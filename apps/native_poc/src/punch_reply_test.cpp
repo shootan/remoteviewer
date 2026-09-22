@@ -346,6 +346,111 @@ int main() {
           std::to_string(left.replied) + " / " + std::to_string(right.replied));
   }
 
+  // ============== the per-source ceiling is a ceiling, and not one per residency in the map
+  //
+  // The first version evicted the least recently used entry when the map filled up, so a source
+  // that had spent its 25 could be pushed out by 64 others and come back as a fresh entry with 25
+  // more. Inside one window the only real limit was the global 200 -- which is not what the
+  // number 25 claims. Eviction is gone: full means a source we are not already tracking is
+  // refused, and the map is cleared only when a window opens.
+  {
+    PunchReplyState state;
+    uint64_t now = 1000;
+    punch_reply_note_directory_event(&state, now);
+
+    const PunchReplySource a = src(192, 168, 20, 16, 50000);
+
+    // 25 milliseconds a step: well inside the window, and 40 a second against a ceiling of 50,
+    // so the per-second budget never joins in and confuses which limit is being measured.
+    auto spend = [&](const PunchReplySource& from, int attempts) {
+      int replied = 0;
+      for (int i = 0; i < attempts; ++i) {
+        now += 25;
+        if (decide_ok(state, from, now).reply) {
+          punch_reply_note_reply(&state, from, now);
+          ++replied;
+        }
+      }
+      return replied;
+    };
+
+    const int aFirst = spend(a, 30);
+    check("a source gets its 25 and no more", aFirst == static_cast<int>(kPunchReplyPerSource),
+          std::to_string(aFirst) + " replies from 30 punches");
+
+    // Fill the rest of the map. One slot is already A's, so 63 others take it to full.
+    int othersAnswered = 0;
+    for (int i = 0; i < 63; ++i) {
+      const PunchReplySource other =
+          src(10, 0, static_cast<uint32_t>(i / 250), static_cast<uint32_t>(i % 250 + 1), 40000);
+      othersAnswered += spend(other, 1);
+    }
+    check("...and 63 other sources fill the map, each answered once", othersAnswered == 63,
+          std::to_string(othersAnswered) + " answered");
+    check("...which is the map full", punch_reply_sources_full(state));
+
+    // The case the eviction made possible. A is still tracked, still spent.
+    const int aAgain = spend(a, 10);
+    check("a spent source stays spent once the map is full", aAgain == 0,
+          std::to_string(aAgain) + " replies, expected 0");
+
+    // And the newcomer is refused rather than displacing anybody.
+    const PunchReplySource newcomer = src(203, 0, 113, 9, 41000);
+    now += 25;
+    const PunchReplyDecision full = decide_ok(state, newcomer, now);
+    check("...and the 65th source is refused rather than evicting one",
+          !full.reply && full.reason == PunchReplyReason::Budget,
+          punch_reply_reason_name(full.reason));
+    check("...with the window still open, so this is a map limit and not an expiry",
+          punch_reply_window_open(state, now));
+    check("...and the global budget still had room, so it is not that either",
+          state.repliesInWindow < kPunchReplyPerWindow,
+          std::to_string(state.repliesInWindow) + " of " + std::to_string(kPunchReplyPerWindow));
+
+    // A new window forgets everyone. That is where a source's 25 comes back -- deliberately,
+    // because a new directory event means somebody asked to connect again.
+    now += kPunchReplyWindowMs + 1;
+    punch_reply_note_directory_event(&state, now);
+    check("a new window clears the map", !punch_reply_sources_full(state));
+    const int aAfter = spend(a, 30);
+    check("...and the same source gets 25 again in it",
+          aAfter == static_cast<int>(kPunchReplyPerSource),
+          std::to_string(aAfter) + " replies");
+  }
+
+  // ===================== a flood of strangers costs the peer its slot, but never its count
+  {
+    // The other half of the same decision, stated as the trade it is. With eviction, 64 punches
+    // from made-up addresses RENEWED a spent source. Without it, they can deny a newcomer a slot
+    // for the rest of the window -- ten seconds -- and that is the price.
+    PunchReplyState state;
+    uint64_t now = 5000;
+    punch_reply_note_directory_event(&state, now);
+
+    const PunchReplySource peer = src(192, 168, 20, 16, 50000);
+    int peerReplies = 0;
+    for (int i = 0; i < 25; ++i) {
+      now += 25;
+      if (decide_ok(state, peer, now).reply) {
+        punch_reply_note_reply(&state, peer, now);
+        ++peerReplies;
+      }
+    }
+    // Seventy, not sixty-three: enough to fill the map AND push the peer out of it. Sixty-three
+    // only fills it, and under the old eviction the peer was still tracked -- so a count that
+    // stopped there watched the defect happen without touching it.
+    for (int i = 0; i < 70; ++i) {
+      now += 25;
+      const PunchReplySource stranger =
+          src(198, 51, 100, static_cast<uint32_t>(i + 1), 40000);
+      if (decide_ok(state, stranger, now).reply) punch_reply_note_reply(&state, stranger, now);
+    }
+    now += 25;
+    check("the flood cannot renew the peer that already spent its share",
+          !decide_ok(state, peer, now).reply,
+          std::to_string(peerReplies) + " replies before the flood");
+  }
+
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
   return gFailures == 0 ? 0 : 1;

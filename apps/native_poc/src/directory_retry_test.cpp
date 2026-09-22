@@ -339,8 +339,11 @@ bool SentTo(PunchHarness* harness, const sockaddr_in& want) {
  * through the same seam, and waiting on it let the first version of this test run its punches
  * against a host that had collected nothing.
  */
+// `heartbeatSeconds` matters for the refresh cases: with the ordinary five, the agent polls
+// on its own often enough to drown out the thing being counted. Set it long and every
+// heartbeat in the count is one a punch asked for.
 bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* label,
-                       const sockaddr_in* capabilityTarget) {
+                       const sockaddr_in* capabilityTarget, uint32_t heartbeatSeconds = 5) {
   harness->cachePath = exe_directory() + "\\punch-fixture-" + std::string(label) + ".json";
 
   harness->media = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -373,7 +376,7 @@ bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* la
   cfg.password = "test-pass-1234";
   cfg.hostName = "Punch PC";
   cfg.cachePath = harness->cachePath;
-  cfg.heartbeatSeconds = 5;
+  cfg.heartbeatSeconds = heartbeatSeconds;
 
   std::string error;
   if (!harness->agent.Start(cfg, [harness](const void* data, size_t len, const sockaddr_in& to) {
@@ -626,6 +629,187 @@ int main() {
     rv.Close();
     harness.Stop();
     relay.Stop();
+  }
+
+  // ============ what a stream of punches costs the directory, measured across several cycles
+  //
+  // The punch branch used to set the refresh flag as its very first act -- before the packet had
+  // been checked and before the source had been looked at -- and the agent clears that flag when
+  // it polls. So a client punching steadily re-armed it every cycle, and steady punching meant
+  // steady outbound HTTP for as long as it went on.
+  //
+  // The earlier evidence for "this is bounded" was a burst of 200 causing no extra heartbeat,
+  // which does not answer the question: a burst lands inside one cycle. This punches for ten
+  // seconds, across many cycles, and counts what the directory was actually asked.
+  {
+    FakeDirectory dir;
+    check("the fake directory starts (refresh rate)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-rate\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    // Deliberately NO capability. A heartbeat that hands one over is followed by the outbound
+    // punch phase, which takes five seconds -- and then the cycle length, not the cooldown, is
+    // what limits the count, and the test would pass whether the cooldown existed or not. The
+    // refresh path does not care about capabilities, so this measures what it says it measures.
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
+
+    PunchHarness harness;
+    // Five minutes: nothing in this case is on the ordinary schedule, so every heartbeat counted
+    // below is one a punch asked for.
+    check("the host is up (refresh rate)",
+          StartPunchHarness(dir, &harness, "rate", nullptr, 300));
+
+    const sockaddr_in client = addrOf("192.168.20.16", 60420);
+    const remote60::native_poc::UdpHelloPacket punch = punchPacket();
+
+    const int before = dir.Count("/api/host/heartbeat");
+    const auto began = std::chrono::steady_clock::now();
+    int sentPunches = 0;
+    while (std::chrono::steady_clock::now() - began < std::chrono::milliseconds(10000)) {
+      harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+      ++sentPunches;
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    // A moment for the last refresh to be consumed, so the count is not short by one by luck.
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    const int after = dir.Count("/api/host/heartbeat");
+    const int caused = after - before;
+
+    // Ten seconds at one per two seconds, plus the one that may be in flight when the clock
+    // starts. Stated as the bound rather than an exact number: the agent polls on a 200ms slice
+    // and a cycle takes time, so which side of a boundary the last one lands on is not fixed.
+    // Ten seconds divided by the floor, plus two: one for a refresh already pending when the
+    // clock started, one for where the last one falls. Without the floor this is about twenty --
+    // a cycle here is a quarter of a second -- so the two cases are not close.
+    const int bound = static_cast<int>(10000 / remote60::native_poc::kPunchRefreshCooldownMs) + 2;
+    check("ten seconds of punches cost at most one directory cycle every two seconds",
+          caused <= bound,
+          std::to_string(caused) + " heartbeats from " + std::to_string(sentPunches) +
+              " punches, bound " + std::to_string(bound));
+    check("...and at least one, so the interrupt still works at all", caused >= 1,
+          std::to_string(caused) + " heartbeats");
+    harness.Stop();
+  }
+
+  // ==================== a punch we would never answer does not get to ask the directory either
+  {
+    FakeDirectory dir;
+    check("the fake directory starts (malformed refresh)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-bad\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    // No capability, so a cycle is a quarter of a second rather than five seconds. With the
+    // slow cycle this case passed even when the packet checks were removed: the heartbeat a
+    // bad punch caused simply had not finished before the count was read.
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
+
+    PunchHarness harness;
+    check("the host is up (malformed refresh)",
+          StartPunchHarness(dir, &harness, "badrefresh", nullptr, 300));
+
+    const int before = dir.Count("/api/host/heartbeat");
+
+    // Right magic and kind, so it reaches the branch; wrong protocol version, so nothing in it
+    // should be acted on. This used to schedule an HTTP request regardless.
+    remote60::native_poc::UdpHelloPacket wrongVersion = punchPacket();
+    wrongVersion.version = remote60::native_poc::kUdpProtocolVersion + 7;
+    const sockaddr_in client = addrOf("192.168.20.16", 60420);
+    for (int i = 0; i < 20; ++i) {
+      harness.agent.ConsumeUdpPacket(&wrongVersion, sizeof(wrongVersion), client);
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    // And an address we would never answer, well formed. Same rule, different reason.
+    const remote60::native_poc::UdpHelloPacket good = punchPacket();
+    const sockaddr_in multicast = addrOf("239.1.2.3", 60420);
+    for (int i = 0; i < 10; ++i) {
+      harness.agent.ConsumeUdpPacket(&good, sizeof(good), multicast);
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const int caused = dir.Count("/api/host/heartbeat") - before;
+    check("a malformed punch, or one from an address we would not answer, asks the directory nothing",
+          caused == 0, std::to_string(caused) + " heartbeats");
+    harness.Stop();
+  }
+
+  // ========================= the directory's own wake keeps its old behaviour, cooldown or not
+  {
+    // The cooldown is for punches from clients. A wake from the directory is rare, it is the
+    // address the directory answers from, and it is the case the interrupt was built for -- so
+    // it must still be immediate, including right after a client punch has just used the floor.
+    FakeDirectory dir;
+    check("the fake directory starts (wake not throttled)", dir.Start());
+    dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" +
+                                        std::to_string(dir.udpPort()) + "}}"}});
+    dir.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-wake\",\"hostToken\":\"" +
+                                             std::string(32, 'e') + "\"}"}});
+    // No capability here either, and for the same reason as the case above: a heartbeat that
+    // hands one over is followed by five seconds of outbound punching, and then every timing
+    // in this case is dominated by that rather than by what it is measuring.
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
+
+    PunchHarness harness;
+    check("the host is up (wake not throttled)",
+          StartPunchHarness(dir, &harness, "wake", nullptr, 300));
+
+    const remote60::native_poc::UdpHelloPacket punch = punchPacket();
+    const sockaddr_in client = addrOf("192.168.20.16", 60420);
+
+    // Spend the client floor, and then WAIT for the refresh it asked for to be consumed. The
+    // first cut of this case did not wait: the flag was still pending when the wake arrived, so
+    // the wake changed nothing observable and the case failed for a reason that had nothing to
+    // do with throttling. `refreshWasPending=1` in the host's own log is what said so.
+    const int beforeClient = dir.Count("/api/host/heartbeat");
+    const auto punchedAt = std::chrono::steady_clock::now();
+    harness.agent.ConsumeUdpPacket(&punch, sizeof(punch), client);
+    bool clientRefreshLanded = false;
+    while (std::chrono::steady_clock::now() - punchedAt < std::chrono::milliseconds(1500)) {
+      if (dir.Count("/api/host/heartbeat") > beforeClient) {
+        clientRefreshLanded = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    check("a client punch asks the directory once", clientRefreshLanded);
+
+    const auto sinceClientPunch = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - punchedAt).count();
+    check("...and the wake below is sent while that floor is still in force",
+          sinceClientPunch < static_cast<long long>(remote60::native_poc::kPunchRefreshCooldownMs),
+          std::to_string(sinceClientPunch) + "ms of " +
+              std::to_string(remote60::native_poc::kPunchRefreshCooldownMs) + "ms");
+
+    const int before = dir.Count("/api/host/heartbeat");
+    sockaddr_in hostMedia{};
+    hostMedia.sin_family = AF_INET;
+    hostMedia.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    hostMedia.sin_port = htons(harness.mediaPort);
+    check("the directory can send from the socket the host observes through",
+          dir.SendFromUdp(&punch, sizeof(punch), hostMedia));
+
+    bool sawHeartbeat = false;
+    const auto wokeAt = std::chrono::steady_clock::now();
+    long long wakeMs = 0;
+    while (std::chrono::steady_clock::now() - wokeAt < std::chrono::milliseconds(5000)) {
+      if (dir.Count("/api/host/heartbeat") > before) {
+        sawHeartbeat = true;
+        wakeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - wokeAt).count();
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    // No further punches are sent, so if the wake were subject to the client floor it would be
+    // dropped and this heartbeat would never arrive at all -- the agent's own schedule is five
+    // minutes away. The elapsed time is recorded, not asserted on.
+    check("a directory wake is not made to wait for the client cooldown", sawHeartbeat,
+          sawHeartbeat ? std::to_string(wakeMs) + "ms after the wake"
+                       : "no heartbeat in 5s, and nothing else was going to cause one");
+    harness.Stop();
   }
 
   // ------------------------------------------------- directory_observe_from_health(), untested

@@ -45,16 +45,50 @@ constexpr uint64_t kPunchReplyWindowMs = 10000;
 constexpr uint32_t kPunchReplyPerSource = 25;
 /** Across all sources in one window. */
 constexpr uint32_t kPunchReplyPerWindow = 200;
+/**
+ * The least time between two directory refreshes that an ARRIVING PUNCH may cause.
+ *
+ * A punch is treated as "someone is trying to connect, go ask the directory for their
+ * capability", and that is an outbound HTTP request. The flag it sets is cleared when the agent
+ * consumes it, so a client punching steadily re-arms it every cycle -- steady punching became
+ * steady HTTP, once per consume, for as long as it continued. Showing that a burst of 200 in one
+ * cycle causes no extra heartbeat does not answer that: the burst lands inside a single cycle.
+ *
+ * A wake from the DIRECTORY itself is not throttled. It is rare, it is authenticated by being
+ * the address the directory answers from, and it is the case the interrupt exists for.
+ */
+constexpr uint64_t kPunchRefreshCooldownMs = 2000;
+
 /** Across all sources in any one second. */
 constexpr uint32_t kPunchReplyPerSec = 50;
-/** Distinct sources tracked at once. Fixed: no allocation on an arriving-datagram path. */
+/**
+ * Distinct sources tracked at once. Fixed: no allocation on an arriving-datagram path.
+ *
+ * Full means full. An entry is never evicted while the window is open, and a source with no
+ * entry is refused once every slot is taken -- which is what makes the per-source ceiling a
+ * ceiling. The first version evicted the least recently used one, and that quietly turned 25
+ * into "25 per residency": a source could spend its 25, be pushed out by 64 others, come back
+ * as a fresh entry and spend 25 more. Inside one window the only real limit was the global 200.
+ *
+ * So the contract is three numbers and one rule:
+ *
+ *   - at most kPunchReplyPerWindow (200) replies in a window, across everyone
+ *   - at most kPunchReplyPerSource (25) replies to any one source in a window
+ *   - at most kPunchReplySources (64) sources tracked; once full, a source not already
+ *     tracked is refused (reason=budget) rather than displacing one that is
+ *
+ * The map is cleared when a window opens, so a new window starts with nobody remembered.
+ */
 constexpr size_t kPunchReplySources = 64;
 
 enum class PunchReplyReason : uint8_t {
   Ok = 0,
   Closed,     // no directory event recently; the host is not expecting anyone
   Budget,     // in the window, but this source or the window or the second is spent
-  Source,     // the directory itself, a multicast/broadcast address, 0.0.0.0, or port 0
+  // The directory itself, 0.0.0.0 or port 0, 224.0.0.0/4, 240.0.0.0/4, or 255.255.255.255.
+  // NOT every broadcast: a subnet broadcast such as 192.168.20.255 is an ordinary address
+  // here and is answered like any other. See punch_reply_source_reason.
+  Source,
   Self,       // our own observed tuple -- answering it would be talking to ourselves
   Malformed,  // wrong length, magic, kind or protocol version
 };
@@ -107,6 +141,10 @@ struct PunchReplyState {
   /** Counters for the log; they never gate anything. */
   uint64_t replied = 0;
   uint64_t refused = 0;
+  /** Refusals that happened because every source slot was taken. Told apart from an
+   *  ordinary budget refusal because they mean something different: not "this peer has had
+   *  its share" but "there are more peers than this host is willing to track at once". */
+  uint64_t refusedSourcesFull = 0;
 };
 
 struct PunchReplyDecision {
@@ -144,14 +182,22 @@ inline PunchReplyReason punch_reply_source_reason(const PunchReplySource& source
   if (source.ipNetworkOrder == 0 || source.portNetworkOrder == 0) return PunchReplyReason::Source;
   const uint32_t host = (source.ipNetworkOrder >> 24) | ((source.ipNetworkOrder >> 8) & 0xff00u) |
                         ((source.ipNetworkOrder << 8) & 0xff0000u) | (source.ipNetworkOrder << 24);
-  // 224.0.0.0/4 multicast and 240.0.0.0/4 reserved, and the all-ones broadcast. A datagram whose
-  // source is any of these was not sent by a peer that can receive the answer.
+  // 224.0.0.0/4 multicast, 240.0.0.0/4 reserved, and the all-ones broadcast. A datagram whose
+  // source is any of these was not sent by a peer that could receive the answer.
+  //
+  // That is the whole list, and it is narrower than "broadcast addresses are blocked": a
+  // DIRECTED broadcast -- 192.168.20.255, or whatever the local mask makes it -- is not
+  // recognisable from the address alone without knowing the mask, so it is not blocked here.
+  // The budgets are what bound that case, not this function.
   if ((host & 0xf0000000u) == 0xe0000000u) return PunchReplyReason::Source;
   if ((host & 0xf0000000u) == 0xf0000000u) return PunchReplyReason::Source;
   if (host == 0xffffffffu) return PunchReplyReason::Source;
   if (directory.ipNetworkOrder != 0 && punch_reply_same(source, directory)) {
     return PunchReplyReason::Source;
   }
+  // `self` is the PUBLIC tuple the directory last observed, and only that. A punch that
+  // arrives from one of this machine's own private addresses is not recognised as self and
+  // is answered like any other source -- on a LAN that is the normal case, not an error.
   if (self.ipNetworkOrder != 0 && punch_reply_same(source, self)) return PunchReplyReason::Self;
   return PunchReplyReason::Ok;
 }
@@ -201,6 +247,14 @@ inline const PunchReplySourceEntry* punch_reply_find(const PunchReplyState& stat
   return nullptr;
 }
 
+/** Whether every source slot is taken. Only meaningful while a window is open. */
+inline bool punch_reply_sources_full(const PunchReplyState& state) {
+  for (size_t i = 0; i < kPunchReplySources; ++i) {
+    if (!state.sources[i].used) return false;
+  }
+  return true;
+}
+
 /**
  * The whole judgement, reading state and changing nothing.
  *
@@ -244,9 +298,15 @@ inline PunchReplyDecision punch_reply_decide(const PunchReplyState& state,
     out.reason = PunchReplyReason::Budget;
     return out;
   }
-  // A source we have not seen needs a slot. The map is full only when every slot is in use, and
-  // the oldest is then reused -- so a flood of new addresses cannot lock out the peer that is
-  // actually trying to connect, it can only cost it its count.
+  // A source we have not seen needs a slot, and if there is none it is refused. The earlier
+  // version reused the least recently used entry, reasoning that a flood of new addresses should
+  // not lock out the peer mid-connection -- but eviction resets the count, so the flood could
+  // instead be used to RENEW a source's 25. Refusing the newcomer costs a genuine 65th peer its
+  // answer inside one ten-second window; letting it in costs the ceiling its meaning.
+  if (!entry && punch_reply_sources_full(state)) {
+    out.reason = PunchReplyReason::Budget;
+    return out;
+  }
   out.reply = true;
   out.reason = PunchReplyReason::Ok;
   return out;
@@ -273,33 +333,32 @@ inline void punch_reply_note_reply(PunchReplyState* state, const PunchReplySourc
       return;
     }
   }
-  size_t slot = 0;
-  bool found = false;
+  // A free slot, or nothing. `decide` refuses a new source when the map is full, so reaching
+  // here with no slot means the caller replied without asking -- record nothing rather than
+  // evict somebody, because eviction is exactly what made the per-source ceiling porous.
   for (size_t i = 0; i < kPunchReplySources; ++i) {
     if (!state->sources[i].used) {
-      slot = i;
-      found = true;
-      break;
+      state->sources[i] =
+          PunchReplySourceEntry{source.ipNetworkOrder, source.portNetworkOrder, 1, nowMs, true};
+      return;
     }
   }
-  if (!found) {
-    // Least recently used. Every slot is in use, so something has to go, and the one nobody has
-    // spoken to for longest is the least likely to be the peer mid-connection.
-    uint64_t oldest = state->sources[0].lastMs;
-    for (size_t i = 1; i < kPunchReplySources; ++i) {
-      if (state->sources[i].lastMs < oldest) {
-        oldest = state->sources[i].lastMs;
-        slot = i;
-      }
-    }
-  }
-  state->sources[slot] = PunchReplySourceEntry{source.ipNetworkOrder, source.portNetworkOrder, 1,
-                                               nowMs, true};
 }
 
 /** Records a punch that was not answered, for the counters only. */
 inline void punch_reply_note_refusal(PunchReplyState* state) {
   if (state) ++state->refused;
+}
+
+/**
+ * Records a refusal that happened because the source map was full.
+ *
+ * Separate from note_refusal so the caller does not have to re-derive why, and separate from the
+ * ordinary budget count so that "this host is seeing more than 64 peers in ten seconds" is
+ * visible rather than folded into "somebody ran out of replies".
+ */
+inline void punch_reply_note_sources_full(PunchReplyState* state) {
+  if (state) ++state->refusedSourcesFull;
 }
 
 }  // namespace remote60::native_poc

@@ -330,6 +330,11 @@ class HostAgent {
   // A peer punch means /api/connect has just queued a capability for this host. Wake the
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};
+  // When a punch last caused a refresh, and whether one ever has. Guarded by mu_, like the
+  // reply state it is decided alongside. Separate flag rather than a zero sentinel, for the
+  // same reason the reply window has one: a steady clock can legitimately read zero.
+  bool punchRefreshSeen_ = false;
+  uint64_t punchRefreshLastMs_ = 0;
 
   // pc2-connect-diag: one line per punch, bounded. Under mu_, like everything else here.
   void LogPunchArrival(const sockaddr_in& from, bool refreshWasPending,

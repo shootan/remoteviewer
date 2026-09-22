@@ -12201,3 +12201,18 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - RCDATA 게이트는 실제 0.2.134 빌드에 대해 **9/9 일치**(`ui\shell.html` 7da6106a…로 독립 검수 기록과 대조), payload 1개 변조·1개 제거 시 각각 DIFFERS/MISSING 으로 exit 1.
 - **실행하지 않은 것**: 실서명·실게시. 다음 승인 릴리스에서 remote_claude 가 실경로로 확인한다.
 - 제품/테스트/문서: 제품 **무변경** / 자동화(`gnlink_release.sh`, `gnlink_release_sign.ps1`, `gnlink_check_installer_payload.ps1` 신규, `gnlink_release_test.sh`) / 문서(이 항목, `구현계획.md` 배포 자동화 절).
+
+### 2026-09-22 C1 r3 — 25 는 상한이 아니었고, 펀치는 검사 전에 HTTP 를 불렀다
+
+- Codex FINAL 이 NEEDS_CHANGES 2건. 둘 다 **기존 143개 테스트가 전부 통과하는 채로** 존재했다 — 내 r1/r2 검사가 닿지 않은 곳이라는 뜻이라 그것부터 적는다.
+- **NC1: per-source 25 가 창 안 상한이 아니었다.** `punch_reply_note_reply` 가 맵이 차면 LRU 로 퇴출했기 때문에, source A 가 25 를 쓰고 → 다른 source 64개에 밀려 나가고 → 다시 들어오면 `replies=0` 인 새 entry 라 25 를 또 썼다. 창 안 실제 상한은 전역 200 뿐이었다.
+  고침: **창 안에서는 퇴출하지 않는다.** 맵이 차면 추적 중이 아닌 source 를 거부하고(`reason=budget`, `refusedSourcesFull` 카운터 분리), 맵은 창이 열릴 때만 비운다. 계약을 헤더 주석에 적었다 — **전역 200 · source 25 · 맵 64(가득 차면 신규 거부)**.
+  대가는 정직하게 적는다: 한 창(10s) 안에서 진짜 65번째 피어는 답을 못 받는다. 퇴출을 두면 그 대신 **가짜 주소 64개로 남의 25 를 갱신**할 수 있다. 후자를 막았다.
+- **NC2: refresh 가 패킷 검사 전에 섰고, 지속 펀치의 상한이 없었다.** Punch 분기 첫 줄이 `refreshRequested_.exchange(true)` 였다 — 길이·버전이 틀린 패킷도, 절대 답하지 않을 주소도 바깥으로 나가는 HTTP 요청을 예약했다. 게다가 에이전트가 그 플래그를 소비하면 다음 펀치가 다시 세우므로 **지속 펀치 = 지속 HTTP** 였다. r1 의 "200개 burst → heartbeat 0 증가" 는 burst 가 한 주기 안에 들어가므로 이 질문의 답이 아니었다.
+  고침: refresh 는 **packetOk && source 허용**일 때만. 클라 펀치가 부른 refresh 에는 `kPunchRefreshCooldownMs`(2000ms) 바닥을 둔다. **디렉터리 wake 는 예외** — 드물고, 디렉터리가 답하는 주소이며, 이 인터럽트가 존재하는 이유다.
+- **표현 정정**: `replied=1` 은 **판정이 허용하고 예산을 청구했다**는 뜻이지 `send_` 가 성공했다는 뜻이 아니다(전송은 그 뒤에 일어나고, 실패해도 이 값은 1). source 차단 범위는 **디렉터리 자신 · 0.0.0.0/포트0 · 224/4 · 240/4 · 255.255.255.255 · 관측된 공인 self tuple** 까지다 — **서브넷 브로드캐스트(192.168.20.255 등)와 사설 self 는 차단하지 않는다.** "모든 broadcast/self 차단" 으로 적지 않는다.
+- **측정치(HTTP 호출 수)**: 가짜 디렉터리에 **capability 없이**(주기 ~0.25s) heartbeat 300s 로 두고 200ms 간격 펀치를 10초 = 50발 → **heartbeat 5회**(상한 7). cooldown 을 제거하면 같은 입력에 **39회**. 잘못된 버전 20발 + 멀티캐스트 10발 → **0회**.
+- **변이 4건, 각각 그 가드가 잡는다**: 퇴출 복원 → 순수 2 FAIL(65번째 거부 · 홍수가 남의 25 를 갱신) · cooldown 제거 → 호스트 1 FAIL(39 > 7) · 검사 게이트 제거 → 호스트 1 FAIL(3 > 0) · (r2 의 두 변이는 그대로 유지). 전부 원복 후 재빌드·재실행으로 복귀 확인.
+- **내 테스트 결함 3건(변이가 드러냄)**: ① 홍수를 63발만 보내 맵을 채우기만 하고 **퇴출을 일으키지 않아**, 퇴출 변이를 절반만 잡았다(70발로). ② 두 refresh 케이스를 capability 있는 하네스로 돌려, 주기가 5초(펀치 송신 단계)라 **측정이 주기 길이에 지배**됐다 — 검사 게이트를 제거해도 통과했다(capability 없는 하네스로). ③ 디렉터리 wake 케이스가 **앞선 클라 refresh 가 아직 소비되지 않은 상태**에서 wake 를 보내 `refreshWasPending=1` 로 아무 변화도 만들지 못했다(먼저 착지를 기다리도록).
+- 검증: `punch_reply_test` **55/0** · `directory_retry_test` **111/0** · `host_punch_reply_e2e_test` **40/0 ×3**(늦은 capability 5526~5529ms 로 **cooldown 전과 동일**, TTL 안 성립 유지) · `udp_control_channel` 12/0 · `control_resume` 48/0 · 전량 빌드 오류 0.
+- 제품/테스트/문서: 제품(`punch_reply.hpp`, `directory_client.{hpp,cpp}`) / 테스트(`punch_reply_test.cpp`, `directory_retry_test.cpp`, `directory_fake_server.hpp` 에 `SendFromUdp` 추가) / 문서(이 항목, `구현계획.md` C1).

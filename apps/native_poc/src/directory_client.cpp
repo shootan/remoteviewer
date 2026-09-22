@@ -504,10 +504,6 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
   if (len >= sizeof(UdpHelloPacket)) {
     const auto* hello = reinterpret_cast<const UdpHelloPacket*>(bytes);
     if (hello->magic == kMagic && hello->kind == static_cast<uint16_t>(UdpPacketKind::Punch)) {
-      const bool wasSet = refreshRequested_.exchange(true, std::memory_order_acq_rel);
-      if (!wasSet) {
-        std::cout << "[native-video-host] directory peer punch; refreshing capability\n";
-      }
 
       // c1-lan-relay: answer the punch, when it is safe to.
       //
@@ -526,6 +522,7 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
 
       remote60::native_poc::PunchReplyDecision decision;
       bool windowOpenedNow = false;
+      bool refreshAllowed = false;
       {
         std::lock_guard<std::mutex> lock(mu_);
         remote60::native_poc::PunchReplySource directory{observeAddr_.sin_addr.s_addr,
@@ -554,6 +551,51 @@ bool HostAgent::ConsumeUdpPacket(const void* data, size_t len, const sockaddr_in
           remote60::native_poc::punch_reply_note_reply(&punchReplyState_, source, nowMs);
         } else {
           remote60::native_poc::punch_reply_note_refusal(&punchReplyState_);
+          // Told apart in the counters: "the map is full" is a different fact from "this peer
+          // has had its share", and only one of them says the host is seeing a crowd.
+          if (decision.reason == remote60::native_poc::PunchReplyReason::Budget &&
+              remote60::native_poc::punch_reply_window_open(punchReplyState_, nowMs) &&
+              remote60::native_poc::punch_reply_sources_full(punchReplyState_) &&
+              remote60::native_poc::punch_reply_find(punchReplyState_, source) == nullptr) {
+            remote60::native_poc::punch_reply_note_sources_full(&punchReplyState_);
+          }
+        }
+
+        // Whether this packet may ask the directory for a capability.
+        //
+        // It used to be the first thing this branch did, before the packet had been checked at
+        // all -- so a datagram of the wrong length or version, from an address we would never
+        // answer, still scheduled an outbound HTTP request. And there was no floor on how often:
+        // the agent clears the flag when it polls, the next punch sets it again, so a client
+        // punching steadily kept the host polling for as long as it kept punching.
+        //
+        // Now it takes a valid packet from an address we would speak to, and a client-triggered
+        // refresh has a floor. A wake from the directory keeps its old behaviour exactly.
+        if (packetOk) {
+          if (fromDirectory) {
+            refreshAllowed = true;
+          } else if (remote60::native_poc::punch_reply_source_reason(source, directory, self) ==
+                     remote60::native_poc::PunchReplyReason::Ok) {
+            const bool cooled =
+                !punchRefreshSeen_ || nowMs < punchRefreshLastMs_ ||
+                nowMs - punchRefreshLastMs_ >= remote60::native_poc::kPunchRefreshCooldownMs;
+            if (cooled) {
+              refreshAllowed = true;
+              punchRefreshSeen_ = true;
+              punchRefreshLastMs_ = nowMs;
+            }
+          }
+        }
+      }
+
+      // The flag is atomic and the agent thread reads it, so it is set outside mu_. Reading it
+      // when no refresh is asked for keeps the log field meaning what it always meant: whether
+      // a refresh was already pending when this punch arrived.
+      bool wasSet = refreshRequested_.load(std::memory_order_acquire);
+      if (refreshAllowed) {
+        wasSet = refreshRequested_.exchange(true, std::memory_order_acq_rel);
+        if (!wasSet) {
+          std::cout << "[native-video-host] directory peer punch; refreshing capability\n";
         }
       }
 
@@ -1311,7 +1353,13 @@ void HostAgent::LogPunchArrival(const sockaddr_in& from, bool refreshWasPending,
   if (skipped) std::cout << " skippedSinceLast=" << skipped;
   // Appended, never inserted: the existing keys and their order are what the field logs from
   // 0.2.13x are read with, and a reader comparing two releases should not have to notice a
-  // reshuffle. replied answers "did we send anything", reason answers "and why not".
+  // reshuffle.
+  //
+  // `replied=1` means the decision ALLOWED a reply and the budget was charged for it. It is
+  // not "a datagram left the machine": the send happens after this, through send_, and a
+  // failed sendto -- or no send_ at all -- still reads replied=1. Saying it the other way
+  // round would make this field evidence of delivery, which nothing here checks.
+  // `reason` is why, allowed or not.
   std::cout << " replied=" << (replyDecision.reply ? 1 : 0) << " reason="
             << remote60::native_poc::punch_reply_reason_name(replyDecision.reason);
   std::cout << "\n";

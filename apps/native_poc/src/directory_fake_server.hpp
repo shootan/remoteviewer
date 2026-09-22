@@ -110,6 +110,19 @@ class FakeDirectory {
     observeReply_ = json;
   }
 
+  /**
+   * Sends a datagram FROM the observe socket.
+   *
+   * The host decides whether a punch is a directory wake by comparing the source address with
+   * the one it observes through, so a test that wants to be that address has to send from this
+   * socket. Synthesising the tuple is not enough -- the kernel writes the real one.
+   */
+  bool SendFromUdp(const void* data, size_t len, const sockaddr_in& to) {
+    if (udp_ == INVALID_SOCKET) return false;
+    return sendto(udp_, static_cast<const char*>(data), static_cast<int>(len), 0,
+                  reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == static_cast<int>(len);
+  }
+
   std::string url() const { return "http://127.0.0.1:" + std::to_string(httpPort_); }
   uint16_t udpPort() const { return udpPort_; }
 
