@@ -659,6 +659,19 @@ add_dependencies(remote60_shipped_helper_gate_test
 # session (its own port) against one host, with a helper that never answers -- so one dispatcher is
 # inside a doomed preview while the other is asked for a round trip. This is where the budget lock
 # and the helper cap of one meet two real Serve loops rather than two threads.
+# item 8 C3: a real host, a control-only break, and the repair measured end to end.
+add_executable(remote60_control_resume_e2e_test
+  src/control_resume_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_control_resume_e2e_test PRIVATE src)
+target_link_libraries(remote60_control_resume_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_control_resume_e2e_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_two_dispatcher_e2e_test
   src/host_two_dispatcher_e2e_test.cpp
   src/native_video_client_shared_core.cpp

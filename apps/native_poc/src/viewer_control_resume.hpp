@@ -215,6 +215,26 @@ inline bool viewer_resume_reply_is_late(const ViewerPendingControlRequest& pendi
   return pending.requestId != replyRequestId;
 }
 
+/** How a turn of the recovery ended. */
+enum class ResumePumpResult : uint8_t {
+  Continue = 0,  // still trying
+  Resumed,       // the channel is back and has been proved
+  GaveUp,        // the ceiling passed
+  Cancelled,     // the session ended underneath it
+};
+
+/** The parts of a recovery that differ between the viewer and a harness driving it. */
+struct ResumePumpHooks {
+  std::function<bool()> cancelled;   // the session is over: nothing else matters
+  std::function<bool()> videoAlive;  // the picture is why this session is worth repairing
+  std::function<uint64_t()> nowUs;
+  // Rebuild the link over the re-keyed channel and complete one real exchange on it.
+  std::function<bool()> proveChannel;
+  // (breakToFirstSendUs, breakToRunningUs) -- the UI, the release-all, the log line.
+  std::function<void(uint64_t, uint64_t)> onResumed;
+  std::function<void()> idle;  // nothing to do this turn
+};
+
 /**
  * The recovery itself.
  *
@@ -324,6 +344,21 @@ class ViewerControlResume {
       log_("[control-resume] round trip failed after rekey, new resumeId=" +
            std::to_string(episode_.resumeId) + " was=" + std::to_string(previous));
     }
+  }
+
+  /**
+   * The trigger, next to the recovery it starts. (item 8, C3)
+   *
+   * Three conditions, and each of them is a different "no": an old host has nothing to answer
+   * with, a cancelled session must not be repaired, and a session whose picture has stopped is
+   * ending rather than broken. Kept here rather than in the caller so that a harness driving this
+   * end to end uses the same three and not three that look like them.
+   */
+  bool BeginBreakIfPossible(uint64_t nowUs, bool videoAlive, bool cancelled) {
+    if (cancelled) return false;
+    if (!videoAlive) return false;
+    BeginBreak(nowUs);
+    return attempt_in_flight();
   }
 
   /** The recovery ended -- confirmed by a round trip, or given up on. */
@@ -455,6 +490,60 @@ class ViewerControlResume {
            " attempt=" + std::to_string(episode_.attempts) + " ok=" + (sent ? "1" : "0"));
     }
     return action;
+  }
+
+  /**
+   * One turn of a recovery, in order, in one place. (item 8, C3)
+   *
+   * The sequence -- cancellation first, then apply a verified answer, then prove the new
+   * channel, then decide whether to ask again -- is the feature. Leaving it written out
+   * in the viewer's worker would mean the only way to exercise it end to end was for a
+   * test to write the same sequence again beside it, and a test that reimplements the
+   * thing it is checking proves that the test works.
+   *
+   * So the order lives here and the callers supply the parts that differ: what counts as
+   * cancelled, what counts as a live picture, how to prove a channel, and what to do when
+   * it comes back. No lock is held across a hook -- proveChannel talks to the network.
+   */
+  ResumePumpResult Pump(const ResumePumpHooks& hooks) {
+    // Cancellation and session end come first, every turn. A recovery must never outlive
+    // the session it is recovering.
+    if (hooks.cancelled && hooks.cancelled()) {
+      Finish(false);
+      return ResumePumpResult::Cancelled;
+    }
+    const uint64_t nowUs = hooks.nowUs ? hooks.nowUs() : 0;
+
+    if (ApplyPendingRekey()) {
+      // An Ack is the host's claim about its own end. This is the part that makes it a
+      // fact: one real exchange over the ids both sides just changed to.
+      if (hooks.proveChannel && hooks.proveChannel()) {
+        const uint64_t doneUs = hooks.nowUs ? hooks.nowUs() : nowUs;
+        const uint64_t beganUs = began_us();
+        const uint64_t firstSendUs = first_send_us();
+        if (hooks.onResumed) {
+          // Two numbers, because one hides the other: how long until the first ask went
+          // out, and how long the whole recovery took.
+          hooks.onResumed(firstSendUs > beganUs ? firstSendUs - beganUs : 0,
+                          doneUs > beganUs ? doneUs - beganUs : 0);
+        }
+        Finish(true);
+        return ResumePumpResult::Resumed;
+      }
+      // Re-keyed and still deaf. The id is spent -- the host has cached its answer for it
+      // and would repeat that answer forever -- so the recovery carries on under a new
+      // one, with the ceiling still running from the original break.
+      RetryWithNewId(hooks.nowUs ? hooks.nowUs() : nowUs);
+    }
+
+    const ControlResumeAction action =
+        Poll(hooks.videoAlive ? hooks.videoAlive() : false, nowUs);
+    if (action == ControlResumeAction::GiveUp) {
+      Finish(false);
+      return ResumePumpResult::GaveUp;
+    }
+    if (action != ControlResumeAction::Send && hooks.idle) hooks.idle();
+    return ResumePumpResult::Continue;
   }
 
   // --- what happened, for the worker's decisions and for the tests' measurements ---

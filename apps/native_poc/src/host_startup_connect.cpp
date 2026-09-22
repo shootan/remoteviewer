@@ -87,6 +87,7 @@
 #include "host_capture_session.hpp"
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
+#include "control_resume.hpp"
 #include "host_startup.hpp"
 
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
@@ -336,6 +337,17 @@ int startup_connect_client(HostContext& hx) {
       ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
       sender.nackEnabled.store((hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
                                std::memory_order_relaxed);
+      // Control resume (item 8). Advertised here as well as on the reader thread's Hello path
+      // -- and this is the one that matters, because it is the handshake EVERY session makes.
+      // The reader's copy (host_startup_control.cpp) only ever sees a later Hello, which is a
+      // client arriving on a host that already has one; a first connection never reached it,
+      // so the bit was never offered and controlResumeNegotiated was never set. The feature
+      // could not negotiate at all, which is what the end-to-end run found and what neither
+      // side's unit tests could: each half was correct about a handshake that never happened.
+      ack.features |= remote60::native_poc::kUdpFeatureControlResume;
+      clientSession.controlResumeNegotiated.store(
+          remote60::native_poc::host_resume_negotiated(hello.features),
+          std::memory_order_release);
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
       if (tokenLen > 0) {

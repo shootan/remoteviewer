@@ -315,13 +315,14 @@ bool ControlClient::begin_control_resume(uint64_t nowUs) {
   // Only the tunnelled path. A direct TCP control socket that dies is a different failure with
   // a different repair, and this one would be re-keying a stream that is not there.
   if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
-  if (!ctx.control.resume.negotiated()) return false;  // an old host is never asked
-  if (!ctx.session.running.load()) return false;
-  // No picture means this is a session that is ending, not one that is broken. Asking into it
-  // would spin and would blur the one signal the liveness verdict still has.
-  if (!video_alive(nowUs)) return false;
-  ctx.control.resume.BeginBreak(nowUs);
-  if (!ctx.control.resume.attempt_in_flight()) return false;
+  // The other three reasons to say no live with the recovery itself -- an old host, a
+  // cancelled session, and a session whose picture has stopped (which is one that is ending,
+  // not one that is broken) -- so a harness driving this end to end asks the same three
+  // questions rather than three that look like them.
+  if (!ctx.control.resume.BeginBreakIfPossible(nowUs, video_alive(nowUs),
+                                               !ctx.session.running.load())) {
+    return false;
+  }
   // Control IS down, and saying otherwise would leave the toolbar claiming a link that answers
   // nothing. It also starts the watchdog's own clock, which is what keeps the 30 s ceiling a
   // single budget rather than two that can be spent one after the other.
@@ -334,80 +335,67 @@ bool ControlClient::begin_control_resume(uint64_t nowUs) {
 bool ControlClient::pump_control_resume(
     std::unique_ptr<remote60::native_poc::ControlLink>& link,
     remote60::native_poc::ControlWorkerState& state) {
-  // Cancellation and session end win, every turn, before anything else is considered. A
-  // recovery that outlives the session it is recovering is the r9-class defect this design
-  // exists to avoid.
-  if (!ctx.session.running.load()) {
-    ctx.control.resume.Finish(false);
-    state = remote60::native_poc::ControlWorkerState::Closed;
-    return false;
-  }
   ctx.control.udpControl.Tick();
-  const uint64_t nowUs = remote60::native_poc::qpc_now_us();
 
-  if (ctx.control.resume.ApplyPendingRekey()) {
+  remote60::native_poc::ResumePumpHooks hooks;
+  hooks.cancelled = [this] { return !ctx.session.running.load(); };
+  hooks.nowUs = [] { return qpc_now_us(); };
+  hooks.videoAlive = [this] { return video_alive(qpc_now_us()); };
+  hooks.proveChannel = [this, &link] {
     // The link is holding a half-read message from the stream that just died. The ordinary
     // loop builds it once precisely so that partial message is not lost -- here losing it is
     // the point, because it belongs to a stream neither end is listening on any more.
     link = std::make_unique<remote60::native_poc::UdpControlLink>(&ctx.control.udpControl,
                                                                  kUdpControlReadTimeoutMs);
-    if (control_round_trip(*link)) {
-      const uint64_t doneUs = remote60::native_poc::qpc_now_us();
-      const uint64_t beganUs = ctx.control.resume.began_us();
-      const uint64_t firstSendUs = ctx.control.resume.first_send_us();
-      std::ostringstream os;
-      os << "[native-video-client][control-resume] resumed resumeId="
-         << ctx.control.resume.resume_id()
-         << " attempts=" << ctx.control.resume.attempts()
-         // Two numbers, because one hides the other: how long until the first ask went out,
-         // and how long the whole recovery took. A single "recovered in Nms" cannot say
-         // which half was slow.
-         << " breakToFirstSendUs=" << (firstSendUs > beganUs ? firstSendUs - beganUs : 0)
-         << " breakToRunningUs=" << (doneUs > beganUs ? doneUs - beganUs : 0);
-      log_client_line(ctx, os.str());
-      ctx.control.resume.Finish(true);
-      // Anything queued while the channel was dead is dropped rather than delivered late. The
-      // user was clicking at a picture that could not answer; replaying thirty seconds of that
-      // into the host the moment it can hear again is worse than losing it. Drained rather
-      // than Reset() so the sequence numbers keep counting -- the host is the same session and
-      // has not forgotten where they were.
-      remote60::native_poc::QueuedControlInputMessage stale;
-      uint32_t dropped = 0;
-      while (ctx.control.inputQueue.TryDequeue(&stale)) ++dropped;
-      std::cout << "[native-video-client][control-resume] dropped " << dropped
-                << " input events queued during the break\n";
-      ctx.control.connected.store(true, std::memory_order_relaxed);
-      set_window_panel_status(ctx, std::string());
-      if (ctx.session.hwnd) {
-        // The existing release-all contract, on the thread that owns the key state. A key-up
-        // sent while the tunnel was dead is gone, and the host is still holding whatever was
-        // down when it broke.
-        PostMessageW(ctx.session.hwnd, kMsgControlResumed, 0, 0);
-        InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
-      }
+    return control_round_trip(*link);
+  };
+  hooks.onResumed = [this](uint64_t toFirstSendUs, uint64_t toRunningUs) {
+    std::ostringstream os;
+    os << "[native-video-client][control-resume] resumed resumeId="
+       << ctx.control.resume.resume_id()
+       << " attempts=" << ctx.control.resume.attempts()
+       << " breakToFirstSendUs=" << toFirstSendUs
+       << " breakToRunningUs=" << toRunningUs;
+    log_client_line(ctx, os.str());
+    // Anything queued while the channel was dead is dropped rather than delivered late. The
+    // user was clicking at a picture that could not answer; replaying thirty seconds of that
+    // into the host the moment it can hear again is worse than losing it. Drained rather than
+    // Reset() so the sequence numbers keep counting -- the host is the same session and has
+    // not forgotten where they were.
+    remote60::native_poc::QueuedControlInputMessage stale;
+    uint32_t dropped = 0;
+    while (ctx.control.inputQueue.TryDequeue(&stale)) ++dropped;
+    std::cout << "[native-video-client][control-resume] dropped " << dropped
+              << " input events queued during the break\n";
+    ctx.control.connected.store(true, std::memory_order_relaxed);
+    set_window_panel_status(ctx, std::string());
+    if (ctx.session.hwnd) {
+      // The existing release-all contract, on the thread that owns the key state. A key-up
+      // sent while the tunnel was dead is gone, and the host is still holding whatever was
+      // down when it broke.
+      PostMessageW(ctx.session.hwnd, kMsgControlResumed, 0, 0);
+      InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+    }
+  };
+  hooks.idle = [] {
+    // Idle can also mean the video stopped too, in which case this waits and asks nothing
+    // while the session watchdog decides -- it declares the session dead after deadSessionUs
+    // and closes the window, which ends this loop through the cancelled hook above.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  };
+
+  switch (ctx.control.resume.Pump(hooks)) {
+    case remote60::native_poc::ResumePumpResult::Resumed:
       state = remote60::native_poc::ControlWorkerState::Running;
       return true;
-    }
-    // The host said it re-keyed and the channel still does not answer. The id cannot be used
-    // again -- the host has cached that answer and would repeat it forever -- so the recovery
-    // carries on under a new one, with the ceiling still running from the original break.
-    ctx.control.resume.RetryWithNewId(remote60::native_poc::qpc_now_us());
+    case remote60::native_poc::ResumePumpResult::GaveUp:
+    case remote60::native_poc::ResumePumpResult::Cancelled:
+      state = remote60::native_poc::ControlWorkerState::Closed;
+      return false;
+    default:
+      return true;
   }
-
-  const remote60::native_poc::ControlResumeAction action =
-      ctx.control.resume.Poll(video_alive(nowUs), nowUs);
-  if (action == remote60::native_poc::ControlResumeAction::GiveUp) {
-    ctx.control.resume.Finish(false);
-    state = remote60::native_poc::ControlWorkerState::Closed;
-    return false;
-  }
-  // Idle can also mean the video stopped too, in which case this waits and asks nothing while
-  // the session watchdog decides -- it declares the session dead after deadSessionUs and closes
-  // the window, which ends this loop through ctx.session.running above.
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  return true;
 }
-
 void ControlClient::Run() {
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
