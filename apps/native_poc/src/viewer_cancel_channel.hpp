@@ -127,6 +127,25 @@ inline void viewer_stop_cancel_watcher(std::atomic<bool>* stopFlag, std::thread*
   if (thread && thread->joinable()) thread->join();
 }
 
+/**
+ * What to keep for a viewer, given whether that viewer actually received the handle.
+ *
+ * Two callers, one rule, and both got it wrong before this existed. A launch that FAILED still
+ * had an event nobody would ever wait on, and the failure path returned without closing it --
+ * one handle per failed launch, invisible until a shell open all day runs out. And a launch
+ * with no stdout pipe has no attribute list and no bInheritHandles, so the child inherited
+ * nothing and was passed no --cancel-event; keeping the event there meant a later replacement
+ * signalled something nobody was waiting on, logged asked=1, and left the old viewer running.
+ * A cancel that reports success and does nothing is worse than one that admits it cannot.
+ *
+ * Returns the handle to store, or null -- and closes what it does not return.
+ */
+inline HANDLE viewer_cancel_slot_handle(bool childReceivedIt, HANDLE event) {
+  if (childReceivedIt) return event;
+  if (event) CloseHandle(event);
+  return nullptr;
+}
+
 /** Signals a viewer's cancel event. The shell holds the handle; nobody else can obtain one. */
 inline bool viewer_request_cancel(HANDLE event) {
   if (!event) return false;

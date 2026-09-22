@@ -958,6 +958,8 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   {
     const auto previous = gViewerByHost.find(request.hostId);
     if (previous != gViewerByHost.end()) {
+      // asked=0 when there was no event to signal, which is the pipe-less case above. It has
+      // to read as "not asked" rather than "asked and fine".
       const bool asked =
           remote60::native_poc::viewer::viewer_request_cancel(previous->second.cancelEvent);
       log_line(std::string("cancelling the viewer already open on this PC pid=") +
@@ -1141,6 +1143,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
       CloseHandle(pipeWrite);
     }
     log_line("session launch failed err=" + std::to_string(launchErr));
+    // The cancel event dies with the attempt. It was created before the launch and is owned
+    // here until the registry takes it, so every failed launch leaked one -- invisible until
+    // a shell that has been open all day runs out of handles.
+    cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(false, cancelEvent);
     post_status("error", "세션을 시작하지 못했습니다");
     return;
   }
@@ -1164,6 +1170,17 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   CloseHandle(pi.hThread);
   // Kept so a later begin_session for this host can signal it. Ownership sits here until the
   // viewer exits or is replaced.
+  //
+  // ...but only if the child actually got it. Without the pipe there is no attribute list and
+  // no bInheritHandles, so the handle was never inherited and no --cancel-event was passed --
+  // and storing it anyway meant a later replacement signalled an event nobody was waiting on,
+  // logged asked=1, and left the old viewer running. A cancel that reports success and does
+  // nothing is worse than one that says it cannot.
+  if (!pipeOk) {
+    log_line("no stdout pipe for this viewer, so it did not inherit a cancel event -- "
+             "it cannot be called off when replaced");
+  }
+  cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(pipeOk, cancelEvent);
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent};
   cancelEvent = nullptr;  // the map owns it now
 

@@ -148,6 +148,42 @@ int main(int argc, char** argv) {
       handle_viewer_exit(host, gViewerOperation, gOwnerEpoch.load(), WAIT_OBJECT_0, 0, 1000,
                          static_cast<DWORD>(1000 + 49));
 
+      // Launches that never happened. begin_session creates the event BEFORE CreateProcess,
+      // so a failed launch has one to dispose of -- and the failure path returned without
+      // doing so, one handle at a time, for as long as the shell stayed open.
+      for (int i = 0; i < 50; ++i) {
+        HANDLE orphan = remote60::native_poc::viewer::viewer_create_cancel_event();
+        if (orphan) CloseHandle(orphan);   // what the failure path has to do
+      }
+
+      // The pipe-less fallback. Without the pipe the child inherits nothing and is passed no
+      // --cancel-event, so keeping the event would mean signalling something nobody waits on
+      // and reporting asked=1 while the old viewer carries on.
+      {
+        // Driven through the helper begin_session itself uses, so this asks the real question.
+        // Built by hand first, which tested nothing: it asserted that signalling a null handle
+        // fails, which was never in doubt, and a mutation that kept the event sailed past it.
+        HANDLE notInherited = remote60::native_poc::viewer::viewer_create_cancel_event();
+        const HANDLE stored =
+            remote60::native_poc::viewer::viewer_cancel_slot_handle(false, notInherited);
+        recovery_check(stored == nullptr,
+                       "an event the child never received is not kept");
+        gViewerByHost["pipeless-host"] = ViewerCancelSlot{4242, stored};
+        const bool asked = remote60::native_poc::viewer::viewer_request_cancel(
+            gViewerByHost["pipeless-host"].cancelEvent);
+        recovery_check(!asked,
+                       "...so a replacement reports asked=0 rather than a false success");
+        gViewerByHost.erase("pipeless-host");
+
+        // And the ordinary case still keeps it, or the rule above would be "never keep one".
+        HANDLE inherited = remote60::native_poc::viewer::viewer_create_cancel_event();
+        const HANDLE keptHandle =
+            remote60::native_poc::viewer::viewer_cancel_slot_handle(true, inherited);
+        recovery_check(keptHandle == inherited && keptHandle != nullptr,
+                       "an event the child did receive is kept");
+        if (keptHandle) CloseHandle(keptHandle);
+      }
+
       DWORD after = 0;
       GetProcessHandleCount(GetCurrentProcess(), &after);
       recovery_check(gViewerByHost.find(host.hostId) == gViewerByHost.end(),
@@ -156,7 +192,7 @@ int main(int argc, char** argv) {
       // so the count moves for reasons that have nothing to do with this. Fifty replacements
       // leaking would show as fifty; a few either way is the rest of the program breathing.
       recovery_check(after <= before + 8,
-                     "fifty replacements do not pile up handles");
+                     "fifty replacements and fifty failed launches do not pile up handles");
     }
 
     gViewerOperation = 100;

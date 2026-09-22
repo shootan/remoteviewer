@@ -12325,3 +12325,15 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 
 - 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `native_video_client_main.cpp`) / 테스트(`viewer_cancel_e2e_test.cpp`, `client_recovery_ui_test.cpp`, `automation/gnlink_release_test.sh`) / 문서(이 항목).
 - 실서명·실게시 0회.
+
+### 2026-09-23 C2 F1 r3 — 성공했다고 말하는 취소가 아무것도 안 하고 있었다
+
+- 검수 발견 2건. 둘 다 `begin_session` 의 **취소 이벤트 수명**이다.
+- **F-a 실패 경로 누수**: 이벤트는 `CreateProcess` **전에** 만들어지는데, 기동 실패 return 이 파이프만 닫고 이벤트는 두고 갔다. **실패 1회당 핸들 1개**, 하루 켜 둔 셸이 소진될 때까지 안 보인다.
+- **F-b 파이프 없는 폴백**: 파이프가 없으면 attribute list 도 `bInheritHandles` 도 없어 자식이 **아무것도 상속받지 못하고** `--cancel-event` 도 안 간다. 그런데 이벤트를 레지스트리에 그대로 저장해서, 나중에 교체할 때 **아무도 안 기다리는 이벤트에 신호하고 `asked=1` 을 찍은 뒤 구 뷰어는 계속 돌았다**. 성공했다고 말하면서 아무것도 안 하는 취소는 못 한다고 말하는 것보다 나쁘다.
+- 고침: 두 자리 모두 **한 규칙**으로 모았다 — `viewer_cancel_slot_handle(childReceivedIt, event)` 가 보관할 핸들을 돌려주고 보관하지 않을 것은 닫는다. 폴백일 때 로그 1줄.
+- ⚠️ **처음 쓴 테스트는 아무것도 묻지 않았다**: 슬롯을 손으로 `{pid, nullptr}` 로 만들어 두고 "널 핸들에 신호하면 실패한다" 를 확인했을 뿐이라, **이벤트를 그대로 보관하는 변이가 통과했다**. 결정을 헬퍼로 빼고 **테스트가 그 헬퍼를 직접 부르게** 한 뒤에야 변이가 잡힌다(2 FAIL).
+- 조건(이미 76e50e7 에 있던 것)을 확장: 교체 50회 **+ 실패한 기동 50회** 뒤 핸들 수 불변, 그리고 "같은 사용자 `PROCESS_DUP_HANDLE` 은 `TerminateProcess` 와 동급이라 위협 모델 밖" 은 이벤트를 만드는 자리에 적혀 있다.
+- 검증: `client_recovery_ui_test` **ALL PASS**(+4 단언) · 변이(헬퍼가 언제나 보관) → **2 FAIL** · 전량 빌드 0 에러 · `viewer_cancel_e2e` 30/0 · `gnlink_release_test` 119/0.
+- 제품/테스트/문서: 제품(`viewer_cancel_channel.hpp`, `client_shell_main.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목).
+- 실서명·실게시 0회.
