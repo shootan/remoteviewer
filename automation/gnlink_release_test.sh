@@ -704,9 +704,13 @@ if [ "$NINE_KEY_MADE" = "1" ]; then
   [ "$rc" = "0" ]
   check $? "sign=no  deploy=no  dry=yes  runs all nine stages" "exit $rc"
 
+  # Signing for real is refused while any tool is substituted, so this row no longer reaches
+  # stage 8 -- see the "substituted tools" block below, which is where it is checked now. What is
+  # lost here is stub coverage of the signing row; what covers signing is the isolated block
+  # above, which runs the real signing script against a throwaway key.
   rc="$(run_nine sign --sign)"
-  [ "$rc" = "0" ] && [ -f "$NINEWT/rel-sign/0.2.134/windows.sig" ]
-  check $? "sign=yes deploy=no  dry=no   signs" "exit $rc"
+  [ "$rc" != "0" ] && [ ! -f "$NINEWT/rel-sign/0.2.134/windows.sig" ]
+  check $? "sign=yes deploy=no  dry=no   is refused while tools are substituted" "exit $rc"
 
   rc="$(run_nine signdry --sign --dry-run)"
   [ "$rc" = "0" ] && [ ! -f "$NINEWT/rel-signdry/0.2.134/windows.sig" ]
@@ -730,12 +734,13 @@ if [ "$NINE_KEY_MADE" = "1" ]; then
   check $? "sign=no  deploy=yes dry=yes  exits 0, deploy script not called" "exit $rc"
 
   rc="$(run_nine signdeploy --sign --deploy)"
-  [ "$rc" = "0" ] && grep -q '^publish ' "$NINE/deploy-signdeploy.log"
-  check $? "sign=yes deploy=yes dry=no   signs and publishes" "exit $rc"
+  [ "$rc" != "0" ] && [ ! -s "$NINE/deploy-signdeploy.log" ]
+  check $? "sign=yes deploy=yes dry=no   is refused, and the deploy script is not called" \
+    "exit $rc"
 
   # A signed release rehearsed end to end: the deploy script IS called, with --dry-run, because
   # this time there is a signature for its preflight to find.
-  cp -r "$NINEWT/rel-sign/0.2.134" "$NINEWT/rel-signed-rehearse-0.2.134" 2>/dev/null
+  cp -r "$NINEWT/rel-plain/0.2.134" "$NINEWT/rel-signed-rehearse-0.2.134" 2>/dev/null
   mkdir -p "$NINEWT/rel-rehearse"
   cp -r "$NINEWT/rel-signed-rehearse-0.2.134" "$NINEWT/rel-rehearse/0.2.134"
   GNLINK_STUB_DEPLOY_LOG="$NINE/deploy-rehearse.log" \
@@ -759,6 +764,67 @@ if [ "$NINE_KEY_MADE" = "1" ]; then
 else
   printf 'SKIP  nine-stage combinations (could not create a throwaway key here)\n'
 fi
+
+printf '\n=== substituted tools cannot reach the key or the server\n'
+# Announcing a substitution is not a gate. The first version of the seams printed "NOT A RELEASE"
+# at the END and carried on, so a run with a stub compiler could still hand its staged files to
+# the operational key, and a stub deploy script could still print "published". Test scaffolding
+# with a path to the real key is not scaffolding.
+#
+# So each seam, on its own, has to be enough to stop --sign and --deploy -- and to stop them at
+# argument time, before the worktree is entered or the key is looked for.
+SUBWT="$TMP/subwt"
+make_worktree "$SUBWT" "0.2.134"
+
+sub_run() {
+  # $1 = the environment assignment to make, rest = release-script arguments.
+  local assign="$1"; shift
+  env "$assign" bash "$RELEASE_SH" --worktree "$SUBWT" --version 0.2.134 "$@" 2>&1
+}
+
+SEAMS=(
+  "GNLINK_CMAKE=$TMP/stub-cmake"
+  "GNLINK_INSTALLER_PAYLOAD_CHECK=$TMP/stub-check.ps1"
+  "GNLINK_DEPLOY_SCRIPT=$TMP/stub-deploy.sh"
+  "GNLINK_SIGN_KEYDIR=$TMP/stub-keydir"
+  "GNLINK_PUBLIC_KEY_HEX=$(printf 'a%.0s' $(seq 128))"
+)
+
+for seam in "${SEAMS[@]}"; do
+  name="${seam%%=*}"
+
+  out="$(sub_run "$seam" --sign)"; rc=$?
+  [ "$rc" != "0" ]
+  check $? "$name alone refuses --sign" "exit $rc"
+
+  printf '%s' "$out" | grep -q 'refusing --sign'
+  check $? "...saying which gate refused it"
+
+  # Before the preflight banner: nothing was read, nothing was entered, no key was looked for.
+  printf '%s' "$out" | grep -qv '1. preflight'
+  check $? "...at argument time, before anything is read"
+
+  out="$(sub_run "$seam" --sign --deploy)"; rc=$?
+  [ "$rc" != "0" ] && printf '%s' "$out" | grep -q 'refusing --'
+  check $? "$name alone refuses a real deploy" "exit $rc"
+done
+
+# A dry run is what a substituted run is for, and it still works. The worktree has no WebView2,
+# so this gets as far as the preflight and stops there -- which is past the gate, which is the
+# point.
+out="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" \
+       sub_run "GNLINK_CMAKE=$TMP/stub-cmake" --sign --deploy --dry-run)"
+printf '%s' "$out" | grep -q '1. preflight'
+check $? "...but a dry run with the same seam is allowed through"
+
+printf '%s' "$out" | grep -q 'SUBSTITUTED  cmake'
+check $? "...and is still told, loudly, what it is running with"
+
+# The operational key is never consulted on the refused path. Pointed at a directory that does
+# not exist: if the run had reached stage 8 it would say so in its own words, and it does not.
+out="$(sub_run "GNLINK_SIGN_KEYDIR=$TMP/definitely-not-a-keydir" --sign)"
+printf '%s' "$out" | grep -qv 'no signing key at'
+check $? "a refused --sign never gets as far as looking for a key"
 
 printf '\n=== the script does not bump versions\n'
 # Reading the header is exactly what the preflight does, so the pattern has to name WRITING:

@@ -38,6 +38,10 @@
 # never produce a signature, so a dry run must not require one. The one refusal is the one case
 # that cannot be made to mean anything -- a real publish of something nobody signed.
 #
+# The table above assumes the real tools. With any of them substituted (see the seam note below)
+# the two rows that reach outside this machine -- signing for real, publishing for real -- are
+# refused at argument time instead, whatever the rest of the row says.
+#
 # "Described only" is literal, and it is the second correction this table has needed. The first
 # version signed nothing at stage 8 and then demanded a signature at stage 9. The second called
 # gnlink_deploy.sh --verify-only instead -- which reads better but does the same thing, because
@@ -56,13 +60,19 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Four things this script reaches outside itself: a compiler, a signing key, a check that reads a
-# real PE, and the server. Each is overridable, and each override is ANNOUNCED -- see
-# say_if_substituted below. They exist so the regression can drive all nine stages without a
-# twenty-minute build, the operational key, or the network; the option table at the top is about
+# real PE, and the server. Each is overridable so the regression can drive all nine stages without
+# a twenty-minute build, the operational key, or the network; the option table at the top is about
 # what happens at stage 9, and a table nothing executes is a comment.
 #
-# A release run sets none of these and says so in its own output, which is the thing to check if
-# a release ever looks too easy.
+# Substituting any of them is a REFUSAL, not a warning. The first version of this only announced
+# it and carried on, which meant a run with a stub compiler could still sign its staged files with
+# the operational key, or a stub deploy script could print "published" -- test scaffolding with a
+# path to the real key and the real server. So: with anything substituted, --sign outside a dry
+# run and --deploy outside a dry run stop at argument time, before the key is read or the network
+# is touched. What is left is what a substituted run is for -- dry runs, and packaging nothing
+# signs.
+#
+# A release run sets none of these. Its output says so, and now so does its exit code.
 MAIN_CHECKOUT_WEBVIEW2="${GNLINK_WEBVIEW2_SOURCE:-D:/remote/remote/third_party/webview2}"
 CMAKE_DEFAULT="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
 CMAKE="${GNLINK_CMAKE:-$CMAKE_DEFAULT}"
@@ -217,8 +227,10 @@ say_if_substituted() {
   say "SUBSTITUTED  $what: $actual"
   say "             (the release path is $expected)"
   SUBSTITUTIONS=$((SUBSTITUTIONS + 1))
+  SUBSTITUTED_LIST="${SUBSTITUTED_LIST:+$SUBSTITUTED_LIST, }$what"
 }
 SUBSTITUTIONS=0
+SUBSTITUTED_LIST=""
 
 usage() {
   sed -n '3,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -238,6 +250,31 @@ while [ $# -gt 0 ]; do
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
+
+# Before the worktree is entered, the key is looked for, or anything is built: which of this
+# script's tools are not the real ones.
+say_if_substituted "cmake" "$CMAKE" "$CMAKE_DEFAULT"
+say_if_substituted "installer payload check" "$INSTALLER_CHECK" "$INSTALLER_CHECK_DEFAULT"
+say_if_substituted "deploy script" "$DEPLOY_SCRIPT" "$DEPLOY_SCRIPT_DEFAULT"
+[ -z "$SIGN_KEYDIR" ] || say_if_substituted "signing key directory" "$SIGN_KEYDIR" ""
+# Not this script's variable, but it changes what the product verifier at stage 8 trusts, so a
+# run where it is set is not a release either. gnlink_verify_manifest.js reads it.
+[ -z "${GNLINK_PUBLIC_KEY_HEX:-}" ] || say_if_substituted "trusted public key (verifier)" "set" ""
+
+# And with any of them substituted, the two things that reach outside this machine are refused
+# here -- at argument time, so the key is never read and the network is never touched.
+#
+# The reasoning is the one in CLAUDE.md about test builds: a test build may differ from a shipping
+# build, and what makes that safe is a gate proving the test-only pieces are absent from the
+# shipping path. Announcing them was not that gate. This is.
+if [ "$SUBSTITUTIONS" != "0" ]; then
+  if [ "$DO_SIGN" = "1" ] && [ "$DRY_RUN" = "0" ]; then
+    die "refusing --sign: $SUBSTITUTIONS tool(s) substituted ($SUBSTITUTED_LIST) -- the operational key does not sign what a stub produced. Add --dry-run, or run with the real tools."
+  fi
+  if [ "$DO_DEPLOY" = "1" ] && [ "$DRY_RUN" = "0" ]; then
+    die "refusing --deploy: $SUBSTITUTIONS tool(s) substituted ($SUBSTITUTED_LIST) -- a substituted run does not publish. Add --dry-run, or run with the real tools."
+  fi
+fi
 
 # The one combination in the table with no sensible reading, refused here rather than nine
 # stages later with a missing file as the explanation.
@@ -266,14 +303,6 @@ PAYLOAD="$REL_DIR/payload"
 
 # ------------------------------------------------------------------- 1. preflight
 step "1. preflight"
-
-say_if_substituted "cmake" "$CMAKE" "$CMAKE_DEFAULT"
-say_if_substituted "installer payload check" "$INSTALLER_CHECK" "$INSTALLER_CHECK_DEFAULT"
-say_if_substituted "deploy script" "$DEPLOY_SCRIPT" "$DEPLOY_SCRIPT_DEFAULT"
-[ -z "$SIGN_KEYDIR" ] || say_if_substituted "signing key directory" "$SIGN_KEYDIR" ""
-# Not this script's variable, but it changes what the product verifier at stage 8 trusts, so a
-# run where it is set is not a release either. gnlink_verify_manifest.js reads it.
-[ -z "${GNLINK_PUBLIC_KEY_HEX:-}" ] || say_if_substituted "trusted public key (verifier)" "set" ""
 
 cd "$WORKTREE" || die "cannot enter $WORKTREE"
 WORKTREE_REAL="$(pwd -P)"
