@@ -16,6 +16,7 @@
   - `update_field_retest_runbook.md` — in-app update field retest and recovery procedure.
   - `수동확인_체크리스트.md`, `external_wan_test_guide.md`, `성능기준선_60fps_20260804.md` — test aids.
   - `connection_version_logging.md` — the `[connection-version]` log contract (0.2.126+).
+  - `review_2026-09-23_connect_bandwidth.md` — 2026-09-23 재검수 발견(RV-00~18)의 근거와 수정 방향. 순서는 `작업목록.md`.
   - `OSLink_구조분석.md` — measured architecture of a competing remote tool; background only.
 - `docs/history/` — weekly history splits.
 - `docs/legacy/` — finished or superseded documents. `legacy/2026-09/` holds the September 2026
