@@ -12440,4 +12440,5 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **측정 2건**: `OpenProcess` 는 pid 하위 2비트를 무시한다(자기 pid+1~3 이 같은 프로세스). 그래서 테스트 정리의 가짜 pid 1049·4242 는 실제 pid 1048·4240 을 연다(RV-15). 1차의 "우연히 안전" 은 틀렸다. Git Bash 에서 `pwd -P` 는 `/D`, `cygpath -u` 는 `/d` 를 낸다(RV-14).
 - 실행: 순수 논리 4종(punch_reply 55 · control_resume 124 · viewer_control_resume 60 · udp_control_channel 12) exit 0, 작업용 빌드 바이너리로. 독립 빌드·e2e 재실행 없음. 세션 콘솔.
 - 기록: `review_2026-09-23_connect_bandwidth.md`(RV-00~18), `작업목록.md` V0·RV-A~G, `구현계획.md` C1·C2·C3 체크박스, `README.md`.
+- 추가 확인: `client_recovery_ui_test` 도 이 PC 의 `%LOCALAPPDATA%\GNLink\client.txt` 를 테스트 값으로 바꿨다(03:25). host.json 은 `/tmp/r2_hp.log`(01:18:17 종료)와 시각으로 대조했다. 이전 사본은 없다. 에이전트의 파일 직접 복구는 권한 분류기가 막았고, 토큰은 어차피 사용자 로그인으로만 돌아온다.
 - 제품/테스트/문서: 제품 **무변경** / 테스트 **무변경** / 문서만.
