@@ -575,6 +575,32 @@ int wmain(int argc, wchar_t** argv) {
     connected = false;  // the cases below are not part of a range run
   }
 
+  // C5: a Hello the host REFUSES must not change the running session. Before the fix the host
+  // stored "did this client ask for resume" from every Hello before deciding whether to accept it,
+  // so a refused one without the resume bit switched resume off for the session in progress --
+  // and case 1 below would then fail. This one carries a capability the host does not hold, from
+  // another socket, straight to the host; the host log is checked at the end for the refusal.
+  bool strangerHelloSent = false;
+  if (connected) {
+    SOCKET stranger = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_port = htons(hostPort);
+    InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
+    UdpHelloPacket refused{};  // default features: no resume bit
+    std::memcpy(refused.authToken, "c5-not-a-capability-this-host-has", 32);
+    for (int i = 0; i < 3; ++i) {
+      if (sendto(stranger, reinterpret_cast<const char*>(&refused), sizeof(refused), 0,
+                 reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr)) > 0) {
+        strangerHelloSent = true;
+      }
+      Sleep(50);
+    }
+    closesocket(stranger);
+    Sleep(200);
+    check("[C5] a Hello the host will refuse is sent before the break", strangerHelloSent);
+  }
+
   // ----------------------------------------------------------------- the break, and the repair
   if (connected) {
     std::cout << "\n--- case 1: control is cut in both directions, video keeps flowing ---\n";
@@ -953,12 +979,16 @@ int wmain(int argc, wchar_t** argv) {
     const std::string idText = "id=" + std::to_string(gCase5ResumeId) + " ";
     bool refusedOnAlive = false;
     bool servedLater = false;
+    bool strangerRefused = false;
     std::string captureLine;
     FILE* f = nullptr;
     if (_wfopen_s(&f, hostLogPath.c_str(), L"rb") == 0 && f) {
       char line[1024];
       while (std::fgets(line, sizeof(line), f)) {
         const std::string text(line);
+        if (text.find("rejected reconnect hello with invalid directory capability") != std::string::npos) {
+          strangerRefused = true;
+        }
         if (captureLine.empty() && (text.find("capture-window target") != std::string::npos)) {
           captureLine = text;
           while (!captureLine.empty() && (captureLine.back() == '\n' || captureLine.back() == '\r')) {
@@ -981,6 +1011,14 @@ int wmain(int argc, wchar_t** argv) {
       std::fclose(f);
     } else {
       std::cout << "    (the host log could not be read)\n";
+    }
+    if (strangerHelloSent) {
+      // What makes case 1 the counter-example: the Hello really was refused, and resume still
+      // worked for the session that was running.
+      check("[C5] THE HOST REFUSED THAT HELLO -- and case 1's resume above still went through",
+            strangerRefused && repaired,
+            std::string("refused=") + (strangerRefused ? "1" : "0") + " repaired=" +
+                (repaired ? "1" : "0"));
     }
     if (launched) {
       check("the host captured the window this test paints, not a monitor",
