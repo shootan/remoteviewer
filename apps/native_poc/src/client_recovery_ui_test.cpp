@@ -195,6 +195,8 @@ int main(int argc, char** argv) {
           gViewerByHost.erase(previous);
         }
         gViewerByHost[host.hostId] = ViewerCancelSlot{static_cast<DWORD>(1000 + i), event};
+        // An exit is matched to its slot by operation now, not by pid (RV-06).
+        gViewerByHost[host.hostId].operation = gViewerOperation;
       }
       // And the last one leaves by the exit path instead.
       handle_viewer_exit(host, gViewerOperation, gOwnerEpoch.load(), WAIT_OBJECT_0, 0, 1000,
@@ -383,6 +385,69 @@ int main(int argc, char** argv) {
                gActiveViewers.load() == beforeDead;
       }, 5000);
       recovery_check(adopted, "the shell adopts the viewer's exit on its own");
+    }
+
+    // ------------------------------ RV-05: a replaced viewer's exit leaves the shell to the new one
+    //
+    // The user presses a PC, then presses it again while that connection is still going. The old
+    // viewer is called off and exits a moment later -- and that exit used to post idle: the list
+    // unlocked and the card said "연결 가능" while the NEW viewer was still connecting, so the next
+    // press cancelled the connection in progress. What is checked is what the user sees after
+    // the old viewer's exit has been adopted: the card still connecting, the list still locked.
+    // Real viewers both times, started by the real begin_session; the first press goes through
+    // the page, the second is begin_session itself (on the page it follows a "새로 고침").
+    {
+      std::vector<DirectoryHostEntry> hosts(1);
+      hosts[0].hostId = "replace-host";
+      hosts[0].hostName = "replace-pc";
+      hosts[0].online = true;
+      std::string list = shell_hosts_json(hosts);
+      post_to_page(list.substr(0, list.size() - 1) + ",\"accountId\":\"account-b\"}");
+      recovery_check(recovery_dom(L"document.querySelectorAll('.host').length === 1 && !document.querySelector('.host').disabled"),
+                     "[replace] the PC card is shown and can be pressed");
+      const uint32_t viewersAtStart = gActiveViewers.load();
+      recovery_eval(L"document.querySelector('.host').click();true");
+      recovery_check(recovery_wait([&] {
+        const auto it = gViewerByHost.find("replace-host");
+        return it != gViewerByHost.end() && gActiveViewers.load() == viewersAtStart + 1;
+      }), "[replace] pressing it starts a real viewer through begin_session");
+      recovery_check(recovery_dom(L"document.querySelector('.host .state').textContent.includes('연결하는 중') && document.querySelector('.host').disabled"),
+                     "[replace] the card says it is connecting and the list is locked");
+      const uint64_t firstOperation = gViewerByHost["replace-host"].operation;
+
+      ShellConnectRequest again{};
+      again.hostId = "replace-host";
+      again.hostName = "replace-pc";
+      begin_session(again);
+      recovery_check(gViewerByHost.count("replace-host") == 1 &&
+                         gViewerByHost["replace-host"].operation > firstOperation,
+                     "[replace] pressing it again replaces the first viewer with a second");
+      // The first viewer was asked to stop; its exit is adopted when the count drops back to one.
+      const bool firstGone = recovery_wait([&] {
+        return gActiveViewers.load() == viewersAtStart + 1;
+      }, 20000);
+      recovery_pump(500);  // the adoption itself is posted to this thread
+      recovery_check(firstGone, "[replace] the first viewer ended after being called off");
+      recovery_check(recovery_dom(L"document.querySelector('.host .state').textContent.includes('연결하는 중') && document.querySelector('.host').disabled && document.getElementById('signIn').disabled", 3000),
+                     "[replace] AFTER THE OLD VIEWER'S EXIT THE CARD STILL SAYS CONNECTING AND THE LIST STAYS LOCKED");
+
+      // Clean up the second viewer the way the shell would, then through its launch handle.
+      const auto second = gViewerByHost.find("replace-host");
+      if (second != gViewerByHost.end()) {
+        remote60::native_poc::viewer::viewer_request_cancel(second->second.cancelEvent);
+        if (second->second.process &&
+            WaitForSingleObject(second->second.process, 5000) != WAIT_OBJECT_0 &&
+            second->second.testTerminate) {
+          TerminateProcess(second->second.testTerminate, 0);
+          WaitForSingleObject(second->second.testTerminate, 5000);
+        }
+      }
+      recovery_check(recovery_wait([&] {
+        return gViewerByHost.find("replace-host") == gViewerByHost.end() &&
+               gActiveViewers.load() == viewersAtStart;
+      }, 10000), "[replace] the second viewer's exit is adopted too");
+      recovery_check(recovery_dom(L"!document.querySelector('.host').disabled", 5000),
+                     "[replace] ...and only then does the list unlock");
     }
 
     gViewerOperation = 100;

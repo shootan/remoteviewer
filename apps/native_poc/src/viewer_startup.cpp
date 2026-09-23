@@ -525,6 +525,18 @@ bool show_startup_failure(ViewerContext& ctx, const std::string& reason) {
       DispatchMessageW(&msg);
     }
     if (done) break;
+    // Called off while this screen is up: the shell has replaced this viewer, and "try again"
+    // would be offering to retry a session the user already replaced. The watcher is still
+    // running at this point (the caller stops it after this returns), so a cancel arrives here
+    // within its 200 ms slice. (RV-07)
+    if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+      std::cerr << "[native-video-client] failure screen closed: connect cancelled"
+                << (ctx.connectCancelledByOwner.load(std::memory_order_acquire)
+                        ? " by the shell (a newer session started)" : "")
+                << "\n";
+      retry = false;
+      break;
+    }
     // The window proc may have swallowed WM_PAINT; draw straight to the DC so the screen is not
     // left blank while we wait.
     HDC hdc = GetDC(hwnd);

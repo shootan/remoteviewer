@@ -12461,3 +12461,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **C5**: Hello 의 per-client 설정(`controlResumeNegotiated`, 그리고 같은 결함의 `fecInterleaved`·`nackEnabled`)을 **받아들인 뒤** 저장. `ResumeWith` 는 Shutdown 된 채널을 다시 열지 않음(먼저 peer-lost 로 닫힌 뒤 Shutdown 된 경우 포함, `shutdown_` 별도 기록). control_resume_test 124→127.
 - 회귀: control_resume_e2e 3/3 ALL PASS(58), viewer_window_proc_isolated 42/0, viewer_control_resume 60/0, udp_control_channel 12/0. 실제 설정 파일 전 기록 불변.
 - 제품/테스트/문서: 제품(뷰어 입력·재개, 호스트 세션·Hello·채널) / 테스트(e2e 3종·순수 2종) / 문서(구현계획 C3, 이 항목).
+
+### 2026-09-23 rv-remediation E — 같은 PC 를 다시 누르면 진행 중인 연결을 스스로 취소하던 셸
+
+- **RV-05**: 교체로 불려 나간 구 뷰어의 종료가 셸을 idle 로 되돌려 목록 잠금이 풀리고 카드가 "연결 가능" 이 됐다 — 새 뷰어는 아직 연결 중이었다. 이제 더 새로운 작업의 뷰어가 있으면 구 뷰어의 종료는 셸 상태를 건드리지 않는다(`handle_viewer_exit`).
+- **RV-06**: `begin_session` 은 토큰·exe 확인과 교체 거부 판정을 **먼저** 하고, 그 뒤에만 재연결 타이머 해제·작업 번호 증가를 한다. 슬롯은 pid 가 아니라 작업 번호로 비교. 거부 문구는 사용자가 할 수 있는 일("이전 시도가 끝난 뒤 다시 눌러 주세요")로.
+- **RV-07**: 뷰어의 실패 화면은 취소를 보면 닫히고 0 으로 끝난다(교체된 것이지 실패가 아님). 세션 성립 뒤 도착한 취소는 "no effect (session established)" 로 로그에 남는다(동작 불변). ⚠️ 이 두 동작은 **실행으로 확인하지 않았다**(실패 화면 상태에서의 취소 사례 없음).
+- 증거(⑴ 제품 셸 코드 + 제품 shell.html 을 WebView2 로 띄운 시험 빌드, 제품 창 실기 아님): `client_recovery_ui_test` 에 교체 사례 — 카드 클릭(DOM) → 실제 뷰어 A → 같은 PC 재시작 → A 종료 채택 뒤에도 카드 "연결하는 중…"·목록 잠금 유지, B 종료 뒤에만 잠금 해제. 3/3 exit 0(49 PASS). 변이(RV-05 되돌림) → 그 단언 FAIL. viewer_cancel_e2e 2/2(30/0).
+- 실제 설정 파일 전 기록 불변. 빌드 게이트: `GNLinkClient.exe` 에 시험 seam 문자열 0건.
+- 제품/테스트/문서: 제품(`client_shell_main.cpp`, 뷰어 `native_video_client_main.cpp`·`viewer_startup.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목).

@@ -98,6 +98,9 @@ struct ViewerCancelSlot {
   // answered without reopening by pid -- a pid that has been reused would answer about
   // somebody else. SYNCHRONIZE and nothing more: this is for waiting, never for killing.
   HANDLE process = nullptr;
+  // The begin_session that launched it. What an exit is matched against: a pid can come round
+  // again between the exit and its handling, an operation number cannot. (RV-06)
+  uint64_t operation = 0;
 #ifdef REMOTE60_SHELL_TEST_SEAM
   // TEST BUILDS ONLY. (RV-17) A terminate-capable duplicate taken from the LAUNCH handle, so a
   // test can end a viewer it caused to be started without reopening anything by pid -- a pid
@@ -954,8 +957,10 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
   // Forgotten only if it is still the one recorded. A replacement has already overwritten this
   // entry, and erasing it here would forget the viewer that is actually open.
   {
+    // By the operation that launched it, not by pid. (RV-06)
+    (void)exitedPid;
     const auto it = gViewerByHost.find(request.hostId);
-    if (it != gViewerByHost.end() && it->second.pid == exitedPid) {
+    if (it != gViewerByHost.end() && it->second.operation == operation) {
       if (it->second.cancelEvent) CloseHandle(it->second.cancelEvent);
       close_slot_handles(it->second);
       gViewerByHost.erase(it);
@@ -966,6 +971,21 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
   if (operation != gViewerOperation) {
     // Older viewers still contribute to main's live-session count, but cannot replace a
     // newer viewer's reconnect request or reset its retry budget.
+    //
+    // Nor can they put the shell back to idle while a NEWER viewer is still there (RV-05). The
+    // usual case is a replacement: the user pressed the same PC again, the old viewer was called
+    // off and exits a moment later -- and posting idle then unlocked the list and showed the PC
+    // as "available" while the new viewer was still connecting, so pressing it again cancelled
+    // the connection in progress. The newer viewer's own exit reports the state.
+    bool newerViewerRunning = false;
+    for (const auto& entry : gViewerByHost) {
+      if (entry.second.operation > operation) newerViewerRunning = true;
+    }
+    if (newerViewerRunning) {
+      log_line("viewer from operation " + std::to_string(operation) +
+               " ended; a newer viewer is running, the shell state is left to it");
+      return;
+    }
     if (!gReconnectRequest)
       post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
     return;
@@ -992,10 +1012,31 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
  * process that cares to look, and a token expires where a password does not.
  */
 void begin_session(const ShellConnectRequest& request, bool automatic = false) {
-  KillTimer(gWindow, kReconnectTimer);
-  gReconnectRequest.reset();
-  if (!automatic) gReconnectAttempts = 0;
-  const uint64_t operation = ++gViewerOperation;
+  // Everything that can refuse comes first, before anything is changed. (RV-06) The operation
+  // number and the reconnect timer used to be touched first, so a refused start still moved the
+  // operation on -- and the viewer still running then ended as a "stale" one: no automatic
+  // reconnect for its 43/44/46, idle instead of its error, and another PC's pending reconnect
+  // gone. And the old viewer was called off before it was known whether a new one could start.
+  uint64_t ownerEpoch = 0;
+  std::string server;
+  std::string account;
+  std::string token;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    server = gServerUrl; account = gAccountId;
+    token = gSessionToken;
+    ownerEpoch = gOwnerEpoch;
+  }
+  if (token.empty()) {
+    post_status("error", "로그인이 필요합니다");
+    return;
+  }
+
+  const std::wstring exe = executable_dir() + L"\\GNLinkViewer.exe";
+  if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    post_status("error", "GNLinkViewer.exe 를 찾을 수 없습니다");
+    return;
+  }
 
   // Call off the viewer already open on this PC, if there is one. It may be mid-connect -- up to
   // thirty seconds of hello -- and if it finishes it will bind a session the user has just
@@ -1035,9 +1076,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
         const char* why = (liveness == WAIT_TIMEOUT) ? "uncancellable" : "liveness-unknown";
         log_line(std::string("replacement refused pid=") +
                  std::to_string(previous->second.pid) + " reason=" + why);
+        // What the user can actually do. "Close the existing window" was not it: a viewer that
+        // is still connecting has no message pump until its hello ends, so its window does not
+        // close. Waiting for that attempt to end and pressing again does work. (RV-06)
         post_status("error",
-                    "이 PC 에 이미 연결 중인 세션이 있어 새로 시작할 수 없습니다. "
-                    "기존 창을 닫아 주세요.");
+                    "이 PC 로의 이전 연결 시도를 멈추지 못해 새로 시작하지 않았습니다. "
+                    "이전 시도가 끝난 뒤(보통 수십 초 안) 다시 눌러 주세요.");
         return;   // the slot stays; handle_viewer_exit clears it when that viewer ends
       }
 
@@ -1046,26 +1090,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
       gViewerByHost.erase(previous);
     }
   }
-  uint64_t ownerEpoch = 0;
-  std::string server;
-  std::string account;
-  std::string token;
-  {
-    std::lock_guard<std::mutex> lock(gStateMu);
-    server = gServerUrl; account = gAccountId;
-    token = gSessionToken;
-    ownerEpoch = gOwnerEpoch;
-  }
-  if (token.empty()) {
-    post_status("error", "로그인이 필요합니다");
-    return;
-  }
 
-  const std::wstring exe = executable_dir() + L"\\GNLinkViewer.exe";
-  if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-    post_status("error", "GNLinkViewer.exe 를 찾을 수 없습니다");
-    return;
-  }
+  // Past every refusal: from here this is the newest operation. (RV-06)
+  KillTimer(gWindow, kReconnectTimer);
+  gReconnectRequest.reset();
+  if (!automatic) gReconnectAttempts = 0;
+  const uint64_t operation = ++gViewerOperation;
 
   ShellRuntimeSettings settings;
   {
@@ -1268,6 +1298,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
              "running cannot be asked, so replacing it will be refused until it ends");
   }
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
+  gViewerByHost[request.hostId].operation = operation;
 #ifdef REMOTE60_SHELL_TEST_SEAM
   {
     HANDLE terminate = nullptr;

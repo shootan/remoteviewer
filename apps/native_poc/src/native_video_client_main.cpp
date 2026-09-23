@@ -110,6 +110,12 @@ int main(int argc, char** argv) {
 
     if (!show_startup_failure(ctx, reason)) {
       viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      // Called off while the failure screen was up: the same answer as being called off during
+      // the connect above -- this viewer was replaced, it did not fail. (RV-07)
+      if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+        if (ctx.dec.mfStarted) MFShutdown();
+        return 0;
+      }
       return rc;
     }
     // Asked for, never automatic: an automatic retry would overwrite the log line that says what
@@ -119,6 +125,18 @@ int main(int argc, char** argv) {
   // Connect is over, one way or the other. The watcher has nothing left to interrupt, and the
   // session that follows is torn down through the ordinary path.
   viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+  // A cancel that arrives from here on reaches nothing: the session is established and this
+  // viewer runs until it is closed. That is unchanged (a connected session is not killed from
+  // outside), but it is now SAID when it happens, instead of the shell's "asked=1" standing as
+  // the only record of a request that had no effect. (RV-07)
+  if (cancelEvent) {
+    std::thread([cancelEvent]() {
+      if (WaitForSingleObject(cancelEvent, INFINITE) == WAIT_OBJECT_0) {
+        std::cerr << "[native-video-client] cancel requested after the session was established:"
+                  << " no effect (session established)" << std::endl;
+      }
+    }).detach();
+  }
 
   attach_control_tunnel_and_log(ctx);
   try {
