@@ -357,12 +357,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // simply gone, and the host is still holding whatever was down when it broke. So
       // the same release-all the window runs when focus leaves, for the same reason --
       // and NOT a replay of anything, which would turn one keystroke into two.
+      //
+      // Wider than focus loss (RV-01): every modifier gets an up whether or not this client
+      // remembers pressing it (the same list as session start), and mouse buttons are released
+      // too -- a drag that was under way when the channel died left its button down on the host.
+      int heldKeys = 0;
+      for (int vk = 0; vk < 256; ++vk) {
+        if (ctx.input.forwardedKeyDown[vk].load(std::memory_order_relaxed)) ++heldKeys;
+      }
+      const unsigned heldButtons = ctx.input.mouseButtons.load(std::memory_order_relaxed) & 0x7u;
+      int modifierUps = 0;
       if (!kInputPolicyForceBlock) {
+        modifierUps = enqueue_release_all_modifiers(ctx);
         enqueue_release_for_pressed_keys(ctx);
+        enqueue_release_for_pressed_mouse_buttons(ctx);
         release_all_physical(ctx);
+        release_mouse_capture_if_idle(ctx, hwnd);
       }
       ctx.picker.CancelPress();
-      std::cout << "[native-video-client][control-resume] released held keys and buttons\n";
+      // What was actually done, not what was meant to be.
+      std::cout << "[native-video-client][control-resume] release: "
+                << (kInputPolicyForceBlock ? "skipped (input blocked by policy)" : "sent")
+                << " modifierUps=" << modifierUps << " heldKeysBefore=" << heldKeys
+                << " heldButtonsBefore=0x" << std::hex << heldButtons << std::dec << "\n";
       return 0;
     }
     case kMsgHostImeDeactivate: {

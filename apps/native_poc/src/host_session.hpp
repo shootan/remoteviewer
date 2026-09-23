@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "directory_client.hpp"
+#include "host_injected_input.hpp"
 #include "native_socket.hpp"
 #include "udp_control_channel.hpp"
 
@@ -119,6 +120,10 @@ struct SessionState {
   // repaired and the picture must not blink. Set by the reader before it wakes the dispatcher,
   // cleared once the answer has gone out.
   std::atomic<bool> controlResumePending{false};
+  // Keys and buttons this session injected as down, released by the host whenever a Serve()
+  // ends -- a resume or the end of the session. Lives here, not in Serve(), because a resume
+  // leaves one Serve() and enters the next and the marks must survive that. (RV-01)
+  InjectedInputTracker injectedInput;
 
 
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---

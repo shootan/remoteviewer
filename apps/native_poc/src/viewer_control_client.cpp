@@ -357,16 +357,19 @@ bool ControlClient::pump_control_resume(
        << " breakToFirstSendUs=" << toFirstSendUs
        << " breakToRunningUs=" << toRunningUs;
     log_client_line(ctx, os.str());
-    // Anything queued while the channel was dead is dropped rather than delivered late. The
+    // Actions queued while the channel was dead are dropped rather than delivered late. The
     // user was clicking at a picture that could not answer; replaying thirty seconds of that
-    // into the host the moment it can hear again is worse than losing it. Drained rather than
-    // Reset() so the sequence numbers keep counting -- the host is the same session and has
-    // not forgotten where they were.
-    remote60::native_poc::QueuedControlInputMessage stale;
+    // into the host the moment it can hear again is worse than losing it. RELEASES are kept:
+    // a key-up or button-up the user made during the break is the one thing that lets go of
+    // what the host is still holding, and dropping it is how a Shift stayed down. (RV-01)
+    // Filtered in place rather than Reset() so the sequence numbers keep counting -- the host
+    // is the same session and has not forgotten where they were.
     uint32_t dropped = 0;
-    while (ctx.control.inputQueue.TryDequeue(&stale)) ++dropped;
+    uint32_t keptReleases = 0;
+    ctx.control.inputQueue.DropAllButReleases(&dropped, &keptReleases);
     std::cout << "[native-video-client][control-resume] dropped " << dropped
-              << " input events queued during the break\n";
+              << " input actions queued during the break, kept " << keptReleases
+              << " releases\n";
     ctx.control.connected.store(true, std::memory_order_relaxed);
     set_window_panel_status(ctx, std::string());
     if (ctx.session.hwnd) {

@@ -126,6 +126,9 @@ class ControlProxy {
  public:
   std::atomic<bool> dropControlUp{false};    // viewer -> host
   std::atomic<bool> dropControlDown{false};  // host -> viewer
+  std::atomic<bool> dropAllUp{false};        // EVERYTHING viewer -> host (C4 range)
+  std::atomic<bool> dropAllDown{false};      // EVERYTHING host -> viewer, video included
+  std::atomic<uint64_t> allDropped{0};
   std::atomic<int> dropNextResumeAcks{0};    // swallow the host's answer N times
   std::atomic<int> duplicateResumeAcks{0};   // ...or send it twice
   std::atomic<uint64_t> controlDropped{0};
@@ -234,6 +237,12 @@ class ControlProxy {
       }
       const Dir dir = fromViewer ? Dir::ViewerToHost : Dir::HostToViewer;
 
+      // A whole direction cut: video, control, resume asks and answers alike. (RV-02, C4 range)
+      if ((dir == Dir::ViewerToHost && dropAllUp.load()) ||
+          (dir == Dir::HostToViewer && dropAllDown.load())) {
+        allDropped.fetch_add(1);
+        continue;
+      }
       const Kindness what = classify(buf.data(), static_cast<size_t>(n));
       if (what == Kindness::Control) {
         if (dir == Dir::HostToViewer && capturing.load()) {

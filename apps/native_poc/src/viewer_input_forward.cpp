@@ -147,6 +147,20 @@ void enqueue_release_for_pressed_keys(ViewerState& ctx) {
   }
 }
 
+int enqueue_release_all_modifiers(ViewerState& ctx) {
+  // Moved here from viewer_startup.cpp so the session start and the control resume cannot drift.
+  static constexpr uint32_t kModifiers[] = {
+      VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU,
+      VK_SHIFT,   VK_LSHIFT,   VK_RSHIFT,   VK_LWIN, VK_RWIN};
+  int queued = 0;
+  for (const uint32_t vk : kModifiers) {
+    ctx.input.forwardedKeyDown[vk].store(false, std::memory_order_relaxed);
+    enqueue_input_event(ctx, 6, 0, 0, 0, vk);
+    ++queued;
+  }
+  return queued;
+}
+
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;

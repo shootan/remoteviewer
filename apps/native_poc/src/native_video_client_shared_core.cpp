@@ -138,6 +138,20 @@ uint64_t ClientInputQueue::coalesced_move_count() const {
   return coalescedMoves_.load(std::memory_order_relaxed);
 }
 
+void ClientInputQueue::DropAllButReleases(uint32_t* dropped, uint32_t* kept) {
+  std::lock_guard<std::mutex> lk(mu_);
+  uint32_t gone = 0;
+  for (auto it = queue_.begin(); it != queue_.end();) {
+    if (!release_identity(*it)) { it = queue_.erase(it); ++gone; }
+    else ++it;
+  }
+  // Backpressure ends where it always does: once the releases it is holding have drained.
+  if (queue_.empty()) backpressured_ = false;
+  if (dropped) *dropped = gone;
+  if (kept) *kept = static_cast<uint32_t>(queue_.size());
+  if (!queue_.empty()) ready_.notify_one();
+}
+
 void ClientInputQueue::Reset() {
   std::lock_guard<std::mutex> lk(mu_);
   queue_.clear();

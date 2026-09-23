@@ -445,8 +445,13 @@ class ViewerControlResume {
       return false;
     }
     if (!channel_) return false;
-    channel_->ResumeWith(control_resume_stream_id(config_.baseTxStreamId, episode_.resumeId),
-                         control_resume_stream_id(config_.baseRxStreamId, episode_.resumeId));
+    if (!channel_->ResumeWith(control_resume_stream_id(config_.baseTxStreamId, episode_.resumeId),
+                              control_resume_stream_id(config_.baseRxStreamId, episode_.resumeId))) {
+      // The viewer is shutting its channel down; there is nothing left to repair. (C5)
+      havePendingServed_ = false;
+      if (log_) log_("[control-resume] ack served=1 but the channel is shut down; not re-keyed");
+      return false;
+    }
     episode_.rekeyed = true;
     havePendingServed_ = false;
     if (log_) {

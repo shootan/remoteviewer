@@ -323,33 +323,129 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(target.keyUps.load()) + " WM_KEYUP so far");
   }
 
-  if (downLanded) {
-    std::cout << "\n--- control is cut; the key-up is never generated ---\n";
-    const uint64_t downsAtCut = target.keyDowns.load();
+  // Cuts the control channel, lets the worker notice, optionally does something DURING the cut,
+  // then restores it and waits for the repair. The same cut for every case below.
+  const auto cut_and_repair = [&](const char* label, const std::function<void()>& duringCut) {
     proxy.dropControlUp.store(true);
     proxy.dropControlDown.store(true);
-
     // The worker finds out on its own: its channel runs out of retransmits and the action fails.
-    const bool resuming =
-        pump_until([&] { return !ctx.control.connected.load(); }, 25000);
-    check("the worker notices the control channel is gone", resuming);
-
+    const bool resuming = pump_until([&] { return !ctx.control.connected.load(); }, 25000);
+    check(std::string("[") + label + "] the worker notices the control channel is gone", resuming);
+    if (duringCut) {
+      duringCut();
+      pump_until([] { return false; }, 300);  // the window procedure handles it while cut
+    }
     // The uplink comes back. Nothing else is done to it.
     proxy.dropControlUp.store(false);
     proxy.dropControlDown.store(false);
-
     const bool back = pump_until([&] { return ctx.control.connected.load(); }, 40000);
-    check("THE CHANNEL IS REPAIRED WITHOUT A RECONNECT", back);
+    check(std::string("[") + label + "] THE CHANNEL IS REPAIRED WITHOUT A RECONNECT", back);
+    return resuming && back;
+  };
+  // Every up that is going to arrive has arrived once this has passed with nothing new: the
+  // host's own release, the up the viewer kept from the break, and its release-all all go out
+  // within a round trip or two of the repair. (RV-01, "no duplicate up")
+  const auto settle = [&](const std::function<uint32_t()>& count) {
+    uint32_t last = count();
+    for (int quiet = 0; quiet < 20;) {
+      pump_until([] { return false; }, 100);
+      const uint32_t now = count();
+      quiet = (now == last) ? quiet + 1 : 0;
+      last = now;
+    }
+  };
 
-    const bool upArrived = pump_until([&] { return target.keyUps.load() > 0; }, 10000);
+  bool keyCaseRepaired = false;
+  if (downLanded) {
+    std::cout << "\n--- case 1: control is cut; the key-up is never generated ---\n";
+    const uint64_t downsAtCut = target.keyDowns.load();
+    keyCaseRepaired = cut_and_repair("held", nullptr);
+
+    const bool upArrived = pump_until([&] { return target.upsByVk[kTestVk].load() > 0; }, 10000);
     check("AND THE KEY-UP ARRIVES AT THE HOST WITHOUT ANYONE SENDING ONE", upArrived,
-          std::to_string(target.keyUps.load()) +
-              " WM_KEYUP -- posted by the release-all the repair triggered");
+          std::to_string(target.upsByVk[kTestVk].load()) +
+              " WM_KEYUP for the key -- nobody generated an up for it");
+    settle([&] { return target.upsByVk[kTestVk].load(); });
+    check("...EXACTLY ONE: the host's release and the viewer's are not both injected",
+          target.upsByVk[kTestVk].load() == 1,
+          std::to_string(target.upsByVk[kTestVk].load()) + " WM_KEYUP for the key");
     check("...so the viewer is no longer holding it",
           !ctx.input.forwardedKeyDown[kTestVk].load());
     check("NO DUPLICATE RE-EXECUTION: the down happened exactly once",
           target.keyDowns.load() == downsAtCut,
           std::to_string(target.keyDowns.load() - downsAtCut) + " further WM_KEYDOWN after the cut");
+  }
+
+  // ---------------------------------------------------------------- the up made DURING the cut
+  // RV-01: the user lets go while the channel is dead. The viewer does generate the up -- and
+  // until this was fixed the repair threw it away with everything else queued during the break,
+  // and nothing else released a key the viewer no longer thought it was holding. Shift is the
+  // case that matters (a latched modifier); the left button is a drag that never ends.
+  if (keyCaseRepaired) {
+    std::cout << "\n--- case 2: Shift goes down, control is cut, Shift comes up during the cut ---\n";
+    const uint32_t downsBefore = target.downsByVk[VK_SHIFT].load();
+    const uint32_t upsBefore = target.upsByVk[VK_SHIFT].load();
+    PostMessageW(viewerWindow, WM_KEYDOWN, VK_SHIFT, key_lparam(VK_SHIFT, false));
+    const bool down = pump_until([&] { return target.downsByVk[VK_SHIFT].load() > downsBefore; }, 10000);
+    check("[shift] THE SHIFT DOWN REACHES THE HOST", down,
+          std::to_string(target.downsByVk[VK_SHIFT].load() - downsBefore) + " WM_KEYDOWN VK_SHIFT");
+    if (down) {
+      const bool ok = cut_and_repair("shift", [&] {
+        PostMessageW(viewerWindow, WM_KEYUP, VK_SHIFT, key_lparam(VK_SHIFT, true));
+      });
+      check("[shift] ...and the viewer let go of it during the cut",
+            !ctx.input.forwardedKeyDown[VK_SHIFT].load());
+      if (ok) {
+        const bool arrived =
+            pump_until([&] { return target.upsByVk[VK_SHIFT].load() > upsBefore; }, 10000);
+        check("[shift] THE SHIFT UP MADE DURING THE CUT ARRIVES AT THE HOST", arrived,
+              std::to_string(target.upsByVk[VK_SHIFT].load() - upsBefore) + " WM_KEYUP VK_SHIFT");
+        settle([&] { return target.upsByVk[VK_SHIFT].load(); });
+        check("[shift] ...EXACTLY ONCE", target.upsByVk[VK_SHIFT].load() - upsBefore == 1,
+              std::to_string(target.upsByVk[VK_SHIFT].load() - upsBefore) + " WM_KEYUP VK_SHIFT");
+        check("[shift] ...and the down was not repeated",
+              target.downsByVk[VK_SHIFT].load() - downsBefore == 1,
+              std::to_string(target.downsByVk[VK_SHIFT].load() - downsBefore) + " WM_KEYDOWN VK_SHIFT");
+      }
+    }
+
+    std::cout << "\n--- case 3: the left button goes down, control is cut, it comes up during the cut ---\n";
+    // The two pieces of state this harness supplies that the product would have reached by now,
+    // because it receives video without decoding it: the size of a decoded frame (the viewer maps
+    // a click into video coordinates with it), and the picker dismissed -- the product hides it
+    // when the first frame of the stream is revealed (kMsgRevealStreamView), and until then a
+    // click is a picker press, not input. Nothing about the release path depends on either.
+    {
+      std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
+      ctx.frameBuf.frame.width = 320;
+      ctx.frameBuf.frame.height = 240;
+    }
+    ctx.picker.visible.store(false, std::memory_order_relaxed);
+    const uint32_t lDownsBefore = target.leftDowns.load();
+    const uint32_t lUpsBefore = target.leftUps.load();
+    const LPARAM at = MAKELPARAM(320, 240);
+    PostMessageW(viewerWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    const bool pressed = pump_until([&] { return target.leftDowns.load() > lDownsBefore; }, 10000);
+    check("[button] THE LEFT BUTTON DOWN REACHES THE HOST", pressed,
+          std::to_string(target.leftDowns.load() - lDownsBefore) + " WM_LBUTTONDOWN");
+    if (pressed) {
+      const bool ok = cut_and_repair("button", [&] {
+        PostMessageW(viewerWindow, WM_LBUTTONUP, 0, at);
+      });
+      check("[button] ...and the viewer let go of it during the cut",
+            (ctx.input.mouseButtons.load() & 1u) == 0);
+      if (ok) {
+        const bool arrived = pump_until([&] { return target.leftUps.load() > lUpsBefore; }, 10000);
+        check("[button] THE BUTTON UP MADE DURING THE CUT ARRIVES AT THE HOST", arrived,
+              std::to_string(target.leftUps.load() - lUpsBefore) + " WM_LBUTTONUP");
+        settle([&] { return target.leftUps.load(); });
+        check("[button] ...EXACTLY ONCE", target.leftUps.load() - lUpsBefore == 1,
+              std::to_string(target.leftUps.load() - lUpsBefore) + " WM_LBUTTONUP");
+        check("[button] ...and the down was not repeated",
+              target.leftDowns.load() - lDownsBefore == 1,
+              std::to_string(target.leftDowns.load() - lDownsBefore) + " WM_LBUTTONDOWN");
+      }
+    }
   }
 
   // ------------------------------------------------------------------------------- teardown

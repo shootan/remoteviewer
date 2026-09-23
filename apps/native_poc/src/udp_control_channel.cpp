@@ -49,6 +49,10 @@ void UdpControlChannel::Close(ControlCloseReason reason) {
   // would otherwise be reported as the peer's death, which reads like a network fault.
   auto expected = ControlCloseReason::None;
   closeReason_.compare_exchange_strong(expected, reason, std::memory_order_relaxed);
+  // Recorded apart from the reason, which keeps the first one: a viewer shutting down while its
+  // channel is already closed as peer-lost -- which is exactly when a resume is in flight --
+  // must still be known to be shutting down. (C5)
+  if (reason == ControlCloseReason::Shutdown) shutdown_.store(true, std::memory_order_relaxed);
   closed_.store(true, std::memory_order_relaxed);
   cv_.notify_all();
 }
@@ -67,11 +71,16 @@ void UdpControlChannel::Reset() {
   // HandleData answers it with an ack while dropping the data -- alive on the wire, deaf above.
   rxDeliveredSeq_ = 0;
   closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
+  shutdown_.store(false, std::memory_order_relaxed);  // Reset is a new session, as it always was
   closed_.store(false, std::memory_order_relaxed);
 }
 
-void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
+bool UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
   std::lock_guard<std::mutex> lock(mu_);
+  // A channel closed because its owner is shutting down stays closed. A resume that raced with
+  // the shutdown would otherwise reopen it underneath the thread that is tearing it down -- in
+  // either order: shut down first, or shut down while already closed as peer-lost. (C5)
+  if (shutdown_.load(std::memory_order_relaxed)) return false;
   // The repair answers the question the probe was asking, and the seq it named belongs to a
   // stream neither side listens on any more.
   probeState_ = ControlProbeState::Idle;
@@ -87,6 +96,7 @@ void UdpControlChannel::ResumeWith(uint32_t txStreamId, uint32_t rxStreamId) {
   rxDeliveredSeq_ = 0;
   closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
   closed_.store(false, std::memory_order_relaxed);
+  return true;
 }
 
 const char* to_string(ControlProbeState state) {

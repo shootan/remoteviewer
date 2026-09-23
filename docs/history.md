@@ -12451,3 +12451,13 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 결과: 단독 **10/10 ALL PASS**(58 checks, 미판정 0), 부하(deadline e2e 상시 병행, 병행 쪽 125회 전부 PASS) **5/5 ALL PASS**. 복구 구간 수신은 매회 2~4발, seam 전달 수와 같았다. 발 수가 적은 것은 호스트 송신 cadence 때문이다 — 40Hz·960×540 으로 올려도 초당 약 2프레임(측정). 화면 밖 창이라 DWM 합성이 줄어드는지는 확인하지 않았다.
 - 실제 설정 파일 두 개: 모든 실행 전후 sha256·mtime 불변(36 기록).
 - 제품/테스트/문서: 제품 **무변경** / 테스트(`control_resume_e2e_test.cpp`, `control_resume_e2e_support.hpp`) / 문서(이 항목, `구현계획.md` C3 정정, `작업목록.md`).
+
+### 2026-09-23 rv-remediation C — 끊김 중에 뗀 키, 그리고 복구가 실제로 닿는 거리
+
+- **C1 뷰어**: 재개 때 큐는 동작만 버리고 해제는 남긴다(`DropAllButReleases`). modifier 11개 up 은 세션 시작과 한 함수를 공유(`enqueue_release_all_modifiers`)하고 마우스 버튼도 푼다. 로그는 한 일(`modifierUps`·`heldKeysBefore`·`heldButtonsBefore`)만 적는다.
+- **C2 호스트**: `InjectedInputTracker` — 주입된 VK·버튼 down 을 기억, `Serve()` 종료(재개·세션 끝)에서 스스로 해제, 해제한 것에 대한 뷰어 up 은 다음 down 까지 삼킴. 새 epoch 는 모두 잊음. 순수 시험 16/0.
+- **C3 e2e**(`viewer_release_all_e2e`): 기존 "아직 누름" 에 중복 up 0 단언 추가, **끊김 중 Shift up**, **끊김 중 왼쪽 버튼 up** 사례. 35 checks 3/3 ALL PASS. 변이: C1 만 되돌림 → 0 FAIL(C2 가 덮음) · C2 만 → 1 FAIL(Shift up 2회) · 둘 다 → 4 FAIL(Shift·버튼 up 미도착). 하네스가 제품 대신 두는 상태 2개를 명시: 디코드된 프레임 크기, 첫 프레임 뒤 picker 숨김.
+- **C4 범위 측정**: 상향 8·12초 재개, 20초 불가(호스트 10초 읽기 시한에 스트림 끔), 하향 3초 무사, 8초 불가(영상 죽음 + 호스트 peer-lost). `구현계획.md` C3 의 "30초 동안" 을 측정표로 정정. 제품 변경 없음.
+- **C5**: Hello 의 per-client 설정(`controlResumeNegotiated`, 그리고 같은 결함의 `fecInterleaved`·`nackEnabled`)을 **받아들인 뒤** 저장. `ResumeWith` 는 Shutdown 된 채널을 다시 열지 않음(먼저 peer-lost 로 닫힌 뒤 Shutdown 된 경우 포함, `shutdown_` 별도 기록). control_resume_test 124→127.
+- 회귀: control_resume_e2e 3/3 ALL PASS(58), viewer_window_proc_isolated 42/0, viewer_control_resume 60/0, udp_control_channel 12/0. 실제 설정 파일 전 기록 불변.
+- 제품/테스트/문서: 제품(뷰어 입력·재개, 호스트 세션·Hello·채널) / 테스트(e2e 3종·순수 2종) / 문서(구현계획 C3, 이 항목).

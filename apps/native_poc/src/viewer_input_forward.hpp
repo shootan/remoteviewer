@@ -56,6 +56,17 @@ void enqueue_release_for_pressed_mouse_buttons(ViewerState& ctx);
 // keeps a modifier from latching on the host.
 void enqueue_release_for_pressed_keys(ViewerState& ctx);
 
+/**
+ * An up for every modifier, whether or not this client thinks it is holding one.
+ *
+ * The session-start clear and the control-resume clear share this list (RV-01): a modifier the
+ * host is holding may have been pressed by a previous client, or its up may have been lost while
+ * the channel was dead, and in neither case does this client's memory know. Each modifier is also
+ * forgotten here, so a following enqueue_release_for_pressed_keys does not send it a second time.
+ * Returns the number of ups queued.
+ */
+int enqueue_release_all_modifiers(ViewerState& ctx);
+
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode);
 // Host-side IME opt-in (env REMOTE60_HOST_IME): whether the user asked for the host-IME path at all.
 bool host_ime_optin();

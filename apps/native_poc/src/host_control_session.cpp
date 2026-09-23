@@ -79,6 +79,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
   // shared stream state, so a session that ends after its successor has started cannot turn the
   // successor's stream off. (Ledger H-28.)
   const uint64_t servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
+  // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
+  clientSession.injectedInput.BeginServe(servedEpoch);
   // A new session starts with the stream on, exactly like the first client of a fresh
   // process. The previous session's disconnect turned it off, and a client that never
   // sends stream-state (the Windows client) would otherwise stare at a black screen
@@ -297,6 +299,48 @@ void ControlSessionServer::Serve(ControlLink& link) {
       (void)inject_physical_scan_key(static_cast<uint16_t>(key & 0xff), false, (key & 0x100) != 0);
     }
     physicalDown.clear();
+  };
+  // The same for virtual keys and mouse buttons (RV-01): everything this session injected as
+  // down and has not seen go up -- including an up whose injection failed, which is not
+  // retransmitted by anyone -- is released through the ordinary injection path when this Serve()
+  // ends. That is both the end of the session and a control resume, which leaves Serve() and
+  // re-enters it: a key-up the user made while the channel was dead may never arrive.
+  auto release_injected_input = [&]() {
+    int32_t lastX = 0;
+    int32_t lastY = 0;
+    const std::vector<InjectedInputTracker::Release> held =
+        clientSession.injectedInput.TakeHeldForRelease(&lastX, &lastY);
+    if (held.empty()) return;
+    const bool desktopMode = !inputRouter.targetCriteria.enabled() &&
+                             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
+    HMONITOR targetMonitor = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(capture.inputTargetMu);
+      targetMonitor = reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(capture.inputTarget.monitorHandle));
+    }
+    for (const auto& r : held) {
+      ControlInputEventMessage up{};
+      up.kind = r.kind;
+      up.keyCode = r.keyCode;
+      up.x = lastX;
+      up.y = lastY;
+      std::string target;
+      InputFailStage stage = InputFailStage::None;
+      DWORD error = 0;
+      const InputInjectResult result =
+          desktopMode && !targetMonitor
+              ? InputInjectResult::NoTarget
+              : inject_background_input_event(up, inputRouter.targetCriteria, capture.targetHwnd,
+                                              desktopMode,
+                                              inputRouter.domainW.load(std::memory_order_acquire),
+                                              inputRouter.domainH.load(std::memory_order_acquire),
+                                              &inputRouter.desktopState, &target, &stage, &error,
+                                              targetMonitor);
+      std::cout << "[native-video-host][input] released-at-serve-exit kind=" << r.kind
+                << " key=" << r.keyCode << " result="
+                << (result == InputInjectResult::Injected ? "injected" : "not-injected")
+                << " stage=" << input_fail_stage_name(stage) << " err=" << error << target << "\n";
+    }
   };
   std::cout << "[native-video-host][connection-version] localProcess=GNLinkStream"
             << " localVersion=" << local_product_version()
@@ -518,7 +562,15 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
       const uint64_t inputReceivedUs = qpc_now_us();
       std::string resolvedTarget;
-      if (inputRouter.injectionEnabled) {
+      // An up for a key or button the host already released itself at a Serve() exit: injecting
+      // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)
+      const bool releaseAlreadyDone =
+          inputRouter.injectionEnabled &&
+          clientSession.injectedInput.SwallowRelease(input.kind, input.keyCode);
+      if (releaseAlreadyDone) {
+        std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
+                  << " kind=" << input.kind << " key=" << input.keyCode << "\n";
+      } else if (inputRouter.injectionEnabled) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -663,6 +715,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
         if (injectAccounted) {
           // Already tallied on the secure path; nothing more to record.
         } else if (injectResult == InputInjectResult::Injected) {
+          clientSession.injectedInput.NoteInjected(input.kind, input.keyCode, input.x, input.y);
           const uint64_t n = inputRouter.events.fetch_add(1) + 1;
           if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
             std::cout << "[native-video-host][input] injected seq=" << input.seq
@@ -1118,6 +1171,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
     if (bodySize > 0 && !link.Discard(bodySize)) break;
   }
   release_all_physical_host();  // release any physical keys still held on the host at session end
+  release_injected_input();     // ...and the virtual keys and mouse buttons (RV-01)
   // Only if we are still the current session. A TCP control thread and the UDP dispatcher can be
   // alive at the same time, and this unconditional store meant whichever finished last switched
   // the OTHER one's video off -- the viewer would sit on a frozen picture with a healthy link.

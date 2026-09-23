@@ -89,7 +89,9 @@ class UdpControlChannel {
    * with ids derived from the same resumeId, so each stops recognising the old stream at the
    * same moment it starts listening for the new one.
    */
-  void ResumeWith(uint32_t txStreamId, uint32_t rxStreamId);
+  // Returns false, and changes nothing, for a channel closed by Shutdown: that is not a channel
+  // to repair but one being torn down. (C5)
+  bool ResumeWith(uint32_t txStreamId, uint32_t rxStreamId);
 
   /**
    * The stream ids in force right now. (item 8, C3)
@@ -226,6 +228,7 @@ class UdpControlChannel {
   std::condition_variable cv_;
   std::atomic<bool> closed_{false};
   std::atomic<ControlCloseReason> closeReason_{ControlCloseReason::None};
+  std::atomic<bool> shutdown_{false};  // Close(Shutdown) was called, whatever reason came first
 
   uint32_t nextTxSeq_ = 1;
   std::deque<Outbound> txQueue_;  // front is the message awaiting acknowledgement

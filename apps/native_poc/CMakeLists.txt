@@ -1573,6 +1573,13 @@ add_executable(remote60_host_input_target_rect_test
 )
 target_include_directories(remote60_host_input_target_rect_test PRIVATE src)
 
+# What the host releases on its own when a control session stops, and which ups it then does not
+# inject a second time (RV-01).
+add_executable(remote60_host_injected_input_test
+  src/host_injected_input_test.cpp
+)
+target_include_directories(remote60_host_injected_input_test PRIVATE src)
+
 add_executable(remote60_connect_candidates_test
   src/connect_candidates_test.cpp
 )

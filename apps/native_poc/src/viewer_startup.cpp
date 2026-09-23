@@ -813,14 +813,8 @@ void connect_control(ViewerContext& ctx) {
       // lost focus while a modifier was down could not send its up, and that up-less state is
       // the host's real key state -- it survives the client closing and reopening, so
       // reconnecting is the only way to shake it loose, and only if the fresh client says so.
-      for (const uint32_t vk : {static_cast<uint32_t>(VK_CONTROL), static_cast<uint32_t>(VK_LCONTROL),
-                                static_cast<uint32_t>(VK_RCONTROL), static_cast<uint32_t>(VK_MENU),
-                                static_cast<uint32_t>(VK_LMENU), static_cast<uint32_t>(VK_RMENU),
-                                static_cast<uint32_t>(VK_SHIFT), static_cast<uint32_t>(VK_LSHIFT),
-                                static_cast<uint32_t>(VK_RSHIFT), static_cast<uint32_t>(VK_LWIN),
-                                static_cast<uint32_t>(VK_RWIN)}) {
-        enqueue_input_event(ctx, 6, 0, 0, 0, vk);
-      }
+      // The same list the control resume uses (RV-01).
+      (void)enqueue_release_all_modifiers(ctx);
     }
     ctx.control.scheduler.Reset(ctx.args.controlIntervalMs, qpc_now_us());
     if (ctx.controlReady) {

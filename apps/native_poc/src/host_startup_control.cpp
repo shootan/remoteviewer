@@ -321,10 +321,6 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
               hello.version == remote60::native_poc::kUdpProtocolVersion &&
               (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0) {
-            sender.fecInterleaved.store(
-                (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
-                std::memory_order_relaxed);
-
             UdpHelloPacket ack{};
             ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
             ack.features =
@@ -337,13 +333,11 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // acted on only for a client that asked -- a client that never asked does not know
             // what a resume answer is, so sending it one would be noise it has to ignore.
             ack.features |= remote60::native_poc::kUdpFeatureControlResume;
-            clientSession.controlResumeNegotiated.store(
-                remote60::native_poc::host_resume_negotiated(hello.features),
-                std::memory_order_release);
+            // Whether THIS client asked is stored further down, once its Hello has been accepted.
+            // Stored here it let a Hello that is then refused (a bad capability, or an
+            // unauthenticated one during a directory session) switch resume off for the session
+            // that is actually running. (RV-02 / C5)
 
-            sender.nackEnabled.store(
-                (hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
-                std::memory_order_relaxed);
             size_t tokenLen = 0;
             while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
               ++tokenLen;
@@ -402,6 +396,18 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             }
             clientSession.directoryAuthenticated.store(directoryAuthenticated,
                                                 std::memory_order_release);
+            // Accepted: from here this Hello is the session's. (C5) Every per-client option it
+            // carries is stored only now -- the FEC layout and NACK used to be stored before the
+            // refusals above too, so a refused Hello could change them under the running session.
+            clientSession.controlResumeNegotiated.store(
+                remote60::native_poc::host_resume_negotiated(hello.features),
+                std::memory_order_release);
+            sender.fecInterleaved.store(
+                (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+                std::memory_order_relaxed);
+            sender.nackEnabled.store(
+                (hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
+                std::memory_order_relaxed);
             const bool changed =
                 sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
                 sender.udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
@@ -747,11 +753,16 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // the moment it starts listening for the new one.
         if (resuming) {
           const uint32_t resumeId = clientSession.controlResumeId.load(std::memory_order_acquire);
-          clientSession.udpControlChannel.ResumeWith(
-              remote60::native_poc::control_resume_stream_id(
-                  remote60::native_poc::kUdpControlStreamHostToClient, resumeId),
-              remote60::native_poc::control_resume_stream_id(
-                  remote60::native_poc::kUdpControlStreamClientToHost, resumeId));
+          if (!clientSession.udpControlChannel.ResumeWith(
+                  remote60::native_poc::control_resume_stream_id(
+                      remote60::native_poc::kUdpControlStreamHostToClient, resumeId),
+                  remote60::native_poc::control_resume_stream_id(
+                      remote60::native_poc::kUdpControlStreamClientToHost, resumeId))) {
+            // Shut down between the wake and here: left closed, and the Serve() below returns at
+            // once. (C5)
+            std::cout << "[native-video-host][control] resume id=" << resumeId
+                      << " not re-keyed: the channel is shut down\n";
+          }
         } else {
           clientSession.udpControlChannel.Reset();
         }

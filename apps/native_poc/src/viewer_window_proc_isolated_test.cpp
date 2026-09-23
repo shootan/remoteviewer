@@ -622,6 +622,7 @@ bool send_ime_result_text(ViewerState&, HWND, LPARAM) { return false; }
 void release_mouse_capture_if_idle(ViewerState&, HWND) {}
 void enqueue_release_for_pressed_mouse_buttons(ViewerState&) {}
 void enqueue_release_for_pressed_keys(ViewerState&) {}
+int enqueue_release_all_modifiers(ViewerState&) { return 0; }
 bool host_ime_mode(ViewerState&) { return false; }
 bool enqueue_physical_key(ViewerState&, bool, uint16_t, uint16_t, bool, bool, bool) { return false; }
 void toggle_macro_window(ViewerState&, HWND) {}

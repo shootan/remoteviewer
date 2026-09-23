@@ -376,6 +376,28 @@ int main() {
     check("...and the re-key reopens it", !closedChannel.IsClosed());
     check("...with the give-up reason cleared",
           closedChannel.CloseReason() == ControlCloseReason::None);
+
+    // ...but not one closed by Shutdown, and a resume's own wake cannot overwrite that. (C5)
+    UdpControlChannel shutChannel;
+    shutChannel.Configure([](const void*, size_t) { return true; }, kUdpControlStreamHostToClient,
+                          oldRx, 1200);
+    shutChannel.Close(ControlCloseReason::Shutdown);
+    shutChannel.Close(ControlCloseReason::PeerLost);  // what the reader does to wake the dispatcher
+    const bool reopened =
+        shutChannel.ResumeWith(control_resume_stream_id(kUdpControlStreamHostToClient, resumeId), newRx);
+    check("a channel shut down is NOT reopened by a resume", !reopened && shutChannel.IsClosed());
+    check("...and still says why it closed",
+          shutChannel.CloseReason() == ControlCloseReason::Shutdown);
+    // The other order: already closed as peer-lost (a resume in flight), then shut down.
+    UdpControlChannel lostThenShut;
+    lostThenShut.Configure([](const void*, size_t) { return true; }, kUdpControlStreamHostToClient,
+                           oldRx, 1200);
+    lostThenShut.Close(ControlCloseReason::PeerLost);
+    lostThenShut.Close(ControlCloseReason::Shutdown);
+    check("a channel shut down while already peer-lost is not reopened either",
+          !lostThenShut.ResumeWith(control_resume_stream_id(kUdpControlStreamHostToClient, resumeId),
+                                   newRx) &&
+              lostThenShut.IsClosed());
   }
 
   // ------------------------------------------------------- the host dispatcher's two wake reasons

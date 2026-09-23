@@ -36,6 +36,11 @@ class ClientInputQueue {
   void WaitForInput(uint32_t timeoutMs);
   uint64_t dropped_count() const;
   uint64_t coalesced_move_count() const;  // P0 (#351): moves replaced by a newer one (latest-wins)
+  // Drops every queued action (downs, moves, wheel, text) and keeps every release edge (key-up,
+  // button-up, physical key-up) in order. What a control resume does with a queue that filled
+  // while the channel was dead: the actions are stale, but a release that was never delivered is
+  // the only thing that lets go of a key the host is still holding. (RV-01)
+  void DropAllButReleases(uint32_t* dropped, uint32_t* kept);
   void Reset();
 
  private:

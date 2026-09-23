@@ -235,6 +235,96 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
   return out;
 }
 
+/**
+ * C4 (RV-02): how far the repair reaches. One direction is cut COMPLETELY -- video, control,
+ * resume asks and answers -- for a fixed time, and the viewer side does what the product's worker
+ * does: keep exchanging until one exchange fails, then ask for ONE resume, and only if the picture
+ * is alive at that moment (viewer_control_client.cpp begin_control_resume). This is a
+ * measurement, not a judgement: it prints one RANGE line and changes nothing in the product.
+ *
+ * What it does not reproduce, said so the table is read correctly: the product's watchdog is not
+ * running here. Its verdict is computed from the product's own thresholds (SessionLivenessConfig)
+ * against what was measured -- "control gone and no picture for deadSessionUs" ends a session,
+ * and so does "control gone for controlGoneWithVideoUs" even with a picture.
+ */
+void run_range_trial(ViewerSide& v, ControlProxy& proxy, bool up, int seconds) {
+  std::cout << "\n--- range: the " << (up ? "UPLINK (viewer -> host)" : "DOWNLINK (host -> viewer)")
+            << " fully cut for " << seconds << " s ---\n";
+  const viewer::SessionLivenessConfig live{};
+  std::atomic<bool>& cut = up ? proxy.dropAllUp : proxy.dropAllDown;
+  const uint64_t cutStart = qpc_now_us();
+  const uint64_t cutEndUs = static_cast<uint64_t>(seconds) * 1000000ull;
+  cut.store(true);
+  std::thread restorer([&cut, seconds] {
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    cut.store(false);
+  });
+  const auto since_cut = [cutStart] { return qpc_now_us() - cutStart; };
+
+  // The worker: one exchange after another until one fails, or until the cut is long over.
+  bool failed = false;
+  uint64_t failedAtUs = 0;
+  while (since_cut() < cutEndUs + 8000000ull) {
+    if (!ping(*v.link)) {
+      failed = true;
+      failedAtUs = since_cut();
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  std::string outcome;
+  std::string watchdog = "not applicable (control never went down)";
+  uint64_t resumedAtUs = 0;
+  uint64_t longestGapUs = 0;
+  bool aliveAtFailure = false;
+  if (failed) {
+    aliveAtFailure = v.video_alive();
+    if (!v.resume.BeginBreakIfPossible(qpc_now_us(), aliveAtFailure, false)) {
+      outcome = "NOT RESUMABLE -- the picture was not alive when the exchange failed; the product "
+                "ends control here and does not ask again";
+      // How long the picture stays away while control is gone, to say which watchdog rule ends it.
+      while (since_cut() < cutEndUs + 8000000ull) {
+        const uint64_t last = v.lastVideoUs.load();
+        const uint64_t gap = last ? qpc_now_us() - last : 0;
+        if (gap > longestGapUs) longestGapUs = gap;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      watchdog = longestGapUs > live.deadSessionUs
+                     ? "CLOSES the session (no picture for " + std::to_string(longestGapUs / 1000) +
+                           "ms > deadSession " + std::to_string(live.deadSessionUs / 1000) + "ms)"
+                     : "closes the session at the latest after controlGoneWithVideo " +
+                           std::to_string(live.controlGoneWithVideoUs / 1000) +
+                           "ms -- control never comes back";
+    } else {
+      const RecoveryResult r = run_recovery(v, 45000);
+      longestGapUs = r.longestVideoGapUs;
+      if (r.resumed) {
+        resumedAtUs = since_cut();
+        outcome = "RESUMED";
+      } else {
+        outcome = r.gaveUp ? "GAVE UP (the viewer's own ceiling)" : "NOT RESUMED within 45 s";
+      }
+      watchdog = longestGapUs > live.deadSessionUs
+                     ? "would CLOSE the session first (picture gap " +
+                           std::to_string(longestGapUs / 1000) + "ms > deadSession " +
+                           std::to_string(live.deadSessionUs / 1000) + "ms)"
+                     : "does not intervene (longest picture gap " +
+                           std::to_string(longestGapUs / 1000) + "ms)";
+    }
+  } else {
+    outcome = "SURVIVED -- no exchange failed, so nothing needed repairing";
+  }
+  restorer.join();
+  std::cout << "RANGE  dir=" << (up ? "up" : "down") << " cut=" << seconds << "s"
+            << "  exchangeFailedAtMs=" << (failed ? std::to_string(failedAtUs / 1000) : "-")
+            << "  pictureAliveThen=" << (failed ? (aliveAtFailure ? "yes" : "no") : "-")
+            << "  controlBackAtMs=" << (resumedAtUs ? std::to_string(resumedAtUs / 1000) : "-")
+            << "  dropped=" << proxy.allDropped.load() << "\n"
+            << "       outcome: " << outcome << "\n"
+            << "       watchdog (by the product's thresholds): " << watchdog << "\n";
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -254,6 +344,23 @@ int wmain(int argc, wchar_t** argv) {
       Sleep(300000);
       return 0;
     }
+  }
+
+  // C4 (RV-02): `--range up|down <seconds>` runs the same setup and then ONE range trial instead
+  // of the cases -- one fresh host per trial, so no trial inherits another's broken session.
+  bool rangeMode = false;
+  bool rangeUp = true;
+  int rangeSeconds = 0;
+  for (int i = 1; i < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--range" && i + 2 < argc) {
+      rangeMode = true;
+      rangeUp = std::wstring(argv[i + 1]) == L"up";
+      rangeSeconds = _wtoi(argv[i + 2]);
+    }
+  }
+  if (rangeMode && (rangeSeconds <= 0 || rangeSeconds > 120)) {
+    std::printf("usage: --range up|down <seconds 1..120>\n");
+    return 2;
   }
 
   WSADATA wsa{};
@@ -461,6 +568,11 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "    (no injection observed -- the remaining input judgements will say so)\n";
       }
     }
+  }
+
+  if (rangeMode && connected) {
+    run_range_trial(viewer, proxy, rangeUp, rangeSeconds);
+    connected = false;  // the cases below are not part of a range run
   }
 
   // ----------------------------------------------------------------- the break, and the repair
