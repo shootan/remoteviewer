@@ -80,6 +80,41 @@ std::wstring directory_of(const std::wstring& path) {
   return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
 }
 
+/**
+ * Ends the helpers under `dir`, identifying each through the SAME handle that ends it. (RV-17)
+ *
+ * The helper is started by the product code under test, so there is no launch handle to use.
+ * What used to happen was find-by-path, then reopen-by-pid to terminate: a gap in which the pid
+ * could have been reused. Here the handle is opened once with query and terminate rights, the
+ * image path is read through it, and only a match is terminated -- through that handle.
+ */
+size_t terminate_helpers_in(const std::wstring& dir) {
+  size_t ended = 0;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return 0;
+  PROCESSENTRY32W e{};
+  e.dwSize = sizeof(e);
+  if (Process32FirstW(snap, &e)) {
+    do {
+      if (_wcsicmp(e.szExeFile, L"GNLinkCapture.exe") != 0) continue;
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                             FALSE, e.th32ProcessID);
+      if (!h) continue;
+      wchar_t image[MAX_PATH]{};
+      DWORD size = MAX_PATH;
+      if (QueryFullProcessImageNameW(h, 0, image, &size) &&
+          _wcsnicmp(image, dir.c_str(), dir.size()) == 0) {
+        TerminateProcess(h, 1);
+        WaitForSingleObject(h, 5000);
+        ++ended;
+      }
+      CloseHandle(h);
+    } while (Process32NextW(snap, &e));
+  }
+  CloseHandle(snap);
+  return ended;
+}
+
 /** Helpers this test started, found by image path rather than by name. */
 std::vector<DWORD> helpers_in(const std::wstring& dir) {
   std::vector<DWORD> pids;
@@ -266,15 +301,7 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   // Clean up the helper the fault injection refused to kill. By pid and by path.
-  const std::vector<DWORD> left = helpers_in(dir);
-  for (DWORD pid : left) {
-    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
-    if (h) {
-      TerminateProcess(h, 1);
-      WaitForSingleObject(h, 5000);
-      CloseHandle(h);
-    }
-  }
+  (void)terminate_helpers_in(dir);
   check("the lingering helper could be cleaned up by this test", helpers_in(dir).empty(),
         std::to_string(helpers_in(dir).size()) + " left");
 

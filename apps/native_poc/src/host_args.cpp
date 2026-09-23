@@ -116,6 +116,8 @@ Args parse_args(int argc, char** argv) {
       a.enableInputInjection = true;
     } else if (k == "--directory-url" && i + 1 < argc) {
       a.directoryUrl = argv[++i];
+    } else if (k == "--directory-cache" && i + 1 < argc) {
+      a.directoryCachePath = argv[++i];
     } else if (k == "--directory-id" && i + 1 < argc) {
       a.directoryId = argv[++i];
     } else if (k == "--directory-pw" && i + 1 < argc) {

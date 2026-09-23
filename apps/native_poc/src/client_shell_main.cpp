@@ -98,8 +98,26 @@ struct ViewerCancelSlot {
   // answered without reopening by pid -- a pid that has been reused would answer about
   // somebody else. SYNCHRONIZE and nothing more: this is for waiting, never for killing.
   HANDLE process = nullptr;
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  // TEST BUILDS ONLY. (RV-17) A terminate-capable duplicate taken from the LAUNCH handle, so a
+  // test can end a viewer it caused to be started without reopening anything by pid -- a pid
+  // can have been reused, and OpenProcess ignores its low two bits (measured on this PC: a
+  // made-up 1049 opens the real 1048). Slots a test makes up by hand have none, and are
+  // therefore never killed.
+  HANDLE testTerminate = nullptr;
+#endif
 };
 std::map<std::string, ViewerCancelSlot> gViewerByHost;
+
+/** Closes every handle a slot owns. */
+void close_slot_handles(ViewerCancelSlot& slot) {
+  if (slot.process) CloseHandle(slot.process);
+  slot.process = nullptr;
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (slot.testTerminate) CloseHandle(slot.testTerminate);
+  slot.testTerminate = nullptr;
+#endif
+}
 uint32_t gReconnectAttempts = 0;
 std::optional<ShellConnectRequest> gReconnectRequest;
 uint64_t gReconnectOwnerEpoch = 0;
@@ -164,7 +182,28 @@ std::wstring executable_dir() {
  * The password is not among them. Remembering it would save one field and hand anyone with the
  * user's profile a working login to every PC on the account.
  */
+#ifdef REMOTE60_SHELL_TEST_SEAM
+// TEST BUILDS ONLY -- never defined for GNLinkClient. (RV-00)
+//
+// Where a test that compiles this file in keeps client.txt and the shell logs. The per-user path
+// below comes from SHGetKnownFolderPath, which does not follow a LOCALAPPDATA override, so a test
+// runner that isolated the environment still had the real file written: on 2026-09-23
+// client_recovery_ui_test overwrote the user's %LOCALAPPDATA%\GNLink\client.txt exactly that way.
+// It fails CLOSED -- a test that forgets to set this ends instead of reaching the real file.
+std::wstring gShellTestDataDir;
+#endif
+
 std::wstring settings_path() {
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (gShellTestDataDir.empty()) {
+    std::fputs("[shell-test-seam] settings_path() with no test data dir; refusing to fall back to "
+               "the user's real settings\n", stderr);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  CreateDirectoryW(gShellTestDataDir.c_str(), nullptr);
+  return gShellTestDataDir + L"\\client.txt";
+#else
   wchar_t* roaming = nullptr;
   std::wstring dir;
   if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &roaming)) && roaming) {
@@ -175,6 +214,7 @@ std::wstring settings_path() {
   }
   CreateDirectoryW(dir.c_str(), nullptr);
   return dir + L"\\client.txt";
+#endif
 }
 
 void save_settings(const std::string& server, const std::string& accountId,
@@ -917,7 +957,7 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
     const auto it = gViewerByHost.find(request.hostId);
     if (it != gViewerByHost.end() && it->second.pid == exitedPid) {
       if (it->second.cancelEvent) CloseHandle(it->second.cancelEvent);
-      if (it->second.process) CloseHandle(it->second.process);
+      close_slot_handles(it->second);
       gViewerByHost.erase(it);
     }
   }
@@ -1002,7 +1042,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
       }
 
       if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
-      if (previous->second.process) CloseHandle(previous->second.process);
+      close_slot_handles(previous->second);
       gViewerByHost.erase(previous);
     }
   }
@@ -1228,6 +1268,15 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
              "running cannot be asked, so replacing it will be refused until it ends");
   }
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  {
+    HANDLE terminate = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &terminate,
+                        PROCESS_TERMINATE | SYNCHRONIZE, FALSE, 0)) {
+      gViewerByHost[request.hostId].testTerminate = terminate;
+    }
+  }
+#endif
   cancelEvent = nullptr;  // the map owns it now
 
   // Watched rather than forgotten: when the session window closes the list has to become usable

@@ -28,6 +28,7 @@
 #include <thread>
 #include <vector>
 
+#include "e2e_isolation.hpp"
 #include "directory_fake_server.hpp"
 #include "directory_rendezvous.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -101,6 +102,7 @@ struct SpawnedHost {
   std::mutex mu;
   std::string output;
   std::wstring dir;
+  std::wstring cachePath;  // where this host was told to keep its directory cache
 
   std::string log() {
     std::lock_guard<std::mutex> lock(mu);
@@ -168,12 +170,27 @@ struct SpawnedHost {
     if (!dir.empty()) {
       DeleteFileW((dir + L"GNLinkStream.exe").c_str());
       DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
+      // What the isolation arguments caught: the token cache and the diagnostic mirror.
+      // Removed only from inside this staging directory.
+      DeleteFileW((dir + L"host_cache.json").c_str());
+      remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
       RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str());
       dir.clear();
     }
   }
   ~SpawnedHost() { Stop(); }
 };
+
+/**
+ * The arguments that keep a test host off the user's files. (RV-00)
+ *
+ * One function so the mutation test has exactly one thing to take away -- and taking it away
+ * makes the pre-launch check refuse, so the host that would have written the real cache is
+ * never started.
+ */
+std::wstring isolation_args(const std::wstring& stagingDir) {
+  return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
+}
 
 bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t mediaPort,
                uint16_t controlPort, const char* tag) {
@@ -214,7 +231,25 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --control-port " + std::to_wstring(controlPort) +
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
-                     L" --seconds 90";
+                     L" --seconds 90" + isolation_args(host->dir);
+
+  // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
+  // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
+  // which this test overwrote on 2026-09-23. It refuses rather than launches.
+  std::string why;
+  const bool cmdIsolated = remote60::native_poc::e2e::e2e_command_is_isolated(cmd, host->dir, &why);
+  check("the host command line keeps the directory cache inside the staging directory",
+        cmdIsolated, why);
+  const std::wstring appData = host->dir + L"localappdata";
+  CreateDirectoryW(appData.c_str(), nullptr);
+  std::vector<wchar_t> env = remote60::native_poc::e2e::e2e_isolated_environment(appData);
+  const bool envIsolated = remote60::native_poc::e2e::e2e_path_is_under(
+      remote60::native_poc::e2e::e2e_block_localappdata(env), host->dir);
+  check("the host gets a LOCALAPPDATA inside the staging directory", envIsolated,
+        "the diagnostic mirror writes under whatever LOCALAPPDATA it is handed");
+  if (!cmdIsolated || !envIsolated) return false;  // never start a host that could reach the user's files
+  host->cachePath = host->dir + L"host_cache.json";
+
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
 
@@ -227,8 +262,8 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
 
   const bool launched =
       CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
-                     CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, host->dir.c_str(), &si,
-                     &host->pi) != FALSE;
+                     CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, env.data(),
+                     host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
   AssignProcessToJobObject(host->job, host->pi.hProcess);
@@ -244,7 +279,16 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
       host->output.append(buf, got);
     }
   });
-  return true;
+  // The host says which cache it will write, before it registers. Confirmed from its own words
+  // rather than from the argument this test passed: the question is what the process DID.
+  const std::string wantPath(host->cachePath.begin(), host->cachePath.end());
+  const bool said = host->WaitFor("directory cache path=", 20000);
+  const std::string out = host->log();
+  const bool usedIt = said && out.find("directory cache path=" + wantPath + " (--directory-cache)") !=
+                                  std::string::npos;
+  check("the host reports using the staging cache, not the user's", usedIt,
+        said ? "" : "the host never said which cache it used");
+  return usedIt;
 }
 
 /** A relay that answers late, and -- when asked to -- forwards for the session that follows. */

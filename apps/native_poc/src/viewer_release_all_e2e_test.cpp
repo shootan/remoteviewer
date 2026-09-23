@@ -33,6 +33,7 @@
 // monitor, so the gate is shut and no physical key is injected -- which is also why driving it
 // would be unsafe here, since SendInput types wherever focus happens to be.
 
+#include "e2e_isolation.hpp"
 #include "control_resume_e2e_support.hpp"
 
 #include <memory>
@@ -150,9 +151,23 @@ int wmain(int argc, wchar_t** argv) {
       si.hStdOutput = hostLog;
       si.hStdError = hostLog;
     }
-    launched = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr,
-                              hostLog != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
-                              nullptr, dir.c_str(), &si, &hostPi) != 0;
+    // Isolated from the user's machine (RV-00): the child gets a LOCALAPPDATA inside this
+    // test's staging directory, so the diagnostic mirror and anything else that follows the
+    // variable writes there. Refused outright if the command line could reach the real files.
+    const std::wstring isoAppData = dir + L"localappdata";
+    CreateDirectoryW(isoAppData.c_str(), nullptr);
+    std::vector<wchar_t> isoEnv = remote60::native_poc::e2e::e2e_isolated_environment(isoAppData);
+    std::string isoWhy;
+    const bool isoOk =
+        remote60::native_poc::e2e::e2e_command_is_isolated(cmd, dir, &isoWhy) &&
+        remote60::native_poc::e2e::e2e_path_is_under(
+            remote60::native_poc::e2e::e2e_block_localappdata(isoEnv), dir);
+    check("the launched process is isolated from the user's files", isoOk, isoWhy);
+    launched = isoOk &&
+               CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr,
+                              hostLog != INVALID_HANDLE_VALUE,
+                              CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                              isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
       AssignProcessToJobObject(job, hostPi.hProcess);
       ResumeThread(hostPi.hThread);
@@ -360,6 +375,7 @@ int wmain(int argc, wchar_t** argv) {
     DeleteFileW((dir + L"host.log").c_str());
     DeleteFileW((dir + L"GNLinkStream.exe").c_str());
     DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
+    remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
     if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) break;
     Sleep(100);
   }

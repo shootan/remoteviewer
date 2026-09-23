@@ -314,8 +314,18 @@ void stop_everything_under(const std::wstring& dir) {
     }
     emptyPasses = 0;
     for (const auto& pair : found) {
-      HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pair.second);
+      // Identified through the same handle that ends it -- no gap between the path check and
+      // the terminate in which the pid could be reused. (RV-17)
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                             FALSE, pair.second);
       if (!h) continue;
+      wchar_t image[MAX_PATH]{};
+      DWORD imageLen = MAX_PATH;
+      if (!QueryFullProcessImageNameW(h, 0, image, &imageLen) ||
+          _wcsnicmp(image, dir.c_str(), dir.size()) != 0) {
+        CloseHandle(h);
+        continue;
+      }
       TerminateProcess(h, 0);
       WaitForSingleObject(h, 3000);
       CloseHandle(h);

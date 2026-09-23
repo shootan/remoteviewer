@@ -67,6 +67,12 @@ struct Args {
   // Directory service. Empty url keeps the host on the current LAN-only behaviour: it simply
   // waits for a client that already knows its address.
   std::string directoryUrl;
+  // Where the directory token cache is read and written. Empty = the per-user default
+  // (default_host_cache_path(), under %LOCALAPPDATA%\remote60). Exists so a test host can be
+  // pointed somewhere that is not the user's real file: an e2e that registered with a fake
+  // directory overwrote the real host.json on 2026-09-23 (RV-00). Location only -- it changes no
+  // permission and nothing on the wire.
+  std::string directoryCachePath;
   std::string directoryId;
   std::string directoryPw;
   std::string directoryHostName;

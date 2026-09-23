@@ -43,6 +43,7 @@
 #include <thread>
 #include <vector>
 
+#include "e2e_isolation.hpp"
 #include "control_resume.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -156,6 +157,7 @@ struct RecoveryResult {
   // so "did video keep arriving" is not a nicety here, it is the condition the viewer uses to
   // decide the session is worth repairing at all.
   uint64_t mediaDuring = 0;
+  uint64_t proxyMediaDuring = 0;  // what the seam forwarded over the same stretch
   bool videoWentQuiet = false;
   uint64_t longestVideoGapUs = 0;
 };
@@ -178,6 +180,7 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
   hooks.idle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(50)); };
 
   const uint64_t mediaAtStart = v.videoDatagrams.load();
+  const uint64_t proxyAtStart = gProxy ? gProxy->mediaPassed.load() : 0;
   const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
   DWORD nextReport = GetTickCount();
   while (GetTickCount() < deadline) {
@@ -219,6 +222,7 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
   }
   out.attempts = v.resume.attempts();
   out.mediaDuring = v.videoDatagrams.load() - mediaAtStart;
+  out.proxyMediaDuring = gProxy ? gProxy->mediaPassed.load() - proxyAtStart : 0;
   return out;
 }
 
@@ -300,7 +304,14 @@ int wmain(int argc, wchar_t** argv) {
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --seconds 300 --enable-input-injection" +
                        L" --input-injection-mode background_message" + L" --input-target-pid " +
-                       std::to_wstring(GetCurrentProcessId());
+                       std::to_wstring(GetCurrentProcessId()) +
+                       // Capture the window this process owns and keeps repainting, rather
+                       // than a monitor nobody is touching. A still monitor produces roughly
+                       // one frame every two seconds, and such a gap can span an entire
+                       // repair -- which is what made the continuity assertion fail once in
+                       // nine runs, for a reason that was never about the product. Nothing is
+                       // drawn on the user's screen to achieve this. (C3 r5)
+                       L" --capture-window-title \"c3 inject target\"";
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     // The host's own account of what it did, kept so the timeline can be read rather than
@@ -319,10 +330,23 @@ int wmain(int argc, wchar_t** argv) {
       si.hStdError = hostLog;
       si.hStdInput = nullptr;
     }
-    launched = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr,
-                              hostLog != INVALID_HANDLE_VALUE, 
-                              CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, dir.c_str(), &si,
-                              &hostPi) != 0;
+    // Isolated from the user's machine (RV-00): the child gets a LOCALAPPDATA inside this
+    // test's staging directory, so the diagnostic mirror and anything else that follows the
+    // variable writes there. Refused outright if the command line could reach the real files.
+    const std::wstring isoAppData = dir + L"localappdata";
+    CreateDirectoryW(isoAppData.c_str(), nullptr);
+    std::vector<wchar_t> isoEnv = remote60::native_poc::e2e::e2e_isolated_environment(isoAppData);
+    std::string isoWhy;
+    const bool isoOk =
+        remote60::native_poc::e2e::e2e_command_is_isolated(cmd, dir, &isoWhy) &&
+        remote60::native_poc::e2e::e2e_path_is_under(
+            remote60::native_poc::e2e::e2e_block_localappdata(isoEnv), dir);
+    check("the launched process is isolated from the user's files", isoOk, isoWhy);
+    launched = isoOk &&
+               CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr,
+                              hostLog != INVALID_HANDLE_VALUE,
+                              CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                              isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
       AssignProcessToJobObject(job, hostPi.hProcess);
       ResumeThread(hostPi.hThread);
@@ -470,8 +494,20 @@ int wmain(int argc, wchar_t** argv) {
     check("THE PICTURE KEPT ARRIVING THROUGHOUT THE REPAIR", r.resumed && !r.videoWentQuiet,
           std::to_string(r.mediaDuring) + " media datagrams during it, longest gap " +
               std::to_string(r.longestVideoGapUs / 1000) + "ms");
-    check("...and there were frames, not merely no complaint", r.mediaDuring > 0,
-          std::to_string(r.mediaDuring) + " media datagrams");
+    // The question C3 can actually answer is not "did the host send video" -- that depends on
+    // whether anything on the captured screen changed -- but "did the repair swallow any of
+    // what it did send". Asked as a comparison across the seam, which is the only place both
+    // numbers exist. When the host sent nothing at all there is nothing to judge, and this
+    // says so instead of passing or failing on an accident of screen activity.
+    if (r.proxyMediaDuring == 0) {
+      std::cout << "    NOT JUDGED  video continuity: the host sent nothing during the repair "
+                   "(a still capture source). Not a pass and not a failure.\n";
+    } else {
+      check("NOTHING THE HOST SENT DURING THE REPAIR WAS SWALLOWED",
+            r.mediaDuring == r.proxyMediaDuring,
+            std::to_string(r.mediaDuring) + " received of " +
+                std::to_string(r.proxyMediaDuring) + " forwarded");
+    }
 
     if (r.resumed) {
       // Three real round trips, on the channel that was just re-keyed.
@@ -813,6 +849,7 @@ int wmain(int argc, wchar_t** argv) {
     DeleteFileW((dir + L"host.log").c_str());
     DeleteFileW((dir + L"GNLinkStream.exe").c_str());
     DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
+    remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
     if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) break;
     Sleep(100);
   }

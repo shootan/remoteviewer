@@ -50,6 +50,12 @@ bool recovery_dom(const std::wstring& script, unsigned timeout = 10000) {
 }
 }
 
+/** The one place this test points the shell at its own directory -- and the mutation target. */
+void set_shell_test_data_dir(const std::filesystem::path& dir) {
+  std::filesystem::create_directories(dir);
+  gShellTestDataDir = dir.wstring();
+}
+
 int main(int argc, char** argv) {
   if (argc != 4) { std::puts("usage: client_recovery_ui_test <fixture-url> <delay-flag> <screenshot>"); return 2; }
   // Refuse the test before opening a WebView unless its profile is a private runner fixture.
@@ -61,6 +67,30 @@ int main(int argc, char** argv) {
           std::filesystem::weakly_canonical(std::filesystem::path(fixture) / "profile") ||
       std::string(argv[1]).rfind("http://127.0.0.1:", 0) != 0) {
     std::puts("FAIL isolated fixture/profile required; no browser process was opened or terminated"); return 2;
+  }
+  // Where the shell keeps its settings and logs, inside the fixture -- set before anything in the
+  // shell runs, and checked. This test wrote the user's real %LOCALAPPDATA%\GNLink\client.txt on
+  // 2026-09-23 because the path comes from SHGetKnownFolderPath, which the runner's LOCALAPPDATA
+  // does not reach. (RV-00)
+  set_shell_test_data_dir(std::filesystem::path(fixture) / "shelldata");
+  {
+    const std::filesystem::path root = std::filesystem::weakly_canonical(fixture);
+    const std::filesystem::path settings = std::filesystem::weakly_canonical(settings_path());
+    const std::wstring rel = settings.lexically_relative(root).wstring();
+    const bool inside = !rel.empty() && rel.rfind(L"..", 0) != 0;
+    wchar_t appData[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
+    const std::wstring appRel = (n > 0 && n < MAX_PATH)
+        ? std::filesystem::weakly_canonical(appData).lexically_relative(root).wstring()
+        : std::wstring();
+    const bool appInside = !appRel.empty() && appRel.rfind(L"..", 0) != 0;
+    std::printf("%s the shell's settings and logs live inside the fixture\n", inside ? "PASS" : "FAIL");
+    std::printf("%s LOCALAPPDATA (viewers, host health log) is inside the fixture\n",
+                appInside ? "PASS" : "FAIL");
+    if (!inside || !appInside) {
+      std::puts("FAIL refusing to start: the shell could reach the user's real files");
+      return 2;
+    }
   }
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -102,8 +132,30 @@ int main(int argc, char** argv) {
     UINT oldBrowser = 0;
     recovery_check(gWebView && SUCCEEDED(gWebView->get_BrowserProcessId(&oldBrowser)) && oldBrowser,
                    "identify browser belonging to isolated WebView environment");
-    HANDLE browser = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, oldBrowser);
+    // The one pid-based open left in this test, and why it is still here: WebView2 starts its
+    // browser process itself, so there is no launch handle to use. It is therefore VERIFIED
+    // before anything is terminated, while the handle is held (so the pid cannot be reused
+    // underneath us): the image must be msedgewebview2.exe, it must have been created after
+    // this test started, and WebView must still report this same pid. Any mismatch is a
+    // failure and nothing is killed. (RV-17)
+    HANDLE browser = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                 FALSE, oldBrowser);
     recovery_check(browser != nullptr, "pin isolated browser process handle");
+    {
+      wchar_t image[MAX_PATH]{};
+      DWORD imageLen = MAX_PATH;
+      const bool named = QueryFullProcessImageNameW(browser, 0, image, &imageLen) &&
+                         std::wstring(image).find(L"msedgewebview2.exe") != std::wstring::npos;
+      FILETIME createdThem{}, createdUs{}, x1{}, x2{}, x3{}, x4{};
+      const bool times = GetProcessTimes(browser, &createdThem, &x1, &x2, &x3) &&
+                         GetProcessTimes(GetCurrentProcess(), &createdUs, &x1, &x2, &x4);
+      const bool newer = times && CompareFileTime(&createdThem, &createdUs) >= 0;
+      UINT stillReported = 0;
+      const bool same = gWebView && SUCCEEDED(gWebView->get_BrowserProcessId(&stillReported)) &&
+                        stillReported == oldBrowser;
+      recovery_check(named && newer && same,
+                     "the process about to be terminated is this test's own WebView browser");
+    }
     const BOOL terminated = TerminateProcess(browser, 99);
     WaitForSingleObject(browser, 3000); CloseHandle(browser);
     recovery_check(terminated != FALSE, "inject failure only into this test browser");
@@ -309,11 +361,10 @@ int main(int argc, char** argv) {
         remote60::native_poc::viewer::viewer_request_cancel(after->second.cancelEvent);
         if (after->second.process &&
             WaitForSingleObject(after->second.process, 5000) != WAIT_OBJECT_0) {
-          HANDLE killable = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, after->second.pid);
-          if (killable) {
-            TerminateProcess(killable, 0);
-            WaitForSingleObject(killable, 5000);
-            CloseHandle(killable);
+          // Through the handle taken at launch, never by pid. (RV-17)
+          if (after->second.testTerminate) {
+            TerminateProcess(after->second.testTerminate, 0);
+            WaitForSingleObject(after->second.testTerminate, 5000);
           }
         }
       }
@@ -380,13 +431,16 @@ int main(int argc, char** argv) {
       CloseHandle(entry.second.cancelEvent);
       entry.second.cancelEvent = nullptr;
     }
-    HANDLE killable = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.second.pid);
-    if (killable) {
-      if (WaitForSingleObject(killable, 2000) != WAIT_OBJECT_0) TerminateProcess(killable, 0);
-      WaitForSingleObject(killable, 3000);
-      CloseHandle(killable);
+    // Only a slot whose viewer was LAUNCHED here has a terminate handle. The made-up pids some
+    // cases put in the map (1000+i, 4242) have none and are left alone: OpenProcess ignores a
+    // pid's low two bits, so reopening one of those would have reached a real process. (RV-17)
+    if (entry.second.testTerminate) {
+      if (WaitForSingleObject(entry.second.testTerminate, 2000) != WAIT_OBJECT_0) {
+        TerminateProcess(entry.second.testTerminate, 0);
+      }
+      WaitForSingleObject(entry.second.testTerminate, 3000);
     }
-    if (entry.second.process) { CloseHandle(entry.second.process); entry.second.process = nullptr; }
+    close_slot_handles(entry.second);
   }
   gViewerByHost.clear();
 

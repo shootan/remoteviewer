@@ -285,12 +285,20 @@ class ControlProxy {
 // ------------------------------------------------------------------------ the injection observer
 
 /**
- * A window this process owns, for the host to inject into.
+ * A window this process owns, for the host to inject into -- and, when asked, to capture.
  *
  * Off screen and never activated, so nothing appears and nothing takes focus -- but a real
  * top-level window, because that is what the host's target resolver looks for. Every input the
  * host injects lands here as an ordinary message, which is the only evidence in this test that an
  * input actually reached the remote side.
+ *
+ * It also PAINTS, about twenty times a second, and that is not decoration. (C3 r5) A host
+ * capturing a monitor that nobody is touching sends almost nothing -- roughly one frame every
+ * two seconds -- and a gap like that can cover a whole repair, which made "video kept arriving"
+ * fail about one run in nine for a reason that had nothing to do with the product. Pointing the
+ * host at THIS window instead (--capture-window-title) and keeping it changing gives a real
+ * frame cadence without drawing anything on the user's screen, which is what putting a moving
+ * pattern on the desktop would have done.
  */
 class InjectTarget {
  public:
@@ -314,6 +322,29 @@ class InjectTarget {
       if (msg == WM_MOUSEMOVE) self->mouseMoves.fetch_add(1);
       if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) self->keyDowns.fetch_add(1);
       if (msg == WM_KEYUP || msg == WM_SYSKEYUP) self->keyUps.fetch_add(1);
+    }
+    if (msg == WM_TIMER && self) {
+      ++self->frame_;
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    }
+    if (msg == WM_PAINT && self) {
+      PAINTSTRUCT ps{};
+      HDC dc = BeginPaint(hwnd, &ps);
+      RECT client{};
+      GetClientRect(hwnd, &client);
+      // A block that moves every frame, over a background that alternates. Enough changed
+      // pixels that no static-scene heuristic can mistake it for a still screen.
+      const int phase = static_cast<int>(self->frame_ % 16);
+      HBRUSH back = CreateSolidBrush((self->frame_ & 1) ? RGB(20, 20, 30) : RGB(30, 20, 20));
+      FillRect(dc, &client, back);
+      DeleteObject(back);
+      RECT block{phase * 18, 20, phase * 18 + 120, 160};
+      HBRUSH fore = CreateSolidBrush(RGB(200, 90 + phase * 8, 40));
+      FillRect(dc, &block, fore);
+      DeleteObject(fore);
+      EndPaint(hwnd, &ps);
+      return 0;
     }
     if (msg == WM_CLOSE) {
       DestroyWindow(hwnd);
@@ -339,6 +370,11 @@ class InjectTarget {
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
       ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+      // 20 Hz. Measured: raising this to 40 Hz and the window to 960x540 changed the
+      // frames the host actually sent by nothing at all -- about two a second either
+      // way -- so the cadence is the host's, not this timer's. Kept at the rate that
+      // is enough rather than the one that looks busier.
+      SetTimer(hwnd_, 1, 50, nullptr);
     }
     ready_.store(true);
     MSG msg;
@@ -349,6 +385,7 @@ class InjectTarget {
     hwnd_ = nullptr;
   }
 
+  uint64_t frame_ = 0;
   HWND hwnd_ = nullptr;
   std::atomic<bool> ready_{false};
   std::thread thread_;

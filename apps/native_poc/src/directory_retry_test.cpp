@@ -85,7 +85,9 @@ std::string exe_directory() {
   char path[MAX_PATH] = {};
   GetModuleFileNameA(nullptr, path, MAX_PATH);
   std::string text(path);
-  const size_t slash = text.find_last_of("\/");
+  // Both separators. This was "\/" -- an unknown escape that is just "/", so on a Windows path
+  // nothing was found and the fixture cache landed in the working directory instead. (RV-17)
+  const size_t slash = text.find_last_of("\\/");
   return slash == std::string::npos ? std::string(".") : text.substr(0, slash);
 }
 
@@ -204,6 +206,8 @@ struct PunchHarness {
   uint16_t mediaPort = 0;  // what the client will use as the "private" candidate
   std::thread pump;
   std::atomic<bool> pumping{false};
+  // Datagrams the agent addressed off this machine: recorded above, never put on the wire. (RV-17)
+  std::atomic<uint64_t> offMachineSuppressed{0};
 
   std::vector<RecordedSend> take() {
     std::lock_guard<std::mutex> lock(mu);
@@ -226,6 +230,8 @@ struct PunchHarness {
   }
   ~PunchHarness() {
     Stop();
+    std::printf("  (harness: %llu datagram(s) addressed off this machine, recorded but not sent)\n",
+                static_cast<unsigned long long>(offMachineSuppressed.load()));
     if (!cachePath.empty()) DeleteFileA(cachePath.c_str());
   }
 };
@@ -391,8 +397,15 @@ bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* la
         // Recorded AND sent: the directory has to see the observe probe for the cycle to get as
         // far as a heartbeat, and the reply has to leave from this socket for the same reason the
         // product needs it to -- the candidate tuple is this socket's address.
-        sendto(harness->media, static_cast<const char*>(data), static_cast<int>(len), 0,
-               reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+        // ...but only to loopback. Punch candidates the fixture hands out can be real-looking
+        // outside addresses, and a test has no business sending anything off this machine;
+        // those are recorded and asserted on, never transmitted. (RV-17)
+        if ((ntohl(to.sin_addr.s_addr) >> 24) == 127) {
+          sendto(harness->media, static_cast<const char*>(data), static_cast<int>(len), 0,
+                 reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+        } else {
+          harness->offMachineSuppressed.fetch_add(1);
+        }
       }, &error)) {
     return false;
   }

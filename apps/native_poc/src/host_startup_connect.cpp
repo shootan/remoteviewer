@@ -250,6 +250,15 @@ int startup_connect_client(HostContext& hx) {
       // filters the primary port have something else to dial.
       dirCfg.alternateUdpPort = lanPort;
       dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
+      // Resolved here rather than left for the agent, so the path it will actually write can be
+      // said out loud BEFORE registration -- which is what lets a test confirm it is not the
+      // user's real file. (RV-00)
+      dirCfg.cachePath = args.directoryCachePath.empty()
+                             ? remote60::native_poc::directory::default_host_cache_path()
+                             : args.directoryCachePath;
+      std::cout << "[native-video-host] directory cache path=" << dirCfg.cachePath
+                << (args.directoryCachePath.empty() ? " (default)" : " (--directory-cache)")
+                << "\n" << std::flush;
       std::string dirError;
       const bool started = clientSession.directoryAgent.Start(
           dirCfg,
