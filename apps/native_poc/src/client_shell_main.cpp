@@ -194,6 +194,8 @@ std::wstring executable_dir() {
 // client_recovery_ui_test overwrote the user's %LOCALAPPDATA%\GNLink\client.txt exactly that way.
 // It fails CLOSED -- a test that forgets to set this ends instead of reaching the real file.
 std::wstring gShellTestDataDir;
+// TEST BUILDS ONLY: the viewer begin_session starts instead of GNLinkViewer.exe. Empty = the real one.
+std::wstring gShellTestViewerExe;
 #endif
 
 std::wstring settings_path() {
@@ -1032,7 +1034,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     return;
   }
 
-  const std::wstring exe = executable_dir() + L"\\GNLinkViewer.exe";
+  std::wstring exe = executable_dir() + L"\\GNLinkViewer.exe";
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  // TEST BUILDS ONLY: a stand-in for the viewer, so a test can run begin_session itself fifty
+  // times -- replacement and failed launch alike -- without fifty real viewers. (RV-16)
+  if (!gShellTestViewerExe.empty()) exe = gShellTestViewerExe;
+#endif
   if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
     post_status("error", "GNLinkViewer.exe 를 찾을 수 없습니다");
     return;

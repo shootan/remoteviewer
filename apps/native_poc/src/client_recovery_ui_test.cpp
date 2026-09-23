@@ -57,6 +57,16 @@ void set_shell_test_data_dir(const std::filesystem::path& dir) {
 }
 
 int main(int argc, char** argv) {
+  // Stand-in viewer mode. begin_session starts THIS executable in place of GNLinkViewer.exe when
+  // the handle-leak case points the test seam at it: it waits on the cancel event it was handed,
+  // exactly as a connecting viewer would be told to stop, and exits 0. Nothing else runs. (RV-16)
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--cancel-event") {
+      HANDLE cancel = remote60::native_poc::viewer::viewer_cancel_handle_from_arg(widen(argv[i + 1]));
+      if (cancel) WaitForSingleObject(cancel, 60000);
+      return 0;
+    }
+  }
   if (argc != 4) { std::puts("usage: client_recovery_ui_test <fixture-url> <delay-flag> <screenshot>"); return 2; }
   // Refuse the test before opening a WebView unless its profile is a private runner fixture.
   // In particular, never share the installed client's normal TEMP/GNLinkClient environment.
@@ -183,32 +193,46 @@ int main(int argc, char** argv) {
       DWORD before = 0;
       GetProcessHandleCount(GetCurrentProcess(), &before);
 
+      // Through begin_session itself, fifty times. (RV-16) This used to be a hand-written copy of
+      // what begin_session does, so deleting the product's CloseHandle left it passing. The
+      // viewer is a stand-in -- this executable, waiting on the cancel event it is handed (see
+      // the top of main) -- because the thing counted is the shell's handles, and fifty real
+      // viewers would each open a window and a connection for nothing.
+      wchar_t selfPath[MAX_PATH]{};
+      GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+      gShellTestViewerExe = selfPath;
       ShellConnectRequest host{};
       host.hostId = "leak-host";
-      for (int i = 0; i < 50; ++i) {
-        // What begin_session does: create the event, record it, and on the next round replace
-        // the record -- which has to close the one it displaces.
-        HANDLE event = remote60::native_poc::viewer::viewer_create_cancel_event();
-        const auto previous = gViewerByHost.find(host.hostId);
-        if (previous != gViewerByHost.end()) {
-          if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
-          gViewerByHost.erase(previous);
+      host.hostName = "leak-pc";
+      const uint32_t viewersAtStart = gActiveViewers.load();
+      for (int i = 0; i < 50; ++i) begin_session(host);  // each replaces the one before
+      // The last one is called off here; every one of the fifty exits is then adopted.
+      {
+        const auto last = gViewerByHost.find(host.hostId);
+        if (last != gViewerByHost.end()) {
+          remote60::native_poc::viewer::viewer_request_cancel(last->second.cancelEvent);
         }
-        gViewerByHost[host.hostId] = ViewerCancelSlot{static_cast<DWORD>(1000 + i), event};
-        // An exit is matched to its slot by operation now, not by pid (RV-06).
-        gViewerByHost[host.hostId].operation = gViewerOperation;
       }
-      // And the last one leaves by the exit path instead.
-      handle_viewer_exit(host, gViewerOperation, gOwnerEpoch.load(), WAIT_OBJECT_0, 0, 1000,
-                         static_cast<DWORD>(1000 + 49));
+      recovery_check(recovery_wait([&] {
+        return gActiveViewers.load() == viewersAtStart &&
+               gViewerByHost.find(host.hostId) == gViewerByHost.end();
+      }, 30000), "fifty replacements through the real begin_session all end and are adopted");
 
-      // Launches that never happened. begin_session creates the event BEFORE CreateProcess,
-      // so a failed launch has one to dispose of -- and the failure path returned without
-      // doing so, one handle at a time, for as long as the shell stayed open.
-      for (int i = 0; i < 50; ++i) {
-        HANDLE orphan = remote60::native_poc::viewer::viewer_create_cancel_event();
-        if (orphan) CloseHandle(orphan);   // what the failure path has to do
-      }
+      // Launches that fail, through the product's own failure path: a file that exists (so the
+      // existence check passes) but is not a program (so CreateProcessW refuses it). begin_session
+      // creates the event before the launch, and the failure path has to dispose of it.
+      const std::filesystem::path notAProgram = std::filesystem::path(fixture) / "not-a-program.exe";
+      { std::ofstream stub(notAProgram); stub << "not a program\n"; }
+      gShellTestViewerExe = notAProgram.wstring();
+      ShellConnectRequest failing{};
+      failing.hostId = "fail-host";
+      failing.hostName = "fail-pc";
+      for (int i = 0; i < 50; ++i) begin_session(failing);
+      recovery_check(gActiveViewers.load() == viewersAtStart &&
+                         gViewerByHost.find(failing.hostId) == gViewerByHost.end(),
+                     "fifty launches that fail start nothing and record nothing");
+      gShellTestViewerExe.clear();
+      recovery_pump(300);
 
       // The pipe-less fallback. Without the pipe the child inherits nothing and is passed no
       // --cancel-event, so keeping the event would mean signalling something nobody waits on
@@ -238,6 +262,14 @@ int main(int argc, char** argv) {
         if (keptHandle) CloseHandle(keptHandle);
       }
 
+      // The shell's worker group joins a finished worker only when the next one is launched, so
+      // the watcher and pipe-reader threads of viewers that ended after the loop are still held.
+      // That is the product's reaping, not a leak, and it is triggered here the product's way --
+      // by launching (twice: the first reaps, and its own thread is reaped by the second).
+      gWorkers.Launch([] {});
+      recovery_pump(300);
+      gWorkers.Launch([] {});
+      recovery_pump(300);
       DWORD after = 0;
       GetProcessHandleCount(GetCurrentProcess(), &after);
       recovery_check(gViewerByHost.find(host.hostId) == gViewerByHost.end(),
@@ -245,6 +277,7 @@ int main(int argc, char** argv) {
       // Not equality: this process has a WebView2 in it, doing its own work on its own threads,
       // so the count moves for reasons that have nothing to do with this. Fifty replacements
       // leaking would show as fifty; a few either way is the rest of the program breathing.
+      std::printf("      (handles: %lu before, %lu after)\n", before, after);
       recovery_check(after <= before + 8,
                      "fifty replacements and fifty failed launches do not pile up handles");
     }
@@ -277,12 +310,6 @@ int main(int argc, char** argv) {
                         FALSE, 0);
         return dup;
       };
-      const auto liveViewersFor = [](const std::string& hostId) {
-        const auto it = gViewerByHost.find(hostId);
-        if (it == gViewerByHost.end()) return 0;
-        if (!it->second.process) return 1;   // recorded, liveness unknown
-        return WaitForSingleObject(it->second.process, 0) == WAIT_TIMEOUT ? 1 : 0;
-      };
 
       ShellConnectRequest req{};
       req.hostId = "fence-host";
@@ -300,8 +327,9 @@ int main(int argc, char** argv) {
                      "an uncancellable live viewer is not replaced -- nothing was started");
       recovery_check(gViewerByHost.find(req.hostId) != gViewerByHost.end(),
                      "...and its slot is kept, not dropped");
-      recovery_check(liveViewersFor(req.hostId) <= 1,
-                     "...leaving at most one live viewer for that host");
+      // (A "at most one live viewer for that host" check stood here. The map holds one entry per
+      // host, so it could only ever say 0 or 1 and could not fail. The count that can fail is the
+      // gActiveViewers one above: a second viewer started would move it. RV-16)
 
       // (2) An event that cannot be signalled -- closed underneath us, so SetEvent fails. Same
       // rule: alive means refused.

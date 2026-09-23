@@ -178,7 +178,7 @@ int main() {
     std::printf("SKIP  viewer_cancel_e2e_test (starts a viewer that opens sockets)\n");
     std::printf("      Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n");
     std::printf("\nRESULT: SKIPPED\n");
-    return 0;
+    return 77;  // kE2eSkippedExit (e2e_isolation.hpp): a skip is not a pass (RV-18)
   }
 
   WSADATA wsa{};

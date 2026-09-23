@@ -191,7 +191,7 @@ int wmain(int argc, wchar_t** argv) {
 
   if (!host_e2e_allowed()) {
     print_skip("host_two_dispatcher_e2e_test (starts a listening host)");
-    return 0;
+    return remote60::native_poc::e2e::kE2eSkippedExit;
   }
 
   // Helper mode: copied over GNLinkCapture.exe, this answers nothing.

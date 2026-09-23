@@ -40,6 +40,11 @@ void shutdown_viewer(ViewerContext& ctx) {
   ctx.session.running = false;
   ctx.session.inputEnabled = false;
   ctx.session.hostImeSupported.store(false, std::memory_order_relaxed);  // stop host-IME on teardown
+  // Nothing resumes after this. Said to the resume component itself, not only through the
+  // "running" flag its pump reads: an answer from the host that arrives during teardown is then
+  // refused by the session flag rather than applied to a channel being closed. EndSession had no
+  // caller in the product until now -- the flag it clears was only ever cleared by tests. (RV-08)
+  ctx.control.resume.EndSession();
   // Before anything is joined: the control thread can be parked in a blocking receive for the
   // read timeout, and closing the channel is what wakes it. Otherwise shutdown waits it out.
   ctx.control.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);

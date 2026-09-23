@@ -406,7 +406,7 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("SKIP  host_punch_reply_e2e_test (starts a listening host)\n");
     std::printf("      Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n");
     std::printf("\nRESULT: SKIPPED\n");
-    return 0;
+    return remote60::native_poc::e2e::kE2eSkippedExit;
   }
 
   WSADATA wsa{};

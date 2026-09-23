@@ -74,13 +74,16 @@ inline ControlResumeAction control_resume_decide(const ControlResumeConfig& conf
 }
 
 /**
- * Whether the host should honour a resume it has just received.
+ * The FIRST rule this decision had, kept as a pure function for its tests -- NOT the rule the
+ * host follows now. (RV-08)
  *
- * The narrow condition is `servingControl`. While the dispatcher is inside Serve() the channel is
- * in use and resetting it would break a working session; the only time a reset is the right answer
- * is when nobody is serving, which is exactly the state a lost peer leaves behind. That is also
- * what keeps this from being a way to disrupt a healthy session: for a stranger's packet to do
- * anything, control has to be broken already.
+ * It refused whenever the dispatcher was inside Serve(). That turned out to refuse exactly the
+ * case the feature exists for: after the viewer's channel gives up, the host's dispatcher is
+ * still inside Serve() on its own read timeout (10 s), so every ask was refused for as long as
+ * that lasted. The reader now decides with host_resume_verdict() below: nobody serving is still
+ * Serve; while serving, the host serves when its own channel has declared peer-lost or a probe
+ * over it goes unanswered, refuses when the probe is answered, and probes when it has neither.
+ * Nothing in the product calls host_should_accept_resume.
  */
 struct HostResumeInputs {
   bool negotiated = false;      // this client asked for resume in its Hello and the host offered it

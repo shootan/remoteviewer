@@ -2094,6 +2094,12 @@ int main(int argc, char** argv) {
   // visible as short rather than as a smaller number nobody compared.
   std::printf("checks: %d run, %d skipped, %d failed\n", gChecks, gSkipped,
               gFailures);
+  // A run that checked nothing is not a pass. (RV-18) Every guard above failing to fire the way it
+  // was expected to -- or a main() that returned early -- would otherwise print PASS over zero.
+  if (gChecks == 0) {
+    std::printf("update_stop_process_test: INCOMPLETE (no checks ran)\n");
+    return 2;
+  }
   if (gFailures == 0 && gSkipped == 0) {
     std::printf("update_stop_process_test: PASS\n");
     return 0;

@@ -37,6 +37,14 @@
 
 namespace remote60::native_poc::e2e {
 
+/**
+ * The exit code of an e2e test that did not run (RV-18). Not 0: a skipped run and a passing one
+ * used to be indistinguishable to anything that reads exit codes, so "all green" could mean "none
+ * of them ran". 77 is the automake/CTest SKIP convention. Not 1 either -- a skip is not a failure,
+ * and a runner that treats it as one teaches people to ignore red.
+ */
+constexpr int kE2eSkippedExit = 77;
+
 inline std::wstring e2e_lower(std::wstring s) {
   for (auto& c : s) c = static_cast<wchar_t>(towlower(c));
   return s;

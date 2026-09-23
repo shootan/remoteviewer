@@ -19,11 +19,14 @@
 #                  reports BLOCKED and that is tolerated here but never counted as a pass.
 
 param(
-  [string]$BuildDir = "D:\remote\remote-worktrees\host-pc-recovery\build-local\apps\native_poc\Release",
+  # This worktree's build, not another one's. The default used to be a fixed path into a different
+  # worktree, so a run with no argument judged binaries that were not the candidate's. (RV-18)
+  [string]$BuildDir = (Join-Path $PSScriptRoot "..\build-local\apps\native_poc\Release"),
   [switch]$RequireReal
 )
 
 $ErrorActionPreference = "Stop"
+Write-Output ("build dir: " + [System.IO.Path]::GetFullPath($BuildDir))
 
 # name -> minimum checks, whether SKIP lines are legitimate, and the cases that must be present.
 # A required case is matched as a substring of the check name, and must be on a PASS line.
@@ -68,8 +71,15 @@ foreach ($suite in $suites) {
     continue
   }
   $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-  $out = & $exe 2>&1
+  # A suite that writes one line to stderr must not end the whole run. In Windows PowerShell 5.1,
+  # `2>&1` on a native program turns each stderr line into an ErrorRecord, and with
+  # ErrorActionPreference=Stop the first one was a terminating error: every suite after it went
+  # unjudged. Relaxed around this call only, and every line made a plain string. (RV-18)
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $out = @(& $exe 2>&1 | ForEach-Object { "$_" })
   $code = $LASTEXITCODE
+  $ErrorActionPreference = $previousPreference
   $ran++
 
   $pass = @($out | Where-Object { $_ -like 'PASS*' }).Count
@@ -101,6 +111,13 @@ foreach ($suite in $suites) {
   foreach ($v in $verdict) {
     Write-Output ("      " + $v)
     $problems += ("{0}: {1}" -f $suite.Name, $v)
+  }
+  # Which checks failed, not only how many: an intermittent failure seen once and not named cannot
+  # be looked for again. (RV-18)
+  if ($verdict.Count -ne 0) {
+    foreach ($line in @($out | Where-Object { $_ -like 'FAIL*' } | Select-Object -First 10)) {
+      Write-Output ("      > " + $line)
+    }
   }
 }
 

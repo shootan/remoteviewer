@@ -12491,3 +12491,15 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - ⚠️ 관찰: 시계가 뒤로 가면(시험의 +80초 뒤 복귀처럼) 그 호스트의 burst·재전송이 되돌아간 폭만큼 멈춘다(`sinceLastMs` 음수). 고치지 않았다(범위 밖, 보고).
 - `deploy/2026-09-22-wake-resend.patch` 재생성: base 27b730e7…(배포본) → after **9f54e188…**. 배포본 사본에 적용 재현·`node --check` OK·시험한 파일과 바이트 동일. **미적용**(배포는 게시 담당). RV-09 는 하지 않음.
 - 제품/테스트/문서: 제품(`apps/directory/server.js`, 배포 patch) / 테스트(`wake_resend_test.js`, `wake_resend_preload.js`) / 문서(이 항목).
+
+### 2026-09-23 rv-remediation G — 실패할 수 없는 검사를 실패할 수 있게
+
+- **핸들 누수 50회**(`client_recovery_ui_test`): 손으로 쓴 복사본 대신 **실제 `begin_session`** 을 50회(교체) + 50회(실행 실패). 뷰어는 시험 전용 seam(`gShellTestViewerExe`, 출하 exe 에 seam 문자열 0건)으로 이 시험 exe 자신이 대역(받은 취소 이벤트를 기다렸다 종료). 실행 실패는 존재하지만 프로그램이 아닌 파일. 제품의 반환 수거(다음 Launch 에서 join)를 제품 방식으로 일으킨 뒤 계수: 261→265. 변이 — 교체 경로 `CloseHandle` 삭제 +53, 실패 경로 해제 삭제 +54 → 각각 FAIL.
+- **실패할 수 없던 단언**: `liveViewersFor(...) <= 1`(지도는 호스트당 1개라 0/1 만) 삭제 — 실패 가능한 `gActiveViewers` 계수가 대신한다. `control_resume_e2e` 의 "re-keyed nothing"(진행 중 복구가 없어 항상 거짓) → 채널의 실제 stream id 전후 비교.
+- **SKIPPED ≠ PASS**: 호스트를 띄우는 e2e 6종이 건너뛸 때 종료 코드 **77**(automake/CTest SKIP 관례, `e2e_isolation.hpp` `kE2eSkippedExit`). 이전에는 0 이라 "전부 녹색" 이 "아무것도 안 돌았다" 일 수 있었다.
+- `update_stop_process_test`: 0 checks 는 PASS 가 아니라 INCOMPLETE(exit 2). `gnlink_update_suites.ps1`: 기본 `-BuildDir` 를 이 워크트리(`$PSScriptRoot\..\build-local`)로, 네이티브 호출의 stderr 가 전체 실행을 멈추지 않게(PS 5.1 ErrorRecord), BAD 판정 시 FAIL 줄을 출력.
+  - ⚠️ 그 스크립트로 3회 돌리는 중 `remote60_updater_scenarios_test` 가 **1회 FAIL(141/142)** — 단독 7회·스크립트 2회는 142/0. 당시 스크립트가 FAIL 줄을 남기지 않아 **어느 검사인지 모른다**(이제 남긴다). 간헐 결함으로 열어 둔다.
+- **제품 호출자 없던 것**: `ViewerControlResume::EndSession()` 을 뷰어 종료(`shutdown_viewer`)에서 부른다. `host_should_accept_resume` 주석은 "첫 규칙, 제품은 `host_resume_verdict` 를 쓴다" 로.
+- 문서: `구현계획.md` C2 "고유 종료 코드 7" → 내부 반환값 7·프로세스 종료 0, C3 "세대 교체 → 답 무시" → 하네스에서만 도달. `작업목록.md` RV-A~G 에 커밋·검수 대기.
+- RV-03(거부 → Running 복귀)은 설계 변경이라 하지 않았다 — 제안만 `rv_report.md`.
+- 제품/테스트/문서: 제품(뷰어 종료에서 EndSession, 셸 시험 seam) / 테스트(recovery_ui·e2e 6종·stop_process·suites 스크립트) / 문서(구현계획·작업목록·이 항목).

@@ -337,7 +337,7 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("      ask about the firewall -- and an unanswered prompt becomes a Block rule on\n");
     std::printf("      the user's machine. Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n");
     std::printf("\nRESULT: SKIPPED\n");
-    return 0;
+    return remote60::native_poc::e2e::kE2eSkippedExit;
   }
   for (int i = 1; i < argc; ++i) {
     if (std::wstring(argv[i]) == L"--thumbnail") {  // staged as GNLinkCapture.exe; answers nothing
@@ -720,6 +720,8 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t before = 0;
     check("the channel is healthy to begin with", ping(*viewer.link, &before));
     const uint64_t mediaBefore = viewer.videoDatagrams.load();
+    // The stream ids in force, to compare after the asks: a re-key on either side changes them.
+    const UdpControlChannel::StreamPair idsBefore = viewer.control.StreamIds();
 
     // ⑴ An ask with an id nobody has used, from the bound endpoint, while the host serves.
     UdpControlResumePacket forged{};
@@ -736,7 +738,14 @@ int wmain(int argc, wchar_t** argv) {
     }
     check("[counter-example 1] A HEALTHY CHANNEL SURVIVES EIGHT UNINVITED ASKS", ok == 3,
           std::to_string(ok) + "/3 round trips after them");
-    check("...and the viewer re-keyed nothing", !viewer.resume.rekeyed());
+    // Was `!viewer.resume.rekeyed()`, which cannot fail here: with no recovery in progress there
+    // is no episode to be re-keyed, so it read false whatever happened. (RV-16) The ids the channel
+    // is actually using can change, and a re-key is exactly the thing that changes them.
+    const UdpControlChannel::StreamPair idsAfter = viewer.control.StreamIds();
+    check("...and the viewer's channel is on the same stream ids -- nothing re-keyed it",
+          idsAfter.tx == idsBefore.tx && idsAfter.rx == idsBefore.rx,
+          "tx " + std::to_string(idsBefore.tx) + "->" + std::to_string(idsAfter.tx) + " rx " +
+              std::to_string(idsBefore.rx) + "->" + std::to_string(idsAfter.rx));
     check("...and video never stopped", viewer.videoDatagrams.load() > mediaBefore,
           std::to_string(viewer.videoDatagrams.load() - mediaBefore) + " media datagrams");
 

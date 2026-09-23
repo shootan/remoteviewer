@@ -54,8 +54,12 @@
 namespace {
 
 int gFailures = 0;
+// Counted here and printed in the summary: counting "^PASS" lines undercounts when the agent's
+// own log output lands on the same line as a check (seen by the reviewer). (RV-18)
+int gChecks = 0;
 
 void check(const char* name, bool cond, const std::string& detail = {}) {
+  ++gChecks;
   std::printf("%s  %s%s%s\n", cond ? "PASS" : "FAIL", name, detail.empty() ? "" : "  ",
               detail.c_str());
   if (!cond) ++gFailures;
@@ -1287,6 +1291,10 @@ int main() {
   }
 
   WSACleanup();
-  std::printf(gFailures == 0 ? "\nall retry checks passed\n" : "\n%d FAILED\n", gFailures);
+  if (gFailures == 0) {
+    std::printf("\nall retry checks passed  (%d checks, 0 failed)\n", gChecks);
+  } else {
+    std::printf("\n%d FAILED  (%d checks, %d failed)\n", gFailures, gChecks, gFailures);
+  }
   return gFailures == 0 ? 0 : 1;
 }

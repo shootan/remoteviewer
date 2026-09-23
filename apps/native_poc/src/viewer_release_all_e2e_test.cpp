@@ -84,7 +84,7 @@ int wmain(int argc, wchar_t** argv) {
   if (!host_e2e_allowed()) {
     std::printf("SKIP  viewer_release_all_e2e_test (starts a listening host)\n");
     std::printf("      Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n\nRESULT: SKIPPED\n");
-    return 0;
+    return remote60::native_poc::e2e::kE2eSkippedExit;
   }
   for (int i = 1; i < argc; ++i) {
     if (std::wstring(argv[i]) == L"--thumbnail") {  // staged as GNLinkCapture.exe
