@@ -28,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -251,6 +252,33 @@ int run_child(const std::string& mode, const std::string& reportPath) {
     return 0;
   }
 
+  if (mode == "cleared" || mode == "cleared-noguard") {
+    // The ledger's wording: the crash was seen at exit AFTER the credentials were removed. A
+    // sign-out clears the credentials but leaves the worker running (it idles, waiting for the
+    // next sign-in), so the thread is just as joinable at exit as in "normal". The guard must
+    // cover this state too; the -noguard twin is its own negative control, so this case cannot
+    // pass merely because clearing happened to stop the worker.
+    const bool guarded = mode == "cleared";
+    Sink sink;
+    if (!sink.Start(Sink::Mode::Ok)) return 90;
+    {
+      std::optional<LogUploadShutdown> guard;
+      if (guarded) guard.emplace();
+      std::string reason;
+      if (!log_upload_configure(config_for(sink.url()), &reason)) return 91;
+      log_upload_enqueue("host", "a line sent before the sign-out");
+      if (!wait_until([] { return log_upload_status().sentBatches >= 1; }, 8000)) return 92;
+      log_upload_clear_credentials("fixture sign-out");
+      const LogUploadStatus st = log_upload_status();
+      if (st.credentials) return 96;  // the clear did not take
+      if (!st.running) return 97;     // precondition of this case: the worker outlives the clear
+      log_upload_enqueue("host", "a line after the sign-out");
+    }
+    if (guarded && log_upload_running()) return 93;
+    sink.Stop();
+    return 0;
+  }
+
   if (mode == "noguard") {
     // The negative control. Identical to "normal" except that nothing stops the worker, so the
     // static's destructor destroys a joinable std::thread on the way out. This child must NOT
@@ -362,6 +390,7 @@ int main(int argc, char** argv) {
       {"inflight", "a process exits cleanly with a request in flight"},
       {"paused", "a process paused on 401 exits cleanly"},
       {"race", "a configure racing the shutdown cannot restart the worker"},
+      {"cleared", "a process that signed out (credentials cleared) exits cleanly"},
   };
   for (const Case& c : cases) {
     const std::string report = std::string(c.mode) == "inflight" ? temp_report_path() : "";
@@ -387,6 +416,14 @@ int main(int argc, char** argv) {
     DWORD code = 0;
     const bool finished = run_mode("noguard", "", &code);
     check("without the guard the same process does NOT exit cleanly", finished && code != 0,
+          finished ? "exit=" + std::to_string(code) : "timed out (60s)");
+  }
+  {
+    DWORD code = 0;
+    const bool finished = run_mode("cleared-noguard", "", &code);
+    // 96/97 would mean the setup, not the exit, failed -- the control did not run.
+    check("...and a signed-out process without the guard does NOT exit cleanly either",
+          finished && code != 0 && code != 90 && code != 91 && code != 92 && code != 96 && code != 97,
           finished ? "exit=" + std::to_string(code) : "timed out (60s)");
   }
 
