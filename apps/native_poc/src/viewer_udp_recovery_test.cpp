@@ -956,13 +956,20 @@ void scenario_p_chunk_loss_repaired_by_nack() {
   // The liveness heartbeat the UI watchdog reads (history #390 item 5) is wired into this path.
   {
     const auto& live = rig.ctx.recvLive;
+    // The recv stage oscillates -- Recv, Decode, Publish, back to Recv -- so asking what it is
+    // at one instant asks about scheduling, not about the product. What the check means is
+    // that the thread REACHES its idle stage, so that is what is waited for (frames keep
+    // flowing meanwhile, which is what keeps the stamps below fresh).
+    const bool idledInRecv =
+        pump_until(host, rig, 1000, [&]() { return live.current_stage() == RecvStage::Recv; });
     const uint64_t nowUs = qpc_now_us();
     CHECK(live.loopIterations.load() > 100, "recv loop heartbeat counted passes");
     CHECK(liveness_age_us(nowUs, live.lastDatagramUs.load()) < 200000, "recent datagram stamp");
     CHECK(liveness_age_us(nowUs, live.lastAssembledUs.load()) < 200000, "recent assembled stamp");
     CHECK(liveness_age_us(nowUs, live.lastDecodeReturnUs.load()) < 200000, "recent decode-return stamp");
     CHECK(liveness_age_us(nowUs, live.lastPublishUs.load()) < 200000, "recent publish stamp");
-    CHECK(live.current_stage() == RecvStage::Recv, std::string("recv thread idles in recv (stage ") + recv_stage_name(live.current_stage()) + ")");
+    CHECK(idledInRecv, std::string("recv thread idles in recv (last stage ") +
+                           recv_stage_name(live.current_stage()) + ")");
     SessionLivenessSample s;
     s.nowUs = nowUs;
     s.stage = live.current_stage();
@@ -1431,8 +1438,29 @@ void scenario_real_sender_flush_boundary_end_to_end() {
     if (round == 0) {
       // (a) hold the next AU at the permission point, queue two more behind it, flush, release.
       host.HoldRealSenderNext();
-      (void)host.SendFrame(false, false, qpc_now_us(), false);
-      CHECK(host.WaitRealSenderHeld(2000), "the sender reached the permission point and is held");
+      // Fed until an AU actually goes out, rather than assumed to exist.
+      //
+      // The encoder is an asynchronous MFT: a call can accept a picture and emit nothing,
+      // with the output arriving on a later call. SendFrame already says so -- it returns 0 --
+      // and this line used to discard that. When it happened, no AU reached the sender's
+      // permission point, the armed hold never fired, and the wait below timed out.
+      //
+      // My first repair here was to raise that wait from 2 s to 15 s, on the theory that a
+      // busy machine was simply slow. Forty runs under load refuted it: the 15 s budget failed
+      // in exactly the same way, because the thread was never going to arrive. Waiting longer
+      // for something that is not coming is not a fix.
+      //
+      // The scenario is unchanged -- one AU held at the permission point, two queued behind it
+      // -- because only the AU that reaches the sender is held, and the ones below still go
+      // out after it.
+      bool auEmitted = false;
+      for (int attempt = 0; attempt < 40 && !auEmitted; ++attempt) {
+        if (host.SendFrame(false, false, qpc_now_us(), false) != 0) auEmitted = true;
+        else sleep_ms(5);
+      }
+      CHECK(auEmitted, "the encoder produced an AU for the sender to hold");
+      CHECK(host.WaitRealSenderHeld(5000),
+            "the sender reached the permission point and is held");
       (void)host.SendFrame(false, false, qpc_now_us(), false);
       (void)host.SendFrame(false, false, qpc_now_us(), false);
       host.Flush();
@@ -1809,7 +1837,12 @@ void scenario_late_chunks_of_abandoned_au_do_not_reblock() {
   if (t == 0) return;
   CHECK(pump_until_idle(host, rig, 1500, [&]() { return rig.give_ups() > giveUpsBefore; }),
         "S24: the spent head was given up");
-  CHECK(rig.gate.waitForKeyFrame, "S24: waiting for a keyframe after the give-up");
+  // Waited for, not sampled. The give-up above is observed through give_ups(), but the gate
+  // flag is set by the VIEWER'S recv thread a moment later, and reading it in the same
+  // breath is a race this test loses whenever the machine is busy -- six times in forty
+  // runs under load. The wait is bounded, so a flag that never arrives still fails.
+  CHECK(pump_until_idle(host, rig, 1500, [&]() { return rig.gate.waitForKeyFrame; }),
+        "S24: waiting for a keyframe after the give-up");
   // The withheld chunk finally shows up (and the whole AU once more, as a retransmit would).
   const uint16_t lastIdx = static_cast<uint16_t>(host.chunks_for(t) - 1);
   CHECK(host.ResendChunks(t, {lastIdx}), "S24: the host still had the AU cached");
