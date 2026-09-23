@@ -245,8 +245,41 @@ run_deploy "$ROOT10B" "$REL"; rc=$?
 check "a second publish of the same version succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
 kept="$(sha256sum -- "$ROOT10B/manifest-backups/0.2.109/windows.manifest" 2>/dev/null | cut -d' ' -f1)"
 check "...and the ORIGINAL backup is still the original"       "$([ "$kept" = "$original" ] && echo 1 || echo 0)" "${kept:-missing}"
-extra="$(find "$ROOT10B/manifest-backups" -maxdepth 1 -name '0.2.109-*' -type d 2>/dev/null | wc -l | tr -d ' ')"
+extra="$(find "$ROOT10B/manifest-backups" -maxdepth 1 -name '0.2.109[-+]*' -type d 2>/dev/null | wc -l | tr -d ' ')"
 check "...and the second one went somewhere of its own"       "$([ "$extra" -ge 1 ] && echo 1 || echo 0)" "$extra"
+
+# ---------------------------------------------------------------------------- 10c. which document
+
+printf '\n== the backup name says WHICH document of a version it holds\n'
+# Ledger 0.0.7: manifest-backups/0.2.109 held the broken r-0.2.109 (no Setup) and the good
+# r-0.2.109-2 only had a timestamp -- a name that picked by version restored the outage. The
+# releaseId is now part of the name, and BACKUP_INFO says how many artifacts the document lists.
+ROOT10C="$WORK/root10c"; mkdir -p "$ROOT10C/update-manifests"
+printf 'schema=2\nreleaseId=r-0.2.109-2\nversion=0.2.109\nartifact=A|1|x\nartifact=B|1|y\nartifact=C|1|z\n' \
+  > "$ROOT10C/update-manifests/windows.manifest"
+printf 'sig-of-r-0.2.109-2\n' > "$ROOT10C/update-manifests/windows.sig"
+run_deploy "$ROOT10C" "$REL"; rc=$?
+check "publish succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "the backup is named version+releaseId" \
+      "$([ -f "$ROOT10C/manifest-backups/0.2.109+r-0.2.109-2/windows.manifest" ] && echo 1 || echo 0)" \
+      "$(ls "$ROOT10C/manifest-backups" 2>/dev/null | tr '\n' ' ')"
+info="$(cat "$ROOT10C/manifest-backups/0.2.109+r-0.2.109-2/BACKUP_INFO" 2>/dev/null)"
+check "...and BACKUP_INFO records the releaseId" \
+      "$(printf '%s\n' "$info" | grep -qx 'releaseId=r-0.2.109-2' && echo 1 || echo 0)" "$info"
+check "...and the artifact count of the kept document" \
+      "$(printf '%s\n' "$info" | grep -qx 'artifacts=3' && echo 1 || echo 0)" "$info"
+
+printf '\n== a releaseId cannot steer the backup out of its directory\n'
+ROOT10D="$WORK/root10d"; mkdir -p "$ROOT10D/update-manifests"
+printf 'schema=2\nreleaseId=../../escape\nversion=0.2.110\n' > "$ROOT10D/update-manifests/windows.manifest"
+printf 'sig\n' > "$ROOT10D/update-manifests/windows.sig"
+run_deploy "$ROOT10D" "$REL"; rc=$?
+check "publish succeeds" "$([ $rc -eq 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "the unsafe characters are replaced, the backup stays inside" \
+      "$([ -f "$ROOT10D/manifest-backups/0.2.110+.._.._escape/windows.manifest" ] && echo 1 || echo 0)" \
+      "$(ls "$ROOT10D/manifest-backups" 2>/dev/null | tr '\n' ' ')"
+check "...and nothing was written outside it" \
+      "$([ ! -e "$WORK/escape" ] && [ ! -e "$ROOT10D/escape" ] && echo 1 || echo 0)"
 
 # ---------------------------------------------------------------------------- 11. path containment
 

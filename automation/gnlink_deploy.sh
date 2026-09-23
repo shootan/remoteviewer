@@ -409,9 +409,20 @@ backup_current_pair() {
     log "nothing published for $PLATFORM yet: no backup to take"
     return 0
   fi
-  local cur_version
+  local cur_version cur_release cur_artifacts
   cur_version="$(remote_sh "sed -n 's/^version=//p' '$cur_manifest' | head -n 1")"
-  stamp="${cur_version:-unknown}"
+  cur_release="$(remote_sh "sed -n 's/^releaseId=//p' '$cur_manifest' | head -n 1")"
+  cur_artifacts="$(remote_sh "grep -c '^artifact=' '$cur_manifest' || true")"
+  # The releaseId goes into the name (ledger 0.0.7). A version alone did not say WHICH document
+  # of that version was kept: manifest-backups/0.2.109 held the broken r-0.2.109 (9 artifacts, no
+  # Setup) while the good r-0.2.109-2 sat under a timestamp, and whoever picked by name restored
+  # the outage. Both parts become path components, so anything but [A-Za-z0-9._-] is replaced.
+  local safe_version safe_release
+  safe_version="$(printf '%s' "${cur_version:-unknown}" | tr -c 'A-Za-z0-9._-' '_')"
+  safe_release="$(printf '%s' "${cur_release:-none}" | tr -c 'A-Za-z0-9._-' '_')"
+  cur_artifacts="$(printf '%s' "$cur_artifacts" | tr -cd '0-9')"
+  stamp="$safe_version"
+  [ -n "$cur_release" ] && stamp="$stamp+$safe_release"
   local dest="$BACKUP_DIR/$stamp"
   # Naming the backup after the published version alone is right exactly once. Publishing a
   # revision of a version that is ALREADY published -- adding an artifact, re-cutting a manifest --
@@ -433,6 +444,9 @@ backup_current_pair() {
   local recorded
   recorded="$(remote_sh "cd '$dest' && sha256sum -- '$PLATFORM.manifest' '$PLATFORM.sig'")"
   remote_sh "printf '%s\n' '$recorded' > '$dest/SHA256SUMS'"
+  # What was kept, readable without parsing the manifest: an artifact count short of the release's
+  # is the "cannot finish a swap" document the old names hid.
+  remote_sh "printf 'version=%s\nreleaseId=%s\nartifacts=%s\n' '$safe_version' '$safe_release' '${cur_artifacts:-0}' > '$dest/BACKUP_INFO'"
   log "backed up $stamp:"
   printf '%s\n' "$recorded" | sed 's/^/  /'
 }
