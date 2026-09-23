@@ -1166,6 +1166,35 @@ if(MSVC)
   )
 endif()
 
+# The same updater, built asInvoker so a non-elevated runner can start it. Same sources, same
+# compile options; only the manifest differs. Not a payload: the release copies
+# $<TARGET_FILE:remote60_updater>, never this. It cannot show requireAdministrator, UAC, or the
+# admin-only working directory -- remote60_updater_exit_record_test does not rely on any of them.
+get_target_property(_gnlink_updater_sources remote60_updater SOURCES)
+add_executable(remote60_updater_asinvoker_test ${_gnlink_updater_sources})
+target_include_directories(remote60_updater_asinvoker_test PRIVATE src)
+target_link_libraries(remote60_updater_asinvoker_test PRIVATE
+  bcrypt winhttp advapi32 ole32 oleaut32 uuid shell32 user32
+)
+if(MSVC)
+  target_compile_options(remote60_updater_asinvoker_test PRIVATE /utf-8)
+  target_link_options(remote60_updater_asinvoker_test PRIVATE
+    "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+  )
+endif()
+
+# Every updater run ends with a verdict line, and the working copy's start is recorded (0.0.10).
+add_executable(remote60_updater_exit_record_test
+  src/update_credential_channel.cpp
+  src/updater_exit_record_test.cpp
+)
+target_include_directories(remote60_updater_exit_record_test PRIVATE src)
+target_compile_definitions(remote60_updater_exit_record_test PRIVATE
+  GNLINK_UPDATER_ASINVOKER=L"$<TARGET_FILE:remote60_updater_asinvoker_test>"
+)
+target_link_libraries(remote60_updater_exit_record_test PRIVATE advapi32)
+add_dependencies(remote60_updater_exit_record_test remote60_updater_asinvoker_test)
+
 # Two conditions that used to be assumed and are now refused by default: surviving the process
 # that started us, and a working directory only administrators can write.
 add_executable(remote60_update_job_guard_test

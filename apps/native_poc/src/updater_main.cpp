@@ -23,6 +23,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <share.h>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,11 @@ using remote60::native_poc::url_origin_key;
 constexpr uint32_t kCredentialDeadlineMs = 120000;
 
 std::wstring gLogPath;
+/**
+ * Whether this run has written its verdict line. Every run ends with one -- see wmain. A log that
+ * stops without one used to be read as success (ledger 0.0.10, history #512/#516).
+ */
+bool gResultLogged = false;
 
 std::string to_utf8(const std::wstring& text) {
   if (text.empty()) return {};
@@ -67,7 +73,14 @@ void log_line(const std::string& text) {
   std::fprintf(stdout, "%s\n", text.c_str());
   if (gLogPath.empty()) return;
   std::FILE* file = nullptr;
-  if (_wfopen_s(&file, gLogPath.c_str(), L"a") != 0 || !file) return;
+  // Shared, and retried briefly. The bootstrap and the working copy append to the SAME log at the
+  // same moment during the handover; _wfopen_s opens deny-write, so whichever came second lost its
+  // line without a trace -- the regression caught "bootstrap done" missing that way.
+  for (int attempt = 0; attempt < 20 && !file; ++attempt) {
+    file = _wfsopen(gLogPath.c_str(), L"a", _SH_DENYNO);
+    if (!file) Sleep(10);
+  }
+  if (!file) return;
   SYSTEMTIME now{};
   GetLocalTime(&now);
   std::fprintf(file, "%02d-%02d %02d:%02d:%02d.%03d [updater] %s\n", now.wMonth, now.wDay,
@@ -171,6 +184,7 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
     BOOL started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
                                   CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP, nullptr,
                                   options.workDir.c_str(), &si, &pi);
+    const bool brokeAway = started != FALSE;
     if (!started) {
       // Breakaway was refused. Whether that matters depends on the job we are in, and it is asked
       // rather than assumed: refusing on every job would fail on machines where nothing was at
@@ -191,6 +205,11 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
       return false;
     }
     CloseHandle(pi.hThread);
+    // Recorded on success too. The failure branches always said something; the path that worked
+    // said nothing, so a log could not tell "started, broke away" from "never got this far".
+    log_line("started the working copy pid=" + std::to_string(pi.dwProcessId) +
+             (brokeAway ? " (broke away from the job)"
+                        : " (breakaway refused; this job does not take its children down)"));
 
     bool handedOver = true;
     if (!credential.empty()) {
@@ -221,7 +240,7 @@ bool run_from_copy(const UpdaterOptions& options, const std::vector<std::wstring
 
 }  // namespace
 
-int wmain(int argc, wchar_t** argv) {
+int updater_main(int argc, wchar_t** argv) {
   std::vector<std::wstring> arguments;
   for (int i = 1; i < argc; ++i) arguments.push_back(argv[i]);
 
@@ -257,6 +276,11 @@ int wmain(int argc, wchar_t** argv) {
     // Hand over to a copy of ourselves so the installed original can be replaced by this update.
     const bool ok = run_from_copy(options, arguments, credential);
     SecureZeroMemory(credential.data(), credential.size());
+    if (ok) {
+      // Not a "result:" line: the update's verdict is the working copy's, and it follows.
+      log_line("bootstrap done -- the update's result: line comes from the working copy");
+      gResultLogged = true;
+    }
     return ok ? 0 : 3;
   }
 
@@ -320,6 +344,7 @@ int wmain(int argc, wchar_t** argv) {
 
   const UpdateOutcome outcome = effects.run(options.platform);
   log_line(std::string("result: ") + result_name(outcome.result) + " -- " + outcome.detail);
+  gResultLogged = true;
   // Which step failed is in the detail; what it actually hit is here. A log with only the first
   // tells an operator that the swap failed and not which file would not move.
   if (!effects.last_effects_error().empty()) {
@@ -360,4 +385,22 @@ int wmain(int argc, wchar_t** argv) {
       return 13;
   }
   return 1;
+}
+
+/**
+ * Every run ends with a verdict line, including the ones that stop before the update runs.
+ *
+ * Only the path through effects.run() used to write "result:". Every early return -- no
+ * credential, a frame that did not parse, effects that would not assemble, a working copy that
+ * did not start -- left a log whose last line was an explanation and no verdict, and a log
+ * without a verdict was read as success (ledger 0.0.10). A process that dies inside run() still
+ * writes nothing; that absence is now the only way a log can lack this line.
+ */
+int wmain(int argc, wchar_t** argv) {
+  const int code = updater_main(argc, argv);
+  if (!gResultLogged) {
+    log_line("result: NotRun -- exit " + std::to_string(code) +
+             " before the update ran (the line above says why)");
+  }
+  return code;
 }
