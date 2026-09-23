@@ -541,10 +541,18 @@ void ControlClient::Run() {
       continue;
     }
     ControlOutboundAction action{};
+    // C0 stage 1: offered only for a host that acknowledged the feature (session flag).
+    ClientBandwidthSnapshot bandwidthSnapshot{};
+    const bool bandwidthObserve = ctx.session.bandwidthObserveNegotiated;
+    if (bandwidthObserve) {
+      std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
+      bandwidthSnapshot = ctx.control.bandwidth;
+    }
     if (ctx.control.scheduler.NextAction(
             nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
             &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
-            &ctx.control.inputQueue, &action)) {
+            &ctx.control.inputQueue, &action, nullptr,
+            bandwidthObserve ? &bandwidthSnapshot : nullptr)) {
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
       const bool actionOk = execute_control_action(*controlLink, action, &response);

@@ -47,6 +47,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.unlockStatusReq, sizeof(action.unlockStatusReq));
     case ControlOutboundActionKind::ImeStateRequest:
       return link.Write(&action.imeStateReq, sizeof(action.imeStateReq));
+    case ControlOutboundActionKind::ClientBandwidth:
+      return link.Write(&action.clientBandwidth, sizeof(action.clientBandwidth));
     case ControlOutboundActionKind::None:
     default:
       return false;
@@ -207,6 +209,7 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
   UdpHelloPacket hello{};
   if (options.requestNack) hello.features |= kUdpFeatureVideoNack;  // video NACK.
   if (options.requestControlResume) hello.features |= kUdpFeatureControlResume;  // item 8
+  if (options.requestBandwidthObserve) hello.features |= kUdpFeatureBandwidthObserve;  // C0
   std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", options.authToken.c_str());
   const auto stopped = [stop]() { return stop && stop->load(std::memory_order_acquire); };
   const auto now_ms = []() {

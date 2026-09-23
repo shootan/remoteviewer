@@ -1575,6 +1575,35 @@ target_include_directories(remote60_host_input_target_rect_test PRIVATE src)
 
 # What the host releases on its own when a control session stops, and which ups it then does not
 # inject a second time (RV-01).
+# C0 stage 1: the receive-side bandwidth estimator against synthetic arrival sequences.
+add_executable(remote60_viewer_bwe_test
+  src/viewer_bwe_test.cpp
+)
+target_include_directories(remote60_viewer_bwe_test PRIVATE src)
+
+# C0 stage 1 on the wire: layout, host validation, negotiation, and the scheduler's gating.
+add_executable(remote60_bandwidth_observe_wire_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/bandwidth_observe_wire_test.cpp
+)
+target_include_directories(remote60_bandwidth_observe_wire_test PRIVATE src)
+target_link_libraries(remote60_bandwidth_observe_wire_test PRIVATE common ws2_32)
+
+# C0 stage 1 observation, end to end through a bottleneck whose truth the test knows.
+add_executable(remote60_bwe_observe_e2e_test
+  src/bwe_observe_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_bwe_observe_e2e_test PRIVATE src)
+target_link_libraries(remote60_bwe_observe_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_bwe_observe_e2e_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_injected_input_test
   src/host_injected_input_test.cpp
 )

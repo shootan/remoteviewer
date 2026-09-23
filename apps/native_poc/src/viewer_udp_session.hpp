@@ -13,8 +13,10 @@
 // Output:  UdpHelloOptions; SessionState.udpHelloAckFeatures / hostSupportsNack; SO_RCVTIMEO.
 // Callers: viewer_startup.cpp (connect_media_socket), viewer_udp_recovery_test.cpp.
 
+#include <cstdlib>
 #include <string>
 
+#include "bandwidth_observe_wire.hpp"
 #include "native_video_client_tcp_control.hpp"
 #include "viewer_common.hpp"
 #include "viewer_session_state.hpp"
@@ -68,6 +70,10 @@ inline remote60::native_poc::UdpHelloOptions viewer_udp_hello_options(const std:
   // answers old viewers exactly as before, and a viewer that did not ask could not be
   // helped by the feature at all.
   hello.requestControlResume = true;
+  // C0 stage 1 bandwidth observation. Asked for unless REMOTE60_BWE_OBSERVE=0: the host only
+  // logs it, and the switch is what the on/off regression compares.
+  const char* observe = std::getenv("REMOTE60_BWE_OBSERVE");
+  hello.requestBandwidthObserve = !(observe && observe[0] == '0');
   return hello;
 }
 
@@ -80,6 +86,10 @@ inline void viewer_apply_udp_hello_ack(uint32_t ackFeatures, bool videoNackEnabl
       videoNackEnabled && (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0;
   session.hostSupportsControlResume =
       (ackFeatures & remote60::native_poc::kUdpFeatureControlResume) != 0;
+  // C0 stage 1: sent only when this viewer asked AND the host acknowledged.
+  const char* observe = std::getenv("REMOTE60_BWE_OBSERVE");
+  session.bandwidthObserveNegotiated = remote60::native_poc::bandwidth_observe_negotiated(
+      !(observe && observe[0] == '0'), ackFeatures);
 }
 
 // The receive timeout every UDP session runs with (direct and tunnelled alike): the clock of the

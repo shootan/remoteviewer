@@ -59,6 +59,11 @@ enum class MessageType : uint16_t {
   ControlClipboardUpdate = 51,   // client -> host: the client's clipboard changed (payload follows)
   ControlClipboardRequest = 52,  // client -> host: poll for a clipboard newer than knownGeneration
   ControlClipboardData = 53,     // host -> client: reply to Request (payload follows when bit0 set)
+  // C0 stage 1: the viewer's bandwidth observation, once a second. The next unused number after
+  // 53. A NEW kind rather than fields added to ControlClientMetrics (24): the host accepts 24 only
+  // at its exact size, so a longer 24 would make an old host drop every metrics report and blind
+  // its ABR. Sent only when both sides set kUdpFeatureBandwidthObserve; no reply.
+  ControlClientBandwidth = 54,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -329,6 +334,38 @@ struct ControlStreamStateMessage {
   uint64_t clientSendQpcUs = 0;
 };
 
+/**
+ * C0 stage 1 -- the viewer's bandwidth observation (kind 54). OBSERVATION ONLY: the host logs it
+ * and nothing reads it. See viewer_bwe.hpp for what each figure means.
+ *
+ * Wire: 60 bytes, packed, little-endian like every message here, accepted only at exactly that
+ * size. Ranges the host checks: usage 0..2, rateState 0..2, lossPm 0..1000, flags bits 0..1 only.
+ * `seq` counts from 1 per viewer control session and wraps modulo 2^32 (a new session may start
+ * lower; the host compares nothing across sessions). `clientSendQpcUs` is the VIEWER's clock and
+ * is carried for the viewer's own logs only -- the host judges freshness by when IT received the
+ * message and never compares this value with its own clock.
+ */
+struct ControlClientBandwidthMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;              // bit0 application-limited, bit1 still-screen hold
+  uint8_t usage = 0;               // BweUsage: 0 normal, 1 underuse, 2 overuse
+  uint8_t rateState = 0;           // BweRateState: 0 hold, 1 increase, 2 decrease
+  uint16_t lossPm = 0;             // assembly drop permille, 0..1000
+  uint32_t bweBps = 0;             // estimate, bits/s (up to 4.29 Gb/s)
+  uint32_t goodputUniqueBps = 0;   // unique media payload received, bits/s
+  uint32_t wireLoadBps = 0;        // every datagram as received, bits/s
+  int32_t delayGradientUs = 0;     // detector trend x1000 (draft units, not a physical delay)
+  int32_t thresholdUs = 0;         // the adaptive threshold it was compared with, x1000
+  uint16_t delaySamples = 0;       // frames sampled in the window (saturates)
+  uint16_t reserved = 0;
+  uint64_t streamGeneration = 0;   // the video stream the figures describe
+  uint64_t clientSendQpcUs = 0;    // viewer clock
+};
+static_assert(sizeof(ControlClientBandwidthMessage) == 60, "bandwidth observation wire drift");
+constexpr uint32_t kBandwidthFlagAppLimited = 0x1u;
+constexpr uint32_t kBandwidthFlagStaticHold = 0x2u;
+
 struct ControlClientMetricsMessage {
   MessageHeader header{};
   uint32_t seq = 0;
@@ -539,6 +576,11 @@ constexpr uint32_t kUdpFeatureVideoNack = 0x10u;
 // which is what keeps a new viewer working against an old host: it simply never asks, and falls
 // back to the behaviour it had before.
 constexpr uint32_t kUdpFeatureControlResume = 0x20u;
+// C0 stage 1: bandwidth observation (ControlClientBandwidth, kind 54). The next unused bit after
+// 0x20. Requested by a viewer that will send it, advertised by a host that will log it; the viewer
+// sends only when the HelloAck carries it, so an old host is never sent a kind it would drain as
+// unknown, and an old viewer is never asked for one.
+constexpr uint32_t kUdpFeatureBandwidthObserve = 0x40u;
 constexpr uint32_t kUdpProtocolVersion = 2u;
 
 // One NACK datagram asks for up to this many missing chunkIndex values of a single AU. A 1080p IDR

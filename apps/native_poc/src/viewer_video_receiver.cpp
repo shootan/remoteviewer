@@ -11,6 +11,7 @@
 #include <random>
 #include <sstream>
 
+#include "bandwidth_observe_wire.hpp"
 #include "udp_video_nack.hpp"
 #include "viewer_decoder_backend.hpp"
 #include "viewer_env_util.hpp"
@@ -68,6 +69,10 @@ void VideoReceiver::run_udp() {
                                                : static_cast<uint32_t>(qpc_now_us() & 0x7fffffffu);
   std::minstd_rand udpSimRng(effectiveUdpSimDropSeed);
   std::uniform_int_distribution<uint32_t> udpSimDropDist(0, 999);
+  // C0 stage 1: the bandwidth observation. Fed every accepted video chunk; reported once a second
+  // to the control thread, which sends it only to a host that acknowledged the feature. Nothing
+  // on this side reads it either -- it observes.
+  remote60::native_poc::ViewerBandwidthEstimator bandwidthEstimator;
   UdpH264FrameAssembler assembler;
   // Video NACK (Windows wiring). Against a host that acknowledged kUdpFeatureVideoNack the
   // assembler delivers in sequence order and holds a completed AU for up to nack.holdUs while an
@@ -423,6 +428,25 @@ void VideoReceiver::run_udp() {
       const uint64_t chunkUs = qpc_now_us();
       ctx.recvLive.lastVideoChunkUs.store(chunkUs, std::memory_order_relaxed);
       ctx.recvLive.Enter(RecvStage::Assembly, chunkUs);
+      bandwidthEstimator.OnChunk(remote60::native_poc::bwe_chunk_from_header(u, static_cast<uint32_t>(n), chunkUs));
+      remote60::native_poc::BweReport bwReport;
+      if (bandwidthEstimator.Report(chunkUs, st.udpAssemblyDropPmLast, &bwReport)) {
+        if (ctx.session.bandwidthObserveNegotiated) {
+          std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
+          ctx.control.bandwidth.message = remote60::native_poc::make_client_bandwidth_message(bwReport, 0, chunkUs);
+          ctx.control.bandwidth.updatedQpcUs = chunkUs;
+        }
+        std::cout << "[native-video-client][bwe-observe] bwe=" << bwReport.bweBps
+                  << " state=" << remote60::native_poc::to_string(bwReport.usage)
+                  << " rate=" << remote60::native_poc::to_string(bwReport.rateState)
+                  << " goodputUnique=" << bwReport.goodputUniqueBps
+                  << " wireLoad=" << bwReport.wireLoadBps << " gradUs=" << bwReport.delayGradientUs
+                  << " thrUs=" << bwReport.thresholdUs << " lossPm=" << bwReport.lossPm
+                  << " appLimited=" << (bwReport.appLimited ? 1 : 0)
+                  << " static=" << (bwReport.staticHold ? 1 : 0)
+                  << " samples=" << bwReport.delaySamples
+                  << " sent=" << (ctx.session.bandwidthObserveNegotiated ? 1 : 0) << "\n";
+      }
     }
     auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n), qpc_now_us());
     if (assembleResult.fecRecovered) {

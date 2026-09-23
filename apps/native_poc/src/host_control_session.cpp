@@ -20,6 +20,7 @@
 #include <iostream>
 
 #include "host_unlock_relay.hpp"
+#include "bandwidth_observe_wire.hpp"
 #include <mutex>
 #include <set>
 #include <string>
@@ -294,6 +295,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
   // released even if the policy gate has since closed (foreground/secure change), or a modifier
   // stays stuck on the host. Released for all on connection end. (Codex #370 BLOCKER C.)
   std::set<uint16_t> physicalDown;
+  // C0 stage 1 observation log state, per control session. Host clock only.
+  uint64_t bwLastRecvUs = 0;
+  uint64_t bwLastLogUs = 0;
+  uint64_t bwSuppressed = 0;
+  uint64_t bwUnnegotiated = 0;
+  uint64_t bwInvalid = 0;
   auto release_all_physical_host = [&]() {
     for (uint16_t key : physicalDown) {
       (void)inject_physical_scan_key(static_cast<uint16_t>(key & 0xff), false, (key & 0x100) != 0);
@@ -965,6 +972,50 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    // C0 stage 1: the viewer's bandwidth observation. LOGGED, and read by nothing else -- no ABR,
+    // encoder or pacing input is touched here (the regression compares those logs with this on
+    // and off). No reply: the viewer does not wait for one.
+    if (type == MessageType::ControlClientBandwidth &&
+        header.size == sizeof(ControlClientBandwidthMessage)) {
+      ControlClientBandwidthMessage bw{};
+      bw.header = header;
+      if (!link.Read(&bw.seq, sizeof(bw) - sizeof(MessageHeader))) break;
+      const uint64_t recvUs = qpc_now_us();  // freshness is judged on THIS clock only
+      if (!clientSession.bandwidthObserveNegotiated.load(std::memory_order_acquire)) {
+        if (bwUnnegotiated++ == 0) {
+          std::cout << "[bwe-observe] ignored: this client did not ask for it in its Hello\n";
+        }
+        continue;
+      }
+      if (!client_bandwidth_message_valid(bw)) {
+        if (bwInvalid++ < 5) {
+          std::cout << "[bwe-observe] rejected seq=" << bw.seq << " (out of range)\n";
+        }
+        continue;
+      }
+      const uint64_t sinceLastUs = bwLastRecvUs ? recvUs - bwLastRecvUs : 0;
+      bwLastRecvUs = recvUs;
+      // Bounded: one line a second whatever the viewer sends.
+      if (bwLastLogUs != 0 && recvUs - bwLastLogUs < 900000) {
+        ++bwSuppressed;
+        continue;
+      }
+      bwLastLogUs = recvUs;
+      std::cout << "[bwe-observe] seq=" << bw.seq << " bwe=" << bw.bweBps
+                << " state=" << to_string(static_cast<BweUsage>(bw.usage))
+                << " rate=" << to_string(static_cast<BweRateState>(bw.rateState))
+                << " goodputUnique=" << bw.goodputUniqueBps << " wireLoad=" << bw.wireLoadBps
+                << " gradUs=" << bw.delayGradientUs << " thrUs=" << bw.thresholdUs
+                << " lossPm=" << bw.lossPm
+                << " appLimited=" << ((bw.flags & kBandwidthFlagAppLimited) ? 1 : 0)
+                << " static=" << ((bw.flags & kBandwidthFlagStaticHold) ? 1 : 0)
+                << " samples=" << bw.delaySamples << " gen=" << bw.streamGeneration
+                << " curGen=" << capture.streamGenerationState.load(std::memory_order_acquire)
+                << " sinceLastMs=" << (sinceLastUs / 1000) << " suppressed=" << bwSuppressed
+                << "\n";
       continue;
     }
 

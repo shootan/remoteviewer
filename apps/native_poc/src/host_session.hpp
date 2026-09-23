@@ -108,6 +108,9 @@ struct SessionState {
   std::atomic<uint32_t> controlResumeId{0};         // the id both sides derive stream ids from
   // Whether this client asked for resume in its Hello. A client that did not is never given one.
   std::atomic<bool> controlResumeNegotiated{false};
+  // C0 stage 1: this client's accepted Hello asked for bandwidth observation. Only then are its
+  // ControlClientBandwidth messages logged; they are read for nothing else.
+  std::atomic<bool> bandwidthObserveNegotiated{false};
   // Whether the dispatcher is inside Serve() right now. A resume is honoured only when it is
   // not: resetting a stream that is working is the one thing this must never do, and it is also
   // what stops a stray packet from being able to disturb a healthy session.

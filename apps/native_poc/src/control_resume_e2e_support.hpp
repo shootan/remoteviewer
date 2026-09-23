@@ -328,6 +328,7 @@ class InjectTarget {
   std::atomic<uint32_t> upsByVk[256]{};
   std::atomic<uint32_t> leftDowns{0};
   std::atomic<uint32_t> leftUps{0};
+  std::atomic<bool> paused{false};  // stop repainting: the captured window goes still
 
   bool Start() {
     thread_ = std::thread([this] { Run(); });
@@ -352,6 +353,8 @@ class InjectTarget {
       if (msg == WM_LBUTTONUP) self->leftUps.fetch_add(1);
     }
     if (msg == WM_TIMER && self) {
+      // Paused = a still screen, for the observation e2e's still->moving phase (C0).
+      if (self->paused.load()) return 0;
       ++self->frame_;
       InvalidateRect(hwnd, nullptr, FALSE);
       return 0;

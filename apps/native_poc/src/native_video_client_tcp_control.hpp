@@ -103,6 +103,9 @@ struct UdpHelloOptions {
   // it only for a client that asked, so a client that does not set this is never sent a
   // resume answer -- and, until C3, no client set it at all.
   bool requestControlResume = false;
+  // Advertise kUdpFeatureBandwidthObserve (C0 stage 1): this client will report bandwidth
+  // observations to a host that acknowledges it.
+  bool requestBandwidthObserve = false;
 };
 // `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
 // learns whether the host supports NACK (kUdpFeatureVideoNack) etc.

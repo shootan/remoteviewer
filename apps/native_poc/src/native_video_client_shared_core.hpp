@@ -194,6 +194,14 @@ struct ClientControlMetricsSnapshot {
   uint64_t updatedQpcUs = 0;
 };
 
+// C0 stage 1: the latest bandwidth observation, sent once per new report -- and only when the
+// caller passes one, which the viewer does only for a host that acknowledged
+// kUdpFeatureBandwidthObserve. seq and clientSendQpcUs are the scheduler's to fill.
+struct ClientBandwidthSnapshot {
+  ControlClientBandwidthMessage message{};
+  uint64_t updatedQpcUs = 0;
+};
+
 enum class ControlOutboundActionKind : uint8_t {
   None = 0,
   Ping,
@@ -214,6 +222,7 @@ enum class ControlOutboundActionKind : uint8_t {
   UnlockSealedRequest,
   UnlockStatusRequest,
   ImeStateRequest,
+  ClientBandwidth,  // C0 stage 1, no reply
 };
 
 struct ControlOutboundAction {
@@ -238,6 +247,7 @@ struct ControlOutboundAction {
   ControlUnlockSealedRequestMessage unlockSealed{};
   ControlUnlockStatusRequestMessage unlockStatusReq{};
   ControlImeStateRequestMessage imeStateReq{};
+  ControlClientBandwidthMessage clientBandwidth{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 
@@ -268,7 +278,8 @@ class ClientControlScheduler {
                  RuntimeTuneState* runtimeTune,
                  ClientInputQueue* inputQueue,
                   ControlOutboundAction* out,
-                 DesktopBackendControl* desktopBackend = nullptr);
+                 DesktopBackendControl* desktopBackend = nullptr,
+                 const ClientBandwidthSnapshot* bandwidth = nullptr);
   uint64_t RecordInputAck(uint32_t inputLogEvery);
 
  private:
@@ -280,6 +291,8 @@ class ClientControlScheduler {
   uint32_t nextMonitorSeq_ = 0;
   uint64_t nextPingUs_ = 0;
   uint64_t lastMetricsSentUs_ = 0;
+  uint32_t nextBandwidthSeq_ = 0;
+  uint64_t lastBandwidthSentUs_ = 0;
   uint64_t inputAckCount_ = 0;
   uint32_t controlIntervalMs_ = 1000;
 };

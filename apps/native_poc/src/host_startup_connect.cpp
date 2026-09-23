@@ -357,6 +357,9 @@ int startup_connect_client(HostContext& hx) {
       clientSession.controlResumeNegotiated.store(
           remote60::native_poc::host_resume_negotiated(hello.features),
           std::memory_order_release);
+      // C0 stage 1: advertised on this path too, for the reason given just above -- this is the
+      // handshake every session makes. Found the same way: the observation e2e saw features=0x3A.
+      ack.features |= remote60::native_poc::kUdpFeatureBandwidthObserve;
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
       if (tokenLen > 0) {
@@ -368,6 +371,10 @@ int startup_connect_client(HostContext& hx) {
         clientSession.directoryAuthenticated.store(true, std::memory_order_release);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
       }
+      // Accepted: whether this client asked for bandwidth observation is its to decide.
+      clientSession.bandwidthObserveNegotiated.store(
+          (hello.features & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
+          std::memory_order_release);
       (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
 

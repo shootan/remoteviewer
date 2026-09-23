@@ -67,6 +67,10 @@ struct ControlChannelState {
   remote60::native_poc::StreamStateControl streamState;
   CaptureModeRequestState captureModeRequests;
   ClientInputQueue inputQueue;
+  // C0 stage 1: the receive thread's latest bandwidth observation, for the control thread to
+  // send. Guarded; copied out whole so a report is never sent half-updated.
+  std::mutex bandwidthMu;
+  ClientBandwidthSnapshot bandwidth;
   // Control over the media socket, for hosts reached through the directory.
   //
   // A second TCP connection cannot be opened to a host behind NAT: only the UDP socket was

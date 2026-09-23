@@ -483,7 +483,8 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
                                         RuntimeTuneState* runtimeTune,
                                         ClientInputQueue* inputQueue,
                                         ControlOutboundAction* out,
-                                        DesktopBackendControl* desktopBackend) {
+                                        DesktopBackendControl* desktopBackend,
+                                        const ClientBandwidthSnapshot* bandwidth) {
   if (!windowPanel || !streamState || !captureMode || !keyframeRequests || !runtimeTune || !inputQueue || !out) {
     return false;
   }
@@ -618,6 +619,20 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     out->metrics.seq = ++nextMetricsSeq_;
     out->metrics.clientSendQpcUs = nowUs;
     lastMetricsSentUs_ = metrics.updatedQpcUs;
+    return true;
+  }
+
+  // C0 stage 1: right behind the metrics, at the same once-a-second cadence, and only when the
+  // caller passed a snapshot (it does only for a host that acknowledged the feature bit).
+  if (bandwidth && bandwidth->updatedQpcUs > 0 && bandwidth->updatedQpcUs != lastBandwidthSentUs_) {
+    out->kind = ControlOutboundActionKind::ClientBandwidth;
+    out->clientBandwidth = bandwidth->message;
+    out->clientBandwidth.header.magic = kMagic;
+    out->clientBandwidth.header.type = static_cast<uint16_t>(MessageType::ControlClientBandwidth);
+    out->clientBandwidth.header.size = static_cast<uint16_t>(sizeof(out->clientBandwidth));
+    out->clientBandwidth.seq = ++nextBandwidthSeq_;
+    out->clientBandwidth.clientSendQpcUs = nowUs;
+    lastBandwidthSentUs_ = bandwidth->updatedQpcUs;
     return true;
   }
 

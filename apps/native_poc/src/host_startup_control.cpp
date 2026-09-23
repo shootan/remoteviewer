@@ -333,6 +333,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // acted on only for a client that asked -- a client that never asked does not know
             // what a resume answer is, so sending it one would be noise it has to ignore.
             ack.features |= remote60::native_poc::kUdpFeatureControlResume;
+            // C0 stage 1: this host logs bandwidth observations. Advertised to everyone like the
+            // two above; a viewer sends them only when it asked and sees this bit.
+            ack.features |= remote60::native_poc::kUdpFeatureBandwidthObserve;
             // Whether THIS client asked is stored further down, once its Hello has been accepted.
             // Stored here it let a Hello that is then refused (a bad capability, or an
             // unauthenticated one during a directory session) switch resume off for the session
@@ -408,6 +411,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             sender.nackEnabled.store(
                 (hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
                 std::memory_order_relaxed);
+            clientSession.bandwidthObserveNegotiated.store(
+                (hello.features & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
+                std::memory_order_release);
             const bool changed =
                 sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
                 sender.udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
