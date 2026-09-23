@@ -158,6 +158,7 @@ struct RecoveryResult {
   // decide the session is worth repairing at all.
   uint64_t mediaDuring = 0;
   uint64_t proxyMediaDuring = 0;  // what the seam forwarded over the same stretch
+  uint64_t proxyMediaSettled = 0;  // the seam again, after the viewer's reading: bounds the surplus
   bool videoWentQuiet = false;
   uint64_t longestVideoGapUs = 0;
 };
@@ -221,8 +222,16 @@ RecoveryResult run_recovery(ViewerSide& v, int budgetMs,
     }
   }
   out.attempts = v.resume.attempts();
-  out.mediaDuring = v.videoDatagrams.load() - mediaAtStart;
+  // The two counters are read at different moments, so the order and the wait are the whole
+  // point. (RV-16) The seam's count is taken FIRST, then datagrams still between the seam and the
+  // viewer are given time to land, and only then is the viewer's count read. Everything the seam
+  // had forwarded by its reading has therefore had its chance to arrive, and the comparison is
+  // "received >= forwarded": the viewer may also hold a few forwarded after the seam's reading
+  // (and, at the start, a few in flight before it), which is surplus, never loss.
   out.proxyMediaDuring = gProxy ? gProxy->mediaPassed.load() - proxyAtStart : 0;
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  out.mediaDuring = v.videoDatagrams.load() - mediaAtStart;
+  out.proxyMediaSettled = gProxy ? gProxy->mediaPassed.load() - proxyAtStart : 0;
   return out;
 }
 
@@ -353,6 +362,21 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   check("the host started", launched);
+
+  // The continuity checks below depend on the host capturing the window this process paints --
+  // asked for with --capture-window-title, but a title that matches nothing makes the host fall
+  // back to the monitor without failing. So the host's own log has to name THIS window: the hwnd
+  // and pid it chose, not just the absence of the fallback line. (RV-16) Judged from the log once
+  // the host has exited: its stdout into a file is block-buffered, so reading it while the host
+  // runs found nothing on the first try even though the line had been written at startup.
+  std::string captureWant;
+  {
+    char want[64]{};
+    std::snprintf(want, sizeof(want), "capture-window target hwnd=0x%llx pid=%lu ",
+                  static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(target.hwnd())),
+                  static_cast<unsigned long>(GetCurrentProcessId()));
+    if (target.hwnd()) captureWant = want;
+  }
 
   ViewerSide viewer;
   bool connected = false;
@@ -500,13 +524,14 @@ int wmain(int argc, wchar_t** argv) {
     // numbers exist. When the host sent nothing at all there is nothing to judge, and this
     // says so instead of passing or failing on an accident of screen activity.
     if (r.proxyMediaDuring == 0) {
-      std::cout << "    NOT JUDGED  video continuity: the host sent nothing during the repair "
-                   "(a still capture source). Not a pass and not a failure.\n";
+      skip("NOTHING THE HOST SENT DURING THE REPAIR WAS SWALLOWED",
+           "the host sent nothing during the repair (a still capture source)");
     } else {
       check("NOTHING THE HOST SENT DURING THE REPAIR WAS SWALLOWED",
-            r.mediaDuring == r.proxyMediaDuring,
-            std::to_string(r.mediaDuring) + " received of " +
-                std::to_string(r.proxyMediaDuring) + " forwarded");
+            r.mediaDuring >= r.proxyMediaDuring,
+            std::to_string(r.mediaDuring) + " received; seam " +
+                std::to_string(r.proxyMediaDuring) + " before the viewer's reading, " +
+                std::to_string(r.proxyMediaSettled) + " after it");
     }
 
     if (r.resumed) {
@@ -662,8 +687,8 @@ int wmain(int argc, wchar_t** argv) {
   // rather than run when case 1 did not get one. A stall reported once is a finding; the same
   // stall reported eight more times under other names is noise that hides it.
   if (connected && !repaired) {
-    std::cout << "\nSKIP  cases 2-4: the channel was not repaired in case 1, so there is "
-                 "nothing to break again.\n";
+    std::cout << "\n";
+    skip("cases 2-4", "the channel was not repaired in case 1, so there is nothing to break again");
   }
   if (connected && repaired) {
     std::cout << "\n--- case 2: the host's answer is lost, then duplicated ---\n";
@@ -816,11 +841,18 @@ int wmain(int argc, wchar_t** argv) {
     const std::string idText = "id=" + std::to_string(gCase5ResumeId) + " ";
     bool refusedOnAlive = false;
     bool servedLater = false;
+    std::string captureLine;
     FILE* f = nullptr;
     if (_wfopen_s(&f, hostLogPath.c_str(), L"rb") == 0 && f) {
       char line[1024];
       while (std::fgets(line, sizeof(line), f)) {
         const std::string text(line);
+        if (captureLine.empty() && (text.find("capture-window target") != std::string::npos)) {
+          captureLine = text;
+          while (!captureLine.empty() && (captureLine.back() == '\n' || captureLine.back() == '\r')) {
+            captureLine.pop_back();
+          }
+        }
         if (gCase5ResumeId != 0 && text.find(idText) != std::string::npos) {
           if (text.find("verdict=refuse") != std::string::npos &&
               text.find("evidence=alive") != std::string::npos) {
@@ -837,6 +869,12 @@ int wmain(int argc, wchar_t** argv) {
       std::fclose(f);
     } else {
       std::cout << "    (the host log could not be read)\n";
+    }
+    if (launched) {
+      check("the host captured the window this test paints, not a monitor",
+            !captureWant.empty() && captureLine.find(captureWant) != std::string::npos,
+            captureLine.empty() ? std::string("the host never said what it captured")
+                                : "host: \"" + captureLine + "\"  want: \"" + captureWant + "\"");
     }
     if (gCase5ResumeId != 0) {
       check("[case 5] the host refused that id because its channel answered", refusedOnAlive);
@@ -857,7 +895,11 @@ int wmain(int argc, wchar_t** argv) {
         GetFileAttributesW(dir.substr(0, dir.size() - 1).c_str()) == INVALID_FILE_ATTRIBUTES);
   WSACleanup();
 
-  std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
-            << " checks, " << gFailures << " failed)\n";
+  // A run with unjudged checks is not ALL PASS, and its summary says so. (RV-16)
+  const char* verdict = gFailures != 0 ? "RESULT: FAILED"
+                        : gSkips != 0  ? "RESULT: PASS WITH UNJUDGED CHECKS"
+                                       : "RESULT: ALL PASS";
+  std::cout << "\n" << verdict << "  (" << gChecks << " checks, " << gFailures << " failed, "
+            << gSkips << " not judged)\n";
   return gFailures == 0 ? 0 : 1;
 }

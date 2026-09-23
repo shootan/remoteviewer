@@ -12442,3 +12442,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 기록: `review_2026-09-23_connect_bandwidth.md`(RV-00~18), `작업목록.md` V0·RV-A~G, `구현계획.md` C1·C2·C3 체크박스, `README.md`.
 - 추가 확인: `client_recovery_ui_test` 도 이 PC 의 `%LOCALAPPDATA%\GNLink\client.txt` 를 테스트 값으로 바꿨다(03:25). host.json 은 `/tmp/r2_hp.log`(01:18:17 종료)와 시각으로 대조했다. 이전 사본은 없다. 에이전트의 파일 직접 복구는 권한 분류기가 막았고, 토큰은 어차피 사용자 로그인으로만 돌아온다.
 - 제품/테스트/문서: 제품 **무변경** / 테스트 **무변경** / 문서만.
+
+### 2026-09-23 C3 r5 + RV-16 — "영상이 계속 왔다" 는 화면이 움직일 때만 참이었다
+
+- 문제: control_resume_e2e 케이스 1 "복구 중 영상 수신" 이 9회 중 1회 0발로 실패. 카운터로 보니 seam 도 0발 전달 = 호스트가 보내지 않았다(정지 모니터의 idle cadence 약 0.5fps). **제품 결함이 아니라 하네스 가정 결함**이었고, 앞서 기록한 "회복 구간 56발·최장 공백 1994ms" 도 모니터 캡처·화면 활동 미기록 조건의 수치였다(정정: `구현계획.md` C3).
+- 변경(테스트만): 테스트 프로세스가 화면 밖(-4000,-4000) 창을 20Hz 로 칠하고 호스트가 `--capture-window-title` 로 그 창을 캡처. 판정은 "seam 이 전달한 수 ≤ 뷰어 수신 수"(삼킴 0) — seam 을 먼저 읽고 300ms 뒤 뷰어를 읽는다(두 계수기를 같은 순간에 읽을 수 없으므로 비행 중 여유는 잉여로만 남는다). seam 전달이 0이면 `SKIP ... NOT JUDGED` 로 세고, 요약 줄이 `RESULT: PASS WITH UNJUDGED CHECKS` 가 된다(ALL PASS 아님).
+- 호스트가 **그 창을 실제로 잡았는지**를 호스트 로그의 `capture-window target hwnd=0x<이 창> pid=<이 프로세스>` 로 단언. 변이(존재하지 않는 제목) → 호스트가 `fallback=monitor` 로 떨어지고 이 단언이 FAIL(58 checks, 1 failed). 첫 구현은 실행 중에 로그를 읽어 FAIL 이었다 — 호스트 stdout 이 파일로 블록 버퍼링돼 있었다. 종료 후 판정으로 옮겼다.
+- 결과: 단독 **10/10 ALL PASS**(58 checks, 미판정 0), 부하(deadline e2e 상시 병행, 병행 쪽 125회 전부 PASS) **5/5 ALL PASS**. 복구 구간 수신은 매회 2~4발, seam 전달 수와 같았다. 발 수가 적은 것은 호스트 송신 cadence 때문이다 — 40Hz·960×540 으로 올려도 초당 약 2프레임(측정). 화면 밖 창이라 DWM 합성이 줄어드는지는 확인하지 않았다.
+- 실제 설정 파일 두 개: 모든 실행 전후 sha256·mtime 불변(36 기록).
+- 제품/테스트/문서: 제품 **무변경** / 테스트(`control_resume_e2e_test.cpp`, `control_resume_e2e_support.hpp`) / 문서(이 항목, `구현계획.md` C3 정정, `작업목록.md`).

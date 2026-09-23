@@ -49,6 +49,15 @@ void check(const std::string& name, bool ok, const std::string& detail = {}) {
   std::cout << "\n";
 }
 
+// Checks this run could not judge either way. They are not passes: the summary line says how
+// many there were, so a run that judged nothing cannot read as ALL PASS. (RV-16)
+int gSkips = 0;
+
+void skip(const std::string& name, const std::string& why) {
+  ++gSkips;
+  std::cout << "SKIP  " << name << "  NOT JUDGED: " << why << "\n";
+}
+
 bool host_e2e_allowed() {
   wchar_t value[8]{};
   const DWORD n = GetEnvironmentVariableW(L"REMOTE60_ALLOW_HOST_E2E", value, 8);
@@ -305,6 +314,11 @@ class InjectTarget {
   std::atomic<uint64_t> mouseMoves{0};
   std::atomic<uint64_t> keyDowns{0};
   std::atomic<uint64_t> keyUps{0};
+  // Per virtual key, so one key's duplicates are not hidden by another key's ups. (RV-01)
+  std::atomic<uint32_t> downsByVk[256]{};
+  std::atomic<uint32_t> upsByVk[256]{};
+  std::atomic<uint32_t> leftDowns{0};
+  std::atomic<uint32_t> leftUps{0};
 
   bool Start() {
     thread_ = std::thread([this] { Run(); });
@@ -314,6 +328,7 @@ class InjectTarget {
     if (hwnd_) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
     if (thread_.joinable()) thread_.join();
   }
+  HWND hwnd() const { return hwnd_; }
 
  private:
   static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -322,6 +337,10 @@ class InjectTarget {
       if (msg == WM_MOUSEMOVE) self->mouseMoves.fetch_add(1);
       if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) self->keyDowns.fetch_add(1);
       if (msg == WM_KEYUP || msg == WM_SYSKEYUP) self->keyUps.fetch_add(1);
+      if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) self->downsByVk[wp & 0xff].fetch_add(1);
+      if (msg == WM_KEYUP || msg == WM_SYSKEYUP) self->upsByVk[wp & 0xff].fetch_add(1);
+      if (msg == WM_LBUTTONDOWN) self->leftDowns.fetch_add(1);
+      if (msg == WM_LBUTTONUP) self->leftUps.fetch_add(1);
     }
     if (msg == WM_TIMER && self) {
       ++self->frame_;
