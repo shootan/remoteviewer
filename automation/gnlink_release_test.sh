@@ -49,6 +49,22 @@ expect_nonzero() {
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Every fixture run goes through the CANDIDATE'S OWN copy of the release script, which
+# make_worktree commits into the fixture. The script refuses to run from outside the worktree
+# it releases (RV-13), and that refusal is tested below with the checkout's own copy. Runs with
+# no usable --worktree (the argument checks) use the checkout's copy; they refuse before the
+# worktree is looked at.
+RUN_RELEASE="$TMP/run_release.sh"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'wt=""; prev=""\n'
+  printf 'for a in "$@"; do [ "$prev" = "--worktree" ] && wt="$a"; prev="$a"; done\n'
+  printf 'if [ -n "$wt" ] && [ -f "$wt/automation/gnlink_release.sh" ]; then\n'
+  printf '  exec bash "$wt/automation/gnlink_release.sh" "$@"\n'
+  printf 'fi\n'
+  printf 'exec bash "%s" "$@"\n' "$RELEASE_SH"
+} > "$RUN_RELEASE"
+
 # ---------------------------------------------------------------- a worktree that looks real
 # Enough of one for the preflight: a git repo, a version header, a clean tree.
 make_worktree() {
@@ -60,19 +76,27 @@ namespace remote60::native_poc {
 constexpr wchar_t kProductVersion[] = L"$version";
 }
 EOF
+  # The tools the release script calls, from where it calls them: its own directory, and the
+  # one source file the payload-set gate reads relative to it. A candidate carries its own.
+  mkdir -p "$dir/automation"
+  cp "$SCRIPT_DIR"/gnlink_release.sh "$SCRIPT_DIR"/gnlink_release_manifest.py \
+     "$SCRIPT_DIR"/gnlink_check_payload_set.py "$SCRIPT_DIR"/gnlink_check_installer_payload.ps1 \
+     "$SCRIPT_DIR"/gnlink_path_probe.ps1 "$SCRIPT_DIR"/gnlink_release_sign.ps1 \
+     "$SCRIPT_DIR"/gnlink_verify_manifest.js "$SCRIPT_DIR"/gnlink_deploy.sh "$dir/automation/"
+  cp "$SCRIPT_DIR/../apps/native_poc/src/update_process_targets.cpp" "$dir/apps/native_poc/src/"
   ( cd "$dir" && git init -q . && git add -A && \
     git -c user.email=t@t -c user.name=t commit -qm fixture ) >/dev/null 2>&1
 }
 
 printf '=== arguments\n'
-expect_nonzero "no --worktree is refused" bash "$RELEASE_SH" --version 0.2.134
-expect_nonzero "no --version is refused" bash "$RELEASE_SH" --worktree "$TMP"
+expect_nonzero "no --worktree is refused" bash "$RUN_RELEASE" --version 0.2.134
+expect_nonzero "no --version is refused" bash "$RUN_RELEASE" --worktree "$TMP"
 expect_nonzero "a worktree that does not exist is refused" \
-  bash "$RELEASE_SH" --worktree "$TMP/nowhere" --version 0.2.134
+  bash "$RUN_RELEASE" --worktree "$TMP/nowhere" --version 0.2.134
 expect_nonzero "a version that is not a version is refused" \
-  bash "$RELEASE_SH" --worktree "$TMP" --version "latest"
+  bash "$RUN_RELEASE" --worktree "$TMP" --version "latest"
 expect_nonzero "an unknown argument is refused" \
-  bash "$RELEASE_SH" --worktree "$TMP" --version 0.2.134 --publish-now
+  bash "$RUN_RELEASE" --worktree "$TMP" --version 0.2.134 --publish-now
 
 printf '\n=== preflight, fail-closed\n'
 WT="$TMP/wt"
@@ -80,8 +104,8 @@ make_worktree "$WT" "0.2.134"
 
 # The guard that matters most: the script must never paper over a version it was not asked for.
 expect_nonzero "a version the source does not claim is refused" \
-  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" --worktree "$WT" --version 0.2.999
-OUT="$(env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" --worktree "$WT" --version 0.2.999 2>&1)"
+  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" --worktree "$WT" --version 0.2.999
+OUT="$(env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" --worktree "$WT" --version 0.2.999 2>&1)"
 case "$OUT" in
   *"the source says 0.2.134"*) check 0 "...and says which version the source claims" ;;
   *) check 1 "...and says which version the source claims" "$(printf '%s' "$OUT" | tail -1)" ;;
@@ -90,8 +114,8 @@ esac
 # Same worktree, matching version, but no SDK anywhere: it must stop rather than start a build
 # that would fail later with an error naming neither WebView2 nor the reason.
 expect_nonzero "no WebView2 SDK, and none to copy, is refused" \
-  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" --worktree "$WT" --version 0.2.134
-OUT="$(env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" --worktree "$WT" --version 0.2.134 2>&1)"
+  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" --worktree "$WT" --version 0.2.134
+OUT="$(env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" --worktree "$WT" --version 0.2.134 2>&1)"
 case "$OUT" in
   *"fetch_webview2"*) check 0 "...and names the script that fetches it" ;;
   *) check 1 "...and names the script that fetches it" "$(printf '%s' "$OUT" | tail -1)" ;;
@@ -102,7 +126,7 @@ DIRTY_WT="$TMP/dirty"
 make_worktree "$DIRTY_WT" "0.2.134"
 printf 'edited\n' >> "$DIRTY_WT/apps/native_poc/src/product_version.hpp"
 expect_nonzero "uncommitted tracked changes are refused" \
-  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" --worktree "$DIRTY_WT" --version 0.2.134
+  env GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" --worktree "$DIRTY_WT" --version 0.2.134
 
 printf '\n=== the manifest, against the shape 0.2.134 published\n'
 
@@ -261,8 +285,8 @@ RMDRIVE="$TMP/rmdrive.sh"
   printf 'die() { printf "FAIL  %%s\\n" "$*" >&2; exit 1; }\n'
   printf 'say() { printf "%%s\\n" "$*"; }\n'
   printf 'SCRIPT_DIR="%s"\n' "$SCRIPT_DIR"
-  sed -n '/^PATH_PROBE=/p;/^normalise_path()/,/^}$/p;/^path_reparse_between()/,/^}$/p;/^path_real()/,/^}$/p;/^nearest_existing()/,/^}$/p;/^check_inside_worktree()/,/^}$/p;/^make_fresh_dir()/,/^}$/p' "$RELEASE_SH"
-  printf 'WORKTREE_REAL="$(cd "$2" && pwd -P)"\n'
+  sed -n '/^PATH_PROBE=/p;/^canon_path()/,/^}$/p;/^normalise_path()/,/^}$/p;/^path_reparse_between()/,/^}$/p;/^path_real()/,/^}$/p;/^nearest_existing()/,/^}$/p;/^check_inside_worktree()/,/^}$/p;/^make_fresh_dir()/,/^}$/p' "$RELEASE_SH"
+  printf 'WORKTREE_REAL="$(canon_path "$(cd "$2" && pwd -P)")"\n'
   printf 'check_inside_worktree "$1" "target"\n'
 } > "$RMDRIVE"
 
@@ -343,9 +367,9 @@ make_test_key() {
   [ -f "$dir/private.ecc.dpapi" ] && [ -f "$dir/public_xy.hex" ]
 }
 
-make_test_key "$KEYDIR"
-KEY_MADE=0
-[ $? = 0 ] && KEY_MADE=1
+# `[ $? = 0 ]` after `KEY_MADE=0` read the assignment's status, which is always 0 -- so a key that
+# could not be made still ran every signing check against nothing. (RV-14)
+if make_test_key "$KEYDIR"; then KEY_MADE=1; else KEY_MADE=0; fi
 
 # A second, unrelated key. Its public half is a valid point on the curve, which the earlier
 # "corrupt two characters of the hex" trick was not -- that made ECDsa::Create throw before any
@@ -494,8 +518,10 @@ opt_reaches_preflight() {
   # Accepted arguments get as far as the preflight and stop there on something else (no
   # WebView2, no compiler). Refused arguments never print the preflight banner.
   local out
-  out="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
-           --worktree "$OPTWT" --version 0.2.134 "$@" 2>&1)"
+  # Stopped by a version the source does not claim, which the preflight checks first. It used
+  # to be stopped by GNLINK_WEBVIEW2_SOURCE pointing nowhere -- which is now itself a setting
+  # that refuses --sign and --deploy (RV-11), so it can no longer stand in for "nothing else".
+  out="$(bash "$RUN_RELEASE" --worktree "$OPTWT" --version 0.2.999 "$@" 2>&1)"
   printf '%s' "$out" | grep -q '1. preflight'
 }
 
@@ -508,9 +534,9 @@ opt_reaches_preflight --sign --deploy             ; check $? "sign=yes deploy=ye
 opt_reaches_preflight --sign --deploy --dry-run   ; check $? "sign=yes deploy=yes dry=yes  is accepted (it used to self-contradict)"
 
 expect_nonzero "sign=no  deploy=yes dry=no   is refused, publishing something unsigned" \
-  bash "$RELEASE_SH" --worktree "$OPTWT" --version 0.2.134 --deploy
+  bash "$RUN_RELEASE" --worktree "$OPTWT" --version 0.2.134 --deploy
 
-OUT="$(bash "$RELEASE_SH" --worktree "$OPTWT" --version 0.2.134 --deploy 2>&1 || true)"
+OUT="$(bash "$RUN_RELEASE" --worktree "$OPTWT" --version 0.2.134 --deploy 2>&1 || true)"
 printf '%s' "$OUT" | grep -q 'nobody signed'
 check $? "...and says why, in those words"
 
@@ -532,7 +558,7 @@ printf 'an earlier build\n' > "$DELWT/build-0.2.134/CMakeCache.txt"
 
 for mode in "" "--dry-run" "--sign --dry-run" "--deploy --dry-run"; do
   # shellcheck disable=SC2086
-  GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+  GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" \
     --worktree "$DELWT" --version 0.2.134 $mode >/dev/null 2>&1
 done
 [ -f "$DELWT/.claude/rel/0.2.134/payload/GNLinkHost.exe" ] \
@@ -546,7 +572,7 @@ check $? "an existing release and an existing build survive every mode"
 mkdir -p "$DELWT/third_party/webview2/build/native"
 printf 'stub
 ' > "$DELWT/third_party/webview2/build/native/WebView2Loader.dll"
-OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" \
         --worktree "$DELWT" --version 0.2.134 2>&1 || true)"
 printf '%s' "$OUT" | grep -qi 'already exists'
 check $? "...and the run says the release directory is already there"
@@ -554,7 +580,7 @@ check $? "...and the run says the release directory is already there"
 # The reservation is a directory, and a run that fails before filling it gives it back. Without
 # that, every failed attempt would leave debris the next one refuses to build into.
 rm -rf "$DELWT/.claude/rel/0.2.134" "$DELWT/build-0.2.134"
-GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" \
   --worktree "$DELWT" --version 0.2.134 >/dev/null 2>&1
 [ ! -e "$DELWT/.claude/rel/0.2.134" ]
 check $? "a run that fails after reserving the name gives the name back" \
@@ -562,11 +588,11 @@ check $? "a run that fails after reserving the name gives the name back" \
 ' ' ')"
 
 expect_nonzero "a build dir outside the worktree is refused" \
-  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --build-dir "$TMP/elsewhere-build"
+  bash "$RUN_RELEASE" --worktree "$DELWT" --version 0.2.134 --build-dir "$TMP/elsewhere-build"
 expect_nonzero "a build dir reached through .. is refused" \
-  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --build-dir "$DELWT/../escaped"
+  bash "$RUN_RELEASE" --worktree "$DELWT" --version 0.2.134 --build-dir "$DELWT/../escaped"
 expect_nonzero "a rel-root outside the worktree is refused" \
-  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134 --rel-root "$TMP/elsewhere-rel"
+  bash "$RUN_RELEASE" --worktree "$DELWT" --version 0.2.134 --rel-root "$TMP/elsewhere-rel"
 [ ! -e "$TMP/elsewhere-build" ] && [ ! -e "$TMP/elsewhere-rel" ]
 check $? "...and none of those created anything outside the worktree"
 
@@ -574,7 +600,7 @@ check $? "...and none of those created anything outside the worktree"
 mkdir -p "$DELWT/.claude/gnlink_release.lock"
 printf 'pid=1 run=fixture\n' > "$DELWT/.claude/gnlink_release.lock/owner"
 expect_nonzero "a second release in the same worktree is refused while one holds the lock" \
-  bash "$RELEASE_SH" --worktree "$DELWT" --version 0.2.134
+  bash "$RUN_RELEASE" --worktree "$DELWT" --version 0.2.134
 rm -rf "$DELWT/.claude/gnlink_release.lock"
 
 printf '\n=== all nine stages, every option combination\n'
@@ -707,7 +733,7 @@ run_nine() {
   GNLINK_DEPLOY_SCRIPT="$NINE/bin/deploy.sh" \
   GNLINK_SIGN_KEYDIR="$NINEKEY" \
   GNLINK_PUBLIC_KEY_HEX="$(cat "$NINEKEY/public_xy.hex")" \
-    bash "$RELEASE_SH" --worktree "$NINEWT" --version 0.2.134 \
+    bash "$RUN_RELEASE" --worktree "$NINEWT" --version 0.2.134 \
       --build-dir "$NINEWT/build-$label" --rel-root "$NINEWT/rel-$label" "$@" \
       > "$NINE/out-$label.log" 2>&1
   printf '%s' "$?"
@@ -770,7 +796,7 @@ if [ "$NINE_KEY_MADE" = "1" ]; then
   GNLINK_DEPLOY_SCRIPT="$NINE/bin/deploy.sh" \
   GNLINK_SIGN_KEYDIR="$NINEKEY" \
   GNLINK_PUBLIC_KEY_HEX="$(cat "$NINEKEY/public_xy.hex")" \
-    bash "$RELEASE_SH" --worktree "$NINEWT" --version 0.2.134 \
+    bash "$RUN_RELEASE" --worktree "$NINEWT" --version 0.2.134 \
       --build-dir "$NINEWT/build-rehearse" --rel-root "$NINEWT/rel-rehearse" \
       --deploy --dry-run > "$NINE/out-rehearse.log" 2>&1
   # It refuses, because rel-rehearse/0.2.134 already exists -- which is the r2 rule, working.
@@ -831,7 +857,7 @@ mkdir -p "$RESWT/third_party/webview2/build/native"
 printf 'stub\n' > "$RESWT/third_party/webview2/build/native/WebView2Loader.dll"
 # An EMPTY release directory: the case mv -T would have swallowed.
 mkdir -p "$RESWT/.claude/rel/0.2.134"
-OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" \
         --worktree "$RESWT" --version 0.2.134 2>&1 || true)"
 printf '%s' "$OUT" | grep -qi 'already exists'
 check $? "an EMPTY release directory stops the run rather than being replaced"
@@ -841,16 +867,27 @@ rmdir "$RESWT/.claude/rel/0.2.134"
 
 # Two runs at once: exactly one may hold the name. Run in the background against the same
 # worktree, which is what a second person on the same machine would do.
-GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$RESWT" --version 0.2.134 \
+GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" --worktree "$RESWT" --version 0.2.134 \
   > "$TMP/race-a.log" 2>&1 &
 RACE_A=$!
-GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$RESWT" --version 0.2.134 \
+GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" --worktree "$RESWT" --version 0.2.134 \
   > "$TMP/race-b.log" 2>&1 &
 RACE_B=$!
 wait $RACE_A; wait $RACE_B
-BLOCKED=$(cat "$TMP/race-a.log" "$TMP/race-b.log" | grep -ci 'another release is running\|already exists')
-[ "$BLOCKED" -ge 1 ]
-check $? "two runs in one worktree: at least one is turned away" "$BLOCKED turned away"
+# WHICH refusal, and that exactly one run got it. "at least one turned away, for any reason with
+# 'already exists' in it" was also satisfied by the build directory being there -- which says
+# nothing about the lock or the reservation. (RV-14)
+race_turned_away() {
+  grep -qi 'another release is running\|already exists and is not empty\|another run may hold it' "$1"
+}
+TURNED=0; RAN=0
+for race_log in "$TMP/race-a.log" "$TMP/race-b.log"; do
+  if race_turned_away "$race_log"; then TURNED=$((TURNED + 1));
+  elif grep -q '2. fresh configure' "$race_log"; then RAN=$((RAN + 1)); fi
+done
+[ "$TURNED" = "1" ] && [ "$RAN" = "1" ]
+check $? "two runs in one worktree: exactly one is turned away by the lock or the reservation, the other builds" \
+  "turned=$TURNED built=$RAN"
 
 printf '\n=== backslashes and globs are refused, not interpreted\n'
 # Two characters the fold step used to mishandle, both measured on the previous version:
@@ -893,7 +930,7 @@ GLOBRUN="$TMP/globrun"
 make_worktree "$GLOBRUN" "0.2.134"
 mkdir -p "$GLOBRUN/third_party/webview2/build/native"
 printf 'stub\n' > "$GLOBRUN/third_party/webview2/build/native/WebView2Loader.dll"
-OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" --worktree "$GLOBRUN" --version 0.2.134 \
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" --worktree "$GLOBRUN" --version 0.2.134 \
         --build-dir "$GLOBRUN/build-*" 2>&1 || true)"
 ! printf '%s' "$OUT" | grep -q '2. configure'
 check $? "a globbed --build-dir never reaches the build"
@@ -932,7 +969,7 @@ if powershell.exe -NoProfile -NonInteractive -Command \
 fi
 
 if [ "$JUNCTION_OK" = "1" ]; then
-  OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RELEASE_SH" \
+  OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" \
           --worktree "$SUBWT2" --version 0.2.134 2>&1 || true)"
   printf '%s' "$OUT" | grep -qi 'refusing to take the lock\|refusing to use the lock'
   check $? "a lock path the boundary check refuses stops the run" \
@@ -956,7 +993,7 @@ LOCKWT="$TMP/lockwt"
 make_worktree "$LOCKWT" "0.2.134"
 mkdir -p "$LOCKWT/.claude/gnlink_release.lock"
 printf 'pid=999999 run=someone-else version=0.2.134\n' > "$LOCKWT/.claude/gnlink_release.lock/owner"
-OUT="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RELEASE_SH" \
+OUT="$(GNLINK_WEBVIEW2_SOURCE="$TMP/no-such-sdk" bash "$RUN_RELEASE" \
         --worktree "$LOCKWT" --version 0.2.134 2>&1 || true)"
 printf '%s' "$OUT" | grep -qi 'another release is running'
 check $? "a lock somebody else holds turns a run away"
@@ -978,7 +1015,7 @@ make_worktree "$SUBWT" "0.2.134"
 sub_run() {
   # $1 = the environment assignment to make, rest = release-script arguments.
   local assign="$1"; shift
-  env "$assign" bash "$RELEASE_SH" --worktree "$SUBWT" --version 0.2.134 "$@" 2>&1
+  env "$assign" bash "$RUN_RELEASE" --worktree "$SUBWT" --version 0.2.134 "$@" 2>&1
 }
 
 SEAMS=(
@@ -1024,6 +1061,113 @@ check $? "...and is still told, loudly, what it is running with"
 out="$(sub_run "GNLINK_SIGN_KEYDIR=$TMP/definitely-not-a-keydir" --sign)"
 ! printf '%s' "$out" | grep -q 'no signing key at'
 check $? "a refused --sign never gets as far as looking for a key"
+
+printf '\n=== RV-13: the gates come from the candidate itself\n'
+FOREIGNWT="$TMP/foreignwt"
+make_worktree "$FOREIGNWT" "0.2.134"
+# The checkout's copy, pointed at a different worktree: the 0.2.109 shape.
+OUT="$(bash "$RELEASE_SH" --worktree "$FOREIGNWT" --version 0.2.134 --dry-run 2>&1)"; rc=$?
+[ "$rc" != "0" ] && printf '%s' "$OUT" | grep -q 'not inside --worktree'
+check $? "a release script outside --worktree refuses to run" "exit $rc: $(printf '%s' "$OUT" | tail -1)"
+! printf '%s' "$OUT" | grep -q '2. fresh configure'
+check $? "...before anything is built"
+OUT="$(GNLINK_ALLOW_FOREIGN_SCRIPT_DIR=1 bash "$RELEASE_SH" --worktree "$FOREIGNWT" --version 0.2.134 --sign 2>&1)"; rc=$?
+[ "$rc" != "0" ] && printf '%s' "$OUT" | grep -q 'refusing --sign'
+check $? "...and the override that lets the regression do it cannot sign" "exit $rc"
+
+printf '\n=== RV-11: settings the tools read on their own refuse a real sign or deploy\n'
+ENVWT="$TMP/envwt"
+make_worktree "$ENVWT" "0.2.134"
+for env_seam in GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT=/tmp/x GNLINK_VERIFY_PUBLIC=0 \
+                GNLINK_DEPLOY_HOST=nobody@127.0.0.1 GNLINK_DEPLOY_KEY=/tmp/nokey GNLINK_REMOTE_ROOT=/tmp/r \
+                GNLINK_PUBLIC_BASE=https://example.invalid GNLINK_UPDATES_SUBDIR=u \
+                GNLINK_MANIFEST_SUBDIR=m GNLINK_BACKUP_SUBDIR=b GNLINK_SOMETHING_NEW=1 \
+                _CL_=/DSTUB CL=/DSTUB LINK=/STUB CMAKE_TOOLCHAIN_FILE=/tmp/t.cmake \
+                CMAKE_GENERATOR=Ninja GNLINK_WEBVIEW2_SOURCE=/tmp/nosdk; do
+  OUT="$(env "$env_seam" bash "$RUN_RELEASE" --worktree "$ENVWT" --version 0.2.134 --sign --deploy 2>&1)"; rc=$?
+  [ "$rc" != "0" ] && printf '%s' "$OUT" | grep -q 'refusing --sign' \
+    && ! printf '%s' "$OUT" | grep -q '1. preflight'
+  check $? "${env_seam%%=*} alone refuses --sign --deploy at argument time" "exit $rc"
+done
+# The control: none of them set, the same arguments get past the argument gate.
+OUT="$(bash "$RUN_RELEASE" --worktree "$ENVWT" --version 0.2.999 --sign --deploy 2>&1)"
+printf '%s' "$OUT" | grep -q '1. preflight'
+check $? "...and with none of them set the same arguments reach the preflight"
+
+printf '\n=== RV-11/12: what a substituted run leaves, and what its summary says\n'
+if [ "$NINE_KEY_MADE" = "1" ]; then
+  [ -f "$NINEWT/rel-plain/0.2.134/NOT_A_RELEASE.txt" ]
+  check $? "a substituted run marks its release directory NOT_A_RELEASE.txt"
+  mkdir -p "$TMP/deploymark/payload"
+  cp "$NINEWT/rel-plain/0.2.134/NOT_A_RELEASE.txt" "$TMP/deploymark/"
+  printf 'm\n' > "$TMP/deploymark/windows.manifest"; printf 's\n' > "$TMP/deploymark/windows.sig"
+  OUT="$(GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$TMP/deploymark-root" GNLINK_VERIFY_PUBLIC=0 \
+        bash "$SCRIPT_DIR/gnlink_deploy.sh" --release-dir "$TMP/deploymark" --dry-run 2>&1)"; rc=$?
+  [ "$rc" != "0" ] && printf '%s' "$OUT" | grep -q 'NOT_A_RELEASE'
+  check $? "...and the deploy script refuses a directory carrying it, even signed" "exit $rc"
+  [ ! -e "$TMP/deploymark-root" ]
+  check $? "...before touching its target"
+  grep -q 'installer payload 9/9 (as reported by installer_check.ps1)' "$NINE/out-plain.log"
+  check $? "the installer line in the summary is the check's own count, naming the check"
+  grep -q 'deployed  : no (dry run; the deploy script was not called)' "$NINE/out-deploydry.log"
+  check $? "a dry run's summary says it deployed nothing, not 'dry run only'"
+  # The per-tool lines of the scripts hash, not the SUBSTITUTED banner that also names them.
+  grep -qE '^ +[0-9a-f]{16}  .*/bin/installer_check\.ps1$' "$NINE/out-plain.log" \
+    && grep -qE '^ +[0-9a-f]{16}  .*/bin/deploy\.sh$' "$NINE/out-plain.log" \
+    && grep -qE '^ +[0-9a-f]{16}  .*/gnlink_check_payload_set\.py$' "$NINE/out-plain.log"
+  check $? "the scripts hash lists the tools actually used, substituted ones included"
+
+  # An installer check that exits 0 without a count is not a pass.
+  cat > "$NINE/bin/installer_quiet.ps1" <<'STUBQUIET'
+param([string]$Setup, [string]$Payload)
+Write-Output "STUB: says nothing about a count"
+exit 0
+STUBQUIET
+  GNLINK_CMAKE="$NINE/bin/cmake" GNLINK_INSTALLER_PAYLOAD_CHECK="$NINE/bin/installer_quiet.ps1" \
+    bash "$RUN_RELEASE" --worktree "$NINEWT" --version 0.2.134 \
+      --build-dir "$NINEWT/build-quiet" --rel-root "$NINEWT/rel-quiet" > "$NINE/out-quiet.log" 2>&1; rc=$?
+  [ "$rc" != "0" ] && grep -q 'did not report a match count' "$NINE/out-quiet.log"
+  check $? "an installer check that reports no count fails the run" "exit $rc"
+
+  # The manifest is pinned at stage 5: an installer check that rewrites it is caught at 7b.
+  cat > "$NINE/bin/installer_tamper.ps1" <<'STUBTAMPER'
+param([string]$Setup, [string]$Payload)
+Add-Content -LiteralPath (Join-Path (Split-Path -Parent $Payload) "windows.manifest") -Value "tampered=1"
+Write-Output "9/9 embedded payloads match the release payload"
+exit 0
+STUBTAMPER
+  GNLINK_CMAKE="$NINE/bin/cmake" GNLINK_INSTALLER_PAYLOAD_CHECK="$NINE/bin/installer_tamper.ps1" \
+    bash "$RUN_RELEASE" --worktree "$NINEWT" --version 0.2.134 \
+      --build-dir "$NINEWT/build-tamper" --rel-root "$NINEWT/rel-tamper" > "$NINE/out-tamper.log" 2>&1; rc=$?
+  [ "$rc" != "0" ] && grep -q 'windows.manifest changed since stage 5' "$NINE/out-tamper.log"
+  check $? "a manifest changed after stage 5 stops the run" "exit $rc"
+else
+  printf 'SKIP  marker and summary checks (no throwaway key, so no nine-stage runs)\n'
+fi
+
+printf '\n=== RV-14: small ones\n'
+SMALLWT="$TMP/smallwt"
+make_worktree "$SMALLWT" "0.2.134"
+OUT="$(timeout 20 bash "$RUN_RELEASE" --version 0.2.134 --worktree 2>&1)"; rc=$?
+[ "$rc" != "0" ] && [ "$rc" != "124" ] && printf '%s' "$OUT" | grep -q 'needs a value'
+check $? "an option given last without its value is refused, not looped on" "exit $rc"
+
+# The D:/ form the usage allows, for a path under %TEMP% -- which the other form spells /tmp.
+mkdir -p "$SMALLWT/third_party/webview2/build/native"
+printf 'stub\n' > "$SMALLWT/third_party/webview2/build/native/WebView2Loader.dll"
+MIXED_BUILD="$(cygpath -m "$SMALLWT")/build-mixed"
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" --worktree "$SMALLWT" --version 0.2.134 \
+        --build-dir "$MIXED_BUILD" 2>&1)"
+printf '%s' "$OUT" | grep -q 'build dir: created'
+check $? "a build dir in D:/ form under the worktree is accepted" "$(printf '%s' "$OUT" | grep -m1 FAIL)"
+rm -rf "$SMALLWT/build-mixed" "$SMALLWT/.claude/rel"
+
+# An earlier run's log beside the build dir is evidence; the run stops instead of replacing it.
+printf 'an earlier log\n' > "$SMALLWT/build-logkeep.configure.log"
+OUT="$(GNLINK_CMAKE=/usr/bin/true bash "$RUN_RELEASE" --worktree "$SMALLWT" --version 0.2.134 \
+        --build-dir "$SMALLWT/build-logkeep" 2>&1)"; rc=$?
+[ "$rc" != "0" ] && grep -q 'an earlier log' "$SMALLWT/build-logkeep.configure.log"
+check $? "an existing build log is not overwritten" "exit $rc"
 
 printf '\n=== the script does not bump versions\n'
 # Reading the header is exactly what the preflight does, so the pattern has to name WRITING:

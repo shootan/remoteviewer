@@ -189,6 +189,20 @@ normalise_path() {
   return 0
 }
 
+# The ONE form every path comparison in this script uses. (RV-14)
+#
+# Two forms were being compared: `pwd -P`, which keeps whatever case the drive was entered in
+# (`cd /D/...` gives `/D/...`), and `cygpath -u`, which gives `/d/...` and maps %TEMP% to `/tmp`.
+# Measured on this PC: a legitimate path was then "outside the worktree", and the `D:/...` form the
+# usage text allows did not work at all. Going through the Windows form and back gives the same
+# answer for /D/x, /d/x and D:/x, and for %TEMP% spelled either way.
+canon_path() {
+  local w
+  w="$(cygpath -w -- "$1" 2>/dev/null)" || return 1
+  [ -n "$w" ] || return 1
+  cygpath -u -- "$w" 2>/dev/null
+}
+
 # none | reparse:<path> | error:<why>, straight from the probe. An error is a refusal.
 path_reparse_between() {
   local root="$1" target="$2" out
@@ -250,6 +264,10 @@ check_inside_worktree() {
   case "$target" in
     /|[A-Za-z]:|[A-Za-z]:/) die "refusing to use the $label: $given is a filesystem root" ;;
   esac
+  # Folded first (textually, so `..` cannot be resolved by anything that follows links), then
+  # put in the one form WORKTREE_REAL is in.
+  target="$(canon_path "$target")" \
+    || die "refusing to use the $label: cannot put $given in canonical form"
 
   # Compared after normalisation, both sides. This is the check the string-append version could
   # not make, because it never had the whole path in normal form.
@@ -298,8 +316,15 @@ make_fresh_dir() {
   # at "()" . A refusal has to stop the run, not hand back nothing.
   normalised="$(check_inside_worktree "$target" "$label")" \
     || die "refusing to create the $label"
-  [ -e "$normalised" ] && die "the $label already exists: $normalised -- move or remove it yourself; this script does not delete"
-  mkdir -p "$normalised" || die "could not create the $label at $normalised"
+  # The parents may be made freely; the directory itself by a plain mkdir, which is the atomic
+  # test-and-create. `[ -e ]` then `mkdir -p` was two moments, and `mkdir -p` does not fail on a
+  # directory that appeared between them. (RV-14)
+  mkdir -p "$(dirname "$normalised")" || die "could not create the parent of the $label at $normalised"
+  if ! mkdir "$normalised" 2>/dev/null; then
+    [ -e "$normalised" ] \
+      && die "the $label already exists: $normalised -- move or remove it yourself; this script does not delete"
+    die "could not create the $label at $normalised"
+  fi
   # Again, now that it exists: the check before could only look at an ancestor, and between the
   # two moments the path is a thing anyone with write access to the parent can replace.
   local after
@@ -336,12 +361,16 @@ usage() {
   exit 2
 }
 
+# An option that takes a value, given last with none, used to be `shift 2` on one argument -- which
+# fails without shifting, and with no `set -e` the loop went round forever. (RV-14)
+need_value() { [ $# -ge 2 ] || die "$1 needs a value"; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --worktree)  WORKTREE="${2:-}"; shift 2 ;;
-    --version)   VERSION="${2:-}"; shift 2 ;;
-    --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
-    --rel-root)  REL_ROOT="${2:-}"; shift 2 ;;
+    --worktree)  need_value "$@"; WORKTREE="$2"; shift 2 ;;
+    --version)   need_value "$@"; VERSION="$2"; shift 2 ;;
+    --build-dir) need_value "$@"; BUILD_DIR="$2"; shift 2 ;;
+    --rel-root)  need_value "$@"; REL_ROOT="$2"; shift 2 ;;
     --sign)      DO_SIGN=1; shift ;;
     --deploy)    DO_DEPLOY=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
@@ -359,6 +388,28 @@ say_if_substituted "deploy script" "$DEPLOY_SCRIPT" "$DEPLOY_SCRIPT_DEFAULT"
 # Not this script's variable, but it changes what the product verifier at stage 8 trusts, so a
 # run where it is set is not a release either. gnlink_verify_manifest.js reads it.
 [ -z "${GNLINK_PUBLIC_KEY_HEX:-}" ] || say_if_substituted "trusted public key (verifier)" "set" ""
+# Environment the tools read on their own. (RV-11) The first list is every GNLINK_* setting
+# gnlink_deploy.sh takes from the environment -- the switches its own regression uses to publish
+# into a local directory, skip the outside check, or talk to another host. With
+# GNLINK_REMOTE_MODE=local a `--sign --deploy` used to sign with the real key, "publish" to a
+# local directory and report `deployed : yes`. The second list changes what the compiler and
+# CMake produce, or which WebView2 SDK is copied in. Set to anything -- even empty -- counts.
+for env_name in GNLINK_REMOTE_MODE GNLINK_LOCAL_ROOT GNLINK_VERIFY_PUBLIC GNLINK_DEPLOY_HOST \
+                GNLINK_DEPLOY_KEY GNLINK_REMOTE_ROOT GNLINK_PUBLIC_BASE GNLINK_UPDATES_SUBDIR \
+                GNLINK_MANIFEST_SUBDIR GNLINK_BACKUP_SUBDIR \
+                _CL_ CL LINK CMAKE_TOOLCHAIN_FILE CMAKE_GENERATOR GNLINK_WEBVIEW2_SOURCE; do
+  if [ -n "${!env_name+set}" ]; then
+    say_if_substituted "environment $env_name" "set" ""
+  fi
+done
+# Every GNLINK_* variable, not only the ones named above: a new switch in a tool should not be
+# able to slip past this list by being newer than it.
+for env_name in $(compgen -e | grep '^GNLINK_' || true); do
+  case " GNLINK_CMAKE GNLINK_INSTALLER_PAYLOAD_CHECK GNLINK_DEPLOY_SCRIPT GNLINK_SIGN_KEYDIR GNLINK_PUBLIC_KEY_HEX GNLINK_REMOTE_MODE GNLINK_LOCAL_ROOT GNLINK_VERIFY_PUBLIC GNLINK_DEPLOY_HOST GNLINK_DEPLOY_KEY GNLINK_REMOTE_ROOT GNLINK_PUBLIC_BASE GNLINK_UPDATES_SUBDIR GNLINK_MANIFEST_SUBDIR GNLINK_BACKUP_SUBDIR GNLINK_WEBVIEW2_SOURCE " in
+    *" $env_name "*) ;;  # already counted above
+    *) say_if_substituted "environment $env_name" "set" "" ;;
+  esac
+done
 
 # And with any of them substituted, the two things that reach outside this machine are refused
 # here -- at argument time, so the key is never read and the network is never touched.
@@ -404,16 +455,38 @@ PAYLOAD="$REL_DIR/payload"
 step "1. preflight"
 
 cd "$WORKTREE" || die "cannot enter $WORKTREE"
-WORKTREE_REAL="$(pwd -P)"
+WORKTREE_REAL="$(canon_path "$(pwd -P)")" || die "cannot put $WORKTREE in canonical form"
+[ -n "$WORKTREE_REAL" ] || die "cannot put $WORKTREE in canonical form"
 git rev-parse --git-dir >/dev/null 2>&1 || die "$WORKTREE is not a git checkout"
 
-HEAD_SHA="$(git rev-parse HEAD)"
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+# The gates come from where this script is, so this script has to be the candidate's. (RV-13)
+# Run from another checkout, the manifest writer and its ARTIFACTS list, the payload-set gate
+# (which reads that checkout's update_process_targets.cpp), the installer check, the verifier and
+# the deploy script would all be that checkout's -- and a candidate that added or renamed a
+# payload file would pass gates that agree with each other and not with it. That is how 0.2.109
+# failed. GNLINK_ALLOW_FOREIGN_SCRIPT_DIR=1 lets the regression run fixture worktrees; being a
+# GNLINK_* variable it is a substitution, so such a run can neither sign nor publish.
+SCRIPT_DIR_REAL="$(canon_path "$(cd "$SCRIPT_DIR" && pwd -P)")" || die "cannot resolve $SCRIPT_DIR"
+case "$SCRIPT_DIR_REAL" in
+  "$WORKTREE_REAL"/?*) ;;
+  *)
+    if [ "${GNLINK_ALLOW_FOREIGN_SCRIPT_DIR:-}" = "1" ]; then
+      say "tools    : from $SCRIPT_DIR_REAL, OUTSIDE the worktree (GNLINK_ALLOW_FOREIGN_SCRIPT_DIR)"
+    else
+      die "this script is $SCRIPT_DIR_REAL, not inside --worktree $WORKTREE_REAL -- run the candidate's own automation/gnlink_release.sh; its gates must be the candidate's"
+    fi
+    ;;
+esac
+
+# A git command that fails prints nothing, and nothing reads as "clean" or "unchanged". (RV-14)
+HEAD_SHA="$(git rev-parse HEAD)" || die "git rev-parse HEAD failed"
+[ -n "$HEAD_SHA" ] || die "git rev-parse HEAD printed nothing"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)" || die "git rev-parse --abbrev-ref HEAD failed"
 say "worktree : $WORKTREE"
 say "branch   : $BRANCH"
 say "HEAD     : $HEAD_SHA"
 
-DIRTY="$(git status --porcelain --untracked-files=no)"
+DIRTY="$(git status --porcelain --untracked-files=no)" || die "git status failed; cannot tell whether the worktree is clean"
 if [ -n "$DIRTY" ]; then
   say "$DIRTY"
   die "the worktree has uncommitted tracked changes; a release must name a commit"
@@ -567,6 +640,11 @@ step "2. fresh configure -> $BUILD_DIR"
 # Fresh by creating a new directory, not by deleting an old one -- if the build dir is already
 # there, this run stops and says so rather than removing somebody's work.
 make_fresh_dir "$BUILD_DIR" "build dir"
+# The logs sit beside the build dir, not in it, so the fresh build dir says nothing about them.
+# An earlier run's log is somebody's evidence; `>` would have replaced it silently. (RV-14)
+for existing_log in "$BUILD_DIR.configure.log" "$BUILD_DIR.build.log"; do
+  [ ! -e "$existing_log" ] || die "$existing_log already exists -- an earlier run's log; move it aside yourself"
+done
 # No -DCMAKE_BUILD_TYPE. The Visual Studio generator is multi-config and setting it makes the
 # generator expressions in the installer's payload rules fail to evaluate.
 "$CMAKE" -S "$WORKTREE" -B "$BUILD_DIR" >"$BUILD_DIR.configure.log" 2>&1 \
@@ -594,6 +672,17 @@ say "all 8 executables present"
 step "4. package -> $REL_DIR"
 
 make_fresh_dir "$REL_DIR" "release dir"
+# A substituted run still lands at the real release path -- that is what lets a reviewer inspect
+# it -- so the directory says, in a file that travels with it, that it is not a release.
+# gnlink_deploy.sh refuses any release directory carrying it, so signing it by hand later cannot
+# get stub output published. (RV-11)
+if [ "$SUBSTITUTIONS" != "0" ]; then
+  {
+    printf 'NOT A RELEASE -- assembled with %s substituted tool(s) or setting(s):\n' "$SUBSTITUTIONS"
+    printf '  %s\n' "$SUBSTITUTED_LIST"
+    printf 'run %s, commit %s\n' "$RUN_ID" "$HEAD_SHA"
+  } > "$REL_DIR/NOT_A_RELEASE.txt" || die "could not write the NOT_A_RELEASE marker"
+fi
 mkdir -p "$PAYLOAD/ui" || die "could not create $PAYLOAD/ui"
 for exe in $EXES; do
   cp "$BIN/$exe.exe" "$PAYLOAD/$exe.exe" || die "could not package $exe.exe"
@@ -611,6 +700,17 @@ step "5. manifest"
 python "$SCRIPT_DIR/gnlink_release_manifest.py" write \
   --payload "$PAYLOAD" --version "$VERSION" --out "$REL_DIR/windows.manifest" \
   || die "could not write the manifest"
+# Pinned now, checked again right before it is signed and before it is published: between stage 5
+# and stage 8 there are gates, a move and minutes of wall time, and a signature over a document
+# that changed in between would be a signature over something no gate looked at. (RV-14)
+MANIFEST_SHA="$(sha256sum "$REL_DIR/windows.manifest" | cut -d' ' -f1)"
+[ -n "$MANIFEST_SHA" ] || die "could not hash the manifest"
+say "manifest sha256: $MANIFEST_SHA"
+manifest_unchanged() {
+  local now
+  now="$(sha256sum "$REL_DIR/windows.manifest" 2>/dev/null | cut -d' ' -f1)"
+  [ "$now" = "$MANIFEST_SHA" ] || die "windows.manifest changed since stage 5 ($MANIFEST_SHA -> ${now:-missing}) -- $1"
+}
 
 # ------------------------------------------------------------------- 6. checksums
 step "6. SHA256SUMS.txt"
@@ -645,10 +745,18 @@ say "-- installer payload: does GNLinkSetup carry what this release ships"
 # The installer embeds the other nine as RT_RCDATA and the update replaces the same nine. Those
 # two sets can disagree without either half looking wrong, and then the thing installed is not
 # the thing gated. 0.2.133 was checked this way by hand.
-powershell.exe -NoProfile -ExecutionPolicy Bypass \
+INSTALLER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass \
   -File "$(cygpath -w "$INSTALLER_CHECK")" \
   -Setup "$(cygpath -w "$PAYLOAD/GNLinkSetup.exe")" \
-  -Payload "$(cygpath -w "$PAYLOAD")" || die "installer payload gate failed"
+  -Payload "$(cygpath -w "$PAYLOAD")" 2>&1)"
+INSTALLER_RC=$?
+printf '%s\n' "$INSTALLER_OUT" | tr -d '\r'
+[ "$INSTALLER_RC" = "0" ] || die "installer payload gate failed"
+# What the summary says about this gate is the gate's own count, not a fixed phrase: the
+# summary used to print "9/9 PASS" whatever ran here, stub included. (RV-12)
+INSTALLER_RESULT="$(printf '%s\n' "$INSTALLER_OUT" | tr -d '\r' \
+  | sed -n 's/^\([0-9][0-9]*\/[0-9][0-9]*\) embedded payloads match the release payload$/\1/p' | tail -1)"
+[ -n "$INSTALLER_RESULT" ] || die "the installer payload check exited 0 but did not report a match count"
 
 say ""
 say "-- inputs: did anything move while this was building"
@@ -656,9 +764,10 @@ say "-- inputs: did anything move while this was building"
 # listed by sdk_inputs, and the commit itself. It does not cover untracked files -- `git status
 # --untracked-files=no` does not look at them, and the earlier note claiming this pinned every
 # input was wrong about its own check.
-DIRTY_AFTER="$(git -C "$WORKTREE" status --porcelain --untracked-files=no)"
+DIRTY_AFTER="$(git -C "$WORKTREE" status --porcelain --untracked-files=no)" \
+  || die "git status failed after the build; cannot tell whether the worktree changed"
 [ -z "$DIRTY_AFTER" ] || { say "$DIRTY_AFTER"; die "the worktree changed during the build; this release does not describe commit $HEAD_SHA"; }
-HEAD_AFTER="$(git -C "$WORKTREE" rev-parse HEAD)"
+HEAD_AFTER="$(git -C "$WORKTREE" rev-parse HEAD)" || die "git rev-parse HEAD failed after the build"
 [ "$HEAD_AFTER" = "$HEAD_SHA" ] || die "HEAD moved from $HEAD_SHA to $HEAD_AFTER during the build"
 SDK_HASH_AFTER="$(sdk_hash)"
 [ "$SDK_HASH_AFTER" = "$SDK_HASH_BEFORE" ] || die "the WebView2 SDK changed during the build ($SDK_HASH_BEFORE -> $SDK_HASH_AFTER)"
@@ -692,6 +801,8 @@ PAYLOAD="$REL_DIR/payload"
 # that changed underneath it, is not something the earlier checksum run can speak for.
 ( cd "$REL_DIR" && sha256sum -c SHA256SUMS.txt ) >/dev/null \
   || die "the release does not match its own SHA256SUMS after being moved into $REL_FINAL"
+# SHA256SUMS covers the payload, not the manifest; the manifest has its own pin from stage 5.
+manifest_unchanged "after the gates and the move"
 say "release: $REL_FINAL (verified after the move)"
 
 # ------------------------------------------------------------------- 8. sign
@@ -708,12 +819,14 @@ if [ "$DO_SIGN" = "1" ]; then
     TRUSTED_KEY="$(sed -n 's/.*return[[:space:]]*"\([0-9a-f]\{128\}\)"[[:space:]]*;.*/\1/p' \
       "$WORKTREE/apps/native_poc/src/update_manifest.cpp" | head -1)"
     [ -n "$TRUSTED_KEY" ] || die "could not read the trusted public key from update_manifest.cpp"
+    manifest_unchanged "refusing to sign it"
     powershell.exe -NoProfile -ExecutionPolicy Bypass \
       -File "$(cygpath -w "$SCRIPT_DIR/gnlink_release_sign.ps1")" \
       -ReleaseDir "$(cygpath -w "$REL_DIR")" \
       -TrustedKeyHex "$TRUSTED_KEY" \
       ${SIGN_KEYDIR:+-KeyDir "$(cygpath -w "$SIGN_KEYDIR")"} || die "signing failed"
     [ -f "$REL_DIR/windows.sig" ] || die "no windows.sig after signing"
+    manifest_unchanged "the signature is over a document no gate checked"
     SIGNED=1
     say "signed"
 
@@ -754,35 +867,49 @@ fi
 step "9. deploy"
 
 DEPLOY_LOG="$REL_DIR/deploy.log"
+DEPLOY_RC=""
 if [ "$DO_DEPLOY" = "1" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     # A dry run never signs, so requiring a signature here is requiring something this mode
     # cannot produce. What it checks instead is everything that does not need one.
-    if [ -f "$REL_DIR/windows.sig" ]; then
-      say "rehearsing publication of a release that is already signed"
-      "$DEPLOY_SCRIPT" --release-dir "$REL_DIR" --dry-run 2>&1 | tee "$DEPLOY_LOG"
-      [ "${PIPESTATUS[0]}" = "0" ] || die "deploy dry run failed (log: $DEPLOY_LOG)"
-    else
-      # Not even --verify-only. That script refuses before it reads its flags when there is no
-      # signature, so calling it here would fail on a file this mode was never going to write --
-      # which is the contradiction this whole table exists to remove, moved one layer down.
-      {
-        say "would deploy $REL_DIR"
-        say "no signature, because --dry-run does not use the key, so the deploy script is not"
-        say "called at all -- its preflight requires one before it reads any flag."
-        # NOT "run this script again with --deploy --dry-run". By then the release directory
-        # exists, and refusing to reuse an existing one is the rule two stages up -- so the
-        # advice contradicted the guard and could not be followed. The deploy script takes a
-        # release directory directly, which is what this case actually needs.
-        say "to rehearse publication of a release that IS signed, point the deploy"
-        say "script at it directly:"
-        say "  automation/gnlink_deploy.sh --release-dir <signed release dir> --dry-run"
-      } 2>&1 | tee "$DEPLOY_LOG"
-    fi
+    #
+    # There used to be a branch here for "a dry run of a release that is already signed", which
+    # called the deploy script with --dry-run. It could not be reached -- the release directory is
+    # created fresh by this run, so no signature can be in it -- and had it been reached, the
+    # deploy script's --dry-run still makes remote directories over ssh. Removed rather than kept
+    # as a path nobody runs. (RV-14)
+    #
+    # Not even --verify-only. That script refuses before it reads its flags when there is no
+    # signature, so calling it here would fail on a file this mode was never going to write --
+    # which is the contradiction this whole table exists to remove, moved one layer down.
+    {
+      say "would deploy $REL_DIR"
+      say "no signature, because --dry-run does not use the key, so the deploy script is not"
+      say "called at all -- its preflight requires one before it reads any flag."
+      # NOT "run this script again with --deploy --dry-run". By then the release directory
+      # exists, and refusing to reuse an existing one is the rule two stages up -- so the
+      # advice contradicted the guard and could not be followed. The deploy script takes a
+      # release directory directly, which is what this case actually needs.
+      say "to rehearse publication of a release that IS signed, point the deploy"
+      say "script at it directly:"
+      say "  automation/gnlink_deploy.sh --release-dir <signed release dir> --dry-run"
+    } 2>&1 | tee "$DEPLOY_LOG"
   else
     [ -f "$REL_DIR/windows.sig" ] || die "--deploy without a signature; sign first"
+    manifest_unchanged "refusing to publish it"
     "$DEPLOY_SCRIPT" --release-dir "$REL_DIR" 2>&1 | tee "$DEPLOY_LOG"
-    [ "${PIPESTATUS[0]}" = "0" ] || die "deploy failed (log: $DEPLOY_LOG)"
+    DEPLOY_RC="${PIPESTATUS[0]}"
+    # The deploy script's exit codes mean different things and are passed on as they are: 3 is
+    # "a person with sudo has to do the printed operations", 4 is "the manifest/sig swap failed
+    # part-way -- restore the backup pair". Folding both into 1 hid which one happened. (RV-14)
+    case "$DEPLOY_RC" in
+      0) ;;
+      3) printf 'ESCALATE  the deploy script needs operations the gnlink account cannot do -- they are printed above (log: %s)\n' "$DEPLOY_LOG" >&2
+         exit 3 ;;
+      4) printf 'FAIL  the manifest/sig swap failed part-way: what is published may be a NEW manifest with an OLD signature. Restore the exact backup pair by hand (log: %s)\n' "$DEPLOY_LOG" >&2
+         exit 4 ;;
+      *) die "deploy failed with exit $DEPLOY_RC (log: $DEPLOY_LOG)" ;;
+    esac
   fi
 else
   say "not requested (--deploy)"
@@ -799,7 +926,26 @@ say "release   : $REL_DIR"
 say "run id    : $RUN_ID"
 say "sdk       : $SDK_HASH_BEFORE"
 say "signed    : $([ "$SIGNED" = "1" ] && echo yes || { [ -f "$REL_DIR/windows.sig" ] && echo 'yes (from an earlier run)' || echo no; })"
-say "deployed  : $([ "$DO_DEPLOY" = "1" ] && { [ "$DRY_RUN" = "1" ] && echo 'dry run only' || echo yes; } || echo no)"
+# From what the deploy script DID and what its outside check SAID, not from the flag that asked
+# for it. `deployed : yes` used to follow from --deploy alone, so a run whose outside check was
+# skipped read exactly like one whose check passed. (RV-12)
+external_result() {
+  [ -f "$DEPLOY_LOG" ] || { printf 'no deploy log'; return; }
+  local verified
+  verified="$(grep -oE 'all [0-9]+ artifacts fetched anonymously over https and hash as signed' "$DEPLOY_LOG" | tail -1)"
+  if [ -n "$verified" ]; then printf 'VERIFIED -- %s' "$verified"
+  elif grep -q 'SKIPPED' "$DEPLOY_LOG"; then printf 'NOT VERIFIED -- the outside check was skipped'
+  elif grep -qi 'curl unavailable' "$DEPLOY_LOG"; then printf 'NOT VERIFIED -- curl was unavailable'
+  else printf 'NOT VERIFIED -- the deploy log has no result line for it'
+  fi
+}
+if [ "$DO_DEPLOY" != "1" ]; then
+  say "deployed  : no (not requested)"
+elif [ "$DRY_RUN" = "1" ]; then
+  say "deployed  : no (dry run; the deploy script was not called)"
+else
+  say "deployed  : deploy script exited $DEPLOY_RC; outside check: $(external_result)"
+fi
 say ""
 say "artifact sha256:"
 sed 's/^/  /' "$REL_DIR/SHA256SUMS.txt"
@@ -808,15 +954,26 @@ if [ "$SUBSTITUTIONS" != "0" ]; then
   say ""
   say "NOT A RELEASE: $SUBSTITUTIONS tool(s) were substituted, listed at the top of this run."
 fi
-say "gates: parity PASS, payload-set PASS, checksums PASS, installer payload 9/9 PASS,"
+say "gates: parity PASS, payload-set PASS, checksums PASS, installer payload $INSTALLER_RESULT (as reported by $(basename "$INSTALLER_CHECK")),"
 say "       tracked files, the listed SDK inputs and the commit unchanged since preflight"
 say "       (untracked files are NOT covered by that check)"
 say "commit    : $HEAD_SHA"
 say "sdk set   : $SDK_HASH_BEFORE  ($(sdk_inputs 2>/dev/null | wc -l | tr -d ' ') files)"
-say "scripts   : $(cd "$SCRIPT_DIR" && sha256sum gnlink_release.sh gnlink_release_sign.ps1 \
-  gnlink_path_probe.ps1 gnlink_release_manifest.py gnlink_check_installer_payload.ps1 2>/dev/null \
-  | sha256sum | cut -d' ' -f1)"
-say "           (this script and the tools it calls, so a run can be traced to what ran it)"
+# Every tool this run can call, at the path it actually used (a substituted one included), and a
+# missing one is a failure rather than a file quietly left out of the hash. (RV-12)
+SCRIPT_FILES=("$SCRIPT_DIR/gnlink_release.sh" "$SCRIPT_DIR/gnlink_release_sign.ps1"
+              "$SCRIPT_DIR/gnlink_path_probe.ps1" "$SCRIPT_DIR/gnlink_release_manifest.py"
+              "$SCRIPT_DIR/gnlink_check_payload_set.py" "$SCRIPT_DIR/gnlink_verify_manifest.js"
+              "$INSTALLER_CHECK" "$DEPLOY_SCRIPT")
+for tool_file in "${SCRIPT_FILES[@]}"; do
+  [ -f "$tool_file" ] || die "summary: the tool $tool_file is missing, so this run cannot say what ran it"
+done
+say "scripts   : $(sha256sum "${SCRIPT_FILES[@]}" | sha256sum | cut -d' ' -f1)"
+say "           (the ${#SCRIPT_FILES[@]} tools this script calls, as used by this run:"
+for tool_file in "${SCRIPT_FILES[@]}"; do
+  say "            $(sha256sum "$tool_file" | cut -c1-16)  $tool_file"
+done
+say "           )"
 if [ "$SIGNED" = "1" ]; then
   say "       signature verified by the product's own verifier"
 fi
@@ -825,7 +982,10 @@ fi
 if [ -f "$DEPLOY_LOG" ]; then
   say ""
   say "external check, from $DEPLOY_LOG:"
-  grep -iE "https|sha256|published|manifest|sig" "$DEPLOY_LOG" | tail -12 | sed 's/^/  /' \
+  # SKIPPED, WARN and failures are kept: filtering on "https|sha256|..." kept the heading of a
+  # check that never ran and dropped the line saying it never ran. (RV-12)
+  grep -iE "https|sha256|published|manifest|sig|SKIPPED|WARN|could not|ERROR|not verified" "$DEPLOY_LOG" \
+    | tail -16 | sed 's/^/  /' \
     || say "  (nothing matched in the deploy log)"
 fi
 exit 0

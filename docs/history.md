@@ -12470,3 +12470,14 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 증거(⑴ 제품 셸 코드 + 제품 shell.html 을 WebView2 로 띄운 시험 빌드, 제품 창 실기 아님): `client_recovery_ui_test` 에 교체 사례 — 카드 클릭(DOM) → 실제 뷰어 A → 같은 PC 재시작 → A 종료 채택 뒤에도 카드 "연결하는 중…"·목록 잠금 유지, B 종료 뒤에만 잠금 해제. 3/3 exit 0(49 PASS). 변이(RV-05 되돌림) → 그 단언 FAIL. viewer_cancel_e2e 2/2(30/0).
 - 실제 설정 파일 전 기록 불변. 빌드 게이트: `GNLinkClient.exe` 에 시험 seam 문자열 0건.
 - 제품/테스트/문서: 제품(`client_shell_main.cpp`, 뷰어 `native_video_client_main.cpp`·`viewer_startup.cpp`) / 테스트(`client_recovery_ui_test.cpp`) / 문서(이 항목).
+
+### 2026-09-23 rv-remediation D — 릴리스 스크립트가 "게시했다" 고 말하려면
+
+- **RV-11**: 실제 `--sign`/`--deploy` 는 deploy 스크립트가 읽는 `GNLINK_*` 10개, 이름 없는 모든 `GNLINK_*`, 빌드 환경(`_CL_`·`CL`·`LINK`·`CMAKE_TOOLCHAIN_FILE`·`CMAKE_GENERATOR`·`GNLINK_WEBVIEW2_SOURCE`) 중 하나라도 있으면 인자 단계에서 거부. 대체된 실행은 릴리스 디렉터리에 `NOT_A_RELEASE.txt` 를 남기고, `gnlink_deploy.sh` 는 그 표지가 있는 디렉터리를 거부.
+- **RV-12**: 요약의 `deployed` 는 deploy 종료 코드와 외부 확인 결과(VERIFIED / NOT VERIFIED: skipped · no curl · no result)로. 외부 확인 발췌에서 SKIPPED·WARN·ERROR 를 버리지 않음. 설치본 줄은 검사가 출력한 `N/M` 을 그대로(없으면 실패). scripts 해시는 실제로 쓴 도구 8개 경로별, 없는 파일은 실패.
+- **RV-13**: `SCRIPT_DIR` 이 `--worktree` 안이 아니면 거부(0.109 재현 경로). 회귀용 `GNLINK_ALLOW_FOREIGN_SCRIPT_DIR=1` 은 그 자체가 대체라 서명·게시 불가.
+- **RV-14**: 경로는 한 정규화(`canon_path`: `/D/x`·`/d/x`·`D:/x`, %TEMP% 두 표기가 같은 값). git 명령 실패 검사. 값 없는 마지막 옵션 거부(무한 루프 제거). `make_fresh_dir` 는 `mkdir` 한 번으로 생성·존재 확인. 빌드 로그 덮어쓰기 거부. manifest 를 5단계에서 해시로 고정해 7b·서명 전후·게시 전 확인. deploy 종료 코드 3(ESCALATE)·4(부분 교체, deploy 쪽 새 코드)를 그대로 전달. 도달 불가 리허설 분기 제거.
+- 회귀(`gnlink_release_test.sh`): 후보 자신의 스크립트로 실행하도록 하네스 변경. `KEY_MADE` 판정 버그와 "두 실행 중 하나 거부" 단언(이제 잠금/예약으로 정확히 하나, 다른 하나는 빌드 진입) 수정. 161 checks 2회 ALL PASS. 변이 10개(`.claude/rv_d_mut.py`) 동시 적용 → 27 FAIL, 각 수정에 대응.
+- ⚠️ 회귀가 대신하지 못하는 것: ssh·curl·실서명(대체 시 서명 거부라 stub 로는 8단계 실서명 불가), deploy 종료 3/4 전달(실게시 경로에서만 도달), manifest 서명 직전 고정(같은 이유; 7b 고정만 시험됨).
+- ⚠️ `CLAUDE.md` "릴리스 배포" 절의 `gnlink_deploy.sh:435-445` 줄 번호·"die 문구" 서술은 이 변경(부분 교체 exit 4, 새 문구)으로 어긋난다 — 문서·정책 파일이라 이 작업에서 고치지 않았다.
+- 제품/테스트/문서: 제품(배포 스크립트 2개) / 테스트(`gnlink_release_test.sh`) / 문서(이 항목).

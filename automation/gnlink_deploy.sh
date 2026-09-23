@@ -31,6 +31,11 @@
 #
 # --verify-only compares what is already published against the release directory and changes
 # nothing. It is the right first command against a server whose state you did not create.
+#
+# Exit codes: 0 done · 1 failed (read the message: a failure of the outside check at the end
+# happens AFTER the swap, so it is not "nothing changed") · 2 usage · 3 ESCALATE (needs sudo;
+# the operations are printed) · 4 the manifest/sig swap failed part-way -- what is published may
+# be a new manifest with an old signature; restore the recorded backup pair by hand.
 
 set -euo pipefail
 
@@ -107,6 +112,11 @@ MANIFEST="$RELEASE_DIR/$PLATFORM.manifest"
 SIGNATURE="$RELEASE_DIR/$PLATFORM.sig"
 PAYLOAD="$RELEASE_DIR/payload"
 
+# A release directory assembled with substituted tools carries this file (gnlink_release.sh
+# writes it). Nothing in it was built by the real toolchain, and signing it by hand later does not
+# change that. (RV-11)
+[ ! -e "$RELEASE_DIR/NOT_A_RELEASE.txt" ] \
+  || die "$RELEASE_DIR is marked NOT_A_RELEASE.txt -- it was assembled with substituted tools; refusing to touch the server"
 [ -f "$MANIFEST" ]  || die "no manifest at $MANIFEST"
 [ -f "$SIGNATURE" ] || die "no signature at $SIGNATURE"
 [ -d "$PAYLOAD" ]   || die "no payload directory at $PAYLOAD"
@@ -443,7 +453,11 @@ publish_pair() {
   remote_sh "chmod 644 -- '$dst_manifest.tmp' '$dst_sig.tmp'"
   if ! remote_sh "mv -f -- '$dst_manifest.tmp' '$dst_manifest' && mv -f -- '$dst_sig.tmp' '$dst_sig'"; then
     warn "temporary files retained for diagnosis; restore BOTH files from the recorded backup"
-    die "the swap failed; the published pair may be partially replaced"
+    # Its own exit code (RV-14): unlike every other failure, this one may have CHANGED what is
+    # published -- the manifest new and the signature old -- and needs a person to restore the
+    # exact backup pair. The release script passes it through instead of folding it into 1.
+    printf 'ERROR %s\n' "the swap failed; the published pair may be partially replaced -- restore the backup pair" >&2
+    exit 4
   fi
   log "published $VERSION"
   log "no restart: only manifest files changed; server code and environment are unchanged"
