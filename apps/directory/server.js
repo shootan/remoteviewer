@@ -139,7 +139,12 @@ const WAKE_RESEND_MAX_TIMERS = 64;
 // Only ever aimed at an address a heartbeat confirmed recently. An older one is a mapping that
 // has probably closed, and firing at it is at best noise to a stranger who now holds that port.
 const WAKE_HOST_FRESH_MS = 90 * 1000;
-// hostId -> last send, so repeated connects for one host collapse into a single burst.
+// hostId -> last BURST, so repeated connects for one host collapse into a single burst.
+//
+// Bursts only. The resend used to stamp this too, once a second, so a new connect arriving while
+// a resend ran was almost always refused its burst with reason=rate -- a replacing connect got
+// one datagram a second later instead of three now. The resend keeps its own time in its record
+// and still waits out WAKE_MIN_INTERVAL_MS after a burst before it sends. (RV-10)
 const wakeLastSentByHost = new Map();
 // hostId -> { connectId, generation, sent, timer }. One entry per HOST: a second connect to the
 // same host replaces the entry rather than adding a timer, and the replacement takes a new
@@ -147,7 +152,7 @@ const wakeLastSentByHost = new Map();
 const wakeResendByHost = new Map();
 let wakeResendGeneration = 0;
 const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0,
-                    resent: 0, resendStopped: 0, resendCapped: 0 };
+                    resent: 0, resendStopped: 0, resendCapped: 0, resendReplaced: 0 };
 
 // ---------------------------------------------------------------- CONNECT-DIAG
 //
@@ -1099,13 +1104,19 @@ function startWakeResend(sock, host, connectId) {
   // did run could not send anything extra. So removing this line changes nothing observable, and
   // no test here catches it -- it is not proven, it is structurally unnecessary, and it stays
   // because the alternative is relying on three separate things all continuing to be true.
-  if (existing) clearTimeout(existing.timer);
+  if (existing) {
+    clearTimeout(existing.timer);
+    // Said and counted, because it changes which connect the datagrams belong to. (RV-10)
+    wakeStats.resendReplaced++;
+    console.log(`[wake] connect=${connectId} resend replaced connect=${existing.connectId} ` +
+                `after ${existing.sent}`);
+  }
 
   const generation = ++wakeResendGeneration;
   // A newer connect gets its own allowance of ten. It is a new request from a real user, and the
   // rate is bounded by the interval and by WAKE_MIN_INTERVAL_MS regardless of how the count is
   // carried; what must not happen is two timers for one host, and there is still only one.
-  const record = { connectId, generation, sent: 0, timer: null };
+  const record = { connectId, generation, sent: 0, timer: null, lastSentAt: 0 };
   wakeResendByHost.set(host.hostId, record);
 
   const tick = () => {
@@ -1131,13 +1142,17 @@ function startWakeResend(sock, host, connectId) {
       stopWakeResend(host.hostId, 'host-gone');
       return;
     }
+    // The host as it is NOW. The one captured when this was armed is a stale object once the
+    // host re-registers -- registration replaces store.hosts[hostId] with a new object -- and its
+    // lastSeen and address stop moving. Read first, before anything is decided from it. (RV-10)
+    const live = store.hosts[host.hostId];
     if (!hasLiveCapability(host.hostId)) {
       // Collected or expired. The heartbeat path says "collected" itself and gets here first;
       // this covers expiry, and a connect whose capability was never queued.
       stopWakeResend(host.hostId, 'no-capability');
       return;
     }
-    if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
+    if (Date.now() - live.lastSeen > WAKE_HOST_FRESH_MS) {
       stopWakeResend(host.hostId, 'stale-host');
       return;
     }
@@ -1145,7 +1160,8 @@ function startWakeResend(sock, host, connectId) {
       stopWakeResend(host.hostId, 'budget');
       return;
     }
-    const since = Date.now() - (wakeLastSentByHost.get(host.hostId) || 0);
+    // After a burst (any connect's) or this resend's own last datagram, whichever is later.
+    const since = Date.now() - Math.max(wakeLastSentByHost.get(host.hostId) || 0, current.lastSentAt);
     if (since < WAKE_MIN_INTERVAL_MS) {
       // Not a failure: the burst, or another connect, has just sent one. Wait out the floor and
       // try again rather than sending a second datagram inside the same interval.
@@ -1154,8 +1170,8 @@ function startWakeResend(sock, host, connectId) {
       return;
     }
 
-    const aim = hostSendTargetFor(host, onServerLan);
-    wakeLastSentByHost.set(host.hostId, Date.now());
+    const aim = hostSendTargetFor(live, onServerLan);
+    current.lastSentAt = Date.now();
     current.sent++;
     wakeStats.resent++;
     const packet = buildPunchPacket();
@@ -1190,6 +1206,7 @@ function logWakeStats() {
   if (!WAKE_ENABLED || wakeStats.sent === 0) return;
   console.log(`[wake] sent=${wakeStats.sent} resent=${wakeStats.resent} ` +
               `resendStopped=${wakeStats.resendStopped} resendCapped=${wakeStats.resendCapped} ` +
+              `resendReplaced=${wakeStats.resendReplaced} ` +
               `suppressed=${wakeStats.suppressed} ` +
               `skippedStale=${wakeStats.skippedStale} failed=${wakeStats.failed}`);
 }

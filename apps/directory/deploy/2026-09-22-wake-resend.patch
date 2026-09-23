@@ -2,7 +2,7 @@
 #
 # Base: /opt/gnlink/remote60-directory/server.js as deployed,
 #       sha256 27b730e7a3c89631fb37c10515f664c74c4412509c6d7170c8dcbd2ec20139d1
-# After: sha256 69451c906b809a9996c1faa8177b3475869d9e74c150d38b0faa1a36f874e036
+# After: sha256 9f54e188180c52b60c5a1063bc4b3988259dec91bdc9b7113175eb8e0815ede3
 #
 # Why: the wake is a burst of three datagrams inside 300ms. A host that misses all three --
 # asleep, or with its heartbeat 25 seconds away -- is never poked again, and the capability sits
@@ -42,7 +42,7 @@
 #   sha256sum server.js            # must be 27b730e7a3c89631...
 #   cp -p server.js server.js.bak-2026-09-22
 #   patch -p0 server.js < 2026-09-22-wake-resend.patch
-#   sha256sum server.js            # must be 69451c906b809a99...
+#   sha256sum server.js            # must be 9f54e188180c52b6...
 #   node --check server.js
 #   sudo systemctl restart <unit>  # the server reads this file once, at start
 #
@@ -53,7 +53,24 @@
 #   sudo systemctl restart <unit>
 #
 # NOT APPLIED. Deploying and restarting is remote_claude's, not this file's.
-@@ -122,12 +122,32 @@
+#
+# Regenerated 2026-09-23 (rv-remediation r1, RV-10) -- the previous version of this file (after
+# 69451c90...) was never applied, so this replaces it rather than stacking on it. Three changes:
+#   - the resend keeps its own clock (record.lastSentAt) and no longer stamps the per-host BURST
+#     clock. Before, a connect arriving while a resend ran was refused its burst (reason=rate)
+#     and got one datagram a second later instead of three at once. Measured in
+#     wake_resend_test.js against the old code: "0 datagrams in the 450 ms after it".
+#   - each tick reads store.hosts[hostId] afresh; registration replaces that object, and the one
+#     captured at arm time stops moving. (Not reachable through the API today -- the heartbeat
+#     that would update the new object also collects the capability and stops the resend -- so
+#     no test fails without it; it is there so that stays true if the order ever changes.)
+#   - a replacement is logged ("resend replaced connect=<old> after <n>") and counted
+#     (resendReplaced in the [wake] stats line).
+# Tested: wake_resend_test.js 33/33 three times (replacement, expiry, stale, tick-error and the
+# 64-timer ceiling now each have a check; expiry/stale/tick-error are driven by a --require
+# preload in the test, server.js has no test switch). Against the pre-RV-10 server: 3 FAIL.
+# Apply reproduced: the deployed base (27b730e7...) + this file -> 9f54e188..., node --check OK.
+@@ -122,12 +122,37 @@
  const WAKE_ENABLED = process.env.REMOTE60_WAKE_DISABLED !== '1';
  const WAKE_PACKETS = [0, 100, 300];        // one datagram is one chance
  const WAKE_MIN_INTERVAL_MS = 1000;         // per host; a retrying client must not become a flood
@@ -74,7 +91,13 @@
  // Only ever aimed at an address a heartbeat confirmed recently. An older one is a mapping that
  // has probably closed, and firing at it is at best noise to a stranger who now holds that port.
  const WAKE_HOST_FRESH_MS = 90 * 1000;
- // hostId -> last send, so repeated connects for one host collapse into a single burst.
+-// hostId -> last send, so repeated connects for one host collapse into a single burst.
++// hostId -> last BURST, so repeated connects for one host collapse into a single burst.
++//
++// Bursts only. The resend used to stamp this too, once a second, so a new connect arriving while
++// a resend ran was almost always refused its burst with reason=rate -- a replacing connect got
++// one datagram a second later instead of three now. The resend keeps its own time in its record
++// and still waits out WAKE_MIN_INTERVAL_MS after a burst before it sends. (RV-10)
  const wakeLastSentByHost = new Map();
 -const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0 };
 +// hostId -> { connectId, generation, sent, timer }. One entry per HOST: a second connect to the
@@ -83,11 +106,11 @@
 +const wakeResendByHost = new Map();
 +let wakeResendGeneration = 0;
 +const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0,
-+                    resent: 0, resendStopped: 0, resendCapped: 0 };
++                    resent: 0, resendStopped: 0, resendCapped: 0, resendReplaced: 0 };
  
  // ---------------------------------------------------------------- CONNECT-DIAG
  //
-@@ -997,11 +1017,159 @@
+@@ -997,11 +1022,171 @@
    return true;
  }
  
@@ -152,13 +175,19 @@
 +  // did run could not send anything extra. So removing this line changes nothing observable, and
 +  // no test here catches it -- it is not proven, it is structurally unnecessary, and it stays
 +  // because the alternative is relying on three separate things all continuing to be true.
-+  if (existing) clearTimeout(existing.timer);
++  if (existing) {
++    clearTimeout(existing.timer);
++    // Said and counted, because it changes which connect the datagrams belong to. (RV-10)
++    wakeStats.resendReplaced++;
++    console.log(`[wake] connect=${connectId} resend replaced connect=${existing.connectId} ` +
++                `after ${existing.sent}`);
++  }
 +
 +  const generation = ++wakeResendGeneration;
 +  // A newer connect gets its own allowance of ten. It is a new request from a real user, and the
 +  // rate is bounded by the interval and by WAKE_MIN_INTERVAL_MS regardless of how the count is
 +  // carried; what must not happen is two timers for one host, and there is still only one.
-+  const record = { connectId, generation, sent: 0, timer: null };
++  const record = { connectId, generation, sent: 0, timer: null, lastSentAt: 0 };
 +  wakeResendByHost.set(host.hostId, record);
 +
 +  const tick = () => {
@@ -184,13 +213,17 @@
 +      stopWakeResend(host.hostId, 'host-gone');
 +      return;
 +    }
++    // The host as it is NOW. The one captured when this was armed is a stale object once the
++    // host re-registers -- registration replaces store.hosts[hostId] with a new object -- and its
++    // lastSeen and address stop moving. Read first, before anything is decided from it. (RV-10)
++    const live = store.hosts[host.hostId];
 +    if (!hasLiveCapability(host.hostId)) {
 +      // Collected or expired. The heartbeat path says "collected" itself and gets here first;
 +      // this covers expiry, and a connect whose capability was never queued.
 +      stopWakeResend(host.hostId, 'no-capability');
 +      return;
 +    }
-+    if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
++    if (Date.now() - live.lastSeen > WAKE_HOST_FRESH_MS) {
 +      stopWakeResend(host.hostId, 'stale-host');
 +      return;
 +    }
@@ -198,7 +231,8 @@
 +      stopWakeResend(host.hostId, 'budget');
 +      return;
 +    }
-+    const since = Date.now() - (wakeLastSentByHost.get(host.hostId) || 0);
++    // After a burst (any connect's) or this resend's own last datagram, whichever is later.
++    const since = Date.now() - Math.max(wakeLastSentByHost.get(host.hostId) || 0, current.lastSentAt);
 +    if (since < WAKE_MIN_INTERVAL_MS) {
 +      // Not a failure: the burst, or another connect, has just sent one. Wait out the floor and
 +      // try again rather than sending a second datagram inside the same interval.
@@ -207,8 +241,8 @@
 +      return;
 +    }
 +
-+    const aim = hostSendTargetFor(host, onServerLan);
-+    wakeLastSentByHost.set(host.hostId, Date.now());
++    const aim = hostSendTargetFor(live, onServerLan);
++    current.lastSentAt = Date.now();
 +    current.sent++;
 +    wakeStats.resent++;
 +    const packet = buildPunchPacket();
@@ -244,11 +278,12 @@
 -  console.log(`[wake] sent=${wakeStats.sent} suppressed=${wakeStats.suppressed} ` +
 +  console.log(`[wake] sent=${wakeStats.sent} resent=${wakeStats.resent} ` +
 +              `resendStopped=${wakeStats.resendStopped} resendCapped=${wakeStats.resendCapped} ` +
++              `resendReplaced=${wakeStats.resendReplaced} ` +
 +              `suppressed=${wakeStats.suppressed} ` +
                `skippedStale=${wakeStats.skippedStale} failed=${wakeStats.failed}`);
  }
  
-@@ -1392,8 +1560,15 @@
+@@ -1392,8 +1577,15 @@
    // not arrived yet" was a guess until mint-to-collect could be read off one line.
    if (punches.length) {
      const waited = punches.map((p) => `${p.connectId || '?'}:${Date.now() - (p.mintedAt || Date.now())}ms`);
@@ -265,7 +300,7 @@
    }
    sendJson(res, 200, {
      ok: true,
-@@ -1490,6 +1665,9 @@
+@@ -1490,6 +1682,9 @@
    // that anyone was waiting -- the relay answers punches rather than forwarding them -- and on the
    // direct path the peer's own punch is dropped by exactly the restrictive NATs where it matters.
    sendWakePunch(observeSock, host, connectId);

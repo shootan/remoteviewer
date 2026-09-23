@@ -12481,3 +12481,13 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - ⚠️ 회귀가 대신하지 못하는 것: ssh·curl·실서명(대체 시 서명 거부라 stub 로는 8단계 실서명 불가), deploy 종료 3/4 전달(실게시 경로에서만 도달), manifest 서명 직전 고정(같은 이유; 7b 고정만 시험됨).
 - ⚠️ `CLAUDE.md` "릴리스 배포" 절의 `gnlink_deploy.sh:435-445` 줄 번호·"die 문구" 서술은 이 변경(부분 교체 exit 4, 새 문구)으로 어긋난다 — 문서·정책 파일이라 이 작업에서 고치지 않았다.
 - 제품/테스트/문서: 제품(배포 스크립트 2개) / 테스트(`gnlink_release_test.sh`) / 문서(이 항목).
+
+### 2026-09-23 rv-remediation F — wake 재전송이 다음 connect 의 burst 를 막고 있었다 (RV-10)
+
+- 재전송 tick 이 매초 per-host **burst** 시계(`wakeLastSentByHost`)를 찍어, 재전송 중에 온 새 connect 는 거의 항상 `reason=rate` 로 burst 를 잃었다(구 서버로 측정: 두 번째 connect 뒤 450ms 동안 0발). 재전송은 자기 시계(`record.lastSentAt`)를 쓰고 burst 뒤 최소 간격만 지킨다.
+- tick 이 매번 `store.hosts[hostId]` 를 새로 읽는다(재등록은 객체를 바꾼다). ⚠️ API 로는 두 객체가 갈라지는 순간에 heartbeat 가 capability 를 거둬 재전송이 멈추므로 **실패하는 시험을 만들 수 없었다** — 구조적 보강.
+- 교체는 `resend replaced connect=<old> after <n>` 로그와 `resendReplaced` 카운터.
+- `wake_resend_test.js`: 세 connect 상한을 실측값 13(= burst 3 + 재전송 10, 이전 20)으로, 교체 로그, 재전송 중 새 burst, 만료(`no-capability`)·stale·tick-error(시험 전용 `--require` preload 로 시계 이동·송신 예외, server.js 무변경)·64 타이머 상한. 33/33 3회, 구 서버로 3 FAIL, 배포본 기준 after 로도 PASS, `test/run.js` 전체 ALL PASS.
+- ⚠️ 관찰: 시계가 뒤로 가면(시험의 +80초 뒤 복귀처럼) 그 호스트의 burst·재전송이 되돌아간 폭만큼 멈춘다(`sinceLastMs` 음수). 고치지 않았다(범위 밖, 보고).
+- `deploy/2026-09-22-wake-resend.patch` 재생성: base 27b730e7…(배포본) → after **9f54e188…**. 배포본 사본에 적용 재현·`node --check` OK·시험한 파일과 바이트 동일. **미적용**(배포는 게시 담당). RV-09 는 하지 않음.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, 배포 patch) / 테스트(`wake_resend_test.js`, `wake_resend_preload.js`) / 문서(이 항목).
