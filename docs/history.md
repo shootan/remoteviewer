@@ -12511,3 +12511,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 측정: 6 Mb/s 병목에서 기울기는 첫 드롭 2초 전부터 올랐지만 임계(6 ms) 미달, overuse 는 첫 드롭과 같은 초~1초 뒤. 큐가 찬 채면 지연 전용 추정은 손실 100% 에도 증가. → ② 전 재검토 항목(임계·표본·손실 성분).
 - 시험: 추정기 30/0 · 와이어 25/0 · 변이 8 전부 FAIL · e2e on×2/off×1 exit 0 · 실제 설정 파일 불변(새 기준 host.json 6c4f9b21…).
 - 제품/테스트/문서: 제품(뷰어 추정·송신, 호스트 협상·로그, 프로토콜) / 테스트(추정기·와이어·관찰 e2e) / 문서(구현계획 C0, 이 항목).
+
+### 2026-09-23 C13·C14 부채 — 1/10 로 실패하던 시험은 자기가 fixture 를 죽이고 있었다
+
+- **updater_scenarios `9 client-only: the client actually ran`**(검증용 측정 1/10·1/12): 시나리오 끝 정리 스윕이, 직접 기동(`started in the user context`)된 클라이언트 fixture 가 witness 를 쓰기 **전에** 종료했다. 시나리오 9 는 run_scenario 가 돌아온 뒤 10초 기다리므로 이미 죽은 것을 기다렸다. 먼저 실패 출력을 넣었다(대기 ms·witness 존재/내용·pid 별 자체 종료·스윕이 죽인 것). CPU 16코어 부하에서 수정 전 동작(`REMOTE60_SCN_NO_SETTLE=1`) 10/10 재현(`swept=[ScnClient.exe pid=…] witness=[]`), 수정(스윕 전 직접 기동 pid 자체 종료 대기, 인스턴스 계수는 그 전) 뒤 부하 10회·무부하 30회 연속 143/0. 남은 것: 셸 경유로 한 번 더 기동된 클라이언트는 pid 를 몰라 스윕이 가끔 거둔다(부하 10회 중 2회, 단언 영향 없음).
+- **업데이터 판정 줄**(0.0.10): 조기 종료가 전부 `result: NotRun -- exit N` 으로 끝나고, 작업 사본 기동을 pid·breakaway 여부와 함께 기록. 새 회귀(실제 updater 를 asInvoker 시험 빌드로 실행)가 **제품 결함 하나를 더** 찾았다 — 부트스트랩과 작업 사본이 같은 로그를 deny-write 로 열어 늦은 쪽 줄이 사라졌다(인계 10회 중 1~2회). `_wfsopen(_SH_DENYNO)` 로 수정.
+- **업로더 0xC0000409**: 원인 수정은 b4d2a7a(#495). 원장 조건(credentials 제거 뒤) 그대로의 회귀를 추가 — guard 없이 exit 3, 있으면 0. 현장 크래시 원인 단정은 여전히 하지 않는다.
+- **백업 이름**(0.0.7): 새 manifest 백업은 `<version>+<releaseId>` + BACKUP_INFO(artifact 수). 서버의 기존 백업은 그대로라 "이름만 보고 고르지 않는다" 는 계속 유효.
+- 이미 해결이던 것: 0.0.2(3c6248d) · #5/#6(a3a4182·2ca5aaa) · 0.0.6(8e7ccea). 0.0.4 는 콘솔 5회 재현 안 됨(fps 58–60, worker p95 18–19 ms / 문턱 35). 0.0.5 는 시험이 격리 호스트를 스스로 띄움.
+- 제품/테스트/문서: 제품(updater_main.cpp, gnlink_deploy.sh) / 테스트(scenarios·exit_record·log_upload_shutdown·udp_control_e2e·deploy_test) / 문서(작업목록 C13·C14, 이 항목).
