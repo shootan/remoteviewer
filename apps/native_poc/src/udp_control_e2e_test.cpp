@@ -2,7 +2,13 @@
 // socket, which is the only path a host behind NAT can offer. Verifies the parts of the
 // session that would be dead if the tunnel were broken: window list, selection, and video.
 //
-// Usage: remote60_udp_control_e2e_test <host> <videoPort>
+// Usage: remote60_udp_control_e2e_test                     starts its own isolated loopback host
+//                                                          (REMOTE60_ALLOW_HOST_E2E=1; else exit 77)
+//        remote60_udp_control_e2e_test <host> <videoPort>  against a host you started
+
+#include "e2e_isolation.hpp"
+
+#include <vector>
 
 #include <atomic>
 #include <chrono>
@@ -64,27 +70,148 @@ bool wait_until(Fn&& fn, int timeoutMs) {
 
 }  // namespace
 
+constexpr int kSelfHostPort = 44799;
+
+/** The host this test starts for itself when run without arguments. */
+struct SelfHost {
+  std::wstring dir;
+  HANDLE job = nullptr;
+  PROCESS_INFORMATION pi{};
+  HANDLE log = INVALID_HANDLE_VALUE;
+  bool launched = false;
+
+  bool Start(std::string* why) {
+    using namespace remote60::native_poc::e2e;
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    dir = std::wstring(temp) + L"remote60_udpctl_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+    CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring myDir(self);
+    myDir = myDir.substr(0, myDir.find_last_of(L"\\/") + 1);
+    if (!CopyFileW((myDir + L"GNLinkStream.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) ||
+        !CopyFileW(self, (dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
+      *why = "could not stage the host";
+      return false;
+    }
+    job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+    SetEnvironmentVariableW(L"REMOTE60_NATIVE_FRAME_GATING_DISABLE", L"1");
+    std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
+                       L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kSelfHostPort) +
+                       L" --seconds 180 --input-injection-mode none";
+    // Refused, not launched, unless injection is off: the checks below send mouse events.
+    if (cmd.find(L" --input-injection-mode none") == std::wstring::npos) {
+      *why = "refusing: the command line does not turn input injection off";
+      return false;
+    }
+    const std::wstring isoAppData = dir + L"localappdata";
+    CreateDirectoryW(isoAppData.c_str(), nullptr);
+    std::vector<wchar_t> env = e2e_isolated_environment(isoAppData);
+    std::string isoWhy;
+    if (!e2e_command_is_isolated(cmd, dir, &isoWhy) ||
+        !e2e_path_is_under(e2e_block_localappdata(env), dir)) {
+      *why = "refusing: not isolated from the user's files -- " + isoWhy;
+      return false;
+    }
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    log = CreateFileW((dir + L"host.log").c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    if (log != INVALID_HANDLE_VALUE) {
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdOutput = log;
+      si.hStdError = log;
+    }
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+    launched = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, log != INVALID_HANDLE_VALUE,
+                              CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                              env.data(), dir.c_str(), &si, &pi) != 0;
+    if (!launched) {
+      *why = "CreateProcessW failed " + std::to_string(GetLastError());
+      return false;
+    }
+    AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    Sleep(1500);  // the listener comes up before the first Hello is worth sending
+    return true;
+  }
+
+  /** Ends the host through the job it was put in, and removes the staging directory. */
+  bool Stop() {
+    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+    if (job) CloseHandle(job);  // kill-on-close: the host and anything it started
+    if (pi.hProcess) {
+      WaitForSingleObject(pi.hProcess, 20000);
+      CloseHandle(pi.hProcess);
+    }
+    if (pi.hThread) CloseHandle(pi.hThread);
+    for (int i = 0; i < 40; ++i) {
+      DeleteFileW((dir + L"host.log").c_str());
+      DeleteFileW((dir + L"GNLinkStream.exe").c_str());
+      DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
+      remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
+      if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) return true;
+      Sleep(100);
+    }
+    return false;
+  }
+};
+
 int main(int argc, char** argv) {
   // Both required, deliberately, and this used to default to 127.0.0.1:43000.
   //
   // That is the port the installed GNLink listens on. A bare run -- which is exactly what a
   // regression sweep does -- therefore sent a UDP hello to the user's own running host. It was
   // rejected and nothing came of it, but a test that reaches into the live product unless told
-  // otherwise is wrong in the way that only shows up once.
-  //
-  // This needs a host to talk to, so it is a tool rather than a test: run it by hand against one
-  // you started, the way the other argument-taking programs here work.
-  if (argc < 3) {
-    std::puts("usage: udp_control_e2e_test <host> <video-port>");
-    std::puts("  Needs a GNLink host to connect to. There is no default on purpose: the old one");
-    std::puts("  was 127.0.0.1:43000, which is the installed product.");
-    return 2;
+  // otherwise is wrong in the way that only shows up once. It still has no default address --
+  // without arguments it now starts a host of its own instead (below).
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--thumbnail") {  // staged as GNLinkCapture.exe; answers nothing
+      Sleep(120000);
+      return 0;
+    }
   }
-  const std::string host = argv[1];
-  const int videoPort = std::atoi(argv[2]);
-  if (videoPort <= 0 || videoPort > 65535) {
-    std::puts("usage: udp_control_e2e_test <host> <video-port>  (port out of range)");
-    return 2;
+  // Two ways to run. With <host> <port> it is the tool it always was, against a host somebody
+  // started. With no arguments it is a TEST (C14, ledger 0.0.5): it no longer depends on whatever
+  // host happens to be running, but starts its own -- loopback, staged in its own directory,
+  // isolated from the user's files like every host e2e (RV-00), and with input injection OFF,
+  // because this test sends mouse events and a host in desktop mode would deliver them to the
+  // user's real desktop. Without REMOTE60_ALLOW_HOST_E2E=1 it skips (exit 77).
+  SelfHost self;
+  std::string host;
+  int videoPort = 0;
+  if (argc >= 3) {
+    host = argv[1];
+    videoPort = std::atoi(argv[2]);
+    if (videoPort <= 0 || videoPort > 65535) {
+      std::puts("usage: udp_control_e2e_test [<host> <video-port>]  (port out of range)");
+      return 2;
+    }
+  } else {
+    wchar_t allow[8]{};
+    if (GetEnvironmentVariableW(L"REMOTE60_ALLOW_HOST_E2E", allow, 8) == 0 || allow[0] != L'1') {
+      std::puts("SKIP  udp_control_e2e_test starts its own listening host when given no arguments.");
+      std::puts("      Set REMOTE60_ALLOW_HOST_E2E=1 to run it, or pass <host> <video-port> to use one");
+      std::puts("      you started (never the installed product's 43000).\n\nRESULT: SKIPPED");
+      return remote60::native_poc::e2e::kE2eSkippedExit;
+    }
+    std::string why;
+    check("an isolated host of its own is started (loopback, no input injection)", self.Start(&why), why);
+    if (!self.launched) {
+      std::printf("\nRESULT: %d FAILED\n", gFailures);
+      return 1;
+    }
+    host = "127.0.0.1";
+    videoPort = kSelfHostPort;
   }
 
   CountingSink sink;
@@ -204,6 +331,7 @@ int main(int argc, char** argv) {
         finalSnapshot.status + " / " + finalSnapshot.lastError);
 
   controller.Disconnect();
+  if (self.launched) check("the scratch directory is cleaned up", self.Stop());
 
   std::printf(gFailures == 0 ? "\nRESULT: ALL PASS\n" : "\nRESULT: %d FAILED\n", gFailures);
   return gFailures == 0 ? 0 : 1;
