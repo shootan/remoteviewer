@@ -31,6 +31,7 @@
 #include <tlhelp32.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <utility>
 #include <iostream>
@@ -291,8 +292,12 @@ std::vector<DWORD> named_but_unidentified() {
   return unknown;
 }
 
-/** Stops what is running out of `dir` -- and only what was confirmed to be running out of it. */
-void stop_everything_under(const std::wstring& dir) {
+/**
+ * Stops what is running out of `dir` -- and only what was confirmed to be running out of it.
+ * Returns what it terminated ("leaf pid=N"), so a caller can say what the sweep took.
+ */
+std::vector<std::string> stop_everything_under(const std::wstring& dir) {
+  std::vector<std::string> terminated;
   // Swept repeatedly, because a shell-routed launch hands off asynchronously: a process started
   // moments ago may not be visible on the first pass, and one missed here holds a file open in
   // the NEXT scenario -- which looks like that scenario's swap failing, and is not.
@@ -308,7 +313,7 @@ void stop_everything_under(const std::wstring& dir) {
   for (int pass = 0; pass < 60; ++pass) {
     const auto found = running_under(dir);
     if (found.empty()) {
-      if (++emptyPasses >= 8) return;
+      if (++emptyPasses >= 8) return terminated;
       Sleep(200);
       continue;
     }
@@ -329,9 +334,14 @@ void stop_everything_under(const std::wstring& dir) {
       TerminateProcess(h, 0);
       WaitForSingleObject(h, 3000);
       CloseHandle(h);
+      const std::wstring full(image, imageLen);
+      const size_t slash = full.find_last_of(L"\\/");
+      terminated.push_back(narrow(slash == std::wstring::npos ? full : full.substr(slash + 1)) +
+                           " pid=" + std::to_string(pair.second));
     }
     Sleep(200);
   }
+  return terminated;
 }
 
 
@@ -636,6 +646,10 @@ int main() {
     bool hostBackupLeft = false;
     bool clientBackupLeft = false;
     std::string hostBytes;
+    /** Per started pid: whether it exited on its own before the sweep, and how long that took. */
+    std::string settle;
+    /** What the end-of-scenario sweep terminated. A fixture here was killed before it could record. */
+    std::string swept;
   };
 
   const auto run_scenario = [&](Knobs knobs) {
@@ -848,11 +862,54 @@ int main() {
       if (pair.first.find(kHostName) != std::wstring::npos) ++r.hostInstances;
       if (pair.first.find(kClientName) != std::wstring::npos) ++r.clientInstances;
     }
-    (void)started;
+    // What this scenario started directly is allowed to finish before the sweep. The fixture
+    // records itself and exits at once -- but "at once" is after the loader, and for an image
+    // that was swapped a moment ago, after whatever scans a new file. The effects return as soon
+    // as CreateProcess does, so the sweep below could arrive first, terminate the client before
+    // it wrote its line, and leave scenario 9 waiting ten seconds for a witness that had been
+    // killed. Done AFTER running_under above, so the instance counts still describe the moment
+    // the run ended. REMOTE60_SCN_NO_SETTLE=1 skips this wait -- the reproduction switch for that
+    // race; with it the sweep's victims show up in `swept`.
+    if (std::getenv("REMOTE60_SCN_NO_SETTLE") == nullptr) {
+      for (DWORD pid : *started) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+        if (!h) {
+          r.settle += std::to_string(pid) + ":gone ";
+          continue;
+        }
+        wchar_t image[MAX_PATH]{};
+        DWORD imageLen = MAX_PATH;
+        // Only a process still running out of THIS install is waited for; a recycled pid is not.
+        if (!QueryFullProcessImageNameW(h, 0, image, &imageLen) ||
+            _wcsnicmp(image, install.c_str(), install.size()) != 0) {
+          CloseHandle(h);
+          r.settle += std::to_string(pid) + ":not-ours ";
+          continue;
+        }
+        const ULONGLONG t0 = GetTickCount64();
+        const DWORD waited = WaitForSingleObject(h, 10000);
+        CloseHandle(h);
+        r.settle += std::to_string(pid) +
+                    (waited == WAIT_OBJECT_0
+                         ? ":exited+" + std::to_string(GetTickCount64() - t0) + "ms "
+                         : std::string(":still-running-after-10s "));
+      }
+    } else {
+      r.settle = "(settle skipped: REMOTE60_SCN_NO_SETTLE)";
+    }
     // Everything this scenario left running goes, so the next one starts from a directory nobody
     // is holding open. Without this a leftover process makes the NEXT scenario fail its swap,
     // which is what happened and looked like a defect in the swap.
-    stop_everything_under(install);
+    for (const std::string& victim : stop_everything_under(install)) {
+      if (!r.swept.empty()) r.swept += ", ";
+      r.swept += victim;
+    }
+    // In every scenario, not only the one that asserts on it: how often the sweep has to kill a
+    // fixture is the rate of the race above.
+    if (!r.swept.empty()) {
+      std::cout << "NOTE  the end-of-scenario sweep terminated: " << r.swept
+                << " (started: " << r.settle << ")\n";
+    }
 
     // Every seam the production assembly is supposed to fill. Not a count and not a total: the
     // list is empty or it names what nobody wired.
@@ -1196,8 +1253,18 @@ int main() {
     // The witness, not a process list. The fixture exits as soon as it has recorded itself, so
     // "is it running now" is the wrong question -- and it was the question that made this suite
     // depend on processes staying alive, which is what left them lying around.
-    check("9 client-only: the client actually ran", wait_for_witness(kClientName, 10000),
-          witness_text() + " -- " + r.log);
+    // On failure: what was waited for (the client's witness line), what the launch did (the log),
+    // whether each started pid exited by itself, and what the sweep killed. A client in `swept`
+    // was terminated by this test before it could record -- that was the intermittent failure.
+    const ULONGLONG waitStart = GetTickCount64();
+    const bool ran = wait_for_witness(kClientName, 10000);
+    check("9 client-only: the client actually ran", ran,
+          "waited " + std::to_string(GetTickCount64() - waitStart) + "ms for " +
+              narrow(kClientName) + " in witness.txt (exists=" +
+              (exists(witnessPath) ? "1" : "0") + ") witness=[" + witness_text() +
+              "] started=[" + r.settle + "] swept=[" + r.swept + "] log=" + r.log);
+    check("9 client-only: the sweep did not have to stop the client",
+          r.swept.find(narrow(kClientName)) == std::string::npos, "swept=[" + r.swept + "]");
   }
 
   // ============================ 10. the handshake nobody answered
