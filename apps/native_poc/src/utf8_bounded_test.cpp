@@ -200,6 +200,23 @@ void limit_cases() {
   check("limit: 21 emoji -> 19 whole emoji and an ellipsis, never half a pair",
         utf8_limit_chars(emoji21, 20) == emoji21.substr(0, 19 * 4) + ell);
 
+  // Hangul, English and emoji in one title, 30 characters: the result is 20 characters counted
+  // here independently, ends in the ellipsis, and is the first 19 characters of the input.
+  {
+    std::string mixed;
+    for (int i = 0; i < 10; ++i) mixed += kHan + "A" + kEmoji;  // 30 characters
+    const std::string out = utf8_limit_chars(mixed, 20);
+    const std::string first19 = mixed.substr(0, 6 * 8 + kHan.size());  // 6 x (Han A emoji) + Han
+    check("limit: mixed Hangul/English/emoji -> 20 characters including the ellipsis",
+          count_chars(out) == 20 && out.size() >= 3 &&
+              out.compare(out.size() - 3, 3, ell) == 0 && utf8_is_valid(out),
+          std::to_string(count_chars(out)) + " chars " + hex(out));
+    check("limit: ...and they are the input's first 19 characters", out == first19 + ell,
+          std::to_string(first19.size()));
+    const std::string mixed20 = mixed.substr(0, 6 * 8 + kHan.size() + 1);  // ... + A
+    check("limit: a mixed title of exactly 20 characters is untouched",
+          count_chars(mixed20) == 20 && utf8_limit_chars(mixed20, 20) == mixed20);
+  }
   check("limit: invalid bytes count as one character each and become '?'",
         utf8_limit_chars("a\x80\xFF" "b", 20) == "a??b");
   check("limit: 25 invalid bytes -> 19 '?' and an ellipsis, valid",
