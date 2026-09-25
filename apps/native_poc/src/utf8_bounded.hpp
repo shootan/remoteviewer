@@ -105,6 +105,43 @@ inline size_t utf8_copy_bounded(char* dst, size_t dstSize, std::string_view src)
   return out;
 }
 
+/** U+2026 HORIZONTAL ELLIPSIS, the mark a shortened title ends with. */
+inline constexpr std::string_view kUtf8Ellipsis = "\xE2\x80\xA6";
+
+/**
+ * At most `maxChars` characters (code points) of `src`, as valid UTF-8. If `src` has more, the
+ * result is its first maxChars-1 characters followed by U+2026, so it is still maxChars long.
+ * Bytes that are not valid UTF-8 become '?' and count as one character each; an embedded NUL
+ * ends the text. Used for window titles on the wire: the user asked for "the first 20 or so
+ * characters", and whole characters are what a person counts.
+ */
+inline std::string utf8_limit_chars(std::string_view src, size_t maxChars) {
+  std::string out;
+  const auto* p = reinterpret_cast<const unsigned char*>(src.data());
+  size_t in = 0;
+  size_t chars = 0;
+  size_t endOfKept = 0;  // byte length of the first maxChars-1 characters
+  while (in < src.size() && p[in] != 0) {
+    if (chars == maxChars) {
+      // There is more than fits: keep maxChars-1 characters and the ellipsis.
+      out.resize(endOfKept);
+      if (maxChars > 0) out.append(kUtf8Ellipsis);
+      return out;
+    }
+    const size_t len = utf8_sequence_length(p + in, src.size() - in);
+    if (len == 0) {
+      out.push_back('?');
+      ++in;
+    } else {
+      out.append(reinterpret_cast<const char*>(p + in), len);
+      in += len;
+    }
+    ++chars;
+    if (chars + 1 == maxChars) endOfKept = out.size();
+  }
+  return out;
+}
+
 /** Reads a fixed field that may not be NUL-terminated: at most `size` bytes, up to the first NUL. */
 inline std::string_view fixed_field_view(const char* field, size_t size) {
   size_t n = 0;

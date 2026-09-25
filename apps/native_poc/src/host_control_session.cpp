@@ -965,8 +965,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
         rsp.hostSendQpcUs = qpc_now_us();
         remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
                                                 windowSelectionTxn.responseReason);
-        remote60::native_poc::utf8_copy_bounded(rsp.title, sizeof(rsp.title),
-                                                windowSelectionTxn.responseTitle);
+        remote60::native_poc::fill_window_title(rsp.title, windowSelectionTxn.responseTitle);
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;

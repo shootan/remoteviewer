@@ -9,6 +9,9 @@
 //  - utf8_copy_bounded at the 95-byte limit with 1-, 2-, 3- and 4-byte characters straddling it,
 //    exactly 95 bytes, empty input, embedded NUL, and malformed input (lone continuation, truncated
 //    sequence, overlong, surrogate, >U+10FFFF, 0xFF) -- output always valid, bounded, NUL-terminated.
+//  - utf8_limit_chars (r2, the user's decision): window titles at most 20 characters, the 20th
+//    replaced by U+2026 when there were more -- 19/20/21 characters, 1- to 4-byte characters at
+//    the 20th, invalid bytes, NUL.
 //  - fill_window_entry, the function the host sends the window list with, on a 152-byte Hangul
 //    title shaped like the measured one (byte 95 two bytes into a syllable, as measured).
 //  - the conversions the Android bridge now uses instead of NewStringUTF / GetStringUTFChars:
@@ -149,6 +152,71 @@ std::string measured_shape_title() {
   return t;
 }
 
+/** Counts code points of valid UTF-8 (the test's own count, not the function under test). */
+size_t count_chars(std::string_view s) {
+  size_t n = 0;
+  for (unsigned char c : s) {
+    if ((c & 0xC0) != 0x80) ++n;
+  }
+  return n;
+}
+
+/** The r2 window-title limit: 20 characters, U+2026 inside them when shortened. */
+void limit_cases() {
+  const std::string ell(kUtf8Ellipsis);
+  check("limit: 21 ASCII -> 19 and an ellipsis",
+        utf8_limit_chars(std::string(21, 'a'), 20) == std::string(19, 'a') + ell);
+  check("limit: exactly 20 is kept whole, no ellipsis",
+        utf8_limit_chars(std::string(20, 'a'), 20) == std::string(20, 'a'));
+  check("limit: 19 is kept whole", utf8_limit_chars(std::string(19, 'a'), 20) == std::string(19, 'a'));
+  check("limit: empty stays empty", utf8_limit_chars("", 20).empty());
+
+  std::string han21;
+  for (int i = 0; i < 21; ++i) han21 += kHan;
+  const std::string han = utf8_limit_chars(han21, 20);
+  check("limit: 21 Hangul -> 19 Hangul and an ellipsis (60 bytes, fits 96 with room)",
+        han == han21.substr(0, 19 * 3) + ell && han.size() == 60 && count_chars(han) == 20,
+        std::to_string(han.size()));
+  check("limit: 20 Hangul are kept whole (60 bytes)",
+        utf8_limit_chars(han21.substr(0, 60), 20) == han21.substr(0, 60));
+
+  // A 1-, 2-, 3- and 4-byte character as the 20th and as the 21st.
+  for (const auto& [label, ch] : {std::pair<const char*, std::string>{"1-byte", "b"},
+                                  {"2-byte", kEAcute},
+                                  {"3-byte", kHan},
+                                  {"4-byte", kEmoji}}) {
+    const std::string twenty = std::string(19, 'a') + ch;
+    check(std::string("limit: a ") + label + " 20th character is kept",
+          utf8_limit_chars(twenty, 20) == twenty);
+    const std::string cut = utf8_limit_chars(twenty + "z", 20);
+    check(std::string("limit: with a 21st, the ") + label + " 20th gives way to the ellipsis",
+          cut == std::string(19, 'a') + ell && utf8_is_valid(cut), hex(cut));
+  }
+  const std::string emoji21 = [] {
+    std::string e;
+    for (int i = 0; i < 21; ++i) e += kEmoji;
+    return e;
+  }();
+  check("limit: 21 emoji -> 19 whole emoji and an ellipsis, never half a pair",
+        utf8_limit_chars(emoji21, 20) == emoji21.substr(0, 19 * 4) + ell);
+
+  check("limit: invalid bytes count as one character each and become '?'",
+        utf8_limit_chars("a\x80\xFF" "b", 20) == "a??b");
+  check("limit: 25 invalid bytes -> 19 '?' and an ellipsis, valid",
+        utf8_limit_chars(std::string(25, '\x80'), 20) == std::string(19, '?') + ell);
+  check("limit: an embedded NUL ends the text", utf8_limit_chars(std::string("ab\0cd", 5), 20) == "ab");
+  check("limit: a limit of 1 on a long text is just the ellipsis",
+        utf8_limit_chars("abc", 1) == ell);
+
+  // Straight into a 96-byte field, as the host does: 20 four-byte characters are 80 bytes, the
+  // most a limited title can be, and the field-level cut is never needed -- but it is still there.
+  char field[96];
+  utf8_copy_bounded(field, sizeof(field), utf8_limit_chars(emoji21, 20));
+  const std::string_view f = fixed_field_view(field, sizeof(field));
+  check("limit: the longest possible limited title (19 emoji + ellipsis, 79 bytes) fits the field",
+        f.size() == 79 && utf8_is_valid(f), std::to_string(f.size()));
+}
+
 void window_list_case() {
   const std::string title = measured_shape_title();
   check("the fixture title is 152 bytes of valid UTF-8, as measured",
@@ -168,12 +236,13 @@ void window_list_case() {
   ControlWindowEntry dst{};
   fill_window_entry(dst, src);
   const std::string_view wire = fixed_field_view(dst.title, sizeof(dst.title));
-  check("the host's window-list entry carries valid UTF-8", utf8_is_valid(wire), hex(wire.substr(88)));
+  check("the host's window-list entry carries valid UTF-8", utf8_is_valid(wire), hex(wire));
   check("...NUL-terminated inside the 96-byte field",
         std::memchr(dst.title, 0, sizeof(dst.title)) != nullptr);
-  check("...as the longest whole-character prefix (93 bytes for this shape)",
-        wire.size() == 93 && title.compare(0, wire.size(), wire) == 0,
-        std::to_string(wire.size()));
+  // r2, the user's limit: 19 characters and U+2026. For this shape the first 19 characters are
+  // "[GNLink] 12 " (12), four syllables (12 bytes), a space, two syllables (6 bytes) = 31 bytes.
+  check("...as its first 19 characters and an ellipsis (20 characters, 34 bytes)",
+        wire == title.substr(0, 31) + std::string(kUtf8Ellipsis), std::to_string(wire.size()));
   check("...and the other fields are filled as before",
         dst.id == 42 && dst.pid == 1234 && dst.width == 1920 && dst.height == 0 && (dst.flags & 1u));
 
@@ -247,8 +316,9 @@ void live_enumerator_case(const char* self) {
     ControlWindowEntry dst{};
     fill_window_entry(dst, *found);
     const std::string_view wire = fixed_field_view(dst.title, sizeof(dst.title));
-    check("live: what the host would send is valid UTF-8 of 93 bytes",
-          utf8_is_valid(wire) && wire.size() == 93, hex(wire.substr(88)));
+    check("live: what the host would send is 19 characters and an ellipsis, valid UTF-8",
+          utf8_is_valid(wire) && wire == title.substr(0, 31) + std::string(kUtf8Ellipsis),
+          hex(wire));
   }
   TerminateProcess(pi.hProcess, 0);
   WaitForSingleObject(pi.hProcess, 5000);
@@ -281,9 +351,11 @@ int own_window() {
 
 int main(int argc, char** argv) {
   if (argc >= 2 && std::string(argv[1]) == "--own-window") return own_window();
+  std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not take the lines before it
   std::printf("utf8_bounded_test\n");
   boundary_cases();
   malformed_cases();
+  limit_cases();
   window_list_case();
   bridge_cases();
   {

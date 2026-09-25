@@ -12528,4 +12528,6 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 안드로이드(`native_bridge.cpp`, 코드만·APK 빌드 없음): Java 와 오가는 문자열을 modified UTF-8 대신 UTF-16 으로 직접 변환(`NewString`/`GetStringChars`) — 잘못된 바이트는 U+FFFD, 이모지는 서로게이트 쌍, 외톨이 서로게이트는 U+FFFD. **구 호스트가 보내는 잘린 제목에도 죽지 않는다.** NDK clang `-fsyntax-only` 통과.
 - Windows 뷰어: 바꾸지 않음. `MultiByteToWideChar(CP_UTF8, 0)` 가 잘린 끝을 U+FFFD 로 바꿔 그려 죽지 않는다(측정: 구 호스트 컷 → 끝이 U+FFFD).
 - 시험 `remote60_utf8_bounded_test` 42/0: 1~4바이트 문자 경계·정확히 95B·빈 문자열·NUL·잘못된 입력 6종, 측정과 같은 모양(95B 에서 2/3 바이트 남는) 152B 제목, 브리지 변환, **실제 창을 제품 열거기로 읽어 wire 까지**(자식 프로세스의 화면 밖 창). 변이: snprintf 복귀 18 FAIL · overlong/서로게이트 검사 제거 3 FAIL · 서로게이트 쌍 제거 2 FAIL.
+- **r2 (사용자 결정, 같은 날)**: "창 제목 다 보일 필요 없어, 앞글자부터 20자 정도로 제한" — 창 목록·선택 응답의 창 제목은 **코드포인트 20자**까지, 넘으면 19자 + "…"(U+2026). `utf8_limit_chars` + `fill_window_title`(`kWindowTitleMaxChars = 20`). 한글 20자 = 60B, 제한된 제목의 최대는 이모지 19 + … = 79B 라 96B 칸 자르기는 더 이상 필요 없지만 그대로 둔다(모니터 이름·pong 등 제한 없는 칸). 사용자 확인: 크롬을 끄니 접속됨 → 원인 확정.
+- r2 시험 62/0(3회): 19·20·21자, 20번째가 1~4바이트, 한글 21자, 이모지 21자, 잘못된 바이트, NUL, 측정 모양 제목 → 31B + … , 실제 창 → 제품 열거기 → 같은 34B. 변이 6종 전부 FAIL(snprintf 14 · overlong/서로게이트 3 · 서로게이트 쌍 2 · 20자 제한 제거 2 · 바이트로 셈 8 · … 없음 12).
 - 제품/테스트/문서: 제품(host_control_session.cpp, utf8_bounded.hpp, host_window_list_wire.hpp, 안드로이드 native_bridge.cpp) / 테스트(utf8_bounded_test, CMake) / 문서(이 항목).
