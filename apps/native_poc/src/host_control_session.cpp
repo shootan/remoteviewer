@@ -38,6 +38,8 @@
 #include "host_input_inject.hpp"
 #include "host_net_io.hpp"
 #include "host_string_util.hpp"
+#include "utf8_bounded.hpp"
+#include "host_window_list_wire.hpp"
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
@@ -109,14 +111,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.itemCount = std::min<uint32_t>(
         static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
     for (uint32_t i = 0; i < rsp.itemCount; ++i) {
-      const auto& src = windows[i];
-      auto& dst = rsp.items[i];
-      dst.id = src.id;
-      dst.pid = src.pid;
-      dst.width = static_cast<uint32_t>(std::max<int>(0, src.width));
-      dst.height = static_cast<uint32_t>(std::max<int>(0, src.height));
-      if (src.minimized) dst.flags |= 0x1u;
-      std::snprintf(dst.title, sizeof(dst.title), "%s", src.title.c_str());
+      remote60::native_poc::fill_window_entry(rsp.items[i], windows[i]);
     }
     std::cout << "[native-video-host][control] window-list seq=" << seq
               << " count=" << rsp.itemCount
@@ -143,7 +138,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       dst.width = src.width;
       dst.height = src.height;
       if (src.primary) dst.flags |= remote60::native_poc::kControlMonitorFlagPrimary;
-      std::snprintf(dst.name, sizeof(dst.name), "%s", src.name.c_str());
+      remote60::native_poc::utf8_copy_bounded(dst.name, sizeof(dst.name), src.name);
     }
     std::cout << "[native-video-host][control] monitor-list seq=" << seq
               << " count=" << rsp.itemCount << " selectedId=" << rsp.selectedMonitorId << "\n";
@@ -412,10 +407,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardTextV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
-      std::snprintf(pong.captureTargetProcess, sizeof(pong.captureTargetProcess), "%s",
-                    target.process.c_str());
-      std::snprintf(pong.captureTargetTitle, sizeof(pong.captureTargetTitle), "%s",
-                    target.title.c_str());
+      remote60::native_poc::utf8_copy_bounded(pong.captureTargetProcess,
+                                              sizeof(pong.captureTargetProcess), target.process);
+      remote60::native_poc::utf8_copy_bounded(pong.captureTargetTitle,
+                                              sizeof(pong.captureTargetTitle), target.title);
       if (!link.Write(&pong, sizeof(pong))) break;
       continue;
     }
@@ -935,9 +930,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
 
       if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
         rsp.flags |= 0x2u;
-        std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", "selection_locked_by_config");
+        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
+                                                "selection_locked_by_config");
         if (req.windowId == 0) {
-          std::snprintf(rsp.title, sizeof(rsp.title), "%s", "desktop");
+          remote60::native_poc::utf8_copy_bounded(rsp.title, sizeof(rsp.title), "desktop");
         }
       } else {
         {
@@ -967,8 +963,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
         rsp.windowId = windowSelectionTxn.responseWindowId;
         rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
         rsp.hostSendQpcUs = qpc_now_us();
-        std::snprintf(rsp.reason, sizeof(rsp.reason), "%s", windowSelectionTxn.responseReason.c_str());
-        std::snprintf(rsp.title, sizeof(rsp.title), "%s", windowSelectionTxn.responseTitle.c_str());
+        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
+                                                windowSelectionTxn.responseReason);
+        remote60::native_poc::utf8_copy_bounded(rsp.title, sizeof(rsp.title),
+                                                windowSelectionTxn.responseTitle);
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;

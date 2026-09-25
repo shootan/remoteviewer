@@ -12520,3 +12520,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **백업 이름**(0.0.7): 새 manifest 백업은 `<version>+<releaseId>` + BACKUP_INFO(artifact 수). 서버의 기존 백업은 그대로라 "이름만 보고 고르지 않는다" 는 계속 유효.
 - 이미 해결이던 것: 0.0.2(3c6248d) · #5/#6(a3a4182·2ca5aaa) · 0.0.6(8e7ccea). 0.0.4 는 콘솔 5회 재현 안 됨(fps 58–60, worker p95 18–19 ms / 문턱 35). 0.0.5 는 시험이 격리 호스트를 스스로 띄움.
 - 제품/테스트/문서: 제품(updater_main.cpp, gnlink_deploy.sh) / 테스트(scenarios·exit_record·log_upload_shutdown·udp_control_e2e·deploy_test) / 문서(작업목록 C13·C14, 이 항목).
+
+### 2026-09-25 긴 한글 창 제목이 휴대폰 앱을 죽였다 — 호스트가 글자 중간을 잘랐고, 앱은 그것을 믿었다
+
+- 증상: 휴대폰으로 이 PC 에 접속할 때마다 앱 크래시(12:58~13:04, NAS apk.log app_start 반복), 창 목록(count=9) 수신 직후. 원인(검증용 측정): 크롬 제목 UTF-8 152B 를 호스트가 `char title[96]` 에 snprintf 로 넣어 95B 에서 한글 3바이트 중 2바이트만 남김 → 안드로이드 `NewStringUTF` 가 잘못된 입력에 abort.
+- 호스트: 고정 문자열 칸 8곳(창 목록 제목·모니터 이름·pong 의 캡처 대상 프로세스/제목·선택 응답의 사유/제목)을 `utf8_copy_bounded`(`utf8_bounded.hpp`)로 — 글자 경계에서만 자르고, 원래 잘못된 바이트는 `?`, 나머지 칸 0. 창 목록 항목은 `fill_window_entry`(`host_window_list_wire.hpp`)로 떼어 시험이 같은 코드를 탄다.
+- 안드로이드(`native_bridge.cpp`, 코드만·APK 빌드 없음): Java 와 오가는 문자열을 modified UTF-8 대신 UTF-16 으로 직접 변환(`NewString`/`GetStringChars`) — 잘못된 바이트는 U+FFFD, 이모지는 서로게이트 쌍, 외톨이 서로게이트는 U+FFFD. **구 호스트가 보내는 잘린 제목에도 죽지 않는다.** NDK clang `-fsyntax-only` 통과.
+- Windows 뷰어: 바꾸지 않음. `MultiByteToWideChar(CP_UTF8, 0)` 가 잘린 끝을 U+FFFD 로 바꿔 그려 죽지 않는다(측정: 구 호스트 컷 → 끝이 U+FFFD).
+- 시험 `remote60_utf8_bounded_test` 42/0: 1~4바이트 문자 경계·정확히 95B·빈 문자열·NUL·잘못된 입력 6종, 측정과 같은 모양(95B 에서 2/3 바이트 남는) 152B 제목, 브리지 변환, **실제 창을 제품 열거기로 읽어 wire 까지**(자식 프로세스의 화면 밖 창). 변이: snprintf 복귀 18 FAIL · overlong/서로게이트 검사 제거 3 FAIL · 서로게이트 쌍 제거 2 FAIL.
+- 제품/테스트/문서: 제품(host_control_session.cpp, utf8_bounded.hpp, host_window_list_wire.hpp, 안드로이드 native_bridge.cpp) / 테스트(utf8_bounded_test, CMake) / 문서(이 항목).

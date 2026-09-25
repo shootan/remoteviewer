@@ -1183,6 +1183,14 @@ if(MSVC)
   )
 endif()
 
+# Window titles cut at a character, not a byte; the Android bridge's UTF-8 <-> UTF-16 (2026-09-25).
+add_executable(remote60_utf8_bounded_test src/utf8_bounded_test.cpp src/host_window_enum.cpp)
+target_include_directories(remote60_utf8_bounded_test PRIVATE src)
+target_link_libraries(remote60_utf8_bounded_test PRIVATE user32 dwmapi)
+if(MSVC)
+  target_compile_options(remote60_utf8_bounded_test PRIVATE /utf-8)
+endif()
+
 # Every updater run ends with a verdict line, and the working copy's start is recorded (0.0.10).
 add_executable(remote60_updater_exit_record_test
   src/update_credential_channel.cpp

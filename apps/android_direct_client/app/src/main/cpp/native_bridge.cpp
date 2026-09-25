@@ -10,6 +10,7 @@
 #include "directory_rendezvous.hpp"
 #include "input_macro.hpp"
 #include "native_video_client_session.hpp"
+#include "utf8_bounded.hpp"
 
 namespace {
 
@@ -34,16 +35,26 @@ uint64_t now_ms() {
           .count());
 }
 
+// Both directions go through UTF-16 instead of the JVM's "modified UTF-8". NewStringUTF ABORTS
+// the process on malformed input, and a window title cut mid-character by an older host is
+// exactly that -- the app died on every window list from one PC (2026-09-25). It also cannot
+// carry 4-byte characters (emoji) correctly. GetStringUTFChars has the mirror problem: it hands
+// back surrogate pairs as 6-byte CESU-8 rather than UTF-8. Invalid bytes become U+FFFD.
 std::string jstring_to_string(JNIEnv* env, jstring value) {
   if (!value) return {};
-  const char* chars = env->GetStringUTFChars(value, nullptr);
-  std::string out = chars ? chars : "";
-  if (chars) env->ReleaseStringUTFChars(value, chars);
+  const jsize len = env->GetStringLength(value);
+  const jchar* chars = env->GetStringChars(value, nullptr);
+  if (!chars) return {};
+  std::string out = remote60::native_poc::utf16_to_utf8_lossy(
+      reinterpret_cast<const char16_t*>(chars), static_cast<size_t>(len));
+  env->ReleaseStringChars(value, chars);
   return out;
 }
 
 jstring to_jstring(JNIEnv* env, const std::string& value) {
-  return env->NewStringUTF(value.c_str());
+  const std::u16string wide = remote60::native_poc::utf8_to_utf16_lossy(value);
+  return env->NewString(reinterpret_cast<const jchar*>(wide.data()),
+                        static_cast<jsize>(wide.size()));
 }
 
 void append_json_escaped(std::ostringstream& oss, const std::string& value) {
@@ -140,11 +151,7 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnect(
     JNIEnv* env, jobject /* this */, jstring host, jint video_port, jint control_port) {
-  const char* host_chars = env->GetStringUTFChars(host, nullptr);
-  const std::string host_value = host_chars ? host_chars : "";
-  if (host_chars) {
-    env->ReleaseStringUTFChars(host, host_chars);
-  }
+  const std::string host_value = jstring_to_string(env, host);
 
   remote60::native_poc::ClientSessionConnectArgs args{};
   args.host = host_value;
