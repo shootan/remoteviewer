@@ -1,3 +1,5 @@
+#include <atomic>
+#include <mutex>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -9,6 +11,7 @@
 #include <vector>
 
 #include "native_socket.hpp"
+#include "session_video_pipeline.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_session.hpp"
 #include "udp_video_nack.hpp"
@@ -61,6 +64,10 @@ bool wait_until(const std::function<bool()>& predicate, int timeoutMs) {
   }
   return predicate();
 }
+
+// Defined further down (the assembler tests); the fake server scripts video with it.
+std::vector<uint8_t> make_video_chunk(uint32_t seq, uint16_t chunkIndex, uint32_t payloadSize,
+                                      uint32_t stride, bool key, uint64_t generation);
 
 struct FakeSessionServer {
   bool Start(bool closeControlAfterWindowList) {
@@ -142,8 +149,53 @@ struct FakeSessionServer {
         hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello)) {
       UdpHelloPacket ack{};
       ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      if (ackVideoNack) ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
       sendto(udpSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
              reinterpret_cast<const sockaddr*>(&peer), peerLen);
+      if (lossyKeyScript) RunLossyKeyScript(peer, peerLen);
+    }
+  }
+
+  // quality r4: what the phone's Wi-Fi did to a large keyframe. A 5-chunk IDR (seq 1) goes out
+  // without its chunk 3, then a one-chunk delta every 33 ms (seq 2..7). A NACK for seq 1 asking
+  // for chunk 3 is answered with that chunk, as the host's RetransmitAu does. Whether the session
+  // gets its keyframe back depends only on whether it waited for the repair.
+  void RunLossyKeyScript(const sockaddr_in& peer, int peerLen) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // the session's loop is up
+    auto send_chunk = [&](uint32_t seq, uint16_t idx, uint32_t size, bool key) {
+      const auto d = make_video_chunk(seq, idx, size, 1000, key, 1);
+      sendto(udpSock, reinterpret_cast<const char*>(d.data()), static_cast<int>(d.size()), 0,
+             reinterpret_cast<const sockaddr*>(&peer), peerLen);
+    };
+    for (uint16_t i = 0; i < 5; ++i) {
+      if (i != 3) send_chunk(1, i, 5000, true);
+    }
+    remote60::native_poc::set_recv_timeout(udpSock, 5);
+    const auto start = std::chrono::steady_clock::now();
+    uint32_t nextDelta = 2;
+    while (!stop.load(std::memory_order_acquire)) {
+      const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - start).count();
+      if (nextDelta <= 7 && elapsedMs >= static_cast<long long>(33 * (nextDelta - 1))) {
+        send_chunk(nextDelta, 0, 800, false);
+        ++nextDelta;
+      }
+      if (elapsedMs > 1500) break;
+      remote60::native_poc::UdpVideoNackPacket nack{};
+      sockaddr_in from{};
+      int fromLen = sizeof(from);
+      const int n = recvfrom(udpSock, reinterpret_cast<char*>(&nack), sizeof(nack), 0,
+                             reinterpret_cast<sockaddr*>(&from), &fromLen);
+      if (n == static_cast<int>(sizeof(nack)) &&
+          nack.kind == static_cast<uint16_t>(UdpPacketKind::VideoNack)) {
+        nacksReceived.fetch_add(1);
+        for (uint16_t k = 0; k < nack.missingCount; ++k) {
+          if (nack.seq == 1 && nack.missing[k] == 3) {
+            send_chunk(1, 3, 5000, true);
+            retransmitsSent.fetch_add(1);
+          }
+        }
+      }
     }
   }
 
@@ -203,6 +255,7 @@ struct FakeSessionServer {
         continue;
       }
 
+      if (type == MessageType::ControlRequestKeyFrame) keyframeRequests.fetch_add(1);
       const size_t discard = static_cast<size_t>(header.size - sizeof(header));
       if (!remote60::native_poc::recv_discard(acceptedTcp, discard)) break;
     }
@@ -213,6 +266,11 @@ struct FakeSessionServer {
   std::atomic<bool> stop{false};
   std::atomic<bool> windowListSent{false};
   bool closeAfterWindowList = false;
+  bool ackVideoNack = false;     // quality r4: advertise kUdpFeatureVideoNack
+  bool lossyKeyScript = false;   // quality r4: RunLossyKeyScript after the hello
+  std::atomic<int> keyframeRequests{0};
+  std::atomic<int> nacksReceived{0};
+  std::atomic<int> retransmitsSent{0};
   SocketHandle tcpListen = kInvalidSocket;
   SocketHandle acceptedTcp = kInvalidSocket;
   SocketHandle udpSock = kInvalidSocket;
@@ -1460,6 +1518,179 @@ bool test_input_queue_preserves_key_edges_on_overflow() {
   return true;
 }
 
+// quality r4: the shared session's receive policy under the loss the field showed -- a large
+// keyframe missing a chunk, the next frames arriving 33 ms apart.
+struct PipelineProbe {
+  std::vector<uint32_t> delivered;  // seqs, in order
+  int requests = 0;
+  int discontinuities = 0;
+  std::vector<remote60::native_poc::UdpVideoNackPacket> nacks;
+};
+
+remote60::native_poc::SessionVideoPipeline make_pipeline(PipelineProbe* p, bool nack, uint64_t holdUs) {
+  using namespace remote60::native_poc;
+  SessionVideoPipelineConfig cfg;
+  cfg.nackEnabled = nack;
+  cfg.holdUs = holdUs;
+  SessionVideoPipeline::Callbacks cb;
+  cb.deliver = [p](UdpH264AssembledFrame&& f) { p->delivered.push_back(f.header.seq); };
+  cb.requestKeyframe = [p]() { ++p->requests; };
+  cb.discontinuity = [p]() { ++p->discontinuities; };
+  cb.sendNack = [p](const UdpVideoNackPacket& n) { p->nacks.push_back(n); };
+  return SessionVideoPipeline(cfg, cb);
+}
+
+void feed(remote60::native_poc::SessionVideoPipeline& pl, uint32_t seq, uint16_t idx, uint32_t size,
+          bool key, uint64_t nowUs) {
+  const auto d = make_video_chunk(seq, idx, size, 1000, key);
+  pl.OnDatagram(d.data(), d.size(), nowUs);
+}
+
+// A 5-chunk keyframe (seq 1) whose chunk 3 is lost, then one-chunk deltas every 33 ms.
+void send_lossy_key_then_deltas(remote60::native_poc::SessionVideoPipeline& pl, uint64_t t0, int deltas) {
+  for (uint16_t i = 0; i < 5; ++i) {
+    if (i != 3) feed(pl, 1, i, 5000, true, t0 + i * 100);
+  }
+  for (int d = 0; d < deltas; ++d) feed(pl, 2 + d, 0, 800, false, t0 + 33000ULL * (d + 1));
+}
+
+bool test_session_video_pipeline() {
+  using namespace remote60::native_poc;
+  const uint64_t t0 = 1000000;
+  {
+    // Hold ON (a NACK host): the lost chunk is NACKed and its retransmit completes the key in time.
+    PipelineProbe p;
+    auto pl = make_pipeline(&p, true, 120000);
+    send_lossy_key_then_deltas(pl, t0, 1);           // delta 2 at +33 ms is held behind key 1
+    pl.OnTick(t0 + 40000);                           // gap grace (25 ms) passed: NACK
+    if (!expect(!p.nacks.empty() && p.nacks.back().seq == 1 && p.nacks.back().missingCount == 1 &&
+                    p.nacks.back().missing[0] == 3,
+                "pipeline(hold): the missing keyframe chunk is NACKed")) return false;
+    feed(pl, 1, 3, 5000, true, t0 + 60000);           // the retransmit lands
+    feed(pl, 3, 0, 800, false, t0 + 66000);
+    if (!expect(p.delivered == std::vector<uint32_t>({1, 2, 3}),
+                "pipeline(hold): the repaired key and the frames behind it are delivered in order")) return false;
+    if (!expect(p.requests == 0 && p.discontinuities == 0,
+                "pipeline(hold): no keyframe request, no decoder reset (field: one per keyframe)")) return false;
+  }
+  {
+    // Hold OFF (the session before r4, or an old host): delta 2 completes first and the key is lost.
+    PipelineProbe p;
+    auto pl = make_pipeline(&p, true, 0);
+    send_lossy_key_then_deltas(pl, t0, 1);
+    feed(pl, 1, 3, 5000, true, t0 + 60000);           // too late: the assembly is gone
+    if (!expect(p.requests >= 1 && std::find(p.delivered.begin(), p.delivered.end(), 1u) == p.delivered.end(),
+                "pipeline(no hold): the next delta throws the key away and asks for another")) return false;
+  }
+  {
+    // Hold ON, the retransmit never comes: after the hold the key is given up, a key is asked for.
+    PipelineProbe p;
+    auto pl = make_pipeline(&p, true, 120000);
+    send_lossy_key_then_deltas(pl, t0, 4);
+    for (uint64_t t = t0 + 150000; t <= t0 + 400000; t += 20000) pl.OnTick(t);
+    feed(pl, 6, 0, 800, false, t0 + 410000);
+    if (!expect(p.requests >= 1 && std::find(p.delivered.begin(), p.delivered.end(), 1u) == p.delivered.end(),
+                "pipeline(hold): an unrepaired key is given up and a new one asked for")) return false;
+    if (!expect(p.delivered.empty(), "pipeline(hold): no delta is decoded against a missing key")) return false;
+  }
+  {
+    // Hold ON, still screen: the key is the last AU (nothing behind it) and never repaired -- the
+    // stuck-head rule gives it up and asks, instead of sitting on an exhausted NACK forever.
+    PipelineProbe p;
+    auto pl = make_pipeline(&p, true, 120000);
+    send_lossy_key_then_deltas(pl, t0, 0);
+    for (uint64_t t = t0 + 20000; t <= t0 + 800000; t += 20000) pl.OnTick(t);
+    if (!expect(p.requests >= 1 && pl.stats().stuckHeadGiveUps == 1,
+                "pipeline(hold): a stuck keyframe with nothing behind it is given up once")) return false;
+  }
+  {
+    // Hold ON: a complete keyframe behind the host's own gap (backlog superseded) asks for nothing.
+    PipelineProbe p;
+    auto pl = make_pipeline(&p, true, 120000);
+    feed(pl, 1, 0, 800, true, t0);
+    feed(pl, 2, 0, 800, false, t0 + 33000);
+    feed(pl, 5, 0, 800, true, t0 + 66000);           // 3 and 4 were never sent
+    for (uint64_t t = t0 + 70000; t <= t0 + 300000; t += 20000) pl.OnTick(t);
+    if (!expect(p.delivered == std::vector<uint32_t>({1, 2, 5}) && p.requests == 0 &&
+                    p.discontinuities == 0,
+                "pipeline(hold): a complete key behind the host's gap resyncs without a request")) return false;
+  }
+  std::cout << "  ok session video pipeline (hold + NACK repair, give-up, host gap)\n";
+  return true;
+}
+
+// quality r4, through the real session loop (VideoReceiveMain over a socket): a keyframe that lost
+// a chunk, deltas arriving behind it, and a host that answers NACKs. With a NACK host the session
+// holds the deltas, repairs the key and asks for nothing; without NACK (an old host) it behaves as
+// before -- the key is thrown away and another is requested.
+class RecordingSink : public remote60::native_poc::ClientEncodedFrameSink {
+ public:
+  void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override {
+    std::lock_guard<std::mutex> lk(mu);
+    seqs.push_back(frame.header.seq);
+  }
+  void OnVideoStreamReset() override {}
+  void OnVideoDiscontinuity() override { discontinuities.fetch_add(1); }
+  std::vector<uint32_t> Seqs() {
+    std::lock_guard<std::mutex> lk(mu);
+    return seqs;
+  }
+  std::mutex mu;
+  std::vector<uint32_t> seqs;
+  std::atomic<int> discontinuities{0};
+};
+
+bool run_lossy_key_session(bool hostNack, std::vector<uint32_t>* seqs, int* requests, int* nacks,
+                           int* retransmits, int* discontinuities) {
+  FakeSessionServer server;
+  server.ackVideoNack = hostNack;
+  server.lossyKeyScript = true;
+  if (!expect(server.Start(false), "lossy session: fake server starts")) return false;
+  RecordingSink sink;
+  ClientSessionController controller;
+  ClientSessionConnectArgs args{};
+  args.host = "127.0.0.1";
+  args.videoPort = server.videoPort;
+  args.controlPort = server.controlPort;
+  args.controlIntervalMs = 50;
+  args.encodedFrameSink = &sink;
+  if (!expect(controller.Connect(args), "lossy session: connects")) return false;
+  std::this_thread::sleep_for(std::chrono::milliseconds(2300));  // the script plus the hold
+  *seqs = sink.Seqs();
+  *requests = server.keyframeRequests.load();
+  *nacks = server.nacksReceived.load();
+  *retransmits = server.retransmitsSent.load();
+  *discontinuities = sink.discontinuities.load();
+  controller.Disconnect();
+  server.Stop();
+  return true;
+}
+
+bool test_session_lossy_keyframe() {
+  std::vector<uint32_t> seqs;
+  int requests = 0, nacks = 0, retransmits = 0, discontinuities = 0;
+  auto list = [&]() {
+    std::string s;
+    for (uint32_t q : seqs) s += std::to_string(q) + " ";
+    return s + "requests=" + std::to_string(requests) + " nacks=" + std::to_string(nacks) +
+           " retransmits=" + std::to_string(retransmits) + " resets=" + std::to_string(discontinuities);
+  };
+  if (!run_lossy_key_session(true, &seqs, &requests, &nacks, &retransmits, &discontinuities)) return false;
+  std::cout << "  lossy key, NACK host: " << list() << "\n";
+  if (!expect(nacks >= 1 && retransmits >= 1, "lossy session(NACK host): the key's lost chunk is NACKed and resent")) return false;
+  if (!expect(!seqs.empty() && seqs.front() == 1 && seqs.size() >= 6,
+              "lossy session(NACK host): the repaired key is decoded first and the deltas follow")) return false;
+  if (!expect(requests == 0 && discontinuities == 0,
+              "lossy session(NACK host): no keyframe request and no decoder reset")) return false;
+
+  if (!run_lossy_key_session(false, &seqs, &requests, &nacks, &retransmits, &discontinuities)) return false;
+  std::cout << "  lossy key, old host (no NACK): " << list() << "\n";
+  if (!expect(requests >= 1 && (seqs.empty() || seqs.front() != 1),
+              "lossy session(old host): unchanged -- the key is lost and another requested")) return false;
+  std::cout << "  ok session lossy keyframe (real receive loop)\n";
+  return true;
+}
+
 // quality r4: the seq gap an arriving IDR reveals is the host superseding its backlog, and the IDR
 // resyncs by itself. Measured: 46 of 46 phone keyframe requests came within 250 ms of a host key.
 bool test_sequence_gap_response() {
@@ -1515,6 +1746,8 @@ int main() {
   if (!test_udp_assembler_saturation_bounds()) return 1;
   if (!test_session_controller()) return 1;
   if (!test_sequence_gap_response()) return 1;
+  if (!test_session_video_pipeline()) return 1;
+  if (!test_session_lossy_keyframe()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;
 }

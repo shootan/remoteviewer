@@ -1,4 +1,5 @@
 #include "native_video_client_session.hpp"
+#include "session_video_pipeline.hpp"
 
 #include "thumbnail_fetch_policy.hpp"
 
@@ -20,6 +21,10 @@ namespace {
 
 constexpr uint32_t kDefaultControlResponseTimeoutMs = 1000;
 constexpr uint32_t kVideoReceiveTimeoutMs = 100;
+// quality r4: with the in-order hold on, the receive timeout is its clock (hold expiry, NACK
+// rounds), so it ticks faster. Same 120 ms hold as the Windows viewer (viewer_context.hpp).
+constexpr uint32_t kVideoReceiveTimeoutHoldMs = 20;
+constexpr uint64_t kVideoNackHoldUs = 120000;
 constexpr uint32_t kTcpControlConnectRetryMs = 4000;
 constexpr uint32_t kTcpControlConnectRetrySleepMs = 50;
 // Generous: a window list or thumbnail crossing a slow link may need several retransmit
@@ -654,29 +659,45 @@ uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) cons
 }
 
 void ClientSessionController::VideoReceiveMain() {
-  UdpH264FrameAssembler assembler;
   std::array<uint8_t, 1600> datagram{};
-  uint64_t assemblyDropped = 0;
   uint64_t oversizePayloadDropCount = 0;
-  uint64_t fecRecoveredCount = 0;
-  bool waitForKeyframe = true;
+  uint64_t lastFecLogged = 0;
 
-  // Video NACK: ask the host to replay the missing chunks of the oldest stuck AU, instead of
-  // waiting for the next (on a static screen, far-off) frame to reveal the loss and then eating a
-  // full IDR. Only when the host advertised support. The grace / round policy lives in the shared
-  // VideoNackScheduler (udp_video_nack.hpp) so the Windows viewer drives the same rules; if it does
-  // not recover, the existing keyframe path takes over. (video NACK; Windows NACK wiring.)
-  VideoNackScheduler nackScheduler;
-  auto maybe_send_nack = [&](SocketHandle sock) {
-    if (sock == kInvalidSocket || !hostSupportsNack_.load(std::memory_order_relaxed)) return;
-    // While waiting for an IDR, only repairing THAT keyframe helps -- a non-key incomplete AU will
-    // be resynced by the coming IDR. But the keyframe itself MUST be repairable here, or a lossy
-    // 200KB IDR never completes and the picture is stuck (the 60s freeze). (Codex.)
-    UdpVideoNackPacket nack{};
-    if (nackScheduler.Poll(assembler, !waitForKeyframe, now_us(), &nack)) {
-      (void)send(sock, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
+  // The receive policy lives in SessionVideoPipeline (session_video_pipeline.hpp) so a test can
+  // drive it with synthetic loss. quality r4: against a host that negotiated video NACK, a
+  // completed AU now waits up to kVideoNackHoldUs behind an incomplete older one -- the next frame
+  // no longer throws away a keyframe that a retransmit could still repair (the field: 46 keyframe
+  // requests in 5 minutes, each a visible stop). Without NACK it behaves as before.
+  const bool nackEnabled = hostSupportsNack_.load(std::memory_order_relaxed);
+  SessionVideoPipelineConfig pipelineConfig;
+  pipelineConfig.nackEnabled = nackEnabled;
+  pipelineConfig.holdUs = nackEnabled ? kVideoNackHoldUs : 0;
+  ClientEncodedFrameSink* currentSink = nullptr;
+  SocketHandle currentSocket = kInvalidSocket;
+  SessionVideoPipeline::Callbacks callbacks;
+  callbacks.deliver = [&](UdpH264AssembledFrame&& frame) {
+    if (!currentSink) return;
+    currentSink->OnEncodedH264Frame(std::move(frame));
+    // The decoder may have had to discard what it was just handed. Ask for an IDR now
+    // rather than letting every later delta decode against a reference that never arrived.
+    if (currentSink->ConsumeDecoderKeyframeRequest()) {
+      (void)keyframeRequests_.Request(2, now_us());
     }
   };
+  callbacks.requestKeyframe = [&]() {
+    // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
+    (void)keyframeRequests_.Request(2, now_us());
+  };
+  callbacks.discontinuity = [&]() {
+    if (currentSink) currentSink->OnVideoDiscontinuity();
+  };
+  callbacks.sendNack = [&](const UdpVideoNackPacket& nack) {
+    if (currentSocket == kInvalidSocket) return;
+    (void)send(currentSocket, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
+  };
+  SessionVideoPipeline pipeline(pipelineConfig, std::move(callbacks));
+  bool loggedPolicy = false;
+  uint64_t nextSummaryAt = 1;
 
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
@@ -687,6 +708,15 @@ void ClientSessionController::VideoReceiveMain() {
       sink = encodedFrameSink_;
     }
     if (udpSocket == kInvalidSocket || !sink) break;
+    currentSink = sink;
+    currentSocket = udpSocket;
+    if (!loggedPolicy) {
+      loggedPolicy = true;
+      // The hold expires on the clock, so the receive timeout is its tick.
+      if (pipeline.HoldEnabled()) (void)set_recv_timeout(udpSocket, kVideoReceiveTimeoutHoldMs);
+      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu\n",
+                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs));
+    }
 
     const int n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
     if (n <= 0) {
@@ -695,9 +725,9 @@ void ClientSessionController::VideoReceiveMain() {
         // The read timeout is also the channel's heartbeat: without it a stalled control
         // transfer would sit unrecovered on an otherwise silent link.
         if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
-        // A quiet socket on a static screen is exactly when a lost chunk goes unnoticed: use the
-        // timeout wakeup to NACK the stuck AU rather than wait for the next frame. (video NACK.)
-        maybe_send_nack(udpSocket);
+        // A quiet socket is exactly when a lost chunk goes unnoticed and a held AU's hold runs
+        // out: tick the pipeline (NACK rounds, hold expiry, stuck-head give-up).
+        pipeline.OnTick(now_us());
         continue;
       }
       SignalRuntimeFailure("udp video receive failed");
@@ -707,70 +737,36 @@ void ClientSessionController::VideoReceiveMain() {
     if (controlOverUdp_.load(std::memory_order_acquire) &&
         udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
       sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+      pipeline.OnTick(now_us());
       continue;
     }
     if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
     sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-    auto assembleResult = assembler.PushDatagram(datagram.data(), static_cast<size_t>(n));
-    if (assembleResult.fecRecovered) {
-      fecRecoveredCount += assembleResult.fecRecoveredChunks;
-      if ((fecRecoveredCount % 120ULL) == 1ULL) {
-        std::fprintf(stderr,
-                     "[native-video-client-session] udp fec recovered chunks=%llu\n",
-                     static_cast<unsigned long long>(fecRecoveredCount));
-      }
+    const uint64_t malformedBefore = pipeline.stats().malformed;
+    pipeline.OnDatagram(datagram.data(), static_cast<size_t>(n), now_us());
+    const auto& ps = pipeline.stats();
+    if (ps.fecRecoveredChunks != lastFecLogged && (ps.fecRecoveredChunks % 120ULL) == 1ULL) {
+      lastFecLogged = ps.fecRecoveredChunks;
+      std::fprintf(stderr, "[native-video-client-session] udp fec recovered chunks=%llu\n",
+                   static_cast<unsigned long long>(ps.fecRecoveredChunks));
     }
-    if (assembleResult.droppedPreviousIncomplete) {
-      ++assemblyDropped;
-      // quality r4: a gap revealed by a complete keyframe needs neither a new IDR nor a decoder
-      // reset -- see respond_to_sequence_gap.
-      const SequenceGapResponse gap = respond_to_sequence_gap(assembleResult);
-      if (gap.discontinuity) {
-        if (!waitForKeyframe) sink->OnVideoDiscontinuity();
-        waitForKeyframe = true;
-      }
-      if (gap.requestKeyframe) (void)keyframeRequests_.Request(2, now_us());
+    if (ps.malformed != malformedBefore && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
+      std::fprintf(stderr, "[native-video-client-session] dropped malformed udp payload count=%llu\n",
+                   static_cast<unsigned long long>(oversizePayloadDropCount));
     }
-    if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
-      ++assemblyDropped;
-      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
-      waitForKeyframe = true;
-      (void)keyframeRequests_.Request(2, now_us());
-      if (assembleResult.oversizePayload && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
-        std::fprintf(stderr,
-                     "[native-video-client-session] dropped oversized udp payload bytes=%u count=%llu\n",
-                     assembleResult.rejectedPayloadSize,
-                     static_cast<unsigned long long>(oversizePayloadDropCount));
-      }
-      continue;
+    if (ps.delivered >= nextSummaryAt) {
+      nextSummaryAt = ps.delivered + 900;
+      std::fprintf(stderr,
+                   "[native-video-client-session] video delivered=%llu keyReq=%llu gapsBehindKey=%llu "
+                   "nacks=%llu stuckGiveUps=%llu discontinuities=%llu\n",
+                   static_cast<unsigned long long>(ps.delivered),
+                   static_cast<unsigned long long>(ps.keyframeRequests),
+                   static_cast<unsigned long long>(ps.gapsBehindCompleteKey),
+                   static_cast<unsigned long long>(ps.nacksSent),
+                   static_cast<unsigned long long>(ps.stuckHeadGiveUps),
+                   static_cast<unsigned long long>(ps.discontinuities));
     }
-    if (assembleResult.disposition == UdpH264AssemblyDisposition::Dropped) {
-      ++assemblyDropped;
-      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
-      waitForKeyframe = true;
-      // Request immediately. KeyframeRequestState owns the time/token limiter, so repeated
-      // late datagrams cannot create an IDR storm.
-      (void)keyframeRequests_.Request(2, now_us());
-      continue;
-    }
-    if (assembleResult.disposition == UdpH264AssemblyDisposition::Completed) {
-      const bool keyFrame = (assembleResult.frame.header.flags & 1u) != 0;
-      if (waitForKeyframe && !keyFrame) {
-        (void)keyframeRequests_.Request(2, now_us());
-        continue;
-      }
-      if (keyFrame) waitForKeyframe = false;
-      sink->OnEncodedH264Frame(std::move(assembleResult.frame));
-      // The decoder may have had to discard what it was just handed. Ask for an IDR now
-      // rather than letting every later delta decode against a reference that never arrived.
-      if (sink->ConsumeDecoderKeyframeRequest()) {
-        (void)keyframeRequests_.Request(2, now_us());
-      }
-    }
-    // After each datagram, on a busy link, also nudge the NACK for any still-stuck earlier AU
-    // (round-interval gated inside). (video NACK.)
-    maybe_send_nack(udpSocket);
   }
 }
 
