@@ -31,6 +31,12 @@
 //
 //   remote60_abr_client_evidence_e2e_test --mode none|present|stop [--host <GNLinkStream.exe>]
 //       [--desktop [--monitor N]] [--bitrate N] [--text-off] [--expect-size WxH]
+//   --select-at SEC:window|desktop (r3, repeatable): at second SEC select this test's window or the
+//   desktop with the product's ControlWindowSelect, the way a viewer does at runtime (a host started
+//   with --capture-window-title refuses selection, so pair it with --desktop --cadence-window).
+//   --tune-at SEC:BITRATE (r3, repeatable): a runtime tune (bitrate, fps kept at 30) through the
+//   product scheduler, as the viewer's quality control sends it.
+//   --expect-final WxH asserts the size on the LAST stats line: the box re-chosen for the last capture.
 //   --monitor selects the host's monitor N (primary first, then left to right) with the product's
 //   ControlMonitorSelect, before the measured run -- a 4K panel that is not the primary.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
@@ -75,6 +81,9 @@ const wchar_t* kTargetTitle = L"remote60 abr evidence target";
 // refresh frames (C0 measured about one a second), which ABR treats as sparse and ignores.
 class CadenceTarget {
  public:
+  // selectable: leave out WS_EX_TOOLWINDOW, which the host's window list excludes -- needed only
+  // when the test selects this window at runtime (it then shows a taskbar button for the run).
+  bool selectable = false;
   bool Start() {
     thread_ = std::thread([this] { Run(); });
     return wait_until([this] { return ready_.load(); }, 5000) && hwnd_ != nullptr;
@@ -83,6 +92,7 @@ class CadenceTarget {
     if (hwnd_) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
     if (thread_.joinable()) thread_.join();
   }
+  HWND hwnd() const { return hwnd_; }
 
  private:
   static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -125,7 +135,7 @@ class CadenceTarget {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60AbrEvidenceTarget";
     RegisterClassExW(&wc);
-    hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+    hwnd_ = CreateWindowExW((selectable ? 0 : WS_EX_TOOLWINDOW) | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
                             wc.lpszClassName, kTargetTitle, WS_POPUP, 0, 0, 480, 270, nullptr,
                             nullptr, wc.hInstance, nullptr);
     if (hwnd_) {
@@ -172,7 +182,11 @@ int wmain(int argc, wchar_t** argv) {
   std::string expectSize;
   int monitor = -1;
   std::wstring keepLog;
-  bool cadenceWindow = false;  // with --desktop: keep the invisible animated window up anyway
+  bool cadenceWindow = false;
+  std::map<int, std::string> selectAt;  // second -> "window" | "desktop"
+  std::string expectFinal;
+  std::map<int, uint32_t> tuneAt;  // second -> bitrate
+  bool gdi = false;  // r3: force the GDI desktop backend, staging the real GNLinkCapture.exe worker  // with --desktop: keep the invisible animated window up anyway
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe
@@ -190,6 +204,26 @@ int wmain(int argc, wchar_t** argv) {
       textOff = true;
     } else if (a == L"--bitrate" && i + 1 < argc) {
       bitrate = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--select-at" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t colon = v.find(L':');
+      if (colon != std::wstring::npos) {
+        const std::wstring what = v.substr(colon + 1);
+        selectAt[static_cast<int>(std::wcstol(v.substr(0, colon).c_str(), nullptr, 10))] =
+            std::string(what.begin(), what.end());
+      }
+    } else if (a == L"--gdi") {
+      gdi = true;
+    } else if (a == L"--tune-at" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t colon = v.find(L':');
+      if (colon != std::wstring::npos) {
+        tuneAt[static_cast<int>(std::wcstol(v.substr(0, colon).c_str(), nullptr, 10))] =
+            static_cast<uint32_t>(std::wcstoul(v.substr(colon + 1).c_str(), nullptr, 10));
+      }
+    } else if (a == L"--expect-final" && i + 1 < argc) {
+      const std::wstring e = argv[++i];
+      expectFinal.assign(e.begin(), e.end());
     } else if (a == L"--cadence-window") {
       cadenceWindow = true;
     } else if (a == L"--keep-log" && i + 1 < argc) {
@@ -218,11 +252,13 @@ int wmain(int argc, wchar_t** argv) {
   const std::wstring me = self_path();
   if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
   const bool staged = CopyFileW(hostExe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
-                      CopyFileW(me.c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE);
+                      CopyFileW(gdi ? (directory_of(me) + L"GNLinkCapture.exe").c_str() : me.c_str(),
+                                (dir + L"GNLinkCapture.exe").c_str(), FALSE);
   check("a host and a never-answering helper could be staged", staged,
         std::string(hostExe.begin(), hostExe.end()));
 
   CadenceTarget target;
+  target.selectable = !selectAt.empty();
   if (!desktop || cadenceWindow) {
     check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
   }
@@ -239,6 +275,7 @@ int wmain(int argc, wchar_t** argv) {
   if (staged) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     if (textOff) SetEnvironmentVariableW(L"REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE", L"1");
+    if (gdi) SetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", L"gdi");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
                        L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(bitrate) +
@@ -281,6 +318,7 @@ int wmain(int argc, wchar_t** argv) {
 
   // Per second of the run: real (non-synthetic) frames completed at this end.
   std::vector<uint32_t> realFramesPerSec;
+  std::vector<std::string> selectionLog;
   uint64_t metricsStoppedAtSec = 0;
   if (launched) {
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -354,6 +392,11 @@ int wmain(int argc, wchar_t** argv) {
     // What this viewer reports, per mode, set once a second by the loop below.
     std::mutex mmu;
     ClientControlMetricsSnapshot pendingMetrics{};
+    bool pendingSelectSet = false;
+    uint32_t pendingTune = 0;
+    uint64_t pendingSelect = 0;
+    std::mutex selMu;
+    std::vector<std::string> selections;  // what the host answered, in order
     std::atomic<bool> controlStop{false};
     std::thread controlThread([&] {
       ClientControlScheduler scheduler;
@@ -366,9 +409,42 @@ int wmain(int argc, wchar_t** argv) {
       scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
       while (!controlStop.load()) {
         ClientControlMetricsSnapshot metrics;
+        bool selectNow = false;
+        uint64_t selectId = 0;
+        uint32_t tuneNow = 0;
         {
           std::lock_guard<std::mutex> lk(mmu);
           metrics = pendingMetrics;
+          tuneNow = pendingTune;
+          pendingTune = 0;
+          selectNow = pendingSelectSet;
+          selectId = pendingSelect;
+          pendingSelectSet = false;
+        }
+        if (tuneNow != 0) {
+          runtimeTune.SetEnabled(true);
+          runtimeTune.SetTargets(tuneNow, 0, kFps);
+        }
+        if (selectNow) {
+          // The product message a viewer sends when the user picks a window (its id) or the
+          // desktop (windowId 0).
+          ControlOutboundAction select{};
+          select.kind = ControlOutboundActionKind::WindowSelect;
+          select.expectedResponseType = MessageType::ControlWindowSelected;
+          select.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlWindowSelectedMessage));
+          select.windowSelect.header.magic = kMagic;
+          select.windowSelect.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelect);
+          select.windowSelect.header.size = static_cast<uint16_t>(sizeof(select.windowSelect));
+          select.windowSelect.seq = 9001;
+          select.windowSelect.windowId = selectId;
+          select.windowSelect.clientSendQpcUs = qpc_now_us();
+          TcpControlResponse response;
+          const bool ok = execute_control_action(link, select, &response);
+          const auto& w = response.windowSelected;
+          std::lock_guard<std::mutex> lk(selMu);
+          selections.push_back(std::string(selectId == 0 ? "desktop" : "window") + " sent=" +
+                               (ok ? "1" : "0") + " flags=" + std::to_string(w.flags) + " reason=" +
+                               std::string(w.reason, strnlen(w.reason, sizeof(w.reason))));
         }
         ControlOutboundAction action{};
         const uint64_t now = qpc_now_us();
@@ -417,6 +493,16 @@ int wmain(int argc, wchar_t** argv) {
         m.updatedQpcUs = now;
       }
       if (mode == "stop" && s == kStopAfterSec) metricsStoppedAtSec = static_cast<uint64_t>(s);
+      if (tuneAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingTune = tuneAt[s];
+      }
+      if (selectAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingSelect = selectAt[s] == "window" ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(target.hwnd()))
+                                                : 0ull;
+        pendingSelectSet = true;
+      }
       {
         std::lock_guard<std::mutex> lk(mmu);
         pendingMetrics = m;
@@ -429,6 +515,10 @@ int wmain(int argc, wchar_t** argv) {
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
+    {
+      std::lock_guard<std::mutex> lk(selMu);
+      selectionLog = selections;
+    }
     stop.store(true);
     if (ingress.joinable()) ingress.join();
     closesocket(sock);
@@ -493,6 +583,20 @@ int wmain(int argc, wchar_t** argv) {
     check("the host encoded " + expectSize + " (stats line and every keyframe)",
           encodedSize == expectSize && keySizes.size() == 1 && *keySizes.begin() == expectSize,
           "stats=" + encodedSize + " keys=" + keySizeList);
+  }
+
+  if (launched && !selectAt.empty()) {
+    bool allOk = selectionLog.size() == selectAt.size();
+    for (const auto& l : selectionLog) {
+      std::cout << "selection: " << l << "\n";
+      allOk = allOk && l.find("sent=1 flags=1 ") != std::string::npos;
+    }
+    check("every selection was accepted by the host (flags bit0)", allOk,
+          std::to_string(selectionLog.size()) + " of " + std::to_string(selectAt.size()));
+  }
+  if (launched && !expectFinal.empty()) {
+    check("after the last selection the host encodes " + expectFinal + " (last stats line)",
+          encodedSize == expectFinal, "stats=" + encodedSize);
   }
 
   if (launched) {

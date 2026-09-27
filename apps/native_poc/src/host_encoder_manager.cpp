@@ -129,7 +129,8 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
 void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureResources& res,
                                                  FrameGatingState& frameGating, InputRouterState& inputRouter,
                                                  SenderState& sender, uint32_t newW, uint32_t newH,
-                                                 const char* reason, bool allowWindowOverride) {
+                                                 const char* reason, bool allowWindowOverride,
+                                                 RateControlState* rate) {
   EncoderState& encoder = *this;
   // An interactive window DRAG keeps the 0.4s settle path (per-frame MFT re-init would thrash),
   // so it bails here. A CONFIRMED window selection passes allowWindowOverride=true so the encode
@@ -138,7 +139,17 @@ void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureR
   // client to reconfigure twice and fire a keyframe-request storm.
   if (capture.windowModeActive && !allowWindowOverride) return;
   if (newW < 2 || newH < 2) return;
-  if (newW == encoder.encodeSourceW && newH == encoder.encodeSourceH) return;  // already fit to this source
+  // quality r3: the priority of what is captured NOW. If the box was chosen for the other one --
+  // a window at 3000 chose the old ladder's box (or the window's own size), then the desktop came
+  // back -- choose again, even when the source size did not change.
+  EncodePriority want = encoder.boxPriority;
+  bool repick = false;
+  if (rate) {
+    want = rate->PriorityFor(capture.windowModeActive.load(std::memory_order_acquire));
+    repick = RateControlState::NeedsBoxRepick(encoder.boxPriority, want, encoder.manualEncodeBox,
+                                              encoder.uiOverviewActive);
+  }
+  if (!repick && newW == encoder.encodeSourceW && newH == encoder.encodeSourceH) return;  // already fit to this source
   encoder.encodeSourceW = newW;
   encoder.encodeSourceH = newH;
   encoder.pendingRefitW = 0;
@@ -149,7 +160,26 @@ void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureR
   // Confirmed change: no aspectClose skip. A smaller same-aspect source must still shrink
   // activeEncode to avoid upscaling. Passing the current nominal box re-fits activeEncode from
   // the new encodeSource aspect and rebuilds the MFT immediately, instead of after the 0.4s settle.
-  if (encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, encoder.nominalEncodeW, encoder.nominalEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+  uint32_t boxW = encoder.nominalEncodeW;
+  uint32_t boxH = encoder.nominalEncodeH;
+  uint32_t fps = encoder.activeFps;
+  RateControlState::BoxPlan picked{};
+  if (repick) {
+    picked = rate->PlanBox(rate->abrProfile, encoder.activeBitrate, newW, newH, want);
+    boxW = picked.width;
+    boxH = picked.height;
+    if (picked.fps > 0) fps = picked.fps;
+  }
+  if (encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, boxW, boxH, fps, encoder.activeBitrate, encoder.activeKeyint)) {
+    if (repick) {
+      rate->encodeLadderReduced = picked.reduced;
+      std::cout << "[native-video-host] encode-box-repick reason=" << reason << " priority="
+                << (want == EncodePriority::DesktopText ? "desktop_text" : "standard")
+                << " from=" << (encoder.boxPriority == EncodePriority::DesktopText ? "desktop_text" : "standard")
+                << " profile=" << rate->abrProfile << " bitrate=" << encoder.activeBitrate
+                << " box=" << boxW << "x" << boxH << " fps=" << fps << "\n";
+      encoder.boxPriority = want;
+    }
     encoder.RequestKey(kHostKeyReasonGeometry);
     encoder.ResetTimelineAnchors(capture);
     std::cout << "[native-video-host] capture-geometry-confirmed reason=" << reason
@@ -179,8 +209,13 @@ bool EncoderState::ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResou
           : focusBitrate;
   const uint32_t targetFps =
       overviewMode ? std::max<uint32_t>(15u, (rate.userFpsCeiling * 67u) / 100u) : rate.userFpsCeiling;
+  // r3: the focus box is the capture's own priority's box -- leaving the picker on a desktop at
+  // 3000 used to land on the old ladder's 720p.
+  const EncodePriority priority =
+      rate.PriorityFor(capture.windowModeActive.load(std::memory_order_acquire));
   const auto sizeChoice = remote60::native_poc::choose_abr_profile_size(
-      overviewMode ? 2 : 0, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
+      overviewMode ? 2 : 0, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced,
+      priority);
   const uint32_t targetKeyint =
       overviewMode ? std::max<uint32_t>(rate.userKeyintCeiling, 60u) : rate.userKeyintCeiling;
   if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, sizeChoice.width, sizeChoice.height, targetFps, targetBitrate,
@@ -188,6 +223,8 @@ bool EncoderState::ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResou
     return false;
   }
   rate.encodeLadderReduced = sizeChoice.reduced;
+  encoder.boxPriority = priority;
+  encoder.uiOverviewActive = overviewMode;
   encoder.tuneManualOverride = true;
   rate.abrCooldownUntilUs = nowUs + 3000000ULL;
   rate.abrGoodSeconds = 0;

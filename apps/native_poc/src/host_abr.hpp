@@ -182,6 +182,30 @@ struct RateControlState {
     return std::min<uint32_t>(userFpsCeiling, std::max<uint32_t>(15u, (userFpsCeiling * 2u) / 3u));
   }
 
+  // r3: the encode box and fps for a capture, from what is captured now -- the ABR profile, the
+  // bitrate, the source size and its priority. Nothing about how the session got here goes in
+  // except the ladder's own band hysteresis (encodeLadderReduced), so window -> tune -> desktop and
+  // a fresh desktop land on the same answer.
+  struct BoxPlan {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps = 0;  // 0: keep the current fps (no ceiling known)
+    bool reduced = false;
+  };
+  BoxPlan PlanBox(int profile, uint32_t bitrate, uint32_t sourceW, uint32_t sourceH,
+                  EncodePriority priority) const {
+    const EncodeResolutionChoice c =
+        choose_abr_profile_size(profile, bitrate, sourceW, sourceH, encodeLadderReduced, priority);
+    return BoxPlan{c.width, c.height, AbrProfileFps(profile, priority), c.reduced};
+  }
+  // Whether a confirmed capture change must re-choose the box: the priority it was chosen for is
+  // not the capture's, and nothing else owns the box (a user-set --encode-width/height box, or the
+  // picker overview while it is showing).
+  static bool NeedsBoxRepick(EncodePriority boxPriority, EncodePriority capturePriority,
+                             bool manualBox, bool overviewActive) {
+    return !manualBox && !overviewActive && boxPriority != capturePriority;
+  }
+
   // --- behaviour (Phase 2-1: former main() lambdas m9_level_bitrate/fps/w/h) ---
   uint32_t M9LevelBitrate(int level) const {
     if (level <= 0) return m9BitrateLevel0;

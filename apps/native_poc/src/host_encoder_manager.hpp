@@ -17,6 +17,7 @@
 #include "host_frame_gate.hpp"
 #include "mf_h264_codec.hpp"
 #include "host_epoch_gate.hpp"
+#include "encode_resolution_ladder.hpp"
 #include "host_keyframe_reason.hpp"
 
 namespace remote60::native_poc {
@@ -141,6 +142,14 @@ struct EncoderState {
   // Why forceKeyNext is set (host_keyframe_reason.hpp), accumulated until the key AU is
   // accepted and logged. Diagnostic only; nothing decides on it.
   uint32_t keyReasons = kHostKeyReasonInitial;
+  // quality r3: which priority the nominal box was last chosen for. A capture that switches
+  // between window and desktop re-chooses the box for its own priority (ApplyConfirmedCapture-
+  // Geometry) instead of inheriting one picked for the other -- so the size depends on what is
+  // captured now, not on the order things happened. manualEncodeBox: --encode-width/height set a
+  // box the user chose, never re-chosen. uiOverviewActive: the picker overview owns the box.
+  EncodePriority boxPriority = EncodePriority::Standard;
+  bool manualEncodeBox = false;
+  bool uiOverviewActive = false;
   uint64_t lastKeyAcceptedUs = 0;  // qpc of the previous key AU accepted for sending (diagnostic)
   void RequestKey(uint32_t reason) {
     forceKeyNext = true;
@@ -320,9 +329,12 @@ struct EncoderState {
                    InputRouterState& inputRouter, SenderState& sender, uint32_t targetW, uint32_t targetH,
                    uint32_t targetFps, uint32_t targetBitrate, uint32_t targetKeyint);
   // A confirmed source-size change: re-fit the encode target to the new geometry immediately.
+  // `rate` (r3): when given, a change of capture priority (window <-> desktop) re-chooses the box
+  // from the ladder for the new priority at the current ABR profile and bitrate.
   void ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
                                      InputRouterState& inputRouter, SenderState& sender, uint32_t newW,
-                                     uint32_t newH, const char* reason, bool allowWindowOverride = false);
+                                     uint32_t newH, const char* reason, bool allowWindowOverride = false,
+                                     RateControlState* rate = nullptr);
   // Capture-UI overview (lower bitrate/fps/size) vs focus mode, derived from the live ceilings.
   bool ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
                                  InputRouterState& inputRouter, SenderState& sender, RateControlState& rate,

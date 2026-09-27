@@ -269,6 +269,8 @@ void startup_configure_encode_geometry(HostContext& hx) {
                             !args.captureWindowProcess.empty();
     choose_h264_encode_size(args, capture.width, capture.height, &encoder.encodeW, &encoder.encodeH,
                             &rate.autoFallback720, rate.PriorityFor(windowArgs));
+    encoder.boxPriority = rate.PriorityFor(windowArgs);
+    encoder.manualEncodeBox = args.encodeWidth > 0 && args.encodeHeight > 0;
   }
 
   // Whether the ladder, rather than the source size, is currently deciding the resolution. Held

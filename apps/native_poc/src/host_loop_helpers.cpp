@@ -245,7 +245,8 @@ bool restart_capture_session(HostContext& hx) {
     finalW = capture.width;
     finalH = capture.height;
   }
-  encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH, "capture-restart");
+  encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH,
+                                        "capture-restart", /*allowWindowOverride=*/false, &hx.rate);
   // The agent's rect follows what was just opened: RDP<->console, DXGI<->WGC<->GDI, a monitor
   // select and a geometry change all come through here (P9).
   sync_input_target_rect(capture, inputRouter, "capture-restart");
@@ -528,7 +529,8 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
       finalW = capture.width;
       finalH = capture.height;
     }
-    encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH, "window-select", /*allowWindowOverride=*/true);
+    encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH,
+                                          "window-select", /*allowWindowOverride=*/true, &hx.rate);
   }
   encoder.RequestKey(kHostKeyReasonSelection);
   kick.selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;

@@ -12552,3 +12552,12 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 시험: ladder 시험(텍스트 9건: 4K@3000→1920x1080, 4K@6000→원본, 1080p 유지, 업스케일 없음, 16:10 비율, 사이 구간 두 방향, 프로필 1080/1080/720, Standard 불변) · host_abr_test(fps 표·창/스위치 범위·압력→mid 1080p@20→low 720p→유지 시간 뒤 1080p@30) · 변이 4종 FAIL. 격리 호스트 e2e(1080p 데스크톱): 3000 텍스트 1920x1080 / 끔 1280x720 / 6000 1920x1080, 데스크톱+움직임 stop·recover — mid 1920x1080@20 → low 1280x720@20 → mid → high 1920x1080@30(클라 측 초당 실프레임 30→20 확인). 창 캡처 ABR 3모드 회귀 10/0(fps 30 유지). 실제 파일 불변.
 - 트래픽: 정지 데스크톱 36초에서 3000 텍스트 1.85MB vs 끔 1.41MB(+31%, 키프레임이 커서). "트래픽 ≤ 지금" 게이트는 사용자 실측으로 판정.
 - 제품/테스트/문서: 제품(해상도 사다리·ABR fps·호출 3곳·[abr] 줄) / 테스트(ladder·host_abr·e2e 옵션) / 문서(이 항목).
+
+### 2026-09-27 quality r3 — 상자는 지금 잡고 있는 것으로 고른다, 지나온 순서로가 아니라
+
+- 검증용 지적(r2 조건부 OK): 창↔데스크톱 전환 때 `ApplyConfirmedCaptureGeometry` 가 이전 nominal 상자를 그대로 쓴다. 격리 e2e 로 재현하니 더 나빴다 — 데스크톱 6000 → 창(480x270) 선택 → 창에서 3000 튠 → 데스크톱 복귀 시 **480x270 에 계속 머묾**(창의 상자).
+- 수정: `EncoderState::boxPriority`(상자가 골라진 우선순위)·`manualEncodeBox`(--encode-width/height)·`uiOverviewActive`(선택기 개요). 확정된 캡처 변경에서 우선순위가 바뀌었으면(`RateControlState::NeedsBoxRepick`) 현재 ABR 단계·비트레이트·소스·우선순위만으로 `PlanBox` 해 다시 적용 — 소스 크기가 같아도. `encode-box-repick` 로그. 선택기 포커스 복귀(`ApplyCaptureUiQualityMode`)도 우선순위를 받는다(종전엔 데스크톱 3000 에서 720p 로 떨어졌을 것).
+- GDI: 캡처 프로세스가 시작 시 인코더 fps 로 고정되므로 ABR fps 변경에도 런타임 튠과 같은 캡처 재시작(`gdi-abr-fps-change`). 실측: 30→20→30 에서 재시작 2회, 클라 초당 실프레임 30→20→30.
+- 확인만: fps 없는 튠 — Windows 뷰어는 셸이 항상 `--runtime-fps` 로 띄우고 APK 는 항상 fps(1..120, 기본 30)를 넣는다(`MainActivity.kt` 3곳) → 기록만. `[keyframe] reasons=none` 반복은 IDR 단계로.
+- 시험: host_abr_test(재선택 조건 5·계획 이력 무관·데스크톱/창·mid) · 변이 3종 FAIL · 격리 e2e: 창→튠→데스크톱 2회 1920x1080(수정 전 호스트는 480x270 FAIL), 데스크톱→창→데스크톱 1920x1080, 데스크톱→창 480x270, 전환마다 최종 크기 키프레임 1장, r2 텍스트/끔·창 ABR 3모드 회귀 PASS, GDI recover PASS · 단위 6종 PASS · 실제 파일 불변.
+- 제품/테스트/문서: 제품(상자 재선택·GDI 재시작·선택기 포커스 우선순위) / 테스트(host_abr_test, e2e 옵션 --select-at·--tune-at·--gdi·--expect-final) / 문서(이 항목).

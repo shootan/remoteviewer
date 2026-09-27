@@ -610,6 +610,43 @@ void TestTextPriorityPressureAndRecovery() {
   expect(r.abrProfile == 0 && plan(0) == "1920x1080@30", "r2: recovered to 1920x1080@30");
 }
 
+// ---- quality r3: the box follows what is captured now, not how the session got there ----
+
+void TestBoxRepickIsHistoryIndependent() {
+  const auto T = EncodePriority::DesktopText;
+  const auto S = EncodePriority::Standard;
+  // When to re-choose.
+  expect(RateControlState::NeedsBoxRepick(S, T, false, false), "r3: window box, desktop capture -> re-choose");
+  expect(RateControlState::NeedsBoxRepick(T, S, false, false), "r3: desktop box, window capture -> re-choose");
+  expect(!RateControlState::NeedsBoxRepick(T, T, false, false), "r3: same priority -> keep");
+  expect(!RateControlState::NeedsBoxRepick(S, T, true, false), "r3: a user-set --encode box is never re-chosen");
+  expect(!RateControlState::NeedsBoxRepick(S, T, false, true), "r3: the picker overview owns its box");
+
+  // What it re-chooses: only (profile, bitrate, source, priority). The measured bug: desktop 6000
+  // -> window 480x270 -> tune 3000 in the window (box = 480x270) -> desktop stayed 480x270.
+  RateControlState r = MakeAbr(false);
+  r.userFpsCeiling = 30;
+  const auto fresh = r.PlanBox(0, 3000000, 1920, 1080, T);
+  RateControlState afterWindow = MakeAbr(false);
+  afterWindow.userFpsCeiling = 30;
+  (void)afterWindow.PlanBox(0, 6000000, 480, 270, S);   // the window, before the tune
+  (void)afterWindow.PlanBox(0, 3000000, 480, 270, S);   // the tune while on the window
+  const auto back = afterWindow.PlanBox(0, 3000000, 1920, 1080, T);
+  expect(back.width == fresh.width && back.height == fresh.height && back.fps == fresh.fps &&
+             back.width == 1920 && back.height == 1080 && back.fps == 30,
+         "r3: window -> tune -> desktop plans the same box as a fresh desktop: " +
+             std::to_string(back.width) + "x" + std::to_string(back.height) + "@" + std::to_string(back.fps));
+  // 4K desktop at 3000: 1080p area; the same 4K as a window (Standard): the old ladder's 720p.
+  const auto desk4k = r.PlanBox(0, 3000000, 3840, 2160, T);
+  const auto win4k = r.PlanBox(0, 3000000, 3840, 2160, S);
+  expect(desk4k.width == 1920 && win4k.width == 1280, "r3: desktop -> 1080p, window -> old ladder 720p");
+  // Mid profile on the desktop: fps, not pixels; the same profile as a window: ceiling fps.
+  const auto deskMid = r.PlanBox(1, 2250000, 3840, 2160, T);
+  const auto winMid = r.PlanBox(1, 2250000, 3840, 2160, S);
+  expect(deskMid.width == 1920 && deskMid.fps == 20 && winMid.fps == 30,
+         "r3: at mid the desktop plans 1080p@20, a window keeps its fps");
+}
+
 }  // namespace
 
 int main() {
@@ -634,6 +671,7 @@ int main() {
   TestClientMetricsSessionStickyFields();
   TestTextPriorityFpsAndScope();
   TestTextPriorityPressureAndRecovery();
+  TestBoxRepickIsHistoryIndependent();
   TestM9DownRequiresConsecutiveSecondsAndCooldown();
   TestM9PressureStreakResets();
   TestM9UpAfterRecoverySeconds();

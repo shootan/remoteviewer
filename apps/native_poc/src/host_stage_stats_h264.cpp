@@ -403,6 +403,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       const uint32_t targetFps = priority == EncodePriority::DesktopText
                                      ? rate.AbrProfileFps(targetProfile, priority)
                                      : encoder.activeFps;
+      const uint32_t prevAbrFps = encoder.activeFps;
 
       if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
         std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
@@ -411,6 +412,20 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // Committed only once the encoder accepted the target, so a failed reinit cannot
       // leave the hysteresis state describing an encoder that does not exist.
       rate.CommitAbrProfile(targetProfile, ladderChoice.reduced, t);
+      encoder.boxPriority = priority;
+      // r3: the GDI backend captures at the encoder's fps, fixed when its capture process starts
+      // (host_capture_session.cpp). A runtime fps tune restarts it for that reason, and an ABR fps
+      // change has to as well -- otherwise a capture restarted at mid's 20 fps keeps feeding 20
+      // after high has gone back to 30. DXGI/WGC are event driven and need nothing.
+      if (targetFps != prevAbrFps && !capture.windowModeActive.load(std::memory_order_acquire) &&
+          backend.active == DesktopCaptureBackend::Gdi) {
+        if (restart_capture_session(hx)) {
+          ++capture.restartCount;
+          capture.FlushCapturePipelineState(res, frameGating, stats, "gdi-abr-fps-change");
+        } else {
+          std::cerr << "[native-video-host][abr] GDI fps restart failed\n";
+        }
+      }
       encoder.RequestKey(kHostKeyReasonAbr);
 
       std::cout << "[native-video-host][abr] profile="

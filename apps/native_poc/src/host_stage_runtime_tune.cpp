@@ -171,6 +171,10 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
         return Flow::Continue;
       }
       rate.encodeLadderReduced = ladderReducedNext;
+      if (bitrateExplicit) {
+        encoder.boxPriority =
+            rate.PriorityFor(capture.windowModeActive.load(std::memory_order_acquire));
+      }
       if (fpsExplicit) rate.userFpsCeiling = targetFps;
       if (keyintExplicit) rate.userKeyintCeiling = targetKeyint;
       encoder.tuneManualOverride = false;
