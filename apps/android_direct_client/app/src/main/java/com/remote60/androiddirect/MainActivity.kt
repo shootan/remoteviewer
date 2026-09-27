@@ -151,6 +151,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var windowSheetRequestQueued = false
     private var windowSheetRequestedAtMs = 0L
     private var windowSheetState = WindowSheetState.READY
+    /** Set when the switch in flight came from the sheet itself; only then does "ready" close it. */
+    private var closeWindowSheetOnReady = false
     private var unlockDialog: AlertDialog? = null
     private lateinit var viewerUnlockBar: View
     private lateinit var viewerUnlockButton: Button
@@ -327,7 +329,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         // Amber for the relay. Not an error -- it is working, and on some networks it is the only
         // thing that does -- but it is the one path where the counter above costs money.
-        viewerPathText.setTextColor(if (connectionPathKind == "relay") 0xFFD9A441.toInt() else 0xFF9AA3B2.toInt())
+        viewerPathText.setTextColor(getColor(if (connectionPathKind == "relay") R.color.ui_warning else R.color.ui_text_secondary))
     }
 
     /**
@@ -444,6 +446,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!::viewerWindowOverlay.isInitialized || viewerWindowOverlay.visibility != View.VISIBLE) return
         viewerWindowOverlay.visibility = View.GONE
         windowSheetAwaitingList = false
+        closeWindowSheetOnReady = false
         diagnosticsLog.log("window_sheet", "action=close reason=$reason")
     }
 
@@ -490,9 +493,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         val tab = if (item.id == 0L) TargetTab.DESKTOP else TargetTab.WINDOWS
         diagnosticsLog.log("window_sheet", "action=select targetId=${item.id} tab=$tab")
-        startSelectionTransition(item.id, item.title, tab, "viewer_sheet")
+        closeWindowSheetOnReady = startSelectionTransition(item.id, item.title, tab, "viewer_sheet")
         renderStatus()
     }
+
+    /**
+     * The words for a switch in progress. The internal label for the desktop is "desktop"; that
+     * never reaches the screen (apk-ui r2 (2)).
+     */
+    private fun switchingText(id: Long?, tab: TargetTab, label: String): String = when {
+        tab == TargetTab.DESKTOP && (id ?: 0L) < MONITOR_ID_BASE -> getString(R.string.ui_switching_desktop)
+        tab == TargetTab.DESKTOP -> getString(R.string.ui_switching_screen, label)
+        else -> getString(R.string.ui_switching_window, label.ifBlank { getString(R.string.ui_rail_windows) })
+    }
+
+    private fun requestSummary(): String =
+        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps, requestedDesktopBackend.label)
 
     /** The desktop in one tap, from the rail (Codex 2). */
     private fun switchToDesktop() {
@@ -553,7 +569,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val currentTitle = if (checkedId == 0L) desktopName else panelSnapshot.selectedTitle
         val status = when (state) {
             WindowSheetState.SWITCHING ->
-                getString(R.string.ui_windows_switching, pendingSelectionLabel.ifBlank { currentTitle })
+                switchingText(pendingSelectionId, pendingSelectionTab, pendingSelectionLabel.ifBlank { currentTitle })
             WindowSheetState.LOCKED -> getString(R.string.ui_windows_locked)
             WindowSheetState.LOADING -> getString(R.string.ui_windows_loading)
             WindowSheetState.ERROR -> getString(R.string.ui_windows_error)
@@ -733,8 +749,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             else -> getString(R.string.ui_quality_status_pending, qualityLabel(), requestedRuntimeFps)
         }
         settingsStatusMessage =
-            "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
-                "desktop ${requestedDesktopBackend.label}"
+            requestSummary()
         settingsAppliedText.text = settingsStatusMessage
         saveCurrentEndpoint()
         diagnosticsLog.log(
@@ -950,9 +965,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val image = view.findViewById<ImageView>(R.id.targetCardThumbnail)
             val bmp = thumbnailBitmaps[id]
             if (bmp != null) {
+                image.scaleType = ImageView.ScaleType.FIT_CENTER
+                image.imageTintList = null
                 image.setImageBitmap(bmp)
             } else {
-                image.setImageDrawable(null)
+                // No preview yet (or none for this target): an icon, not an empty black box.
+                image.scaleType = ImageView.ScaleType.CENTER
+                image.imageTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.ui_text_secondary))
+                image.setImageResource(
+                    if (activeTargetTab == TargetTab.DESKTOP) R.drawable.ic_ui_desktop else R.drawable.ic_ui_windows
+                )
             }
             view.isActivated = id == targetListSelectedId
             return view
@@ -1273,6 +1295,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         loginServerInput = findViewById(R.id.loginServerInput)
         loginIdInput = findViewById(R.id.loginIdInput)
         loginPasswordInput = findViewById(R.id.loginPasswordInput)
+        // A password field falls back to monospace for its hint; keep it in the same face as the others.
+        loginPasswordInput.typeface = android.graphics.Typeface.DEFAULT
         loginButton = findViewById(R.id.loginButton)
         loginErrorText = findViewById(R.id.loginErrorText)
         loginManualButton = findViewById(R.id.loginManualButton)
@@ -1440,8 +1464,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         requestedRuntimeFps = savedEndpoint.fps
         requestedDesktopBackend = DesktopCaptureBackendOption.fromCode(savedEndpoint.desktopBackendCode)
         settingsStatusMessage =
-            "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
-                "desktop ${requestedDesktopBackend.label}"
+            requestSummary()
         settingsAppliedText.text = settingsStatusMessage
         renderQualityControls()
         updateDesktopBackendButtons()
@@ -1539,7 +1562,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 pendingRuntimeConfigSync = false
                 diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             } else {
-                messages += "Runtime config request failed."
+                messages += getString(R.string.ui_request_quality_failed)
                 diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             }
 
@@ -1552,7 +1575,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "backend=${requestedDesktopBackend.label.lowercase()}"
                 )
             } else {
-                messages += "Desktop backend request failed."
+                messages += getString(R.string.ui_request_backend_failed)
                 diagnosticsLog.log(
                     "desktop_backend_failed",
                     "backend=${requestedDesktopBackend.label.lowercase()}"
@@ -1560,8 +1583,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             if (messages.isEmpty()) {
                 settingsStatusMessage =
-                    "Requested: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
-                        "desktop ${requestedDesktopBackend.label}"
+                    requestSummary()
             } else {
                 settingsStatusMessage = messages.joinToString(" / ")
             }
@@ -2057,12 +2079,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun updateDesktopBackendButtons() {
-        settingsDesktopBackendDxgiButton.text =
-            if (requestedDesktopBackend == DesktopCaptureBackendOption.DXGI) "[DXGI]" else "DXGI"
-        settingsDesktopBackendWgcButton.text =
-            if (requestedDesktopBackend == DesktopCaptureBackendOption.WGC) "[WGC]" else "WGC"
-        settingsDesktopBackendGdiButton.text =
-            if (requestedDesktopBackend == DesktopCaptureBackendOption.GDI) "[GDI]" else "GDI"
+        settingsDesktopBackendDxgiButton.text = "DXGI"
+        settingsDesktopBackendDxgiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.DXGI
+        settingsDesktopBackendWgcButton.text = "WGC"
+        settingsDesktopBackendWgcButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.WGC
+        settingsDesktopBackendGdiButton.text = "GDI"
+        settingsDesktopBackendGdiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.GDI
     }
 
     private fun syncConnectedClientPreferences(isConnected: Boolean) {
@@ -2076,8 +2098,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
                 pendingRuntimeConfigSync = false
                 settingsStatusMessage =
-                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
-                        "desktop ${requestedDesktopBackend.label}"
+                    requestSummary()
                 settingsAppliedText.text = settingsStatusMessage
                 qualityStatusMessage =
                     getString(R.string.ui_quality_status_requested, qualityLabel(), requestedRuntimeFps)
@@ -2093,8 +2114,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)) {
                 pendingDesktopBackendSync = false
                 settingsStatusMessage =
-                    "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
-                        "desktop ${requestedDesktopBackend.label}"
+                    requestSummary()
                 settingsAppliedText.text = settingsStatusMessage
                 diagnosticsLog.log(
                     "desktop_backend_sync",
@@ -3301,8 +3321,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // Key events only ever arrived through InputConnection.sendKeyEvent, so a physical or
     // Bluetooth keyboard attached to the tablet was silently ignored in the viewer.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (currentScene == UiScene.VIEWER && event.deviceId != KeyCharacterMap.VIRTUAL_KEYBOARD) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        val sheetOpen = isViewerSheetOpen()
+        if (sheetOpen && ::viewerImeCaptureView.isInitialized && viewerImeCaptureView.hasFocus()) {
+            // The capture view forwards whatever reaches it; with a sheet up it must not be the
+            // one that does (apk-ui r2 (4)).
+            viewerImeCaptureView.clearFocus()
+        }
+        val route = ViewerKeyRouting.route(
+            inViewer = currentScene == UiScene.VIEWER,
+            sheetOpen = sheetOpen,
+            fromVirtualKeyboard = event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD,
+            isBack = event.keyCode == KeyEvent.KEYCODE_BACK,
+        )
+        if (route == KeyRoute.HOST) {
             val vk = mapAndroidKeyCodeToWindowsVk(event.keyCode)
             // VK down/up only. The host posts a real WM_KEYDOWN with a scan code, and the
             // target app's own TranslateMessage synthesises WM_CHAR from it — sending the
@@ -3454,7 +3485,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                     clearPendingSelection()
                     currentScene = UiScene.VIEWER
-                    closeWindowSheet("select_ready")
+                    if (closeWindowSheetOnReady) closeWindowSheet("select_ready")
                     showViewerControls(emphasized = true)
                     showRightClickHintOnce()
                 } else if (selectionStage == SelectionStage.REQUESTING &&
@@ -3485,7 +3516,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         syncConnectedClientPreferences(isConnected)
 
-        connectStatusText.text = statusValue
+        connectStatusText.text = when {
+            statusValue.startsWith("connecting") -> getString(R.string.ui_status_connecting)
+            statusValue.startsWith("connected") -> getString(R.string.ui_status_connected)
+            else -> ""
+        }
         // The log path is developer detail; surfacing it as the permanent error line pushed
         // the real message out of the 3-line box. It stays available in the LOG overlay.
         connectErrorText.text = errorValue
@@ -3511,15 +3546,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
         val selectionPending = selectionStage != SelectionStage.IDLE
         val settingsActive = activeTargetTab == TargetTab.SETTINGS
-        listWindowsButton.text =
-            if (activeTargetTab == TargetTab.WINDOWS) "[Windows]" else getString(R.string.target_windows_button)
-        listDevicesButton.text =
-            if (activeTargetTab == TargetTab.DESKTOP) "[Desktop]" else getString(R.string.target_desktop_button)
-        listSettingsButton.text =
-            if (settingsActive) "[Settings]" else getString(R.string.target_settings_button)
-        listWindowsButton.isEnabled = activeTargetTab != TargetTab.WINDOWS && !selectionPending
-        listDevicesButton.isEnabled = activeTargetTab != TargetTab.DESKTOP && !selectionPending
-        listSettingsButton.isEnabled = !settingsActive && !selectionPending
+        // The current tab is shown as selected (tinted, accent border), not by brackets and not by
+        // greying it out as if it were unavailable.
+        listWindowsButton.isSelected = activeTargetTab == TargetTab.WINDOWS
+        listDevicesButton.isSelected = activeTargetTab == TargetTab.DESKTOP
+        listSettingsButton.isSelected = settingsActive
+        listWindowsButton.isEnabled = !selectionPending
+        listDevicesButton.isEnabled = !selectionPending
+        listSettingsButton.isEnabled = !selectionPending
         listRefreshButton.isEnabled = isConnected && !selectionPending && !settingsActive
         listRefreshButton.visibility = if (settingsActive) View.GONE else View.VISIBLE
         listDisconnectButton.isEnabled = isConnected || connectFlowActive
@@ -3536,7 +3570,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         targetListView.visibility = if (settingsActive) View.GONE else View.VISIBLE
         updateDesktopBackendButtons()
 
-        listSelectedText.text = "Selected: ${panelSnapshot.selectedTitle}"
+        val currentName =
+            if (panelSnapshot.selectedId == 0L) getString(R.string.ui_windows_desktop_name) else panelSnapshot.selectedTitle
+        listSelectedText.text = if (isConnected) getString(R.string.ui_targets_current, currentName) else ""
+        listSelectedText.visibility = if (listSelectedText.text.isEmpty()) View.GONE else View.VISIBLE
         // The path is said in full here, once, before anything is opened. In the viewer there is
         // only room for a two-character badge, and "my data is being billed" is not something to
         // learn from a badge alone.
@@ -3546,14 +3583,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             "public", "public-alt" -> getString(R.string.connect_path_direct)
             else -> ""
         }
+        // The host's status line ("window_list_received count=8") is for the log, not the screen.
         listStatusText.text =
-            when (selectionStage) {
-                SelectionStage.REQUESTING -> "selecting $pendingSelectionLabel..."
-                SelectionStage.WAITING_FIRST_FRAME -> "waiting first frame for $pendingSelectionLabel..."
-                SelectionStage.IDLE ->
-                    if (isConnected && pathNote.isNotEmpty()) "$pathNote\n${panelSnapshot.status}"
-                    else panelSnapshot.status
+            when {
+                selectionStage != SelectionStage.IDLE ->
+                    switchingText(pendingSelectionId, pendingSelectionTab, pendingSelectionLabel)
+                !isConnected -> getString(R.string.ui_status_connecting)
+                panelSnapshot.status.startsWith("window_list_request") -> getString(R.string.ui_targets_loading)
+                else -> pathNote
             }
+        listStatusText.visibility = if (listStatusText.text.isEmpty()) View.GONE else View.VISIBLE
 
         val labels = mutableListOf<String>()
         val ids = mutableListOf<Long>()
@@ -3561,8 +3600,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         when (activeTargetTab) {
             TargetTab.WINDOWS -> {
                 panelSnapshot.items.forEach { item ->
-                    val minimizedSuffix = if (item.minimized) " • minimized" else ""
-                    labels.add(item.title + minimizedSuffix)
+                    labels.add(
+                        if (item.minimized) getString(R.string.ui_targets_minimized, item.title) else item.title
+                    )
                     ids.add(item.id)
                 }
                 targetListEmptyText.text = getString(R.string.targets_empty)
@@ -3626,10 +3666,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // cancels -- there is no automatic give-up.
             viewerLoadingText.text = when {
                 selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 30000L ->
-                    getString(R.string.viewer_preparing_long, target)
+                    getString(R.string.ui_preparing_long)
                 selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 6000L ->
-                    getString(R.string.viewer_preparing, target)
-                else -> getString(R.string.viewer_switching_to, target)
+                    getString(R.string.ui_preparing)
+                else -> switchingText(pendingSelectionId, pendingSelectionTab, target)
             }
             viewerLoadingPanel.visibility = View.VISIBLE
             viewerOverlayStatusText.visibility = View.GONE
@@ -3657,8 +3697,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             viewerOverlayStatusText.visibility = View.GONE
         } else {
             viewerOverlayStatusText.visibility = View.VISIBLE
-            viewerOverlayStatusText.text =
-                panelSnapshot.selectedTitle + " • " + statusValue + "\n" + videoDebugValue
+            val line = getString(
+                when {
+                    disconnected -> R.string.ui_viewer_disconnected
+                    videoStalled -> R.string.ui_viewer_stalled
+                    else -> R.string.ui_viewer_waiting
+                }
+            )
+            if (viewerOverlayStatusText.text.toString() != line) {
+                viewerOverlayStatusText.text = line
+                // The counters that used to be painted over the picture belong in the log.
+                diagnosticsLog.log(
+                    "viewer_overlay",
+                    "line=$line title=${panelSnapshot.selectedTitle} status=$statusValue debug=$videoDebugValue"
+                )
+            }
         }
     }
 
@@ -3931,8 +3984,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val state = view.findViewById<TextView>(R.id.hostCardState)
             state.text =
                 if (host.online) getString(R.string.hosts_online) else getString(R.string.hosts_offline)
-            state.setTextColor(if (host.online) Color.parseColor("#1B7F3B") else Color.parseColor("#8A8A8A"))
-            view.alpha = if (host.online) 1.0f else 0.55f
+            state.setTextColor(getColor(if (host.online) R.color.ui_success else R.color.ui_text_secondary))
+            view.alpha = if (host.online) 1.0f else 0.8f
             return view
         }
     }

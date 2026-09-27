@@ -13,7 +13,7 @@
     <string name="target_settings_button">Settings</string>
     <string name="desktop_mode_button">Desktop</string>
     <string name="targets_title">Select A Target</string>
-    <string name="settings_title">화질</string>
+    <string name="settings_title">스트림 설정</string>
     <string name="settings_hint">뷰어 메뉴와 같은 설정입니다. 연결 중이면 바로 PC 에 요청합니다.</string>
     <string name="settings_desktop_backend_label">Desktop Capture Backend</string>
     <string name="settings_desktop_backend_hint">Choose DXGI, WGC, or isolated GDI for desktop mode. Window-target capture remains WGC.</string>
@@ -212,5 +212,21 @@
     <string name="ui_window_minimized">최소화됨</string>
     <string name="ui_window_current_description">%1$s, 보고 있는 화면</string>
     <string name="ui_desktop_already">이미 바탕화면을 보고 있습니다</string>
+    <string name="ui_switching_desktop">바탕화면으로 전환하는 중…</string>
+    <string name="ui_switching_window">‘%1$s’ 창을 여는 중…</string>
+    <string name="ui_switching_screen">‘%1$s’ 화면을 여는 중…</string>
+    <string name="ui_preparing">화면을 준비하는 중입니다. PC 가 바쁘면 조금 걸릴 수 있습니다</string>
+    <string name="ui_preparing_long">아직 준비하는 중입니다. 뒤로 가기를 누르면 취소합니다</string>
+    <string name="ui_viewer_waiting">화면을 기다리는 중…</string>
+    <string name="ui_viewer_stalled">화면이 멈췄습니다 · 다시 연결하는 중…</string>
+    <string name="ui_viewer_disconnected">연결이 끊겼습니다</string>
+    <string name="ui_targets_current">지금 보는 대상: %1$s</string>
+    <string name="ui_targets_loading">창 목록을 불러오는 중…</string>
+    <string name="ui_targets_minimized">%1$s · 최소화됨</string>
+    <string name="ui_request_summary">요청: %1$s · %2$d fps · 바탕화면 캡처 %3$s</string>
+    <string name="ui_request_quality_failed">화질 요청을 보내지 못했습니다</string>
+    <string name="ui_request_backend_failed">캡처 방식 요청을 보내지 못했습니다</string>
+    <string name="ui_status_connecting">연결하는 중…</string>
+    <string name="ui_status_connected">연결됨</string>
     <string name="ui_switch_busy">전환하는 중입니다. 잠시 뒤에 다시 눌러 주세요</string>
 </resources>

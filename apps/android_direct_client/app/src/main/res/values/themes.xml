@@ -1,6 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.Remote60AndroidDirect" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
-        <item name="android:statusBarColor" tools:targetApi="l">#101820</item>
-        <item name="android:navigationBarColor">#101820</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/ui_bg</item>
+        <item name="android:navigationBarColor">@color/ui_bg</item>
+        <item name="android:windowBackground">@color/ui_bg</item>
+        <item name="android:colorAccent">@color/ui_accent</item>
+        <item name="android:textCursorDrawable">@null</item>
     </style>
 </resources>

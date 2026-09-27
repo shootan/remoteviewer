@@ -42,3 +42,15 @@ object ViewerWindowSheetModel {
     fun checkedId(switching: Boolean, hostSelectedId: Long, lastConfirmedId: Long): Long =
         if (switching) lastConfirmedId else hostSelectedId
 }
+
+/** Where a key event goes in the viewer (apk-ui r2, Codex 4: nothing leaks while a sheet is open). */
+enum class KeyRoute { HOST, LOCAL }
+
+object ViewerKeyRouting {
+    /**
+     * A hardware key goes to the PC only in the viewer, with no sheet open, and never Back (Back is
+     * the phone's). Keys from the on-screen keyboard take the IME path and are not routed here.
+     */
+    fun route(inViewer: Boolean, sheetOpen: Boolean, fromVirtualKeyboard: Boolean, isBack: Boolean): KeyRoute =
+        if (inViewer && !sheetOpen && !fromVirtualKeyboard && !isBack) KeyRoute.HOST else KeyRoute.LOCAL
+}

@@ -1,24 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- apk-ui r2: a target or PC card. Activated is the host's current selection. -->
+<!-- apk-ui r2: the one main action on a screen (sign in, connect). Text stays ui_text on a tinted
+     fill (10.46:1); white on ui_accent itself would be 2.95:1. -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:state_activated="true">
+    <item android:state_enabled="false">
         <shape android:shape="rectangle">
-            <solid android:color="@color/ui_accent_container" />
-            <stroke android:width="2dp" android:color="@color/ui_accent" />
+            <solid android:color="@color/ui_surface" />
             <corners android:radius="@dimen/ui_corner_button" />
         </shape>
     </item>
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
             <solid android:color="@color/ui_surface_raised" />
-            <stroke android:width="1dp" android:color="@color/ui_divider" />
+            <stroke android:width="2dp" android:color="@color/ui_accent" />
             <corners android:radius="@dimen/ui_corner_button" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="@color/ui_surface" />
-            <stroke android:width="1dp" android:color="@color/ui_divider" />
+            <solid android:color="@color/ui_accent_container" />
+            <stroke android:width="2dp" android:color="@color/ui_accent" />
             <corners android:radius="@dimen/ui_corner_button" />
         </shape>
     </item>

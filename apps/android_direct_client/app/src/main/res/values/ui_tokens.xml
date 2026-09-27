@@ -16,6 +16,10 @@
     <color name="ui_scrim">#8C000000</color>
     <color name="ui_warning">#E0B04F</color>
     <color name="ui_danger">#FF7B7B</color>
+    <!-- Online pill on a card, and a disabled label (disabled controls are exempt from the 4.5:1
+         floor, but the label should still be legible). -->
+    <color name="ui_success">#5FD38D</color>
+    <color name="ui_text_disabled">#7D8898</color>
     <dimen name="ui_space">8dp</dimen>
     <dimen name="ui_space_2">16dp</dimen>
     <dimen name="ui_corner_button">12dp</dimen>

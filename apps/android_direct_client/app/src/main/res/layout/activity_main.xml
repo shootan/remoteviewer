@@ -2,7 +2,7 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F3EE">
+    android:background="@color/ui_bg">
 
     <ScrollView
         android:id="@+id/loginScene"
@@ -20,7 +20,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="@string/login_title"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textSize="28sp"
                 android:textStyle="bold" />
 
@@ -29,7 +29,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="@string/login_subtitle"
-                android:textColor="#666666"
+                android:textColor="@color/ui_text_secondary"
                 android:textSize="13sp" />
 
             <EditText
@@ -42,8 +42,8 @@
                 android:inputType="textUri"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777" />
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary" />
 
             <EditText
                 android:id="@+id/loginIdInput"
@@ -55,8 +55,8 @@
                 android:inputType="text"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777" />
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary" />
 
             <EditText
                 android:id="@+id/loginPasswordInput"
@@ -68,15 +68,18 @@
                 android:inputType="textPassword"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777" />
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary" />
 
             <Button
                 android:id="@+id/loginButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="18dp"
-                android:background="@drawable/panel_button_background"
+                android:background="@drawable/ui_primary_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/login_button" />
 
@@ -86,7 +89,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
                 android:maxLines="3"
-                android:textColor="#B00020" />
+                android:textColor="@color/ui_danger" />
 
             <Button
                 android:id="@+id/loginManualButton"
@@ -94,6 +97,9 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/login_manual_button" />
         </LinearLayout>
@@ -121,7 +127,7 @@
                 android:ellipsize="end"
                 android:maxLines="1"
                 android:text="@string/hosts_title"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
@@ -130,6 +136,9 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/refresh_button" />
 
@@ -139,6 +148,9 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/hosts_logout_button" />
         </LinearLayout>
@@ -149,7 +161,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
             android:maxLines="2"
-            android:textColor="#666666"
+            android:textColor="@color/ui_text_secondary"
             android:textSize="13sp" />
 
         <ListView
@@ -167,7 +179,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:text="@string/hosts_empty"
-            android:textColor="#666666" />
+            android:textColor="@color/ui_text_secondary" />
     </LinearLayout>
 
     <ScrollView
@@ -187,7 +199,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/shell_title"
-            android:textColor="#1A1A1A"
+            android:textColor="@color/ui_text"
             android:textSize="28sp"
             android:textStyle="bold" />
 
@@ -196,7 +208,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="@string/shell_subtitle"
-            android:textColor="#666666"
+            android:textColor="@color/ui_text_secondary"
             android:textSize="13sp" />
 
             <EditText
@@ -209,8 +221,8 @@
                 android:inputType="textUri"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777"
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary"
                 android:text="192.168.0.10" />
 
         <LinearLayout
@@ -229,8 +241,8 @@
                 android:inputType="number"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777"
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary"
                 android:text="43000" />
 
             <EditText
@@ -244,8 +256,8 @@
                 android:inputType="number"
                 android:maxLines="1"
                 android:padding="12dp"
-                android:textColor="#1A1A1A"
-                android:textColorHint="#777777"
+                android:textColor="@color/ui_text"
+                android:textColorHint="@color/ui_text_secondary"
                 android:text="43001" />
         </LinearLayout>
 
@@ -254,7 +266,10 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:background="@drawable/panel_button_background"
+            android:background="@drawable/ui_primary_button_background"
+            android:minHeight="@dimen/ui_touch"
+            android:stateListAnimator="@null"
+            android:textAllCaps="false"
             android:textColor="@color/panel_button_text"
             android:text="@string/connect_button" />
 
@@ -265,7 +280,7 @@
             android:layout_marginTop="18dp"
             android:ellipsize="end"
             android:maxLines="2"
-            android:textColor="#1A1A1A"
+            android:textColor="@color/ui_text"
             android:textStyle="bold" />
 
         <TextView
@@ -275,7 +290,7 @@
             android:layout_marginTop="8dp"
             android:ellipsize="end"
             android:maxLines="3"
-            android:textColor="#B00020" />
+            android:textColor="@color/ui_danger" />
     </LinearLayout>
     </ScrollView>
 
@@ -298,7 +313,7 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/targets_title"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
@@ -307,6 +322,9 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/disconnect_button" />
         </LinearLayout>
@@ -323,6 +341,9 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/target_windows_button" />
 
@@ -333,6 +354,9 @@
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/target_desktop_button" />
 
@@ -343,6 +367,9 @@
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:textColor="@color/panel_button_text"
                 android:text="@string/target_settings_button" />
         </LinearLayout>
@@ -354,6 +381,9 @@
             android:layout_gravity="end"
             android:layout_marginTop="8dp"
             android:background="@drawable/panel_button_background"
+            android:minHeight="@dimen/ui_touch"
+            android:stateListAnimator="@null"
+            android:textAllCaps="false"
             android:textColor="@color/panel_button_text"
             android:text="@string/refresh_button" />
 
@@ -364,7 +394,7 @@
             android:layout_marginTop="12dp"
             android:ellipsize="end"
             android:maxLines="1"
-            android:textColor="#1A1A1A"
+            android:textColor="@color/ui_text"
             android:textStyle="bold" />
 
         <TextView
@@ -374,7 +404,7 @@
             android:layout_marginTop="4dp"
             android:ellipsize="end"
             android:maxLines="2"
-            android:textColor="#666666"
+            android:textColor="@color/ui_text_secondary"
             android:textSize="12sp" />
 
         <LinearLayout
@@ -382,16 +412,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:background="@drawable/panel_input_background"
+            android:background="@drawable/ui_card_background"
             android:orientation="vertical"
-            android:padding="12dp"
+            android:padding="16dp"
             android:visibility="gone">
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="@string/settings_title"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textStyle="bold" />
 
             <TextView
@@ -399,7 +429,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:text="@string/settings_hint"
-                android:textColor="#666666"
+                android:textColor="@color/ui_text_secondary"
                 android:textSize="12sp" />
 
             <TextView
@@ -407,7 +437,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:text="@string/settings_desktop_backend_label"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textStyle="bold" />
 
             <TextView
@@ -415,7 +445,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="@string/settings_desktop_backend_hint"
-                android:textColor="#666666"
+                android:textColor="@color/ui_text_secondary"
                 android:textSize="12sp" />
 
             <LinearLayout
@@ -430,6 +460,9 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:background="@drawable/panel_button_background"
+                    android:minHeight="@dimen/ui_touch"
+                    android:stateListAnimator="@null"
+                    android:textAllCaps="false"
                     android:text="@string/settings_desktop_backend_dxgi"
                     android:textColor="@color/panel_button_text" />
 
@@ -440,6 +473,9 @@
                     android:layout_marginStart="10dp"
                     android:layout_weight="1"
                     android:background="@drawable/panel_button_background"
+                    android:minHeight="@dimen/ui_touch"
+                    android:stateListAnimator="@null"
+                    android:textAllCaps="false"
                     android:text="@string/settings_desktop_backend_wgc"
                     android:textColor="@color/panel_button_text" />
 
@@ -450,6 +486,9 @@
                     android:layout_marginStart="10dp"
                     android:layout_weight="1"
                     android:background="@drawable/panel_button_background"
+                    android:minHeight="@dimen/ui_touch"
+                    android:stateListAnimator="@null"
+                    android:textAllCaps="false"
                     android:text="@string/settings_desktop_backend_gdi"
                     android:textColor="@color/panel_button_text" />
             </LinearLayout>
@@ -461,7 +500,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:text="@string/ui_quality_label"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textStyle="bold" />
 
             <LinearLayout
@@ -487,7 +526,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:text="@string/ui_fps_label"
-                android:textColor="#1A1A1A"
+                android:textColor="@color/ui_text"
                 android:textStyle="bold" />
 
             <Spinner
@@ -505,7 +544,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:text="@string/ui_fps_hint"
-                android:textColor="#555555"
+                android:textColor="@color/ui_text_secondary"
                 android:textSize="12sp" />
 
             <Button
@@ -514,6 +553,9 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
                 android:text="@string/settings_apply_button"
                 android:textColor="@color/panel_button_text" />
 
@@ -523,7 +565,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="@string/settings_apply_idle"
-                android:textColor="#666666"
+                android:textColor="@color/ui_text_secondary"
                 android:textSize="12sp" />
         </LinearLayout>
 
@@ -546,7 +588,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:gravity="center"
-            android:textColor="#666666"
+            android:textColor="@color/ui_text_secondary"
             android:textSize="13sp"
             android:visibility="gone" />
     </LinearLayout>
@@ -837,17 +879,24 @@
                         android:textSize="14sp" />
                 </LinearLayout>
 
+                <!-- apk-ui r2: one short line about the connection, not the decoder's counters (those
+                     go to the diagnostics log). -->
                 <TextView
                     android:id="@+id/viewerOverlayStatusText"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="bottom"
-                    android:background="#66000000"
+                    android:layout_gravity="top|center_horizontal"
+                    android:layout_marginTop="16dp"
+                    android:accessibilityLiveRegion="polite"
+                    android:background="@drawable/ui_status_pill_background"
                     android:ellipsize="end"
-                    android:maxLines="2"
-                    android:padding="12dp"
-                    android:textColor="#F2F2F2"
-                    android:textSize="12sp"
+                    android:maxLines="1"
+                    android:paddingStart="16dp"
+                    android:paddingTop="8dp"
+                    android:paddingEnd="16dp"
+                    android:paddingBottom="8dp"
+                    android:textColor="@color/ui_text"
+                    android:textSize="14sp"
                     android:visibility="gone" />
             </FrameLayout>
 

@@ -56,3 +56,18 @@ class ViewerWindowSheetModelTest {
         assertEquals(9L, ViewerWindowSheetModel.checkedId(switching = false, hostSelectedId = 9L, lastConfirmedId = 7L))
     }
 }
+
+class ViewerKeyRoutingTest {
+    @Test
+    fun aHardwareKeyReachesThePcOnlyWithNoSheetOpen() {
+        assertEquals(KeyRoute.HOST, ViewerKeyRouting.route(inViewer = true, sheetOpen = false, fromVirtualKeyboard = false, isBack = false))
+        assertEquals(KeyRoute.LOCAL, ViewerKeyRouting.route(inViewer = true, sheetOpen = true, fromVirtualKeyboard = false, isBack = false))
+    }
+
+    @Test
+    fun backVirtualKeysAndOtherScreensStayOnThePhone() {
+        assertEquals(KeyRoute.LOCAL, ViewerKeyRouting.route(inViewer = true, sheetOpen = false, fromVirtualKeyboard = false, isBack = true))
+        assertEquals(KeyRoute.LOCAL, ViewerKeyRouting.route(inViewer = true, sheetOpen = false, fromVirtualKeyboard = true, isBack = false))
+        assertEquals(KeyRoute.LOCAL, ViewerKeyRouting.route(inViewer = false, sheetOpen = false, fromVirtualKeyboard = false, isBack = false))
+    }
+}
