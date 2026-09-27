@@ -12541,3 +12541,14 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 재현 e2e 가 계측으로 바로 보인 것(로컬 480x270 캡처, 참고치): 키프레임이 **매초 주기(scheduled)** — 인자 기본 keyint 30 프레임(`host_args.hpp:59`)이 30fps 에서 1초. 제품 실행 인자로 무엇이 오는지는 이번에 확인 안 함. 1청크짜리 작은 프레임에도 패리티가 청크 전체 폭(~1172B)이라 패리티 바이트가 페이로드의 5배. 둘 다 이번에 고치지 않음(Codex 순서 3·IDR 단계).
 - 시험: `host_abr_test` PASS(r1 6건 추가, 변이 4종 각각 FAIL) · `remote60_abr_client_evidence_e2e_test` none/present/stop 각 2회 10/0(캡처 초당 실프레임 ≥15 가 32/32초), 수정 전 논리 호스트로 none·present FAIL(강등 재현) · 관련 단위 시험 14종 PASS · udp_control_e2e 20/0 · bwe_observe_e2e 3회 중 1회 관찰 줄 39/40 경계 FAIL, 재실행 2회 43·44 PASS. 실제 파일 불변.
 - 제품/테스트/문서: 제품(ABR 유효성, 키프레임 사유, 흐름별 바이트, [abr] 줄) / 테스트(host_abr_test, abr_client_evidence_e2e, CMake) / 문서(이 항목).
+
+### 2026-09-27 quality r2 — 데스크톱 글자는 비트레이트만으로 720p 로 내려가지 않는다
+
+- Codex 1(조건부 승인): 비트레이트 문턱만으로 720p 금지, 소스 보존·업스케일 금지, 부족은 FPS/QP 먼저, 실제 송신 압력일 때만 강등(hysteresis), 이번엔 데스크톱 텍스트 우선만.
+- `EncodePriority::DesktopText`(`encode_resolution_ladder.hpp`): 데스크톱 캡처에서 비트레이트 부족 시 줄이는 한계를 720p 면적 → **1080p 면적**(소스가 작으면 소스). 문턱(≥5M 원본, ≤4M 축소)과 사이 구간 유지는 그대로. 창 캡처와 `REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE=1` 은 종전 사다리 그대로(`Standard`).
+- ABR 단계(`RateControlState::AbrProfileFps`): DesktopText 에서 mid 는 **해상도 대신 fps**(상한의 2/3, 최소 15, 상한을 넘지 않음), low 만 720p(+같은 fps), high 는 상한 fps·바닥 해상도로 복귀. 진입·복귀는 ABR 의 기존 판정·유지 시간(r1 로 유효한 증거만)·쿨다운 그대로. Standard 는 종전처럼 fps 불변.
+- 시작 크기(`choose_h264_encode_size`, 창 캡처 인자면 Standard)·런타임 튠·ABR 전환 세 곳에 우선순위 전달. `[abr]` 줄에 `fps=`·`priority=` 추가.
+- 한계: 표시 배율(DPI)은 스트리밍 호스트가 모른다 — 바닥은 1080p 면적 고정. 4K 소스 실측은 이 PC 에서 불가(활성 데스크톱이 1920x1080 가상 디스플레이 하나, 호스트가 `monitor-select out of range id=1 count=1`) → 4K 는 순수 시험만.
+- 시험: ladder 시험(텍스트 9건: 4K@3000→1920x1080, 4K@6000→원본, 1080p 유지, 업스케일 없음, 16:10 비율, 사이 구간 두 방향, 프로필 1080/1080/720, Standard 불변) · host_abr_test(fps 표·창/스위치 범위·압력→mid 1080p@20→low 720p→유지 시간 뒤 1080p@30) · 변이 4종 FAIL. 격리 호스트 e2e(1080p 데스크톱): 3000 텍스트 1920x1080 / 끔 1280x720 / 6000 1920x1080, 데스크톱+움직임 stop·recover — mid 1920x1080@20 → low 1280x720@20 → mid → high 1920x1080@30(클라 측 초당 실프레임 30→20 확인). 창 캡처 ABR 3모드 회귀 10/0(fps 30 유지). 실제 파일 불변.
+- 트래픽: 정지 데스크톱 36초에서 3000 텍스트 1.85MB vs 끔 1.41MB(+31%, 키프레임이 커서). "트래픽 ≤ 지금" 게이트는 사용자 실측으로 판정.
+- 제품/테스트/문서: 제품(해상도 사다리·ABR fps·호출 3곳·[abr] 줄) / 테스트(ladder·host_abr·e2e 옵션) / 문서(이 항목).

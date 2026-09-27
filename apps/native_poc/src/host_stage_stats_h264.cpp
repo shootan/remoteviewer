@@ -390,12 +390,21 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // log. Deriving from the ladder also tracks capture-size changes (monitor
       // switches, RDP) that a frozen value never could. Runtime tuning does the same
       // already, and the hysteresis state is shared so the two cannot fight.
+      const EncodePriority priority =
+          rate.PriorityFor(capture.windowModeActive.load(std::memory_order_acquire));
       const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
-          targetProfile, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
+          targetProfile, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced,
+          priority);
       uint32_t targetW = ladderChoice.width;
       uint32_t targetH = ladderChoice.height;
+      // quality r2: DesktopText gives up frames at mid rather than pixels. Standard keeps the
+      // current fps exactly as before (AbrProfileFps returns the ceiling, and the ceiling is what
+      // activeFps is whenever ABR runs -- see the comment on the ABR inputs above).
+      const uint32_t targetFps = priority == EncodePriority::DesktopText
+                                     ? rate.AbrProfileFps(targetProfile, priority)
+                                     : encoder.activeFps;
 
-      if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, encoder.activeFps, targetBitrate, encoder.activeKeyint)) {
+      if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
         std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
         return Flow::Next;
       }
@@ -409,6 +418,8 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                 << " encode=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
                 << " bitrate=" << encoder.activeBitrate
                 << " reason=" << abrReason
+                << " fps=" << encoder.activeFps
+                << " priority=" << (priority == EncodePriority::DesktopText ? "desktop_text" : "standard")
                 << " clientSize=" << clWidth << "x" << clHeight
                 << " clientDecodedFps=" << (clDecodedFpsX100 / 100.0)
                 << " clientAvgLatUs=" << clAvgLatencyUs

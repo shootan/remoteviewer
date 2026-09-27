@@ -556,6 +556,60 @@ void TestClientMetricsSessionStickyFields() {
          "metrics(r1): decode fields are recognised by value");
 }
 
+// ---- quality r2: the fps ABR runs each profile at, and which captures get DesktopText ----
+
+void TestTextPriorityFpsAndScope() {
+  RateControlState r = MakeAbr(false);
+  r.userFpsCeiling = 30;
+  const auto T = EncodePriority::DesktopText;
+  const auto S = EncodePriority::Standard;
+  expect(r.AbrProfileFps(0, T) == 30 && r.AbrProfileFps(1, T) == 20 && r.AbrProfileFps(2, T) == 20,
+         "r2: desktop text at 30 fps runs high 30 / mid 20 / low 20");
+  expect(r.AbrProfileFps(0, S) == 30 && r.AbrProfileFps(1, S) == 30 && r.AbrProfileFps(2, S) == 30,
+         "r2: standard keeps the ceiling at every profile (unchanged)");
+  r.userFpsCeiling = 60;
+  expect(r.AbrProfileFps(1, T) == 40, "r2: 60 fps -> mid 40");
+  r.userFpsCeiling = 20;
+  expect(r.AbrProfileFps(1, T) == 15, "r2: 20 fps -> mid floors at 15");
+  r.userFpsCeiling = 10;
+  expect(r.AbrProfileFps(1, T) == 10, "r2: a ceiling under the floor is never raised");
+  expect(r.PriorityFor(false) == T && r.PriorityFor(true) == S,
+         "r2: desktop capture is text priority, window capture keeps the old ladder");
+  r.textPriorityEnabled = false;
+  expect(r.PriorityFor(false) == S, "r2: the rollback switch turns it off");
+}
+
+// Pressure and recovery, end to end through the ABR's own timers: what the encoder is told at each
+// profile for a 4K desktop at the user's 3000/30. Resolution below 1080p only at low; recovering to
+// high restores both the fps and the floor.
+void TestTextPriorityPressureAndRecovery() {
+  RateControlState r = MakeAbr(false);
+  r.userFpsCeiling = 30;
+  const auto T = EncodePriority::DesktopText;
+  const auto plan = [&](int profile) {
+    const uint32_t bitrate = profile == 0 ? 3000000u : (profile == 1 ? 2250000u : 1650000u);
+    const auto size = choose_abr_profile_size(profile, bitrate, 3840, 2160, true, T);
+    return std::to_string(size.width) + "x" + std::to_string(size.height) + "@" +
+           std::to_string(r.AbrProfileFps(profile, T));
+  };
+  expect(plan(r.abrProfile) == "1920x1080@30", "r2: starts 1920x1080@30, got " + plan(r.abrProfile));
+  // Healthy seconds never demote.
+  RunAbr(r, Healthy(), kStartUs + 3 * kSec, 20);
+  expect(r.abrProfile == 0, "r2: healthy seconds hold high");
+  // Real pressure: high -> mid gives up frames, not pixels.
+  RunAbr(r, Severe(), kStartUs + 23 * kSec, 2);
+  expect(r.abrProfile == 1 && plan(1) == "1920x1080@20", "r2: first pressure step keeps 1080p, fps 20: " + plan(1));
+  // Sustained: mid -> low is the only step that takes 720p.
+  RunAbr(r, Severe(), kStartUs + 25 * kSec, 4);
+  const std::string lowPlan = plan(2);
+  expect(r.abrProfile == 2 && lowPlan.rfind("1280x720", 0) == 0, "r2: sustained pressure reaches 720p: " + lowPlan);
+  // Recovery takes its hold time (low->mid 5 s, mid->high 8 s, plus cooldowns) and comes back whole.
+  RunAbr(r, Healthy(), kStartUs + 29 * kSec, 4);
+  expect(r.abrProfile == 2, "r2: no instant recovery (hysteresis)");
+  RunAbr(r, Healthy(), kStartUs + 33 * kSec, 30);
+  expect(r.abrProfile == 0 && plan(0) == "1920x1080@30", "r2: recovered to 1920x1080@30");
+}
+
 }  // namespace
 
 int main() {
@@ -578,6 +632,8 @@ int main() {
   TestAbrFreshZeroFromADecodeReporterIsStillEvidence();
   TestAbrReportedThenSilentStillDemotes();
   TestClientMetricsSessionStickyFields();
+  TestTextPriorityFpsAndScope();
+  TestTextPriorityPressureAndRecovery();
   TestM9DownRequiresConsecutiveSecondsAndCooldown();
   TestM9PressureStreakResets();
   TestM9UpAfterRecoverySeconds();

@@ -31,6 +31,23 @@ constexpr uint32_t kLadderReducedMaxBitrate = 4000000;   // at or below: cap at 
 // it into a 1280x720 box would shrink it for no gain.
 constexpr uint32_t kLadderReducedPixels = 1280u * 720u;
 
+// What the picture is for (quality r2, Codex 1). The ladder above was written for motion: a whole
+// screen changing at once at 3 Mb/s. On a desktop of text it does the opposite of what is wanted --
+// measured 2026-09-27: a 4K (200%) desktop at 3000 and at 6000 was encoded at 1280x720, blown up
+// twice on the phone, and a "0" read as an "8". Text is mostly still, and a still frame costs almost
+// nothing at any size; what text cannot survive is losing pixels.
+//
+// DesktopText: a bitrate alone never takes the picture below the 1080p area (or the source, if
+// smaller -- nothing is upscaled). A shortage of bits is left to what absorbs it without losing
+// pixels: the encoder's QP within the VBR budget, and frame gating's still-screen fps. Resolution
+// below that floor happens only under the ABR low profile, which is entered on real send pressure
+// with its own hold and recovery (host_abr.hpp) -- see choose_abr_profile_size.
+// Standard: the ladder above, unchanged -- window capture, and anything the switch turns off.
+enum class EncodePriority { Standard, DesktopText };
+
+// The DesktopText floor, as an area for the same reason as kLadderReducedPixels.
+constexpr uint32_t kTextFloorPixels = 1920u * 1080u;
+
 struct EncodeResolutionChoice {
   uint32_t width = 0;
   uint32_t height = 0;
@@ -47,7 +64,8 @@ struct EncodeResolutionChoice {
  * unchanged, which is what keeps a wavering bitrate from restarting the encoder repeatedly.
  */
 inline EncodeResolutionChoice choose_encode_resolution(uint32_t bitrate, uint32_t captureW,
-                                                       uint32_t captureH, bool currentlyReduced) {
+                                                       uint32_t captureH, bool currentlyReduced,
+                                                       EncodePriority priority = EncodePriority::Standard) {
   EncodeResolutionChoice out{captureW, captureH, false};
   if (captureW == 0 || captureH == 0) return out;
 
@@ -56,10 +74,12 @@ inline EncodeResolutionChoice choose_encode_resolution(uint32_t bitrate, uint32_
   else if (bitrate <= kLadderReducedMaxBitrate) reduce = true;
   if (!reduce) return out;
 
+  const uint32_t budgetPixels =
+      priority == EncodePriority::DesktopText ? kTextFloorPixels : kLadderReducedPixels;
   const double pixels = static_cast<double>(captureW) * static_cast<double>(captureH);
-  if (pixels <= static_cast<double>(kLadderReducedPixels)) return out;
+  if (pixels <= static_cast<double>(budgetPixels)) return out;
   // Area scales with the square of the linear factor, so this is the square root.
-  const double scale = std::sqrt(static_cast<double>(kLadderReducedPixels) / pixels);
+  const double scale = std::sqrt(static_cast<double>(budgetPixels) / pixels);
 
   auto even = [](double v, uint32_t upper) {
     uint32_t n = static_cast<uint32_t>(v + 0.5);
@@ -87,9 +107,12 @@ inline EncodeResolutionChoice choose_encode_resolution(uint32_t bitrate, uint32_
  */
 inline EncodeResolutionChoice choose_abr_profile_size(int profile, uint32_t bitrate,
                                                       uint32_t captureW, uint32_t captureH,
-                                                      bool currentlyReduced) {
+                                                      bool currentlyReduced,
+                                                      EncodePriority priority = EncodePriority::Standard) {
+  // DesktopText keeps its floor through high and mid; only low -- sustained, verified pressure --
+  // takes the 1280x720 box below. Mid takes fps instead (RateControlState::AbrProfileFps).
   EncodeResolutionChoice out =
-      choose_encode_resolution(bitrate, captureW, captureH, currentlyReduced);
+      choose_encode_resolution(bitrate, captureW, captureH, currentlyReduced, priority);
   if (profile != 2) return out;
   if (out.width > 1280 || out.height > 720) {
     const double sx = 1280.0 / static_cast<double>(out.width);

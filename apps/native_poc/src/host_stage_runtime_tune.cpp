@@ -150,7 +150,8 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       bool ladderReducedNext = rate.encodeLadderReduced;
       if (bitrateExplicit) {
         const auto choice = remote60::native_poc::choose_encode_resolution(
-            targetBitrate, capture.width, capture.height, rate.encodeLadderReduced);
+            targetBitrate, capture.width, capture.height, rate.encodeLadderReduced,
+            rate.PriorityFor(capture.windowModeActive.load(std::memory_order_acquire)));
         ladderReducedNext = choice.reduced;
         ladderW = choice.width;
         ladderH = choice.height;

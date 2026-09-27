@@ -47,7 +47,8 @@ void fit_size_preserving_aspect(uint32_t srcW, uint32_t srcH, uint32_t boxW, uin
 }
 
 void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captureH,
-                             uint32_t* outW, uint32_t* outH, bool* outAutoFallback720) {
+                             uint32_t* outW, uint32_t* outH, bool* outAutoFallback720,
+                             EncodePriority priority) {
   if (!outW || !outH || !outAutoFallback720) return;
   *outAutoFallback720 = false;
   uint32_t targetW = captureW;
@@ -70,7 +71,8 @@ void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captu
     // extremes; 3 Mbps at 1080p was left to spend a quarter of the bits per pixel and showed it
     // whenever the whole screen changed at once. See encode_resolution_ladder.hpp.
     const auto choice =
-        remote60::native_poc::choose_encode_resolution(args.bitrate, captureW, captureH, false);
+        remote60::native_poc::choose_encode_resolution(args.bitrate, captureW, captureH, false,
+                                                       priority);
     if (choice.reduced) {
       targetW = choice.width;
       targetH = choice.height;

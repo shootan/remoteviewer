@@ -174,6 +174,7 @@ int startup_configure_from_env(HostContext& hx) {
       "REMOTE60_NATIVE_CAPTURE_SUBMIT_EARLY_TOLERANCE_PCT", 25, 0, 90);
   rate.abrEnabled = useH264 && !env_truthy("REMOTE60_NATIVE_ABR_DISABLE");
   rate.abrQualityFirst = env_truthy("REMOTE60_NATIVE_ADAPTIVE_QUALITY_FIRST");
+  rate.textPriorityEnabled = !env_truthy("REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE");
   rate.m9Enabled = useH264 && env_truthy("REMOTE60_NATIVE_M9_ENABLE");
   rate.m9Apply = rate.m9Enabled && env_truthy("REMOTE60_NATIVE_M9_APPLY");
   rate.m9CooldownSec = env_u32_clamped("REMOTE60_NATIVE_M9_COOLDOWN_SEC", 4, 1, 60);

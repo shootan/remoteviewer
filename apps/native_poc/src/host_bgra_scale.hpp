@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "encode_resolution_ladder.hpp"
 #include "host_args.hpp"
 
 namespace remote60::native_poc {
@@ -31,8 +32,12 @@ uint32_t clamp_even_dim(uint32_t v, uint32_t minValue, uint32_t maxValue);
 void fit_size_preserving_aspect(uint32_t srcW, uint32_t srcH, uint32_t boxW, uint32_t boxH,
                                 uint32_t* outW, uint32_t* outH);
 
+// `priority`: quality r2 -- DesktopText keeps at least the 1080p area on a bitrate shortage
+// (encode_resolution_ladder.hpp). An explicit --encode-width/--encode-height box is honoured
+// either way.
 void choose_h264_encode_size(const Args& args, uint32_t captureW, uint32_t captureH,
-                             uint32_t* outW, uint32_t* outH, bool* outAutoFallback720);
+                             uint32_t* outW, uint32_t* outH, bool* outAutoFallback720,
+                             EncodePriority priority = EncodePriority::Standard);
 
 void choose_abr_720_size(uint32_t captureW, uint32_t captureH, uint32_t* outW, uint32_t* outH);
 

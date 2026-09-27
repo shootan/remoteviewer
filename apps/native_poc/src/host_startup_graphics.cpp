@@ -263,7 +263,12 @@ void startup_configure_encode_geometry(HostContext& hx) {
   encoder.encodeW = capture.width;
   encoder.encodeH = capture.height;
   if (useH264) {
-    choose_h264_encode_size(args, capture.width, capture.height, &encoder.encodeW, &encoder.encodeH, &rate.autoFallback720);
+    // Window capture is known from the arguments at this point; the selection path re-derives
+    // the priority from capture.windowModeActive later.
+    const bool windowArgs = !args.captureWindowTitle.empty() || args.captureWindowPid != 0 ||
+                            !args.captureWindowProcess.empty();
+    choose_h264_encode_size(args, capture.width, capture.height, &encoder.encodeW, &encoder.encodeH,
+                            &rate.autoFallback720, rate.PriorityFor(windowArgs));
   }
 
   // Whether the ladder, rather than the source size, is currently deciding the resolution. Held

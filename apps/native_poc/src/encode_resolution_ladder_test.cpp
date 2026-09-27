@@ -10,6 +10,7 @@
 #include "encode_resolution_ladder.hpp"
 
 using remote60::native_poc::choose_encode_resolution;
+using remote60::native_poc::choose_abr_profile_size;
 
 namespace {
 
@@ -122,6 +123,50 @@ int main() {
         choose_abr_profile_size(1, 4500000, 1920, 1080, true).reduced);
   check("and keeps the previous full size the same way",
         !choose_abr_profile_size(1, 4500000, 1920, 1080, false).reduced);
+
+  // ---- quality r2: DesktopText. Measured 2026-09-27: a 4K desktop at 3000 and 6000 went to 720p.
+  {
+    using remote60::native_poc::EncodePriority;
+    const auto T = EncodePriority::DesktopText;
+    auto fourK3 = choose_encode_resolution(3000000, 3840, 2160, false, T);
+    std::snprintf(buf, sizeof(buf), "%ux%u reduced=%d", fourK3.width, fourK3.height, fourK3.reduced);
+    check("text: 4K at 3 Mbps keeps the 1080p area (not 720p)",
+          fourK3.width == 1920 && fourK3.height == 1080 && fourK3.reduced, buf);
+    auto fourK6 = choose_encode_resolution(6000000, 3840, 2160, false, T);
+    std::snprintf(buf, sizeof(buf), "%ux%u", fourK6.width, fourK6.height);
+    check("text: 4K at 6 Mbps keeps the source", fourK6.width == 3840 && !fourK6.reduced, buf);
+    auto hd3 = choose_encode_resolution(3000000, 1920, 1080, false, T);
+    std::snprintf(buf, sizeof(buf), "%ux%u", hd3.width, hd3.height);
+    check("text: a 1080p source at 3 Mbps stays 1080p", hd3.width == 1920 && hd3.height == 1080 &&
+          !hd3.reduced, buf);
+    auto small = choose_encode_resolution(1500000, 1366, 768, false, T);
+    check("text: a small source is never upscaled", small.width == 1366 && small.height == 768);
+    auto wide = choose_encode_resolution(3000000, 2560, 1600, false, T);
+    const double area = static_cast<double>(wide.width) * wide.height;
+    const double aspect = static_cast<double>(wide.width) / wide.height;
+    std::snprintf(buf, sizeof(buf), "%ux%u", wide.width, wide.height);
+    check("text: 16:10 keeps its aspect and about the 1080p area",
+          area <= 1920.0 * 1080.0 * 1.01 && area >= 1920.0 * 1080.0 * 0.97 && aspect > 1.59 &&
+              aspect < 1.61 && wide.width % 2 == 0 && wide.height % 2 == 0, buf);
+    check("text: between the thresholds the previous answer stands (reduced)",
+          choose_encode_resolution(4500000, 3840, 2160, true, T).width == 1920);
+    check("text: ...and (full)", choose_encode_resolution(4500000, 3840, 2160, false, T).width == 3840);
+
+    // The ABR profiles at the user's 3000: high and mid keep the floor, only low takes 720p.
+    auto high = choose_abr_profile_size(0, 3000000, 3840, 2160, true, T);
+    auto mid = choose_abr_profile_size(1, 2250000, 3840, 2160, true, T);
+    auto low = choose_abr_profile_size(2, 1650000, 3840, 2160, true, T);
+    std::snprintf(buf, sizeof(buf), "high %ux%u mid %ux%u low %ux%u", high.width, high.height,
+                  mid.width, mid.height, low.width, low.height);
+    check("text: at 3000 the profiles are 1080p / 1080p / 720p",
+          high.width == 1920 && mid.width == 1920 && low.width <= 1280 && low.height <= 720, buf);
+
+    // Standard is untouched: the same 4K desktop at 3000 still goes to 720p there.
+    auto std3 = choose_encode_resolution(3000000, 3840, 2160, false);
+    std::snprintf(buf, sizeof(buf), "%ux%u", std3.width, std3.height);
+    check("standard (window capture, or switched off): unchanged, 4K at 3 Mbps -> 720p",
+          std3.width == 1280 && std3.height == 720, buf);
+  }
 
   std::printf(gFailures == 0 ? "\nencode_resolution_ladder_test: PASS\n"
                              : "\nencode_resolution_ladder_test: %d FAILED\n", gFailures);

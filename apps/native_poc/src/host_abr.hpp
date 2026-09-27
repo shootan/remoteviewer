@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cstdint>
+
+#include "encode_resolution_ladder.hpp"
 #include <string>
 
 namespace remote60::native_poc {
@@ -97,6 +99,10 @@ struct RateControlState {
   // Env config (REMOTE60_NATIVE_ABR_* / M9_*), fixed after startup.
   bool abrEnabled = false;
   bool abrQualityFirst = false;
+  // quality r2: desktop capture keeps its pixels (EncodePriority::DesktopText). On unless
+  // REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE is set -- the rollback switch, which restores the old
+  // ladder and the old mid profile exactly.
+  bool textPriorityEnabled = true;
   bool m9Enabled = false;
   bool m9Apply = false;
   uint32_t m9CooldownSec = 0;
@@ -158,6 +164,23 @@ struct RateControlState {
   uint64_t m9CooldownUntilUs = 0;
   uint32_t m9DownPressureSeconds = 0;
   uint32_t m9UpPressureSeconds = 0;
+
+  // The priority for the current capture: window capture keeps the old ladder (this revision
+  // turns on desktop text only, Codex 1).
+  EncodePriority PriorityFor(bool windowMode) const {
+    return (textPriorityEnabled && !windowMode) ? EncodePriority::DesktopText
+                                                : EncodePriority::Standard;
+  }
+  // The fps an ABR profile runs at. Standard: the user's ceiling at every profile, as before.
+  // DesktopText: mid gives up frames instead of pixels -- two thirds of the ceiling, at least 15 --
+  // and low keeps that while it also takes the 720p box. High is always the ceiling, so recovering
+  // to high restores both. Entered and left only through the ABR's own hold and recovery timers.
+  uint32_t AbrProfileFps(int profile, EncodePriority priority) const {
+    if (priority != EncodePriority::DesktopText || profile <= 0 || userFpsCeiling == 0) {
+      return userFpsCeiling;
+    }
+    return std::min<uint32_t>(userFpsCeiling, std::max<uint32_t>(15u, (userFpsCeiling * 2u) / 3u));
+  }
 
   // --- behaviour (Phase 2-1: former main() lambdas m9_level_bitrate/fps/w/h) ---
   uint32_t M9LevelBitrate(int level) const {

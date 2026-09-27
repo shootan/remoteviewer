@@ -13,6 +13,8 @@
 //   none     never sends ControlClientMetrics           -> must not demote
 //   present  sends it APK-style, present* only            -> must not demote
 //   stop     sends full Windows-style metrics, then stops -> must demote on stale_active (P7 kept)
+//   recover  full metrics, 12 s of silence, then full again -> demotes, then climbs back to high
+//            through the ABR's own hold times (r2: DesktopText restores fps and the 1080p floor)
 // All modes also check the r1 instrumentation is live: [keyframe] lines with reasons, and the
 // per-flow byte keys on the stats line.
 //
@@ -22,7 +24,15 @@
 // test counts real (non-synthetic) frames per second itself. If the host did not send a real
 // cadence, the ABR checks are NOT JUDGED rather than passed.
 //
+// quality r2 adds the encode-size question: with --desktop the host captures the monitor instead of
+// the test window (DesktopText priority applies), --bitrate sets the user's budget, --text-off sets
+// the rollback switch, and --expect-size WxH asserts what the host actually encoded (its own stats
+// line and [keyframe] lines). Nothing captured is kept: only sizes and byte counts are read.
+//
 //   remote60_abr_client_evidence_e2e_test --mode none|present|stop [--host <GNLinkStream.exe>]
+//       [--desktop [--monitor N]] [--bitrate N] [--text-off] [--expect-size WxH]
+//   --monitor selects the host's monitor N (primary first, then left to right) with the product's
+//   ControlMonitorSelect, before the measured run -- a 4K panel that is not the primary.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include <algorithm>
@@ -57,7 +67,7 @@ namespace {
 
 constexpr uint16_t kHostPort = 44793;
 constexpr uint32_t kFps = 30;
-constexpr uint32_t kBitrate = 6000000;
+constexpr uint32_t kDefaultBitrate = 6000000;
 const wchar_t* kTargetTitle = L"remote60 abr evidence target";
 
 // An on-screen window the user cannot see or hit: alpha 1/255, WS_EX_TRANSPARENT, never activated.
@@ -156,6 +166,13 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::string mode;
   std::wstring hostExe;
+  bool desktop = false;
+  bool textOff = false;
+  uint32_t bitrate = kDefaultBitrate;
+  std::string expectSize;
+  int monitor = -1;
+  std::wstring keepLog;
+  bool cadenceWindow = false;  // with --desktop: keep the invisible animated window up anyway
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe
@@ -167,13 +184,29 @@ int wmain(int argc, wchar_t** argv) {
       mode.assign(m.begin(), m.end());
     } else if (a == L"--host" && i + 1 < argc) {
       hostExe = argv[++i];
+    } else if (a == L"--desktop") {
+      desktop = true;
+    } else if (a == L"--text-off") {
+      textOff = true;
+    } else if (a == L"--bitrate" && i + 1 < argc) {
+      bitrate = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--cadence-window") {
+      cadenceWindow = true;
+    } else if (a == L"--keep-log" && i + 1 < argc) {
+      keepLog = argv[++i];
+    } else if (a == L"--monitor" && i + 1 < argc) {
+      monitor = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--expect-size" && i + 1 < argc) {
+      const std::wstring e = argv[++i];
+      expectSize.assign(e.begin(), e.end());
     }
   }
-  if (mode != "none" && mode != "present" && mode != "stop") {
-    std::printf("usage: --mode none|present|stop [--host <GNLinkStream.exe>]\n");
+  if (mode != "none" && mode != "present" && mode != "stop" && mode != "recover") {
+    std::printf("usage: --mode none|present|stop|recover [--host <GNLinkStream.exe>]\n");
     return 2;
   }
-  std::cout << "mode: " << mode << "\n";
+  std::cout << "mode: " << mode << " capture=" << (desktop ? "desktop" : "test-window")
+            << " bitrate=" << bitrate << " textPriority=" << (textOff ? "off" : "on") << "\n";
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
@@ -190,7 +223,9 @@ int wmain(int argc, wchar_t** argv) {
         std::string(hostExe.begin(), hostExe.end()));
 
   CadenceTarget target;
-  check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
+  if (!desktop || cadenceWindow) {
+    check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
+  }
 
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -203,11 +238,12 @@ int wmain(int argc, wchar_t** argv) {
   bool launched = false;
   if (staged) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+    if (textOff) SetEnvironmentVariableW(L"REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE", L"1");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
-                       L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(kBitrate) +
+                       L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(bitrate) +
                        L" --seconds 120 --input-injection-mode none" +
-                       L" --capture-window-title \"" + kTargetTitle + L"\"";
+                       (desktop ? std::wstring() : L" --capture-window-title \"" + std::wstring(kTargetTitle) + L"\"");
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check("the host is started with input injection off", noInjection);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -297,6 +333,24 @@ int wmain(int argc, wchar_t** argv) {
       }
     });
 
+    if (desktop && monitor >= 0) {
+      // The product message, sent once before the control thread starts, answered with the list.
+      ControlOutboundAction select{};
+      select.kind = ControlOutboundActionKind::MonitorSelect;
+      select.expectedResponseType = MessageType::ControlMonitorList;
+      select.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlMonitorListMessage));
+      select.monitorSelect.header.magic = kMagic;
+      select.monitorSelect.header.type = static_cast<uint16_t>(MessageType::ControlMonitorSelect);
+      select.monitorSelect.header.size = static_cast<uint16_t>(sizeof(select.monitorSelect));
+      select.monitorSelect.seq = 1;
+      select.monitorSelect.monitorId = static_cast<uint32_t>(monitor);
+      select.monitorSelect.clientSendQpcUs = qpc_now_us();
+      TcpControlResponse response;
+      const bool selected = execute_control_action(link, select, &response);
+      check("monitor " + std::to_string(monitor) + " was selected", selected);
+      std::this_thread::sleep_for(std::chrono::seconds(2));  // the reattach and its keyframe
+    }
+
     // What this viewer reports, per mode, set once a second by the loop below.
     std::mutex mmu;
     ClientControlMetricsSnapshot pendingMetrics{};
@@ -332,8 +386,9 @@ int wmain(int argc, wchar_t** argv) {
     });
 
     // The run: 36 seconds. 'stop' reports fully for the first 14 and is silent after.
-    constexpr int kRunSec = 36;
+    const int kRunSec = mode == "recover" ? 72 : 36;
     constexpr int kStopAfterSec = 14;
+    constexpr int kResumeAtSec = 26;  // recover: silent from 14 to 26
     for (int s = 0; s < kRunSec; ++s) {
       const uint64_t now = qpc_now_us();
       ClientControlMetricsSnapshot m{};
@@ -347,7 +402,8 @@ int wmain(int argc, wchar_t** argv) {
         m.message.presentSampleCount = kFps;
         m.message.presentDisplayedCount = kFps;
         m.updatedQpcUs = now;
-      } else if (mode == "stop" && s < kStopAfterSec) {
+      } else if ((mode == "stop" && s < kStopAfterSec) ||
+                 (mode == "recover" && (s < kStopAfterSec || s >= kResumeAtSec))) {
         // A healthy Windows-style report: decode fields present and fine.
         m.message.width = 480;
         m.message.height = 270;
@@ -378,7 +434,7 @@ int wmain(int argc, wchar_t** argv) {
     closesocket(sock);
   }
 
-  target.Stop();
+  if (!desktop || cadenceWindow) target.Stop();
   if (hostPi.hProcess) {
     TerminateProcess(hostPi.hProcess, 0);
     WaitForSingleObject(hostPi.hProcess, 5000);
@@ -426,6 +482,19 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
 
+  // quality r2: what the host actually encoded -- its stats line (size=) and every [keyframe] line.
+  std::string encodedSize = value_of(lastStats, "size");
+  std::set<std::string> keySizes;
+  for (const auto& l : keyLines) keySizes.insert(value_of(l, "size"));
+  std::string keySizeList;
+  for (const auto& k : keySizes) keySizeList += k + " ";
+  std::cout << "\nencoded size (last stats line): " << encodedSize << "  keyframe sizes: " << keySizeList << "\n";
+  if (launched && !expectSize.empty()) {
+    check("the host encoded " + expectSize + " (stats line and every keyframe)",
+          encodedSize == expectSize && keySizes.size() == 1 && *keySizes.begin() == expectSize,
+          "stats=" + encodedSize + " keys=" + keySizeList);
+  }
+
   if (launched) {
     // Instrumentation (A), independent of the cadence.
     bool keyReasoned = !keyLines.empty();
@@ -445,6 +514,22 @@ int wmain(int argc, wchar_t** argv) {
       check("ABR did not demote a client whose decode evidence " +
                 std::string(mode == "none" ? "never arrived" : "was never reported"),
             abrLines.empty(), abrLines.empty() ? "" : abrLines.front());
+    } else if (mode == "recover") {
+      bool demoted = false;
+      bool recoveredHigh = false;
+      std::string last;
+      for (const auto& l : abrLines) {
+        if (value_of(l, "reason").find("severe") != std::string::npos) demoted = true;
+        if (demoted && value_of(l, "profile") == "high") recoveredHigh = true;
+        last = l;
+      }
+      check("ABR demoted during the silence and climbed back to high after it", demoted && recoveredHigh,
+            std::to_string(abrLines.size()) + " [abr] lines");
+      if (!expectSize.empty()) {
+        check("...and the high profile it returned to is " + expectSize + " at " + std::to_string(kFps) + " fps",
+              value_of(last, "encode") == expectSize && value_of(last, "fps") == std::to_string(kFps),
+              last);
+      }
     } else {
       bool staleDemote = false;
       for (const auto& l : abrLines) {
@@ -459,6 +544,7 @@ int wmain(int argc, wchar_t** argv) {
   }
   (void)metricsStoppedAtSec;
 
+  if (!keepLog.empty()) CopyFileW(hostLogPath.c_str(), keepLog.c_str(), FALSE);
   for (int i = 0; i < 40; ++i) {
     DeleteFileW((dir + L"host.log").c_str());
     DeleteFileW((dir + L"GNLinkStream.exe").c_str());
