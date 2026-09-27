@@ -152,6 +152,14 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                          reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) return false;
     if (stats) {
+      ++stats->datagrams;
+      stats->headerBytes += sizeof(header);
+      if ((header.flags & 0x10u) != 0) {
+        ++stats->parityDatagrams;
+        stats->parityBytes += byteCount;
+      } else {
+        stats->dataBytes += byteCount;
+      }
       const uint64_t callDoneUs = qpc_now_us();
       const uint64_t callUs = callDoneUs >= callStartUs ? callDoneUs - callStartUs : 0;
       ++stats->payloadChunkCount;
@@ -243,7 +251,9 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
 
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count) {
+                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count,
+                                      uint64_t* outWireBytes,
+                                      uint64_t* outDatagrams) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET || !indices || count == 0)
     return UdpSendOutcome::TransportError;
   if (payloadSize > std::numeric_limits<uint32_t>::max()) return UdpSendOutcome::TransportError;
@@ -269,9 +279,13 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
-    (void)sendto(s, reinterpret_cast<const char*>(datagram.data()),
+    const int sent = sendto(s, reinterpret_cast<const char*>(datagram.data()),
                  static_cast<int>(sizeof(h) + chunkSize), 0,
                  reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    if (sent > 0) {
+      if (outWireBytes) *outWireBytes += static_cast<uint64_t>(sent);
+      if (outDatagrams) ++*outDatagrams;
+    }
   }
   return UdpSendOutcome::Sent;
 }

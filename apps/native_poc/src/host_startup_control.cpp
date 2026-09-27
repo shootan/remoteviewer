@@ -162,6 +162,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             std::cout << "[native-video-host][control] client connected\n";
             {
               TcpControlLink link(acceptedSock);
+              link.SetWriteCounter(&sender.txControlBytes);
               controlServer.Serve(link);
             }
             // This thread is the ONLY closer of an accepted control socket, and the close
@@ -221,8 +222,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           to.sin_family = AF_INET;
           to.sin_addr.s_addr = ip;
           to.sin_port = port;
-          return sendto(clientSession.clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
-                        reinterpret_cast<const sockaddr*>(&to), sizeof(to)) > 0;
+          const int sent = sendto(clientSession.clientSock, static_cast<const char*>(data),
+                                  static_cast<int>(len), 0, reinterpret_cast<const sockaddr*>(&to),
+                                  sizeof(to));
+          if (sent > 0) {
+            sender.txControlBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+            sender.txControlDatagrams.fetch_add(1, std::memory_order_relaxed);
+          }
+          return sent > 0;
         },
         remote60::native_poc::kUdpControlStreamHostToClient,
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);

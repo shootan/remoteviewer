@@ -149,6 +149,16 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       (senderSendCountNow > 0)
           ? (sender.sendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
           : 0;
+  // Per-flow totals for the stats line (quality r1).
+  const uint64_t txParity = sender.txParityBytes.load(std::memory_order_relaxed);
+  const uint64_t txChunkHdr = sender.txChunkHeaderBytes.load(std::memory_order_relaxed);
+  const uint64_t txVideoDg = sender.txVideoDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txNack = sender.txNackBytes.load(std::memory_order_relaxed);
+  const uint64_t txNackDg = sender.txNackDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txCtl = sender.txControlBytes.load(std::memory_order_relaxed);
+  const uint64_t txCtlDg = sender.txControlDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txIpUdpHdrEst = (txVideoDg + txNackDg + txCtlDg) * 28ULL;
+  const uint64_t txWireEst = sender.udpTxBytes + txParity + txChunkHdr + txNack + txCtl + txIpUdpHdrEst;
   if (statsPrintDue) {
   // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
   // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
@@ -310,6 +320,18 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " firstKeyWireUs=" << sender.firstKeyWireUs.load(std::memory_order_relaxed)
             << " lastKeyAuBytes=" << sender.lastKeyAuBytes.load(std::memory_order_relaxed)
             << " lastKeyAuChunks=" << sender.lastKeyAuChunks.load(std::memory_order_relaxed)
+            // Per-flow wire bytes (quality r1), appended; cumulative like udpTxBytes (= AU payload).
+            // IP+UDP headers are an estimate: 28 bytes per datagram (IPv4 without options), no
+            // Ethernet framing. udpTxWireEstBytes is the sum of every host->viewer flow here.
+            << " udpTxParityBytes=" << txParity
+            << " udpTxChunkHdrBytes=" << txChunkHdr
+            << " udpTxVideoDatagrams=" << txVideoDg
+            << " udpTxNackBytes=" << txNack
+            << " udpTxNackDatagrams=" << txNackDg
+            << " ctlTxBytes=" << txCtl
+            << " ctlTxDatagrams=" << txCtlDg
+            << " udpTxIpUdpHdrEstBytes=" << txIpUdpHdrEst
+            << " udpTxWireEstBytes=" << txWireEst
             << "\n";
   }
 
@@ -350,7 +372,8 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     // ABR only runs when no manual override or M9 is lowering encoder.activeFps, so here it is the
     // authoritative target. All four thresholds and the sparse floor share it.
     const AbrInputs abrIn{metricsFresh, clDecodedFpsX100, clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs,
-                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs, clUdpDropPm};
+                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs, clUdpDropPm,
+                          viewer.firstUs != 0, viewer.decodeReported};
     const AbrDecision abrDecision = rate.DecideAbrProfile(abrIn, t);
     const int targetProfile = abrDecision.targetProfile;
     const char* abrReason = abrDecision.reason;
@@ -379,7 +402,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // Committed only once the encoder accepted the target, so a failed reinit cannot
       // leave the hysteresis state describing an encoder that does not exist.
       rate.CommitAbrProfile(targetProfile, ladderChoice.reduced, t);
-      encoder.forceKeyNext = true;
+      encoder.RequestKey(kHostKeyReasonAbr);
 
       std::cout << "[native-video-host][abr] profile="
                 << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
@@ -391,6 +414,25 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                 << " clientAvgLatUs=" << clAvgLatencyUs
                 << " clientAvgTailUs=" << clAvgDecodeTailUs
                 << " clientMbps=" << (clRecvMbpsX1000 / 1000.0)
+                // quality r1: what this decision stood on, and whether it was valid evidence.
+                // evidence = the verdicts live this second; the raw inputs are the unmasked report
+                // (the client* keys above read 0 whenever the report is stale).
+                << " evidence=" << abr_evidence_names(abrDecision.evidence)
+                << " metricsFresh=" << (metricsFresh ? 1 : 0)
+                << " clientDecodeValid=" << (abrDecision.clientDecodeValid ? 1 : 0)
+                << " clientReports=" << viewer.reports
+                << " clientReportAgeMs=" << (viewer.updatedUs > 0 && t >= viewer.updatedUs ? (t - viewer.updatedUs) / 1000 : 0)
+                << " clientFirstReportAgeMs=" << (viewer.firstUs > 0 && t >= viewer.firstUs ? (t - viewer.firstUs) / 1000 : 0)
+                << " clientFirstDecodeAgeMs=" << (viewer.firstDecodeUs > 0 && t >= viewer.firstDecodeUs ? (t - viewer.firstDecodeUs) / 1000 : 0)
+                << " rawDecodedFps=" << (viewer.decodedFpsX100 / 100.0)
+                << " rawAvgLatUs=" << viewer.avgLatencyUs
+                << " rawAvgTailUs=" << viewer.avgDecodeTailUs
+                << " rawDropPm=" << viewer.udpAssemblyDropPm
+                << " cb2eAvgUs=" << cb2eAvgUs
+                << " sentFrames=" << sender.sentFrames
+                << " activeFps=" << encoder.activeFps
+                << " staticMode=" << (frameGating.staticMode ? 1 : 0)
+                << " streamAgeMs=" << (t >= startUs ? (t - startUs) / 1000 : 0)
                 << "\n";
     }
   }
@@ -434,7 +476,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
           return Flow::Next;
         }
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonM9);
       }
       rate.CommitM9Level(targetLevel, t);
     }

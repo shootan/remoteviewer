@@ -163,7 +163,7 @@ Flow stage_stream_active(HostContext& hx, TickContext& tc) {
                 << desktop_capture_backend_name(backend.active) << "\n";
     }
     streamActiveApplied = true;
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonStreamActive);
     // A returning viewer on a still desktop needs a picture too; arm the trailing-edge kick for
     // the current epoch (coalesces with any arm from the epoch/generation edges above). This also
     // covers the stream-inactive->active edge and a capture reattach, which both land here.

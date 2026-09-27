@@ -189,7 +189,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
         // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
         if (barrierClosed) {
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonBarrierKick);
           kickForcedKey = true;
         }
         seq = 0;

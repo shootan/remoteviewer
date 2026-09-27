@@ -137,7 +137,7 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
           capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
           capture.lastCallbackUs.store(0, std::memory_order_release);
           encoder.ResetTimelineAnchors(capture);
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonSelection);
           std::cout << "[native-video-host][control] monitor-select applied id=" << requestedId
                     << " " << target.width << "x" << target.height
                     << " at " << target.x << "," << target.y << "\n";
@@ -310,7 +310,7 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
             capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
             capture.lastCallbackUs.store(0, std::memory_order_release);
             encoder.ResetTimelineAnchors(capture);
-            encoder.forceKeyNext = true;
+            encoder.RequestKey(kHostKeyReasonSelection);
             std::cout << "[native-video-host] capture-window rebound hwnd=0x" << std::hex << nextRaw << std::dec
                       << " pid=" << capture.targetPid.load(std::memory_order_relaxed)
                       << " process=" << targetProc

@@ -346,7 +346,7 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
     // Outstanding requests belong to the client that made them. (Phase 4.)
     hx.mailbox.Clear();
     encoder.ResetKeyRequestBucket();
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonSession);
     kick.selectionFirstKeyframeDropCount = 0;
     encoder.encodedSeq = 0;
     stats.lastSendStartUs = 0;
@@ -530,7 +530,7 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
     }
     encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH, "window-select", /*allowWindowOverride=*/true);
   }
-  encoder.forceKeyNext = true;
+  encoder.RequestKey(kHostKeyReasonSelection);
   kick.selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
   kick.selectionFirstKeyframeDropCount = 0;
   ++capture.restartCount;

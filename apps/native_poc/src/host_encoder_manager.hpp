@@ -17,6 +17,7 @@
 #include "host_frame_gate.hpp"
 #include "mf_h264_codec.hpp"
 #include "host_epoch_gate.hpp"
+#include "host_keyframe_reason.hpp"
 
 namespace remote60::native_poc {
 
@@ -137,6 +138,14 @@ struct EncoderState {
   uint64_t activePacingFrameIntervalUs = 0;
   // Force-key: next input must be an IDR; submit latch so one request forces one input.
   bool forceKeyNext = true;
+  // Why forceKeyNext is set (host_keyframe_reason.hpp), accumulated until the key AU is
+  // accepted and logged. Diagnostic only; nothing decides on it.
+  uint32_t keyReasons = kHostKeyReasonInitial;
+  uint64_t lastKeyAcceptedUs = 0;  // qpc of the previous key AU accepted for sending (diagnostic)
+  void RequestKey(uint32_t reason) {
+    forceKeyNext = true;
+    keyReasons |= reason;
+  }
   uint64_t forceKeySubmittedAtUs = 0;
   // Epoch gate (P11, host_epoch_gate.hpp): after a flush, nothing encoded from a pre-flush input
   // goes out and the first AU sent is the new epoch's IDR.
@@ -233,7 +242,7 @@ struct EncoderState {
     ++resetCount;
     ++provenanceResyncCount;
     consecutiveStaleFrames = 0;
-    forceKeyNext = true;
+    RequestKey(kHostKeyReasonProvenance);
     epochGate.provenanceInvalid = false;
     epoch_gate_note_reset(epochGate, nowUs);
     provenanceResyncPending = false;

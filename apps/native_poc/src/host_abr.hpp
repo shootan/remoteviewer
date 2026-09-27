@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 namespace remote60::native_poc {
 
@@ -27,11 +28,55 @@ struct AbrInputs {
   uint32_t activeFps = 0;         // the encoder's current fps target
   uint64_t startUs = 0;           // stream start (warmup anchor)
   uint32_t clUdpDropPm = 0;       // client UDP assembly drop per-mille (P6)
+  // quality r1 -- validity of the client evidence, session-scoped (ViewerMetrics):
+  bool clientEverReported = false;  // any ControlClientMetrics arrived this session
+  bool clientDecodeReported = false;  // ...and at least one carried decode-side values
+};
+// Which evidence was live this second (bits), for the [abr] line -- diagnostic only.
+enum AbrEvidence : uint32_t {
+  kAbrEvidenceSevereClient = 1u << 0,
+  kAbrEvidenceSevereHost = 1u << 1,
+  kAbrEvidenceStaleActive = 1u << 2,
+  kAbrEvidenceModerateClient = 1u << 3,
+  kAbrEvidenceModerateHost = 1u << 4,
+  kAbrEvidenceEmergencyClient = 1u << 5,
+  kAbrEvidenceHostSparse = 1u << 6,
+  kAbrEvidenceWarmup = 1u << 7,             // still inside the 4 s warmup
+  kAbrEvidenceDecodeUnreported = 1u << 8,   // metrics arrive but never carried decode fields
+  kAbrEvidenceNeverReported = 1u << 9,      // no metrics at all this session
 };
 struct AbrDecision {
   int targetProfile = 0;          // 0 high, 1 mid, 2 low (== abrProfile: hold)
   const char* reason = "none";
+  uint32_t evidence = 0;          // AbrEvidence bits of this second
+  bool clientDecodeValid = false; // fresh AND the session has reported decode-side values
 };
+inline const char* abr_evidence_name(uint32_t bit);
+/** "severe_host|decode_unreported" -- the set bits by name; "none" when empty. */
+inline std::string abr_evidence_names(uint32_t evidence) {
+  std::string out;
+  for (uint32_t bit = 1; bit != 0 && bit <= kAbrEvidenceNeverReported; bit <<= 1) {
+    if ((evidence & bit) == 0) continue;
+    if (!out.empty()) out += '|';
+    out += abr_evidence_name(bit);
+  }
+  return out.empty() ? std::string("none") : out;
+}
+inline const char* abr_evidence_name(uint32_t bit) {
+  switch (bit) {
+    case kAbrEvidenceSevereClient: return "severe_client";
+    case kAbrEvidenceSevereHost: return "severe_host";
+    case kAbrEvidenceStaleActive: return "stale_active";
+    case kAbrEvidenceModerateClient: return "moderate_client";
+    case kAbrEvidenceModerateHost: return "moderate_host";
+    case kAbrEvidenceEmergencyClient: return "emergency_client";
+    case kAbrEvidenceHostSparse: return "host_sparse";
+    case kAbrEvidenceWarmup: return "warmup";
+    case kAbrEvidenceDecodeUnreported: return "decode_unreported";
+    case kAbrEvidenceNeverReported: return "never_reported";
+    default: return "?";
+  }
+}
 // Inputs of the once-a-second M9 level decision.
 struct M9Inputs {
   bool metricsFresh = false;
@@ -185,8 +230,13 @@ struct RateControlState {
     const uint32_t severeDropPm = rate.abrQualityFirst ? 60u : 100u;
     const uint32_t moderateDropPm = rate.abrQualityFirst ? 20u : 35u;
 
+    // quality r1: the decode-side fields count only when this session has ever reported them. A
+    // viewer that sends the message without them (Android APK <= 0.2.21: present* only) would
+    // otherwise read as decodedFps 0 -> "collapse" -> severe, every second the host sends a full
+    // cadence. A fresh 0 from a viewer that DOES report decode values is still taken at its word.
+    const bool clientDecodeValid = in.metricsFresh && in.clientDecodeReported;
     const bool severeDownByClient =
-        in.metricsFresh &&
+        clientDecodeValid &&
         (in.clAvgLatencyUs > severeLatencyUs ||
          in.clAvgDecodeTailUs > severeTailUs ||
          in.clUdpDropPm > severeDropPm ||
@@ -198,7 +248,7 @@ struct RateControlState {
          // an active send is congestion on its own. (history #341)
          in.clDecodedFpsX100 < collapseFpsX100);
     const bool moderateDownByClient =
-        in.metricsFresh &&
+        clientDecodeValid &&
         (in.clAvgLatencyUs > moderateLatencyUs ||
          in.clAvgDecodeTailUs > moderateTailUs ||
          in.clUdpDropPm > moderateDropPm ||
@@ -206,18 +256,25 @@ struct RateControlState {
           (in.clAvgLatencyUs > (moderateLatencyUs - 50000ULL) ||
            in.clAvgDecodeTailUs > (moderateTailUs - 30000ULL))));
     const bool emergencyDownByClient =
-        in.metricsFresh &&
+        clientDecodeValid &&
         (in.clAvgLatencyUs > emergencyLatencyUs ||
          in.clAvgDecodeTailUs > emergencyTailUs);
-    const bool severeDownByHost = (!in.metricsFresh && in.cb2eAvgUs > (rate.abrQualityFirst ? 110000ULL : 90000ULL));
-    const bool moderateDownByHost = (!in.metricsFresh && in.cb2eAvgUs > (rate.abrQualityFirst ? 90000ULL : 70000ULL));
+    // Host evidence stands in whenever the client's is not valid -- stale, never sent, or sent
+    // without decode fields. Unchanged thresholds; before r1 a present-only report switched this
+    // off while supplying no client evidence in its place.
+    const bool severeDownByHost = (!clientDecodeValid && in.cb2eAvgUs > (rate.abrQualityFirst ? 110000ULL : 90000ULL));
+    const bool moderateDownByHost = (!clientDecodeValid && in.cb2eAvgUs > (rate.abrQualityFirst ? 90000ULL : 70000ULL));
     // P7: client feedback lost WHILE still actively sending is congestion that neither client
     // metrics (they stopped arriving) nor cb2e (encoding stays fine while the network dies) can
     // show. Under a relay-bandwidth collapse the encoder held the VBR peak (~3x mean) and ABR sat
     // at high because every down verdict needs a signal that had gone silent -> peer-lost. Count
     // stale seconds during active send and treat a short run as severe so ABR still steps the
     // target -- and with it the peak -- down. (history #341)
-    if (abrWarmupDone && !in.metricsFresh && !hostOfferSparse) {
+    // quality r1: "feedback lost" needs feedback to have existed. A peer that never reported this
+    // session is not one that went quiet, and counting its silence as congestion demoted every
+    // such session to the lowest rung within seconds. A peer that reported and then stopped is
+    // the case P7 was built for and is counted exactly as before.
+    if (abrWarmupDone && !in.metricsFresh && in.clientEverReported && !hostOfferSparse) {
       ++rate.abrStaleActiveSeconds;
     } else {
       rate.abrStaleActiveSeconds = 0;
@@ -332,7 +389,24 @@ struct RateControlState {
         }
       }
     }
-    return AbrDecision{targetProfile, abrReason};
+    uint32_t evidence = 0;
+    if (severeDownByClient) evidence |= kAbrEvidenceSevereClient;
+    if (severeDownByHost) evidence |= kAbrEvidenceSevereHost;
+    if (staleActiveCongestion) evidence |= kAbrEvidenceStaleActive;
+    if (moderateDownByClient) evidence |= kAbrEvidenceModerateClient;
+    if (moderateDownByHost) evidence |= kAbrEvidenceModerateHost;
+    if (emergencyDownByClient) evidence |= kAbrEvidenceEmergencyClient;
+    if (hostOfferSparse) evidence |= kAbrEvidenceHostSparse;
+    if (!abrWarmupDone) evidence |= kAbrEvidenceWarmup;
+    if (!in.clientEverReported) {
+      evidence |= kAbrEvidenceNeverReported;
+    } else if (!in.clientDecodeReported) {
+      evidence |= kAbrEvidenceDecodeUnreported;
+    }
+    AbrDecision decision{targetProfile, abrReason};
+    decision.evidence = evidence;
+    decision.clientDecodeValid = clientDecodeValid;
+    return decision;
   }
   // The encoder accepted the new profile: record it and start the 4s cooldown.
   void CommitAbrProfile(int targetProfile, bool ladderReduced, uint64_t t) {

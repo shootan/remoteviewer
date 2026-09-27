@@ -167,7 +167,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
             capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
             capture.lastCallbackUs.store(0, std::memory_order_release);
             encoder.ResetTimelineAnchors(capture);
-            encoder.forceKeyNext = true;
+            encoder.RequestKey(kHostKeyReasonCaptureRestart);
             watchdog.inputLowPushStreakSec = 0;
             std::cout << "[native-video-host] capture session restarted reason="
                       << (fallbackFromGdi ? "gdi-low-push-fallback" : "capture-input-stall")
@@ -308,7 +308,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
           capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
           capture.lastCallbackUs.store(0, std::memory_order_release);
           encoder.ResetTimelineAnchors(capture);
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonCaptureRestart);
           ++watchdog.deadRestartCount;
           ++watchdog.drainRestartCount;
           std::cout << "[native-video-host] capture session restarted reason=readback-drain count="

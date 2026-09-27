@@ -279,9 +279,12 @@ class TcpControlLink : public ControlLink {
   bool Write(const void* data, size_t len) override;
   bool EndMessage() override { return Current() != kInvalidSocket; }
   bool Alive() const override { return Current() != kInvalidSocket; }
+  /** Optional: bytes successfully written are added here (host traffic accounting). */
+  void SetWriteCounter(std::atomic<uint64_t>* counter) { writeCounter_ = counter; }
 
  private:
   SocketHandle Current() const { return fetch_ ? fetch_() : fixed_; }
+  std::atomic<uint64_t>* writeCounter_ = nullptr;
 
   SocketHandle fixed_ = kInvalidSocket;
   std::function<SocketHandle()> fetch_;

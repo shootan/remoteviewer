@@ -173,7 +173,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
         // chain again (an output nobody can vouch for may reference pictures the viewer has not
         // got), so the key is re-forced -- the same answer as DropAwaitingKey. A DropOldEpoch
         // above does not do this: its provenance is certain and the chain is still good.
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonEpochGate);
         std::cout << "[native-video-host] epoch-gate dropped-unknown auEpoch=" << au.inputEpoch << " curEpoch=" << inputEpochNow
                   << " auCaptureUs=" << gateStampUs << " key=" << (au.keyFrame ? 1 : 0)
                   << " provenanceInvalid=" << (encoder.epochGate.provenanceInvalid ? 1 : 0)
@@ -183,7 +183,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
       case EpochVerdict::DropAwaitingKey:
         // The forced IDR did not come (ignored or delayed): ask again; this P would reference a
         // chain the viewer will never have.
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonEpochGate);
         std::cout << "[native-video-host] epoch-gate dropped-nonkey curEpoch=" << inputEpochNow
                   << " auCaptureUs=" << gateStampUs << " reforce=1 awaitDropped=" << encoder.epochGate.awaitDropped << "\n";
         return AuFlow::Continue;
@@ -203,7 +203,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
         encoder.forceKeySubmittedAtUs = 0;
         ++encoder.resetCount;
         encoder.consecutiveStaleFrames = 0;
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonEncoderReset);
         epoch_gate_note_reset(encoder.epochGate, qpc_now_us());
         encoderResetTriggered = true;
         return AuFlow::Break;
@@ -266,7 +266,7 @@ if (guardStaleEncoded && encodedAgeUs > kMaxEncodedFrameAgeUs) {
     encoder.forceKeySubmittedAtUs = 0;
     ++encoder.resetCount;
     encoder.consecutiveStaleFrames = 0;
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonEncoderReset);
     encoderResetTriggered = true;
     return AuFlow::Break;
   }
@@ -515,6 +515,22 @@ if (!servedBootstrap) {
 if ((hdr.flags & 1u) != 0) {
   encoder.forceKeyNext = false;
   encoder.forceKeySubmittedAtUs = 0;
+  // One line per key AU accepted for sending, with what asked for it (quality r1). "none" means no
+  // host request was pending: the encoder produced the IDR on its own. sinceLastKeyMs is from the
+  // previous key accepted, so a burst of keys after a connection reads directly off the log.
+  const uint64_t keyNowUs = qpc_now_us();
+  const uint64_t sinceLastKeyMs =
+      (encoder.lastKeyAcceptedUs > 0 && keyNowUs >= encoder.lastKeyAcceptedUs)
+          ? (keyNowUs - encoder.lastKeyAcceptedUs) / 1000
+          : 0;
+  std::cout << "[native-video-host][keyframe] seq=" << hdr.seq << " bytes=" << hdr.payloadSize
+            << " reasons=" << host_key_reason_names(encoder.keyReasons)
+            << " sinceLastKeyMs=" << sinceLastKeyMs
+            << " kick=" << (servedBootstrap ? 1 : 0)
+            << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
+            << " bitrate=" << encoder.activeBitrate << "\n";
+  encoder.lastKeyAcceptedUs = keyNowUs;
+  encoder.keyReasons = kHostKeyReasonNone;
 }
 
 if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&

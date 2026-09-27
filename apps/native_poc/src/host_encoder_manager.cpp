@@ -97,7 +97,7 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   encoder.targetPending = encoder.codecNeedsInit = false;
   encoder.targetRetryAtUs = encoder.encodeErrorSinceUs = 0;
   encoder.targetFailures = 0;
-  encoder.forceKeyNext = true;
+  encoder.RequestKey(kHostKeyReasonEncoderTarget);
   encoder.activeEncodeH = targetH;
   encoder.activeFps = targetFps;
   encoder.activeBitrate = targetBitrate;
@@ -150,7 +150,7 @@ void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureR
   // activeEncode to avoid upscaling. Passing the current nominal box re-fits activeEncode from
   // the new encodeSource aspect and rebuilds the MFT immediately, instead of after the 0.4s settle.
   if (encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, encoder.nominalEncodeW, encoder.nominalEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonGeometry);
     encoder.ResetTimelineAnchors(capture);
     std::cout << "[native-video-host] capture-geometry-confirmed reason=" << reason
               << " source=" << newW << "x" << newH
@@ -197,7 +197,7 @@ bool EncoderState::ApplyCaptureUiQualityMode(CaptureState& capture, CaptureResou
   rate.m9CooldownUntilUs = nowUs + static_cast<uint64_t>(rate.m9CooldownSec) * 1000000ULL;
   rate.m9DownPressureSeconds = 0;
   rate.m9UpPressureSeconds = 0;
-  encoder.forceKeyNext = true;
+  encoder.RequestKey(kHostKeyReasonUiQualityMode);
   return true;
 }
 

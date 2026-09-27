@@ -6,6 +6,7 @@
 // Host split refactor Phase 2-T1 (2026-08-26).
 
 #include "host_abr.hpp"
+#include "host_client_metrics.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +17,7 @@ using remote60::native_poc::AbrInputs;
 using remote60::native_poc::M9Decision;
 using remote60::native_poc::M9Inputs;
 using remote60::native_poc::RateControlState;
+using namespace remote60::native_poc;
 
 namespace {
 
@@ -45,10 +47,13 @@ RateControlState MakeAbr(bool qualityFirst) {
   return r;
 }
 
-// A second in which the client decoded the full rate with low latency.
+// A second in which the client decoded the full rate with low latency. A viewer that reports its
+// decode side (the Windows viewer): the session has seen reports, with decode fields.
 AbrInputs Healthy() {
   AbrInputs in;
   in.metricsFresh = true;
+  in.clientEverReported = true;
+  in.clientDecodeReported = true;
   in.clDecodedFpsX100 = kFps * 100;
   in.clAvgLatencyUs = 40000;
   in.clAvgDecodeTailUs = 20000;
@@ -432,6 +437,125 @@ void TestM9EachAxisTriggersDown() {
   }
 }
 
+// ---- quality r1: evidence validity ------------------------------------------------------------
+
+// What the Android APK (<= 0.2.21) sends: a fresh ControlClientMetrics every second with only the
+// present* block, so every decode field is 0. Measured: 6000/30 and 3000/30 both fell to the lowest
+// rung within 5-11 s with "clientDecodedFps=0 clientAvgLatUs=0 clientMbps=0" and the host fine.
+AbrInputs PresentOnly() {
+  AbrInputs in = Healthy();
+  in.clientDecodeReported = false;
+  in.clDecodedFpsX100 = 0;
+  in.clAvgLatencyUs = 0;
+  in.clAvgDecodeTailUs = 0;
+  in.clUdpDropPm = 0;
+  return in;
+}
+
+void TestAbrPresentOnlyReportsDoNotDemote() {
+  RateControlState r = MakeAbr(false);
+  const AbrInputs in = PresentOnly();
+  const int p = RunAbr(r, in, kStartUs + 3 * kSec, 30);
+  expect(p == 0, "abr(r1): present-only reports (decode fields never sent) hold high for 30 s");
+  const AbrDecision d = r.DecideAbrProfile(in, kStartUs + 40 * kSec);
+  expect((d.evidence & kAbrEvidenceSevereClient) == 0 && !d.clientDecodeValid,
+         "abr(r1): ...their zeros are not client evidence");
+  expect((d.evidence & kAbrEvidenceDecodeUnreported) != 0,
+         "abr(r1): ...and the decision line says the decode side was never reported");
+
+  RateControlState q = MakeAbr(true);
+  expect(RunAbr(q, in, kStartUs + 3 * kSec, 30) == 0, "abr(r1): same in quality-first mode");
+}
+
+void TestAbrNeverReportedDoesNotDemote() {
+  RateControlState r = MakeAbr(false);
+  AbrInputs in = Healthy();
+  in.metricsFresh = false;
+  in.clientEverReported = false;
+  in.clientDecodeReported = false;
+  const int p = RunAbr(r, in, kStartUs + 3 * kSec, 30);
+  expect(p == 0, "abr(r1): a client that never reported is not 'feedback lost' -- holds high 30 s");
+  expect(r.abrStaleActiveSeconds == 0, "abr(r1): ...and no stale-active seconds accumulate");
+  const AbrDecision d = r.DecideAbrProfile(in, kStartUs + 40 * kSec);
+  expect((d.evidence & kAbrEvidenceNeverReported) != 0 && (d.evidence & kAbrEvidenceStaleActive) == 0,
+         "abr(r1): ...the decision line says never_reported, not stale_active");
+}
+
+void TestAbrHostPressureStillDemotesWithoutClientEvidence() {
+  // Kept on purpose (Codex 2): the host's own encode pressure demotes whether the client's evidence
+  // is missing (never reported) or meaningless (present-only). Before r1 the present-only case had
+  // this switched off, because it only applied when the report was stale.
+  for (int variant = 0; variant < 2; ++variant) {
+    RateControlState r = MakeAbr(false);
+    AbrInputs in = variant == 0 ? PresentOnly() : Healthy();
+    if (variant == 1) {
+      in.metricsFresh = false;
+      in.clientEverReported = false;
+      in.clientDecodeReported = false;
+    }
+    in.cb2eAvgUs = 100000;  // over the 90 ms severe host threshold
+    int at = 0;
+    std::string reason;
+    const int p = RunAbr(r, in, kStartUs + 3 * kSec, 2, &at, &reason);
+    expect(p == 1 && at == 2 && reason == "high_to_mid_severe",
+           std::string("abr(r1): host encode pressure still demotes -- ") +
+               (variant == 0 ? "present-only client" : "never-reported client"));
+  }
+}
+
+void TestAbrFreshZeroFromADecodeReporterIsStillEvidence() {
+  // A viewer that does report decode values and now says 0 decoded under a full send: that is the
+  // relay-collapse signal and stays one.
+  RateControlState r = MakeAbr(false);
+  AbrInputs in = Healthy();
+  in.clDecodedFpsX100 = 0;
+  int at = 0;
+  std::string reason;
+  const int p = RunAbr(r, in, kStartUs + 3 * kSec, 2, &at, &reason);
+  expect(p == 1 && at == 2 && reason == "high_to_mid_severe",
+         "abr(r1): a fresh 0 fps from a decode-reporting viewer still demotes");
+}
+
+void TestAbrReportedThenSilentStillDemotes() {
+  // The P7 case with the r1 input spelled out: reports existed, then stopped under a full send.
+  RateControlState r = MakeAbr(false);
+  AbrInputs in = PresentOnly();  // even a present-only reporter that goes silent is feedback lost
+  in.metricsFresh = false;
+  int at = 0;
+  std::string reason;
+  const int p = RunAbr(r, in, kStartUs + 3 * kSec, 3, &at, &reason);
+  expect(p == 1 && at == 3 && reason == "high_to_mid_severe",
+         "abr(r1): a client that reported and then went silent still demotes (P7 kept)");
+}
+
+void TestClientMetricsSessionStickyFields() {
+  ClientMetricsSnapshot snap;
+  ViewerMetrics presentOnly;
+  presentOnly.updatedUs = 1000;
+  snap.Publish(presentOnly);
+  ViewerMetrics v = snap.Snapshot();
+  expect(v.firstUs == 1000 && v.reports == 1 && !v.decodeReported && v.firstDecodeUs == 0,
+         "metrics(r1): a present-only report counts as reported, not as decode-reported");
+  ViewerMetrics full;
+  full.updatedUs = 2000;
+  full.width = 1280;
+  full.decodedFpsX100 = 3000;
+  snap.Publish(full);
+  presentOnly.updatedUs = 3000;
+  snap.Publish(presentOnly);
+  v = snap.Snapshot();
+  expect(v.firstUs == 1000 && v.firstDecodeUs == 2000 && v.decodeReported && v.reports == 3,
+         "metrics(r1): decode-reported is sticky for the session; first times are kept");
+  snap.Reset();
+  v = snap.Snapshot();
+  expect(v.firstUs == 0 && !v.decodeReported && v.reports == 0,
+         "metrics(r1): a new session starts with nothing reported");
+  ViewerMetrics zeros;
+  zeros.updatedUs = 5000;
+  expect(!viewer_report_has_decode_fields(zeros) && viewer_report_has_decode_fields(full),
+         "metrics(r1): decode fields are recognised by value");
+}
+
 }  // namespace
 
 int main() {
@@ -448,6 +572,12 @@ int main() {
   TestAbrClientLossTriggersDemotion();
   TestAbrStaleFeedbackDuringActiveSendDemotes();
   TestAbrLowClientFpsDemotesDespiteLowLatency();
+  TestAbrPresentOnlyReportsDoNotDemote();
+  TestAbrNeverReportedDoesNotDemote();
+  TestAbrHostPressureStillDemotesWithoutClientEvidence();
+  TestAbrFreshZeroFromADecodeReporterIsStillEvidence();
+  TestAbrReportedThenSilentStillDemotes();
+  TestClientMetricsSessionStickyFields();
   TestM9DownRequiresConsecutiveSecondsAndCooldown();
   TestM9PressureStreakResets();
   TestM9UpAfterRecoverySeconds();

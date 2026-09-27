@@ -99,7 +99,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
       nowUs >= capture.restartRetryAtUs && restart_capture_session(hx)) {
     ++capture.restartCount;
     encoder.ResetTimelineAnchors(capture);
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonCaptureRestart);
     kick.Arm(nowUs, useH264, hx.encoder.activeFps);
     std::cout << "[native-video-host] capture retry recovered\n";
   }
@@ -155,7 +155,11 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   uint16_t viewerKeyReason = 0;
   const uint32_t keyReasons = hx.mailbox.TakeKeyframeReasons(&viewerKeyReason);
   if (keyReasons != kKeyframeReasonNone) {
-    encoder.forceKeyNext = true;
+    uint32_t hostReasons = kHostKeyReasonNone;
+    if ((keyReasons & kKeyframeReasonViewer) != 0) hostReasons |= kHostKeyReasonViewer;
+    if ((keyReasons & kKeyframeReasonSenderBarrier) != 0) hostReasons |= kHostKeyReasonSenderBarrier;
+    if ((keyReasons & kKeyframeReasonSenderBacklog) != 0) hostReasons |= kHostKeyReasonSenderBacklog;
+    encoder.RequestKey(hostReasons);
     if ((keyReasons & kKeyframeReasonViewer) != 0) {
       std::cout << "[native-video-host][control] keyframe-request-consumed reason="
                 << viewerKeyReason << "\n";

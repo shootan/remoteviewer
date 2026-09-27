@@ -114,7 +114,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
           capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
           capture.lastCallbackUs.store(0, std::memory_order_release);
           encoder.ResetTimelineAnchors(capture);
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonCaptureRestart);
           capture.FlushCapturePipelineState(res, frameGating, stats, "desktop-backend-switch");
           std::cout << "[native-video-host][control] desktop-backend-applied seq=" << reqSeq
                     << " requested=" << desktop_capture_backend_name(backend.requested)
@@ -165,7 +165,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
     capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
     capture.lastCallbackUs.store(0, std::memory_order_release);
     encoder.ResetTimelineAnchors(capture);
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonCaptureRestart);
     capture.FlushCapturePipelineState(res, frameGating, stats, "dxgi-runtime-fallback");
   }
   if (clientSession.streamControlActive.load(std::memory_order_acquire) &&
@@ -192,7 +192,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
     capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
     capture.lastCallbackUs.store(0, std::memory_order_release);
     encoder.ResetTimelineAnchors(capture);
-    encoder.forceKeyNext = true;
+    encoder.RequestKey(kHostKeyReasonCaptureRestart);
     capture.FlushCapturePipelineState(res, frameGating, stats, "gdi-runtime-fallback");
   }
 
@@ -254,7 +254,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
           capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
           capture.lastCallbackUs.store(0, std::memory_order_release);
           encoder.ResetTimelineAnchors(capture);
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonCaptureRestart);
           capture.FlushCapturePipelineState(res, frameGating, stats, promoted ? "desktop-backend-restored"
                                                 : "desktop-backend-retry-failed");
         }

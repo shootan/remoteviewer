@@ -40,7 +40,24 @@ struct ViewerMetrics {
   uint32_t queueDepthMax = 0;
   uint32_t queueDepthH4p = 0;
   uint32_t udpAssemblyDropPm = 0;
+  // Session-sticky, kept by Publish across reports (quality r1). A report is the viewer's word on
+  // what it measured -- but a viewer can send the message without measuring the decode side at all:
+  // the Android APK (0.2.21 and before) sends ControlClientMetrics with only the present* block, so
+  // decodedFps, latency, size and receive rate arrive as 0 every second. Those zeros are "not
+  // measured", not "decoded nothing", and ABR read them as a collapse. decodeReported is true once
+  // any report of this session carried a decode-side value; until then the decode fields mean
+  // nothing. firstUs / firstDecodeUs / reports say when and how often.
+  uint64_t firstUs = 0;
+  uint64_t firstDecodeUs = 0;
+  uint64_t reports = 0;
+  bool decodeReported = false;
 };
+
+/** Whether this one report carries any decode-side measurement (see ViewerMetrics::decodeReported). */
+inline bool viewer_report_has_decode_fields(const ViewerMetrics& m) {
+  return m.width != 0 || m.height != 0 || m.recvFpsX100 != 0 || m.decodedFpsX100 != 0 ||
+         m.recvMbpsX1000 != 0 || m.avgLatencyUs != 0 || m.avgDecodeTailUs != 0;
+}
 
 // Client-reported metrics + keyframe requests (Phase 1-10 state struct). The control thread
 // publishes a whole ViewerMetrics as each ControlClientMetrics message arrives; the main loop's
@@ -53,7 +70,17 @@ struct ClientMetricsSnapshot {
 
   void Publish(const ViewerMetrics& m) {
     std::lock_guard<std::mutex> lk(mu);
+    const uint64_t firstUs = metrics.firstUs != 0 ? metrics.firstUs : m.updatedUs;
+    const bool hasDecode = viewer_report_has_decode_fields(m);
+    const uint64_t firstDecodeUs =
+        metrics.firstDecodeUs != 0 ? metrics.firstDecodeUs : (hasDecode ? m.updatedUs : 0);
+    const bool decodeReported = metrics.decodeReported || hasDecode;
+    const uint64_t reports = metrics.reports + 1;
     metrics = m;
+    metrics.firstUs = firstUs;
+    metrics.firstDecodeUs = firstDecodeUs;
+    metrics.decodeReported = decodeReported;
+    metrics.reports = reports;
   }
   ViewerMetrics Snapshot() {
     std::lock_guard<std::mutex> lk(mu);

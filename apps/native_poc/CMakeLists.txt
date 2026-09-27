@@ -1641,6 +1641,19 @@ if(MSVC)
   target_compile_options(remote60_bwe_observe_e2e_test PRIVATE /utf-8)
 endif()
 
+# quality r1: ABR with a client that never sends decode metrics, APK-style present-only, or stops.
+add_executable(remote60_abr_client_evidence_e2e_test
+  src/abr_client_evidence_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_abr_client_evidence_e2e_test PRIVATE src)
+target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32)
+if(MSVC)
+  target_compile_options(remote60_abr_client_evidence_e2e_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_injected_input_test
   src/host_injected_input_test.cpp
 )

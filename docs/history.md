@@ -12531,3 +12531,13 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - **r2 (사용자 결정, 같은 날)**: "창 제목 다 보일 필요 없어, 앞글자부터 20자 정도로 제한" — 창 목록·선택 응답의 창 제목은 **코드포인트 20자**까지, 넘으면 19자 + "…"(U+2026). `utf8_limit_chars` + `fill_window_title`(`kWindowTitleMaxChars = 20`). 한글 20자 = 60B, 제한된 제목의 최대는 이모지 19 + … = 79B 라 96B 칸 자르기는 더 이상 필요 없지만 그대로 둔다(모니터 이름·pong 등 제한 없는 칸). 사용자 확인: 크롬을 끄니 접속됨 → 원인 확정.
 - r2 시험 62/0(3회): 19·20·21자, 20번째가 1~4바이트, 한글 21자, 이모지 21자, 잘못된 바이트, NUL, 측정 모양 제목 → 31B + … , 실제 창 → 제품 열거기 → 같은 34B. 변이 6종 전부 FAIL(snprintf 14 · overlong/서로게이트 3 · 서로게이트 쌍 2 · 20자 제한 제거 2 · 바이트로 셈 8 · … 없음 12).
 - 제품/테스트/문서: 제품(host_control_session.cpp, utf8_bounded.hpp, host_window_list_wire.hpp, 안드로이드 native_bridge.cpp) / 테스트(utf8_bounded_test, CMake) / 문서(이 항목).
+
+### 2026-09-27 quality r1 — 휴대폰은 지표를 보내고 있었다, 해독 칸만 비워서
+
+- 배경: 사용자 "GNLink 가 OSLink 보다 트래픽 많고 글자 흐림"(3.79 vs 1.26 Mb/s, 720p 강제). Codex 결정(`.claude/codex_quality_2026-09-27.md`) 순서의 첫 두 단계만: 계측 기준 고정 → ABR 유효성. 해상도·FEC·레이트 제어는 결과 뒤 별도.
+- **원인 확정(코드 + 재현)**: APK(0.2.21, `fea13a5`)는 ControlClientMetrics(24)를 매초 보내지만 `present*` 만 채운다(`native_video_client_session.cpp`) — decodedFps·지연·크기·수신률은 항상 0. 호스트는 그 보고를 "신선"하게 받고 decodedFps 0 을 relay 붕괴(P7)로 읽어 전송이 꽉 찬 모든 초를 severe 로 셌다. 격리 호스트 e2e 로 같은 모양 재현: 수정 전 논리에서 present-only 는 5초에 high→mid, 10초에 mid→low(현장 5~11초), 지표를 아예 안 보내는 클라는 6초에 stale_active 로 강등.
+- **B 수정**(`host_abr.hpp`, `host_client_metrics.hpp`): 세션마다 "보고가 있었는가 / 해독 칸이 한 번이라도 채워졌는가"를 유지. 클라 판정(severe/moderate/emergency)은 신선 **그리고** 해독 칸을 보고해 온 세션에서만. stale_active(피드백 상실)는 보고가 있던 세션에서만. 호스트 판정(cb2e)은 클라 증거가 유효하지 않을 때마다 적용 — 전에는 present-only 보고가 이것을 꺼 버렸다. 신선한 decodedFps 0 은 해독 칸을 보고하는 뷰어에서는 그대로 붕괴 신호. M9 는 기본 꺼짐이라 손대지 않음.
+- **A 계측**(추가만, 기존 키·순서 불변): 통계 줄 끝에 흐름별 누적 바이트(패리티·청크 헤더·데이터그램·NACK 재전송·제어·IP/UDP 헤더 추정 28B/개·합계). `[keyframe]` 줄 — 키 AU 마다 사유(33곳의 `forceKeyNext = true` 를 사유별 `RequestKey` 로, 주기·첫 프레임 포함), 직전 키와의 간격. `[abr]` 결정 줄 — 판정 근거 비트(evidence), 유효성, 보고 수·나이·최초 수신/최초 해독 보고 나이, 가려지지 않은 원시 값, cb2e·보낸 프레임.
+- 재현 e2e 가 계측으로 바로 보인 것(로컬 480x270 캡처, 참고치): 키프레임이 **매초 주기(scheduled)** — 인자 기본 keyint 30 프레임(`host_args.hpp:59`)이 30fps 에서 1초. 제품 실행 인자로 무엇이 오는지는 이번에 확인 안 함. 1청크짜리 작은 프레임에도 패리티가 청크 전체 폭(~1172B)이라 패리티 바이트가 페이로드의 5배. 둘 다 이번에 고치지 않음(Codex 순서 3·IDR 단계).
+- 시험: `host_abr_test` PASS(r1 6건 추가, 변이 4종 각각 FAIL) · `remote60_abr_client_evidence_e2e_test` none/present/stop 각 2회 10/0(캡처 초당 실프레임 ≥15 가 32/32초), 수정 전 논리 호스트로 none·present FAIL(강등 재현) · 관련 단위 시험 14종 PASS · udp_control_e2e 20/0 · bwe_observe_e2e 3회 중 1회 관찰 줄 39/40 경계 FAIL, 재실행 2회 43·44 PASS. 실제 파일 불변.
+- 제품/테스트/문서: 제품(ABR 유효성, 키프레임 사유, 흐름별 바이트, [abr] 줄) / 테스트(host_abr_test, abr_client_evidence_e2e, CMake) / 문서(이 항목).

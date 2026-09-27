@@ -45,6 +45,15 @@ struct SendPathStats {
   uint64_t payloadCallCount = 0;
   uint64_t payloadChunkCount = 0;
   uint64_t payloadChunkMaxUs = 0;
+  // What went on the wire, by kind (quality r1). Datagram payload only -- IP/UDP headers are the
+  // caller's estimate. dataBytes is the AU itself; parityBytes the FEC datagrams' payload (always a
+  // full chunk stride, even for a short last group); headerBytes the UdpVideoChunkHeader of every
+  // datagram, data and parity alike.
+  uint64_t dataBytes = 0;
+  uint64_t parityBytes = 0;
+  uint64_t headerBytes = 0;
+  uint64_t datagrams = 0;
+  uint64_t parityDatagrams = 0;
 };
 
 bool send_all_timed(SOCKET s, const void* data, size_t len, uint64_t* outUs,
@@ -108,8 +117,12 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
 // `payload`/`baseHeader`/`mtuBytes`, using the exact same chunk geometry as the original send (so
 // the client assembles them into the same frame). No FEC and no pacing -- it is a handful of small
 // datagrams answering a NACK on a low-RTT path. Out-of-range indices are skipped. (video NACK.)
+// outWireBytes / outDatagrams (optional): what the replay actually put on the wire, header
+// included, for the per-flow byte accounting (quality r1).
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count);
+                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count,
+                                      uint64_t* outWireBytes = nullptr,
+                                      uint64_t* outDatagrams = nullptr);
 
 }  // namespace remote60::native_poc

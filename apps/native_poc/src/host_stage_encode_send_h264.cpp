@@ -174,7 +174,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         const uint32_t keepNominalH = encoder.nominalEncodeH;
         if (encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, keepNominalW, keepNominalH, encoder.activeFps, encoder.activeBitrate,
                                  encoder.activeKeyint)) {
-          encoder.forceKeyNext = true;
+          encoder.RequestKey(kHostKeyReasonRefit);
           std::cout << "[native-video-host] encode-refit source=" << contentW << "x" << contentH
                     << " encode=" << prevW << "x" << prevH << " -> " << encoder.activeEncodeW << "x"
                     << encoder.activeEncodeH << "\n";
@@ -270,6 +270,11 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
        !servedBootstrap && (encoder.activeKeyint > 0) && ((seq % encoder.activeKeyint) == 0);
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
    const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
+   // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
+   if (forceKeyFrame) {
+     if (scheduledKey) encoder.keyReasons |= kHostKeyReasonScheduled;
+     if (encoder.encodedSeq == 0) encoder.keyReasons |= kHostKeyReasonFirstFrame;
+   }
     const uint64_t encodeInputUs = captureStampUs;
     // Provenance rides the encoder's accepted-input FIFO so the wire synthetic flag lands on the AU
     // this input produces (an async MFT emits an older input's AU during this call). The stamp is
@@ -361,7 +366,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.
     if (!units.empty() || encodeStats.processOutputErrorCount > 0) {
       encoder.ResetTimelineAnchors(capture);
-      encoder.forceKeyNext = true;
+      encoder.RequestKey(kHostKeyReasonEncodeLoss);
     }
     const uint64_t failureUs = qpc_now_us();
     if (!encoder.encodeErrorSinceUs) encoder.encodeErrorSinceUs = failureUs;

@@ -160,6 +160,17 @@ struct SenderState {
   std::atomic<uint64_t> txFrames{0};
   std::atomic<uint64_t> txChunks{0};
   std::atomic<uint64_t> txBytes{0};
+  // Per-flow wire accounting (quality r1), cumulative like txBytes. txBytes stays what it always
+  // was -- AU payload bytes -- so every existing reader keeps its meaning; these are the rest of
+  // what leaves the socket. Datagram payloads; IP/UDP headers are estimated at the stats line.
+  std::atomic<uint64_t> txParityBytes{0};       // FEC parity datagram payload
+  std::atomic<uint64_t> txChunkHeaderBytes{0};  // UdpVideoChunkHeader on every video datagram
+  std::atomic<uint64_t> txVideoDatagrams{0};    // data + parity
+  std::atomic<uint64_t> txNackBytes{0};         // NACK replays, header included
+  std::atomic<uint64_t> txNackDatagrams{0};
+  std::atomic<uint64_t> txControlBytes{0};      // control channel as sent (UDP: channel datagrams
+                                                // incl. its fragment headers/retransmits; TCP: payload)
+  std::atomic<uint64_t> txControlDatagrams{0};  // UDP control datagrams (0 on TCP)
   std::atomic<uint64_t> txNoPeer{0};
   std::atomic<uint64_t> lastSendStartUs{0};
   std::atomic<uint64_t> sendDurSumUs{0};

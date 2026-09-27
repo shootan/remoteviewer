@@ -112,7 +112,7 @@ Flow stage_watchdogs(HostContext& hx, TickContext& tc) {
         capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
         capture.lastCallbackUs.store(0, std::memory_order_release);
         encoder.ResetTimelineAnchors(capture);
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonCaptureRestart);
         ++watchdog.deadRestartCount;
         std::cout << "[native-video-host] capture session restarted count=" << capture.restartCount
                   << " captureDeadRestartCount=" << watchdog.deadRestartCount
@@ -212,7 +212,7 @@ Flow stage_watchdogs(HostContext& hx, TickContext& tc) {
         capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
         capture.lastCallbackUs.store(0, std::memory_order_release);
         encoder.ResetTimelineAnchors(capture);
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonCaptureRestart);
         ++watchdog.deadRestartCount;
         ++watchdog.frozenRingRestartCount;
         std::cout << "[native-video-host] capture session restarted reason=frozen-ring count="

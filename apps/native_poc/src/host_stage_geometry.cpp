@@ -132,7 +132,7 @@ Flow stage_geometry(HostContext& hx, TickContext& tc) {
         encoder.ResetTimelineAnchors(capture);
         // Force an IDR at the (now correct) geometry. An interactive drag still lets the encode
         // size catch up on the 0.4s refit path; only the capture pool was resized here.
-        encoder.forceKeyNext = true;
+        encoder.RequestKey(kHostKeyReasonGeometry);
         uint32_t newCapW = 0;
         uint32_t newCapH = 0;
         {
@@ -159,7 +159,7 @@ Flow stage_geometry(HostContext& hx, TickContext& tc) {
       capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
       capture.lastCallbackUs.store(0, std::memory_order_release);
       encoder.ResetTimelineAnchors(capture);
-      encoder.forceKeyNext = true;
+      encoder.RequestKey(kHostKeyReasonGeometry);
       std::cout << "[native-video-host] capture session restarted reason=size-change count="
                 << capture.restartCount << "\n";
     } else {

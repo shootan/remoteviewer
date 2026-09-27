@@ -463,7 +463,9 @@ bool TcpControlLink::Read(void* out, size_t len) {
 bool TcpControlLink::Write(const void* data, size_t len) {
   const SocketHandle sock = Current();
   if (sock == kInvalidSocket) return false;
-  return send_all(sock, data, len);
+  if (!send_all(sock, data, len)) return false;
+  if (writeCounter_) writeCounter_->fetch_add(len, std::memory_order_relaxed);
+  return true;
 }
 
 bool UdpControlLink::EnsureInbound() {

@@ -88,8 +88,12 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
     }
     nackBudgetTokensBytes -= estBytes;
   }
+  uint64_t replayBytes = 0;
+  uint64_t replayDatagrams = 0;
   (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu, missing,
-                               count);
+                               count, &replayBytes, &replayDatagrams);
+  txNackBytes.fetch_add(replayBytes, std::memory_order_relaxed);
+  txNackDatagrams.fetch_add(replayDatagrams, std::memory_order_relaxed);
   nackRetransmitChunks.fetch_add(count, std::memory_order_relaxed);
 }
 
@@ -214,6 +218,9 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         sender.txFrames.fetch_add(1, std::memory_order_relaxed);
         sender.txChunks.fetch_add(pathStats.payloadChunkCount, std::memory_order_relaxed);
         sender.txBytes.fetch_add(item.bytes.size(), std::memory_order_relaxed);
+        sender.txParityBytes.fetch_add(pathStats.parityBytes, std::memory_order_relaxed);
+        sender.txChunkHeaderBytes.fetch_add(pathStats.headerBytes, std::memory_order_relaxed);
+        sender.txVideoDatagrams.fetch_add(pathStats.datagrams, std::memory_order_relaxed);
         sender.sendDurSumUs.fetch_add(durUs, std::memory_order_relaxed);
         sender.sendCount.fetch_add(1, std::memory_order_relaxed);
         uint64_t prevMax = sender.sendDurMaxUs.load(std::memory_order_relaxed);
@@ -339,7 +346,7 @@ void SenderState::PumpUdpHello(VideoTransport transport, EncoderState& encoder) 
     sender.lastKeyAuBytes.store(0, std::memory_order_relaxed);
     sender.lastKeyAuChunks.store(0, std::memory_order_relaxed);
   }
-  encoder.forceKeyNext = true;
+  encoder.RequestKey(kHostKeyReasonPeer);
   sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
   std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="
             << sender.mediaSessionEpoch.load(std::memory_order_acquire) << " forcing keyframe\n";

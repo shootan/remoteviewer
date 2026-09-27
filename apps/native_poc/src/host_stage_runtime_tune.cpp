@@ -177,7 +177,7 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       rate.abrGoodSeconds = 0;
       rate.abrModeratePressureSeconds = 0;
       rate.abrSeverePressureSeconds = 0;
-      encoder.forceKeyNext = true;
+      encoder.RequestKey(kHostKeyReasonTune);
       if (fpsChanged && !capture.windowModeActive.load(std::memory_order_acquire) &&
           backend.active == DesktopCaptureBackend::Gdi) {
         if (!restart_capture_session(hx)) {
