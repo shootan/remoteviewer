@@ -515,8 +515,9 @@ if (!servedBootstrap) {
 if ((hdr.flags & 1u) != 0) {
   encoder.forceKeyNext = false;
   encoder.forceKeySubmittedAtUs = 0;
-  // One line per key AU accepted for sending, with what asked for it (quality r1). "none" means no
-  // host request was pending: the encoder produced the IDR on its own. sinceLastKeyMs is from the
+  // One line per key AU accepted for sending, with what asked for it (quality r1). "encoder_gop"
+  // (r4) means no host request was pending: the encoder's own GOP produced the IDR. sinceLastKeyMs
+  // is from the
   // previous key accepted, so a burst of keys after a connection reads directly off the log.
   const uint64_t keyNowUs = qpc_now_us();
   const uint64_t sinceLastKeyMs =
@@ -531,6 +532,7 @@ if ((hdr.flags & 1u) != 0) {
             << " bitrate=" << encoder.activeBitrate << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
   encoder.keyReasons = kHostKeyReasonNone;
+  encoder.realInputsSinceKey = 0;  // r4: any key restarts the period
 }
 
 if (args.traceEvery > 0 && (hdr.seq % args.traceEvery) == 0 &&

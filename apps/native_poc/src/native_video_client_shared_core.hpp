@@ -313,6 +313,26 @@ struct UdpH264AssembledFrame {
   std::vector<uint8_t> payload;
 };
 
+struct UdpH264AssemblyStepResult;
+/**
+ * What a receiver does when the assembler reports a sequence gap (droppedPreviousIncomplete).
+ *
+ * A gap is revealed by the AU that arrives after it. If that AU is itself a complete keyframe, it
+ * resyncs the decoder on its own -- and the gap is usually the host's doing, not the network's: an
+ * arriving IDR supersedes the sender's backlog, whose seqs are never sent. Asking for another IDR
+ * then only buys a second one, which clears the backlog again and opens the next gap.
+ *
+ * The Windows viewer learned this in history #390 (90 of 90 reason-2 requests right after a
+ * complete keyframe). The shared session -- the Android app -- had not: measured 2026-09-27, 46 of
+ * 46 phone requests came within 250 ms of a host keyframe, and each also reset the Android codec
+ * through OnVideoDiscontinuity (the video size flipping 1080 <-> 1088 in apk.log). quality r4.
+ */
+struct SequenceGapResponse {
+  bool requestKeyframe = false;   // ask the host for an IDR
+  bool discontinuity = false;     // tell the sink the reference chain broke
+};
+SequenceGapResponse respond_to_sequence_gap(const UdpH264AssemblyStepResult& result);
+
 struct UdpH264AssemblyStepResult {
   UdpH264AssemblyDisposition disposition = UdpH264AssemblyDisposition::Ignored;
   bool startedNewAssembly = false;

@@ -151,6 +151,12 @@ struct EncoderState {
   bool manualEncodeBox = false;
   bool uiOverviewActive = false;
   uint64_t lastKeyAcceptedUs = 0;  // qpc of the previous key AU accepted for sending (diagnostic)
+  // quality r4: real (non-kick) inputs handed to the encoder since the last key AU was accepted --
+  // of ANY reason. The periodic key is due when this reaches activeKeyint. It used to be
+  // `captureSeq % keyint`, which ignored every other key: a tune or selection IDR at seq 280 was
+  // followed by a "scheduled" one at 282, and a kick frame that pushed the encoder's own GOP over
+  // its boundary made the MFT emit an IDR the host then repeated (reasons=none, then scheduled).
+  uint32_t realInputsSinceKey = 0;
   void RequestKey(uint32_t reason) {
     forceKeyNext = true;
     keyReasons |= reason;

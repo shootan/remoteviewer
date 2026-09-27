@@ -266,8 +266,11 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     const uint64_t encodeStartUs = qpc_now_us();
    const bool forceKeyInFlight =
        encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000;
-   const bool scheduledKey =
-       !servedBootstrap && (encoder.activeKeyint > 0) && ((seq % encoder.activeKeyint) == 0);
+   // r4: due by real inputs since the last key of any kind, not by the capture seq -- see
+   // EncoderState::realInputsSinceKey.
+   const bool scheduledKey = !servedBootstrap && (encoder.activeKeyint > 0) &&
+                             (encoder.realInputsSinceKey >= encoder.activeKeyint);
+   (void)seq;
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
    const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
    // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
@@ -275,6 +278,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      if (scheduledKey) encoder.keyReasons |= kHostKeyReasonScheduled;
      if (encoder.encodedSeq == 0) encoder.keyReasons |= kHostKeyReasonFirstFrame;
    }
+   if (!servedBootstrap) ++encoder.realInputsSinceKey;
     const uint64_t encodeInputUs = captureStampUs;
     // Provenance rides the encoder's accepted-input FIFO so the wire synthetic flag lands on the AU
     // this input produces (an async MFT emits an older input's AU during this call). The stamp is

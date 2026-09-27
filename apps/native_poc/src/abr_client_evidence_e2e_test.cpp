@@ -36,6 +36,9 @@
 //   with --capture-window-title refuses selection, so pair it with --desktop --cadence-window).
 //   --tune-at SEC:BITRATE (r3, repeatable): a runtime tune (bitrate, fps kept at 30) through the
 //   product scheduler, as the viewer's quality control sends it.
+//   --request-key-at SEC (r4, repeatable): the viewer asks for a keyframe (product KeyframeRequestState).
+//   Every one must be answered by a [keyframe] carrying reason "viewer" -- the recovery IDR the
+//   r4 cadence change must not take away. --run-sec N overrides the run length.
 //   --expect-final WxH asserts the size on the LAST stats line: the box re-chosen for the last capture.
 //   --monitor selects the host's monitor N (primary first, then left to right) with the product's
 //   ControlMonitorSelect, before the measured run -- a 4K panel that is not the primary.
@@ -186,6 +189,8 @@ int wmain(int argc, wchar_t** argv) {
   std::map<int, std::string> selectAt;  // second -> "window" | "desktop"
   std::string expectFinal;
   std::map<int, uint32_t> tuneAt;  // second -> bitrate
+  std::set<int> requestKeyAt;
+  int runSec = 0;
   bool gdi = false;  // r3: force the GDI desktop backend, staging the real GNLinkCapture.exe worker  // with --desktop: keep the invisible animated window up anyway
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -212,6 +217,10 @@ int wmain(int argc, wchar_t** argv) {
         selectAt[static_cast<int>(std::wcstol(v.substr(0, colon).c_str(), nullptr, 10))] =
             std::string(what.begin(), what.end());
       }
+    } else if (a == L"--request-key-at" && i + 1 < argc) {
+      requestKeyAt.insert(static_cast<int>(std::wcstol(argv[++i], nullptr, 10)));
+    } else if (a == L"--run-sec" && i + 1 < argc) {
+      runSec = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
     } else if (a == L"--gdi") {
       gdi = true;
     } else if (a == L"--tune-at" && i + 1 < argc) {
@@ -394,7 +403,9 @@ int wmain(int argc, wchar_t** argv) {
     ClientControlMetricsSnapshot pendingMetrics{};
     bool pendingSelectSet = false;
     uint32_t pendingTune = 0;
+    bool pendingKeyRequest = false;
     uint64_t pendingSelect = 0;
+    std::string pendingSelectKind;  // what the run asked for, not what the id happens to mean
     std::mutex selMu;
     std::vector<std::string> selections;  // what the host answered, in order
     std::atomic<bool> controlStop{false};
@@ -411,16 +422,22 @@ int wmain(int argc, wchar_t** argv) {
         ClientControlMetricsSnapshot metrics;
         bool selectNow = false;
         uint64_t selectId = 0;
+        std::string selectKind;
         uint32_t tuneNow = 0;
+        bool keyNow = false;
         {
           std::lock_guard<std::mutex> lk(mmu);
           metrics = pendingMetrics;
           tuneNow = pendingTune;
           pendingTune = 0;
+          keyNow = pendingKeyRequest;
+          pendingKeyRequest = false;
           selectNow = pendingSelectSet;
           selectId = pendingSelect;
+          selectKind = pendingSelectKind;
           pendingSelectSet = false;
         }
+        if (keyNow) (void)keyframe.Request(2, qpc_now_us());
         if (tuneNow != 0) {
           runtimeTune.SetEnabled(true);
           runtimeTune.SetTargets(tuneNow, 0, kFps);
@@ -442,8 +459,10 @@ int wmain(int argc, wchar_t** argv) {
           const bool ok = execute_control_action(link, select, &response);
           const auto& w = response.windowSelected;
           std::lock_guard<std::mutex> lk(selMu);
-          selections.push_back(std::string(selectId == 0 ? "desktop" : "window") + " sent=" +
-                               (ok ? "1" : "0") + " flags=" + std::to_string(w.flags) + " reason=" +
+          selections.push_back(selectKind + " sent=" +
+                               (ok ? "1" : "0") + " flags=" + std::to_string(w.flags) +
+                               " asked=" + std::to_string(selectId) + " answered=" +
+                               std::to_string(w.windowId) + " reason=" +
                                std::string(w.reason, strnlen(w.reason, sizeof(w.reason))));
         }
         ControlOutboundAction action{};
@@ -462,7 +481,7 @@ int wmain(int argc, wchar_t** argv) {
     });
 
     // The run: 36 seconds. 'stop' reports fully for the first 14 and is silent after.
-    const int kRunSec = mode == "recover" ? 72 : 36;
+    const int kRunSec = runSec > 0 ? runSec : (mode == "recover" ? 72 : 36);
     constexpr int kStopAfterSec = 14;
     constexpr int kResumeAtSec = 26;  // recover: silent from 14 to 26
     for (int s = 0; s < kRunSec; ++s) {
@@ -493,6 +512,10 @@ int wmain(int argc, wchar_t** argv) {
         m.updatedQpcUs = now;
       }
       if (mode == "stop" && s == kStopAfterSec) metricsStoppedAtSec = static_cast<uint64_t>(s);
+      if (requestKeyAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingKeyRequest = true;
+      }
       if (tuneAt.count(s) != 0) {
         std::lock_guard<std::mutex> lk(mmu);
         pendingTune = tuneAt[s];
@@ -501,6 +524,7 @@ int wmain(int argc, wchar_t** argv) {
         std::lock_guard<std::mutex> lk(mmu);
         pendingSelect = selectAt[s] == "window" ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(target.hwnd()))
                                                 : 0ull;
+        pendingSelectKind = selectAt[s];
         pendingSelectSet = true;
       }
       {
@@ -590,9 +614,42 @@ int wmain(int argc, wchar_t** argv) {
     for (const auto& l : selectionLog) {
       std::cout << "selection: " << l << "\n";
       allOk = allOk && l.find("sent=1 flags=1 ") != std::string::npos;
+      // r4 (r3 review): a "window" selection must really name this test's window -- without
+      // --cadence-window it would be sent as id 0, the desktop, and pass.
+      if (l.rfind("window ", 0) == 0) {
+        const std::string asked = value_of(" " + l, "asked");
+        allOk = allOk && asked != "0" && !asked.empty() && value_of(" " + l, "answered") == asked;
+      }
     }
     check("every selection was accepted by the host (flags bit0)", allOk,
           std::to_string(selectionLog.size()) + " of " + std::to_string(selectAt.size()));
+  }
+  // r4: keyframes by reason (a key with several reasons counts under each).
+  {
+    std::map<std::string, int> byReason;
+    uint64_t keyBytes = 0;
+    for (const auto& l : keyLines) {
+      std::string r = value_of(l, "reasons");
+      const std::string b = value_of(l, "bytes");
+      if (!b.empty()) keyBytes += std::stoull(b);
+      size_t start = 0;
+      while (start <= r.size()) {
+        const size_t bar = r.find('|', start);
+        byReason[r.substr(start, bar == std::string::npos ? std::string::npos : bar - start)] += 1;
+        if (bar == std::string::npos) break;
+        start = bar + 1;
+      }
+    }
+    std::cout << "keyframes: " << keyLines.size() << " total, " << keyBytes << " bytes;";
+    for (const auto& [reason, n] : byReason) std::cout << " " << reason << "=" << n;
+    std::cout << "\n";
+    if (launched && !requestKeyAt.empty()) {
+      const int viewerKeys = byReason.count("viewer") ? byReason["viewer"] : 0;
+      check("every viewer keyframe request was answered with an IDR (" +
+                std::to_string(requestKeyAt.size()) + " asked)",
+            viewerKeys >= static_cast<int>(requestKeyAt.size()),
+            "viewer-reason keys=" + std::to_string(viewerKeys));
+    }
   }
   if (launched && !expectFinal.empty()) {
     check("after the last selection the host encodes " + expectFinal + " (last stats line)",

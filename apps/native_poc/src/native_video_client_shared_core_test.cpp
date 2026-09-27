@@ -1460,6 +1460,44 @@ bool test_input_queue_preserves_key_edges_on_overflow() {
   return true;
 }
 
+// quality r4: the seq gap an arriving IDR reveals is the host superseding its backlog, and the IDR
+// resyncs by itself. Measured: 46 of 46 phone keyframe requests came within 250 ms of a host key.
+bool test_sequence_gap_response() {
+  using remote60::native_poc::respond_to_sequence_gap;
+  UdpH264FrameAssembler assembler;
+  // seq 1: a complete delta. seq 4: a complete KEY after a gap (2, 3 never sent).
+  auto r = push_chunk(assembler, 1, 0, 100, 1200, false, 1000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Completed && !r.droppedPreviousIncomplete,
+              "gap: the first delta completes cleanly")) return false;
+  r = push_chunk(assembler, 4, 0, 100, 1200, true, 2000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Completed && r.droppedPreviousIncomplete,
+              "gap: the assembler reports the gap on the key that reveals it")) return false;
+  auto g = respond_to_sequence_gap(r);
+  if (!expect(!g.requestKeyframe && !g.discontinuity,
+              "gap: a complete keyframe behind the gap asks for nothing and resets nothing")) return false;
+  // seq 7: a complete DELTA after a gap (5, 6 missing) -- its references are gone: ask, reset.
+  r = push_chunk(assembler, 7, 0, 100, 1200, false, 3000);
+  if (!expect(r.disposition == UdpH264AssemblyDisposition::Completed && r.droppedPreviousIncomplete,
+              "gap: a delta behind a gap is reported")) return false;
+  g = respond_to_sequence_gap(r);
+  if (!expect(g.requestKeyframe && g.discontinuity,
+              "gap: a delta behind a gap asks for an IDR and resets the decoder")) return false;
+  // No gap: nothing.
+  r = push_chunk(assembler, 8, 0, 100, 1200, false, 4000);
+  g = respond_to_sequence_gap(r);
+  if (!expect(!r.droppedPreviousIncomplete && !g.requestKeyframe && !g.discontinuity,
+              "gap: consecutive frames ask for nothing")) return false;
+  // A gap reported on a result that is not a completed key (e.g. an evicted head) still asks.
+  UdpH264AssemblyStepResult evicted{};
+  evicted.droppedPreviousIncomplete = true;
+  evicted.disposition = UdpH264AssemblyDisposition::Partial;
+  evicted.frame.header.flags = 1u;  // a key header on a result that did not complete is not a key in hand
+  g = respond_to_sequence_gap(evicted);
+  if (!expect(g.requestKeyframe && g.discontinuity,
+              "gap: an incomplete result behind a gap still asks")) return false;
+  return true;
+}
+
 int main() {
   if (!test_control_keepalive_interval()) return 1;
   if (!test_ping_and_metrics_order()) return 1;
@@ -1476,6 +1514,7 @@ int main() {
   if (!test_udp_assembler_saturation_episode()) return 1;
   if (!test_udp_assembler_saturation_bounds()) return 1;
   if (!test_session_controller()) return 1;
+  if (!test_sequence_gap_response()) return 1;
   std::cout << "[shared-core-test] PASS\n";
   return 0;
 }

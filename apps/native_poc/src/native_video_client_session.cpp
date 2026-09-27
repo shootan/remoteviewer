@@ -723,9 +723,14 @@ void ClientSessionController::VideoReceiveMain() {
     }
     if (assembleResult.droppedPreviousIncomplete) {
       ++assemblyDropped;
-      if (!waitForKeyframe) sink->OnVideoDiscontinuity();
-      waitForKeyframe = true;
-      (void)keyframeRequests_.Request(2, now_us());
+      // quality r4: a gap revealed by a complete keyframe needs neither a new IDR nor a decoder
+      // reset -- see respond_to_sequence_gap.
+      const SequenceGapResponse gap = respond_to_sequence_gap(assembleResult);
+      if (gap.discontinuity) {
+        if (!waitForKeyframe) sink->OnVideoDiscontinuity();
+        waitForKeyframe = true;
+      }
+      if (gap.requestKeyframe) (void)keyframeRequests_.Request(2, now_us());
     }
     if (assembleResult.disposition == UdpH264AssemblyDisposition::Malformed) {
       ++assemblyDropped;

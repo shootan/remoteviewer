@@ -43,7 +43,7 @@ enum HostKeyReason : uint32_t {
   kHostKeyReasonScheduled = 1u << 22,       // the keyint schedule (periodic)
 };
 
-/** "peer|encoder_target|abr" -- the set bits by name, lowest first; "none" when empty. */
+/** "peer|encoder_target|abr" -- the set bits by name, lowest first; "encoder_gop" when empty. */
 inline std::string host_key_reason_names(uint32_t reasons) {
   static const char* const kNames[] = {
       "initial",      "peer",          "session",        "selection",      "geometry",
@@ -63,7 +63,9 @@ inline std::string host_key_reason_names(uint32_t reasons) {
     if (!out.empty()) out += '|';
     out += "unknown";
   }
-  return out.empty() ? std::string("none") : out;
+  // No host reason pending: the encoder produced this IDR by itself -- its own GOP (quality r4:
+  // mf_h264_codec sets AVEncMPVGOPSize = keyint, and those keys land on its GOP boundaries).
+  return out.empty() ? std::string("encoder_gop") : out;
 }
 
 }  // namespace remote60::native_poc

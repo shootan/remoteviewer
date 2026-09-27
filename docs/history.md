@@ -12561,3 +12561,13 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 확인만: fps 없는 튠 — Windows 뷰어는 셸이 항상 `--runtime-fps` 로 띄우고 APK 는 항상 fps(1..120, 기본 30)를 넣는다(`MainActivity.kt` 3곳) → 기록만. `[keyframe] reasons=none` 반복은 IDR 단계로.
 - 시험: host_abr_test(재선택 조건 5·계획 이력 무관·데스크톱/창·mid) · 변이 3종 FAIL · 격리 e2e: 창→튠→데스크톱 2회 1920x1080(수정 전 호스트는 480x270 FAIL), 데스크톱→창→데스크톱 1920x1080, 데스크톱→창 480x270, 전환마다 최종 크기 키프레임 1장, r2 텍스트/끔·창 ABR 3모드 회귀 PASS, GDI recover PASS · 단위 6종 PASS · 실제 파일 불변.
 - 제품/테스트/문서: 제품(상자 재선택·GDI 재시작·선택기 포커스 우선순위) / 테스트(host_abr_test, e2e 옵션 --select-at·--tune-at·--gdi·--expect-final) / 문서(이 항목).
+
+### 2026-09-27 quality r4 — 휴대폰은 IDR 을 받을 때마다 IDR 을 또 달라고 했다
+
+- 실측(0.2.137, 3000, 영상 3분, 호스트 로그 20:42~47): 키 166장 11.9MB(페이로드의 16%) — scheduled 94 · **viewer 46** · **none 24**. NIC 3.55 Mb/s.
+- **viewer 46 = 46/46 이 호스트 키 뒤 250ms 안**. 원인: 공용 세션(`native_video_client_session.cpp`, APK 가 쓰는 쪽)이 시퀀스 틈(`droppedPreviousIncomplete`)을 드러낸 AU 가 **완전한 IDR 이어도** 디코더를 리셋(`OnVideoDiscontinuity` — 안드로이드 코덱 재생성, apk.log 의 1080/1088 반복)하고 키를 또 요청했다. 틈은 호스트가 만든 것이다 — 들어오는 IDR 이 송신 백로그를 대체해 그 seq 들은 안 나간다(호스트 senderQueueDrops 59). Windows 뷰어는 history #390 에서 이미 고쳤고(`note_sequence_gap`) 공용 세션만 빠져 있었다. 수정: `respond_to_sequence_gap` — 완전한 키가 드러낸 틈은 요청·리셋 없음. **APK 재빌드 필요**(버전 올림은 검증용).
+- **none 24 = 인코더 자체 GOP**(`AVEncMPVGOPSize = keyint`, 킥 프레임까지 세서 경계가 호스트 주기와 어긋남). 호스트 주기는 `captureSeq % keyint` 라 다른 키와 무관하게 또 IDR — 튠 키 뒤 125ms, viewer 키 뒤 132ms 에 scheduled 가 붙었다. 수정: 주기를 "마지막 키(사유 무관) 이후 실프레임 수"(`EncoderState::realInputsSinceKey`)로 — 인코더 GOP 키도 주기를 다시 시작. 사유 없는 키는 `encoder_gop` 로 표기.
+- ⚠️ 시도 후 되돌림: MFT GOP 를 4배로 늘리면 `viewer_udp_recovery_test` 가 재현성 있게 실패(복구 IDR 로 재개 못 함, 4~8건), 1배로 되돌리면 3/3 PASS. 복구 IDR 보존이 우선 — GOP 는 keyint 그대로.
+- 주기(2초) 유지 근거: APK 는 해독 지표를 보내지 않아(r1) 조용한 손상을 호스트가 알 길이 없고, 주기 IDR 이 유일한 자가 복구. 정지 화면에선 입력 수가 줄어 시간상 이미 길어진다. 늘리는 것은 APK 가 해독 상태를 보고한 뒤로.
+- 격리 e2e(데스크톱+움직임, 3000, 튠 keyint 60, 뷰어 요청 3회, 60초) 전후: 키 35·36 → 30·27, 키 바이트 2.78→2.16MB(한 쌍), 500ms 안 중복 2·3 → 0·1(1 은 시험이 보낸 viewer 요청). 정지 화면 9 → 7. 뷰어 요청 3/3·2/2 모두 IDR 로 응답(보존). 공용 세션 틈 규칙 시험 + 변이 FAIL. 하네스: `--select-at N:window` 가 실제 그 창 id 로 선택·응답됐는지 검사(창 없으면 FAIL 확인).
+- 제품/테스트/문서: 제품(호스트 주기 키 계수·encoder_gop 표기, 공용 세션 틈 처리 — APK 대상) / 테스트(shared_core 틈 시험, e2e --request-key-at·--run-sec·선택 검증) / 문서(이 항목).

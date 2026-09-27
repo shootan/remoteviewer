@@ -798,6 +798,17 @@ bool UdpH264FrameAssembler::GiveUpIncomplete(uint64_t generation, uint32_t seq, 
 
 // Hand one assembled AU out: the completion block PushDatagram used to run inline, so the legacy
 // immediate path and the in-order hold path deliver byte-identical results.
+SequenceGapResponse respond_to_sequence_gap(const UdpH264AssemblyStepResult& result) {
+  SequenceGapResponse out{};
+  if (!result.droppedPreviousIncomplete) return out;
+  const bool completedKey = result.disposition == UdpH264AssemblyDisposition::Completed &&
+                            (result.frame.header.flags & 1u) != 0;
+  if (completedKey) return out;  // the IDR in hand resyncs; see the header
+  out.requestKeyframe = true;
+  out.discontinuity = true;
+  return out;
+}
+
 UdpH264AssemblyStepResult UdpH264FrameAssembler::DeliverAssembly(Assembly& assembly) {
   UdpH264AssemblyStepResult result{};
   result.packetSeq = assembly.seq;

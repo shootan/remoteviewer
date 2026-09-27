@@ -1431,6 +1431,11 @@ void H264Encoder::apply_low_latency_codec_api() {
   // HRESULT vs GetValue readback vs backend so the three cases separate: setHr!=S_OK => rejected;
   // setHr=S_OK & readback=requested & observed<requested => encoder policy; readback<requested =>
   // clamped/not applied.
+  // quality r4 note: the host counts its periodic key from the last key of ANY reason
+  // (EncoderState::realInputsSinceKey), so an IDR this GOP produces on its own restarts that
+  // count and is not followed by a second one. A longer GOP here was tried and REVERTED: at
+  // four periods the recovery rig (viewer_udp_recovery_test) stopped resuming on the forced
+  // recovery IDR in 4-8 of its cases, reproducibly, and passed again at one period.
   const uint32_t requestedGop = std::max<uint32_t>(1, keyint_);
   const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
   uint32_t gopReadback = 0;
