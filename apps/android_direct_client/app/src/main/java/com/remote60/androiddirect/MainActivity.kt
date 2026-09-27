@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -30,13 +31,17 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.inputmethod.InputMethodManager
 import android.graphics.Bitmap
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONException
@@ -51,6 +56,7 @@ import kotlin.math.roundToInt
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
+        private const val ZONE_IDLE_ALPHA = 0.85f
         private const val LOG_TAG = "remote60_android_direct"
         // Windows promotes a second press to a double-click only inside SM_CXDOUBLECLK (4px)
         // and GetDoubleClickTime (500ms). Anchor a little more generously than the OS box,
@@ -112,7 +118,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var forcePortrait = false
     private var lastAppliedLandscape: Boolean? = null
     private var sessionBytesReceived = 0L
-    private var quickSettingsDialog: AlertDialog? = null
+    // apk-ui r1: the menu and the window list are sheets over the viewer, not dialogs. A dialog
+    // took window focus (and with it the soft keyboard and the clipboard read); an overlay view
+    // takes only the touches that land on it, and keeps every one of them away from the PC.
+    private lateinit var viewerMenuOverlay: View
+    private lateinit var viewerMenuSheet: View
+    private lateinit var viewerWindowOverlay: View
+    private lateinit var viewerWindowSheet: View
+    private lateinit var viewerWindowList: ListView
+    private lateinit var viewerWindowStatusText: TextView
+    private lateinit var viewerWindowProgress: View
+    private lateinit var viewerWindowRefreshButton: View
+    private lateinit var viewerWindowsButton: Button
+    private lateinit var viewerDesktopButton: Button
+    private lateinit var viewerQualityLowButton: TextView
+    private lateinit var viewerQualityHighButton: TextView
+    private lateinit var viewerFpsSpinner: Spinner
+    private lateinit var viewerQualityStatusText: TextView
+    private lateinit var settingsQualityLowButton: TextView
+    private lateinit var settingsQualityHighButton: TextView
+    private lateinit var settingsFpsSpinner: Spinner
+    /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
+    private var qualityStatusMessage = ""
+    private val windowSheetItems = mutableListOf<WindowPanelItem>()
+    private lateinit var windowSheetAdapter: WindowSheetAdapter
+    /** The id that carries the check in the window sheet. */
+    private var windowSheetCheckedId = 0L
+    /** The host's selection as of the last moment no switch was in flight. */
+    private var windowSheetConfirmedId = 0L
+    private var windowSheetLocked = false
+    private var windowSheetAwaitingList = false
+    private var windowSheetRequestQueued = false
+    private var windowSheetRequestedAtMs = 0L
+    private var windowSheetState = WindowSheetState.READY
     private var unlockDialog: AlertDialog? = null
     private lateinit var viewerUnlockBar: View
     private lateinit var viewerUnlockButton: Button
@@ -152,7 +190,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         val zoneBar = findViewById<LinearLayout>(R.id.viewerZoneBar)
-        val stripPx = dp(34f)
+        val stripPx = dp(44f)
         zoneBar.orientation =
             if (deviceLandscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         zoneBar.layoutParams = if (deviceLandscape) {
@@ -176,7 +214,31 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         viewerRotateButton.text =
-            if (forcePortrait) "PORT" else getString(R.string.viewer_rotate_button)
+            getString(if (forcePortrait) R.string.ui_rotate_portrait else R.string.ui_rotate_auto)
+        layoutViewerSheets(deviceLandscape)
+    }
+
+    /**
+     * A side sheet on the right in landscape and a bottom sheet in portrait (Codex 1), so the sheet
+     * never lands on the gesture strip on the left and always leaves some of the picture showing.
+     */
+    private fun layoutViewerSheets(deviceLandscape: Boolean) {
+        if (!::viewerMenuSheet.isInitialized) return
+        val metrics = resources.displayMetrics
+        val sideWidth = resources.getDimensionPixelSize(R.dimen.ui_sheet_side_width)
+            .coerceAtMost((metrics.widthPixels * 0.6f).roundToInt())
+        val bottomHeight = (metrics.heightPixels * 0.72f).roundToInt()
+        for (sheet in listOf(viewerMenuSheet, viewerWindowSheet)) {
+            sheet.layoutParams = if (deviceLandscape) {
+                FrameLayout.LayoutParams(sideWidth, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END)
+            } else {
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, bottomHeight, Gravity.BOTTOM)
+            }
+            sheet.setBackgroundResource(
+                if (deviceLandscape) R.drawable.ui_sheet_side_background
+                else R.drawable.ui_sheet_bottom_background
+            )
+        }
     }
 
     /**
@@ -278,45 +340,266 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return parts[1].substringBefore(' ').trim()
     }
 
-    /** Quick settings popup: bitrate/fps presets and the orientation override in one place. */
-    private fun showQuickSettingsDialog() {
-        if (quickSettingsDialog?.isShowing == true) return
-        val items = arrayOf(
-            getString(R.string.quick_preset_mobile),
-            getString(R.string.quick_preset_balanced),
-            getString(R.string.quick_preset_sharp),
-            if (forcePortrait) getString(R.string.quick_orientation_portrait)
-            else getString(R.string.quick_orientation_auto),
-            getString(R.string.quick_unlock),
-            // The rail ran out of room, so the rarely-needed diagnostics live here now.
-            getString(R.string.quick_diagnostics_log),
-        )
-        quickSettingsDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.quick_settings_title)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> applyQuickPreset(3000, 15)
-                    1 -> applyQuickPreset(6000, 30)
-                    2 -> applyQuickPreset(8000, 30)
-                    3 -> {
-                        forcePortrait = !forcePortrait
-                        lastAppliedLandscape = null
-                        applyOrientationForContent(
-                            if (videoWidth > 0) videoWidth else expectedContentWidth,
-                            if (videoHeight > 0) videoHeight else expectedContentHeight,
-                            pendingSelectionTab,
-                        )
-                        applyViewerRailLayout()
-                    }
-                    4 -> showUnlockDialog()
-                    5 -> toggleViewerLogDialog()
+    // ------------------------------------------------------------ viewer sheets (apk-ui r1)
+
+    private fun isViewerSheetOpen(): Boolean =
+        ::viewerMenuOverlay.isInitialized &&
+            (viewerMenuOverlay.visibility == View.VISIBLE || viewerWindowOverlay.visibility == View.VISIBLE)
+
+    private fun initViewerSheets() {
+        viewerMenuOverlay = findViewById(R.id.viewerMenuOverlay)
+        viewerMenuSheet = findViewById(R.id.viewerMenuSheet)
+        viewerWindowOverlay = findViewById(R.id.viewerWindowOverlay)
+        viewerWindowSheet = findViewById(R.id.viewerWindowSheet)
+        viewerWindowList = findViewById(R.id.viewerWindowList)
+        viewerWindowStatusText = findViewById(R.id.viewerWindowStatusText)
+        viewerWindowProgress = findViewById(R.id.viewerWindowProgress)
+        viewerWindowRefreshButton = findViewById(R.id.viewerWindowRefreshButton)
+        viewerWindowsButton = findViewById(R.id.viewerWindowsButton)
+        viewerDesktopButton = findViewById(R.id.viewerDesktopButton)
+        viewerQualityLowButton = findViewById(R.id.viewerQualityLowButton)
+        viewerQualityHighButton = findViewById(R.id.viewerQualityHighButton)
+        viewerFpsSpinner = findViewById(R.id.viewerFpsSpinner)
+        viewerQualityStatusText = findViewById(R.id.viewerQualityStatusText)
+
+        // A tap on the dimmed picture closes the sheet. The sheet swallows its own taps, so they
+        // neither close it nor fall through -- nothing under either overlay reaches the PC.
+        viewerMenuOverlay.setOnClickListener { closeViewerMenu("scrim") }
+        viewerWindowOverlay.setOnClickListener { closeWindowSheet("scrim") }
+        findViewById<View>(R.id.viewerMenuCloseButton).setOnClickListener { closeViewerMenu("close") }
+        findViewById<View>(R.id.viewerWindowCloseButton).setOnClickListener { closeWindowSheet("close") }
+        viewerWindowRefreshButton.setOnClickListener {
+            requestWindowSheetList("refresh")
+            renderStatus()
+        }
+        viewerWindowsButton.setOnClickListener { openWindowSheet() }
+        viewerDesktopButton.setOnClickListener { switchToDesktop() }
+        findViewById<View>(R.id.viewerMenuUnlockButton).setOnClickListener {
+            closeViewerMenu("unlock")
+            showUnlockDialog()
+        }
+        findViewById<View>(R.id.viewerMenuDiagnosticsButton).setOnClickListener {
+            closeViewerMenu("diagnostics")
+            toggleViewerLogDialog()
+        }
+
+        windowSheetAdapter = WindowSheetAdapter()
+        viewerWindowList.adapter = windowSheetAdapter
+        viewerWindowList.setOnItemClickListener { _, _, position, _ ->
+            windowSheetItems.getOrNull(position)?.let { onWindowSheetRowTap(it) }
+        }
+
+        viewerQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "menu") }
+        viewerQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "menu") }
+        settingsQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "settings") }
+        settingsQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "settings") }
+        for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
+            val adapter = ArrayAdapter(
+                this,
+                R.layout.ui_spinner_item,
+                ViewerQualitySettings.FPS_CHOICES.map { getString(R.string.ui_fps_item, it) },
+            )
+            adapter.setDropDownViewResource(R.layout.ui_spinner_dropdown_item)
+            spinner.adapter = adapter
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val fps = ViewerQualitySettings.FPS_CHOICES.getOrNull(position) ?: return
+                    // Moving the spinner to the stored value from code lands here as well; that is
+                    // not a pick, and selectQuality ignores a choice that changes nothing.
+                    selectQuality(QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps), fps, origin)
                 }
-                renderStatus()
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
-            .setNegativeButton(R.string.quick_close, null)
-            .create()
-        quickSettingsDialog?.setOnDismissListener { quickSettingsDialog = null }
-        quickSettingsDialog?.show()
+        }
+    }
+
+    private fun openViewerMenu() {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) return
+        closeWindowSheet("menu_open")
+        prepareViewerForSheet()
+        renderQualityControls()
+        renderClipboardButton()
+        viewerMenuOverlay.visibility = View.VISIBLE
+        diagnosticsLog.log("viewer_menu", "action=open")
+    }
+
+    private fun closeViewerMenu(reason: String) {
+        if (!::viewerMenuOverlay.isInitialized || viewerMenuOverlay.visibility != View.VISIBLE) return
+        viewerMenuOverlay.visibility = View.GONE
+        diagnosticsLog.log("viewer_menu", "action=close reason=$reason")
+    }
+
+    private fun openWindowSheet() {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) return
+        closeViewerMenu("window_sheet_open")
+        prepareViewerForSheet()
+        viewerWindowOverlay.visibility = View.VISIBLE
+        diagnosticsLog.log("window_sheet", "action=open")
+        requestWindowSheetList("open")
+        renderStatus()
+    }
+
+    private fun closeWindowSheet(reason: String) {
+        if (!::viewerWindowOverlay.isInitialized || viewerWindowOverlay.visibility != View.VISIBLE) return
+        viewerWindowOverlay.visibility = View.GONE
+        windowSheetAwaitingList = false
+        diagnosticsLog.log("window_sheet", "action=close reason=$reason")
+    }
+
+    private fun closeViewerSheets(reason: String) {
+        closeViewerMenu(reason)
+        closeWindowSheet(reason)
+    }
+
+    /**
+     * Lets go of anything held on the PC before a sheet covers the picture: a finger mid-drag, a
+     * modifier held in the gesture strip, the soft keyboard. Otherwise a button or Ctrl would stay
+     * pressed on the PC for as long as the sheet is open.
+     */
+    private fun prepareViewerForSheet() {
+        cancelActiveViewerTouch("sheet_open")
+        releaseViewerModifiers()
+        hideViewerKeyboard("sheet_open")
+        viewerKeyPanel?.hide()
+        layoutViewerSheets(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+    }
+
+    private fun requestWindowSheetList(reason: String) {
+        windowSheetRequestQueued = NativeSessionBridge.nativeRequestWindowList()
+        windowSheetAwaitingList = true
+        windowSheetRequestedAtMs = SystemClock.elapsedRealtime()
+        diagnosticsLog.log("window_sheet", "action=list_request reason=$reason queued=$windowSheetRequestQueued")
+    }
+
+    private fun onWindowSheetRowTap(item: WindowPanelItem) {
+        when (windowSheetState) {
+            WindowSheetState.SWITCHING -> {
+                Toast.makeText(this, R.string.ui_switch_busy, Toast.LENGTH_SHORT).show()
+                return
+            }
+            WindowSheetState.LOCKED -> {
+                Toast.makeText(this, R.string.ui_windows_locked, Toast.LENGTH_SHORT).show()
+                return
+            }
+            else -> Unit
+        }
+        if (item.id == windowSheetCheckedId) {
+            closeWindowSheet("same_target")
+            return
+        }
+        val tab = if (item.id == 0L) TargetTab.DESKTOP else TargetTab.WINDOWS
+        diagnosticsLog.log("window_sheet", "action=select targetId=${item.id} tab=$tab")
+        startSelectionTransition(item.id, item.title, tab, "viewer_sheet")
+        renderStatus()
+    }
+
+    /** The desktop in one tap, from the rail (Codex 2). */
+    private fun switchToDesktop() {
+        val message = when {
+            selectionStage != SelectionStage.IDLE -> R.string.ui_switch_busy
+            windowSheetLocked -> R.string.ui_windows_locked
+            windowSheetConfirmedId == 0L -> R.string.ui_desktop_already
+            else -> null
+        }
+        if (message != null) {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            return
+        }
+        closeViewerSheets("desktop")
+        diagnosticsLog.log("window_sheet", "action=desktop")
+        startSelectionTransition(0L, getString(R.string.ui_windows_desktop_name), TargetTab.DESKTOP, "viewer_desktop")
+        renderStatus()
+    }
+
+    /** Runs on every viewer tick; draws the window sheet only while it is open. */
+    private fun renderViewerSheets(panelSnapshot: WindowPanelUiSnapshot) {
+        val switching = selectionStage != SelectionStage.IDLE
+        if (!switching) windowSheetConfirmedId = panelSnapshot.selectedId
+        windowSheetLocked = panelSnapshot.selectionLocked
+        if (viewerWindowOverlay.visibility != View.VISIBLE) return
+
+        // The session marks the request pending until the host answers; anything else in the
+        // status line means the answer (or something newer) has arrived.
+        if (windowSheetAwaitingList && !panelSnapshot.status.startsWith("window_list_request")) {
+            windowSheetAwaitingList = false
+        }
+        val waitedMs =
+            if (windowSheetRequestQueued) SystemClock.elapsedRealtime() - windowSheetRequestedAtMs
+            else ViewerWindowSheetModel.LIST_TIMEOUT_MS
+        val state = ViewerWindowSheetModel.resolve(
+            switching = switching,
+            selectionLocked = panelSnapshot.selectionLocked,
+            awaitingList = windowSheetAwaitingList,
+            waitedMs = waitedMs,
+            itemCount = panelSnapshot.items.size,
+        )
+        val checkedId = ViewerWindowSheetModel.checkedId(switching, panelSnapshot.selectedId, windowSheetConfirmedId)
+        val desktopName = getString(R.string.ui_windows_desktop_name)
+        val rows = buildList {
+            add(WindowPanelItem(0L, desktopName, 0, 0, false))
+            panelSnapshot.items.forEach { add(it.copy(thumbVersion = 0L)) }
+        }
+        // The poll runs four times a second; only a real change touches the list, so a scroll or
+        // a finger on a row is not reset under the user.
+        if (rows != windowSheetItems || checkedId != windowSheetCheckedId || state != windowSheetState) {
+            windowSheetItems.clear()
+            windowSheetItems.addAll(rows)
+            windowSheetCheckedId = checkedId
+            windowSheetState = state
+            windowSheetAdapter.notifyDataSetChanged()
+        }
+
+        val currentTitle = if (checkedId == 0L) desktopName else panelSnapshot.selectedTitle
+        val status = when (state) {
+            WindowSheetState.SWITCHING ->
+                getString(R.string.ui_windows_switching, pendingSelectionLabel.ifBlank { currentTitle })
+            WindowSheetState.LOCKED -> getString(R.string.ui_windows_locked)
+            WindowSheetState.LOADING -> getString(R.string.ui_windows_loading)
+            WindowSheetState.ERROR -> getString(R.string.ui_windows_error)
+            WindowSheetState.EMPTY -> getString(R.string.ui_windows_empty)
+            WindowSheetState.READY -> getString(R.string.ui_windows_current, currentTitle)
+        }
+        // A live region announces every change, so the same words are not set again each tick.
+        if (viewerWindowStatusText.text.toString() != status) viewerWindowStatusText.text = status
+        val busy = state == WindowSheetState.SWITCHING ||
+            (windowSheetAwaitingList && state != WindowSheetState.ERROR)
+        viewerWindowProgress.visibility = if (busy) View.VISIBLE else View.GONE
+        viewerWindowRefreshButton.isEnabled = state != WindowSheetState.SWITCHING
+        viewerWindowRefreshButton.alpha = if (viewerWindowRefreshButton.isEnabled) 1.0f else 0.4f
+    }
+
+    private inner class WindowSheetAdapter : BaseAdapter() {
+        override fun getCount(): Int = windowSheetItems.size
+        override fun getItem(position: Int): Any = windowSheetItems[position]
+        override fun getItemId(position: Int): Long = windowSheetItems[position].id
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = convertView ?: layoutInflater.inflate(R.layout.viewer_window_row, parent, false)
+            val item = windowSheetItems[position]
+            val desktop = item.id == 0L
+            val checked = item.id == windowSheetCheckedId
+            row.findViewById<ImageView>(R.id.viewerWindowRowIcon).setImageResource(
+                if (desktop) R.drawable.ic_ui_desktop else R.drawable.ic_ui_windows
+            )
+            val title = item.title.ifBlank { getString(R.string.ui_rail_windows) }
+            row.findViewById<TextView>(R.id.viewerWindowRowTitle).text = title
+            val detail = row.findViewById<TextView>(R.id.viewerWindowRowDetail)
+            detail.text = when {
+                desktop -> ""
+                item.minimized -> getString(R.string.ui_window_minimized)
+                item.width > 0 && item.height > 0 -> getString(R.string.ui_window_detail, item.width, item.height)
+                else -> ""
+            }
+            detail.visibility = if (detail.text.isEmpty()) View.GONE else View.VISIBLE
+            row.findViewById<View>(R.id.viewerWindowRowCheck).visibility =
+                if (checked) View.VISIBLE else View.INVISIBLE
+            row.isSelected = checked
+            row.alpha = if (ViewerWindowSheetModel.rowsEnabled(windowSheetState)) 1.0f else 0.5f
+            row.contentDescription =
+                if (checked) getString(R.string.ui_window_current_description, title) else title
+            return row
+        }
     }
 
     /**
@@ -423,16 +706,62 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
     }
 
-    private fun applyQuickPreset(bitrateKbps: Int, fps: Int) {
-        requestedRuntimeBitrateKbps = bitrateKbps
+    private fun qualityLabel(): String = getString(
+        if (QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps) == QualityLevel.HIGH) R.string.ui_quality_high_short
+        else R.string.ui_quality_low_short
+    )
+
+    /**
+     * One pick from the menu or the settings screen. Both write the same two values, which is what
+     * SessionPersistence stores, so the two screens can never disagree.
+     */
+    private fun selectQuality(level: QualityLevel, fps: Int, origin: String) {
+        if (level.bitrateKbps == requestedRuntimeBitrateKbps && fps == requestedRuntimeFps) {
+            renderQualityControls()
+            return
+        }
+        requestedRuntimeBitrateKbps = level.bitrateKbps
         requestedRuntimeFps = fps
-        settingsBitrateInput.setText(bitrateKbps.toString())
-        settingsFpsInput.setText(fps.toString())
-        NativeSessionBridge.nativeRequestRuntimeConfig(bitrateKbps * 1000, fps)
+        val connected = NativeSessionBridge.nativeGetStatus().startsWith("connected")
+        val sent = connected &&
+            NativeSessionBridge.nativeRequestRuntimeConfig(requestedRuntimeBitrateKbps * 1000, requestedRuntimeFps)
+        // Not sent is not lost: the connected-sync pass retries until the session takes it.
+        pendingRuntimeConfigSync = !sent
+        qualityStatusMessage = when {
+            sent -> getString(R.string.ui_quality_status_requested, qualityLabel(), requestedRuntimeFps)
+            connected -> getString(R.string.ui_quality_status_failed)
+            else -> getString(R.string.ui_quality_status_pending, qualityLabel(), requestedRuntimeFps)
+        }
         settingsStatusMessage =
-            "Current request: ${bitrateKbps} kbps / ${fps} fps / desktop ${requestedDesktopBackend.label}"
+            "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
+                "desktop ${requestedDesktopBackend.label}"
+        settingsAppliedText.text = settingsStatusMessage
         saveCurrentEndpoint()
-        diagnosticsLog.log("quick-preset", "bitrateKbps=$bitrateKbps fps=$fps")
+        diagnosticsLog.log(
+            "quality_select",
+            "origin=$origin bitrateKbps=$requestedRuntimeBitrateKbps fps=$requestedRuntimeFps sent=$sent"
+        )
+        renderQualityControls()
+    }
+
+    /** The menu and the settings screen show the same stored pick. */
+    private fun renderQualityControls() {
+        if (!::viewerQualityLowButton.isInitialized) return
+        val level = QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps)
+        val fpsIndex = ViewerQualitySettings.FPS_CHOICES
+            .indexOf(ViewerQualitySettings.nearestFps(requestedRuntimeFps)).coerceAtLeast(0)
+        for ((low, high) in listOf(
+            viewerQualityLowButton to viewerQualityHighButton,
+            settingsQualityLowButton to settingsQualityHighButton,
+        )) {
+            low.isSelected = level == QualityLevel.LOW
+            high.isSelected = level == QualityLevel.HIGH
+        }
+        for (spinner in listOf(viewerFpsSpinner, settingsFpsSpinner)) {
+            if (spinner.selectedItemPosition != fpsIndex) spinner.setSelection(fpsIndex, false)
+        }
+        viewerQualityStatusText.text = qualityStatusMessage
+        viewerQualityStatusText.visibility = if (qualityStatusMessage.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private var lastVideoOutputSeenUs = 0L
@@ -574,8 +903,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var listSettingsButton: Button
     private lateinit var listRefreshButton: Button
     private lateinit var settingsPanel: View
-    private lateinit var settingsBitrateInput: EditText
-    private lateinit var settingsFpsInput: EditText
     private lateinit var settingsDesktopBackendDxgiButton: Button
     private lateinit var settingsDesktopBackendWgcButton: Button
     private lateinit var settingsDesktopBackendGdiButton: Button
@@ -715,10 +1042,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerRecoveryTargetId = Long.MIN_VALUE
     private var lastViewerRecoveryAtMs = 0L
     private var lastViewerRecoveryAttempts = 0
-    private var requestedRuntimeBitrateKbps = 8000
-    private var requestedRuntimeFps = 30
+    private var requestedRuntimeBitrateKbps = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps
+    private var requestedRuntimeFps = ViewerQualitySettings.DEFAULT_FPS
     private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
-    private var settingsStatusMessage = "Current request: 8000 kbps / 30 fps / desktop DXGI"
+    private var settingsStatusMessage = ""
     private var pendingRuntimeConfigSync = false
     private var pendingDesktopBackendSync = false
     private var desiredStreamActive = false
@@ -873,12 +1200,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!::viewerClipboardButton.isInitialized) return
         val supported = NativeSessionBridge.nativeHostSupportsClipboard()
         val enabled = supported && NativeSessionBridge.nativeIsClipboardSyncEnabled()
-        viewerClipboardButton.alpha = if (supported) 1.0f else 0.45f
-        viewerClipboardButton.text = if (enabled) {
-            getString(R.string.clipboard_button)
-        } else {
-            getString(R.string.clipboard_button) + "✕"
-        }
+        // Said in words rather than dimmed: a faded row fails the contrast floor (Codex 4).
+        val label = getString(
+            when {
+                !supported -> R.string.ui_clipboard_unsupported
+                enabled -> R.string.ui_clipboard_on
+                else -> R.string.ui_clipboard_off
+            }
+        )
+        if (viewerClipboardButton.text.toString() != label) viewerClipboardButton.text = label
     }
 
     /**
@@ -970,8 +1300,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listSettingsButton = findViewById(R.id.listSettingsButton)
         listRefreshButton = findViewById(R.id.listRefreshButton)
         settingsPanel = findViewById(R.id.settingsPanel)
-        settingsBitrateInput = findViewById(R.id.settingsBitrateInput)
-        settingsFpsInput = findViewById(R.id.settingsFpsInput)
+        settingsQualityLowButton = findViewById(R.id.settingsQualityLowButton)
+        settingsQualityHighButton = findViewById(R.id.settingsQualityHighButton)
+        settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
         settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
@@ -987,6 +1318,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerMenuButton = findViewById(R.id.viewerMenuButton)
         viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
         viewerPathText = findViewById(R.id.viewerPathText)
+        initViewerSheets()
         viewerUnlockBar = findViewById(R.id.viewerUnlockBar)
         viewerUnlockButton = findViewById(R.id.viewerUnlockButton)
         viewerUnlockSettingsButton = findViewById(R.id.viewerUnlockSettingsButton)
@@ -1008,7 +1340,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             applyViewerRailLayout()
             renderStatus()
         }
-        viewerMenuButton.setOnClickListener { showQuickSettingsDialog() }
+        viewerMenuButton.setOnClickListener { openViewerMenu() }
         viewerKeysButton = findViewById(R.id.viewerKeysButton)
         viewerKeyPanel = ViewerKeyPanel(this, findViewById(R.id.viewerKeyPanel)) { vk, down ->
             queueViewerSpecialKey(vk, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP)
@@ -1091,7 +1423,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         macroRecordBarPause = findViewById(R.id.macroRecordBarPause)
         macroRecordBarPause.setOnClickListener { toggleMacroPause() }
         findViewById<Button>(R.id.macroRecordBarStop).setOnClickListener { stopMacroRecording() }
-        findViewById<Button>(R.id.viewerMacroButton).setOnClickListener { showMacroDialog() }
+        findViewById<Button>(R.id.viewerMacroButton).setOnClickListener {
+            closeViewerMenu("macro")
+            showMacroDialog()
+        }
         initDirectoryUi()
 
         val savedEndpoint = SessionPersistence.load(this)
@@ -1107,9 +1442,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsStatusMessage =
             "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
                 "desktop ${requestedDesktopBackend.label}"
-        settingsBitrateInput.setText(requestedRuntimeBitrateKbps.toString())
-        settingsFpsInput.setText(requestedRuntimeFps.toString())
         settingsAppliedText.text = settingsStatusMessage
+        renderQualityControls()
         updateDesktopBackendButtons()
 
         diagnosticsLog.log(
@@ -1197,23 +1531,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         settingsApplyButton.setOnClickListener {
-            val bitrateKbps = settingsBitrateInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
-            val fps = settingsFpsInput.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            // The picture level and the frame rate are already chosen (and stored) by the controls
+            // above; Apply re-sends them together with the capture backend.
             val messages = mutableListOf<String>()
-            if (bitrateKbps < 300 || fps !in 1..120) {
-                messages += "Use bitrate >= 300 kbps and fps between 1 and 120."
-                diagnosticsLog.log("runtime_config_invalid", "bitrateKbps=$bitrateKbps fps=$fps")
+            val bitrateBps = requestedRuntimeBitrateKbps * 1000
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+                pendingRuntimeConfigSync = false
+                diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             } else {
-                val bitrateBps = bitrateKbps * 1000
-                val runtimeOk = NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, fps)
-                if (runtimeOk) {
-                    requestedRuntimeBitrateKbps = bitrateKbps
-                    requestedRuntimeFps = fps
-                    diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$fps")
-                } else {
-                    messages += "Runtime config request failed."
-                    diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$fps")
-                }
+                messages += "Runtime config request failed."
+                diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             }
 
             val backendOk =
@@ -1244,6 +1571,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         viewerBackButton.setOnClickListener {
+            closeViewerSheets("viewer_back")
             showViewerControls(emphasized = true)
             handleViewerBack("viewer_back")
         }
@@ -1551,6 +1879,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun handleSystemBack() {
         when (currentScene) {
             UiScene.VIEWER, UiScene.SWITCHING -> {
+                if (isViewerSheetOpen()) {
+                    closeViewerSheets("system_back")
+                    return
+                }
                 if (viewerImeCaptureView.hasFocus()) {
                     hideViewerKeyboard("system_back")
                     showViewerControls(emphasized = true)
@@ -1747,6 +2079,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "Current request: ${requestedRuntimeBitrateKbps} kbps / ${requestedRuntimeFps} fps / " +
                         "desktop ${requestedDesktopBackend.label}"
                 settingsAppliedText.text = settingsStatusMessage
+                qualityStatusMessage =
+                    getString(R.string.ui_quality_status_requested, qualityLabel(), requestedRuntimeFps)
+                renderQualityControls()
                 diagnosticsLog.log(
                     "runtime_config_sync",
                     "bitrateBps=$bitrateBps fps=$requestedRuntimeFps"
@@ -1776,6 +2111,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
         diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
         dismissViewerLogDialog()
+        closeViewerSheets(reason)
         releaseViewerModifiers()
         cancelActiveViewerTouch(reason)
         hideViewerKeyboard(reason)
@@ -2310,12 +2646,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (zoneTabletLocked) R.string.tablet_lock_closed else R.string.tablet_lock_open,
             )
         }
+        // Idle zones stay readable: 0.85 keeps the label at 7.55:1 on ui_bg where 0.55 gave 3.86:1
+        // (Codex 4). Active is full strength on a green tint.
         if (::viewerZoneRightClick.isInitialized) {
-            viewerZoneRightClick.alpha = if (isRightClickModeActive()) 1.0f else 0.55f
+            viewerZoneRightClick.alpha = if (isRightClickModeActive()) 1.0f else ZONE_IDLE_ALPHA
             viewerZoneRightClick.setBackgroundColor(
                 if (isRightClickModeActive()) 0x3345E08C else 0x00000000,
             )
-            viewerZoneTablet.alpha = if (isTabletModeActive()) 1.0f else 0.55f
+            viewerZoneTablet.alpha = if (isTabletModeActive()) 1.0f else ZONE_IDLE_ALPHA
             viewerZoneTablet.setBackgroundColor(
                 if (isTabletModeActive()) 0x3345E08C else 0x00000000,
             )
@@ -3116,6 +3454,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                     clearPendingSelection()
                     currentScene = UiScene.VIEWER
+                    closeWindowSheet("select_ready")
                     showViewerControls(emphasized = true)
                     showRightClickHintOnce()
                 } else if (selectionStage == SelectionStage.REQUESTING &&
@@ -3159,7 +3498,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
             renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
+            renderViewerSheets(panelSnapshot)
             updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
+        } else {
+            closeViewerSheets("scene_$currentScene")
         }
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
@@ -3183,8 +3525,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listDisconnectButton.isEnabled = isConnected || connectFlowActive
         targetListView.isEnabled = isConnected && !selectionPending && !settingsActive
         settingsPanel.visibility = if (settingsActive) View.VISIBLE else View.GONE
-        settingsBitrateInput.isEnabled = isConnected && !selectionPending
-        settingsFpsInput.isEnabled = isConnected && !selectionPending
+        // A pick made while disconnected is stored and sent on connect, so only a switch in flight
+        // holds these.
+        settingsQualityLowButton.isEnabled = !selectionPending
+        settingsQualityHighButton.isEnabled = !selectionPending
+        settingsFpsSpinner.isEnabled = !selectionPending
         settingsDesktopBackendDxgiButton.isEnabled = isConnected && !selectionPending
         settingsDesktopBackendWgcButton.isEnabled = isConnected && !selectionPending
         settingsApplyButton.isEnabled = isConnected && !selectionPending
@@ -3977,8 +4322,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val host = hostEdit.text?.toString()?.trim().orEmpty()
         val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 43000
         val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 43001
-        val bitrateKbps = settingsBitrateInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeBitrateKbps
-        val fps = settingsFpsInput.text?.toString()?.toIntOrNull() ?: requestedRuntimeFps
+        val bitrateKbps = requestedRuntimeBitrateKbps
+        val fps = requestedRuntimeFps
         SessionPersistence.save(
             this,
             host,

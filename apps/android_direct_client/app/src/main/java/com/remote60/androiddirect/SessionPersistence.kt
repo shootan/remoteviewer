@@ -6,8 +6,8 @@ data class SavedEndpoint(
     val host: String = "",
     val videoPort: Int = 43000,
     val controlPort: Int = 43001,
-    val bitrateKbps: Int = 8000,
-    val fps: Int = 30,
+    val bitrateKbps: Int = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps,
+    val fps: Int = ViewerQualitySettings.DEFAULT_FPS,
     val desktopBackendCode: Int = 1,
 )
 
@@ -19,16 +19,39 @@ object SessionPersistence {
     private const val KEY_BITRATE_KBPS = "bitrate_kbps"
     private const val KEY_FPS = "fps"
     private const val KEY_DESKTOP_BACKEND = "desktop_backend"
+    // apk-ui r1: which meaning bitrate/fps have (ViewerQualitySettings.CURRENT_SCHEMA). Absent on
+    // everything written before the two-level choice existed.
+    private const val KEY_SETTINGS_SCHEMA = "settings_schema"
     private const val KEY_UNLOCK_PASSWORD_PREFIX = "unlock_pw_"
 
+    /**
+     * The saved endpoint, with bitrate/fps on the two quality levels and three frame rates.
+     *
+     * The first load after the two-level choice arrived moves the old free-form numbers onto it once
+     * (ViewerQualitySettings.resolve: >= 3000 high, below low, invalid low; fps to the nearest of
+     * 30/45/60) and writes the result back, so the settings screen and the viewer menu read the same
+     * stored model from then on.
+     */
     fun load(context: Context): SavedEndpoint {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val resolved = ViewerQualitySettings.resolve(
+            schema = prefs.getInt(KEY_SETTINGS_SCHEMA, 0),
+            storedBitrateKbps = if (prefs.contains(KEY_BITRATE_KBPS)) prefs.getInt(KEY_BITRATE_KBPS, 0) else null,
+            storedFps = if (prefs.contains(KEY_FPS)) prefs.getInt(KEY_FPS, 0) else null,
+        )
+        if (resolved.migrated || prefs.getInt(KEY_SETTINGS_SCHEMA, 0) < ViewerQualitySettings.CURRENT_SCHEMA) {
+            prefs.edit()
+                .putInt(KEY_BITRATE_KBPS, resolved.bitrateKbps)
+                .putInt(KEY_FPS, resolved.fps)
+                .putInt(KEY_SETTINGS_SCHEMA, ViewerQualitySettings.CURRENT_SCHEMA)
+                .apply()
+        }
         return SavedEndpoint(
             host = prefs.getString(KEY_HOST, "") ?: "",
             videoPort = prefs.getInt(KEY_VIDEO_PORT, 43000),
             controlPort = prefs.getInt(KEY_CONTROL_PORT, 43001),
-            bitrateKbps = prefs.getInt(KEY_BITRATE_KBPS, 8000),
-            fps = prefs.getInt(KEY_FPS, 30),
+            bitrateKbps = resolved.bitrateKbps,
+            fps = resolved.fps,
             desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 1),
         )
     }
@@ -72,6 +95,7 @@ object SessionPersistence {
             .putInt(KEY_CONTROL_PORT, controlPort)
             .putInt(KEY_BITRATE_KBPS, bitrateKbps)
             .putInt(KEY_FPS, fps)
+            .putInt(KEY_SETTINGS_SCHEMA, ViewerQualitySettings.CURRENT_SCHEMA)
             .putInt(KEY_DESKTOP_BACKEND, desktopBackendCode)
             .apply()
     }

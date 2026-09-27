@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- apk-ui r1 design tokens (Codex 4): one dark palette, 8dp spacing, 12dp buttons,
+     20dp sheets. Measured (WCAG, .claude/apk_ui_contrast.py): ui_text on ui_surface 14.44:1,
+     on ui_bg 16.90:1, on ui_accent_container 10.46:1; ui_text_secondary on ui_surface 8.60:1;
+     ui_accent on ui_surface 4.89:1. ui_text on ui_accent is only 2.95:1, so no text sits on it. -->
+<resources>
+    <color name="ui_bg">#10151C</color>
+    <color name="ui_surface">#1B2430</color>
+    <color name="ui_surface_raised">#243042</color>
+    <color name="ui_text">#F3F6FA</color>
+    <color name="ui_text_secondary">#B7C1CF</color>
+    <color name="ui_accent">#4C8DFF</color>
+    <color name="ui_accent_container">#1E3A66</color>
+    <color name="ui_divider">#2C3746</color>
+    <color name="ui_rail_bg">#E610151C</color>
+    <color name="ui_scrim">#8C000000</color>
+    <color name="ui_warning">#E0B04F</color>
+    <color name="ui_danger">#FF7B7B</color>
+    <dimen name="ui_space">8dp</dimen>
+    <dimen name="ui_space_2">16dp</dimen>
+    <dimen name="ui_corner_button">12dp</dimen>
+    <dimen name="ui_corner_sheet">20dp</dimen>
+    <dimen name="ui_touch">48dp</dimen>
+    <dimen name="ui_rail_cell">56dp</dimen>
+    <dimen name="ui_icon">24dp</dimen>
+    <dimen name="ui_sheet_side_width">360dp</dimen>
+</resources>

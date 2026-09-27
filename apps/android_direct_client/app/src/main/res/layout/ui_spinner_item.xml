@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The FPS dropdown's closed face and its rows: readable on the dark sheet, 48dp tall. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="48dp"
+    android:drawableEnd="@drawable/ic_ui_expand"
+    android:drawableTint="@color/ui_text_secondary"
+    android:gravity="center_vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="12dp"
+    android:textColor="@color/ui_text"
+    android:textSize="15sp" />

@@ -454,41 +454,59 @@
                     android:textColor="@color/panel_button_text" />
             </LinearLayout>
 
-            <LinearLayout
+            <!-- apk-ui r1 (Codex 3): the viewer menu's two picture levels and three frame rates,
+                 on the same stored model (SessionPersistence / ViewerQualitySettings). -->
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:text="@string/ui_quality_label"
+                android:textColor="#1A1A1A"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:orientation="horizontal">
 
-                <EditText
-                    android:id="@+id/settingsBitrateInput"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:background="#F5F3EE"
-                    android:hint="@string/settings_bitrate_hint"
-                    android:inputType="number"
-                    android:maxLines="1"
-                    android:padding="12dp"
-                    android:textColor="#1A1A1A"
-                    android:textColorHint="#777777"
-                    android:text="8000" />
+                <TextView
+                    android:id="@+id/settingsQualityLowButton"
+                    style="@style/UiSegment"
+                    android:text="@string/ui_quality_low" />
 
-                <EditText
-                    android:id="@+id/settingsFpsInput"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:background="#F5F3EE"
-                    android:hint="@string/settings_fps_hint"
-                    android:inputType="number"
-                    android:maxLines="1"
-                    android:padding="12dp"
-                    android:textColor="#1A1A1A"
-                    android:textColorHint="#777777"
-                    android:text="30" />
+                <TextView
+                    android:id="@+id/settingsQualityHighButton"
+                    style="@style/UiSegment"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/ui_quality_high" />
             </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/ui_fps_label"
+                android:textColor="#1A1A1A"
+                android:textStyle="bold" />
+
+            <Spinner
+                android:id="@+id/settingsFpsSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/ui_field_background"
+                android:contentDescription="@string/ui_fps_label"
+                android:popupBackground="@color/ui_surface_raised"
+                android:spinnerMode="dropdown" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/ui_fps_hint"
+                android:textColor="#555555"
+                android:textSize="12sp" />
 
             <Button
                 android:id="@+id/settingsApplyButton"
@@ -555,9 +573,9 @@
                  and work on every screen. Top and middle are held; the bottom is a tap. -->
             <LinearLayout
                 android:id="@+id/viewerZoneBar"
-                android:layout_width="34dp"
+                android:layout_width="44dp"
                 android:layout_height="match_parent"
-                android:background="#0A0A0A"
+                android:background="@color/ui_bg"
                 android:orientation="vertical">
 
                 <TextView
@@ -565,43 +583,55 @@
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
-                    android:alpha="0.55"
+                    android:alpha="0.85"
+                    android:drawableTop="@drawable/ic_ui_right_click"
+                    android:drawablePadding="2dp"
+                    android:drawableTint="@color/ui_text_secondary"
                     android:gravity="center"
+                    android:maxLines="1"
                     android:text="@string/zone_right_click"
-                    android:textColor="#8A93A5"
-                    android:textSize="9sp" />
+                    android:textColor="@color/ui_text_secondary"
+                    android:textSize="10sp" />
 
                 <View
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
-                    android:background="#22FFFFFF" />
+                    android:background="@color/ui_divider" />
 
                 <TextView
                     android:id="@+id/viewerZoneTablet"
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
-                    android:alpha="0.55"
+                    android:alpha="0.85"
+                    android:drawableTop="@drawable/ic_ui_pen"
+                    android:drawablePadding="2dp"
+                    android:drawableTint="@color/ui_text_secondary"
                     android:gravity="center"
+                    android:maxLines="1"
                     android:text="@string/zone_tablet"
-                    android:textColor="#8A93A5"
-                    android:textSize="9sp" />
+                    android:textColor="@color/ui_text_secondary"
+                    android:textSize="10sp" />
 
                 <View
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
-                    android:background="#22FFFFFF" />
+                    android:background="@color/ui_divider" />
 
                 <TextView
                     android:id="@+id/viewerZoneMouse"
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
-                    android:alpha="0.55"
+                    android:alpha="0.85"
+                    android:drawableTop="@drawable/ic_ui_mouse"
+                    android:drawablePadding="2dp"
+                    android:drawableTint="@color/ui_text_secondary"
                     android:gravity="center"
+                    android:maxLines="1"
                     android:text="@string/zone_mouse"
-                    android:textColor="#8A93A5"
-                    android:textSize="9sp" />
+                    android:textColor="@color/ui_text_secondary"
+                    android:textSize="10sp" />
             </LinearLayout>
 
             <FrameLayout
@@ -821,134 +851,66 @@
                     android:visibility="gone" />
             </FrameLayout>
 
+            <!-- apk-ui r1 (Codex 1): five tools and nothing else: keyboard, shortcuts, window
+                 switch, desktop, menu. Right edge in landscape, bottom in portrait
+                 (applyViewerRailLayout). Everything that used to crowd this strip lives in the
+                 menu sheet (viewer_menu_sheet.xml). -->
             <LinearLayout
                 android:id="@+id/viewerControlsBar"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
-                android:background="#12151C"
+                android:background="@color/ui_bg"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:paddingStart="6dp"
-                android:paddingTop="10dp"
-                android:paddingEnd="6dp"
-                android:paddingBottom="10dp">
-
-                <Button
-                    android:id="@+id/viewerBackButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_back_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="12sp" />
+                android:padding="4dp">
 
                 <Button
                     android:id="@+id/viewerKeyboardButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
+                    style="@style/UiRailButton"
+                    android:layout_margin="2dp"
                     android:contentDescription="@string/viewer_keyboard_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_keyboard_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="18sp" />
-
-                <Button
-                    android:id="@+id/viewerMacroButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/macro_description"
-                    android:minWidth="0dp"
-                    android:text="@string/macro_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
+                    android:drawableTop="@drawable/ic_ui_keyboard"
+                    android:text="@string/ui_rail_keyboard" />
 
                 <Button
                     android:id="@+id/viewerKeysButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
+                    style="@style/UiRailButton"
+                    android:layout_margin="2dp"
                     android:contentDescription="@string/key_panel_description"
-                    android:minWidth="0dp"
-                    android:text="@string/key_panel_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
-
-                <!-- Clipboard text sync on/off (K1). A toggle rather than an always-on feature,
-                     because copying a password on the phone should not put it on the PC. -->
-                <Button
-                    android:id="@+id/viewerClipboardButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/clipboard_description"
-                    android:minWidth="0dp"
-                    android:text="@string/clipboard_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
+                    android:drawableTop="@drawable/ic_ui_shortcut"
+                    android:text="@string/ui_rail_shortcuts" />
 
                 <Button
-                    android:id="@+id/viewerRotateButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
-                    android:contentDescription="@string/viewer_rotate_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_rotate_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
+                    android:id="@+id/viewerWindowsButton"
+                    style="@style/UiRailButton"
+                    android:layout_margin="2dp"
+                    android:contentDescription="@string/ui_rail_windows_description"
+                    android:drawableTop="@drawable/ic_ui_windows"
+                    android:text="@string/ui_rail_windows" />
+
+                <Button
+                    android:id="@+id/viewerDesktopButton"
+                    style="@style/UiRailButton"
+                    android:layout_margin="2dp"
+                    android:contentDescription="@string/ui_rail_desktop_description"
+                    android:drawableTop="@drawable/ic_ui_desktop"
+                    android:text="@string/ui_rail_desktop" />
 
                 <Button
                     android:id="@+id/viewerMenuButton"
-                    android:layout_width="56dp"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/viewer_control_button_background"
+                    style="@style/UiRailButton"
+                    android:layout_margin="2dp"
                     android:contentDescription="@string/viewer_menu_description"
-                    android:minWidth="0dp"
-                    android:text="@string/viewer_menu_button"
-                    android:textAllCaps="false"
-                    android:textColor="#F4F0E8"
-                    android:textSize="10sp" />
-
-                <TextView
-                    android:id="@+id/viewerDataUsageText"
-                    android:layout_width="56dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:gravity="center"
-                    android:maxLines="2"
-                    android:textColor="#9AA3B2"
-                    android:textSize="9sp" />
-
-                <!-- Sits with the data counter because that is the number it explains: on the
-                     relay every one of those megabytes is paid for, and the difference is
-                     invisible otherwise. -->
-                <TextView
-                    android:id="@+id/viewerPathText"
-                    android:layout_width="56dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:gravity="center"
-                    android:maxLines="1"
-                    android:textColor="#9AA3B2"
-                    android:textSize="9sp" />
+                    android:drawableTop="@drawable/ic_ui_menu"
+                    android:text="@string/ui_rail_menu" />
             </LinearLayout>
         </LinearLayout>
 
         <include layout="@layout/viewer_key_panel" />
     </LinearLayout>
+
+    <!-- apk-ui r1: the viewer's sheets, above the video and the rail. -->
+    <include layout="@layout/viewer_menu_sheet" />
+
+    <include layout="@layout/viewer_window_sheet" />
 </FrameLayout>

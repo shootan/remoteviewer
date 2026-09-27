@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- apk-ui r1: the viewer menu (Codex 1, 3). Picture and frame rate on top, the tools that used to
+     crowd the rail below, lock and diagnostics apart at the bottom. The overlay is clickable over its
+     whole area, so a touch on the dimmed video closes the sheet and never reaches the remote PC. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/viewerMenuOverlay"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ui_scrim"
+    android:clickable="true"
+    android:focusable="false"
+    android:visibility="gone">
+
+    <LinearLayout
+        android:id="@+id/viewerMenuSheet"
+        android:layout_width="@dimen/ui_sheet_side_width"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:background="@drawable/ui_sheet_side_background"
+        android:clickable="true"
+        android:elevation="8dp"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="20dp"
+            android:paddingEnd="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/ui_menu_title"
+                android:textColor="@color/ui_text"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <ImageButton
+                android:id="@+id/viewerMenuCloseButton"
+                style="@style/UiIconButton"
+                android:contentDescription="@string/ui_close"
+                android:src="@drawable/ic_ui_close" />
+        </LinearLayout>
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="16dp">
+
+                <TextView
+                    style="@style/UiSectionLabel"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/ui_quality_label" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/viewerQualityLowButton"
+                        style="@style/UiSegment"
+                        android:text="@string/ui_quality_low" />
+
+                    <TextView
+                        android:id="@+id/viewerQualityHighButton"
+                        style="@style/UiSegment"
+                        android:layout_marginStart="8dp"
+                        android:text="@string/ui_quality_high" />
+                </LinearLayout>
+
+                <TextView
+                    style="@style/UiSectionLabel"
+                    android:text="@string/ui_fps_label" />
+
+                <Spinner
+                    android:id="@+id/viewerFpsSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:background="@drawable/ui_field_background"
+                    android:contentDescription="@string/ui_fps_label"
+                    android:popupBackground="@color/ui_surface_raised"
+                    android:spinnerMode="dropdown" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/ui_fps_hint"
+                    android:textColor="@color/ui_text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/viewerQualityStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="@color/ui_text_secondary"
+                    android:textSize="12sp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="8dp"
+                    android:background="@color/ui_divider" />
+
+                <!-- The clipboard label is set by renderClipboardButton (on / off / unsupported). -->
+                <Button
+                    android:id="@+id/viewerClipboardButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/clipboard_description"
+                    android:drawableStart="@drawable/ic_ui_clipboard"
+                    android:text="@string/ui_clipboard_on" />
+
+                <!-- The rotate label is set by applyViewerRailLayout (auto / portrait). -->
+                <Button
+                    android:id="@+id/viewerRotateButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/viewer_rotate_description"
+                    android:drawableStart="@drawable/ic_ui_rotate"
+                    android:text="@string/ui_rotate_auto" />
+
+                <Button
+                    android:id="@+id/viewerMacroButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/macro_description"
+                    android:drawableStart="@drawable/ic_ui_macro"
+                    android:text="@string/ui_macro" />
+
+                <Button
+                    android:id="@+id/viewerBackButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/ui_connection_list_description"
+                    android:drawableStart="@drawable/ic_ui_list"
+                    android:text="@string/ui_connection_list" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="8dp"
+                    android:background="@color/ui_divider" />
+
+                <Button
+                    android:id="@+id/viewerMenuUnlockButton"
+                    style="@style/UiSheetRow"
+                    android:drawableStart="@drawable/ic_ui_unlock"
+                    android:text="@string/quick_unlock" />
+
+                <Button
+                    android:id="@+id/viewerMenuDiagnosticsButton"
+                    style="@style/UiSheetRow"
+                    android:drawableStart="@drawable/ic_ui_diagnostics"
+                    android:text="@string/ui_diagnostics" />
+
+                <!-- The connection figures moved here from the rail: the data used this session and
+                     the path it took. Amber for the relay, where the megabytes are paid for. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp">
+
+                    <TextView
+                        android:id="@+id/viewerDataUsageText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/ui_text_secondary"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/viewerPathText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:textColor="@color/ui_text_secondary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
+    </LinearLayout>
+</FrameLayout>
