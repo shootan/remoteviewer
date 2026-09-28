@@ -434,7 +434,7 @@ int wmain(int argc, wchar_t** argv) {
                        // repair -- which is what made the continuity assertion fail once in
                        // nine runs, for a reason that was never about the product. Nothing is
                        // drawn on the user's screen to achieve this. (C3 r5)
-                       L" --capture-window-title \"c3 inject target\"";
+                       remote60::native_poc::e2e::e2e_capture_window_args(target.title);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     // The host's own account of what it did, kept so the timeline can be read rather than
@@ -1037,6 +1037,7 @@ int wmain(int argc, wchar_t** argv) {
                 (repaired ? "1" : "0"));
     }
     if (launched) {
+      std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
       check("the host captured the window this test paints, not a monitor",
             !captureWant.empty() && captureLine.find(captureWant) != std::string::npos,
             captureLine.empty() ? std::string("the host never said what it captured")

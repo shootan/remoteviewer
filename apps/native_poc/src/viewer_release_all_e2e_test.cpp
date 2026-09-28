@@ -151,7 +151,7 @@ int wmain(int argc, wchar_t** argv) {
                        // the resolver would otherwise be free to pick the viewer's -- which would
                        // feed the host's injection straight back into the window procedure that
                        // produced it. Both criteria must match, so there is exactly one answer.
-                       L" --input-target-title \"c3 inject target\"";
+                       L" --input-target-title \"" + target.title + L"\"";
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     STARTUPINFOW si{};

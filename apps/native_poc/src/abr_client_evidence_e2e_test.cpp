@@ -95,7 +95,7 @@ int gStillAfterMs = 0;
 double gMeasureFromSec = 8.0;  // r5 --measure-from SEC: the measured span starts SEC after the first stats line  // r5 --still-after SEC: the motion stops (the picture freezes) after SEC
 int gBlock = 4;  // r5 --block: pan texture detail, px per random block (4 = very busy, 16 = video-like)
 constexpr uint32_t kDefaultBitrate = 6000000;
-const wchar_t* kTargetTitle = L"remote60 abr evidence target";
+std::wstring kTargetTitle;  // unique to this process, set in wmain (e2e_unique_window_title)
 
 // An on-screen window the user cannot see or hit: alpha 1/255, WS_EX_TRANSPARENT, never activated.
 // On screen because an off-screen window is never composed and the host then sends only synthetic
@@ -168,7 +168,7 @@ class CadenceTarget {
     wc.lpszClassName = L"Remote60AbrEvidenceTarget";
     RegisterClassExW(&wc);
     hwnd_ = CreateWindowExW((selectable ? 0 : WS_EX_TOOLWINDOW) | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                            wc.lpszClassName, kTargetTitle, WS_POPUP, 0, 0, gWinW, gWinH, nullptr,
+                            wc.lpszClassName, kTargetTitle.c_str(), WS_POPUP, 0, 0, gWinW, gWinH, nullptr,
                             nullptr, wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
@@ -387,6 +387,7 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
   std::printf("host port %u (picked at run time)\n", kHostPort);
+  kTargetTitle = remote60::native_poc::e2e::e2e_unique_window_title(L"remote60 abr evidence target");
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
   const std::wstring dir = std::wstring(temp) + L"remote60_abr_ev_" +
@@ -405,6 +406,7 @@ int wmain(int argc, wchar_t** argv) {
   if (!desktop || cadenceWindow) {
     check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
   }
+  const HWND targetHwnd = target.hwnd();
 
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -428,7 +430,7 @@ int wmain(int argc, wchar_t** argv) {
                        (keyint > 0 ? L" --keyint " + std::to_wstring(keyint) : std::wstring()) +
                        L" --seconds " + std::to_wstring(std::max(120, runSec + 30)) +
                        L" --input-injection-mode none" +
-                       (desktop ? std::wstring() : L" --capture-window-title \"" + std::wstring(kTargetTitle) + L"\"");
+                       (desktop ? std::wstring() : remote60::native_poc::e2e::e2e_capture_window_args(kTargetTitle));
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check("the host is started with input injection off", noInjection);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -721,6 +723,13 @@ int wmain(int argc, wchar_t** argv) {
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
   CloseHandle(job);
+
+  if (launched && !desktop) {
+    std::string captureLine;
+    const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
+    std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
+    check("the host captured the window this test paints (its hwnd, this pid), not another test's", own, captureLine);
+  }
 
   // ------------------------------------------------------------------ the host's own account
   std::vector<std::string> abrLines, keyLines;

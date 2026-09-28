@@ -364,6 +364,7 @@ int wmain(int argc, wchar_t** argv) {
 
   InjectTarget target;
   check("a window of this process is up for the host to capture", target.Start());
+  const HWND targetHwnd = target.hwnd();
   Bottleneck link;
   check("the bottleneck is listening between the viewer and the host",
         link.Start(kShaperPort, kHostPort, kSourcePort));
@@ -384,7 +385,7 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATIC_SCENE_FPS", L"15");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
-                       L" --seconds 240 --capture-window-title \"c3 inject target\"";
+                       L" --seconds 240" + remote60::native_poc::e2e::e2e_capture_window_args(target.title);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     SECURITY_ATTRIBUTES sa{};
@@ -650,6 +651,12 @@ int wmain(int argc, wchar_t** argv) {
   }
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
 
+  {
+    std::string captureLine;
+    const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
+    std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
+    check("the host captured the window this test paints (its hwnd, this pid), not another test's", own, captureLine);
+  }
   std::vector<std::string> hostObserve;
   std::vector<std::string> hostAbr;
   bool ignoredLine = false;
