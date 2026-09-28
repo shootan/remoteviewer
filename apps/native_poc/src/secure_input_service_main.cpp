@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <string>
 
+#include "mouse_button_map.hpp"
 #include "secure_input_mapping.hpp"
 #include "secure_input_protocol.hpp"
 #include "secure_input_session.hpp"
@@ -24,6 +25,8 @@ namespace {
 
 using remote60::native_poc::DesktopRect;
 using remote60::native_poc::map_client_point;
+using remote60::native_poc::MouseSendInput;
+using remote60::native_poc::mouse_vk_to_sendinput;
 using remote60::native_poc::SecureInputKind;
 using remote60::native_poc::SecureInputMessage;
 using remote60::native_poc::kInvalidSessionId;
@@ -907,16 +910,8 @@ POINT map_point(const SecureInputMessage& message) {
   return point;
 }
 
-DWORD mouse_flag(uint16_t kind, uint32_t key) {
-  if (kind == 2) {
-    if (key == VK_RBUTTON) return MOUSEEVENTF_RIGHTDOWN;
-    if (key == VK_MBUTTON) return MOUSEEVENTF_MIDDLEDOWN;
-    return MOUSEEVENTF_LEFTDOWN;
-  }
-  if (key == VK_RBUTTON) return MOUSEEVENTF_RIGHTUP;
-  if (key == VK_MBUTTON) return MOUSEEVENTF_MIDDLEUP;
-  return MOUSEEVENTF_LEFTUP;
-}
+// The button edge -> SendInput mapping is mouse_button_map.hpp, shared with the host. The copy
+// that lived here made any key that was not right or middle a LEFT click. (mouse-xbutton r1)
 
 const char* gDpiAwarenessApplied = "none";
 
@@ -1026,8 +1021,16 @@ bool inject_message(const SecureInputMessage& message) {
   if (message.eventKind == 1) return true;
   INPUT input{};
   if (message.eventKind == 2 || message.eventKind == 3) {
+    // flags 0 = not a button key: nothing is injected. The cursor has already been placed above,
+    // which is what a move would have done; no button edge follows it.
+    const MouseSendInput mouse = mouse_vk_to_sendinput(message.eventKind, message.keyCode);
+    if (mouse.flags == 0) {
+      diag_inject_failure("unknown-mouse-key", message, 0, point.x, point.y);
+      return false;
+    }
     input.type = INPUT_MOUSE;
-    input.mi.dwFlags = mouse_flag(message.eventKind, message.keyCode);
+    input.mi.dwFlags = mouse.flags;
+    input.mi.mouseData = mouse.mouseData;
   } else if (message.eventKind == 4) {
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = MOUSEEVENTF_WHEEL;

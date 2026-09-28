@@ -328,6 +328,19 @@ class InjectTarget {
   std::atomic<uint32_t> upsByVk[256]{};
   std::atomic<uint32_t> leftDowns{0};
   std::atomic<uint32_t> leftUps{0};
+  std::atomic<uint32_t> rightDowns{0};
+  std::atomic<uint32_t> rightUps{0};
+  std::atomic<uint32_t> middleDowns{0};
+  std::atomic<uint32_t> middleUps{0};
+  // WM_XBUTTONDOWN / UP by the XBUTTON identifier in the wParam's HIWORD (slots 1 and 2; slot 0
+  // is anything else), with the last wParam and client point of each so a test can read which
+  // button the message named and the MK_* state it carried. (mouse-xbutton r1)
+  std::atomic<uint32_t> xDowns[3]{};
+  std::atomic<uint32_t> xUps[3]{};
+  std::atomic<uint32_t> lastXDownWparam{0};
+  std::atomic<uint32_t> lastXUpWparam{0};
+  std::atomic<int32_t> lastXDownX{0};
+  std::atomic<int32_t> lastXDownY{0};
   std::atomic<bool> paused{false};  // stop repainting: the captured window goes still
 
   bool Start() {
@@ -351,6 +364,24 @@ class InjectTarget {
       if (msg == WM_KEYUP || msg == WM_SYSKEYUP) self->upsByVk[wp & 0xff].fetch_add(1);
       if (msg == WM_LBUTTONDOWN) self->leftDowns.fetch_add(1);
       if (msg == WM_LBUTTONUP) self->leftUps.fetch_add(1);
+      if (msg == WM_RBUTTONDOWN) self->rightDowns.fetch_add(1);
+      if (msg == WM_RBUTTONUP) self->rightUps.fetch_add(1);
+      if (msg == WM_MBUTTONDOWN) self->middleDowns.fetch_add(1);
+      if (msg == WM_MBUTTONUP) self->middleUps.fetch_add(1);
+      if (msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP) {
+        const WORD which = GET_XBUTTON_WPARAM(wp);
+        const size_t slot = (which == XBUTTON1 || which == XBUTTON2) ? which : 0;
+        if (msg == WM_XBUTTONDOWN) {
+          self->xDowns[slot].fetch_add(1);
+          self->lastXDownWparam.store(static_cast<uint32_t>(wp));
+          self->lastXDownX.store(static_cast<int32_t>(static_cast<short>(LOWORD(lp))));
+          self->lastXDownY.store(static_cast<int32_t>(static_cast<short>(HIWORD(lp))));
+        } else {
+          self->xUps[slot].fetch_add(1);
+          self->lastXUpWparam.store(static_cast<uint32_t>(wp));
+        }
+        return TRUE;  // the documented answer for a handled WM_XBUTTON*
+      }
     }
     if (msg == WM_TIMER && self) {
       // Paused = a still screen, for the observation e2e's still->moving phase (C0).

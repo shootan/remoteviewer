@@ -77,9 +77,31 @@ int main() {
     check("...and what an earlier client held", t.held_count() == 0);
   }
   {
+    // The X pair (back / forward) is a button since mouse-xbutton r1: held, released at Serve()
+    // exit, and the viewer's own up for it swallowed -- exactly like left.
     InjectedInputTracker t;
     t.BeginServe(1);
-    t.NoteInjected(kMouseDown, 0x05, 0, 0);  // XBUTTON1 is not a button the viewer sends
+    t.NoteInjected(kMouseDown, 0x05, 40, 50);  // VK_XBUTTON1
+    t.NoteInjected(kMouseDown, 0x06, 41, 51);  // VK_XBUTTON2
+    check("X1 and X2 are tracked like the other buttons", t.held_count() == 2);
+    int32_t x = 0, y = 0;
+    const auto held = t.TakeHeldForRelease(&x, &y);
+    bool x1 = false, x2 = false;
+    for (const auto& r : held) {
+      if (r.kind == kMouseUp && r.keyCode == 0x05) x1 = true;
+      if (r.kind == kMouseUp && r.keyCode == 0x06) x2 = true;
+    }
+    check("...and released as button ups", held.size() == 2 && x1 && x2,
+          std::to_string(held.size()) + " releases");
+    check("...where the pointer last was", x == 41 && y == 51);
+    check("...so the viewer's X1 up is swallowed", t.SwallowRelease(kMouseUp, 0x05));
+    check("...and X2's", t.SwallowRelease(kMouseUp, 0x06));
+  }
+  {
+    InjectedInputTracker t;
+    t.BeginServe(1);
+    t.NoteInjected(kMouseDown, 0x07, 0, 0);  // no such button (0x07 is undefined)
+    t.NoteInjected(kMouseDown, 0x00, 0, 0);
     t.NoteInjected(kKeyDown, 0x1234, 0, 0);  // out of range
     check("codes outside the protocol's are not tracked", t.held_count() == 0);
   }

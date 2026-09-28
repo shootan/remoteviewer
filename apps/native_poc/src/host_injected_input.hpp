@@ -30,7 +30,7 @@ class InjectedInputTracker {
  public:
   struct Release {
     uint16_t kind = 0;     // 6 (key up) or 3 (button up)
-    uint32_t keyCode = 0;  // VK, or VK_LBUTTON/VK_RBUTTON/VK_MBUTTON
+    uint32_t keyCode = 0;  // VK, or VK_LBUTTON/VK_RBUTTON/VK_MBUTTON/VK_XBUTTON1/VK_XBUTTON2
   };
 
   /** Called at the start of every Serve(). A new epoch forgets everything from the last one. */
@@ -111,8 +111,12 @@ class InjectedInputTracker {
     if (keyCode == 0 || keyCode > 0xff) return 0;
     if (kind == 5 || kind == 6) return keyCode;
     if (kind == 2 || kind == 3) {
-      // VK_LBUTTON, VK_RBUTTON, VK_MBUTTON -- the only codes the viewer sends for a button.
-      if (keyCode == 1 || keyCode == 2 || keyCode == 4) return kButtonBit | keyCode;
+      // VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2 -- the only codes a viewer
+      // sends for a button (the X pair since mouse-xbutton r1, and only to a host that advertised
+      // kCaptureFlagMouseXButtonsV1). A held X button is released at Serve() exit like the others.
+      if (keyCode == 1 || keyCode == 2 || keyCode == 4 || keyCode == 5 || keyCode == 6) {
+        return kButtonBit | keyCode;
+      }
     }
     return 0;
   }

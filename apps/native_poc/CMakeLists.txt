@@ -699,6 +699,58 @@ if(MSVC)
   target_compile_options(remote60_viewer_release_all_e2e_test PRIVATE /utf-8)
 endif()
 
+# mouse-xbutton r1: the back / forward buttons through the product's window procedure, the wire, a
+# real isolated host and into a window of this process -- and not at all (--legacy-host) against a
+# host that does not advertise them. Same link set as the release-all test: the product's viewer.
+add_executable(remote60_viewer_mouse_xbutton_e2e_test
+  src/viewer_mouse_xbutton_e2e_test.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_input_forward.cpp
+  src/viewer_control_client.cpp
+  src/viewer_present.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/viewer_unlock.cpp
+  src/client_session_toolbar.cpp
+  src/input_macro.cpp
+  src/viewer_session_watchdog.cpp
+  src/viewer_cursor_overlay.cpp
+  src/viewer_frame_gate.cpp
+  src/sealed_unlock.cpp
+  src/mf_h264_codec.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_mouse_xbutton_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_mouse_xbutton_e2e_test PRIVATE
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_mouse_xbutton_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_host_poc)
+
+# mouse-xbutton r1: the button vocabulary (wire bit <-> VK <-> MK_* / XBUTTON / MOUSEEVENTF_*), and
+# the host's window-mode injection against a window of this process: X1 / X2 arrive as
+# WM_XBUTTONDOWN/UP naming the right button, an unknown key posts nothing (it used to become a LEFT
+# click), the kill switch makes an X edge unsupported. No host, no network, no SendInput.
+add_executable(remote60_mouse_button_map_test
+  src/mouse_button_map_test.cpp
+  src/host_input_inject.cpp
+  src/host_window_enum.cpp
+)
+target_include_directories(remote60_mouse_button_map_test PRIVATE src)
+target_link_libraries(remote60_mouse_button_map_test PRIVATE user32 imm32)
+if(MSVC)
+  target_compile_options(remote60_mouse_button_map_test PRIVATE /utf-8)
+endif()
+
 # item 8 C3: a real host, a control-only break, and the repair measured end to end.
 add_executable(remote60_control_resume_e2e_test
   src/control_resume_e2e_test.cpp

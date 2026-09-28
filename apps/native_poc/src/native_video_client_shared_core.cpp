@@ -172,7 +172,7 @@ QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint
   msg.inputEvent.header.size = static_cast<uint16_t>(sizeof(msg.inputEvent));
   msg.inputEvent.seq = queue.NextSequence();
   msg.inputEvent.kind = kind;
-  msg.inputEvent.buttons = static_cast<uint16_t>(buttons & 0x7u);
+  msg.inputEvent.buttons = static_cast<uint16_t>(buttons & kMouseWireMask);
   msg.inputEvent.x = x;
   msg.inputEvent.y = y;
   msg.inputEvent.wheelDelta = wheelDelta;

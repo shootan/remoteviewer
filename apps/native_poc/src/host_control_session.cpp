@@ -405,6 +405,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardTextV1;
+      // Mouse X buttons (back / forward): a viewer sends VK_XBUTTON1/2 edges and X bits in its
+      // held mask only to a host that says so -- an older host made an unknown key a LEFT click.
+      if (mouse_xbuttons_enabled())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagMouseXButtonsV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       remote60::native_poc::utf8_copy_bounded(pong.captureTargetProcess,

@@ -1366,10 +1366,10 @@ bool test_input_message_builders() {
                   ev.inputEvent.header.type == static_cast<uint16_t>(MessageType::ControlInputEvent) &&
                   ev.inputEvent.header.size == sizeof(ev.inputEvent),
               "builder: event header")) return false;
-  if (!expect(ev.inputEvent.seq == 1 && ev.inputEvent.kind == 2 && ev.inputEvent.buttons == 0x7u &&
+  if (!expect(ev.inputEvent.seq == 1 && ev.inputEvent.kind == 2 && ev.inputEvent.buttons == 0x1Fu &&
                   ev.inputEvent.x == 10 && ev.inputEvent.y == -20 && ev.inputEvent.wheelDelta == 120 &&
                   ev.inputEvent.keyCode == 65 && ev.inputEvent.clientSendQpcUs == 777,
-              "builder: event fields (buttons masked to 3 bits, seq from the queue)")) return false;
+              "builder: event fields (buttons masked to the 5 wire bits, seq from the queue)")) return false;
 
   std::vector<uint16_t> text(130);  // 64 + 64 + 2
   for (size_t i = 0; i < text.size(); ++i) text[i] = static_cast<uint16_t>(0x3131 + i);

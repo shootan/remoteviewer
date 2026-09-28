@@ -4,6 +4,7 @@
 
 #include "viewer_common.hpp"
 #include "viewer_state.hpp"
+#include "mouse_button_map.hpp"  // after viewer_common.hpp: it owns the windows.h configuration
 
 namespace remote60::native_poc::viewer {
 
@@ -116,19 +117,38 @@ bool send_ime_result_text(ViewerState& ctx, HWND hwnd, LPARAM imeFlags) {
 }
 
 void release_mouse_capture_if_idle(ViewerState& ctx, HWND hwnd) {
-  if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0 && GetCapture() == hwnd) {
+  if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & kMouseWireMask) == 0 &&
+      GetCapture() == hwnd) {
     ReleaseCapture();
   }
 }
 
 void enqueue_release_for_pressed_mouse_buttons(ViewerState& ctx) {
   const uint16_t buttons = ctx.input.mouseButtons.exchange(0, std::memory_order_acq_rel);
-  if ((buttons & 0x7u) == 0) return;
+  if ((buttons & kMouseWireMask) == 0) return;
   const int32_t vx = ctx.input.lastVideoX.load(std::memory_order_relaxed);
   const int32_t vy = ctx.input.lastVideoY.load(std::memory_order_relaxed);
-  if ((buttons & 0x4u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_MBUTTON);
-  if ((buttons & 0x2u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_RBUTTON);
-  if ((buttons & 0x1u) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_LBUTTON);
+  // The X pair too (mouse-xbutton r1): a "back" held when capture or the channel is lost would
+  // otherwise stay down on the host. Each up passes the host fence in enqueue_input_event, which
+  // is a no-op here in practice -- an X bit is only ever set after the host said it takes them.
+  if ((buttons & kMouseWireX2) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_XBUTTON2);
+  if ((buttons & kMouseWireX1) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_XBUTTON1);
+  if ((buttons & kMouseWireMiddle) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_MBUTTON);
+  if ((buttons & kMouseWireRight) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_RBUTTON);
+  if ((buttons & kMouseWireLeft) != 0) enqueue_input_event(ctx, 3, vx, vy, 0, VK_LBUTTON);
+}
+
+// The wire fence for the mouse X buttons (mouse-xbutton r1). A host that has not advertised
+// kCaptureFlagMouseXButtonsV1 masks `buttons` with 0x7 and -- before r1 -- mapped an unknown
+// button key to a LEFT click, so against it neither an X edge nor an X bit in the held mask may
+// leave this process, whichever path produced it: the window procedure, a release-all, or a macro
+// replayed from a file recorded against a newer host. Every ControlInputEvent passes through here.
+// Returns false when the event itself must not be sent; otherwise `buttons` has been trimmed to
+// what this host reads.
+static bool fence_mouse_for_host(ViewerState& ctx, uint16_t kind, uint32_t keyCode, uint16_t* buttons) {
+  if (ctx.session.hostMouseXButtons.load(std::memory_order_acquire)) return true;
+  *buttons = static_cast<uint16_t>(*buttons & kMouseWireLegacyMask);
+  return !((kind == 2 || kind == 3) && mouse_vk_is_xbutton(keyCode));
 }
 
 // Release every key this client has an outstanding down for.
@@ -164,11 +184,12 @@ int enqueue_release_all_modifiers(ViewerState& ctx) {
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
+  uint16_t buttons = ctx.input.mouseButtons.load();
+  if (!fence_mouse_for_host(ctx, kind, keyCode, &buttons)) return;
   // The message is the shared make_control_input_event (F-09); only the live button state and
   // the macro tap are this side's.
   const QueuedControlInputMessage msg = remote60::native_poc::make_control_input_event(
-      ctx.control.inputQueue, kind, ctx.input.mouseButtons.load(), x, y, wheelDelta, keyCode,
-      qpc_now_us());
+      ctx.control.inputQueue, kind, buttons, x, y, wheelDelta, keyCode, qpc_now_us());
   // Recording taps the send path, so the macro sees exactly what the host will see -- the
   // engine keeps pointer actions and drops keys on its own.
   if (ctx.input.macro.IsRecording()) {
@@ -181,9 +202,11 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
 void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
+  uint16_t buttons = step.buttons;
+  if (!fence_mouse_for_host(ctx, step.kind, step.keyCode, &buttons)) return;
   enqueue_control_input_message(
       ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, step.kind,
-                                                          step.buttons, step.x, step.y,
+                                                          buttons, step.x, step.y,
                                                           step.wheelDelta, step.keyCode,
                                                           qpc_now_us()));
 }

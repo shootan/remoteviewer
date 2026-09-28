@@ -267,7 +267,7 @@ bool InputMacro::LoadSerialized(const std::string& text) {
     if (kind < 1 || kind > 4) return false;
     s.kind = static_cast<uint16_t>(kind);
     s.keyCode = key;
-    s.buttons = static_cast<uint16_t>(buttons & 0x7u);
+    s.buttons = static_cast<uint16_t>(buttons & kMouseWireMask);
     s.delayMs = std::min<unsigned>(delay, kMaxDelayMs);
     s.x = std::max(0, s.x);
     s.y = std::max(0, s.y);
