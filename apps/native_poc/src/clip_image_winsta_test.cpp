@@ -145,7 +145,8 @@ int wmain(int argc, wchar_t** argv) {
   check("the interactive clipboard (WinSta0) did not move: sequence " + std::to_string(interactiveBefore) + " -> " +
             std::to_string(interactiveAfter),
         interactiveBefore == interactiveAfter);
-  check("the staging directory is removed" + (staging.Remove() ? std::string() : ": " + staging.why()), staging.removed());
+  const bool stagingRemoved = staging.Remove();  // before the check: argument order is unspecified
+  check("the staging directory is removed" + (stagingRemoved ? std::string() : ": " + staging.why()), stagingRemoved);
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

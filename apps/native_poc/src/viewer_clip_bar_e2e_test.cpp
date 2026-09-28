@@ -27,8 +27,9 @@
 //
 // The user's clipboard is never read or written. Images ride the text clipboard sync (the product
 // offers an image only to a host that advertises text sync too), so the host runs WITH its sync on
-// -- on a private window station, whose clipboard is its own (as clip_image_clipboard_test's
-// child). On this side the two window messages that would touch this machine's clipboard -- the
+// -- on a private window station, whose clipboard is not the user's (as clip_image_clipboard_test's
+// child). Unnamed stations are one per logon session, so this test's own clipboard child shares it:
+// the child empties it before the host starts. On this side the two window messages that would touch this machine's clipboard -- the
 // once-per-session push (kMsgPushClipboardNow, which reads it) and an incoming host text
 // (kMsgApplyClipboard, which writes it) -- are held back from the product's window procedure by
 // this test's message loop and counted. WinSta0's clipboard sequence number is compared before and
@@ -389,6 +390,12 @@ int run_clipboard_child(const wchar_t* resultFile) {
 
   image.Stop();
   DestroyWindow(hwnd);
+  // Unnamed private stations are one per logon session (clip_image_winsta_test): the host started
+  // next lives on this same station, and must find its clipboard empty, not this child's text.
+  if (station_open()) {
+    EmptyClipboard();
+    CloseClipboard();
+  }
   std::printf("CHILD RESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures);
   std::fflush(stdout);
   return gFailures ? 1 : 0;
@@ -836,7 +843,7 @@ int wmain(int argc, wchar_t** argv) {
         hostGone && ts::remove_scratch_run_dir());
   std::cout << "      held back from the window procedure: " << heldPush << " clipboard push(es), " << heldApply
             << " host text apply(s)\n";
-  check("no host text arrived to apply (the host's private clipboard is empty)", heldApply == 0);
+  check("no host text arrived to apply (the station clipboard was emptied before the host started)", heldApply == 0);
   const DWORD interactiveClipAfter = GetClipboardSequenceNumber();
   check("the user's clipboard (WinSta0) did not move: " + std::to_string(interactiveClipBefore) + " -> " +
             std::to_string(interactiveClipAfter),
