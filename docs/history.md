@@ -12581,3 +12581,14 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 시험: 파이프라인 단위 5건(키 청크 손실 → NACK → 재전송 → 1,2,3 순서 전달·요청 0 / hold 없음 → 키 버림·요청 / 재전송 없음 → 포기·요청·델타 미전달 / 정지 화면 stuck-head 1회 / 호스트 틈 뒤 완전 키 → 요청 0), **실제 세션 수신 루프**(가짜 서버가 청크 3 빠진 키 + 33ms 델타, NACK 에 재전송): NACK 호스트 7프레임 모두 전달·요청 0·리셋 0(5회 반복 동일), 구 호스트 0프레임·요청 2. 변이(hold 끔·NACK 끔·stuck-head 끔·키 예외 제거) 전부 FAIL, hold 끔은 세션 시험에서 현장 모양(요청 2) 재현. NDK syntax 경고 0.
 - 남은 후보(이번에 안 함): 키 페이싱 — 키가 약 90Mb/s 로 6~11ms 에 쏟아진다(`REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS` 기본 100M). 이 PC 에선 휴대폰 Wi-Fi 손실을 잴 수 없어 실측 A/B 뒤 결정. 사용자 체감 증거(끊김 횟수: client-present over2x·gapMax, 앱 out 공백)는 새 APK 실측으로만.
 - 제품/테스트/문서: 제품(공용 세션 수신 정책 — APK 재빌드 대상) / 테스트(파이프라인 단위·실제 세션 루프, 가짜 서버 손실 대본) / 문서(이 항목).
+
+### 2026-09-28 process — 작업용은 구현, 검증용·Codex 가 검수, 검증용이 main 머지·push·게시
+Goal
+- 사용자 지시: 작업용들은 각자 worktree 에서 구현·커밋만, 검증용(remote_claude)과 Codex 가 검수한 뒤 검증용이 main 머지·push, 완료 항목은 main 에서 직접 빌드·게시. 병렬 진행.
+Changes
+- AGENTS.md: "개발 프로세스"(09-28) 절 신설, 작업용 역할에서 빌드·서명·배포 제거, git push 보류 해제(검수 commit 의 정상 main push 한정), 사용자 창구 = 사용자가 직접 지휘하는 세션, 우선 적용 범위 정리.
+- CLAUDE.md: "개발 프로세스 절차" 신설(전용 worktree 배정·이관 구분, 검증용 안 vs Codex 안 비교 합의, 기능 단위 검수, main 머지·버전·게시·push·원격 정합 확인, 병렬 충돌 방지 — 번호 예약·먼저 끝난 것 먼저 머지·뒤 작업이 main 합쳐 재검증·머지 후 회귀), 사용자 창구 개정.
+Validation
+- Codex 문서 검토 7항 반영(.claude/process_docs_review.md). main 은 0.2.140(68edf58)까지 빨리감기 병합 — push 는 권한 분류기에 막혀 사용자 조치 대기.
+Next
+- 병렬: 작업용 clip-image(A), 작업용2 mouse-xbutton.
