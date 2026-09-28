@@ -494,6 +494,10 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<bool> stop{false};
     std::mutex fmu;
     std::set<uint32_t> realSeqThisSec;
+    // r6: frame age per real frame (same machine, same QPC clock): capture -> encode done, and
+    // capture -> received here, for the frames of the measured span.
+    std::atomic<bool> latencyOn{false};
+    std::vector<uint64_t> capToEncUs, capToRecvUs;
     std::thread ingress([&] {
       std::vector<uint8_t> buf(2048);
       while (!stop.load()) {
@@ -508,6 +512,11 @@ int wmain(int argc, wchar_t** argv) {
               (h.flags & 0x40u) == 0 && (h.flags & 0x4u) != 0) {  // last chunk of a real frame
             std::lock_guard<std::mutex> lk(fmu);
             realSeqThisSec.insert(h.seq);
+            if (latencyOn.load() && h.captureQpcUs > 0) {
+              const uint64_t now = qpc_now_us();
+              if (h.encodeEndQpcUs >= h.captureQpcUs) capToEncUs.push_back(h.encodeEndQpcUs - h.captureQpcUs);
+              if (now >= h.captureQpcUs) capToRecvUs.push_back(now - h.captureQpcUs);
+            }
           }
         }
       }
@@ -664,6 +673,7 @@ int wmain(int argc, wchar_t** argv) {
         std::lock_guard<std::mutex> lk(mmu);
         pendingMetrics = m;
       }
+      if (s + 1 >= static_cast<int>(gMeasureFromSec)) latencyOn.store(true);
       std::this_thread::sleep_for(std::chrono::seconds(1));
       std::lock_guard<std::mutex> lk(fmu);
       realFramesPerSec.push_back(static_cast<uint32_t>(realSeqThisSec.size()));
@@ -672,6 +682,21 @@ int wmain(int argc, wchar_t** argv) {
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
+    if (gPattern != Pattern::Default) {
+      std::lock_guard<std::mutex> lk(fmu);
+      auto stat = [](std::vector<uint64_t> v, const char* name) {
+        if (v.empty()) return std::string(name) + "=none";
+        std::sort(v.begin(), v.end());
+        uint64_t sum = 0;
+        for (uint64_t x : v) sum += x;
+        char b[160];
+        std::snprintf(b, sizeof(b), "%sAvgMs=%.1f %sP95Ms=%.1f", name, sum / 1000.0 / v.size(), name,
+                      v[v.size() * 95 / 100] / 1000.0);
+        return std::string(b);
+      };
+      std::cout << "R6LAT frames=" << capToRecvUs.size() << " " << stat(capToEncUs, "capToEnc") << " "
+                << stat(capToRecvUs, "capToRecv") << "\n";
+    }
     {
       std::lock_guard<std::mutex> lk(selMu);
       selectionLog = selections;

@@ -1416,10 +1416,17 @@ bool H264Encoder::configure_types() {
 
 void H264Encoder::apply_low_latency_codec_api() {
   if (!enc_) return;
-  (void)set_mf_attr_u32(enc_.Get(), MF_LOW_LATENCY, 1);
-  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVLowLatencyMode, true);
-  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonLowLatency, true);
-  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
+  // quality r6 diagnostic switches (all default to today's settings): REMOTE60_NATIVE_LOW_LATENCY=0
+  // leaves the three low-latency hints off, REMOTE60_NATIVE_REALTIME=0 the real-time one. Used to
+  // look for a configuration in which this PC's MFT follows its mean bitrate.
+  const bool lowLatency = !env_string_equals_ci("REMOTE60_NATIVE_LOW_LATENCY", "0");
+  const bool realTime = !env_string_equals_ci("REMOTE60_NATIVE_REALTIME", "0");
+  if (lowLatency) {
+    (void)set_mf_attr_u32(enc_.Get(), MF_LOW_LATENCY, 1);
+    (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVLowLatencyMode, true);
+    (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonLowLatency, true);
+  }
+  if (realTime) (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
 
   (void)apply_rate_control("init");
 
@@ -1447,7 +1454,11 @@ void H264Encoder::apply_low_latency_codec_api() {
                 backendName_, requestedGop, static_cast<unsigned long>(gopSetHr),
                 gopGetOk ? 1 : 0, gopReadback);
   std::cout << gopLine << "\n";
-  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, stableTextTune_ ? 68u : 100u);
+  const uint32_t qualityVsSpeed =
+      env_u32_or("REMOTE60_NATIVE_QUALITY_VS_SPEED", stableTextTune_ ? 68u : 100u);  // r6 switch
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, qualityVsSpeed);
+  std::cout << "[native-video-host] h264 encoder-hints lowLatency=" << (lowLatency ? 1 : 0)
+            << " realTime=" << (realTime ? 1 : 0) << " qualityVsSpeed=" << qualityVsSpeed << "\n";
 }
 
 /**
@@ -1476,13 +1487,26 @@ bool H264Encoder::apply_rate_control(const char* reason) {
   const uint32_t vbvBytes = stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
                                             : low_latency_vbv_bytes(bitrate_);
 
-  const bool rcSet = set_codecapi_u32(
-      enc_.Get(), CODECAPI_AVEncCommonRateControlMode,
-      useCbr ? eAVEncCommonRateControlMode_CBR
-             : eAVEncCommonRateControlMode_PeakConstrainedVBR);
+  // quality r6 diagnostic switches: REMOTE60_NATIVE_RC_MODE_NUM picks the eAVEncCommonRateControlMode
+  // value directly (0 CBR, 1 PeakConstrainedVBR, 2 UnconstrainedVBR, 4 LowDelayVBR, ...), and
+  // REMOTE60_NATIVE_RC_MEAN_OVERRIDE gives the encoder a different mean (peak scaled with it) while
+  // the host keeps its own target -- the test of whether the output follows the mean at one size.
+  const uint32_t modeNum = env_u32_or("REMOTE60_NATIVE_RC_MODE_NUM", 0xFFFFFFFFu);
+  const uint32_t rcMode = modeNum != 0xFFFFFFFFu
+                              ? modeNum
+                              : static_cast<uint32_t>(useCbr ? eAVEncCommonRateControlMode_CBR
+                                                             : eAVEncCommonRateControlMode_PeakConstrainedVBR);
+  const uint32_t meanOverride = env_u32_or("REMOTE60_NATIVE_RC_MEAN_OVERRIDE", 0u);
+  const uint32_t mean = meanOverride >= 100000u ? meanOverride : bitrate_;
+  const uint32_t peak = meanOverride >= 100000u
+                            ? static_cast<uint32_t>(std::min<uint64_t>(
+                                  static_cast<uint64_t>(mean) * std::max<uint32_t>(100u, peakMultiplierPercent) / 100ULL,
+                                  200000000ULL))
+                            : maxBitrate;
+  const bool rcSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, rcMode);
   bool ok = true;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, mean) && ok;
+  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, peak) && ok;
   ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes) && ok;
 
   // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner. The rate
@@ -1508,10 +1532,10 @@ bool H264Encoder::apply_rate_control(const char* reason) {
   // Not every MFT honours these, and a rejected call leaves the previous mode in place, so
   // report what actually stuck rather than what was asked for.
   std::cout << "[native-video-host] h264 rate-control reason=" << reason
-            << " mode=" << (useCbr ? "cbr" : "vbr_peak")
+            << " mode=" << (useCbr ? "cbr" : "vbr_peak") << " modeNum=" << rcMode
             << " modeAccepted=" << (rcSet ? 1 : 0)
-            << " mean=" << bitrate_
-            << " peak=" << maxBitrate
+            << " mean=" << mean
+            << " peak=" << peak
             << " vbvBytes=" << vbvBytes
             << " maxQp=" << maxQp
             << " maxQpAccepted=" << (qpSet ? 1 : 0)
@@ -1570,6 +1594,8 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     }
   }
 
+  // quality r6 diagnostic switch: the rate control also before the media types.
+  if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) (void)apply_rate_control("pre_types");
   codec_debug_log("encoder initialize: configure types");
   if (!configure_types()) {
     shutdown();

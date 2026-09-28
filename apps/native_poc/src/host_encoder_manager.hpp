@@ -56,6 +56,7 @@ struct EncoderState {
   RateGovernor rateGovernor{RateGovernorConfig{H264Encoder::configured_max_qp()}};
   uint64_t rateGovernorLastTxBytes = 0;
   uint32_t rateGovernorBitrate = 0;
+  uint32_t rateGovernorUserFps = 0;  // r6: the user's frame rate the loop was started against
   struct PendingTarget { uint32_t w=0, h=0, fps=0, bitrate=0, keyint=0; } retryTarget;
   bool targetPending = false;
   bool codecNeedsInit = false;

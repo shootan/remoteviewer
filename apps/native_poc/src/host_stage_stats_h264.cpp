@@ -154,21 +154,56 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
         txNow >= encoder.rateGovernorLastTxBytes ? txNow - encoder.rateGovernorLastTxBytes : 0;
     encoder.rateGovernorLastTxBytes = txNow;
     if (governorOn && encoder.activeBitrate > 0) {
-      // A new target or a rebuilt encoder (which starts at the configured ceiling) starts over.
-      if (encoder.activeBitrate != encoder.rateGovernorBitrate ||
-          (encoder.codec.max_qp_override() == 0 &&
-           encoder.rateGovernor.maxQp() != H264Encoder::configured_max_qp())) {
-        encoder.rateGovernor.Reset();
+      auto& governor = encoder.rateGovernor;
+      // The user's frame rate is the ceiling; the loop only ever goes below it (r6).
+      const uint32_t userFps = rate.userFpsCeiling > 0 ? rate.userFpsCeiling : encoder.activeFps;
+      if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
+        // A new target, or the user chose another frame rate: start over from the floor.
+        governor.Reset();
         encoder.rateGovernorBitrate = encoder.activeBitrate;
+        encoder.rateGovernorUserFps = userFps;
       } else {
-        const uint32_t before = encoder.rateGovernor.maxQp();
-        const uint32_t after = encoder.rateGovernor.OnSecond(txDelta, encoder.activeBitrate);
-        if (after != before) {
-          const bool applied = encoder.codec.set_max_qp(after);
-          std::cout << "[native-video-host][rate-governor] maxQp " << before << "->" << after
-                    << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
-                    << " targetKbps=" << (encoder.activeBitrate / 1000U)
-                    << " applied=" << (applied ? 1 : 0) << "\n";
+        const RateDecision before{governor.maxQp(), governor.FpsForStep(userFps, governor.fpsStep())};
+        if (governor.fpsStep() > 0 && encoder.activeFps != before.fps) {
+          // Something else moved the frame rate (ABR, M9, the overview) since this loop set it:
+          // that controller owns it now, and the loop starts over rather than fight it.
+          governor.Reset();
+        } else {
+          // A rebuilt encoder (an fps or size change) starts at the configured ceiling: put the
+          // loop's own back instead of losing it.
+          if (encoder.codec.max_qp_override() == 0 && governor.maxQp() != H264Encoder::configured_max_qp()) {
+            (void)encoder.codec.set_max_qp(governor.maxQp());
+          }
+          const RateDecision after = governor.OnSecond(txDelta, encoder.activeBitrate, userFps);
+          if (after.fps != before.fps) {
+            const uint32_t prevFps = encoder.activeFps;
+            const bool fpsApplied = encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender,
+                                                        encoder.nominalEncodeW, encoder.nominalEncodeH,
+                                                        after.fps, encoder.activeBitrate, encoder.activeKeyint);
+            if (fpsApplied) {
+              (void)encoder.codec.set_max_qp(after.maxQp);  // the rebuilt encoder, with the loop's ceiling
+              // Same as ABR: the GDI worker captures at the rate it was started with.
+              if (!capture.windowModeActive.load(std::memory_order_acquire) &&
+                  backend.active == DesktopCaptureBackend::Gdi && restart_capture_session(hx)) {
+                ++capture.restartCount;
+                capture.FlushCapturePipelineState(res, frameGating, stats, "gdi-rate-governor-fps");
+              }
+            } else {
+              governor.Reset();  // the encoder refused; do not keep a state that describes nothing
+            }
+            std::cout << "[native-video-host][rate-governor] fps " << prevFps << "->" << after.fps
+                      << " userFps=" << userFps << " maxQp=" << after.maxQp
+                      << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
+                      << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " applied=" << (fpsApplied ? 1 : 0) << "\n";
+          } else if (after.maxQp != before.maxQp) {
+            const bool applied = encoder.codec.set_max_qp(after.maxQp);
+            std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
+                      << " fps=" << encoder.activeFps
+                      << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
+                      << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " applied=" << (applied ? 1 : 0) << "\n";
+          }
         }
       }
     }
