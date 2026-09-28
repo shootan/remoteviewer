@@ -194,6 +194,14 @@ std::wstring isolation_args(const std::wstring& stagingDir) {
 
 bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t mediaPort,
                uint16_t controlPort, const char* tag) {
+  if (mediaPort == 0 || controlPort == 0) {
+    // A port the picker could not provide must not reach the host: --bind-port 0 reads as "no
+    // candidates" and the host would fall back to the product's default port. Nothing is staged,
+    // nothing is started; the case fails at its "starts" check.
+    std::printf("SKIP-LAUNCH %s: no free port (media udp %u, control tcp %u), the host is not started\n", tag,
+                mediaPort, controlPort);
+    return false;
+  }
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
   host->dir = std::wstring(temp) + L"remote60_punch_e2e_" +
@@ -429,10 +437,10 @@ int wmain(int argc, wchar_t** argv) {
     ScriptDirectory(dir, "h-e2e", capabilityBody(token, kIssuedIp, kIssuedPort));
 
     SpawnedHost host;
-    const uint16_t mediaPort = 44890;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();  // picked at run time (RV-19)
     SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
     check("a real GNLinkStream starts against it",
-          StartHost(&host, dir.url(), mediaPort, 44891, "armed"));
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "armed"));
     // The outbound punch is the host saying it collected the capability -- which is also what
     // opened its reply window. Following the host's own line beats sleeping.
     check("...and collects the capability from the heartbeat",
@@ -535,10 +543,10 @@ int wmain(int argc, wchar_t** argv) {
     ScriptDirectory(dir, "h-e2e-bad", capabilityBody(token, kIssuedIp, kIssuedPort));
 
     SpawnedHost host;
-    const uint16_t mediaPort = 44892;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
     check("a real GNLinkStream starts (bad token)",
-          StartHost(&host, dir.url(), mediaPort, 44893, "badtoken"));
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "badtoken"));
     check("...and collects the capability", host.WaitFor("directory punch ->", 30000),
           host.tail());
 
@@ -601,11 +609,11 @@ int wmain(int argc, wchar_t** argv) {
                                        Reply{200, "{\"ok\":true,\"pendingPunch\":[]}"}});
 
     SpawnedHost host;
-    const uint16_t mediaPort = 44894;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     // Far enough out that no second heartbeat can re-open the window mid-case.
     SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
     check("a real GNLinkStream starts (window expiry)",
-          StartHost(&host, dir.url(), mediaPort, 44895, "expiry"));
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "expiry"));
     check("...and collects the capability, opening the window",
           host.WaitFor("directory punch ->", 30000), host.tail());
 
@@ -692,10 +700,10 @@ int wmain(int argc, wchar_t** argv) {
                                        Reply{200, capabilityBody(token, kIssuedIp, kIssuedPort)}});
 
     SpawnedHost host;
-    const uint16_t mediaPort = 44896;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"5");
     check("a real GNLinkStream starts (late capability)",
-          StartHost(&host, dir.url(), mediaPort, 44897, "late"));
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "late"));
     check("...and reaches its directory with nothing pending",
           host.WaitFor("directory agent started", 30000), host.tail());
     check("...and has no capability yet",

@@ -78,7 +78,7 @@ void check(bool ok, const std::string& what, const std::string& detail = std::st
 }
 std::string u(uint64_t v) { return std::to_string(v); }
 
-constexpr uint16_t kHostPortBase = 44820;
+// The host port is picked at run time per run (e2e_pick_free_udp_port), so runs and tests can overlap.
 constexpr uint32_t kFps = 30;
 constexpr uint32_t kBitrate = 1500000;  // the user's 1500 setting, where parity was 25% of payload
 constexpr int kWinW = 640;
@@ -351,6 +351,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   target.title = L"remote60 fec single-chunk target " + std::to_wstring(GetCurrentProcessId()) + L" " +
                  std::wstring(tight ? L"tight" : L"padded");
   check(target.Start(), "an on-screen, invisible, click-through window is up for the host to capture");
+  const HWND targetHwnd = target.hwnd();
 
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -368,7 +369,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(kBitrate) + L" --seconds " +
                        std::to_wstring(seconds + 30) + L" --input-injection-mode none" +
-                       L" --capture-window-title \"" + target.title + L"\"";
+                       remote60::native_poc::e2e::e2e_capture_window_args(target.title);
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check(noInjection, "the host is started with input injection off");
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -568,6 +569,14 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
   CloseHandle(job);
   r.host = read_host_log(hostLogPath);
+  {
+    std::string captureLine;
+    const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
+    std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
+    check(own, std::string(tight ? "tight" : "padded") +
+                   ": the host captured the window this test paints (its hwnd, this pid), not another test's",
+          captureLine);
+  }
 
   // Everything delivered, through the product decoder.
   if (!deliveredAus.empty()) {
@@ -667,7 +676,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  uint16_t port = kHostPortBase;
   for (Content content : contents) {
     const char* cls = content_name(content);
     RunResult res[2];
@@ -675,7 +683,14 @@ int main(int argc, char** argv) {
       const bool tight = layout == 1;  // padded first: what the field sends today
       const std::wstring runDir = dir + std::wstring(cls, cls + std::strlen(cls)) + L"_" +
                                   (tight ? L"tight" : L"padded") + L"\\";
-      res[layout] = run_host(hostExe, runDir, content, tight, port++, seconds, lossPermille, lossSeed);
+      const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+      check(port != 0, std::string(cls) + (tight ? " tight" : " padded") + ": a free UDP port for the host", u(port));
+      if (port == 0) {
+        // --bind-port 0 would send the host to the product's default port: nothing is started.
+        std::printf("SKIP-LAUNCH %s %s: no free port, the host is not started\n", cls, tight ? "tight" : "padded");
+        continue;
+      }
+      res[layout] = run_host(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed);
       print_run(content, tight, lossPermille, lossSeed, res[layout]);
       const RunResult& r = res[layout];
       const std::string tag = std::string(cls) + " " + (tight ? "tight" : "padded");
@@ -699,10 +714,13 @@ int main(int argc, char** argv) {
                   u(r.disc) + " keyReq " + u(r.keyReq));
         check(r.rxDropped == 0 && r.nacks == 0 && r.fec == 0, tag + ": lossless -> nothing dropped, no NACK, no repair");
         // What the host says it sent and what arrived here agree on the parity bytes (both count
-        // datagram payload; the stats line is at most a second behind the receiver).
+        // datagram payload; the stats line is at most a second behind the receiver, so the
+        // allowance is a second and a half of this run's parity rate, not a share of the total --
+        // a share is too tight for a short run, where one second is a large share).
         const uint64_t hp = r.host.parity;
         const uint64_t rp = r.rxParity;
-        check(hp > 0 && rp > 0 && (hp <= rp + rp / 10 + 4096) && (rp <= hp + hp / 10 + 4096),
+        const uint64_t allowance = (std::max(hp, rp) * 3) / (static_cast<uint64_t>(seconds) * 2) + 4096;
+        check(hp > 0 && rp > 0 && (hp <= rp + allowance) && (rp <= hp + allowance),
               tag + ": the host's parity account and the received parity agree (within a second of stats)",
               "host " + u(hp) + " received " + u(rp));
       }

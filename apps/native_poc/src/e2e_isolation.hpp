@@ -32,6 +32,10 @@
 #include <winsock2.h>
 #include <windows.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -134,6 +138,125 @@ inline std::wstring e2e_block_localappdata(const std::vector<wchar_t>& block) {
     if (_wcsnicmp(p, L"LOCALAPPDATA=", 13) == 0) return std::wstring(p + 13);
   }
   return {};
+}
+
+/**
+ * Ports nobody on this machine holds right now, `count` of them, all different (RV-19,
+ * 2026-09-28). The host e2e tests used to name their ports in the source (44720..44899), so two
+ * of them running at once -- a worker's measurement and the verifier's regression sweep -- fought
+ * over the same number and the second host died at bind ("udp bind failed on every candidate
+ * port"). Asked to bind port 0, the OS hands out a port from its dynamic range; every socket is
+ * kept open until all `count` are picked, so the ports differ, and then all are released for the
+ * host, the proxy, the shaper or the stand-in source to bind for real. `type` is SOCK_DGRAM (the
+ * host's media port, every proxy) or SOCK_STREAM (the host's control port). The pick itself is
+ * retried a few times; an empty vector means no port could be found.
+ *
+ * Limit: bind-0 / close / the host's own bind is NOT a reservation. The ports are released before
+ * they are handed over, so another process may bind one in between; when that happens the host
+ * fails at its bind and that test fails, as it did before -- there is no retry at launch.
+ *
+ * A caller must not start a host on an empty or short result: the host reads --bind-port 0 as
+ * "no candidates" and falls back to the product's default port (parse_bind_port_candidates), which
+ * is exactly the collision this is here to prevent. REMOTE60_E2E_PICK_PORT_FAIL=1 makes every pick
+ * fail, so a test can show that it then starts nothing.
+ */
+inline std::vector<uint16_t> e2e_pick_free_ports(int type, size_t count) {
+  {
+    wchar_t fail[8]{};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_PICK_PORT_FAIL", fail, 8) != 0 && fail[0] == L'1') return {};
+  }
+  WSADATA wsa{};
+  const bool started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;  // reference counted: harmless if already up
+  std::vector<uint16_t> ports;
+  for (int attempt = 0; attempt < 3 && ports.size() < count; ++attempt) {
+    ports.clear();
+    std::vector<SOCKET> held;
+    for (size_t i = 0; i < count; ++i) {
+      SOCKET s = socket(AF_INET, type, type == SOCK_STREAM ? IPPROTO_TCP : IPPROTO_UDP);
+      if (s == INVALID_SOCKET) break;
+      sockaddr_in local{};
+      local.sin_family = AF_INET;
+      local.sin_addr.s_addr = htonl(INADDR_ANY);  // free on every address, so free on loopback too
+      local.sin_port = 0;
+      sockaddr_in bound{};
+      int len = sizeof(bound);
+      if (bind(s, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 ||
+          getsockname(s, reinterpret_cast<sockaddr*>(&bound), &len) != 0 || bound.sin_port == 0) {
+        closesocket(s);
+        break;
+      }
+      held.push_back(s);
+      ports.push_back(ntohs(bound.sin_port));
+    }
+    for (SOCKET s : held) closesocket(s);
+    if (ports.size() < count) ports.clear();
+  }
+  if (started) WSACleanup();
+  return ports;
+}
+
+/** One free UDP port (0 = none found). */
+inline uint16_t e2e_pick_free_udp_port() {
+  const std::vector<uint16_t> p = e2e_pick_free_ports(SOCK_DGRAM, 1);
+  return p.empty() ? 0 : p[0];
+}
+
+/** One free TCP port (0 = none found). */
+inline uint16_t e2e_pick_free_tcp_port() {
+  const std::vector<uint16_t> p = e2e_pick_free_ports(SOCK_STREAM, 1);
+  return p.empty() ? 0 : p[0];
+}
+
+/**
+ * A window title no other test process can be carrying (RV-19 r2, 2026-09-28): `base`, this
+ * process id and a random tag. The host resolves --capture-window-title and --input-target-title
+ * as a substring of the title, so every test that named its window "c3 inject target" was
+ * offering it to every other test's host: run side by side, a control-resume host captured the
+ * window of the mouse-x-button test. Pair the title with the pid (e2e_capture_window_args), so
+ * both must match and there is exactly one answer.
+ */
+inline std::wstring e2e_unique_window_title(const std::wstring& base) {
+  std::random_device rd;
+  uint32_t v = rd();
+  std::wstring tag;
+  for (int i = 0; i < 8; ++i) {
+    tag.push_back(L"0123456789abcdef"[v & 15u]);
+    v >>= 4;
+  }
+  return base + L" pid " + std::to_wstring(GetCurrentProcessId()) + L" " + tag;
+}
+
+/** The host arguments that resolve exactly one window: this process's pid AND `title`. */
+inline std::wstring e2e_capture_window_args(const std::wstring& title) {
+  return L" --capture-window-pid " + std::to_wstring(GetCurrentProcessId()) + L" --capture-window-title \"" + title +
+         L"\"";
+}
+
+/**
+ * Whether the host's log says it captured `hwnd` of THIS process -- the "capture-window target
+ * hwnd=0x... pid=..." line it writes at startup (the fallback line says "not found"). Read it once
+ * the host has exited: its stdout into a file is block-buffered. `lineOut` receives the line the
+ * host wrote, or a note that it wrote none, for the report.
+ */
+inline bool e2e_host_captured_window(const std::wstring& hostLogPath, HWND hwnd, std::string* lineOut) {
+  char want[80]{};
+  std::snprintf(want, sizeof(want), "capture-window target hwnd=0x%llx pid=%lu ",
+                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(hwnd)),
+                static_cast<unsigned long>(GetCurrentProcessId()));
+  std::ifstream in(hostLogPath);
+  std::string line;
+  bool found = false;
+  bool said = false;
+  while (std::getline(in, line)) {
+    if (line.find("capture-window target") == std::string::npos) continue;
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    if (lineOut) *lineOut = line;
+    said = true;
+    found = hwnd != nullptr && line.find(want) != std::string::npos;
+    break;
+  }
+  if (!said && lineOut) *lineOut = "the host never said what it captured";
+  return found;
 }
 
 /** Recursive delete, refusing anything that is not strictly inside `root`. Test scratch only. */

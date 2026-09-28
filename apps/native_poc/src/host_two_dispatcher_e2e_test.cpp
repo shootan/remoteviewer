@@ -205,8 +205,14 @@ int wmain(int argc, wchar_t** argv) {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
 
-  const uint16_t mediaPort = 44780;   // UDP: media, and the control tunnel rides on it
-  const uint16_t controlPort = 44781; // TCP: the second dispatcher
+  // Picked at run time (RV-19): two of these tests may run side by side.
+  const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();    // UDP: media, and the control tunnel rides on it
+  const uint16_t controlPort = remote60::native_poc::e2e::e2e_pick_free_tcp_port();  // TCP: the second dispatcher
+  if (mediaPort == 0 || controlPort == 0) {
+    std::printf("FAIL  no free ports for the host (media udp %u, control tcp %u)\n", mediaPort, controlPort);
+    return 1;
+  }
+  std::printf("ports media %u control %u (picked at run time)\n", mediaPort, controlPort);
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);

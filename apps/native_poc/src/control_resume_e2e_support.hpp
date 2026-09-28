@@ -31,6 +31,7 @@
 #include <thread>
 #include <vector>
 
+#include "e2e_isolation.hpp"
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc::e2e {
@@ -320,6 +321,9 @@ class ControlProxy {
  */
 class InjectTarget {
  public:
+  // Unique to this process (e2e_unique_window_title), set before Start() returns: what the host
+  // is told to capture / inject into, by pid and by this exact title, never another test's.
+  std::wstring title;
   std::atomic<uint64_t> mouseMoves{0};
   std::atomic<uint64_t> keyDowns{0};
   std::atomic<uint64_t> keyUps{0};
@@ -426,8 +430,9 @@ class InjectTarget {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60C3InjectTarget";
     RegisterClassExW(&wc);
+    title = e2e_unique_window_title(L"remote60 c3 inject target");
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
-                            L"remote60 c3 inject target", WS_OVERLAPPEDWINDOW, -4000, -4000, 320,
+                            title.c_str(), WS_OVERLAPPEDWINDOW, -4000, -4000, 320,
                             240, nullptr, nullptr, wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));

@@ -70,9 +70,9 @@ using namespace remote60::native_poc::e2e;
 
 namespace {
 
-constexpr uint16_t kHostPort = 44796;
-constexpr uint16_t kShaperPort = 44797;
-constexpr uint16_t kSourcePort = 44798;           // the stand-in video source (see the header)
+uint16_t kHostPort = 0;    // all three picked at run time (e2e_pick_free_ports): tests run side by side
+uint16_t kShaperPort = 0;
+uint16_t kSourcePort = 0;  // the stand-in video source (see the header)
 constexpr uint64_t kSourceGeneration = 0xC0C0C0C0ull;
 
 // ------------------------------------------------------------------------------ the bottleneck
@@ -338,6 +338,17 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  {
+    const std::vector<uint16_t> ports = remote60::native_poc::e2e::e2e_pick_free_ports(SOCK_DGRAM, 3);
+    if (ports.size() != 3) {
+      std::printf("FAIL  no free UDP ports for the host, the shaper and the source\n");
+      return 1;
+    }
+    kHostPort = ports[0];
+    kShaperPort = ports[1];
+    kSourcePort = ports[2];
+    std::printf("ports host %u shaper %u source %u (picked at run time)\n", kHostPort, kShaperPort, kSourcePort);
+  }
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
@@ -353,6 +364,7 @@ int wmain(int argc, wchar_t** argv) {
 
   InjectTarget target;
   check("a window of this process is up for the host to capture", target.Start());
+  const HWND targetHwnd = target.hwnd();
   Bottleneck link;
   check("the bottleneck is listening between the viewer and the host",
         link.Start(kShaperPort, kHostPort, kSourcePort));
@@ -373,7 +385,7 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATIC_SCENE_FPS", L"15");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
-                       L" --seconds 240 --capture-window-title \"c3 inject target\"";
+                       L" --seconds 240" + remote60::native_poc::e2e::e2e_capture_window_args(target.title);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     SECURITY_ATTRIBUTES sa{};
@@ -639,6 +651,12 @@ int wmain(int argc, wchar_t** argv) {
   }
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
 
+  {
+    std::string captureLine;
+    const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
+    std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
+    check("the host captured the window this test paints (its hwnd, this pid), not another test's", own, captureLine);
+  }
   std::vector<std::string> hostObserve;
   std::vector<std::string> hostAbr;
   bool ignoredLine = false;
