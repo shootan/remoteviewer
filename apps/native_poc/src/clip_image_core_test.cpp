@@ -213,6 +213,7 @@ int main() {
     c.MarkEvaluated(t, rounds);
     check("a long quiet spell banks at most one second of growth", c.rate() - before <= 2048000 / 4 + 1);
     // ---- ③ what a raise may not stand on
+    step(clean(20000, c.rate()));  // the settle round after the last raise
     const uint32_t r0 = c.rate();
     BulkRateWindow noWork = clean(20000, r0 * 2);
     noWork.workPending = false;
@@ -326,6 +327,18 @@ int main() {
     check("never below the floor (64 kbps) by its own decreases", f.rate() == 64000);
   }
   {
+    // ---- the probe stops at the cap: the controller's own rate, not only what it sends
+    BulkRateConfig lowCap;
+    lowCap.capBps = 1000000;
+    BulkRateController k(lowCap);
+    BulkRateWindow kw;
+    kw.pullRttP50Us = 1000;
+    kw.rttSamples = 1;
+    for (int i = 0; i < 20; ++i) {
+      kw.goodputBps = static_cast<uint64_t>(k.rate()) * (i + 2);  // always a gain
+      k.Evaluate(kw, 100000ull * (i + 1), static_cast<uint64_t>(i + 1));
+    }
+    check("the rate stops at the cap (1 Mbps) and the probe ends there", k.rate() == 1000000 && !k.inSlowStart());
     // ---- ④ the cap is the budget: it wins over the floor, 0 included
     BulkRateController c;
     c.SetCapBps(0);
@@ -375,7 +388,8 @@ int main() {
   {
     BulkRttEstimator e;
     check("the first sample is used", e.OnSample(40000, 0, 65000, false, false) && e.srttUs() == 40000);
-    check("a resent chunk's sample is not (Karn)", !e.OnSample(400000, 70000, 65000, true, false) && e.srttUs() == 40000);
+    check("a resent chunk's sample is not (Karn), even an ordinary-looking one",
+          !e.OnSample(45000, 70000, 65000, true, false) && e.srttUs() == 40000);
     check("a duplicate pull is not", !e.OnSample(40000, 70000, 65000, false, true));
     check("a pull bunched right behind the previous one is not (ACK compression)",
           !e.OnSample(5000, 2000, 65000, false, false) && e.srttUs() == 40000);
