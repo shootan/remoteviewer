@@ -386,11 +386,8 @@ void ClipImageClient::OpenBulk() {
     lastTxUs_.clear();
     tainted_.clear();
     resentSeqsInWindow_.clear();
-    resentKeys_.clear();
-    resentFragsPerSeq_.clear();
     confirmedOffsets_.clear();
-    spuriousRtoResends_ = 0;
-    uniqueSentWin_ = uniqueLostWin_ = rtoWin_ = 0;
+    loss_.Reset();
   }
   bulk_.Reset();
   {
@@ -423,23 +420,13 @@ void ClipImageClient::OnTransmitted(const uint8_t* data, size_t len, uint64_t no
   }
   std::lock_guard<std::mutex> ev(evMu_);
   if (!resend) {
-    ++uniqueSentWin_;  // an original fragment's first transmission: the loss ratio's denominator
+    loss_.OnOriginal();  // an original fragment's first transmission: the loss ratio's denominator
   } else {
-    // Each original fragment counts as lost once, however often it is resent (②); a message all
-    // of whose fragments came back through the resend path was resent whole by the timer (RTO).
-    const uint64_t key = (static_cast<uint64_t>(h.messageSeq) << 16) | h.fragIndex;
+    // Each original fragment counts as lost once, however often it is resent; a resend of a chunk
+    // the host already confirmed is a lost ACK, counted apart (BulkLossCounter).
     const auto so = seqToOffset_.find(h.messageSeq);
-    if (so != seqToOffset_.end() && confirmedOffsets_.count(so->second)) {
-      ++spuriousRtoResends_;  // the host already has this chunk: its ACK was lost on the way back
-      return;
-    }
-    if (resentKeys_.insert(key).second) {
-      ++uniqueLostWin_;
-      auto& n = resentFragsPerSeq_[h.messageSeq];
-      if (++n == h.fragCount) ++rtoWin_;
-    }
-    while (resentFragsPerSeq_.size() > 64) resentFragsPerSeq_.erase(resentFragsPerSeq_.begin());
-    if (resentKeys_.size() > 4096) resentKeys_.erase(resentKeys_.begin());
+    const bool confirmed = so != seqToOffset_.end() && confirmedOffsets_.count(so->second) != 0;
+    if (loss_.OnResend(h.messageSeq, h.fragIndex, h.fragCount, confirmed) == BulkLossCounter::Resend::AckLost) return;
   }
   if (h.fragIndex == 0 && len >= sizeof(UdpControlChunkHeader) + sizeof(ClipBulkChunkHeader)) {
     ClipBulkChunkHeader c{};
@@ -450,6 +437,15 @@ void ClipImageClient::OnTransmitted(const uint8_t* data, size_t len, uint64_t no
   auto it = seqToOffset_.find(h.messageSeq);
   if (it == seqToOffset_.end()) return;
   const uint32_t offset = it->second;
+  {
+    auto ct = chunkTimes_.find(offset);
+    if (ct != chunkTimes_.end()) {
+      if (!ct->second.firstTx) ct->second.firstTx = nowUs;
+      ct->second.lastAnyTx = nowUs;
+      if (resend) ct->second.resent = true;
+      else if (h.fragIndex + 1 == h.fragCount) ct->second.lastTx = nowUs;
+    }
+  }
   if (resend) {
     tainted_.insert(offset);
     lastTxUs_.erase(offset);
@@ -474,7 +470,8 @@ void ClipImageClient::ServeLoop() {
   uint64_t lastPullUs = 0;
   uint32_t capInForce = rateConfig_.capBps;
   const char* traceEnv = std::getenv("REMOTE60_CLIP_BULK_TRACE");
-  const bool traceRate = traceEnv && traceEnv[0] == '1';
+  const bool traceRate = traceEnv && (traceEnv[0] == '1' || traceEnv[0] == '2');
+  const bool traceChunks = traceEnv && traceEnv[0] == '2';
   const uint64_t traceT0 = windowStartUs;
   rc.MarkEvaluated(windowStartUs, 0);
   while (serving_.load()) {
@@ -518,6 +515,19 @@ void ClipImageClient::ServeLoop() {
           bool resent = false;
           {
             std::lock_guard<std::mutex> ev(evMu_);
+            if (traceChunks) {
+              auto ct = chunkTimes_.find(p.triggerOffset);
+              if (ct != chunkTimes_.end()) {
+                const ChunkTimes& c = ct->second;
+                std::printf("CHUNKTRACE off=%u pullAt=%llu enqAt=%llu firstTx=%llu lastTx=%llu lastAnyTx=%llu confirmAt=%llu "
+                            "resent=%d rate=%u\n",
+                            p.triggerOffset, static_cast<unsigned long long>(c.pullAt),
+                            static_cast<unsigned long long>(c.enqAt), static_cast<unsigned long long>(c.firstTx),
+                            static_cast<unsigned long long>(c.lastTx), static_cast<unsigned long long>(c.lastAnyTx),
+                            static_cast<unsigned long long>(now), c.resent ? 1 : 0, rateNow_.load());
+                chunkTimes_.erase(ct);
+              }
+            }
             confirmedOffsets_.insert(p.triggerOffset);
             while (confirmedOffsets_.size() > 256) confirmedOffsets_.erase(confirmedOffsets_.begin());
             auto t = lastTxUs_.find(p.triggerOffset);
@@ -531,20 +541,34 @@ void ClipImageClient::ServeLoop() {
           }
         }
         lastPullUs = now;
+        if (traceChunks) {
+          std::lock_guard<std::mutex> ev(evMu_);
+          ChunkTimes& c = chunkTimes_[p.offset];
+          c.pullAt = now;
+          while (chunkTimes_.size() > 64) chunkTimes_.erase(chunkTimes_.begin());
+        }
         (void)bulk_.Send(out.data(), out.size());
+        if (traceChunks) {
+          std::lock_guard<std::mutex> ev(evMu_);
+          auto ct = chunkTimes_.find(p.offset);
+          if (ct != chunkTimes_.end()) ct->second.enqAt = BulkPacer::NowUs();
+        }
       }
     }
     if (rc.Due(now, rounds, rtt.srttUs())) {
       const BulkPacer::Stats ps = pacer_.GetStats();
       BulkRateWindow w;
+      uint64_t ackLostTotal = 0, repeatTotal = 0;  // kept apart from the loss ratio (diagnostics)
       {
         std::lock_guard<std::mutex> ev(evMu_);
         w.lossEvents = static_cast<uint32_t>(resentSeqsInWindow_.size());
         resentSeqsInWindow_.clear();
-        w.uniqueFragmentsSent = uniqueSentWin_;
-        w.uniqueFragmentsLost = uniqueLostWin_;
-        w.rtoEvents = rtoWin_;
-        uniqueSentWin_ = uniqueLostWin_ = rtoWin_ = 0;
+        const BulkLossCounter::Window lw = loss_.Take();
+        w.uniqueFragmentsSent = lw.sent;
+        w.uniqueFragmentsLost = lw.lost;
+        w.rtoEvents = lw.rto;
+        ackLostTotal = loss_.ackLostResends();
+        repeatTotal = loss_.repeatResends();
       }
       const uint64_t leftBytes = ps.bytesSent - sentBytesBase;
       sentBytesBase = ps.bytesSent;
@@ -554,6 +578,7 @@ void ClipImageClient::ServeLoop() {
       }
       w.rttSamples = static_cast<uint32_t>(rtts.size());
       w.pullSrttUs = rtt.srttUs();
+      w.pullCurrentUs = rtt.currentUs();
       // A NACK within about a round trip of the fragment's departure crossed it in flight.
       pacer_.SetResendGuardUs(rtt.srttUs() ? rtt.srttUs() + rtt.srttUs() / 4 + 5000 : 0);
       w.pingRttUs = pingRtt_ ? pingRtt_() : 0;
@@ -570,11 +595,14 @@ void ClipImageClient::ServeLoop() {
         const BulkRateAction a = rc.Evaluate(w, now, rounds);
         if (traceRate) {  // REMOTE60_CLIP_BULK_TRACE=1: one line per evaluation (diagnostics)
           std::printf("RATETRACE t=%.3f rate=%u->%u act=%d lossEv=%u uLost=%u uSent=%u rto=%u pull=%llu n=%u ping=%llu "
-                      "good=%llu work=%d yield=%d lossState=%d plateau=%d\n",
+                      "good=%llu work=%d yield=%d lossState=%d plateau=%d cause=%u srtt=%llu cur=%llu ackLost=%llu repeat=%llu\n",
                       (now - traceT0) / 1e6, rateBefore, rc.rate(), static_cast<int>(a), w.lossEvents, w.uniqueFragmentsLost,
                       w.uniqueFragmentsSent, w.rtoEvents, static_cast<unsigned long long>(w.pullRttP50Us), w.rttSamples,
                       static_cast<unsigned long long>(w.pingRttUs), static_cast<unsigned long long>(w.goodputBps),
-                      w.workPending ? 1 : 0, w.yielded ? 1 : 0, static_cast<int>(rc.LossState()), rc.onPlateau() ? 1 : 0);
+                      w.workPending ? 1 : 0, w.yielded ? 1 : 0, static_cast<int>(rc.LossState()), rc.onPlateau() ? 1 : 0,
+                      rc.lastCause(), static_cast<unsigned long long>(w.pullSrttUs),
+                      static_cast<unsigned long long>(w.pullCurrentUs), static_cast<unsigned long long>(ackLostTotal),
+                      static_cast<unsigned long long>(repeatTotal));
         }
         std::lock_guard<std::mutex> lock(mu_);
         ++counters_.evaluations;

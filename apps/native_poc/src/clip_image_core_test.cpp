@@ -403,6 +403,97 @@ int main() {
     s.OnSample(260000, 70000, 65000, false, false);
     check("two high samples in a row are a queue: both count",
           s.OnSample(270000, 70000, 65000, false, false) && s.srttUs() > 80000);
+    // The pair a lost pull leaves on a head-only channel: the resent one, then its follower one round
+    // trip later and a little less late. Measured pattern (41 ms apart, 305 then 246 ms).
+    BulkRttEstimator h;
+    h.OnSample(42000, 0, 65000, false, false);
+    check("a lost pull's resend is held", !h.OnSample(305000, 70000, 65000, false, false));
+    check("...its follower one round trip later, less late, is not a queue: both dropped",
+          !h.OnSample(246000, 41000, 65000, false, false) && h.srttUs() == 42000);
+    check("...and the next normal sample counts as usual", h.OnSample(42000, 70000, 65000, false, false));
+    BulkRttEstimator q;
+    q.OnSample(42000, 0, 65000, false, false);
+    q.OnSample(250000, 70000, 65000, false, false);
+    check("a later-arriving, higher second spike close behind is still a queue",
+          q.OnSample(260000, 41000, 65000, false, false) && q.srttUs() > 60000);
+    // The current delay: min of the last 4 valid samples (spikes included; Karn/duplicate/bunched not).
+    BulkRttEstimator c;
+    check("no current delay before any sample", c.currentUs() == 0);
+    c.OnSample(42000, 0, 65000, false, false);
+    c.OnSample(296000, 70000, 65000, false, false);
+    c.OnSample(543000, 250000, 65000, false, false);
+    check("a pull lost twice (296 then 543 ms, measured) leaves the current delay at the path's 42 ms",
+          c.currentUs() == 42000);
+    c.OnSample(900000, 70000, 65000, true, false);
+    c.OnSample(900000, 500, 65000, false, false);
+    check("resent and bunched samples do not enter it", c.currentUs() == 42000);
+    c.OnSample(80000, 70000, 65000, false, false);
+    c.OnSample(90000, 70000, 65000, false, false);
+    check("a queue lifts every sample: once the last 4 are all high, it is high", c.currentUs() == 80000);
+  }
+  {
+    // 3rd agreement ①: the loss ratio's parts.
+    BulkLossCounter lc;
+    for (int i = 0; i < 30; ++i) lc.OnOriginal();
+    check("a first resend of a fragment is a new loss", lc.OnResend(7, 3, 15, false) == BulkLossCounter::Resend::NewLoss);
+    check("the same fragment NACKed and resent again is a repeat",
+          lc.OnResend(7, 3, 15, false) == BulkLossCounter::Resend::Repeat &&
+              lc.OnResend(7, 3, 15, false) == BulkLossCounter::Resend::Repeat);
+    check("a resend of a chunk the host already confirmed is a lost ACK",
+          lc.OnResend(6, 0, 15, true) == BulkLossCounter::Resend::AckLost);
+    BulkLossCounter::Window w1 = lc.Take();
+    check("the numerator does not grow with repeats or lost ACKs (30 sent, 1 lost)",
+          w1.sent == 30 && w1.lost == 1 && w1.rto == 0);
+    check("repeats and lost ACKs are counted apart", lc.repeatResends() == 2 && lc.ackLostResends() == 1);
+    check("Take starts a fresh window", lc.Take().sent == 0);
+    for (uint16_t f = 0; f < 4; ++f) lc.OnResend(9, f, 4, false);
+    BulkLossCounter::Window w2 = lc.Take();
+    check("a message resent whole (every fragment) is one RTO", w2.lost == 4 && w2.rto == 1);
+    for (uint16_t f = 0; f < 4; ++f) lc.OnResend(9, f, 4, false);
+    check("...and resending it again is neither loss nor another RTO", lc.Take().lost == 0 && lc.repeatResends() == 6);
+    lc.Reset();
+    check("a new session starts from nothing: the same fragment is a new loss again",
+          lc.OnResend(7, 3, 15, false) == BulkLossCounter::Resend::NewLoss && lc.repeatResends() == 0 &&
+              lc.ackLostResends() == 0);
+  }
+  {
+    // The rolling horizon: too few samples = Unknown; a long pause ages it out.
+    BulkRateController rc;
+    BulkRateWindow w;
+    w.uniqueFragmentsSent = 200;
+    w.uniqueFragmentsLost = 30;
+    rc.Evaluate(w, 1000000, 1);
+    check("200 fragments (under the 300 minimum) at 15 % loss is Unknown, not High",
+          rc.LossState() == BulkLossState::Unknown);
+    rc.Evaluate(w, 1200000, 2);
+    check("400 fragments at 15 % is High", rc.LossState() == BulkLossState::High);
+    BulkRateWindow clean;
+    clean.uniqueFragmentsSent = 10;
+    rc.Evaluate(clean, 12000000, 3);
+    check("after a pause longer than the 10 s horizon the old losses are gone: Unknown again",
+          rc.LossState() == BulkLossState::Unknown);
+  }
+  {
+    // The controller judges delay on the current delay, not on an SRTT still carrying old spikes.
+    BulkRateController rc;
+    BulkRateWindow w;
+    w.pullRttP50Us = 42000;
+    w.pullCurrentUs = 42000;
+    w.rttSamples = 1;
+    w.goodputBps = 1000000;
+    rc.Evaluate(w, 1000000, 1);  // baseline 42 ms
+    BulkRateWindow l = w;
+    l.pullSrttUs = 143000;  // measured: SRTT after a 296/543 ms pair while the path was back at 42 ms
+    l.pullCurrentUs = 42000;
+    l.lossEvents = 1;
+    l.uniqueFragmentsLost = 1;
+    const uint32_t before = rc.RateBps(2000000);
+    const BulkRateAction a = rc.Evaluate(l, 2000000, 3);
+    check("an isolated loss with an SRTT still high from old spikes but a normal current delay holds",
+          a == BulkRateAction::Hold && rc.RateBps(2000000) == before);
+    BulkRateWindow q = l;
+    q.pullCurrentUs = 150000;
+    check("a current delay over max(2x, +50 ms) is congestion", rc.Evaluate(q, 3000000, 5) == BulkRateAction::Lower);
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;

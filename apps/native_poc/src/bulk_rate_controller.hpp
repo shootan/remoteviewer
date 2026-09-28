@@ -29,6 +29,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <set>
 
 namespace remote60::native_poc {
 
@@ -77,7 +79,8 @@ struct BulkRateConfig {
 struct BulkRateWindow {
   uint32_t lossEvents = 0;         // messages with at least one fragment resent (recoverable losses)
   uint64_t pullRttP50Us = 0;       // chunk sent -> the pull it completed arrives, median of valid samples
-  uint64_t pullSrttUs = 0;         // the smoothed pull RTT (what delay rises are judged on; 0 = use the median)
+  uint64_t pullSrttUs = 0;         // the smoothed pull RTT (the evaluation interval; delay if no current)
+  uint64_t pullCurrentUs = 0;      // the current pull delay: min of the last 4 valid samples (0 = none yet)
   uint64_t pingRttUs = 0;          // the control channel's ping RTT (0 = none fresh)
   uint64_t deliveredBps = 0;       // what the pacer let out in the window
   uint32_t uniqueFragmentsSent = 0;  // original data fragments first sent in the window
@@ -105,6 +108,13 @@ class BulkRttEstimator {
     if (resent || duplicate || rttUs == 0) return false;
     const uint64_t bunched = (std::max<uint64_t>)(1000, chunkSendUs / 4);
     if (sinceLastPullUs != 0 && sinceLastPullUs < bunched) return false;
+    // The current delay (LEDBAT's filter): the minimum of the last few valid samples, spikes included.
+    // A queue lifts every sample; a pull the host had to resend -- once, twice in a row, or its
+    // follower waiting behind it on the head-only channel -- lifts a few (measured: 296 then 543 ms
+    // on a 42 ms path, while the samples around them stayed at 42-77 ms).
+    recent_[recentNext_] = rttUs;
+    recentNext_ = (recentNext_ + 1) % kRecent;
+    if (recentCount_ < kRecent) ++recentCount_;
     // A lone spike -- over max(2 x SRTT, SRTT + 100 ms) -- is held back until the next sample says
     // whether it is a queue (the next one is high too: both count) or a pull the host had to resend
     // after the reverse path lost it (measured: 250 ms on a 40 ms path, alone). Only one is held.
@@ -115,6 +125,10 @@ class BulkRttEstimator {
       }
       const uint64_t held = heldSpikeUs_;
       heldSpikeUs_ = 0;
+      // ...unless it is the lost pull's follower: the host's channel is head-only, so the next pull
+      // waited behind the resend and lands one round trip after it, a little less late (measured: 17
+      // of 17 such pairs 40-43 ms apart, the second 15-100 ms lower). Not a queue -- both dropped.
+      if (sinceLastPullUs != 0 && sinceLastPullUs < srttUs_ * 3 / 2 && rttUs < held) return false;
       srttUs_ = (srttUs_ * 7 + held) / 8;
     } else {
       heldSpikeUs_ = 0;  // the spike stood alone: dropped
@@ -123,10 +137,72 @@ class BulkRttEstimator {
     return true;
   }
   uint64_t srttUs() const { return srttUs_; }
+  uint64_t currentUs() const {
+    uint64_t m = 0;
+    for (uint32_t i = 0; i < recentCount_; ++i) m = m ? (std::min)(m, recent_[i]) : recent_[i];
+    return m;
+  }
 
  private:
+  static constexpr uint32_t kRecent = 4;
+  uint64_t recent_[kRecent] = {};
+  uint32_t recentNext_ = 0;
+  uint32_t recentCount_ = 0;
   uint64_t srttUs_ = 0;
   uint64_t heldSpikeUs_ = 0;
+};
+
+/**
+ * The loss ratio's parts, from the sender's own transmissions (3rd agreement ①). Denominator: original
+ * fragments sent for the first time. Numerator: original fragments that needed recovery, each ONCE --
+ * a fragment NACKed and resent again and again is still one. Kept apart, never in the ratio: a resend
+ * of a chunk the host already confirmed (its ACK was lost on the way back) and a repeat resend of a
+ * fragment already counted. A message all of whose fragments came back through the resend path was
+ * resent whole by the timer (RTO). Reset per bulk session (a new path starts from nothing).
+ */
+class BulkLossCounter {
+ public:
+  enum class Resend : uint8_t { NewLoss = 0, Repeat, AckLost };
+  struct Window {
+    uint32_t sent = 0, lost = 0, rto = 0;
+  };
+
+  void OnOriginal() { ++win_.sent; }
+
+  Resend OnResend(uint32_t seq, uint16_t fragIndex, uint16_t fragCount, bool chunkConfirmed) {
+    if (chunkConfirmed) {
+      ++ackLost_;
+      return Resend::AckLost;
+    }
+    const uint64_t key = (static_cast<uint64_t>(seq) << 16) | fragIndex;
+    if (!keys_.insert(key).second) {
+      ++repeats_;
+      return Resend::Repeat;
+    }
+    ++win_.lost;
+    if (++fragsPerSeq_[seq] == fragCount) ++win_.rto;
+    while (fragsPerSeq_.size() > 64) fragsPerSeq_.erase(fragsPerSeq_.begin());
+    if (keys_.size() > 4096) keys_.erase(keys_.begin());
+    return Resend::NewLoss;
+  }
+
+  /** This window's counts, and a fresh window. */
+  Window Take() {
+    const Window w = win_;
+    win_ = {};
+    return w;
+  }
+  uint64_t ackLostResends() const { return ackLost_; }
+  uint64_t repeatResends() const { return repeats_; }
+
+  void Reset() { *this = BulkLossCounter{}; }
+
+ private:
+  Window win_;
+  std::set<uint64_t> keys_;              // (seq << 16 | frag) already counted as lost
+  std::map<uint32_t, uint32_t> fragsPerSeq_;
+  uint64_t ackLost_ = 0;
+  uint64_t repeats_ = 0;
 };
 
 class BulkRateController {
@@ -175,15 +251,19 @@ class BulkRateController {
     if (w.pullRttP50Us && (!basePullRttUs_ || w.pullRttP50Us < basePullRttUs_)) basePullRttUs_ = w.pullRttP50Us;
     if (w.pingRttUs && (!basePingRttUs_ || w.pingRttUs < basePingRttUs_)) basePingRttUs_ = w.pingRttUs;
 
-    // Delay rises are judged on the SMOOTHED pull RTT: one late sample -- a pull the host had to resend
-    // because the reverse path lost it, measured at 250 ms on a 40 ms path -- is not a queue.
-    const uint64_t pullDelay = w.pullSrttUs ? w.pullSrttUs : w.pullRttP50Us;
+    // Delay rises are judged on the CURRENT pull delay (min of the last few samples): one late sample --
+    // a pull the host had to resend because the reverse path lost it, measured at 250 ms on a 40 ms
+    // path, 543 ms when lost twice -- is not a queue. The SRTT was judged before and carried one such
+    // pair for seconds after the path was back at 42 ms (measured: 3 decreases and a pause on it).
+    const uint64_t pullDelay = w.pullCurrentUs ? w.pullCurrentUs : (w.pullSrttUs ? w.pullSrttUs : w.pullRttP50Us);
     const bool strongDelay = Risen(pullDelay, basePullRttUs_) || Risen(w.pingRttUs, basePingRttUs_);
     const bool weakDelay = WeakRisen(pullDelay, basePullRttUs_) || WeakRisen(w.pingRttUs, basePingRttUs_);
     const bool loss = w.lossEvents > 0 || w.uniqueFragmentsLost > 0;
     const bool congested = strongDelay || w.rtoEvents > 0 || (loss && weakDelay) ||
                            (loss && lossState_ == BulkLossState::High);
     const bool inRecovery = haveDecreased_ && roundsCompleted != 0 && roundsCompleted <= recoveryEndRound_;
+    lastCause_ = (strongDelay ? 1u : 0u) | (w.rtoEvents > 0 ? 2u : 0u) | (loss && weakDelay ? 4u : 0u) |
+                 (loss && lossState_ == BulkLossState::High ? 8u : 0u);
     if (congested) {
       if (inRecovery) return BulkRateAction::Hold;  // the trailing signals of the event just answered
       slowStart_ = false;
@@ -260,6 +340,8 @@ class BulkRateController {
   uint32_t capBps() const { return c_.capBps; }
   bool inSlowStart() const { return slowStart_; }
   bool onPlateau() const { return plateau_; }
+  /** Why the last evaluation saw congestion: 1 delay, 2 RTO, 4 loss + weak delay, 8 sustained loss (diagnostics). */
+  uint32_t lastCause() const { return lastCause_; }
   const BulkRateConfig& config() const { return c_; }
 
  private:
@@ -316,6 +398,7 @@ class BulkRateController {
   uint64_t plateauGoodputBps_ = 0;
   uint64_t plateauSinceUs_ = 0;
   uint64_t goodputEwma_ = 0;
+  uint32_t lastCause_ = 0;
 };
 
 }  // namespace remote60::native_poc

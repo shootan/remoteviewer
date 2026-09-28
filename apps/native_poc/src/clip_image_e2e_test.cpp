@@ -248,8 +248,23 @@ struct Rig {
       connect(clientSock, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
       peerOfHost = clientAddr;
     }
+    static const bool tracePulls = [] {
+      const char* e = std::getenv("REMOTE60_CLIP_BULK_TRACE");
+      return e && e[0] == '2';
+    }();
     svc.Start(
         [this](const void* d, size_t n) {
+          if (tracePulls && n >= sizeof(UdpControlChunkHeader) + sizeof(ClipBulkPullMessage)) {
+            UdpControlChunkHeader h{};
+            std::memcpy(&h, d, sizeof(h));
+            ClipBulkPullMessage p{};
+            std::memcpy(&p, static_cast<const uint8_t*>(d) + sizeof(h), sizeof(p));
+            if (h.kind == static_cast<uint16_t>(UdpPacketKind::ControlData) &&
+                p.header.type == static_cast<uint16_t>(MessageType::ClipBulkPull)) {
+              std::printf("PULLTX off=%u trig=%u seq=%u at=%llu\n", p.offset, p.triggerOffset, h.messageSeq,
+                          static_cast<unsigned long long>(now_us()));
+            }
+          }
           return sendto(hostSock, static_cast<const char*>(d), static_cast<int>(n), 0,
                         reinterpret_cast<const sockaddr*>(&peerOfHost), sizeof(peerOfHost)) > 0;
         },
@@ -381,7 +396,7 @@ int main(int argc, char** argv) {
     };
     // The agreed values are the defaults; the loss-tolerance variant is measured for comparison only.
     // The agreed values (2nd agreement) are the defaults; nothing else is measured here any more.
-    const Cfg cfgs[] = {{"agreed-2 (isolated loss holds, 5% over 500 fragments, raise on timely rounds)", BulkRateConfig{}}};
+    const Cfg cfgs[] = {{"agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)", BulkRateConfig{}}};
     struct Case {
       const Image* im;
       const char* size;
@@ -394,27 +409,32 @@ int main(int argc, char** argv) {
     // 1 % loss <= 25 s. 1 MiB is measured alongside with the same bounds for reference.
     // 2nd agreement ⑤: the lossy-path gate is 30 s, over several fixed loss seeds (every seed is
     // reported and judged -- none is picked). The earlier 25 s failures stay in the older logs.
-    static Impair wanSeeds[5];
-    for (uint32_t s = 0; s < 5; ++s) {
+    // 3rd agreement ③: a PROVISIONAL cap of 45 s (not final), over the earlier seeds 1-5 and five
+    // independent seeds chosen in advance (11-15). The 30 s target is still printed for every run
+    // (target30=met/missed) -- its failures stay on record, the threshold is not raised again.
+    static Impair wanSeeds[10];
+    static const char* wanNames[10] = {"40ms/1%/8M seed1",  "40ms/1%/8M seed2",  "40ms/1%/8M seed3",  "40ms/1%/8M seed4",
+                                       "40ms/1%/8M seed5",  "40ms/1%/8M seed11", "40ms/1%/8M seed12", "40ms/1%/8M seed13",
+                                       "40ms/1%/8M seed14", "40ms/1%/8M seed15"};
+    for (uint32_t s = 0; s < 10; ++s) {
       wanSeeds[s] = wan;
-      wanSeeds[s].seed = s + 1;
+      wanSeeds[s].seed = s < 5 ? s + 1 : s + 6;
     }
-    static const char* wanNames[5] = {"40ms/1%/8M seed1", "40ms/1%/8M seed2", "40ms/1%/8M seed3", "40ms/1%/8M seed4",
-                                      "40ms/1%/8M seed5"};
     std::vector<Case> cases = {{&img5m, "5 MiB", nullptr, "LAN", 5.0, 60}};
-    for (uint32_t s = 0; s < (quick ? 1u : 5u); ++s) cases.push_back({&img5m, "5 MiB", &wanSeeds[s], wanNames[s], 30.0, 90});
+    for (uint32_t s = 0; s < (quick ? 1u : 10u); ++s) cases.push_back({&img5m, "5 MiB", &wanSeeds[s], wanNames[s], 45.0, 120});
     if (!quick) {
       cases.push_back({&img1m, "1 MiB", nullptr, "LAN", 5.0, 40});
-      cases.push_back({&img1m, "1 MiB", &wanSeeds[0], wanNames[0], 30.0, 60});
+      cases.push_back({&img1m, "1 MiB", &wanSeeds[0], wanNames[0], 45.0, 60});
     }
     for (const Cfg& c : cfgs) {
       for (const Case& k : cases) {
         char label[160];
         std::snprintf(label, sizeof(label), "%s, %s, %s", k.size, k.path, c.name);
         const Run r = transfer(*k.im, k.impair, c.rate, label, k.limitS);
-        std::printf("MEASURE  cfg=\"%s\" size=%s path=%s published=%d seconds=%.1f gate=%.0f verdict=%s lastRateBps=%u resends=%llu\n",
+        std::printf("MEASURE  cfg=\"%s\" size=%s path=%s published=%d seconds=%.1f gate=%.0f verdict=%s target30=%s lastRateBps=%u resends=%llu\n",
                     c.name, k.size, k.path, r.published ? 1 : 0, r.seconds, k.gateS,
-                    (r.published && r.seconds <= k.gateS) ? "within" : "OVER", r.lastRate,
+                    (r.published && r.seconds <= k.gateS) ? "within" : "OVER",
+                    k.impair ? ((r.published && r.seconds <= 30.0) ? "met" : "missed") : "n/a", r.lastRate,
                     static_cast<unsigned long long>(r.resends));
         if (&c == &cfgs[0]) {
           char g[200];

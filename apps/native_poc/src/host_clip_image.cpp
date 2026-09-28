@@ -154,6 +154,10 @@ ControlClipImageOfferReplyMessage HostClipImageService::HandleOffer(const Contro
   // The bulk stream for this transfer: a fresh channel on the generation's ids, so a late datagram
   // of any earlier transfer names a stream nobody listens on.
   bulk_.Reset();
+  {
+    const char* e = std::getenv("REMOTE60_CLIP_BULK_TRACE");
+    traceChunks_ = e && e[0] == '2';
+  }
   lastChunkUs_ = 0;
   rxRateBps_ = 0;
   // Pull size sized to the arrival rate: a measurement option only (run5 showed no gain), off unless
@@ -239,6 +243,14 @@ void HostClipImageService::Run() {
         ++counters_.chunksDropped;
       } else {
         ++counters_.chunksAccepted;
+        if (traceChunks_) {
+          LARGE_INTEGER f, c;
+          QueryPerformanceFrequency(&f);
+          QueryPerformanceCounter(&c);
+          const uint64_t q = static_cast<uint64_t>(c.QuadPart) / f.QuadPart * 1000000ull +
+                             static_cast<uint64_t>(c.QuadPart) % f.QuadPart * 1000000ull / f.QuadPart;
+          std::printf("HOSTCHUNK off=%u doneAt=%llu\n", h.offset, static_cast<unsigned long long>(q));
+        }
         if (res == ClipImageReceiver::ChunkResult::Complete) {
           // The channel acknowledged the last chunk as it assembled it; nothing more rides it.
           CloseBulk();

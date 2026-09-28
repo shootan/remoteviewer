@@ -230,16 +230,18 @@ class ClipImageClient {
   // datagrams. One lost acknowledgement makes the channel resend a whole message -- ~15 datagrams --
   // and counting each of them as a loss read one lost ack as 15 % loss (measured: 40 ms / 1 % path).
   std::set<uint32_t> resentSeqsInWindow_;
-  // The loss ratio's parts (②): original fragments first sent, those that needed a resend (each
-  // once), and whole messages resent by the timer (RTO), since the last evaluation.
-  uint32_t uniqueSentWin_ = 0, uniqueLostWin_ = 0, rtoWin_ = 0;
-  std::set<uint64_t> resentKeys_;               // (seq << 16 | frag) already counted as lost
-  std::map<uint32_t, uint32_t> resentFragsPerSeq_;
+  // The loss ratio's parts (② / 3rd agreement ①), since the last evaluation: see BulkLossCounter.
+  BulkLossCounter loss_;
   // Chunks the host has already confirmed (a pull named them as its trigger). A timer resend of one of
   // these is a lost ACK, not lost progress: neither an RTO nor loss (the resends are charged to the
   // pacer's budget all the same).
   std::set<uint32_t> confirmedOffsets_;
-  uint64_t spuriousRtoResends_ = 0;
+  // Diagnostics (REMOTE60_CLIP_BULK_TRACE=2): each chunk's timeline, QPC microseconds.
+  struct ChunkTimes {
+    uint64_t pullAt = 0, enqAt = 0, firstTx = 0, lastTx = 0, lastAnyTx = 0;
+    bool resent = false;
+  };
+  std::map<uint32_t, ChunkTimes> chunkTimes_;
 };
 
 }  // namespace remote60::native_poc
