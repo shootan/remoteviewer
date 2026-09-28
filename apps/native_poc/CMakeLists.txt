@@ -186,6 +186,90 @@ target_link_libraries(remote60_secure_input_service PRIVATE
   remote60_sealed_unlock
 )
 
+# The Medium-integrity clipboard helper the elevated host starts as the interactive user
+# (file-copy-helper r1): an async IDataObject for files on the viewer's PC, and the user's own
+# rights for files the user copied here. One pipe to the host, no network. Not yet in the
+# installer payload -- the network side (control 65~79, bulk) and the host wiring come with the
+# file-copy task; this ships once that lands.
+add_executable(remote60_file_copy_helper
+  src/file_copy_helper_main.cpp
+  src/file_copy_data_object.cpp
+  src/file_copy_local_files.cpp
+)
+set_target_properties(remote60_file_copy_helper PROPERTIES OUTPUT_NAME "GNLinkClipHelper")
+target_include_directories(remote60_file_copy_helper PRIVATE src)
+target_link_libraries(remote60_file_copy_helper PRIVATE ole32 shell32 shlwapi user32 uuid)
+if(MSVC)
+  target_compile_options(remote60_file_copy_helper PRIVATE /utf-8)
+endif()
+
+# file-copy-helper r1 tests.
+# The pipe codec: every message round-trips, every bound refuses, a truncated / padded payload is
+# rejected, and names that may not travel do not. Pure.
+add_executable(remote60_file_copy_pipe_test
+  src/file_copy_pipe_test.cpp
+)
+target_include_directories(remote60_file_copy_pipe_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_file_copy_pipe_test PRIVATE /utf-8)
+endif()
+
+# r2: the frame reader against the poll-boundary race that lost PasteBegin / PasteEnd in r1 --
+# thousands of frames at 0-2 ms gaps polled at 1 ms, a frame arriving in pieces across timed-out
+# polls, and the error vocabulary. The pre-r2 receive path is kept in the test to measure its loss.
+add_executable(remote60_file_copy_pipe_io_test
+  src/file_copy_pipe_io_test.cpp
+  src/file_copy_helper_host.cpp
+)
+target_include_directories(remote60_file_copy_pipe_io_test PRIVATE src)
+target_link_libraries(remote60_file_copy_pipe_io_test PRIVATE advapi32 wtsapi32 bcrypt)
+if(MSVC)
+  target_compile_options(remote60_file_copy_pipe_io_test PRIVATE /utf-8)
+endif()
+
+# r3: the data object against a transport that re-enters it -- a new paste or a cleared offer
+# arriving while a descriptor / Read wait pumps must not confirm the new operation with the old
+# reply nor hand bytes to a stream of a paste that ended. Deterministic: no shell, no pipe.
+add_executable(remote60_file_copy_data_object_test
+  src/file_copy_data_object_test.cpp
+  src/file_copy_data_object.cpp
+)
+target_include_directories(remote60_file_copy_data_object_test PRIVATE src)
+target_link_libraries(remote60_file_copy_data_object_test PRIVATE ole32 shell32 shlwapi user32 uuid)
+if(MSVC)
+  target_compile_options(remote60_file_copy_data_object_test PRIVATE /utf-8)
+endif()
+
+# The helper's local-file side in process: stat / classify, pin with FILE_SHARE_READ (a writer is
+# refused, and refused while pinned), FileId check (replaced file refused), size / time check,
+# positional reads, lease expiry with a fake clock, unpin. Files live in the repo's scratch root.
+add_executable(remote60_file_copy_local_files_test
+  src/file_copy_local_files_test.cpp
+  src/file_copy_local_files.cpp
+)
+target_include_directories(remote60_file_copy_local_files_test PRIVATE src)
+target_link_libraries(remote60_file_copy_local_files_test PRIVATE remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_file_copy_local_files_test PRIVATE /utf-8)
+endif()
+
+# The real helper, started the way the product will (HelperLink: pipe + nonce + Job) but as this
+# user (the Medium test launch), on a private window station so the interactive clipboard is never
+# touched; this test is the host and, re-launched on that station, the Explorer-equivalent paste
+# consumer (the destination folder's IDropTarget, driven as SHSimulateDrop does). Token refusals,
+# handshake refusals, both directions, the counter-examples, and the helper's exit.
+add_executable(remote60_file_copy_helper_e2e_test
+  src/file_copy_helper_e2e_test.cpp
+  src/file_copy_helper_host.cpp
+)
+target_include_directories(remote60_file_copy_helper_e2e_test PRIVATE src)
+target_link_libraries(remote60_file_copy_helper_e2e_test PRIVATE
+  remote60_test_scratch_dir ole32 shell32 shlwapi user32 advapi32 wtsapi32 bcrypt uuid)
+if(MSVC)
+  target_compile_options(remote60_file_copy_helper_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_file_copy_helper_e2e_test remote60_file_copy_helper)
+
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_startup.cpp
