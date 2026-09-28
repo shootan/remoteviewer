@@ -218,6 +218,16 @@ class ViewerKeyPanel(
 
     val isOpen: Boolean get() = root.visibility == View.VISIBLE
 
+    /**
+     * Height the panel must leave to the rest of the viewer. In landscape the rail stands beside
+     * the picture above the panel, and four 48dp buttons need their room (apk-ui r3d).
+     */
+    var reservedHeightPx: Int = 0
+        set(value) {
+            field = value
+            if (isOpen) applyPanelHeight()
+        }
+
     fun toggle() {
         if (isOpen) hide() else show()
     }
@@ -235,8 +245,9 @@ class ViewerKeyPanel(
             val parentHeight = (root.parent as? View)?.height ?: 0
             if (parentHeight > 0) {
                 val share = if (showExtraRows) 0.62f else 0.5f
+                val wanted = (parentHeight * share).toInt()
                 root.layoutParams = root.layoutParams.also {
-                    it.height = (parentHeight * share).toInt()
+                    it.height = wanted.coerceAtMost(parentHeight - reservedHeightPx).coerceAtLeast(0)
                 }
                 root.requestLayout()
             }

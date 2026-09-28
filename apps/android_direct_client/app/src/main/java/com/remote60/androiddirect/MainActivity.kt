@@ -220,6 +220,45 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerRotateButton.text =
             getString(if (forcePortrait) R.string.ui_rotate_portrait else R.string.ui_rotate_auto)
         layoutViewerSheets(deviceLandscape)
+        // The key panel may take no more than leaves the side rail its four 48dp buttons.
+        viewerKeyPanel?.reservedHeightPx = if (deviceLandscape) railMinimumHeightPx() else 0
+        fitRailCells()
+    }
+
+    /** Four buttons at the 48dp floor, their 1dp margins, and the bar's padding. */
+    private fun railMinimumHeightPx(): Int =
+        viewerControlsBar.childCount * (dp(48f) + dp(2f)) + viewerControlsBar.paddingTop + viewerControlsBar.paddingBottom
+
+    /**
+     * Sizes the rail's buttons to the length the bar actually has (apk-ui r3d). With the key panel
+     * up in landscape the bar is shorter than four 56dp buttons, and the top and bottom ones were
+     * cut off. The buttons shrink toward 48dp -- never below -- and tighten their padding so the
+     * icon and label still fit.
+     */
+    private fun fitRailCells() {
+        if (!::viewerControlsBar.isInitialized) return
+        val vertical = viewerControlsBar.orientation == LinearLayout.VERTICAL
+        val count = viewerControlsBar.childCount
+        if (count == 0) return
+        val full = resources.getDimensionPixelSize(R.dimen.ui_rail_cell)
+        val length = if (vertical) viewerControlsBar.height else viewerControlsBar.width
+        val available = length - (if (vertical) viewerControlsBar.paddingTop + viewerControlsBar.paddingBottom
+            else viewerControlsBar.paddingLeft + viewerControlsBar.paddingRight)
+        val cell = if (!vertical || length <= 0) full
+            else (available / count - dp(2f)).coerceIn(dp(48f), full)
+        val compact = cell < full
+        val margin = if (compact) dp(1f) else dp(2f)
+        for (i in 0 until count) {
+            val child = viewerControlsBar.getChildAt(i) as? TextView ?: continue
+            val lp = child.layoutParams as LinearLayout.LayoutParams
+            if (lp.height == cell && lp.width == full && lp.topMargin == margin) continue
+            lp.width = full
+            lp.height = cell
+            lp.setMargins(margin, margin, margin, margin)
+            child.layoutParams = lp
+            child.compoundDrawablePadding = if (compact) 0 else dp(2f)
+            child.setPadding(child.paddingLeft, if (compact) dp(2f) else dp(6f), child.paddingRight, if (compact) dp(1f) else dp(4f))
+        }
     }
 
     /**
@@ -1390,6 +1429,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
         viewerMenuButton.setOnClickListener { openViewerMenu() }
+        // The bar's length changes when the key panel opens or closes, not only on rotation.
+        viewerControlsBar.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) viewerControlsBar.post { fitRailCells() }
+        }
         viewerKeyPanel = ViewerKeyPanel(
             this,
             findViewById(R.id.viewerKeyPanel),
@@ -1628,6 +1671,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (viewerImeCaptureView.hasFocus()) {
                 hideViewerKeyboard("rail_keyboard")
             } else {
+                viewerKeyPanel?.reservedHeightPx =
+                    if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) railMinimumHeightPx() else 0
                 viewerKeyPanel?.toggle()
             }
         }
