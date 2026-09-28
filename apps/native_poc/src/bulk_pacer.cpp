@@ -86,6 +86,14 @@ bool BulkPacer::Enqueue(const void* data, size_t len) {
       ++stats_.resendsCoalesced;  // the same datagram is still waiting: sending it twice helps nobody
       return true;
     }
+    if (isData) {
+      const auto sent = sentKeys_.find(key);
+      const uint64_t guard = resendGuardUs_.load(std::memory_order_relaxed);
+      if (sent != sentKeys_.end() && guard && NowUs() - sent->second < guard) {
+        ++stats_.resendsTooSoon;  // it only just left: a NACK that crossed it, not a loss
+        return true;
+      }
+    }
     if (queue_.size() >= kMaxQueuedDatagrams) {
       ++stats_.droppedQueueFull;
       return false;
@@ -159,12 +167,14 @@ void BulkPacer::Run() {
         Key key;
         if (DataKey(dgram.data(), dgram.size(), &key)) {
           queuedKeys_.erase(key);
-          resend = !sentKeys_.insert(key).second;
+          const auto ins = sentKeys_.insert({key, 0});
+          resend = !ins.second;
+          ins.first->second = NowUs();
           if (resend) ++stats_.resendsAfterTransmit;
           const uint32_t seq = std::get<1>(key);
           if (seq > newestSeq_) newestSeq_ = seq;
           // Only the recent messages can still be retransmitted (the channel is head-only).
-          while (!sentKeys_.empty() && std::get<1>(*sentKeys_.begin()) + 64 < newestSeq_) {
+          while (!sentKeys_.empty() && std::get<1>(sentKeys_.begin()->first) + 64 < newestSeq_) {
             sentKeys_.erase(sentKeys_.begin());
           }
         }

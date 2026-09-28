@@ -257,7 +257,7 @@ struct Rig {
     svc.SetBulkNegotiated(bulkNegotiated);
     client.Start([this](const void* d, size_t n) { return send(clientSock, static_cast<const char*>(d), static_cast<int>(n), 0) > 0; },
                  [] { return uint64_t{0}; }, [] { return false; }, 1200, rate, [](const std::string& line) {
-                   std::printf("    [client] %s\n", line.c_str());
+                   std::printf("    [client %.3f] %s\n", BulkPacer::NowUs() / 1e6, line.c_str());
                  });
     client.SetBulkNegotiated(bulkNegotiated);
     client.SetHostSupports(true);
@@ -318,6 +318,7 @@ Run transfer(const Image& im, const Impair* impair, BulkRateConfig rate, const c
   if (!rig.Start(impair, rate)) return out;
   LoopbackLink link(&rig.svc, 3);
   const uint64_t t0 = now_us();
+  std::printf("    [t0 %.3f] submit\n", t0 / 1e6);
   rig.client.SubmitSnapshot(snapshot_of(im, 500));
   const bool ok = rig.Drive(link, t0 + limitS * 1000000ull, [&] {
     const auto c = rig.client.GetCounters();
@@ -379,18 +380,8 @@ int main(int argc, char** argv) {
       BulkRateConfig rate;
     };
     // The agreed values are the defaults; the loss-tolerance variant is measured for comparison only.
-    BulkRateConfig hz;
-    hz.lossTolerancePerMille = 20;
-    hz.lossHorizonDatagrams = 500;
-    BulkRateConfig cand;  // under discussion: loss only with an RTT rise or > 5 % per round; raise on a timely round
-    cand.lossRule = BulkLossRule::RttOrRoundRate;
-    cand.raiseRule = BulkRaiseRule::TimelyRound;
-    BulkRateConfig cand500 = cand;
-    cand500.lossHorizonDatagrams = 500;
-    const Cfg cfgs[] = {{"agreed (round x2 -> +25%/s, /2 per event, 16M)", BulkRateConfig{}},
-                        {"agreed + loss judged over 500 datagrams at 20/1000", hz},
-                        {"candidate: loss w/ RTT rise or >5%/round, raise on timely round", cand},
-                        {"candidate, loss rate over 500 datagrams", cand500}};
+    // The agreed values (2nd agreement) are the defaults; nothing else is measured here any more.
+    const Cfg cfgs[] = {{"agreed-2 (isolated loss holds, 5% over 500 fragments, raise on timely rounds)", BulkRateConfig{}}};
     struct Case {
       const Image* im;
       const char* size;
@@ -401,10 +392,20 @@ int main(int argc, char** argv) {
     };
     // Gates (agreed, fixed test conditions, not an SLA): 5 MiB on an idle LAN <= 5 s, on RTT 40 ms /
     // 1 % loss <= 25 s. 1 MiB is measured alongside with the same bounds for reference.
-    std::vector<Case> cases = {{&img5m, "5 MiB", nullptr, "LAN", 5.0, 60}, {&img5m, "5 MiB", &wan, "40ms/1%/8M", 25.0, 90}};
+    // 2nd agreement ⑤: the lossy-path gate is 30 s, over several fixed loss seeds (every seed is
+    // reported and judged -- none is picked). The earlier 25 s failures stay in the older logs.
+    static Impair wanSeeds[5];
+    for (uint32_t s = 0; s < 5; ++s) {
+      wanSeeds[s] = wan;
+      wanSeeds[s].seed = s + 1;
+    }
+    static const char* wanNames[5] = {"40ms/1%/8M seed1", "40ms/1%/8M seed2", "40ms/1%/8M seed3", "40ms/1%/8M seed4",
+                                      "40ms/1%/8M seed5"};
+    std::vector<Case> cases = {{&img5m, "5 MiB", nullptr, "LAN", 5.0, 60}};
+    for (uint32_t s = 0; s < (quick ? 1u : 5u); ++s) cases.push_back({&img5m, "5 MiB", &wanSeeds[s], wanNames[s], 30.0, 90});
     if (!quick) {
       cases.push_back({&img1m, "1 MiB", nullptr, "LAN", 5.0, 40});
-      cases.push_back({&img1m, "1 MiB", &wan, "40ms/1%/8M", 25.0, 60});
+      cases.push_back({&img1m, "1 MiB", &wanSeeds[0], wanNames[0], 30.0, 60});
     }
     for (const Cfg& c : cfgs) {
       for (const Case& k : cases) {
@@ -529,9 +530,18 @@ int main(int argc, char** argv) {
     char buf[200];
     std::snprintf(buf, sizeof(buf), "a budget drop mid-transfer applies at once: %u -> %u bps in %.0f ms (<= 100)", before, after, ms);
     check(buf, before >= 4000000 && after <= 1000000 && ms <= 100.0);
+    // ④ a budget of 0 sends nothing -- not the 64 kbps floor -- and its end resumes the transfer
     rig.client.SetUplinkBudgetBps(0);
+    Sleep(300);  // let the pacer drain what was already admitted
+    const uint64_t dg0 = rig.bulkDatagramsToHost.load();
+    rig.Drive(link, now_us() + 1500000, [] { return false; });
+    const uint64_t dg1 = rig.bulkDatagramsToHost.load();
+    std::snprintf(buf, sizeof(buf), "④ a budget of 0: %llu bulk datagrams reached the host in 1.5 s (acknowledgements only, no data)",
+                  static_cast<unsigned long long>(dg1 - dg0));
+    check(buf, dg1 - dg0 <= 4);
+    rig.client.ClearUplinkBudget();
     const bool ok = rig.Drive(link, now_us() + 60000000, [&] { return rig.client.GetCounters().published > 0; });
-    check("...and the transfer still completes intact", ok && rig.pub.mismatches == 0);
+    check("...and the transfer still completes intact once the budget returns", ok && rig.pub.mismatches == 0);
     rig.Stop();
   }
   // ---- an old host (no bulk channel negotiated): nothing image-related is sent at all

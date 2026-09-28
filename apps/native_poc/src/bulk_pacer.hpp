@@ -11,6 +11,11 @@
 //          Acknowledgements (ControlAck / ControlNack) jump the queue: the host's pulls ride a
 //          head-only channel, so an ack stuck behind a second of queued data would stall the very
 //          pull that asks for more. They still pay -- in debt the next data datagram repays.
+//          A resend of a datagram that left less than the resend guard ago is dropped too: the
+//          receiver's NACK wait (90 ms, the control channel's, unchanged by agreement) is shorter than
+//          the gap between datagrams at low rates, so its NACK races fragments still in flight --
+//          resending them would only duplicate them and read as loss. A real loss is asked for again
+//          by the next NACK, after the guard.
 //          A resend of a datagram that is still queued is a no-op -- at 64 kbps a 16 KiB message
 //          takes two seconds to leave, and the channel's retry would otherwise double it; a resend
 //          of one that already left counts as loss, the controller's first evidence.
@@ -24,6 +29,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <map>
 #include <set>
 #include <thread>
 #include <tuple>
@@ -90,12 +96,16 @@ class BulkPacer {
     uint64_t droppedQueueFull = 0;
     uint64_t yields = 0;
     uint64_t idleUs = 0;                // time with nothing queued (app-limited evidence)
+    uint64_t resendsTooSoon = 0;        // resends of a datagram that had only just left: dropped
   };
 
   ~BulkPacer() { Stop(); }
 
   bool Start(RawSendFn send, RateFn rate, YieldFn yield, TransmittedFn transmitted);
   void Stop();
+
+  /** A resend of a datagram sent less than this long ago is dropped (0 = no guard). */
+  void SetResendGuardUs(uint64_t us) { resendGuardUs_.store(us, std::memory_order_relaxed); }
 
   /** Non-blocking: queue one datagram (the channel's SendFn). False when full or stopped. */
   bool Enqueue(const void* data, size_t len);
@@ -127,7 +137,8 @@ class BulkPacer {
   std::deque<std::vector<uint8_t>> queue_;
   size_t queuedAcks_ = 0;  // acknowledgements at the front of queue_
   std::set<Key> queuedKeys_;
-  std::set<Key> sentKeys_;          // bounded: pruned by message sequence
+  std::map<Key, uint64_t> sentKeys_;  // when each recent datagram last left; pruned by message sequence
+  std::atomic<uint64_t> resendGuardUs_{0};
   uint32_t newestSeq_ = 0;
   Stats stats_;
   std::atomic<bool> running_{false};

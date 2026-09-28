@@ -44,6 +44,7 @@ struct Impair {
   // (drop-tail). A real rate limit has a finite buffer; an unbounded one turns any overshoot into
   // a delay that never drains.
   uint64_t maxQueueUs = 200000;
+  uint32_t seed = 1;  // the loss pattern
 };
 
 class Proxy {
@@ -98,7 +99,7 @@ class Proxy {
     return s;
   }
   void Pump(SOCKET s, bool up) {
-    std::mt19937 rng(up ? 1 : 2);
+    std::mt19937 rng(im_.seed * 2 + (up ? 1 : 0));  // fixed per seed: runs are repeatable, seeds differ
     uint8_t buf[2048];
     while (running_) {
       sockaddr_in from{};

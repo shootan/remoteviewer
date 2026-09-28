@@ -77,7 +77,7 @@ inline uint64_t clip_bulk_retransmit_us(uint32_t rateBps, uint64_t rttUs = 0) {
 /**
  * BulkRateConfig for the viewer's uplink: the agreed values (bulk_rate_controller.hpp defaults), each
  * reachable without a rebuild for measurement -- REMOTE60_CLIP_BULK_EVAL=wall, _SS=num/den,
- * _CA_PCT, _CAP_BPS, _START_BPS, _LOSS_PERMILLE.
+ * _CA_PCT, _CAP_BPS, _START_BPS, _LOSS_HIGH_PM.
  */
 BulkRateConfig clip_bulk_rate_config_from_env();
 
@@ -110,11 +110,14 @@ class ClipImageClient {
   void SetBulkNegotiated(bool v) { bulkNegotiated_.store(v, std::memory_order_release); }
   /**
    * The same-direction (viewer uplink) wire budget less media, FEC, retransmission and control, in
-   * bits/s; 0 = unknown. Unknown is the default and the policy is then the configured ceiling alone
+   * bits/s; 0 = send nothing. Unknown (ClearUplinkBudget, the default) means the configured ceiling alone
    * (16 Mbps) with congestion deciding -- the video the host sends the OTHER way is never subtracted.
    * A shrink applies at once.
    */
   void SetUplinkBudgetBps(uint32_t bps) { budgetBps_.store(bps, std::memory_order_relaxed); }
+  /** Back to "no budget known" (the configured ceiling alone). */
+  void ClearUplinkBudget() { budgetBps_.store(kBudgetUnknown, std::memory_order_relaxed); }
+  static constexpr uint32_t kBudgetUnknown = 0xFFFFFFFFu;
 
   /** Pong carried kCaptureFlagClipboardImageV1. */
   void SetHostSupports(bool v) { hostSupports_.store(v, std::memory_order_release); }
@@ -155,7 +158,7 @@ class ClipImageClient {
     uint64_t srttUs = 0;
     // Rate decisions this transfer (diagnostics for the report).
     uint64_t raises = 0, lowers = 0, pauses = 0, recoveryHolds = 0, evaluations = 0;
-    uint64_t lossEvents = 0, channelFragmentRetransmits = 0;
+    uint64_t lossEvents = 0, channelFragmentRetransmits = 0, rtoEvents = 0;
     uint8_t lastState = 0, lastReason = 0;
   };
   Counters GetCounters() const {
@@ -215,7 +218,7 @@ class ClipImageClient {
   std::thread serveThread_;
   std::atomic<bool> serving_{false};
   std::atomic<uint32_t> rateNow_{0};
-  std::atomic<uint32_t> budgetBps_{0};
+  std::atomic<uint32_t> budgetBps_{kBudgetUnknown};  // 0 is a real budget: send nothing (④)
   uint32_t txStreamId_ = 0;
 
   // Rate evidence (serving thread + pacer callback).
@@ -227,6 +230,16 @@ class ClipImageClient {
   // datagrams. One lost acknowledgement makes the channel resend a whole message -- ~15 datagrams --
   // and counting each of them as a loss read one lost ack as 15 % loss (measured: 40 ms / 1 % path).
   std::set<uint32_t> resentSeqsInWindow_;
+  // The loss ratio's parts (②): original fragments first sent, those that needed a resend (each
+  // once), and whole messages resent by the timer (RTO), since the last evaluation.
+  uint32_t uniqueSentWin_ = 0, uniqueLostWin_ = 0, rtoWin_ = 0;
+  std::set<uint64_t> resentKeys_;               // (seq << 16 | frag) already counted as lost
+  std::map<uint32_t, uint32_t> resentFragsPerSeq_;
+  // Chunks the host has already confirmed (a pull named them as its trigger). A timer resend of one of
+  // these is a lost ACK, not lost progress: neither an RTO nor loss (the resends are charged to the
+  // pacer's budget all the same).
+  std::set<uint32_t> confirmedOffsets_;
+  uint64_t spuriousRtoResends_ = 0;
 };
 
 }  // namespace remote60::native_poc

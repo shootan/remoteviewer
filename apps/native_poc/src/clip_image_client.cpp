@@ -69,17 +69,8 @@ BulkRateConfig clip_bulk_rate_config_from_env() {
     const unsigned long v = std::strtoul(e, nullptr, 10);
     if (v >= c.floorBps) c.capBps = static_cast<uint32_t>(v);
   }
-  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_PERMILLE")) {
-    c.lossTolerancePerMille = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-  }
-  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_HORIZON")) {
-    c.lossHorizonDatagrams = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-  }
-  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_RULE")) {
-    if (std::strcmp(e, "rtt_or_rate") == 0) c.lossRule = BulkLossRule::RttOrRoundRate;
-  }
-  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_RAISE_RULE")) {
-    if (std::strcmp(e, "timely") == 0) c.raiseRule = BulkRaiseRule::TimelyRound;
+  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_HIGH_PM")) {
+    c.lossHighPerMille = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
   }
   if (const char* e = std::getenv("REMOTE60_CLIP_BULK_START_BPS")) {
     const unsigned long v = std::strtoul(e, nullptr, 10);
@@ -384,7 +375,7 @@ bool ClipImageClient::OnDatagram(const void* data, size_t len) {
 void ClipImageClient::OpenBulk() {
   bulkClosePending_ = false;
   counters_.raises = counters_.lowers = counters_.pauses = counters_.recoveryHolds = counters_.evaluations = 0;
-  counters_.lossEvents = counters_.channelFragmentRetransmits = 0;  // this transfer's channel: nothing queued for closing applies to it
+  counters_.lossEvents = counters_.channelFragmentRetransmits = counters_.rtoEvents = 0;  // this transfer's channel: nothing queued for closing applies to it
   const uint32_t gen = sender_.bulkGen();
   txStreamId_ = bulk_stream_id(gen, kBulkStreamClientToHost);
   {
@@ -393,6 +384,11 @@ void ClipImageClient::OpenBulk() {
     lastTxUs_.clear();
     tainted_.clear();
     resentSeqsInWindow_.clear();
+    resentKeys_.clear();
+    resentFragsPerSeq_.clear();
+    confirmedOffsets_.clear();
+    spuriousRtoResends_ = 0;
+    uniqueSentWin_ = uniqueLostWin_ = rtoWin_ = 0;
   }
   bulk_.Reset();
   {
@@ -424,6 +420,25 @@ void ClipImageClient::OnTransmitted(const uint8_t* data, size_t len, uint64_t no
     return;
   }
   std::lock_guard<std::mutex> ev(evMu_);
+  if (!resend) {
+    ++uniqueSentWin_;  // an original fragment's first transmission: the loss ratio's denominator
+  } else {
+    // Each original fragment counts as lost once, however often it is resent (②); a message all
+    // of whose fragments came back through the resend path was resent whole by the timer (RTO).
+    const uint64_t key = (static_cast<uint64_t>(h.messageSeq) << 16) | h.fragIndex;
+    const auto so = seqToOffset_.find(h.messageSeq);
+    if (so != seqToOffset_.end() && confirmedOffsets_.count(so->second)) {
+      ++spuriousRtoResends_;  // the host already has this chunk: its ACK was lost on the way back
+      return;
+    }
+    if (resentKeys_.insert(key).second) {
+      ++uniqueLostWin_;
+      auto& n = resentFragsPerSeq_[h.messageSeq];
+      if (++n == h.fragCount) ++rtoWin_;
+    }
+    while (resentFragsPerSeq_.size() > 64) resentFragsPerSeq_.erase(resentFragsPerSeq_.begin());
+    if (resentKeys_.size() > 4096) resentKeys_.erase(resentKeys_.begin());
+  }
   if (h.fragIndex == 0 && len >= sizeof(UdpControlChunkHeader) + sizeof(ClipBulkChunkHeader)) {
     ClipBulkChunkHeader c{};
     std::memcpy(&c, data + sizeof(UdpControlChunkHeader), sizeof(c));
@@ -450,21 +465,24 @@ void ClipImageClient::ServeLoop() {
   std::vector<uint64_t> rtts;  // this evaluation's valid samples
   uint64_t rounds = 0;
   uint64_t windowStartUs = BulkPacer::NowUs();
-  uint64_t sentBytesBase = 0, sentDgramBase = 0, yieldBase = 0, idleBase = 0;
+  uint64_t sentBytesBase = 0, yieldBase = 0;
+  uint64_t completedBytes = 0;  // goodput evidence: chunks the host confirmed in this window
+  uint32_t pullsInWindow = 0;   // pending work: the host asked for more in this window
   uint64_t lastTimingRttUs = 0;
-  uint64_t lossDgramBase = 0;
   uint64_t lastPullUs = 0;
   uint32_t capInForce = rateConfig_.capBps;
-  std::deque<std::pair<uint64_t, uint64_t>> horizon;  // (datagrams, loss events) per evaluation
+  const char* traceEnv = std::getenv("REMOTE60_CLIP_BULK_TRACE");
+  const bool traceRate = traceEnv && traceEnv[0] == '1';
+  const uint64_t traceT0 = windowStartUs;
   rc.MarkEvaluated(windowStartUs, 0);
   while (serving_.load()) {
     const bool got = bulk_.Receive(&msg, 10);
     bulk_.Tick();
     const uint64_t now = BulkPacer::NowUs();
-    // The cap: the configured ceiling and, when one is known, the same-direction budget -- a shrink
-    // applies at once (SetCapBps). Unknown budget: the ceiling alone, and congestion decides.
+    // The cap is the budget: the configured ceiling and, when one is known, the same-direction
+    // budget -- applied at once, 0 included (④). Unknown budget: the ceiling alone.
     const uint32_t budget = budgetBps_.load(std::memory_order_relaxed);
-    const uint32_t cap = budget ? (std::min)(rateConfig_.capBps, budget) : rateConfig_.capBps;
+    const uint32_t cap = budget != kBudgetUnknown ? (std::min)(rateConfig_.capBps, budget) : rateConfig_.capBps;
     if (cap != capInForce) {
       rc.SetCapBps(cap);
       capInForce = cap;
@@ -488,14 +506,18 @@ void ClipImageClient::ServeLoop() {
         }
       }
       if (ok) {
+        ++pullsInWindow;
         if (s.completedChunk) {  // a pull naming a chunk counted before is not completedChunk (duplicate)
           ++rounds;
+          completedBytes += s.completedBytes;
           const uint32_t r = rateNow_.load(std::memory_order_relaxed);
           const uint64_t chunkSendUs = r ? static_cast<uint64_t>(s.completedBytes) * 8ull * 1000000ull / r : 0;
           uint64_t sample = 0;
           bool resent = false;
           {
             std::lock_guard<std::mutex> ev(evMu_);
+            confirmedOffsets_.insert(p.triggerOffset);
+            while (confirmedOffsets_.size() > 256) confirmedOffsets_.erase(confirmedOffsets_.begin());
             auto t = lastTxUs_.find(p.triggerOffset);
             if (t != lastTxUs_.end() && now > t->second) sample = now - t->second;
             resent = tainted_.count(p.triggerOffset) != 0 || t == lastTxUs_.end();
@@ -515,31 +537,12 @@ void ClipImageClient::ServeLoop() {
       BulkRateWindow w;
       {
         std::lock_guard<std::mutex> ev(evMu_);
-        w.lossOrNacks = static_cast<uint32_t>(resentSeqsInWindow_.size());
+        w.lossEvents = static_cast<uint32_t>(resentSeqsInWindow_.size());
         resentSeqsInWindow_.clear();
-      }
-      w.datagramsSent = static_cast<uint32_t>(ps.datagramsSent - sentDgramBase);
-      sentDgramBase = ps.datagramsSent;
-      if (rateConfig_.lossHorizonDatagrams) {
-        // Judge loss over the recent horizon rather than this one round: a lone loss in a
-        // 14-datagram round is 70 per mille, and says little about a path losing 1 % at random.
-        horizon.push_back({w.datagramsSent, w.lossOrNacks});
-        uint64_t d = 0, l = 0;
-        for (auto it = horizon.rbegin(); it != horizon.rend(); ++it) {
-          d += it->first;
-          l += it->second;
-          if (d >= rateConfig_.lossHorizonDatagrams) break;
-        }
-        while (horizon.size() > 1 && d >= rateConfig_.lossHorizonDatagrams) {
-          uint64_t dd = 0;
-          for (size_t k = 1; k < horizon.size(); ++k) dd += horizon[k].first;
-          if (dd < rateConfig_.lossHorizonDatagrams) break;
-          horizon.pop_front();
-        }
-        // A new loss still has to exist in THIS window to count as a new event.
-        if (w.lossOrNacks == 0) l = 0;
-        w.lossOrNacks = static_cast<uint32_t>(l);
-        w.datagramsSent = static_cast<uint32_t>(d);
+        w.uniqueFragmentsSent = uniqueSentWin_;
+        w.uniqueFragmentsLost = uniqueLostWin_;
+        w.rtoEvents = rtoWin_;
+        uniqueSentWin_ = uniqueLostWin_ = rtoWin_ = 0;
       }
       const uint64_t leftBytes = ps.bytesSent - sentBytesBase;
       sentBytesBase = ps.bytesSent;
@@ -547,26 +550,30 @@ void ClipImageClient::ServeLoop() {
         std::nth_element(rtts.begin(), rtts.begin() + rtts.size() / 2, rtts.end());
         w.pullRttP50Us = rtts[rtts.size() / 2];
       }
+      w.rttSamples = static_cast<uint32_t>(rtts.size());
+      w.pullSrttUs = rtt.srttUs();
+      // A NACK within about a round trip of the fragment's departure crossed it in flight.
+      pacer_.SetResendGuardUs(rtt.srttUs() ? rtt.srttUs() + rtt.srttUs() / 4 + 5000 : 0);
       w.pingRttUs = pingRtt_ ? pingRtt_() : 0;
       const uint64_t span = now > windowStartUs ? now - windowStartUs : 1;
-      // "Used its rate": what the pacer actually let out in the window.
       w.deliveredBps = leftBytes * 8ull * 1000000ull / span;
-      // Evidence a raise may not stand on: the pacer sat empty for a quarter of the window
-      // (app-limited -- waiting on pulls, not on the path), or it stood aside for control.
-      w.appLimited = (ps.idleUs - idleBase) * 4 > span;
-      w.lostDatagrams = static_cast<uint32_t>(ps.resendsAfterTransmit - lossDgramBase);
-      lossDgramBase = ps.resendsAfterTransmit;
-      w.rttSamples = static_cast<uint32_t>(rtts.size());
-      // With a horizon, the loss ratio is loss EVENTS over the horizon's datagrams: a whole-message
-      // resend after one lost acknowledgement is one loss, not fifteen.
-      if (rateConfig_.lossHorizonDatagrams) w.lostDatagrams = w.lossOrNacks;
+      w.goodputBps = completedBytes * 8ull * 1000000ull / span;
+      w.workPending = pullsInWindow > 0;
       w.yielded = ps.yields != yieldBase;
-      idleBase = ps.idleUs;
       yieldBase = ps.yields;
       // A window in which nothing left and nothing was lost says nothing about the path.
-      if (leftBytes > 0 || w.lossOrNacks > 0) {
-        const uint32_t lossNow = w.lossOrNacks;
+      if (leftBytes > 0 || w.lossEvents > 0) {
+        const uint32_t lossNow = w.lossEvents;
+        const uint32_t rateBefore = rc.rate();
         const BulkRateAction a = rc.Evaluate(w, now, rounds);
+        if (traceRate) {  // REMOTE60_CLIP_BULK_TRACE=1: one line per evaluation (diagnostics)
+          std::printf("RATETRACE t=%.3f rate=%u->%u act=%d lossEv=%u uLost=%u uSent=%u rto=%u pull=%llu n=%u ping=%llu "
+                      "good=%llu work=%d yield=%d lossState=%d plateau=%d\n",
+                      (now - traceT0) / 1e6, rateBefore, rc.rate(), static_cast<int>(a), w.lossEvents, w.uniqueFragmentsLost,
+                      w.uniqueFragmentsSent, w.rtoEvents, static_cast<unsigned long long>(w.pullRttP50Us), w.rttSamples,
+                      static_cast<unsigned long long>(w.pingRttUs), static_cast<unsigned long long>(w.goodputBps),
+                      w.workPending ? 1 : 0, w.yielded ? 1 : 0, static_cast<int>(rc.LossState()), rc.onPlateau() ? 1 : 0);
+        }
         std::lock_guard<std::mutex> lock(mu_);
         ++counters_.evaluations;
         counters_.lossEvents += lossNow ? 1 : 0;
@@ -574,9 +581,12 @@ void ClipImageClient::ServeLoop() {
         if (a == BulkRateAction::Lower) ++counters_.lowers;
         if (a == BulkRateAction::Pause) ++counters_.pauses;
         if (a == BulkRateAction::Hold && lossNow) ++counters_.recoveryHolds;
+        counters_.rtoEvents += w.rtoEvents;
       }
       rc.MarkEvaluated(now, rounds);
       rtts.clear();
+      completedBytes = 0;
+      pullsInWindow = 0;
       windowStartUs = now;
     }
     const uint32_t rate = rc.RateBps(now);
