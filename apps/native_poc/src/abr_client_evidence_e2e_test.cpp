@@ -418,12 +418,22 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::printf("host port %u (picked at run time)\n", kHostPort);
   kTargetTitle = remote60::native_poc::e2e::e2e_unique_window_title(L"remote60 abr evidence target");
-  wchar_t temp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, temp);
-  const std::wstring dir = !runDir.empty() ? runDir + L"\\"
-                                           : std::wstring(temp) + L"remote60_abr_ev_" +
-                                                 std::to_wstring(GetCurrentProcessId()) + L"\\";
-  CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+  // Staged inside the repository's test scratch root, never %TEMP%; removed when main returns,
+  // whichever way it returns (RV-20 r2). Only the directory this process created is ever removed.
+  // --run-dir names the CALLER's directory instead (the A/B scripts keep each run's evidence there,
+  // inside the repository): it is used as given and left for the caller.
+  remote60::native_poc::e2e::StagingDir staging;
+  std::wstring dir;
+  if (!runDir.empty()) {
+    CreateDirectoryW(runDir.c_str(), nullptr);
+    dir = runDir + L"\\";
+  } else {
+    if (!staging.Create(L"abr_ev")) {
+      std::printf("FAIL  %s\n", staging.why().c_str());
+      return 1;
+    }
+    dir = staging.path();
+  }
   const std::wstring me = self_path();
   if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
   const bool staged = CopyFileW(hostExe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
@@ -1195,16 +1205,11 @@ int wmain(int argc, wchar_t** argv) {
   (void)metricsStoppedAtSec;
 
   if (!keepLog.empty()) CopyFileW(hostLogPath.c_str(), keepLog.c_str(), FALSE);
-  for (int i = 0; i < 40; ++i) {
-    DeleteFileW((dir + L"host.log").c_str());
-    DeleteFileW((dir + L"GNLinkStream.exe").c_str());
-    DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-    remove_tree_under(dir + L"localappdata", dir);
-    if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) break;
-    Sleep(100);
+  if (runDir.empty()) {
+    check("the scratch directory is cleaned up", staging.Remove(), staging.why());
+  } else {
+    std::printf("NOTE  --run-dir: the caller's directory is kept (not a scratch directory)\n");
   }
-  check("the scratch directory is cleaned up",
-        GetFileAttributesW(dir.substr(0, dir.size() - 1).c_str()) == INVALID_FILE_ATTRIBUTES);
   WSACleanup();
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
             << " checks, " << gFailures << " failed)\n";

@@ -214,11 +214,14 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::printf("ports media %u control %u (picked at run time)\n", mediaPort, controlPort);
 
-  wchar_t temp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, temp);
-  const std::wstring dir = std::wstring(temp) + L"remote60_two_disp_" +
-                           std::to_wstring(GetCurrentProcessId()) + L"\\";
-  CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+  // Staged inside the repository's test scratch root, never %TEMP%; removed when main returns,
+  // whichever way it returns (RV-20 r2). Only the directory this process created is ever removed.
+  remote60::native_poc::e2e::StagingDir staging;
+  if (!staging.Create(L"two_disp")) {
+    std::printf("FAIL  %s\n", staging.why().c_str());
+    return 1;
+  }
+  const std::wstring dir = staging.path();
 
   const std::wstring me = self_path();
   const std::wstring myDir = directory_of(me);
@@ -430,15 +433,7 @@ int wmain(int argc, wchar_t** argv) {
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
   check("the host is gone when the job closes", hostGone);
 
-  for (int i = 0; i < 30; ++i) {
-    DeleteFileW((dir + L"GNLinkStream.exe").c_str());
-    DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-    remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
-    if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) break;
-    Sleep(100);
-  }
-  check("the scratch directory is cleaned up",
-        GetFileAttributesW(dir.substr(0, dir.size() - 1).c_str()) == INVALID_FILE_ATTRIBUTES);
+  check("the scratch directory is cleaned up", staging.Remove(), staging.why());
   WSACleanup();
 
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  ("

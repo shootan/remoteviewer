@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -30,6 +31,7 @@
 #include "host_bgra_scale.hpp"
 #include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
+#include "test_scratch_dir.hpp"
 #include "time_utils.hpp"
 
 namespace {
@@ -72,12 +74,21 @@ std::wstring directory_of(const std::wstring& path) {
   return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
 }
 
+// Inside the repository's test scratch root, never %TEMP% (RV-20 r2): only a directory this
+// process created, removed through the scratch boundary. Empty when the root was refused.
 std::wstring scratch_dir(const wchar_t* tag) {
-  wchar_t temp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, temp);
-  std::wstring dir = std::wstring(temp) + L"remote60_thumb_e2e_" + tag + L"_" +
-                     std::to_wstring(GetCurrentProcessId());
-  CreateDirectoryW(dir.c_str(), nullptr);
+  const std::wstring dir = remote60::native_poc::test_support::make_scratch_dir(std::wstring(L"thumb_") + tag);
+  // The shared run directory is tidied once at exit (non-recursive; harmless if not empty).
+  static const bool tidyRegistered = [] {
+    std::atexit([] { RemoveDirectoryW(remote60::native_poc::test_support::scratch_run_dir().c_str()); });
+    return true;
+  }();
+  (void)tidyRegistered;
+  if (dir.empty()) {
+    std::printf("FAIL  no scratch directory inside the repository: %s\n",
+                remote60::native_poc::test_support::scratch_root_problem().c_str());
+    return {};
+  }
   return dir + L"\\";
 }
 
@@ -310,13 +321,24 @@ bool copy_file(const std::wstring& from, const std::wstring& to) {
   return CopyFileW(from.c_str(), to.c_str(), FALSE) != FALSE;
 }
 
-void remove_dir(const std::wstring& dir) {
-  DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-  DeleteFileW((dir + L"probe.exe").c_str());
-  DeleteFileW((dir + L"result.txt").c_str());
+// Gone means FILE_NOT_FOUND / PATH_NOT_FOUND -- an unreadable path is not "gone".
+bool scratch_gone(const std::wstring& path) {
+  if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+  const DWORD e = GetLastError();
+  return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+}
+
+bool remove_dir(const std::wstring& dir) {
+  if (dir.empty()) return false;
   std::wstring trimmed = dir;
   if (!trimmed.empty() && trimmed.back() == L'\\') trimmed.pop_back();
-  RemoveDirectoryW(trimmed.c_str());
+  for (int i = 0; i < 40; ++i) {
+    if (scratch_gone(trimmed)) break;
+    (void)remote60::native_poc::test_support::remove_scratch_tree(trimmed);
+    if (scratch_gone(trimmed)) break;
+    Sleep(100);
+  }
+  return scratch_gone(trimmed);
 }
 
 }  // namespace
@@ -401,7 +423,8 @@ int wmain(int argc, wchar_t** argv) {
   // ---------------------------------------------------------------- the real helper
   {
     const std::wstring dir = scratch_dir(L"real");
-    const bool staged = copy_file(me, dir + L"probe.exe") &&
+    // An empty dir (the scratch root refused) must not turn these into relative paths in the CWD.
+    const bool staged = !dir.empty() && copy_file(me, dir + L"probe.exe") &&
                         copy_file(realHelper, dir + L"GNLinkCapture.exe");
     check("the real GNLinkCapture could be staged beside a probe", staged,
           staged ? std::string() : "is remote60_gdi_capture_worker built?");
@@ -443,14 +466,14 @@ int wmain(int argc, wchar_t** argv) {
         check("the timing comparison produced samples", false);
       }
     }
-    remove_dir(dir);
+    check("the scratch directory is removed", remove_dir(dir));
   }
 
   // ---------------------------------------------------------------- a helper that never answers
   {
     const std::wstring dir = scratch_dir(L"stall");
     // The fake helper IS this executable: invoked with --thumbnail it sleeps for two minutes.
-    const bool staged = copy_file(me, dir + L"probe.exe") &&
+    const bool staged = !dir.empty() && copy_file(me, dir + L"probe.exe") &&
                         copy_file(me, dir + L"GNLinkCapture.exe");
     check("a stalling helper could be staged", staged);
     if (staged) {
@@ -576,13 +599,13 @@ int wmain(int argc, wchar_t** argv) {
                   std::to_string(deadline / 1000) + "ms deadline");
       }
     }
-    remove_dir(dir);
+    check("the scratch directory is removed", remove_dir(dir));
   }
 
   // ---------------------------------------------------------------- no helper at all
   {
     const std::wstring dir = scratch_dir(L"missing");
-    const bool staged = copy_file(me, dir + L"probe.exe");
+    const bool staged = !dir.empty() && copy_file(me, dir + L"probe.exe");
     check("a probe with no helper beside it could be staged", staged);
     if (staged) {
       ProbeReport r;
@@ -592,7 +615,7 @@ int wmain(int argc, wchar_t** argv) {
       check("...reported immediately", ran && r.elapsedUs < 1000 * 1000,
             std::to_string(r.elapsedUs / 1000) + "ms");
     }
-    remove_dir(dir);
+    check("the scratch directory is removed", remove_dir(dir));
   }
 
   // The numbers the design settled on, asserted rather than assumed. Changing one of these is a
