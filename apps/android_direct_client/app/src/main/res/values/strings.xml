@@ -116,6 +116,7 @@
     <string name="hosts_connect_failed">Could not connect: %1$s</string>
     <string name="hosts_manual_button">Connect by IP instead</string>
     <string name="key_panel_tab_extra">F keys</string>
+    <string name="key_panel_tab_phone">Phone keyboard</string>
     <string name="virtual_mouse_roll">Roll</string>
     <string name="virtual_mouse_left">Left</string>
     <string name="virtual_mouse_right">Right</string>
@@ -190,8 +191,17 @@
     <string name="ui_rotate_auto">화면 방향 · 원격 화면 따라감</string>
     <string name="ui_rotate_portrait">화면 방향 · 세로 고정</string>
     <string name="ui_macro">매크로</string>
-    <string name="ui_connection_list">연결 목록</string>
-    <string name="ui_connection_list_description">뷰어를 닫고 연결 목록으로 돌아갑니다</string>
+    <string name="ui_connection_list">대상 선택 화면</string>
+    <string name="ui_connection_list_description">뷰어를 닫고 대상 선택 화면으로 돌아갑니다 (연결은 유지)</string>
+    <string name="ui_menu_disconnect">연결 해제</string>
+    <string name="ui_menu_disconnect_description">PC 와의 연결을 끊고 PC 목록으로 돌아갑니다</string>
+    <string name="ui_disconnect_confirm_title">연결을 끊을까요?</string>
+    <string name="ui_disconnect_confirm_message">PC 와의 연결을 끊고 PC 목록으로 돌아갑니다.</string>
+    <string name="ui_disconnect_confirm_yes">연결 해제</string>
+    <string name="ui_cancel">취소</string>
+    <string name="key_panel_hanyeong_han">한/영\n한</string>
+    <string name="key_panel_hanyeong_eng">한/영\n영</string>
+    <string name="key_panel_hanyeong_description">한/영 전환 (지금: %1$s)</string>
     <string name="ui_diagnostics">진단 로그</string>
     <string name="ui_rail_keyboard">키보드</string>
     <string name="ui_rail_shortcuts">단축키</string>

@@ -20,9 +20,23 @@
         android:orientation="horizontal">
 
         <Button
+            android:id="@+id/keyPanelTabKeys"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:background="@drawable/viewer_control_button_background"
+            android:minWidth="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/key_panel_tab_keys"
+            android:textAllCaps="false"
+            android:textColor="#F4F0E8"
+            android:textSize="12sp" />
+
+        <Button
             android:id="@+id/keyPanelTabShortcut"
             android:layout_width="wrap_content"
             android:layout_height="40dp"
+            android:layout_marginStart="8dp"
             android:background="@drawable/viewer_control_button_background"
             android:minWidth="0dp"
             android:paddingStart="14dp"
@@ -32,8 +46,10 @@
             android:textColor="#F4F0E8"
             android:textSize="12sp" />
 
+        <!-- apk-ui r3: the phone's own keyboard (text through the IME), for long Korean text or
+             anything the PC keyboard does not have. -->
         <Button
-            android:id="@+id/keyPanelTabKeys"
+            android:id="@+id/keyPanelTabPhone"
             android:layout_width="wrap_content"
             android:layout_height="40dp"
             android:layout_marginStart="8dp"
@@ -41,7 +57,7 @@
             android:minWidth="0dp"
             android:paddingStart="14dp"
             android:paddingEnd="14dp"
-            android:text="@string/key_panel_tab_keys"
+            android:text="@string/key_panel_tab_phone"
             android:textAllCaps="false"
             android:textColor="#F4F0E8"
             android:textSize="12sp" />

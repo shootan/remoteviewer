@@ -28,6 +28,8 @@ import android.view.ViewConfiguration
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import android.view.WindowInsetsController
 import android.view.inputmethod.InputMethodManager
 import android.graphics.Bitmap
@@ -951,9 +953,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerOverlayStatusText: TextView
     private lateinit var viewerSplit: LinearLayout
     private lateinit var viewerRotateButton: Button
-    private lateinit var viewerKeysButton: Button
     private lateinit var viewerClipboardButton: Button
     private var viewerKeyPanel: ViewerKeyPanel? = null
+    private var imeWasVisible = false
+    private var disconnectDialog: AlertDialog? = null
     private lateinit var viewerMenuButton: Button
     private lateinit var viewerDataUsageText: TextView
     private lateinit var viewerPathText: TextView
@@ -1387,14 +1390,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
         viewerMenuButton.setOnClickListener { openViewerMenu() }
-        viewerKeysButton = findViewById(R.id.viewerKeysButton)
-        viewerKeyPanel = ViewerKeyPanel(this, findViewById(R.id.viewerKeyPanel)) { vk, down ->
-            queueViewerSpecialKey(vk, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP)
-        }
-        viewerKeysButton.setOnClickListener {
-            showViewerControls(emphasized = true)
-            viewerKeyPanel?.toggle()
-        }
+        viewerKeyPanel = ViewerKeyPanel(
+            this,
+            findViewById(R.id.viewerKeyPanel),
+            onKey = { vk, down -> queueViewerSpecialKey(vk, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP) },
+            // 한 mode: finished syllables go as text, the one being built is only shown.
+            onText = { text -> queueViewerCommittedText(text) },
+            onPreview = { text -> showInputPreview(text) },
+            onPhoneKeyboard = {
+                viewerKeyPanel?.hide()
+                toggleViewerKeyboard()
+            },
+        )
         viewerClipboardButton = findViewById(R.id.viewerClipboardButton)
         viewerClipboardButton.setOnClickListener {
             showViewerControls(emphasized = true)
@@ -1442,12 +1449,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
 
                 override fun onPreviewTextChanged(text: CharSequence) {
-                    viewerInputPreviewText.post {
-                        val visibleText = text.toString().replace('\n', ' ').replace('\r', ' ')
-                        viewerInputPreviewText.text = visibleText
-                        viewerInputPreviewText.visibility =
-                            if (visibleText.isBlank()) View.GONE else View.VISIBLE
-                    }
+                    viewerInputPreviewText.post { showInputPreview(text) }
                 }
             }
 
@@ -1619,8 +1621,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showViewerControls(emphasized = true)
             handleViewerBack("viewer_back")
         }
+        // apk-ui r3: one keyboard button. It opens the PC keyboard panel (키보드 · 단축키 · 휴대폰 자판);
+        // with the phone keyboard up, the same button puts it away.
         viewerKeyboardButton.setOnClickListener {
-            toggleViewerKeyboard()
+            showViewerControls(emphasized = true)
+            if (viewerImeCaptureView.hasFocus()) {
+                hideViewerKeyboard("rail_keyboard")
+            } else {
+                viewerKeyPanel?.toggle()
+            }
+        }
+        findViewById<View>(R.id.viewerMenuDisconnectButton).setOnClickListener { confirmDisconnectFromViewer() }
+        // The phone keyboard can be put away without the app hearing a key (its own down arrow, or
+        // Back while it is up). Whatever it was showing as typed goes with it (apk-ui r3 (7)).
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { view, insets ->
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (imeWasVisible && !imeVisible && viewerImeCaptureView.hasFocus()) {
+                hideViewerKeyboard("ime_hidden")
+            }
+            imeWasVisible = imeVisible
+            ViewCompat.onApplyWindowInsets(view, insets)
         }
         renderStatus()
     }
@@ -1925,6 +1945,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             UiScene.VIEWER, UiScene.SWITCHING -> {
                 if (isViewerSheetOpen()) {
                     closeViewerSheets("system_back")
+                    return
+                }
+                if (viewerKeyPanel?.isOpen == true) {
+                    viewerKeyPanel?.hide()
                     return
                 }
                 if (viewerImeCaptureView.hasFocus()) {
@@ -3142,6 +3166,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    /** The typed-text preview at the top left; blank hides it. */
+    private fun showInputPreview(text: CharSequence) {
+        if (!::viewerInputPreviewText.isInitialized) return
+        val visibleText = text.toString().replace('\n', ' ').replace('\r', ' ')
+        viewerInputPreviewText.text = visibleText
+        viewerInputPreviewText.visibility = if (visibleText.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    /** 연결 해제 from the viewer menu: one light confirmation, then the same path as the list's. */
+    private fun confirmDisconnectFromViewer() {
+        if (disconnectDialog?.isShowing == true) return
+        closeViewerMenu("disconnect")
+        disconnectDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.ui_disconnect_confirm_title)
+            .setMessage(R.string.ui_disconnect_confirm_message)
+            .setPositiveButton(R.string.ui_disconnect_confirm_yes) { _, _ ->
+                diagnosticsLog.log("viewer_disconnect", "scene=$currentScene")
+                viewerKeyPanel?.hide()
+                releaseViewerModifiers()
+                listDisconnectButton.performClick()
+            }
+            .setNegativeButton(R.string.ui_cancel, null)
+            .create()
+        disconnectDialog?.setOnDismissListener {
+            disconnectDialog = null
+            applyImmersiveMode()
+        }
+        disconnectDialog?.show()
+    }
+
     private fun hideViewerKeyboard(reason: String) {
         if (!::viewerImeCaptureView.isInitialized) return
         val hadFocus = viewerImeCaptureView.hasFocus()
@@ -3149,6 +3203,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         imm?.hideSoftInputFromWindow(viewerImeCaptureView.windowToken, 0)
         viewerImeCaptureView.clearFocus()
         viewerImeCaptureView.resetPreviewState()
+        showInputPreview("")
         if (hadFocus) {
             diagnosticsLog.log("viewer_keyboard_hide", "reason=$reason")
         }

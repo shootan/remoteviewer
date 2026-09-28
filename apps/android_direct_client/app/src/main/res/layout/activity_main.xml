@@ -922,14 +922,6 @@
                     android:text="@string/ui_rail_keyboard" />
 
                 <Button
-                    android:id="@+id/viewerKeysButton"
-                    style="@style/UiRailButton"
-                    android:layout_margin="2dp"
-                    android:contentDescription="@string/key_panel_description"
-                    android:drawableTop="@drawable/ic_ui_shortcut"
-                    android:text="@string/ui_rail_shortcuts" />
-
-                <Button
                     android:id="@+id/viewerWindowsButton"
                     style="@style/UiRailButton"
                     android:layout_margin="2dp"

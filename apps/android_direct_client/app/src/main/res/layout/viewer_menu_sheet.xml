@@ -117,6 +117,23 @@
                     android:layout_marginBottom="8dp"
                     android:background="@color/ui_divider" />
 
+                <!-- apk-ui r3: the way out, first (user: "연결 해제 버튼이 가장 위에"). One light
+                     confirmation, since a stray tap would otherwise end the session. -->
+                <Button
+                    android:id="@+id/viewerMenuDisconnectButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/ui_menu_disconnect_description"
+                    android:drawableStart="@drawable/ic_ui_close"
+                    android:text="@string/ui_menu_disconnect"
+                    android:textColor="@color/ui_danger" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="4dp"
+                    android:layout_marginBottom="4dp"
+                    android:background="@color/ui_divider" />
+
                 <!-- apk-ui r3: which window or screen the PC shares. The rail's 창 전환 / 바탕화면 are
                      Alt+Tab / Win+D on the PC, as in the PC viewer; choosing the shared target is
                      this row. -->

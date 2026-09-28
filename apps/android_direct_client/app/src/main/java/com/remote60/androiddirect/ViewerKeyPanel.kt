@@ -23,6 +23,12 @@ class ViewerKeyPanel(
     private val context: Context,
     private val root: LinearLayout,
     private val onKey: (vk: Int, down: Boolean) -> Unit,
+    /** Finished Hangul text for the PC (apk-ui r3): sent as text, not as keys. */
+    private val onText: (text: String) -> Unit = {},
+    /** The syllable being composed, for the on-screen preview; "" clears it. */
+    private val onPreview: (text: String) -> Unit = {},
+    /** The 휴대폰 자판 tab: close the panel and bring up the phone's own keyboard. */
+    private val onPhoneKeyboard: () -> Unit = {},
 ) {
     private object Vk {
         const val BACK = 0x08; const val TAB = 0x09; const val ENTER = 0x0D
@@ -33,6 +39,8 @@ class ViewerKeyPanel(
         const val LEFT = 0x25; const val UP = 0x26; const val RIGHT = 0x27; const val DOWN = 0x28
         const val PRTSC = 0x2C; const val INSERT = 0x2D; const val DELETE = 0x2E
         const val WIN = 0x5B; const val APPS = 0x5D
+        /** Not a Windows key: the panel's own 한/영 switch, never sent to the host. */
+        const val HANYEONG = -2
         const val F1 = 0x70
         const val SCROLL = 0x91
         const val OEM_1 = 0xBA      // ;:
@@ -151,7 +159,8 @@ class ViewerKeyPanel(
             Key("Win", vk = Vk.WIN, units = 1.2f),
             Key("Alt", vk = Vk.ALT, units = 1.2f),
             Key("Space", vk = Vk.SPACE, units = 5f),
-            Key("Alt", vk = Vk.ALT, units = 1.2f),
+            // Where a Korean keyboard has 한/영 (right Alt).
+            Key("한/영", vk = Vk.HANYEONG, units = 1.2f),
             Key("Menu", vk = Vk.APPS, units = 1.2f),
             Key("Ctrl", vk = Vk.CTRL, units = 1.4f),
             Key("←", vk = Vk.LEFT), Key("↓", vk = Vk.DOWN), Key("→", vk = Vk.RIGHT),
@@ -170,13 +179,29 @@ class ViewerKeyPanel(
     private val tabShortcut: Button = root.findViewById(R.id.keyPanelTabShortcut)
     private val tabKeys: Button = root.findViewById(R.id.keyPanelTabKeys)
     private val tabExtra: Button = root.findViewById(R.id.keyPanelTabExtra)
+    private val tabPhone: Button = root.findViewById(R.id.keyPanelTabPhone)
     private var showExtraRows = false
+
+    /**
+     * 한/영. The host puts the target's IME back to alphanumeric before every key it injects, so
+     * VK_HANGUL would not stick; in 한 mode this panel composes Hangul itself (HangulComposer) and
+     * sends finished syllables as text, like the PC viewer.
+     */
+    var koreanMode = false
+        private set
+    private val composer = HangulComposer()
+    private val hanYeongButtons = mutableListOf<Button>()
 
     init {
         root.findViewById<Button>(R.id.keyPanelCloseButton).setOnClickListener { hide() }
-        tabShortcut.setOnClickListener { showShortcuts(true) }
+        tabShortcut.setOnClickListener { commitComposition(); showShortcuts(true) }
         tabKeys.setOnClickListener { showShortcuts(false) }
+        tabPhone.setOnClickListener {
+            commitComposition()
+            onPhoneKeyboard()
+        }
         tabExtra.setOnClickListener {
+            commitComposition()
             showExtraRows = !showExtraRows
             buildKeyboard()
             renderModifiers()
@@ -219,6 +244,8 @@ class ViewerKeyPanel(
     }
 
     fun hide() {
+        // A syllable still being built is sent, not dropped, and its preview goes with the panel.
+        commitComposition()
         releaseHeldModifiers()
         root.layoutParams = root.layoutParams.also {
             it.height = LinearLayout.LayoutParams.WRAP_CONTENT
@@ -252,6 +279,7 @@ class ViewerKeyPanel(
     private fun buildKeyboard() {
         keysRoot.removeAllViews()
         modifierButtons.clear()
+        hanYeongButtons.clear()
         tabExtra.alpha = if (showExtraRows) 1.0f else 0.55f
         val rows = if (showExtraRows) extraRows + coreRows else coreRows
         for (row in rows) {
@@ -293,10 +321,31 @@ class ViewerKeyPanel(
                 if (key.vk in modifierKeys) {
                     modifierButtons.getOrPut(key.vk) { mutableListOf() }.add(b)
                 }
+                if (key.vk == Vk.HANYEONG) hanYeongButtons.add(b)
                 line.addView(b)
             }
             keysRoot.addView(line)
         }
+        renderHanYeong()
+    }
+
+    /** The 한/영 key says which mode is on, as a Korean keyboard's indicator would. */
+    private fun renderHanYeong() {
+        hanYeongButtons.forEach {
+            it.text = context.getString(
+                if (koreanMode) R.string.key_panel_hanyeong_han else R.string.key_panel_hanyeong_eng
+            )
+            it.alpha = if (koreanMode) 1.0f else 0.72f
+            it.contentDescription =
+                context.getString(R.string.key_panel_hanyeong_description, if (koreanMode) "한" else "영")
+        }
+    }
+
+    /** Sends the syllable being built, if any, and clears its preview. */
+    fun commitComposition() {
+        val text = composer.flush()
+        if (text.isNotEmpty()) onText(text)
+        onPreview("")
     }
 
     private fun showShortcuts(shortcuts: Boolean) {
@@ -307,6 +356,32 @@ class ViewerKeyPanel(
     }
 
     private fun onKeyTapped(vk: Int) {
+        if (vk == Vk.HANYEONG) {
+            commitComposition()
+            koreanMode = !koreanMode
+            renderHanYeong()
+            return
+        }
+        if (koreanMode) {
+            // With nothing but Shift held, a letter is a jamo: Shift picks ㄲ ㄸ ㅃ ㅆ ㅉ ㅒ ㅖ and is
+            // let go before the text goes out. Ctrl/Alt/Win + letter stays a shortcut.
+            val onlyShift = heldModifiers.all { it == Vk.SHIFT }
+            val jamo = if (onlyShift) HangulComposer.jamoForKey(vk, Vk.SHIFT in heldModifiers) else null
+            if (jamo != null) {
+                releaseHeldModifiers()
+                val done = composer.input(jamo)
+                if (done.isNotEmpty()) onText(done)
+                onPreview(composer.preview)
+                return
+            }
+            if (vk == Vk.BACK && heldModifiers.isEmpty() && composer.backspace()) {
+                onPreview(composer.preview)
+                return
+            }
+            // Space, Enter, digits, arrows, modifiers, any shortcut: the syllable is finished first,
+            // so it lands before the key that follows it.
+            if (vk != Vk.SHIFT) commitComposition()
+        }
         if (vk in modifierKeys) {
             // Sticky, so one finger can express a chord.
             if (heldModifiers.contains(vk)) {
@@ -325,6 +400,7 @@ class ViewerKeyPanel(
     }
 
     private fun sendChord(chord: Chord) {
+        commitComposition()
         releaseHeldModifiers()
         HostKeyChord.steps(chord.mods, chord.key).forEach { onKey(it.vk, it.down) }
     }
