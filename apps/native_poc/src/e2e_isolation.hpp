@@ -136,6 +136,65 @@ inline std::wstring e2e_block_localappdata(const std::vector<wchar_t>& block) {
   return {};
 }
 
+/**
+ * Ports nobody on this machine holds right now, `count` of them, all different (RV-19,
+ * 2026-09-28). The host e2e tests used to name their ports in the source (44720..44899), so two
+ * of them running at once -- a worker's measurement and the verifier's regression sweep -- fought
+ * over the same number and the second host died at bind ("udp bind failed on every candidate
+ * port"). Asked to bind port 0, the OS hands out a port from its dynamic range; every socket is
+ * kept open until all `count` are picked, so the ports differ, and then all are released for the
+ * host, the proxy, the shaper or the stand-in source to bind for real. `type` is SOCK_DGRAM (the
+ * host's media port, every proxy) or SOCK_STREAM (the host's control port). The pick itself is
+ * retried a few times; an empty vector means no port could be found.
+ *
+ * The ports are released before they are handed over, so another process could in principle bind
+ * one in the milliseconds before ours does. The OS does not reissue a port it just gave out and
+ * the range holds sixteen thousand, so the tests treat that as noise rather than a case to
+ * retry: a host that still fails to bind fails its test as before, now on a port nobody chose.
+ */
+inline std::vector<uint16_t> e2e_pick_free_ports(int type, size_t count) {
+  WSADATA wsa{};
+  const bool started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;  // reference counted: harmless if already up
+  std::vector<uint16_t> ports;
+  for (int attempt = 0; attempt < 3 && ports.size() < count; ++attempt) {
+    ports.clear();
+    std::vector<SOCKET> held;
+    for (size_t i = 0; i < count; ++i) {
+      SOCKET s = socket(AF_INET, type, type == SOCK_STREAM ? IPPROTO_TCP : IPPROTO_UDP);
+      if (s == INVALID_SOCKET) break;
+      sockaddr_in local{};
+      local.sin_family = AF_INET;
+      local.sin_addr.s_addr = htonl(INADDR_ANY);  // free on every address, so free on loopback too
+      local.sin_port = 0;
+      sockaddr_in bound{};
+      int len = sizeof(bound);
+      if (bind(s, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 ||
+          getsockname(s, reinterpret_cast<sockaddr*>(&bound), &len) != 0 || bound.sin_port == 0) {
+        closesocket(s);
+        break;
+      }
+      held.push_back(s);
+      ports.push_back(ntohs(bound.sin_port));
+    }
+    for (SOCKET s : held) closesocket(s);
+    if (ports.size() < count) ports.clear();
+  }
+  if (started) WSACleanup();
+  return ports;
+}
+
+/** One free UDP port (0 = none found). */
+inline uint16_t e2e_pick_free_udp_port() {
+  const std::vector<uint16_t> p = e2e_pick_free_ports(SOCK_DGRAM, 1);
+  return p.empty() ? 0 : p[0];
+}
+
+/** One free TCP port (0 = none found). */
+inline uint16_t e2e_pick_free_tcp_port() {
+  const std::vector<uint16_t> p = e2e_pick_free_ports(SOCK_STREAM, 1);
+  return p.empty() ? 0 : p[0];
+}
+
 /** Recursive delete, refusing anything that is not strictly inside `root`. Test scratch only. */
 inline void remove_tree_under(const std::wstring& path, const std::wstring& root) {
   if (!e2e_path_is_under(path, root)) return;

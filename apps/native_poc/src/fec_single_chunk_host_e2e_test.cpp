@@ -78,7 +78,7 @@ void check(bool ok, const std::string& what, const std::string& detail = std::st
 }
 std::string u(uint64_t v) { return std::to_string(v); }
 
-constexpr uint16_t kHostPortBase = 44820;
+// The host port is picked at run time per run (e2e_pick_free_udp_port), so runs and tests can overlap.
 constexpr uint32_t kFps = 30;
 constexpr uint32_t kBitrate = 1500000;  // the user's 1500 setting, where parity was 25% of payload
 constexpr int kWinW = 640;
@@ -667,7 +667,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  uint16_t port = kHostPortBase;
   for (Content content : contents) {
     const char* cls = content_name(content);
     RunResult res[2];
@@ -675,7 +674,9 @@ int main(int argc, char** argv) {
       const bool tight = layout == 1;  // padded first: what the field sends today
       const std::wstring runDir = dir + std::wstring(cls, cls + std::strlen(cls)) + L"_" +
                                   (tight ? L"tight" : L"padded") + L"\\";
-      res[layout] = run_host(hostExe, runDir, content, tight, port++, seconds, lossPermille, lossSeed);
+      const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+      check(port != 0, std::string(cls) + (tight ? " tight" : " padded") + ": a free UDP port for the host", u(port));
+      res[layout] = run_host(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed);
       print_run(content, tight, lossPermille, lossSeed, res[layout]);
       const RunResult& r = res[layout];
       const std::string tag = std::string(cls) + " " + (tight ? "tight" : "padded");

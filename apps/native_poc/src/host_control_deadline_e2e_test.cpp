@@ -178,8 +178,14 @@ int wmain(int argc, wchar_t** argv) {
 
   // Ports chosen well away from the product's 43000/43001. A host already running on this machine
   // is somebody else's and is not to be disturbed.
-  const uint16_t mediaPort = 44720;
-  const uint16_t controlPort = 44721;
+  // Picked at run time as well (RV-19): two of these tests may run side by side.
+  const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  const uint16_t controlPort = remote60::native_poc::e2e::e2e_pick_free_tcp_port();
+  if (mediaPort == 0 || controlPort == 0) {
+    std::printf("FAIL  no free ports for the host (media udp %u, control tcp %u)\n", mediaPort, controlPort);
+    return 1;
+  }
+  std::printf("ports media %u control %u (picked at run time)\n", mediaPort, controlPort);
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);

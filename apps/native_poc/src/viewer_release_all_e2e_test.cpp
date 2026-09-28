@@ -54,8 +54,8 @@ using remote60::native_poc::viewer::ViewerState;
 
 namespace {
 
-constexpr uint16_t kHostPort = 44794;
-constexpr uint16_t kProxyPort = 44795;
+uint16_t kHostPort = 0;   // both picked at run time (e2e_pick_free_ports): tests run side by side
+uint16_t kProxyPort = 0;
 constexpr uint32_t kTestVk = 'K';
 
 /** The scan-code shaped lParam a real WM_KEYDOWN carries; the product reads bits out of it. */
@@ -95,6 +95,16 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  {
+    const std::vector<uint16_t> ports = remote60::native_poc::e2e::e2e_pick_free_ports(SOCK_DGRAM, 2);
+    if (ports.size() != 2) {
+      std::printf("FAIL  no free UDP ports for the host and the proxy\n");
+      return 1;
+    }
+    kHostPort = ports[0];
+    kProxyPort = ports[1];
+    std::printf("ports host %u proxy %u (picked at run time)\n", kHostPort, kProxyPort);
+  }
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);

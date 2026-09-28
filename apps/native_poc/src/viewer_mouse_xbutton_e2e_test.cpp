@@ -59,7 +59,7 @@ using remote60::native_poc::viewer::ViewerState;
 
 namespace {
 
-constexpr uint16_t kHostPort = 44796;
+uint16_t kHostPort = 0;  // picked at run time (e2e_pick_free_udp_port): tests run side by side
 
 // How many of the host's own input-log lines name a given key with a given result word.
 int count_host_log_lines(const std::wstring& path, const std::string& result, const std::string& key) {
@@ -117,6 +117,12 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  kHostPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  if (kHostPort == 0) {
+    std::printf("FAIL  no free UDP port for the host\n");
+    return 1;
+  }
+  std::printf("host port %u (picked at run time)\n", kHostPort);
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);

@@ -83,7 +83,7 @@ using namespace remote60::native_poc::e2e;
 
 namespace {
 
-constexpr uint16_t kHostPort = 44793;
+uint16_t kHostPort = 0;  // picked at run time (e2e_pick_free_udp_port): tests run side by side
 uint32_t kFps = 30;  // --fps (r5); 30 for every earlier mode
 
 // r5: the source the host captures. Default is the small cadence animation of r1-r4.
@@ -381,6 +381,12 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  kHostPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  if (kHostPort == 0) {
+    std::printf("FAIL  no free UDP port for the host\n");
+    return 1;
+  }
+  std::printf("host port %u (picked at run time)\n", kHostPort);
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
   const std::wstring dir = std::wstring(temp) + L"remote60_abr_ev_" +

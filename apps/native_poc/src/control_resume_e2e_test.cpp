@@ -366,8 +366,15 @@ int wmain(int argc, wchar_t** argv) {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
 
-  const uint16_t hostPort = 44790;
-  const uint16_t proxyPort = 44791;
+  // Picked at run time so this test and its neighbours can run side by side (RV-19).
+  const std::vector<uint16_t> ports = remote60::native_poc::e2e::e2e_pick_free_ports(SOCK_DGRAM, 2);
+  if (ports.size() != 2) {
+    std::printf("FAIL  no free UDP ports for the host and the proxy\n");
+    return 1;
+  }
+  const uint16_t hostPort = ports[0];
+  const uint16_t proxyPort = ports[1];
+  std::printf("ports host %u proxy %u (picked at run time)\n", hostPort, proxyPort);
 
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
