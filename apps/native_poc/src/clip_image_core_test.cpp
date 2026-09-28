@@ -221,8 +221,11 @@ int main() {
     check("a budget drop applies at once", c.rate() == 1000000);
   }
   {
-    // ---- competing traffic: RTT rises and stays up -> one halving per event, then pause and probe
-    BulkRateController c;
+    // ---- competing traffic: RTT rises and stays up -> one halving per event, then pause and probe.
+    // Started at 2 Mbps so three halvings (250 kbps) cannot be mistaken for the 64 kbps probe.
+    BulkRateConfig ct;
+    ct.startBps = 2000000;
+    BulkRateController c(ct);
     uint64_t t = 0, rounds = 0;
     BulkRateWindow base{0, 20000, 10000, 256000};
     c.Evaluate(base, t += 100000, ++rounds);

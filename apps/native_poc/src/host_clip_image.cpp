@@ -86,7 +86,9 @@ HostClipImageService::HostClipImageService(HostClipImagePublisher* publisher)
   bulk_.SetTimings(bulk_timings());
 }
 
-bool HostClipImageService::Enabled() const { return publisher_ && publisher_->Enabled() && running_.load(); }
+bool HostClipImageService::Enabled() const { return Available() && running_.load(); }
+
+bool HostClipImageService::Available() const { return publisher_ && publisher_->Enabled(); }
 
 bool HostClipImageService::Start(SendFn send, uint32_t mtuBytes) {
   if (running_.load()) return true;

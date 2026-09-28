@@ -369,7 +369,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // Clipboard image v1: acknowledged only while the image service runs, so a viewer never
             // sends bulk datagrams to a host whose control channel would swallow them.
             if ((hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
-                clientSession.clipImage && clientSession.clipImage->Enabled())
+                clientSession.clipImage && clientSession.clipImage->Available())
               ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
             // Whether THIS client asked is stored further down, once its Hello has been accepted.
             // Stored here it let a Hello that is then refused (a bad capability, or an

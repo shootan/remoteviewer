@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "host_clip_image.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -360,6 +361,13 @@ int startup_connect_client(HostContext& hx) {
       // C0 stage 1: advertised on this path too, for the reason given just above -- this is the
       // handshake every session makes. Found the same way: the observation e2e saw features=0x3A.
       ack.features |= remote60::native_poc::kUdpFeatureBandwidthObserve;
+      // Clipboard image v1: this path too, for the same reason -- the handshake every session makes.
+      // The reader thread's copy alone never saw a first connection, so the bulk channel could not
+      // negotiate (found by the harness against the real host: "the host acknowledged the bulk
+      // channel" FAILED). "Available", not "running": the service starts after this answer.
+      const bool bulkOffered = (hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
+                               clientSession.clipImage && clientSession.clipImage->Available();
+      if (bulkOffered) ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
       if (tokenLen > 0) {
@@ -375,6 +383,7 @@ int startup_connect_client(HostContext& hx) {
       clientSession.bandwidthObserveNegotiated.store(
           (hello.features & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
           std::memory_order_release);
+      if (clientSession.clipImage) clientSession.clipImage->SetBulkNegotiated(bulkOffered);
       (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                    reinterpret_cast<const sockaddr*>(&peer), peerLen);
 

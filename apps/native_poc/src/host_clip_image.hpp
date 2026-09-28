@@ -83,6 +83,13 @@ class HostClipImageService {
   /** Whether this host advertises kCaptureFlagClipboardImageV1 (hub running, not disabled). */
   bool Enabled() const;
 
+  /**
+   * Whether the feature is configured on at all (a publisher that is enabled), whether or not the
+   * worker has started yet. What the Hello acknowledgement asks: the FIRST Hello of every session is
+   * answered before the control channel -- and with it this service -- is started.
+   */
+  bool Available() const;
+
   /** The current session negotiated kUdpFeatureBulkChannel (set at Hello accept). */
   void SetBulkNegotiated(bool negotiated) { bulkNegotiated_.store(negotiated, std::memory_order_release); }
 
