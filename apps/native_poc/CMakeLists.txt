@@ -559,6 +559,12 @@ add_executable(remote60_host_abr_test
 )
 target_include_directories(remote60_host_abr_test PRIVATE src)
 
+# quality r5: the closed loop on the encoder's quantiser ceiling (pure).
+add_executable(remote60_host_rate_governor_test
+  src/host_rate_governor_test.cpp
+)
+target_include_directories(remote60_host_rate_governor_test PRIVATE src)
+
 add_executable(remote60_host_frame_gate_test
   src/host_frame_gate_test.cpp
 )
@@ -1649,7 +1655,7 @@ add_executable(remote60_abr_client_evidence_e2e_test
   src/udp_control_channel.cpp
 )
 target_include_directories(remote60_abr_client_evidence_e2e_test PRIVATE src)
-target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32)
+target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32 winmm)
 if(MSVC)
   target_compile_options(remote60_abr_client_evidence_e2e_test PRIVATE /utf-8)
 endif()

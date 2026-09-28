@@ -42,6 +42,12 @@
 //   --expect-final WxH asserts the size on the LAST stats line: the box re-chosen for the last capture.
 //   --monitor selects the host's monitor N (primary first, then left to right) with the product's
 //   ControlMonitorSelect, before the measured run -- a 4K panel that is not the primary.
+//   quality r5, rate control: --fps N, --keyint N (frames, as the viewer sends it), --max-qp N (0 =
+//   the ceiling off; unset = the host default), --pattern pan|noise and --window WxH turn the target
+//   into a high-motion source -- pan: a large detailed texture panned a few pixels a frame (camera
+//   motion over a busy scene, like video); noise: fresh noise every frame (the worst case). The
+//   run ends with one R5MEASURE line: payload / parity / header Mbps over the seconds after warmup,
+//   payload against the target, and the IDRs in that span, all from the host's own stats lines.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include <algorithm>
@@ -61,6 +67,7 @@
 #include <thread>
 #include <vector>
 
+
 #include "e2e_isolation.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -69,13 +76,24 @@
 #include "udp_control_channel.hpp"
 #include "control_resume_e2e_support.hpp"
 
+#include <mmsystem.h>  // timeBeginPeriod (r5); after the project headers, which bring winsock2/windows
+
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::e2e;
 
 namespace {
 
 constexpr uint16_t kHostPort = 44793;
-constexpr uint32_t kFps = 30;
+uint32_t kFps = 30;  // --fps (r5); 30 for every earlier mode
+
+// r5: the source the host captures. Default is the small cadence animation of r1-r4.
+enum class Pattern { Default, Pan, Noise };
+Pattern gPattern = Pattern::Default;
+int gWinW = 480;
+int gWinH = 270;
+int gStillAfterMs = 0;
+double gMeasureFromSec = 8.0;  // r5 --measure-from SEC: the measured span starts SEC after the first stats line  // r5 --still-after SEC: the motion stops (the picture freezes) after SEC
+int gBlock = 4;  // r5 --block: pan texture detail, px per random block (4 = very busy, 16 = video-like)
 constexpr uint32_t kDefaultBitrate = 6000000;
 const wchar_t* kTargetTitle = L"remote60 abr evidence target";
 
@@ -101,8 +119,19 @@ class CadenceTarget {
   static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<CadenceTarget*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_TIMER && self) {
+      if (gStillAfterMs > 0 && self->startTick_ == 0) self->startTick_ = GetTickCount64();
+      if (gStillAfterMs > 0 && GetTickCount64() - self->startTick_ > static_cast<uint64_t>(gStillAfterMs)) {
+        return 0;  // frozen: nothing changes, nothing repaints
+      }
       ++self->frame_;
       InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    }
+    if (msg == WM_PAINT && self && gPattern != Pattern::Default) {
+      PAINTSTRUCT ps{};
+      HDC dc = BeginPaint(hwnd, &ps);
+      self->PaintMotion(dc);
+      EndPaint(hwnd, &ps);
       return 0;
     }
     if (msg == WM_PAINT && self) {
@@ -139,24 +168,97 @@ class CadenceTarget {
     wc.lpszClassName = L"Remote60AbrEvidenceTarget";
     RegisterClassExW(&wc);
     hwnd_ = CreateWindowExW((selectable ? 0 : WS_EX_TOOLWINDOW) | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                            wc.lpszClassName, kTargetTitle, WS_POPUP, 0, 0, 480, 270, nullptr,
+                            wc.lpszClassName, kTargetTitle, WS_POPUP, 0, 0, gWinW, gWinH, nullptr,
                             nullptr, wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
       SetLayeredWindowAttributes(hwnd_, 0, 1, LWA_ALPHA);
       ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-      SetTimer(hwnd_, 1, 16, nullptr);
+      // r5: a high-motion source must change at least as often as the host samples it.
+      if (gPattern != Pattern::Default) timeBeginPeriod(1);
+      SetTimer(hwnd_, 1, gPattern != Pattern::Default ? 8 : 16, nullptr);
     }
     ready_.store(true);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
     hwnd_ = nullptr;
   }
+  // r5: pan -- a texture larger than the window by kPanMargin, blitted at an offset that moves
+  // 7 px right and 3 px down a frame; busy at every scale (4 px blocks of random colour over
+  // gradients and stripes), so it is hard to code but motion-predictable, like camera video.
+  // noise -- every pixel fresh every frame.
+  static constexpr int kPanMargin = 512;
+  void EnsureSurface(HDC dc) {
+    if (memDc_) return;
+    const int w = gWinW + (gPattern == Pattern::Pan ? kPanMargin : 0);
+    const int h = gWinH + (gPattern == Pattern::Pan ? kPanMargin : 0);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    memDc_ = CreateCompatibleDC(dc);
+    bitmap_ = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&pixels_), nullptr, 0);
+    SelectObject(memDc_, bitmap_);
+    surfW_ = w;
+    surfH_ = h;
+    if (gPattern == Pattern::Pan) {
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const uint32_t block = Rand(static_cast<uint32_t>((x / gBlock) * 7919 + (y / gBlock) * 104729));
+          const uint32_t r = ((block & 0xFF) + (x * 255 / w)) / 2;
+          const uint32_t g = (((block >> 8) & 0xFF) + (y * 255 / h)) / 2;
+          const uint32_t b = ((((x + y) / 9) & 1) ? 200u : 40u) ^ ((block >> 16) & 0x3F);
+          pixels_[static_cast<size_t>(y) * w + x] = (r << 16) | (g << 8) | b;
+        }
+      }
+    }
+  }
+  static uint32_t Rand(uint32_t v) {
+    v ^= v << 13;
+    v ^= v >> 17;
+    v ^= v << 5;
+    return v * 2654435761u;
+  }
+  void PaintMotion(HDC dc) {
+    EnsureSurface(dc);
+    if (!pixels_) return;
+    int sx = 0, sy = 0;
+    if (gPattern == Pattern::Pan) {
+      sx = static_cast<int>((frame_ * 7) % kPanMargin);
+      sy = static_cast<int>((frame_ * 3) % kPanMargin);
+    } else {
+      uint32_t state = static_cast<uint32_t>(frame_ * 2654435761u + 1u);
+      const size_t n = static_cast<size_t>(surfW_) * surfH_;
+      for (size_t i = 0; i < n; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        pixels_[i] = state & 0x00FFFFFFu;
+      }
+    }
+    BitBlt(dc, 0, 0, gWinW, gWinH, memDc_, sx, sy, SRCCOPY);
+  }
   std::thread thread_;
   std::atomic<bool> ready_{false};
   uint64_t frame_ = 0;
+  uint64_t startTick_ = 0;
   HWND hwnd_ = nullptr;
+  HDC memDc_ = nullptr;
+  HBITMAP bitmap_ = nullptr;
+  uint32_t* pixels_ = nullptr;
+  int surfW_ = 0;
+  int surfH_ = 0;
 };
+
+// r5: "HH:MM:SS.mmm" at the start of a host log line, in seconds since midnight; -1 if absent.
+double log_time_sec(const std::string& line) {
+  if (line.size() < 18 || line[8] != ':' || line[11] != ':' || line[14] != '.') return -1.0;
+  return std::stoi(line.substr(6, 2)) * 3600.0 + std::stoi(line.substr(9, 2)) * 60.0 +
+         std::stoi(line.substr(12, 2)) + std::stoi(line.substr(15, 3)) / 1000.0;
+}
 
 std::string value_of(const std::string& line, const std::string& key) {
   const std::string needle = " " + key + "=";
@@ -191,6 +293,9 @@ int wmain(int argc, wchar_t** argv) {
   std::map<int, uint32_t> tuneAt;  // second -> bitrate
   std::set<int> requestKeyAt;
   int runSec = 0;
+  uint32_t keyint = 0;     // r5: 0 = the host's default
+  std::wstring maxQpArg;   // r5: empty = the host's default
+  std::string patternName = "default";
   bool gdi = false;  // r3: force the GDI desktop backend, staging the real GNLinkCapture.exe worker  // with --desktop: keep the invisible animated window up anyway
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -221,6 +326,29 @@ int wmain(int argc, wchar_t** argv) {
       requestKeyAt.insert(static_cast<int>(std::wcstol(argv[++i], nullptr, 10)));
     } else if (a == L"--run-sec" && i + 1 < argc) {
       runSec = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--fps" && i + 1 < argc) {
+      kFps = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--keyint" && i + 1 < argc) {
+      keyint = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--max-qp" && i + 1 < argc) {
+      maxQpArg = argv[++i];
+    } else if (a == L"--pattern" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      patternName.assign(v.begin(), v.end());
+      gPattern = v == L"pan" ? Pattern::Pan : (v == L"noise" ? Pattern::Noise : Pattern::Default);
+    } else if (a == L"--measure-from" && i + 1 < argc) {
+      gMeasureFromSec = std::wcstod(argv[++i], nullptr);
+    } else if (a == L"--still-after" && i + 1 < argc) {
+      gStillAfterMs = static_cast<int>(std::wcstol(argv[++i], nullptr, 10)) * 1000;
+    } else if (a == L"--block" && i + 1 < argc) {
+      gBlock = std::max(1, static_cast<int>(std::wcstol(argv[++i], nullptr, 10)));
+    } else if (a == L"--window" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t x = v.find(L'x');
+      if (x != std::wstring::npos) {
+        gWinW = static_cast<int>(std::wcstol(v.substr(0, x).c_str(), nullptr, 10));
+        gWinH = static_cast<int>(std::wcstol(v.substr(x + 1).c_str(), nullptr, 10));
+      }
     } else if (a == L"--gdi") {
       gdi = true;
     } else if (a == L"--tune-at" && i + 1 < argc) {
@@ -285,10 +413,15 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     if (textOff) SetEnvironmentVariableW(L"REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE", L"1");
     if (gdi) SetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", L"gdi");
+    if (!maxQpArg.empty()) SetEnvironmentVariableW(L"REMOTE60_NATIVE_MAX_QP", maxQpArg.c_str());
+    // r5: a stats line every second, so the measured span has one reading per second.
+    if (gPattern != Pattern::Default) SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
                        L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(bitrate) +
-                       L" --seconds 120 --input-injection-mode none" +
+                       (keyint > 0 ? L" --keyint " + std::to_wstring(keyint) : std::wstring()) +
+                       L" --seconds " + std::to_wstring(std::max(120, runSec + 30)) +
+                       L" --input-injection-mode none" +
                        (desktop ? std::wstring() : L" --capture-window-title \"" + std::wstring(kTargetTitle) + L"\"");
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check("the host is started with input injection off", noInjection);
@@ -651,6 +784,69 @@ int wmain(int argc, wchar_t** argv) {
             "viewer-reason keys=" + std::to_string(viewerKeys));
     }
   }
+  // r5: the rate the encoder actually produced, from the host's own cumulative counters, over the
+  // stats lines after an 8 s warmup (encoder start, first IDR, ramp).
+  if (launched) {
+    std::vector<std::string> statsLines;
+    std::string rcLine, gopLine;
+    {
+      std::ifstream in(hostLogPath);
+      std::string line;
+      while (std::getline(in, line)) {
+        if (line.find(" udpTxWireEstBytes=") != std::string::npos) statsLines.push_back(line);
+        if (line.find("h264 rate-control") != std::string::npos) rcLine = line;
+        if (line.find("h264 gop-config") != std::string::npos) gopLine = line;
+      }
+    }
+    const double t0 = statsLines.empty() ? -1.0 : log_time_sec(statsLines.front());
+    size_t a = 0;
+    while (a < statsLines.size() && log_time_sec(statsLines[a]) < t0 + gMeasureFromSec) ++a;
+    if (a + 1 < statsLines.size()) {
+      const std::string& A = statsLines[a];
+      const std::string& B = statsLines.back();
+      const double span = log_time_sec(B) - log_time_sec(A);
+      auto mbps = [&](const char* key) {
+        const std::string x = value_of(A, key), y = value_of(B, key);
+        if (x.empty() || y.empty() || span <= 0) return -1.0;
+        return (std::stod(y) - std::stod(x)) * 8.0 / span / 1e6;
+      };
+      int keysInSpan = 0;
+      std::map<std::string, int> spanReasons;
+      for (const auto& l : keyLines) {
+        const double t = log_time_sec(l);
+        if (t > log_time_sec(A) && t <= log_time_sec(B)) {
+          ++keysInSpan;
+          spanReasons[value_of(l, "reasons")] += 1;
+        }
+      }
+      std::string reasons;
+      for (const auto& [r, n] : spanReasons) reasons += r + ":" + std::to_string(n) + ",";
+      const double payload = mbps("udpTxBytes");
+      std::cout << std::fixed;
+      std::cout.precision(2);
+      std::cout << "R5MEASURE pattern=" << patternName << " block=" << gBlock << " fps=" << kFps << " keyint=" << keyint
+                << " maxQpArg=" << std::string(maxQpArg.begin(), maxQpArg.end())
+                << " encode=" << value_of(B, "size") << " span=" << span
+                << " targetMbps=" << bitrate / 1e6 << " payloadMbps=" << payload
+                << " ratio=" << (payload / (bitrate / 1e6))
+                << " parityMbps=" << mbps("udpTxParityBytes")
+                << " chunkHdrMbps=" << mbps("udpTxChunkHdrBytes")
+                << " ipUdpHdrMbps=" << mbps("udpTxIpUdpHdrEstBytes")
+                << " nackMbps=" << mbps("udpTxNackBytes")
+                << " wireMbps=" << mbps("udpTxWireEstBytes")
+                << " keys=" << keysInSpan << " keysPerSec=" << (span > 0 ? keysInSpan / span : 0.0)
+                << " keyReasons=" << reasons << "\n";
+      auto tail = [](const std::string& l) {
+        const size_t at = l.find("h264");
+        return at == std::string::npos ? std::string("(missing)") : l.substr(at);
+      };
+      std::cout << "R5RC " << tail(rcLine) << "\n";
+      std::cout << "R5GOP " << tail(gopLine) << "\n";
+    } else {
+      std::cout << "R5MEASURE none: not enough stats lines after warmup\n";
+    }
+  }
+
   if (launched && !expectFinal.empty()) {
     check("after the last selection the host encodes " + expectFinal + " (last stats line)",
           encodedSize == expectFinal, "stats=" + encodedSize);

@@ -1485,12 +1485,25 @@ bool H264Encoder::apply_rate_control(const char* reason) {
   ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, maxBitrate) && ok;
   ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes) && ok;
 
-  // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner.
-  const uint32_t maxQp = env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u);
+  // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner. The rate
+  // governor (quality r5) raises it while the output stays well over the target.
+  const uint32_t maxQp = maxQpOverride_ != 0 ? maxQpOverride_ : configured_max_qp();
   bool qpSet = false;
   if (maxQp > 0 && maxQp <= 51) {
     qpSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, maxQp);
   }
+
+  // quality r5: what the MFT holds afterwards, read back -- an S_OK SetValue is not proof the
+  // value is in force (Codex 4). -1 = the MFT would not report it.
+  auto readback = [this](const GUID& key) -> long long {
+    uint32_t v = 0;
+    return get_codecapi_u32(enc_.Get(), key, &v) ? static_cast<long long>(v) : -1LL;
+  };
+  const long long rbMode = readback(CODECAPI_AVEncCommonRateControlMode);
+  const long long rbMean = readback(CODECAPI_AVEncCommonMeanBitRate);
+  const long long rbPeak = readback(CODECAPI_AVEncCommonMaxBitRate);
+  const long long rbVbv = readback(CODECAPI_AVEncCommonBufferSize);
+  const long long rbMaxQp = readback(CODECAPI_AVEncVideoMaxQP);
 
   // Not every MFT honours these, and a rejected call leaves the previous mode in place, so
   // report what actually stuck rather than what was asked for.
@@ -1503,6 +1516,8 @@ bool H264Encoder::apply_rate_control(const char* reason) {
             << " maxQp=" << maxQp
             << " maxQpAccepted=" << (qpSet ? 1 : 0)
             << " valuesAccepted=" << (ok ? 1 : 0)
+            << " readbackMode=" << rbMode << " readbackMean=" << rbMean << " readbackPeak=" << rbPeak
+            << " readbackVbv=" << rbVbv << " readbackMaxQp=" << rbMaxQp
             << "\n";
   return ok;
 }
@@ -1515,6 +1530,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   fps_ = std::max<uint32_t>(1, fps);
   bitrate_ = std::max<uint32_t>(100000, bitrate);
   keyint_ = std::max<uint32_t>(1, keyint);
+  maxQpOverride_ = 0;  // a new encoder starts from the configured ceiling (the governor resets too)
   stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
 
@@ -1615,6 +1631,14 @@ void H264Encoder::report_sps_profile_once(const uint8_t* data, size_t size) {
     spsProfileReported_ = true;
     return;
   }
+}
+
+uint32_t H264Encoder::configured_max_qp() { return env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u); }
+
+bool H264Encoder::set_max_qp(uint32_t maxQp) {
+  if (!enc_) return false;
+  maxQpOverride_ = maxQp;
+  return apply_rate_control("governor");
 }
 
 bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {

@@ -172,6 +172,14 @@ class H264Encoder {
   bool set_d3d11_device(ID3D11Device* device);
   bool initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint);
   bool reconfigure_bitrate(uint32_t bitrate);
+  /**
+   * quality r5: the quantiser ceiling at runtime (the rate governor). 0 returns to the configured
+   * one (REMOTE60_NATIVE_MAX_QP, default 32). A new encoder starts from the configured one again.
+   */
+  bool set_max_qp(uint32_t maxQp);
+  uint32_t max_qp_override() const { return maxQpOverride_; }
+  /** The configured ceiling (REMOTE60_NATIVE_MAX_QP, default 32; 0 = none). */
+  static uint32_t configured_max_qp();
   bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
                     std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
   /** Converts BGRA directly into the Media Foundation input buffer, avoiding the temporary
@@ -226,6 +234,7 @@ class H264Encoder {
   uint32_t height_ = 0;
   uint32_t fps_ = 0;
   uint32_t bitrate_ = 0;
+  uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
   uint32_t keyint_ = 0;
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;

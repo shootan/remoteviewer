@@ -17,6 +17,7 @@
 #include "host_frame_gate.hpp"
 #include "mf_h264_codec.hpp"
 #include "host_epoch_gate.hpp"
+#include "host_rate_governor.hpp"
 #include "encode_resolution_ladder.hpp"
 #include "host_keyframe_reason.hpp"
 
@@ -50,6 +51,11 @@ struct Nv12PendingRelease {
 // land in the middle of it. (Ledger H-04.)
 struct EncoderState {
   H264Encoder codec;
+  // quality r5: the closed loop on the quantiser ceiling (host_rate_governor.hpp). Off when the
+  // configured ceiling is 0 or REMOTE60_NATIVE_RATE_GOVERNOR=0.
+  RateGovernor rateGovernor{RateGovernorConfig{H264Encoder::configured_max_qp()}};
+  uint64_t rateGovernorLastTxBytes = 0;
+  uint32_t rateGovernorBitrate = 0;
   struct PendingTarget { uint32_t w=0, h=0, fps=0, bitrate=0, keyint=0; } retryTarget;
   bool targetPending = false;
   bool codecNeedsInit = false;

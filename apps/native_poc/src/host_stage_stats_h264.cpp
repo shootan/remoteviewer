@@ -142,6 +142,37 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     sender.udpTxBytes = sender.txBytes.load(std::memory_order_relaxed);
     sender.udpTxNoPeer += sender.txNoPeer.exchange(0, std::memory_order_relaxed);
   }
+  // quality r5: the rate governor, once a tick. The payload this second against the user's target;
+  // when the ceiling moves it goes to the encoder at once and the line says whether it stuck.
+  {
+    static const bool governorOn = [] {
+      const char* v = std::getenv("REMOTE60_NATIVE_RATE_GOVERNOR");
+      return !(v && v[0] == '0') && H264Encoder::configured_max_qp() != 0;
+    }();
+    const uint64_t txNow = sender.txBytes.load(std::memory_order_relaxed);
+    const uint64_t txDelta =
+        txNow >= encoder.rateGovernorLastTxBytes ? txNow - encoder.rateGovernorLastTxBytes : 0;
+    encoder.rateGovernorLastTxBytes = txNow;
+    if (governorOn && encoder.activeBitrate > 0) {
+      // A new target or a rebuilt encoder (which starts at the configured ceiling) starts over.
+      if (encoder.activeBitrate != encoder.rateGovernorBitrate ||
+          (encoder.codec.max_qp_override() == 0 &&
+           encoder.rateGovernor.maxQp() != H264Encoder::configured_max_qp())) {
+        encoder.rateGovernor.Reset();
+        encoder.rateGovernorBitrate = encoder.activeBitrate;
+      } else {
+        const uint32_t before = encoder.rateGovernor.maxQp();
+        const uint32_t after = encoder.rateGovernor.OnSecond(txDelta, encoder.activeBitrate);
+        if (after != before) {
+          const bool applied = encoder.codec.set_max_qp(after);
+          std::cout << "[native-video-host][rate-governor] maxQp " << before << "->" << after
+                    << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
+                    << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                    << " applied=" << (applied ? 1 : 0) << "\n";
+        }
+      }
+    }
+  }
   const uint64_t udpTxChunkPerFrameX100 =
       (sender.udpTxFrames > 0) ? ((sender.udpTxChunks * 100ULL) / sender.udpTxFrames) : 0;
   const uint64_t senderSendCountNow = sender.sendCount.load(std::memory_order_relaxed);
