@@ -84,6 +84,7 @@
 #include "udp_control_channel.hpp"
 #include "control_resume_e2e_support.hpp"
 #include "clip_image_client.hpp"
+#include "clip_image_wic.hpp"
 #include "udp_impair_proxy.hpp"
 #include <psapi.h>
 
@@ -308,6 +309,7 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring maxQpArg;   // r5: empty = the host's default
   std::string patternName = "default";
   bool clipBench = false;  // clip-image r2 perf: the ClipSink host build + the bulk channel
+  bool clipPng = false;    // offer a PNG encoded before the run (no viewer-side encode in the span)
   uint32_t clipMib = 0;
   int clipAtSec = 10;
   std::wstring proxySpec;
@@ -369,6 +371,8 @@ int wmain(int argc, wchar_t** argv) {
       gdi = true;
     } else if (a == L"--clip-bench") {
       clipBench = true;
+    } else if (a == L"--clip-png") {
+      clipPng = true;
     } else if (a == L"--clip-mib" && i + 1 < argc) {
       clipMib = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
     } else if (a == L"--clip-at" && i + 1 < argc) {
@@ -706,6 +710,46 @@ int wmain(int argc, wchar_t** argv) {
       }
     });
 
+    // The image to offer, built before the measured run. --clip-png encodes it to PNG here too, so the
+    // viewer-side WIC encode (CPU on this same PC) is out of the measured span: the A/B that tells
+    // the transfer's own effect on frame age from this machine's CPU contention.
+    ClipSnapshot clipSnapshot;
+    if (clipBench && clipMib > 0) {
+      const uint32_t w = 512, h = 512 * clipMib;
+      clipSnapshot.kind = ClipSnapshotKind::Dib;
+      clipSnapshot.sequence = 1000 + static_cast<uint64_t>(clipAtSec);
+      clipSnapshot.bytes.resize(sizeof(BITMAPV5HEADER) + static_cast<size_t>(w) * h * 4);
+      BITMAPV5HEADER bh{};
+      bh.bV5Size = sizeof(bh);
+      bh.bV5Width = static_cast<LONG>(w);
+      bh.bV5Height = static_cast<LONG>(h);
+      bh.bV5Planes = 1;
+      bh.bV5BitCount = 32;
+      bh.bV5Compression = BI_BITFIELDS;
+      bh.bV5RedMask = 0x00FF0000;
+      bh.bV5GreenMask = 0x0000FF00;
+      bh.bV5BlueMask = 0x000000FF;
+      bh.bV5AlphaMask = 0xFF000000;
+      bh.bV5CSType = LCS_sRGB;
+      std::memcpy(clipSnapshot.bytes.data(), &bh, sizeof(bh));
+      uint32_t x = 0x12345678u;
+      for (size_t o = sizeof(bh); o + 4 <= clipSnapshot.bytes.size(); o += 4) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        std::memcpy(clipSnapshot.bytes.data() + o, &x, 4);
+      }
+      if (clipPng) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::vector<uint8_t> png;
+        uint32_t pw = 0, ph = 0;
+        const bool enc = clip_dib_to_png(clipSnapshot.bytes.data(), clipSnapshot.bytes.size(), &png, &pw, &ph) ==
+                         ClipWicResult::Ok;
+        check("--clip-png: the image was encoded to PNG before the run", enc);
+        clipSnapshot.kind = ClipSnapshotKind::Png;
+        clipSnapshot.bytes = std::move(png);
+      }
+    }
     struct MemSample {
       int sec;
       SIZE_T viewerPrivate;
@@ -767,35 +811,11 @@ int wmain(int argc, wchar_t** argv) {
       }
       if (s + 1 >= static_cast<int>(gMeasureFromSec)) latencyOn.store(true);
       if (clipBench && clipMib > 0 && s == clipAtSec) {
-        // Incompressible noise with alpha: the PNG is about as large as the pixels.
-        const uint32_t w = 512, h = 512 * clipMib;
-        ClipSnapshot snap;
-        snap.kind = ClipSnapshotKind::Dib;
-        snap.sequence = 1000 + static_cast<uint64_t>(s);
-        snap.bytes.resize(sizeof(BITMAPV5HEADER) + static_cast<size_t>(w) * h * 4);
-        BITMAPV5HEADER bh{};
-        bh.bV5Size = sizeof(bh);
-        bh.bV5Width = static_cast<LONG>(w);
-        bh.bV5Height = static_cast<LONG>(h);
-        bh.bV5Planes = 1;
-        bh.bV5BitCount = 32;
-        bh.bV5Compression = BI_BITFIELDS;
-        bh.bV5RedMask = 0x00FF0000;
-        bh.bV5GreenMask = 0x0000FF00;
-        bh.bV5BlueMask = 0x000000FF;
-        bh.bV5AlphaMask = 0xFF000000;
-        bh.bV5CSType = LCS_sRGB;
-        std::memcpy(snap.bytes.data(), &bh, sizeof(bh));
-        uint32_t x = 0x12345678u;
-        for (size_t o = sizeof(bh); o + 4 <= snap.bytes.size(); o += 4) {
-          x ^= x << 13;
-          x ^= x >> 17;
-          x ^= x << 5;
-          std::memcpy(snap.bytes.data() + o, &x, 4);
-        }
+        // Prepared before the run (below), so nothing but the transfer happens at this second.
         clipOfferUs = qpc_now_us();
-        clip.SubmitSnapshot(std::move(snap));
-        std::cout << "clip: offered " << clipMib << " MiB at second " << s << "\n";
+        clip.SubmitSnapshot(std::move(clipSnapshot));
+        std::cout << "clip: offered " << clipMib << " MiB (" << (clipPng ? "pre-encoded PNG" : "DIB, encoded now")
+                  << ") at second " << s << "\n";
       }
       if (clipBench) {
         PROCESS_MEMORY_COUNTERS_EX self{}, host{};
