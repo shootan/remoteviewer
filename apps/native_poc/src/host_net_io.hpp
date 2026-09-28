@@ -47,8 +47,9 @@ struct SendPathStats {
   uint64_t payloadChunkMaxUs = 0;
   // What went on the wire, by kind (quality r1). Datagram payload only -- IP/UDP headers are the
   // caller's estimate. dataBytes is the AU itself; parityBytes the FEC datagrams' payload (always a
-  // full chunk stride, even for a short last group); headerBytes the UdpVideoChunkHeader of every
-  // datagram, data and parity alike.
+  // full chunk stride, even for a short last group -- and the stride of a frame that fits in one
+  // datagram is that frame's size, see UdpChunkGeometry); headerBytes the UdpVideoChunkHeader of
+  // every datagram, data and parity alike.
   uint64_t dataBytes = 0;
   uint64_t parityBytes = 0;
   uint64_t headerBytes = 0;
@@ -79,7 +80,33 @@ struct UdpEgressConfig {
   // Set from the viewer's hello. Older viewers do not advertise it and must keep receiving the
   // consecutive layout they know how to repair.
   bool fecInterleaved = false;
+  // A frame that fits in one datagram is chunked with chunkStride = its own size instead of the
+  // MTU chunk (fec-single-chunk-stride, 2026-09-28). Its one XOR parity datagram must be exactly
+  // chunkStride bytes for every receiver in the field, so with the MTU stride a 200-byte P frame
+  // was followed by a 1112-byte parity: on a still screen parity cost several times the video.
+  // With the tight stride the parity is the frame's size -- still a full replica that repairs the
+  // loss of the data datagram. Nothing on the wire says which stride was used; the receiver's
+  // checks (ceil(payloadSize / chunkStride) == chunkCount, chunkOffset == index * chunkStride,
+  // parity chunkSize == chunkStride) hold for both, so no negotiation is involved. Frames of two
+  // chunks or more keep the MTU stride, byte for byte. false restores the padded layout
+  // (REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE=0, the field rollback lever).
+  bool fecSingleChunkTightStride = true;
 };
+
+// One frame's datagram layout. Computed once per send and shared by the original send, the NACK
+// replay of that frame and the pacing budget, so the three can never disagree on a stride: a
+// replayed chunk whose chunkStride differs from the assembly's makes the receiver discard the
+// whole assembly as malformed.
+struct UdpChunkGeometry {
+  bool valid = false;          // false: no payload, MTU too small for a header, or > 65535 chunks
+  uint32_t maxChunk = 0;       // MTU minus the chunk header: the most one datagram carries
+  uint32_t chunkStride = 0;    // UdpVideoChunkHeader::chunkStride of every datagram of the frame
+  uint32_t chunkCount = 0;     // data datagrams
+  uint32_t fecGroupCount = 0;  // parity datagrams: one per kUdpVideoFecGroupSize data chunks
+  uint32_t packetCount = 0;    // chunkCount + fecGroupCount (what pacing spreads the budget over)
+  uint64_t parityBytes = 0;    // fecGroupCount * chunkStride: every parity datagram is one stride
+};
+UdpChunkGeometry udp_chunk_geometry(size_t payloadSize, uint32_t mtuBytes, bool tightSingleChunk);
 
 void udp_pace_wait_until(uint64_t targetUs);
 
@@ -114,14 +141,17 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                                      const UdpEgressConfig& egress);
 
 // Selective retransmit: re-send only the data chunks named in `indices` for the AU described by
-// `payload`/`baseHeader`/`mtuBytes`, using the exact same chunk geometry as the original send (so
-// the client assembles them into the same frame). No FEC and no pacing -- it is a handful of small
-// datagrams answering a NACK on a low-RTT path. Out-of-range indices are skipped. (video NACK.)
+// `payload`/`baseHeader`/`mtuBytes`/`tightSingleChunk`, using the exact same chunk geometry as the
+// original send (so the client assembles them into the same frame -- `tightSingleChunk` must be
+// the fecSingleChunkTightStride the frame was first sent with; the NACK cache carries it). No FEC
+// and no pacing -- it is a handful of small datagrams answering a NACK on a low-RTT path.
+// Out-of-range indices are skipped. (video NACK.)
 // outWireBytes / outDatagrams (optional): what the replay actually put on the wire, header
 // included, for the per-flow byte accounting (quality r1).
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count,
+                                      uint32_t mtuBytes, bool tightSingleChunk,
+                                      const uint16_t* indices, uint16_t count,
                                       uint64_t* outWireBytes = nullptr,
                                       uint64_t* outDatagrams = nullptr);
 

@@ -1711,6 +1711,24 @@ if(MSVC)
   target_compile_options(remote60_bwe_observe_e2e_test PRIVATE /utf-8)
 endif()
 
+# fec-single-chunk-stride: a real isolated host capturing this test's composed window, padded vs
+# tight parity layout, three kinds of content; the shared session receive policy + the product
+# decoder at this end; wire totals from the host's own stats line and from what arrived.
+add_executable(remote60_fec_single_chunk_host_e2e_test
+  src/fec_single_chunk_host_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/mf_h264_codec.cpp
+)
+target_include_directories(remote60_fec_single_chunk_host_e2e_test PRIVATE src)
+target_link_libraries(remote60_fec_single_chunk_host_e2e_test PRIVATE
+  capture common ws2_32 user32 gdi32 winmm runtimeobject windowsapp advapi32 d3d11 dxgi
+  mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_fec_single_chunk_host_e2e_test PRIVATE /utf-8)
+endif()
+
 # quality r1: ABR with a client that never sends decode metrics, APK-style present-only, or stops.
 add_executable(remote60_abr_client_evidence_e2e_test
   src/abr_client_evidence_e2e_test.cpp
@@ -2311,6 +2329,55 @@ add_executable(remote60_udp_fec_interleave_test
 )
 target_include_directories(remote60_udp_fec_interleave_test PRIVATE src)
 target_link_libraries(remote60_udp_fec_interleave_test PRIVATE common ws2_32)
+
+# fec-single-chunk-stride: the host's real chunker over loopback, its datagrams judged by the real
+# shared assembler -- boundary sizes, loss counter-examples, the NACK replay geometry, both layouts.
+add_executable(remote60_udp_fec_single_chunk_test
+  src/host_net_io.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/udp_fec_single_chunk_test.cpp
+)
+target_include_directories(remote60_udp_fec_single_chunk_test PRIVATE src)
+target_link_libraries(remote60_udp_fec_single_chunk_test PRIVATE common ws2_32)
+
+# fec-single-chunk-stride under loss: one fixed H.264 AU stream per content class through the real
+# chunker, the real NACK cache/replay (no threads), seeded loss by datagram identity, the shared
+# session receive policy on a virtual clock, and the real decoder -- padded vs tight, same losses.
+add_executable(remote60_udp_fec_single_chunk_loss_test
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/mf_h264_codec.cpp
+  src/udp_fec_single_chunk_loss_test.cpp
+)
+target_include_directories(remote60_udp_fec_single_chunk_loss_test PRIVATE src)
+target_link_libraries(remote60_udp_fec_single_chunk_loss_test PRIVATE
+  capture
+  common
+  ws2_32
+  runtimeobject
+  windowsapp
+  advapi32
+  d3d11
+  dxgi
+  gdi32
+  user32
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
 
 add_executable(remote60_udp_control_channel_test
   src/udp_control_channel.cpp

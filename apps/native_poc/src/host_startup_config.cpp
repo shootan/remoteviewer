@@ -154,6 +154,12 @@ int startup_configure_from_env(HostContext& hx) {
       "REMOTE60_NATIVE_UDP_PACE_PEAK_FLOOR_BPS", 40000000, 0, 1000000000);
   sender.udpKeyframePacePeakBps = env_u32_clamped(
       "REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS", 100000000, 0, 1000000000);
+  // A frame that fits in one datagram is chunked with its own size as the stride, so its XOR
+  // parity is the frame's size instead of a padded MTU chunk (fec-single-chunk-stride). Wire
+  // format and negotiation are unchanged; 0 restores the padded layout (the rollback lever).
+  sender.fecSingleChunkTightStride.store(
+      env_u32_clamped("REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE", 1, 0, 1) != 0,
+      std::memory_order_relaxed);
   // Holding an encoded frame back to enforce even send spacing costs exactly what it holds:
   // measured end-to-end latency p95 went 4ms -> 31ms at 30fps when this was enabled
   // unconditionally, and rose further when the hold also pushed the next frame's deadline.
@@ -310,6 +316,8 @@ void startup_log_config(HostContext& hx) {
               << " udpPacePeakFloorBps=" << sender.udpPacePeakFloorBps
               << " udpKeyframePacePeakBps="
               << sender.keyframePacePeakBps.load(std::memory_order_relaxed)
+              << " fecSingleChunkStride="
+              << (sender.fecSingleChunkTightStride.load(std::memory_order_relaxed) ? "tight" : "padded")
               << " stalePreEncodeGuard=" << (guardStalePreEncode ? 1 : 0)
               << " capturePoolBuffers=" << capture.framePoolBuffers
               << " encoderTuneMode=" << encoder.tuneMode
