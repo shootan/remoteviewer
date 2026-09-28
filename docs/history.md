@@ -12606,3 +12606,10 @@ Next
 - 수정: `secure_input_inject.hpp`(신설) — 한 이벤트의 결정을 `plan_input_event`(유효성·커서 이동 여부·INPUT 하나)로 먼저 만들고, `run_input_event`(SetCursorPos·SendInput 을 인자로 받는 실행기)가 **무효 계획엔 호출 0**, 유효면 커서 → INPUT 순으로 실행. 서비스는 실제 API 를 넘긴다. move/wheel/L/R/M/X/키 동작은 그대로(키는 커서 안 건드림, 확장키 플래그 유지).
 - 시험: `secure_input_inject_test` 19/0 — 같은 실행기를 기록 함수로 구동: 모르는 키(0x07·0·'A'·0x1234) down/up 과 kind 9 는 OS 호출 0, X1/X2 는 커서 1회 뒤 XDOWN/XUP+XBUTTON1/2, move 커서만, wheel delta, L/R/M, 키 다운/업(확장), SetCursorPos 실패 시 INPUT 0. 변이 m6(계획이 커서 이동을 먼저 표시 + 실행기가 검사 전에 이동 = r1 순서) → 8 FAIL(`cursor(640,360)` 기록). 서비스 빌드 OK. 운영 화면 SendInput 없음. **구 호스트 e2e 는 킬스위치의 capability-off 모사이지 구 바이너리가 아니다.**
 - 제품/테스트/문서: 제품(`secure_input_inject.hpp` 신설, `secure_input_service_main.cpp`) / 테스트(`secure_input_inject_test` 신설, CMake 1 타깃) / 문서(이 항목).
+
+### 2026-09-28 fix-thumbnail-test-minmax — 게시 빌드가 못 본 시험 하나의 컴파일 실패
+
+- 증상(검증용, main 7386ded 전체 빌드): `remote60_thumbnail_helper_e2e_test` 만 컴파일 실패 — `encode_resolution_ladder.hpp:120` 의 `std::min(sx, sy)` 가 `windows.h` 의 `min` 매크로에 먹힘(C2589/C2059/C2737). 35418d2 부터 `host_bgra_scale.hpp` 가 이 헤더를 include 하고, 그 시험 TU 는 `<windows.h>` 를 NOMINMAX 없이 먼저 include. 게시 페이로드 타깃은 그 조합이 없어 게시 빌드에선 안 보였다.
+- 수정: `(std::min)(sx, sy)` — 매크로 확장이 안 되는 형태. 헤더의 유일한 min/max 사용처. 제품 동작 변화 0.
+- 검증: 이 worktree(fix/thumbnail-test-minmax) **전체 타깃 빌드 rc 0**(150 출력 링크, 오류 0) · `encode_resolution_ladder_test` 28/0 · `thumbnail_helper_e2e_test` 29/0 exit 0.
+- 제품/테스트/문서: 제품(`encode_resolution_ladder.hpp` 1줄+주석) / 테스트 없음 / 문서(이 항목).
