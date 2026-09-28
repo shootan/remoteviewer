@@ -40,6 +40,7 @@ void shutdown_viewer(ViewerContext& ctx) {
   ctx.session.running = false;
   ctx.session.inputEnabled = false;
   ctx.session.hostImeSupported.store(false, std::memory_order_relaxed);  // stop host-IME on teardown
+  ctx.session.hostMouseXButtons.store(false, std::memory_order_release);  // no host to take them now
   // Nothing resumes after this. Said to the resume component itself, not only through the
   // "running" flag its pump reads: an answer from the host that arrives during teardown is then
   // refused by the session flag rather than applied to a channel being closed. EndSession had no

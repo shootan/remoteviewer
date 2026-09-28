@@ -117,7 +117,10 @@ inline EncodeResolutionChoice choose_abr_profile_size(int profile, uint32_t bitr
   if (out.width > 1280 || out.height > 720) {
     const double sx = 1280.0 / static_cast<double>(out.width);
     const double sy = 720.0 / static_cast<double>(out.height);
-    const double scale = std::min(sx, sy);
+    // Parenthesised so a translation unit that included windows.h without NOMINMAX (the min
+    // macro) still compiles this header: thumbnail_helper_e2e_test did exactly that once
+    // host_bgra_scale.hpp started including it.
+    const double scale = (std::min)(sx, sy);
     if (scale > 0.0 && scale < 1.0) {
       out.width = static_cast<uint32_t>(out.width * scale);
       out.height = static_cast<uint32_t>(out.height * scale);

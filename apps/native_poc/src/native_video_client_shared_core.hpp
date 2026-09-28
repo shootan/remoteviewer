@@ -57,7 +57,8 @@ class ClientInputQueue {
 // and the Windows viewer each assembled them by hand, field for field).
 //
 // One ControlInputEvent: header, the queue's next sequence, the fields, the send stamp. `buttons`
-// is masked to the three mouse bits the host reads.
+// is masked to the five wire bits (kMouseWireMask). Whether the X pair may be set at all against
+// this host is the caller's fence (viewer_input_forward.cpp), not this builder's.
 QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint16_t kind,
                                                    uint16_t buttons, int32_t x, int32_t y,
                                                    int32_t wheelDelta, uint32_t keyCode,

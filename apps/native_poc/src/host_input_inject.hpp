@@ -85,6 +85,13 @@ HostImeAlignResult host_ime_align_query(bool setEnglish);
 bool interactive_desktop_is_default_uncached();
 bool interactive_desktop_is_default();
 
+// Mouse X buttons (back / forward, mouse-xbutton r1). True unless REMOTE60_NATIVE_MOUSE_XBUTTONS
+// starts with 0 / f / n. Off, this host behaves as one that predates the feature: the pong does
+// not advertise kCaptureFlagMouseXButtonsV1 (so a viewer never sends an X edge) and an X edge that
+// arrives anyway is Unsupported -- posted nowhere, unlike the pre-r1 host which made it a left
+// click. Read per call; a field rollback lever and the way the e2e stands in an older host.
+bool mouse_xbuttons_enabled();
+
 enum class InputInjectResult : uint8_t {
   Injected = 0,
   IgnoredMove = 1,

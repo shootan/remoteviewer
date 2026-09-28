@@ -12581,3 +12581,35 @@ CMake 주석도 `# Hypothesis 4:` 로 남은 채 바로 아래 줄에서 `d3d11 
 - 시험: 파이프라인 단위 5건(키 청크 손실 → NACK → 재전송 → 1,2,3 순서 전달·요청 0 / hold 없음 → 키 버림·요청 / 재전송 없음 → 포기·요청·델타 미전달 / 정지 화면 stuck-head 1회 / 호스트 틈 뒤 완전 키 → 요청 0), **실제 세션 수신 루프**(가짜 서버가 청크 3 빠진 키 + 33ms 델타, NACK 에 재전송): NACK 호스트 7프레임 모두 전달·요청 0·리셋 0(5회 반복 동일), 구 호스트 0프레임·요청 2. 변이(hold 끔·NACK 끔·stuck-head 끔·키 예외 제거) 전부 FAIL, hold 끔은 세션 시험에서 현장 모양(요청 2) 재현. NDK syntax 경고 0.
 - 남은 후보(이번에 안 함): 키 페이싱 — 키가 약 90Mb/s 로 6~11ms 에 쏟아진다(`REMOTE60_NATIVE_UDP_KEYFRAME_PACE_PEAK_BPS` 기본 100M). 이 PC 에선 휴대폰 Wi-Fi 손실을 잴 수 없어 실측 A/B 뒤 결정. 사용자 체감 증거(끊김 횟수: client-present over2x·gapMax, 앱 out 공백)는 새 APK 실측으로만.
 - 제품/테스트/문서: 제품(공용 세션 수신 정책 — APK 재빌드 대상) / 테스트(파이프라인 단위·실제 세션 루프, 가짜 서버 손실 대본) / 문서(이 항목).
+
+### 2026-09-28 process — 작업용은 구현, 검증용·Codex 가 검수, 검증용이 main 머지·push·게시
+Goal
+- 사용자 지시: 작업용들은 각자 worktree 에서 구현·커밋만, 검증용(remote_claude)과 Codex 가 검수한 뒤 검증용이 main 머지·push, 완료 항목은 main 에서 직접 빌드·게시. 병렬 진행.
+Changes
+- AGENTS.md: "개발 프로세스"(09-28) 절 신설, 작업용 역할에서 빌드·서명·배포 제거, git push 보류 해제(검수 commit 의 정상 main push 한정), 사용자 창구 = 사용자가 직접 지휘하는 세션, 우선 적용 범위 정리.
+- CLAUDE.md: "개발 프로세스 절차" 신설(전용 worktree 배정·이관 구분, 검증용 안 vs Codex 안 비교 합의, 기능 단위 검수, main 머지·버전·게시·push·원격 정합 확인, 병렬 충돌 방지 — 번호 예약·먼저 끝난 것 먼저 머지·뒤 작업이 main 합쳐 재검증·머지 후 회귀), 사용자 창구 개정.
+Validation
+- Codex 문서 검토 7항 반영(.claude/process_docs_review.md). main 은 0.2.140(68edf58)까지 빨리감기 병합 — push 는 권한 분류기에 막혀 사용자 조치 대기.
+Next
+- 병렬: 작업용 clip-image(A), 작업용2 mouse-xbutton.
+### 2026-09-28 mouse-xbutton r1 — 뒤로/앞으로 버튼은 보내지지도 않았고, 보냈다면 왼쪽 클릭이 됐을 것이다
+
+- 사용자: "PC 클라에서 마우스 4번째 버튼 뒤로가기가 안 되고, 앞으로가기도 안 된다." 원인(코드): 뷰어 `viewer_window_proc.cpp` 가 L/R/M 만 처리(`WM_XBUTTON*` 은 DefWindowProc 로), 호스트 `host_input_inject.cpp` 와 SYSTEM 에이전트 `secure_input_service_main.cpp` 의 버튼 매핑은 **모르는 vk 를 왼쪽 버튼으로** 기본 처리 — 새 뷰어가 구 호스트에 X 를 보냈다면 뒤로가 왼쪽 클릭이 됐을 것.
+- 수정(제품): 공용 `mouse_button_map.hpp`(wire 비트 ↔ VK ↔ MK_*/XBUTTON/MOUSEEVENTF; wire X1=0x8·X2=0x10 은 MK_XBUTTON1=0x20·MK_XBUTTON2=0x40 과 다른 값이라 명시 변환). 호스트 창 모드: `WM_XBUTTONDOWN/UP`(LOWORD=엣지 뒤 held MK 상태, HIWORD=XBUTTON1/2; 앞선 WM_MOUSEMOVE 는 LOWORD 만) / 데스크톱 모드: `MOUSEEVENTF_XDOWN/XUP`+mouseData. 모르는 vk 는 호스트 두 경로·에이전트 모두 **Unsupported = 미주입**(전엔 LEFT). `InjectedInputTracker` 가 X1/X2 도 추적(Serve 종료 release·중복 up 삼킴). 능력비트 `kCaptureFlagMouseXButtonsV1`=0x400(0x200 은 clip-image 예약) — 호스트 pong 이 광고, 뷰어는 광고한 호스트에만 X 엣지·held X 비트를 보냄: WndProc 게이트(구 호스트·첫 pong 전이면 로그 1줄·TRUE 반환) + 모든 ControlInputEvent 가 지나는 wire fence(`fence_mouse_for_host`: held 마스크 0x7 절단·X 엣지 폐기 — release-all·매크로 재생 포함). 뷰어 `WM_XBUTTONDOWN/UP/DBLCLK` → `on_secondary_button`, TRUE 반환. release-all(`enqueue_release_for_pressed_mouse_buttons`)·캡처 해제·이동 held 마스크에 X 포함. `buttons` 마스크 0x7→0x1F(shared core·매크로 로드). 호스트 킬스위치 `REMOTE60_NATIVE_MOUSE_XBUTTONS=0`(광고 안 함 + X 엣지 Unsupported) = 구 호스트 모사이자 현장 롤백 레버.
+- 시험(이 PC 콘솔 세션 `qwinsta` console/Active, 실제 사용자 파일·운영 화면 불변): `mouse_button_map_test` 63/0 — 순수 매핑 + 이 프로세스 창에 대한 제품 `inject_background_input_event` **창 모드 실행**(X1/X2 가 wParam HIWORD XBUTTON1/2·LOWORD MK 비트로 도착, 앞선 move 는 LOWORD 만, 모르는 vk 0x07/0/'A' 는 메시지 0·Unsupported, L/R/M 회귀, held X 로 move/wheel MK, 킬스위치) · `host_injected_input_test` 21/0 · shared_core PASS(마스크 0x1F) · `input_macro_test` 46/0 · `viewer_window_proc_isolated_test` 42/0 · **격리 e2e** `viewer_mouse_xbutton_e2e_test`(실 GNLinkStream, LOCALAPPDATA 격리, `--input-target-pid/title` 로 이 프로세스 창에만 PostMessage, `--input-log-every 1`): 새 호스트 39/0 ×3 — pong 비트, 제품 WndProc `SendMessage` 반환 TRUE, X1/X2 down/up 이 `WM_XBUTTONDOWN/UP` 로 XBUTTON1/2·MK_XBUTTON1/2 와 함께 도착(LEFT 0, 대상 클라이언트 영역 안), 왼쪽 클릭 회귀, X1 held 상태에서 **실제 `ReleaseCapture`→`WM_CAPTURECHANGED`** 로 up 정확히 1회, 호스트 입력 로그 injected key=5 4줄·key=6 2줄·unsupported 0; 구 호스트(킬스위치) 23/0 ×2 — 비트 없음, X 4엣지 **미전송**(뷰어 송신 카운트 delta 2 = 뒤이은 왼쪽 클릭만, 도착 0, 로그 1줄, 호스트 unsupported 0), X 없는 캡처 해제에 X up 0 · `viewer_release_all_e2e_test` 35/0(공용 하네스 회귀). **변이 4종 각각 해당 단언만 FAIL**: m1 모르는 vk→LEFT 복원(4 FAIL, 0x07 이 WM_LBUTTONDOWN 으로 도착) · m5 X 미추적(4) · m2 뷰어 게이트+fence 제거(구 호스트 run 4 FAIL: 6 이벤트 송신·호스트 unsupported 4) · m3 release-all X 제외(새 호스트 run 3 FAIL: up 0). 고정 후보 해시는 `.claude/mouse_xbutton_report.md`(worktree).
+- 미검증: 설치본 실기(브라우저/탐색기 뒤로·앞으로), 데스크톱 모드 SendInput 실동작(순수 매핑만), SYSTEM 에이전트 실경로, 이 PC 외 GPU/세션. Android 변경 없음(shared core 의 마스크 상수만 공유).
+- 제품/테스트/문서: 제품(`mouse_button_map.hpp` 신설, `poc_protocol.hpp` 비트·wire 상수, `host_input_inject.*`, `host_control_session.cpp` pong, `host_injected_input.hpp`, `secure_input_service_main.cpp`, viewer `window_proc`/`input_forward`/`session_state`/`input_state`/`control_client`/`shutdown`, shared core·`input_macro.cpp` 마스크) / 테스트(`mouse_button_map_test`·`viewer_mouse_xbutton_e2e_test` 신설, `host_injected_input_test`·shared_core_test 갱신, `control_resume_e2e_support.hpp` X 계수, CMake 2 타깃) / 문서(이 항목, 구현계획 W2, 작업목록 C16).
+
+### 2026-09-28 mouse-xbutton r2 — 에이전트는 거절하기 전에 커서부터 옮겼다
+
+- Codex 검수(검증용 OK 뒤 보완 1건): `secure_input_service_main.cpp` `inject_message` 가 eventKind 2/3 의 모르는 keyCode 도 **SetCursorPos 를 먼저** 하고 나서 flags==0 으로 거절 → 커서만 움직임. 호스트 직접 경로는 검사가 먼저라 안 움직였다.
+- 수정: `secure_input_inject.hpp`(신설) — 한 이벤트의 결정을 `plan_input_event`(유효성·커서 이동 여부·INPUT 하나)로 먼저 만들고, `run_input_event`(SetCursorPos·SendInput 을 인자로 받는 실행기)가 **무효 계획엔 호출 0**, 유효면 커서 → INPUT 순으로 실행. 서비스는 실제 API 를 넘긴다. move/wheel/L/R/M/X/키 동작은 그대로(키는 커서 안 건드림, 확장키 플래그 유지).
+- 시험: `secure_input_inject_test` 19/0 — 같은 실행기를 기록 함수로 구동: 모르는 키(0x07·0·'A'·0x1234) down/up 과 kind 9 는 OS 호출 0, X1/X2 는 커서 1회 뒤 XDOWN/XUP+XBUTTON1/2, move 커서만, wheel delta, L/R/M, 키 다운/업(확장), SetCursorPos 실패 시 INPUT 0. 변이 m6(계획이 커서 이동을 먼저 표시 + 실행기가 검사 전에 이동 = r1 순서) → 8 FAIL(`cursor(640,360)` 기록). 서비스 빌드 OK. 운영 화면 SendInput 없음. **구 호스트 e2e 는 킬스위치의 capability-off 모사이지 구 바이너리가 아니다.**
+- 제품/테스트/문서: 제품(`secure_input_inject.hpp` 신설, `secure_input_service_main.cpp`) / 테스트(`secure_input_inject_test` 신설, CMake 1 타깃) / 문서(이 항목).
+
+### 2026-09-28 fix-thumbnail-test-minmax — 게시 빌드가 못 본 시험 하나의 컴파일 실패
+
+- 증상(검증용, main 7386ded 전체 빌드): `remote60_thumbnail_helper_e2e_test` 만 컴파일 실패 — `encode_resolution_ladder.hpp:120` 의 `std::min(sx, sy)` 가 `windows.h` 의 `min` 매크로에 먹힘(C2589/C2059/C2737). 35418d2 부터 `host_bgra_scale.hpp` 가 이 헤더를 include 하고, 그 시험 TU 는 `<windows.h>` 를 NOMINMAX 없이 먼저 include. 게시 페이로드 타깃은 그 조합이 없어 게시 빌드에선 안 보였다.
+- 수정: `(std::min)(sx, sy)` — 매크로 확장이 안 되는 형태. 헤더의 유일한 min/max 사용처. 제품 동작 변화 0.
+- 검증: 이 worktree(fix/thumbnail-test-minmax) **전체 타깃 빌드 rc 0**(150 출력 링크, 오류 0) · `encode_resolution_ladder_test` 28/0 · `thumbnail_helper_e2e_test` 29/0 exit 0.
+- 제품/테스트/문서: 제품(`encode_resolution_ladder.hpp` 1줄+주석) / 테스트 없음 / 문서(이 항목).

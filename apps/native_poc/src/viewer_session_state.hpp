@@ -55,6 +55,12 @@ struct SessionState {
   std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
   std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
   std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
+  // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
+  // sent. Written by the control thread on every pong (release), read by the UI thread's window
+  // procedure and the input fence (acquire). False until the first pong and after teardown, and an
+  // X press in that state is dropped with one log line -- never sent, because a host without the
+  // bit made an unknown button key a LEFT click. (mouse-xbutton r1)
+  std::atomic<bool> hostMouseXButtons{false};
   // UDP video handshake result: the HelloAck feature bits, and whether the host acknowledged
   // kUdpFeatureVideoNack so the recv thread may ask for selective retransmits. main sets both at
   // connect, before the threads start; the recv thread reads. (Windows NACK wiring: the viewer

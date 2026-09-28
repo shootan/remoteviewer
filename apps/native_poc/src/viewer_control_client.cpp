@@ -180,6 +180,11 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.unlockSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
         std::memory_order_relaxed);
+    // Mouse X buttons (back / forward): sent only to a host that says it maps them. Set every
+    // pong like the others, so a reconnect never inherits an answer. (mouse-xbutton r1)
+    ctx.session.hostMouseXButtons.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagMouseXButtonsV1) != 0,
+        std::memory_order_release);
     if (secure != ctx.control.reportedSecure) {
       ctx.control.reportedSecure = secure;
       std::cout << "[native-video-client] secure-desktop-active="

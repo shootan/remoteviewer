@@ -20,7 +20,11 @@
 namespace remote60::native_poc::viewer {
 
 struct InputState {
+  // The wire bits (kMouseWire*) of every button this client holds down on the host.
   std::atomic<uint16_t> mouseButtons{0};
+  // Whether "an X button was pressed but the host does not take them" has been said this
+  // session. Once: a user pressing back on an old host would otherwise write a line per click.
+  std::atomic<bool> xButtonRefusalReported{false};
   std::atomic<int32_t> lastVideoX{0};
   std::atomic<int32_t> lastVideoY{0};
   // Which keys this client forwarded a down for, so the matching up is forwarded by memory
