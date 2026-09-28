@@ -15,7 +15,7 @@
 #include <cstdio>
 #include <string>
 
-#include "mouse_button_map.hpp"
+#include "secure_input_inject.hpp"
 #include "secure_input_mapping.hpp"
 #include "secure_input_protocol.hpp"
 #include "secure_input_session.hpp"
@@ -25,8 +25,10 @@ namespace {
 
 using remote60::native_poc::DesktopRect;
 using remote60::native_poc::map_client_point;
-using remote60::native_poc::MouseSendInput;
-using remote60::native_poc::mouse_vk_to_sendinput;
+using remote60::native_poc::InjectPlan;
+using remote60::native_poc::InjectRun;
+using remote60::native_poc::plan_input_event;
+using remote60::native_poc::run_input_event;
 using remote60::native_poc::SecureInputKind;
 using remote60::native_poc::SecureInputMessage;
 using remote60::native_poc::kInvalidSessionId;
@@ -910,8 +912,9 @@ POINT map_point(const SecureInputMessage& message) {
   return point;
 }
 
-// The button edge -> SendInput mapping is mouse_button_map.hpp, shared with the host. The copy
-// that lived here made any key that was not right or middle a LEFT click. (mouse-xbutton r1)
+// The button edge -> SendInput mapping is mouse_button_map.hpp, shared with the host; what this
+// agent does for one event is planned in secure_input_inject.hpp before any call is made. The copy
+// that lived here made any key that was not right or middle a LEFT click. (mouse-xbutton r1 / r2)
 
 const char* gDpiAwarenessApplied = "none";
 
@@ -1009,58 +1012,35 @@ bool inject_message(const SecureInputMessage& message) {
     return false;
   }
   const POINT point = map_point(message);
+  // Decided in full before anything is touched (secure_input_inject.hpp): an event this agent
+  // does not understand -- a button edge whose key is not a button, an unknown kind -- moves
+  // nothing and sends nothing. Until r2 the cursor was placed first and the refusal came after.
+  const InjectPlan plan = plan_input_event(message);
+  if (!plan.valid) {
+    diag_inject_failure(plan.why, message, 0, point.x, point.y);
+    return false;
+  }
   // Position with SetCursorPos and send the button separately. Carrying absolute coordinates on
   // the button event is theoretically tidier -- it removes the window in which something else
   // could move the cursor between the two calls -- but the 0..65535 virtual-desktop mapping
   // relies on metrics this SYSTEM agent does not reliably see, and getting them wrong throws
   // every click off-screen, which reads as input being completely dead. Keep the proven path.
-  if (message.eventKind >= 1 && message.eventKind <= 4 && !SetCursorPos(point.x, point.y)) {
+  const InjectRun run = run_input_event(
+      plan, point, [](long x, long y) { return SetCursorPos(x, y) != FALSE; },
+      [](INPUT& input) { return SendInput(1, &input, sizeof(INPUT)) == 1; });
+  if (run == InjectRun::SetCursorPosFailed) {
     diag_inject_failure("SetCursorPos", message, GetLastError(), point.x, point.y);
     return false;
   }
-  if (message.eventKind == 1) return true;
-  INPUT input{};
-  if (message.eventKind == 2 || message.eventKind == 3) {
-    // flags 0 = not a button key: nothing is injected. The cursor has already been placed above,
-    // which is what a move would have done; no button edge follows it.
-    const MouseSendInput mouse = mouse_vk_to_sendinput(message.eventKind, message.keyCode);
-    if (mouse.flags == 0) {
-      diag_inject_failure("unknown-mouse-key", message, 0, point.x, point.y);
-      return false;
-    }
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = mouse.flags;
-    input.mi.mouseData = mouse.mouseData;
-  } else if (message.eventKind == 4) {
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    input.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(message.wheelDelta));
-  } else if (message.eventKind == 5 || message.eventKind == 6) {
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = static_cast<WORD>(message.keyCode);
-    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(message.keyCode, MAPVK_VK_TO_VSC));
-    if (message.eventKind == 6) input.ki.dwFlags |= KEYEVENTF_KEYUP;
-    switch (message.keyCode) {
-      case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
-      case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
-      case VK_INSERT: case VK_DELETE: case VK_RCONTROL: case VK_RMENU:
-        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-        break;
-      default:
-        break;
-    }
-  } else {
-    diag_inject_failure("unhandled-event-kind", message, 0, point.x, point.y);
+  if (run == InjectRun::SendInputFailed) {
+    diag_inject_failure("SendInput", message, GetLastError(), point.x, point.y);
     return false;
   }
-  if (SendInput(1, &input, sizeof(INPUT)) == 1) {
-    // Button events only. Moves return above, and there are enough of them to exhaust the budget
-    // before a single click is recorded -- and it is the click whose position is in question.
-    diag_inject_landing(message, point.x, point.y);
-    return true;
-  }
-  diag_inject_failure("SendInput", message, GetLastError(), point.x, point.y);
-  return false;
+  // Button and key events only. A move sends no INPUT, and there are enough of them to exhaust
+  // the budget before a single click is recorded -- and it is the click whose position is in
+  // question.
+  if (plan.sendInput) diag_inject_landing(message, point.x, point.y);
+  return true;
 }
 
 // Reports what the agent is actually doing, once per change rather than per event.

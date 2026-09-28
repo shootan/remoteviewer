@@ -1661,6 +1661,18 @@ add_executable(remote60_secure_input_mapping_test
 )
 target_include_directories(remote60_secure_input_mapping_test PRIVATE src)
 
+# mouse-xbutton r2: the SYSTEM agent's per-event decision and the calls it makes, run through the
+# product's executor with recording SetCursorPos / SendInput. An unknown button key makes no call
+# at all (it used to move the cursor first); X1 / X2 place the cursor once then send XDOWN / XUP.
+add_executable(remote60_secure_input_inject_test
+  src/secure_input_inject_test.cpp
+)
+target_include_directories(remote60_secure_input_inject_test PRIVATE src)
+target_link_libraries(remote60_secure_input_inject_test PRIVATE user32)
+if(MSVC)
+  target_compile_options(remote60_secure_input_inject_test PRIVATE /utf-8)
+endif()
+
 # The secure-input target rect rule (P9): the agent's rect follows the monitor the capture opened
 # and is re-derived on every restart; window mode = no rect; origin-preserving for multi-monitor.
 add_executable(remote60_host_input_target_rect_test
