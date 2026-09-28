@@ -25,6 +25,18 @@ namespace remote60::native_poc {
 
 enum class ClipSnapshotKind : uint8_t { None = 0, Png, Dib };
 
+/**
+ * The length of a NUL-terminated UTF-16 text in an allocation of `cap` units, looking at no more
+ * than `max` + 1 units: `max` + 1 means "over the limit" (or no NUL within it), and nothing past
+ * that is read.
+ */
+inline size_t clip_bounded_text_length(const wchar_t* t, size_t cap, size_t max) {
+  const size_t look = cap < max + 1 ? cap : max + 1;
+  size_t n = 0;
+  while (n < look && t[n] != L'\0') ++n;
+  return n == look && look == max + 1 ? max + 1 : n;
+}
+
 enum class ClipSnapshotResult : uint8_t {
   Ok = 0,
   NoImage,       // nothing image-like on the clipboard (text v1 handles it)

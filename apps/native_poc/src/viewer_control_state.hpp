@@ -38,6 +38,9 @@ namespace remote60::native_poc::viewer {
 struct ClipboardSyncState {
   std::atomic<bool> enabled{true};        // the toolbar toggle; off means no send and no poll
   std::atomic<bool> hostSupports{false};  // host advertised kCaptureFlagClipboardTextV1 (pong)
+  // The clipboard sequence number right after this viewer wrote the host's text to it (UI thread).
+  // The WM_CLIPBOARDUPDATE that write provokes is its own echo, not a new copy by the user.
+  std::atomic<uint32_t> ownWriteSeq{0};
 
   std::mutex mu;
   remote60::native_poc::ClipboardSyncCore core;  // echo/duplicate suppression, both directions

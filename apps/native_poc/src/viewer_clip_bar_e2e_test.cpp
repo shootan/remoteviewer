@@ -34,6 +34,15 @@
 // this test's message loop and counted. WinSta0's clipboard sequence number is compared before and
 // after.
 //
+// The clipboard boundary itself (Codex review of 4528dc9 ②) is driven by a CHILD of this test on a
+// private window station, whose clipboard is its own: real formats put there, the product's
+// WndProc hearing WM_CLIPBOARDUPDATE, capture_local_clipboard reading it -- a new copy voids an
+// older image still being encoded, the viewer's own echo does not, a copy over the size limit says
+// it was not sent. No host is needed for that part.
+//
+// Scratch lives in the repository (test_scratch_dir: created by this run, reparse-checked, removed
+// only after the host is known to have exited), never in %TEMP%.
+//
 //   remote60_viewer_clip_bar_e2e_test --out <dir>      (needs REMOTE60_ALLOW_HOST_E2E=1)
 
 #include "e2e_isolation.hpp"
@@ -65,6 +74,9 @@
 #include "viewer_state.hpp"
 #include "viewer_udp_session.hpp"
 #include "viewer_window_proc.hpp"
+#include "test_scratch_dir.hpp"
+
+namespace ts = remote60::native_poc::test_support;
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::e2e;
@@ -256,6 +268,178 @@ std::string narrow(const std::wstring& w) {
 
 }  // namespace
 
+// ------------------------------------------------------------------ the clipboard-boundary child
+// Runs on a private window station (its clipboard is not the user's). Everything below the product
+// window is the product's: WndProc -> capture_local_clipboard -> ClipImageClient.
+bool station_open() {
+  for (int i = 0; i < 50; ++i) {
+    if (OpenClipboard(nullptr)) return true;
+    Sleep(20);
+  }
+  return false;
+}
+bool station_put(UINT format, const std::vector<uint8_t>& bytes) {
+  if (!station_open()) return false;
+  EmptyClipboard();
+  HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+  bool ok = g != nullptr;
+  if (ok) {
+    std::memcpy(GlobalLock(g), bytes.data(), bytes.size());
+    GlobalUnlock(g);
+    ok = SetClipboardData(format, g) != nullptr;
+    if (!ok) GlobalFree(g);
+  }
+  CloseClipboard();
+  return ok;
+}
+std::vector<uint8_t> text_bytes(const std::u16string& s) {
+  std::vector<uint8_t> b((s.size() + 1) * 2, 0);
+  std::memcpy(b.data(), s.data(), s.size() * 2);
+  return b;
+}
+
+int run_clipboard_child(const wchar_t* resultFile) {
+  FILE* out = _wfreopen(resultFile, L"w", stdout);
+  if (!out) return 3;
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  ViewerState ctx;
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = remote60::native_poc::viewer::WndProc;  // the product's
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"Remote60ClipBarStationViewer";
+  RegisterClassExW(&wc);
+  HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"station viewer", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, nullptr,
+                              nullptr, wc.hInstance, &ctx);
+  check("the product's window procedure owns a window on the private station", hwnd != nullptr);
+  ctx.control.clipboard.enabled.store(true);
+  ctx.control.clipboard.hostSupports.store(true);
+  auto& image = ctx.control.clipImage;
+  image.Start([](const void*, size_t) { return true; }, [] { return uint64_t{0}; }, [] { return false; }, 1200,
+              BulkRateConfig{}, [](const std::string& l) { std::printf("      client: %s\n", l.c_str()); });
+  image.SetBulkNegotiated(true);
+  image.SetHostSupports(true);
+  const UINT kDibv5 = CF_DIBV5;
+  const auto dib_bytes = [](uint32_t w, uint32_t h, uint32_t seed) { return noise_dib(w, h, seed, seed).bytes; };
+  const auto packaged = [&] { return image.GetCounters().packaged; };
+  const auto settle = [&] {
+    for (int i = 0; i < 300; ++i) {  // until the package worker has nothing left (<= 3 s)
+      Sleep(10);
+    }
+  };
+
+  // 1. An ordinary image copy reaches the image client through the product's path.
+  check("an image copy is put on the private clipboard", station_put(kDibv5, dib_bytes(64, 64, 1)));
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+  settle();
+  check("WM_CLIPBOARDUPDATE -> capture_local_clipboard -> the client packages it",
+        image.GetCounters().submitted == 1 && packaged() == 1);
+
+  // 2. A genuine new copy (text) while an older image is still being encoded: the older one is void.
+  const uint64_t p2 = packaged();
+  station_put(kDibv5, dib_bytes(2048, 2048, 2));
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // encoding starts (a 2048 x 2048 noise PNG: ~100 ms+)
+  station_put(CF_UNICODETEXT, text_bytes(u"a newer copy by the user"));
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // the user copied something else meanwhile
+  settle();
+  check("a newer copy makes the image still being encoded void (nothing of it is offered)", packaged() == p2);
+
+  // 2b. The case the old code missed: the new copy is an image the clipboard read refuses (over the
+  //     snapshot limit before anything is copied). It cancelled nothing, so the older image still went.
+  {
+    const uint64_t p2b = packaged();
+    station_put(kDibv5, dib_bytes(2048, 2048, 5));
+    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // the older image starts encoding
+    std::vector<uint8_t> huge(65u * 1024u * 1024u + 4096u, 0);  // over kMaxDibSnapshotBytes
+    BITMAPV5HEADER bh{};
+    bh.bV5Size = sizeof(bh);
+    bh.bV5Width = 4096;
+    bh.bV5Height = 4097;
+    bh.bV5Planes = 1;
+    bh.bV5BitCount = 32;
+    bh.bV5Compression = BI_RGB;
+    std::memcpy(huge.data(), &bh, sizeof(bh));
+    check("an image copy over the read limit is put on the private clipboard", station_put(kDibv5, huge));
+    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+    settle();
+    check("a new image the read refuses still makes the older image void", packaged() == p2b);
+    const auto pr2 = image.GetProgress();
+    check("...and says the new one was not sent (too large)",
+          pr2.outcome == ClipOutcome::NotSent && pr2.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+  }
+
+  // 3. The viewer's own echo -- the host's text it just wrote -- is NOT a new copy.
+  const uint64_t p3 = packaged();
+  station_put(kDibv5, dib_bytes(2048, 2048, 3));
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+  SendMessageW(hwnd, remote60::native_poc::viewer::kMsgApplyClipboard, 0,
+               reinterpret_cast<LPARAM>(new std::u16string(u"text from the host")));  // the product's apply
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // what that write provokes
+  settle();
+  check("the echo of the viewer's own write does not void the image being encoded", packaged() == p3 + 1);
+
+  // 4. A copy over the size limit: the older one is void and the user is told this one did not go.
+  station_put(kDibv5, dib_bytes(8193, 1, 4));
+  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+  settle();
+  const auto pr = image.GetProgress();
+  check("an image over the size limit ends with 'not sent: too large'",
+        pr.outcome == ClipOutcome::NotSent && pr.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+
+  image.Stop();
+  DestroyWindow(hwnd);
+  std::printf("CHILD RESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures);
+  std::fflush(stdout);
+  return gFailures ? 1 : 0;
+}
+
+/** Runs the child above on a private window station; its PASS/FAIL lines count here. */
+void run_clipboard_boundary() {
+  std::cout << "\n--- the clipboard boundary, on a private window station (the product's WndProc) ---\n";
+  HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+  wchar_t name[256] = L"";
+  DWORD len = 0;
+  if (ws) GetUserObjectInformationW(ws, UOI_NAME, name, sizeof(name), &len);
+  HWINSTA orig = GetProcessWindowStation();
+  HDESK dk = nullptr;
+  if (ws) {
+    SetProcessWindowStation(ws);
+    dk = CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+    SetProcessWindowStation(orig);
+  }
+  check("a private window station for the clipboard child", ws != nullptr && dk != nullptr);
+  const std::wstring result = ts::scratch_path(L"clipboard_child.txt");
+  std::wstring desktop = std::wstring(name) + L"\\Default";
+  std::wstring cmd = L"\"" + self_path() + L"\" --clipboard-child \"" + result + L"\"";
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  si.lpDesktop = desktop.data();
+  PROCESS_INFORMATION pi{};
+  DWORD code = 99;
+  if (ws && dk && CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 120000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+  }
+  std::ifstream in(result);
+  std::string line;
+  while (std::getline(in, line)) {
+    std::cout << "  child: " << line << "\n";
+    if (line.rfind("PASS", 0) == 0) ++gChecks;
+    if (line.rfind("FAIL", 0) == 0) {
+      ++gChecks;
+      ++gFailures;
+    }
+  }
+  in.close();
+  DeleteFileW(result.c_str());
+  check("the clipboard child exited 0", code == 0, std::to_string(code));
+  if (dk) CloseDesktop(dk);
+  if (ws) CloseWindowStation(ws);
+}
+
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   SetConsoleOutputCP(CP_UTF8);
@@ -267,6 +451,7 @@ int wmain(int argc, wchar_t** argv) {
       return 0;
     }
     if (a == L"--out" && i + 1 < argc) outDir = argv[++i];
+    if (a == L"--clipboard-child" && i + 1 < argc) return run_clipboard_child(argv[i + 1]);
   }
   if (!host_e2e_allowed()) {
     std::printf("SKIP  viewer_clip_bar_e2e_test (starts a listening host)\n");
@@ -287,10 +472,15 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::printf("host port %u (picked at run time)\n", kHostPort);
 
-  wchar_t temp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, temp);
-  const std::wstring dir = std::wstring(temp) + L"remote60_clipbar_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
-  CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+  // Scratch in the repository (test_scratch_dir), never %TEMP%.
+  const std::wstring scratch = ts::make_scratch_dir(L"clip_bar");
+  check("a scratch directory inside the repository", !scratch.empty(), ts::scratch_root_problem());
+  if (scratch.empty()) {
+    std::printf("\nRESULT: FAILED  (%d checks, %d failed)\n", gChecks, gFailures);
+    return 1;
+  }
+  const std::wstring dir = scratch + L"\\";
+  run_clipboard_boundary();
   const std::wstring me = self_path();
   const std::wstring myDir = directory_of(me);
   // The TEST build of the host: received images go to a folder, never to a clipboard.
@@ -565,13 +755,15 @@ int wmain(int argc, wchar_t** argv) {
     const uint64_t cancelAt = qpc_now_us();
     click_bar((cancel.left + cancel.right) / 2, (cancel.top + cancel.bottom) / 2);
     const bool stopped = pump_until([&] { return !ctx.control.clipImage.Active(); }, 10000);
-    const auto c1 = ctx.control.clipImage.GetCounters();
-    check("Cancel stops the transfer on this side", stopped,
+    check("Cancel stops the sending on this side at once", stopped,
           std::to_string((qpc_now_us() - cancelAt) / 1000) + " ms after the click");
-    check("...as a USER cancel (not superseded, not a session end)",
-          c1.lastState == static_cast<uint8_t>(ClipImageState::Cancelled) &&
-              c1.lastReason == static_cast<uint8_t>(ClipImageReason::User),
-          "state=" + std::to_string(c1.lastState) + " reason=" + std::to_string(c1.lastReason));
+    const bool settled = pump_until([&] { return !ctx.control.clipImage.GetProgress().cancelling; }, 20000);
+    const auto p1 = ctx.control.clipImage.GetProgress();
+    const auto c1 = ctx.control.clipImage.GetCounters();
+    check("...and the HOST's answer settles it: cancelled, by the user",
+          settled && p1.outcome == ClipOutcome::Cancelled && p1.detail == static_cast<uint8_t>(ClipImageReason::User),
+          "outcome=" + std::to_string(static_cast<int>(p1.outcome)) + " detail=" + std::to_string(p1.detail) + " after " +
+              std::to_string((qpc_now_us() - cancelAt) / 1000) + " ms");
     pump_until([&] { return clip_transfer_bar_current().phase == ClipBarPhase::Result; }, 3000);
     const std::wstring t2 = clip_transfer_bar_text(clip_transfer_bar_current());
     check("the bar says it was cancelled, without a Cancel button",
@@ -587,7 +779,7 @@ int wmain(int argc, wchar_t** argv) {
     check("the next copy is published (both sides went idle after the cancel)", published);
     pump_until([&] {
       const ClipBarView v = clip_transfer_bar_current();
-      return v.phase == ClipBarPhase::Result && v.state == static_cast<uint8_t>(ClipImageState::Published);
+      return v.phase == ClipBarPhase::Result && v.outcome == ClipOutcome::Published;
     }, 3000);
     const std::wstring t3 = clip_transfer_bar_text(clip_transfer_bar_current());
     check("the bar says where it went", t3.find(L"이미지를 원격 PC 클립보드에 넣었습니다") == 0, narrow(t3));
@@ -638,16 +830,10 @@ int wmain(int argc, wchar_t** argv) {
     CopyFileW(hostLogPath.c_str(), (outDir + L"\\host.log").c_str(), FALSE);
   }
 
-  for (int i = 0; i < 40; ++i) {
-    DeleteFileW((dir + L"host.log").c_str());
-    DeleteFileW((dir + L"GNLinkStream.exe").c_str());
-    DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-    remove_tree_under(dir + L"sink", dir);
-    remove_tree_under(dir + L"localappdata", dir);
-    if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) break;
-    Sleep(100);
-  }
-  check("the scratch directory is cleaned up", GetFileAttributesW(dir.substr(0, dir.size() - 1).c_str()) == INVALID_FILE_ATTRIBUTES);
+  // Removed only once the host is known to have exited (above): a directory that will not go
+  // usually means a process that has not stopped, and that is reported, not retried around.
+  check("the scratch run directory is removed (the host had exited: " + std::string(hostGone ? "yes" : "NO") + ")",
+        hostGone && ts::remove_scratch_run_dir());
   std::cout << "      held back from the window procedure: " << heldPush << " clipboard push(es), " << heldApply
             << " host text apply(s)\n";
   check("no host text arrived to apply (the host's private clipboard is empty)", heldApply == 0);

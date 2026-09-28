@@ -91,8 +91,14 @@ ClipPackageResult clip_build_package(const ClipSnapshot& snap, ClipPackage* out)
   } else if (snap.kind == ClipSnapshotKind::Dib) {
     const DibInfo info = validate_dib(snap.bytes.data(), snap.bytes.size());
     if (!info.ok()) {
-      return info.reason == DibReason::UnsupportedColorSpace ? ClipPackageResult::ColorProfile
-                                                            : ClipPackageResult::NotAnImage;
+      if (info.reason == DibReason::UnsupportedColorSpace) return ClipPackageResult::ColorProfile;
+      // A well-formed image with a side over the limit is too large, not unreadable: the user is
+      // told which (validate_dib reports both as BadDimensions, with the sides already read).
+      if (info.reason == DibReason::BadDimensions &&
+          (info.width > kClipImageMaxSide || info.height > kClipImageMaxSide)) {
+        return ClipPackageResult::TooLarge;
+      }
+      return ClipPackageResult::NotAnImage;
     }
     // Gate on the decoded size before encoding: the encoder's output is the second buffer of the
     // sender's peak (plan r2 §9 S2).
@@ -160,9 +166,17 @@ void ClipImageClient::SubmitSnapshot(ClipSnapshot snap) {
   snapshot_ = std::move(snap);
   haveSnapshot_ = true;
   ++snapshotGen_;
-  // Anything packaged from an older copy is now stale: it must not be offered after this one.
+  // Anything from an older copy is now stale: its package must not be offered after this one, its
+  // fallback text must not arrive after this one, and a transfer of it is cancelled NOW -- not once
+  // this copy has been encoded, which gave the old image seconds in which to be published.
   havePending_ = false;
   pending_ = ClipPackage{};
+  haveFallback_ = false;
+  fallbackText_.clear();
+  if (sender_.Active() && !cancelActive_) {
+    cancelActive_ = true;
+    cancelReason_ = ClipImageReason::Superseded;
+  }
   cv_.notify_all();
 }
 
@@ -172,7 +186,82 @@ void ClipImageClient::CancelForNewerCopy() {
   haveSnapshot_ = false;
   havePending_ = false;
   pending_ = ClipPackage{};
-  if (sender_.Active()) cancelActive_ = true;
+  haveFallback_ = false;  // an older copy's text must not follow this one
+  fallbackText_.clear();
+  if (sender_.Active() && !cancelActive_) {
+    cancelActive_ = true;
+    cancelReason_ = ClipImageReason::Superseded;
+  }
+}
+
+void ClipImageClient::NoteLocalCopyNotSent(ClipPackageResult why) {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::ostringstream os;
+  os << "copy not sent result=" << static_cast<int>(why) << " (text, if any, goes by text sync)";
+  Log(os.str());
+  if (cancelActive_ || awaiting_.on) {  // the older transfer's cancel is still to be settled
+    deferredNotSent_ = true;
+    deferredNotSentWhy_ = static_cast<uint8_t>(why);
+    return;
+  }
+  RecordOutcome(ClipOutcome::NotSent, static_cast<uint8_t>(why));
+}
+
+void ClipImageClient::SettleAwaiting(ClipOutcome o, uint8_t detail) {
+  awaiting_.on = false;
+  RecordOutcome(o, detail);
+  if (deferredNotSent_) {
+    deferredNotSent_ = false;
+    RecordOutcome(ClipOutcome::NotSent, deferredNotSentWhy_);
+  }
+}
+
+void ClipImageClient::RecordOutcome(ClipOutcome o, uint8_t detail) {
+  ++outcomes_;
+  lastOutcome_ = o;
+  lastDetail_ = detail;
+  std::ostringstream os;
+  os << "outcome=" << static_cast<int>(o) << " detail=" << static_cast<int>(detail);
+  Log(os.str());
+}
+
+void ClipImageClient::ApplyCancelAnswer(const ControlClipImageStatusReplyMessage& r) {
+  if (!awaiting_.on || r.transferId != awaiting_.transferId) return;  // not the transfer being settled
+  const auto st = static_cast<ClipImageState>(r.state);
+  const auto why = static_cast<ClipImageReason>(r.reason);
+  switch (st) {
+    case ClipImageState::Cancelled:
+      ++counters_.cancelled;
+      counters_.lastState = r.state;
+      counters_.lastReason = static_cast<uint8_t>(why == ClipImageReason::None ? awaiting_.why : why);
+      SettleAwaiting(ClipOutcome::Cancelled, counters_.lastReason);
+      return;
+    case ClipImageState::Published:  // it was already on the host's clipboard: say so, do not undo it
+      ++counters_.published;
+      counters_.lastState = r.state;
+      counters_.lastReason = 0;
+      SettleAwaiting(ClipOutcome::CancelTooLate, static_cast<uint8_t>(awaiting_.why));
+      return;
+    case ClipImageState::Superseded:
+      ++counters_.superseded;
+      counters_.lastState = r.state;
+      counters_.lastReason = r.reason;
+      SettleAwaiting(ClipOutcome::HostSuperseded, r.reason);
+      return;
+    case ClipImageState::Failed:
+      ++counters_.failed;
+      counters_.lastState = r.state;
+      counters_.lastReason = r.reason;
+      SettleAwaiting(ClipOutcome::Failed, r.reason);
+      return;
+    case ClipImageState::Unknown:  // the host holds no record of it: what happened is not known
+      counters_.lastState = r.state;
+      counters_.lastReason = static_cast<uint8_t>(awaiting_.why);
+      SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(awaiting_.why));
+      return;
+    default:
+      return;  // still verifying / publishing on the host: the next Status settles it
+  }
 }
 
 void ClipImageClient::CancelByUser() {
@@ -181,6 +270,8 @@ void ClipImageClient::CancelByUser() {
   haveSnapshot_ = false;
   havePending_ = false;
   pending_ = ClipPackage{};
+  haveFallback_ = false;
+  fallbackText_.clear();
   if (sender_.Active()) {
     cancelActive_ = true;
     cancelReason_ = ClipImageReason::User;
@@ -192,9 +283,11 @@ ClipImageClient::Progress ClipImageClient::GetProgress() const {
   std::lock_guard<std::mutex> lock(mu_);
   Progress p;
   p.active = sender_.Active();
-  p.finished = counters_.published + counters_.failed + counters_.superseded + counters_.cancelled;
-  p.lastState = counters_.lastState;
-  p.lastReason = counters_.lastReason;
+  p.cancelling = awaiting_.on;
+  p.cancellingWhy = static_cast<uint8_t>(awaiting_.why);
+  p.finished = outcomes_;
+  p.outcome = lastOutcome_;
+  p.detail = lastDetail_;
   if (p.active) {
     p.bytesTotal = sender_.offer().packageBytes();
     p.bytesConfirmed = (std::min<uint64_t>)(confirmedBytes_.load(std::memory_order_relaxed), p.bytesTotal);
@@ -231,14 +324,16 @@ void ClipImageClient::PackageWorker() {
     std::lock_guard<std::mutex> lock(mu_);
     if (gen != snapshotGen_) continue;  // a newer copy arrived meanwhile: this one is dead
     if (r != ClipPackageResult::Ok) {
-      if (sender_.Active()) cancelActive_ = true;  // the newest copy is not this transfer's
+      // (A running transfer of an older copy was already cancelled when this copy was submitted.)
       std::ostringstream os;
       os << "package refused result=" << static_cast<int>(r) << " (not sent; text, if any, goes by text sync)";
       Log(os.str());
       if (!snap.text.empty()) {
         fallbackText_ = snap.text;
         haveFallback_ = true;
+        fallbackGen_ = gen;
       }
+      RecordOutcome(ClipOutcome::NotSent, static_cast<uint8_t>(r));
       continue;
     }
     ++counters_.packaged;
@@ -257,6 +352,11 @@ void ClipImageClient::PackageWorker() {
 bool ClipImageClient::TakeFallbackText(std::u16string* out) {
   std::lock_guard<std::mutex> lock(mu_);
   if (!haveFallback_) return false;
+  if (fallbackGen_ != snapshotGen_) {  // a newer copy exists: this text would arrive after it
+    haveFallback_ = false;
+    fallbackText_.clear();
+    return false;
+  }
   *out = std::move(fallbackText_);
   fallbackText_.clear();
   haveFallback_ = false;
@@ -271,10 +371,22 @@ void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) 
   counters_.lastState = static_cast<uint8_t>(finalState);
   counters_.lastReason = static_cast<uint8_t>(why);
   switch (finalState) {
-    case ClipImageState::Published: ++counters_.published; break;
-    case ClipImageState::Superseded: ++counters_.superseded; break;
-    case ClipImageState::Cancelled: ++counters_.cancelled; break;
-    default: ++counters_.failed; break;
+    case ClipImageState::Published:
+      ++counters_.published;
+      RecordOutcome(ClipOutcome::Published, 0);
+      break;
+    case ClipImageState::Superseded:
+      ++counters_.superseded;
+      RecordOutcome(ClipOutcome::HostSuperseded, static_cast<uint8_t>(why));
+      break;
+    case ClipImageState::Cancelled:
+      ++counters_.cancelled;
+      RecordOutcome(ClipOutcome::Cancelled, static_cast<uint8_t>(why));
+      break;
+    default:
+      ++counters_.failed;
+      RecordOutcome(ClipOutcome::Failed, static_cast<uint8_t>(why));
+      break;
   }
   std::ostringstream os;
   os << "end state=" << static_cast<int>(finalState) << " reason=" << static_cast<int>(why)
@@ -291,12 +403,11 @@ int ClipImageClient::Pump(ControlLink& link) {
   int result = 0;
   {
     std::unique_lock<std::mutex> lock(mu_);
-    // 1. A newer copy is ready while one is running: cancel it first, and wait for the answer
-    //    (r2 8-2), so the host is free when the new offer arrives.
+    // 1. A newer copy, or the user, cancels the running transfer. Sending stops here at once; what
+    //    happened on the host is a separate question the answer settles (it may already have
+    //    published, or be verifying and still publish). Until it is settled nothing new is offered.
     if (sender_.Active() && (havePending_ || cancelActive_)) {
-      // A newer copy supersedes; the bar's Cancel is the user's (reason User) -- unless a newer
-      // copy is also waiting, which then goes out right after.
-      const ClipImageReason why = havePending_ ? ClipImageReason::Superseded : cancelReason_;
+      const ClipImageReason why = cancelActive_ ? cancelReason_ : ClipImageReason::Superseded;
       cancelActive_ = false;
       cancelReason_ = ClipImageReason::Superseded;
       ControlClipImageCancelMessage c{};
@@ -306,26 +417,72 @@ int ClipImageClient::Pump(ControlLink& link) {
       c.reason = static_cast<uint8_t>(why);
       c.transferId = sender_.transferId();
       c.epochTag = sender_.epochTag();
-      EndActive(ClipImageState::Cancelled, why);  // local cleanup is immediate
+      awaiting_ = Awaiting{true, c.transferId, c.epochTag, why, now + kClipImageStatusIntervalUs,
+                           now + kClipCancelConfirmBudgetUs};
+      {
+        const uint64_t ms = (now - sender_.startedUs()) / 1000;
+        counters_.lastTransferMs = ms;
+        lastBytesTotal_ = sender_.offer().packageBytes();
+        std::ostringstream os;
+        os << "stopped here, cancel sent reason=" << static_cast<int>(why) << " bytes=" << lastBytesTotal_
+           << " served=" << sender_.served() << " ms=" << ms << " sha=" << hex8(sender_.offer().sha256);
+        Log(os.str());
+      }
+      sender_.End();
       bulkClosePending_ = false;  // closed right here -- a flag left set would close the NEXT transfer's
       lock.unlock();
       CloseBulk();
-      if (!link.Write(&c, sizeof(c)) || !link.EndMessage()) return -1;
       ControlClipImageStatusReplyMessage r{};
-      if (!read_reply(link, MessageType::ControlClipImageCancelReply, &r)) return -1;
-      {
-        std::ostringstream os;
-        os << "cancel answered reason=" << static_cast<int>(why) << " hostState=" << static_cast<int>(r.state)
-           << " hostReason=" << static_cast<int>(r.reason);
-        Log(os.str());
+      const bool answered = link.Write(&c, sizeof(c)) && link.EndMessage() &&
+                            read_reply(link, MessageType::ControlClipImageCancelReply, &r);
+      lock.lock();
+      if (!answered) {  // the link failed: nobody knows what the host did
+        if (awaiting_.on && awaiting_.transferId == c.transferId) {
+          SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(why));
+        }
+        return -1;
       }
+      std::ostringstream os;
+      os << "cancel answered reason=" << static_cast<int>(why) << " hostState=" << static_cast<int>(r.state)
+         << " hostReason=" << static_cast<int>(r.reason) << " seqOk=" << (r.seq == c.seq ? 1 : 0)
+         << " idOk=" << (r.transferId == c.transferId ? 1 : 0);
+      Log(os.str());
+      if (r.seq == c.seq) ApplyCancelAnswer(r);  // a mismatch settles nothing: Status will
       return 1;
     }
-    // 2. Offer the newest package.
-    if (!sender_.Active() && havePending_ && Usable()) {
+    // 1b. A cancel not settled yet: ask about THAT transfer, bounded.
+    if (awaiting_.on && now >= awaiting_.nextStatusUs) {
+      if (now >= awaiting_.deadlineUs) {
+        SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(awaiting_.why));
+        return 0;
+      }
+      ControlClipImageStatusMessage s{};
+      s.header.type = static_cast<uint16_t>(MessageType::ControlClipImageStatus);
+      s.header.size = sizeof(s);
+      s.seq = ++nextSeq_;
+      s.transferId = awaiting_.transferId;
+      s.epochTag = awaiting_.epochTag;
+      awaiting_.nextStatusUs = now + kClipImageStatusIntervalUs;
+      lock.unlock();
+      ControlClipImageStatusReplyMessage r{};
+      const bool answered = link.Write(&s, sizeof(s)) && link.EndMessage() &&
+                            read_reply(link, MessageType::ControlClipImageStatusReply, &r);
+      lock.lock();
+      if (!answered) {
+        if (awaiting_.on && awaiting_.transferId == s.transferId) {
+          SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(awaiting_.why));
+        }
+        return -1;
+      }
+      if (r.seq == s.seq) ApplyCancelAnswer(r);
+      return 1;
+    }
+    // 2. Offer the newest package -- only once the host has settled the previous one.
+    if (!sender_.Active() && !awaiting_.on && havePending_ && Usable()) {
       ClipPackage pkg = std::move(pending_);
       pending_ = ClipPackage{};
       havePending_ = false;
+      offerGen_ = pendingGen_;
       ControlClipImageOfferMessage m{};
       m.header.type = static_cast<uint16_t>(MessageType::ControlClipImageOffer);
       m.header.size = sizeof(m);
@@ -359,9 +516,13 @@ int ClipImageClient::Pump(ControlLink& link) {
         std::ostringstream os;
         os << "refused verdict=" << static_cast<int>(r.verdict) << " (text, if any, goes by text sync)";
         Log(os.str());
-        if (!pkg.text.empty()) {
-          fallbackText_ = pkg.text;
-          haveFallback_ = true;
+        if (offerGen_ == snapshotGen_) {  // still the newest copy: say so, and send its text instead
+          RecordOutcome(ClipOutcome::Refused, r.verdict);
+          if (!pkg.text.empty()) {
+            fallbackText_ = pkg.text;
+            haveFallback_ = true;
+            fallbackGen_ = offerGen_;
+          }
         }
       }
       return 1;
@@ -399,6 +560,8 @@ void ClipImageClient::EndSession() {
   {
     std::lock_guard<std::mutex> lock(mu_);
     EndActive(ClipImageState::Cancelled, ClipImageReason::Session);
+    if (awaiting_.on) SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(awaiting_.why));
+    deferredNotSent_ = false;
     havePending_ = false;
     pending_ = ClipPackage{};
     haveSnapshot_ = false;

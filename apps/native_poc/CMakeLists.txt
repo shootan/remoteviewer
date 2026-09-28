@@ -728,6 +728,15 @@ endif()
 
 # clip-image direction A, two-sided on loopback: the product client and host service over real UDP
 # sockets, through an impairment proxy; the clipboard injected at the OS boundary (see the file).
+# clip-image (Codex review of 4528dc9): the client against a scripted host -- cancel races,
+# supersede, refusals and packages that never leave, deterministic.
+add_executable(remote60_clip_image_client_test src/clip_image_client_test.cpp)
+target_include_directories(remote60_clip_image_client_test PRIVATE src)
+target_link_libraries(remote60_clip_image_client_test PRIVATE remote60_clip_image)
+if(MSVC)
+  target_compile_options(remote60_clip_image_client_test PRIVATE /utf-8)
+endif()
+
 # clip-image ④: the transfer bar's words and when it shows them -- the functions the bar calls.
 add_executable(remote60_clip_transfer_bar_test src/clip_transfer_bar_test.cpp)
 target_include_directories(remote60_clip_transfer_bar_test PRIVATE src)
@@ -971,6 +980,7 @@ add_executable(remote60_viewer_clip_bar_e2e_test
 target_include_directories(remote60_viewer_clip_bar_e2e_test PRIVATE src)
 target_link_libraries(remote60_viewer_clip_bar_e2e_test PRIVATE
   remote60_clip_image  # the viewer's state holds the clipboard image client
+  remote60_test_scratch_dir  # scratch inside the repository, never %TEMP%
   common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt
   d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
 if(MSVC)

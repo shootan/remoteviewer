@@ -272,11 +272,17 @@ void capture_local_clipboard(ViewerState& ctx, HWND hwnd, bool allowImage) {
   // Only for a genuine change: connecting does not push a possibly large image (the one-shot push
   // stays text-only, as it was).
   auto& image = ctx.control.clipImage;
-  if (image.Usable()) {
-    if (allowImage && remote60::native_poc::clip_image_available()) {
+  // A genuine new copy -- not the one-shot push at connect (allowImage false), not the echo of host
+  // text this viewer just wrote -- makes everything older void AT ONCE: the package being made, the
+  // transfer running, the text of a refused older image. Before this, a new image only cancelled
+  // the old transfer once it had been encoded, and an image that could not be read cancelled nothing.
+  const bool echo = GetClipboardSequenceNumber() == clip.ownWriteSeq.load(std::memory_order_relaxed);
+  if (image.Usable() && allowImage && !echo) {
+    image.CancelForNewerCopy();
+    if (remote60::native_poc::clip_image_available()) {
       remote60::native_poc::ClipSnapshot snap;
-      if (remote60::native_poc::clip_image_read_snapshot(hwnd, &snap) ==
-          remote60::native_poc::ClipSnapshotResult::Ok) {
+      const remote60::native_poc::ClipSnapshotResult read = remote60::native_poc::clip_image_read_snapshot(hwnd, &snap);
+      if (read == remote60::native_poc::ClipSnapshotResult::Ok) {
         if (!snap.text.empty()) {
           // Recorded as sent, so a later poll that brings the same text back is not re-applied.
           std::lock_guard<std::mutex> lock(clip.mu);
@@ -286,8 +292,10 @@ void capture_local_clipboard(ViewerState& ctx, HWND hwnd, bool allowImage) {
         image.SubmitSnapshot(std::move(snap));
         return;
       }
-    } else if (allowImage) {
-      image.CancelForNewerCopy();
+      // An image the user copied that cannot go: say so. Its text, if any, still goes below.
+      image.NoteLocalCopyNotSent(read == remote60::native_poc::ClipSnapshotResult::TooLarge
+                                     ? remote60::native_poc::ClipPackageResult::TooLarge
+                                     : remote60::native_poc::ClipPackageResult::ReadFailed);
     }
   }
   // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same 16 bits
@@ -352,6 +360,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (text) {
         (void)remote60::native_poc::clipboard_set_unicode_text(
             hwnd, remote60::native_poc::u16_to_wide(*text));
+        ctx.control.clipboard.ownWriteSeq.store(GetClipboardSequenceNumber(), std::memory_order_relaxed);
       }
       return 0;
     }

@@ -85,10 +85,11 @@ ClipSnapshotResult clip_image_read_snapshot(HWND owner, ClipSnapshot* out) {
   if (result == ClipSnapshotResult::Ok && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
     if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
       if (const wchar_t* t = static_cast<const wchar_t*>(GlobalLock(h))) {
-        const SIZE_T cap = GlobalSize(h) / sizeof(wchar_t);
-        size_t n = 0;
-        while (n < cap && t[n] != L'\0') ++n;  // bounded by the allocation, not by trust in a NUL
-        out->text.assign(reinterpret_cast<const char16_t*>(t), n);
+        // Bounded by the text limit BEFORE anything is scanned or copied, not only by the
+        // allocation: a large image's same-copy text used to be copied whole here and cut later
+        // (clip_build_package). Over the limit it is left out, as text v1 would; the image still goes.
+        const size_t n = clip_bounded_text_length(t, GlobalSize(h) / sizeof(wchar_t), kClipboardTextMaxUtf16);
+        if (n <= kClipboardTextMaxUtf16) out->text.assign(reinterpret_cast<const char16_t*>(t), n);
         GlobalUnlock(h);
       }
     }

@@ -118,6 +118,25 @@ int run_child(const wchar_t* resultFile) {
   check("the snapshot reads the DIB, the same-copy text and the sequence number",
         clip_image_read_snapshot(nullptr, &snap) == ClipSnapshotResult::Ok && snap.kind == ClipSnapshotKind::Dib &&
             snap.text == text && snap.sequence == seqNow && snap.bytes.size() >= v5.size());
+  // The same copy's text over the text limit (Codex review ④): left out BEFORE it is copied -- the
+  // image still goes -- and one unit under the limit still comes along.
+  {
+    std::u16string big(static_cast<size_t>(kClipboardTextMaxUtf16) + 1, u'x');
+    check("an image copy with text one unit over the limit is put on the private clipboard",
+          put_formats({{CF_DIBV5, v5}, {CF_UNICODETEXT, utf16_bytes(big)}}));
+    ClipSnapshot s2;
+    check("...the image is read and the over-limit text is left out",
+          clip_image_read_snapshot(nullptr, &s2) == ClipSnapshotResult::Ok && s2.kind == ClipSnapshotKind::Dib &&
+              s2.text.empty());
+    big.resize(kClipboardTextMaxUtf16);
+    check("text exactly at the limit is put on the private clipboard",
+          put_formats({{CF_DIBV5, v5}, {CF_UNICODETEXT, utf16_bytes(big)}}));
+    ClipSnapshot s3;
+    check("...comes along whole", clip_image_read_snapshot(nullptr, &s3) == ClipSnapshotResult::Ok &&
+                                       s3.text.size() == kClipboardTextMaxUtf16);
+    check("the image copy with the short text is put back for the steps below",
+          put_formats({{CF_DIBV5, v5}, {CF_UNICODETEXT, utf16_bytes(text)}}));
+  }
   check("the clipboard is closed again after the snapshot (another open succeeds at once)",
         OpenClipboard(nullptr) && CloseClipboard());
   std::vector<uint8_t> png;
@@ -187,6 +206,17 @@ int wmain(int argc, wchar_t** argv) {
   if (argc >= 3 && wcscmp(argv[1], L"--child") == 0) return run_child(argv[2]);
   std::wstring outDir = L".";
   if (argc >= 3 && wcscmp(argv[1], L"--out") == 0) outDir = argv[2];
+  // The bound itself, no clipboard: nothing past limit + 1 units is looked at.
+  {
+    std::wstring s(10, L'a');
+    check("bounded length: a short text is its length", clip_bounded_text_length(s.c_str(), s.size() + 1, 100) == 10);
+    std::wstring over(8, L'b');  // no NUL within limit + 1 = 6 units
+    check("bounded length: over the limit reports limit + 1 without reading further",
+          clip_bounded_text_length(over.data(), 1000000, 5) == 6);
+    check("bounded length: no NUL within a small allocation stops at the allocation",
+          clip_bounded_text_length(over.data(), 4, 100) == 4);
+    check("bounded length: exactly the limit is kept", clip_bounded_text_length(s.c_str(), s.size() + 1, 10) == 10);
+  }
   const DWORD interactiveBefore = GetClipboardSequenceNumber();
   HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);  // unnamed: medium may not name one
   if (!ws) {

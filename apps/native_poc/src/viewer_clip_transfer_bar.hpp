@@ -4,9 +4,12 @@
 //
 // Role:    While an image copied on this PC is on its way to the remote PC, a small bar at the
 //          bottom centre of the viewer says so -- percent, size, seconds -- with a Cancel button,
-//          and once it ends, one line saying how it ended. On a lossy long path 5 MiB takes about
-//          30 s (measured, 40 ms / 1 %), so the user must not be told it is instant: past 10 s the
-//          line also says the network is why.
+//          and once it ends, one line saying how it ended -- including a copy that never left
+//          (too large, unreadable) and one the host would not take. On a lossy long path 5 MiB
+//          takes about 30 s (measured, 40 ms / 1 %), so the user must not be told it is instant:
+//          past 10 s the line says it is taking time (not why -- nothing here measures why).
+//          Cancel stops sending at once, but the line says "cancelling" until the host has said
+//          what happened: it may already have published the image.
 // Why a window of its own: the video is a flip-model swapchain, which composites over anything
 //          GDI draws into the viewer's client area (see compute_client_layout, the session
 //          toolbar). The session toolbar hides itself unless summoned, so the status cannot live
@@ -28,7 +31,7 @@
 
 namespace remote60::native_poc {
 
-enum class ClipBarPhase : uint8_t { Hidden = 0, Sending, Result };
+enum class ClipBarPhase : uint8_t { Hidden = 0, Sending, Cancelling, Result };
 
 /** What the bar shows. Pure data, so the text can be asserted without a window. */
 struct ClipBarView {
@@ -36,8 +39,9 @@ struct ClipBarView {
   uint64_t bytesDone = 0;
   uint64_t bytesTotal = 0;
   uint64_t elapsedMs = 0;
-  uint8_t state = 0;   // ClipImageState of the result (Result only)
-  uint8_t reason = 0;  // ClipImageReason of the result (Result only)
+  uint8_t cancellingWhy = 0;                // ClipImageReason (Cancelling only)
+  ClipOutcome outcome = ClipOutcome::None;  // Result only
+  uint8_t detail = 0;                       // Result only (see ClipOutcome)
 };
 
 /** The one line the bar draws. */

@@ -17,7 +17,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"Remote60ClipTransferBar";
 constexpr UINT_PTR kTimerPoll = 1;
 constexpr UINT kPollMs = 250;
-constexpr uint64_t kSlowAfterMs = 10000;  // past this, the line says the network is why
+constexpr uint64_t kSlowAfterMs = 10000;  // past this, the line says it is taking time
 
 std::wstring megabytes(uint64_t bytes) {
   wchar_t buf[32];
@@ -44,30 +44,63 @@ std::wstring failure_reason(ClipImageReason r) {
 
 }  // namespace
 
+static std::wstring not_sent_reason(ClipPackageResult r) {
+  switch (r) {
+    case ClipPackageResult::TooLarge: return L"이미지가 너무 커서 보내지 않았습니다";
+    case ClipPackageResult::ColorProfile: return L"색 프로필이 들어 있는 이미지라 보내지 않았습니다";
+    default: return L"복사한 이미지를 읽지 못해 보내지 않았습니다";
+  }
+}
+
+static std::wstring refused_reason(ClipImageVerdict v) {
+  switch (v) {
+    case ClipImageVerdict::TooLarge: return L"원격 PC가 크기 제한으로 이미지를 받지 않았습니다";
+    case ClipImageVerdict::Disabled: return L"원격 PC에서 클립보드 공유가 꺼져 있어 이미지를 받지 않았습니다";
+    case ClipImageVerdict::Busy: return L"원격 PC가 다른 이미지를 받는 중이라 이 이미지를 받지 않았습니다";
+    default: return L"원격 PC가 이미지를 받지 않았습니다";
+  }
+}
+
 std::wstring clip_transfer_bar_text(const ClipBarView& v) {
   if (v.phase == ClipBarPhase::Sending) {
     const uint64_t pct = v.bytesTotal ? (std::min<uint64_t>)(99, v.bytesDone * 100 / v.bytesTotal) : 0;
     std::wstring s = L"원격 PC로 이미지 보내는 중 " + std::to_wstring(pct) + L"% (" + megabytes(v.bytesDone) + L" / " +
                      megabytes(v.bytesTotal) + L" MB) · " + seconds(v.elapsedMs);
-    if (v.elapsedMs >= kSlowAfterMs) s += L" — 네트워크가 느려 시간이 걸리고 있습니다";
+    // Taking time is a fact; WHY is not measured here (the path, the host verifying, this PC), so
+    // the line does not guess.
+    if (v.elapsedMs >= kSlowAfterMs) s += L" — 전송에 시간이 걸리고 있습니다";
     return s;
   }
+  if (v.phase == ClipBarPhase::Cancelling) {
+    return static_cast<ClipImageReason>(v.cancellingWhy) == ClipImageReason::User
+               ? L"이미지 보내기를 취소하는 중…"
+               : L"새로 복사한 내용으로 바꾸는 중…";
+  }
   if (v.phase != ClipBarPhase::Result) return std::wstring();
-  const auto st = static_cast<ClipImageState>(v.state);
-  const auto why = static_cast<ClipImageReason>(v.reason);
-  switch (st) {
-    case ClipImageState::Published:
+  const auto why = static_cast<ClipImageReason>(v.detail);
+  switch (v.outcome) {
+    case ClipOutcome::Published:
       return L"이미지를 원격 PC 클립보드에 넣었습니다 (" + megabytes(v.bytesTotal) + L" MB, " + seconds(v.elapsedMs) +
              L")";
-    case ClipImageState::Cancelled:
+    case ClipOutcome::Cancelled:
       if (why == ClipImageReason::User) return L"이미지 보내기를 취소했습니다";
       if (why == ClipImageReason::Superseded) return L"새로 복사한 내용으로 바뀌어 이전 이미지는 보내지 않았습니다";
       if (why == ClipImageReason::Session) return L"연결이 끊겨 이미지 보내기가 중단됐습니다";
       return L"이미지 보내기가 취소됐습니다";
-    case ClipImageState::Superseded:
+    case ClipOutcome::CancelTooLate:
+      return L"취소하기 전에 이미 원격 PC 클립보드에 들어갔습니다";
+    case ClipOutcome::CancelUnconfirmed:
+      return L"보내기를 멈췄지만 원격 PC에서 어떻게 됐는지 확인하지 못했습니다";
+    case ClipOutcome::HostSuperseded:
       return L"원격 PC 클립보드가 먼저 바뀌어 이미지를 넣지 않았습니다";
-    default:
+    case ClipOutcome::Failed:
       return L"이미지를 보내지 못했습니다 (" + failure_reason(why) + L")";
+    case ClipOutcome::NotSent:
+      return not_sent_reason(static_cast<ClipPackageResult>(v.detail));
+    case ClipOutcome::Refused:
+      return refused_reason(static_cast<ClipImageVerdict>(v.detail));
+    default:
+      return std::wstring();
   }
 }
 
@@ -88,6 +121,13 @@ ClipBarView clip_transfer_bar_view(const ClipImageClient::Progress& p, uint64_t 
     *resultUntilUs = 0;
     return v;
   }
+  if (p.cancelling) {  // stopped here; what the host did is not known yet
+    v.phase = ClipBarPhase::Cancelling;
+    v.cancellingWhy = p.cancellingWhy;
+    *seenFinished = p.finished;
+    *resultUntilUs = 0;
+    return v;
+  }
   if (p.finished != *seenFinished) {
     // A new outcome, including one that began and ended between two polls (a fast LAN copy).
     *seenFinished = p.finished;
@@ -98,8 +138,8 @@ ClipBarView clip_transfer_bar_view(const ClipImageClient::Progress& p, uint64_t 
     v.bytesDone = p.bytesConfirmed;
     v.bytesTotal = p.bytesTotal;
     v.elapsedMs = p.elapsedMs;
-    v.state = p.lastState;
-    v.reason = p.lastReason;
+    v.outcome = p.outcome;
+    v.detail = p.detail;
   }
   return v;
 }
@@ -181,12 +221,13 @@ void poll() {
   if (g.view.phase != before.phase && g.hooks.onLog) {
     std::string line = "[clip-bar] phase=" + std::to_string(static_cast<int>(g.view.phase));
     if (g.view.phase == ClipBarPhase::Result) {
-      line += " state=" + std::to_string(g.view.state) + " reason=" + std::to_string(g.view.reason);
+      line += " outcome=" + std::to_string(static_cast<int>(g.view.outcome)) + " detail=" + std::to_string(g.view.detail);
     }
     g.hooks.onLog(line);
   }
   const bool changed = g.view.phase != before.phase || g.view.bytesDone != before.bytesDone ||
-                       g.view.elapsedMs / 1000 != before.elapsedMs / 1000 || g.view.state != before.state;
+                       g.view.elapsedMs / 1000 != before.elapsedMs / 1000 || g.view.outcome != before.outcome ||
+                       g.view.detail != before.detail;
   if (changed) reposition();
 }
 
@@ -205,8 +246,8 @@ void paint(HDC target) {
   const int pad = scaled(10);
   RECT textRect{pad, 0, (g.cancel.right > 0 ? g.cancel.left : w) - pad / 2, h};
   const bool failed = g.view.phase == ClipBarPhase::Result &&
-                      static_cast<ClipImageState>(g.view.state) != ClipImageState::Published &&
-                      static_cast<ClipImageState>(g.view.state) != ClipImageState::Cancelled;
+                      (g.view.outcome == ClipOutcome::Failed || g.view.outcome == ClipOutcome::NotSent ||
+                       g.view.outcome == ClipOutcome::Refused || g.view.outcome == ClipOutcome::CancelUnconfirmed);
   SetTextColor(hdc, failed ? RGB(242, 150, 140) : RGB(232, 236, 242));
   const std::wstring text = clip_transfer_bar_text(g.view);
   DrawTextW(hdc, text.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);

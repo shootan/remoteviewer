@@ -81,7 +81,32 @@ inline uint64_t clip_bulk_retransmit_us(uint32_t rateBps, uint64_t rttUs = 0) {
  */
 BulkRateConfig clip_bulk_rate_config_from_env();
 
-enum class ClipPackageResult : uint8_t { Ok = 0, NotAnImage, TooLarge, ColorProfile, EncodeFailed, HashFailed };
+enum class ClipPackageResult : uint8_t {
+  Ok = 0,
+  NotAnImage,
+  TooLarge,
+  ColorProfile,
+  EncodeFailed,
+  HashFailed,
+  ReadFailed,  // the clipboard held an image that could not be read (busy, unreadable)
+};
+
+/**
+ * How the last image copy ended, as the user is told (the transfer bar). One per copy that reached
+ * the image path; `detail` says why where there is a why.
+ */
+enum class ClipOutcome : uint8_t {
+  None = 0,
+  Published,          // on the remote PC's clipboard
+  Cancelled,          // stopped, and the host confirmed it; detail = ClipImageReason (User / Superseded / Session)
+  CancelTooLate,      // the cancel reached the host after it had already published the image
+  CancelUnconfirmed,  // the cancel went (or could not go) and the host's answer never came
+  HostSuperseded,     // the host's clipboard changed first: nothing was published
+  Failed,             // detail = ClipImageReason
+  NotSent,            // never left this PC; detail = ClipPackageResult
+  Refused,            // the host did not take it; detail = ClipImageVerdict
+};
+constexpr uint64_t kClipCancelConfirmBudgetUs = 15000000;  // how long a cancel's outcome is waited for
 
 struct ClipPackage {
   std::shared_ptr<const std::vector<uint8_t>> bytes;  // [PNG][UTF-16LE text]
@@ -135,6 +160,13 @@ class ClipImageClient {
   void CancelForNewerCopy();
 
   /**
+   * UI thread: this PC's clipboard changed to an image that cannot be sent (too large, unreadable).
+   * Called after CancelForNewerCopy, which already made everything older void; this only tells the
+   * user that the new copy did not go.
+   */
+  void NoteLocalCopyNotSent(ClipPackageResult why);
+
+  /**
    * UI thread: the user pressed Cancel on the transfer bar (3rd rate agreement ④). The running
    * transfer is cancelled on the host with reason User (the existing Cancel message), and a copy
    * still being packaged or waiting to be offered is dropped with it -- it is the same copy.
@@ -147,9 +179,11 @@ class ClipImageClient {
     uint64_t bytesTotal = 0;      // the package (PNG + text)
     uint64_t bytesConfirmed = 0;  // chunks the host has confirmed (never counts a resend twice)
     uint64_t elapsedMs = 0;       // since the offer; for a finished one, how long it took
-    uint64_t finished = 0;        // transfers ended so far: a change means a new outcome below
-    uint8_t lastState = 0;        // ClipImageState of the last finished transfer
-    uint8_t lastReason = 0;       // ClipImageReason of the last finished transfer
+    bool cancelling = false;      // stopped here; the host's answer to the cancel is awaited
+    uint8_t cancellingWhy = 0;    // ClipImageReason of that cancel (User / Superseded)
+    uint64_t finished = 0;        // outcomes so far: a change means a new one below
+    ClipOutcome outcome = ClipOutcome::None;  // the last one
+    uint8_t detail = 0;                       // its why (see ClipOutcome)
   };
   Progress GetProgress() const;
 
@@ -198,6 +232,10 @@ class ClipImageClient {
   void OnTransmitted(const uint8_t* data, size_t len, uint64_t nowUs, bool resend);
   void Log(const std::string& line);
   void EndActive(ClipImageState finalState, ClipImageReason why);  // caller holds mu_; bulk closed after
+  void RecordOutcome(ClipOutcome o, uint8_t detail);  // caller holds mu_
+  // A cancel's answer (or a later Status) for the awaited transfer. Non-terminal: keep waiting.
+  void ApplyCancelAnswer(const ControlClipImageStatusReplyMessage& r);  // caller holds mu_
+  void SettleAwaiting(ClipOutcome o, uint8_t detail);  // caller holds mu_: the cancel's outcome, then any deferred notice
 
   SendFn send_;
   PingRttFn pingRtt_;
@@ -223,6 +261,8 @@ class ClipImageClient {
   uint64_t pendingGen_ = 0;
   std::u16string fallbackText_;
   bool haveFallback_ = false;
+  uint64_t fallbackGen_ = 0;  // the copy the fallback text belongs to: stale once a newer one exists
+  uint64_t offerGen_ = 0;     // the copy the transfer on offer belongs to
 
   ClipImageSender sender_;
   uint64_t nextStatusUs_ = 0;
@@ -232,6 +272,25 @@ class ClipImageClient {
   ClipImageReason cancelReason_ = ClipImageReason::Superseded;  // User when the bar's Cancel asked
   std::atomic<uint64_t> confirmedBytes_{0};  // this transfer's chunks the host confirmed
   uint64_t lastBytesTotal_ = 0;                // the last finished transfer's size (under mu_)
+  // A transfer stopped here whose cancel the host has not settled yet. Until it has, nothing new is
+  // offered (the host would answer Busy and the newest copy would be lost) and only replies naming
+  // THIS transfer id count.
+  struct Awaiting {
+    bool on = false;
+    uint64_t transferId = 0;
+    uint64_t epochTag = 0;
+    ClipImageReason why = ClipImageReason::Superseded;
+    uint64_t nextStatusUs = 0;
+    uint64_t deadlineUs = 0;
+  };
+  Awaiting awaiting_;
+  uint64_t outcomes_ = 0;
+  // "The new copy did not go" while the older transfer's cancel is still being settled: shown after
+  // that settles, so the user's last line is about the copy they just made.
+  bool deferredNotSent_ = false;
+  uint8_t deferredNotSentWhy_ = 0;
+  ClipOutcome lastOutcome_ = ClipOutcome::None;
+  uint8_t lastDetail_ = 0;
   Counters counters_;
 
   // Bulk stream (while a transfer is accepted).
