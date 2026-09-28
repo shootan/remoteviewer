@@ -188,6 +188,52 @@ int main() {
     const BulkRateAction a2 = ping.Evaluate(p2, 4000000);
     check("control RTT +35 ms holds the rate (no raise, no cut)", a2 == BulkRateAction::Hold && ping.rate() == 384000);
   }
+  // ------------------------------------------------------------------ bulk rate: the parameters
+  {
+    // The values under discussion (per-ACK slow start x2, then x1.25, a 16 Mbps cap), as parameters.
+    BulkRateConfig ss;
+    ss.slowStartNumerator = 2;
+    ss.slowStartDenominator = 1;
+    ss.upNumerator = 5;
+    ss.upDenominator = 4;
+    ss.capBps = 16000000;
+    ss.evalUnit = BulkRateEvalUnit::AckRound;
+    BulkRateController c(ss);
+    BulkRateWindow w{0, 1000, 1000, 0};
+    uint64_t t = 0, rounds = 0;
+    check("per-ACK: nothing is due before a round completes", !c.Due(t += 1000, rounds));
+    ++rounds;
+    check("per-ACK: one completed round makes an evaluation due", c.Due(t, rounds));
+    for (int i = 0; i < 3; ++i) {
+      w.deliveredBps = c.rate();
+      c.Evaluate(w, t += 1000);
+      c.MarkEvaluated(t, ++rounds);
+    }
+    check("slow start doubles per evaluation (256k -> 2048k)", c.rate() == 2048000 && c.inSlowStart());
+    check("per-ACK: evaluated rounds are not evaluated twice", !c.Due(t + 5000000, rounds));
+    BulkRateWindow lossy{1, 1000, 1000, 2048000};
+    c.Evaluate(lossy, t += 1000);
+    check("the first congestion ends slow start and halves", c.rate() == 1024000 && !c.inSlowStart());
+    w.deliveredBps = c.rate();
+    c.Evaluate(w, t += 1000);
+    check("after slow start the gentler step applies (x1.25)", c.rate() == 1280000);
+    for (int i = 0; i < 40; ++i) { w.deliveredBps = c.rate(); c.Evaluate(w, t += 1000); }
+    check("raises stop at the configured cap (16 Mbps)", c.rate() == 16000000);
+    c.SetCapBps(3000000);
+    check("a cap moved below the rate brings the rate down at once", c.rate() == 3000000 && c.capBps() == 3000000);
+    c.SetCapBps(8000000);
+    check("a cap moved up does not raise the rate by itself", c.rate() == 3000000);
+    c.SetCapBps(1);
+    check("the cap never goes below the floor", c.capBps() == 64000 && c.rate() == 64000);
+    BulkRateConfig gap = ss;
+    gap.minEvalIntervalUs = 50000;
+    BulkRateController m(gap);
+    m.MarkEvaluated(100000, 0);
+    check("per-ACK: a very short RTT still waits the minimum interval", !m.Due(120000, 5) && m.Due(150000, 5));
+    BulkRateController wall;  // defaults: a 2 s wall-clock window
+    wall.MarkEvaluated(1000000, 0);
+    check("wall-clock: due every 2 s, rounds do not matter", !wall.Due(2999999, 100) && wall.Due(3000000, 0));
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }
