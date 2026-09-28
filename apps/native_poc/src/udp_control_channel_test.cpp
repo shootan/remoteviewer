@@ -2,6 +2,7 @@
 // remote session becomes unusable the moment a control message is silently dropped.
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -234,7 +235,98 @@ void run_case(const char* label, double lossRate, size_t messageBytes, int messa
 
 }  // namespace
 
+/**
+ * The control channel's own timing, unchanged by the clipboard-image bulk channel (reviewer
+ * condition, t-si5297mp): a channel nobody calls SetTimings on resends an unacknowledged message
+ * after 250 ms and NACKs a gap after 90 ms -- and it still does so while ANOTHER instance in the same
+ * process runs on bulk timings. Real clock; the windows allow for Tick granularity and scheduling.
+ */
+void run_default_timing_case() {
+  using namespace remote60::native_poc;
+  using clock = std::chrono::steady_clock;
+  const UdpControlChannel::Timings d;
+  check("the default timings are the control channel's (250 ms / 24 / 90 ms / 90 ms)",
+        d.retransmitIntervalUs == 250000 && d.maxAttempts == 24 && d.nackDelayUs == 90000 && d.nackIntervalUs == 90000);
+
+  struct Sent {
+    double ms;
+    uint16_t kind;
+  };
+  auto run = [&](UdpControlChannel& ch, std::vector<Sent>* log, clock::time_point t0, int ms) {
+    while (std::chrono::duration<double, std::milli>(clock::now() - t0).count() < ms) {
+      ch.Tick();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    (void)log;
+  };
+  // Resend: the default instance and a bulk-timed instance side by side.
+  std::vector<Sent> dlog, blog;
+  clock::time_point t0;
+  auto recorder = [&](std::vector<Sent>* log) {
+    return [log, &t0](const void* data, size_t len) {
+      uint16_t kind = 0;
+      if (len >= 6) std::memcpy(&kind, static_cast<const uint8_t*>(data) + 4, 2);
+      log->push_back({std::chrono::duration<double, std::milli>(clock::now() - t0).count(), kind});
+      return true;
+    };
+  };
+  UdpControlChannel control, bulk;
+  control.Configure(recorder(&dlog), 1, 2, 1200);
+  bulk.Configure(recorder(&blog), 0x40000005u, 0x40000006u, 1200);
+  UdpControlChannel::Timings bt;
+  bt.retransmitIntervalUs = 1000000;  // what a bulk instance may set; the control one must not follow
+  bulk.SetTimings(bt);
+  const std::vector<uint8_t> msg(2000, 7);  // two fragments
+  t0 = clock::now();
+  control.Send(msg.data(), msg.size());
+  bulk.Send(msg.data(), msg.size());
+  std::thread tb([&] { run(bulk, &blog, t0, 1300); });
+  run(control, &dlog, t0, 400);
+  tb.join();
+  auto first_resend = [](const std::vector<Sent>& log) {
+    // The first two datagrams are the initial send; the next one is the first resend.
+    return log.size() > 2 ? log[2].ms : -1.0;
+  };
+  const double dr = first_resend(dlog), br = first_resend(blog);
+  char buf[200];
+  std::snprintf(buf, sizeof(buf), "control instance resends at 250 ms (measured %.0f ms) with a bulk instance on 1 s beside it", dr);
+  check(buf, dr >= 249.0 && dr < 330.0);
+  std::snprintf(buf, sizeof(buf), "the bulk instance keeps its own interval (measured %.0f ms)", br);
+  check(buf, br >= 999.0 && br < 1100.0);
+
+  // NACK: the control instance asks for a missing fragment after 90 ms, not sooner.
+  std::vector<Sent> rlog;
+  UdpControlChannel rx;
+  rx.Configure(recorder(&rlog), 2, 1, 1200);
+  UdpControlChunkHeader h{};
+  h.magic = kMagic;
+  h.kind = static_cast<uint16_t>(UdpPacketKind::ControlData);
+  h.streamId = 1;
+  h.messageSeq = 1;
+  h.totalSize = 2000;
+  h.fragIndex = 0;
+  h.fragCount = 2;
+  h.fragOffset = 0;
+  h.fragSize = 1000;
+  std::vector<uint8_t> packet(sizeof(h) + 1000, 1);
+  std::memcpy(packet.data(), &h, sizeof(h));
+  t0 = clock::now();
+  rx.OnPacket(packet.data(), packet.size());
+  run(rx, &rlog, t0, 200);
+  double nack = -1.0;
+  for (const auto& s : rlog) {
+    if (s.kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) {
+      nack = s.ms;
+      break;
+    }
+  }
+  std::snprintf(buf, sizeof(buf), "control instance NACKs a gap at 90 ms (measured %.0f ms)", nack);
+  check(buf, nack >= 89.0 && nack < 150.0);
+}
+
+
 int main() {
+  run_default_timing_case();
   {
     using namespace remote60::native_poc;
     UdpControlChannel channel;

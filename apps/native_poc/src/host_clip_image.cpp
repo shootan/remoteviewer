@@ -54,19 +54,6 @@ const char* state_name(ClipImageState s) {
   }
 }
 
-// The host's side of the bulk stream sends only pulls (48 bytes) and acknowledgements, so a quick
-// resend costs nothing -- and it is what covers the one race the protocol has: the first pulls
-// leave with the OfferReply, and can reach the viewer before it has opened the stream they are on
-// (they are then dropped unacknowledged). The NACK wait is the control channel's own (90 ms, left
-// unchanged by agreement): a NACK for datagrams still waiting in the viewer's pacer is merged there
-// into the queued copy and costs nothing (bulk_pacer.hpp).
-UdpControlChannel::Timings bulk_timings() {
-  UdpControlChannel::Timings t;
-  t.retransmitIntervalUs = 150000;
-  t.maxAttempts = 200;  // ~30 s: the transfer's own stall rule decides first
-  return t;
-}
-
 }  // namespace
 
 bool HubClipImagePublisher::Enabled() const { return hub_ && hub_->enabled(); }
@@ -83,7 +70,9 @@ ClipPublishResult HubClipImagePublisher::Publish(uint64_t expectSequence, HGLOBA
 
 HostClipImageService::HostClipImageService(HostClipImagePublisher* publisher)
     : publisher_(publisher), receiver_(random32()) {
-  bulk_.SetTimings(bulk_timings());
+  // The host's bulk channel runs on the control channel's own timings (retransmit, NACK): it sends
+  // only pulls and acknowledgements, and a faster pull resend was not needed by measurement (the
+  // first-pull race costs at most one default interval). Only the viewer's sending instance differs.
 }
 
 bool HostClipImageService::Enabled() const { return Available() && running_.load(); }
@@ -165,10 +154,15 @@ ControlClipImageOfferReplyMessage HostClipImageService::HandleOffer(const Contro
   // The bulk stream for this transfer: a fresh channel on the generation's ids, so a late datagram
   // of any earlier transfer names a stream nobody listens on.
   bulk_.Reset();
-  bulk_.SetTimings(bulk_timings());
   lastChunkUs_ = 0;
   rxRateBps_ = 0;
-  if (const char* e = std::getenv("REMOTE60_CLIP_ADAPTIVE_CHUNKS")) adaptiveChunks_ = e[0] != '0';
+  // Pull size sized to the arrival rate: a measurement option only (run5 showed no gain), off unless
+  // REMOTE60_CLIP_ADAPTIVE_CHUNKS=1.
+  {
+    const char* e = std::getenv("REMOTE60_CLIP_ADAPTIVE_CHUNKS");
+    adaptiveChunks_ = e && e[0] == '1';
+  }
+  receiver_.SetChunkBytes(kClipImageChunkBytes);
   bulkRx_ = bulk_stream_id(res.bulkGen, kBulkStreamClientToHost);
   bulk_.Configure(send_, bulk_stream_id(res.bulkGen, kBulkStreamHostToClient), bulkRx_, mtu_);
   bulkOpen_ = true;

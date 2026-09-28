@@ -138,7 +138,7 @@ class HostClipImageService {
   uint32_t bulkRx_ = 0;             // the stream id chunks arrive on, while open
   uint64_t lastChunkUs_ = 0;        // chunk sizing: when the previous chunk arrived
   uint64_t rxRateBps_ = 0;          // chunk sizing: smoothed arrival rate
-  bool adaptiveChunks_ = true;
+  bool adaptiveChunks_ = false;  // measurement option (REMOTE60_CLIP_ADAPTIVE_CHUNKS=1)
   Counters counters_;
 };
 
