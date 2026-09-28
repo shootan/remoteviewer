@@ -275,6 +275,13 @@ void HostClipImageService::Run() {
 }
 
 void HostClipImageService::VerifyAndPublish() {
+  // SHA-256 over the package and the WIC decode are CPU work on the machine that is also capturing
+  // and encoding the video: they run below normal priority so the stream wins any contention
+  // (A/B x10: more >250 ms gaps with a transfer than without, under load). Restored on the way out.
+  struct Priority {
+    Priority() { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL); }
+    ~Priority() { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL); }
+  } priority;
   // The package is not touched by anyone else while Verifying/Publishing: chunks are refused, a
   // cancel only marks it. So it is read here without the lock -- the decode takes real time and
   // the control dispatchers must keep answering Status meanwhile.

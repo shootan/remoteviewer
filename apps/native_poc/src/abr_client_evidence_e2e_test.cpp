@@ -572,6 +572,15 @@ int wmain(int argc, wchar_t** argv) {
     // capture -> received here, for the frames of the measured span.
     std::atomic<bool> latencyOn{false};
     std::vector<uint64_t> capToEncUs, capToRecvUs;
+    // clip-image A/B: every real frame of the measured span with its own times, so the span can be cut
+    // into "during / just after the transfer" and "the rest" afterwards.
+    struct FrameRec {
+      uint64_t arrUs;
+      uint64_t encUs;   // capture -> encode done (host-internal)
+      uint64_t recvUs;  // capture -> received here
+    };
+    std::vector<FrameRec> frameRecs;
+    uint64_t clipWinStartUs = 0;
     std::thread ingress([&] {
       std::vector<uint8_t> buf(2048);
       while (!stop.load()) {
@@ -592,6 +601,9 @@ int wmain(int argc, wchar_t** argv) {
               const uint64_t now = qpc_now_us();
               if (h.encodeEndQpcUs >= h.captureQpcUs) capToEncUs.push_back(h.encodeEndQpcUs - h.captureQpcUs);
               if (now >= h.captureQpcUs) capToRecvUs.push_back(now - h.captureQpcUs);
+              if (h.encodeEndQpcUs >= h.captureQpcUs && now >= h.encodeEndQpcUs) {
+                frameRecs.push_back({now, h.encodeEndQpcUs - h.captureQpcUs, now - h.captureQpcUs});
+              }
             }
           }
         }
@@ -810,6 +822,7 @@ int wmain(int argc, wchar_t** argv) {
         pendingMetrics = m;
       }
       if (s + 1 >= static_cast<int>(gMeasureFromSec)) latencyOn.store(true);
+      if (clipBench && s == clipAtSec) clipWinStartUs = qpc_now_us();  // same instant with or without a transfer
       if (clipBench && clipMib > 0 && s == clipAtSec) {
         // Prepared before the run (below), so nothing but the transfer happens at this second.
         clipOfferUs = qpc_now_us();
@@ -883,6 +896,42 @@ int wmain(int argc, wchar_t** argv) {
                   static_cast<unsigned long long>(ps.resendsAfterTransmit), pings.size(), pct(pings, 50),
                   pct(pings, 95), arrivals.size(), gaps100, gaps250, maxGap / 1000.0, vBase / 1048576.0,
                   vPeak / 1048576.0, vAfter / 1048576.0, hBase / 1048576.0, hPeak / 1048576.0, hAfter / 1048576.0);
+      // R8WIN: the span cut at clip-at + 8 s. W1 = during / just after the transfer (it takes ~6 s here,
+      // then the host verifies and decodes), W2 = the rest. Baseline runs are cut at the same instant.
+      {
+        std::vector<FrameRec> recs;
+        {
+          std::lock_guard<std::mutex> lk(fmu);
+          recs = frameRecs;
+        }
+        auto window = [&](uint64_t from, uint64_t to, const char* name) {
+          std::vector<uint64_t> enc, recv, net;
+          uint32_t g250 = 0, g100 = 0;
+          uint64_t prev = 0;
+          for (const auto& r : recs) {
+            if (r.arrUs < from || r.arrUs >= to) continue;
+            enc.push_back(r.encUs);
+            recv.push_back(r.recvUs);
+            net.push_back(r.recvUs - r.encUs);
+            if (prev) {
+              g250 += r.arrUs - prev > 250000;
+              g100 += r.arrUs - prev > 100000;
+            }
+            prev = r.arrUs;
+          }
+          auto p95 = [](std::vector<uint64_t> v) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[v.size() * 95 / 100] / 1000.0;
+          };
+          std::printf("R8WIN %s frames=%zu capToEncP95Ms=%.1f capToRecvP95Ms=%.1f netP95Ms=%.1f gaps100=%u gaps250=%u\n",
+                      name, enc.size(), p95(enc), p95(recv), p95(net), g100, g250);
+        };
+        if (clipWinStartUs) {
+          window(clipWinStartUs, clipWinStartUs + 8000000, "w1");
+          window(clipWinStartUs + 8000000, UINT64_MAX, "w2");
+        }
+      }
       clip.Stop();
     }
     if (proxyOn) proxy.Stop();

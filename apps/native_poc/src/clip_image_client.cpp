@@ -177,6 +177,8 @@ void ClipImageClient::CancelForNewerCopy() {
 
 void ClipImageClient::PackageWorker() {
   (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // WIC
+  // Encoding and hashing are background work: the viewer's decode and present come first.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
   while (running_.load()) {
     ClipSnapshot snap;
     uint64_t gen = 0;
