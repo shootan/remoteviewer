@@ -571,6 +571,20 @@ add_executable(remote60_clip_image_core_test
 )
 target_include_directories(remote60_clip_image_core_test PRIVATE src)
 
+# clip-image: DIB -> PNG -> CF_DIBV5 through WIC, header-first sizing.
+add_executable(remote60_clip_image_wic_test
+  src/clip_image_wic.cpp
+  src/clip_image_wic_test.cpp
+)
+target_include_directories(remote60_clip_image_wic_test PRIVATE src)
+target_link_libraries(remote60_clip_image_wic_test PRIVATE windowscodecs ole32 shlwapi)
+
+# clip-image: two private window stations keep separate clipboards; WinSta0 does not move.
+add_executable(remote60_clip_image_winsta_test
+  src/clip_image_winsta_test.cpp
+)
+target_link_libraries(remote60_clip_image_winsta_test PRIVATE user32)
+
 add_executable(remote60_host_frame_gate_test
   src/host_frame_gate_test.cpp
 )
