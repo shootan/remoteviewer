@@ -11,6 +11,8 @@
 //
 //   remote60_clip_image_winsta_test            (parent)
 //   remote60_clip_image_winsta_test --child TAG RESULTFILE
+#include "e2e_isolation.hpp"  // first: it brings winsock2.h, which must precede windows.h
+
 #include <windows.h>
 
 #include <cstdio>
@@ -102,12 +104,15 @@ int wmain(int argc, wchar_t** argv) {
   const DWORD interactiveBefore = GetClipboardSequenceNumber();
   wchar_t self[MAX_PATH];
   GetModuleFileNameW(nullptr, self, MAX_PATH);
-  wchar_t temp[MAX_PATH];
-  GetTempPathW(MAX_PATH, temp);
-  const std::wstring resA = std::wstring(temp) + L"remote60_winsta_a.txt";
-  const std::wstring resB = std::wstring(temp) + L"remote60_winsta_b.txt";
-  DeleteFileW(resA.c_str());
-  DeleteFileW(resB.c_str());
+  // The children's result files: in the repository's test scratch (a directory this run creates),
+  // never %TEMP%.
+  remote60::native_poc::e2e::StagingDir staging;
+  if (!staging.Create(L"clip_winsta")) {
+    std::printf("FAIL  %s\n", staging.why().c_str());
+    return 1;
+  }
+  const std::wstring resA = staging.path() + L"winsta_a.txt";
+  const std::wstring resB = staging.path() + L"winsta_b.txt";
 
   Station a = make_station(), b = make_station();
   check("a private window station was created", a.ws && a.dk && b.ws && b.dk);
@@ -140,8 +145,7 @@ int wmain(int argc, wchar_t** argv) {
   check("the interactive clipboard (WinSta0) did not move: sequence " + std::to_string(interactiveBefore) + " -> " +
             std::to_string(interactiveAfter),
         interactiveBefore == interactiveAfter);
-  DeleteFileW(resA.c_str());
-  DeleteFileW(resB.c_str());
+  check("the staging directory is removed" + (staging.Remove() ? std::string() : ": " + staging.why()), staging.removed());
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

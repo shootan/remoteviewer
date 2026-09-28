@@ -764,7 +764,7 @@ add_executable(remote60_clip_image_clipboard_test
   src/clipboard_monitor.cpp
 )
 target_include_directories(remote60_clip_image_clipboard_test PRIVATE src)
-target_link_libraries(remote60_clip_image_clipboard_test PRIVATE remote60_clip_image)
+target_link_libraries(remote60_clip_image_clipboard_test PRIVATE remote60_clip_image remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_clip_image_clipboard_test PRIVATE /utf-8)
 endif()
@@ -772,7 +772,7 @@ endif()
 add_executable(remote60_clip_image_winsta_test
   src/clip_image_winsta_test.cpp
 )
-target_link_libraries(remote60_clip_image_winsta_test PRIVATE user32)
+target_link_libraries(remote60_clip_image_winsta_test PRIVATE user32 ws2_32 remote60_test_scratch_dir)
 
 add_executable(remote60_host_frame_gate_test
   src/host_frame_gate_test.cpp

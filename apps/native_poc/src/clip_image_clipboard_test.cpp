@@ -12,6 +12,8 @@
 //
 //   remote60_clip_image_clipboard_test --out <dir>          (parent)
 //   remote60_clip_image_clipboard_test --child <resultfile> (on the private station)
+#include "e2e_isolation.hpp"  // first: it brings winsock2.h, which must precede windows.h
+
 #include <windows.h>
 
 #include <cstdio>
@@ -204,8 +206,19 @@ int run_child(const wchar_t* resultFile) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc >= 3 && wcscmp(argv[1], L"--child") == 0) return run_child(argv[2]);
-  std::wstring outDir = L".";
-  if (argc >= 3 && wcscmp(argv[1], L"--out") == 0) outDir = argv[2];
+  // The child's result file: --out <dir> when given, otherwise the repository's test scratch (a
+  // directory this run creates) -- never the working directory or %TEMP%.
+  remote60::native_poc::e2e::StagingDir staging;
+  std::wstring outDir;
+  if (argc >= 3 && wcscmp(argv[1], L"--out") == 0) {
+    outDir = argv[2];
+  } else {
+    if (!staging.Create(L"clip_clipboard")) {
+      std::printf("FAIL  %s\n", staging.why().c_str());
+      return 1;
+    }
+    outDir = staging.path().substr(0, staging.path().size() - 1);
+  }
   // The bound itself, no clipboard: nothing past limit + 1 units is looked at.
   {
     std::wstring s(10, L'a');
