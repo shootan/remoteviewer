@@ -25,6 +25,7 @@
 #include <string>
 #include <thread>
 
+#include "clip_image_clipboard.hpp"
 #include "clipboard_sync.hpp"
 
 namespace remote60::native_poc {
@@ -46,6 +47,11 @@ class ClipboardMonitor {
   // Sets the clipboard to `text`. Safe to call from any thread; the work is marshalled to the
   // monitor thread. Returns false if the monitor is not running.
   bool SetText(const std::u16string& text);
+
+  // Runs `fn` on the monitor thread (with the listener window as the clipboard owner) and waits up
+  // to `timeoutMs` for it. False if the monitor is not running or the wait timed out -- in which
+  // case `fn` may still run later, so it must own everything it touches.
+  bool Invoke(std::function<void(HWND)> fn, DWORD timeoutMs);
 
   bool running() const { return running_.load(std::memory_order_acquire); }
 
@@ -85,6 +91,14 @@ class HostClipboardHub {
   // already present. Records the content as applied first, so the resulting change notification is
   // recognised as an echo and does not raise the generation.
   void ApplyRemote(const std::u16string& text, uint64_t hash);
+
+  // Clipboard image v1: publish PNG + CF_DIBV5 (+ same-copy text) on the monitor thread, with the
+  // clipboard held and only if its sequence number is still `expectSequence` (plan r2 8-4). Takes
+  // ownership of both HGLOBALs. On Published the text is recorded as applied before the change
+  // notification the write provokes is processed (same thread, queued behind this), so it is not
+  // served back to the viewer that sent it.
+  ClipPublishResult PublishImage(uint64_t expectSequence, HGLOBAL pngGlobal, HGLOBAL dibv5,
+                                 const std::u16string& text);
 
  private:
   void OnLocalText(const std::u16string& text);

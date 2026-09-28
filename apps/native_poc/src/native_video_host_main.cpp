@@ -80,6 +80,10 @@
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
 #include "clipboard_monitor.hpp"
+#include "host_clip_image.hpp"
+#if defined(REMOTE60_CLIP_IMAGE_TEST_SINK)
+#include "host_clip_image_test_sink.hpp"
+#endif
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
 #include "host_startup.hpp"
@@ -203,6 +207,36 @@ int main(int argc, char** argv) {
     return !(v == "0" || v == "false" || v == "off");
   }();
   if (clipboardSyncEnabled) clipboardHub.Start();
+  // Clipboard image v1 (direction A, viewer -> host). Rides the clipboard sync switch: off with it,
+  // and only advertised while the hub runs. REMOTE60_CLIPBOARD_IMAGE=0 turns images alone off.
+  // Started with the UDP control channel (host_startup_control.cpp); stopped in shutdown_host.
+  const bool clipboardImageEnabled = clipboardSyncEnabled && []() {
+    const std::string v = remote60::native_poc::env_string_or_empty("REMOTE60_CLIPBOARD_IMAGE");
+    return !(v == "0" || v == "false" || v == "off");
+  }();
+  remote60::native_poc::HubClipImagePublisher clipImagePublisher(&clipboardHub);
+  remote60::native_poc::HostClipImagePublisher* clipImagePublisherInUse =
+      clipboardImageEnabled ? &clipImagePublisher : nullptr;
+#if defined(REMOTE60_CLIP_IMAGE_TEST_SINK)
+  // TEST BUILD ONLY (GNLinkStreamClipSink): received images go to a folder instead of a clipboard,
+  // so a host under test next to the user's session never writes the user's clipboard. Absent from
+  // GNLinkStream.exe (clip_image_build_gate_test).
+  const std::wstring clipSinkDir = [] {
+    wchar_t buf[MAX_PATH] = L"";
+    const DWORD n = GetEnvironmentVariableW(L"REMOTE60_CLIP_IMAGE_TEST_SINK_DIR", buf, MAX_PATH);
+    return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
+  }();
+  remote60::native_poc::FileSinkClipImagePublisher clipSinkPublisher(clipSinkDir);
+  if (!clipSinkDir.empty()) {
+    clipImagePublisherInUse = &clipSinkPublisher;
+    std::cout << "[native-video-host][clip-image] TEST SINK publisher (no clipboard)\n";
+  }
+#endif
+  remote60::native_poc::HostClipImageService clipImageService(clipImagePublisherInUse);
+  if (clipImagePublisherInUse) {
+    clientSession.clipImage = &clipImageService;
+    clientSession.onClipImageSessionEnd = [&clipImageService](uint64_t epoch) { clipImageService.OnSessionEnd(epoch); };
+  }
   ControlSessionServer controlServer(args, stop, clientSession, capture, clientMetrics, encoder,
                                      inputRouter, backend, windowSelectionTxn, mailbox,
                                      clipboardSyncEnabled ? &clipboardHub : nullptr);

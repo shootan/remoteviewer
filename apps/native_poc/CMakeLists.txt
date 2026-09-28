@@ -70,6 +70,9 @@ add_executable(remote60_native_video_host_poc
   src/host_args.cpp
   src/host_control_session.cpp
   src/clipboard_monitor.cpp
+  src/host_clip_image.cpp
+  src/clip_image_clipboard.cpp
+  src/clip_image_wic.cpp
   src/host_thumbnail_helper.cpp
   src/host_thumbnail_kill.cpp
   src/host_unlock_relay.cpp
@@ -130,6 +133,26 @@ if(CMAKE_GENERATOR MATCHES "Visual Studio")
   add_dependencies(remote60_host_runtime_failure_test remote60_native_video_host_poc)
 endif()
 
+# TEST BUILD of the host for clipboard-image runs next to a user's session: the same sources and
+# libraries as GNLinkStream, plus a publisher that writes received images to a folder
+# (REMOTE60_CLIP_IMAGE_TEST_SINK_DIR) instead of the clipboard. Its own output name, never packaged;
+# clip_image_build_gate_test checks the shipped GNLinkStream.exe carries none of it.
+get_target_property(_clipsink_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_clipsink ${_clipsink_host_sources} src/host_clip_image_test_sink.cpp)
+set_target_properties(remote60_native_video_host_clipsink PROPERTIES OUTPUT_NAME "GNLinkStreamClipSink")
+target_include_directories(remote60_native_video_host_clipsink PRIVATE src)
+target_compile_definitions(remote60_native_video_host_clipsink PRIVATE
+  REMOTE60_CLIP_IMAGE_TEST_SINK=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_clipsink PRIVATE
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
+add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
+add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink)
+
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
   # The one-shot --thumbnail mode calls the product's own capture_window_thumbnail rather than a
@@ -170,6 +193,9 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   runtimeobject
   windowsapp
   advapi32
+  bcrypt
+  windowscodecs
+  shlwapi
 )
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
@@ -185,6 +211,22 @@ target_link_libraries(remote60_secure_input_service PRIVATE
   user32
   remote60_sealed_unlock
 )
+
+# Clipboard image v1 (plan .claude/clip_image_plan.md r1 + r2): the viewer's image client (package,
+# offer/cancel/status, bulk stream, pacer) and the clipboard/WIC pieces it shares with the host. A
+# library because the viewer's state holds the client, so every target that links the viewer's
+# sources needs it.
+add_library(remote60_clip_image STATIC
+  src/clip_image_client.cpp
+  src/bulk_pacer.cpp
+  src/clip_image_clipboard.cpp
+  src/clip_image_wic.cpp
+  # The bulk stream is a UdpControlChannel; targets that link the viewer's state without the
+  # channel get it from here (a static library contributes it only where it is not already linked).
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_clip_image PUBLIC src)
+target_link_libraries(remote60_clip_image PUBLIC bcrypt windowscodecs ole32 shlwapi user32 ws2_32)
 
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
@@ -263,6 +305,7 @@ endif()
 
 target_link_libraries(remote60_native_video_client_poc PRIVATE
   common
+  remote60_clip_image
   remote60_sealed_unlock
   crypt32
   ws2_32
@@ -580,6 +623,43 @@ target_include_directories(remote60_clip_image_wic_test PRIVATE src)
 target_link_libraries(remote60_clip_image_wic_test PRIVATE windowscodecs ole32 shlwapi)
 
 # clip-image: two private window stations keep separate clipboards; WinSta0 does not move.
+# clip-image direction A: the transfer state machines (tamper, stale epoch/generation, busy, cancel,
+# stall/budget) and the bulk pacer on a real high-resolution timer.
+add_executable(remote60_clip_image_transfer_test
+  src/clip_image_transfer_test.cpp
+  src/bulk_pacer.cpp
+)
+target_include_directories(remote60_clip_image_transfer_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_clip_image_transfer_test PRIVATE /utf-8)
+endif()
+
+# clip-image direction A, two-sided on loopback: the product client and host service over real UDP
+# sockets, through an impairment proxy; the clipboard injected at the OS boundary (see the file).
+add_executable(remote60_clip_image_e2e_test
+  src/clip_image_e2e_test.cpp
+  src/host_clip_image.cpp
+  src/clipboard_monitor.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_clip_image_e2e_test PRIVATE src)
+target_link_libraries(remote60_clip_image_e2e_test PRIVATE remote60_clip_image winmm)
+if(MSVC)
+  target_compile_options(remote60_clip_image_e2e_test PRIVATE /utf-8)
+endif()
+
+# clip-image direction A: the real clipboard, one side at a time, on a private window station --
+# the viewer's snapshot read and the host's publish through HostClipboardHub (never WinSta0).
+add_executable(remote60_clip_image_clipboard_test
+  src/clip_image_clipboard_test.cpp
+  src/clipboard_monitor.cpp
+)
+target_include_directories(remote60_clip_image_clipboard_test PRIVATE src)
+target_link_libraries(remote60_clip_image_clipboard_test PRIVATE remote60_clip_image)
+if(MSVC)
+  target_compile_options(remote60_clip_image_clipboard_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_clip_image_winsta_test
   src/clip_image_winsta_test.cpp
 )
@@ -713,6 +793,7 @@ add_executable(remote60_viewer_release_all_e2e_test
 )
 target_include_directories(remote60_viewer_release_all_e2e_test PRIVATE src)
 target_link_libraries(remote60_viewer_release_all_e2e_test PRIVATE
+  remote60_clip_image
   common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt
   d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
 if(MSVC)
@@ -1516,6 +1597,7 @@ add_executable(remote60_viewer_udp_recovery_test
 )
 target_include_directories(remote60_viewer_udp_recovery_test PRIVATE src)
 target_link_libraries(remote60_viewer_udp_recovery_test PRIVATE
+  remote60_clip_image
   capture
   common
   ws2_32
@@ -1565,7 +1647,8 @@ add_executable(remote60_picker_preview
   src/client_session_toolbar.cpp
 )
 target_include_directories(remote60_picker_preview PRIVATE src)
-target_link_libraries(remote60_picker_preview PRIVATE user32 gdi32 gdiplus shlwapi ws2_32)
+target_link_libraries(remote60_picker_preview PRIVATE
+  remote60_clip_image user32 gdi32 gdiplus shlwapi ws2_32)
 if(MSVC)
   target_compile_options(remote60_picker_preview PRIVATE /utf-8)
 endif()
@@ -1675,7 +1758,7 @@ add_executable(remote60_abr_client_evidence_e2e_test
   src/udp_control_channel.cpp
 )
 target_include_directories(remote60_abr_client_evidence_e2e_test PRIVATE src)
-target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32 winmm)
+target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32 winmm psapi remote60_clip_image)
 if(MSVC)
   target_compile_options(remote60_abr_client_evidence_e2e_test PRIVATE /utf-8)
 endif()
@@ -1784,6 +1867,7 @@ target_include_directories(remote60_viewer_window_proc_isolated_test PRIVATE src
 # them is what puts an actual flip-model swapchain in front of this window, which is the only way
 # the reveal ordering can be reproduced at all.
 target_link_libraries(remote60_viewer_window_proc_isolated_test PRIVATE
+  remote60_clip_image
   user32 gdi32 shell32 ole32 shlwapi version ws2_32
   d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
 if(MSVC)
@@ -1811,6 +1895,7 @@ add_executable(remote60_picker_open_chain_test
 target_include_directories(remote60_picker_open_chain_test
   PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
 target_link_libraries(remote60_picker_open_chain_test PRIVATE
+  remote60_clip_image
   "${GNLINK_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
   user32 gdi32 shell32 ole32 shlwapi version ws2_32)
 if(MSVC)
@@ -2012,9 +2097,10 @@ endif()
 add_executable(remote60_clipboard_monitor_test
   src/clipboard_monitor_test.cpp
   src/clipboard_monitor.cpp
+  src/clip_image_clipboard.cpp
 )
 target_include_directories(remote60_clipboard_monitor_test PRIVATE src)
-target_link_libraries(remote60_clipboard_monitor_test PRIVATE user32)
+target_link_libraries(remote60_clipboard_monitor_test PRIVATE user32 bcrypt)
 if(MSVC)
   target_compile_options(remote60_clipboard_monitor_test PRIVATE /utf-8)
 endif()

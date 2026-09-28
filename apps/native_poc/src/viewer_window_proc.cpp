@@ -259,11 +259,34 @@ bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
  * network I/O is not done here; this runs on the UI thread, which is the one that owns the
  * listener window and may therefore touch the clipboard at all.
  */
-void capture_local_clipboard(ViewerState& ctx, HWND hwnd) {
+void capture_local_clipboard(ViewerState& ctx, HWND hwnd, bool allowImage) {
   auto& clip = ctx.control.clipboard;
   if (!clip.enabled.load(std::memory_order_relaxed) ||
       !clip.hostSupports.load(std::memory_order_relaxed)) {
     return;
+  }
+  // Clipboard image v1 (direction A): a copy that holds an image travels as one package -- the
+  // image and the text of the same copy together -- so text sync does not send that text on its own.
+  // Only for a genuine change: connecting does not push a possibly large image (the one-shot push
+  // stays text-only, as it was).
+  auto& image = ctx.control.clipImage;
+  if (image.Usable()) {
+    if (allowImage && remote60::native_poc::clip_image_available()) {
+      remote60::native_poc::ClipSnapshot snap;
+      if (remote60::native_poc::clip_image_read_snapshot(hwnd, &snap) ==
+          remote60::native_poc::ClipSnapshotResult::Ok) {
+        if (!snap.text.empty()) {
+          // Recorded as sent, so a later poll that brings the same text back is not re-applied.
+          std::lock_guard<std::mutex> lock(clip.mu);
+          uint64_t hash = 0;
+          (void)clip.core.OnLocalChange(snap.text, &hash);
+        }
+        image.SubmitSnapshot(std::move(snap));
+        return;
+      }
+    } else if (allowImage) {
+      image.CancelForNewerCopy();
+    }
   }
   // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same 16 bits
   // here but not on Android, so the conversion is explicit (clipboard_win32.hpp).
@@ -311,12 +334,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_CLIPBOARDUPDATE:
       // Clipboard text sync (K1): the local clipboard changed.
-      capture_local_clipboard(ctx, hwnd);
+      capture_local_clipboard(ctx, hwnd, true);
       return 0;
     case kMsgPushClipboardNow:
       // The control thread opened a session and wants this machine's current clipboard sent, so
       // that what the user copied most recently wins over whatever the host was holding.
-      capture_local_clipboard(ctx, hwnd);
+      capture_local_clipboard(ctx, hwnd, false);
       return 0;
     case kMsgApplyClipboard: {
       // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS

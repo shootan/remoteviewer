@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -22,6 +23,8 @@
 #include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
+
+class HostClipImageService;
 
 // main() returns from many places; a destructor is the only way to close these on every path.
 struct SocketCloser {
@@ -111,6 +114,10 @@ struct SessionState {
   // C0 stage 1: this client's accepted Hello asked for bandwidth observation. Only then are its
   // ControlClientBandwidth messages logged; they are read for nothing else.
   std::atomic<bool> bandwidthObserveNegotiated{false};
+  // Clipboard image v1 (direction A). Owned by main(), null when clipboard sync is off. The reader
+  // routes bulk-stream datagrams to it ahead of the control channel; the control session answers
+  // its Offer / Cancel / Status; a new epoch ends whatever transfer was running.
+  HostClipImageService* clipImage = nullptr;
   // Whether the dispatcher is inside Serve() right now. A resume is honoured only when it is
   // not: resetting a stream that is working is the one thing this must never do, and it is also
   // what stops a stray packet from being able to disturb a healthy session.
@@ -139,7 +146,14 @@ struct SessionState {
     // session still being served.
     clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
     clientSession.epochCv.notify_all();
+    EndClipImageTransfer(epoch);
     return epoch;
+  }
+  // Set by main() next to clipImage (a callback, so nothing that includes this header has to link
+  // the image service).
+  std::function<void(uint64_t)> onClipImageSessionEnd;
+  void EndClipImageTransfer(uint64_t newEpoch) {
+    if (onClipImageSessionEnd) onClipImageSessionEnd(newEpoch);
   }
   // Block until the control channel has served that epoch (or the host stops).
   void AwaitControlReady(uint64_t epoch) {

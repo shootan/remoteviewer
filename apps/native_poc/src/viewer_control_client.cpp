@@ -85,6 +85,19 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
   if (clip.policy.TakeInitialPush() && ctx.session.hwnd) {
     PostMessageW(ctx.session.hwnd, kMsgPushClipboardNow, 0, 0);
   }
+  // Clipboard image v1: an image copy's offer / cancel / status exchange, one per idle turn.
+  {
+    const int r = ctx.control.clipImage.Pump(link);
+    if (r != 0) return r;
+    // The host refused an image copy (too large, busy, ...): its text still travels, by text sync.
+    std::u16string fallback;
+    if (ctx.control.clipImage.TakeFallbackText(&fallback) && !fallback.empty()) {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      clip.pendingHash = remote60::native_poc::clipboard_fnv1a(fallback);
+      clip.pendingText = std::move(fallback);
+      clip.hasPending = true;
+    }
+  }
   // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
   // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
   // poll.
@@ -189,6 +202,11 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
       ctx.control.clipboard.policy.OnConnected();
     }
     ctx.control.clipboard.hostSupports.store(clipboardHost, std::memory_order_relaxed);
+    // Clipboard image v1: only together with the text sync (images ride its on/off and its session
+    // rules) and the bulk channel the HelloAck agreed to.
+    ctx.control.clipImage.SetHostSupports(
+        clipboardHost && ctx.session.bulkChannelNegotiated &&
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardImageV1) != 0);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;

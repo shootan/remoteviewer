@@ -63,6 +63,27 @@ class UdpControlChannel {
 
   void Configure(SendFn send, uint32_t txStreamId, uint32_t rxStreamId, uint32_t mtuBytes);
 
+  /**
+   * Retransmit and NACK timing, per instance. The defaults are the control channel's and the
+   * control channel never calls this. The clipboard-image bulk channel does: its datagrams leave
+   * through a pacer at as little as 64 kbps, where one 16 KiB message takes seconds to drain, so
+   * the control channel's 250 ms whole-message resend and 90 ms NACK would only duplicate what is
+   * still waiting in the pacer's queue -- and the duplicates would read as loss.
+   */
+  struct Timings {
+    uint64_t retransmitIntervalUs = 250000;
+    uint32_t maxAttempts = 24;
+    uint64_t nackDelayUs = 90000;
+    uint64_t nackIntervalUs = 90000;
+  };
+  void SetTimings(const Timings& timings);
+
+  /** True while a message is queued or awaiting its acknowledgement. */
+  bool TxPending() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return !txQueue_.empty();
+  }
+
   /** Feed a datagram that the media protocol did not recognise. True when it was ours. */
   bool OnPacket(const void* data, size_t len);
 
@@ -223,6 +244,7 @@ class UdpControlChannel {
   uint32_t txStreamId_ = 0;
   uint32_t rxStreamId_ = 0;
   uint32_t fragBytes_ = 1100;
+  Timings timings_;
 
   mutable std::mutex mu_;
   std::condition_variable cv_;

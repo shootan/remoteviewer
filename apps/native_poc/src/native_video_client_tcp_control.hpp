@@ -106,6 +106,9 @@ struct UdpHelloOptions {
   // Advertise kUdpFeatureBandwidthObserve (C0 stage 1): this client will report bandwidth
   // observations to a host that acknowledges it.
   bool requestBandwidthObserve = false;
+  // Advertise kUdpFeatureBulkChannel (clipboard image v1): this viewer routes bulk-stream datagrams
+  // ahead of its control channel. The Android session does not set it.
+  bool requestBulkChannel = false;
 };
 // `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
 // learns whether the host supports NACK (kUdpFeatureVideoNack) etc.

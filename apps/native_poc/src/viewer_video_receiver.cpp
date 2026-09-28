@@ -53,6 +53,9 @@ void VideoReceiver::run_udp() {
   UdpIngress ingress(ctx.session.sock,
       [&](const uint8_t* bytes, size_t count) {
         ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
+        // Clipboard image v1: bulk-stream datagrams (stream id bit30) go to their own channel,
+        // whether control rides this socket or TCP -- the control channel would swallow them.
+        if (ctx.session.bulkChannelNegotiated && ctx.control.clipImage.OnDatagram(bytes, count)) return true;
         if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
         // Before OnPacket, as on the host, because the thing it answers about is the
         // channel OnPacket feeds. This call VALIDATES and records; the re-key itself is

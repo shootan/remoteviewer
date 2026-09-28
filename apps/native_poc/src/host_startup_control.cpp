@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "host_clip_image.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -233,6 +234,28 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         },
         remote60::native_poc::kUdpControlStreamHostToClient,
         remote60::native_poc::kUdpControlStreamClientToHost, args.udpMtu);
+    // Clipboard image v1: the bulk stream leaves by the same socket towards the same peer.
+    if (clientSession.clipImage) {
+      clientSession.clipImage->Start(
+          [&](const void* data, size_t len) -> bool {
+            const uint32_t ip = sender.udpPeerIpNet.load(std::memory_order_acquire);
+            const uint16_t port = sender.udpPeerPortNet.load(std::memory_order_acquire);
+            if (ip == 0 || port == 0) return false;
+            sockaddr_in to{};
+            to.sin_family = AF_INET;
+            to.sin_addr.s_addr = ip;
+            to.sin_port = port;
+            const int sent = sendto(clientSession.clientSock, static_cast<const char*>(data),
+                                    static_cast<int>(len), 0, reinterpret_cast<const sockaddr*>(&to),
+                                    sizeof(to));
+            if (sent > 0) {
+              sender.txControlBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+              sender.txControlDatagrams.fetch_add(1, std::memory_order_relaxed);
+            }
+            return sent > 0;
+          },
+          args.udpMtu);
+    }
 
     clientSession.udpReaderThread = std::thread([&]() {
       // Control resume bookkeeping (item 8, C3). Reader-thread locals on purpose: this thread
@@ -343,6 +366,11 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // C0 stage 1: this host logs bandwidth observations. Advertised to everyone like the
             // two above; a viewer sends them only when it asked and sees this bit.
             ack.features |= remote60::native_poc::kUdpFeatureBandwidthObserve;
+            // Clipboard image v1: acknowledged only while the image service runs, so a viewer never
+            // sends bulk datagrams to a host whose control channel would swallow them.
+            if ((hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
+                clientSession.clipImage && clientSession.clipImage->Enabled())
+              ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
             // Whether THIS client asked is stored further down, once its Hello has been accepted.
             // Stored here it let a Hello that is then refused (a bad capability, or an
             // unauthenticated one during a directory session) switch resume off for the session
@@ -421,6 +449,10 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             clientSession.bandwidthObserveNegotiated.store(
                 (hello.features & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
                 std::memory_order_release);
+            if (clientSession.clipImage) {
+              clientSession.clipImage->SetBulkNegotiated(
+                  (ack.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0);
+            }
             const bool changed =
                 sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
                 sender.udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
@@ -721,6 +753,15 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
                       << " serving=" << (decide.servingControl ? 1 : 0) << "\n";
             continue;
           }
+        }
+        // Clipboard image v1: the bulk stream (stream id bit30) goes to its own channel, BEFORE the
+        // control channel -- which claims every ControlData/Ack/Nack datagram whatever its stream
+        // id and would drop these. Only from the current peer.
+        if (clientSession.clipImage &&
+            sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
+            sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port &&
+            clientSession.clipImage->OnDatagram(rx, len)) {
+          continue;
         }
         if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
         (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, len, peer);

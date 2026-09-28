@@ -148,91 +148,154 @@ int main() {
     for (size_t i = seen.size() - 64; i < seen.size(); ++i) clash = clash || seen[i] == after;
     check("after a wrap, none of the last 64 low values is reused", !clash);
   }
-  // ------------------------------------------------------------------ bulk rate
+  // ------------------------------------------------------------------ bulk rate: the agreed values
+  // ("증속 합의", clip_image_debate_2026-09-28.md): per-round evaluation no faster than
+  // max(SRTT, 100 ms); 256 kbps start, x2 per round until the first congestion, then linear at most
+  // +25 %/s of the post-decrease rate; /2 once per congestion event; cap 16 Mbps and the budget.
   {
     BulkRateController c;
-    uint64_t t = 0;
-    check("starts at 256 kbps", c.RateBps(t) == 256000);
-    BulkRateWindow good{0, 20000, 10000, 256000};
-    c.Evaluate(good, t += 2000000);
-    check("a clean window that used its rate raises it x1.5", c.rate() == 384000);
-    BulkRateWindow idle{0, 20000, 10000, 100000};
-    c.Evaluate(idle, t += 2000000);
-    check("a window that did not use its rate does not raise it", c.rate() == 384000);
-    for (int i = 0; i < 20; ++i) { good.deliveredBps = c.rate(); c.Evaluate(good, t += 2000000); }
-    check("raises stop at the cap (2 Mbps)", c.rate() == 2000000);
-    BulkRateWindow lossy{3, 20000, 10000, 2000000};
-    c.Evaluate(lossy, t += 2000000);
-    check("loss halves the rate", c.rate() == 1000000);
-    BulkRateWindow slowRtt{0, 75000, 10000, 1000000};  // over max(2x 20, 20 + 50) = 70 ms
-    c.Evaluate(slowRtt, t += 2000000);
-    check("a pull RTT over max(2x, +50 ms) of baseline halves it", c.rate() == 500000);
-    const BulkRateAction third = c.Evaluate(lossy, t += 2000000);
-    check("a third congested window in a row pauses", third == BulkRateAction::Pause && c.RateBps(t + 1) == 0);
+    check("defaults: 256 kbps start, per-ACK rounds, 16 Mbps cap", c.RateBps(0) == 256000 && c.capBps() == 16000000 &&
+                                                                     c.config().evalUnit == BulkRateEvalUnit::AckRound);
+    uint64_t t = 1000000, rounds = 0;
+    c.MarkEvaluated(t, rounds);
+    check("nothing is due before a round completes", !c.Due(t + 500000, 0, 0));
+    check("a round completed 50 ms ago is not due yet (min 100 ms)", !c.Due(t + 50000, 1, 0));
+    check("...and is due at 100 ms", c.Due(t + 100000, 1, 0));
+    check("with SRTT 300 ms the interval is the SRTT, not 100 ms", !c.Due(t + 200000, 1, 300000) && c.Due(t + 300000, 1, 300000));
+    BulkRateWindow w{0, 20000, 10000, 0};
+    w.datagramsSent = 100;
+    auto clean = [&](uint64_t dtUs) {
+      w.deliveredBps = c.rate();
+      t += dtUs;
+      ++rounds;
+      const BulkRateAction a = c.Evaluate(w, t, rounds);
+      c.MarkEvaluated(t, rounds);
+      return a;
+    };
+    clean(100000);
+    check("initial probe: x2 per round (256k -> 512k)", c.rate() == 512000 && c.inSlowStart());
+    for (int i = 0; i < 3; ++i) clean(100000);
+    check("x2 per round: 4096k after four rounds", c.rate() == 4096000);
+    // ---- first congestion, and the same event's trailing signals (counterexample: a loss burst on a long RTT)
+    BulkRateWindow lossy = w;
+    lossy.lossOrNacks = 3;
+    t += 100000;
+    ++rounds;
+    check("first congestion halves and ends the probe", c.Evaluate(lossy, t, rounds) == BulkRateAction::Lower &&
+                                                             c.rate() == 2048000 && !c.inSlowStart());
+    c.MarkEvaluated(t, rounds);
+    t += 100000;
+    ++rounds;
+    check("the next round's loss is the same event: no second halving", c.Evaluate(lossy, t, rounds) == BulkRateAction::Hold &&
+                                                                          c.rate() == 2048000);
+    c.MarkEvaluated(t, rounds);
+    // ---- linear growth, not exponential
+    for (int i = 0; i < 10; ++i) clean(100000);
+    const double oneSec = c.rate() / 2048000.0;
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "after recovery: +25 %% of the post-decrease rate per second (x%.3f in ~1 s)", oneSec);
+    check(buf, oneSec > 1.20 && oneSec < 1.26);
+    for (int i = 0; i < 10; ++i) clean(100000);
+    const double twoSec = c.rate() / 2048000.0;
+    std::snprintf(buf, sizeof(buf), "linear, not exponential: x%.3f after ~2 s (1.5, not 1.5625)", twoSec);
+    check(buf, twoSec > 1.44 && twoSec < 1.51);
+    const uint32_t before = c.rate();
+    clean(10000000);
+    check("a long quiet spell banks at most one second of growth", c.rate() - before <= 2048000 / 4 + 1);
+    // ---- evidence a raise may not stand on
+    BulkRateWindow app = w;
+    app.appLimited = true;
+    app.deliveredBps = c.rate();
+    const uint32_t r0 = c.rate();
+    t += 100000;
+    ++rounds;
+    check("an app-limited window holds (the pacer ran dry)", c.Evaluate(app, t, rounds) == BulkRateAction::Hold && c.rate() == r0);
+    BulkRateWindow yielded = w;
+    yielded.yielded = true;
+    yielded.deliveredBps = c.rate();
+    t += 100000;
+    ++rounds;
+    check("a window that yielded to control/video holds", c.Evaluate(yielded, t, rounds) == BulkRateAction::Hold && c.rate() == r0);
+    // ---- a budget that shrinks (counterexample: video starts)
+    c.SetCapBps(1000000);
+    check("a budget drop applies at once", c.rate() == 1000000);
+  }
+  {
+    // ---- competing traffic: RTT rises and stays up -> one halving per event, then pause and probe
+    BulkRateController c;
+    uint64_t t = 0, rounds = 0;
+    BulkRateWindow base{0, 20000, 10000, 256000};
+    c.Evaluate(base, t += 100000, ++rounds);
+    BulkRateWindow queued{0, 80000, 10000, 512000};  // over max(2 x 20, 20 + 50) = 70 ms
+    check("competing traffic (RTT past max(2x, +50 ms)) halves", c.Evaluate(queued, t += 100000, ++rounds) == BulkRateAction::Lower);
+    check("...its next round is the same event", c.Evaluate(queued, t += 100000, ++rounds) == BulkRateAction::Hold);
+    check("a later round still congested is a new event", c.Evaluate(queued, t += 100000, ++rounds) == BulkRateAction::Lower);
+    c.Evaluate(queued, t += 100000, ++rounds);
+    const BulkRateAction third = c.Evaluate(queued, t += 100000, ++rounds);
+    check("three decreases in a row pause", third == BulkRateAction::Pause && c.RateBps(t + 1) == 0);
     check("after the pause comes a small probe, not the old rate", c.RateBps(t + 2000000 + 1) == 64000);
-    const BulkRateAction during = c.Evaluate(good, t + 2500000);
-    check("a clean window inside the probe does not raise yet", during == BulkRateAction::Probe);
+    check("a clean window inside the probe does not raise yet", c.Evaluate(base, t + 2500000, rounds + 10) == BulkRateAction::Probe);
     BulkRateController f;
-    for (int i = 0; i < 12; ++i) f.Evaluate(lossy, 1000000ull * (i + 1) * 5);
+    BulkRateWindow lossy{3, 20000, 10000, 2000000};
+    uint64_t r = 0;
+    for (int i = 0; i < 30; ++i) f.Evaluate(lossy, 3000000ull * (i + 1), r += 3);
     check("never below the floor (64 kbps)", f.rate() == 64000);
+  }
+  {
     BulkRateController lan;
     BulkRateWindow l1{0, 1000, 1000, 256000};
-    lan.Evaluate(l1, 2000000);
-    BulkRateWindow l2{0, 3000, 3000, 384000};  // 3x a 1 ms LAN baseline, but only +2 ms
+    lan.Evaluate(l1, 100000, 1);
+    BulkRateWindow l2{0, 3000, 3000, 512000};  // 3x a 1 ms LAN baseline, but only +2 ms
     check("LAN jitter (1 ms -> 3 ms) is neither congestion nor a reason to stop raising",
-          lan.Evaluate(l2, 4000000) == BulkRateAction::Raise);
+          lan.Evaluate(l2, 200000, 2) == BulkRateAction::Raise);
     BulkRateController ping;
     BulkRateWindow p1{0, 20000, 10000, 256000};
-    ping.Evaluate(p1, 2000000);
-    BulkRateWindow p2{0, 20000, 45000, 384000};  // ping +35 ms: not congestion (<+50), but no raise (>+30)
-    const BulkRateAction a2 = ping.Evaluate(p2, 4000000);
-    check("control RTT +35 ms holds the rate (no raise, no cut)", a2 == BulkRateAction::Hold && ping.rate() == 384000);
-  }
-  // ------------------------------------------------------------------ bulk rate: the parameters
-  {
-    // The values under discussion (per-ACK slow start x2, then x1.25, a 16 Mbps cap), as parameters.
-    BulkRateConfig ss;
-    ss.slowStartNumerator = 2;
-    ss.slowStartDenominator = 1;
-    ss.upNumerator = 5;
-    ss.upDenominator = 4;
-    ss.capBps = 16000000;
-    ss.evalUnit = BulkRateEvalUnit::AckRound;
-    BulkRateController c(ss);
-    BulkRateWindow w{0, 1000, 1000, 0};
-    uint64_t t = 0, rounds = 0;
-    check("per-ACK: nothing is due before a round completes", !c.Due(t += 1000, rounds));
-    ++rounds;
-    check("per-ACK: one completed round makes an evaluation due", c.Due(t, rounds));
-    for (int i = 0; i < 3; ++i) {
-      w.deliveredBps = c.rate();
-      c.Evaluate(w, t += 1000);
-      c.MarkEvaluated(t, ++rounds);
+    ping.Evaluate(p1, 100000, 1);
+    BulkRateWindow p2{0, 20000, 45000, 512000};  // ping +35 ms: not congestion (<+50), but no raise (>+30)
+    check("control RTT +35 ms holds the rate (no raise, no cut)",
+          ping.Evaluate(p2, 200000, 2) == BulkRateAction::Hold && ping.rate() == 512000);
+    BulkRateWindow idle{0, 20000, 10000, 100000};
+    BulkRateController u;
+    check("a window that did not use its rate does not raise it", u.Evaluate(idle, 100000, 1) == BulkRateAction::Hold);
+    BulkRateController cap;
+    BulkRateWindow cw{0, 1000, 1000, 0};
+    uint64_t rr = 0;
+    for (int i = 0; i < 30; ++i) {
+      cw.deliveredBps = cap.rate();
+      cap.Evaluate(cw, 100000ull * (i + 1), ++rr);
     }
-    check("slow start doubles per evaluation (256k -> 2048k)", c.rate() == 2048000 && c.inSlowStart());
-    check("per-ACK: evaluated rounds are not evaluated twice", !c.Due(t + 5000000, rounds));
-    BulkRateWindow lossy{1, 1000, 1000, 2048000};
-    c.Evaluate(lossy, t += 1000);
-    check("the first congestion ends slow start and halves", c.rate() == 1024000 && !c.inSlowStart());
-    w.deliveredBps = c.rate();
-    c.Evaluate(w, t += 1000);
-    check("after slow start the gentler step applies (x1.25)", c.rate() == 1280000);
-    for (int i = 0; i < 40; ++i) { w.deliveredBps = c.rate(); c.Evaluate(w, t += 1000); }
-    check("raises stop at the configured cap (16 Mbps)", c.rate() == 16000000);
-    c.SetCapBps(3000000);
-    check("a cap moved below the rate brings the rate down at once", c.rate() == 3000000 && c.capBps() == 3000000);
-    c.SetCapBps(8000000);
-    check("a cap moved up does not raise the rate by itself", c.rate() == 3000000);
-    c.SetCapBps(1);
-    check("the cap never goes below the floor", c.capBps() == 64000 && c.rate() == 64000);
-    BulkRateConfig gap = ss;
-    gap.minEvalIntervalUs = 50000;
-    BulkRateController m(gap);
-    m.MarkEvaluated(100000, 0);
-    check("per-ACK: a very short RTT still waits the minimum interval", !m.Due(120000, 5) && m.Due(150000, 5));
-    BulkRateController wall;  // defaults: a 2 s wall-clock window
+    check("the probe stops at the cap (16 Mbps) and ends there", cap.rate() == 16000000 && !cap.inSlowStart());
+    cap.SetCapBps(8000000);
+    cap.SetCapBps(12000000);
+    check("a cap moved up does not raise the rate by itself", cap.rate() == 8000000);
+    cap.SetCapBps(1);
+    check("the cap never goes below the floor", cap.capBps() == 64000 && cap.rate() == 64000);
+    BulkRateConfig tol;
+    tol.lossTolerancePerMille = 20;
+    BulkRateController lt(tol);
+    BulkRateWindow few{2, 1000, 1000, 256000};
+    few.datagramsSent = 200;  // 10 per mille
+    check("loss under a configured tolerance is not congestion", lt.Evaluate(few, 100000, 1) == BulkRateAction::Raise);
+    BulkRateController strict;
+    BulkRateWindow one{1, 1000, 1000, 256000};
+    one.datagramsSent = 1000;
+    check("tolerance 0 (agreed): a single loss event halves", strict.Evaluate(one, 100000, 1) == BulkRateAction::Lower);
+    BulkRateConfig wallCfg;
+    wallCfg.evalUnit = BulkRateEvalUnit::WallClock;
+    BulkRateController wall(wallCfg);
     wall.MarkEvaluated(1000000, 0);
-    check("wall-clock: due every 2 s, rounds do not matter", !wall.Due(2999999, 100) && wall.Due(3000000, 0));
+    check("wall-clock mode (a parameter): due every 2 s, rounds do not matter", !wall.Due(2999999, 100) && wall.Due(3000000, 0));
+  }
+  // ------------------------------------------------------------------ RTT samples
+  {
+    BulkRttEstimator e;
+    check("the first sample is used", e.OnSample(40000, 0, 65000, false, false) && e.srttUs() == 40000);
+    check("a resent chunk's sample is not (Karn)", !e.OnSample(400000, 70000, 65000, true, false) && e.srttUs() == 40000);
+    check("a duplicate pull is not", !e.OnSample(40000, 70000, 65000, false, true));
+    check("a pull bunched right behind the previous one is not (ACK compression)",
+          !e.OnSample(5000, 2000, 65000, false, false) && e.srttUs() == 40000);
+    check("an ordinary sample moves SRTT by 1/8", e.OnSample(48000, 70000, 65000, false, false) && e.srttUs() == 41000);
+    check("the bunching floor is 1 ms at high rates", e.OnSample(40000, 1100, 1000, false, false));
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;

@@ -703,6 +703,26 @@ int connect_media_socket(ViewerContext& ctx) {
       return 6;
     }
     viewer_apply_udp_hello_ack(ackFeatures, ctx.videoNackEnabled, ctx.session);
+    // Clipboard image v1 (direction A). Started only when the host agreed to the bulk channel; it
+    // sends on this (connected) socket, reads the control RTT as evidence, and yields to control.
+    ctx.control.clipImage.SetBulkNegotiated(ctx.session.bulkChannelNegotiated);
+    if (ctx.session.bulkChannelNegotiated) {
+      ctx.control.clipImage.Start(
+          [&ctx](const void* data, size_t len) -> bool {
+            return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+          },
+          [&ctx]() -> uint64_t {
+            const uint64_t at = ctx.control.lastRttAtUs.load(std::memory_order_relaxed);
+            const uint64_t now = remote60::native_poc::qpc_now_us();
+            // A ping older than 3 s says nothing about the path now.
+            return (at != 0 && now >= at && now - at <= 3000000) ? ctx.control.lastRttUs.load(std::memory_order_relaxed)
+                                                                 : 0;
+          },
+          [&ctx]() -> bool {
+            return ctx.control.overUdp.load(std::memory_order_acquire) && ctx.control.udpControl.TxPending();
+          },
+          ctx.args.udpMtu, remote60::native_poc::clip_bulk_rate_config_from_env());
+    }
     std::cout << "[native-video-client] udp hello ack features=0x" << std::hex << ackFeatures
               << std::dec << " nackRequested=" << (ctx.videoNackEnabled ? 1 : 0)
               << " nackNegotiated=" << (ctx.session.hostSupportsNack ? 1 : 0)

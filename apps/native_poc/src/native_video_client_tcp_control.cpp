@@ -210,6 +210,7 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
   if (options.requestNack) hello.features |= kUdpFeatureVideoNack;  // video NACK.
   if (options.requestControlResume) hello.features |= kUdpFeatureControlResume;  // item 8
   if (options.requestBandwidthObserve) hello.features |= kUdpFeatureBandwidthObserve;  // C0
+  if (options.requestBulkChannel) hello.features |= kUdpFeatureBulkChannel;  // clipboard image v1
   std::snprintf(hello.authToken, sizeof(hello.authToken), "%s", options.authToken.c_str());
   const auto stopped = [stop]() { return stop && stop->load(std::memory_order_acquire); };
   const auto now_ms = []() {

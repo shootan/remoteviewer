@@ -33,6 +33,7 @@
 
 #include "clipboard_monitor.hpp"
 #include "clipboard_sync.hpp"
+#include "host_clip_image.hpp"
 #include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
 #include "host_input_inject.hpp"
@@ -405,6 +406,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardTextV1;
+      // Clipboard image v1: the image receiver runs. A viewer also needs kUdpFeatureBulkChannel in
+      // its HelloAck before it offers anything.
+      if (clientSession.clipImage && clientSession.clipImage->Enabled())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardImageV1;
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       remote60::native_poc::utf8_copy_bounded(pong.captureTargetProcess,
@@ -1213,6 +1218,50 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const std::vector<uint8_t> reply = remote60::native_poc::build_clipboard_data(
           req.seq, snap.generation, hasData, snap.text, snap.hash, qpc_now_us());
       if (!link.Write(reply.data(), reply.size())) break;
+      continue;
+    }
+
+    // Clipboard image v1 (direction A): fixed-size requests, one answer each. Only reached on a host
+    // that advertised kCaptureFlagClipboardImageV1. The image itself never rides this channel.
+    if (type == MessageType::ControlClipImageOffer && header.size == sizeof(ControlClipImageOfferMessage)) {
+      ControlClipImageOfferMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlClipImageOfferReplyMessage rsp{};
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlClipImageOfferReply);
+      rsp.header.size = sizeof(rsp);
+      rsp.seq = req.seq;
+      rsp.transferId = req.transferId;
+      rsp.verdict = static_cast<uint8_t>(ClipImageVerdict::Disabled);
+      if (clientSession.clipImage) rsp = clientSession.clipImage->HandleOffer(req, servedEpoch);
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+    if (type == MessageType::ControlClipImageCancel && header.size == sizeof(ControlClipImageCancelMessage)) {
+      ControlClipImageCancelMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlClipImageStatusReplyMessage rsp{};
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlClipImageStatusReply);
+      rsp.header.size = sizeof(rsp);
+      rsp.seq = req.seq;
+      rsp.transferId = req.transferId;
+      if (clientSession.clipImage) rsp = clientSession.clipImage->HandleCancel(req);
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlClipImageCancelReply);
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+    if (type == MessageType::ControlClipImageStatus && header.size == sizeof(ControlClipImageStatusMessage)) {
+      ControlClipImageStatusMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlClipImageStatusReplyMessage rsp{};
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlClipImageStatusReply);
+      rsp.header.size = sizeof(rsp);
+      rsp.seq = req.seq;
+      rsp.transferId = req.transferId;
+      if (clientSession.clipImage) rsp = clientSession.clipImage->HandleStatus(req);
+      if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }
 

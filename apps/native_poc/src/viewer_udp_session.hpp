@@ -14,6 +14,7 @@
 // Callers: viewer_startup.cpp (connect_media_socket), viewer_udp_recovery_test.cpp.
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "bandwidth_observe_wire.hpp"
@@ -54,6 +55,12 @@ constexpr bool kVideoNackEnabledDefault = true;
  */
 constexpr uint32_t kViewerHelloBudgetMs = 30000;
 
+// Clipboard image v1 (direction A) is asked for unless REMOTE60_CLIPBOARD_IMAGE=0.
+inline bool viewer_clip_image_requested() {
+  const char* v = std::getenv("REMOTE60_CLIPBOARD_IMAGE");
+  return !(v && (v[0] == '0' || std::strcmp(v, "off") == 0 || std::strcmp(v, "false") == 0));
+}
+
 // The Hello the Windows viewer sends: the same exchange the Android session performs (F-09),
 // 200 ms per wait, 50 ms between tries, the directory capability riding along, and -- since
 // the Windows NACK wiring -- the request for selective retransmit whenever the env policy
@@ -74,6 +81,7 @@ inline remote60::native_poc::UdpHelloOptions viewer_udp_hello_options(const std:
   // logs it, and the switch is what the on/off regression compares.
   const char* observe = std::getenv("REMOTE60_BWE_OBSERVE");
   hello.requestBandwidthObserve = !(observe && observe[0] == '0');
+  hello.requestBulkChannel = viewer_clip_image_requested();
   return hello;
 }
 
@@ -90,6 +98,8 @@ inline void viewer_apply_udp_hello_ack(uint32_t ackFeatures, bool videoNackEnabl
   const char* observe = std::getenv("REMOTE60_BWE_OBSERVE");
   session.bandwidthObserveNegotiated = remote60::native_poc::bandwidth_observe_negotiated(
       !(observe && observe[0] == '0'), ackFeatures);
+  session.bulkChannelNegotiated =
+      viewer_clip_image_requested() && (ackFeatures & remote60::native_poc::kUdpFeatureBulkChannel) != 0;
 }
 
 // The receive timeout every UDP session runs with (direct and tunnelled alike): the clock of the

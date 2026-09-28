@@ -13,6 +13,16 @@ namespace {
 constexpr wchar_t kClassName[] = L"Remote60ClipboardMonitor";
 // Marshals a SetText onto the monitor thread. lParam is a heap std::u16string the handler owns.
 constexpr UINT kMsgSetClipboard = WM_APP + 1;
+// Marshals an Invoke onto the monitor thread. lParam is a heap std::shared_ptr<InvokeJob>.
+constexpr UINT kMsgInvoke = WM_APP + 2;
+
+struct InvokeJob {
+  std::function<void(HWND)> fn;
+  HANDLE done = nullptr;
+  ~InvokeJob() {
+    if (done) CloseHandle(done);
+  }
+};
 }  // namespace
 
 LRESULT CALLBACK ClipboardMonitor::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -36,6 +46,14 @@ LRESULT CALLBACK ClipboardMonitor::WndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     case kMsgSetClipboard: {
       std::unique_ptr<std::u16string> text(reinterpret_cast<std::u16string*>(lParam));
       if (text) (void)clipboard_set_unicode_text(hwnd, u16_to_wide(*text));
+      return 0;
+    }
+    case kMsgInvoke: {
+      std::unique_ptr<std::shared_ptr<InvokeJob>> job(reinterpret_cast<std::shared_ptr<InvokeJob>*>(lParam));
+      if (job && *job) {
+        if ((*job)->fn) (*job)->fn(hwnd);
+        SetEvent((*job)->done);
+      }
       return 0;
     }
     case WM_DESTROY:
@@ -124,6 +142,21 @@ bool ClipboardMonitor::SetText(const std::u16string& text) {
   return true;
 }
 
+bool ClipboardMonitor::Invoke(std::function<void(HWND)> fn, DWORD timeoutMs) {
+  HWND hwnd = hwnd_.load(std::memory_order_acquire);
+  if (!hwnd || !running_.load(std::memory_order_acquire)) return false;
+  auto job = std::make_shared<InvokeJob>();
+  job->fn = std::move(fn);
+  job->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!job->done) return false;
+  auto* holder = new std::shared_ptr<InvokeJob>(job);
+  if (!PostMessageW(hwnd, kMsgInvoke, 0, reinterpret_cast<LPARAM>(holder))) {
+    delete holder;
+    return false;
+  }
+  return WaitForSingleObject(job->done, timeoutMs) == WAIT_OBJECT_0;
+}
+
 // --- HostClipboardHub -------------------------------------------------------------------------
 
 bool HostClipboardHub::Start() {
@@ -180,6 +213,46 @@ void HostClipboardHub::ApplyRemote(const std::u16string& text, uint64_t hash) {
     if (core_.OnRemoteData(text, hash) != ClipboardRemoteDecision::Apply) return;
   }
   (void)monitor_.SetText(text);
+}
+
+ClipPublishResult HostClipboardHub::PublishImage(uint64_t expectSequence, HGLOBAL pngGlobal, HGLOBAL dibv5,
+                                                 const std::u16string& text) {
+  struct Job {
+    HGLOBAL png = nullptr;
+    HGLOBAL dib = nullptr;
+    std::u16string text;
+    uint64_t expect = 0;
+    std::atomic<bool> abandoned{false};
+    ClipPublishResult result = ClipPublishResult::OpenFailed;
+    ~Job() {
+      if (png) GlobalFree(png);
+      if (dib) GlobalFree(dib);
+    }
+  };
+  auto job = std::make_shared<Job>();
+  job->png = pngGlobal;
+  job->dib = dibv5;
+  job->text = text;
+  job->expect = expectSequence;
+  const bool finished = monitor_.Invoke(
+      [this, job](HWND hwnd) {
+        // A publish that its caller has stopped waiting for must not happen late (the viewer has
+        // been told it failed): the job then just frees what it holds.
+        if (job->abandoned.load()) return;
+        HGLOBAL png = job->png, dib = job->dib;
+        job->png = job->dib = nullptr;  // clip_image_publish owns them from here
+        job->result = clip_image_publish(hwnd, job->expect, png, dib, &job->text, nullptr);
+        if (job->result == ClipPublishResult::Published && !job->text.empty()) {
+          std::lock_guard<std::mutex> lock(mu_);
+          (void)core_.OnRemoteData(job->text, clipboard_fnv1a(job->text));
+        }
+      },
+      10000);
+  if (!finished) {
+    job->abandoned.store(true);
+    return ClipPublishResult::OpenFailed;
+  }
+  return job->result;
 }
 
 }  // namespace remote60::native_poc

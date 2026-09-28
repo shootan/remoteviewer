@@ -48,6 +48,14 @@
 //   motion over a busy scene, like video); noise: fresh noise every frame (the worst case). The
 //   run ends with one R5MEASURE line: payload / parity / header Mbps over the seconds after warmup,
 //   payload against the target, and the IDRs in that span, all from the host's own stats lines.
+//   clip-image r2 (direction A, plan ⑧ performance): --clip-bench runs the host as the test build
+//   GNLinkStreamClipSink (--host), clipboard sync off and received images written to <run>/sink --
+//   never a clipboard; this side negotiates the bulk channel and runs the product ClipImageClient.
+//   --clip-mib N --clip-at SEC offers an N MiB image at second SEC (0 = a baseline run, same setup).
+//   --proxy DELAYMS:LOSSPERMILLE:RATEKBPS puts the loopback impairment proxy (udp_impair_proxy.hpp)
+//   between this viewer and the host. --run-dir DIR stages inside DIR instead of %TEMP%. The run
+//   ends with R7CLIP: the transfer's outcome and time, the control ping RTT, frame gaps and memory
+//   over the measured span (--measure-from), for comparison with a baseline run of the same span.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include <algorithm>
@@ -75,6 +83,9 @@
 #include "time_utils.hpp"
 #include "udp_control_channel.hpp"
 #include "control_resume_e2e_support.hpp"
+#include "clip_image_client.hpp"
+#include "udp_impair_proxy.hpp"
+#include <psapi.h>
 
 #include <mmsystem.h>  // timeBeginPeriod (r5); after the project headers, which bring winsock2/windows
 
@@ -296,6 +307,11 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t keyint = 0;     // r5: 0 = the host's default
   std::wstring maxQpArg;   // r5: empty = the host's default
   std::string patternName = "default";
+  bool clipBench = false;  // clip-image r2 perf: the ClipSink host build + the bulk channel
+  uint32_t clipMib = 0;
+  int clipAtSec = 10;
+  std::wstring proxySpec;
+  std::wstring runDir;
   bool gdi = false;  // r3: force the GDI desktop backend, staging the real GNLinkCapture.exe worker  // with --desktop: keep the invisible animated window up anyway
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -351,6 +367,16 @@ int wmain(int argc, wchar_t** argv) {
       }
     } else if (a == L"--gdi") {
       gdi = true;
+    } else if (a == L"--clip-bench") {
+      clipBench = true;
+    } else if (a == L"--clip-mib" && i + 1 < argc) {
+      clipMib = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--clip-at" && i + 1 < argc) {
+      clipAtSec = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--proxy" && i + 1 < argc) {
+      proxySpec = argv[++i];
+    } else if (a == L"--run-dir" && i + 1 < argc) {
+      runDir = argv[++i];
     } else if (a == L"--tune-at" && i + 1 < argc) {
       const std::wstring v = argv[++i];
       const size_t colon = v.find(L':');
@@ -383,8 +409,9 @@ int wmain(int argc, wchar_t** argv) {
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
-  const std::wstring dir = std::wstring(temp) + L"remote60_abr_ev_" +
-                           std::to_wstring(GetCurrentProcessId()) + L"\\";
+  const std::wstring dir = !runDir.empty() ? runDir + L"\\"
+                                           : std::wstring(temp) + L"remote60_abr_ev_" +
+                                                 std::to_wstring(GetCurrentProcessId()) + L"\\";
   CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
   const std::wstring me = self_path();
   if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
@@ -416,6 +443,13 @@ int wmain(int argc, wchar_t** argv) {
     if (!maxQpArg.empty()) SetEnvironmentVariableW(L"REMOTE60_NATIVE_MAX_QP", maxQpArg.c_str());
     // r5: a stats line every second, so the measured span has one reading per second.
     if (gPattern != Pattern::Default) SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    if (clipBench) {
+      // The host under test sits next to the user's session: its clipboard monitor stays off, and
+      // received images land in a folder (the ClipSink test build), never on a clipboard.
+      SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
+      CreateDirectoryW((dir + L"sink").c_str(), nullptr);
+      SetEnvironmentVariableW(L"REMOTE60_CLIP_IMAGE_TEST_SINK_DIR", (dir + L"sink").c_str());
+    }
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
                        L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(bitrate) +
@@ -468,7 +502,25 @@ int wmain(int argc, wchar_t** argv) {
     hostAddr.sin_family = AF_INET;
     hostAddr.sin_port = htons(kHostPort);
     InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
-    connect(sock, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+    remote60::native_poc::test::Proxy proxy;
+    bool proxyOn = false;
+    if (!proxySpec.empty()) {
+      remote60::native_poc::test::Impair im;
+      unsigned d = 0, l = 0, r = 0;
+      std::swscanf(proxySpec.c_str(), L"%u:%u:%u", &d, &l, &r);
+      im.oneWayDelayUs = static_cast<uint64_t>(d) * 1000 / 2;
+      im.lossPerMille = l;
+      im.rateBps = static_cast<uint64_t>(r) * 1000;
+      proxyOn = proxy.Start(hostAddr, im);
+      check("the impairment proxy is up (RTT " + std::to_string(d) + " ms, loss " + std::to_string(l) +
+                "/1000, " + std::to_string(r) + " kbps)",
+            proxyOn);
+    }
+    if (proxyOn) {
+      connect(sock, reinterpret_cast<const sockaddr*>(&proxy.frontAddr), sizeof(proxy.frontAddr));
+    } else {
+      connect(sock, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+    }
     DWORD rcvTimeout = 20;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
     int rcvBuf = 4 << 20;
@@ -478,6 +530,7 @@ int wmain(int argc, wchar_t** argv) {
     hello.budgetMs = 20000;
     hello.sliceMaxMs = 250;
     hello.retrySleepMs = 50;
+    hello.requestBulkChannel = clipBench;
     std::string helloError;
     uint32_t ackFeatures = 0;
     const bool handshake = udp_hello_handshake(sock, hello, nullptr, &helloError, &ackFeatures, nullptr);
@@ -491,6 +544,23 @@ int wmain(int argc, wchar_t** argv) {
         kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
     UdpControlLink link(&control, 12000);
 
+    // clip-image r2: the product client, on this socket, as the viewer runs it.
+    ClipImageClient clip;
+    std::atomic<uint64_t> lastPingRttUs{0};
+    std::mutex pingMu;
+    std::vector<uint64_t> pingRttUs;  // measured span only
+    std::vector<uint64_t> frameArrivalUs;  // measured span only: last chunk of each real frame
+    const bool bulkAcked = (ackFeatures & kUdpFeatureBulkChannel) != 0;
+    if (clipBench) {
+      check("the host acknowledged the bulk channel (kUdpFeatureBulkChannel)", bulkAcked);
+      clip.Start([&sock](const void* data, size_t len) {
+                   return send(sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+                 },
+                 [&] { return lastPingRttUs.load(); }, [&] { return control.TxPending(); }, 1200,
+                 clip_bulk_rate_config_from_env());
+      clip.SetBulkNegotiated(bulkAcked);
+    }
+
     std::atomic<bool> stop{false};
     std::mutex fmu;
     std::set<uint32_t> realSeqThisSec;
@@ -503,6 +573,7 @@ int wmain(int argc, wchar_t** argv) {
       while (!stop.load()) {
         control.Tick();
         const int n = recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+        if (n > 0 && clipBench && clip.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
         if (n > 0 && !control.OnPacket(buf.data(), static_cast<size_t>(n)) &&
             n >= static_cast<int>(sizeof(UdpVideoChunkHeader))) {
           UdpVideoChunkHeader h{};
@@ -512,6 +583,7 @@ int wmain(int argc, wchar_t** argv) {
               (h.flags & 0x40u) == 0 && (h.flags & 0x4u) != 0) {  // last chunk of a real frame
             std::lock_guard<std::mutex> lk(fmu);
             realSeqThisSec.insert(h.seq);
+            if (latencyOn.load()) frameArrivalUs.push_back(qpc_now_us());
             if (latencyOn.load() && h.captureQpcUs > 0) {
               const uint64_t now = qpc_now_us();
               if (h.encodeEndQpcUs >= h.captureQpcUs) capToEncUs.push_back(h.encodeEndQpcUs - h.captureQpcUs);
@@ -561,6 +633,7 @@ int wmain(int argc, wchar_t** argv) {
       ClientInputQueue inputQueue;
       scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
       while (!controlStop.load()) {
+        if (clipBench) (void)clip.Pump(link);
         ClientControlMetricsSnapshot metrics;
         bool selectNow = false;
         uint64_t selectId = 0;
@@ -614,7 +687,18 @@ int wmain(int argc, wchar_t** argv) {
           TcpControlResponse response;
           if (execute_control_action(link, action, &response) &&
               action.kind == ControlOutboundActionKind::Ping) {
-            scheduler.OnPingCompleted(qpc_now_us());
+            const uint64_t done = qpc_now_us();
+            scheduler.OnPingCompleted(done);
+            const uint64_t rtt = done >= action.ping.clientSendQpcUs ? done - action.ping.clientSendQpcUs : 0;
+            lastPingRttUs.store(rtt);
+            if (latencyOn.load()) {
+              std::lock_guard<std::mutex> lk(pingMu);
+              pingRttUs.push_back(rtt);
+            }
+            if (clipBench) {
+              clip.SetHostSupports(bulkAcked &&
+                                   (response.pong.captureTargetFlags & kCaptureFlagClipboardImageV1) != 0);
+            }
           }
         } else {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -622,6 +706,14 @@ int wmain(int argc, wchar_t** argv) {
       }
     });
 
+    struct MemSample {
+      int sec;
+      SIZE_T viewerPrivate;
+      SIZE_T hostPrivate;
+    };
+    std::vector<MemSample> memSamples;
+    uint64_t clipOfferUs = 0, clipDoneUs = 0;
+    int clipDoneSec = -1;
     // The run: 36 seconds. 'stop' reports fully for the first 14 and is silent after.
     const int kRunSec = runSec > 0 ? runSec : (mode == "recover" ? 72 : 36);
     constexpr int kStopAfterSec = 14;
@@ -674,6 +766,48 @@ int wmain(int argc, wchar_t** argv) {
         pendingMetrics = m;
       }
       if (s + 1 >= static_cast<int>(gMeasureFromSec)) latencyOn.store(true);
+      if (clipBench && clipMib > 0 && s == clipAtSec) {
+        // Incompressible noise with alpha: the PNG is about as large as the pixels.
+        const uint32_t w = 512, h = 512 * clipMib;
+        ClipSnapshot snap;
+        snap.kind = ClipSnapshotKind::Dib;
+        snap.sequence = 1000 + static_cast<uint64_t>(s);
+        snap.bytes.resize(sizeof(BITMAPV5HEADER) + static_cast<size_t>(w) * h * 4);
+        BITMAPV5HEADER bh{};
+        bh.bV5Size = sizeof(bh);
+        bh.bV5Width = static_cast<LONG>(w);
+        bh.bV5Height = static_cast<LONG>(h);
+        bh.bV5Planes = 1;
+        bh.bV5BitCount = 32;
+        bh.bV5Compression = BI_BITFIELDS;
+        bh.bV5RedMask = 0x00FF0000;
+        bh.bV5GreenMask = 0x0000FF00;
+        bh.bV5BlueMask = 0x000000FF;
+        bh.bV5AlphaMask = 0xFF000000;
+        bh.bV5CSType = LCS_sRGB;
+        std::memcpy(snap.bytes.data(), &bh, sizeof(bh));
+        uint32_t x = 0x12345678u;
+        for (size_t o = sizeof(bh); o + 4 <= snap.bytes.size(); o += 4) {
+          x ^= x << 13;
+          x ^= x >> 17;
+          x ^= x << 5;
+          std::memcpy(snap.bytes.data() + o, &x, 4);
+        }
+        clipOfferUs = qpc_now_us();
+        clip.SubmitSnapshot(std::move(snap));
+        std::cout << "clip: offered " << clipMib << " MiB at second " << s << "\n";
+      }
+      if (clipBench) {
+        PROCESS_MEMORY_COUNTERS_EX self{}, host{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&self), sizeof(self));
+        GetProcessMemoryInfo(hostPi.hProcess, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&host), sizeof(host));
+        memSamples.push_back({s, self.PrivateUsage, host.PrivateUsage});
+        const auto c = clip.GetCounters();
+        if (clipDoneUs == 0 && c.published + c.failed + c.cancelled + c.superseded > 0) {
+          clipDoneUs = qpc_now_us();
+          clipDoneSec = s;
+        }
+      }
       std::this_thread::sleep_for(std::chrono::seconds(1));
       std::lock_guard<std::mutex> lk(fmu);
       realFramesPerSec.push_back(static_cast<uint32_t>(realSeqThisSec.size()));
@@ -682,6 +816,56 @@ int wmain(int argc, wchar_t** argv) {
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
+    if (clipBench) {
+      const auto c = clip.GetCounters();
+      std::vector<uint64_t> pings;
+      {
+        std::lock_guard<std::mutex> lk(pingMu);
+        pings = pingRttUs;
+      }
+      std::sort(pings.begin(), pings.end());
+      auto pct = [](const std::vector<uint64_t>& v, int p) { return v.empty() ? 0.0 : v[v.size() * p / 100] / 1000.0; };
+      std::vector<uint64_t> arrivals;
+      {
+        std::lock_guard<std::mutex> lk(fmu);
+        arrivals = frameArrivalUs;
+      }
+      uint32_t gaps100 = 0, gaps250 = 0;
+      uint64_t maxGap = 0;
+      for (size_t i = 1; i < arrivals.size(); ++i) {
+        const uint64_t g = arrivals[i] - arrivals[i - 1];
+        gaps100 += g > 100000;
+        gaps250 += g > 250000;
+        maxGap = std::max(maxGap, g);
+      }
+      SIZE_T vBase = 0, vPeak = 0, vAfter = 0, hBase = 0, hPeak = 0, hAfter = 0;
+      for (const auto& m : memSamples) {
+        if (m.sec == clipAtSec - 1 || (clipMib == 0 && m.sec == clipAtSec)) {
+          vBase = m.viewerPrivate;
+          hBase = m.hostPrivate;
+        }
+        if (m.sec >= clipAtSec) {
+          vPeak = std::max(vPeak, m.viewerPrivate);
+          hPeak = std::max(hPeak, m.hostPrivate);
+        }
+        if (clipDoneSec >= 0 && m.sec == clipDoneSec + 5) {
+          vAfter = m.viewerPrivate;
+          hAfter = m.hostPrivate;
+        }
+      }
+      const double transferS = (clipOfferUs && clipDoneUs) ? (clipDoneUs - clipOfferUs) / 1e6 : 0.0;
+      const auto ps = clip.PacerStats();
+      std::printf("R7CLIP mib=%u published=%llu failed=%llu transferS=%.1f lastRateBps=%u pacerDatagrams=%llu "
+                  "resends=%llu pingN=%zu pingP50Ms=%.1f pingP95Ms=%.1f frames=%zu gaps100=%u gaps250=%u maxGapMs=%.1f "
+                  "viewerPrivMiB base=%.1f peak=%.1f after5s=%.1f hostPrivMiB base=%.1f peak=%.1f after5s=%.1f\n",
+                  clipMib, static_cast<unsigned long long>(c.published), static_cast<unsigned long long>(c.failed),
+                  transferS, c.lastRateBps, static_cast<unsigned long long>(ps.datagramsSent),
+                  static_cast<unsigned long long>(ps.resendsAfterTransmit), pings.size(), pct(pings, 50),
+                  pct(pings, 95), arrivals.size(), gaps100, gaps250, maxGap / 1000.0, vBase / 1048576.0,
+                  vPeak / 1048576.0, vAfter / 1048576.0, hBase / 1048576.0, hPeak / 1048576.0, hAfter / 1048576.0);
+      clip.Stop();
+    }
+    if (proxyOn) proxy.Stop();
     if (gPattern != Pattern::Default) {
       std::lock_guard<std::mutex> lk(fmu);
       auto stat = [](std::vector<uint64_t> v, const char* name) {

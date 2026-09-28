@@ -10,10 +10,9 @@ namespace {
 
 // One unacknowledged message at a time matches the request/response protocol above, so these
 // only have to cover loss, not congestion.
-constexpr uint64_t kRetransmitIntervalUs = 250000;   // whole-message resend while unacked
-constexpr uint32_t kMaxAttempts = 24;                // ~6 s before the link is declared dead
-constexpr uint64_t kNackDelayUs = 90000;             // wait this long for stragglers first
-constexpr uint64_t kNackIntervalUs = 90000;
+// (The defaults live in UdpControlChannel::Timings: a 250 ms whole-message resend while unacked,
+// 24 attempts -- ~6 s -- before the link is declared dead, and a NACK only after 90 ms without
+// progress, repeated every 90 ms.)
 // Long messages (window thumbnails) run to hundreds of fragments; a short pause every burst
 // keeps them from overrunning the receiver's socket buffer in one go.
 constexpr size_t kBurstFragments = 24;
@@ -31,6 +30,11 @@ uint64_t now_us() {
 }
 
 }  // namespace
+
+void UdpControlChannel::SetTimings(const Timings& timings) {
+  std::lock_guard<std::mutex> lock(mu_);
+  timings_ = timings;
+}
 
 void UdpControlChannel::Configure(SendFn send, uint32_t txStreamId, uint32_t rxStreamId,
                                   uint32_t mtuBytes) {
@@ -413,8 +417,8 @@ void UdpControlChannel::Tick() {
 
   if (!txQueue_.empty()) {
     Outbound& head = txQueue_.front();
-    if (now - head.lastSendUs >= kRetransmitIntervalUs) {
-      if (++head.attempts > kMaxAttempts) {
+    if (now - head.lastSendUs >= timings_.retransmitIntervalUs) {
+      if (++head.attempts > timings_.maxAttempts) {
         auto expected = ControlCloseReason::None;
         closeReason_.compare_exchange_strong(expected, ControlCloseReason::PeerLost,
                                              std::memory_order_relaxed);
@@ -429,8 +433,8 @@ void UdpControlChannel::Tick() {
 
   for (auto& [seq, slot] : rxPending_) {
     if (slot.fragCount == 0 || slot.haveCount >= slot.fragCount) continue;
-    if (now - slot.lastProgressUs < kNackDelayUs) continue;
-    if (slot.lastNackUs != 0 && now - slot.lastNackUs < kNackIntervalUs) continue;
+    if (now - slot.lastProgressUs < timings_.nackDelayUs) continue;
+    if (slot.lastNackUs != 0 && now - slot.lastNackUs < timings_.nackIntervalUs) continue;
     std::vector<uint16_t> missing;
     for (uint16_t i = 0; i < slot.fragCount; ++i) {
       if (!slot.have[i]) missing.push_back(i);

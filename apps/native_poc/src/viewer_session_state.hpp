@@ -67,6 +67,8 @@ struct SessionState {
   // C0 stage 1: this viewer asked for bandwidth observation and the host acknowledged it. Only
   // then does the control thread send ControlClientBandwidth.
   bool bandwidthObserveNegotiated = false;
+  // Clipboard image v1: this viewer asked for kUdpFeatureBulkChannel and the host acknowledged it.
+  bool bulkChannelNegotiated = false;
   // Session watchdog (viewer_session_watchdog.cpp): a session whose control channel is gone for
   // good and whose video has not progressed for deadSessionUs is declared dead; deadSessionExit
   // then ends the viewer so the shell offers a reconnect (REMOTE60_NATIVE_DEAD_SESSION_EXIT=0 only

@@ -24,6 +24,7 @@
 
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
+#include "clip_image_client.hpp"
 #include "clipboard_sync.hpp"
 #include "viewer_control_resume.hpp"
 
@@ -96,6 +97,9 @@ struct ControlChannelState {
   std::atomic<bool> reportedSecure{false};
   // Clipboard text sync (K1): UI thread produces local changes, control thread sends + polls.
   ClipboardSyncState clipboard;
+  // Clipboard image v1 (direction A): UI thread submits image copies, control thread offers and
+  // polls, recv thread routes the bulk stream to it. Started at connect, stopped at shutdown.
+  remote60::native_poc::ClipImageClient clipImage;
 };
 
 }  // namespace remote60::native_poc::viewer

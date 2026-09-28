@@ -64,6 +64,21 @@ enum class MessageType : uint16_t {
   // at its exact size, so a longer 24 would make an old host drop every metrics report and blind
   // its ABR. Sent only when both sides set kUdpFeatureBandwidthObserve; no reply.
   ControlClientBandwidth = 54,
+  // Clipboard image v1 (clip-image, plan r2). Fixed-size control messages, metadata only -- the
+  // image itself never rides the control channel. Requests are the viewer's, answers the host's
+  // (the host cannot push on control). Sent only once the Pong carries
+  // kCaptureFlagClipboardImageV1 AND the HelloAck carries kUdpFeatureBulkChannel.
+  ControlClipImageOffer = 55,        // viewer -> host: "I have an image" (direction A)
+  ControlClipImageOfferReply = 56,   // host -> viewer: verdict, epochTag, bulkGen
+  ControlClipImageCancel = 57,       // viewer -> host
+  ControlClipImageCancelReply = 58,  // host -> viewer
+  // 59 / 60 were the r1 "Result" pair, removed in r2 (a host-initiated message cannot exist on a
+  // request/response control channel). Left unused so an r1 build is never mistaken for r2.
+  ControlClipImageStatus = 61,       // viewer -> host, every 500 ms during a transfer
+  ControlClipImageStatusReply = 62,  // host -> viewer: the only way the host's outcome is told
+  // The bulk stream's own messages (never on the control channel; see kBulkStreamTag).
+  ClipBulkPull = 63,                 // host -> viewer: send me [offset, offset + len)
+  ClipBulkChunk = 64,                // viewer -> host: those bytes
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -232,6 +247,9 @@ static_assert((kCaptureFlagFrameHeartbeat & kCaptureFlagPeerVersion) == 0,
 // clipboard monitor. A viewer only sends clipboard messages once it sees this bit, so an old host
 // that never advertises it is never sent one (its Serve loop would mis-drain the variable payload).
 constexpr uint32_t kCaptureFlagClipboardTextV1 = 0x100u;
+// Clipboard image v1: the host runs the image receiver (Offer/Cancel/Status, bulk pulls) and can
+// publish PNG + CF_DIBV5 to its clipboard. Meaningful only together with kUdpFeatureBulkChannel.
+constexpr uint32_t kCaptureFlagClipboardImageV1 = 0x200u;
 
 struct ControlVersionMessage {
   MessageHeader header{};
@@ -581,6 +599,12 @@ constexpr uint32_t kUdpFeatureControlResume = 0x20u;
 // sends only when the HelloAck carries it, so an old host is never sent a kind it would drain as
 // unknown, and an old viewer is never asked for one.
 constexpr uint32_t kUdpFeatureBandwidthObserve = 0x40u;
+// Clipboard image v1: this peer demultiplexes bulk-stream datagrams (stream id bit30, see
+// clip_image_core.hpp) ahead of its control channel. Requested by a viewer that will send them,
+// acknowledged by a host that will route them; nothing bulk is sent to a peer that did not agree,
+// because an old peer's control channel would swallow and drop them (udp_control_channel.cpp).
+// NOT encrypted: this path, like the rest of the UDP media socket, is plaintext.
+constexpr uint32_t kUdpFeatureBulkChannel = 0x80u;
 constexpr uint32_t kUdpProtocolVersion = 2u;
 
 // One NACK datagram asks for up to this many missing chunkIndex values of a single AU. A 1080p IDR
@@ -859,6 +883,136 @@ struct ControlImeStateResponseMessage {
 static_assert(sizeof(ControlImeStateResponseMessage) == 32, "ime state-resp wire drift");
 
 constexpr uint16_t kUdpVideoFecGroupSize = 8;
+
+// ---------------------------------------------------------------- clipboard image v1 (plan r2)
+// Wire: packed, little-endian, fixed size; each accepted only at exactly its size.
+constexpr uint8_t kClipImageFormatPng = 0x1u;   // the package starts with a PNG (always set)
+constexpr uint8_t kClipImageFormatText = 0x2u;  // the package ends with UTF-16 text of the same copy
+
+enum class ClipImageVerdict : uint8_t {
+  Accept = 0,
+  Busy = 1,        // one image transfer per session, whichever direction (r2 8-2)
+  TooLarge = 2,    // clip_image_gate refused it
+  Disabled = 3,    // clipboard sync is off on the host
+  StaleEpoch = 4,
+  BadDims = 5,
+  BadRequest = 6,  // formats / sizes that cannot describe a package
+};
+
+enum class ClipImageState : uint8_t {
+  Unknown = 0,     // not the current transfer (or no transfer): nothing about it is known
+  Pulling = 1,
+  Verifying = 2,
+  Publishing = 3,
+  Published = 4,
+  Failed = 5,
+  Cancelled = 6,
+  Superseded = 7,  // the host's clipboard changed after the offer was accepted: nothing published
+};
+
+enum class ClipImageReason : uint8_t {
+  None = 0,
+  Stalled = 1,       // 30 s without a chunk
+  Timeout = 2,       // the wall-clock budget for this size ran out
+  VerifyFailed = 3,  // SHA-256 mismatch
+  DecodeFailed = 4,
+  SizeMismatch = 5,  // the PNG is not the size the offer said
+  PublishFailed = 6, // the clipboard refused a Set (it was emptied again, not left half-written)
+  Session = 7,       // the session ended or rolled over
+  Limit = 8,
+  User = 9,
+  Superseded = 10,   // a newer local copy replaced it
+  ColorProfile = 11, // an embedded / linked colour profile, refused rather than recoloured
+};
+
+struct ControlClipImageOfferMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint8_t formats = 0;          // kClipImageFormat*
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;      // viewer-chosen random, never 0
+  uint64_t revision = 0;        // the viewer's clipboard sequence number of this copy
+  uint32_t pngBytes = 0;
+  uint32_t textUtf16 = 0;       // UTF-16 code units after the PNG (0 without kClipImageFormatText)
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint8_t sha256[32] = {};      // of the whole package: [PNG][UTF-16 text]
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlClipImageOfferMessage) == 88, "clip image offer wire drift");
+
+struct ControlClipImageOfferReplyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;             // echoes the offer
+  uint8_t verdict = 0;          // ClipImageVerdict
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;      // echoes the offer
+  uint64_t epochTag = 0;        // (host random32 << 32) | session epoch -- quoted back on every bulk message
+  uint32_t bulkGen = 0;         // the bulk stream generation for this transfer (low 28 bits used)
+  uint32_t pullWindow = 0;      // pulls the host keeps outstanding (logical; the channel is head-only)
+};
+static_assert(sizeof(ControlClipImageOfferReplyMessage) == 40, "clip image offer reply wire drift");
+
+struct ControlClipImageCancelMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint8_t reason = 0;           // ClipImageReason
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+};
+static_assert(sizeof(ControlClipImageCancelMessage) == 32, "clip image cancel wire drift");
+
+struct ControlClipImageStatusMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t reserved = 0;
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+};
+static_assert(sizeof(ControlClipImageStatusMessage) == 32, "clip image status wire drift");
+
+// The answer to both Cancel (57) and Status (61): where the named transfer stands on the host.
+struct ControlClipImageStatusReplyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;             // echoes the request
+  uint8_t state = 0;            // ClipImageState (Unknown: not the current transfer -- left alone)
+  uint8_t reason = 0;           // ClipImageReason
+  uint16_t reserved = 0;
+  uint64_t transferId = 0;      // echoes the request
+  uint32_t bytesReceived = 0;
+  uint32_t totalBytes = 0;
+};
+static_assert(sizeof(ControlClipImageStatusReplyMessage) == 32, "clip image status reply wire drift");
+
+// Bulk stream (stream id bit30) messages. transferId + epochTag + bulkGen must all be current, or the
+// message is dropped without an answer; an old datagram never cancels the current transfer.
+struct ClipBulkPullMessage {
+  MessageHeader header{};
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+  uint32_t bulkGen = 0;
+  uint32_t offset = 0;
+  uint32_t len = 0;
+  // The chunk whose arrival released this pull (UINT32_MAX for the opening pulls). The viewer times
+  // its round trip from the last datagram of that chunk to here -- the rate controller's pull RTT.
+  uint32_t triggerOffset = 0xFFFFFFFFu;
+  uint32_t bytesReceived = 0;   // what the host holds so far (progress, for the viewer's evidence)
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(ClipBulkPullMessage) == 48, "clip bulk pull wire drift");
+
+// Followed by `len` bytes of the package.
+struct ClipBulkChunkHeader {
+  MessageHeader header{};       // size = sizeof(*this); the bytes follow
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+  uint32_t bulkGen = 0;
+  uint32_t offset = 0;
+  uint32_t len = 0;
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(ClipBulkChunkHeader) == 40, "clip bulk chunk wire drift");
 #pragma pack(pop)
 
 }  // namespace remote60::native_poc
