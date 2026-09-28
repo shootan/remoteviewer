@@ -34,10 +34,13 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <random>
 #include <string>
 #include <vector>
+
+#include "test_scratch_dir.hpp"
 
 namespace remote60::native_poc::e2e {
 
@@ -260,40 +263,119 @@ inline bool e2e_host_captured_window(const std::wstring& hostLogPath, HWND hwnd,
 }
 
 /**
- * Removes one staging directory this run created -- and nothing else: only `dir`, only if it is
- * strictly inside `root` (the temp directory), never anything found by name or pattern (RV-20,
- * 2026-09-28). The host may still be releasing its image when the test tears down (a job's
- * kill-on-close is asynchronous), so a delete can fail once or twice; retried for a few seconds.
- * Returns whether the directory is gone.
+ * "Gone" means the filesystem says it does not exist -- not merely that its attributes could not
+ * be read. Access denied, a sharing violation or a bad path all come back as
+ * INVALID_FILE_ATTRIBUTES too, and each of those is a failure to report, not a success.
  */
-inline void remove_tree_under(const std::wstring& path, const std::wstring& root);  // below
-
-inline bool e2e_remove_staging_dir(const std::wstring& dir, const std::wstring& root, int attempts = 40) {
-  std::wstring path = dir;
-  while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
-  if (path.empty() || !e2e_path_is_under(path, root)) return false;
-  for (int i = 0; i < attempts; ++i) {
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
-    remove_tree_under(path, root);
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
-    Sleep(100);
+inline bool e2e_path_gone(const std::wstring& path, DWORD* error = nullptr) {
+  if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (error) *error = ERROR_SUCCESS;
+    return false;
   }
-  return false;
+  const DWORD e = GetLastError();
+  if (error) *error = e;
+  return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
 }
 
 /**
- * Removes the staging directory when it goes out of scope -- on success, on failure and on an
- * early return alike -- unless `keep` was set by an explicit option (--keep-dir), so a run that
- * stops halfway leaves nothing behind in the user's temp directory. Declare it right after the
- * directory is created. A crash still leaves the directory: that is the one case this cannot cover.
+ * A staging directory for one test (or one fixture of a test): the exe copies, the host log, the
+ * isolated LOCALAPPDATA and the token cache live here.
+ *
+ * Inside the repository, never %TEMP% (RV-20 r2, 2026-09-28; AGENTS.md: a test deletes nothing
+ * outside the repository). test_scratch_dir.hpp owns the boundary: the root is validated against
+ * the repository root, every ancestor is checked for a link, and make_scratch_dir hands out only
+ * a directory THIS process created -- a name already there is never adopted (another run's, or a
+ * junction somebody left). Removal goes through remove_scratch_tree, which re-checks the root and
+ * every component on the way and removes a link as a link without entering it.
+ *
+ * Remove() is retried for a few seconds because a host may still be releasing its image when the
+ * test tears down (a job's kill-on-close is asynchronous). Its result is kept and reported: on the
+ * tidy path a test checks it; on an early return the destructor runs it and prints the outcome,
+ * so a failure to clean up is never silent. `keep` (an explicit --keep-dir, or a fixture that did
+ * not end cleanly) leaves the directory in place and says so.
  */
-struct StagingDirCleanup {
-  std::wstring dir;
-  std::wstring root;
-  bool keep = false;
-  ~StagingDirCleanup() {
-    if (!keep) (void)e2e_remove_staging_dir(dir, root);
+class StagingDir {
+ public:
+  /** Creates a fresh directory under this run's scratch directory. False, with why(), if refused. */
+  bool Create(const std::wstring& tag) {
+    if (!path_.empty()) {
+      why_ = "already created";
+      return false;
+    }
+    const std::wstring made = test_support::make_scratch_dir(tag);
+    if (made.empty()) {
+      why_ = "no scratch directory inside the repository: " + test_support::scratch_root_problem();
+      return false;
+    }
+    path_ = made + L"\\";
+    why_.clear();
+    // This process's run directory (the parent of every staging directory it makes) is tidied
+    // once, at exit, after every StagingDir is gone -- a plain, non-recursive RemoveDirectoryW
+    // that fails harmlessly if anything is still in it. Registered after the run directory
+    // exists, so it runs before that static is destroyed.
+    static const bool tidyRegistered = [] {
+      std::atexit([] { RemoveDirectoryW(test_support::scratch_run_dir().c_str()); });
+      return true;
+    }();
+    (void)tidyRegistered;
+    return true;
   }
+  /** With a trailing backslash, ready for `path() + L"host.log"`. Empty until Create. */
+  const std::wstring& path() const { return path_; }
+  bool created() const { return !path_.empty(); }
+  void set_keep(bool keep, const std::string& why = std::string()) {
+    keep_ = keep;
+    if (keep && !why.empty()) why_ = why;
+  }
+  bool kept() const { return keep_; }
+  bool removed() const { return removed_; }
+  const std::string& why() const { return why_; }
+
+  /** Removes the directory (idempotent; retried). Keeps it, and says so, when `keep` is set. */
+  bool Remove(int attempts = 40) {
+    attempted_ = true;
+    if (path_.empty()) return true;  // nothing was ever made
+    if (removed_) return true;
+    if (keep_) return false;
+    const std::wstring bare = path_.substr(0, path_.size() - 1);
+    DWORD attrError = ERROR_SUCCESS;
+    for (int i = 0; i < attempts && !removed_; ++i) {
+      if (e2e_path_gone(bare, &attrError)) {
+        removed_ = true;
+        break;
+      }
+      (void)test_support::remove_scratch_tree(bare);
+      if (e2e_path_gone(bare, &attrError)) {
+        removed_ = true;
+        break;
+      }
+      Sleep(100);
+    }
+    if (removed_) {
+      why_.clear();
+      return true;
+    }
+    why_ = "staging directory not removed (" + std::string(bare.begin(), bare.end()) +
+           ", attributes error " + std::to_string(attrError) + ")";
+    return false;
+  }
+
+  ~StagingDir() {
+    if (!created()) return;
+    if (keep_) {
+      std::printf("KEPT  staging directory %ls%s%s\n", path_.c_str(), why_.empty() ? "" : ": ", why_.c_str());
+      return;
+    }
+    if (!attempted_) (void)Remove();
+    if (!removed_) std::printf("WARN  %s\n", why_.c_str());
+  }
+
+ private:
+  std::wstring path_;
+  std::string why_;
+  bool keep_ = false;
+  bool removed_ = false;
+  bool attempted_ = false;
 };
 
 /** Recursive delete, refusing anything that is not strictly inside `root`. Test scratch only. */

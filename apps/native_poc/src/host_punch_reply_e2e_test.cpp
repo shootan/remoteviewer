@@ -103,6 +103,9 @@ struct SpawnedHost {
   std::string output;
   std::wstring dir;
   std::wstring cachePath;  // where this host was told to keep its directory cache
+  remote60::native_poc::e2e::StagingDir staging;  // the directory above, inside the repository
+  bool stopClean = false;   // Stop(): the host exited and its staging directory is gone
+  std::string stopWhy;      // ...or why not
 
   std::string log() {
     std::lock_guard<std::mutex> lock(mu);
@@ -165,23 +168,31 @@ struct SpawnedHost {
     }
     if (reader.joinable()) reader.join();
     if (pi.hThread) CloseHandle(pi.hThread);
+    bool exited = true;
+    DWORD wait = WAIT_OBJECT_0;
     if (pi.hProcess) {
       // The kill is asynchronous: until the host has actually exited its image file is in use
       // and GNLinkStream.exe cannot be deleted -- which is how every case used to leave its
-      // staging directory behind (132 of them on one machine). Wait for it first.
-      WaitForSingleObject(pi.hProcess, 20000);
+      // staging directory behind (132 of them on one machine). Only WAIT_OBJECT_0 says it has.
+      wait = WaitForSingleObject(pi.hProcess, 20000);
+      exited = (wait == WAIT_OBJECT_0);
       CloseHandle(pi.hProcess);
     }
     pi = PROCESS_INFORMATION{};
     if (!dir.empty()) {
-      // Everything the staging directory holds -- the exe copies, the token cache and the
-      // diagnostic mirror the isolation arguments caught -- and only inside this one directory.
-      wchar_t temp[MAX_PATH]{};
-      GetTempPathW(MAX_PATH, temp);
-      if (!remote60::native_poc::e2e::e2e_remove_staging_dir(dir, temp)) {
-        std::printf("WARN  staging directory not removed: %ls\n", dir.c_str());
+      if (!exited) {
+        // Kept, not removed under a process that may still be using it; the case reports it.
+        stopWhy = "the host did not exit within 20 s (wait=" + std::to_string(wait) + "); staging kept";
+        staging.set_keep(true, stopWhy);
+        stopClean = false;
+      } else {
+        stopClean = staging.Remove();
+        stopWhy = stopClean ? std::string() : staging.why();
       }
       dir.clear();
+    } else if (!staging.created()) {
+      stopClean = true;  // never staged, nothing to remove
+      stopWhy = "nothing was staged";
     }
   }
   ~SpawnedHost() { Stop(); }
@@ -208,12 +219,13 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                 mediaPort, controlPort);
     return false;
   }
-  wchar_t temp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, temp);
-  host->dir = std::wstring(temp) + L"remote60_punch_e2e_" +
-              std::wstring(tag, tag + strlen(tag)) + L"_" +
-              std::to_wstring(GetCurrentProcessId()) + L"\\";
-  CreateDirectoryW(host->dir.substr(0, host->dir.size() - 1).c_str(), nullptr);
+  // Inside the repository's test scratch root, never %TEMP% (RV-20 r2): a directory this
+  // process created, one per case, removed once the host has exited.
+  if (!host->staging.Create(L"punch_" + std::wstring(tag, tag + strlen(tag)))) {
+    std::printf("FAIL  %s\n", host->staging.why().c_str());
+    return false;
+  }
+  host->dir = host->staging.path();
 
   const std::wstring myDir = directory_of(self_path());
   // GNLinkCapture is staged as a copy of this binary in --thumbnail mode: the host starts one and
@@ -539,6 +551,7 @@ int wmain(int argc, wchar_t** argv) {
 
     client.Disconnect();
     host.Stop();
+    check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
     relay.Stop();
   }
 
@@ -590,6 +603,7 @@ int wmain(int argc, wchar_t** argv) {
           host.log().find("client connected") == std::string::npos);
     client.Disconnect();
     host.Stop();
+    check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // ============================ the window closes on its own, and the relay path still works
@@ -685,6 +699,7 @@ int wmain(int argc, wchar_t** argv) {
           "relay port " + std::to_string(relay.port));
     client.Disconnect();
     host.Stop();
+    check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
     relay.Stop();
   }
 
@@ -744,6 +759,7 @@ int wmain(int argc, wchar_t** argv) {
     note("hello retried for " + std::to_string(waitedMs) + "ms before the capability landed");
     client.Disconnect();
     host.Stop();
+    check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // Punch LOSS is not covered in this round. Not "cannot be covered" -- the earlier note said

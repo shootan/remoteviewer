@@ -82,10 +82,12 @@ struct SelfHost {
 
   bool Start(std::string* why) {
     using namespace remote60::native_poc::e2e;
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, temp);
-    dir = std::wstring(temp) + L"remote60_udpctl_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
-    CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+    // Inside the repository's test scratch root, never %TEMP% (RV-20 r2).
+    if (!staging.Create(L"udpctl")) {
+      *why = staging.why();
+      return false;
+    }
+    dir = staging.path();
     wchar_t self[MAX_PATH]{};
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     std::wstring myDir(self);
@@ -145,25 +147,30 @@ struct SelfHost {
     return true;
   }
 
-  /** Ends the host through the job it was put in, and removes the staging directory. */
+  /**
+   * Ends the host through the job it was put in, and removes the staging directory -- only once
+   * the host has actually exited; a host still running keeps its directory, and this says so.
+   */
   bool Stop() {
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+    log = INVALID_HANDLE_VALUE;
     if (job) CloseHandle(job);  // kill-on-close: the host and anything it started
+    job = nullptr;
+    bool exited = true;
     if (pi.hProcess) {
-      WaitForSingleObject(pi.hProcess, 20000);
+      const DWORD w = WaitForSingleObject(pi.hProcess, 20000);
+      exited = (w == WAIT_OBJECT_0);
       CloseHandle(pi.hProcess);
     }
     if (pi.hThread) CloseHandle(pi.hThread);
-    for (int i = 0; i < 40; ++i) {
-      DeleteFileW((dir + L"host.log").c_str());
-      DeleteFileW((dir + L"GNLinkStream.exe").c_str());
-      DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-      remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
-      if (RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str())) return true;
-      Sleep(100);
+    pi = PROCESS_INFORMATION{};
+    if (!exited) {
+      staging.set_keep(true, "the host did not exit within 20 s; its staging directory is kept");
+      return false;
     }
-    return false;
+    return staging.Remove();
   }
+  remote60::native_poc::e2e::StagingDir staging;
 };
 
 int main(int argc, char** argv) {

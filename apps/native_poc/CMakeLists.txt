@@ -2489,3 +2489,19 @@ target_link_libraries(remote60_peer_version_test PRIVATE ws2_32)
 if(MSVC)
   target_compile_options(remote60_host_diagnostic_log_test PRIVATE /utf-8)
 endif()
+
+# RV-20 r2: every host e2e stages inside the repository's test scratch root (e2e_isolation.hpp
+# StagingDir over test_scratch_dir), never %TEMP%. The boundary cases have their own test.
+foreach(t
+    remote60_abr_client_evidence_e2e_test remote60_bwe_observe_e2e_test remote60_control_resume_e2e_test
+    remote60_fec_single_chunk_host_e2e_test remote60_host_control_deadline_e2e_test
+    remote60_host_punch_reply_e2e_test remote60_host_two_dispatcher_e2e_test remote60_udp_control_e2e_test
+    remote60_viewer_release_all_e2e_test remote60_viewer_mouse_xbutton_e2e_test remote60_thumbnail_helper_e2e_test)
+  target_link_libraries(${t} PRIVATE remote60_test_scratch_dir)
+endforeach()
+add_executable(remote60_e2e_staging_test src/e2e_staging_test.cpp)
+target_include_directories(remote60_e2e_staging_test PRIVATE src)
+target_link_libraries(remote60_e2e_staging_test PRIVATE remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_e2e_staging_test PRIVATE /utf-8)
+endif()
