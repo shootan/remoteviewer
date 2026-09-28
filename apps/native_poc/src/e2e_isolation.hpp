@@ -259,6 +259,43 @@ inline bool e2e_host_captured_window(const std::wstring& hostLogPath, HWND hwnd,
   return found;
 }
 
+/**
+ * Removes one staging directory this run created -- and nothing else: only `dir`, only if it is
+ * strictly inside `root` (the temp directory), never anything found by name or pattern (RV-20,
+ * 2026-09-28). The host may still be releasing its image when the test tears down (a job's
+ * kill-on-close is asynchronous), so a delete can fail once or twice; retried for a few seconds.
+ * Returns whether the directory is gone.
+ */
+inline void remove_tree_under(const std::wstring& path, const std::wstring& root);  // below
+
+inline bool e2e_remove_staging_dir(const std::wstring& dir, const std::wstring& root, int attempts = 40) {
+  std::wstring path = dir;
+  while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+  if (path.empty() || !e2e_path_is_under(path, root)) return false;
+  for (int i = 0; i < attempts; ++i) {
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    remove_tree_under(path, root);
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    Sleep(100);
+  }
+  return false;
+}
+
+/**
+ * Removes the staging directory when it goes out of scope -- on success, on failure and on an
+ * early return alike -- unless `keep` was set by an explicit option (--keep-dir), so a run that
+ * stops halfway leaves nothing behind in the user's temp directory. Declare it right after the
+ * directory is created. A crash still leaves the directory: that is the one case this cannot cover.
+ */
+struct StagingDirCleanup {
+  std::wstring dir;
+  std::wstring root;
+  bool keep = false;
+  ~StagingDirCleanup() {
+    if (!keep) (void)e2e_remove_staging_dir(dir, root);
+  }
+};
+
 /** Recursive delete, refusing anything that is not strictly inside `root`. Test scratch only. */
 inline void remove_tree_under(const std::wstring& path, const std::wstring& root) {
   if (!e2e_path_is_under(path, root)) return;

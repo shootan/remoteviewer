@@ -393,6 +393,8 @@ int wmain(int argc, wchar_t** argv) {
   const std::wstring dir = std::wstring(temp) + L"remote60_abr_ev_" +
                            std::to_wstring(GetCurrentProcessId()) + L"\\";
   CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+  // Removed when main returns, whichever way it returns (the loop at the end is the tidy path).
+  remote60::native_poc::e2e::StagingDirCleanup stagingCleanup{dir, std::wstring(temp)};
   const std::wstring me = self_path();
   if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
   const bool staged = CopyFileW(hostExe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&

@@ -165,16 +165,22 @@ struct SpawnedHost {
     }
     if (reader.joinable()) reader.join();
     if (pi.hThread) CloseHandle(pi.hThread);
-    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hProcess) {
+      // The kill is asynchronous: until the host has actually exited its image file is in use
+      // and GNLinkStream.exe cannot be deleted -- which is how every case used to leave its
+      // staging directory behind (132 of them on one machine). Wait for it first.
+      WaitForSingleObject(pi.hProcess, 20000);
+      CloseHandle(pi.hProcess);
+    }
     pi = PROCESS_INFORMATION{};
     if (!dir.empty()) {
-      DeleteFileW((dir + L"GNLinkStream.exe").c_str());
-      DeleteFileW((dir + L"GNLinkCapture.exe").c_str());
-      // What the isolation arguments caught: the token cache and the diagnostic mirror.
-      // Removed only from inside this staging directory.
-      DeleteFileW((dir + L"host_cache.json").c_str());
-      remote60::native_poc::e2e::remove_tree_under(dir + L"localappdata", dir);
-      RemoveDirectoryW(dir.substr(0, dir.size() - 1).c_str());
+      // Everything the staging directory holds -- the exe copies, the token cache and the
+      // diagnostic mirror the isolation arguments caught -- and only inside this one directory.
+      wchar_t temp[MAX_PATH]{};
+      GetTempPathW(MAX_PATH, temp);
+      if (!remote60::native_poc::e2e::e2e_remove_staging_dir(dir, temp)) {
+        std::printf("WARN  staging directory not removed: %ls\n", dir.c_str());
+      }
       dir.clear();
     }
   }

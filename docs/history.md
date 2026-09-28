@@ -12682,3 +12682,10 @@ Next
 - 검증: 시임 켜고 fec(`--content static --seconds 4 --keep-dir`)·punch_reply 실행 → 둘 다 FAIL 로 끝나고 SKIP-LAUNCH 6줄만(fec 2·punch 4), 호스트 기동 흔적("the host started"/"capture-window target"/"GNLinkStream starts" PASS) 0, fec 보존 디렉터리 항목 0, TEMP 의 punch 스테이징 디렉터리 증가 0(128→128). 시임 끄고 punch_reply 52/0, fec 기본 길이(12 s) PASS. fec 를 `--seconds 6` 으로 돌린 정지 화면 run 은 프레임 4~6개라 IDR 패리티가 per-frame 게이트를 흔들어 1 FAIL — 짧은 run 의 하네스 한계(게이트 계약은 기본 12 s), 이번 변경과 무관, 게이트는 손대지 않음. 두 타깃만 재빌드.
 - 별건 관찰(미수정): `host_punch_reply_e2e_test` 는 케이스당 `%TEMP%\remote60_punch_e2e_<tag>_<pid>\` 스테이징 디렉터리를 남긴다(이 PC 누적 132개).
 - 제품/테스트/문서: 제품 없음 / 테스트(`e2e_isolation.hpp` 주석·시임, fec·punch_reply e2e 가드) / 문서(이 항목).
+
+### 2026-09-28 fix-punch-e2e-temp-cleanup r1 — 시험은 자기가 만든 임시 폴더를 어떤 길로 끝나든 지운다
+
+- 관찰(작업용2): `host_punch_reply_e2e_test` 가 케이스마다 `%TEMP%\remote60_punch_e2e_<tag>_<pid>\` 를 남김(이 PC 132개, 내용은 `GNLinkStream.exe` 하나). 원인: teardown 이 Job 을 닫고(비동기 kill) 곧바로 `GNLinkStream.exe` 를 지웠다 — 호스트 이미지가 아직 매핑돼 있어 삭제 실패 → `RemoveDirectoryW` 실패. 다른 host e2e 는 프로세스 종료 대기 + 40회 재시도 루프가 있어 남기지 않았다(전후 계수로 확인).
+- 수정(시험만, 제품 코드 0): punch_reply `SpawnedHost::Stop` 이 `WaitForSingleObject(hProcess)` 뒤 `e2e_remove_staging_dir` 로 제거(재시도, 실패 시 WARN 출력); 소멸자가 Stop 을 부르므로 조기 return 도 덮음. `e2e_isolation.hpp` 에 `e2e_remove_staging_dir(dir, root)`(**이 run 이 만든 그 경로만**, temp 루트 안에서만, 이름 패턴 청소 없음, 100 ms × 40 재시도) 와 `StagingDirCleanup` 가드(디렉터리 생성 직후 선언 → main 이 어떤 return 으로 끝나도 제거, `--keep-dir` 면 보존). 단일 스테이징 디렉터리를 쓰는 8종(abr·bwe·control_resume·fec(keepDir 존중)·deadline·two_dispatcher·mouse_xbutton·release_all)에 가드 추가, 기존 정리 루프는 그대로. 기존 132개는 손대지 않음(저장소 밖). 크래시는 여전히 못 덮음(명시).
+- 검증: host e2e 11종을 각 1회 실행(동시) — 각 시험의 자기 패턴 `%TEMP%` 계수 전후 동일(punch 132→132 포함), 전부 PASS; 포트 선택 실패 경로(`REMOTE60_E2E_PICK_PORT_FAIL=1`, fec·punch)도 전후 동일. 로그 `.claude/tempproof/`(worktree).
+- 제품/테스트/문서: 제품 없음 / 테스트(`e2e_isolation.hpp` 헬퍼·가드, punch_reply teardown, e2e 8종 가드) / 문서(이 항목).

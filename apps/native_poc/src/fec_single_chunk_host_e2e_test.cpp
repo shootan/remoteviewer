@@ -661,6 +661,8 @@ int main(int argc, char** argv) {
   GetTempPathW(MAX_PATH, temp);
   const std::wstring dir = std::wstring(temp) + L"remote60_fec_e2e_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
   CreateDirectoryW(dir.substr(0, dir.size() - 1).c_str(), nullptr);
+  // Removed when main returns, whichever way it returns, unless --keep-dir.
+  remote60::native_poc::e2e::StagingDirCleanup stagingCleanup{dir, std::wstring(temp), keepDir};
   const std::wstring me = self_path();
   if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
   std::printf("fec_single_chunk_host_e2e_test: host=%s seconds=%d content=%s loss=%u/1000 seed=%u\n",
