@@ -232,6 +232,27 @@ static_assert((kCaptureFlagFrameHeartbeat & kCaptureFlagPeerVersion) == 0,
 // clipboard monitor. A viewer only sends clipboard messages once it sees this bit, so an old host
 // that never advertises it is never sent one (its Serve loop would mis-drain the variable payload).
 constexpr uint32_t kCaptureFlagClipboardTextV1 = 0x100u;
+// 0x200 is reserved for clipboard image sync (K2, in progress on another branch).
+// Mouse X buttons (back / forward, mouse-xbutton r1): the host maps VK_XBUTTON1/2 button edges
+// to WM_XBUTTONDOWN/UP or MOUSEEVENTF_XDOWN/XUP and reads the X bits of `buttons`. A viewer sends
+// an X edge, or an X bit in the held mask, ONLY to a host that advertises this: an older host
+// masks `buttons` with 0x7 and its default branch turned any unknown button key into a LEFT
+// click, so "back" against it would have been a left click.
+constexpr uint32_t kCaptureFlagMouseXButtonsV1 = 0x400u;
+
+// ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
+// own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
+// 0x20); the host translates (mouse_button_map.hpp). Platform-neutral so the shared client core
+// and the Android session compile them without windows.h.
+constexpr uint16_t kMouseWireLeft = 0x1u;
+constexpr uint16_t kMouseWireRight = 0x2u;
+constexpr uint16_t kMouseWireMiddle = 0x4u;
+constexpr uint16_t kMouseWireX1 = 0x8u;
+constexpr uint16_t kMouseWireX2 = 0x10u;
+// What a host without kCaptureFlagMouseXButtonsV1 reads (it masks `buttons` with 0x7).
+constexpr uint16_t kMouseWireLegacyMask = kMouseWireLeft | kMouseWireRight | kMouseWireMiddle;
+constexpr uint16_t kMouseWireXMask = kMouseWireX1 | kMouseWireX2;
+constexpr uint16_t kMouseWireMask = kMouseWireLegacyMask | kMouseWireXMask;
 
 struct ControlVersionMessage {
   MessageHeader header{};
@@ -264,11 +285,13 @@ struct ControlInputEventMessage {
   MessageHeader header{};
   uint32_t seq = 0;
   uint16_t kind = 0;     // 1:mouse_move 2:mouse_down 3:mouse_up 4:wheel 5:key_down 6:key_up
-  uint16_t buttons = 0;  // bit0:left bit1:right bit2:middle
+  uint16_t buttons = 0;  // kMouseWire*: bit0:left bit1:right bit2:middle bit3:X1 bit4:X2 (X bits
+                         // only to a host with kCaptureFlagMouseXButtonsV1)
   int32_t x = 0;         // client-local coordinates
   int32_t y = 0;
   int32_t wheelDelta = 0;
-  uint32_t keyCode = 0;
+  uint32_t keyCode = 0;  // kind 2/3: VK_LBUTTON 1, VK_RBUTTON 2, VK_MBUTTON 4, VK_XBUTTON1 5,
+                         // VK_XBUTTON2 6 (the last two only with kCaptureFlagMouseXButtonsV1)
   uint64_t clientSendQpcUs = 0;
 };
 

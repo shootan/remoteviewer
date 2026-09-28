@@ -24,6 +24,7 @@
 #include "host_input_inject.hpp"
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
+#include "mouse_button_map.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
 
@@ -31,40 +32,9 @@ namespace remote60::native_poc {
 
 namespace {
 
-WPARAM mouse_button_wparam(uint16_t buttons) {
-  WPARAM wp = 0;
-  if ((buttons & 0x1u) != 0) wp |= MK_LBUTTON;
-  if ((buttons & 0x2u) != 0) wp |= MK_RBUTTON;
-  if ((buttons & 0x4u) != 0) wp |= MK_MBUTTON;
-  return wp;
-}
-
-uint16_t mouse_vk_to_mask(uint32_t vk) {
-  switch (vk) {
-    case VK_LBUTTON:
-      return 0x1u;
-    case VK_RBUTTON:
-      return 0x2u;
-    case VK_MBUTTON:
-      return 0x4u;
-    default:
-      return 0x0u;
-  }
-}
-
-UINT mouse_vk_to_message(uint16_t kind, uint32_t vk) {
-  if (kind == 2) {
-    if (vk == VK_RBUTTON) return WM_RBUTTONDOWN;
-    if (vk == VK_MBUTTON) return WM_MBUTTONDOWN;
-    return WM_LBUTTONDOWN;
-  }
-  if (kind == 3) {
-    if (vk == VK_RBUTTON) return WM_RBUTTONUP;
-    if (vk == VK_MBUTTON) return WM_MBUTTONUP;
-    return WM_LBUTTONUP;
-  }
-  return 0;
-}
+// The button vocabulary (wire bit / virtual key / MK_* / XBUTTON / MOUSEEVENTF_*) is
+// mouse_button_map.hpp, shared with the SYSTEM agent and the viewer. The hand-written copies that
+// lived here mapped an unknown key to the LEFT button; the shared ones map it to nothing.
 
 bool is_extended_vk(uint32_t vk) {
   switch (vk) {
@@ -288,20 +258,6 @@ bool resolve_desktop_input_target(const POINT& screenPt, DesktopInputState* stat
   return true;
 }
 
-DWORD mouse_vk_to_sendinput_flag(uint16_t kind, uint32_t vk) {
-  if (kind == 2) {
-    if (vk == VK_RBUTTON) return MOUSEEVENTF_RIGHTDOWN;
-    if (vk == VK_MBUTTON) return MOUSEEVENTF_MIDDLEDOWN;
-    return MOUSEEVENTF_LEFTDOWN;
-  }
-  if (kind == 3) {
-    if (vk == VK_RBUTTON) return MOUSEEVENTF_RIGHTUP;
-    if (vk == VK_MBUTTON) return MOUSEEVENTF_MIDDLEUP;
-    return MOUSEEVENTF_LEFTUP;
-  }
-  return 0;
-}
-
 bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   INPUT in{};
   in.type = INPUT_MOUSE;
@@ -396,6 +352,16 @@ bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
 }
 
 }  // namespace
+
+bool mouse_xbuttons_enabled() {
+  // Read per call rather than cached: consulted only for an X-button edge and once per pong, and
+  // a test flips it in-process. Anything starting with 0 / f / n turns the feature off.
+  char buf[8]{};
+  const DWORD n = GetEnvironmentVariableA("REMOTE60_NATIVE_MOUSE_XBUTTONS", buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf)) return true;
+  const char c = buf[0];
+  return !(c == '0' || c == 'f' || c == 'F' || c == 'n' || c == 'N');
+}
 
 // Host-side IME v1: inject one physical key by its client scan code (KEYEVENTF_SCANCODE, wVk=0) so
 // the host keyboard layout + IME resolve it and compose live -- no IME neutralization here. This is
@@ -616,35 +582,37 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       // cannot hover. The on-screen mouse breaks that assumption: it exists precisely to place
       // the pointer before pressing anything, and dropping those moves made it do nothing at
       // all. WM_MOUSEMOVE with no buttons is what a real mouse sends while hovering.
-      const WPARAM wp = mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u));
+      const WPARAM wp = mouse_wire_to_mk(static_cast<uint16_t>(input.buttons & kMouseWireMask));
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
       SetLastError(ERROR_SUCCESS);
       return PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
                                                                     : fail(InputFailStage::PostMessage);
     }
     if (input.kind == 2 || input.kind == 3) {
+      // An X button with the feature switched off is what an older host would have made of it
+      // -- except that the older host posted a LEFT click. Unsupported posts nothing.
+      if (mouse_vk_is_xbutton(input.keyCode) && !mouse_xbuttons_enabled()) return InputInjectResult::Unsupported;
+      // 0 for a key that is not a button: nothing is posted. This branch used to default to the
+      // left button, which turned an unknown key into a click. (mouse-xbutton r1)
       const UINT msg = mouse_vk_to_message(input.kind, input.keyCode);
       if (msg == 0) return InputInjectResult::Unsupported;
-      uint16_t buttons = static_cast<uint16_t>(input.buttons & 0x7u);
-      const uint16_t eventMask = mouse_vk_to_mask(input.keyCode);
-      if (input.kind == 2) {
-        buttons = static_cast<uint16_t>(buttons | eventMask);
-      } else if (input.kind == 3) {
-        buttons = static_cast<uint16_t>(buttons & static_cast<uint16_t>(~eventMask));
-      }
-      const WPARAM wp = mouse_button_wparam(buttons);
+      // LOWORD: every button held after this edge; HIWORD: XBUTTON1 / 2 for an X message, else 0.
+      const WPARAM wp = mouse_button_message_wparam(input.kind, input.keyCode, input.buttons);
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
       // Sequential, not one combined bool: a failing PostMessage must have its own error captured
-      // before the next call overwrites it.
+      // before the next call overwrites it. The move carries the state word alone -- WM_MOUSEMOVE
+      // has no button identifier in its HIWORD.
       SetLastError(ERROR_SUCCESS);
-      if (!PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp)) return fail(InputFailStage::PostMessage);
+      if (!PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, static_cast<WPARAM>(LOWORD(wp)), lp)) {
+        return fail(InputFailStage::PostMessage);
+      }
       SetLastError(ERROR_SUCCESS);
       if (!PostMessageW(resolvedTargetHwnd, msg, wp, lp)) return fail(InputFailStage::PostMessage);
       return InputInjectResult::Injected;
     }
     if (input.kind == 4) {
       const WPARAM wp =
-          MAKEWPARAM(mouse_button_wparam(static_cast<uint16_t>(input.buttons & 0x7u)),
+          MAKEWPARAM(mouse_wire_to_mk(static_cast<uint16_t>(input.buttons & kMouseWireMask)),
                      static_cast<WORD>(static_cast<SHORT>(input.wheelDelta)));
       const LPARAM screenLp =
           MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
@@ -698,13 +666,16 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
                                                 : fail(InputFailStage::SetCursorPos);
   }
   if (input.kind == 2 || input.kind == 3) {
-    const DWORD mouseFlag = mouse_vk_to_sendinput_flag(input.kind, input.keyCode);
-    if (mouseFlag == 0) return InputInjectResult::Unsupported;
+    if (mouse_vk_is_xbutton(input.keyCode) && !mouse_xbuttons_enabled()) return InputInjectResult::Unsupported;
+    // flags 0 for a key that is not a button: no SendInput at all, and the cursor is not moved
+    // for it either. This used to default to MOUSEEVENTF_LEFTDOWN / UP. (mouse-xbutton r1)
+    const MouseSendInput mouse = mouse_vk_to_sendinput(input.kind, input.keyCode);
+    if (mouse.flags == 0) return InputInjectResult::Unsupported;
     SetLastError(ERROR_SUCCESS);
     if (!SetCursorPos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
     SetLastError(ERROR_SUCCESS);
-    return send_desktop_mouse_input(mouseFlag) ? InputInjectResult::Injected
-                                               : fail(InputFailStage::SendInputMouse);
+    return send_desktop_mouse_input(mouse.flags, mouse.mouseData) ? InputInjectResult::Injected
+                                                                  : fail(InputFailStage::SendInputMouse);
   }
   if (input.kind == 4) {
     SetLastError(ERROR_SUCCESS);

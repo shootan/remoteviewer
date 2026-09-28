@@ -9,6 +9,7 @@
 
 #include "clipboard_win32.hpp"
 #include "viewer_common.hpp"
+#include "mouse_button_map.hpp"  // after viewer_common.hpp: it owns the windows.h configuration
 #include "viewer_cursor_overlay.hpp"
 #include "viewer_gdi_util.hpp"
 #include "viewer_state.hpp"
@@ -365,7 +366,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       for (int vk = 0; vk < 256; ++vk) {
         if (ctx.input.forwardedKeyDown[vk].load(std::memory_order_relaxed)) ++heldKeys;
       }
-      const unsigned heldButtons = ctx.input.mouseButtons.load(std::memory_order_relaxed) & 0x7u;
+      const unsigned heldButtons = ctx.input.mouseButtons.load(std::memory_order_relaxed) & kMouseWireMask;
       int modifierUps = 0;
       if (!kInputPolicyForceBlock) {
         modifierUps = enqueue_release_all_modifiers(ctx);
@@ -453,7 +454,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (ctx.picker.visible.load(std::memory_order_relaxed)) return 0;
       if (point_in_panel_ui(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
       if (kInputPolicyForceBlock) return 0;
-      if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & 0x7u) == 0) return 0;
+      if ((ctx.input.mouseButtons.load(std::memory_order_relaxed) & kMouseWireMask) == 0) return 0;
       {
         int32_t vx = 0;
         int32_t vy = 0;
@@ -543,6 +544,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return on_secondary_button(ctx, hwnd, true, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MBUTTONUP:
       return on_secondary_button(ctx, hwnd, false, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+    // WM_XBUTTONDOWN / UP: the back and forward buttons (mouse-xbutton r1). The same secondary
+    // path as right and middle, with two differences the Win32 contract imposes: which of the two
+    // buttons it is travels in the HIWORD of wParam, and a handled message is answered TRUE rather
+    // than 0. DBLCLK is the second press of a double-click, delivered instead of a DOWN only to a
+    // class with CS_DBLCLKS -- this class has none, but a press must not be lost if that changes.
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONDBLCLK:
+    case WM_XBUTTONUP: {
+      const uint32_t vk = mouse_xbutton_to_vk(GET_XBUTTON_WPARAM(wp));
+      const uint16_t bit = mouse_vk_to_wire(vk);
+      if (bit == 0) return TRUE;  // neither X1 nor X2: nothing to forward
+      const bool down = msg != WM_XBUTTONUP;
+      if (down && !ctx.session.hostMouseXButtons.load(std::memory_order_acquire)) {
+        // The host has not said it takes X buttons: an older host, or no pong yet. Its input
+        // path turned an unknown button key into a LEFT click, so nothing is sent -- said once.
+        // (An up is left to the ordinary path: a held X bit can only exist against a host that
+        // took the down, and the wire fence drops anything else.)
+        if (!ctx.input.xButtonRefusalReported.exchange(true, std::memory_order_relaxed)) {
+          std::cout << "[native-video-client][input] mouse X button ignored: the host does not "
+                       "advertise kCaptureFlagMouseXButtonsV1 (older host, or no pong yet)\n";
+        }
+        return TRUE;
+      }
+      (void)on_secondary_button(ctx, hwnd, down, bit, vk, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      return TRUE;
+    }
     case WM_MOUSEWHEEL: {
       if (mouse_suppressed(ctx, "wheel")) return 0;
       POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
