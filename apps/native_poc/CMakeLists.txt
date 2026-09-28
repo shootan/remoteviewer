@@ -565,6 +565,12 @@ add_executable(remote60_host_rate_governor_test
 )
 target_include_directories(remote60_host_rate_governor_test PRIVATE src)
 
+# clip-image: limits, DIB header check, bulk demux/generations, bulk rate (pure).
+add_executable(remote60_clip_image_core_test
+  src/clip_image_core_test.cpp
+)
+target_include_directories(remote60_clip_image_core_test PRIVATE src)
+
 add_executable(remote60_host_frame_gate_test
   src/host_frame_gate_test.cpp
 )
