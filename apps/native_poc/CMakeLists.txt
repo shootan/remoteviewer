@@ -221,12 +221,19 @@ add_library(remote60_clip_image STATIC
   src/bulk_pacer.cpp
   src/clip_image_clipboard.cpp
   src/clip_image_wic.cpp
+  # The viewer's transfer bar (percent, seconds, Cancel): in the library because every target built
+  # from the viewer's window procedure moves and destroys it.
+  src/viewer_clip_transfer_bar.cpp
   # The bulk stream is a UdpControlChannel; targets that link the viewer's state without the
   # channel get it from here (a static library contributes it only where it is not already linked).
   src/udp_control_channel.cpp
 )
 target_include_directories(remote60_clip_image PUBLIC src)
-target_link_libraries(remote60_clip_image PUBLIC bcrypt windowscodecs ole32 shlwapi user32 ws2_32)
+target_link_libraries(remote60_clip_image PUBLIC bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
+if(MSVC)
+  # The transfer bar's Korean lines (history #523: a Korean literal does not survive without it).
+  target_compile_options(remote60_clip_image PRIVATE /utf-8)
+endif()
 
 # The Medium-integrity clipboard helper the elevated host starts as the interactive user
 # (file-copy-helper r1): an async IDataObject for files on the viewer's PC, and the user's own
@@ -315,6 +322,7 @@ add_dependencies(remote60_file_copy_helper_e2e_test remote60_file_copy_helper)
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_startup.cpp
+  src/viewer_clip_image_wiring.cpp
   src/viewer_shutdown.cpp
   src/viewer_present.cpp
   src/viewer_picker_state.cpp
@@ -720,6 +728,14 @@ endif()
 
 # clip-image direction A, two-sided on loopback: the product client and host service over real UDP
 # sockets, through an impairment proxy; the clipboard injected at the OS boundary (see the file).
+# clip-image ④: the transfer bar's words and when it shows them -- the functions the bar calls.
+add_executable(remote60_clip_transfer_bar_test src/clip_transfer_bar_test.cpp)
+target_include_directories(remote60_clip_transfer_bar_test PRIVATE src)
+target_link_libraries(remote60_clip_transfer_bar_test PRIVATE remote60_clip_image)
+if(MSVC)
+  target_compile_options(remote60_clip_transfer_bar_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_clip_image_e2e_test
   src/clip_image_e2e_test.cpp
   src/host_clip_image.cpp
@@ -921,6 +937,46 @@ if(MSVC)
   target_compile_options(remote60_viewer_mouse_xbutton_e2e_test PRIVATE /utf-8)
 endif()
 add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_host_poc)
+
+# clip-image ④ (3rd rate agreement, DECISIONS §5): the transfer bar -- percent, seconds, Cancel --
+# through the product's window procedure, image client wiring and control worker, against a real
+# isolated ClipSink host: screenshots while sending / after Cancel / after a publish, the cancel
+# arriving at the host, and the next copy accepted. Same link set as the mouse-xbutton test.
+add_executable(remote60_viewer_clip_bar_e2e_test
+  src/viewer_clip_bar_e2e_test.cpp
+  src/viewer_clip_image_wiring.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_input_forward.cpp
+  src/viewer_control_client.cpp
+  src/viewer_present.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/viewer_unlock.cpp
+  src/client_session_toolbar.cpp
+  src/input_macro.cpp
+  src/viewer_session_watchdog.cpp
+  src/viewer_cursor_overlay.cpp
+  src/viewer_frame_gate.cpp
+  src/sealed_unlock.cpp
+  src/mf_h264_codec.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_clip_bar_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_clip_bar_e2e_test PRIVATE
+  remote60_clip_image  # the viewer's state holds the clipboard image client
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_clip_bar_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_viewer_clip_bar_e2e_test remote60_native_video_host_clipsink)
 
 # mouse-xbutton r1: the button vocabulary (wire bit <-> VK <-> MK_* / XBUTTON / MOUSEEVENTF_*), and
 # the host's window-mode injection against a window of this process: X1 / X2 arrive as

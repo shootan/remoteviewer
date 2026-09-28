@@ -135,6 +135,25 @@ class ClipImageClient {
   void CancelForNewerCopy();
 
   /**
+   * UI thread: the user pressed Cancel on the transfer bar (3rd rate agreement ④). The running
+   * transfer is cancelled on the host with reason User (the existing Cancel message), and a copy
+   * still being packaged or waiting to be offered is dropped with it -- it is the same copy.
+   */
+  void CancelByUser();
+
+  /** What the transfer bar shows: one consistent snapshot. */
+  struct Progress {
+    bool active = false;          // an offer is out or its chunks are being served
+    uint64_t bytesTotal = 0;      // the package (PNG + text)
+    uint64_t bytesConfirmed = 0;  // chunks the host has confirmed (never counts a resend twice)
+    uint64_t elapsedMs = 0;       // since the offer; for a finished one, how long it took
+    uint64_t finished = 0;        // transfers ended so far: a change means a new outcome below
+    uint8_t lastState = 0;        // ClipImageState of the last finished transfer
+    uint8_t lastReason = 0;       // ClipImageReason of the last finished transfer
+  };
+  Progress GetProgress() const;
+
+  /**
    * Control thread, idle turn. 1 = exchanged messages, 0 = nothing to do, -1 = link failure (the
    * stream is desynchronised, as for every other exchange on the link).
    */
@@ -210,6 +229,9 @@ class ClipImageClient {
   uint32_t nextSeq_ = 0;
   bool bulkClosePending_ = false;
   bool cancelActive_ = false;  // a newer non-image copy: cancel the running transfer
+  ClipImageReason cancelReason_ = ClipImageReason::Superseded;  // User when the bar's Cancel asked
+  std::atomic<uint64_t> confirmedBytes_{0};  // this transfer's chunks the host confirmed
+  uint64_t lastBytesTotal_ = 0;                // the last finished transfer's size (under mu_)
   Counters counters_;
 
   // Bulk stream (while a transfer is accepted).

@@ -175,6 +175,38 @@ void ClipImageClient::CancelForNewerCopy() {
   if (sender_.Active()) cancelActive_ = true;
 }
 
+void ClipImageClient::CancelByUser() {
+  std::lock_guard<std::mutex> lock(mu_);
+  ++snapshotGen_;  // a snapshot being packaged is this same copy
+  haveSnapshot_ = false;
+  havePending_ = false;
+  pending_ = ClipPackage{};
+  if (sender_.Active()) {
+    cancelActive_ = true;
+    cancelReason_ = ClipImageReason::User;
+  }
+  Log("user cancel requested active=" + std::string(sender_.Active() ? "1" : "0"));
+}
+
+ClipImageClient::Progress ClipImageClient::GetProgress() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  Progress p;
+  p.active = sender_.Active();
+  p.finished = counters_.published + counters_.failed + counters_.superseded + counters_.cancelled;
+  p.lastState = counters_.lastState;
+  p.lastReason = counters_.lastReason;
+  if (p.active) {
+    p.bytesTotal = sender_.offer().packageBytes();
+    p.bytesConfirmed = (std::min<uint64_t>)(confirmedBytes_.load(std::memory_order_relaxed), p.bytesTotal);
+    p.elapsedMs = (BulkPacer::NowUs() - sender_.startedUs()) / 1000;
+  } else {
+    p.bytesTotal = lastBytesTotal_;
+    p.bytesConfirmed = lastBytesTotal_;
+    p.elapsedMs = counters_.lastTransferMs;
+  }
+  return p;
+}
+
 void ClipImageClient::PackageWorker() {
   (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // WIC
   // Encoding and hashing are background work: the viewer's decode and present come first.
@@ -235,6 +267,7 @@ void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) 
   if (!sender_.Active()) return;
   const uint64_t ms = (BulkPacer::NowUs() - sender_.startedUs()) / 1000;
   counters_.lastTransferMs = ms;
+  lastBytesTotal_ = sender_.offer().packageBytes();
   counters_.lastState = static_cast<uint8_t>(finalState);
   counters_.lastReason = static_cast<uint8_t>(why);
   switch (finalState) {
@@ -261,21 +294,31 @@ int ClipImageClient::Pump(ControlLink& link) {
     // 1. A newer copy is ready while one is running: cancel it first, and wait for the answer
     //    (r2 8-2), so the host is free when the new offer arrives.
     if (sender_.Active() && (havePending_ || cancelActive_)) {
+      // A newer copy supersedes; the bar's Cancel is the user's (reason User) -- unless a newer
+      // copy is also waiting, which then goes out right after.
+      const ClipImageReason why = havePending_ ? ClipImageReason::Superseded : cancelReason_;
       cancelActive_ = false;
+      cancelReason_ = ClipImageReason::Superseded;
       ControlClipImageCancelMessage c{};
       c.header.type = static_cast<uint16_t>(MessageType::ControlClipImageCancel);
       c.header.size = sizeof(c);
       c.seq = ++nextSeq_;
-      c.reason = static_cast<uint8_t>(ClipImageReason::Superseded);
+      c.reason = static_cast<uint8_t>(why);
       c.transferId = sender_.transferId();
       c.epochTag = sender_.epochTag();
-      EndActive(ClipImageState::Cancelled, ClipImageReason::Superseded);  // local cleanup is immediate
+      EndActive(ClipImageState::Cancelled, why);  // local cleanup is immediate
       bulkClosePending_ = false;  // closed right here -- a flag left set would close the NEXT transfer's
       lock.unlock();
       CloseBulk();
       if (!link.Write(&c, sizeof(c)) || !link.EndMessage()) return -1;
       ControlClipImageStatusReplyMessage r{};
       if (!read_reply(link, MessageType::ControlClipImageCancelReply, &r)) return -1;
+      {
+        std::ostringstream os;
+        os << "cancel answered reason=" << static_cast<int>(why) << " hostState=" << static_cast<int>(r.state)
+           << " hostReason=" << static_cast<int>(r.reason);
+        Log(os.str());
+      }
       return 1;
     }
     // 2. Offer the newest package.
@@ -297,6 +340,7 @@ int ClipImageClient::Pump(ControlLink& link) {
       std::memcpy(m.sha256, pkg.offer.sha256, 32);
       m.clientSendQpcUs = now;
       sender_.Begin(pkg.bytes, pkg.offer, now);
+      confirmedBytes_.store(0, std::memory_order_relaxed);
       ++counters_.offered;
       lock.unlock();
       if (!link.Write(&m, sizeof(m)) || !link.EndMessage()) return -1;
@@ -509,6 +553,7 @@ void ClipImageClient::ServeLoop() {
         if (s.completedChunk) {  // a pull naming a chunk counted before is not completedChunk (duplicate)
           ++rounds;
           completedBytes += s.completedBytes;
+          confirmedBytes_.fetch_add(s.completedBytes, std::memory_order_relaxed);
           const uint32_t r = rateNow_.load(std::memory_order_relaxed);
           const uint64_t chunkSendUs = r ? static_cast<uint64_t>(s.completedBytes) * 8ull * 1000000ull / r : 0;
           uint64_t sample = 0;

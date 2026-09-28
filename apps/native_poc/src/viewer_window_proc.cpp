@@ -8,6 +8,7 @@
 #include <set>
 
 #include "clipboard_win32.hpp"
+#include "viewer_clip_transfer_bar.hpp"
 #include "viewer_common.hpp"
 #include "mouse_button_map.hpp"  // after viewer_common.hpp: it owns the windows.h configuration
 #include "viewer_cursor_overlay.hpp"
@@ -330,6 +331,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       release_all_physical(ctx);  // nothing should stay held on the host
       restore_local_ime(hwnd);  // re-attach the IME we detached for host-side IME mode
       remote60::native_poc::session_toolbar_destroy();
+      remote60::native_poc::clip_transfer_bar_destroy();
       destroy_cached_gdi_objects(ctx);
       PostQuitMessage(0);
       return 0;
@@ -439,6 +441,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED: {
       remote60::native_poc::session_toolbar_follow_owner();
+      remote60::native_poc::clip_transfer_bar_follow_owner();
       // A resize has to reach the picker. This class sets no CS_HREDRAW/CS_VREDRAW and there is no
       // WM_SIZE handler, so shrinking the window repaints nothing. That was invisible while the
       // picker was GDI drawn into a window the screen was ignoring; now that the picker is

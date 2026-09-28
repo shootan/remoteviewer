@@ -21,6 +21,7 @@
 #include "viewer_key_chord.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_log.hpp"
+#include "viewer_clip_image_wiring.hpp"
 #include "viewer_window_proc.hpp"
 
 namespace remote60::native_poc::viewer {
@@ -252,6 +253,8 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);
     push_session_toolbar_state(ctx);
+    // Clipboard image v1: the transfer bar (percent, seconds, Cancel), hidden until an image goes.
+    create_clip_transfer_bar(ctx);
   }
   return 0;
 }
@@ -703,26 +706,9 @@ int connect_media_socket(ViewerContext& ctx) {
       return 6;
     }
     viewer_apply_udp_hello_ack(ackFeatures, ctx.videoNackEnabled, ctx.session);
-    // Clipboard image v1 (direction A). Started only when the host agreed to the bulk channel; it
-    // sends on this (connected) socket, reads the control RTT as evidence, and yields to control.
-    ctx.control.clipImage.SetBulkNegotiated(ctx.session.bulkChannelNegotiated);
-    if (ctx.session.bulkChannelNegotiated) {
-      ctx.control.clipImage.Start(
-          [&ctx](const void* data, size_t len) -> bool {
-            return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
-          },
-          [&ctx]() -> uint64_t {
-            const uint64_t at = ctx.control.lastRttAtUs.load(std::memory_order_relaxed);
-            const uint64_t now = remote60::native_poc::qpc_now_us();
-            // A ping older than 3 s says nothing about the path now.
-            return (at != 0 && now >= at && now - at <= 3000000) ? ctx.control.lastRttUs.load(std::memory_order_relaxed)
-                                                                 : 0;
-          },
-          [&ctx]() -> bool {
-            return ctx.control.overUdp.load(std::memory_order_acquire) && ctx.control.udpControl.TxPending();
-          },
-          ctx.args.udpMtu, remote60::native_poc::clip_bulk_rate_config_from_env());
-    }
+    // Clipboard image v1 (direction A). Started only when the host agreed to the bulk channel
+    // (viewer_clip_image_wiring.cpp, shared with viewer_clip_bar_e2e_test).
+    start_clip_image_client(ctx, ctx.args.udpMtu);
     std::cout << "[native-video-client] udp hello ack features=0x" << std::hex << ackFeatures
               << std::dec << " nackRequested=" << (ctx.videoNackEnabled ? 1 : 0)
               << " nackNegotiated=" << (ctx.session.hostSupportsNack ? 1 : 0)
