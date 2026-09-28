@@ -117,6 +117,16 @@
                     android:layout_marginBottom="8dp"
                     android:background="@color/ui_divider" />
 
+                <!-- apk-ui r3: which window or screen the PC shares. The rail's 창 전환 / 바탕화면 are
+                     Alt+Tab / Win+D on the PC, as in the PC viewer; choosing the shared target is
+                     this row. -->
+                <Button
+                    android:id="@+id/viewerMenuTargetsButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/ui_menu_targets_description"
+                    android:drawableStart="@drawable/ic_ui_list"
+                    android:text="@string/ui_menu_targets" />
+
                 <!-- The clipboard label is set by renderClipboardButton (on / off / unsupported). -->
                 <Button
                     android:id="@+id/viewerClipboardButton"

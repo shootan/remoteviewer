@@ -326,10 +326,7 @@ class ViewerKeyPanel(
 
     private fun sendChord(chord: Chord) {
         releaseHeldModifiers()
-        chord.mods.forEach { onKey(it, true) }
-        onKey(chord.key, true)
-        onKey(chord.key, false)
-        chord.mods.reversed().forEach { onKey(it, false) }
+        HostKeyChord.steps(chord.mods, chord.key).forEach { onKey(it.vk, it.down) }
     }
 
     private fun releaseHeldModifiers() {

@@ -374,8 +374,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             requestWindowSheetList("refresh")
             renderStatus()
         }
-        viewerWindowsButton.setOnClickListener { openWindowSheet() }
-        viewerDesktopButton.setOnClickListener { switchToDesktop() }
+        // apk-ui r3: the PC viewer's 화면전환 / 바탕화면, not target selection -- that is the menu's
+        // 보는 화면 선택 below.
+        viewerWindowsButton.setOnClickListener {
+            sendHostChord(HostKeyChord.SWITCH_WINDOW, "switch-window", R.string.ui_chord_sent_switch)
+        }
+        viewerDesktopButton.setOnClickListener {
+            sendHostChord(HostKeyChord.SHOW_DESKTOP, "show-desktop", R.string.ui_chord_sent_desktop)
+        }
+        findViewById<View>(R.id.viewerMenuTargetsButton).setOnClickListener { openWindowSheet() }
         findViewById<View>(R.id.viewerMenuUnlockButton).setOnClickListener {
             closeViewerMenu("unlock")
             showUnlockDialog()
@@ -504,28 +511,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun switchingText(id: Long?, tab: TargetTab, label: String): String = when {
         tab == TargetTab.DESKTOP && (id ?: 0L) < MONITOR_ID_BASE -> getString(R.string.ui_switching_desktop)
         tab == TargetTab.DESKTOP -> getString(R.string.ui_switching_screen, label)
-        else -> getString(R.string.ui_switching_window, label.ifBlank { getString(R.string.ui_rail_windows) })
+        else -> getString(R.string.ui_switching_window, label.ifBlank { getString(R.string.ui_window_untitled) })
     }
 
     private fun requestSummary(): String =
         getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps, requestedDesktopBackend.label)
 
-    /** The desktop in one tap, from the rail (Codex 2). */
-    private fun switchToDesktop() {
-        val message = when {
-            selectionStage != SelectionStage.IDLE -> R.string.ui_switch_busy
-            windowSheetLocked -> R.string.ui_windows_locked
-            windowSheetConfirmedId == 0L -> R.string.ui_desktop_already
-            else -> null
-        }
-        if (message != null) {
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    /**
+     * Win+D / Alt+Tab on the PC, the way the PC viewer's toolbar sends them (send_host_key_chord):
+     * four key events through the same queue as typing, so a chord cannot overtake the keys around
+     * it. The phone's own OS never sees them.
+     *
+     * If the first event cannot be queued the input channel is off and nothing else is sent. Once
+     * a modifier is down every remaining step is still sent, so a hiccup mid-chord cannot leave
+     * Alt or Win held on the PC.
+     */
+    private fun sendHostChord(steps: List<HostKeyChord.Step>, what: String, sentMessage: Int) {
+        showViewerControls(emphasized = true)
+        if (currentScene != UiScene.VIEWER) {
+            // Keys only go out from a live viewer; while a switch is loading, say that instead.
+            Toast.makeText(this, R.string.ui_switch_busy, Toast.LENGTH_SHORT).show()
             return
         }
-        closeViewerSheets("desktop")
-        diagnosticsLog.log("window_sheet", "action=desktop")
-        startSelectionTransition(0L, getString(R.string.ui_windows_desktop_name), TargetTab.DESKTOP, "viewer_desktop")
-        renderStatus()
+        var sent = 0
+        for ((index, step) in steps.withIndex()) {
+            val ok = queueViewerSpecialKey(step.vk, if (step.down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP)
+            if (ok) sent++
+            if (!ok && index == 0) break
+        }
+        diagnosticsLog.log("host_chord", "what=$what sent=$sent/${steps.size}")
+        val message = when {
+            sent == 0 -> R.string.ui_chord_input_off
+            // Sharing one window, the host posts keys to that window; the shell and the task
+            // switcher do not read posted keys, so the chord may do nothing (as on the PC viewer).
+            windowSheetConfirmedId != 0L -> R.string.ui_chord_window_only
+            else -> sentMessage
+        }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     /** Runs on every viewer tick; draws the window sheet only while it is open. */
@@ -598,7 +620,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             row.findViewById<ImageView>(R.id.viewerWindowRowIcon).setImageResource(
                 if (desktop) R.drawable.ic_ui_desktop else R.drawable.ic_ui_windows
             )
-            val title = item.title.ifBlank { getString(R.string.ui_rail_windows) }
+            val title = item.title.ifBlank { getString(R.string.ui_window_untitled) }
             row.findViewById<TextView>(R.id.viewerWindowRowTitle).text = title
             val detail = row.findViewById<TextView>(R.id.viewerWindowRowDetail)
             detail.text = when {
