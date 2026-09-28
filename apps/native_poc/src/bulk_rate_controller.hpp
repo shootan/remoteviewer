@@ -26,6 +26,20 @@
 
 namespace remote60::native_poc {
 
+/** What makes loss count as congestion. */
+enum class BulkLossRule : uint8_t {
+  AnyEvent = 0,       // any loss event (the agreed rule)
+  RttOrRoundRate,     // loss only with an RTT rise, or when the round lost more than lossRoundPerMille of its datagrams
+};
+
+/** What a raise needs besides clean RTTs. */
+enum class BulkRaiseRule : uint8_t {
+  UsedRate = 0,       // the window used >= 90 % of the rate, and was neither app-limited nor yielded (agreed)
+  TimelyRound,        // the round's requested chunks arrived on time (valid pull RTT samples, all within the
+                      // raise bounds) -- the pacer's idle time while the head-only channel waits is not held
+                      // against it; yielded windows still hold
+};
+
 enum class BulkRateEvalUnit : uint8_t {
   WallClock = 0,  // one evaluation per evalWindowUs
   AckRound,       // one evaluation per completed round trip, never faster than max(SRTT, minEvalIntervalUs)
@@ -58,6 +72,10 @@ struct BulkRateConfig {
   // Over how many recent data datagrams the loss ratio is judged (the caller aggregates; 0 = the
   // evaluation window alone). Measurement option, not the agreed rule.
   uint32_t lossHorizonDatagrams = 0;
+  // Candidate rules under discussion (defaults = the agreed ones).
+  BulkLossRule lossRule = BulkLossRule::AnyEvent;
+  uint32_t lossRoundPerMille = 50;   // RttOrRoundRate: > 5 % of the round's datagrams lost
+  BulkRaiseRule raiseRule = BulkRaiseRule::UsedRate;
   uint32_t pauseAfterDecreases = 3;
   uint64_t pauseUs = 2000000;
   uint64_t probeUs = 1000000;
@@ -72,6 +90,8 @@ struct BulkRateWindow {
   uint32_t datagramsSent = 0;      // data datagrams sent in the window (the loss ratio's base)
   bool appLimited = false;         // the sender ran out of work: says nothing about room on the path
   bool yielded = false;            // bulk stood aside for control / video in the window
+  uint32_t lostDatagrams = 0;      // datagrams resent after they had left (RttOrRoundRate's ratio)
+  uint32_t rttSamples = 0;         // valid pull RTT samples in the window (TimelyRound needs >= 1)
 };
 
 enum class BulkRateAction : uint8_t { Hold = 0, Raise, Lower, Pause, Probe };
@@ -153,7 +173,15 @@ class BulkRateController {
     const bool lossCongested =
         w.lossOrNacks > 0 &&
         static_cast<uint64_t>(w.lossOrNacks) * 1000ull > static_cast<uint64_t>(c_.lossTolerancePerMille) * w.datagramsSent;
-    const bool congested = lossCongested || rttCongested;
+    bool congested = lossCongested || rttCongested;
+    if (c_.lossRule == BulkLossRule::RttOrRoundRate) {
+      // Random loss on a lossy path is not a queue: loss counts only with an RTT rise, or when the
+      // round lost more than lossRoundPerMille of its datagrams.
+      const bool heavy = w.datagramsSent > 0 &&
+                         static_cast<uint64_t>(w.lostDatagrams) * 1000ull >
+                             static_cast<uint64_t>(c_.lossRoundPerMille) * w.datagramsSent;
+      congested = rttCongested || (w.lossOrNacks > 0 && heavy);
+    }
     const bool inRecovery = haveDecreased_ && roundsCompleted != 0 && roundsCompleted <= recoveryEndRound_;
     if (congested) {
       if (inRecovery) return BulkRateAction::Hold;  // the trailing signals of the event just answered
@@ -172,11 +200,13 @@ class BulkRateController {
     }
     if (!inRecovery) decreases_ = 0;
     if (nowUs < probeUntilUs_) return BulkRateAction::Probe;  // the probe window must finish first
-    if (inRecovery || w.appLimited || w.yielded) return BulkRateAction::Hold;
+    const bool timely = c_.raiseRule == BulkRaiseRule::TimelyRound;
+    if (inRecovery || w.yielded || (!timely && w.appLimited)) return BulkRateAction::Hold;
     const bool pullOk = !w.pullRttP50Us || !basePullRttUs_ ||
                         w.pullRttP50Us <= (std::max)(basePullRttUs_ * 3 / 2, basePullRttUs_ + c_.pullRaiseAbsUs);
     const bool pingOk = !w.pingRttUs || !basePingRttUs_ || w.pingRttUs <= basePingRttUs_ + c_.rttUpSlackUs;
-    const bool usedIt = w.deliveredBps * 10 >= static_cast<uint64_t>(rate_) * 9;
+    const bool usedIt = timely ? (w.rttSamples > 0 && w.lossOrNacks == 0)
+                               : w.deliveredBps * 10 >= static_cast<uint64_t>(rate_) * 9;
     if (!(pullOk && pingOk && usedIt && rate_ < c_.capBps)) return BulkRateAction::Hold;
     uint64_t next = 0;
     if (slowStart_) {

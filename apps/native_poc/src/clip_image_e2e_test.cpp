@@ -382,8 +382,15 @@ int main(int argc, char** argv) {
     BulkRateConfig hz;
     hz.lossTolerancePerMille = 20;
     hz.lossHorizonDatagrams = 500;
+    BulkRateConfig cand;  // under discussion: loss only with an RTT rise or > 5 % per round; raise on a timely round
+    cand.lossRule = BulkLossRule::RttOrRoundRate;
+    cand.raiseRule = BulkRaiseRule::TimelyRound;
+    BulkRateConfig cand500 = cand;
+    cand500.lossHorizonDatagrams = 500;
     const Cfg cfgs[] = {{"agreed (round x2 -> +25%/s, /2 per event, 16M)", BulkRateConfig{}},
-                        {"agreed + loss judged over 500 datagrams at 20/1000", hz}};
+                        {"agreed + loss judged over 500 datagrams at 20/1000", hz},
+                        {"candidate: loss w/ RTT rise or >5%/round, raise on timely round", cand},
+                        {"candidate, loss rate over 500 datagrams", cand500}};
     struct Case {
       const Image* im;
       const char* size;

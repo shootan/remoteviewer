@@ -289,6 +289,48 @@ int main() {
     wall.MarkEvaluated(1000000, 0);
     check("wall-clock mode (a parameter): due every 2 s, rounds do not matter", !wall.Due(2999999, 100) && wall.Due(3000000, 0));
   }
+  // ------------------------------------------------------------------ candidate rules (under discussion)
+  {
+    BulkRateConfig cand;
+    cand.lossRule = BulkLossRule::RttOrRoundRate;
+    cand.raiseRule = BulkRaiseRule::TimelyRound;
+    auto win = [](uint32_t events, uint32_t lost, uint32_t sent, uint64_t pull) {
+      BulkRateWindow w{events, pull, 1000, 0};
+      w.lostDatagrams = lost;
+      w.datagramsSent = sent;
+      w.rttSamples = 1;
+      return w;
+    };
+    BulkRateController a(cand);
+    a.Evaluate(win(0, 0, 100, 20000), 100000, 1);  // baseline 20 ms
+    check("candidate: 1 %% random loss without an RTT rise is not congestion",
+          a.Evaluate(win(1, 1, 100, 21000), 200000, 2) != BulkRateAction::Lower);
+    BulkRateController b(cand);
+    b.Evaluate(win(0, 0, 100, 20000), 100000, 1);
+    check("candidate: a round that lost 6 %% of its datagrams is congestion",
+          b.Evaluate(win(2, 6, 100, 21000), 200000, 2) == BulkRateAction::Lower);
+    BulkRateController c(cand);
+    c.Evaluate(win(0, 0, 100, 20000), 100000, 1);
+    check("candidate: loss with an RTT rise is congestion",
+          c.Evaluate(win(1, 1, 100, 90000), 200000, 2) == BulkRateAction::Lower);
+    BulkRateController d(cand);
+    BulkRateWindow idle = win(0, 0, 100, 20000);
+    idle.appLimited = true;  // the pacer idled while the head-only channel waited
+    idle.deliveredBps = 50000;
+    check("candidate: a timely round raises even though the pacer idled",
+          d.Evaluate(idle, 100000, 1) == BulkRateAction::Raise);
+    BulkRateController e(cand);
+    BulkRateWindow none = win(0, 0, 100, 0);
+    none.rttSamples = 0;
+    none.deliveredBps = 256000;
+    check("candidate: no valid sample in the round, no raise", e.Evaluate(none, 100000, 1) == BulkRateAction::Hold);
+    BulkRateController f(cand);
+    BulkRateWindow y = win(0, 0, 100, 20000);
+    y.yielded = true;
+    check("candidate: a yielded window still holds", f.Evaluate(y, 100000, 1) == BulkRateAction::Hold);
+    BulkRateController g;  // agreed defaults: the same idle window does not raise
+    check("agreed rule: that app-limited window holds", g.Evaluate(idle, 100000, 1) == BulkRateAction::Hold);
+  }
   // ------------------------------------------------------------------ RTT samples
   {
     BulkRttEstimator e;

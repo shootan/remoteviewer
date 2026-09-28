@@ -75,6 +75,12 @@ BulkRateConfig clip_bulk_rate_config_from_env() {
   if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_HORIZON")) {
     c.lossHorizonDatagrams = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
   }
+  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_LOSS_RULE")) {
+    if (std::strcmp(e, "rtt_or_rate") == 0) c.lossRule = BulkLossRule::RttOrRoundRate;
+  }
+  if (const char* e = std::getenv("REMOTE60_CLIP_BULK_RAISE_RULE")) {
+    if (std::strcmp(e, "timely") == 0) c.raiseRule = BulkRaiseRule::TimelyRound;
+  }
   if (const char* e = std::getenv("REMOTE60_CLIP_BULK_START_BPS")) {
     const unsigned long v = std::strtoul(e, nullptr, 10);
     if (v >= c.floorBps) c.startBps = static_cast<uint32_t>(v);
@@ -446,6 +452,7 @@ void ClipImageClient::ServeLoop() {
   uint64_t windowStartUs = BulkPacer::NowUs();
   uint64_t sentBytesBase = 0, sentDgramBase = 0, yieldBase = 0, idleBase = 0;
   uint64_t lastTimingRttUs = 0;
+  uint64_t lossDgramBase = 0;
   uint64_t lastPullUs = 0;
   uint32_t capInForce = rateConfig_.capBps;
   std::deque<std::pair<uint64_t, uint64_t>> horizon;  // (datagrams, loss events) per evaluation
@@ -547,6 +554,12 @@ void ClipImageClient::ServeLoop() {
       // Evidence a raise may not stand on: the pacer sat empty for a quarter of the window
       // (app-limited -- waiting on pulls, not on the path), or it stood aside for control.
       w.appLimited = (ps.idleUs - idleBase) * 4 > span;
+      w.lostDatagrams = static_cast<uint32_t>(ps.resendsAfterTransmit - lossDgramBase);
+      lossDgramBase = ps.resendsAfterTransmit;
+      w.rttSamples = static_cast<uint32_t>(rtts.size());
+      // With a horizon, the loss ratio is loss EVENTS over the horizon's datagrams: a whole-message
+      // resend after one lost acknowledgement is one loss, not fifteen.
+      if (rateConfig_.lossHorizonDatagrams) w.lostDatagrams = w.lossOrNacks;
       w.yielded = ps.yields != yieldBase;
       idleBase = ps.idleUs;
       yieldBase = ps.yields;
