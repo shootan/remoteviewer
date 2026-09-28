@@ -105,6 +105,31 @@ uint64_t udp_pace_budget_us(const UdpEgressConfig& egress, size_t payloadSize,
   return (static_cast<uint64_t>(payloadSize) * 8ULL * 1000000ULL) / static_cast<uint64_t>(peakBps);
 }
 
+UdpChunkGeometry udp_chunk_geometry(size_t payloadSize, uint32_t mtuBytes, bool tightSingleChunk) {
+  UdpChunkGeometry g;
+  if (payloadSize == 0 || payloadSize > std::numeric_limits<uint32_t>::max()) return g;
+  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
+  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return g;
+  g.maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+  // A frame that fits in one datagram is one chunk whichever stride is written in the header; the
+  // stride only decides how long its parity datagram is (the receiver requires parity chunkSize ==
+  // chunkStride). Writing the frame's own size makes the parity a replica of the frame and nothing
+  // more. Anything larger keeps the MTU stride, so the datagrams of a multi-chunk frame are byte
+  // for byte what they were before the tight stride existed.
+  g.chunkStride = (tightSingleChunk && payloadSize <= g.maxChunk) ? static_cast<uint32_t>(payloadSize)
+                                                                  : g.maxChunk;
+  const uint64_t chunkCount =
+      (static_cast<uint64_t>(payloadSize) + g.chunkStride - 1u) / g.chunkStride;
+  if (chunkCount == 0 || chunkCount > std::numeric_limits<uint16_t>::max()) return g;
+  g.chunkCount = static_cast<uint32_t>(chunkCount);
+  g.fecGroupCount = (g.chunkCount + remote60::native_poc::kUdpVideoFecGroupSize - 1u) /
+                    remote60::native_poc::kUdpVideoFecGroupSize;
+  g.packetCount = g.chunkCount + g.fecGroupCount;
+  g.parityBytes = static_cast<uint64_t>(g.fecGroupCount) * g.chunkStride;
+  g.valid = true;
+  return g;
+}
+
 // liveEpoch/itemEpoch let a rollover abort a chunked send mid-frame: if the live media epoch no
 // longer matches the epoch this frame was stamped for, the remaining data/parity packets are the
 // old session's and must not reach a freshly attached decoder. nullptr liveEpoch disables the check.
@@ -114,25 +139,21 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
                                     const UdpEgressConfig& egress) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return UdpSendOutcome::TransportError;
-  if (payloadSize > std::numeric_limits<uint32_t>::max()) return UdpSendOutcome::TransportError;
   const uint64_t startUs = qpc_now_us();
-  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
-  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return UdpSendOutcome::TransportError;
-  const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
-  std::vector<uint8_t> datagram(safeMtu);
-  const uint32_t chunkCount =
-      static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
-  if (chunkCount == 0 || chunkCount > std::numeric_limits<uint16_t>::max())
-    return UdpSendOutcome::TransportError;
+  // One geometry for the data chunks, the parity, the pacing budget and (through the NACK cache,
+  // which stores the same inputs) the replay of this frame.
+  const UdpChunkGeometry geo =
+      udp_chunk_geometry(payloadSize, mtuBytes, egress.fecSingleChunkTightStride);
+  if (!geo.valid) return UdpSendOutcome::TransportError;
+  const uint32_t stride = geo.chunkStride;
+  const uint32_t chunkCount = geo.chunkCount;
+  std::vector<uint8_t> datagram(sizeof(UdpVideoChunkHeader) + geo.maxChunk);
   const auto epoch_changed = [&]() {
     return liveEpoch && liveEpoch->load(std::memory_order_relaxed) != itemEpoch;
   };
-  const uint32_t fecGroupCount =
-      (chunkCount + remote60::native_poc::kUdpVideoFecGroupSize - 1u) /
-      remote60::native_poc::kUdpVideoFecGroupSize;
-  const uint32_t packetCount = chunkCount + fecGroupCount;
-  const uint64_t pacedPayloadBytes =
-      static_cast<uint64_t>(payloadSize) + static_cast<uint64_t>(fecGroupCount) * maxChunk;
+  const uint32_t fecGroupCount = geo.fecGroupCount;
+  const uint32_t packetCount = geo.packetCount;
+  const uint64_t pacedPayloadBytes = static_cast<uint64_t>(payloadSize) + geo.parityBytes;
   const uint64_t budgetUs =
       udp_pace_budget_us(egress, static_cast<size_t>(pacedPayloadBytes), packetCount,
                          (baseHeader.flags & 0x1u) != 0);
@@ -172,15 +193,15 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
 
   for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
     if (epoch_changed()) return UdpSendOutcome::EpochChanged;
-    const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+    const size_t offset = static_cast<size_t>(chunkIndex) * stride;
     const uint32_t chunkSize =
-        static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+        static_cast<uint32_t>(std::min<size_t>(stride, payloadSize - offset));
     UdpVideoChunkHeader h = baseHeader;
     h.chunkOffset = static_cast<uint32_t>(offset);
     h.chunkSize = chunkSize;
     h.chunkIndex = static_cast<uint16_t>(chunkIndex);
     h.chunkCount = static_cast<uint16_t>(chunkCount);
-    h.chunkStride = maxChunk;
+    h.chunkStride = stride;
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
@@ -195,8 +216,11 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
   // consecutive chunks puts the whole burst in one group, where a single parity repairs
   // nothing. Interleaving -- group g holds chunks g, g+G, g+2G ... -- spreads a burst of up
   // to G across G groups, one loss each, all recoverable, at exactly the same cost.
+  //
+  // A parity datagram is always one stride long (the receiver rejects anything else), which is
+  // why a single-chunk frame's stride is its own size: its parity is then the frame's size too.
   const bool interleaved = egress.fecInterleaved;
-  std::vector<uint8_t> parity(maxChunk, 0);
+  std::vector<uint8_t> parity(stride, 0);
   for (uint32_t group = 0; group < fecGroupCount; ++group) {
     if (epoch_changed()) return UdpSendOutcome::EpochChanged;
     std::fill(parity.begin(), parity.end(), 0);
@@ -209,21 +233,21 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                                          firstChunk +
                                              remote60::native_poc::kUdpVideoFecGroupSize);
     for (uint32_t chunkIndex = firstChunk; chunkIndex < limit; chunkIndex += step) {
-      const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+      const size_t offset = static_cast<size_t>(chunkIndex) * stride;
       const uint32_t chunkSize =
-          static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+          static_cast<uint32_t>(std::min<size_t>(stride, payloadSize - offset));
       for (uint32_t i = 0; i < chunkSize; ++i) parity[i] ^= payload[offset + i];
     }
     UdpVideoChunkHeader h = baseHeader;
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u));
     h.flags |= 0x10u;
     if (interleaved) h.flags |= 0x20u;
-    h.chunkOffset = firstChunk * maxChunk;
-    h.chunkSize = maxChunk;
+    h.chunkOffset = firstChunk * stride;
+    h.chunkSize = stride;
     h.chunkIndex = static_cast<uint16_t>(firstChunk);
     h.chunkCount = static_cast<uint16_t>(chunkCount);
-    h.chunkStride = maxChunk;
-    if (!send_packet(h, parity.data(), maxChunk)) return UdpSendOutcome::TransportError;
+    h.chunkStride = stride;
+    if (!send_packet(h, parity.data(), stride)) return UdpSendOutcome::TransportError;
   }
 
   if (stats) {
@@ -251,29 +275,31 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
 
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
-                                      uint32_t mtuBytes, const uint16_t* indices, uint16_t count,
+                                      uint32_t mtuBytes, bool tightSingleChunk,
+                                      const uint16_t* indices, uint16_t count,
                                       uint64_t* outWireBytes,
                                       uint64_t* outDatagrams) {
   if (!payload || payloadSize == 0 || s == INVALID_SOCKET || !indices || count == 0)
     return UdpSendOutcome::TransportError;
-  if (payloadSize > std::numeric_limits<uint32_t>::max()) return UdpSendOutcome::TransportError;
-  const uint32_t safeMtu = clamp_udp_mtu(mtuBytes);
-  if (safeMtu <= sizeof(UdpVideoChunkHeader)) return UdpSendOutcome::TransportError;
-  const uint32_t maxChunk = safeMtu - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
-  const uint32_t chunkCount = static_cast<uint32_t>((payloadSize + maxChunk - 1) / maxChunk);
-  std::vector<uint8_t> datagram(safeMtu);
+  // The same geometry as the original send: the receiver discards an assembly whose stride a
+  // later chunk contradicts, so a replay with the wrong stride would destroy what it repairs.
+  const UdpChunkGeometry geo = udp_chunk_geometry(payloadSize, mtuBytes, tightSingleChunk);
+  if (!geo.valid) return UdpSendOutcome::TransportError;
+  const uint32_t stride = geo.chunkStride;
+  const uint32_t chunkCount = geo.chunkCount;
+  std::vector<uint8_t> datagram(sizeof(UdpVideoChunkHeader) + geo.maxChunk);
   for (uint16_t i = 0; i < count; ++i) {
     const uint32_t chunkIndex = indices[i];
     if (chunkIndex >= chunkCount) continue;  // stale/garbled request -- skip, never index OOB
-    const size_t offset = static_cast<size_t>(chunkIndex) * maxChunk;
+    const size_t offset = static_cast<size_t>(chunkIndex) * stride;
     const uint32_t chunkSize =
-        static_cast<uint32_t>(std::min<size_t>(maxChunk, payloadSize - offset));
+        static_cast<uint32_t>(std::min<size_t>(stride, payloadSize - offset));
     UdpVideoChunkHeader h = baseHeader;  // same seq / streamGeneration / codec / flags(key) / sizes
     h.chunkOffset = static_cast<uint32_t>(offset);
     h.chunkSize = chunkSize;
     h.chunkIndex = static_cast<uint16_t>(chunkIndex);
     h.chunkCount = static_cast<uint16_t>(chunkCount);
-    h.chunkStride = maxChunk;
+    h.chunkStride = stride;
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));  // recompute first/last, never parity
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;

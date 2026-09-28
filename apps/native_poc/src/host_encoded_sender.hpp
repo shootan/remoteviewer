@@ -82,6 +82,10 @@ struct SenderState {
   std::atomic<uint32_t> pacePeakBps{0};
   std::atomic<uint32_t> keyframePacePeakBps{100000000};
   std::atomic<bool> fecInterleaved{false};
+  // Single-chunk frames chunked with their own size as the stride (UdpEgressConfig::
+  // fecSingleChunkTightStride). Fixed at startup from REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE
+  // (unset / 1 = on, 0 = the padded layout); read by the sender through EgressSnapshot.
+  std::atomic<bool> fecSingleChunkTightStride{true};
   // ---- Video NACK (selective retransmit) ----
   // Set from the client's Hello: true only when the client advertised kUdpFeatureVideoNack, so an
   // old client is never handed retransmits it did not ask for. Reader thread writes, sender reads.
@@ -90,6 +94,10 @@ struct SenderState {
     uint64_t generation = 0;
     uint32_t seq = 0;
     uint32_t mtu = 0;
+    // The stride policy the AU was first sent with, so the replay computes the same geometry
+    // (udp_chunk_geometry) -- a replayed chunk with a different chunkStride makes the receiver
+    // discard the assembly it was meant to repair.
+    bool tightSingleChunk = true;
     UdpVideoChunkHeader baseHeader{};
     std::vector<uint8_t> payload;
   };
@@ -106,8 +114,9 @@ struct SenderState {
   uint64_t nackBudgetTokensBytes = 0;
   uint64_t nackBudgetLastUs = 0;
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
+  // `tightSingleChunk` is the egress.fecSingleChunkTightStride the AU was chunked with.
   void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
-               uint32_t mtu, const uint8_t* payload, size_t payloadSize);
+               uint32_t mtu, bool tightSingleChunk, const uint8_t* payload, size_t payloadSize);
   // Answer a NACK: replay the requested chunks of (generation, seq) if still cached. (reader thread)
   void RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq,
                     const uint16_t* missing, uint16_t count);
@@ -117,6 +126,7 @@ struct SenderState {
     c.pacePeakBps = pacePeakBps.load(std::memory_order_relaxed);
     c.keyframePacePeakBps = keyframePacePeakBps.load(std::memory_order_relaxed);
     c.fecInterleaved = fecInterleaved.load(std::memory_order_relaxed);
+    c.fecSingleChunkTightStride = fecSingleChunkTightStride.load(std::memory_order_relaxed);
     return c;
   }
   // UDP peer as the reader thread sees it (the render loop picks up changes through the atomics).

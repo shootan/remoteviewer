@@ -70,7 +70,7 @@ bool wait_until(Fn&& fn, int timeoutMs) {
 
 }  // namespace
 
-constexpr int kSelfHostPort = 44799;
+int kSelfHostPort = 0;  // picked at run time (e2e_pick_free_udp_port) when this test starts its own host
 
 /** The host this test starts for itself when run without arguments. */
 struct SelfHost {
@@ -204,6 +204,12 @@ int main(int argc, char** argv) {
       std::puts("      you started (never the installed product's 43000).\n\nRESULT: SKIPPED");
       return remote60::native_poc::e2e::kE2eSkippedExit;
     }
+    kSelfHostPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    if (kSelfHostPort == 0) {
+      std::puts("FAIL  no free UDP port for the self-started host");
+      return 1;
+    }
+    std::printf("self host port %d (picked at run time)\n", kSelfHostPort);
     std::string why;
     check("an isolated host of its own is started (loopback, no input injection)", self.Start(&why), why);
     if (!self.launched) {

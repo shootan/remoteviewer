@@ -31,7 +31,8 @@
 namespace remote60::native_poc {
 
 void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
-                          uint32_t mtu, const uint8_t* payload, size_t payloadSize) {
+                          uint32_t mtu, bool tightSingleChunk, const uint8_t* payload,
+                          size_t payloadSize) {
   if (!nackEnabled.load(std::memory_order_relaxed) || !payload || payloadSize == 0) return;
   std::lock_guard<std::mutex> lk(nackCacheMu);
   nackCache.emplace_back();
@@ -39,6 +40,7 @@ void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunk
   e.generation = generation;
   e.seq = seq;
   e.mtu = mtu;
+  e.tightSingleChunk = tightSingleChunk;
   e.baseHeader = baseHeader;
   e.payload.assign(payload, payload + payloadSize);
   while (nackCache.size() > kNackCacheMaxAus) nackCache.pop_front();
@@ -52,6 +54,7 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
   std::vector<uint8_t> payload;
   UdpVideoChunkHeader baseHeader{};
   uint32_t mtu = 0;
+  bool tightSingleChunk = true;
   {
     std::lock_guard<std::mutex> lk(nackCacheMu);
     auto it = std::find_if(nackCache.rbegin(), nackCache.rend(), [&](const CachedAu& e) {
@@ -64,6 +67,7 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
     payload = it->payload;
     baseHeader = it->baseHeader;
     mtu = it->mtu;
+    tightSingleChunk = it->tightSingleChunk;
   }
   // Retransmit byte budget: refill a token bucket at ~15% of the live send rate and only spend if
   // the requested chunks fit, so a NACK storm cannot amplify congestion. (Codex: byte budget.)
@@ -90,8 +94,8 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
   }
   uint64_t replayBytes = 0;
   uint64_t replayDatagrams = 0;
-  (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu, missing,
-                               count, &replayBytes, &replayDatagrams);
+  (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu,
+                               tightSingleChunk, missing, count, &replayBytes, &replayDatagrams);
   txNackBytes.fetch_add(replayBytes, std::memory_order_relaxed);
   txNackDatagrams.fetch_add(replayDatagrams, std::memory_order_relaxed);
   nackRetransmitChunks.fetch_add(count, std::memory_order_relaxed);
@@ -212,7 +216,7 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         // Cache this AU so a client NACK can be answered with just the missing chunks (no-op unless
         // the client negotiated NACK). (video NACK.)
         sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
-                       item.bytes.data(), item.bytes.size());
+                       egress.fecSingleChunkTightStride, item.bytes.data(), item.bytes.size());
         const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
         sender.lastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
         sender.txFrames.fetch_add(1, std::memory_order_relaxed);
