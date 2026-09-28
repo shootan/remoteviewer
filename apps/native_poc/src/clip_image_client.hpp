@@ -236,6 +236,16 @@ class ClipImageClient {
   // A cancel's answer (or a later Status) for the awaited transfer. Non-terminal: keep waiting.
   void ApplyCancelAnswer(const ControlClipImageStatusReplyMessage& r);  // caller holds mu_
   void SettleAwaiting(ClipOutcome o, uint8_t detail);  // caller holds mu_: the cancel's outcome, then any deferred notice
+  // Caller holds mu_. A copy that never left (read refused / package failed): shown at once, or --
+  // while an older transfer's cancel is unsettled -- held with its copy's generation and shown after
+  // it, only if that copy is still the newest (P2).
+  void NoteNotSent(ClipPackageResult why, uint64_t gen);
+  void FlushDeferredNotSent();  // caller holds mu_
+  bool CancelPending() const {  // caller holds mu_
+    return awaiting_.on || (cancelTargetId_ != 0 && sender_.Active() && sender_.transferId() == cancelTargetId_);
+  }
+  void RequestCancel(ClipImageReason why);  // caller holds mu_: cancel the running transfer, bound to its id
+  void ClearCancelFor(uint64_t transferId);  // caller holds mu_: that transfer ended -- its cancel goes with it
 
   SendFn send_;
   PingRttFn pingRtt_;
@@ -268,7 +278,10 @@ class ClipImageClient {
   uint64_t nextStatusUs_ = 0;
   uint32_t nextSeq_ = 0;
   bool bulkClosePending_ = false;
-  bool cancelActive_ = false;  // a newer non-image copy: cancel the running transfer
+  // The transfer a cancel was asked for (0 = none). Bound to its id, not a flag: a cancel meant for
+  // transfer A must never outlive A -- refused, ended by the host, or the session -- and cancel the
+  // next copy's transfer B (Codex review of da24d9f, P1).
+  uint64_t cancelTargetId_ = 0;
   ClipImageReason cancelReason_ = ClipImageReason::Superseded;  // User when the bar's Cancel asked
   std::atomic<uint64_t> confirmedBytes_{0};  // this transfer's chunks the host confirmed
   uint64_t lastBytesTotal_ = 0;                // the last finished transfer's size (under mu_)
@@ -289,6 +302,7 @@ class ClipImageClient {
   // that settles, so the user's last line is about the copy they just made.
   bool deferredNotSent_ = false;
   uint8_t deferredNotSentWhy_ = 0;
+  uint64_t deferredNotSentGen_ = 0;
   ClipOutcome lastOutcome_ = ClipOutcome::None;
   uint8_t lastDetail_ = 0;
   Counters counters_;

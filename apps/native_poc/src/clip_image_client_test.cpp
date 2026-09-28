@@ -46,6 +46,7 @@ class ScriptedHost : public ControlLink {
   uint64_t statusIdOverride = 0;  // non-zero: the Status reply names this id instead (a stale answer)
   bool dropNextReply = false;     // the reply never arrives (the link fails)
   std::function<void()> onOffer;  // runs while an offer is "in flight" (before its reply is read)
+  std::function<void()> onStatus;  // runs while a Status is "in flight" (before its reply is read)
 
   struct Seen {
     uint16_t type;
@@ -93,6 +94,7 @@ class ScriptedHost : public ControlLink {
       seen.push_back({h.type, m.transferId, 0});
       put(status(MessageType::ControlClipImageStatusReply, m.seq, statusIdOverride ? statusIdOverride : m.transferId,
                  statusAnswer, cancelReason_));
+      if (onStatus) onStatus();
     }
     buf_.clear();
     return true;
@@ -337,6 +339,80 @@ int main() {
               r.client.GetProgress().detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
     r.pump_for(200);
     check("...and nothing is offered", r.host.count(MessageType::ControlClipImageOffer) == 0);
+  }
+  {
+    std::printf("\n--- r4 ①: a newer copy during A's offer, A refused -> the next copy B is not cancelled ---\n");
+    Rig r;
+    r.host.offerVerdict = static_cast<uint8_t>(ClipImageVerdict::Disabled);
+    r.host.onOffer = [&r] {
+      r.host.onOffer = nullptr;
+      r.client.CancelForNewerCopy();  // a newer copy while A's offer is on the wire: a cancel aimed at A
+    };
+    check("A offered (and refused)", r.offer(dib(64, 64, 101)) && !r.client.Active());
+    r.host.offerVerdict = static_cast<uint8_t>(ClipImageVerdict::Accept);
+    check("B offered and being served", r.offer(dib(64, 64, 102)) && r.client.Active());
+    r.pump_for(300);
+    check("no Cancel was sent for B (A's cancel did not outlive A)", r.host.count(MessageType::ControlClipImageCancel) == 0);
+    r.host.statusAnswer = ClipImageState::Published;
+    r.pump_for(800);
+    check("B is published", r.outcome() == ClipOutcome::Published && r.client.GetCounters().published == 1);
+  }
+  for (const ClipImageState terminal : {ClipImageState::Published, ClipImageState::Failed}) {
+    std::printf("\n--- r4 ②: the user cancels A while A's Status (%s) is in flight -> B is not cancelled ---\n",
+                terminal == ClipImageState::Published ? "published" : "failed");
+    Rig r;
+    check("A offered and being served", r.offer(dib(64, 64, 111)) && r.client.Active());
+    r.host.statusAnswer = terminal;
+    r.host.onStatus = [&r] {
+      r.host.onStatus = nullptr;
+      r.client.CancelByUser();  // the click lands while the answer that ends A is on its way
+    };
+    r.pump_for(800);
+    check("A ended by the host's answer, no Cancel sent", !r.client.Active() && r.host.count(MessageType::ControlClipImageCancel) == 0);
+    r.host.statusAnswer = ClipImageState::Pulling;
+    check("B offered and being served", r.offer(dib(64, 64, 112)) && r.client.Active());
+    r.pump_for(300);
+    check("no Cancel was sent for B (the user's cancel was A's)", r.host.count(MessageType::ControlClipImageCancel) == 0);
+    r.host.statusAnswer = ClipImageState::Published;
+    r.pump_for(800);
+    check("B is published", r.outcome() == ClipOutcome::Published);
+  }
+  {
+    std::printf("\n--- r4 ③: A's cancel unsettled (verifying), B's package fails -> the last line is B's ---\n");
+    Rig r;
+    check("A offered and being served", r.offer(dib(64, 64, 121)) && r.client.Active());
+    r.host.cancelAnswer = ClipImageState::Verifying;
+    r.host.statusAnswer = ClipImageState::Verifying;
+    r.client.SubmitSnapshot(dib(8193, 1, 122));  // B: over the size gate -- its package fails
+    r.client.Pump(r.host);
+    check("A is being cancelled (superseded) and not settled", r.client.GetProgress().cancelling &&
+                                                                  r.host.count(MessageType::ControlClipImageCancel) == 1);
+    const uint64_t before = r.client.GetProgress().finished;
+    wait_for([&] { return false; }, 400);  // B's package worker has failed by now
+    check("B's failure is held while A is unsettled (not shown under 'cancelling')",
+          r.client.GetProgress().finished == before && r.client.GetProgress().cancelling);
+    r.host.statusAnswer = ClipImageState::Cancelled;
+    r.pump_for(800);
+    const auto p = r.client.GetProgress();
+    check("after A settles, the LAST line is B's: not sent, too large",
+          !p.cancelling && p.outcome == ClipOutcome::NotSent && p.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+  }
+  {
+    std::printf("\n--- r4 ④: as ③, but the user copies C before A settles -> no line about B ---\n");
+    Rig r;
+    check("A offered and being served", r.offer(dib(64, 64, 131)) && r.client.Active());
+    r.host.cancelAnswer = ClipImageState::Verifying;
+    r.host.statusAnswer = ClipImageState::Verifying;
+    r.client.SubmitSnapshot(dib(8193, 1, 132));  // B fails
+    r.client.Pump(r.host);
+    wait_for([&] { return false; }, 400);
+    r.client.CancelForNewerCopy();  // C: a newer copy (text) -- B is history
+    r.host.statusAnswer = ClipImageState::Cancelled;
+    r.pump_for(800);
+    const auto p = r.client.GetProgress();
+    check("after A settles there is no line about B (C replaced it): A's cancel is the last",
+          !p.cancelling && p.outcome == ClipOutcome::Cancelled &&
+              p.detail == static_cast<uint8_t>(ClipImageReason::Superseded));
   }
   {
     std::printf("\n--- normal path: offered, served, published ---\n");

@@ -173,10 +173,7 @@ void ClipImageClient::SubmitSnapshot(ClipSnapshot snap) {
   pending_ = ClipPackage{};
   haveFallback_ = false;
   fallbackText_.clear();
-  if (sender_.Active() && !cancelActive_) {
-    cancelActive_ = true;
-    cancelReason_ = ClipImageReason::Superseded;
-  }
+  RequestCancel(ClipImageReason::Superseded);
   cv_.notify_all();
 }
 
@@ -188,8 +185,21 @@ void ClipImageClient::CancelForNewerCopy() {
   pending_ = ClipPackage{};
   haveFallback_ = false;  // an older copy's text must not follow this one
   fallbackText_.clear();
-  if (sender_.Active() && !cancelActive_) {
-    cancelActive_ = true;
+  RequestCancel(ClipImageReason::Superseded);
+}
+
+void ClipImageClient::RequestCancel(ClipImageReason why) {
+  if (!sender_.Active()) return;
+  // A user's cancel of this same transfer keeps its reason; a newer copy does not turn it into
+  // "superseded".
+  if (cancelTargetId_ == sender_.transferId() && why == ClipImageReason::Superseded) return;
+  cancelTargetId_ = sender_.transferId();
+  cancelReason_ = why;
+}
+
+void ClipImageClient::ClearCancelFor(uint64_t transferId) {
+  if (cancelTargetId_ != 0 && cancelTargetId_ == transferId) {
+    cancelTargetId_ = 0;
     cancelReason_ = ClipImageReason::Superseded;
   }
 }
@@ -199,21 +209,30 @@ void ClipImageClient::NoteLocalCopyNotSent(ClipPackageResult why) {
   std::ostringstream os;
   os << "copy not sent result=" << static_cast<int>(why) << " (text, if any, goes by text sync)";
   Log(os.str());
-  if (cancelActive_ || awaiting_.on) {  // the older transfer's cancel is still to be settled
+  NoteNotSent(why, snapshotGen_);  // the copy CancelForNewerCopy just made current
+}
+
+void ClipImageClient::NoteNotSent(ClipPackageResult why, uint64_t gen) {
+  if (gen != snapshotGen_) return;  // a newer copy exists: this one's news is stale
+  if (CancelPending()) {            // the older transfer's cancel is still to be settled: after it
     deferredNotSent_ = true;
     deferredNotSentWhy_ = static_cast<uint8_t>(why);
+    deferredNotSentGen_ = gen;
     return;
   }
   RecordOutcome(ClipOutcome::NotSent, static_cast<uint8_t>(why));
 }
 
+void ClipImageClient::FlushDeferredNotSent() {
+  if (!deferredNotSent_ || CancelPending()) return;
+  deferredNotSent_ = false;
+  if (deferredNotSentGen_ == snapshotGen_) RecordOutcome(ClipOutcome::NotSent, deferredNotSentWhy_);
+}
+
 void ClipImageClient::SettleAwaiting(ClipOutcome o, uint8_t detail) {
   awaiting_.on = false;
   RecordOutcome(o, detail);
-  if (deferredNotSent_) {
-    deferredNotSent_ = false;
-    RecordOutcome(ClipOutcome::NotSent, deferredNotSentWhy_);
-  }
+  FlushDeferredNotSent();  // the newest copy's line comes last
 }
 
 void ClipImageClient::RecordOutcome(ClipOutcome o, uint8_t detail) {
@@ -272,10 +291,7 @@ void ClipImageClient::CancelByUser() {
   pending_ = ClipPackage{};
   haveFallback_ = false;
   fallbackText_.clear();
-  if (sender_.Active()) {
-    cancelActive_ = true;
-    cancelReason_ = ClipImageReason::User;
-  }
+  RequestCancel(ClipImageReason::User);
   Log("user cancel requested active=" + std::string(sender_.Active() ? "1" : "0"));
 }
 
@@ -333,7 +349,7 @@ void ClipImageClient::PackageWorker() {
         haveFallback_ = true;
         fallbackGen_ = gen;
       }
-      RecordOutcome(ClipOutcome::NotSent, static_cast<uint8_t>(r));
+      NoteNotSent(r, gen);
       continue;
     }
     ++counters_.packaged;
@@ -365,6 +381,7 @@ bool ClipImageClient::TakeFallbackText(std::u16string* out) {
 
 void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) {
   if (!sender_.Active()) return;
+  ClearCancelFor(sender_.transferId());  // a cancel asked for this transfer ends with it
   const uint64_t ms = (BulkPacer::NowUs() - sender_.startedUs()) / 1000;
   counters_.lastTransferMs = ms;
   lastBytesTotal_ = sender_.offer().packageBytes();
@@ -406,9 +423,10 @@ int ClipImageClient::Pump(ControlLink& link) {
     // 1. A newer copy, or the user, cancels the running transfer. Sending stops here at once; what
     //    happened on the host is a separate question the answer settles (it may already have
     //    published, or be verifying and still publish). Until it is settled nothing new is offered.
-    if (sender_.Active() && (havePending_ || cancelActive_)) {
-      const ClipImageReason why = cancelActive_ ? cancelReason_ : ClipImageReason::Superseded;
-      cancelActive_ = false;
+    const bool cancelThis = cancelTargetId_ != 0 && sender_.Active() && sender_.transferId() == cancelTargetId_;
+    if (sender_.Active() && (havePending_ || cancelThis)) {
+      const ClipImageReason why = cancelThis ? cancelReason_ : ClipImageReason::Superseded;
+      cancelTargetId_ = 0;
       cancelReason_ = ClipImageReason::Superseded;
       ControlClipImageCancelMessage c{};
       c.header.type = static_cast<uint16_t>(MessageType::ControlClipImageCancel);
@@ -513,6 +531,7 @@ int ClipImageClient::Pump(ControlLink& link) {
         Log(os.str());
       } else {
         ++counters_.refused;
+        ClearCancelFor(m.transferId);  // the refused offer's cancel ends with it (P1)
         std::ostringstream os;
         os << "refused verdict=" << static_cast<int>(r.verdict) << " (text, if any, goes by text sync)";
         Log(os.str());
@@ -524,6 +543,7 @@ int ClipImageClient::Pump(ControlLink& link) {
             fallbackGen_ = offerGen_;
           }
         }
+        FlushDeferredNotSent();
       }
       return 1;
     }
@@ -545,6 +565,7 @@ int ClipImageClient::Pump(ControlLink& link) {
         const auto st = static_cast<ClipImageState>(r.state);
         if (clip_image_state_terminal(st) || st == ClipImageState::Unknown) {
           EndActive(st, static_cast<ClipImageReason>(r.reason));
+          FlushDeferredNotSent();
         }
       }
       result = 1;
@@ -569,7 +590,7 @@ void ClipImageClient::EndSession() {
     ++snapshotGen_;
     haveFallback_ = false;
     bulkClosePending_ = false;
-    cancelActive_ = false;
+    cancelTargetId_ = 0;
   }
   CloseBulk();
   hostSupports_.store(false);
