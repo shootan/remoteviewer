@@ -140,7 +140,16 @@ int main() {
   check(".lnk is Excluded", classify_source_path(L"C:\\x\\shortcut.lnk") == Status::Excluded);
   check(".URL (any case) is Excluded", classify_source_path(L"C:\\x\\site.URL") == Status::Excluded);
   check("an ordinary path is Ok", classify_source_path(L"C:\\Users\\me\\a.bin") == Status::Ok);
-  check("a UNC path is Ok (the open decides)", classify_source_path(L"\\\\server\\share\\a.bin") == Status::Ok);
+  // r3 ④: explicit local absolute paths only.
+  check("a UNC path is BadPath", classify_source_path(L"\\\\server\\share\\a.bin") == Status::BadPath);
+  check("a relative path is BadPath", classify_source_path(L"a.bin") == Status::BadPath && classify_source_path(L"x\\a.bin") == Status::BadPath);
+  check("a drive-relative path is BadPath", classify_source_path(L"C:a.bin") == Status::BadPath);
+  check("a rooted path without a drive is BadPath", classify_source_path(L"\\Users\\me\\a.bin") == Status::BadPath);
+  check("forward slashes are BadPath", classify_source_path(L"C:/Users/me/a.bin") == Status::BadPath);
+  check("a \"..\" component is BadPath", classify_source_path(L"C:\\x\\..\\a.bin") == Status::BadPath);
+  check("a \".\" component is BadPath", classify_source_path(L"C:\\x\\.\\a.bin") == Status::BadPath);
+  check("a doubled or trailing backslash is BadPath", classify_source_path(L"C:\\x\\\\a.bin") == Status::BadPath && classify_source_path(L"C:\\x\\") == Status::BadPath);
+  check("the bare drive root is BadPath", classify_source_path(L"C:\\") == Status::BadPath);
   check("basename", basename_of(L"C:\\x\\y\\a.bin") == u"a.bin" && basename_of(L"a.bin") == u"a.bin");
 
   const std::wstring root = ts::make_scratch_dir(L"file_copy_local");
@@ -297,6 +306,53 @@ int main() {
     HANDLE w = open_writer(a);
     check("...and the writer may open", w != INVALID_HANDLE_VALUE);
     if (w != INVALID_HANDLE_VALUE) CloseHandle(w);
+  }
+
+  std::printf("\n--- r3 ④: the handle, not the text, decides where a path went ---\n");
+  {
+    // A file reached THROUGH a junction: the text names a plain file, the handle resolves elsewhere.
+    const std::wstring real = root + L"\\real";
+    const std::wstring viaLink = root + L"\\jn2";
+    check("a directory with a file, and a junction to that directory",
+          CreateDirectoryW(real.c_str(), nullptr) && write_file(real + L"\\t.bin", 4096, 4) && make_junction(viaLink, real));
+    const StatEntry direct = stat_source_file(real + L"\\t.bin");
+    const StatEntry through = stat_source_file(viaLink + L"\\t.bin");
+    check("the direct path is Ok", direct.status == Status::Ok, status_name(direct.status));
+    check("THE SAME FILE THROUGH THE JUNCTION IS PathThroughLink (stat)", through.status == Status::PathThroughLink, status_name(through.status));
+    std::vector<PinResultEntry> r;
+    // (Pin first, then judge: the detail argument is evaluated before the check's condition.)
+    const bool pinned = t.Pin(10, 60000, {pin_entry(viaLink + L"\\t.bin", direct)}, &r);
+    check("...AND FOR Pin, EVEN WITH THE RIGHT FileId", pinned && r.size() == 1 && r[0].status == Status::PathThroughLink && t.pinned_handles() == 0,
+          r.empty() ? "no result" : status_name(r[0].status));
+    check("...while the direct path pins", t.Pin(10, 60000, {pin_entry(real + L"\\t.bin", direct)}, &r) && r[0].status == Status::Ok && t.Unpin(10) == 1);
+  }
+  {
+    // The path is swapped between the offer and the paste: a directory in it is replaced by a
+    // junction that points at the same content elsewhere. Same FileId -- refused all the same.
+    const std::wstring sub = root + L"\\sub";
+    const std::wstring subReal = root + L"\\sub_real";
+    check("a file in a plain directory", CreateDirectoryW(sub.c_str(), nullptr) && write_file(sub + L"\\t2.bin", 1024, 5));
+    const StatEntry before = stat_source_file(sub + L"\\t2.bin");
+    check("...stat is Ok", before.status == Status::Ok);
+    check("the directory is renamed and a junction takes its name", MoveFileW(sub.c_str(), subReal.c_str()) && make_junction(sub, subReal));
+    std::vector<PinResultEntry> r;
+    const bool pinned = t.Pin(11, 60000, {pin_entry(sub + L"\\t2.bin", before)}, &r);
+    check("A PIN THROUGH THE SWAPPED-IN JUNCTION IS PathThroughLink, NOT Ok",
+          pinned && r.size() == 1 && r[0].status == Status::PathThroughLink && t.pinned_handles() == 0,
+          r.empty() ? "no result" : status_name(r[0].status));
+    const StatEntry after = stat_source_file(subReal + L"\\t2.bin");
+    check("...the real location still pins with the same id", after.status == Status::Ok && after.id == before.id &&
+                                                                  t.Pin(11, 60000, {pin_entry(subReal + L"\\t2.bin", before)}, &r) &&
+                                                                  r[0].status == Status::Ok && t.Unpin(11) == 1);
+  }
+  {
+    // Letter case is not a link: the comparison with the handle's path is case-insensitive.
+    std::wstring upper = a;
+    for (auto& c : upper) c = static_cast<wchar_t>(towupper(c));
+    const StatEntry s = stat_source_file(upper);
+    check("the same path in another letter case is Ok", s.status == Status::Ok, status_name(s.status));
+    // A share of this machine is NotLocal / BadPath before any open: refused by classification.
+    check("a UNC form of a local file is refused by classification", stat_source_file(L"\\\\localhost\\C$\\Windows\\notepad.exe").status == Status::BadPath);
   }
 
   check("the scratch run directory is removed", ts::remove_scratch_run_dir());

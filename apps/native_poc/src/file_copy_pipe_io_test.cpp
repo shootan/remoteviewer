@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 
+#include "file_copy_helper_host.hpp"
 #include "file_copy_pipe_io.hpp"
 
 using namespace remote60::native_poc::file_copy;
@@ -207,8 +208,19 @@ std::string describe(const Traffic& t) {
 
 }  // namespace
 
-int main() {
+int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  if (argc > 1 && wcscmp(argv[1], L"--terminate-policy-child") == 0) {
+    // The helper's policy, in a process of its own: a stuck cancellation ends it with 47.
+    PipePair pair;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkClipTest-child-" + std::to_wstring(GetCurrentProcessId());
+    if (!pair.Open(name.c_str())) return 3;
+    FrameReader helper(StuckIoPolicy::TerminateProcess);
+    PipeFrame f;
+    detail::simulate_stuck_cancel() = true;
+    helper.Receive(pair.server, &f, 20, nullptr);  // does not return
+    return 4;
+  }
   std::printf("--- 3000 frames at 0-2 ms gaps, 1 ms polls ---\n");
   {
     FrameReader reader;
@@ -244,7 +256,8 @@ int main() {
       const size_t cuts[4] = {0, cut1, cut2, wire.size()};
       for (int i = 0; i < 3; ++i) {
         DWORD moved = 0;
-        detail::pipe_io_once<true>(pair.client, wire.data() + cuts[i], static_cast<DWORD>(cuts[i + 1] - cuts[i]), 5000, nullptr, &moved);
+        detail::pipe_io_once<true>(pair.client, wire, cuts[i], static_cast<DWORD>(cuts[i + 1] - cuts[i]), 5000, nullptr, &moved,
+                                   StuckIoPolicy::OrphanAndFail);
         Sleep(60);
       }
     });
@@ -278,9 +291,9 @@ int main() {
     FrameReader reader;
     PipeFrame f;
     check("nothing yet: WAIT_TIMEOUT", !reader.Receive(pair.server, &f, 20, nullptr) && GetLastError() == WAIT_TIMEOUT);
-    uint8_t junk[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    std::vector<uint8_t> junk = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
     DWORD moved = 0;
-    detail::pipe_io_once<true>(pair.client, junk, sizeof(junk), 1000, nullptr, &moved);
+    detail::pipe_io_once<true>(pair.client, junk, 0, static_cast<DWORD>(junk.size()), 1000, nullptr, &moved, StuckIoPolicy::OrphanAndFail);
     check("16 bytes that are not a header: ERROR_INVALID_DATA", !reader.Receive(pair.server, &f, 500, nullptr) && GetLastError() == ERROR_INVALID_DATA);
     HANDLE abort = CreateEventW(nullptr, TRUE, TRUE, nullptr);  // already signalled
     FrameReader r2;
@@ -291,6 +304,122 @@ int main() {
     FrameReader r3;
     check("the other end closed: a broken pipe, not a timeout", !r3.Receive(pair.server, &f, 2000, nullptr) && GetLastError() != WAIT_TIMEOUT,
           "err=" + std::to_string(GetLastError()));
+  }
+
+  std::printf("\n--- r3 ①: the connection wait (AwaitHello's pieces) ---\n");
+  {
+    // A connection that completes between the wait timing out and its cancellation is a
+    // connection, not a loss: the hook connects the client in exactly that window.
+    PipePair pair;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkClipTest-conn-" + std::to_wstring(GetCurrentProcessId());
+    pair.server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                   PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, nullptr);
+    check("a listening server pipe", pair.server != INVALID_HANDLE_VALUE);
+    std::unique_ptr<detail::PendingConnect> pending;
+    DWORD err = 0;
+    check("begin_connect with nobody there is Pending", detail::begin_connect(pair.server, &pending, &err) == detail::ConnectOutcome::Pending && pending);
+    detail::before_connect_cancel_hook() = [&] {
+      pair.client = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+      Sleep(20);  // let the completion land before the cancel is issued
+    };
+    const detail::ConnectOutcome o = detail::settle_connect(pair.server, pending, 30, nullptr, &err);
+    detail::before_connect_cancel_hook() = nullptr;
+    check("A CONNECTION THAT BEAT THE CANCELLATION IS Connected, NOT Timeout", o == detail::ConnectOutcome::Connected && !pending,
+          std::to_string(static_cast<int>(o)));
+    check("...and the pipe is usable: a frame goes through", [&] {
+      FrameReader r;
+      PipeFrame f;
+      PasteBegin m;
+      m.offerId = 1;
+      return pipe_send_frame(pair.client, encode(m), 2000) && r.Receive(pair.server, &f, 2000) && f.type == PipeMsg::PasteBegin;
+    }());
+  }
+  {
+    PipePair pair;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkClipTest-conn2-" + std::to_wstring(GetCurrentProcessId());
+    pair.server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                   PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, nullptr);
+    std::unique_ptr<detail::PendingConnect> pending;
+    DWORD err = 0;
+    detail::begin_connect(pair.server, &pending, &err);
+    const uint32_t before = orphaned_io_count();
+    check("nobody connects: Timeout, storage freed, no orphan",
+          detail::settle_connect(pair.server, pending, 30, nullptr, &err) == detail::ConnectOutcome::Timeout && !pending && orphaned_io_count() == before);
+    // The launched process ends first: ProcessExited.
+    detail::begin_connect(pair.server, &pending, &err);
+    HANDLE ended = CreateEventW(nullptr, TRUE, TRUE, nullptr);  // a "process" handle that is already signalled
+    check("the helper process ending first: ProcessExited",
+          detail::settle_connect(pair.server, pending, 5000, ended, &err) == detail::ConnectOutcome::ProcessExited && !pending);
+    CloseHandle(ended);
+    // A cancellation that never completes: the storage is leaked and counted; the wait is Stuck.
+    detail::begin_connect(pair.server, &pending, &err);
+    detail::simulate_stuck_cancel() = true;
+    const detail::ConnectOutcome stuck = detail::settle_connect(pair.server, pending, 30, nullptr, &err);
+    detail::simulate_stuck_cancel() = false;
+    check("A STUCK CANCELLATION IS Stuck: THE STORAGE IS ORPHANED (NOT FREED) AND COUNTED, THE PROCESS LIVES",
+          stuck == detail::ConnectOutcome::Stuck && !pending && orphaned_io_count() == before + 1, std::to_string(orphaned_io_count()));
+  }
+
+  std::printf("\n--- r3 ②: a stuck read / write under each policy ---\n");
+  {
+    const uint32_t before = orphaned_io_count();
+    PipePair pair;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkClipTest-stuck-" + std::to_wstring(GetCurrentProcessId());
+    check("pipe pair", pair.Open(name.c_str()));
+    FrameReader host(StuckIoPolicy::OrphanAndFail);
+    PipeFrame f;
+    detail::simulate_stuck_cancel() = true;
+    const bool got = host.Receive(pair.server, &f, 20, nullptr);
+    const DWORD e = GetLastError();
+    detail::simulate_stuck_cancel() = false;
+    check("HOST POLICY: THE READ FAILS WITH ERROR_IO_INCOMPLETE, THE PROCESS SURVIVES, ONE ORPHAN COUNTED",
+          !got && e == ERROR_IO_INCOMPLETE && orphaned_io_count() == before + 1 && host.orphaned(), "err=" + std::to_string(e));
+    check("...the reader is finished (every later call says so at once)", !host.Receive(pair.server, &f, 5000, nullptr) && GetLastError() == ERROR_IO_INCOMPLETE);
+    // A fresh pipe and reader work as before: the orphan cost this link, not the process.
+    PipePair fresh;
+    check("...a fresh pipe still works", fresh.Open((name + L"-fresh").c_str()) && [&] {
+      FrameReader r;
+      PasteBegin m;
+      m.offerId = 3;
+      PipeFrame g;
+      return pipe_send_frame(fresh.client, encode(m), 2000) && r.Receive(fresh.server, &g, 2000) && g.type == PipeMsg::PasteBegin;
+    }());
+    // The bound: at kMaxOrphanedIo no new I/O is started.
+    const uint32_t saved = detail::orphan_counter().load();
+    detail::orphan_counter().store(kMaxOrphanedIo);
+    FrameReader capped;
+    const bool started = capped.Receive(fresh.server, &f, 20, nullptr);
+    const DWORD capErr = GetLastError();
+    detail::orphan_counter().store(saved);
+    check("AT THE ORPHAN BOUND NO NEW I/O IS STARTED (ERROR_NO_SYSTEM_RESOURCES)", !started && capErr == ERROR_NO_SYSTEM_RESOURCES,
+          "err=" + std::to_string(capErr));
+    // A write under the host policy: the wire buffer goes to the orphan; the send fails.
+    detail::simulate_stuck_cancel() = true;
+    PasteBegin m;
+    m.offerId = 4;
+    // Fill the pipe so the write must pend: 64 KiB buffer, write 200 KiB with nobody reading.
+    ReadData big;
+    big.data.resize(200 * 1024);
+    const bool sent = pipe_send_frame(fresh.client, encode(big), 20, nullptr, StuckIoPolicy::OrphanAndFail);
+    const DWORD sendErr = GetLastError();
+    detail::simulate_stuck_cancel() = false;
+    check("HOST POLICY: A STUCK WRITE FAILS (ERROR_IO_INCOMPLETE), NO TERMINATION", !sent && sendErr == ERROR_IO_INCOMPLETE && orphaned_io_count() == before + 2,
+          "err=" + std::to_string(sendErr) + " orphans=" + std::to_string(orphaned_io_count()));
+    // The helper policy terminates the process -- proven by running this test itself as a child.
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = std::wstring(L"\"") + exe + L"\" --terminate-policy-child";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    DWORD code = 0xFFFFFFFF;
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+      if (WaitForSingleObject(pi.hProcess, 15000) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+      else TerminateProcess(pi.hProcess, 200);
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    check("HELPER POLICY: A STUCK CANCELLATION TERMINATES THAT PROCESS (exit 47), NOT THIS ONE", code == 47, "child exit=" + std::to_string(code));
   }
 
   std::printf("\n%s  (%d checks, %d failed)\n", gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);

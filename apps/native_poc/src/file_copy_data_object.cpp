@@ -86,6 +86,13 @@ class RemoteFileStream : public IStream {
       const Status st = owner_->transport_->Read(owner_->offerId_, pasteOp_, index_, pos_, chunk,
                                                 owner_->config_.readTimeoutMs, &data);
       --owner_->waiting_;
+      if (!owner_->op_is(pasteOp_)) {
+        // The STA pumped while waiting and the operation ended or was replaced: these bytes are
+        // for a paste that no longer exists. Nothing is copied, nothing is touched. (r3 ③)
+        owner_->log("stream index=" + std::to_string(index_) + " op=" + std::to_string(pasteOp_) +
+                    " ended while a Read was waiting -> E_FAIL");
+        return E_FAIL;
+      }
       if (st != Status::Ok) {
         owner_->log("stream index=" + std::to_string(index_) + " Read offset=" + std::to_string(pos_) +
                     " -> " + status_name(st) + " -> E_FAIL");
@@ -196,12 +203,17 @@ HRESULT RemoteFilesDataObject::descriptor(STGMEDIUM* sm) {
     return E_FAIL;
   }
   if (!op_.confirmed) {
+    // The operation this wait belongs to, fixed BEFORE the wait: the STA pumps while waiting, and
+    // a new StartOperation (a second paste, a cleared offer) can replace op_ underneath. A reply
+    // for the old operation must not become the new one's descriptor. (r3 ③)
+    const uint64_t op = op_.pasteOp;
     std::vector<RemoteFileItem> confirmed;
     ++waiting_;
-    const Status st = transport_->WaitDescriptor(offerId_, op_.pasteOp, config_.descriptorTimeoutMs, &confirmed);
+    const Status st = transport_->WaitDescriptor(offerId_, op, config_.descriptorTimeoutMs, &confirmed);
     --waiting_;
-    if (!op_.active) {
-      log("descriptor: the operation ended while waiting -> E_FAIL");
+    if (!op_is(op)) {
+      log("descriptor: op=" + std::to_string(op) + " changed while waiting (now " +
+          (op_.active ? std::to_string(op_.pasteOp) : std::string("none")) + ") -> E_FAIL");
       return E_FAIL;
     }
     if (st != Status::Ok) {

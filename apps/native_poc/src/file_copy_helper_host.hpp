@@ -24,6 +24,8 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 
 #include "file_copy_pipe.hpp"
@@ -72,6 +74,43 @@ HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceByte
  * prevent. The product path always passes the linked token; this guards a later wiring mistake.
  */
 bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid);
+
+namespace detail {
+
+/**
+ * The pieces of AwaitHello's connection wait, exposed so the cases that cannot be timed from
+ * outside -- a connection completing between the wait timing out and its cancellation, a
+ * cancellation that never completes -- can be driven deterministically. (r3 ①)
+ */
+enum class ConnectOutcome : uint8_t {
+  Connected = 0,
+  Pending,        // begin_connect only: the wait is on
+  Timeout,
+  ProcessExited,  // the launched helper ended before connecting
+  Failed,         // an API error (*error)
+  Stuck,          // the cancellation never completed: the storage was orphaned (leaked, counted)
+};
+
+/** Heap-owned storage of a pending ConnectNamedPipe, freed only once the OS says it is over. */
+struct PendingConnect {
+  OVERLAPPED io{};
+};
+
+/** Starts ConnectNamedPipe. Connected / Failed at once, or Pending with `*pending` to settle. */
+ConnectOutcome begin_connect(HANDLE pipe, std::unique_ptr<PendingConnect>* pending, DWORD* error);
+
+/**
+ * Waits up to `timeoutMs` for a pending connection (ending early if `process` ends), cancels it at
+ * the bound, and then asks the OS what actually happened: a connection that completed before the
+ * cancellation took effect is Connected, not lost. Stuck leaks the storage and counts it.
+ */
+ConnectOutcome settle_connect(HANDLE pipe, std::unique_ptr<PendingConnect>& pending, DWORD timeoutMs, HANDLE process,
+                              DWORD* error);
+
+/** Test seam: runs after a connection wait times out and before it is cancelled. */
+std::function<void()>& before_connect_cancel_hook();
+
+}  // namespace detail
 
 class HelperLink {
  public:

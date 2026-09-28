@@ -67,20 +67,65 @@ Status describe_open_file(HANDLE h, FileId* id, uint64_t* size, uint64_t* mtime,
 }  // namespace
 
 Status classify_source_path(const std::wstring& path) {
-  if (path.empty()) return Status::BadPath;
-  if (starts_with(path, L"\\\\.\\") || starts_with(path, L"\\\\?\\") || starts_with(path, L"\\??\\") ||
-      starts_with(path, L"//./") || starts_with(path, L"//?/")) {
-    return Status::BadPath;
-  }
-  // A colon anywhere but as the drive separator ("C:\...") names an alternate data stream or a
-  // device ("CON:"); neither is a file this feature copies.
+  // Explicit local absolute paths only: "X:\..." with backslashes. That refuses UNC, relative and
+  // drive-relative forms, the "\\?\" / "\\.\" / "\??\" object-manager prefixes and forward slashes
+  // in one rule -- the shell puts CF_HDROP paths on the clipboard in exactly this form. (r3 ④)
+  if (path.size() < 4) return Status::BadPath;
+  const wchar_t d = path[0];
+  if (!((d >= L'A' && d <= L'Z') || (d >= L'a' && d <= L'z')) || path[1] != L':' || path[2] != L'\\') return Status::BadPath;
   for (size_t i = 0; i < path.size(); ++i) {
-    if (path[i] == L':' && i != 1) return Status::BadPath;
+    const wchar_t c = path[i];
+    // A colon anywhere but as the drive separator names an alternate data stream or a device.
+    if (c == L'/' || c < 0x20 || (c == L':' && i != 1)) return Status::BadPath;
   }
-  if (path.size() >= 2 && path[1] == L':' && !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z'))) {
-    return Status::BadPath;
+  // No "." / ".." components, no empty component (a doubled or trailing backslash).
+  size_t start = 3;
+  for (size_t i = 3; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == L'\\') {
+      const std::wstring component = path.substr(start, i - start);
+      if (component.empty() || component == L"." || component == L"..") return Status::BadPath;
+      start = i + 1;
+    }
   }
   if (has_extension(path, L".lnk") || has_extension(path, L".url")) return Status::Excluded;
+  return Status::Ok;
+}
+
+Status open_source_file(const std::wstring& path, DWORD access, DWORD share, HANDLE* out) {
+  *out = INVALID_HANDLE_VALUE;
+  const Status c = classify_source_path(path);
+  if (c != Status::Ok) return c;
+  // The link itself, not what it points at: a reparse point as the final component is Excluded
+  // before anything is opened. GetFileAttributes does not follow. A directory is not a file.
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES) return status_from_open_error(GetLastError());
+  if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) return Status::Excluded;
+  if (attrs & FILE_ATTRIBUTE_DIRECTORY) return Status::NotAFile;
+  // FILE_FLAG_OPEN_REPARSE_POINT: if the final component became a reparse point since the check
+  // above, the handle is the link itself (describe_open_file reports it Excluded), never the target.
+  HANDLE h = CreateFileW(path.c_str(), access, share, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return status_from_open_error(GetLastError());
+  // Where the handle REALLY is. A junction or symlinked directory anywhere above the file, a
+  // substituted or mapped drive, a share: the resolved path differs from the one asked for, or is
+  // not a local drive letter at all. The handle, not the text, is the authority. (r3 ④)
+  std::wstring finalPath(32768, L'\0');
+  const DWORD n = GetFinalPathNameByHandleW(h, finalPath.data(), static_cast<DWORD>(finalPath.size()),
+                                            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (n == 0 || n >= finalPath.size()) {
+    CloseHandle(h);
+    return Status::NotLocal;  // no DOS name: an unlettered volume, or nothing this feature copies
+  }
+  finalPath.resize(n);
+  if (starts_with(finalPath, L"\\\\?\\")) finalPath.erase(0, 4);
+  if (starts_with(finalPath, L"UNC\\") || classify_source_path(finalPath) == Status::BadPath) {
+    CloseHandle(h);
+    return Status::NotLocal;
+  }
+  if (_wcsicmp(finalPath.c_str(), path.c_str()) != 0) {
+    CloseHandle(h);
+    return Status::PathThroughLink;
+  }
+  *out = h;
   return Status::Ok;
 }
 
@@ -92,29 +137,9 @@ std::u16string basename_of(const std::wstring& path) {
 
 StatEntry stat_source_file(const std::wstring& path) {
   StatEntry entry;
-  entry.status = classify_source_path(path);
+  HANDLE h = INVALID_HANDLE_VALUE;
+  entry.status = open_source_file(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &h);
   if (entry.status != Status::Ok) return entry;
-  // The link itself, not what it points at: a symbolic link or junction is Excluded before it is
-  // followed. GetFileAttributes does not follow.
-  const DWORD attrs = GetFileAttributesW(path.c_str());
-  if (attrs == INVALID_FILE_ATTRIBUTES) {
-    entry.status = status_from_open_error(GetLastError());
-    return entry;
-  }
-  if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
-    entry.status = Status::Excluded;
-    return entry;
-  }
-  if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-    entry.status = Status::NotAFile;
-    return entry;
-  }
-  HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         nullptr, OPEN_EXISTING, 0, nullptr);
-  if (h == INVALID_HANDLE_VALUE) {
-    entry.status = status_from_open_error(GetLastError());
-    return entry;
-  }
   entry.status = describe_open_file(h, &entry.id, &entry.size, &entry.mtime, &entry.attributes);
   CloseHandle(h);
   if (entry.status == Status::Ok) {
@@ -157,24 +182,13 @@ bool LocalFileTable::Pin(uint64_t pinId, uint32_t leaseMs, const std::vector<Pin
     PinResultEntry r;
     PinnedFile pf;
     const std::wstring path(e.path.begin(), e.path.end());
-    r.status = classify_source_path(path);
-    if (r.status == Status::Ok) {
-      const DWORD attrs = GetFileAttributesW(path.c_str());
-      if (attrs == INVALID_FILE_ATTRIBUTES) {
-        r.status = status_from_open_error(GetLastError());
-      } else if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
-        r.status = Status::Excluded;
-      } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-        r.status = Status::NotAFile;
-      }
-    }
-    if (r.status == Status::Ok) {
+    {
       // FILE_SHARE_READ alone: another reader is fine, a writer (or a delete / rename) is refused
-      // now, and none can arrive while this handle is held. No privileged retry, ever.
-      HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-      if (h == INVALID_HANDLE_VALUE) {
-        r.status = status_from_open_error(GetLastError());
-      } else {
+      // now, and none can arrive while this handle is held. No privileged retry, ever. The same
+      // path policy as Stat, applied to the handle actually opened (r3 ④).
+      HANDLE h = INVALID_HANDLE_VALUE;
+      r.status = open_source_file(path, GENERIC_READ, FILE_SHARE_READ, &h);
+      if (r.status == Status::Ok) {
         uint32_t attributes = 0;
         r.status = describe_open_file(h, &r.id, &r.size, &r.mtime, &attributes);
         if (r.status == Status::Ok && r.id != e.expectedId) {

@@ -31,13 +31,22 @@
 namespace remote60::native_poc::file_copy {
 
 /**
- * What the path text alone says. BadPath for device / object-manager / stream syntax and an
- * empty path; Excluded for a .lnk / .url; Ok otherwise (the open decides the rest).
- * "\\?\" and "\\.\" prefixes are refused: the host hands over paths as the shell put them on the
- * clipboard, which are ordinary DOS paths, and the object-manager forms are how a caller reaches
- * devices and volumes by name.
+ * What the path text alone says. Only an explicit local absolute path ("X:\...", backslashes, no
+ * "." / ".." / empty components, no stream colon) is Ok; UNC, relative, drive-relative, "\\?\" /
+ * "\\.\" / "\??\" and forward-slash forms are BadPath; a .lnk / .url is Excluded. The shell hands
+ * CF_HDROP paths over in exactly the accepted form. (r3 ④)
  */
 Status classify_source_path(const std::wstring& path);
+
+/**
+ * Opens a source file under the whole policy, text and handle alike: classify_source_path; the
+ * final component is never followed if it is a reparse point (FILE_FLAG_OPEN_REPARSE_POINT --
+ * the handle is then the link, which is Excluded); and the opened handle's real path
+ * (GetFinalPathNameByHandle) must be the path asked for on a local drive letter -- otherwise the
+ * file was reached through a junction or symlinked directory (PathThroughLink), or is on a share /
+ * mapped or unlettered volume (NotLocal). Ok hands the handle to the caller.
+ */
+Status open_source_file(const std::wstring& path, DWORD access, DWORD share, HANDLE* out);
 
 /** The basename of a path (after the last separator). */
 std::u16string basename_of(const std::wstring& path);

@@ -261,7 +261,8 @@ bool pipe_broken(HANDLE pipe) {
 void sender_main() {
   PipeFrame frame;
   while (gShared.send->Pop(&frame)) {
-    if (!pipe_send_frame(gShared.pipe, frame, 5000, gShared.abort)) {
+    // The helper is an isolated process: a cancellation that never completes ends it (r3 ②).
+    if (!pipe_send_frame(gShared.pipe, frame, 5000, gShared.abort, StuckIoPolicy::TerminateProcess)) {
       if (WaitForSingleObject(gShared.abort, 0) != WAIT_OBJECT_0) {
         logf("send failed type=%u -> pipe gone", static_cast<unsigned>(frame.type));
         post_shutdown(1);
@@ -274,7 +275,7 @@ void sender_main() {
 // The reader owns the local file table: every Stat / Pin / ReadLocal / Unpin runs here.
 void reader_main() {
   LocalFileTable table;
-  FrameReader reader;  // keeps a half-received frame across the 1 s polls (r2)
+  FrameReader reader(StuckIoPolicy::TerminateProcess);  // keeps a half-received frame across the 1 s polls (r2)
   for (;;) {
     PipeFrame f;
     if (!reader.Receive(gShared.pipe, &f, 1000, gShared.abort)) {
@@ -621,12 +622,12 @@ int wmain(int argc, wchar_t** argv) {
   Hello hello;
   hello.nonce = o.nonce;
   hello.pid = GetCurrentProcessId();
-  if (!pipe_send_frame(gShared.pipe, encode(hello), 5000)) {
+  if (!pipe_send_frame(gShared.pipe, encode(hello), 5000, nullptr, StuckIoPolicy::TerminateProcess)) {
     logf("hello send failed err=%lu", GetLastError());
     return 3;
   }
   PipeFrame ack;
-  FrameReader helloReader;
+  FrameReader helloReader(StuckIoPolicy::TerminateProcess);
   if (!helloReader.Receive(gShared.pipe, &ack, 10000) || ack.type != PipeMsg::HelloAck) {
     logf("no HelloAck (refused?) err=%lu", GetLastError());
     return 4;

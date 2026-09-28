@@ -197,6 +197,69 @@ bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid) {
   return integrityRid < SECURITY_MANDATORY_HIGH_RID;
 }
 
+namespace detail {
+
+std::function<void()>& before_connect_cancel_hook() {
+  static std::function<void()> hook;
+  return hook;
+}
+
+ConnectOutcome begin_connect(HANDLE pipe, std::unique_ptr<PendingConnect>* pending, DWORD* error) {
+  pending->reset();
+  *error = ERROR_SUCCESS;
+  auto p = std::make_unique<PendingConnect>();
+  p->io.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!p->io.hEvent) {
+    *error = GetLastError();
+    return ConnectOutcome::Failed;
+  }
+  const BOOL connected = ConnectNamedPipe(pipe, &p->io);
+  const DWORD e = connected ? ERROR_SUCCESS : GetLastError();
+  if (connected || e == ERROR_PIPE_CONNECTED) {
+    CloseHandle(p->io.hEvent);
+    return ConnectOutcome::Connected;
+  }
+  if (e == ERROR_IO_PENDING) {
+    *pending = std::move(p);
+    return ConnectOutcome::Pending;
+  }
+  CloseHandle(p->io.hEvent);
+  *error = e;
+  return ConnectOutcome::Failed;
+}
+
+ConnectOutcome settle_connect(HANDLE pipe, std::unique_ptr<PendingConnect>& pending, DWORD timeoutMs, HANDLE process,
+                              DWORD* error) {
+  *error = ERROR_SUCCESS;
+  if (!pending) return ConnectOutcome::Failed;
+  HANDLE waits[2] = {pending->io.hEvent, process};
+  const DWORD w = WaitForMultipleObjects(process ? 2 : 1, waits, FALSE, timeoutMs);
+  ConnectOutcome early = ConnectOutcome::Connected;
+  if (w != WAIT_OBJECT_0) {
+    early = (w == WAIT_OBJECT_0 + 1) ? ConnectOutcome::ProcessExited : ConnectOutcome::Timeout;
+    if (before_connect_cancel_hook()) before_connect_cancel_hook()();
+    CancelIoEx(pipe, &pending->io);
+    if (file_copy::detail::simulate_stuck_cancel() ||
+        WaitForSingleObject(pending->io.hEvent, file_copy::detail::cancel_wait_ms()) != WAIT_OBJECT_0) {
+      // Not finished: the OS may still complete into this storage. Leaked, never freed.
+      (void)pending.release();
+      file_copy::detail::orphan_counter().fetch_add(1);
+      return ConnectOutcome::Stuck;
+    }
+  }
+  DWORD moved = 0;
+  const BOOL ok = GetOverlappedResult(pipe, &pending->io, &moved, FALSE);
+  const DWORD e = ok ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(pending->io.hEvent);
+  pending.reset();
+  if (ok) return ConnectOutcome::Connected;  // including a connection that beat the cancellation
+  if (e == ERROR_OPERATION_ABORTED && early != ConnectOutcome::Connected) return early;
+  *error = e;
+  return ConnectOutcome::Failed;
+}
+
+}  // namespace detail
+
 HelperLink::~HelperLink() { Close(); }
 
 bool HelperLink::CreateServerPipe(const std::wstring& userSid, std::string* why) {
@@ -325,29 +388,22 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
     pipe_ = INVALID_HANDLE_VALUE;
     return false;
   };
-  OVERLAPPED io{};
-  io.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (!io.hEvent) return refuse("event");
-  const BOOL connected = ConnectNamedPipe(pipe_, &io);
-  const DWORD err = connected ? ERROR_SUCCESS : GetLastError();
-  bool ok = false;
-  if (connected || err == ERROR_PIPE_CONNECTED) {
-    ok = true;
-  } else if (err == ERROR_IO_PENDING) {
-    HANDLE waits[2] = {io.hEvent, process_};
-    const DWORD w = WaitForMultipleObjects(process_ ? 2 : 1, waits, FALSE, timeoutMs);
-    if (w == WAIT_OBJECT_0) {
-      DWORD moved = 0;
-      ok = GetOverlappedResult(pipe_, &io, &moved, FALSE) != FALSE;
-    } else {
-      CancelIoEx(pipe_, &io);
-      WaitForSingleObject(io.hEvent, 2000);
-      CloseHandle(io.hEvent);
-      return refuse(w == WAIT_OBJECT_0 + 1 ? "helper-exited-before-connecting" : "connect-timeout");
-    }
+  std::unique_ptr<detail::PendingConnect> pending;
+  DWORD err = 0;
+  detail::ConnectOutcome outcome = detail::begin_connect(pipe_, &pending, &err);
+  if (outcome == detail::ConnectOutcome::Pending) outcome = detail::settle_connect(pipe_, pending, timeoutMs, process_, &err);
+  switch (outcome) {
+    case detail::ConnectOutcome::Connected:
+      break;
+    case detail::ConnectOutcome::Timeout:
+      return refuse("connect-timeout");
+    case detail::ConnectOutcome::ProcessExited:
+      return refuse("helper-exited-before-connecting");
+    case detail::ConnectOutcome::Stuck:
+      return refuse("connect-cancel-stuck");  // the storage is orphaned; this link is over
+    default:
+      return refuse("ConnectNamedPipe err=" + std::to_string(err));
   }
-  CloseHandle(io.hEvent);
-  if (!ok) return refuse("ConnectNamedPipe err=" + std::to_string(err));
   ULONG clientPid = 0;
   if (!GetNamedPipeClientProcessId(pipe_, &clientPid)) return refuse("client-pid-unreadable");
   PipeFrame frame;

@@ -701,6 +701,21 @@ int run_driver() {
     bad.Close();
   }
   {
+    // The launched helper exits before anyone connects and nobody else does: refused as such,
+    // promptly, with the connection wait's storage settled (r3 ①).
+    HelperLink bad;
+    std::string why;
+    bad.CreateServerPipe(userSid, &why);
+    check("...launch a helper that exits at once (bad pipe, no client)",
+          bad.Launch(helperExe, nullptr, station.desktop.c_str(), L"--pipe \\\\.\\pipe\\GNLinkClip-does-not-exist", &why), why);
+    const ULONGLONG t0 = GetTickCount64();
+    const bool accepted = bad.AwaitHello(15000, &why);
+    const ULONGLONG took = GetTickCount64() - t0;
+    check("A HELPER THAT EXITED BEFORE CONNECTING IS REFUSED AS SUCH, WITHOUT WAITING OUT THE TIMEOUT",
+          !accepted && why == "helper-exited-before-connecting" && took < 10000, why + " in " + std::to_string(took) + " ms");
+    bad.Close();
+  }
+  {
     // The real helper, told a wrong nonce (its last --nonce wins): refused, and it exits 4.
     HelperLink bad;
     std::string why;
@@ -1060,6 +1075,7 @@ int run_driver() {
   }
   if (station.dk) CloseDesktop(station.dk);
   if (station.ws) CloseWindowStation(station.ws);
+  check("the host side orphaned no pending I/O in this whole run", orphaned_io_count() == 0, std::to_string(orphaned_io_count()));
   check("the scratch run directory is removed", ts::remove_scratch_run_dir());
   return 0;
 }

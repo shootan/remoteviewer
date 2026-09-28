@@ -103,6 +103,8 @@ enum class Status : uint16_t {
   Timeout = 14,
   Refused = 15,          // e.g. a name the descriptor may not carry
   BadRequest = 16,       // index / offset / length outside the item
+  PathThroughLink = 17,  // the path reaches the file through a junction / symlinked directory
+  NotLocal = 18,         // the file is not on a local drive letter (UNC, mapped, unlettered volume)
 };
 
 enum class EndReason : uint16_t {
@@ -812,6 +814,8 @@ inline const char* status_name(Status s) {
     case Status::Timeout: return "timeout";
     case Status::Refused: return "refused";
     case Status::BadRequest: return "bad-request";
+    case Status::PathThroughLink: return "path-through-link";
+    case Status::NotLocal: return "not-local";
   }
   return "?";
 }

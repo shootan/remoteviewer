@@ -219,10 +219,25 @@ endif()
 # polls, and the error vocabulary. The pre-r2 receive path is kept in the test to measure its loss.
 add_executable(remote60_file_copy_pipe_io_test
   src/file_copy_pipe_io_test.cpp
+  src/file_copy_helper_host.cpp
 )
 target_include_directories(remote60_file_copy_pipe_io_test PRIVATE src)
+target_link_libraries(remote60_file_copy_pipe_io_test PRIVATE advapi32 wtsapi32 bcrypt)
 if(MSVC)
   target_compile_options(remote60_file_copy_pipe_io_test PRIVATE /utf-8)
+endif()
+
+# r3: the data object against a transport that re-enters it -- a new paste or a cleared offer
+# arriving while a descriptor / Read wait pumps must not confirm the new operation with the old
+# reply nor hand bytes to a stream of a paste that ended. Deterministic: no shell, no pipe.
+add_executable(remote60_file_copy_data_object_test
+  src/file_copy_data_object_test.cpp
+  src/file_copy_data_object.cpp
+)
+target_include_directories(remote60_file_copy_data_object_test PRIVATE src)
+target_link_libraries(remote60_file_copy_data_object_test PRIVATE ole32 shell32 shlwapi user32 uuid)
+if(MSVC)
+  target_compile_options(remote60_file_copy_data_object_test PRIVATE /utf-8)
 endif()
 
 # The helper's local-file side in process: stat / classify, pin with FILE_SHARE_READ (a writer is
