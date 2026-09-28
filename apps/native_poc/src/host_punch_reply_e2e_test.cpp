@@ -194,6 +194,14 @@ std::wstring isolation_args(const std::wstring& stagingDir) {
 
 bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t mediaPort,
                uint16_t controlPort, const char* tag) {
+  if (mediaPort == 0 || controlPort == 0) {
+    // A port the picker could not provide must not reach the host: --bind-port 0 reads as "no
+    // candidates" and the host would fall back to the product's default port. Nothing is staged,
+    // nothing is started; the case fails at its "starts" check.
+    std::printf("SKIP-LAUNCH %s: no free port (media udp %u, control tcp %u), the host is not started\n", tag,
+                mediaPort, controlPort);
+    return false;
+  }
   wchar_t temp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, temp);
   host->dir = std::wstring(temp) + L"remote60_punch_e2e_" +

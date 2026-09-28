@@ -685,6 +685,11 @@ int main(int argc, char** argv) {
                                   (tight ? L"tight" : L"padded") + L"\\";
       const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
       check(port != 0, std::string(cls) + (tight ? " tight" : " padded") + ": a free UDP port for the host", u(port));
+      if (port == 0) {
+        // --bind-port 0 would send the host to the product's default port: nothing is started.
+        std::printf("SKIP-LAUNCH %s %s: no free port, the host is not started\n", cls, tight ? "tight" : "padded");
+        continue;
+      }
       res[layout] = run_host(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed);
       print_run(content, tight, lossPermille, lossSeed, res[layout]);
       const RunResult& r = res[layout];

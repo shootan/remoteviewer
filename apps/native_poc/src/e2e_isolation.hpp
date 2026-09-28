@@ -151,12 +151,20 @@ inline std::wstring e2e_block_localappdata(const std::vector<wchar_t>& block) {
  * host's media port, every proxy) or SOCK_STREAM (the host's control port). The pick itself is
  * retried a few times; an empty vector means no port could be found.
  *
- * The ports are released before they are handed over, so another process could in principle bind
- * one in the milliseconds before ours does. The OS does not reissue a port it just gave out and
- * the range holds sixteen thousand, so the tests treat that as noise rather than a case to
- * retry: a host that still fails to bind fails its test as before, now on a port nobody chose.
+ * Limit: bind-0 / close / the host's own bind is NOT a reservation. The ports are released before
+ * they are handed over, so another process may bind one in between; when that happens the host
+ * fails at its bind and that test fails, as it did before -- there is no retry at launch.
+ *
+ * A caller must not start a host on an empty or short result: the host reads --bind-port 0 as
+ * "no candidates" and falls back to the product's default port (parse_bind_port_candidates), which
+ * is exactly the collision this is here to prevent. REMOTE60_E2E_PICK_PORT_FAIL=1 makes every pick
+ * fail, so a test can show that it then starts nothing.
  */
 inline std::vector<uint16_t> e2e_pick_free_ports(int type, size_t count) {
+  {
+    wchar_t fail[8]{};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_PICK_PORT_FAIL", fail, 8) != 0 && fail[0] == L'1') return {};
+  }
   WSADATA wsa{};
   const bool started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;  // reference counted: harmless if already up
   std::vector<uint16_t> ports;
