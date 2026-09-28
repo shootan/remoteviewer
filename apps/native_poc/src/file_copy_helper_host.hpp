@@ -27,6 +27,7 @@
 #include <string>
 
 #include "file_copy_pipe.hpp"
+#include "file_copy_pipe_io.hpp"
 
 namespace remote60::native_poc::file_copy {
 
@@ -64,6 +65,14 @@ struct HelloCheck {
 HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceBytes>& expectedNonce,
                         uint32_t clientPid, uint32_t launchedPid);
 
+/**
+ * Pure: whether a process with this elevation type and integrity may start the helper as ITSELF
+ * (HelperLink::Launch with token == nullptr, the Medium test launch). An elevated caller may not:
+ * the helper would inherit administrator rights, which is the one thing this design exists to
+ * prevent. The product path always passes the linked token; this guards a later wiring mistake.
+ */
+bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid);
+
 class HelperLink {
  public:
   HelperLink() = default;
@@ -89,7 +98,8 @@ class HelperLink {
    * Starts the helper, suspended, puts it in a Job that kills it when the Job (this object) goes,
    * then resumes it. `token` non-null: CreateProcessWithTokenW(token) -- the product path, needs
    * SeImpersonate (an elevated host has it). `token` null: CreateProcessW as this process's user
-   * -- the Medium test launch. `desktop` (optional) is the `winsta\desktop` the helper is put on.
+   * -- the Medium test launch, REFUSED when this process is elevated (medium_launch_allowed).
+   * `desktop` (optional) is the `winsta\desktop` the helper is put on.
    */
   bool Launch(const std::wstring& exe, HANDLE token, const wchar_t* desktop, const std::wstring& extraArgs,
               std::string* why);
@@ -101,7 +111,12 @@ class HelperLink {
    */
   bool AwaitHello(DWORD timeoutMs, std::string* why);
 
+  /** False closes the pipe: a frame that could not be written whole leaves the link unusable. */
   bool Send(const PipeFrame& frame, DWORD timeoutMs = 5000);
+  /**
+   * False with GetLastError() == WAIT_TIMEOUT means "nothing complete yet" (a half-received frame
+   * is kept for the next call); any other error closes the pipe.
+   */
   bool Receive(PipeFrame* frame, DWORD timeoutMs);
 
   /** Closes the pipe, the process handle and the Job (which ends the helper). */
@@ -126,6 +141,7 @@ class HelperLink {
   HANDLE job_ = nullptr;
   DWORD helperPid_ = 0;
   bool handshaken_ = false;
+  FrameReader reader_;
 };
 
 /**

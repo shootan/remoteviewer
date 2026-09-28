@@ -192,6 +192,11 @@ HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceByte
   return c;
 }
 
+bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid) {
+  if (type == TokenElevationTypeFull) return false;
+  return integrityRid < SECURITY_MANDATORY_HIGH_RID;
+}
+
 HelperLink::~HelperLink() { Close(); }
 
 bool HelperLink::CreateServerPipe(const std::wstring& userSid, std::string* why) {
@@ -243,6 +248,26 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
   if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
     if (why) *why = "helper-exe-missing";
     return false;
+  }
+  if (!token) {
+    // Starting the helper as THIS process is only for a process that is already the plain user.
+    // An elevated caller would hand it administrator rights: refused, whatever asked. (r2)
+    HANDLE self = nullptr;
+    TOKEN_ELEVATION_TYPE type{};
+    DWORD rid = SECURITY_MANDATORY_HIGH_RID;  // unreadable counts as elevated
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &self)) {
+      DWORD len = 0;
+      if (!GetTokenInformation(self, TokenElevationType, &type, sizeof(type), &len)) type = TokenElevationTypeFull;
+      rid = token_integrity_rid(self);
+      if (rid == 0) rid = SECURITY_MANDATORY_HIGH_RID;
+      CloseHandle(self);
+    } else {
+      type = TokenElevationTypeFull;
+    }
+    if (!medium_launch_allowed(type, rid)) {
+      if (why) *why = "medium-launch-refused-caller-elevated";
+      return false;
+    }
   }
   job_ = CreateJobObjectW(nullptr, nullptr);
   if (!job_) {
@@ -326,7 +351,8 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
   ULONG clientPid = 0;
   if (!GetNamedPipeClientProcessId(pipe_, &clientPid)) return refuse("client-pid-unreadable");
   PipeFrame frame;
-  if (!pipe_receive_frame(pipe_, &frame, timeoutMs)) return refuse("no-hello");
+  reader_ = FrameReader{};
+  if (!reader_.Receive(pipe_, &frame, timeoutMs)) return refuse("no-hello");
   Hello hello;
   if (!decode(frame, &hello)) return refuse("hello-malformed");
   const HelloCheck check = verify_hello(hello, nonce_, clientPid, helperPid_);
@@ -338,12 +364,23 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
 
 bool HelperLink::Send(const PipeFrame& frame, DWORD timeoutMs) {
   if (pipe_ == INVALID_HANDLE_VALUE) return false;
-  return pipe_send_frame(pipe_, frame, timeoutMs);
+  if (pipe_send_frame(pipe_, frame, timeoutMs)) return true;
+  const DWORD error = GetLastError();
+  ClosePipe();  // part of a frame may be on the wire: nothing sent after it could be framed
+  SetLastError(error);
+  return false;
 }
 
 bool HelperLink::Receive(PipeFrame* frame, DWORD timeoutMs) {
-  if (pipe_ == INVALID_HANDLE_VALUE) return false;
-  return pipe_receive_frame(pipe_, frame, timeoutMs);
+  if (pipe_ == INVALID_HANDLE_VALUE) {
+    SetLastError(ERROR_PIPE_NOT_CONNECTED);
+    return false;
+  }
+  if (reader_.Receive(pipe_, frame, timeoutMs)) return true;
+  const DWORD error = GetLastError();
+  if (error != WAIT_TIMEOUT) ClosePipe();  // broken, aborted, or not a frame: the link is over
+  SetLastError(error);
+  return false;
 }
 
 void HelperLink::ClosePipe() {

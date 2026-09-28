@@ -214,6 +214,17 @@ if(MSVC)
   target_compile_options(remote60_file_copy_pipe_test PRIVATE /utf-8)
 endif()
 
+# r2: the frame reader against the poll-boundary race that lost PasteBegin / PasteEnd in r1 --
+# thousands of frames at 0-2 ms gaps polled at 1 ms, a frame arriving in pieces across timed-out
+# polls, and the error vocabulary. The pre-r2 receive path is kept in the test to measure its loss.
+add_executable(remote60_file_copy_pipe_io_test
+  src/file_copy_pipe_io_test.cpp
+)
+target_include_directories(remote60_file_copy_pipe_io_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_file_copy_pipe_io_test PRIVATE /utf-8)
+endif()
+
 # The helper's local-file side in process: stat / classify, pin with FILE_SHARE_READ (a writer is
 # refused, and refused while pinned), FileId check (replaced file refused), size / time check,
 # positional reads, lease expiry with a fake clock, unpin. Files live in the repo's scratch root.

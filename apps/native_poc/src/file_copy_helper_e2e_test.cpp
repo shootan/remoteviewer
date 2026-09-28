@@ -426,6 +426,12 @@ struct Child {
     if (pi.hProcess) TerminateProcess(pi.hProcess, 124);
   }
   ~Child() {
+    // A consumer still running when its case is over would keep the destination open and the
+    // scratch directory undeletable; it has nothing left to prove.
+    if (pi.hProcess && WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) {
+      TerminateProcess(pi.hProcess, 125);
+      WaitForSingleObject(pi.hProcess, 5000);
+    }
     if (pi.hThread) CloseHandle(pi.hThread);
     if (pi.hProcess) CloseHandle(pi.hProcess);
   }
@@ -458,6 +464,11 @@ PasteLog serve_paste(HelperLink& link, uint64_t offerId, const PasteScript& scri
   while (GetTickCount64() < deadline) {
     PipeFrame f;
     if (!link.Receive(&f, 500)) {
+      const DWORD error = GetLastError();
+      if (error != WAIT_TIMEOUT) {
+        std::printf("      serve_paste: the link failed err=%lu\n", error);
+        break;
+      }
       if (!link.pipe_open() || !link.helper_alive()) break;
       continue;
     }
@@ -642,6 +653,18 @@ int run_driver() {
     ver.version = 2;
     check("a wrong version is refused", !verify_hello(ver, nonce, 500, 500).ok);
   }
+
+  // ---------------------------------------------------------------- the Medium launch rule (pure)
+  std::printf("\n--- who may start the helper as itself ---\n");
+  check("a limited (UAC-split) Medium process may", medium_launch_allowed(TokenElevationTypeLimited, SECURITY_MANDATORY_MEDIUM_RID));
+  check("a plain (no UAC split) Medium process may", medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_MEDIUM_RID));
+  check("AN ELEVATED (FULL) PROCESS MAY NOT", !medium_launch_allowed(TokenElevationTypeFull, SECURITY_MANDATORY_HIGH_RID));
+  check("...nor a full one that somehow reads Medium", !medium_launch_allowed(TokenElevationTypeFull, SECURITY_MANDATORY_MEDIUM_RID));
+  check("...nor a High-integrity process without a split (UAC off, administrator)",
+        !medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_HIGH_RID));
+  check("...nor SYSTEM", !medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_SYSTEM_RID));
+  check("a Low process may (it is not elevated; the pipe DACL decides the rest)",
+        medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_LOW_RID));
 
   Station station;
   check("a private window station with a Default desktop (its own clipboard)", station.Create(), narrow(station.desktop));
@@ -1077,6 +1100,17 @@ int run_elevated_check(int argc, wchar_t** argv) {
       std::to_string(GetCurrentProcessId()));
   verdict("this run is elevated (TokenElevationTypeFull, High)", type == TokenElevationTypeFull && rid >= SECURITY_MANDATORY_HIGH_RID);
   const std::wstring helperExe = dir_of(self_path()) + L"GNLinkClipHelper.exe";
+  {
+    // The guard: from an elevated process the Medium test launch (token == nullptr) is refused.
+    HelperLink guard;
+    std::string why;
+    std::wstring sid;
+    current_process_user_sid(&sid);
+    guard.CreateServerPipe(sid, &why);
+    const bool started = guard.Launch(helperExe, nullptr, nullptr, L"", &why);
+    verdict("Launch(token=nullptr) from an elevated process is refused", !started && why == "medium-launch-refused-caller-elevated", why);
+    guard.Close();
+  }
   HelperLink link;
   std::string why;
   const bool launched = launch_file_copy_helper(helperExe, &link, &why, 15000);

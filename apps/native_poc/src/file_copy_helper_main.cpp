@@ -274,9 +274,10 @@ void sender_main() {
 // The reader owns the local file table: every Stat / Pin / ReadLocal / Unpin runs here.
 void reader_main() {
   LocalFileTable table;
+  FrameReader reader;  // keeps a half-received frame across the 1 s polls (r2)
   for (;;) {
     PipeFrame f;
-    if (!pipe_receive_frame(gShared.pipe, &f, 1000, gShared.abort)) {
+    if (!reader.Receive(gShared.pipe, &f, 1000, gShared.abort)) {
       const DWORD err = GetLastError();
       if (WaitForSingleObject(gShared.abort, 0) == WAIT_OBJECT_0) break;
       if (err != WAIT_TIMEOUT || pipe_broken(gShared.pipe)) {
@@ -625,7 +626,8 @@ int wmain(int argc, wchar_t** argv) {
     return 3;
   }
   PipeFrame ack;
-  if (!pipe_receive_frame(gShared.pipe, &ack, 10000) || ack.type != PipeMsg::HelloAck) {
+  FrameReader helloReader;
+  if (!helloReader.Receive(gShared.pipe, &ack, 10000) || ack.type != PipeMsg::HelloAck) {
     logf("no HelloAck (refused?) err=%lu", GetLastError());
     return 4;
   }
