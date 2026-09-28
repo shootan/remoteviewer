@@ -23,6 +23,7 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -96,8 +97,16 @@ struct PendingConnect {
   OVERLAPPED io{};
 };
 
-/** Starts ConnectNamedPipe. Connected / Failed at once, or Pending with `*pending` to settle. */
+/**
+ * Starts ConnectNamedPipe. Connected / Failed at once, or Pending with `*pending` to settle.
+ * Under the process-wide I/O bound (file_copy_pipe_io.hpp, r4): at kMaxOrphanedIo it makes no
+ * OS call at all and returns Failed with `*error` = ERROR_NO_SYSTEM_RESOURCES. A Pending wait
+ * holds its reservation until settle_connect returns; Stuck keeps it (the orphan).
+ */
 ConnectOutcome begin_connect(HANDLE pipe, std::unique_ptr<PendingConnect>* pending, DWORD* error);
+
+/** Telemetry: ConnectNamedPipe calls made by this process (the bound test reads it). */
+std::atomic<uint32_t>& connect_attempts();
 
 /**
  * Waits up to `timeoutMs` for a pending connection (ending early if `process` ends), cancels it at

@@ -204,26 +204,42 @@ std::function<void()>& before_connect_cancel_hook() {
   return hook;
 }
 
+std::atomic<uint32_t>& connect_attempts() {
+  static std::atomic<uint32_t> n{0};
+  return n;
+}
+
 ConnectOutcome begin_connect(HANDLE pipe, std::unique_ptr<PendingConnect>* pending, DWORD* error) {
   pending->reset();
   *error = ERROR_SUCCESS;
+  // Admission before anything else (r4): a connection wait counts against the same bound as a
+  // read or a write, so at kMaxOrphanedIo no event is created and ConnectNamedPipe is not called.
+  // Without this a link that kept timing out and getting stuck could leave storage without end.
+  if (!file_copy::detail::reserve_io()) {
+    *error = ERROR_NO_SYSTEM_RESOURCES;
+    return ConnectOutcome::Failed;
+  }
   auto p = std::make_unique<PendingConnect>();
   p->io.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!p->io.hEvent) {
     *error = GetLastError();
+    file_copy::detail::release_io();
     return ConnectOutcome::Failed;
   }
+  connect_attempts().fetch_add(1);
   const BOOL connected = ConnectNamedPipe(pipe, &p->io);
   const DWORD e = connected ? ERROR_SUCCESS : GetLastError();
   if (connected || e == ERROR_PIPE_CONNECTED) {
     CloseHandle(p->io.hEvent);
+    file_copy::detail::release_io();
     return ConnectOutcome::Connected;
   }
   if (e == ERROR_IO_PENDING) {
-    *pending = std::move(p);
+    *pending = std::move(p);  // the reservation travels with the wait; settle_connect frees it
     return ConnectOutcome::Pending;
   }
   CloseHandle(p->io.hEvent);
+  file_copy::detail::release_io();
   *error = e;
   return ConnectOutcome::Failed;
 }
@@ -241,7 +257,8 @@ ConnectOutcome settle_connect(HANDLE pipe, std::unique_ptr<PendingConnect>& pend
     CancelIoEx(pipe, &pending->io);
     if (file_copy::detail::simulate_stuck_cancel() ||
         WaitForSingleObject(pending->io.hEvent, file_copy::detail::cancel_wait_ms()) != WAIT_OBJECT_0) {
-      // Not finished: the OS may still complete into this storage. Leaked, never freed.
+      // Not finished: the OS may still complete into this storage. Leaked, never freed -- and its
+      // reservation is kept, which is how the bound counts it.
       (void)pending.release();
       file_copy::detail::orphan_counter().fetch_add(1);
       return ConnectOutcome::Stuck;
@@ -252,6 +269,7 @@ ConnectOutcome settle_connect(HANDLE pipe, std::unique_ptr<PendingConnect>& pend
   const DWORD e = ok ? ERROR_SUCCESS : GetLastError();
   CloseHandle(pending->io.hEvent);
   pending.reset();
+  file_copy::detail::release_io();  // the OS is done with the storage: the wait no longer counts
   if (ok) return ConnectOutcome::Connected;  // including a connection that beat the cancellation
   if (e == ERROR_OPERATION_ABORTED && early != ConnectOutcome::Connected) return early;
   *error = e;

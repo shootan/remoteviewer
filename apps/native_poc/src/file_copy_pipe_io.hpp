@@ -48,15 +48,50 @@ enum class StuckIoPolicy : uint8_t {
   TerminateProcess,   // the helper: an isolated process ends itself
 };
 
-/** Orphans this process has accumulated (pending I/O whose cancellation never completed). */
+/**
+ * The bound on what this process may leave to the OS: orphans (pending I/O whose cancellation
+ * never completed, leaked for ever) plus operations still in flight, which may yet become
+ * orphans. At the bound no new operation is started at all.
+ */
 constexpr uint32_t kMaxOrphanedIo = 16;
 
 namespace detail {
 
+/** Telemetry: how many operations became orphans (each keeps its reservation below). */
 inline std::atomic<uint32_t>& orphan_counter() {
   static std::atomic<uint32_t> n{0};
   return n;
 }
+
+/**
+ * Admission (r4). Every operation -- a read, a write, a connection wait -- takes one reservation
+ * BEFORE it makes any OS call (no event, no ReadFile/WriteFile, no ConnectNamedPipe without one)
+ * and gives it back once the OS is done with its storage; an orphan keeps its reservation for
+ * ever. Taken with a compare-and-swap, so however many threads start I/O at once the number of
+ * orphans can never exceed kMaxOrphanedIo, and at the bound every new operation fails with
+ * ERROR_NO_SYSTEM_RESOURCES instead of adding storage. A link that keeps timing out and getting
+ * stuck therefore costs at most kMaxOrphanedIo leaked operations per process, connections
+ * included -- it used to be able to pile those up without end (Codex r3 review).
+ */
+inline std::atomic<uint32_t>& io_reservations() {
+  static std::atomic<uint32_t> n{0};
+  return n;
+}
+inline bool reserve_io() {
+  uint32_t current = io_reservations().load();
+  for (;;) {
+    if (current >= kMaxOrphanedIo) return false;
+    if (io_reservations().compare_exchange_weak(current, current + 1)) return true;
+  }
+}
+inline void release_io() { io_reservations().fetch_sub(1); }
+/** Frees the reservation on every exit but the one where the operation became an orphan. */
+struct IoReservation {
+  bool held = true;
+  ~IoReservation() {
+    if (held) release_io();
+  }
+};
 
 /** How long a cancellation is given to complete. */
 inline DWORD& cancel_wait_ms() {
@@ -137,10 +172,11 @@ template <bool kWrite>
 bool pipe_io_once(HANDLE pipe, std::vector<uint8_t>& storage, size_t offset, DWORD size, DWORD timeoutMs, HANDLE abort,
                   DWORD* moved, StuckIoPolicy policy) {
   *moved = 0;
-  if (orphan_counter().load() >= kMaxOrphanedIo) {
+  if (!reserve_io()) {
     SetLastError(ERROR_NO_SYSTEM_RESOURCES);
     return false;
   }
+  IoReservation reservation;
   auto pending = std::make_unique<PendingIo>();
   pending->io.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!pending->io.hEvent) return false;
@@ -162,6 +198,7 @@ bool pipe_io_once(HANDLE pipe, std::vector<uint8_t>& storage, size_t offset, DWO
     bool completedOk = false;
     DWORD completionError = 0, abortedBy = 0;
     if (!settle_pending(pipe, pending, timeoutMs, abort, policy, &storage, &completedOk, &n, &completionError, &abortedBy)) {
+      reservation.held = false;  // the orphan keeps it: this is what the bound counts
       SetLastError(ERROR_IO_INCOMPLETE);
       return false;  // orphaned: pending is gone, storage is gone
     }
@@ -184,6 +221,8 @@ bool pipe_io_once(HANDLE pipe, std::vector<uint8_t>& storage, size_t offset, DWO
 }  // namespace detail
 
 inline uint32_t orphaned_io_count() { return detail::orphan_counter().load(); }
+/** Orphans + operations in flight: what counts against kMaxOrphanedIo right now. */
+inline uint32_t io_reserved_count() { return detail::io_reservations().load(); }
 /** Test seam: how long a cancellation may take before the stuck policy applies (default 2000 ms). */
 inline void set_cancel_wait_for_test(DWORD ms) { detail::cancel_wait_ms() = ms; }
 

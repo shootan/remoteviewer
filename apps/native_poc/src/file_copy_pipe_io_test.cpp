@@ -384,13 +384,13 @@ int wmain(int argc, wchar_t** argv) {
       PipeFrame g;
       return pipe_send_frame(fresh.client, encode(m), 2000) && r.Receive(fresh.server, &g, 2000) && g.type == PipeMsg::PasteBegin;
     }());
-    // The bound: at kMaxOrphanedIo no new I/O is started.
-    const uint32_t saved = detail::orphan_counter().load();
-    detail::orphan_counter().store(kMaxOrphanedIo);
+    // The bound: at kMaxOrphanedIo (orphans + in flight) no new I/O is started.
+    const uint32_t saved = detail::io_reservations().load();
+    detail::io_reservations().store(kMaxOrphanedIo);
     FrameReader capped;
     const bool started = capped.Receive(fresh.server, &f, 20, nullptr);
     const DWORD capErr = GetLastError();
-    detail::orphan_counter().store(saved);
+    detail::io_reservations().store(saved);
     check("AT THE ORPHAN BOUND NO NEW I/O IS STARTED (ERROR_NO_SYSTEM_RESOURCES)", !started && capErr == ERROR_NO_SYSTEM_RESOURCES,
           "err=" + std::to_string(capErr));
     // A write under the host policy: the wire buffer goes to the orphan; the send fails.
@@ -420,6 +420,87 @@ int wmain(int argc, wchar_t** argv) {
       CloseHandle(pi.hProcess);
     }
     check("HELPER POLICY: A STUCK CANCELLATION TERMINATES THAT PROCESS (exit 47), NOT THIS ONE", code == 47, "child exit=" + std::to_string(code));
+  }
+
+  std::printf("\n--- r4: the connection wait is under the same admission bound ---\n");
+  {
+    // Last, because it drives the process-wide bound to its limit (the storage it orphans is
+    // leaked for real; the counters are reset at the end so the process's bookkeeping starts over).
+    const uint32_t savedOrphans = detail::orphan_counter().load();
+    const uint32_t savedReservations = detail::io_reservations().load();
+    PipePair pair;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkClipTest-bound-" + std::to_wstring(GetCurrentProcessId());
+    pair.server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                   PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, nullptr);
+    check("a listening server pipe", pair.server != INVALID_HANDLE_VALUE);
+    std::unique_ptr<detail::PendingConnect> pending;
+    DWORD err = 0;
+    // A normal cancellation gives its reservation back: usage does not grow.
+    const uint32_t r0 = detail::io_reservations().load();
+    check("begin_connect holds one reservation while the wait is on",
+          detail::begin_connect(pair.server, &pending, &err) == detail::ConnectOutcome::Pending && detail::io_reservations().load() == r0 + 1);
+    check("a cancelled (timed-out) connection wait gives it back: usage +0, orphans +0",
+          detail::settle_connect(pair.server, pending, 30, nullptr, &err) == detail::ConnectOutcome::Timeout && !pending &&
+              detail::io_reservations().load() == r0 && orphaned_io_count() == savedOrphans);
+    // Stuck cancellations, repeated the way a link that keeps timing out would repeat them: each
+    // is admitted while under the bound, each keeps its storage and its reservation.
+    const uint32_t attemptsBefore = detail::connect_attempts().load();
+    uint32_t stuckCount = 0;
+    bool allAdmitted = true;
+    while (detail::io_reservations().load() < kMaxOrphanedIo && stuckCount <= kMaxOrphanedIo) {
+      if (detail::begin_connect(pair.server, &pending, &err) != detail::ConnectOutcome::Pending) {
+        allAdmitted = false;
+        break;
+      }
+      detail::simulate_stuck_cancel() = true;
+      const detail::ConnectOutcome o = detail::settle_connect(pair.server, pending, 20, nullptr, &err);
+      detail::simulate_stuck_cancel() = false;
+      if (o != detail::ConnectOutcome::Stuck) {
+        allAdmitted = false;
+        break;
+      }
+      ++stuckCount;
+    }
+    check("...up to the bound every wait was admitted (one ConnectNamedPipe each), every stuck one was orphaned and counted",
+          allAdmitted && stuckCount == kMaxOrphanedIo - r0 && orphaned_io_count() == savedOrphans + stuckCount &&
+              detail::connect_attempts().load() == attemptsBefore + stuckCount && detail::io_reservations().load() == kMaxOrphanedIo,
+          "stuck=" + std::to_string(stuckCount) + " orphans=" + std::to_string(orphaned_io_count()) + " reserved=" +
+              std::to_string(detail::io_reservations().load()));
+    // At the bound: the next connection wait makes no OS call at all -- no ConnectNamedPipe, no
+    // event handle, no storage -- and this process is still here to say so.
+    DWORD handlesBefore = 0, handlesAfter = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &handlesBefore);
+    const uint32_t attemptsAtBound = detail::connect_attempts().load();
+    const detail::ConnectOutcome refused = detail::begin_connect(pair.server, &pending, &err);
+    GetProcessHandleCount(GetCurrentProcess(), &handlesAfter);
+    check("AT THE BOUND A NEW CONNECTION WAIT IS REFUSED: Failed + ERROR_NO_SYSTEM_RESOURCES, ConnectNamedPipe NOT CALLED, NO EVENT, NO STORAGE, THIS PROCESS LIVES",
+          refused == detail::ConnectOutcome::Failed && err == ERROR_NO_SYSTEM_RESOURCES && !pending &&
+              detail::connect_attempts().load() == attemptsAtBound && handlesAfter == handlesBefore &&
+              detail::io_reservations().load() == kMaxOrphanedIo && orphaned_io_count() == savedOrphans + stuckCount,
+          "outcome=" + std::to_string(static_cast<int>(refused)) + " err=" + std::to_string(err) + " attempts=" +
+              std::to_string(detail::connect_attempts().load() - attemptsAtBound) + " handles=" + std::to_string(handlesBefore) + "->" +
+              std::to_string(handlesAfter));
+    // ...and neither a read nor a write is started: it is one bound, whichever operation reached it.
+    PipePair fresh;
+    check("a fresh pipe pair (handles, not I/O)", fresh.Open((name + L"-fresh").c_str()));
+    FrameReader capped;
+    PipeFrame f;
+    const bool readStarted = capped.Receive(fresh.server, &f, 20, nullptr);
+    const DWORD readErr = GetLastError();
+    PasteBegin m;
+    m.offerId = 5;
+    const bool writeStarted = pipe_send_frame(fresh.client, encode(m), 20, nullptr, StuckIoPolicy::OrphanAndFail);
+    const DWORD writeErr = GetLastError();
+    check("...at the bound reached through connections, a read and a write are refused too (ERROR_NO_SYSTEM_RESOURCES)",
+          !readStarted && readErr == ERROR_NO_SYSTEM_RESOURCES && !writeStarted && writeErr == ERROR_NO_SYSTEM_RESOURCES,
+          "read err=" + std::to_string(readErr) + " write err=" + std::to_string(writeErr));
+    // Bookkeeping reset for the rest of this process (the orphaned storage itself stays leaked).
+    detail::io_reservations().store(savedReservations);
+    detail::orphan_counter().store(savedOrphans);
+    check("after the reset a connection wait is admitted again",
+          detail::begin_connect(pair.server, &pending, &err) == detail::ConnectOutcome::Pending &&
+              detail::settle_connect(pair.server, pending, 20, nullptr, &err) == detail::ConnectOutcome::Timeout && !pending &&
+              detail::io_reservations().load() == savedReservations);
   }
 
   std::printf("\n%s  (%d checks, %d failed)\n", gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
