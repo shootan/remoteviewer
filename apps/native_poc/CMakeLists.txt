@@ -2464,6 +2464,8 @@ if(GNLINK_HAVE_WEBVIEW2)
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
+    src/login_credential_store.cpp
+    src/login_flow.cpp
     src/client_shell_bridge.cpp
     src/client_update_gate.cpp
     src/directory_session_client.cpp

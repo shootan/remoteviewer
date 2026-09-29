@@ -133,6 +133,14 @@ std::string shell_restore_json(const std::string& accountId,
   return oss.str();
 }
 
+std::string shell_auto_login_json(const std::string& state, const std::string& accountId,
+                                  const std::string& text) {
+  std::ostringstream oss;
+  oss << "{\"type\":\"autoLogin\",\"state\":\"" << escape(state) << "\",\"accountId\":\""
+      << escape(accountId) << "\",\"text\":\"" << escape(text) << "\"}";
+  return oss.str();
+}
+
 std::string shell_message_type(const std::string& json) {
   std::string type;
   if (!json_get_string(json, "type", &type)) return {};

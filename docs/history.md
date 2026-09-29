@@ -12773,3 +12773,20 @@ Next
 - 한계: 32회보다 오래전에 발급된 자격은 "모르는 값"으로 읽힌다(401, 폐기 없음). 실패 지연의 키는 기기+상대 주소라 프록시 뒤에서는 상대가 모두 같은 주소다. TLS·프록시·실제 서버는 이 시험에 없다. 비밀번호 변경 route 는 아직 없어 "변경 시 전 기기 폐기"는 구현되지 않았다.
 - 배포(검증용 + NAS 세션, 이 작업에서는 하지 않음): **서버 먼저 → 클라.** 올릴 파일에 `device_credentials.js` 가 **추가**된다(`server.js` · `update_manifest.js` · `version_compare.js` · `wake_target.js` · `package.json` 과 함께) — 빠지면 `MODULE_NOT_FOUND`. 재시작 필요. 롤백: 옛 서버로 되돌려도 store 의 `devices` 는 보존되고, 자격을 가진 클라는 refresh 404 를 "이 서버는 못 한다"로 읽어 비밀번호 로그인으로 돌아간다.
 - 제품/테스트/문서: 제품(`apps/directory/server.js`, `device_credentials.js` 신설) / 테스트(`device_credentials_unit_test.js`·`device_credential_test.js` 신설, `test/run.js`) / 문서(`apps/directory/README.md`, 이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (2/4) — PC 클라: 로그인한 채로 돌아온다
+
+- 목표: 한 번 로그인하면 GNLinkClient 를 껐다 켜도, 서버가 재시작됐어도 **입력 없이** PC 목록으로. 로그아웃하면 다음 실행은 로그인 화면. 비밀번호는 저장하지 않는다.
+- 저장(`login_credential_store.*`, client.txt 옆): `login.cred`(서버 origin·계정·deviceId·기기 자격·revokeToken, **DPAPI user scope** + 전용 entropy) · `login.cred.revoke`(서버에 아직 알리지 못한 로그아웃, 유계 16건, 같은 보호) · `login.cred.gen`(영속 generation) · `login.cred.lock`. 쓰기는 임시 파일 → `MoveFileEx`. 읽지 못하는 파일은 지우지 않고 로그인 화면.
+- 직렬화: **자격 저장소 전용 배타 파일 잠금**(공유 0 으로 연 파일 — 같은 파일에 닿는 모든 프로세스·로그온 세션에 같은 잠금, 프로세스가 죽으면 풀림). 대기는 유계(8 s), worker 에서만.
+- 흐름(`login_flow.*`, directory 호출은 함수로 주입):
+  - 돌아오기 = 잠금 → **다시 읽기** → refresh → 새 자격 원자 저장 → 해제. 401 만 자격을 지운다. 429·5xx·불통은 보존(1 s·4 s·15 s 뒤 재시도, 그동안 폼은 쓸 수 있고 끝나면 "다시 시도" 버튼). 404/405 는 옛 서버 — 보존하고 로그인 화면. 다른 origin 의 자격은 보내지도 지우지도 않는다.
+  - 로그인 = generation 올림 → `/api/login` 에 `device` 실어 요청 → 응답 때 generation 이 그대로면 저장. 아니면(그 사이 로그아웃·다른 로그인, **다른 프로세스 포함**) 저장하지 않고 **방금 발급된 기기를 폐기**, 세션도 쓰지 않는다. 새 로그인은 새 계열이고 이전 계열은 폐기 대상으로 기록.
+  - 로그아웃 = generation 올림 → **폐기 표식 기록 → 자격 삭제**(잠금 안) → 서버 폐기. 서버에 닿지 않으면 표식이 남아 다음 시작·다음 로그인 때 마저 보낸다. 표식이 있는 자격은 자동 로그인에 쓰지 않는다.
+  - 세션 중 401(12 h·서버 재시작) → 돌아오기 1회 → 실패면 로그인 화면.
+- 화면(`shell.html`): 시작 시 "저장된 로그인으로 접속하는 중" → 목록. 실패면 메시지 + `#retryAuto`. 아이디 칸은 유지.
+- 🔴 **e2e 가 찾은 결함**: 자동 로그인 시작이 epoch 을 올리는데 `restore` 메시지는 그 **전에** 게시돼 stale 로 버려졌다 → 로그아웃 뒤 폼의 아이디 칸이 비었다. `ready` 처리에서 자동 로그인 시작을 게시보다 앞으로.
+- 로그: 자격·revokeToken·세션은 어떤 줄에도 없다. 기기는 id 앞 8자로만.
+- 한계: DPAPI 는 다른 Windows 사용자·디스크 복사를 막는다. **같은 사용자 권한의 프로세스는 풀 수 있다.** 저장 직전 크래시는 재로그인으로 복구(서버가 회전했는데 저장 못 한 경우 유예 60 s·1회).
+- 검증은 (4/4) 항목.
+- 제품/테스트/문서: 제품(`login_credential_store.*`·`login_flow.*` 신설, `client_shell_main.cpp`, `client_shell_bridge.*`, `directory_session_client.*`, `ui/shell.html`, CMake 의 클라 소스 2줄) / 테스트 없음(4/4) / 문서(이 항목).
