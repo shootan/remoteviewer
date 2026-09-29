@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build gate: what ships has one directory server and no way to be pointed at another.
+"""Build gate: what ships signs in to one directory server, and carries no test switch.
 
     python automation/gnlink_check_fixed_server.py --dir <folder with the product exes>
     python automation/gnlink_check_fixed_server.py --apk <release.apk>
@@ -9,16 +9,23 @@ Two questions are asked of each file, by reading its bytes:
 
   1. Is the fixed address in it?   (apps/native_poc/src/fixed_directory.hpp, BuildConfig)
   2. Is any test switch in it?     The test builds that talk to a fixture directory are
-     separate executables compiled with REMOTE60_SHELL_TEST_SEAM / REMOTE60_HOST_TEST_SEAM.
-     Each of those code paths prints a message naming itself, and the wrappers read environment
-     variables; those strings are what is looked for.
+     separate executables compiled with REMOTE60_SHELL_TEST_SEAM / REMOTE60_HOST_TEST_SEAM /
+     REMOTE60_STREAM_TEST_SEAM, and the update client's option-failure case with
+     REMOTE60_UPDATE_HTTP_TEST_SEAM. Each of those code paths carries a message naming itself,
+     and the wrappers read environment variables; those strings are what is looked for.
+
+What this does NOT claim. It is about the directory: where a sign-in, a host list, a connect and
+a log upload go. REMOTE60_UPDATE_MANIFEST_URL / BuildConfig.UPDATE_MANIFEST_URL (an operator's
+own manifest address, fetched without a credential) and GNLinkStream's REMOTE60_DIRECTORY_URL
+fallback are product behaviour, present in what ships, and not looked for here.
 
 GNLinkClient.exe, GNLinkHost.exe and GNLinkStream.exe must carry the address: the first two
 sign in to it, and the streaming host compares the address it is handed against it to decide
 whether a token cached under a former name may be presented. GNLinkViewer.exe is handed its
 directory on the command line (--directory-url) by the client and decides nothing from the
-constant, so for it only question 2 decides; whether the address is present is printed and
-not judged.
+constant, and GNLinkUpdater.exe is handed its manifest address by the program that starts it;
+for those two only question 2 decides, and whether the address is present is printed and not
+judged.
 
 This reads bytes. It says nothing about what the program does with them -- that is what
 client_recovery_ui_runner.js and host_login_ui_runner.js are for.
@@ -40,6 +47,9 @@ TEST_MARKERS = [
     'host-test-seam',             # host_app_main.cpp, REMOTE60_HOST_TEST_SEAM
     'GNLINK_HOST_TEST_',          # host_app_ui_test.cpp (ROOT, DIRECTORY)
     'GNLINK_RECOVERY_TEST_ROOT',  # client_recovery_ui_test.cpp
+    'stream-test-seam',           # directory_client.cpp, REMOTE60_STREAM_TEST_SEAM
+    'GNLINK_STREAM_TEST_',        # the same seam's environment (DIRECTORY, FORMER_NAME)
+    'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM
 ]
 
 # (file, must carry the address)
@@ -48,6 +58,7 @@ WINDOWS_FILES = [
     ('GNLinkHost.exe', True),
     ('GNLinkStream.exe', True),
     ('GNLinkViewer.exe', False),
+    ('GNLinkUpdater.exe', False),
 ]
 
 # What the sign-in screen's removed field was called; a release APK has no resource by that name.
@@ -83,7 +94,7 @@ def check_windows_file(report, path, must_carry):
     if must_carry:
         report.check(has_address, '%s carries %s' % (name, FIXED_ADDRESS))
     else:
-        report.note('%s is handed its directory by its parent; the address is %s in it'
+        report.note('%s is not required to carry the address; it is %s in it'
                     % (name, 'present' if has_address else 'not present'))
     found = [marker for marker in TEST_MARKERS if contains(data, marker)]
     report.check(not found, '%s has no test switch%s'

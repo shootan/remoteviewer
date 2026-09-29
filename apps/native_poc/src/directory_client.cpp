@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -963,10 +964,46 @@ CachedOrigin classify_cached_origin(const std::string& cachedUrl, const std::str
   return CachedOrigin::Unlisted;
 }
 
+#ifdef REMOTE60_STREAM_TEST_SEAM
+namespace {
+
+// TEST BUILDS ONLY -- never defined for GNLinkStream, GNLinkHost or GNLinkClient.
+//
+// The product's server and its former names are constants naming hosts no test may talk to. A
+// test build of the streaming host reads stand-ins for the two from its environment, so the rest
+// of the path -- host_startup_connect handing the list to the agent, the agent presenting the
+// cached token, the heartbeat, the cache being rewritten -- is the product's, run as a process.
+//
+// Loopback only, and it fails CLOSED: a test build started without its fixture ends here.
+std::string stream_test_value(const char* name, bool required) {
+  const char* value = std::getenv(name);
+  const std::string text = value ? value : "";
+  if (text.empty() && !required) return text;
+  if (text.rfind("http://127.0.0.1:", 0) != 0) {
+    std::fprintf(stderr, "[stream-test-seam] %s is not a loopback fixture; refusing to fall back "
+                         "to the product's\n", name);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  return text;
+}
+
+}  // namespace
+#endif
+
 std::vector<std::string> product_migratable_origins_for(const std::string& serverUrl) {
   std::vector<std::string> origins;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  const std::string fixedUrl = stream_test_value("GNLINK_STREAM_TEST_DIRECTORY", true);
+  const std::string formerName = stream_test_value("GNLINK_STREAM_TEST_FORMER_NAME", false);
+  std::cout << "[stream-test-seam] server=" << fixedUrl << " former="
+            << (formerName.empty() ? "(none)" : formerName) << "\n";
+  if (directory_origin_key(serverUrl) != directory_origin_key(fixedUrl)) return origins;
+  if (!formerName.empty()) origins.push_back(formerName);
+#else
   if (directory_origin_key(serverUrl) != directory_origin_key(kFixedDirectoryUrl)) return origins;
   for (const char* origin : kMigratableDirectoryOrigins) origins.emplace_back(origin);
+#endif
   return origins;
 }
 
@@ -1450,6 +1487,8 @@ bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& 
 
 void HostAgent::Run() {
   bool announcedOnline = false;
+  // The last "this host has to be signed in again" state that was said out loud.
+  std::string announcedSignIn;
   // pc2-connect-diag: the cycle, step by step.
   //
   // A capability can only reach this host through this loop, and none of it was logged:
@@ -1513,6 +1552,26 @@ void HostAgent::Run() {
         } else {
           announcedOnline = false;
         }
+      }
+    }
+
+    // Said once per occurrence, on the line GNLinkHost's window reads its status from. A
+    // rejected token used to change the status in here and print nothing, so the window went on
+    // showing the last thing it had read -- "agent started" -- under NOT REACHABLE, and the one
+    // state the user can fix by signing in was the one state they were never shown.
+    {
+      std::string now;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        now = status_;
+      }
+      const bool needsSignIn = now.find("token rejected") != std::string::npos ||
+                               now.find("registration needs") != std::string::npos;
+      if (!needsSignIn) {
+        announcedSignIn.clear();
+      } else if (now != announcedSignIn) {
+        announcedSignIn = now;
+        std::cout << "[native-video-host] directory " << now << "\n";
       }
     }
 

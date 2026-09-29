@@ -150,6 +150,26 @@ target_link_libraries(remote60_native_video_host_clipsink PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the cached-sign-in migration: the same sources and libraries as
+# GNLinkStream, with the product's server and its former names replaced by loopback fixtures read
+# from the environment (REMOTE60_STREAM_TEST_SEAM, in directory_client.cpp and nowhere else). The
+# line that hands the list to the agent, in host_startup_connect.cpp, is the product's in both.
+# Its own output name, never packaged; automation/gnlink_check_fixed_server.py checks the shipped
+# GNLinkStream.exe carries none of it.
+get_target_property(_migration_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_migration_seam ${_migration_host_sources})
+set_target_properties(remote60_native_video_host_migration_seam PROPERTIES
+  OUTPUT_NAME "GNLinkStreamMigrationTest")
+target_include_directories(remote60_native_video_host_migration_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_migration_seam PRIVATE
+  REMOTE60_STREAM_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
 add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink)
 
@@ -1079,6 +1099,23 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
 
+# The cached-sign-in migration, run as a process: a real streaming host (the test-seam build
+# above) started the way GNLinkHost starts it, against fixture directories that record what they
+# were sent. What is judged is the requests each address received and the bytes of the cache.
+add_executable(remote60_host_migration_e2e_test
+  src/host_migration_e2e_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_migration_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_migration_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_migration_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_migration_e2e_test remote60_native_video_host_migration_seam)
+
 # Calling off a viewer that is already connecting, the way the shell does it. A real
 # GNLinkViewer against a scripted fake directory, cancelled with the same function the shell
 # calls, measured on how long it takes to stop and checked on why it says it stopped.
@@ -1326,6 +1363,10 @@ add_executable(remote60_update_http_test
 )
 target_include_directories(remote60_update_http_test PRIVATE src)
 target_link_libraries(remote60_update_http_test PRIVATE winhttp ws2_32)
+# Test-only seam: makes "disable redirects" report failure and counts the sends after it. Defined
+# for this target and no other -- automation/gnlink_check_fixed_server.py looks for its marker in
+# what ships.
+target_compile_definitions(remote60_update_http_test PRIVATE REMOTE60_UPDATE_HTTP_TEST_SEAM=1)
 if(MSVC)
   target_compile_options(remote60_update_http_test PRIVATE /utf-8)
 endif()
@@ -2718,7 +2759,8 @@ foreach(t
     remote60_abr_client_evidence_e2e_test remote60_bwe_observe_e2e_test remote60_control_resume_e2e_test
     remote60_fec_single_chunk_host_e2e_test remote60_host_control_deadline_e2e_test
     remote60_host_punch_reply_e2e_test remote60_host_two_dispatcher_e2e_test remote60_udp_control_e2e_test
-    remote60_viewer_release_all_e2e_test remote60_viewer_mouse_xbutton_e2e_test remote60_thumbnail_helper_e2e_test)
+    remote60_viewer_release_all_e2e_test remote60_viewer_mouse_xbutton_e2e_test remote60_thumbnail_helper_e2e_test
+    remote60_host_migration_e2e_test)
   target_link_libraries(${t} PRIVATE remote60_test_scratch_dir)
 endforeach()
 add_executable(remote60_e2e_staging_test src/e2e_staging_test.cpp)

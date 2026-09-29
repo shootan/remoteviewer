@@ -13,9 +13,23 @@ namespace remote60::native_poc {
 //
 // Everything that reaches the directory from those two programs starts here: sign-in, the host
 // list, connect, the viewer and streaming children (handed it as --directory-url), the log
-// uploader and the derived update endpoint. A shipped executable has no way to be pointed
-// anywhere else; the tests that need a fixture server are separate builds
-// (REMOTE60_SHELL_TEST_SEAM / REMOTE60_HOST_TEST_SEAM), and
+// uploader and the derived update endpoint.
+//
+// What that does and does not promise. GNLinkClient and GNLinkHost have no input -- no field,
+// argument, environment variable or stored value -- that changes where they sign in, list hosts,
+// connect or upload logs. Two things are outside that statement and unchanged by it:
+//
+//   * REMOTE60_UPDATE_MANIFEST_URL (Windows) and BuildConfig.UPDATE_MANIFEST_URL (Android) still
+//     name a manifest address of the operator's own. A request to it carries no credential
+//     (update_endpoint_for), so it is somewhere an update can be fetched from, not somewhere a
+//     sign-in can be sent.
+//   * GNLinkStream and GNLinkViewer take their directory as --directory-url from the program
+//     that starts them, and GNLinkStream falls back to REMOTE60_DIRECTORY_URL when started
+//     without one. The product always passes the argument; the fallback is what scripts that
+//     start a streaming host by hand use.
+//
+// The tests that need a fixture server are separate builds (REMOTE60_SHELL_TEST_SEAM,
+// REMOTE60_HOST_TEST_SEAM, REMOTE60_STREAM_TEST_SEAM), and
 // automation/gnlink_check_fixed_server.py checks that what ships carries this address and none
 // of their switches.
 constexpr char kFixedDirectoryUrl[] = "https://gnlink.shotan.net";

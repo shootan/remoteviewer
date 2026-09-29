@@ -12732,3 +12732,21 @@ Next
   - ⚠️ 증명하지 못하는 것: **실제 두 호스트에 대한 TLS 요청.** `update_http` 는 http 를 거부하고 TLS 검증은 끌 수 없으므로 loopback fixture 로는 네트워크 수준 시험을 만들 수 없다. `update_credential_hops_test` 는 프로세스 간 자격 전달 채널 시험이지 이 경로가 아니다. 실제 게시·외부 확인은 검증용 몫.
 - 검증: `gnlink_deploy_test.sh` exit 0, PASS 57 / FAIL 0(`GNLINK_TEST_RELEASE` 로 main 의 `.claude/rel/0.2.109-r2` 를 복사해 사용, 읽기만). `gnlink_release_test.sh` exit 0, RESULT: ALL PASS (161 checks, 0 failed). ssh·curl 은 이 회귀가 대신하지 못한다.
 - 제품/테스트/문서: 제품(릴리스 도구 2: `gnlink_deploy.sh`, `gnlink_release_manifest.py`) / 테스트(`gnlink_deploy_test.sh`, `gnlink_release_test.sh`, `directory_migration_test.cpp`, `FixedDirectoryTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r4 1부 — 1차 출시 전 보수 3건 (검수 NEEDS_CHANGES)
+
+- 근거: 검증용 검수 + Codex 검토(`466aeb9`). 1차 범위(A1~A8·A4)는 닫혔고, 이 항목은 그 위의 보수다.
+- ① **자격 있는 업데이트 요청이 redirect 차단 실패를 무시했다**(`update_http.cpp`, 기존 코드). `WinHttpSetOption(WINHTTP_DISABLE_REDIRECTS)` 의 반환값을 버리고 자격 헤더를 붙여 보냈다. 이제 설정 실패면 **보내지 않고** `ConnectFailed` + "could not disable redirects … it was not sent"(메시지에 자격 없음). 무자격 요청(artifact 다운로드)의 redirect 정책은 그대로.
+  - 반례(`update_http_test`, `REMOTE60_UPDATE_HTTP_TEST_SEAM`): 옵션 실패 주입 → `WinHttpSendRequest` **0회**(text·file 둘 다, 파일 미생성). 대조: 주입 없으면 1회, 무자격 요청은 주입돼도 1회. seam 은 그 한 호출의 실패 보고와 송신 계수만 바꾼다.
+- ② **실제 GNLinkStream 의 이행 배선 e2e**(`host_migration_e2e_test`). `GNLinkStreamMigrationTest.exe` = GNLinkStream 의 전 소스 + `REMOTE60_STREAM_TEST_SEAM`(`directory_client.cpp` 한 곳: 제품 주소·옛 이름 목록을 환경변수의 loopback fixture 로, 없으면 종료 97). `host_startup_connect.cpp` 의 배선 줄은 두 빌드에서 같다. 호스트는 GNLinkHost 가 만드는 것과 같은 인자(url·id·host-name, **비밀번호 없음**)로 기동.
+  - 옛 이름 캐시 + 토큰 → **재등록 없이** heartbeat 1회(토큰 실림) · `directory online` · 캐시 주소가 서버 주소로 · 토큰/계정/hostId 동일 · 옛 이름 주소 요청 0.
+  - 미등록 origin → 토큰 실린 요청 0(서버 요청 0건) · heartbeat/register 0 · 캐시 바이트 동일 · "no cached host token".
+  - 401 → 토큰 1회 제시 뒤 재제시 없음 · 캐시 무변경 · online 아님.
+  - 서버 불통 → 다음 주기 재시도(`dir-cycle n=2`) · 캐시 무변경 · 옛 이름으로 대신 가지 않음.
+  - 부정 대조: 배선 줄을 뺀 빌드 → exit 1, 8/33 FAIL(`[carried] THE HOST SENT A HEARTBEAT… heartbeats: 0` 포함). 원복·해시 확인 뒤 재빌드 33/0.
+- ②-b **e2e 가 찾은 것: 401 뒤 "재인증 필요"가 창에 닿지 않았다.** GNLinkHost 창은 자식 출력의 `directory …` 줄에서 상태를 읽는데, 에이전트는 online 일 때만 그 줄을 찍었다. 토큰이 거부돼도 창은 마지막으로 읽은 `agent started url=…` 을 NOT REACHABLE 아래 보여 줬고 `needs_sign_in_again` 은 참이 될 수 없었다(이행과 무관한 기존 결함, 이행의 401 경로가 여기로 떨어진다). `HostAgent::Run` 이 "token rejected" / "registration needs" 상태를 **발생마다 한 번** `[native-video-host] directory <상태>` 로 출력한다. e2e 가 그 두 줄을 단언. ⚠️ 창이 그 줄을 읽어 SIGN IN AGAIN 배지를 띄우는 것까지는 실행으로 보지 않았다(Host UI 시험의 스트리밍 자식은 stand-in).
+- ③ **표현 정정**: "출하 exe 에 주소 override 가 없다"는 directory(로그인·목록·connect·로그 업로드)에만 참이다. `REMOTE60_UPDATE_MANIFEST_URL` / `BuildConfig.UPDATE_MANIFEST_URL`(무자격 업데이트 목적지)과 GNLinkStream 의 `REMOTE60_DIRECTORY_URL` fallback 은 제품 동작으로 남아 있다 — `fixed_directory.hpp` 주석과 gate 설명을 그 범위로 고쳤다(동작 변경 없음). 위 1차 항목의 "출하 exe 에는 주소를 바꾸는 인자·환경변수가 없다"도 이 범위로 읽는다.
+- gate 확장: 표식 `stream-test-seam` · `GNLINK_STREAM_TEST_` · `update-http-test-seam` 추가, 대상에 `GNLinkUpdater.exe` 추가. 시험 빌드를 제품 이름으로 놓은 세트 → exit 1(GNLinkStream 2건, GNLinkUpdater 1건 검출). ⚠️ update-http seam 의 표식은 처음에 링커가 지워 검출되지 않았다 — 참조되게 고친 뒤 검출 확인.
+- 검증(console 세션, 격리): `update_http_test` exit 0 (44/0) · `host_migration_e2e_test` exit 0 (33/0, `REMOTE60_ALLOW_HOST_E2E=1`) · `directory_migration_test` exit 0 (71) · `directory_retry_test` exit 0 (122/0) · `update_check_test` 28/0 · `update_release_test` 80/0 · `client_update_flow_test` PASS · `host_login_ui_runner` exit 0 · `client_recovery_ui_runner` exit 0 · gate exit 0 (8) · gate self-test exit 0 (13). 실사용 `host.json` mtime 09-23 그대로.
+- 증명하지 못하는 것: TLS, 실제 서버·실제 옛 이름, 설치된 무인 Host 가 업데이트를 거쳐 이행되는 것(실기), 창의 SIGN IN AGAIN 배지 표시.
+- 제품/테스트/문서: 제품(`update_http.cpp`, `directory_client.cpp`(상태 출력 + test seam), `fixed_directory.hpp` 주석) / 테스트(`update_http_test.cpp`, `host_migration_e2e_test.cpp` 신설, `GNLinkStreamMigrationTest` 타깃, `gnlink_check_fixed_server.py`, CMake) / 문서(이 항목, 구현계획).
