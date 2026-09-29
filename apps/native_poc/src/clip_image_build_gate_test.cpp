@@ -81,6 +81,19 @@ int wmain(int argc, wchar_t** argv) {
   // And the product feature itself IS in the shipped host (the gate must not pass because the whole
   // feature was left out).
   check("the shipped host does carry the product's clip-image log tag", contains(shipped, "[native-video-host][clip-image]"));
+  // The e2e station lock (e2e_station_lock.hpp) is test code: no product executable may carry it.
+  {
+    const std::string lockName = "GNLinkE2EClipboardStation";
+    const auto netE2e = read_all(dir + L"\\remote60_file_copy_net_e2e_test.exe");
+    check("positive control: the net e2e carries the station lock's name (UTF-16)", contains(netE2e, utf16(lockName)));
+    for (const wchar_t* exe : {L"GNLinkStream.exe", L"GNLinkViewer.exe", L"GNLinkClipHelper.exe"}) {
+      const auto bytes = read_all(dir + L"\\" + exe);
+      std::string n;
+      for (const wchar_t* c = exe; *c; ++c) n += static_cast<char>(*c);
+      check(n + " was read and does not carry the station lock", !bytes.empty() && !contains(bytes, utf16(lockName)) &&
+                                                                     !contains(bytes, lockName));
+    }
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <string>
+#include "e2e_station_lock.hpp"
 
 namespace {
 int g_failed = 0;
@@ -100,6 +101,8 @@ bool read_result(const std::wstring& path, std::wstring* line) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc >= 4 && wcscmp(argv[1], L"--child") == 0) return run_child(argv[2], argv[3]);
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("clip_image_winsta_test")) return remote60::native_poc::e2e::StationLock::Busy("clip_image_winsta_test");
 
   const DWORD interactiveBefore = GetClipboardSequenceNumber();
   wchar_t self[MAX_PATH];

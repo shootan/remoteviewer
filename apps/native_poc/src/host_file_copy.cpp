@@ -521,9 +521,19 @@ void HostFileCopyService::FinishSendClose(uint64_t pinId) {
 bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t>& body, uint64_t servedEpoch,
                                         uint16_t* replyType, std::vector<uint8_t>* reply) {
   bool newSession = false;
+  bool olderSession = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    newSession = servedEpoch_ != 0 && servedEpoch != servedEpoch_;
+    // The epoch only grows (host_session.hpp: fetch_add), but each Serve() captured its own when it
+    // started, and a TCP control thread and the UDP dispatcher can both be inside Serve() for a while
+    // (host_control_session.cpp, H-28). A late request of the OLDER one must not end the newer
+    // session's state: it is dropped, and its link -- out of date anyway -- is let go.
+    olderSession = servedEpoch_ != 0 && servedEpoch < servedEpoch_;
+    newSession = servedEpoch_ != 0 && servedEpoch > servedEpoch_;
+  }
+  if (olderSession) {
+    Log("a request of an older control session: dropped, the current session's state stays");
+    return false;
   }
   // A request of another control session reached the handlers before its session-end hook: nothing of
   // the old one is carried into it -- not its offers, its paste or its begun state (r2 ④).

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "clipboard_monitor.hpp"
+#include "e2e_station_lock.hpp"
 
 using namespace remote60::native_poc;
 
@@ -123,6 +124,8 @@ int child() {
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc >= 2 && std::wstring(argv[1]) == L"--child") return child();
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("clipboard_monitor_files_test")) return remote60::native_poc::e2e::StationLock::Busy("clipboard_monitor_files_test");
 
   const DWORD userSeq = GetClipboardSequenceNumber();
   // A private window station: its clipboard is not the user's.

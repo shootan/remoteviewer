@@ -45,6 +45,7 @@
 #include "file_copy_helper_host.hpp"
 #include "file_copy_wire.hpp"
 #include "host_file_copy.hpp"
+#include "e2e_station_lock.hpp"
 
 using namespace remote60::native_poc;
 namespace fc = remote60::native_poc::file_copy;
@@ -200,6 +201,8 @@ class LoopbackLink : public ControlLink {
 
 int wmain() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("file_copy_net_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("file_copy_net_e2e_test");
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   const DWORD userClipBefore = GetClipboardSequenceNumber();
   e2e::StagingDir staging;
@@ -1221,6 +1224,21 @@ int wmain() {
     raw.clear();
     check("session 2 asking about it: Withdrawn (the old session's offer is gone)",
           call(fn::FileMsg::PasteQuery, fn::body(q), 2, &raw) && fn::parse(raw, &qr) && qr.state == fn::PasteState::Withdrawn,
+          "state=" + std::to_string(static_cast<int>(qr.state)));
+    // r2 review: a LATE request of the older session (another Serve() still alive) must not end
+    // session 2's state the way a newer one ends session 1's.
+    fn::Offer o2 = o;
+    o2.offerId = 0xE0E1;
+    raw.clear();
+    check("an offer of session 2 is published", call(fn::FileMsg::Offer, fn::body(o2), 2, &raw) && fn::parse(raw, &orr) &&
+                                                   orr.verdict == fn::Verdict::Accept);
+    fn::PasteQuery late{0xE0E0};
+    raw.clear();
+    check("a late request of session 1 is DROPPED (the handler refuses it)", !call(fn::FileMsg::PasteQuery, fn::body(late), 1, &raw));
+    fn::PasteQuery q2{0xE0E1};
+    raw.clear();
+    check("...and session 2's offer is still there (not Withdrawn)",
+          call(fn::FileMsg::PasteQuery, fn::body(q2), 2, &raw) && fn::parse(raw, &qr) && qr.state == fn::PasteState::None,
           "state=" + std::to_string(static_cast<int>(qr.state)));
   }
   hostRx.join();

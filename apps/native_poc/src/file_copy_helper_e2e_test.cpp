@@ -44,6 +44,7 @@
 #include "file_copy_helper_host.hpp"
 #include "file_copy_pipe.hpp"
 #include "test_scratch_dir.hpp"
+#include "e2e_station_lock.hpp"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -1261,6 +1262,8 @@ int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (has_arg(argc, argv, L"--consumer")) return run_consumer(argc, argv);
   if (has_arg(argc, argv, L"--elevated-check")) return run_elevated_check(argc, argv);
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("file_copy_helper_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("file_copy_helper_e2e_test");
   const int rc = run_driver();
   std::printf("\n%s  (%d checks, %d failed)\n", gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
   return (rc == 0 && gFailures == 0) ? 0 : 1;

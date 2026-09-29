@@ -152,7 +152,8 @@ target_link_libraries(remote60_native_video_host_clipsink PRIVATE
 )
 
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
-add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink)
+add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink
+                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test)
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp

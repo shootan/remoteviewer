@@ -35,6 +35,7 @@
 #include "clip_image_core.hpp"
 #include "host_clip_image.hpp"
 #include "udp_impair_proxy.hpp"
+#include "e2e_station_lock.hpp"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -373,6 +374,8 @@ Run transfer(const Image& im, const Impair* impair, BulkRateConfig rate, const c
 }  // namespace
 
 int main(int argc, char** argv) {
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("clip_image_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("clip_image_e2e_test");
   const bool quick = argc > 1 && std::strcmp(argv[1], "--quick") == 0;
   const bool perfOnly = argc > 1 && std::strcmp(argv[1], "--perf-only") == 0;
   WSADATA wsa;

@@ -76,6 +76,7 @@
 #include "viewer_udp_session.hpp"
 #include "viewer_window_proc.hpp"
 #include "test_scratch_dir.hpp"
+#include "e2e_station_lock.hpp"
 
 namespace ts = remote60::native_poc::test_support;
 
@@ -466,6 +467,8 @@ int wmain(int argc, wchar_t** argv) {
     return kE2eSkippedExit;
   }
   if (outDir.empty()) outDir = directory_of(self_path()) + L"clip_bar_shots";
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("viewer_clip_bar_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("viewer_clip_bar_e2e_test");
   const DWORD interactiveClipBefore = GetClipboardSequenceNumber();
   CreateDirectoryW(outDir.c_str(), nullptr);
   std::cout << "screenshots: " << narrow(outDir) << "\n";

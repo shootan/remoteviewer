@@ -25,6 +25,7 @@
 #include "clip_image_core.hpp"
 #include "clip_image_wic.hpp"
 #include "clipboard_monitor.hpp"
+#include "e2e_station_lock.hpp"
 
 using namespace remote60::native_poc;
 
@@ -206,6 +207,8 @@ int run_child(const wchar_t* resultFile) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc >= 3 && wcscmp(argv[1], L"--child") == 0) return run_child(argv[2]);
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("clip_image_clipboard_test")) return remote60::native_poc::e2e::StationLock::Busy("clip_image_clipboard_test");
   // The child's result file: --out <dir> when given, otherwise the repository's test scratch (a
   // directory this run creates) -- never the working directory or %TEMP%.
   remote60::native_poc::e2e::StagingDir staging;

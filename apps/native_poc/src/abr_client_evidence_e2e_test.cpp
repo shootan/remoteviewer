@@ -100,6 +100,7 @@
 #include <psapi.h>
 
 #include <mmsystem.h>  // timeBeginPeriod (r5); after the project headers, which bring winsock2/windows
+#include "e2e_station_lock.hpp"
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::e2e;
@@ -303,6 +304,8 @@ int wmain(int argc, wchar_t** argv) {
     return kE2eSkippedExit;
   }
   std::string mode;
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("abr_client_evidence_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("abr_client_evidence_e2e_test");
   std::wstring hostExe;
   bool desktop = false;
   bool textOff = false;
