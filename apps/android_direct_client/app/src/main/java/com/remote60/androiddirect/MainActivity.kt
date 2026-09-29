@@ -3903,12 +3903,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val loginVault: LoginFlow.Vault by lazy { KeystoreLoginVault(this) }
     private var signInEpoch = 0
 
+    /**
+     * The account the session in use belongs to -- what the host list is shown as. Not the id
+     * in the form, which a failed attempt also changes. Main thread.
+     */
+    private var sessionAccountId = ""
+
     private fun directoryOrigin(): String = DirectoryClient.originKey(DirectoryClient.directoryUrl)
 
     private fun flowLog(line: String) = diagnosticsLog.log("sign_in_store", line)
 
     /** Takes a session into use: memory, the log uploader, and the host list. Main thread. */
-    private fun adoptSession(token: String, reason: String) {
+    private fun adoptSession(token: String, accountId: String, reason: String) {
+        sessionAccountId = accountId
         DirectoryClient.adoptSession(token)
         LogUploader.configure(this, DirectoryClient.directoryUrl, token)
         setDirectoryBusy(false)
@@ -3944,13 +3951,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         directoryExecutor.execute {
             try {
                 val generation = LoginFlow.beginSignIn(loginVault, ::flowLog)
-                // With nowhere to keep a credential the sign-in is made without asking for one,
-                // rather than refused: this run works, the next one asks for the password.
-                val result = if (generation != 0L) {
-                    DirectoryClient.loginWithDevice(url, id, password, deviceLabel())
-                } else {
-                    DirectoryClient.loginWithDevice(url, id, password, null)
+                if (generation == 0L) {
+                    // Without the counter nothing can tell this sign-in's answer from one that
+                    // arrives after a sign-out -- or after a sign-in as somebody else. So no
+                    // request is sent, with or without a device credential.
+                    diagnosticsLog.log("login_failed", "the sign-in store could not be written")
+                    runOnUiThread {
+                        if (epoch != signInEpoch) return@runOnUiThread
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_store_unavailable)
+                    }
+                    return@execute
                 }
+                val result = DirectoryClient.loginWithDevice(url, id, password, deviceLabel())
                 // Where observations go rides on the login response. Kept for this run so the
                 // connect below does not have to ask again.
                 directoryObserveEndpoint = result.advertised
@@ -3968,12 +3981,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
                 }
                 runOnUiThread {
+                    // Moved on since: a sign-out moved the counter too, so what this stored (if
+                    // anything) was already ended by it; a newer sign-in owes it a sign-out.
                     if (epoch != signInEpoch) return@runOnUiThread
                     if (refused != null) {
                         setDirectoryBusy(false)
                         loginErrorText.text = refused
                     } else {
-                        adoptSession(result.signedIn.sessionToken, "login")
+                        adoptSession(result.signedIn.sessionToken, id, "login")
                     }
                 }
             } catch (e: Exception) {
@@ -4033,7 +4048,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             runOnUiThread {
                 if (epoch != signInEpoch) return@runOnUiThread
                 when (finished.outcome) {
-                    LoginFlow.Return.SIGNED_IN -> adoptSession(finished.sessionToken, "resume")
+                    LoginFlow.Return.SIGNED_IN ->
+                        adoptSession(finished.sessionToken, finished.accountId, "resume")
                     LoginFlow.Return.REJECTED -> {
                         setDirectoryBusy(false)
                         loginErrorText.text = getString(R.string.login_again)
@@ -4059,6 +4075,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val url = DirectoryClient.directoryUrl
         val session = DirectoryClient.session()
         DirectoryClient.dropSession()
+        sessionAccountId = ""
         manualConnectMode = false
         directoryHosts = emptyList()
         hostListAdapter.notifyDataSetChanged()
@@ -4092,9 +4109,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         val epoch = signInEpoch
+        val account = sessionAccountId
         setDirectoryBusy(true)
         hostsStatusText.text = getString(R.string.hosts_loading)
         directoryExecutor.execute {
+            var anotherAccount = false
             try {
                 var list: List<DirectoryClient.Host>
                 try {
@@ -4102,11 +4121,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 } catch (e: DirectoryClient.DirectoryException) {
                     if (e.status != 401) throw e
                     // The session is no longer one: twelve hours went by, or the server was
-                    // restarted. This phone may still hold what gets another -- asked once.
+                    // restarted. This phone may still hold what gets another -- asked once, and
+                    // only for the account this screen shows. What is stored may be another's
+                    // by now; its session would show that account's PCs under this one's name.
+                    if (account.isEmpty()) throw e
                     val back = LoginFlow.comeBack(
-                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
+                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog,
+                        onlyForAccount = account)
                     diagnosticsLog.log("session_refused", "coming back: ${back.outcome}")
-                    if (back.outcome != LoginFlow.Return.SIGNED_IN) throw e
+                    anotherAccount = back.outcome == LoginFlow.Return.OTHER_ACCOUNT
+                    if (back.outcome != LoginFlow.Return.SIGNED_IN || back.accountId != account) throw e
                     if (epoch != signInEpoch) return@execute
                     DirectoryClient.adoptSession(back.sessionToken)
                     LogUploader.configure(this, url, back.sessionToken)
@@ -4120,7 +4144,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     setDirectoryBusy(false)
                     directoryHosts = list
                     hostListAdapter.notifyDataSetChanged()
-                    hostsStatusText.text = DirectoryClient.savedAccountId(this)
+                    hostsStatusText.text = account.ifEmpty { DirectoryClient.savedAccountId(this) }
                     renderStatus()
                 }
             } catch (e: Exception) {
@@ -4133,8 +4157,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (e is DirectoryClient.DirectoryException && e.status == 401) {
                         ++signInEpoch
                         DirectoryClient.dropSession()
+                        sessionAccountId = ""
                         currentScene = UiScene.LOGIN
-                        loginErrorText.text = getString(R.string.login_again)
+                        loginErrorText.text = getString(
+                            if (anotherAccount) R.string.login_other_account else R.string.login_again)
                     } else {
                         hostsStatusText.text = e.message ?: ""
                     }

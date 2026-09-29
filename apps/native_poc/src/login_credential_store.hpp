@@ -53,7 +53,7 @@ struct PendingRevoke {
   std::string revokeToken;
 };
 
-/** How many sign-outs can be waiting to be told to the server. The oldest goes past this. */
+/** How many sign-outs can be waiting to be told to the server. Past this, none is added. */
 constexpr size_t kMaxPendingRevokes = 16;
 
 enum class ReadResult {
@@ -103,10 +103,22 @@ class Store {
   uint64_t BumpGeneration(const Lock& lock) const;
 
   ReadResult LoadPendingRevokes(const Lock& lock, std::vector<PendingRevoke>* out) const;
-  /** Adds one, replacing an entry for the same device; drops the oldest past the bound. */
+  /**
+   * Adds one, replacing an entry for the same device.
+   *
+   * Refused -- nothing written, `why` says which -- when the list is full and when it cannot
+   * be read. Neither is resolved by dropping or overwriting what is there: every entry is a
+   * device still alive at the directory and the only copy of the token that ends it.
+   */
   bool AddPendingRevoke(const Lock& lock, const PendingRevoke& pending,
                         std::string* why = nullptr) const;
   bool RemovePendingRevoke(const Lock& lock, const std::string& deviceId) const;
+  /**
+   * Moves a list that cannot be read out of the way, whole, to `login.cred.revoke.unreadable-N`,
+   * so that a new list can be started. Only when it cannot be read, and only by a caller with
+   * the user in front of it (a sign-in made on purpose): it is how the store stops refusing.
+   */
+  bool SetAsidePendingRevokes(const Lock& lock, std::string* movedTo = nullptr) const;
 
   const std::wstring& directory() const { return directory_; }
   std::wstring credential_path() const;

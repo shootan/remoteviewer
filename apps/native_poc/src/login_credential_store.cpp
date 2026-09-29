@@ -362,19 +362,46 @@ bool Store::AddPendingRevoke(const Lock& lock, const PendingRevoke& pending,
     return false;
   }
   std::vector<PendingRevoke> list;
-  // A list that cannot be read is started again rather than kept: what it held cannot be sent
-  // to the server anyway, and refusing to record THIS sign-out would lose one that can.
-  (void)LoadPendingRevokes(lock, &list);
+  // A list that cannot be read is NOT started again. Writing a new one over it would throw
+  // away sign-outs that are still owed -- devices still alive at the directory, and the only
+  // copies of the tokens that end them. It stays as it is and this one is refused; the caller
+  // has to end the device some other way, or not at all.
+  if (LoadPendingRevokes(lock, &list) == ReadResult::Unreadable) {
+    if (why) *why = "the list of owed sign-outs cannot be read, and is not written over";
+    return false;
+  }
   list.erase(std::remove_if(list.begin(), list.end(),
                             [&](const PendingRevoke& p) { return p.deviceId == pending.deviceId; }),
              list.end());
+  // Full is refused too. The oldest entry is as much owed as the newest, and dropping it to
+  // make room is forgetting a device that is still signed in somewhere.
+  if (list.size() >= kMaxPendingRevokes) {
+    if (why) *why = "the list of owed sign-outs is full";
+    return false;
+  }
   list.push_back(pending);
-  while (list.size() > kMaxPendingRevokes) list.erase(list.begin());
   if (!save_pending(revoke_path(), list)) {
     if (why) *why = "could not write it (" + std::to_string(GetLastError()) + ")";
     return false;
   }
   return true;
+}
+
+bool Store::SetAsidePendingRevokes(const Lock& lock, std::string* movedTo) const {
+  if (!lock.held()) return false;
+  std::vector<PendingRevoke> list;
+  if (LoadPendingRevokes(lock, &list) != ReadResult::Unreadable) return false;
+  // Kept, whole, under a name nothing reads: what is in it cannot be opened here, and may yet
+  // be by whoever comes to find out why.
+  for (int n = 1; n <= 64; ++n) {
+    const std::wstring aside = revoke_path() + L".unreadable-" + std::to_wstring(n);
+    if (MoveFileExW(revoke_path().c_str(), aside.c_str(), MOVEFILE_WRITE_THROUGH)) {
+      if (movedTo) *movedTo = "login.cred.revoke.unreadable-" + std::to_string(n);
+      return true;
+    }
+    if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS) return false;
+  }
+  return false;
 }
 
 bool Store::RemovePendingRevoke(const Lock& lock, const std::string& deviceId) const {

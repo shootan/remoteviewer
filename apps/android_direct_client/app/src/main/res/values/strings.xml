@@ -110,7 +110,9 @@
     <string name="login_again">Please sign in again.</string>
     <string name="login_superseded">You were signed out while signing in. Please sign in again.</string>
     <string name="login_not_saved">The sign-in could not be saved. Please try again.</string>
-    <string name="login_sign_out_failed">The saved sign-in could not be removed.</string>
+    <string name="login_sign_out_failed">Sign-out could not be completed. The saved sign-in is still here and may sign you in again next time. Sign in, then sign out once more.</string>
+    <string name="login_store_unavailable">The saved sign-in cannot be opened, so you were not signed in. Please try again in a moment.</string>
+    <string name="login_other_account">Another account signed in on this device. Please sign in again.</string>
     <string name="hosts_title">My PCs</string>
     <string name="hosts_logout_button">Sign out</string>
     <string name="hosts_empty">No PCs registered yet. Sign in on the PC with the same account.</string>

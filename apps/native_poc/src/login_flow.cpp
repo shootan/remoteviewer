@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <vector>
 
+// One rule runs through this file: WHEN SOMETHING COULD NOT BE WRITTEN, THE STEP AFTER IT IS NOT
+// TAKEN. The counter, the record of a sign-out owed and the credential are each what makes the
+// next step safe, and each write reports whether it happened. None of those reports is dropped.
+
 namespace remote60::native_poc::login_flow {
 namespace {
 
@@ -41,30 +45,69 @@ bool owed_for(const std::vector<PendingRevoke>& owed, const std::string& deviceI
 }
 
 /**
+ * Whether the directory's answer means there is nothing left to send for this device.
+ *
+ * Ok: it ended the device. Rejected (401): it does not accept the revoke token, which is what
+ * it answers for a device it no longer has.
+ *
+ * NOT Unsupported. A 404 from the logout route says the server in front of us has no such
+ * route -- a server from before device credentials, put back during a rollback. The device is
+ * still in its store, untouched, and alive again the moment the newer server returns. That is
+ * not an ended device; it is one that has not been told yet.
+ */
+bool ended_at_directory(SessionCall call) {
+  return call == SessionCall::Ok || call == SessionCall::Rejected;
+}
+
+SessionCall tell_directory(const Deps& deps, const std::string& deviceId,
+                           const std::string& revokeToken) {
+  std::string error;
+  return deps.revoke ? deps.revoke(deviceId, revokeToken, &error) : SessionCall::Unreachable;
+}
+
+/**
  * Ends a device the directory issued and this client will not keep. Told now if it can be,
- * written down as owed if it cannot. `lock` may be held or not; the record needs it held.
+ * written down as owed if it cannot -- and if neither, that is said.
  */
 void end_unkept_device(const Store& store, const Deps& deps, const DeviceSignIn& signedIn,
-                       const char* why) {
-  std::string error;
-  const SessionCall told = deps.revoke ? deps.revoke(signedIn.deviceId, signedIn.revokeToken, &error)
-                                       : SessionCall::Unreachable;
-  if (told == SessionCall::Ok || told == SessionCall::Rejected ||
-      told == SessionCall::Unsupported) {
-    // Rejected: it is already ended, or the token is not this device's -- nothing more this
-    // client can do either way. Unsupported: that directory issues no devices to end.
-    say(deps, std::string("device ") + tag(signedIn.deviceId) + " was not kept (" + why +
+                       const std::string& why) {
+  const SessionCall told = tell_directory(deps, signedIn.deviceId, signedIn.revokeToken);
+  if (ended_at_directory(told)) {
+    say(deps, "device " + tag(signedIn.deviceId) + " was not kept (" + why +
                   ") and the directory was told: " + session_call_name(told));
     return;
   }
   Store::Lock lock = store.Acquire(deps.lockWaitMs);
+  std::string recordWhy = "the store could not be had";
   const bool recorded =
       lock.held() &&
       store.AddPendingRevoke(lock, PendingRevoke{deps.serverOrigin, signedIn.deviceId,
-                                                 signedIn.revokeToken});
-  say(deps, std::string("device ") + tag(signedIn.deviceId) + " was not kept (" + why +
+                                                 signedIn.revokeToken}, &recordWhy);
+  say(deps, "device " + tag(signedIn.deviceId) + " was not kept (" + why +
                 "); the directory could not be told (" + session_call_name(told) + ") and that is " +
-                (recorded ? "recorded as owed" : "NOT recorded: the store could not be written"));
+                (recorded ? std::string("recorded as owed")
+                          : "NOT recorded (" + recordWhy +
+                                "): the device stays alive at the directory until it expires"));
+}
+
+/**
+ * Takes a stored credential out of use, under the lock: written down as owed, then erased.
+ *
+ * In that order, and the second only if the first succeeded. What is returned is whether the
+ * credential is gone; when the record could not be written, it is exactly as it was found.
+ */
+bool retire_under_lock(const Store& store, const Store::Lock& lock, const Credential& stored,
+                       bool* recorded, std::string* why) {
+  *recorded = store.AddPendingRevoke(
+      lock, PendingRevoke{stored.serverOrigin, stored.deviceId, stored.revokeToken}, why);
+  if (!*recorded) return false;
+  if (!store.Erase(lock)) {
+    // The record is there and says this credential is not to be used; come_back reads it
+    // first. But it is not gone, and that is what is reported.
+    if (why) *why = "the credential could not be erased";
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -80,6 +123,7 @@ const char* return_name(Return value) {
     case Return::TryLater: return "try-later";
     case Return::Busy: return "busy";
     case Return::NotSaved: return "not-saved";
+    case Return::OtherAccount: return "other-account";
   }
   return "?";
 }
@@ -96,7 +140,7 @@ const char* remembered_name(Remembered value) {
 
 // ------------------------------------------------------------------------------ coming back
 
-ReturnResult come_back(const Store& store, const Deps& deps) {
+ReturnResult come_back(const Store& store, const Deps& deps, const std::string& onlyForAccount) {
   ReturnResult result;
   Store::Lock lock = store.Acquire(deps.lockWaitMs);
   if (!lock.held()) {
@@ -134,18 +178,41 @@ ReturnResult come_back(const Store& store, const Deps& deps) {
     return result;
   }
 
+  if (!onlyForAccount.empty() && stored.accountId != onlyForAccount) {
+    // Somebody signed in as another account, in another window, since this one did. What is
+    // stored is theirs. It is not presented on this window's behalf: the session it would get
+    // is the other account's, and this window would show that account's PCs under the name
+    // of its own.
+    wipe(&stored);
+    result.outcome = Return::OtherAccount;
+    result.detail = "another account is signed in on this device";
+    say(deps, "the stored sign-in belongs to another account than this window's; it is not used");
+    return result;
+  }
+
   std::vector<PendingRevoke> owed;
-  (void)store.LoadPendingRevokes(lock, &owed);
+  if (store.LoadPendingRevokes(lock, &owed) == ReadResult::Unreadable) {
+    // Whether this credential was signed out of is written in a list that cannot be read. It
+    // may have been. Nothing is presented on the strength of not knowing.
+    wipe(&stored);
+    result.outcome = Return::Unreadable;
+    result.detail = "the list of sign-outs cannot be read";
+    say(deps, "the list of owed sign-outs cannot be read; the stored credential is not used");
+    return result;
+  }
   if (owed_for(owed, stored.deviceId)) {
     // A sign-out got as far as being written down and no further. It is finished here rather
-    // than undone: the credential goes, and the directory is told by settle_owed_sign_outs.
-    (void)store.BumpGeneration(lock);
-    const bool erased = store.Erase(lock);
+    // than undone -- but only behind the counter: without that on disk, an answer to a
+    // sign-in from before the sign-out could still store itself.
+    const bool barrier = store.BumpGeneration(lock) != 0;
+    const bool erased = barrier && store.Erase(lock);
     wipe(&stored);
     result.outcome = Return::SignedOut;
     result.detail = "this device was signed out";
     say(deps, "device " + tag(result.deviceId) + " has a sign-out owed; its credential is " +
-                  (erased ? "erased" : "STILL ON DISK (could not be erased)") +
+                  (erased ? "erased"
+                          : barrier ? "STILL ON DISK (could not be erased)"
+                                    : "left on disk (the counter could not be written)") +
                   " and it is not used");
     return result;
   }
@@ -183,13 +250,17 @@ ReturnResult come_back(const Store& store, const Deps& deps) {
       return result;
     }
     case SessionCall::Rejected: {
-      (void)store.BumpGeneration(lock);
-      const bool erased = store.Erase(lock);
+      // Refused: it opens nothing any more. Erased behind the counter, like every other way a
+      // credential leaves; if the counter cannot be written it stays, and is refused again.
+      const bool barrier = store.BumpGeneration(lock) != 0;
+      const bool erased = barrier && store.Erase(lock);
       wipe(&stored);
       result.outcome = Return::Rejected;
       result.detail = error;
       say(deps, "device " + tag(result.deviceId) + ": the directory refused the credential; it is " +
-                    (erased ? "erased" : "STILL ON DISK (could not be erased)"));
+                    (erased ? "erased"
+                            : barrier ? "STILL ON DISK (could not be erased)"
+                                      : "left on disk (the counter could not be written)"));
       return result;
     }
     case SessionCall::Unsupported:
@@ -204,8 +275,9 @@ ReturnResult come_back(const Store& store, const Deps& deps) {
       wipe(&stored);
       result.outcome = Return::TryLater;
       result.detail = error;
-      say(deps, std::string("device ") + tag(result.deviceId) + ": no answer about the credential (" +
-                    session_call_name(call) + "); it is kept");
+      say(deps, std::string("device ") + tag(result.deviceId) +
+                    ": no answer about the credential (" + session_call_name(call) +
+                    "); it is kept");
       return result;
   }
   return result;
@@ -216,67 +288,144 @@ ReturnResult come_back(const Store& store, const Deps& deps) {
 uint64_t begin_sign_in(const Store& store, const Deps& deps) {
   Store::Lock lock = store.Acquire(deps.lockWaitMs);
   if (!lock.held()) {
-    say(deps, "could not be had in time; this sign-in will not be remembered");
+    say(deps, "could not be had in time; the sign-in is not made");
     return 0;
   }
   const uint64_t generation = store.BumpGeneration(lock);
-  if (generation == 0) say(deps, "the counter could not be written; this sign-in will not be remembered");
+  if (generation == 0) say(deps, "the counter could not be written; the sign-in is not made");
   return generation;
 }
 
 Remembered remember_sign_in(const Store& store, const Deps& deps, uint64_t generation,
                             const std::string& accountId, const DeviceSignIn& signedIn) {
-  if (signedIn.deviceId.empty() || signedIn.deviceCredential.empty() ||
-      signedIn.revokeToken.empty()) {
-    return Remembered::NotIssued;
-  }
+  const bool issued = !signedIn.deviceId.empty() && !signedIn.deviceCredential.empty() &&
+                      !signedIn.revokeToken.empty();
 
   Remembered outcome = Remembered::Superseded;
-  const char* why = "something happened to the store after this sign-in began";
+  std::string why = "something happened to the store after this sign-in began";
   std::string previousDevice;
-  {
+  // A device that could not be written down as owed and was ended at the directory instead,
+  // on the first pass. The second pass finds it still stored and knows it is dealt with.
+  std::string endedAtDirectory;
+
+  for (int pass = 0; pass < 2; ++pass) {
     Store::Lock lock = store.Acquire(deps.lockWaitMs);
     if (!lock.held() || generation == 0) {
       outcome = Remembered::NotSaved;
       why = "the store could not be had";
-    } else if (store.Generation(lock) != generation) {
-      outcome = Remembered::Superseded;
-    } else {
-      // The family this one replaces, if there was one: a sign-in made on purpose starts a
-      // new family, and the old one is ended rather than left to expire in ninety days.
-      Credential previous;
-      if (store.Load(lock, &previous) == ReadResult::Ok &&
-          previous.serverOrigin == deps.serverOrigin &&
-          previous.deviceId != signedIn.deviceId) {
-        previousDevice = previous.deviceId;
-        (void)store.AddPendingRevoke(
-            lock, PendingRevoke{previous.serverOrigin, previous.deviceId, previous.revokeToken});
-      }
-      wipe(&previous);
-
-      Credential fresh{deps.serverOrigin, accountId, signedIn.deviceId,
-                       signedIn.deviceCredential, signedIn.revokeToken};
-      std::string saveWhy;
-      if (store.Save(lock, fresh, &saveWhy)) {
-        outcome = Remembered::Stored;
-      } else {
-        outcome = Remembered::NotSaved;
-        why = "the credential could not be written";
-        say(deps, "device " + tag(signedIn.deviceId) + ": could not be stored (" + saveWhy + ")");
-      }
-      wipe(&fresh);
+      break;
     }
+    // Asked whether or not the directory issued anything to keep. A sign-in answered after a
+    // sign-out is late either way, and its session is not used.
+    if (store.Generation(lock) != generation) {
+      outcome = Remembered::Superseded;
+      break;
+    }
+
+    // What is stored now is about to stop being this device's sign-in: a sign-in made on
+    // purpose starts a family of its own. The one before it is ended -- written down as owed,
+    // or, failing that, ended at the directory first. It is never simply written over, and
+    // never simply left: left, it would sign this device in as the account before.
+    Credential previous;
+    const bool hasPrevious = store.Load(lock, &previous) == ReadResult::Ok &&
+                             previous.serverOrigin == deps.serverOrigin &&
+                             previous.deviceId != signedIn.deviceId;
+    if (hasPrevious && previous.deviceId != endedAtDirectory) {
+      std::vector<PendingRevoke> owed;
+      if (store.LoadPendingRevokes(lock, &owed) == ReadResult::Unreadable) {
+        // The user is here and has just proved who they are. A list that cannot be read is
+        // set aside -- kept, under another name -- so that a new one can be started.
+        std::string aside;
+        if (store.SetAsidePendingRevokes(lock, &aside)) {
+          say(deps, "the list of owed sign-outs could not be read; it is kept as " + aside +
+                        " and a new one is started");
+        }
+      }
+      std::string recordWhy;
+      if (!store.AddPendingRevoke(lock, PendingRevoke{previous.serverOrigin, previous.deviceId,
+                                                      previous.revokeToken}, &recordWhy)) {
+        if (pass == 1) {
+          outcome = Remembered::NotSaved;
+          why = "the sign-in it replaces could not be written down as owed (" + recordWhy + ")";
+          wipe(&previous);
+          break;
+        }
+        say(deps, "device " + tag(previous.deviceId) + ": could not be written down as owed (" +
+                      recordWhy + "); the directory is told before it is replaced");
+        // Out of the lock for the call, then round again: the generation is asked anew.
+        lock = Store::Lock();
+        const SessionCall told = tell_directory(deps, previous.deviceId, previous.revokeToken);
+        const std::string device = previous.deviceId;
+        wipe(&previous);
+        if (!ended_at_directory(told)) {
+          outcome = Remembered::NotSaved;
+          why = "the sign-in it replaces could neither be written down as owed nor ended at "
+                "the directory";
+          break;
+        }
+        endedAtDirectory = device;
+        continue;
+      }
+    }
+    if (hasPrevious) previousDevice = previous.deviceId;
+    wipe(&previous);
+
+    // The counter moves again, on disk, before anything is stored or erased. It makes any
+    // second answer to this same sign-in late -- and it is the test of whether the counter
+    // can be written at all. A sign-out that found it could not be written did not happen
+    // (sign_out), and had no way to make this answer late; so the answer is kept only by a
+    // store whose counter works.
+    if (store.BumpGeneration(lock) == 0) {
+      outcome = Remembered::NotSaved;
+      why = "the counter could not be written";
+      break;
+    }
+
+    if (!issued) {
+      // The directory issued nothing to keep. What WAS kept still goes.
+      if (hasPrevious && !store.Erase(lock)) {
+        outcome = Remembered::NotSaved;
+        why = "the sign-in it replaces could not be erased";
+        break;
+      }
+      outcome = Remembered::NotIssued;
+      break;
+    }
+
+    Credential fresh{deps.serverOrigin, accountId, signedIn.deviceId, signedIn.deviceCredential,
+                     signedIn.revokeToken};
+    std::string saveWhy;
+    if (store.Save(lock, fresh, &saveWhy)) {
+      outcome = Remembered::Stored;
+    } else {
+      outcome = Remembered::NotSaved;
+      why = "the credential could not be written (" + saveWhy + ")";
+    }
+    wipe(&fresh);
+    break;
   }
 
-  if (outcome == Remembered::Stored) {
-    say(deps, "device " + tag(signedIn.deviceId) + ": stored" +
-                  (previousDevice.empty() ? std::string()
-                                          : "; device " + tag(previousDevice) +
-                                                " before it is to be ended"));
+  if (outcome == Remembered::Stored || outcome == Remembered::NotIssued) {
+    say(deps, (issued ? "device " + tag(signedIn.deviceId) + ": stored"
+                      : std::string("the directory issued no credential; nothing is stored")) +
+                  (previousDevice.empty()
+                       ? std::string()
+                       : "; device " + tag(previousDevice) + " before it is " +
+                             (previousDevice == endedAtDirectory ? "ended" : "owed a sign-out")));
     return outcome;
   }
-  end_unkept_device(store, deps, signedIn, why);
+  if (issued) {
+    end_unkept_device(store, deps, signedIn, why);
+  } else {
+    say(deps, "the sign-in is not used: " + why);
+  }
   return outcome;
+}
+
+void discard_sign_in(const Store& store, const Deps& deps, const DeviceSignIn& signedIn,
+                     const std::string& why) {
+  if (signedIn.deviceId.empty() || signedIn.revokeToken.empty()) return;
+  end_unkept_device(store, deps, signedIn, why);
 }
 
 // ------------------------------------------------------------------------------ signing out
@@ -284,7 +433,7 @@ Remembered remember_sign_in(const Store& store, const Deps& deps, uint64_t gener
 SignOutResult sign_out(const Store& store, const Deps& deps) {
   SignOutResult result;
   Credential stored;
-  bool haveCredential = false;
+  bool recorded = false;
   {
     Store::Lock lock = store.Acquire(deps.lockWaitMs);
     if (!lock.held()) {
@@ -292,62 +441,97 @@ SignOutResult sign_out(const Store& store, const Deps& deps) {
       say(deps, "could not be had in time; the credential was not erased");
       return result;
     }
-    // The counter first: from here every answer still in flight is late.
-    (void)store.BumpGeneration(lock);
-    const ReadResult read = store.Load(lock, &stored);
-    haveCredential = read == ReadResult::Ok && stored.serverOrigin == deps.serverOrigin;
-    if (haveCredential) {
-      // Written down BEFORE the credential goes. If this process dies between the two lines,
-      // the credential is still there -- with a record beside it that says it is not to be
-      // used, which come_back() reads first.
-      std::string why;
-      result.owed = store.AddPendingRevoke(
-          lock, PendingRevoke{stored.serverOrigin, stored.deviceId, stored.revokeToken}, &why);
-      if (!result.owed) {
-        say(deps, "device " + tag(stored.deviceId) +
-                      ": the sign-out could not be written down (" + why + ")");
-      }
+    // The counter first, and on disk: from here every answer still in flight is late. If it
+    // cannot be written there is nothing that would make them late, and a sign-in answered a
+    // moment from now would store itself over this sign-out. So nothing else is done.
+    if (store.BumpGeneration(lock) == 0) {
+      result.detail = "the sign-out could not be recorded";
+      say(deps, "the counter could not be written; the sign-out is not made");
+      return result;
     }
-    if (read == ReadResult::Ok && !haveCredential) {
+    std::string why;
+    const ReadResult read = store.Load(lock, &stored, &why);
+    if (read == ReadResult::None) {
+      result.localDone = true;
+      result.detail = "nothing was stored";
+      return result;
+    }
+    if (read == ReadResult::Unreadable) {
+      // It opens nothing and names no device to end. It goes.
+      result.localDone = store.Erase(lock);
+      result.detail = result.localDone ? "what was stored could not be read, and is removed"
+                                       : "the stored sign-in could not be removed";
+      say(deps, "the stored credential could not be read (" + why + "); " +
+                    (result.localDone ? "erased" : "COULD NOT BE ERASED"));
+      return result;
+    }
+    if (stored.serverOrigin != deps.serverOrigin) {
       // Another server's. Signing out of this one does not touch it.
       result.localDone = true;
       result.detail = "nothing of this server's was stored";
       wipe(&stored);
       return result;
     }
-    result.localDone = store.Erase(lock);
+    // Written down BEFORE the credential goes, and the credential goes only if it was. If
+    // this process dies between the two, the credential is still there -- with a record
+    // beside it that says it is not to be used, which come_back() reads first.
+    result.localDone = retire_under_lock(store, lock, stored, &recorded, &why);
+    result.owed = recorded;
     if (!result.localDone) {
-      say(deps, "the credential could not be erased");
-      result.detail = "the stored sign-in could not be removed";
+      result.detail = why;
+      say(deps, "device " + tag(stored.deviceId) + ": could not be signed out on disk (" + why +
+                    ")" + (recorded ? "" : "; the directory is told first"));
     }
   }
-  if (!haveCredential) {
-    result.detail = "nothing was stored";
+
+  const SessionCall told = tell_directory(deps, stored.deviceId, stored.revokeToken);
+  const std::string device = stored.deviceId;
+  wipe(&stored);
+
+  if (!recorded) {
+    // Nothing could be written down. The credential is kept -- it holds the only means of
+    // ending the device -- unless the directory itself says the device is ended. Then there
+    // is nothing left for it to open, and it may go.
+    if (ended_at_directory(told)) {
+      Store::Lock lock = store.Acquire(deps.lockWaitMs);
+      result.localDone = lock.held() && store.Erase(lock);
+      result.serverTold = told == SessionCall::Ok;
+      result.detail = result.localDone ? std::string() : "the stored sign-in could not be removed";
+      say(deps, "device " + tag(device) + ": the directory ended it (" + session_call_name(told) +
+                    "); the credential is " +
+                    (result.localDone ? "erased" : "STILL ON DISK (could not be erased)"));
+    } else {
+      result.localDone = false;
+      result.detail = "the sign-out could not be written down and the server could not be told";
+      say(deps, "device " + tag(device) + ": NOT signed out -- nothing could be written down and "
+                    "the directory could not be told (" + session_call_name(told) +
+                    "); the credential is kept");
+    }
     return result;
   }
 
-  std::string error;
-  const SessionCall told = deps.revoke(stored.deviceId, stored.revokeToken, &error);
-  const std::string device = stored.deviceId;
-  wipe(&stored);
-  // Rejected: the directory does not accept the revoke token, which is what it answers for a
-  // device it no longer has as well as for a wrong token. There is nothing left to send.
-  // Unsupported: a directory that issues no devices has none to end.
-  if (told == SessionCall::Ok || told == SessionCall::Rejected ||
-      told == SessionCall::Unsupported) {
+  if (ended_at_directory(told)) {
+    result.serverTold = told == SessionCall::Ok;
+    if (!result.localDone) {
+      // The credential could not be erased. The record beside it is what keeps it from being
+      // used, so the record stays even though the directory has been told.
+      result.owed = true;
+      say(deps, "device " + tag(device) + ": the directory answered " + session_call_name(told) +
+                    "; the record is kept because the credential is still on disk");
+      return result;
+    }
     Store::Lock lock = store.Acquire(deps.lockWaitMs);
     const bool cleared = lock.held() && store.RemovePendingRevoke(lock, device);
-    result.serverTold = told == SessionCall::Ok;
     result.owed = !cleared;
     say(deps, "device " + tag(device) + ": signed out; the directory answered " +
                   session_call_name(told));
     return result;
   }
   result.serverTold = false;
-  result.detail = "the server could not be told yet";
-  say(deps, std::string("device ") + tag(device) + ": signed out here; the directory could not be told (" +
-                session_call_name(told) + ") and that is " +
-                (result.owed ? "recorded as owed" : "NOT recorded"));
+  result.owed = true;
+  if (result.detail.empty()) result.detail = "the server could not be told yet";
+  say(deps, "device " + tag(device) + ": signed out here; the directory could not be told (" +
+                session_call_name(told) + ") and that is recorded as owed");
   return result;
 }
 
@@ -356,7 +540,12 @@ size_t settle_owed_sign_outs(const Store& store, const Deps& deps) {
   {
     Store::Lock lock = store.Acquire(deps.lockWaitMs);
     if (!lock.held()) return 0;
-    if (store.LoadPendingRevokes(lock, &owed) != ReadResult::Ok) return 0;
+    const ReadResult read = store.LoadPendingRevokes(lock, &owed);
+    if (read == ReadResult::Unreadable) {
+      say(deps, "the list of owed sign-outs cannot be read; nothing is sent and nothing is removed");
+      return 1;   // something is owed that cannot be settled: not "none"
+    }
+    if (read != ReadResult::Ok) return 0;
   }
   size_t remaining = 0;
   for (PendingRevoke& pending : owed) {
@@ -365,17 +554,15 @@ size_t settle_owed_sign_outs(const Store& store, const Deps& deps) {
       ++remaining;
       continue;
     }
-    std::string error;
-    const SessionCall told = deps.revoke(pending.deviceId, pending.revokeToken, &error);
-    if (told == SessionCall::Ok || told == SessionCall::Rejected ||
-        told == SessionCall::Unsupported) {
+    const SessionCall told = tell_directory(deps, pending.deviceId, pending.revokeToken);
+    if (ended_at_directory(told)) {
       Store::Lock lock = store.Acquire(deps.lockWaitMs);
       if (!lock.held() || !store.RemovePendingRevoke(lock, pending.deviceId)) ++remaining;
       say(deps, "device " + tag(pending.deviceId) + ": an owed sign-out was settled (" +
                     session_call_name(told) + ")");
     } else {
       ++remaining;
-      say(deps, std::string("device ") + tag(pending.deviceId) + ": a sign-out is still owed (" +
+      say(deps, "device " + tag(pending.deviceId) + ": a sign-out is still owed (" +
                     session_call_name(told) + ")");
     }
     wipe(&pending.revokeToken);

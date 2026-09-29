@@ -11,6 +11,10 @@ import java.util.concurrent.locks.ReentrantLock
  * password -- which gets a session later without anything being typed. Every use replaces it.
  * Signing out ends it, here at once and at the directory as soon as the directory can be told.
  *
+ * One rule runs through this file: WHEN SOMETHING COULD NOT BE WRITTEN, THE STEP AFTER IT IS NOT
+ * TAKEN. The counter, the record of a sign-out owed and the credential are each what makes the
+ * next step safe, and each write reports whether it happened. None of those reports is dropped.
+ *
  * Nothing here is Android. The vault is an interface and so are the directory's calls, which is
  * what lets "the answer arrived after the sign-out" be tested on a JVM: a real server cannot be
  * told to be slow at exactly that moment. The vault the app uses is [KeystoreLoginVault].
@@ -44,6 +48,16 @@ object LoginFlow {
         data class Unreadable(val why: String) : VaultRead()
     }
 
+    /** The list of sign-outs owed. Nothing stored is an empty [Ok]. */
+    sealed class OwedRead {
+        data class Ok(val list: List<OwedSignOut>) : OwedRead()
+        /**
+         * Something is stored and cannot be read. It is NOT an empty list: what it held may
+         * include the sign-out of the very credential that is stored.
+         */
+        data class Unreadable(val why: String) : OwedRead()
+    }
+
     /** Where the stored sign-in lives. Every call is made under [LoginFlow]'s lock. */
     interface Vault {
         fun load(): VaultRead
@@ -53,13 +67,23 @@ object LoginFlow {
         fun generation(): Long
         /** Moves the counter and returns the new value; 0 when it could not be written. */
         fun bumpGeneration(): Long
-        fun owed(): List<OwedSignOut>
-        /** Adds one, replacing an entry for the same device; drops the oldest past the bound. */
+        fun owed(): OwedRead
+        /**
+         * Adds one, replacing an entry for the same device. Refused -- false, nothing written --
+         * when the list cannot be read (it is not written over) or already holds [MAX_OWED]
+         * other devices (none is dropped to make room).
+         */
         fun addOwed(owed: OwedSignOut): Boolean
         fun removeOwed(deviceId: String): Boolean
+        /**
+         * Only when the list cannot be read: keeps it under another name and leaves no list, so
+         * that a new one can be started. False when that could not be done, or there was
+         * nothing unreadable to set aside.
+         */
+        fun setAsideOwed(): Boolean
     }
 
-    /** How many sign-outs can be waiting to be told to the directory. */
+    /** How many sign-outs can be waiting to be told to the directory. Past this, none is added. */
     const val MAX_OWED = 16
 
     /** What became of a call, in the terms the caller has to act on. */
@@ -67,7 +91,10 @@ object LoginFlow {
         OK,
         /** 401: the credential is not accepted. Erase, ask to sign in. */
         REJECTED,
-        /** 404/405: a directory from before device credentials. Keep, do without. */
+        /**
+         * 404/405: a directory from before device credentials. A refresh does without. A
+         * sign-out is NOT done: the device is alive again when a newer server is back.
+         */
         UNSUPPORTED,
         /** 429: asked too often. Keep, try later. */
         LIMITED,
@@ -87,6 +114,8 @@ object LoginFlow {
     enum class Return {
         SIGNED_IN, NO_CREDENTIAL, SIGNED_OUT, REJECTED, UNREADABLE, SERVER_CANNOT, TRY_LATER, BUSY,
         NOT_SAVED,
+        /** What is stored is another account's than the one asked for. Not presented. */
+        OTHER_ACCOUNT,
     }
 
     data class ReturnResult(
@@ -113,6 +142,10 @@ object LoginFlow {
         override fun toString(): String = "SignedIn(device=${tag(deviceId)})"
     }
 
+    /**
+     * [localDone] false: the sign-out was NOT made and the stored sign-in is still there. The
+     * caller says so; it does not show the user signed out.
+     */
     data class SignOutResult(
         val localDone: Boolean,
         val serverTold: Boolean,
@@ -138,20 +171,53 @@ object LoginFlow {
     /** How a device is named in a log: enough to tell two apart, not enough to use. */
     fun tag(deviceId: String): String = if (deviceId.isEmpty()) "-" else deviceId.take(8)
 
-    private fun settled(call: Call): Boolean =
-        // REJECTED: the directory does not accept the revoke token, which is also what it
-        // answers for a device it no longer has. UNSUPPORTED: it issues no devices to end.
-        call == Call.OK || call == Call.REJECTED || call == Call.UNSUPPORTED
+    /**
+     * Whether the directory's answer means there is nothing left to send for this device.
+     * REJECTED: it does not accept the revoke token, which is also what it answers for a device
+     * it no longer has. NOT UNSUPPORTED: a 404 says the server in front of us has no such route
+     * -- one from before device credentials, put back in a rollback -- and the device is still
+     * in its store, alive again the moment the newer server returns.
+     */
+    private fun endedAtDirectory(call: Call): Boolean = call == Call.OK || call == Call.REJECTED
+
+    /**
+     * Ends a device the directory issued and this app will not keep. Told now if it can be,
+     * written down as owed if it cannot -- and if neither, that is said.
+     */
+    private fun endUnkeptDevice(
+        vault: Vault, directory: Directory, serverOrigin: String, signedIn: SignedIn, why: String,
+        log: (String) -> Unit, lockWaitMs: Long,
+    ) {
+        val told = directory.revoke(signedIn.deviceId, signedIn.revokeToken)
+        if (endedAtDirectory(told)) {
+            log("sign-in store: device ${tag(signedIn.deviceId)} was not kept ($why) and the " +
+                "directory was told: $told")
+            return
+        }
+        val recorded = locked(lockWaitMs, busy = { false }) {
+            vault.addOwed(OwedSignOut(serverOrigin, signedIn.deviceId, signedIn.revokeToken))
+        }
+        log("sign-in store: device ${tag(signedIn.deviceId)} was not kept ($why); the directory " +
+            "could not be told ($told) and that is " +
+            (if (recorded) "recorded as owed"
+             else "NOT recorded: the device stays alive at the directory until it expires"))
+    }
 
     // ------------------------------------------------------------------ coming back
 
-    /** One attempt to come back signed in: lock, read, refresh, store, unlock. */
+    /**
+     * One attempt to come back signed in: lock, read, refresh, store, unlock.
+     *
+     * [onlyForAccount], when not empty, is the account a screen already shows: a sign-in stored
+     * since by another account is not presented for it ([Return.OTHER_ACCOUNT]).
+     */
     fun comeBack(
         vault: Vault,
         directory: Directory,
         serverOrigin: String,
         log: (String) -> Unit = {},
         lockWaitMs: Long = 8000,
+        onlyForAccount: String = "",
     ): ReturnResult = locked(lockWaitMs, busy = {
         log("sign-in store: could not be had in time; nothing was sent")
         ReturnResult(Return.BUSY, detail = "busy")
@@ -170,12 +236,34 @@ object LoginFlow {
             return@locked ReturnResult(Return.NO_CREDENTIAL, accountId = stored.accountId,
                 deviceId = stored.deviceId)
         }
-        if (vault.owed().any { it.deviceId == stored.deviceId }) {
-            // A sign-out got as far as being written down. It is finished, not undone.
-            vault.bumpGeneration()
-            val erased = vault.erase()
-            log("sign-in store: device ${tag(stored.deviceId)} has a sign-out owed; its credential " +
-                (if (erased) "is erased" else "COULD NOT BE ERASED") + " and it is not used")
+        if (onlyForAccount.isNotEmpty() && stored.accountId != onlyForAccount) {
+            // Somebody signed in as another account since this screen did. The session it would
+            // get is theirs, shown under this screen's name. Not presented; left for its owner.
+            log("sign-in store: the stored sign-in belongs to another account than this screen's; " +
+                "it is not used")
+            return@locked ReturnResult(Return.OTHER_ACCOUNT, accountId = stored.accountId,
+                deviceId = stored.deviceId, detail = "another account is signed in on this device")
+        }
+        val owed = when (val list = vault.owed()) {
+            is OwedRead.Unreadable -> {
+                // Whether this credential was signed out of is written in a list that cannot be
+                // read. It may have been. Nothing is presented on the strength of not knowing.
+                log("sign-in store: the list of owed sign-outs cannot be read; the stored " +
+                    "credential is not used")
+                return@locked ReturnResult(Return.UNREADABLE, accountId = stored.accountId,
+                    deviceId = stored.deviceId, detail = "the list of sign-outs cannot be read")
+            }
+            is OwedRead.Ok -> list.list
+        }
+        if (owed.any { it.deviceId == stored.deviceId }) {
+            // A sign-out got as far as being written down. It is finished, not undone -- but
+            // only behind the counter: without that, an answer to a sign-in from before the
+            // sign-out could still store itself.
+            val barrier = vault.bumpGeneration() != 0L
+            val erased = barrier && vault.erase()
+            log("sign-in store: device ${tag(stored.deviceId)} has a sign-out owed; its credential is " +
+                (if (erased) "erased" else if (barrier) "STILL STORED (could not be erased)"
+                 else "left stored (the counter could not be written)") + " and it is not used")
             return@locked ReturnResult(Return.SIGNED_OUT, accountId = stored.accountId,
                 deviceId = stored.deviceId)
         }
@@ -200,10 +288,13 @@ object LoginFlow {
                 ReturnResult(Return.SIGNED_IN, refreshed.sessionToken, stored.accountId, stored.deviceId)
             }
             Call.REJECTED -> {
-                vault.bumpGeneration()
-                val erased = vault.erase()
+                // Erased behind the counter, like every other way a credential leaves; if the
+                // counter cannot be written it stays, and is refused again.
+                val barrier = vault.bumpGeneration() != 0L
+                val erased = barrier && vault.erase()
                 log("sign-in store: device ${tag(stored.deviceId)}: the directory refused the " +
-                    "credential; it " + (if (erased) "is erased" else "COULD NOT BE ERASED"))
+                    "credential; it is " + (if (erased) "erased" else if (barrier)
+                        "STILL STORED (could not be erased)" else "left stored (the counter could not be written)"))
                 ReturnResult(Return.REJECTED, accountId = stored.accountId, deviceId = stored.deviceId)
             }
             Call.UNSUPPORTED -> {
@@ -224,18 +315,29 @@ object LoginFlow {
 
     /**
      * Marks the start of a sign-in the user asked for; returns the generation it runs under.
-     * Moving the counter is what makes every answer still in flight late. 0 = not remembered.
+     * Moving the counter is what makes every answer still in flight late.
+     *
+     * 0: the counter could not be had or written. THE SIGN-IN IS NOT MADE -- no request is sent.
+     * Without the counter nothing could tell its answer from one that arrives after a sign-out.
      */
     fun beginSignIn(vault: Vault, log: (String) -> Unit = {}, lockWaitMs: Long = 8000): Long =
         locked(lockWaitMs, busy = {
-            log("sign-in store: could not be had in time; this sign-in will not be remembered")
+            log("sign-in store: could not be had in time; the sign-in is not made")
             0L
-        }) { vault.bumpGeneration() }
+        }) {
+            val generation = vault.bumpGeneration()
+            if (generation == 0L) log("sign-in store: the counter could not be written; the sign-in is not made")
+            generation
+        }
 
     /**
      * Stores what a successful sign-in was given -- if this sign-in is still the latest thing
-     * that happened to the vault. When it is not, the credential is not stored and the device
-     * it belongs to is ended; when the directory cannot be told, that is recorded as owed.
+     * that happened to the vault. When it is not, nothing is stored and the device it was
+     * issued is ended; when the directory cannot be told, that is recorded as owed.
+     *
+     * Asked whether or not the directory issued anything: an answer with nothing issued is late
+     * like any other. The sign-in stored before it is ended either way -- written down as owed,
+     * or, when that cannot be written, ended at the directory first; never simply written over.
      *
      * Only [Remembered.STORED] and [Remembered.NOT_ISSUED] mean the session may be used.
      */
@@ -249,58 +351,131 @@ object LoginFlow {
         log: (String) -> Unit = {},
         lockWaitMs: Long = 8000,
     ): Remembered {
-        if (!signedIn.issued) return Remembered.NOT_ISSUED
+        var outcome = Remembered.SUPERSEDED
         var why = "something happened to the store after this sign-in began"
-        val outcome = locked(lockWaitMs, busy = {
-            why = "the store could not be had"
-            Remembered.NOT_SAVED
-        }) {
-            if (generation == 0L) {
-                why = "the store could not be had when the sign-in began"
-                return@locked Remembered.NOT_SAVED
+        var previousDevice = ""
+        // A device that could not be written down as owed and was ended at the directory
+        // instead, on the first pass. The second pass finds it still stored and knows.
+        var endedAtDirectory = ""
+        var toTell: StoredLogin? = null
+
+        for (pass in 0 until 2) {
+            toTell = null
+            val done = locked(lockWaitMs, busy = {
+                outcome = Remembered.NOT_SAVED
+                why = "the store could not be had"
+                true
+            }) inner@{
+                if (generation == 0L) {
+                    outcome = Remembered.NOT_SAVED
+                    why = "the store could not be had when the sign-in began"
+                    return@inner true
+                }
+                if (vault.generation() != generation) {
+                    outcome = Remembered.SUPERSEDED
+                    return@inner true
+                }
+                val read = vault.load()
+                val previous = (read as? VaultRead.Ok)?.login?.takeIf {
+                    it.serverOrigin == serverOrigin && it.deviceId != signedIn.deviceId
+                }
+                if (previous != null && previous.deviceId != endedAtDirectory) {
+                    if (vault.owed() is OwedRead.Unreadable && vault.setAsideOwed()) {
+                        // The user is here and has just proved who they are. A list that cannot
+                        // be read is set aside -- kept -- so that a new one can be started.
+                        log("sign-in store: the list of owed sign-outs could not be read; it is " +
+                            "kept aside and a new one is started")
+                    }
+                    if (!vault.addOwed(OwedSignOut(previous.serverOrigin, previous.deviceId,
+                            previous.revokeToken))) {
+                        if (pass == 1) {
+                            outcome = Remembered.NOT_SAVED
+                            why = "the sign-in it replaces could not be written down as owed"
+                            return@inner true
+                        }
+                        log("sign-in store: device ${tag(previous.deviceId)}: could not be written " +
+                            "down as owed; the directory is told before it is replaced")
+                        toTell = previous
+                        return@inner false   // out of the lock for the call, then round again
+                    }
+                }
+                if (previous != null) previousDevice = previous.deviceId
+
+                // The counter moves again before anything is stored or erased: it makes any
+                // second answer to this sign-in late, and it is the test of whether the counter
+                // can be written at all. A sign-out that could not write it did not happen.
+                if (vault.bumpGeneration() == 0L) {
+                    outcome = Remembered.NOT_SAVED
+                    why = "the counter could not be written"
+                    return@inner true
+                }
+                if (!signedIn.issued) {
+                    // The directory issued nothing to keep. What WAS kept still goes.
+                    if (previous != null && !vault.erase()) {
+                        outcome = Remembered.NOT_SAVED
+                        why = "the sign-in it replaces could not be erased"
+                        return@inner true
+                    }
+                    outcome = Remembered.NOT_ISSUED
+                    return@inner true
+                }
+                if (vault.save(StoredLogin(serverOrigin, accountId, signedIn.deviceId,
+                        signedIn.deviceCredential, signedIn.revokeToken))) {
+                    outcome = Remembered.STORED
+                } else {
+                    outcome = Remembered.NOT_SAVED
+                    why = "the credential could not be written"
+                }
+                true
             }
-            if (vault.generation() != generation) return@locked Remembered.SUPERSEDED
-            // A sign-in made on purpose starts a new family; the one before it is ended.
-            val previous = vault.load()
-            if (previous is VaultRead.Ok && previous.login.serverOrigin == serverOrigin &&
-                previous.login.deviceId != signedIn.deviceId) {
-                vault.addOwed(OwedSignOut(serverOrigin, previous.login.deviceId,
-                    previous.login.revokeToken))
+            if (done) break
+            val previous = toTell ?: break
+            val told = directory.revoke(previous.deviceId, previous.revokeToken)
+            if (!endedAtDirectory(told)) {
+                outcome = Remembered.NOT_SAVED
+                why = "the sign-in it replaces could neither be written down as owed nor ended " +
+                    "at the directory"
+                break
             }
-            val saved = vault.save(StoredLogin(serverOrigin, accountId, signedIn.deviceId,
-                signedIn.deviceCredential, signedIn.revokeToken))
-            if (saved) {
-                Remembered.STORED
-            } else {
-                why = "the credential could not be written"
-                Remembered.NOT_SAVED
-            }
+            endedAtDirectory = previous.deviceId
         }
-        if (outcome == Remembered.STORED) {
-            log("sign-in store: device ${tag(signedIn.deviceId)}: stored")
+
+        if (outcome == Remembered.STORED || outcome == Remembered.NOT_ISSUED) {
+            log("sign-in store: " + (if (signedIn.issued) "device ${tag(signedIn.deviceId)}: stored"
+                else "the directory issued no credential; nothing is stored") +
+                (if (previousDevice.isEmpty()) "" else "; device ${tag(previousDevice)} before it is " +
+                    (if (previousDevice == endedAtDirectory) "ended" else "owed a sign-out")))
             return outcome
         }
-        // Not kept. Nothing is left that would sign this device in later unasked.
-        val told = directory.revoke(signedIn.deviceId, signedIn.revokeToken)
-        if (settled(told)) {
-            log("sign-in store: device ${tag(signedIn.deviceId)} was not kept ($why) and the " +
-                "directory was told: $told")
+        if (signedIn.issued) {
+            endUnkeptDevice(vault, directory, serverOrigin, signedIn, why, log, lockWaitMs)
         } else {
-            val recorded = locked(lockWaitMs, busy = { false }) {
-                vault.addOwed(OwedSignOut(serverOrigin, signedIn.deviceId, signedIn.revokeToken))
-            }
-            log("sign-in store: device ${tag(signedIn.deviceId)} was not kept ($why); the " +
-                "directory could not be told ($told) and that is " +
-                (if (recorded) "recorded as owed" else "NOT recorded"))
+            log("sign-in store: the sign-in is not used: $why")
         }
         return outcome
+    }
+
+    /**
+     * Ends the device a sign-in was issued, for a caller that has decided not to use it: the
+     * screen signed out while it was in flight, or what had to follow it failed.
+     */
+    fun discardSignIn(
+        vault: Vault, directory: Directory, serverOrigin: String, signedIn: SignedIn, why: String,
+        log: (String) -> Unit = {}, lockWaitMs: Long = 8000,
+    ) {
+        if (signedIn.deviceId.isEmpty() || signedIn.revokeToken.isEmpty()) return
+        endUnkeptDevice(vault, directory, serverOrigin, signedIn, why, log, lockWaitMs)
     }
 
     // ------------------------------------------------------------------ signing out
 
     /**
-     * Signs this device out. The counter moves, the sign-out is written down as owed, the
-     * credential is erased -- under the lock -- and only then is the directory told.
+     * Signs this device out. Under the lock: the counter moves (or nothing is done), the
+     * sign-out is written down as owed, and only if it was is the credential erased. Then the
+     * directory is told.
+     *
+     * When the sign-out cannot be written down, the credential is kept -- it holds the only
+     * means of ending the device -- unless the directory itself confirms the device is ended.
      */
     fun signOut(
         vault: Vault,
@@ -310,41 +485,89 @@ object LoginFlow {
         lockWaitMs: Long = 8000,
     ): SignOutResult {
         var stored: StoredLogin? = null
-        var owed = false
+        var recorded = false
         val local = locked(lockWaitMs, busy = {
             log("sign-in store: could not be had in time; the credential was not erased")
             SignOutResult(false, false, false, "busy")
         }) {
-            vault.bumpGeneration()
-            val read = vault.load()
-            if (read is VaultRead.Ok && read.login.serverOrigin != serverOrigin) {
-                // Another server's. Signing out of this one does not touch it.
-                return@locked SignOutResult(true, false, false, "nothing of this server's was stored")
+            // The counter first: from here every answer still in flight is late. If it cannot
+            // be written, a sign-in answered a moment from now would store itself over this
+            // sign-out. So nothing else is done.
+            if (vault.bumpGeneration() == 0L) {
+                log("sign-in store: the counter could not be written; the sign-out is not made")
+                return@locked SignOutResult(false, false, false, "the sign-out could not be recorded")
             }
-            if (read is VaultRead.Ok) {
-                stored = read.login
-                // Written down BEFORE the credential goes: if the app dies between the two,
-                // the credential is there with a record saying it is not to be used.
-                owed = vault.addOwed(OwedSignOut(serverOrigin, read.login.deviceId,
-                    read.login.revokeToken))
+            when (val read = vault.load()) {
+                is VaultRead.None -> SignOutResult(true, false, false, "nothing was stored")
+                is VaultRead.Unreadable -> {
+                    // It opens nothing and names no device to end. It goes.
+                    val erased = vault.erase()
+                    log("sign-in store: the stored sign-in could not be read (${read.why}); " +
+                        (if (erased) "erased" else "COULD NOT BE ERASED"))
+                    SignOutResult(erased, false, false,
+                        if (erased) "what was stored could not be read, and is removed"
+                        else "the stored sign-in could not be removed")
+                }
+                is VaultRead.Ok -> {
+                    if (read.login.serverOrigin != serverOrigin) {
+                        // Another server's. Signing out of this one does not touch it.
+                        return@locked SignOutResult(true, false, false,
+                            "nothing of this server's was stored")
+                    }
+                    stored = read.login
+                    // Written down BEFORE the credential goes, and the credential goes only if
+                    // it was. If the app dies between the two, the credential is there with a
+                    // record saying it is not to be used, which comeBack reads first.
+                    recorded = vault.addOwed(OwedSignOut(serverOrigin, read.login.deviceId,
+                        read.login.revokeToken))
+                    when {
+                        !recorded -> SignOutResult(false, false, false,
+                            "the sign-out could not be written down")
+                        !vault.erase() -> SignOutResult(false, false, true,
+                            "the credential could not be erased")
+                        else -> SignOutResult(true, false, true)
+                    }
+                }
             }
-            SignOutResult(vault.erase(), false, owed)
         }
         val ended = stored ?: return local
-        if (!local.localDone) return local
 
         val told = directory.revoke(ended.deviceId, ended.revokeToken)
-        if (settled(told)) {
+        if (!recorded) {
+            if (endedAtDirectory(told)) {
+                val erased = locked(lockWaitMs, busy = { false }) { vault.erase() }
+                log("sign-in store: device ${tag(ended.deviceId)}: the directory ended it ($told); " +
+                    "the credential is " + (if (erased) "erased" else "STILL STORED (could not be erased)"))
+                return SignOutResult(erased, told == Call.OK, false,
+                    if (erased) "" else "the stored sign-in could not be removed")
+            }
+            log("sign-in store: device ${tag(ended.deviceId)}: NOT signed out -- nothing could be " +
+                "written down and the directory could not be told ($told); the credential is kept")
+            return SignOutResult(false, false, false,
+                "the sign-out could not be written down and the server could not be told")
+        }
+        if (endedAtDirectory(told)) {
+            if (!local.localDone) {
+                // The credential could not be erased. The record beside it is what keeps it from
+                // being used, so the record stays even though the directory has been told.
+                log("sign-in store: device ${tag(ended.deviceId)}: the directory answered $told; " +
+                    "the record is kept because the credential is still stored")
+                return SignOutResult(false, told == Call.OK, true, local.detail)
+            }
             val cleared = locked(lockWaitMs, busy = { false }) { vault.removeOwed(ended.deviceId) }
             log("sign-in store: device ${tag(ended.deviceId)}: signed out; the directory answered $told")
             return SignOutResult(true, told == Call.OK, !cleared)
         }
         log("sign-in store: device ${tag(ended.deviceId)}: signed out here; the directory could " +
-            "not be told ($told) and that is " + (if (owed) "recorded as owed" else "NOT recorded"))
-        return SignOutResult(true, false, owed, "the server could not be told yet")
+            "not be told ($told) and that is recorded as owed")
+        return SignOutResult(local.localDone, false, true,
+            local.detail.ifEmpty { "the server could not be told yet" })
     }
 
-    /** Tells the directory about every sign-out still owed; returns how many remain. */
+    /**
+     * Tells the directory about every sign-out still owed; returns how many remain. A list that
+     * cannot be read counts as one: something is owed that cannot be settled, which is not none.
+     */
     fun settleOwedSignOuts(
         vault: Vault,
         directory: Directory,
@@ -352,15 +575,23 @@ object LoginFlow {
         log: (String) -> Unit = {},
         lockWaitMs: Long = 8000,
     ): Int {
-        val owed = locked(lockWaitMs, busy = { emptyList() }) { vault.owed() }
+        val owed = locked(lockWaitMs, busy = { OwedRead.Ok(emptyList()) }) { vault.owed() }
+        val list = when (owed) {
+            is OwedRead.Unreadable -> {
+                log("sign-in store: the list of owed sign-outs cannot be read; nothing is sent " +
+                    "and nothing is removed")
+                return 1
+            }
+            is OwedRead.Ok -> owed.list
+        }
         var remaining = 0
-        for (one in owed) {
+        for (one in list) {
             if (one.serverOrigin != serverOrigin) {
                 ++remaining   // owed to another server; kept for when that one is the server
                 continue
             }
             val told = directory.revoke(one.deviceId, one.revokeToken)
-            if (settled(told)) {
+            if (endedAtDirectory(told)) {
                 val cleared = locked(lockWaitMs, busy = { false }) { vault.removeOwed(one.deviceId) }
                 if (!cleared) ++remaining
                 log("sign-in store: device ${tag(one.deviceId)}: an owed sign-out was settled ($told)")

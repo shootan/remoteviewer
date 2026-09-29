@@ -19,7 +19,9 @@ import javax.crypto.spec.GCMParameterSpec
  * the Android Keystore and never leaves it:
  *
  *   login   the device credential the directory issued at sign-in
- *   owed    sign-outs the directory has not been told about yet, a bounded list
+ *   owed    sign-outs the directory has not been told about yet, a bounded list -- one that
+ *           cannot be read is never written over, and is only set aside (owed.unreadable)
+ *           by a sign-in the user makes
  *
  * and one that is not a secret: the counter a late answer is checked against.
  *
@@ -86,32 +88,49 @@ class KeystoreLoginVault(context: Context) : LoginFlow.Vault {
         return if (prefs.edit().putLong(KEY_GENERATION, next).commit()) next else 0L
     }
 
-    override fun owed(): List<LoginFlow.OwedSignOut> {
-        val sealed = prefs.getString(KEY_OWED, null) ?: return emptyList()
-        val plain = open(sealed) ?: return emptyList()
+    override fun owed(): LoginFlow.OwedRead {
+        val sealed = prefs.getString(KEY_OWED, null) ?: return LoginFlow.OwedRead.Ok(emptyList())
+        val plain = open(sealed) ?: return LoginFlow.OwedRead.Unreadable("could not be opened on this phone")
         return try {
             val array = JSONArray(plain)
-            (0 until array.length()).mapNotNull { i ->
-                val item = array.optJSONObject(i) ?: return@mapNotNull null
+            val list = (0 until array.length()).map { i ->
+                val item = array.getJSONObject(i)
                 val owed = LoginFlow.OwedSignOut(
-                    item.optString("origin"), item.optString("device"), item.optString("revoke"))
+                    item.getString("origin"), item.getString("device"), item.getString("revoke"))
                 if (owed.serverOrigin.isEmpty() || owed.deviceId.isEmpty() ||
-                    owed.revokeToken.isEmpty()) null else owed
+                    owed.revokeToken.isEmpty()) {
+                    return LoginFlow.OwedRead.Unreadable("holds an entry that is not a sign-out")
+                }
+                owed
             }
+            LoginFlow.OwedRead.Ok(list)
         } catch (e: Exception) {
-            emptyList()
+            LoginFlow.OwedRead.Unreadable("is not a list of sign-outs")
         }
     }
 
     override fun addOwed(owed: LoginFlow.OwedSignOut): Boolean {
-        // A list that cannot be read is started again rather than kept: what it held cannot be
-        // sent anyway, and refusing to record THIS sign-out would lose one that can.
-        val list = owed().filter { it.deviceId != owed.deviceId } + owed
-        return writeOwed(list.takeLast(LoginFlow.MAX_OWED))
+        // A list that cannot be read is not written over: what it held may be the sign-out of
+        // the credential that is stored, and with it gone that credential would be used again.
+        // A full one drops nothing to make room: every entry is a device still alive.
+        val read = owed() as? LoginFlow.OwedRead.Ok ?: return false
+        val others = read.list.filter { it.deviceId != owed.deviceId }
+        if (others.size >= LoginFlow.MAX_OWED) return false
+        return writeOwed(others + owed)
     }
 
-    override fun removeOwed(deviceId: String): Boolean =
-        writeOwed(owed().filter { it.deviceId != deviceId })
+    override fun removeOwed(deviceId: String): Boolean {
+        val read = owed() as? LoginFlow.OwedRead.Ok ?: return false
+        return writeOwed(read.list.filter { it.deviceId != deviceId })
+    }
+
+    override fun setAsideOwed(): Boolean {
+        if (owed() !is LoginFlow.OwedRead.Unreadable) return false
+        val sealed = prefs.getString(KEY_OWED, null) ?: return false
+        // Kept as it was, in one entry, beside the list: never read again by the app, and
+        // there to be looked at. A second set-aside replaces the first.
+        return prefs.edit().putString(KEY_OWED_UNREADABLE, sealed).remove(KEY_OWED).commit()
+    }
 
     private fun writeOwed(list: List<LoginFlow.OwedSignOut>): Boolean {
         if (list.isEmpty()) return prefs.edit().remove(KEY_OWED).commit()
@@ -187,6 +206,7 @@ class KeystoreLoginVault(context: Context) : LoginFlow.Vault {
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val KEY_LOGIN = "login"
         private const val KEY_OWED = "owed"
+        private const val KEY_OWED_UNREADABLE = "owed.unreadable"
         private const val KEY_GENERATION = "generation"
     }
 }

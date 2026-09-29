@@ -990,15 +990,29 @@ void begin_login(std::string accountId, std::string password) {
       ok = directory_login_with_device(server, accountId, password, "windows-client",
                                        device_label(), &signedIn, &error) == SessionCall::Ok;
     } else {
-      // The store could not be had, so there is nowhere to keep a credential. The sign-in is
-      // made without asking for one rather than refused: this run works, the next one asks.
-      ok = directory_login(server, accountId, password, &signedIn.sessionToken, &error);
+      // The store could not be had. Signing in anyway would leave whatever is stored where it
+      // is -- another account's sign-in, which the next start would come back as -- and would
+      // have nothing to be checked against if a sign-out happened meanwhile. Nothing is sent.
+      error = "저장된 로그인 정보를 열 수 없어 로그인하지 못했습니다. 잠시 후 다시 시도해 주세요.";
     }
     if (!password.empty()) SecureZeroMemory(password.data(), password.size());
 
     std::vector<DirectoryHostEntry> hosts;
+    const bool signedInAtDirectory = ok;
     if (ok) ok = directory_list_hosts(server, signedIn.sessionToken, &hosts, &error);
 
+    if (signedInAtDirectory && (!ok || !epoch_is(epoch))) {
+      // The directory signed this device in and the sign-in is not going to be used: the list
+      // did not come, or this window signed out -- or began another sign-in -- while the
+      // answer was on its way. The window's own epoch is asked here as well as the store's
+      // counter, because it is the one barrier that needs nothing written. What the directory
+      // issued is ended rather than left alive with nobody holding it.
+      login_flow::discard_sign_in(store, deps, signedIn,
+                                  ok ? "this window moved on while it was in flight"
+                                     : "the PC list could not be fetched");
+      ok = false;
+      if (error.empty()) error = "로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.";
+    }
     if (ok) {
       const login_flow::Remembered remembered =
           login_flow::remember_sign_in(store, deps, generation, accountId, signedIn);
@@ -1129,13 +1143,18 @@ void begin_refresh_hosts() {
     bool ok = directory_list_hosts(server, token, &hosts, &error, &status);
     bool renewed = false;
     bool signedOut = false;
+    bool otherAccount = false;
     if (!ok && status == 401) {
       // The session is no longer one: twelve hours went by, or the server was restarted. This
-      // device may still hold what gets another -- asked once, not in a loop.
-      const login_flow::ReturnResult back = login_flow::come_back(sign_in_store(), sign_in_deps());
+      // device may still hold what gets another -- asked once, not in a loop, and only for
+      // the account this window is signed in as. What is stored may be somebody else's by
+      // now: another window may have signed in as another account since.
+      const login_flow::ReturnResult back =
+          login_flow::come_back(sign_in_store(), sign_in_deps(), accountId);
       log_line(std::string("session refused; coming back: ") +
                login_flow::return_name(back.outcome));
-      if (back.outcome == login_flow::Return::SignedIn) {
+      otherAccount = back.outcome == login_flow::Return::OtherAccount;
+      if (back.outcome == login_flow::Return::SignedIn && back.accountId == accountId) {
         token = back.sessionToken;
         renewed = true;
         ok = directory_list_hosts(server, token, &hosts, &error, &status);
@@ -1144,7 +1163,8 @@ void begin_refresh_hosts() {
         signedOut = true;
       }
     }
-    post_ui([accountId, token, epoch, ok, renewed, signedOut, hosts = std::move(hosts), error]() {
+    post_ui([accountId, token, epoch, ok, renewed, signedOut, otherAccount,
+             hosts = std::move(hosts), error]() {
       if (!epoch_is(epoch)) return;
       if (signedOut) {
         {
@@ -1154,7 +1174,10 @@ void begin_refresh_hosts() {
         }
         remote60::native_poc::log_upload_clear_credentials("the session ended");
         post_to_page("{\"type\":\"signedOut\"}");
-        post_auto_login("rejected", accountId, "로그인이 만료됐습니다. 다시 로그인해 주세요.");
+        post_auto_login("rejected", accountId,
+                        otherAccount
+                            ? "이 PC에서 다른 계정으로 로그인했습니다. 다시 로그인해 주세요."
+                            : "로그인이 만료됐습니다. 다시 로그인해 주세요.");
         return;
       }
       if (!ok) { post_status("error", error + " — 다시 로그인해 주세요"); return; }
@@ -1189,8 +1212,14 @@ void begin_sign_out(std::string sessionToken) {
     }
     if (!sessionToken.empty()) SecureZeroMemory(sessionToken.data(), sessionToken.size());
     if (!result.localDone) {
-      post_ui([detail = result.detail] {
-        post_status("error", "저장된 로그인을 지우지 못했습니다. " + detail);
+      // This window is signed out: its session is gone from memory. What is STORED is not,
+      // and the next start may come back signed in. That is said, where the user is looking,
+      // together with the way to try again.
+      log_line("sign-out NOT completed: " + result.detail);
+      post_ui([] {
+        post_auto_login("failed", std::string(),
+                        "로그아웃을 완료하지 못했습니다. 저장된 로그인이 남아 있어 다음 실행 때 다시 "
+                        "로그인될 수 있습니다. 다시 로그인한 뒤 로그아웃을 한 번 더 눌러 주세요.");
       });
     }
   });

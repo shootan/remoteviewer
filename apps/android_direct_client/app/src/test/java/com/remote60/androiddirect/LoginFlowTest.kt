@@ -25,12 +25,20 @@ class LoginFlowTest {
 
     private val origin = "https://gnlink.example:443"
 
-    /** The vault as a few fields. `failSave` is the disk being full. */
+    /**
+     * The vault as a few fields. `failSave`, `failCounter`, `failOwed` and `failErase` are each
+     * one write that does not happen; `owedUnreadable` is a list of sign-outs that cannot be read.
+     */
     private class MemoryVault : LoginFlow.Vault {
         var stored: LoginFlow.StoredLogin? = null
         var unreadable = false
         var counter = 0L
         var failSave = false
+        var failCounter = false
+        var failOwed = false
+        var failErase = false
+        var owedUnreadable = false
+        var setAside = 0
         val owedList = ArrayList<LoginFlow.OwedSignOut>()
 
         override fun load(): LoginFlow.VaultRead = when {
@@ -44,18 +52,33 @@ class LoginFlowTest {
             unreadable = false
             return true
         }
-        override fun erase(): Boolean { stored = null; unreadable = false; return true }
+        override fun erase(): Boolean {
+            if (failErase) return false
+            stored = null; unreadable = false; return true
+        }
         override fun generation(): Long = counter
-        override fun bumpGeneration(): Long = ++counter
-        override fun owed(): List<LoginFlow.OwedSignOut> = owedList.toList()
+        override fun bumpGeneration(): Long = if (failCounter) 0L else ++counter
+        override fun owed(): LoginFlow.OwedRead =
+            if (owedUnreadable) LoginFlow.OwedRead.Unreadable("fixture")
+            else LoginFlow.OwedRead.Ok(owedList.toList())
+        // The same refusals KeystoreLoginVault makes: not over an unreadable list, not past the bound.
         override fun addOwed(owed: LoginFlow.OwedSignOut): Boolean {
+            if (failOwed || owedUnreadable) return false
+            if (owedList.count { it.deviceId != owed.deviceId } >= LoginFlow.MAX_OWED) return false
             owedList.removeAll { it.deviceId == owed.deviceId }
             owedList.add(owed)
-            while (owedList.size > LoginFlow.MAX_OWED) owedList.removeAt(0)
             return true
         }
         override fun removeOwed(deviceId: String): Boolean {
+            if (failOwed || owedUnreadable) return false
             owedList.removeAll { it.deviceId == deviceId }
+            return true
+        }
+        override fun setAsideOwed(): Boolean {
+            if (!owedUnreadable) return false
+            owedUnreadable = false
+            owedList.clear()
+            ++setAside
             return true
         }
     }
@@ -371,6 +394,219 @@ class LoginFlowTest {
         val r = LoginFlow.signOut(MemoryVault(), dir, origin, log)
         assertTrue(r.localDone)
         assertTrue(dir.revoked.isEmpty())
+    }
+
+    // ---------------------------------------------------------------- r5: a write that fails stops what follows
+
+    @Test
+    fun `r5-1 the counter cannot be written - the sign-out is not made and a late answer is not stored`() {
+        val c = login("counter")
+        val vault = MemoryVault().apply { stored = c }
+        val dir = FakeDirectory()
+        val g = LoginFlow.beginSignIn(vault, log)
+        assertNotEquals(0L, g)
+        vault.failCounter = true
+        val out = LoginFlow.signOut(vault, dir, origin, log)
+        assertFalse("THE SIGN-OUT IS NOT MADE, and says so", out.localDone)
+        assertEquals("the sign-out could not be recorded", out.detail)
+        assertEquals("nothing was erased", c, vault.stored)
+        assertTrue("nothing was sent", dir.revoked.isEmpty())
+        assertTrue("nothing is owed", vault.owedList.isEmpty())
+
+        // The answer to the sign-in from before arrives now. Nothing made it late, so it must
+        // not be kept: the store whose counter cannot be written keeps nothing.
+        val late = signedIn("counter-late")
+        assertEquals("THE ANSWER THAT ARRIVES AFTERWARDS IS NOT STORED", LoginFlow.Remembered.NOT_SAVED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", late, log))
+        assertEquals(c, vault.stored)
+        assertTrue("and the device it carried is ended", dir.revoked.contains(late.deviceId))
+
+        assertEquals("a sign-in cannot even begin", 0L, LoginFlow.beginSignIn(vault, log))
+
+        vault.failCounter = false
+        assertTrue("once the counter can be written the sign-out is made",
+            LoginFlow.signOut(vault, dir, origin, log).localDone)
+        assertEquals(null, vault.stored)
+    }
+
+    @Test
+    fun `r5-1 a refused or owed credential is not erased without the counter`() {
+        val vault = MemoryVault().apply { stored = login("refused-nocounter"); failCounter = true }
+        val dir = FakeDirectory().apply { refreshAnswer = LoginFlow.Call.REJECTED }
+        assertEquals(LoginFlow.Return.REJECTED, LoginFlow.comeBack(vault, dir, origin, log).outcome)
+        assertEquals(login("refused-nocounter"), vault.stored)
+
+        val c = login("owed-nocounter")
+        vault.stored = c
+        vault.owedList.add(LoginFlow.OwedSignOut(origin, c.deviceId, c.revokeToken))
+        val before = dir.presented.size
+        assertEquals(LoginFlow.Return.SIGNED_OUT, LoginFlow.comeBack(vault, dir, origin, log).outcome)
+        assertEquals("still not presented", before, dir.presented.size)
+        assertEquals(c, vault.stored)
+    }
+
+    @Test
+    fun `r5-2 the sign-out cannot be written down - the credential stays unless the directory ends it`() {
+        val c = login("unwritten")
+        val vault = MemoryVault().apply { stored = c; failOwed = true }
+        val dir = FakeDirectory().apply { revokeAnswer = LoginFlow.Call.UNREACHABLE }
+        val out = LoginFlow.signOut(vault, dir, origin, log)
+        assertFalse("IT IS NOT MADE", out.localDone)
+        assertFalse(out.owed)
+        assertEquals("the sign-out could not be written down and the server could not be told", out.detail)
+        assertEquals("THE CREDENTIAL, AND WITH IT THE MEANS OF ENDING THE DEVICE, IS STILL THERE", c, vault.stored)
+
+        dir.revokeAnswer = LoginFlow.Call.OK
+        val again = LoginFlow.signOut(vault, dir, origin, log)
+        assertTrue("when the directory confirms the device is ended, the credential goes", again.localDone)
+        assertTrue(again.serverTold)
+        assertEquals(null, vault.stored)
+    }
+
+    @Test
+    fun `r5-2 a sign-in does not write over one it could neither record nor end`() {
+        val before = login("before")
+        val vault = MemoryVault().apply { stored = before }
+        val dir = FakeDirectory().apply { revokeAnswer = LoginFlow.Call.UNREACHABLE }
+        val g = LoginFlow.beginSignIn(vault, log)
+        vault.failOwed = true
+        val s = signedIn("replacing")
+        assertEquals(LoginFlow.Remembered.NOT_SAVED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", s, log))
+        assertEquals("the one before is still stored", before, vault.stored)
+        assertEquals("the directory was asked to end both", listOf(before.deviceId, s.deviceId), dir.revoked)
+
+        dir.revokeAnswer = LoginFlow.Call.OK
+        val g2 = LoginFlow.beginSignIn(vault, log)
+        val s2 = signedIn("replacing-2")
+        assertEquals("when the directory confirms the one before is ended, the new one is stored",
+            LoginFlow.Remembered.STORED, LoginFlow.rememberSignIn(vault, dir, origin, g2, "tester", s2, log))
+        assertEquals(s2.deviceId, vault.stored!!.deviceId)
+    }
+
+    @Test
+    fun `r5-3 the seventeenth does not push the first out`() {
+        val vault = MemoryVault()
+        for (i in 0 until LoginFlow.MAX_OWED) {
+            vault.owedList.add(LoginFlow.OwedSignOut(origin, "owed-$i", "revoke-owed-$i"))
+        }
+        val c = login("seventeenth")
+        vault.stored = c
+        val dir = FakeDirectory().apply { revokeAnswer = LoginFlow.Call.UNREACHABLE }
+        val out = LoginFlow.signOut(vault, dir, origin, log)
+        assertEquals("all sixteen are still owed", (0 until 16).map { "owed-$it" }, vault.owedList.map { it.deviceId })
+        assertFalse("the seventeenth sign-out is not made", out.localDone)
+        assertEquals("its credential is kept", c, vault.stored)
+
+        dir.revokeAnswer = LoginFlow.Call.OK
+        assertEquals("the sixteen are settled", 0, LoginFlow.settleOwedSignOuts(vault, dir, origin, log))
+        assertTrue(LoginFlow.signOut(vault, dir, origin, log).localDone)
+        assertEquals(null, vault.stored)
+    }
+
+    @Test
+    fun `r5-3 a list that cannot be read is not empty, not written over, and blocks coming back`() {
+        val c = login("unreadable-list")
+        val vault = MemoryVault().apply { stored = c; owedUnreadable = true }
+        val dir = FakeDirectory()
+        assertEquals("THE STORED CREDENTIAL IS NOT PRESENTED", LoginFlow.Return.UNREADABLE,
+            LoginFlow.comeBack(vault, dir, origin, log).outcome)
+        assertTrue(dir.presented.isEmpty())
+        assertFalse("NOTHING IS WRITTEN OVER IT",
+            vault.addOwed(LoginFlow.OwedSignOut(origin, "x", "y")))
+        assertTrue(vault.owedUnreadable)
+        assertEquals("settling sends nothing and says something is still owed", 1,
+            LoginFlow.settleOwedSignOuts(vault, dir, origin, log))
+        assertTrue(dir.revoked.isEmpty())
+
+        val g = LoginFlow.beginSignIn(vault, log)
+        val s = signedIn("on-purpose")
+        assertEquals("a sign-in made on purpose is stored", LoginFlow.Remembered.STORED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", s, log))
+        assertEquals("the unreadable list is set aside, not overwritten", 1, vault.setAside)
+        assertEquals("the credential it replaced is owed in a new one", listOf(c.deviceId),
+            vault.owedList.map { it.deviceId })
+    }
+
+    @Test
+    fun `r5-4 a 404 from the logout route is not a device ended`() {
+        val c = login("old-route")
+        val vault = MemoryVault().apply { stored = c }
+        val dir = FakeDirectory().apply { revokeAnswer = LoginFlow.Call.UNSUPPORTED }
+        val out = LoginFlow.signOut(vault, dir, origin, log)
+        assertTrue("the credential goes", out.localDone)
+        assertEquals(null, vault.stored)
+        assertTrue("A 404 IS NOT A DEVICE ENDED: the sign-out is still owed", out.owed)
+        assertEquals(listOf(c.deviceId), vault.owedList.map { it.deviceId })
+        assertEquals(1, LoginFlow.settleOwedSignOuts(vault, dir, origin, log))
+        assertEquals("stays owed while the server has no such route", 1, vault.owedList.size)
+
+        dir.revokeAnswer = LoginFlow.Call.OK
+        assertEquals("a server with the route is told, and the debt is settled", 0,
+            LoginFlow.settleOwedSignOuts(vault, dir, origin, log))
+        assertTrue(vault.owedList.isEmpty())
+
+        // A device that is not kept and meets a 404 is owed too.
+        val g = LoginFlow.beginSignIn(vault, log)
+        LoginFlow.signOut(vault, dir, origin, log)
+        dir.revokeAnswer = LoginFlow.Call.UNSUPPORTED
+        val late = signedIn("late-404")
+        assertEquals(LoginFlow.Remembered.SUPERSEDED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", late, log))
+        assertEquals(listOf(late.deviceId), vault.owedList.map { it.deviceId })
+
+        dir.revokeAnswer = LoginFlow.Call.REJECTED
+        assertEquals("a 401 still means there is nothing more to send", 0,
+            LoginFlow.settleOwedSignOuts(vault, dir, origin, log))
+    }
+
+    @Test
+    fun `r5-5 nothing issued - the account before is erased and owed, and a late one is not used`() {
+        val a = login("account-a")
+        val vault = MemoryVault().apply { stored = a }
+        val dir = FakeDirectory()
+        val g = LoginFlow.beginSignIn(vault, log)
+        assertEquals("signing in as B with nothing issued: the sign-in stands",
+            LoginFlow.Remembered.NOT_ISSUED, LoginFlow.rememberSignIn(
+                vault, dir, origin, g, "account-b", LoginFlow.SignedIn("b-session", "", "", ""), log))
+        assertEquals("A'S STORED SIGN-IN IS GONE", null, vault.stored)
+        assertEquals("A's device is owed a sign-out", listOf(a.deviceId), vault.owedList.map { it.deviceId })
+        assertEquals(LoginFlow.Return.NO_CREDENTIAL, LoginFlow.comeBack(vault, dir, origin, log).outcome)
+
+        val g2 = LoginFlow.beginSignIn(vault, log)
+        LoginFlow.signOut(vault, dir, origin, log)
+        assertEquals("AN ANSWER WITH NOTHING ISSUED IS LATE LIKE ANY OTHER", LoginFlow.Remembered.SUPERSEDED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g2, "account-b",
+                LoginFlow.SignedIn("b-late-session", "", "", ""), log))
+    }
+
+    @Test
+    fun `r5-5 the app does not sign in without the store`() {
+        // Static: the source no longer has the fallback. Behaviour is in the case above
+        // (beginSignIn returns 0 and the flow refuses what follows).
+        val activity = codeOf(main("java/com/remote60/androiddirect/MainActivity.kt").readText())
+        assertFalse(activity.contains("loginWithDevice(url, id, password, null)"))
+        assertTrue(activity.contains("if (generation == 0L) {"))
+    }
+
+    @Test
+    fun `r5-6 another account's stored sign-in is not presented for this screen`() {
+        val b = login("account-b").copy(accountId = "account-b")
+        val vault = MemoryVault().apply { stored = b }
+        val dir = FakeDirectory()
+        val r = LoginFlow.comeBack(vault, dir, origin, log, onlyForAccount = "account-a")
+        assertEquals(LoginFlow.Return.OTHER_ACCOUNT, r.outcome)
+        assertEquals("", r.sessionToken)
+        assertTrue("nothing was sent", dir.presented.isEmpty())
+        assertEquals("left as it is, for its owner", b, vault.stored)
+
+        val own = LoginFlow.comeBack(vault, dir, origin, log, onlyForAccount = "account-b")
+        assertEquals(LoginFlow.Return.SIGNED_IN, own.outcome)
+        assertEquals("account-b", own.accountId)
+
+        val anyone = LoginFlow.comeBack(vault, dir, origin, log)
+        assertEquals("with nobody signed in yet it comes back as whoever is stored, and says who",
+            "account-b", anyone.accountId)
     }
 
     // ---------------------------------------------------------------- what is written down

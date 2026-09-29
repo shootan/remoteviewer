@@ -12815,3 +12815,19 @@ Next
 - 검증용 요청 반영(`review_466aeb9_verifier.md`): `gnlink_host_login_uia.ps1` 이 버튼이 가려진 **그 순간** 가린 창의 hwnd·class·title·pid·exe 를 남긴다.
 - 증명하지 못하는 것: GNLinkClient.exe 자체(시험 빌드는 같은 소스·같은 page, 다른 exe), TLS·실제 서버, 12 h 경과(서버 재시작으로 대신), 다른 Windows 사용자·다른 로그온 세션, 쓰기 도중 전원 차단, **APK 의 Keystore·화면·기기 재시작**, 물리 입력.
 - 제품/테스트/문서: 제품 없음 / 테스트(`login_flow_test.cpp`·`client_auto_login_ui_test.cpp`·`client_auto_login_runner.js`·`LoginFlowTest.kt` 신설, `client_recovery_ui_test.cpp`, `client_shell_bridge_test.cpp`, `gnlink_check_fixed_server.py`, `gnlink_host_login_uia.ps1`, CMake 시험 타깃) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r5 — 영속 기록이 실패하면 그 다음 단계로 가지 않는다 (PC 클라·APK)
+
+- 반려(r5, Codex `6e4764a` 검토) 6건은 한 원인이었다: **쓰기의 반환값을 버렸다.** 카운터·폐기 표식·자격 각각이 다음 단계를 안전하게 만드는 기록인데, 실패해도 다음 단계로 갔다. 이제 어느 것도 버리지 않는다. 서버(`d34f6e5`)는 건드리지 않았다.
+- ① 카운터(generation)를 쓰지 못하면: 로그아웃은 **하지 않고** 그렇다고 말한다(자격·표식·서버 모두 그대로). 로그인은 시작하지 않는다. 늦게 도착한 로그인 응답은 저장되지 않는다 — `remember_sign_in` 이 저장 전에 카운터를 한 번 더 쓰고, 그것이 실패하면 저장하지 않는다. come_back 의 표식·401 삭제도 카운터를 쓴 뒤에만 한다.
+- ② 폐기 표식을 쓰지 못하면 자격을 지우지 않는다(그 자격이 기기를 끝낼 유일한 수단). 서버가 그 기기를 끝냈다고 확인해 줄 때만 지운다. 로그인이 앞 자격을 대체할 때도 같다 — 표식을 못 쓰면 서버에 먼저 알리고, 그것도 안 되면 새 자격을 저장하지 않는다. 사용자에게: "로그아웃을 완료하지 못했습니다 … 다음 실행 때 다시 로그인될 수 있습니다 …".
+- ③ 폐기 목록: 읽을 수 없음 ≠ 비어 있음. 읽을 수 없으면 덮어쓰지 않고, 저장된 자격을 제시하지 않으며, 정산은 "남음 1" 로 답한다. 가득(16) 차면 **아무것도 밀어내지 않고** 추가를 거부한다(→ 그 로그아웃은 ②의 규칙). 사용자가 직접 로그인할 때만 읽을 수 없는 목록을 옆으로 치워(`login.cred.revoke.unreadable-N` / APK `owed.unreadable`) 새로 시작한다.
+- ④ 로그아웃의 404/405 는 기기가 끝난 것이 아니다 — 표식을 남기고, 그 route 가 있는 서버가 돌아오면 보낸다. 401 은 종전대로 끝.
+- ⑤ 저장소를 쓸 수 없으면 자격 없는 로그인으로 대신하지 않는다(PC `begin_login`, APK `performLogin` 의 폴백 삭제). 발급 없음(NotIssued) 응답도 generation 을 확인하고, 앞 계정의 저장 자격은 표식 후 지운다(A→B 로 로그인했는데 다음 실행이 A 로 돌아오던 반례).
+- ⑥ 401 복구의 `come_back` 은 이 창/화면이 보여 주는 계정의 자격만 제시한다(`onlyForAccount` → `OtherAccount`): 다른 창이 다른 계정으로 로그인한 뒤에는 "다른 계정으로 로그인했습니다. 다시 로그인해 주세요." PC 클라는 로그인 응답 뒤 목록이 실패하거나 창이 이미 다른 일로 넘어갔으면 발급된 기기를 끝낸다(`discard_sign_in`).
+- 시험(각 항목 반례): `login_flow_test` exit 0, **116 checks**(r5 44 — 경로를 디렉터리로 막아 카운터·표식 쓰기를 실제로 실패시킨다) · `LoginFlowTest` 38/0(r5 10) · 단위 13 클래스 failures 0.
+- 변이(결함을 하나씩 되돌림): C++ 7종(404=끝 · 로그아웃이 카운터 실패 무시 · 표식 없이 삭제 · generation 전에 NotIssued · 계정 무시 · 읽을 수 없는 목록=빈 목록 · 저장 전 카운터 실패 무시) 모두 FAIL 로 exit 1. Kotlin 같은 7종 모두 "38 tests completed, 1~2 failed". ⚠️ 첫 Kotlin 실행은 `gradlew.bat` 을 찾지 못한 exit 1 을 "죽음" 으로 셀 뻔했다 — 테스트가 실제로 실패한 것만 세도록 고쳐 다시 돌렸다.
+- 회귀(console 세션, 비관리자, 격리): `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(PASS 65) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` exit 0 · `directory_session_client_test` exit 0 · APK 단위 153/0 · `assembleRelease` 성공 · gate Windows 8 / APK 5 / self-test 13 모두 exit 0. 실사용 `client.txt`(09-23)·`host.json`(09-29 18:38, r5 가 적은 0.2.144 실기 재기록) 해시 전후 동일, `login.cred` 없음.
+- ⚠️ r5 의 새 사용자 문구(로그아웃 미완료·다른 계정·저장소 없음)는 흐름 시험으로만 확인했고, 제품 창에서 그 상태를 만들어 보지는 않았다.
+- 증명하지 못하는 것: 실제 디스크 가득·권한 거부(경로를 디렉터리로 막아 대신), APK 의 Keystore·SharedPreferences 쓰기 실패(JVM vault 로 대신 — 기기 없음), 두 창 두 계정의 실제 UI(흐름 시험으로 대신).
+- 제품/테스트/문서: 제품(`login_credential_store.{hpp,cpp}`, `login_flow.{hpp,cpp}`, `client_shell_main.cpp`, `LoginFlow.kt`, `KeystoreLoginVault.kt`, `MainActivity.kt`, strings 2) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
