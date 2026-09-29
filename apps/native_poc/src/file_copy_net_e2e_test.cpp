@@ -1,5 +1,5 @@
-// File copy P->R, end to end in one process plus the real helper and a real paste consumer.
-// (t-zdmsd4gb r1 step 1)
+// File copy, both directions, end to end in one process plus the real helpers and real paste
+// consumers. (t-zdmsd4gb r1 steps 1-2)
 //
 // The chain, with nothing in it written by the test but the source files and the transport:
 //
@@ -12,6 +12,13 @@
 //   what it does not prove is file_copy_helper_host.hpp's) --OLE clipboard of that station--
 //   the paste consumer (remote60_file_copy_helper_e2e_test --consumer: the destination folder's
 //   IDropTarget driven as Explorer's Paste drives it; the shell's own copy engine).
+//
+// R->P runs the same chain the other way: HostFileCopyService is handed a copy of files the way the
+// host's clipboard monitor hands it over (OnHostClipboard: path strings -- the one boundary the test
+// injects, because the host's real clipboard is the user's), its helper identifies and pins them as
+// the user, its paced sender answers the viewer's pulls; FileCopyClient asks every 700 ms, publishes
+// the list through ITS OWN helper (a second private window station: "this PC"), and each helper Read
+// becomes pulls checked chunk by chunk.
 //
 // The bytes that land are compared with the source files here. Scratch: StagingDir (inside the
 // repository). The user's clipboard and files are never touched: the helper and the consumer live on
@@ -105,8 +112,12 @@ struct Station {
   HWINSTA ws = nullptr;
   HDESK dk = nullptr;
   std::wstring desktop;
-  bool Create() {
-    ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);  // unnamed: medium may not name one
+  std::wstring name;
+  // `stationName` null: the unnamed station -- its name comes from the logon session, so a second
+  // unnamed Create() in this process is the SAME station (one clipboard). A second, separate
+  // clipboard needs a name.
+  bool Create(const wchar_t* stationName = nullptr) {
+    ws = CreateWindowStationW(stationName, 0, WINSTA_ALL_ACCESS, nullptr);
     if (!ws) return false;
     wchar_t name[256] = L"";
     DWORD len = 0;
@@ -115,6 +126,7 @@ struct Station {
     SetProcessWindowStation(ws);
     dk = CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
     SetProcessWindowStation(orig);
+    this->name = name;
     desktop = std::wstring(name) + L"\\Default";
     return dk != nullptr;
   }
@@ -208,6 +220,11 @@ int wmain() {
   Station station;
   check("a private window station for the helper and the consumer (their clipboard is not the user's)", station.Create(),
         narrow(station.desktop));
+  // R->P: "this PC" has to be a private station too. A Medium process cannot name a window station,
+  // and the unnamed one is per logon session -- so it is the SAME station, one clipboard for both
+  // helpers (unlike two real PCs). The R->P part therefore starts only after the P->R offer is
+  // withdrawn and off that clipboard (below), and this is said, not hidden.
+  Station& local = station;
 
   // ------------------------------------------------------------------ the transport
   WSADATA wsa{};
@@ -245,9 +262,19 @@ int wmain() {
     return sendto(viewSock, reinterpret_cast<const char*>(copy.data()), static_cast<int>(copy.size()), 0,
                   reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr)) > 0;
   };
+  // Scenario G flips one byte of one file-chunk datagram on its way to the viewer.
+  std::atomic<int> tamperHostNext{0};
   const auto host_send = [&](const void* d, size_t n) {
-    return sendto(hostSock, static_cast<const char*>(d), static_cast<int>(n), 0, reinterpret_cast<const sockaddr*>(&viewAddr),
-                  sizeof(viewAddr)) > 0;
+    std::vector<uint8_t> copy(static_cast<const uint8_t*>(d), static_cast<const uint8_t*>(d) + n);
+    if (tamperHostNext.load() > 0 && n > sizeof(UdpControlChunkHeader) + 64 && bulk_datagram_is_file(d, n)) {
+      UdpControlChunkHeader h{};
+      std::memcpy(&h, copy.data(), sizeof(h));
+      if (h.kind == static_cast<uint16_t>(UdpPacketKind::ControlData) && h.fragIndex > 0 && --tamperHostNext == 0) {
+        copy[copy.size() - 7] ^= 0x5A;
+      }
+    }
+    return sendto(hostSock, reinterpret_cast<const char*>(copy.data()), static_cast<int>(copy.size()), 0,
+                  reinterpret_cast<const sockaddr*>(&viewAddr), sizeof(viewAddr)) > 0;
   };
 
   BulkArbiter hostArbiter, viewArbiter;
@@ -266,7 +293,18 @@ int wmain() {
            link->AwaitHello(10000, why);
   };
   host.Start(host_send, 1200, cfg, &hostArbiter, [](const std::string& l) { std::printf("      host: %s\n", l.c_str()); });
+  // Before any viewer asks: this copy was on the remote clipboard before the session began.
+  const std::wstring preDir = srcDir + L"\\pre";
+  CreateDirectoryW(preDir.c_str(), nullptr);
+  write_file(preDir + L"\\before.txt", make_content(333, 51));
+  uint64_t hostSeq = 500;
+  host.OnHostClipboard(hostSeq, {preDir + L"\\before.txt"});
   FileCopyClient viewer;
+  const std::wstring viewerHelperLog = root + L"viewer_helper.log";
+  viewer.SetHelperLauncher([&](fc::HelperLink* link, std::string* why) {
+    return fc::launch_file_copy_helper_as_self(helperExe, local.desktop.c_str(),
+                                               L"--idle-ms 8000 --log \"" + viewerHelperLog + L"\"", link, why);
+  });
   viewer.Start(viewer_send, [] { return uint64_t{0}; }, [] { return false; }, 1200, BulkRateConfig{}, &viewArbiter,
                [](const std::string& l) { std::printf("      viewer: %s\n", l.c_str()); });
   viewer.SetBulkNegotiated(true);
@@ -298,12 +336,19 @@ int wmain() {
   });
 
   uint64_t revision = 100;
-  const auto paste = [&](const std::wstring& dest, uint64_t expectBytes, int waitSec, Child* consumer) {
+  const auto paste_on = [&](const Station& where, const std::wstring& dest, uint64_t expectBytes, int waitSec,
+                            Child* consumer) {
     CreateDirectoryW(dest.c_str(), nullptr);
     const std::wstring res = dest + L".result.txt";
     const std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode drop --dest \"" + dest + L"\" --result \"" + res +
                              L"\" --expect-bytes " + std::to_wstring(expectBytes) + L" --wait-sec " + std::to_wstring(waitSec);
-    return consumer->Start(cmd, station.desktop);
+    const bool started = consumer->Start(cmd, where.desktop);
+    std::printf("      consumer pid=%lu\n", static_cast<unsigned long>(consumer->pi.dwProcessId));
+    return started;
+  };
+  // P->R pastes happen on the remote station, R->P pastes on this PC's.
+  const auto paste = [&](const std::wstring& dest, uint64_t expectBytes, int waitSec, Child* consumer) {
+    return paste_on(station, dest, expectBytes, waitSec, consumer);
   };
   const auto same_files = [&](const std::wstring& dest, const std::map<std::wstring, std::vector<uint8_t>>& expect, std::string* detail) {
     bool ok = true;
@@ -452,6 +497,169 @@ int wmain() {
     viewArbiter.Release(777);
   }
 
+  // ================================================================== R->P (step 2)
+  // One clipboard for both helpers here (see `local`): the viewer's last P->R offer comes off it first.
+  {
+    viewer.ClearLocalOffer();
+    const bool withdrawn = wait_until([&] { return !viewer.PasteActive(); }, 3000);
+    Sleep(1500);  // the End (73) on the next turn, the host's ClearRemoteFiles, the helper's clear
+    check("the P->R offer was withdrawn before R->P (the test's shared station)", withdrawn);
+  }
+  std::printf("\n--- B0. a copy made on the remote PC BEFORE the session: never published here ---\n");
+  {
+    Sleep(2500);  // several 700 ms questions
+    const auto vc = viewer.GetCounters();
+    check("the viewer asked the host every 700 ms", vc.offerQueries >= 2, "queries=" + std::to_string(vc.offerQueries));
+    check("...and published nothing (connecting never replaces this PC's clipboard)",
+          vc.remotePublished == 0 && vc.remoteOffersSeen == 0);
+  }
+
+  std::printf("\n--- B. R->P: three files copied there, pasted here ---\n");
+  std::map<std::wstring, std::vector<uint8_t>> setB = {
+      {L"remote one.bin", make_content(900 * 1024 + 7, 61)},
+      {L"원격.txt", make_content(17, 62)},
+      {L"empty.dat", {}},
+      {L"remote big.bin", make_content(3 * 1024 * 1024 + 5, 63)},
+  };
+  const std::wstring remoteDir = srcDir + L"\\remote";
+  CreateDirectoryW(remoteDir.c_str(), nullptr);
+  uint64_t totalB = 0;
+  std::vector<std::wstring> pathsB;
+  for (const auto& [name, content] : setB) {
+    pathsB.push_back(remoteDir + L"\\" + name);
+    write_file(pathsB.back(), content);
+    totalB += content.size();
+  }
+  {
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, pathsB);
+    const bool published = wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    check("the remote copy was identified by the host's helper and published on this PC's clipboard", published,
+          "hostOffers=" + std::to_string(host.GetCounters().hostOffers) + " seen=" +
+              std::to_string(viewer.GetCounters().remoteOffersSeen));
+    Child consumer;
+    const std::wstring dest = root + L"destB";
+    check("the paste consumer starts on this PC's station", paste_on(local, dest, totalB, 60, &consumer));
+    const DWORD code = consumer.Wait(90000);
+    check("the consumer finished (EndOperation) with exit 0", code == 0, "exit=" + std::to_string(code));
+    std::string detail;
+    check("EVERY FILE LANDED BYTE-FOR-BYTE AS THE SOURCE (R->P, an empty file included)", same_files(dest, setB, &detail),
+          detail);
+    const bool told = wait_until([&] { return host.GetCounters().sendEnded == 1 && hostArbiter.use() == BulkUse::Idle; }, 5000);
+    const auto hc = host.GetCounters();
+    const auto vc = viewer.GetCounters();
+    check("the viewer ended it and told the host (73): completed, the host's bulk is free", told,
+          "sendEnded=" + std::to_string(hc.sendEnded) + " sendFailed=" + std::to_string(hc.sendFailed) +
+              " reason=" + std::to_string(hc.lastSendEndReason));
+    check("...and the viewer's bulk is free", wait_until([&] { return viewArbiter.use() == BulkUse::Idle; }, 2000));
+    check("every received byte passed its chunk check, none rejected",
+          vc.chunksRejected == 0 && vc.bytesReceived == totalB && vc.recvEnded == 1,
+          "received=" + std::to_string(vc.bytesReceived) + "/" + std::to_string(totalB) +
+              " rejected=" + std::to_string(vc.chunksRejected));
+    std::printf("      files whole-file verified: %llu, chunk verified: %llu\n",
+                static_cast<unsigned long long>(vc.filesWholeVerified), static_cast<unsigned long long>(vc.filesChunkVerified));
+    check("the host served every byte from its helper's pinned handles", hc.bytesServed >= totalB && hc.localReadFailures == 0,
+          "served=" + std::to_string(hc.bytesServed));
+  }
+
+  std::printf("\n--- G. R->P: one byte flipped on the wire: that Read fails, nothing unchecked is delivered ---\n");
+  {
+    const std::wstring path = remoteDir + L"\\tamperR.bin";
+    const auto content = make_content(700 * 1024, 71);
+    write_file(path, content);
+    const auto before = viewer.GetCounters();
+    const auto hBefore = host.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    tamperHostNext.store(40);
+    Child consumer;
+    const std::wstring dest = root + L"destG";
+    paste_on(local, dest, content.size(), 30, &consumer);
+    consumer.Wait(60000);
+    wait_until([&] { return viewer.GetCounters().recvFailed > before.recvFailed; }, 15000);
+    const auto vc = viewer.GetCounters();
+    std::vector<uint8_t> got;
+    const bool landed = read_file(dest + L"\\tamperR.bin", &got);
+    check("the corrupted chunk was rejected by its SHA-256 (on the viewer)", vc.chunksRejected > before.chunksRejected,
+          std::to_string(vc.chunksRejected - before.chunksRejected) + " rejected");
+    check("...the paste ended failed (verification) here", vc.recvFailed > before.recvFailed &&
+              vc.lastRecvEndReason == static_cast<uint8_t>(fn::PasteEndReason::Verification),
+          "reason=" + std::to_string(vc.lastRecvEndReason));
+    check("...and the host was told the same", wait_until([&] {
+            const auto hc = host.GetCounters();
+            return hc.sendFailed > hBefore.sendFailed && hc.lastSendEndReason == static_cast<uint8_t>(fn::PasteEndReason::Verification);
+          }, 5000));
+    check("...and no complete copy with different content exists at the destination",
+          !landed || got.size() != content.size() || got == content,
+          landed ? "partial " + std::to_string(got.size()) + " bytes" : "absent");
+  }
+
+  std::printf("\n--- H. R->P while this session's bulk is taken (the host's): refused before any byte ---\n");
+  {
+    const std::wstring path = remoteDir + L"\\busyR.txt";
+    write_file(path, make_content(1000, 81));
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    check("an image transfer takes the host's bulk", hostArbiter.TryAcquire(BulkUse::Image, 888));
+    const auto hBefore = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destH";
+    paste_on(local, dest, 1000, 15, &consumer);
+    consumer.Wait(30000);
+    wait_until([&] { return host.GetCounters().sendRefused > hBefore.sendRefused; }, 5000);
+    std::vector<uint8_t> got;
+    check("the host refused it as Busy (never swapped in)", host.GetCounters().sendRefused > hBefore.sendRefused &&
+              host.GetCounters().lastSendVerdict == static_cast<uint8_t>(fn::Verdict::Busy));
+    check("...nothing landed", !read_file(dest + L"\\busyR.txt", &got) || got.empty());
+    check("...the image still holds the host's bulk", hostArbiter.use() == BulkUse::Image && hostArbiter.owner() == 888);
+    check("...and the viewer's bulk is free again", wait_until([&] { return viewArbiter.use() == BulkUse::Idle; }, 3000));
+    hostArbiter.Release(888);
+  }
+
+  std::printf("\n--- J. R->P: a new copy on the remote PC while a paste runs: the running paste finishes ---\n");
+  {
+    std::map<std::wstring, std::vector<uint8_t>> setJ = {{L"bigR.bin", make_content(16u * 1024u * 1024u, 91)}};
+    const std::wstring bigPath = remoteDir + L"\\bigR.bin";
+    write_file(bigPath, setJ.begin()->second);
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {bigPath});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    Child consumer;
+    const std::wstring dest = root + L"destJ";
+    check("the R->P paste of the big file starts", paste_on(local, dest, setJ.begin()->second.size(), 120, &consumer));
+    const bool moving = wait_until([&] { return viewer.GetCounters().bytesReceived > before.bytesReceived + 1024 * 1024; }, 30000);
+    check("...bytes are moving (over 1 MiB received)", moving);
+    const std::wstring nextPath = remoteDir + L"\\nextR.txt";
+    std::map<std::wstring, std::vector<uint8_t>> setNext = {{L"nextR.txt", make_content(4096, 92)}};
+    write_file(nextPath, setNext.begin()->second);
+    const auto mid = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {nextPath});
+    check("the new remote copy was published here during the paste",
+          wait_until([&] { return viewer.GetCounters().remotePublished > mid.remotePublished; }, 20000));
+    check("...while the running paste is still running", viewer.ReceiveActive());
+    const DWORD code = consumer.Wait(180000);
+    check("the running paste finished (exit 0)", code == 0, "exit=" + std::to_string(code));
+    std::string detail;
+    check("THE BIG FILE LANDED WHOLE -- the new copy did not cut it", same_files(dest, setJ, &detail), detail);
+    check("...and both ends count it completed", wait_until([&] {
+            return viewer.GetCounters().recvEnded == before.recvEnded + 1 && host.GetCounters().sendEnded >= 2;
+          }, 5000));
+    Child next;
+    const std::wstring destNext = root + L"destJNext";
+    paste_on(local, destNext, 4096, 30, &next);
+    const DWORD codeNext = next.Wait(60000);
+    std::string detailNext;
+    check("a paste after it gets the NEW copy", codeNext == 0 && same_files(destNext, setNext, &detailNext), detailNext);
+  }
+
+  std::printf("\n--- I. the remote clipboard stops naming files: ours comes off this PC's clipboard ---\n");
+  {
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {});
+    check("the viewer withdrew what it had published", wait_until([&] { return viewer.GetCounters().remoteCleared > before.remoteCleared; }, 5000));
+  }
+
   // ------------------------------------------------------------------ teardown
   stop.store(true);
   pump.join();
@@ -462,15 +670,27 @@ int wmain() {
   closesocket(hostSock);
   closesocket(viewSock);
   check("the control link never went out of step", !linkBroken.load());
-  check("the user's clipboard (WinSta0) did not move", GetClipboardSequenceNumber() == userClipBefore);
+  {
+    // Who wrote it, if it moved: this test (or a child it started) would be a defect; another program
+    // on this console (the user copying while the test runs) is not this test's doing.
+    const DWORD seqNow = GetClipboardSequenceNumber();
+    DWORD ownerPid = 0;
+    if (HWND owner = GetClipboardOwner()) GetWindowThreadProcessId(owner, &ownerPid);
+    const bool moved = seqNow != userClipBefore;
+    const bool ours = moved && ownerPid == GetCurrentProcessId();
+    check("the user's clipboard (WinSta0) was not written by this test", !ours,
+          moved ? "moved by pid " + std::to_string(ownerPid) + (ours ? " (THIS TEST)" : " (not this test)") : "unchanged");
+  }
   if (gFailures) {
     // The helper's own account (it names no path) -- the staging directory goes next.
-    std::printf("\n--- helper log ---\n");
-    if (FILE* f = _wfopen(helperLog.c_str(), L"rb")) {
-      char b[4096];
-      size_t n;
-      while ((n = std::fread(b, 1, sizeof(b), f)) > 0) std::fwrite(b, 1, n, stdout);
-      std::fclose(f);
+    for (const std::wstring* log : {&helperLog, &viewerHelperLog}) {
+      std::printf("\n--- %s ---\n", log == &helperLog ? "host helper log" : "viewer helper log");
+      if (FILE* f = _wfopen(log->c_str(), L"rb")) {
+        char b[4096];
+        size_t n;
+        while ((n = std::fread(b, 1, sizeof(b), f)) > 0) std::fwrite(b, 1, n, stdout);
+        std::fclose(f);
+      }
     }
   }
   const bool removed = staging.Remove();

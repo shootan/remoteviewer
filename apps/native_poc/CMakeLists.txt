@@ -220,8 +220,6 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 # sources needs it.
 add_library(remote60_clip_image STATIC
   src/clip_image_client.cpp
-  src/bulk_uplink.cpp
-  src/bulk_pacer.cpp
   # File copy, viewer side (t-zdmsd4gb): offer, paste query, pin as the user, the shared bulk sender.
   # The files are identified and opened by the helper's own user-token code.
   src/file_copy_client.cpp
@@ -231,12 +229,9 @@ add_library(remote60_clip_image STATIC
   # The viewer's transfer bar (percent, seconds, Cancel): in the library because every target built
   # from the viewer's window procedure moves and destroys it.
   src/viewer_clip_transfer_bar.cpp
-  # The bulk stream is a UdpControlChannel; targets that link the viewer's state without the
-  # channel get it from here (a static library contributes it only where it is not already linked).
-  src/udp_control_channel.cpp
 )
 target_include_directories(remote60_clip_image PUBLIC src)
-target_link_libraries(remote60_clip_image PUBLIC remote60_file_copy_net bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
+target_link_libraries(remote60_clip_image PUBLIC remote60_file_copy_paste bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
 if(MSVC)
   # The transfer bar's Korean lines (history #523: a Korean literal does not survive without it).
   target_compile_options(remote60_clip_image PRIVATE /utf-8)
@@ -270,10 +265,26 @@ target_link_libraries(remote60_file_copy_net PUBLIC bcrypt)
 if(MSVC)
   target_compile_options(remote60_file_copy_net PRIVATE /utf-8)
 endif()
-# The host's file-copy side: the helper (launched as the interactive user), pulls, chunk checks.
-add_library(remote60_file_copy_host STATIC src/host_file_copy.cpp src/file_copy_helper_host.cpp)
+# What both ends of a file paste are made of (file_copy_paste_parts.hpp): the helper channel and its
+# launch, the receiving side's pulls and chunk checks, the serving side's chunks, and the paced bulk
+# sender the image path shares. The bulk stream is a UdpControlChannel; targets that link it without
+# the channel get it from here (a static library contributes it only where it is not already linked).
+add_library(remote60_file_copy_paste STATIC
+  src/file_copy_paste_parts.cpp
+  src/file_copy_helper_host.cpp
+  src/bulk_uplink.cpp
+  src/bulk_pacer.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_file_copy_paste PUBLIC src)
+target_link_libraries(remote60_file_copy_paste PUBLIC remote60_file_copy_net advapi32 wtsapi32 bcrypt ws2_32)
+if(MSVC)
+  target_compile_options(remote60_file_copy_paste PRIVATE /utf-8)
+endif()
+# The host's file-copy side, both directions (host_file_copy.hpp).
+add_library(remote60_file_copy_host STATIC src/host_file_copy.cpp)
 target_include_directories(remote60_file_copy_host PUBLIC src)
-target_link_libraries(remote60_file_copy_host PUBLIC remote60_file_copy_net advapi32 wtsapi32 bcrypt)
+target_link_libraries(remote60_file_copy_host PUBLIC remote60_file_copy_paste)
 if(MSVC)
   target_compile_options(remote60_file_copy_host PRIVATE /utf-8)
 endif()
@@ -2029,6 +2040,8 @@ add_executable(remote60_abr_client_evidence_e2e_test
 )
 target_include_directories(remote60_abr_client_evidence_e2e_test PRIVATE src)
 target_link_libraries(remote60_abr_client_evidence_e2e_test PRIVATE common ws2_32 user32 gdi32 winmm psapi remote60_clip_image)
+# --file-bench stages the clipboard helper and runs the paste consumer beside this test.
+add_dependencies(remote60_abr_client_evidence_e2e_test remote60_file_copy_helper remote60_file_copy_helper_e2e_test)
 if(MSVC)
   target_compile_options(remote60_abr_client_evidence_e2e_test PRIVATE /utf-8)
 endif()
@@ -2373,6 +2386,18 @@ target_include_directories(remote60_clipboard_monitor_test PRIVATE src)
 target_link_libraries(remote60_clipboard_monitor_test PRIVATE user32 bcrypt)
 if(MSVC)
   target_compile_options(remote60_clipboard_monitor_test PRIVATE /utf-8)
+endif()
+# The same monitor reporting copies of files (file copy R->P), run on a private window station so
+# the clipboard is never the user's -- always runs, no gate.
+add_executable(remote60_clipboard_monitor_files_test
+  src/clipboard_monitor_files_test.cpp
+  src/clipboard_monitor.cpp
+  src/clip_image_clipboard.cpp
+)
+target_include_directories(remote60_clipboard_monitor_files_test PRIVATE src)
+target_link_libraries(remote60_clipboard_monitor_files_test PRIVATE user32 bcrypt shell32)
+if(MSVC)
+  target_compile_options(remote60_clipboard_monitor_files_test PRIVATE /utf-8)
 endif()
 
 # Clipboard wire round-trip (K1): the client send/poll helpers over a ControlLink, against a mock

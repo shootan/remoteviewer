@@ -11,9 +11,11 @@
 #include "host_clip_image_test_sink.hpp"
 
 #include <cstdio>
+#include <iostream>
 #include <string>
 
 #include "clip_image_core.hpp"
+#include "file_copy_helper_host.hpp"
 
 namespace remote60::native_poc {
 
@@ -53,6 +55,66 @@ ClipPublishResult FileSinkClipImagePublisher::Publish(uint64_t expectSequence, H
   if (pngGlobal) GlobalFree(pngGlobal);
   if (dibv5) GlobalFree(dibv5);
   return r;
+}
+
+HostFileCopyService::HelperLauncher FileCopyTestSource::Launcher() {
+  if (desktop_.empty()) {
+    // Unnamed: a Medium process may not name a window station. Kept open for the process's life.
+    HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+    if (ws) {
+      wchar_t name[256] = L"";
+      DWORD len = 0;
+      GetUserObjectInformationW(ws, UOI_NAME, name, sizeof(name), &len);
+      HWINSTA orig = GetProcessWindowStation();
+      SetProcessWindowStation(ws);
+      HDESK dk = CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+      SetProcessWindowStation(orig);
+      if (dk) desktop_ = std::wstring(name) + L"\\Default";
+    }
+  }
+  const std::wstring desktop = desktop_;
+  return [desktop](file_copy::HelperLink* link, std::string* why) {
+    if (desktop.empty()) {
+      *why = "no private window station";
+      return false;
+    }
+    wchar_t path[MAX_PATH] = L"";
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring exe(path, n);
+    exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
+    return file_copy::launch_file_copy_helper_as_self(exe, desktop.c_str(), L"", link, why);
+  };
+}
+
+void FileCopyTestSource::Start(HostFileCopyService* service) {
+  if (!Enabled() || thread_.joinable()) return;
+  thread_ = std::thread([this, service] {
+    const std::wstring go = dir_ + L"\\go";
+    while (!stop_.load()) {
+      if (GetFileAttributesW(go.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::vector<std::wstring> paths;
+        WIN32_FIND_DATAW fd{};
+        const std::wstring files = dir_ + L"\\files\\";
+        HANDLE h = FindFirstFileW((files + L"*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+          do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) paths.push_back(files + fd.cFileName);
+          } while (FindNextFileW(h, &fd));
+          FindClose(h);
+        }
+        std::cout << "[native-video-host][file-copy] TEST SOURCE copy of " << paths.size() << " file(s)\n";
+        std::cout.flush();
+        service->OnHostClipboard(1000, std::move(paths));
+        return;
+      }
+      Sleep(100);
+    }
+  });
+}
+
+void FileCopyTestSource::Stop() {
+  stop_.store(true);
+  if (thread_.joinable()) thread_.join();
 }
 
 }  // namespace remote60::native_poc

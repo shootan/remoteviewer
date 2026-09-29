@@ -592,7 +592,12 @@ void on_timer() {
   if (!gOwner.current) return;
   if (OleIsCurrentClipboard(gOwner.current) != S_OK) {
     // Something else took the clipboard: the offer is over. A paste already running on it runs on.
-    logf("clipboard taken over: offer=%llu dropped", static_cast<unsigned long long>(gOwner.current->offer_id()));
+    // Who took it (a pid, no names), for the field log.
+    DWORD ownerPid = 0;
+    if (HWND owner = GetClipboardOwner()) GetWindowThreadProcessId(owner, &ownerPid);
+    logf("clipboard taken over: offer=%llu dropped (owner pid=%lu seq=%lu)",
+         static_cast<unsigned long long>(gOwner.current->offer_id()), static_cast<unsigned long>(ownerPid),
+         static_cast<unsigned long>(GetClipboardSequenceNumber()));
     retire_or_abort(EndReason::Released);
     return;
   }

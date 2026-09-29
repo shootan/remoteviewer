@@ -38,6 +38,19 @@ void start_clip_image_client(ViewerState& ctx, uint32_t udpMtu) {
     const char* v = std::getenv("REMOTE60_CLIPBOARD_FILES");
     ctx.control.fileCopy.SetAllowed(!(v && (v[0] == '0' || std::strcmp(v, "off") == 0 || std::strcmp(v, "false") == 0)));
   }
+  // R->P: files copied on the remote PC are put on THIS clipboard by the clipboard helper beside
+  // this program, started as this program's own user (the viewer is not elevated; nothing is raised).
+  ctx.control.fileCopy.SetHelperLauncher([](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
+    wchar_t path[MAX_PATH] = L"";
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+      *why = "own path unknown";
+      return false;
+    }
+    std::wstring exe(path, n);
+    exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
+    return remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
+  });
   ctx.control.fileCopy.Start(
       [&ctx](const void* data, size_t len) -> bool {
         return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;

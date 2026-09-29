@@ -517,4 +517,17 @@ bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, st
   return ok;
 }
 
+bool launch_file_copy_helper_as_self(const std::wstring& helperExe, const wchar_t* desktop, const std::wstring& extraArgs,
+                                     HelperLink* link, std::string* why, DWORD helloTimeoutMs) {
+  std::wstring sid;
+  if (!current_process_user_sid(&sid)) {
+    if (why) *why = "no user SID";
+    return false;
+  }
+  const bool ok = link->CreateServerPipe(sid, why) && link->Launch(helperExe, nullptr, desktop, extraArgs, why) &&
+                  link->AwaitHello(helloTimeoutMs, why);
+  if (!ok) link->Close();
+  return ok;
+}
+
 }  // namespace remote60::native_poc::file_copy

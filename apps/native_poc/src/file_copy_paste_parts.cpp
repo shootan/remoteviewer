@@ -1,0 +1,459 @@
+// See file_copy_paste_parts.hpp.
+
+#include "file_copy_paste_parts.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+
+namespace remote60::native_poc {
+
+namespace fc = remote60::native_poc::file_copy;
+namespace fn = remote60::native_poc::file_copy::net;
+
+// ------------------------------------------------------------------------------ FileHelperChannel
+
+void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneFn onGone) {
+  std::lock_guard<std::mutex> lock(mu_);
+  config_ = std::move(config);
+  onFrame_ = std::move(onFrame);
+  onGone_ = std::move(onGone);
+}
+
+bool FileHelperChannel::Running() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return link_.pipe_open() && link_.helper_alive();
+}
+
+bool FileHelperChannel::Ensure(std::string* why) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (link_.pipe_open() && link_.helper_alive()) return true;
+  const uint64_t now = GetTickCount64();
+  if (now < nextLaunchMs_) {
+    *why = "helper start backing off";
+    return false;
+  }
+  readerRun_.store(false);
+  if (reader_.joinable()) reader_.join();
+  link_.Close();
+  ++launches_;
+  if (!config_.launcher || !config_.launcher(&link_, why)) {
+    link_.Close();
+    backoffMs_ = backoffMs_ ? (std::min)(backoffMs_ * 2, config_.backoffMaxMs) : config_.backoffFirstMs;
+    nextLaunchMs_ = now + backoffMs_;
+    ++launchFailures_;
+    return false;
+  }
+  backoffMs_ = 0;
+  nextLaunchMs_ = 0;
+  readerRun_.store(true);
+  reader_ = std::thread([this] { ReaderLoop(); });
+  return true;
+}
+
+bool FileHelperChannel::Send(const fc::PipeFrame& f) {
+  std::lock_guard<std::mutex> s(sendMu_);
+  return link_.pipe_open() && link_.Send(f);
+}
+
+void FileHelperChannel::ReaderLoop() {
+  while (readerRun_.load()) {
+    fc::PipeFrame f;
+    if (!link_.Receive(&f, 100)) {
+      if (GetLastError() == WAIT_TIMEOUT) continue;
+      break;  // the pipe is gone
+    }
+    if (onFrame_) onFrame_(f);
+  }
+  if (onGone_) onGone_();
+}
+
+void FileHelperChannel::Disconnect() {
+  readerRun_.store(false);
+  std::lock_guard<std::mutex> s(sendMu_);
+  link_.ClosePipe();
+}
+
+void FileHelperChannel::Stop() {
+  readerRun_.store(false);
+  std::thread t;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    {
+      std::lock_guard<std::mutex> s(sendMu_);
+      link_.Close();
+    }
+    t = std::move(reader_);
+  }
+  if (t.joinable()) t.join();
+}
+
+// ------------------------------------------------------------------------------ FilePullReceiver
+
+void FilePullReceiver::Start(AnswerFn answer) {
+  if (running_.exchange(true)) return;
+  answer_ = std::move(answer);
+  thread_ = std::thread([this] { Loop(); });
+}
+
+void FilePullReceiver::Stop() {
+  if (!running_.exchange(false)) return;
+  Close(fc::Status::Aborted);
+  cv_.notify_all();
+  if (thread_.joinable()) thread_.join();
+}
+
+void FilePullReceiver::Open(SendFn send, uint32_t txStreamId, uint32_t rxStreamId, uint32_t mtuBytes,
+                            const FilePasteIdentity& id, const std::vector<uint64_t>& sizes) {
+  std::lock_guard<std::mutex> lock(mu_);
+  id_ = id;
+  sizes_ = sizes;
+  coverage_.clear();
+  for (uint64_t s : sizes) coverage_.emplace_back(s);
+  jobs_.clear();
+  outstanding_.clear();
+  completed_.clear();
+  waiting_.clear();
+  aheadOn_ = false;
+  ahead_.clear();
+  nextRequestId_ = 1;
+  bytesDelivered_ = 0;
+  failure_ = fn::PasteEndReason::None;
+  bulk_.Reset();
+  bulk_.Configure(std::move(send), txStreamId, rxStreamId, mtuBytes);
+  open_ = true;
+  cv_.notify_all();
+}
+
+void FilePullReceiver::Close(fc::Status why) {
+  std::vector<fc::ReadData> answers;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!open_) return;
+    FailAllLocked(why, &answers);
+    bulk_.Close(ControlCloseReason::SessionRollover);
+    open_ = false;
+  }
+  if (answer_) {
+    for (const fc::ReadData& d : answers) answer_(d);
+  }
+}
+
+bool FilePullReceiver::IsOpen() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return open_;
+}
+
+fn::PasteEndReason FilePullReceiver::failure() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return failure_;
+}
+
+uint64_t FilePullReceiver::bytesDelivered() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return bytesDelivered_;
+}
+
+std::vector<bool> FilePullReceiver::wholeFileVerified() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::vector<bool> v;
+  for (const auto& c : coverage_) v.push_back(c.whole_file_verified());
+  return v;
+}
+
+FilePullReceiver::Counters FilePullReceiver::GetCounters() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return counters_;
+}
+
+void FilePullReceiver::Submit(const fc::ReadRequest& m) {
+  std::vector<fc::ReadData> answers;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++counters_.readsRequested;
+    fc::ReadData refuse;
+    refuse.offerId = m.offerId;
+    refuse.pasteOp = m.pasteOp;
+    refuse.fileIndex = m.fileIndex;
+    refuse.offset = m.offset;
+    const bool mine = open_ && id_.offerId == m.offerId && id_.pasteOp == m.pasteOp && m.fileIndex < sizes_.size();
+    if (!mine) {
+      refuse.status = fc::Status::UnknownId;
+    } else if (!fn::range_ok(sizes_[m.fileIndex], m.offset, m.length, fc::kMaxChunkBytes)) {
+      refuse.status = fc::Status::BadRequest;
+    } else if (m.length == 0) {
+      refuse.status = fc::Status::Ok;  // nothing to fetch (end of file)
+    } else if (failure_ == fn::PasteEndReason::Verification) {
+      refuse.status = fc::Status::ReadError;  // a chunk of this paste failed its check: no Read succeeds after it
+    } else {
+      waiting_.push_back(m);
+      ProcessLocked(&answers);
+      refuse.status = fc::Status::Ok;
+      refuse.pasteOp = 0;  // no refusal
+    }
+    if (refuse.pasteOp != 0) {
+      if (refuse.status != fc::Status::Ok) ++counters_.readsFailed;
+      answers.push_back(std::move(refuse));
+    }
+  }
+  if (answer_) {
+    for (const fc::ReadData& d : answers) answer_(d);
+  }
+}
+
+void FilePullReceiver::ResetAheadLocked(uint32_t fileIndex, uint64_t offset) {
+  // Pulls already in flight for the old position still arrive; they are verified and dropped.
+  aheadOn_ = true;
+  aheadFile_ = fileIndex;
+  aheadStart_ = offset;
+  ahead_.clear();
+  aheadIssuedEnd_ = offset;
+}
+
+void FilePullReceiver::ProcessLocked(std::vector<fc::ReadData>* answers) {
+  while (!waiting_.empty()) {
+    const fc::ReadRequest& w = waiting_.front();
+    if (!aheadOn_ || w.fileIndex != aheadFile_ || w.offset != aheadStart_) ResetAheadLocked(w.fileIndex, w.offset);
+    if (ahead_.size() < w.length) break;
+    fc::ReadData d;
+    d.offerId = w.offerId;
+    d.pasteOp = w.pasteOp;
+    d.fileIndex = w.fileIndex;
+    d.offset = w.offset;
+    d.status = fc::Status::Ok;
+    d.data.assign(ahead_.begin(), ahead_.begin() + w.length);
+    ahead_.erase(ahead_.begin(), ahead_.begin() + w.length);
+    aheadStart_ += w.length;
+    bytesDelivered_ += w.length;
+    counters_.bytesDelivered += w.length;
+    ++counters_.readsServed;
+    answers->push_back(std::move(d));
+    waiting_.pop_front();
+  }
+  if (!aheadOn_ || aheadFile_ >= sizes_.size()) return;
+  // The window: what the next waiting Read needs, plus kAheadBytes past the consumer's position.
+  const uint64_t need = waiting_.empty() ? 0 : waiting_.front().length;
+  const uint64_t target = (std::min)(sizes_[aheadFile_], aheadStart_ + need + kAheadBytes);
+  while (aheadIssuedEnd_ < target) {
+    const uint64_t len = (std::min<uint64_t>)(fc::kMaxChunkBytes, target - aheadIssuedEnd_);
+    auto job = std::make_unique<Job>();
+    job->fileIndex = aheadFile_;
+    job->offset = aheadIssuedEnd_;
+    job->data.resize(static_cast<size_t>(len));
+    for (uint64_t off = 0; off < len; off += fn::kMaxFileChunkBytes) {
+      fn::Pull p;
+      p.epochTag = id_.epochTag;
+      p.offerId = id_.offerId;
+      p.pasteOp = id_.pasteOp;
+      p.bulkGen = id_.bulkGen;
+      p.fileIndex = aheadFile_;
+      p.offset = aheadIssuedEnd_ + off;
+      p.length = static_cast<uint32_t>((std::min<uint64_t>)(fn::kMaxFileChunkBytes, len - off));
+      job->pulls.push_back(p);
+    }
+    jobs_.push_back(std::move(job));
+    aheadIssuedEnd_ += len;
+  }
+  PumpPullsLocked();
+  cv_.notify_all();
+}
+
+void FilePullReceiver::PumpPullsLocked() {
+  if (!open_) return;
+  for (auto& jp : jobs_) {
+    Job& j = *jp;
+    while (!j.failed && j.nextPull < j.pulls.size() && outstanding_.size() < pullWindow_) {
+      fn::Pull& p = j.pulls[j.nextPull];
+      p.requestId = nextRequestId_++;
+      p.triggerRequestId = fn::kNoTrigger;
+      if (!completed_.empty()) {  // one pull carries each completion, oldest first
+        p.triggerRequestId = completed_.front();
+        completed_.pop_front();
+      }
+      outstanding_[p.requestId] = {&j, j.nextPull};
+      ++j.nextPull;
+      const std::vector<uint8_t> w = fn::frame_bulk(p);
+      (void)bulk_.Send(w.data(), w.size());
+    }
+    if (outstanding_.size() >= pullWindow_) break;
+  }
+}
+
+void FilePullReceiver::FailAllLocked(fc::Status why, std::vector<fc::ReadData>* answers) {
+  for (const fc::ReadRequest& w : waiting_) {
+    fc::ReadData d;
+    d.offerId = w.offerId;
+    d.pasteOp = w.pasteOp;
+    d.fileIndex = w.fileIndex;
+    d.offset = w.offset;
+    d.status = why;
+    ++counters_.readsFailed;
+    answers->push_back(std::move(d));
+  }
+  waiting_.clear();
+  jobs_.clear();
+  outstanding_.clear();
+  aheadOn_ = false;
+  ahead_.clear();
+}
+
+void FilePullReceiver::Loop() {
+  std::vector<uint8_t> msg;
+  while (running_.load()) {
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      if (!open_) {
+        cv_.wait_for(lock, std::chrono::milliseconds(200));
+        continue;
+      }
+    }
+    const bool got = bulk_.Receive(&msg, 20);
+    bulk_.Tick();
+    std::vector<fc::ReadData> answers;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!open_) continue;
+      fn::Chunk c;
+      bool failed = false;
+      if (got && fn::parse_bulk(msg.data(), msg.size(), &c)) {
+        auto o = outstanding_.find(c.requestId);
+        if (o == outstanding_.end()) {
+          ++counters_.chunksRejected;  // not a pull in flight (a stale or foreign answer): nothing of it is used
+        } else {
+          Job* j = o->second.first;
+          const fn::Pull& asked = j->pulls[o->second.second];
+          outstanding_.erase(o);
+          if (fn::check_chunk(asked, c) != fn::ChunkCheck::Ok) {
+            ++counters_.chunksRejected;
+            j->failed = true;
+            failed = true;
+            failure_ = fn::PasteEndReason::Verification;
+          } else {
+            ++counters_.chunksVerified;
+            std::memcpy(j->data.data() + (c.offset - j->offset), c.data.data(), c.data.size());
+            ++j->done;
+            completed_.push_back(c.requestId);
+            while (completed_.size() > 32) completed_.pop_front();  // the serving side remembers 32
+          }
+        }
+      }
+      if (failed) {
+        // Nothing unchecked is handed on: the Reads waiting fail, the window starts over.
+        FailAllLocked(fc::Status::ReadError, &answers);
+      } else {
+        // Finished ranges, in order: contiguous with the window -> kept; from an old position -> dropped.
+        while (!jobs_.empty()) {
+          Job& j = *jobs_.front();
+          if (j.done != j.pulls.size()) break;
+          if (aheadOn_ && j.fileIndex == aheadFile_ && j.offset == aheadStart_ + ahead_.size()) {
+            ahead_.insert(ahead_.end(), j.data.begin(), j.data.end());
+            // "Whole file verified" counts the verified bytes in the order they are kept (0..size once,
+            // ascending), not the order the chunks happened to arrive in.
+            if (j.fileIndex < coverage_.size()) coverage_[j.fileIndex].OnVerified(j.offset, j.data.size());
+          }
+          jobs_.pop_front();
+        }
+        ProcessLocked(&answers);
+      }
+      if (bulk_.IsClosed()) {
+        // The serving side stopped answering for the channel's whole retry budget.
+        if (failure_ == fn::PasteEndReason::None) failure_ = fn::PasteEndReason::Session;
+        FailAllLocked(fc::Status::ReadError, &answers);
+        open_ = false;
+      }
+      PumpPullsLocked();
+    }
+    if (answer_) {
+      for (const fc::ReadData& d : answers) answer_(d);
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------ FileChunkServer
+
+void FileChunkServer::Begin(const FilePasteIdentity& id, std::vector<uint64_t> sizes, ReadFn read) {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_ = true;
+  id_ = id;
+  sizes_ = std::move(sizes);
+  read_ = std::move(read);
+  sent_.clear();
+}
+
+void FileChunkServer::End() {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_ = false;
+  read_ = nullptr;
+  sent_.clear();
+}
+
+FileChunkServer::Counters FileChunkServer::GetCounters() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return counters_;
+}
+
+bool FileChunkServer::OnPull(const std::vector<uint8_t>& msg, uint64_t /*nowUs*/, std::vector<uint8_t>* out,
+                             BulkServed* served) {
+  fn::Pull p;
+  if (!fn::parse_bulk(msg.data(), msg.size(), &p)) return false;
+  ReadFn read;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const bool mine = active_ && p.epochTag == id_.epochTag && p.offerId == id_.offerId && p.pasteOp == id_.pasteOp &&
+                      p.bulkGen == id_.bulkGen && p.fileIndex < sizes_.size();
+    if (!mine || !fn::range_ok(sizes_[p.fileIndex], p.offset, p.length, fn::kMaxFileChunkBytes)) {
+      ++counters_.pullsRefused;
+      return false;
+    }
+    read = read_;
+  }
+  fn::Chunk c;
+  c.epochTag = p.epochTag;
+  c.offerId = p.offerId;
+  c.pasteOp = p.pasteOp;
+  c.bulkGen = p.bulkGen;
+  c.fileIndex = p.fileIndex;
+  c.requestId = p.requestId;
+  c.offset = p.offset;
+  const fc::Status st = read ? read(p.fileIndex, p.offset, p.length, &c.data) : fc::Status::Aborted;
+  if (st != fc::Status::Ok || c.data.size() != p.length || !fn::sha256(c.data.data(), c.data.size(), &c.sha256)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++counters_.pullsRefused;
+    return false;
+  }
+  *out = fn::frame_bulk(c);
+  served->chunkKey = p.requestId;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (p.triggerRequestId != fn::kNoTrigger) {
+    for (auto it = sent_.begin(); it != sent_.end(); ++it) {
+      if (it->first == p.triggerRequestId) {
+        served->completedChunk = true;
+        served->completedBytes = it->second;
+        served->triggerKey = p.triggerRequestId;
+        sent_.erase(it);
+        break;
+      }
+    }
+  }
+  bool again = false;
+  for (const auto& s : sent_) again = again || s.first == p.requestId;
+  if (!again) {
+    sent_.emplace_back(p.requestId, p.length);
+    if (sent_.size() > 32) sent_.pop_front();
+  }
+  ++counters_.chunksServed;
+  counters_.bytesServed += p.length;
+  return true;
+}
+
+bool FileChunkServer::ChunkKeyOf(const uint8_t* message, size_t len, uint64_t* key) {
+  // MessageHeader(8) + epoch(8) + offer(8) + paste(8) + gen(4) + file(4) -> requestId at byte 40.
+  constexpr size_t kAt = sizeof(MessageHeader) + 8 + 8 + 8 + 4 + 4;
+  if (fn::bulk_type(message, len) != static_cast<uint16_t>(fn::FileMsg::Chunk) || len < kAt + 8) return false;
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(message[kAt + i]) << (8 * i);
+  *key = v;
+  return true;
+}
+
+}  // namespace remote60::native_poc

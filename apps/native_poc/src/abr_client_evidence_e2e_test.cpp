@@ -56,6 +56,15 @@
 //   between this viewer and the host. --run-dir DIR stages inside DIR instead of %TEMP%. The run
 //   ends with R7CLIP: the transfer's outcome and time, the control ping RTT, frame gaps and memory
 //   over the measured span (--measure-from), for comparison with a baseline run of the same span.
+//   file copy R->P (t-zdmsd4gb step 2, docs/file_copy_r2p_gates.md): --file-bench runs the host as the
+//   test build GNLinkStreamClipSink (--host) whose folder source hands a copy of files to the product
+//   HostFileCopyService at --file-at SEC (--file-mib N, 0 = a baseline run, same setup); this side runs
+//   the product FileCopyClient (700 ms query, publish through the clipboard helper on a private window
+//   station, prepare, chunk checks) and a real paste consumer there. Use it with --mode measured: the
+//   metrics this viewer reports each second are the ones it measured (real frames received, capture ->
+//   receive latency; decode tail fixed -- nothing decodes here), so the host's ABR can react to what
+//   the file transfer does to the picture. The run ends with R9FILE; the host log (--run-dir) keeps
+//   the ABR lines and the file sender's RATETRACE lines in order.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include <algorithm>
@@ -84,6 +93,8 @@
 #include "udp_control_channel.hpp"
 #include "control_resume_e2e_support.hpp"
 #include "clip_image_client.hpp"
+#include "file_copy_client.hpp"
+#include "file_copy_helper_host.hpp"
 #include "clip_image_wic.hpp"
 #include "udp_impair_proxy.hpp"
 #include <psapi.h>
@@ -309,6 +320,9 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring maxQpArg;   // r5: empty = the host's default
   std::string patternName = "default";
   bool clipBench = false;  // clip-image r2 perf: the ClipSink host build + the bulk channel
+  bool fileBench = false;  // file copy R->P gate: the ClipSink host build's folder source + the bulk channel
+  uint32_t fileMib = 0;
+  int fileAtSec = 10;
   bool clipPng = false;    // offer a PNG encoded before the run (no viewer-side encode in the span)
   uint32_t clipMib = 0;
   int clipAtSec = 10;
@@ -369,6 +383,12 @@ int wmain(int argc, wchar_t** argv) {
       }
     } else if (a == L"--gdi") {
       gdi = true;
+    } else if (a == L"--file-bench") {
+      fileBench = true;
+    } else if (a == L"--file-mib" && i + 1 < argc) {
+      fileMib = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--file-at" && i + 1 < argc) {
+      fileAtSec = _wtoi(argv[++i]);
     } else if (a == L"--clip-bench") {
       clipBench = true;
     } else if (a == L"--clip-png") {
@@ -402,8 +422,8 @@ int wmain(int argc, wchar_t** argv) {
       expectSize.assign(e.begin(), e.end());
     }
   }
-  if (mode != "none" && mode != "present" && mode != "stop" && mode != "recover") {
-    std::printf("usage: --mode none|present|stop|recover [--host <GNLinkStream.exe>]\n");
+  if (mode != "none" && mode != "present" && mode != "stop" && mode != "recover" && mode != "measured") {
+    std::printf("usage: --mode none|present|stop|recover|measured [--host <GNLinkStream.exe>]\n");
     return 2;
   }
   std::cout << "mode: " << mode << " capture=" << (desktop ? "desktop" : "test-window")
@@ -425,6 +445,11 @@ int wmain(int argc, wchar_t** argv) {
   remote60::native_poc::e2e::StagingDir staging;
   std::wstring dir;
   if (!runDir.empty()) {
+    // Absolute: the host runs in this directory, so a relative name handed to it (the file bench's
+    // source folder) would point somewhere else.
+    wchar_t full[MAX_PATH] = L"";
+    const DWORD fl = GetFullPathNameW(runDir.c_str(), MAX_PATH, full, nullptr);
+    if (fl > 0 && fl < MAX_PATH) runDir = full;
     CreateDirectoryW(runDir.c_str(), nullptr);
     dir = runDir + L"\\";
   } else {
@@ -441,6 +466,34 @@ int wmain(int argc, wchar_t** argv) {
                                 (dir + L"GNLinkCapture.exe").c_str(), FALSE);
   check("a host and a never-answering helper could be staged", staged,
         std::string(hostExe.begin(), hostExe.end()));
+  // file bench: the clipboard helper beside the staged host (the test build's source starts it there),
+  // and the "copied" file in the source folder.
+  const std::wstring fileSrc = dir + L"fsrc";
+  const std::wstring fileDest = dir + L"fdest";
+  std::vector<uint8_t> fileContent;
+  if (fileBench) {
+    const bool helperStaged =
+        CopyFileW((directory_of(me) + L"GNLinkClipHelper.exe").c_str(), (dir + L"GNLinkClipHelper.exe").c_str(), FALSE);
+    CreateDirectoryW(fileSrc.c_str(), nullptr);
+    CreateDirectoryW((fileSrc + L"\\files").c_str(), nullptr);
+    CreateDirectoryW(fileDest.c_str(), nullptr);
+    DeleteFileW((fileSrc + L"\\go").c_str());
+    bool written = true;
+    if (fileMib > 0) {
+      fileContent.resize(static_cast<size_t>(fileMib) << 20);
+      uint32_t x = 0x9E3779B9u;
+      for (auto& b : fileContent) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        b = static_cast<uint8_t>(x);
+      }
+      std::ofstream o(fileSrc + L"\\files\\bench.bin", std::ios::binary);
+      o.write(reinterpret_cast<const char*>(fileContent.data()), static_cast<std::streamsize>(fileContent.size()));
+      written = o.good();
+    }
+    check("file bench: the helper and the source file are staged", helperStaged && written);
+  }
 
   CadenceTarget target;
   target.selectable = !selectAt.empty();
@@ -465,6 +518,15 @@ int wmain(int argc, wchar_t** argv) {
     if (!maxQpArg.empty()) SetEnvironmentVariableW(L"REMOTE60_NATIVE_MAX_QP", maxQpArg.c_str());
     // r5: a stats line every second, so the measured span has one reading per second.
     if (gPattern != Pattern::Default) SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    if (fileBench) {
+      // The same test build; its folder source stands in for the user's clipboard (which stays
+      // untouched: clipboard sync off). The file sender's rate evaluations go to the host log.
+      SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
+      SetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_SOURCE_DIR", fileSrc.c_str());
+      SetEnvironmentVariableW(L"REMOTE60_CLIP_BULK_TRACE", L"1");
+      // One stats line a second: the host log's clock for "when" (ABR steps, the send's end).
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    }
     if (clipBench) {
       // The host under test sits next to the user's session: its clipboard monitor stays off, and
       // received images land in a folder (the ClipSink test build), never on a clipboard.
@@ -552,7 +614,7 @@ int wmain(int argc, wchar_t** argv) {
     hello.budgetMs = 20000;
     hello.sliceMaxMs = 250;
     hello.retrySleepMs = 50;
-    hello.requestBulkChannel = clipBench;
+    hello.requestBulkChannel = clipBench || fileBench;
     std::string helloError;
     uint32_t ackFeatures = 0;
     const bool handshake = udp_hello_handshake(sock, hello, nullptr, &helloError, &ackFeatures, nullptr);
@@ -573,6 +635,36 @@ int wmain(int argc, wchar_t** argv) {
     std::vector<uint64_t> pingRttUs;  // measured span only
     std::vector<uint64_t> frameArrivalUs;  // measured span only: last chunk of each real frame
     const bool bulkAcked = (ackFeatures & kUdpFeatureBulkChannel) != 0;
+    // file bench: the product client, on this socket, with its helper on a private window station.
+    FileCopyClient files;
+    BulkArbiter viewArbiter;
+    std::wstring fileDesktop;
+    if (fileBench) {
+      check("the host acknowledged the bulk channel (kUdpFeatureBulkChannel)", bulkAcked);
+      HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+      if (ws) {
+        wchar_t name[256] = L"";
+        DWORD len = 0;
+        GetUserObjectInformationW(ws, UOI_NAME, name, sizeof(name), &len);
+        HWINSTA orig = GetProcessWindowStation();
+        SetProcessWindowStation(ws);
+        if (CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr)) fileDesktop = std::wstring(name) + L"\\Default";
+        SetProcessWindowStation(orig);
+      }
+      check("file bench: a private window station for this side's helper and consumer", !fileDesktop.empty());
+      const std::wstring helperExe = directory_of(me) + L"GNLinkClipHelper.exe";
+      const std::wstring viewerHelperLog = dir + L"viewer_helper.log";
+      files.SetHelperLauncher([helperExe, fileDesktop, viewerHelperLog](file_copy::HelperLink* hl, std::string* why) {
+        return file_copy::launch_file_copy_helper_as_self(helperExe, fileDesktop.c_str(),
+                                                          L"--log \"" + viewerHelperLog + L"\"", hl, why);
+      });
+      files.Start([&sock](const void* data, size_t len) {
+                    return send(sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+                  },
+                  [&] { return lastPingRttUs.load(); }, [&] { return control.TxPending(); }, 1200,
+                  clip_bulk_rate_config_from_env(), &viewArbiter);
+      files.SetBulkNegotiated(bulkAcked);
+    }
     if (clipBench) {
       check("the host acknowledged the bulk channel (kUdpFeatureBulkChannel)", bulkAcked);
       clip.Start([&sock](const void* data, size_t len) {
@@ -586,6 +678,9 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<bool> stop{false};
     std::mutex fmu;
     std::set<uint32_t> realSeqThisSec;
+    uint64_t secLatSumUs = 0, secLatMaxUs = 0;  // --mode measured: this second's capture -> receive
+    uint32_t secLatN = 0;
+    ClientControlMetricsSnapshot measuredLastSec{};
     // r6: frame age per real frame (same machine, same QPC clock): capture -> encode done, and
     // capture -> received here, for the frames of the measured span.
     std::atomic<bool> latencyOn{false};
@@ -605,6 +700,7 @@ int wmain(int argc, wchar_t** argv) {
         control.Tick();
         const int n = recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
         if (n > 0 && clipBench && clip.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
+        if (n > 0 && fileBench && files.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
         if (n > 0 && !control.OnPacket(buf.data(), static_cast<size_t>(n)) &&
             n >= static_cast<int>(sizeof(UdpVideoChunkHeader))) {
           UdpVideoChunkHeader h{};
@@ -614,6 +710,14 @@ int wmain(int argc, wchar_t** argv) {
               (h.flags & 0x40u) == 0 && (h.flags & 0x4u) != 0) {  // last chunk of a real frame
             std::lock_guard<std::mutex> lk(fmu);
             realSeqThisSec.insert(h.seq);
+            if (h.captureQpcUs > 0) {
+              const uint64_t nowUs = qpc_now_us();
+              if (nowUs >= h.captureQpcUs) {
+                secLatSumUs += nowUs - h.captureQpcUs;
+                secLatMaxUs = std::max<uint64_t>(secLatMaxUs, nowUs - h.captureQpcUs);
+                ++secLatN;
+              }
+            }
             if (latencyOn.load()) frameArrivalUs.push_back(qpc_now_us());
             if (latencyOn.load() && h.captureQpcUs > 0) {
               const uint64_t now = qpc_now_us();
@@ -668,6 +772,7 @@ int wmain(int argc, wchar_t** argv) {
       scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
       while (!controlStop.load()) {
         if (clipBench) (void)clip.Pump(link);
+        if (fileBench) (void)files.Pump(link);
         ClientControlMetricsSnapshot metrics;
         bool selectNow = false;
         uint64_t selectId = 0;
@@ -733,6 +838,9 @@ int wmain(int argc, wchar_t** argv) {
               clip.SetHostSupports(bulkAcked &&
                                    (response.pong.captureTargetFlags & kCaptureFlagClipboardImageV1) != 0);
             }
+            if (fileBench) {
+              files.SetHostSupports(bulkAcked && (response.pong.captureTargetFlags & kCaptureFlagFileCopyV1) != 0);
+            }
           }
         } else {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -787,6 +895,9 @@ int wmain(int argc, wchar_t** argv) {
     };
     std::vector<MemSample> memSamples;
     uint64_t clipOfferUs = 0, clipDoneUs = 0;
+    uint64_t fileWinStartUs = 0, filePublishedUs = 0, fileDoneUs = 0;
+    bool fileConsumerStarted = false;
+    PROCESS_INFORMATION fileConsumerPi{};
     int clipDoneSec = -1;
     // The run: 36 seconds. 'stop' reports fully for the first 14 and is silent after.
     const int kRunSec = runSec > 0 ? runSec : (mode == "recover" ? 72 : 36);
@@ -795,7 +906,13 @@ int wmain(int argc, wchar_t** argv) {
     for (int s = 0; s < kRunSec; ++s) {
       const uint64_t now = qpc_now_us();
       ClientControlMetricsSnapshot m{};
-      if (mode == "present") {
+      if (mode == "measured") {
+        // What this side measured over the last second (the ingress thread): real frames and
+        // capture -> receive latency. Decode tail: nothing decodes here, so a fixed, healthy value.
+        std::lock_guard<std::mutex> lk(fmu);
+        m = measuredLastSec;
+        m.updatedQpcUs = now;
+      } else if (mode == "present") {
         // Exactly what the APK's session fills: the present* block and nothing else.
         m.message.presentTargetIntervalUs = 1000000 / kFps;
         m.message.presentFpsX100 = kFps * 100;
@@ -859,14 +976,118 @@ int wmain(int argc, wchar_t** argv) {
           clipDoneSec = s;
         }
       }
+      if (fileBench && s == fileAtSec) {
+        fileWinStartUs = qpc_now_us();  // same instant with or without a copy
+        if (fileMib > 0) {
+          std::ofstream((fileSrc + L"\\go").c_str()) << "go";
+          std::cout << "file: copy of " << fileMib << " MiB triggered on the host at second " << s << "\n";
+        }
+      }
+      if (fileBench && fileMib > 0 && !fileConsumerStarted && files.GetCounters().remotePublished > 0) {
+        fileConsumerStarted = true;
+        filePublishedUs = qpc_now_us();
+        const std::wstring consumerExe = directory_of(me) + L"remote60_file_copy_helper_e2e_test.exe";
+        const std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode drop --dest \"" + fileDest +
+                                 L"\" --result \"" + dir + L"fdest.result.txt\" --expect-bytes " +
+                                 std::to_wstring(fileContent.size()) + L" --wait-sec " + std::to_wstring(kRunSec + 30);
+        std::vector<wchar_t> c(cmd.begin(), cmd.end());
+        c.push_back(0);
+        STARTUPINFOW csi{};
+        csi.cb = sizeof(csi);
+        std::wstring d = fileDesktop;
+        csi.lpDesktop = d.data();
+        const bool started = CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                                            &csi, &fileConsumerPi) != 0;
+        if (started) AssignProcessToJobObject(job, fileConsumerPi.hProcess);
+        std::cout << "file: published here at second " << s << ", paste consumer " << (started ? "started" : "FAILED") << "\n";
+      }
+      if (fileBench && fileDoneUs == 0) {
+        const auto fcnt = files.GetCounters();
+        if (fcnt.recvEnded + fcnt.recvFailed > 0) {
+          fileDoneUs = qpc_now_us();
+          std::cout << "file: paste ended at second " << s << " (ended=" << fcnt.recvEnded << " failed=" << fcnt.recvFailed
+                    << ")\n";
+        }
+      }
       std::this_thread::sleep_for(std::chrono::seconds(1));
       std::lock_guard<std::mutex> lk(fmu);
       realFramesPerSec.push_back(static_cast<uint32_t>(realSeqThisSec.size()));
+      {
+        ClientControlMetricsSnapshot ms{};
+        const uint32_t frames = static_cast<uint32_t>(realSeqThisSec.size());
+        ms.message.width = 480;
+        ms.message.height = 270;
+        ms.message.recvFpsX100 = frames * 100;
+        ms.message.decodedFpsX100 = frames * 100;
+        ms.message.recvMbpsX1000 = 3000;
+        ms.message.avgLatencyUs = secLatN ? static_cast<uint32_t>(secLatSumUs / secLatN) : 0;
+        ms.message.maxLatencyUs = static_cast<uint32_t>(secLatMaxUs);
+        ms.message.avgDecodeTailUs = 8000;
+        ms.message.maxDecodeTailUs = 15000;
+        measuredLastSec = ms;
+        secLatSumUs = secLatMaxUs = 0;
+        secLatN = 0;
+      }
       realSeqThisSec.clear();
     }
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
+    if (fileBench) {
+      // R9FILE: the measured span (from --measure-from) and the file's outcome, for the A/B of
+      // docs/file_copy_r2p_gates.md. The host log (--run-dir) keeps [abr] and RATETRACE in order.
+      if (fileConsumerPi.hProcess) {
+        WaitForSingleObject(fileConsumerPi.hProcess, fileDoneUs ? 15000 : 0);
+        TerminateProcess(fileConsumerPi.hProcess, 125);
+        CloseHandle(fileConsumerPi.hProcess);
+        CloseHandle(fileConsumerPi.hThread);
+      }
+      std::vector<uint8_t> landed;
+      {
+        std::ifstream in(fileDest + L"\\bench.bin", std::ios::binary);
+        if (in) landed.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      }
+      const bool same = fileMib > 0 && landed == fileContent;
+      const auto fcnt = files.GetCounters();
+      std::vector<uint64_t> pings;
+      {
+        std::lock_guard<std::mutex> lk(pingMu);
+        pings = pingRttUs;
+      }
+      std::sort(pings.begin(), pings.end());
+      auto pct = [](const std::vector<uint64_t>& v, int p) { return v.empty() ? 0.0 : v[v.size() * p / 100] / 1000.0; };
+      std::vector<uint64_t> recv;
+      uint32_t gaps250 = 0, gaps100 = 0;
+      uint64_t maxGap = 0, prev = 0;
+      {
+        std::lock_guard<std::mutex> lk(fmu);
+        for (const auto& r : frameRecs) {
+          recv.push_back(r.recvUs);
+          if (prev) {
+            const uint64_t g = r.arrUs - prev;
+            gaps250 += g > 250000;
+            gaps100 += g > 100000;
+            maxGap = std::max(maxGap, g);
+          }
+          prev = r.arrUs;
+        }
+      }
+      std::sort(recv.begin(), recv.end());
+      const double transferS = (fileWinStartUs && fileDoneUs) ? (fileDoneUs - fileWinStartUs) / 1e6 : 0.0;
+      std::printf("R9FILE mib=%u published=%llu prepared=%llu ended=%llu failed=%llu same=%d transferS=%.1f "
+                  "bytes=%llu rejected=%llu pingN=%zu pingP50Ms=%.1f pingP95Ms=%.1f frames=%zu capToRecvP50Ms=%.1f "
+                  "capToRecvP95Ms=%.1f gaps100=%u gaps250=%u maxGapMs=%.1f queries=%llu seen=%llu helperLaunches=%llu "
+                  "helperFailures=%llu\n",
+                  fileMib, static_cast<unsigned long long>(fcnt.remotePublished),
+                  static_cast<unsigned long long>(fcnt.recvPrepared), static_cast<unsigned long long>(fcnt.recvEnded),
+                  static_cast<unsigned long long>(fcnt.recvFailed), same ? 1 : 0, transferS,
+                  static_cast<unsigned long long>(fcnt.bytesReceived), static_cast<unsigned long long>(fcnt.chunksRejected),
+                  pings.size(), pct(pings, 50), pct(pings, 95), recv.size(), pct(recv, 50), pct(recv, 95), gaps100,
+                  gaps250, maxGap / 1000.0, static_cast<unsigned long long>(fcnt.offerQueries),
+                  static_cast<unsigned long long>(fcnt.remoteOffersSeen), static_cast<unsigned long long>(fcnt.helperLaunches),
+                  static_cast<unsigned long long>(fcnt.helperLaunchFailures));
+      files.Stop();
+    }
     if (clipBench) {
       const auto c = clip.GetCounters();
       std::vector<uint64_t> pings;
@@ -1190,6 +1411,11 @@ int wmain(int argc, wchar_t** argv) {
               value_of(last, "encode") == expectSize && value_of(last, "fps") == std::to_string(kFps),
               last);
       }
+    } else if (mode == "measured") {
+      // The file bench's A/B is judged outside this run (docs/file_copy_r2p_gates.md) from R9FILE
+      // and the host log; nothing here is expected of ABR on its own.
+      std::printf("NOTE  mode measured: ABR is judged by the A/B, not by this run (%zu [abr] lines)\n",
+                  abrLines.size());
     } else {
       bool staleDemote = false;
       for (const auto& l : abrLines) {

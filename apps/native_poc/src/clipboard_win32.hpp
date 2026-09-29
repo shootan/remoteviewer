@@ -16,9 +16,12 @@
 // skip rather than an error -- the sync simply resumes when the desktop is back.
 
 #include <windows.h>
+#include <shellapi.h>  // DragQueryFileW (CF_HDROP)
+#pragma comment(lib, "shell32.lib")
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace remote60::native_poc {
 
@@ -60,6 +63,32 @@ inline bool clipboard_read_unicode_text(HWND owner, std::wstring* out) {
     if (const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(handle))) {
       *out = text;  // NUL-terminated; assigns up to the terminator
       GlobalUnlock(handle);
+    }
+  }
+  CloseClipboard();
+  return true;
+}
+
+// File copy (t-zdmsd4gb): the paths a copy of files names (CF_HDROP), as strings -- nothing is opened.
+// At most `maxPaths` (the caller passes one over its limit, so its rules can say "too many"); a path
+// longer than the long-path maximum is skipped. False only when the clipboard could not be opened; no
+// CF_HDROP clears `out` and returns true.
+inline bool clipboard_read_file_paths(HWND owner, size_t maxPaths, std::vector<std::wstring>* out) {
+  if (!out) return false;
+  out->clear();
+  if (!IsClipboardFormatAvailable(CF_HDROP)) return true;
+  if (!clipboard_open_with_retry(owner)) return false;
+  if (HANDLE h = GetClipboardData(CF_HDROP)) {
+    if (auto* drop = static_cast<HDROP>(GlobalLock(h))) {
+      const UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+      for (UINT i = 0; i < n && out->size() < maxPaths; ++i) {
+        const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+        if (len == 0 || len > 32767) continue;
+        std::wstring p(len, L'\0');
+        DragQueryFileW(drop, i, p.data(), len + 1);
+        out->push_back(std::move(p));
+      }
+      GlobalUnlock(h);
     }
   }
   CloseClipboard();

@@ -35,6 +35,7 @@ LRESULT CALLBACK ClipboardMonitor::WndProc(HWND hwnd, UINT msg, WPARAM wParam, L
   auto* self = reinterpret_cast<ClipboardMonitor*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   switch (msg) {
     case WM_CLIPBOARDUPDATE: {
+      if (self) self->ReportFiles(hwnd);
       if (self && self->onText_) {
         // Win32 hands back wchar_t; the core and the wire speak UTF-16 code units, which on
         // Windows is the same 16 bits (clipboard_win32.hpp).
@@ -101,6 +102,28 @@ void ClipboardMonitor::ThreadMain() {
   }
   running_.store(false, std::memory_order_release);
   hwnd_.store(nullptr, std::memory_order_release);
+}
+
+void ClipboardMonitor::ReportFiles(HWND hwnd) {
+  OnFilesFn fn;
+  {
+    std::lock_guard<std::mutex> lock(filesMu_);
+    fn = onFiles_;
+  }
+  if (!fn) return;
+  const uint64_t seq = GetClipboardSequenceNumber();
+  std::vector<std::wstring> paths;
+  // One over the offer limit (100), so the rules say "too many" rather than offering part of it.
+  if (!clipboard_read_file_paths(hwnd, 101, &paths)) return;  // busy / secure desktop: the next change reports
+  fn(seq, std::move(paths));
+}
+
+void ClipboardMonitor::SetOnFiles(OnFilesFn fn) {
+  {
+    std::lock_guard<std::mutex> lock(filesMu_);
+    onFiles_ = std::move(fn);
+  }
+  (void)Invoke([this](HWND hwnd) { ReportFiles(hwnd); }, 2000);
 }
 
 bool ClipboardMonitor::Start(OnTextFn onText) {

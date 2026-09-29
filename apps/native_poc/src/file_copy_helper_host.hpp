@@ -200,4 +200,13 @@ class HelperLink {
 bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why,
                              DWORD helloTimeoutMs = 10000);
 
+/**
+ * The viewer's path (R->P: remote files published on THIS PC's clipboard): the helper runs as this
+ * process's own user -- the viewer is a Medium program, so nothing is raised or lowered. Refused
+ * when this process is elevated (HelperLink::Launch). `desktop` null = this process's desktop; a
+ * test names its private window station's.
+ */
+bool launch_file_copy_helper_as_self(const std::wstring& helperExe, const wchar_t* desktop, const std::wstring& extraArgs,
+                                     HelperLink* link, std::string* why, DWORD helloTimeoutMs = 10000);
+
 }  // namespace remote60::native_poc::file_copy

@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "clip_image_clipboard.hpp"
 #include "clipboard_sync.hpp"
@@ -36,6 +37,9 @@ namespace remote60::native_poc {
 class ClipboardMonitor {
  public:
   using OnTextFn = std::function<void(const std::u16string&)>;
+  // File copy (t-zdmsd4gb): every clipboard change, with the sequence number and what CF_HDROP names
+  // (empty = no files). Path strings only; nothing is opened.
+  using OnFilesFn = std::function<void(uint64_t seq, std::vector<std::wstring> paths)>;
 
   ~ClipboardMonitor() { Stop(); }
 
@@ -54,8 +58,12 @@ class ClipboardMonitor {
   bool Invoke(std::function<void(HWND)> fn, DWORD timeoutMs);
 
   bool running() const { return running_.load(std::memory_order_acquire); }
+  // Any time: from now on every change is also reported to `fn`, and the current content is reported
+  // once right away (on the monitor thread). Null stops it.
+  void SetOnFiles(OnFilesFn fn);
 
  private:
+  void ReportFiles(HWND hwnd);
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   void ThreadMain();
 
@@ -65,6 +73,8 @@ class ClipboardMonitor {
   std::atomic<HWND> hwnd_{nullptr};
   DWORD threadId_ = 0;
   OnTextFn onText_;
+  std::mutex filesMu_;
+  OnFilesFn onFiles_;
 };
 
 // The host's clipboard, seen by the control protocol. Generation rises only on genuine local
@@ -99,6 +109,8 @@ class HostClipboardHub {
   // served back to the viewer that sent it.
   ClipPublishResult PublishImage(uint64_t expectSequence, HGLOBAL pngGlobal, HGLOBAL dibv5,
                                  const std::u16string& text);
+  // File copy: where this PC's copies of files go (HostFileCopyService::OnHostClipboard).
+  void SetFileListener(ClipboardMonitor::OnFilesFn fn) { monitor_.SetOnFiles(std::move(fn)); }
 
  private:
   void OnLocalText(const std::u16string& text);

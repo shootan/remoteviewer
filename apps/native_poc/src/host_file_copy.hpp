@@ -1,24 +1,35 @@
 #pragma once
 
-// File copy, host side. Step 1 (t-zdmsd4gb r1): P->R -- the viewer's files, pasted on this PC.
+// File copy, host side (t-zdmsd4gb r1). Both directions; the pieces are file_copy_paste_parts.hpp.
 //
-// Role:    HostFileCopyService -- the viewer's offer (65) goes to the Medium clipboard helper
-//          (PublishRemoteFiles; the helper is started on the first offer, with backoff after a
-//          failure, never as anyone but the interactive user -- no High / SYSTEM fallback). When a
-//          consumer starts a paste the helper says PasteBegin; the viewer learns it by asking
-//          (69/70, the host cannot push), pins its files and sends the confirmed descriptor (71),
-//          which goes to the helper (PasteDescriptor). Each helper Read (<= 256 KiB) becomes pulls on
-//          the bulk stream (<= 64 KiB, 77); each chunk (78) is checked against its pull -- identity,
-//          length, SHA-256 -- BEFORE a byte of it reaches the helper; a failed check fails that Read
-//          ("전송 데이터 검증 실패"). PasteEnd from the helper ends the paste; the viewer learns it by
-//          asking.
+// P->R (step 1) -- the viewer's files, pasted on this PC: the viewer's offer (65) goes to the Medium
+//          clipboard helper (PublishRemoteFiles). When a consumer starts a paste the helper says
+//          PasteBegin; the viewer learns it by asking (69/70, the host cannot push), pins its files
+//          and sends the confirmed descriptor (71), which goes to the helper (PasteDescriptor). Each
+//          helper Read becomes pulls on the bulk stream (FilePullReceiver): every chunk is checked --
+//          identity, length, SHA-256 -- before a byte of it reaches the helper. PasteEnd from the
+//          helper ends the paste; the viewer learns it by asking.
+// R->P (step 2) -- this PC's files, pasted on the viewer's PC: the clipboard monitor hands over what
+//          CF_HDROP names (OnHostClipboard: path strings only -- this elevated process opens no file).
+//          The helper identifies them AS THE USER (StatFiles: plain local files only, FileId, size,
+//          time); the result is the host's offer, which the viewer discovers by asking every 700 ms
+//          (67/68, debate D4: kept up while the session is negotiated and allowed). When a consumer
+//          pastes on the viewer's PC, the viewer asks the host to prepare (71, R->P): the helper pins
+//          the files (Pin: the same FileId, a writer refused, the content at the moment the paste
+//          started) and the host's paced bulk sender (bulk_uplink.hpp, FileChunkServer) answers the
+//          viewer's pulls from the helper's pinned handles (ReadLocal), each chunk with its SHA-256.
+//          The viewer ends it (73).
+// Sender:  the host's bulk sender starts low and has a configured hard ceiling (Config::rate), reacts
+//          to delay / queue / resends like the image path, and yields while video is queued
+//          (Config::videoBusy) -- a paste may get slow or stop to keep the picture (debate D1).
 // Allowed: one question, file_copy_allowed(), asked by every handler (A2) -- not only the Pong bit.
-// One bulk: a paste takes the session's BulkArbiter as File (the image service takes it as Image).
-//          Two pastes at once: the second is refused before any byte (the helper's descriptor
-//          fails), never swapped in.
-// Thread:  Handle* on the host's control thread; OnDatagram on the UDP receive thread; its own
-//          helper-pipe reader and bulk threads. Shared state under mu_.
+// One bulk: a paste of either direction takes the session's BulkArbiter as File (the image service
+//          takes it as Image). A second paste, either direction, is refused (Busy), never swapped in.
+// Thread:  HandleControl on the host's control thread; OnHostClipboard on the clipboard monitor's;
+//          OnDatagram on the UDP receive thread; the helper's reader thread, a worker for helper
+//          starts, the receiver's and the sender's threads. Shared state under mu_.
 //
+// Plaintext, like the rest of the media socket: names, sizes and content travel unencrypted (A3).
 // Logs carry counts, sizes, ids and outcomes -- never a path or a name.
 
 #ifndef NOMINMAX
@@ -32,21 +43,28 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <map>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "bulk_arbiter.hpp"
+#include "bulk_uplink.hpp"
 #include "clip_image_core.hpp"
 #include "file_copy_helper_host.hpp"
 #include "file_copy_net_rules.hpp"
+#include "file_copy_paste_parts.hpp"
 #include "file_copy_wire.hpp"
-#include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
+
+constexpr uint32_t kHostFilePinLeaseMs = 60000;  // the helper's lease; every ReadLocal renews it (A4)
+
+/**
+ * The host's file bulk sender: conservative start, a hard ceiling (debate D1). The ceiling and the
+ * start can be set by REMOTE60_FILE_BULK_CAP_KBPS / REMOTE60_FILE_BULK_START_KBPS.
+ */
+BulkRateConfig host_file_bulk_rate_config_from_env();
 
 class HostFileCopyService {
  public:
@@ -63,11 +81,17 @@ class HostFileCopyService {
     bool enabled = false;              // the switch (settings)
     HelperLauncher launcher;           // null = unavailable
     uint32_t publishWaitMs = 5000;     // PublishResult bound
+    uint32_t pinWaitMs = 5000;         // PinResult bound (R->P prepare)
+    uint32_t readWaitMs = 10000;       // one ReadLocal (R->P)
     uint32_t backoffFirstMs = 5000;    // after a failed launch, no new attempt before this ...
     uint32_t backoffMaxMs = 120000;    // ... doubling up to this
-    uint32_t pullWindow = 4;           // outstanding pulls (each <= 64 KiB)
+    uint32_t pullWindow = 4;           // outstanding pulls (each <= 64 KiB), P->R
+    BulkRateConfig rate = host_file_bulk_rate_config_from_env();  // R->P sender
+    std::function<bool()> videoBusy;   // R->P sender yields while this says video is queued
+    std::function<uint64_t()> pingRtt; // the control link's RTT (0 = unknown)
   };
 
+  HostFileCopyService();
   ~HostFileCopyService() { Stop(); }
 
   /** Once, from main(): the switch, the launcher, the session's one-bulk arbiter. */
@@ -82,7 +106,7 @@ class HostFileCopyService {
   }
   void Stop();
 
-  /** Pong 0x800: switched on and a launcher configured. (Whether the helper really starts is per offer.) */
+  /** Pong 0x800: switched on and a launcher configured. (Whether the helper really starts is per use.) */
   bool Advertised() const { return file_copy_allowed(); }
   /** The one allow rule every handler asks (A2). A view-only session would be added here. */
   bool file_copy_allowed() const { return running_.load() && config_.enabled && config_.launcher != nullptr; }
@@ -98,7 +122,14 @@ class HostFileCopyService {
   /** A file-paste bulk datagram (the router decided). True when it was one. */
   bool OnDatagram(const void* data, size_t len);
 
-  /** The session ended or rolled over: the offer, any paste and the helper go. */
+  /**
+   * The clipboard of this PC changed (`seq` = its sequence number): `paths` is what CF_HDROP names,
+   * empty when it names nothing. Strings only -- nothing is opened here. Identified as the user by
+   * the helper once a negotiated session asks (A1).
+   */
+  void OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths);
+
+  /** The session ended or rolled over: offers of the viewer, any paste and the helper go. */
   void OnSessionEnd(uint64_t newEpoch);
 
   struct Counters {
@@ -107,34 +138,41 @@ class HostFileCopyService {
     uint64_t readsRequested = 0, readsServed = 0, readsFailed = 0, chunksVerified = 0, chunksRejected = 0;
     uint64_t bytesDelivered = 0, filesWholeVerified = 0, filesChunkVerified = 0;
     uint8_t lastVerdict = 0, lastEndReason = 0;
+    // R->P
+    uint64_t hostCopies = 0, hostOffers = 0, hostFilesOffered = 0, hostFilesExcluded = 0, offerQueries = 0;
+    uint64_t sendPrepared = 0, sendRefused = 0, sendEnded = 0, sendFailed = 0;
+    uint64_t chunksServed = 0, bytesServed = 0, pullsRefused = 0, localReadFailures = 0;
+    uint8_t lastSendVerdict = 0, lastSendEndReason = 0;
   };
-  Counters GetCounters() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    return counters_;
-  }
+  Counters GetCounters() const;
+  BulkUplink::Counters UplinkCounters() const { return uplink_.GetCounters(); }
+  /** The R->P sender's current rate (bits/s), 0 when no paste is being served. */
+  uint32_t SendRateBps() const { return uplink_.open() ? uplink_.rate_now() : 0; }
 
  private:
-  struct OfferRec {
+  struct PeerOffer {  // P->R: the viewer's offer, published here
     uint64_t offerId = 0;
     std::vector<file_copy::net::OfferItem> items;
   };
-  struct Job {  // one helper ReadRequest
-    file_copy::ReadRequest req;
-    std::vector<file_copy::net::Pull> pulls;
-    size_t nextPull = 0;
-    size_t done = 0;
-    std::vector<uint8_t> data;
-    bool failed = false;
+  struct HostFile {   // R->P: one file of this PC's clipboard, as the user's helper identified it
+    std::u16string path;  // never logged
+    file_copy::FileId id;
+    uint64_t size = 0;
+    uint64_t mtime = 0;
   };
+  struct HostOffer {  // R->P
+    uint64_t revision = 0;  // the clipboard sequence it describes (0 = none yet)
+    uint64_t offerId = 0;   // 0 = the clipboard names no file
+    std::vector<file_copy::net::OfferItem> items;
+    std::vector<HostFile> files;
+  };
+  enum class Dir : uint8_t { None, PtoR, RtoP };
   struct Paste {
-    bool active = false;
+    Dir dir = Dir::None;
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
     uint32_t bulkGen = 0;
     std::vector<uint64_t> sizes;
-    std::vector<file_copy::net::CoverageTracker> coverage;
-    uint64_t bytesDelivered = 0;
-    file_copy::net::PasteEndReason failure = file_copy::net::PasteEndReason::None;
   };
   struct Ended {
     uint64_t offerId = 0;
@@ -143,22 +181,25 @@ class HostFileCopyService {
     file_copy::net::PasteEndReason reason = file_copy::net::PasteEndReason::None;
   };
 
-  bool EnsureHelper(std::string* why);  // caller holds helperMu_
-  bool SendHelper(const file_copy::PipeFrame& f);
-  void ReaderLoop();
-  void BulkLoop();
+  void OnHelperFrame(const file_copy::PipeFrame& f);
+  void OnHelperGone();
+  void WorkerLoop();
   void OnPasteBegin(const file_copy::PasteBegin& m);
-  void OnReadRequest(const file_copy::ReadRequest& m);
   void OnPasteEnd(const file_copy::PasteEnd& m);
-  void PumpPullsLocked();                        // caller holds mu_
-  void FailJobsLocked(file_copy::Status why);    // caller holds mu_
-  void EndPasteLocked(file_copy::net::PasteState state, file_copy::net::PasteEndReason reason);  // caller holds mu_
-  const OfferRec* FindOffer(uint64_t offerId) const;  // caller holds mu_
+  void OnStats(const file_copy::Stats& m);
+  // caller holds mu_; returns true when an R->P sender must be closed (FinishSendClose, unlocked)
+  bool EndPasteLocked(file_copy::net::PasteState state, file_copy::net::PasteEndReason reason);
+  void FinishSendClose(uint64_t pinId);  // closes the R->P sender and unpins, not under mu_
+  const PeerOffer* FindPeerOffer(uint64_t offerId) const;  // caller holds mu_
+  const HostOffer* FindHostOffer(uint64_t offerId) const;  // caller holds mu_
+  file_copy::Status ReadLocal(uint64_t pinId, uint32_t index, uint64_t offset, uint32_t length, std::vector<uint8_t>* out);
   void Log(const std::string& line);
 
   std::vector<uint8_t> HandleOffer(const file_copy::net::Offer& m);
+  std::vector<uint8_t> HandleOfferQuery(const file_copy::net::OfferQuery& m);
   std::vector<uint8_t> HandlePasteQuery(const file_copy::net::PasteQuery& m);
   std::vector<uint8_t> HandlePrepare(const file_copy::net::Prepare& m);
+  std::vector<uint8_t> HandlePrepareRtoP(const file_copy::net::Prepare& m);
   std::vector<uint8_t> HandleEnd(const file_copy::net::End& m);
   std::vector<uint8_t> HandleStatus(const file_copy::net::StatusQuery& m);
 
@@ -169,39 +210,48 @@ class HostFileCopyService {
   LogFn log_;
   std::atomic<bool> running_{false};
 
-  // The helper: launched lazily, one at a time, with backoff.
-  std::mutex helperMu_;
-  file_copy::HelperLink link_;
-  std::mutex helperSendMu_;
-  std::thread reader_;
-  std::atomic<bool> readerRun_{false};
-  uint64_t nextLaunchMs_ = 0;
-  uint32_t backoffMs_ = 0;
+  FileHelperChannel helper_;
+  FilePullReceiver receiver_;  // P->R
+  FileChunkServer server_;     // R->P
+  BulkUplink uplink_;          // R->P
+
+  // Helper starts and StatFiles run here, never on the control or clipboard thread.
+  std::thread worker_;
+  std::condition_variable workCv_;
 
   mutable std::mutex mu_;
-  std::condition_variable publishCv_;
+  std::condition_variable replyCv_;  // PublishResult / PinResult / LocalData
   bool publishAnswered_ = false;
   file_copy::PublishResult publishResult_;
+  bool pinAnswered_ = false;
+  file_copy::PinResult pinResult_;
+  bool localAnswered_ = false;
+  file_copy::LocalData localData_;
+  bool sendAborting_ = false;  // R->P: a read in flight gives up at once
+  uint64_t sendBytesAtStart_ = 0;  // the server's served-bytes counter when this paste began
   uint64_t epochTag_ = 0;
   uint32_t random32_ = 0;
-  OfferRec offer_, retired_;
+  PeerOffer offer_, retired_;
   bool haveBegun_ = false;
   uint64_t begunOffer_ = 0, begunOp_ = 0;
+  // R->P: the newest clipboard content, the offer made of it, and the one it replaced (a paste may
+  // have begun on it just before).
+  uint64_t clipSeq_ = 0;
+  std::vector<std::wstring> clipPaths_;
+  // A session's first OfferQuery fixes its baseline: what the clipboard held before (sequence <=
+  // baseline) is never offered to it -- connecting never replaces the viewer's clipboard (the text
+  // sync's rule). Only a copy made here while connected is identified and offered.
+  bool baselineSet_ = false;
+  uint64_t baselineSeq_ = 0;
+  bool statWanted_ = false;     // a negotiated session asked and the clipboard is not identified yet
+  uint64_t statSeq_ = 0;        // the clipboard sequence the StatFiles in flight describes
+  uint64_t statId_ = 0;         // its request id (0 = none in flight)
+  uint64_t nextStatId_ = 1;
+  HostOffer hostOffer_, hostRetired_;
   Paste paste_;
   Ended lastEnded_;
-  std::deque<std::unique_ptr<Job>> jobs_;
-  std::map<uint64_t, std::pair<Job*, size_t>> outstanding_;  // request id -> job, pull index
-  uint64_t nextRequestId_ = 1;
-  // Verified chunks not yet named to the viewer; each pull names one (its rate control counts
-  // goodput by them -- a completion never named is goodput the viewer never sees).
-  std::deque<uint64_t> completed_;
   BulkGenAllocator gens_;
   Counters counters_;
-
-  UdpControlChannel bulk_;
-  bool bulkOpen_ = false;
-  std::thread bulkThread_;
-  std::condition_variable bulkCv_;
 };
 
 }  // namespace remote60::native_poc

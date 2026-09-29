@@ -241,14 +241,44 @@ int main(int argc, char** argv) {
     clientSession.clipImage = &clipImageService;
     clientSession.onClipImageSessionEnd = [&clipImageService](uint64_t epoch) { clipImageService.OnSessionEnd(epoch); };
   }
-  // File copy (t-zdmsd4gb). Rides the clipboard sync switch like images; REMOTE60_CLIPBOARD_FILES=0
-  // turns files alone off. The helper is started as the interactive user (the linked token) on the
-  // first offer -- no High / SYSTEM fallback; if that is impossible every offer is refused.
+  // File copy (t-zdmsd4gb), both directions. Rides the clipboard sync switch like images;
+  // REMOTE60_CLIPBOARD_FILES=0 turns files alone off. The helper is started as the interactive user
+  // (the linked token) when a paste or a copy needs it -- no High / SYSTEM fallback; if that is
+  // impossible the offer / paste is refused. This PC's copies of files (CF_HDROP) reach it as path
+  // strings from the clipboard monitor; the R->P sender yields while video is queued.
   const bool clipboardFilesEnabled = clipboardSyncEnabled && []() {
     const std::string v = remote60::native_poc::env_string_or_empty("REMOTE60_CLIPBOARD_FILES");
     return !(v == "0" || v == "false" || v == "off");
   }();
   remote60::native_poc::HostFileCopyService fileCopyService;
+  // Destroyed before fileCopyService: the monitor thread stops calling into it first.
+  struct FileListenerDetach {
+    remote60::native_poc::HostClipboardHub& hub;
+    ~FileListenerDetach() { hub.SetFileListener(nullptr); }
+  } fileListenerDetach{clipboardHub};
+#if defined(REMOTE60_CLIP_IMAGE_TEST_SINK)
+  // TEST BUILD ONLY (GNLinkStreamClipSink): R->P files from a folder instead of the user's clipboard
+  // (FileCopyTestSource), with clipboard sync off. Absent from GNLinkStream.exe (clip_image_build_gate_test).
+  remote60::native_poc::FileCopyTestSource fileTestSource([] {
+    wchar_t buf[MAX_PATH] = L"";
+    const DWORD n = GetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_SOURCE_DIR", buf, MAX_PATH);
+    return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
+  }());
+  if (fileTestSource.Enabled() && !clipboardFilesEnabled) {
+    remote60::native_poc::HostFileCopyService::Config fcfg;
+    fcfg.enabled = true;
+    fcfg.launcher = fileTestSource.Launcher();
+    fcfg.videoBusy = [&sender]() {
+      std::lock_guard<std::mutex> lock(sender.mu);
+      return !sender.queue.empty();
+    };
+    fileCopyService.Configure(fcfg, &hostBulkArbiter);
+    clientSession.fileCopy = &fileCopyService;
+    clientSession.onFileCopySessionEnd = [&fileCopyService](uint64_t epoch) { fileCopyService.OnSessionEnd(epoch); };
+    fileTestSource.Start(&fileCopyService);
+    std::cout << "[native-video-host][file-copy] TEST SOURCE (no clipboard)\n";
+  }
+#endif
   if (clipboardFilesEnabled) {
     remote60::native_poc::HostFileCopyService::Config fcfg;
     fcfg.enabled = true;
@@ -261,7 +291,14 @@ int main(int argc, char** argv) {
     fcfg.launcher = [helperExe](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
       return remote60::native_poc::file_copy::launch_file_copy_helper(helperExe, link, why);
     };
+    fcfg.videoBusy = [&sender]() {
+      std::lock_guard<std::mutex> lock(sender.mu);
+      return !sender.queue.empty();
+    };
     fileCopyService.Configure(fcfg, &hostBulkArbiter);
+    clipboardHub.SetFileListener([&fileCopyService](uint64_t seq, std::vector<std::wstring> paths) {
+      fileCopyService.OnHostClipboard(seq, std::move(paths));
+    });
     clientSession.fileCopy = &fileCopyService;
     clientSession.onFileCopySessionEnd = [&fileCopyService](uint64_t epoch) { fileCopyService.OnSessionEnd(epoch); };
   }

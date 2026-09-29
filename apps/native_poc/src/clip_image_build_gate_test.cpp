@@ -65,6 +65,15 @@ int wmain(int argc, wchar_t** argv) {
   check("the shipped host does not carry the seam's variable (UTF-16)", !contains(shipped, utf16(name)));
   check("the shipped host does not carry the seam's variable (ASCII)", !contains(shipped, name));
   check("the shipped host does not carry the seam's banner", !contains(shipped, banner));
+  // File copy R->P (t-zdmsd4gb step 2): the folder source of the same test build.
+  const std::string fileName = "REMOTE60_FILE_COPY_TEST_SOURCE_DIR";
+  const std::string fileBanner = "TEST SOURCE copy of";
+  check("positive control: the test build carries the file source's variable (UTF-16)", contains(test, utf16(fileName)));
+  check("positive control: the test build carries the file source's banner", contains(test, fileBanner));
+  check("the shipped host does not carry the file source's variable (UTF-16)", !contains(shipped, utf16(fileName)));
+  check("the shipped host does not carry the file source's variable (ASCII)", !contains(shipped, fileName));
+  check("the shipped host does not carry the file source's banner", !contains(shipped, fileBanner));
+  check("the shipped host does carry the product's file-copy R->P code", contains(shipped, "host copy offered files="));
   // And the product feature itself IS in the shipped host (the gate must not pass because the whole
   // feature was left out).
   check("the shipped host does carry the product's clip-image log tag", contains(shipped, "[native-video-host][clip-image]"));

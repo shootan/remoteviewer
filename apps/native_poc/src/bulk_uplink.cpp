@@ -4,11 +4,28 @@
 #include "bulk_uplink.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "poc_protocol.hpp"
+
+#include <iostream>
+
+namespace {
+// The trace lines go through std::cout: a process that routes its log through std::cout's buffer
+// (the host's timestamp prefix, its log file) keeps them in order with its other lines.
+void trace_line(const char* fmt, ...) {
+  char b[1024];
+  va_list ap;
+  va_start(ap, fmt);
+  std::vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  std::cout << b;
+  std::cout.flush();
+}
+}  // namespace
 
 namespace remote60::native_poc {
 
@@ -147,7 +164,7 @@ void BulkUplink::ServeLoop() {
               auto ct = chunkTimes_.find(s.triggerKey);
               if (ct != chunkTimes_.end()) {
                 const ChunkTimes& c = ct->second;
-                std::printf("CHUNKTRACE off=%llu pullAt=%llu enqAt=%llu firstTx=%llu lastTx=%llu lastAnyTx=%llu confirmAt=%llu "
+                trace_line("CHUNKTRACE off=%llu pullAt=%llu enqAt=%llu firstTx=%llu lastTx=%llu lastAnyTx=%llu confirmAt=%llu "
                             "resent=%d rate=%u\n",
                             static_cast<unsigned long long>(s.triggerKey), static_cast<unsigned long long>(c.pullAt),
                             static_cast<unsigned long long>(c.enqAt), static_cast<unsigned long long>(c.firstTx),
@@ -222,7 +239,7 @@ void BulkUplink::ServeLoop() {
         const uint32_t rateBefore = rc.rate();
         const BulkRateAction a = rc.Evaluate(w, now, rounds);
         if (traceRate) {  // REMOTE60_CLIP_BULK_TRACE=1: one line per evaluation (diagnostics)
-          std::printf("RATETRACE t=%.3f rate=%u->%u act=%d lossEv=%u uLost=%u uSent=%u rto=%u pull=%llu n=%u ping=%llu "
+          trace_line("RATETRACE t=%.3f rate=%u->%u act=%d lossEv=%u uLost=%u uSent=%u rto=%u pull=%llu n=%u ping=%llu "
                       "good=%llu work=%d yield=%d lossState=%d plateau=%d cause=%u srtt=%llu cur=%llu ackLost=%llu repeat=%llu\n",
                       (now - traceT0) / 1e6, rateBefore, rc.rate(), static_cast<int>(a), w.lossEvents, w.uniqueFragmentsLost,
                       w.uniqueFragmentsSent, w.rtoEvents, static_cast<unsigned long long>(w.pullRttP50Us), w.rttSamples,

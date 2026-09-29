@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 
@@ -24,6 +25,16 @@ uint32_t random32() {
   return v;
 }
 
+uint64_t random_id() {
+  uint64_t v = 0;
+  while (v == 0) {
+    if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&v), sizeof(v), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+      v = GetTickCount64() * 6364136223846793005ull + GetCurrentProcessId();
+    }
+  }
+  return v;
+}
+
 fn::PasteEndReason map_end(fc::EndReason r) {
   switch (r) {
     case fc::EndReason::Ended: return fn::PasteEndReason::Completed;
@@ -37,7 +48,26 @@ fn::PasteEndReason map_end(fc::EndReason r) {
   return fn::PasteEndReason::ConsumerError;
 }
 
+uint32_t env_kbps(const char* name, uint32_t fallbackBps) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return fallbackBps;
+  const unsigned long k = std::strtoul(v, nullptr, 10);
+  if (k == 0 || k > 1000000) return fallbackBps;
+  return static_cast<uint32_t>(k * 1000);
+}
+
 }  // namespace
+
+BulkRateConfig host_file_bulk_rate_config_from_env() {
+  BulkRateConfig c;
+  // Debate D1: a configured hard ceiling and a conservative start -- no "remaining budget" formula
+  // (nothing measures the link's spare capacity). The picture comes first; a paste may get slow.
+  c.capBps = env_kbps("REMOTE60_FILE_BULK_CAP_KBPS", 8000000);
+  c.startBps = (std::min)(env_kbps("REMOTE60_FILE_BULK_START_KBPS", 256000), c.capBps);
+  return c;
+}
+
+HostFileCopyService::HostFileCopyService() : receiver_(4) {}
 
 void HostFileCopyService::Log(const std::string& line) {
   if (log_) log_(line);
@@ -51,120 +81,425 @@ void HostFileCopyService::Configure(Config config, BulkArbiter* arbiter, LogFn l
   log_ = std::move(log);
   random32_ = random32();
   running_.store(true);
-  bulkThread_ = std::thread([this] { BulkLoop(); });
+  FileHelperChannel::Config hc;
+  hc.launcher = config_.launcher;
+  hc.backoffFirstMs = config_.backoffFirstMs;
+  hc.backoffMaxMs = config_.backoffMaxMs;
+  helper_.Configure(hc, [this](const fc::PipeFrame& f) { OnHelperFrame(f); }, [this] { OnHelperGone(); });
+  receiver_.Start([this](const fc::ReadData& d) { (void)helper_.Send(fc::encode(d)); });
+  worker_ = std::thread([this] { WorkerLoop(); });
 }
 
 void HostFileCopyService::StartTransport(SendFn send, uint32_t mtuBytes) {
-  std::lock_guard<std::mutex> lock(mu_);
-  send_ = std::move(send);
-  mtu_ = mtuBytes;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    send_ = std::move(send);
+    mtu_ = mtuBytes;
+  }
+  uplink_.Configure(send_, config_.pingRtt ? config_.pingRtt : [] { return uint64_t{0}; },
+                    config_.videoBusy ? config_.videoBusy : [] { return false; }, mtuBytes, config_.rate,
+                    fn::kMaxFileChunkBytes);
 }
 
 void HostFileCopyService::Stop() {
-  if (!running_.exchange(false)) return;
+  if (!running_.load()) return;
   OnSessionEnd(0);
-  bulkCv_.notify_all();
-  if (bulkThread_.joinable()) bulkThread_.join();
-  readerRun_.store(false);
-  {
-    std::lock_guard<std::mutex> h(helperMu_);
-    link_.Close();
-  }
-  if (reader_.joinable()) reader_.join();
+  running_.store(false);
+  workCv_.notify_all();
+  if (worker_.joinable()) worker_.join();
+  receiver_.Stop();
+  uplink_.Close();
+  helper_.Stop();
 }
 
-bool HostFileCopyService::SendHelper(const fc::PipeFrame& f) {
-  std::lock_guard<std::mutex> s(helperSendMu_);
-  return link_.pipe_open() && link_.Send(f);
+// ------------------------------------------------------------------------------ the helper
+
+void HostFileCopyService::OnHelperFrame(const fc::PipeFrame& f) {
+  switch (f.type) {
+    case fc::PipeMsg::PublishResult: {
+      fc::PublishResult m;
+      if (!fc::decode(f, &m)) break;
+      std::lock_guard<std::mutex> lock(mu_);
+      publishResult_ = m;
+      publishAnswered_ = true;
+      replyCv_.notify_all();
+      break;
+    }
+    case fc::PipeMsg::PasteBegin: {
+      fc::PasteBegin m;
+      if (fc::decode(f, &m)) OnPasteBegin(m);
+      break;
+    }
+    case fc::PipeMsg::ReadRequest: {
+      fc::ReadRequest m;
+      if (fc::decode(f, &m)) receiver_.Submit(m);
+      break;
+    }
+    case fc::PipeMsg::PasteEnd: {
+      fc::PasteEnd m;
+      if (fc::decode(f, &m)) OnPasteEnd(m);
+      break;
+    }
+    case fc::PipeMsg::Stats: {
+      fc::Stats m;
+      if (fc::decode(f, &m)) OnStats(m);
+      break;
+    }
+    case fc::PipeMsg::PinResult: {
+      fc::PinResult m;
+      if (!fc::decode(f, &m)) break;
+      std::lock_guard<std::mutex> lock(mu_);
+      pinResult_ = std::move(m);
+      pinAnswered_ = true;
+      replyCv_.notify_all();
+      break;
+    }
+    case fc::PipeMsg::LocalData: {
+      fc::LocalData m;
+      if (!fc::decode(f, &m)) break;
+      std::lock_guard<std::mutex> lock(mu_);
+      localData_ = std::move(m);
+      localAnswered_ = true;
+      replyCv_.notify_all();
+      break;
+    }
+    default:
+      break;
+  }
 }
 
-bool HostFileCopyService::EnsureHelper(std::string* why) {
-  if (link_.pipe_open() && link_.helper_alive()) return true;
-  const uint64_t now = GetTickCount64();
-  if (now < nextLaunchMs_) {
-    *why = "helper start backing off";
-    return false;
-  }
-  readerRun_.store(false);
-  if (reader_.joinable()) reader_.join();
-  link_.Close();
+void HostFileCopyService::OnHelperGone() {
+  // Whatever the helper was doing is over: its clipboard object, its reads, its pins.
+  bool closeSend = false;
+  uint64_t pin = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    ++counters_.helperLaunches;
+    if (paste_.dir != Dir::None) {
+      pin = paste_.pasteOp;
+      closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+    }
+    haveBegun_ = false;
+    if (statId_ != 0) {
+      statId_ = 0;
+      statWanted_ = clipSeq_ != hostOffer_.revision && !clipPaths_.empty();
+    }
+    replyCv_.notify_all();
   }
-  if (!config_.launcher || !config_.launcher(&link_, why)) {
-    link_.Close();
-    backoffMs_ = backoffMs_ ? (std::min)(backoffMs_ * 2, config_.backoffMaxMs) : config_.backoffFirstMs;
-    nextLaunchMs_ = now + backoffMs_;
-    std::lock_guard<std::mutex> lock(mu_);
-    ++counters_.helperLaunchFailures;
-    return false;
-  }
-  backoffMs_ = 0;
-  nextLaunchMs_ = 0;
-  readerRun_.store(true);
-  reader_ = std::thread([this] { ReaderLoop(); });
-  return true;
+  if (closeSend) FinishSendClose(pin);
+  workCv_.notify_all();
 }
 
-void HostFileCopyService::ReaderLoop() {
-  while (readerRun_.load() && running_.load()) {
-    fc::PipeFrame f;
-    if (!link_.Receive(&f, 100)) {
-      if (GetLastError() == WAIT_TIMEOUT) continue;
-      break;  // the pipe is gone
+void HostFileCopyService::WorkerLoop() {
+  std::unique_lock<std::mutex> lock(mu_);
+  while (running_.load()) {
+    workCv_.wait_for(lock, std::chrono::milliseconds(500), [&] { return !running_.load() || (statWanted_ && statId_ == 0); });
+    if (!running_.load()) break;
+    if (!statWanted_ || statId_ != 0) continue;
+    statWanted_ = false;
+    const uint64_t seq = clipSeq_;
+    const std::vector<std::wstring> paths = clipPaths_;
+    if (paths.empty() || !file_copy_allowed()) continue;
+    lock.unlock();
+    std::string why;
+    const bool up = helper_.Ensure(&why);
+    fc::StatFiles s;
+    for (const std::wstring& p : paths) s.paths.emplace_back(p.begin(), p.end());
+    lock.lock();
+    if (seq != clipSeq_) {
+      statWanted_ = true;  // it changed again meanwhile: the newer content next
+      continue;
     }
-    switch (f.type) {
-      case fc::PipeMsg::PublishResult: {
-        fc::PublishResult m;
-        if (!fc::decode(f, &m)) break;
-        std::lock_guard<std::mutex> lock(mu_);
-        publishResult_ = m;
-        publishAnswered_ = true;
-        publishCv_.notify_all();
-        break;
-      }
-      case fc::PipeMsg::PasteBegin: {
-        fc::PasteBegin m;
-        if (fc::decode(f, &m)) OnPasteBegin(m);
-        break;
-      }
-      case fc::PipeMsg::ReadRequest: {
-        fc::ReadRequest m;
-        if (fc::decode(f, &m)) OnReadRequest(m);
-        break;
-      }
-      case fc::PipeMsg::PasteEnd: {
-        fc::PasteEnd m;
-        if (fc::decode(f, &m)) OnPasteEnd(m);
-        break;
-      }
-      default:
-        break;
+    if (!up) {
+      // The clipboard names files this service cannot identify now: no stale offer stands for it.
+      if (hostOffer_.offerId != 0) hostRetired_ = hostOffer_;
+      hostOffer_ = HostOffer{};
+      hostOffer_.revision = seq;
+      Log("host copy not offered: helper unavailable (" + why + ")");
+      continue;
+    }
+    s.requestId = nextStatId_++;
+    statId_ = s.requestId;
+    statSeq_ = seq;
+    lock.unlock();
+    const bool sent = helper_.Send(fc::encode(s));
+    lock.lock();
+    if (!sent && statId_ == s.requestId) {
+      statId_ = 0;
+      statWanted_ = true;
     }
   }
-  // The helper is gone: whatever it was doing is over.
+}
+
+// ------------------------------------------------------------------------------ R->P: this PC's clipboard
+
+void HostFileCopyService::OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (paste_.active) EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
-  haveBegun_ = false;
-  publishCv_.notify_all();
+  if (seq == clipSeq_ && paths == clipPaths_) return;
+  clipSeq_ = seq;
+  if (paths.size() > fc::kMaxFiles + 1) paths.resize(fc::kMaxFiles + 1);  // one over: the rules say "too many"
+  clipPaths_ = std::move(paths);
+  if (clipPaths_.empty()) {
+    // Anything else on the clipboard: no files to offer. A paste already running is untouched.
+    if (hostOffer_.offerId != 0) hostRetired_ = hostOffer_;
+    hostOffer_ = HostOffer{};
+    hostOffer_.revision = seq;
+    return;
+  }
+  ++counters_.hostCopies;
+  if (baselineSet_ && seq > baselineSeq_) {
+    statWanted_ = true;  // identified by the worker, as the user (the helper starts only if needed)
+    workCv_.notify_all();
+  }
 }
 
-const HostFileCopyService::OfferRec* HostFileCopyService::FindOffer(uint64_t offerId) const {
-  if (offerId != 0 && offer_.offerId == offerId) return &offer_;
-  if (offerId != 0 && retired_.offerId == offerId) return &retired_;
+void HostFileCopyService::OnStats(const fc::Stats& m) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (m.requestId != statId_ || statId_ == 0) return;  // an answer nobody waits for
+  statId_ = 0;
+  HostOffer o;
+  o.revision = statSeq_;
+  uint64_t excluded = 0;
+  for (size_t i = 0; i < m.entries.size() && i < clipPaths_.size(); ++i) {
+    const fc::StatEntry& e = m.entries[i];
+    if (e.status != fc::Status::Ok || e.name.empty()) {
+      ++excluded;
+      continue;
+    }
+    fn::OfferItem it;
+    it.index = static_cast<uint32_t>(o.items.size());  // = the pin order
+    it.name = e.name;
+    it.size = e.size;
+    it.mtime = e.mtime;
+    it.attributes = e.attributes;
+    o.items.push_back(std::move(it));
+    HostFile f;
+    const std::wstring& p = clipPaths_[i];
+    f.path.assign(p.begin(), p.end());
+    f.id = e.id;
+    f.size = e.size;
+    f.mtime = e.mtime;
+    o.files.push_back(std::move(f));
+  }
+  std::string why;
+  const fn::Verdict v = o.items.empty() ? fn::Verdict::BadRequest : fn::check_offer_items(o.items, &why);
+  if (hostOffer_.offerId != 0) hostRetired_ = hostOffer_;
+  counters_.hostFilesExcluded += excluded;
+  if (v != fn::Verdict::Accept || statSeq_ != clipSeq_) {
+    hostOffer_ = HostOffer{};
+    hostOffer_.revision = statSeq_;
+    if (statSeq_ != clipSeq_) {
+      statWanted_ = true;  // the clipboard moved on while the helper looked
+      workCv_.notify_all();
+    } else {
+      std::ostringstream os;
+      os << "host copy not offered: files=" << o.items.size() << " excluded=" << excluded << " (" << why << ")";
+      Log(os.str());
+    }
+    return;
+  }
+  o.offerId = random_id();
+  hostOffer_ = std::move(o);
+  ++counters_.hostOffers;
+  counters_.hostFilesOffered += hostOffer_.items.size();
+  std::ostringstream os;
+  os << "host copy offered files=" << hostOffer_.items.size() << " excluded=" << excluded;
+  Log(os.str());
+}
+
+const HostFileCopyService::HostOffer* HostFileCopyService::FindHostOffer(uint64_t offerId) const {
+  if (offerId != 0 && hostOffer_.offerId == offerId) return &hostOffer_;
+  if (offerId != 0 && hostRetired_.offerId == offerId) return &hostRetired_;
   return nullptr;
 }
+
+std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery& m) {
+  std::lock_guard<std::mutex> lock(mu_);
+  ++counters_.offerQueries;
+  fn::OfferQueryReply r;
+  r.epochTag = epochTag_;
+  if (!file_copy_allowed()) {
+    r.revision = 0;
+    r.unchanged = m.knownRevision == 0;
+    return fn::body(r);
+  }
+  if (!baselineSet_) {
+    baselineSet_ = true;
+    baselineSeq_ = clipSeq_;
+  }
+  if (clipSeq_ <= baselineSeq_ || hostOffer_.revision <= baselineSeq_) {
+    // Nothing copied here since this session began (or not identified yet): the baseline, no files.
+    if (clipSeq_ > baselineSeq_ && !clipPaths_.empty() && statId_ == 0 && !statWanted_) {
+      statWanted_ = true;  // a copy made while connected, not identified yet: now (A1)
+      workCv_.notify_all();
+    }
+    r.revision = baselineSeq_;
+    r.unchanged = m.knownRevision == r.revision;
+    return fn::body(r);
+  }
+  // A negotiated session is asking: a copy not identified yet is identified now (A1).
+  if (clipSeq_ != hostOffer_.revision && !clipPaths_.empty() && statId_ == 0 && !statWanted_) {
+    statWanted_ = true;
+    workCv_.notify_all();
+  }
+  r.revision = hostOffer_.revision;
+  r.unchanged = m.knownRevision == r.revision;
+  if (!r.unchanged) {
+    r.offerId = hostOffer_.offerId;
+    r.items = hostOffer_.items;  // empty when the clipboard names no file
+  }
+  return fn::body(r);
+}
+
+std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m) {
+  fn::PrepareReply r;
+  r.direction = fn::Direction::RtoP;
+  r.offerId = m.offerId;
+  r.pasteOp = m.pasteOp;
+  std::vector<HostFile> files;
+  std::vector<fn::OfferItem> items;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    r.epochTag = epochTag_;
+    const HostOffer* offer = FindHostOffer(m.offerId);
+    if (!file_copy_allowed()) {
+      r.verdict = fn::Verdict::Disabled;
+    } else if (!offer) {
+      r.verdict = fn::Verdict::UnknownId;
+    } else if (!m.items.empty() || m.pasteOp == 0) {
+      r.verdict = fn::Verdict::BadRequest;
+    } else if (paste_.dir != Dir::None || haveBegun_ || (arbiter_ && !arbiter_->TryAcquire(BulkUse::File, m.pasteOp))) {
+      r.verdict = fn::Verdict::Busy;  // one paste per session, either direction; never swapped in
+    } else {
+      r.verdict = fn::Verdict::Accept;
+      files = offer->files;
+      items = offer->items;
+      paste_ = Paste{};
+      paste_.dir = Dir::RtoP;  // reserved: the pin decides
+      paste_.offerId = m.offerId;
+      paste_.pasteOp = m.pasteOp;
+      pinAnswered_ = false;
+    }
+    if (r.verdict != fn::Verdict::Accept) {
+      ++counters_.sendRefused;
+      counters_.lastSendVerdict = static_cast<uint8_t>(r.verdict);
+      std::ostringstream os;
+      os << "send prepare refused verdict=" << static_cast<int>(r.verdict);
+      Log(os.str());
+      return fn::body(r);
+    }
+  }
+  // Pinned by the user's helper: the same FileId, a writer refused, the size / time of the offer.
+  std::string why;
+  bool up = helper_.Ensure(&why);
+  if (up) {
+    fc::Pin pin;
+    pin.pinId = m.pasteOp;
+    pin.leaseMs = kHostFilePinLeaseMs;
+    for (const HostFile& f : files) pin.entries.push_back({f.path, f.id, f.size, f.mtime});
+    up = helper_.Send(fc::encode(pin));
+    if (!up) why = "the helper pipe failed";
+  }
+  std::unique_lock<std::mutex> lock(mu_);
+  if (up) {
+    replyCv_.wait_for(lock, std::chrono::milliseconds(config_.pinWaitMs),
+                      [&] { return (pinAnswered_ && pinResult_.pinId == m.pasteOp) || paste_.pasteOp != m.pasteOp; });
+  }
+  const bool answered = up && pinAnswered_ && pinResult_.pinId == m.pasteOp && paste_.pasteOp == m.pasteOp;
+  bool allOk = answered && pinResult_.entries.size() == files.size();
+  std::vector<uint64_t> sizes;
+  for (size_t i = 0; i < files.size(); ++i) {
+    fn::PreparedItem it;
+    it.index = static_cast<uint32_t>(i);
+    const fc::PinResultEntry res =
+        answered && i < pinResult_.entries.size() ? pinResult_.entries[i] : fc::PinResultEntry{fc::Status::ReadError};
+    it.status = static_cast<uint16_t>(res.status);
+    it.size = res.size;
+    it.mtime = res.mtime;
+    it.attributes = items[i].attributes;
+    allOk = allOk && res.status == fc::Status::Ok;
+    sizes.push_back(res.size);
+    r.items.push_back(it);
+  }
+  if (!allOk) {
+    r.verdict = up ? fn::Verdict::BadRequest : fn::Verdict::HelperUnavailable;
+    if (paste_.pasteOp == m.pasteOp) paste_ = Paste{};
+    if (arbiter_) arbiter_->Release(m.pasteOp);
+    ++counters_.sendRefused;
+    counters_.lastSendVerdict = static_cast<uint8_t>(r.verdict);
+    lock.unlock();
+    if (up) (void)helper_.Send(fc::encode(fc::Unpin{m.pasteOp}));
+    std::ostringstream os;
+    os << "send prepare failed: pinned=" << (answered ? 1 : 0) << " verdict=" << static_cast<int>(r.verdict)
+       << (up ? "" : " (" + why + ")");
+    Log(os.str());
+    return fn::body(r);
+  }
+  paste_.bulkGen = gens_.Next();
+  paste_.sizes = sizes;
+  r.bulkGen = paste_.bulkGen;
+  sendAborting_ = false;
+  sendBytesAtStart_ = server_.GetCounters().bytesServed;
+  ++counters_.sendPrepared;
+  counters_.lastSendVerdict = 0;
+  const FilePasteIdentity id{r.epochTag, m.offerId, m.pasteOp, r.bulkGen};
+  lock.unlock();
+  const uint64_t pinId = m.pasteOp;
+  server_.Begin(id, sizes, [this, pinId](uint32_t index, uint64_t offset, uint32_t length, std::vector<uint8_t>* out) {
+    return ReadLocal(pinId, index, offset, length, out);
+  });
+  uplink_.ResetRateCounters();
+  uplink_.Open(bulk_stream_id(r.bulkGen, kFileBulkStreamHostToClient), bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost),
+               &server_);
+  std::ostringstream os;
+  os << "send prepared files=" << files.size() << " gen=" << r.bulkGen;
+  Log(os.str());
+  return fn::body(r);
+}
+
+fc::Status HostFileCopyService::ReadLocal(uint64_t pinId, uint32_t index, uint64_t offset, uint32_t length,
+                                          std::vector<uint8_t>* out) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (sendAborting_ || !file_copy_allowed()) return fc::Status::Aborted;
+    localAnswered_ = false;
+  }
+  if (!helper_.Send(fc::encode(fc::ReadLocal{pinId, index, offset, length}))) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++counters_.localReadFailures;
+    return fc::Status::ReadError;
+  }
+  std::unique_lock<std::mutex> lock(mu_);
+  replyCv_.wait_for(lock, std::chrono::milliseconds(config_.readWaitMs), [&] {
+    return sendAborting_ ||
+           (localAnswered_ && localData_.pinId == pinId && localData_.fileIndex == index && localData_.offset == offset);
+  });
+  if (sendAborting_) return fc::Status::Aborted;
+  if (!localAnswered_ || localData_.pinId != pinId || localData_.fileIndex != index || localData_.offset != offset) {
+    ++counters_.localReadFailures;
+    return fc::Status::Timeout;
+  }
+  localAnswered_ = false;
+  if (localData_.status != fc::Status::Ok) {
+    ++counters_.localReadFailures;
+    return localData_.status;
+  }
+  *out = std::move(localData_.data);
+  return fc::Status::Ok;
+}
+
+void HostFileCopyService::FinishSendClose(uint64_t pinId) {
+  server_.End();
+  uplink_.Close();
+  if (pinId != 0) (void)helper_.Send(fc::encode(fc::Unpin{pinId}));
+}
+
+// ------------------------------------------------------------------------------ control
 
 bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t>& body, uint64_t servedEpoch,
                                         uint16_t* replyType, std::vector<uint8_t>* reply) {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    const uint64_t tag = (static_cast<uint64_t>(random32_) << 32) | (servedEpoch & 0xFFFFFFFFull);
-    if (tag != epochTag_ && epochTag_ != 0) {
-      // A new session epoch reached the handlers before OnSessionEnd: nothing of the old one stays.
-    }
-    epochTag_ = tag;
+    epochTag_ = (static_cast<uint64_t>(random32_) << 32) | (servedEpoch & 0xFFFFFFFFull);
   }
   switch (static_cast<fn::FileMsg>(type)) {
     case fn::FileMsg::Offer: {
@@ -172,6 +507,13 @@ bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::OfferReply);
       *reply = HandleOffer(m);
+      return true;
+    }
+    case fn::FileMsg::OfferQuery: {
+      fn::OfferQuery m;
+      if (!fn::parse(body, &m)) return false;
+      *replyType = static_cast<uint16_t>(fn::FileMsg::OfferQueryReply);
+      *reply = HandleOfferQuery(m);
       return true;
     }
     case fn::FileMsg::PasteQuery: {
@@ -185,7 +527,7 @@ bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t
       fn::Prepare m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::PrepareReply);
-      *reply = HandlePrepare(m);
+      *reply = m.direction == fn::Direction::RtoP ? HandlePrepareRtoP(m) : HandlePrepare(m);
       return true;
     }
     case fn::FileMsg::End: {
@@ -202,23 +544,17 @@ bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t
       *reply = HandleStatus(m);
       return true;
     }
-    case fn::FileMsg::OfferQuery: {  // R->P is step 2: answer "no offer", unchanged
-      fn::OfferQuery m;
-      if (!fn::parse(body, &m)) return false;
-      fn::OfferQueryReply r;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        r.epochTag = epochTag_;
-      }
-      r.revision = 0;
-      r.unchanged = true;
-      *replyType = static_cast<uint16_t>(fn::FileMsg::OfferQueryReply);
-      *reply = fn::body(r);
-      return true;
-    }
     default:
       return false;
   }
+}
+
+// ------------------------------------------------------------------------------ P->R: the viewer's files
+
+const HostFileCopyService::PeerOffer* HostFileCopyService::FindPeerOffer(uint64_t offerId) const {
+  if (offerId != 0 && offer_.offerId == offerId) return &offer_;
+  if (offerId != 0 && retired_.offerId == offerId) return &retired_;
+  return nullptr;
 }
 
 std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
@@ -247,8 +583,7 @@ std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
     if (m.items[i].index != i) return refuse(fn::Verdict::BadRequest, "indices are not the offer order");
   }
   if (m.items.empty()) return refuse(fn::Verdict::BadRequest, "no files");
-  std::lock_guard<std::mutex> h(helperMu_);
-  if (!EnsureHelper(&why)) return refuse(fn::Verdict::HelperUnavailable, why);
+  if (!helper_.Ensure(&why)) return refuse(fn::Verdict::HelperUnavailable, why);
   fc::PublishRemoteFiles pub;
   pub.offerId = m.offerId;
   for (const fn::OfferItem& it : m.items) pub.items.push_back({it.name, it.size, it.mtime, it.attributes});
@@ -256,13 +591,14 @@ std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
     std::lock_guard<std::mutex> lock(mu_);
     publishAnswered_ = false;
   }
-  if (!SendHelper(fc::encode(pub))) return refuse(fn::Verdict::HelperUnavailable, "the helper pipe failed");
+  if (!helper_.Send(fc::encode(pub))) return refuse(fn::Verdict::HelperUnavailable, "the helper pipe failed");
   std::unique_lock<std::mutex> lock(mu_);
-  publishCv_.wait_for(lock, std::chrono::milliseconds(config_.publishWaitMs),
-                      [&] { return publishAnswered_ && publishResult_.offerId == m.offerId; });
+  replyCv_.wait_for(lock, std::chrono::milliseconds(config_.publishWaitMs),
+                    [&] { return publishAnswered_ && publishResult_.offerId == m.offerId; });
   if (!publishAnswered_ || publishResult_.offerId != m.offerId || publishResult_.status != fc::Status::Ok) {
+    const bool answered = publishAnswered_;
     lock.unlock();
-    return refuse(fn::Verdict::HelperUnavailable, publishAnswered_ ? "the helper refused it" : "the helper did not answer");
+    return refuse(fn::Verdict::HelperUnavailable, answered ? "the helper refused it" : "the helper did not answer");
   }
   // The new offer is the future; a paste already running on the older one runs on (debate "공통 상태").
   if (offer_.offerId != 0) retired_ = offer_;
@@ -282,9 +618,9 @@ void HostFileCopyService::OnPasteBegin(const fc::PasteBegin& m) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++counters_.pastesBegun;
-    // One paste at a time: a second one fails before any byte (the helper's descriptor), never
-    // replaces the running one.
-    refuse = paste_.active || haveBegun_ || !FindOffer(m.offerId) || !file_copy_allowed();
+    // One paste at a time, either direction: a second one fails before any byte (the helper's
+    // descriptor), never replaces the running one.
+    refuse = paste_.dir != Dir::None || haveBegun_ || !FindPeerOffer(m.offerId) || !file_copy_allowed();
     if (!refuse) {
       haveBegun_ = true;
       begunOffer_ = m.offerId;
@@ -298,7 +634,7 @@ void HostFileCopyService::OnPasteBegin(const fc::PasteBegin& m) {
     d.offerId = m.offerId;
     d.pasteOp = m.pasteOp;
     d.status = fc::Status::Refused;
-    (void)SendHelper(fc::encode(d));
+    (void)helper_.Send(fc::encode(d));
     Log("paste refused: another paste runs, or the offer is gone");
   }
 }
@@ -314,7 +650,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePasteQuery(const fn::PasteQuery&
     r.offerId = begunOffer_;  // whichever offer it began on (a newer copy may have replaced it)
     r.state = fn::PasteState::Begun;
     r.pasteOp = begunOp_;
-  } else if (paste_.active && m.offerId == paste_.offerId) {
+  } else if (paste_.dir == Dir::PtoR && m.offerId == paste_.offerId) {
     r.state = fn::PasteState::Active;
     r.pasteOp = paste_.pasteOp;
   } else if (lastEnded_.pasteOp != 0 && m.offerId == lastEnded_.offerId) {
@@ -337,10 +673,12 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
   fc::PasteDescriptor d;
   d.offerId = m.offerId;
   d.pasteOp = m.pasteOp;
+  FilePasteIdentity id;
+  std::vector<uint64_t> sizes;
   {
     std::lock_guard<std::mutex> lock(mu_);
     r.epochTag = epochTag_;
-    const OfferRec* offer = FindOffer(m.offerId);
+    const PeerOffer* offer = FindPeerOffer(m.offerId);
     fc::Status failed = fc::Status::Ok;
     if (m.direction != fn::Direction::PtoR || !file_copy_allowed()) {
       r.verdict = !file_copy_allowed() ? fn::Verdict::Disabled : fn::Verdict::BadRequest;
@@ -357,7 +695,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
       }
       if (failed != fc::Status::Ok) {
         r.verdict = failed == fc::Status::Refused ? fn::Verdict::Busy : fn::Verdict::BadRequest;
-      } else if (arbiter_ && !arbiter_->TryAcquire(BulkUse::File, m.pasteOp)) {
+      } else if (paste_.dir != Dir::None || (arbiter_ && !arbiter_->TryAcquire(BulkUse::File, m.pasteOp))) {
         r.verdict = fn::Verdict::Busy;
         failed = fc::Status::Refused;
       } else {
@@ -367,13 +705,12 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
     haveBegun_ = false;
     if (r.verdict == fn::Verdict::Accept) {
       paste_ = Paste{};
-      paste_.active = true;
+      paste_.dir = Dir::PtoR;
       paste_.offerId = m.offerId;
       paste_.pasteOp = m.pasteOp;
       paste_.bulkGen = gens_.Next();
       for (size_t i = 0; i < m.items.size(); ++i) {
-        paste_.sizes.push_back(m.items[i].size);
-        paste_.coverage.emplace_back(m.items[i].size);
+        sizes.push_back(m.items[i].size);
         fc::RemoteFileItem ri;
         ri.name = offer->items[i].name;
         ri.size = m.items[i].size;
@@ -381,28 +718,72 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
         ri.attributes = offer->items[i].attributes;
         d.items.push_back(ri);
       }
+      paste_.sizes = sizes;
       r.bulkGen = paste_.bulkGen;
-      nextRequestId_ = 1;
-      completed_.clear();
-      bulk_.Reset();
-      bulk_.Configure(send_, bulk_stream_id(paste_.bulkGen, kFileBulkStreamHostToClient),
-                      bulk_stream_id(paste_.bulkGen, kFileBulkStreamClientToHost), mtu_);
-      bulkOpen_ = true;
+      id = FilePasteIdentity{r.epochTag, m.offerId, m.pasteOp, r.bulkGen};
       ++counters_.pastesPrepared;
       d.status = fc::Status::Ok;
-      bulkCv_.notify_all();
     } else {
       d.status = failed != fc::Status::Ok ? failed : fc::Status::Refused;
       if (r.verdict == fn::Verdict::Busy) ++counters_.pastesBusy;
       else ++counters_.pastesFailed;
     }
   }
+  if (r.verdict == fn::Verdict::Accept) {
+    receiver_.Open(send_, bulk_stream_id(r.bulkGen, kFileBulkStreamHostToClient),
+                   bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost), mtu_, id, sizes);
+  }
   // The helper's descriptor: the confirmed sizes / times, or the reason the paste fails before a byte.
-  if (r.verdict != fn::Verdict::UnknownId) (void)SendHelper(fc::encode(d));
+  if (r.verdict != fn::Verdict::UnknownId) (void)helper_.Send(fc::encode(d));
   std::ostringstream os;
   os << "prepare verdict=" << static_cast<int>(r.verdict) << " files=" << m.items.size();
   Log(os.str());
   return fn::body(r);
+}
+
+void HostFileCopyService::OnPasteEnd(const fc::PasteEnd& m) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (paste_.dir == Dir::PtoR && paste_.pasteOp == m.pasteOp) {
+    // A failed chunk check is the reason, whatever the consumer made of the failed Read.
+    const fn::PasteEndReason failure = receiver_.failure();
+    const fn::PasteEndReason reason = failure != fn::PasteEndReason::None ? failure : map_end(m.reason);
+    (void)EndPasteLocked(reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed, reason);
+  } else if (haveBegun_ && begunOp_ == m.pasteOp) {
+    haveBegun_ = false;  // it ended before the viewer prepared it
+    lastEnded_ = Ended{m.offerId, m.pasteOp, fn::PasteState::Failed, map_end(m.reason)};
+  }
+}
+
+bool HostFileCopyService::EndPasteLocked(fn::PasteState state, fn::PasteEndReason reason) {
+  if (paste_.dir == Dir::None) return false;
+  const bool rtop = paste_.dir == Dir::RtoP;
+  lastEnded_ = Ended{paste_.offerId, paste_.pasteOp, state, reason};
+  if (arbiter_) arbiter_->Release(paste_.pasteOp);
+  const bool ok = state == fn::PasteState::Ended && reason == fn::PasteEndReason::Completed;
+  std::ostringstream os;
+  if (rtop) {
+    sendAborting_ = true;  // a read in flight gives up; FinishSendClose (unlocked) closes the sender
+    replyCv_.notify_all();
+    if (ok) ++counters_.sendEnded;
+    else ++counters_.sendFailed;
+    counters_.lastSendEndReason = static_cast<uint8_t>(reason);
+    os << "send ended state=" << static_cast<int>(state) << " reason=" << static_cast<int>(reason)
+       << " bytes=" << (server_.GetCounters().bytesServed - sendBytesAtStart_);
+  } else {
+    receiver_.Close(fc::Status::Aborted);
+    for (bool whole : receiver_.wholeFileVerified()) {
+      if (whole) ++counters_.filesWholeVerified;
+      else ++counters_.filesChunkVerified;
+    }
+    if (ok) ++counters_.pastesEnded;
+    else ++counters_.pastesFailed;
+    counters_.lastEndReason = static_cast<uint8_t>(reason);
+    os << "paste ended state=" << static_cast<int>(state) << " reason=" << static_cast<int>(reason)
+       << " bytes=" << receiver_.bytesDelivered() << " wholeVerified=" << counters_.filesWholeVerified;
+  }
+  Log(os.str());
+  paste_ = Paste{};
+  return rtop;
 }
 
 std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
@@ -410,28 +791,30 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
   r.offerId = m.offerId;
   r.pasteOp = m.pasteOp;
   bool clear = false;
+  bool closeSend = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (m.pasteOp == 0) {
-      // Withdraw the offer: off the remote clipboard. A paste already running on it runs on.
+      // Withdraw the viewer's offer: off this clipboard. A paste already running on it runs on.
       if (offer_.offerId == m.offerId) {
         retired_ = offer_;
-        offer_ = OfferRec{};
+        offer_ = PeerOffer{};
         clear = true;
       }
       r.state = fn::PasteState::Withdrawn;
-    } else if (paste_.active && paste_.pasteOp == m.pasteOp) {
-      FailJobsLocked(fc::Status::Aborted);
-      EndPasteLocked(fn::PasteState::Failed, m.reason == fn::PasteEndReason::None ? fn::PasteEndReason::Cancelled : m.reason);
-      r.state = fn::PasteState::Failed;
+    } else if (paste_.dir != Dir::None && paste_.pasteOp == m.pasteOp) {
+      const fn::PasteEndReason reason = m.reason == fn::PasteEndReason::None ? fn::PasteEndReason::Cancelled : m.reason;
+      r.state = reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed;
+      closeSend = EndPasteLocked(r.state, reason);
     } else {
       r.state = fn::PasteState::None;
     }
   }
+  if (closeSend) FinishSendClose(m.pasteOp);
   if (clear) {
     fc::ClearRemoteFiles c;
     c.offerId = m.offerId;
-    (void)SendHelper(fc::encode(c));
+    (void)helper_.Send(fc::encode(c));
   }
   return fn::body(r);
 }
@@ -441,9 +824,9 @@ std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m)
   fn::StatusReply r;
   r.offerId = m.offerId;
   r.pasteOp = m.pasteOp;
-  if (paste_.active && paste_.pasteOp == m.pasteOp) {
+  if (paste_.dir != Dir::None && paste_.pasteOp == m.pasteOp) {
     r.state = fn::PasteState::Active;
-    r.bytesDelivered = paste_.bytesDelivered;
+    r.bytesDelivered = paste_.dir == Dir::PtoR ? receiver_.bytesDelivered() : server_.GetCounters().bytesServed;
   } else if (lastEnded_.pasteOp == m.pasteOp && m.pasteOp != 0) {
     r.state = lastEnded_.state;
     r.reason = lastEnded_.reason;
@@ -453,233 +836,68 @@ std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m)
   return fn::body(r);
 }
 
-void HostFileCopyService::OnReadRequest(const fc::ReadRequest& m) {
-  fc::ReadData refuse;
-  refuse.offerId = m.offerId;
-  refuse.pasteOp = m.pasteOp;
-  refuse.fileIndex = m.fileIndex;
-  refuse.offset = m.offset;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    ++counters_.readsRequested;
-    const bool mine = paste_.active && paste_.offerId == m.offerId && paste_.pasteOp == m.pasteOp &&
-                      m.fileIndex < paste_.sizes.size() && file_copy_allowed();
-    if (!mine) {
-      refuse.status = fc::Status::UnknownId;
-    } else if (!fn::range_ok(paste_.sizes[m.fileIndex], m.offset, m.length, fc::kMaxChunkBytes)) {
-      refuse.status = fc::Status::BadRequest;
-    } else if (m.length == 0) {
-      refuse.status = fc::Status::Ok;  // nothing to fetch (end of file)
-    } else {
-      auto job = std::make_unique<Job>();
-      job->req = m;
-      job->data.resize(m.length);
-      for (uint64_t off = 0; off < m.length; off += fn::kMaxFileChunkBytes) {
-        fn::Pull p;
-        p.epochTag = epochTag_;
-        p.offerId = m.offerId;
-        p.pasteOp = m.pasteOp;
-        p.bulkGen = paste_.bulkGen;
-        p.fileIndex = m.fileIndex;
-        p.offset = m.offset + off;
-        p.length = static_cast<uint32_t>((std::min<uint64_t>)(fn::kMaxFileChunkBytes, m.length - off));
-        job->pulls.push_back(p);
-      }
-      jobs_.push_back(std::move(job));
-      PumpPullsLocked();
-      bulkCv_.notify_all();
-      return;
-    }
-    if (refuse.status != fc::Status::Ok) ++counters_.readsFailed;
-  }
-  (void)SendHelper(fc::encode(refuse));
-}
-
-void HostFileCopyService::PumpPullsLocked() {
-  if (!bulkOpen_) return;
-  for (auto& jp : jobs_) {
-    Job& j = *jp;
-    while (!j.failed && j.nextPull < j.pulls.size() && outstanding_.size() < config_.pullWindow) {
-      fn::Pull& p = j.pulls[j.nextPull];
-      p.requestId = nextRequestId_++;
-      p.triggerRequestId = fn::kNoTrigger;
-      if (!completed_.empty()) {  // one pull carries each completion, oldest first
-        p.triggerRequestId = completed_.front();
-        completed_.pop_front();
-      }
-      outstanding_[p.requestId] = {&j, j.nextPull};
-      ++j.nextPull;
-      const std::vector<uint8_t> w = fn::frame_bulk(p);
-      (void)bulk_.Send(w.data(), w.size());
-    }
-    if (outstanding_.size() >= config_.pullWindow) break;
-  }
-}
-
-void HostFileCopyService::FailJobsLocked(fc::Status why) {
-  for (auto& jp : jobs_) {
-    fc::ReadData d;
-    d.offerId = jp->req.offerId;
-    d.pasteOp = jp->req.pasteOp;
-    d.fileIndex = jp->req.fileIndex;
-    d.offset = jp->req.offset;
-    d.status = why;
-    ++counters_.readsFailed;
-    // Sent without mu_ held would be nicer; the helper pipe write is bounded (5 s) and rare here.
-    (void)SendHelper(fc::encode(d));
-  }
-  jobs_.clear();
-  outstanding_.clear();
-}
-
-void HostFileCopyService::EndPasteLocked(fn::PasteState state, fn::PasteEndReason reason) {
-  if (!paste_.active) return;
-  for (size_t i = 0; i < paste_.coverage.size(); ++i) {
-    if (paste_.coverage[i].whole_file_verified()) ++counters_.filesWholeVerified;
-    else ++counters_.filesChunkVerified;
-  }
-  lastEnded_ = Ended{paste_.offerId, paste_.pasteOp, state, reason};
-  if (arbiter_) arbiter_->Release(paste_.pasteOp);
-  bulk_.Close(ControlCloseReason::SessionRollover);
-  bulkOpen_ = false;
-  jobs_.clear();
-  outstanding_.clear();
-  if (state == fn::PasteState::Ended && reason == fn::PasteEndReason::Completed) ++counters_.pastesEnded;
-  else ++counters_.pastesFailed;
-  counters_.lastEndReason = static_cast<uint8_t>(reason);
-  std::ostringstream os;
-  os << "paste ended state=" << static_cast<int>(state) << " reason=" << static_cast<int>(reason)
-     << " bytes=" << paste_.bytesDelivered << " wholeVerified=" << counters_.filesWholeVerified;
-  Log(os.str());
-  paste_ = Paste{};
-}
-
-void HostFileCopyService::OnPasteEnd(const fc::PasteEnd& m) {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (haveBegun_ && begunOp_ == m.pasteOp) haveBegun_ = false;
-  if (!paste_.active || paste_.pasteOp != m.pasteOp) return;
-  fn::PasteEndReason reason = map_end(m.reason);
-  if (paste_.failure != fn::PasteEndReason::None && reason != fn::PasteEndReason::Completed) reason = paste_.failure;
-  EndPasteLocked(m.reason == fc::EndReason::Ended ? fn::PasteState::Ended : fn::PasteState::Failed, reason);
-}
+// ------------------------------------------------------------------------------ transport / session
 
 bool HostFileCopyService::OnDatagram(const void* data, size_t len) {
   if (!bulk_datagram_is_file(data, len)) return false;
-  (void)bulk_.OnPacket(data, len);  // dropped by the channel unless it is the open stream
+  // One paste at a time: the receiver's stream (P->R) or the sender's (R->P); a channel drops what
+  // is not its open stream.
+  if (receiver_.IsOpen()) (void)receiver_.OnDatagram(data, len);
+  else (void)uplink_.OnDatagram(data, len);
   return true;
-}
-
-void HostFileCopyService::BulkLoop() {
-  std::vector<uint8_t> msg;
-  while (running_.load()) {
-    {
-      std::unique_lock<std::mutex> lock(mu_);
-      if (!bulkOpen_) {
-        bulkCv_.wait_for(lock, std::chrono::milliseconds(200));
-        continue;
-      }
-    }
-    const bool got = bulk_.Receive(&msg, 20);
-    bulk_.Tick();
-    std::vector<fc::ReadData> answers;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (!bulkOpen_) continue;
-      fn::Chunk c;
-      if (got && fn::parse_bulk(msg.data(), msg.size(), &c)) {
-        auto o = outstanding_.find(c.requestId);
-        if (o == outstanding_.end()) {
-          ++counters_.chunksRejected;  // not a pull in flight (a stale or foreign answer): nothing of it is used
-        } else {
-          Job* j = o->second.first;
-          const fn::Pull& asked = j->pulls[o->second.second];
-          outstanding_.erase(o);
-          if (fn::check_chunk(asked, c) != fn::ChunkCheck::Ok) {
-            ++counters_.chunksRejected;
-            j->failed = true;
-            paste_.failure = fn::PasteEndReason::Verification;
-          } else {
-            ++counters_.chunksVerified;
-            std::memcpy(j->data.data() + (c.offset - j->req.offset), c.data.data(), c.data.size());
-            ++j->done;
-            completed_.push_back(c.requestId);
-            while (completed_.size() > 32) completed_.pop_front();  // the viewer remembers 32
-            if (asked.fileIndex < paste_.coverage.size()) paste_.coverage[asked.fileIndex].OnVerified(c.offset, c.data.size());
-          }
-        }
-      }
-      // Finished reads, in order: verified bytes go to the helper, a failed read fails.
-      while (!jobs_.empty()) {
-        Job& j = *jobs_.front();
-        const bool finished = j.failed || j.done == j.pulls.size();
-        if (!finished) break;
-        bool inFlight = false;
-        for (const auto& o : outstanding_) inFlight = inFlight || o.second.first == &j;
-        if (inFlight) {
-          for (auto it = outstanding_.begin(); it != outstanding_.end();) {
-            it = it->second.first == &j ? outstanding_.erase(it) : std::next(it);
-          }
-        }
-        fc::ReadData d;
-        d.offerId = j.req.offerId;
-        d.pasteOp = j.req.pasteOp;
-        d.fileIndex = j.req.fileIndex;
-        d.offset = j.req.offset;
-        if (j.failed) {
-          d.status = fc::Status::ReadError;
-          ++counters_.readsFailed;
-        } else {
-          d.status = fc::Status::Ok;
-          d.data = std::move(j.data);
-          paste_.bytesDelivered += d.data.size();
-          counters_.bytesDelivered += d.data.size();
-          ++counters_.readsServed;
-        }
-        answers.push_back(std::move(d));
-        jobs_.pop_front();
-      }
-      if (bulk_.IsClosed() && paste_.active) {
-        // The viewer stopped answering for the channel's whole retry budget.
-        paste_.failure = fn::PasteEndReason::Session;
-        for (auto& jp : jobs_) {
-          fc::ReadData d;
-          d.offerId = jp->req.offerId;
-          d.pasteOp = jp->req.pasteOp;
-          d.fileIndex = jp->req.fileIndex;
-          d.offset = jp->req.offset;
-          d.status = fc::Status::ReadError;
-          ++counters_.readsFailed;
-          answers.push_back(std::move(d));
-        }
-        jobs_.clear();
-        outstanding_.clear();
-        bulkOpen_ = false;
-      }
-      PumpPullsLocked();
-    }
-    for (const fc::ReadData& d : answers) (void)SendHelper(fc::encode(d));
-  }
 }
 
 void HostFileCopyService::OnSessionEnd(uint64_t /*newEpoch*/) {
   bool shut = false;
+  bool closeSend = false;
+  uint64_t pin = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    FailJobsLocked(fc::Status::Aborted);
-    EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+    if (paste_.dir != Dir::None) {
+      pin = paste_.pasteOp;
+      closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+    }
     haveBegun_ = false;
     shut = offer_.offerId != 0 || retired_.offerId != 0;
-    offer_ = OfferRec{};
-    retired_ = OfferRec{};
+    offer_ = PeerOffer{};
+    retired_ = PeerOffer{};
     lastEnded_ = Ended{};
+    baselineSet_ = false;  // the next session takes its own
+    // This PC's clipboard offer stays what the clipboard says; an identification in flight with the
+    // helper that now goes is asked again by the next session.
+    if (statId_ != 0) {
+      statId_ = 0;
+      statWanted_ = false;
+    }
   }
+  if (closeSend) FinishSendClose(pin);
   if (shut) {
     // The helper is per session (plan §1): it clears the clipboard and exits.
-    (void)SendHelper(fc::encode_shutdown());
+    (void)helper_.Send(fc::encode_shutdown());
   }
-  readerRun_.store(false);
-  std::lock_guard<std::mutex> h(helperMu_);
-  link_.ClosePipe();
+  helper_.Disconnect();
+}
+
+HostFileCopyService::Counters HostFileCopyService::GetCounters() const {
+  Counters c;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    c = counters_;
+  }
+  const FilePullReceiver::Counters rc = receiver_.GetCounters();
+  c.readsRequested = rc.readsRequested;
+  c.readsServed = rc.readsServed;
+  c.readsFailed = rc.readsFailed;
+  c.chunksVerified = rc.chunksVerified;
+  c.chunksRejected = rc.chunksRejected;
+  c.bytesDelivered = rc.bytesDelivered;
+  const FileChunkServer::Counters sc = server_.GetCounters();
+  c.chunksServed = sc.chunksServed;
+  c.bytesServed = sc.bytesServed;
+  c.pullsRefused = sc.pullsRefused;
+  c.helperLaunches = helper_.launches();
+  c.helperLaunchFailures = helper_.launchFailures();
+  return c;
 }
 
 }  // namespace remote60::native_poc
