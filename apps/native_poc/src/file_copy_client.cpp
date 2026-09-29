@@ -97,6 +97,8 @@ void FileCopyClient::SetAllowed(bool v) {
       EndPaste(fn::PasteState::Failed, fn::PasteEndReason::Disabled);
     }
     EndReceiveLocked(fn::PasteEndReason::Disabled);
+    waitBulk_.on = false;
+    ReleasePreemptLocked();  // a paste waiting on an image ends here too (switched off: no resume)
     if (offer_.live) withdrawOfferId_ = offer_.offerId;
     offer_ = OfferState{};
     retired_ = OfferState{};
@@ -254,6 +256,7 @@ int FileCopyClient::Pump(ControlLink& link) {
       act = waitBulk_.toRemote ? Act::PrepareToRemote : Act::PrepareAfterWait;
       key = waitBulk_.key;
       waitBulk_.on = false;
+      if (!waitBulk_.toRemote) preparingOp_ = key.pasteOp, preparingOffer_ = key.offerId;  // a PasteEnd now is seen (r3 A-1)
     } else if (waitBulk_.on) {
       // waiting for the bulk: the other questions still go out below
       if (!allowed) {
@@ -365,6 +368,7 @@ int FileCopyClient::PumpOffer(ControlLink& link) {
     Log(os.str());
   } else {
     ++counters_.offersRefused;
+    if (r.verdict == fn::Verdict::HelperUnavailable) ++result_.noHelper, result_.noHelperHere = false;
     std::ostringstream os;
     os << "offer refused verdict=" << static_cast<int>(r.verdict);
     Log(os.str());
@@ -520,6 +524,7 @@ void FileCopyClient::EndPaste(fn::PasteState state, fn::PasteEndReason reason) {
   RecordResultLocked(true, state, reason, 0, paste_.files, server_.GetCounters().bytesServed - paste_.servedAtStart,
                      paste_.startUs);
   paste_.active = false;
+  if (cancelPending_ && cancelKey_.offerId == paste_.offerId && cancelKey_.pasteOp == op) cancelPending_ = false;
   closeUplinkPending_ = true;
   {
     std::lock_guard<std::mutex> pin(pinMu_);
@@ -595,6 +600,8 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
       std::string why;
       if (!helper_.Ensure(&why) || !helper_.Send(fc::encode(pub))) {
         Log("remote copy not published: helper unavailable (" + why + ")");
+        std::lock_guard<std::mutex> lock(mu_);
+        ++result_.noHelper, result_.noHelperHere = true;
         return;
       }
       std::ostringstream os;
@@ -705,6 +712,9 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
     std::lock_guard<std::mutex> lock(mu_);
     ++counters_.recvBusy;
     counters_.lastRecvVerdict = static_cast<uint8_t>(fn::Verdict::Busy);
+    // An end like any other: recorded, and a stopped image released (r3 A-1; the budget ran out here).
+    RecordResultLocked(false, fn::PasteState::Failed, fn::PasteEndReason::None, static_cast<uint16_t>(fc::Status::Refused),
+                       static_cast<uint32_t>(items.size()), 0, 0);
     Log("remote paste refused: the session's bulk is busy");
     return 0;
   }
@@ -732,6 +742,11 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
     } else if (it.status != static_cast<uint16_t>(fc::Status::Ok)) {
       go = false;
       why = static_cast<fc::Status>(it.status);
+    } else if (it.size != items[i].size) {
+      // Pinned at the offered size (a moved size is refused there), so any other is a broken answer --
+      // and equal sizes keep the sum inside the offer's checked total, no overflow (r3 A-3).
+      go = false;
+      why = fc::Status::BadRequest;
     } else {
       sizes.push_back(it.size);
       d.items.push_back({items[i].name, it.size, it.mtime, items[i].attributes});
@@ -763,6 +778,8 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
       if (!endedMeanwhile) {
         RecordResultLocked(false, fn::PasteState::Failed, fn::PasteEndReason::None, static_cast<uint16_t>(why),
                            static_cast<uint32_t>(items.size()), 0, 0);
+      } else {
+        ReleasePreemptLocked();  // the consumer gave up first: its end was not recorded here, the image still is (r3 A-1)
       }
     }
   }
@@ -844,95 +861,24 @@ int FileCopyClient::SendReceiveEnd(ControlLink& link, const PasteKey& k) {
   if (!Exchange(link, fn::FileMsg::End, fn::body(e), fn::FileMsg::EndReply, &raw)) return -1;
   fn::EndReply r;
   if (!fn::parse(raw, &r)) return -1;
+  if (r.offerId != k.offerId || r.pasteOp != k.pasteOp) return 1;  // another id's answer changes nothing (r3 A-2)
   std::lock_guard<std::mutex> lock(mu_);
-  // The host answered: a P->R paste this End named is over on both ends now (a user cancel), and a
-  // cancel shown as "cancelling" is confirmed.
   if (paste_.active && paste_.offerId == k.offerId && paste_.pasteOp == k.pasteOp) {
-    EndPaste(r.state == fn::PasteState::None ? fn::PasteState::Failed : r.state, k.reason);
+    // P->R: how it ended is the host's to say -- a paste the consumer completed just before this
+    // cancel is "completed", not "cancelled" (r3 A-2). Its kept result, with the reason, comes with
+    // the next 700 ms question, asked now; None (unknown to the host) stays unconfirmed until then.
+    paste_.nextQueryUs = 0;
+    return 1;
   }
   if (cancelPending_ && cancelKey_.offerId == k.offerId && cancelKey_.pasteOp == k.pasteOp) cancelPending_ = false;
   return 1;
 }
 
-void FileCopyClient::CancelPaste() {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (cancelPending_) return;
-  if (paste_.active) {
-    // P->R: the host ends it (its reads fail, the consumer stops); here it ends when the host says so.
-    cancelKey_ = PasteKey{paste_.offerId, paste_.pasteOp, fn::PasteEndReason::Cancelled};
-    cancelPending_ = true;
-    endQueue_.push_back(cancelKey_);
-    Log("paste cancelled by the user (P->R): asking the host");
-  } else if (recv_.active) {
-    // R->P: nothing more is read here (the consumer's reads fail); the host is told and confirms.
-    cancelKey_ = PasteKey{recv_.offerId, recv_.pasteOp, fn::PasteEndReason::Cancelled};
-    cancelPending_ = true;
-    EndReceiveLocked(fn::PasteEndReason::Cancelled);  // queues the End
-    Log("paste cancelled by the user (R->P)");
-  }
-}
-
-void FileCopyClient::RecordResultLocked(bool toRemote, fn::PasteState state, fn::PasteEndReason reason, uint16_t refused,
-                                        uint32_t files, uint64_t bytes, uint64_t startUs) {
-  ++result_.finished;
-  result_.lastToRemote = toRemote;
-  result_.lastState = static_cast<uint8_t>(state);
-  result_.lastReason = static_cast<uint8_t>(reason);
-  result_.lastRefused = refused;
-  result_.lastFiles = files;
-  result_.lastBytes = bytes;
-  const uint64_t now = BulkPacer::NowUs();
-  result_.lastElapsedMs = startUs && now > startUs ? (now - startUs) / 1000 : 0;
-  ReleasePreemptLocked();
-}
-
-void FileCopyClient::WaitForBulkLocked(bool toRemote, const PasteKey& k) {
-  waitBulk_.on = true;
-  waitBulk_.toRemote = toRemote;
-  waitBulk_.key = k;
-  waitBulk_.deadlineUs = BulkPacer::NowUs() + kFileBulkSwitchBudgetUs;
-  if (arbiter_ && arbiter_->use() == BulkUse::Image && preempt_ && !preemptActive_) {
-    preemptActive_ = true;
-    revisionAtPreempt_ = remote_.revision;
-    const bool stopping = preempt_();
-    Log(std::string("paste waits for the bulk: an image is being stopped for it (") + (stopping ? "running" : "settling") + ")");
-  } else {
-    Log("paste waits for the bulk");
-  }
-}
-
-void FileCopyClient::ReleasePreemptLocked() {
-  if (!preemptActive_) return;
-  preemptActive_ = false;
-  // The stopped image may go again only if nothing it depends on moved meanwhile (D5).
-  const bool mayResume = allowed_.load() && Usable() && remote_.revision == revisionAtPreempt_;
-  if (after_) after_(mayResume);
-}
-
-FileCopyClient::Progress FileCopyClient::GetProgress() const {
-  std::lock_guard<std::mutex> lock(mu_);
-  Progress p = result_;
-  const uint64_t now = BulkPacer::NowUs();
-  p.cancelling = cancelPending_;
-  if (paste_.active) {
-    p.sending = true;
-    p.files = paste_.files;
-    p.bytesTotal = paste_.bytesTotal;
-    p.bytesDone = server_.GetCounters().bytesServed - paste_.servedAtStart;
-    p.elapsedMs = now > paste_.startUs ? (now - paste_.startUs) / 1000 : 0;
-  } else if (recv_.active) {
-    p.receiving = true;
-    p.files = recv_.files;
-    p.bytesTotal = recv_.bytesTotal;
-    p.bytesDone = receiver_.bytesDelivered();
-    p.elapsedMs = now > recv_.startUs ? (now - recv_.startUs) / 1000 : 0;
-  }
-  return p;
-}
-
 void FileCopyClient::OnHelperGone() {
   std::lock_guard<std::mutex> lock(mu_);
   EndReceiveLocked(fn::PasteEndReason::Session);
+  if (waitBulk_.on && !waitBulk_.toRemote) waitBulk_.on = false;  // its consumer went with the helper
+  ReleasePreemptLocked();
   publishedOfferId_ = 0;  // the helper cleared what it published when it went
   prepareQueue_.clear();
 }

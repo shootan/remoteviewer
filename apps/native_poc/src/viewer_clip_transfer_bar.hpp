@@ -68,8 +68,8 @@ inline bool clip_transfer_bar_has_cancel(const ClipBarView& v) {
  */
 struct FileBarState {
   bool primed = false;
-  uint64_t seenFinished = 0, seenOffered = 0, seenAvailable = 0;
-  uint64_t resultUntilUs = 0, offeredUntilUs = 0, availableUntilUs = 0;
+  uint64_t seenFinished = 0, seenOffered = 0, seenAvailable = 0, seenNoHelper = 0;
+  uint64_t resultUntilUs = 0, offeredUntilUs = 0, availableUntilUs = 0, noHelperUntilUs = 0;
 };
 ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t nowUs, FileBarState* state);
 

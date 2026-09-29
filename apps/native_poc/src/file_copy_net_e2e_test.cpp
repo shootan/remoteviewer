@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <map>
 #include <string>
 #include <thread>
@@ -179,6 +180,10 @@ class LoopbackLink : public ControlLink {
     uint16_t rt = 0;
     std::vector<uint8_t> rb, out;
     if (!svc_->HandleControl(h.header.type, body, epoch_, &rt, &rb)) return false;
+    {
+      std::lock_guard<std::mutex> lock(rewriteMu_);
+      if (rewrite_) rewrite_(rt, &rb);  // r3: what a broken or hostile host would answer instead
+    }
     if (!fn::frame_control(static_cast<fn::FileMsg>(rt), h.seq, rb, &out)) return false;
     rx_.insert(rx_.end(), out.begin(), out.end());
     return true;
@@ -190,8 +195,14 @@ class LoopbackLink : public ControlLink {
     return true;
   }
   bool Alive() const override { return true; }
+  void SetRewrite(std::function<void(uint16_t, std::vector<uint8_t>*)> f) {
+    std::lock_guard<std::mutex> lock(rewriteMu_);
+    rewrite_ = std::move(f);
+  }
 
  private:
+  std::mutex rewriteMu_;
+  std::function<void(uint16_t, std::vector<uint8_t>*)> rewrite_;
   HostFileCopyService* svc_;
   uint64_t epoch_;
   std::vector<uint8_t> tx_, rx_;
@@ -880,6 +891,76 @@ int wmain() {
     viewArbiter.Release(fakeImage.owner);
   }
 
+  std::printf("\n--- A2a (r3). P->R: the consumer COMPLETES, then a late Cancel: shown as completed, not cancelled ---\n");
+  {
+    const auto content = make_content(8u * 1024u * 1024u + 3, 291);
+    const std::wstring path = srcDir + L"\\lateCancel.bin";
+    write_file(path, content);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto hBefore = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destA2a";
+    paste(dest, content.size(), 60, &consumer);
+    const bool running = wait_until([&] { return viewer.PasteActive(); }, 20000);
+    pumpPaused.store(true);  // the viewer does not learn the end by its 700 ms question yet
+    const DWORD code = consumer.Wait(90000);
+    const bool hostDone = wait_until([&] { return host.GetCounters().pastesEnded > hBefore.pastesEnded; }, 10000);
+    check("staged: the consumer completed while the viewer still counts the paste as running",
+          running && hostDone && code == 0 && viewer.PasteActive(), "exit=" + std::to_string(code));
+    viewer.CancelPaste();  // the user presses Cancel a moment too late
+    pumpPaused.store(false);
+    const bool ended = wait_until([&] { return !viewer.PasteActive() && !viewer.GetProgress().cancelling; }, 5000);
+    const auto p = viewer.GetProgress();
+    check("THE LATE CANCEL SHOWS THE REAL END: completed, not cancelled",
+          ended && p.lastState == static_cast<uint8_t>(fn::PasteState::Ended) &&
+              p.lastReason == static_cast<uint8_t>(fn::PasteEndReason::Completed),
+          "state=" + std::to_string(p.lastState) + " reason=" + std::to_string(p.lastReason));
+    check("...and the host kept it completed", host.GetCounters().lastEndReason == static_cast<uint8_t>(fn::PasteEndReason::Completed));
+  }
+
+  std::printf("\n--- A2b (r3). P->R cancel: another id's EndReply and a held-back answer confirm nothing ---\n");
+  {
+    const auto content = make_content(48u * 1024u * 1024u, 293);
+    const std::wstring path = srcDir + L"\\cancelId.bin";
+    write_file(path, content);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    Child consumer;
+    const std::wstring dest = root + L"destA2b";
+    paste(dest, content.size(), 60, &consumer);
+    const bool running = wait_until([&] { return viewer.PasteActive(); }, 20000);
+    link.SetRewrite([](uint16_t type, std::vector<uint8_t>* rb) {
+      if (type == static_cast<uint16_t>(fn::FileMsg::EndReply)) {
+        fn::EndReply r;
+        if (fn::parse(*rb, &r)) {
+          r.pasteOp += 1;  // an answer about another paste
+          *rb = fn::body(r);
+        }
+      } else if (type == static_cast<uint16_t>(fn::FileMsg::PasteQueryReply)) {
+        fn::PasteQueryReply r;
+        if (fn::parse(*rb, &r) && (r.state == fn::PasteState::Ended || r.state == fn::PasteState::Failed)) {
+          r.state = fn::PasteState::Active;  // the host's own answer held back for now
+          r.reason = fn::PasteEndReason::None;
+          *rb = fn::body(r);
+        }
+      }
+    });
+    viewer.CancelPaste();
+    Sleep(2500);
+    const bool stillCancelling = viewer.GetProgress().cancelling && viewer.PasteActive();
+    link.SetRewrite(nullptr);
+    check("another id's EndReply confirms nothing: still 'cancelling', still running", running && stillCancelling);
+    const bool ended = wait_until([&] { return !viewer.PasteActive() && !viewer.GetProgress().cancelling; }, 5000);
+    const auto p = viewer.GetProgress();
+    check("...then the host's own answer ends it: cancelled", ended && p.lastReason == static_cast<uint8_t>(fn::PasteEndReason::Cancelled),
+          "reason=" + std::to_string(p.lastReason));
+    consumer.Wait(30000);
+    DeleteFileW((dest + L"\\cancelId.bin").c_str());
+  }
+
   // ================================================================== R->P (step 2)
   // One clipboard for both helpers here (see `local`): the viewer's last P->R offer comes off it first.
   {
@@ -1128,6 +1209,65 @@ int wmain() {
     check("...and because the remote clipboard changed meanwhile, the image may NOT go again", wait_until([&] {
             return fakeImage.afters.load() == aftersBefore + 1 && fakeImage.lastMayResume.load() == 0;
           }, 5000), "mayResume=" + std::to_string(fakeImage.lastMayResume.load()));
+  }
+
+  std::printf("\n--- Q4 (r3 A-1). R->P: the image never lets go: refused within the budget, and the image is RELEASED ---\n");
+  {
+    const std::wstring path = remoteDir + L"\\d5R4.bin";
+    write_file(path, make_content(300000, 283));
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    fakeImage.owner = 0xD5D8;
+    check("an image holds the viewer's bulk (and will not let go)", viewArbiter.TryAcquire(BulkUse::Image, fakeImage.owner));
+    fakeImage.releaseAfterMs.store(0);
+    const int preemptsBefore = fakeImage.preempts.load(), aftersBefore = fakeImage.afters.load();
+    const auto t0 = GetTickCount64();
+    Child consumer;
+    const std::wstring dest = root + L"destQ4";
+    paste_on(local, dest, 300000, 15, &consumer);
+    const bool refused = wait_until([&] { return viewer.GetCounters().recvBusy > before.recvBusy; }, 15000);
+    const auto secs = (GetTickCount64() - t0) / 1000.0;
+    check("R->P: the image was asked to stop, and the paste is refused as busy after the budget (7 s)",
+          fakeImage.preempts.load() == preemptsBefore + 1 && refused && secs >= 6.0 && secs <= 10.5, std::to_string(secs) + " s");
+    consumer.Wait(30000);
+    check("...nothing landed", nothing_lands(dest, L"d5R4.bin"));
+    check("THE STOPPED IMAGE IS RELEASED (told the paste is over) -- later images are not held for ever",
+          wait_until([&] { return fakeImage.afters.load() == aftersBefore + 1; }, 3000),
+          "afters=" + std::to_string(fakeImage.afters.load() - aftersBefore));
+    viewArbiter.Release(fakeImage.owner);
+  }
+
+  std::printf("\n--- P3 (r3 A-3). R->P: a PrepareReply whose sizes are not the offered ones (huge, overflowing): refused, the host lets go ---\n");
+  {
+    const std::wstring p1 = remoteDir + L"\\sz1.bin", p2 = remoteDir + L"\\sz2.bin";
+    write_file(p1, make_content(4000, 301));
+    write_file(p2, make_content(5000, 302));
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {p1, p2});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    link.SetRewrite([](uint16_t type, std::vector<uint8_t>* rb) {
+      if (type != static_cast<uint16_t>(fn::FileMsg::PrepareReply)) return;
+      fn::PrepareReply r;
+      if (!fn::parse(*rb, &r) || r.items.size() != 2) return;
+      r.items[0].size = ~uint64_t{0};  // a small offer, a huge prepare -- and the sum wraps
+      r.items[1].size = 2;
+      *rb = fn::body(r);
+    });
+    const auto hb = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destP3";
+    paste_on(local, dest, 9000, 15, &consumer);
+    const bool refused = wait_until([&] { return viewer.GetCounters().recvRefused > before.recvRefused; }, 15000);
+    link.SetRewrite(nullptr);
+    consumer.Wait(30000);
+    check("THE SIZES THAT ARE NOT THE OFFER'S ARE REFUSED, before any byte",
+          refused && nothing_lands(dest, L"sz1.bin") && nothing_lands(dest, L"sz2.bin") &&
+              viewer.GetCounters().bytesReceived == before.bytesReceived);
+    check("...the host's pinned send ended and both bulks are free", wait_until([&] {
+            return host.GetCounters().sendFailed > hb.sendFailed && hostArbiter.use() == BulkUse::Idle &&
+                   viewArbiter.use() == BulkUse::Idle;
+          }, 5000), "sendFailed=" + std::to_string(host.GetCounters().sendFailed - hb.sendFailed));
   }
 
   std::printf("\n--- N3 (r2 4). the viewer's switch goes OFF mid R->P paste: the host sends nothing more ---\n");

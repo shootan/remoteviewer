@@ -219,6 +219,19 @@ int main() {
           has(clip_transfer_bar_text(file_transfer_bar_view(p, now, &st)), L"다른 전송이 진행 중"));
     FileBarState fresh;
     check("file: a result from before the bar existed is not news", !file_transfer_bar_view(p, now, &fresh).isFile);
+    // r3: the helper could not run (the first update to a release with it does not install it).
+    now += 2 * kClipBarResultUs;
+    p.noHelper = 1;
+    p.noHelperHere = false;
+    const std::wstring remoteNo = clip_transfer_bar_text(file_transfer_bar_view(p, now, &st));
+    check("file: no helper on the REMOTE PC is said (update it once more), not silent",
+          remoteNo == L"원격 PC의 GNLink 를 한 번 더 업데이트해야 파일을 붙여넣을 수 있습니다");
+    check("file: ...for 5 s, then gone", !file_transfer_bar_view(p, now + kClipBarResultUs + 1, &st).isFile);
+    p.noHelper = 2;
+    p.noHelperHere = true;
+    check("file: no helper on THIS PC names this PC",
+          clip_transfer_bar_text(file_transfer_bar_view(p, now + 2 * kClipBarResultUs, &st)) ==
+              L"이 PC의 GNLink 를 한 번 더 업데이트해야 원격 PC의 파일을 붙여넣을 수 있습니다");
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);

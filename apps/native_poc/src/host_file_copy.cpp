@@ -854,6 +854,8 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
       const fn::PasteEndReason reason = m.reason == fn::PasteEndReason::None ? fn::PasteEndReason::Cancelled : m.reason;
       r.state = reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed;
       closeSend = EndPasteLocked(r.state, reason);
+    } else if (lastEnded_.pasteOp != 0 && lastEnded_.offerId == m.offerId && lastEnded_.pasteOp == m.pasteOp) {
+      r.state = lastEnded_.state;  // already over: how it really ended, not "cancelled" (r3 A-2)
     } else {
       r.state = fn::PasteState::None;
     }

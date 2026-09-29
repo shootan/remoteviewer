@@ -112,6 +112,7 @@ ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t n
     st->seenFinished = p.finished;
     st->seenOffered = p.offered;
     st->seenAvailable = p.available;
+    st->seenNoHelper = p.noHelper;
   }
   if (p.cancelling) {
     v.isFile = true;
@@ -143,6 +144,19 @@ ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t n
     v.isFile = true;
     v.phase = ClipBarPhase::Result;
     v.fileText = file_ended_text(p);
+    return v;
+  }
+  if (p.noHelper != st->seenNoHelper) {
+    st->seenNoHelper = p.noHelper;
+    st->noHelperUntilUs = nowUs + kClipBarResultUs;
+  }
+  if (st->noHelperUntilUs > nowUs) {
+    // Not silent: the likeliest cause is an install from before the helper existed (it arrives with
+    // the next update); the exact reason is in the host / viewer log.
+    v.isFile = true;
+    v.phase = ClipBarPhase::Result;
+    v.fileText = p.noHelperHere ? L"이 PC의 GNLink 를 한 번 더 업데이트해야 원격 PC의 파일을 붙여넣을 수 있습니다"
+                                : L"원격 PC의 GNLink 를 한 번 더 업데이트해야 파일을 붙여넣을 수 있습니다";
     return v;
   }
   if (p.offered != st->seenOffered) {

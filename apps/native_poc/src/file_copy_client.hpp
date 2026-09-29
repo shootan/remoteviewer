@@ -170,6 +170,10 @@ class FileCopyClient {
     // Offers: this PC's files published on the remote PC / the remote PC's published here.
     uint64_t offered = 0, available = 0;
     uint32_t offeredFiles = 0, availableFiles = 0;
+    // The clipboard helper could not run -- counted so the bar says so once (r3: the first update to
+    // a release with the helper does not install it; without a word the user sees a broken feature).
+    uint64_t noHelper = 0;
+    bool noHelperHere = false;  // on this PC (R->P publish), else on the remote PC (P->R offer refused)
   };
   Progress GetProgress() const;
   /** UI thread: the user cancels the running paste (either direction). Confirmed by the other side. */

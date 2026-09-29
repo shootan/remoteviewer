@@ -224,6 +224,7 @@ add_library(remote60_clip_image STATIC
   # File copy, viewer side (t-zdmsd4gb): offer, paste query, pin as the user, the shared bulk sender.
   # The files are identified and opened by the helper's own user-token code.
   src/file_copy_client.cpp
+  src/file_copy_client_progress.cpp
   src/file_copy_local_files.cpp
   src/clip_image_clipboard.cpp
   src/clip_image_wic.cpp

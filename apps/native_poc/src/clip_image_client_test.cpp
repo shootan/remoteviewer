@@ -456,6 +456,14 @@ int main() {
     r.client.AfterFilePaste(false);  // the switch went off, the session changed, or the remote clipboard moved
     r.pump_for(300);
     check("D5: mayResume=false -> the stopped image is dropped", r.host.count(MessageType::ControlClipImageOffer) == offers);
+    // r3 A-1: once the paste is over (here refused -- the hold is released on every end), the NEXT
+    // copy is not held: it is really offered and completes.
+    check("D5: after the paste's end nothing is held any more", !r.client.GetProgress().heldForFile);
+    check("D5: a NEW image copy afterwards is offered", r.offer(dib(48, 48, 512)) &&
+                                                      r.host.count(MessageType::ControlClipImageOffer) == offers + 1);
+    r.host.statusAnswer = ClipImageState::Published;
+    r.pump_for(800);
+    check("D5: ...and completes (published)", r.outcome() == ClipOutcome::Published);
   }
   {
     Rig r;
