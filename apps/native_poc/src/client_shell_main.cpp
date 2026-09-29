@@ -46,6 +46,7 @@
 #include "update_handoff.hpp"
 #include "directory_client.hpp"
 #include "directory_session_client.hpp"
+#include "fixed_directory.hpp"
 #include "json_profile.hpp"
 #include "log_upload.hpp"
 #include "product_version.hpp"
@@ -134,10 +135,9 @@ void post_ui(std::function<void()> action) {
 
 // Guards everything the worker threads write and the UI thread reads.
 std::mutex gStateMu;
-std::string gServerUrl;
 std::string gAccountId;
 /**
- * Counts sign-ins and server changes in this process.
+ * Counts sign-ins in this process.
  *
  * The account name and the server address are not enough to tell one sign-in from the next: sign
  * out and back in as the same user and both are identical, while the session token -- the thing
@@ -180,7 +180,7 @@ std::wstring executable_dir() {
 }
 
 /**
- * Where the server address and account id are remembered between runs.
+ * Where the account id and the picture settings are remembered between runs.
  *
  * The password is not among them. Remembering it would save one field and hand anyone with the
  * user's profile a working login to every PC on the account.
@@ -196,7 +196,31 @@ std::wstring executable_dir() {
 std::wstring gShellTestDataDir;
 // TEST BUILDS ONLY: the viewer begin_session starts instead of GNLinkViewer.exe. Empty = the real one.
 std::wstring gShellTestViewerExe;
+// TEST BUILDS ONLY: the fixture directory this shell talks to in place of kFixedDirectoryUrl.
+// GNLinkClient has no such variable and no input that could stand in for one.
+std::string gShellTestDirectoryUrl;
 #endif
+
+/**
+ * The directory server. Every request this shell makes, and every child it starts, gets its
+ * address from here -- not from the page and not from client.txt.
+ *
+ * A test build fails CLOSED, the same way settings_path() does: a test that forgot to name its
+ * fixture ends here instead of signing a fixture account in to the real server.
+ */
+std::string shell_directory_url() {
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (gShellTestDirectoryUrl.empty()) {
+    std::fputs("[shell-test-seam] shell_directory_url() with no fixture directory; refusing to "
+               "fall back to the product's server\n", stderr);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  return gShellTestDirectoryUrl;
+#else
+  return kFixedDirectoryUrl;
+#endif
+}
 
 std::wstring settings_path() {
 #ifdef REMOTE60_SHELL_TEST_SEAM
@@ -222,30 +246,31 @@ std::wstring settings_path() {
 #endif
 }
 
-void save_settings(const std::string& server, const std::string& accountId,
-                   const ShellRuntimeSettings& settings) {
+void save_settings(const std::string& accountId, const ShellRuntimeSettings& settings) {
   std::ofstream file(settings_path(), std::ios::trunc);
   if (!file) return;
   // One value per line, in a fixed order. A settings file this small does not need a format.
-  file << server << "\n"
+  //
+  // The first line is still the server address, although nothing here reads it back: a build
+  // from before the address was fixed reads it, and that is the build a rollback installs.
+  file << shell_directory_url() << "\n"
        << accountId << "\n"
        << settings.bitrateKbps << "\n"
        << settings.fps << "\n"
        << settings.monitorId << "\n";
 }
 
-void load_settings(std::string* server, std::string* accountId, ShellRuntimeSettings* settings) {
+void load_settings(std::string* accountId, ShellRuntimeSettings* settings) {
   std::ifstream file(settings_path());
   if (!file) return;
-  std::getline(file, *server);
+  // The first line is the server address an older build wrote, or the one save_settings writes
+  // for it. Read past, never used: whatever it says, the server is shell_directory_url().
+  std::string storedServer;
+  std::getline(file, storedServer);
   std::getline(file, *accountId);
-  // A file touched by a text editor comes back with a byte order mark, and it would ride along
-  // inside the url -- producing a message the page cannot parse and a screen that stays blank
-  // for no visible reason.
-  if (server->rfind("\xEF\xBB\xBF", 0) == 0) server->erase(0, 3);
   // Written on Windows, so a stray carriage return is likelier than not.
-  for (std::string* line : {server, accountId}) {
-    while (!line->empty() && (line->back() == '\r' || line->back() == '\n')) line->pop_back();
+  while (!accountId->empty() && (accountId->back() == '\r' || accountId->back() == '\n')) {
+    accountId->pop_back();
   }
   std::string line;
   auto read_u32 = [&](uint32_t* target) {
@@ -276,25 +301,6 @@ struct OwnerSnapshot {
   std::string serverUrl;
   uint64_t epoch = 0;
 };
-
-/**
- * The directory this shell is signed in to, or the one it last remembered.
- *
- * The start-up update check runs before the page has restored anything, so gServerUrl is still
- * empty then; the saved address is the only thing that exists at that moment, and it is the same
- * address the user will sign in to a second later.
- */
-std::string configured_directory_url() {
-  {
-    std::lock_guard<std::mutex> lock(gStateMu);
-    if (!gServerUrl.empty()) return gServerUrl;
-  }
-  std::string server;
-  std::string accountId;
-  ShellRuntimeSettings settings;
-  load_settings(&server, &accountId, &settings);
-  return server;
-}
 
 /**
  * A line in the client's log.
@@ -552,7 +558,7 @@ void start_client_update(const std::string& availableVersion) {
   const upd::UpdateEndpoint launchEndpoint =
       remote60::native_poc::directory::update_endpoint_for(
           remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-          configured_directory_url(), "windows",
+          shell_directory_url(), "windows",
           launchSession.empty() ? std::string() : "Authorization: Bearer " + launchSession,
           launchOwner, launchEpoch);
   spec.manifestUrl = launchEndpoint.url;
@@ -671,7 +677,7 @@ void start_client_update(const std::string& availableVersion) {
       const upd::UpdateEndpoint nowEndpoint =
           remote60::native_poc::directory::update_endpoint_for(
               remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-              configured_directory_url(), "windows",
+              shell_directory_url(), "windows",
               nowSession.empty() ? std::string() : "Authorization: Bearer " + nowSession, nowOwner,
               nowEpoch);
 
@@ -721,7 +727,7 @@ void start_client_update(const std::string& availableVersion) {
               const upd::UpdateEndpoint atReady =
                   remote60::native_poc::directory::update_endpoint_for(
                       remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-                      configured_directory_url(), "windows",
+                      shell_directory_url(), "windows",
                       checkSession.empty() ? std::string()
                                            : "Authorization: Bearer " + checkSession,
                       checkOwner, checkEpoch);
@@ -775,29 +781,17 @@ void start_update_check() {
   namespace upd = remote60::native_poc::update;
   namespace cli = remote60::native_poc::client;
 
-  // ONE snapshot, and the url is part of it.
-  //
-  // It used to read the session under the lock and then call configured_directory_url(), which
-  // takes the same lock again -- so the two halves could describe different moments. They are
-  // read together now; the settings-file fallback happens after, outside the lock, and only when
-  // nothing is signed in (in which case there is no session to be inconsistent with).
+  // ONE snapshot. The url is not part of it any more because it cannot change: it is the same
+  // address before sign-in, after it, and whatever client.txt says.
   std::string session;
   std::string owner;
   uint64_t epoch = 0;
-  std::string url;
+  const std::string url = shell_directory_url();
   {
     std::lock_guard<std::mutex> lock(gStateMu);
     session = gSessionToken;
     owner = gAccountId;
     epoch = gOwnerEpoch;
-    url = gServerUrl;
-  }
-  if (url.empty()) {
-    std::string server;
-    std::string accountId;
-    ShellRuntimeSettings settings;
-    load_settings(&server, &accountId, &settings);
-    url = server;
   }
 
   {
@@ -868,8 +862,14 @@ void start_update_check() {
       });
 }
 
-/** Login and refresh results are adopted only on the UI thread and current operation epoch. */
-void begin_login(std::string server, std::string accountId, std::string password) {
+/**
+ * Login and refresh results are adopted only on the UI thread and current operation epoch.
+ *
+ * The page supplies an account and a password and nothing else. Where they are sent is decided
+ * here, so a page that posted a `server` of its own would have it ignored.
+ */
+void begin_login(std::string accountId, std::string password) {
+  const std::string server = shell_directory_url();
   uint64_t epoch = 0;
   { std::lock_guard<std::mutex> lock(gStateMu); epoch = ++gOwnerEpoch; gSessionToken.clear(); }
   log_upload_clear_credentials("new sign-in operation");
@@ -887,7 +887,6 @@ void begin_login(std::string server, std::string accountId, std::string password
     log_line("hosts ok count=" + std::to_string(hosts.size()));
     {
       std::lock_guard<std::mutex> lock(gStateMu);
-      gServerUrl = server;
       gAccountId = accountId;
       gSessionToken = token;
     }
@@ -911,7 +910,7 @@ void begin_login(std::string server, std::string accountId, std::string password
     }
     {
       std::lock_guard<std::mutex> lock(gStateMu);
-      save_settings(server, accountId, gSettings);
+      save_settings(accountId, gSettings);
     }
 
     // The check that ran at start-up had neither a token nor an address and reported "not
@@ -931,11 +930,12 @@ void begin_login(std::string server, std::string accountId, std::string password
 }
 
 void begin_refresh_hosts() {
-  std::string server, accountId, token;
+  const std::string server = shell_directory_url();
+  std::string accountId, token;
   uint64_t epoch = 0;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
-    server = gServerUrl; accountId = gAccountId; token = gSessionToken; epoch = gOwnerEpoch;
+    accountId = gAccountId; token = gSessionToken; epoch = gOwnerEpoch;
   }
   if (token.empty()) return;
   gWorkers.Launch([server, accountId, token, epoch]() {
@@ -1020,12 +1020,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   // reconnect for its 43/44/46, idle instead of its error, and another PC's pending reconnect
   // gone. And the old viewer was called off before it was known whether a new one could start.
   uint64_t ownerEpoch = 0;
-  std::string server;
+  const std::string server = shell_directory_url();
   std::string account;
   std::string token;
   {
     std::lock_guard<std::mutex> lock(gStateMu);
-    server = gServerUrl; account = gAccountId;
+    account = gAccountId;
     token = gSessionToken;
     ownerEpoch = gOwnerEpoch;
   }
@@ -1341,16 +1341,15 @@ void handle_page_message(const std::string& json) {
   const std::string type = shell_message_type(json);
 
   if (type == "ready") {
-    std::string server;
     std::string accountId;
     ShellRuntimeSettings settings;
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       settings = gSettings;
-      load_settings(&server, &accountId, &settings);
+      load_settings(&accountId, &settings);
       gSettings = settings;
     }
-    post_to_page(shell_restore_json(server, accountId, settings));
+    post_to_page(shell_restore_json(accountId, settings));
     // Anything the start-up check found while the page was still loading goes out now.
     flush_pending_update_notice();
     begin_refresh_hosts();  // restore an authenticated page after a WebView process restart
@@ -1390,14 +1389,12 @@ void handle_page_message(const std::string& json) {
     return;
   }
   if (type == "settings") {
-    std::string server;
     std::string accountId;
     {
       std::lock_guard<std::mutex> lock(gStateMu);
       shell_parse_settings(json, &gSettings);
-      server = gServerUrl;
       accountId = gAccountId;
-      save_settings(server, accountId, gSettings);
+      save_settings(accountId, gSettings);
     }
     // Applied to the next session rather than the running one: the child owns its own encoder
     // negotiation once started, and reaching into it from here would duplicate that logic.
@@ -1405,13 +1402,12 @@ void handle_page_message(const std::string& json) {
     return;
   }
   if (type == "login") {
-    std::string server;
+    // Two fields. A `server` in the message is not read: the page is not where that is decided.
     std::string accountId;
     std::string password;
-    json_profile::json_get_string(json, "server", &server);
     json_profile::json_get_string(json, "accountId", &accountId);
     json_profile::json_get_string(json, "password", &password);
-    begin_login(server, accountId, password);
+    begin_login(accountId, password);
     return;
   }
   if (type == "hosts") {

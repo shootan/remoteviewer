@@ -650,11 +650,11 @@ int wmain() {
   // keyboard user is NOT shown by this and is listed as unverified.
   const std::string focused = eval(
       L"(function(){"
-      L"  var el=document.getElementById('server');"
+      L"  var el=document.getElementById('account');"
       L"  el.focus();"
       L"  return document.activeElement ? document.activeElement.id : 'none';"
       L"})()");
-  ok(focused == "\"server\"", "focus lands on the control that was asked for", focused);
+  ok(focused == "\"account\"", "focus lands on the control that was asked for", focused);
 
   const std::string ringRule = eval(
       L"(function(){"

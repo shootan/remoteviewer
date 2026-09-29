@@ -33,25 +33,13 @@
                 android:textSize="13sp" />
 
             <EditText
-                android:id="@+id/loginServerInput"
+                android:id="@+id/loginIdInput"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
                 android:background="@drawable/panel_input_background"
-                android:hint="@string/login_server_hint"
-                android:inputType="textUri"
-                android:maxLines="1"
-                android:padding="12dp"
-                android:textColor="@color/ui_text"
-                android:textColorHint="@color/ui_text_secondary" />
-
-            <EditText
-                android:id="@+id/loginIdInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/panel_input_background"
                 android:hint="@string/login_id_hint"
+                android:imeOptions="actionNext"
                 android:inputType="text"
                 android:maxLines="1"
                 android:padding="12dp"
@@ -65,6 +53,7 @@
                 android:layout_marginTop="10dp"
                 android:background="@drawable/panel_input_background"
                 android:hint="@string/login_password_hint"
+                android:imeOptions="actionDone"
                 android:inputType="textPassword"
                 android:maxLines="1"
                 android:padding="12dp"

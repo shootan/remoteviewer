@@ -21,9 +21,24 @@ async function port(tcp) {
   await new Promise(r=>tcp?socket.listen(0,'127.0.0.1',r):socket.bind(0,'127.0.0.1',r));
   const value=socket.address().port; await new Promise(r=>socket.close(r)); return value;
 }
-let server, ui;
+let server, ui, decoy;
 (async()=>{
   const httpPort=await port(true),udpPort=await port(false);
+  // fixed-server: the address the shell's client.txt names when it starts, and that a login
+  // message from the page names later. Nothing may arrive here. It answers like a directory
+  // would, so a shell that did come here would carry on and be counted rather than fail early
+  // and look like a network error.
+  const decoyHits=[];
+  decoy=require('http').createServer((req,res)=>{
+    decoyHits.push(req.method+' '+req.url);
+    res.writeHead(200,{'content-type':'application/json'});res.end('{"ok":true}');
+  });
+  await new Promise(r=>decoy.listen(0,'127.0.0.1',r));
+  const decoyUrl=`http://127.0.0.1:${decoy.address().port}`;
+  // The counter is only evidence if it counts. One request of our own, seen, then forgotten.
+  await fetch(decoyUrl+'/self-check');
+  assert.deepEqual(decoyHits,['GET /self-check'],'the decoy counts what reaches it');
+  decoyHits.length=0;
   const env={...process.env,TEMP:profile,TMP:profile,LOCALAPPDATA:path.join(scratch,'appdata'),
     GNLINK_RECOVERY_TEST_ROOT:scratch,TEST_HOSTS_DELAY:delayFlag,
     REMOTE60_DIR_DATA:path.join(scratch,'store.json'),REMOTE60_DIR_PORT:String(httpPort),
@@ -40,14 +55,20 @@ let server, ui;
   assert(ready);
   const executable=process.argv[2]||path.join(root,'build-local/apps/native_poc/Release/remote60_client_recovery_ui_test.exe');
   const screenshot=path.join(root,'.claude','client-recovery-ui.png');
-  ui=spawn(executable,[url,delayFlag,screenshot],{env,stdio:'inherit'});
+  ui=spawn(executable,[url,delayFlag,screenshot,decoyUrl],{env,stdio:'inherit'});
   const result=await new Promise((resolve,reject)=>{ui.once('error',reject);ui.once('exit',resolve);});
   assert.equal(result,0,'production UI recovery fixture');
   console.log('PASS UI screenshot '+screenshot);
+  console.log('PASS sign-in screenshot '+screenshot+'.login.png');
+  // client.txt named the decoy for the whole run and one login message named it too.
+  console.log('      (requests the decoy received: '+decoyHits.length+(decoyHits.length?' -- '+decoyHits.join(', '):'')+')');
+  assert.equal(decoyHits.length,0,'the stored address and the page-supplied address received no request');
+  console.log('PASS [fixed-server] the address in client.txt and the one a page named received no request');
 })().catch(error=>{console.error('FAIL',error.message);process.exitCode=1;})
 .finally(async()=>{
   if(ui&&ui.exitCode===null){const done=new Promise(r=>ui.once('exit',r));ui.kill();await done;}
   if(server&&server.exitCode===null){const done=new Promise(r=>server.once('exit',r));server.kill();await done;}
+  if(decoy){decoy.closeAllConnections?.();await new Promise(r=>decoy.close(r));}
   // Keep private profile evidence out of git; WebView descendants can still be closing handles.
   console.log('Private fixture retained at '+scratch);
 });

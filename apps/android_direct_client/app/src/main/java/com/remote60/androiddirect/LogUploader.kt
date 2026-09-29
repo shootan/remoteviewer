@@ -117,6 +117,9 @@ object LogUploader {
             // a question two places should answer separately.
             val base = DirectoryClient.normalizedUrl(directoryUrl)
             connection = (URL(base.trimEnd('/') + "/api/logs").openConnection() as HttpURLConnection).apply {
+                // Carries the session token, so it goes to the address it was given and
+                // nowhere a redirect points.
+                instanceFollowRedirects = false
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS

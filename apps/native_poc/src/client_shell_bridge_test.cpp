@@ -89,16 +89,19 @@ int main() {
   check("an unknown message has no type we act on",
         shell_message_type(R"({"nothing":1})").empty());
 
-  // The settings file is plain text, so an editor may have left a byte order mark on the first
-  // line. It is invisible in the file and invisible in the field, but the url it prefixes
-  // resolves to nothing -- and the connect screen comes up blank with nothing to explain it.
+  // The settings file is plain text, so an editor may have left a byte order mark in it. It is
+  // invisible in the file and invisible in the field, but a message the page cannot parse leaves
+  // the connect screen blank with nothing to explain it.
   ShellRuntimeSettings restoreSettings{9000, 30, 2};
   const std::string restored =
-      shell_restore_json("\xEF\xBB\xBF" "http://server:8080", "demo", restoreSettings);
-  std::string restoredServer;
-  json_profile::json_get_string(restored, "server", &restoredServer);
-  check("a byte order mark is stripped from a restored address",
-        restoredServer == "http://server:8080", "server=[" + restoredServer + "]");
+      shell_restore_json("\xEF\xBB\xBF" "demo", restoreSettings);
+  std::string restoredAccount;
+  json_profile::json_get_string(restored, "accountId", &restoredAccount);
+  check("a byte order mark is stripped from a restored account",
+        restoredAccount == "demo", "accountId=[" + restoredAccount + "]");
+  // The page has no server field, so nothing tells it a server: where a sign-in goes is not
+  // something a restored message can carry.
+  check("a restore names no server", !contains(restored, "\"server\""), restored);
   check("the remembered numbers travel with it",
         contains(restored, "\"bitrateKbps\":9000") && contains(restored, "\"fps\":30") &&
             contains(restored, "\"monitorId\":2"),

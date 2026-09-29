@@ -31,6 +31,7 @@ import android.view.WindowInsets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.view.WindowInsetsController
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.graphics.Bitmap
 import android.widget.AdapterView
@@ -954,7 +955,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var connectScene: View
     private lateinit var targetsScene: View
     private lateinit var viewerScene: View
-    private lateinit var loginServerInput: EditText
     private lateinit var loginIdInput: EditText
     private lateinit var loginPasswordInput: EditText
     private lateinit var loginButton: Button
@@ -1356,7 +1356,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog = SessionDiagnosticsLog(this)
         loginScene = findViewById(R.id.loginScene)
         hostsScene = findViewById(R.id.hostsScene)
-        loginServerInput = findViewById(R.id.loginServerInput)
         loginIdInput = findViewById(R.id.loginIdInput)
         loginPasswordInput = findViewById(R.id.loginPasswordInput)
         // A password field falls back to monospace for its hint; keep it in the same face as the others.
@@ -1921,7 +1920,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      */
     private fun updateEndpoint(): DirectoryClient.UpdateEndpoint = DirectoryClient.updateEndpointFor(
         BuildConfig.UPDATE_MANIFEST_URL,
-        DirectoryClient.savedUrl(this),
+        DirectoryClient.directoryUrl,
         DirectoryClient.savedSessionToken(this),
     )
 
@@ -2005,7 +2004,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             UiScene.CONNECT ->
                 // Typing an address was a detour from signing in; back should undo the detour.
-                if (manualConnectMode && DirectoryClient.savedUrl(this).isNotEmpty()) {
+                if (manualConnectMode) {
                     manualConnectMode = false
                     currentScene = homeScene()
                     renderStatus()
@@ -3850,8 +3849,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             directoryHosts.getOrNull(position)?.let { connectToDirectoryHost(it) }
         }
 
-        loginServerInput.setText(DirectoryClient.savedUrl(this))
         loginIdInput.setText(DirectoryClient.savedAccountId(this))
+        // Two fields, so the keyboard's own key finishes the form: Next from the id, Done from
+        // the password signs in.
+        loginPasswordInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                performLogin()
+                true
+            } else {
+                false
+            }
+        }
 
         loginButton.setOnClickListener { performLogin() }
         loginManualButton.setOnClickListener {
@@ -3886,22 +3894,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun performLogin() {
         if (directoryBusy) return
-        val url = loginServerInput.text?.toString()?.trim().orEmpty()
+        val url = DirectoryClient.directoryUrl
         val id = loginIdInput.text?.toString()?.trim().orEmpty()
         val password = loginPasswordInput.text?.toString().orEmpty()
-        if (url.isEmpty()) {
-            loginErrorText.text = getString(R.string.login_needs_server)
-            return
-        }
         if (id.isEmpty() || password.isEmpty()) {
             loginErrorText.text = getString(R.string.login_needs_credentials)
+            (if (id.isEmpty()) loginIdInput else loginPasswordInput).requestFocus()
             return
         }
 
         setDirectoryBusy(true)
         loginErrorText.text = getString(R.string.login_signing_in)
         // Kept whatever the outcome, so a failed attempt does not wipe the form.
-        DirectoryClient.rememberEndpoint(this, url, id)
+        DirectoryClient.rememberEndpoint(this, id)
         diagnosticsLog.log("login_attempt", "server=$url id=$id")
         directoryExecutor.execute {
             try {
@@ -3911,7 +3916,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // connect below does not have to ask again; a run that starts from a stored
                 // session asks /healthz instead, because it never sees a login response.
                 directoryObserveEndpoint = result.advertised
-                DirectoryClient.saveSession(this, url, id, token, result.expiresAt)
+                DirectoryClient.saveSession(this, id, token, result.expiresAt)
                 LogUploader.configure(this, url, token)
                 runOnUiThread {
                     setDirectoryBusy(false)
@@ -3934,7 +3939,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun loadHosts(reason: String) {
-        val url = DirectoryClient.savedUrl(this)
+        val url = DirectoryClient.directoryUrl
         val token = DirectoryClient.savedSessionToken(this)
         LogUploader.configure(this, url, token)
         if (url.isEmpty() || token.isEmpty()) {
@@ -3947,6 +3952,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         directoryExecutor.execute {
             try {
                 val list = DirectoryClient.hosts(url, token)
+                // The server accepted the session. If it was stored under a former name of the
+                // server, this is the moment it becomes stored under the server's own.
+                DirectoryClient.confirmStoredSession(this)
                 runOnUiThread {
                     setDirectoryBusy(false)
                     directoryHosts = list
@@ -3983,7 +3991,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             hostsStatusText.text = getString(R.string.hosts_offline_detail)
             return
         }
-        val url = DirectoryClient.savedUrl(this)
+        val url = DirectoryClient.directoryUrl
         val token = DirectoryClient.savedSessionToken(this)
         if (url.isEmpty() || token.isEmpty()) {
             currentScene = UiScene.LOGIN

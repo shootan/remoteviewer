@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "connect_candidates.hpp"
+#include "fixed_directory.hpp"
 #include "json_profile.hpp"
 #include "poc_protocol.hpp"
 #include "update_endpoint.hpp"
@@ -951,22 +952,47 @@ bool save_host_cache(const std::string& path, const HostCache& cache) {
   return MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
+CachedOrigin classify_cached_origin(const std::string& cachedUrl, const std::string& serverUrl,
+                                    const std::vector<std::string>& migratableOrigins) {
+  const std::string cached = directory_origin_key(cachedUrl);
+  if (cached.empty()) return CachedOrigin::Unlisted;
+  if (cached == directory_origin_key(serverUrl)) return CachedOrigin::Same;
+  for (const std::string& listed : migratableOrigins) {
+    if (cached == directory_origin_key(listed)) return CachedOrigin::Migratable;
+  }
+  return CachedOrigin::Unlisted;
+}
+
+std::vector<std::string> product_migratable_origins_for(const std::string& serverUrl) {
+  std::vector<std::string> origins;
+  if (directory_origin_key(serverUrl) != directory_origin_key(kFixedDirectoryUrl)) return origins;
+  for (const char* origin : kMigratableDirectoryOrigins) origins.emplace_back(origin);
+  return origins;
+}
+
 bool HostAgent::LoadCache() {
   HostCache cached;
   if (!load_host_cache(cfg_.cachePath, &cached)) return false;
 
   // A token is only meaningful for the account, server and machine it was issued against.
   // Compared by origin, so a trailing slash or a written-out default port does not read as a
-  // different server -- and so http and https still do.
-  if (directory_origin_key(cached.directoryUrl) != directory_origin_key(cfg_.url) ||
-      cached.machineId != machineId_) {
-    return false;
-  }
+  // different server -- and so http and https still do. A listed former name of this server is
+  // the one exception, and it is not taken on trust: see migrationPending_.
+  const CachedOrigin origin =
+      classify_cached_origin(cached.directoryUrl, cfg_.url, cfg_.migratableOrigins);
+  if (origin == CachedOrigin::Unlisted || cached.machineId != machineId_) return false;
   if (!cfg_.accountId.empty() && cached.accountId != cfg_.accountId) return false;
 
   hostToken_ = cached.hostToken;
   hostId_ = cached.hostId;
   if (cfg_.accountId.empty()) cfg_.accountId = cached.accountId;
+  migrationPending_ = origin == CachedOrigin::Migratable;
+  migratingFrom_ = migrationPending_ ? directory_origin_key(cached.directoryUrl) : std::string();
+  if (migrationPending_) {
+    std::cout << "[directory] the cached sign-in was issued as " << migratingFrom_
+              << "; presenting it to " << directory_origin_key(cfg_.url)
+              << ", the cache is rewritten if it is accepted\n";
+  }
   return true;
 }
 
@@ -997,6 +1023,8 @@ bool HostAgent::EnsureRegistered() {
   hostToken_ = token;
   hostId_ = id;
   observeAdvertised_ = advertised;
+  // A registration made here replaces whatever was cached, wherever that came from.
+  migrationPending_ = false;
   if (!ApplyObserveEndpoint()) return false;
   SaveCache();
   std::cout << "[native-video-host] directory registered hostId=" << hostId_
@@ -1241,6 +1269,16 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
   if (status != 200) {
     SetStatus("heartbeat failed (http " + std::to_string(status) + ")");
     return false;
+  }
+
+  if (migrationPending_) {
+    // Accepted: the token is this server's. Only now does the cache name the new address --
+    // a 401 above left the file alone, and so did every answer that was not an answer about
+    // the token (unreachable, 5xx, 429, 409).
+    migrationPending_ = false;
+    SaveCache();
+    std::cout << "[directory] the sign-in issued as " << migratingFrom_ << " was accepted by "
+              << directory_origin_key(cfg_.url) << "; the cache now names it\n";
   }
 
   if (outPunch) {

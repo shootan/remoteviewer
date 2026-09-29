@@ -102,6 +102,28 @@ class FakeDirectory {
     return counts_[path];
   }
 
+  /** Every request received, over HTTP, whatever its path. */
+  int Requests() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return static_cast<int>(received_.size());
+  }
+
+  /** How many of them contained `text` anywhere -- request line, headers or body. */
+  int RequestsContaining(const std::string& text) {
+    std::lock_guard<std::mutex> lk(mu_);
+    int n = 0;
+    for (const std::string& raw : received_) {
+      if (raw.find(text) != std::string::npos) ++n;
+    }
+    return n;
+  }
+
+  /** Extra response headers for a path, CRLF terminated -- a Location, for a redirect. */
+  void Headers(const std::string& path, const std::string& headers) {
+    std::lock_guard<std::mutex> lk(mu_);
+    headers_[path] = headers;
+  }
+
   int ObserveProbes() const { return probes_.load(); }
 
   /** What to answer an OBSERVE probe with. Empty = the real thing (the sender's own address). */
@@ -202,10 +224,17 @@ class FakeDirectory {
       if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
         path = raw.substr(firstSpace + 1, secondSpace - firstSpace - 1);
       }
+      std::string extraHeaders;
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        received_.push_back(raw);
+        const auto found = headers_.find(path);
+        if (found != headers_.end()) extraHeaders = found->second;
+      }
       const Reply reply = Next(path);
       const std::string out = "HTTP/1.1 " + std::to_string(reply.status) + " X\r\nContent-Length: " +
-                              std::to_string(reply.body.size()) +
-                              "\r\nConnection: close\r\n\r\n" + reply.body;
+                              std::to_string(reply.body.size()) + "\r\n" + extraHeaders +
+                              "Connection: close\r\n\r\n" + reply.body;
       size_t sent = 0;
       while (sent < out.size()) {
         const int n = send(c, out.data() + sent, static_cast<int>(out.size() - sent), 0);
@@ -251,6 +280,8 @@ class FakeDirectory {
   std::map<std::string, std::vector<Reply>> scripts_;
   std::map<std::string, size_t> served_;
   std::map<std::string, int> counts_;
+  std::map<std::string, std::string> headers_;
+  std::vector<std::string> received_;
   std::atomic<int> probes_{0};
   std::string observeReply_;
   std::mutex mu_;

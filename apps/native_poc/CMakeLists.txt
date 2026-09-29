@@ -523,6 +523,35 @@ add_dependencies(remote60_host_app
   remote60_gdi_capture_worker
 )
 
+# The same window in a build a test can start: every source GNLinkHost has, with the entry point
+# renamed and three things replaced through REMOTE60_HOST_TEST_SEAM -- the directory, host.json
+# and the streaming child. asInvoker, so a runner without elevation can start it and UI
+# Automation can reach it; it therefore cannot show requireAdministrator, UAC or UIPI. Nothing
+# ships this, and automation/gnlink_check_fixed_server.py checks the seam is not in what does.
+get_target_property(_host_ui_test_sources remote60_host_app SOURCES)
+list(FILTER _host_ui_test_sources EXCLUDE REGEX "host_app_main.cpp$")
+list(REMOVE_DUPLICATES _host_ui_test_sources)
+add_executable(remote60_host_app_ui_test WIN32
+  src/host_app_ui_test.cpp
+  ${_host_ui_test_sources}
+)
+set_target_properties(remote60_host_app_ui_test PROPERTIES OUTPUT_NAME "GNLinkHostUiTest")
+target_compile_definitions(remote60_host_app_ui_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_app_ui_test PRIVATE /utf-8)
+target_include_directories(remote60_host_app_ui_test PRIVATE src)
+target_link_libraries(remote60_host_app_ui_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+)
+if(MSVC)
+  target_link_options(remote60_host_app_ui_test PRIVATE
+    "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+  )
+endif()
+
 # One file the user can carry to another machine. It embeds the four product executables and
 # installs them under %ProgramFiles%\GNLink, which is the only place the LocalSystem input
 # service can live without handing SYSTEM to anyone who can write the install folder.
@@ -2038,6 +2067,20 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# Where a host token cached under another address goes: to the server when the address is a
+# listed former name of it (and the cache is rewritten only once accepted), nowhere when it is
+# not. Also that a redirect answered to a credentialed request is not followed. Counts what each
+# fixture directory received, because a credential sent to the wrong place still signs in.
+add_executable(remote60_directory_migration_test
+  src/directory_migration_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_directory_migration_test PRIVATE src)
+target_link_libraries(remote60_directory_migration_test PRIVATE common ws2_32)
+
 # The client's update check, through the production chain against a real socket. The check had
 # one call site, before sign-in, so it always answered "not configured" and never ran again --
 # a decision that lived where no test could reach it.
@@ -2427,9 +2470,15 @@ if(GNLINK_HAVE_WEBVIEW2)
   list(FILTER _recovery_shell_sources EXCLUDE REGEX "client_shell_main.cpp$")
   list(REMOVE_DUPLICATES _recovery_shell_sources)
   add_executable(remote60_client_recovery_ui_test src/client_recovery_ui_test.cpp ${_recovery_shell_sources})
-  # Test-only seam: the shell's settings path moves into the fixture. Never defined for
-# GNLinkClient -- checked by grepping the shipped exe for the seam's own message. (RV-00)
+  # Test-only seam: the shell's settings path moves into the fixture, and the directory it talks
+# to becomes the fixture's. Never defined for GNLinkClient -- checked by grepping the shipped exe
+# for the seam's own message (RV-00, automation/gnlink_check_fixed_server.py).
 target_compile_definitions(remote60_client_recovery_ui_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+if(MSVC)
+  # The page's Korean is compared against literals in the test, and that file has no byte order
+  # mark to tell the compiler what it is.
+  target_compile_options(remote60_client_recovery_ui_test PRIVATE /utf-8)
+endif()
 target_include_directories(remote60_client_recovery_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   get_target_property(_recovery_shell_links remote60_client_shell LINK_LIBRARIES)
   target_link_libraries(remote60_client_recovery_ui_test PRIVATE ${_recovery_shell_links})

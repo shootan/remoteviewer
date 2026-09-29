@@ -251,6 +251,10 @@ int startup_connect_client(HostContext& hx) {
       // filters the primary port have something else to dial.
       dirCfg.alternateUdpPort = lanPort;
       dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
+      // Former names of the product's server, and only when that is the server this host was
+      // started against. Decided by the address, not by an argument: there is none for it.
+      dirCfg.migratableOrigins =
+          remote60::native_poc::directory::product_migratable_origins_for(dirCfg.url);
       // Resolved here rather than left for the agent, so the path it will actually write can be
       // said out loud BEFORE registration -- which is what lets a test confirm it is not the
       // user's real file. (RV-00)

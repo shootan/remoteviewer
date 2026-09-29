@@ -124,10 +124,10 @@ ShellUpdateNotice shell_update_notice(const std::string& outcome,
   return notice;
 }
 
-std::string shell_restore_json(const std::string& server, const std::string& accountId,
+std::string shell_restore_json(const std::string& accountId,
                                const ShellRuntimeSettings& settings) {
   std::ostringstream oss;
-  oss << "{\"type\":\"restore\",\"server\":\"" << escape(server) << "\",\"accountId\":\""
+  oss << "{\"type\":\"restore\",\"accountId\":\""
       << escape(accountId) << "\",\"bitrateKbps\":" << settings.bitrateKbps
       << ",\"fps\":" << settings.fps << ",\"monitorId\":" << settings.monitorId << "}";
   return oss.str();

@@ -372,45 +372,119 @@ object DirectoryClient {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    // ------------------------------------------------------------------ stored session
+    // ------------------------------------------------------------------ the server
 
-    fun savedUrl(context: Context): String =
-        prefs(context).getString(KEY_URL, "").orEmpty()
+    /**
+     * The directory server. Every request this app makes to a directory goes here.
+     *
+     * A build constant, not a preference: the sign-in screen used to ask for it and store the
+     * answer, and what is stored is no longer read -- an address left over from an older
+     * version, or typed wrong once, cannot send anything anywhere.
+     */
+    val directoryUrl: String get() = BuildConfig.DIRECTORY_URL
+
+    /** Former names of [directoryUrl] under which a stored session may have been issued. */
+    val migratableOrigins: List<String>
+        get() = BuildConfig.DIRECTORY_MIGRATABLE_ORIGINS.split(',')
+            .map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** What the address a session is stored beside means for using it with a given server. */
+    enum class StoredOrigin {
+        /** Issued by this server: used as it always was. */
+        SAME,
+
+        /**
+         * Issued under a listed former name of it: presented to this server, and the stored
+         * address rewritten once the server has accepted it.
+         */
+        MIGRATABLE,
+
+        /** Anything else: not sent anywhere, and not erased. */
+        UNLISTED,
+    }
+
+    /**
+     * Decides which of the three a stored address is, by origin.
+     *
+     * The same rule the PC host applies to its host token (classify_cached_origin). Nothing
+     * stored is UNLISTED rather than "the default server": a token with no address has no issuer.
+     */
+    fun classifyStoredOrigin(
+        storedUrl: String,
+        serverUrl: String,
+        migratable: List<String>,
+    ): StoredOrigin {
+        if (storedUrl.isBlank()) return StoredOrigin.UNLISTED
+        val stored = originKey(storedUrl)
+        if (stored == originKey(serverUrl)) return StoredOrigin.SAME
+        if (migratable.any { it.isNotBlank() && originKey(it) == stored }) {
+            return StoredOrigin.MIGRATABLE
+        }
+        return StoredOrigin.UNLISTED
+    }
+
+    private fun storedOrigin(context: Context): StoredOrigin = classifyStoredOrigin(
+        prefs(context).getString(KEY_URL, "").orEmpty(), directoryUrl, migratableOrigins,
+    )
+
+    // ------------------------------------------------------------------ stored session
 
     fun savedAccountId(context: Context): String =
         prefs(context).getString(KEY_ACCOUNT, "").orEmpty()
 
-    /** A stored token is only useful while it is valid; treat an expired one as absent. */
+    /**
+     * A stored token is only useful while it is valid and to the server that issued it; an
+     * expired one, or one from another server, is treated as absent.
+     */
     fun savedSessionToken(context: Context): String {
         val p = prefs(context)
         val expiresAt = p.getLong(KEY_EXPIRES, 0L)
         if (expiresAt in 1..System.currentTimeMillis()) return ""
+        if (storedOrigin(context) == StoredOrigin.UNLISTED) return ""
         return p.getString(KEY_SESSION, "").orEmpty()
     }
 
     /**
-     * Remembers where the user was signing in to, before knowing whether it worked.
+     * Called when this server has just accepted the stored session (the host list came back).
      *
-     * These are not secrets, and tying them to a successful login meant every failed attempt
-     * threw away the server address and made the next try start from an empty form.
+     * A session stored under a former name of the server is, from here on, stored under the
+     * server's own. Not before: a 401 leaves the old address beside a token that is about to be
+     * cleared, and a request that never got an answer leaves everything as it was found.
      */
-    fun rememberEndpoint(context: Context, url: String, accountId: String) {
-        prefs(context).edit()
-            .putString(KEY_URL, normalize(url))
-            .putString(KEY_ACCOUNT, accountId)
-            .apply()
+    fun confirmStoredSession(context: Context) {
+        if (storedOrigin(context) != StoredOrigin.MIGRATABLE) return
+        prefs(context).edit().putString(KEY_URL, normalize(directoryUrl)).apply()
     }
 
-    fun saveSession(context: Context, url: String, accountId: String, token: String, expiresAt: Long) {
+    /**
+     * Remembers who was signing in, before knowing whether it worked.
+     *
+     * Not a secret, and tying it to a successful login meant every failed attempt made the next
+     * try start from an empty form.
+     *
+     * The address is written as well, in the key an older version reads -- unless a token is
+     * stored beside some other address. Rewriting the address beside that token would make it
+     * look like one this server issued, so both are left as found until a sign-in succeeds.
+     */
+    fun rememberEndpoint(context: Context, accountId: String) {
+        val p = prefs(context)
+        val foreignToken = p.getString(KEY_SESSION, "").orEmpty().isNotEmpty() &&
+            storedOrigin(context) != StoredOrigin.SAME
+        val edit = p.edit().putString(KEY_ACCOUNT, accountId)
+        if (!foreignToken) edit.putString(KEY_URL, normalize(directoryUrl))
+        edit.apply()
+    }
+
+    fun saveSession(context: Context, accountId: String, token: String, expiresAt: Long) {
         prefs(context).edit()
-            .putString(KEY_URL, normalize(url))
+            .putString(KEY_URL, normalize(directoryUrl))
             .putString(KEY_ACCOUNT, accountId)
             .putString(KEY_SESSION, token)
             .putLong(KEY_EXPIRES, expiresAt)
             .apply()
     }
 
-    /** Forgets the token but keeps the server and id, so signing back in is one field. */
+    /** Forgets the token but keeps the id, so signing back in is one field. */
     fun clearSession(context: Context) {
         prefs(context).edit()
             .remove(KEY_SESSION)
@@ -494,6 +568,10 @@ object DirectoryClient {
     ): JSONObject {
         val connection = URL(normalize(url) + path).openConnection() as HttpURLConnection
         try {
+            // Nothing is followed. The directory's API answers and does not redirect, and these
+            // requests carry the session token: following a redirect repeats the request at
+            // whatever address the answer named. A 3xx is reported like any other refusal.
+            connection.instanceFollowRedirects = false
             connection.requestMethod = method
             connection.connectTimeout = CONNECT_TIMEOUT_MS
             connection.readTimeout = READ_TIMEOUT_MS
