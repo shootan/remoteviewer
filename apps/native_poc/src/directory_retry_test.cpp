@@ -1078,6 +1078,63 @@ int main() {
     dir.Stop();
   }
 
+  // ---------------------------------------- an account that is not active
+  //
+  // The directory answers a host of a stopped account 401 with code account_inactive, and a
+  // registration by an account waiting for approval 403 with a sentence. Neither is fixed by
+  // asking again every heartbeat, and the first must not cost the token: re-enabled, the account
+  // takes this same token back with nothing to re-register.
+  {
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/host/register",
+               {Reply{200, "{\"hostId\":\"h1\",\"hostToken\":\"" + std::string(32, 'd') + "\"}"}});
+    dir.Script("/api/host/heartbeat",
+               {Reply{401, "{\"error\":\"unknown host token\",\"code\":\"account_inactive\"}"},
+                Reply{200, "{\"ok\":true}"}});
+    const std::string status = RunHost(dir, "inactive", 3, 1, false, dir.udpPort());
+    check("[inactive] a 401 for an account that is not active keeps the token: no registration",
+          dir.Count("/api/host/register") == 1, std::to_string(dir.Count("/api/host/register")));
+    check("[inactive] ...and the host is not asked again every heartbeat (it waits cycles out)",
+          dir.Count("/api/host/heartbeat") <= 2, std::to_string(dir.Count("/api/host/heartbeat")));
+    check("[inactive] re-enabled, the same token is taken back: online, nothing re-registered",
+          status.rfind("online", 0) == 0, status);
+    dir.Stop();
+  }
+  {
+    // Still stopped: what the host says meanwhile.
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/host/register",
+               {Reply{200, "{\"hostId\":\"h1\",\"hostToken\":\"" + std::string(32, 'e') + "\"}"}});
+    const Reply inactive{401, "{\"error\":\"unknown host token\",\"code\":\"account_inactive\"}"};
+    dir.Script("/api/host/heartbeat", {inactive, inactive, inactive, inactive});
+    const std::string status = RunHost(dir, "inactive-stays", 1, 1, false, dir.udpPort());
+    check("[inactive] ...while stopped it says so in the words the window reads as SIGN IN AGAIN",
+          status.find("token rejected") != std::string::npos &&
+              status.find("not active") != std::string::npos,
+          status);
+    check("[inactive] ...and still has not registered again", dir.Count("/api/host/register") == 1);
+    dir.Stop();
+  }
+  {
+    FakeDirectory dir;
+    dir.Start();
+    dir.Script("/api/host/register",
+               {Reply{403, "{\"error\":\"fixture: waiting for approval\",\"code\":\"pending\"}"},
+                Reply{403, "{\"error\":\"fixture: waiting for approval\",\"code\":\"pending\"}"},
+                Reply{403, "{\"error\":\"fixture: waiting for approval\",\"code\":\"pending\"}"},
+                Reply{403, "{\"error\":\"fixture: waiting for approval\",\"code\":\"pending\"}"}});
+    const std::string status = RunHost(dir, "register-403", 0, 4, false, dir.udpPort());
+    check("[403] a refused registration is not retried every heartbeat",
+          dir.Count("/api/host/register") <= 2, std::to_string(dir.Count("/api/host/register")));
+    check("[403] ...the directory's own sentence is what the host says",
+          status.find("registration refused: fixture: waiting for approval") != std::string::npos,
+          status);
+    check("[403] ...and nothing was heartbeated", dir.Count("/api/host/heartbeat") == 0);
+    dir.Stop();
+  }
+
   // ---------------------------------------- a port that is not a port must not become one
   //
   // The reply to the address probe is the host's own public port: it is what gets published, and

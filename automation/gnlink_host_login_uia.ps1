@@ -9,6 +9,9 @@
 #   -Expect signin     the sign-in form is up. Lists what it shows, photographs it, and -- when
 #                      -Account and -Password are given -- types them and presses Sign in.
 #   -Expect signedin   the status card is up without anything having been typed.
+#   -ExpectRefusalFile with -Expect signin and -Account: the sign-in is expected to be REFUSED
+#                      with the sentence in that UTF-8 file (the directory's words for an account
+#                      waiting for approval or stopped), shown on the form, and no status card.
 #
 # UI Automation supplies the tree, what is on screen and where. On this window it reports every
 # control as a Pane with no patterns, so a control is told apart by its window class (Edit,
@@ -30,6 +33,7 @@ param(
   [string]$Password = '',
   [Parameter(Mandatory = $true)][string]$Shot,
   [string]$ShotAfter = '',
+  [string]$ExpectRefusalFile = '',
   [int]$TimeoutSec = 30
 )
 
@@ -227,8 +231,29 @@ if ($Expect -eq 'signin') {
     [void][GnlinkHostUia]::PostMessage($button.Hwnd, 0x0201, [IntPtr]1, $l)   # WM_LBUTTONDOWN
     [void][GnlinkHostUia]::PostMessage($button.Hwnd, 0x0202, [IntPtr]::Zero, $l)   # WM_LBUTTONUP
     [void][GnlinkHostUia]::SetWindowPos($hostHwnd, [IntPtr](-2), 0, 0, 0, 0, $noMoveNoSizeNoActivate)   # HWND_NOTOPMOST
-    $Expect = 'signedin'
-    $Shot = $ShotAfter
+    if ($ExpectRefusalFile -ne '') {
+      # Read as UTF-8: the sentence is Korean, and a command-line argument would not carry it.
+      $want = (Get-Content -LiteralPath $ExpectRefusalFile -Encoding UTF8 -Raw).Trim()
+      $deadline = (Get-Date).AddSeconds($TimeoutSec)
+      $said = $null
+      do {
+        $shown = Get-Shown $window
+        $said = $shown | Where-Object { $_.Type -eq 'Text' -and $_.Name -like "*$want*" } | Select-Object -First 1
+        if ($said) { break }
+        Start-Sleep -Milliseconds 300
+      } while ((Get-Date) -lt $deadline)
+      Write-Controls $shown
+      Check ($null -ne $said) 'the refusal is shown on the form, in the directory''s own words'
+      $card = $shown | Where-Object { $_.Type -eq 'Text' -and $_.Name -like 'Account:*' } | Select-Object -First 1
+      Check ($null -eq $card) 'no status card: the PC was not signed in'
+      $again = $shown | Where-Object { $_.Type -eq 'Button' -and $_.Name -eq 'Sign in' } | Select-Object -First 1
+      Check ($null -ne $again -and $again.Enabled) 'Sign in can be pressed again'
+      if ($ShotAfter -ne '') { Check ([bool](Save-Shot $window $ShotAfter)) "the refusal is photographed: $ShotAfter" }
+      # $Expect stays 'signin': nothing after this looks for a status card.
+    } else {
+      $Expect = 'signedin'
+      $Shot = $ShotAfter
+    }
   }
 }
 

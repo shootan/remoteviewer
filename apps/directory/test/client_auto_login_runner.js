@@ -70,7 +70,9 @@ async function freePort(tcp) {
   return port;
 }
 
-let server, port, env, url;
+let server, port, env, url, adminPort;
+// The admin listener's key: a fixture value, searched for in every log like the secrets below.
+const ADMIN_KEY = 'fixture-admin-key-2b7c90e14d';
 const clients = new Set();
 async function startDirectory() {
   const out = fs.openSync(serverLog, 'a');
@@ -137,12 +139,14 @@ function walk(dir) {
 (async () => {
   port = await freePort(true);
   const udp = await freePort(false);
+  adminPort = await freePort(true);
   url = `http://127.0.0.1:${port}`;
   env = { ...process.env, TEMP: profile, TMP: profile, LOCALAPPDATA: appData,
     GNLINK_RECOVERY_TEST_ROOT: scratch, TEST_HANDED_OUT: captured, TEST_HOLD_LOGIN: holdLogin,
     REMOTE60_DIR_DATA: data, REMOTE60_DIR_PORT: String(port), REMOTE60_DIR_UDP_PORT: String(udp),
     REMOTE60_RELAY_ENABLED: '0', REMOTE60_DIR_TLS_KEY: '', REMOTE60_DIR_TLS_CERT: '',
-    REMOTE60_UPDATE_MANIFEST_URL: '', REMOTE60_LOG_DIR: path.join(scratch, 'logs') };
+    REMOTE60_UPDATE_MANIFEST_URL: '', REMOTE60_LOG_DIR: path.join(scratch, 'logs'),
+    REMOTE60_DIR_ADMIN_PORT: String(adminPort), REMOTE60_DIR_ADMIN_KEY: ADMIN_KEY };
   assert.equal(spawnSync(process.execPath, [serverPath, '--add-account', ACCOUNT, PASSWORD],
                          { env, stdio: 'ignore' }).status, 0);
   await startDirectory();
@@ -302,6 +306,33 @@ function walk(dir) {
   check('the next start is the sign-in form',
         await runClient(executable, 'expect-form', '10-form-after', '') === 0);
 
+  // ------------------------------------------------------------ 12. an account that is not active
+  console.log('\n== 12. an account waiting for approval, approved, stopped, enabled again');
+  const admin = async (route, body, method) => {
+    const response = await fetch(`http://127.0.0.1:${adminPort}${route}`, {
+      method: method || 'POST',
+      headers: { authorization: 'Bearer ' + ADMIN_KEY, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined });
+    return response.status;
+  };
+  const WAITING = 'waiting-user';
+  check('(the operator makes an account: pending)',
+        await admin('/admin/v1/accounts', { id: WAITING, pw: PASSWORD, memo: 'fixture' }) === 201);
+  check('the right password of a pending account: the form says so, in the directory\'s words',
+        await runClient(executable, 'refused-pending', '12-pending', WAITING) === 0);
+  check('(the operator approves it)', await admin(`/admin/v1/accounts/${WAITING}/approve`) === 200);
+  check('approved, it signs in', await runClient(executable, 'sign-in', '12-approved', WAITING) === 0);
+  const waitingDevice = live().find((d) => d.accountId === WAITING);
+  check('(the operator stops it)', await admin(`/admin/v1/accounts/${WAITING}/disable`) === 200);
+  check('stopped: the next start is the form, asking to sign in again (the stored sign-in was refused)',
+        await runClient(executable, 'expect-form', '12-stopped', 'sign-in-again') === 0);
+  check('...its device family was not ended by the stop', !!waitingDevice &&
+        live().some((d) => d.deviceId === waitingDevice.deviceId));
+  check('the password then: the form says the account is stopped',
+        await runClient(executable, 'refused-disabled', '12-disabled', WAITING) === 0);
+  check('(the operator enables it)', await admin(`/admin/v1/accounts/${WAITING}/enable`) === 200);
+  check('enabled, it signs in again', await runClient(executable, 'sign-in', '12-enabled', WAITING) === 0);
+
   // ------------------------------------------------------------ 11. what was written down
   console.log('\n== 11. nothing the directory handed out is written in any log');
   await stopDirectory();
@@ -312,7 +343,7 @@ function walk(dir) {
   for (const file of files) {
     const text = fs.readFileSync(file, 'latin1');
     const wide = Buffer.from(text, 'latin1').toString('utf16le');
-    for (const secret of [...secrets, PASSWORD]) {
+    for (const secret of [...secrets, PASSWORD, ADMIN_KEY]) {
       if (text.includes(secret) || wide.includes(secret)) {
         leaks.push(path.relative(scratch, file) + ' contains a ' + secret.length + '-character secret');
       }

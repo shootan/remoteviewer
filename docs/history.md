@@ -12860,3 +12860,19 @@ Next
 - 배포 목록: `server.js`·`accounts.js`(신규)·`device_credentials.js`·`update_manifest.js`·`version_compare.js`·`wake_target.js`·`package.json`. NAS 환경변수 추가 `REMOTE60_DIR_ADMIN_PORT=29182`·`REMOTE60_DIR_ADMIN_KEY=<키>`(HOST 기본 127.0.0.1) + 재시작 필요. 롤백하면 옛 서버는 상태를 읽지 않아 pending·disabled 도 로그인된다(README 에 기록).
 - 증명하지 못하는 것: 실제 릴레이 세션이 정지 순간 끊기는 것(시험 서버는 릴레이 꺼짐 — closeHostsNow 는 실행되지만 닫을 세션이 없음), TLS·실제 NAS·메인 서버.
 - 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js` 신설, `directory_test.js`, `run.js`) / 문서(`apps/directory/README.md`, 이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (2/2) — 클라: 승인 대기·정지 계정의 문장, Host 의 재시도 간격
+
+- 프롬프트 5절 + 지시서 6. 서버는 (1/2) `3debe25`.
+- PC 클라(GNLinkClient): 로그인 403 은 이미 `error_from_response` 로 서버 문장을 그대로 폼에 보였다 — 코드 변경 없이 제품 창 시험으로 고정. 자동 재시도 없음(403 은 `Failed`, 재시도 경로 아님). 실행 중 401 → 기존 복구(기기 자격 refresh) → 정지 계정이면 refresh 401 → 자격 삭제 → 폼 "다시 로그인해 주세요" → 비밀번호 로그인 → 403 문장.
+- Host 창(GNLinkHost): `register_host` 가 403 을 "id or password is not correct" 로 뭉개던 것을 서버 문장 그대로 돌려주도록(401 은 종전 문구). 선택 인자 `outHttpStatus`.
+- GNLinkStream(HostAgent): 등록 403 → `registration refused: <문장>` + 재등록을 2·4·8… 주기(최대 48 주기 ≈ 20 분)로 미룸. heartbeat 401 이 `code: account_inactive` 이면 **토큰을 지우지 않고** 같은 간격으로 미룸 — 상태 문구에 "token rejected" 가 들어 있어 창은 종전대로 SIGN IN AGAIN, 계정이 다시 enable 되면 같은 토큰으로 재등록 없이 online. 그 밖의 401 은 종전(토큰 버림·재등록).
+- APK: `describe()` 는 403 을 이미 서버 문장 그대로 보였다 — `internal` 로 열고 JVM 시험으로 고정(기존 매칭 문자열 `login required`·`observation*` 도 함께). refresh 401 → `REJECTED`(자격 삭제·로그인 화면) 확인.
+- 시험(console 세션, 비관리자, 격리):
+  - `client_auto_login_runner` exit 0, **220 checks** — 12. 관리 API 로 pending 계정 생성 → 제품 창에서 비밀번호 로그인 → 폼에 "승인 대기 중입니다…"(스크린샷 `client-auto-login.12-pending.png`), 저장·세션 없음 → approve → 로그인 → disable → 다음 시작은 폼 "다시 로그인해 주세요"(저장 자격이 401), 기기 계열은 서버에 살아 있음 → 비밀번호 로그인 → "사용이 정지된 계정입니다."(`12-disabled.png`) → enable → 로그인.
+  - `host_login_ui_runner` exit 0, 52 checks — 5. signup 으로 만든 pending 계정을 Host 창에 입력·Sign in → 창에 서버 문장(스크린샷 `pending-refused.png`), 상태 카드 없음, 다시 누를 수 있음, host.json 에 토큰 없음, 스트리밍 자식 미기동.
+  - `directory_retry_test` exit 0, 133 — [inactive] 토큰 유지·재등록 없음·매 주기 재시도 없음·enable 뒤 같은 토큰으로 online·정지 중 "token rejected: the account is not active" / [403] 재등록 매 주기 아님·서버 문장이 상태.
+  - APK 단위 157/0 · `assembleRelease` 성공 · `host_migration_e2e_test`(REMOTE60_ALLOW_HOST_E2E=1) exit 0 33 · `directory_migration_test` 0 · `login_flow_test` 0 · bridge 0 · session 0 · `client_recovery_ui_runner` 0 · gate win 8 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이 4/4 kill: 403 을 비밀번호 오류로 · inactive 401 에 토큰 버림 · 대기 없음 · APK 403 일반 문구.
+- 증명하지 못하는 것: 설치된 GNLinkHost(관리자 권한)·실제 NAS·APK 화면(기기 없음 — describe 는 JVM, 화면 표시는 기존 `loginErrorText.text = e.message` 경로), 20 분 대기 자체(주기 수로만 확인).
+- 제품/테스트/문서: 제품(`directory_client.{hpp,cpp}`, `DirectoryClient.kt`) / 테스트(`directory_retry_test.cpp`, `client_auto_login_ui_test.cpp`, `client_auto_login_runner.js`, `host_login_ui_runner.js`, `gnlink_host_login_uia.ps1`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).

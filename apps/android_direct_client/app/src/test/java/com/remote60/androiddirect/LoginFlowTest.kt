@@ -727,6 +727,21 @@ class LoginFlowTest {
         }
     }
 
+    @Test
+    fun `an account that is not active - the directory's sentence is what the user sees`() {
+        val pending = "승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다."
+        val disabled = "사용이 정지된 계정입니다."
+        assertEquals(pending, DirectoryClient.describe(403, pending))
+        assertEquals(disabled, DirectoryClient.describe(403, disabled))
+        // The strings clients already match on are unchanged by the added `code`.
+        assertEquals("로그인이 필요합니다", DirectoryClient.describe(401, "login required"))
+        assertEquals("아이디 또는 비밀번호가 맞지 않습니다", DirectoryClient.describe(401, "invalid id or password"))
+        assertEquals("주소 확인 정보가 없어 다시 시도합니다", DirectoryClient.describe(409, "observation_required"))
+        // A refused device credential (401, also for a stopped account) is REJECTED: erased, and
+        // the password asked for -- where the 403 above is then shown.
+        assertEquals(LoginFlow.Call.REJECTED, DirectoryClient.callFor(401))
+    }
+
     // ---------------------------------------------------------------- the session an older version stored
 
     @Test

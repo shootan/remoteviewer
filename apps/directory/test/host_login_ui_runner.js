@@ -118,7 +118,7 @@ function drive(args) {
     REMOTE60_DIR_DATA: path.join(scratch, 'store.json'), REMOTE60_DIR_PORT: String(httpPort),
     REMOTE60_DIR_UDP_PORT: String(udpPort), REMOTE60_RELAY_ENABLED: '0',
     REMOTE60_DIR_TLS_KEY: '', REMOTE60_DIR_TLS_CERT: '', REMOTE60_UPDATE_MANIFEST_URL: '',
-    REMOTE60_LOG_DIR: path.join(scratch, 'logs') };
+    REMOTE60_LOG_DIR: path.join(scratch, 'logs'), REMOTE60_DIR_SIGNUP_KEY: 'fixture-signup-key' };
   assert.equal(spawnSync(process.execPath, [serverPath, '--add-account', ACCOUNT, PASSWORD],
                          { env, stdio: 'ignore' }).status, 0);
   server = spawn(process.execPath, [serverPath], { env, stdio: 'ignore' });
@@ -212,6 +212,29 @@ function drive(args) {
   pass('[fixed-server] a host.json naming another server is left byte-for-byte as it was found');
   assert.equal(launchLines().length, launchesAtSeed);
   pass('[fixed-server] ...and no streaming child is started on its token');
+  await stopHost();
+
+  // ---- 5. an account waiting for approval: the window says so, in the directory's words.
+  const PENDING = 'waiting-user';
+  const signup = await fetch(url + '/api/signup', { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: PENDING, pw: PASSWORD, signupKey: 'fixture-signup-key' }) });
+  assert.equal(signup.status, 200, 'a pending account is made');
+  fs.rmSync(cachePath, { force: true });   // the fixture's own file, inside the scratch profile
+  const refusalFile = path.join(scratch, 'expected-refusal.txt');
+  fs.writeFileSync(refusalFile, '승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다.', 'utf8');
+  const launchesAtPending = launchLines().length;
+  host = spawn(executable, [], { env, stdio: 'ignore' });
+  assert.equal(drive(['-Expect', 'signin', '-Account', PENDING, '-Password', PASSWORD,
+                      '-Shot', path.join(scratch, 'pending-form.png'),
+                      '-ShotAfter', path.join(scratch, 'pending-refused.png'),
+                      '-ExpectRefusalFile', refusalFile]), 0,
+               "a pending account is refused, with the directory's sentence");
+  await sleep(1500);
+  assert(!fs.existsSync(cachePath) || !JSON.parse(fs.readFileSync(cachePath, 'utf8')).hostToken,
+         'nothing was stored for the pending account');
+  assert.equal(launchLines().length, launchesAtPending);
+  pass("[account] a pending account: refused on the form in the directory's words, nothing stored, no streaming child");
   await stopHost();
 
   console.log('      (requests the decoy received: ' + decoyHits.length +
