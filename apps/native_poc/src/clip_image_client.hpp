@@ -162,6 +162,23 @@ class ClipImageClient : private BulkUplinkSource {
    */
   void CancelByUser();
 
+  /**
+   * File copy D5 (any thread): the user pasted files -- an explicit act, before an automatic image
+   * sync. No new image is offered until AfterFilePaste, and a running one is asked to stop (the
+   * existing Cancel, reason Superseded on the wire). The bulk is free only once the host has
+   * CONFIRMED the image's end (the arbiter is released at that point, as for any cancel) -- the file
+   * waits for that, never for the request alone. True when a running image was asked to stop.
+   * The stopped image is kept (shared bytes) as the one candidate to resume.
+   */
+  bool PreemptForFilePaste();
+  /**
+   * The paste is over (either way). The kept image is offered again -- a new transfer id, from the
+   * start -- only when `mayResume` (the caller: switch on, same session, the remote clipboard not
+   * changed since), the host CONFIRMED it cancelled (never an image that was already published), no
+   * newer copy exists here, and it is under a minute old. Otherwise it is dropped.
+   */
+  void AfterFilePaste(bool mayResume);
+
   /** What the transfer bar shows: one consistent snapshot. */
   struct Progress {
     bool active = false;          // an offer is out or its chunks are being served
@@ -173,6 +190,7 @@ class ClipImageClient : private BulkUplinkSource {
     uint64_t finished = 0;        // outcomes so far: a change means a new one below
     ClipOutcome outcome = ClipOutcome::None;  // the last one
     uint8_t detail = 0;                       // its why (see ClipOutcome)
+    bool heldForFile = false;                 // D5: an image waits (or is being stopped) for a file paste
   };
   Progress GetProgress() const;
 
@@ -292,6 +310,13 @@ class ClipImageClient : private BulkUplinkSource {
   // next copy's transfer B (Codex review of da24d9f, P1).
   uint64_t cancelTargetId_ = 0;
   ClipImageReason cancelReason_ = ClipImageReason::Superseded;  // User when the bar's Cancel asked
+  // D5: a file paste has the bulk's priority; the image it stopped, kept to resume under conditions.
+  bool fileHold_ = false;
+  ClipPackage lastOffered_;          // the package now on offer (shared bytes)
+  bool havePreempted_ = false;
+  ClipPackage preempted_;
+  uint64_t preemptedGen_ = 0, preemptedAtUs_ = 0, preemptedId_ = 0;
+  bool preemptedConfirmedCancelled_ = false;
   uint64_t lastBytesTotal_ = 0;                // the last finished transfer's size (under mu_)
   // A transfer stopped here whose cancel the host has not settled yet. Until it has, nothing new is
   // offered (the host would answer Busy and the newest copy would be lost) and only replies naming

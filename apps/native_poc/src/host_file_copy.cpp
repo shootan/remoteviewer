@@ -803,6 +803,7 @@ bool HostFileCopyService::EndPasteLocked(fn::PasteState state, fn::PasteEndReaso
     replyCv_.notify_all();
     if (ok) ++counters_.sendEnded;
     else ++counters_.sendFailed;
+    if (reason == fn::PasteEndReason::Verification) ++counters_.sendVerificationEnds;
     counters_.lastSendEndReason = static_cast<uint8_t>(reason);
     os << "send ended state=" << static_cast<int>(state) << " reason=" << static_cast<int>(reason)
        << " bytes=" << (server_.GetCounters().bytesServed - sendBytesAtStart_);

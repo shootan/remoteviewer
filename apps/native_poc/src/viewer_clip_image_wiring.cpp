@@ -51,6 +51,10 @@ void start_clip_image_client(ViewerState& ctx, uint32_t udpMtu) {
     exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
     return remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
   });
+  // D5: a paste (an explicit act) stops a running image and waits for its confirmed end; the image
+  // may go again afterwards under the conditions ClipImageClient::AfterFilePaste checks.
+  ctx.control.fileCopy.SetImagePreemption([&ctx] { return ctx.control.clipImage.PreemptForFilePaste(); },
+                                          [&ctx](bool mayResume) { ctx.control.clipImage.AfterFilePaste(mayResume); });
   ctx.control.fileCopy.Start(
       [&ctx](const void* data, size_t len) -> bool {
         return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
@@ -73,6 +77,8 @@ void create_clip_transfer_bar(ViewerState& ctx) {
   hooks.progress = [&ctx] { return ctx.control.clipImage.GetProgress(); };
   hooks.onCancel = [&ctx] { ctx.control.clipImage.CancelByUser(); };
   hooks.onLog = [&ctx](const std::string& line) { log_client_line(ctx, line); };
+  hooks.fileProgress = [&ctx] { return ctx.control.fileCopy.GetProgress(); };
+  hooks.onFileCancel = [&ctx] { ctx.control.fileCopy.CancelPaste(); };
   remote60::native_poc::clip_transfer_bar_create(ctx.session.hwnd, std::move(hooks));
 }
 

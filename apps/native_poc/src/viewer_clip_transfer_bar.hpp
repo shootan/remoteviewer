@@ -22,6 +22,7 @@
 
 // clip_image_client.hpp first: it brings winsock2.h, which must precede windows.h.
 #include "clip_image_client.hpp"
+#include "file_copy_client.hpp"
 
 #include <windows.h>
 
@@ -42,13 +43,35 @@ struct ClipBarView {
   uint8_t cancellingWhy = 0;                // ClipImageReason (Cancelling only)
   ClipOutcome outcome = ClipOutcome::None;  // Result only
   uint8_t detail = 0;                       // Result only (see ClipOutcome)
+  // File copy (t-zdmsd4gb D6): when set, the bar is showing a file paste and draws `fileText`; Cancel is
+  // offered while the paste runs and no cancel is pending.
+  bool isFile = false;
+  bool fileCancel = false;
+  bool imageForFile = false;  // D5: the image is being stopped because files are being pasted
+  std::wstring fileText;
 };
 
 /** The one line the bar draws. */
 std::wstring clip_transfer_bar_text(const ClipBarView& v);
 
 /** Whether the Cancel button is offered (only while sending). */
-inline bool clip_transfer_bar_has_cancel(const ClipBarView& v) { return v.phase == ClipBarPhase::Sending; }
+inline bool clip_transfer_bar_has_cancel(const ClipBarView& v) {
+  return v.isFile ? v.fileCancel : v.phase == ClipBarPhase::Sending;
+}
+
+/**
+ * File copy (D6): the bar's view of the file state, Hidden when there is nothing to say. What is known
+ * is said apart: an offer published (a paste is POSSIBLE -- 5 s), bytes moving either way, a cancel
+ * asked and not confirmed, and how the last paste ended (5 s) -- "완료" only when the consumer ended it
+ * successfully, a failure after bytes moved says a partial file may be left. `state` keeps what was
+ * already shown (like seenFinished for images).
+ */
+struct FileBarState {
+  bool primed = false;
+  uint64_t seenFinished = 0, seenOffered = 0, seenAvailable = 0;
+  uint64_t resultUntilUs = 0, offeredUntilUs = 0, availableUntilUs = 0;
+};
+ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t nowUs, FileBarState* state);
 
 /**
  * The view for a progress snapshot. `seenFinished` is the finished-count the bar last showed a
@@ -63,6 +86,9 @@ struct ClipTransferBarHooks {
   std::function<ClipImageClient::Progress()> progress;
   std::function<void()> onCancel;
   std::function<void(const std::string&)> onLog;
+  // File copy (D6). While the file view has something to say it takes the bar; Cancel then cancels the paste.
+  std::function<FileCopyClient::Progress()> fileProgress;
+  std::function<void()> onFileCancel;
 };
 
 /** Creates the bar for `owner` (hidden until a transfer starts). Later calls are ignored. */

@@ -61,7 +61,116 @@ static std::wstring refused_reason(ClipImageVerdict v) {
   }
 }
 
+namespace {
+
+std::wstring file_refused_text(uint16_t status) {
+  switch (static_cast<file_copy::Status>(status)) {
+    case file_copy::Status::Replaced: return L"원본 파일이 복사한 뒤 다른 파일로 바뀌어 붙여넣지 못했습니다";
+    case file_copy::Status::Changed: return L"원본 파일이 복사한 뒤 바뀌어 붙여넣지 못했습니다";
+    case file_copy::Status::SharingViolation: return L"원본 파일을 다른 프로그램이 쓰고 있어 붙여넣지 못했습니다";
+    case file_copy::Status::NotFound: return L"원본 파일이 없어져 붙여넣지 못했습니다";
+    case file_copy::Status::AccessDenied: return L"원본 파일을 읽을 권한이 없어 붙여넣지 못했습니다";
+    case file_copy::Status::Refused: return L"다른 전송이 진행 중이라 붙여넣지 못했습니다";
+    default: return L"파일을 붙여넣지 못했습니다";
+  }
+}
+
+std::wstring file_ended_text(const FileCopyClient::Progress& p) {
+  const auto reason = static_cast<file_copy::net::PasteEndReason>(p.lastReason);
+  const std::wstring n = std::to_wstring(p.lastFiles);
+  if (p.lastRefused != 0) return file_refused_text(p.lastRefused);
+  if (reason == file_copy::net::PasteEndReason::Completed) {
+    // Completed = the consumer (Explorer, ...) ended the paste successfully -- not merely "bytes arrived".
+    return (p.lastToRemote ? L"원격 PC에서 파일 " : L"파일 ") + n + L"개 붙여넣기 완료 (" + megabytes(p.lastBytes) + L" MB, " +
+           seconds(p.lastElapsedMs) + L")";
+  }
+  std::wstring s;
+  switch (reason) {
+    case file_copy::net::PasteEndReason::Cancelled: s = L"파일 붙여넣기를 취소했습니다"; break;
+    case file_copy::net::PasteEndReason::Verification: s = L"전송 데이터 검증에 실패해 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Replaced: s = L"원본 파일이 다른 파일로 바뀌어 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Changed: s = L"원본 파일이 바뀌어 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::InUse: s = L"원본 파일을 다른 프로그램이 쓰고 있어 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Idle: s = L"진행이 멈춰 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Disabled: s = L"파일 복사가 꺼져 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Session: s = L"연결이 끊겨 붙여넣기가 중단됐습니다"; break;
+    case file_copy::net::PasteEndReason::Superseded: s = L"새 붙여넣기가 시작돼 이전 붙여넣기가 중단됐습니다"; break;
+    default: s = L"붙여넣는 프로그램이 실패를 알렸습니다"; break;
+  }
+  // Removing a partly written file is not ours to promise: the consumer decides.
+  if (p.lastBytes > 0) s += L" — 받는 쪽에 일부만 저장된 파일이 남았을 수 있습니다";
+  return s;
+}
+
+}  // namespace
+
+ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t nowUs, FileBarState* st) {
+  ClipBarView v;
+  if (!st->primed) {
+    // The first poll: whatever ended or was offered before the bar existed is not news.
+    st->primed = true;
+    st->seenFinished = p.finished;
+    st->seenOffered = p.offered;
+    st->seenAvailable = p.available;
+  }
+  if (p.cancelling) {
+    v.isFile = true;
+    v.phase = ClipBarPhase::Cancelling;
+    v.fileText = L"파일 붙여넣기를 취소하는 중… (상대 PC의 확인을 기다립니다)";
+    return v;
+  }
+  if (p.sending || p.receiving) {
+    v.isFile = true;
+    v.phase = ClipBarPhase::Sending;
+    v.fileCancel = true;
+    v.bytesDone = p.bytesDone;
+    v.bytesTotal = p.bytesTotal;
+    v.elapsedMs = p.elapsedMs;
+    const uint64_t pct = p.bytesTotal ? (std::min<uint64_t>)(99, p.bytesDone * 100 / p.bytesTotal) : 0;
+    v.fileText = (p.sending ? L"원격 PC로 파일 " : L"원격 PC에서 파일 ") + std::to_wstring(p.files) +
+                 (p.sending ? L"개 보내는 중 " : L"개 받는 중 ") + std::to_wstring(pct) + L"% (" + megabytes(p.bytesDone) + L" / " +
+                 megabytes(p.bytesTotal) + L" MB) · " + seconds(p.elapsedMs);
+    if (p.elapsedMs >= kSlowAfterMs) v.fileText += L" — 전송에 시간이 걸리고 있습니다";
+    st->seenFinished = p.finished;  // what ended before this one is not news any more
+    st->resultUntilUs = 0;
+    return v;
+  }
+  if (p.finished != st->seenFinished) {
+    st->seenFinished = p.finished;
+    st->resultUntilUs = nowUs + kClipBarResultUs;
+  }
+  if (st->resultUntilUs > nowUs) {
+    v.isFile = true;
+    v.phase = ClipBarPhase::Result;
+    v.fileText = file_ended_text(p);
+    return v;
+  }
+  if (p.offered != st->seenOffered) {
+    st->seenOffered = p.offered;
+    st->offeredUntilUs = nowUs + kClipBarResultUs;
+  }
+  if (p.available != st->seenAvailable) {
+    st->seenAvailable = p.available;
+    st->availableUntilUs = nowUs + kClipBarResultUs;
+  }
+  // A published offer says what the user can do now -- not that anything was sent.
+  if (st->availableUntilUs > nowUs) {
+    v.isFile = true;
+    v.phase = ClipBarPhase::Result;
+    v.fileText = L"원격 PC에서 복사한 파일 " + std::to_wstring(p.availableFiles) + L"개를 이 PC에 붙여넣을 수 있습니다";
+    return v;
+  }
+  if (st->offeredUntilUs > nowUs) {
+    v.isFile = true;
+    v.phase = ClipBarPhase::Result;
+    v.fileText = L"복사한 파일 " + std::to_wstring(p.offeredFiles) + L"개를 원격 PC에서 붙여넣을 수 있습니다";
+    return v;
+  }
+  return v;
+}
+
 std::wstring clip_transfer_bar_text(const ClipBarView& v) {
+  if (v.isFile) return v.fileText;
   if (v.phase == ClipBarPhase::Sending) {
     const uint64_t pct = v.bytesTotal ? (std::min<uint64_t>)(99, v.bytesDone * 100 / v.bytesTotal) : 0;
     std::wstring s = L"원격 PC로 이미지 보내는 중 " + std::to_wstring(pct) + L"% (" + megabytes(v.bytesDone) + L" / " +
@@ -72,6 +181,7 @@ std::wstring clip_transfer_bar_text(const ClipBarView& v) {
     return s;
   }
   if (v.phase == ClipBarPhase::Cancelling) {
+    if (v.imageForFile) return L"파일 붙여넣기를 먼저 하려고 이미지 보내기를 멈추는 중…";
     return static_cast<ClipImageReason>(v.cancellingWhy) == ClipImageReason::User
                ? L"이미지 보내기를 취소하는 중…"
                : L"새로 복사한 내용으로 바꾸는 중…";
@@ -124,6 +234,7 @@ ClipBarView clip_transfer_bar_view(const ClipImageClient::Progress& p, uint64_t 
   if (p.cancelling) {  // stopped here; what the host did is not known yet
     v.phase = ClipBarPhase::Cancelling;
     v.cancellingWhy = p.cancellingWhy;
+    v.imageForFile = p.heldForFile;
     *seenFinished = p.finished;
     *resultUntilUs = 0;
     return v;
@@ -151,6 +262,7 @@ struct Bar {
   HWND owner = nullptr;
   ClipTransferBarHooks hooks;
   ClipBarView view;
+  FileBarState fileState;
   uint64_t seenFinished = 0;
   uint64_t resultUntilUs = 1;  // 1 = "nothing polled yet" (see clip_transfer_bar_view)
   RECT cancel{};
@@ -217,7 +329,13 @@ void reposition() {
 void poll() {
   if (!g.hooks.progress) return;
   const ClipBarView before = g.view;
-  g.view = clip_transfer_bar_view(g.hooks.progress(), BulkPacer::NowUs(), &g.seenFinished, &g.resultUntilUs);
+  const uint64_t nowUs = BulkPacer::NowUs();
+  g.view = clip_transfer_bar_view(g.hooks.progress(), nowUs, &g.seenFinished, &g.resultUntilUs);
+  // A file paste (running, cancelling, just ended, just offered) takes the bar over the image's line.
+  if (g.hooks.fileProgress) {
+    const ClipBarView fv = file_transfer_bar_view(g.hooks.fileProgress(), nowUs, &g.fileState);
+    if (fv.isFile) g.view = fv;
+  }
   if (g.view.phase != before.phase && g.hooks.onLog) {
     std::string line = "[clip-bar] phase=" + std::to_string(static_cast<int>(g.view.phase));
     if (g.view.phase == ClipBarPhase::Result) {
@@ -225,7 +343,8 @@ void poll() {
     }
     g.hooks.onLog(line);
   }
-  const bool changed = g.view.phase != before.phase || g.view.bytesDone != before.bytesDone ||
+  const bool changed = g.view.phase != before.phase || g.view.isFile != before.isFile || g.view.fileText != before.fileText ||
+                       g.view.bytesDone != before.bytesDone ||
                        g.view.elapsedMs / 1000 != before.elapsedMs / 1000 || g.view.outcome != before.outcome ||
                        g.view.detail != before.detail;
   if (changed) reposition();
@@ -315,7 +434,12 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (g.hooks.onLog) {
         g.hooks.onLog(std::string("[clip-bar] cancel clicked, callback ") + (g.hooks.onCancel ? "present" : "MISSING"));
       }
-      if (g.hooks.onCancel) g.hooks.onCancel();
+      if (g.view.isFile) {
+        if (g.hooks.onLog) g.hooks.onLog("[clip-bar] file paste cancel clicked");
+        if (g.hooks.onFileCancel) g.hooks.onFileCancel();
+      } else if (g.hooks.onCancel) {
+        g.hooks.onCancel();
+      }
       poll();
       return 0;
     }

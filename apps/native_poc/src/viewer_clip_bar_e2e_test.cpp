@@ -493,8 +493,9 @@ int wmain(int argc, wchar_t** argv) {
   // The TEST build of the host: received images go to a folder, never to a clipboard.
   const bool staged =
       CopyFileW((myDir + L"GNLinkStreamClipSink.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
-      CopyFileW(me.c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE);
-  check("the test host (ClipSink) and a never-answering helper could be staged", staged);
+      CopyFileW(me.c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE) &&
+      CopyFileW((myDir + L"GNLinkClipHelper.exe").c_str(), (dir + L"GNLinkClipHelper.exe").c_str(), FALSE);
+  check("the test host (ClipSink), a never-answering helper and the clipboard helper could be staged", staged);
 
   CaptureSource source;
   check("a window of this process is up for the host to capture", source.Start());
@@ -504,6 +505,7 @@ int wmain(int argc, wchar_t** argv) {
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
+  std::wstring hostDesktopName;  // the host's private station (its consumers paste there)
   const std::wstring hostLogPath = dir + L"host.log";
   const std::wstring sinkDir = dir + L"sink";
   HANDLE hostLog = INVALID_HANDLE_VALUE;
@@ -514,6 +516,8 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", nullptr);  // on: images need the text sync
     CreateDirectoryW(sinkDir.c_str(), nullptr);
     SetEnvironmentVariableW(L"REMOTE60_CLIP_IMAGE_TEST_SINK_DIR", sinkDir.c_str());
+    // File copy: the test build's helper runs as this user on the host's private station.
+    SetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_HELPER_AS_SELF", L"1");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
                        L" --fps 30 --seconds 300 --input-injection-mode none" + e2e_capture_window_args(source.title);
@@ -547,6 +551,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     static std::wstring hostDesktop;
     hostDesktop = std::wstring(wsName) + L"\\Default";
+    hostDesktopName = hostDesktop;
     check("the host gets a private window station (its own clipboard)", ws != nullptr && privateDesk != nullptr,
           narrow(hostDesktop));
     si.lpDesktop = hostDesktop.data();
@@ -646,7 +651,9 @@ int wmain(int argc, wchar_t** argv) {
         ctx.control.udpControl.Tick();
         const int n = recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
         if (n <= 0) continue;
-        // The product's receive order (viewer_video_receiver.cpp): the bulk stream first.
+        // The product's receive order (viewer_video_receiver.cpp): the bulk streams first -- a file
+        // paste's, then an image's.
+        if (ctx.session.bulkChannelNegotiated && ctx.control.fileCopy.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
         if (ctx.session.bulkChannelNegotiated && ctx.control.clipImage.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
         if (ctx.control.resume.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
         if (ctx.control.udpControl.OnPacket(buf.data(), static_cast<size_t>(n))) continue;
@@ -794,6 +801,109 @@ int wmain(int argc, wchar_t** argv) {
           save_windows_png(viewerWindow, bar, outDir + L"\\03_published.png", &shot), shot);
     const bool hidden = pump_until([&] { return !IsWindowVisible(bar); }, 8000);
     check("the result line goes away by itself (about 5 s)", hidden);
+
+    // ---------------------------------------------------------------- 3. files (t-zdmsd4gb D6)
+    // The one replaced step: the files come from this test (SubmitLocalFiles is the product method
+    // the window procedure calls on a CF_HDROP copy), not from the user's clipboard. The paste is a
+    // real consumer (Explorer's copy engine) on the host's private station.
+    std::cout << "\n--- files: offered, sending, Cancel, a completed paste ---\n";
+    const bool filesUsable = pump_until([&] { return ctx.control.fileCopy.Usable(); }, 15000);
+    check("the host says it takes files (Pong 0x800)", filesUsable);
+    const std::wstring filesDir = dir + L"files";
+    CreateDirectoryW(filesDir.c_str(), nullptr);
+    const std::wstring bigPath = filesDir + L"\\big file.bin";
+    {
+      std::vector<uint8_t> big(16u * 1024u * 1024u);
+      uint32_t x = 0x1234567u;
+      for (auto& b : big) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        b = static_cast<uint8_t>(x);
+      }
+      std::ofstream(bigPath, std::ios::binary).write(reinterpret_cast<const char*>(big.data()), static_cast<std::streamsize>(big.size()));
+    }
+    ctx.control.fileCopy.SubmitLocalFiles({bigPath}, 9001);
+    const bool offered = pump_until([&] {
+      const ClipBarView v = clip_transfer_bar_current();
+      return v.isFile && clip_transfer_bar_text(v).find(L"붙여넣을 수 있습니다") != std::wstring::npos;
+    }, 20000);
+    const std::wstring f0 = clip_transfer_bar_text(clip_transfer_bar_current());
+    check("the bar says the copied file can be pasted on the remote PC (an offer, not a transfer)",
+          offered && f0 == L"복사한 파일 1개를 원격 PC에서 붙여넣을 수 있습니다" && IsWindowVisible(bar), narrow(f0));
+    check("screenshot: offered", save_windows_png(viewerWindow, bar, outDir + L"\\04_file_offered.png", &shot), shot);
+
+    const std::wstring consumerExe = myDir + L"remote60_file_copy_helper_e2e_test.exe";
+    const auto start_consumer = [&](const std::wstring& dest, uint64_t expect, PROCESS_INFORMATION* pi) {
+      CreateDirectoryW(dest.c_str(), nullptr);
+      std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode drop --dest \"" + dest + L"\" --result \"" + dest +
+                         L".txt\" --expect-bytes " + std::to_wstring(expect) + L" --wait-sec 60";
+      std::vector<wchar_t> c(cmd.begin(), cmd.end());
+      c.push_back(0);
+      STARTUPINFOW csi{};
+      csi.cb = sizeof(csi);
+      std::wstring d = hostDesktopName;
+      csi.lpDesktop = d.data();
+      const bool ok = CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &csi, pi) != 0;
+      if (ok) AssignProcessToJobObject(job, pi->hProcess);
+      return ok;
+    };
+    PROCESS_INFORMATION bigPi{};
+    check("a paste consumer starts on the host's private station", start_consumer(dir + L"destBig", 16u * 1024u * 1024u, &bigPi));
+    const bool fileSending = pump_until([&] {
+      const ClipBarView v = clip_transfer_bar_current();
+      return v.isFile && v.phase == ClipBarPhase::Sending && v.bytesDone > 0 && v.elapsedMs >= 3000;
+    }, 40000);
+    const std::wstring f1 = clip_transfer_bar_text(clip_transfer_bar_current());
+    check("the bar shows the file going out while it runs", fileSending && IsWindowVisible(bar), narrow(f1));
+    check("...with file count, a percentage, sizes and seconds",
+          f1.find(L"원격 PC로 파일 1개 보내는 중") == 0 && f1.find(L"%") != std::wstring::npos && f1.find(L"MB") != std::wstring::npos);
+    const RECT fc = clip_transfer_bar_cancel_rect();
+    check("...and a Cancel button", fc.right > fc.left);
+    check("screenshot: file sending", save_windows_png(viewerWindow, bar, outDir + L"\\05_file_sending.png", &shot), shot);
+    const auto served0 = ctx.control.fileCopy.GetCounters().bytesServed;
+    click_bar(fc.left / 2, (fc.top + fc.bottom) / 2);
+    pump_until([] { return false; }, 1000);
+    check("a click beside the button cancels nothing (negative control)",
+          ctx.control.fileCopy.PasteActive() && ctx.control.fileCopy.GetCounters().bytesServed > served0);
+    click_bar((fc.left + fc.right) / 2, (fc.top + fc.bottom) / 2);
+    const bool fileCancelled = pump_until([&] {
+      const ClipBarView v = clip_transfer_bar_current();
+      return v.isFile && v.phase == ClipBarPhase::Result && !ctx.control.fileCopy.PasteActive();
+    }, 20000);
+    const std::wstring f2 = clip_transfer_bar_text(clip_transfer_bar_current());
+    check("Cancel ends the paste, confirmed by the host: the bar says it was cancelled, without a Cancel button",
+          fileCancelled && f2 == L"파일 붙여넣기를 취소했습니다" + std::wstring(L" — 받는 쪽에 일부만 저장된 파일이 남았을 수 있습니다") &&
+              clip_transfer_bar_cancel_rect().right == 0,
+          narrow(f2));
+    check("screenshot: file cancelled", save_windows_png(viewerWindow, bar, outDir + L"\\06_file_cancelled.png", &shot), shot);
+    if (bigPi.hProcess) {
+      WaitForSingleObject(bigPi.hProcess, 70000);
+      CloseHandle(bigPi.hProcess);
+      CloseHandle(bigPi.hThread);
+    }
+    const std::wstring smallPath = filesDir + L"\\small.txt";
+    std::ofstream(smallPath, std::ios::binary) << std::string(40000, 'x');
+    ctx.control.fileCopy.SubmitLocalFiles({smallPath}, 9002);
+    pump_until([&] { return ctx.control.fileCopy.GetCounters().offersAccepted >= 2; }, 20000);
+    PROCESS_INFORMATION smallPi{};
+    start_consumer(dir + L"destSmall", 40000, &smallPi);
+    const bool completed = pump_until([&] {
+      return clip_transfer_bar_text(clip_transfer_bar_current()).find(L"붙여넣기 완료") != std::wstring::npos;
+    }, 40000);
+    const std::wstring f3 = clip_transfer_bar_text(clip_transfer_bar_current());
+    check("a paste the consumer completes: the bar says it was completed on the remote PC",
+          completed && f3.find(L"원격 PC에서 파일 1개 붙여넣기 완료") == 0, narrow(f3));
+    check("screenshot: file completed", save_windows_png(viewerWindow, bar, outDir + L"\\07_file_completed.png", &shot), shot);
+    if (smallPi.hProcess) {
+      WaitForSingleObject(smallPi.hProcess, 30000);
+      CloseHandle(smallPi.hProcess);
+      CloseHandle(smallPi.hThread);
+    }
+    std::ifstream smallLanded(dir + L"destSmall\\small.txt", std::ios::binary | std::ios::ate);
+    check("...and the file is there, whole", smallLanded && smallLanded.tellg() == 40000);
+    check("this viewer never started a clipboard helper of its own (nothing was put on this PC's clipboard)",
+          ctx.control.fileCopy.GetCounters().helperLaunches == 0);
   }
 
   // ------------------------------------------------------------------------------- teardown
@@ -802,6 +912,7 @@ int wmain(int argc, wchar_t** argv) {
   ingressStop.store(true);
   if (ingress.joinable()) ingress.join();
   ctx.control.clipImage.Stop();
+  ctx.control.fileCopy.Stop();
   if (sock != INVALID_SOCKET) closesocket(sock);
   if (viewerWindow) DestroyWindow(viewerWindow);
   check("the bar is destroyed with the viewer window", clip_transfer_bar_window() == nullptr);
@@ -820,6 +931,13 @@ int wmain(int argc, wchar_t** argv) {
   if (launched && ready) {
     const int cancelEnds = count_lines(hostLogPath, "[clip-image] end state=cancelled reason=9");
     const int publishedEnds = count_lines(hostLogPath, "[clip-image] end state=published");
+    // Files: the host's own account of the two pastes -- the cancelled one (state 4 = failed,
+    // reason 4 = cancelled) and the completed one (state 3 = ended, reason 1 = completed).
+    const int fileCancelEnds = count_lines(hostLogPath, "[file-copy] paste ended state=4 reason=4");
+    const int fileCompletedEnds = count_lines(hostLogPath, "[file-copy] paste ended state=3 reason=1");
+    check("host log: the big file's paste ended cancelled on the host", fileCancelEnds == 1, std::to_string(fileCancelEnds));
+    check("host log: the small file's paste ended completed on the host", fileCompletedEnds == 1,
+          std::to_string(fileCompletedEnds));
     check("host log: the transfer ended as cancelled by the USER (reason 9) on the host", cancelEnds == 1,
           std::to_string(cancelEnds));
     check("host log: exactly one image published (the small one)", publishedEnds == 1, std::to_string(publishedEnds));

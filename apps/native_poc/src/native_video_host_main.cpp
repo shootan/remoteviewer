@@ -277,6 +277,28 @@ int main(int argc, char** argv) {
     clientSession.onFileCopySessionEnd = [&fileCopyService](uint64_t epoch) { fileCopyService.OnSessionEnd(epoch); };
     fileTestSource.Start(&fileCopyService);
     std::cout << "[native-video-host][file-copy] TEST SOURCE (no clipboard)\n";
+  } else if (clipboardFilesEnabled && [] {
+               wchar_t v[8] = L"";
+               return GetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_HELPER_AS_SELF", v, 8) > 0 && v[0] == L'1';
+             }()) {
+    // TEST BUILD ONLY: a host on a private window station, not elevated (the transfer-bar e2e) --
+    // its file-copy helper runs as this same user on this station, instead of the linked token's
+    // launch the shipped host uses. Everything else is the product path.
+    remote60::native_poc::HostFileCopyService::Config fcfg;
+    fcfg.enabled = true;
+    fcfg.launcher = [](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
+      wchar_t path[MAX_PATH] = L"";
+      const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+      std::wstring exe(path, n);
+      exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
+      return remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
+    };
+    fcfg.videoBusy = [&sender]() {
+      std::lock_guard<std::mutex> lock(sender.mu);
+      return !sender.queue.empty();
+    };
+    fileCopyService.Configure(fcfg, &hostBulkArbiter);  // the product block below then finds it configured
+    std::cout << "[native-video-host][file-copy] TEST HELPER AS SELF (private station)\n";
   }
 #endif
   if (clipboardFilesEnabled) {

@@ -134,21 +134,23 @@ int main() {
                                                  f.fake.ends[0].second == EndReason::Ended && !f.obj->in_operation());
   }
   {
-    std::printf("\n--- ③ a new paste starts while the descriptor wait is pumping ---\n");
+    std::printf("\n--- ③ a second paste starts while the descriptor wait is pumping ---\n");
     Fixture f;
     f.obj->StartOperation(nullptr);
     const uint64_t first = f.obj->paste_op();
-    f.fake.duringWaitDescriptor = [&] { f.obj->StartOperation(nullptr); };  // the shell again, re-entrant
+    HRESULT second = S_OK;
+    f.fake.duringWaitDescriptor = [&] { second = f.obj->StartOperation(nullptr); };  // another paste, re-entrant
     UINT items = 0;
     const HRESULT hr = f.descriptor(&items);
-    check("THE OLD WAIT'S REPLY DOES NOT BECOME THE NEW OPERATION'S DESCRIPTOR (E_FAIL)", FAILED(hr), std::to_string(static_cast<unsigned long>(hr)));
-    check("...the first operation was superseded", f.fake.ends.size() == 1 && f.fake.ends[0].first == first && f.fake.ends[0].second == EndReason::Superseded);
-    check("...the new operation is open and unconfirmed", f.obj->in_operation() && f.obj->paste_op() == first + 1);
+    check("THE SECOND PASTE IS REFUSED (busy), NOT SWAPPED IN", second == HRESULT_FROM_WIN32(ERROR_BUSY),
+          std::to_string(static_cast<unsigned long>(second)));
+    check("...the running one is untouched: no end, same op", f.fake.ends.empty() && f.obj->in_operation() && f.obj->paste_op() == first);
+    check("...and its own wait still confirms its descriptor", hr == S_OK && items == 2 && f.fake.descriptorWaits == 1,
+          std::to_string(static_cast<unsigned long>(hr)));
     f.fake.duringWaitDescriptor = nullptr;
-    check("...and it confirms itself with its own wait", f.descriptor(&items) == S_OK && items == 2 && f.fake.descriptorWaits == 2);
     HRESULT shr = E_FAIL;
     IStream* s = f.stream(0, &shr);
-    check("...and serves streams for itself", SUCCEEDED(shr) && s);
+    check("...and serves its streams", SUCCEEDED(shr) && s);
     if (s) s->Release();
   }
   {
@@ -160,26 +162,15 @@ int main() {
     HRESULT hr = E_FAIL;
     IStream* s = f.stream(0, &hr);
     std::vector<uint8_t> buf(4096, 0xEE);
-    f.fake.duringRead = [&] { f.obj->StartOperation(nullptr); };
+    HRESULT second = S_OK;
+    f.fake.duringRead = [&] { second = f.obj->StartOperation(nullptr); };
     ULONG got = 7;
     const HRESULT r = s->Read(buf.data(), static_cast<ULONG>(buf.size()), &got);
-    bool untouched = true;
-    for (uint8_t b : buf) untouched = untouched && b == 0xEE;
-    check("THE BYTES FOR THE ENDED PASTE ARE NOT HANDED TO THE STREAM (E_FAIL, 0 read, buffer untouched)",
-          FAILED(r) && got == 0 && untouched && f.fake.reads == 1);
+    check("A SECOND PASTE DURING A READ IS REFUSED (busy)", second == HRESULT_FROM_WIN32(ERROR_BUSY));
+    check("...and the running paste's Read completes with its bytes", SUCCEEDED(r) && got > 0 && buf[0] == content_byte(0, 0) &&
+                                                                     f.fake.ends.empty() && f.fake.reads == 1);
     f.fake.duringRead = nullptr;
-    ULONG got2 = 7;
-    check("...and the old stream stays dead without asking the host again", FAILED(s->Read(buf.data(), 16, &got2)) && got2 == 0 && f.fake.reads == 1);
     s->Release();
-    check("...while the new operation works: descriptor + stream + read", f.descriptor(&items) == S_OK && [&] {
-      HRESULT h2 = E_FAIL;
-      IStream* s2 = f.stream(1, &h2);
-      if (!s2) return false;
-      ULONG g = 0;
-      const HRESULT rr = s2->Read(buf.data(), 16, &g);
-      s2->Release();
-      return SUCCEEDED(rr) && g == 5 && buf[0] == content_byte(0, 1);
-    }());
   }
   {
     std::printf("\n--- ③ the offer is cleared / the clipboard changes hands while a Read is waiting ---\n");

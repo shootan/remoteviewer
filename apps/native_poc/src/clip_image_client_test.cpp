@@ -423,6 +423,72 @@ int main() {
     check("the host's Published ends it as published", r.outcome() == ClipOutcome::Published && !r.client.Active());
   }
 
+  // ------------------------------------------------------------------ D5 (t-zdmsd4gb step 3)
+  std::printf("\n--- D5: a file paste stops the running image; it goes again only under the conditions ---\n");
+  {
+    Rig r;
+    BulkArbiter a;
+    r.client.SetBulkArbiter(&a);
+    check("D5: an image is offered and holds the bulk", r.offer(dib(64, 64, 501)) && a.use() == BulkUse::Image);
+    const uint64_t first = r.host.last(MessageType::ControlClipImageOffer)->transferId;
+    check("D5: a file paste asks it to stop (true: it was running)", r.client.PreemptForFilePaste());
+    r.pump_for(300);
+    check("D5: the existing Cancel went out and, once the host confirmed, the bulk is free",
+          r.host.count(MessageType::ControlClipImageCancel) >= 1 && a.use() == BulkUse::Idle);
+    const int offersHeld = r.host.count(MessageType::ControlClipImageOffer);
+    r.pump_for(300);
+    check("D5: while the paste runs nothing is offered (held)", r.host.count(MessageType::ControlClipImageOffer) == offersHeld &&
+                                                            r.client.GetProgress().heldForFile);
+    r.client.AfterFilePaste(true);
+    r.pump_for(300);
+    const auto* again = r.host.last(MessageType::ControlClipImageOffer);
+    check("D5: after the paste it is offered again, as a NEW transfer (new id, from the start)",
+          r.host.count(MessageType::ControlClipImageOffer) == offersHeld + 1 && again && again->transferId != first);
+  }
+  {
+    Rig r;
+    BulkArbiter a;
+    r.client.SetBulkArbiter(&a);
+    r.offer(dib(64, 64, 511));
+    r.client.PreemptForFilePaste();
+    r.pump_for(300);
+    const int offers = r.host.count(MessageType::ControlClipImageOffer);
+    r.client.AfterFilePaste(false);  // the switch went off, the session changed, or the remote clipboard moved
+    r.pump_for(300);
+    check("D5: mayResume=false -> the stopped image is dropped", r.host.count(MessageType::ControlClipImageOffer) == offers);
+  }
+  {
+    Rig r;
+    BulkArbiter a;
+    r.client.SetBulkArbiter(&a);
+    r.offer(dib(64, 64, 521));
+    r.host.cancelAnswer = ClipImageState::Published;  // it was already on the host's clipboard
+    r.client.PreemptForFilePaste();
+    r.pump_for(300);
+    const int offers = r.host.count(MessageType::ControlClipImageOffer);
+    r.client.AfterFilePaste(true);
+    r.pump_for(300);
+    check("D5: an image the host had already published is never sent again", r.host.count(MessageType::ControlClipImageOffer) == offers);
+  }
+  {
+    Rig r;
+    BulkArbiter a;
+    r.client.SetBulkArbiter(&a);
+    r.offer(dib(64, 64, 531));
+    r.client.PreemptForFilePaste();
+    r.pump_for(300);
+    const int offers = r.host.count(MessageType::ControlClipImageOffer);
+    const uint64_t packaged = r.client.GetCounters().packaged;
+    r.client.SubmitSnapshot(dib(32, 32, 532));  // the user copies another image while the paste runs
+    wait_for([&] { return r.client.GetCounters().packaged > packaged; }, 10000);
+    r.pump_for(300);
+    check("D5: a newer copy made during the paste waits too", r.host.count(MessageType::ControlClipImageOffer) == offers);
+    r.client.AfterFilePaste(true);
+    r.pump_for(300);
+    check("D5: after it the NEWER copy goes -- one offer, not the stopped older image as well",
+          r.host.count(MessageType::ControlClipImageOffer) == offers + 1);
+  }
+
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   CoUninitialize();
   return g_failed ? 1 : 0;

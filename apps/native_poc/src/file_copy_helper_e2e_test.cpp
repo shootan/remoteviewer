@@ -136,6 +136,9 @@ std::vector<std::string> read_lines(const std::wstring& path) {
 //   --mode dup    inside one async operation, GetData(FileContents, 0) twice and read both fully
 //   --mode sync   ask for the descriptor WITHOUT StartOperation: must be refused
 //   --mode empty  report whether the clipboard offers FileGroupDescriptorW at all
+//   --mode seek   inside one async operation, read file 0 by pieces with Seeks (forward, backward,
+//                 from the end) and then fully again through a second stream; every piece is written
+//                 to --dest as seek_<offset>.bin and the full read as full.bin (the caller compares)
 
 FILE* gResult = nullptr;
 void result(const char* fmt, ...) {
@@ -334,6 +337,87 @@ int run_consumer(int argc, wchar_t** argv) {
     dobj->Release();
     OleUninitialize();
     return 0;
+  }
+
+  if (mode == L"seek") {
+    IDataObjectAsyncCapability* async = nullptr;
+    hr = dobj->QueryInterface(IID_PPV_ARGS(&async));
+    if (!async) {
+      result("seek async qi hr=0x%08lx", static_cast<unsigned long>(hr));
+      dobj->Release();
+      OleUninitialize();
+      return 4;
+    }
+    hr = async->StartOperation(nullptr);
+    result("seek start hr=0x%08lx", static_cast<unsigned long>(hr));
+    FORMATETC fe{static_cast<CLIPFORMAT>(cf_desc()), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM sm{};
+    uint64_t size0 = 0;
+    if (SUCCEEDED(dobj->GetData(&fe, &sm))) {
+      auto* g = static_cast<FILEGROUPDESCRIPTORW*>(GlobalLock(sm.hGlobal));
+      size0 = (static_cast<uint64_t>(g->fgd[0].nFileSizeHigh) << 32) | g->fgd[0].nFileSizeLow;
+      GlobalUnlock(sm.hGlobal);
+      ReleaseStgMedium(&sm);
+    }
+    const auto save = [&](const std::wstring& name, const std::vector<uint8_t>& b) {
+      FILE* f = _wfopen((dest + L"\\" + name).c_str(), L"wb");
+      if (!f) return;
+      if (!b.empty()) std::fwrite(b.data(), 1, b.size(), f);
+      std::fclose(f);
+    };
+    FORMATETC fc{static_cast<CLIPFORMAT>(cf_contents()), nullptr, DVASPECT_CONTENT, 0, TYMED_ISTREAM};
+    STGMEDIUM s1{}, s2{};
+    HRESULT h = dobj->GetData(&fc, &s1);
+    int pieces = 0, failures = 0;
+    const auto piece = [&](IStream* s, int64_t move, DWORD origin, ULONG len) {
+      LARGE_INTEGER li{};
+      li.QuadPart = move;
+      ULARGE_INTEGER pos{};
+      if (FAILED(s->Seek(li, origin, &pos))) {
+        ++failures;
+        return;
+      }
+      std::vector<uint8_t> b(len);
+      ULONG got = 0;
+      if (FAILED(s->Read(b.data(), len, &got))) {
+        ++failures;
+        return;
+      }
+      b.resize(got);
+      save(L"seek_" + std::to_wstring(pos.QuadPart) + L".bin", b);
+      ++pieces;
+    };
+    if (SUCCEEDED(h) && size0 > 400000) {
+      piece(s1.pstm, 0, STREAM_SEEK_SET, 100000);                                     // from the start
+      piece(s1.pstm, static_cast<int64_t>(size0 / 2), STREAM_SEEK_SET, 100000);       // jump forward
+      piece(s1.pstm, -150000, STREAM_SEEK_CUR, 70000);                                // back
+      piece(s1.pstm, -5000, STREAM_SEEK_END, 10000);                                  // near the end (short read)
+      ReleaseStgMedium(&s1);
+    }
+    std::vector<uint8_t> full;
+    const HRESULT h2 = dobj->GetData(&fc, &s2);
+    if (SUCCEEDED(h2)) {
+      std::vector<uint8_t> buf(256 * 1024);
+      for (;;) {
+        ULONG got = 0;
+        const HRESULT r = s2.pstm->Read(buf.data(), static_cast<ULONG>(buf.size()), &got);
+        if (FAILED(r)) {
+          ++failures;
+          break;
+        }
+        full.insert(full.end(), buf.begin(), buf.begin() + got);
+        if (got < buf.size() || r == S_FALSE) break;
+      }
+      ReleaseStgMedium(&s2);
+      save(L"full.bin", full);
+    }
+    hr = async->EndOperation(failures == 0 ? S_OK : E_FAIL, nullptr, DROPEFFECT_COPY);
+    result("seek pieces=%d failures=%d full=%zu size0=%llu end hr=0x%08lx", pieces, failures, full.size(),
+           static_cast<unsigned long long>(size0), static_cast<unsigned long>(hr));
+    async->Release();
+    dobj->Release();
+    OleUninitialize();
+    return failures == 0 && pieces == 4 ? 0 : 5;
   }
 
   // mode == drop: Explorer's paste into `dest`.

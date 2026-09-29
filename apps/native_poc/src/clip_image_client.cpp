@@ -251,6 +251,7 @@ void ClipImageClient::ApplyCancelAnswer(const ControlClipImageStatusReplyMessage
   const auto why = static_cast<ClipImageReason>(r.reason);
   switch (st) {
     case ClipImageState::Cancelled:
+      if (havePreempted_ && r.transferId == preemptedId_) preemptedConfirmedCancelled_ = true;
       ++counters_.cancelled;
       counters_.lastState = r.state;
       counters_.lastReason = static_cast<uint8_t>(why == ClipImageReason::None ? awaiting_.why : why);
@@ -284,6 +285,47 @@ void ClipImageClient::ApplyCancelAnswer(const ControlClipImageStatusReplyMessage
   }
 }
 
+bool ClipImageClient::PreemptForFilePaste() {
+  std::lock_guard<std::mutex> lock(mu_);
+  fileHold_ = true;
+  if (!sender_.Active()) return false;
+  if (lastOffered_.bytes && lastOffered_.offer.transferId == sender_.transferId() && !havePreempted_) {
+    havePreempted_ = true;
+    preempted_ = lastOffered_;
+    preemptedGen_ = offerGen_;
+    preemptedAtUs_ = BulkPacer::NowUs();
+    preemptedId_ = sender_.transferId();
+    preemptedConfirmedCancelled_ = false;
+  }
+  RequestCancel(ClipImageReason::Superseded);
+  Log("stopping the image for a file paste (D5)");
+  return true;
+}
+
+void ClipImageClient::AfterFilePaste(bool mayResume) {
+  std::lock_guard<std::mutex> lock(mu_);
+  fileHold_ = false;
+  if (!havePreempted_) return;
+  const bool fresh = BulkPacer::NowUs() - preemptedAtUs_ < 60000000ull;
+  const bool resume = mayResume && preemptedConfirmedCancelled_ && preemptedGen_ == snapshotGen_ && !havePending_ &&
+                      !sender_.Active() && fresh && Usable();
+  if (resume) {
+    pending_ = preempted_;
+    pending_.offer.transferId = random64();  // a new transfer, from the start
+    havePending_ = true;
+    pendingGen_ = snapshotGen_;
+    Log("the image stopped for the file paste is offered again (D5)");
+  } else {
+    std::ostringstream os;
+    os << "the image stopped for the file paste is dropped (mayResume=" << (mayResume ? 1 : 0)
+       << " confirmedCancelled=" << (preemptedConfirmedCancelled_ ? 1 : 0)
+       << " newerCopy=" << (preemptedGen_ != snapshotGen_ ? 1 : 0) << " fresh=" << (fresh ? 1 : 0) << ")";
+    Log(os.str());
+  }
+  havePreempted_ = false;
+  preempted_ = ClipPackage{};
+}
+
 void ClipImageClient::CancelByUser() {
   std::lock_guard<std::mutex> lock(mu_);
   ++snapshotGen_;  // a snapshot being packaged is this same copy
@@ -305,6 +347,7 @@ ClipImageClient::Progress ClipImageClient::GetProgress() const {
   p.finished = outcomes_;
   p.outcome = lastOutcome_;
   p.detail = lastDetail_;
+  p.heldForFile = fileHold_;
   if (p.active) {
     p.bytesTotal = sender_.offer().packageBytes();
     const uint64_t confirmed = sender_.phase() == ClipImageSender::Phase::Serving ? uplink_.confirmed_bytes() : 0;
@@ -499,7 +542,7 @@ int ClipImageClient::Pump(ControlLink& link) {
       return 1;
     }
     // 2. Offer the newest package -- only once the host has settled the previous one.
-    if (!sender_.Active() && !awaiting_.on && havePending_ && Usable() &&
+    if (!sender_.Active() && !awaiting_.on && havePending_ && Usable() && !fileHold_ &&
         (!arbiter_ || arbiter_->TryAcquire(BulkUse::Image, pending_.offer.transferId))) {
       ClipPackage pkg = std::move(pending_);
       pending_ = ClipPackage{};
@@ -518,6 +561,7 @@ int ClipImageClient::Pump(ControlLink& link) {
       m.height = pkg.offer.height;
       std::memcpy(m.sha256, pkg.offer.sha256, 32);
       m.clientSendQpcUs = now;
+      lastOffered_ = pkg;  // shared bytes: kept in case a file paste stops it (D5)
       sender_.Begin(pkg.bytes, pkg.offer, now);
       ++counters_.offered;
       lock.unlock();

@@ -61,6 +61,9 @@ namespace remote60::native_poc {
 constexpr uint64_t kFilePasteQueryIntervalUs = 700000;  // debate D4: P->R only while an offer / paste lives
 constexpr uint64_t kFileOfferQueryIntervalUs = 700000;  // debate D4: R->P while negotiated and allowed
 constexpr uint32_t kFilePinLeaseMs = 60000;               // renewed by every read (A4: progress, not time)
+// D5: how long a paste may wait for the session's bulk (an image being stopped for it) before it is
+// refused -- inside the consumer's 10 s descriptor wait, less the 700 ms query and the prepare.
+constexpr uint64_t kFileBulkSwitchBudgetUs = 7000000;
 
 class FileCopyClient {
  public:
@@ -127,6 +130,7 @@ class FileCopyClient {
     uint64_t recvBegun = 0, recvPrepared = 0, recvBusy = 0, recvRefused = 0, recvEnded = 0, recvFailed = 0;
     uint64_t chunksVerified = 0, chunksRejected = 0, bytesReceived = 0, filesWholeVerified = 0, filesChunkVerified = 0;
     uint64_t helperLaunches = 0, helperLaunchFailures = 0;
+    uint64_t recvVerificationEnds = 0;  // R->P pastes ended by a failed chunk check
     uint8_t lastRecvVerdict = 0, lastRecvEndReason = 0;
   };
   Counters GetCounters() const;
@@ -141,6 +145,45 @@ class FileCopyClient {
     return recv_.active;
   }
   BulkUplink::Counters UplinkCounters() const { return uplink_.GetCounters(); }
+
+  /**
+   * What the transfer bar shows (D6), from the UI thread. It keeps apart what is known: an offer
+   * published there / here (a paste is POSSIBLE), bytes moving (sending / receiving), a cancel asked
+   * and not yet confirmed, and how the last paste ended -- "Completed" only when the consumer ended
+   * it successfully (EndOperation S_OK), never merely because the bytes arrived.
+   */
+  struct Progress {
+    bool sending = false;     // P->R paste running (bytes served to the remote PC)
+    bool receiving = false;   // R->P paste running (bytes received here)
+    bool cancelling = false;  // the user cancelled; the other side has not confirmed yet
+    uint32_t files = 0;
+    uint64_t bytesDone = 0, bytesTotal = 0, elapsedMs = 0;
+    // The last paste's end (either direction), counted so a result that began and ended between two
+    // polls is still shown once.
+    uint64_t finished = 0;
+    bool lastToRemote = false;
+    uint8_t lastState = 0;    // file_copy::net::PasteState
+    uint8_t lastReason = 0;   // file_copy::net::PasteEndReason (None when refused before any byte)
+    uint16_t lastRefused = 0; // file_copy::Status when refused before any byte (0 = not refused)
+    uint32_t lastFiles = 0;
+    uint64_t lastBytes = 0, lastElapsedMs = 0;
+    // Offers: this PC's files published on the remote PC / the remote PC's published here.
+    uint64_t offered = 0, available = 0;
+    uint32_t offeredFiles = 0, availableFiles = 0;
+  };
+  Progress GetProgress() const;
+  /** UI thread: the user cancels the running paste (either direction). Confirmed by the other side. */
+  void CancelPaste();
+
+  /**
+   * D5, before Start: how a paste stops a running image (`preempt`: true when one was asked to stop)
+   * and tells it the paste is over (`after(mayResume)`). A paste finding the bulk held waits for it,
+   * bounded by kFileBulkSwitchBudgetUs; the image's own cancel confirmation frees it.
+   */
+  void SetImagePreemption(std::function<bool()> preempt, std::function<void(bool mayResume)> after) {
+    preempt_ = std::move(preempt);
+    after_ = std::move(after);
+  }
 
  private:
   struct LocalFile {
@@ -164,6 +207,8 @@ class FileCopyClient {
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
     uint64_t nextQueryUs = 0;
+    uint32_t files = 0;
+    uint64_t bytesTotal = 0, startUs = 0, servedAtStart = 0;
   };
   struct RemoteOffer {  // R->P: what the remote clipboard names
     uint64_t revision = 0;  // the host's; 0 = nothing known
@@ -174,7 +219,12 @@ class FileCopyClient {
     bool active = false;
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
+    uint32_t files = 0;
+    uint64_t bytesTotal = 0, startUs = 0;
   };
+  // caller holds mu_: the last paste's end, for the bar
+  void RecordResultLocked(bool toRemote, file_copy::net::PasteState state, file_copy::net::PasteEndReason reason,
+                          uint16_t refused, uint32_t files, uint64_t bytes, uint64_t startUs);
   struct PasteKey {
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
@@ -189,7 +239,7 @@ class FileCopyClient {
   int PreparePaste(ControlLink& link, uint64_t offerId, uint64_t pasteOp);
   void EndPaste(file_copy::net::PasteState state, file_copy::net::PasteEndReason reason);  // caller holds mu_
   int PumpOfferQuery(ControlLink& link);
-  int PrepareReceive(ControlLink& link, const PasteKey& k);
+  int PrepareReceive(ControlLink& link, const PasteKey& k, bool mayWait = true);
   int SendReceiveEnd(ControlLink& link, const PasteKey& k);
   void OnHelperFrame(const file_copy::PipeFrame& f);
   void OnHelperGone();
@@ -236,6 +286,23 @@ class FileCopyClient {
   std::deque<PasteKey> prepareQueue_;  // helper PasteBegin -> prepare on the control thread
   std::deque<PasteKey> endQueue_;      // helper PasteEnd -> End on the control thread
   uint64_t preparingOp_ = 0;           // the R->P prepare in flight on the control thread
+  bool cancelPending_ = false;         // the user's cancel, sent, not yet answered
+  // D5: a paste waiting for the bulk (P->R or R->P), and whether an image was stopped for it.
+  struct WaitBulk {
+    bool on = false;
+    bool toRemote = false;
+    PasteKey key;
+    uint64_t deadlineUs = 0;
+  } waitBulk_;
+  bool preemptActive_ = false;
+  uint64_t revisionAtPreempt_ = 0;
+  std::function<bool()> preempt_;
+  std::function<void(bool)> after_;
+  // caller holds mu_: a paste found the bulk taken -- start waiting (and stop an image) or keep waiting
+  void WaitForBulkLocked(bool toRemote, const PasteKey& k);
+  void ReleasePreemptLocked();  // caller holds mu_: the paste is over -- the stopped image may resume
+  PasteKey cancelKey_;
+  Progress result_;                    // the "last" / offer fields of GetProgress
   uint64_t preparingOffer_ = 0;
   uint32_t nextSeq_ = 0;
   Counters counters_;

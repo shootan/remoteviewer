@@ -74,6 +74,10 @@ int wmain(int argc, wchar_t** argv) {
   check("the shipped host does not carry the file source's variable (ASCII)", !contains(shipped, fileName));
   check("the shipped host does not carry the file source's banner", !contains(shipped, fileBanner));
   check("the shipped host does carry the product's file-copy R->P code", contains(shipped, "host copy offered files="));
+  const std::string selfName = "REMOTE60_FILE_COPY_TEST_HELPER_AS_SELF";
+  check("positive control: the test build carries the helper-as-self switch (UTF-16)", contains(test, utf16(selfName)));
+  check("the shipped host does not carry the helper-as-self switch (UTF-16)", !contains(shipped, utf16(selfName)));
+  check("the shipped host does not carry the helper-as-self banner", !contains(shipped, "TEST HELPER AS SELF"));
   // And the product feature itself IS in the shipped host (the gate must not pass because the whole
   // feature was left out).
   check("the shipped host does carry the product's clip-image log tag", contains(shipped, "[native-video-host][clip-image]"));

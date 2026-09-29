@@ -152,6 +152,7 @@ class HostFileCopyService {
     uint64_t hostCopies = 0, hostOffers = 0, hostFilesOffered = 0, hostFilesExcluded = 0, offerQueries = 0;
     uint64_t sendPrepared = 0, sendRefused = 0, sendEnded = 0, sendFailed = 0;
     uint64_t chunksServed = 0, bytesServed = 0, pullsRefused = 0, localReadFailures = 0;
+    uint64_t sendVerificationEnds = 0;  // R->P sends ended because the viewer's chunk check failed
     uint8_t lastSendVerdict = 0, lastSendEndReason = 0;
   };
   Counters GetCounters() const;

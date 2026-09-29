@@ -149,6 +149,78 @@ int main() {
   check("...and its own end is shown", a.phase == ClipBarPhase::Result &&
                                            a.detail == static_cast<uint8_t>(ClipImageReason::Timeout));
 
+  // ------------------------------------------------------------------ file copy (t-zdmsd4gb D6)
+  {
+    namespace fn = remote60::native_poc::file_copy::net;
+    namespace fc = remote60::native_poc::file_copy;
+    FileBarState st;
+    FileCopyClient::Progress p;
+    uint64_t now = 1000000;
+    ClipBarView v = file_transfer_bar_view(p, now, &st);
+    check("file: nothing to say -> not the file's line", !v.isFile);
+    p.offered = 1;
+    p.offeredFiles = 3;
+    v = file_transfer_bar_view(p, now, &st);
+    check("file: a published offer says a paste is POSSIBLE (not that anything was sent)",
+          v.isFile && clip_transfer_bar_text(v) == L"복사한 파일 3개를 원격 PC에서 붙여넣을 수 있습니다" && !clip_transfer_bar_has_cancel(v));
+    v = file_transfer_bar_view(p, now + kClipBarResultUs + 1, &st);
+    check("file: ...for 5 s, then gone", !v.isFile);
+    p.sending = true;
+    p.files = 3;
+    p.bytesDone = 2621440;
+    p.bytesTotal = 10485760;
+    p.elapsedMs = 4000;
+    v = file_transfer_bar_view(p, now, &st);
+    check("file: sending -- files, percent, MB, seconds, Cancel offered",
+          clip_transfer_bar_text(v) == L"원격 PC로 파일 3개 보내는 중 25% (2.5 / 10.0 MB) · 4초" && clip_transfer_bar_has_cancel(v));
+    p.bytesDone = p.bytesTotal;
+    check("file: sending never says 100 % (the consumer has not ended it)",
+          has(clip_transfer_bar_text(file_transfer_bar_view(p, now, &st)), L" 99% "));
+    p.sending = false;
+    p.receiving = true;
+    p.bytesDone = 0;
+    p.elapsedMs = 12000;
+    const std::wstring recv = clip_transfer_bar_text(file_transfer_bar_view(p, now, &st));
+    check("file: receiving says so, and past 10 s that it is taking time",
+          has(recv, L"원격 PC에서 파일 3개 받는 중 0%") && has(recv, L"전송에 시간이 걸리고 있습니다"));
+    p.cancelling = true;
+    v = file_transfer_bar_view(p, now, &st);
+    check("file: a cancel not yet confirmed says 'cancelling', no Cancel button",
+          has(clip_transfer_bar_text(v), L"취소하는 중") && !clip_transfer_bar_has_cancel(v));
+    p.cancelling = false;
+    p.receiving = false;
+    p.finished = 1;
+    p.lastToRemote = false;
+    p.lastReason = static_cast<uint8_t>(fn::PasteEndReason::Completed);
+    p.lastFiles = 3;
+    p.lastBytes = 10485760;
+    p.lastElapsedMs = 9000;
+    v = file_transfer_bar_view(p, now, &st);
+    check("file: completed = the consumer ended it successfully",
+          clip_transfer_bar_text(v) == L"파일 3개 붙여넣기 완료 (10.0 MB, 9초)" && !clip_transfer_bar_has_cancel(v));
+    p.finished = 2;
+    p.lastReason = static_cast<uint8_t>(fn::PasteEndReason::Verification);
+    p.lastBytes = 4096;
+    const std::wstring ver = clip_transfer_bar_text(file_transfer_bar_view(p, now, &st));
+    check("file: a failed check says 'transfer data check failed', not 'the source changed'",
+          has(ver, L"전송 데이터 검증에 실패") && !has(ver, L"원본"));
+    check("file: ...and after bytes moved, that a partial file may be left (removal is not promised)",
+          has(ver, L"일부만 저장된 파일이 남았을 수 있습니다"));
+    p.finished = 3;
+    p.lastReason = static_cast<uint8_t>(fn::PasteEndReason::None);
+    p.lastRefused = static_cast<uint16_t>(fc::Status::Replaced);
+    p.lastBytes = 0;
+    const std::wstring rep = clip_transfer_bar_text(file_transfer_bar_view(p, now, &st));
+    check("file: refused before any byte because the source was replaced -- said, and no 'partial file'",
+          has(rep, L"다른 파일로 바뀌어") && !has(rep, L"일부만"));
+    p.finished = 4;
+    p.lastRefused = static_cast<uint16_t>(fc::Status::Refused);
+    check("file: refused as busy",
+          has(clip_transfer_bar_text(file_transfer_bar_view(p, now, &st)), L"다른 전송이 진행 중"));
+    FileBarState fresh;
+    check("file: a result from before the bar existed is not news", !file_transfer_bar_view(p, now, &fresh).isFile);
+  }
+
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

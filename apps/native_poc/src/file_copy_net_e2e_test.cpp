@@ -346,13 +346,15 @@ int wmain() {
   };
 
   uint64_t revision = 100;
+  std::vector<DWORD> ourPids = {GetCurrentProcessId()};  // this test, its helpers, its consumers
   const auto paste_on = [&](const Station& where, const std::wstring& dest, uint64_t expectBytes, int waitSec,
-                            Child* consumer) {
+                            Child* consumer, const wchar_t* mode = L"drop") {
     CreateDirectoryW(dest.c_str(), nullptr);
     const std::wstring res = dest + L".result.txt";
-    const std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode drop --dest \"" + dest + L"\" --result \"" + res +
+    const std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode " + std::wstring(mode) + L" --dest \"" + dest + L"\" --result \"" + res +
                              L"\" --expect-bytes " + std::to_wstring(expectBytes) + L" --wait-sec " + std::to_wstring(waitSec);
     const bool started = consumer->Start(cmd, where.desktop);
+    ourPids.push_back(consumer->pi.dwProcessId);
     std::printf("      consumer pid=%lu\n", static_cast<unsigned long>(consumer->pi.dwProcessId));
     return started;
   };
@@ -684,6 +686,197 @@ int wmain() {
     check("...and the OLDER offer is off the remote clipboard (a paste gets nothing)", nothing_lands(destO, L"oldO.txt"));
   }
 
+
+  // D5: a scripted image holding the viewer's bulk. preempt() is what ClipImageClient does (asks it
+  // to stop); here it "confirms its end" by releasing the bulk after `releaseAfterMs` (never, if 0).
+  // after(mayResume) is recorded. Installed with the pump held, so the pump never races the setter.
+  struct FakeImage {
+    std::atomic<int> preempts{0}, afters{0}, lastMayResume{-1};
+    std::atomic<uint32_t> releaseAfterMs{0};
+    uint64_t owner = 0;
+    std::thread releaser;
+    ~FakeImage() {
+      if (releaser.joinable()) releaser.join();
+    }
+  };
+  FakeImage fakeImage;
+  const auto install_fake_image = [&] {
+    pumpPaused.store(true);
+    Sleep(50);
+    viewer.SetImagePreemption(
+        [&] {
+          ++fakeImage.preempts;
+          const uint32_t ms = fakeImage.releaseAfterMs.load();
+          if (ms != 0) {
+            if (fakeImage.releaser.joinable()) fakeImage.releaser.join();
+            fakeImage.releaser = std::thread([&, ms] {
+              Sleep(ms);
+              viewArbiter.Release(fakeImage.owner);  // the host confirmed the image's end
+            });
+          }
+          return true;
+        },
+        [&](bool mayResume) {
+          ++fakeImage.afters;
+          fakeImage.lastMayResume.store(mayResume ? 1 : 0);
+        });
+    pumpPaused.store(false);
+  };
+
+  // ================================================================== step 3 counterexamples
+  // A Seek / repeated-read consumer: every piece it read is the source's bytes at that offset, the
+  // second stream reads the whole file, and the host counts it "chunk verified", not whole-range.
+  const auto seek_ok = [&](const std::wstring& dest, const std::vector<uint8_t>& src, std::string* detail) {
+    bool ok = true;
+    int pieces = 0;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((dest + L"\\seek_*.bin").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        const uint64_t off = _wcstoui64(fd.cFileName + 5, nullptr, 10);
+        std::vector<uint8_t> got;
+        read_file(dest + L"\\" + fd.cFileName, &got);
+        const bool same = off + got.size() <= src.size() && !got.empty() &&
+                          std::equal(got.begin(), got.end(), src.begin() + static_cast<std::ptrdiff_t>(off));
+        ok = ok && same;
+        ++pieces;
+        *detail += "@" + std::to_string(off) + "+" + std::to_string(got.size()) + (same ? "=same " : "=DIFFERENT ");
+      } while (FindNextFileW(h, &fd));
+      FindClose(h);
+    }
+    std::vector<uint8_t> full;
+    const bool fullOk = read_file(dest + L"\\full.bin", &full) && full == src;
+    *detail += fullOk ? "full=same" : "full=DIFFERENT(" + std::to_string(full.size()) + ")";
+    return ok && pieces == 4 && fullOk;
+  };
+
+  std::printf("\n--- S1 (step 3). P->R: a consumer that Seeks and reads the same file twice ---\n");
+  {
+    const auto content = make_content(1024 * 1024 + 333, 201);
+    const std::wstring path = srcDir + L"\\seekP.bin";
+    write_file(path, content);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destS1";
+    paste_on(station, dest, 0, 30, &consumer, L"seek");
+    const DWORD code = consumer.Wait(60000);
+    std::string detail;
+    const bool piecesOk = code == 0 && seek_ok(dest, content, &detail);
+    check("every piece read after a Seek (forward, back, from the end) and the second full read are the source's bytes",
+          piecesOk, "exit=" + std::to_string(code) + " " + detail);
+    check("...the paste completed and is counted 'chunk verified', not whole-range", wait_until([&] {
+            const auto hc = host.GetCounters();
+            return hc.pastesEnded > before.pastesEnded && hc.filesChunkVerified > before.filesChunkVerified &&
+                   hc.chunksRejected == before.chunksRejected;
+          }, 5000), "chunkVerified " + std::to_string(before.filesChunkVerified) + " -> " +
+                        std::to_string(host.GetCounters().filesChunkVerified));
+    wait_until([&] { return !viewer.PasteActive(); }, 5000);
+  }
+
+  std::printf("\n--- S2 (step 3). P->R: the source file is REPLACED between the copy and the paste ---\n");
+  {
+    const std::wstring path = srcDir + L"\\replaceP.bin";
+    write_file(path, make_content(300000, 211));
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    DeleteFileW(path.c_str());
+    write_file(path, make_content(300000, 212));  // same name and size, another file (FileId)
+    const auto vBefore = viewer.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destS2";
+    paste(dest, 300000, 10, &consumer);
+    consumer.Wait(30000);
+    check("the paste is refused before any byte (the pin sees another FileId)",
+          wait_until([&] { return viewer.GetCounters().pastesFailed > vBefore.pastesFailed; }, 5000) &&
+              viewer.GetCounters().bytesServed == vBefore.bytesServed);
+    check("...nothing landed", nothing_lands(dest, L"replaceP.bin"));
+    check("...and the viewer's bulk is free", viewArbiter.use() == BulkUse::Idle && !viewer.PasteActive());
+  }
+
+  std::printf("\n--- S3 (step 3). P->R: the paste consumer DIES mid-paste: both ends let go, bounded ---\n");
+  {
+    const auto content = make_content(16u * 1024u * 1024u, 221);
+    const std::wstring path = srcDir + L"\\deathP.bin";
+    write_file(path, content);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destS3";
+    paste(dest, content.size(), 120, &consumer);
+    check("...bytes are moving", wait_until([&] { return host.GetCounters().bytesDelivered > before.bytesDelivered + 1024 * 1024; }, 30000));
+    TerminateProcess(consumer.pi.hProcess, 99);  // the consumer is killed
+    WaitForSingleObject(consumer.pi.hProcess, 5000);
+    const auto t0 = GetTickCount64();
+    const bool ended = wait_until([&] {
+      const auto hc = host.GetCounters();
+      return hc.pastesFailed > before.pastesFailed && !viewer.PasteActive() && viewArbiter.use() == BulkUse::Idle &&
+             hostArbiter.use() == BulkUse::Idle;
+    }, 40000);
+    check("both ends end the paste and free the bulk within the helper's idle bound (8 s here) + slack", ended,
+          std::to_string((GetTickCount64() - t0) / 1000) + " s, reason=" + std::to_string(host.GetCounters().lastEndReason));
+  }
+
+  std::printf("\n--- Q1 (step 3, D5). P->R paste while an IMAGE holds the bulk: the image is stopped, the paste waits for its confirmed end ---\n");
+  install_fake_image();
+  {
+    const auto content = make_content(2u * 1024u * 1024u + 5, 261);
+    const std::wstring path = srcDir + L"\\d5P.bin";
+    write_file(path, content);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    fakeImage.owner = 0xD5D5;
+    check("an image holds the viewer's bulk", viewArbiter.TryAcquire(BulkUse::Image, fakeImage.owner));
+    fakeImage.releaseAfterMs.store(1500);
+    const int preemptsBefore = fakeImage.preempts.load(), aftersBefore = fakeImage.afters.load();
+    Child consumer;
+    const std::wstring dest = root + L"destQ1";
+    paste(dest, content.size(), 60, &consumer);
+    const DWORD code = consumer.Wait(90000);
+    std::map<std::wstring, std::vector<uint8_t>> setQ = {{L"d5P.bin", content}};
+    std::string detail;
+    check("the image was asked to stop (once)", fakeImage.preempts.load() == preemptsBefore + 1);
+    check("THE PASTE WAITED FOR THE IMAGE'S END, THEN COMPLETED WHOLE", code == 0 && same_files(dest, setQ, &detail), detail);
+    check("...and the image was told the paste is over, and may go again", wait_until([&] {
+            return fakeImage.afters.load() == aftersBefore + 1 && fakeImage.lastMayResume.load() == 1;
+          }, 5000));
+    wait_until([&] { return !viewer.PasteActive(); }, 5000);
+  }
+
+  std::printf("\n--- Q2 (step 3, D5). the image never lets go: the paste is refused within the budget, before any byte ---\n");
+  {
+    const std::wstring path = srcDir + L"\\d5P2.bin";
+    write_file(path, make_content(300000, 271));
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    fakeImage.owner = 0xD5D6;
+    check("an image holds the viewer's bulk (and will not let go)", viewArbiter.TryAcquire(BulkUse::Image, fakeImage.owner));
+    fakeImage.releaseAfterMs.store(0);
+    const auto vBefore = viewer.GetCounters();
+    const int aftersBefore = fakeImage.afters.load();
+    const auto t0 = GetTickCount64();
+    Child consumer;
+    const std::wstring dest = root + L"destQ2";
+    paste(dest, 300000, 15, &consumer);
+    const bool refused = wait_until([&] { return viewer.GetCounters().pastesBusy > vBefore.pastesBusy; }, 15000);
+    const auto secs = (GetTickCount64() - t0) / 1000.0;
+    check("the paste is refused as busy after the switch budget (7 s), inside the consumer's 10 s",
+          refused && secs >= 6.0 && secs <= 10.5, std::to_string(secs) + " s");
+    consumer.Wait(30000);
+    check("...nothing landed, and no file byte was served", nothing_lands(dest, L"d5P2.bin") &&
+                                                         viewer.GetCounters().bytesServed == vBefore.bytesServed);
+    check("...the image still holds its bulk, and was told the paste is over", viewArbiter.owner() == fakeImage.owner &&
+                                                                              fakeImage.afters.load() == aftersBefore + 1);
+    viewArbiter.Release(fakeImage.owner);
+  }
+
   // ================================================================== R->P (step 2)
   // One clipboard for both helpers here (see `local`): the viewer's last P->R offer comes off it first.
   {
@@ -769,12 +962,12 @@ int wmain() {
     const bool landed = read_file(dest + L"\\tamperR.bin", &got);
     check("the corrupted chunk was rejected by its SHA-256 (on the viewer)", vc.chunksRejected > before.chunksRejected,
           std::to_string(vc.chunksRejected - before.chunksRejected) + " rejected");
-    check("...the paste ended failed (verification) here", vc.recvFailed > before.recvFailed &&
-              vc.lastRecvEndReason == static_cast<uint8_t>(fn::PasteEndReason::Verification),
-          "reason=" + std::to_string(vc.lastRecvEndReason));
+    // (Explorer may retry the paste afterwards as a new paste, which then succeeds -- the one the
+    // flipped byte hit must have ended Verification on both sides.)
+    check("...the paste ended failed (verification) here", vc.recvVerificationEnds > before.recvVerificationEnds,
+          "verificationEnds=" + std::to_string(vc.recvVerificationEnds - before.recvVerificationEnds));
     check("...and the host was told the same", wait_until([&] {
-            const auto hc = host.GetCounters();
-            return hc.sendFailed > hBefore.sendFailed && hc.lastSendEndReason == static_cast<uint8_t>(fn::PasteEndReason::Verification);
+            return host.GetCounters().sendVerificationEnds > hBefore.sendVerificationEnds;
           }, 5000));
     check("...and no complete copy with different content exists at the destination",
           !landed || got.size() != content.size() || got == content,
@@ -838,6 +1031,100 @@ int wmain() {
     const DWORD codeNext = next.Wait(60000);
     std::string detailNext;
     check("a paste after it gets the NEW copy", codeNext == 0 && same_files(destNext, setNext, &detailNext), detailNext);
+  }
+
+  std::printf("\n--- S4 (step 3). R->P: a consumer that Seeks and reads the same file twice ---\n");
+  {
+    const auto content = make_content(1024 * 1024 + 777, 231);
+    const std::wstring path = remoteDir + L"\\seekR.bin";
+    write_file(path, content);
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    Child consumer;
+    const std::wstring dest = root + L"destS4";
+    paste_on(local, dest, 0, 30, &consumer, L"seek");
+    const DWORD code = consumer.Wait(60000);
+    std::string detail;
+    const bool piecesOk = code == 0 && seek_ok(dest, content, &detail);
+    check("R->P: every piece after a Seek and the second full read are the source's bytes",
+          piecesOk, "exit=" + std::to_string(code) + " " + detail);
+    check("...completed and counted 'chunk verified' on the viewer", wait_until([&] {
+            const auto vc = viewer.GetCounters();
+            return vc.recvEnded > before.recvEnded && vc.filesChunkVerified > before.filesChunkVerified;
+          }, 5000));
+  }
+
+  std::printf("\n--- S5 (step 3). R->P: the source file is REPLACED between the copy and the paste ---\n");
+  {
+    const std::wstring path = remoteDir + L"\\replaceR.bin";
+    write_file(path, make_content(300000, 241));
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    DeleteFileW(path.c_str());
+    write_file(path, make_content(300000, 242));
+    const auto hBefore = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destS5";
+    paste_on(local, dest, 300000, 10, &consumer);
+    consumer.Wait(30000);
+    check("the host's pin refuses it (another FileId) before any byte",
+          wait_until([&] { return host.GetCounters().sendRefused > hBefore.sendRefused; }, 5000) &&
+              host.GetCounters().bytesServed == hBefore.bytesServed);
+    check("...nothing landed and both ends' bulk is free",
+          nothing_lands(dest, L"replaceR.bin") && hostArbiter.use() == BulkUse::Idle && viewArbiter.use() == BulkUse::Idle);
+  }
+
+  std::printf("\n--- S6 (step 3). R->P: the paste consumer DIES mid-paste: both ends let go, bounded ---\n");
+  {
+    const auto content = make_content(16u * 1024u * 1024u, 251);
+    const std::wstring path = remoteDir + L"\\deathR.bin";
+    write_file(path, content);
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    const auto hBefore = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destS6";
+    paste_on(local, dest, content.size(), 120, &consumer);
+    check("...bytes are moving", wait_until([&] { return viewer.GetCounters().bytesReceived > before.bytesReceived + 1024 * 1024; }, 30000));
+    TerminateProcess(consumer.pi.hProcess, 99);
+    WaitForSingleObject(consumer.pi.hProcess, 5000);
+    const auto t0 = GetTickCount64();
+    const bool ended = wait_until([&] {
+      return host.GetCounters().sendFailed > hBefore.sendFailed && !viewer.ReceiveActive() &&
+             viewArbiter.use() == BulkUse::Idle && hostArbiter.use() == BulkUse::Idle;
+    }, 40000);
+    check("both ends end it and free the bulk within the helper's idle bound + slack", ended,
+          std::to_string((GetTickCount64() - t0) / 1000) + " s, reason=" + std::to_string(host.GetCounters().lastSendEndReason));
+  }
+
+  std::printf("\n--- Q3 (step 3, D5). R->P paste while an image holds the bulk; the remote clipboard changes meanwhile ---\n");
+  {
+    const auto content = make_content(2u * 1024u * 1024u + 9, 281);
+    const std::wstring path = remoteDir + L"\\d5R.bin";
+    write_file(path, content);
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    fakeImage.owner = 0xD5D7;
+    check("an image holds the viewer's bulk", viewArbiter.TryAcquire(BulkUse::Image, fakeImage.owner));
+    fakeImage.releaseAfterMs.store(2500);
+    const int aftersBefore = fakeImage.afters.load();
+    Child consumer;
+    const std::wstring dest = root + L"destQ3";
+    paste_on(local, dest, content.size(), 60, &consumer);
+    // While the paste waits for the image: the remote clipboard gets another copy (not files).
+    Sleep(700);
+    host.OnHostClipboard(++hostSeq, {});
+    const DWORD code = consumer.Wait(90000);
+    std::map<std::wstring, std::vector<uint8_t>> setQ = {{L"d5R.bin", content}};
+    std::string detail;
+    check("R->P: the paste waited for the image's end, then completed whole", code == 0 && same_files(dest, setQ, &detail), detail);
+    check("...and because the remote clipboard changed meanwhile, the image may NOT go again", wait_until([&] {
+            return fakeImage.afters.load() == aftersBefore + 1 && fakeImage.lastMayResume.load() == 0;
+          }, 5000), "mayResume=" + std::to_string(fakeImage.lastMayResume.load()));
   }
 
   std::printf("\n--- N3 (r2 4). the viewer's switch goes OFF mid R->P paste: the host sends nothing more ---\n");
@@ -966,8 +1253,44 @@ int wmain() {
       }
     }
   }
+  // The private station is the logon session's unnamed one (a Medium process cannot name one), so
+  // ANOTHER run on this PC -- another agent's test at the same time -- shares its clipboard. The
+  // helpers log who took the clipboard over; a writer that is none of ours makes a failed run
+  // INVALID (interfered with), not a product failure. A run without one is judged as it is.
+  std::vector<DWORD> foreign;
+  for (const std::wstring* log : {&helperLog, &viewerHelperLog}) {
+    std::ifstream in(*log);
+    std::string line;
+    while (std::getline(in, line)) {
+      size_t at = line.find(" ready pid=");
+      if (at != std::string::npos) ourPids.push_back(static_cast<DWORD>(std::strtoul(line.c_str() + at + 11, nullptr, 10)));
+      at = line.find("(owner pid=");
+      if (at != std::string::npos) {
+        const DWORD pid = static_cast<DWORD>(std::strtoul(line.c_str() + at + 11, nullptr, 10));
+        if (pid != 0) foreign.push_back(pid);
+      }
+    }
+  }
+  std::vector<DWORD> strangers;
+  for (DWORD pid : foreign) {
+    bool ours = false;
+    for (DWORD o : ourPids) ours = ours || o == pid;
+    bool listed = false;
+    for (DWORD s : strangers) listed = listed || s == pid;
+    if (!ours && !listed) strangers.push_back(pid);
+  }
+  if (!strangers.empty()) {
+    std::string list;
+    for (DWORD s : strangers) list += std::to_string(s) + " ";
+    std::printf("\nNOTE  another process wrote the shared window station's clipboard during this run: pid %s\n", list.c_str());
+  }
   const bool removed = staging.Remove();
   check("the staging directory is removed" + (removed ? std::string() : ": " + staging.why()), removed);
+  if (gFailures && !strangers.empty()) {
+    std::printf("\nRESULT: INVALID  (%d checks, %d failed -- with a foreign clipboard writer on the shared station; rerun alone)\n",
+                gChecks, gFailures);
+    return 3;
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

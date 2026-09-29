@@ -336,8 +336,11 @@ HRESULT RemoteFilesDataObject::GetAsyncMode(BOOL* pfIsOpAsync) {
 }
 HRESULT RemoteFilesDataObject::StartOperation(IBindCtx*) {
   if (op_.active) {
-    // Nobody ended the previous paste; the new one supersedes it rather than sharing its handles.
-    end_operation(EndReason::Superseded);
+    // One paste of an offer at a time (t-zdmsd4gb debate "공통 상태": the second is refused, the
+    // running one is never swapped out). A consumer that went away without EndOperation does not
+    // hold it for ever: the idle bound ends that paste, and then a new one may start.
+    log("paste refused: paste op=" + std::to_string(op_.pasteOp) + " of this offer is still running");
+    return HRESULT_FROM_WIN32(ERROR_BUSY);
   }
   op_ = Operation{};
   op_.active = true;

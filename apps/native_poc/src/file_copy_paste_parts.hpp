@@ -123,6 +123,14 @@ class FilePullReceiver {
   };
 
   explicit FilePullReceiver(uint32_t pullWindow = 4) : pullWindow_(pullWindow) {}
+
+  /**
+   * A4 (stall): a Read waiting while not one chunk has been verified for this long fails (Timeout),
+   * and the paste's failure is Idle. Progress -- a verified chunk -- restarts the clock, so a long
+   * transfer that moves is never cut; a serving side that acknowledges pulls but never answers them
+   * (its source read failing, say) no longer holds the consumer for ever. Default 30 s.
+   */
+  void SetStallTimeoutUs(uint64_t us) { stallUs_.store(us); }
   ~FilePullReceiver() { Stop(); }
 
   void Start(AnswerFn answer);
@@ -193,6 +201,8 @@ class FilePullReceiver {
   uint64_t nextRequestId_ = 1;
   uint64_t bytesDelivered_ = 0;
   file_copy::net::PasteEndReason failure_ = file_copy::net::PasteEndReason::None;
+  std::atomic<uint64_t> stallUs_{30000000};
+  uint64_t lastProgressUs_ = 0;  // a verified chunk, or a Read starting to wait on an idle receiver
   Counters counters_;
   UdpControlChannel bulk_;
 };

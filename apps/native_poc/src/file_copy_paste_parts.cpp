@@ -118,6 +118,7 @@ void FilePullReceiver::Open(SendFn send, uint32_t txStreamId, uint32_t rxStreamI
   ahead_.clear();
   nextRequestId_ = 1;
   bytesDelivered_ = 0;
+  lastProgressUs_ = BulkPacer::NowUs();
   failure_ = fn::PasteEndReason::None;
   bulk_.Reset();
   bulk_.Configure(std::move(send), txStreamId, rxStreamId, mtuBytes);
@@ -183,9 +184,10 @@ void FilePullReceiver::Submit(const fc::ReadRequest& m) {
       refuse.status = fc::Status::BadRequest;
     } else if (m.length == 0) {
       refuse.status = fc::Status::Ok;  // nothing to fetch (end of file)
-    } else if (failure_ == fn::PasteEndReason::Verification) {
+    } else if (failure_ == fn::PasteEndReason::Verification || failure_ == fn::PasteEndReason::Idle) {
       refuse.status = fc::Status::ReadError;  // a chunk of this paste failed its check: no Read succeeds after it
     } else {
+      if (waiting_.empty()) lastProgressUs_ = BulkPacer::NowUs();  // the clock runs while someone waits
       waiting_.push_back(m);
       ProcessLocked(&answers);
       refuse.status = fc::Status::Ok;
@@ -317,8 +319,13 @@ void FilePullReceiver::Loop() {
       bool failed = false;
       if (got && fn::parse_bulk(msg.data(), msg.size(), &c)) {
         auto o = outstanding_.find(c.requestId);
-        if (o == outstanding_.end()) {
-          ++counters_.chunksRejected;  // not a pull in flight (a stale or foreign answer): nothing of it is used
+        const bool thisPaste = c.epochTag == id_.epochTag && c.offerId == id_.offerId && c.pasteOp == id_.pasteOp &&
+                               c.bulkGen == id_.bulkGen;
+        if (!thisPaste || o == outstanding_.end()) {
+          // Another paste's (an older generation, session or offer) or not a pull in flight: a stale or
+          // foreign answer. Nothing of it is used, and it neither ends nor advances this paste (D2) --
+          // even when its request id happens to be one in flight.
+          ++counters_.chunksRejected;
         } else {
           Job* j = o->second.first;
           const fn::Pull& asked = j->pulls[o->second.second];
@@ -330,6 +337,7 @@ void FilePullReceiver::Loop() {
             failure_ = fn::PasteEndReason::Verification;
           } else {
             ++counters_.chunksVerified;
+            lastProgressUs_ = BulkPacer::NowUs();
             std::memcpy(j->data.data() + (c.offset - j->offset), c.data.data(), c.data.size());
             ++j->done;
             completed_.push_back(c.requestId);
@@ -354,6 +362,11 @@ void FilePullReceiver::Loop() {
           jobs_.pop_front();
         }
         ProcessLocked(&answers);
+      }
+      if (open_ && !waiting_.empty() && BulkPacer::NowUs() - lastProgressUs_ > stallUs_.load()) {
+        // Waited with no verified chunk for the whole bound: the paste has stalled (A4).
+        if (failure_ == fn::PasteEndReason::None) failure_ = fn::PasteEndReason::Idle;
+        FailAllLocked(fc::Status::Timeout, &answers);
       }
       if (bulk_.IsClosed()) {
         // The serving side stopped answering for the channel's whole retry budget.
