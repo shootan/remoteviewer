@@ -15,6 +15,10 @@ const env = { ...process.env, REMOTE60_DIR_DATA: dataPath,
 fs.rmSync(dataPath, { force: true });
 spawnSync(process.execPath, [serverPath, '--add-account', 'tester', 'test-pass-1234'],
           { env, stdio: 'ignore' });
+// relay_test needs a second account that can sign in. It used to sign one up itself; an
+// account made through signup is pending now, so the operator's way makes it here first.
+spawnSync(process.execPath, [serverPath, '--add-account', 'outsider', 'outsider-pass-1234'],
+          { env, stdio: 'ignore' });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,6 +63,10 @@ function cleanup() {
   console.log('--- device credentials: the server ---');
   const deviceServer = await runTest(['device_credential_test.js']);
   if (deviceServer.code !== 0) { cleanup(); process.exit(deviceServer.code); }
+  // Account states and the admin API: several servers of its own, in its own scratch store.
+  console.log('--- accounts: states and the admin API ---');
+  const accountAdmin = await runTest(['account_admin_test.js']);
+  if (accountAdmin.code !== 0) { cleanup(); process.exit(accountAdmin.code); }
   // First, and without a server: the version-comparison contract. It shares its vectors with the
   // C++ and Kotlin suites, so a drift between the three shows up here before anything else runs.
   // Also without a server: where a wake is aimed. Pure, so it runs before anything is started --

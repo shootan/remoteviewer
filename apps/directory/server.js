@@ -18,8 +18,17 @@
  *   REMOTE60_DIR_DATA        account/host store path         (default ./directory-data.json)
  *   REMOTE60_DIR_TLS_KEY     PEM key  — enables HTTPS when both are set
  *   REMOTE60_DIR_TLS_CERT    PEM cert
- *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
+ *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup.
+ *                            An account made this way is `pending` until an operator approves it.
  *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
+ *
+ * Account Admin API v1 (accounts.js holds the rules; the contract is shared with GMux and
+ * IdleFirst). A SEPARATE listener, plain HTTP, never on REMOTE60_DIR_PORT -- that port is on the
+ * internet. It is not started at all unless both the port and the key are set.
+ *   REMOTE60_DIR_ADMIN_PORT    port of the admin listener           (unset = no listener)
+ *   REMOTE60_DIR_ADMIN_HOST    address it binds                     (default 127.0.0.1)
+ *   REMOTE60_DIR_ADMIN_KEY     bearer key it requires               (unset = no listener)
+ *   REMOTE60_DIR_ADMIN_MAX_PENDING  accounts that may wait for approval (default 200)
  *   REMOTE60_PUBLIC_IP       this server's own public IPv4; lets it correct the observation
  *                            made for a peer that sits on its own LAN (default: the relay ip)
  *
@@ -57,6 +66,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { hostSendTargetFor } = require('./wake_target');
 const deviceCredentials = require('./device_credentials');
+const accounts = require('./accounts');
 const os = require('os');
 
 const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
@@ -90,6 +100,13 @@ const UPDATE_DIR = process.env.REMOTE60_UPDATE_DIR || '';
 // The operator's call, not ours. Short passwords are genuinely weak on a server that
 // grants remote control of a PC, so the default stays at 8 and lowering it is explicit.
 const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD || 8));
+
+// The admin listener. Both values, or nothing: a port with no key would be an open door, and a
+// key with no port a setting that silently does nothing -- so either one missing means off.
+const ADMIN_PORT = Number(process.env.REMOTE60_DIR_ADMIN_PORT || 0);
+const ADMIN_HOST = String(process.env.REMOTE60_DIR_ADMIN_HOST || '127.0.0.1').trim() || '127.0.0.1';
+const ADMIN_KEY = String(process.env.REMOTE60_DIR_ADMIN_KEY || '');
+const ADMIN_MAX_PENDING = Math.max(0, Number(process.env.REMOTE60_DIR_ADMIN_MAX_PENDING || 200));
 
 // ---------------------------------------------------------------- nat diagnostics (temporary)
 //
@@ -423,11 +440,11 @@ async function handleLogs(req, res) {
   if (session) {
     accountId = session.accountId;
   } else {
-    const hostToken = String(req.headers['x-host-token'] || '');
-    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
-    const host = hostId ? store.hosts[hostId] : null;
-    if (!host) return sendJson(res, 401, { error: 'unknown session or host token' });
-    accountId = host.accountId;
+    const found = hostForToken(req.headers['x-host-token']);
+    if (!found.host) {
+      return sendJson(res, 401, { error: 'unknown session or host token', code: found.code });
+    }
+    accountId = found.host.accountId;
   }
 
   const device = logSegment(req.headers['x-log-device'], 'unknown-device');
@@ -471,10 +488,9 @@ async function handleUpdateManifest(req, res) {
 
   const session = sessionFor(req);
   if (!session) {
-    const hostToken = String(req.headers['x-host-token'] || '');
-    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
-    if (!hostId || !store.hosts[hostId]) {
-      return sendJson(res, 401, { error: 'unknown session or host token' });
+    const found = hostForToken(req.headers['x-host-token']);
+    if (!found.host) {
+      return sendJson(res, 401, { error: 'unknown session or host token', code: found.code });
     }
   }
 
@@ -574,6 +590,9 @@ function loadStore() {
   // then read by a server from before, keeps the key because that server rewrites the whole
   // object. Either way what is in memory from here on has one.
   deviceCredentials.normaliseStore(store);
+  // A store from before account states has none; every account in it could sign in, and still
+  // can. See accounts.normaliseStore.
+  accounts.normaliseStore(store, (line) => console.log(line));
   indexHostTokens();
 }
 
@@ -652,7 +671,7 @@ async function authenticateAccount(id, password, res) {
   }
   authInFlight.add(id);
   try {
-    const account = store.accounts[id];
+    const account = accounts.get(store, id);
     let valid = false;
     if (account && account.salt && account.hash) {
       const { hash } = await hashPasswordAsync(password, account.salt);
@@ -663,11 +682,42 @@ async function authenticateAccount(id, password, res) {
       const count = (fail ? fail.count : 0) + 1;
       const delayMs = count <= 3 ? 0 : Math.min(30000, 500 * 2 ** Math.min(count - 3, 6));
       loginFailures.set(id, { count, nextAllowedAt: Date.now() + delayMs });
-      sendJson(res, 401, { error: 'invalid id or password' }); return null;
+      sendJson(res, 401, { error: 'invalid id or password', code: 'invalid_credentials' }); return null;
     }
+    // The password was right, so nothing here counts as a failed attempt -- whatever the
+    // account's state turns out to be. The state is asked by the caller, after this.
     loginFailures.delete(id);
     return account;
   } finally { authInFlight.delete(id); }
+}
+
+/**
+ * The right password for an account that may not be used: 403, with the contract's sentence.
+ * Asked only after the password has been checked, so the state of an account is told to nobody
+ * who could not sign in to it. Returns true when it answered.
+ */
+function refuseUnlessActive(account, res) {
+  if (account.status === 'active') return false;
+  const refusal = accounts.REFUSALS[account.status] || accounts.REFUSALS.disabled;
+  sendJson(res, 403, { ...refusal });
+  return true;
+}
+
+/**
+ * The host a token belongs to, if its account may use the service.
+ *
+ * A host token never expires, so this is the one place a disabled account's PCs are stopped:
+ * every request that comes in with one asks again. `code` says which of the two refusals it was
+ * -- the token holder already proved who it is, so telling it the account is inactive tells it
+ * nothing it could not have been told at sign-in.
+ */
+function hostForToken(rawToken) {
+  const token = String(rawToken || '');
+  const hostId = token ? hostTokens.get(hashToken(token)) : undefined;
+  const host = hostId ? store.hosts[hostId] : null;
+  if (!host) return { host: null, code: 'unknown_host_token' };
+  if (!accounts.hostIsActive(store, host)) return { host: null, code: 'account_inactive' };
+  return { host, code: '' };
 }
 
 function randomToken() {
@@ -706,7 +756,18 @@ setInterval(sweep, 30 * 1000).unref();
 
 // ---------------------------------------------------------------- http helpers
 
+// What an error answer's `code` is when the handler did not name one. The `error` sentence is
+// left exactly as it was -- clients show it -- and the code is only added beside it.
+const DEFAULT_ERROR_CODES = Object.freeze({
+  400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 404: 'not_found', 409: 'conflict',
+  413: 'too_large', 429: 'rate_limited', 500: 'server_error', 503: 'unavailable',
+});
+
 function sendJson(res, status, payload) {
+  if (status >= 400 && payload && typeof payload === 'object' && payload.error !== undefined &&
+      !payload.code) {
+    payload = { ...payload, code: DEFAULT_ERROR_CODES[status] || 'error' };
+  }
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -780,6 +841,9 @@ function sessionFor(req) {
   if (!token) return null;
   const s = sessions.get(token);
   if (!s || s.expiresAt <= Date.now()) return null;
+  // Asked every time, not only when the session was issued: an account that is disabled or
+  // deleted stops here on its very next request, whatever sessions it still holds.
+  if (!accounts.isActive(store, s.accountId)) return null;
   // A session belongs to the device family it was issued through, and ends with it. Ending the
   // family deletes its sessions; this is the same rule asked again at the door, so that a
   // session which somehow outlived its family is still not one.
@@ -880,6 +944,16 @@ async function handleSessionRefresh(req, res) {
     ? store.devices[deviceId] : null;
   const verdict = deviceCredentials.classify(record, credential, now);
 
+  if ((verdict === 'current' || verdict === 'grace') &&
+      !accounts.isActive(store, record.accountId)) {
+    // The right credential for an account that is pending, disabled or gone. 401, like any other
+    // refusal here, so the client erases it and asks for the password -- where it is then told
+    // why. Nothing rotates, nothing is revoked (enabling the account brings the device back),
+    // and it is not counted as a wrong value: it was not one.
+    console.log(`[device] ${deviceTag(deviceId)} refused: the account is not active`);
+    return sendJson(res, 401, { error: 'invalid device credential', code: 'account_inactive' });
+  }
+
   if (verdict === 'current' || verdict === 'grace') {
     const issued = commitDevices(() => deviceCredentials.rotate(store.devices[deviceId], verdict, now));
     deviceFailures.delete(failureKey(req, deviceId));
@@ -939,8 +1013,7 @@ function handleDevices(req, res) {
   const session = sessionFor(req);
   if (!session) return sendJson(res, 401, { error: 'login required' });
   sendJson(res, 200, {
-    devices: deviceCredentials.listFor(store.devices, session.accountId, session.deviceId || '',
-                                       Date.now()),
+    devices: accounts.listDevices(store, session.accountId, session.deviceId || '', Date.now()),
   });
 }
 
@@ -984,24 +1057,29 @@ async function handleSignup(req, res) {
     return sendJson(res, 403, { error: 'signup key is not correct' });
   }
 
-  const id = String(body.id || '').trim().toLowerCase();
+  const id = accounts.normaliseId(body.id);
   const pw = String(body.pw || '');
-  if (!/^[a-z0-9._-]{3,32}$/.test(id)) {
-    return sendJson(res, 400, { error: 'id must be 3-32 characters: letters, digits, . _ -' });
+  if (!accounts.validId(id)) {
+    return sendJson(res, 400, { error: 'id must be 3-32 characters: letters, digits, . _ -', code: 'id' });
   }
   if (pw.length < MIN_PASSWORD) {
-    return sendJson(res, 400, { error: `password must be at least ${MIN_PASSWORD} characters` });
+    return sendJson(res, 400, { error: `password must be at least ${MIN_PASSWORD} characters`, code: 'pw' });
   }
-  if (store.accounts[id]) {
-    return sendJson(res, 409, { error: 'that id is already taken' });
+  if (pw.length > accounts.PASSWORD_MAX) {
+    return sendJson(res, 400, { error: `password must be at most ${accounts.PASSWORD_MAX} characters`, code: 'pw' });
+  }
+  if (accounts.get(store, id)) {
+    return sendJson(res, 409, { error: 'that id is already taken', code: 'taken' });
   }
 
   const { salt, hash } = await hashPasswordAsync(pw);
   // Another signup may have finished while the KDF was in flight.
-  if (store.accounts[id]) return sendJson(res, 409, { error: 'that id is already taken' });
-  store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
-  try { saveStoreNow(); } catch (error) { delete store.accounts[id]; throw error; }
-  console.log(`[directory] account '${id}' created via signup`);
+  if (accounts.get(store, id)) return sendJson(res, 409, { error: 'that id is already taken', code: 'taken' });
+  // Pending, like every account a person can make for themselves: it can sign in to nothing
+  // until an operator approves it.
+  accounts.create(store, { id, salt, hash, memo: '', status: 'pending' }, Date.now());
+  try { saveStoreNow(); } catch (error) { accounts.remove(store, id); throw error; }
+  console.log(`[directory] account '${id}' created via signup (pending)`);
   sendJson(res, 200, { ok: true, id });
 }
 
@@ -1016,11 +1094,15 @@ async function handleLogin(req, res) {
   const device = deviceCredentials.parseDeviceRequest(body.device);
   if (device.error) return sendJson(res, 400, { error: device.error });
 
-  if (!(await authenticateAccount(id, pw, res))) return;
+  const account = await authenticateAccount(id, pw, res);
+  if (!account) return;
+  if (refuseUnlessActive(account, res)) return;
+  accounts.touchLogin(account, Date.now());
 
   if (!device.wanted) {
     // The sign-in every client made before device credentials existed, answered exactly as it
     // was: a session and nothing else.
+    saveStoreSoon();
     return sendJson(res, 200, withObserve(startSession(id, '')));
   }
 
@@ -1030,8 +1112,8 @@ async function handleLogin(req, res) {
   const now = Date.now();
   let dropped = [];
   const family = commitDevices(() => {
-    const made = deviceCredentials.createFamily(store.devices, id, device, now);
-    dropped = deviceCredentials.prune(store.devices, id, now);
+    const made = accounts.createDevice(store, id, device, now);
+    dropped = accounts.pruneDevices(store, id, now);
     return made;
   });
   endSessionsOf(dropped);
@@ -1054,7 +1136,10 @@ async function handleHostRegister(req, res) {
   if (!id || !pw || !machineId) {
     return sendJson(res, 400, { error: 'id, pw and machineId are required' });
   }
-  if (!(await authenticateAccount(id, pw, res))) return;
+  const account = await authenticateAccount(id, pw, res);
+  if (!account) return;
+  // A pending account must not be able to put a PC on the service any more than it can sign in.
+  if (refuseUnlessActive(account, res)) return;
 
   // Keyed by machine so reinstalling does not pile up duplicate entries.
   let hostId = Object.keys(store.hosts).find(
@@ -1168,7 +1253,9 @@ function relayEligibleFor(accountId, clientIp) {
   if (!RELAY_ENABLED || !RELAY_IP) return false;
   const ipOk = RELAY_ALLOW_IPS.any || RELAY_ALLOW_IPS.set.has(clientIp);
   const accountOk = RELAY_ALLOW_ACCOUNTS.any || RELAY_ALLOW_ACCOUNTS.set.has(accountId);
-  return ipOk && accountOk;
+  // The allowlists above are unchanged. This is in addition: an account that is not active is
+  // not eligible for anything, the relay included.
+  return ipOk && accountOk && accounts.isActive(store, accountId);
 }
 
 /**
@@ -1580,6 +1667,7 @@ function relayBindSession(rinfo, parsed) {
   if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) return null;
   const host = store.hosts[auth.hostId];
   if (!host || !host.publicIp || !host.publicUdpPort) return null;
+  if (!accounts.hostIsActive(store, host)) return null;
 
   // The newest connect wins. The alternative -- first session keeps the host -- reads as fair but
   // means a phone whose app was killed cannot come back: nobody is left to release the lease, and
@@ -1752,10 +1840,10 @@ function relayHandleHostPacket(msg, rinfo) {
 
 async function handleHostHeartbeat(req, res) {
   const body = await readJsonBody(req);
-  const hostToken = String(body.hostToken || '');
-  const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
-  const host = hostId ? store.hosts[hostId] : null;
-  if (!host) return sendJson(res, 401, { error: 'unknown host token' });
+  const found = hostForToken(body.hostToken);
+  const host = found.host;
+  if (!host) return sendJson(res, 401, { error: 'unknown host token', code: found.code });
+  const hostId = host.hostId;
 
   // The observation token ties this heartbeat to the UDP packet that came from the very
   // socket the host will stream on, so the port we hand out is the one NAT actually mapped.
@@ -1836,8 +1924,8 @@ function handleHosts(req, res) {
   const session = sessionFor(req);
   if (!session) return sendJson(res, 401, { error: 'login required' });
   const now = Date.now();
-  const list = Object.values(store.hosts)
-    .filter((h) => h.accountId === session.accountId)
+  const list = accounts.hostsOf(store, session.accountId)
+    .filter((h) => accounts.hostIsActive(store, h))
     .map((h) => ({
       hostId: h.hostId,
       hostName: h.hostName,
@@ -1852,8 +1940,9 @@ async function handleConnect(req, res) {
   const session = sessionFor(req);
   if (!session) return sendJson(res, 401, { error: 'login required' });
   const body = await readJsonBody(req);
-  const host = store.hosts[String(body.hostId || '')];
-  if (!host || host.accountId !== session.accountId) {
+  const hostKey = String(body.hostId || '');
+  const host = Object.prototype.hasOwnProperty.call(store.hosts, hostKey) ? store.hosts[hostKey] : null;
+  if (!host || host.accountId !== session.accountId || !accounts.hostIsActive(store, host)) {
     return sendJson(res, 404, { error: 'host not found' });
   }
   if (Date.now() - host.lastSeen >= HOST_OFFLINE_MS) {
@@ -2061,12 +2150,329 @@ function addAccountFromCli() {
     console.error('usage: node server.js --add-account <id> <password>');
     process.exit(2);
   }
+  if (!accounts.validId(id)) {
+    console.error('the id must be 3-32 characters of a-z 0-9 . _ -');
+    process.exit(2);
+  }
   loadStore();
   const { salt, hash } = hashPassword(pw);
-  store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
+  // The operator, on the server itself: nobody to wait for, so the account is active.
+  accounts.put(store, { id, salt, hash, status: 'active' }, Date.now());
   fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
   console.log(`[directory] account '${id}' saved to ${DATA_PATH}`);
   return true;
+}
+
+// ---------------------------------------------------------------- Account Admin API v1
+//
+// What the main server (signup and approval) uses to tell this one what to do. It never edits
+// directory-data.json itself; it calls these, on a port of their own that is not on the
+// internet. The contract -- paths, bodies, the three states, the error codes -- is shared with
+// GMux and IdleFirst and is not changed here alone.
+//
+// Every change follows the order the rest of this file keeps: change in memory, write the store
+// (undone in memory if the write fails, answered 503), and only then end what is open --
+// sessions, relay sessions -- and answer. Nothing is logged that is a password or the key.
+
+const ADMIN_MAX_BODY_BYTES = 16 * 1024;
+
+/** Runs a change to accounts, hosts and devices and persists it; undone if it cannot be written. */
+function commitStore(change) {
+  const before = JSON.stringify({ accounts: store.accounts, hosts: store.hosts, devices: store.devices });
+  try {
+    const result = change();
+    saveStoreNow();
+    return result;
+  } catch (error) {
+    const saved = JSON.parse(before);
+    store.accounts = saved.accounts;
+    store.hosts = saved.hosts;
+    store.devices = saved.devices;
+    indexHostTokens();
+    throw error;
+  }
+}
+
+/** Ends every session of the account, whatever it came from. */
+function endSessionsOfAccount(accountId) {
+  let count = 0;
+  for (const [token, s] of sessions) {
+    if (s.accountId === accountId) {
+      sessions.delete(token);
+      ++count;
+    }
+  }
+  return count;
+}
+
+/**
+ * Closes what is open for these hosts right now: relay sessions, the capabilities waiting to
+ * mint one, the wake resend. A heartbeat or connect would be refused from here on anyway; this
+ * is what does not wait for the next request.
+ */
+function closeHostsNow(hostIds, reason) {
+  let relays = 0;
+  for (const hostId of hostIds) {
+    const lease = relayLeaseByHost.get(hostId);
+    if (lease && !lease.dropped) {
+      relayDropSession(lease, reason);
+      ++relays;
+    }
+    for (const session of [...relaySessions]) {
+      if (session.hostId === hostId && !session.dropped) {
+        relayDropSession(session, reason);
+        ++relays;
+      }
+    }
+    for (const [token, auth] of relayAuthByToken) {
+      if (auth.hostId === hostId) relayAuthByToken.delete(token);
+    }
+    relayLatestTokenByHost.delete(hostId);
+    pendingPunch.delete(hostId);
+    stopWakeResend(hostId, reason);
+  }
+  return relays;
+}
+
+function adminAudit(action, id, outcome) {
+  // What, to which account, when. Never a password, never the key.
+  console.log(`[admin] ${new Date().toISOString()} action=${action} account=${id || '-'} ` +
+              `result=${outcome}`);
+}
+
+function adminError(res, status, code, error) {
+  sendJson(res, status, { error, code });
+}
+
+/** Constant-time: both sides are hashed first, so neither the length nor a prefix leaks. */
+function adminKeyMatches(req) {
+  const header = String(req.headers['authorization'] || '');
+  if (!header.startsWith('Bearer ')) return false;
+  const given = crypto.createHash('sha256').update(header.slice(7)).digest();
+  const expected = crypto.createHash('sha256').update(ADMIN_KEY).digest();
+  return crypto.timingSafeEqual(given, expected);
+}
+
+/** A JSON object body, or null after answering 400 bad_request. */
+async function adminBody(req, res) {
+  let body;
+  try {
+    body = await new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      req.on('data', (c) => {
+        size += c.length;
+        // Over the limit: stop keeping it, answer 400, and let the rest drain into nothing. The
+        // key was already checked, so only a key holder can send one; cutting the connection
+        // instead would leave the caller with no answer at all.
+        if (size > ADMIN_MAX_BODY_BYTES) { chunks.length = 0; reject(new Error('body too large')); return; }
+        chunks.push(c);
+      });
+      req.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('invalid json')); }
+      });
+      req.on('error', reject);
+    });
+  } catch (error) {
+    if (error.message === 'body too large') res.setHeader('connection', 'close');
+    adminError(res, 400, 'bad_request', error.message === 'body too large'
+      ? 'the body is larger than 16KB' : 'the body is not JSON');
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    adminError(res, 400, 'bad_request', 'the body is not a JSON object');
+    return null;
+  }
+  return body;
+}
+
+function adminAccountAnswer(res, status, account) {
+  sendJson(res, status, { ok: true, account: accounts.publicView(store, account) });
+}
+
+async function adminCreate(req, res) {
+  const body = await adminBody(req, res);
+  if (!body) return;
+  const id = typeof body.id === 'string' ? body.id : '';
+  if (!accounts.validId(id)) return adminError(res, 400, 'id', 'id must match ^[a-z0-9._-]{3,32}$');
+  if (!accounts.validPassword(body.pw)) {
+    return adminError(res, 400, 'pw', `pw must be ${accounts.PASSWORD_MIN}-${accounts.PASSWORD_MAX} characters`);
+  }
+  if (accounts.get(store, id)) {
+    adminAudit('create', id, 'taken');
+    return adminError(res, 409, 'taken', 'that id is already taken');
+  }
+  if (accounts.counts(store).pending >= ADMIN_MAX_PENDING) {
+    adminAudit('create', id, 'too_many_pending');
+    return adminError(res, 429, 'too_many_pending', 'too many accounts are waiting for approval');
+  }
+  const { salt, hash } = await hashPasswordAsync(body.pw);
+  // Another request may have made it while the KDF ran.
+  if (accounts.get(store, id)) return adminError(res, 409, 'taken', 'that id is already taken');
+  const account = commitStore(() =>
+    accounts.create(store, { id, salt, hash, memo: body.memo, status: 'pending' }, Date.now()));
+  adminAudit('create', id, 'pending');
+  adminAccountAnswer(res, 201, account);
+}
+
+async function adminApprove(res, account) {
+  if (account.status === 'active') {
+    // Safe to retry: approving what is already approved is the same answer, not an error.
+    adminAudit('approve', account.id, 'already-active');
+    return adminAccountAnswer(res, 200, account);
+  }
+  if (account.status !== 'pending') {
+    adminAudit('approve', account.id, `state:${account.status}`);
+    return adminError(res, 409, 'state', `the account is ${account.status}, not pending`);
+  }
+  commitStore(() => accounts.setStatus(accounts.get(store, account.id), 'active', Date.now()));
+  adminAudit('approve', account.id, 'active');
+  adminAccountAnswer(res, 200, accounts.get(store, account.id));
+}
+
+async function adminDisable(res, account) {
+  const id = account.id;
+  if (account.status !== 'disabled') {
+    commitStore(() => accounts.setStatus(accounts.get(store, id), 'disabled', Date.now()));
+  }
+  // Written first; now what is open closes. Host tokens, device families and the hosts
+  // themselves are kept: every request asks whether the account is active, so they stop working
+  // now and work again on enable, with nothing to re-register.
+  const ended = endSessionsOfAccount(id);
+  const relays = closeHostsNow(accounts.hostsOf(store, id).map((h) => h.hostId), 'account disabled');
+  adminAudit('disable', id, `disabled sessions=${ended} relays=${relays}`);
+  adminAccountAnswer(res, 200, accounts.get(store, id));
+}
+
+async function adminEnable(res, account) {
+  if (account.status !== 'disabled') {
+    adminAudit('enable', account.id, `state:${account.status}`);
+    return adminError(res, 409, 'state', `the account is ${account.status}, not disabled`);
+  }
+  commitStore(() => accounts.setStatus(accounts.get(store, account.id), 'active', Date.now()));
+  adminAudit('enable', account.id, 'active');
+  adminAccountAnswer(res, 200, accounts.get(store, account.id));
+}
+
+async function adminPassword(req, res, account) {
+  const body = await adminBody(req, res);
+  if (!body) return;
+  if (!accounts.validPassword(body.pw)) {
+    return adminError(res, 400, 'pw', `pw must be ${accounts.PASSWORD_MIN}-${accounts.PASSWORD_MAX} characters`);
+  }
+  const id = account.id;
+  const { salt, hash } = await hashPasswordAsync(body.pw);
+  if (!accounts.get(store, id)) return adminError(res, 404, 'not_found', 'no such account');
+  let dropped = [];
+  let endedDevices = [];
+  commitStore(() => {
+    const now = Date.now();
+    accounts.setPassword(accounts.get(store, id), { salt, hash }, now);
+    // Every standing sign-in ends with the old password: the PCs' tokens, and the device
+    // families that let a client come back without typing it.
+    dropped = accounts.dropHostTokensOf(store, id);
+    endedDevices = accounts.endDevicesOf(store, id, 'the password was changed', now);
+  });
+  for (const tokenHash of dropped) hostTokens.delete(tokenHash);
+  endSessionsOf(endedDevices);
+  const ended = endSessionsOfAccount(id);
+  const relays = closeHostsNow(accounts.hostsOf(store, id).map((h) => h.hostId), 'password changed');
+  loginFailures.delete(id);
+  adminAudit('password', id, `changed sessions=${ended} hostTokens=${dropped.length} ` +
+             `devices=${endedDevices.length} relays=${relays}`);
+  adminAccountAnswer(res, 200, accounts.get(store, id));
+}
+
+async function adminDelete(res, account) {
+  const id = account.id;
+  const removed = commitStore(() => accounts.remove(store, id));
+  for (const tokenHash of removed.tokenHashes) hostTokens.delete(tokenHash);
+  const ended = endSessionsOfAccount(id);
+  const relays = closeHostsNow(removed.hostIds, 'account deleted');
+  loginFailures.delete(id);
+  adminAudit('delete', id, `deleted hosts=${removed.hostIds.length} devices=${removed.deviceIds.length} ` +
+             `sessions=${ended} relays=${relays}`);
+  sendJson(res, 200, { ok: true });
+}
+
+async function onAdminRequest(req, res) {
+  // The key first, for every path: without it this listener answers nothing else, not even
+  // which paths exist.
+  if (!adminKeyMatches(req)) {
+    adminAudit('auth', '', 'unauthorized');
+    return adminError(res, 401, 'unauthorized', 'unauthorized');
+  }
+  const url = new URL(req.url || '/', 'http://admin.invalid');
+  const parts = url.pathname.split('/').filter(Boolean);
+  try {
+    if (parts[0] !== 'admin' || parts[1] !== 'v1') return adminError(res, 404, 'not_found', 'not found');
+    if (parts.length === 3 && parts[2] === 'health' && req.method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true, service: 'gnlink', version: SERVER_VERSION, counts: accounts.counts(store),
+      });
+    }
+    if (parts[2] !== 'accounts') return adminError(res, 404, 'not_found', 'not found');
+    if (parts.length === 3) {
+      if (req.method === 'GET') {
+        const status = url.searchParams.get('status');
+        if (status !== null && !accounts.STATUSES.includes(status)) {
+          return adminError(res, 400, 'bad_request', 'status must be pending, active or disabled');
+        }
+        return sendJson(res, 200, {
+          accounts: accounts.list(store, status).map((a) => accounts.publicView(store, a)),
+        });
+      }
+      if (req.method === 'POST') return await adminCreate(req, res);
+      return adminError(res, 404, 'not_found', 'not found');
+    }
+    let id;
+    try { id = decodeURIComponent(parts[3] || ''); } catch { id = ''; }
+    if (!accounts.validId(id)) return adminError(res, 400, 'id', 'id must match ^[a-z0-9._-]{3,32}$');
+    const action = parts.length === 5 ? parts[4] : (parts.length === 4 ? '' : null);
+    const known = (action === '' && req.method === 'DELETE') ||
+                  (req.method === 'POST' && ['approve', 'disable', 'enable', 'password'].includes(action));
+    if (!known) return adminError(res, 404, 'not_found', 'not found');
+    const account = accounts.get(store, id);
+    if (!account) {
+      adminAudit(action || 'delete', id, 'not_found');
+      return adminError(res, 404, 'not_found', 'no such account');
+    }
+    if (action === '') return await adminDelete(res, account);
+    if (action === 'approve') return await adminApprove(res, account);
+    if (action === 'disable') return await adminDisable(res, account);
+    if (action === 'enable') return await adminEnable(res, account);
+    return await adminPassword(req, res, account);
+  } catch (error) {
+    console.error(`[admin] ${req.method} ${url.pathname} failed: ${error.message}`);
+    const status = error.statusCode || 500;
+    return adminError(res, status, status === 503 ? 'unavailable' : 'server_error', error.message);
+  }
+}
+
+const SERVER_VERSION = (() => {
+  try { return String(require('./package.json').version || ''); } catch { return ''; }
+})();
+
+/**
+ * Starts the admin listener, or says why it did not. Never on the service port: that one is on
+ * the internet, and the whole point of a separate port is that it is not.
+ */
+function startAdminListener() {
+  if (!ADMIN_KEY || !ADMIN_PORT) {
+    console.log('[admin] off (REMOTE60_DIR_ADMIN_PORT and REMOTE60_DIR_ADMIN_KEY must both be set)');
+    return null;
+  }
+  if (!Number.isInteger(ADMIN_PORT) || ADMIN_PORT < 1 || ADMIN_PORT > 65535 || ADMIN_PORT === HTTP_PORT) {
+    console.error(`[admin] NOT started: port ${process.env.REMOTE60_DIR_ADMIN_PORT} is not a ` +
+                  'usable port of its own');
+    return null;
+  }
+  const admin = http.createServer(onAdminRequest);
+  admin.on('error', (err) => console.error('[admin] listener error:', err.message));
+  admin.listen(ADMIN_PORT, ADMIN_HOST, () => {
+    console.log(`[admin] account admin v1 on http://${ADMIN_HOST}:${ADMIN_PORT}`);
+  });
+  return admin;
 }
 
 // ---------------------------------------------------------------- boot
@@ -2092,6 +2498,7 @@ if (!addAccountFromCli()) {
   });
   observeSock = startUdp();
   relaySock = startRelayListener();
+  startAdminListener();
   if (RELAY_ENABLED) {
     const ips = RELAY_ALLOW_IPS.any ? '*' : ([...RELAY_ALLOW_IPS.set].join(',') || '(none)');
     const accounts = RELAY_ALLOW_ACCOUNTS.any

@@ -12844,3 +12844,19 @@ Next
 - 부정 대조(④): 시험 창 위를 30 ms 마다 다시 덮는 자체 decoy 창(다른 프로세스) → runner exit 3 INVALID, 가린 창 신원 출력 확인. decoy 없이 같은 빌드는 exit 0.
 - 증명하지 못하는 것: APK Activity 재생성 자체(기기 없음 — JVM 에서 DirectoryClient 값의 수명과 복구 흐름, 그리고 Activity 에 사본이 없음을 소스로 확인), 실제 두 창 동시 실행 UI.
 - 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`, `DirectoryClient.kt`, `MainActivity.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`, `gnlink_host_login_uia.ps1`, `host_login_ui_runner.js`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (1/2) — 서버: 계정 상태와 관리 창구 (Account Admin API v1)
+
+- 요구: `.claude/account_admin_prompt_2026-09-29.md` + 공통 규격 `account_admin_contract_v1.md`(GMux·IdleFirst 공통 — 경로·응답·상태 이름 그대로). 지시서 `task_account_admin_r1.md`.
+- `accounts.js`(신설): `store.accounts` 를 읽고 쓰는 코드와, 계정 때문에 그 계정의 호스트·기기 자격에 하는 일(정지·비번 변경·삭제)을 한 모듈로. server.js 에서 `store.accounts[...]` 직접 접근은 없어졌다(기기 자격의 계정 관련 호출 `createFamily`·`prune`·`listFor` 도 이 모듈을 거친다).
+- 상태 `pending|active|disabled`, 값 `updatedAt·approvedAt·memo(200자, 제어문자 제거)·lastLoginAt`. 옛 파일(상태 없음)은 전부 active 로 읽는다. 모르는 상태 문자열은 disabled 로 읽고 로그에 남긴다.
+- 로그인·호스트 등록: 비밀번호 먼저(틀리면 종전 401). 맞으면 pending/disabled 는 403 + 규격 문장·code, loginFailures 에 세지 않음. 성공 로그인은 lastLoginAt.
+- 매 요청 active 확인: `sessionFor`, 호스트 토큰(heartbeat·logs·update manifest — `hostForToken`, code `account_inactive`), `/api/session/refresh`(active 아니면 401 `account_inactive`, **회전·폐기·실패 계수 없음**), 목록·connect 대상·릴레이 자격(`relayEligibleFor` 는 허용 목록 판정은 그대로 두고 active 조건만 추가, `relayBindSession`).
+- 모든 오류 응답에 `code` 추가(없으면 상태별 기본값). `error` 문장은 그대로.
+- signup = pending, `--add-account` = active(+ id 규칙 검사).
+- 관리 창구: 별도 http 리스너, 기본 127.0.0.1, `REMOTE60_DIR_ADMIN_PORT`+`REMOTE60_DIR_ADMIN_KEY` 둘 다 있어야 기동, 서비스 포트와 같으면 기동 안 함. Bearer 키는 sha256 후 timingSafeEqual. 본문 16KB(넘으면 400 bad_request 로 답하고 닫음). 경로·코드는 규격 그대로 + 목록에 hostCount. disable = 세션·릴레이 세션·대기 capability·wake resend 즉시 종료(호스트 토큰·기기 자격은 보존, enable 로 재등록 없이 복귀). password = 세션 + 호스트 토큰 무효 + **기기 자격 계열 전부 폐기**. DELETE = 계정·세션·호스트·호스트 토큰·**기기 자격 항목**. 모든 변경은 메모리 → 저장 → (실패 시 되돌리고 503) → 세션 종료 → 응답. 감사 로그 `[admin] <시각> action= account= result=`, 비밀번호·키 없음.
+- 시험: `account_admin_test.js`(신설) exit 0, 105 checks, 3회 반복 동일 — 옛 파일·키/포트 없으면 리스너 없음(포트 실제 미개방)·한쪽만 있어도 없음·서비스 포트에 /admin 없음(404)·127.0.0.1 만(LAN 주소로는 연결 안 됨)·틀린 키 401·생성/검증 오류 코드 전부·pending 403(로그인·등록·기기 계열 미생성)·403 은 실패 계수 안 됨·approve/enable/disable 상태 전이·정지 뒤 세션/호스트 토큰/manifest/refresh 401(무회전)·정지 계정 PC 는 다른 계정 목록·connect 대상 아님·enable 뒤 호스트 토큰·기기 자격 복귀·비번 변경 뒤 옛 세션/토큰/기기 401·삭제 뒤 store 에 계정·호스트·기기 없음·저장 실패 503 무변경·재시작 뒤 상태 유지·로그에 비번/키 없음. `node apps/directory/test/run.js` exit 0(RESULT: ALL PASS). 기존 시험 조정: `directory_test` 는 signup 계정이 pending(403)임을 확인하도록, `run.js` 는 relay_test 의 두 번째 계정을 `--add-account` 로 미리 만든다.
+- 변이 17종 중 16종 kill. `session-not-asked`(sessionFor 의 active 확인 제거)는 단독으로는 살아남는다 — disable·delete 가 그 계정 세션을 직접 끝내기 때문. disable 의 세션 종료까지 함께 빼면 "정지 뒤 세션 401" 이 FAIL → 매 요청 확인이 실제로 막는다는 것을 확인.
+- 배포 목록: `server.js`·`accounts.js`(신규)·`device_credentials.js`·`update_manifest.js`·`version_compare.js`·`wake_target.js`·`package.json`. NAS 환경변수 추가 `REMOTE60_DIR_ADMIN_PORT=29182`·`REMOTE60_DIR_ADMIN_KEY=<키>`(HOST 기본 127.0.0.1) + 재시작 필요. 롤백하면 옛 서버는 상태를 읽지 않아 pending·disabled 도 로그인된다(README 에 기록).
+- 증명하지 못하는 것: 실제 릴레이 세션이 정지 순간 끊기는 것(시험 서버는 릴레이 꺼짐 — closeHostsNow 는 실행되지만 닫을 세션이 없음), TLS·실제 NAS·메인 서버.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js` 신설, `directory_test.js`, `run.js`) / 문서(`apps/directory/README.md`, 이 항목, 구현계획).
