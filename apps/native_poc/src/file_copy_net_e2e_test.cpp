@@ -1195,12 +1195,16 @@ int wmain() {
     fakeImage.owner = 0xD5D7;
     check("an image holds the viewer's bulk", viewArbiter.TryAcquire(BulkUse::Image, fakeImage.owner));
     fakeImage.releaseAfterMs.store(2500);
-    const int aftersBefore = fakeImage.afters.load();
+    const int aftersBefore = fakeImage.afters.load(), preemptsBefore = fakeImage.preempts.load();
     Child consumer;
     const std::wstring dest = root + L"destQ3";
     paste_on(local, dest, content.size(), 60, &consumer);
-    // While the paste waits for the image: the remote clipboard gets another copy (not files).
-    Sleep(700);
+    // While the paste waits for the image: the remote clipboard gets another copy (not files). Only
+    // once the paste has really begun and is waiting (the image was asked to stop) -- a fixed sleep
+    // let a slow consumer start AFTER the change, when the copy was already withdrawn (verifier's
+    // 18a38fa run under load: published 231.5 s, cleared 232.9 s, no StartOperation).
+    check("staged: the paste began and waits for the image (it was asked to stop)",
+          wait_until([&] { return fakeImage.preempts.load() > preemptsBefore; }, 30000));
     host.OnHostClipboard(++hostSeq, {});
     const DWORD code = consumer.Wait(90000);
     std::map<std::wstring, std::vector<uint8_t>> setQ = {{L"d5R.bin", content}};
