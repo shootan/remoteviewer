@@ -247,6 +247,46 @@ void test_product_list() {
             directory::product_migratable_origins_for("").empty());
 }
 
+// ------------------------------------------------------------------------------ updates
+//
+// A machine that installed an earlier build asks the address it has stored -- the former name --
+// for its manifest, and the manifest a release publishes now names artifacts under the fixed
+// address. Manifest on one origin, artifacts on another: the credential belongs to the first
+// and must not travel to the second. The artifacts are served without one.
+//
+// This is the decision the updater's fetch functions make before every request
+// (production_updater_deps, through credential_allowed). That an update then runs to the end
+// with artifacts on a host of their own is update_release_test; that the two real hosts answer
+// as expected is a check against the real hosts, which no test here makes.
+void test_update_across_the_two_names() {
+  namespace update = remote60::native_poc::update;
+  const std::string credential = std::string("x-host-token: ") + kToken;
+  const char* former = remote60::native_poc::kMigratableDirectoryOrigins[0];
+  const std::string fixed = remote60::native_poc::kFixedDirectoryUrl;
+
+  const update::UpdateEndpoint installed =
+      directory::update_endpoint_for("", former, "windows", credential, "owner", 1);
+  check("[update] an earlier install asks the former name for its manifest",
+        installed.derived &&
+            installed.url == std::string(former) + ":443/api/update/manifest?platform=windows",
+        installed.url);
+  check("[update] ...and sends its credential with that request",
+        update::credential_allowed(installed, installed.url));
+  check("[update] ...BUT NOT WITH AN ARTIFACT UNDER THE FIXED ADDRESS",
+        !update::credential_allowed(installed, fixed + "/updates/0.2.144/GNLinkHost.exe") &&
+            !update::credential_allowed(installed, fixed + ":443/updates/0.2.144/ui/shell.html"));
+
+  const update::UpdateEndpoint current =
+      directory::update_endpoint_for("", fixed, "windows", credential, "owner", 1);
+  check("[update] this build asks the fixed address",
+        current.derived && current.url == fixed + ":443/api/update/manifest?platform=windows",
+        current.url);
+  check("[update] ...and an artifact still published under the former name gets no credential",
+        update::credential_allowed(current, current.url) &&
+            !update::credential_allowed(current, std::string(former) +
+                                                     "/updates/0.2.143/GNLinkHost.exe"));
+}
+
 // ------------------------------------------------------------------------------ the agent
 
 void test_former_name_is_accepted() {
@@ -439,6 +479,7 @@ int main() {
 
   test_classification();
   test_product_list();
+  test_update_across_the_two_names();
   for (int status : {301, 302, 307, 308}) test_redirect_is_not_followed(status);
   test_former_name_is_accepted();
   test_unlisted_is_neither_sent_nor_erased();

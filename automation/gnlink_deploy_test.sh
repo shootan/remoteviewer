@@ -25,6 +25,10 @@ DEPLOY="$REPO/automation/gnlink_deploy.sh"
 # preflight gate now refuses it -- correctly. A fixture has to be a release that could actually be
 # published, or every case downstream is testing the refusal instead of the thing it names.
 SOURCE_REL="${GNLINK_TEST_RELEASE:-$REPO/.claude/rel/0.2.109-r2}"
+# That release was signed when the server was called rem.shotan.net, and its artifact urls say
+# so. It cannot be edited -- the signature covers them -- so the cases below publish it under
+# the base it was made for. What the script does with its DEFAULT base is case 12.
+FIXTURE_BASE="https://rem.shotan.net"
 
 failures=0
 check() {
@@ -62,6 +66,7 @@ run_deploy() {
   local root="$1" rel="$2"; shift 2
   LAST_OUT="$WORK/out.$$.txt"
   GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$root" GNLINK_VERIFY_PUBLIC=0 \
+    GNLINK_PUBLIC_BASE="$FIXTURE_BASE" \
     bash "$DEPLOY" --release-dir "$rel" --platform windows "$@" >"$LAST_OUT" 2>&1
   return $?
 }
@@ -286,11 +291,53 @@ check "...and nothing was written outside it" \
 printf '\n== an artifact url outside the public base is refused\n'
 ROOT11="$WORK/root11"; mkdir -p "$ROOT11"
 REL11="$WORK/rel11"; copy_release "$REL11"
-sed -i 's#https://rem.shotan.net/updates/#https://elsewhere.example/updates/#' "$REL11/windows.manifest"
+sed -i "s#$FIXTURE_BASE/updates/#https://elsewhere.example/updates/#" "$REL11/windows.manifest"
+# The substitution is the whole case. A pattern that matched nothing leaves the manifest as it
+# was, the deploy refuses it for a different reason (or not at all), and "it refuses" is then a
+# statement about something else.
+moved="$(grep -c 'https://elsewhere.example/updates/' "$REL11/windows.manifest" || true)"
+left="$(grep -c "$FIXTURE_BASE/updates/" "$REL11/windows.manifest" || true)"
+check "the fixture's artifact urls really were moved elsewhere" \
+      "$([ "${moved:-0}" -gt 0 ] && [ "${left:-0}" -eq 0 ] && echo 1 || echo 0)" \
+      "moved=$moved left=$left"
 GNLINK_PUBLIC_KEY_HEX="" run_deploy "$ROOT11" "$REL11"; rc=$?
 check "it refuses" "$([ $rc -ne 0 ] && echo 1 || echo 0)" "exit=$rc"
+# Why it refuses, said out loud, because it is not why the title suggests: the urls are inside
+# the signed document, so moving them breaks the signature and the deploy stops there -- before
+# it has compared any url with the public base. That is the right outcome, and it means this
+# case cannot show the prefix rule. Case 12 does, with a document whose signature is intact.
+check "...at the signature, before any url is compared with the base" \
+      "$(grep -q 'does not verify' "$LAST_OUT" && ! grep -q 'is outside' "$LAST_OUT" && echo 1 || echo 0)" \
+      "$(grep -E 'does not verify|is outside' "$LAST_OUT" | head -1)"
 check "...and uploads nothing" \
       "$([ -z "$(find "$ROOT11/updates" -type f 2>/dev/null)" ] && echo 1 || echo 0)"
+
+# ---------------------------------------------------------------------------- 12. the default base
+
+printf '\n== with nothing set, the public base is the one server, and the prefix rule is applied to it\n'
+default_base="$(env -u GNLINK_PUBLIC_BASE bash -c 'set -uo pipefail; eval "$(grep -E "^GNLINK_PUBLIC_BASE=" "$1")"; printf %s "$GNLINK_PUBLIC_BASE"' _ "$DEPLOY")"
+check "the default is https://gnlink.shotan.net" \
+      "$([ "$default_base" = "https://gnlink.shotan.net" ] && echo 1 || echo 0)" "$default_base"
+# And it is what the script acts on: the fixture names the former address, so under the default
+# base every one of its artifacts is outside the public base and the deploy must refuse.
+ROOT12="$WORK/root12"; mkdir -p "$ROOT12"
+REL12="$WORK/rel12"; copy_release "$REL12"
+run_deploy_default() {
+  local root="$1" rel="$2"
+  LAST_OUT="$WORK/out.$$.txt"
+  env -u GNLINK_PUBLIC_BASE GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$root" \
+    GNLINK_VERIFY_PUBLIC=0 \
+    bash "$DEPLOY" --release-dir "$rel" --platform windows >"$LAST_OUT" 2>&1
+  return $?
+}
+run_deploy_default "$ROOT12" "$REL12"; rc=$?
+check "a release signed for the former address is refused under the default" \
+      "$([ $rc -ne 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "...because of where its artifacts are" \
+      "$(grep -qi 'rem.shotan.net' "$LAST_OUT" && echo 1 || echo 0)" \
+      "$(grep -i 'rem.shotan.net' "$LAST_OUT" | head -1)"
+check "...and nothing is uploaded or published" \
+      "$([ -z "$(find "$ROOT12" -type f 2>/dev/null)" ] && echo 1 || echo 0)"
 
 # ----------------------------------------------------------------------------
 

@@ -85,6 +85,23 @@ class FixedDirectoryTest {
         }
     }
 
+    // ---------------------------------------------------------------- updates across the two names
+
+    @Test
+    fun `a manifest from the former name and an apk under the fixed address do not share a credential`() {
+        // What an app installed before this build does: its manifest comes from the address it
+        // has stored, and the manifest now names an apk on the fixed one.
+        val installed = DirectoryClient.updateEndpointFor("", "https://rem.shotan.net", "session-token")
+        assertTrue(installed.credentialAllowedFor(installed.url))
+        assertFalse(installed.credentialAllowedFor(
+            "https://gnlink.shotan.net/updates/android-0.2.24/GNLink.apk"))
+
+        val current = DirectoryClient.updateEndpointFor("", "https://gnlink.shotan.net", "session-token")
+        assertTrue(current.credentialAllowedFor(current.url))
+        assertFalse(current.credentialAllowedFor(
+            "https://rem.shotan.net/updates/android-0.2.23/GNLink.apk"))
+    }
+
     // ---------------------------------------------------------------- redirects
 
     /**
