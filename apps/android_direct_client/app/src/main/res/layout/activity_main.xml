@@ -80,6 +80,20 @@
                 android:maxLines="3"
                 android:textColor="@color/ui_danger" />
 
+            <!-- Shown only after an attempt to come back signed in got no answer. -->
+            <Button
+                android:id="@+id/loginRetryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
+                android:textColor="@color/panel_button_text"
+                android:text="@string/login_retry_button"
+                android:visibility="gone" />
+
             <Button
                 android:id="@+id/loginManualButton"
                 android:layout_width="match_parent"

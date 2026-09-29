@@ -12790,3 +12790,14 @@ Next
 - 한계: DPAPI 는 다른 Windows 사용자·디스크 복사를 막는다. **같은 사용자 권한의 프로세스는 풀 수 있다.** 저장 직전 크래시는 재로그인으로 복구(서버가 회전했는데 저장 못 한 경우 유예 60 s·1회).
 - 검증은 (4/4) 항목.
 - 제품/테스트/문서: 제품(`login_credential_store.*`·`login_flow.*` 신설, `client_shell_main.cpp`, `client_shell_bridge.*`, `directory_session_client.*`, `ui/shell.html`, CMake 의 클라 소스 2줄) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (3/4) — APK: 세션은 메모리에만, 자격은 Keystore 로
+
+- 목표: PC 클라와 같은 규칙. 그리고 **평문 세션 토큰 저장을 없앤다.**
+- `LoginFlow.kt`(순수 Kotlin, vault·directory 가 인터페이스) = PC 의 `login_flow` 와 같은 트랜잭션·같은 결과 분류. 앱은 프로세스가 하나라 잠금은 앱 안 `ReentrantLock`(유계 `tryLock`), generation 은 vault 에 영속.
+- `KeystoreLoginVault.kt`: prefs `gnlink_login` 에 Android Keystore AES-GCM 키(alias `gnlink.login.v1`, 사용자 인증 불요)로 암호화한 자격·폐기 표식. 쓰기는 `commit()`. 키가 없거나 복호화 실패면 Unreadable → 로그인 화면.
+- 세션: `DirectoryClient.session()` 메모리 전용. `saveSession`/`clearSession`/`savedSessionToken` 삭제. 이전 버전이 남긴 평문 세션은 시작 때 한 번 `takeLegacySession` — 만료 전 + origin 이 고정 주소 또는 옛 이름일 때만 메모리로 옮기고, **저장된 사본은 어느 경우든 지운다.** 그렇게 옮긴 세션에는 기기 자격을 발급하지 않는다(명시 로그인 때만).
+- 백업 제외: manifest `fullBackupContent`·`dataExtractionRules` → `gnlink_login.xml`, `remote60_directory.xml` 을 cloud backup·device transfer 에서 제외.
+- 화면: 저장된 로그인으로 접속 중 → 목록 / 실패 시 메시지 + `loginRetryButton`. 로그아웃은 표식 → 삭제 → 서버 폐기.
+- 검증은 (4/4). ⚠️ **기기·에뮬레이터가 없어 Keystore·화면·프로세스 종료 뒤 복귀는 실행하지 못했다 — 실기 대기.**
+- 제품/테스트/문서: 제품(`LoginFlow.kt`·`KeystoreLoginVault.kt` 신설, `DirectoryClient.kt`, `MainActivity.kt`, layout, strings, manifest, `res/xml/backup_rules.xml`·`data_extraction_rules.xml`) / 테스트 없음(4/4) / 문서(이 항목).

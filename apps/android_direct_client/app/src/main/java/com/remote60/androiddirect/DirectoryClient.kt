@@ -78,6 +78,15 @@ object DirectoryClient {
         val advertised: ObserveEndpoint,
     )
 
+    /** A sign-in that asked for a device credential, and what the directory handed out. */
+    data class DeviceLogin(
+        val signedIn: LoginFlow.SignedIn,
+        val expiresAt: Long,
+        val advertised: ObserveEndpoint,
+    ) {
+        override fun toString(): String = "DeviceLogin(${signedIn})"
+    }
+
     private const val PREFS = "remote60_directory"
     private const val KEY_URL = "url"
     private const val KEY_ACCOUNT = "accountId"
@@ -432,63 +441,92 @@ object DirectoryClient {
     fun savedAccountId(context: Context): String =
         prefs(context).getString(KEY_ACCOUNT, "").orEmpty()
 
-    /**
-     * A stored token is only useful while it is valid and to the server that issued it; an
-     * expired one, or one from another server, is treated as absent.
-     */
-    fun savedSessionToken(context: Context): String {
-        val p = prefs(context)
-        val expiresAt = p.getLong(KEY_EXPIRES, 0L)
-        if (expiresAt in 1..System.currentTimeMillis()) return ""
-        if (storedOrigin(context) == StoredOrigin.UNLISTED) return ""
-        return p.getString(KEY_SESSION, "").orEmpty()
+    // ------------------------------------------------------------------ the session
+    //
+    // In memory, and nowhere else. It used to be written to preferences in the clear, which
+    // made the preferences file a way into the account for twelve hours at a time. What
+    // outlives the process now is the device credential, in [KeystoreLoginVault].
+
+    @Volatile
+    private var memorySession = ""
+
+    /** True while the session in memory was carried over from a former name of the server. */
+    @Volatile
+    private var carriedOver = false
+
+    fun session(): String = memorySession
+
+    fun adoptSession(token: String) {
+        memorySession = token
+    }
+
+    fun dropSession() {
+        memorySession = ""
+        carriedOver = false
     }
 
     /**
-     * Called when this server has just accepted the stored session (the host list came back).
+     * Whether a session an older version left in preferences may be used by this one.
      *
-     * A session stored under a former name of the server is, from here on, stored under the
-     * server's own. Not before: a 401 leaves the old address beside a token that is about to be
-     * cleared, and a request that never got an answer leaves everything as it was found.
+     * Only one that has not expired and was stored beside this server or a listed former name
+     * of it. Anything else is not sent anywhere.
      */
-    fun confirmStoredSession(context: Context) {
-        if (storedOrigin(context) != StoredOrigin.MIGRATABLE) return
+    fun legacySessionUsable(
+        storedUrl: String,
+        token: String,
+        expiresAt: Long,
+        now: Long,
+        serverUrl: String,
+        migratable: List<String>,
+    ): Boolean {
+        if (token.isEmpty()) return false
+        if (expiresAt in 1..now) return false
+        return classifyStoredOrigin(storedUrl, serverUrl, migratable) != StoredOrigin.UNLISTED
+    }
+
+    /**
+     * Moves a session an older version stored in the clear into memory, if it may be used, and
+     * removes the stored copy whether or not it may. Called once, when the app starts.
+     *
+     * A session moved this way is not a device credential and gets none: the phone stays signed
+     * in for this run, and the next sign-in the user makes is what issues one.
+     */
+    fun takeLegacySession(context: Context) {
+        val p = prefs(context)
+        val token = p.getString(KEY_SESSION, "").orEmpty()
+        if (token.isEmpty() && !p.contains(KEY_EXPIRES)) return
+        val storedUrl = p.getString(KEY_URL, "").orEmpty()
+        if (legacySessionUsable(storedUrl, token, p.getLong(KEY_EXPIRES, 0L),
+                System.currentTimeMillis(), directoryUrl, migratableOrigins)) {
+            memorySession = token
+            carriedOver = classifyStoredOrigin(storedUrl, directoryUrl, migratableOrigins) ==
+                StoredOrigin.MIGRATABLE
+        }
+        // commit: the point is that it is gone from disk, not that it will be.
+        p.edit().remove(KEY_SESSION).remove(KEY_EXPIRES).commit()
+    }
+
+    /**
+     * Called when this server has just accepted the session (the host list came back).
+     *
+     * If the session was carried over from a former name of the server, the stored address
+     * becomes the server's own from here on. Not before: a 401 or no answer leaves it as found.
+     */
+    fun confirmCarriedOver(context: Context) {
+        if (!carriedOver) return
+        carriedOver = false
         prefs(context).edit().putString(KEY_URL, normalize(directoryUrl)).apply()
     }
 
     /**
-     * Remembers who was signing in, before knowing whether it worked.
-     *
-     * Not a secret, and tying it to a successful login meant every failed attempt made the next
-     * try start from an empty form.
-     *
-     * The address is written as well, in the key an older version reads -- unless a token is
-     * stored beside some other address. Rewriting the address beside that token would make it
-     * look like one this server issued, so both are left as found until a sign-in succeeds.
+     * Remembers who was signing in, before knowing whether it worked. Not a secret, and tying
+     * it to a successful login meant every failed attempt made the next try start from an empty
+     * form. The address is written beside it, in the key an older version reads.
      */
-    fun rememberEndpoint(context: Context, accountId: String) {
-        val p = prefs(context)
-        val foreignToken = p.getString(KEY_SESSION, "").orEmpty().isNotEmpty() &&
-            storedOrigin(context) != StoredOrigin.SAME
-        val edit = p.edit().putString(KEY_ACCOUNT, accountId)
-        if (!foreignToken) edit.putString(KEY_URL, normalize(directoryUrl))
-        edit.apply()
-    }
-
-    fun saveSession(context: Context, accountId: String, token: String, expiresAt: Long) {
+    fun rememberAccount(context: Context, accountId: String) {
         prefs(context).edit()
-            .putString(KEY_URL, normalize(directoryUrl))
             .putString(KEY_ACCOUNT, accountId)
-            .putString(KEY_SESSION, token)
-            .putLong(KEY_EXPIRES, expiresAt)
-            .apply()
-    }
-
-    /** Forgets the token but keeps the id, so signing back in is one field. */
-    fun clearSession(context: Context) {
-        prefs(context).edit()
-            .remove(KEY_SESSION)
-            .remove(KEY_EXPIRES)
+            .putString(KEY_URL, normalize(directoryUrl))
             .apply()
     }
 
@@ -505,6 +543,81 @@ object DirectoryClient {
         // Optional and additive: an older directory does not send it, and that is a documented
         // state rather than an error -- see observePortFor.
         return LoginResult(token, response.optLong("expiresAt", 0L), parseObserveMetadata(response))
+    }
+
+    /**
+     * Signs in and, when [deviceLabel] is given, asks for a device credential for this phone.
+     *
+     * Against a directory that does not issue them the sign-in still succeeds and the device
+     * fields come back empty. That is a state, not an error.
+     */
+    fun loginWithDevice(url: String, id: String, password: String, deviceLabel: String?): DeviceLogin {
+        val body = JSONObject().put("id", id).put("pw", password)
+        if (deviceLabel != null) {
+            body.put("device", JSONObject().put("kind", "android").put("label", deviceLabel))
+        }
+        val response = post(url, "/api/login", body, null)
+        val token = response.optString("sessionToken")
+        if (token.isEmpty()) throw DirectoryException("server did not return a session")
+        var signedIn = LoginFlow.SignedIn(
+            sessionToken = token,
+            deviceId = response.optString("deviceId"),
+            deviceCredential = response.optString("deviceCredential"),
+            revokeToken = response.optString("revokeToken"),
+        )
+        // All three or none.
+        if (!signedIn.issued) signedIn = LoginFlow.SignedIn(token, "", "", "")
+        return DeviceLogin(signedIn, response.optLong("expiresAt", 0L), parseObserveMetadata(response))
+    }
+
+    /** What a status means for a stored credential. Only 401 is an answer about the credential. */
+    fun callFor(status: Int): LoginFlow.Call = when (status) {
+        in 200..299 -> LoginFlow.Call.OK
+        401 -> LoginFlow.Call.REJECTED
+        404, 405 -> LoginFlow.Call.UNSUPPORTED
+        429 -> LoginFlow.Call.LIMITED
+        else -> LoginFlow.Call.FAILED
+    }
+
+    private fun callOf(e: Exception): LoginFlow.Call =
+        if (e is DirectoryException && e.status != 0) callFor(e.status) else LoginFlow.Call.UNREACHABLE
+
+    /** Exchanges the credential for a session and the next credential. */
+    fun refreshSession(url: String, deviceId: String, deviceCredential: String): LoginFlow.Refreshed =
+        try {
+            val response = post(url, "/api/session/refresh",
+                JSONObject().put("deviceId", deviceId).put("deviceCredential", deviceCredential), null)
+            val session = response.optString("sessionToken")
+            val next = response.optString("deviceCredential")
+            if (session.isEmpty() || next.isEmpty()) {
+                // A 200 without the next credential would leave this phone holding one the
+                // server has just replaced. It is not treated as a sign-in.
+                LoginFlow.Refreshed(LoginFlow.Call.FAILED)
+            } else {
+                LoginFlow.Refreshed(LoginFlow.Call.OK, session, next)
+            }
+        } catch (e: Exception) {
+            LoginFlow.Refreshed(callOf(e))
+        }
+
+    /** Ends the device and every session it issued; with the revoke token, a session, or both. */
+    fun endDevice(url: String, deviceId: String, revokeToken: String, session: String): LoginFlow.Call =
+        try {
+            val body = JSONObject().put("deviceId", deviceId)
+            if (revokeToken.isNotEmpty()) body.put("revokeToken", revokeToken)
+            post(url, "/api/session/logout", body, session.ifEmpty { null })
+            LoginFlow.Call.OK
+        } catch (e: Exception) {
+            callOf(e)
+        }
+
+    /** The directory's calls, as [LoginFlow] wants them. */
+    fun directoryCalls(url: String): LoginFlow.Directory = object : LoginFlow.Directory {
+        override fun refresh(deviceId: String, deviceCredential: String): LoginFlow.Refreshed =
+            refreshSession(url, deviceId, deviceCredential)
+
+        override fun revoke(deviceId: String, revokeToken: String): LoginFlow.Call =
+            endDevice(url, deviceId, revokeToken, "")
     }
 
     fun hosts(url: String, sessionToken: String): List<Host> {
