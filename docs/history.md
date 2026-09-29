@@ -12801,3 +12801,17 @@ Next
 - 화면: 저장된 로그인으로 접속 중 → 목록 / 실패 시 메시지 + `loginRetryButton`. 로그아웃은 표식 → 삭제 → 서버 폐기.
 - 검증은 (4/4). ⚠️ **기기·에뮬레이터가 없어 Keystore·화면·프로세스 종료 뒤 복귀는 실행하지 못했다 — 실기 대기.**
 - 제품/테스트/문서: 제품(`LoginFlow.kt`·`KeystoreLoginVault.kt` 신설, `DirectoryClient.kt`, `MainActivity.kt`, layout, strings, manifest, `res/xml/backup_rules.xml`·`data_extraction_rules.xml`) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (4/4) — 시험·gate: 자동 로그인의 반례
+
+- 환경: console 세션(RDP 아님), 비관리자, 전부 격리(`.claude/test-tmp`, loopback, test account). 실사용 `client.txt`·`host.json` mtime 09-23 그대로, 실사용 프로필에 `login.cred` 없음.
+- ⑵ 제품 UI(product-equivalent test build) `client_auto_login_runner.js` exit 0, **176 checks** — `client_auto_login_ui_test`(제품 `client_shell_main.cpp` 전체 + 같은 `shell.html`, 다른 것은 설정·자격 경로와 서버 주소) 의 **실행 1회 = 클라 시작 1회**, 실제 `server.js`:
+  1 첫 시작 → 폼 → 아이디+비밀번호 → 목록, 서버에 windows-client 기기 1개, 디스크 파일에 발급값·비밀번호 없음 / 2 다시 시작 → **입력 없이 목록** / 3 서버 재시작 뒤 시작 → 입력 없이 목록 / 4 클라가 열린 채 서버 재시작 → 새로 고침에 세션 교체, 목록 유지 / 5 창 2개 동시 시작 → 둘 다 목록, **기기 폐기 안 됨** / 6 서버 죽은 채 시작 → 폼 사용 가능·재시도 버튼·자격 보존 → 서버 기동 뒤 버튼으로 목록 / 7 다른 세션에서 그 기기 폐기 → 폼 + "다시 로그인", 자격 삭제 / 8 로그인(새 계열) → 로그아웃 → 서버에 `signed out` 으로 폐기, 디스크 비움, **다음 시작은 폼** / 9 서버 죽은 채 로그아웃 → 자격 삭제·표식 남음 → 서버 기동 뒤 시작: 폼, 그 시작이 서버에 폐기를 알림 / 10 한 창의 로그인 응답을 서버가 붙잡은 사이 다른 창이 로그인·로그아웃 → **늦은 응답은 로그인시키지 못함**, 저장 0, 두 기기 모두 폐기 / 11 서버가 내준 모든 값(40개)과 비밀번호가 클라 로그·서버 로그·업로드된 로그·store 어디에도 없음.
+- `login_flow_test` exit 0, 72 checks — 파일에 평문 없음, 손상·잘림·다른 entropy → Unreadable, **다른 프로세스가 쥔 잠금**(자식 프로세스) 과 그 프로세스가 죽은 뒤 해제, 두 호출 동시 → 둘째는 첫째가 방금 저장한 자격을 제시, 늦은 응답 4종(같은 프로세스·다른 프로세스·서버 불통·두 로그인), 오프라인 로그아웃과 정산, 로그 줄에 비밀 없음.
+- 변이(`login_flow_test`): 표식 무시 · generation 무시 · 무응답에 자격 삭제 · origin 무시 · 로그에 세션 출력 · 로그아웃 표식 생략 · 잠금 공유 · 평문 저장 → 8종 모두 exit≠0. (시험 삼아 넣은 "잠금 전에 읽기" 변이는 동작을 바꾸지 못하는 빈 변이였다 — 목록에서 뺐다.)
+- APK: JVM 단위 143/0(`LoginFlowTest` 28 — PC 와 같은 반례 + 평문 세션 이행 판정 + 소스에 세션 저장 없음·비밀번호 인자 없음·백업 제외·재시도 버튼). `assembleDebug`/`assembleRelease` BUILD SUCCESSFUL.
+- gate: release APK 에 Keystore alias·prefs 이름·두 route 가 있고 백업 제외 규칙이 manifest·리소스에 있음(5 checks, exit 0). 부정 대조: 게시된 0.2.23 APK → exit 1(4 FAIL). Windows 는 종전 8 checks exit 0 — 자격 경로를 바꾸는 길은 기존 shell test seam 하나이고 그 표식은 이미 검사 대상.
+- 회귀: `client_recovery_ui_runner` exit 0(64, 자동 로그인 확인이 끝난 뒤의 폼을 검사하도록 대기 추가) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` PASS · `directory_session_client_test` PASS.
+- 검증용 요청 반영(`review_466aeb9_verifier.md`): `gnlink_host_login_uia.ps1` 이 버튼이 가려진 **그 순간** 가린 창의 hwnd·class·title·pid·exe 를 남긴다.
+- 증명하지 못하는 것: GNLinkClient.exe 자체(시험 빌드는 같은 소스·같은 page, 다른 exe), TLS·실제 서버, 12 h 경과(서버 재시작으로 대신), 다른 Windows 사용자·다른 로그온 세션, 쓰기 도중 전원 차단, **APK 의 Keystore·화면·기기 재시작**, 물리 입력.
+- 제품/테스트/문서: 제품 없음 / 테스트(`login_flow_test.cpp`·`client_auto_login_ui_test.cpp`·`client_auto_login_runner.js`·`LoginFlowTest.kt` 신설, `client_recovery_ui_test.cpp`, `client_shell_bridge_test.cpp`, `gnlink_check_fixed_server.py`, `gnlink_host_login_uia.ps1`, CMake 시험 타깃) / 문서(이 항목, 구현계획).

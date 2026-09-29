@@ -48,6 +48,12 @@ public static class GnlinkHostUia {
   public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder text, int max);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder text, int max);
 }
 '@
 # Before anything asks for a rectangle: an unaware process is handed scaled coordinates, and the
@@ -176,7 +182,22 @@ if ($Expect -eq 'signin') {
     $pt = New-Object GnlinkHostUia+POINT
     $pt.X = [int]$cx; $pt.Y = [int]$cy
     $atPoint = [GnlinkHostUia]::WindowFromPoint($pt)
-    if ($atPoint -ne $button.Hwnd) { Write-Output "      (at the button's centre: window $atPoint, not the button $($button.Hwnd))" }
+    if ($atPoint -ne $button.Hwnd) {
+      # Said at the moment it is seen: by the time anyone looks, the window in the way is gone.
+      Write-Output "      (at the button's centre: window $atPoint, not the button $($button.Hwnd))"
+      foreach ($h in @($atPoint, [GnlinkHostUia]::GetAncestor($atPoint, 2))) {   # 2 = GA_ROOT
+        if ($h -eq [IntPtr]::Zero) { continue }
+        $class = New-Object System.Text.StringBuilder 256
+        $title = New-Object System.Text.StringBuilder 256
+        [void][GnlinkHostUia]::GetClassNameW($h, $class, 256)
+        [void][GnlinkHostUia]::GetWindowTextW($h, $title, 256)
+        [uint32]$ownerPid = 0
+        [void][GnlinkHostUia]::GetWindowThreadProcessId($h, [ref]$ownerPid)
+        $exe = ''
+        try { $exe = (Get-Process -Id $ownerPid -ErrorAction Stop).Path } catch { $exe = '(could not be read)' }
+        Write-Output ("      (in the way: hwnd={0} class='{1}' title='{2}' pid={3} exe={4})" -f $h, $class, $title, $ownerPid, $exe)
+      }
+    }
     Check ($atPoint -eq $button.Hwnd) 'nothing lies over the Sign in button'
 
     # Left button down and up in the middle of the button, in its own coordinates.

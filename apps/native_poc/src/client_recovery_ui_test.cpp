@@ -169,6 +169,12 @@ int main(int argc, char** argv) {
     }
     recovery_check(SUCCEEDED(create_shell_webview()), "production WebView creation starts");
     recovery_check(recovery_dom(L"!!document.getElementById('signIn')"), "production login UI loads");
+    // The shell asks whether this device was left signed in before it gives the form over.
+    // Nothing is stored here, so the answer is no -- waited for, because the checks below are
+    // about the form as a person finds it.
+    recovery_check(recovery_dom(L"!document.getElementById('signIn').disabled&&"
+                                L"document.getElementById('retryAuto').classList.contains('hidden')"),
+                   "with nothing stored the sign-in form is given over, with no retry offered");
 
     // ------------------------------------------------ fixed-server: what the sign-in form shows
     //
