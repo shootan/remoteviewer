@@ -3,6 +3,8 @@
 
     python automation/gnlink_check_fixed_server.py --dir <folder with the product exes>
     python automation/gnlink_check_fixed_server.py --apk <release.apk>
+        (also: the stored sign-in's keystore alias and routes are in it, and the backup rules
+         that leave the stored sign-in out are named by its manifest)
     python automation/gnlink_check_fixed_server.py --self-test
 
 Two questions are asked of each file, by reading its bytes:
@@ -64,6 +66,15 @@ WINDOWS_FILES = [
 # What the sign-in screen's removed field was called; a release APK has no resource by that name.
 APK_REMOVED = ['loginServerInput', 'login_server_hint', 'login_needs_server']
 
+# What a release APK that stays signed in carries: the keystore alias and preferences file of
+# the stored sign-in (KeystoreLoginVault), the two backup rule files that leave it out, and the
+# manifest attributes that name them. An APK built without these keeps a credential that
+# travels with a backup.
+APK_SIGN_IN_CODE = ['gnlink.login.v1', 'gnlink_login', '/api/session/refresh',
+                    '/api/session/logout']
+APK_BACKUP_RESOURCES = ['backup_rules', 'data_extraction_rules']
+APK_BACKUP_ATTRIBUTES = ['fullBackupContent', 'dataExtractionRules']
+
 
 def contains(data, text):
     """Narrow or wide: the Windows programs hold both kinds of literal."""
@@ -123,6 +134,18 @@ def check_apk(report, path):
              if item.encode('ascii') in everything or item.encode('utf-16-le') in everything]
     report.check(not found, '%s has no server field or text asking for one%s'
                  % (name, (' -- found: ' + ', '.join(found)) if found else ''))
+
+    with zipfile.ZipFile(path) as apk:
+        names = apk.namelist()
+        table = apk.read('resources.arsc') if 'resources.arsc' in names else b''
+        manifest = apk.read('AndroidManifest.xml') if 'AndroidManifest.xml' in names else b''
+    missing = [item for item in APK_SIGN_IN_CODE if item.encode('ascii') not in dex]
+    report.check(not missing, '%s carries the stored sign-in and its two routes%s'
+                 % (name, (' -- missing: ' + ', '.join(missing)) if missing else ''))
+    missing = [item for item in APK_BACKUP_RESOURCES if not contains(table, item)]
+    missing += [item for item in APK_BACKUP_ATTRIBUTES if not contains(manifest, item)]
+    report.check(not missing, '%s leaves the stored sign-in out of backups%s'
+                 % (name, (' -- missing: ' + ', '.join(missing)) if missing else ''))
 
 
 def self_test():

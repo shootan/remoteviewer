@@ -49,6 +49,8 @@
 #include "fixed_directory.hpp"
 #include "json_profile.hpp"
 #include "log_upload.hpp"
+#include "login_credential_store.hpp"
+#include "login_flow.hpp"
 #include "product_version.hpp"
 
 using Microsoft::WRL::Callback;
@@ -862,11 +864,113 @@ void start_update_check() {
       });
 }
 
+// ---------------------------------------------------------------- staying signed in
+//
+// The rules are in login_flow.hpp; the files are beside client.txt. What is here is when each
+// step runs and what the page is told. Every step runs on a worker -- each one waits for the
+// store and for the network -- and every result is adopted on the UI thread, under the epoch
+// that was current when the step began.
+
+/** Beside client.txt, wherever that is: the user's profile, or a test's fixture. */
+login_store::Store sign_in_store() {
+  std::wstring path = settings_path();
+  const size_t slash = path.find_last_of(L"\\/");
+  return login_store::Store(slash == std::wstring::npos ? std::wstring(L".") : path.substr(0, slash));
+}
+
+login_flow::Deps sign_in_deps() {
+  const std::string server = shell_directory_url();
+  login_flow::Deps deps;
+  deps.serverOrigin = directory::directory_origin_key(server);
+  deps.refresh = [server](const std::string& deviceId, const std::string& credential,
+                          DeviceSignIn* out, std::string* error) {
+    return directory_session_refresh(server, deviceId, credential, out, error);
+  };
+  deps.revoke = [server](const std::string& deviceId, const std::string& revokeToken,
+                         std::string* error) {
+    return directory_session_logout(server, deviceId, revokeToken, std::string(), error);
+  };
+  deps.log = [](const std::string& line) { log_line(line); };
+  return deps;
+}
+
+/** What this device is called in the account's list of devices: the computer's name. */
+std::string device_label() {
+  wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+  if (GetComputerNameW(name, &length) && name[0] != L'\0') return narrow(name);
+  return "PC";
+}
+
+/** What the page is told about an attempt to come back signed in. */
+void post_auto_login(const char* state, const std::string& accountId, const std::string& text) {
+  post_to_page(shell_auto_login_json(state, accountId, text));
+}
+
+/**
+ * Takes a session into use: the account, the token, the log uploader, the update check and the
+ * host list. UI thread only, and only for the epoch the session was obtained under.
+ */
+void adopt_session(const std::string& accountId, const std::string& token,
+                   const std::vector<DirectoryHostEntry>& hosts) {
+  const std::string server = shell_directory_url();
+  log_line("hosts ok count=" + std::to_string(hosts.size()));
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    gAccountId = accountId;
+    gSessionToken = token;
+  }
+  {
+    // Now that a token exists the shell can hand its logs to the directory, which is the only
+    // way the phone's and this machine's logs ever sit side by side. A second login re-points
+    // the uploader (a restarted server forgets every session; the old token then gets 401),
+    // and a login as a different account discards what was queued under the previous one.
+    remote60::native_poc::log_upload_set_auth_rejected_callback([] {
+      log_line("log upload: the server rejected the session token; sign in again to resume");
+      post_status("error", "로그 업로드 인증이 만료됐습니다. 다시 로그인하면 재개됩니다.");
+    });
+    remote60::native_poc::LogUploadConfig upload;
+    upload.directoryUrl = server;
+    upload.sessionToken = token;
+    upload.identity = accountId + "@" + server;
+    std::string reason;
+    log_line(remote60::native_poc::log_upload_configure(upload, &reason)
+                 ? "log upload on " + reason
+                 : "log upload off: " + reason);
+  }
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    save_settings(accountId, gSettings);
+  }
+
+  // The check that ran at start-up had neither a token nor an address and reported "not
+  // configured" -- correctly, and then nothing asked again, so signing in never produced an
+  // update check at all. Signing in is exactly the moment both appear, so it is asked here.
+  // Asynchronous, not waited on: a server that never answers must not hold up the host list.
+  gUpdateRetryAttempts = 0;
+  start_update_check();
+
+  std::string message = shell_hosts_json(hosts);
+  // The page shows which account it is listing, so it travels with the list.
+  const std::string suffix = ",\"accountId\":\"" + accountId + "\"}";
+  message = message.substr(0, message.size() - 1) + suffix;
+  post_to_page(message);
+}
+
+bool epoch_is(uint64_t epoch) {
+  std::lock_guard<std::mutex> lock(gStateMu);
+  return epoch == gOwnerEpoch;
+}
+
 /**
  * Login and refresh results are adopted only on the UI thread and current operation epoch.
  *
  * The page supplies an account and a password and nothing else. Where they are sent is decided
  * here, so a page that posted a `server` of its own would have it ignored.
+ *
+ * A sign-in that succeeds is remembered -- as a device credential the directory issued, never
+ * as the password -- unless something happened to the store while it was in flight. The epoch
+ * below guards this process; the store's own counter guards every other one.
  */
 void begin_login(std::string accountId, std::string password) {
   const std::string server = shell_directory_url();
@@ -875,58 +979,152 @@ void begin_login(std::string accountId, std::string password) {
   log_upload_clear_credentials("new sign-in operation");
   log_line("login attempt server=" + server + " account=" + accountId);
   if (!gWorkers.Launch([server, accountId, password = std::move(password), epoch]() mutable {
-    std::string error, token;
-    std::vector<DirectoryHostEntry> hosts;
-    const bool ok = directory_login(server, accountId, password, &token, &error) &&
-                    directory_list_hosts(server, token, &hosts, &error);
+    const login_store::Store store = sign_in_store();
+    const login_flow::Deps deps = sign_in_deps();
+    const uint64_t generation = login_flow::begin_sign_in(store, deps);
+
+    std::string error;
+    DeviceSignIn signedIn;
+    bool ok = false;
+    if (generation != 0) {
+      ok = directory_login_with_device(server, accountId, password, "windows-client",
+                                       device_label(), &signedIn, &error) == SessionCall::Ok;
+    } else {
+      // The store could not be had. Signing in anyway would leave whatever is stored where it
+      // is -- another account's sign-in, which the next start would come back as -- and would
+      // have nothing to be checked against if a sign-out happened meanwhile. Nothing is sent.
+      error = "저장된 로그인 정보를 열 수 없어 로그인하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+    }
     if (!password.empty()) SecureZeroMemory(password.data(), password.size());
-    post_ui([server, accountId, token, hosts = std::move(hosts), error, ok, epoch]() {
-      { std::lock_guard<std::mutex> lock(gStateMu); if (epoch != gOwnerEpoch) return; }
+
+    std::vector<DirectoryHostEntry> hosts;
+    const bool signedInAtDirectory = ok;
+    if (ok) ok = directory_list_hosts(server, signedIn.sessionToken, &hosts, &error);
+
+    if (signedInAtDirectory && (!ok || !epoch_is(epoch))) {
+      // The directory signed this device in and the sign-in is not going to be used: the list
+      // did not come, or this window signed out -- or began another sign-in -- while the
+      // answer was on its way. The window's own epoch is asked here as well as the store's
+      // counter, because it is the one barrier that needs nothing written. What the directory
+      // issued is ended rather than left alive with nobody holding it.
+      login_flow::discard_sign_in(store, deps, signedIn,
+                                  ok ? "this window moved on while it was in flight"
+                                     : "the PC list could not be fetched");
+      ok = false;
+      if (error.empty()) error = "로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.";
+    }
+    if (ok) {
+      const login_flow::Remembered remembered =
+          login_flow::remember_sign_in(store, deps, generation, accountId, signedIn);
+      log_line(std::string("sign-in remembered: ") + login_flow::remembered_name(remembered));
+      if (remembered == login_flow::Remembered::Superseded) {
+        // Signed out -- here or in another window -- while this was in flight. The device the
+        // directory issued has been ended, and its session with it.
+        ok = false;
+        error = "로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.";
+      } else if (remembered == login_flow::Remembered::NotSaved) {
+        ok = false;
+        error = "로그인 정보를 저장하지 못했습니다. 다시 시도해 주세요.";
+      } else {
+        (void)login_flow::settle_owed_sign_outs(store, deps);
+      }
+    }
+    if (!signedIn.deviceCredential.empty()) {
+      SecureZeroMemory(signedIn.deviceCredential.data(), signedIn.deviceCredential.size());
+    }
+    if (!signedIn.revokeToken.empty()) {
+      SecureZeroMemory(signedIn.revokeToken.data(), signedIn.revokeToken.size());
+    }
+
+    post_ui([accountId, token = signedIn.sessionToken, hosts = std::move(hosts), error, ok,
+             epoch]() {
+      if (!epoch_is(epoch)) return;
       if (!ok) { log_line("login failed: " + error); post_status("error", error); return; }
       log_line("login ok");
-    log_line("hosts ok count=" + std::to_string(hosts.size()));
-    {
-      std::lock_guard<std::mutex> lock(gStateMu);
-      gAccountId = accountId;
-      gSessionToken = token;
-    }
-    {
-      // Now that a token exists the shell can hand its logs to the directory, which is the only
-      // way the phone's and this machine's logs ever sit side by side. A second login re-points
-      // the uploader (a restarted server forgets every session; the old token then gets 401),
-      // and a login as a different account discards what was queued under the previous one.
-      remote60::native_poc::log_upload_set_auth_rejected_callback([] {
-        log_line("log upload: the server rejected the session token; sign in again to resume");
-        post_status("error", "로그 업로드 인증이 만료됐습니다. 다시 로그인하면 재개됩니다.");
-      });
-      remote60::native_poc::LogUploadConfig upload;
-      upload.directoryUrl = server;
-      upload.sessionToken = token;
-      upload.identity = accountId + "@" + server;
-      std::string reason;
-      log_line(remote60::native_poc::log_upload_configure(upload, &reason)
-                   ? "log upload on " + reason
-                   : "log upload off: " + reason);
-    }
-    {
-      std::lock_guard<std::mutex> lock(gStateMu);
-      save_settings(accountId, gSettings);
-    }
-
-    // The check that ran at start-up had neither a token nor an address and reported "not
-    // configured" -- correctly, and then nothing asked again, so signing in never produced an
-    // update check at all. Signing in is exactly the moment both appear, so it is asked here.
-    // Asynchronous, not waited on: a server that never answers must not hold up the host list.
-    gUpdateRetryAttempts = 0;
-    start_update_check();
-
-    std::string message = shell_hosts_json(hosts);
-    // The page shows which account it is listing, so it travels with the list.
-    const std::string suffix = ",\"accountId\":\"" + accountId + "\"}";
-    message = message.substr(0, message.size() - 1) + suffix;
-    post_to_page(message);
+      adopt_session(accountId, token, hosts);
     });
   })) post_status("error", "로그인 작업을 시작하지 못했습니다.");
+}
+
+/**
+ * Comes back signed in, if this device was left signed in.
+ *
+ * Asked once when the page is ready, and again when the user presses the retry the page shows
+ * after a failure. One attempt holds the form; if there was no answer ABOUT THE CREDENTIAL --
+ * the server was out of reach, or busy -- the form is given back and up to three more attempts
+ * follow behind it, a little further apart each time. Typing a password ends them: a sign-in
+ * moves the epoch.
+ */
+void begin_auto_login() {
+  uint64_t epoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    if (!gSessionToken.empty()) return;
+    epoch = ++gOwnerEpoch;
+  }
+  post_auto_login("checking", std::string(), std::string());
+  if (!gWorkers.Launch([epoch]() {
+    const std::string server = shell_directory_url();
+    const login_store::Store store = sign_in_store();
+    const login_flow::Deps deps = sign_in_deps();
+    (void)login_flow::settle_owed_sign_outs(store, deps);
+
+    constexpr DWORD kWaitsMs[] = {1000, 4000, 15000};
+    login_flow::ReturnResult result;
+    for (size_t attempt = 0;; ++attempt) {
+      result = login_flow::come_back(store, deps);
+      const bool later = result.outcome == login_flow::Return::TryLater ||
+                         result.outcome == login_flow::Return::Busy;
+      if (!later || attempt >= std::size(kWaitsMs)) break;
+      post_ui([epoch, accountId = result.accountId] {
+        if (epoch_is(epoch)) {
+          post_auto_login("retrying", accountId, "서버에 연결할 수 없습니다. 다시 시도하는 중입니다.");
+        }
+      });
+      const uint64_t until = GetTickCount64() + kWaitsMs[attempt];
+      while (GetTickCount64() < until && !gWorkers.Stopping() && epoch_is(epoch)) Sleep(100);
+      if (gWorkers.Stopping() || !epoch_is(epoch)) return;
+    }
+    log_line(std::string("auto sign-in: ") + login_flow::return_name(result.outcome));
+
+    std::vector<DirectoryHostEntry> hosts;
+    std::string error;
+    bool listed = false;
+    if (result.outcome == login_flow::Return::SignedIn) {
+      listed = directory_list_hosts(server, result.sessionToken, &hosts, &error);
+    }
+    post_ui([epoch, result, hosts = std::move(hosts), listed, error]() {
+      if (!epoch_is(epoch)) return;
+      switch (result.outcome) {
+        case login_flow::Return::SignedIn:
+          if (listed) {
+            log_line("auto sign-in ok");
+            adopt_session(result.accountId, result.sessionToken, hosts);
+          } else {
+            // Signed in, and then the list did not come. The session is kept: the page shows
+            // the form with a retry, and the retry finds the credential that was just stored.
+            post_auto_login("failed", result.accountId,
+                            "PC 목록을 불러오지 못했습니다. " + error);
+          }
+          return;
+        case login_flow::Return::Rejected:
+          post_auto_login("rejected", result.accountId, "다시 로그인해 주세요.");
+          return;
+        case login_flow::Return::SignedOut:
+        case login_flow::Return::NoCredential:
+        case login_flow::Return::Unreadable:
+        case login_flow::Return::ServerCannot:
+          post_auto_login("none", result.accountId, std::string());
+          return;
+        case login_flow::Return::TryLater:
+        case login_flow::Return::Busy:
+        case login_flow::Return::NotSaved:
+          post_auto_login("failed", result.accountId,
+                          "서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+          return;
+      }
+    });
+  })) post_auto_login("none", std::string(), std::string());
 }
 
 void begin_refresh_hosts() {
@@ -938,17 +1136,92 @@ void begin_refresh_hosts() {
     accountId = gAccountId; token = gSessionToken; epoch = gOwnerEpoch;
   }
   if (token.empty()) return;
-  gWorkers.Launch([server, accountId, token, epoch]() {
+  gWorkers.Launch([server, accountId, token, epoch]() mutable {
     std::string error;
     std::vector<DirectoryHostEntry> hosts;
-    const bool ok = directory_list_hosts(server, token, &hosts, &error);
-    post_ui([accountId, epoch, ok, hosts = std::move(hosts), error]() {
-      { std::lock_guard<std::mutex> lock(gStateMu); if (epoch != gOwnerEpoch) return; }
+    uint32_t status = 0;
+    bool ok = directory_list_hosts(server, token, &hosts, &error, &status);
+    bool renewed = false;
+    bool signedOut = false;
+    bool otherAccount = false;
+    if (!ok && status == 401) {
+      // The session is no longer one: twelve hours went by, or the server was restarted. This
+      // device may still hold what gets another -- asked once, not in a loop, and only for
+      // the account this window is signed in as. What is stored may be somebody else's by
+      // now: another window may have signed in as another account since.
+      const login_flow::ReturnResult back =
+          login_flow::come_back(sign_in_store(), sign_in_deps(), accountId);
+      log_line(std::string("session refused; coming back: ") +
+               login_flow::return_name(back.outcome));
+      otherAccount = back.outcome == login_flow::Return::OtherAccount;
+      if (back.outcome == login_flow::Return::SignedIn && back.accountId == accountId) {
+        token = back.sessionToken;
+        renewed = true;
+        ok = directory_list_hosts(server, token, &hosts, &error, &status);
+      } else if (back.outcome != login_flow::Return::TryLater &&
+                 back.outcome != login_flow::Return::Busy) {
+        signedOut = true;
+      }
+    }
+    post_ui([accountId, token, epoch, ok, renewed, signedOut, otherAccount,
+             hosts = std::move(hosts), error]() {
+      if (!epoch_is(epoch)) return;
+      if (signedOut) {
+        {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          gSessionToken.clear();
+          ++gOwnerEpoch;
+        }
+        remote60::native_poc::log_upload_clear_credentials("the session ended");
+        post_to_page("{\"type\":\"signedOut\"}");
+        post_auto_login("rejected", accountId,
+                        otherAccount
+                            ? "이 PC에서 다른 계정으로 로그인했습니다. 다시 로그인해 주세요."
+                            : "로그인이 만료됐습니다. 다시 로그인해 주세요.");
+        return;
+      }
       if (!ok) { post_status("error", error + " — 다시 로그인해 주세요"); return; }
+      if (renewed) {
+        adopt_session(accountId, token, hosts);
+        return;
+      }
       std::string message = shell_hosts_json(hosts);
       message = message.substr(0, message.size() - 1) + ",\"accountId\":\"" + accountId + "\"}";
       post_to_page(message);
     });
+  });
+}
+
+/**
+ * Signs this device out: here at once, and at the directory as soon as it can be told.
+ *
+ * The session in memory is already gone by the time this runs (the caller cleared it under the
+ * lock and moved the epoch). This is the part that outlives the process.
+ */
+void begin_sign_out(std::string sessionToken) {
+  gWorkers.Launch([sessionToken = std::move(sessionToken)]() mutable {
+    const login_flow::SignOutResult result = login_flow::sign_out(sign_in_store(), sign_in_deps());
+    log_line(std::string("sign-out: local=") + (result.localDone ? "done" : "NOT done") +
+             " server=" + (result.serverTold ? "told" : (result.owed ? "owed" : "nothing to tell")));
+    if (!result.serverTold && !result.owed && !sessionToken.empty()) {
+      // A session that came from a sign-in with no device credential has no family to end;
+      // the session itself is what the directory is asked to forget.
+      std::string error;
+      (void)directory_session_logout(shell_directory_url(), std::string(), std::string(),
+                                     sessionToken, &error);
+    }
+    if (!sessionToken.empty()) SecureZeroMemory(sessionToken.data(), sessionToken.size());
+    if (!result.localDone) {
+      // This window is signed out: its session is gone from memory. What is STORED is not,
+      // and the next start may come back signed in. That is said, where the user is looking,
+      // together with the way to try again.
+      log_line("sign-out NOT completed: " + result.detail);
+      post_ui([] {
+        post_auto_login("failed", std::string(),
+                        "로그아웃을 완료하지 못했습니다. 저장된 로그인이 남아 있어 다음 실행 때 다시 "
+                        "로그인될 수 있습니다. 다시 로그인한 뒤 로그아웃을 한 번 더 눌러 주세요.");
+      });
+    }
   });
 }
 
@@ -1349,10 +1622,24 @@ void handle_page_message(const std::string& json) {
       load_settings(&accountId, &settings);
       gSettings = settings;
     }
+    bool signedIn = false;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      signedIn = !gSessionToken.empty();
+    }
+    // Before anything is posted to the page. Coming back signed in is a new operation and moves
+    // the epoch, and a message posted under the epoch before it is dropped as stale when it
+    // arrives -- which is what happened to the restore below when it went first: the form came
+    // up with the id field empty.
+    if (!signedIn) begin_auto_login();  // a device that was left signed in comes back signed in
     post_to_page(shell_restore_json(accountId, settings));
     // Anything the start-up check found while the page was still loading goes out now.
     flush_pending_update_notice();
-    begin_refresh_hosts();  // restore an authenticated page after a WebView process restart
+    if (signedIn) begin_refresh_hosts();  // an authenticated page after a WebView process restart
+    return;
+  }
+  if (type == "autologin") {
+    begin_auto_login();  // the retry the page offers after an attempt that got no answer
     return;
   }
   if (type == "update") {
@@ -1425,15 +1712,18 @@ void handle_page_message(const std::string& json) {
     KillTimer(gWindow, kReconnectTimer);
     gReconnectRequest.reset();
     gReconnectAttempts = 0;
+    std::string endedSession;
     {
       std::lock_guard<std::mutex> lock(gStateMu);
-      gSessionToken.clear();
+      endedSession.swap(gSessionToken);
       // Signing out is an owner change. Without this the account name and the server address are
       // unchanged and the epoch is unchanged, so an attempt started while signed in would still
       // compare as the same owner -- and would be acknowledged after the user had left.
       ++gOwnerEpoch;
     }
     remote60::native_poc::log_upload_clear_credentials("logged out");
+    // What is stored goes too, and the directory is told: the next start is the sign-in form.
+    begin_sign_out(std::move(endedSession));
     {
       // The answer described the session that asked for it. Leaving the button up would offer
       // the next person to sign in an install that was found for somebody else.

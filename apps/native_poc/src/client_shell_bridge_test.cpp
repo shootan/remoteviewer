@@ -102,6 +102,22 @@ int main() {
   // The page has no server field, so nothing tells it a server: where a sign-in goes is not
   // something a restored message can carry.
   check("a restore names no server", !contains(restored, "\"server\""), restored);
+
+  // What the page is told about coming back signed in. The text is a sentence shown to a
+  // person and the account comes off disk, so both are escaped like everything else.
+  const std::string coming = shell_auto_login_json("failed", "de\"mo", "line one\nline two");
+  std::string comingState, comingAccount, comingText;
+  json_profile::json_get_string(coming, "state", &comingState);
+  json_profile::json_get_string(coming, "accountId", &comingAccount);
+  json_profile::json_get_string(coming, "text", &comingText);
+  check("an auto sign-in message carries its state, the account and the text",
+        shell_message_type(coming) == "autoLogin" && comingState == "failed" &&
+            comingAccount == "de\"mo" && comingText == "line one\nline two",
+        coming);
+  check("...and nothing else: no session, no credential",
+        !contains(coming, "session") && !contains(coming, "credential") &&
+            !contains(coming, "token"),
+        coming);
   check("the remembered numbers travel with it",
         contains(restored, "\"bitrateKbps\":9000") && contains(restored, "\"fps\":30") &&
             contains(restored, "\"monitorId\":2"),

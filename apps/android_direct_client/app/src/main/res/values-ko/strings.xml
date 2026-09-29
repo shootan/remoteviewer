@@ -56,6 +56,16 @@
     <string name="login_manual_button">IP로 직접 연결</string>
     <string name="login_signing_in">로그인 중…</string>
     <string name="login_needs_credentials">아이디와 비밀번호를 입력하세요</string>
+    <string name="login_coming_back">저장된 로그인으로 접속하는 중입니다…</string>
+    <string name="login_retrying">서버에 연결할 수 없습니다. 다시 시도하는 중입니다…</string>
+    <string name="login_unreachable">서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.</string>
+    <string name="login_retry_button">저장된 로그인으로 다시 시도</string>
+    <string name="login_again">다시 로그인해 주세요.</string>
+    <string name="login_superseded">로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.</string>
+    <string name="login_not_saved">로그인 정보를 저장하지 못했습니다. 다시 시도해 주세요.</string>
+    <string name="login_sign_out_failed">로그아웃을 완료하지 못했습니다. 저장된 로그인이 남아 있어 다음 실행 때 다시 로그인될 수 있습니다. 다시 로그인한 뒤 로그아웃을 한 번 더 눌러 주세요.</string>
+    <string name="login_store_unavailable">저장된 로그인 정보를 열 수 없어 로그인하지 못했습니다. 잠시 후 다시 시도해 주세요.</string>
+    <string name="login_other_account">이 기기에서 다른 계정으로 로그인했습니다. 다시 로그인해 주세요.</string>
     <string name="hosts_title">내 PC</string>
     <string name="hosts_logout_button">로그아웃</string>
     <string name="hosts_empty">등록된 PC가 없습니다. PC에서 같은 계정으로 로그인하세요.</string>

@@ -183,6 +183,8 @@
 
   <button id="signIn">로그인</button>
   <div class="msg" id="signInMsg"></div>
+  <!-- Shown only after an attempt to come back signed in got no answer from the server. -->
+  <button class="link hidden" id="retryAuto">저장된 로그인으로 다시 시도</button>
 </div>
 
 <div class="card hidden" id="hostsCard">
@@ -278,8 +280,15 @@
       return;
     }
     message($('signInMsg'), '');
+    show($('retryAuto'), false);
     setBusy(true, '로그인 중');
     send({ type: 'login', accountId: id, password: pw });
+  };
+
+  $('retryAuto').onclick = () => {
+    if (busy) return;
+    show($('retryAuto'), false);
+    send({ type: 'autologin' });
   };
 
   // Enter anywhere in the form submits, because a login screen that ignores Enter feels broken.
@@ -405,8 +414,27 @@
       (msg.accountId ? $('password') : $('account')).focus();
       return;
     }
+    if (msg.type === 'autoLogin') {
+      // Coming back signed in. Only `checking` holds the form: while further attempts are
+      // being made behind it (`retrying`) a password can be typed, and typing one ends them.
+      if (msg.accountId && !$('account').value) $('account').value = msg.accountId;
+      if (msg.state === 'checking') {
+        show($('retryAuto'), false);
+        message($('signInMsg'), '저장된 로그인으로 접속하는 중입니다.');
+        setBusy(true, '로그인 확인 중');
+        return;
+      }
+      setBusy(false);
+      show($('retryAuto'), msg.state === 'failed');
+      message($('signInMsg'), msg.text || '', msg.state === 'failed');
+      // The first empty field, as after a restore -- but not while attempts are still being
+      // made, when moving the caret would take it from whoever has started typing.
+      if (msg.state !== 'retrying') ($('account').value ? $('password') : $('account')).focus();
+      return;
+    }
     if (msg.type === 'hosts') {
       setBusy(false);
+      show($('retryAuto'), false);
       show($('signInCard'), false);
       show($('hostsCard'), true);
       $('accountLabel').textContent = msg.accountId || '';

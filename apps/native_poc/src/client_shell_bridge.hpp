@@ -58,6 +58,16 @@ std::string shell_status_json(const std::string& state, const std::string& detai
 std::string shell_restore_json(const std::string& accountId,
                                const ShellRuntimeSettings& settings);
 
+/**
+ * Serialises what became of an attempt to come back signed in.
+ *
+ * `state` is one of: checking (the form waits), retrying (no answer yet; the form is usable),
+ * none (nothing to come back with), rejected (sign in again), failed (no answer; offer a retry).
+ * The account id travels with it so the form can show whose sign-in this was.
+ */
+std::string shell_auto_login_json(const std::string& state, const std::string& accountId,
+                                  const std::string& text);
+
 /** Reads a connect request out of what the page posted. Returns false when it is not one. */
 bool shell_parse_connect(const std::string& json, ShellConnectRequest* out);
 

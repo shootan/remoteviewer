@@ -959,6 +959,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var loginPasswordInput: EditText
     private lateinit var loginButton: Button
     private lateinit var loginErrorText: TextView
+    private lateinit var loginRetryButton: Button
     private lateinit var loginManualButton: Button
     private lateinit var hostsTitleText: TextView
     private lateinit var hostsStatusText: TextView
@@ -1362,6 +1363,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         loginPasswordInput.typeface = android.graphics.Typeface.DEFAULT
         loginButton = findViewById(R.id.loginButton)
         loginErrorText = findViewById(R.id.loginErrorText)
+        loginRetryButton = findViewById(R.id.loginRetryButton)
         loginManualButton = findViewById(R.id.loginManualButton)
         hostsTitleText = findViewById(R.id.hostsTitleText)
         hostsStatusText = findViewById(R.id.hostsStatusText)
@@ -1921,7 +1923,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateEndpoint(): DirectoryClient.UpdateEndpoint = DirectoryClient.updateEndpointFor(
         BuildConfig.UPDATE_MANIFEST_URL,
         DirectoryClient.directoryUrl,
-        DirectoryClient.savedSessionToken(this),
+        DirectoryClient.session(),
     )
 
     /** Empty until an operational key exists. Empty means this build cannot check, not that it failed. */
@@ -3869,27 +3871,58 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
         hostsRefreshButton.setOnClickListener { loadHosts("refresh") }
-        hostsLogoutButton.setOnClickListener {
-            manualConnectMode = false
-            DirectoryClient.clearSession(this)
-            directoryHosts = emptyList()
-            hostListAdapter.notifyDataSetChanged()
-            currentScene = UiScene.LOGIN
-            loginErrorText.text = ""
-            renderStatus()
-        }
+        hostsLogoutButton.setOnClickListener { performSignOut() }
+        loginRetryButton.setOnClickListener { if (!directoryBusy) beginAutoLogin() }
 
-        if (DirectoryClient.savedSessionToken(this).isNotEmpty()) {
+        // A version from before this kept the session itself in preferences, in the clear. One
+        // that is still good is taken into memory for this run; the stored copy goes either way.
+        DirectoryClient.takeLegacySession(this)
+        if (DirectoryClient.session().isNotEmpty()) {
             currentScene = UiScene.HOSTS
             loadHosts("resume")
+        } else {
+            beginAutoLogin()
         }
     }
 
     /** Where the app sits when no session is running. */
     private fun homeScene(): UiScene = when {
         manualConnectMode -> UiScene.CONNECT
-        DirectoryClient.savedSessionToken(this).isNotEmpty() -> UiScene.HOSTS
+        DirectoryClient.session().isNotEmpty() -> UiScene.HOSTS
         else -> UiScene.LOGIN
+    }
+
+    // ------------------------------------------------------------------ staying signed in
+    //
+    // The rules are LoginFlow's. What is here is when each step runs and what the screen says.
+    // Every step runs on directoryExecutor -- each waits for the vault and for the network --
+    // and every result is taken up on the main thread, under the epoch that was current when
+    // the step began. A sign-in, a sign-out and an attempt to come back each move the epoch, so
+    // an answer that arrives after the user has done something else is dropped.
+
+    private val loginVault: LoginFlow.Vault by lazy { KeystoreLoginVault(this) }
+    private var signInEpoch = 0
+
+    private fun directoryOrigin(): String = DirectoryClient.originKey(DirectoryClient.directoryUrl)
+
+    private fun flowLog(line: String) = diagnosticsLog.log("sign_in_store", line)
+
+    /** Takes a session into use: memory, the log uploader, and the host list. Main thread. */
+    private fun adoptSession(token: String, accountId: String, reason: String) {
+        // The session and its owner go in together (DirectoryClient keeps them as one value), so
+        // a recreated Activity finds both -- not the id in the form, which a failed attempt
+        // also changes.
+        DirectoryClient.adoptSession(token, accountId)
+        LogUploader.configure(this, DirectoryClient.directoryUrl, token)
+        setDirectoryBusy(false)
+        manualConnectMode = false
+        // Nothing keeps the password around once it has been exchanged for a token.
+        loginPasswordInput.setText("")
+        loginErrorText.text = ""
+        loginRetryButton.visibility = View.GONE
+        currentScene = UiScene.HOSTS
+        loadHosts(reason)
+        renderStatus()
     }
 
     private fun performLogin() {
@@ -3903,34 +3936,61 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
+        val epoch = ++signInEpoch
+        DirectoryClient.dropSession()
         setDirectoryBusy(true)
+        loginRetryButton.visibility = View.GONE
         loginErrorText.text = getString(R.string.login_signing_in)
         // Kept whatever the outcome, so a failed attempt does not wipe the form.
-        DirectoryClient.rememberEndpoint(this, id)
+        DirectoryClient.rememberAccount(this, id)
         diagnosticsLog.log("login_attempt", "server=$url id=$id")
         directoryExecutor.execute {
             try {
-                val result = DirectoryClient.login(url, id, password)
-                val token = result.sessionToken
+                val generation = LoginFlow.beginSignIn(loginVault, ::flowLog)
+                if (generation == 0L) {
+                    // Without the counter nothing can tell this sign-in's answer from one that
+                    // arrives after a sign-out -- or after a sign-in as somebody else. So no
+                    // request is sent, with or without a device credential.
+                    diagnosticsLog.log("login_failed", "the sign-in store could not be written")
+                    runOnUiThread {
+                        if (epoch != signInEpoch) return@runOnUiThread
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_store_unavailable)
+                    }
+                    return@execute
+                }
+                val result = DirectoryClient.loginWithDevice(url, id, password, deviceLabel())
                 // Where observations go rides on the login response. Kept for this run so the
-                // connect below does not have to ask again; a run that starts from a stored
-                // session asks /healthz instead, because it never sees a login response.
+                // connect below does not have to ask again.
                 directoryObserveEndpoint = result.advertised
-                DirectoryClient.saveSession(this, id, token, result.expiresAt)
-                LogUploader.configure(this, url, token)
+                val remembered = LoginFlow.rememberSignIn(
+                    loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), generation,
+                    id, result.signedIn, ::flowLog)
+                diagnosticsLog.log("login_remembered", remembered.name)
+                val refused = when (remembered) {
+                    LoginFlow.Remembered.SUPERSEDED -> getString(R.string.login_superseded)
+                    LoginFlow.Remembered.NOT_SAVED -> getString(R.string.login_not_saved)
+                    else -> null
+                }
+                if (refused == null) {
+                    LoginFlow.settleOwedSignOuts(
+                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
+                }
                 runOnUiThread {
-                    setDirectoryBusy(false)
-                    manualConnectMode = false
-                    // Nothing keeps the password around once it has been exchanged for a token.
-                    loginPasswordInput.setText("")
-                    loginErrorText.text = ""
-                    currentScene = UiScene.HOSTS
-                    loadHosts("login")
-                    renderStatus()
+                    // Moved on since: a sign-out moved the counter too, so what this stored (if
+                    // anything) was already ended by it; a newer sign-in owes it a sign-out.
+                    if (epoch != signInEpoch) return@runOnUiThread
+                    if (refused != null) {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = refused
+                    } else {
+                        adoptSession(result.signedIn.sessionToken, id, "login")
+                    }
                 }
             } catch (e: Exception) {
                 diagnosticsLog.log("login_failed", e.message.orEmpty())
                 runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
                     setDirectoryBusy(false)
                     loginErrorText.text = e.message ?: "로그인에 실패했습니다"
                 }
@@ -3938,40 +3998,163 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    /** What this phone is called in the account's list of devices. */
+    private fun deviceLabel(): String =
+        listOf(Build.MANUFACTURER, Build.MODEL).filter { !it.isNullOrBlank() }.joinToString(" ")
+            .ifBlank { "Android" }
+
+    /**
+     * Comes back signed in, if this phone was left signed in.
+     *
+     * One attempt holds the form. If there was no answer about the credential -- the server was
+     * out of reach, or busy -- the form is given back and up to three more attempts follow
+     * behind it, further apart each time. Typing a password ends them: a sign-in moves the epoch.
+     */
+    private fun beginAutoLogin() {
+        if (DirectoryClient.session().isNotEmpty()) return
+        val epoch = ++signInEpoch
+        val url = DirectoryClient.directoryUrl
+        setDirectoryBusy(true)
+        loginRetryButton.visibility = View.GONE
+        loginErrorText.text = getString(R.string.login_coming_back)
+        directoryExecutor.execute {
+            val calls = DirectoryClient.directoryCalls(url)
+            LoginFlow.settleOwedSignOuts(loginVault, calls, directoryOrigin(), ::flowLog)
+            val waits = longArrayOf(1000, 4000, 15000)
+            var attempt = 0
+            var result: LoginFlow.ReturnResult
+            while (true) {
+                result = LoginFlow.comeBack(loginVault, calls, directoryOrigin(), ::flowLog)
+                val later = result.outcome == LoginFlow.Return.TRY_LATER ||
+                    result.outcome == LoginFlow.Return.BUSY
+                if (!later || attempt >= waits.size) break
+                runOnUiThread {
+                    if (epoch == signInEpoch) {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_retrying)
+                    }
+                }
+                val until = System.currentTimeMillis() + waits[attempt]
+                while (System.currentTimeMillis() < until && epoch == signInEpoch) Thread.sleep(100)
+                if (epoch != signInEpoch) return@execute
+                ++attempt
+            }
+            diagnosticsLog.log("auto_login", result.outcome.name)
+            val finished = result
+            runOnUiThread {
+                if (epoch != signInEpoch) return@runOnUiThread
+                when (finished.outcome) {
+                    LoginFlow.Return.SIGNED_IN ->
+                        adoptSession(finished.sessionToken, finished.accountId, "resume")
+                    LoginFlow.Return.REJECTED -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_again)
+                    }
+                    LoginFlow.Return.TRY_LATER, LoginFlow.Return.BUSY, LoginFlow.Return.NOT_SAVED -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_unreachable)
+                        loginRetryButton.visibility = View.VISIBLE
+                    }
+                    else -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = ""
+                    }
+                }
+                renderStatus()
+            }
+        }
+    }
+
+    /** Signs this phone out: here at once, and at the directory as soon as it can be told. */
+    private fun performSignOut() {
+        ++signInEpoch
+        val url = DirectoryClient.directoryUrl
+        val session = DirectoryClient.session()
+        DirectoryClient.dropSession()
+        manualConnectMode = false
+        directoryHosts = emptyList()
+        hostListAdapter.notifyDataSetChanged()
+        currentScene = UiScene.LOGIN
+        loginErrorText.text = ""
+        loginRetryButton.visibility = View.GONE
+        renderStatus()
+        directoryExecutor.execute {
+            val result = LoginFlow.signOut(
+                loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
+            diagnosticsLog.log("sign_out",
+                "local=${result.localDone} server=${result.serverTold} owed=${result.owed}")
+            if (!result.serverTold && !result.owed && session.isNotEmpty()) {
+                // A session from a sign-in with no device credential has no family to end; the
+                // session itself is what the directory is asked to forget.
+                DirectoryClient.endDevice(url, "", "", session)
+            }
+            if (!result.localDone) {
+                runOnUiThread { loginErrorText.text = getString(R.string.login_sign_out_failed) }
+            }
+        }
+    }
+
     private fun loadHosts(reason: String) {
         val url = DirectoryClient.directoryUrl
-        val token = DirectoryClient.savedSessionToken(this)
+        val token = DirectoryClient.session()
         LogUploader.configure(this, url, token)
         if (url.isEmpty() || token.isEmpty()) {
             currentScene = UiScene.LOGIN
             renderStatus()
             return
         }
+        val epoch = signInEpoch
+        val account = DirectoryClient.sessionAccount()
         setDirectoryBusy(true)
         hostsStatusText.text = getString(R.string.hosts_loading)
         directoryExecutor.execute {
+            var anotherAccount = false
             try {
-                val list = DirectoryClient.hosts(url, token)
-                // The server accepted the session. If it was stored under a former name of the
-                // server, this is the moment it becomes stored under the server's own.
-                DirectoryClient.confirmStoredSession(this)
+                var list: List<DirectoryClient.Host>
+                try {
+                    list = DirectoryClient.hosts(url, token)
+                } catch (e: DirectoryClient.DirectoryException) {
+                    if (e.status != 401) throw e
+                    // The session is no longer one: twelve hours went by, or the server was
+                    // restarted. This phone may still hold what gets another -- asked once, and
+                    // only for the account this screen shows. What is stored may be another's
+                    // by now; its session would show that account's PCs under this one's name.
+                    if (account.isEmpty()) throw e
+                    val back = LoginFlow.comeBack(
+                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog,
+                        onlyForAccount = account)
+                    diagnosticsLog.log("session_refused", "coming back: ${back.outcome}")
+                    anotherAccount = back.outcome == LoginFlow.Return.OTHER_ACCOUNT
+                    if (back.outcome != LoginFlow.Return.SIGNED_IN || back.accountId != account) throw e
+                    if (epoch != signInEpoch) return@execute
+                    DirectoryClient.adoptSession(back.sessionToken, back.accountId)
+                    LogUploader.configure(this, url, back.sessionToken)
+                    list = DirectoryClient.hosts(url, back.sessionToken)
+                }
+                // The server accepted the session. If it was one carried over from a former name
+                // of the server, this is the moment the stored address becomes the server's own.
+                DirectoryClient.confirmCarriedOver(this)
                 runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
                     setDirectoryBusy(false)
                     directoryHosts = list
                     hostListAdapter.notifyDataSetChanged()
-                    hostsStatusText.text = DirectoryClient.savedAccountId(this)
+                    hostsStatusText.text = account.ifEmpty { DirectoryClient.savedAccountId(this) }
                     renderStatus()
                 }
             } catch (e: Exception) {
                 diagnosticsLog.log("hosts_failed", "reason=$reason error=${e.message}")
                 runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
                     setDirectoryBusy(false)
-                    // An expired or revoked token is the common case; ask for the password again
+                    // A refused session with nothing to replace it: ask for the password again
                     // rather than leaving an empty list that looks like "no PCs registered".
-                    if (e is DirectoryClient.DirectoryException && e.message?.contains("로그인") == true) {
-                        DirectoryClient.clearSession(this)
+                    if (e is DirectoryClient.DirectoryException && e.status == 401) {
+                        ++signInEpoch
+                        DirectoryClient.dropSession()
                         currentScene = UiScene.LOGIN
-                        loginErrorText.text = e.message
+                        loginErrorText.text = getString(
+                            if (anotherAccount) R.string.login_other_account else R.string.login_again)
                     } else {
                         hostsStatusText.text = e.message ?: ""
                     }
@@ -3992,7 +4175,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         val url = DirectoryClient.directoryUrl
-        val token = DirectoryClient.savedSessionToken(this)
+        val token = DirectoryClient.session()
         if (url.isEmpty() || token.isEmpty()) {
             currentScene = UiScene.LOGIN
             renderStatus()

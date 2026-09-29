@@ -259,8 +259,133 @@ bool directory_login(const std::string& url, const std::string& accountId,
   return true;
 }
 
+namespace {
+
+SessionCall session_call_for(uint32_t status) {
+  if (status == 200) return SessionCall::Ok;
+  if (status == 401) return SessionCall::Rejected;
+  if (status == 404 || status == 405) return SessionCall::Unsupported;
+  if (status == 429) return SessionCall::Limited;
+  return SessionCall::Failed;
+}
+
+/**
+ * One call that carries a secret in its body.
+ *
+ * The body is built here and zeroed here. What comes back is only ever described by its status
+ * and the server's own error text -- never echoed -- so that nothing a caller logs about a
+ * failure can contain what was sent.
+ */
+SessionCall secret_call(const std::string& url, const char* path, std::string body,
+                        const std::string& bearer, std::string* outResponse,
+                        std::string* outError) {
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return SessionCall::Failed;
+
+  uint32_t status = 0;
+  std::string response;
+  const bool exchanged =
+      http_request(host, port, secure, "POST", path, bearer, body, &status, &response);
+  if (!body.empty()) SecureZeroMemory(body.data(), body.size());
+  if (!exchanged) {
+    if (outError) *outError = "cannot reach the server";
+    return SessionCall::Unreachable;
+  }
+  const SessionCall call = session_call_for(status);
+  if (call != SessionCall::Ok && outError) *outError = error_from_response(status, response);
+  if (outResponse) *outResponse = std::move(response);
+  return call;
+}
+
+}  // namespace
+
+const char* session_call_name(SessionCall call) {
+  switch (call) {
+    case SessionCall::Ok: return "ok";
+    case SessionCall::Rejected: return "rejected";
+    case SessionCall::Unsupported: return "unsupported";
+    case SessionCall::Limited: return "limited";
+    case SessionCall::Failed: return "failed";
+    case SessionCall::Unreachable: return "unreachable";
+  }
+  return "?";
+}
+
+SessionCall directory_login_with_device(const std::string& url, const std::string& accountId,
+                                        const std::string& password, const std::string& kind,
+                                        const std::string& label, DeviceSignIn* out,
+                                        std::string* outError) {
+  if (out) *out = DeviceSignIn{};
+  std::string body = "{\"id\":\"" + json_escape(accountId) + "\",\"pw\":\"" +
+                     json_escape(password) + "\",\"device\":{\"kind\":\"" + json_escape(kind) +
+                     "\",\"label\":\"" + json_escape(label) + "\"}}";
+  std::string response;
+  const SessionCall call =
+      secret_call(url, "/api/login", std::move(body), {}, &response, outError);
+  if (call != SessionCall::Ok) return call;
+
+  DeviceSignIn read;
+  if (!json_get_string(response, "sessionToken", &read.sessionToken) ||
+      read.sessionToken.empty()) {
+    if (outError) *outError = "server did not return a session";
+    return SessionCall::Failed;
+  }
+  // All three or none. A directory from before device credentials sends none, and the sign-in
+  // stands; one that sends some of them has sent something this client cannot use.
+  json_get_string(response, "deviceId", &read.deviceId);
+  json_get_string(response, "deviceCredential", &read.deviceCredential);
+  json_get_string(response, "revokeToken", &read.revokeToken);
+  if (read.deviceId.empty() || read.deviceCredential.empty() || read.revokeToken.empty()) {
+    read.deviceId.clear();
+    read.deviceCredential.clear();
+    read.revokeToken.clear();
+  }
+  if (out) *out = std::move(read);
+  return SessionCall::Ok;
+}
+
+SessionCall directory_session_refresh(const std::string& url, const std::string& deviceId,
+                                      const std::string& deviceCredential, DeviceSignIn* out,
+                                      std::string* outError) {
+  if (out) *out = DeviceSignIn{};
+  std::string body = "{\"deviceId\":\"" + json_escape(deviceId) + "\",\"deviceCredential\":\"" +
+                     json_escape(deviceCredential) + "\"}";
+  std::string response;
+  const SessionCall call =
+      secret_call(url, "/api/session/refresh", std::move(body), {}, &response, outError);
+  if (call != SessionCall::Ok) return call;
+
+  DeviceSignIn read;
+  read.deviceId = deviceId;
+  if (!json_get_string(response, "sessionToken", &read.sessionToken) ||
+      read.sessionToken.empty() ||
+      !json_get_string(response, "deviceCredential", &read.deviceCredential) ||
+      read.deviceCredential.empty()) {
+    // A 200 without the next credential would leave this device holding one the server has
+    // just replaced. It is not treated as a sign-in.
+    if (outError) *outError = "server did not return a session and the next credential";
+    return SessionCall::Failed;
+  }
+  if (out) *out = std::move(read);
+  return SessionCall::Ok;
+}
+
+SessionCall directory_session_logout(const std::string& url, const std::string& deviceId,
+                                     const std::string& revokeToken,
+                                     const std::string& sessionToken, std::string* outError) {
+  std::string body = "{\"deviceId\":\"" + json_escape(deviceId) + "\"";
+  if (!revokeToken.empty()) body += ",\"revokeToken\":\"" + json_escape(revokeToken) + "\"";
+  body += "}";
+  return secret_call(url, "/api/session/logout", std::move(body), sessionToken, nullptr,
+                     outError);
+}
+
 bool directory_list_hosts(const std::string& url, const std::string& sessionToken,
-                          std::vector<DirectoryHostEntry>* outHosts, std::string* outError) {
+                          std::vector<DirectoryHostEntry>* outHosts, std::string* outError,
+                          uint32_t* outStatus) {
+  if (outStatus) *outStatus = 0;
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -272,6 +397,7 @@ bool directory_list_hosts(const std::string& url, const std::string& sessionToke
     if (outError) *outError = "cannot reach the server";
     return false;
   }
+  if (outStatus) *outStatus = status;
   if (status != 200) {
     if (outError) *outError = error_from_response(status, response);
     return false;

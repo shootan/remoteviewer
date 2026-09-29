@@ -2108,6 +2108,25 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# The stored sign-in: the files, the lock, and what a sign-in, a return and a sign-out each leave
+# behind. The store and the flow are the product's; the directory is functions the test owns,
+# because a real one cannot be told to answer after a sign-out.
+add_executable(remote60_login_flow_test
+  src/login_flow_test.cpp
+  src/login_flow.cpp
+  src/login_credential_store.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_login_flow_test PRIVATE src)
+target_link_libraries(remote60_login_flow_test PRIVATE common ws2_32 crypt32)
+if(MSVC)
+  target_compile_options(remote60_login_flow_test PRIVATE /utf-8)
+endif()
+
 # Where a host token cached under another address goes: to the server when the address is a
 # listed former name of it (and the cache is rewritten only once accepted), nowhere when it is
 # not. Also that a redirect answered to a credentialed request is not followed. Counts what each
@@ -2464,6 +2483,8 @@ if(GNLINK_HAVE_WEBVIEW2)
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
+    src/login_credential_store.cpp
+    src/login_flow.cpp
     src/client_shell_bridge.cpp
     src/client_update_gate.cpp
     src/directory_session_client.cpp
@@ -2524,6 +2545,18 @@ target_include_directories(remote60_client_recovery_ui_test PRIVATE src "${GNLIN
   get_target_property(_recovery_shell_links remote60_client_shell LINK_LIBRARIES)
   target_link_libraries(remote60_client_recovery_ui_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_client_recovery_ui_test remote60_client_shell)
+
+  # Coming back signed in, in the client's own window: the same shell, the same seam, one start
+  # of the client per run. apps/directory/test/client_auto_login_runner.js strings the runs
+  # together around a real directory that it restarts, stops and slows down.
+  add_executable(remote60_client_auto_login_ui_test src/client_auto_login_ui_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_client_auto_login_ui_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_client_auto_login_ui_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_client_auto_login_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_auto_login_ui_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_auto_login_ui_test remote60_client_shell)
 
   # The page is loaded from disk rather than compiled in, so it can be adjusted without a
   # rebuild; copied beside the executable so a build tree behaves like an install.

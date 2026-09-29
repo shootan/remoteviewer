@@ -79,6 +79,11 @@ function drive(args) {
   process.stdout.write(run.stdout || '');
   process.stderr.write(run.stderr || '');
   passed += ((run.stdout || '').match(/^PASS /gm) || []).length;
+  if (run.status === 3) {
+    // Another program's window was over the button: the case could not be looked at. Not a
+    // pass and not a product failure -- the whole run is INVALID, and says whose window it was.
+    throw Object.assign(new Error("another program's window covered the test window"), { invalid: true });
+  }
   return run.status;
 }
 
@@ -216,7 +221,14 @@ function drive(args) {
   pass('[fixed-server] the address in host.json received no request, with its token or without');
   console.log('PASS screenshots ' + Object.values(shots).join(' , '));
   console.log(`host_login_ui_runner: ALL PASS (${passed} checks; product window, asInvoker test build, fixture directory)`);
-})().catch((error) => { console.error('FAIL', error.message); console.log('host_login_ui_runner: FAIL'); process.exitCode = 1; })
+})().catch((error) => {
+  if (error && error.invalid) {
+    console.log(`host_login_ui_runner: INVALID (${error.message}; its identity is printed above)`);
+    process.exitCode = 3;
+    return;
+  }
+  console.error('FAIL', error.message); console.log('host_login_ui_runner: FAIL'); process.exitCode = 1;
+})
   .finally(async () => {
     await stopHost();
     if (server && server.exitCode === null && server.signalCode === null) { const done = new Promise((r) => server.once('exit', r)); server.kill(); await done; }

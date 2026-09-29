@@ -12750,3 +12750,97 @@ Next
 - 검증(console 세션, 격리): `update_http_test` exit 0 (44/0) · `host_migration_e2e_test` exit 0 (33/0, `REMOTE60_ALLOW_HOST_E2E=1`) · `directory_migration_test` exit 0 (71) · `directory_retry_test` exit 0 (122/0) · `update_check_test` 28/0 · `update_release_test` 80/0 · `client_update_flow_test` PASS · `host_login_ui_runner` exit 0 · `client_recovery_ui_runner` exit 0 · gate exit 0 (8) · gate self-test exit 0 (13). 실사용 `host.json` mtime 09-23 그대로.
 - 증명하지 못하는 것: TLS, 실제 서버·실제 옛 이름, 설치된 무인 Host 가 업데이트를 거쳐 이행되는 것(실기), 창의 SIGN IN AGAIN 배지 표시.
 - 제품/테스트/문서: 제품(`update_http.cpp`, `directory_client.cpp`(상태 출력 + test seam), `fixed_directory.hpp` 주석) / 테스트(`update_http_test.cpp`, `host_migration_e2e_test.cpp` 신설, `GNLinkStreamMigrationTest` 타깃, `gnlink_check_fixed_server.py`, CMake) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r4 2부 (1/4) — 서버: 기기 자격으로 세션을 다시 얻는다
+
+- 목표: 자동 로그인(S2). 비밀번호를 저장하지 않고, 서버 재시작·12 h 만료 뒤에도 입력 없이 세션을 얻는다. 이 항목은 **서버만**이다 — 클라가 쓰기 전에는 사용자에게 보이는 변화가 없다. **배포하지 않았다.**
+- 설계 정본: `.claude/auto_login_design_r1.md` + `auto_login_debate_2026-09-29.md` "검증용 결론" + r4 2부 확정 10건.
+- 모델: 명시적 로그인이 `device:{kind,label}` 를 실으면 **계열** 하나를 새로 만든다 — `deviceId` · `deviceCredential`(세션과 다음 자격으로만 교환, 쓸 때마다 회전) · `revokeToken`(폐기 전용, **계열 동안 고정**). 저장소(`store.devices`)에는 해시만.
+- route: `POST /api/session/refresh` · `POST /api/session/logout`(세션 또는 revokeToken) · `GET /api/devices` · `POST /api/devices/revoke`. `device` 없는 `/api/login` 응답은 키·순서까지 종전과 같다.
+- 규칙(`device_credentials.js`, 시계·난수를 인자로 받는 순수 함수):
+  - 수명 90일 sliding, 세션 12 h 그대로. 직전 자격은 60 s·1회 유예 — **기한과 남은 횟수가 저장소에 있다**(재시작으로 다시 열리지 않음).
+  - **서버가 실제로 발급했던 해시**(계열당 최근 32개)가 다시 오면 그 계열을 폐기. **발급한 적 없는 값은 401 뿐**이고 아무것도 끝내지 않는다 — deviceId 만 아는 사람이 남을 로그아웃시킬 수 없다. 틀린 값은 기기·상대별로 지연되지만 **맞는 값은 먼저 검사**하므로 남의 추측이 주인을 막지 못한다.
+  - 응답 연속 유실: 같은 옛 자격의 세 번째 제시는 재사용 → 폐기 → 재로그인(허용된 복구). 로그는 유실과 도난을 구분했다고 쓰지 않는다.
+  - 폐기의 효력: logout / revoke / 재사용 폐기는 그 계열이 발급한 **기존 Bearer 세션도 끝낸다**(삭제 + 조회 시 재검사, 두 겹).
+  - 순서: 메모리 변경 → **저장** → 세션 종료·응답. 저장 실패는 메모리를 되돌리고 503.
+  - 소유: 목록·폐기는 요청 계정의 기기만. 남의 deviceId 는 없는 기기와 **같은 응답**(404).
+  - 계정당 계열 32개, 끝난 계열은 30일 뒤 삭제.
+- 검증(격리: 실제 `server.js` 를 프로세스로, OS 가 고른 포트, `.claude/test-tmp` 의 store·로그):
+  - `device_credentials_unit_test.js` exit 0, 27 checks — 유예 60 s 경계, 재시작 뒤 유예 상태, 90일 sliding, 발급 이력 상한, 옛 계열 revokeToken 이 새 계열에 무효.
+  - `device_credential_test.js` exit 0, 83 checks — 옛 클라 응답 형태 / 저장 뒤 응답 / **재시작 뒤 자격으로 세션 획득** / 유실 1회 회복·2회 폐기 / 추측은 폐기 안 함·주인은 막히지 않음 / hostToken↔기기 자격↔revokeToken↔세션 교차 거부 / 로그아웃(세션·revokeToken)과 복수 세션 무효화 / 한 대만 폐기 / 남의 계정 / 저장 실패 시 store 바이트 동일·세션 유지·회전 안 됨 / **옛 서버(6e5cd70)가 `devices` 를 보존**(실행: 옛 서버로 기동 → host register 로 저장 → `devices` JSON 동일 → 새 서버에서 같은 자격으로 refresh 200) / 발급한 모든 비밀(자격·revokeToken·세션·hostToken·비밀번호)이 scratch 의 어떤 파일에도 없음.
+  - 변이 8종 + 조합 1: 저장 실패 시 되돌리지 않음 · 저장 전에 응답 · 추측을 재사용으로 · 계정 검사 제거 · 자격을 로그에 출력 · 유예 무제한 → 각각 exit 1. 세션 삭제와 조회 시 재검사는 **하나씩 빼면 통과**(서로 덮는다) — 둘 다 빼면 exit 1(4건 FAIL). 전부 원복·해시 확인.
+  - 기존 서버 회귀 `node test/run.js` exit 0, `RESULT: ALL PASS`.
+- 한계: 32회보다 오래전에 발급된 자격은 "모르는 값"으로 읽힌다(401, 폐기 없음). 실패 지연의 키는 기기+상대 주소라 프록시 뒤에서는 상대가 모두 같은 주소다. TLS·프록시·실제 서버는 이 시험에 없다. 비밀번호 변경 route 는 아직 없어 "변경 시 전 기기 폐기"는 구현되지 않았다.
+- 배포(검증용 + NAS 세션, 이 작업에서는 하지 않음): **서버 먼저 → 클라.** 올릴 파일에 `device_credentials.js` 가 **추가**된다(`server.js` · `update_manifest.js` · `version_compare.js` · `wake_target.js` · `package.json` 과 함께) — 빠지면 `MODULE_NOT_FOUND`. 재시작 필요. 롤백: 옛 서버로 되돌려도 store 의 `devices` 는 보존되고, 자격을 가진 클라는 refresh 404 를 "이 서버는 못 한다"로 읽어 비밀번호 로그인으로 돌아간다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `device_credentials.js` 신설) / 테스트(`device_credentials_unit_test.js`·`device_credential_test.js` 신설, `test/run.js`) / 문서(`apps/directory/README.md`, 이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (2/4) — PC 클라: 로그인한 채로 돌아온다
+
+- 목표: 한 번 로그인하면 GNLinkClient 를 껐다 켜도, 서버가 재시작됐어도 **입력 없이** PC 목록으로. 로그아웃하면 다음 실행은 로그인 화면. 비밀번호는 저장하지 않는다.
+- 저장(`login_credential_store.*`, client.txt 옆): `login.cred`(서버 origin·계정·deviceId·기기 자격·revokeToken, **DPAPI user scope** + 전용 entropy) · `login.cred.revoke`(서버에 아직 알리지 못한 로그아웃, 유계 16건, 같은 보호) · `login.cred.gen`(영속 generation) · `login.cred.lock`. 쓰기는 임시 파일 → `MoveFileEx`. 읽지 못하는 파일은 지우지 않고 로그인 화면.
+- 직렬화: **자격 저장소 전용 배타 파일 잠금**(공유 0 으로 연 파일 — 같은 파일에 닿는 모든 프로세스·로그온 세션에 같은 잠금, 프로세스가 죽으면 풀림). 대기는 유계(8 s), worker 에서만.
+- 흐름(`login_flow.*`, directory 호출은 함수로 주입):
+  - 돌아오기 = 잠금 → **다시 읽기** → refresh → 새 자격 원자 저장 → 해제. 401 만 자격을 지운다. 429·5xx·불통은 보존(1 s·4 s·15 s 뒤 재시도, 그동안 폼은 쓸 수 있고 끝나면 "다시 시도" 버튼). 404/405 는 옛 서버 — 보존하고 로그인 화면. 다른 origin 의 자격은 보내지도 지우지도 않는다.
+  - 로그인 = generation 올림 → `/api/login` 에 `device` 실어 요청 → 응답 때 generation 이 그대로면 저장. 아니면(그 사이 로그아웃·다른 로그인, **다른 프로세스 포함**) 저장하지 않고 **방금 발급된 기기를 폐기**, 세션도 쓰지 않는다. 새 로그인은 새 계열이고 이전 계열은 폐기 대상으로 기록.
+  - 로그아웃 = generation 올림 → **폐기 표식 기록 → 자격 삭제**(잠금 안) → 서버 폐기. 서버에 닿지 않으면 표식이 남아 다음 시작·다음 로그인 때 마저 보낸다. 표식이 있는 자격은 자동 로그인에 쓰지 않는다.
+  - 세션 중 401(12 h·서버 재시작) → 돌아오기 1회 → 실패면 로그인 화면.
+- 화면(`shell.html`): 시작 시 "저장된 로그인으로 접속하는 중" → 목록. 실패면 메시지 + `#retryAuto`. 아이디 칸은 유지.
+- 🔴 **e2e 가 찾은 결함**: 자동 로그인 시작이 epoch 을 올리는데 `restore` 메시지는 그 **전에** 게시돼 stale 로 버려졌다 → 로그아웃 뒤 폼의 아이디 칸이 비었다. `ready` 처리에서 자동 로그인 시작을 게시보다 앞으로.
+- 로그: 자격·revokeToken·세션은 어떤 줄에도 없다. 기기는 id 앞 8자로만.
+- 한계: DPAPI 는 다른 Windows 사용자·디스크 복사를 막는다. **같은 사용자 권한의 프로세스는 풀 수 있다.** 저장 직전 크래시는 재로그인으로 복구(서버가 회전했는데 저장 못 한 경우 유예 60 s·1회).
+- 검증은 (4/4) 항목.
+- 제품/테스트/문서: 제품(`login_credential_store.*`·`login_flow.*` 신설, `client_shell_main.cpp`, `client_shell_bridge.*`, `directory_session_client.*`, `ui/shell.html`, CMake 의 클라 소스 2줄) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (3/4) — APK: 세션은 메모리에만, 자격은 Keystore 로
+
+- 목표: PC 클라와 같은 규칙. 그리고 **평문 세션 토큰 저장을 없앤다.**
+- `LoginFlow.kt`(순수 Kotlin, vault·directory 가 인터페이스) = PC 의 `login_flow` 와 같은 트랜잭션·같은 결과 분류. 앱은 프로세스가 하나라 잠금은 앱 안 `ReentrantLock`(유계 `tryLock`), generation 은 vault 에 영속.
+- `KeystoreLoginVault.kt`: prefs `gnlink_login` 에 Android Keystore AES-GCM 키(alias `gnlink.login.v1`, 사용자 인증 불요)로 암호화한 자격·폐기 표식. 쓰기는 `commit()`. 키가 없거나 복호화 실패면 Unreadable → 로그인 화면.
+- 세션: `DirectoryClient.session()` 메모리 전용. `saveSession`/`clearSession`/`savedSessionToken` 삭제. 이전 버전이 남긴 평문 세션은 시작 때 한 번 `takeLegacySession` — 만료 전 + origin 이 고정 주소 또는 옛 이름일 때만 메모리로 옮기고, **저장된 사본은 어느 경우든 지운다.** 그렇게 옮긴 세션에는 기기 자격을 발급하지 않는다(명시 로그인 때만).
+- 백업 제외: manifest `fullBackupContent`·`dataExtractionRules` → `gnlink_login.xml`, `remote60_directory.xml` 을 cloud backup·device transfer 에서 제외.
+- 화면: 저장된 로그인으로 접속 중 → 목록 / 실패 시 메시지 + `loginRetryButton`. 로그아웃은 표식 → 삭제 → 서버 폐기.
+- 검증은 (4/4). ⚠️ **기기·에뮬레이터가 없어 Keystore·화면·프로세스 종료 뒤 복귀는 실행하지 못했다 — 실기 대기.**
+- 제품/테스트/문서: 제품(`LoginFlow.kt`·`KeystoreLoginVault.kt` 신설, `DirectoryClient.kt`, `MainActivity.kt`, layout, strings, manifest, `res/xml/backup_rules.xml`·`data_extraction_rules.xml`) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (4/4) — 시험·gate: 자동 로그인의 반례
+
+- 환경: console 세션(RDP 아님), 비관리자, 전부 격리(`.claude/test-tmp`, loopback, test account). 실사용 `client.txt`·`host.json` mtime 09-23 그대로, 실사용 프로필에 `login.cred` 없음.
+- ⑵ 제품 UI(product-equivalent test build) `client_auto_login_runner.js` exit 0, **176 checks** — `client_auto_login_ui_test`(제품 `client_shell_main.cpp` 전체 + 같은 `shell.html`, 다른 것은 설정·자격 경로와 서버 주소) 의 **실행 1회 = 클라 시작 1회**, 실제 `server.js`:
+  1 첫 시작 → 폼 → 아이디+비밀번호 → 목록, 서버에 windows-client 기기 1개, 디스크 파일에 발급값·비밀번호 없음 / 2 다시 시작 → **입력 없이 목록** / 3 서버 재시작 뒤 시작 → 입력 없이 목록 / 4 클라가 열린 채 서버 재시작 → 새로 고침에 세션 교체, 목록 유지 / 5 창 2개 동시 시작 → 둘 다 목록, **기기 폐기 안 됨** / 6 서버 죽은 채 시작 → 폼 사용 가능·재시도 버튼·자격 보존 → 서버 기동 뒤 버튼으로 목록 / 7 다른 세션에서 그 기기 폐기 → 폼 + "다시 로그인", 자격 삭제 / 8 로그인(새 계열) → 로그아웃 → 서버에 `signed out` 으로 폐기, 디스크 비움, **다음 시작은 폼** / 9 서버 죽은 채 로그아웃 → 자격 삭제·표식 남음 → 서버 기동 뒤 시작: 폼, 그 시작이 서버에 폐기를 알림 / 10 한 창의 로그인 응답을 서버가 붙잡은 사이 다른 창이 로그인·로그아웃 → **늦은 응답은 로그인시키지 못함**, 저장 0, 두 기기 모두 폐기 / 11 서버가 내준 모든 값(40개)과 비밀번호가 클라 로그·서버 로그·업로드된 로그·store 어디에도 없음.
+- `login_flow_test` exit 0, 72 checks — 파일에 평문 없음, 손상·잘림·다른 entropy → Unreadable, **다른 프로세스가 쥔 잠금**(자식 프로세스) 과 그 프로세스가 죽은 뒤 해제, 두 호출 동시 → 둘째는 첫째가 방금 저장한 자격을 제시, 늦은 응답 4종(같은 프로세스·다른 프로세스·서버 불통·두 로그인), 오프라인 로그아웃과 정산, 로그 줄에 비밀 없음.
+- 변이(`login_flow_test`): 표식 무시 · generation 무시 · 무응답에 자격 삭제 · origin 무시 · 로그에 세션 출력 · 로그아웃 표식 생략 · 잠금 공유 · 평문 저장 → 8종 모두 exit≠0. (시험 삼아 넣은 "잠금 전에 읽기" 변이는 동작을 바꾸지 못하는 빈 변이였다 — 목록에서 뺐다.)
+- APK: JVM 단위 143/0(`LoginFlowTest` 28 — PC 와 같은 반례 + 평문 세션 이행 판정 + 소스에 세션 저장 없음·비밀번호 인자 없음·백업 제외·재시도 버튼). `assembleDebug`/`assembleRelease` BUILD SUCCESSFUL.
+- gate: release APK 에 Keystore alias·prefs 이름·두 route 가 있고 백업 제외 규칙이 manifest·리소스에 있음(5 checks, exit 0). 부정 대조: 게시된 0.2.23 APK → exit 1(4 FAIL). Windows 는 종전 8 checks exit 0 — 자격 경로를 바꾸는 길은 기존 shell test seam 하나이고 그 표식은 이미 검사 대상.
+- 회귀: `client_recovery_ui_runner` exit 0(64, 자동 로그인 확인이 끝난 뒤의 폼을 검사하도록 대기 추가) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` PASS · `directory_session_client_test` PASS.
+- 검증용 요청 반영(`review_466aeb9_verifier.md`): `gnlink_host_login_uia.ps1` 이 버튼이 가려진 **그 순간** 가린 창의 hwnd·class·title·pid·exe 를 남긴다.
+- 증명하지 못하는 것: GNLinkClient.exe 자체(시험 빌드는 같은 소스·같은 page, 다른 exe), TLS·실제 서버, 12 h 경과(서버 재시작으로 대신), 다른 Windows 사용자·다른 로그온 세션, 쓰기 도중 전원 차단, **APK 의 Keystore·화면·기기 재시작**, 물리 입력.
+- 제품/테스트/문서: 제품 없음 / 테스트(`login_flow_test.cpp`·`client_auto_login_ui_test.cpp`·`client_auto_login_runner.js`·`LoginFlowTest.kt` 신설, `client_recovery_ui_test.cpp`, `client_shell_bridge_test.cpp`, `gnlink_check_fixed_server.py`, `gnlink_host_login_uia.ps1`, CMake 시험 타깃) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r5 — 영속 기록이 실패하면 그 다음 단계로 가지 않는다 (PC 클라·APK)
+
+- 반려(r5, Codex `6e4764a` 검토) 6건은 한 원인이었다: **쓰기의 반환값을 버렸다.** 카운터·폐기 표식·자격 각각이 다음 단계를 안전하게 만드는 기록인데, 실패해도 다음 단계로 갔다. 이제 어느 것도 버리지 않는다. 서버(`d34f6e5`)는 건드리지 않았다.
+- ① 카운터(generation)를 쓰지 못하면: 로그아웃은 **하지 않고** 그렇다고 말한다(자격·표식·서버 모두 그대로). 로그인은 시작하지 않는다. 늦게 도착한 로그인 응답은 저장되지 않는다 — `remember_sign_in` 이 저장 전에 카운터를 한 번 더 쓰고, 그것이 실패하면 저장하지 않는다. come_back 의 표식·401 삭제도 카운터를 쓴 뒤에만 한다.
+- ② 폐기 표식을 쓰지 못하면 자격을 지우지 않는다(그 자격이 기기를 끝낼 유일한 수단). 서버가 그 기기를 끝냈다고 확인해 줄 때만 지운다. 로그인이 앞 자격을 대체할 때도 같다 — 표식을 못 쓰면 서버에 먼저 알리고, 그것도 안 되면 새 자격을 저장하지 않는다. 사용자에게: "로그아웃을 완료하지 못했습니다 … 다음 실행 때 다시 로그인될 수 있습니다 …".
+- ③ 폐기 목록: 읽을 수 없음 ≠ 비어 있음. 읽을 수 없으면 덮어쓰지 않고, 저장된 자격을 제시하지 않으며, 정산은 "남음 1" 로 답한다. 가득(16) 차면 **아무것도 밀어내지 않고** 추가를 거부한다(→ 그 로그아웃은 ②의 규칙). 사용자가 직접 로그인할 때만 읽을 수 없는 목록을 옆으로 치워(`login.cred.revoke.unreadable-N` / APK `owed.unreadable`) 새로 시작한다.
+- ④ 로그아웃의 404/405 는 기기가 끝난 것이 아니다 — 표식을 남기고, 그 route 가 있는 서버가 돌아오면 보낸다. 401 은 종전대로 끝.
+- ⑤ 저장소를 쓸 수 없으면 자격 없는 로그인으로 대신하지 않는다(PC `begin_login`, APK `performLogin` 의 폴백 삭제). 발급 없음(NotIssued) 응답도 generation 을 확인하고, 앞 계정의 저장 자격은 표식 후 지운다(A→B 로 로그인했는데 다음 실행이 A 로 돌아오던 반례).
+- ⑥ 401 복구의 `come_back` 은 이 창/화면이 보여 주는 계정의 자격만 제시한다(`onlyForAccount` → `OtherAccount`): 다른 창이 다른 계정으로 로그인한 뒤에는 "다른 계정으로 로그인했습니다. 다시 로그인해 주세요." PC 클라는 로그인 응답 뒤 목록이 실패하거나 창이 이미 다른 일로 넘어갔으면 발급된 기기를 끝낸다(`discard_sign_in`).
+- 시험(각 항목 반례): `login_flow_test` exit 0, **116 checks**(r5 44 — 경로를 디렉터리로 막아 카운터·표식 쓰기를 실제로 실패시킨다) · `LoginFlowTest` 38/0(r5 10) · 단위 13 클래스 failures 0.
+- 변이(결함을 하나씩 되돌림): C++ 7종(404=끝 · 로그아웃이 카운터 실패 무시 · 표식 없이 삭제 · generation 전에 NotIssued · 계정 무시 · 읽을 수 없는 목록=빈 목록 · 저장 전 카운터 실패 무시) 모두 FAIL 로 exit 1. Kotlin 같은 7종 모두 "38 tests completed, 1~2 failed". ⚠️ 첫 Kotlin 실행은 `gradlew.bat` 을 찾지 못한 exit 1 을 "죽음" 으로 셀 뻔했다 — 테스트가 실제로 실패한 것만 세도록 고쳐 다시 돌렸다.
+- 회귀(console 세션, 비관리자, 격리): `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(PASS 65) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` exit 0 · `directory_session_client_test` exit 0 · APK 단위 153/0 · `assembleRelease` 성공 · gate Windows 8 / APK 5 / self-test 13 모두 exit 0. 실사용 `client.txt`(09-23)·`host.json`(09-29 18:38, r5 가 적은 0.2.144 실기 재기록) 해시 전후 동일, `login.cred` 없음.
+- ⚠️ r5 의 새 사용자 문구(로그아웃 미완료·다른 계정·저장소 없음)는 흐름 시험으로만 확인했고, 제품 창에서 그 상태를 만들어 보지는 않았다.
+- 증명하지 못하는 것: 실제 디스크 가득·권한 거부(경로를 디렉터리로 막아 대신), APK 의 Keystore·SharedPreferences 쓰기 실패(JVM vault 로 대신 — 기기 없음), 두 창 두 계정의 실제 UI(흐름 시험으로 대신).
+- 제품/테스트/문서: 제품(`login_credential_store.{hpp,cpp}`, `login_flow.{hpp,cpp}`, `client_shell_main.cpp`, `LoginFlow.kt`, `KeystoreLoginVault.kt`, `MainActivity.kt`, strings 2) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r6 — 늦은 로그아웃 응답·Activity 재생성·빈 자리의 손상 목록 (PC 클라·APK) + Host UI 시험의 가림 판정
+
+- 반려(r6, Codex `e7e5037` 확인 + 검증용 동의) 3건 + 시험 1건. 서버 무변경.
+- ① 표식을 못 쓴 로그아웃은 잠금을 놓고 서버에 먼저 알린다. 그 사이 다른 창이 계열 B 를 저장하면, 돌아온 응답이 **B 를 지우던** 것을 막았다: 다시 잠근 뒤 **저장된 것이 여전히 A(origin·deviceId)일 때만** 지운다. 아니면 A 는 서버에서 끝났고 디스크에도 없으므로 완료로 보고 B 는 그대로 둔다. generation 은 판정에 쓰지 않았다 — 다른 창이 로그인을 시작만 해도 카운터가 움직이지만 그때 A 는 여전히 지워야 한다(`login_flow.cpp`, `LoginFlow.kt`).
+- ② APK: 세션과 그 소유 계정을 `DirectoryClient` 의 한 값(`Held(token, accountId)`)으로 함께 두어 같은 수명(프로세스)으로 만들었다. Activity 필드 `sessionAccountId` 삭제 → 재생성된 Activity 도 401 복구에 계정을 넘긴다. 옛 버전에서 옮겨 온 평문 세션은 계정이 기록돼 있지 않아 빈 값(추정하지 않음).
+- ③ 읽을 수 없는 폐기 목록을 옆으로 치우는 일을 "이전 자격이 있을 때" 조건에서 떼어 냈다 — 로그아웃으로 자격이 없는 상태에서도 명시 로그인 1회로 목록이 복구되고 다음 시작이 자동 로그인된다.
+- ④ `gnlink_host_login_uia.ps1`: 누르기 전에 시험 창을 포커스 없이 최상위로 올린다(끝나면 되돌림). 그래도 **다른 프로세스의 창**이 버튼을 가리면 FAIL 이 아니라 **INVALID(exit 3)** + 그 창의 hwnd·class·title·pid·exe. 자기 프로세스의 창이 가리면 종전대로 FAIL. `host_login_ui_runner.js` 는 exit 3 을 받아 전체를 INVALID(exit 3)로 끝낸다. 사용자 창은 옮기거나 닫지 않는다. (원인: 검증용 20:02 실행에서 버튼 위 창 = GMux.)
+- 시험: `login_flow_test` exit 0, 124 checks(r6 8) · APK 단위 156/0(`LoginFlowTest` 41, r6 3) · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(65) · `host_login_ui_runner` exit 0(38) · bridge 0 · session 0 · gate win 8 / apk 5 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이: C++ 3종(목록 확인 없이 삭제 · 재확인 없이 실패 처리 · 이전 자격 있을 때만 치움) · Kotlin 3종(같은 둘 + 세션에 계정 안 붙임) 모두 실제 시험 실패로 kill.
+- 부정 대조(④): 시험 창 위를 30 ms 마다 다시 덮는 자체 decoy 창(다른 프로세스) → runner exit 3 INVALID, 가린 창 신원 출력 확인. decoy 없이 같은 빌드는 exit 0.
+- 증명하지 못하는 것: APK Activity 재생성 자체(기기 없음 — JVM 에서 DirectoryClient 값의 수명과 복구 흐름, 그리고 Activity 에 사본이 없음을 소스로 확인), 실제 두 창 동시 실행 UI.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`, `DirectoryClient.kt`, `MainActivity.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`, `gnlink_host_login_uia.ps1`, `host_login_ui_runner.js`) / 문서(이 항목, 구현계획).
