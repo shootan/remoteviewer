@@ -178,6 +178,10 @@ constexpr uint32_t kBulkStreamTag = 0x40000000u;
 constexpr uint32_t kBulkStreamTagMask = 0xC0000000u;
 constexpr uint32_t kBulkStreamClientToHost = 1u;
 constexpr uint32_t kBulkStreamHostToClient = 2u;
+// File copy (t-zdmsd4gb) uses the two bases the image path does not, so an image transfer and a file
+// paste can never share a stream id whatever their generations (bulk_stream_is_file routes them).
+constexpr uint32_t kFileBulkStreamClientToHost = 3u;
+constexpr uint32_t kFileBulkStreamHostToClient = 0u;
 constexpr uint32_t kBulkGenBits = 28u;
 constexpr uint32_t kBulkGenMask = (1u << kBulkGenBits) - 1u;
 
@@ -207,6 +211,20 @@ inline bool bulk_stream_claims(const void* data, size_t len) {
                            kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) ||
                            kind == static_cast<uint16_t>(UdpPacketKind::ControlNack);
   return controlKind && bulk_stream_id_is_bulk(streamId);
+}
+
+/** A bulk stream id of a file paste (bases 0 / 3), not of an image transfer (bases 1 / 2). */
+inline bool bulk_stream_is_file(uint32_t streamId) {
+  const uint32_t b = streamId & 0x3u;
+  return bulk_stream_id_is_bulk(streamId) && (b == kFileBulkStreamClientToHost || b == kFileBulkStreamHostToClient);
+}
+
+/** Whether a bulk datagram (bulk_stream_claims) is a file paste's -- the router's one question. */
+inline bool bulk_datagram_is_file(const void* data, size_t len) {
+  if (!bulk_stream_claims(data, len)) return false;
+  uint32_t streamId = 0;
+  std::memcpy(&streamId, static_cast<const uint8_t*>(data) + 8, 4);
+  return bulk_stream_is_file(streamId);
 }
 
 /**

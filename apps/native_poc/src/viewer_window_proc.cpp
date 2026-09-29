@@ -4,6 +4,8 @@
 
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
+#include <shellapi.h>  // DragQueryFileW: a copy of files (CF_HDROP) becomes a file-copy offer
+#pragma comment(lib, "shell32.lib")
 
 #include <set>
 
@@ -277,6 +279,35 @@ void capture_local_clipboard(ViewerState& ctx, HWND hwnd, bool allowImage) {
   // transfer running, the text of a refused older image. Before this, a new image only cancelled
   // the old transfer once it had been encoded, and an image that could not be read cancelled nothing.
   const bool echo = GetClipboardSequenceNumber() == clip.ownWriteSeq.load(std::memory_order_relaxed);
+  // File copy (t-zdmsd4gb): a genuine copy of files is an offer -- names and sizes only; nothing is
+  // read until a paste on the remote PC asks. Any other genuine copy withdraws the offer (a paste
+  // already running is not touched).
+  auto& files = ctx.control.fileCopy;
+  if (files.Usable() && allowImage && !echo) {
+    std::vector<std::wstring> paths;
+    if (IsClipboardFormatAvailable(CF_HDROP) && OpenClipboard(hwnd)) {
+      if (HANDLE h = GetClipboardData(CF_HDROP)) {
+        if (auto* drop = static_cast<HDROP>(GlobalLock(h))) {
+          const UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+          for (UINT i = 0; i < n && i <= 100; ++i) {  // one over the offer limit: the rules say "too many"
+            const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+            if (len == 0 || len > 32767) continue;
+            std::wstring p(len, L'\0');
+            DragQueryFileW(drop, i, p.data(), len + 1);
+            paths.push_back(std::move(p));
+          }
+          GlobalUnlock(h);
+        }
+      }
+      CloseClipboard();
+    }
+    if (!paths.empty()) {
+      image.CancelForNewerCopy();  // an older image is older than this copy
+      files.SubmitLocalFiles(paths, GetClipboardSequenceNumber());
+      return;
+    }
+    files.ClearLocalOffer();
+  }
   if (image.Usable() && allowImage && !echo) {
     image.CancelForNewerCopy();
     if (remote60::native_poc::clip_image_available()) {

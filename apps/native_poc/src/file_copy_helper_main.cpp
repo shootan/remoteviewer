@@ -477,10 +477,32 @@ class PipeTransport : public PasteTransport {
 
 struct Owner {
   RemoteFilesDataObject* current = nullptr;  // one AddRef held by us
+  // Objects no longer on the clipboard -- a newer offer replaced them, or another program took the
+  // clipboard -- with a paste still running on each (one AddRef each). A paste that has begun runs to
+  // its end: a new copy changes only what the NEXT paste gets (t-zdmsd4gb, debate "공통 상태").
+  std::vector<RemoteFilesDataObject*> retired;
   PipeTransport transport;
   bool quitting = false;
 };
 Owner gOwner;
+
+/**
+ * The current object leaves the clipboard (`why` says for what). With a paste running on it, it is
+ * retired and keeps serving that paste; otherwise it ends as before.
+ */
+void retire_or_abort(EndReason why) {
+  if (!gOwner.current) return;
+  if (gOwner.current->in_operation()) {
+    logf("offer=%llu off the clipboard (%s); paste op=%llu runs on", static_cast<unsigned long long>(gOwner.current->offer_id()),
+         end_reason_name(why), static_cast<unsigned long long>(gOwner.current->paste_op()));
+    gOwner.retired.push_back(gOwner.current);  // our ref moves with it
+    gOwner.current = nullptr;
+    return;
+  }
+  gOwner.current->AbortOperation(why);
+  gOwner.current->Release();
+  gOwner.current = nullptr;
+}
 
 void release_current(bool clearClipboard) {
   if (!gOwner.current) return;
@@ -504,10 +526,7 @@ void on_publish(std::unique_ptr<PublishRemoteFiles> m) {
     gShared.send->Push(encode(result));
     return;
   }
-  if (gOwner.current) {
-    gOwner.current->AbortOperation(EndReason::Cleared);
-    release_current(false);
-  }
+  retire_or_abort(EndReason::Cleared);
   DataObjectConfig cfg;
   auto* obj = new RemoteFilesDataObject(m->offerId, m->items, &gOwner.transport, cfg,
                                         [](const std::string& line) { gLog.Line(line); });
@@ -543,18 +562,38 @@ void shutdown(const char* why) {
     gOwner.current->AbortOperation(EndReason::Disconnected);
     release_current(true);
   }
+  for (RemoteFilesDataObject* r : gOwner.retired) {  // the session is over: every paste ends
+    r->AbortOperation(EndReason::Disconnected);
+    r->Release();
+  }
+  gOwner.retired.clear();
   // Abort is raised after the loop, once the sender has had its chance to put the last PasteEnd
   // on the wire (when the pipe is still there to take it).
   PostQuitMessage(0);
 }
 
 void on_timer() {
+  // Retired objects: released once their paste is over; the idle rule still ends a paste nobody reads.
+  for (auto it = gOwner.retired.begin(); it != gOwner.retired.end();) {
+    RemoteFilesDataObject* r = *it;
+    if (!r->in_operation()) {
+      logf("retired offer=%llu released (its paste is over)", static_cast<unsigned long long>(r->offer_id()));
+      r->Release();
+      it = gOwner.retired.erase(it);
+      continue;
+    }
+    if (!r->waiting() && GetTickCount64() - r->last_activity_ms() > gShared.idleMs) {
+      logf("paste op=%llu idle for %lu ms: ending it", static_cast<unsigned long long>(r->paste_op()),
+           static_cast<unsigned long>(gShared.idleMs));
+      r->AbortOperation(EndReason::Idle);
+    }
+    ++it;
+  }
   if (!gOwner.current) return;
   if (OleIsCurrentClipboard(gOwner.current) != S_OK) {
-    // Something else took the clipboard: the offer is over, whether or not a paste was running.
+    // Something else took the clipboard: the offer is over. A paste already running on it runs on.
     logf("clipboard taken over: offer=%llu dropped", static_cast<unsigned long long>(gOwner.current->offer_id()));
-    gOwner.current->AbortOperation(EndReason::Released);
-    release_current(false);
+    retire_or_abort(EndReason::Released);
     return;
   }
   // Idle means nobody is asking; a wait on the host in progress is the opposite of idle.

@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "host_clip_image.hpp"
+#include "host_file_copy.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -366,7 +367,8 @@ int startup_connect_client(HostContext& hx) {
       // negotiate (found by the harness against the real host: "the host acknowledged the bulk
       // channel" FAILED). "Available", not "running": the service starts after this answer.
       const bool bulkOffered = (hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
-                               clientSession.clipImage && clientSession.clipImage->Available();
+                               ((clientSession.clipImage && clientSession.clipImage->Available()) ||
+                                (clientSession.fileCopy && clientSession.fileCopy->Advertised()));
       if (bulkOffered) ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;

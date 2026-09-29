@@ -55,6 +55,8 @@ void VideoReceiver::run_udp() {
         ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
         // Clipboard image v1: bulk-stream datagrams (stream id bit30) go to their own channel,
         // whether control rides this socket or TCP -- the control channel would swallow them.
+        // The bulk streams: a file paste's (bases 0 / 3) or an image transfer's (1 / 2).
+        if (ctx.session.bulkChannelNegotiated && ctx.control.fileCopy.OnDatagram(bytes, count)) return true;
         if (ctx.session.bulkChannelNegotiated && ctx.control.clipImage.OnDatagram(bytes, count)) return true;
         if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
         // Before OnPacket, as on the host, because the thing it answers about is the

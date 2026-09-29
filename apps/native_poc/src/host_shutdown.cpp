@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "host_clip_image.hpp"
+#include "host_file_copy.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -146,6 +147,7 @@ void shutdown_host(HostContext& hx) {
   if (clientSession.udpReaderThread.joinable()) clientSession.udpReaderThread.join();
   // Clipboard image v1: its worker sends on the media socket, so it stops before the socket closes.
   if (clientSession.clipImage) clientSession.clipImage->Stop();
+  if (clientSession.fileCopy) clientSession.fileCopy->Stop();
   capture.DetachCaptureSession(res, token);
   // Stop the readback worker while everything its publish callback touches is still alive;
   // relying on destructor order would tear down FrameState first.

@@ -24,7 +24,9 @@
 
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
+#include "bulk_arbiter.hpp"
 #include "clip_image_client.hpp"
+#include "file_copy_client.hpp"
 #include "clipboard_sync.hpp"
 #include "viewer_control_resume.hpp"
 
@@ -103,6 +105,11 @@ struct ControlChannelState {
   // Clipboard image v1 (direction A): UI thread submits image copies, control thread offers and
   // polls, recv thread routes the bulk stream to it. Started at connect, stopped at shutdown.
   remote60::native_poc::ClipImageClient clipImage;
+  // File copy (t-zdmsd4gb): UI thread submits CF_HDROP copies, control thread offers / queries /
+  // prepares, recv thread routes the file bulk streams to it. Started at connect, stopped at shutdown.
+  remote60::native_poc::FileCopyClient fileCopy;
+  // One bulk per session: the image and the file paths take it in turn (bulk_arbiter.hpp).
+  remote60::native_poc::BulkArbiter bulkArbiter;
 };
 
 }  // namespace remote60::native_poc::viewer

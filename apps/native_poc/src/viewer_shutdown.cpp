@@ -51,6 +51,7 @@ void shutdown_viewer(ViewerContext& ctx) {
   ctx.control.udpControl.Close(remote60::native_poc::ControlCloseReason::Shutdown);
   // Clipboard image v1: its pacer and serving thread send on the media socket.
   ctx.control.clipImage.Stop();
+  ctx.control.fileCopy.Stop();
   ctx.input.macro.StopPlayback();
   ctx.input.macro.StopRecording();
   remote60::native_poc::macro_window_destroy();

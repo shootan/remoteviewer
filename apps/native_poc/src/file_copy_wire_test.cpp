@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "bulk_arbiter.hpp"
+#include "clip_image_core.hpp"
 #include "file_copy_net_rules.hpp"
 #include "file_copy_wire.hpp"
 
@@ -259,6 +261,41 @@ int main() {
     check("coverage: not to the end -> not whole", !part.whole_file_verified() && part.sequential());
     CoverageTracker empty(0);
     check("coverage: an empty file is whole once its size 0 is confirmed", empty.whole_file_verified());
+  }
+
+  // ------------------------------------------------------------------ one bulk per session
+  {
+    BulkArbiter a;
+    check("arbiter: idle at first", a.use() == BulkUse::Idle);
+    check("arbiter: an image takes it", a.TryAcquire(BulkUse::Image, 11) && a.use() == BulkUse::Image && a.owner() == 11);
+    check("arbiter: a file paste meanwhile is Busy (never swapped in)", !a.TryAcquire(BulkUse::File, 22) && a.owner() == 11);
+    check("arbiter: another image meanwhile is Busy", !a.TryAcquire(BulkUse::Image, 12));
+    check("arbiter: the same holder again is fine", a.TryAcquire(BulkUse::Image, 11));
+    check("arbiter: only the holder releases", !a.Release(22) && a.use() == BulkUse::Image);
+    check("arbiter: the holder is stopped for someone else", a.BeginStop(11) && a.use() == BulkUse::Stopping &&
+                                                                 a.stopped_from() == BulkUse::Image);
+    check("arbiter: while stopping nobody takes it -- not even the file that asked", !a.TryAcquire(BulkUse::File, 22) &&
+                                                                                         !a.TryAcquire(BulkUse::Image, 11));
+    check("arbiter: the stopped holder confirms and releases", a.Release(11) && a.use() == BulkUse::Idle);
+    check("arbiter: then the file takes it", a.TryAcquire(BulkUse::File, 22) && a.use() == BulkUse::File);
+    check("arbiter: owner 0 and Idle / Stopping are not uses", !BulkArbiter().TryAcquire(BulkUse::File, 0) &&
+                                                                  !BulkArbiter().TryAcquire(BulkUse::Stopping, 5) &&
+                                                                  !BulkArbiter().TryAcquire(BulkUse::Idle, 5));
+    a.Reset();
+    check("arbiter: a session end frees it", a.use() == BulkUse::Idle && a.owner() == 0);
+  }
+  {
+    bool apart = true;
+    for (uint32_t gen = 0; gen < 64; ++gen) {
+      const uint32_t img[] = {bulk_stream_id(gen, kBulkStreamClientToHost), bulk_stream_id(gen, kBulkStreamHostToClient)};
+      const uint32_t fil[] = {bulk_stream_id(gen, kFileBulkStreamClientToHost), bulk_stream_id(gen, kFileBulkStreamHostToClient)};
+      for (uint32_t i : img) apart = apart && !bulk_stream_is_file(i) && bulk_stream_id_is_bulk(i);
+      for (uint32_t f : fil) apart = apart && bulk_stream_is_file(f) && bulk_stream_id_is_bulk(f);
+      for (uint32_t i : img)
+        for (uint32_t f : fil) apart = apart && i != f;
+    }
+    check("streams: image and file ids never meet, whatever the generation", apart);
+    check("streams: a control id (no bit30) is neither", !bulk_stream_is_file(3u) && !bulk_stream_is_file(0u));
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);

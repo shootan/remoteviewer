@@ -148,7 +148,7 @@ void ClipImageClient::Start(SendFn send, PingRttFn pingRtt, YieldFn yield, uint3
   log_ = std::move(log);
   mtu_ = mtuBytes;
   rateConfig_ = rate;
-  bulk_.SetTimings(clip_bulk_timings());
+  uplink_.Configure(send_, pingRtt_, yield_, mtuBytes, rate, kClipImageChunkBytes);
   running_.store(true);
   packageWorker_ = std::thread([this] { PackageWorker(); });
 }
@@ -231,6 +231,7 @@ void ClipImageClient::FlushDeferredNotSent() {
 
 void ClipImageClient::SettleAwaiting(ClipOutcome o, uint8_t detail) {
   awaiting_.on = false;
+  if (arbiter_) arbiter_->Release(awaiting_.transferId);  // terminal on both ends: the bulk is free
   RecordOutcome(o, detail);
   FlushDeferredNotSent();  // the newest copy's line comes last
 }
@@ -306,7 +307,8 @@ ClipImageClient::Progress ClipImageClient::GetProgress() const {
   p.detail = lastDetail_;
   if (p.active) {
     p.bytesTotal = sender_.offer().packageBytes();
-    p.bytesConfirmed = (std::min<uint64_t>)(confirmedBytes_.load(std::memory_order_relaxed), p.bytesTotal);
+    const uint64_t confirmed = sender_.phase() == ClipImageSender::Phase::Serving ? uplink_.confirmed_bytes() : 0;
+    p.bytesConfirmed = (std::min<uint64_t>)(confirmed, p.bytesTotal);
     p.elapsedMs = (BulkPacer::NowUs() - sender_.startedUs()) / 1000;
   } else {
     p.bytesTotal = lastBytesTotal_;
@@ -382,6 +384,7 @@ bool ClipImageClient::TakeFallbackText(std::u16string* out) {
 void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) {
   if (!sender_.Active()) return;
   ClearCancelFor(sender_.transferId());  // a cancel asked for this transfer ends with it
+  if (arbiter_) arbiter_->Release(sender_.transferId());  // over, and its channel closes after this
   const uint64_t ms = (BulkPacer::NowUs() - sender_.startedUs()) / 1000;
   counters_.lastTransferMs = ms;
   lastBytesTotal_ = sender_.offer().packageBytes();
@@ -408,7 +411,7 @@ void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) 
   std::ostringstream os;
   os << "end state=" << static_cast<int>(finalState) << " reason=" << static_cast<int>(why)
      << " bytes=" << sender_.offer().packageBytes() << " served=" << sender_.served() << " ms=" << ms
-     << " sha=" << hex8(sender_.offer().sha256) << " rateBps=" << rateNow_.load();
+     << " sha=" << hex8(sender_.offer().sha256) << " rateBps=" << uplink_.rate_now();
   Log(os.str());
   sender_.End();
   bulkClosePending_ = true;
@@ -496,7 +499,8 @@ int ClipImageClient::Pump(ControlLink& link) {
       return 1;
     }
     // 2. Offer the newest package -- only once the host has settled the previous one.
-    if (!sender_.Active() && !awaiting_.on && havePending_ && Usable()) {
+    if (!sender_.Active() && !awaiting_.on && havePending_ && Usable() &&
+        (!arbiter_ || arbiter_->TryAcquire(BulkUse::Image, pending_.offer.transferId))) {
       ClipPackage pkg = std::move(pending_);
       pending_ = ClipPackage{};
       havePending_ = false;
@@ -515,7 +519,6 @@ int ClipImageClient::Pump(ControlLink& link) {
       std::memcpy(m.sha256, pkg.offer.sha256, 32);
       m.clientSendQpcUs = now;
       sender_.Begin(pkg.bytes, pkg.offer, now);
-      confirmedBytes_.store(0, std::memory_order_relaxed);
       ++counters_.offered;
       lock.unlock();
       if (!link.Write(&m, sizeof(m)) || !link.EndMessage()) return -1;
@@ -532,6 +535,7 @@ int ClipImageClient::Pump(ControlLink& link) {
       } else {
         ++counters_.refused;
         ClearCancelFor(m.transferId);  // the refused offer's cancel ends with it (P1)
+        if (arbiter_) arbiter_->Release(m.transferId);
         std::ostringstream os;
         os << "refused verdict=" << static_cast<int>(r.verdict) << " (text, if any, goes by text sync)";
         Log(os.str());
@@ -598,272 +602,47 @@ void ClipImageClient::EndSession() {
 
 bool ClipImageClient::OnDatagram(const void* data, size_t len) {
   if (!bulk_stream_claims(data, len)) return false;
-  (void)bulk_.OnPacket(data, len);  // dropped by the channel unless it is the open stream
+  (void)uplink_.OnDatagram(data, len);  // dropped by the channel unless it is the open stream
   return true;
 }
 
 void ClipImageClient::OpenBulk() {
   bulkClosePending_ = false;
-  counters_.raises = counters_.lowers = counters_.pauses = counters_.recoveryHolds = counters_.evaluations = 0;
-  counters_.lossEvents = counters_.channelFragmentRetransmits = counters_.rtoEvents = 0;  // this transfer's channel: nothing queued for closing applies to it
+  uplink_.ResetRateCounters();  // this transfer's channel: nothing queued for closing applies to it
   const uint32_t gen = sender_.bulkGen();
-  txStreamId_ = bulk_stream_id(gen, kBulkStreamClientToHost);
-  {
-    std::lock_guard<std::mutex> ev(evMu_);
-    seqToOffset_.clear();
-    lastTxUs_.clear();
-    tainted_.clear();
-    resentSeqsInWindow_.clear();
-    confirmedOffsets_.clear();
-    loss_.Reset();
-  }
-  bulk_.Reset();
-  {
-    UdpControlChannel::Timings t = clip_bulk_timings();
-    t.retransmitIntervalUs = clip_bulk_retransmit_us((std::min)(rateConfig_.startBps, rateConfig_.capBps));
-    bulk_.SetTimings(t);
-  }
-  bulk_.Configure([this](const void* d, size_t n) { return pacer_.Enqueue(d, n); }, txStreamId_,
-                  bulk_stream_id(gen, kBulkStreamHostToClient), mtu_);
-  rateNow_.store((std::min)(rateConfig_.startBps, rateConfig_.capBps));
-  pacer_.Start(send_, [this](uint64_t) { return rateNow_.load(std::memory_order_relaxed); }, yield_,
-               [this](const uint8_t* d, size_t n, uint64_t t, bool resend) { OnTransmitted(d, n, t, resend); });
-  serving_.store(true);
-  serveThread_ = std::thread([this] { ServeLoop(); });
+  uplink_.Open(bulk_stream_id(gen, kBulkStreamClientToHost), bulk_stream_id(gen, kBulkStreamHostToClient), this);
 }
 
-void ClipImageClient::CloseBulk() {
-  serving_.store(false);
-  bulk_.Close(ControlCloseReason::SessionRollover);
-  if (serveThread_.joinable()) serveThread_.join();
-  pacer_.Stop();
+void ClipImageClient::CloseBulk() { uplink_.Close(); }
+
+bool ClipImageClient::OnPull(const std::vector<uint8_t>& msg, uint64_t nowUs, std::vector<uint8_t>* out,
+                             BulkServed* served) {
+  if (msg.size() != sizeof(ClipBulkPullMessage)) return false;
+  ClipBulkPullMessage p{};
+  std::memcpy(&p, msg.data(), sizeof(p));
+  if (p.header.magic != kMagic || p.header.type != static_cast<uint16_t>(MessageType::ClipBulkPull) ||
+      p.header.size != sizeof(p)) {
+    return false;
+  }
+  ClipImageSender::Served s;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!sender_.OnPull(p, nowUs, &s)) return false;
+  out->resize(sizeof(ClipBulkChunkHeader) + s.header.len);
+  std::memcpy(out->data(), &s.header, sizeof(s.header));
+  std::memcpy(out->data() + sizeof(s.header), s.data, s.header.len);  // the package outlives this lock
+  served->completedChunk = s.completedChunk;
+  served->completedBytes = s.completedBytes;
+  served->triggerKey = p.triggerOffset == 0xFFFFFFFFu ? kBulkNoKey : p.triggerOffset;
+  served->chunkKey = p.offset;
+  return true;
 }
 
-void ClipImageClient::OnTransmitted(const uint8_t* data, size_t len, uint64_t nowUs, bool resend) {
-  if (len < sizeof(UdpControlChunkHeader)) return;
-  UdpControlChunkHeader h{};
-  std::memcpy(&h, data, sizeof(h));
-  if (h.magic != kMagic || h.kind != static_cast<uint16_t>(UdpPacketKind::ControlData) || h.streamId != txStreamId_) {
-    return;
-  }
-  std::lock_guard<std::mutex> ev(evMu_);
-  if (!resend) {
-    loss_.OnOriginal();  // an original fragment's first transmission: the loss ratio's denominator
-  } else {
-    // Each original fragment counts as lost once, however often it is resent; a resend of a chunk
-    // the host already confirmed is a lost ACK, counted apart (BulkLossCounter).
-    const auto so = seqToOffset_.find(h.messageSeq);
-    const bool confirmed = so != seqToOffset_.end() && confirmedOffsets_.count(so->second) != 0;
-    if (loss_.OnResend(h.messageSeq, h.fragIndex, h.fragCount, confirmed) == BulkLossCounter::Resend::AckLost) return;
-  }
-  if (h.fragIndex == 0 && len >= sizeof(UdpControlChunkHeader) + sizeof(ClipBulkChunkHeader)) {
-    ClipBulkChunkHeader c{};
-    std::memcpy(&c, data + sizeof(UdpControlChunkHeader), sizeof(c));
-    seqToOffset_[h.messageSeq] = c.offset;
-    while (seqToOffset_.size() > 64) seqToOffset_.erase(seqToOffset_.begin());
-  }
-  auto it = seqToOffset_.find(h.messageSeq);
-  if (it == seqToOffset_.end()) return;
-  const uint32_t offset = it->second;
-  {
-    auto ct = chunkTimes_.find(offset);
-    if (ct != chunkTimes_.end()) {
-      if (!ct->second.firstTx) ct->second.firstTx = nowUs;
-      ct->second.lastAnyTx = nowUs;
-      if (resend) ct->second.resent = true;
-      else if (h.fragIndex + 1 == h.fragCount) ct->second.lastTx = nowUs;
-    }
-  }
-  if (resend) {
-    tainted_.insert(offset);
-    lastTxUs_.erase(offset);
-    resentSeqsInWindow_.insert(h.messageSeq);
-    return;
-  }
-  if (h.fragIndex + 1 == h.fragCount && !tainted_.count(offset)) lastTxUs_[offset] = nowUs;
-}
-
-void ClipImageClient::ServeLoop() {
-  BulkRateController rc(rateConfig_);
-  BulkRttEstimator rtt;
-  std::vector<uint8_t> msg;
-  std::vector<uint8_t> out;
-  std::vector<uint64_t> rtts;  // this evaluation's valid samples
-  uint64_t rounds = 0;
-  uint64_t windowStartUs = BulkPacer::NowUs();
-  uint64_t sentBytesBase = 0, yieldBase = 0;
-  uint64_t completedBytes = 0;  // goodput evidence: chunks the host confirmed in this window
-  uint32_t pullsInWindow = 0;   // pending work: the host asked for more in this window
-  uint64_t lastTimingRttUs = 0;
-  uint64_t lastPullUs = 0;
-  uint32_t capInForce = rateConfig_.capBps;
-  const char* traceEnv = std::getenv("REMOTE60_CLIP_BULK_TRACE");
-  const bool traceRate = traceEnv && (traceEnv[0] == '1' || traceEnv[0] == '2');
-  const bool traceChunks = traceEnv && traceEnv[0] == '2';
-  const uint64_t traceT0 = windowStartUs;
-  rc.MarkEvaluated(windowStartUs, 0);
-  while (serving_.load()) {
-    const bool got = bulk_.Receive(&msg, 10);
-    bulk_.Tick();
-    const uint64_t now = BulkPacer::NowUs();
-    // The cap is the budget: the configured ceiling and, when one is known, the same-direction
-    // budget -- applied at once, 0 included (④). Unknown budget: the ceiling alone.
-    const uint32_t budget = budgetBps_.load(std::memory_order_relaxed);
-    const uint32_t cap = budget != kBudgetUnknown ? (std::min)(rateConfig_.capBps, budget) : rateConfig_.capBps;
-    if (cap != capInForce) {
-      rc.SetCapBps(cap);
-      capInForce = cap;
-    }
-    if (got && msg.size() == sizeof(ClipBulkPullMessage)) {
-      ClipBulkPullMessage p{};
-      std::memcpy(&p, msg.data(), sizeof(p));
-      ClipImageSender::Served s;
-      bool ok = false;
-      if (p.header.magic == kMagic && p.header.type == static_cast<uint16_t>(MessageType::ClipBulkPull) &&
-          p.header.size == sizeof(p)) {
-        std::lock_guard<std::mutex> lock(mu_);
-        ok = sender_.OnPull(p, now, &s);
-        if (ok) {
-          ++counters_.pullsServed;
-          out.resize(sizeof(ClipBulkChunkHeader) + s.header.len);
-          std::memcpy(out.data(), &s.header, sizeof(s.header));
-          std::memcpy(out.data() + sizeof(s.header), s.data, s.header.len);  // the package outlives this lock
-        } else {
-          ++counters_.pullsDropped;
-        }
-      }
-      if (ok) {
-        ++pullsInWindow;
-        if (s.completedChunk) {  // a pull naming a chunk counted before is not completedChunk (duplicate)
-          ++rounds;
-          completedBytes += s.completedBytes;
-          confirmedBytes_.fetch_add(s.completedBytes, std::memory_order_relaxed);
-          const uint32_t r = rateNow_.load(std::memory_order_relaxed);
-          const uint64_t chunkSendUs = r ? static_cast<uint64_t>(s.completedBytes) * 8ull * 1000000ull / r : 0;
-          uint64_t sample = 0;
-          bool resent = false;
-          {
-            std::lock_guard<std::mutex> ev(evMu_);
-            if (traceChunks) {
-              auto ct = chunkTimes_.find(p.triggerOffset);
-              if (ct != chunkTimes_.end()) {
-                const ChunkTimes& c = ct->second;
-                std::printf("CHUNKTRACE off=%u pullAt=%llu enqAt=%llu firstTx=%llu lastTx=%llu lastAnyTx=%llu confirmAt=%llu "
-                            "resent=%d rate=%u\n",
-                            p.triggerOffset, static_cast<unsigned long long>(c.pullAt),
-                            static_cast<unsigned long long>(c.enqAt), static_cast<unsigned long long>(c.firstTx),
-                            static_cast<unsigned long long>(c.lastTx), static_cast<unsigned long long>(c.lastAnyTx),
-                            static_cast<unsigned long long>(now), c.resent ? 1 : 0, rateNow_.load());
-                chunkTimes_.erase(ct);
-              }
-            }
-            confirmedOffsets_.insert(p.triggerOffset);
-            while (confirmedOffsets_.size() > 256) confirmedOffsets_.erase(confirmedOffsets_.begin());
-            auto t = lastTxUs_.find(p.triggerOffset);
-            if (t != lastTxUs_.end() && now > t->second) sample = now - t->second;
-            resent = tainted_.count(p.triggerOffset) != 0 || t == lastTxUs_.end();
-            lastTxUs_.erase(p.triggerOffset);
-            tainted_.erase(p.triggerOffset);
-          }
-          if (rtt.OnSample(sample, lastPullUs ? now - lastPullUs : 0, chunkSendUs, resent, false)) {
-            rtts.push_back(sample);
-          }
-        }
-        lastPullUs = now;
-        if (traceChunks) {
-          std::lock_guard<std::mutex> ev(evMu_);
-          ChunkTimes& c = chunkTimes_[p.offset];
-          c.pullAt = now;
-          while (chunkTimes_.size() > 64) chunkTimes_.erase(chunkTimes_.begin());
-        }
-        (void)bulk_.Send(out.data(), out.size());
-        if (traceChunks) {
-          std::lock_guard<std::mutex> ev(evMu_);
-          auto ct = chunkTimes_.find(p.offset);
-          if (ct != chunkTimes_.end()) ct->second.enqAt = BulkPacer::NowUs();
-        }
-      }
-    }
-    if (rc.Due(now, rounds, rtt.srttUs())) {
-      const BulkPacer::Stats ps = pacer_.GetStats();
-      BulkRateWindow w;
-      uint64_t ackLostTotal = 0, repeatTotal = 0;  // kept apart from the loss ratio (diagnostics)
-      {
-        std::lock_guard<std::mutex> ev(evMu_);
-        w.lossEvents = static_cast<uint32_t>(resentSeqsInWindow_.size());
-        resentSeqsInWindow_.clear();
-        const BulkLossCounter::Window lw = loss_.Take();
-        w.uniqueFragmentsSent = lw.sent;
-        w.uniqueFragmentsLost = lw.lost;
-        w.rtoEvents = lw.rto;
-        ackLostTotal = loss_.ackLostResends();
-        repeatTotal = loss_.repeatResends();
-      }
-      const uint64_t leftBytes = ps.bytesSent - sentBytesBase;
-      sentBytesBase = ps.bytesSent;
-      if (!rtts.empty()) {
-        std::nth_element(rtts.begin(), rtts.begin() + rtts.size() / 2, rtts.end());
-        w.pullRttP50Us = rtts[rtts.size() / 2];
-      }
-      w.rttSamples = static_cast<uint32_t>(rtts.size());
-      w.pullSrttUs = rtt.srttUs();
-      w.pullCurrentUs = rtt.currentUs();
-      // A NACK within about a round trip of the fragment's departure crossed it in flight.
-      pacer_.SetResendGuardUs(rtt.srttUs() ? rtt.srttUs() + rtt.srttUs() / 4 + 5000 : 0);
-      w.pingRttUs = pingRtt_ ? pingRtt_() : 0;
-      const uint64_t span = now > windowStartUs ? now - windowStartUs : 1;
-      w.deliveredBps = leftBytes * 8ull * 1000000ull / span;
-      w.goodputBps = completedBytes * 8ull * 1000000ull / span;
-      w.workPending = pullsInWindow > 0;
-      w.yielded = ps.yields != yieldBase;
-      yieldBase = ps.yields;
-      // A window in which nothing left and nothing was lost says nothing about the path.
-      if (leftBytes > 0 || w.lossEvents > 0) {
-        const uint32_t lossNow = w.lossEvents;
-        const uint32_t rateBefore = rc.rate();
-        const BulkRateAction a = rc.Evaluate(w, now, rounds);
-        if (traceRate) {  // REMOTE60_CLIP_BULK_TRACE=1: one line per evaluation (diagnostics)
-          std::printf("RATETRACE t=%.3f rate=%u->%u act=%d lossEv=%u uLost=%u uSent=%u rto=%u pull=%llu n=%u ping=%llu "
-                      "good=%llu work=%d yield=%d lossState=%d plateau=%d cause=%u srtt=%llu cur=%llu ackLost=%llu repeat=%llu\n",
-                      (now - traceT0) / 1e6, rateBefore, rc.rate(), static_cast<int>(a), w.lossEvents, w.uniqueFragmentsLost,
-                      w.uniqueFragmentsSent, w.rtoEvents, static_cast<unsigned long long>(w.pullRttP50Us), w.rttSamples,
-                      static_cast<unsigned long long>(w.pingRttUs), static_cast<unsigned long long>(w.goodputBps),
-                      w.workPending ? 1 : 0, w.yielded ? 1 : 0, static_cast<int>(rc.LossState()), rc.onPlateau() ? 1 : 0,
-                      rc.lastCause(), static_cast<unsigned long long>(w.pullSrttUs),
-                      static_cast<unsigned long long>(w.pullCurrentUs), static_cast<unsigned long long>(ackLostTotal),
-                      static_cast<unsigned long long>(repeatTotal));
-        }
-        std::lock_guard<std::mutex> lock(mu_);
-        ++counters_.evaluations;
-        counters_.lossEvents += lossNow ? 1 : 0;
-        if (a == BulkRateAction::Raise) ++counters_.raises;
-        if (a == BulkRateAction::Lower) ++counters_.lowers;
-        if (a == BulkRateAction::Pause) ++counters_.pauses;
-        if (a == BulkRateAction::Hold && lossNow) ++counters_.recoveryHolds;
-        counters_.rtoEvents += w.rtoEvents;
-      }
-      rc.MarkEvaluated(now, rounds);
-      rtts.clear();
-      completedBytes = 0;
-      pullsInWindow = 0;
-      windowStartUs = now;
-    }
-    const uint32_t rate = rc.RateBps(now);
-    const uint64_t ping = pingRtt_ ? pingRtt_() : 0;
-    if (rate != rateNow_.load(std::memory_order_relaxed) || (ping && (ping > lastTimingRttUs * 2 || ping * 2 < lastTimingRttUs))) {
-      UdpControlChannel::Timings t = clip_bulk_timings();
-      t.retransmitIntervalUs = clip_bulk_retransmit_us(rate, ping);
-      bulk_.SetTimings(t);
-      lastTimingRttUs = ping;
-    }
-    rateNow_.store(rate, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      counters_.lastRateBps = rc.rate();
-      counters_.srttUs = rtt.srttUs();
-      counters_.channelFragmentRetransmits = bulk_.GetStats().fragmentRetransmits;
-    }
-  }
+bool ClipImageClient::ChunkKeyOf(const uint8_t* message, size_t len, uint64_t* key) {
+  if (len < sizeof(ClipBulkChunkHeader)) return false;
+  ClipBulkChunkHeader c{};
+  std::memcpy(&c, message, sizeof(c));
+  *key = c.offset;
+  return true;
 }
 
 }  // namespace remote60::native_poc

@@ -41,6 +41,8 @@
 #include "host_string_util.hpp"
 #include "utf8_bounded.hpp"
 #include "host_window_list_wire.hpp"
+#include "host_file_copy.hpp"
+#include "file_copy_wire.hpp"
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
@@ -410,6 +412,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // its HelloAck before it offers anything.
       if (clientSession.clipImage && clientSession.clipImage->Enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardImageV1;
+      // File copy (t-zdmsd4gb): switched on and the helper may run as the interactive user. Each
+      // handler asks the same question again (file_copy_allowed): the bit is not the only gate.
+      if (clientSession.fileCopy && clientSession.fileCopy->Advertised())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFileCopyV1;
       // Mouse X buttons (back / forward): a viewer sends VK_XBUTTON1/2 edges and X bits in its
       // held mask only to a host that says so -- an older host made an unknown key a LEFT click.
       if (mouse_xbuttons_enabled())
@@ -1266,6 +1272,28 @@ void ControlSessionServer::Serve(ControlLink& link) {
       rsp.transferId = req.transferId;
       if (clientSession.clipImage) rsp = clientSession.clipImage->HandleStatus(req);
       if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    // File copy (t-zdmsd4gb, file_copy_wire.hpp): a fixed header, then a body of at most
+    // kMaxControlPayload -- bounded before anything is allocated. One answer each.
+    if (remote60::native_poc::file_copy::net::is_file_control(header.type) &&
+        header.size == sizeof(remote60::native_poc::file_copy::net::FileControlHeader)) {
+      remote60::native_poc::file_copy::net::FileControlHeader fh{};
+      fh.header = header;
+      if (!link.Read(&fh.seq, sizeof(fh) - sizeof(MessageHeader))) break;
+      if (fh.payloadBytes > remote60::native_poc::file_copy::net::kMaxControlPayload) break;
+      std::vector<uint8_t> body(fh.payloadBytes);
+      if (fh.payloadBytes > 0 && !link.Read(body.data(), body.size())) break;
+      uint16_t replyType = 0;
+      std::vector<uint8_t> replyBody, out;
+      if (!clientSession.fileCopy ||
+          !clientSession.fileCopy->HandleControl(header.type, body, servedEpoch, &replyType, &replyBody) ||
+          !remote60::native_poc::file_copy::net::frame_control(
+              static_cast<remote60::native_poc::file_copy::net::FileMsg>(replyType), fh.seq, replyBody, &out)) {
+        break;  // a malformed request: the link is out of step, as for any other
+      }
+      if (!link.Write(out.data(), out.size())) break;
       continue;
     }
 

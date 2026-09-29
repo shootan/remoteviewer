@@ -89,6 +89,9 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
   {
     const int r = ctx.control.clipImage.Pump(link);
     if (r != 0) return r;
+    // File copy (t-zdmsd4gb): offer / 700 ms paste query / prepare, one per idle turn.
+    const int f = ctx.control.fileCopy.Pump(link);
+    if (f != 0) return f;
     // The host refused an image copy (too large, busy, ...): its text still travels, by text sync.
     std::u16string fallback;
     if (ctx.control.clipImage.TakeFallbackText(&fallback) && !fallback.empty()) {
@@ -212,6 +215,10 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.control.clipImage.SetHostSupports(
         clipboardHost && ctx.session.bulkChannelNegotiated &&
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardImageV1) != 0);
+    // File copy: the same conditions and its own bit (0x800).
+    ctx.control.fileCopy.SetHostSupports(
+        clipboardHost && ctx.session.bulkChannelNegotiated &&
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileCopyV1) != 0);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;

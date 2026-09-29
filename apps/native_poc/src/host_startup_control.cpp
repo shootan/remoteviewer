@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "host_clip_image.hpp"
+#include "host_file_copy.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -256,6 +257,27 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           },
           args.udpMtu);
     }
+    // File copy: the same socket towards the same peer.
+    if (clientSession.fileCopy) {
+      clientSession.fileCopy->StartTransport(
+          [&](const void* data, size_t len) -> bool {
+            const uint32_t ip = sender.udpPeerIpNet.load(std::memory_order_acquire);
+            const uint16_t port = sender.udpPeerPortNet.load(std::memory_order_acquire);
+            if (ip == 0 || port == 0) return false;
+            sockaddr_in to{};
+            to.sin_family = AF_INET;
+            to.sin_addr.s_addr = ip;
+            to.sin_port = port;
+            const int sent = sendto(clientSession.clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
+                                    reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+            if (sent > 0) {
+              sender.txControlBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+              sender.txControlDatagrams.fetch_add(1, std::memory_order_relaxed);
+            }
+            return sent > 0;
+          },
+          args.udpMtu);
+    }
 
     clientSession.udpReaderThread = std::thread([&]() {
       // Control resume bookkeeping (item 8, C3). Reader-thread locals on purpose: this thread
@@ -369,7 +391,8 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             // Clipboard image v1: acknowledged only while the image service runs, so a viewer never
             // sends bulk datagrams to a host whose control channel would swallow them.
             if ((hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
-                clientSession.clipImage && clientSession.clipImage->Available())
+                ((clientSession.clipImage && clientSession.clipImage->Available()) ||
+                 (clientSession.fileCopy && clientSession.fileCopy->Advertised())))
               ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
             // Whether THIS client asked is stored further down, once its Hello has been accepted.
             // Stored here it let a Hello that is then refused (a bad capability, or an
@@ -757,6 +780,13 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // Clipboard image v1: the bulk stream (stream id bit30) goes to its own channel, BEFORE the
         // control channel -- which claims every ControlData/Ack/Nack datagram whatever its stream
         // id and would drop these. Only from the current peer.
+        // File copy's bulk streams (bases 0 / 3) first; they are never the image's.
+        if (clientSession.fileCopy &&
+            sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
+            sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port &&
+            clientSession.fileCopy->OnDatagram(rx, len)) {
+          continue;
+        }
         if (clientSession.clipImage &&
             sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
             sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port &&

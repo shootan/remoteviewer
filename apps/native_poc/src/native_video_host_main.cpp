@@ -81,6 +81,7 @@
 #include "host_capture_session.hpp"
 #include "clipboard_monitor.hpp"
 #include "host_clip_image.hpp"
+#include "host_file_copy.hpp"
 #if defined(REMOTE60_CLIP_IMAGE_TEST_SINK)
 #include "host_clip_image_test_sink.hpp"
 #endif
@@ -233,9 +234,36 @@ int main(int argc, char** argv) {
   }
 #endif
   remote60::native_poc::HostClipImageService clipImageService(clipImagePublisherInUse);
+  // One bulk per session: the image service and file copy take it in turn (bulk_arbiter.hpp).
+  remote60::native_poc::BulkArbiter hostBulkArbiter;
+  clipImageService.SetBulkArbiter(&hostBulkArbiter);
   if (clipImagePublisherInUse) {
     clientSession.clipImage = &clipImageService;
     clientSession.onClipImageSessionEnd = [&clipImageService](uint64_t epoch) { clipImageService.OnSessionEnd(epoch); };
+  }
+  // File copy (t-zdmsd4gb). Rides the clipboard sync switch like images; REMOTE60_CLIPBOARD_FILES=0
+  // turns files alone off. The helper is started as the interactive user (the linked token) on the
+  // first offer -- no High / SYSTEM fallback; if that is impossible every offer is refused.
+  const bool clipboardFilesEnabled = clipboardSyncEnabled && []() {
+    const std::string v = remote60::native_poc::env_string_or_empty("REMOTE60_CLIPBOARD_FILES");
+    return !(v == "0" || v == "false" || v == "off");
+  }();
+  remote60::native_poc::HostFileCopyService fileCopyService;
+  if (clipboardFilesEnabled) {
+    remote60::native_poc::HostFileCopyService::Config fcfg;
+    fcfg.enabled = true;
+    const std::wstring helperExe = [] {
+      wchar_t path[MAX_PATH] = L"";
+      GetModuleFileNameW(nullptr, path, MAX_PATH);
+      std::wstring s = path;
+      return s.substr(0, s.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
+    }();
+    fcfg.launcher = [helperExe](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
+      return remote60::native_poc::file_copy::launch_file_copy_helper(helperExe, link, why);
+    };
+    fileCopyService.Configure(fcfg, &hostBulkArbiter);
+    clientSession.fileCopy = &fileCopyService;
+    clientSession.onFileCopySessionEnd = [&fileCopyService](uint64_t epoch) { fileCopyService.OnSessionEnd(epoch); };
   }
   ControlSessionServer controlServer(args, stop, clientSession, capture, clientMetrics, encoder,
                                      inputRouter, backend, windowSelectionTxn, mailbox,

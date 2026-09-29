@@ -25,6 +25,7 @@
 namespace remote60::native_poc {
 
 class HostClipImageService;
+class HostFileCopyService;
 
 // main() returns from many places; a destructor is the only way to close these on every path.
 struct SocketCloser {
@@ -118,6 +119,9 @@ struct SessionState {
   // routes bulk-stream datagrams to it ahead of the control channel; the control session answers
   // its Offer / Cancel / Status; a new epoch ends whatever transfer was running.
   HostClipImageService* clipImage = nullptr;
+  // File copy (t-zdmsd4gb). Owned by main(), null when switched off. The reader routes the file bulk
+  // streams to it ahead of the image service; the control session answers 65~76.
+  HostFileCopyService* fileCopy = nullptr;
   // Whether the dispatcher is inside Serve() right now. A resume is honoured only when it is
   // not: resetting a stream that is working is the one thing this must never do, and it is also
   // what stops a stray packet from being able to disturb a healthy session.
@@ -152,8 +156,10 @@ struct SessionState {
   // Set by main() next to clipImage (a callback, so nothing that includes this header has to link
   // the image service).
   std::function<void(uint64_t)> onClipImageSessionEnd;
+  std::function<void(uint64_t)> onFileCopySessionEnd;  // likewise for file copy
   void EndClipImageTransfer(uint64_t newEpoch) {
     if (onClipImageSessionEnd) onClipImageSessionEnd(newEpoch);
+    if (onFileCopySessionEnd) onFileCopySessionEnd(newEpoch);
   }
   // Block until the control channel has served that epoch (or the host stops).
   void AwaitControlReady(uint64_t epoch) {

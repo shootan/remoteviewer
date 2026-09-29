@@ -108,6 +108,7 @@ void HostClipImageService::CloseBulk() {
 
 void HostClipImageService::LogEnd(const char* where) {
   const ClipImageState s = receiver_.state();
+  if (arbiter_) arbiter_->Release(receiver_.offer().transferId);  // terminal: the bulk is free
   if (s == ClipImageState::Published) ++counters_.published;
   else if (s == ClipImageState::Superseded) ++counters_.superseded;
   else if (s == ClipImageState::Cancelled) ++counters_.cancelled;
@@ -141,8 +142,16 @@ ControlClipImageOfferReplyMessage HostClipImageService::HandleOffer(const Contro
   const bool enabled = Enabled() && bulkNegotiated_.load(std::memory_order_acquire);
   // Read now: publishing later is allowed only if the host clipboard has not moved since (r2 8-4).
   const uint64_t seqNow = publisher_ ? publisher_->Sequence() : 0;
+  // One bulk per session: a file paste holding it makes this image Busy (never swapped in).
+  if (enabled && arbiter_ && !arbiter_->TryAcquire(BulkUse::Image, m.transferId)) {
+    r.verdict = static_cast<uint8_t>(ClipImageVerdict::Busy);
+    std::cout << "[native-video-host][clip-image] offer id=" << (m.transferId & 0xFFFF) << " verdict=busy (bulk is "
+              << bulk_use_name(arbiter_->use()) << ")\n";
+    return r;
+  }
   const auto res = receiver_.OnOffer(offer, sessionEpoch, enabled, seqNow, steady_us());
   r.verdict = static_cast<uint8_t>(res.verdict);
+  if (res.verdict != ClipImageVerdict::Accept && arbiter_) arbiter_->Release(m.transferId);
   std::cout << "[native-video-host][clip-image] offer id=" << (m.transferId & 0xFFFF) << " "
             << m.width << "x" << m.height << " png=" << m.pngBytes << " textUtf16=" << m.textUtf16
             << " sha=" << hex8(m.sha256) << " verdict=" << static_cast<int>(res.verdict) << "\n";

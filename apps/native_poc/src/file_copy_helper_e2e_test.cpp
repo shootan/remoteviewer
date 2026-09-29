@@ -360,6 +360,10 @@ int run_consumer(int argc, wchar_t** argv) {
   result("drop hr=0x%08lx effect=0x%lx seconds=%.3f", static_cast<unsigned long>(hr), effect, dropSec);
   // The copy continues on the shell's thread after Drop returns (async). Wait until the bytes
   // are on disk and stable, or the budget is out.
+  // The copy engine sizes a file before it fills it, so "enough bytes on disk" alone is not "done":
+  // an async data object also has to have seen its EndOperation.
+  IDataObjectAsyncCapability* dropAsync = nullptr;
+  (void)dobj->QueryInterface(IID_PPV_ARGS(&dropAsync));
   const DWORD until = GetTickCount() + waitSec * 1000;
   uint64_t last = 0;
   int stable = 0;
@@ -367,7 +371,9 @@ int run_consumer(int argc, wchar_t** argv) {
     pump_for(250);
     int files = 0;
     const uint64_t now = dir_bytes(dest, &files);
-    if (now == last && now >= expectBytes && expectBytes > 0) {
+    BOOL inOp = FALSE;
+    if (dropAsync && FAILED(dropAsync->InOperation(&inOp))) inOp = FALSE;
+    if (now == last && now >= expectBytes && expectBytes > 0 && !inOp) {
       if (++stable >= 6) break;  // 1.5 s unchanged with everything there
     } else {
       stable = 0;
@@ -376,6 +382,7 @@ int run_consumer(int argc, wchar_t** argv) {
   }
   pump_for(500);
   report_dest(dest);
+  if (dropAsync) dropAsync->Release();
   dt->Release();
   parent->Release();
   CoTaskMemFree(pidl);

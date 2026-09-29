@@ -30,6 +30,7 @@
 #include <mutex>
 #include <thread>
 
+#include "bulk_arbiter.hpp"
 #include "clip_image_clipboard.hpp"
 #include "clip_image_transfer.hpp"
 #include "poc_protocol.hpp"
@@ -78,6 +79,8 @@ class HostClipImageService {
 
   /** Starts the worker. `send` puts one datagram on the media socket towards the current peer. */
   bool Start(SendFn send, uint32_t mtuBytes);
+  /** The session's one-bulk rule, shared with file copy (bulk_arbiter.hpp). Null = none. */
+  void SetBulkArbiter(BulkArbiter* a) { arbiter_ = a; }
   void Stop();
 
   /** Whether this host advertises kCaptureFlagClipboardImageV1 (hub running, not disabled). */
@@ -141,6 +144,7 @@ class HostClipImageService {
   bool adaptiveChunks_ = false;
   bool traceChunks_ = false;  // REMOTE60_CLIP_BULK_TRACE=2 (diagnostics)  // measurement option (REMOTE60_CLIP_ADAPTIVE_CHUNKS=1)
   Counters counters_;
+  BulkArbiter* arbiter_ = nullptr;
 };
 
 }  // namespace remote60::native_poc

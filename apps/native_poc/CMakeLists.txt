@@ -146,6 +146,7 @@ target_compile_definitions(remote60_native_video_host_clipsink PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
 target_link_libraries(remote60_native_video_host_clipsink PRIVATE
+  remote60_file_copy_host
   capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
   bcrypt windowscodecs shlwapi winmm
 )
@@ -181,6 +182,7 @@ target_include_directories(remote60_native_video_host_poc PRIVATE
 )
 
 target_link_libraries(remote60_native_video_host_poc PRIVATE
+  remote60_file_copy_host  # file copy (t-zdmsd4gb): the helper link, pulls, chunk checks
   capture
   common
   ws2_32
@@ -218,7 +220,12 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 # sources needs it.
 add_library(remote60_clip_image STATIC
   src/clip_image_client.cpp
+  src/bulk_uplink.cpp
   src/bulk_pacer.cpp
+  # File copy, viewer side (t-zdmsd4gb): offer, paste query, pin as the user, the shared bulk sender.
+  # The files are identified and opened by the helper's own user-token code.
+  src/file_copy_client.cpp
+  src/file_copy_local_files.cpp
   src/clip_image_clipboard.cpp
   src/clip_image_wic.cpp
   # The viewer's transfer bar (percent, seconds, Cancel): in the library because every target built
@@ -229,7 +236,7 @@ add_library(remote60_clip_image STATIC
   src/udp_control_channel.cpp
 )
 target_include_directories(remote60_clip_image PUBLIC src)
-target_link_libraries(remote60_clip_image PUBLIC bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
+target_link_libraries(remote60_clip_image PUBLIC remote60_file_copy_net bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
 if(MSVC)
   # The transfer bar's Korean lines (history #523: a Korean literal does not survive without it).
   target_compile_options(remote60_clip_image PRIVATE /utf-8)
@@ -263,6 +270,22 @@ target_link_libraries(remote60_file_copy_net PUBLIC bcrypt)
 if(MSVC)
   target_compile_options(remote60_file_copy_net PRIVATE /utf-8)
 endif()
+# The host's file-copy side: the helper (launched as the interactive user), pulls, chunk checks.
+add_library(remote60_file_copy_host STATIC src/host_file_copy.cpp src/file_copy_helper_host.cpp)
+target_include_directories(remote60_file_copy_host PUBLIC src)
+target_link_libraries(remote60_file_copy_host PUBLIC remote60_file_copy_net advapi32 wtsapi32 bcrypt)
+if(MSVC)
+  target_compile_options(remote60_file_copy_host PRIVATE /utf-8)
+endif()
+# P->R end to end: the product's viewer and host sides over loopback UDP, the real helper and a real
+# paste consumer on a private window station, bytes compared. StagingDir scratch.
+add_executable(remote60_file_copy_net_e2e_test src/file_copy_net_e2e_test.cpp)
+target_link_libraries(remote60_file_copy_net_e2e_test PRIVATE remote60_clip_image remote60_file_copy_host
+  remote60_test_scratch_dir ws2_32 ole32)
+if(MSVC)
+  target_compile_options(remote60_file_copy_net_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_file_copy_net_e2e_test remote60_file_copy_helper remote60_file_copy_helper_e2e_test)
 add_executable(remote60_file_copy_wire_test src/file_copy_wire_test.cpp)
 target_link_libraries(remote60_file_copy_wire_test PRIVATE remote60_file_copy_net)
 if(MSVC)
