@@ -94,6 +94,10 @@ class FileCopyClient {
    * running paste either way ends (Disabled) -- pins released, the sender and the receiver closed,
    * the host told -- the offers are withdrawn and the helper goes, bounded, on the caller's thread;
    * after it no new byte of a file is read or sent (r2 ④).
+   * NOT A PRODUCT SWITCH YET: the product has no run-time off switch. File copy is turned off only
+   * at process start, from the environment once (native_video_host_main.cpp:206,249 /
+   * viewer_clip_image_wiring.cpp:39). The mid-session off path (SetAllowed(false) after start) is a part exercised by tests;
+   * a settings switch that calls it is a follow-up after the field-test release (t-zdmsd4gb r3).
    */
   void SetAllowed(bool v);
   bool Usable() const {

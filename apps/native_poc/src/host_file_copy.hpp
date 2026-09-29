@@ -118,6 +118,10 @@ class HostFileCopyService {
   /**
    * The switch at run time. Off: nothing new starts, a running paste either way ends (Disabled), the
    * offers are withdrawn, the helper is told to shut down -- bounded, on the caller's thread.
+   * NOT A PRODUCT SWITCH YET: the product has no run-time off switch. File copy is turned off only
+   * at process start, from the environment once (native_video_host_main.cpp:206,249 /
+   * viewer_clip_image_wiring.cpp:39). The mid-session off path here is a part exercised by tests;
+   * a settings switch that calls it is a follow-up after the field-test release (t-zdmsd4gb r3).
    */
   void SetEnabled(bool on);
 
