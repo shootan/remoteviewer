@@ -450,6 +450,12 @@ async function handleLogs(req, res) {
   const device = logSegment(req.headers['x-log-device'], 'unknown-device');
   const stream = logSegment(req.headers['x-log-stream'], 'log');
   const body = await readRawBody(req, LOG_MAX_UPLOAD_BYTES);
+  // Asked again now that the body is in: the upload may have taken long enough for the admin API
+  // to stop the account, change its password or delete it. What was allowed when the headers
+  // arrived is not what is allowed now.
+  if (session ? !sessionStillFor(req, session) : !hostTokenStillFor(req.headers['x-host-token'], accountId)) {
+    return sendJson(res, 401, { error: 'unknown session or host token', code: 'unauthorized' });
+  }
   if (!body.length) return sendJson(res, 200, { ok: true, bytes: 0 });
 
   const budgetKey = `${accountId}/${device}`;
@@ -678,6 +684,13 @@ async function authenticateAccount(id, password, res) {
       const a = Buffer.from(hash, 'hex'), b = Buffer.from(account.hash, 'hex');
       valid = a.length === b.length && crypto.timingSafeEqual(a, b);
     }
+    // The hash took a while. If the admin API deleted the account, deleted and made it again
+    // under the same id, or changed its password meanwhile, what was checked is not what is
+    // there now: the answer is the one for a wrong password, and nothing is issued on it.
+    const current = valid ? accounts.stillTheSame(store, account) : null;
+    if (valid && !current) {
+      sendJson(res, 401, { error: 'invalid id or password', code: 'invalid_credentials' }); return null;
+    }
     if (!valid) {
       const count = (fail ? fail.count : 0) + 1;
       const delayMs = count <= 3 ? 0 : Math.min(30000, 500 * 2 ** Math.min(count - 3, 6));
@@ -687,7 +700,7 @@ async function authenticateAccount(id, password, res) {
     // The password was right, so nothing here counts as a failed attempt -- whatever the
     // account's state turns out to be. The state is asked by the caller, after this.
     loginFailures.delete(id);
-    return account;
+    return current;
   } finally { authInFlight.delete(id); }
 }
 
@@ -834,6 +847,21 @@ function rejectWithoutObservation(res, observation) {
 function bearerToken(req) {
   const auth = req.headers['authorization'] || '';
   return auth.startsWith('Bearer ') ? auth.slice(7) : '';
+}
+
+/**
+ * After an await: whether the request's session is still the one it was, and still allowed.
+ * sessionFor asks the same things; this also insists on the same account.
+ */
+function sessionStillFor(req, before) {
+  const now = sessionFor(req);
+  return !!now && now.accountId === before.accountId;
+}
+
+/** After an await: whether the host token still names a host of this account, and is allowed. */
+function hostTokenStillFor(rawToken, accountId) {
+  const found = hostForToken(rawToken);
+  return !!found.host && found.host.accountId === accountId;
 }
 
 function sessionFor(req) {
@@ -1021,6 +1049,8 @@ async function handleDeviceRevoke(req, res) {
   const session = sessionFor(req);
   if (!session) return sendJson(res, 401, { error: 'login required' });
   const body = await readJsonBody(req);
+  // Asked again after the body: see handleLogs.
+  if (!sessionStillFor(req, session)) return sendJson(res, 401, { error: 'login required' });
   const deviceId = String(body.deviceId || '');
   const record = deviceId && Object.prototype.hasOwnProperty.call(store.devices, deviceId)
     ? store.devices[deviceId] : null;
@@ -1940,6 +1970,9 @@ async function handleConnect(req, res) {
   const session = sessionFor(req);
   if (!session) return sendJson(res, 401, { error: 'login required' });
   const body = await readJsonBody(req);
+  // Asked again after the body: a capability minted on the strength of a session the admin API
+  // has since ended would be a connect the account is no longer allowed. See handleLogs.
+  if (!sessionStillFor(req, session)) return sendJson(res, 401, { error: 'login required' });
   const hostKey = String(body.hostId || '');
   const host = Object.prototype.hasOwnProperty.call(store.hosts, hostKey) ? store.hosts[hostKey] : null;
   if (!host || host.accountId !== session.accountId || !accounts.hostIsActive(store, host)) {
@@ -2307,8 +2340,11 @@ async function adminCreate(req, res) {
     return adminError(res, 429, 'too_many_pending', 'too many accounts are waiting for approval');
   }
   const { salt, hash } = await hashPasswordAsync(body.pw);
-  // Another request may have made it while the KDF ran.
+  // Another request may have made it while the KDF ran -- or filled the pending limit.
   if (accounts.get(store, id)) return adminError(res, 409, 'taken', 'that id is already taken');
+  if (accounts.counts(store).pending >= ADMIN_MAX_PENDING) {
+    return adminError(res, 429, 'too_many_pending', 'too many accounts are waiting for approval');
+  }
   const account = commitStore(() =>
     accounts.create(store, { id, salt, hash, memo: body.memo, status: 'pending' }, Date.now()));
   adminAudit('create', id, 'pending');
@@ -2361,8 +2397,14 @@ async function adminPassword(req, res, account) {
     return adminError(res, 400, 'pw', `pw must be ${accounts.PASSWORD_MIN}-${accounts.PASSWORD_MAX} characters`);
   }
   const id = account.id;
+  const createdAt = account.createdAt;
   const { salt, hash } = await hashPasswordAsync(body.pw);
-  if (!accounts.get(store, id)) return adminError(res, 404, 'not_found', 'no such account');
+  // The body and the hash were waited for. An account deleted meanwhile -- or deleted and made
+  // again under the same id -- is not the one this request was about.
+  const current = accounts.get(store, id);
+  if (!current || current.createdAt !== createdAt) {
+    return adminError(res, 404, 'not_found', 'no such account');
+  }
   let dropped = [];
   let endedDevices = [];
   commitStore(() => {

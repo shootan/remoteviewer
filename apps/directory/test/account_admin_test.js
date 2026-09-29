@@ -13,6 +13,7 @@
 const fs = require('fs'), path = require('path'), net = require('net'), dgram = require('dgram'),
       os = require('os');
 const { spawn, spawnSync } = require('child_process');
+const http = require('http');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '../../..');
@@ -27,7 +28,16 @@ const serverLog = path.join(scratch, 'server.out.log');
 const preload = path.join(scratch, 'fault.cjs');
 fs.writeFileSync(preload, `const fs=require('fs'); const write=fs.writeFileSync;
 fs.writeFileSync=function(p,...args){if(String(p)===process.env.REMOTE60_DIR_DATA+'.tmp'&&fs.existsSync(process.env.TEST_FAULT_FLAG))
-throw Object.assign(new Error('injected disk full'),{code:'ENOSPC'});return write.call(this,p,...args)};`);
+throw Object.assign(new Error('injected disk full'),{code:'ENOSPC'});return write.call(this,p,...args)};
+// The next password hash to start while TEST_HOLD_KDF exists is finished but not answered until
+// the file is gone -- so a case can do something through the admin API in between. One hash only
+// (a .seen file marks it taken), so the admin API's own hashing is never held.
+const crypto=require('crypto'); const scrypt=crypto.scrypt;
+crypto.scrypt=function(pw,salt,len,...rest){const cb=rest[rest.length-1];const f=process.env.TEST_HOLD_KDF;
+if(f&&fs.existsSync(f)&&!fs.existsSync(f+'.seen')){fs.writeFileSync(f+'.seen','1');
+return scrypt.call(this,pw,salt,len,(e,v)=>{const wait=()=>fs.existsSync(f)?setTimeout(wait,20):cb(e,v);wait();});}
+return scrypt.call(this,pw,salt,len,...rest)};`);
+const holdKdf = path.join(scratch, 'hold-kdf');
 
 const ADMIN_KEY = 'fixture-admin-key-5b1e0c7d93a2';
 const PW = { old: 'fixture-old-pass-3391', a: 'fixture-pass-a-7720', b: 'fixture-pass-b-1185',
@@ -99,6 +109,15 @@ async function stop() {
   }
 }
 const storeJson = () => JSON.parse(fs.readFileSync(data, 'utf8'));
+function walkFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkFiles(full)); else out.push(full);
+  }
+  return out;
+}
 const withAdmin = () => ({ REMOTE60_DIR_ADMIN_PORT: String(adminPort), REMOTE60_DIR_ADMIN_KEY: ADMIN_KEY });
 
 async function registerHost(id, pw, machineId) {
@@ -118,7 +137,7 @@ const DEVICE = { kind: 'windows-client', label: 'Fixture PC' };
     REMOTE60_DIR_TLS_KEY: '', REMOTE60_DIR_TLS_CERT: '', REMOTE60_DIR_ADMIN_PORT: '',
     REMOTE60_DIR_ADMIN_KEY: '', REMOTE60_DIR_ADMIN_HOST: '', REMOTE60_DIR_ADMIN_MAX_PENDING: '',
     REMOTE60_LOG_DIR: path.join(scratch, 'logs'), REMOTE60_UPDATE_DIR: path.join(scratch, 'updates'),
-    REMOTE60_UPDATE_PUBLIC_KEY: '', TEST_FAULT_FLAG: flag };
+    REMOTE60_UPDATE_PUBLIC_KEY: '', TEST_FAULT_FLAG: flag, TEST_HOLD_KDF: holdKdf };
 
   // ---------------------------------------------------------------- 1. a store from before
   console.log('\n== a store written before account states: every account is active, nothing breaks');
@@ -404,6 +423,104 @@ const DEVICE = { kind: 'windows-client', label: 'Fixture PC' };
   r = await admin('/admin/v1/accounts/veteran/enable', { method: 'POST' });
   check('...and enable brings the host back with its old token',
         r.status === 200 && (await hostWorks(veteranHost.body.hostToken)).status === 200);
+
+  // ---------------------------------------------------------------- 13. what changes while a request waits
+  console.log('\n== a request that was allowed when it arrived, and is not by the time it acts');
+  // The headers arrive (and are checked), the body is held back; meanwhile the admin API ends
+  // what the request was allowed on; then the body arrives.
+  function held(route, { bearer, headers, body }) {
+    const text = typeof body === 'string' ? body : JSON.stringify(body);
+    let settle;
+    const done = new Promise((r) => { settle = r; });
+    const req = http.request({ host: '127.0.0.1', port, path: route, method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text),
+                 ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...(headers || {}) } },
+    (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => settle({ status: res.statusCode, text: d })); });
+    req.on('error', (e) => settle({ status: 0, text: String(e) }));
+    req.flushHeaders();
+    return { finish: () => { req.end(text); return done; } };
+  }
+  const RACE_PW = 'fixture-race-pass-8810';
+  await admin('/admin/v1/accounts', { body: { id: 'racer', pw: RACE_PW } });
+  await admin('/admin/v1/accounts/racer/approve', { method: 'POST' });
+  let session = (await api('/api/login', { id: 'racer', pw: RACE_PW })).body.sessionToken;
+
+  let pending = held('/api/connect', { bearer: session, body: { hostId: 'any', observeToken: 'x' } });
+  await sleep(250);
+  await admin('/admin/v1/accounts/racer/password', { body: { pw: RACE_PW + '-2' } });
+  r = await pending.finish();
+  check('connect: the session ended while the body was on its way -> 401, nothing minted',
+        r.status === 401, `${r.status} ${r.text}`);
+
+  const withDevice = (await api('/api/login', { id: 'racer', pw: RACE_PW + '-2', device: DEVICE })).body;
+  pending = held('/api/devices/revoke', { bearer: withDevice.sessionToken, body: { deviceId: withDevice.deviceId } });
+  await sleep(250);
+  await admin('/admin/v1/accounts/racer/disable', { method: 'POST' });
+  r = await pending.finish();
+  check('device revoke: the account was stopped meanwhile -> 401, the device is not changed',
+        r.status === 401 && !storeJson().devices[withDevice.deviceId].revokedAt, `${r.status} ${r.text}`);
+  await admin('/admin/v1/accounts/racer/enable', { method: 'POST' });
+
+  const racerHost = (await registerHost('racer', RACE_PW + '-2', 'machine-racer')).body;
+  pending = held('/api/logs', { headers: { 'x-host-token': racerHost.hostToken, 'x-log-stream': 'late-stream' },
+                                body: 'a line sent after the token ended\n' });
+  await sleep(250);
+  await admin('/admin/v1/accounts/racer/password', { body: { pw: RACE_PW + '-3' } });
+  r = await pending.finish();
+  const lateLog = walkFiles(path.join(scratch, 'logs')).some((f) => f.includes('late-stream'));
+  check('logs: the host token ended while the body was on its way -> 401, nothing written',
+        r.status === 401 && !lateLog, `${r.status} ${r.text} written=${lateLog}`);
+
+  // The password hash: checked against one account, finished after the admin API changed it.
+  const holdOne = async (start) => {
+    fs.rmSync(holdKdf + '.seen', { force: true });
+    fs.writeFileSync(holdKdf, '1');
+    const answer = start();
+    for (let i = 0; i < 200 && !fs.existsSync(holdKdf + '.seen'); ++i) await sleep(20);
+    return { answer };   // wrapped: awaiting holdOne must not wait for the held request itself
+  };
+  const release = () => { fs.rmSync(holdKdf, { force: true }); };
+  const devicesOf = (id) => Object.values(storeJson().devices || {}).filter((d) => d.accountId === id);
+  const hostsOf = (id) => Object.values(storeJson().hosts).filter((h) => h.accountId === id);
+
+  let { answer } = await holdOne(() => api('/api/login', { id: 'racer', pw: RACE_PW + '-3', device: DEVICE }));
+  const racerDevicesBefore = devicesOf('racer').length;
+  await admin('/admin/v1/accounts/racer', { method: 'DELETE' });
+  release();
+  r = await answer;
+  check('login: the account was deleted while its password was hashed -> 401, nothing issued',
+        r.status === 401 && !r.body.sessionToken && devicesOf('racer').length === 0 && racerDevicesBefore >= 1,
+        `${r.status} ${r.text}`);
+
+  await admin('/admin/v1/accounts', { body: { id: 'twin', pw: RACE_PW } });
+  await admin('/admin/v1/accounts/twin/approve', { method: 'POST' });
+  ({ answer } = await holdOne(() => api('/api/login', { id: 'twin', pw: RACE_PW, device: DEVICE })));
+  await admin('/admin/v1/accounts/twin', { method: 'DELETE' });
+  await admin('/admin/v1/accounts', { body: { id: 'twin', pw: RACE_PW } });   // same id, same password
+  await admin('/admin/v1/accounts/twin/approve', { method: 'POST' });
+  release();
+  r = await answer;
+  check('login: deleted and made again under the same id, same password -> 401, nothing attached to the new one',
+        r.status === 401 && !r.body.sessionToken && devicesOf('twin').length === 0, `${r.status} ${r.text}`);
+
+  ({ answer } = await holdOne(() => registerHost('twin', RACE_PW, 'machine-twin')));
+  await admin('/admin/v1/accounts/twin/password', { body: { pw: RACE_PW + '-new' } });
+  release();
+  r = await answer;
+  check('host register: the password changed while it was hashed -> 401, no host',
+        r.status === 401 && !r.body.hostToken && hostsOf('twin').length === 0, `${r.status} ${r.text}`);
+  check('...and the new password works', (await api('/api/login', { id: 'twin', pw: RACE_PW + '-new' })).status === 200);
+
+  // The admin API's own wait: a password change whose account is deleted and made again meanwhile.
+  ({ answer } = await holdOne(() => admin('/admin/v1/accounts/twin/password', { body: { pw: RACE_PW + '-stale' } })));
+  await admin('/admin/v1/accounts/twin', { method: 'DELETE' });
+  await admin('/admin/v1/accounts', { body: { id: 'twin', pw: RACE_PW + '-fresh' } });
+  await admin('/admin/v1/accounts/twin/approve', { method: 'POST' });
+  release();
+  r = await answer;
+  check('admin password: the account was deleted and made again meanwhile -> 404, the new one untouched',
+        r.status === 404 && r.body.code === 'not_found' &&
+        (await api('/api/login', { id: 'twin', pw: RACE_PW + '-fresh' })).status === 200, `${r.status} ${r.text}`);
 
   // ---------------------------------------------------------------- 12. what was written down
   console.log('\n== the log says what was done, and nothing secret');

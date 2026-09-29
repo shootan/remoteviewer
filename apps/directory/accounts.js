@@ -60,6 +60,23 @@ function get(store, id) {
   return has(store, id) ? store.accounts[id] : null;
 }
 
+/**
+ * The account as it is NOW, if it is still the one `seen` was -- the same account (not deleted
+ * and made again under the same id) with the same password. Null otherwise.
+ *
+ * For whoever read an account, then waited (a password hash takes tens of milliseconds, a request
+ * body as long as the client likes), and is about to act on what it read. Anything the admin API
+ * did in between -- delete, delete and re-create, a new password -- makes the answer null.
+ */
+function stillTheSame(store, seen) {
+  if (!seen) return null;
+  const now = get(store, seen.id);
+  if (!now || now.createdAt !== seen.createdAt || now.salt !== seen.salt || now.hash !== seen.hash) {
+    return null;
+  }
+  return now;
+}
+
 /** Whether this account exists and may use the service. A missing account is not active. */
 function isActive(store, id) {
   const account = get(store, id);
@@ -253,7 +270,7 @@ function pruneDevices(store, id, now) {
 module.exports = {
   STATUSES, ID_PATTERN, PASSWORD_MIN, PASSWORD_MAX, MEMO_MAX, REFUSALS,
   normaliseId, validId, validPassword, cleanMemo,
-  get, isActive, normaliseStore, publicView, list, counts,
+  get, stillTheSame, isActive, normaliseStore, publicView, list, counts,
   create, put, setStatus, setPassword, touchLogin,
   hostsOf, hostIsActive, devicesOf, listDevices, endDevicesOf, dropHostTokensOf, remove,
   createDevice, pruneDevices,

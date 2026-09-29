@@ -12884,3 +12884,15 @@ Next
 - 반례: 이전 자격 없음 + 목록 읽을 수 없음 + 옮길 이름 64개가 전부 막힘(자격 저장은 가능) → NotSaved, 자격 파일 없음, 목록 바이트 동일, 발급 기기 폐기 요청 1회 / APK 는 `failSetAside` vault.
 - 시험: `login_flow_test` exit 0, 127 · APK 단위 158/0 · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(220) · `client_recovery_ui_runner` exit 0. 변이(치우기 실패 무시) C++·Kotlin 모두 kill. 실사용 `client.txt`·`host.json` 해시 동일.
 - 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r2 — 서버: 기다리는 동안 바뀐 것은 다시 묻는다
+
+- 반려(r2, Codex `3debe25` — 함수 격리 실행으로 재현, 검증용 소스 확인) 2건. 공통 원인: **인증을 확인한 뒤 await, 그 뒤에 부작용.** 그 사이 관리 창구가 disable·password·delete 를 끝내면 옛 권한으로 일이 됐다.
+- 인증 뒤 await 가 있는 핸들러를 전부 훑었다:
+  - `handleLogs`(인증 → 본문 → 기록), `handleDeviceRevoke`(세션 → 본문 → 폐기), `handleConnect`(세션 → 본문 → capability 발급): **본문을 받은 뒤 부작용 직전에 다시 확인**(`sessionStillFor`·`hostTokenStillFor` — 같은 세션/토큰이 여전히 유효하고 같은 계정이며 active). 아니면 401.
+  - `handleLogin`·`handleHostRegister`(본문 → `authenticateAccount` 의 KDF → 발급): KDF 뒤 `accounts.stillTheSame` — 저장소의 계정이 **검증한 그 판본**(같은 createdAt·salt·hash)일 때만 그 계정을 돌려준다. 삭제·같은 id 재생성·비밀번호 변경이면 401(틀린 비밀번호와 같은 답, 실패 계수 없음).
+  - 관리 창구 `adminPassword`(본문 → KDF → 변경): 기다린 뒤 같은 계정(createdAt)이 아니면 404 — 재생성된 새 계정의 비밀번호를 바꾸지 않는다. `adminCreate`(KDF 뒤): taken 에 더해 pending 상한도 다시 확인.
+  - 해당 없음(await 뒤에 인증하거나 await 가 없음): `handleSessionRefresh`·`handleSessionLogout`·`handleHostHeartbeat`(본문 먼저, 그 뒤 동기 확인), `handleUpdateManifest`·`handleHosts`·`handleDevices`(await 없음), `handleSignup`(KDF 뒤 taken 재확인 — 인증 없음), 관리 approve·disable·enable·delete(await 없음).
+- 반례(`account_admin_test.js` 13절, 실제 서버): 헤더만 보낸 요청 → 관리 작업 → 본문 완료 = connect 401 · device revoke 401(기기 무변경) · logs 401(파일 없음). KDF 는 시험 preload(`--require`, 출하 경로 아님)가 "다음 해시 하나"를 붙잡는다: 검증 지연 → 삭제 → 완료 = 401·기기 없음 / 삭제 → 같은 id·같은 비밀번호로 재생성·승인 → 완료 = 401·새 계정에 기기 없음 / 등록 중 비밀번호 변경 = 401·호스트 없음 / 관리 비밀번호 변경 중 삭제·재생성 = 404·새 계정 비밀번호 그대로.
+- 시험: `account_admin_test` exit 0, 113 checks ×3 · `run.js` exit 0(RESULT: ALL PASS, PASS 661) · 클라 연동 `client_auto_login_runner` exit 0(220)·`host_login_ui_runner` exit 0(52). 변이 6종(logs·revoke·connect 재확인 제거, KDF 뒤 재조회 제거, 판본 대신 id 만, 관리 비번 계정 동일성 제거) 모두 kill — connect 는 호스트가 없어 변이 시 200 이 아니라 404 로 드러난다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js`) / 문서(이 항목, 구현계획).
