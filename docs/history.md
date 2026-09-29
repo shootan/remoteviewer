@@ -12896,3 +12896,10 @@ Next
 - 반례(`account_admin_test.js` 13절, 실제 서버): 헤더만 보낸 요청 → 관리 작업 → 본문 완료 = connect 401 · device revoke 401(기기 무변경) · logs 401(파일 없음). KDF 는 시험 preload(`--require`, 출하 경로 아님)가 "다음 해시 하나"를 붙잡는다: 검증 지연 → 삭제 → 완료 = 401·기기 없음 / 삭제 → 같은 id·같은 비밀번호로 재생성·승인 → 완료 = 401·새 계정에 기기 없음 / 등록 중 비밀번호 변경 = 401·호스트 없음 / 관리 비밀번호 변경 중 삭제·재생성 = 404·새 계정 비밀번호 그대로.
 - 시험: `account_admin_test` exit 0, 113 checks ×3 · `run.js` exit 0(RESULT: ALL PASS, PASS 661) · 클라 연동 `client_auto_login_runner` exit 0(220)·`host_login_ui_runner` exit 0(52). 변이 6종(logs·revoke·connect 재확인 제거, KDF 뒤 재조회 제거, 판본 대신 id 만, 관리 비번 계정 동일성 제거) 모두 kill — connect 는 호스트가 없어 변이 시 200 이 아니라 404 로 드러난다.
 - 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r3 — 시험: 두 프로세스의 시계를 맞대지 않는다
+
+- 검증용 실행에서 `account_admin_test` 의 "pending -> active, approvedAt set" 이 15회 중 2회 FAIL. 서버 응답은 정상(approvedAt==updatedAt)이었고, 시험이 **자기 프로세스의 `Date.now()`(beforeApprove)** 와 서버가 찍은 approvedAt 을 비교하고 있었다 — Windows 에서 두 프로세스의 ms 판독이 어긋날 수 있다(추정; 당시 값은 기록되지 않았다).
+- 이제 서버가 쓴 시각끼리만 비교한다: 승인 전 행(pending, approvedAt=null, updatedAt=u0) → 승인 응답 approvedAt === updatedAt ≥ u0, 다시 승인해도 approvedAt 불변, lastLoginAt ≥ approvedAt. 실패 시 비교한 값을 줄에 남긴다. 같은 모양의 교차 프로세스 비교는 이 파일의 두 곳(approve·lastLoginAt)뿐이었다 — 다른 서버 시험의 `Date.now()` 는 같은 프로세스 안의 경과 시간이다.
+- 시험: `account_admin_test` 30회 연속 exit 0, 113/0. 변이(승인이 approvedAt 을 안 찍음) → 이 검사가 FAIL.
+- 제품/테스트/문서: 제품 없음 / 테스트(`account_admin_test.js`) / 문서(이 항목).
