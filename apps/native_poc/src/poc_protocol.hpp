@@ -79,6 +79,22 @@ enum class MessageType : uint16_t {
   // The bulk stream's own messages (never on the control channel; see kBulkStreamTag).
   ClipBulkPull = 63,                 // host -> viewer: send me [offset, offset + len)
   ClipBulkChunk = 64,                // viewer -> host: those bytes
+  // File copy (t-zdmsd4gb, file_copy_wire.hpp is the codec). Control 65~76: viewer request, host
+  // answer; bulk 77/78 on the bulk stream. 79 reserved.
+  ControlFileOffer = 65,
+  ControlFileOfferReply = 66,
+  ControlFileOfferQuery = 67,
+  ControlFileOfferQueryReply = 68,
+  ControlFilePasteQuery = 69,
+  ControlFilePasteQueryReply = 70,
+  ControlFilePrepare = 71,
+  ControlFilePrepareReply = 72,
+  ControlFileEnd = 73,
+  ControlFileEndReply = 74,
+  ControlFileStatus = 75,
+  ControlFileStatusReply = 76,
+  FileBulkPull = 77,
+  FileBulkChunk = 78,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -256,6 +272,10 @@ constexpr uint32_t kCaptureFlagClipboardImageV1 = 0x200u;
 // masks `buttons` with 0x7 and its default branch turned any unknown button key into a LEFT
 // click, so "back" against it would have been a left click.
 constexpr uint32_t kCaptureFlagMouseXButtonsV1 = 0x400u;
+// File copy v1 (t-zdmsd4gb): the host takes file offers (messages 65~78) -- switched on, and its
+// Medium clipboard helper can run as the interactive user. Meaningful only with kUdpFeatureBulkChannel.
+// A viewer sends no file message to a host that does not advertise it.
+constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

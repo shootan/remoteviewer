@@ -255,6 +255,20 @@ endif()
 # file-copy-helper r1 tests.
 # The pipe codec: every message round-trips, every bound refuses, a truncated / padded payload is
 # rejected, and names that may not travel do not. Pure.
+# file-copy network (t-zdmsd4gb): the wire codec (65~78) and the rules both ends apply -- offer
+# names / counts / sizes, ranges, per-chunk SHA-256, "whole file verified". No network, no files.
+add_library(remote60_file_copy_net STATIC src/file_copy_net_rules.cpp)
+target_include_directories(remote60_file_copy_net PUBLIC src)
+target_link_libraries(remote60_file_copy_net PUBLIC bcrypt)
+if(MSVC)
+  target_compile_options(remote60_file_copy_net PRIVATE /utf-8)
+endif()
+add_executable(remote60_file_copy_wire_test src/file_copy_wire_test.cpp)
+target_link_libraries(remote60_file_copy_wire_test PRIVATE remote60_file_copy_net)
+if(MSVC)
+  target_compile_options(remote60_file_copy_wire_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_file_copy_pipe_test
   src/file_copy_pipe_test.cpp
 )
