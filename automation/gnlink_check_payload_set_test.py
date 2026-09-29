@@ -24,7 +24,7 @@ REPO = os.path.dirname(HERE)
 WINDOWS_NAMES = [
     'GNLinkHost.exe', 'GNLinkStream.exe', 'GNLinkCapture.exe', 'GNLinkInputService.exe',
     'GNLinkClient.exe', 'GNLinkViewer.exe', 'GNLinkSetup.exe', 'GNLinkUpdater.exe',
-    'ui\\shell.html', 'ui\\macro.html',
+    'GNLinkClipHelper.exe', 'ui\\shell.html', 'ui\\macro.html',
 ]
 
 passed = 0

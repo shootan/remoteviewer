@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
 
   const wchar_t* names[] = {L"GNLinkHost.exe",   L"GNLinkStream.exe",  L"GNLinkCapture.exe",
                             L"GNLinkInputService.exe", L"GNLinkClient.exe", L"GNLinkViewer.exe",
-                            L"GNLinkSetup.exe",  L"GNLinkUpdater.exe"};
+                            L"GNLinkSetup.exe",  L"GNLinkUpdater.exe", L"GNLinkClipHelper.exe"};
 
   for (const wchar_t* leaf : names) {
     const std::wstring path = install + L"\\" + leaf;

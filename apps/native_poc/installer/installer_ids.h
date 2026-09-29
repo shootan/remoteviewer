@@ -20,6 +20,7 @@
 // refuse traversal -- it would be frozen at its compile-time constants forever. It runs from a
 // copy of itself instead. See docs/업데이트_배선_계획.md W2a.
 #define IDR_PAYLOAD_UPDATER 208
+#define IDR_PAYLOAD_CLIP_HELPER 209
 
 #define IDD_MAIN 300
 #define IDC_APP_ICON 301

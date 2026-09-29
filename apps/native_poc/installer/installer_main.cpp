@@ -68,6 +68,9 @@ const PayloadFile kPayload[] = {
     {IDR_PAYLOAD_GDI_WORKER, L"GNLinkCapture.exe"},
     {IDR_PAYLOAD_CLIENT_SHELL, L"GNLinkClient.exe"},
     {IDR_PAYLOAD_CLIENT_VIEWER, L"GNLinkViewer.exe"},
+    // Started by GNLinkStream (as the signed-in user) and by GNLinkViewer so Explorer can paste
+    // files of the other PC; both look for it beside their own module.
+    {IDR_PAYLOAD_CLIP_HELPER, L"GNLinkClipHelper.exe"},
     // Installed here like anything else. It runs from a copy of itself in a sibling directory, so
     // the file sitting here is never the one executing and a later update can replace it. Putting
     // it outside the install directory instead would make it unreplaceable -- payload names are
@@ -180,7 +183,10 @@ void stop_running_product() {
   // The tray app and its children keep their own images locked.
   static const wchar_t* kImages[] = {L"GNLinkHost.exe", L"GNLinkStream.exe",
                                      L"GNLinkCapture.exe",
-                                     L"GNLinkInputService.exe"};
+                                     L"GNLinkInputService.exe",
+                                     // Runs as the user, not as a child of the host, so /T from
+                                     // GNLinkStream does not reach it; it would keep its image open.
+                                     L"GNLinkClipHelper.exe"};
   for (const wchar_t* image : kImages) {
     std::wstring command = L"taskkill /F /T /IM ";
     command += image;

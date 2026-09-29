@@ -84,6 +84,10 @@ const std::vector<std::wstring>& product_image_names() {
   static const std::vector<std::wstring> names = {
       L"GNLinkHost.exe",   L"GNLinkStream.exe", L"GNLinkCapture.exe",
       L"GNLinkInputService.exe", L"GNLinkClient.exe", L"GNLinkViewer.exe",
+      // The clipboard helper runs as the user beside GNLinkStream / GNLinkViewer and exits when
+      // they do, but it holds its own image open while it lives. Its hidden top-level window takes
+      // WM_CLOSE like any other.
+      L"GNLinkClipHelper.exe",
       // The installer counts too, now that it is a member of the update package. If one is
       // running, an uninstall may be in progress -- replacing its binary underneath that is worse
       // than not updating, and the identity check means a stale PID cannot be mistaken for it.

@@ -1,7 +1,7 @@
 # Compares what the installer carries with what the release ships.
 #
-# GNLinkSetup.exe embeds the other nine files as RT_RCDATA resources, and the update replaces the
-# same nine on disk. Those two sets can disagree: the installer links against a staging directory
+# GNLinkSetup.exe embeds the other ten files as RT_RCDATA resources, and the update replaces the
+# same ten on disk. Those two sets can disagree: the installer links against a staging directory
 # CMake fills, while the release payload is copied out of the build tree by the release script. A
 # stale staging copy, a target that did not relink, a payload assembled from a different build --
 # each produces an installer that installs something other than what was gated, signed and
@@ -11,7 +11,7 @@
 #
 #   gnlink_check_installer_payload.ps1 -Setup <GNLinkSetup.exe> -Payload <payload dir>
 #
-# Exit 0 = all nine match, byte for byte. Anything else = do not publish.
+# Exit 0 = all ten match, byte for byte. Anything else = do not publish.
 
 param(
   [Parameter(Mandatory = $true)][string]$Setup,
@@ -30,6 +30,7 @@ $expected = @(
   @{ Id = 204; Path = 'GNLinkClient.exe' },
   @{ Id = 205; Path = 'GNLinkViewer.exe' },
   @{ Id = 208; Path = 'GNLinkUpdater.exe' },
+  @{ Id = 209; Path = 'GNLinkClipHelper.exe' },
   @{ Id = 206; Path = 'ui\shell.html' },
   @{ Id = 207; Path = 'ui\macro.html' }
 )

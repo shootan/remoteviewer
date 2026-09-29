@@ -90,17 +90,17 @@ DO_SIGN=0
 DO_DEPLOY=0
 DRY_RUN=0
 
-# The eight payload targets. Setup and Updater are in this list, not extra steps: the installer
-# embeds the other six, so it must link after them, and the build system already knows that.
-# The eight payload targets, and the verifier.
+# The nine payload targets. Setup and Updater are in this list, not extra steps: the installer
+# embeds the other seven, so it must link after them, and the build system already knows that.
+# The nine payload targets, and the verifier.
 #
 # remote60_verify_release is built HERE, with the payload, rather than at stage 8 where it is
 # used. Built at stage 8 it would be compiled AFTER the drift check at stage 7 -- so the one
 # binary whose whole job is to say "this candidate is what it claims" would itself come from a
 # tree nothing had checked since. Now it is inside the same window as everything else, and a
 # dry run produces it too, which is what lets a reviewer see it was built at all.
-TARGETS="remote60_host_app remote60_native_video_host_poc remote60_gdi_capture_worker remote60_secure_input_service remote60_client_shell remote60_native_video_client_poc remote60_installer remote60_updater remote60_verify_release"
-EXES="GNLinkHost GNLinkStream GNLinkCapture GNLinkInputService GNLinkClient GNLinkViewer GNLinkSetup GNLinkUpdater"
+TARGETS="remote60_host_app remote60_native_video_host_poc remote60_gdi_capture_worker remote60_secure_input_service remote60_client_shell remote60_native_video_client_poc remote60_file_copy_helper remote60_installer remote60_updater remote60_verify_release"
+EXES="GNLinkHost GNLinkStream GNLinkCapture GNLinkInputService GNLinkClient GNLinkViewer GNLinkClipHelper GNLinkSetup GNLinkUpdater"
 
 say()  { printf '%s\n' "$*"; }
 
@@ -718,7 +718,7 @@ step "6. SHA256SUMS.txt"
 ( cd "$REL_DIR" && for f in \
     payload/GNLinkCapture.exe payload/GNLinkClient.exe payload/GNLinkHost.exe \
     payload/GNLinkInputService.exe payload/GNLinkSetup.exe payload/GNLinkStream.exe \
-    payload/GNLinkUpdater.exe payload/GNLinkViewer.exe \
+    payload/GNLinkUpdater.exe payload/GNLinkViewer.exe payload/GNLinkClipHelper.exe \
     payload/ui/macro.html payload/ui/shell.html; do
       sha256sum "./$f" || exit 1
     done > SHA256SUMS.txt ) || die "could not write SHA256SUMS.txt"
@@ -742,7 +742,7 @@ say "-- checksums"
 
 say ""
 say "-- installer payload: does GNLinkSetup carry what this release ships"
-# The installer embeds the other nine as RT_RCDATA and the update replaces the same nine. Those
+# The installer embeds the other ten as RT_RCDATA and the update replaces the same ten. Those
 # two sets can disagree without either half looking wrong, and then the thing installed is not
 # the thing gated. 0.2.133 was checked this way by hand.
 INSTALLER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass \

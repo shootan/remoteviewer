@@ -38,6 +38,8 @@ ARTIFACTS = [
     ('GNLinkViewer.exe', 'GNLinkViewer.exe', 'GNLinkViewer.exe'),
     ('GNLinkSetup.exe', 'GNLinkSetup.exe', 'GNLinkSetup.exe'),
     ('GNLinkUpdater.exe', 'GNLinkUpdater.exe', 'GNLinkUpdater.exe'),
+    # Added after 0.2.134 (file copy). Kept beside the other exes; the html pair stays last.
+    ('GNLinkClipHelper.exe', 'GNLinkClipHelper.exe', 'GNLinkClipHelper.exe'),
     ('ui' + chr(92) + 'shell.html', os.path.join('ui', 'shell.html'), 'ui/shell.html'),
     ('ui' + chr(92) + 'macro.html', os.path.join('ui', 'macro.html'), 'ui/macro.html'),
 ]
@@ -54,7 +56,8 @@ CARRIERS = {
     'GNLinkStream.exe': 1,
     'GNLinkSetup.exe': 5,
 }
-NO_VERSION = ['GNLinkCapture.exe', 'GNLinkInputService.exe', 'GNLinkUpdater.exe']
+NO_VERSION = ['GNLinkCapture.exe', 'GNLinkInputService.exe', 'GNLinkUpdater.exe',
+              'GNLinkClipHelper.exe']
 
 
 def read(path):

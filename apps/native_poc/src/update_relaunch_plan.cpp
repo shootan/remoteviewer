@@ -29,6 +29,9 @@ const std::vector<KnownImage> kKnownImages = {
      "a capture worker is started by the streaming host for the duration of a session"},
     {L"GNLinkViewer.exe", L"gnlinkviewer.exe", RelaunchKind::SupervisedByAnother,
      "the client shell starts the viewer when a connection is made, not at start-up"},
+    {L"GNLinkClipHelper.exe", L"gnlinkcliphelper.exe", RelaunchKind::SupervisedByAnother,
+     "the streaming host and the viewer each start their own clipboard helper with a fresh pipe and "
+     "nonce; one started here would have neither"},
 };
 
 const KnownImage* find_known(const std::wstring& leafLower,

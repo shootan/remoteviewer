@@ -139,7 +139,8 @@ import io, os, sys
 payload, version = sys.argv[1], sys.argv[2]
 counts = {'GNLinkHost.exe': 1, 'GNLinkClient.exe': 1, 'GNLinkViewer.exe': 1,
           'GNLinkStream.exe': 1, 'GNLinkSetup.exe': 5,
-          'GNLinkCapture.exe': 0, 'GNLinkInputService.exe': 0, 'GNLinkUpdater.exe': 0}
+          'GNLinkCapture.exe': 0, 'GNLinkInputService.exe': 0, 'GNLinkUpdater.exe': 0,
+          'GNLinkClipHelper.exe': 0}
 for name, n in counts.items():
     # An EVEN number of filler bytes: UTF-16 is two bytes per character, and an odd prefix
     # shifts every string after it out of alignment.
@@ -160,15 +161,15 @@ lines = [l for l in lines if l != '']
 want_head = ['schema=2', 'releaseId=r-0.2.134', 'platform=windows', 'arch=x64', 'version=0.2.134']
 order = ['GNLinkHost.exe', 'GNLinkStream.exe', 'GNLinkCapture.exe', 'GNLinkInputService.exe',
          'GNLinkClient.exe', 'GNLinkViewer.exe', 'GNLinkSetup.exe', 'GNLinkUpdater.exe',
-         'ui' + chr(92) + 'shell.html', 'ui' + chr(92) + 'macro.html']
+         'GNLinkClipHelper.exe', 'ui' + chr(92) + 'shell.html', 'ui' + chr(92) + 'macro.html']
 problems = []
 if not lines[0].startswith('# GNLink update manifest -- release 0.2.134'):
     problems.append('header line')
 if lines[1:6] != want_head:
     problems.append('head fields: %r' % (lines[1:6],))
 arts = [l for l in lines if l.startswith('artifact=')]
-if len(arts) != 10:
-    problems.append('%d artifact lines, expected 10' % len(arts))
+if len(arts) != 11:
+    problems.append('%d artifact lines, expected 11' % len(arts))
 for i, line in enumerate(arts):
     fields = line[len('artifact='):].split('|')
     if len(fields) != 4:
@@ -217,6 +218,10 @@ def shape(path):
 
 
 mine, real = shape(sys.argv[1]), shape(sys.argv[2])
+# The one line added since 0.2.134 (file copy), and only that one: everything else must still
+# line up with what was published.
+if 'artifact=GNLinkClipHelper.exe' not in real:
+    mine = [l for l in mine if l != 'artifact=GNLinkClipHelper.exe']
 if mine != real:
     sys.stderr.write('  generated: %r\n  published: %r\n' % (mine, real))
     sys.exit(1)
@@ -664,6 +669,7 @@ if [ "$MODE" = "build" ]; then
   emit GNLinkCapture 0
   emit GNLinkInputService 0
   emit GNLinkUpdater 0
+  emit GNLinkClipHelper 0
   # The verifier is a payload-stage target now, so the stub has to produce it or stage 8
   # fails on a file the real cmake would have made.
   printf 'MZ stub verifier\n' > "$OUT/remote60_verify_release.exe"

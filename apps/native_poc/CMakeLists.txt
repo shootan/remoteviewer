@@ -591,12 +591,13 @@ set(GNLINK_PAYLOAD_CLIENT_VIEWER "${_gnlink_payload_dir}/GNLinkViewer.exe")
 set(GNLINK_PAYLOAD_CLIENT_UI "${_gnlink_payload_dir}/shell.html")
 set(GNLINK_PAYLOAD_MACRO_UI "${_gnlink_payload_dir}/macro.html")
 set(GNLINK_PAYLOAD_UPDATER "${_gnlink_payload_dir}/GNLinkUpdater.exe")
+set(GNLINK_PAYLOAD_CLIP_HELPER "${_gnlink_payload_dir}/GNLinkClipHelper.exe")
 
 # The .rc reader takes these paths literally, so escape the separators for the generated script.
 foreach(_var GNLINK_INSTALLER_ICON GNLINK_PAYLOAD_HOST_APP GNLINK_PAYLOAD_VIDEO_HOST
              GNLINK_PAYLOAD_SECURE_INPUT GNLINK_PAYLOAD_GDI_WORKER
              GNLINK_PAYLOAD_CLIENT_SHELL GNLINK_PAYLOAD_CLIENT_VIEWER GNLINK_PAYLOAD_CLIENT_UI
-             GNLINK_PAYLOAD_MACRO_UI GNLINK_PAYLOAD_UPDATER)
+             GNLINK_PAYLOAD_MACRO_UI GNLINK_PAYLOAD_UPDATER GNLINK_PAYLOAD_CLIP_HELPER)
   string(REPLACE "/" "\\\\" ${_var} "${${_var}}")
 endforeach()
 configure_file(installer/payload.rc.in "${CMAKE_CURRENT_BINARY_DIR}/installer_payload.rc" @ONLY)
@@ -614,6 +615,7 @@ add_custom_command(
     "${_gnlink_payload_dir}/shell.html"
     "${_gnlink_payload_dir}/macro.html"
     "${_gnlink_payload_dir}/GNLinkUpdater.exe"
+    "${_gnlink_payload_dir}/GNLinkClipHelper.exe"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${_gnlink_payload_dir}"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "$<TARGET_FILE:remote60_updater>" "${_gnlink_payload_dir}/GNLinkUpdater.exe"
@@ -634,12 +636,16 @@ add_custom_command(
           "$<TARGET_FILE:remote60_native_video_client_poc>"
           "${_gnlink_payload_dir}/GNLinkViewer.exe"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:remote60_file_copy_helper>"
+          "${_gnlink_payload_dir}/GNLinkClipHelper.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html" "${_gnlink_payload_dir}/shell.html"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/macro.html" "${_gnlink_payload_dir}/macro.html"
   DEPENDS remote60_host_app remote60_native_video_host_poc
           remote60_secure_input_service remote60_gdi_capture_worker
           remote60_client_shell remote60_native_video_client_poc remote60_updater
+          remote60_file_copy_helper
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/shell.html"
           "${CMAKE_CURRENT_SOURCE_DIR}/ui/macro.html"
   COMMENT "Staging GNLink installer payload"
@@ -656,6 +662,7 @@ add_custom_target(remote60_installer_payload
     "${_gnlink_payload_dir}/shell.html"
     "${_gnlink_payload_dir}/macro.html"
     "${_gnlink_payload_dir}/GNLinkUpdater.exe"
+    "${_gnlink_payload_dir}/GNLinkClipHelper.exe"
 )
 
 add_executable(remote60_installer WIN32
