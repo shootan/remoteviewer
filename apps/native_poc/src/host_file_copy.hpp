@@ -108,8 +108,18 @@ class HostFileCopyService {
 
   /** Pong 0x800: switched on and a launcher configured. (Whether the helper really starts is per use.) */
   bool Advertised() const { return file_copy_allowed(); }
-  /** The one allow rule every handler asks (A2). A view-only session would be added here. */
-  bool file_copy_allowed() const { return running_.load() && config_.enabled && config_.launcher != nullptr; }
+  /**
+   * The one allow rule (A2). Asked by every handler that starts or feeds a transfer -- Offer,
+   * OfferQuery, PasteQuery, Prepare, a helper Read / PasteBegin, every bulk datagram, every ReadLocal.
+   * End and Status are answered while disabled (they only end or describe). The product has no
+   * view-only session; one would be added here (not implemented).
+   */
+  bool file_copy_allowed() const { return running_.load() && enabled_.load() && config_.launcher != nullptr; }
+  /**
+   * The switch at run time. Off: nothing new starts, a running paste either way ends (Disabled), the
+   * offers are withdrawn, the helper is told to shut down -- bounded, on the caller's thread.
+   */
+  void SetEnabled(bool on);
 
   /**
    * One control request (65/67/69/71/73/75) -> its answer. False when `type` is not one of them or
@@ -209,6 +219,11 @@ class HostFileCopyService {
   BulkArbiter* arbiter_ = nullptr;
   LogFn log_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> enabled_{false};
+  uint64_t servedEpoch_ = 0;  // the control session the state belongs to (0 = none yet)
+
+  // Ends whatever runs and drops the viewer's offers; `reason` is the paste's end reason.
+  void Teardown(file_copy::net::PasteEndReason reason);
 
   FileHelperChannel helper_;
   FilePullReceiver receiver_;  // P->R

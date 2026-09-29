@@ -328,12 +328,22 @@ int wmain() {
   });
   LoopbackLink link(&host, 1);
   std::atomic<bool> linkBroken{false};
+  std::atomic<bool> pumpPaused{false};  // r2 ②: hold the viewer's control turns to stage a race
   std::thread pump([&] {
     while (!stop.load()) {
-      if (viewer.Pump(link) < 0) linkBroken.store(true);
+      if (!pumpPaused.load() && viewer.Pump(link) < 0) linkBroken.store(true);
       Sleep(10);
     }
   });
+  // A request straight to the host's handler, as another / an older requester would send it.
+  const auto call = [&](fn::FileMsg type, const std::vector<uint8_t>& body, uint64_t epoch, std::vector<uint8_t>* reply) {
+    uint16_t rt = 0;
+    return host.HandleControl(static_cast<uint16_t>(type), body, epoch, &rt, reply);
+  };
+  const auto nothing_lands = [&](const std::wstring& dest, const std::wstring& name) {
+    std::vector<uint8_t> got;
+    return !read_file(dest + L"\\" + name, &got);
+  };
 
   uint64_t revision = 100;
   const auto paste_on = [&](const Station& where, const std::wstring& dest, uint64_t expectBytes, int waitSec,
@@ -394,8 +404,10 @@ int wmain() {
           "ended=" + std::to_string(hc.pastesEnded) + " failed=" + std::to_string(hc.pastesFailed) + " reason=" + std::to_string(hc.lastEndReason));
     check("...and the viewer learned it (700 ms query), unpinned, and gave the bulk back", viewerSawEnd &&
               viewArbiter.use() == BulkUse::Idle && hostArbiter.use() == BulkUse::Idle);
+    // A consumer may read a range again (legal): every delivered byte was checked, and at least the
+    // whole set was delivered -- the landed bytes are compared above (r2 ⑧).
     check("every delivered byte passed its chunk check, none rejected",
-          hc.chunksRejected == 0 && hc.chunksVerified > 0 && hc.bytesDelivered == totalA,
+          hc.chunksRejected == 0 && hc.chunksVerified > 0 && hc.bytesDelivered >= totalA,
           "verified=" + std::to_string(hc.chunksVerified) + " delivered=" + std::to_string(hc.bytesDelivered) + "/" + std::to_string(totalA));
     std::printf("      files whole-file verified: %llu, chunk verified: %llu\n", static_cast<unsigned long long>(hc.filesWholeVerified),
                 static_cast<unsigned long long>(hc.filesChunkVerified));
@@ -495,6 +507,181 @@ int wmain() {
     check("...nothing landed", !read_file(dest + L"\\busy.txt", &got) || got.empty());
     check("...and the image still holds the bulk", viewArbiter.use() == BulkUse::Image && viewArbiter.owner() == 777);
     viewArbiter.Release(777);
+  }
+
+  // ================================================================== r2 counterexamples (P->R)
+  std::printf("\n--- K (r2 1). a TEXT / IMAGE copy on the viewer's PC while a paste runs: the paste finishes ---\n");
+  {
+    // A copy of anything but files is ClearLocalOffer (viewer_window_proc.cpp: text and image alike).
+    std::map<std::wstring, std::vector<uint8_t>> setK = {{L"bigK.bin", make_content(16u * 1024u * 1024u, 101)}};
+    const std::wstring bigPath = srcDir + L"\\bigK.bin";
+    write_file(bigPath, setK.begin()->second);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({bigPath}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destK";
+    paste(dest, setK.begin()->second.size(), 120, &consumer);
+    check("...bytes are moving", wait_until([&] { return host.GetCounters().bytesDelivered > before.bytesDelivered + 1024 * 1024; }, 30000));
+    viewer.ClearLocalOffer();  // the user copies text (or an image) on the viewer's PC
+    Sleep(1500);               // the withdrawal (End, 73) goes out and reaches the helper
+    check("...the running paste is still running after the withdrawal", viewer.PasteActive());
+    const DWORD code = consumer.Wait(180000);
+    std::string detail;
+    check("THE PASTE FINISHED WHOLE -- withdrawing the offer did not abort it", code == 0 && same_files(dest, setK, &detail), detail);
+    check("...and the host counts it completed", wait_until([&] {
+            return host.GetCounters().pastesEnded == before.pastesEnded + 1 && host.GetCounters().pastesFailed == before.pastesFailed;
+          }, 5000));
+    wait_until([&] { return !viewer.PasteActive(); }, 5000);
+    Child next;
+    const std::wstring destNext = root + L"destKNext";
+    paste(destNext, 1, 8, &next);
+    next.Wait(30000);
+    check("...but the NEXT paste gets nothing (the withdrawn offer is off the remote clipboard)", nothing_lands(destNext, L"bigK.bin"));
+  }
+
+  std::printf("\n--- L (r2 2). a stale Prepare / End / Status with another id leaves the real paste alone ---\n");
+  {
+    const std::wstring path = srcDir + L"\\raceL.bin";
+    std::map<std::wstring, std::vector<uint8_t>> setL = {{L"raceL.bin", make_content(3u * 1024u * 1024u, 111)}};
+    write_file(path, setL.begin()->second);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    pumpPaused.store(true);  // the viewer does not prepare yet: the paste stays "begun" on the host
+    Child consumer;
+    const std::wstring dest = root + L"destL";
+    paste(dest, setL.begin()->second.size(), 60, &consumer);
+    check("the paste began on the host", wait_until([&] { return host.GetCounters().pastesBegun > before.pastesBegun; }, 20000));
+    // The begun paste's own ids: while it is begun the host names them in any PasteQuery answer.
+    std::vector<uint8_t> raw;
+    fn::PasteQueryReply begun;
+    check("the host names the begun paste (its offer and paste op)",
+          call(fn::FileMsg::PasteQuery, fn::body(fn::PasteQuery{0}), 1, &raw) && fn::parse(raw, &begun) &&
+              begun.state == fn::PasteState::Begun && begun.pasteOp != 0);
+    fn::Prepare stale;
+    stale.direction = fn::Direction::PtoR;
+    stale.offerId = 0x5A1E;
+    stale.pasteOp = 0x5A1E;
+    fn::PrepareReply pr;
+    raw.clear();
+    check("a stale Prepare of another offer is refused (UnknownId)",
+          call(fn::FileMsg::Prepare, fn::body(stale), 1, &raw) && fn::parse(raw, &pr) && pr.verdict == fn::Verdict::UnknownId);
+    pumpPaused.store(false);  // now the real Prepare
+    check("...and the real one still succeeds: the paste is prepared",
+          wait_until([&] { return host.GetCounters().pastesPrepared > before.pastesPrepared; }, 10000));
+    // While it runs: an End and a Status with the RIGHT paste op and another offer.
+    fn::End wrong{0xBAD0FFE4, begun.pasteOp, fn::PasteEndReason::Cancelled};
+    fn::EndReply er;
+    raw.clear();
+    check("an End with the right paste op but another offer ends nothing",
+          call(fn::FileMsg::End, fn::body(wrong), 1, &raw) && fn::parse(raw, &er) && er.state == fn::PasteState::None);
+    fn::StatusReply sr;
+    raw.clear();
+    check("...a Status like it describes nothing",
+          call(fn::FileMsg::Status, fn::body(fn::StatusQuery{0xBAD0FFE4, begun.pasteOp}), 1, &raw) && fn::parse(raw, &sr) &&
+              sr.state == fn::PasteState::None);
+    raw.clear();
+    check("...while the right key still sees it running",
+          call(fn::FileMsg::Status, fn::body(fn::StatusQuery{begun.offerId, begun.pasteOp}), 1, &raw) && fn::parse(raw, &sr) &&
+              sr.state == fn::PasteState::Active);
+    const DWORD code = consumer.Wait(90000);
+    std::string detail;
+    check("THE PASTE FINISHED WHOLE", code == 0 && same_files(dest, setL, &detail), detail);
+    // (the refused stale Prepare counts as a failed prepare; the real paste is the completion)
+    check("...and completed on the host (not cancelled by the foreign End)", wait_until([&] {
+            const auto hc = host.GetCounters();
+            return hc.pastesEnded == before.pastesEnded + 1 && hc.lastEndReason == static_cast<uint8_t>(fn::PasteEndReason::Completed);
+          }, 5000));
+    wait_until([&] { return !viewer.PasteActive(); }, 5000);
+  }
+
+  std::printf("\n--- N (r2 4). the viewer's switch goes OFF mid-paste: no file byte after it, the paste ends Disabled ---\n");
+  {
+    std::map<std::wstring, std::vector<uint8_t>> setN = {{L"bigN.bin", make_content(16u * 1024u * 1024u, 121)}};
+    const std::wstring bigPath = srcDir + L"\\bigN.bin";
+    write_file(bigPath, setN.begin()->second);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({bigPath}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destN";
+    paste(dest, setN.begin()->second.size(), 60, &consumer);
+    check("...bytes are moving", wait_until([&] { return host.GetCounters().bytesDelivered > before.bytesDelivered + 1024 * 1024; }, 30000));
+    viewer.SetAllowed(false);
+    const uint64_t servedAt = viewer.GetCounters().bytesServed;
+    Sleep(2000);
+    check("NOT ONE FILE BYTE IS SERVED AFTER THE SWITCH WENT OFF", viewer.GetCounters().bytesServed == servedAt,
+          std::to_string(servedAt) + " -> " + std::to_string(viewer.GetCounters().bytesServed));
+    check("...the pins are released and the bulk is free on the viewer", !viewer.PasteActive() && viewArbiter.use() == BulkUse::Idle);
+    check("...the host was told: the paste ended Disabled", wait_until([&] {
+            const auto hc = host.GetCounters();
+            return hc.pastesFailed > before.pastesFailed && hc.lastEndReason == static_cast<uint8_t>(fn::PasteEndReason::Disabled);
+          }, 5000), "reason=" + std::to_string(host.GetCounters().lastEndReason));
+    consumer.Wait(60000);
+    std::vector<uint8_t> got;
+    check("...and no complete copy landed", !read_file(dest + L"\\bigN.bin", &got) || got != setN.begin()->second);
+    viewer.SetAllowed(true);
+    wait_until([&] { return hostArbiter.use() == BulkUse::Idle; }, 5000);
+  }
+
+  std::printf("\n--- N2 (r2 4). the HOST's switch goes OFF mid-paste: nothing more reaches its helper ---\n");
+  {
+    std::map<std::wstring, std::vector<uint8_t>> setN2 = {{L"bigN2.bin", make_content(16u * 1024u * 1024u, 131)}};
+    const std::wstring bigPath = srcDir + L"\\bigN2.bin";
+    write_file(bigPath, setN2.begin()->second);
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({bigPath}, ++revision);
+    wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000);
+    const auto before = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destN2";
+    paste(dest, setN2.begin()->second.size(), 60, &consumer);
+    check("...bytes are moving", wait_until([&] { return host.GetCounters().bytesDelivered > before.bytesDelivered + 1024 * 1024; }, 30000));
+    host.SetEnabled(false);
+    const uint64_t deliveredAt = host.GetCounters().bytesDelivered;
+    Sleep(2000);
+    const auto hc = host.GetCounters();
+    check("NOT ONE BYTE REACHES THE HOST'S HELPER AFTER ITS SWITCH WENT OFF", hc.bytesDelivered == deliveredAt,
+          std::to_string(deliveredAt) + " -> " + std::to_string(hc.bytesDelivered));
+    check("...the paste ended Disabled and the host no longer advertises file copy",
+          hc.pastesFailed > before.pastesFailed && hc.lastEndReason == static_cast<uint8_t>(fn::PasteEndReason::Disabled) && !host.Advertised());
+    consumer.Wait(60000);
+    host.SetEnabled(true);
+    check("...the viewer learns it and lets go", wait_until([&] { return !viewer.PasteActive() && viewArbiter.use() == BulkUse::Idle; }, 10000));
+  }
+
+  std::printf("\n--- O (r2 5). a copy of 101 files: refused whole, and the older offer is withdrawn ---\n");
+  {
+    const std::wstring path = srcDir + L"\\oldO.txt";
+    write_file(path, make_content(2000, 141));
+    const uint64_t acceptedBefore = viewer.GetCounters().offersAccepted;
+    viewer.SubmitLocalFiles({path}, ++revision);
+    check("an ordinary offer is live on the remote PC", wait_until([&] { return viewer.GetCounters().offersAccepted > acceptedBefore; }, 20000));
+    const std::wstring manyDir = srcDir + L"\\many";
+    CreateDirectoryW(manyDir.c_str(), nullptr);
+    std::vector<std::wstring> many;
+    many.push_back(manyDir);  // a folder first: left out if filtering came before the limit
+    many.push_back(manyDir);
+    for (int i = 0; i < 99; ++i) {
+      many.push_back(manyDir + L"\\f" + std::to_wstring(i) + L".txt");
+      write_file(many.back(), make_content(10, 150 + i));
+    }
+    const auto vBefore = viewer.GetCounters();
+    viewer.SubmitLocalFiles(many, ++revision);  // 101 names, 99 of them eligible files
+    Sleep(1500);
+    const auto vc = viewer.GetCounters();
+    check("THE COPY OF 101 IS REFUSED WHOLE (TooMany), NOT OFFERED AS ITS 99 ELIGIBLE FILES",
+          vc.offersSent == vBefore.offersSent && vc.lastVerdict == static_cast<uint8_t>(fn::Verdict::TooMany),
+          "sent " + std::to_string(vBefore.offersSent) + " -> " + std::to_string(vc.offersSent) + " verdict=" + std::to_string(vc.lastVerdict));
+    Child next;
+    const std::wstring destO = root + L"destO";
+    paste(destO, 1, 8, &next);
+    next.Wait(30000);
+    check("...and the OLDER offer is off the remote clipboard (a paste gets nothing)", nothing_lands(destO, L"oldO.txt"));
   }
 
   // ================================================================== R->P (step 2)
@@ -653,8 +840,70 @@ int wmain() {
     check("a paste after it gets the NEW copy", codeNext == 0 && same_files(destNext, setNext, &detailNext), detailNext);
   }
 
+  std::printf("\n--- N3 (r2 4). the viewer's switch goes OFF mid R->P paste: the host sends nothing more ---\n");
+  {
+    std::map<std::wstring, std::vector<uint8_t>> setN3 = {{L"bigN3.bin", make_content(16u * 1024u * 1024u, 161)}};
+    const std::wstring bigPath = remoteDir + L"\\bigN3.bin";
+    write_file(bigPath, setN3.begin()->second);
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {bigPath});
+    wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000);
+    const auto hBefore = host.GetCounters();
+    Child consumer;
+    const std::wstring dest = root + L"destN3";
+    paste_on(local, dest, setN3.begin()->second.size(), 60, &consumer);
+    check("...bytes are moving", wait_until([&] { return viewer.GetCounters().bytesReceived > before.bytesReceived + 1024 * 1024; }, 30000));
+    viewer.SetAllowed(false);
+    const bool told = wait_until([&] {
+      const auto hc = host.GetCounters();
+      return hc.sendFailed > hBefore.sendFailed && hc.lastSendEndReason == static_cast<uint8_t>(fn::PasteEndReason::Disabled);
+    }, 5000);
+    check("the host was told: the send ended Disabled", told, "reason=" + std::to_string(host.GetCounters().lastSendEndReason));
+    const uint64_t servedAt = host.GetCounters().bytesServed;
+    Sleep(2000);
+    check("NOT ONE FILE BYTE IS SENT BY THE HOST AFTER IT", host.GetCounters().bytesServed == servedAt,
+          std::to_string(servedAt) + " -> " + std::to_string(host.GetCounters().bytesServed));
+    check("...both ends' bulk is free", hostArbiter.use() == BulkUse::Idle && viewArbiter.use() == BulkUse::Idle);
+    consumer.Wait(60000);
+    viewer.SetAllowed(true);
+  }
+
+  std::printf("\n--- O2 (r2 5). a copy of 101 files on the remote PC: not offered at all ---\n");
+  {
+    std::vector<std::wstring> many;
+    // Real, eligible files after two folders: cut first and filtered after (the old way), this would be
+    // offered as its 99 files; judged as a copy of 101 it is not offered at all.
+    const std::wstring manyR = remoteDir + L"\\manyR";
+    CreateDirectoryW(manyR.c_str(), nullptr);
+    many.push_back(manyR);
+    many.push_back(manyR);
+    for (int i = 0; i < 99; ++i) {
+      many.push_back(manyR + L"\\r" + std::to_wstring(i) + L".txt");
+      write_file(many.back(), make_content(10, 250 + i));
+    }
+    // First an ordinary remote copy, published here -- the one the refused copy must replace.
+    const std::wstring oldPath = remoteDir + L"\\oldO2.txt";
+    write_file(oldPath, make_content(700, 191));
+    const auto pub = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {oldPath});
+    check("an ordinary remote copy is published here first",
+          wait_until([&] { return viewer.GetCounters().remotePublished > pub.remotePublished; }, 20000));
+    const auto hBefore = host.GetCounters();
+    const auto vBefore = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, many);
+    Sleep(2000);
+    check("the host offers none of it (no identification even started)", host.GetCounters().hostOffers == hBefore.hostOffers);
+    check("...and the older remote offer comes off this PC's clipboard (the newer copy replaced it)",
+          wait_until([&] { return viewer.GetCounters().remoteCleared > vBefore.remoteCleared; }, 5000));
+  }
+
   std::printf("\n--- I. the remote clipboard stops naming files: ours comes off this PC's clipboard ---\n");
   {
+    const std::wstring path = remoteDir + L"\\lastI.txt";
+    write_file(path, make_content(500, 181));
+    const auto pub = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {path});
+    wait_until([&] { return viewer.GetCounters().remotePublished > pub.remotePublished; }, 20000);
     const auto before = viewer.GetCounters();
     host.OnHostClipboard(++hostSeq, {});
     check("the viewer withdrew what it had published", wait_until([&] { return viewer.GetCounters().remoteCleared > before.remoteCleared; }, 5000));
@@ -663,6 +912,30 @@ int wmain() {
   // ------------------------------------------------------------------ teardown
   stop.store(true);
   pump.join();
+  std::printf("\n--- E (r2 4). a request of a NEW control session: nothing of the old one is carried over ---\n");
+  {
+    const std::wstring path = srcDir + L"\\epochE.txt";
+    write_file(path, make_content(100, 171));
+    // The last P->R offer (O's refusal withdrew one; publish a fresh one straight to the handler).
+    fn::Offer o;
+    o.offerId = 0xE0E0;
+    o.revision = 1;
+    fn::OfferItem it;
+    it.index = 0;
+    it.name = u"epochE.txt";
+    it.size = 100;
+    o.items.push_back(it);
+    std::vector<uint8_t> raw;
+    fn::OfferReply orr;
+    check("an offer of session 1 is published", call(fn::FileMsg::Offer, fn::body(o), 1, &raw) && fn::parse(raw, &orr) &&
+                                                   orr.verdict == fn::Verdict::Accept);
+    fn::PasteQuery q{0xE0E0};
+    fn::PasteQueryReply qr;
+    raw.clear();
+    check("session 2 asking about it: Withdrawn (the old session's offer is gone)",
+          call(fn::FileMsg::PasteQuery, fn::body(q), 2, &raw) && fn::parse(raw, &qr) && qr.state == fn::PasteState::Withdrawn,
+          "state=" + std::to_string(static_cast<int>(qr.state)));
+  }
   hostRx.join();
   viewRx.join();
   viewer.Stop();

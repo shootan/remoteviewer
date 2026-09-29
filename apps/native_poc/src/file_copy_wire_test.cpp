@@ -270,7 +270,8 @@ int main() {
     check("arbiter: an image takes it", a.TryAcquire(BulkUse::Image, 11) && a.use() == BulkUse::Image && a.owner() == 11);
     check("arbiter: a file paste meanwhile is Busy (never swapped in)", !a.TryAcquire(BulkUse::File, 22) && a.owner() == 11);
     check("arbiter: another image meanwhile is Busy", !a.TryAcquire(BulkUse::Image, 12));
-    check("arbiter: the same holder again is fine", a.TryAcquire(BulkUse::Image, 11));
+    check("arbiter: the same holder asking again is not a new acquisition (false), and it still holds",
+          !a.TryAcquire(BulkUse::Image, 11) && a.use() == BulkUse::Image && a.owner() == 11);
     check("arbiter: only the holder releases", !a.Release(22) && a.use() == BulkUse::Image);
     check("arbiter: the holder is stopped for someone else", a.BeginStop(11) && a.use() == BulkUse::Stopping &&
                                                                  a.stopped_from() == BulkUse::Image);

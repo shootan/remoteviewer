@@ -49,10 +49,12 @@ enum class ChunkCheck : uint8_t {
 ChunkCheck check_chunk(const Pull& asked, const Chunk& got);
 
 /**
- * "Whole file verified" (검증용 결론): only when the verified chunks of ONE stream covered 0..size
- * exactly once, in ascending contiguous order. A Seek, a repeated range, a gap, or a second stream
- * makes it "chunk verified" -- every byte handed on was checked, but the whole file was not read as
- * one sequence. An empty file is whole-verified once its size 0 is confirmed.
+ * "Whole file verified" (the counters' name; 검증용 결론, r2 ⑦ wording): the verified chunks KEPT for a
+ * file covered 0..size exactly once, ascending and contiguous -- i.e. every chunk of the whole range
+ * passed its own SHA-256 check. It is NOT a SHA-256 of the whole file (none is computed or compared),
+ * and it cannot tell one reading stream from several: it says only that the kept chunks were
+ * contiguous. A Seek, a repeated range or a gap makes it "chunk verified" -- every byte handed on was
+ * still checked. An empty file counts once its size 0 is confirmed.
  */
 class CoverageTracker {
  public:

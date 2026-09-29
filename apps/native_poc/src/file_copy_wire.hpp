@@ -19,7 +19,8 @@
 // Integrity (debate D3, 검증용 결론 "최소안"): every FileChunk carries the SHA-256 of ITS bytes, and
 // the receiving side checks length, range and hash before those bytes are returned to anyone. A
 // mismatch fails that Read ("전송 데이터 검증 실패", not "원본 바뀜"). "Whole file verified" is a
-// separate, narrower claim (file_copy_net_rules.hpp). None of this authenticates a plaintext peer
+// separate, narrower claim -- every chunk of the whole range checked, not a whole-file SHA
+// (file_copy_net_rules.hpp). None of this authenticates a plaintext peer
 // (A3): the hash detects transfer errors, nothing more.
 
 #include <array>

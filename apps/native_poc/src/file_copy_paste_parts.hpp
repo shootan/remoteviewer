@@ -143,7 +143,10 @@ class FilePullReceiver {
   /** Why it went wrong, if it did: Verification (a chunk failed its check) / Session (the peer went quiet). */
   file_copy::net::PasteEndReason failure() const;
   uint64_t bytesDelivered() const;
-  /** Per file: whether 0..size arrived once, ascending ("whole file verified") -- else "chunk verified". */
+  /**
+   * Per file: whether the kept, verified chunks covered 0..size once, ascending ("whole file verified":
+   * every chunk of the whole range checked -- not a whole-file SHA) -- else "chunk verified".
+   */
   std::vector<bool> wholeFileVerified() const;
   Counters GetCounters() const;
 

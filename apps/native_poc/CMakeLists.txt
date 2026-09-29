@@ -805,6 +805,20 @@ if(MSVC)
   target_compile_options(remote60_clip_image_e2e_test PRIVATE /utf-8)
 endif()
 
+# r2 ③: a repeated image offer must not release the running image's bulk (the product host service
+# and the session's BulkArbiter; no network, no clipboard).
+add_executable(remote60_clip_image_arbiter_test
+  src/clip_image_arbiter_test.cpp
+  src/host_clip_image.cpp
+  src/clipboard_monitor.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_clip_image_arbiter_test PRIVATE src)
+target_link_libraries(remote60_clip_image_arbiter_test PRIVATE remote60_clip_image winmm)
+if(MSVC)
+  target_compile_options(remote60_clip_image_arbiter_test PRIVATE /utf-8)
+endif()
+
 # clip-image direction A: the real clipboard, one side at a time, on a private window station --
 # the viewer's snapshot read and the host's publish through HostClipboardHub (never WinSta0).
 add_executable(remote60_clip_image_clipboard_test

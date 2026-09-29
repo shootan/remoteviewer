@@ -143,7 +143,9 @@ ControlClipImageOfferReplyMessage HostClipImageService::HandleOffer(const Contro
   // Read now: publishing later is allowed only if the host clipboard has not moved since (r2 8-4).
   const uint64_t seqNow = publisher_ ? publisher_->Sequence() : 0;
   // One bulk per session: a file paste holding it makes this image Busy (never swapped in).
-  if (enabled && arbiter_ && !arbiter_->TryAcquire(BulkUse::Image, m.transferId)) {
+  // Only what THIS offer acquired is given back on a refusal below (r2 ③): never the running one's.
+  const bool acquired = enabled && arbiter_ && arbiter_->TryAcquire(BulkUse::Image, m.transferId);
+  if (enabled && arbiter_ && !acquired) {
     r.verdict = static_cast<uint8_t>(ClipImageVerdict::Busy);
     std::cout << "[native-video-host][clip-image] offer id=" << (m.transferId & 0xFFFF) << " verdict=busy (bulk is "
               << bulk_use_name(arbiter_->use()) << ")\n";
@@ -151,7 +153,7 @@ ControlClipImageOfferReplyMessage HostClipImageService::HandleOffer(const Contro
   }
   const auto res = receiver_.OnOffer(offer, sessionEpoch, enabled, seqNow, steady_us());
   r.verdict = static_cast<uint8_t>(res.verdict);
-  if (res.verdict != ClipImageVerdict::Accept && arbiter_) arbiter_->Release(m.transferId);
+  if (res.verdict != ClipImageVerdict::Accept && acquired) arbiter_->Release(m.transferId);
   std::cout << "[native-video-host][clip-image] offer id=" << (m.transferId & 0xFFFF) << " "
             << m.width << "x" << m.height << " png=" << m.pngBytes << " textUtf16=" << m.textUtf16
             << " sha=" << hex8(m.sha256) << " verdict=" << static_cast<int>(res.verdict) << "\n";

@@ -35,11 +35,16 @@ inline const char* bulk_use_name(BulkUse u) {
 
 class BulkArbiter {
  public:
-  /** Takes the bulk for `use` (Image / File) as `owner` (a transfer id / paste op, non-zero). */
+  /**
+   * Takes the bulk for `use` (Image / File) as `owner` (a transfer id / paste op, non-zero), from Idle
+   * only. True means THIS call took it -- so a caller that then refuses may Release it. A holder
+   * asking again gets false like anyone else: a repeated offer of the transfer already running must
+   * not be able to give the running transfer's bulk away (r2 ③).
+   */
   bool TryAcquire(BulkUse use, uint64_t owner) {
     if ((use != BulkUse::Image && use != BulkUse::File) || owner == 0) return false;
     std::lock_guard<std::mutex> lock(mu_);
-    if (use_ != BulkUse::Idle) return use_ != BulkUse::Stopping && owner_ == owner && use_ == use;  // re-entry
+    if (use_ != BulkUse::Idle) return false;
     use_ = use;
     owner_ = owner;
     stoppedFrom_ = BulkUse::Idle;

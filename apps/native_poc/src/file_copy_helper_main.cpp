@@ -549,8 +549,14 @@ void on_clear(std::unique_ptr<ClearRemoteFiles> m) {
     logf("clear offer=%llu: not current", static_cast<unsigned long long>(m->offerId));
     return;
   }
-  gOwner.current->AbortOperation(EndReason::Cleared);
-  release_current(true);
+  // Withdrawing an OFFER is not cancelling a PASTE (r2 ①): the offer comes off the clipboard (the next
+  // paste cannot get it), and a paste already running on it runs to its end. Only the session's end,
+  // the switch or the user's cancel stop a paste -- they arrive as Shutdown / a failed Read, not here.
+  if (OleIsCurrentClipboard(gOwner.current) == S_OK) {
+    const HRESULT hr = OleSetClipboard(nullptr);
+    logf("clipboard cleared hr=0x%08lx", static_cast<unsigned long>(hr));
+  }
+  retire_or_abort(EndReason::Cleared);
   logf("clear offer=%llu done", static_cast<unsigned long long>(m->offerId));
 }
 

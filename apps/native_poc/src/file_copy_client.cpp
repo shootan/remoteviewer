@@ -85,6 +85,32 @@ void FileCopyClient::Stop() {
   helper_.Stop();
 }
 
+void FileCopyClient::SetAllowed(bool v) {
+  const bool was = allowed_.exchange(v);
+  if (!was || v || !running_.load()) return;
+  bool disconnect = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (paste_.active) {
+      // The host learns it by End (73) -- sent even while disabled, it only ends.
+      endQueue_.push_back(PasteKey{paste_.offerId, paste_.pasteOp, fn::PasteEndReason::Disabled});
+      EndPaste(fn::PasteState::Failed, fn::PasteEndReason::Disabled);
+    }
+    EndReceiveLocked(fn::PasteEndReason::Disabled);
+    if (offer_.live) withdrawOfferId_ = offer_.offerId;
+    offer_ = OfferState{};
+    retired_ = OfferState{};
+    prepareQueue_.clear();
+    disconnect = publishedOfferId_ != 0 || R2PEnabled();
+    publishedOfferId_ = 0;
+    closeUplinkPending_ = false;
+  }
+  server_.End();
+  uplink_.Close();
+  if (disconnect) helper_.Disconnect();  // what it published comes off this clipboard
+  Log("switched off: the running paste ended, the offers withdrawn");
+}
+
 void FileCopyClient::Post(std::function<void()> task) {
   {
     std::lock_guard<std::mutex> w(workMu_);
@@ -115,7 +141,11 @@ void FileCopyClient::SubmitLocalFiles(const std::vector<std::wstring>& paths, ui
   std::vector<LocalFile> files;
   std::vector<fn::OfferItem> items;
   uint64_t excluded = 0;
-  for (const std::wstring& path : paths) {
+  // The limit is the COPY's, judged before anything is left out (r2 ⑤): a copy of more than the limit
+  // is refused whole, with its reason -- never offered as whichever files happened to come first.
+  const bool tooMany = paths.size() > fn::kMaxOfferFiles;
+  for (size_t i = 0; !tooMany && i < paths.size(); ++i) {
+    const std::wstring& path = paths[i];
     const fc::StatEntry e = fc::stat_source_file(path);
     if (e.status != fc::Status::Ok) {
       ++excluded;
@@ -137,10 +167,20 @@ void FileCopyClient::SubmitLocalFiles(const std::vector<std::wstring>& paths, ui
     items.push_back(std::move(it));
   }
   std::string why;
-  const fn::Verdict v = items.empty() ? fn::Verdict::BadRequest : fn::check_offer_items(items, &why);
+  fn::Verdict v = fn::Verdict::Accept;
+  if (tooMany) {
+    v = fn::Verdict::TooMany;
+    why = "a copy of " + std::to_string(paths.size()) + " or more files (the limit is " +
+          std::to_string(fn::kMaxOfferFiles) + ")";
+  } else {
+    v = items.empty() ? fn::Verdict::BadRequest : fn::check_offer_items(items, &why);
+  }
   std::lock_guard<std::mutex> lock(mu_);
   ++counters_.submitted;
   counters_.filesExcluded += excluded;
+  // The newer copy replaces the offer whatever it is: even a copy that cannot be offered takes the
+  // older one off the remote clipboard (r2 ⑤). A paste already running on it runs on (①).
+  if (offer_.live) withdrawOfferId_ = offer_.offerId;
   if (offer_.live || offer_.pending) retired_ = offer_;  // a paste may already have begun on it
   offer_ = OfferState{};
   if (v != fn::Verdict::Accept) {
@@ -189,7 +229,12 @@ bool FileCopyClient::Exchange(ControlLink& link, fn::FileMsg type, const std::ve
 }
 
 int FileCopyClient::Pump(ControlLink& link) {
-  if (!running_.load() || !Usable()) return 0;
+  if (!running_.load() || !bulkNegotiated_.load(std::memory_order_acquire) ||
+      !hostSupports_.load(std::memory_order_acquire)) {
+    return 0;
+  }
+  // Switched off: only what ends things goes out (an End, a withdrawal) -- nothing that starts one.
+  const bool allowed = allowed_.load(std::memory_order_acquire);
   const uint64_t now = BulkPacer::NowUs();
   // One exchange per turn, chosen in this order: what the consumer is waiting on first (an end,
   // a prepare), then this PC's offer, then the two 700 ms questions. Only the chosen one is taken.
@@ -203,13 +248,15 @@ int FileCopyClient::Pump(ControlLink& link) {
       act = Act::End;
       key = endQueue_.front();
       endQueue_.pop_front();
-    } else if (!prepareQueue_.empty()) {
+    } else if (allowed && !prepareQueue_.empty()) {
       act = Act::Prepare;
       key = prepareQueue_.front();
       prepareQueue_.pop_front();
     } else if (withdrawOfferId_ != 0) {
       act = Act::Withdraw;
       withdraw = withdrawOfferId_;
+    } else if (!allowed) {
+      // nothing else while switched off
     } else if (offer_.pending) {
       act = Act::Offer;
     } else if (paste_.active && now >= paste_.nextQueryUs) {
@@ -319,6 +366,13 @@ int FileCopyClient::PumpPasteQuery(ControlLink& link, uint64_t offerId, bool for
       }
       return 1;
     }
+    // The host no longer knows the running paste's offer at all (switched off, its state gone): the
+    // paste is over -- the pins and the bulk are let go, not held for ever (r2 ④).
+    if (forActivePaste && paste_.active && r.offerId == paste_.offerId && r.state == fn::PasteState::Withdrawn) {
+      EndPaste(fn::PasteState::Withdrawn,
+               r.reason != fn::PasteEndReason::None ? r.reason : fn::PasteEndReason::Session);
+      return 1;
+    }
     if (r.state == fn::PasteState::Begun && !paste_.active && r.pasteOp != 0 &&
         (r.offerId == offer_.offerId || r.offerId == retired_.offerId)) {
       prepare = true;
@@ -406,6 +460,7 @@ int FileCopyClient::PreparePaste(ControlLink& link, uint64_t offerId, uint64_t p
   }
   server_.Begin(FilePasteIdentity{r.epochTag, offerId, pasteOp, r.bulkGen}, sizes,
                 [this, pasteOp](uint32_t index, uint64_t offset, uint32_t length, std::vector<uint8_t>* out) {
+                  if (!allowed_.load(std::memory_order_acquire)) return fc::Status::Aborted;  // switched off
                   std::lock_guard<std::mutex> pin(pinMu_);
                   return pins_.Read(pasteOp, index, offset, length, out);
                 });
@@ -581,12 +636,14 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k) {
     std::lock_guard<std::mutex> lock(mu_);
     items = k.offerId == remote_.offerId ? remote_.items : remoteRetired_.items;
     preparingOp_ = k.pasteOp;
+    preparingOffer_ = k.offerId;
   }
   struct Done {
     FileCopyClient* self;
     ~Done() {
       std::lock_guard<std::mutex> lock(self->mu_);
       self->preparingOp_ = 0;
+      self->preparingOffer_ = 0;
     }
   } done{this};
   if (arbiter_ && !arbiter_->TryAcquire(BulkUse::File, k.pasteOp)) {
@@ -640,7 +697,7 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k) {
     std::lock_guard<std::mutex> lock(mu_);
     counters_.lastRecvVerdict = parsed ? static_cast<uint8_t>(r.verdict) : 0xFF;
     // The consumer may have given up while the host pinned (the helper said PasteEnd, or the switch).
-    for (const PasteKey& e : endQueue_) endedMeanwhile = endedMeanwhile || e.pasteOp == k.pasteOp;
+    for (const PasteKey& e : endQueue_) endedMeanwhile = endedMeanwhile || (e.pasteOp == k.pasteOp && e.offerId == k.offerId);
     if (go && (endedMeanwhile || !Usable())) go = false;
     if (go) {
       recv_ = RecvRun{true, k.offerId, k.pasteOp};
@@ -676,7 +733,7 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k) {
 
 void FileCopyClient::OnHelperPasteEnd(const fc::PasteEnd& m) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (recv_.active && recv_.pasteOp == m.pasteOp) {
+  if (recv_.active && recv_.offerId == m.offerId && recv_.pasteOp == m.pasteOp) {
     // A failed chunk check is the reason, whatever the consumer made of the failed Read.
     const fn::PasteEndReason failure = receiver_.failure();
     EndReceiveLocked(failure != fn::PasteEndReason::None ? failure : map_end(m.reason));
@@ -684,13 +741,13 @@ void FileCopyClient::OnHelperPasteEnd(const fc::PasteEnd& m) {
   }
   // Ended before it was prepared: the prepare is not sent, or its result is undone.
   for (auto it = prepareQueue_.begin(); it != prepareQueue_.end(); ++it) {
-    if (it->pasteOp == m.pasteOp) {
+    if (it->offerId == m.offerId && it->pasteOp == m.pasteOp) {
       prepareQueue_.erase(it);
       return;
     }
   }
   // A prepare in flight sees it (and ends the host's pin if the host already made one).
-  if (preparingOp_ == m.pasteOp) endQueue_.push_back(PasteKey{m.offerId, m.pasteOp, map_end(m.reason)});
+  if (preparingOp_ == m.pasteOp && preparingOffer_ == m.offerId) endQueue_.push_back(PasteKey{m.offerId, m.pasteOp, map_end(m.reason)});
 }
 
 void FileCopyClient::EndReceiveLocked(fn::PasteEndReason reason) {

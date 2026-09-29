@@ -77,6 +77,7 @@ void HostFileCopyService::Log(const std::string& line) {
 void HostFileCopyService::Configure(Config config, BulkArbiter* arbiter, LogFn log) {
   if (running_.load()) return;
   config_ = std::move(config);
+  enabled_.store(config_.enabled);
   arbiter_ = arbiter;
   log_ = std::move(log);
   random32_ = random32();
@@ -132,7 +133,18 @@ void HostFileCopyService::OnHelperFrame(const fc::PipeFrame& f) {
     }
     case fc::PipeMsg::ReadRequest: {
       fc::ReadRequest m;
-      if (fc::decode(f, &m)) receiver_.Submit(m);
+      if (!fc::decode(f, &m)) break;
+      if (!file_copy_allowed()) {  // switched off: nothing more reaches the helper
+        fc::ReadData d;
+        d.offerId = m.offerId;
+        d.pasteOp = m.pasteOp;
+        d.fileIndex = m.fileIndex;
+        d.offset = m.offset;
+        d.status = fc::Status::Aborted;
+        (void)helper_.Send(fc::encode(d));
+        break;
+      }
+      receiver_.Submit(m);
       break;
     }
     case fc::PipeMsg::PasteEnd: {
@@ -236,7 +248,18 @@ void HostFileCopyService::OnHostClipboard(uint64_t seq, std::vector<std::wstring
   std::lock_guard<std::mutex> lock(mu_);
   if (seq == clipSeq_ && paths == clipPaths_) return;
   clipSeq_ = seq;
-  if (paths.size() > fc::kMaxFiles + 1) paths.resize(fc::kMaxFiles + 1);  // one over: the rules say "too many"
+  // The limit is the copy's (r2 ⑤): more than the limit is not offered at all -- not as whichever
+  // files came first. (The monitor hands over one over the limit to say so.)
+  const bool tooMany = paths.size() > fc::kMaxFiles;
+  if (tooMany) {
+    clipPaths_.clear();
+    if (hostOffer_.offerId != 0) hostRetired_ = hostOffer_;
+    hostOffer_ = HostOffer{};
+    hostOffer_.revision = seq;
+    ++counters_.hostCopies;
+    Log("host copy not offered: more than " + std::to_string(fc::kMaxFiles) + " files");
+    return;
+  }
   clipPaths_ = std::move(paths);
   if (clipPaths_.empty()) {
     // Anything else on the clipboard: no files to offer. A paste already running is untouched.
@@ -497,8 +520,20 @@ void HostFileCopyService::FinishSendClose(uint64_t pinId) {
 
 bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t>& body, uint64_t servedEpoch,
                                         uint16_t* replyType, std::vector<uint8_t>* reply) {
+  bool newSession = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    newSession = servedEpoch_ != 0 && servedEpoch != servedEpoch_;
+  }
+  // A request of another control session reached the handlers before its session-end hook: nothing of
+  // the old one is carried into it -- not its offers, its paste or its begun state (r2 ④).
+  if (newSession) {
+    Log("a new control session: the previous one's file-copy state ends");
+    OnSessionEnd(servedEpoch);
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    servedEpoch_ = servedEpoch;
     epochTag_ = (static_cast<uint64_t>(random32_) << 32) | (servedEpoch & 0xFFFFFFFFull);
   }
   switch (static_cast<fn::FileMsg>(type)) {
@@ -702,7 +737,9 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
         r.verdict = fn::Verdict::Accept;
       }
     }
-    haveBegun_ = false;
+    // Only the begun paste THIS request names leaves the "begun" state (r2 ②): a stale or foreign
+    // Prepare refused as UnknownId must not wipe the one that is waiting to be prepared.
+    if (haveBegun_ && begunOffer_ == m.offerId && begunOp_ == m.pasteOp) haveBegun_ = false;
     if (r.verdict == fn::Verdict::Accept) {
       paste_ = Paste{};
       paste_.dir = Dir::PtoR;
@@ -743,12 +780,12 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
 
 void HostFileCopyService::OnPasteEnd(const fc::PasteEnd& m) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (paste_.dir == Dir::PtoR && paste_.pasteOp == m.pasteOp) {
+  if (paste_.dir == Dir::PtoR && paste_.offerId == m.offerId && paste_.pasteOp == m.pasteOp) {
     // A failed chunk check is the reason, whatever the consumer made of the failed Read.
     const fn::PasteEndReason failure = receiver_.failure();
     const fn::PasteEndReason reason = failure != fn::PasteEndReason::None ? failure : map_end(m.reason);
     (void)EndPasteLocked(reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed, reason);
-  } else if (haveBegun_ && begunOp_ == m.pasteOp) {
+  } else if (haveBegun_ && begunOffer_ == m.offerId && begunOp_ == m.pasteOp) {
     haveBegun_ = false;  // it ended before the viewer prepared it
     lastEnded_ = Ended{m.offerId, m.pasteOp, fn::PasteState::Failed, map_end(m.reason)};
   }
@@ -802,7 +839,7 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
         clear = true;
       }
       r.state = fn::PasteState::Withdrawn;
-    } else if (paste_.dir != Dir::None && paste_.pasteOp == m.pasteOp) {
+    } else if (paste_.dir != Dir::None && paste_.offerId == m.offerId && paste_.pasteOp == m.pasteOp) {
       const fn::PasteEndReason reason = m.reason == fn::PasteEndReason::None ? fn::PasteEndReason::Cancelled : m.reason;
       r.state = reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed;
       closeSend = EndPasteLocked(r.state, reason);
@@ -824,10 +861,10 @@ std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m)
   fn::StatusReply r;
   r.offerId = m.offerId;
   r.pasteOp = m.pasteOp;
-  if (paste_.dir != Dir::None && paste_.pasteOp == m.pasteOp) {
+  if (paste_.dir != Dir::None && paste_.offerId == m.offerId && paste_.pasteOp == m.pasteOp) {
     r.state = fn::PasteState::Active;
     r.bytesDelivered = paste_.dir == Dir::PtoR ? receiver_.bytesDelivered() : server_.GetCounters().bytesServed;
-  } else if (lastEnded_.pasteOp == m.pasteOp && m.pasteOp != 0) {
+  } else if (lastEnded_.pasteOp == m.pasteOp && lastEnded_.offerId == m.offerId && m.pasteOp != 0) {
     r.state = lastEnded_.state;
     r.reason = lastEnded_.reason;
   } else {
@@ -840,6 +877,7 @@ std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m)
 
 bool HostFileCopyService::OnDatagram(const void* data, size_t len) {
   if (!bulk_datagram_is_file(data, len)) return false;
+  if (!file_copy_allowed()) return true;  // switched off: no new data is accepted (it is still ours to drop)
   // One paste at a time: the receiver's stream (P->R) or the sender's (R->P); a channel drops what
   // is not its open stream.
   if (receiver_.IsOpen()) (void)receiver_.OnDatagram(data, len);
@@ -847,7 +885,17 @@ bool HostFileCopyService::OnDatagram(const void* data, size_t len) {
   return true;
 }
 
-void HostFileCopyService::OnSessionEnd(uint64_t /*newEpoch*/) {
+void HostFileCopyService::SetEnabled(bool on) {
+  const bool was = enabled_.exchange(on);
+  if (was && !on && running_.load()) {
+    Log("switched off: the running paste ends, the offers go, the helper shuts down");
+    Teardown(fn::PasteEndReason::Disabled);
+  }
+}
+
+void HostFileCopyService::OnSessionEnd(uint64_t /*newEpoch*/) { Teardown(fn::PasteEndReason::Session); }
+
+void HostFileCopyService::Teardown(fn::PasteEndReason reason) {
   bool shut = false;
   bool closeSend = false;
   uint64_t pin = 0;
@@ -855,13 +903,14 @@ void HostFileCopyService::OnSessionEnd(uint64_t /*newEpoch*/) {
     std::lock_guard<std::mutex> lock(mu_);
     if (paste_.dir != Dir::None) {
       pin = paste_.pasteOp;
-      closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+      closeSend = EndPasteLocked(fn::PasteState::Failed, reason);
     }
     haveBegun_ = false;
     shut = offer_.offerId != 0 || retired_.offerId != 0;
     offer_ = PeerOffer{};
     retired_ = PeerOffer{};
-    lastEnded_ = Ended{};
+    // A new session starts clean; a switch-off keeps how the paste ended, so the viewer can learn it.
+    if (reason == fn::PasteEndReason::Session) lastEnded_ = Ended{};
     baselineSet_ = false;  // the next session takes its own
     // This PC's clipboard offer stays what the clipboard says; an identification in flight with the
     // helper that now goes is asked again by the next session.

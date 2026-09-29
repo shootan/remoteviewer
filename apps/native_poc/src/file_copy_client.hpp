@@ -86,8 +86,13 @@ class FileCopyClient {
   void SetBulkNegotiated(bool v) { bulkNegotiated_.store(v, std::memory_order_release); }
   /** Pong carried kCaptureFlagFileCopyV1. */
   void SetHostSupports(bool v) { hostSupports_.store(v, std::memory_order_release); }
-  /** The viewer's own switch (A2: file_copy_allowed on this side). */
-  void SetAllowed(bool v) { allowed_.store(v, std::memory_order_release); }
+  /**
+   * The viewer's own switch (A2: file_copy_allowed on this side). Off while something runs: the
+   * running paste either way ends (Disabled) -- pins released, the sender and the receiver closed,
+   * the host told -- the offers are withdrawn and the helper goes, bounded, on the caller's thread;
+   * after it no new byte of a file is read or sent (r2 ④).
+   */
+  void SetAllowed(bool v);
   bool Usable() const {
     return bulkNegotiated_.load(std::memory_order_acquire) && hostSupports_.load(std::memory_order_acquire) &&
            allowed_.load(std::memory_order_acquire);
@@ -231,6 +236,7 @@ class FileCopyClient {
   std::deque<PasteKey> prepareQueue_;  // helper PasteBegin -> prepare on the control thread
   std::deque<PasteKey> endQueue_;      // helper PasteEnd -> End on the control thread
   uint64_t preparingOp_ = 0;           // the R->P prepare in flight on the control thread
+  uint64_t preparingOffer_ = 0;
   uint32_t nextSeq_ = 0;
   Counters counters_;
 
