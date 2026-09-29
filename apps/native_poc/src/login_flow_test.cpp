@@ -1300,6 +1300,39 @@ void test_r6_3_an_unreadable_list_with_nothing_stored() {
         back.outcome == Return::SignedIn && !back.sessionToken.empty(),
         login_flow::return_name(back.outcome));
   keep_log(dir);
+
+  // The same, when the list cannot even be set aside: every name it would be moved to is taken.
+  {
+    const Store blocked(fresh_dir());
+    FakeDirectory d2;
+    const Deps deps2 = d2.deps();
+    {
+      Store::Lock lock = blocked.Acquire(1000);
+      blocked.AddPendingRevoke(lock, PendingRevoke{kOrigin, "r6-3b-older", "r6-3b-older-9e41"});
+    }
+    gSecrets.push_back("r6-3b-older-9e41");
+    std::string bad = read_bytes(blocked.revoke_path());
+    bad[bad.size() / 2] = static_cast<char>(bad[bad.size() / 2] ^ 0x41);
+    write_bytes(blocked.revoke_path(), bad);
+    std::vector<std::wstring> taken;
+    for (int n = 1; n <= 64; ++n) {
+      taken.push_back(blocked.revoke_path() + L".unreadable-" + std::to_wstring(n));
+      block_path(taken.back());
+    }
+    const uint64_t g2 = login_flow::begin_sign_in(blocked, deps2);
+    const DeviceSignIn s2 = signed_in("r6-3b-new");
+    const Remembered r2 = login_flow::remember_sign_in(blocked, deps2, g2, "tester", s2);
+    Credential none2;
+    check("[r6-3] a list that cannot be set aside: THE SIGN-IN IS NOT KEPT, not Stored",
+          r2 == Remembered::NotSaved && load(blocked, &none2) == ReadResult::None,
+          login_flow::remembered_name(r2));
+    check("[r6-3] ...the list is left exactly as it was",
+          read_bytes(blocked.revoke_path()) == bad);
+    check("[r6-3] ...and the device it was issued is ended",
+          d2.revoked.size() == 1 && d2.revoked[0] == s2.deviceId);
+    for (const std::wstring& path : taken) unblock_path(path);
+    keep_log(d2);
+  }
 }
 
 void test_nothing_secret_is_logged() {

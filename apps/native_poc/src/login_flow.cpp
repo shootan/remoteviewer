@@ -330,14 +330,20 @@ Remembered remember_sign_in(const Store& store, const Deps& deps, uint64_t gener
     // be read is set aside -- kept, under another name -- so that a new one can be started.
     // Whether or not anything is stored: a list left unreadable blocks every return after this
     // sign-in, and there being no credential beside it (a sign-out came first) changes nothing.
+    // If it cannot even be set aside, this sign-in is not kept: stored, it would be refused at
+    // the very next start by the list still in its place, and the user would have been told
+    // they are signed in. The list stays as it is, for whoever looks at it.
     {
       std::vector<PendingRevoke> owed;
       if (store.LoadPendingRevokes(lock, &owed) == ReadResult::Unreadable) {
         std::string aside;
-        if (store.SetAsidePendingRevokes(lock, &aside)) {
-          say(deps, "the list of owed sign-outs could not be read; it is kept as " + aside +
-                        " and a new one is started");
+        if (!store.SetAsidePendingRevokes(lock, &aside)) {
+          outcome = Remembered::NotSaved;
+          why = "the list of owed sign-outs cannot be read, and could not be set aside";
+          break;
         }
+        say(deps, "the list of owed sign-outs could not be read; it is kept as " + aside +
+                      " and a new one is started");
       }
     }
 

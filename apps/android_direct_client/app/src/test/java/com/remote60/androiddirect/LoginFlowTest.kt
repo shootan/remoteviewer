@@ -38,6 +38,7 @@ class LoginFlowTest {
         var failOwed = false
         var failErase = false
         var owedUnreadable = false
+        var failSetAside = false
         var setAside = 0
         val owedList = ArrayList<LoginFlow.OwedSignOut>()
 
@@ -75,7 +76,7 @@ class LoginFlowTest {
             return true
         }
         override fun setAsideOwed(): Boolean {
-            if (!owedUnreadable) return false
+            if (!owedUnreadable || failSetAside) return false
             owedUnreadable = false
             owedList.clear()
             ++setAside
@@ -677,6 +678,19 @@ class LoginFlowTest {
         assertEquals("THE UNREADABLE LIST IS SET ASIDE, though nothing was stored beside it", 1, vault.setAside)
         assertEquals("the next start comes back signed in", LoginFlow.Return.SIGNED_IN,
             LoginFlow.comeBack(vault, dir, origin, log).outcome)
+    }
+
+    @Test
+    fun `r6-3 a list that cannot be set aside - the sign-in is not kept, and the list is left`() {
+        val vault = MemoryVault().apply { owedUnreadable = true; failSetAside = true }
+        val dir = FakeDirectory()
+        val g = LoginFlow.beginSignIn(vault, log)
+        val s = signedIn("r6-3b")
+        assertEquals("NOT Stored", LoginFlow.Remembered.NOT_SAVED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", s, log))
+        assertEquals(null, vault.stored)
+        assertTrue("the list is left as it was", vault.owedUnreadable)
+        assertEquals("the device it was issued is ended", listOf(s.deviceId), dir.revoked)
     }
 
     // ---------------------------------------------------------------- what is written down

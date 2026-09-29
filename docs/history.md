@@ -12876,3 +12876,11 @@ Next
 - 변이 4/4 kill: 403 을 비밀번호 오류로 · inactive 401 에 토큰 버림 · 대기 없음 · APK 403 일반 문구.
 - 증명하지 못하는 것: 설치된 GNLinkHost(관리자 권한)·실제 NAS·APK 화면(기기 없음 — describe 는 JVM, 화면 표시는 기존 `loginErrorText.text = e.message` 경로), 20 분 대기 자체(주기 수로만 확인).
 - 제품/테스트/문서: 제품(`directory_client.{hpp,cpp}`, `DirectoryClient.kt`) / 테스트(`directory_retry_test.cpp`, `client_auto_login_ui_test.cpp`, `client_auto_login_runner.js`, `host_login_ui_runner.js`, `gnlink_host_login_uia.ps1`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin 추가 — 읽을 수 없는 폐기 목록을 치우지 못하면 새 로그인도 저장하지 않는다 (PC 클라·APK)
+
+- Codex `31d26aa` 확인 ③(P2, 검증용이 account-admin 클라 묶음에 배정). r6 에서 "명시 로그인이 목록을 옆으로 치운다"를 이전 자격 조건에서 떼어 냈지만, 치우기가 **실패**해도 새 자격을 저장하고 성공으로 끝냈다 → 다음 시작이 그대로 남은 목록 때문에 Unreadable 로 막힌다.
+- 이제 치우기 실패 = `NotSaved`(발급된 기기는 기존 정리 경로로 폐기·또는 owed), 원본 목록은 그대로(`login_flow.cpp` `remember_sign_in`, `LoginFlow.kt` `rememberSignIn`).
+- 반례: 이전 자격 없음 + 목록 읽을 수 없음 + 옮길 이름 64개가 전부 막힘(자격 저장은 가능) → NotSaved, 자격 파일 없음, 목록 바이트 동일, 발급 기기 폐기 요청 1회 / APK 는 `failSetAside` vault.
+- 시험: `login_flow_test` exit 0, 127 · APK 단위 158/0 · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(220) · `client_recovery_ui_runner` exit 0. 변이(치우기 실패 무시) C++·Kotlin 모두 kill. 실사용 `client.txt`·`host.json` 해시 동일.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
