@@ -27,6 +27,45 @@ node server.js                                 # start
 Passwords are stored as scrypt hashes with a per-account salt. **Run with TLS in production** —
 without it, session tokens travel in clear.
 
+## Staying signed in (device credentials)
+
+A session lasts twelve hours and is forgotten by a restart. A client that wants to come back
+signed in asks for a **device credential** when it signs in, by adding `device` to the request:
+
+| Route | Body | Answers |
+|---|---|---|
+| `POST /api/login` | `{id, pw}` | `{sessionToken, expiresAt}` — exactly as before |
+| `POST /api/login` | `{id, pw, device: {kind, label}}` | the same, plus `deviceId`, `deviceCredential`, `revokeToken`, `deviceExpiresAt` |
+| `POST /api/session/refresh` | `{deviceId, deviceCredential}` | a new session **and the next credential**; the one presented stops being current |
+| `POST /api/session/logout` | `{deviceId}` with a session, or `{deviceId, revokeToken}` without | ends the device and every session it issued |
+| `GET /api/devices` | – (session) | the account's own devices; no secret, no hash |
+| `POST /api/devices/revoke` | `{deviceId}` (session) | ends one device of the account's own |
+
+`kind` is `windows-client` or `android`. Secrets travel in the body and are never logged; a
+device appears in the log as the first eight characters of its id.
+
+- The store keeps **hashes only** (`devices` in the store file). A copy of it opens nothing.
+- A credential is good for 90 days from its last use. Every refresh replaces it. The one just
+  replaced is accepted **once more for 60 seconds**, for the case where the answer was lost;
+  that window and its count are in the store, so a restart does not reopen it.
+- A credential this device *was* issued and has since replaced, presented again, **ends the
+  device**. A value that was never issued is refused and ends nothing — knowing a device id is
+  not enough to sign its owner out.
+- The revoke token never changes and only revokes.
+- Every change is written to the store **before** the client is answered. If the store cannot
+  be written the answer is 503 and nothing has changed, in memory or on disk.
+- A host token and a device credential are different things; each is refused where the other
+  belongs.
+
+**Deploying.** `device_credentials.js` is a new module `server.js` requires: upload it together
+with `server.js`, `update_manifest.js`, `version_compare.js`, `wake_target.js` and
+`package.json`, then restart. Server first, clients after: a client from before this sends no
+`device` and is answered as it always was. **Rolling back** to a server from before is safe for
+the store — it keeps `devices` untouched when it rewrites the file (run, not assumed:
+`test/device_credential_test.js`, "a server from before") — and clients holding a credential
+get 404 from the refresh route, which they treat as "this server cannot do that" and fall back
+to asking for the password.
+
 ## Wake
 
 When a client asks to connect, the server immediately sends a small UDP packet to the host from
@@ -80,3 +119,7 @@ node test/run.js
 
 Starts a throwaway server on ports 18080/18081 and checks login, throttling, host
 registration, heartbeat, address observation and the punch handshake.
+
+`test/device_credentials_unit_test.js` and `test/device_credential_test.js` are part of that
+run and can be run on their own; the second starts its own server on ports the OS picks and
+keeps everything it writes under `.claude/test-tmp`.

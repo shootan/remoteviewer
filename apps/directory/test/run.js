@@ -51,6 +51,14 @@ function cleanup() {
   console.log('--- storage failure and authentication recovery ---');
   const recovery = await runTest(['recovery_fault_test.js']);
   if (recovery.code !== 0) { cleanup(); process.exit(recovery.code); }
+  // Device credentials: the rules with the clock in the test's hands, then the same rules
+  // through a real server that is restarted, refused its store and replaced by an older one.
+  console.log('--- device credentials: the rules ---');
+  const deviceRules = await runTest(['device_credentials_unit_test.js']);
+  if (deviceRules.code !== 0) { cleanup(); process.exit(deviceRules.code); }
+  console.log('--- device credentials: the server ---');
+  const deviceServer = await runTest(['device_credential_test.js']);
+  if (deviceServer.code !== 0) { cleanup(); process.exit(deviceServer.code); }
   // First, and without a server: the version-comparison contract. It shares its vectors with the
   // C++ and Kotlin suites, so a drift between the three shows up here before anything else runs.
   // Also without a server: where a wake is aimed. Pure, so it runs before anything is started --

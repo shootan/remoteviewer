@@ -56,6 +56,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { hostSendTargetFor } = require('./wake_target');
+const deviceCredentials = require('./device_credentials');
 const os = require('os');
 
 const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
@@ -569,6 +570,10 @@ function loadStore() {
     if (err.code !== 'ENOENT') throw new Error('directory store unreadable; original preserved: ' + err.message);
     store = { accounts: {}, hosts: {} };
   }
+  // A store written before device credentials existed has no `devices`; one written after, and
+  // then read by a server from before, keeps the key because that server rewrites the whole
+  // object. Either way what is in memory from here on has one.
+  deviceCredentials.normaliseStore(store);
   indexHostTokens();
 }
 
@@ -675,7 +680,8 @@ function hashToken(token) {
 
 // ---------------------------------------------------------------- volatile state
 
-const sessions = new Map();      // sessionToken -> {accountId, expiresAt}
+const sessions = new Map();      // sessionToken -> {accountId, expiresAt, deviceId?}
+const deviceFailures = new Map(); // deviceId|peer -> {count, nextAllowedAt}; wrong values only
 const hostTokens = new Map();    // sha256(hostToken) -> hostId, rebuilt from the store
 const pendingPunch = new Map();  // hostId       -> [{ip, port, punchToken, expiresAt}]
 const observed = new Map();      // observeToken -> {ip, port, at}
@@ -684,6 +690,7 @@ const loginFailures = new Map(); // accountId    -> {count, nextAllowedAt}
 function sweep() {
   const now = Date.now();
   for (const [token, s] of sessions) if (s.expiresAt <= now) sessions.delete(token);
+  for (const [key, f] of deviceFailures) if (f.nextAllowedAt + 60000 <= now) deviceFailures.delete(key);
   for (const [hostId, list] of pendingPunch) {
     const live = list.filter((p) => p.expiresAt > now);
     if (live.length) pendingPunch.set(hostId, live);
@@ -773,7 +780,189 @@ function sessionFor(req) {
   if (!token) return null;
   const s = sessions.get(token);
   if (!s || s.expiresAt <= Date.now()) return null;
+  // A session belongs to the device family it was issued through, and ends with it. Ending the
+  // family deletes its sessions; this is the same rule asked again at the door, so that a
+  // session which somehow outlived its family is still not one.
+  if (s.deviceId && !deviceCredentials.isLive(store.devices[s.deviceId], Date.now())) {
+    sessions.delete(token);
+    return null;
+  }
   return s;
+}
+
+// ---------------------------------------------------------------- device credentials
+//
+// The rules are in device_credentials.js. What is here is the order things happen in, and it is
+// the same for every route that changes a family:
+//
+//   1. change the record in memory
+//   2. write the store
+//   3. only then end sessions, and only then answer
+//
+// A write that fails puts the records back as they were and answers 503. There is no state in
+// which the server has told a client "rotated" or "revoked" and would forget it on restart, and
+// none in which it has rotated in memory and told the client nothing.
+//
+// Nothing secret is logged: not a credential, not a revoke token, not a session. A device is
+// named in a log line by the first eight characters of its id.
+
+function deviceTag(deviceId) {
+  return String(deviceId || '').slice(0, 8) || '-';
+}
+
+/** Runs a change to store.devices and persists it; undone in memory if it cannot be written. */
+function commitDevices(change) {
+  const before = JSON.stringify(store.devices);
+  try {
+    const result = change();
+    saveStoreNow();
+    return result;
+  } catch (error) {
+    store.devices = JSON.parse(before);
+    throw error;
+  }
+}
+
+function endSessionsOf(deviceIds) {
+  const ended = new Set(deviceIds);
+  if (!ended.size) return 0;
+  let count = 0;
+  for (const [token, s] of sessions) {
+    if (s.deviceId && ended.has(s.deviceId)) {
+      sessions.delete(token);
+      ++count;
+    }
+  }
+  return count;
+}
+
+function startSession(accountId, deviceId) {
+  const token = randomToken();
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, deviceId ? { accountId, expiresAt, deviceId } : { accountId, expiresAt });
+  return { sessionToken: token, expiresAt };
+}
+
+function failureKey(req, deviceId) {
+  return String(deviceId).slice(0, 64) + '|' + (req.socket && req.socket.remoteAddress || '');
+}
+
+/**
+ * A wrong value was presented for a device. Counted per device and peer, delayed like a wrong
+ * password is. A RIGHT value is never delayed by this: it is checked first, so nobody who knows
+ * only a device id can keep its owner out by guessing at it.
+ */
+function refuseDeviceCredential(req, res, deviceId) {
+  const key = failureKey(req, deviceId);
+  const fail = deviceFailures.get(key);
+  const now = Date.now();
+  if (fail && fail.nextAllowedAt > now) {
+    return sendJson(res, 429, { error: 'too many attempts, retry later' });
+  }
+  const count = (fail ? fail.count : 0) + 1;
+  const delayMs = count <= 3 ? 0 : Math.min(30000, 500 * 2 ** Math.min(count - 3, 6));
+  if (deviceFailures.size > 10000) deviceFailures.clear();
+  deviceFailures.set(key, { count, nextAllowedAt: now + delayMs });
+  // One body for every refusal. Whether the device exists, is revoked, has expired or was
+  // handed the wrong value is not something the caller is told.
+  return sendJson(res, 401, { error: 'invalid device credential' });
+}
+
+async function handleSessionRefresh(req, res) {
+  const body = await readJsonBody(req);
+  const deviceId = String(body.deviceId || '');
+  const credential = String(body.deviceCredential || '');
+  if (!deviceId || !credential) {
+    return sendJson(res, 400, { error: 'deviceId and deviceCredential are required' });
+  }
+  const now = Date.now();
+  const record = Object.prototype.hasOwnProperty.call(store.devices, deviceId)
+    ? store.devices[deviceId] : null;
+  const verdict = deviceCredentials.classify(record, credential, now);
+
+  if (verdict === 'current' || verdict === 'grace') {
+    const issued = commitDevices(() => deviceCredentials.rotate(store.devices[deviceId], verdict, now));
+    deviceFailures.delete(failureKey(req, deviceId));
+    const session = startSession(record.accountId, deviceId);
+    console.log(`[device] ${deviceTag(deviceId)} refreshed` + (verdict === 'grace' ? ' (grace)' : ''));
+    return sendJson(res, 200, withObserve({
+      ...session, deviceId, deviceCredential: issued.credential, deviceExpiresAt: issued.expiresAt,
+    }));
+  }
+
+  if (verdict === 'reused') {
+    // A credential this family was really issued, and has since replaced, came back. That is
+    // true of a copy somebody took and equally true of an answer that was lost twice; which of
+    // the two it was cannot be known from here, and the log does not pretend to know.
+    commitDevices(() => deviceCredentials.revoke(store.devices[deviceId],
+                                                  'a superseded credential was presented', now));
+    const ended = endSessionsOf([deviceId]);
+    console.log(`[device] ${deviceTag(deviceId)} ended: a superseded credential was presented ` +
+                `(sessions ended: ${ended})`);
+  }
+  return refuseDeviceCredential(req, res, deviceId);
+}
+
+async function handleSessionLogout(req, res) {
+  const body = await readJsonBody(req);
+  const session = sessionFor(req);
+  const deviceId = String(body.deviceId || (session && session.deviceId) || '');
+  const revokeToken = String(body.revokeToken || '');
+  const record = deviceId && Object.prototype.hasOwnProperty.call(store.devices, deviceId)
+    ? store.devices[deviceId] : null;
+
+  // Two ways to be allowed: a session of the account that owns the device, or the device's
+  // own revoke token -- which is what a client that signed out while offline still has.
+  const bySession = !!session && (!record || record.accountId === session.accountId);
+  const byToken = !!record && !!revokeToken &&
+                  deviceCredentials.revokeTokenMatches(record, revokeToken);
+  if (!bySession && !byToken) {
+    if (deviceId && revokeToken) return refuseDeviceCredential(req, res, deviceId);
+    return sendJson(res, 401, { error: 'login required' });
+  }
+
+  if (record && (byToken || (bySession && record.accountId === session.accountId))) {
+    const changed = commitDevices(
+      () => deviceCredentials.revoke(store.devices[deviceId], 'signed out', Date.now()));
+    const ended = endSessionsOf([deviceId]);
+    if (changed) {
+      console.log(`[device] ${deviceTag(deviceId)} ended: signed out (sessions ended: ${ended})`);
+    }
+  }
+  // A session that came from a plain sign-in has no family; it is what ends.
+  if (session && !session.deviceId) sessions.delete(bearerToken(req));
+  // The same answer whether this ended something or it had already ended.
+  sendJson(res, 200, { ok: true });
+}
+
+function handleDevices(req, res) {
+  const session = sessionFor(req);
+  if (!session) return sendJson(res, 401, { error: 'login required' });
+  sendJson(res, 200, {
+    devices: deviceCredentials.listFor(store.devices, session.accountId, session.deviceId || '',
+                                       Date.now()),
+  });
+}
+
+async function handleDeviceRevoke(req, res) {
+  const session = sessionFor(req);
+  if (!session) return sendJson(res, 401, { error: 'login required' });
+  const body = await readJsonBody(req);
+  const deviceId = String(body.deviceId || '');
+  const record = deviceId && Object.prototype.hasOwnProperty.call(store.devices, deviceId)
+    ? store.devices[deviceId] : null;
+  // Somebody else's device and no such device are the same answer.
+  if (!record || record.accountId !== session.accountId) {
+    return sendJson(res, 404, { error: 'device not found' });
+  }
+  const changed = commitDevices(
+    () => deviceCredentials.revoke(store.devices[deviceId], 'revoked by the account', Date.now()));
+  const ended = endSessionsOf([deviceId]);
+  if (changed) {
+    console.log(`[device] ${deviceTag(deviceId)} ended: revoked by the account ` +
+                `(sessions ended: ${ended})`);
+  }
+  sendJson(res, 200, { ok: true });
 }
 
 // ---------------------------------------------------------------- routes
@@ -822,11 +1011,38 @@ async function handleLogin(req, res) {
   const pw = String(body.pw || '');
   if (!id || !pw) return sendJson(res, 400, { error: 'id and pw are required' });
 
+  // Asked for before the password is checked, so that a request this server cannot honour is
+  // refused for what is wrong with it rather than after a sign-in that then yields nothing.
+  const device = deviceCredentials.parseDeviceRequest(body.device);
+  if (device.error) return sendJson(res, 400, { error: device.error });
+
   if (!(await authenticateAccount(id, pw, res))) return;
-  const token = randomToken();
-  const expiresAt = Date.now() + SESSION_TTL_MS;
-  sessions.set(token, { accountId: id, expiresAt });
-  sendJson(res, 200, withObserve({ sessionToken: token, expiresAt }));
+
+  if (!device.wanted) {
+    // The sign-in every client made before device credentials existed, answered exactly as it
+    // was: a session and nothing else.
+    return sendJson(res, 200, withObserve(startSession(id, '')));
+  }
+
+  // A sign-in made on purpose starts a family of its own. The family is on disk before the
+  // client hears of it; if it cannot be written there is no sign-in at all, rather than a
+  // session whose device the server would forget.
+  const now = Date.now();
+  let dropped = [];
+  const family = commitDevices(() => {
+    const made = deviceCredentials.createFamily(store.devices, id, device, now);
+    dropped = deviceCredentials.prune(store.devices, id, now);
+    return made;
+  });
+  endSessionsOf(dropped);
+  console.log(`[device] ${deviceTag(family.deviceId)} started kind=${device.kind}`);
+  sendJson(res, 200, withObserve({
+    ...startSession(id, family.deviceId),
+    deviceId: family.deviceId,
+    deviceCredential: family.credential,
+    revokeToken: family.revokeToken,
+    deviceExpiresAt: family.expiresAt,
+  }));
 }
 
 async function handleHostRegister(req, res) {
@@ -1753,6 +1969,10 @@ const routes = {
   'POST /api/connect': handleConnect,
   'POST /api/logs': handleLogs,
   'GET /api/update/manifest': handleUpdateManifest,
+  'POST /api/session/refresh': handleSessionRefresh,
+  'POST /api/session/logout': handleSessionLogout,
+  'GET /api/devices': handleDevices,
+  'POST /api/devices/revoke': handleDeviceRevoke,
 };
 
 async function onRequest(req, res) {

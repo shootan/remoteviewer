@@ -12750,3 +12750,26 @@ Next
 - 검증(console 세션, 격리): `update_http_test` exit 0 (44/0) · `host_migration_e2e_test` exit 0 (33/0, `REMOTE60_ALLOW_HOST_E2E=1`) · `directory_migration_test` exit 0 (71) · `directory_retry_test` exit 0 (122/0) · `update_check_test` 28/0 · `update_release_test` 80/0 · `client_update_flow_test` PASS · `host_login_ui_runner` exit 0 · `client_recovery_ui_runner` exit 0 · gate exit 0 (8) · gate self-test exit 0 (13). 실사용 `host.json` mtime 09-23 그대로.
 - 증명하지 못하는 것: TLS, 실제 서버·실제 옛 이름, 설치된 무인 Host 가 업데이트를 거쳐 이행되는 것(실기), 창의 SIGN IN AGAIN 배지 표시.
 - 제품/테스트/문서: 제품(`update_http.cpp`, `directory_client.cpp`(상태 출력 + test seam), `fixed_directory.hpp` 주석) / 테스트(`update_http_test.cpp`, `host_migration_e2e_test.cpp` 신설, `GNLinkStreamMigrationTest` 타깃, `gnlink_check_fixed_server.py`, CMake) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r4 2부 (1/4) — 서버: 기기 자격으로 세션을 다시 얻는다
+
+- 목표: 자동 로그인(S2). 비밀번호를 저장하지 않고, 서버 재시작·12 h 만료 뒤에도 입력 없이 세션을 얻는다. 이 항목은 **서버만**이다 — 클라가 쓰기 전에는 사용자에게 보이는 변화가 없다. **배포하지 않았다.**
+- 설계 정본: `.claude/auto_login_design_r1.md` + `auto_login_debate_2026-09-29.md` "검증용 결론" + r4 2부 확정 10건.
+- 모델: 명시적 로그인이 `device:{kind,label}` 를 실으면 **계열** 하나를 새로 만든다 — `deviceId` · `deviceCredential`(세션과 다음 자격으로만 교환, 쓸 때마다 회전) · `revokeToken`(폐기 전용, **계열 동안 고정**). 저장소(`store.devices`)에는 해시만.
+- route: `POST /api/session/refresh` · `POST /api/session/logout`(세션 또는 revokeToken) · `GET /api/devices` · `POST /api/devices/revoke`. `device` 없는 `/api/login` 응답은 키·순서까지 종전과 같다.
+- 규칙(`device_credentials.js`, 시계·난수를 인자로 받는 순수 함수):
+  - 수명 90일 sliding, 세션 12 h 그대로. 직전 자격은 60 s·1회 유예 — **기한과 남은 횟수가 저장소에 있다**(재시작으로 다시 열리지 않음).
+  - **서버가 실제로 발급했던 해시**(계열당 최근 32개)가 다시 오면 그 계열을 폐기. **발급한 적 없는 값은 401 뿐**이고 아무것도 끝내지 않는다 — deviceId 만 아는 사람이 남을 로그아웃시킬 수 없다. 틀린 값은 기기·상대별로 지연되지만 **맞는 값은 먼저 검사**하므로 남의 추측이 주인을 막지 못한다.
+  - 응답 연속 유실: 같은 옛 자격의 세 번째 제시는 재사용 → 폐기 → 재로그인(허용된 복구). 로그는 유실과 도난을 구분했다고 쓰지 않는다.
+  - 폐기의 효력: logout / revoke / 재사용 폐기는 그 계열이 발급한 **기존 Bearer 세션도 끝낸다**(삭제 + 조회 시 재검사, 두 겹).
+  - 순서: 메모리 변경 → **저장** → 세션 종료·응답. 저장 실패는 메모리를 되돌리고 503.
+  - 소유: 목록·폐기는 요청 계정의 기기만. 남의 deviceId 는 없는 기기와 **같은 응답**(404).
+  - 계정당 계열 32개, 끝난 계열은 30일 뒤 삭제.
+- 검증(격리: 실제 `server.js` 를 프로세스로, OS 가 고른 포트, `.claude/test-tmp` 의 store·로그):
+  - `device_credentials_unit_test.js` exit 0, 27 checks — 유예 60 s 경계, 재시작 뒤 유예 상태, 90일 sliding, 발급 이력 상한, 옛 계열 revokeToken 이 새 계열에 무효.
+  - `device_credential_test.js` exit 0, 83 checks — 옛 클라 응답 형태 / 저장 뒤 응답 / **재시작 뒤 자격으로 세션 획득** / 유실 1회 회복·2회 폐기 / 추측은 폐기 안 함·주인은 막히지 않음 / hostToken↔기기 자격↔revokeToken↔세션 교차 거부 / 로그아웃(세션·revokeToken)과 복수 세션 무효화 / 한 대만 폐기 / 남의 계정 / 저장 실패 시 store 바이트 동일·세션 유지·회전 안 됨 / **옛 서버(6e5cd70)가 `devices` 를 보존**(실행: 옛 서버로 기동 → host register 로 저장 → `devices` JSON 동일 → 새 서버에서 같은 자격으로 refresh 200) / 발급한 모든 비밀(자격·revokeToken·세션·hostToken·비밀번호)이 scratch 의 어떤 파일에도 없음.
+  - 변이 8종 + 조합 1: 저장 실패 시 되돌리지 않음 · 저장 전에 응답 · 추측을 재사용으로 · 계정 검사 제거 · 자격을 로그에 출력 · 유예 무제한 → 각각 exit 1. 세션 삭제와 조회 시 재검사는 **하나씩 빼면 통과**(서로 덮는다) — 둘 다 빼면 exit 1(4건 FAIL). 전부 원복·해시 확인.
+  - 기존 서버 회귀 `node test/run.js` exit 0, `RESULT: ALL PASS`.
+- 한계: 32회보다 오래전에 발급된 자격은 "모르는 값"으로 읽힌다(401, 폐기 없음). 실패 지연의 키는 기기+상대 주소라 프록시 뒤에서는 상대가 모두 같은 주소다. TLS·프록시·실제 서버는 이 시험에 없다. 비밀번호 변경 route 는 아직 없어 "변경 시 전 기기 폐기"는 구현되지 않았다.
+- 배포(검증용 + NAS 세션, 이 작업에서는 하지 않음): **서버 먼저 → 클라.** 올릴 파일에 `device_credentials.js` 가 **추가**된다(`server.js` · `update_manifest.js` · `version_compare.js` · `wake_target.js` · `package.json` 과 함께) — 빠지면 `MODULE_NOT_FOUND`. 재시작 필요. 롤백: 옛 서버로 되돌려도 store 의 `devices` 는 보존되고, 자격을 가진 클라는 refresh 404 를 "이 서버는 못 한다"로 읽어 비밀번호 로그인으로 돌아간다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `device_credentials.js` 신설) / 테스트(`device_credentials_unit_test.js`·`device_credential_test.js` 신설, `test/run.js`) / 문서(`apps/directory/README.md`, 이 항목).
