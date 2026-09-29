@@ -326,21 +326,26 @@ Remembered remember_sign_in(const Store& store, const Deps& deps, uint64_t gener
     // purpose starts a family of its own. The one before it is ended -- written down as owed,
     // or, failing that, ended at the directory first. It is never simply written over, and
     // never simply left: left, it would sign this device in as the account before.
-    Credential previous;
-    const bool hasPrevious = store.Load(lock, &previous) == ReadResult::Ok &&
-                             previous.serverOrigin == deps.serverOrigin &&
-                             previous.deviceId != signedIn.deviceId;
-    if (hasPrevious && previous.deviceId != endedAtDirectory) {
+    // The user is here and has just proved who they are. A list of owed sign-outs that cannot
+    // be read is set aside -- kept, under another name -- so that a new one can be started.
+    // Whether or not anything is stored: a list left unreadable blocks every return after this
+    // sign-in, and there being no credential beside it (a sign-out came first) changes nothing.
+    {
       std::vector<PendingRevoke> owed;
       if (store.LoadPendingRevokes(lock, &owed) == ReadResult::Unreadable) {
-        // The user is here and has just proved who they are. A list that cannot be read is
-        // set aside -- kept, under another name -- so that a new one can be started.
         std::string aside;
         if (store.SetAsidePendingRevokes(lock, &aside)) {
           say(deps, "the list of owed sign-outs could not be read; it is kept as " + aside +
                         " and a new one is started");
         }
       }
+    }
+
+    Credential previous;
+    const bool hasPrevious = store.Load(lock, &previous) == ReadResult::Ok &&
+                             previous.serverOrigin == deps.serverOrigin &&
+                             previous.deviceId != signedIn.deviceId;
+    if (hasPrevious && previous.deviceId != endedAtDirectory) {
       std::string recordWhy;
       if (!store.AddPendingRevoke(lock, PendingRevoke{previous.serverOrigin, previous.deviceId,
                                                       previous.revokeToken}, &recordWhy)) {
@@ -493,9 +498,26 @@ SignOutResult sign_out(const Store& store, const Deps& deps) {
     // ending the device -- unless the directory itself says the device is ended. Then there
     // is nothing left for it to open, and it may go.
     if (ended_at_directory(told)) {
+      // The lock was let go for the call, and another window may have signed in meanwhile and
+      // stored a family of its own -- alive at the directory, and this file its only means of
+      // being ended. So what is erased is THIS device's credential, read again under the lock,
+      // and nothing else. (The counter is not the test: a sign-in begun elsewhere moves it
+      // without storing anything, and A's credential is then still here and still to go.)
       Store::Lock lock = store.Acquire(deps.lockWaitMs);
-      result.localDone = lock.held() && store.Erase(lock);
+      Credential now;
+      const ReadResult again = lock.held() ? store.Load(lock, &now) : ReadResult::Unreadable;
+      const bool stillThis = again == ReadResult::Ok && now.serverOrigin == deps.serverOrigin &&
+                             now.deviceId == device;
+      wipe(&now);
       result.serverTold = told == SessionCall::Ok;
+      if (lock.held() && !stillThis && again != ReadResult::Unreadable) {
+        // Gone already, or replaced by another sign-in: this device is ended and not on disk.
+        result.localDone = true;
+        say(deps, "device " + tag(device) + ": the directory ended it (" + session_call_name(told) +
+                      "); what is stored now is not it, and is left as it is");
+        return result;
+      }
+      result.localDone = lock.held() && stillThis && store.Erase(lock);
       result.detail = result.localDone ? std::string() : "the stored sign-in could not be removed";
       say(deps, "device " + tag(device) + ": the directory ended it (" + session_call_name(told) +
                     "); the credential is " +

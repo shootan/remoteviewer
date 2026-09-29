@@ -3903,20 +3903,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val loginVault: LoginFlow.Vault by lazy { KeystoreLoginVault(this) }
     private var signInEpoch = 0
 
-    /**
-     * The account the session in use belongs to -- what the host list is shown as. Not the id
-     * in the form, which a failed attempt also changes. Main thread.
-     */
-    private var sessionAccountId = ""
-
     private fun directoryOrigin(): String = DirectoryClient.originKey(DirectoryClient.directoryUrl)
 
     private fun flowLog(line: String) = diagnosticsLog.log("sign_in_store", line)
 
     /** Takes a session into use: memory, the log uploader, and the host list. Main thread. */
     private fun adoptSession(token: String, accountId: String, reason: String) {
-        sessionAccountId = accountId
-        DirectoryClient.adoptSession(token)
+        // The session and its owner go in together (DirectoryClient keeps them as one value), so
+        // a recreated Activity finds both -- not the id in the form, which a failed attempt
+        // also changes.
+        DirectoryClient.adoptSession(token, accountId)
         LogUploader.configure(this, DirectoryClient.directoryUrl, token)
         setDirectoryBusy(false)
         manualConnectMode = false
@@ -4075,7 +4071,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val url = DirectoryClient.directoryUrl
         val session = DirectoryClient.session()
         DirectoryClient.dropSession()
-        sessionAccountId = ""
         manualConnectMode = false
         directoryHosts = emptyList()
         hostListAdapter.notifyDataSetChanged()
@@ -4109,7 +4104,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         val epoch = signInEpoch
-        val account = sessionAccountId
+        val account = DirectoryClient.sessionAccount()
         setDirectoryBusy(true)
         hostsStatusText.text = getString(R.string.hosts_loading)
         directoryExecutor.execute {
@@ -4132,7 +4127,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     anotherAccount = back.outcome == LoginFlow.Return.OTHER_ACCOUNT
                     if (back.outcome != LoginFlow.Return.SIGNED_IN || back.accountId != account) throw e
                     if (epoch != signInEpoch) return@execute
-                    DirectoryClient.adoptSession(back.sessionToken)
+                    DirectoryClient.adoptSession(back.sessionToken, back.accountId)
                     LogUploader.configure(this, url, back.sessionToken)
                     list = DirectoryClient.hosts(url, back.sessionToken)
                 }
@@ -4157,7 +4152,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (e is DirectoryClient.DirectoryException && e.status == 401) {
                         ++signInEpoch
                         DirectoryClient.dropSession()
-                        sessionAccountId = ""
                         currentScene = UiScene.LOGIN
                         loginErrorText.text = getString(
                             if (anotherAccount) R.string.login_other_account else R.string.login_again)

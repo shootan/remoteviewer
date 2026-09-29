@@ -12831,3 +12831,16 @@ Next
 - ⚠️ r5 의 새 사용자 문구(로그아웃 미완료·다른 계정·저장소 없음)는 흐름 시험으로만 확인했고, 제품 창에서 그 상태를 만들어 보지는 않았다.
 - 증명하지 못하는 것: 실제 디스크 가득·권한 거부(경로를 디렉터리로 막아 대신), APK 의 Keystore·SharedPreferences 쓰기 실패(JVM vault 로 대신 — 기기 없음), 두 창 두 계정의 실제 UI(흐름 시험으로 대신).
 - 제품/테스트/문서: 제품(`login_credential_store.{hpp,cpp}`, `login_flow.{hpp,cpp}`, `client_shell_main.cpp`, `LoginFlow.kt`, `KeystoreLoginVault.kt`, `MainActivity.kt`, strings 2) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r6 — 늦은 로그아웃 응답·Activity 재생성·빈 자리의 손상 목록 (PC 클라·APK) + Host UI 시험의 가림 판정
+
+- 반려(r6, Codex `e7e5037` 확인 + 검증용 동의) 3건 + 시험 1건. 서버 무변경.
+- ① 표식을 못 쓴 로그아웃은 잠금을 놓고 서버에 먼저 알린다. 그 사이 다른 창이 계열 B 를 저장하면, 돌아온 응답이 **B 를 지우던** 것을 막았다: 다시 잠근 뒤 **저장된 것이 여전히 A(origin·deviceId)일 때만** 지운다. 아니면 A 는 서버에서 끝났고 디스크에도 없으므로 완료로 보고 B 는 그대로 둔다. generation 은 판정에 쓰지 않았다 — 다른 창이 로그인을 시작만 해도 카운터가 움직이지만 그때 A 는 여전히 지워야 한다(`login_flow.cpp`, `LoginFlow.kt`).
+- ② APK: 세션과 그 소유 계정을 `DirectoryClient` 의 한 값(`Held(token, accountId)`)으로 함께 두어 같은 수명(프로세스)으로 만들었다. Activity 필드 `sessionAccountId` 삭제 → 재생성된 Activity 도 401 복구에 계정을 넘긴다. 옛 버전에서 옮겨 온 평문 세션은 계정이 기록돼 있지 않아 빈 값(추정하지 않음).
+- ③ 읽을 수 없는 폐기 목록을 옆으로 치우는 일을 "이전 자격이 있을 때" 조건에서 떼어 냈다 — 로그아웃으로 자격이 없는 상태에서도 명시 로그인 1회로 목록이 복구되고 다음 시작이 자동 로그인된다.
+- ④ `gnlink_host_login_uia.ps1`: 누르기 전에 시험 창을 포커스 없이 최상위로 올린다(끝나면 되돌림). 그래도 **다른 프로세스의 창**이 버튼을 가리면 FAIL 이 아니라 **INVALID(exit 3)** + 그 창의 hwnd·class·title·pid·exe. 자기 프로세스의 창이 가리면 종전대로 FAIL. `host_login_ui_runner.js` 는 exit 3 을 받아 전체를 INVALID(exit 3)로 끝낸다. 사용자 창은 옮기거나 닫지 않는다. (원인: 검증용 20:02 실행에서 버튼 위 창 = GMux.)
+- 시험: `login_flow_test` exit 0, 124 checks(r6 8) · APK 단위 156/0(`LoginFlowTest` 41, r6 3) · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(65) · `host_login_ui_runner` exit 0(38) · bridge 0 · session 0 · gate win 8 / apk 5 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이: C++ 3종(목록 확인 없이 삭제 · 재확인 없이 실패 처리 · 이전 자격 있을 때만 치움) · Kotlin 3종(같은 둘 + 세션에 계정 안 붙임) 모두 실제 시험 실패로 kill.
+- 부정 대조(④): 시험 창 위를 30 ms 마다 다시 덮는 자체 decoy 창(다른 프로세스) → runner exit 3 INVALID, 가린 창 신원 출력 확인. decoy 없이 같은 빌드는 exit 0.
+- 증명하지 못하는 것: APK Activity 재생성 자체(기기 없음 — JVM 에서 DirectoryClient 값의 수명과 복구 흐름, 그리고 Activity 에 사본이 없음을 소스로 확인), 실제 두 창 동시 실행 UI.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`, `DirectoryClient.kt`, `MainActivity.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`, `gnlink_host_login_uia.ps1`, `host_login_ui_runner.js`) / 문서(이 항목, 구현계획).

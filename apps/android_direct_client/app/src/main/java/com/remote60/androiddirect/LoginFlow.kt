@@ -375,17 +375,18 @@ object LoginFlow {
                     outcome = Remembered.SUPERSEDED
                     return@inner true
                 }
+                // The user is here and has just proved who they are. A list that cannot be read
+                // is set aside -- kept -- so that a new one can be started. Whether or not a
+                // sign-in is stored beside it: left unreadable, it blocks every return after this.
+                if (vault.owed() is OwedRead.Unreadable && vault.setAsideOwed()) {
+                    log("sign-in store: the list of owed sign-outs could not be read; it is " +
+                        "kept aside and a new one is started")
+                }
                 val read = vault.load()
                 val previous = (read as? VaultRead.Ok)?.login?.takeIf {
                     it.serverOrigin == serverOrigin && it.deviceId != signedIn.deviceId
                 }
                 if (previous != null && previous.deviceId != endedAtDirectory) {
-                    if (vault.owed() is OwedRead.Unreadable && vault.setAsideOwed()) {
-                        // The user is here and has just proved who they are. A list that cannot
-                        // be read is set aside -- kept -- so that a new one can be started.
-                        log("sign-in store: the list of owed sign-outs could not be read; it is " +
-                            "kept aside and a new one is started")
-                    }
                     if (!vault.addOwed(OwedSignOut(previous.serverOrigin, previous.deviceId,
                             previous.revokeToken))) {
                         if (pass == 1) {
@@ -535,7 +536,24 @@ object LoginFlow {
         val told = directory.revoke(ended.deviceId, ended.revokeToken)
         if (!recorded) {
             if (endedAtDirectory(told)) {
-                val erased = locked(lockWaitMs, busy = { false }) { vault.erase() }
+                // The lock was let go for the call; a sign-in may have stored a family of its
+                // own meanwhile, alive at the directory. Only THIS device's credential goes.
+                var replaced = false
+                val erased = locked(lockWaitMs, busy = { false }) {
+                    val now = vault.load()
+                    val stillThis = now is VaultRead.Ok && now.login.serverOrigin == serverOrigin &&
+                        now.login.deviceId == ended.deviceId
+                    when {
+                        stillThis -> vault.erase()
+                        now is VaultRead.Unreadable -> false
+                        else -> { replaced = true; true }
+                    }
+                }
+                if (replaced) {
+                    log("sign-in store: device ${tag(ended.deviceId)}: the directory ended it ($told); " +
+                        "what is stored now is not it, and is left as it is")
+                    return SignOutResult(true, told == Call.OK, false)
+                }
                 log("sign-in store: device ${tag(ended.deviceId)}: the directory ended it ($told); " +
                     "the credential is " + (if (erased) "erased" else "STILL STORED (could not be erased)"))
                 return SignOutResult(erased, told == Call.OK, false,

@@ -19,6 +19,9 @@
 # The password is the fixture server's test account. Nothing here reads or types a real one.
 #
 # Prints PASS/FAIL lines and a last line "host_login_uia: ALL PASS" or "... FAIL"; exit 0 or 1.
+# Exit 3 (INVALID) when a window of ANOTHER program still lies over the Sign in button after the
+# test window was raised: the test could not look, which is not the product failing. Its identity
+# is printed. Nothing is done to that window -- it is the user's, and it is left where it is.
 
 param(
   [Parameter(Mandatory = $true)][int]$ProcessId,
@@ -54,6 +57,8 @@ public static class GnlinkHostUia {
   public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder text, int max);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder text, int max);
+  [DllImport("user32.dll")]
+  public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 }
 '@
 # Before anything asks for a rectangle: an unaware process is handed scaled coordinates, and the
@@ -179,9 +184,17 @@ if ($Expect -eq 'signin') {
     $cx = $br.X + $br.Width / 2; $cy = $br.Y + $br.Height / 2
     $insideWindow = $cx -ge $wr.X -and $cx -le ($wr.X + $wr.Width) -and $cy -ge $wr.Y -and $cy -le ($wr.Y + $wr.Height)
     Check ($button.Enabled -and $insideWindow) 'the Sign in button is enabled and lies inside the window'
+    # The test's own window is raised first, without taking the focus: the desktop this runs on
+    # is somebody's, and their windows (2026-09-29: GMux, the program these sessions run in) can
+    # be in front of it. Topmost for as long as it is looked at and pressed, then back.
+    $hostHwnd = [IntPtr]$window.Current.NativeWindowHandle
+    $noMoveNoSizeNoActivate = 0x0002 -bor 0x0001 -bor 0x0010
+    [void][GnlinkHostUia]::SetWindowPos($hostHwnd, [IntPtr](-1), 0, 0, 0, 0, $noMoveNoSizeNoActivate)   # HWND_TOPMOST
+    Start-Sleep -Milliseconds 150
     $pt = New-Object GnlinkHostUia+POINT
     $pt.X = [int]$cx; $pt.Y = [int]$cy
     $atPoint = [GnlinkHostUia]::WindowFromPoint($pt)
+    $coveredByOther = $false
     if ($atPoint -ne $button.Hwnd) {
       # Said at the moment it is seen: by the time anyone looks, the window in the way is gone.
       Write-Output "      (at the button's centre: window $atPoint, not the button $($button.Hwnd))"
@@ -196,14 +209,24 @@ if ($Expect -eq 'signin') {
         $exe = ''
         try { $exe = (Get-Process -Id $ownerPid -ErrorAction Stop).Path } catch { $exe = '(could not be read)' }
         Write-Output ("      (in the way: hwnd={0} class='{1}' title='{2}' pid={3} exe={4})" -f $h, $class, $title, $ownerPid, $exe)
+        if ($ownerPid -ne 0 -and $ownerPid -ne $ProcessId) { $coveredByOther = $true }
       }
     }
+    if ($coveredByOther) {
+      # Another program's window, still in front after ours was raised. The button was not
+      # looked at, so nothing is said about it either way.
+      [void][GnlinkHostUia]::SetWindowPos($hostHwnd, [IntPtr](-2), 0, 0, 0, 0, $noMoveNoSizeNoActivate)   # HWND_NOTOPMOST
+      Write-Output 'host_login_uia: INVALID (another program''s window covers the Sign in button; see "in the way" above)'
+      exit 3
+    }
+    # A window or control of the product's own process in the way is the product's doing: FAIL.
     Check ($atPoint -eq $button.Hwnd) 'nothing lies over the Sign in button'
 
     # Left button down and up in the middle of the button, in its own coordinates.
     $l = [IntPtr]((([int]($br.Height / 2)) -shl 16) -bor ([int]($br.Width / 2)))
     [void][GnlinkHostUia]::PostMessage($button.Hwnd, 0x0201, [IntPtr]1, $l)   # WM_LBUTTONDOWN
     [void][GnlinkHostUia]::PostMessage($button.Hwnd, 0x0202, [IntPtr]::Zero, $l)   # WM_LBUTTONUP
+    [void][GnlinkHostUia]::SetWindowPos($hostHwnd, [IntPtr](-2), 0, 0, 0, 0, $noMoveNoSizeNoActivate)   # HWND_NOTOPMOST
     $Expect = 'signedin'
     $Shot = $ShotAfter
   }

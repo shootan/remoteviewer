@@ -609,6 +609,76 @@ class LoginFlowTest {
             "account-b", anyone.accountId)
     }
 
+    // ---------------------------------------------------------------- r6
+
+    @Test
+    fun `r6-1 a late answer to the sign-out of A does not erase B, stored meanwhile by another sign-in`() {
+        val a = login("r6-a")
+        val b = login("r6-b")
+        val vault = MemoryVault().apply { stored = a; failOwed = true }
+        // The directory's answer is held until another sign-in has stored B.
+        val dir = object : LoginFlow.Directory {
+            val revoked = ArrayList<String>()
+            override fun refresh(deviceId: String, deviceCredential: String) =
+                LoginFlow.Refreshed(LoginFlow.Call.UNREACHABLE)
+            override fun revoke(deviceId: String, revokeToken: String): LoginFlow.Call {
+                revoked.add(deviceId)
+                vault.stored = b      // the other window, complete
+                return LoginFlow.Call.OK
+            }
+        }
+        val out = LoginFlow.signOut(vault, dir, origin, log)
+        assertEquals("A LATE ANSWER TO THE SIGN-OUT OF A DOES NOT ERASE B", b, vault.stored)
+        assertTrue("A's sign-out is done: ended at the directory, not on disk", out.localDone && out.serverTold)
+        assertEquals(listOf(a.deviceId), dir.revoked)
+
+        // With nobody in between, A still goes (r5-2).
+        val alone = MemoryVault().apply { stored = a; failOwed = true }
+        assertTrue(LoginFlow.signOut(alone, FakeDirectory(), origin, log).localDone)
+        assertEquals(null, alone.stored)
+    }
+
+    @Test
+    fun `r6-2 the session and its account are held together, past the Activity`() {
+        try {
+            DirectoryClient.adoptSession("r6-session-3c1f", "account-r6")
+            // A recreated Activity has none of the old one's fields; what it can read is this.
+            assertEquals("r6-session-3c1f", DirectoryClient.session())
+            assertEquals("account-r6", DirectoryClient.sessionAccount())
+
+            // The session is refused later; the stored sign-in brings it back for that account,
+            // without a password.
+            val vault = MemoryVault().apply { stored = login("r6-2").copy(accountId = "account-r6") }
+            val back = LoginFlow.comeBack(vault, FakeDirectory(), origin, log,
+                onlyForAccount = DirectoryClient.sessionAccount())
+            assertEquals(LoginFlow.Return.SIGNED_IN, back.outcome)
+            DirectoryClient.adoptSession(back.sessionToken, back.accountId)
+            assertEquals("account-r6", DirectoryClient.sessionAccount())
+
+            DirectoryClient.dropSession()
+            assertEquals("", DirectoryClient.session())
+            assertEquals("the account goes with the session", "", DirectoryClient.sessionAccount())
+        } finally {
+            DirectoryClient.dropSession()
+        }
+        // Static: the Activity keeps no copy of its own that a recreation would lose.
+        val activity = codeOf(main("java/com/remote60/androiddirect/MainActivity.kt").readText())
+        assertFalse(activity.contains("sessionAccountId"))
+        assertTrue(activity.contains("val account = DirectoryClient.sessionAccount()"))
+    }
+
+    @Test
+    fun `r6-3 an unreadable list with nothing stored is set aside by a sign-in, and the next start comes back`() {
+        val vault = MemoryVault().apply { owedUnreadable = true }
+        val dir = FakeDirectory()
+        val g = LoginFlow.beginSignIn(vault, log)
+        assertEquals(LoginFlow.Remembered.STORED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", signedIn("r6-3"), log))
+        assertEquals("THE UNREADABLE LIST IS SET ASIDE, though nothing was stored beside it", 1, vault.setAside)
+        assertEquals("the next start comes back signed in", LoginFlow.Return.SIGNED_IN,
+            LoginFlow.comeBack(vault, dir, origin, log).outcome)
+    }
+
     // ---------------------------------------------------------------- what is written down
 
     @Test

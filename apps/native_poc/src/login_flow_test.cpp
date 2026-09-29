@@ -1205,6 +1205,103 @@ void test_r5_6_another_account() {
   keep_log(dir);
 }
 
+// ------------------------------------------------------------------------------ r6
+//
+// Two more from the review of e7e5037: an answer to a sign-out that arrives after another window
+// has signed in, and a list that cannot be read with nothing stored beside it.
+
+void test_r6_1_a_late_sign_out_answer() {
+  // Window 1 signs out of A. The sign-out cannot be written down, so the directory is told
+  // first -- with the lock let go. While that call is out, window 2 signs in as B and stores it.
+  const Store store(fresh_dir());
+  FakeDirectory dir;
+  Deps deps = dir.deps();
+  const Credential a = credential("r6-1-a");
+  const Credential b = credential("r6-1-b");
+  secret(a);
+  secret(b);
+  seed(store, a);
+  bool storedB = false;
+  auto tell = deps.revoke;
+  deps.revoke = [&](const std::string& deviceId, const std::string& token, std::string* error) {
+    // Window 2, complete, while window 1 waits for the directory.
+    Store::Lock lock = store.Acquire(1000);
+    storedB = lock.held() && store.Save(lock, b);
+    lock = Store::Lock();
+    return tell(deviceId, token, error);
+  };
+  std::string bBytes;
+  {
+    BrokenJournalWrite broken(store);
+    const auto out = login_flow::sign_out(store, deps);
+    bBytes = read_bytes(store.credential_path());
+    Credential now;
+    check("[r6-1] the other window's sign-in was stored while the sign-out waited", storedB);
+    check("[r6-1] A LATE ANSWER TO THE SIGN-OUT OF A DOES NOT ERASE B",
+          load(store, &now) == ReadResult::Ok && now.deviceId == b.deviceId &&
+              now.revokeToken == b.revokeToken,
+          now.deviceId);
+    check("[r6-1] ...and A's sign-out is done: the directory ended it, and A is not on disk",
+          out.localDone && out.serverTold && dir.revoked.size() == 1 &&
+              dir.revoked[0] == a.deviceId);
+  }
+  // Without the other window, the same answer still erases A (the case r5-2 covers).
+  {
+    const Store alone(fresh_dir());
+    FakeDirectory d2;
+    const Credential c = credential("r6-1-alone");
+    secret(c);
+    seed(alone, c);
+    BrokenJournalWrite broken(alone);
+    const auto out = login_flow::sign_out(alone, d2.deps());
+    Credential after;
+    check("[r6-1] with nobody in between, A's credential is erased as before",
+          out.localDone && load(alone, &after) == ReadResult::None);
+    keep_log(d2);
+  }
+  keep_log(dir);
+}
+
+void test_r6_3_an_unreadable_list_with_nothing_stored() {
+  // Signed out (nothing stored), and the list of owed sign-outs cannot be read.
+  const Store store(fresh_dir());
+  FakeDirectory dir;
+  const Deps deps = dir.deps();
+  {
+    Store::Lock lock = store.Acquire(1000);
+    store.AddPendingRevoke(lock, PendingRevoke{kOrigin, "r6-3-older-device", "r6-3-older-51d0"});
+  }
+  gSecrets.push_back("r6-3-older-51d0");
+  std::string journal = read_bytes(store.revoke_path());
+  journal[journal.size() / 2] = static_cast<char>(journal[journal.size() / 2] ^ 0x41);
+  write_bytes(store.revoke_path(), journal);
+  Credential none;
+  check("[r6-3] nothing is stored, and the list cannot be read",
+        load(store, &none) == ReadResult::None);
+
+  // One sign-in, made on purpose.
+  const uint64_t g = login_flow::begin_sign_in(store, deps);
+  const DeviceSignIn s = signed_in("r6-3-new");
+  const Remembered r = login_flow::remember_sign_in(store, deps, g, "tester", s);
+  check("[r6-3] the sign-in is stored", r == Remembered::Stored, login_flow::remembered_name(r));
+  std::vector<PendingRevoke> list;
+  ReadResult listRead;
+  {
+    Store::Lock lock = store.Acquire(1000);
+    listRead = store.LoadPendingRevokes(lock, &list);
+  }
+  check("[r6-3] THE UNREADABLE LIST IS SET ASIDE BY IT, though there was nothing stored beside it",
+        listRead != ReadResult::Unreadable &&
+            read_bytes(store.revoke_path() + L".unreadable-1") == journal);
+
+  // The next start.
+  const auto back = login_flow::come_back(store, deps);
+  check("[r6-3] ...so the next start comes back signed in",
+        back.outcome == Return::SignedIn && !back.sessionToken.empty(),
+        login_flow::return_name(back.outcome));
+  keep_log(dir);
+}
+
 void test_nothing_secret_is_logged() {
   size_t lines = 0, leaks = 0;
   std::string first;
@@ -1251,6 +1348,8 @@ int wmain(int argc, wchar_t** argv) {
   test_r5_4_a_server_without_the_route();
   test_r5_5_no_sign_in_without_the_store();
   test_r5_6_another_account();
+  test_r6_1_a_late_sign_out_answer();
+  test_r6_3_an_unreadable_list_with_nothing_stored();
   test_nothing_secret_is_logged();
 
   remove_case_dirs();

@@ -447,21 +447,36 @@ object DirectoryClient {
     // made the preferences file a way into the account for twelve hours at a time. What
     // outlives the process now is the device credential, in [KeystoreLoginVault].
 
+    /**
+     * A session and the account it belongs to, held as ONE value: they are set, replaced and
+     * dropped together, and they live exactly as long as each other -- as long as the process.
+     * The account used to be a field of the Activity, and a recreated Activity (rotation, a
+     * theme change, the system reclaiming it) came back with the session and without its owner.
+     */
+    private class Held(val token: String, val accountId: String)
+
     @Volatile
-    private var memorySession = ""
+    private var memory = Held("", "")
 
     /** True while the session in memory was carried over from a former name of the server. */
     @Volatile
     private var carriedOver = false
 
-    fun session(): String = memorySession
+    fun session(): String = memory.token
 
-    fun adoptSession(token: String) {
-        memorySession = token
+    /**
+     * The account the session in memory belongs to. Empty when there is no session, and for a
+     * session carried over from an older version, which did not record whose it was -- it is
+     * not guessed from the form.
+     */
+    fun sessionAccount(): String = memory.accountId
+
+    fun adoptSession(token: String, accountId: String) {
+        memory = Held(token, accountId)
     }
 
     fun dropSession() {
-        memorySession = ""
+        memory = Held("", "")
         carriedOver = false
     }
 
@@ -498,7 +513,7 @@ object DirectoryClient {
         val storedUrl = p.getString(KEY_URL, "").orEmpty()
         if (legacySessionUsable(storedUrl, token, p.getLong(KEY_EXPIRES, 0L),
                 System.currentTimeMillis(), directoryUrl, migratableOrigins)) {
-            memorySession = token
+            memory = Held(token, "")
             carriedOver = classifyStoredOrigin(storedUrl, directoryUrl, migratableOrigins) ==
                 StoredOrigin.MIGRATABLE
         }
