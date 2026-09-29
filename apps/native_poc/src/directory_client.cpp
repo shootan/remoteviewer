@@ -840,7 +840,8 @@ bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& password, const std::string& hostName,
                    const std::string& machineId, std::string* outHostId,
                    std::string* outHostToken, std::string* outError,
-                   ObserveEndpoint* outObserve) {
+                   ObserveEndpoint* outObserve, uint32_t* outHttpStatus) {
+  if (outHttpStatus) *outHttpStatus = 0;
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -858,9 +859,20 @@ bool register_host(const std::string& url, const std::string& accountId,
     if (outError) *outError = "cannot reach the server";
     return false;
   }
-  if (status == 401 || status == 403) {
+  if (outHttpStatus) *outHttpStatus = status;
+  if (status == 401) {
     // The server will not say which of the two was wrong, and neither should we.
     if (outError) *outError = "id or password is not correct";
+    return false;
+  }
+  if (status == 403) {
+    // The password was right; the account may not register a PC -- waiting for approval, or
+    // stopped. The directory's sentence says which, and it is what the user is shown.
+    std::string serverError;
+    json_get_string(resp, "error", &serverError);
+    if (outError) {
+      *outError = serverError.empty() ? "this account cannot register a PC (http 403)" : serverError;
+    }
     return false;
   }
   if (status == 429) {
@@ -1052,11 +1064,19 @@ bool HostAgent::EnsureRegistered() {
   }
   std::string token, id, error;
   ObserveEndpoint advertised;
+  uint32_t httpStatus = 0;
   if (!register_host(cfg_.url, cfg_.accountId, cfg_.password, cfg_.hostName, machineId_, &id,
-                     &token, &error, &advertised)) {
+                     &token, &error, &advertised, &httpStatus)) {
+    if (httpStatus == 403) {
+      // Waiting for approval, or stopped. Asking again every heartbeat would not change that; an
+      // operator does. So the next attempt is far off, and further each time.
+      BackOffInactive("registration refused: " + error);
+      return false;
+    }
     SetStatus(error);
     return false;
   }
+  inactiveBackoff_ = 0;
   hostToken_ = token;
   hostId_ = id;
   observeAdvertised_ = advertised;
@@ -1193,6 +1213,16 @@ std::vector<std::string> local_ipv4_addresses() {
   return out;
 }
 
+void HostAgent::BackOffInactive(const std::string& status) {
+  // 2, 4, 8 ... cycles, to about twenty minutes at the default 25-second heartbeat.
+  constexpr int kMaxInactiveCooldownCycles = 48;
+  inactiveBackoff_ = inactiveBackoff_ == 0 ? 2 : (std::min)(inactiveBackoff_ * 2, kMaxInactiveCooldownCycles);
+  inactiveCooldown_ = inactiveBackoff_;
+  SetStatus(status);
+  std::cout << "[native-video-host] directory " << status << "; asking again in "
+            << inactiveCooldown_ << " cycles\n";
+}
+
 bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
   uint32_t status = 0;
   std::string serverError;
@@ -1296,6 +1326,16 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
     return false;
   }
   if (status == 401) {
+    std::string code;
+    json_get_string(resp, "code", &code);
+    if (code == "account_inactive") {
+      // The token is good; the account behind it has been stopped (or is waiting for approval).
+      // It is KEPT: the account may be re-enabled, and then this same token works again with
+      // nothing to re-register. The status still reads "token rejected", which is what the
+      // window shows as SIGN IN AGAIN -- the PC is off the service until that changes.
+      BackOffInactive("host token rejected: the account is not active");
+      return false;
+    }
     // The server forgot us (restored from an older store, or the token was revoked).
     // Drop the cached token so the next pass re-registers if we still hold a password.
     hostToken_.clear();
@@ -1508,7 +1548,13 @@ void HostAgent::Run() {
     std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " start cause="
               << cycleCause << "\n";
 
-    if (EnsureRegistered()) {
+    if (inactiveCooldown_ > 0) {
+      // The account is not active. Nothing is sent this cycle; the status set when that was
+      // learned stands.
+      --inactiveCooldown_;
+      std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=skip reason=inactive"
+                << " cyclesLeft=" << inactiveCooldown_ << "\n";
+    } else if (EnsureRegistered()) {
       // A host that started from a cached token never registered, so nothing has told it where
       // observations go. Asked here rather than inside EnsureRegistered, because that function
       // returns immediately when a token is cached -- which is exactly the case that needs this.
@@ -1543,6 +1589,7 @@ void HostAgent::Run() {
                   << (hbOk ? 1 : 0) << " ms=" << stepMs(hbStart)
                   << " capabilities=" << punch.size() << "\n";
         if (hbOk) {
+          inactiveBackoff_ = 0;
           SetStatus("online");
           if (!announcedOnline) {
             announcedOnline = true;

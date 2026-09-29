@@ -378,7 +378,14 @@ object LoginFlow {
                 // The user is here and has just proved who they are. A list that cannot be read
                 // is set aside -- kept -- so that a new one can be started. Whether or not a
                 // sign-in is stored beside it: left unreadable, it blocks every return after this.
-                if (vault.owed() is OwedRead.Unreadable && vault.setAsideOwed()) {
+                // If it cannot even be set aside, this sign-in is not kept: stored, it would be
+                // refused at the next start by the list still in its place.
+                if (vault.owed() is OwedRead.Unreadable) {
+                    if (!vault.setAsideOwed()) {
+                        outcome = Remembered.NOT_SAVED
+                        why = "the list of owed sign-outs cannot be read, and could not be set aside"
+                        return@inner true
+                    }
                     log("sign-in store: the list of owed sign-outs could not be read; it is " +
                         "kept aside and a new one is started")
                 }

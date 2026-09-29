@@ -26,6 +26,9 @@
 //                           directory is back) reaches the PC list
 //   slow-sign-in <account>  press sign in and report what the form says when the answer comes
 //   sign-in-then-out <account>  sign in with the id and password, then press sign out
+//   refused-pending <account>   sign in with the id and the right password of an account that
+//   refused-disabled <account>  waits for approval / is stopped: the form says the directory's
+//                               sentence, and nothing is listed, held or stored
 //
 // Input is ExecuteScript on the rendered page. It is not a physical keyboard or mouse.
 
@@ -345,6 +348,22 @@ int main(int argc, char** argv) {
       pump(1500);
       check(GetFileAttributesW(store.credential_path().c_str()) == INVALID_FILE_ATTRIBUTES,
             tag + "AND IT STORED NOTHING");
+    } else if (mode == "refused-pending" || mode == "refused-disabled") {
+      check(dom(kFormFree, 30000), tag + "the sign-in form comes up, free to use");
+      type_and_press(account);
+      // The contract's sentences, as the directory sends them.
+      const std::wstring want = mode == "refused-pending"
+          ? L"승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다."
+          : L"사용이 정지된 계정입니다.";
+      check(dom(L"document.getElementById('signInMsg').textContent.includes('" + want + L"')&&"
+                L"!document.getElementById('signIn').disabled", 15000),
+            tag + "THE FORM SAYS WHAT THE DIRECTORY SAID, and sign in can be pressed again",
+            page_text(L"signInMsg"));
+      pump(800);
+      check(eval(kListShown) == "false" && gSessionToken.empty(), tag + "no PC list, no session");
+      const login_store::Store store = sign_in_store();
+      check(GetFileAttributesW(store.credential_path().c_str()) == INVALID_FILE_ATTRIBUTES,
+            tag + "nothing is stored");
     } else {
       check(false, "unknown mode " + mode);
     }

@@ -38,6 +38,7 @@ class LoginFlowTest {
         var failOwed = false
         var failErase = false
         var owedUnreadable = false
+        var failSetAside = false
         var setAside = 0
         val owedList = ArrayList<LoginFlow.OwedSignOut>()
 
@@ -75,7 +76,7 @@ class LoginFlowTest {
             return true
         }
         override fun setAsideOwed(): Boolean {
-            if (!owedUnreadable) return false
+            if (!owedUnreadable || failSetAside) return false
             owedUnreadable = false
             owedList.clear()
             ++setAside
@@ -679,6 +680,19 @@ class LoginFlowTest {
             LoginFlow.comeBack(vault, dir, origin, log).outcome)
     }
 
+    @Test
+    fun `r6-3 a list that cannot be set aside - the sign-in is not kept, and the list is left`() {
+        val vault = MemoryVault().apply { owedUnreadable = true; failSetAside = true }
+        val dir = FakeDirectory()
+        val g = LoginFlow.beginSignIn(vault, log)
+        val s = signedIn("r6-3b")
+        assertEquals("NOT Stored", LoginFlow.Remembered.NOT_SAVED,
+            LoginFlow.rememberSignIn(vault, dir, origin, g, "tester", s, log))
+        assertEquals(null, vault.stored)
+        assertTrue("the list is left as it was", vault.owedUnreadable)
+        assertEquals("the device it was issued is ended", listOf(s.deviceId), dir.revoked)
+    }
+
     // ---------------------------------------------------------------- what is written down
 
     @Test
@@ -725,6 +739,21 @@ class LoginFlowTest {
         for (status in listOf(301, 302, 307, 400, 403, 409, 500, 502, 503)) {
             assertEquals(status.toString(), LoginFlow.Call.FAILED, DirectoryClient.callFor(status))
         }
+    }
+
+    @Test
+    fun `an account that is not active - the directory's sentence is what the user sees`() {
+        val pending = "승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다."
+        val disabled = "사용이 정지된 계정입니다."
+        assertEquals(pending, DirectoryClient.describe(403, pending))
+        assertEquals(disabled, DirectoryClient.describe(403, disabled))
+        // The strings clients already match on are unchanged by the added `code`.
+        assertEquals("로그인이 필요합니다", DirectoryClient.describe(401, "login required"))
+        assertEquals("아이디 또는 비밀번호가 맞지 않습니다", DirectoryClient.describe(401, "invalid id or password"))
+        assertEquals("주소 확인 정보가 없어 다시 시도합니다", DirectoryClient.describe(409, "observation_required"))
+        // A refused device credential (401, also for a stopped account) is REJECTED: erased, and
+        // the password asked for -- where the 403 above is then shown.
+        assertEquals(LoginFlow.Call.REJECTED, DirectoryClient.callFor(401))
     }
 
     // ---------------------------------------------------------------- the session an older version stored

@@ -12844,3 +12844,55 @@ Next
 - 부정 대조(④): 시험 창 위를 30 ms 마다 다시 덮는 자체 decoy 창(다른 프로세스) → runner exit 3 INVALID, 가린 창 신원 출력 확인. decoy 없이 같은 빌드는 exit 0.
 - 증명하지 못하는 것: APK Activity 재생성 자체(기기 없음 — JVM 에서 DirectoryClient 값의 수명과 복구 흐름, 그리고 Activity 에 사본이 없음을 소스로 확인), 실제 두 창 동시 실행 UI.
 - 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`, `DirectoryClient.kt`, `MainActivity.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`, `gnlink_host_login_uia.ps1`, `host_login_ui_runner.js`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (1/2) — 서버: 계정 상태와 관리 창구 (Account Admin API v1)
+
+- 요구: `.claude/account_admin_prompt_2026-09-29.md` + 공통 규격 `account_admin_contract_v1.md`(GMux·IdleFirst 공통 — 경로·응답·상태 이름 그대로). 지시서 `task_account_admin_r1.md`.
+- `accounts.js`(신설): `store.accounts` 를 읽고 쓰는 코드와, 계정 때문에 그 계정의 호스트·기기 자격에 하는 일(정지·비번 변경·삭제)을 한 모듈로. server.js 에서 `store.accounts[...]` 직접 접근은 없어졌다(기기 자격의 계정 관련 호출 `createFamily`·`prune`·`listFor` 도 이 모듈을 거친다).
+- 상태 `pending|active|disabled`, 값 `updatedAt·approvedAt·memo(200자, 제어문자 제거)·lastLoginAt`. 옛 파일(상태 없음)은 전부 active 로 읽는다. 모르는 상태 문자열은 disabled 로 읽고 로그에 남긴다.
+- 로그인·호스트 등록: 비밀번호 먼저(틀리면 종전 401). 맞으면 pending/disabled 는 403 + 규격 문장·code, loginFailures 에 세지 않음. 성공 로그인은 lastLoginAt.
+- 매 요청 active 확인: `sessionFor`, 호스트 토큰(heartbeat·logs·update manifest — `hostForToken`, code `account_inactive`), `/api/session/refresh`(active 아니면 401 `account_inactive`, **회전·폐기·실패 계수 없음**), 목록·connect 대상·릴레이 자격(`relayEligibleFor` 는 허용 목록 판정은 그대로 두고 active 조건만 추가, `relayBindSession`).
+- 모든 오류 응답에 `code` 추가(없으면 상태별 기본값). `error` 문장은 그대로.
+- signup = pending, `--add-account` = active(+ id 규칙 검사).
+- 관리 창구: 별도 http 리스너, 기본 127.0.0.1, `REMOTE60_DIR_ADMIN_PORT`+`REMOTE60_DIR_ADMIN_KEY` 둘 다 있어야 기동, 서비스 포트와 같으면 기동 안 함. Bearer 키는 sha256 후 timingSafeEqual. 본문 16KB(넘으면 400 bad_request 로 답하고 닫음). 경로·코드는 규격 그대로 + 목록에 hostCount. disable = 세션·릴레이 세션·대기 capability·wake resend 즉시 종료(호스트 토큰·기기 자격은 보존, enable 로 재등록 없이 복귀). password = 세션 + 호스트 토큰 무효 + **기기 자격 계열 전부 폐기**. DELETE = 계정·세션·호스트·호스트 토큰·**기기 자격 항목**. 모든 변경은 메모리 → 저장 → (실패 시 되돌리고 503) → 세션 종료 → 응답. 감사 로그 `[admin] <시각> action= account= result=`, 비밀번호·키 없음.
+- 시험: `account_admin_test.js`(신설) exit 0, 105 checks, 3회 반복 동일 — 옛 파일·키/포트 없으면 리스너 없음(포트 실제 미개방)·한쪽만 있어도 없음·서비스 포트에 /admin 없음(404)·127.0.0.1 만(LAN 주소로는 연결 안 됨)·틀린 키 401·생성/검증 오류 코드 전부·pending 403(로그인·등록·기기 계열 미생성)·403 은 실패 계수 안 됨·approve/enable/disable 상태 전이·정지 뒤 세션/호스트 토큰/manifest/refresh 401(무회전)·정지 계정 PC 는 다른 계정 목록·connect 대상 아님·enable 뒤 호스트 토큰·기기 자격 복귀·비번 변경 뒤 옛 세션/토큰/기기 401·삭제 뒤 store 에 계정·호스트·기기 없음·저장 실패 503 무변경·재시작 뒤 상태 유지·로그에 비번/키 없음. `node apps/directory/test/run.js` exit 0(RESULT: ALL PASS). 기존 시험 조정: `directory_test` 는 signup 계정이 pending(403)임을 확인하도록, `run.js` 는 relay_test 의 두 번째 계정을 `--add-account` 로 미리 만든다.
+- 변이 17종 중 16종 kill. `session-not-asked`(sessionFor 의 active 확인 제거)는 단독으로는 살아남는다 — disable·delete 가 그 계정 세션을 직접 끝내기 때문. disable 의 세션 종료까지 함께 빼면 "정지 뒤 세션 401" 이 FAIL → 매 요청 확인이 실제로 막는다는 것을 확인.
+- 배포 목록: `server.js`·`accounts.js`(신규)·`device_credentials.js`·`update_manifest.js`·`version_compare.js`·`wake_target.js`·`package.json`. NAS 환경변수 추가 `REMOTE60_DIR_ADMIN_PORT=29182`·`REMOTE60_DIR_ADMIN_KEY=<키>`(HOST 기본 127.0.0.1) + 재시작 필요. 롤백하면 옛 서버는 상태를 읽지 않아 pending·disabled 도 로그인된다(README 에 기록).
+- 증명하지 못하는 것: 실제 릴레이 세션이 정지 순간 끊기는 것(시험 서버는 릴레이 꺼짐 — closeHostsNow 는 실행되지만 닫을 세션이 없음), TLS·실제 NAS·메인 서버.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js` 신설, `directory_test.js`, `run.js`) / 문서(`apps/directory/README.md`, 이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (2/2) — 클라: 승인 대기·정지 계정의 문장, Host 의 재시도 간격
+
+- 프롬프트 5절 + 지시서 6. 서버는 (1/2) `3debe25`.
+- PC 클라(GNLinkClient): 로그인 403 은 이미 `error_from_response` 로 서버 문장을 그대로 폼에 보였다 — 코드 변경 없이 제품 창 시험으로 고정. 자동 재시도 없음(403 은 `Failed`, 재시도 경로 아님). 실행 중 401 → 기존 복구(기기 자격 refresh) → 정지 계정이면 refresh 401 → 자격 삭제 → 폼 "다시 로그인해 주세요" → 비밀번호 로그인 → 403 문장.
+- Host 창(GNLinkHost): `register_host` 가 403 을 "id or password is not correct" 로 뭉개던 것을 서버 문장 그대로 돌려주도록(401 은 종전 문구). 선택 인자 `outHttpStatus`.
+- GNLinkStream(HostAgent): 등록 403 → `registration refused: <문장>` + 재등록을 2·4·8… 주기(최대 48 주기 ≈ 20 분)로 미룸. heartbeat 401 이 `code: account_inactive` 이면 **토큰을 지우지 않고** 같은 간격으로 미룸 — 상태 문구에 "token rejected" 가 들어 있어 창은 종전대로 SIGN IN AGAIN, 계정이 다시 enable 되면 같은 토큰으로 재등록 없이 online. 그 밖의 401 은 종전(토큰 버림·재등록).
+- APK: `describe()` 는 403 을 이미 서버 문장 그대로 보였다 — `internal` 로 열고 JVM 시험으로 고정(기존 매칭 문자열 `login required`·`observation*` 도 함께). refresh 401 → `REJECTED`(자격 삭제·로그인 화면) 확인.
+- 시험(console 세션, 비관리자, 격리):
+  - `client_auto_login_runner` exit 0, **220 checks** — 12. 관리 API 로 pending 계정 생성 → 제품 창에서 비밀번호 로그인 → 폼에 "승인 대기 중입니다…"(스크린샷 `client-auto-login.12-pending.png`), 저장·세션 없음 → approve → 로그인 → disable → 다음 시작은 폼 "다시 로그인해 주세요"(저장 자격이 401), 기기 계열은 서버에 살아 있음 → 비밀번호 로그인 → "사용이 정지된 계정입니다."(`12-disabled.png`) → enable → 로그인.
+  - `host_login_ui_runner` exit 0, 52 checks — 5. signup 으로 만든 pending 계정을 Host 창에 입력·Sign in → 창에 서버 문장(스크린샷 `pending-refused.png`), 상태 카드 없음, 다시 누를 수 있음, host.json 에 토큰 없음, 스트리밍 자식 미기동.
+  - `directory_retry_test` exit 0, 133 — [inactive] 토큰 유지·재등록 없음·매 주기 재시도 없음·enable 뒤 같은 토큰으로 online·정지 중 "token rejected: the account is not active" / [403] 재등록 매 주기 아님·서버 문장이 상태.
+  - APK 단위 157/0 · `assembleRelease` 성공 · `host_migration_e2e_test`(REMOTE60_ALLOW_HOST_E2E=1) exit 0 33 · `directory_migration_test` 0 · `login_flow_test` 0 · bridge 0 · session 0 · `client_recovery_ui_runner` 0 · gate win 8 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이 4/4 kill: 403 을 비밀번호 오류로 · inactive 401 에 토큰 버림 · 대기 없음 · APK 403 일반 문구.
+- 증명하지 못하는 것: 설치된 GNLinkHost(관리자 권한)·실제 NAS·APK 화면(기기 없음 — describe 는 JVM, 화면 표시는 기존 `loginErrorText.text = e.message` 경로), 20 분 대기 자체(주기 수로만 확인).
+- 제품/테스트/문서: 제품(`directory_client.{hpp,cpp}`, `DirectoryClient.kt`) / 테스트(`directory_retry_test.cpp`, `client_auto_login_ui_test.cpp`, `client_auto_login_runner.js`, `host_login_ui_runner.js`, `gnlink_host_login_uia.ps1`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin 추가 — 읽을 수 없는 폐기 목록을 치우지 못하면 새 로그인도 저장하지 않는다 (PC 클라·APK)
+
+- Codex `31d26aa` 확인 ③(P2, 검증용이 account-admin 클라 묶음에 배정). r6 에서 "명시 로그인이 목록을 옆으로 치운다"를 이전 자격 조건에서 떼어 냈지만, 치우기가 **실패**해도 새 자격을 저장하고 성공으로 끝냈다 → 다음 시작이 그대로 남은 목록 때문에 Unreadable 로 막힌다.
+- 이제 치우기 실패 = `NotSaved`(발급된 기기는 기존 정리 경로로 폐기·또는 owed), 원본 목록은 그대로(`login_flow.cpp` `remember_sign_in`, `LoginFlow.kt` `rememberSignIn`).
+- 반례: 이전 자격 없음 + 목록 읽을 수 없음 + 옮길 이름 64개가 전부 막힘(자격 저장은 가능) → NotSaved, 자격 파일 없음, 목록 바이트 동일, 발급 기기 폐기 요청 1회 / APK 는 `failSetAside` vault.
+- 시험: `login_flow_test` exit 0, 127 · APK 단위 158/0 · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(220) · `client_recovery_ui_runner` exit 0. 변이(치우기 실패 무시) C++·Kotlin 모두 kill. 실사용 `client.txt`·`host.json` 해시 동일.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r2 — 서버: 기다리는 동안 바뀐 것은 다시 묻는다
+
+- 반려(r2, Codex `3debe25` — 함수 격리 실행으로 재현, 검증용 소스 확인) 2건. 공통 원인: **인증을 확인한 뒤 await, 그 뒤에 부작용.** 그 사이 관리 창구가 disable·password·delete 를 끝내면 옛 권한으로 일이 됐다.
+- 인증 뒤 await 가 있는 핸들러를 전부 훑었다:
+  - `handleLogs`(인증 → 본문 → 기록), `handleDeviceRevoke`(세션 → 본문 → 폐기), `handleConnect`(세션 → 본문 → capability 발급): **본문을 받은 뒤 부작용 직전에 다시 확인**(`sessionStillFor`·`hostTokenStillFor` — 같은 세션/토큰이 여전히 유효하고 같은 계정이며 active). 아니면 401.
+  - `handleLogin`·`handleHostRegister`(본문 → `authenticateAccount` 의 KDF → 발급): KDF 뒤 `accounts.stillTheSame` — 저장소의 계정이 **검증한 그 판본**(같은 createdAt·salt·hash)일 때만 그 계정을 돌려준다. 삭제·같은 id 재생성·비밀번호 변경이면 401(틀린 비밀번호와 같은 답, 실패 계수 없음).
+  - 관리 창구 `adminPassword`(본문 → KDF → 변경): 기다린 뒤 같은 계정(createdAt)이 아니면 404 — 재생성된 새 계정의 비밀번호를 바꾸지 않는다. `adminCreate`(KDF 뒤): taken 에 더해 pending 상한도 다시 확인.
+  - 해당 없음(await 뒤에 인증하거나 await 가 없음): `handleSessionRefresh`·`handleSessionLogout`·`handleHostHeartbeat`(본문 먼저, 그 뒤 동기 확인), `handleUpdateManifest`·`handleHosts`·`handleDevices`(await 없음), `handleSignup`(KDF 뒤 taken 재확인 — 인증 없음), 관리 approve·disable·enable·delete(await 없음).
+- 반례(`account_admin_test.js` 13절, 실제 서버): 헤더만 보낸 요청 → 관리 작업 → 본문 완료 = connect 401 · device revoke 401(기기 무변경) · logs 401(파일 없음). KDF 는 시험 preload(`--require`, 출하 경로 아님)가 "다음 해시 하나"를 붙잡는다: 검증 지연 → 삭제 → 완료 = 401·기기 없음 / 삭제 → 같은 id·같은 비밀번호로 재생성·승인 → 완료 = 401·새 계정에 기기 없음 / 등록 중 비밀번호 변경 = 401·호스트 없음 / 관리 비밀번호 변경 중 삭제·재생성 = 404·새 계정 비밀번호 그대로.
+- 시험: `account_admin_test` exit 0, 113 checks ×3 · `run.js` exit 0(RESULT: ALL PASS, PASS 661) · 클라 연동 `client_auto_login_runner` exit 0(220)·`host_login_ui_runner` exit 0(52). 변이 6종(logs·revoke·connect 재확인 제거, KDF 뒤 재조회 제거, 판본 대신 id 만, 관리 비번 계정 동일성 제거) 모두 kill — connect 는 호스트가 없어 변이 시 200 이 아니라 404 로 드러난다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js`) / 문서(이 항목, 구현계획).

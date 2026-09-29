@@ -727,8 +727,14 @@ object DirectoryClient {
         }
     }
 
-    /** Server messages are terse and English; turn the ones users hit into plain guidance. */
-    private fun describe(status: Int, serverError: String): String = when {
+    /**
+     * Server messages are terse and English; turn the ones users hit into plain guidance.
+     *
+     * A 403 is shown as the directory wrote it: that is the right password for an account that
+     * waits for approval or has been stopped, and the sentence says which -- in Korean, already
+     * written for the user. Internal so the unit tests can hold it to that.
+     */
+    internal fun describe(status: Int, serverError: String): String = when {
         status == 401 && serverError.contains("login", true) -> "로그인이 필요합니다"
         status == 401 -> "아이디 또는 비밀번호가 맞지 않습니다"
         status == 404 -> "해당 호스트를 찾을 수 없습니다"
