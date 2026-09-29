@@ -281,12 +281,20 @@ const DEVICE = { kind: 'windows-client', label: 'Fixture PC' };
 
   // ---------------------------------------------------------------- 5. approve
   console.log('\n== approve');
-  const beforeApprove = Date.now();
+  // Times are compared only with times the SERVER wrote: this process's clock and the server's
+  // are two readings, and on Windows they were seen to disagree by a millisecond or so.
+  const beforeRow = (await admin('/admin/v1/accounts?status=pending')).body.accounts.find((a) => a.id === 'alice');
   r = await admin('/admin/v1/accounts/alice/approve', { method: 'POST' });
-  check('pending -> active, approvedAt set', r.status === 200 && r.body.account.status === 'active' &&
-        r.body.account.approvedAt >= beforeApprove, r.text);
+  const approved = r.body.account || {};
+  check('pending -> active, approvedAt set (by this request: = updatedAt, after the last change)',
+        r.status === 200 && approved.status === 'active' && beforeRow && beforeRow.approvedAt === null &&
+        typeof approved.approvedAt === 'number' && approved.approvedAt === approved.updatedAt &&
+        approved.approvedAt >= beforeRow.updatedAt,
+        `before.updatedAt=${beforeRow && beforeRow.updatedAt} approvedAt=${approved.approvedAt} updatedAt=${approved.updatedAt}`);
   r = await admin('/admin/v1/accounts/alice/approve', { method: 'POST' });
-  check('approving again: 200, the same account', r.status === 200 && r.body.account.status === 'active');
+  check('approving again: 200, the same account', r.status === 200 && r.body.account.status === 'active' &&
+        r.body.account.approvedAt === approved.approvedAt,
+        `approvedAt=${r.body.account && r.body.account.approvedAt} first=${approved.approvedAt}`);
   r = await admin('/admin/v1/accounts/alice/enable', { method: 'POST' });
   check('enabling an active account: 409 state', r.status === 409 && r.body.code === 'state', r.text);
   r = await api('/api/login', { id: 'alice', pw: PW.a, device: DEVICE });
@@ -295,7 +303,9 @@ const DEVICE = { kind: 'windows-client', label: 'Fixture PC' };
   const aliceDevice = { deviceId: r.body.deviceId, deviceCredential: r.body.deviceCredential };
   r = await admin('/admin/v1/accounts?status=active');
   const aliceRow = r.body.accounts.find((a) => a.id === 'alice');
-  check('lastLoginAt is recorded', aliceRow && aliceRow.lastLoginAt >= beforeApprove, JSON.stringify(aliceRow));
+  check('lastLoginAt is recorded, after the approval (both server times)',
+        aliceRow && typeof aliceRow.lastLoginAt === 'number' && aliceRow.lastLoginAt >= approved.approvedAt,
+        `lastLoginAt=${aliceRow && aliceRow.lastLoginAt} approvedAt=${approved.approvedAt}`);
   const aliceHost = await registerHost('alice', PW.a, 'machine-alice');
   check('...and registers a PC', aliceHost.status === 200 && !!aliceHost.body.hostToken);
   check('both work', await sessionWorks(aliceSession) && (await hostWorks(aliceHost.body.hostToken)).status === 200);
