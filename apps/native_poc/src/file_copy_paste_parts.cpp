@@ -20,6 +20,39 @@ void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneFn onGone)
   onGone_ = std::move(onGone);
 }
 
+void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneOfFn onGone) {
+  std::lock_guard<std::mutex> lock(mu_);
+  config_ = std::move(config);
+  onFrame_ = std::move(onFrame);
+  onGoneOf_ = std::move(onGone);
+}
+
+void FileHelperChannel::SetOwner(uint64_t owner) {
+  std::lock_guard<std::mutex> s(sendMu_);  // ordered with SendAs: no send of the old owner after this
+  owner_.store(owner);
+}
+
+bool FileHelperChannel::EnsureAs(uint64_t owner, std::string* why, bool* stale) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (owner_.load() != owner) {
+    *why = "the session ended";
+    if (stale) *stale = true;
+    return false;
+  }
+  if (stale) *stale = false;
+  return EnsureLocked(why);
+}
+
+bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* stale) {
+  std::lock_guard<std::mutex> s(sendMu_);
+  if (owner_.load() != owner) {
+    if (stale) *stale = true;
+    return false;
+  }
+  if (stale) *stale = false;
+  return link_.pipe_open() && link_.Send(f);
+}
+
 bool FileHelperChannel::Running() const {
   std::lock_guard<std::mutex> lock(mu_);
   return link_.pipe_open() && link_.helper_alive();
@@ -27,6 +60,10 @@ bool FileHelperChannel::Running() const {
 
 bool FileHelperChannel::Ensure(std::string* why) {
   std::lock_guard<std::mutex> lock(mu_);
+  return EnsureLocked(why);
+}
+
+bool FileHelperChannel::EnsureLocked(std::string* why) {
   if (link_.pipe_open() && link_.helper_alive()) return true;
   const uint64_t now = GetTickCount64();
   if (now < nextLaunchMs_) {
@@ -47,7 +84,8 @@ bool FileHelperChannel::Ensure(std::string* why) {
   backoffMs_ = 0;
   nextLaunchMs_ = 0;
   readerRun_.store(true);
-  reader_ = std::thread([this] { ReaderLoop(); });
+  const uint64_t owner = owner_.load();  // whom this helper was started for
+  reader_ = std::thread([this, owner] { ReaderLoop(owner); });
   return true;
 }
 
@@ -56,7 +94,7 @@ bool FileHelperChannel::Send(const fc::PipeFrame& f) {
   return link_.pipe_open() && link_.Send(f);
 }
 
-void FileHelperChannel::ReaderLoop() {
+void FileHelperChannel::ReaderLoop(uint64_t owner) {
   while (readerRun_.load()) {
     fc::PipeFrame f;
     if (!link_.Receive(&f, 100)) {
@@ -66,6 +104,7 @@ void FileHelperChannel::ReaderLoop() {
     if (onFrame_) onFrame_(f);
   }
   if (onGone_) onGone_();
+  if (onGoneOf_) onGoneOf_(owner);
 }
 
 void FileHelperChannel::Disconnect() {
@@ -403,6 +442,16 @@ void FileChunkServer::End() {
 FileChunkServer::Counters FileChunkServer::GetCounters() const {
   std::lock_guard<std::mutex> lock(mu_);
   return counters_;
+}
+
+bool FileChunkServer::active() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return active_;
+}
+
+FilePasteIdentity FileChunkServer::identity() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return id_;
 }
 
 bool FileChunkServer::OnPull(const std::vector<uint8_t>& msg, uint64_t /*nowUs*/, std::vector<uint8_t>* out,

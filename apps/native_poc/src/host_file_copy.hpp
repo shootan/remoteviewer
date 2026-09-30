@@ -32,6 +32,13 @@
 //          Which session the state belongs to is decided, switched and recorded under sessionMu_ in
 //          one go, servedEpoch_ never goes down, and every handler asks once more under mu_ that the
 //          state is still its request's before it reads or writes it (r4).
+//          The epoch OWNS the shared parts (r5): the helper channel (FileHelperChannel::SetOwner --
+//          an ended session's Ensure/Send do nothing) and the R->P sender (a (epoch, offerId,
+//          pasteOp) key under bulkMu_: Begin/Open and End/Close by anyone else are no-ops). The P->R
+//          receiver is opened and closed under mu_ together with the paste that owns it. A late
+//          session-end hook or a late "helper gone" of an earlier session changes nothing.
+//          Lock order: sessionMu_ -> bulkMu_ -> mu_ (never the other way; nothing waits for the
+//          helper or joins a thread under mu_).
 //
 // Plaintext, like the rest of the media socket: names, sizes and content travel unencrypted (A3).
 // Logs carry counts, sizes, ids and outcomes -- never a path or a name.
@@ -157,8 +164,11 @@ class HostFileCopyService {
   /**
    * TEST ONLY -- parks a control thread at a chosen point of HandleControl so a test can cross two
    * sessions' requests on purpose: `point` 1 = the epoch is decided, before the switch (under
-   * sessionMu_); 2 = it is recorded, before the handler runs (not under it). No product code calls
-   * this; the build gate checks the shipped host does not carry it.
+   * sessionMu_); 2 = it is recorded, before the handler runs (not under it). In the handlers (r5,
+   * no lock held): 3 = Offer, the helper is up, before Publish is sent; 4 = Offer, Publish sent,
+   * before the answer is awaited; 5 = Prepare R->P, pinned and accepted, before the sender is
+   * begun; 6 = End, the paste is ended under mu_, before the sender is closed. No product code
+   * calls this; the build gate checks the shipped host does not carry it.
    */
   void SetEpochProbeForTest(std::function<void(uint64_t requestEpoch, int point)> probe);
 
@@ -174,6 +184,11 @@ class HostFileCopyService {
     uint64_t chunksServed = 0, bytesServed = 0, pullsRefused = 0, localReadFailures = 0;
     uint64_t sendVerificationEnds = 0;  // R->P sends ended because the viewer's chunk check failed
     uint8_t lastSendVerdict = 0, lastSendEndReason = 0;
+    // r5: what the shared sender is begun for (the test's window on the bulk ownership), and how
+    // many helper starts / sends of an ended session were refused by the channel's owner check.
+    bool sendOpen = false;
+    uint64_t sendPasteOp = 0;
+    uint64_t staleHelperSends = 0;
   };
   Counters GetCounters() const;
   BulkUplink::Counters UplinkCounters() const { return uplink_.GetCounters(); }
@@ -200,10 +215,17 @@ class HostFileCopyService {
   enum class Dir : uint8_t { None, PtoR, RtoP };
   struct Paste {
     Dir dir = Dir::None;
+    uint64_t epoch = 0;  // the session it belongs to (r5)
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
     uint32_t bulkGen = 0;
     std::vector<uint64_t> sizes;
+  };
+  // Who may begin / end the shared R->P sender (r5): the paste, by its session.
+  struct BulkKey {
+    uint64_t epoch = 0, offerId = 0, pasteOp = 0;
+    bool operator==(const BulkKey& o) const { return epoch == o.epoch && offerId == o.offerId && pasteOp == o.pasteOp; }
+    bool operator!=(const BulkKey& o) const { return !(*this == o); }
   };
   struct Ended {
     uint64_t offerId = 0;
@@ -213,17 +235,29 @@ class HostFileCopyService {
   };
 
   void OnHelperFrame(const file_copy::PipeFrame& f);
-  void OnHelperGone();
+  void OnHelperGone(uint64_t owner);  // `owner`: whom the pipe that went was started for
   void WorkerLoop();
   void OnPasteBegin(const file_copy::PasteBegin& m);
   void OnPasteEnd(const file_copy::PasteEnd& m);
   void OnStats(const file_copy::Stats& m);
   // caller holds mu_; returns true when an R->P sender must be closed (FinishSendClose, unlocked)
   bool EndPasteLocked(file_copy::net::PasteState state, file_copy::net::PasteEndReason reason);
-  void FinishSendClose(uint64_t pinId);  // closes the R->P sender and unpins, not under mu_
+  BulkKey KeyOfPasteLocked() const { return BulkKey{paste_.epoch, paste_.offerId, paste_.pasteOp}; }
+  // R->P sender ownership (r5), under bulkMu_ (taken before mu_, never inside it):
+  // BeginSend takes the sender for `key` if the paste is still that one's and current, else false;
+  // FinishSendClose ends / closes / unpins only when `key` holds it -- otherwise the pin alone.
+  bool BeginSend(const BulkKey& key, const FilePasteIdentity& id, const std::vector<uint64_t>& sizes);
+  void FinishSendClose(const BulkKey& key);
+  // The one switch of the state to `epoch` (caller holds sessionMu_); `endPrevious` = a session ran.
+  void SwitchToLocked(uint64_t epoch, bool endPrevious);
+  // A request whose session ended on the way: releases what it reserved (`pasteOp`, 0 = nothing),
+  // answers {} so HandleControl drops it. StaleLocked: caller holds mu_; StaleAs takes it.
+  std::vector<uint8_t> StaleLocked(uint64_t pasteOp);
+  std::vector<uint8_t> StaleAs(uint64_t pasteOp);
   const PeerOffer* FindPeerOffer(uint64_t offerId) const;  // caller holds mu_
   const HostOffer* FindHostOffer(uint64_t offerId) const;  // caller holds mu_
-  file_copy::Status ReadLocal(uint64_t pinId, uint32_t index, uint64_t offset, uint32_t length, std::vector<uint8_t>* out);
+  file_copy::Status ReadLocal(uint64_t epoch, uint64_t pinId, uint32_t index, uint64_t offset, uint32_t length,
+                              std::vector<uint8_t>* out);
   void Log(const std::string& line);
 
   // Each handler answers {} -- nothing, dropped by HandleControl -- when the state is no longer its
@@ -251,6 +285,8 @@ class HostFileCopyService {
   // Held across "decide the epoch -> end the older session -> record" (HandleControl) and across
   // OnSessionEnd, so those never interleave. Taken before mu_, never inside it.
   std::mutex sessionMu_;
+  std::mutex bulkMu_;    // the R->P sender's lifecycle and its owner (r5)
+  BulkKey sendOwner_;    // under bulkMu_; {} = nobody
   std::function<void(uint64_t, int)> epochProbe_;  // test only (SetEpochProbeForTest), installed before any request
 
   // Ends whatever runs and drops the viewer's offers; `reason` is the paste's end reason.

@@ -61,6 +61,9 @@ class FileHelperChannel {
   using FrameFn = std::function<void(const file_copy::PipeFrame&)>;
   /** The pipe is gone (the helper exited or was stopped), on the reader thread. */
   using GoneFn = std::function<void()>;
+  /** The same, told which owner (SetOwner) the pipe was started for -- a late "gone" of an earlier
+   *  session's helper can then be told from the current one's. */
+  using GoneOfFn = std::function<void(uint64_t owner)>;
 
   struct Config {
     Launcher launcher;               // null = unavailable
@@ -71,11 +74,23 @@ class FileHelperChannel {
   ~FileHelperChannel() { Stop(); }
 
   void Configure(Config config, FrameFn onFrame, GoneFn onGone);
+  void Configure(Config config, FrameFn onFrame, GoneOfFn onGone);
   bool configured() const { return config_.launcher != nullptr; }
 
   /** Running, or started now (one start at a time, backoff honoured). */
   bool Ensure(std::string* why);
   bool Send(const file_copy::PipeFrame& f);
+
+  /**
+   * Ownership (r5): the helper is per session, and the session's epoch owns the channel. SetOwner
+   * moves it on; EnsureAs / SendAs of another owner do nothing -- a late request of an ended session
+   * can neither start a helper for the new session nor put anything on its clipboard. `stale`
+   * (optional) tells that refusal from a plain pipe failure.
+   */
+  void SetOwner(uint64_t owner);
+  uint64_t owner() const { return owner_.load(); }
+  bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr);
+  bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr);
   bool Running() const;
   /** Drops the pipe: the helper clears what it published and exits (its contract). */
   void Disconnect();
@@ -85,11 +100,14 @@ class FileHelperChannel {
   uint64_t launchFailures() const { return launchFailures_.load(); }
 
  private:
-  void ReaderLoop();
+  void ReaderLoop(uint64_t owner);
+  bool EnsureLocked(std::string* why);  // caller holds mu_
 
   Config config_;
   FrameFn onFrame_;
   GoneFn onGone_;
+  GoneOfFn onGoneOf_;
+  std::atomic<uint64_t> owner_{0};
   mutable std::mutex mu_;      // start / stop
   std::mutex sendMu_;
   file_copy::HelperLink link_;
@@ -223,6 +241,8 @@ class FileChunkServer : public BulkUplinkSource {
   /** Nothing more is answered. */
   void End();
   Counters GetCounters() const;
+  bool active() const;                 // between Begin and End
+  FilePasteIdentity identity() const;  // the paste Begin was given (whatever active())
 
   // BulkUplinkSource
   bool OnPull(const std::vector<uint8_t>& msg, uint64_t nowUs, std::vector<uint8_t>* out, BulkServed* served) override;

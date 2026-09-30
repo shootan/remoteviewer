@@ -1536,6 +1536,274 @@ int wmain() {
       check("X3: ...and it stays (the hook already switched the epoch: no second teardown)",
             answered && sb == fn::PasteState::None, "state=" + std::to_string(static_cast<int>(sb)));
     }
+    // ---------------------------------------------------------------- r5: the epoch owns the shared parts
+    // Generalised parking: A runs `act` and parks at (point, epoch); B runs meanwhile; A is let go.
+    struct Parked {
+      bool aParked = false, bDone = false;
+    };
+    const auto park = [&](int point, uint64_t epoch, const std::function<void()>& act, const std::function<void()>& meanwhile,
+                          int bWaitMs) {
+      Parked p;
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = point;
+        parkEpoch = epoch;
+        parked = false;
+        release = false;
+      }
+      std::thread a(act);
+      {
+        std::unique_lock<std::mutex> l(pm);
+        p.aParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked; });
+      }
+      std::atomic<bool> bDone{false};
+      std::thread b([&] {
+        meanwhile();
+        bDone.store(true);
+      });
+      wait_until([&] { return bDone.load(); }, bWaitMs);
+      p.bDone = bDone.load();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;
+        pcv.notify_all();
+      }
+      a.join();
+      b.join();
+      return p;
+    };
+    const auto offer_call = [&](uint64_t epoch, uint64_t id, bool* answered, fn::OfferReply* reply) {
+      std::vector<uint8_t> raw;
+      *answered = call(fn::FileMsg::Offer, fn::body(offer_of(id)), epoch, &raw) && fn::parse(raw, reply);
+    };
+    // The host helper's log (appended by every helper started for this test): what the LAST
+    // publish on the remote clipboard was, and whether anything cleared it afterwards.
+    const auto helper_log_tail = [&](size_t from) {
+      std::vector<uint8_t> b;
+      read_file(helperLog, &b);
+      if (b.size() < from) from = 0;  // a fresh helper truncated it: all of it is new
+      return std::string(b.begin() + static_cast<std::ptrdiff_t>(from), b.end());
+    };
+    const auto helper_log_size = [&] {
+      std::vector<uint8_t> b;
+      read_file(helperLog, &b);
+      return b.size();
+    };
+    const auto last_publish_is = [&](const std::string& tail, uint64_t offerId, std::string* detail) {
+      const std::string want = "publish offer=" + std::to_string(offerId) + " items=";
+      const size_t at = tail.rfind("publish offer=");
+      const bool last = at != std::string::npos && tail.compare(at, want.size(), want) == 0;
+      // (Two helpers append to one file: the old one's own exit lines may land after B's publish. A
+      // "clipboard cleared" after B's publish would be B's object going -- the helper only clears
+      // what is still its own, so the old one's exit must not log it then.)
+      const bool clearedAfter = at != std::string::npos && (tail.find("clipboard cleared", at) != std::string::npos ||
+                                                            tail.find("clear offer=", at) != std::string::npos);
+      *detail = at == std::string::npos ? "no publish in the tail" : tail.substr(at, (std::min)(tail.size() - at, size_t{160}));
+      return last && !clearedAfter;
+    };
+    // A remote-files object is on the private station's clipboard right now (the consumer, "empty"
+    // mode, only enumerates the formats: descriptor + contents = the helper's object).
+    const auto station_has_files_object = [&](const wchar_t* tag, std::string* detail) {
+      Child probe;
+      const std::wstring dest = root + L"probe_" + tag;
+      if (!paste_on(station, dest, 0, 5, &probe, L"empty")) {
+        *detail = "the consumer did not start";
+        return false;
+      }
+      probe.Wait(15000);
+      std::vector<uint8_t> b;
+      read_file(dest + L".result.txt", &b);
+      const std::string res(b.begin(), b.end());
+      *detail = res;
+      return res.find("formats desc=1 contents=1") != std::string::npos;
+    };
+
+    // Y1 (r5 1): a session-end hook that is LATE -- it names the epoch already served (the new
+    // session's first request made the switch), or an older one: it must change nothing.
+    std::printf("      --- Y1: a late session-end hook does not tear the new session down ---\n");
+    {
+      const auto before = host.GetCounters();
+      const fn::PasteState s0 = state_of(5, 0xE3B0, &answered);
+      check("Y1: session 5's offer stands before the hooks", answered && s0 == fn::PasteState::None);
+      host.OnSessionEnd(5);  // "session 4 ended, 5 is next" -- but 5's request already switched
+      const fn::PasteState s1 = state_of(5, 0xE3B0, &answered);
+      check("Y1: after OnSessionEnd(5) (already served) session 5's offer is still there", answered && s1 == fn::PasteState::None,
+            "state=" + std::to_string(static_cast<int>(s1)));
+      host.OnSessionEnd(4);  // older still
+      const fn::PasteState s2 = state_of(5, 0xE3B0, &answered);
+      check("Y1: after OnSessionEnd(4) (older) session 5's offer is still there", answered && s2 == fn::PasteState::None,
+            "state=" + std::to_string(static_cast<int>(s2)));
+      check("Y1: no helper was restarted by the late hooks", host.GetCounters().helperLaunches == before.helperLaunches,
+            "launches +" + std::to_string(host.GetCounters().helperLaunches - before.helperLaunches));
+      std::string detail;
+      check("Y1: the remote clipboard still carries session 5's object", station_has_files_object(L"y1", &detail), detail);
+      host.OnSessionEnd(6);  // a real one: 6 is newer
+      const fn::PasteState s3 = state_of(6, 0xE3B0, &answered);
+      check("Y1: OnSessionEnd(6) (newer) does switch: session 5's offer is gone", answered && s3 == fn::PasteState::Withdrawn,
+            "state=" + std::to_string(static_cast<int>(s3)));
+    }
+
+    // Y2 (r5 2): an Offer of the OLD session crosses the switch inside its helper round trip. Point 3 =
+    // its helper is up, Publish not sent yet; point 4 = Publish sent, answer not awaited yet. Either way
+    // the new session's publication (B) must be what stays on the clipboard, and A applies nothing.
+    std::printf("      --- Y2: an old session's Offer crossing the switch publishes / clears nothing of the new one ---\n");
+    for (int point = 3; point <= 4; ++point) {
+      const uint64_t oldEpoch = point == 3 ? 6 : 7, newEpoch = oldEpoch + 1;
+      const uint64_t oldId = point == 3 ? 0xF2A0 : 0xF2C0, newId = point == 3 ? 0xF2B0 : 0xF2D0;
+      const std::string tag = "Y2." + std::to_string(point) + ": ";
+      const auto before = host.GetCounters();
+      const size_t logAt = helper_log_size();
+      bool aAnswered = false, bAnswered = false;
+      fn::OfferReply a, b;
+      uint64_t launchesAfterB = 0;
+      const Parked p = park(point, oldEpoch, [&] { offer_call(oldEpoch, oldId, &aAnswered, &a); },
+                            [&] {
+                              offer_call(newEpoch, newId, &bAnswered, &b);
+                              launchesAfterB = host.GetCounters().helperLaunches;
+                            },
+                            15000);
+      check(tag + "A (old session) was parked inside its helper round trip", p.aParked);
+      check(tag + "B (new session) ran through while A was parked", p.bDone);
+      check(tag + "B's offer was accepted in the new session", bAnswered && b.verdict == fn::Verdict::Accept,
+            "verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      check(tag + "A was DROPPED (no answer): its session ended on the way", !aAnswered,
+            "answered=" + std::to_string(aAnswered) + " verdict=" + std::to_string(static_cast<int>(a.verdict)));
+      const fn::PasteState sb = state_of(newEpoch, newId, &answered);
+      check(tag + "the new session's offer is still there", answered && sb == fn::PasteState::None,
+            "state=" + std::to_string(static_cast<int>(sb)));
+      const fn::PasteState sa = state_of(newEpoch, oldId, &answered);
+      check(tag + "A's offer is unknown to the new session", answered && sa == fn::PasteState::Withdrawn,
+            "state=" + std::to_string(static_cast<int>(sa)));
+      const auto after = host.GetCounters();
+      check(tag + "A started no helper for the new session (no launch after B's)", after.helperLaunches == launchesAfterB,
+            "launches +" + std::to_string(after.helperLaunches - before.helperLaunches) + " afterB=" + std::to_string(launchesAfterB - before.helperLaunches));
+      check(tag + "A's send / start was refused by the channel's owner check", after.staleHelperSends > before.staleHelperSends,
+            "stale +" + std::to_string(after.staleHelperSends - before.staleHelperSends));
+      // (A was counted as received -- it was its session's request when it came in; it is never ACCEPTED.)
+      check(tag + "only B's offer was accepted", after.offersAccepted == before.offersAccepted + 1,
+            "accepted +" + std::to_string(after.offersAccepted - before.offersAccepted));
+      std::string detail;
+      check(tag + "the helper's last publication is B's and nothing cleared it afterwards",
+            last_publish_is(helper_log_tail(logAt), newId, &detail), detail);
+      check(tag + "the remote clipboard carries a remote-files object now", station_has_files_object(point == 3 ? L"y2a" : L"y2b", &detail),
+            detail);
+    }
+
+    // Y3 (r5 3): the shared R->P sender. Point 5 = an old session's Prepare is pinned and accepted,
+    // the sender not begun yet; point 6 = an old session's End has ended the paste, the sender not
+    // closed yet. In both, the new session begins its own send meanwhile: the old request must
+    // neither begin on top of it nor close it.
+    std::printf("      --- Y3: an old session's late begin / close does not touch the new session's sender ---\n");
+    // The host's clipboard offer as a session sees it: the session's first request (its baseline),
+    // then a copy made on the remote PC, identified by the helper, asked for until it has an id.
+    const std::wstring y3Path = remoteDir + L"\\epochY3.txt";
+    write_file(y3Path, make_content(2048, 173));
+    const auto host_offer_in = [&](uint64_t epoch) {
+      fn::OfferQueryReply qr;
+      std::vector<uint8_t> raw;
+      (void)(call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), epoch, &raw) && fn::parse(raw, &qr));  // the baseline
+      host.OnHostClipboard(++hostSeq, {y3Path});
+      uint64_t id = 0;
+      wait_until([&] {
+        std::vector<uint8_t> r2;
+        fn::OfferQueryReply q2;
+        if (call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), epoch, &r2) && fn::parse(r2, &q2)) id = q2.offerId;
+        return id != 0;
+      }, 15000);
+      return id;
+    };
+    const auto prepare_rtop = [&](uint64_t epoch, uint64_t offerId, uint64_t pasteOp, bool* answered, fn::PrepareReply* reply) {
+      fn::Prepare pr;
+      pr.direction = fn::Direction::RtoP;
+      pr.offerId = offerId;
+      pr.pasteOp = pasteOp;
+      std::vector<uint8_t> raw;
+      *answered = call(fn::FileMsg::Prepare, fn::body(pr), epoch, &raw) && fn::parse(raw, reply);
+    };
+    const auto end_paste = [&](uint64_t epoch, uint64_t offerId, uint64_t pasteOp, bool* answered, fn::EndReply* reply) {
+      fn::End e{offerId, pasteOp, fn::PasteEndReason::Cancelled};
+      std::vector<uint8_t> raw;
+      *answered = call(fn::FileMsg::End, fn::body(e), epoch, &raw) && fn::parse(raw, reply);
+    };
+    {
+      // Y3.5: A = Prepare R->P of session 8 parked at point 5; B = session 9 prepares its own send.
+      const uint64_t h8 = host_offer_in(8);
+      check("Y3.5: session 8 sees the remote copy as an offer", h8 != 0);
+      const auto before = host.GetCounters();
+      bool aAnswered = false, bAnswered = false;
+      fn::PrepareReply a, b;
+      uint64_t h9 = 0;
+      HostFileCopyService::Counters atB{};
+      const Parked p = park(5, 8, [&] { prepare_rtop(8, h8, 0x5A01, &aAnswered, &a); },
+                            [&] {
+                              h9 = host_offer_in(9);
+                              prepare_rtop(9, h9, 0x5B01, &bAnswered, &b);
+                              atB = host.GetCounters();
+                            },
+                            30000);
+      check("Y3.5: A (session 8) was parked with its send pinned and accepted, not begun", p.aParked);
+      check("Y3.5: B (session 9) ran through while A was parked", p.bDone);
+      check("Y3.5: session 9 sees the remote copy as its own offer", h9 != 0 && h9 != h8, "h8=" + std::to_string(h8) + " h9=" + std::to_string(h9));
+      check("Y3.5: B's send was prepared in session 9", bAnswered && b.verdict == fn::Verdict::Accept,
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      check("Y3.5: ...and the sender was begun for B while A was parked", atB.sendOpen && atB.sendPasteOp == 0x5B01,
+            "open=" + std::to_string(atB.sendOpen) + " op=" + std::to_string(atB.sendPasteOp));
+      check("Y3.5: A was DROPPED (no answer)", !aAnswered,
+            "answered=" + std::to_string(aAnswered) + " verdict=" + std::to_string(static_cast<int>(a.verdict)));
+      const auto after = host.GetCounters();
+      check("Y3.5: the sender is still B's after A was let go (A did not begin on top of it)", after.sendOpen && after.sendPasteOp == 0x5B01,
+            "open=" + std::to_string(after.sendOpen) + " op=" + std::to_string(after.sendPasteOp));
+      check("Y3.5: only B's send was counted as prepared", after.sendPrepared == before.sendPrepared + 1,
+            "prepared +" + std::to_string(after.sendPrepared - before.sendPrepared));
+      bool eAnswered = false;
+      fn::EndReply er;
+      end_paste(9, h9, 0x5B01, &eAnswered, &er);
+      check("Y3.5: session 9 ends its send", eAnswered && er.state == fn::PasteState::Failed, "state=" + std::to_string(static_cast<int>(er.state)));
+      check("Y3.5: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
+    }
+    {
+      // Y3.6: session 9 sends; its End is parked at point 6 (paste ended, sender not closed); session
+      // 10 begins its own send meanwhile; the late close must leave session 10's sender alone.
+      fn::OfferQueryReply qr;
+      std::vector<uint8_t> raw;
+      uint64_t h9 = 0;
+      if (call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), 9, &raw) && fn::parse(raw, &qr)) h9 = qr.offerId;
+      check("Y3.6: session 9 still has its offer", h9 != 0);
+      bool pAnswered = false;
+      fn::PrepareReply pr;
+      prepare_rtop(9, h9, 0x5A02, &pAnswered, &pr);
+      check("Y3.6: session 9's send is prepared and begun", pAnswered && pr.verdict == fn::Verdict::Accept && host.GetCounters().sendOpen &&
+                                                               host.GetCounters().sendPasteOp == 0x5A02);
+      bool aAnswered = false, bAnswered = false;
+      fn::EndReply a;
+      fn::PrepareReply b;
+      uint64_t h10 = 0;
+      HostFileCopyService::Counters atB{};
+      const Parked p = park(6, 9, [&] { end_paste(9, h9, 0x5A02, &aAnswered, &a); },
+                            [&] {
+                              h10 = host_offer_in(10);
+                              prepare_rtop(10, h10, 0x5B02, &bAnswered, &b);
+                              atB = host.GetCounters();
+                            },
+                            30000);
+      check("Y3.6: A (session 9's End) was parked with the paste ended, the sender not closed", p.aParked);
+      check("Y3.6: B (session 10) ran through while A was parked", p.bDone);
+      check("Y3.6: session 10 sees the remote copy as its own offer", h10 != 0 && h10 != h9);
+      check("Y3.6: B's send was prepared in session 10", bAnswered && b.verdict == fn::Verdict::Accept,
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      check("Y3.6: ...and the sender was begun for B (the stale one closed first)", atB.sendOpen && atB.sendPasteOp == 0x5B02,
+            "open=" + std::to_string(atB.sendOpen) + " op=" + std::to_string(atB.sendPasteOp));
+      const auto after = host.GetCounters();
+      check("Y3.6: the sender is still B's after A's late close (A did not close it)", after.sendOpen && after.sendPasteOp == 0x5B02,
+            "open=" + std::to_string(after.sendOpen) + " op=" + std::to_string(after.sendPasteOp));
+      check("Y3.6: A's own answer, if any, reports its paste ended", !aAnswered || a.state == fn::PasteState::Failed,
+            "answered=" + std::to_string(aAnswered) + " state=" + std::to_string(static_cast<int>(a.state)));
+      bool eAnswered = false;
+      fn::EndReply er;
+      end_paste(10, h10, 0x5B02, &eAnswered, &er);
+      check("Y3.6: session 10 ends its send", eAnswered && er.state == fn::PasteState::Failed);
+      check("Y3.6: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
+    }
     host.SetEpochProbeForTest(nullptr);
   }
   hostRx.join();
