@@ -86,6 +86,12 @@ int wmain(int argc, wchar_t** argv) {
     const std::string lockName = "GNLinkE2EClipboardStation";
     const auto netE2e = read_all(dir + L"\\remote60_file_copy_net_e2e_test.exe");
     check("positive control: the net e2e carries the station lock's name (UTF-16)", contains(netE2e, utf16(lockName)));
+    // The epoch-crossing probe (HostFileCopyService::SetEpochProbeForTest, t-zdmsd4gb r4) is
+    // installed by tests only: its banner is in the net e2e and not in the shipped host.
+    const std::string probeBanner = "TEST PROBE epoch crossing";
+    check("positive control: the net e2e carries the epoch probe's banner", contains(netE2e, probeBanner));
+    check("the shipped host does not carry the epoch probe's banner", !contains(shipped, probeBanner));
+    check("the shipped host does carry the product's epoch check", contains(shipped, "a request of an older control session"));
     for (const wchar_t* exe : {L"GNLinkStream.exe", L"GNLinkViewer.exe", L"GNLinkClipHelper.exe"}) {
       const auto bytes = read_all(dir + L"\\" + exe);
       std::string n;

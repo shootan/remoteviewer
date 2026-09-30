@@ -28,6 +28,10 @@
 // Thread:  HandleControl on the host's control thread; OnHostClipboard on the clipboard monitor's;
 //          OnDatagram on the UDP receive thread; the helper's reader thread, a worker for helper
 //          starts, the receiver's and the sender's threads. Shared state under mu_.
+// Epoch:   two control threads can be inside HandleControl at once (host_control_session.cpp, H-28).
+//          Which session the state belongs to is decided, switched and recorded under sessionMu_ in
+//          one go, servedEpoch_ never goes down, and every handler asks once more under mu_ that the
+//          state is still its request's before it reads or writes it (r4).
 //
 // Plaintext, like the rest of the media socket: names, sizes and content travel unencrypted (A3).
 // Logs carry counts, sizes, ids and outcomes -- never a path or a name.
@@ -143,8 +147,20 @@ class HostFileCopyService {
    */
   void OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths);
 
-  /** The session ended or rolled over: offers of the viewer, any paste and the helper go. */
+  /**
+   * The session ended or rolled over: offers of the viewer, any paste and the helper go. `newEpoch`
+   * (0 = none) becomes the served epoch when it is newer: a late request of the ended session is
+   * dropped from then on, never handled (r4).
+   */
   void OnSessionEnd(uint64_t newEpoch);
+
+  /**
+   * TEST ONLY -- parks a control thread at a chosen point of HandleControl so a test can cross two
+   * sessions' requests on purpose: `point` 1 = the epoch is decided, before the switch (under
+   * sessionMu_); 2 = it is recorded, before the handler runs (not under it). No product code calls
+   * this; the build gate checks the shipped host does not carry it.
+   */
+  void SetEpochProbeForTest(std::function<void(uint64_t requestEpoch, int point)> probe);
 
   struct Counters {
     uint64_t offers = 0, offersAccepted = 0, offersRefused = 0, helperLaunches = 0, helperLaunchFailures = 0;
@@ -210,13 +226,19 @@ class HostFileCopyService {
   file_copy::Status ReadLocal(uint64_t pinId, uint32_t index, uint64_t offset, uint32_t length, std::vector<uint8_t>* out);
   void Log(const std::string& line);
 
-  std::vector<uint8_t> HandleOffer(const file_copy::net::Offer& m);
-  std::vector<uint8_t> HandleOfferQuery(const file_copy::net::OfferQuery& m);
-  std::vector<uint8_t> HandlePasteQuery(const file_copy::net::PasteQuery& m);
-  std::vector<uint8_t> HandlePrepare(const file_copy::net::Prepare& m);
-  std::vector<uint8_t> HandlePrepareRtoP(const file_copy::net::Prepare& m);
-  std::vector<uint8_t> HandleEnd(const file_copy::net::End& m);
-  std::vector<uint8_t> HandleStatus(const file_copy::net::StatusQuery& m);
+  // Each handler answers {} -- nothing, dropped by HandleControl -- when the state is no longer its
+  // request's session's (Current(), under mu_): a request that passed the epoch check and then lost
+  // the session to a newer one changes nothing (r4).
+  bool Current(uint64_t epoch) const { return servedEpoch_ == epoch; }  // caller holds mu_
+  bool HandleKnown(uint16_t type, const std::vector<uint8_t>& body, uint64_t epoch, uint16_t* replyType,
+                   std::vector<uint8_t>* reply);  // the switch of HandleControl
+  std::vector<uint8_t> HandleOffer(const file_copy::net::Offer& m, uint64_t epoch);
+  std::vector<uint8_t> HandleOfferQuery(const file_copy::net::OfferQuery& m, uint64_t epoch);
+  std::vector<uint8_t> HandlePasteQuery(const file_copy::net::PasteQuery& m, uint64_t epoch);
+  std::vector<uint8_t> HandlePrepare(const file_copy::net::Prepare& m, uint64_t epoch);
+  std::vector<uint8_t> HandlePrepareRtoP(const file_copy::net::Prepare& m, uint64_t epoch);
+  std::vector<uint8_t> HandleEnd(const file_copy::net::End& m, uint64_t epoch);
+  std::vector<uint8_t> HandleStatus(const file_copy::net::StatusQuery& m, uint64_t epoch);
 
   SendFn send_;
   uint32_t mtu_ = 1200;
@@ -225,7 +247,11 @@ class HostFileCopyService {
   LogFn log_;
   std::atomic<bool> running_{false};
   std::atomic<bool> enabled_{false};
-  uint64_t servedEpoch_ = 0;  // the control session the state belongs to (0 = none yet)
+  uint64_t servedEpoch_ = 0;  // the control session the state belongs to (0 = none yet); under mu_, only grows
+  // Held across "decide the epoch -> end the older session -> record" (HandleControl) and across
+  // OnSessionEnd, so those never interleave. Taken before mu_, never inside it.
+  std::mutex sessionMu_;
+  std::function<void(uint64_t, int)> epochProbe_;  // test only (SetEpochProbeForTest), installed before any request
 
   // Ends whatever runs and drops the viewer's offers; `reason` is the paste's end reason.
   void Teardown(file_copy::net::PasteEndReason reason);

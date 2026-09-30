@@ -335,8 +335,9 @@ const HostFileCopyService::HostOffer* HostFileCopyService::FindHostOffer(uint64_
   return nullptr;
 }
 
-std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery& m) {
+std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery& m, uint64_t epoch) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!Current(epoch)) return {};
   ++counters_.offerQueries;
   fn::OfferQueryReply r;
   r.epochTag = epochTag_;
@@ -373,7 +374,7 @@ std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery&
   return fn::body(r);
 }
 
-std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m) {
+std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m, uint64_t epoch) {
   fn::PrepareReply r;
   r.direction = fn::Direction::RtoP;
   r.offerId = m.offerId;
@@ -382,6 +383,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m
   std::vector<fn::OfferItem> items;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!Current(epoch)) return {};
     r.epochTag = epochTag_;
     const HostOffer* offer = FindHostOffer(m.offerId);
     if (!file_copy_allowed()) {
@@ -520,73 +522,94 @@ void HostFileCopyService::FinishSendClose(uint64_t pinId) {
 
 bool HostFileCopyService::HandleControl(uint16_t type, const std::vector<uint8_t>& body, uint64_t servedEpoch,
                                         uint16_t* replyType, std::vector<uint8_t>* reply) {
-  bool newSession = false;
-  bool olderSession = false;
   {
-    std::lock_guard<std::mutex> lock(mu_);
     // The epoch only grows (host_session.hpp: fetch_add), but each Serve() captured its own when it
     // started, and a TCP control thread and the UDP dispatcher can both be inside Serve() for a while
-    // (host_control_session.cpp, H-28). A late request of the OLDER one must not end the newer
-    // session's state: it is dropped, and its link -- out of date anyway -- is let go.
-    olderSession = servedEpoch_ != 0 && servedEpoch < servedEpoch_;
-    newSession = servedEpoch_ != 0 && servedEpoch > servedEpoch_;
+    // (host_control_session.cpp, H-28). Decided, switched and recorded under ONE lock (r4): between
+    // the decision and the record nothing of another session gets in, and servedEpoch_ never goes
+    // down -- a request of the OLDER session, however late, is dropped and its link (out of date
+    // anyway) is let go. The session-end hook takes the same lock (OnSessionEnd).
+    std::lock_guard<std::mutex> session(sessionMu_);
+    bool newSession = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (servedEpoch_ != 0 && servedEpoch < servedEpoch_) {
+        Log("a request of an older control session: dropped, the current session's state stays");
+        return false;
+      }
+      newSession = servedEpoch_ != 0 && servedEpoch > servedEpoch_;
+    }
+    if (epochProbe_) epochProbe_(servedEpoch, 1);
+    // A request of another control session reached the handlers before its session-end hook: nothing
+    // of the old one is carried into it -- not its offers, its paste or its begun state (r2 4).
+    if (newSession) {
+      Log("a new control session: the previous one's file-copy state ends");
+      Teardown(fn::PasteEndReason::Session);
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (servedEpoch > servedEpoch_) {
+      servedEpoch_ = servedEpoch;
+      epochTag_ = (static_cast<uint64_t>(random32_) << 32) | (servedEpoch & 0xFFFFFFFFull);
+    }
   }
-  if (olderSession) {
-    Log("a request of an older control session: dropped, the current session's state stays");
+  if (epochProbe_) epochProbe_(servedEpoch, 2);
+  // From here the handler runs without sessionMu_ (a newer session must not wait behind a helper
+  // round trip of this one), so each handler asks again under mu_ -- at its first look at the state
+  // and after every wait -- that the state is still this request's; if not it answers nothing and
+  // the request is dropped like a late one.
+  std::vector<uint8_t> answer;
+  if (!HandleKnown(type, body, servedEpoch, replyType, &answer)) return false;
+  if (answer.empty()) {
+    Log("a request of a control session that ended meanwhile: dropped, nothing of it was applied");
     return false;
   }
-  // A request of another control session reached the handlers before its session-end hook: nothing of
-  // the old one is carried into it -- not its offers, its paste or its begun state (r2 ④).
-  if (newSession) {
-    Log("a new control session: the previous one's file-copy state ends");
-    OnSessionEnd(servedEpoch);
-  }
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    servedEpoch_ = servedEpoch;
-    epochTag_ = (static_cast<uint64_t>(random32_) << 32) | (servedEpoch & 0xFFFFFFFFull);
-  }
+  *reply = std::move(answer);
+  return true;
+}
+
+bool HostFileCopyService::HandleKnown(uint16_t type, const std::vector<uint8_t>& body, uint64_t servedEpoch,
+                                      uint16_t* replyType, std::vector<uint8_t>* reply) {
   switch (static_cast<fn::FileMsg>(type)) {
     case fn::FileMsg::Offer: {
       fn::Offer m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::OfferReply);
-      *reply = HandleOffer(m);
+      *reply = HandleOffer(m, servedEpoch);
       return true;
     }
     case fn::FileMsg::OfferQuery: {
       fn::OfferQuery m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::OfferQueryReply);
-      *reply = HandleOfferQuery(m);
+      *reply = HandleOfferQuery(m, servedEpoch);
       return true;
     }
     case fn::FileMsg::PasteQuery: {
       fn::PasteQuery m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::PasteQueryReply);
-      *reply = HandlePasteQuery(m);
+      *reply = HandlePasteQuery(m, servedEpoch);
       return true;
     }
     case fn::FileMsg::Prepare: {
       fn::Prepare m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::PrepareReply);
-      *reply = m.direction == fn::Direction::RtoP ? HandlePrepareRtoP(m) : HandlePrepare(m);
+      *reply = m.direction == fn::Direction::RtoP ? HandlePrepareRtoP(m, servedEpoch) : HandlePrepare(m, servedEpoch);
       return true;
     }
     case fn::FileMsg::End: {
       fn::End m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::EndReply);
-      *reply = HandleEnd(m);
+      *reply = HandleEnd(m, servedEpoch);
       return true;
     }
     case fn::FileMsg::Status: {
       fn::StatusQuery m;
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::StatusReply);
-      *reply = HandleStatus(m);
+      *reply = HandleStatus(m, servedEpoch);
       return true;
     }
     default:
@@ -602,7 +625,7 @@ const HostFileCopyService::PeerOffer* HostFileCopyService::FindPeerOffer(uint64_
   return nullptr;
 }
 
-std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
+std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m, uint64_t epoch) {
   fn::OfferReply r;
   r.offerId = m.offerId;
   auto refuse = [&](fn::Verdict v, const std::string& why) {
@@ -617,6 +640,7 @@ std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
   };
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!Current(epoch)) return {};
     ++counters_.offers;
   }
   if (!file_copy_allowed()) return refuse(fn::Verdict::Disabled, "switched off");
@@ -644,6 +668,17 @@ std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m) {
     const bool answered = publishAnswered_;
     lock.unlock();
     return refuse(fn::Verdict::HelperUnavailable, answered ? "the helper refused it" : "the helper did not answer");
+  }
+  // The session ended while the helper was answering (r4): the offer is not the new session's. The
+  // helper that published it was told to go with the old session; should the publication have
+  // reached the NEW session's helper instead (this thread's Send after the other's launch), it is
+  // taken off again -- by id, so the new session's own offer stays (the helper: "if still ours").
+  if (!Current(epoch)) {
+    lock.unlock();
+    fc::ClearRemoteFiles c;
+    c.offerId = m.offerId;
+    (void)helper_.Send(fc::encode(c));
+    return {};
   }
   // The new offer is the future; a paste already running on the older one runs on (debate "공통 상태").
   if (offer_.offerId != 0) retired_ = offer_;
@@ -684,8 +719,9 @@ void HostFileCopyService::OnPasteBegin(const fc::PasteBegin& m) {
   }
 }
 
-std::vector<uint8_t> HostFileCopyService::HandlePasteQuery(const fn::PasteQuery& m) {
+std::vector<uint8_t> HostFileCopyService::HandlePasteQuery(const fn::PasteQuery& m, uint64_t epoch) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!Current(epoch)) return {};
   fn::PasteQueryReply r;
   r.offerId = m.offerId;
   if (!file_copy_allowed()) {
@@ -710,7 +746,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePasteQuery(const fn::PasteQuery&
   return fn::body(r);
 }
 
-std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
+std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m, uint64_t epoch) {
   fn::PrepareReply r;
   r.direction = m.direction;
   r.offerId = m.offerId;
@@ -722,6 +758,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m) {
   std::vector<uint64_t> sizes;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!Current(epoch)) return {};
     r.epochTag = epochTag_;
     const PeerOffer* offer = FindPeerOffer(m.offerId);
     fc::Status failed = fc::Status::Ok;
@@ -834,7 +871,7 @@ bool HostFileCopyService::EndPasteLocked(fn::PasteState state, fn::PasteEndReaso
   return rtop;
 }
 
-std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
+std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m, uint64_t epoch) {
   fn::EndReply r;
   r.offerId = m.offerId;
   r.pasteOp = m.pasteOp;
@@ -842,6 +879,7 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
   bool closeSend = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!Current(epoch)) return {};
     if (m.pasteOp == 0) {
       // Withdraw the viewer's offer: off this clipboard. A paste already running on it runs on.
       if (offer_.offerId == m.offerId) {
@@ -869,8 +907,9 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m) {
   return fn::body(r);
 }
 
-std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m) {
+std::vector<uint8_t> HostFileCopyService::HandleStatus(const fn::StatusQuery& m, uint64_t epoch) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!Current(epoch)) return {};
   fn::StatusReply r;
   r.offerId = m.offerId;
   r.pasteOp = m.pasteOp;
@@ -906,7 +945,25 @@ void HostFileCopyService::SetEnabled(bool on) {
   }
 }
 
-void HostFileCopyService::OnSessionEnd(uint64_t /*newEpoch*/) { Teardown(fn::PasteEndReason::Session); }
+void HostFileCopyService::OnSessionEnd(uint64_t newEpoch) {
+  // Same lock as HandleControl's decision: the end of one session and the first request of the next
+  // never interleave. The served epoch moves up to the new one (never down), so a late request of the
+  // ended session is dropped at the first check instead of being handled -- and a request of the new
+  // session that arrives after this hook finds the state already its own (no second teardown).
+  std::lock_guard<std::mutex> session(sessionMu_);
+  Teardown(fn::PasteEndReason::Session);
+  std::lock_guard<std::mutex> lock(mu_);
+  if (newEpoch > servedEpoch_) {
+    servedEpoch_ = newEpoch;
+    epochTag_ = (static_cast<uint64_t>(random32_) << 32) | (newEpoch & 0xFFFFFFFFull);
+  }
+}
+
+void HostFileCopyService::SetEpochProbeForTest(std::function<void(uint64_t, int)> probe) {
+  std::lock_guard<std::mutex> session(sessionMu_);
+  epochProbe_ = std::move(probe);
+  Log("TEST PROBE epoch crossing installed");
+}
 
 void HostFileCopyService::Teardown(fn::PasteEndReason reason) {
   bool shut = false;

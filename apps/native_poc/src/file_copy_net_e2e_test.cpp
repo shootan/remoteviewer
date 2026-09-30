@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -1384,6 +1385,158 @@ int wmain() {
     check("...and session 2's offer is still there (not Withdrawn)",
           call(fn::FileMsg::PasteQuery, fn::body(q2), 2, &raw) && fn::parse(raw, &qr) && qr.state == fn::PasteState::None,
           "state=" + std::to_string(static_cast<int>(qr.state)));
+  }
+  std::printf("\n--- E2 (r4). two control threads cross at the epoch check: the newer session keeps its state, the older request applies nothing ---\n");
+  {
+    // One control thread (A) is parked inside HandleControl by the test-only probe at a chosen point;
+    // another (B, a newer session) is sent while A is parked; then A is let go. Point 1 = the epoch
+    // is decided, before the switch: B must WAIT for A (one lock), so A's request lands in A's own
+    // session and B's teardown comes after it -- never A's record after B's. Point 2 = recorded,
+    // before the handler: A's handler must find the state no longer its session's and apply nothing.
+    std::mutex pm;
+    std::condition_variable pcv;
+    int parkPoint = 0;
+    uint64_t parkEpoch = 0;
+    bool parked = false, release = false;
+    host.SetEpochProbeForTest([&](uint64_t e, int point) {
+      std::unique_lock<std::mutex> l(pm);
+      if (point != parkPoint || e != parkEpoch) return;
+      parked = true;
+      pcv.notify_all();
+      pcv.wait(l, [&] { return release; });
+    });
+    const auto offer_of = [](uint64_t id) {
+      fn::Offer o;
+      o.offerId = id;
+      o.revision = 1;
+      fn::OfferItem it;
+      it.index = 0;
+      it.name = u"epochE.txt";
+      it.size = 100;
+      o.items.push_back(it);
+      return o;
+    };
+    const auto state_of = [&](uint64_t epoch, uint64_t offerId, bool* answered) {
+      fn::PasteQuery q{offerId};
+      fn::PasteQueryReply qr;
+      std::vector<uint8_t> raw;
+      *answered = call(fn::FileMsg::PasteQuery, fn::body(q), epoch, &raw) && fn::parse(raw, &qr);
+      return *answered ? qr.state : fn::PasteState::None;
+    };
+    struct Crossed {
+      bool aAnswered = false, bAnswered = false, aParked = false, bWaitedForA = false;
+      fn::OfferReply a, b;
+    };
+    const auto cross = [&](int point, uint64_t oldEpoch, uint64_t oldId, uint64_t newEpoch, uint64_t newId, bool bBlocked) {
+      Crossed c;
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = point;
+        parkEpoch = oldEpoch;
+        parked = false;
+        release = false;
+      }
+      std::vector<uint8_t> ra, rb;
+      std::atomic<bool> bDone{false};
+      std::thread a([&] { c.aAnswered = call(fn::FileMsg::Offer, fn::body(offer_of(oldId)), oldEpoch, &ra) && fn::parse(ra, &c.a); });
+      {
+        std::unique_lock<std::mutex> l(pm);
+        c.aParked = pcv.wait_for(l, std::chrono::seconds(5), [&] { return parked; });
+      }
+      std::thread b([&] {
+        c.bAnswered = call(fn::FileMsg::Offer, fn::body(offer_of(newId)), newEpoch, &rb) && fn::parse(rb, &c.b);
+        bDone.store(true);
+      });
+      // B, sent while A is parked: at point 1 it cannot finish before A is let go (same lock) -- A is
+      // held 400 ms and B must still be inside; at point 2 it runs through -- B is given up to 5 s
+      // (a helper launch under load) and must be done before A is let go.
+      if (bBlocked) Sleep(400);
+      else wait_until([&] { return bDone.load(); }, 5000);
+      c.bWaitedForA = !bDone.load();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;
+        pcv.notify_all();
+      }
+      a.join();
+      b.join();
+      return c;
+    };
+    bool answered = false;
+    // X1: A of the current session (2) parked at point 1, B of session 3 sent meanwhile.
+    {
+      const auto before = host.GetCounters();
+      const Crossed c = cross(1, 2, 0xE1A0, 3, 0xE1B0, true);
+      check("X1: A (session 2) was parked at the decision", c.aParked);
+      check("X1: B (session 3) could not finish while A held the decision", c.bWaitedForA);
+      // A was session 2's when decided, so it is handled as session 2's -- and B's teardown may
+      // overtake its helper round trip: accepted (then torn down with session 2), refused by a helper
+      // that was going, or dropped. Never an accept that reaches session 3 (checked below).
+      check("X1: A's answer, if any, is its own session's: Accept or HelperUnavailable",
+            !c.aAnswered || c.a.verdict == fn::Verdict::Accept || c.a.verdict == fn::Verdict::HelperUnavailable,
+            "answered=" + std::to_string(c.aAnswered) + " verdict=" + std::to_string(static_cast<int>(c.a.verdict)));
+      check("X1: B's offer was accepted in session 3", c.bAnswered && c.b.verdict == fn::Verdict::Accept);
+      const fn::PasteState sb = state_of(3, 0xE1B0, &answered);
+      check("X1: session 3's offer is still there afterwards (not torn down by A's record)",
+            answered && sb == fn::PasteState::None, "state=" + std::to_string(static_cast<int>(sb)));
+      const fn::PasteState sa = state_of(3, 0xE1A0, &answered);
+      check("X1: A's offer is gone with session 2", answered && sa == fn::PasteState::Withdrawn,
+            "state=" + std::to_string(static_cast<int>(sa)));
+      (void)state_of(2, 0xE1A0, &answered);
+      check("X1: a late request of session 2 is dropped", !answered);
+      // Session 3's helper is the one B started, and it still serves: another offer of session 3 goes
+      // through it without a new launch.
+      const auto launched = host.GetCounters().helperLaunches;
+      std::vector<uint8_t> raw;
+      fn::OfferReply orr;
+      check("X1: session 3's helper still serves (another offer of session 3 is accepted)",
+            call(fn::FileMsg::Offer, fn::body(offer_of(0xE1C0)), 3, &raw) && fn::parse(raw, &orr) && orr.verdict == fn::Verdict::Accept);
+      check("X1: ...on the helper B started (one launch for session 3, none since)",
+            launched == before.helperLaunches + 1 && host.GetCounters().helperLaunches == launched,
+            "launches +" + std::to_string(host.GetCounters().helperLaunches - before.helperLaunches));
+    }
+    // X2: A of the current session (3) parked at point 2 (recorded, before its handler), B of session 4
+    // runs through meanwhile: A's handler must apply nothing to session 4's state.
+    {
+      const auto before = host.GetCounters();
+      const Crossed c = cross(2, 3, 0xE2A0, 4, 0xE2B0, false);
+      check("X2: A (session 3) was parked before its handler", c.aParked);
+      check("X2: B (session 4) ran through while A was parked", !c.bWaitedForA);
+      check("X2: A's answer, if any, is not an Accept", !c.aAnswered || c.a.verdict != fn::Verdict::Accept);
+      check("X2: B's offer was accepted in session 4", c.bAnswered && c.b.verdict == fn::Verdict::Accept);
+      check("X2: A's request was DROPPED (no answer) -- its session ended while it was on the way",
+            !c.aAnswered, "answered=" + std::to_string(c.aAnswered) + " verdict=" + std::to_string(static_cast<int>(c.a.verdict)));
+      const fn::PasteState sb = state_of(4, 0xE2B0, &answered);
+      check("X2: session 4's offer is still there", answered && sb == fn::PasteState::None,
+            "state=" + std::to_string(static_cast<int>(sb)));
+      const fn::PasteState sa = state_of(4, 0xE2A0, &answered);
+      check("X2: A's offer never got in (Withdrawn = unknown to session 4)", answered && sa == fn::PasteState::Withdrawn,
+            "state=" + std::to_string(static_cast<int>(sa)));
+      const auto after = host.GetCounters();
+      check("X2: only B's offer was counted (A applied nothing, not even a count)", after.offers == before.offers + 1,
+            "offers +" + std::to_string(after.offers - before.offers));
+    }
+    // X3: the session-end hook names the new epoch: from then on the ended session's requests are
+    // dropped at the first check, and the new session's first request finds the state its own.
+    {
+      std::vector<uint8_t> raw;
+      fn::OfferReply orr;
+      check("X3: an offer of session 4 is published", call(fn::FileMsg::Offer, fn::body(offer_of(0xE3A0)), 4, &raw) &&
+                                                          fn::parse(raw, &orr) && orr.verdict == fn::Verdict::Accept);
+      host.OnSessionEnd(5);
+      (void)state_of(4, 0xE3A0, &answered);
+      check("X3: after OnSessionEnd(5) a request of session 4 is dropped", !answered);
+      const fn::PasteState sa = state_of(5, 0xE3A0, &answered);
+      check("X3: session 5 does not see session 4's offer", answered && sa == fn::PasteState::Withdrawn,
+            "state=" + std::to_string(static_cast<int>(sa)));
+      raw.clear();
+      check("X3: an offer of session 5 is published", call(fn::FileMsg::Offer, fn::body(offer_of(0xE3B0)), 5, &raw) &&
+                                                          fn::parse(raw, &orr) && orr.verdict == fn::Verdict::Accept);
+      const fn::PasteState sb = state_of(5, 0xE3B0, &answered);
+      check("X3: ...and it stays (the hook already switched the epoch: no second teardown)",
+            answered && sb == fn::PasteState::None, "state=" + std::to_string(static_cast<int>(sb)));
+    }
+    host.SetEpochProbeForTest(nullptr);
   }
   hostRx.join();
   viewRx.join();
