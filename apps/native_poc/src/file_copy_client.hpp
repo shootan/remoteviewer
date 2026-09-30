@@ -136,8 +136,15 @@ class FileCopyClient {
     uint64_t helperLaunches = 0, helperLaunchFailures = 0;
     uint64_t recvVerificationEnds = 0;  // R->P pastes ended by a failed chunk check
     uint8_t lastRecvVerdict = 0, lastRecvEndReason = 0;
+    uint64_t staleHelperFrames = 0, staleHelperGones = 0;  // of a helper since replaced, not taken (r8)
   };
   Counters GetCounters() const;
+  /**
+   * TEST ONLY -- called when a helper frame (point 1) or a helper's "gone" (point 2) arrives, with
+   * the instance it came from, before it is looked at. No product code calls this; the build gate
+   * checks the shipped viewer does not carry it.
+   */
+  void SetHelperProbeForTest(std::function<void(uint64_t instance, int point)> probe);
   /** Whether a paste of this viewer's files is running (pinned, bulk open). */
   bool PasteActive() const {
     std::lock_guard<std::mutex> lock(mu_);
@@ -249,10 +256,12 @@ class FileCopyClient {
   int PumpOfferQuery(ControlLink& link);
   int PrepareReceive(ControlLink& link, const PasteKey& k, bool mayWait = true);
   int SendReceiveEnd(ControlLink& link, const PasteKey& k);
-  void OnHelperFrame(const file_copy::PipeFrame& f);
-  void OnHelperGone();
-  void OnHelperPasteBegin(const file_copy::PasteBegin& m);
-  void OnHelperPasteEnd(const file_copy::PasteEnd& m);
+  // `instance`: which helper spoke (FileHelperChannel::instance()); taken only if it is the current one
+  void OnHelperFrame(uint64_t instance, const file_copy::PipeFrame& f);
+  void OnHelperGone(uint64_t instance);
+  void OnHelperPasteBegin(uint64_t instance, const file_copy::PasteBegin& m);
+  void OnHelperPasteEnd(uint64_t instance, const file_copy::PasteEnd& m);
+  bool HelperCurrentLocked(uint64_t instance, bool gone);  // caller holds mu_
   void EndReceiveLocked(file_copy::net::PasteEndReason reason);  // caller holds mu_; queues the End
   void RefuseDescriptor(uint64_t offerId, uint64_t pasteOp, file_copy::Status why);
   void Post(std::function<void()> task);  // runs on the worker (helper start / publish / clear)
@@ -321,6 +330,7 @@ class FileCopyClient {
   FileChunkServer server_;     // P->R
   BulkUplink uplink_;          // P->R
   FileHelperChannel helper_;   // R->P
+  std::function<void(uint64_t, int)> helperProbe_;  // test only (SetHelperProbeForTest)
   FilePullReceiver receiver_;  // R->P
 
   std::thread worker_;

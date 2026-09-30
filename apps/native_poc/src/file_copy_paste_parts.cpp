@@ -13,13 +13,6 @@ namespace fn = remote60::native_poc::file_copy::net;
 
 // ------------------------------------------------------------------------------ FileHelperChannel
 
-void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneFn onGone) {
-  std::lock_guard<std::mutex> lock(mu_);
-  config_ = std::move(config);
-  onFrame_ = std::move(onFrame);
-  onGone_ = std::move(onGone);
-}
-
 void FileHelperChannel::Configure(Config config, FrameOfFn onFrame, GoneOfFn onGone) {
   std::lock_guard<std::mutex> lock(mu_);
   config_ = std::move(config);
@@ -43,18 +36,19 @@ void FileHelperChannel::SetOwner(uint64_t owner) {
   if (dying) dying->Close();
 }
 
-bool FileHelperChannel::EnsureAs(uint64_t owner, std::string* why, bool* stale) {
+bool FileHelperChannel::EnsureAs(uint64_t owner, std::string* why, bool* stale, uint64_t* instance) {
   std::lock_guard<std::mutex> lock(mu_);
-  return EnsureLocked(owner, why, stale);
+  return EnsureLocked(owner, why, stale, instance);
 }
 
-bool FileHelperChannel::Ensure(std::string* why) {
+bool FileHelperChannel::Ensure(std::string* why, uint64_t* instance) {
   std::lock_guard<std::mutex> lock(mu_);
-  return EnsureLocked(owner_.load(), why, nullptr);
+  return EnsureLocked(owner_.load(), why, nullptr, instance);
 }
 
-bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* stale) {
+bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* stale, uint64_t* instance) {
   if (stale) *stale = false;
+  if (instance) *instance = 0;
   {
     std::lock_guard<std::mutex> s(sendMu_);
     if (owner_.load() != owner) {
@@ -62,7 +56,10 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
       if (stale) *stale = true;
       return false;
     }
-    if (cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive()) return true;
+    if (cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive()) {
+      if (instance) *instance = cur_.instance;
+      return true;
+    }
   }
   const uint64_t now = GetTickCount64();
   if (now < nextLaunchMs_) {
@@ -87,7 +84,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   std::shared_ptr<fc::HelperLink> dying, dyingCur;
   std::thread oldReader;
   bool adopted = false;
-  const uint64_t instance = ++nextInstance_;
+  const uint64_t inst = ++nextInstance_;
   {
     std::lock_guard<std::mutex> s(sendMu_);
     if (owner_.load() == owner) {
@@ -96,8 +93,9 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
       // before; one of another owner (after SetOwner) is prev_ and Retire's to end.
       if (cur_.link && cur_.owner == owner) dyingCur = cur_.link;
       prev_ = std::move(cur_);
-      cur_ = Helper{fresh, owner, instance};
-      instance_.store(instance);
+      cur_ = Helper{fresh, owner, inst};
+      instance_.store(inst);
+      if (instance) *instance = inst;
       adopted = true;
     }
   }
@@ -114,25 +112,31 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   oldReader = std::move(prevReader_);
   if (oldReader.joinable()) oldReader.join();  // under mu_ only: never under a caller's lock
   prevReader_ = std::move(reader_);
-  reader_ = std::thread([this, owner, instance, fresh] { ReaderLoop(owner, instance, fresh); });
+  reader_ = std::thread([this, owner, inst, fresh] { ReaderLoop(owner, inst, fresh); });
   backoffMs_ = 0;
   nextLaunchMs_ = 0;
   return true;
 }
 
-bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* stale) {
+bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* stale, uint64_t* instance) {
   std::lock_guard<std::mutex> s(sendMu_);
+  if (instance) *instance = 0;
   if (owner_.load() != owner) {
     if (stale) *stale = true;
     return false;
   }
   if (stale) *stale = false;
-  return cur_.link && cur_.link->pipe_open() && cur_.link->Send(f);
+  if (!(cur_.link && cur_.link->pipe_open() && cur_.link->Send(f))) return false;
+  if (instance) *instance = cur_.instance;  // whom it went to: the answer to take is this one's
+  return true;
 }
 
-bool FileHelperChannel::Send(const fc::PipeFrame& f) {
+bool FileHelperChannel::Send(const fc::PipeFrame& f, uint64_t* instance) {
   std::lock_guard<std::mutex> s(sendMu_);
-  return cur_.link && cur_.link->pipe_open() && cur_.link->Send(f);
+  if (instance) *instance = 0;
+  if (!(cur_.link && cur_.link->pipe_open() && cur_.link->Send(f))) return false;
+  if (instance) *instance = cur_.instance;
+  return true;
 }
 
 bool FileHelperChannel::Running() const {
@@ -141,19 +145,16 @@ bool FileHelperChannel::Running() const {
 }
 
 void FileHelperChannel::ReaderLoop(uint64_t owner, uint64_t instance, std::shared_ptr<fc::HelperLink> link) {
-  // The untagged callbacks (the viewer's use) get only the current instance's frames and "gone":
-  // decided here, without the receiver's lock -- the tagged ones let the receiver decide under its
-  // own lock (the host does).
+  // Every frame and the "gone" carry this helper's tag; the receiver decides under its own lock
+  // whether this helper is still its current one (r8: no untagged, unbound check here).
   for (;;) {
     fc::PipeFrame f;
     if (!link->Receive(&f, 100)) {
       if (GetLastError() == WAIT_TIMEOUT) continue;
       break;  // the pipe is gone
     }
-    if (onFrame_ && instance_.load() == instance) onFrame_(f);
     if (onFrameOf_) onFrameOf_(owner, instance, f);
   }
-  if (onGone_ && instance_.load() == instance) onGone_();
   if (onGoneOf_) onGoneOf_(owner, instance);
 }
 

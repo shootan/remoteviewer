@@ -61,7 +61,11 @@ void FileCopyClient::Start(SendFn send, PingRttFn pingRtt, YieldFn yield, uint32
   if (R2PEnabled()) {
     FileHelperChannel::Config hc;
     hc.launcher = launcher_;
-    helper_.Configure(hc, [this](const fc::PipeFrame& f) { OnHelperFrame(f); }, [this] { OnHelperGone(); });
+    // Tagged callbacks (r8): which helper instance spoke is checked under mu_, together with what
+    // it changes -- a late frame or "gone" of a helper this viewer has since replaced changes nothing.
+    helper_.Configure(
+        hc, [this](uint64_t, uint64_t instance, const fc::PipeFrame& f) { OnHelperFrame(instance, f); },
+        [this](uint64_t, uint64_t instance) { OnHelperGone(instance); });
     receiver_.Start([this](const fc::ReadData& d) { (void)helper_.Send(fc::encode(d)); });
     {
       std::lock_guard<std::mutex> w(workMu_);
@@ -620,12 +624,27 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
   return 1;
 }
 
-void FileCopyClient::OnHelperFrame(const fc::PipeFrame& f) {
+bool FileCopyClient::HelperCurrentLocked(uint64_t instance, bool gone) {
+  if (instance == helper_.instance()) return true;
+  if (gone) ++counters_.staleHelperGones;
+  else ++counters_.staleHelperFrames;
+  return false;
+}
+
+void FileCopyClient::SetHelperProbeForTest(std::function<void(uint64_t, int)> probe) {
+  std::lock_guard<std::mutex> lock(mu_);
+  helperProbe_ = std::move(probe);
+  Log("TEST PROBE viewer helper installed");
+}
+
+void FileCopyClient::OnHelperFrame(uint64_t instance, const fc::PipeFrame& f) {
+  if (helperProbe_) helperProbe_(instance, 1);
   switch (f.type) {
     case fc::PipeMsg::PublishResult: {
       fc::PublishResult m;
       if (!fc::decode(f, &m)) break;
       std::lock_guard<std::mutex> lock(mu_);
+      if (!HelperCurrentLocked(instance, false)) break;
       if (m.status == fc::Status::Ok && m.offerId == remote_.offerId) {
         publishedOfferId_ = m.offerId;
         ++counters_.remotePublished;
@@ -639,17 +658,20 @@ void FileCopyClient::OnHelperFrame(const fc::PipeFrame& f) {
     }
     case fc::PipeMsg::PasteBegin: {
       fc::PasteBegin m;
-      if (fc::decode(f, &m)) OnHelperPasteBegin(m);
+      if (fc::decode(f, &m)) OnHelperPasteBegin(instance, m);
       break;
     }
     case fc::PipeMsg::ReadRequest: {
       fc::ReadRequest m;
-      if (fc::decode(f, &m)) receiver_.Submit(m);
+      if (!fc::decode(f, &m)) break;
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!HelperCurrentLocked(instance, false)) break;
+      receiver_.Submit(m);  // under mu_, like the receiver's open / close
       break;
     }
     case fc::PipeMsg::PasteEnd: {
       fc::PasteEnd m;
-      if (fc::decode(f, &m)) OnHelperPasteEnd(m);
+      if (fc::decode(f, &m)) OnHelperPasteEnd(instance, m);
       break;
     }
     default:
@@ -665,10 +687,11 @@ void FileCopyClient::RefuseDescriptor(uint64_t offerId, uint64_t pasteOp, fc::St
   (void)helper_.Send(fc::encode(d));
 }
 
-void FileCopyClient::OnHelperPasteBegin(const fc::PasteBegin& m) {
+void FileCopyClient::OnHelperPasteBegin(uint64_t instance, const fc::PasteBegin& m) {
   bool refuse = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!HelperCurrentLocked(instance, false)) return;
     ++counters_.recvBegun;
     const bool known = m.offerId != 0 && (m.offerId == remote_.offerId || m.offerId == remoteRetired_.offerId);
     // One paste at a time here too; a second one fails before any byte, never replaces the first.
@@ -808,8 +831,9 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
   return 1;
 }
 
-void FileCopyClient::OnHelperPasteEnd(const fc::PasteEnd& m) {
+void FileCopyClient::OnHelperPasteEnd(uint64_t instance, const fc::PasteEnd& m) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!HelperCurrentLocked(instance, false)) return;
   if (recv_.active && recv_.offerId == m.offerId && recv_.pasteOp == m.pasteOp) {
     // A failed chunk check is the reason, whatever the consumer made of the failed Read.
     const fn::PasteEndReason failure = receiver_.failure();
@@ -874,8 +898,12 @@ int FileCopyClient::SendReceiveEnd(ControlLink& link, const PasteKey& k) {
   return 1;
 }
 
-void FileCopyClient::OnHelperGone() {
+void FileCopyClient::OnHelperGone(uint64_t instance) {
+  if (helperProbe_) helperProbe_(instance, 2);
   std::lock_guard<std::mutex> lock(mu_);
+  // A helper this viewer has since replaced: what the new one published, is receiving or has
+  // queued is not the old one's to end (r8).
+  if (!HelperCurrentLocked(instance, true)) return;
   EndReceiveLocked(fn::PasteEndReason::Session);
   if (waitBulk_.on && !waitBulk_.toRemote) waitBulk_.on = false;  // its consumer went with the helper
   ReleasePreemptLocked();

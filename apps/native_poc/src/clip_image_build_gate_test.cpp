@@ -97,6 +97,11 @@ int wmain(int argc, wchar_t** argv) {
     check("positive control: the net e2e carries the receive probe's banner", contains(netE2e, receiveBanner));
     check("the shipped host does not carry the receive probe's banner", !contains(shipped, receiveBanner));
     check("the shipped viewer does not carry the receive probe's banner", !contains(read_all(dir + L"\\GNLinkViewer.exe"), receiveBanner));
+    // The viewer's helper probe (FileCopyClient::SetHelperProbeForTest, r8) likewise: tests only.
+    const std::string viewerBanner = "TEST PROBE viewer helper";
+    check("positive control: the net e2e carries the viewer helper probe's banner", contains(netE2e, viewerBanner));
+    check("the shipped viewer does not carry the viewer helper probe's banner", !contains(read_all(dir + L"\\GNLinkViewer.exe"), viewerBanner));
+    check("the shipped host does not carry the viewer helper probe's banner", !contains(shipped, viewerBanner));
     for (const wchar_t* exe : {L"GNLinkStream.exe", L"GNLinkViewer.exe", L"GNLinkClipHelper.exe"}) {
       const auto bytes = read_all(dir + L"\\" + exe);
       std::string n;

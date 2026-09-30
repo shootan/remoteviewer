@@ -313,6 +313,10 @@ int wmain() {
                     link->Launch(helperExe, nullptr, station.desktop.c_str(), L"--idle-ms 8000 --log \"" + helperLog + L"\"", why) &&
                     link->AwaitHello(10000, why);
     if (up) lastHelperPid.store(link->helper_pid());
+    {
+      std::lock_guard<std::mutex> l(lpm);
+      std::printf("      launcher: up=%d pid=%lu park=%d\n", up ? 1 : 0, static_cast<unsigned long>(up ? link->helper_pid() : 0), launchPark ? 1 : 0);
+    }
     if (up) {
       std::unique_lock<std::mutex> l(lpm);
       if (launchPark) {
@@ -333,9 +337,12 @@ int wmain() {
   host.OnHostClipboard(hostSeq, {preDir + L"\\before.txt"});
   FileCopyClient viewer;
   const std::wstring viewerHelperLog = root + L"viewer_helper.log";
+  std::atomic<DWORD> viewerHelperPid{0};  // r8 V1
   viewer.SetHelperLauncher([&](fc::HelperLink* link, std::string* why) {
-    return fc::launch_file_copy_helper_as_self(helperExe, local.desktop.c_str(),
-                                               L"--idle-ms 8000 --log \"" + viewerHelperLog + L"\"", link, why);
+    const bool up = fc::launch_file_copy_helper_as_self(helperExe, local.desktop.c_str(),
+                                                        L"--idle-ms 8000 --log \"" + viewerHelperLog + L"\"", link, why);
+    if (up) viewerHelperPid.store(link->helper_pid());
+    return up;
   });
   viewer.Start(viewer_send, [] { return uint64_t{0}; }, [] { return false; }, 1200, BulkRateConfig{}, &viewArbiter,
                [](const std::string& l) { std::printf("      viewer: %s\n", l.c_str()); });
@@ -1361,6 +1368,74 @@ int wmain() {
     check("the viewer withdrew what it had published", wait_until([&] { return viewer.GetCounters().remoteCleared > before.remoteCleared; }, 5000));
   }
 
+
+  std::printf("\n--- V1 (r8 2). the viewer: an old helper's late 'gone' does not undo what its successor published ---\n");
+  {
+    // The viewer's helper H1 published the remote copies above. H1 dies; its "gone" is held at the
+    // viewer's door (probe point 2) while a new remote copy makes the viewer start H2 and publish
+    // through it; then the old "gone" is let in. What H2 published must stay published -- which
+    // shows when the remote clipboard clears: the viewer withdraws only what it knows it published.
+    std::mutex vpm;
+    std::condition_variable vpcv;
+    int vpoint = 0;
+    bool vparked = false, vrelease = false;
+    uint64_t vinst = 0;
+    viewer.SetHelperProbeForTest([&](uint64_t instance, int point) {
+      std::unique_lock<std::mutex> l(vpm);
+      if (point != vpoint) return;
+      vpoint = 0;
+      vinst = instance;
+      vparked = true;
+      vpcv.notify_all();
+      vpcv.wait(l, [&] { return vrelease; });
+    });
+    const std::wstring v1a = remoteDir + L"\\viewV1a.txt", v1b = remoteDir + L"\\viewV1b.txt";
+    write_file(v1a, make_content(512, 201));
+    write_file(v1b, make_content(768, 202));
+    const auto before = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {v1a});
+    check("V1: the viewer published the remote copy through its helper H1",
+          wait_until([&] { return viewer.GetCounters().remotePublished > before.remotePublished; }, 20000));
+    const DWORD pid1 = viewerHelperPid.load();
+    {
+      std::lock_guard<std::mutex> l(vpm);
+      vpoint = 2;  // H1's "gone"
+      vparked = false;
+      vrelease = false;
+    }
+    HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid1);
+    check("V1: H1's process could be opened", hp != nullptr, "pid=" + std::to_string(pid1));
+    if (hp) {
+      TerminateProcess(hp, 9);
+      WaitForSingleObject(hp, 5000);
+      CloseHandle(hp);
+    }
+    bool goneParked = false;
+    {
+      std::unique_lock<std::mutex> l(vpm);
+      goneParked = vpcv.wait_for(l, std::chrono::seconds(10), [&] { return vparked; });
+    }
+    check("V1: H1's 'gone' was held at the viewer's door", goneParked, "instance=" + std::to_string(vinst));
+    const auto mid = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {v1b});  // a new remote copy: the viewer starts H2 and publishes through it
+    check("V1: the viewer published the new copy through a new helper H2", wait_until([&] {
+            const auto c = viewer.GetCounters();
+            return c.remotePublished > mid.remotePublished && c.helperLaunches > mid.helperLaunches;
+          }, 20000));
+    {
+      std::lock_guard<std::mutex> l(vpm);
+      vrelease = true;  // the old "gone" goes in now
+      vpcv.notify_all();
+    }
+    check("V1: the old 'gone' was not taken (a helper since replaced)",
+          wait_until([&] { return viewer.GetCounters().staleHelperGones > mid.staleHelperGones; }, 5000));
+    const auto pub = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {});  // the remote clipboard clears
+    check("V1: what H2 published is still known as published: the viewer withdraws it",
+          wait_until([&] { return viewer.GetCounters().remoteCleared > pub.remoteCleared; }, 5000),
+          "cleared +" + std::to_string(viewer.GetCounters().remoteCleared - pub.remoteCleared));
+    viewer.SetHelperProbeForTest(nullptr);
+  }
   // ------------------------------------------------------------------ teardown
   stop.store(true);
   pump.join();
@@ -1412,6 +1487,7 @@ int wmain() {
     // before the handler: A's handler must find the state no longer its session's and apply nothing.
     std::mutex pm;
     std::condition_variable pcv;
+    const int kPinResultPoint = 700 + static_cast<int>(fc::PipeMsg::PinResult);  // the probe's "a PinResult arrived"
     int parkPoint = 0, parkPoint2 = 0;
     uint64_t parkEpoch = 0, parkEpoch2 = 0;
     bool parked = false, release = false, parked2 = false, release2 = false;
@@ -1914,7 +1990,7 @@ int wmain() {
       const auto before = host.GetCounters();
       {
         std::lock_guard<std::mutex> l(pm);
-        parkPoint = 7;  // the old helper's next frame: the PinResult
+        parkPoint = kPinResultPoint;  // the old helper's next frame: the PinResult
         parkEpoch = oldE;
         parked = false;
         release = false;
@@ -1990,7 +2066,7 @@ int wmain() {
       const auto before = host.GetCounters();
       {
         std::lock_guard<std::mutex> l(pm);
-        parkPoint = 7;  // the helper's next frame: the PinResult of the first Prepare
+        parkPoint = kPinResultPoint;  // the helper's next frame: the PinResult of the first Prepare
         parkEpoch = E;
         parked = false;
         release = false;
@@ -2164,6 +2240,168 @@ int wmain() {
       check("Z4: no I/O storage was orphaned", fc::detail::orphan_counter().load() == orphansBefore,
             "orphans +" + std::to_string(fc::detail::orphan_counter().load() - orphansBefore));
       check("Z4: all rounds clean (no crash)", ok == rounds, std::to_string(ok) + "/" + std::to_string(rounds));
+    }
+
+    // Z5 (r8 1): the helper is replaced in the MIDDLE of a request. The new Prepare has reserved and
+    // cleared its answer flag, and is inside H2's start (H1 still the current instance) when H1's
+    // late PinResult (op 1) arrives and is stored -- a legitimate adoption at that moment. H2 is then
+    // adopted and the new Pin goes to it, and H2's answer is held: the Prepare must NOT answer on
+    // H1's stored value; it answers only once H2's own answer comes. Two orders of H1's "gone":
+    // (a) held until the end (Codex's order), then let in: not taken; (b) let in during H2's start
+    // (H1 still current): the reservation, sent to nobody yet, must survive it.
+    std::printf("      --- Z5: an answer stored before the new pin went out is not the new pin's answer ---\n");
+    for (int variant = 0; variant < 2; ++variant) {
+      const std::string tag = std::string("Z5") + (variant == 0 ? "a" : "b") + ": ";
+      const uint64_t E = 401 + static_cast<uint64_t>(variant);  // after Z4 (201..300): epochs only go up
+      const std::wstring z5 = remoteDir + (variant == 0 ? L"\\epochZ5a.txt" : L"\\epochZ5b.txt");
+      write_file(z5, make_content(2048, 211 + variant));
+      uint64_t h = host_offer_in(E, z5);
+      // Settle: the worker may identify the copy a second time (an offer query that came while its
+      // helper was starting asks once more, up to half a second later). Take the offer as it stands
+      // once that is over, so no identification is in flight when H1 is ended below -- otherwise the
+      // worker itself would start H2 for it, and there would be no start left for the new Prepare.
+      Sleep(1500);
+      {
+        std::vector<uint8_t> r0;
+        fn::OfferQueryReply q0;
+        if (call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), E, &r0) && fn::parse(r0, &q0) && q0.offerId != 0) h = q0.offerId;
+      }
+      check(tag + "the session sees its copy", h != 0);
+      const DWORD pid1 = lastHelperPid.load();
+      const auto before = host.GetCounters();
+      // 1. H1's PinResult (op 1) is held on its reader; the first Prepare times out and releases
+      //    its reservation; H1 dies (its reader, parked, has not noticed).
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = kPinResultPoint;
+        parkEpoch = E;
+        parked = false;
+        release = false;
+        parkPoint2 = 10;  // H1's "gone", when it comes
+        parkEpoch2 = E;
+        parked2 = false;
+        release2 = false;
+      }
+      bool aAnswered = false;
+      fn::PrepareReply a;
+      std::thread at([&] { prepare_rtop(E, h, 1, &aAnswered, &a); });
+      bool readerParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        readerParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked; });
+      }
+      const auto atPark = host.GetCounters();
+      check(tag + "H1's PinResult was held", readerParked,
+            "launches +" + std::to_string(atPark.helperLaunches - before.helperLaunches) + " hostOffers +" +
+                std::to_string(atPark.hostOffers - before.hostOffers) + " pid1=" + std::to_string(pid1));
+      HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid1);
+      bool killed = false;
+      if (hp) {
+        killed = TerminateProcess(hp, 9) != FALSE && WaitForSingleObject(hp, 5000) == WAIT_OBJECT_0;
+        CloseHandle(hp);
+      }
+      check(tag + "H1's process was ended", killed, "pid1=" + std::to_string(pid1));
+      at.join();
+      {
+        const auto c = host.GetCounters();
+        std::printf("      Z5 after the first Prepare: launches +%llu hostOffers +%llu pidNow=%lu\n",
+                    static_cast<unsigned long long>(c.helperLaunches - before.helperLaunches),
+                    static_cast<unsigned long long>(c.hostOffers - before.hostOffers), static_cast<unsigned long>(lastHelperPid.load()));
+      }
+      check(tag + "the first Prepare gave up (its pin timed out) and released its reservation",
+            aAnswered && a.verdict != fn::Verdict::Accept && hostArbiter.use() == BulkUse::Idle,
+            "verdict=" + std::to_string(static_cast<int>(a.verdict)));
+      // 2. The new Prepare (op 1, the cached offer) reserves, clears its flag, starts H2 -- and is
+      //    held inside H2's start.
+      {
+        std::lock_guard<std::mutex> l(lpm);
+        launchPark = true;
+        launchParked = false;
+        launchRelease = false;
+      }
+      bool bAnswered = false;
+      fn::PrepareReply b;
+      std::atomic<bool> bDone{false};
+      std::thread bt([&] {
+        prepare_rtop(E, h, 1, &bAnswered, &b);
+        bDone.store(true);
+      });
+      bool lp = false;
+      {
+        std::unique_lock<std::mutex> l(lpm);
+        lp = lpcv.wait_for(l, std::chrono::seconds(15), [&] { return launchParked; });
+      }
+      const auto atB = host.GetCounters();
+      check(tag + "the new Prepare is held inside H2's start (H1 still the current instance)", lp,
+            "launches +" + std::to_string(atB.helperLaunches - before.helperLaunches) + " hostOffers +" +
+                std::to_string(atB.hostOffers - before.hostOffers) + " pidNow=" + std::to_string(lastHelperPid.load()) +
+                " bDone=" + std::to_string(bDone.load()));
+      // 3. H1's PinResult goes in now (current instance: stored). Its "gone" follows and is held.
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;
+        pcv.notify_all();
+      }
+      bool goneParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        goneParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked2; });
+      }
+      check(tag + "H1's 'gone' followed and was held", goneParked);
+      if (variant == 1) {
+        // (b) the old "gone" goes in while H2 is still starting: H1 is the current instance, but the
+        // reservation was sent to nobody -- it must survive.
+        std::lock_guard<std::mutex> l(pm);
+        release2 = true;
+        pcv.notify_all();
+      }
+      Sleep(200);
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = kPinResultPoint;  // H2's PinResult, when it comes
+        parkEpoch = E;
+        parked = false;
+        release = false;
+      }
+      // 4. H2 is adopted, the new Pin goes to it; H2's answer is held.
+      {
+        std::lock_guard<std::mutex> l(lpm);
+        launchRelease = true;
+        lpcv.notify_all();
+      }
+      bool h2Parked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        h2Parked = pcv.wait_for(l, std::chrono::seconds(15), [&] { return parked; });
+      }
+      check(tag + "H2 answered the new Pin and that answer is held", h2Parked);
+      Sleep(1000);
+      check(tag + "the new Prepare did NOT answer on H1's stored value (it waits for H2's)", !bDone.load(),
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;  // H2's answer goes in
+        pcv.notify_all();
+      }
+      bt.join();
+      check(tag + "...and accepted once H2's own answer came", bAnswered && b.verdict == fn::Verdict::Accept && b.items.size() == 1,
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      const auto after = host.GetCounters();
+      check(tag + "the sender is this Prepare's", after.sendOpen && after.sendEpochTag == b.epochTag && after.sendPasteOp == 1);
+      if (variant == 0) {
+        std::lock_guard<std::mutex> l(pm);
+        release2 = true;  // (a) H1's "gone" goes in only now: not the current instance's
+        pcv.notify_all();
+      }
+      check(tag + "H1's 'gone' did not end the paste " + (variant == 0 ? "(let in after H2: stale)" : "(let in during H2's start: sent to nobody)"),
+            wait_until([&] { return host.GetCounters().staleHelperGones > before.staleHelperGones || variant == 1; }, 5000) &&
+                host.GetCounters().sendOpen,
+            "stale gones +" + std::to_string(host.GetCounters().staleHelperGones - before.staleHelperGones));
+      bool eAnswered = false;
+      fn::EndReply er;
+      end_paste(E, h, 1, &eAnswered, &er);
+      check(tag + "the session ends its send", eAnswered && er.state == fn::PasteState::Failed);
+      check(tag + "...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
     }
     host.SetEpochProbeForTest(nullptr);
   }

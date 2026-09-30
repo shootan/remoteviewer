@@ -57,18 +57,20 @@ class FileHelperChannel {
  public:
   /** Starts the helper and completes its handshake on `link`; false = unavailable now. */
   using Launcher = std::function<bool(file_copy::HelperLink* link, std::string* why)>;
-  /** Every frame the helper sends, on the reader thread. */
-  using FrameFn = std::function<void(const file_copy::PipeFrame&)>;
   /**
-   * The same, told which owner (SetOwner) the helper that sent it was started for (r6) and which
+   * Every frame the helper sends, on the reader thread, told which owner (SetOwner) the helper
+   * that sent it was started for (r6) and which
    * helper INSTANCE it is (r7): every start gets a new, never reused number (instance()), so a
    * frame of an earlier helper of the SAME owner (one that was replaced after its pipe failed) can
    * be told from the current one's -- owner alone cannot tell them apart.
    */
   using FrameOfFn = std::function<void(uint64_t owner, uint64_t instance, const file_copy::PipeFrame&)>;
-  /** The pipe is gone (the helper exited or was stopped), on the reader thread. */
-  using GoneFn = std::function<void()>;
-  /** The same, told which owner and instance the pipe was started for (see FrameOfFn). */
+  /**
+   * The pipe is gone (the helper exited or was stopped), on the reader thread, told which owner
+   * and instance the pipe was started for (see FrameOfFn). There are no untagged callbacks (r8):
+   * every receiver decides under its own lock whether the helper that spoke is still its current
+   * one -- a check made here, before the callback, would not be bound to what the callback changes.
+   */
   using GoneOfFn = std::function<void(uint64_t owner, uint64_t instance)>;
 
   struct Config {
@@ -79,13 +81,17 @@ class FileHelperChannel {
 
   ~FileHelperChannel() { Stop(); }
 
-  void Configure(Config config, FrameFn onFrame, GoneFn onGone);
   void Configure(Config config, FrameOfFn onFrame, GoneOfFn onGone);
   bool configured() const { return config_.launcher != nullptr; }
 
-  /** Running, or started now (one start at a time, backoff honoured). Unowned: as the current owner. */
-  bool Ensure(std::string* why);
-  bool Send(const file_copy::PipeFrame& f);
+  /**
+   * Running, or started now (one start at a time, backoff honoured). Unowned: as the current owner.
+   * `instance` (optional, r8): which helper instance is running / took the frame, so a request can
+   * bind what it sent to the answer it will take -- an answer of an earlier instance, stored while
+   * its successor was starting, is then nobody's.
+   */
+  bool Ensure(std::string* why, uint64_t* instance = nullptr);
+  bool Send(const file_copy::PipeFrame& f, uint64_t* instance = nullptr);
 
   /**
    * Ownership (r5/r6): the helper is per session, and the session's epoch owns the channel. Every
@@ -103,8 +109,8 @@ class FileHelperChannel {
   uint64_t owner() const { return owner_.load(); }
   /** The current helper's instance number (0 = none): the receiver takes frames of this one only. */
   uint64_t instance() const { return instance_.load(); }
-  bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr);
-  bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr);
+  bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr, uint64_t* instance = nullptr);
+  bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr, uint64_t* instance = nullptr);
   bool Running() const;
   /**
    * Ends `owner`'s helper (the current one, or the previous one after SetOwner): Shutdown is sent
@@ -129,12 +135,10 @@ class FileHelperChannel {
     uint64_t instance = 0;
   };
   void ReaderLoop(uint64_t owner, uint64_t instance, std::shared_ptr<file_copy::HelperLink> link);
-  bool EnsureLocked(uint64_t owner, std::string* why, bool* stale);  // caller holds mu_
+  bool EnsureLocked(uint64_t owner, std::string* why, bool* stale, uint64_t* instance);  // caller holds mu_
 
   Config config_;
-  FrameFn onFrame_;
   FrameOfFn onFrameOf_;
-  GoneFn onGone_;
   GoneOfFn onGoneOf_;
   std::atomic<uint64_t> owner_{0};
   std::atomic<uint64_t> instance_{0};  // cur_'s instance (0 = none); set under sendMu_

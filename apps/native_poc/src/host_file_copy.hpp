@@ -173,10 +173,12 @@ class HostFileCopyService {
    * sessionMu_); 2 = it is recorded, before the handler runs (not under it). In the handlers (r5,
    * no lock held): 3 = Offer, the helper is up, before Publish is sent; 4 = Offer, Publish sent,
    * before the answer is awaited; 5 = Prepare R->P, pinned and accepted, before the sender is
-   * begun; 6 = End, the paste is ended under mu_, before the sender is closed; 7 = a helper frame
-   * arrived (`requestEpoch` = the owner that helper was started for), before it is looked at; 8 =
-   * Prepare R->P, reserved, before the helper is asked to pin. No product code calls this; the
-   * build gate checks the shipped host does not carry it.
+   * begun; 6 = End, the paste is ended under mu_, before the sender is closed; 700 + frame type = a
+   * helper frame of that type arrived (`requestEpoch` = the owner that helper was started for),
+   * before it is looked at; 8 =
+   * Prepare R->P, reserved, before the helper is asked to pin; 10 = a helper's "gone" arrived
+   * (`requestEpoch` = its owner), before it is looked at. No product code calls this; the build
+   * gate checks the shipped host does not carry it.
    */
   void SetEpochProbeForTest(std::function<void(uint64_t requestEpoch, int point)> probe);
 
@@ -227,6 +229,7 @@ class HostFileCopyService {
   struct Paste {
     Dir dir = Dir::None;
     uint64_t epoch = 0;  // the session it belongs to (r5)
+    uint64_t helperInstance = 0;  // the helper it was sent to / begun by (r8); 0 = none yet
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
     uint32_t bulkGen = 0;
@@ -324,13 +327,17 @@ class HostFileCopyService {
   file_copy::PinResult pinResult_;
   bool localAnswered_ = false;
   file_copy::LocalData localData_;
+  // r8: which helper instance each stored answer came from. A request takes only the answer of the
+  // instance it sent to; an answer of an earlier instance, taken while its successor was starting
+  // (it was the current one then), is nobody's.
+  uint64_t publishInstance_ = 0, pinInstance_ = 0, localInstance_ = 0;
   bool sendAborting_ = false;  // R->P: a read in flight gives up at once
   uint64_t sendBytesAtStart_ = 0;  // the server's served-bytes counter when this paste began
   uint64_t epochTag_ = 0;
   uint32_t random32_ = 0;
   PeerOffer offer_, retired_;
   bool haveBegun_ = false;
-  uint64_t begunOffer_ = 0, begunOp_ = 0;
+  uint64_t begunOffer_ = 0, begunOp_ = 0, begunInstance_ = 0;
   // R->P: the newest clipboard content, the offer made of it, and the one it replaced (a paste may
   // have begun on it just before).
   uint64_t clipSeq_ = 0;
