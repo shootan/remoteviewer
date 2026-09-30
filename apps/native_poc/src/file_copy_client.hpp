@@ -144,7 +144,8 @@ class FileCopyClient {
   /**
    * TEST ONLY -- called when a helper frame (point 1) or a helper's "gone" (point 2) arrives, with
    * the instance it came from, before it is looked at; and before a refusal descriptor (3), an
-   * accepted descriptor (4) or a Read answer (5) is sent, with the instance it is for. No product
+   * accepted descriptor (4) or a Read answer (5) is sent, with the instance it is for; and on the
+   * worker, before a publish looks for / starts a helper (6, instance 0). No product
    * code calls this; the build gate checks the shipped viewer does not carry it.
    */
   void SetHelperProbeForTest(std::function<void(uint64_t instance, int point)> probe);

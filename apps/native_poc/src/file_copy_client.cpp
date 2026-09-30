@@ -611,6 +611,7 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     Post([this, pub, files] {
       std::string why;
       uint64_t inst = 0;
+      if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
       if (!helper_.Ensure(&why, &inst) || !helper_.SendTo(inst, fc::encode(pub))) {
         Log("remote copy not published: helper unavailable (" + why + ")");
         std::lock_guard<std::mutex> lock(mu_);

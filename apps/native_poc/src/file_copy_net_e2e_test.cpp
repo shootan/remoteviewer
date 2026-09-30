@@ -1533,54 +1533,97 @@ int wmain() {
       c1.Wait(15000);
     }
 
-    // V3: an accepted descriptor. Helper A's PasteBegin is queued (the pump held) and A dies -- its
-    // "gone" held at the door (2), so the queue keeps the paste; the pump is let go: the prepare
-    // completes its control round trip and its descriptor, meant for A, is held before it is sent
-    // (4); let go, it is not delivered (A is gone: sent to a dead pipe, never to a successor). The
-    // successor starts only afterwards (a new remote copy) and receives nothing of it.
-    // (The order "A replaced by B WHILE A's prepare is in its round trip" could not be produced on
-    // the viewer, in three attempts (r9/r10 logs): the round trip runs on the pump thread, which
-    // is also the only thread that posts the publish a successor starts from; a prepare waiting
-    // for the bulk (the one state in which the pump goes on to the offer query) is retried and
-    // refused as soon as the remote offer changes -- and the offer must change for a publish to be
-    // posted. So the reachable case is "A dead, not yet replaced", and it is what this checks; V5
-    // checks the in-flight death itself, with the host's reply held.)
+    // V3: an accepted descriptor, the helper REPLACED WHILE its prepare is in its control round
+    // trip (Codex's order, r11). The publish of a second remote copy O2 is posted to the worker and
+    // held there before it looks for a helper (W); with the pump paused, helper H1's PasteBegin for
+    // the first copy O1 is accepted and queued; the pump is let go and the prepare's round trip is
+    // held at the host (C); H1 dies, its "gone" held at the viewer's door; W is let go: the worker
+    // starts H2 and publishes O2 through it -- while the prepare is still in flight; C is let go:
+    // Accept arrives for a prepare whose helper H1 is no longer the current one. Nothing may be
+    // opened for it, the host must be told to end it, its descriptor must not reach H2; and H2
+    // must then run a paste of its own to the end.
     {
       const std::wstring v3a = remoteDir + L"\\viewV3a.bin", v3b = remoteDir + L"\\viewV3b.bin";
+      const auto contentB = make_content(64 * 1024, 234);
       write_file(v3a, make_content(64 * 1024, 233));
-      write_file(v3b, make_content(64 * 1024, 234));
-      check("V3: the remote copy is published here", remote_copy(v3a, false));
+      write_file(v3b, contentB);
+      check("V3: O1 is published here through helper H1", remote_copy(v3a, false));
       const DWORD pidA = viewerHelperPid.load();
       const auto before = viewer.GetCounters();
-      pumpPaused.store(true);  // the paste's prepare waits in the queue
+      const auto hBefore = host.GetCounters();
+      // C: the host holds its reply to the viewer's Prepare (reserved, before the pin).
+      std::mutex hpm;
+      std::condition_variable hpcv;
+      bool hparked = false, hrelease = false;
+      host.SetEpochProbeForTest([&](uint64_t e, int point) {
+        if (point != 8 || e != 1) return;
+        std::unique_lock<std::mutex> l(hpm);
+        hparked = true;
+        hpcv.notify_all();
+        hpcv.wait(l, [&] { return hrelease; });
+      });
+      // (2)(3) O2's publish is posted and held on the worker at W; the pump is paused right after.
+      arm(1, 6);
+      host.OnHostClipboard(++hostSeq, {v3b});
+      check("V3: the publish of O2 is held on the worker, before it looks for a helper (W)", wait_parked(1, 15));
+      pumpPaused.store(true);
+      // (4) H1 (alive) says PasteBegin for O1 -- O1 is the retired offer now, still known.
       Child c3;
-      paste_on(local, root + L"destV3", 64 * 1024, 15, &c3);
-      check("V3: the paste began (queued, the pump held)",
+      paste_on(local, root + L"destV3", 64 * 1024, 20, &c3);
+      check("V3: H1's PasteBegin for O1 was accepted and queued",
             wait_until([&] { return viewer.GetCounters().recvBegun > before.recvBegun; }, 15000));
-      arm(2, 2);  // helper A's "gone" is held: the queue keeps its paste
-      check("V3: helper A was ended", kill_viewer_helper(pidA), "pid=" + std::to_string(pidA));
-      check("V3: helper A's 'gone' is held at the viewer's door", wait_parked(2, 10));
-      arm(1, 4);  // the accepted descriptor, before it is sent
+      // (5) the pump is let go: the prepare's round trip starts and is held at C.
       pumpPaused.store(false);
-      check("V3: the prepare completed its round trip and its descriptor is held before it is sent (helper A's)",
-            wait_parked(1, 15), "instance=" + std::to_string(vinst));
+      bool atC = false;
+      {
+        std::unique_lock<std::mutex> l(hpm);
+        atC = hpcv.wait_for(l, std::chrono::seconds(15), [&] { return hparked; });
+      }
+      check("V3: the prepare is in its round trip (the host holds its reply at C)", atC);
+      // (6) H1 dies; its "gone" is held at the viewer's door.
+      arm(2, 2);
+      check("V3: H1 was ended", kill_viewer_helper(pidA), "pid=" + std::to_string(pidA));
+      check("V3: H1's 'gone' is held at the viewer's door", wait_parked(2, 10));
+      // (7) W is let go: the worker starts H2 and publishes O2 -- the prepare still in flight.
       const auto mid = viewer.GetCounters();
       let_go(1);
-      check("V3: the descriptor meant for helper A was not delivered (A is gone)",
-            wait_until([&] {
+      check("V3: H2 came up and published O2 while H1's prepare was still in its round trip", wait_until([&] {
               const auto c = viewer.GetCounters();
-              return c.helperSendsDropped + c.helperSendsFailed > mid.helperSendsDropped + mid.helperSendsFailed;
-            }, 5000),
-            "dropped +" + std::to_string(viewer.GetCounters().helperSendsDropped - mid.helperSendsDropped) + " failed +" +
-                std::to_string(viewer.GetCounters().helperSendsFailed - mid.helperSendsFailed));
-      const auto pub = viewer.GetCounters();
-      check("V3: a new remote copy is published through a NEW helper B", remote_copy(v3b, true));
-      let_go(2);  // A's "gone" goes in only now, after B: not the current helper's
-      check("V3: helper A's 'gone', let in after B, is not taken",
-            wait_until([&] { return viewer.GetCounters().staleHelperGones > pub.staleHelperGones; }, 5000));
-      Sleep(300);
-      check("V3: B began no paste of its own from A's descriptor", viewer.GetCounters().recvBegun == pub.recvBegun);
-      c3.Wait(15000);
+              return c.remotePublished > mid.remotePublished && c.helperLaunches > mid.helperLaunches;
+            }, 20000));
+      // (8) C is let go: Accept arrives; the prepare's helper is not the current one any more.
+      {
+        std::lock_guard<std::mutex> l(hpm);
+        hrelease = true;
+        hpcv.notify_all();
+      }
+      check("V3: the prepare was refused here (its helper H1 is not the current one)",
+            wait_until([&] { return viewer.GetCounters().recvRefused > mid.recvRefused; }, 15000),
+            "refused +" + std::to_string(viewer.GetCounters().recvRefused - mid.recvRefused));
+      check("V3: nothing was opened for it (no receive run)", !viewer.ReceiveActive() && viewer.GetCounters().recvPrepared == mid.recvPrepared);
+      check("V3: the host was told to end the paste it had pinned",
+            wait_until([&] { return host.GetCounters().sendFailed > hBefore.sendFailed && !host.GetCounters().sendOpen; }, 10000),
+            "host sendFailed +" + std::to_string(host.GetCounters().sendFailed - hBefore.sendFailed));
+      check("V3: the descriptor meant for H1 went to nobody (not to H2)", viewer.GetCounters().helperSendsDropped > mid.helperSendsDropped,
+            "dropped +" + std::to_string(viewer.GetCounters().helperSendsDropped - mid.helperSendsDropped));
+      // H1's "gone" drains: not the current helper's.
+      let_go(2);
+      check("V3: H1's 'gone', let in after H2, is not taken",
+            wait_until([&] { return viewer.GetCounters().staleHelperGones > mid.staleHelperGones; }, 5000));
+      host.SetEpochProbeForTest(nullptr);
+      c3.Wait(20000);
+      // H2's own paste runs to the end: the consumer pastes O2 and gets the file.
+      {
+        const auto p0 = viewer.GetCounters();
+        Child c3b;
+        const std::wstring dest = root + L"destV3b";
+        paste_on(local, dest, contentB.size(), 30, &c3b);
+        const DWORD code = c3b.Wait(60000);
+        std::string detail;
+        check("V3: a paste through H2 ran to the end", code == 0 && wait_until([&] { return viewer.GetCounters().recvEnded > p0.recvEnded; }, 10000),
+              "exit=" + std::to_string(code));
+        check("V3: ...and O2's file landed whole", same_files(dest, {{L"viewV3b.bin", contentB}}, &detail), detail);
+      }
     }
 
     // V4: a Read answer. A paste of a large file runs (reads flow); one answer is held before it is
