@@ -1538,10 +1538,13 @@ int wmain() {
     // completes its control round trip and its descriptor, meant for A, is held before it is sent
     // (4); let go, it is not delivered (A is gone: sent to a dead pipe, never to a successor). The
     // successor starts only afterwards (a new remote copy) and receives nothing of it.
-    // (The order "A replaced by B WHILE A's prepare is in its round trip" cannot arise in the viewer:
-    // the round trip runs on the pump thread, and a successor starts only from a publish that the
-    // same thread posts after seeing a new remote offer -- which also ends any paste waiting for
-    // the bulk. So the reachable case is "A dead, not yet replaced", and it is what this checks.)
+    // (The order "A replaced by B WHILE A's prepare is in its round trip" could not be produced on
+    // the viewer, in three attempts (r9/r10 logs): the round trip runs on the pump thread, which
+    // is also the only thread that posts the publish a successor starts from; a prepare waiting
+    // for the bulk (the one state in which the pump goes on to the offer query) is retried and
+    // refused as soon as the remote offer changes -- and the offer must change for a publish to be
+    // posted. So the reachable case is "A dead, not yet replaced", and it is what this checks; V5
+    // checks the in-flight death itself, with the host's reply held.)
     {
       const std::wstring v3a = remoteDir + L"\\viewV3a.bin", v3b = remoteDir + L"\\viewV3b.bin";
       write_file(v3a, make_content(64 * 1024, 233));
@@ -1606,6 +1609,83 @@ int wmain() {
       c4.Wait(30000);
     }
     viewer.SetHelperProbeForTest(nullptr);
+    host.OnHostClipboard(++hostSeq, {});
+    Sleep(500);
+  }
+
+  const auto remote_copy_after_v5 = [&] {
+    const std::wstring p = remoteDir + L"\\viewV5b.bin";
+    write_file(p, make_content(64 * 1024, 252));
+    const auto c = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {p});
+    return wait_until([&] {
+      const auto n = viewer.GetCounters();
+      return n.remotePublished > c.remotePublished && n.helperLaunches > c.helperLaunches;
+    }, 20000);
+  };
+
+  std::printf("\n--- V5 (r10 2). the viewer: the helper dies while its prepare is in its control round trip ---\n");
+  {
+    // The host holds its reply to the viewer's Prepare (host probe point 8: reserved, before the
+    // pin); the viewer's helper A dies meanwhile and its "gone" is processed in full; then the
+    // host answers Accept. The viewer must open nothing for a dead helper, tell the host to end
+    // the paste it pinned, and leave no state behind.
+    std::mutex hpm;
+    std::condition_variable hpcv;
+    bool hparked = false, hrelease = false;
+    host.SetEpochProbeForTest([&](uint64_t e, int point) {
+      if (point != 8 || e != 1) return;
+      std::unique_lock<std::mutex> l(hpm);
+      hparked = true;
+      hpcv.notify_all();
+      hpcv.wait(l, [&] { return hrelease; });
+    });
+    std::atomic<int> vgones{0};
+    viewer.SetHelperProbeForTest([&](uint64_t, int point) {
+      if (point == 2) ++vgones;
+    });
+    const std::wstring v5 = remoteDir + L"\\viewV5.bin";
+    write_file(v5, make_content(64 * 1024, 251));
+    const auto c0 = viewer.GetCounters();
+    host.OnHostClipboard(++hostSeq, {v5});
+    check("V5: the remote copy is published here", wait_until([&] { return viewer.GetCounters().remotePublished > c0.remotePublished; }, 20000));
+    const DWORD pidA = viewerHelperPid.load();
+    const auto before = viewer.GetCounters();
+    const auto hBefore = host.GetCounters();
+    Child c5;
+    paste_on(local, root + L"destV5", 64 * 1024, 15, &c5);
+    bool held = false;
+    {
+      std::unique_lock<std::mutex> l(hpm);
+      held = hpcv.wait_for(l, std::chrono::seconds(15), [&] { return hparked; });
+    }
+    check("V5: the viewer's Prepare is in its round trip (the host holds its reply)", held);
+    HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pidA);
+    bool killed = false;
+    if (hp) {
+      killed = TerminateProcess(hp, 9) != FALSE && WaitForSingleObject(hp, 5000) == WAIT_OBJECT_0;
+      CloseHandle(hp);
+    }
+    check("V5: helper A was ended", killed, "pid=" + std::to_string(pidA));
+    check("V5: A's 'gone' was processed in full while the round trip was still open", wait_until([&] { return vgones.load() > 0; }, 10000));
+    Sleep(200);
+    {
+      std::lock_guard<std::mutex> l(hpm);
+      hrelease = true;
+      hpcv.notify_all();
+    }
+    check("V5: the prepare was refused here (its helper died on the way)",
+          wait_until([&] { return viewer.GetCounters().recvRefused > before.recvRefused; }, 15000),
+          "refused +" + std::to_string(viewer.GetCounters().recvRefused - before.recvRefused));
+    check("V5: nothing was opened for it (no receive run)", !viewer.ReceiveActive() && viewer.GetCounters().recvPrepared == before.recvPrepared);
+    check("V5: the host was told to end the paste it had pinned",
+          wait_until([&] { return host.GetCounters().sendFailed > hBefore.sendFailed && !host.GetCounters().sendOpen; }, 10000),
+          "host sendFailed +" + std::to_string(host.GetCounters().sendFailed - hBefore.sendFailed));
+    check("V5: no state is left: no receive, no wait, nothing queued (a new remote copy publishes cleanly through a new helper)",
+          remote_copy_after_v5(), "");
+    host.SetEpochProbeForTest(nullptr);
+    viewer.SetHelperProbeForTest(nullptr);
+    c5.Wait(15000);
     host.OnHostClipboard(++hostSeq, {});
     Sleep(500);
   }
@@ -2634,6 +2714,106 @@ int wmain() {
             "open=" + std::to_string(after.sendOpen) + " prepared +" + std::to_string(after.sendPrepared - before.sendPrepared));
       check("Z6: the reservation and the host's bulk were released", hostArbiter.use() == BulkUse::Idle,
             "use=" + std::to_string(static_cast<int>(hostArbiter.use())));
+    }
+
+    // Z7 (r10 1): a P->R paste begun (the helper said PasteBegin) but not yet prepared; the same
+    // session replaces the helper (H1 dies, H2 comes up for a stat) and H1's "gone" is held; the
+    // late Prepare must be refused (nothing opened), the begun must be gone from PasteQuery, and
+    // H2's own paste must be possible.
+    std::printf("      --- Z7: a begun paste of a helper since replaced is not prepared for it ---\n");
+    {
+      const uint64_t E = 601;
+      std::vector<uint8_t> raw;
+      fn::OfferReply orr;
+      check("Z7: an offer of session 601 is published (helper H1)", call(fn::FileMsg::Offer, fn::body(offer_of(0xF7A0)), E, &raw) &&
+                                                                       fn::parse(raw, &orr) && orr.verdict == fn::Verdict::Accept);
+      const DWORD pid1 = lastHelperPid.load();
+      const auto before = host.GetCounters();
+      Child c7;
+      paste(root + L"destZ7", 100, 12, &c7);  // a consumer on the remote station: H1 says PasteBegin
+      check("Z7: the paste began on the host (H1's)", wait_until([&] { return host.GetCounters().pastesBegun > before.pastesBegun; }, 20000));
+      fn::PasteQueryReply q;
+      raw.clear();
+      check("Z7: PasteQuery names the begun paste", call(fn::FileMsg::PasteQuery, fn::body(fn::PasteQuery{0}), E, &raw) &&
+                                                       fn::parse(raw, &q) && q.state == fn::PasteState::Begun && q.pasteOp != 0);
+      const uint64_t op = q.pasteOp;
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint2 = 10;  // H1's "gone", when it comes
+        parkEpoch2 = E;
+        parked2 = false;
+        release2 = false;
+      }
+      HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid1);
+      bool killed = false;
+      if (hp) {
+        killed = TerminateProcess(hp, 9) != FALSE && WaitForSingleObject(hp, 5000) == WAIT_OBJECT_0;
+        CloseHandle(hp);
+      }
+      check("Z7: H1 was ended", killed, "pid=" + std::to_string(pid1));
+      bool goneHeld = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        goneHeld = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked2; });
+      }
+      check("Z7: H1's 'gone' is held", goneHeld);
+      // The same session starts H2: a copy on the remote PC is identified by the worker.
+      const std::wstring z7 = remoteDir + L"\\epochZ7.txt";
+      write_file(z7, make_content(512, 261));
+      {
+        std::vector<uint8_t> r0;
+        fn::OfferQueryReply q0;
+        (void)(call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), E, &r0) && fn::parse(r0, &q0));  // the session's baseline
+      }
+      host.OnHostClipboard(++hostSeq, {z7});
+      check("Z7: H2 came up for the session (launches +1) while H1's begun is still recorded",
+            wait_until([&] { return host.GetCounters().helperLaunches > before.helperLaunches; }, 15000));
+      Sleep(500);
+      // The late Prepare of H1's begun paste, with H2 current and H1's gone not yet in.
+      fn::Prepare p;
+      p.direction = fn::Direction::PtoR;
+      p.offerId = 0xF7A0;
+      p.pasteOp = op;
+      fn::PreparedItem it;
+      it.index = 0;
+      it.status = static_cast<uint16_t>(fc::Status::Ok);
+      it.size = 100;
+      p.items.push_back(it);
+      fn::PrepareReply pr;
+      raw.clear();
+      const bool answered = call(fn::FileMsg::Prepare, fn::body(p), E, &raw) && fn::parse(raw, &pr);
+      check("Z7: the late Prepare is refused (its helper is not the current one)", answered && pr.verdict == fn::Verdict::HelperUnavailable,
+            "answered=" + std::to_string(answered) + " verdict=" + std::to_string(static_cast<int>(pr.verdict)));
+      check("Z7: nothing was prepared / opened for it", host.GetCounters().pastesPrepared == before.pastesPrepared);
+      raw.clear();
+      check("Z7: PasteQuery no longer names H1's begun paste",
+            call(fn::FileMsg::PasteQuery, fn::body(fn::PasteQuery{0}), E, &raw) && fn::parse(raw, &q) && q.state != fn::PasteState::Begun,
+            "state=" + std::to_string(static_cast<int>(q.state)));
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release2 = true;  // H1's gone goes in now: stale
+        pcv.notify_all();
+      }
+      check("Z7: H1's 'gone' was not taken as the current helper's", wait_until([&] { return host.GetCounters().staleHelperGones > before.staleHelperGones; }, 5000));
+      // H2's own paste is possible: a new offer on H2, a consumer paste, PasteBegin accepted.
+      raw.clear();
+      check("Z7: an offer is published on H2", call(fn::FileMsg::Offer, fn::body(offer_of(0xF7B0)), E, &raw) && fn::parse(raw, &orr) &&
+                                                  orr.verdict == fn::Verdict::Accept);
+      const auto mid = host.GetCounters();
+      Child c7b;
+      paste(root + L"destZ7b", 100, 12, &c7b);
+      check("Z7: H2's paste began (not refused as busy by H1's leftover)",
+            wait_until([&] { return host.GetCounters().pastesBegun > mid.pastesBegun; }, 20000) && host.GetCounters().pastesBusy == mid.pastesBusy,
+            "busy +" + std::to_string(host.GetCounters().pastesBusy - mid.pastesBusy));
+      raw.clear();
+      fn::PasteQueryReply q2;
+      if (call(fn::FileMsg::PasteQuery, fn::body(fn::PasteQuery{0}), E, &raw) && fn::parse(raw, &q2) && q2.state == fn::PasteState::Begun) {
+        fn::End e{0xF7B0, q2.pasteOp, fn::PasteEndReason::Cancelled};
+        raw.clear();
+        (void)call(fn::FileMsg::End, fn::body(e), E, &raw);
+      }
+      c7.Wait(15000);
+      c7b.Wait(15000);
     }
     host.SetEpochProbeForTest(nullptr);
   }

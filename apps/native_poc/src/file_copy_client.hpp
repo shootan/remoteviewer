@@ -308,6 +308,9 @@ class FileCopyClient {
   std::deque<PasteKey> prepareQueue_;  // helper PasteBegin -> prepare on the control thread
   std::deque<PasteKey> endQueue_;      // helper PasteEnd -> End on the control thread
   uint64_t preparingOp_ = 0;           // the R->P prepare in flight on the control thread
+  uint64_t preparingInstance_ = 0;     // ...and the helper it is for (r10)
+  bool preparingDead_ = false;         // ...whose "gone" came while it was in flight (r10)
+  uint64_t lastGoneInstance_ = 0;      // the highest helper instance whose "gone" was seen (r10)
   bool cancelPending_ = false;         // the user's cancel, sent, not yet answered
   // D5: a paste waiting for the bulk (P->R or R->P), and whether an image was stopped for it.
   struct WaitBulk {

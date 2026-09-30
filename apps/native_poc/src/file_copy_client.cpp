@@ -263,7 +263,12 @@ int FileCopyClient::Pump(ControlLink& link) {
       act = waitBulk_.toRemote ? Act::PrepareToRemote : Act::PrepareAfterWait;
       key = waitBulk_.key;
       waitBulk_.on = false;
-      if (!waitBulk_.toRemote) preparingOp_ = key.pasteOp, preparingOffer_ = key.offerId;  // a PasteEnd now is seen (r3 A-1)
+      if (!waitBulk_.toRemote) {  // a PasteEnd (or its helper's gone) now is seen (r3 A-1, r10)
+        preparingOp_ = key.pasteOp;
+        preparingOffer_ = key.offerId;
+        preparingInstance_ = key.instance;
+        preparingDead_ = key.instance <= lastGoneInstance_;
+      }
     } else if (waitBulk_.on) {
       // waiting for the bulk: the other questions still go out below
       if (!allowed) {
@@ -717,6 +722,8 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
     items = k.offerId == remote_.offerId ? remote_.items : remoteRetired_.items;
     preparingOp_ = k.pasteOp;
     preparingOffer_ = k.offerId;
+    preparingInstance_ = k.instance;
+    preparingDead_ = k.instance <= lastGoneInstance_;  // its helper may be gone already
   }
   struct Done {
     FileCopyClient* self;
@@ -724,6 +731,8 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
       std::lock_guard<std::mutex> lock(self->mu_);
       self->preparingOp_ = 0;
       self->preparingOffer_ = 0;
+      self->preparingInstance_ = 0;
+      self->preparingDead_ = false;
     }
   } done{this};
   if (mayWait) {
@@ -794,13 +803,22 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
     counters_.lastRecvVerdict = parsed ? static_cast<uint8_t>(r.verdict) : 0xFF;
     // The consumer may have given up while the host pinned (the helper said PasteEnd, or the switch).
     for (const PasteKey& e : endQueue_) endedMeanwhile = endedMeanwhile || (e.pasteOp == k.pasteOp && e.offerId == k.offerId);
-    if (go && (endedMeanwhile || !Usable())) go = false;
+    // The helper this paste is for must still be there and still be the current one (r10): its
+    // "gone" during the round trip marked it dead; a successor adopted meanwhile makes it not
+    // current. Either way nothing is opened for it -- the host is told (End below).
+    const bool helperGone = preparingDead_ || k.instance <= lastGoneInstance_ || k.instance != helper_.instance();
+    if (go && (endedMeanwhile || !Usable() || helperGone)) go = false;
     if (go) {
       recv_ = RecvRun{true, k.offerId, k.pasteOp, k.instance};
       recv_.files = static_cast<uint32_t>(sizes.size());
       for (uint64_t s : sizes) recv_.bytesTotal += s;
       recv_.startUs = BulkPacer::NowUs();
       ++counters_.recvPrepared;
+      // Opened here, under mu_, with the run it belongs to (r10): a "gone" cannot slip between the
+      // decision and the open.
+      receiver_.Open(send_, bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost),
+                     bulk_stream_id(r.bulkGen, kFileBulkStreamHostToClient), mtu_,
+                     FilePasteIdentity{r.epochTag, k.offerId, k.pasteOp, r.bulkGen}, sizes, k.instance);
     } else {
       ++counters_.recvRefused;
       if (!endedMeanwhile) {
@@ -825,9 +843,6 @@ int FileCopyClient::PrepareReceive(ControlLink& link, const PasteKey& k, bool ma
     Log(os.str());
     return exchanged ? 1 : -1;
   }
-  receiver_.Open(send_, bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost),
-                 bulk_stream_id(r.bulkGen, kFileBulkStreamHostToClient), mtu_,
-                 FilePasteIdentity{r.epochTag, k.offerId, k.pasteOp, r.bulkGen}, sizes, k.instance);
   d.status = fc::Status::Ok;
   if (helperProbe_) helperProbe_(k.instance, 4);
   (void)helper_.SendTo(k.instance, fc::encode(d));  // to the helper whose paste this is, or to nobody
@@ -907,6 +922,10 @@ int FileCopyClient::SendReceiveEnd(ControlLink& link, const PasteKey& k) {
 void FileCopyClient::OnHelperGone(uint64_t instance) {
   if (helperProbe_) helperProbe_(instance, 2);
   std::lock_guard<std::mutex> lock(mu_);
+  // Whatever the branch below (r10): remembered by instance, and a prepare in flight for this
+  // helper is marked dead -- when its round trip returns, nothing is opened for it.
+  if (instance > lastGoneInstance_) lastGoneInstance_ = instance;
+  if (preparingInstance_ == instance) preparingDead_ = true;
   // A helper this viewer has since replaced: what the new one published, is receiving or has
   // queued is not the old one's to end (r8) -- but what was the OLD one's ends with it (r9): its
   // paste being received, its wait for the bulk, its queued pastes.

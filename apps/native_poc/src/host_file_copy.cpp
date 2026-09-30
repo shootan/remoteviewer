@@ -218,6 +218,12 @@ void HostFileCopyService::OnHelperGone(uint64_t owner, uint64_t instance) {
     // and binds or consumes just after, sees that its helper is gone.
     if (instance > lastGoneInstance_) lastGoneInstance_ = instance;
     ++counters_.helperGones;
+    // A paste begun by this helper and not yet prepared ends with it, whatever the branch below
+    // (r10): otherwise a late Prepare would accept it for a dead helper.
+    if (haveBegun_ && begunInstance_ == instance) {
+      haveBegun_ = false;
+      lastEnded_ = Ended{begunOffer_, begunOp_, fn::PasteState::Failed, fn::PasteEndReason::Session};
+    }
     // The helper of a session that has since ended (torn down with it): the current session's
     // state, paste and helper are not its business (r5).
     if (owner != helper_.owner() || instance != helper_.instance()) {
@@ -237,7 +243,6 @@ void HostFileCopyService::OnHelperGone(uint64_t owner, uint64_t instance) {
         keyInst = paste_.helperInstance;
         closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
       }
-      if (begunInstance_ == instance) haveBegun_ = false;
       if (statId_ != 0) {
         statId_ = 0;
         statWanted_ = clipSeq_ != hostOffer_.revision && !clipPaths_.empty();
@@ -921,6 +926,12 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m, ui
       r.verdict = !file_copy_allowed() ? fn::Verdict::Disabled : fn::Verdict::BadRequest;
     } else if (!haveBegun_ || begunOffer_ != m.offerId || begunOp_ != m.pasteOp || !offer) {
       r.verdict = fn::Verdict::UnknownId;
+    } else if (begunInstance_ <= lastGoneInstance_ || begunInstance_ != helper_.instance()) {
+      // The helper that began it is gone, or is not the current one any more (r10): nothing is
+      // prepared for it -- no receiver, no paste; the begun ends here.
+      r.verdict = fn::Verdict::HelperUnavailable;
+      haveBegun_ = false;
+      lastEnded_ = Ended{begunOffer_, begunOp_, fn::PasteState::Failed, fn::PasteEndReason::Session};
     } else if (m.items.size() != offer->items.size()) {
       r.verdict = fn::Verdict::BadRequest;
     } else {
