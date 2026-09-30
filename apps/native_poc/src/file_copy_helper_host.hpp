@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "file_copy_pipe.hpp"
@@ -159,6 +160,14 @@ class HelperLink {
    */
   bool AwaitHello(DWORD timeoutMs, std::string* why);
 
+  /**
+   * The pipe handle has ONE owner, this object, and is closed ONCE (r7): Send and Receive register
+   * as "in flight" on it while they use it; ClosePipe / Close while something is in flight only
+   * cancel that I/O (CancelIoEx) and mark the handle for closing -- the last operation to leave
+   * closes it. Nothing ever does I/O on a closed or reused handle, and no handle is closed twice.
+   * A pending I/O's storage is owned by the I/O layer (file_copy_pipe_io.hpp): it is released
+   * only when the OS reports the cancelled operation complete, or orphaned by its policy.
+   */
   /** False closes the pipe: a frame that could not be written whole leaves the link unusable. */
   bool Send(const PipeFrame& frame, DWORD timeoutMs = 5000);
   /**
@@ -179,12 +188,33 @@ class HelperLink {
   DWORD helper_pid() const { return helperPid_; }
   HANDLE helper_process() const { return process_; }
   bool helper_alive() const;
-  bool pipe_open() const { return pipe_ != INVALID_HANDLE_VALUE; }
+  bool pipe_open() const;
+
+  /**
+   * Diagnostics (tests): pipe handles created / closed by every HelperLink of this process. Each
+   * handle is closed exactly once, so once every link is closed the two agree.
+   */
+  static uint32_t pipes_created();
+  static uint32_t pipes_closed();
+  /**
+   * TEST ONLY -- called on every Receive once it is registered as in flight, before the read, with
+   * the pid of the helper on the other end, so a test can cross ONE link's read with ClosePipe on
+   * purpose. No product code calls this; the build gate checks the shipped executables do not
+   * carry it.
+   */
+  static void SetReceiveProbeForTest(std::function<void(DWORD helperPid)> probe);
 
  private:
   std::wstring pipeName_;
   std::array<uint8_t, kNonceBytes> nonce_{};
-  HANDLE pipe_ = INVALID_HANDLE_VALUE;
+  bool Enter(HANDLE* h);       // registers an I/O on pipe_ (false: closed or closing)
+  void Leave(bool failed);     // unregisters; closes the handle if asked to and nobody is left
+  void CloseNowLocked();       // hmu_ held, nothing in flight: the one CloseHandle
+
+  HANDLE pipe_ = INVALID_HANDLE_VALUE;  // under hmu_
+  mutable std::mutex hmu_;              // pipe_, ioInFlight_, closeRequested_, process_, job_
+  int ioInFlight_ = 0;                  // Sends / Receives using pipe_ right now
+  bool closeRequested_ = false;         // ClosePipe came while I/O was in flight: the last one out closes
   HANDLE process_ = nullptr;
   HANDLE job_ = nullptr;
   DWORD helperPid_ = 0;

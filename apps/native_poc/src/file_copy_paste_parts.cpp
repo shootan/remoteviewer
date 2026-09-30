@@ -37,6 +37,7 @@ void FileHelperChannel::SetOwner(uint64_t owner) {
       dying = std::move(prev_.link);  // a helper two sessions back: gone now
       prev_ = std::move(cur_);
       cur_ = Helper{};
+      instance_.store(0);
     }
   }
   if (dying) dying->Close();
@@ -69,10 +70,12 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
     return false;
   }
   ++launches_;
-  // Started on a link of its own, outside every lock (a start takes seconds); only once it is up is
-  // it checked, under sendMu_, that its owner still owns the channel -- and only then does it become
-  // the channel's helper. A previous helper (of this or an earlier owner) is closed for good here,
-  // as before: its Job goes and so does its process.
+  // Started on a link of its own, under the channel's mu_ only (no host lock, no sendMu_; a start
+  // takes seconds); only once it is up is it checked, under sendMu_, that its owner still owns the
+  // channel -- and only then does it become the channel's helper, with a fresh instance number. A
+  // previous helper (of this or an earlier owner) is closed for good here, as before: its Job goes
+  // and so does its process. Its reader is not joined here: it may be inside a callback; it drains
+  // on its own, and its frames and "gone" carry the old instance number, which nobody takes.
   auto fresh = std::make_shared<fc::HelperLink>();
   if (!config_.launcher || !config_.launcher(fresh.get(), why)) {
     fresh->Close();
@@ -84,6 +87,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   std::shared_ptr<fc::HelperLink> dying, dyingCur;
   std::thread oldReader;
   bool adopted = false;
+  const uint64_t instance = ++nextInstance_;
   {
     std::lock_guard<std::mutex> s(sendMu_);
     if (owner_.load() == owner) {
@@ -92,7 +96,8 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
       // before; one of another owner (after SetOwner) is prev_ and Retire's to end.
       if (cur_.link && cur_.owner == owner) dyingCur = cur_.link;
       prev_ = std::move(cur_);
-      cur_ = Helper{fresh, owner};
+      cur_ = Helper{fresh, owner, instance};
+      instance_.store(instance);
       adopted = true;
     }
   }
@@ -109,7 +114,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   oldReader = std::move(prevReader_);
   if (oldReader.joinable()) oldReader.join();  // under mu_ only: never under a caller's lock
   prevReader_ = std::move(reader_);
-  reader_ = std::thread([this, owner, fresh] { ReaderLoop(owner, fresh); });
+  reader_ = std::thread([this, owner, instance, fresh] { ReaderLoop(owner, instance, fresh); });
   backoffMs_ = 0;
   nextLaunchMs_ = 0;
   return true;
@@ -135,18 +140,21 @@ bool FileHelperChannel::Running() const {
   return cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive();
 }
 
-void FileHelperChannel::ReaderLoop(uint64_t owner, std::shared_ptr<fc::HelperLink> link) {
+void FileHelperChannel::ReaderLoop(uint64_t owner, uint64_t instance, std::shared_ptr<fc::HelperLink> link) {
+  // The untagged callbacks (the viewer's use) get only the current instance's frames and "gone":
+  // decided here, without the receiver's lock -- the tagged ones let the receiver decide under its
+  // own lock (the host does).
   for (;;) {
     fc::PipeFrame f;
     if (!link->Receive(&f, 100)) {
       if (GetLastError() == WAIT_TIMEOUT) continue;
       break;  // the pipe is gone
     }
-    if (onFrame_) onFrame_(f);
-    if (onFrameOf_) onFrameOf_(owner, f);
+    if (onFrame_ && instance_.load() == instance) onFrame_(f);
+    if (onFrameOf_) onFrameOf_(owner, instance, f);
   }
-  if (onGone_) onGone_();
-  if (onGoneOf_) onGoneOf_(owner);
+  if (onGone_ && instance_.load() == instance) onGone_();
+  if (onGoneOf_) onGoneOf_(owner, instance);
 }
 
 void FileHelperChannel::Retire(uint64_t owner, bool sendShutdown) {

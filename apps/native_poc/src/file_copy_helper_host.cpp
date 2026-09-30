@@ -278,6 +278,21 @@ ConnectOutcome settle_connect(HANDLE pipe, std::unique_ptr<PendingConnect>& pend
 
 }  // namespace detail
 
+namespace {
+std::atomic<uint32_t> gPipesCreated{0}, gPipesClosed{0};
+std::function<void(DWORD)>& receive_probe() {
+  static std::function<void(DWORD)> probe;
+  return probe;
+}
+}  // namespace
+
+uint32_t HelperLink::pipes_created() { return gPipesCreated.load(); }
+uint32_t HelperLink::pipes_closed() { return gPipesClosed.load(); }
+void HelperLink::SetReceiveProbeForTest(std::function<void(DWORD)> probe) {
+  receive_probe() = std::move(probe);
+  OutputDebugStringA("TEST PROBE receive crossing installed");
+}
+
 HelperLink::~HelperLink() { Close(); }
 
 bool HelperLink::CreateServerPipe(const std::wstring& userSid, std::string* why) {
@@ -310,6 +325,7 @@ bool HelperLink::CreateServerPipe(const std::wstring& userSid, std::string* why)
     if (why) *why = "CreateNamedPipe err=" + std::to_string(err);
     return false;
   }
+  ++gPipesCreated;
   return true;
 }
 
@@ -402,8 +418,7 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
   }
   auto refuse = [&](const std::string& reason) {
     if (why) *why = reason;
-    CloseHandle(pipe_);
-    pipe_ = INVALID_HANDLE_VALUE;
+    ClosePipe();  // the one way a pipe handle is closed (nothing is in flight yet: no reader exists)
     return false;
   };
   std::unique_ptr<detail::PendingConnect> pending;
@@ -436,51 +451,96 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
   return true;
 }
 
-bool HelperLink::Send(const PipeFrame& frame, DWORD timeoutMs) {
-  if (pipe_ == INVALID_HANDLE_VALUE) return false;
-  if (pipe_send_frame(pipe_, frame, timeoutMs)) return true;
-  const DWORD error = GetLastError();
-  ClosePipe();  // part of a frame may be on the wire: nothing sent after it could be framed
-  SetLastError(error);
-  return false;
+bool HelperLink::Enter(HANDLE* h) {
+  std::lock_guard<std::mutex> lock(hmu_);
+  if (pipe_ == INVALID_HANDLE_VALUE || closeRequested_) return false;
+  ++ioInFlight_;
+  *h = pipe_;
+  return true;
 }
 
-bool HelperLink::Receive(PipeFrame* frame, DWORD timeoutMs) {
-  if (pipe_ == INVALID_HANDLE_VALUE) {
-    SetLastError(ERROR_PIPE_NOT_CONNECTED);
-    return false;
-  }
-  if (reader_.Receive(pipe_, frame, timeoutMs)) return true;
-  const DWORD error = GetLastError();
-  if (error != WAIT_TIMEOUT) ClosePipe();  // broken, aborted, or not a frame: the link is over
-  SetLastError(error);
-  return false;
+void HelperLink::Leave(bool failed) {
+  std::lock_guard<std::mutex> lock(hmu_);
+  --ioInFlight_;
+  if (failed) closeRequested_ = true;  // broken, aborted, not a frame, or a partial send: the link is over
+  if (closeRequested_ && ioInFlight_ == 0) CloseNowLocked();
 }
 
-void HelperLink::ClosePipe() {
+void HelperLink::CloseNowLocked() {
   if (pipe_ != INVALID_HANDLE_VALUE) {
     CloseHandle(pipe_);
     pipe_ = INVALID_HANDLE_VALUE;
+    ++gPipesClosed;
   }
+  closeRequested_ = false;
   handshaken_ = false;
+}
+
+bool HelperLink::Send(const PipeFrame& frame, DWORD timeoutMs) {
+  HANDLE h = INVALID_HANDLE_VALUE;
+  if (!Enter(&h)) {
+    SetLastError(ERROR_PIPE_NOT_CONNECTED);
+    return false;
+  }
+  const bool ok = pipe_send_frame(h, frame, timeoutMs);
+  const DWORD error = GetLastError();
+  Leave(!ok);  // part of a frame may be on the wire: nothing sent after it could be framed
+  SetLastError(error);
+  return ok;
+}
+
+bool HelperLink::Receive(PipeFrame* frame, DWORD timeoutMs) {
+  HANDLE h = INVALID_HANDLE_VALUE;
+  if (!Enter(&h)) {
+    SetLastError(ERROR_PIPE_NOT_CONNECTED);
+    return false;
+  }
+  if (auto& probe = receive_probe()) probe(helperPid_);
+  const bool ok = reader_.Receive(h, frame, timeoutMs);
+  const DWORD error = GetLastError();
+  Leave(!ok && error != WAIT_TIMEOUT);  // a timeout keeps the link; anything else ends it
+  SetLastError(error);
+  return ok;
+}
+
+void HelperLink::ClosePipe() {
+  std::lock_guard<std::mutex> lock(hmu_);
+  handshaken_ = false;
+  if (pipe_ == INVALID_HANDLE_VALUE) return;
+  if (ioInFlight_ > 0) {
+    // Somebody is reading or writing on it: the handle stays open for them. Their I/O is cancelled
+    // and they close the handle on their way out (Leave). No second close, no I/O on a closed one.
+    closeRequested_ = true;
+    CancelIoEx(pipe_, nullptr);
+    return;
+  }
+  CloseNowLocked();
 }
 
 void HelperLink::Close() {
   ClosePipe();
-  if (job_) {
-    CloseHandle(job_);  // KILL_ON_JOB_CLOSE: the helper goes with it
+  HANDLE job = nullptr, process = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(hmu_);
+    job = job_;
+    process = process_;
     job_ = nullptr;
-  }
-  if (process_) {
-    CloseHandle(process_);
     process_ = nullptr;
+    helperPid_ = 0;
+    handshaken_ = false;
   }
-  helperPid_ = 0;
-  handshaken_ = false;
+  if (job) CloseHandle(job);  // KILL_ON_JOB_CLOSE: the helper goes with it
+  if (process) CloseHandle(process);
 }
 
 bool HelperLink::helper_alive() const {
+  std::lock_guard<std::mutex> lock(hmu_);
   return process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT;
+}
+
+bool HelperLink::pipe_open() const {
+  std::lock_guard<std::mutex> lock(hmu_);
+  return pipe_ != INVALID_HANDLE_VALUE && !closeRequested_;
 }
 
 bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why, DWORD helloTimeoutMs) {

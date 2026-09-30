@@ -92,6 +92,11 @@ int wmain(int argc, wchar_t** argv) {
     check("positive control: the net e2e carries the epoch probe's banner", contains(netE2e, probeBanner));
     check("the shipped host does not carry the epoch probe's banner", !contains(shipped, probeBanner));
     check("the shipped host does carry the product's epoch check", contains(shipped, "a request of an older control session"));
+    // The receive-crossing probe (HelperLink::SetReceiveProbeForTest, r7) likewise: tests only.
+    const std::string receiveBanner = "TEST PROBE receive crossing";
+    check("positive control: the net e2e carries the receive probe's banner", contains(netE2e, receiveBanner));
+    check("the shipped host does not carry the receive probe's banner", !contains(shipped, receiveBanner));
+    check("the shipped viewer does not carry the receive probe's banner", !contains(read_all(dir + L"\\GNLinkViewer.exe"), receiveBanner));
     for (const wchar_t* exe : {L"GNLinkStream.exe", L"GNLinkViewer.exe", L"GNLinkClipHelper.exe"}) {
       const auto bytes = read_all(dir + L"\\" + exe);
       std::string n;

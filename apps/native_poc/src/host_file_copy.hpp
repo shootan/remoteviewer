@@ -37,11 +37,12 @@
 //          pasteOp) key under bulkMu_: Begin/Open and End/Close by anyone else are no-ops). The P->R
 //          receiver is opened and closed under mu_ together with the paste that owns it. A late
 //          session-end hook or a late "helper gone" of an earlier session changes nothing.
-//          Every helper is tagged with the session it was started for, for life (r6): a start that
-//          crossed the switch is closed as soon as it is up, a frame of an earlier session's helper
-//          is not taken (decided under mu_ with what it would change), and a stale request releases
-//          a reservation only if it is still its own by the whole (epoch, offerId, pasteOp) key --
-//          paste ops repeat per session.
+//          Every helper is tagged with the session it was started for and with its own instance
+//          number, for life (r6/r7): a start that crossed the switch is closed as soon as it is up,
+//          a frame or "gone" of any earlier helper -- another session's, or one replaced within
+//          this session after its pipe failed -- is not taken (decided under mu_ with what it would
+//          change), and a stale request releases a reservation only if it is still its own by the
+//          whole (epoch, offerId, pasteOp) key -- paste ops repeat per session and per helper.
 //          Lock order: sessionMu_ -> bulkMu_ -> mu_ (never the other way; nothing waits for the
 //          helper or joins a thread under mu_).
 //
@@ -197,7 +198,8 @@ class HostFileCopyService {
     uint64_t sendPasteOp = 0;
     uint64_t sendEpochTag = 0;       // whose session's (paste ops repeat per session)
     uint64_t staleHelperSends = 0;
-    uint64_t staleHelperFrames = 0;  // frames of an earlier session's helper, not taken (r6)
+    uint64_t staleHelperFrames = 0;  // frames of an earlier helper (another session's, or replaced), not taken (r6/r7)
+    uint64_t staleHelperGones = 0;   // the same for "gone" (r7)
   };
   Counters GetCounters() const;
   BulkUplink::Counters UplinkCounters() const { return uplink_.GetCounters(); }
@@ -243,13 +245,14 @@ class HostFileCopyService {
     file_copy::net::PasteEndReason reason = file_copy::net::PasteEndReason::None;
   };
 
-  void OnHelperFrame(uint64_t owner, const file_copy::PipeFrame& f);  // `owner`: whom that helper was started for
-  bool FrameAcceptedLocked(uint64_t owner);  // caller holds mu_: the frame is the current session's helper's
-  void OnHelperGone(uint64_t owner);  // `owner`: whom the pipe that went was started for
+  // `owner` / `instance`: whom that helper was started for, and which start it was (r7)
+  void OnHelperFrame(uint64_t owner, uint64_t instance, const file_copy::PipeFrame& f);
+  bool FrameAcceptedLocked(uint64_t owner, uint64_t instance);  // caller holds mu_: the frame is the current helper's
+  void OnHelperGone(uint64_t owner, uint64_t instance);  // whom the pipe that went was started for, which start
   void WorkerLoop();
-  void OnPasteBegin(uint64_t owner, const file_copy::PasteBegin& m);
-  void OnPasteEnd(uint64_t owner, const file_copy::PasteEnd& m);
-  void OnStats(uint64_t owner, const file_copy::Stats& m);
+  void OnPasteBegin(uint64_t owner, uint64_t instance, const file_copy::PasteBegin& m);
+  void OnPasteEnd(uint64_t owner, uint64_t instance, const file_copy::PasteEnd& m);
+  void OnStats(uint64_t owner, uint64_t instance, const file_copy::Stats& m);
   // caller holds mu_; returns true when an R->P sender must be closed (FinishSendClose, unlocked)
   bool EndPasteLocked(file_copy::net::PasteState state, file_copy::net::PasteEndReason reason);
   BulkKey KeyOfPasteLocked() const { return BulkKey{paste_.epoch, paste_.offerId, paste_.pasteOp}; }

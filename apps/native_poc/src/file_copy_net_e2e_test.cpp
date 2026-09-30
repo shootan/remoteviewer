@@ -302,6 +302,7 @@ int wmain() {
   std::mutex lpm;
   std::condition_variable lpcv;
   bool launchPark = false, launchParked = false, launchRelease = false;
+  std::atomic<DWORD> lastHelperPid{0};  // r7 Z3
   cfg.launcher = [&](fc::HelperLink* link, std::string* why) {
     std::wstring sid;
     if (!fc::current_process_user_sid(&sid)) {
@@ -311,6 +312,7 @@ int wmain() {
     const bool up = link->CreateServerPipe(sid, why) &&
                     link->Launch(helperExe, nullptr, station.desktop.c_str(), L"--idle-ms 8000 --log \"" + helperLog + L"\"", why) &&
                     link->AwaitHello(10000, why);
+    if (up) lastHelperPid.store(link->helper_pid());
     if (up) {
       std::unique_lock<std::mutex> l(lpm);
       if (launchPark) {
@@ -1971,12 +1973,207 @@ int wmain() {
       check("Z2: the new session ends its send", eAnswered && er.state == fn::PasteState::Failed);
       check("Z2: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
     }
+
+    // Z3 (r7 1): the SAME session's helper is replaced (its process died, so the next request starts
+    // another), while the old helper's reader still holds a PinResult (op 1) and has not yet seen
+    // the pipe go. Owner alone cannot tell the two helpers apart: the old PinResult must not answer
+    // the new helper's pin, and the old helper's "gone" must not end the paste begun with the new one.
+    std::printf("      --- Z3: an old helper of the SAME session: its late PinResult / gone do not touch the new helper's paste ---\n");
+    {
+      const uint64_t E = 71;
+      const std::wstring z3A = remoteDir + L"\\epochZ3a.txt", z3B = remoteDir + L"\\epochZ3b.txt";
+      write_file(z3A, make_content(2048, 191));
+      write_file(z3B, make_content(4096, 192));
+      const uint64_t hA = host_offer_in(E, z3A);
+      check("Z3: the session sees its first copy (2048 bytes)", hA != 0);
+      const DWORD pid1 = lastHelperPid.load();
+      const auto before = host.GetCounters();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = 7;  // the helper's next frame: the PinResult of the first Prepare
+        parkEpoch = E;
+        parked = false;
+        release = false;
+      }
+      bool aAnswered = false;
+      fn::PrepareReply a;
+      std::thread at([&] { prepare_rtop(E, hA, 1, &aAnswered, &a); });
+      bool readerParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        readerParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked; });
+      }
+      check("Z3: the first helper's PinResult was held before the host looked at it", readerParked);
+      // The first helper dies (as if it crashed): the next request of this same session starts another.
+      HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid1);
+      check("Z3: the first helper's process could be opened", hp != nullptr, "pid=" + std::to_string(pid1));
+      if (hp) {
+        TerminateProcess(hp, 9);
+        WaitForSingleObject(hp, 5000);
+        CloseHandle(hp);
+      }
+      at.join();  // the first Prepare gives up (its pin timed out); its reservation is released
+      check("Z3: the first Prepare did not succeed (its helper died mid-pin)", !aAnswered || a.verdict != fn::Verdict::Accept,
+            "answered=" + std::to_string(aAnswered) + " verdict=" + std::to_string(static_cast<int>(a.verdict)));
+      // A new copy on the remote PC: identified by a NEW helper of the same session (instance 2).
+      host.OnHostClipboard(++hostSeq, {z3B});
+      uint64_t hB = 0, hBSize = 0, lastSeen = 0, lastSeenSize = 0;
+      wait_until([&] {
+        std::vector<uint8_t> r2;
+        fn::OfferQueryReply q2;
+        if (call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), E, &r2) && fn::parse(r2, &q2) && q2.offerId != 0) {
+          lastSeen = q2.offerId;
+          lastSeenSize = q2.items.empty() ? 0 : q2.items[0].size;
+          if (q2.offerId != hA && lastSeenSize == 4096) {
+            hB = q2.offerId;
+            hBSize = lastSeenSize;
+          }
+        }
+        return hB != 0;
+      }, 15000);
+      check("Z3: the second copy (4096 bytes) is offered, identified by a new helper of the same session",
+            hB != 0 && hBSize == 4096 && host.GetCounters().helperLaunches == before.helperLaunches + 1,
+            "launches +" + std::to_string(host.GetCounters().helperLaunches - before.helperLaunches) + " lastSeen=" +
+                std::to_string(lastSeen) + " size=" + std::to_string(lastSeenSize) + " hA=" + std::to_string(hA));
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint2 = 8;  // the new Prepare (op 1 again), reserved, before its own pin
+        parkEpoch2 = E;
+        parked2 = false;
+        release2 = false;
+      }
+      bool bAnswered = false;
+      fn::PrepareReply b;
+      std::thread bt([&] { prepare_rtop(E, hB, 1, &bAnswered, &b); });
+      bool bParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        bParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked2; });
+      }
+      check("Z3: the new Prepare was held with op 1 reserved, before its own pin", bParked);
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;  // the OLD helper's PinResult arrives now; then its reader finds the pipe gone
+        pcv.notify_all();
+      }
+      const bool goneSeen = wait_until([&] { return host.GetCounters().staleHelperGones > before.staleHelperGones; }, 5000);
+      const auto mid = host.GetCounters();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release2 = true;  // now the new Prepare asks its own helper
+        pcv.notify_all();
+      }
+      bt.join();
+      check("Z3: the old helper's PinResult was not taken (a stale frame of an earlier instance)",
+            mid.staleHelperFrames > before.staleHelperFrames, "stale frames +" + std::to_string(mid.staleHelperFrames - before.staleHelperFrames));
+      check("Z3: the old helper's 'gone' was not taken either", goneSeen, "stale gones +" + std::to_string(mid.staleHelperGones - before.staleHelperGones));
+      check("Z3: the new Prepare was accepted", bAnswered && b.verdict == fn::Verdict::Accept,
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      check("Z3: ...with the NEW helper's answer: the second file's size", bAnswered && b.items.size() == 1 && b.items[0].size == 4096,
+            "items=" + std::to_string(b.items.size()) + " size0=" + std::to_string(b.items.empty() ? 0 : b.items[0].size));
+      const auto after = host.GetCounters();
+      check("Z3: the paste begun with the new helper is still there (the old 'gone' did not end it)",
+            after.sendOpen && after.sendPasteOp == 1 && after.sendEpochTag == b.epochTag,
+            "open=" + std::to_string(after.sendOpen) + " failed +" + std::to_string(after.sendFailed - before.sendFailed));
+      bool eAnswered = false;
+      fn::EndReply er;
+      end_paste(E, hB, 1, &eAnswered, &er);
+      check("Z3: the session ends its send (the paste was there to end)", eAnswered && er.state == fn::PasteState::Failed,
+            "state=" + std::to_string(static_cast<int>(er.state)));
+      check("Z3: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
+    }
+
+    // Z4 (r7 2): the pipe HANDLE has one owner and is closed once. The current helper's reader is
+    // held inside Receive (registered as in flight, before the read) while the session switch
+    // retires that helper (ClosePipe): the handle must stay open for the read, be closed exactly
+    // once when the read is out, the new session's helper must work on its own handle, no I/O
+    // storage may be orphaned, and none of it may crash -- 50 rounds.
+    std::printf("      --- Z4: a read in flight and the retiring close: one owner, one CloseHandle, 50 rounds ---\n");
+    {
+      std::mutex rpm;
+      std::condition_variable rpcv;
+      bool rparkNext = false, rparked = false, rrelease = false;
+      fc::HelperLink::SetReceiveProbeForTest([&](DWORD helperPid) {
+        std::unique_lock<std::mutex> l(rpm);
+        if (!rparkNext || helperPid != lastHelperPid.load()) return;  // the host's current helper only
+        rparkNext = false;
+        rparked = true;
+        rpcv.notify_all();
+        rpcv.wait(l, [&] { return rrelease; });
+      });
+      const uint32_t orphansBefore = fc::detail::orphan_counter().load();
+      uint32_t openBase = 0;  // what is open when nothing is in flux (measured in the first round)
+      const int rounds = 50;
+      int parkedOk = 0, heldOk = 0, closedOnceOk = 0, newOk = 0, ok = 0;
+      for (int i = 0; i < rounds; ++i) {
+        const uint64_t E = 201 + 2 * static_cast<uint64_t>(i), N = E + 1;
+        bool oAnswered = false;
+        fn::OfferReply o;
+        offer_call(E, 0xC100 + static_cast<uint64_t>(i), &oAnswered, &o);  // the switch to E and E's helper
+        const bool started = oAnswered && o.verdict == fn::Verdict::Accept;
+        if (i == 0) {
+          Sleep(300);  // the helper retired by this first switch closes on its reader's way out
+          openBase = fc::HelperLink::pipes_created() - fc::HelperLink::pipes_closed();
+        }
+        {
+          std::lock_guard<std::mutex> l(rpm);
+          rparkNext = true;  // the next Receive (E's reader, polling) is held before its read
+          rparked = false;
+          rrelease = false;
+        }
+        bool parkedNow = false;
+        {
+          std::unique_lock<std::mutex> l(rpm);
+          parkedNow = rpcv.wait_for(l, std::chrono::seconds(5), [&] { return rparked; });
+        }
+        // Settle: the previous round's retired pipe closes on its reader's way out (within a poll);
+        // then only the same handles as before the loop (the viewer's, one host helper) are open,
+        // so the counts below are exact.
+        wait_until([&] { return fc::HelperLink::pipes_created() - fc::HelperLink::pipes_closed() == openBase; }, 3000);
+        const uint32_t createdBefore = fc::HelperLink::pipes_created(), closedBefore = fc::HelperLink::pipes_closed();
+        host.OnSessionEnd(N);  // retires E's helper: Shutdown, then ClosePipe -- with a read in flight
+        Sleep(50);
+        const uint32_t closedMid = fc::HelperLink::pipes_closed();
+        const bool held = closedMid == closedBefore;  // not closed under the read's feet
+        {
+          std::lock_guard<std::mutex> l(rpm);
+          rrelease = true;  // the read runs on the still-open handle, then the reader closes it, once
+          rpcv.notify_all();
+        }
+        const bool closedOnce = wait_until([&] { return fc::HelperLink::pipes_closed() == closedBefore + 1; }, 5000) &&
+                                fc::HelperLink::pipes_closed() == closedBefore + 1;
+        bool nAnswered = false;
+        fn::OfferReply n;
+        offer_call(N, 0xC200 + static_cast<uint64_t>(i), &nAnswered, &n);  // the new session's helper, its own handle
+        const bool fresh = nAnswered && n.verdict == fn::Verdict::Accept && fc::HelperLink::pipes_created() == createdBefore + 1;
+        parkedOk += parkedNow ? 1 : 0;
+        heldOk += held ? 1 : 0;
+        closedOnceOk += closedOnce ? 1 : 0;
+        newOk += fresh ? 1 : 0;
+        ok += (started && parkedNow && held && closedOnce && fresh) ? 1 : 0;
+      }
+      fc::HelperLink::SetReceiveProbeForTest(nullptr);
+      check("Z4: the reader was held inside Receive (in flight, before the read) every round", parkedOk == rounds,
+            std::to_string(parkedOk) + "/" + std::to_string(rounds));
+      check("Z4: the retiring ClosePipe did not close the handle under the read (deferred) every round", heldOk == rounds,
+            std::to_string(heldOk) + "/" + std::to_string(rounds));
+      check("Z4: the handle was closed exactly once, by the read on its way out, every round", closedOnceOk == rounds,
+            std::to_string(closedOnceOk) + "/" + std::to_string(rounds));
+      check("Z4: the new session's helper came up on a handle of its own every round", newOk == rounds,
+            std::to_string(newOk) + "/" + std::to_string(rounds));
+      check("Z4: no I/O storage was orphaned", fc::detail::orphan_counter().load() == orphansBefore,
+            "orphans +" + std::to_string(fc::detail::orphan_counter().load() - orphansBefore));
+      check("Z4: all rounds clean (no crash)", ok == rounds, std::to_string(ok) + "/" + std::to_string(rounds));
+    }
     host.SetEpochProbeForTest(nullptr);
   }
   hostRx.join();
   viewRx.join();
   viewer.Stop();
   host.Stop();
+  check("every pipe handle this process created was closed exactly once (r7)",
+        fc::HelperLink::pipes_closed() == fc::HelperLink::pipes_created(),
+        "created=" + std::to_string(fc::HelperLink::pipes_created()) + " closed=" + std::to_string(fc::HelperLink::pipes_closed()));
   closesocket(hostSock);
   closesocket(viewSock);
   check("the control link never went out of step", !linkBroken.load());
