@@ -167,6 +167,7 @@ target_compile_definitions(remote60_native_video_host_migration_seam PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
 target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
+  remote60_file_copy_host  # the same list as GNLinkStream: its sources reference file copy (t-zdmsd4gb)
   capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
   bcrypt windowscodecs shlwapi winmm
 )
