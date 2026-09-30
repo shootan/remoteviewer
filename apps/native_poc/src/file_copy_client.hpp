@@ -137,12 +137,15 @@ class FileCopyClient {
     uint64_t recvVerificationEnds = 0;  // R->P pastes ended by a failed chunk check
     uint8_t lastRecvVerdict = 0, lastRecvEndReason = 0;
     uint64_t staleHelperFrames = 0, staleHelperGones = 0;  // of a helper since replaced, not taken (r8)
+    uint64_t helperSendsDropped = 0;  // frames meant for a helper since replaced, sent to nobody (r9)
+    uint64_t helperSendsFailed = 0;  // frames for the current helper whose pipe was already closed (r9)
   };
   Counters GetCounters() const;
   /**
    * TEST ONLY -- called when a helper frame (point 1) or a helper's "gone" (point 2) arrives, with
-   * the instance it came from, before it is looked at. No product code calls this; the build gate
-   * checks the shipped viewer does not carry it.
+   * the instance it came from, before it is looked at; and before a refusal descriptor (3), an
+   * accepted descriptor (4) or a Read answer (5) is sent, with the instance it is for. No product
+   * code calls this; the build gate checks the shipped viewer does not carry it.
    */
   void SetHelperProbeForTest(std::function<void(uint64_t instance, int point)> probe);
   /** Whether a paste of this viewer's files is running (pinned, bulk open). */
@@ -234,6 +237,7 @@ class FileCopyClient {
     bool active = false;
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
+    uint64_t instance = 0;  // the helper whose paste this is (r9)
     uint32_t files = 0;
     uint64_t bytesTotal = 0, startUs = 0;
   };
@@ -244,6 +248,7 @@ class FileCopyClient {
     uint64_t offerId = 0;
     uint64_t pasteOp = 0;
     file_copy::net::PasteEndReason reason = file_copy::net::PasteEndReason::None;
+    uint64_t instance = 0;  // the helper this paste belongs to (r9): its descriptor goes there, or nowhere
   };
 
   // One request / answer on the control link. False = link failure.
@@ -263,7 +268,7 @@ class FileCopyClient {
   void OnHelperPasteEnd(uint64_t instance, const file_copy::PasteEnd& m);
   bool HelperCurrentLocked(uint64_t instance, bool gone);  // caller holds mu_
   void EndReceiveLocked(file_copy::net::PasteEndReason reason);  // caller holds mu_; queues the End
-  void RefuseDescriptor(uint64_t offerId, uint64_t pasteOp, file_copy::Status why);
+  void RefuseDescriptor(uint64_t instance, uint64_t offerId, uint64_t pasteOp, file_copy::Status why);
   void Post(std::function<void()> task);  // runs on the worker (helper start / publish / clear)
   void WorkerLoop();
   bool R2PEnabled() const { return launcher_ != nullptr; }

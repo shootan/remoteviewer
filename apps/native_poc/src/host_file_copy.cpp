@@ -89,7 +89,7 @@ void HostFileCopyService::Configure(Config config, BulkArbiter* arbiter, LogFn l
   helper_.Configure(
       hc, [this](uint64_t owner, uint64_t instance, const fc::PipeFrame& f) { OnHelperFrame(owner, instance, f); },
       [this](uint64_t owner, uint64_t instance) { OnHelperGone(owner, instance); });
-  receiver_.Start([this](const fc::ReadData& d) { (void)helper_.Send(fc::encode(d)); });
+  receiver_.Start([this](uint64_t instance, const fc::ReadData& d) { (void)helper_.SendTo(instance, fc::encode(d)); });
   worker_ = std::thread([this] { WorkerLoop(); });
 }
 
@@ -150,7 +150,7 @@ void HostFileCopyService::OnHelperFrame(uint64_t owner, uint64_t instance, const
         std::lock_guard<std::mutex> lock(mu_);
         if (!FrameAcceptedLocked(owner, instance)) break;
         allowed = file_copy_allowed();
-        if (allowed) receiver_.Submit(m);  // under mu_: the receiver is opened / closed under it with its paste
+        if (allowed) receiver_.Submit(m, instance);  // under mu_: the receiver is opened / closed under it with its paste
       }
       if (!allowed) {  // switched off: nothing more reaches the helper
         fc::ReadData d;
@@ -159,7 +159,7 @@ void HostFileCopyService::OnHelperFrame(uint64_t owner, uint64_t instance, const
         d.fileIndex = m.fileIndex;
         d.offset = m.offset;
         d.status = fc::Status::Aborted;
-        (void)helper_.Send(fc::encode(d));
+        (void)helper_.SendTo(instance, fc::encode(d));
       }
       break;
     }
@@ -211,29 +211,41 @@ void HostFileCopyService::OnHelperGone(uint64_t owner, uint64_t instance) {
   if (epochProbe_) epochProbe_(owner, 10);
   bool closeSend = false;
   BulkKey key;
+  uint64_t keyInst = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    // Remembered whatever else is decided (r9): a request that sent to this helper just before,
+    // and binds or consumes just after, sees that its helper is gone.
+    if (instance > lastGoneInstance_) lastGoneInstance_ = instance;
+    ++counters_.helperGones;
     // The helper of a session that has since ended (torn down with it): the current session's
     // state, paste and helper are not its business (r5).
     if (owner != helper_.owner() || instance != helper_.instance()) {
       Log("an earlier helper went (another session's, or one replaced in this one): the current state stays");
       ++counters_.staleHelperGones;
-      return;
-    }
-    // Only what was sent to THIS helper ends with it (r8): a paste reserved for its successor (sent
-    // to nobody yet: helperInstance 0) is left to its own request, which will find out itself.
-    if (paste_.dir != Dir::None && paste_.helperInstance == instance) {
-      key = KeyOfPasteLocked();
-      closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
-    }
-    if (begunInstance_ == instance) haveBegun_ = false;
-    if (statId_ != 0) {
-      statId_ = 0;
-      statWanted_ = clipSeq_ != hostOffer_.revision && !clipPaths_.empty();
+      // ...except a paste that was bound to that very helper (r9): it ends with it.
+      if (paste_.dir != Dir::None && paste_.helperInstance == instance) {
+        key = KeyOfPasteLocked();
+        keyInst = paste_.helperInstance;
+        closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+      }
+    } else {
+      // Only what was sent to THIS helper ends with it (r8): a paste reserved for its successor
+      // (sent to nobody yet: helperInstance 0) is left to its own request, which will find out itself.
+      if (paste_.dir != Dir::None && paste_.helperInstance == instance) {
+        key = KeyOfPasteLocked();
+        keyInst = paste_.helperInstance;
+        closeSend = EndPasteLocked(fn::PasteState::Failed, fn::PasteEndReason::Session);
+      }
+      if (begunInstance_ == instance) haveBegun_ = false;
+      if (statId_ != 0) {
+        statId_ = 0;
+        statWanted_ = clipSeq_ != hostOffer_.revision && !clipPaths_.empty();
+      }
     }
     replyCv_.notify_all();
   }
-  if (closeSend) FinishSendClose(key);
+  if (closeSend) FinishSendClose(key, keyInst);
   workCv_.notify_all();
 }
 
@@ -249,7 +261,8 @@ void HostFileCopyService::WorkerLoop() {
     if (paths.empty() || !file_copy_allowed()) continue;
     lock.unlock();
     std::string why;
-    const bool up = helper_.Ensure(&why);
+    uint64_t inst = 0;
+    const bool up = helper_.Ensure(&why, &inst);
     fc::StatFiles s;
     for (const std::wstring& p : paths) s.paths.emplace_back(p.begin(), p.end());
     lock.lock();
@@ -269,7 +282,7 @@ void HostFileCopyService::WorkerLoop() {
     statId_ = s.requestId;
     statSeq_ = seq;
     lock.unlock();
-    const bool sent = helper_.Send(fc::encode(s));
+    const bool sent = helper_.SendTo(inst, fc::encode(s));
     lock.lock();
     if (!sent && statId_ == s.requestId) {
       statId_ = 0;
@@ -466,9 +479,18 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m
     up = helper_.SendAs(epoch, fc::encode(pin), &stale, &sent);
     if (!up) why = "the helper pipe failed";
   }
+  if (epochProbe_) epochProbe_(epoch, 9);  // the pin is out, not yet bound to its helper
   std::unique_lock<std::mutex> lock(mu_);
   const BulkKey mine{epoch, m.offerId, m.pasteOp};
   if (stale) return StaleLocked(mine);
+  if (!Current(epoch)) return StaleLocked(mine);  // the session ended meanwhile: dropped, before anything else
+  // The pin went out without mu_; the helper it went to may have answered AND gone in between, its
+  // "gone" finding no binding to end (r9). Its gone is remembered by instance: bound only if it
+  // has not gone -- otherwise this pin is a dead helper's, whatever answer it stored.
+  if (up && sent <= lastGoneInstance_) {
+    up = false;
+    why = "the helper went while pinning";
+  }
   if (up && KeyOfPasteLocked() == mine) paste_.helperInstance = sent;  // from here that helper's "gone" ends it
   if (up) {
     // An answer stored before this pin went out (an earlier instance's, taken while its successor
@@ -479,7 +501,8 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m
     });
   }
   if (!Current(epoch)) return StaleLocked(mine);
-  const bool answered = up && pinAnswered_ && pinResult_.pinId == m.pasteOp && pinInstance_ == sent && KeyOfPasteLocked() == mine;
+  const bool answered = up && pinAnswered_ && pinResult_.pinId == m.pasteOp && pinInstance_ == sent &&
+                        sent > lastGoneInstance_ && KeyOfPasteLocked() == mine;
   bool allOk = answered && pinResult_.entries.size() == files.size();
   std::vector<uint64_t> sizes;
   for (size_t i = 0; i < files.size(); ++i) {
@@ -504,7 +527,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m
     ++counters_.sendRefused;
     counters_.lastSendVerdict = static_cast<uint8_t>(r.verdict);
     lock.unlock();
-    if (up) (void)helper_.SendAs(epoch, fc::encode(fc::Unpin{m.pasteOp}));
+    if (up) (void)helper_.SendTo(sent, fc::encode(fc::Unpin{m.pasteOp}));
     std::ostringstream os;
     os << "send prepare failed: pinned=" << (answered ? 1 : 0) << " verdict=" << static_cast<int>(r.verdict)
        << (up ? "" : " (" + why + ")");
@@ -518,13 +541,14 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m
   sendBytesAtStart_ = server_.GetCounters().bytesServed;
   const FilePasteIdentity id{r.epochTag, m.offerId, m.pasteOp, r.bulkGen};
   const BulkKey key = KeyOfPasteLocked();
+  const uint64_t keyInst = paste_.helperInstance;
   lock.unlock();
   if (epochProbe_) epochProbe_(epoch, 5);
   // The shared sender is begun under its owner key (r5): if the session ended meanwhile (the paste
   // is no longer this one's), nothing is begun and the request is dropped -- a newer session's send
   // is never overwritten.
   if (!BeginSend(key, id, sizes)) {
-    (void)helper_.SendAs(epoch, fc::encode(fc::Unpin{m.pasteOp}));
+    (void)helper_.SendTo(keyInst, fc::encode(fc::Unpin{m.pasteOp}));
     std::lock_guard<std::mutex> again(mu_);
     return StaleLocked(key);
   }
@@ -554,6 +578,10 @@ fc::Status HostFileCopyService::ReadLocal(uint64_t epoch, uint64_t pinId, uint32
     return fc::Status::ReadError;
   }
   std::unique_lock<std::mutex> lock(mu_);
+  if (sent <= lastGoneInstance_) {  // it went before this read was even bound (r9)
+    ++counters_.localReadFailures;
+    return fc::Status::ReadError;
+  }
   replyCv_.wait_for(lock, std::chrono::milliseconds(config_.readWaitMs), [&] {
     return sendAborting_ || (localAnswered_ && localInstance_ == sent && localData_.pinId == pinId &&
                              localData_.fileIndex == index && localData_.offset == offset);
@@ -604,7 +632,7 @@ bool HostFileCopyService::BeginSend(const BulkKey& key, const FilePasteIdentity&
   return true;
 }
 
-void HostFileCopyService::FinishSendClose(const BulkKey& key) {
+void HostFileCopyService::FinishSendClose(const BulkKey& key, uint64_t helperInstance) {
   std::lock_guard<std::mutex> bulk(bulkMu_);
   if (sendOwner_ == key) {
     server_.End();
@@ -614,7 +642,7 @@ void HostFileCopyService::FinishSendClose(const BulkKey& key) {
     // Not begun by this paste (reserved, never begun), or begun by a later one (r5): left alone.
     Log("send close: the sender is not this paste's, left as it is");
   }
-  if (key.pasteOp != 0) (void)helper_.SendAs(key.epoch, fc::encode(fc::Unpin{key.pasteOp}));
+  if (key.pasteOp != 0) (void)helper_.SendTo(helperInstance, fc::encode(fc::Unpin{key.pasteOp}));
 }
 
 std::vector<uint8_t> HostFileCopyService::StaleAs(const BulkKey& key) {
@@ -786,13 +814,18 @@ std::vector<uint8_t> HostFileCopyService::HandleOffer(const fn::Offer& m, uint64
   }
   if (epochProbe_) epochProbe_(epoch, 4);
   std::unique_lock<std::mutex> lock(mu_);
+  if (!Current(epoch)) return StaleLocked(BulkKey{});  // the session ended meanwhile: dropped, before anything else
+  if (sent <= lastGoneInstance_) {  // it went before this publication was even waited for (r9)
+    lock.unlock();
+    return refuse(fn::Verdict::HelperUnavailable, "the helper went while publishing");
+  }
   replyCv_.wait_for(lock, std::chrono::milliseconds(config_.publishWaitMs), [&] {
     return (publishAnswered_ && publishResult_.offerId == m.offerId && publishInstance_ == sent) || !Current(epoch);
   });
   // The session ended while the helper was answering: that helper went with it (shutdown), and the
   // offer is not the new session's -- nothing to apply, nothing to undo.
   if (!Current(epoch)) return StaleLocked(BulkKey{});
-  if (!publishAnswered_ || publishResult_.offerId != m.offerId || publishInstance_ != sent ||
+  if (!publishAnswered_ || publishResult_.offerId != m.offerId || publishInstance_ != sent || sent <= lastGoneInstance_ ||
       publishResult_.status != fc::Status::Ok) {
     const bool answered = publishAnswered_;
     lock.unlock();
@@ -834,7 +867,7 @@ void HostFileCopyService::OnPasteBegin(uint64_t owner, uint64_t instance, const 
     d.offerId = m.offerId;
     d.pasteOp = m.pasteOp;
     d.status = fc::Status::Refused;
-    (void)helper_.Send(fc::encode(d));
+    (void)helper_.SendTo(instance, fc::encode(d));
     Log("paste refused: another paste runs, or the offer is gone");
   }
 }
@@ -876,12 +909,14 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m, ui
   d.pasteOp = m.pasteOp;
   FilePasteIdentity id;
   std::vector<uint64_t> sizes;
+  uint64_t descInst = 0;  // the helper the descriptor answers: the one whose PasteBegin this prepares
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!Current(epoch)) return {};
     r.epochTag = epochTag_;
     const PeerOffer* offer = FindPeerOffer(m.offerId);
     fc::Status failed = fc::Status::Ok;
+    descInst = begunInstance_;
     if (m.direction != fn::Direction::PtoR || !file_copy_allowed()) {
       r.verdict = !file_copy_allowed() ? fn::Verdict::Disabled : fn::Verdict::BadRequest;
     } else if (!haveBegun_ || begunOffer_ != m.offerId || begunOp_ != m.pasteOp || !offer) {
@@ -932,7 +967,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m, ui
       // Opened here, under mu_, together with the paste that owns it (r5): it is closed the same
       // way (EndPasteLocked), so no request of another session can open or close it in between.
       receiver_.Open(send_, bulk_stream_id(r.bulkGen, kFileBulkStreamHostToClient),
-                     bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost), mtu_, id, sizes);
+                     bulk_stream_id(r.bulkGen, kFileBulkStreamClientToHost), mtu_, id, sizes, paste_.helperInstance);
     } else {
       d.status = failed != fc::Status::Ok ? failed : fc::Status::Refused;
       if (r.verdict == fn::Verdict::Busy) ++counters_.pastesBusy;
@@ -940,7 +975,7 @@ std::vector<uint8_t> HostFileCopyService::HandlePrepare(const fn::Prepare& m, ui
     }
   }
   // The helper's descriptor: the confirmed sizes / times, or the reason the paste fails before a byte.
-  if (r.verdict != fn::Verdict::UnknownId) (void)helper_.SendAs(epoch, fc::encode(d));
+  if (r.verdict != fn::Verdict::UnknownId) (void)helper_.SendTo(descInst, fc::encode(d));
   std::ostringstream os;
   os << "prepare verdict=" << static_cast<int>(r.verdict) << " files=" << m.items.size();
   Log(os.str());
@@ -1001,9 +1036,11 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m, uint64_t e
   bool clear = false;
   bool closeSend = false;
   BulkKey key;
+  uint64_t keyInst = 0, clearInst = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!Current(epoch)) return {};
+    clearInst = helper_.instance();
     if (m.pasteOp == 0) {
       // Withdraw the viewer's offer: off this clipboard. A paste already running on it runs on.
       if (offer_.offerId == m.offerId) {
@@ -1016,6 +1053,7 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m, uint64_t e
       const fn::PasteEndReason reason = m.reason == fn::PasteEndReason::None ? fn::PasteEndReason::Cancelled : m.reason;
       r.state = reason == fn::PasteEndReason::Completed ? fn::PasteState::Ended : fn::PasteState::Failed;
       key = KeyOfPasteLocked();
+      keyInst = paste_.helperInstance;
       closeSend = EndPasteLocked(r.state, reason);
     } else if (lastEnded_.pasteOp != 0 && lastEnded_.offerId == m.offerId && lastEnded_.pasteOp == m.pasteOp) {
       r.state = lastEnded_.state;  // already over: how it really ended, not "cancelled" (r3 A-2)
@@ -1024,11 +1062,11 @@ std::vector<uint8_t> HostFileCopyService::HandleEnd(const fn::End& m, uint64_t e
     }
   }
   if (epochProbe_) epochProbe_(epoch, 6);
-  if (closeSend) FinishSendClose(key);  // only if this paste still holds the sender (r5)
+  if (closeSend) FinishSendClose(key, keyInst);  // only if this paste still holds the sender (r5)
   if (clear) {
     fc::ClearRemoteFiles c;
     c.offerId = m.offerId;
-    (void)helper_.SendAs(epoch, fc::encode(c));
+    (void)helper_.SendTo(clearInst, fc::encode(c));  // the helper that holds the offer: the current one, as decided under mu_
   }
   return fn::body(r);
 }
@@ -1121,10 +1159,12 @@ void HostFileCopyService::Teardown(fn::PasteEndReason reason, uint64_t helperOwn
   bool shut = false;
   bool closeSend = false;
   BulkKey key;
+  uint64_t keyInst = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (paste_.dir != Dir::None) {
       key = KeyOfPasteLocked();
+      keyInst = paste_.helperInstance;
       closeSend = EndPasteLocked(fn::PasteState::Failed, reason);
     }
     haveBegun_ = false;
@@ -1141,7 +1181,7 @@ void HostFileCopyService::Teardown(fn::PasteEndReason reason, uint64_t helperOwn
       statWanted_ = false;
     }
   }
-  if (closeSend) FinishSendClose(key);
+  if (closeSend) FinishSendClose(key, keyInst);
   // The helper is per session (plan §1): told Shutdown when it published something, then its pipe
   // is dropped -- it clears the clipboard and exits. Only THAT session's helper (r6): after the
   // switch the channel already belongs to the new session, whose helper is not touched.
@@ -1167,6 +1207,8 @@ HostFileCopyService::Counters HostFileCopyService::GetCounters() const {
   c.pullsRefused = sc.pullsRefused;
   c.helperLaunches = helper_.launches();
   c.helperLaunchFailures = helper_.launchFailures();
+  c.helperSendsDropped = helper_.droppedSends();
+  c.helperSendsFailed = helper_.failedSends();
   c.sendOpen = server_.active();
   c.sendPasteOp = server_.identity().pasteOp;
   c.sendEpochTag = server_.identity().epochTag;

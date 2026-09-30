@@ -176,7 +176,8 @@ class HostFileCopyService {
    * begun; 6 = End, the paste is ended under mu_, before the sender is closed; 700 + frame type = a
    * helper frame of that type arrived (`requestEpoch` = the owner that helper was started for),
    * before it is looked at; 8 =
-   * Prepare R->P, reserved, before the helper is asked to pin; 10 = a helper's "gone" arrived
+   * Prepare R->P, reserved, before the helper is asked to pin; 9 = Prepare R->P, the pin sent,
+   * before it is bound to its helper under mu_; 10 = a helper's "gone" arrived
    * (`requestEpoch` = its owner), before it is looked at. No product code calls this; the build
    * gate checks the shipped host does not carry it.
    */
@@ -202,6 +203,9 @@ class HostFileCopyService {
     uint64_t staleHelperSends = 0;
     uint64_t staleHelperFrames = 0;  // frames of an earlier helper (another session's, or replaced), not taken (r6/r7)
     uint64_t staleHelperGones = 0;   // the same for "gone" (r7)
+    uint64_t helperSendsDropped = 0; // frames meant for a helper since replaced, sent to nobody (r9)
+    uint64_t helperSendsFailed = 0;  // frames for the current helper whose pipe was already closed (r9)
+    uint64_t helperGones = 0;        // every helper "gone" seen, taken or not (r9, tests)
   };
   Counters GetCounters() const;
   BulkUplink::Counters UplinkCounters() const { return uplink_.GetCounters(); }
@@ -263,7 +267,7 @@ class HostFileCopyService {
   // BeginSend takes the sender for `key` if the paste is still that one's and current, else false;
   // FinishSendClose ends / closes / unpins only when `key` holds it -- otherwise the pin alone.
   bool BeginSend(const BulkKey& key, const FilePasteIdentity& id, const std::vector<uint64_t>& sizes);
-  void FinishSendClose(const BulkKey& key);
+  void FinishSendClose(const BulkKey& key, uint64_t helperInstance);  // the unpin goes to that helper
   // The one switch of the state to `epoch` (caller holds sessionMu_); `endPrevious` = a session ran.
   void SwitchToLocked(uint64_t epoch, bool endPrevious);
   // A request whose session ended on the way: releases what it reserved (`key`, only if the
@@ -331,6 +335,10 @@ class HostFileCopyService {
   // instance it sent to; an answer of an earlier instance, taken while its successor was starting
   // (it was the current one then), is nobody's.
   uint64_t publishInstance_ = 0, pinInstance_ = 0, localInstance_ = 0;
+  // r9: the highest helper instance whose "gone" has been seen (they only go up). A request that
+  // sent to instance N without mu_ checks N > lastGoneInstance_ when it binds / consumes: N's gone
+  // may have come in between, finding nothing bound to end.
+  uint64_t lastGoneInstance_ = 0;
   bool sendAborting_ = false;  // R->P: a read in flight gives up at once
   uint64_t sendBytesAtStart_ = 0;  // the server's served-bytes counter when this paste began
   uint64_t epochTag_ = 0;

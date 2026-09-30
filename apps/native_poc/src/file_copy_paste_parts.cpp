@@ -131,12 +131,15 @@ bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* sta
   return true;
 }
 
-bool FileHelperChannel::Send(const fc::PipeFrame& f, uint64_t* instance) {
+bool FileHelperChannel::SendTo(uint64_t instance, const fc::PipeFrame& f) {
   std::lock_guard<std::mutex> s(sendMu_);
-  if (instance) *instance = 0;
-  if (!(cur_.link && cur_.link->pipe_open() && cur_.link->Send(f))) return false;
-  if (instance) *instance = cur_.instance;
-  return true;
+  if (!cur_.link || cur_.instance != instance) {
+    ++droppedSends_;  // that helper is gone or replaced: what was meant for it goes to nobody
+    return false;
+  }
+  if (cur_.link->pipe_open() && cur_.link->Send(f)) return true;
+  ++failedSends_;  // still the current helper, but its pipe is closed: it is gone
+  return false;
 }
 
 bool FileHelperChannel::Running() const {
@@ -204,9 +207,10 @@ void FilePullReceiver::Stop() {
 }
 
 void FilePullReceiver::Open(SendFn send, uint32_t txStreamId, uint32_t rxStreamId, uint32_t mtuBytes,
-                            const FilePasteIdentity& id, const std::vector<uint64_t>& sizes) {
+                            const FilePasteIdentity& id, const std::vector<uint64_t>& sizes, uint64_t helperInstance) {
   std::lock_guard<std::mutex> lock(mu_);
   id_ = id;
+  helperInstance_ = helperInstance;
   sizes_ = sizes;
   coverage_.clear();
   for (uint64_t s : sizes) coverage_.emplace_back(s);
@@ -228,15 +232,17 @@ void FilePullReceiver::Open(SendFn send, uint32_t txStreamId, uint32_t rxStreamI
 
 void FilePullReceiver::Close(fc::Status why) {
   std::vector<fc::ReadData> answers;
+  uint64_t inst = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!open_) return;
+    inst = helperInstance_;
     FailAllLocked(why, &answers);
     bulk_.Close(ControlCloseReason::SessionRollover);
     open_ = false;
   }
   if (answer_) {
-    for (const fc::ReadData& d : answers) answer_(d);
+    for (const fc::ReadData& d : answers) answer_(inst, d);
   }
 }
 
@@ -267,8 +273,9 @@ FilePullReceiver::Counters FilePullReceiver::GetCounters() const {
   return counters_;
 }
 
-void FilePullReceiver::Submit(const fc::ReadRequest& m) {
+void FilePullReceiver::Submit(const fc::ReadRequest& m, uint64_t instance) {
   std::vector<fc::ReadData> answers;
+  uint64_t inst = instance;  // a refusal answers the asker; a served read answers the paste's helper
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++counters_.readsRequested;
@@ -292,6 +299,7 @@ void FilePullReceiver::Submit(const fc::ReadRequest& m) {
       ProcessLocked(&answers);
       refuse.status = fc::Status::Ok;
       refuse.pasteOp = 0;  // no refusal
+      inst = helperInstance_;
     }
     if (refuse.pasteOp != 0) {
       if (refuse.status != fc::Status::Ok) ++counters_.readsFailed;
@@ -299,7 +307,7 @@ void FilePullReceiver::Submit(const fc::ReadRequest& m) {
     }
   }
   if (answer_) {
-    for (const fc::ReadData& d : answers) answer_(d);
+    for (const fc::ReadData& d : answers) answer_(inst, d);
   }
 }
 
@@ -412,9 +420,11 @@ void FilePullReceiver::Loop() {
     const bool got = bulk_.Receive(&msg, 20);
     bulk_.Tick();
     std::vector<fc::ReadData> answers;
+    uint64_t inst = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (!open_) continue;
+      inst = helperInstance_;
       fn::Chunk c;
       bool failed = false;
       if (got && fn::parse_bulk(msg.data(), msg.size(), &c)) {
@@ -477,7 +487,7 @@ void FilePullReceiver::Loop() {
       PumpPullsLocked();
     }
     if (answer_) {
-      for (const fc::ReadData& d : answers) answer_(d);
+      for (const fc::ReadData& d : answers) answer_(inst, d);
     }
   }
 }

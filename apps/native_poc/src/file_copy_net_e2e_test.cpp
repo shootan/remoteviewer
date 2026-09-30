@@ -1436,6 +1436,179 @@ int wmain() {
           "cleared +" + std::to_string(viewer.GetCounters().remoteCleared - pub.remoteCleared));
     viewer.SetHelperProbeForTest(nullptr);
   }
+
+  // r9 (2): the viewer's answers to a helper go to THAT helper or to nobody -- never to its successor.
+  // One probe for the three send sites: a refusal descriptor (3), an accepted descriptor (4), a Read
+  // answer (5); and the old helper's "gone" (2) where it must be held.
+  std::printf("\n--- V2..V4 (r9 2). the viewer: what was meant for a helper since replaced is sent to nobody ---\n");
+  {
+    std::mutex vpm;
+    std::condition_variable vpcv;
+    int vpoint = 0, vpoint2 = 0;
+    bool vparked = false, vrelease = false, vparked2 = false, vrelease2 = false;
+    uint64_t vinst = 0, vinst2 = 0;
+    viewer.SetHelperProbeForTest([&](uint64_t instance, int point) {
+      std::unique_lock<std::mutex> l(vpm);
+      if (point == vpoint) {
+        vpoint = 0;
+        vinst = instance;
+        vparked = true;
+        vpcv.notify_all();
+        vpcv.wait(l, [&] { return vrelease; });
+      } else if (point == vpoint2) {
+        vpoint2 = 0;
+        vinst2 = instance;
+        vparked2 = true;
+        vpcv.notify_all();
+        vpcv.wait(l, [&] { return vrelease2; });
+      }
+    });
+    const auto arm = [&](int slot, int point) {
+      std::lock_guard<std::mutex> l(vpm);
+      if (slot == 1) {
+        vpoint = point;
+        vparked = false;
+        vrelease = false;
+      } else {
+        vpoint2 = point;
+        vparked2 = false;
+        vrelease2 = false;
+      }
+    };
+    const auto wait_parked = [&](int slot, int sec) {
+      std::unique_lock<std::mutex> l(vpm);
+      return vpcv.wait_for(l, std::chrono::seconds(sec), [&] { return slot == 1 ? vparked : vparked2; });
+    };
+    const auto let_go = [&](int slot) {
+      std::lock_guard<std::mutex> l(vpm);
+      if (slot == 1) vrelease = true;
+      else vrelease2 = true;
+      vpcv.notify_all();
+    };
+    const auto kill_viewer_helper = [&](DWORD pid) {
+      HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+      bool ok = false;
+      if (hp) {
+        ok = TerminateProcess(hp, 9) != FALSE && WaitForSingleObject(hp, 5000) == WAIT_OBJECT_0;
+        CloseHandle(hp);
+      }
+      return ok;
+    };
+    // A new remote copy: the viewer publishes it -- through its current helper, or through a new
+    // one if the current one is gone (launches +1 then).
+    const auto remote_copy = [&](const std::wstring& path, bool expectNewHelper) {
+      const auto c0 = viewer.GetCounters();
+      host.OnHostClipboard(++hostSeq, {path});
+      return wait_until([&] {
+        const auto c = viewer.GetCounters();
+        return c.remotePublished > c0.remotePublished && (!expectNewHelper || c.helperLaunches > c0.helperLaunches);
+      }, 20000);
+    };
+
+    // V2: a refusal descriptor. The viewer is made unusable for a moment (bulk not negotiated), so
+    // helper A's PasteBegin is refused on the reader thread; the refusal is held before it is sent
+    // (3); A dies; the viewer is usable again and a new remote copy makes it start a successor B;
+    // then the refusal is let go: it goes to nobody.
+    {
+      const std::wstring v2a = remoteDir + L"\\viewV2a.bin", v2b = remoteDir + L"\\viewV2b.bin";
+      write_file(v2a, make_content(64 * 1024, 231));
+      write_file(v2b, make_content(64 * 1024, 232));
+      check("V2: the remote copy is published here", remote_copy(v2a, false));
+      const DWORD pidA = viewerHelperPid.load();
+      const auto before = viewer.GetCounters();
+      viewer.SetBulkNegotiated(false);  // not usable: the next PasteBegin is refused at the door
+      arm(1, 3);
+      Child c1;
+      paste_on(local, root + L"destV2", 64 * 1024, 12, &c1);
+      check("V2: helper A's PasteBegin was refused and the refusal is held before it is sent", wait_parked(1, 15),
+            "instance=" + std::to_string(vinst) + " begun +" + std::to_string(viewer.GetCounters().recvBegun - before.recvBegun));
+      check("V2: helper A was ended", kill_viewer_helper(pidA), "pid=" + std::to_string(pidA));
+      viewer.SetBulkNegotiated(true);
+      check("V2: a new remote copy is published through a NEW helper B", remote_copy(v2b, true));
+      const auto mid = viewer.GetCounters();
+      let_go(1);
+      check("V2: the refusal meant for helper A went to nobody (not to B)",
+            wait_until([&] { return viewer.GetCounters().helperSendsDropped > mid.helperSendsDropped; }, 5000),
+            "dropped +" + std::to_string(viewer.GetCounters().helperSendsDropped - mid.helperSendsDropped));
+      c1.Wait(15000);
+    }
+
+    // V3: an accepted descriptor. Helper A's PasteBegin is queued (the pump held) and A dies -- its
+    // "gone" held at the door (2), so the queue keeps the paste; the pump is let go: the prepare
+    // completes its control round trip and its descriptor, meant for A, is held before it is sent
+    // (4); let go, it is not delivered (A is gone: sent to a dead pipe, never to a successor). The
+    // successor starts only afterwards (a new remote copy) and receives nothing of it.
+    // (The order "A replaced by B WHILE A's prepare is in its round trip" cannot arise in the viewer:
+    // the round trip runs on the pump thread, and a successor starts only from a publish that the
+    // same thread posts after seeing a new remote offer -- which also ends any paste waiting for
+    // the bulk. So the reachable case is "A dead, not yet replaced", and it is what this checks.)
+    {
+      const std::wstring v3a = remoteDir + L"\\viewV3a.bin", v3b = remoteDir + L"\\viewV3b.bin";
+      write_file(v3a, make_content(64 * 1024, 233));
+      write_file(v3b, make_content(64 * 1024, 234));
+      check("V3: the remote copy is published here", remote_copy(v3a, false));
+      const DWORD pidA = viewerHelperPid.load();
+      const auto before = viewer.GetCounters();
+      pumpPaused.store(true);  // the paste's prepare waits in the queue
+      Child c3;
+      paste_on(local, root + L"destV3", 64 * 1024, 15, &c3);
+      check("V3: the paste began (queued, the pump held)",
+            wait_until([&] { return viewer.GetCounters().recvBegun > before.recvBegun; }, 15000));
+      arm(2, 2);  // helper A's "gone" is held: the queue keeps its paste
+      check("V3: helper A was ended", kill_viewer_helper(pidA), "pid=" + std::to_string(pidA));
+      check("V3: helper A's 'gone' is held at the viewer's door", wait_parked(2, 10));
+      arm(1, 4);  // the accepted descriptor, before it is sent
+      pumpPaused.store(false);
+      check("V3: the prepare completed its round trip and its descriptor is held before it is sent (helper A's)",
+            wait_parked(1, 15), "instance=" + std::to_string(vinst));
+      const auto mid = viewer.GetCounters();
+      let_go(1);
+      check("V3: the descriptor meant for helper A was not delivered (A is gone)",
+            wait_until([&] {
+              const auto c = viewer.GetCounters();
+              return c.helperSendsDropped + c.helperSendsFailed > mid.helperSendsDropped + mid.helperSendsFailed;
+            }, 5000),
+            "dropped +" + std::to_string(viewer.GetCounters().helperSendsDropped - mid.helperSendsDropped) + " failed +" +
+                std::to_string(viewer.GetCounters().helperSendsFailed - mid.helperSendsFailed));
+      const auto pub = viewer.GetCounters();
+      check("V3: a new remote copy is published through a NEW helper B", remote_copy(v3b, true));
+      let_go(2);  // A's "gone" goes in only now, after B: not the current helper's
+      check("V3: helper A's 'gone', let in after B, is not taken",
+            wait_until([&] { return viewer.GetCounters().staleHelperGones > pub.staleHelperGones; }, 5000));
+      Sleep(300);
+      check("V3: B began no paste of its own from A's descriptor", viewer.GetCounters().recvBegun == pub.recvBegun);
+      c3.Wait(15000);
+    }
+
+    // V4: a Read answer. A paste of a large file runs (reads flow); one answer is held before it is
+    // sent (5); the helper dies and a new remote copy makes the viewer start a successor; let go,
+    // the answer goes to nobody.
+    {
+      const std::wstring v4a = remoteDir + L"\\viewV4a.bin", v4b = remoteDir + L"\\viewV4b.bin";
+      write_file(v4a, make_content(8u * 1024u * 1024u, 235));
+      write_file(v4b, make_content(64 * 1024, 236));
+      check("V4: the remote copy is published here", remote_copy(v4a, false));
+      const DWORD pidA = viewerHelperPid.load();
+      const auto before = viewer.GetCounters();
+      Child c4;
+      paste_on(local, root + L"destV4", 8u * 1024u * 1024u, 30, &c4);
+      check("V4: bytes are moving (reads are answered)",
+            wait_until([&] { return viewer.GetCounters().bytesReceived > before.bytesReceived + 512 * 1024; }, 30000));
+      arm(1, 5);
+      check("V4: a Read answer is held before it is sent (helper A's)", wait_parked(1, 15), "instance=" + std::to_string(vinst));
+      check("V4: helper A was ended", kill_viewer_helper(pidA), "pid=" + std::to_string(pidA));
+      check("V4: a new remote copy is published through a NEW helper B", remote_copy(v4b, true));
+      const auto mid = viewer.GetCounters();
+      let_go(1);
+      check("V4: the Read answer meant for helper A went to nobody (not to B)",
+            wait_until([&] { return viewer.GetCounters().helperSendsDropped > mid.helperSendsDropped; }, 5000),
+            "dropped +" + std::to_string(viewer.GetCounters().helperSendsDropped - mid.helperSendsDropped));
+      c4.Wait(30000);
+    }
+    viewer.SetHelperProbeForTest(nullptr);
+    host.OnHostClipboard(++hostSeq, {});
+    Sleep(500);
+  }
   // ------------------------------------------------------------------ teardown
   stop.store(true);
   pump.join();
@@ -2402,6 +2575,65 @@ int wmain() {
       end_paste(E, h, 1, &eAnswered, &er);
       check(tag + "the session ends its send", eAnswered && er.state == fn::PasteState::Failed);
       check(tag + "...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
+    }
+
+    // Z6 (r9 1): the pin is out, its helper answers AND goes before the request binds the pin to it
+    // (probe 9: after the send, before mu_). The gone finds nothing bound to end; the request must
+    // still not take the dead helper's stored answer: no Accept, no sender, reservation and bulk freed.
+    std::printf("      --- Z6: a helper that answered and went before its pin was bound: no Accept on its stored answer ---\n");
+    {
+      const uint64_t E = 501;
+      const std::wstring z6 = remoteDir + L"\\epochZ6.txt";
+      write_file(z6, make_content(2048, 241));
+      uint64_t h = host_offer_in(E, z6);
+      Sleep(1500);  // let the second identification (if any) settle, as in Z5
+      {
+        std::vector<uint8_t> r0;
+        fn::OfferQueryReply q0;
+        if (call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), E, &r0) && fn::parse(r0, &q0) && q0.offerId != 0) h = q0.offerId;
+      }
+      check("Z6: the session sees its copy", h != 0);
+      const DWORD pid1 = lastHelperPid.load();
+      const auto before = host.GetCounters();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = 9;  // the pin is out, not yet bound
+        parkEpoch = E;
+        parked = false;
+        release = false;
+      }
+      bool aAnswered = false;
+      fn::PrepareReply a;
+      std::thread at([&] { prepare_rtop(E, h, 1, &aAnswered, &a); });
+      bool held = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        held = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked; });
+      }
+      check("Z6: the Prepare is held with its pin sent, before the binding", held);
+      Sleep(400);  // the helper's PinResult arrives and is stored meanwhile (its reader is free)
+      HANDLE hp = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid1);
+      bool killed = false;
+      if (hp) {
+        killed = TerminateProcess(hp, 9) != FALSE && WaitForSingleObject(hp, 5000) == WAIT_OBJECT_0;
+        CloseHandle(hp);
+      }
+      check("Z6: the helper was ended", killed, "pid=" + std::to_string(pid1));
+      check("Z6: its 'gone' was processed (finding nothing bound to end)",
+            wait_until([&] { return host.GetCounters().helperGones > before.helperGones; }, 5000));
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;
+        pcv.notify_all();
+      }
+      at.join();
+      check("Z6: the Prepare did NOT accept on the dead helper's stored answer", aAnswered && a.verdict == fn::Verdict::HelperUnavailable,
+            "answered=" + std::to_string(aAnswered) + " verdict=" + std::to_string(static_cast<int>(a.verdict)));
+      const auto after = host.GetCounters();
+      check("Z6: no sender was opened", !after.sendOpen && after.sendPrepared == before.sendPrepared,
+            "open=" + std::to_string(after.sendOpen) + " prepared +" + std::to_string(after.sendPrepared - before.sendPrepared));
+      check("Z6: the reservation and the host's bulk were released", hostArbiter.use() == BulkUse::Idle,
+            "use=" + std::to_string(static_cast<int>(hostArbiter.use())));
     }
     host.SetEpochProbeForTest(nullptr);
   }

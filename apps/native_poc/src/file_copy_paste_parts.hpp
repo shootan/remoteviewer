@@ -91,7 +91,16 @@ class FileHelperChannel {
    * its successor was starting, is then nobody's.
    */
   bool Ensure(std::string* why, uint64_t* instance = nullptr);
-  bool Send(const file_copy::PipeFrame& f, uint64_t* instance = nullptr);
+  /**
+   * Sends to helper `instance` only (r9): under sendMu_, only if that is still the current helper;
+   * otherwise the frame is dropped (droppedSends). Every answer to something a helper said, and
+   * every follow-up of something sent to a helper, goes through this with the instance it belongs
+   * to -- never "whoever is current now".
+   */
+  bool SendTo(uint64_t instance, const file_copy::PipeFrame& f);
+  uint64_t droppedSends() const { return droppedSends_.load(); }
+  /** SendTo frames whose helper was still the current one but whose pipe was closed (it is gone). */
+  uint64_t failedSends() const { return failedSends_.load(); }
 
   /**
    * Ownership (r5/r6): the helper is per session, and the session's epoch owns the channel. Every
@@ -151,7 +160,7 @@ class FileHelperChannel {
   std::thread reader_, prevReader_;  // under mu_
   uint64_t nextLaunchMs_ = 0;
   uint32_t backoffMs_ = 0;
-  std::atomic<uint64_t> launches_{0}, launchFailures_{0};
+  std::atomic<uint64_t> launches_{0}, launchFailures_{0}, droppedSends_{0}, failedSends_{0};
 };
 
 // ------------------------------------------------------------------------------ the paste's identity
@@ -169,7 +178,9 @@ class FilePullReceiver {
  public:
   using SendFn = std::function<bool(const void* data, size_t len)>;
   /** A finished (or failed) helper Read, to go back to the helper -- called with no lock held. */
-  using AnswerFn = std::function<void(const file_copy::ReadData&)>;
+  /** An answer to a helper's Read, with the helper INSTANCE it is for (r9): the paste's helper for
+   *  served reads, the asking helper's for refusals. */
+  using AnswerFn = std::function<void(uint64_t instance, const file_copy::ReadData&)>;
 
   struct Counters {
     uint64_t readsRequested = 0, readsServed = 0, readsFailed = 0, chunksVerified = 0, chunksRejected = 0;
@@ -192,13 +203,13 @@ class FilePullReceiver {
 
   /** A prepared paste: the bulk stream opens (tx carries pulls, rx the chunks). */
   void Open(SendFn send, uint32_t txStreamId, uint32_t rxStreamId, uint32_t mtuBytes, const FilePasteIdentity& id,
-            const std::vector<uint64_t>& sizes);
+            const std::vector<uint64_t>& sizes, uint64_t helperInstance);  // whose paste it is
   /** The paste is over: pending Reads fail with `why`, the stream closes. */
   void Close(file_copy::Status why);
   bool IsOpen() const;
 
-  /** A helper Read of the open paste (or a refusal answered at once). */
-  void Submit(const file_copy::ReadRequest& m);
+  /** A helper Read of the open paste (or a refusal answered at once); `instance` = the asking helper. */
+  void Submit(const file_copy::ReadRequest& m, uint64_t instance);
   /** A bulk datagram of this paste's rx stream. */
   bool OnDatagram(const void* data, size_t len) { return bulk_.OnPacket(data, len); }
 
@@ -233,6 +244,7 @@ class FilePullReceiver {
 
   const uint32_t pullWindow_;
   AnswerFn answer_;
+  uint64_t helperInstance_ = 0;  // the open paste's helper (under mu_)
   std::atomic<bool> running_{false};
   std::thread thread_;
   mutable std::mutex mu_;

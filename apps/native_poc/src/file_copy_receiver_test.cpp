@@ -72,7 +72,7 @@ struct Rig {
 
   explicit Rig(PeerMode mode, uint64_t stallUs, uint64_t fileSize) {
     rx.SetStallTimeoutUs(stallUs);
-    rx.Start([this](const fc::ReadData& d) {
+    rx.Start([this](uint64_t, const fc::ReadData& d) {
       std::lock_guard<std::mutex> lock(mu);
       answers.push_back(d);
       cv.notify_all();
@@ -92,7 +92,7 @@ struct Rig {
       }
     });
     peer.Configure([this](const void* d, size_t n) { wire.Push(0, d, n); return true; }, kRx, kTx, 1200);
-    rx.Open([this](const void* d, size_t n) { wire.Push(1, d, n); return true; }, kTx, kRx, 1200, id, {fileSize});
+    rx.Open([this](const void* d, size_t n) { wire.Push(1, d, n); return true; }, kTx, kRx, 1200, id, {fileSize}, 1);
     peerThread = std::thread([this, mode] {
       std::vector<uint8_t> msg;
       while (run.load()) {
@@ -149,7 +149,7 @@ struct Rig {
     r.fileIndex = 0;
     r.offset = offset;
     r.length = length;
-    rx.Submit(r);
+    rx.Submit(r, 1);
   }
   bool WaitAnswers(size_t n, int ms) {
     std::unique_lock<std::mutex> lock(mu);
