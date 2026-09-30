@@ -36,6 +36,49 @@ void set_error(std::string* error, const std::string& text) {
 
 }  // namespace
 
+#ifdef REMOTE60_UPDATE_HTTP_TEST_SEAM
+// TEST BUILDS ONLY -- never defined for GNLinkUpdater, GNLinkHost or GNLinkClient.
+//
+// WinHttpSetOption does not fail on request, so the one thing a test cannot produce by itself is
+// the failure this file has to survive. The seam makes that one call report failure and counts
+// the sends that follow it. Nothing else is replaced: the session, the connection, the request
+// handle and every other option are the real ones.
+namespace test_seam {
+bool gFailDisableRedirects = false;
+int gSendRequestCalls = 0;
+const char kMarker[] = "[update-http-test-seam]";
+}  // namespace test_seam
+#endif
+
+namespace {
+
+/** Tells a request to follow no redirect. False means it could not be told. */
+bool disable_redirects(HINTERNET request) {
+#ifdef REMOTE60_UPDATE_HTTP_TEST_SEAM
+  if (test_seam::gFailDisableRedirects) {
+    // Named, so that a build carrying this seam can be recognised by what it contains.
+    OutputDebugStringA(test_seam::kMarker);
+    SetLastError(ERROR_WINHTTP_INCORRECT_HANDLE_STATE);
+    return false;
+  }
+#endif
+  DWORD disable = WINHTTP_DISABLE_REDIRECTS;
+  return WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable)) !=
+         FALSE;
+}
+
+BOOL send_request(HINTERNET request, const std::wstring& headers) {
+#ifdef REMOTE60_UPDATE_HTTP_TEST_SEAM
+  ++test_seam::gSendRequestCalls;
+#endif
+  return WinHttpSendRequest(request,
+                            headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                            headers.empty() ? 0 : static_cast<DWORD>(-1),
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+}
+
+}  // namespace
+
 const char* fetch_status_name(FetchStatus s) {
   switch (s) {
     case FetchStatus::Ok: return "Ok";
@@ -185,18 +228,24 @@ FetchStatus open_request(const std::string& url, const std::string& credentialHe
   // another address, and that address is chosen by whoever answered -- which is the one party a
   // credential must not be handed to on request. Turned off at the handle rather than inspected
   // per hop, because an inspection is a decision that can be wrong.
+  //
+  // And checked. The return value used to be dropped, so a request that could NOT be told to
+  // stay put went out anyway with the credential on it -- the one case the option exists for.
+  // A credentialed request that cannot be pinned is not sent. A request with no credential is
+  // left as it was: it follows redirects that stay on https, which is how an artifact host is
+  // allowed to move its files.
   std::wstring headers;
   if (!credentialHeader.empty()) {
-    DWORD disable = WINHTTP_DISABLE_REDIRECTS;
-    WinHttpSetOption(request->h, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
+    if (!disable_redirects(request->h)) {
+      set_error(error, "could not disable redirects for a request carrying a credential (" +
+                           std::to_string(GetLastError()) + "); it was not sent");
+      return FetchStatus::ConnectFailed;
+    }
     headers = widen(credentialHeader);
     headers += L"\r\n";
   }
 
-  if (!WinHttpSendRequest(request->h,
-                          headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
-                          headers.empty() ? 0 : static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0,
-                          0, 0)) {
+  if (!send_request(request->h, headers)) {
     const DWORD err = GetLastError();
     // ERROR_WINHTTP_SECURE_FAILURE is the one worth naming: it means the certificate did not
     // check out, and the request stopped there rather than continuing.

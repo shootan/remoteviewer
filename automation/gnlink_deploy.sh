@@ -53,7 +53,11 @@ GNLINK_MANIFEST_SUBDIR="${GNLINK_MANIFEST_SUBDIR:-update-manifests}"
 # gnlink-owned on purpose. /opt/gnlink/backups is root-owned, so a backup written there fails --
 # and a backup step that fails silently is worse than none, because rollback then has nothing.
 GNLINK_BACKUP_SUBDIR="${GNLINK_BACKUP_SUBDIR:-manifest-backups}"
-GNLINK_PUBLIC_BASE="${GNLINK_PUBLIC_BASE:-https://rem.shotan.net}"
+# The product's one server (apps/native_poc/src/fixed_directory.hpp). Artifact urls in a
+# manifest must start with this, and the external check asks this address. A release that was
+# signed with urls under the former name (rem.shotan.net) is refused by the prefix check unless
+# GNLINK_PUBLIC_BASE says so -- those documents are immutable and are not re-signed.
+GNLINK_PUBLIC_BASE="${GNLINK_PUBLIC_BASE:-https://gnlink.shotan.net}"
 # ssh = the real thing. local = the same steps against a directory on this machine, which is how
 # the tests exercise ordering, idempotence and the failure paths without touching the NAS.
 GNLINK_REMOTE_MODE="${GNLINK_REMOTE_MODE:-ssh}"

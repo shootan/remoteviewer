@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The same two files as backup_rules.xml, for Android 12 and above: left out of cloud backup
+     and out of device-to-device transfer alike. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="gnlink_login.xml" />
+        <exclude domain="sharedpref" path="remote60_directory.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="gnlink_login.xml" />
+        <exclude domain="sharedpref" path="remote60_directory.xml" />
+    </device-transfer>
+</data-extraction-rules>

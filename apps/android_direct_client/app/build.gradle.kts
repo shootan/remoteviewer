@@ -3,6 +3,25 @@ plugins {
   id("org.jetbrains.kotlin.android")
 }
 
+val fixedDirectoryUrl = "https://gnlink.shotan.net"
+// Names the same server was signed in to under before the address was fixed, comma separated.
+// A session stored under one of these exact origins may be presented to fixedDirectoryUrl, and
+// the stored address is rewritten once the server has accepted it. Anything else is neither
+// sent nor erased. Keep in step with kMigratableDirectoryOrigins (fixed_directory.hpp).
+val migratableDirectoryOrigins = "https://rem.shotan.net"
+
+// A release that was handed the test property is refused rather than quietly built with the
+// fixed address: whoever passed it believes they are getting something else.
+gradle.taskGraph.whenReady {
+  val release = allTasks.any { it.project == project && it.name.contains("Release") }
+  for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins")) {
+    if (release && project.hasProperty(property)) {
+      throw GradleException(
+        "$property is for debug builds; a release build always uses $fixedDirectoryUrl")
+    }
+  }
+}
+
 android {
   namespace = "com.remote60.androiddirect"
   compileSdk = 34
@@ -19,6 +38,16 @@ android {
         cppFlags += "-std=c++20"
       }
     }
+
+    // The directory server: the one address this app signs in to, lists PCs from, connects
+    // through, uploads its log to and derives its update endpoint from. The sign-in screen has
+    // no field for it and nothing stored on the phone is read in its place.
+    //
+    // Written here and nowhere else. The debug build type below may replace it for a test; a
+    // release build cannot be given another one.
+    buildConfigField("String", "DIRECTORY_URL", "\"" + fixedDirectoryUrl + "\"")
+    buildConfigField("String", "DIRECTORY_MIGRATABLE_ORIGINS",
+      "\"" + migratableDirectoryOrigins + "\"")
 
     // Where updates come from, and the key that says a manifest is ours.
     //
@@ -45,6 +74,16 @@ android {
   }
 
   buildTypes {
+    debug {
+      // TEST BUILDS ONLY: -Pgnlink.testDirectoryUrl=http://10.0.2.2:18200 points a debug APK at
+      // a fixture directory. There is no such line under `release`.
+      (project.findProperty("gnlink.testDirectoryUrl") as String?)?.let {
+        buildConfigField("String", "DIRECTORY_URL", "\"" + it + "\"")
+        // A fixture has no former names unless the test names them.
+        buildConfigField("String", "DIRECTORY_MIGRATABLE_ORIGINS",
+          "\"" + (project.findProperty("gnlink.testMigratableOrigins") ?: "") + "\"")
+      }
+    }
     release {
       isMinifyEnabled = false
       proguardFiles(

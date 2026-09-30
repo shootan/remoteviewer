@@ -115,6 +115,21 @@ bool http_exchange(const std::string& host, uint16_t port, bool secure, const ch
     return true;
   };
 
+  // Nothing is followed. Every request here is to a directory's own API, which answers and does
+  // not redirect -- and the requests carry credentials: a bearer token or x-host-token in the
+  // headers, the host token in a heartbeat's body. WinHTTP follows a redirect by repeating the
+  // request at the new address, headers and (for 307/308) body included, and the posture above
+  // only stops that when the new address is not https. So a 3xx comes back as the status it
+  // is, for the caller to treat like any other answer that is not the one it asked for.
+  //
+  // Checked, not assumed: a request that cannot be told to stay put is not sent.
+  DWORD disabledFeatures = WINHTTP_DISABLE_REDIRECTS;
+  if (!WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures,
+                        sizeof(disabledFeatures))) {
+    out->error = "cannot disable redirects for this request";
+    return false;
+  }
+
   std::wstring headers;
   if (!body.empty() && contentType) {
     headers += L"Content-Type: ";

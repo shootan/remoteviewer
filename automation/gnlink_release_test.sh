@@ -182,7 +182,7 @@ for i, line in enumerate(arts):
         problems.append('%s size is not a number' % name)
     if not re.fullmatch(r'[0-9a-f]{64}', digest):
         problems.append('%s digest is not a sha256' % name)
-    if not url.startswith('https://rem.shotan.net/updates/0.2.134/'):
+    if not url.startswith('https://gnlink.shotan.net/updates/0.2.134/'):
         problems.append('%s url is %s' % (name, url))
 if problems:
     for p in problems:

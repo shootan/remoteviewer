@@ -151,6 +151,26 @@ target_link_libraries(remote60_native_video_host_clipsink PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the cached-sign-in migration: the same sources and libraries as
+# GNLinkStream, with the product's server and its former names replaced by loopback fixtures read
+# from the environment (REMOTE60_STREAM_TEST_SEAM, in directory_client.cpp and nowhere else). The
+# line that hands the list to the agent, in host_startup_connect.cpp, is the product's in both.
+# Its own output name, never packaged; automation/gnlink_check_fixed_server.py checks the shipped
+# GNLinkStream.exe carries none of it.
+get_target_property(_migration_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_migration_seam ${_migration_host_sources})
+set_target_properties(remote60_native_video_host_migration_seam PROPERTIES
+  OUTPUT_NAME "GNLinkStreamMigrationTest")
+target_include_directories(remote60_native_video_host_migration_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_migration_seam PRIVATE
+  REMOTE60_STREAM_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
 add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink
                  remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test)
@@ -578,6 +598,35 @@ add_dependencies(remote60_host_app
   remote60_secure_input_service
   remote60_gdi_capture_worker
 )
+
+# The same window in a build a test can start: every source GNLinkHost has, with the entry point
+# renamed and three things replaced through REMOTE60_HOST_TEST_SEAM -- the directory, host.json
+# and the streaming child. asInvoker, so a runner without elevation can start it and UI
+# Automation can reach it; it therefore cannot show requireAdministrator, UAC or UIPI. Nothing
+# ships this, and automation/gnlink_check_fixed_server.py checks the seam is not in what does.
+get_target_property(_host_ui_test_sources remote60_host_app SOURCES)
+list(FILTER _host_ui_test_sources EXCLUDE REGEX "host_app_main.cpp$")
+list(REMOVE_DUPLICATES _host_ui_test_sources)
+add_executable(remote60_host_app_ui_test WIN32
+  src/host_app_ui_test.cpp
+  ${_host_ui_test_sources}
+)
+set_target_properties(remote60_host_app_ui_test PROPERTIES OUTPUT_NAME "GNLinkHostUiTest")
+target_compile_definitions(remote60_host_app_ui_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_app_ui_test PRIVATE /utf-8)
+target_include_directories(remote60_host_app_ui_test PRIVATE src)
+target_link_libraries(remote60_host_app_ui_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+)
+if(MSVC)
+  target_link_options(remote60_host_app_ui_test PRIVATE
+    "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+  )
+endif()
 
 # One file the user can carry to another machine. It embeds the four product executables and
 # installs them under %ProgramFiles%\GNLink, which is the only place the LocalSystem input
@@ -1127,6 +1176,23 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
 
+# The cached-sign-in migration, run as a process: a real streaming host (the test-seam build
+# above) started the way GNLinkHost starts it, against fixture directories that record what they
+# were sent. What is judged is the requests each address received and the bytes of the cache.
+add_executable(remote60_host_migration_e2e_test
+  src/host_migration_e2e_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_migration_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_migration_e2e_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_migration_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_migration_e2e_test remote60_native_video_host_migration_seam)
+
 # Calling off a viewer that is already connecting, the way the shell does it. A real
 # GNLinkViewer against a scripted fake directory, cancelled with the same function the shell
 # calls, measured on how long it takes to stop and checked on why it says it stopped.
@@ -1374,6 +1440,10 @@ add_executable(remote60_update_http_test
 )
 target_include_directories(remote60_update_http_test PRIVATE src)
 target_link_libraries(remote60_update_http_test PRIVATE winhttp ws2_32)
+# Test-only seam: makes "disable redirects" report failure and counts the sends after it. Defined
+# for this target and no other -- automation/gnlink_check_fixed_server.py looks for its marker in
+# what ships.
+target_compile_definitions(remote60_update_http_test PRIVATE REMOTE60_UPDATE_HTTP_TEST_SEAM=1)
 if(MSVC)
   target_compile_options(remote60_update_http_test PRIVATE /utf-8)
 endif()
@@ -2117,6 +2187,39 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# The stored sign-in: the files, the lock, and what a sign-in, a return and a sign-out each leave
+# behind. The store and the flow are the product's; the directory is functions the test owns,
+# because a real one cannot be told to answer after a sign-out.
+add_executable(remote60_login_flow_test
+  src/login_flow_test.cpp
+  src/login_flow.cpp
+  src/login_credential_store.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_login_flow_test PRIVATE src)
+target_link_libraries(remote60_login_flow_test PRIVATE common ws2_32 crypt32)
+if(MSVC)
+  target_compile_options(remote60_login_flow_test PRIVATE /utf-8)
+endif()
+
+# Where a host token cached under another address goes: to the server when the address is a
+# listed former name of it (and the cache is rewritten only once accepted), nowhere when it is
+# not. Also that a redirect answered to a credentialed request is not followed. Counts what each
+# fixture directory received, because a credential sent to the wrong place still signs in.
+add_executable(remote60_directory_migration_test
+  src/directory_migration_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_directory_migration_test PRIVATE src)
+target_link_libraries(remote60_directory_migration_test PRIVATE common ws2_32)
+
 # The client's update check, through the production chain against a real socket. The check had
 # one call site, before sign-in, so it always answered "not configured" and never ran again --
 # a decision that lived where no test could reach it.
@@ -2471,6 +2574,8 @@ if(GNLINK_HAVE_WEBVIEW2)
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
+    src/login_credential_store.cpp
+    src/login_flow.cpp
     src/client_shell_bridge.cpp
     src/client_update_gate.cpp
     src/directory_session_client.cpp
@@ -2518,13 +2623,31 @@ if(GNLINK_HAVE_WEBVIEW2)
   list(FILTER _recovery_shell_sources EXCLUDE REGEX "client_shell_main.cpp$")
   list(REMOVE_DUPLICATES _recovery_shell_sources)
   add_executable(remote60_client_recovery_ui_test src/client_recovery_ui_test.cpp ${_recovery_shell_sources})
-  # Test-only seam: the shell's settings path moves into the fixture. Never defined for
-# GNLinkClient -- checked by grepping the shipped exe for the seam's own message. (RV-00)
+  # Test-only seam: the shell's settings path moves into the fixture, and the directory it talks
+# to becomes the fixture's. Never defined for GNLinkClient -- checked by grepping the shipped exe
+# for the seam's own message (RV-00, automation/gnlink_check_fixed_server.py).
 target_compile_definitions(remote60_client_recovery_ui_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+if(MSVC)
+  # The page's Korean is compared against literals in the test, and that file has no byte order
+  # mark to tell the compiler what it is.
+  target_compile_options(remote60_client_recovery_ui_test PRIVATE /utf-8)
+endif()
 target_include_directories(remote60_client_recovery_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   get_target_property(_recovery_shell_links remote60_client_shell LINK_LIBRARIES)
   target_link_libraries(remote60_client_recovery_ui_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_client_recovery_ui_test remote60_client_shell)
+
+  # Coming back signed in, in the client's own window: the same shell, the same seam, one start
+  # of the client per run. apps/directory/test/client_auto_login_runner.js strings the runs
+  # together around a real directory that it restarts, stops and slows down.
+  add_executable(remote60_client_auto_login_ui_test src/client_auto_login_ui_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_client_auto_login_ui_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_client_auto_login_ui_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_client_auto_login_ui_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_auto_login_ui_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_auto_login_ui_test remote60_client_shell)
 
   # The page is loaded from disk rather than compiled in, so it can be adjusted without a
   # rebuild; copied beside the executable so a build tree behaves like an install.
@@ -2760,7 +2883,8 @@ foreach(t
     remote60_abr_client_evidence_e2e_test remote60_bwe_observe_e2e_test remote60_control_resume_e2e_test
     remote60_fec_single_chunk_host_e2e_test remote60_host_control_deadline_e2e_test
     remote60_host_punch_reply_e2e_test remote60_host_two_dispatcher_e2e_test remote60_udp_control_e2e_test
-    remote60_viewer_release_all_e2e_test remote60_viewer_mouse_xbutton_e2e_test remote60_thumbnail_helper_e2e_test)
+    remote60_viewer_release_all_e2e_test remote60_viewer_mouse_xbutton_e2e_test remote60_thumbnail_helper_e2e_test
+    remote60_host_migration_e2e_test)
   target_link_libraries(${t} PRIVATE remote60_test_scratch_dir)
 endforeach()
 add_executable(remote60_e2e_staging_test src/e2e_staging_test.cpp)

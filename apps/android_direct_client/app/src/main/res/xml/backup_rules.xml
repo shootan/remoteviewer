@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    What a backup leaves out (Android 11 and below; data_extraction_rules.xml is the same list
+    for 12 and above).
+
+    gnlink_login.xml is the stored sign-in (KeystoreLoginVault). It is encrypted with a key that
+    never leaves this phone, so a copy restored elsewhere would not open - and a credential has
+    no business travelling in the first place.
+
+    remote60_directory.xml held a session in the clear in versions before this one. This
+    version removes it on first start; a backup taken before that start must not carry it.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="gnlink_login.xml" />
+    <exclude domain="sharedpref" path="remote60_directory.xml" />
+</full-backup-content>

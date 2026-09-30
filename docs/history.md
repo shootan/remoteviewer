@@ -12697,3 +12697,209 @@ Next
 - 반례 `e2e_staging_test`(신설): keep-dir 보존 · 정상 경로(파일·하위 디렉터리·**외부 sentinel 로 나가는 junction** 포함 → sentinel 생존) · 선점 디렉터리(다음 이름을 미리 만들어 둠 → 채택 않고 다른 이름, 그 내용 무접촉) · 시작점을 junction 으로 바꿔치기 → sentinel 생존 · 열린 파일로 제거 실패 → false + 이유, 해제 뒤 성공 · "없음" 의미(FILE/PATH_NOT_FOUND 만, 잘못된 이름은 없음 아님). sentinel 은 scratch 루트의 형제(빌드 디렉터리 안, 저장소 안)에 두고 시험이 직접 만들고 지움.
 - 검증(좁게): 위 반례 전부 PASS; host e2e 11종 각 1회 + keep-dir run + 포트 선택 실패 경로 — `%TEMP%` 의 remote60_* 항목이 **파일 단위로 전후 동일**(diff 없음), scratch 루트에 잔존 0, 전부 PASS. 로그 `.claude/r2proof/`(worktree).
 - 제품/테스트/문서: 제품 없음 / 테스트(`e2e_isolation.hpp` StagingDir·e2e_path_gone, `e2e_staging_test` 신설, host e2e 11종 스테이징 전환, CMake) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r3 (1차) — 서버 주소는 프로그램이 안다: 입력란 제거 · 고정 주소 · 옛 이름으로 저장된 자격의 이행
+
+- 목표(사용자 지시): PC 클라 · Host · APK 로그인 화면에서 서버 입력란을 없애고 `https://gnlink.shotan.net` 고정, 입력은 아이디·비밀번호만. 이미 설치된 기기(전부 `rem.shotan.net` 으로 등록)는 업데이트 뒤 다시 로그인하지 않아도 되게(A4). 자동 로그인(B, S2)은 2차 — 이 항목은 **자동 로그인 완료가 아니다**.
+- 고정 주소(A1): Windows 는 `fixed_directory.hpp` 의 `kFixedDirectoryUrl` 한 곳(클라·Host·Stream 공용), APK 는 `BuildConfig.DIRECTORY_URL` 한 곳. 옛 이름 목록도 그 옆 한 곳씩(`kMigratableDirectoryOrigins` / `DIRECTORY_MIGRATABLE_ORIGINS`), 현재 `https://rem.shotan.net` 하나.
+- 입력란 제거(A2): `shell.html` 의 #server·라벨 삭제, login 메시지에서 server 제거(네이티브는 메시지의 server 를 읽지 않음), 빈 칸이면 해당 칸으로 포커스. Host 는 Advanced 체크박스·Server edit·라벨·"Enter the server address" 분기 삭제(컨트롤 id 1001·1015·1019 는 비워 두고 나머지 id 유지). APK 는 `loginServerInput`·`login_server_hint`·`login_needs_server` 삭제, IME Next/Done 으로 제출.
+- 소비자(A3): 클라의 로그인·호스트 목록·connect·뷰어 자식(`--directory-url`)·로그 업로더·업데이트 endpoint 가 모두 `shell_directory_url()`, Host 는 `host_directory_url()`(로그인·스트리밍 자식·업로더·업데이트 endpoint), APK 는 `DirectoryClient.directoryUrl`. 저장값(`client.txt` 1행 · host.json `directoryUrl` · prefs `url`)은 **읽지 않는다.** `--ui-preview` 의 `http://127.0.0.1:8080` 대입도 삭제.
+- 저장 형식(A5): 세 파일 모두 형식 그대로, 주소 자리에는 고정 주소를 쓴다(이전 버전 롤백용).
+- 이행(A4): 저장된 origin 을 셋으로 나눈다 — **같음**(종전대로) / **옛 이름**(목록에 있는 정확한 origin: 토큰을 고정 주소에만 제시, **heartbeat 200(APK 는 `/api/hosts` 200) 뒤에만** 저장 주소를 고정 주소로 고쳐 씀, 401 은 종전 401 처리, 네트워크 실패·5xx·429·409 는 파일 무변경·다음 주기 재시도) / **그 밖**(보내지도 지우지도 않음, 로그인 필요). 한 함수 `classify_cached_origin`(Kotlin `classifyStoredOrigin`)을 Host 창·`HostAgent::LoadCache`·시험이 같이 쓴다. Host 창은 옛 이름이면 로그인된 화면으로 뜨고 **스스로 host.json 을 고쳐 쓰지 않는다**(고쳐 쓰는 것은 스트리밍 호스트의 첫 heartbeat 200). 그 밖의 origin 이면 host.json 은 로그인 성공 전까지 바이트 그대로(틀린 비밀번호 시도가 지우지 않음).
+- redirect(A4-5): 🔴 **고치기 전에는 자격이 따라갔다.** WinHTTP 는 https→https 교차 origin redirect 를 기본으로 따라가며 헤더를 다시 보낸다(변이 실측: 301/302/307/308 모두 redirect 대상이 Authorization·x-host-token 을 받음, 307/308 은 본문의 hostToken 도). `winhttp_transport.cpp` 의 모든 요청에 `WINHTTP_DISABLE_REDIRECTS`(설정 실패 시 요청을 보내지 않음) — 3xx 는 그 상태 코드로 돌아온다. 평문 http 소켓 경로는 원래 따라가지 않는다(시험으로 고정). APK `DirectoryClient`·`LogUploader` 에 `instanceFollowRedirects = false`. 업데이트 경로(`update_http.cpp`, `UpdateFlow.kt`)는 자격 요청의 redirect 를 이미 막고 있었다.
+- 시험 빌드(A6): 클라는 기존 `REMOTE60_SHELL_TEST_SEAM` 에 `gShellTestDirectoryUrl`(없으면 종료 97, fail closed). Host 는 신설 `REMOTE60_HOST_TEST_SEAM` + `GNLinkHostUiTest.exe`(`host_app_ui_test.cpp`): 제품 `host_app_main.cpp` 전체를 컴파일하고 주소·옛 이름 목록·host.json 경로·스트리밍 자식(stand-in)만 교체, manifest `asInvoker`. APK 는 debug 빌드 타입만 `-Pgnlink.testDirectoryUrl`, release 에 주면 Gradle 이 거부. 출하 exe 에는 주소를 바꾸는 인자·환경변수가 없다.
+- build gate: `automation/gnlink_check_fixed_server.py` — GNLinkClient/Host/Stream 에 고정 주소 문자열 있음, 네 exe 에 시험 스위치 문자열 없음, release APK 에 고정 주소 있음·서버 입력 리소스 없음. `--self-test` 는 실패해야 하는 파일 세트로 gate 자체를 시험.
+- 검증(세션: console, RDP 아님. 전부 격리 — `.claude/test-tmp` 의 fixture · loopback 서버 · test account, 실사용 `client.txt`/`host.json` mtime 은 09-23 그대로):
+  - ⑵ 제품 UI(product-equivalent test build): `client_recovery_ui_runner.js` exit 0, PASS 63 — 렌더된 입력 `account:text,password:password` 2개, #server 없음, `elementFromPoint` 가림 검사, 아이디+비밀번호+Enter → 실제 HTTP → 호스트 목록, `client.txt` 1행 = 프로그램 주소. `host_login_ui_runner.js` exit 0, PASS 38 — 입력 `ID|Password|This PC's name`, 서버·Advanced 없음, WM_SETTEXT + 버튼에 WM_LBUTTONDOWN/UP → signed-in, 재시작 시 입력 없이 signed-in, 옛 이름으로 저장된 캐시 → 입력 없이 signed-in.
+  - 부정 대조: 저장 파일·페이지 메시지·host.json 에 넣어 둔 decoy 주소가 받은 요청 **0**(decoy 는 자기 점검 요청 1건을 세는지 먼저 확인). 뷰어 stand-in 50개가 받은 `--directory-url` 전부 프로그램 주소.
+  - `directory_migration_test` exit 0, 66 checks — 분류 규칙, 제품 목록이 정확한 https origin, redirect 4종 × (WinHTTP POST/GET + 소켓 POST), 옛 이름 → 수락·캐시 재작성·옛 이름 요청 0, 그 밖 → **토큰 실린 요청 0**·파일 바이트 동일, 401 → 파일 무변경, 500·429 → 다음 주기에 같은 토큰 재시도·파일 무변경, 서버 죽음 → 파일 무변경.
+  - 변이(실제로 FAIL 하는지): 클라가 `client.txt` 1행을 쓰게 → 클라 runner exit 1; Host 가 아무 토큰이나 쓰게 → Host runner exit 1; allowlist 검사 제거 + redirect 허용 → `directory_migration_test` 22/66 FAIL("NO REQUEST CARRYING THE TOKEN…" 포함); APK redirect 허용 → `FixedDirectoryTest` FAIL. 전부 원복·해시 확인 뒤 재빌드·재통과.
+  - APK: JVM 단위 114/0(`FixedDirectoryTest` 10), `assembleDebug`/`assembleRelease` BUILD SUCCESSFUL, release + test property → BUILD FAILED(의도), gate exit 0. **기기·에뮬레이터 없음(adb devices 0, AVD 0) → 화면은 실기 대기.**
+  - 회귀: client_shell_bridge 30/0, client_update_flow 23/0, update_stop_process 113/0, directory_session_client 147/0, directory_http_contract 43/0, winhttp_tls_posture 8/0, winhttp_recovery PASS, update_credential_hops 40/0, log_upload PASS, directory_retry PASS. `client_update_ui_test` 는 26 PASS / 1 FAIL(exit 1) — 실패 1건은 "서명된 manifest 를 찾지 못함"(이 worktree 에 `.claude/rel` 없음, 릴리스 단계 전제)이고 이번에 바꾼 포커스 검사는 PASS.
+- 이 시험이 증명하지 못하는 것: 실제 `requireAdministrator`·UAC·UIPI, 실제 GNLinkStream 과 실제 서버, **TLS 아래의 redirect 차단**(옵션은 같은 요청 객체에 걸리지만 시험은 http loopback), Android 기기의 HTTP 클라이언트, **설치된 무인 Host 가 업데이트를 거쳐 이행되는 것**(격리 검증 / 실기 미검증), 물리 마우스·키보드 입력(메시지 수준 입력만).
+- 관찰(미수정): ① GNLinkStream 에 `REMOTE60_DIRECTORY_URL` 환경변수 fallback 이 있다(`host_startup_config.cpp:375`, 기존). GNLinkHost 는 항상 `--directory-url` 을 넘기므로 제품 경로에서는 읽히지 않는다 — 지시서가 `--directory-url` 은 그대로 두라고 해 손대지 않음. ② 이 PC 의 실제 `client.txt` 1행 `http://127.0.0.1:52762` 는 2026-09-23 03:25 `client_recovery_ui_test` 가 쓴 것(RV-00, 파일 mtime 일치). ③ 이미 설치된 구버전은 manifest 를 저장된 주소(rem)에서 받으므로 rem 이 닫히면 그 버전은 업데이트를 받지 못한다 — 이 버전이 깔린 뒤에 닫아야 한다.
+- 제품/테스트/문서: 제품(`fixed_directory.hpp` 신설, `client_shell_main.cpp`, `client_shell_bridge.*`, `ui/shell.html`, `host_app_main.cpp`, `directory_client.*`, `host_startup_connect.cpp`, `winhttp_transport.cpp`, `tools/ui_preview.cpp`, APK `build.gradle.kts`·`DirectoryClient.kt`·`LogUploader.kt`·`MainActivity.kt`·layout·strings) / 테스트(`client_recovery_ui_test.cpp`+runner, `host_app_ui_test.cpp`·`host_login_ui_runner.js`·`gnlink_host_login_uia.ps1` 신설, `directory_migration_test.cpp` 신설, `directory_fake_server.hpp` 요청 기록, `client_shell_bridge_test.cpp`, `client_update_ui_test.cpp`, `FixedDirectoryTest.kt` 신설, `gnlink_check_fixed_server.py` 신설, CMake) / 문서(이 항목, 구현계획).
+- 다음: A8(릴리스 도구 주소) 별도 commit → 검증용 검수 → B(S2) 설계 초안 `.claude/auto_login_design_r1.md`.
+
+### 2026-09-29 fixed-server r3 A8 — 릴리스 도구도 같은 주소를 쓴다
+
+- 목표(사용자 지시, r3): 릴리스 도구·미리보기의 주소를 `https://gnlink.shotan.net` 으로. 사용자는 앞으로 gnlink 만 열어 둘 계획.
+- 수정: `automation/gnlink_deploy.sh` 의 `GNLINK_PUBLIC_BASE` 기본값, `automation/gnlink_release_manifest.py` 의 `BASE_URL`(`…/updates`), `automation/gnlink_release_test.sh` 의 기대 prefix. `tools/ui_preview.cpp` 의 예시 주소는 A2 에서 인자 자체가 없어졌다(1차 commit). 배포 ssh 대상·이미 게시된 manifest/artifact·`docs/` 과거 기록은 그대로.
+- 회귀 `gnlink_deploy_test.sh`: fixture(0.2.109-r2)는 rem 주소로 **서명된** 문서라 고칠 수 없다 → 기존 케이스들은 그 문서가 만들어진 base(`FIXTURE_BASE`)를 명시해 게시한다.
+  - 🔴 **케이스 11 은 prefix 규칙을 본 적이 없었다.** URL 을 sed 로 바꾸면 서명이 깨져 `SignatureInvalid` 에서 멈춘다 — URL 과 base 를 비교하는 곳까지 가지 않는다(실측: `manifest REFUSED: SignatureInvalid`). 이제 치환이 실제로 일어났는지(moved=10 left=0)와 **어디서 거부됐는지**(서명, "is outside" 아님)를 단언한다.
+  - 케이스 12 신설: 아무것도 설정하지 않으면 base 는 `https://gnlink.shotan.net`; 서명이 온전한 rem 문서는 그 기본값에서 `artifact url is outside https://gnlink.shotan.net/updates/` 로 거부되고 업로드·게시 0. prefix 규칙이 실제로 도는 것은 이 케이스다.
+- 교차 호스트 업데이트(A8-6): manifest origin ≠ artifact origin. 결정 규칙은 제품 주소로 고정 — `directory_migration_test` `[update]` 5건(rem 에서 받은 manifest 의 자격은 gnlink artifact 에 가지 않음, 반대도), `FixedDirectoryTest` 1건(APK). 기존 근거: `directory_session_client_test.cpp:288`("but not to another host"), `DirectoryObserveTest.kt:344`. 다른 호스트의 artifact 로 업데이트가 끝까지 가는 것은 `update_release_test`(artifact 가 `updates.example`, 80/0). APK 는 artifact 요청에 자격을 아예 싣지 않는다(`UpdateFlow.kt:86` 은 manifest 요청만).
+  - ⚠️ 증명하지 못하는 것: **실제 두 호스트에 대한 TLS 요청.** `update_http` 는 http 를 거부하고 TLS 검증은 끌 수 없으므로 loopback fixture 로는 네트워크 수준 시험을 만들 수 없다. `update_credential_hops_test` 는 프로세스 간 자격 전달 채널 시험이지 이 경로가 아니다. 실제 게시·외부 확인은 검증용 몫.
+- 검증: `gnlink_deploy_test.sh` exit 0, PASS 57 / FAIL 0(`GNLINK_TEST_RELEASE` 로 main 의 `.claude/rel/0.2.109-r2` 를 복사해 사용, 읽기만). `gnlink_release_test.sh` exit 0, RESULT: ALL PASS (161 checks, 0 failed). ssh·curl 은 이 회귀가 대신하지 못한다.
+- 제품/테스트/문서: 제품(릴리스 도구 2: `gnlink_deploy.sh`, `gnlink_release_manifest.py`) / 테스트(`gnlink_deploy_test.sh`, `gnlink_release_test.sh`, `directory_migration_test.cpp`, `FixedDirectoryTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r4 1부 — 1차 출시 전 보수 3건 (검수 NEEDS_CHANGES)
+
+- 근거: 검증용 검수 + Codex 검토(`466aeb9`). 1차 범위(A1~A8·A4)는 닫혔고, 이 항목은 그 위의 보수다.
+- ① **자격 있는 업데이트 요청이 redirect 차단 실패를 무시했다**(`update_http.cpp`, 기존 코드). `WinHttpSetOption(WINHTTP_DISABLE_REDIRECTS)` 의 반환값을 버리고 자격 헤더를 붙여 보냈다. 이제 설정 실패면 **보내지 않고** `ConnectFailed` + "could not disable redirects … it was not sent"(메시지에 자격 없음). 무자격 요청(artifact 다운로드)의 redirect 정책은 그대로.
+  - 반례(`update_http_test`, `REMOTE60_UPDATE_HTTP_TEST_SEAM`): 옵션 실패 주입 → `WinHttpSendRequest` **0회**(text·file 둘 다, 파일 미생성). 대조: 주입 없으면 1회, 무자격 요청은 주입돼도 1회. seam 은 그 한 호출의 실패 보고와 송신 계수만 바꾼다.
+- ② **실제 GNLinkStream 의 이행 배선 e2e**(`host_migration_e2e_test`). `GNLinkStreamMigrationTest.exe` = GNLinkStream 의 전 소스 + `REMOTE60_STREAM_TEST_SEAM`(`directory_client.cpp` 한 곳: 제품 주소·옛 이름 목록을 환경변수의 loopback fixture 로, 없으면 종료 97). `host_startup_connect.cpp` 의 배선 줄은 두 빌드에서 같다. 호스트는 GNLinkHost 가 만드는 것과 같은 인자(url·id·host-name, **비밀번호 없음**)로 기동.
+  - 옛 이름 캐시 + 토큰 → **재등록 없이** heartbeat 1회(토큰 실림) · `directory online` · 캐시 주소가 서버 주소로 · 토큰/계정/hostId 동일 · 옛 이름 주소 요청 0.
+  - 미등록 origin → 토큰 실린 요청 0(서버 요청 0건) · heartbeat/register 0 · 캐시 바이트 동일 · "no cached host token".
+  - 401 → 토큰 1회 제시 뒤 재제시 없음 · 캐시 무변경 · online 아님.
+  - 서버 불통 → 다음 주기 재시도(`dir-cycle n=2`) · 캐시 무변경 · 옛 이름으로 대신 가지 않음.
+  - 부정 대조: 배선 줄을 뺀 빌드 → exit 1, 8/33 FAIL(`[carried] THE HOST SENT A HEARTBEAT… heartbeats: 0` 포함). 원복·해시 확인 뒤 재빌드 33/0.
+- ②-b **e2e 가 찾은 것: 401 뒤 "재인증 필요"가 창에 닿지 않았다.** GNLinkHost 창은 자식 출력의 `directory …` 줄에서 상태를 읽는데, 에이전트는 online 일 때만 그 줄을 찍었다. 토큰이 거부돼도 창은 마지막으로 읽은 `agent started url=…` 을 NOT REACHABLE 아래 보여 줬고 `needs_sign_in_again` 은 참이 될 수 없었다(이행과 무관한 기존 결함, 이행의 401 경로가 여기로 떨어진다). `HostAgent::Run` 이 "token rejected" / "registration needs" 상태를 **발생마다 한 번** `[native-video-host] directory <상태>` 로 출력한다. e2e 가 그 두 줄을 단언. ⚠️ 창이 그 줄을 읽어 SIGN IN AGAIN 배지를 띄우는 것까지는 실행으로 보지 않았다(Host UI 시험의 스트리밍 자식은 stand-in).
+- ③ **표현 정정**: "출하 exe 에 주소 override 가 없다"는 directory(로그인·목록·connect·로그 업로드)에만 참이다. `REMOTE60_UPDATE_MANIFEST_URL` / `BuildConfig.UPDATE_MANIFEST_URL`(무자격 업데이트 목적지)과 GNLinkStream 의 `REMOTE60_DIRECTORY_URL` fallback 은 제품 동작으로 남아 있다 — `fixed_directory.hpp` 주석과 gate 설명을 그 범위로 고쳤다(동작 변경 없음). 위 1차 항목의 "출하 exe 에는 주소를 바꾸는 인자·환경변수가 없다"도 이 범위로 읽는다.
+- gate 확장: 표식 `stream-test-seam` · `GNLINK_STREAM_TEST_` · `update-http-test-seam` 추가, 대상에 `GNLinkUpdater.exe` 추가. 시험 빌드를 제품 이름으로 놓은 세트 → exit 1(GNLinkStream 2건, GNLinkUpdater 1건 검출). ⚠️ update-http seam 의 표식은 처음에 링커가 지워 검출되지 않았다 — 참조되게 고친 뒤 검출 확인.
+- 검증(console 세션, 격리): `update_http_test` exit 0 (44/0) · `host_migration_e2e_test` exit 0 (33/0, `REMOTE60_ALLOW_HOST_E2E=1`) · `directory_migration_test` exit 0 (71) · `directory_retry_test` exit 0 (122/0) · `update_check_test` 28/0 · `update_release_test` 80/0 · `client_update_flow_test` PASS · `host_login_ui_runner` exit 0 · `client_recovery_ui_runner` exit 0 · gate exit 0 (8) · gate self-test exit 0 (13). 실사용 `host.json` mtime 09-23 그대로.
+- 증명하지 못하는 것: TLS, 실제 서버·실제 옛 이름, 설치된 무인 Host 가 업데이트를 거쳐 이행되는 것(실기), 창의 SIGN IN AGAIN 배지 표시.
+- 제품/테스트/문서: 제품(`update_http.cpp`, `directory_client.cpp`(상태 출력 + test seam), `fixed_directory.hpp` 주석) / 테스트(`update_http_test.cpp`, `host_migration_e2e_test.cpp` 신설, `GNLinkStreamMigrationTest` 타깃, `gnlink_check_fixed_server.py`, CMake) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r4 2부 (1/4) — 서버: 기기 자격으로 세션을 다시 얻는다
+
+- 목표: 자동 로그인(S2). 비밀번호를 저장하지 않고, 서버 재시작·12 h 만료 뒤에도 입력 없이 세션을 얻는다. 이 항목은 **서버만**이다 — 클라가 쓰기 전에는 사용자에게 보이는 변화가 없다. **배포하지 않았다.**
+- 설계 정본: `.claude/auto_login_design_r1.md` + `auto_login_debate_2026-09-29.md` "검증용 결론" + r4 2부 확정 10건.
+- 모델: 명시적 로그인이 `device:{kind,label}` 를 실으면 **계열** 하나를 새로 만든다 — `deviceId` · `deviceCredential`(세션과 다음 자격으로만 교환, 쓸 때마다 회전) · `revokeToken`(폐기 전용, **계열 동안 고정**). 저장소(`store.devices`)에는 해시만.
+- route: `POST /api/session/refresh` · `POST /api/session/logout`(세션 또는 revokeToken) · `GET /api/devices` · `POST /api/devices/revoke`. `device` 없는 `/api/login` 응답은 키·순서까지 종전과 같다.
+- 규칙(`device_credentials.js`, 시계·난수를 인자로 받는 순수 함수):
+  - 수명 90일 sliding, 세션 12 h 그대로. 직전 자격은 60 s·1회 유예 — **기한과 남은 횟수가 저장소에 있다**(재시작으로 다시 열리지 않음).
+  - **서버가 실제로 발급했던 해시**(계열당 최근 32개)가 다시 오면 그 계열을 폐기. **발급한 적 없는 값은 401 뿐**이고 아무것도 끝내지 않는다 — deviceId 만 아는 사람이 남을 로그아웃시킬 수 없다. 틀린 값은 기기·상대별로 지연되지만 **맞는 값은 먼저 검사**하므로 남의 추측이 주인을 막지 못한다.
+  - 응답 연속 유실: 같은 옛 자격의 세 번째 제시는 재사용 → 폐기 → 재로그인(허용된 복구). 로그는 유실과 도난을 구분했다고 쓰지 않는다.
+  - 폐기의 효력: logout / revoke / 재사용 폐기는 그 계열이 발급한 **기존 Bearer 세션도 끝낸다**(삭제 + 조회 시 재검사, 두 겹).
+  - 순서: 메모리 변경 → **저장** → 세션 종료·응답. 저장 실패는 메모리를 되돌리고 503.
+  - 소유: 목록·폐기는 요청 계정의 기기만. 남의 deviceId 는 없는 기기와 **같은 응답**(404).
+  - 계정당 계열 32개, 끝난 계열은 30일 뒤 삭제.
+- 검증(격리: 실제 `server.js` 를 프로세스로, OS 가 고른 포트, `.claude/test-tmp` 의 store·로그):
+  - `device_credentials_unit_test.js` exit 0, 27 checks — 유예 60 s 경계, 재시작 뒤 유예 상태, 90일 sliding, 발급 이력 상한, 옛 계열 revokeToken 이 새 계열에 무효.
+  - `device_credential_test.js` exit 0, 83 checks — 옛 클라 응답 형태 / 저장 뒤 응답 / **재시작 뒤 자격으로 세션 획득** / 유실 1회 회복·2회 폐기 / 추측은 폐기 안 함·주인은 막히지 않음 / hostToken↔기기 자격↔revokeToken↔세션 교차 거부 / 로그아웃(세션·revokeToken)과 복수 세션 무효화 / 한 대만 폐기 / 남의 계정 / 저장 실패 시 store 바이트 동일·세션 유지·회전 안 됨 / **옛 서버(6e5cd70)가 `devices` 를 보존**(실행: 옛 서버로 기동 → host register 로 저장 → `devices` JSON 동일 → 새 서버에서 같은 자격으로 refresh 200) / 발급한 모든 비밀(자격·revokeToken·세션·hostToken·비밀번호)이 scratch 의 어떤 파일에도 없음.
+  - 변이 8종 + 조합 1: 저장 실패 시 되돌리지 않음 · 저장 전에 응답 · 추측을 재사용으로 · 계정 검사 제거 · 자격을 로그에 출력 · 유예 무제한 → 각각 exit 1. 세션 삭제와 조회 시 재검사는 **하나씩 빼면 통과**(서로 덮는다) — 둘 다 빼면 exit 1(4건 FAIL). 전부 원복·해시 확인.
+  - 기존 서버 회귀 `node test/run.js` exit 0, `RESULT: ALL PASS`.
+- 한계: 32회보다 오래전에 발급된 자격은 "모르는 값"으로 읽힌다(401, 폐기 없음). 실패 지연의 키는 기기+상대 주소라 프록시 뒤에서는 상대가 모두 같은 주소다. TLS·프록시·실제 서버는 이 시험에 없다. 비밀번호 변경 route 는 아직 없어 "변경 시 전 기기 폐기"는 구현되지 않았다.
+- 배포(검증용 + NAS 세션, 이 작업에서는 하지 않음): **서버 먼저 → 클라.** 올릴 파일에 `device_credentials.js` 가 **추가**된다(`server.js` · `update_manifest.js` · `version_compare.js` · `wake_target.js` · `package.json` 과 함께) — 빠지면 `MODULE_NOT_FOUND`. 재시작 필요. 롤백: 옛 서버로 되돌려도 store 의 `devices` 는 보존되고, 자격을 가진 클라는 refresh 404 를 "이 서버는 못 한다"로 읽어 비밀번호 로그인으로 돌아간다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `device_credentials.js` 신설) / 테스트(`device_credentials_unit_test.js`·`device_credential_test.js` 신설, `test/run.js`) / 문서(`apps/directory/README.md`, 이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (2/4) — PC 클라: 로그인한 채로 돌아온다
+
+- 목표: 한 번 로그인하면 GNLinkClient 를 껐다 켜도, 서버가 재시작됐어도 **입력 없이** PC 목록으로. 로그아웃하면 다음 실행은 로그인 화면. 비밀번호는 저장하지 않는다.
+- 저장(`login_credential_store.*`, client.txt 옆): `login.cred`(서버 origin·계정·deviceId·기기 자격·revokeToken, **DPAPI user scope** + 전용 entropy) · `login.cred.revoke`(서버에 아직 알리지 못한 로그아웃, 유계 16건, 같은 보호) · `login.cred.gen`(영속 generation) · `login.cred.lock`. 쓰기는 임시 파일 → `MoveFileEx`. 읽지 못하는 파일은 지우지 않고 로그인 화면.
+- 직렬화: **자격 저장소 전용 배타 파일 잠금**(공유 0 으로 연 파일 — 같은 파일에 닿는 모든 프로세스·로그온 세션에 같은 잠금, 프로세스가 죽으면 풀림). 대기는 유계(8 s), worker 에서만.
+- 흐름(`login_flow.*`, directory 호출은 함수로 주입):
+  - 돌아오기 = 잠금 → **다시 읽기** → refresh → 새 자격 원자 저장 → 해제. 401 만 자격을 지운다. 429·5xx·불통은 보존(1 s·4 s·15 s 뒤 재시도, 그동안 폼은 쓸 수 있고 끝나면 "다시 시도" 버튼). 404/405 는 옛 서버 — 보존하고 로그인 화면. 다른 origin 의 자격은 보내지도 지우지도 않는다.
+  - 로그인 = generation 올림 → `/api/login` 에 `device` 실어 요청 → 응답 때 generation 이 그대로면 저장. 아니면(그 사이 로그아웃·다른 로그인, **다른 프로세스 포함**) 저장하지 않고 **방금 발급된 기기를 폐기**, 세션도 쓰지 않는다. 새 로그인은 새 계열이고 이전 계열은 폐기 대상으로 기록.
+  - 로그아웃 = generation 올림 → **폐기 표식 기록 → 자격 삭제**(잠금 안) → 서버 폐기. 서버에 닿지 않으면 표식이 남아 다음 시작·다음 로그인 때 마저 보낸다. 표식이 있는 자격은 자동 로그인에 쓰지 않는다.
+  - 세션 중 401(12 h·서버 재시작) → 돌아오기 1회 → 실패면 로그인 화면.
+- 화면(`shell.html`): 시작 시 "저장된 로그인으로 접속하는 중" → 목록. 실패면 메시지 + `#retryAuto`. 아이디 칸은 유지.
+- 🔴 **e2e 가 찾은 결함**: 자동 로그인 시작이 epoch 을 올리는데 `restore` 메시지는 그 **전에** 게시돼 stale 로 버려졌다 → 로그아웃 뒤 폼의 아이디 칸이 비었다. `ready` 처리에서 자동 로그인 시작을 게시보다 앞으로.
+- 로그: 자격·revokeToken·세션은 어떤 줄에도 없다. 기기는 id 앞 8자로만.
+- 한계: DPAPI 는 다른 Windows 사용자·디스크 복사를 막는다. **같은 사용자 권한의 프로세스는 풀 수 있다.** 저장 직전 크래시는 재로그인으로 복구(서버가 회전했는데 저장 못 한 경우 유예 60 s·1회).
+- 검증은 (4/4) 항목.
+- 제품/테스트/문서: 제품(`login_credential_store.*`·`login_flow.*` 신설, `client_shell_main.cpp`, `client_shell_bridge.*`, `directory_session_client.*`, `ui/shell.html`, CMake 의 클라 소스 2줄) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (3/4) — APK: 세션은 메모리에만, 자격은 Keystore 로
+
+- 목표: PC 클라와 같은 규칙. 그리고 **평문 세션 토큰 저장을 없앤다.**
+- `LoginFlow.kt`(순수 Kotlin, vault·directory 가 인터페이스) = PC 의 `login_flow` 와 같은 트랜잭션·같은 결과 분류. 앱은 프로세스가 하나라 잠금은 앱 안 `ReentrantLock`(유계 `tryLock`), generation 은 vault 에 영속.
+- `KeystoreLoginVault.kt`: prefs `gnlink_login` 에 Android Keystore AES-GCM 키(alias `gnlink.login.v1`, 사용자 인증 불요)로 암호화한 자격·폐기 표식. 쓰기는 `commit()`. 키가 없거나 복호화 실패면 Unreadable → 로그인 화면.
+- 세션: `DirectoryClient.session()` 메모리 전용. `saveSession`/`clearSession`/`savedSessionToken` 삭제. 이전 버전이 남긴 평문 세션은 시작 때 한 번 `takeLegacySession` — 만료 전 + origin 이 고정 주소 또는 옛 이름일 때만 메모리로 옮기고, **저장된 사본은 어느 경우든 지운다.** 그렇게 옮긴 세션에는 기기 자격을 발급하지 않는다(명시 로그인 때만).
+- 백업 제외: manifest `fullBackupContent`·`dataExtractionRules` → `gnlink_login.xml`, `remote60_directory.xml` 을 cloud backup·device transfer 에서 제외.
+- 화면: 저장된 로그인으로 접속 중 → 목록 / 실패 시 메시지 + `loginRetryButton`. 로그아웃은 표식 → 삭제 → 서버 폐기.
+- 검증은 (4/4). ⚠️ **기기·에뮬레이터가 없어 Keystore·화면·프로세스 종료 뒤 복귀는 실행하지 못했다 — 실기 대기.**
+- 제품/테스트/문서: 제품(`LoginFlow.kt`·`KeystoreLoginVault.kt` 신설, `DirectoryClient.kt`, `MainActivity.kt`, layout, strings, manifest, `res/xml/backup_rules.xml`·`data_extraction_rules.xml`) / 테스트 없음(4/4) / 문서(이 항목).
+
+### 2026-09-29 fixed-server r4 2부 (4/4) — 시험·gate: 자동 로그인의 반례
+
+- 환경: console 세션(RDP 아님), 비관리자, 전부 격리(`.claude/test-tmp`, loopback, test account). 실사용 `client.txt`·`host.json` mtime 09-23 그대로, 실사용 프로필에 `login.cred` 없음.
+- ⑵ 제품 UI(product-equivalent test build) `client_auto_login_runner.js` exit 0, **176 checks** — `client_auto_login_ui_test`(제품 `client_shell_main.cpp` 전체 + 같은 `shell.html`, 다른 것은 설정·자격 경로와 서버 주소) 의 **실행 1회 = 클라 시작 1회**, 실제 `server.js`:
+  1 첫 시작 → 폼 → 아이디+비밀번호 → 목록, 서버에 windows-client 기기 1개, 디스크 파일에 발급값·비밀번호 없음 / 2 다시 시작 → **입력 없이 목록** / 3 서버 재시작 뒤 시작 → 입력 없이 목록 / 4 클라가 열린 채 서버 재시작 → 새로 고침에 세션 교체, 목록 유지 / 5 창 2개 동시 시작 → 둘 다 목록, **기기 폐기 안 됨** / 6 서버 죽은 채 시작 → 폼 사용 가능·재시도 버튼·자격 보존 → 서버 기동 뒤 버튼으로 목록 / 7 다른 세션에서 그 기기 폐기 → 폼 + "다시 로그인", 자격 삭제 / 8 로그인(새 계열) → 로그아웃 → 서버에 `signed out` 으로 폐기, 디스크 비움, **다음 시작은 폼** / 9 서버 죽은 채 로그아웃 → 자격 삭제·표식 남음 → 서버 기동 뒤 시작: 폼, 그 시작이 서버에 폐기를 알림 / 10 한 창의 로그인 응답을 서버가 붙잡은 사이 다른 창이 로그인·로그아웃 → **늦은 응답은 로그인시키지 못함**, 저장 0, 두 기기 모두 폐기 / 11 서버가 내준 모든 값(40개)과 비밀번호가 클라 로그·서버 로그·업로드된 로그·store 어디에도 없음.
+- `login_flow_test` exit 0, 72 checks — 파일에 평문 없음, 손상·잘림·다른 entropy → Unreadable, **다른 프로세스가 쥔 잠금**(자식 프로세스) 과 그 프로세스가 죽은 뒤 해제, 두 호출 동시 → 둘째는 첫째가 방금 저장한 자격을 제시, 늦은 응답 4종(같은 프로세스·다른 프로세스·서버 불통·두 로그인), 오프라인 로그아웃과 정산, 로그 줄에 비밀 없음.
+- 변이(`login_flow_test`): 표식 무시 · generation 무시 · 무응답에 자격 삭제 · origin 무시 · 로그에 세션 출력 · 로그아웃 표식 생략 · 잠금 공유 · 평문 저장 → 8종 모두 exit≠0. (시험 삼아 넣은 "잠금 전에 읽기" 변이는 동작을 바꾸지 못하는 빈 변이였다 — 목록에서 뺐다.)
+- APK: JVM 단위 143/0(`LoginFlowTest` 28 — PC 와 같은 반례 + 평문 세션 이행 판정 + 소스에 세션 저장 없음·비밀번호 인자 없음·백업 제외·재시도 버튼). `assembleDebug`/`assembleRelease` BUILD SUCCESSFUL.
+- gate: release APK 에 Keystore alias·prefs 이름·두 route 가 있고 백업 제외 규칙이 manifest·리소스에 있음(5 checks, exit 0). 부정 대조: 게시된 0.2.23 APK → exit 1(4 FAIL). Windows 는 종전 8 checks exit 0 — 자격 경로를 바꾸는 길은 기존 shell test seam 하나이고 그 표식은 이미 검사 대상.
+- 회귀: `client_recovery_ui_runner` exit 0(64, 자동 로그인 확인이 끝난 뒤의 폼을 검사하도록 대기 추가) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` PASS · `directory_session_client_test` PASS.
+- 검증용 요청 반영(`review_466aeb9_verifier.md`): `gnlink_host_login_uia.ps1` 이 버튼이 가려진 **그 순간** 가린 창의 hwnd·class·title·pid·exe 를 남긴다.
+- 증명하지 못하는 것: GNLinkClient.exe 자체(시험 빌드는 같은 소스·같은 page, 다른 exe), TLS·실제 서버, 12 h 경과(서버 재시작으로 대신), 다른 Windows 사용자·다른 로그온 세션, 쓰기 도중 전원 차단, **APK 의 Keystore·화면·기기 재시작**, 물리 입력.
+- 제품/테스트/문서: 제품 없음 / 테스트(`login_flow_test.cpp`·`client_auto_login_ui_test.cpp`·`client_auto_login_runner.js`·`LoginFlowTest.kt` 신설, `client_recovery_ui_test.cpp`, `client_shell_bridge_test.cpp`, `gnlink_check_fixed_server.py`, `gnlink_host_login_uia.ps1`, CMake 시험 타깃) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r5 — 영속 기록이 실패하면 그 다음 단계로 가지 않는다 (PC 클라·APK)
+
+- 반려(r5, Codex `6e4764a` 검토) 6건은 한 원인이었다: **쓰기의 반환값을 버렸다.** 카운터·폐기 표식·자격 각각이 다음 단계를 안전하게 만드는 기록인데, 실패해도 다음 단계로 갔다. 이제 어느 것도 버리지 않는다. 서버(`d34f6e5`)는 건드리지 않았다.
+- ① 카운터(generation)를 쓰지 못하면: 로그아웃은 **하지 않고** 그렇다고 말한다(자격·표식·서버 모두 그대로). 로그인은 시작하지 않는다. 늦게 도착한 로그인 응답은 저장되지 않는다 — `remember_sign_in` 이 저장 전에 카운터를 한 번 더 쓰고, 그것이 실패하면 저장하지 않는다. come_back 의 표식·401 삭제도 카운터를 쓴 뒤에만 한다.
+- ② 폐기 표식을 쓰지 못하면 자격을 지우지 않는다(그 자격이 기기를 끝낼 유일한 수단). 서버가 그 기기를 끝냈다고 확인해 줄 때만 지운다. 로그인이 앞 자격을 대체할 때도 같다 — 표식을 못 쓰면 서버에 먼저 알리고, 그것도 안 되면 새 자격을 저장하지 않는다. 사용자에게: "로그아웃을 완료하지 못했습니다 … 다음 실행 때 다시 로그인될 수 있습니다 …".
+- ③ 폐기 목록: 읽을 수 없음 ≠ 비어 있음. 읽을 수 없으면 덮어쓰지 않고, 저장된 자격을 제시하지 않으며, 정산은 "남음 1" 로 답한다. 가득(16) 차면 **아무것도 밀어내지 않고** 추가를 거부한다(→ 그 로그아웃은 ②의 규칙). 사용자가 직접 로그인할 때만 읽을 수 없는 목록을 옆으로 치워(`login.cred.revoke.unreadable-N` / APK `owed.unreadable`) 새로 시작한다.
+- ④ 로그아웃의 404/405 는 기기가 끝난 것이 아니다 — 표식을 남기고, 그 route 가 있는 서버가 돌아오면 보낸다. 401 은 종전대로 끝.
+- ⑤ 저장소를 쓸 수 없으면 자격 없는 로그인으로 대신하지 않는다(PC `begin_login`, APK `performLogin` 의 폴백 삭제). 발급 없음(NotIssued) 응답도 generation 을 확인하고, 앞 계정의 저장 자격은 표식 후 지운다(A→B 로 로그인했는데 다음 실행이 A 로 돌아오던 반례).
+- ⑥ 401 복구의 `come_back` 은 이 창/화면이 보여 주는 계정의 자격만 제시한다(`onlyForAccount` → `OtherAccount`): 다른 창이 다른 계정으로 로그인한 뒤에는 "다른 계정으로 로그인했습니다. 다시 로그인해 주세요." PC 클라는 로그인 응답 뒤 목록이 실패하거나 창이 이미 다른 일로 넘어갔으면 발급된 기기를 끝낸다(`discard_sign_in`).
+- 시험(각 항목 반례): `login_flow_test` exit 0, **116 checks**(r5 44 — 경로를 디렉터리로 막아 카운터·표식 쓰기를 실제로 실패시킨다) · `LoginFlowTest` 38/0(r5 10) · 단위 13 클래스 failures 0.
+- 변이(결함을 하나씩 되돌림): C++ 7종(404=끝 · 로그아웃이 카운터 실패 무시 · 표식 없이 삭제 · generation 전에 NotIssued · 계정 무시 · 읽을 수 없는 목록=빈 목록 · 저장 전 카운터 실패 무시) 모두 FAIL 로 exit 1. Kotlin 같은 7종 모두 "38 tests completed, 1~2 failed". ⚠️ 첫 Kotlin 실행은 `gradlew.bat` 을 찾지 못한 exit 1 을 "죽음" 으로 셀 뻔했다 — 테스트가 실제로 실패한 것만 세도록 고쳐 다시 돌렸다.
+- 회귀(console 세션, 비관리자, 격리): `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(PASS 65) · `host_login_ui_runner` exit 0(38) · `client_shell_bridge_test` exit 0 · `directory_session_client_test` exit 0 · APK 단위 153/0 · `assembleRelease` 성공 · gate Windows 8 / APK 5 / self-test 13 모두 exit 0. 실사용 `client.txt`(09-23)·`host.json`(09-29 18:38, r5 가 적은 0.2.144 실기 재기록) 해시 전후 동일, `login.cred` 없음.
+- ⚠️ r5 의 새 사용자 문구(로그아웃 미완료·다른 계정·저장소 없음)는 흐름 시험으로만 확인했고, 제품 창에서 그 상태를 만들어 보지는 않았다.
+- 증명하지 못하는 것: 실제 디스크 가득·권한 거부(경로를 디렉터리로 막아 대신), APK 의 Keystore·SharedPreferences 쓰기 실패(JVM vault 로 대신 — 기기 없음), 두 창 두 계정의 실제 UI(흐름 시험으로 대신).
+- 제품/테스트/문서: 제품(`login_credential_store.{hpp,cpp}`, `login_flow.{hpp,cpp}`, `client_shell_main.cpp`, `LoginFlow.kt`, `KeystoreLoginVault.kt`, `MainActivity.kt`, strings 2) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 fixed-server r6 — 늦은 로그아웃 응답·Activity 재생성·빈 자리의 손상 목록 (PC 클라·APK) + Host UI 시험의 가림 판정
+
+- 반려(r6, Codex `e7e5037` 확인 + 검증용 동의) 3건 + 시험 1건. 서버 무변경.
+- ① 표식을 못 쓴 로그아웃은 잠금을 놓고 서버에 먼저 알린다. 그 사이 다른 창이 계열 B 를 저장하면, 돌아온 응답이 **B 를 지우던** 것을 막았다: 다시 잠근 뒤 **저장된 것이 여전히 A(origin·deviceId)일 때만** 지운다. 아니면 A 는 서버에서 끝났고 디스크에도 없으므로 완료로 보고 B 는 그대로 둔다. generation 은 판정에 쓰지 않았다 — 다른 창이 로그인을 시작만 해도 카운터가 움직이지만 그때 A 는 여전히 지워야 한다(`login_flow.cpp`, `LoginFlow.kt`).
+- ② APK: 세션과 그 소유 계정을 `DirectoryClient` 의 한 값(`Held(token, accountId)`)으로 함께 두어 같은 수명(프로세스)으로 만들었다. Activity 필드 `sessionAccountId` 삭제 → 재생성된 Activity 도 401 복구에 계정을 넘긴다. 옛 버전에서 옮겨 온 평문 세션은 계정이 기록돼 있지 않아 빈 값(추정하지 않음).
+- ③ 읽을 수 없는 폐기 목록을 옆으로 치우는 일을 "이전 자격이 있을 때" 조건에서 떼어 냈다 — 로그아웃으로 자격이 없는 상태에서도 명시 로그인 1회로 목록이 복구되고 다음 시작이 자동 로그인된다.
+- ④ `gnlink_host_login_uia.ps1`: 누르기 전에 시험 창을 포커스 없이 최상위로 올린다(끝나면 되돌림). 그래도 **다른 프로세스의 창**이 버튼을 가리면 FAIL 이 아니라 **INVALID(exit 3)** + 그 창의 hwnd·class·title·pid·exe. 자기 프로세스의 창이 가리면 종전대로 FAIL. `host_login_ui_runner.js` 는 exit 3 을 받아 전체를 INVALID(exit 3)로 끝낸다. 사용자 창은 옮기거나 닫지 않는다. (원인: 검증용 20:02 실행에서 버튼 위 창 = GMux.)
+- 시험: `login_flow_test` exit 0, 124 checks(r6 8) · APK 단위 156/0(`LoginFlowTest` 41, r6 3) · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(176) · `client_recovery_ui_runner` exit 0(65) · `host_login_ui_runner` exit 0(38) · bridge 0 · session 0 · gate win 8 / apk 5 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이: C++ 3종(목록 확인 없이 삭제 · 재확인 없이 실패 처리 · 이전 자격 있을 때만 치움) · Kotlin 3종(같은 둘 + 세션에 계정 안 붙임) 모두 실제 시험 실패로 kill.
+- 부정 대조(④): 시험 창 위를 30 ms 마다 다시 덮는 자체 decoy 창(다른 프로세스) → runner exit 3 INVALID, 가린 창 신원 출력 확인. decoy 없이 같은 빌드는 exit 0.
+- 증명하지 못하는 것: APK Activity 재생성 자체(기기 없음 — JVM 에서 DirectoryClient 값의 수명과 복구 흐름, 그리고 Activity 에 사본이 없음을 소스로 확인), 실제 두 창 동시 실행 UI.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`, `DirectoryClient.kt`, `MainActivity.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`, `gnlink_host_login_uia.ps1`, `host_login_ui_runner.js`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (1/2) — 서버: 계정 상태와 관리 창구 (Account Admin API v1)
+
+- 요구: `.claude/account_admin_prompt_2026-09-29.md` + 공통 규격 `account_admin_contract_v1.md`(GMux·IdleFirst 공통 — 경로·응답·상태 이름 그대로). 지시서 `task_account_admin_r1.md`.
+- `accounts.js`(신설): `store.accounts` 를 읽고 쓰는 코드와, 계정 때문에 그 계정의 호스트·기기 자격에 하는 일(정지·비번 변경·삭제)을 한 모듈로. server.js 에서 `store.accounts[...]` 직접 접근은 없어졌다(기기 자격의 계정 관련 호출 `createFamily`·`prune`·`listFor` 도 이 모듈을 거친다).
+- 상태 `pending|active|disabled`, 값 `updatedAt·approvedAt·memo(200자, 제어문자 제거)·lastLoginAt`. 옛 파일(상태 없음)은 전부 active 로 읽는다. 모르는 상태 문자열은 disabled 로 읽고 로그에 남긴다.
+- 로그인·호스트 등록: 비밀번호 먼저(틀리면 종전 401). 맞으면 pending/disabled 는 403 + 규격 문장·code, loginFailures 에 세지 않음. 성공 로그인은 lastLoginAt.
+- 매 요청 active 확인: `sessionFor`, 호스트 토큰(heartbeat·logs·update manifest — `hostForToken`, code `account_inactive`), `/api/session/refresh`(active 아니면 401 `account_inactive`, **회전·폐기·실패 계수 없음**), 목록·connect 대상·릴레이 자격(`relayEligibleFor` 는 허용 목록 판정은 그대로 두고 active 조건만 추가, `relayBindSession`).
+- 모든 오류 응답에 `code` 추가(없으면 상태별 기본값). `error` 문장은 그대로.
+- signup = pending, `--add-account` = active(+ id 규칙 검사).
+- 관리 창구: 별도 http 리스너, 기본 127.0.0.1, `REMOTE60_DIR_ADMIN_PORT`+`REMOTE60_DIR_ADMIN_KEY` 둘 다 있어야 기동, 서비스 포트와 같으면 기동 안 함. Bearer 키는 sha256 후 timingSafeEqual. 본문 16KB(넘으면 400 bad_request 로 답하고 닫음). 경로·코드는 규격 그대로 + 목록에 hostCount. disable = 세션·릴레이 세션·대기 capability·wake resend 즉시 종료(호스트 토큰·기기 자격은 보존, enable 로 재등록 없이 복귀). password = 세션 + 호스트 토큰 무효 + **기기 자격 계열 전부 폐기**. DELETE = 계정·세션·호스트·호스트 토큰·**기기 자격 항목**. 모든 변경은 메모리 → 저장 → (실패 시 되돌리고 503) → 세션 종료 → 응답. 감사 로그 `[admin] <시각> action= account= result=`, 비밀번호·키 없음.
+- 시험: `account_admin_test.js`(신설) exit 0, 105 checks, 3회 반복 동일 — 옛 파일·키/포트 없으면 리스너 없음(포트 실제 미개방)·한쪽만 있어도 없음·서비스 포트에 /admin 없음(404)·127.0.0.1 만(LAN 주소로는 연결 안 됨)·틀린 키 401·생성/검증 오류 코드 전부·pending 403(로그인·등록·기기 계열 미생성)·403 은 실패 계수 안 됨·approve/enable/disable 상태 전이·정지 뒤 세션/호스트 토큰/manifest/refresh 401(무회전)·정지 계정 PC 는 다른 계정 목록·connect 대상 아님·enable 뒤 호스트 토큰·기기 자격 복귀·비번 변경 뒤 옛 세션/토큰/기기 401·삭제 뒤 store 에 계정·호스트·기기 없음·저장 실패 503 무변경·재시작 뒤 상태 유지·로그에 비번/키 없음. `node apps/directory/test/run.js` exit 0(RESULT: ALL PASS). 기존 시험 조정: `directory_test` 는 signup 계정이 pending(403)임을 확인하도록, `run.js` 는 relay_test 의 두 번째 계정을 `--add-account` 로 미리 만든다.
+- 변이 17종 중 16종 kill. `session-not-asked`(sessionFor 의 active 확인 제거)는 단독으로는 살아남는다 — disable·delete 가 그 계정 세션을 직접 끝내기 때문. disable 의 세션 종료까지 함께 빼면 "정지 뒤 세션 401" 이 FAIL → 매 요청 확인이 실제로 막는다는 것을 확인.
+- 배포 목록: `server.js`·`accounts.js`(신규)·`device_credentials.js`·`update_manifest.js`·`version_compare.js`·`wake_target.js`·`package.json`. NAS 환경변수 추가 `REMOTE60_DIR_ADMIN_PORT=29182`·`REMOTE60_DIR_ADMIN_KEY=<키>`(HOST 기본 127.0.0.1) + 재시작 필요. 롤백하면 옛 서버는 상태를 읽지 않아 pending·disabled 도 로그인된다(README 에 기록).
+- 증명하지 못하는 것: 실제 릴레이 세션이 정지 순간 끊기는 것(시험 서버는 릴레이 꺼짐 — closeHostsNow 는 실행되지만 닫을 세션이 없음), TLS·실제 NAS·메인 서버.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js` 신설, `directory_test.js`, `run.js`) / 문서(`apps/directory/README.md`, 이 항목, 구현계획).
+
+### 2026-09-29 account-admin r1 (2/2) — 클라: 승인 대기·정지 계정의 문장, Host 의 재시도 간격
+
+- 프롬프트 5절 + 지시서 6. 서버는 (1/2) `3debe25`.
+- PC 클라(GNLinkClient): 로그인 403 은 이미 `error_from_response` 로 서버 문장을 그대로 폼에 보였다 — 코드 변경 없이 제품 창 시험으로 고정. 자동 재시도 없음(403 은 `Failed`, 재시도 경로 아님). 실행 중 401 → 기존 복구(기기 자격 refresh) → 정지 계정이면 refresh 401 → 자격 삭제 → 폼 "다시 로그인해 주세요" → 비밀번호 로그인 → 403 문장.
+- Host 창(GNLinkHost): `register_host` 가 403 을 "id or password is not correct" 로 뭉개던 것을 서버 문장 그대로 돌려주도록(401 은 종전 문구). 선택 인자 `outHttpStatus`.
+- GNLinkStream(HostAgent): 등록 403 → `registration refused: <문장>` + 재등록을 2·4·8… 주기(최대 48 주기 ≈ 20 분)로 미룸. heartbeat 401 이 `code: account_inactive` 이면 **토큰을 지우지 않고** 같은 간격으로 미룸 — 상태 문구에 "token rejected" 가 들어 있어 창은 종전대로 SIGN IN AGAIN, 계정이 다시 enable 되면 같은 토큰으로 재등록 없이 online. 그 밖의 401 은 종전(토큰 버림·재등록).
+- APK: `describe()` 는 403 을 이미 서버 문장 그대로 보였다 — `internal` 로 열고 JVM 시험으로 고정(기존 매칭 문자열 `login required`·`observation*` 도 함께). refresh 401 → `REJECTED`(자격 삭제·로그인 화면) 확인.
+- 시험(console 세션, 비관리자, 격리):
+  - `client_auto_login_runner` exit 0, **220 checks** — 12. 관리 API 로 pending 계정 생성 → 제품 창에서 비밀번호 로그인 → 폼에 "승인 대기 중입니다…"(스크린샷 `client-auto-login.12-pending.png`), 저장·세션 없음 → approve → 로그인 → disable → 다음 시작은 폼 "다시 로그인해 주세요"(저장 자격이 401), 기기 계열은 서버에 살아 있음 → 비밀번호 로그인 → "사용이 정지된 계정입니다."(`12-disabled.png`) → enable → 로그인.
+  - `host_login_ui_runner` exit 0, 52 checks — 5. signup 으로 만든 pending 계정을 Host 창에 입력·Sign in → 창에 서버 문장(스크린샷 `pending-refused.png`), 상태 카드 없음, 다시 누를 수 있음, host.json 에 토큰 없음, 스트리밍 자식 미기동.
+  - `directory_retry_test` exit 0, 133 — [inactive] 토큰 유지·재등록 없음·매 주기 재시도 없음·enable 뒤 같은 토큰으로 online·정지 중 "token rejected: the account is not active" / [403] 재등록 매 주기 아님·서버 문장이 상태.
+  - APK 단위 157/0 · `assembleRelease` 성공 · `host_migration_e2e_test`(REMOTE60_ALLOW_HOST_E2E=1) exit 0 33 · `directory_migration_test` 0 · `login_flow_test` 0 · bridge 0 · session 0 · `client_recovery_ui_runner` 0 · gate win 8 exit 0. 실사용 `client.txt`·`host.json` 해시 전후 동일, `login.cred` 없음.
+- 변이 4/4 kill: 403 을 비밀번호 오류로 · inactive 401 에 토큰 버림 · 대기 없음 · APK 403 일반 문구.
+- 증명하지 못하는 것: 설치된 GNLinkHost(관리자 권한)·실제 NAS·APK 화면(기기 없음 — describe 는 JVM, 화면 표시는 기존 `loginErrorText.text = e.message` 경로), 20 분 대기 자체(주기 수로만 확인).
+- 제품/테스트/문서: 제품(`directory_client.{hpp,cpp}`, `DirectoryClient.kt`) / 테스트(`directory_retry_test.cpp`, `client_auto_login_ui_test.cpp`, `client_auto_login_runner.js`, `host_login_ui_runner.js`, `gnlink_host_login_uia.ps1`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin 추가 — 읽을 수 없는 폐기 목록을 치우지 못하면 새 로그인도 저장하지 않는다 (PC 클라·APK)
+
+- Codex `31d26aa` 확인 ③(P2, 검증용이 account-admin 클라 묶음에 배정). r6 에서 "명시 로그인이 목록을 옆으로 치운다"를 이전 자격 조건에서 떼어 냈지만, 치우기가 **실패**해도 새 자격을 저장하고 성공으로 끝냈다 → 다음 시작이 그대로 남은 목록 때문에 Unreadable 로 막힌다.
+- 이제 치우기 실패 = `NotSaved`(발급된 기기는 기존 정리 경로로 폐기·또는 owed), 원본 목록은 그대로(`login_flow.cpp` `remember_sign_in`, `LoginFlow.kt` `rememberSignIn`).
+- 반례: 이전 자격 없음 + 목록 읽을 수 없음 + 옮길 이름 64개가 전부 막힘(자격 저장은 가능) → NotSaved, 자격 파일 없음, 목록 바이트 동일, 발급 기기 폐기 요청 1회 / APK 는 `failSetAside` vault.
+- 시험: `login_flow_test` exit 0, 127 · APK 단위 158/0 · `assembleRelease` 성공 · `client_auto_login_runner` exit 0(220) · `client_recovery_ui_runner` exit 0. 변이(치우기 실패 무시) C++·Kotlin 모두 kill. 실사용 `client.txt`·`host.json` 해시 동일.
+- 제품/테스트/문서: 제품(`login_flow.cpp`, `LoginFlow.kt`) / 테스트(`login_flow_test.cpp`, `LoginFlowTest.kt`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r2 — 서버: 기다리는 동안 바뀐 것은 다시 묻는다
+
+- 반려(r2, Codex `3debe25` — 함수 격리 실행으로 재현, 검증용 소스 확인) 2건. 공통 원인: **인증을 확인한 뒤 await, 그 뒤에 부작용.** 그 사이 관리 창구가 disable·password·delete 를 끝내면 옛 권한으로 일이 됐다.
+- 인증 뒤 await 가 있는 핸들러를 전부 훑었다:
+  - `handleLogs`(인증 → 본문 → 기록), `handleDeviceRevoke`(세션 → 본문 → 폐기), `handleConnect`(세션 → 본문 → capability 발급): **본문을 받은 뒤 부작용 직전에 다시 확인**(`sessionStillFor`·`hostTokenStillFor` — 같은 세션/토큰이 여전히 유효하고 같은 계정이며 active). 아니면 401.
+  - `handleLogin`·`handleHostRegister`(본문 → `authenticateAccount` 의 KDF → 발급): KDF 뒤 `accounts.stillTheSame` — 저장소의 계정이 **검증한 그 판본**(같은 createdAt·salt·hash)일 때만 그 계정을 돌려준다. 삭제·같은 id 재생성·비밀번호 변경이면 401(틀린 비밀번호와 같은 답, 실패 계수 없음).
+  - 관리 창구 `adminPassword`(본문 → KDF → 변경): 기다린 뒤 같은 계정(createdAt)이 아니면 404 — 재생성된 새 계정의 비밀번호를 바꾸지 않는다. `adminCreate`(KDF 뒤): taken 에 더해 pending 상한도 다시 확인.
+  - 해당 없음(await 뒤에 인증하거나 await 가 없음): `handleSessionRefresh`·`handleSessionLogout`·`handleHostHeartbeat`(본문 먼저, 그 뒤 동기 확인), `handleUpdateManifest`·`handleHosts`·`handleDevices`(await 없음), `handleSignup`(KDF 뒤 taken 재확인 — 인증 없음), 관리 approve·disable·enable·delete(await 없음).
+- 반례(`account_admin_test.js` 13절, 실제 서버): 헤더만 보낸 요청 → 관리 작업 → 본문 완료 = connect 401 · device revoke 401(기기 무변경) · logs 401(파일 없음). KDF 는 시험 preload(`--require`, 출하 경로 아님)가 "다음 해시 하나"를 붙잡는다: 검증 지연 → 삭제 → 완료 = 401·기기 없음 / 삭제 → 같은 id·같은 비밀번호로 재생성·승인 → 완료 = 401·새 계정에 기기 없음 / 등록 중 비밀번호 변경 = 401·호스트 없음 / 관리 비밀번호 변경 중 삭제·재생성 = 404·새 계정 비밀번호 그대로.
+- 시험: `account_admin_test` exit 0, 113 checks ×3 · `run.js` exit 0(RESULT: ALL PASS, PASS 661) · 클라 연동 `client_auto_login_runner` exit 0(220)·`host_login_ui_runner` exit 0(52). 변이 6종(logs·revoke·connect 재확인 제거, KDF 뒤 재조회 제거, 판본 대신 id 만, 관리 비번 계정 동일성 제거) 모두 kill — connect 는 호스트가 없어 변이 시 200 이 아니라 404 로 드러난다.
+- 제품/테스트/문서: 제품(`apps/directory/server.js`, `apps/directory/accounts.js`) / 테스트(`account_admin_test.js`) / 문서(이 항목, 구현계획).
+
+### 2026-09-29 account-admin r3 — 시험: 두 프로세스의 시계를 맞대지 않는다
+
+- 검증용 실행에서 `account_admin_test` 의 "pending -> active, approvedAt set" 이 15회 중 2회 FAIL. 서버 응답은 정상(approvedAt==updatedAt)이었고, 시험이 **자기 프로세스의 `Date.now()`(beforeApprove)** 와 서버가 찍은 approvedAt 을 비교하고 있었다 — Windows 에서 두 프로세스의 ms 판독이 어긋날 수 있다(추정; 당시 값은 기록되지 않았다).
+- 이제 서버가 쓴 시각끼리만 비교한다: 승인 전 행(pending, approvedAt=null, updatedAt=u0) → 승인 응답 approvedAt === updatedAt ≥ u0, 다시 승인해도 approvedAt 불변, lastLoginAt ≥ approvedAt. 실패 시 비교한 값을 줄에 남긴다. 같은 모양의 교차 프로세스 비교는 이 파일의 두 곳(approve·lastLoginAt)뿐이었다 — 다른 서버 시험의 `Date.now()` 는 같은 프로세스 안의 경과 시간이다.
+- 시험: `account_admin_test` 30회 연속 exit 0, 113/0. 변이(승인이 approvedAt 을 안 찍음) → 이 검사가 FAIL.
+- 제품/테스트/문서: 제품 없음 / 테스트(`account_admin_test.js`) / 문서(이 항목).

@@ -67,9 +67,70 @@ bool directory_login(const std::string& url, const std::string& accountId,
                      std::string* outError,
                      directory::ObserveEndpoint* outObserve = nullptr);
 
-/** The PCs registered to the signed-in account, online ones first. */
+/**
+ * The PCs registered to the signed-in account, online ones first.
+ *
+ * `outStatus` carries the http status when the exchange happened at all: a 401 means the
+ * session is no longer one, which a client holding a device credential can repair by itself.
+ */
 bool directory_list_hosts(const std::string& url, const std::string& sessionToken,
-                          std::vector<DirectoryHostEntry>* outHosts, std::string* outError);
+                          std::vector<DirectoryHostEntry>* outHosts, std::string* outError,
+                          uint32_t* outStatus = nullptr);
+
+// ---------------------------------------------------------------- staying signed in
+//
+// A sign-in can ask the directory for a device credential: something that gets a new session
+// later without the password. See apps/directory/README.md ("Staying signed in").
+
+/** What the directory handed out. `revokeToken` comes with a sign-in, never with a refresh. */
+struct DeviceSignIn {
+  std::string sessionToken;
+  std::string deviceId;
+  std::string deviceCredential;
+  std::string revokeToken;
+};
+
+/**
+ * What became of a call, in the terms the caller has to act on.
+ *
+ * They are kept apart because each one means something different for the stored credential:
+ * only Rejected is an answer about the credential itself.
+ */
+enum class SessionCall {
+  Ok,
+  Rejected,     // 401: the credential (or password) is not accepted. Erase, ask to sign in.
+  Unsupported,  // 404/405: a directory from before device credentials. Keep, do without.
+  Limited,      // 429: asked too often. Keep, try later.
+  Failed,       // anything else that answered -- 5xx, a redirect, a body that makes no sense
+  Unreachable,  // nothing answered
+};
+const char* session_call_name(SessionCall call);
+
+/**
+ * Signs in and asks for a device credential for this device.
+ *
+ * Against a directory that does not issue them the sign-in still succeeds: `out->sessionToken`
+ * is set and the device fields are empty. That is a state, not an error.
+ */
+SessionCall directory_login_with_device(const std::string& url, const std::string& accountId,
+                                        const std::string& password, const std::string& kind,
+                                        const std::string& label, DeviceSignIn* out,
+                                        std::string* outError);
+
+/** Exchanges the credential for a session and the next credential. */
+SessionCall directory_session_refresh(const std::string& url, const std::string& deviceId,
+                                      const std::string& deviceCredential, DeviceSignIn* out,
+                                      std::string* outError);
+
+/**
+ * Ends the device and every session it issued.
+ *
+ * With the revoke token, a session, or both; the revoke token is what a client that signed out
+ * while offline still has. Ending something already ended is Ok.
+ */
+SessionCall directory_session_logout(const std::string& url, const std::string& deviceId,
+                                     const std::string& revokeToken,
+                                     const std::string& sessionToken, std::string* outError);
 
 /**
  * Ask to reach one host.

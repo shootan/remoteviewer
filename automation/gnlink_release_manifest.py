@@ -44,7 +44,10 @@ ARTIFACTS = [
     ('ui' + chr(92) + 'macro.html', os.path.join('ui', 'macro.html'), 'ui/macro.html'),
 ]
 
-BASE_URL = 'https://rem.shotan.net/updates'
+# Under the product's one server. A machine that installed an earlier build still asks the
+# former name for its manifest; the artifacts that manifest names are here, on another origin,
+# which is why the updater never sends the directory's credential with an artifact request.
+BASE_URL = 'https://gnlink.shotan.net/updates'
 
 # The four that carry the version once, and the installer that carries it five times. Measured on
 # 0.2.133 and 0.2.134; a change here means the product changed how it stamps itself, which is

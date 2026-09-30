@@ -78,6 +78,15 @@ object DirectoryClient {
         val advertised: ObserveEndpoint,
     )
 
+    /** A sign-in that asked for a device credential, and what the directory handed out. */
+    data class DeviceLogin(
+        val signedIn: LoginFlow.SignedIn,
+        val expiresAt: Long,
+        val advertised: ObserveEndpoint,
+    ) {
+        override fun toString(): String = "DeviceLogin(${signedIn})"
+    }
+
     private const val PREFS = "remote60_directory"
     private const val KEY_URL = "url"
     private const val KEY_ACCOUNT = "accountId"
@@ -372,49 +381,167 @@ object DirectoryClient {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    // ------------------------------------------------------------------ stored session
+    // ------------------------------------------------------------------ the server
 
-    fun savedUrl(context: Context): String =
-        prefs(context).getString(KEY_URL, "").orEmpty()
+    /**
+     * The directory server. Every request this app makes to a directory goes here.
+     *
+     * A build constant, not a preference: the sign-in screen used to ask for it and store the
+     * answer, and what is stored is no longer read -- an address left over from an older
+     * version, or typed wrong once, cannot send anything anywhere.
+     */
+    val directoryUrl: String get() = BuildConfig.DIRECTORY_URL
+
+    /** Former names of [directoryUrl] under which a stored session may have been issued. */
+    val migratableOrigins: List<String>
+        get() = BuildConfig.DIRECTORY_MIGRATABLE_ORIGINS.split(',')
+            .map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** What the address a session is stored beside means for using it with a given server. */
+    enum class StoredOrigin {
+        /** Issued by this server: used as it always was. */
+        SAME,
+
+        /**
+         * Issued under a listed former name of it: presented to this server, and the stored
+         * address rewritten once the server has accepted it.
+         */
+        MIGRATABLE,
+
+        /** Anything else: not sent anywhere, and not erased. */
+        UNLISTED,
+    }
+
+    /**
+     * Decides which of the three a stored address is, by origin.
+     *
+     * The same rule the PC host applies to its host token (classify_cached_origin). Nothing
+     * stored is UNLISTED rather than "the default server": a token with no address has no issuer.
+     */
+    fun classifyStoredOrigin(
+        storedUrl: String,
+        serverUrl: String,
+        migratable: List<String>,
+    ): StoredOrigin {
+        if (storedUrl.isBlank()) return StoredOrigin.UNLISTED
+        val stored = originKey(storedUrl)
+        if (stored == originKey(serverUrl)) return StoredOrigin.SAME
+        if (migratable.any { it.isNotBlank() && originKey(it) == stored }) {
+            return StoredOrigin.MIGRATABLE
+        }
+        return StoredOrigin.UNLISTED
+    }
+
+    private fun storedOrigin(context: Context): StoredOrigin = classifyStoredOrigin(
+        prefs(context).getString(KEY_URL, "").orEmpty(), directoryUrl, migratableOrigins,
+    )
+
+    // ------------------------------------------------------------------ stored session
 
     fun savedAccountId(context: Context): String =
         prefs(context).getString(KEY_ACCOUNT, "").orEmpty()
 
-    /** A stored token is only useful while it is valid; treat an expired one as absent. */
-    fun savedSessionToken(context: Context): String {
-        val p = prefs(context)
-        val expiresAt = p.getLong(KEY_EXPIRES, 0L)
-        if (expiresAt in 1..System.currentTimeMillis()) return ""
-        return p.getString(KEY_SESSION, "").orEmpty()
+    // ------------------------------------------------------------------ the session
+    //
+    // In memory, and nowhere else. It used to be written to preferences in the clear, which
+    // made the preferences file a way into the account for twelve hours at a time. What
+    // outlives the process now is the device credential, in [KeystoreLoginVault].
+
+    /**
+     * A session and the account it belongs to, held as ONE value: they are set, replaced and
+     * dropped together, and they live exactly as long as each other -- as long as the process.
+     * The account used to be a field of the Activity, and a recreated Activity (rotation, a
+     * theme change, the system reclaiming it) came back with the session and without its owner.
+     */
+    private class Held(val token: String, val accountId: String)
+
+    @Volatile
+    private var memory = Held("", "")
+
+    /** True while the session in memory was carried over from a former name of the server. */
+    @Volatile
+    private var carriedOver = false
+
+    fun session(): String = memory.token
+
+    /**
+     * The account the session in memory belongs to. Empty when there is no session, and for a
+     * session carried over from an older version, which did not record whose it was -- it is
+     * not guessed from the form.
+     */
+    fun sessionAccount(): String = memory.accountId
+
+    fun adoptSession(token: String, accountId: String) {
+        memory = Held(token, accountId)
+    }
+
+    fun dropSession() {
+        memory = Held("", "")
+        carriedOver = false
     }
 
     /**
-     * Remembers where the user was signing in to, before knowing whether it worked.
+     * Whether a session an older version left in preferences may be used by this one.
      *
-     * These are not secrets, and tying them to a successful login meant every failed attempt
-     * threw away the server address and made the next try start from an empty form.
+     * Only one that has not expired and was stored beside this server or a listed former name
+     * of it. Anything else is not sent anywhere.
      */
-    fun rememberEndpoint(context: Context, url: String, accountId: String) {
-        prefs(context).edit()
-            .putString(KEY_URL, normalize(url))
-            .putString(KEY_ACCOUNT, accountId)
-            .apply()
+    fun legacySessionUsable(
+        storedUrl: String,
+        token: String,
+        expiresAt: Long,
+        now: Long,
+        serverUrl: String,
+        migratable: List<String>,
+    ): Boolean {
+        if (token.isEmpty()) return false
+        if (expiresAt in 1..now) return false
+        return classifyStoredOrigin(storedUrl, serverUrl, migratable) != StoredOrigin.UNLISTED
     }
 
-    fun saveSession(context: Context, url: String, accountId: String, token: String, expiresAt: Long) {
-        prefs(context).edit()
-            .putString(KEY_URL, normalize(url))
-            .putString(KEY_ACCOUNT, accountId)
-            .putString(KEY_SESSION, token)
-            .putLong(KEY_EXPIRES, expiresAt)
-            .apply()
+    /**
+     * Moves a session an older version stored in the clear into memory, if it may be used, and
+     * removes the stored copy whether or not it may. Called once, when the app starts.
+     *
+     * A session moved this way is not a device credential and gets none: the phone stays signed
+     * in for this run, and the next sign-in the user makes is what issues one.
+     */
+    fun takeLegacySession(context: Context) {
+        val p = prefs(context)
+        val token = p.getString(KEY_SESSION, "").orEmpty()
+        if (token.isEmpty() && !p.contains(KEY_EXPIRES)) return
+        val storedUrl = p.getString(KEY_URL, "").orEmpty()
+        if (legacySessionUsable(storedUrl, token, p.getLong(KEY_EXPIRES, 0L),
+                System.currentTimeMillis(), directoryUrl, migratableOrigins)) {
+            memory = Held(token, "")
+            carriedOver = classifyStoredOrigin(storedUrl, directoryUrl, migratableOrigins) ==
+                StoredOrigin.MIGRATABLE
+        }
+        // commit: the point is that it is gone from disk, not that it will be.
+        p.edit().remove(KEY_SESSION).remove(KEY_EXPIRES).commit()
     }
 
-    /** Forgets the token but keeps the server and id, so signing back in is one field. */
-    fun clearSession(context: Context) {
+    /**
+     * Called when this server has just accepted the session (the host list came back).
+     *
+     * If the session was carried over from a former name of the server, the stored address
+     * becomes the server's own from here on. Not before: a 401 or no answer leaves it as found.
+     */
+    fun confirmCarriedOver(context: Context) {
+        if (!carriedOver) return
+        carriedOver = false
+        prefs(context).edit().putString(KEY_URL, normalize(directoryUrl)).apply()
+    }
+
+    /**
+     * Remembers who was signing in, before knowing whether it worked. Not a secret, and tying
+     * it to a successful login meant every failed attempt made the next try start from an empty
+     * form. The address is written beside it, in the key an older version reads.
+     */
+    fun rememberAccount(context: Context, accountId: String) {
         prefs(context).edit()
-            .remove(KEY_SESSION)
-            .remove(KEY_EXPIRES)
+            .putString(KEY_ACCOUNT, accountId)
+            .putString(KEY_URL, normalize(directoryUrl))
             .apply()
     }
 
@@ -431,6 +558,81 @@ object DirectoryClient {
         // Optional and additive: an older directory does not send it, and that is a documented
         // state rather than an error -- see observePortFor.
         return LoginResult(token, response.optLong("expiresAt", 0L), parseObserveMetadata(response))
+    }
+
+    /**
+     * Signs in and, when [deviceLabel] is given, asks for a device credential for this phone.
+     *
+     * Against a directory that does not issue them the sign-in still succeeds and the device
+     * fields come back empty. That is a state, not an error.
+     */
+    fun loginWithDevice(url: String, id: String, password: String, deviceLabel: String?): DeviceLogin {
+        val body = JSONObject().put("id", id).put("pw", password)
+        if (deviceLabel != null) {
+            body.put("device", JSONObject().put("kind", "android").put("label", deviceLabel))
+        }
+        val response = post(url, "/api/login", body, null)
+        val token = response.optString("sessionToken")
+        if (token.isEmpty()) throw DirectoryException("server did not return a session")
+        var signedIn = LoginFlow.SignedIn(
+            sessionToken = token,
+            deviceId = response.optString("deviceId"),
+            deviceCredential = response.optString("deviceCredential"),
+            revokeToken = response.optString("revokeToken"),
+        )
+        // All three or none.
+        if (!signedIn.issued) signedIn = LoginFlow.SignedIn(token, "", "", "")
+        return DeviceLogin(signedIn, response.optLong("expiresAt", 0L), parseObserveMetadata(response))
+    }
+
+    /** What a status means for a stored credential. Only 401 is an answer about the credential. */
+    fun callFor(status: Int): LoginFlow.Call = when (status) {
+        in 200..299 -> LoginFlow.Call.OK
+        401 -> LoginFlow.Call.REJECTED
+        404, 405 -> LoginFlow.Call.UNSUPPORTED
+        429 -> LoginFlow.Call.LIMITED
+        else -> LoginFlow.Call.FAILED
+    }
+
+    private fun callOf(e: Exception): LoginFlow.Call =
+        if (e is DirectoryException && e.status != 0) callFor(e.status) else LoginFlow.Call.UNREACHABLE
+
+    /** Exchanges the credential for a session and the next credential. */
+    fun refreshSession(url: String, deviceId: String, deviceCredential: String): LoginFlow.Refreshed =
+        try {
+            val response = post(url, "/api/session/refresh",
+                JSONObject().put("deviceId", deviceId).put("deviceCredential", deviceCredential), null)
+            val session = response.optString("sessionToken")
+            val next = response.optString("deviceCredential")
+            if (session.isEmpty() || next.isEmpty()) {
+                // A 200 without the next credential would leave this phone holding one the
+                // server has just replaced. It is not treated as a sign-in.
+                LoginFlow.Refreshed(LoginFlow.Call.FAILED)
+            } else {
+                LoginFlow.Refreshed(LoginFlow.Call.OK, session, next)
+            }
+        } catch (e: Exception) {
+            LoginFlow.Refreshed(callOf(e))
+        }
+
+    /** Ends the device and every session it issued; with the revoke token, a session, or both. */
+    fun endDevice(url: String, deviceId: String, revokeToken: String, session: String): LoginFlow.Call =
+        try {
+            val body = JSONObject().put("deviceId", deviceId)
+            if (revokeToken.isNotEmpty()) body.put("revokeToken", revokeToken)
+            post(url, "/api/session/logout", body, session.ifEmpty { null })
+            LoginFlow.Call.OK
+        } catch (e: Exception) {
+            callOf(e)
+        }
+
+    /** The directory's calls, as [LoginFlow] wants them. */
+    fun directoryCalls(url: String): LoginFlow.Directory = object : LoginFlow.Directory {
+        override fun refresh(deviceId: String, deviceCredential: String): LoginFlow.Refreshed =
+            refreshSession(url, deviceId, deviceCredential)
+
+        override fun revoke(deviceId: String, revokeToken: String): LoginFlow.Call =
+            endDevice(url, deviceId, revokeToken, "")
     }
 
     fun hosts(url: String, sessionToken: String): List<Host> {
@@ -494,6 +696,10 @@ object DirectoryClient {
     ): JSONObject {
         val connection = URL(normalize(url) + path).openConnection() as HttpURLConnection
         try {
+            // Nothing is followed. The directory's API answers and does not redirect, and these
+            // requests carry the session token: following a redirect repeats the request at
+            // whatever address the answer named. A 3xx is reported like any other refusal.
+            connection.instanceFollowRedirects = false
             connection.requestMethod = method
             connection.connectTimeout = CONNECT_TIMEOUT_MS
             connection.readTimeout = READ_TIMEOUT_MS
@@ -521,8 +727,14 @@ object DirectoryClient {
         }
     }
 
-    /** Server messages are terse and English; turn the ones users hit into plain guidance. */
-    private fun describe(status: Int, serverError: String): String = when {
+    /**
+     * Server messages are terse and English; turn the ones users hit into plain guidance.
+     *
+     * A 403 is shown as the directory wrote it: that is the right password for an account that
+     * waits for approval or has been stopped, and the sentence says which -- in Korean, already
+     * written for the user. Internal so the unit tests can hold it to that.
+     */
+    internal fun describe(status: Int, serverError: String): String = when {
         status == 401 && serverError.contains("login", true) -> "로그인이 필요합니다"
         status == 401 -> "아이디 또는 비밀번호가 맞지 않습니다"
         status == 404 -> "해당 호스트를 찾을 수 없습니다"

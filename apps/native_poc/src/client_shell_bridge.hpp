@@ -49,12 +49,24 @@ std::string shell_status_json(const std::string& state, const std::string& detai
 /**
  * Serialises what the connect screen should start with.
  *
- * Escaped like everything else crossing the boundary: the server address and account come off
- * disk, where a text editor may have left a byte order mark or a stray quote, and a message the
- * page cannot parse produces a blank screen with nothing to explain it.
+ * Escaped like everything else crossing the boundary: the account comes off disk, where a text
+ * editor may have left a byte order mark or a stray quote, and a message the page cannot parse
+ * produces a blank screen with nothing to explain it.
+ *
+ * No server address: the page has no field for one and no say in where a sign-in goes.
  */
-std::string shell_restore_json(const std::string& server, const std::string& accountId,
+std::string shell_restore_json(const std::string& accountId,
                                const ShellRuntimeSettings& settings);
+
+/**
+ * Serialises what became of an attempt to come back signed in.
+ *
+ * `state` is one of: checking (the form waits), retrying (no answer yet; the form is usable),
+ * none (nothing to come back with), rejected (sign in again), failed (no answer; offer a retry).
+ * The account id travels with it so the form can show whose sign-in this was.
+ */
+std::string shell_auto_login_json(const std::string& state, const std::string& accountId,
+                                  const std::string& text);
 
 /** Reads a connect request out of what the page posted. Returns false when it is not one. */
 bool shell_parse_connect(const std::string& json, ShellConnectRequest* out);

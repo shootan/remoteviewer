@@ -22,6 +22,13 @@
 #include <string>
 #include <thread>
 
+#ifdef REMOTE60_UPDATE_HTTP_TEST_SEAM
+namespace remote60::native_poc::update::test_seam {
+extern bool gFailDisableRedirects;
+extern int gSendRequestCalls;
+}  // namespace remote60::native_poc::update::test_seam
+#endif
+
 namespace {
 
 using namespace remote60::native_poc::update;
@@ -204,6 +211,69 @@ int main() {
     check("an unreachable https endpoint is a connect failure, not a bad URL",
           status == FetchStatus::ConnectFailed, std::string(fetch_status_name(status)) + " " + err);
   }
+
+#ifdef REMOTE60_UPDATE_HTTP_TEST_SEAM
+  {
+    // A request carrying a credential that cannot be told to follow no redirect.
+    //
+    // The address is a loopback port nothing listens on: whatever is sent goes nowhere, and what
+    // is counted is whether a send was attempted at all. The credential is a fixture string.
+    const std::string url = "https://127.0.0.1:9/api/update/manifest?platform=windows";
+    const std::string credential = "x-host-token: fixture-update-credential-5d1c";
+    std::string out;
+    std::string err;
+
+    // The control first, or the zero below would also be true of a client that never sends.
+    test_seam::gFailDisableRedirects = false;
+    test_seam::gSendRequestCalls = 0;
+    (void)https_get_text(url, 4096, &out, &err, credential);
+    check("[redirect] control: with the option set, the credentialed request is sent",
+          test_seam::gSendRequestCalls == 1,
+          "sends: " + std::to_string(test_seam::gSendRequestCalls) + "  " + err);
+
+    test_seam::gFailDisableRedirects = true;
+    test_seam::gSendRequestCalls = 0;
+    err.clear();
+    const FetchStatus refused = https_get_text(url, 4096, &out, &err, credential);
+    check("[redirect] THE OPTION FAILS: THE CREDENTIALED REQUEST IS NOT SENT",
+          test_seam::gSendRequestCalls == 0,
+          "sends: " + std::to_string(test_seam::gSendRequestCalls));
+    check("[redirect] ...it is reported as a failure that says why",
+          refused != FetchStatus::Ok && err.find("could not disable redirects") != std::string::npos,
+          std::string(fetch_status_name(refused)) + " " + err);
+    check("[redirect] ...and the message does not quote the credential",
+          err.find("fixture-update-credential-5d1c") == std::string::npos, err);
+    check("[redirect] ...and nothing came back", out.empty(), out);
+
+    // The file fetch goes through the same function.
+    // Beside this executable, inside the build tree: a test does not write to %TEMP%.
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    const std::wstring dest = std::wstring(self) + L".redirect-case-" +
+                              std::to_wstring(GetCurrentProcessId()) + L".bin";
+    test_seam::gSendRequestCalls = 0;
+    err.clear();
+    const FetchStatus fileRefused = https_get_file(url, dest, 4096, &err, credential);
+    check("[redirect] the same for a file download with a credential",
+          test_seam::gSendRequestCalls == 0 && fileRefused != FetchStatus::Ok,
+          "sends: " + std::to_string(test_seam::gSendRequestCalls));
+    check("[redirect] ...which leaves no file behind",
+          GetFileAttributesW(dest.c_str()) == INVALID_FILE_ATTRIBUTES);
+
+    // No credential, no option to set: an artifact download is not affected by this failure,
+    // and its redirect policy is what it was.
+    test_seam::gSendRequestCalls = 0;
+    err.clear();
+    (void)https_get_text(url, 4096, &out, &err);
+    check("[redirect] a request with no credential is still sent",
+          test_seam::gSendRequestCalls == 1,
+          "sends: " + std::to_string(test_seam::gSendRequestCalls));
+    test_seam::gFailDisableRedirects = false;
+  }
+#else
+  check("[redirect] this build has the test seam", false,
+        "REMOTE60_UPDATE_HTTP_TEST_SEAM is not defined; the option-failure case did not run");
+#endif
 
   WSACleanup();
 

@@ -299,7 +299,7 @@ int wmain() {
          settings.fps = 60;
          settings.monitorId = 0;
          gWebView->PostWebMessageAsString(
-             widen(np::shell_restore_json("https://rem.shotan.net", "shotan", settings)).c_str());
+             widen(np::shell_restore_json("shotan", settings)).c_str());
          gWebView->PostWebMessageAsString(widen(hosts).c_str());
          Sleep(200);
          eval(L"document.getElementById('openSettings').click()");

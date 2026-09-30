@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "connect_candidates.hpp"
+#include "fixed_directory.hpp"
 #include "json_profile.hpp"
 #include "poc_protocol.hpp"
 #include "update_endpoint.hpp"
@@ -838,7 +840,8 @@ bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& password, const std::string& hostName,
                    const std::string& machineId, std::string* outHostId,
                    std::string* outHostToken, std::string* outError,
-                   ObserveEndpoint* outObserve) {
+                   ObserveEndpoint* outObserve, uint32_t* outHttpStatus) {
+  if (outHttpStatus) *outHttpStatus = 0;
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -856,9 +859,20 @@ bool register_host(const std::string& url, const std::string& accountId,
     if (outError) *outError = "cannot reach the server";
     return false;
   }
-  if (status == 401 || status == 403) {
+  if (outHttpStatus) *outHttpStatus = status;
+  if (status == 401) {
     // The server will not say which of the two was wrong, and neither should we.
     if (outError) *outError = "id or password is not correct";
+    return false;
+  }
+  if (status == 403) {
+    // The password was right; the account may not register a PC -- waiting for approval, or
+    // stopped. The directory's sentence says which, and it is what the user is shown.
+    std::string serverError;
+    json_get_string(resp, "error", &serverError);
+    if (outError) {
+      *outError = serverError.empty() ? "this account cannot register a PC (http 403)" : serverError;
+    }
     return false;
   }
   if (status == 429) {
@@ -951,22 +965,83 @@ bool save_host_cache(const std::string& path, const HostCache& cache) {
   return MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
+CachedOrigin classify_cached_origin(const std::string& cachedUrl, const std::string& serverUrl,
+                                    const std::vector<std::string>& migratableOrigins) {
+  const std::string cached = directory_origin_key(cachedUrl);
+  if (cached.empty()) return CachedOrigin::Unlisted;
+  if (cached == directory_origin_key(serverUrl)) return CachedOrigin::Same;
+  for (const std::string& listed : migratableOrigins) {
+    if (cached == directory_origin_key(listed)) return CachedOrigin::Migratable;
+  }
+  return CachedOrigin::Unlisted;
+}
+
+#ifdef REMOTE60_STREAM_TEST_SEAM
+namespace {
+
+// TEST BUILDS ONLY -- never defined for GNLinkStream, GNLinkHost or GNLinkClient.
+//
+// The product's server and its former names are constants naming hosts no test may talk to. A
+// test build of the streaming host reads stand-ins for the two from its environment, so the rest
+// of the path -- host_startup_connect handing the list to the agent, the agent presenting the
+// cached token, the heartbeat, the cache being rewritten -- is the product's, run as a process.
+//
+// Loopback only, and it fails CLOSED: a test build started without its fixture ends here.
+std::string stream_test_value(const char* name, bool required) {
+  const char* value = std::getenv(name);
+  const std::string text = value ? value : "";
+  if (text.empty() && !required) return text;
+  if (text.rfind("http://127.0.0.1:", 0) != 0) {
+    std::fprintf(stderr, "[stream-test-seam] %s is not a loopback fixture; refusing to fall back "
+                         "to the product's\n", name);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  return text;
+}
+
+}  // namespace
+#endif
+
+std::vector<std::string> product_migratable_origins_for(const std::string& serverUrl) {
+  std::vector<std::string> origins;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  const std::string fixedUrl = stream_test_value("GNLINK_STREAM_TEST_DIRECTORY", true);
+  const std::string formerName = stream_test_value("GNLINK_STREAM_TEST_FORMER_NAME", false);
+  std::cout << "[stream-test-seam] server=" << fixedUrl << " former="
+            << (formerName.empty() ? "(none)" : formerName) << "\n";
+  if (directory_origin_key(serverUrl) != directory_origin_key(fixedUrl)) return origins;
+  if (!formerName.empty()) origins.push_back(formerName);
+#else
+  if (directory_origin_key(serverUrl) != directory_origin_key(kFixedDirectoryUrl)) return origins;
+  for (const char* origin : kMigratableDirectoryOrigins) origins.emplace_back(origin);
+#endif
+  return origins;
+}
+
 bool HostAgent::LoadCache() {
   HostCache cached;
   if (!load_host_cache(cfg_.cachePath, &cached)) return false;
 
   // A token is only meaningful for the account, server and machine it was issued against.
   // Compared by origin, so a trailing slash or a written-out default port does not read as a
-  // different server -- and so http and https still do.
-  if (directory_origin_key(cached.directoryUrl) != directory_origin_key(cfg_.url) ||
-      cached.machineId != machineId_) {
-    return false;
-  }
+  // different server -- and so http and https still do. A listed former name of this server is
+  // the one exception, and it is not taken on trust: see migrationPending_.
+  const CachedOrigin origin =
+      classify_cached_origin(cached.directoryUrl, cfg_.url, cfg_.migratableOrigins);
+  if (origin == CachedOrigin::Unlisted || cached.machineId != machineId_) return false;
   if (!cfg_.accountId.empty() && cached.accountId != cfg_.accountId) return false;
 
   hostToken_ = cached.hostToken;
   hostId_ = cached.hostId;
   if (cfg_.accountId.empty()) cfg_.accountId = cached.accountId;
+  migrationPending_ = origin == CachedOrigin::Migratable;
+  migratingFrom_ = migrationPending_ ? directory_origin_key(cached.directoryUrl) : std::string();
+  if (migrationPending_) {
+    std::cout << "[directory] the cached sign-in was issued as " << migratingFrom_
+              << "; presenting it to " << directory_origin_key(cfg_.url)
+              << ", the cache is rewritten if it is accepted\n";
+  }
   return true;
 }
 
@@ -989,14 +1064,24 @@ bool HostAgent::EnsureRegistered() {
   }
   std::string token, id, error;
   ObserveEndpoint advertised;
+  uint32_t httpStatus = 0;
   if (!register_host(cfg_.url, cfg_.accountId, cfg_.password, cfg_.hostName, machineId_, &id,
-                     &token, &error, &advertised)) {
+                     &token, &error, &advertised, &httpStatus)) {
+    if (httpStatus == 403) {
+      // Waiting for approval, or stopped. Asking again every heartbeat would not change that; an
+      // operator does. So the next attempt is far off, and further each time.
+      BackOffInactive("registration refused: " + error);
+      return false;
+    }
     SetStatus(error);
     return false;
   }
+  inactiveBackoff_ = 0;
   hostToken_ = token;
   hostId_ = id;
   observeAdvertised_ = advertised;
+  // A registration made here replaces whatever was cached, wherever that came from.
+  migrationPending_ = false;
   if (!ApplyObserveEndpoint()) return false;
   SaveCache();
   std::cout << "[native-video-host] directory registered hostId=" << hostId_
@@ -1128,6 +1213,16 @@ std::vector<std::string> local_ipv4_addresses() {
   return out;
 }
 
+void HostAgent::BackOffInactive(const std::string& status) {
+  // 2, 4, 8 ... cycles, to about twenty minutes at the default 25-second heartbeat.
+  constexpr int kMaxInactiveCooldownCycles = 48;
+  inactiveBackoff_ = inactiveBackoff_ == 0 ? 2 : (std::min)(inactiveBackoff_ * 2, kMaxInactiveCooldownCycles);
+  inactiveCooldown_ = inactiveBackoff_;
+  SetStatus(status);
+  std::cout << "[native-video-host] directory " << status << "; asking again in "
+            << inactiveCooldown_ << " cycles\n";
+}
+
 bool HostAgent::Heartbeat(std::vector<PunchTarget>* outPunch) {
   uint32_t status = 0;
   std::string serverError;
@@ -1231,6 +1326,16 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
     return false;
   }
   if (status == 401) {
+    std::string code;
+    json_get_string(resp, "code", &code);
+    if (code == "account_inactive") {
+      // The token is good; the account behind it has been stopped (or is waiting for approval).
+      // It is KEPT: the account may be re-enabled, and then this same token works again with
+      // nothing to re-register. The status still reads "token rejected", which is what the
+      // window shows as SIGN IN AGAIN -- the PC is off the service until that changes.
+      BackOffInactive("host token rejected: the account is not active");
+      return false;
+    }
     // The server forgot us (restored from an older store, or the token was revoked).
     // Drop the cached token so the next pass re-registers if we still hold a password.
     hostToken_.clear();
@@ -1241,6 +1346,16 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
   if (status != 200) {
     SetStatus("heartbeat failed (http " + std::to_string(status) + ")");
     return false;
+  }
+
+  if (migrationPending_) {
+    // Accepted: the token is this server's. Only now does the cache name the new address --
+    // a 401 above left the file alone, and so did every answer that was not an answer about
+    // the token (unreachable, 5xx, 429, 409).
+    migrationPending_ = false;
+    SaveCache();
+    std::cout << "[directory] the sign-in issued as " << migratingFrom_ << " was accepted by "
+              << directory_origin_key(cfg_.url) << "; the cache now names it\n";
   }
 
   if (outPunch) {
@@ -1412,6 +1527,8 @@ bool HostAgent::AuthorizePeer(const std::string& punchToken, const sockaddr_in& 
 
 void HostAgent::Run() {
   bool announcedOnline = false;
+  // The last "this host has to be signed in again" state that was said out loud.
+  std::string announcedSignIn;
   // pc2-connect-diag: the cycle, step by step.
   //
   // A capability can only reach this host through this loop, and none of it was logged:
@@ -1431,7 +1548,13 @@ void HostAgent::Run() {
     std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " start cause="
               << cycleCause << "\n";
 
-    if (EnsureRegistered()) {
+    if (inactiveCooldown_ > 0) {
+      // The account is not active. Nothing is sent this cycle; the status set when that was
+      // learned stands.
+      --inactiveCooldown_;
+      std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=skip reason=inactive"
+                << " cyclesLeft=" << inactiveCooldown_ << "\n";
+    } else if (EnsureRegistered()) {
       // A host that started from a cached token never registered, so nothing has told it where
       // observations go. Asked here rather than inside EnsureRegistered, because that function
       // returns immediately when a token is cached -- which is exactly the case that needs this.
@@ -1466,6 +1589,7 @@ void HostAgent::Run() {
                   << (hbOk ? 1 : 0) << " ms=" << stepMs(hbStart)
                   << " capabilities=" << punch.size() << "\n";
         if (hbOk) {
+          inactiveBackoff_ = 0;
           SetStatus("online");
           if (!announcedOnline) {
             announcedOnline = true;
@@ -1475,6 +1599,26 @@ void HostAgent::Run() {
         } else {
           announcedOnline = false;
         }
+      }
+    }
+
+    // Said once per occurrence, on the line GNLinkHost's window reads its status from. A
+    // rejected token used to change the status in here and print nothing, so the window went on
+    // showing the last thing it had read -- "agent started" -- under NOT REACHABLE, and the one
+    // state the user can fix by signing in was the one state they were never shown.
+    {
+      std::string now;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        now = status_;
+      }
+      const bool needsSignIn = now.find("token rejected") != std::string::npos ||
+                               now.find("registration needs") != std::string::npos;
+      if (!needsSignIn) {
+        announcedSignIn.clear();
+      } else if (now != announcedSignIn) {
+        announcedSignIn = now;
+        std::cout << "[native-video-host] directory " << now << "\n";
       }
     }
 

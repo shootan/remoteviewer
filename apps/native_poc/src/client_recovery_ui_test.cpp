@@ -56,18 +56,55 @@ void set_shell_test_data_dir(const std::filesystem::path& dir) {
   gShellTestDataDir = dir.wstring();
 }
 
+/**
+ * The one place this test names the directory the shell talks to -- and the mutation target for
+ * "the address comes from the program, not from client.txt or the page".
+ */
+void set_shell_test_directory_url(const std::string& url) {
+  gShellTestDirectoryUrl = url;
+}
+
+/** Photographs what the WebView has rendered, into a file inside the fixture's reach. */
+bool recovery_capture(const std::wstring& path) {
+  ComPtr<IStream> stream;
+  if (FAILED(SHCreateStreamOnFileEx(path.c_str(), STGM_CREATE | STGM_READWRITE,
+                                    FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &stream))) {
+    return false;
+  }
+  auto captured = std::make_shared<std::atomic<int>>(0);
+  gWebView->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
+    Callback<ICoreWebView2CapturePreviewCompletedHandler>([captured](HRESULT hr) -> HRESULT {
+      captured->store(SUCCEEDED(hr) ? 1 : -1); return S_OK;
+    }).Get());
+  recovery_wait([&] { return captured->load() != 0; });
+  return captured->load() == 1;
+}
+
 int main(int argc, char** argv) {
   // Stand-in viewer mode. begin_session starts THIS executable in place of GNLinkViewer.exe when
   // the handle-leak case points the test seam at it: it waits on the cancel event it was handed,
   // exactly as a connecting viewer would be told to stop, and exits 0. Nothing else runs. (RV-16)
   for (int i = 1; i + 1 < argc; ++i) {
     if (std::string(argv[i]) == "--cancel-event") {
+      // What directory the shell told its viewer to use, written down where the test can read
+      // it: the viewer is the one consumer of the address that lives in another process.
+      if (const char* root = std::getenv("GNLINK_RECOVERY_TEST_ROOT")) {
+        for (int j = 1; j + 1 < argc; ++j) {
+          if (std::string(argv[j]) != "--directory-url") continue;
+          std::ofstream seen(std::filesystem::path(root) / "viewer-directory-urls.txt",
+                             std::ios::app);
+          seen << argv[j + 1] << "\n";
+        }
+      }
       HANDLE cancel = remote60::native_poc::viewer::viewer_cancel_handle_from_arg(widen(argv[i + 1]));
       if (cancel) WaitForSingleObject(cancel, 60000);
       return 0;
     }
   }
-  if (argc != 4) { std::puts("usage: client_recovery_ui_test <fixture-url> <delay-flag> <screenshot>"); return 2; }
+  if (argc != 5) {
+    std::puts("usage: client_recovery_ui_test <fixture-url> <delay-flag> <screenshot> <decoy-url>");
+    return 2;
+  }
   // Refuse the test before opening a WebView unless its profile is a private runner fixture.
   // In particular, never share the installed client's normal TEMP/GNLinkClient environment.
   const char* fixture = std::getenv("GNLINK_RECOVERY_TEST_ROOT");
@@ -75,9 +112,14 @@ int main(int argc, char** argv) {
   if (!fixture || !std::filesystem::exists(std::filesystem::path(fixture) / ".fixture") ||
       std::filesystem::weakly_canonical(temporary) !=
           std::filesystem::weakly_canonical(std::filesystem::path(fixture) / "profile") ||
-      std::string(argv[1]).rfind("http://127.0.0.1:", 0) != 0) {
+      std::string(argv[1]).rfind("http://127.0.0.1:", 0) != 0 ||
+      std::string(argv[4]).rfind("http://127.0.0.1:", 0) != 0 ||
+      std::string(argv[4]) == argv[1]) {
     std::puts("FAIL isolated fixture/profile required; no browser process was opened or terminated"); return 2;
   }
+  // Before anything in the shell runs, for the same reason as the data directory below: the
+  // start-up update check asks for the address, and a test build with none ends the process.
+  set_shell_test_directory_url(argv[1]);
   // Where the shell keeps its settings and logs, inside the fixture -- set before anything in the
   // shell runs, and checked. This test wrote the user's real %LOCALAPPDATA%\GNLink\client.txt on
   // 2026-09-23 because the path comes from SHGetKnownFolderPath, which the runner's LOCALAPPDATA
@@ -116,16 +158,106 @@ int main(int argc, char** argv) {
     gWindow=CreateWindowExW(0,kWindowClass,L"GNLink isolated recovery test",WS_OVERLAPPEDWINDOW,
                             CW_USEDEFAULT,CW_USEDEFAULT,560,760,nullptr,nullptr,wc.hInstance,nullptr);
     ShowWindow(gWindow,SW_SHOW);
+    // ------------------------------------------------ fixed-server: the file names another server
+    //
+    // What an installed client has on disk after years of the old form: an address on line 1.
+    // Here it is the decoy -- a listener the runner owns and counts requests on. Everything below
+    // runs with this file in place, and the runner fails the run if the decoy heard anything.
+    {
+      std::ofstream stored(settings_path(), std::ios::trunc);
+      stored << argv[4] << "\nstored-account\n9000\n30\n1\n";
+    }
     recovery_check(SUCCEEDED(create_shell_webview()), "production WebView creation starts");
     recovery_check(recovery_dom(L"!!document.getElementById('signIn')"), "production login UI loads");
-    const auto signIn = [&](const wchar_t* account) {
-      const std::wstring script = L"document.getElementById('server').value='" + widen(argv[1]) +
-        L"';document.getElementById('account').value='" + account +
-        L"';document.getElementById('password').value='fixture-password';document.getElementById('signIn').click();true";
-      recovery_eval(script);
-      recovery_check(recovery_dom(L"!document.getElementById('hostsCard').classList.contains('hidden')"),
-                     "DOM login crosses native handler and real HTTP into host list");
+    // The shell asks whether this device was left signed in before it gives the form over.
+    // Nothing is stored here, so the answer is no -- waited for, because the checks below are
+    // about the form as a person finds it.
+    recovery_check(recovery_dom(L"!document.getElementById('signIn').disabled&&"
+                                L"document.getElementById('retryAuto').classList.contains('hidden')"),
+                   "with nothing stored the sign-in form is given over, with no retry offered");
+
+    // ------------------------------------------------ fixed-server: what the sign-in form shows
+    //
+    // Asked of the rendered page, not of the source: every input, select and textarea that has a
+    // box on screen inside the sign-in card, in document order.
+    const std::string shownInputs = recovery_eval(
+        L"(function(){var out=[];"
+        L"document.querySelectorAll('#signInCard input,#signInCard select,#signInCard textarea')"
+        L".forEach(function(el){var r=el.getBoundingClientRect();"
+        L"if(r.width>0&&r.height>0&&getComputedStyle(el).visibility!=='hidden')"
+        L"out.push(el.id+':'+el.type);});return out.join(',');})()");
+    std::printf("      (sign-in inputs rendered: %s)\n", shownInputs.c_str());
+    recovery_check(shownInputs == "\"account:text,password:password\"",
+                   "[fixed-server] the sign-in form shows an id and a password and nothing else");
+    recovery_check(recovery_eval(L"document.getElementById('server')===null&&"
+                                 L"!/서버|server/i.test(document.getElementById('signInCard').innerText)") == "true",
+                   "[fixed-server] no server field and no mention of one on the sign-in card");
+    recovery_check(recovery_dom(L"document.getElementById('account').value==='stored-account'&&"
+                                L"document.getElementById('bitrate').value==='9000'", 5000),
+                   "[fixed-server] the stored file WAS read: its account and settings are restored");
+    recovery_check(recovery_eval(L"document.activeElement&&document.activeElement.id") == "\"password\"",
+                   "[fixed-server] with the id remembered, the caret is in the password field");
+    // "Can be pressed" is more than exists: on screen, enabled, and nothing lying over it.
+    recovery_check(recovery_eval(
+        L"(function(){var b=document.getElementById('signIn'),r=b.getBoundingClientRect();"
+        L"var x=r.left+r.width/2,y=r.top+r.height/2;"
+        L"return !b.disabled&&r.width>0&&r.height>0&&x>=0&&y>=0&&x<=innerWidth&&y<=innerHeight&&"
+        L"document.elementFromPoint(x,y)===b;})()") == "true",
+                   "[fixed-server] the sign-in button is on screen, enabled and not covered");
+    recovery_check(recovery_capture(widen(std::string(argv[3]) + ".login.png")),
+                   "[fixed-server] the sign-in screen is photographed");
+
+    // Nothing typed: the message names the two things that are asked for, and nothing is sent.
+    recovery_eval(L"document.getElementById('account').value='';"
+                  L"document.getElementById('signIn').click();true");
+    recovery_check(recovery_eval(L"document.getElementById('signInMsg').textContent==="
+                                 L"'아이디와 비밀번호를 모두 입력해 주세요.'") == "true" &&
+                   recovery_eval(L"document.activeElement&&document.activeElement.id") == "\"account\"" &&
+                   gSessionToken.empty(),
+                   "[fixed-server] an empty form asks for the id and password, and the caret goes to the id");
+
+    const auto typeCredentials = [&](const wchar_t* account) {
+      recovery_eval(std::wstring(L"document.getElementById('account').value='") + account +
+                    L"';document.getElementById('password').value='fixture-password';true");
     };
+    const auto expectHostList = [&](const char* label) {
+      recovery_check(recovery_dom(L"!document.getElementById('hostsCard').classList.contains('hidden')"),
+                     label);
+    };
+    const auto signIn = [&](const wchar_t* account) {
+      typeCredentials(account);
+      recovery_eval(L"document.getElementById('signIn').click();true");
+      expectHostList("DOM login crosses native handler and real HTTP into host list");
+    };
+
+    // Enter in the password field, which is how a person with two fields signs in.
+    typeCredentials(L"account-a");
+    recovery_eval(L"document.getElementById('password').dispatchEvent("
+                  L"new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));true");
+    expectHostList("[fixed-server] id + password + Enter reaches the host list over real HTTP");
+    {
+      // What was written back: the same layout an older build reads, with the program's own
+      // address on line 1 -- not the decoy that was there, and not nothing.
+      std::ifstream saved(settings_path());
+      std::string line1, line2;
+      std::getline(saved, line1);
+      std::getline(saved, line2);
+      recovery_check(line1 == argv[1] && line2 == "account-a",
+                     "[fixed-server] client.txt keeps its layout: line 1 the program's server, line 2 the id");
+    }
+
+    // A page that names a server of its own. The old message had this field and the native side
+    // obeyed it; now it is not read, so the sign-in still goes to the program's server.
+    recovery_eval(L"document.getElementById('signOut').click();true");
+    recovery_check(recovery_dom(L"!document.getElementById('signInCard').classList.contains('hidden')"),
+                   "[fixed-server] signed out again");
+    recovery_eval(std::wstring(L"window.chrome.webview.postMessage(JSON.stringify({type:'login',server:'") +
+                  widen(argv[4]) + L"',accountId:'account-a',password:'fixture-password'}));true");
+    expectHostList("[fixed-server] a login message naming another server signs in to the program's server");
+    recovery_eval(L"document.getElementById('signOut').click();true");
+    recovery_check(recovery_dom(L"!document.getElementById('signInCard').classList.contains('hidden')"),
+                   "[fixed-server] signed out before the recovery cases");
+
     signIn(L"account-a");
     { std::ofstream flag(argv[2]); flag << '1'; }
     recovery_eval(L"document.getElementById('refresh').click();true");
@@ -217,6 +349,20 @@ int main(int argc, char** argv) {
         return gActiveViewers.load() == viewersAtStart &&
                gViewerByHost.find(host.hostId) == gViewerByHost.end();
       }, 30000), "fifty replacements through the real begin_session all end and are adopted");
+      {
+        // Each of those stand-ins wrote down the --directory-url it was started with. client.txt
+        // named the decoy when this shell started; a viewer sent there would say so here.
+        std::ifstream seen(std::filesystem::path(fixture) / "viewer-directory-urls.txt");
+        size_t viewers = 0, elsewhere = 0;
+        for (std::string url; std::getline(seen, url);) {
+          ++viewers;
+          if (url != argv[1]) ++elsewhere;
+        }
+        std::printf("      (viewers that recorded their directory: %zu, not the program's: %zu)\n",
+                    viewers, elsewhere);
+        recovery_check(viewers >= 1 && elsewhere == 0,
+                       "[fixed-server] every viewer was handed the program's server as --directory-url");
+      }
 
       // Launches that fail, through the product's own failure path: a file that exists (so the
       // existence check passes) but is not a program (so CreateProcessW refuses it). begin_session
@@ -501,15 +647,7 @@ int main(int argc, char** argv) {
     post_status("error", "fixture recovery error");
     recovery_check(recovery_dom(L"!document.getElementById('signIn').disabled"), "failure in settings also clears global busy state");
     recovery_eval(L"document.getElementById('closeSettings').click();true");
-    ComPtr<IStream> screenshot;
-    recovery_check(SUCCEEDED(SHCreateStreamOnFileEx(widen(argv[3]).c_str(), STGM_CREATE|STGM_READWRITE,
-                                                   FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &screenshot)), "open isolated screenshot output");
-    auto captured = std::make_shared<std::atomic<bool>>(false);
-    gWebView->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, screenshot.Get(),
-      Callback<ICoreWebView2CapturePreviewCompletedHandler>([captured](HRESULT hr) -> HRESULT {
-        captured->store(SUCCEEDED(hr)); return S_OK;
-      }).Get());
-    recovery_check(recovery_wait([&] { return captured->load(); }), "capture rendered production page");
+    recovery_check(recovery_capture(widen(argv[3])), "capture rendered production page");
     std::puts("client_recovery_ui_test: ALL PASS (real UI/native/HTTP; no updater installation)");
   } catch (const std::exception& error) { std::printf("client_recovery_ui_test: FAIL %s\n", error.what()); result=1; }
   // Whatever is still in the registry goes, pass or fail.

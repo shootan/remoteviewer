@@ -51,6 +51,11 @@ struct HostAgentConfig {
   // the first has something else to try. Zero when there is no second listener.
   uint16_t alternateUdpPort = 0;
   uint32_t heartbeatSeconds = 25;
+  // Origins a cached token may have been issued under and still be presented to `url` (see
+  // classify_cached_origin). Empty means none: only a token cached for `url` itself is used.
+  // The product fills this from product_migratable_origins_for(); nothing on the command line
+  // or in the environment can.
+  std::vector<std::string> migratableOrigins;
 };
 
 /** %LOCALAPPDATA%\remote60\host.json */
@@ -75,15 +80,45 @@ struct HostCache {
 bool load_host_cache(const std::string& path, HostCache* out);
 bool save_host_cache(const std::string& path, const HostCache& cache);
 
+/** What the address a token is cached beside means for using it with a given server. */
+enum class CachedOrigin {
+  Same,        // issued by this server: used as it always was
+  Migratable,  // issued under a listed former name of it: presented here, the cache rewritten
+               // once the server has accepted it
+  Unlisted,    // anything else: not sent anywhere, and not erased
+};
+
+/**
+ * Decides which of the three a cached address is, by origin (directory_origin_key).
+ *
+ * One function, because three places ask -- the host's window, the streaming host's agent and
+ * the tests -- and the day they disagree is the day a token goes somewhere it was not issued.
+ * An empty or unparseable cached address is Unlisted: a token with no issuer has nowhere to go.
+ */
+CachedOrigin classify_cached_origin(const std::string& cachedUrl, const std::string& serverUrl,
+                                    const std::vector<std::string>& migratableOrigins);
+
+/**
+ * The product's list of former names, for the product's server and for nothing else.
+ *
+ * Empty unless `serverUrl` is kFixedDirectoryUrl: the list says where tokens may be presented,
+ * and a streaming host started against some other directory has no business presenting them.
+ */
+std::vector<std::string> product_migratable_origins_for(const std::string& serverUrl);
+
 /**
  * Exchanges an id and password for a host token. Also the only way to check credentials
  * without starting a session, which is what the sign-in window needs.
+ *
+ * `outHttpStatus` is the directory's answer, 0 when none came. 403 is the right password for an
+ * account that may not register a PC -- waiting for approval, or stopped -- and `outError` is
+ * then the directory's own sentence, to be shown as it is.
  */
 bool register_host(const std::string& url, const std::string& accountId,
                    const std::string& password, const std::string& hostName,
                    const std::string& machineId, std::string* outHostId,
                    std::string* outHostToken, std::string* outError,
-                   ObserveEndpoint* outObserve = nullptr);
+                   ObserveEndpoint* outObserve = nullptr, uint32_t* outHttpStatus = nullptr);
 
 /**
  * Creates an account, so a user can choose their own id and password rather than asking the
@@ -285,6 +320,8 @@ class HostAgent {
    */
   bool FetchObserveEndpointFromHealth();
   bool Heartbeat(std::vector<PunchTarget>* outPunch);
+  /** The account is not active: say so, and wait a growing number of cycles before asking. */
+  void BackOffInactive(const std::string& status);
   // One attempt, reporting the status and the server's error name so the caller can tell a
   // missing observation apart from every other refusal. Heartbeat() is the policy on top.
   bool HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* outStatus,
@@ -297,6 +334,11 @@ class HostAgent {
 
   bool LoadCache();
   void SaveCache() const;
+  // The cached token was issued under a former name of this server (CachedOrigin::Migratable)
+  // and the server has not accepted it yet. The cache file still names the old address; the
+  // first heartbeat that comes back 200 is what rewrites it.
+  bool migrationPending_ = false;
+  std::string migratingFrom_;
 
   HostAgentConfig cfg_;
   SendFn send_;
@@ -317,6 +359,14 @@ class HostAgent {
   int observeFetchAttempts_ = 0;
   /** Cycles left to wait before asking again. Grows, so a silent server is not polled forever. */
   int observeFetchCooldown_ = 0;
+  /**
+   * The account is not active: registration was refused 403, or the heartbeat came back 401
+   * with code account_inactive. Nothing is asked of the directory for this many cycles, and the
+   * wait doubles each time it happens again, to a cap. An operator may approve or re-enable the
+   * account at any time, so it is asked again -- rarely, not never.
+   */
+  int inactiveCooldown_ = 0;
+  int inactiveBackoff_ = 0;
   /** Whether the directory URL is https, which changes what an absent advertisement means. */
   bool httpSecure_ = false;
 

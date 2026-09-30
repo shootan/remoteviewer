@@ -58,8 +58,11 @@ function observe(token) {
     { id: 'newcomer', pw: 'a-good-password', signupKey: 'test-signup-key' });
   check('signup creates an account', r.status === 200, `status=${r.status}`);
 
+  // Made, and waiting for an operator: the right password is answered 403 with the contract's
+  // sentence, not with a session. (account_admin_test.js covers approval.)
   r = await api('POST', '/api/login', { id: 'newcomer', pw: 'a-good-password' });
-  check('the new account can log in', r.status === 200 && !!r.body.sessionToken, `status=${r.status}`);
+  check('the new account waits for approval', r.status === 403 && r.body.code === 'pending' &&
+        !r.body.sessionToken, `status=${r.status} code=${r.body.code}`);
 
   r = await api('POST', '/api/signup', { id: 'intruder', pw: 'a-good-password', signupKey: 'wrong' });
   check('signup refuses a wrong key', r.status === 403, `status=${r.status}`);
@@ -69,7 +72,10 @@ function observe(token) {
     { id: 'newcomer', pw: 'different-password', signupKey: 'test-signup-key' });
   check('signup refuses an id already taken', r.status === 409, `status=${r.status}`);
   r = await api('POST', '/api/login', { id: 'newcomer', pw: 'a-good-password' });
-  check('the original password still works', r.status === 200, `status=${r.status}`);
+  check('the original password is still the one (403 pending, not 401)', r.status === 403,
+        `status=${r.status}`);
+  r = await api('POST', '/api/login', { id: 'newcomer', pw: 'different-password' });
+  check('the password the second signup tried is not', r.status === 401, `status=${r.status}`);
 
   r = await api('POST', '/api/signup', { id: 'shorty', pw: 'short', signupKey: 'test-signup-key' });
   check('signup refuses a weak password', r.status === 400, `status=${r.status}`);

@@ -51,6 +51,7 @@
 #include "host_command_line.hpp"
 #include "product_version.hpp"
 #include "env_util.hpp"
+#include "fixed_directory.hpp"
 #include "update_check.hpp"
 #include "update_credential_channel.hpp"
 #include "update_handoff.hpp"
@@ -86,9 +87,11 @@ constexpr wchar_t kProductName[] = L"GNLink Host";
 
 using remote60::native_poc::kProductVersion;
 
+// 1001, 1015 and 1019 were the server address field, its label and the toggle that revealed
+// them. They are gone with the question they asked; the numbers are left unused so that every
+// other control keeps the id it had.
 enum ControlId : int {
-  IdServer = 1001,
-  IdAccount,
+  IdAccount = 1002,
   IdPassword,
   IdHostName,
   IdSignIn,
@@ -101,12 +104,10 @@ enum ControlId : int {
   IdSignOut,
   IdSwitchAccount,
   IdTitle,
-  IdServerLabel,
-  IdAccountLabel,
+  IdAccountLabel = 1016,
   IdPasswordLabel,
   IdHostNameLabel,
-  IdAdvanced,
-  IdSignedAccount,
+  IdSignedAccount = 1020,
   IdSignedHost,
   IdBadge,
   IdOpenLog,
@@ -156,6 +157,66 @@ std::wstring executable_dir() {
   GetModuleFileNameW(nullptr, path, MAX_PATH);
   PathRemoveFileSpecW(path);
   return path;
+}
+
+#ifdef REMOTE60_HOST_TEST_SEAM
+// TEST BUILDS ONLY -- never defined for GNLinkHost.
+//
+// What a test that drives this window replaces, and nothing else: which directory it talks to,
+// where host.json lives (default_host_cache_path() comes from SHGetKnownFolderPath, which does
+// not follow a LOCALAPPDATA override -- the way host_punch_reply_e2e overwrote the real file on
+// 2026-09-23), and what is started in place of GNLinkStream.exe, which would otherwise capture
+// the screen and bind the ports the installed host is using. The form, the sign-in worker, the
+// HTTP and the cache handling are the product's.
+struct HostTestSeam {
+  std::string directoryUrl;
+  std::string cachePath;
+  std::wstring streamExe;
+  // Stands in for kMigratableDirectoryOrigins, which names a server no test may talk to.
+  std::vector<std::string> migratableOrigins;
+};
+HostTestSeam gHostTest;
+
+/** A test that forgot one of the three ends here rather than reaching the real thing. */
+[[noreturn]] void host_test_seam_refuse(const char* what) {
+  std::fprintf(stderr, "[host-test-seam] %s was not set; refusing to fall back to the product's\n",
+               what);
+  std::fflush(stderr);
+  TerminateProcess(GetCurrentProcess(), 97);
+  for (;;) Sleep(1000);
+}
+#endif
+
+/**
+ * The directory server. Sign-in, the streaming child, the log uploader and the update endpoint
+ * all get its address from here -- not from the form, and not from host.json.
+ */
+std::string host_directory_url() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  if (gHostTest.directoryUrl.empty()) host_test_seam_refuse("the fixture directory");
+  return gHostTest.directoryUrl;
+#else
+  return remote60::native_poc::kFixedDirectoryUrl;
+#endif
+}
+
+/** Former names of that server, under which a cached token may have been issued. */
+std::vector<std::string> host_migratable_origins() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  return gHostTest.migratableOrigins;
+#else
+  return directory::product_migratable_origins_for(host_directory_url());
+#endif
+}
+
+/** Where the host token is cached: %LOCALAPPDATA%\remote60\host.json. */
+std::string host_cache_path() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  if (gHostTest.cachePath.empty()) host_test_seam_refuse("the fixture host.json");
+  return gHostTest.cachePath;
+#else
+  return directory::default_host_cache_path();
+#endif
 }
 
 std::wstring own_executable_path() {
@@ -450,7 +511,14 @@ class StreamingHostProcess {
   }
 
   void Supervise() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+    // TEST BUILDS ONLY: a stand-in that records what it was started with. The real one would
+    // capture this screen and bind 43000/3478, which the installed host is holding.
+    if (gHostTest.streamExe.empty()) host_test_seam_refuse("the stand-in streaming host");
+    const std::wstring exe = gHostTest.streamExe;
+#else
     const std::wstring exe = executable_dir() + L"\\GNLinkStream.exe";
+#endif
     // A streaming host that dies within seconds and keeps dying is a crash loop, not an
     // ordinary reconnect. Two things follow from noticing it: back off the relaunch so a
     // wedged driver does not spin the CPU and flood the log, and -- once the GPU surface
@@ -496,7 +564,7 @@ class StreamingHostProcess {
       // one address. Making both reachable is N5's job, and until it lands the friendlier port
       // can only be reached by someone who already knows to ask for it.
       // Built from argument VALUES, not string concatenation. hostName_ comes from an edit box
-      // and the URL / account id are user input as well; a value containing a quote used to break
+      // and the account id is user input as well; a value containing a quote used to break
       // the argument boundary and inject or corrupt the child's options. (Ledger H-20.)
       const std::wstring command = build_windows_command_line(
           exe, {L"--transport", L"udp",
@@ -719,9 +787,6 @@ struct AppState {
   HWND passwordEdit = nullptr;
   HWND hostNameLabel = nullptr;
   HWND hostNameEdit = nullptr;
-  HWND advancedToggle = nullptr;
-  HWND serverLabel = nullptr;
-  HWND serverEdit = nullptr;
   HWND createAccountCheck = nullptr;
   HWND signupKeyLabel = nullptr;
   HWND signupKeyEdit = nullptr;
@@ -748,13 +813,16 @@ struct AppState {
   HBRUSH badgeBrushes[4] = {};
   BadgeState badgeState = BadgeState::Starting;
   UINT dpi = 96;
-  bool advancedOpen = false;
   NOTIFYICONDATAW tray{};
   bool trayAdded = false;
   bool signedIn = false;
   bool uiPreview = false;
   std::string cachePath;
   directory::HostCache cache;
+  // host.json held a token this build may not use (see cached_token_origin). The file is as
+  // it was found, and stays so until a sign-in succeeds and there is something to replace it
+  // with -- a mistyped password must not be what erases it.
+  bool unusableCacheOnDisk = false;
   /**
    * Counts sign-ins in this process.
    *
@@ -915,7 +983,7 @@ remote60::native_poc::update::UpdateEndpoint current_update_endpoint() {
   std::lock_guard<std::mutex> lock(g.ownerMu);
   return directory::update_endpoint_for(
       remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
-      g.cache.directoryUrl, "windows",
+      host_directory_url(), "windows",
       g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
       g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
 }
@@ -1025,10 +1093,6 @@ void apply_signed_in_ui(bool signedIn) {
   ShowWindow(g.passwordEdit, form);
   ShowWindow(g.hostNameLabel, form);
   ShowWindow(g.hostNameEdit, form);
-  ShowWindow(g.advancedToggle, form);
-  const bool serverVisible = !signedIn && g.advancedOpen;
-  ShowWindow(g.serverLabel, serverVisible ? SW_SHOW : SW_HIDE);
-  ShowWindow(g.serverEdit, serverVisible ? SW_SHOW : SW_HIDE);
   ShowWindow(g.createAccountCheck, form);
   const bool creating =
       !signedIn && SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1060,7 +1124,7 @@ void apply_signed_in_ui(bool signedIn) {
  */
 bool start_log_upload() {
   remote60::native_poc::LogUploadConfig upload;
-  upload.directoryUrl = g.cache.directoryUrl;
+  upload.directoryUrl = host_directory_url();
   upload.hostToken = g.cache.hostToken;
   upload.device = g.cache.machineId;
   upload.identity = g.cache.accountId + "/" + g.cache.machineId;
@@ -1349,39 +1413,43 @@ void start_update_handoff(HWND window) {
 
 void start_streaming() {
   if (g.uiPreview) return;
-  g.streaming.Configure(widen(g.cache.directoryUrl), widen(g.cache.accountId),
+  g.streaming.Configure(widen(host_directory_url()), widen(g.cache.accountId),
                         widen(g.cache.hostName));
   g.streaming.Start();
 }
 
-void open_advanced_settings() {
-  g.advancedOpen = true;
-  SendMessageW(g.advancedToggle, BM_SETCHECK, BST_CHECKED, 0);
-  ShowWindow(g.serverLabel, SW_SHOW);
-  ShowWindow(g.serverEdit, SW_SHOW);
-  relayout();
+/**
+ * What the address in host.json means for the token beside it.
+ *
+ * The same question HostAgent::LoadCache asks in the streaming child, through the same function,
+ * so the window and the child cannot disagree about being signed in:
+ *
+ *   Same        issued by this build's server. Used as it always was.
+ *   Migratable  issued under a listed former name of it. The window comes up signed in and
+ *               presents the token to this build's server and to nothing else; the child's
+ *               first accepted heartbeat is what rewrites host.json. This process does not
+ *               rewrite it on the token's say-so.
+ *   Unlisted    anything else. Not sent anywhere and not erased: the file stays as found.
+ */
+directory::CachedOrigin cached_token_origin(const directory::HostCache& cached) {
+  if (cached.hostToken.empty()) return directory::CachedOrigin::Unlisted;
+  return directory::classify_cached_origin(cached.directoryUrl, host_directory_url(),
+                                           host_migratable_origins());
 }
 
 void perform_sign_in() {
   if (g.signInBusy.exchange(true)) return;
 
-  const std::string url = narrow(window_text(g.serverEdit));
+  const std::string url = host_directory_url();
   const std::string account = narrow(window_text(g.accountEdit));
   const std::string password = narrow(window_text(g.passwordEdit));
   std::string hostName = narrow(window_text(g.hostNameEdit));
   if (hostName.empty()) hostName = narrow(default_host_name());
 
-  if (url.empty()) {
-    // The field lives behind the advanced toggle; asking for it while keeping it hidden
-    // would send the user hunting.
-    if (!g.advancedOpen) open_advanced_settings();
-    set_status(L"Enter the server address under Advanced settings.");
-    SetFocus(g.serverEdit);
-    g.signInBusy.store(false);
-    return;
-  }
   if (account.empty() || password.empty()) {
     set_status(L"Enter your ID and password.");
+    // The caret goes where the missing thing is typed.
+    SetFocus(account.empty() ? g.accountEdit : g.passwordEdit);
     g.signInBusy.store(false);
     return;
   }
@@ -1395,9 +1463,9 @@ void perform_sign_in() {
     return;
   }
 
-  // Remember where they were signing in to before knowing whether it worked; retyping the
-  // server address after every failed attempt is needless. The token goes with the account it
-  // was issued for, so it is dropped when either the account or the server changes.
+  // Remember who was signing in before knowing whether it worked; retyping the id after every
+  // failed attempt is needless. The token goes with the account and the server it was issued
+  // for, so it is dropped when the account changes or the file named a different server.
   uint64_t requestEpoch = 0;
   {
     std::lock_guard<std::mutex> lock(g.ownerMu);
@@ -1413,7 +1481,7 @@ void perform_sign_in() {
   g.cache.machineId = directory::machine_id();
     requestEpoch = ++g.ownerEpoch;
   }
-  (void)directory::save_host_cache(g.cachePath, g.cache);
+  if (!g.unusableCacheOnDisk) (void)directory::save_host_cache(g.cachePath, g.cache);
 
   set_status(creating ? L"Creating the account..." : L"Signing in...");
   EnableWindow(g.signInButton, FALSE);
@@ -1486,9 +1554,9 @@ void create_fonts() {
 void apply_fonts() {
   const HWND bodyControls[] = {
       g.hintLabel,       g.accountLabel,       g.accountEdit,      g.passwordLabel,
-      g.passwordEdit,    g.hostNameLabel,      g.hostNameEdit,     g.advancedToggle,
-      g.serverLabel,     g.serverEdit,         g.createAccountCheck, g.signupKeyLabel,
-      g.signupKeyEdit,   g.signInButton,       g.signedAccountLabel, g.signedHostLabel,
+      g.passwordEdit,    g.hostNameLabel,      g.hostNameEdit,     g.createAccountCheck,
+      g.signupKeyLabel,  g.signupKeyEdit,      g.signInButton,
+      g.signedAccountLabel, g.signedHostLabel,
       g.statusBadge,     g.startWithWindowsCheck, g.switchAccountButton, g.signOutButton,
       g.openLogButton,   g.statusLabel,     g.versionLabel,
   };
@@ -1541,15 +1609,8 @@ void build_controls(HWND window) {
   g.hostNameLabel = make_label(window, IdHostNameLabel, L"This PC's name");
   g.hostNameEdit = make_edit(window, IdHostName, 0);
 
-  // The server address is real configuration, but 99% of sign-ins reuse the cached one, so it
-  // hides behind a toggle instead of being the first thing on the form.
-  g.advancedToggle =
-      make_button(window, IdAdvanced, L"Advanced settings (server address)",
-                  WS_VISIBLE | BS_AUTOCHECKBOX);
-  g.serverLabel = make_label(window, IdServerLabel, L"Server");
-  g.serverEdit = make_edit(window, IdServer, 0);
-  ShowWindow(g.serverLabel, SW_HIDE);
-  ShowWindow(g.serverEdit, SW_HIDE);
+  // No server address: the program knows its server (host_directory_url), so the form asks for
+  // who is signing in and nothing about where.
 
   // Without this the only accounts that work are ones somebody created on the server by hand,
   // and picking your own id gets rejected as "not correct", which reads like a typo.
@@ -1624,14 +1685,6 @@ int layout_signed_out() {
   place(g.hostNameLabel, margin, y + sc(4), labelW, labelH);
   place(g.hostNameEdit, fieldX, y, fieldW, rowH);
   y += rowH + sc(10);
-
-  place(g.advancedToggle, margin, y, contentW, sc(22));
-  y += sc(28);
-  if (g.advancedOpen) {
-    place(g.serverLabel, margin, y + sc(4), labelW, labelH);
-    place(g.serverEdit, fieldX, y, fieldW, rowH);
-    y += rowH + sc(10);
-  }
 
   place(g.createAccountCheck, margin, y, contentW, sc(22));
   y += sc(28);
@@ -1836,13 +1889,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         set_autostart(checked);
         return 0;
       }
-      if (id == IdAdvanced) {
-        g.advancedOpen = SendMessageW(g.advancedToggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        ShowWindow(g.serverLabel, g.advancedOpen ? SW_SHOW : SW_HIDE);
-        ShowWindow(g.serverEdit, g.advancedOpen ? SW_SHOW : SW_HIDE);
-        relayout();
-        return 0;
-      }
       if (id == IdCreateAccount) {
         const bool checked =
             SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1977,6 +2023,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         write_health_report(start_log_upload() ? "pending" : "not-configured");
         // Only the token is written; the password never reaches disk.
         (void)directory::save_host_cache(g.cachePath, g.cache);
+        g.unusableCacheOnDisk = false;  // replaced by a registration this build made
         SetWindowTextW(g.passwordEdit, L"");
         apply_signed_in_ui(true);
         start_streaming();
@@ -2108,18 +2155,38 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
     g.uiPreview = true;
     g.cache.accountId = "preview-account";
     g.cache.hostName = "PREVIEW-PC";
-    g.cache.directoryUrl = "http://127.0.0.1:8080";
     haveToken = previewSignedIn;
   } else {
-    g.cachePath = directory::default_host_cache_path();
-    haveToken = directory::load_host_cache(g.cachePath, &g.cache);
+    g.cachePath = host_cache_path();
+    const bool storedToken = directory::load_host_cache(g.cachePath, &g.cache);
+    const directory::CachedOrigin storedOrigin = cached_token_origin(g.cache);
+    haveToken = storedToken && storedOrigin != directory::CachedOrigin::Unlisted;
+    if (haveToken && storedOrigin == directory::CachedOrigin::Migratable) {
+      append_host_app_log("[host-app] the stored sign-in was issued as " +
+                          directory::directory_origin_key(g.cache.directoryUrl) +
+                          ", a former name of this build's server; it is presented to " +
+                          directory::directory_origin_key(host_directory_url()) +
+                          " and host.json is rewritten once that is accepted");
+    }
+    if (storedToken && !haveToken) {
+      // Not this build's server. The token stays in the file and leaves this process: nothing
+      // below -- the uploader, the update endpoint, the streaming child -- may be handed it.
+      append_host_app_log("[host-app] the stored sign-in was issued by " +
+                          directory::directory_origin_key(g.cache.directoryUrl) +
+                          ", not by this build's server; it is kept on disk and not used");
+      g.cache.hostToken.clear();
+      g.cache.hostId.clear();
+      g.unusableCacheOnDisk = true;
+    }
     bool uploaderOn = false;
     if (haveToken) uploaderOn = start_log_upload();
     // Said as soon as it is known, so an updater is not waiting on a machine that has nothing to
     // report. `pending` means an answer is coming; the other two mean none is.
     write_health_report(uploaderOn ? "pending" : "not-configured");
   }
-  SetWindowTextW(g.serverEdit, widen(g.cache.directoryUrl).c_str());
+  // Whatever the file said, from here on the address is the program's -- including in what is
+  // written back, which an older build reads after a rollback.
+  g.cache.directoryUrl = host_directory_url();
   SetWindowTextW(g.accountEdit, widen(g.cache.accountId).c_str());
   SetWindowTextW(g.hostNameEdit,
                  g.cache.hostName.empty() ? default_host_name().c_str()

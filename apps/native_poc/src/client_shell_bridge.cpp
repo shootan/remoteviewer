@@ -124,12 +124,20 @@ ShellUpdateNotice shell_update_notice(const std::string& outcome,
   return notice;
 }
 
-std::string shell_restore_json(const std::string& server, const std::string& accountId,
+std::string shell_restore_json(const std::string& accountId,
                                const ShellRuntimeSettings& settings) {
   std::ostringstream oss;
-  oss << "{\"type\":\"restore\",\"server\":\"" << escape(server) << "\",\"accountId\":\""
+  oss << "{\"type\":\"restore\",\"accountId\":\""
       << escape(accountId) << "\",\"bitrateKbps\":" << settings.bitrateKbps
       << ",\"fps\":" << settings.fps << ",\"monitorId\":" << settings.monitorId << "}";
+  return oss.str();
+}
+
+std::string shell_auto_login_json(const std::string& state, const std::string& accountId,
+                                  const std::string& text) {
+  std::ostringstream oss;
+  oss << "{\"type\":\"autoLogin\",\"state\":\"" << escape(state) << "\",\"accountId\":\""
+      << escape(accountId) << "\",\"text\":\"" << escape(text) << "\"}";
   return oss.str();
 }
 
