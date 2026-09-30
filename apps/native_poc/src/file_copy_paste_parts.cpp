@@ -20,27 +20,99 @@ void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneFn onGone)
   onGone_ = std::move(onGone);
 }
 
-void FileHelperChannel::Configure(Config config, FrameFn onFrame, GoneOfFn onGone) {
+void FileHelperChannel::Configure(Config config, FrameOfFn onFrame, GoneOfFn onGone) {
   std::lock_guard<std::mutex> lock(mu_);
   config_ = std::move(config);
-  onFrame_ = std::move(onFrame);
+  onFrameOf_ = std::move(onFrame);
   onGoneOf_ = std::move(onGone);
 }
 
 void FileHelperChannel::SetOwner(uint64_t owner) {
-  std::lock_guard<std::mutex> s(sendMu_);  // ordered with SendAs: no send of the old owner after this
-  owner_.store(owner);
+  std::shared_ptr<fc::HelperLink> dying;
+  {
+    std::lock_guard<std::mutex> s(sendMu_);
+    if (owner_.load() == owner) return;
+    owner_.store(owner);
+    if (cur_.link) {
+      dying = std::move(prev_.link);  // a helper two sessions back: gone now
+      prev_ = std::move(cur_);
+      cur_ = Helper{};
+    }
+  }
+  if (dying) dying->Close();
 }
 
 bool FileHelperChannel::EnsureAs(uint64_t owner, std::string* why, bool* stale) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (owner_.load() != owner) {
+  return EnsureLocked(owner, why, stale);
+}
+
+bool FileHelperChannel::Ensure(std::string* why) {
+  std::lock_guard<std::mutex> lock(mu_);
+  return EnsureLocked(owner_.load(), why, nullptr);
+}
+
+bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* stale) {
+  if (stale) *stale = false;
+  {
+    std::lock_guard<std::mutex> s(sendMu_);
+    if (owner_.load() != owner) {
+      *why = "the session ended";
+      if (stale) *stale = true;
+      return false;
+    }
+    if (cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive()) return true;
+  }
+  const uint64_t now = GetTickCount64();
+  if (now < nextLaunchMs_) {
+    *why = "helper start backing off";
+    return false;
+  }
+  ++launches_;
+  // Started on a link of its own, outside every lock (a start takes seconds); only once it is up is
+  // it checked, under sendMu_, that its owner still owns the channel -- and only then does it become
+  // the channel's helper. A previous helper (of this or an earlier owner) is closed for good here,
+  // as before: its Job goes and so does its process.
+  auto fresh = std::make_shared<fc::HelperLink>();
+  if (!config_.launcher || !config_.launcher(fresh.get(), why)) {
+    fresh->Close();
+    backoffMs_ = backoffMs_ ? (std::min)(backoffMs_ * 2, config_.backoffMaxMs) : config_.backoffFirstMs;
+    nextLaunchMs_ = now + backoffMs_;
+    ++launchFailures_;
+    return false;
+  }
+  std::shared_ptr<fc::HelperLink> dying, dyingCur;
+  std::thread oldReader;
+  bool adopted = false;
+  {
+    std::lock_guard<std::mutex> s(sendMu_);
+    if (owner_.load() == owner) {
+      dying = std::move(prev_.link);
+      // The replaced helper of this same owner (it died, or its pipe failed) goes now too, as it did
+      // before; one of another owner (after SetOwner) is prev_ and Retire's to end.
+      if (cur_.link && cur_.owner == owner) dyingCur = cur_.link;
+      prev_ = std::move(cur_);
+      cur_ = Helper{fresh, owner};
+      adopted = true;
+    }
+  }
+  if (!adopted) {
+    // The owner moved on while the helper was starting: this helper was started for a session that
+    // has ended. It never published anything; it goes at once.
+    fresh->Close();
     *why = "the session ended";
     if (stale) *stale = true;
     return false;
   }
-  if (stale) *stale = false;
-  return EnsureLocked(why);
+  if (dying) dying->Close();  // its reader (if still there) sees the pipe go and ends
+  if (dyingCur) dyingCur->Close();
+  oldReader = std::move(prevReader_);
+  if (oldReader.joinable()) oldReader.join();  // under mu_ only: never under a caller's lock
+  prevReader_ = std::move(reader_);
+  reader_ = std::thread([this, owner, fresh] { ReaderLoop(owner, fresh); });
+  backoffMs_ = 0;
+  nextLaunchMs_ = 0;
+  return true;
 }
 
 bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* stale) {
@@ -50,81 +122,61 @@ bool FileHelperChannel::SendAs(uint64_t owner, const fc::PipeFrame& f, bool* sta
     return false;
   }
   if (stale) *stale = false;
-  return link_.pipe_open() && link_.Send(f);
-}
-
-bool FileHelperChannel::Running() const {
-  std::lock_guard<std::mutex> lock(mu_);
-  return link_.pipe_open() && link_.helper_alive();
-}
-
-bool FileHelperChannel::Ensure(std::string* why) {
-  std::lock_guard<std::mutex> lock(mu_);
-  return EnsureLocked(why);
-}
-
-bool FileHelperChannel::EnsureLocked(std::string* why) {
-  if (link_.pipe_open() && link_.helper_alive()) return true;
-  const uint64_t now = GetTickCount64();
-  if (now < nextLaunchMs_) {
-    *why = "helper start backing off";
-    return false;
-  }
-  readerRun_.store(false);
-  if (reader_.joinable()) reader_.join();
-  link_.Close();
-  ++launches_;
-  if (!config_.launcher || !config_.launcher(&link_, why)) {
-    link_.Close();
-    backoffMs_ = backoffMs_ ? (std::min)(backoffMs_ * 2, config_.backoffMaxMs) : config_.backoffFirstMs;
-    nextLaunchMs_ = now + backoffMs_;
-    ++launchFailures_;
-    return false;
-  }
-  backoffMs_ = 0;
-  nextLaunchMs_ = 0;
-  readerRun_.store(true);
-  const uint64_t owner = owner_.load();  // whom this helper was started for
-  reader_ = std::thread([this, owner] { ReaderLoop(owner); });
-  return true;
+  return cur_.link && cur_.link->pipe_open() && cur_.link->Send(f);
 }
 
 bool FileHelperChannel::Send(const fc::PipeFrame& f) {
   std::lock_guard<std::mutex> s(sendMu_);
-  return link_.pipe_open() && link_.Send(f);
+  return cur_.link && cur_.link->pipe_open() && cur_.link->Send(f);
 }
 
-void FileHelperChannel::ReaderLoop(uint64_t owner) {
-  while (readerRun_.load()) {
+bool FileHelperChannel::Running() const {
+  std::lock_guard<std::mutex> s(sendMu_);
+  return cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive();
+}
+
+void FileHelperChannel::ReaderLoop(uint64_t owner, std::shared_ptr<fc::HelperLink> link) {
+  for (;;) {
     fc::PipeFrame f;
-    if (!link_.Receive(&f, 100)) {
+    if (!link->Receive(&f, 100)) {
       if (GetLastError() == WAIT_TIMEOUT) continue;
       break;  // the pipe is gone
     }
     if (onFrame_) onFrame_(f);
+    if (onFrameOf_) onFrameOf_(owner, f);
   }
   if (onGone_) onGone_();
   if (onGoneOf_) onGoneOf_(owner);
 }
 
-void FileHelperChannel::Disconnect() {
-  readerRun_.store(false);
+void FileHelperChannel::Retire(uint64_t owner, bool sendShutdown) {
   std::lock_guard<std::mutex> s(sendMu_);
-  link_.ClosePipe();
+  for (Helper* h : {&cur_, &prev_}) {
+    if (!h->link || h->owner != owner) continue;
+    if (sendShutdown && h->link->pipe_open()) (void)h->link->Send(fc::encode_shutdown());
+    h->link->ClosePipe();
+  }
+}
+
+void FileHelperChannel::Disconnect() {
+  std::lock_guard<std::mutex> s(sendMu_);
+  if (cur_.link) cur_.link->ClosePipe();
 }
 
 void FileHelperChannel::Stop() {
-  readerRun_.store(false);
-  std::thread t;
+  std::thread a, b;
   {
     std::lock_guard<std::mutex> lock(mu_);
     {
       std::lock_guard<std::mutex> s(sendMu_);
-      link_.Close();
+      if (cur_.link) cur_.link->Close();
+      if (prev_.link) prev_.link->Close();
     }
-    t = std::move(reader_);
+    a = std::move(reader_);
+    b = std::move(prevReader_);
   }
-  if (t.joinable()) t.join();
+  if (a.joinable()) a.join();
+  if (b.joinable()) b.join();
 }
 
 // ------------------------------------------------------------------------------ FilePullReceiver

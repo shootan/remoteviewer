@@ -59,6 +59,8 @@ class FileHelperChannel {
   using Launcher = std::function<bool(file_copy::HelperLink* link, std::string* why)>;
   /** Every frame the helper sends, on the reader thread. */
   using FrameFn = std::function<void(const file_copy::PipeFrame&)>;
+  /** The same, told which owner (SetOwner) the helper that sent it was started for (r6). */
+  using FrameOfFn = std::function<void(uint64_t owner, const file_copy::PipeFrame&)>;
   /** The pipe is gone (the helper exited or was stopped), on the reader thread. */
   using GoneFn = std::function<void()>;
   /** The same, told which owner (SetOwner) the pipe was started for -- a late "gone" of an earlier
@@ -74,25 +76,37 @@ class FileHelperChannel {
   ~FileHelperChannel() { Stop(); }
 
   void Configure(Config config, FrameFn onFrame, GoneFn onGone);
-  void Configure(Config config, FrameFn onFrame, GoneOfFn onGone);
+  void Configure(Config config, FrameOfFn onFrame, GoneOfFn onGone);
   bool configured() const { return config_.launcher != nullptr; }
 
-  /** Running, or started now (one start at a time, backoff honoured). */
+  /** Running, or started now (one start at a time, backoff honoured). Unowned: as the current owner. */
   bool Ensure(std::string* why);
   bool Send(const file_copy::PipeFrame& f);
 
   /**
-   * Ownership (r5): the helper is per session, and the session's epoch owns the channel. SetOwner
-   * moves it on; EnsureAs / SendAs of another owner do nothing -- a late request of an ended session
-   * can neither start a helper for the new session nor put anything on its clipboard. `stale`
-   * (optional) tells that refusal from a plain pipe failure.
+   * Ownership (r5/r6): the helper is per session, and the session's epoch owns the channel. Every
+   * helper is started FOR an owner and stays tagged with it for its whole life: its reader hands
+   * frames and its "gone" to the callbacks with that tag, so the receiver can tell an earlier
+   * session's helper from the current one's. SetOwner moves the channel on: the current helper (if
+   * any) becomes the previous one, to be shut down by Retire; from then on EnsureAs / SendAs of
+   * another owner do nothing (`stale`). A start that was under way when the owner moved on is
+   * checked again once the helper is up and, if its owner is no longer the channel's, closed at
+   * once -- it never becomes the new owner's helper (r6). Nothing here is waited for under the
+   * caller's locks: a start takes seconds; only the channel's own mu_ serialises starts.
    */
   void SetOwner(uint64_t owner);
   uint64_t owner() const { return owner_.load(); }
   bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr);
   bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr);
   bool Running() const;
-  /** Drops the pipe: the helper clears what it published and exits (its contract). */
+  /**
+   * Ends `owner`'s helper (the current one, or the previous one after SetOwner): Shutdown is sent
+   * when asked, then the pipe is dropped -- the helper clears what it published and exits (its
+   * contract). The process handle and Job stay until the next start (as before), so the helper has
+   * that long to clear the clipboard on its own. Another owner's helper is not touched.
+   */
+  void Retire(uint64_t owner, bool sendShutdown);
+  /** Drops the current pipe (unowned use): the helper clears what it published and exits. */
   void Disconnect();
   void Stop();
 
@@ -100,19 +114,27 @@ class FileHelperChannel {
   uint64_t launchFailures() const { return launchFailures_.load(); }
 
  private:
-  void ReaderLoop(uint64_t owner);
-  bool EnsureLocked(std::string* why);  // caller holds mu_
+  // One started helper: its link (shared with its reader thread, which outlives a replacement) and
+  // the owner it was started for.
+  struct Helper {
+    std::shared_ptr<file_copy::HelperLink> link;
+    uint64_t owner = 0;
+  };
+  void ReaderLoop(uint64_t owner, std::shared_ptr<file_copy::HelperLink> link);
+  bool EnsureLocked(uint64_t owner, std::string* why, bool* stale);  // caller holds mu_
 
   Config config_;
   FrameFn onFrame_;
+  FrameOfFn onFrameOf_;
   GoneFn onGone_;
   GoneOfFn onGoneOf_;
   std::atomic<uint64_t> owner_{0};
-  mutable std::mutex mu_;      // start / stop
-  std::mutex sendMu_;
-  file_copy::HelperLink link_;
-  std::thread reader_;
-  std::atomic<bool> readerRun_{false};
+  mutable std::mutex mu_;  // starts, one at a time; the reader threads
+  // sendMu_: owner_, cur_ and prev_ change only under it, and every send holds it -- so once
+  // SetOwner has returned, no send of the previous owner reaches any pipe.
+  mutable std::mutex sendMu_;
+  Helper cur_, prev_;
+  std::thread reader_, prevReader_;  // under mu_
   uint64_t nextLaunchMs_ = 0;
   uint32_t backoffMs_ = 0;
   std::atomic<uint64_t> launches_{0}, launchFailures_{0};

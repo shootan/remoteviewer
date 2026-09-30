@@ -297,15 +297,30 @@ int wmain() {
   HostFileCopyService::Config cfg;
   cfg.enabled = true;
   const std::wstring helperLog = root + L"helper.log";
+  // r6 Z1: the test can hold the launcher once the helper is up and has said hello -- the moment a
+  // session switch would find "a helper of the old session, started, not yet the channel's".
+  std::mutex lpm;
+  std::condition_variable lpcv;
+  bool launchPark = false, launchParked = false, launchRelease = false;
   cfg.launcher = [&](fc::HelperLink* link, std::string* why) {
     std::wstring sid;
     if (!fc::current_process_user_sid(&sid)) {
       *why = "no user SID";
       return false;
     }
-    return link->CreateServerPipe(sid, why) &&
-           link->Launch(helperExe, nullptr, station.desktop.c_str(), L"--idle-ms 8000 --log \"" + helperLog + L"\"", why) &&
-           link->AwaitHello(10000, why);
+    const bool up = link->CreateServerPipe(sid, why) &&
+                    link->Launch(helperExe, nullptr, station.desktop.c_str(), L"--idle-ms 8000 --log \"" + helperLog + L"\"", why) &&
+                    link->AwaitHello(10000, why);
+    if (up) {
+      std::unique_lock<std::mutex> l(lpm);
+      if (launchPark) {
+        launchPark = false;
+        launchParked = true;
+        lpcv.notify_all();
+        lpcv.wait(l, [&] { return launchRelease; });
+      }
+    }
+    return up;
   };
   host.Start(host_send, 1200, cfg, &hostArbiter, [](const std::string& l) { std::printf("      host: %s\n", l.c_str()); });
   // Before any viewer asks: this copy was on the remote clipboard before the session began.
@@ -1395,15 +1410,22 @@ int wmain() {
     // before the handler: A's handler must find the state no longer its session's and apply nothing.
     std::mutex pm;
     std::condition_variable pcv;
-    int parkPoint = 0;
-    uint64_t parkEpoch = 0;
-    bool parked = false, release = false;
+    int parkPoint = 0, parkPoint2 = 0;
+    uint64_t parkEpoch = 0, parkEpoch2 = 0;
+    bool parked = false, release = false, parked2 = false, release2 = false;
     host.SetEpochProbeForTest([&](uint64_t e, int point) {
       std::unique_lock<std::mutex> l(pm);
-      if (point != parkPoint || e != parkEpoch) return;
-      parked = true;
-      pcv.notify_all();
-      pcv.wait(l, [&] { return release; });
+      if (point == parkPoint && e == parkEpoch) {
+        parkPoint = 0;  // one thread per slot
+        parked = true;
+        pcv.notify_all();
+        pcv.wait(l, [&] { return release; });
+      } else if (point == parkPoint2 && e == parkEpoch2) {
+        parkPoint2 = 0;
+        parked2 = true;
+        pcv.notify_all();
+        pcv.wait(l, [&] { return release2; });
+      }
     });
     const auto offer_of = [](uint64_t id) {
       fn::Offer o;
@@ -1698,11 +1720,11 @@ int wmain() {
     // then a copy made on the remote PC, identified by the helper, asked for until it has an id.
     const std::wstring y3Path = remoteDir + L"\\epochY3.txt";
     write_file(y3Path, make_content(2048, 173));
-    const auto host_offer_in = [&](uint64_t epoch) {
+    const auto host_offer_in = [&](uint64_t epoch, const std::wstring& path = std::wstring()) {
       fn::OfferQueryReply qr;
       std::vector<uint8_t> raw;
       (void)(call(fn::FileMsg::OfferQuery, fn::body(fn::OfferQuery{0}), epoch, &raw) && fn::parse(raw, &qr));  // the baseline
-      host.OnHostClipboard(++hostSeq, {y3Path});
+      host.OnHostClipboard(++hostSeq, {path.empty() ? y3Path : path});
       uint64_t id = 0;
       wait_until([&] {
         std::vector<uint8_t> r2;
@@ -1734,10 +1756,12 @@ int wmain() {
       fn::PrepareReply a, b;
       uint64_t h9 = 0;
       HostFileCopyService::Counters atB{};
-      const Parked p = park(5, 8, [&] { prepare_rtop(8, h8, 0x5A01, &aAnswered, &a); },
+      // Both sessions use paste op 1 (r6): every session's ops start at 1, so the old request's
+      // clean-up must tell the new session's reservation from its own by the whole key.
+      const Parked p = park(5, 8, [&] { prepare_rtop(8, h8, 1, &aAnswered, &a); },
                             [&] {
                               h9 = host_offer_in(9);
-                              prepare_rtop(9, h9, 0x5B01, &bAnswered, &b);
+                              prepare_rtop(9, h9, 1, &bAnswered, &b);
                               atB = host.GetCounters();
                             },
                             30000);
@@ -1746,19 +1770,27 @@ int wmain() {
       check("Y3.5: session 9 sees the remote copy as its own offer", h9 != 0 && h9 != h8, "h8=" + std::to_string(h8) + " h9=" + std::to_string(h9));
       check("Y3.5: B's send was prepared in session 9", bAnswered && b.verdict == fn::Verdict::Accept,
             "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
-      check("Y3.5: ...and the sender was begun for B while A was parked", atB.sendOpen && atB.sendPasteOp == 0x5B01,
-            "open=" + std::to_string(atB.sendOpen) + " op=" + std::to_string(atB.sendPasteOp));
+      check("Y3.5: ...and the sender was begun for B while A was parked", atB.sendOpen && atB.sendPasteOp == 1 && atB.sendEpochTag == b.epochTag,
+            "open=" + std::to_string(atB.sendOpen) + " op=" + std::to_string(atB.sendPasteOp) + " tagIsB=" + std::to_string(atB.sendEpochTag == b.epochTag));
       check("Y3.5: A was DROPPED (no answer)", !aAnswered,
             "answered=" + std::to_string(aAnswered) + " verdict=" + std::to_string(static_cast<int>(a.verdict)));
       const auto after = host.GetCounters();
-      check("Y3.5: the sender is still B's after A was let go (A did not begin on top of it)", after.sendOpen && after.sendPasteOp == 0x5B01,
-            "open=" + std::to_string(after.sendOpen) + " op=" + std::to_string(after.sendPasteOp));
+      check("Y3.5: the sender is still B's after A was let go (A did not begin on top of it)",
+            after.sendOpen && after.sendPasteOp == 1 && after.sendEpochTag == b.epochTag && a.epochTag != b.epochTag,
+            "open=" + std::to_string(after.sendOpen) + " op=" + std::to_string(after.sendPasteOp) + " tagIsB=" + std::to_string(after.sendEpochTag == b.epochTag));
       check("Y3.5: only B's send was counted as prepared", after.sendPrepared == before.sendPrepared + 1,
             "prepared +" + std::to_string(after.sendPrepared - before.sendPrepared));
+      // The old request's clean-up (same op 1) must not have released the NEW session's reservation:
+      // the host's bulk is still held by paste op 1 (B's), and B's paste is still there to be ended.
+      check("Y3.5: the host's bulk is still B's (the stale clean-up did not release the same op)",
+            hostArbiter.use() == BulkUse::File && hostArbiter.owner() == 1,
+            "use=" + std::to_string(static_cast<int>(hostArbiter.use())) + " owner=" + std::to_string(hostArbiter.owner()));
       bool eAnswered = false;
       fn::EndReply er;
-      end_paste(9, h9, 0x5B01, &eAnswered, &er);
-      check("Y3.5: session 9 ends its send", eAnswered && er.state == fn::PasteState::Failed, "state=" + std::to_string(static_cast<int>(er.state)));
+      end_paste(9, h9, 1, &eAnswered, &er);
+      check("Y3.5: session 9 ends its send (its paste was still there, not wiped by the stale clean-up)",
+            eAnswered && er.state == fn::PasteState::Failed, "state=" + std::to_string(static_cast<int>(er.state)));
+      check("Y3.5: ...and the bulk is free", hostArbiter.use() == BulkUse::Idle);
       check("Y3.5: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
     }
     {
@@ -1803,6 +1835,141 @@ int wmain() {
       end_paste(10, h10, 0x5B02, &eAnswered, &er);
       check("Y3.6: session 10 ends its send", eAnswered && er.state == fn::PasteState::Failed);
       check("Y3.6: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
+    }
+
+    // Z1 (r6 2a): the switch happens while the OLD session's helper is still starting (up, said
+    // hello, not yet the channel's). That helper must never become the new session's: the old
+    // request is dropped, the new session starts its own (exactly one more launch), its offer stays,
+    // and nothing crashes -- 20 times over.
+    std::printf("      --- Z1: a helper start that crosses the switch never becomes the new session's helper ---\n");
+    {
+      int ok = 0, parkedOk = 0, launchesOk = 0, stateOk = 0, aDropped = 0;
+      const int rounds = 20;
+      for (int i = 0; i < rounds; ++i) {
+        const uint64_t oldE = 11 + 2 * static_cast<uint64_t>(i), newE = oldE + 1;
+        host.OnSessionEnd(oldE);  // a clean session, no live helper (the previous one is retired)
+        const auto before = host.GetCounters();
+        {
+          std::lock_guard<std::mutex> l(lpm);
+          launchPark = true;
+          launchParked = false;
+          launchRelease = false;
+        }
+        bool aAnswered = false;
+        fn::OfferReply a;
+        std::thread at([&] { offer_call(oldE, 0xA100 + static_cast<uint64_t>(i), &aAnswered, &a); });
+        bool parkedNow = false;
+        {
+          std::unique_lock<std::mutex> l(lpm);
+          parkedNow = lpcv.wait_for(l, std::chrono::seconds(15), [&] { return launchParked; });
+        }
+        host.OnSessionEnd(newE);  // the switch, while the old session's helper is up but not adopted
+        {
+          std::lock_guard<std::mutex> l(lpm);
+          launchPark = false;
+          launchRelease = true;
+          lpcv.notify_all();
+        }
+        at.join();
+        bool cAnswered = false;
+        fn::OfferReply c;
+        offer_call(newE, 0xA200 + static_cast<uint64_t>(i), &cAnswered, &c);
+        Sleep(150);  // room for a late "gone" of the crossed helper, if any
+        const fn::PasteState sc = state_of(newE, 0xA200 + static_cast<uint64_t>(i), &answered);
+        const auto after = host.GetCounters();
+        parkedOk += parkedNow ? 1 : 0;
+        aDropped += !aAnswered ? 1 : 0;
+        launchesOk += after.helperLaunches == before.helperLaunches + 2 ? 1 : 0;
+        stateOk += (cAnswered && c.verdict == fn::Verdict::Accept && answered && sc == fn::PasteState::None) ? 1 : 0;
+        ok += (parkedNow && !aAnswered && after.helperLaunches == before.helperLaunches + 2 && cAnswered &&
+               c.verdict == fn::Verdict::Accept && answered && sc == fn::PasteState::None)
+                  ? 1
+                  : 0;
+      }
+      check("Z1: the old session's start was held at 'up, not yet the channel's' every round", parkedOk == rounds,
+            std::to_string(parkedOk) + "/" + std::to_string(rounds));
+      check("Z1: the old request was dropped every round (its helper was closed, not adopted)", aDropped == rounds,
+            std::to_string(aDropped) + "/" + std::to_string(rounds));
+      check("Z1: the new session started exactly one helper of its own every round (launches +2)", launchesOk == rounds,
+            std::to_string(launchesOk) + "/" + std::to_string(rounds));
+      check("Z1: the new session's offer was accepted and stayed every round", stateOk == rounds,
+            std::to_string(stateOk) + "/" + std::to_string(rounds));
+      check("Z1: all rounds clean (no crash, no leak into the new session)", ok == rounds, std::to_string(ok) + "/" + std::to_string(rounds));
+    }
+
+    // Z2 (r6 2b): the OLD session's helper answers a Pin (op 1) and that answer is still on its way
+    // (its reader is parked at point 7) when the switch happens and the NEW session reserves the same
+    // op 1 and is about to ask its own helper (parked at point 8). The old answer must not be taken:
+    // the new session's Prepare gets its own helper's answer -- its own file's size, not the old one's.
+    std::printf("      --- Z2: an old helper's late PinResult (same op) does not answer the new session's pin ---\n");
+    {
+      const uint64_t oldE = 61, newE = 62;
+      const std::wstring z2Old = remoteDir + L"\\epochZ2old.txt", z2New = remoteDir + L"\\epochZ2new.txt";
+      write_file(z2Old, make_content(2048, 181));
+      write_file(z2New, make_content(4096, 182));
+      const uint64_t hOld = host_offer_in(oldE, z2Old);
+      check("Z2: the old session sees its copy (2048 bytes)", hOld != 0);
+      const auto before = host.GetCounters();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        parkPoint = 7;  // the old helper's next frame: the PinResult
+        parkEpoch = oldE;
+        parked = false;
+        release = false;
+        parkPoint2 = 8;  // the new session's Prepare, reserved, before its own pin
+        parkEpoch2 = newE;
+        parked2 = false;
+        release2 = false;
+      }
+      bool aAnswered = false;
+      fn::PrepareReply a;
+      std::thread at([&] { prepare_rtop(oldE, hOld, 1, &aAnswered, &a); });
+      bool readerParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        readerParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked; });
+      }
+      check("Z2: the old helper's PinResult was held before the host looked at it", readerParked);
+      host.OnSessionEnd(newE);  // the switch: the old helper is retired, its reader still holds the answer
+      at.join();               // the old Prepare gives up (its session ended, or its pin timed out)
+      const uint64_t hNew = host_offer_in(newE, z2New);
+      check("Z2: the new session sees its copy (4096 bytes)", hNew != 0 && hNew != hOld);
+      bool bAnswered = false;
+      fn::PrepareReply b;
+      std::thread bt([&] { prepare_rtop(newE, hNew, 1, &bAnswered, &b); });
+      bool bParked = false;
+      {
+        std::unique_lock<std::mutex> l(pm);
+        bParked = pcv.wait_for(l, std::chrono::seconds(10), [&] { return parked2; });
+      }
+      check("Z2: the new session's Prepare was held with op 1 reserved, before its own pin", bParked);
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release = true;  // the old answer arrives now, into the new session's wait
+        pcv.notify_all();
+      }
+      Sleep(200);
+      const auto mid = host.GetCounters();
+      {
+        std::lock_guard<std::mutex> l(pm);
+        release2 = true;  // now the new session asks its own helper
+        pcv.notify_all();
+      }
+      bt.join();
+      check("Z2: the old helper's answer was not taken (a stale frame)", mid.staleHelperFrames > before.staleHelperFrames,
+            "stale frames +" + std::to_string(mid.staleHelperFrames - before.staleHelperFrames));
+      check("Z2: the new session's Prepare was accepted", bAnswered && b.verdict == fn::Verdict::Accept,
+            "answered=" + std::to_string(bAnswered) + " verdict=" + std::to_string(static_cast<int>(b.verdict)));
+      check("Z2: ...with ITS OWN helper's answer: its file's size, not the old session's",
+            bAnswered && b.items.size() == 1 && b.items[0].size == 4096,
+            "items=" + std::to_string(b.items.size()) + " size0=" + std::to_string(b.items.empty() ? 0 : b.items[0].size));
+      const auto after = host.GetCounters();
+      check("Z2: the sender is the new session's", after.sendOpen && after.sendEpochTag == b.epochTag && after.sendPasteOp == 1);
+      bool eAnswered = false;
+      fn::EndReply er;
+      end_paste(newE, hNew, 1, &eAnswered, &er);
+      check("Z2: the new session ends its send", eAnswered && er.state == fn::PasteState::Failed);
+      check("Z2: ...and the sender is closed", wait_until([&] { return !host.GetCounters().sendOpen; }, 3000));
     }
     host.SetEpochProbeForTest(nullptr);
   }
