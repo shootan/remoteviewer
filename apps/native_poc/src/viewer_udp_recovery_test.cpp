@@ -1903,7 +1903,12 @@ int run_real_recv_smoke(const std::wstring& hostExe, int seconds) {
 
     std::set<uint32_t> seen;
     uint32_t matched = 0, kfReqs = 0;
-    const uint64_t endUs = qpc_now_us() + static_cast<uint64_t>(seconds) * 1'000'000ull;
+    // Fixed measurement boundary (r9 V2): collect for `seconds`, then an extra drain margin so the last
+    // event painted before the cutoff has time to decode. Only events painted at/before `eventCutoffUs`
+    // are REQUIRED to have been matched (an event painted during the drain margin is not falsely demanded).
+    const uint64_t startUs = qpc_now_us();
+    const uint64_t eventCutoffUs = startUs + static_cast<uint64_t>(seconds) * 1'000'000ull;
+    const uint64_t endUs = eventCutoffUs + 1'500'000ull;  // drain margin for the last pre-cutoff event
     while (qpc_now_us() < endUs) {
       uint16_t reason = 0;
       while (rig.ctx.control.keyframeRequests.ConsumePending(&reason)) ++kfReqs;
@@ -1918,32 +1923,37 @@ int run_real_recv_smoke(const std::wstring& hostExe, int seconds) {
       }
       Sleep(3);
     }
-    const uint32_t expected = host.eventLog.Count();
+    // AUTHORITATIVE product evidence that an IDR decoded + reference-synced, read from the receiver's
+    // own FrameGate state (set on the recv thread in note_reference_sync), NOT the 2 ms present poll:
+    //   lastDecodedKeyCaptureUs != 0  <- set ONLY when a KEY frame decodes (an IDR resynced the decoder)
+    //   waitForKeyFrame == false      <- the gate left the first-IDR wait after that decode
+    const uint64_t idrKeyCaptureUs = rig.gate.lastDecodedKeyCaptureUs;
+    const bool leftKeyWait = !rig.gate.waitForKeyFrame;
+    const uint32_t requiredEvents = host.eventLog.CountUpTo(eventCutoffUs);  // all events with decode time
+    const uint32_t paintedTotal = host.eventLog.Count();
     const uint64_t published = rig.publishedCount.load();
     const std::string keySeqs = rig.published_key_seqs();
     const uint64_t missed = rig.missedPublishes.load();
     const uint64_t giveUps = rig.give_ups();
     rig.Stop();
     host.Stop();
-    std::printf("REALRECV %-22s | marker matched=%u/%u | published=%llu keyIDRs(present-poll)=%s "
-                "missedPublishes=%llu | FrameGate keyReq=%u | giveUps=%llu\n",
-                s.label, matched, expected, (unsigned long long)published, keySeqs.c_str(),
-                (unsigned long long)missed, kfReqs, (unsigned long long)giveUps);
+    std::printf("REALRECV %-22s | marker matched=%u (required<=cutoff=%u, paintedTotal=%u) | IDR keyCaptureUs=%llu "
+                "leftKeyWait=%d | published=%llu keyIDRs(present-poll)=%s missedPublishes=%llu | keyReq=%u giveUps=%llu\n",
+                s.label, matched, requiredEvents, paintedTotal, (unsigned long long)idrKeyCaptureUs,
+                leftKeyWait ? 1 : 0, (unsigned long long)published, keySeqs.c_str(), (unsigned long long)missed,
+                kfReqs, (unsigned long long)giveUps);
     const std::string t = std::string("realrecv ") + s.label;
-    // Recovery evidence that does NOT depend on ViewerRig's 2 ms present-KEY poll (which intermittently
-    // misses a coalesced key-frame version -- its own missedPublishes). A matched marker REQUIRES a
-    // decoded reference IDR (you cannot decode a markered frame without it), so matched>=1 + frames
-    // PUBLISHED through the real path (publishedCount, an accumulating counter) + no stuck-head give-up
-    // is the authoritative "an IDR decoded and recovery works". keyIDRs(present-poll) and the per-second
-    // RecvStats.decodedFrames (reset each flush) are diagnostics only, not gated. (r8 verify-fail
-    // classification: the IDR decodes EVERY run -- marker 4/4 in all 10 repeats -- only the present-poll
-    // key record flaked; test-side, not a product defect.)
-    CHECK(matched >= 1 && expected >= 1, t + ": a change marker reached the real VideoReceiver's decoded FrameBuffer");
-    CHECK(published >= 1, t + ": frames were published through the real receive path (an IDR + dependents)");
-    CHECK(giveUps == 0, t + ": no stuck-head give-up on the real receive path");
+    // (1) IDR decode gated on the AUTHORITATIVE product state, not the lossy present-key poll (r9 V1).
+    CHECK(idrKeyCaptureUs != 0 && leftKeyWait,
+          t + ": the real FrameGate decoded+reference-synced an IDR (lastDecodedKeyCaptureUs set, keyframe-wait cleared)");
+    // (2) EVERY event painted with decode time before the fixed cutoff reached the decoded FrameBuffer.
+    CHECK(requiredEvents >= 1 && matched >= requiredEvents,
+          t + ": every change marker painted before the cutoff reached the decoded FrameBuffer (matched=" +
+              std::to_string(matched) + " required=" + std::to_string(requiredEvents) + ")");
     // No keyframe storm: FrameGate asks only around the first-IDR wait, not per frame. 0-1 is normal.
-    CHECK(kfReqs <= 3u + expected, t + ": no unnecessary repeated keyframe requests (reqs=" +
-                                           std::to_string(kfReqs) + " events=" + std::to_string(expected) + ")");
+    CHECK(kfReqs <= 3u + paintedTotal, t + ": no unnecessary repeated keyframe requests (reqs=" +
+                                           std::to_string(kfReqs) + " events=" + std::to_string(paintedTotal) + ")");
+    (void)published;  // reported as a diagnostic alongside keyIDRs(present-poll)/missedPublishes
   }
   return 0;
 }

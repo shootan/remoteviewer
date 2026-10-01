@@ -103,6 +103,16 @@ struct EventLog {
     std::lock_guard<std::mutex> lk(mu);
     return next - 1;
   }
+  // Events whose paint QPC is at or before `cutoffUs` -- i.e. painted early enough to have had time to
+  // decode within a collection window ending after `cutoffUs`. Used to fix the measurement boundary so
+  // an event painted just before the window closes is not falsely required (r9 V2 marker gate).
+  uint32_t CountUpTo(uint64_t cutoffUs) {
+    std::lock_guard<std::mutex> lk(mu);
+    uint32_t n = 0;
+    for (const auto& kv : paintQpc)
+      if (kv.second <= cutoffUs) ++n;
+    return n;
+  }
 };
 
 // Read the marker out of a decoded NV12 Y plane (coded stride = width; visible origin applied). Returns
