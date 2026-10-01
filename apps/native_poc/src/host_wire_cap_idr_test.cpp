@@ -169,6 +169,41 @@ void measure(uint64_t capBps, size_t idrBytes, const char* label) {
   check(std::string("FIX ") + label + ": the scheduler spends no rounds, so spent_for stays false", !gaveUp, buf);
 }
 
+// Mixed-version comparison: the SAME cap-paced lossless IDR through the real scheduler in its
+// pre-0.2.147/legacy age-based tail mode vs the r2 progress-based mode. The old receiver fires
+// premature tail NACKs (wasteful, but note: it does NOT prove a give-up -- the product give-up also
+// needs noProgress, and the tail keeps progressing); the fixed receiver fires none.
+void measure_legacy_vs_fixed() {
+  std::printf("\n--- mixed version: legacy (age-based) vs fixed (progress-based) tail, same cap-paced IDR ---\n");
+  const auto dgs = cap_paced_idr(1'500'000, 208u * 1024u);  // the worst case: ~1.4 s send
+  auto run = [&](bool legacy) {
+    UdpH264FrameAssembler a;
+    a.ConfigureInOrderHold(120000, 8);
+    VideoNackConfig cfg;
+    cfg.tailAgeBasedLegacy = legacy;
+    VideoNackScheduler sched(cfg);
+    uint64_t nacks = 0;
+    uint64_t pollUs = dgs.front().emitUs;
+    for (const auto& d : dgs) {
+      while (pollUs + 25000 <= d.emitUs) {
+        pollUs += 25000;
+        UdpVideoNackPacket p{};
+        if (sched.Poll(a, true, pollUs, &p)) ++nacks;
+      }
+      a.PushDatagram(d.bytes.data(), d.bytes.size(), d.emitUs);
+      UdpVideoNackPacket p{};
+      if (sched.Poll(a, true, d.emitUs, &p)) ++nacks;
+    }
+    return nacks;
+  };
+  const uint64_t legacyNacks = run(true);
+  const uint64_t fixedNacks = run(false);
+  check("legacy (old 0.2.147) age-based tail: premature NACKs on the lossless cap-paced IDR",
+        legacyNacks > 0, "legacyNacks=" + std::to_string(legacyNacks));
+  check("fixed (r2) progress-based tail: no premature NACK on the same IDR",
+        fixedNacks == 0, "fixedNacks=" + std::to_string(fixedNacks));
+}
+
 // Negative control: a tail that genuinely STOPS arriving (the host stalls) IS still NACKed after
 // tailGrace of no progress -- the progress rule must not disable real tail recovery.
 void measure_stalled_tail() {
@@ -205,6 +240,7 @@ int main() {
   measure(6'000'000, 208u * 1024u, "208KB@6Mbps");
   measure(1'500'000, 155u * 1024u, "155KB@1.5Mbps");
   measure(1'500'000, 208u * 1024u, "208KB@1.5Mbps");
+  measure_legacy_vs_fixed();
   measure_stalled_tail();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   // This test PASSES when it REPRODUCES the problem; it is evidence for the receiver fix decision.
