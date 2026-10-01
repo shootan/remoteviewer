@@ -37,6 +37,8 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -84,12 +86,20 @@ constexpr uint32_t kBitrate = 1500000;  // the user's 1500 setting, where parity
 constexpr int kWinW = 640;
 constexpr int kWinH = 360;
 
-enum class Content { StaticText, LowMotion, Video };
+// StaticText/LowMotion/Video are the original synthetic cases. TextScroll/WindowDrag/PartialVideo are
+// the r4-addendum "real desktop-like" cases the verifier asked for: a structured text page that
+// scrolls, a static page with an opaque window dragged across it, and a static page with a small
+// localised video (noise) region -- the mostly-static-plus-local-motion profile of actual desktop use,
+// which exercises the cap's quality trade-off far more realistically than full-frame noise.
+enum class Content { StaticText, LowMotion, Video, TextScroll, WindowDrag, PartialVideo };
 const char* content_name(Content c) {
   switch (c) {
     case Content::StaticText: return "static";
     case Content::LowMotion: return "lowmotion";
     case Content::Video: return "video";
+    case Content::TextScroll: return "textscroll";
+    case Content::WindowDrag: return "windowdrag";
+    case Content::PartialVideo: return "partialvideo";
   }
   return "?";
 }
@@ -183,6 +193,52 @@ class Target {
         uint32_t* row = pixels_ + static_cast<size_t>(y) * kWinW;
         for (int x = 0; x < kWinW; ++x) row[x] = (x >= barX && x < barX + 32) ? 0x00F0F0F0u : 0x00ECECE6u;
       }
+    } else if (content == Content::TextScroll) {
+      // The whole structured page scrolls vertically -- a full-frame change, but of real text, not
+      // noise. Composited by blitting the cached page at a wrapping offset (fast, no per-pixel work).
+      EnsurePageCache(dc);
+      const int off = static_cast<int>((frame_ * 4) % static_cast<uint64_t>(kWinH));
+      BitBlt(memDc_, 0, 0, kWinW, kWinH - off, pageDc_, 0, off, SRCCOPY);
+      if (off > 0) BitBlt(memDc_, 0, kWinH - off, kWinW, off, pageDc_, 0, 0, SRCCOPY);
+    } else if (content == Content::WindowDrag) {
+      // A static text page with one opaque "window" (title bar + body) dragged diagonally across it --
+      // mostly static, a localised moving rectangle. Restore the clean page first (blit), then draw it.
+      EnsurePageCache(dc);
+      BitBlt(memDc_, 0, 0, kWinW, kWinH, pageDc_, 0, 0, SRCCOPY);
+      const int span = kWinW - 360;
+      int wx = static_cast<int>((frame_ * 6) % static_cast<uint64_t>(span * 2));
+      if (wx >= span) wx = span * 2 - wx;  // bounce
+      const int wy = 40 + (wx / 3);
+      RECT body{wx, wy, wx + 340, wy + 200};
+      HBRUSH bodyB = CreateSolidBrush(RGB(250, 250, 252));
+      FillRect(memDc_, &body, bodyB);
+      DeleteObject(bodyB);
+      RECT title{wx, wy, wx + 340, wy + 24};
+      HBRUSH titleB = CreateSolidBrush(RGB(48, 96, 180));
+      FillRect(memDc_, &title, titleB);
+      DeleteObject(titleB);
+      RECT frameTop{wx, wy, wx + 340, wy + 1};
+      HBRUSH edge = CreateSolidBrush(RGB(20, 20, 30));
+      FrameRect(memDc_, &body, edge);
+      FillRect(memDc_, &frameTop, edge);
+      DeleteObject(edge);
+    } else if (content == Content::PartialVideo) {
+      // A static text page with a small localised video region (noise) -- e.g. a video playing in a
+      // corner of a document. Restore the clean page (blit), then repaint only the small noise rect.
+      EnsurePageCache(dc);
+      BitBlt(memDc_, 0, 0, kWinW, kWinH, pageDc_, 0, 0, SRCCOPY);
+      GdiFlush();  // commit the restore blit before writing the noise region into memDc_'s DIB bits
+      const int vx = kWinW - 340, vy = kWinH - 260, vw = 320, vh = 240;
+      uint32_t state = static_cast<uint32_t>(frame_ * 2654435761u + 1u);
+      for (int y = vy; y < vy + vh; ++y) {
+        uint32_t* row = pixels_ + static_cast<size_t>(y) * kWinW;
+        for (int x = vx; x < vx + vw; ++x) {
+          state ^= state << 13;
+          state ^= state >> 17;
+          state ^= state << 5;
+          row[x] = state & 0x00FFFFFFu;
+        }
+      }
     }
     BitBlt(dc, 0, 0, kWinW, kWinH, memDc_, 0, 0, SRCCOPY);
   }
@@ -198,6 +254,24 @@ class Target {
     memDc_ = CreateCompatibleDC(dc);
     bitmap_ = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&pixels_), nullptr, 0);
     SelectObject(memDc_, bitmap_);
+  }
+  // A cached clean text page the real-desktop content types composite from each frame (scroll blit,
+  // window-drag restore, partial-video restore) -- painting the page is per-pixel and far too slow to
+  // redo every frame, so it is rendered once here and only blitted after.
+  void EnsurePageCache(HDC dc) {
+    if (pageDc_) return;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = kWinW;
+    bi.bmiHeader.biHeight = -kWinH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    pageDc_ = CreateCompatibleDC(dc);
+    pageBitmap_ = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, nullptr, nullptr, 0);
+    SelectObject(pageDc_, pageBitmap_);
+    PaintPage(pageDc_);
+    GdiFlush();
   }
   static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<Target*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -247,6 +321,8 @@ class Target {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
     if (memDc_) DeleteDC(memDc_);
     if (bitmap_) DeleteObject(bitmap_);
+    if (pageDc_) DeleteDC(pageDc_);
+    if (pageBitmap_) DeleteObject(pageBitmap_);
     hwnd_ = nullptr;
   }
   std::thread thread_;
@@ -257,6 +333,8 @@ class Target {
   HDC memDc_ = nullptr;
   HBITMAP bitmap_ = nullptr;
   uint32_t* pixels_ = nullptr;
+  HDC pageDc_ = nullptr;      // cached clean page for the real-desktop content types
+  HBITMAP pageBitmap_ = nullptr;
 };
 
 // ------------------------------------------------------------------------------ host log
@@ -343,6 +421,12 @@ struct RunResult {
   uint64_t switchUs = 0;  // when the runtime bitrate downshift was sent (0 = none)
   uint64_t recoveryMaxUs = 0;  // max time from a discontinuity to the next delivered keyframe
   uint32_t recoveryCount = 0;
+  // Realtime decode (r4 addendum): a decoder thread consumes AUs AS THEY ARE DELIVERED (not post-hoc),
+  // so these are present-ready timings -- when each frame actually finished decoding, and the span
+  // from its capture to that moment. This is what a viewer would actually see keep up (or not).
+  std::vector<uint64_t> decodeOutUs;      // qpc when each frame finished decoding, in order
+  std::vector<uint64_t> decodeLatencyUs;  // decodeOut - captureStamp per frame
+  uint32_t realtimeDecoded = 0;           // frames the realtime decoder produced
 };
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
@@ -429,7 +513,6 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   }
   check(r.launched, "the host started");
 
-  std::vector<std::pair<std::vector<uint8_t>, std::pair<bool, uint64_t>>> deliveredAus;  // payload, (key, stamp)
   if (r.launched) {
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in hostAddr{};
@@ -466,6 +549,13 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     std::atomic<bool> pendingKeyRequest{false};
     uint32_t lastDelivered = 0;
     uint64_t lastDiscUs = 0;  // for recovery-time: a discontinuity awaiting its next delivered key
+    // Realtime decode (r4 addendum): a decoder thread consumes AUs as they are delivered, so the
+    // fps/latency/freeze reflect what a viewer would actually see keep up -- not a post-hoc batch.
+    std::mutex dmu;
+    std::condition_variable dcv;
+    bool dstop = false;
+    std::deque<std::pair<std::vector<uint8_t>, std::pair<bool, uint64_t>>> dq;  // payload, (key, captureStamp)
+
     SessionVideoPipelineConfig cfg;
     cfg.nackEnabled = r.nackNegotiated;
     cfg.holdUs = r.nackNegotiated ? 120000 : 0;
@@ -491,7 +581,11 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
         ++r.recoveryCount;
         lastDiscUs = 0;  // recovered
       }
-      deliveredAus.emplace_back(std::move(f.payload), std::make_pair(key, f.header.captureQpcUs));
+      {
+        std::lock_guard<std::mutex> dlk(dmu);
+        dq.emplace_back(std::move(f.payload), std::make_pair(key, f.header.captureQpcUs));
+      }
+      dcv.notify_one();
     };
     cb.requestKeyframe = [&] {
       ++r.keyReq;
@@ -503,6 +597,40 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       (void)send(sock, reinterpret_cast<const char*>(&p), sizeof(p), 0);  // to the real host
     };
     SessionVideoPipeline pipeline(cfg, cb);
+
+    std::thread decodeThread([&] {
+      H264Decoder dec;
+      if (!dec.initialize(kWinW, kWinH, fps)) {
+        r.decoder = "init-failed";
+        return;
+      }
+      r.decoder = dec.backend_name();
+      int64_t stamp = 10000000;
+      for (;;) {
+        std::pair<std::vector<uint8_t>, std::pair<bool, uint64_t>> au;
+        {
+          std::unique_lock<std::mutex> dlk(dmu);
+          dcv.wait(dlk, [&] { return dstop || !dq.empty(); });
+          if (dq.empty()) {
+            if (dstop) break;
+            continue;
+          }
+          au = std::move(dq.front());
+          dq.pop_front();
+        }
+        std::vector<DecodedFrameNv12> out;
+        bool overflow = false;
+        stamp += 333333;
+        if (!dec.decode_access_unit(au.first, au.second.first, stamp, &out, &overflow)) ++r.decodeErrors;
+        const uint64_t outUs = qpc_now_us();
+        for (size_t k = 0; k < out.size(); ++k) {
+          ++r.realtimeDecoded;
+          r.decodeOutUs.push_back(outUs);
+          r.decodeLatencyUs.push_back(outUs >= au.second.second ? outUs - au.second.second : 0);
+        }
+      }
+      dec.shutdown();
+    });
 
     std::atomic<bool> stop{false};
     std::map<uint64_t, uint32_t> occurrences;
@@ -602,6 +730,14 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     if (controlThread.joinable()) controlThread.join();
     stop.store(true);
     if (ingress.joinable()) ingress.join();
+    // Drain and stop the realtime decoder (it finishes any AUs still queued, then exits).
+    {
+      std::lock_guard<std::mutex> dlk(dmu);
+      dstop = true;
+    }
+    dcv.notify_all();
+    if (decodeThread.joinable()) decodeThread.join();
+    r.decoded = r.realtimeDecoded;  // the matrix's correctness check now reflects the realtime decode
     {
       std::lock_guard<std::mutex> lk(pmu);
       r.malformed = static_cast<uint32_t>(pipeline.stats().malformed);
@@ -631,24 +767,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
           captureLine);
   }
 
-  // Everything delivered, through the product decoder.
-  if (!deliveredAus.empty()) {
-    H264Decoder dec;
-    if (dec.initialize(kWinW, kWinH, fps)) {
-      r.decoder = dec.backend_name();
-      int64_t stamp = 10000000;
-      for (const auto& au : deliveredAus) {
-        std::vector<DecodedFrameNv12> out;
-        bool overflow = false;
-        stamp += 333333;
-        if (!dec.decode_access_unit(au.first, au.second.first, stamp, &out, &overflow)) ++r.decodeErrors;
-        r.decoded += static_cast<uint32_t>(out.size());
-      }
-      dec.shutdown();
-    } else {
-      r.decoder = "init-failed";
-    }
-  }
+  // Decode is realtime now (the decodeThread above), so there is no post-hoc batch pass here.
   r.appliedBitrate = bitrate;
   r.appliedFps = fps;
   return r;
@@ -689,18 +808,17 @@ double window_peak_bps(const std::vector<std::pair<uint64_t, uint32_t>>& ev, uin
 
 // The isolation-matrix metrics for one run + the cap-window / responsiveness assertions.
 //
-// r4 R4 metric honesty: the timing figures below are measured at ASSEMBLER DELIVERY, and `postDecoded`
-// is a POST-HOC decode of the collected AUs after the host/receiver stopped -- NOT a real-time
-// present. So `deliveredFps` is the delivery cadence, `deliverLat*` is capture->assembler-delivery,
-// `deliverGapMax` is the largest delivery gap. Post-hoc decode success (postDecoded>=2, decErr==0) is
-// a correctness check, not a realtime-present proof. A real-time decoder/present + PC FrameGate path
-// remains a test-candidate (see report). `maxDeliverGapMs` (0 = no gate) is a pre-fixed responsiveness
-// ceiling for scenarios where a long freeze would be a defect (lossless motion); a frozen candidate
-// then FAILS instead of only printing a large number.
-void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, double maxDeliverGapMs) {
+// Two layers are reported, kept distinct (r4 R4 + addendum):
+//   delivery* -- measured at ASSEMBLER DELIVERY (deliveredFps / deliverLat / deliverGapMax).
+//   decode*   -- measured at the REALTIME DECODER output (decodeFps / decodeLat / decodeGapMax): a
+//                decoder thread consumed the AUs as they arrived, so this is present-ready timing --
+//                what a viewer would actually see keep up. `realtimeDecoded`/decErr is the correctness
+//                check. The pre-fixed responsiveness ceiling `maxDecodeGapMs` (0 = no gate) is applied
+//                to the DECODE gap, so a candidate that holds the cap by freezing the picture FAILS.
+void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, double maxDecodeGapMs) {
   const double p1s = window_peak_bps(r.wireEvents, 1'000'000);
   const double p250 = window_peak_bps(r.wireEvents, 250'000);
-  double deliveredFps = 0, firstFrameMs = 0, deliverGapMaxMs = 0, latP95Ms = 0, latMaxMs = 0, idrPerSec = 0;
+  double deliveredFps = 0, firstFrameMs = 0, deliverGapMaxMs = 0, idrPerSec = 0;
   if (r.deliverUs.size() >= 2) {
     const uint64_t span = r.deliverUs.back() - r.deliverUs.front();
     if (span > 0) {
@@ -712,35 +830,46 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
     uint64_t gap = 0;
     for (size_t i = 1; i < r.deliverUs.size(); ++i) gap = std::max(gap, r.deliverUs[i] - r.deliverUs[i - 1]);
     deliverGapMaxMs = gap / 1000.0;
-    std::vector<uint64_t> lat;
-    for (size_t i = 0; i < r.deliverUs.size(); ++i)
-      if (r.deliverUs[i] >= r.captureStampUs[i]) lat.push_back(r.deliverUs[i] - r.captureStampUs[i]);
+  }
+  // Realtime decode layer.
+  double decodeFps = 0, decodeGapMaxMs = 0, decodeLatP95Ms = 0, decodeLatMaxMs = 0, firstDecodeMs = 0;
+  if (r.decodeOutUs.size() >= 2) {
+    const uint64_t span = r.decodeOutUs.back() - r.decodeOutUs.front();
+    if (span > 0) decodeFps = static_cast<double>(r.realtimeDecoded) * 1e6 / static_cast<double>(span);
+    const uint64_t t0 = r.wireEvents.empty() ? r.decodeOutUs.front() : r.wireEvents.front().first;
+    firstDecodeMs = (r.decodeOutUs.front() - t0) / 1000.0;
+    uint64_t gap = 0;
+    for (size_t i = 1; i < r.decodeOutUs.size(); ++i) gap = std::max(gap, r.decodeOutUs[i] - r.decodeOutUs[i - 1]);
+    decodeGapMaxMs = gap / 1000.0;
+    std::vector<uint64_t> lat = r.decodeLatencyUs;
     if (!lat.empty()) {
       std::sort(lat.begin(), lat.end());
-      latP95Ms = lat[(lat.size() * 95) / 100] / 1000.0;
-      latMaxMs = lat.back() / 1000.0;
+      decodeLatP95Ms = lat[(lat.size() * 95) / 100] / 1000.0;
+      decodeLatMaxMs = lat.back() / 1000.0;
     }
   }
-  std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | postDecoded=%u "
-              "deliveredFps=%.1f firstFrame=%.0fms deliverGapMax=%.0fms deliverLatP95=%.0fms deliverLatMax=%.0fms "
-              "idr/s=%.2f keyReq=%u disc=%u nacks=%u giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
+  std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | "
+              "deliveredFps=%.1f deliverGapMax=%.0fms firstFrame=%.0fms | realtimeDecoded=%u decodeFps=%.1f "
+              "firstDecode=%.0fms decodeGapMax=%.0fms decodeLatP95=%.0fms decodeLatMax=%.0fms | idr/s=%.2f keyReq=%u "
+              "disc=%u nacks=%u giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
               label, (unsigned long long)capBps, r.appliedBitrate, r.appliedFps, p1s, 100.0 * p1s / capBps, p250,
-              100.0 * p250 / capBps, r.decoded, deliveredFps, firstFrameMs, deliverGapMaxMs, latP95Ms, latMaxMs,
-              idrPerSec, r.keyReq, r.disc, r.nacks, r.giveUps, r.decodeErrors, r.decoder.c_str(),
-              (unsigned long long)r.rxDropped);
+              100.0 * p250 / capBps, deliveredFps, deliverGapMaxMs, firstFrameMs, r.realtimeDecoded, decodeFps,
+              firstDecodeMs, decodeGapMaxMs, decodeLatP95Ms, decodeLatMaxMs, idrPerSec, r.keyReq, r.disc, r.nacks,
+              r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped);
   std::printf("       %s host: queueWaitMax=%llums queueDepthMax=%llu wireCapBps=%llu | recoveryMax=%.0fms recoveries=%u\n",
               label, (unsigned long long)(r.host.maxQueueWaitUs / 1000), (unsigned long long)r.host.maxQueueDepth,
               (unsigned long long)r.host.wireCapBps, r.recoveryMaxUs / 1000.0, r.recoveryCount);
   const std::string tag = std::string("matrix ") + label;
   check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
   check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
-  check(r.decoded >= 2 && r.decodeErrors == 0, tag + ": post-hoc decode produced frames (correctness, not realtime)");
-  check(firstFrameMs >= 0 && firstFrameMs <= 3000, tag + ": the first frame arrives within a bounded time");
-  // r4 R4-2: a pre-fixed responsiveness ceiling so a frozen stream FAILS rather than only printing a
-  // large deliverGapMax. Only where a long freeze is a defect (lossless motion); 0 disables the gate.
-  if (maxDeliverGapMs > 0)
-    check(deliverGapMaxMs <= maxDeliverGapMs,
-          tag + ": max delivery gap within the responsiveness ceiling (" + std::to_string((int)maxDeliverGapMs) + "ms)");
+  check(r.realtimeDecoded >= 2 && r.decodeErrors == 0, tag + ": the realtime decoder produced frames (no decode error)");
+  check(firstDecodeMs >= 0 && firstDecodeMs <= 3000, tag + ": the first frame decodes within a bounded time");
+  // r4 R4-2 / addendum: a pre-fixed responsiveness ceiling on the REALTIME DECODE gap, so a candidate
+  // that keeps the cap by freezing the decoded picture FAILS. Only where a long freeze is a defect
+  // (motion-bearing content); 0 disables it (a static page legitimately has long gaps).
+  if (maxDecodeGapMs > 0)
+    check(decodeGapMaxMs <= maxDecodeGapMs,
+          tag + ": max realtime-decode gap within the responsiveness ceiling (" + std::to_string((int)maxDecodeGapMs) + "ms)");
 }
 
 // A runtime 6 -> 1.5 Mbps downshift. r4 R4-3: instead of discarding a fixed +1.5 s settle window, pin
@@ -794,13 +923,17 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     const char* label;
     Content content;
     uint32_t bitrate, fps, lossPermille;
-    double maxDeliverGapMs;  // responsiveness ceiling (r4 R4-2); 0 = no gate (static / loss are lenient)
+    double maxDecodeGapMs;  // realtime-decode responsiveness ceiling; 0 = no gate (static/loss lenient)
   };
   const Scn scns[] = {
       {"6M/60-motion", Content::Video, 6'000'000, 60, 0, 500.0},
       {"6M/60-static", Content::StaticText, 6'000'000, 60, 0, 0.0},
       {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0, 900.0},
       {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50, 0.0},
+      // r4 addendum: real desktop-like content, each with realtime decode measured.
+      {"6M/60-textscroll", Content::TextScroll, 6'000'000, 60, 0, 600.0},
+      {"6M/60-windowdrag", Content::WindowDrag, 6'000'000, 60, 0, 600.0},
+      {"3M/60-partialvideo", Content::PartialVideo, 3'000'000, 60, 0, 700.0},
   };
   for (const Scn& s : scns) {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
@@ -811,7 +944,7 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     const std::wstring runDir = dir + L"m_" + safe + L"\\";
     const RunResult r = run_host(hostExe, runDir, s.content, /*tight=*/true, port, seconds, s.lossPermille, 1,
                                  /*wireCapOn=*/true, s.bitrate, s.fps);
-    matrix_metrics(s.label, s.bitrate, r, s.maxDeliverGapMs);
+    matrix_metrics(s.label, s.bitrate, r, s.maxDecodeGapMs);
   }
   // Runtime 6 -> 1.5 Mbps downshift mid-run.
   const uint16_t dport = remote60::native_poc::e2e::e2e_pick_free_udp_port();
