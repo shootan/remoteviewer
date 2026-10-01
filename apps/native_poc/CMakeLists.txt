@@ -1952,6 +1952,7 @@ target_link_libraries(remote60_viewer_udp_recovery_test PRIVATE
   capture
   common
   ws2_32
+  winmm
   runtimeobject
   windowsapp
   advapi32

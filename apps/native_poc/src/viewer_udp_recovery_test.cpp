@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +48,7 @@
 #include "viewer_state.hpp"
 #include "viewer_udp_session.hpp"
 #include "viewer_video_receiver.hpp"
+#include "host_e2e_marker_fixture.hpp"  // r8: shared marker Target/EventLog/decode_event_marker/MarkerHost
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::viewer;
@@ -1864,6 +1866,77 @@ void scenario_late_chunks_of_abandoned_au_do_not_reblock() {
 
 }  // namespace
 
+// r8 V2-fix: the REAL PC receive path (ViewerRig -> VideoReceiver::Run -> assembler -> FrameGate ->
+// decoder -> FrameBuffer) pointed at an isolated GNLinkStream host painting the event-ID marker. We do
+// NOT re-copy any gate logic; the marker is read out of the product FrameBuffer's decoded NV12. For
+// each change we match the marker to its paint QPC, and we count the keyframe requests FrameGate made
+// (ConsumePending, the viewer-side request path) and the IDRs the receiver published. Env-gated.
+int run_real_recv_smoke(const std::wstring& hostExe, int seconds) {
+  namespace em = remote60::native_poc::e2emarker;
+  struct Scn { const char* label; em::Content content; uint32_t bitrate, fps; };
+  const Scn scns[] = {
+      {"singlechange-6M60", em::Content::SingleChange, 6'000'000, 60},
+      {"singlechange-1.5M30", em::Content::SingleChange, 1'500'000, 30},
+      {"fulltransition-6M60", em::Content::FullTransition, 6'000'000, 60},
+      {"fulltransition-1.5M30", em::Content::FullTransition, 1'500'000, 30},
+  };
+  wchar_t tmp[MAX_PATH]{};
+  GetTempPathW(MAX_PATH, tmp);
+  const std::wstring stagingRoot = std::wstring(tmp) + L"remote60_real_recv_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+  CreateDirectoryW(stagingRoot.c_str(), nullptr);
+  wchar_t selfExe[MAX_PATH]{};
+  GetModuleFileNameW(nullptr, selfExe, MAX_PATH);
+  std::printf("\n=== r8 V2-fix: real PC VideoReceiver/FrameGate smoke (product receiver, marker from FrameBuffer) ===\n");
+  int idx = 0;
+  for (const Scn& s : scns) {
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    std::wstring runDir = stagingRoot + L"rrs_" + std::to_wstring(idx++) + L"\\";
+    em::MarkerHost host;
+    const bool started = host.Start(hostExe, runDir, port, seconds, s.bitrate, s.fps, s.content, /*wireCapOn=*/true, selfExe);
+    CHECK(started, std::string("realrecv ") + s.label + ": isolated host started");
+    if (!started) continue;
+    ViewerRig rig;
+    rig.args.fpsHint = s.fps;
+    const bool connected = rig.Connect(port, /*requestNack=*/true, /*holdUs=*/120000);
+    CHECK(connected, std::string("realrecv ") + s.label + ": viewer connected to host");
+    if (!connected) { host.Stop(); continue; }
+
+    std::set<uint32_t> seen;
+    uint32_t matched = 0, kfReqs = 0;
+    const uint64_t endUs = qpc_now_us() + static_cast<uint64_t>(seconds) * 1'000'000ull;
+    while (qpc_now_us() < endUs) {
+      uint16_t reason = 0;
+      while (rig.ctx.control.keyframeRequests.ConsumePending(&reason)) ++kfReqs;
+      {
+        std::lock_guard<std::mutex> lk(rig.ctx.frameBuf.frame.mu);
+        const auto& fr = rig.ctx.frameBuf.frame;
+        if (fr.bytes && fr.format == SharedFrame::PixelFormat::Nv12 && !fr.bytes->empty()) {
+          const uint32_t id = em::decode_event_marker(fr.bytes->data(), fr.codedWidth, fr.codedHeight,
+                                                       fr.visibleLeft, fr.visibleTop);
+          if (id != 0 && seen.insert(id).second) ++matched;
+        }
+      }
+      Sleep(3);
+    }
+    const uint32_t expected = host.eventLog.Count();
+    const uint64_t published = rig.publishedCount.load();
+    const std::string keySeqs = rig.published_key_seqs();
+    const uint64_t giveUps = rig.give_ups();
+    rig.Stop();
+    host.Stop();
+    std::printf("REALRECV %-22s | marker matched=%u/%u | published frames=%llu keyIDRs=%s | FrameGate keyReq=%u | giveUps=%llu\n",
+                s.label, matched, expected, (unsigned long long)published, keySeqs.c_str(), kfReqs,
+                (unsigned long long)giveUps);
+    const std::string t = std::string("realrecv ") + s.label;
+    CHECK(matched >= 1 && expected >= 1, t + ": a change marker reached the real VideoReceiver's decoded FrameBuffer");
+    CHECK(keySeqs != "none", t + ": at least one IDR was published through the real receive path (recovery)");
+    // No keyframe storm: FrameGate asks only around the first-IDR wait / sparse recovery, not per frame.
+    CHECK(kfReqs <= 3u + expected, t + ": no unnecessary repeated keyframe requests (reqs=" +
+                                           std::to_string(kfReqs) + " events=" + std::to_string(expected) + ")");
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   WinsockScope ws;
@@ -1874,6 +1947,28 @@ int main(int argc, char** argv) {
   if (FAILED(MFStartup(MF_VERSION))) {
     std::printf("MFStartup failed\n");
     return 2;
+  }
+  // r8 V2-fix: env-gated real-host receive smoke (spawns an isolated GNLinkStream capturing a marker
+  // window). Off by default so the unit scenarios below run in regression without a real host.
+  {
+    std::wstring realRecvHost;
+    for (int i = 1; i < argc; ++i) {
+      const std::string a = argv[i];
+      if (a == "--real-recv-smoke" && i + 1 < argc) { const std::string v = argv[i + 1]; realRecvHost.assign(v.begin(), v.end()); }
+    }
+    if (!realRecvHost.empty()) {
+      char allow[8]{};
+      if (GetEnvironmentVariableA("REMOTE60_ALLOW_HOST_E2E", allow, sizeof(allow)) == 0 || std::string(allow) != "1") {
+        std::printf("SKIP real-recv-smoke: set REMOTE60_ALLOW_HOST_E2E=1 (spawns an isolated host).\nRESULT: SKIPPED\n");
+        MFShutdown();
+        return 0;
+      }
+      run_real_recv_smoke(realRecvHost, 10);
+      MFShutdown();
+      if (gFailures == 0) { std::printf("viewer_udp_recovery_test(real-recv-smoke): PASS\n"); return 0; }
+      std::printf("viewer_udp_recovery_test(real-recv-smoke): FAIL (%d)\n", gFailures);
+      return 1;
+    }
   }
   const bool fullHdFixture = argc == 2 && std::string(argv[1]) == "--serve-viewer-fhd";
   if (fullHdFixture || (argc == 2 && std::string(argv[1]) == "--serve-viewer")) {
