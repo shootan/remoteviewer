@@ -53,6 +53,10 @@
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "session_video_pipeline.hpp"
+#include "viewer_constants.hpp"       // r7 V2: FrameGate env defaults
+#include "viewer_frame_gate.hpp"      // r7 V2: the real PC receive gate
+#include "viewer_frame_gate_state.hpp"
+#include "viewer_recv_stats.hpp"
 #include "time_utils.hpp"
 #include "udp_control_channel.hpp"
 #include "control_resume_e2e_support.hpp"
@@ -566,6 +570,13 @@ struct RunResult {
   // = ids whose marker was decoded. This is the real single-change / full-transition response.
   std::vector<uint64_t> eventLatencyUs;
   uint32_t eventsExpected = 0, eventsMatched = 0;
+  // Per-event detail for the V1 paired table: id, paint QPC, first decoded-marker QPC, latency.
+  struct EventRec { uint32_t id = 0; uint64_t paintUs = 0, decodedUs = 0, latencyUs = 0; };
+  std::vector<EventRec> eventRecs;
+  // r7 V2: the real PC VideoReceiver/FrameGate smoke path -- keyframe requests FrameGate made (the
+  // "no unnecessary repeated keyframe" check) and the IDRs that actually decoded through the gate.
+  uint32_t v2KeyframeRequests = 0;
+  uint32_t v2IdrDecoded = 0;
 };
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
@@ -580,7 +591,7 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
 RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
                    uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                    uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
-                   uint32_t downshiftAtSec = 0) {
+                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false) {
   RunResult r;
   CreateDirectoryW(runDir.c_str(), nullptr);
   const std::wstring me = self_path();
@@ -697,6 +708,55 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     bool dstop = false;
     std::deque<std::pair<std::vector<uint8_t>, std::pair<bool, uint64_t>>> dq;  // payload, (key, captureStamp)
 
+    // r7 V2: the real PC receive gate. When v2FrameGate, each assembled AU goes through the real
+    // FrameGate (admit -> gate verdict), and on Decode is decoded INLINE on the ingress thread (as the
+    // viewer's recv thread does), then note_decode_ok/note_reference_sync/clear_empty_streak; fg.tick()
+    // runs after every datagram and timeout to drive the recovery (keyframe re-ask) timer. The sink
+    // counts keyframe requests and routes them to the same control path. (SessionVideoPipeline still
+    // does the assembly + NACK below; FrameGate is the pre-decode gate layered on its delivery.)
+    using viewer::FrameGate;
+    using viewer::FrameGateInputs;
+    using viewer::FrameGateLag;
+    using viewer::FrameGateState;
+    using viewer::FrameGateVerdict;
+    using viewer::RecvStats;
+    FrameGateState v2gate;
+    RecvStats v2st;
+    std::unique_ptr<H264Decoder> v2dec;
+    uint64_t v2PresentedCapUs = 0;
+    int64_t v2stamp = 10'000'000;
+    std::set<uint32_t> v2seen;
+    struct V2Sink : viewer::FrameGateSink {
+      RunResult* r = nullptr;
+      std::atomic<bool>* pending = nullptr;
+      void reset_decoder() override {}
+      bool rebuild_decoder() override { return true; }
+      void request_keyframe(uint16_t reason) override {
+        (void)reason;
+        ++r->v2KeyframeRequests;
+        pending->store(true);
+      }
+    } v2sink;
+    v2sink.r = &r;
+    v2sink.pending = &pendingKeyRequest;
+    FrameGate v2fg(v2gate, v2st, v2sink);
+    if (v2FrameGate) {
+      v2gate.catchupReenterMinIntervalUs = viewer::kCatchupReenterMinIntervalUsDefault;
+      v2gate.staleCaptureDropUs = viewer::kStaleCaptureDropUs;
+      v2gate.staleReferenceRecoveryMinIntervalUs = viewer::kStaleRecoveryMinIntervalUsDefault;
+      v2gate.congestionRecoverMinUs = viewer::kCongestionRecoverMinUsDefault;
+      v2gate.congestionRecoveryTimeoutUs = viewer::kCongestionRecoveryTimeoutUsDefault;
+      v2gate.decodeQueueLagDropUs = viewer::kDecodeQueueLagDropUs;
+      v2gate.catchupLagDropUs = viewer::kCatchupLagDropUs;
+      v2gate.denseArrivalMaxGapUs = viewer::kDenseArrivalMaxGapUsDefault;
+      v2gate.lagTriggerStreakMin = viewer::kLagTriggerStreakMinDefault;
+      v2gate.recoveryRetryIntervalUs = viewer::kKeyRecoveryRetryUsDefault;
+      v2gate.recoveryRetryMaxIntervalUs = viewer::kKeyRecoveryRetryMaxUsDefault;
+      v2gate.recoveryRetryDeferMaxUs = viewer::kKeyRecoveryDeferMaxUsDefault;
+      v2gate.frameIntervalUs = 1'000'000ULL / (fps ? fps : 60);
+      v2gate.waitForKeyFrame = true;  // an H.264 session starts waiting for its first IDR
+    }
+
     SessionVideoPipelineConfig cfg;
     cfg.nackEnabled = r.nackNegotiated;
     cfg.holdUs = r.nackNegotiated ? 120000 : 0;
@@ -722,6 +782,47 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
         ++r.recoveryCount;
         lastDiscUs = 0;  // recovered
       }
+      if (v2FrameGate) {
+        // The real PC pre-decode gate, inline on this (ingress) thread.
+        FrameGateInputs in{};
+        in.captureQpcUs = f.header.captureQpcUs;
+        in.sendQpcUs = f.header.sendQpcUs;
+        in.seq = f.header.seq;
+        in.keyFrame = key;
+        in.packetNowUs = deliverNowUs;
+        in.recvGapUs = v2fg.note_packet(deliverNowUs, false);
+        in.presentedCapUs = v2PresentedCapUs;
+        in.decodedCapUs = v2PresentedCapUs;
+        FrameGateLag lag{};
+        const FrameGateVerdict v = v2fg.admit(in, &lag);
+        if (v == FrameGateVerdict::Decode && v2dec) {
+          std::vector<DecodedFrameNv12> dout;
+          bool ov = false;
+          v2stamp += 333333;
+          if (v2dec->decode_access_unit(f.payload, key, v2stamp, &dout, &ov)) {
+            v2fg.note_decode_ok();
+            v2fg.note_reference_sync(in);
+            v2fg.clear_empty_streak();
+            if (key) ++r.v2IdrDecoded;
+            const uint64_t outUs = qpc_now_us();
+            v2PresentedCapUs = f.header.captureQpcUs;
+            for (const auto& df : dout) {
+              if (df.bytes.empty()) continue;
+              const uint32_t mid = decode_event_marker(df.bytes.data(), df.width, df.height, df.visibleLeft, df.visibleTop);
+              if (mid != 0 && v2seen.insert(mid).second) {
+                const uint64_t paintQpc = eventLog.PaintQpc(mid);
+                if (paintQpc != 0 && outUs >= paintQpc) {
+                  r.eventLatencyUs.push_back(outUs - paintQpc);
+                  r.eventRecs.push_back({mid, paintQpc, outUs, outUs - paintQpc});
+                }
+              }
+            }
+          } else {
+            v2fg.note_decode_failure(in, lag);
+          }
+        }
+        return;  // v2 decodes inline; nothing goes to the realtime decode queue
+      }
       {
         std::lock_guard<std::mutex> dlk(dmu);
         dq.emplace_back(std::move(f.payload), std::make_pair(key, f.header.captureQpcUs));
@@ -739,7 +840,10 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     };
     SessionVideoPipeline pipeline(cfg, cb);
 
-    std::thread decodeThread([&] {
+    // The realtime decode thread is used only by the measurement path; V2 decodes inline on the
+    // ingress thread (its own v2dec), so it is not started under v2FrameGate.
+    std::thread decodeThread;
+    if (!v2FrameGate) decodeThread = std::thread([&] {
       H264Decoder dec;
       if (!dec.initialize(kWinW, kWinH, fps)) {
         r.decoder = "init-failed";
@@ -776,7 +880,10 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
             const uint32_t id = decode_event_marker(f.bytes.data(), f.width, f.height, f.visibleLeft, f.visibleTop);
             if (id != 0 && seenEvents.insert(id).second) {
               const uint64_t paintQpc = eventLog.PaintQpc(id);
-              if (paintQpc != 0 && outUs >= paintQpc) r.eventLatencyUs.push_back(outUs - paintQpc);
+              if (paintQpc != 0 && outUs >= paintQpc) {
+                r.eventLatencyUs.push_back(outUs - paintQpc);
+                r.eventRecs.push_back({id, paintQpc, outUs, outUs - paintQpc});
+              }
             }
           }
         }
@@ -787,6 +894,11 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     std::atomic<bool> stop{false};
     std::map<uint64_t, uint32_t> occurrences;
     std::thread ingress([&] {
+      if (v2FrameGate) {  // the V2 decoder lives on this (recv) thread, like the real viewer
+        v2dec = std::make_unique<H264Decoder>();
+        if (v2dec->initialize(kWinW, kWinH, fps)) r.decoder = v2dec->backend_name();
+        else r.decoder = "init-failed";
+      }
       std::vector<uint8_t> buf(2048);
       while (!stop.load()) {
         control.Tick();
@@ -821,12 +933,14 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
             } else {
               std::lock_guard<std::mutex> lk(pmu);
               pipeline.OnDatagram(buf.data(), static_cast<size_t>(n), now);
+              if (v2FrameGate) v2fg.tick(now);  // recovery timer after every datagram (real recv loop)
             }
             continue;
           }
         }
         std::lock_guard<std::mutex> lk(pmu);
         pipeline.OnTick(now);
+        if (v2FrameGate) v2fg.tick(now);  // and on every receive timeout
       }
     });
 
@@ -1127,6 +1241,25 @@ int run_paired(const std::wstring& candidateHost, const std::wstring& baselineHo
       const std::wstring runDir = dir + L"p_" + safe + L"_" + std::wstring(tag, tag + std::strlen(tag)) +
                                   L"_" + std::to_wstring(idx++) + L"\\";
       const RunResult r = run_host(host, runDir, s.content, /*tight=*/true, port, seconds, 0, 1, capOn, s.bitrate, s.fps);
+      // V1: per-event table (event 1 = first screen, includes connect+host init+first IDR; separated
+      // from the later idle->change events) + the slowest event's byte-time trace.
+      size_t slow = 0;
+      for (size_t i = 1; i < r.eventRecs.size(); ++i)
+        if (r.eventRecs[i].latencyUs > r.eventRecs[slow].latencyUs) slow = i;
+      std::printf("   [%s/%s] events(id:lat ms): ", s.label, tag);
+      for (size_t i = 0; i < r.eventRecs.size(); ++i)
+        std::printf("%s%u:%.0f%s", i == 1 ? "| runtime: " : (i == 0 ? "ev1(init): " : ""),
+                    r.eventRecs[i].id, r.eventRecs[i].latencyUs / 1000.0, (i + 1 < r.eventRecs.size()) ? " " : "\n");
+      if (r.eventRecs.empty()) std::printf("(none)\n");
+      if (!r.eventRecs.empty()) {
+        const auto& e = r.eventRecs[slow];
+        const double latMs = e.latencyUs / 1000.0;
+        const double wireBudgetBytes = latMs / 1000.0 * s.bitrate / 8.0;  // bytes transmissible in that time
+        std::printf("        slowest ev%u lat=%.0fms: implied wire budget @%.1fMbps = %.0f bytes; host "
+                    "queueWaitMax=%llums queueDepthMax=%llu (latency explained by byte serialization + pacing)\n",
+                    e.id, latMs, s.bitrate / 1e6, wireBudgetBytes, (unsigned long long)(r.host.maxQueueWaitUs / 1000),
+                    (unsigned long long)r.host.maxQueueDepth);
+      }
       return event_stats(r);
     };
     const EvStats on = one(candidateHost, true, "on");
@@ -1161,6 +1294,45 @@ int run_paired(const std::wstring& candidateHost, const std::wstring& baselineHo
                   on.p95 - base.p95);
       check(on.matched >= base.matched, t + ": candidate ON loses no event the baseline delivered");
     }
+  }
+  return 0;
+}
+
+// r7 V2: the real PC VideoReceiver/FrameGate receive path (admit gates decode, tick drives recovery)
+// on big-IDR + idle->change content at 6M/60 and 1.5M/30 -- a local smoke (not 2-PC/WAN). Confirms
+// the event marker reaches the decoded picture through the gate, recovery is finite, and there is NO
+// unnecessary repeated keyframe request (the IDR-storm defect FrameGate exists to avoid).
+int run_v2(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
+  struct Scn { const char* label; Content content; uint32_t bitrate, fps; };
+  const Scn scns[] = {
+      {"singlechange-6M60", Content::SingleChange, 6'000'000, 60},
+      {"singlechange-1.5M30", Content::SingleChange, 1'500'000, 30},
+      {"fulltransition-6M60", Content::FullTransition, 6'000'000, 60},
+      {"fulltransition-1.5M30", Content::FullTransition, 1'500'000, 30},
+  };
+  std::printf("\n=== r7 V2 PC VideoReceiver/FrameGate smoke (cap ON, real gate+decoder) ===\n");
+  int idx = 0;
+  for (const Scn& s : scns) {
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    if (port == 0) continue;
+    std::wstring safe(s.label, s.label + std::strlen(s.label));
+    for (wchar_t& c : safe) if (c == L'.' || c == L'/') c = L'_';
+    const std::wstring runDir = dir + L"v2_" + safe + L"_" + std::to_wstring(idx++) + L"\\";
+    const RunResult r = run_host(hostExe, runDir, s.content, /*tight=*/true, port, seconds, 0, 1, /*wireCapOn=*/true,
+                                 s.bitrate, s.fps, 0, 0, /*v2FrameGate=*/true);
+    std::printf("V2 %-22s | marker events matched=%u/%u | IDR decoded=%u | FrameGate keyframe reqs=%u | "
+                "disc=%u nacks=%u decoder=%s\n",
+                s.label, r.eventsMatched, r.eventsExpected, r.v2IdrDecoded, r.v2KeyframeRequests, r.disc, r.nacks,
+                r.decoder.c_str());
+    const std::string t = std::string("v2 ") + s.label;
+    check(r.eventsExpected > 0 && r.eventsMatched == r.eventsExpected,
+          t + ": every change marker reached the decoded picture through the real FrameGate");
+    check(r.v2IdrDecoded >= 1, t + ": at least one IDR decoded through the gate (recovery works)");
+    // No IDR storm: FrameGate must not re-ask every frame. ~5 change events over `seconds`; a healthy
+    // run needs only the first-IDR wait + the occasional recovery. A storm is many requests per event.
+    check(r.v2KeyframeRequests <= 3u + r.eventsExpected,
+          t + ": no unnecessary repeated keyframe requests (reqs=" + std::to_string(r.v2KeyframeRequests) +
+              " events=" + std::to_string(r.eventsExpected) + ")");
   }
   return 0;
 }
@@ -1232,6 +1404,7 @@ int main(int argc, char** argv) {
   bool keepDir = false;
   bool matrix = false;
   bool paired = false;
+  bool v2 = false;
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1243,6 +1416,8 @@ int main(int argc, char** argv) {
       baselineHost.assign(v.begin(), v.end());
     } else if (a == "--paired") {
       paired = true;
+    } else if (a == "--v2") {
+      v2 = true;
     } else if (a == "--seconds" && i + 1 < argc) {
       seconds = std::max(4, std::atoi(argv[++i]));
     } else if (a == "--content" && i + 1 < argc) {
@@ -1293,7 +1468,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (paired) {
+  if (v2) {
+    run_v2(hostExe, dir, seconds);
+  } else if (paired) {
     run_paired(hostExe, baselineHost, dir, seconds);
   } else if (matrix) {
     run_matrix(hostExe, dir, seconds);

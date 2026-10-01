@@ -2122,6 +2122,7 @@ add_executable(remote60_fec_single_chunk_host_e2e_test
   src/native_video_client_tcp_control.cpp
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
+  src/viewer_frame_gate.cpp
 )
 target_include_directories(remote60_fec_single_chunk_host_e2e_test PRIVATE src)
 target_link_libraries(remote60_fec_single_chunk_host_e2e_test PRIVATE
