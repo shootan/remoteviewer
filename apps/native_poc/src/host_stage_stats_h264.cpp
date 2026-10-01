@@ -174,7 +174,12 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             ? tickNowUs - encoder.rateGovernorLastTickUs
             : 1000000ULL;
     encoder.rateGovernorLastTickUs = tickNowUs;
-    const uint64_t avgSentFrameBytes = framesDelta > 0 ? txDelta / framesDelta : 0;
+    // A tick with no completed frame (framesDelta == 0: one big AU spanned the whole interval, or
+    // every frame was gate-skipped) must not value the skipped frames at 0 -- use the last known
+    // average so the generated load still reads as over. (r2)
+    const uint64_t avgSentFrameBytes =
+        framesDelta > 0 ? txDelta / framesDelta : encoder.rateGovernorLastAvgFrameBytes;
+    if (framesDelta > 0) encoder.rateGovernorLastAvgFrameBytes = avgSentFrameBytes;
     const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;
     // Normalise to a per-second figure so OnSecond's "percent of target" is a true bitrate.
     const uint64_t govBytesPerSec =

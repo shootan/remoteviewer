@@ -265,21 +265,30 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // surfaced. The latch is stamped only after the encoder ACCEPTS the input (below), and
    // times out after 300ms so a lost key is retried.
     const uint64_t encodeStartUs = qpc_now_us();
+   // A key AU already on the wire counts as "in flight" too (bitrate-hard-cap r2): the encode-side
+   // latch clears when the key is emitted, but a cap-paced IDR then spends up to ~1.4 s going out,
+   // and a repeated recovery request in that window would force a duplicate IDR. The sender flag is
+   // bounded by a generous safety timeout in case the sender thread is wedged (the real clear is on
+   // send completion / rollover). Only while the cap is on, where the long send time exists.
+   const bool keyOnWire = sender.wireCapEnabled && sender.keyAuOnWire.load(std::memory_order_acquire) &&
+                          encodeStartUs < sender.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL;
    const bool forceKeyInFlight =
-       encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000;
+       (encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000) || keyOnWire;
    // r4: due by real inputs since the last key of any kind, not by the capture seq -- see
    // EncoderState::realInputsSinceKey.
    const bool scheduledKey = !servedBootstrap && (encoder.activeKeyint > 0) &&
                              (encoder.realInputsSinceKey >= encoder.activeKeyint);
    (void)seq;
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
-   // The hard wire-rate cap's input gate (bitrate-hard-cap r1): while the wire is backlogged -- the
-   // sender queue full, or the async MFT holding accepted inputs that will burst into it -- skip this
-   // capture frame BEFORE it is encoded, so the stream drops fps to what the wire carries instead of
-   // encoding a delta that overflows the queue into a resync-IDR loop (host_encode_admission.hpp). A
-   // key, a bootstrap/kick synthetic, and recovery are never skipped -- they must reach the wire.
-   // Same early exit as the stale-frame skip above: the popped NV12 slot is released at the next loop
-   // top, nothing was encoded, the reference chain is untouched.
+   // The hard wire-rate cap's input gate (bitrate-hard-cap r1/r2): while the wire is backlogged -- the
+   // sender queue has not drained -- skip this capture frame BEFORE it is encoded, so the stream drops
+   // fps to what the wire carries instead of encoding a delta that overflows the queue into a
+   // resync-IDR loop (host_encode_admission.hpp). A key, a bootstrap/kick synthetic, and recovery are
+   // never skipped -- they must reach the wire. The gate is on the SENDER QUEUE only, not the MFT's
+   // pending inputs: the MFT drains only inside the encode call, so gating on its depth would skip the
+   // drain and stall for ever (r2); the queue is drained by the wire thread, so this skip is bounded
+   // and every admit drains the MFT. Same early exit as the stale-frame skip above: the popped NV12
+   // slot is released at the next loop top, nothing was encoded, the reference chain is untouched.
    if (sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled()) {
      uint32_t senderDepth = 0;
      {
@@ -291,7 +300,6 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      adm.keyWanted = keyWanted;
      adm.servedBootstrap = servedBootstrap;
      adm.senderQueueDepth = senderDepth;
-     adm.mftPendingDepth = encoder.codec.pending_input_depth();
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
        return Flow::Continue;

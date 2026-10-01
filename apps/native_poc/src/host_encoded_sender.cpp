@@ -60,6 +60,25 @@ void SenderState::UpdateWireCap(uint64_t capBps) {
   wireCapBps.store(wireCapEnabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
+bool SenderState::NackFallbackTryAcquire(uint64_t bytes) {
+  const uint64_t nowUs = static_cast<uint64_t>(qpc_now_us());
+  const uint32_t peakBps = pacePeakBps.load(std::memory_order_relaxed);  // bits/s; 0 = unpaced
+  const uint64_t rateBytesPerSec =
+      ((peakBps > 0 ? static_cast<uint64_t>(peakBps) : 48000000ULL) / 8ULL) * 15ULL / 100ULL;
+  const uint64_t capBytes = rateBytesPerSec / 2ULL + 65536ULL;  // ~0.5s burst + one frame's slack
+  std::lock_guard<std::mutex> lk(nackBudgetMu);
+  if (nackBudgetLastUs == 0) {
+    nackBudgetTokensBytes = capBytes;  // prime the bucket on first use
+  } else if (nowUs > nackBudgetLastUs) {
+    nackBudgetTokensBytes += (nowUs - nackBudgetLastUs) * rateBytesPerSec / 1000000ULL;
+    if (nackBudgetTokensBytes > capBytes) nackBudgetTokensBytes = capBytes;
+  }
+  nackBudgetLastUs = nowUs;
+  if (nackBudgetTokensBytes < bytes) return false;
+  nackBudgetTokensBytes -= bytes;
+  return true;
+}
+
 void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
                           uint32_t mtu, bool tightSingleChunk, const uint8_t* payload,
                           size_t payloadSize) {
@@ -92,18 +111,31 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
     });
     if (it == nackCache.rend()) {
       nackMisses.fetch_add(1, std::memory_order_relaxed);
-      return;  // too old / rolled out -> client falls back to a keyframe request
+      // The AU may be too old (rolled out of the cache) OR still being sent (not cached yet). Defer
+      // the request: if this (gen,seq) is cached soon (StoreAu), ServeDeferredNacks replays it once;
+      // if it never caches, the bounded buffer drops it and the client's IDR fallback recovers. (r2)
+      DeferNack(generation, seq, missing, count);
+      return;
     }
     payload = it->payload;
     baseHeader = it->baseHeader;
     mtu = it->mtu;
     tightSingleChunk = it->tightSingleChunk;
   }
-  // Retransmit byte budget (bitrate-hard-cap r1): the replay spends the SAME wire bucket as the live
-  // send, non-blockingly (TryAcquire inside send_udp_chunk_indices) -- a chunk that does not fit the
-  // budget now is suppressed and the client's IDR fallback recovers it, so a NACK storm cannot push
-  // the stream over the cap, and there is no separate retransmit lane around it. When the cap is off
-  // (wireLimiter null) every chunk goes, as before. The reader thread never blocks on the wire.
+  // Retransmit byte budget. With the cap ON (bitrate-hard-cap r1): the replay spends the SAME wire
+  // bucket as the live send, non-blockingly (TryAcquire inside send_udp_chunk_indices) -- a chunk that
+  // does not fit is suppressed and the client's IDR fallback recovers it, so a NACK storm cannot push
+  // the stream over the cap and there is no separate retransmit lane around it. With the cap OFF (r2):
+  // the shared bucket is inactive, so the old flood defence gates the whole replay here -- ~15% of the
+  // live rate, ~0.5 s burst -- exactly as before the cap existed. The reader thread never blocks.
+  const bool capEnforcing = wireLimiter && wireLimiter->enabled();
+  if (!capEnforcing) {
+    const uint64_t estBytes = static_cast<uint64_t>(count) * static_cast<uint64_t>(mtu ? mtu : 1400);
+    if (!NackFallbackTryAcquire(estBytes)) {
+      nackSuppressed.fetch_add(1, std::memory_order_relaxed);
+      return;  // over the cap-off fallback budget -> client's IDR fallback handles it
+    }
+  }
   WireEgress wire = MakeWireEgress();
   uint64_t replayBytes = 0;
   uint64_t replayDatagrams = 0;
@@ -115,6 +147,40 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
   txNackDatagrams.fetch_add(replayDatagrams, std::memory_order_relaxed);
   nackRetransmitChunks.fetch_add(replayDatagrams, std::memory_order_relaxed);
   if (replaySuppressed > 0) nackSuppressed.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SenderState::DeferNack(uint64_t generation, uint32_t seq, const uint16_t* missing, uint16_t count) {
+  if (!nackEnabled.load(std::memory_order_relaxed) || !missing || count == 0) return;
+  std::lock_guard<std::mutex> lk(pendingNackMu);
+  // Merge into an existing entry for this (gen,seq), else add one (dropping the oldest past the bound).
+  auto it = std::find_if(pendingNacks.begin(), pendingNacks.end(),
+                         [&](const PendingNack& p) { return p.generation == generation && p.seq == seq; });
+  if (it == pendingNacks.end()) {
+    if (pendingNacks.size() >= kMaxPendingNacks) pendingNacks.pop_front();
+    pendingNacks.push_back(PendingNack{generation, seq, {}});
+    it = std::prev(pendingNacks.end());
+  }
+  for (uint16_t i = 0; i < count && it->missing.size() < kUdpVideoNackMaxMissing; ++i) {
+    const uint16_t idx = missing[i];
+    if (std::find(it->missing.begin(), it->missing.end(), idx) == it->missing.end()) it->missing.push_back(idx);
+  }
+}
+
+void SenderState::ServeDeferredNacks(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq) {
+  std::vector<uint16_t> missing;
+  {
+    std::lock_guard<std::mutex> lk(pendingNackMu);
+    auto it = std::find_if(pendingNacks.begin(), pendingNacks.end(),
+                           [&](const PendingNack& p) { return p.generation == generation && p.seq == seq; });
+    if (it == pendingNacks.end()) return;
+    missing = std::move(it->missing);
+    pendingNacks.erase(it);
+  }
+  if (missing.empty()) return;
+  std::sort(missing.begin(), missing.end());
+  // Now the AU is in the cache (StoreAu just ran): RetransmitAu finds it and replays through the same
+  // wire budget. One post-send recovery for a hole that was requested while the AU was still sending.
+  RetransmitAu(sock, peer, generation, seq, missing.data(), static_cast<uint16_t>(missing.size()));
 }
 
 void SenderState::StartThread(VideoTransport transport, bool useH264, const Args& args,
@@ -226,16 +292,26 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // The hard wire cap, shared with the NACK path. Null limiter (cap off) leaves the send exactly
       // as it was. Acquire waits for tokens per datagram and aborts (-> EpochChanged) on stop/epoch.
       WireEgress wireEgress = sender.MakeWireEgress();
+      // A key AU is on the wire for the whole of this (possibly long, cap-paced) send: the encode
+      // gate uses this to not force a duplicate recovery IDR while this one is still going out. (r2)
+      if (item.keyFrame) {
+        sender.keyAuOnWireSinceUs.store(sendStartUs, std::memory_order_release);
+        sender.keyAuOnWire.store(true, std::memory_order_release);
+      }
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                 item.mediaEpoch, egress, &wireEgress);
+      if (item.keyFrame) sender.keyAuOnWire.store(false, std::memory_order_release);
       const uint64_t sendDoneUs = qpc_now_us();
       if (outcome == UdpSendOutcome::Sent) {
         // Cache this AU so a client NACK can be answered with just the missing chunks (no-op unless
         // the client negotiated NACK). (video NACK.)
         sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
                        egress.fecSingleChunkTightStride, item.bytes.data(), item.bytes.size());
+        // Now cached: serve any NACK that missed while this AU was still being sent (r2), to the
+        // current media peer. One bounded post-send recovery; the shared wire budget still bounds it.
+        sender.ServeDeferredNacks(clientSession.clientSock, peer, item.udpHdr.streamGeneration, item.udpHdr.seq);
         const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
         sender.lastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
         sender.txFrames.fetch_add(1, std::memory_order_relaxed);
@@ -372,6 +448,8 @@ void SenderState::PumpUdpHello(VideoTransport transport, EncoderState& encoder) 
   // A sender asleep in the limiter for an old-epoch frame must wake to see the new epoch and abort;
   // Acquire re-checks mediaSessionEpoch after this wake. (bitrate-hard-cap r1)
   if (sender.wireLimiter) sender.wireLimiter->Cancel();
+  // The new session's key is a fresh recovery, not a duplicate of the old epoch's; clear the guard.
+  sender.keyAuOnWire.store(false, std::memory_order_release);
   encoder.RequestKey(kHostKeyReasonPeer);
   sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
   std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="

@@ -120,6 +120,33 @@ struct SenderState {
   // through UpdateWireCap (ApplyTarget); a rate change never refills the bucket (plan point 4).
   std::unique_ptr<WireLimiter> wireLimiter;
   bool wireCapEnabled = false;  // REMOTE60_NATIVE_WIRE_CAP (default on); fixed after startup
+  // Cap-OFF fallback NACK budget (bitrate-hard-cap r2): when the hard cap is off (kill-switch, or no
+  // limiter) the shared bucket does not bound the replay, so the old flood defence stays -- a token
+  // bucket at ~15% of the live send rate, ~0.5 s burst. With the cap ON the shared wire bucket bounds
+  // NACK instead and this is unused. Guarded by nackBudgetMu; refilled on demand.
+  std::mutex nackBudgetMu;
+  uint64_t nackBudgetTokensBytes = 0;
+  uint64_t nackBudgetLastUs = 0;
+  // Non-blocking: spend `bytes` from the cap-off fallback bucket, false if over budget. (reader thread)
+  bool NackFallbackTryAcquire(uint64_t bytes);
+  // Deferred NACKs (bitrate-hard-cap r2): a NACK for an AU still being sent misses the cache (StoreAu
+  // runs only after the whole AU is on the wire), so a real hole lost during a cap-paced send would
+  // never be replayed and the stuck head would eventually force a keyframe. The miss is remembered
+  // here, bounded and merged per (generation, seq), and served ONCE the moment StoreAu caches that AU
+  // -- guaranteeing one post-send recovery for a hole requested during send. FEC + NACK keep the same
+  // wire budget; the reader never blocks (it only records); the sender serves from its own thread.
+  struct PendingNack {
+    uint64_t generation = 0;
+    uint32_t seq = 0;
+    std::vector<uint16_t> missing;  // ascending, deduped, capped at kUdpVideoNackMaxMissing
+  };
+  static constexpr size_t kMaxPendingNacks = 8;  // bounded: oldest dropped past this
+  std::mutex pendingNackMu;
+  std::deque<PendingNack> pendingNacks;
+  // Reader thread: remember a NACK whose AU is not yet cached (merged per (gen,seq), bounded).
+  void DeferNack(uint64_t generation, uint32_t seq, const uint16_t* missing, uint16_t count);
+  // Sender thread, right after StoreAu caches (gen,seq): replay any deferred NACK for it, once.
+  void ServeDeferredNacks(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq);
   uint32_t wireCapMtu = 1200;   // clamp_udp_mtu(args.udpMtu); the Lmax source for the bucket depth
   std::atomic<uint64_t> wireCapBps{0};  // the cap now in force (telemetry; 0 = disabled)
   // Build the limiter (idempotent) and set the cap. enabled=false sets rate 0 (cap off).
@@ -205,6 +232,14 @@ struct SenderState {
   std::atomic<uint64_t> sendDurSumUs{0};
   std::atomic<uint64_t> sendDurMaxUs{0};
   std::atomic<uint64_t> sendCount{0};
+  // A key AU is being put on the wire now for the current media epoch -- set by the sender thread for
+  // the whole duration of a key AU's (cap-paced) send, cleared when it finishes or aborts, and on a
+  // rollover. The encode gate reads it so a repeated recovery request does not force a SECOND IDR
+  // while one is still on the wire: at a low cap a 155-208 KB IDR takes 0.2-1.4 s to send, far longer
+  // than the encode-side force-key latch, so without this a frame-gate re-ask could pile IDRs up.
+  // (bitrate-hard-cap r2, plan r2 point 4 -- the recovery IDR's encode->queue->wire lifetime.)
+  std::atomic<bool> keyAuOnWire{false};
+  std::atomic<uint64_t> keyAuOnWireSinceUs{0};
   // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
   std::atomic<uint64_t> firstKeyWireUs{0};
   std::atomic<uint64_t> lastKeyAuBytes{0};

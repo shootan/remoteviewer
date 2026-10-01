@@ -426,7 +426,6 @@ struct QueueModel {
     adm.keyWanted = false;
     adm.servedBootstrap = false;
     adm.senderQueueDepth = static_cast<uint32_t>(queue + 0.5);
-    adm.mftPendingDepth = static_cast<uint32_t>(mftPending + 0.5);
     if (decide_encode_admission(adm) == EncodeAdmission::Admit) {
       mftPending += 1.0;  // the frame is accepted by the MFT (will drain into the queue next ticks)
     }
@@ -446,14 +445,14 @@ void test_admission_gate() {
   EncodeAdmissionInputs base;
   base.wireCapActive = true;
   base.senderQueueMax = 2;
-  base.mftPendingMax = 4;
   check("cap off: always admit (legacy)", admit([&] { auto i = base; i.wireCapActive = false; i.senderQueueDepth = 99; return i; }()));
   check("a keyframe is admitted even when backlogged", admit([&] { auto i = base; i.keyWanted = true; i.senderQueueDepth = 9; return i; }()));
   check("a bootstrap synthetic is admitted even when backlogged",
         admit([&] { auto i = base; i.servedBootstrap = true; i.senderQueueDepth = 9; return i; }()));
   check("a full sender queue skips a delta", !admit([&] { auto i = base; i.senderQueueDepth = 2; return i; }()));
-  check("a backed-up MFT skips a delta", !admit([&] { auto i = base; i.mftPendingDepth = 4; return i; }()));
-  check("an idle wire admits", admit([&] { auto i = base; i.senderQueueDepth = 0; i.mftPendingDepth = 1; return i; }()));
+  check("an idle wire admits", admit([&] { auto i = base; i.senderQueueDepth = 0; return i; }()));
+  check("the gate no longer uses MFT pending depth (r2: draining is coupled to the encode call)",
+        admit([&] { auto i = base; i.senderQueueDepth = 1; return i; }()));
 
   // The effect: overproduction (each frame needs ~2 ticks of wire) -- the queue stays bounded with
   // the gate, and the resync-IDR path is never taken.

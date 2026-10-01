@@ -14,9 +14,14 @@
 // reach the wire (bounded by the existing force-key latch), so a first frame / single input / loss
 // recovery still arrives.
 //
-// "Backlogged" is two signals, because an async MFT releases several AUs per call: the sender queue
-// depth now, AND the inputs the MFT has accepted but not yet drained (they will become queued AUs in
-// a burst). Either over its threshold means the wire is behind.
+// "Backlogged" is the sender queue depth now. The async MFT's own accepted-but-undrained inputs are
+// deliberately NOT a gate signal (bitrate-hard-cap r2): the MFT is drained only INSIDE the encode
+// call (mf_h264_codec encode_sample_common's drain loop), so skipping the encode because the MFT is
+// backed up would also skip the drain -- the pending inputs would never fall and the gate would skip
+// for ever (a self-perpetuating stall, the pending=4/keyWanted=false case). The sender queue, by
+// contrast, is drained by the wire on its own thread, so a queue-depth gate is self-correcting: as
+// soon as the wire clears one AU the gate admits, the encode runs, and the MFT drains. Every admit
+// therefore drains the MFT; every skip is bounded by the wire draining the queue.
 //
 // Pure, so every branch is a unit test; the thresholds come from the caller.
 
@@ -30,8 +35,6 @@ struct EncodeAdmissionInputs {
   bool servedBootstrap = false;    // a bootstrap/kick synthetic frame -- always admit
   uint32_t senderQueueDepth = 0;   // sender.queue.size() now
   uint32_t senderQueueMax = 2;     // kSenderQueueMaxFrames: at/above this the wire has not drained
-  uint32_t mftPendingDepth = 0;    // encoder inputs accepted but not yet drained as output
-  uint32_t mftPendingMax = 4;      // at/above this the MFT itself is backed up (steady state is 1-2)
 };
 
 enum class EncodeAdmission { Admit, SkipOverloaded };
@@ -40,7 +43,6 @@ inline EncodeAdmission decide_encode_admission(const EncodeAdmissionInputs& in) 
   if (!in.wireCapActive) return EncodeAdmission::Admit;      // no gate unless the wire is bounded
   if (in.keyWanted || in.servedBootstrap) return EncodeAdmission::Admit;  // these must reach the wire
   if (in.senderQueueDepth >= in.senderQueueMax) return EncodeAdmission::SkipOverloaded;
-  if (in.mftPendingDepth >= in.mftPendingMax) return EncodeAdmission::SkipOverloaded;
   return EncodeAdmission::Admit;
 }
 

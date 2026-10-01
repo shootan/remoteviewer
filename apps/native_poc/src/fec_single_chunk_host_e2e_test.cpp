@@ -365,13 +365,10 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE", tight ? L"1" : L"0");
-    // This test is about the FEC layout, not the wire cap. The hard wire cap (bitrate-hard-cap r1)
-    // paces a large AU over ~its send time at 1.5 Mbps, so its tail is still arriving when the
-    // receiver's 120 ms NACK tail grace elapses -- premature NACKs on a lossless run, which breaks
-    // this test's "lossless -> no NACK" invariant. That interaction is the subject of its own test
-    // (host_wire_cap_idr_test) and a pending receiver fix; here the cap is pinned off so the FEC
-    // measurement is unperturbed.
-    SetEnvironmentVariableW(L"REMOTE60_NATIVE_WIRE_CAP", L"0");
+    // The hard wire cap is left ON (its default): with the r2 progress-based tail rule a cap-paced
+    // large AU's still-arriving tail is no longer NACKed, so a lossless run makes no NACK even under
+    // the cap -- this test's "lossless -> no NACK" invariant now holds with the cap on, so it also
+    // covers the cap + fix on real hardware. (It was pinned off at r1 before the fix existed.)
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(kBitrate) + L" --seconds " +

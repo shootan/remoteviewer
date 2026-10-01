@@ -64,6 +64,10 @@ struct EncoderState {
   uint64_t rateGovernorLastTxFrames = 0;
   uint64_t rateGovernorLastSkips = 0;
   uint64_t rateGovernorLastTickUs = 0;
+  // Last tick's average sent-frame size, so a tick in which a single large AU spanned the whole
+  // interval (framesDelta == 0) does not value the gate's skipped frames at 0 bytes and misread an
+  // overloaded stream as calm. (bitrate-hard-cap r2.)
+  uint64_t rateGovernorLastAvgFrameBytes = 0;
   struct PendingTarget { uint32_t w=0, h=0, fps=0, bitrate=0, keyint=0; } retryTarget;
   bool targetPending = false;
   bool codecNeedsInit = false;

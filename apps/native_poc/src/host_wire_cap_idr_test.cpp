@@ -161,20 +161,51 @@ void measure(uint64_t capBps, size_t idrBytes, const char* label) {
   std::printf("    dbg %s: incompletePolls=%llu maxAgeMs=%.0f maxMissing=%llu maxHighWater=%llu fed=%zu dgs=%zu\n",
               label, (unsigned long long)dbgIncompletePolls, dbgMaxAgeUs / 1000.0,
               (unsigned long long)dbgMaxMissing, (unsigned long long)dbgMaxHighWater, fed, dgs.size());
-  check(std::string("REPRO ") + label + ": premature tail NACKs on a lossless cap-paced IDR", prematureNacks > 0, buf);
-  check(std::string("REPRO ") + label + ": keyframe requested before the IDR finished (the loop)",
-        gaveUp && keyframeRequestUs < completeUs, buf);
+  // r2 FIX verification: with the progress-based tail rule, a lossless cap-paced IDR whose tail is
+  // still arriving draws NO premature tail NACK and the scheduler spends no rounds on it -- so the
+  // caller never gives it up (spent_for stays false). (The full product give-up path -- viewer
+  // stuck-head + frame-gate -- is exercised by the mixed-version timeline test.)
+  check(std::string("FIX ") + label + ": no premature tail NACK on a lossless cap-paced IDR", prematureNacks == 0, buf);
+  check(std::string("FIX ") + label + ": the scheduler spends no rounds, so spent_for stays false", !gaveUp, buf);
+}
+
+// Negative control: a tail that genuinely STOPS arriving (the host stalls) IS still NACKed after
+// tailGrace of no progress -- the progress rule must not disable real tail recovery.
+void measure_stalled_tail() {
+  std::printf("\n--- negative control: a genuinely stalled tail is still NACKed ---\n");
+  auto dgs = cap_paced_idr(6'000'000, 155u * 1024u);
+  // Deliver only the first 60% of the datagrams, then stop (the tail never comes).
+  const size_t keep = dgs.size() * 6 / 10;
+  UdpH264FrameAssembler asm1;
+  asm1.ConfigureInOrderHold(120000, 8);
+  VideoNackScheduler sched;
+  uint64_t tailNacks = 0;
+  const uint64_t firstUs = dgs.front().emitUs;
+  uint64_t lastEmit = firstUs;
+  for (size_t i = 0; i < keep; ++i) {
+    asm1.PushDatagram(dgs[i].bytes.data(), dgs[i].bytes.size(), dgs[i].emitUs);
+    lastEmit = dgs[i].emitUs;
+  }
+  // Now poll with the clock advancing past the stall, well beyond tailGrace of no progress.
+  for (int k = 1; k <= 12; ++k) {
+    const uint64_t nowUs = lastEmit + static_cast<uint64_t>(k) * 25000;
+    UdpVideoNackPacket nack{};
+    if (sched.Poll(asm1, true, nowUs, &nack)) ++tailNacks;
+  }
+  check("a stalled tail (no progress for > tailGrace) IS asked for", tailNacks > 0,
+        "tailNacks=" + std::to_string(tailNacks));
 }
 
 }  // namespace
 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  std::printf("--- large IDR vs the current receiver, under the cap (reproduction) ---\n");
+  std::printf("--- large IDR under the cap: progress-based tail rule holds (r2 fix) ---\n");
   measure(6'000'000, 155u * 1024u, "155KB@6Mbps");
   measure(6'000'000, 208u * 1024u, "208KB@6Mbps");
   measure(1'500'000, 155u * 1024u, "155KB@1.5Mbps");
   measure(1'500'000, 208u * 1024u, "208KB@1.5Mbps");
+  measure_stalled_tail();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   // This test PASSES when it REPRODUCES the problem; it is evidence for the receiver fix decision.
   return g_failed ? 1 : 0;

@@ -31,9 +31,19 @@ namespace remote60::native_poc {
 
 struct VideoNackConfig {
   uint64_t gapGraceUs = 25000;    // reorder settle before a confirmed hole is asked for
-  uint64_t tailGraceUs = 120000;  // a large frame should be fully sent by now
+  // The in-flight tail (indices >= highWater) is only asked for once the AU has STALLED -- no new
+  // data chunk (or an FEC-recovered one) for this long. From the AU's own lastProgressUs, not its
+  // age: a large frame paced out by the wire-rate cap takes far longer than its age-based grace to
+  // arrive, so asking from age ignited premature tail NACKs that spent the round budget while the
+  // tail was legitimately still coming (bitrate-hard-cap r2). A tail that is truly lost makes no
+  // progress, so its grace still elapses and it is still repaired.
+  uint64_t tailGraceUs = 120000;  // stall (no progress) before the in-flight tail is asked for
   uint64_t roundUs = 25000;       // spacing between rounds (>= a few RTTs)
   uint32_t maxRounds = 3;         // then give up -> the IDR path recovers
+  // The old (<= 0.2.147) behaviour: the tail grace ran from the AU's age, not its last progress.
+  // Product default is false (progress-based, the r2 fix). A mixed-version test sets this true to
+  // drive the real pre-fix scheduler and compare an old receiver's behaviour against the fixed one.
+  bool tailAgeBasedLegacy = false;
 };
 
 struct VideoNackStats {
@@ -106,7 +116,13 @@ class VideoNackScheduler {
     }
     const uint64_t age = (nowUs >= firstUs_) ? (nowUs - firstUs_) : 0;
     const bool gapEligible = age >= cfg_.gapGraceUs;
-    const bool tailEligible = age >= cfg_.tailGraceUs;
+    // The tail grace runs from the AU's last progress, not its age: while new chunks keep arriving
+    // (a cap-paced large frame), the tail is not "missing", it is in flight, and must not be asked
+    // for. lastProgressUs == 0 (the legacy overload never stamped it) falls back to age so old
+    // callers are unchanged. (bitrate-hard-cap r2, plan r2 point 1-2.)
+    const uint64_t sinceProgressUs =
+        (info.lastProgressUs != 0 && nowUs >= info.lastProgressUs) ? (nowUs - info.lastProgressUs) : age;
+    const bool tailEligible = cfg_.tailAgeBasedLegacy ? (age >= cfg_.tailGraceUs) : (sinceProgressUs >= cfg_.tailGraceUs);
     const uint16_t have = std::min<uint16_t>(info.missingTotal, kMax);
     // Holes and the tail are two phases with a round budget each: rounds spent chasing a hole
     // while a large frame's tail was still (legitimately) in flight must not leave the tail with
