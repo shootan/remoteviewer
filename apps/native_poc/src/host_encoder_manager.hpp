@@ -57,6 +57,13 @@ struct EncoderState {
   uint64_t rateGovernorLastTxBytes = 0;
   uint32_t rateGovernorBitrate = 0;
   uint32_t rateGovernorUserFps = 0;  // r6: the user's frame rate the loop was started against
+  // Governor assist for the hard wire cap (bitrate-hard-cap r1): the governor judges the GENERATED
+  // load (bytes sent + the bytes the gate skipped to meet the cap), normalised to the real tick
+  // length -- not just the sent bytes, which the cap pins at the target so the loop would never
+  // step the quality down under motion. These track the previous tick's cumulative values.
+  uint64_t rateGovernorLastTxFrames = 0;
+  uint64_t rateGovernorLastSkips = 0;
+  uint64_t rateGovernorLastTickUs = 0;
   struct PendingTarget { uint32_t w=0, h=0, fps=0, bitrate=0, keyint=0; } retryTarget;
   bool targetPending = false;
   bool codecNeedsInit = false;

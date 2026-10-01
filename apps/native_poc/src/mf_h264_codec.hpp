@@ -204,6 +204,10 @@ class H264Encoder {
   // provenance (every AU goes out tagged epoch 0, which the emit gate refuses). Only a rebuild --
   // shutdown() followed by a successful initialize() -- clears it.
   bool provenance_invalid() const { return pendingInputs_.provenance_invalid(); }
+  // Inputs the async MFT has accepted but not yet drained as output (bitrate-hard-cap r1): the
+  // encode-input gate reads this so it can pre-empt the backlog the still-in-flight inputs will
+  // become, not only the backlog already in the sender queue. Single-threaded with encode.
+  uint32_t pending_input_depth() const { return static_cast<uint32_t>(pendingInputs_.size()); }
   /**
    * Test seam (A06 regression only): initialize() adopts this transform instead of enumerating
    * one, so a test can drive the accepted-input FIFO and the drain path deterministically --

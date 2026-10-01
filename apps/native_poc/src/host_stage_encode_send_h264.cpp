@@ -54,6 +54,7 @@
 #include "host_capture_session.hpp"
 #include "host_client_metrics.hpp"
 #include "host_control_session.hpp"
+#include "host_encode_admission.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_frame_gate.hpp"
@@ -272,6 +273,30 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                              (encoder.realInputsSinceKey >= encoder.activeKeyint);
    (void)seq;
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
+   // The hard wire-rate cap's input gate (bitrate-hard-cap r1): while the wire is backlogged -- the
+   // sender queue full, or the async MFT holding accepted inputs that will burst into it -- skip this
+   // capture frame BEFORE it is encoded, so the stream drops fps to what the wire carries instead of
+   // encoding a delta that overflows the queue into a resync-IDR loop (host_encode_admission.hpp). A
+   // key, a bootstrap/kick synthetic, and recovery are never skipped -- they must reach the wire.
+   // Same early exit as the stale-frame skip above: the popped NV12 slot is released at the next loop
+   // top, nothing was encoded, the reference chain is untouched.
+   if (sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled()) {
+     uint32_t senderDepth = 0;
+     {
+       std::lock_guard<std::mutex> lk(sender.mu);
+       senderDepth = static_cast<uint32_t>(sender.queue.size());
+     }
+     EncodeAdmissionInputs adm;
+     adm.wireCapActive = true;
+     adm.keyWanted = keyWanted;
+     adm.servedBootstrap = servedBootstrap;
+     adm.senderQueueDepth = senderDepth;
+     adm.mftPendingDepth = encoder.codec.pending_input_depth();
+     if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
+       ++stats.wireOverloadSkipCount;
+       return Flow::Continue;
+     }
+   }
    const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
    // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
    if (forceKeyFrame) {

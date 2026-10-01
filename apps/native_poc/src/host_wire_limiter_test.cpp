@@ -27,12 +27,17 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "time_utils.hpp"
+
+#include "host_encode_admission.hpp"
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
 #include "native_video_transport.hpp"
@@ -395,13 +400,187 @@ void test_negative_controls() {
   }
 }
 
+// ------------------------------------------------------------------ 4. the encode-input gate
+// A faithful model of the gate's effect, driving the REAL decide_encode_admission: the encoder
+// overproduces (a frame every tick, each larger than the wire drains in a tick), the wire drains a
+// fraction of a frame per tick. With the gate the sender queue stays bounded (fps drops); with it
+// off (the pre-gate behaviour) the queue grows without bound -- which is the overflow -> resync-IDR
+// loop the gate exists to pre-empt. This exercises the product gate, not a re-implementation of it.
+struct QueueModel {
+  double queue = 0;        // sender-queue depth (fractional: AUs waiting)
+  double mftPending = 0;   // inputs accepted by the MFT, not yet drained
+  double drainPerTick;     // AUs the wire can clear per tick (< 1 when overproducing)
+  uint32_t maxQueueSeen = 0;
+  uint64_t idrRequests = 0;  // a DropAndResync (queue overflow past 2) would request an IDR
+  void tick(bool gateOn) {
+    // Drain first (the sender thread sends what the wire allows this tick).
+    queue = std::max(0.0, queue - drainPerTick);
+    // The MFT releases one accepted input as a queued AU per tick (steady async cadence).
+    if (mftPending >= 1.0) {
+      mftPending -= 1.0;
+      queue += 1.0;
+    }
+    // Admit (or skip) a new capture frame.
+    EncodeAdmissionInputs adm;
+    adm.wireCapActive = gateOn;
+    adm.keyWanted = false;
+    adm.servedBootstrap = false;
+    adm.senderQueueDepth = static_cast<uint32_t>(queue + 0.5);
+    adm.mftPendingDepth = static_cast<uint32_t>(mftPending + 0.5);
+    if (decide_encode_admission(adm) == EncodeAdmission::Admit) {
+      mftPending += 1.0;  // the frame is accepted by the MFT (will drain into the queue next ticks)
+    }
+    // Overflow past the 2-frame queue is what the product clears with a resync IDR.
+    if (queue > 2.0) {
+      ++idrRequests;
+      queue = 0;  // DropAndResync clears the backlog
+    }
+    maxQueueSeen = std::max(maxQueueSeen, static_cast<uint32_t>(queue + 0.5));
+  }
+};
+
+void test_admission_gate() {
+  std::printf("\n--- the encode-input gate (decide_encode_admission) ---\n");
+  // The pure decisions, every branch.
+  auto admit = [](EncodeAdmissionInputs in) { return decide_encode_admission(in) == EncodeAdmission::Admit; };
+  EncodeAdmissionInputs base;
+  base.wireCapActive = true;
+  base.senderQueueMax = 2;
+  base.mftPendingMax = 4;
+  check("cap off: always admit (legacy)", admit([&] { auto i = base; i.wireCapActive = false; i.senderQueueDepth = 99; return i; }()));
+  check("a keyframe is admitted even when backlogged", admit([&] { auto i = base; i.keyWanted = true; i.senderQueueDepth = 9; return i; }()));
+  check("a bootstrap synthetic is admitted even when backlogged",
+        admit([&] { auto i = base; i.servedBootstrap = true; i.senderQueueDepth = 9; return i; }()));
+  check("a full sender queue skips a delta", !admit([&] { auto i = base; i.senderQueueDepth = 2; return i; }()));
+  check("a backed-up MFT skips a delta", !admit([&] { auto i = base; i.mftPendingDepth = 4; return i; }()));
+  check("an idle wire admits", admit([&] { auto i = base; i.senderQueueDepth = 0; i.mftPendingDepth = 1; return i; }()));
+
+  // The effect: overproduction (each frame needs ~2 ticks of wire) -- the queue stays bounded with
+  // the gate, and the resync-IDR path is never taken.
+  {
+    QueueModel m;
+    m.drainPerTick = 0.5;  // the wire clears half a frame per tick (2x overproduction)
+    for (int t = 0; t < 600; ++t) m.tick(/*gateOn=*/true);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "maxQueue=%u idrRequests=%llu", m.maxQueueSeen, (unsigned long long)m.idrRequests);
+    check("GATE ON: the sender queue stays bounded and no resync IDR is forced", m.maxQueueSeen <= 2 && m.idrRequests == 0, buf);
+  }
+  {
+    // NEGATIVE: gate off -> the queue overflows and the resync-IDR loop fires repeatedly.
+    QueueModel m;
+    m.drainPerTick = 0.5;
+    for (int t = 0; t < 600; ++t) m.tick(/*gateOn=*/false);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "idrRequests=%llu", (unsigned long long)m.idrRequests);
+    check("NEGATIVE: with the gate off the overproducing stream forces repeated resync IDRs", m.idrRequests > 10, buf);
+  }
+}
+
+// ------------------------------------------------------------------ 5. real OS UDP, real clock
+// The deterministic layers above measure the shaper's own maths. This one measures the OS network
+// observation the contract asks for separately: the real send path driving a REAL loopback UDP
+// socket, the limiter on the real qpc clock with a real cancellable sleep, a receiver thread that
+// timestamps every datagram by its arrival (qpc) and length, and the sliding 1 s / 250 ms windows
+// computed over those arrivals. Tag: network (loopback), display/gpu independent. ~3 s.
+void test_real_udp_window() {
+  std::printf("\n--- real OS UDP loopback, real clock: sliding windows under the cap ---\n");
+  WSADATA wsa{};
+  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+    check("WSAStartup", false, "WSAStartup failed");
+    return;
+  }
+  SOCKET rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  SOCKET tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  bind(rx, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  int alen = sizeof(addr);
+  getsockname(rx, reinterpret_cast<sockaddr*>(&addr), &alen);  // the OS-chosen port
+  int rcvbuf = 8 * 1024 * 1024;
+  setsockopt(rx, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+  DWORD to = 500;
+  setsockopt(rx, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+
+  std::vector<WireEvent> ev;
+  std::atomic<bool> rxStop{false};
+  std::thread rxThread([&] {
+    std::vector<char> buf(2048);
+    for (;;) {
+      const int n = recv(rx, buf.data(), static_cast<int>(buf.size()), 0);
+      const uint64_t t = qpc_now_us();
+      if (n > 0) {
+        const bool parity = n >= 2 && (static_cast<uint8_t>(buf[0]) & 0x10u);  // header flags low byte
+        ev.push_back({t, static_cast<uint64_t>(n) + kHdr28, parity, false});
+      } else if (rxStop.load()) {
+        break;
+      }
+    }
+  });
+
+  const uint64_t cap = 6'000'000;
+  const uint32_t lmax = clamp_udp_mtu(kMtu) + 28u;
+  WireLimiter lim([] { return qpc_now_us(); },
+                  [&lim](uint64_t deadlineUs, uint64_t seq) -> bool {
+                    for (;;) {
+                      const uint64_t now = qpc_now_us();
+                      if (now >= deadlineUs) return true;
+                      if (lim.cancel_seq() != seq || lim.stopped()) return false;
+                      udp_pace_wait_until(std::min<uint64_t>(deadlineUs, now + 1000ULL));
+                    }
+                  });
+  lim.SetRate(cap, lmax);
+  // Overproduce ~2x the cap at 60 fps for ~3 s; the limiter is the binding constraint (its real
+  // waits pace the sender), so the output rate on the wire is the cap.
+  const size_t deltaBytes = static_cast<size_t>(cap / 8 / 60 * 2);
+  WireEgress wire;
+  wire.limiter = &lim;  // no sink -> real sendto
+  const uint64_t t0 = qpc_now_us();
+  int seq = 0;
+  while (qpc_now_us() - t0 < 3'000'000) {
+    std::vector<uint8_t> payload(deltaBytes, static_cast<uint8_t>(seq & 0xFF));
+    SendPathStats st{};
+    UdpEgressConfig egress;
+    send_udp_chunks_timed(tx, addr, payload.data(), payload.size(), base_header(seq, seq == 5), kMtu, &st,
+                          nullptr, 0, egress, &wire);
+    ++seq;
+  }
+  // Let the receiver drain, then stop it.
+  udp_pace_wait_until(qpc_now_us() + 300'000);
+  rxStop.store(true);
+  lim.Stop();
+  closesocket(tx);
+  // nudge the recv timeout
+  udp_pace_wait_until(qpc_now_us() + 600'000);
+  if (rxThread.joinable()) rxThread.join();
+  closesocket(rx);
+  WSACleanup();
+
+  if (ev.size() < 200) {
+    check("real-UDP: received enough datagrams to measure", false,
+          "only " + std::to_string(ev.size()) + " received");
+    return;
+  }
+  const double p1s = peak_bps(ev, 1'000'000);
+  const double p250 = peak_bps(ev, 250'000);
+  char buf[192];
+  std::snprintf(buf, sizeof(buf), "1s=%.0f (%.1f%%) 250ms=%.0f (%.1f%%) received=%zu over ~3s", p1s,
+                100.0 * p1s / cap, p250, 100.0 * p250 / cap, ev.size());
+  check("real-UDP: every 1 s window <= cap +10%", p1s <= cap * 1.10, buf);
+  check("real-UDP: every 250 ms window <= cap +10%", p250 <= cap * 1.10, buf);
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  const bool skipNet = argc > 1 && std::string(argv[1]) == "--no-net";
   test_bucket_math();
   test_real_path_windows();
+  test_admission_gate();
   test_negative_controls();
+  if (!skipNet) test_real_udp_window();  // network (loopback); --no-net to skip
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

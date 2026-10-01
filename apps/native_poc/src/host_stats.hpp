@@ -39,6 +39,11 @@ struct HostStats {
   uint64_t tracePrinted = 0;
   uint64_t staleEncodedDropCount = 0;
   uint64_t stalePreEncodeDropCount = 0;
+  // Capture frames skipped before encode because the wire was backlogged (the hard wire-rate cap's
+  // input gate, bitrate-hard-cap r1): the stream drops fps to what the wire carries instead of
+  // encoding a delta that would overflow the sender queue and trigger a resync IDR -- the picture
+  // keeps updating at the sustainable rate, no IDR storm. 0 when the cap is off.
+  uint64_t wireOverloadSkipCount = 0;
   // GPU scaler outcome counters + stage timings.
   uint64_t gpuScaleAttempts = 0;
   uint64_t gpuScaleSuccess = 0;

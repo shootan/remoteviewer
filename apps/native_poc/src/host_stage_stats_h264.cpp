@@ -153,6 +153,32 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
     const uint64_t txDelta =
         txNow >= encoder.rateGovernorLastTxBytes ? txNow - encoder.rateGovernorLastTxBytes : 0;
     encoder.rateGovernorLastTxBytes = txNow;
+    // The governor assist (bitrate-hard-cap r1): when the wire cap is active the sender only sends up
+    // to the cap, so txDelta alone can never read "over" and the loop would never lower quality under
+    // motion. Judge the GENERATED load instead -- the bytes sent plus an estimate of the bytes the
+    // input gate skipped to stay under the cap (skipped frames x the average sent frame) -- and
+    // normalise it to the real tick length so a long or short tick is not misread. Cap off: the
+    // estimate is just txDelta, still normalised by elapsed (more correct than assuming exactly 1 s).
+    const bool wireCapActive = sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled();
+    const uint64_t framesNow = sender.txFrames.load(std::memory_order_relaxed);
+    const uint64_t framesDelta =
+        framesNow >= encoder.rateGovernorLastTxFrames ? framesNow - encoder.rateGovernorLastTxFrames : 0;
+    encoder.rateGovernorLastTxFrames = framesNow;
+    const uint64_t skipsNow = stats.wireOverloadSkipCount;
+    const uint64_t skipsDelta =
+        skipsNow >= encoder.rateGovernorLastSkips ? skipsNow - encoder.rateGovernorLastSkips : 0;
+    encoder.rateGovernorLastSkips = skipsNow;
+    const uint64_t tickNowUs = qpc_now_us();
+    const uint64_t elapsedUs =
+        encoder.rateGovernorLastTickUs > 0 && tickNowUs > encoder.rateGovernorLastTickUs
+            ? tickNowUs - encoder.rateGovernorLastTickUs
+            : 1000000ULL;
+    encoder.rateGovernorLastTickUs = tickNowUs;
+    const uint64_t avgSentFrameBytes = framesDelta > 0 ? txDelta / framesDelta : 0;
+    const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;
+    // Normalise to a per-second figure so OnSecond's "percent of target" is a true bitrate.
+    const uint64_t govBytesPerSec =
+        elapsedUs > 0 ? static_cast<uint64_t>(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
     if (governorOn && encoder.activeBitrate > 0) {
       auto& governor = encoder.rateGovernor;
       // The user's frame rate is the ceiling; the loop only ever goes below it (r6).
@@ -174,7 +200,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           if (encoder.codec.max_qp_override() == 0 && governor.maxQp() != H264Encoder::configured_max_qp()) {
             (void)encoder.codec.set_max_qp(governor.maxQp());
           }
-          const RateDecision after = governor.OnSecond(txDelta, encoder.activeBitrate, userFps);
+          const RateDecision after = governor.OnSecond(govBytesPerSec, encoder.activeBitrate, userFps);
           if (after.fps != before.fps) {
             const uint32_t prevFps = encoder.activeFps;
             const bool fpsApplied = encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender,
@@ -193,14 +219,16 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             }
             std::cout << "[native-video-host][rate-governor] fps " << prevFps << "->" << after.fps
                       << " userFps=" << userFps << " maxQp=" << after.maxQp
-                      << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
+                      << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
+                      << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
                       << " applied=" << (fpsApplied ? 1 : 0) << "\n";
           } else if (after.maxQp != before.maxQp) {
             const bool applied = encoder.codec.set_max_qp(after.maxQp);
             std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
                       << " fps=" << encoder.activeFps
-                      << " payloadKbps=" << (txDelta * 8ULL / 1000ULL)
+                      << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
+                      << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
                       << " applied=" << (applied ? 1 : 0) << "\n";
           }
