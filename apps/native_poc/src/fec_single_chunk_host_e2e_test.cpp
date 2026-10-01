@@ -337,7 +337,7 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
 }
 
 RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
-                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed) {
+                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn) {
   RunResult r;
   CreateDirectoryW(runDir.c_str(), nullptr);
   const std::wstring me = self_path();
@@ -365,10 +365,11 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE", tight ? L"1" : L"0");
-    // The hard wire cap is left ON (its default): with the r2 progress-based tail rule a cap-paced
-    // large AU's still-arriving tail is no longer NACKed, so a lossless run makes no NACK even under
-    // the cap -- this test's "lossless -> no NACK" invariant now holds with the cap on, so it also
-    // covers the cap + fix on real hardware. (It was pinned off at r1 before the fix existed.)
+    // The FEC-layout runs pin the wire cap OFF (this test's original purpose is the parity layout,
+    // and the cap paces a large AU over its send time, which is orthogonal). A separate cap-ON
+    // lossless run below asserts "lossless -> premature NACK 0" so the pin does not erase the cap-ON
+    // evidence that the r2 progress-based tail fix holds on real hardware. (bitrate-hard-cap r2.)
+    SetEnvironmentVariableW(L"REMOTE60_NATIVE_WIRE_CAP", wireCapOn ? L"1" : L"0");
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(kBitrate) + L" --seconds " +
@@ -699,7 +700,8 @@ int main(int argc, char** argv) {
         std::printf("SKIP-LAUNCH %s %s: no free port, the host is not started\n", cls, tight ? "tight" : "padded");
         continue;
       }
-      res[layout] = run_host(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed);
+      res[layout] = run_host(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed,
+                             /*wireCapOn=*/false);
       print_run(content, tight, lossPermille, lossSeed, res[layout]);
       const RunResult& r = res[layout];
       const std::string tag = std::string(cls) + " " + (tight ? "tight" : "padded");
@@ -778,6 +780,24 @@ int main(int argc, char** argv) {
         std::printf("INFO video: parity/frame tight %.0f vs padded %.0f (multi-chunk frames are identical under both;"
                     " two live captures)\n", tightParityPerFrame, padParityPerFrame);
       }
+    }
+  }
+
+  // Cap-ON evidence (bitrate-hard-cap r2): the same lossless scenario with the hard wire cap ON must,
+  // after the progress-based tail fix, still make NO premature NACK -- the pinned cap-OFF runs above
+  // keep this test's FEC-layout purpose, this run keeps the cap-ON proof. Only on a lossless path.
+  if (lossPermille == 0) {
+    const uint16_t capPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    if (capPort != 0) {
+      const std::wstring capDir = dir + L"capon_lossless\\";
+      const RunResult cr = run_host(hostExe, capDir, Content::Video, /*tight=*/true, capPort, seconds, 0, lossSeed,
+                                    /*wireCapOn=*/true);
+      print_run(Content::Video, true, 0, lossSeed, cr);
+      check(cr.delivered >= 2 && cr.decodeErrors == 0,
+            "cap ON lossless: frames delivered and decoded", "delivered " + u(cr.delivered) + " decErr " + u(cr.decodeErrors));
+      check(cr.nacks == 0,
+            "cap ON lossless: NO premature NACK (the r2 progress-based tail holds under the cap on real hardware)",
+            "rxNacks " + u(cr.nacks));
     }
   }
 
