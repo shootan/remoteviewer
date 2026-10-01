@@ -6,6 +6,7 @@
 #include <wtsapi32.h>
 #include <bcrypt.h>
 
+#include <cstdio>
 #include <vector>
 
 #include "file_copy_pipe_io.hpp"
@@ -110,56 +111,141 @@ DWORD token_integrity_rid(HANDLE token) {
   return *GetSidSubAuthority(label->Label.Sid, count - 1);
 }
 
-TokenVerdict inspect_helper_token(HANDLE elevatedProcessToken, DWORD sessionId,
-                                  const std::wstring& interactiveUserSid, HANDLE* linkedPrimaryOut) {
-  TokenVerdict v;
-  if (linkedPrimaryOut) *linkedPrimaryOut = nullptr;
-  TOKEN_ELEVATION_TYPE type{};
-  if (!token_elevation_type(elevatedProcessToken, &type)) {
-    v.why = "elevation-type-unreadable";
-    v.error = GetLastError();
-    return v;
-  }
-  if (type != TokenElevationTypeFull) {
-    // Not an elevated process (UAC off, or never elevated): its "linked token" is the OTHER half
-    // -- the full admin one -- which is exactly what must never run the helper.
-    v.why = type == TokenElevationTypeLimited ? "caller-not-elevated" : "caller-no-split-token";
-    return v;
-  }
-  TOKEN_LINKED_TOKEN linked{};
+TokenFacts read_token_facts(HANDLE token) {
+  TokenFacts f;
+  auto note = [&] {
+    if (f.error == 0) f.error = GetLastError();
+  };
   DWORD len = 0;
-  if (!GetTokenInformation(elevatedProcessToken, TokenLinkedToken, &linked, sizeof(linked), &len) || !linked.LinkedToken) {
-    v.why = "no-linked-token";
-    v.error = GetLastError();
-    return v;
+  f.typeRead = GetTokenInformation(token, TokenType, &f.type, sizeof(f.type), &len) != FALSE;
+  if (!f.typeRead) note();
+  f.userRead = token_user_sid(token, &f.userSid);
+  if (!f.userRead) note();
+  f.sessionRead = token_session(token, &f.session);
+  if (!f.sessionRead) note();
+  f.integrityRid = token_integrity_rid(token);
+  if (f.integrityRid == 0) note();
+  TOKEN_ELEVATION elevation{};
+  f.elevationRead = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &len) != FALSE;
+  if (f.elevationRead) {
+    f.elevated = elevation.TokenIsElevated != 0;
+  } else {
+    note();
   }
-  HANDLE t = linked.LinkedToken;
-  auto refuse = [&](const char* why) {
+  f.elevationTypeRead = token_elevation_type(token, &f.elevationType);
+  if (!f.elevationTypeRead) note();
+  SetLastError(ERROR_SUCCESS);
+  f.restricted = IsTokenRestricted(token) != FALSE;
+  // IsTokenRestricted cannot tell "no" from "could not read": an error counts as restricted.
+  if (!f.restricted && GetLastError() != ERROR_SUCCESS) {
+    f.restricted = true;
+    note();
+  }
+  return f;
+}
+
+TokenVerdict judge_helper_token(const TokenFacts& f, DWORD sessionId, const std::wstring& interactiveUserSid) {
+  TokenVerdict v;
+  v.error = f.error;
+  if (!f.typeRead) v.why = "type-unreadable";
+  else if (!f.userRead) v.why = "user-unreadable";
+  else if (!f.sessionRead) v.why = "session-unreadable";
+  else if (f.integrityRid == 0) v.why = "integrity-unreadable";
+  else if (!f.elevationRead) v.why = "elevation-unreadable";
+  else if (!f.elevationTypeRead) v.why = "elevation-type-unreadable";
+  else if (f.type != TokenPrimary) v.why = "not-primary";
+  else if (_wcsicmp(f.userSid.c_str(), interactiveUserSid.c_str()) != 0) v.why = "user-is-not-the-interactive-user";
+  else if (f.session != sessionId) v.why = "session-differs";
+  else if (f.integrityRid != SECURITY_MANDATORY_MEDIUM_RID) v.why = "not-medium";
+  else if (f.elevated) v.why = "elevated";
+  else if (f.elevationType == TokenElevationTypeFull) v.why = "full-elevation";
+  else if (f.restricted) v.why = "restricted";
+  else {
+    v.ok = true;
+    v.why = "ok";
+    v.error = 0;
+  }
+  return v;
+}
+
+std::string describe_token_facts(const TokenFacts& f) {
+  auto hex = [](DWORD x) {
+    char b[16];
+    std::snprintf(b, sizeof(b), "0x%lx", static_cast<unsigned long>(x));
+    return std::string(b);
+  };
+  std::string s = "type=";
+  s += !f.typeRead ? "?" : f.type == TokenPrimary ? "primary" : "impersonation";
+  s += " il=" + (f.integrityRid ? hex(f.integrityRid) : std::string("?"));
+  s += " elevated=" + (f.elevationRead ? std::string(f.elevated ? "1" : "0") : std::string("?"));
+  s += " elevType=";
+  if (!f.elevationTypeRead) s += "?";
+  else if (f.elevationType == TokenElevationTypeDefault) s += "default";
+  else if (f.elevationType == TokenElevationTypeLimited) s += "limited";
+  else s += "full";
+  s += " restricted=" + std::string(f.restricted ? "1" : "0");
+  s += " session=" + (f.sessionRead ? std::to_string(f.session) : std::string("?"));
+  return s;
+}
+
+const char* launch_failure_name(LaunchFailure f) {
+  switch (f) {
+    case LaunchFailure::None: return "none";
+    case LaunchFailure::Missing: return "missing";
+    case LaunchFailure::TokenRejected: return "token-rejected";
+    case LaunchFailure::NoShell: return "no-shell";
+    case LaunchFailure::SpawnFailed: return "spawn-failed";
+    case LaunchFailure::HandshakeFailed: return "handshake-failed";
+  }
+  return "none";
+}
+
+LaunchFailure launch_failure_of(const std::string& why) {
+  for (LaunchFailure f : {LaunchFailure::Missing, LaunchFailure::TokenRejected, LaunchFailure::NoShell,
+                          LaunchFailure::SpawnFailed, LaunchFailure::HandshakeFailed}) {
+    const std::string prefix = std::string(launch_failure_name(f)) + ":";
+    if (why.compare(0, prefix.size(), prefix) == 0) return f;
+  }
+  return LaunchFailure::None;
+}
+
+TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
+                                 LaunchFailure* cls, std::string* diag) {
+  primaryOut->reset();
+  *cls = LaunchFailure::None;
+  TokenVerdict v;
+  auto refuse = [&](LaunchFailure c, const char* stage, const char* why, DWORD error) {
+    *cls = c;
+    v.ok = false;
+    v.stage = stage;
     v.why = why;
-    v.error = GetLastError();
-    CloseHandle(t);
+    v.error = error;
     return v;
   };
-  std::wstring user;
-  if (!token_user_sid(t, &user)) return refuse("linked-user-unreadable");
-  if (_wcsicmp(user.c_str(), interactiveUserSid.c_str()) != 0) return refuse("linked-user-is-not-the-interactive-user");
-  DWORD session = 0;
-  if (!token_session(t, &session)) return refuse("linked-session-unreadable");
-  if (session != sessionId) return refuse("linked-session-differs");
-  if (token_integrity_rid(t) != SECURITY_MANDATORY_MEDIUM_RID) return refuse("linked-token-not-medium");
-  if (IsTokenRestricted(t)) return refuse("linked-token-restricted");
-  TOKEN_ELEVATION_TYPE linkedType{};
-  if (!token_elevation_type(t, &linkedType) || linkedType != TokenElevationTypeLimited) return refuse("linked-token-not-limited");
-  HANDLE primary = nullptr;
-  if (!DuplicateTokenEx(t, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenPrimary, &primary)) {
-    return refuse("linked-token-duplicate-failed");
+  const HWND shell = GetShellWindow();
+  if (!shell) return refuse(LaunchFailure::NoShell, "shell-window", "no-shell-window", GetLastError());
+  DWORD pid = 0;
+  GetWindowThreadProcessId(shell, &pid);
+  if (pid == 0) return refuse(LaunchFailure::NoShell, "shell-window", "shell-pid-unknown", GetLastError());
+  UniqueHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+  if (!process) return refuse(LaunchFailure::NoShell, "shell-process", "shell-process-open", GetLastError());
+  UniqueHandle shellToken;
+  if (!OpenProcessToken(process.get(), TOKEN_QUERY | TOKEN_DUPLICATE, shellToken.put())) {
+    return refuse(LaunchFailure::TokenRejected, "shell-token", "shell-token-open", GetLastError());
   }
-  CloseHandle(t);
-  if (linkedPrimaryOut) {
-    *linkedPrimaryOut = primary;
-  } else {
-    CloseHandle(primary);
+  const TokenFacts facts = read_token_facts(shellToken.get());
+  if (diag) *diag = "shell: " + describe_token_facts(facts);
+  const TokenVerdict shellVerdict = judge_helper_token(facts, sessionId, interactiveUserSid);
+  if (!shellVerdict.ok) return refuse(LaunchFailure::TokenRejected, "shell-token", shellVerdict.why, shellVerdict.error);
+  UniqueHandle primary;
+  if (!DuplicateTokenEx(shellToken.get(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, nullptr,
+                        SecurityImpersonation, TokenPrimary, primary.put())) {
+    return refuse(LaunchFailure::TokenRejected, "duplicate", "duplicate-failed", GetLastError());
   }
+  // The token launched is the duplicate: it is judged too, not assumed to be its source.
+  const TokenVerdict finalVerdict = judge_helper_token(read_token_facts(primary.get()), sessionId, interactiveUserSid);
+  if (!finalVerdict.ok) return refuse(LaunchFailure::TokenRejected, "duplicate", finalVerdict.why, finalVerdict.error);
+  *primaryOut = std::move(primary);
   v.ok = true;
   v.why = "ok";
   return v;
@@ -338,11 +424,13 @@ std::wstring HelperLink::helper_command_line(const std::wstring& exe, const std:
 
 bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* desktop, const std::wstring& extraArgs,
                         std::string* why) {
+  lastError_ = 0;
   if (pipe_ == INVALID_HANDLE_VALUE) {
     if (why) *why = "no-pipe";
     return false;
   }
   if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    lastError_ = GetLastError();
     if (why) *why = "helper-exe-missing";
     return false;
   }
@@ -368,13 +456,15 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
   }
   job_ = CreateJobObjectW(nullptr, nullptr);
   if (!job_) {
-    if (why) *why = "CreateJobObject err=" + std::to_string(GetLastError());
+    lastError_ = GetLastError();
+    if (why) *why = "CreateJobObject err=" + std::to_string(lastError_);
     return false;
   }
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-    if (why) *why = "SetInformationJobObject err=" + std::to_string(GetLastError());
+    lastError_ = GetLastError();
+    if (why) *why = "SetInformationJobObject err=" + std::to_string(lastError_);
     return false;
   }
   std::wstring cmd = helper_command_line(exe, extraArgs);
@@ -393,12 +483,14 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
     ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi);
   }
   if (!ok) {
-    if (why) *why = std::string(token ? "CreateProcessWithTokenW" : "CreateProcessW") + " err=" + std::to_string(GetLastError());
+    lastError_ = GetLastError();
+    if (why) *why = std::string(token ? "CreateProcessWithTokenW" : "CreateProcessW") + " err=" + std::to_string(lastError_);
     return false;
   }
   if (!AssignProcessToJobObject(job_, pi.hProcess)) {
     // A helper outside the Job would outlive this object; that is not a helper we run.
-    if (why) *why = "AssignProcessToJobObject err=" + std::to_string(GetLastError());
+    lastError_ = GetLastError();
+    if (why) *why = "AssignProcessToJobObject err=" + std::to_string(lastError_);
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -412,6 +504,7 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
 }
 
 bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
+  lastError_ = 0;
   if (pipe_ == INVALID_HANDLE_VALUE || helperPid_ == 0) {
     if (why) *why = "not-launched";
     return false;
@@ -435,6 +528,7 @@ bool HelperLink::AwaitHello(DWORD timeoutMs, std::string* why) {
     case detail::ConnectOutcome::Stuck:
       return refuse("connect-cancel-stuck");  // the storage is orphaned; this link is over
     default:
+      lastError_ = err;
       return refuse("ConnectNamedPipe err=" + std::to_string(err));
   }
   ULONG clientPid = 0;
@@ -543,49 +637,111 @@ bool HelperLink::pipe_open() const {
   return pipe_ != INVALID_HANDLE_VALUE && !closeRequested_;
 }
 
-bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why, DWORD helloTimeoutMs) {
-  HANDLE self = nullptr;
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &self)) {
-    if (why) *why = "OpenProcessToken err=" + std::to_string(GetLastError());
+namespace {
+
+// "<class>: stage=<step> err=<win32> (<detail>)" -- launch_failure_of reads the class back.
+std::string launch_why(LaunchFailure cls, const char* stage, DWORD error, const std::string& detail) {
+  std::string s = std::string(launch_failure_name(cls)) + ": stage=" + stage + " err=" + std::to_string(error);
+  if (!detail.empty()) s += " (" + detail + ")";
+  return s;
+}
+
+// What every launch does once it knows the helper's user: the pipe, the start (Job, suspended,
+// resume), the handshake -- each refusal classified, with the Win32 error the link recorded.
+bool start_and_greet(HelperLink* link, const std::wstring& userSid, const std::wstring& helperExe, HANDLE token,
+                     const wchar_t* desktop, const std::wstring& extraArgs, DWORD helloTimeoutMs, std::string* why) {
+  std::string detail;
+  if (!link->CreateServerPipe(userSid, &detail)) {
+    if (why) *why = launch_why(LaunchFailure::SpawnFailed, "pipe", 0, detail);
+    return false;
+  }
+  if (!link->Launch(helperExe, token, desktop, extraArgs, &detail)) {
+    const LaunchFailure cls = detail == "helper-exe-missing" ? LaunchFailure::Missing : LaunchFailure::SpawnFailed;
+    if (why) *why = launch_why(cls, "launch", link->last_error(), detail);
+    return false;
+  }
+  if (!link->AwaitHello(helloTimeoutMs, &detail)) {
+    if (why) *why = launch_why(LaunchFailure::HandshakeFailed, "hello", link->last_error(), detail);
+    return false;
+  }
+  return true;
+}
+
+// For the log only: what this process's TokenLinkedToken is (the old source: 1346 on duplication).
+// Its type and impersonation level, nothing else; the handle is closed at once.
+std::string linked_token_note() {
+  UniqueHandle self;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, self.put())) return "linked: ?";
+  TOKEN_LINKED_TOKEN linked{};
+  DWORD len = 0;
+  if (!GetTokenInformation(self.get(), TokenLinkedToken, &linked, sizeof(linked), &len) || !linked.LinkedToken) {
+    return "linked: none err=" + std::to_string(GetLastError());
+  }
+  UniqueHandle t(linked.LinkedToken);
+  TOKEN_TYPE type{};
+  if (!GetTokenInformation(t.get(), TokenType, &type, sizeof(type), &len)) return "linked: type=?";
+  if (type == TokenPrimary) return "linked: type=primary";
+  SECURITY_IMPERSONATION_LEVEL level{};
+  if (!GetTokenInformation(t.get(), TokenImpersonationLevel, &level, sizeof(level), &len)) {
+    return "linked: type=impersonation level=?";
+  }
+  static const char* const kLevels[] = {"anonymous", "identification", "impersonation", "delegation"};
+  return std::string("linked: type=impersonation level=") + (level >= 0 && level <= 3 ? kLevels[level] : "?");
+}
+
+}  // namespace
+
+bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why, DWORD helloTimeoutMs,
+                             std::string* diag) {
+  if (diag) diag->clear();
+  // The file first: a missing helper is an install problem, and no token step may hide it (the
+  // 0.2.146 field log showed only the token failure while the executable was not even there).
+  if (GetFileAttributesW(helperExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (why) *why = launch_why(LaunchFailure::Missing, "helper-exe", GetLastError(), "helper-exe-missing");
     return false;
   }
   DWORD session = 0;
   if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
-    CloseHandle(self);
-    if (why) *why = "ProcessIdToSessionId err=" + std::to_string(GetLastError());
+    if (why) *why = launch_why(LaunchFailure::TokenRejected, "host-session", GetLastError(), "");
     return false;
   }
   std::wstring interactiveUser;
   DWORD err = 0;
   if (!interactive_session_user_sid(session, &interactiveUser, &err)) {
-    CloseHandle(self);
-    if (why) *why = "interactive-user-unknown err=" + std::to_string(err);
+    if (why) *why = launch_why(LaunchFailure::TokenRejected, "interactive-user", err, "interactive-user-unknown");
     return false;
   }
-  HANDLE linked = nullptr;
-  const TokenVerdict verdict = inspect_helper_token(self, session, interactiveUser, &linked);
-  CloseHandle(self);
+  UniqueHandle token;
+  LaunchFailure cls = LaunchFailure::None;
+  std::string shellNote;
+  const TokenVerdict verdict = acquire_shell_token(session, interactiveUser, &token, &cls, &shellNote);
+  const std::string tokens = (shellNote.empty() ? std::string("shell: ?") : shellNote) + "; " + linked_token_note();
+  if (diag) *diag = tokens;
   if (!verdict.ok) {
-    if (why) *why = std::string("token: ") + verdict.why + " err=" + std::to_string(verdict.error);
+    if (why) *why = launch_why(cls, verdict.stage, verdict.error, std::string(verdict.why) + "; " + tokens);
     return false;
   }
-  std::wstring linkedUser;
-  bool ok = token_user_sid(linked, &linkedUser) && link->CreateServerPipe(linkedUser, why) &&
-            link->Launch(helperExe, linked, nullptr, L"", why) && link->AwaitHello(helloTimeoutMs, why);
-  CloseHandle(linked);
-  if (!ok) link->Close();
+  // The pipe is for the user the token was judged to be: the interactive user.
+  const bool ok = start_and_greet(link, interactiveUser, helperExe, token.get(), nullptr, L"", helloTimeoutMs, why);
+  if (!ok) {
+    if (why) *why += "; " + tokens;
+    link->Close();
+  }
   return ok;
 }
 
 bool launch_file_copy_helper_as_self(const std::wstring& helperExe, const wchar_t* desktop, const std::wstring& extraArgs,
                                      HelperLink* link, std::string* why, DWORD helloTimeoutMs) {
-  std::wstring sid;
-  if (!current_process_user_sid(&sid)) {
-    if (why) *why = "no user SID";
+  if (GetFileAttributesW(helperExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (why) *why = launch_why(LaunchFailure::Missing, "helper-exe", GetLastError(), "helper-exe-missing");
     return false;
   }
-  const bool ok = link->CreateServerPipe(sid, why) && link->Launch(helperExe, nullptr, desktop, extraArgs, why) &&
-                  link->AwaitHello(helloTimeoutMs, why);
+  std::wstring sid;
+  if (!current_process_user_sid(&sid)) {
+    if (why) *why = launch_why(LaunchFailure::TokenRejected, "self-user", GetLastError(), "no user SID");
+    return false;
+  }
+  const bool ok = start_and_greet(link, sid, helperExe, nullptr, desktop, extraArgs, helloTimeoutMs, why);
   if (!ok) link->Close();
   return ok;
 }

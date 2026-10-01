@@ -380,7 +380,7 @@ int FileCopyClient::PumpOffer(ControlLink& link) {
     Log(os.str());
   } else {
     ++counters_.offersRefused;
-    if (r.verdict == fn::Verdict::HelperUnavailable) ++result_.noHelper, result_.noHelperHere = false;
+    if (r.verdict == fn::Verdict::HelperUnavailable) ++result_.noHelper, result_.noHelperHere = false, result_.noHelperHereMissing = false;
     std::ostringstream os;
     os << "offer refused verdict=" << static_cast<int>(r.verdict);
     Log(os.str());
@@ -612,10 +612,12 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
       std::string why;
       uint64_t inst = 0;
       if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
-      if (!helper_.Ensure(&why, &inst) || !helper_.SendTo(inst, fc::encode(pub))) {
+      const bool up = helper_.Ensure(&why, &inst);
+      if (!up || !helper_.SendTo(inst, fc::encode(pub))) {
         Log("remote copy not published: helper unavailable (" + why + ")");
         std::lock_guard<std::mutex> lock(mu_);
         ++result_.noHelper, result_.noHelperHere = true;
+        result_.noHelperHereMissing = !up && helper_.lastLaunchFailure() == fc::LaunchFailure::Missing;
         return;
       }
       std::ostringstream os;

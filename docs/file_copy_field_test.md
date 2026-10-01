@@ -10,9 +10,12 @@ t-zdmsd4gb r1 4단계. 자동 시험이 증명하지 못한 부분만 사람이 
 - 설치 파일이 도우미를 싣는지 — `gnlink_check_installer_payload.ps1` 10/10(로컬 빌드).
 
 ## 자동으로 증명 못 한 것 = 이번 실기의 대상
-1. **Host**: 관리자(`requireAdministrator`)로 도는 GNLinkStream 이 **로그인 사용자 토큰(연결 토큰)**으로
-   도우미를 띄우는 것. 시험 빌드는 비관리자라 이 경로를 못 탄다. 실패하면 High/SYSTEM 으로
-   대신 띄우지 않고 **거절**하는 것이 정상 동작이다.
+1. **Host**: 관리자(`requireAdministrator`)로 도는 GNLinkStream 이 **현재 셸(탐색기) 프로세스의 토큰**
+   (로그인 사용자·Medium·비승격)으로 도우미를 띄우는 것. 시험 빌드는 비관리자라 이 경로를 못 탄다.
+   실패하면 High/SYSTEM 으로 대신 띄우지 않고 **거절**하는 것이 정상 동작이다.
+   ⚠️ 0.2.146 은 연결 토큰(TokenLinkedToken)을 썼고 실기(10-01)에서 `linked-token-duplicate-failed
+   err=1346` 으로 항상 실패했다 — helper-shell-token r1 에서 셸 토큰으로 바꿨다(history 10-01 항목).
+   설치본 실기 전에 `automation/file_copy_helper_elevated_check.ps1` 1회(UAC)로 승격 경로를 먼저 본다.
 2. 실제 **탐색기**가 원격 파일 목록을 받아 붙여넣는 것(시험은 셸 소비자 흉내 + 실제 IStream).
 3. 실제 회선(원격 PC)에서의 속도·바 표시.
 

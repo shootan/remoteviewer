@@ -151,12 +151,19 @@ ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t n
     st->noHelperUntilUs = nowUs + kClipBarResultUs;
   }
   if (st->noHelperUntilUs > nowUs) {
-    // Not silent: the likeliest cause is an install from before the helper existed (it arrives with
-    // the next update); the exact reason is in the host / viewer log.
+    // Not silent -- and not a guess (helper-shell-token r1): only a helper found MISSING on this PC
+    // is an install / update problem. Anything else (a token refused, no shell, a failed start or
+    // handshake), and every refusal from the remote PC (its reason is not on the wire), is said as
+    // "could not start"; the exact reason is in the host / viewer log.
     v.isFile = true;
     v.phase = ClipBarPhase::Result;
-    v.fileText = p.noHelperHere ? L"이 PC의 GNLink 를 한 번 더 업데이트해야 원격 PC의 파일을 붙여넣을 수 있습니다"
-                                : L"원격 PC의 GNLink 를 한 번 더 업데이트해야 파일을 붙여넣을 수 있습니다";
+    if (!p.noHelperHere) {
+      v.fileText = L"원격 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요";
+    } else if (p.noHelperHereMissing) {
+      v.fileText = L"이 PC의 GNLink 에 파일 복사 도우미가 없습니다. GNLink 를 업데이트하거나 다시 설치해 주세요";
+    } else {
+      v.fileText = L"이 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요";
+    }
     return v;
   }
   if (p.offered != st->seenOffered) {

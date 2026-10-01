@@ -11,6 +11,10 @@
 //             an older bulk generation: both are rejected, nothing of them is handed on, the bytes
 //             delivered are the right ones.
 //
+//   helper    (helper-shell-token r1) FileHelperChannel keeps the CLASS of the last failed helper
+//             start -- read from the launcher's `why` -- through the backoff that follows, and drops
+//             it once a start succeeds: the viewer says "not installed" only for a helper found missing.
+//
 // Tags: pure-logic (no sockets, no files).
 
 #include <atomic>
@@ -203,6 +207,45 @@ int main() {
           "rejected=" + std::to_string(c.chunksRejected) + " verified=" + std::to_string(c.chunksVerified));
     check("...and none of them failed the paste or counted as progress beyond the right chunks",
           r.rx.failure() == fn::PasteEndReason::None && c.bytesDelivered == 256u * 1024u);
+  }
+
+  std::printf("\n--- helper: the class of the last failed start ---\n");
+  {
+    // A scripted launcher: what it answers is the test's; the channel only reads the class back.
+    std::string next = "missing: stage=helper-exe err=2 (helper-exe-missing)";
+    bool succeed = false;
+    FileHelperChannel ch;
+    FileHelperChannel::Config cfg;
+    cfg.backoffFirstMs = 300;
+    cfg.backoffMaxMs = 300;
+    cfg.launcher = [&](fc::HelperLink*, std::string* why) {
+      if (succeed) return true;
+      *why = next;
+      return false;
+    };
+    ch.Configure(cfg, [](uint64_t, uint64_t, const fc::PipeFrame&) {}, [](uint64_t, uint64_t) {});
+    std::string why;
+    check("nothing failed yet: no class", ch.lastLaunchFailure() == fc::LaunchFailure::None);
+    check("a start that finds the helper missing fails ...", !ch.Ensure(&why), why);
+    check("...and is kept as Missing", ch.lastLaunchFailure() == fc::LaunchFailure::Missing);
+    check("during the backoff no start is made ...", !ch.Ensure(&why) && why == "helper start backing off", why);
+    check("...and the class is still Missing (not lost to 'backing off')", ch.lastLaunchFailure() == fc::LaunchFailure::Missing);
+    Sleep(350);
+    next = "token-rejected: stage=shell-token err=0 (not-medium)";
+    check("a later start refused for its token ...", !ch.Ensure(&why), why);
+    check("...is TokenRejected, not Missing", ch.lastLaunchFailure() == fc::LaunchFailure::TokenRejected);
+    Sleep(350);
+    next = "some launcher that names no class";
+    check("a failure that names no class ...", !ch.Ensure(&why));
+    check("...is None: never taken for Missing", ch.lastLaunchFailure() == fc::LaunchFailure::None);
+    Sleep(350);
+    next = "missing: stage=helper-exe err=2 (helper-exe-missing)";
+    (void)ch.Ensure(&why);
+    Sleep(350);
+    succeed = true;
+    (void)ch.Ensure(&why);
+    check("a start that succeeds clears the class", ch.lastLaunchFailure() == fc::LaunchFailure::None);
+    ch.Stop();
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures);

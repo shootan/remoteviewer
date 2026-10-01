@@ -189,6 +189,9 @@ class FileCopyClient {
     // a release with the helper does not install it; without a word the user sees a broken feature).
     uint64_t noHelper = 0;
     bool noHelperHere = false;  // on this PC (R->P publish), else on the remote PC (P->R offer refused)
+    // On this PC, and its helper executable was found missing (an install / update problem). The
+    // remote PC's reason is not on the wire (verdict 5 says only "unavailable"): never claimed there.
+    bool noHelperHereMissing = false;
   };
   Progress GetProgress() const;
   /** UI thread: the user cancels the running paste (either direction). Confirmed by the other side. */

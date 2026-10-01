@@ -134,6 +134,14 @@ class FileHelperChannel {
 
   uint64_t launches() const { return launches_.load(); }
   uint64_t launchFailures() const { return launchFailures_.load(); }
+  /**
+   * The class of the last start that failed (launch_failure_of its `why`), kept through the backoff
+   * that follows it; None once a start succeeds. Lets a caller say "the helper is not installed"
+   * only when that is what was found (helper-shell-token r1).
+   */
+  file_copy::LaunchFailure lastLaunchFailure() const {
+    return static_cast<file_copy::LaunchFailure>(lastLaunchFailure_.load());
+  }
 
  private:
   // One started helper: its link (shared with its reader thread, which outlives a replacement) and
@@ -161,6 +169,7 @@ class FileHelperChannel {
   uint64_t nextLaunchMs_ = 0;
   uint32_t backoffMs_ = 0;
   std::atomic<uint64_t> launches_{0}, launchFailures_{0}, droppedSends_{0}, failedSends_{0};
+  std::atomic<uint8_t> lastLaunchFailure_{0};
 };
 
 // ------------------------------------------------------------------------------ the paste's identity

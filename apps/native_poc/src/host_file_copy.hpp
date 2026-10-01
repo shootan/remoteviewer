@@ -88,7 +88,7 @@ class HostFileCopyService {
   using SendFn = std::function<bool(const void* data, size_t len)>;
   /**
    * Starts the helper and completes its handshake on `link`. The product passes
-   * launch_file_copy_helper (the interactive user's linked token); a test passes the Medium launch
+   * launch_file_copy_helper (the interactive user's shell token); a test passes the Medium launch
    * on a private window station. False = the feature is unavailable now (the service backs off).
    */
   using HelperLauncher = std::function<bool(file_copy::HelperLink* link, std::string* why)>;

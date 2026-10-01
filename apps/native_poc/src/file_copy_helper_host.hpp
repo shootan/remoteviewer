@@ -4,11 +4,16 @@
 // is started, and the handshake that proves the process on the other end is the one started.
 // (file-copy-helper r1, plan §1)
 //
-// Role:    inspect_helper_token -- the elevated host's TokenLinkedToken, accepted ONLY when it is
-//          the interactive session's user (same SID), Medium integrity, the same session, not
-//          restricted. No fallback: if the linked token is not that, the feature is off.
+// Role:    acquire_shell_token -- the helper's identity is the CURRENT SHELL PROCESS's primary
+//          token (GetShellWindow -> its PID -> OpenProcessToken), accepted ONLY when judge_helper_token
+//          says it is a primary token of the interactive session's user (same SID), in the host's
+//          session, exactly Medium, not elevated, not a full elevation, not restricted -- checked on
+//          the shell's token and again on the duplicate that is launched. No fallback: no shell, or a
+//          shell token that is not that, and the feature is off. (helper-shell-token r1: the old
+//          source, TokenLinkedToken, is an Identification-level token for a caller without TCB and
+//          cannot become a primary token -- DuplicateTokenEx failed with 1346 on every elevated host.)
 //          HelperLink -- one pipe instance under a random name with a DACL for that user alone and
-//          a Medium label, the 256-bit nonce, the launch (CreateProcessWithTokenW with the linked
+//          a Medium label, the 256-bit nonce, the launch (CreateProcessWithTokenW with the shell
 //          token; or, for the Medium test launch, a plain CreateProcessW as the current user), the
 //          Job (KILL_ON_JOB_CLOSE), and AwaitHello: the connecting client's PID must be the
 //          launched PID and its Hello must carry the nonce -- otherwise the pipe is closed and the
@@ -17,8 +22,8 @@
 // Callers: launch_file_copy_helper (the product path), the helper e2e test (the Medium launch).
 //
 // What the Medium test launch does NOT prove: CreateProcessWithTokenW under the elevated host's
-// SeImpersonate, the real linked token, the real label on a pipe created by a High process. Those
-// are the one prepared elevated run (UAC) the verifier asks the user for at the end.
+// SeImpersonate, the shell token seen from a High process, the real label on a pipe created by a
+// High process. Those are the one prepared elevated run (UAC) the verifier asks the user for.
 
 #include <windows.h>
 
@@ -38,6 +43,7 @@ namespace remote60::native_poc::file_copy {
 struct TokenVerdict {
   bool ok = false;
   const char* why = "";  // a short reason when !ok
+  const char* stage = "";  // where it was refused (acquire_shell_token: shell-window / shell-process / shell-token / duplicate)
   DWORD error = 0;       // GetLastError of the failing API, when there was one
 };
 
@@ -50,15 +56,96 @@ bool current_process_user_sid(std::wstring* sidOut);
 /** Integrity RID of a token (SECURITY_MANDATORY_*_RID), or 0 when it cannot be read. */
 DWORD token_integrity_rid(HANDLE token);
 
+/** One owner, one CloseHandle (process, token, duplicate). Null and INVALID_HANDLE_VALUE are "none". */
+class UniqueHandle {
+ public:
+  UniqueHandle() = default;
+  explicit UniqueHandle(HANDLE h) : h_(h) {}
+  ~UniqueHandle() { reset(); }
+  UniqueHandle(const UniqueHandle&) = delete;
+  UniqueHandle& operator=(const UniqueHandle&) = delete;
+  UniqueHandle(UniqueHandle&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+  UniqueHandle& operator=(UniqueHandle&& o) noexcept {
+    if (this != &o) {
+      reset();
+      h_ = o.h_;
+      o.h_ = nullptr;
+    }
+    return *this;
+  }
+  HANDLE get() const { return h_; }
+  HANDLE* put() {
+    reset();
+    return &h_;
+  }
+  explicit operator bool() const { return h_ != nullptr && h_ != INVALID_HANDLE_VALUE; }
+  void reset() {
+    if (h_ && h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
+    h_ = nullptr;
+  }
+
+ private:
+  HANDLE h_ = nullptr;
+};
+
 /**
- * Examines `elevatedProcessToken`'s linked token for use as the helper's identity. On success
- * `*linkedPrimaryOut` is a PRIMARY token the caller owns (CloseHandle). The checks, in order:
- * the caller is a full elevation; a linked token exists; its user SID equals
- * `interactiveUserSid`; its session is `sessionId`; it is Medium integrity; it is not
- * restricted; it is a limited elevation. Every refusal names itself.
+ * What a token says about itself, as read (read_token_facts). Each field has its own "read"
+ * flag: a field that could not be read is a refusal, never a default. Tests build these by hand
+ * to drive judge_helper_token through cases no real token on this PC can show (High, elevated).
  */
-TokenVerdict inspect_helper_token(HANDLE elevatedProcessToken, DWORD sessionId,
-                                  const std::wstring& interactiveUserSid, HANDLE* linkedPrimaryOut);
+struct TokenFacts {
+  bool typeRead = false;
+  TOKEN_TYPE type = TokenImpersonation;
+  bool userRead = false;
+  std::wstring userSid;
+  bool sessionRead = false;
+  DWORD session = 0;
+  DWORD integrityRid = 0;  // 0 = unreadable
+  bool elevationRead = false;
+  bool elevated = true;  // TokenElevation.TokenIsElevated
+  bool elevationTypeRead = false;
+  TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeFull;
+  bool restricted = true;  // IsTokenRestricted
+  DWORD error = 0;         // GetLastError of the first field that could not be read
+};
+
+TokenFacts read_token_facts(HANDLE token);
+
+/**
+ * Pure: may a token with these facts run the helper? The contract, in order: every field read;
+ * a PRIMARY token; user SID == `interactiveUserSid`; session == `sessionId`; integrity exactly
+ * Medium; TokenIsElevated false; elevation type Limited or Default (Default: no linked token --
+ * a standard user, not something to refuse; Full is refused); not restricted. Each refusal names
+ * itself (the caller adds the stage when it logs it).
+ */
+TokenVerdict judge_helper_token(const TokenFacts& facts, DWORD sessionId, const std::wstring& interactiveUserSid);
+
+/** "type=primary il=0x2000 elevated=0 elevType=limited restricted=0 session=1" -- no SID, no handle values. */
+std::string describe_token_facts(const TokenFacts& facts);
+
+/** Why the helper did not start, as a class (helper-shell-token r1 A4). Logged; not on the wire. */
+enum class LaunchFailure : uint8_t {
+  None = 0,
+  Missing,          // the helper executable is not there (an install / update problem)
+  TokenRejected,    // a token could not be read, or is not the interactive user's plain Medium one
+  NoShell,          // no shell window / its process is gone or cannot be opened
+  SpawnFailed,      // the pipe, the Job or CreateProcess*
+  HandshakeFailed,  // started, but did not connect / prove itself
+};
+const char* launch_failure_name(LaunchFailure f);
+/** The class a launcher's `why` begins with ("missing: ...") -- None when it names none. */
+LaunchFailure launch_failure_of(const std::string& why);
+
+/**
+ * The shell's identity for the helper: GetShellWindow -> PID -> OpenProcess(QUERY_LIMITED) ->
+ * OpenProcessToken(QUERY|DUPLICATE) -> judge -> DuplicateTokenEx(QUERY|DUPLICATE|ASSIGN_PRIMARY,
+ * primary) -> judge again on the duplicate. Never enumerates processes by name, never another
+ * session's or user's token, never SYSTEM. On success `*primaryOut` owns the duplicate. `*cls`
+ * is NoShell or TokenRejected on refusal; the verdict's `stage` names the step. `*diag`
+ * (optional) gets the shell token's facts.
+ */
+TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
+                                 LaunchFailure* cls, std::string* diag);
 
 struct HelloCheck {
   bool ok = false;
@@ -73,7 +160,7 @@ HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceByte
  * Pure: whether a process with this elevation type and integrity may start the helper as ITSELF
  * (HelperLink::Launch with token == nullptr, the Medium test launch). An elevated caller may not:
  * the helper would inherit administrator rights, which is the one thing this design exists to
- * prevent. The product path always passes the linked token; this guards a later wiring mistake.
+ * prevent. The product path always passes the shell token; this guards a later wiring mistake.
  */
 bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid);
 
@@ -132,7 +219,7 @@ class HelperLink {
   /**
    * Creates the pipe: `\\.\pipe\GNLinkClip-<128-bit hex>`, one instance, byte mode, overlapped,
    * remote clients rejected, DACL = `userSid` full access and nobody else, integrity label
-   * Medium (no-write-up). Draws the nonce. `userSid` is the helper's user -- the linked token's
+   * Medium (no-write-up). Draws the nonce. `userSid` is the helper's user -- the shell token's
    * user on the product path, this process's user for the Medium test launch.
    */
   bool CreateServerPipe(const std::wstring& userSid, std::string* why);
@@ -185,6 +272,8 @@ class HelperLink {
    */
   void ClosePipe();
 
+  /** The Win32 error of the last Launch / AwaitHello refusal (0 when it had none). */
+  DWORD last_error() const { return lastError_; }
   DWORD helper_pid() const { return helperPid_; }
   HANDLE helper_process() const { return process_; }
   bool helper_alive() const;
@@ -218,17 +307,22 @@ class HelperLink {
   HANDLE process_ = nullptr;
   HANDLE job_ = nullptr;
   DWORD helperPid_ = 0;
+  DWORD lastError_ = 0;
   bool handshaken_ = false;
   FrameReader reader_;
 };
 
 /**
- * The product path, in order: this process's token -> the interactive user of this session ->
- * inspect_helper_token -> pipe for that user -> CreateProcessWithTokenW -> AwaitHello. Any
- * refusal leaves `link` closed and names itself in `why`. Never falls back to another token.
+ * The product path, in order: the helper executable exists -> this process's session -> its
+ * interactive user -> acquire_shell_token -> pipe for that user -> CreateProcessWithTokenW (Job,
+ * suspended) -> AwaitHello. Any refusal leaves `link` closed and `why` =
+ * "<class>: stage=<step> err=<win32> (<detail>)" with the class from launch_failure_name, plus the
+ * token diagnostics when they were read. Never falls back to another token. `*diag` (optional)
+ * gets the token diagnostics line on success too: the shell token's facts and, for comparison,
+ * the type / impersonation level of this process's TokenLinkedToken (no longer used to launch).
  */
 bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why,
-                             DWORD helloTimeoutMs = 10000);
+                             DWORD helloTimeoutMs = 10000, std::string* diag = nullptr);
 
 /**
  * The viewer's path (R->P: remote files published on THIS PC's clipboard): the helper runs as this

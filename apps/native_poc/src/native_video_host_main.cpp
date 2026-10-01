@@ -311,7 +311,14 @@ int main(int argc, char** argv) {
       return s.substr(0, s.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
     }();
     fcfg.launcher = [helperExe](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
-      return remote60::native_poc::file_copy::launch_file_copy_helper(helperExe, link, why);
+      // A refusal is logged by the service with `why` (class, stage, error, token facts); a start is
+      // logged here with the same token facts, so the field log shows what the helper ran as.
+      std::string tokens;
+      const bool ok = remote60::native_poc::file_copy::launch_file_copy_helper(helperExe, link, why, 10000, &tokens);
+      if (ok) {
+        std::cout << "[native-video-host][file-copy] helper started pid=" << link->helper_pid() << " (" << tokens << ")\n";
+      }
+      return ok;
     };
     fcfg.videoBusy = [&sender]() {
       std::lock_guard<std::mutex> lock(sender.mu);

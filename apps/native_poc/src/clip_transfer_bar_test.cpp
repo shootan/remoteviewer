@@ -219,19 +219,34 @@ int main() {
           has(clip_transfer_bar_text(file_transfer_bar_view(p, now, &st)), L"다른 전송이 진행 중"));
     FileBarState fresh;
     check("file: a result from before the bar existed is not news", !file_transfer_bar_view(p, now, &fresh).isFile);
-    // r3: the helper could not run (the first update to a release with it does not install it).
+    // r3: the helper could not run -- said, not silent. helper-shell-token r1: and not guessed. The
+    // remote PC's reason is not on the wire, so "update" is never said for it (0.2.146 said "update
+    // once more" for a token failure an update could not fix); only a helper found MISSING here is.
     now += 2 * kClipBarResultUs;
     p.noHelper = 1;
     p.noHelperHere = false;
+    p.noHelperHereMissing = false;
     const std::wstring remoteNo = clip_transfer_bar_text(file_transfer_bar_view(p, now, &st));
-    check("file: no helper on the REMOTE PC is said (update it once more), not silent",
-          remoteNo == L"원격 PC의 GNLink 를 한 번 더 업데이트해야 파일을 붙여넣을 수 있습니다");
+    check("file: the REMOTE PC's helper not starting is said as 'could not start', not 'update'",
+          remoteNo == L"원격 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요" &&
+              !has(remoteNo, L"업데이트"));
     check("file: ...for 5 s, then gone", !file_transfer_bar_view(p, now + kClipBarResultUs + 1, &st).isFile);
     p.noHelper = 2;
     p.noHelperHere = true;
-    check("file: no helper on THIS PC names this PC",
-          clip_transfer_bar_text(file_transfer_bar_view(p, now + 2 * kClipBarResultUs, &st)) ==
-              L"이 PC의 GNLink 를 한 번 더 업데이트해야 원격 PC의 파일을 붙여넣을 수 있습니다");
+    p.noHelperHereMissing = false;
+    const std::wstring hereNo = clip_transfer_bar_text(file_transfer_bar_view(p, now + 2 * kClipBarResultUs, &st));
+    check("file: THIS PC's helper not starting (not missing) names this PC, 'could not start', not 'update'",
+          hereNo == L"이 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요" &&
+              !has(hereNo, L"업데이트"));
+    p.noHelper = 3;
+    p.noHelperHereMissing = true;
+    check("file: THIS PC's helper MISSING is the one case that says update / reinstall",
+          clip_transfer_bar_text(file_transfer_bar_view(p, now + 4 * kClipBarResultUs, &st)) ==
+              L"이 PC의 GNLink 에 파일 복사 도우미가 없습니다. GNLink 를 업데이트하거나 다시 설치해 주세요");
+    p.noHelper = 4;
+    p.noHelperHere = false;
+    check("file: ...a stale 'missing' flag never turns a REMOTE refusal into 'update'",
+          !has(clip_transfer_bar_text(file_transfer_bar_view(p, now + 6 * kClipBarResultUs, &st)), L"업데이트"));
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);

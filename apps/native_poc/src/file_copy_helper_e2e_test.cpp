@@ -60,6 +60,16 @@ namespace {
 int gChecks = 0;
 int gFailures = 0;
 
+// This process is a plain user process: Medium, not elevated (the usual test run). An elevated run
+// takes the other branch of the token checks.
+bool this_process_is_plain() {
+  HANDLE t = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &t)) return false;
+  const TokenFacts f = read_token_facts(t);
+  CloseHandle(t);
+  return f.integrityRid == SECURITY_MANDATORY_MEDIUM_RID && f.elevationRead && !f.elevated;
+}
+
 void check(const std::string& name, bool ok, const std::string& detail = {}) {
   ++gChecks;
   if (!ok) ++gFailures;
@@ -689,10 +699,14 @@ int run_driver() {
   const std::wstring helperLog = root + L"\\helper.log";
 
   // ---------------------------------------------------------------- token: the product rule
-  std::printf("\n--- the token rule ---\n");
+  // helper-shell-token r1: the helper runs as the CURRENT SHELL's primary token, judged by
+  // judge_helper_token on the shell's token and again on the duplicate. What this (non-elevated)
+  // run can show with REAL tokens: the shell token of this session acquired and accepted; this
+  // process's own token refused as an impersonation copy, a restricted copy, a Low copy, another
+  // user, another session. What only injected facts can show here: High / System, TokenIsElevated,
+  // a full elevation, every unreadable field. [session-privilege: a High caller is the elevated check]
+  std::printf("\n--- the token rule (shell token) ---\n");
   {
-    HANDLE self = nullptr;
-    OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &self);
     DWORD session = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &session);
     std::wstring interactive;
@@ -702,26 +716,245 @@ int run_driver() {
     std::wstring mine;
     check("...and it is this process's user", current_process_user_sid(&mine) && _wcsicmp(mine.c_str(), interactive.c_str()) == 0,
           narrow(mine) + " vs " + narrow(interactive));
-    TOKEN_ELEVATION_TYPE type{};
-    DWORD len = 0;
-    GetTokenInformation(self, TokenElevationType, &type, sizeof(type), &len);
-    HANDLE linked = nullptr;
-    const TokenVerdict v = inspect_helper_token(self, session, interactive, &linked);
-    if (type == TokenElevationTypeFull) {
-      check("(this run is ELEVATED) the linked token passes every check", v.ok, v.why);
-      if (linked) {
-        check("...and it is Medium", token_integrity_rid(linked) == SECURITY_MANDATORY_MEDIUM_RID);
-        CloseHandle(linked);
-      }
-    } else {
-      check("A NON-ELEVATED CALLER IS REFUSED (its linked token would be the FULL admin one)",
-            !v.ok && std::string(v.why) == (type == TokenElevationTypeLimited ? "caller-not-elevated" : "caller-no-split-token") && !linked,
-            v.why);
-      check("...a wrong interactive user is refused on an elevated caller only (here: refused earlier)", !v.ok);
-    }
-    CloseHandle(self);
     std::wstring dummy;
     check("an impossible session has no interactive user", !interactive_session_user_sid(0xFFFFFFF0u, &dummy, &err));
+
+    // The real shell token of this session.
+    {
+      UniqueHandle shell;
+      LaunchFailure cls = LaunchFailure::None;
+      std::string diag;
+      const TokenVerdict v = acquire_shell_token(session, interactive, &shell, &cls, &diag);
+      check("THE SHELL'S TOKEN OF THIS SESSION IS ACQUIRED AND ACCEPTED", v.ok && bool(shell) && cls == LaunchFailure::None,
+            std::string(v.stage) + " " + v.why + " err=" + std::to_string(v.error) + " " + diag);
+      if (shell) {
+        const TokenFacts f = read_token_facts(shell.get());
+        check("...the duplicate is a primary token of the interactive user, Medium, not elevated, not restricted",
+              f.typeRead && f.type == TokenPrimary && f.userRead && _wcsicmp(f.userSid.c_str(), interactive.c_str()) == 0 &&
+                  f.integrityRid == SECURITY_MANDATORY_MEDIUM_RID && f.elevationRead && !f.elevated && !f.restricted &&
+                  f.sessionRead && f.session == session,
+              describe_token_facts(f));
+        check("...it carries only QUERY | DUPLICATE | ASSIGN_PRIMARY (no ADJUST_*, no IMPERSONATE)", [&] {
+          // A token handle opened with more rights would let these succeed; ours must not.
+          TOKEN_PRIVILEGES none{};
+          const BOOL adj = AdjustTokenPrivileges(shell.get(), TRUE, &none, sizeof(none), nullptr, nullptr);
+          return !adj && GetLastError() == ERROR_ACCESS_DENIED;
+        }());
+      }
+      check("the diagnostics name the shell token's facts and no SID",
+            diag.rfind("shell: type=primary il=0x2000 elevated=0", 0) == 0 && diag.find("S-1-") == std::string::npos, diag);
+    }
+    {
+      UniqueHandle shell;
+      LaunchFailure cls = LaunchFailure::None;
+      const TokenVerdict v = acquire_shell_token(session, L"S-1-5-18", &shell, &cls, nullptr);
+      check("the shell token is REFUSED when the interactive user is someone else (here: SYSTEM's SID)",
+            !v.ok && !shell && cls == LaunchFailure::TokenRejected && std::string(v.why) == "user-is-not-the-interactive-user" &&
+                std::string(v.stage) == "shell-token",
+            std::string(v.stage) + " " + v.why);
+      const TokenVerdict w = acquire_shell_token(session + 1, interactive, &shell, &cls, nullptr);
+      check("...and when the host's session is another one",
+            !w.ok && !shell && cls == LaunchFailure::TokenRejected && std::string(w.why) == "session-differs", w.why);
+    }
+
+    // Real tokens derived from this process's own (non-elevated: a Medium, not-elevated user token).
+    UniqueHandle self;
+    OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT, self.put());
+    const TokenFacts selfFacts = read_token_facts(self.get());
+    const bool selfPlain = this_process_is_plain();
+    if (selfPlain) {
+      check("this process's own (Medium, not elevated) token passes the same rule",
+            judge_helper_token(selfFacts, session, interactive).ok, describe_token_facts(selfFacts));
+    } else {
+      check("(this run is elevated) this process's own token is refused", !judge_helper_token(selfFacts, session, interactive).ok,
+            describe_token_facts(selfFacts));
+    }
+    {
+      UniqueHandle imp;
+      DuplicateTokenEx(self.get(), TOKEN_QUERY, nullptr, SecurityImpersonation, TokenImpersonation, imp.put());
+      const TokenVerdict v = judge_helper_token(read_token_facts(imp.get()), session, interactive);
+      check("AN IMPERSONATION TOKEN IS REFUSED (real: DuplicateTokenEx Impersonation)", !v.ok && std::string(v.why) == "not-primary",
+            v.why);
+      UniqueHandle ident;
+      DuplicateTokenEx(self.get(), TOKEN_QUERY, nullptr, SecurityIdentification, TokenImpersonation, ident.put());
+      const TokenVerdict w = judge_helper_token(read_token_facts(ident.get()), session, interactive);
+      check("...and an Identification one (what TokenLinkedToken gives a caller without TCB)",
+            !w.ok && std::string(w.why) == "not-primary", w.why);
+    }
+    if (selfPlain) {
+      UniqueHandle restricted;
+      std::vector<uint8_t> tu(256);
+      DWORD len = 0;
+      GetTokenInformation(self.get(), TokenUser, tu.data(), static_cast<DWORD>(tu.size()), &len);
+      SID_AND_ATTRIBUTES restrict{};
+      restrict.Sid = reinterpret_cast<TOKEN_USER*>(tu.data())->User.Sid;
+      const BOOL made = CreateRestrictedToken(self.get(), 0, 0, nullptr, 0, nullptr, 1, &restrict, restricted.put());
+      const TokenVerdict v = judge_helper_token(read_token_facts(restricted.get()), session, interactive);
+      check("A RESTRICTED TOKEN IS REFUSED (real: CreateRestrictedToken)", made && !v.ok && std::string(v.why) == "restricted",
+            v.why);
+      UniqueHandle low;
+      DuplicateTokenEx(self.get(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, nullptr, SecurityImpersonation, TokenPrimary, low.put());
+      SID_IDENTIFIER_AUTHORITY mandatory = SECURITY_MANDATORY_LABEL_AUTHORITY;
+      PSID lowSid = nullptr;
+      AllocateAndInitializeSid(&mandatory, 1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &lowSid);
+      TOKEN_MANDATORY_LABEL label{};
+      label.Label.Attributes = SE_GROUP_INTEGRITY;
+      label.Label.Sid = lowSid;
+      const BOOL lowered = SetTokenInformation(low.get(), TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid(lowSid));
+      FreeSid(lowSid);
+      const TokenVerdict w = judge_helper_token(read_token_facts(low.get()), session, interactive);
+      check("A LOW-INTEGRITY TOKEN IS REFUSED (real: a primary copy lowered to Low)",
+            lowered && !w.ok && std::string(w.why) == "not-medium", w.why);
+    }
+
+    // Injected facts: the cases no token of a non-elevated run can show.
+    TokenFacts good;
+    good.typeRead = good.userRead = good.sessionRead = good.elevationRead = good.elevationTypeRead = true;
+    good.type = TokenPrimary;
+    good.userSid = interactive;
+    good.session = session;
+    good.integrityRid = SECURITY_MANDATORY_MEDIUM_RID;
+    good.elevated = false;
+    good.elevationType = TokenElevationTypeLimited;
+    good.restricted = false;
+    check("(facts) the plain shell token of an administrator (Limited) is accepted", judge_helper_token(good, session, interactive).ok);
+    auto refused = [&](const char* name, TokenFacts f, const char* why) {
+      const TokenVerdict v = judge_helper_token(f, session, interactive);
+      check(name, !v.ok && std::string(v.why) == why, v.why);
+    };
+    {
+      TokenFacts f = good;
+      f.elevationType = TokenElevationTypeDefault;
+      check("(facts) A STANDARD USER'S (Default, no linked token) IS ACCEPTED -- not taken for elevated",
+            judge_helper_token(f, session, interactive).ok);
+    }
+    {
+      TokenFacts f = good;
+      f.integrityRid = SECURITY_MANDATORY_HIGH_RID;
+      refused("(facts) A HIGH-INTEGRITY SHELL IS REFUSED", f, "not-medium");
+      f.integrityRid = SECURITY_MANDATORY_SYSTEM_RID;
+      refused("(facts) ...and a System one", f, "not-medium");
+    }
+    {
+      TokenFacts f = good;
+      f.elevated = true;
+      refused("(facts) AN ELEVATED TOKEN IS REFUSED even if it read Medium", f, "elevated");
+      f = good;
+      f.elevationType = TokenElevationTypeFull;
+      refused("(facts) A FULL ELEVATION IS REFUSED even if it read Medium and not elevated", f, "full-elevation");
+      f = good;
+      f.restricted = true;
+      refused("(facts) a restricted token is refused", f, "restricted");
+      f = good;
+      f.type = TokenImpersonation;
+      refused("(facts) an impersonation token is refused", f, "not-primary");
+      f = good;
+      f.userSid = L"S-1-5-21-1-2-3-1001";
+      refused("(facts) another user is refused", f, "user-is-not-the-interactive-user");
+      f = good;
+      f.session = session + 7;
+      refused("(facts) another session is refused", f, "session-differs");
+    }
+    {
+      TokenFacts f = good;
+      f.typeRead = false;
+      refused("(facts) an unreadable type is a refusal, not a default", f, "type-unreadable");
+      f = good;
+      f.userRead = false;
+      refused("(facts) ...an unreadable user", f, "user-unreadable");
+      f = good;
+      f.sessionRead = false;
+      refused("(facts) ...an unreadable session", f, "session-unreadable");
+      f = good;
+      f.integrityRid = 0;
+      refused("(facts) ...an unreadable integrity", f, "integrity-unreadable");
+      f = good;
+      f.elevationRead = false;
+      refused("(facts) ...an unreadable TokenElevation", f, "elevation-unreadable");
+      f = good;
+      f.elevationTypeRead = false;
+      refused("(facts) ...an unreadable elevation type", f, "elevation-type-unreadable");
+    }
+    check("read_token_facts of no token reads nothing (every flag false, restricted)", [] {
+      const TokenFacts f = read_token_facts(nullptr);
+      return !f.typeRead && !f.userRead && !f.sessionRead && f.integrityRid == 0 && !f.elevationRead && !f.elevationTypeRead &&
+             f.restricted && f.error != 0;
+    }());
+  }
+
+  // ---------------------------------------------------------------- the failure classes
+  // A missing helper and a token / start failure are told apart (the field log of 0.2.146 showed only
+  // the token failure while the executable was not there), each with stage and Win32 error.
+  std::printf("\n--- the failure classes ---\n");
+  {
+    check("the class names read back", launch_failure_of("missing: stage=x err=2") == LaunchFailure::Missing &&
+                                           launch_failure_of("token-rejected: stage=x") == LaunchFailure::TokenRejected &&
+                                           launch_failure_of("no-shell: stage=x") == LaunchFailure::NoShell &&
+                                           launch_failure_of("spawn-failed: stage=x") == LaunchFailure::SpawnFailed &&
+                                           launch_failure_of("handshake-failed: stage=x") == LaunchFailure::HandshakeFailed &&
+                                           launch_failure_of("helper start backing off") == LaunchFailure::None &&
+                                           launch_failure_of("missing") == LaunchFailure::None);
+    const std::wstring absent = dir_of(self_path()) + L"GNLinkClipHelper-absent.exe";
+    HelperLink link;
+    std::string why;
+    check("A MISSING HELPER (product path) IS 'missing' AT stage=helper-exe, before any token step",
+          !launch_file_copy_helper(absent, &link, &why) && launch_failure_of(why) == LaunchFailure::Missing &&
+              why.rfind("missing: stage=helper-exe err=2 ", 0) == 0 && why.find("shell:") == std::string::npos,
+          why);
+    std::string selfWhy;
+    check("...and on the viewer's path (as self)",
+          !launch_file_copy_helper_as_self(absent, nullptr, L"", &link, &selfWhy) &&
+              launch_failure_of(selfWhy) == LaunchFailure::Missing,
+          selfWhy);
+
+    // The real helper, the product path, from this non-elevated process: the shell token is
+    // accepted, then CreateProcessWithTokenW needs SeImpersonatePrivilege, which a non-elevated
+    // token does not hold -> spawn-failed with the Win32 error, and everything it made is closed.
+    // An elevated run (the elevated check) is where it starts.
+    auto handles = [] {
+      DWORD n = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &n);
+      return n;
+    };
+    std::string productWhy;
+    std::string diag;
+    HelperLink warm;
+    const bool started = launch_file_copy_helper(helperExe, &warm, &productWhy, 3000, &diag);
+    warm.Close();
+    if (this_process_is_plain()) {
+      check("THE PRODUCT PATH FROM A NON-ELEVATED PROCESS: token accepted, start refused as spawn-failed (no SeImpersonate)",
+            !started && launch_failure_of(productWhy) == LaunchFailure::SpawnFailed &&
+                productWhy.find("stage=launch") != std::string::npos &&
+                productWhy.find("CreateProcessWithTokenW") != std::string::npos &&
+                productWhy.find("shell: type=primary il=0x2000 elevated=0") != std::string::npos,
+            productWhy);
+      check("...the token diagnostics carry the shell facts and the linked token's level, no SID",
+            diag.find("shell: type=primary") == 0 && diag.find("; linked: ") != std::string::npos &&
+                diag.find("S-1-") == std::string::npos,
+            diag);
+      const DWORD before = handles();
+      bool linksClean = true;
+      for (int i = 0; i < 10; ++i) {
+        HelperLink l;
+        std::string w;
+        (void)launch_file_copy_helper(helperExe, &l, &w, 3000);
+        linksClean = linksClean && !l.helper_process() && !l.pipe_open() && l.helper_pid() == 0;
+      }
+      const DWORD after = handles();
+      check("after each failed start the link holds nothing: no helper process, no pipe", linksClean);
+      check("10 FAILED STARTS LEAVE NO HANDLE BEHIND (token, duplicate, process, Job, pipe)", after == before,
+            std::to_string(before) + " -> " + std::to_string(after));
+      const DWORD beforeRefusal = handles();
+      for (int i = 0; i < 10; ++i) {
+        UniqueHandle t;
+        LaunchFailure cls = LaunchFailure::None;
+        (void)acquire_shell_token(0xFFFFFFF0u, L"S-1-5-18", &t, &cls, nullptr);
+      }
+      check("10 token refusals leave no handle behind (shell process, shell token)", handles() == beforeRefusal,
+            std::to_string(beforeRefusal) + " -> " + std::to_string(handles()));
+    } else {
+      check("(this run is elevated) the product path starts the helper", started, productWhy);
+    }
   }
 
   // ---------------------------------------------------------------- the handshake rule (pure)
@@ -1176,9 +1409,10 @@ int run_driver() {
 
 // ================================================================== the elevated check (UAC, once)
 //
-// The product path -- launch_file_copy_helper: this process's TokenLinkedToken checked against the
-// interactive user, CreateProcessWithTokenW, the pipe's DACL + Medium label, the Job, the
-// handshake -- and then one StatFiles round trip on a file of the test's own and Shutdown. Nothing
+// The product path -- launch_file_copy_helper: the current shell's primary token judged against the
+// interactive user (helper-shell-token r1; the TokenLinkedToken of 0.2.146 failed here with 1346),
+// CreateProcessWithTokenW, the pipe's DACL + Medium label, the Job, the handshake -- and then one
+// StatFiles round trip on a file of the test's own and Shutdown. Nothing
 // is put on the clipboard. Meant to be run ONCE, elevated, from
 // automation/file_copy_helper_elevated_check.ps1; it writes what it saw to --log and exits 0 only
 // if every step held.
@@ -1221,18 +1455,32 @@ int run_elevated_check(int argc, wchar_t** argv) {
   }
   HelperLink link;
   std::string why;
-  const bool launched = launch_file_copy_helper(helperExe, &link, &why, 15000);
-  verdict("launch_file_copy_helper (linked token -> pipe -> CreateProcessWithTokenW -> Hello)", launched, why);
+  std::string tokens;
+  const bool launched = launch_file_copy_helper(helperExe, &link, &why, 15000, &tokens);
+  say("tokens: " + tokens);
+  verdict("the shell token is a Medium, not-elevated primary token",
+          tokens.rfind("shell: type=primary il=0x2000 elevated=0", 0) == 0, tokens);
+  verdict("launch_file_copy_helper (shell token -> pipe -> CreateProcessWithTokenW -> Job -> Hello)", launched, why);
   if (launched) {
     say("helper pid=" + std::to_string(link.helper_pid()) + " pipe=" + narrow(link.pipe_name()));
-    // The helper's own integrity, read from its process token.
+    // The helper's own token, read from its process: Medium, not elevated, the interactive user.
     HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, link.helper_pid());
     HANDLE ht = nullptr;
     if (hp && OpenProcessToken(hp, TOKEN_QUERY, &ht)) {
-      const DWORD helperRid = token_integrity_rid(ht);
-      std::wstring helperUser, me;
-      current_process_user_sid(&me);
-      verdict("the helper runs at Medium integrity", helperRid == SECURITY_MANDATORY_MEDIUM_RID, "rid=" + std::to_string(helperRid));
+      const TokenFacts hf = read_token_facts(ht);
+      DWORD session = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &session);
+      std::wstring interactive;
+      DWORD err = 0;
+      interactive_session_user_sid(session, &interactive, &err);
+      say("helper token: " + describe_token_facts(hf));
+      verdict("the helper runs at Medium integrity", hf.integrityRid == SECURITY_MANDATORY_MEDIUM_RID,
+              "rid=" + std::to_string(hf.integrityRid));
+      verdict("the helper is not elevated", hf.elevationRead && !hf.elevated && hf.elevationType != TokenElevationTypeFull);
+      verdict("the helper runs as the interactive user, in this session",
+              hf.userRead && _wcsicmp(hf.userSid.c_str(), interactive.c_str()) == 0 && hf.sessionRead && hf.session == session);
+      BOOL inJob = FALSE;
+      verdict("the helper is in a Job", IsProcessInJob(hp, nullptr, &inJob) && inJob);
       CloseHandle(ht);
     } else {
       verdict("the helper's token could be read", false, "err=" + std::to_string(GetLastError()));

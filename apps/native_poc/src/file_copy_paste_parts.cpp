@@ -76,6 +76,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   auto fresh = std::make_shared<fc::HelperLink>();
   if (!config_.launcher || !config_.launcher(fresh.get(), why)) {
     fresh->Close();
+    lastLaunchFailure_.store(static_cast<uint8_t>(fc::launch_failure_of(*why)));
     backoffMs_ = backoffMs_ ? (std::min)(backoffMs_ * 2, config_.backoffMaxMs) : config_.backoffFirstMs;
     nextLaunchMs_ = now + backoffMs_;
     ++launchFailures_;
@@ -84,6 +85,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
   std::shared_ptr<fc::HelperLink> dying, dyingCur;
   std::thread oldReader;
   bool adopted = false;
+  lastLaunchFailure_.store(static_cast<uint8_t>(fc::LaunchFailure::None));
   const uint64_t inst = ++nextInstance_;
   {
     std::lock_guard<std::mutex> s(sendMu_);
