@@ -226,7 +226,7 @@ HelperFile helper_file_state(const std::wstring& exe, DWORD* error) {
 }
 
 TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
-                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup) {
+                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup, DWORD dupAccessMask) {
   primaryOut->reset();
   *cls = LaunchFailure::None;
   TokenVerdict v;
@@ -260,8 +260,7 @@ TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiv
   const TokenVerdict shellVerdict = judge_helper_token(facts, sessionId, interactiveUserSid);
   if (!shellVerdict.ok) return refuse(LaunchFailure::TokenRejected, "shell-token", shellVerdict.why, shellVerdict.error);
   UniqueHandle primary;
-  if (!DuplicateTokenEx(shellToken.get(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, nullptr,
-                        SecurityImpersonation, TokenPrimary, primary.put())) {
+  if (!DuplicateTokenEx(shellToken.get(), dupAccessMask, nullptr, SecurityImpersonation, TokenPrimary, primary.put())) {
     return refuse(LaunchFailure::TokenRejected, "duplicate", "duplicate-failed", GetLastError());
   }
   // The token launched is the duplicate: it is judged too, not assumed to be its source.
@@ -460,7 +459,7 @@ std::wstring HelperLink::helper_command_line(const std::wstring& exe, const std:
 }
 
 bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* desktop, const std::wstring& extraArgs,
-                        std::string* why) {
+                        std::string* why, DWORD createFlags, const std::wstring& workDir) {
   lastError_ = 0;
   if (pipe_ == INVALID_HANDLE_VALUE) {
     if (why) *why = "no-pipe";
@@ -517,11 +516,12 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
   if (!desktopSpec.empty()) si.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION pi{};
   BOOL ok;
-  const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+  const DWORD flags = createFlags;
+  const wchar_t* cwd = workDir.empty() ? nullptr : workDir.c_str();
   if (token) {
-    ok = CreateProcessWithTokenW(token, 0, nullptr, mutableCmd.data(), flags, nullptr, nullptr, &si, &pi);
+    ok = CreateProcessWithTokenW(token, 0, nullptr, mutableCmd.data(), flags, nullptr, cwd, &si, &pi);
   } else {
-    ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi);
+    ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, flags, nullptr, cwd, &si, &pi);
   }
   if (!ok) {
     lastError_ = GetLastError();
@@ -537,7 +537,7 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
     CloseHandle(pi.hProcess);
     return false;
   }
-  ResumeThread(pi.hThread);
+  if (flags & CREATE_SUSPENDED) ResumeThread(pi.hThread);  // not suspended = already running (matrix variant d)
   CloseHandle(pi.hThread);
   process_ = pi.hProcess;
   helperPid_ = pi.dwProcessId;
@@ -703,13 +703,14 @@ bool helper_file_present(const std::wstring& exe, std::string* why) {
 // What every launch does once it knows the helper's user: the pipe, the start (Job, suspended,
 // resume), the handshake -- each refusal classified, with the Win32 error the link recorded.
 bool start_and_greet(HelperLink* link, const std::wstring& userSid, const std::wstring& helperExe, HANDLE token,
-                     const wchar_t* desktop, const std::wstring& extraArgs, DWORD helloTimeoutMs, std::string* why) {
+                     const wchar_t* desktop, const std::wstring& extraArgs, DWORD helloTimeoutMs, std::string* why,
+                     DWORD createFlags, const std::wstring& workDir) {
   std::string detail;
   if (!link->CreateServerPipe(userSid, &detail)) {
     if (why) *why = launch_why(LaunchFailure::SpawnFailed, "pipe", 0, detail);
     return false;
   }
-  if (!link->Launch(helperExe, token, desktop, extraArgs, &detail)) {
+  if (!link->Launch(helperExe, token, desktop, extraArgs, &detail, createFlags, workDir)) {
     const LaunchFailure cls = detail == "helper-exe-missing" ? LaunchFailure::Missing : LaunchFailure::SpawnFailed;
     if (why) *why = launch_why(cls, "launch", link->last_error(), detail);
     return false;
@@ -746,7 +747,8 @@ std::string linked_token_note() {
 }  // namespace
 
 bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why, DWORD helloTimeoutMs,
-                             std::string* diag) {
+                             std::string* diag, const HelperLaunchTuning* tuningIn) {
+  const HelperLaunchTuning tuning = tuningIn ? *tuningIn : HelperLaunchTuning{};
   if (diag) diag->clear();
   // The file first: a missing helper is an install problem, and no token step may hide it (the
   // 0.2.146 field log showed only the token failure while the executable was not even there).
@@ -765,7 +767,8 @@ bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, st
   UniqueHandle token;
   LaunchFailure cls = LaunchFailure::None;
   std::string shellNote;
-  const TokenVerdict verdict = acquire_shell_token(session, interactiveUser, &token, &cls, &shellNote);
+  const TokenVerdict verdict =
+      acquire_shell_token(session, interactiveUser, &token, &cls, &shellNote, nullptr, tuning.dupAccessMask);
   const std::string tokens = (shellNote.empty() ? std::string("shell: ?") : shellNote) + "; " + linked_token_note();
   if (diag) *diag = tokens;
   if (!verdict.ok) {
@@ -773,7 +776,10 @@ bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, st
     return false;
   }
   // The pipe is for the user the token was judged to be: the interactive user.
-  const bool ok = start_and_greet(link, interactiveUser, helperExe, token.get(), nullptr, L"", helloTimeoutMs, why);
+  const std::wstring workDir =
+      tuning.workDirIsHelperFolder ? helperExe.substr(0, helperExe.find_last_of(L'\\') + 1) : std::wstring();
+  const bool ok = start_and_greet(link, interactiveUser, helperExe, token.get(), tuning.desktop, L"", helloTimeoutMs, why,
+                                  tuning.createFlags, workDir);
   if (!ok) {
     if (why) *why += "; " + tokens;
     link->Close();
@@ -789,7 +795,8 @@ bool launch_file_copy_helper_as_self(const std::wstring& helperExe, const wchar_
     if (why) *why = launch_why(LaunchFailure::TokenRejected, "self-user", GetLastError(), "no user SID");
     return false;
   }
-  const bool ok = start_and_greet(link, sid, helperExe, nullptr, desktop, extraArgs, helloTimeoutMs, why);
+  const bool ok = start_and_greet(link, sid, helperExe, nullptr, desktop, extraArgs, helloTimeoutMs, why,
+                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, L"");
   if (!ok) link->Close();
   return ok;
 }

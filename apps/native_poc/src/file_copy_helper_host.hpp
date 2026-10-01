@@ -164,6 +164,28 @@ struct ShellLookup {
 };
 
 /**
+ * The few launch parameters that differ from the shipped updater's launch_as_shell_user and so are
+ * the suspects for the field's CreateProcessWithTokenW ERROR_ACCESS_DENIED (helper-shell-token r3).
+ * The product passes nothing and gets the defaults below; --elevated-check's matrix passes one
+ * variant at a time through the SAME functions (never a copy) so one UAC run says which matters.
+ *
+ * Default dupAccessMask is MAXIMUM_ALLOWED: CreateProcessWithTokenW hands the token to the
+ * secondary logon service (seclogon), which re-opens and manipulates it to build the process; the
+ * documented caller mask (QUERY|DUPLICATE|ASSIGN_PRIMARY) is not always enough for seclogon's own
+ * work and it returns ERROR_ACCESS_DENIED. The updater uses MAXIMUM_ALLOWED and starts in the
+ * field. MAXIMUM_ALLOWED grants the (High) caller access to the HANDLE, not privilege to the
+ * PROCESS: the launched helper still runs as the user's Medium, non-elevated token, which is
+ * re-judged after the duplicate is made. CREATE_SUSPENDED is kept so the helper does nothing before
+ * it is in the Job (the Job guarantee); only the matrix turns it off.
+ */
+struct HelperLaunchTuning {
+  DWORD dupAccessMask = MAXIMUM_ALLOWED;
+  DWORD createFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+  const wchar_t* desktop = nullptr;       // null = inherit the caller's (the product)
+  bool workDirIsHelperFolder = false;     // false = none (the product)
+};
+
+/**
  * The shell's identity for the helper: GetShellWindow -> PID -> OpenProcess(QUERY_LIMITED) ->
  * OpenProcessToken(QUERY|DUPLICATE) -> judge -> DuplicateTokenEx(QUERY|DUPLICATE|ASSIGN_PRIMARY,
  * primary) -> judge again on the duplicate -> (r2) with the process handle still open, the shell
@@ -177,7 +199,8 @@ struct ShellLookup {
  * `*diag` (optional) gets the shell token's facts. `lookup` null = the OS.
  */
 TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
-                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup = nullptr);
+                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup = nullptr,
+                                 DWORD dupAccessMask = MAXIMUM_ALLOWED);
 
 struct HelloCheck {
   bool ok = false;
@@ -271,7 +294,8 @@ class HelperLink {
    * `desktop` (optional) is the `winsta\desktop` the helper is put on.
    */
   bool Launch(const std::wstring& exe, HANDLE token, const wchar_t* desktop, const std::wstring& extraArgs,
-              std::string* why);
+              std::string* why, DWORD createFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+              const std::wstring& workDir = L"");
 
   /**
    * Waits for the helper to connect (bounded), refuses a client whose PID is not the launched
@@ -355,7 +379,8 @@ class HelperLink {
  * the type / impersonation level of this process's TokenLinkedToken (no longer used to launch).
  */
 bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, std::string* why,
-                             DWORD helloTimeoutMs = 10000, std::string* diag = nullptr);
+                             DWORD helloTimeoutMs = 10000, std::string* diag = nullptr,
+                             const HelperLaunchTuning* tuning = nullptr);
 
 /**
  * The viewer's path (R->P: remote files published on THIS PC's clipboard): the helper runs as this

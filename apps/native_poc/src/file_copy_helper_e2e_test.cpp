@@ -734,12 +734,15 @@ int run_driver() {
                   f.integrityRid == SECURITY_MANDATORY_MEDIUM_RID && f.elevationRead && !f.elevated && !f.restricted &&
                   f.sessionRead && f.session == session,
               describe_token_facts(f));
-        check("...it carries only QUERY | DUPLICATE | ASSIGN_PRIMARY (no ADJUST_*, no IMPERSONATE)", [&] {
-          // A token handle opened with more rights would let these succeed; ours must not.
-          TOKEN_PRIVILEGES none{};
-          const BOOL adj = AdjustTokenPrivileges(shell.get(), TRUE, &none, sizeof(none), nullptr, nullptr);
-          return !adj && GetLastError() == ERROR_ACCESS_DENIED;
-        }());
+        check("...MAXIMUM_ALLOWED grants the HANDLE access (CreateProcessWithTokenW / seclogon needs it, r3) but no privilege: still Medium, not elevated",
+              [&] {
+                // The mask is what the shipped updater uses. The duplicate is re-judged (above): it
+                // is the user's Medium, non-elevated token -- the launched helper runs as that, not
+                // raised. Access to the handle is not privilege in the process.
+                const TokenFacts f2 = read_token_facts(shell.get());
+                return judge_helper_token(f2, session, interactive).ok && f2.integrityRid == SECURITY_MANDATORY_MEDIUM_RID &&
+                       !f2.elevated;
+              }());
       }
       check("the diagnostics name the shell token's facts and no SID",
             diag.rfind("shell: type=primary il=0x2000 elevated=0", 0) == 0 && diag.find("S-1-") == std::string::npos, diag);
@@ -1602,6 +1605,44 @@ int run_elevated_check(int argc, wchar_t** argv) {
     const bool started = guard.Launch(helperExe, nullptr, nullptr, L"", &why);
     verdict("Launch(token=nullptr) from an elevated process is refused", !started && why == "medium-launch-refused-caller-elevated", why);
     guard.Close();
+  }
+  // The diagnostic matrix (r3): the 14:20 field run failed at CreateProcessWithTokenW err=5 with the
+  // minimal dup mask + the product flags. Each variant runs the SAME product function
+  // (launch_file_copy_helper) with only its tuning changed -- never a copy -- so this one UAC run
+  // says which difference from the updater's launch_as_shell_user matters. Each attempt is torn down
+  // at once (Close kills the Job); nothing is put on the clipboard.
+  say("--- matrix: CreateProcessWithTokenW variants (same product function, tuning only) ---");
+  {
+    const DWORD minimalMask = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
+    const DWORD productFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+    HelperLaunchTuning a;
+    a.dupAccessMask = minimalMask;
+    a.createFlags = productFlags;  // a = exactly the 14:20 field attempt
+    HelperLaunchTuning b = a;
+    b.dupAccessMask = MAXIMUM_ALLOWED;
+    HelperLaunchTuning c = a;
+    c.desktop = L"winsta0\\default";
+    HelperLaunchTuning d = a;
+    d.createFlags = 0;
+    HelperLaunchTuning e = a;
+    e.workDirIsHelperFolder = true;
+    HelperLaunchTuning f = a;  // the updater combo
+    f.dupAccessMask = MAXIMUM_ALLOWED;
+    f.createFlags = 0;
+    f.workDirIsHelperFolder = true;
+    struct V {
+      const char* name;
+      const HelperLaunchTuning* t;
+    };
+    const V variants[] = {{"a_current_minimal_mask", &a}, {"b_MAXIMUM_ALLOWED_mask", &b}, {"c_desktop_winsta0_default", &c},
+                          {"d_flags_0_no_suspend", &d},   {"e_workdir_helper_folder", &e}, {"f_updater_combo", &f}};
+    for (const V& v : variants) {
+      HelperLink l;
+      std::string w, dg;
+      const bool ok = launch_file_copy_helper(helperExe, &l, &w, 6000, &dg, v.t);
+      say(std::string("variant=") + v.name + (ok ? "  ok (full launch + Hello)" : "  " + w));
+      l.Close();
+    }
   }
   HelperLink link;
   std::string why;

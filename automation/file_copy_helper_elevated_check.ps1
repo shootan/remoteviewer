@@ -8,6 +8,13 @@
 # handshake, one StatFiles, Shutdown. This script asks for that elevation ONCE, runs the check, and
 # prints its log. It runs the test build's binaries only: no installed GNLink file or process.
 #
+# r3: the 14:20 field run reached CreateProcessWithTokenW and failed err=5 (ACCESS_DENIED) with the
+# minimal dup-token mask. The check now first runs a MATRIX -- variant=a..f -- each the same product
+# launch function with one parameter changed (dup mask, create flags, lpDesktop, work dir), so this
+# one run says which difference from the updater's launch_as_shell_user matters. Then it runs the
+# product default (MAXIMUM_ALLOWED mask, CREATE_SUSPENDED kept) end to end. Expect every variant line
+# and then PASS for the full launch; variant=a (the field combo) is expected to still show err=5.
+#
 # It puts nothing on the clipboard and touches no user file: the check stats the test executable
 # itself and tells the helper to shut down.
 #
