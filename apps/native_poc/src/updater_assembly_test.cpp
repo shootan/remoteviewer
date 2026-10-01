@@ -348,6 +348,39 @@ int main() {
           read_file(install + L"\\GNLinkHost.exe") == kBody);
   }
 
+  // ================================================================ a product file the install lacks
+
+  {
+    // 0.2.146 was installed without GNLinkClipHelper.exe and 0.2.147 lists it. Through the
+    // product's own payload list, the update has to create it rather than trip over its absence.
+    const auto exists = [](const std::wstring& path) {
+      return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    const std::vector<std::wstring> payload = product_payload_names();
+    bool listed = false;
+    for (const std::wstring& n : payload) {
+      if (_wcsicmp(n.c_str(), L"GNLinkClipHelper.exe") == 0) listed = true;
+    }
+    check("the product payload includes GNLinkClipHelper.exe", listed);
+
+    seed_install();
+    const std::wstring clip = install + L"\\GNLinkClipHelper.exe";
+    DeleteFileW(clip.c_str());
+    DeleteFileW((clip + L".gnlink-old").c_str());
+    check("precondition: the install has no ClipHelper", !exists(clip));
+
+    Recorder rec;
+    UpdaterEffects effects(options, make_deps(&rec));
+    std::string why;
+    check("the assembly builds", effects.build(&why), why);
+    const UpdateOutcome out = effects.run("windows");
+    check("ClipHelper absent: the update completes", out.result == UpdateResult::Updated,
+          std::string(result_name(out.result)) + " " + out.detail);
+    check("ClipHelper absent: it is created with the artifact's bytes",
+          exists(clip) && read_file(clip) == kBody);
+    check("ClipHelper absent: no backup of it", !exists(clip + L".gnlink-old"));
+  }
+
   // ================================================================ the verified version flows
 
   {

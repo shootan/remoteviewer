@@ -23,6 +23,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1036,6 +1037,144 @@ int main(int argc, char** argv) {
           result_name(out.result));
     check("newer installed: install untouched",
           read_text(install + L"\\AlphaPayload.bin") == kOldAlpha);
+  }
+
+  // ---------------------------------------------------------------- a payload the install lacks
+  //
+  // A release can name a file the installation has never had. 0.2.146 was installed by the 0.2.145
+  // updater and has no GNLinkClipHelper.exe; 0.2.147 lists it, so the swap has to CREATE it -- and
+  // a rollback has to take it away again, because "no such file" is what the previous build was.
+  // The code that does this (placed_, separate from movedAside_) was only reached incidentally;
+  // these cases assert it.
+
+  const auto clear_name = [&](const std::wstring& name) {
+    DeleteFileW((install + L"\\" + name).c_str());
+    DeleteFileW((install + L"\\" + name + L".gnlink-old").c_str());
+  };
+
+  {
+    // 1. A is installed, B is not. The release names both.
+    clear_name(L"AlphaPayload.bin");
+    clear_name(L"BetaPayload.bin");
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+    check("new name: precondition -- B is not installed",
+          !exists(install + L"\\BetaPayload.bin"));
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    WindowsUpdateEffects e(c);
+    e.set_installed_version("0.2.104");
+    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
+                   std::string(128, '0'));
+    const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+    const UpdateOutcome out = run_update(e, accept, "windows");
+    check("new name: Updated", out.result == UpdateResult::Updated,
+          std::string(result_name(out.result)) + " " + out.detail + " / " + e.last_error());
+    check("new name: B now exists", exists(install + L"\\BetaPayload.bin"));
+    // By hash, through the product's own helper -- the bytes the manifest vouched for.
+    const std::string betaSha = exists(install + L"\\BetaPayload.bin")
+                                    ? sha256_file_hex(install + L"\\BetaPayload.bin")
+                                    : std::string();
+    check("new name: B is the artifact byte for byte", betaSha == gArtifactSha, betaSha);
+    check("new name: A was replaced", read_text(install + L"\\AlphaPayload.bin") == kArtifactBytes);
+    check("new name: no backup of A left", !exists(install + L"\\AlphaPayload.bin.gnlink-old"));
+    check("new name: no backup of B was ever made",
+          !exists(install + L"\\BetaPayload.bin.gnlink-old"));
+    check("new name: staging cleaned", !exists(staging + L"\\artifact.staged"));
+  }
+
+  {
+    // 2. The same start, and a failure after the swap. The installation before was "A old, no B",
+    // so that is what a rollback must leave -- B removed, not kept as the new build's leftover.
+    clear_name(L"AlphaPayload.bin");
+    clear_name(L"BetaPayload.bin");
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.registerInstall = []() { return false; };  // fails after the swap
+    WindowsUpdateEffects e(c);
+    e.set_installed_version("0.2.104");
+    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
+                   std::string(128, '0'));
+    const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+    const UpdateOutcome out = run_update(e, accept, "windows");
+    check("new name + registration failure: RolledBack", out.result == UpdateResult::RolledBack,
+          std::string(result_name(out.result)) + " " + out.detail);
+    check("new name + registration failure: A restored",
+          read_text(install + L"\\AlphaPayload.bin") == kOldAlpha,
+          read_text(install + L"\\AlphaPayload.bin"));
+    check("new name + registration failure: B removed",
+          !exists(install + L"\\BetaPayload.bin"));
+    check("new name + registration failure: no backups left",
+          !exists(install + L"\\AlphaPayload.bin.gnlink-old") &&
+              !exists(install + L"\\BetaPayload.bin.gnlink-old"));
+  }
+
+  {
+    // 2b. The other road into the rollback: the new build runs and fails its health check. The
+    // restored build answers healthy, so this is a clean rollback, not RestoredButUnhealthy.
+    clear_name(L"AlphaPayload.bin");
+    clear_name(L"BetaPayload.bin");
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    auto calls = std::make_shared<int>(0);
+    c.healthCheck = [calls]() { return ++*calls > 1; };  // the new build is unhealthy, the old is not
+    WindowsUpdateEffects e(c);
+    e.set_installed_version("0.2.104");
+    e.set_manifest(manifest_for("0.2.105", {L"AlphaPayload.bin", L"BetaPayload.bin"}),
+                   std::string(128, '0'));
+    const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+    const UpdateOutcome out = run_update(e, accept, "windows");
+    check("new name + health failure: RolledBack", out.result == UpdateResult::RolledBack,
+          std::string(result_name(out.result)) + " " + out.detail);
+    check("new name + health failure: A restored",
+          read_text(install + L"\\AlphaPayload.bin") == kOldAlpha,
+          read_text(install + L"\\AlphaPayload.bin"));
+    check("new name + health failure: B removed", !exists(install + L"\\BetaPayload.bin"));
+  }
+
+  {
+    // 3. The same, under the real name 0.2.147 adds. product_payload_names() is not linked here
+    // (see the top of the file); updater_assembly_test asserts the product list contains this name
+    // and drives the same creation through it.
+    const std::wstring kClip = L"GNLinkClipHelper.exe";
+    clear_name(L"AlphaPayload.bin");
+    clear_name(kClip);
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+
+    UpdateEffectsConfig c = base_config(install, staging);
+    c.payloadNames = {L"AlphaPayload.bin", kClip};
+    {
+      WindowsUpdateEffects e(c);
+      e.set_installed_version("0.2.146");
+      e.set_manifest(manifest_for("0.2.147", {L"AlphaPayload.bin", kClip}), std::string(128, '0'));
+      const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+      const UpdateOutcome out = run_update(e, accept, "windows");
+      check("ClipHelper absent: Updated", out.result == UpdateResult::Updated,
+            std::string(result_name(out.result)) + " " + out.detail + " / " + e.last_error());
+      const std::string clipSha =
+          exists(install + L"\\" + kClip) ? sha256_file_hex(install + L"\\" + kClip) : std::string();
+      check("ClipHelper absent: it is created, byte for byte", clipSha == gArtifactSha, clipSha);
+      check("ClipHelper absent: no backup of it", !exists(install + L"\\" + kClip + L".gnlink-old"));
+    }
+
+    clear_name(L"AlphaPayload.bin");
+    clear_name(kClip);
+    write_text(install + L"\\AlphaPayload.bin", kOldAlpha);
+    c.registerInstall = []() { return false; };
+    {
+      WindowsUpdateEffects e(c);
+      e.set_installed_version("0.2.146");
+      e.set_manifest(manifest_for("0.2.147", {L"AlphaPayload.bin", kClip}), std::string(128, '0'));
+      const auto accept = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+      const UpdateOutcome out = run_update(e, accept, "windows");
+      check("ClipHelper absent + rollback: RolledBack", out.result == UpdateResult::RolledBack,
+            std::string(result_name(out.result)) + " " + out.detail);
+      check("ClipHelper absent + rollback: it is removed again", !exists(install + L"\\" + kClip));
+      check("ClipHelper absent + rollback: A restored",
+            read_text(install + L"\\AlphaPayload.bin") == kOldAlpha);
+    }
+    clear_name(kClip);
   }
 
   // ---------------------------------------------------------------- PID reuse
