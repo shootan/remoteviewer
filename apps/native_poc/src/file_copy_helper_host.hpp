@@ -114,13 +114,17 @@ TokenFacts read_token_facts(HANDLE token);
 /**
  * Pure: may a token with these facts run the helper? The contract, in order: every field read;
  * a PRIMARY token; user SID == `interactiveUserSid`; session == `sessionId`; integrity exactly
- * Medium; TokenIsElevated false; elevation type Limited or Default (Default: no linked token --
- * a standard user, not something to refuse; Full is refused); not restricted. Each refusal names
- * itself (the caller adds the stage when it logs it).
+ * Medium; TokenIsElevated false; elevation type exactly Limited or Default (an allowlist: Default
+ * is a standard user, no linked token -- not something to refuse; Full is "full-elevation", any
+ * other value "elevation-type-unknown"); not restricted. Each refusal names itself (the caller
+ * adds the stage when it logs it).
  */
 TokenVerdict judge_helper_token(const TokenFacts& facts, DWORD sessionId, const std::wstring& interactiveUserSid);
 
-/** "type=primary il=0x2000 elevated=0 elevType=limited restricted=0 session=1" -- no SID, no handle values. */
+/**
+ * "type=primary il=0x2000 elevated=0 elevType=limited restricted=0 session=1" -- no SID, no handle
+ * values. An elevation type that is none of the three is "unknown(<n>)", never "full".
+ */
 std::string describe_token_facts(const TokenFacts& facts);
 
 /** Why the helper did not start, as a class (helper-shell-token r1 A4). Logged; not on the wire. */
@@ -133,19 +137,47 @@ enum class LaunchFailure : uint8_t {
   HandshakeFailed,  // started, but did not connect / prove itself
 };
 const char* launch_failure_name(LaunchFailure f);
+
+/**
+ * Whether the helper executable is there (helper-shell-token r2). GetFileAttributesW failing is a
+ * failed LOOK-UP: only ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND mean Missing (the one case the
+ * viewer calls an install problem); any other error (access denied, a bad name, ...) is
+ * Unreadable and keeps its own error -- a start that could not happen, not "reinstall".
+ */
+enum class HelperFile : uint8_t { Present = 0, Missing, Unreadable };
+/** Pure: the class of a GetFileAttributesW failure's error. */
+HelperFile helper_file_state_of_error(DWORD error);
+/** The look-up itself; `*error` gets GetLastError when it is not Present. */
+HelperFile helper_file_state(const std::wstring& exe, DWORD* error);
 /** The class a launcher's `why` begins with ("missing: ...") -- None when it names none. */
 LaunchFailure launch_failure_of(const std::string& why);
 
 /**
+ * Where acquire_shell_token reads which window is the shell and which process owns it. The product
+ * passes nothing and gets GetShellWindow / GetWindowThreadProcessId; a test substitutes these two
+ * OS answers (an OS-boundary fixture: its own process as "the shell", a shell that changes or
+ * exits mid-way) -- never the user's explorer.
+ */
+struct ShellLookup {
+  std::function<HWND()> shellWindow;
+  std::function<DWORD(HWND)> ownerPid;
+};
+
+/**
  * The shell's identity for the helper: GetShellWindow -> PID -> OpenProcess(QUERY_LIMITED) ->
  * OpenProcessToken(QUERY|DUPLICATE) -> judge -> DuplicateTokenEx(QUERY|DUPLICATE|ASSIGN_PRIMARY,
- * primary) -> judge again on the duplicate. Never enumerates processes by name, never another
- * session's or user's token, never SYSTEM. On success `*primaryOut` owns the duplicate. `*cls`
- * is NoShell or TokenRejected on refusal; the verdict's `stage` names the step. `*diag`
- * (optional) gets the shell token's facts.
+ * primary) -> judge again on the duplicate -> (r2) with the process handle still open, the shell
+ * window and its owner read AGAIN: the same window, the same PID, the open handle that PID and the
+ * process still running -- else NoShell ("shell-recheck"). The attribute checks alone cannot tell
+ * the shell from another plain process of the same user (a PID reused before OpenProcess, a shell
+ * replaced or gone while its token was taken). This fixes the token to the shell that was current
+ * when it was taken; it does not promise the shell stays. Never enumerates processes by name,
+ * never another session's or user's token, never SYSTEM. On success `*primaryOut` owns the
+ * duplicate. `*cls` is NoShell or TokenRejected on refusal; the verdict's `stage` names the step.
+ * `*diag` (optional) gets the shell token's facts. `lookup` null = the OS.
  */
 TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
-                                 LaunchFailure* cls, std::string* diag);
+                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup = nullptr);
 
 struct HelloCheck {
   bool ok = false;
@@ -161,6 +193,7 @@ HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceByte
  * (HelperLink::Launch with token == nullptr, the Medium test launch). An elevated caller may not:
  * the helper would inherit administrator rights, which is the one thing this design exists to
  * prevent. The product path always passes the shell token; this guards a later wiring mistake.
+ * Allowlist (r2): only Limited or Default, below High; Full and any unknown type are refused.
  */
 bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid);
 

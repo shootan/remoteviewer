@@ -239,6 +239,11 @@ int main() {
     check("a failure that names no class ...", !ch.Ensure(&why));
     check("...is None: never taken for Missing", ch.lastLaunchFailure() == fc::LaunchFailure::None);
     Sleep(350);
+    next = "spawn-failed: stage=helper-exe err=5 (helper-exe-unreadable)";
+    check("(r2) a helper the look-up could not READ (access denied) ...", !ch.Ensure(&why));
+    check("...is SpawnFailed, not Missing: no 'reinstall' for a permission problem",
+          ch.lastLaunchFailure() == fc::LaunchFailure::SpawnFailed);
+    Sleep(350);
     next = "missing: stage=helper-exe err=2 (helper-exe-missing)";
     (void)ch.Ensure(&why);
     Sleep(350);

@@ -1,11 +1,18 @@
 // The transfer bar's words and when it shows them (viewer_clip_transfer_bar.hpp) -- the functions the
 // bar itself calls, no window. The window, the click and the host are viewer_clip_bar_e2e_test.
+// `--shots <dir>` (helper-shell-token r2): the helper-failure lines in the product bar window, saved
+// as PNG (display-capture: needs an interactive desktop).
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "poc_protocol.hpp"
-#include "viewer_clip_transfer_bar.hpp"
+#include "viewer_clip_transfer_bar.hpp"  // brings winsock2.h before windows.h
+#include "clip_image_wic.hpp"
 
 using namespace remote60::native_poc;
 
@@ -53,9 +60,175 @@ std::wstring result_text(ClipOutcome o, uint8_t detail) {
   r.detail = detail;
   return clip_transfer_bar_text(r);
 }
+
+// helper-shell-token r2: the helper-failure lines in the PRODUCT bar window (clip_transfer_bar_create,
+// its WndProc, its timer, its layout and paint), fed a progress snapshot instead of a live
+// FileCopyClient. What is the product's: the window, the view, the words, the layout, the font.
+// What is not: where the progress comes from (a fixture snapshot), the owner (a plain window of
+// this test, not the viewer). Each case: the owner at a given client width, the bar's own pixels
+// (PrintWindow) composited at its place, saved as PNG; the bar must be visible and not clamped
+// (its width below the owner's client width minus the margin = the whole line drawn, no ellipsis).
+LRESULT CALLBACK shot_owner_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m == WM_ERASEBKGND) {
+    RECT r;
+    GetClientRect(h, &r);
+    HBRUSH b = CreateSolidBrush(RGB(70, 90, 120));
+    FillRect(reinterpret_cast<HDC>(w), &r, b);
+    DeleteObject(b);
+    return 1;
+  }
+  return DefWindowProcW(h, m, w, l);
+}
+
+bool save_shot(HWND owner, HWND bar, const std::wstring& path, std::string* detail) {
+  RECT vr{};
+  GetWindowRect(owner, &vr);
+  const int w = vr.right - vr.left, h = vr.bottom - vr.top;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = h;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  HGDIOBJ old = SelectObject(mem, dib);
+  const BOOL okOwner = PrintWindow(owner, mem, PW_RENDERFULLCONTENT);
+  RECT br{};
+  GetWindowRect(bar, &br);
+  const int bw = br.right - br.left, bh = br.bottom - br.top;
+  HDC barDc = CreateCompatibleDC(screen);
+  HBITMAP barBmp = CreateCompatibleBitmap(screen, bw, bh);
+  HGDIOBJ oldBar = SelectObject(barDc, barBmp);
+  const BOOL okBar = PrintWindow(bar, barDc, 0);
+  BitBlt(mem, br.left - vr.left, br.top - vr.top, bw, bh, barDc, 0, 0, SRCCOPY);
+  SelectObject(barDc, oldBar);
+  DeleteObject(barBmp);
+  DeleteDC(barDc);
+  GdiFlush();
+  std::vector<uint8_t> dibBytes(sizeof(BITMAPV5HEADER) + static_cast<size_t>(w) * h * 4);
+  BITMAPV5HEADER v5{};
+  v5.bV5Size = sizeof(v5);
+  v5.bV5Width = w;
+  v5.bV5Height = h;
+  v5.bV5Planes = 1;
+  v5.bV5BitCount = 32;
+  v5.bV5Compression = BI_BITFIELDS;
+  v5.bV5RedMask = 0x00FF0000;
+  v5.bV5GreenMask = 0x0000FF00;
+  v5.bV5BlueMask = 0x000000FF;
+  v5.bV5AlphaMask = 0xFF000000;
+  v5.bV5CSType = LCS_sRGB;
+  std::memcpy(dibBytes.data(), &v5, sizeof(v5));
+  const uint8_t* src = static_cast<const uint8_t*>(bits);
+  for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+    uint32_t px;
+    std::memcpy(&px, src + i * 4, 4);
+    px |= 0xFF000000u;
+    std::memcpy(dibBytes.data() + sizeof(v5) + i * 4, &px, 4);
+  }
+  SelectObject(mem, old);
+  DeleteObject(dib);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+  std::vector<uint8_t> png;
+  uint32_t pw = 0, ph = 0;
+  bool written = false;
+  if (clip_dib_to_png(dibBytes.data(), dibBytes.size(), &png, &pw, &ph) == ClipWicResult::Ok) {
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+    written = out.good();
+  }
+  if (detail) {
+    *detail = "owner " + std::to_string(w) + "x" + std::to_string(h) + " bar " + std::to_string(bw) + "x" + std::to_string(bh) +
+              " printOwner=" + std::to_string(okOwner) + " printBar=" + std::to_string(okBar) + " png=" + std::to_string(png.size());
+  }
+  return okOwner && okBar && written;
+}
+
+int run_shots(const std::wstring& dir) {
+  CreateDirectoryW(dir.c_str(), nullptr);
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = shot_owner_proc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"GNLinkClipBarShotOwner";
+  RegisterClassExW(&wc);
+  struct Case {
+    const char* name;
+    bool here, missing;
+    const wchar_t* expect;
+  };
+  const Case cases[] = {
+      {"remote", false, false, L"원격 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요"},
+      {"here", true, false, L"이 PC의 파일 복사 도우미를 시작하지 못했습니다. 설치 상태와 실행 권한을 확인해 주세요"},
+      {"here_missing", true, true, L"이 PC의 GNLink 에 파일 복사 도우미가 없습니다. GNLink 를 업데이트하거나 다시 설치해 주세요"},
+  };
+  const int widths[] = {1280, 960};
+  for (int cw : widths) {
+    for (const Case& c : cases) {
+      RECT r{0, 0, cw, 540};
+      AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, FALSE, 0);
+      HWND owner = CreateWindowExW(0, wc.lpszClassName, L"clip bar shot", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40,
+                                   r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+      int polls = 0;
+      ClipTransferBarHooks hooks;
+      hooks.progress = [] { return ClipImageClient::Progress{}; };
+      hooks.fileProgress = [&] {
+        FileCopyClient::Progress p;
+        p.noHelper = ++polls > 1 ? 1 : 0;  // the first snapshot is the baseline: only a later failure is news
+        p.noHelperHere = c.here;
+        p.noHelperHereMissing = c.missing;
+        return p;
+      };
+      clip_transfer_bar_create(owner, hooks);
+      HWND bar = clip_transfer_bar_window();
+      const auto t0 = GetTickCount64();
+      MSG msg;
+      while (GetTickCount64() - t0 < 1500) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&msg);
+          DispatchMessageW(&msg);
+        }
+        if (clip_transfer_bar_current().isFile && IsWindowVisible(bar) && GetTickCount64() - t0 > 700) break;
+        Sleep(15);
+      }
+      const std::wstring text = clip_transfer_bar_text(clip_transfer_bar_current());
+      RECT client{}, br{};
+      GetClientRect(owner, &client);
+      GetWindowRect(bar, &br);
+      const int dpi = static_cast<int>(GetDpiForWindow(owner));
+      const int clamp = (std::max)(static_cast<int>(client.right) - MulDiv(16, dpi, 96), MulDiv(120, dpi, 96));
+      const int barW = br.right - br.left;
+      const std::wstring path = dir + L"\\bar_" + std::to_wstring(cw) + L"_" +
+                                std::wstring(c.name, c.name + std::strlen(c.name)) + L".png";
+      std::string detail;
+      const bool saved = save_shot(owner, bar, path, &detail);
+      const std::string label = std::string("shot ") + std::to_string(cw) + " " + c.name;
+      check((label + ": the product bar is visible with the line").c_str(), IsWindowVisible(bar) && text == c.expect);
+      check((label + ": the whole line fits (bar " + std::to_string(barW) + " < clamp " + std::to_string(clamp) + ", no ellipsis)").c_str(),
+            barW > 0 && barW < clamp);
+      check((label + ": saved (" + detail + ")").c_str(), saved);
+      clip_transfer_bar_destroy();
+      DestroyWindow(owner);
+    }
+  }
+  std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
+  return g_failed ? 1 : 0;
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc >= 3 && std::strcmp(argv[1], "--shots") == 0) {
+    const int n = MultiByteToWideChar(CP_ACP, 0, argv[2], -1, nullptr, 0);
+    std::wstring dir(n > 0 ? n - 1 : 0, wchar_t{0});
+    if (n > 0) MultiByteToWideChar(CP_ACP, 0, argv[2], -1, dir.data(), n);
+    return run_shots(dir);
+  }
   // ---- the words while sending
   ClipBarView v;
   v.phase = ClipBarPhase::Sending;

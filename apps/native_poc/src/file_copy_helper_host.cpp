@@ -159,6 +159,9 @@ TokenVerdict judge_helper_token(const TokenFacts& f, DWORD sessionId, const std:
   else if (f.integrityRid != SECURITY_MANDATORY_MEDIUM_RID) v.why = "not-medium";
   else if (f.elevated) v.why = "elevated";
   else if (f.elevationType == TokenElevationTypeFull) v.why = "full-elevation";
+  else if (f.elevationType != TokenElevationTypeLimited && f.elevationType != TokenElevationTypeDefault) {
+    v.why = "elevation-type-unknown";
+  }
   else if (f.restricted) v.why = "restricted";
   else {
     v.ok = true;
@@ -182,7 +185,8 @@ std::string describe_token_facts(const TokenFacts& f) {
   if (!f.elevationTypeRead) s += "?";
   else if (f.elevationType == TokenElevationTypeDefault) s += "default";
   else if (f.elevationType == TokenElevationTypeLimited) s += "limited";
-  else s += "full";
+  else if (f.elevationType == TokenElevationTypeFull) s += "full";
+  else s += "unknown(" + std::to_string(static_cast<int>(f.elevationType)) + ")";
   s += " restricted=" + std::string(f.restricted ? "1" : "0");
   s += " session=" + (f.sessionRead ? std::to_string(f.session) : std::string("?"));
   return s;
@@ -209,8 +213,20 @@ LaunchFailure launch_failure_of(const std::string& why) {
   return LaunchFailure::None;
 }
 
+HelperFile helper_file_state_of_error(DWORD error) {
+  return (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) ? HelperFile::Missing : HelperFile::Unreadable;
+}
+
+HelperFile helper_file_state(const std::wstring& exe, DWORD* error) {
+  if (error) *error = 0;
+  if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) return HelperFile::Present;
+  const DWORD e = GetLastError();
+  if (error) *error = e;
+  return helper_file_state_of_error(e);
+}
+
 TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiveUserSid, UniqueHandle* primaryOut,
-                                 LaunchFailure* cls, std::string* diag) {
+                                 LaunchFailure* cls, std::string* diag, const ShellLookup* lookup) {
   primaryOut->reset();
   *cls = LaunchFailure::None;
   TokenVerdict v;
@@ -222,10 +238,16 @@ TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiv
     v.error = error;
     return v;
   };
-  const HWND shell = GetShellWindow();
+  const auto shellWindow = [&] { return lookup && lookup->shellWindow ? lookup->shellWindow() : GetShellWindow(); };
+  const auto ownerPid = [&](HWND w) {
+    if (lookup && lookup->ownerPid) return lookup->ownerPid(w);
+    DWORD p = 0;
+    GetWindowThreadProcessId(w, &p);
+    return p;
+  };
+  const HWND shell = shellWindow();
   if (!shell) return refuse(LaunchFailure::NoShell, "shell-window", "no-shell-window", GetLastError());
-  DWORD pid = 0;
-  GetWindowThreadProcessId(shell, &pid);
+  const DWORD pid = ownerPid(shell);
   if (pid == 0) return refuse(LaunchFailure::NoShell, "shell-window", "shell-pid-unknown", GetLastError());
   UniqueHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
   if (!process) return refuse(LaunchFailure::NoShell, "shell-process", "shell-process-open", GetLastError());
@@ -245,6 +267,21 @@ TokenVerdict acquire_shell_token(DWORD sessionId, const std::wstring& interactiv
   // The token launched is the duplicate: it is judged too, not assumed to be its source.
   const TokenVerdict finalVerdict = judge_helper_token(read_token_facts(primary.get()), sessionId, interactiveUserSid);
   if (!finalVerdict.ok) return refuse(LaunchFailure::TokenRejected, "duplicate", finalVerdict.why, finalVerdict.error);
+  // r2: is it still the shell? The process handle is still open, so its PID cannot have been
+  // reused since OpenProcess; the window and its owner are read again and must be the same, the
+  // handle must be that PID, and the process must still be running. A PID reused before
+  // OpenProcess, or a shell replaced / gone while the token was taken, ends here.
+  const HWND shellNow = shellWindow();
+  const DWORD pidNow = shellNow ? ownerPid(shellNow) : 0;
+  if (shellNow != shell || pidNow != pid) return refuse(LaunchFailure::NoShell, "shell-recheck", "shell-changed", 0);
+  if (GetProcessId(process.get()) != pid) {
+    return refuse(LaunchFailure::NoShell, "shell-recheck", "shell-process-differs", GetLastError());
+  }
+  DWORD exitCode = 0;
+  if (!GetExitCodeProcess(process.get(), &exitCode)) {
+    return refuse(LaunchFailure::NoShell, "shell-recheck", "shell-exit-unreadable", GetLastError());
+  }
+  if (exitCode != STILL_ACTIVE) return refuse(LaunchFailure::NoShell, "shell-recheck", "shell-exited", 0);
   *primaryOut = std::move(primary);
   v.ok = true;
   v.why = "ok";
@@ -279,7 +316,7 @@ HelloCheck verify_hello(const Hello& hello, const std::array<uint8_t, kNonceByte
 }
 
 bool medium_launch_allowed(TOKEN_ELEVATION_TYPE type, DWORD integrityRid) {
-  if (type == TokenElevationTypeFull) return false;
+  if (type != TokenElevationTypeLimited && type != TokenElevationTypeDefault) return false;  // Full, or unknown
   return integrityRid < SECURITY_MANDATORY_HIGH_RID;
 }
 
@@ -429,10 +466,14 @@ bool HelperLink::Launch(const std::wstring& exe, HANDLE token, const wchar_t* de
     if (why) *why = "no-pipe";
     return false;
   }
-  if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-    lastError_ = GetLastError();
-    if (why) *why = "helper-exe-missing";
-    return false;
+  {
+    DWORD e = 0;
+    const HelperFile file = helper_file_state(exe, &e);
+    if (file != HelperFile::Present) {
+      lastError_ = e;
+      if (why) *why = file == HelperFile::Missing ? "helper-exe-missing" : "helper-exe-unreadable";
+      return false;
+    }
   }
   if (!token) {
     // Starting the helper as THIS process is only for a process that is already the plain user.
@@ -646,6 +687,19 @@ std::string launch_why(LaunchFailure cls, const char* stage, DWORD error, const 
   return s;
 }
 
+// The look-up both launch paths make first: Missing only for a file that is not there; any other
+// failed look-up is a start that could not happen, with its own error (r2).
+bool helper_file_present(const std::wstring& exe, std::string* why) {
+  DWORD e = 0;
+  const HelperFile file = helper_file_state(exe, &e);
+  if (file == HelperFile::Present) return true;
+  if (why) {
+    *why = file == HelperFile::Missing ? launch_why(LaunchFailure::Missing, "helper-exe", e, "helper-exe-missing")
+                                       : launch_why(LaunchFailure::SpawnFailed, "helper-exe", e, "helper-exe-unreadable");
+  }
+  return false;
+}
+
 // What every launch does once it knows the helper's user: the pipe, the start (Job, suspended,
 // resume), the handshake -- each refusal classified, with the Win32 error the link recorded.
 bool start_and_greet(HelperLink* link, const std::wstring& userSid, const std::wstring& helperExe, HANDLE token,
@@ -696,10 +750,7 @@ bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, st
   if (diag) diag->clear();
   // The file first: a missing helper is an install problem, and no token step may hide it (the
   // 0.2.146 field log showed only the token failure while the executable was not even there).
-  if (GetFileAttributesW(helperExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-    if (why) *why = launch_why(LaunchFailure::Missing, "helper-exe", GetLastError(), "helper-exe-missing");
-    return false;
-  }
+  if (!helper_file_present(helperExe, why)) return false;
   DWORD session = 0;
   if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
     if (why) *why = launch_why(LaunchFailure::TokenRejected, "host-session", GetLastError(), "");
@@ -732,10 +783,7 @@ bool launch_file_copy_helper(const std::wstring& helperExe, HelperLink* link, st
 
 bool launch_file_copy_helper_as_self(const std::wstring& helperExe, const wchar_t* desktop, const std::wstring& extraArgs,
                                      HelperLink* link, std::string* why, DWORD helloTimeoutMs) {
-  if (GetFileAttributesW(helperExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-    if (why) *why = launch_why(LaunchFailure::Missing, "helper-exe", GetLastError(), "helper-exe-missing");
-    return false;
-  }
+  if (!helper_file_present(helperExe, why)) return false;
   std::wstring sid;
   if (!current_process_user_sid(&sid)) {
     if (why) *why = launch_why(LaunchFailure::TokenRejected, "self-user", GetLastError(), "no user SID");

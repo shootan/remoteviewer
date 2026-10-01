@@ -846,6 +846,13 @@ int run_driver() {
       f.restricted = true;
       refused("(facts) a restricted token is refused", f, "restricted");
       f = good;
+      f.elevationType = static_cast<TOKEN_ELEVATION_TYPE>(0);
+      refused("(facts) AN UNKNOWN ELEVATION TYPE (0) IS REFUSED -- an allowlist, not 'not Full'", f, "elevation-type-unknown");
+      f.elevationType = static_cast<TOKEN_ELEVATION_TYPE>(4);
+      refused("(facts) ...and (4)", f, "elevation-type-unknown");
+      check("(facts) ...and it is described as unknown(4), not full", describe_token_facts(f).find("elevType=unknown(4)") != std::string::npos,
+            describe_token_facts(f));
+      f = good;
       f.type = TokenImpersonation;
       refused("(facts) an impersonation token is refused", f, "not-primary");
       f = good;
@@ -882,6 +889,113 @@ int run_driver() {
     }());
   }
 
+  // ---------------------------------------------------------------- the shell re-check (r2)
+  // The attribute checks cannot tell the shell from another plain process of the same user. The
+  // OS answers "which window is the shell, whose is it" are substituted (ShellLookup) -- the user's
+  // explorer is never touched: "the shell" is a fixture process of this test (same user, session,
+  // Medium: its token passes every attribute check), and the second look-up -- made after the
+  // duplicate is judged, just before the token is returned -- is where the shell changes or ends.
+  std::printf("\n--- the shell re-check (r2) ---\n");
+  {
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    std::wstring interactive;
+    DWORD err = 0;
+    interactive_session_user_sid(session, &interactive, &err);
+    UniqueHandle fixtureJob(CreateJobObjectW(nullptr, nullptr));
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION kill{};
+    kill.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(fixtureJob.get(), JobObjectExtendedLimitInformation, &kill, sizeof(kill));
+    auto start_fixture = [&](PROCESS_INFORMATION* pi) {
+      std::wstring cmd = L"\"" + self_path() + L"\" --fixture-sleep";
+      std::vector<wchar_t> c(cmd.begin(), cmd.end());
+      c.push_back(0);
+      STARTUPINFOW si{};
+      si.cb = sizeof(si);
+      const bool ok = CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, pi) != 0;
+      if (ok) AssignProcessToJobObject(fixtureJob.get(), pi->hProcess);
+      return ok;
+    };
+    PROCESS_INFORMATION fx{};
+    const bool fixtureUp = start_fixture(&fx);
+    check("a fixture process of this test is up (it plays 'the shell')", fixtureUp);
+    const HWND fakeShell = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x5E11));
+    const HWND realShell = GetShellWindow();
+    DWORD realShellPid = 0;
+    GetWindowThreadProcessId(realShell, &realShellPid);
+    int calls = 0;
+    std::function<void(int)> onCall;  // what happens at the n-th look-up
+    ShellLookup lookup;
+    lookup.shellWindow = [&] {
+      ++calls;
+      if (onCall) onCall(calls);
+      return fakeShell;
+    };
+    DWORD secondPid = 0;  // 0 = the fixture again
+    lookup.ownerPid = [&](HWND) { return (calls >= 2 && secondPid != 0) ? secondPid : fx.dwProcessId; };
+    auto acquire = [&](std::string* stage, std::string* why, LaunchFailure* cls, bool* gotToken) {
+      calls = 0;
+      UniqueHandle t;
+      const TokenVerdict v = acquire_shell_token(session, interactive, &t, cls, nullptr, &lookup);
+      *stage = v.stage;
+      *why = v.why;
+      *gotToken = bool(t);
+      return v.ok;
+    };
+    std::string stage, why;
+    LaunchFailure cls = LaunchFailure::None;
+    bool got = false;
+    const bool steady = acquire(&stage, &why, &cls, &got);
+    check("(fixture) a steady 'shell' of this user passes every check -- the attribute checks alone accept a plain process",
+          steady && got && calls == 2, why + " calls=" + std::to_string(calls));
+    secondPid = realShellPid ? realShellPid : 4;
+    const bool changed = acquire(&stage, &why, &cls, &got);
+    check("THE SHELL CHANGED BETWEEN THE FIRST LOOK-UP AND THE RETURN (a reused PID / a replaced shell): no-shell, no token",
+          !changed && !got && cls == LaunchFailure::NoShell && stage == "shell-recheck" && why == "shell-changed",
+          stage + " " + why);
+    secondPid = 0;
+    onCall = [&](int n) {
+      if (n == 2) {  // the fixture ends after its token was taken and duplicated
+        TerminateProcess(fx.hProcess, 7);
+        WaitForSingleObject(fx.hProcess, 5000);
+      }
+    };
+    const bool exited = acquire(&stage, &why, &cls, &got);
+    onCall = nullptr;
+    check("THE SHELL ENDED WHILE ITS TOKEN WAS TAKEN: no-shell, no token",
+          !exited && !got && cls == LaunchFailure::NoShell && stage == "shell-recheck" && why == "shell-exited", stage + " " + why);
+    lookup.shellWindow = [&] { return HWND{}; };
+    const bool none = acquire(&stage, &why, &cls, &got);
+    check("no shell window at all: no-shell at the first look-up", !none && !got && cls == LaunchFailure::NoShell && why == "no-shell-window",
+          stage + " " + why);
+    lookup.shellWindow = [&] {
+      ++calls;
+      return fakeShell;
+    };
+    // The ended fixture's last handle goes, so its PID names no process any more.
+    CloseHandle(fx.hProcess);
+    CloseHandle(fx.hThread);
+    const bool gone = acquire(&stage, &why, &cls, &got);
+    check("a 'shell' PID whose process is gone is refused before any token (no-shell at OpenProcess)",
+          !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-process", stage + " " + why);
+    auto handles = [] {
+      DWORD n = 0;
+      GetProcessHandleCount(GetCurrentProcess(), &n);
+      return n;
+    };
+    PROCESS_INFORMATION fx2{};
+    start_fixture(&fx2);
+    fx = fx2;
+    secondPid = realShellPid ? realShellPid : 4;
+    const DWORD before = handles();
+    for (int i = 0; i < 10; ++i) acquire(&stage, &why, &cls, &got);
+    check("10 re-check refusals leave no handle behind (process, token, duplicate)", handles() == before,
+          std::to_string(before) + " -> " + std::to_string(handles()));
+    TerminateProcess(fx.hProcess, 0);
+    CloseHandle(fx.hProcess);
+    CloseHandle(fx.hThread);
+  }
+
   // ---------------------------------------------------------------- the failure classes
   // A missing helper and a token / start failure are told apart (the field log of 0.2.146 showed only
   // the token failure while the executable was not there), each with stage and Win32 error.
@@ -901,6 +1015,39 @@ int run_driver() {
           !launch_file_copy_helper(absent, &link, &why) && launch_failure_of(why) == LaunchFailure::Missing &&
               why.rfind("missing: stage=helper-exe err=2 ", 0) == 0 && why.find("shell:") == std::string::npos,
           why);
+    check("(r2) only FILE/PATH_NOT_FOUND are 'missing'; access denied, a bad name, a sharing error are not",
+          helper_file_state_of_error(ERROR_FILE_NOT_FOUND) == HelperFile::Missing &&
+              helper_file_state_of_error(ERROR_PATH_NOT_FOUND) == HelperFile::Missing &&
+              helper_file_state_of_error(ERROR_ACCESS_DENIED) == HelperFile::Unreadable &&
+              helper_file_state_of_error(ERROR_INVALID_NAME) == HelperFile::Unreadable &&
+              helper_file_state_of_error(ERROR_SHARING_VIOLATION) == HelperFile::Unreadable);
+    {
+      // A real failed look-up that is not "not found": a name the file system refuses (123).
+      const std::wstring badName = dir_of(self_path()) + L"GNLinkClip<Helper>.exe";
+      DWORD e = 0;
+      const HelperFile st = helper_file_state(badName, &e);
+      HelperLink bad;
+      std::string badWhy, badSelfWhy, badLaunchWhy;
+      const bool productStarted = launch_file_copy_helper(badName, &bad, &badWhy);
+      const bool selfStarted = launch_file_copy_helper_as_self(badName, nullptr, L"", &bad, &badSelfWhy);
+      check("A LOOK-UP THAT FAILS FOR ANOTHER REASON IS NOT 'missing' (product path): spawn-failed, its own error",
+            st == HelperFile::Unreadable && e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && !productStarted &&
+                launch_failure_of(badWhy) == LaunchFailure::SpawnFailed &&
+                badWhy.rfind("spawn-failed: stage=helper-exe err=" + std::to_string(e) + " (helper-exe-unreadable)", 0) == 0,
+            badWhy);
+      check("...nor on the viewer's path (as self) -- so the viewer never says 'reinstall' for it",
+            !selfStarted && launch_failure_of(badSelfWhy) == LaunchFailure::SpawnFailed, badSelfWhy);
+      HelperLink direct;
+      std::string pipeWhy;
+      std::wstring sid;
+      current_process_user_sid(&sid);
+      direct.CreateServerPipe(sid, &pipeWhy);
+      check("...nor in HelperLink::Launch's own look-up",
+            !direct.Launch(badName, nullptr, nullptr, L"", &badLaunchWhy) && badLaunchWhy == "helper-exe-unreadable" &&
+                direct.last_error() == e,
+            badLaunchWhy);
+      direct.Close();
+    }
     std::string selfWhy;
     check("...and on the viewer's path (as self)",
           !launch_file_copy_helper_as_self(absent, nullptr, L"", &link, &selfWhy) &&
@@ -988,6 +1135,9 @@ int run_driver() {
   check("...nor a High-integrity process without a split (UAC off, administrator)",
         !medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_HIGH_RID));
   check("...nor SYSTEM", !medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_SYSTEM_RID));
+  check("...nor an unknown elevation type (0 / 4), whatever its integrity (r2 allowlist)",
+        !medium_launch_allowed(static_cast<TOKEN_ELEVATION_TYPE>(0), SECURITY_MANDATORY_MEDIUM_RID) &&
+            !medium_launch_allowed(static_cast<TOKEN_ELEVATION_TYPE>(4), SECURITY_MANDATORY_MEDIUM_RID));
   check("a Low process may (it is not elevated; the pipe DACL decides the rest)",
         medium_launch_allowed(TokenElevationTypeDefault, SECURITY_MANDATORY_LOW_RID));
 
@@ -1510,6 +1660,10 @@ int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (has_arg(argc, argv, L"--consumer")) return run_consumer(argc, argv);
   if (has_arg(argc, argv, L"--elevated-check")) return run_elevated_check(argc, argv);
+  if (has_arg(argc, argv, L"--fixture-sleep")) {  // "the shell" of the re-check test: a process of this user, idle
+    Sleep(120000);
+    return 0;
+  }
   remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
   if (!stationLock.Acquire("file_copy_helper_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("file_copy_helper_e2e_test");
   const int rc = run_driver();

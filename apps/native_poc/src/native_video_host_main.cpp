@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
                return GetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_HELPER_AS_SELF", v, 8) > 0 && v[0] == L'1';
              }()) {
     // TEST BUILD ONLY: a host on a private window station, not elevated (the transfer-bar e2e) --
-    // its file-copy helper runs as this same user on this station, instead of the linked token's
+    // its file-copy helper runs as this same user on this station, instead of the shell token's
     // launch the shipped host uses. Everything else is the product path.
     remote60::native_poc::HostFileCopyService::Config fcfg;
     fcfg.enabled = true;
