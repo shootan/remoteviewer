@@ -19,6 +19,7 @@
 #undef max
 #endif
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -79,8 +80,8 @@ size_t pending_missing(SenderState& s, uint64_t gen, uint32_t seq) {
 // Store a cached AU for THIS session and mark it started on the wire (what a real send does), so it is
 // eligible for replay (r4 R2 first-packet fence).
 void store_started(SenderState& s, uint64_t gen, uint32_t seq, uint64_t mediaEpoch, const sockaddr_in& peer,
-                   const std::vector<uint8_t>& payload, uint32_t mtu) {
-  s.StoreAu(gen, seq, base_header(seq, gen, payload.size()), mtu, true, mediaEpoch, /*inputEpoch=*/0, peer,
+                   const std::vector<uint8_t>& payload, uint32_t mtu, uint64_t inputEpoch = 0) {
+  s.StoreAu(gen, seq, base_header(seq, gen, payload.size()), mtu, true, mediaEpoch, inputEpoch, peer,
             payload.data(), payload.size());
   s.MarkAuStartedOnWire(gen, seq);
 }
@@ -280,6 +281,63 @@ int main() {
     for (int i = 0; i < 10 && pending_count(sender) > 0; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), epochB); }
     check("a past-epoch request is dropped without replay", drain(rx) == 0 && pending_count(sender) == 0 &&
           sender.replayServedChunks.load() == 0);
+  }
+
+  std::printf("--- H2: an input-fenced head request is retired at once and does NOT block a valid tail ---\n");
+  {
+    SenderState sender;
+    sender.nackEnabled.store(true, std::memory_order_relaxed);
+    sender.StartWireCap(capBps, mtu, /*enabled=*/true);
+    std::atomic<uint64_t> liveInput{8};  // an input flush has moved the live input epoch to 8
+    sender.inputEpochRef = &liveInput;
+    const uint64_t ep = sender.mediaSessionEpoch.load();
+    // P_old: a started AU of the OLD input epoch 7 (now fenced); P_new: a started AU of the live epoch 8.
+    const uint32_t seqOld = 100, seqNew = 200;
+    store_started(sender, gen, seqOld, ep, addr, payload, mtu, /*inputEpoch=*/7);
+    store_started(sender, gen, seqNew, ep, addr, payload, mtu, /*inputEpoch=*/8);
+    const uint16_t m1[] = {0};
+    sender.RecordReplayRequest(gen, seqOld, addr, ep, m1, 1);  // recorded FIRST -> at the head
+    sender.RecordReplayRequest(gen, seqNew, addr, ep, m1, 1);
+    int served = 0;
+    for (int i = 0; i < 40 && pending_count(sender) > 0; ++i) {
+      Sleep(10);
+      sender.DrainPendingReplays(tx, addr, qpc_now_us(), ep);
+      served += drain(rx);
+    }
+    check("H2: the fenced old-input head is retired and the new-input tail IS replayed (not blocked)",
+          served == 1 && sender.replayServedChunks.load() == 1 && pending_count(sender) == 0,
+          "served=" + std::to_string(served) + " pending=" + std::to_string(pending_count(sender)));
+    sender.inputEpochRef = nullptr;
+  }
+
+  std::printf("--- H2: the live fence applies with the cap OFF too (kill-switch) ---\n");
+  {
+    SenderState sender;
+    sender.nackEnabled.store(true, std::memory_order_relaxed);
+    sender.StartWireCap(capBps, mtu, /*enabled=*/false);  // cap OFF -> fallback bucket, but fence still wired
+    std::atomic<uint64_t> liveInput{9};
+    sender.inputEpochRef = &liveInput;
+    const uint64_t ep = sender.mediaSessionEpoch.load();
+    store_started(sender, gen, seq, ep, addr, payload, mtu, /*inputEpoch=*/8);  // stale input epoch
+    const uint16_t m1[] = {0};
+    sender.RecordReplayRequest(gen, seq, addr, ep, m1, 1);
+    for (int i = 0; i < 10 && pending_count(sender) > 0; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), ep); }
+    check("H2 cap-OFF: a flushed AU's replay is fenced and retired (not sent)", drain(rx) == 0 &&
+          sender.replayServedChunks.load() == 0 && pending_count(sender) == 0);
+    // NEGATIVE control: with the live input epoch matching, the same cap-OFF replay DOES go out.
+    SenderState ok;
+    ok.nackEnabled.store(true, std::memory_order_relaxed);
+    ok.StartWireCap(capBps, mtu, /*enabled=*/false);
+    std::atomic<uint64_t> liveInput2{8};
+    ok.inputEpochRef = &liveInput2;
+    const uint64_t ep2 = ok.mediaSessionEpoch.load();
+    store_started(ok, gen, seq, ep2, addr, payload, mtu, /*inputEpoch=*/8);  // matches live
+    ok.RecordReplayRequest(gen, seq, addr, ep2, m1, 1);
+    ok.DrainPendingReplays(tx, addr, qpc_now_us(), ep2);
+    check("H2 cap-OFF negative control: a current-epoch replay still goes out", drain(rx) == 1 &&
+          ok.replayServedChunks.load() == 1);
+    ok.inputEpochRef = nullptr;
+    sender.inputEpochRef = nullptr;
   }
 
   closesocket(rx);

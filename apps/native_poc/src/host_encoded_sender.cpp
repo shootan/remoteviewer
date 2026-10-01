@@ -227,7 +227,13 @@ bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint
     // Cap-off keeps the non-blocking fallback budget; if it is exhausted, stop this pass.
     if (!capEnforcing && !NackFallbackTryAcquire((mtu ? mtu : 1400) + 28u)) break;
 
+    // r6 H2: the live media+input fence is wired REGARDLESS of the cap (a kill-switch-off stream must
+    // still not replay across a rollover/flush). Only the token mechanism is cap-gated.
     WireEgress wire;
+    wire.mediaEpoch = &mediaSessionEpoch;  // live media fence AT the send (fast + slow path)
+    wire.itemMediaEpoch = currentEpoch;
+    wire.inputEpoch = inputEpochRef;       // live input fence -- a flushed AU's replay stops
+    wire.itemInputEpoch = itemInputEpoch;
     if (capEnforcing) {
       wire.limiter = wireLimiter.get();
       // Interleave (maxChunks != 0, during a saturated original send) blocks for a fair share of the
@@ -235,17 +241,16 @@ bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint
       // Idle/between-AU (maxChunks == 0) stays non-blocking: tokens are free when no original drains
       // them, and a token-blocked idle replay is retried by the sender's 50 ms heartbeat, not a spin.
       wire.blockingAcquire = (maxChunks != 0);
-      wire.mediaEpoch = &mediaSessionEpoch;  // r5 G2: live media fence AT the send (fast + slow path)
-      wire.itemMediaEpoch = currentEpoch;
-      wire.inputEpoch = inputEpochRef;       // r5 G2: live input fence -- a flushed AU's replay stops
-      wire.itemInputEpoch = itemInputEpoch;
     }
     uint64_t wb = 0, dg = 0, sup = 0;
+    bool fenced = false;
     send_udp_chunk_indices(sock, peer, payload->data(), payload->size(), baseHeader, mtu, tight, &idx, 1, &wb, &dg,
-                           &wire, &sup);
+                           &wire, &sup, &fenced);
 
-    // Settle: pop the served chunk only if its request still owns this session (a rollover may have
-    // cleared it while we sent; the send-time fence would then have produced dg==0).
+    // Settle. r6 H2: distinguish a PERMANENT invalidation (fenced: rollover/flush) from a temporary
+    // budget shortage. A fenced request is retired at once so it cannot occupy the head and starve a
+    // later valid request for up to its 1 s deadline; a budget shortage is kept and we stop this pass.
+    bool retireFenced = false;
     {
       std::lock_guard<std::mutex> lk(pendingReplayMu);
       auto it = std::find_if(pendingReplays.begin(), pendingReplays.end(), [&](const PendingReplay& p) {
@@ -254,10 +259,16 @@ bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint
       if (dg > 0 && it != pendingReplays.end() && !it->missing.empty() && it->missing.front() == idx) {
         it->missing.erase(it->missing.begin());
         if (it->missing.empty()) pendingReplays.erase(it);
+      } else if (fenced && it != pendingReplays.end()) {
+        pendingReplays.erase(it);  // flushed/rolled -> the client's IDR fallback recovers it
+        retireFenced = true;
       }
       pendingReplayCount.store(pendingReplays.size(), std::memory_order_relaxed);
     }
-    if (dg == 0) break;  // fenced (rollover / input flush) or budget -> stop this pass
+    if (dg == 0) {
+      if (retireFenced) continue;  // served nothing, but the head is retired -> try the next request
+      break;                       // temporary budget shortage -> stop this pass, keep the request
+    }
     ++servedThisCall;
     replayServedChunks.fetch_add(1, std::memory_order_relaxed);
     txNackBytes.fetch_add(wb, std::memory_order_relaxed);
@@ -537,7 +548,7 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
             sender.queue.clear();
             // r5 G1: the queue (and any key waiting in it) is discarded on this barrier re-arm, so end
             // the queued-key state -- the re-armed IDR requested below must not be suppressed.
-            sender.keyAuQueued.store(false, std::memory_order_release);
+            sender.ClearKeyQueuedAll();
             sender.waitingForKey = true;
             rearmed = true;
           } else {
@@ -609,8 +620,7 @@ void SenderState::PumpUdpHello(VideoTransport transport, EncoderState& encoder) 
   // the rollover (the per-replay epoch/peer fence is a second line; this frees the memory at once).
   sender.ClearReplayStateForRollover();
   // The new session's key is a fresh recovery, not a duplicate of the old epoch's; clear the guards.
-  sender.keyAuOnWire.store(false, std::memory_order_release);
-  sender.keyAuQueued.store(false, std::memory_order_release);
+  sender.ClearKeyStateAll();
   encoder.RequestKey(kHostKeyReasonPeer);
   sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
   std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="

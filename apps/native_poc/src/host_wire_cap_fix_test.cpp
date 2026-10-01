@@ -27,6 +27,7 @@
 #endif
 
 #include <atomic>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -178,18 +179,15 @@ void test_f4_reconciliation_partial_send() {
         "wd=" + std::to_string(wd) + " wp=" + std::to_string(wp));
 }
 
-// ---------------------------------------------------------------- F2 decision model + tag atomics
-// Mirrors the gate expression in host_stage_encode_send_h264.cpp (keyOnWire tag match -> forceKeyInFlight
-// -> forceKeyFrame -> admission) and drives the REAL decide_encode_admission and the REAL SenderState
-// tag atomics. This isolates the decision; the integrated encode/emit path is the real-MFT matrix.
+// ---------------------------------------------------------------- F2 decision + real KeyInFlightFor
+// Mirrors the gate expression in host_stage_encode_send_h264.cpp (KeyInFlightFor -> forceKeyFrame ->
+// admission), driving the REAL SenderState::KeyInFlightFor and the REAL decide_encode_admission. This
+// isolates the decision; the integrated encode/emit path is the real-MFT matrix.
 EncodeAdmission gate_model(SenderState& s, uint64_t curMediaEpoch, uint64_t curGeneration,
-                           uint64_t encodeStartUs, bool keyWanted, bool forceKeySubmittedRecently,
-                           uint32_t senderDepth, bool& outForceKeyFrame) {
-  const bool keyOnWire = s.wireCapEnabled && s.keyAuOnWire.load(std::memory_order_acquire) &&
-                         encodeStartUs < s.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
-                         s.keyAuOnWireMediaEpoch.load(std::memory_order_relaxed) == curMediaEpoch &&
-                         s.keyAuOnWireGeneration.load(std::memory_order_relaxed) == curGeneration;
-  const bool forceKeyInFlight = forceKeySubmittedRecently || keyOnWire;
+                           uint64_t curInputEpoch, uint64_t encodeStartUs, bool keyWanted,
+                           bool forceKeySubmittedRecently, uint32_t senderDepth, bool& outForceKeyFrame) {
+  const bool keyInFlight = s.wireCapEnabled && s.KeyInFlightFor(curMediaEpoch, curGeneration, curInputEpoch, encodeStartUs);
+  const bool forceKeyInFlight = forceKeySubmittedRecently || keyInFlight;
   const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
   outForceKeyFrame = forceKeyFrame;
   EncodeAdmissionInputs adm;
@@ -205,18 +203,14 @@ void test_f2_recovery_admission_and_tag() {
   std::printf("\n--- F2: a keyWanted frame that cannot force (key already in flight) is gated like a delta ---\n");
   SenderState s;
   s.wireCapEnabled = true;
-  // A key of THIS session (epoch 3, gen 9) is on the wire right now.
-  s.keyAuOnWire.store(true, std::memory_order_release);
-  s.keyAuOnWireSinceUs.store(1'000'000, std::memory_order_release);
-  s.keyAuOnWireMediaEpoch.store(3, std::memory_order_relaxed);
-  s.keyAuOnWireGeneration.store(9, std::memory_order_relaxed);
+  // A key of THIS session (epoch 3, gen 9, input 0, seq 50) is on the wire right now.
+  s.MarkKeyOnWire(/*media=*/3, /*gen=*/9, /*input=*/0, /*seq=*/50, /*now=*/1'000'000);
   const uint64_t encodeStartUs = 1'100'000;  // within the 6 s window
 
   // Scenario ⓐ: keyWanted (forceKeyNext) with the key already on the wire, sender queue full (2).
   bool fkf = true;
-  const auto decA = gate_model(s, /*mediaEpoch=*/3, /*gen=*/9, encodeStartUs,
-                               /*keyWanted=*/true, /*forceKeySubmittedRecently=*/false,
-                               /*senderDepth=*/2, fkf);
+  const auto decA = gate_model(s, /*mediaEpoch=*/3, /*gen=*/9, /*input=*/0, encodeStartUs,
+                               /*keyWanted=*/true, /*forceKeySubmittedRecently=*/false, /*senderDepth=*/2, fkf);
   check("F2 (a): keyWanted but key-in-flight -> forceKeyFrame=false (it would be a delta)", !fkf);
   check("F2 (a): the delta is SKIPPED on a full queue (no resync-IDR overflow)",
         decA == EncodeAdmission::SkipOverloaded);
@@ -233,30 +227,23 @@ void test_f2_recovery_admission_and_tag() {
   }
 
   // When the key CAN actually be forced (none in flight), it is admitted even on a full queue.
-  bool fkf2 = false;
-  const auto decReal = gate_model(s, 3, 9, encodeStartUs, /*keyWanted=*/true,
-                                  /*forceKeySubmittedRecently=*/false, /*senderDepth=*/2, fkf2);
-  // still in flight here (same tags) -> gated; flip the flag off to prove the real-key path:
-  s.keyAuOnWire.store(false, std::memory_order_release);
+  s.ClearKeyOnWireIfSeq(9, 50);
   bool fkf3 = false;
-  const auto decForce = gate_model(s, 3, 9, encodeStartUs, true, false, 2, fkf3);
+  const auto decForce = gate_model(s, 3, 9, 0, encodeStartUs, true, false, 2, fkf3);
   check("F2: with no key in flight a real forced key is admitted even on a full queue", fkf3 && decForce == EncodeAdmission::Admit);
-  (void)decReal;
 
   std::printf("--- F2 tag: a stale on-wire key of a DIFFERENT (epoch, generation) does not count as in-flight ---\n");
-  s.keyAuOnWire.store(true, std::memory_order_release);
-  s.keyAuOnWireMediaEpoch.store(3, std::memory_order_relaxed);
-  s.keyAuOnWireGeneration.store(9, std::memory_order_relaxed);
+  s.MarkKeyOnWire(3, 9, 0, 50, 1'000'000);
   // Now the session rolled over: we are encoding for media epoch 4 / generation 10. The old flag must
   // NOT suppress this new session's recovery IDR.
   bool fkfNew = false;
-  const auto decNewGen = gate_model(s, /*mediaEpoch=*/4, /*gen=*/10, encodeStartUs,
+  const auto decNewGen = gate_model(s, /*mediaEpoch=*/4, /*gen=*/10, /*input=*/0, encodeStartUs,
                                     /*keyWanted=*/true, false, /*senderDepth=*/2, fkfNew);
   check("F2 tag: a new (epoch,generation)'s keyWanted IS a real forced key (old tag ignored) and admitted",
         fkfNew && decNewGen == EncodeAdmission::Admit);
   // Same generation, same epoch -> the tag DOES match -> suppressed (the intended in-flight case).
   bool fkfSame = true;
-  gate_model(s, 3, 9, encodeStartUs, true, false, 2, fkfSame);
+  gate_model(s, 3, 9, 0, encodeStartUs, true, false, 2, fkfSame);
   check("F2 tag: the SAME (epoch,generation) key still counts as in-flight (forceKeyFrame=false)", !fkfSame);
 }
 
@@ -267,31 +254,52 @@ void test_g1_queued_key_identity() {
   s.wireCapEnabled = true;
   // Key A (seq 100) is enqueued for media 3 / gen 9 / input epoch 7.
   s.MarkKeyQueued(/*media=*/3, /*gen=*/9, /*input=*/7, /*seq=*/100, /*now=*/1'000'000);
-  check("A is queued", s.keyAuQueued.load());
-  // A clear aimed at a DIFFERENT seq must not touch A's flag.
-  s.ClearKeyQueuedIfSeq(9, 101);
-  check("G1: clearing a different seq leaves A queued", s.keyAuQueued.load());
-  // A different key B entering the wire must not clear A's queued flag (media/gen same, seq differs).
-  s.MarkKeyOnWire(3, 9, 7, /*seqB=*/101, 1'050'000);
-  check("G1: key B's wire entry does NOT clear A's queued flag", s.keyAuQueued.load());
-  // A's own exit (input-fence discard) clears A.
-  s.ClearKeyQueuedIfSeq(9, 100);
-  check("G1: A's own discard ends A's queued state", !s.keyAuQueued.load());
+  check("A is queued", s.key_queued_active_for_test());
+  s.ClearKeyQueuedIfSeq(9, 101);  // a clear aimed at a DIFFERENT seq
+  check("G1: clearing a different seq leaves A queued", s.key_queued_active_for_test());
+  s.MarkKeyOnWire(3, 9, 7, /*seqB=*/101, 1'050'000);  // a different key B enters the wire
+  check("G1: key B's wire entry does NOT clear A's queued flag", s.key_queued_active_for_test());
+  s.ClearKeyQueuedIfSeq(9, 100);  // A's own exit (input-fence discard)
+  check("G1: A's own discard ends A's queued state", !s.key_queued_active_for_test());
 
   std::printf("--- G1 gate: a stale queued flag of an OLD input epoch does not suppress the new key ---\n");
-  // Re-queue A at input epoch 7, then model the gate for a frame whose CURRENT input epoch is 8 (a
-  // flush bumped it). The queued flag must NOT count as in-flight for the new input epoch's key.
-  s.MarkKeyQueued(3, 9, 7, 100, 1'000'000);
+  // Re-queue A at input epoch 7, then ask KeyInFlightFor for a frame whose CURRENT input epoch is 8 (a
+  // flush bumped it). The queued key must NOT count as in-flight for the new input epoch's key.
+  SenderState s2;
+  s2.wireCapEnabled = true;
+  s2.MarkKeyQueued(3, 9, 7, 100, 1'000'000);
   const uint64_t encodeStartUs = 1'100'000;
-  auto keyQueuedForGate = [&](uint64_t curMedia, uint64_t curGen, uint64_t curInput) {
-    return s.wireCapEnabled && s.keyAuQueued.load(std::memory_order_acquire) &&
-           encodeStartUs < s.keyAuQueuedSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
-           s.keyAuQueuedMediaEpoch.load(std::memory_order_relaxed) == curMedia &&
-           s.keyAuQueuedGeneration.load(std::memory_order_relaxed) == curGen &&
-           s.keyAuQueuedInputEpoch.load(std::memory_order_relaxed) == curInput;
-  };
-  check("G1 gate: same (media,gen,input)=（3,9,7) still counts as in-flight", keyQueuedForGate(3, 9, 7));
-  check("G1 gate: a NEW input epoch (3,9,8) is NOT suppressed by the stale flag", !keyQueuedForGate(3, 9, 8));
+  check("G1 gate: same (media,gen,input)=(3,9,7) still counts as in-flight", s2.KeyInFlightFor(3, 9, 7, encodeStartUs));
+  check("G1 gate: a NEW input epoch (3,9,8) is NOT suppressed by the stale flag", !s2.KeyInFlightFor(3, 9, 8, encodeStartUs));
+}
+
+// ---------------------------------------------------------------- H1: transition serialization (TOCTOU)
+// Two threads cross exactly as Codex described: a sender clear/handover for key A races main's enqueue
+// of key B. Under the keyStateMu serialization, B's flag must survive A's clear. Run many iterations
+// with a barrier to maximise the overlap; the pre-fix check-then-store(false) would intermittently
+// erase B.
+void test_h1_transition_toctou() {
+  std::printf("\n--- H1: a key-A clear racing a key-B enqueue never erases B (keyStateMu serialization) ---\n");
+  int bErased = 0;
+  const int rounds = 2000;
+  for (int i = 0; i < rounds; ++i) {
+    SenderState s;
+    s.wireCapEnabled = true;
+    // A is on the wire / about-to-clear; B is the NEW key main is enqueueing concurrently.
+    s.MarkKeyOnWire(3, 9, 7, /*seqA=*/100, 1'000'000);
+    std::atomic<bool> go{false};
+    // Thread 1 (sender): A finishes -> clears its own on-wire, and (handover path) tries to clear a
+    // queued A. Thread 2 (main): enqueues B (seq 101) as queued.
+    std::thread t1([&] { while (!go.load()) {} s.ClearKeyOnWireIfSeq(9, 100); s.ClearKeyQueuedIfSeq(9, 100); });
+    std::thread t2([&] { while (!go.load()) {} s.MarkKeyQueued(3, 9, 7, /*seqB=*/101, 1'000'050); });
+    go.store(true);
+    t1.join();
+    t2.join();
+    // B (seq 101) must remain queued -- its enqueue is a complete transition under the lock.
+    if (!s.KeyInFlightFor(3, 9, 7, 1'000'100)) ++bErased;
+  }
+  check("H1: B's queued flag survived the A-clear/B-enqueue cross every round", bErased == 0,
+        "bErased=" + std::to_string(bErased) + "/" + std::to_string(rounds));
 }
 
 // ---------------------------------------------------------------- G2: the live fence AT the send
@@ -344,6 +352,7 @@ int main() {
   test_f2_recovery_admission_and_tag();
   test_g1_queued_key_identity();
   test_g2_send_time_fence();
+  test_h1_transition_toctou();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

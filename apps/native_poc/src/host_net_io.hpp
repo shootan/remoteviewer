@@ -202,6 +202,11 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
                                       uint64_t* outWireBytes = nullptr,
                                       uint64_t* outDatagrams = nullptr,
                                       const WireEgress* wire = nullptr,
-                                      uint64_t* outSuppressed = nullptr);
+                                      uint64_t* outSuppressed = nullptr,
+                                      // r6 H2: set true if the live media/input fence stopped the send
+                                      // (a PERMANENT invalidation -- rollover/flush) as opposed to a
+                                      // temporary token shortage, so the caller can retire the request
+                                      // instead of retrying it and blocking later valid ones.
+                                      bool* outFenced = nullptr);
 
 }  // namespace remote60::native_poc

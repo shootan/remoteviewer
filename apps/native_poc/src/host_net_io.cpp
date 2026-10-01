@@ -326,7 +326,8 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
                                       uint64_t* outWireBytes,
                                       uint64_t* outDatagrams,
                                       const WireEgress* wire,
-                                      uint64_t* outSuppressed) {
+                                      uint64_t* outSuppressed,
+                                      bool* outFenced) {
   const bool haveSink = wire && wire->sink;
   if (!payload || payloadSize == 0 || (s == INVALID_SOCKET && !haveSink) || !indices || count == 0)
     return UdpSendOutcome::TransportError;
@@ -360,8 +361,11 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     // session / the flushed picture. Checked just before acquiring tokens so no token is spent on a
     // datagram that will not go out.
     if (wire) {
-      if (wire->mediaEpoch && wire->mediaEpoch->load(std::memory_order_acquire) != wire->itemMediaEpoch) break;
-      if (wire->inputEpoch && wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch) break;
+      if ((wire->mediaEpoch && wire->mediaEpoch->load(std::memory_order_acquire) != wire->itemMediaEpoch) ||
+          (wire->inputEpoch && wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch)) {
+        if (outFenced) *outFenced = true;  // r6 H2: permanent invalidation, not a token shortage
+        break;
+      }
     }
     // The common wire cap. By default non-blocking (a replay chunk that does not fit the shared budget
     // now is left out so a NACK burst cannot push the stream over the cap -- the client's keyframe
@@ -388,6 +392,7 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
           (wire->inputEpoch && wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch);
       if (fencedAfterWait) {
         wire->limiter->Refund(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
+        if (outFenced) *outFenced = true;  // r6 H2
         break;
       }
     }

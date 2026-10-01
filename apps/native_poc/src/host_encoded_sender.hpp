@@ -297,61 +297,62 @@ struct SenderState {
   // while one is still on the wire: at a low cap a 155-208 KB IDR takes 0.2-1.4 s to send, far longer
   // than the encode-side force-key latch, so without this a frame-gate re-ask could pile IDRs up.
   // (bitrate-hard-cap r2, plan r2 point 4 -- the recovery IDR's encode->queue->wire lifetime.)
-  std::atomic<bool> keyAuOnWire{false};
-  std::atomic<uint64_t> keyAuOnWireSinceUs{0};
-  // The key AU on the wire is identified by (media epoch, generation, INPUT epoch, SEQ) -- r3 F2 gave
-  // it (media epoch, generation); r5 G1 adds input epoch + seq so a stale flag cannot suppress a NEW
-  // key the SAME media/gen but a newer input epoch needs (an input flush bumps inputEpoch only), and
-  // so one key's wire handover clears only ITS OWN flag, not a different key enqueued meanwhile.
-  std::atomic<uint64_t> keyAuOnWireMediaEpoch{0};
-  std::atomic<uint64_t> keyAuOnWireGeneration{0};
-  std::atomic<uint64_t> keyAuOnWireInputEpoch{0};
-  std::atomic<uint32_t> keyAuOnWireSeq{0};
-  // A key AU that is ENQUEUED but not yet on the wire (r4 R3; identity extended r5 G1). keyAuOnWire
-  // only covers the wire send; a key can sit in the sender queue behind a long preceding AU, and during
-  // that wait a recovery re-request would force ANOTHER key. This closes the encode->queue gap. It is
-  // ended on EVERY exit of its own key: wire entry (-> keyAuOnWire), input-fence/dequeue drop of that
-  // key, a queue clear that discards it, and rollover -- each clearing ONLY the matching (gen,seq)
-  // owner, never a different key's flag. The 6 s safety bound stays as a last resort.
-  std::atomic<bool> keyAuQueued{false};
-  std::atomic<uint64_t> keyAuQueuedSinceUs{0};
-  std::atomic<uint64_t> keyAuQueuedMediaEpoch{0};
-  std::atomic<uint64_t> keyAuQueuedGeneration{0};
-  std::atomic<uint64_t> keyAuQueuedInputEpoch{0};
-  std::atomic<uint32_t> keyAuQueuedSeq{0};
-  // r5 G1 ownership helpers (sender thread). MarkKeyQueued/OnWire stamp identity; the Clear* end a
-  // key's lifetime only when it owns the current flag, so discarding an invalid key is a real
-  // completion (not a 6 s wait) and never erases a different key's flag.
+  // r5 G1 / r6 H1: the queued-and-on-wire key state is one consistent record (per-key identity: media
+  // epoch, generation, INPUT epoch, SEQ) serialized by keyStateMu. The r5 version stored each field as
+  // a separate atomic and did check-then-store(false) on a bool, which races main's MarkKeyQueued: A's
+  // handover/drop could read "queued=A", then main enqueues B, then A's store(false) erases B. Now the
+  // whole snapshot/transition/exit runs under keyStateMu so a clear only ends its OWN key atomically.
+  // Lock order: a caller already holding sender.mu (enqueue/drop paths) then takes keyStateMu; nothing
+  // takes sender.mu while holding keyStateMu, so there is no cycle.
+  struct KeyId {
+    bool active = false;
+    uint64_t mediaEpoch = 0, generation = 0, inputEpoch = 0, sinceUs = 0;
+    uint32_t seq = 0;
+    bool owns(uint64_t gen, uint32_t s) const { return active && generation == gen && seq == s; }
+  };
+  mutable std::mutex keyStateMu;
+  KeyId keyQueued_;   // a key enqueued, not yet on the wire
+  KeyId keyOnWire_;   // a key being sent now
+  static constexpr uint64_t kKeyInFlightSafetyUs = 6'000'000;  // last-resort bound if a key is lost
   void MarkKeyQueued(uint64_t mediaEpoch, uint64_t generation, uint64_t inputEpoch, uint32_t seq, uint64_t nowUs) {
-    keyAuQueuedMediaEpoch.store(mediaEpoch, std::memory_order_relaxed);
-    keyAuQueuedGeneration.store(generation, std::memory_order_relaxed);
-    keyAuQueuedInputEpoch.store(inputEpoch, std::memory_order_relaxed);
-    keyAuQueuedSeq.store(seq, std::memory_order_relaxed);
-    keyAuQueuedSinceUs.store(nowUs, std::memory_order_release);
-    keyAuQueued.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    keyQueued_ = KeyId{true, mediaEpoch, generation, inputEpoch, nowUs, seq};
   }
   void MarkKeyOnWire(uint64_t mediaEpoch, uint64_t generation, uint64_t inputEpoch, uint32_t seq, uint64_t nowUs) {
-    keyAuOnWireMediaEpoch.store(mediaEpoch, std::memory_order_relaxed);
-    keyAuOnWireGeneration.store(generation, std::memory_order_relaxed);
-    keyAuOnWireInputEpoch.store(inputEpoch, std::memory_order_relaxed);
-    keyAuOnWireSeq.store(seq, std::memory_order_relaxed);
-    keyAuOnWireSinceUs.store(nowUs, std::memory_order_release);
-    keyAuOnWire.store(true, std::memory_order_release);
-    // The key left the queue for the wire: end the queued state ONLY if it is this same key.
-    if (keyAuQueued.load(std::memory_order_acquire) && keyAuQueuedSeq.load(std::memory_order_relaxed) == seq &&
-        keyAuQueuedGeneration.load(std::memory_order_relaxed) == generation)
-      keyAuQueued.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    keyOnWire_ = KeyId{true, mediaEpoch, generation, inputEpoch, nowUs, seq};
+    if (keyQueued_.owns(generation, seq)) keyQueued_.active = false;  // same key: queue -> wire handover
   }
   void ClearKeyQueuedIfSeq(uint64_t generation, uint32_t seq) {
-    if (keyAuQueued.load(std::memory_order_acquire) && keyAuQueuedSeq.load(std::memory_order_relaxed) == seq &&
-        keyAuQueuedGeneration.load(std::memory_order_relaxed) == generation)
-      keyAuQueued.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    if (keyQueued_.owns(generation, seq)) keyQueued_.active = false;
   }
   void ClearKeyOnWireIfSeq(uint64_t generation, uint32_t seq) {
-    if (keyAuOnWire.load(std::memory_order_acquire) && keyAuOnWireSeq.load(std::memory_order_relaxed) == seq &&
-        keyAuOnWireGeneration.load(std::memory_order_relaxed) == generation)
-      keyAuOnWire.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    if (keyOnWire_.owns(generation, seq)) keyOnWire_.active = false;
   }
+  void ClearKeyQueuedAll() {  // a queue clear (DropAndResync / barrier re-arm) discarded whatever was queued
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    keyQueued_.active = false;
+  }
+  void ClearKeyStateAll() {  // rollover ends both
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    keyQueued_.active = false;
+    keyOnWire_.active = false;
+  }
+  // The gate's "a key of THIS (media, generation, input epoch) is already queued or on the wire" test,
+  // computed from a consistent snapshot. The 6 s safety bound releases a lost key.
+  bool KeyInFlightFor(uint64_t curMedia, uint64_t curGen, uint64_t curInput, uint64_t nowUs) const {
+    std::lock_guard<std::mutex> lk(keyStateMu);
+    auto matches = [&](const KeyId& k) {
+      return k.active && k.mediaEpoch == curMedia && k.generation == curGen && k.inputEpoch == curInput &&
+             nowUs < k.sinceUs + kKeyInFlightSafetyUs;
+    };
+    return matches(keyOnWire_) || matches(keyQueued_);
+  }
+  // Test accessors (single-threaded tests read the snapshot).
+  bool key_queued_active_for_test() const { std::lock_guard<std::mutex> lk(keyStateMu); return keyQueued_.active; }
+  bool key_on_wire_active_for_test() const { std::lock_guard<std::mutex> lk(keyStateMu); return keyOnWire_.active; }
   // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
   std::atomic<uint64_t> firstKeyWireUs{0};
   std::atomic<uint64_t> lastKeyAuBytes{0};

@@ -467,7 +467,7 @@ if (transport == VideoTransport::Tcp) {
           sender.queue.clear();
           // r5 G1: the queue (and any key waiting in it) is gone, so end the queued-key state -- the
           // fresh IDR requested below must not be suppressed as "already queued".
-          sender.keyAuQueued.store(false, std::memory_order_release);
+          sender.ClearKeyQueuedAll();
           sender.waitingForKey = true;
           hx.mailbox.PostRequestKeyframe(kKeyframeReasonSenderBacklog);
           break;
