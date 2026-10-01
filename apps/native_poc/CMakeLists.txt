@@ -2815,6 +2815,24 @@ if(MSVC)
   target_compile_options(remote60_host_wire_limiter_test PRIVATE /utf-8)
 endif()
 
+# bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
+# The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
+# while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /
+# keyframe-before-completion loop the current receiver has with a cap-spread IDR (plan point 7).
+add_executable(remote60_host_wire_cap_idr_test
+  src/host_net_io.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/host_wire_cap_idr_test.cpp
+)
+target_include_directories(remote60_host_wire_cap_idr_test PRIVATE src)
+target_link_libraries(remote60_host_wire_cap_idr_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_wire_cap_idr_test PRIVATE /utf-8)
+endif()
+
 # fec-single-chunk-stride: the host's real chunker over loopback, its datagrams judged by the real
 # shared assembler -- boundary sizes, loss counter-examples, the NACK replay geometry, both layouts.
 add_executable(remote60_udp_fec_single_chunk_test
