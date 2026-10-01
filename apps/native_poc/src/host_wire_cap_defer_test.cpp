@@ -80,7 +80,7 @@ size_t pending_missing(SenderState& s, uint64_t gen, uint32_t seq) {
 // eligible for replay (r4 R2 first-packet fence).
 void store_started(SenderState& s, uint64_t gen, uint32_t seq, uint64_t mediaEpoch, const sockaddr_in& peer,
                    const std::vector<uint8_t>& payload, uint32_t mtu) {
-  s.StoreAu(gen, seq, base_header(seq, gen, payload.size()), mtu, true, mediaEpoch, peer,
+  s.StoreAu(gen, seq, base_header(seq, gen, payload.size()), mtu, true, mediaEpoch, /*inputEpoch=*/0, peer,
             payload.data(), payload.size());
   s.MarkAuStartedOnWire(gen, seq);
 }
@@ -230,7 +230,7 @@ int main() {
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     sender.StartWireCap(capBps, mtu, /*enabled=*/true);
     // Cache at send-start but DO NOT mark started (the F3 fence aborted the original at 0 datagrams).
-    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, kEpoch, addr, payload.data(), payload.size());
+    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, kEpoch, /*inputEpoch=*/0, addr, payload.data(), payload.size());
     const uint16_t missing[] = {0};
     sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 1);
     for (int i = 0; i < 20; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch); }

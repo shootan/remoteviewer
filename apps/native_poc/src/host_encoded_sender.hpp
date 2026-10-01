@@ -106,12 +106,18 @@ struct SenderState {
     uint64_t mediaEpoch = 0;
     uint32_t peerIpNet = 0;
     uint16_t peerPortNet = 0;
+    // The input epoch the AU was encoded from (r5 G2): a replay is fenced to it at send time, so a
+    // cached AU whose input epoch is now stale (an input flush happened after it was cached) is not
+    // replayed -- the original's mid-AU exception is not extended to a new replay of a flushed AU.
+    uint64_t inputEpoch = 0;
     // The first-packet fence (r4 R2): the AU is cached at send-START (so an in-flight NACK is a hit),
     // but it must not be replayable until its original send has actually put at least one datagram on
     // the wire. An AU the F3 input fence aborted with 0 datagrams stays false and is never replayed.
     bool startedOnWire = false;
     UdpVideoChunkHeader baseHeader{};
-    std::vector<uint8_t> payload;
+    // shared so Drain can snapshot the payload under the cache lock and send OUTSIDE it (r5 G3: the
+    // reader must not block behind a replay's token wait), without copying the whole AU per chunk.
+    std::shared_ptr<std::vector<uint8_t>> payload;
   };
   static constexpr size_t kNackCacheMaxAus = 24;
   std::mutex nackCacheMu;
@@ -163,8 +169,10 @@ struct SenderState {
   static constexpr uint64_t kReplayDeadlineUs = 1'000'000;  // give up a replay request after this
   std::mutex pendingReplayMu;
   std::deque<PendingReplay> pendingReplays;
-  // A lock-free "work remains" flag so the sender's cv predicate can wake on a new replay without
-  // taking pendingReplayMu inside the predicate (r4 R1). Written under pendingReplayMu; read relaxed.
+  // A lock-free count of pending replays, a HINT for the sender to choose a bounded timed wait (for
+  // deadline/uncached cleanup) vs an indefinite one. Written under pendingReplayMu; read relaxed. It
+  // is NOT the wake signal -- that is newReplayWork below, set under sender.mu to close the lost-wake
+  // the atomic-on-a-different-mutex had (r5 G3).
   std::atomic<size_t> pendingReplayCount{0};
   std::atomic<uint64_t> replayServedChunks{0};   // telemetry: chunks actually replayed
   std::atomic<uint64_t> replayDroppedRequests{0};  // telemetry: requests dropped at the deadline
@@ -172,6 +180,10 @@ struct SenderState {
   // media epoch, and wake the sender. Does NOT send.
   void RecordReplayRequest(uint64_t generation, uint32_t seq, const sockaddr_in& peer,
                            uint64_t mediaEpoch, const uint16_t* missing, uint16_t count);
+  // The wake signal for a newly recorded replay (r5 G3). Set true by RecordReplayRequest UNDER
+  // sender.mu (the same mutex the sender's cv waits on) and notified, so a record that lands between
+  // the sender's predicate check and its sleep is never missed. The sender clears it when it wakes.
+  bool newReplayWork = false;
   // Sender thread: replay what is cached, owned by `currentEpoch`/peer, started on the wire, and fits
   // the budget now; drop requests of a past epoch or past their deadline. maxChunks bounds one call's
   // replay work (0 = unlimited, the between-AU drain; a small N is the per-datagram interleave). The
@@ -200,8 +212,8 @@ struct SenderState {
   // it is cached at send-START with startedOnWire=false and marked true once its first datagram goes
   // out (MarkAuStartedOnWire) -- an aborted 0-packet AU stays unreplayable.
   void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
-               uint32_t mtu, bool tightSingleChunk, uint64_t mediaEpoch, const sockaddr_in& peer,
-               const uint8_t* payload, size_t payloadSize);
+               uint32_t mtu, bool tightSingleChunk, uint64_t mediaEpoch, uint64_t inputEpoch,
+               const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize);
   // Answer a NACK: replay the requested chunks of (generation, seq) if still cached. (reader thread)
   void RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq,
                     const uint16_t* missing, uint16_t count);
@@ -287,24 +299,59 @@ struct SenderState {
   // (bitrate-hard-cap r2, plan r2 point 4 -- the recovery IDR's encode->queue->wire lifetime.)
   std::atomic<bool> keyAuOnWire{false};
   std::atomic<uint64_t> keyAuOnWireSinceUs{0};
-  // The (media epoch, stream generation) the on-wire key belongs to (bitrate-hard-cap r3 F2). The bare
-  // keyAuOnWire bool could suppress a genuinely-needed recovery IDR of a NEW session: a rollover arms a
-  // fresh generation, but a key of the OLD generation still flagged on the wire (sender not yet past it,
-  // or wedged until the 6 s timeout) would read as "a key is already in flight" for the new one. The
-  // gate counts keyOnWire only when BOTH tags match what it is encoding for now, so the suppression is
-  // scoped to the encode->queue->wire lifetime of the SAME key, not merely "some key was recently sent".
+  // The key AU on the wire is identified by (media epoch, generation, INPUT epoch, SEQ) -- r3 F2 gave
+  // it (media epoch, generation); r5 G1 adds input epoch + seq so a stale flag cannot suppress a NEW
+  // key the SAME media/gen but a newer input epoch needs (an input flush bumps inputEpoch only), and
+  // so one key's wire handover clears only ITS OWN flag, not a different key enqueued meanwhile.
   std::atomic<uint64_t> keyAuOnWireMediaEpoch{0};
   std::atomic<uint64_t> keyAuOnWireGeneration{0};
-  // A key AU that is ENQUEUED but not yet on the wire (bitrate-hard-cap r4 R3). keyAuOnWire only covers
-  // the wire send; a key can sit in the sender queue behind a long preceding AU for a while, and during
-  // that wait a recovery re-request would force ANOTHER key (forceKeyNext/forceKeySubmittedAtUs were
-  // cleared at encode). This closes the encode->queue gap: set when a key is enqueued, cleared when the
-  // sender starts it on the wire (it becomes keyAuOnWire) or on a rollover. Tagged by (media epoch,
-  // generation) and bounded by the same 6 s safety as keyAuOnWire so a dropped key cannot wedge it.
+  std::atomic<uint64_t> keyAuOnWireInputEpoch{0};
+  std::atomic<uint32_t> keyAuOnWireSeq{0};
+  // A key AU that is ENQUEUED but not yet on the wire (r4 R3; identity extended r5 G1). keyAuOnWire
+  // only covers the wire send; a key can sit in the sender queue behind a long preceding AU, and during
+  // that wait a recovery re-request would force ANOTHER key. This closes the encode->queue gap. It is
+  // ended on EVERY exit of its own key: wire entry (-> keyAuOnWire), input-fence/dequeue drop of that
+  // key, a queue clear that discards it, and rollover -- each clearing ONLY the matching (gen,seq)
+  // owner, never a different key's flag. The 6 s safety bound stays as a last resort.
   std::atomic<bool> keyAuQueued{false};
   std::atomic<uint64_t> keyAuQueuedSinceUs{0};
   std::atomic<uint64_t> keyAuQueuedMediaEpoch{0};
   std::atomic<uint64_t> keyAuQueuedGeneration{0};
+  std::atomic<uint64_t> keyAuQueuedInputEpoch{0};
+  std::atomic<uint32_t> keyAuQueuedSeq{0};
+  // r5 G1 ownership helpers (sender thread). MarkKeyQueued/OnWire stamp identity; the Clear* end a
+  // key's lifetime only when it owns the current flag, so discarding an invalid key is a real
+  // completion (not a 6 s wait) and never erases a different key's flag.
+  void MarkKeyQueued(uint64_t mediaEpoch, uint64_t generation, uint64_t inputEpoch, uint32_t seq, uint64_t nowUs) {
+    keyAuQueuedMediaEpoch.store(mediaEpoch, std::memory_order_relaxed);
+    keyAuQueuedGeneration.store(generation, std::memory_order_relaxed);
+    keyAuQueuedInputEpoch.store(inputEpoch, std::memory_order_relaxed);
+    keyAuQueuedSeq.store(seq, std::memory_order_relaxed);
+    keyAuQueuedSinceUs.store(nowUs, std::memory_order_release);
+    keyAuQueued.store(true, std::memory_order_release);
+  }
+  void MarkKeyOnWire(uint64_t mediaEpoch, uint64_t generation, uint64_t inputEpoch, uint32_t seq, uint64_t nowUs) {
+    keyAuOnWireMediaEpoch.store(mediaEpoch, std::memory_order_relaxed);
+    keyAuOnWireGeneration.store(generation, std::memory_order_relaxed);
+    keyAuOnWireInputEpoch.store(inputEpoch, std::memory_order_relaxed);
+    keyAuOnWireSeq.store(seq, std::memory_order_relaxed);
+    keyAuOnWireSinceUs.store(nowUs, std::memory_order_release);
+    keyAuOnWire.store(true, std::memory_order_release);
+    // The key left the queue for the wire: end the queued state ONLY if it is this same key.
+    if (keyAuQueued.load(std::memory_order_acquire) && keyAuQueuedSeq.load(std::memory_order_relaxed) == seq &&
+        keyAuQueuedGeneration.load(std::memory_order_relaxed) == generation)
+      keyAuQueued.store(false, std::memory_order_release);
+  }
+  void ClearKeyQueuedIfSeq(uint64_t generation, uint32_t seq) {
+    if (keyAuQueued.load(std::memory_order_acquire) && keyAuQueuedSeq.load(std::memory_order_relaxed) == seq &&
+        keyAuQueuedGeneration.load(std::memory_order_relaxed) == generation)
+      keyAuQueued.store(false, std::memory_order_release);
+  }
+  void ClearKeyOnWireIfSeq(uint64_t generation, uint32_t seq) {
+    if (keyAuOnWire.load(std::memory_order_acquire) && keyAuOnWireSeq.load(std::memory_order_relaxed) == seq &&
+        keyAuOnWireGeneration.load(std::memory_order_relaxed) == generation)
+      keyAuOnWire.store(false, std::memory_order_release);
+  }
   // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
   std::atomic<uint64_t> firstKeyWireUs{0};
   std::atomic<uint64_t> lastKeyAuBytes{0};

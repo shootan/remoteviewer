@@ -353,6 +353,16 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
     const int datagramLen = static_cast<int>(sizeof(h) + chunkSize);
+    // r5 G2: the live session fence, checked AT the send (not a stale snapshot) and INDEPENDENT of the
+    // token mechanism, so it holds for the fast path (tokens already available), the blocking wait, and
+    // the non-blocking TryAcquire alike. A rollover (media epoch moved) or an input flush (input epoch
+    // moved) that lands before this datagram commits stops the replay -- it must not reach the new
+    // session / the flushed picture. Checked just before acquiring tokens so no token is spent on a
+    // datagram that will not go out.
+    if (wire) {
+      if (wire->mediaEpoch && wire->mediaEpoch->load(std::memory_order_acquire) != wire->itemMediaEpoch) break;
+      if (wire->inputEpoch && wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch) break;
+    }
     // The common wire cap. By default non-blocking (a replay chunk that does not fit the shared budget
     // now is left out so a NACK burst cannot push the stream over the cap -- the client's keyframe
     // fallback recovers it). When blockingAcquire is set (r4 R1 sender-thread interleave), WAIT for the
@@ -369,6 +379,16 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
       if (!got) {
         if (outSuppressed) ++*outSuppressed;
         continue;
+      }
+      // r5 G2: a blocking Acquire may have WAITED; re-check the fence after it so a rollover/flush that
+      // landed during the wait (or slipped past the token fast path) still stops this datagram. The
+      // token just spent is given back to the bucket so the budget is not charged for an unsent chunk.
+      const bool fencedAfterWait =
+          (wire->mediaEpoch && wire->mediaEpoch->load(std::memory_order_acquire) != wire->itemMediaEpoch) ||
+          (wire->inputEpoch && wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch);
+      if (fencedAfterWait) {
+        wire->limiter->Refund(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
+        break;
       }
     }
     std::memcpy(datagram.data(), &h, sizeof(h));

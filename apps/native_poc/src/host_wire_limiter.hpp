@@ -116,6 +116,18 @@ class WireLimiter {
     return true;
   }
 
+  // Give back tokens reserved for a datagram that then did NOT go out (r5 G2: a replay fenced by a
+  // rollover/flush after its token was acquired). Clamped to the depth, so it never grants credit
+  // beyond the bucket -- the spend set tokens_ to at most B_-bytes, so returning bytes lands at <= B_.
+  void Refund(uint64_t bytes) {
+    if (!enabled_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    tokens_ += bytes;
+    if (tokens_ > B_) tokens_ = B_;
+    if (spentBytes_.load(std::memory_order_relaxed) >= bytes)
+      spentBytes_.fetch_sub(bytes, std::memory_order_relaxed);
+  }
+
   // Wake every blocked Acquire so it re-checks its fence (call on stop / epoch roll / peer change).
   void Cancel() { Wake(); }
   void Stop() {

@@ -412,7 +412,7 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
     // tagged with its session (epoch 1, this peer), then mark it started on the wire (r4 R2) so it is
     // replayable -- the original send above really put its datagrams out.
     sender.StoreAu(1, seq, h, kMtu, egress.fecSingleChunkTightStride,
-                   sender.mediaSessionEpoch.load(std::memory_order_acquire), loop.rxAddr,
+                   sender.mediaSessionEpoch.load(std::memory_order_acquire), /*inputEpoch=*/0, loop.rxAddr,
                    au.bytes.data(), au.bytes.size());
     sender.MarkAuStartedOnWire(1, seq);
     ++r.sent;

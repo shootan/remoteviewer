@@ -126,6 +126,11 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   if (sender.wireCapEnabled &&
       sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(encoder.activeBitrate)) {
     sender.UpdateWireCap(static_cast<uint64_t>(encoder.activeBitrate));
+    // r5 G4: a same-clock apply marker so a test (or field log) can pin the EXACT instant the wire cap
+    // changed -- the independent apply point, not a rate observed later. qpc here is the sender/receiver
+    // clock on loopback. Diagnostic only.
+    std::cout << "[native-video-host] wirecap applied bitrate=" << encoder.activeBitrate
+              << " appliedQpcUs=" << qpc_now_us() << "\n";
   }
   res.captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
   encoder.RefreshFrameIntervals(capture, frameGating);

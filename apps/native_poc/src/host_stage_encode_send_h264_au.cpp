@@ -431,14 +431,13 @@ if (transport == VideoTransport::Tcp) {
           sender.queue.clear();
           sender.waitingForKey = false;
           if (sender.firstKeyEnqueuedUs == 0) sender.firstKeyEnqueuedUs = sendStartUs;
-          // r4 R3: the key is now QUEUED (not yet on the wire). Close the encode->queue gap so a
+          // r4 R3 / r5 G1: the key is now QUEUED (not yet on the wire). Close the encode->queue gap so a
           // recovery re-request while this key waits behind nothing-or-a-long-AU does not force a
-          // duplicate key. Tagged by (media epoch, generation); cleared when the sender starts it on
-          // the wire (keyAuOnWire) or on a rollover.
-          sender.keyAuQueuedMediaEpoch.store(item.mediaEpoch, std::memory_order_relaxed);
-          sender.keyAuQueuedGeneration.store(item.udpHdr.streamGeneration, std::memory_order_relaxed);
-          sender.keyAuQueuedSinceUs.store(qpc_now_us(), std::memory_order_release);
-          sender.keyAuQueued.store(true, std::memory_order_release);
+          // duplicate key. Tagged by full identity (media epoch, generation, input epoch, seq) so the
+          // gate's suppression is scoped to THIS key and its clear hits only its own entry; the new key
+          // supersedes any key the queue.clear() above just discarded.
+          sender.MarkKeyQueued(item.mediaEpoch, item.udpHdr.streamGeneration, au.inputEpoch,
+                               item.udpHdr.seq, static_cast<uint64_t>(qpc_now_us()));
           sender.queue.push_back(std::move(item));
           enqueuedForSend = true;
           // The backlog this batch was judged on is gone -- this key just cleared it. Leaving
@@ -466,6 +465,9 @@ if (transport == VideoTransport::Tcp) {
           sender.heldFrames += sender.queue.size();
           sender.sentFrames -= std::min<uint64_t>(sender.sentFrames, sender.queue.size());
           sender.queue.clear();
+          // r5 G1: the queue (and any key waiting in it) is gone, so end the queued-key state -- the
+          // fresh IDR requested below must not be suppressed as "already queued".
+          sender.keyAuQueued.store(false, std::memory_order_release);
           sender.waitingForKey = true;
           hx.mailbox.PostRequestKeyframe(kKeyframeReasonSenderBacklog);
           break;

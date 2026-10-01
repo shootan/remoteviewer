@@ -270,20 +270,24 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // and a repeated recovery request in that window would force a duplicate IDR. The sender flag is
    // bounded by a generous safety timeout in case the sender thread is wedged (the real clear is on
    // send completion / rollover). Only while the cap is on, where the long send time exists.
-   // Only a key of the SAME (media epoch, generation) we are encoding for counts as in-flight (r3 F2):
-   // a stale flag left on an old session's key must not suppress a fresh session's recovery IDR.
+   // Only a key of the SAME (media epoch, generation, INPUT epoch) we are encoding for counts as in
+   // flight (r3 F2 + r5 G1): a stale flag of an old session, or of an old INPUT epoch (an input flush
+   // bumped inputEpoch but not media/generation), must not suppress the fresh key that flush now needs.
    const uint64_t curMediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
+   const uint64_t curInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
    const bool keyOnWire = sender.wireCapEnabled && sender.keyAuOnWire.load(std::memory_order_acquire) &&
                           encodeStartUs < sender.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
                           sender.keyAuOnWireMediaEpoch.load(std::memory_order_relaxed) == curMediaEpoch &&
-                          sender.keyAuOnWireGeneration.load(std::memory_order_relaxed) == streamGeneration;
+                          sender.keyAuOnWireGeneration.load(std::memory_order_relaxed) == streamGeneration &&
+                          sender.keyAuOnWireInputEpoch.load(std::memory_order_relaxed) == curInputEpoch;
    // r4 R3: a key still WAITING in the sender queue (not yet on the wire) also counts as in flight, so
-   // a recovery re-request during that wait does not produce a duplicate key. Same (epoch, generation)
-   // scope and 6 s safety bound as keyOnWire.
+   // a recovery re-request during that wait does not produce a duplicate key. Same (media, generation,
+   // input epoch) scope and 6 s safety bound as keyOnWire.
    const bool keyQueued = sender.wireCapEnabled && sender.keyAuQueued.load(std::memory_order_acquire) &&
                           encodeStartUs < sender.keyAuQueuedSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
                           sender.keyAuQueuedMediaEpoch.load(std::memory_order_relaxed) == curMediaEpoch &&
-                          sender.keyAuQueuedGeneration.load(std::memory_order_relaxed) == streamGeneration;
+                          sender.keyAuQueuedGeneration.load(std::memory_order_relaxed) == streamGeneration &&
+                          sender.keyAuQueuedInputEpoch.load(std::memory_order_relaxed) == curInputEpoch;
    const bool forceKeyInFlight =
        (encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000) ||
        keyOnWire || keyQueued;

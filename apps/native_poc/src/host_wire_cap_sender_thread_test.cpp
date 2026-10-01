@@ -211,6 +211,75 @@ int main() {
     stop_sender(*sender);
   }
 
+  std::printf("--- R1/G3 (c): a NACK at the idle boundary is never lost (hammer the check->sleep edge) ---\n");
+  {
+    auto sender = make_sender(6'000'000);
+    Args args;
+    args.udpMtu = mtu;
+    SessionState session;
+    session.clientSock = tx;
+    MainLoopMailbox mailbox;
+    sender->StartThread(VideoTransport::Udp, true, args, session, mailbox);
+    const uint32_t seq = 30;
+    std::vector<uint8_t> au(8u * 1024u, 0xAB);
+    enqueue(*sender, make_item(seq, gen, au, true, kEpoch, 60));
+    for (int i = 0; i < 200 && sender->txFrames.load() == 0; ++i) Sleep(5);
+    Sleep(30);
+    (void)drain(rx);
+
+    // Repeatedly inject a single-chunk NACK right as the stream is idle (no Sleep before the inject),
+    // so the record lands near the sender's predicate-check/sleep edge. Every one must be served --
+    // newReplayWork is raised under sender.mu, so the wake cannot be lost. (G3 lost-wake.)
+    int lost = 0;
+    const int rounds = 40;
+    for (int i = 0; i < rounds; ++i) {
+      const uint64_t before = sender->replayServedChunks.load();
+      const uint16_t miss[] = {static_cast<uint16_t>(1 + (i % 5))};
+      sender->RetransmitAu(tx, rxAddr, gen, seq, miss, 1);
+      bool served = false;
+      for (int k = 0; k < 100; ++k) {  // up to ~500 ms
+        if (sender->replayServedChunks.load() > before) { served = true; break; }
+        Sleep(5);
+      }
+      (void)drain(rx);
+      if (!served) ++lost;
+    }
+    check("G3: every NACK at the idle boundary was served (no lost wake over 40 rounds)", lost == 0,
+          "lost=" + std::to_string(lost) + "/" + std::to_string(rounds));
+    stop_sender(*sender);
+  }
+
+  std::printf("--- G3 (d): the reader (RetransmitAu) is not blocked behind a replay's token wait ---\n");
+  {
+    auto sender = make_sender(1'500'000);  // low cap -> interleave does blocking token waits
+    Args args;
+    args.udpMtu = mtu;
+    SessionState session;
+    session.clientSock = tx;
+    MainLoopMailbox mailbox;
+    sender->StartThread(VideoTransport::Udp, true, args, session, mailbox);
+    const uint32_t seq = 40;
+    std::vector<uint8_t> idr(208u * 1024u, 0xCD);  // long cap-paced send -> interleave active
+    enqueue(*sender, make_item(seq, gen, idr, true, kEpoch, 60));
+    Sleep(80);  // the send is well under way, interleave blocking on tokens
+
+    // Time many RetransmitAu calls (the reader entry point) while the sender interleaves under a low
+    // cap. Each must return quickly -- Drain releases pendingReplayMu during its blocking token wait,
+    // so the reader never waits behind it. (G3 reader-blocking.)
+    uint64_t maxCallUs = 0;
+    for (int i = 0; i < 200; ++i) {
+      const uint16_t miss[] = {static_cast<uint16_t>(i % 100)};
+      const uint64_t t0 = qpc_now_us();
+      sender->RetransmitAu(tx, rxAddr, gen, seq, miss, 1);
+      const uint64_t dtUs = qpc_now_us() - t0;
+      maxCallUs = std::max(maxCallUs, dtUs);
+      (void)drain(rx);
+    }
+    check("G3: the reader's RetransmitAu never blocked behind the interleave token wait (max < 20 ms)",
+          maxCallUs < 20000, "maxCallUs=" + std::to_string(maxCallUs));
+    stop_sender(*sender);
+  }
+
   closesocket(rx);
   closesocket(tx);
   WSACleanup();

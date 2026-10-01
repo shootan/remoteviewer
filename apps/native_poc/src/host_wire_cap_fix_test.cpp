@@ -260,14 +260,90 @@ void test_f2_recovery_admission_and_tag() {
   check("F2 tag: the SAME (epoch,generation) key still counts as in-flight (forceKeyFrame=false)", !fkfSame);
 }
 
+// ---------------------------------------------------------------- G1: queued-key identity + clears
+void test_g1_queued_key_identity() {
+  std::printf("\n--- G1: queued-key state is owned per (generation, seq) and ends on its own key's exit ---\n");
+  SenderState s;
+  s.wireCapEnabled = true;
+  // Key A (seq 100) is enqueued for media 3 / gen 9 / input epoch 7.
+  s.MarkKeyQueued(/*media=*/3, /*gen=*/9, /*input=*/7, /*seq=*/100, /*now=*/1'000'000);
+  check("A is queued", s.keyAuQueued.load());
+  // A clear aimed at a DIFFERENT seq must not touch A's flag.
+  s.ClearKeyQueuedIfSeq(9, 101);
+  check("G1: clearing a different seq leaves A queued", s.keyAuQueued.load());
+  // A different key B entering the wire must not clear A's queued flag (media/gen same, seq differs).
+  s.MarkKeyOnWire(3, 9, 7, /*seqB=*/101, 1'050'000);
+  check("G1: key B's wire entry does NOT clear A's queued flag", s.keyAuQueued.load());
+  // A's own exit (input-fence discard) clears A.
+  s.ClearKeyQueuedIfSeq(9, 100);
+  check("G1: A's own discard ends A's queued state", !s.keyAuQueued.load());
+
+  std::printf("--- G1 gate: a stale queued flag of an OLD input epoch does not suppress the new key ---\n");
+  // Re-queue A at input epoch 7, then model the gate for a frame whose CURRENT input epoch is 8 (a
+  // flush bumped it). The queued flag must NOT count as in-flight for the new input epoch's key.
+  s.MarkKeyQueued(3, 9, 7, 100, 1'000'000);
+  const uint64_t encodeStartUs = 1'100'000;
+  auto keyQueuedForGate = [&](uint64_t curMedia, uint64_t curGen, uint64_t curInput) {
+    return s.wireCapEnabled && s.keyAuQueued.load(std::memory_order_acquire) &&
+           encodeStartUs < s.keyAuQueuedSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
+           s.keyAuQueuedMediaEpoch.load(std::memory_order_relaxed) == curMedia &&
+           s.keyAuQueuedGeneration.load(std::memory_order_relaxed) == curGen &&
+           s.keyAuQueuedInputEpoch.load(std::memory_order_relaxed) == curInput;
+  };
+  check("G1 gate: same (media,gen,input)=（3,9,7) still counts as in-flight", keyQueuedForGate(3, 9, 7));
+  check("G1 gate: a NEW input epoch (3,9,8) is NOT suppressed by the stale flag", !keyQueuedForGate(3, 9, 8));
+}
+
+// ---------------------------------------------------------------- G2: the live fence AT the send
+void test_g2_send_time_fence() {
+  std::printf("\n--- G2: a rollover/flush fences a replay AT the send, incl. the token fast path ---\n");
+  const size_t bytes = 40u * 1024u;
+  std::vector<uint8_t> payload(bytes, 0xBB);
+  const uint32_t mtu = 1200;
+  const uint32_t lmax = clamp_udp_mtu(mtu) + 28u;
+  const uint16_t idxs[] = {0, 1, 2, 3};
+
+  auto run = [&](bool blocking, uint64_t liveMedia, uint64_t itemMedia, uint64_t liveInput, uint64_t itemInput) {
+    FakeClock clk;
+    // A generous cap with the bucket pre-filled so Acquire/TryAcquire take the FAST path (tokens
+    // available) -- the point is that the explicit fence stops the send even then.
+    WireLimiter limiter([&] { return clk.now += 100000; }, [&](uint64_t, uint64_t) { return true; });
+    limiter.SetRate(1'000'000'000ULL, lmax);
+    (void)limiter.tokens_for_test();  // advance the clock once so the bucket fills to B
+    std::atomic<uint64_t> media{liveMedia}, input{liveInput};
+    int sent = 0;
+    WireEgress wire;
+    wire.limiter = &limiter;
+    wire.sink = [&](const uint8_t*, int, bool) { ++sent; return 1; };
+    wire.blockingAcquire = blocking;
+    wire.mediaEpoch = &media;
+    wire.itemMediaEpoch = itemMedia;
+    wire.inputEpoch = &input;
+    wire.itemInputEpoch = itemInput;
+    sockaddr_in peer{};
+    uint64_t wb = 0, dg = 0, sup = 0;
+    send_udp_chunk_indices(INVALID_SOCKET, peer, payload.data(), payload.size(), base_header(1, 1, bytes), mtu,
+                           true, idxs, 4, &wb, &dg, &wire, &sup);
+    return sent;
+  };
+
+  check("G2: matching media+input, fast-path TryAcquire -> all 4 chunks sent", run(false, 5, 5, 7, 7) == 4);
+  check("G2: media epoch mismatch fences the replay on the fast path (0 sent)", run(false, 6, 5, 7, 7) == 0);
+  check("G2: input epoch mismatch fences the replay on the fast path (0 sent)", run(false, 5, 5, 8, 7) == 0);
+  check("G2: the blocking-acquire fast path is ALSO fenced by a media mismatch (0 sent)", run(true, 6, 5, 7, 7) == 0);
+  check("G2: the blocking-acquire fast path is ALSO fenced by an input mismatch (0 sent)", run(true, 5, 5, 8, 7) == 0);
+}
+
 }  // namespace
 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  std::printf("--- bitrate-hard-cap r3: F2/F3/F4 counter-examples + negative controls ---\n");
+  std::printf("--- bitrate-hard-cap r3/r5: F2/F3/F4 + G1/G2 counter-examples + negative controls ---\n");
   test_f3_first_datagram_epoch_fence();
   test_f4_reconciliation_partial_send();
   test_f2_recovery_admission_and_tag();
+  test_g1_queued_key_identity();
+  test_g2_send_time_fence();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

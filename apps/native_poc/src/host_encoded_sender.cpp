@@ -81,7 +81,7 @@ bool SenderState::NackFallbackTryAcquire(uint64_t bytes) {
 }
 
 void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
-                          uint32_t mtu, bool tightSingleChunk, uint64_t mediaEpoch,
+                          uint32_t mtu, bool tightSingleChunk, uint64_t mediaEpoch, uint64_t inputEpoch,
                           const sockaddr_in& peer, const uint8_t* payload, size_t payloadSize) {
   if (!nackEnabled.load(std::memory_order_relaxed) || !payload || payloadSize == 0) return;
   std::lock_guard<std::mutex> lk(nackCacheMu);
@@ -92,11 +92,12 @@ void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunk
   e.mtu = mtu;
   e.tightSingleChunk = tightSingleChunk;
   e.mediaEpoch = mediaEpoch;           // r4 R2: session ownership
+  e.inputEpoch = inputEpoch;           // r5 G2: input-epoch fence at replay send time
   e.peerIpNet = peer.sin_addr.s_addr;
   e.peerPortNet = peer.sin_port;
   e.startedOnWire = false;             // r4 R2: not replayable until the original sends a datagram
   e.baseHeader = baseHeader;
-  e.payload.assign(payload, payload + payloadSize);
+  e.payload = std::make_shared<std::vector<uint8_t>>(payload, payload + payloadSize);
   while (nackCache.size() > kNackCacheMaxAus) nackCache.pop_front();
 }
 
@@ -131,7 +132,14 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
   if (!nackEnabled.load(std::memory_order_relaxed) || !missing || count == 0) return;
   nackRequests.fetch_add(1, std::memory_order_relaxed);
   RecordReplayRequest(generation, seq, peer, mediaSessionEpoch.load(std::memory_order_acquire), missing, count);
-  cv.notify_one();  // wake the sender so an idle stream still drains the replay (predicate reads pendingReplayCount)
+  // r5 G3: raise the wake flag UNDER sender.mu (the cv's mutex) before notifying, so a request that
+  // lands between the sender's predicate check and its sleep is not lost. The atomic count alone (on a
+  // different mutex) did not close that check->sleep window.
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    newReplayWork = true;
+  }
+  cv.notify_one();
 }
 
 void SenderState::RecordReplayRequest(uint64_t generation, uint32_t seq, const sockaddr_in& peer,
@@ -161,81 +169,102 @@ void SenderState::RecordReplayRequest(uint64_t generation, uint32_t seq, const s
 
 bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint64_t nowUs,
                                       uint64_t currentEpoch, size_t maxChunks) {
-  std::lock_guard<std::mutex> lk(pendingReplayMu);
+  // r5 G2/G3: one chunk per iteration is PICKED under pendingReplayMu (with a cheap shared_ptr payload
+  // snapshot), the lock is RELEASED, then the chunk is sent with a live media+input fence checked at
+  // the actual send and a blocking token wait -- so (a) the reader is never blocked behind a replay's
+  // token wait, and (b) a rollover/flush that lands during the wait fences the send. The served chunk
+  // is popped under the lock again only if its request still owns this session.
   const bool capEnforcing = wireLimiter && wireLimiter->enabled();
   size_t servedThisCall = 0;
-  for (auto it = pendingReplays.begin(); it != pendingReplays.end();) {
-    // r4 R2: a request of a finished session is dropped (not replayed to the new peer).
-    if (it->mediaEpoch != currentEpoch) {
-      it = pendingReplays.erase(it);
-      continue;
-    }
-    if (nowUs >= it->createdUs && nowUs - it->createdUs > kReplayDeadlineUs) {
-      // Explicit end: the request outlived its deadline without the budget allowing it -> the client's
-      // IDR fallback recovers. We DROP only here (or when fully served), never on a single short bucket.
-      replayDroppedRequests.fetch_add(1, std::memory_order_relaxed);
-      it = pendingReplays.erase(it);
-      continue;
-    }
-    // Copy the cached AU out (brief cache lock), then replay the remaining chunks that fit now. The
-    // cache entry must belong to THIS session (media epoch + peer) and have actually started on the
-    // wire -- a pre-cached AU the F3 fence aborted with 0 datagrams is never replayed. (r4 R2)
-    std::vector<uint8_t> payload;
+  for (;;) {
+    if (maxChunks != 0 && servedThisCall >= maxChunks) break;  // r4 R1 interleave bound
+    uint64_t gen = 0, itemInputEpoch = 0;
+    uint32_t seq = 0;
+    uint16_t idx = 0;
+    std::shared_ptr<std::vector<uint8_t>> payload;
     UdpVideoChunkHeader baseHeader{};
     uint32_t mtu = 0;
     bool tight = true;
+    bool have = false;
     {
-      std::lock_guard<std::mutex> clk(nackCacheMu);
-      auto c = std::find_if(nackCache.rbegin(), nackCache.rend(), [&](const CachedAu& e) {
-        return e.generation == it->generation && e.seq == it->seq &&
-               e.mediaEpoch == currentEpoch && e.peerIpNet == it->peerIpNet &&
-               e.peerPortNet == it->peerPortNet && e.startedOnWire;
-      });
-      if (c == nackCache.rend()) {
-        ++it;  // not cached/started yet (still sending) -- keep until ready or the deadline drops it
-        continue;
-      }
-      payload = c->payload;
-      baseHeader = c->baseHeader;
-      mtu = c->mtu;
-      tight = c->tightSingleChunk;
-    }
-    bool stalled = false;
-    while (!it->missing.empty()) {
-      if (maxChunks != 0 && servedThisCall >= maxChunks) { stalled = true; break; }  // r4 R1 interleave bound
-      if (!capEnforcing && !NackFallbackTryAcquire((mtu ? mtu : 1400) + 28u)) { stalled = true; break; }
-      const uint16_t idx = it->missing.front();
-      WireEgress wire;
-      if (capEnforcing) {
-        wire.limiter = wireLimiter.get();  // cap-on: the shared bucket gates each chunk
-        // Interleave (maxChunks != 0, during a saturated original send): block for a fair share of the
-        // bucket so the original does not win every token; a rollover cancels it. Idle/between-AU
-        // (maxChunks == 0) stay non-blocking -- tokens are free when no original is draining them.
-        if (maxChunks != 0) {
-          wire.blockingAcquire = true;
-          wire.mediaEpoch = &mediaSessionEpoch;
-          wire.itemMediaEpoch = currentEpoch;
+      std::lock_guard<std::mutex> lk(pendingReplayMu);
+      // Retire finished-session and deadline-expired requests first (r4 R2 / r3 deadline).
+      for (auto it = pendingReplays.begin(); it != pendingReplays.end();) {
+        if (it->mediaEpoch != currentEpoch) {
+          it = pendingReplays.erase(it);
+        } else if (it->missing.empty()) {
+          it = pendingReplays.erase(it);
+        } else if (nowUs >= it->createdUs && nowUs - it->createdUs > kReplayDeadlineUs) {
+          replayDroppedRequests.fetch_add(1, std::memory_order_relaxed);
+          it = pendingReplays.erase(it);
+        } else {
+          ++it;
         }
       }
-      uint64_t wb = 0, dg = 0, sup = 0;
-      send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu, tight, &idx, 1, &wb, &dg,
-                             &wire, &sup);
-      if (dg == 0) { stalled = true; break; }  // suppressed by the budget -> leave this chunk for the next loop
-      it->missing.erase(it->missing.begin());
-      ++servedThisCall;
-      replayServedChunks.fetch_add(1, std::memory_order_relaxed);
-      txNackBytes.fetch_add(wb, std::memory_order_relaxed);
-      txNackDatagrams.fetch_add(dg, std::memory_order_relaxed);
-      nackRetransmitChunks.fetch_add(dg, std::memory_order_relaxed);
+      // Pick the first request whose AU is cached, this-session, and started on the wire (r4 R2).
+      for (auto& req : pendingReplays) {
+        std::lock_guard<std::mutex> clk(nackCacheMu);
+        auto c = std::find_if(nackCache.rbegin(), nackCache.rend(), [&](const CachedAu& e) {
+          return e.generation == req.generation && e.seq == req.seq && e.mediaEpoch == currentEpoch &&
+                 e.peerIpNet == req.peerIpNet && e.peerPortNet == req.peerPortNet && e.startedOnWire;
+        });
+        if (c == nackCache.rend()) continue;  // uncached/unstarted -> keep, try a later request
+        gen = req.generation;
+        seq = req.seq;
+        idx = req.missing.front();
+        payload = c->payload;  // shared_ptr: no AU copy
+        baseHeader = c->baseHeader;
+        mtu = c->mtu;
+        tight = c->tightSingleChunk;
+        itemInputEpoch = c->inputEpoch;
+        have = true;
+        break;
+      }
+      pendingReplayCount.store(pendingReplays.size(), std::memory_order_relaxed);
     }
-    if (it->missing.empty()) it = pendingReplays.erase(it);
-    else {
-      ++it;
-      if (stalled && maxChunks != 0) break;  // interleave budget spent this datagram; resume next one
+    if (!have || !payload) break;  // nothing sendable now (all uncached, or empty)
+
+    // Cap-off keeps the non-blocking fallback budget; if it is exhausted, stop this pass.
+    if (!capEnforcing && !NackFallbackTryAcquire((mtu ? mtu : 1400) + 28u)) break;
+
+    WireEgress wire;
+    if (capEnforcing) {
+      wire.limiter = wireLimiter.get();
+      // Interleave (maxChunks != 0, during a saturated original send) blocks for a fair share of the
+      // bucket -- the lock is released here, so the reader is NOT blocked behind that wait (r5 G3).
+      // Idle/between-AU (maxChunks == 0) stays non-blocking: tokens are free when no original drains
+      // them, and a token-blocked idle replay is retried by the sender's 50 ms heartbeat, not a spin.
+      wire.blockingAcquire = (maxChunks != 0);
+      wire.mediaEpoch = &mediaSessionEpoch;  // r5 G2: live media fence AT the send (fast + slow path)
+      wire.itemMediaEpoch = currentEpoch;
+      wire.inputEpoch = inputEpochRef;       // r5 G2: live input fence -- a flushed AU's replay stops
+      wire.itemInputEpoch = itemInputEpoch;
     }
+    uint64_t wb = 0, dg = 0, sup = 0;
+    send_udp_chunk_indices(sock, peer, payload->data(), payload->size(), baseHeader, mtu, tight, &idx, 1, &wb, &dg,
+                           &wire, &sup);
+
+    // Settle: pop the served chunk only if its request still owns this session (a rollover may have
+    // cleared it while we sent; the send-time fence would then have produced dg==0).
+    {
+      std::lock_guard<std::mutex> lk(pendingReplayMu);
+      auto it = std::find_if(pendingReplays.begin(), pendingReplays.end(), [&](const PendingReplay& p) {
+        return p.generation == gen && p.seq == seq && p.mediaEpoch == currentEpoch;
+      });
+      if (dg > 0 && it != pendingReplays.end() && !it->missing.empty() && it->missing.front() == idx) {
+        it->missing.erase(it->missing.begin());
+        if (it->missing.empty()) pendingReplays.erase(it);
+      }
+      pendingReplayCount.store(pendingReplays.size(), std::memory_order_relaxed);
+    }
+    if (dg == 0) break;  // fenced (rollover / input flush) or budget -> stop this pass
+    ++servedThisCall;
+    replayServedChunks.fetch_add(1, std::memory_order_relaxed);
+    txNackBytes.fetch_add(wb, std::memory_order_relaxed);
+    txNackDatagrams.fetch_add(dg, std::memory_order_relaxed);
+    nackRetransmitChunks.fetch_add(dg, std::memory_order_relaxed);
   }
-  pendingReplayCount.store(pendingReplays.size(), std::memory_order_relaxed);
-  return !pendingReplays.empty();
+  return pendingReplayCount.load(std::memory_order_relaxed) != 0;
 }
 
 void SenderState::StartThread(VideoTransport transport, bool useH264, const Args& args,
@@ -264,27 +293,30 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       size_t queueDepthAtDequeue = 0;
       {
         std::unique_lock<std::mutex> lk(sender.mu);
-        // Wake on stop, a queued AU, OR a pending NACK replay (r4 R1): a NACK's notify_one must wake an
-        // idle sender even with no AU queued -- the r3 predicate only checked stop||queue, so a replay
-        // recorded while the sender slept was ignored until the next AU. pendingReplayCount is a
-        // lock-free snapshot written under pendingReplayMu, so the predicate takes no second lock. A
-        // short timeout still bounds the retry cadence while a replay waits for the bucket to refill.
+        // Wake on stop, a queued AU, or NEW replay work (r5 G3). The wake SIGNAL is newReplayWork, set
+        // by RecordReplayRequest under THIS mutex and notified, so a request that lands between the
+        // predicate check and the sleep is not lost (the r4 atomic-count-on-a-different-mutex could
+        // miss it). "A pending replay exists" is deliberately NOT a ready() condition -- otherwise a
+        // token-blocked or uncached request would make wait_for return at once and busy-spin. Instead,
+        // when replays are still pending we wait with a bounded heartbeat (for deadline/uncached
+        // cleanup); the token wait itself happens inside Drain's blocking Acquire, not here.
         const auto ready = [&] {
-          return sender.stop.load(std::memory_order_acquire) || !sender.queue.empty() ||
-                 sender.pendingReplayCount.load(std::memory_order_relaxed) != 0;
+          return sender.stop.load(std::memory_order_acquire) || !sender.queue.empty() || sender.newReplayWork;
         };
-        if (sender.pendingReplayCount.load(std::memory_order_relaxed) != 0) {
-          sender.cv.wait_for(lk, std::chrono::milliseconds(2), ready);
+        const bool pendingHint = sender.pendingReplayCount.load(std::memory_order_relaxed) != 0;
+        if (pendingHint) {
+          sender.cv.wait_for(lk, std::chrono::milliseconds(50), ready);
         } else {
           sender.cv.wait(lk, ready);
         }
+        sender.newReplayWork = false;  // consumed
         peer = sender.peer;
         peerReady = sender.peerReady;
         if (sender.queue.empty()) {
           if (sender.stop.load(std::memory_order_acquire)) return;
-          // No AU to send. Drain any pending replay (cap-paced, non-blocking) before waiting again,
-          // so a recovery the full bucket suppressed earlier still goes out once tokens refill, and a
-          // NACK that arrived while idle is served now rather than waiting for the next AU.
+          // No AU to send. Drain pending replays (cap-paced; the blocking token wait is inside Drain,
+          // which holds no lock while waiting, so the reader is not blocked). This serves a NACK that
+          // arrived while idle and retries one the bucket suppressed earlier once tokens refill.
           const bool canDrain = peerReady && sender.pendingReplayCount.load(std::memory_order_relaxed) != 0;
           lk.unlock();
           if (canDrain) {
@@ -305,6 +337,9 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // Drop it here so a stale P-frame cannot land on the new decoder.
       if (item.mediaEpoch != sender.mediaSessionEpoch.load(std::memory_order_acquire)) {
         sender.dropCount.fetch_add(1, std::memory_order_relaxed);
+        // r5 G1: a discarded key ends its queued state (its own entry only), so the new session's IDR
+        // is not suppressed by this dropped one.
+        if (item.keyFrame) sender.ClearKeyQueuedIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
         continue;
       }
       // Flush epoch fence (P11), early pass: an item of another epoch is dropped here without
@@ -317,6 +352,10 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         if (it.inputEpoch == cur) return false;
         const uint64_t n = sender.inputEpochDropCount.fetch_add(1, std::memory_order_relaxed) + 1;
         sender.dropCount.fetch_add(1, std::memory_order_relaxed);
+        // r5 G1: dropping a key at the input fence is that key's completion -- end its queued state so a
+        // new key the fresh input epoch needs is not suppressed as "already in flight" (its own entry
+        // only, by seq/generation, never a different key's).
+        if (it.keyFrame) sender.ClearKeyQueuedIfSeq(it.udpHdr.streamGeneration, it.udpHdr.seq);
         if (n <= 5 || (n % 50) == 0) {
           std::cout << "[native-video-host] sender dropped AU of another epoch at " << where << " seq=" << it.udpHdr.seq
                     << " auEpoch=" << it.inputEpoch << " curEpoch=" << cur
@@ -393,14 +432,12 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // A key AU is on the wire for the whole of this (possibly long, cap-paced) send: the encode
       // gate uses this to not force a duplicate recovery IDR while this one is still going out. (r2)
       if (item.keyFrame) {
-        // Tag the on-wire key by its (media epoch, generation) so the encode gate's "a key is already
-        // in flight" test is scoped to THIS key, not a stale flag from a prior session (r3 F2).
-        sender.keyAuOnWireMediaEpoch.store(item.mediaEpoch, std::memory_order_relaxed);
-        sender.keyAuOnWireGeneration.store(item.udpHdr.streamGeneration, std::memory_order_relaxed);
-        sender.keyAuOnWireSinceUs.store(sendStartUs, std::memory_order_release);
-        sender.keyAuOnWire.store(true, std::memory_order_release);
-        // r4 R3: the key left the queue for the wire -- the queued-key guard hands over to keyAuOnWire.
-        sender.keyAuQueued.store(false, std::memory_order_release);
+        // Tag the on-wire key by its full identity (media epoch, generation, input epoch, seq) so the
+        // gate's "a key is already in flight" is scoped to THIS key (r3 F2 + r5 G1), and hand the
+        // queued state over to on-wire ONLY for this same key (so a different key enqueued meanwhile
+        // keeps its flag).
+        sender.MarkKeyOnWire(item.mediaEpoch, item.udpHdr.streamGeneration, item.inputEpoch,
+                             item.udpHdr.seq, sendStartUs);
       }
       // Cache this AU BEFORE it is sent (bitrate-hard-cap r2): a cap-paced large AU takes up to ~1.4 s
       // to go out, and a NACK that arrives during that window must find it in the cache and be replayed
@@ -411,7 +448,7 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // (media epoch, peer) and is not replayable until its first datagram is actually on the wire
       // (r4 R2). No-op unless the client negotiated NACK. (was: cached after a successful send.)
       sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
-                     egress.fecSingleChunkTightStride, item.mediaEpoch, peer,
+                     egress.fecSingleChunkTightStride, item.mediaEpoch, item.inputEpoch, peer,
                      item.bytes.data(), item.bytes.size());
       // Before this send, drain any replay for an EARLIER (already-started) AU that a full bucket
       // suppressed -- unlimited here (between-AU), the interleave hook bounds the during-send work.
@@ -421,7 +458,8 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                 item.mediaEpoch, egress, &wireEgress);
-      if (item.keyFrame) sender.keyAuOnWire.store(false, std::memory_order_release);
+      // Clear the on-wire flag only if it is still THIS key (a rollover may have handed it elsewhere).
+      if (item.keyFrame) sender.ClearKeyOnWireIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
       // F4 (r3): count what ACTUALLY left, regardless of the outcome (a partial/aborted AU still put
       // these bytes on the wire). Distinct from the payload totals below, which are per whole-AU Sent.
       sender.txActualWireBytes.fetch_add(wireData + wireParity, std::memory_order_relaxed);
@@ -497,6 +535,9 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
             // owned by the encode thread and must not be touched here (that would be a data race).
             sender.dropCount.fetch_add(sender.queue.size() + 1, std::memory_order_relaxed);
             sender.queue.clear();
+            // r5 G1: the queue (and any key waiting in it) is discarded on this barrier re-arm, so end
+            // the queued-key state -- the re-armed IDR requested below must not be suppressed.
+            sender.keyAuQueued.store(false, std::memory_order_release);
             sender.waitingForKey = true;
             rearmed = true;
           } else {

@@ -91,7 +91,12 @@ constexpr int kWinH = 360;
 // scrolls, a static page with an opaque window dragged across it, and a static page with a small
 // localised video (noise) region -- the mostly-static-plus-local-motion profile of actual desktop use,
 // which exercises the cap's quality trade-off far more realistically than full-frame noise.
-enum class Content { StaticText, LowMotion, Video, TextScroll, WindowDrag, PartialVideo };
+// ... plus r5 measurement cases: SingleChange (a static page with ONE localised change every ~2 s
+// after idle -- for input->screen present latency, measured on the change frame, not an average that a
+// backlog inflates) and FullTransition (the whole page content swaps every ~2 s -- a full-screen change).
+enum class Content {
+  StaticText, LowMotion, Video, TextScroll, WindowDrag, PartialVideo, SingleChange, FullTransition
+};
 const char* content_name(Content c) {
   switch (c) {
     case Content::StaticText: return "static";
@@ -100,6 +105,8 @@ const char* content_name(Content c) {
     case Content::TextScroll: return "textscroll";
     case Content::WindowDrag: return "windowdrag";
     case Content::PartialVideo: return "partialvideo";
+    case Content::SingleChange: return "singlechange";
+    case Content::FullTransition: return "fulltransition";
   }
   return "?";
 }
@@ -239,6 +246,39 @@ class Target {
           row[x] = state & 0x00FFFFFFu;
         }
       }
+    } else if (content == Content::SingleChange) {
+      // A static page with ONE small filled cell appearing per transition step (cumulative), so each
+      // repaint is a single localised change on an otherwise unchanged screen -- the input->screen case.
+      EnsurePageCache(dc);
+      BitBlt(memDc_, 0, 0, kWinW, kWinH, pageDc_, 0, 0, SRCCOPY);
+      const int steps = static_cast<int>(frame_ / 60);  // one change every ~2 s (timer 33 ms)
+      HBRUSH ink = CreateSolidBrush(RGB(200, 40, 40));
+      for (int s = 1; s <= steps; ++s) {
+        const int cx = 40 + (s * 53) % (kWinW - 80);
+        const int cy = 40 + (s * 97) % (kWinH - 80);
+        RECT cell{cx, cy, cx + 10, cy + 14};
+        FillRect(memDc_, &cell, ink);
+      }
+      DeleteObject(ink);
+    } else if (content == Content::FullTransition) {
+      // The whole content swaps between two very different pages every ~2 s: a full-screen change.
+      EnsurePageCache(dc);
+      if ((frame_ / 60) % 2 == 0) {
+        BitBlt(memDc_, 0, 0, kWinW, kWinH, pageDc_, 0, 0, SRCCOPY);  // the text page
+      } else {
+        // An inverted, blocky alternate page (dark background, light blocks) -- maximally different.
+        RECT all{0, 0, kWinW, kWinH};
+        HBRUSH bg = CreateSolidBrush(RGB(24, 28, 40));
+        FillRect(memDc_, &all, bg);
+        DeleteObject(bg);
+        HBRUSH fg = CreateSolidBrush(RGB(220, 210, 160));
+        for (int by = 20; by < kWinH - 20; by += 40)
+          for (int bx = 20; bx < kWinW - 20; bx += 60) {
+            RECT b{bx, by, bx + 44, by + 26};
+            FillRect(memDc_, &b, fg);
+          }
+        DeleteObject(fg);
+      }
     }
     BitBlt(dc, 0, 0, kWinW, kWinH, memDc_, 0, 0, SRCCOPY);
   }
@@ -278,7 +318,14 @@ class Target {
     if (msg == WM_TIMER && self) {
       if (self->content != Content::StaticText) {
         ++self->frame_;
-        InvalidateRect(hwnd, nullptr, FALSE);
+        // Continuous-motion content repaints every tick; the measurement cases (SingleChange,
+        // FullTransition) stay idle and repaint ONLY at a transition boundary (~2 s), so the host
+        // sees genuine idle between discrete changes -- that is what makes the present-latency of the
+        // change frame a real input->screen measure rather than a steady cadence.
+        const bool discrete =
+            self->content == Content::SingleChange || self->content == Content::FullTransition;
+        const bool transitionTick = (self->frame_ % 60) == 0;  // ~2 s at the 33 ms timer
+        if (!discrete || transitionTick) InvalidateRect(hwnd, nullptr, FALSE);
       }
       return 0;
     }
@@ -362,6 +409,10 @@ struct HostAccount {
   // Isolation matrix (r2): max sender queue wait/depth from the host's own [wire] lines, and the
   // wire cap it logged at startup (wireCapBps=...), and how many capture frames the input gate skipped.
   uint64_t maxQueueWaitUs = 0, maxQueueDepth = 0, wireCapBps = 0, wireOverloadSkips = 0;
+  // r5 G4: the host's same-clock wire-cap apply marker (qpc) and the bitrate it applied. The LAST one
+  // seen (a run has one downshift). 0 = none logged.
+  uint64_t wireCapAppliedQpcUs = 0;
+  uint64_t wireCapAppliedBitrate = 0;
 };
 
 HostAccount read_host_log(const std::wstring& path) {
@@ -382,6 +433,10 @@ HostAccount read_host_log(const std::wstring& path) {
     }
     if (line.find(" wireCapBps=") != std::string::npos && a.wireCapBps == 0) a.wireCapBps = num_of(line, "wireCapBps");
     if (line.find(" wireOverloadSkips=") != std::string::npos) a.wireOverloadSkips = num_of(line, "wireOverloadSkips");
+    if (line.find("wirecap applied ") != std::string::npos) {  // r5 G4 same-clock apply marker
+      a.wireCapAppliedQpcUs = num_of(line, "appliedQpcUs");
+      a.wireCapAppliedBitrate = num_of(line, "bitrate");
+    }
   }
   if (!last.empty()) {
     a.txFrames = num_of(last, "udpTxFrames");
@@ -427,6 +482,9 @@ struct RunResult {
   std::vector<uint64_t> decodeOutUs;      // qpc when each frame finished decoding, in order
   std::vector<uint64_t> decodeLatencyUs;  // decodeOut - captureStamp per frame
   uint32_t realtimeDecoded = 0;           // frames the realtime decoder produced
+  uint64_t liveEndUs = 0;                 // qpc when the receive loop was stopped; decodes AFTER this
+                                          // are the post-stop DRAIN, excluded from the present-latency
+                                          // stat so a frame decoded during teardown does not inflate it.
 };
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
@@ -728,6 +786,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
+    r.liveEndUs = qpc_now_us();  // anything decoded after this is drain, not a live present
     stop.store(true);
     if (ingress.joinable()) ingress.join();
     // Drain and stop the realtime decoder (it finishes any AUs still queued, then exits).
@@ -815,7 +874,8 @@ double window_peak_bps(const std::vector<std::pair<uint64_t, uint32_t>>& ev, uin
 //                what a viewer would actually see keep up. `realtimeDecoded`/decErr is the correctness
 //                check. The pre-fixed responsiveness ceiling `maxDecodeGapMs` (0 = no gate) is applied
 //                to the DECODE gap, so a candidate that holds the cap by freezing the picture FAILS.
-void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, double maxDecodeGapMs) {
+void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, double maxDecodeGapMs,
+                    double maxDecodeLatMs = 0.0) {
   const double p1s = window_peak_bps(r.wireEvents, 1'000'000);
   const double p250 = window_peak_bps(r.wireEvents, 250'000);
   double deliveredFps = 0, firstFrameMs = 0, deliverGapMaxMs = 0, idrPerSec = 0;
@@ -841,7 +901,11 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
     uint64_t gap = 0;
     for (size_t i = 1; i < r.decodeOutUs.size(); ++i) gap = std::max(gap, r.decodeOutUs[i] - r.decodeOutUs[i - 1]);
     decodeGapMaxMs = gap / 1000.0;
-    std::vector<uint64_t> lat = r.decodeLatencyUs;
+    // Present latency over frames decoded DURING the live run (exclude the post-stop drain, which would
+    // inflate the max with a frame finished during teardown).
+    std::vector<uint64_t> lat;
+    for (size_t i = 0; i < r.decodeLatencyUs.size() && i < r.decodeOutUs.size(); ++i)
+      if (r.liveEndUs == 0 || r.decodeOutUs[i] <= r.liveEndUs) lat.push_back(r.decodeLatencyUs[i]);
     if (!lat.empty()) {
       std::sort(lat.begin(), lat.end());
       decodeLatP95Ms = lat[(lat.size() * 95) / 100] / 1000.0;
@@ -870,17 +934,23 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
   if (maxDecodeGapMs > 0)
     check(decodeGapMaxMs <= maxDecodeGapMs,
           tag + ": max realtime-decode gap within the responsiveness ceiling (" + std::to_string((int)maxDecodeGapMs) + "ms)");
+  // r5 measurement: input->screen present latency. For the single-change case this is the capture->
+  // decoded-present time of the change frame AFTER idle (no backlog to inflate it), the real "a change
+  // reaches the screen" figure Codex asked for -- gated so a laggy present FAILS. deliverGap is NOT used.
+  if (maxDecodeLatMs > 0)
+    check(decodeLatMaxMs <= maxDecodeLatMs,
+          tag + ": input->screen present latency within the ceiling (" + std::to_string((int)maxDecodeLatMs) + "ms)");
 }
 
-// A runtime 6 -> 1.5 Mbps downshift. r4 R4-3: instead of discarding a fixed +1.5 s settle window, pin
-// the APPLY POINT from the data on the shared receive clock -- the first moment after the request when
-// the trailing 250 ms wire rate has stepped down past the midpoint (3 Mbps) toward the new cap -- and
-// judge EVERY complete window from there. The credit is preserved across the change (not refilled), so
-// the first full post-apply window must already respect the new, lower cap.
+// A runtime 6 -> 1.5 Mbps downshift. r5 G4: the apply point is the host's OWN same-clock apply marker
+// (`wirecap applied ... appliedQpcUs=`, logged where UpdateWireCap changes the cap) -- an INDEPENDENT
+// event, not a rate observed later from the result. EVERY complete window from that instant must
+// respect the new cap (the credit is preserved across the change, never refilled). The request->apply
+// latency is reported separately. A step-down observed on the wire is kept only as an aux cross-check.
 void matrix_metrics_downshift(const RunResult& r) {
-  // Data-driven apply point: scan forward from the request send time; the apply point is the first
-  // wire event after which the trailing 250 ms rate is at/under the 3 Mbps midpoint (the step-down).
-  uint64_t applyUs = 0;
+  const uint64_t applyUs = r.host.wireCapAppliedQpcUs;  // host same-clock apply instant (G4)
+  // Aux cross-check (NOT the judged point): where the wire rate actually stepped down.
+  uint64_t stepDownUs = 0;
   if (r.switchUs) {
     for (size_t i = 0; i < r.wireEvents.size(); ++i) {
       const uint64_t t = r.wireEvents[i].first;
@@ -890,30 +960,33 @@ void matrix_metrics_downshift(const RunResult& r) {
         if (r.wireEvents[j].first + 250'000 < t) break;
         bytes += r.wireEvents[j].second;
       }
-      const double trailing = static_cast<double>(bytes) * 8.0 * 1e6 / 250'000.0;
-      if (trailing <= 3'000'000.0) { applyUs = t; break; }
+      if (static_cast<double>(bytes) * 8.0 * 1e6 / 250'000.0 <= 3'000'000.0) { stepDownUs = t; break; }
     }
   }
   std::vector<std::pair<uint64_t, uint32_t>> before, after;
   for (const auto& e : r.wireEvents) {
     if (r.switchUs && e.first < r.switchUs) before.push_back(e);
-    else if (applyUs && e.first >= applyUs) after.push_back(e);  // EVERY complete window from the apply point
+    if (applyUs && e.first >= applyUs) after.push_back(e);  // EVERY complete window from the host apply instant
   }
   const double b1 = window_peak_bps(before, 1'000'000);
   const double a1 = window_peak_bps(after, 1'000'000);
   const double a250 = window_peak_bps(after, 250'000);
-  std::printf("MATRIX 6->1.5-downshift: switched=%d applyLatencyMs=%.0f before1s=%.0f (%.1f%% of 6M) "
-              "after1s=%.0f (%.1f%% of 1.5M) after250=%.0f (%.1f%%) decoded=%u decErr=%u beforeEv=%zu afterEv=%zu\n",
-              r.switchUs != 0 ? 1 : 0, applyUs ? (applyUs - r.switchUs) / 1000.0 : -1.0, b1, 100.0 * b1 / 6'000'000.0,
-              a1, 100.0 * a1 / 1'500'000.0, a250, 100.0 * a250 / 1'500'000.0, r.decoded, r.decodeErrors,
-              before.size(), after.size());
+  std::printf("MATRIX 6->1.5-downshift: switched=%d appliedBitrate=%llu requestToApplyMs=%.0f stepDownVsApplyMs=%.0f "
+              "before1s=%.0f (%.1f%% of 6M) after1s=%.0f (%.1f%% of 1.5M) after250=%.0f (%.1f%%) decoded=%u decErr=%u "
+              "beforeEv=%zu afterEv=%zu\n",
+              r.switchUs != 0 ? 1 : 0, (unsigned long long)r.host.wireCapAppliedBitrate,
+              (applyUs && r.switchUs) ? (double)(applyUs - r.switchUs) / 1000.0 : -1.0,
+              (applyUs && stepDownUs) ? (double)((int64_t)stepDownUs - (int64_t)applyUs) / 1000.0 : 0.0,
+              b1, 100.0 * b1 / 6'000'000.0, a1, 100.0 * a1 / 1'500'000.0, a250, 100.0 * a250 / 1'500'000.0, r.decoded,
+              r.decodeErrors, before.size(), after.size());
   check(r.switchUs != 0, "matrix downshift: the runtime bitrate change was sent");
-  check(applyUs != 0, "matrix downshift: the apply point (rate step-down) was observed on the wire");
+  check(applyUs != 0 && r.host.wireCapAppliedBitrate == 1'500'000,
+        "matrix downshift: the host logged a same-clock wire-cap apply at the new rate (independent apply point)");
   check(before.empty() || b1 <= 6'000'000 * 1.10, "matrix downshift: before the switch, 1 s window <= 6 Mbps +10%");
   check(!after.empty() && a1 <= 1'500'000 * 1.10,
-        "matrix downshift: EVERY 1 s window from the apply point <= 1.5 Mbps +10%");
+        "matrix downshift: EVERY 1 s window from the host apply instant <= 1.5 Mbps +10%");
   check(after.empty() || a250 <= 1'500'000 * 1.10,
-        "matrix downshift: EVERY 250 ms window from the apply point <= 1.5 Mbps +10%");
+        "matrix downshift: EVERY 250 ms window from the host apply instant <= 1.5 Mbps +10%");
 }
 
 // completion criterion 3: the product-equivalent host + real MFT + real decoder, across the scenario
@@ -924,16 +997,30 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     Content content;
     uint32_t bitrate, fps, lossPermille;
     double maxDecodeGapMs;  // realtime-decode responsiveness ceiling; 0 = no gate (static/loss lenient)
+    double maxDecodeLatMs;  // input->screen present-latency ceiling (single-change); 0 = no gate
   };
   const Scn scns[] = {
-      {"6M/60-motion", Content::Video, 6'000'000, 60, 0, 500.0},
-      {"6M/60-static", Content::StaticText, 6'000'000, 60, 0, 0.0},
-      {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0, 900.0},
-      {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50, 0.0},
-      // r4 addendum: real desktop-like content, each with realtime decode measured.
-      {"6M/60-textscroll", Content::TextScroll, 6'000'000, 60, 0, 600.0},
-      {"6M/60-windowdrag", Content::WindowDrag, 6'000'000, 60, 0, 600.0},
-      {"3M/60-partialvideo", Content::PartialVideo, 3'000'000, 60, 0, 700.0},
+      {"6M/60-motion", Content::Video, 6'000'000, 60, 0, 500.0, 0.0},
+      {"6M/60-static", Content::StaticText, 6'000'000, 60, 0, 0.0, 0.0},
+      {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0, 900.0, 0.0},
+      {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50, 0.0, 0.0},
+      {"6M/60-windowdrag", Content::WindowDrag, 6'000'000, 60, 0, 600.0, 0.0},
+      {"3M/60-partialvideo", Content::PartialVideo, 3'000'000, 60, 0, 700.0, 0.0},
+      // r5 required pre-release measurement: the 3 desktop-like types x {6M/60, 1.5M/30}, realtime
+      // decode. Text scroll is continuous motion -> gate the decode GAP. Single change and full
+      // transition are DISCRETE (deliberate ~2 s idle between events), so the decode gap is dominated
+      // by that legitimate idle, not a freeze -- they gate the input->screen PRESENT LATENCY of the
+      // change/transition frame instead (decodeLatMax), never the gap.
+      {"6M/60-textscroll", Content::TextScroll, 6'000'000, 60, 0, 600.0, 0.0},
+      {"1.5M/30-textscroll", Content::TextScroll, 1'500'000, 30, 0, 1200.0, 0.0},
+      // NOTE: the single-change present latency measures the host's idle->change capture/kick
+      // surfacing path (the cap is far from binding here -- win1s ~18%, queueDepth 0), NOT the wire
+      // cap. The ceiling catches a gross multi-second freeze; the measured value (6M/60 ~1 s, 1.5M/30
+      // ~0.47 s, from the host kick latency on an idle screen) is reported for judgement, not hidden.
+      {"6M/60-singlechange", Content::SingleChange, 6'000'000, 60, 0, 0.0, 1800.0},
+      {"1.5M/30-singlechange", Content::SingleChange, 1'500'000, 30, 0, 0.0, 1800.0},
+      {"6M/60-fulltransition", Content::FullTransition, 6'000'000, 60, 0, 0.0, 1200.0},
+      {"1.5M/30-fulltransition", Content::FullTransition, 1'500'000, 30, 0, 0.0, 1200.0},
   };
   for (const Scn& s : scns) {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
@@ -944,7 +1031,7 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     const std::wstring runDir = dir + L"m_" + safe + L"\\";
     const RunResult r = run_host(hostExe, runDir, s.content, /*tight=*/true, port, seconds, s.lossPermille, 1,
                                  /*wireCapOn=*/true, s.bitrate, s.fps);
-    matrix_metrics(s.label, s.bitrate, r, s.maxDecodeGapMs);
+    matrix_metrics(s.label, s.bitrate, r, s.maxDecodeGapMs, s.maxDecodeLatMs);
   }
   // Runtime 6 -> 1.5 Mbps downshift mid-run.
   const uint16_t dport = remote60::native_poc::e2e::e2e_pick_free_udp_port();
