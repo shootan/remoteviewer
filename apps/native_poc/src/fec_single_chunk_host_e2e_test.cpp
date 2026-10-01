@@ -325,6 +325,13 @@ struct RunResult {
   uint32_t gapsBehindKey = 0;
   uint32_t decoded = 0, decodeErrors = 0;
   std::string decoder;
+  // Isolation-matrix instrumentation (bitrate-hard-cap r2, completion criterion 3).
+  std::vector<std::pair<uint64_t, uint32_t>> wireEvents;  // (arrival qpc us, bytes incl. +28)
+  std::vector<uint64_t> deliverUs;        // when each AU was delivered (qpc)
+  std::vector<uint64_t> captureStampUs;   // its header captureQpcUs (latency, same clock domain)
+  std::vector<uint8_t> deliverWasKey;     // 1 if the delivered AU was a keyframe
+  uint32_t appliedBitrate = 0, appliedFps = 0;
+  uint64_t switchUs = 0;  // when the runtime bitrate downshift was sent (0 = none)
 };
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
@@ -337,7 +344,9 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
 }
 
 RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
-                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn) {
+                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
+                   uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
+                   uint32_t downshiftAtSec = 0) {
   RunResult r;
   CreateDirectoryW(runDir.c_str(), nullptr);
   const std::wstring me = self_path();
@@ -372,7 +381,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_WIRE_CAP", wireCapOn ? L"1" : L"0");
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
-                       std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(kBitrate) + L" --seconds " +
+                       std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) + L" --seconds " +
                        std::to_wstring(seconds + 30) + L" --input-injection-mode none" +
                        remote60::native_poc::e2e::e2e_capture_window_args(target.title);
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
@@ -461,6 +470,9 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       r.lastSeq = f.header.seq;
       const bool key = (f.header.flags & kEncodedFrameFlagKeyFrame) != 0;
       if (key) ++r.keyFrames;
+      r.deliverUs.push_back(qpc_now_us());
+      r.captureStampUs.push_back(f.header.captureQpcUs);
+      r.deliverWasKey.push_back(key ? 1 : 0);
       deliveredAus.emplace_back(std::move(f.payload), std::make_pair(key, f.header.captureQpcUs));
     };
     cb.requestKeyframe = [&] {
@@ -495,6 +507,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
             const uint32_t body = static_cast<uint32_t>(n) - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
             ++r.rxVideoDatagrams;
             r.rxHeader += sizeof(UdpVideoChunkHeader);
+            r.wireEvents.emplace_back(now, static_cast<uint32_t>(n) + 28u);  // IP+UDP for the window math
             if (occ > 1) r.rxReplay += static_cast<uint64_t>(n);
             else if (parity) r.rxParity += body;
             else r.rxData += body;
@@ -531,7 +544,24 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
       ClientInputQueue inputQueue;
       scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
+      const uint64_t downshiftSendUs = downshiftBitrate > 0 ? qpc_now_us() + downshiftAtSec * 1'000'000ull : 0;
+      bool downsent = false;
+      uint32_t dseq = 50000;
       while (!controlStop.load()) {
+        if (downshiftSendUs && !downsent && qpc_now_us() >= downshiftSendUs) {
+          ControlRuntimeEncoderConfigMessage m{};
+          m.header.magic = kMagic;
+          m.header.type = static_cast<uint16_t>(MessageType::ControlRuntimeEncoderConfig);
+          m.header.size = static_cast<uint16_t>(sizeof(m));
+          m.seq = ++dseq;
+          m.bitrate = downshiftBitrate;
+          m.flags = 0x1u;  // bitrate valid
+          m.clientSendQpcUs = qpc_now_us();
+          if (link.Write(&m, sizeof(m)) && link.EndMessage()) {
+            r.switchUs = qpc_now_us();
+            downsent = true;
+          }
+        }
         if (pendingKeyRequest.exchange(false)) (void)keyframe.Request(2, qpc_now_us());
         ClientControlMetricsSnapshot metrics{};
         ControlOutboundAction action{};
@@ -586,7 +616,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   // Everything delivered, through the product decoder.
   if (!deliveredAus.empty()) {
     H264Decoder dec;
-    if (dec.initialize(kWinW, kWinH, kFps)) {
+    if (dec.initialize(kWinW, kWinH, fps)) {
       r.decoder = dec.backend_name();
       int64_t stamp = 10000000;
       for (const auto& au : deliveredAus) {
@@ -601,6 +631,8 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       r.decoder = "init-failed";
     }
   }
+  r.appliedBitrate = bitrate;
+  r.appliedFps = fps;
   return r;
 }
 
@@ -623,6 +655,115 @@ void print_run(Content content, bool tight, uint32_t lossPermille, uint32_t loss
               static_cast<unsigned long long>(r.rxVideoDatagrams), r.decoded, r.decodeErrors, r.decoder.c_str());
 }
 
+// Peak bytes in any sliding window, as bits/s (two-pointer; wireEvents are in arrival order).
+double window_peak_bps(const std::vector<std::pair<uint64_t, uint32_t>>& ev, uint64_t windowUs) {
+  double peak = 0;
+  size_t lo = 0;
+  uint64_t sum = 0;
+  for (size_t hi = 0; hi < ev.size(); ++hi) {
+    sum += ev[hi].second;
+    while (ev[hi].first - ev[lo].first >= windowUs) sum -= ev[lo++].second;
+    const double bps = static_cast<double>(sum) * 8.0 * 1e6 / static_cast<double>(windowUs);
+    if (bps > peak) peak = bps;
+  }
+  return peak;
+}
+
+// The isolation-matrix metrics for one run + the cap-window / minimal-delivery assertions.
+void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r) {
+  const double p1s = window_peak_bps(r.wireEvents, 1'000'000);
+  const double p250 = window_peak_bps(r.wireEvents, 250'000);
+  double fps = 0, firstFrameMs = 0, freezeMaxMs = 0, latP95Ms = 0, latMaxMs = 0, idrPerSec = 0;
+  if (r.deliverUs.size() >= 2) {
+    const uint64_t span = r.deliverUs.back() - r.deliverUs.front();
+    if (span > 0) {
+      fps = static_cast<double>(r.decoded) * 1e6 / static_cast<double>(span);
+      idrPerSec = static_cast<double>(r.keyFrames) * 1e6 / static_cast<double>(span);
+    }
+    const uint64_t t0 = r.wireEvents.empty() ? r.deliverUs.front() : r.wireEvents.front().first;
+    firstFrameMs = (r.deliverUs.front() - t0) / 1000.0;
+    uint64_t gap = 0;
+    for (size_t i = 1; i < r.deliverUs.size(); ++i) gap = std::max(gap, r.deliverUs[i] - r.deliverUs[i - 1]);
+    freezeMaxMs = gap / 1000.0;
+    std::vector<uint64_t> lat;
+    for (size_t i = 0; i < r.deliverUs.size(); ++i)
+      if (r.deliverUs[i] >= r.captureStampUs[i]) lat.push_back(r.deliverUs[i] - r.captureStampUs[i]);
+    if (!lat.empty()) {
+      std::sort(lat.begin(), lat.end());
+      latP95Ms = lat[(lat.size() * 95) / 100] / 1000.0;
+      latMaxMs = lat.back() / 1000.0;
+    }
+  }
+  std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | decoded=%u fps=%.1f "
+              "firstFrame=%.0fms freezeMax=%.0fms latP95=%.0fms latMax=%.0fms idr/s=%.2f keyReq=%u disc=%u nacks=%u "
+              "giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
+              label, (unsigned long long)capBps, r.appliedBitrate, r.appliedFps, p1s, 100.0 * p1s / capBps, p250,
+              100.0 * p250 / capBps, r.decoded, fps, firstFrameMs, freezeMaxMs, latP95Ms, latMaxMs, idrPerSec, r.keyReq,
+              r.disc, r.nacks, r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped);
+  const std::string tag = std::string("matrix ") + label;
+  check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
+  check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
+  check(r.decoded >= 2 && r.decodeErrors == 0, tag + ": the decoder actually produced frames (not starved)");
+  check(firstFrameMs >= 0 && firstFrameMs <= 3000, tag + ": the first frame arrives within a bounded time");
+}
+
+// A runtime 6 -> 1.5 Mbps downshift: windows wholly after the switch (+1.5 s settle) must respect the
+// new, lower cap -- the credit is preserved across the change, not refilled.
+void matrix_metrics_downshift(const RunResult& r) {
+  std::vector<std::pair<uint64_t, uint32_t>> before, after;
+  for (const auto& e : r.wireEvents) {
+    if (r.switchUs && e.first < r.switchUs) before.push_back(e);
+    else if (r.switchUs && e.first >= r.switchUs + 1'500'000) after.push_back(e);
+  }
+  const double b1 = window_peak_bps(before, 1'000'000);
+  const double a1 = window_peak_bps(after, 1'000'000);
+  const double a250 = window_peak_bps(after, 250'000);
+  std::printf("MATRIX 6->1.5-downshift: switched=%d before1s=%.0f (%.1f%% of 6M) after1s=%.0f (%.1f%% of 1.5M) "
+              "after250=%.0f (%.1f%%) decoded=%u decErr=%u beforeEv=%zu afterEv=%zu\n",
+              r.switchUs != 0 ? 1 : 0, b1, 100.0 * b1 / 6'000'000.0, a1, 100.0 * a1 / 1'500'000.0, a250,
+              100.0 * a250 / 1'500'000.0, r.decoded, r.decodeErrors, before.size(), after.size());
+  check(r.switchUs != 0, "matrix downshift: the runtime bitrate change was sent");
+  check(before.empty() || b1 <= 6'000'000 * 1.10, "matrix downshift: before the switch, 1 s window <= 6 Mbps +10%");
+  check(!after.empty() && a1 <= 1'500'000 * 1.10, "matrix downshift: after the switch (settled), 1 s window <= 1.5 Mbps +10%");
+  check(after.empty() || a250 <= 1'500'000 * 1.10, "matrix downshift: after the switch, 250 ms window <= 1.5 Mbps +10%");
+}
+
+// completion criterion 3: the product-equivalent host + real MFT + real decoder, across the scenario
+// matrix, each with the cap ON and every 1 s / 250 ms window measured on the real UDP receive.
+int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
+  struct Scn {
+    const char* label;
+    Content content;
+    uint32_t bitrate, fps, lossPermille;
+  };
+  const Scn scns[] = {
+      {"6M/60-motion", Content::Video, 6'000'000, 60, 0},
+      {"6M/60-static", Content::StaticText, 6'000'000, 60, 0},
+      {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0},
+      {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50},
+  };
+  for (const Scn& s : scns) {
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    if (port == 0) continue;
+    std::wstring safe(s.label, s.label + std::strlen(s.label));
+    for (wchar_t& c : safe)
+      if (c == L'/' || c == L'%' || c == L'.') c = L'_';  // a run-dir name, not a path
+    const std::wstring runDir = dir + L"m_" + safe + L"\\";
+    const RunResult r = run_host(hostExe, runDir, s.content, /*tight=*/true, port, seconds, s.lossPermille, 1,
+                                 /*wireCapOn=*/true, s.bitrate, s.fps);
+    matrix_metrics(s.label, s.bitrate, r);
+  }
+  // Runtime 6 -> 1.5 Mbps downshift mid-run.
+  const uint16_t dport = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  if (dport != 0) {
+    const RunResult r = run_host(hostExe, dir + L"m_downshift\\", Content::Video, /*tight=*/true, dport,
+                                 std::max(seconds, 10), 0, 1, /*wireCapOn=*/true, 6'000'000, 60,
+                                 /*downshiftBitrate=*/1'500'000, /*downshiftAtSec=*/static_cast<uint32_t>(std::max(seconds, 10) / 2));
+    matrix_metrics_downshift(r);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -633,6 +774,7 @@ int main(int argc, char** argv) {
   uint32_t lossPermille = 0;
   uint32_t lossSeed = 1;
   bool keepDir = false;
+  bool matrix = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--host" && i + 1 < argc) {
@@ -648,6 +790,8 @@ int main(int argc, char** argv) {
       lossSeed = static_cast<uint32_t>(std::atoi(argv[++i]));
     } else if (a == "--keep-dir") {
       keepDir = true;
+    } else if (a == "--matrix") {
+      matrix = true;
     }
   }
   char allow[8]{};
@@ -686,6 +830,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (matrix) {
+    run_matrix(hostExe, dir, seconds);
+  } else
   for (Content content : contents) {
     const char* cls = content_name(content);
     RunResult res[2];
@@ -786,7 +933,7 @@ int main(int argc, char** argv) {
   // Cap-ON evidence (bitrate-hard-cap r2): the same lossless scenario with the hard wire cap ON must,
   // after the progress-based tail fix, still make NO premature NACK -- the pinned cap-OFF runs above
   // keep this test's FEC-layout purpose, this run keeps the cap-ON proof. Only on a lossless path.
-  if (lossPermille == 0) {
+  if (!matrix && lossPermille == 0) {
     const uint16_t capPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     if (capPort != 0) {
       const std::wstring capDir = dir + L"capon_lossless\\";
