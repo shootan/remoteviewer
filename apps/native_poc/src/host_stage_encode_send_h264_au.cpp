@@ -377,6 +377,34 @@ if (transport == VideoTransport::Tcp) {
     item.udpHdr.encodeEndQpcUs = hdr.encodeEndQpcUs;
     item.udpHdr.sendQpcUs = hdr.sendQpcUs;  // sender restamps at wire time
     item.bytes = std::move(au.bytes);
+    // r4 R3: bounded staging for accepted MFT output under the cap. When one encode call releases
+    // several AUs (the async MFT drains its accepted-input backlog), the later outputs are already in
+    // the reference chain -- discarding them (DropAndResync) forces an IDR loop on a healthy link. The
+    // input gate already suppresses NEW captures when the queue is backlogged (host_encode_admission),
+    // so here we give the already-produced output a bounded chance to drain into the queue instead of
+    // throwing the chain away. Only under the cap (where that input gate exists); cap-off keeps the
+    // legacy pre-batch-backlog resync (the old flood defence). A real stall still resyncs after the
+    // bound. Key AUs re-anchor and never stage. (Codex R3.)
+    const bool capActive = sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled();
+    if (capActive && !item.keyFrame) {
+      const uint64_t epochAtStage = sender.mediaSessionEpoch.load(std::memory_order_acquire);
+      const uint64_t frameIntervalUs =
+          std::clamp<uint64_t>(encoder.activeFrameIntervalUs, 8333ULL, 200000ULL);
+      const uint64_t stageDeadlineUs = qpc_now_us() + std::min<uint64_t>(2ULL * frameIntervalUs, 100000ULL);
+      for (;;) {
+        bool roomOrDone;
+        {
+          std::lock_guard<std::mutex> lk(sender.mu);
+          // waitingForKey -> this delta is HoldForKey regardless; a rollover (epoch change) -> dropped
+          // at dequeue; otherwise wait for a drain slot below the hard cap.
+          roomOrDone = sender.waitingForKey ||
+                       sender.mediaSessionEpoch.load(std::memory_order_acquire) != epochAtStage ||
+                       sender.queue.size() < kSenderQueueMaxFrames;
+        }
+        if (roomOrDone || qpc_now_us() >= stageDeadlineUs) break;
+        udp_pace_wait_until(qpc_now_us() + 1000);  // 1 ms; the sender drains on its own thread
+      }
+    }
     {
       std::lock_guard<std::mutex> lk(sender.mu);
       // Stamp under the same lock the rollover bumps the epoch under, so the stamp is
@@ -387,7 +415,11 @@ if (transport == VideoTransport::Tcp) {
       item.mediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
       item.inputEpoch = au.inputEpoch;  // sender-side fence for AUs queued before a flush (P11)
       item.enqueueUs = qpc_now_us();  // AU handed to sender; sender derives queueWaitUs
-      switch (decide_sender_queue_action(item.keyFrame, sender.waitingForKey, senderBacklogged,
+      // Under the cap the pre-batch backlog flag is NOT a resync trigger (the bounded staging above
+      // and the input gate handle congestion); the decision is purely current depth vs the hard cap,
+      // so accepted output enqueues once a slot frees. Cap-off keeps the legacy pre-batch behaviour.
+      const bool backloggedForDecision = backlog_resync_active(capActive, senderBacklogged);
+      switch (decide_sender_queue_action(item.keyFrame, sender.waitingForKey, backloggedForDecision,
                                          sender.queue.size(), kSenderQueueMaxFrames)) {
         case SenderQueueAction::EnqueueKey: {
           // A new IDR makes every queued frame irrelevant and re-anchors the stream. This is
@@ -399,6 +431,14 @@ if (transport == VideoTransport::Tcp) {
           sender.queue.clear();
           sender.waitingForKey = false;
           if (sender.firstKeyEnqueuedUs == 0) sender.firstKeyEnqueuedUs = sendStartUs;
+          // r4 R3: the key is now QUEUED (not yet on the wire). Close the encode->queue gap so a
+          // recovery re-request while this key waits behind nothing-or-a-long-AU does not force a
+          // duplicate key. Tagged by (media epoch, generation); cleared when the sender starts it on
+          // the wire (keyAuOnWire) or on a rollover.
+          sender.keyAuQueuedMediaEpoch.store(item.mediaEpoch, std::memory_order_relaxed);
+          sender.keyAuQueuedGeneration.store(item.udpHdr.streamGeneration, std::memory_order_relaxed);
+          sender.keyAuQueuedSinceUs.store(qpc_now_us(), std::memory_order_release);
+          sender.keyAuQueued.store(true, std::memory_order_release);
           sender.queue.push_back(std::move(item));
           enqueuedForSend = true;
           // The backlog this batch was judged on is gone -- this key just cleared it. Leaving

@@ -272,13 +272,21 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // send completion / rollover). Only while the cap is on, where the long send time exists.
    // Only a key of the SAME (media epoch, generation) we are encoding for counts as in-flight (r3 F2):
    // a stale flag left on an old session's key must not suppress a fresh session's recovery IDR.
+   const uint64_t curMediaEpoch = sender.mediaSessionEpoch.load(std::memory_order_acquire);
    const bool keyOnWire = sender.wireCapEnabled && sender.keyAuOnWire.load(std::memory_order_acquire) &&
                           encodeStartUs < sender.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
-                          sender.keyAuOnWireMediaEpoch.load(std::memory_order_relaxed) ==
-                              sender.mediaSessionEpoch.load(std::memory_order_acquire) &&
+                          sender.keyAuOnWireMediaEpoch.load(std::memory_order_relaxed) == curMediaEpoch &&
                           sender.keyAuOnWireGeneration.load(std::memory_order_relaxed) == streamGeneration;
+   // r4 R3: a key still WAITING in the sender queue (not yet on the wire) also counts as in flight, so
+   // a recovery re-request during that wait does not produce a duplicate key. Same (epoch, generation)
+   // scope and 6 s safety bound as keyOnWire.
+   const bool keyQueued = sender.wireCapEnabled && sender.keyAuQueued.load(std::memory_order_acquire) &&
+                          encodeStartUs < sender.keyAuQueuedSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
+                          sender.keyAuQueuedMediaEpoch.load(std::memory_order_relaxed) == curMediaEpoch &&
+                          sender.keyAuQueuedGeneration.load(std::memory_order_relaxed) == streamGeneration;
    const bool forceKeyInFlight =
-       (encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000) || keyOnWire;
+       (encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000) ||
+       keyOnWire || keyQueued;
    // r4: due by real inputs since the last key of any kind, not by the capture seq -- see
    // EncoderState::realInputsSinceKey.
    const bool scheduledKey = !servedBootstrap && (encoder.activeKeyint > 0) &&

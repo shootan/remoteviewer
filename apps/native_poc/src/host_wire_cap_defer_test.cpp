@@ -1,13 +1,9 @@
-// bitrate-hard-cap r3 F1 -- the host's sender-driven NACK replay under the hard cap, over loopback.
-//
-// r2 replayed on the READER thread with a single TryAcquire: under a full cap bucket that one spend
-// failed, the request was erased, and the hole was lost for ever (Codex F1). r3 moves the replay to
-// the SENDER thread: the reader only RECORDS the request (RecordReplayRequest, bounded + merged per
-// (gen,seq) + deadline), and DrainPendingReplays retries it every loop through the SAME wire bucket
-// until the chunks have ACTUALLY been sent, or the deadline passes, or the epoch ends. This test
-// drives the real SenderState with the cap ON (StartWireCap -- the r2 test never called it, so it
-// was really exercising the cap-OFF fallback and proved nothing about the capped path) over a real
-// loopback socket, and the cap-OFF fallback bucket as a second leg.
+// bitrate-hard-cap r3 F1 / r4 R1+R2 -- the host's sender-driven NACK replay under the hard cap, over
+// loopback. This drives the real SenderState functions (RecordReplayRequest / DrainPendingReplays /
+// StoreAu / MarkAuStartedOnWire / ClearReplayStateForRollover) with the cap ON. The wake-up and
+// long-AU interleave behaviour of the REAL sender thread is covered separately by
+// host_wire_cap_sender_thread_test; this file pins the replay bookkeeping, the deadline/merge/bound,
+// the cap-off fallback, and the r4 R2 session-ownership fences.
 // Tag: network (loopback), pure-logic (bucket timing uses the real qpc clock).
 
 #ifndef NOMINMAX
@@ -58,7 +54,6 @@ UdpVideoChunkHeader base_header(uint32_t seq, uint64_t gen, size_t payloadSize) 
   return h;
 }
 
-// Drain and count datagrams on a non-blocking socket.
 int drain(SOCKET s) {
   char buf[2048];
   int n = 0;
@@ -78,7 +73,16 @@ size_t pending_missing(SenderState& s, uint64_t gen, uint32_t seq) {
   std::lock_guard<std::mutex> lk(s.pendingReplayMu);
   for (const auto& p : s.pendingReplays)
     if (p.generation == gen && p.seq == seq) return p.missing.size();
-  return 0;  // 0 == not present or fully served
+  return 0;
+}
+
+// Store a cached AU for THIS session and mark it started on the wire (what a real send does), so it is
+// eligible for replay (r4 R2 first-packet fence).
+void store_started(SenderState& s, uint64_t gen, uint32_t seq, uint64_t mediaEpoch, const sockaddr_in& peer,
+                   const std::vector<uint8_t>& payload, uint32_t mtu) {
+  s.StoreAu(gen, seq, base_header(seq, gen, payload.size()), mtu, true, mediaEpoch, peer,
+            payload.data(), payload.size());
+  s.MarkAuStartedOnWire(gen, seq);
 }
 
 }  // namespace
@@ -101,46 +105,38 @@ int main() {
 
   const uint64_t gen = 7;
   const uint32_t seq = 100;
-  const size_t bytes = 40u * 1024u;  // ~34 data chunks at mtu 1200
+  const size_t bytes = 40u * 1024u;
   std::vector<uint8_t> payload(bytes, 0xAB);
   const uint32_t mtu = 1200;
-  // A deliberately low cap so the empty bucket cannot serve a chunk immediately: at 2 Mbps the bucket
-  // refills ~250 B/ms, and one chunk is ~1228 B, so ~5 ms of refill is one chunk. The test waits in
-  // real time for the bucket to earn the tokens, exactly as the product would.
   const uint64_t capBps = 2'000'000;
+  const uint64_t kEpoch = 1;  // SenderState default mediaSessionEpoch
 
-  std::printf("--- F1: sender-driven replay survives a full cap bucket and goes out as tokens refill ---\n");
+  std::printf("--- F1: replay survives a full cap bucket and goes out as tokens refill ---\n");
   {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     sender.StartWireCap(capBps, mtu, /*enabled=*/true);
-    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, payload.data(), payload.size());
+    store_started(sender, gen, seq, kEpoch, addr, payload, mtu);
 
-    // Record a replay for 3 chunks, then drain with the bucket still empty: nothing fits now, but the
-    // request is KEPT (this is the whole r3 F1 fix -- r2 would have erased it here and lost the hole).
     const uint16_t missing[] = {3, 4, 5};
-    sender.RecordReplayRequest(gen, seq, missing, 3);  // recording never touches the wire
-    sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 3);
+    sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
     const int immediate = drain(rx);
     check("an empty bucket serves 0 chunks but the request is NOT dropped", immediate == 0 &&
           pending_missing(sender, gen, seq) == 3 && sender.replayDroppedRequests.load() == 0,
           "sentNow=" + std::to_string(immediate) + " stillMissing=" + std::to_string(pending_missing(sender, gen, seq)));
 
-    // Rounds exhausted: keep draining against the empty bucket; the request still survives (bounded by
-    // deadline, not by a single short bucket). This is the "replay arrives even after rounds exhausted".
-    for (int i = 0; i < 5; ++i) { sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load()); }
+    for (int i = 0; i < 5; ++i) sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
     check("repeated drains against a full bucket neither send nor drop the request", drain(rx) == 0 &&
           pending_missing(sender, gen, seq) == 3 && sender.replayDroppedRequests.load() == 0);
 
-    // Let the bucket earn tokens and drain across several loops: the cap bucket depth B caps one
-    // drain's burst, so a full recovery is RETRIED loop-to-loop as tokens refill until none remain.
     int served = 0;
     for (int i = 0; i < 40 && pending_count(sender) > 0; ++i) {
       Sleep(10);
-      sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
+      sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
       served += drain(rx);
     }
-    check("across refill loops all 3 chunks are REALLY sent and the request is fully served (residual < 1 chunk)",
+    check("across refill loops all 3 chunks are REALLY sent and fully served (residual < 1 chunk)",
           served == 3 && pending_count(sender) == 0 && sender.replayServedChunks.load() == 3 &&
           sender.replayDroppedRequests.load() == 0,
           "served=" + std::to_string(served) + " pending=" + std::to_string(pending_count(sender)));
@@ -151,13 +147,13 @@ int main() {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     sender.StartWireCap(capBps, mtu, /*enabled=*/true);
-    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, payload.data(), payload.size());
-    const uint16_t group0[] = {0, 1};  // two data chunks in the first FEC group (group size 8)
-    sender.RecordReplayRequest(gen, seq, group0, 2);
+    store_started(sender, gen, seq, kEpoch, addr, payload, mtu);
+    const uint16_t group0[] = {0, 1};
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, group0, 2);
     int served = 0;
     for (int i = 0; i < 40 && pending_count(sender) > 0; ++i) {
       Sleep(10);
-      sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
+      sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
       served += drain(rx);
     }
     check("both same-group chunks are replayed (not just one)", served == 2 &&
@@ -165,36 +161,35 @@ int main() {
           "served=" + std::to_string(served));
   }
 
-  std::printf("--- F1: an uncached (still-sending) AU keeps the request until it is cached ---\n");
+  std::printf("--- F1: an uncached (still-sending) AU keeps the request until it is cached+started ---\n");
   {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     sender.StartWireCap(capBps, mtu, /*enabled=*/true);
     const uint16_t missing[] = {2};
-    sender.RecordReplayRequest(gen, seq, missing, 1);  // not cached yet
-    Sleep(40);  // bucket has tokens, but there is nothing to copy
-    sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 1);  // not cached yet
+    Sleep(40);
+    sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
     check("a replay for a not-yet-cached AU sends nothing but is retained", drain(rx) == 0 &&
           pending_missing(sender, gen, seq) == 1);
-    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, payload.data(), payload.size());
-    sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
-    check("the same request is served the moment the AU is cached", drain(rx) == 1 &&
+    store_started(sender, gen, seq, kEpoch, addr, payload, mtu);
+    sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
+    check("the same request is served the moment the AU is cached+started", drain(rx) == 1 &&
           pending_count(sender) == 0);
   }
 
-  std::printf("--- F1: a request outlives its deadline and is dropped exactly once (client IDR recovers) ---\n");
+  std::printf("--- F1: a request outlives its deadline and is dropped exactly once ---\n");
   {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     sender.StartWireCap(capBps, mtu, /*enabled=*/true);
-    // Record with a createdUs far in the past by recording, then draining with a now past the deadline.
     const uint16_t missing[] = {1};
-    sender.RecordReplayRequest(gen, seq, missing, 1);  // never cached -> only the deadline can end it
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 1);  // never cached -> deadline ends it
     const uint64_t pastDeadline = qpc_now_us() + SenderState::kReplayDeadlineUs + 1'000'000ULL;
-    sender.DrainPendingReplays(tx, addr, pastDeadline, sender.mediaSessionEpoch.load());
+    sender.DrainPendingReplays(tx, addr, pastDeadline, kEpoch);
     check("past its deadline the request is dropped, nothing sent", drain(rx) == 0 &&
           pending_count(sender) == 0 && sender.replayDroppedRequests.load() == 1);
-    sender.DrainPendingReplays(tx, addr, pastDeadline + 1, sender.mediaSessionEpoch.load());
+    sender.DrainPendingReplays(tx, addr, pastDeadline + 1, kEpoch);
     check("the dropped request is counted exactly once", sender.replayDroppedRequests.load() == 1);
   }
 
@@ -203,31 +198,88 @@ int main() {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
     const uint16_t m1[] = {1};
-    for (uint32_t s = 0; s < 20; ++s) sender.RecordReplayRequest(1, s, m1, 1);  // 20 distinct AUs
+    for (uint32_t s = 0; s < 20; ++s) sender.RecordReplayRequest(1, s, addr, kEpoch, m1, 1);
     check("the pending list is bounded (<= kMaxPendingReplays)", pending_count(sender) <= SenderState::kMaxPendingReplays,
           "pending=" + std::to_string(pending_count(sender)));
     const uint16_t a[] = {2, 3};
     const uint16_t b[] = {3, 9};
-    sender.RecordReplayRequest(2, 500, a, 2);
-    sender.RecordReplayRequest(2, 500, b, 2);
+    sender.RecordReplayRequest(2, 500, addr, kEpoch, a, 2);
+    sender.RecordReplayRequest(2, 500, addr, kEpoch, b, 2);
     check("repeated misses for one AU merge into a single entry (union {2,3,9})",
-          pending_missing(sender, 2, 500) == 3,
-          "size=" + std::to_string(pending_missing(sender, 2, 500)));
+          pending_missing(sender, 2, 500) == 3, "size=" + std::to_string(pending_missing(sender, 2, 500)));
   }
 
-  std::printf("--- F1 (cap OFF): the fallback bucket path still replays a cached AU ---\n");
+  std::printf("--- F1 (cap OFF): the fallback bucket path still replays a cached+started AU ---\n");
   {
     SenderState sender;
     sender.nackEnabled.store(true, std::memory_order_relaxed);
-    sender.StartWireCap(capBps, mtu, /*enabled=*/false);  // cap OFF -> NackFallbackTryAcquire path
-    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, payload.data(), payload.size());
+    sender.StartWireCap(capBps, mtu, /*enabled=*/false);
+    store_started(sender, gen, seq, kEpoch, addr, payload, mtu);
     const uint16_t missing[] = {3, 4, 5};
-    sender.RecordReplayRequest(gen, seq, missing, 3);
-    sender.DrainPendingReplays(tx, addr, qpc_now_us(), sender.mediaSessionEpoch.load());
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 3);
+    sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch);
     const int served = drain(rx);
     check("with the cap off the fallback bucket replays the 3 chunks", served == 3 &&
-          sender.replayServedChunks.load() == 3,
-          "served=" + std::to_string(served));
+          sender.replayServedChunks.load() == 3, "served=" + std::to_string(served));
+  }
+
+  // ----------------------------------------------------------------- r4 R2 session-ownership fences
+  std::printf("--- R2: an AU that never put a packet on the wire (startedOnWire=false) is NOT replayed ---\n");
+  {
+    SenderState sender;
+    sender.nackEnabled.store(true, std::memory_order_relaxed);
+    sender.StartWireCap(capBps, mtu, /*enabled=*/true);
+    // Cache at send-start but DO NOT mark started (the F3 fence aborted the original at 0 datagrams).
+    sender.StoreAu(gen, seq, base_header(seq, gen, bytes), mtu, true, kEpoch, addr, payload.data(), payload.size());
+    const uint16_t missing[] = {0};
+    sender.RecordReplayRequest(gen, seq, addr, kEpoch, missing, 1);
+    for (int i = 0; i < 20; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch); }
+    check("NEGATIVE: an unstarted (aborted) AU is never replayed", drain(rx) == 0 &&
+          sender.replayServedChunks.load() == 0,
+          "pending=" + std::to_string(pending_count(sender)));
+    // Now it actually starts -> the same request can be served.
+    sender.MarkAuStartedOnWire(gen, seq);
+    for (int i = 0; i < 40 && pending_count(sender) > 0; ++i) { Sleep(10); sender.DrainPendingReplays(tx, addr, qpc_now_us(), kEpoch); }
+    check("POSITIVE: once the AU has started on the wire the same chunk replays", drain(rx) == 1 &&
+          sender.replayServedChunks.load() == 1);
+  }
+
+  std::printf("--- R2: a rollover (A->B) drops A's cache+pending so nothing of A reaches B ---\n");
+  {
+    SenderState senderB;  // model peer B
+    SenderState sender;
+    (void)senderB;
+    sender.nackEnabled.store(true, std::memory_order_relaxed);
+    sender.StartWireCap(capBps, mtu, /*enabled=*/true);
+    const uint64_t epochA = sender.mediaSessionEpoch.load();
+    store_started(sender, gen, seq, epochA, addr, payload, mtu);
+    const uint16_t missing[] = {4, 5};
+    sender.RecordReplayRequest(gen, seq, addr, epochA, missing, 2);  // A's NACK, tokens not yet available
+    sender.DrainPendingReplays(tx, addr, qpc_now_us(), epochA);  // empty bucket -> nothing out, kept
+    check("A's replay is pending before the rollover", pending_count(sender) == 1);
+    // Rollover: the sender's barrier clears A's cache + pending (ClearReplayStateForRollover).
+    sender.ClearReplayStateForRollover();
+    const uint64_t epochB = epochA + 1;  // the new session's epoch
+    (void)drain(rx);  // clear anything already on the wire
+    for (int i = 0; i < 20; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), epochB); }
+    check("after the rollover A's pending/cache are gone -> 0 datagrams to the new session", drain(rx) == 0 &&
+          pending_count(sender) == 0 && sender.replayServedChunks.load() == 0);
+  }
+
+  std::printf("--- R2: a request of a finished epoch is dropped, not replayed to the new session ---\n");
+  {
+    SenderState sender;
+    sender.nackEnabled.store(true, std::memory_order_relaxed);
+    sender.StartWireCap(capBps, mtu, /*enabled=*/true);
+    const uint64_t epochA = sender.mediaSessionEpoch.load();
+    store_started(sender, gen, seq, epochA, addr, payload, mtu);
+    const uint16_t missing[] = {6};
+    sender.RecordReplayRequest(gen, seq, addr, epochA, missing, 1);
+    // The sender now serves a DIFFERENT (newer) epoch: the A-epoch request must be dropped on sight.
+    const uint64_t epochB = epochA + 1;
+    for (int i = 0; i < 10 && pending_count(sender) > 0; ++i) { Sleep(5); sender.DrainPendingReplays(tx, addr, qpc_now_us(), epochB); }
+    check("a past-epoch request is dropped without replay", drain(rx) == 0 && pending_count(sender) == 0 &&
+          sender.replayServedChunks.load() == 0);
   }
 
   closesocket(rx);

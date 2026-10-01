@@ -100,6 +100,16 @@ struct SenderState {
     // (udp_chunk_geometry) -- a replayed chunk with a different chunkStride makes the receiver
     // discard the assembly it was meant to repair.
     bool tightSingleChunk = true;
+    // Session ownership (bitrate-hard-cap r4 R2): the (media epoch, peer) this AU belongs to. A
+    // replay is fenced to the SAME session -- a cached AU of peer A must never go out to peer B after
+    // a rollover. mediaEpoch is the sender.mediaSessionEpoch the AU was stamped under.
+    uint64_t mediaEpoch = 0;
+    uint32_t peerIpNet = 0;
+    uint16_t peerPortNet = 0;
+    // The first-packet fence (r4 R2): the AU is cached at send-START (so an in-flight NACK is a hit),
+    // but it must not be replayable until its original send has actually put at least one datagram on
+    // the wire. An AU the F3 input fence aborted with 0 datagrams stays false and is never replayed.
+    bool startedOnWire = false;
     UdpVideoChunkHeader baseHeader{};
     std::vector<uint8_t> payload;
   };
@@ -142,19 +152,36 @@ struct SenderState {
     uint64_t generation = 0;
     uint32_t seq = 0;
     uint64_t createdUs = 0;
+    // Session ownership (r4 R2): the (media epoch, peer) the NACK was recorded under. The sender
+    // drops the request on a rollover (mediaEpoch mismatch) and only ever replays to this peer.
+    uint64_t mediaEpoch = 0;
+    uint32_t peerIpNet = 0;
+    uint16_t peerPortNet = 0;
     std::vector<uint16_t> missing;  // remaining ascending, deduped, capped at kUdpVideoNackMaxMissing
   };
   static constexpr size_t kMaxPendingReplays = 8;         // bounded: oldest dropped past this
   static constexpr uint64_t kReplayDeadlineUs = 1'000'000;  // give up a replay request after this
   std::mutex pendingReplayMu;
   std::deque<PendingReplay> pendingReplays;
+  // A lock-free "work remains" flag so the sender's cv predicate can wake on a new replay without
+  // taking pendingReplayMu inside the predicate (r4 R1). Written under pendingReplayMu; read relaxed.
+  std::atomic<size_t> pendingReplayCount{0};
   std::atomic<uint64_t> replayServedChunks{0};   // telemetry: chunks actually replayed
   std::atomic<uint64_t> replayDroppedRequests{0};  // telemetry: requests dropped at the deadline
-  // Reader thread: record a NACK request (merged per (gen,seq), bounded). Does NOT send.
-  void RecordReplayRequest(uint64_t generation, uint32_t seq, const uint16_t* missing, uint16_t count);
-  // Sender thread, every loop: replay what is cached and fits the budget now; drop requests whose
-  // deadline has passed or whose epoch is over. Returns whether any request remains (to pace waits).
-  bool DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint64_t nowUs, uint64_t currentEpoch);
+  // Reader thread: record a NACK request (merged per (gen,seq), bounded) for `peer` under the current
+  // media epoch, and wake the sender. Does NOT send.
+  void RecordReplayRequest(uint64_t generation, uint32_t seq, const sockaddr_in& peer,
+                           uint64_t mediaEpoch, const uint16_t* missing, uint16_t count);
+  // Sender thread: replay what is cached, owned by `currentEpoch`/peer, started on the wire, and fits
+  // the budget now; drop requests of a past epoch or past their deadline. maxChunks bounds one call's
+  // replay work (0 = unlimited, the between-AU drain; a small N is the per-datagram interleave). The
+  // `peer`/`currentEpoch` are the session the sender is serving now. Returns whether any request remains.
+  bool DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint64_t nowUs, uint64_t currentEpoch,
+                           size_t maxChunks = 0);
+  // Sender thread: mark a cached AU as having started on the wire (the first-packet fence, r4 R2).
+  void MarkAuStartedOnWire(uint64_t generation, uint32_t seq);
+  // Sender thread (rollover): drop every pending replay and cached AU of the old session.
+  void ClearReplayStateForRollover();
   uint32_t wireCapMtu = 1200;   // clamp_udp_mtu(args.udpMtu); the Lmax source for the bucket depth
   std::atomic<uint64_t> wireCapBps{0};  // the cap now in force (telemetry; 0 = disabled)
   // Build the limiter (idempotent) and set the cap. enabled=false sets rate 0 (cap off).
@@ -168,9 +195,13 @@ struct SenderState {
     return w;
   }
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
-  // `tightSingleChunk` is the egress.fecSingleChunkTightStride the AU was chunked with.
+  // `tightSingleChunk` is the egress.fecSingleChunkTightStride the AU was chunked with. The AU is
+  // tagged with its session (media epoch, peer) so a replay is fenced to the same session (r4 R2);
+  // it is cached at send-START with startedOnWire=false and marked true once its first datagram goes
+  // out (MarkAuStartedOnWire) -- an aborted 0-packet AU stays unreplayable.
   void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
-               uint32_t mtu, bool tightSingleChunk, const uint8_t* payload, size_t payloadSize);
+               uint32_t mtu, bool tightSingleChunk, uint64_t mediaEpoch, const sockaddr_in& peer,
+               const uint8_t* payload, size_t payloadSize);
   // Answer a NACK: replay the requested chunks of (generation, seq) if still cached. (reader thread)
   void RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq,
                     const uint16_t* missing, uint16_t count);
@@ -264,6 +295,16 @@ struct SenderState {
   // scoped to the encode->queue->wire lifetime of the SAME key, not merely "some key was recently sent".
   std::atomic<uint64_t> keyAuOnWireMediaEpoch{0};
   std::atomic<uint64_t> keyAuOnWireGeneration{0};
+  // A key AU that is ENQUEUED but not yet on the wire (bitrate-hard-cap r4 R3). keyAuOnWire only covers
+  // the wire send; a key can sit in the sender queue behind a long preceding AU for a while, and during
+  // that wait a recovery re-request would force ANOTHER key (forceKeyNext/forceKeySubmittedAtUs were
+  // cleared at encode). This closes the encode->queue gap: set when a key is enqueued, cleared when the
+  // sender starts it on the wire (it becomes keyAuOnWire) or on a rollover. Tagged by (media epoch,
+  // generation) and bounded by the same 6 s safety as keyAuOnWire so a dropped key cannot wedge it.
+  std::atomic<bool> keyAuQueued{false};
+  std::atomic<uint64_t> keyAuQueuedSinceUs{0};
+  std::atomic<uint64_t> keyAuQueuedMediaEpoch{0};
+  std::atomic<uint64_t> keyAuQueuedGeneration{0};
   // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
   std::atomic<uint64_t> firstKeyWireUs{0};
   std::atomic<uint64_t> lastKeyAuBytes{0};

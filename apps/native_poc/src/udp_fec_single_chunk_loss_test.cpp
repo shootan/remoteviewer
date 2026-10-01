@@ -375,7 +375,7 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
       // What the host's reader thread does with a NACK (host_startup_control.cpp): RECORD it (r3 F1).
       sender.RetransmitAu(loop.tx, loop.rxAddr, p.streamGeneration, p.seq, p.missing, count);
       // What the sender thread then does every loop: drain the recorded replays (DrainPendingReplays).
-      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), 0);
+      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), sender.mediaSessionEpoch.load(std::memory_order_acquire));
       // The replay is at most `count` datagrams; the drain may also send nothing (budget, miss).
       const auto replays = loop.DrainCount(count, 30);
       feed(replays, nowUs, true);
@@ -408,8 +408,13 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
       std::printf("  send failed at seq %u\n", seq);
       break;
     }
-    // What the sender thread does right after a successful send (host_encoded_sender.cpp).
-    sender.StoreAu(1, seq, h, kMtu, egress.fecSingleChunkTightStride, au.bytes.data(), au.bytes.size());
+    // What the sender thread does around a successful send (host_encoded_sender.cpp): cache the AU
+    // tagged with its session (epoch 1, this peer), then mark it started on the wire (r4 R2) so it is
+    // replayable -- the original send above really put its datagrams out.
+    sender.StoreAu(1, seq, h, kMtu, egress.fecSingleChunkTightStride,
+                   sender.mediaSessionEpoch.load(std::memory_order_acquire), loop.rxAddr,
+                   au.bytes.data(), au.bytes.size());
+    sender.MarkAuStartedOnWire(1, seq);
     ++r.sent;
     if (st.payloadChunkCount == 2) ++r.singleChunkFrames;  // one data + one parity datagram
     r.wireData += st.dataBytes;
@@ -457,7 +462,7 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
       (void)loop.DrainCount(64, 5);  // nothing should be pending; clear anything that is
       const uint16_t index = 0;
       sender.RetransmitAu(loop.tx, loop.rxAddr, 1, r.replayProbeSeq, &index, 1);  // record (r3 F1)
-      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), 0);  // then send
+      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), sender.mediaSessionEpoch.load(std::memory_order_acquire));  // then send
       const auto replay = loop.DrainCount(1, 200);
       if (replay.size() == 1 && replay[0].size() >= sizeof(UdpVideoChunkHeader)) {
         UdpVideoChunkHeader h{};

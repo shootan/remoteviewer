@@ -230,6 +230,10 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
       stats->payloadUs += callUs;
       stats->payloadChunkMaxUs = std::max(stats->payloadChunkMaxUs, callUs);
     }
+    // r4 R1: now that this datagram has left, give the sender a chance to interleave a bounded amount
+    // of NACK replay from the shared bucket -- so a long cap-paced AU does not starve recovery until it
+    // finishes. Runs on the sender thread, outside the limiter lock.
+    if (wire && wire->betweenDatagrams) wire->betweenDatagrams();
     return true;
   };
 
@@ -349,13 +353,23 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
     const int datagramLen = static_cast<int>(sizeof(h) + chunkSize);
-    // The common wire cap, non-blocking on this (reader) thread: a replay chunk that does not fit
-    // the shared budget now is left out so a NACK burst cannot push the stream over the cap -- the
-    // client's keyframe fallback recovers it. Not a transport error; keep going to the next index.
-    if (wire && wire->limiter &&
-        !wire->limiter->TryAcquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes)) {
-      if (outSuppressed) ++*outSuppressed;
-      continue;
+    // The common wire cap. By default non-blocking (a replay chunk that does not fit the shared budget
+    // now is left out so a NACK burst cannot push the stream over the cap -- the client's keyframe
+    // fallback recovers it). When blockingAcquire is set (r4 R1 sender-thread interleave), WAIT for the
+    // tokens so the replay gets a fair share of a bucket a saturated original is draining; a rollover
+    // (media epoch move) cancels the wait and the replay stops. Not a transport error either way.
+    if (wire && wire->limiter) {
+      bool got;
+      if (wire->blockingAcquire) {
+        got = wire->limiter->Acquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes,
+                                     wire->mediaEpoch, wire->itemMediaEpoch) == WireLimiter::Acq::Permitted;
+      } else {
+        got = wire->limiter->TryAcquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
+      }
+      if (!got) {
+        if (outSuppressed) ++*outSuppressed;
+        continue;
+      }
     }
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);

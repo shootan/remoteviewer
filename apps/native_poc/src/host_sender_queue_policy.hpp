@@ -46,4 +46,19 @@ inline SenderQueueAction decide_sender_queue_action(bool keyFrame, bool waitingF
   return SenderQueueAction::Enqueue;
 }
 
+/**
+ * Whether the pre-batch backlog flag may still force a resync (bitrate-hard-cap r4 R3).
+ *
+ * Under the hard wire cap the input gate (host_encode_admission) already suppresses NEW captures when
+ * the queue is backlogged, and the emit path gives already-accepted MFT output a bounded chance to
+ * drain into the queue (staging) rather than discarding the reference chain. So under the cap the
+ * pre-batch backlog flag must NOT be a resync trigger -- the queue decision is purely current depth vs
+ * the hard cap, and accepted output enqueues once a slot frees. With the cap OFF there is no input
+ * gate, so the legacy pre-batch-backlog resync (the old flood defence) stays. A genuine stall still
+ * resyncs when the current depth reaches maxFrames after the bounded staging wait.
+ */
+inline bool backlog_resync_active(bool capActive, bool preBatchBacklogged) {
+  return capActive ? false : preBatchBacklogged;
+}
+
 }  // namespace remote60::native_poc

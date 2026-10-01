@@ -60,6 +60,19 @@ struct WireEgress {
   uint64_t* outWireDataBytes = nullptr;
   uint64_t* outWireParityBytes = nullptr;
   uint64_t* outWireDatagrams = nullptr;
+  // Blocking-acquire replay (bitrate-hard-cap r4 R1): make send_udp_chunk_indices wait for tokens
+  // (limiter Acquire against mediaEpoch/itemMediaEpoch) instead of the non-blocking TryAcquire, so the
+  // sender-thread interleave gets a fair share of a bucket a saturated original is draining. Only the
+  // sender thread sets this (the reader never blocks on the wire). Ignored when limiter is null.
+  bool blockingAcquire = false;
+  const std::atomic<uint64_t>* mediaEpoch = nullptr;
+  uint64_t itemMediaEpoch = 0;
+  // Interleave hook (bitrate-hard-cap r4 R1): called AFTER each datagram of this AU actually leaves,
+  // on the sender thread, so a long cap-paced AU still services NACK replays from the SAME bucket
+  // while it is going out -- not only between whole AUs. The sender sets this to a bounded drain (at
+  // most a few replay chunks per original datagram, so original data keeps priority and the shared
+  // cap still bounds the sum). It runs outside any limiter lock. null = no interleave (legacy/tests).
+  std::function<void()> betweenDatagrams;
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */
@@ -177,9 +190,11 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
 // outWireBytes / outDatagrams (optional): what the replay actually put on the wire, header
 // included, for the per-flow byte accounting (quality r1).
 // `wire` (bitrate-hard-cap r1): the common limiter + optional sink. Retransmit charges the SAME
-// bucket as the live send through TryAcquire (non-blocking -- the reader thread must not wait on the
-// wire): a chunk that does not fit the budget now is left for the client's IDR fallback, so a NACK
-// storm cannot push the stream over the cap. `outSuppressed` (optional) counts chunks skipped that way.
+// bucket as the live send. By default it uses TryAcquire (non-blocking) -- a chunk that does not fit
+// now is left for the next pass. When WireEgress::blockingAcquire is set (r4 R1: the sender-thread
+// interleave, where a saturated original would otherwise win every refilled token and starve the
+// replay), it uses the blocking Acquire against WireEgress::mediaEpoch/itemMediaEpoch so the replay
+// gets a fair share of the bucket and a rollover cancels it. `outSuppressed` counts chunks skipped.
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                       uint32_t mtuBytes, bool tightSingleChunk,

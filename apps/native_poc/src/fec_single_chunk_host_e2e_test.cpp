@@ -687,22 +687,31 @@ double window_peak_bps(const std::vector<std::pair<uint64_t, uint32_t>>& ev, uin
   return peak;
 }
 
-// The isolation-matrix metrics for one run + the cap-window / minimal-delivery assertions.
-void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r) {
+// The isolation-matrix metrics for one run + the cap-window / responsiveness assertions.
+//
+// r4 R4 metric honesty: the timing figures below are measured at ASSEMBLER DELIVERY, and `postDecoded`
+// is a POST-HOC decode of the collected AUs after the host/receiver stopped -- NOT a real-time
+// present. So `deliveredFps` is the delivery cadence, `deliverLat*` is capture->assembler-delivery,
+// `deliverGapMax` is the largest delivery gap. Post-hoc decode success (postDecoded>=2, decErr==0) is
+// a correctness check, not a realtime-present proof. A real-time decoder/present + PC FrameGate path
+// remains a test-candidate (see report). `maxDeliverGapMs` (0 = no gate) is a pre-fixed responsiveness
+// ceiling for scenarios where a long freeze would be a defect (lossless motion); a frozen candidate
+// then FAILS instead of only printing a large number.
+void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, double maxDeliverGapMs) {
   const double p1s = window_peak_bps(r.wireEvents, 1'000'000);
   const double p250 = window_peak_bps(r.wireEvents, 250'000);
-  double fps = 0, firstFrameMs = 0, freezeMaxMs = 0, latP95Ms = 0, latMaxMs = 0, idrPerSec = 0;
+  double deliveredFps = 0, firstFrameMs = 0, deliverGapMaxMs = 0, latP95Ms = 0, latMaxMs = 0, idrPerSec = 0;
   if (r.deliverUs.size() >= 2) {
     const uint64_t span = r.deliverUs.back() - r.deliverUs.front();
     if (span > 0) {
-      fps = static_cast<double>(r.decoded) * 1e6 / static_cast<double>(span);
+      deliveredFps = static_cast<double>(r.delivered) * 1e6 / static_cast<double>(span);
       idrPerSec = static_cast<double>(r.keyFrames) * 1e6 / static_cast<double>(span);
     }
     const uint64_t t0 = r.wireEvents.empty() ? r.deliverUs.front() : r.wireEvents.front().first;
     firstFrameMs = (r.deliverUs.front() - t0) / 1000.0;
     uint64_t gap = 0;
     for (size_t i = 1; i < r.deliverUs.size(); ++i) gap = std::max(gap, r.deliverUs[i] - r.deliverUs[i - 1]);
-    freezeMaxMs = gap / 1000.0;
+    deliverGapMaxMs = gap / 1000.0;
     std::vector<uint64_t> lat;
     for (size_t i = 0; i < r.deliverUs.size(); ++i)
       if (r.deliverUs[i] >= r.captureStampUs[i]) lat.push_back(r.deliverUs[i] - r.captureStampUs[i]);
@@ -712,41 +721,70 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r) {
       latMaxMs = lat.back() / 1000.0;
     }
   }
-  std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | decoded=%u fps=%.1f "
-              "firstFrame=%.0fms freezeMax=%.0fms latP95=%.0fms latMax=%.0fms idr/s=%.2f keyReq=%u disc=%u nacks=%u "
-              "giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
+  std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | postDecoded=%u "
+              "deliveredFps=%.1f firstFrame=%.0fms deliverGapMax=%.0fms deliverLatP95=%.0fms deliverLatMax=%.0fms "
+              "idr/s=%.2f keyReq=%u disc=%u nacks=%u giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
               label, (unsigned long long)capBps, r.appliedBitrate, r.appliedFps, p1s, 100.0 * p1s / capBps, p250,
-              100.0 * p250 / capBps, r.decoded, fps, firstFrameMs, freezeMaxMs, latP95Ms, latMaxMs, idrPerSec, r.keyReq,
-              r.disc, r.nacks, r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped);
+              100.0 * p250 / capBps, r.decoded, deliveredFps, firstFrameMs, deliverGapMaxMs, latP95Ms, latMaxMs,
+              idrPerSec, r.keyReq, r.disc, r.nacks, r.giveUps, r.decodeErrors, r.decoder.c_str(),
+              (unsigned long long)r.rxDropped);
   std::printf("       %s host: queueWaitMax=%llums queueDepthMax=%llu wireCapBps=%llu | recoveryMax=%.0fms recoveries=%u\n",
               label, (unsigned long long)(r.host.maxQueueWaitUs / 1000), (unsigned long long)r.host.maxQueueDepth,
               (unsigned long long)r.host.wireCapBps, r.recoveryMaxUs / 1000.0, r.recoveryCount);
   const std::string tag = std::string("matrix ") + label;
   check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
   check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
-  check(r.decoded >= 2 && r.decodeErrors == 0, tag + ": the decoder actually produced frames (not starved)");
+  check(r.decoded >= 2 && r.decodeErrors == 0, tag + ": post-hoc decode produced frames (correctness, not realtime)");
   check(firstFrameMs >= 0 && firstFrameMs <= 3000, tag + ": the first frame arrives within a bounded time");
+  // r4 R4-2: a pre-fixed responsiveness ceiling so a frozen stream FAILS rather than only printing a
+  // large deliverGapMax. Only where a long freeze is a defect (lossless motion); 0 disables the gate.
+  if (maxDeliverGapMs > 0)
+    check(deliverGapMaxMs <= maxDeliverGapMs,
+          tag + ": max delivery gap within the responsiveness ceiling (" + std::to_string((int)maxDeliverGapMs) + "ms)");
 }
 
-// A runtime 6 -> 1.5 Mbps downshift: windows wholly after the switch (+1.5 s settle) must respect the
-// new, lower cap -- the credit is preserved across the change, not refilled.
+// A runtime 6 -> 1.5 Mbps downshift. r4 R4-3: instead of discarding a fixed +1.5 s settle window, pin
+// the APPLY POINT from the data on the shared receive clock -- the first moment after the request when
+// the trailing 250 ms wire rate has stepped down past the midpoint (3 Mbps) toward the new cap -- and
+// judge EVERY complete window from there. The credit is preserved across the change (not refilled), so
+// the first full post-apply window must already respect the new, lower cap.
 void matrix_metrics_downshift(const RunResult& r) {
+  // Data-driven apply point: scan forward from the request send time; the apply point is the first
+  // wire event after which the trailing 250 ms rate is at/under the 3 Mbps midpoint (the step-down).
+  uint64_t applyUs = 0;
+  if (r.switchUs) {
+    for (size_t i = 0; i < r.wireEvents.size(); ++i) {
+      const uint64_t t = r.wireEvents[i].first;
+      if (t < r.switchUs) continue;
+      uint64_t bytes = 0;
+      for (size_t j = i + 1; j-- > 0;) {
+        if (r.wireEvents[j].first + 250'000 < t) break;
+        bytes += r.wireEvents[j].second;
+      }
+      const double trailing = static_cast<double>(bytes) * 8.0 * 1e6 / 250'000.0;
+      if (trailing <= 3'000'000.0) { applyUs = t; break; }
+    }
+  }
   std::vector<std::pair<uint64_t, uint32_t>> before, after;
   for (const auto& e : r.wireEvents) {
     if (r.switchUs && e.first < r.switchUs) before.push_back(e);
-    else if (r.switchUs && e.first >= r.switchUs + 1'500'000) after.push_back(e);
+    else if (applyUs && e.first >= applyUs) after.push_back(e);  // EVERY complete window from the apply point
   }
   const double b1 = window_peak_bps(before, 1'000'000);
   const double a1 = window_peak_bps(after, 1'000'000);
   const double a250 = window_peak_bps(after, 250'000);
-  std::printf("MATRIX 6->1.5-downshift: switched=%d before1s=%.0f (%.1f%% of 6M) after1s=%.0f (%.1f%% of 1.5M) "
-              "after250=%.0f (%.1f%%) decoded=%u decErr=%u beforeEv=%zu afterEv=%zu\n",
-              r.switchUs != 0 ? 1 : 0, b1, 100.0 * b1 / 6'000'000.0, a1, 100.0 * a1 / 1'500'000.0, a250,
-              100.0 * a250 / 1'500'000.0, r.decoded, r.decodeErrors, before.size(), after.size());
+  std::printf("MATRIX 6->1.5-downshift: switched=%d applyLatencyMs=%.0f before1s=%.0f (%.1f%% of 6M) "
+              "after1s=%.0f (%.1f%% of 1.5M) after250=%.0f (%.1f%%) decoded=%u decErr=%u beforeEv=%zu afterEv=%zu\n",
+              r.switchUs != 0 ? 1 : 0, applyUs ? (applyUs - r.switchUs) / 1000.0 : -1.0, b1, 100.0 * b1 / 6'000'000.0,
+              a1, 100.0 * a1 / 1'500'000.0, a250, 100.0 * a250 / 1'500'000.0, r.decoded, r.decodeErrors,
+              before.size(), after.size());
   check(r.switchUs != 0, "matrix downshift: the runtime bitrate change was sent");
+  check(applyUs != 0, "matrix downshift: the apply point (rate step-down) was observed on the wire");
   check(before.empty() || b1 <= 6'000'000 * 1.10, "matrix downshift: before the switch, 1 s window <= 6 Mbps +10%");
-  check(!after.empty() && a1 <= 1'500'000 * 1.10, "matrix downshift: after the switch (settled), 1 s window <= 1.5 Mbps +10%");
-  check(after.empty() || a250 <= 1'500'000 * 1.10, "matrix downshift: after the switch, 250 ms window <= 1.5 Mbps +10%");
+  check(!after.empty() && a1 <= 1'500'000 * 1.10,
+        "matrix downshift: EVERY 1 s window from the apply point <= 1.5 Mbps +10%");
+  check(after.empty() || a250 <= 1'500'000 * 1.10,
+        "matrix downshift: EVERY 250 ms window from the apply point <= 1.5 Mbps +10%");
 }
 
 // completion criterion 3: the product-equivalent host + real MFT + real decoder, across the scenario
@@ -756,12 +794,13 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     const char* label;
     Content content;
     uint32_t bitrate, fps, lossPermille;
+    double maxDeliverGapMs;  // responsiveness ceiling (r4 R4-2); 0 = no gate (static / loss are lenient)
   };
   const Scn scns[] = {
-      {"6M/60-motion", Content::Video, 6'000'000, 60, 0},
-      {"6M/60-static", Content::StaticText, 6'000'000, 60, 0},
-      {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0},
-      {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50},
+      {"6M/60-motion", Content::Video, 6'000'000, 60, 0, 500.0},
+      {"6M/60-static", Content::StaticText, 6'000'000, 60, 0, 0.0},
+      {"1.5M/30-motion", Content::Video, 1'500'000, 30, 0, 900.0},
+      {"6M/60-loss5%-nack", Content::Video, 6'000'000, 60, 50, 0.0},
   };
   for (const Scn& s : scns) {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
@@ -772,7 +811,7 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
     const std::wstring runDir = dir + L"m_" + safe + L"\\";
     const RunResult r = run_host(hostExe, runDir, s.content, /*tight=*/true, port, seconds, s.lossPermille, 1,
                                  /*wireCapOn=*/true, s.bitrate, s.fps);
-    matrix_metrics(s.label, s.bitrate, r);
+    matrix_metrics(s.label, s.bitrate, r, s.maxDeliverGapMs);
   }
   // Runtime 6 -> 1.5 Mbps downshift mid-run.
   const uint16_t dport = remote60::native_poc::e2e::e2e_pick_free_udp_port();

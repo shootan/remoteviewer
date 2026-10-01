@@ -257,8 +257,11 @@ void measure_stalled_tail() {
 // Drives the REAL SessionVideoPipeline (the shared/Android receiver: its give-up is
 // GiveUpStuckHead -- spent && replyOver && noProgress && oldEnough, 245 ms / 5 s -- and its
 // keyframe requests go through Request()/Break(), NOT spent_for()). The host's defer-then-serve of
-// a NACK that misses the cache during send is modelled here (its real implementation -- the sender's
-// RecordReplayRequest / DrainPendingReplays -- is validated on the real SenderState by host_wire_cap_defer_test).
+// a NACK's recovery chunk is injected by the test's callback after a fixed delay (a RECEIVER-side
+// model only -- it does NOT drive the real host sender). The real sender recovery (RecordReplayRequest
+// -> DrainPendingReplays over the shared bucket, idle-wake + during-send interleave) is validated on
+// the real SenderState by host_wire_cap_defer_test and on the real sender THREAD + socket by
+// host_wire_cap_sender_thread_test. This timeline's pass/fail is on the product RECEIVER give-up only.
 // A timeline is printed; the pass/fail is on the product give-up, so roundsExhausted alone never
 // decides an IDR loop. (bitrate-hard-cap r2, verifier note.)
 struct TimelineResult {
@@ -375,13 +378,18 @@ void test_timeline() {
           "nacks=" + std::to_string(r.nacks) + " giveUps=" + std::to_string(r.giveUps) +
               " keyReq=" + std::to_string(r.keyframeRequests));
   }
-  // 3) A real hole DURING send (cache miss), FIXED receiver + host deferred-NACK: the hole is held
-  //    and served once the AU is cached, so the IDR completes with no give-up / no keyframe request.
+  // 3) A real hole DURING send (cache miss), FIXED receiver: this is a RECEIVER-side model -- the
+  //    NACK callback injects a recovery chunk after a fixed delay, it does NOT drive the real host
+  //    sender. It shows only that the RECEIVER, given a timely replay, recovers the hole without a
+  //    give-up/keyframe request. The actual host sender recovery (reader records -> sender drains the
+  //    SAME wire bucket, idle-wake and during-send interleave) is validated end-to-end over a real
+  //    socket by host_wire_cap_sender_thread_test; do NOT read this leg as sender-recovery evidence.
+  //    (bitrate-hard-cap r4 R4-4.)
   {
     // Two chunks in ONE FEC group (consecutive, non-interleaved) -> FEC cannot repair -> the hole
-    // MUST be recovered by the deferred NACK served after the AU is cached.
-    const auto r = timeline(1'500'000, 208u * 1024u, {40, 41}, /*legacy=*/false, "hole-during-send");
-    check("FEC-unrecoverable hole during send: cached-at-send-start NACK replay recovers it, IDR delivered, no give-up",
+    // must be recovered by a replay reaching the receiver.
+    const auto r = timeline(1'500'000, 208u * 1024u, {40, 41}, /*legacy=*/false, "hole-during-send(receiver-model)");
+    check("RECEIVER MODEL: given a timely replay the receiver recovers a FEC-unrecoverable hole, no give-up",
           r.delivered && r.deferredServed > 0 && r.giveUps == 0 && r.keyframeRequests == 0,
           "replays=" + std::to_string(r.deferredServed) + " giveUps=" + std::to_string(r.giveUps) +
               " delivered=" + std::to_string(r.delivered ? 1 : 0));

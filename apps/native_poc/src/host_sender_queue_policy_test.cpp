@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+using remote60::native_poc::backlog_resync_active;
 using remote60::native_poc::decide_sender_queue_action;
 using remote60::native_poc::SenderQueueAction;
 
@@ -169,6 +170,43 @@ void test_cap_still_applies() {
   expect_true("overflow asked for a key", s.requestKey);
 }
 
+// --- 4. r4 R3: under the cap, accepted multi-output is staged (chain kept), not discarded ---
+// Drives the REAL product helpers (backlog_resync_active + decide_sender_queue_action, both called by
+// host_stage_encode_send_h264_au.cpp). The full HostContext emit path needs live capture/encoder/
+// graphics and is not unit-harnessable; the integrated behaviour is the real-MFT matrix. Here we pin
+// the decision the stage makes for one encode call that releases two deltas.
+void test_r3_cap_staging_keeps_chain() {
+  std::printf("r4 R3: a 2-delta batch under the cap keeps the reference chain\n");
+  // One encode call releases two deltas while a frame is already queued (depth 1 before the batch),
+  // and the sender had a pre-batch backlog reading. Under the cap that pre-batch flag is NOT a resync
+  // trigger (the input gate + bounded staging handle congestion), so both deltas enqueue.
+  const bool preBatchBacklogged = true;  // the reading the old path would have resynced on
+  const bool capBacklog = backlog_resync_active(/*capActive=*/true, preBatchBacklogged);
+  expect_false("under the cap the pre-batch backlog does not force resync", capBacklog);
+
+  FakeSender s;
+  s.queue.push_back("queued-0");  // depth 1 before the batch
+  bool backlogged = capBacklog;   // what the stage feeds decide_sender_queue_action under the cap
+  apply(s, /*keyFrame=*/false, backlogged, "delta-1");
+  apply(s, /*keyFrame=*/false, backlogged, "delta-2");
+  expect_eq("both accepted deltas enqueued (chain kept, no discard)",
+            static_cast<long long>(s.queue.size()), 3);
+  expect_false("no resync -> barrier stays open", s.waitingForKey);
+  expect_false("no spurious keyframe request", s.requestKey);
+  expect_eq("nothing was dropped", s.drops, 0);
+
+  // NEGATIVE control: cap OFF (or the pre-fix path) -- the same pre-batch backlog DOES force a resync
+  // on the first accepted delta, discarding the chain and asking for a key. This is the bug R3 fixes.
+  expect_true("cap off: the pre-batch backlog still resyncs (legacy flood defence)",
+              backlog_resync_active(/*capActive=*/false, preBatchBacklogged));
+  FakeSender s2;
+  s2.queue.push_back("queued-0");
+  bool backlogged2 = backlog_resync_active(/*capActive=*/false, preBatchBacklogged);  // true
+  apply(s2, /*keyFrame=*/false, backlogged2, "delta-1");
+  expect_eq("cap off: the chain is discarded on the first delta", static_cast<long long>(s2.queue.size()), 0);
+  expect_true("cap off: a key is re-requested", s2.requestKey);
+}
+
 }  // namespace
 
 int main() {
@@ -176,6 +214,7 @@ int main() {
   test_key_then_delta_in_one_batch();
   test_without_reset_would_regress();
   test_cap_still_applies();
+  test_r3_cap_staging_keeps_chain();
   if (gFailures == 0) {
     std::printf("host_sender_queue_policy_test: PASS\n");
     return 0;
