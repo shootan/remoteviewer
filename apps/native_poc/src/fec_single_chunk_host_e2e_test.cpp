@@ -281,6 +281,9 @@ struct HostAccount {
   uint64_t txFrames = 0, txBytes = 0, parity = 0, chunkHdr = 0, videoDatagrams = 0, nackBytes = 0,
            nackDatagrams = 0, wireEst = 0;
   size_t keyframeLines = 0;
+  // Isolation matrix (r2): max sender queue wait/depth from the host's own [wire] lines, and the
+  // wire cap it logged at startup (wireCapBps=...), and how many capture frames the input gate skipped.
+  uint64_t maxQueueWaitUs = 0, maxQueueDepth = 0, wireCapBps = 0, wireOverloadSkips = 0;
 };
 
 HostAccount read_host_log(const std::wstring& path) {
@@ -295,6 +298,12 @@ HostAccount read_host_log(const std::wstring& path) {
       ++a.statsLines;
     }
     if (line.find("[keyframe]") != std::string::npos) ++a.keyframeLines;
+    if (line.find(" wire seq=") != std::string::npos) {
+      a.maxQueueWaitUs = std::max(a.maxQueueWaitUs, num_of(line, "queueWaitUs"));
+      a.maxQueueDepth = std::max(a.maxQueueDepth, num_of(line, "queueDepth"));
+    }
+    if (line.find(" wireCapBps=") != std::string::npos && a.wireCapBps == 0) a.wireCapBps = num_of(line, "wireCapBps");
+    if (line.find(" wireOverloadSkips=") != std::string::npos) a.wireOverloadSkips = num_of(line, "wireOverloadSkips");
   }
   if (!last.empty()) {
     a.txFrames = num_of(last, "udpTxFrames");
@@ -332,6 +341,8 @@ struct RunResult {
   std::vector<uint8_t> deliverWasKey;     // 1 if the delivered AU was a keyframe
   uint32_t appliedBitrate = 0, appliedFps = 0;
   uint64_t switchUs = 0;  // when the runtime bitrate downshift was sent (0 = none)
+  uint64_t recoveryMaxUs = 0;  // max time from a discontinuity to the next delivered keyframe
+  uint32_t recoveryCount = 0;
 };
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
@@ -454,6 +465,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     std::mutex pmu;
     std::atomic<bool> pendingKeyRequest{false};
     uint32_t lastDelivered = 0;
+    uint64_t lastDiscUs = 0;  // for recovery-time: a discontinuity awaiting its next delivered key
     SessionVideoPipelineConfig cfg;
     cfg.nackEnabled = r.nackNegotiated;
     cfg.holdUs = r.nackNegotiated ? 120000 : 0;
@@ -470,16 +482,22 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       r.lastSeq = f.header.seq;
       const bool key = (f.header.flags & kEncodedFrameFlagKeyFrame) != 0;
       if (key) ++r.keyFrames;
-      r.deliverUs.push_back(qpc_now_us());
+      const uint64_t deliverNowUs = qpc_now_us();
+      r.deliverUs.push_back(deliverNowUs);
       r.captureStampUs.push_back(f.header.captureQpcUs);
       r.deliverWasKey.push_back(key ? 1 : 0);
+      if (key && lastDiscUs != 0 && deliverNowUs >= lastDiscUs) {
+        r.recoveryMaxUs = std::max(r.recoveryMaxUs, deliverNowUs - lastDiscUs);
+        ++r.recoveryCount;
+        lastDiscUs = 0;  // recovered
+      }
       deliveredAus.emplace_back(std::move(f.payload), std::make_pair(key, f.header.captureQpcUs));
     };
     cb.requestKeyframe = [&] {
       ++r.keyReq;
       pendingKeyRequest.store(true);
     };
-    cb.discontinuity = [&] { ++r.disc; };
+    cb.discontinuity = [&] { ++r.disc; if (lastDiscUs == 0) lastDiscUs = qpc_now_us(); };
     cb.sendNack = [&](const UdpVideoNackPacket& p) {
       ++r.nacks;
       (void)send(sock, reinterpret_cast<const char*>(&p), sizeof(p), 0);  // to the real host
@@ -700,6 +718,9 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r) {
               label, (unsigned long long)capBps, r.appliedBitrate, r.appliedFps, p1s, 100.0 * p1s / capBps, p250,
               100.0 * p250 / capBps, r.decoded, fps, firstFrameMs, freezeMaxMs, latP95Ms, latMaxMs, idrPerSec, r.keyReq,
               r.disc, r.nacks, r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped);
+  std::printf("       %s host: queueWaitMax=%llums queueDepthMax=%llu wireCapBps=%llu | recoveryMax=%.0fms recoveries=%u\n",
+              label, (unsigned long long)(r.host.maxQueueWaitUs / 1000), (unsigned long long)r.host.maxQueueDepth,
+              (unsigned long long)r.host.wireCapBps, r.recoveryMaxUs / 1000.0, r.recoveryCount);
   const std::string tag = std::string("matrix ") + label;
   check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
   check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
