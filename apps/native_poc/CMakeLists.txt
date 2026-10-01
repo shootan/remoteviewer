@@ -2847,6 +2847,18 @@ if(MSVC)
   target_compile_options(remote60_host_wire_cap_defer_test PRIVATE /utf-8)
 endif()
 
+add_executable(remote60_host_wire_cap_fix_test
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/host_wire_cap_fix_test.cpp
+)
+target_include_directories(remote60_host_wire_cap_fix_test PRIVATE src)
+target_link_libraries(remote60_host_wire_cap_fix_test PRIVATE capture common ws2_32
+  runtimeobject windowsapp advapi32 d3d11 dxgi gdi32 user32 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_wire_cap_fix_test PRIVATE /utf-8)
+endif()
+
 # fec-single-chunk-stride: the host's real chunker over loopback, its datagrams judged by the real
 # shared assembler -- boundary sizes, loss counter-examples, the NACK replay geometry, both layouts.
 add_executable(remote60_udp_fec_single_chunk_test

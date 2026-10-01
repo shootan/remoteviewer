@@ -126,8 +126,7 @@ void measure(uint64_t capBps, size_t idrBytes, const char* label) {
   asm1.ConfigureInOrderHold(120000, 8);  // the viewer's in-order hold (~120 ms at 60 fps)
   VideoNackScheduler sched;              // default config: gap 25, tail 120, round 25, maxRounds 3
 
-  uint64_t prematureNacks = 0, chunksReq = 0, keyframeRequestUs = 0;
-  bool gaveUp = false;
+  uint64_t prematureNacks = 0, chunksReq = 0;
   size_t fed = 0;
   uint64_t dbgIncompletePolls = 0, dbgMaxAgeUs = 0, dbgMaxMissing = 0, dbgMaxHighWater = 0;
   // Replay datagrams at their cap-paced arrival times; between arrivals poll at the 25 ms receive
@@ -151,10 +150,10 @@ void measure(uint64_t capBps, size_t idrBytes, const char* label) {
       dbgMaxMissing = std::max<uint64_t>(dbgMaxMissing, info.missingTotal);
       dbgMaxHighWater = std::max<uint64_t>(dbgMaxHighWater, info.highWater);
     }
-    if (!gaveUp && hasIncomplete && sched.spent_for(hasTail)) {
-      gaveUp = true;
-      keyframeRequestUs = nowUs;
-    }
+    (void)hasTail;  // r3: measure() no longer infers a give-up from spent_for -- that is NOT the
+                    // product give-up (which also needs noProgress). The real give-up is driven
+                    // through SessionVideoPipeline in test_timeline(); here we only measure the
+                    // scheduler's NACK/round behaviour on a lossless cap-paced IDR.
   };
   for (const auto& d : dgs) {
     // advance the 25 ms poll cadence up to this arrival
@@ -173,23 +172,23 @@ void measure(uint64_t capBps, size_t idrBytes, const char* label) {
     poll(pollUs);
   }
 
-  const double keyframeAtMs = gaveUp ? (keyframeRequestUs - firstUs) / 1000.0 : 0.0;
   char buf[256];
   std::snprintf(buf, sizeof(buf),
-                "%s: deliver=%.0fms prematureNacks=%llu chunksReq=%llu roundsExhausted=%llu gaveUp=%d keyframeAt=%.0fms",
+                "%s: deliver=%.0fms prematureNacks=%llu chunksReq=%llu roundsExhausted=%llu",
                 label, deliverMs, (unsigned long long)prematureNacks, (unsigned long long)chunksReq,
-                (unsigned long long)sched.stats().roundsExhausted, gaveUp ? 1 : 0, keyframeAtMs);
+                (unsigned long long)sched.stats().roundsExhausted);
   // The reproduction: a cap-paced IDR draws premature NACKs for its still-in-flight tail, exhausts
   // the rounds, and the caller requests a keyframe BEFORE the IDR has finished arriving -> IDR loop.
   std::printf("    dbg %s: incompletePolls=%llu maxAgeMs=%.0f maxMissing=%llu maxHighWater=%llu fed=%zu dgs=%zu\n",
               label, (unsigned long long)dbgIncompletePolls, dbgMaxAgeUs / 1000.0,
               (unsigned long long)dbgMaxMissing, (unsigned long long)dbgMaxHighWater, fed, dgs.size());
-  // r2 FIX verification: with the progress-based tail rule, a lossless cap-paced IDR whose tail is
-  // still arriving draws NO premature tail NACK and the scheduler spends no rounds on it -- so the
-  // caller never gives it up (spent_for stays false). (The full product give-up path -- viewer
-  // stuck-head + frame-gate -- is exercised by the mixed-version timeline test.)
+  // r2/r3 FIX verification: with the progress-based tail rule, a lossless cap-paced IDR whose tail is
+  // still arriving draws NO premature tail NACK and the scheduler exhausts no rounds on it. These are
+  // scheduler-level facts measured here; whether the RECEIVER gives the head up (which also needs
+  // noProgress) is decided by the real product path in test_timeline(), not inferred from spent_for.
   check(std::string("FIX ") + label + ": no premature tail NACK on a lossless cap-paced IDR", prematureNacks == 0, buf);
-  check(std::string("FIX ") + label + ": the scheduler spends no rounds, so spent_for stays false", !gaveUp, buf);
+  check(std::string("FIX ") + label + ": the scheduler exhausts no rounds on the in-flight tail",
+        sched.stats().roundsExhausted == 0, buf);
 }
 
 // Mixed-version comparison: the SAME cap-paced lossless IDR through the real scheduler in its
@@ -258,8 +257,8 @@ void measure_stalled_tail() {
 // Drives the REAL SessionVideoPipeline (the shared/Android receiver: its give-up is
 // GiveUpStuckHead -- spent && replyOver && noProgress && oldEnough, 245 ms / 5 s -- and its
 // keyframe requests go through Request()/Break(), NOT spent_for()). The host's defer-then-serve of
-// a NACK that misses the cache during send is modelled here (its real implementation -- DeferNack /
-// ServeDeferredNacks / RetransmitAu -- is validated on the real SenderState by host_wire_cap_defer_test).
+// a NACK that misses the cache during send is modelled here (its real implementation -- the sender's
+// RecordReplayRequest / DrainPendingReplays -- is validated on the real SenderState by host_wire_cap_defer_test).
 // A timeline is printed; the pass/fail is on the product give-up, so roundsExhausted alone never
 // decides an IDR loop. (bitrate-hard-cap r2, verifier note.)
 struct TimelineResult {

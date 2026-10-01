@@ -31,7 +31,11 @@ namespace remote60::native_poc {
 
 struct EncodeAdmissionInputs {
   bool wireCapActive = false;      // the hard cap is on; with it off the gate never skips (legacy)
-  bool keyWanted = false;          // first frame / forced / scheduled / recovery IDR -- always admit
+  bool keyWanted = false;          // this frame will ACTUALLY be forced as a key now (forceKeyFrame)
+                                   // -- always admit. A keyWanted frame that cannot force (a key of
+                                   // this session already in flight) is a delta and must be false here,
+                                   // so it is gated like any delta instead of overflowing the queue
+                                   // into a resync-IDR loop while the real key is on its way. (r3 F2)
   bool servedBootstrap = false;    // a bootstrap/kick synthetic frame -- always admit
   uint32_t senderQueueDepth = 0;   // sender.queue.size() now
   uint32_t senderQueueMax = 2;     // kSenderQueueMaxFrames: at/above this the wire has not drained

@@ -129,24 +129,32 @@ struct SenderState {
   uint64_t nackBudgetLastUs = 0;
   // Non-blocking: spend `bytes` from the cap-off fallback bucket, false if over budget. (reader thread)
   bool NackFallbackTryAcquire(uint64_t bytes);
-  // Deferred NACKs (bitrate-hard-cap r2): a NACK for an AU still being sent misses the cache (StoreAu
-  // runs only after the whole AU is on the wire), so a real hole lost during a cap-paced send would
-  // never be replayed and the stuck head would eventually force a keyframe. The miss is remembered
-  // here, bounded and merged per (generation, seq), and served ONCE the moment StoreAu caches that AU
-  // -- guaranteeing one post-send recovery for a hole requested during send. FEC + NACK keep the same
-  // wire budget; the reader never blocks (it only records); the sender serves from its own thread.
-  struct PendingNack {
+  // Pending replays (bitrate-hard-cap r3 F1): a NACK does NOT replay on the reader thread. The reader
+  // only RECORDS the request here (bounded, merged per (generation, seq), with a deadline); the sender
+  // thread drains the list every loop and replays the missing chunks through the SAME wire budget,
+  // keeping a request until its chunks have ACTUALLY been sent, or its deadline passes, or its epoch
+  // ends. A single reader-side TryAcquire (r2) could suppress the whole replay under a full cap bucket
+  // and drop the request for ever; this retries across loops as tokens refill, so a real hole lost
+  // during a cap-paced send is recovered once the AU is cached and the budget allows. The reader never
+  // blocks; the sender never blocks indefinitely (bounded list, per-datagram non-blocking spend,
+  // deadline). Merge, max count and stop/epoch cancellation are kept.
+  struct PendingReplay {
     uint64_t generation = 0;
     uint32_t seq = 0;
-    std::vector<uint16_t> missing;  // ascending, deduped, capped at kUdpVideoNackMaxMissing
+    uint64_t createdUs = 0;
+    std::vector<uint16_t> missing;  // remaining ascending, deduped, capped at kUdpVideoNackMaxMissing
   };
-  static constexpr size_t kMaxPendingNacks = 8;  // bounded: oldest dropped past this
-  std::mutex pendingNackMu;
-  std::deque<PendingNack> pendingNacks;
-  // Reader thread: remember a NACK whose AU is not yet cached (merged per (gen,seq), bounded).
-  void DeferNack(uint64_t generation, uint32_t seq, const uint16_t* missing, uint16_t count);
-  // Sender thread, right after StoreAu caches (gen,seq): replay any deferred NACK for it, once.
-  void ServeDeferredNacks(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq);
+  static constexpr size_t kMaxPendingReplays = 8;         // bounded: oldest dropped past this
+  static constexpr uint64_t kReplayDeadlineUs = 1'000'000;  // give up a replay request after this
+  std::mutex pendingReplayMu;
+  std::deque<PendingReplay> pendingReplays;
+  std::atomic<uint64_t> replayServedChunks{0};   // telemetry: chunks actually replayed
+  std::atomic<uint64_t> replayDroppedRequests{0};  // telemetry: requests dropped at the deadline
+  // Reader thread: record a NACK request (merged per (gen,seq), bounded). Does NOT send.
+  void RecordReplayRequest(uint64_t generation, uint32_t seq, const uint16_t* missing, uint16_t count);
+  // Sender thread, every loop: replay what is cached and fits the budget now; drop requests whose
+  // deadline has passed or whose epoch is over. Returns whether any request remains (to pace waits).
+  bool DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint64_t nowUs, uint64_t currentEpoch);
   uint32_t wireCapMtu = 1200;   // clamp_udp_mtu(args.udpMtu); the Lmax source for the bucket depth
   std::atomic<uint64_t> wireCapBps{0};  // the cap now in force (telemetry; 0 = disabled)
   // Build the limiter (idempotent) and set the cap. enabled=false sets rate 0 (cap off).
@@ -224,6 +232,14 @@ struct SenderState {
   std::atomic<uint64_t> txVideoDatagrams{0};    // data + parity
   std::atomic<uint64_t> txNackBytes{0};         // NACK replays, header included
   std::atomic<uint64_t> txNackDatagrams{0};
+  // Actual-wire accounting (bitrate-hard-cap r3 F4): bytes (len + 28) and datagrams that ACTUALLY
+  // left the socket for the live data/parity path, accumulated per datagram the instant it succeeds
+  // -- so a partially-sent AU (epoch cancel / transport error) still counts what went out, unlike
+  // txBytes/txParityBytes which are payload totals added only on a whole-AU Sent. These are the
+  // figure to reconcile against an OS/receiver observation; they are distinct from the limiter's
+  // pre-send RESERVATION (WireLimiter::spent_bytes, charged before each datagram).
+  std::atomic<uint64_t> txActualWireBytes{0};
+  std::atomic<uint64_t> txActualWireDatagrams{0};
   std::atomic<uint64_t> txControlBytes{0};      // control channel as sent (UDP: channel datagrams
                                                 // incl. its fragment headers/retransmits; TCP: payload)
   std::atomic<uint64_t> txControlDatagrams{0};  // UDP control datagrams (0 on TCP)
@@ -240,6 +256,14 @@ struct SenderState {
   // (bitrate-hard-cap r2, plan r2 point 4 -- the recovery IDR's encode->queue->wire lifetime.)
   std::atomic<bool> keyAuOnWire{false};
   std::atomic<uint64_t> keyAuOnWireSinceUs{0};
+  // The (media epoch, stream generation) the on-wire key belongs to (bitrate-hard-cap r3 F2). The bare
+  // keyAuOnWire bool could suppress a genuinely-needed recovery IDR of a NEW session: a rollover arms a
+  // fresh generation, but a key of the OLD generation still flagged on the wire (sender not yet past it,
+  // or wedged until the 6 s timeout) would read as "a key is already in flight" for the new one. The
+  // gate counts keyOnWire only when BOTH tags match what it is encoding for now, so the suppression is
+  // scoped to the encode->queue->wire lifetime of the SAME key, not merely "some key was recently sent".
+  std::atomic<uint64_t> keyAuOnWireMediaEpoch{0};
+  std::atomic<uint64_t> keyAuOnWireGeneration{0};
   // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
   std::atomic<uint64_t> firstKeyWireUs{0};
   std::atomic<uint64_t> lastKeyAuBytes{0};

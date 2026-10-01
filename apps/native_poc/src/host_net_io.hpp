@@ -46,6 +46,20 @@ struct WireEgress {
   // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
   // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
   std::function<int(const uint8_t* datagram, int len, bool parity)> sink;
+  // Input-epoch fence re-checked AFTER the first datagram's token wait (bitrate-hard-cap r3 F3): the
+  // sender's first-datagram permission point is before the limiter wait, so without this an AU that
+  // was permitted and then waited for tokens would start on the wire after a flush changed the input
+  // epoch. When set, the first datagram is permitted only if `*inputEpoch == itemInputEpoch` AFTER its
+  // pacing/token wait; otherwise the send aborts as an epoch change (no datagram goes out). Later
+  // datagrams keep the existing mid-AU behaviour (an AU already started completes). null = inactive.
+  const std::atomic<uint64_t>* inputEpoch = nullptr;
+  uint64_t itemInputEpoch = 0;
+  // Actual-wire accounting (r3 F4): every datagram that actually leaves (len + 28) is added here,
+  // by kind, the instant the send succeeds -- separate from the limiter's pre-send reservation and
+  // reflected even when the AU is later aborted/partial. null = not collected.
+  uint64_t* outWireDataBytes = nullptr;
+  uint64_t* outWireParityBytes = nullptr;
+  uint64_t* outWireDatagrams = nullptr;
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */

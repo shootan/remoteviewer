@@ -270,8 +270,13 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // and a repeated recovery request in that window would force a duplicate IDR. The sender flag is
    // bounded by a generous safety timeout in case the sender thread is wedged (the real clear is on
    // send completion / rollover). Only while the cap is on, where the long send time exists.
+   // Only a key of the SAME (media epoch, generation) we are encoding for counts as in-flight (r3 F2):
+   // a stale flag left on an old session's key must not suppress a fresh session's recovery IDR.
    const bool keyOnWire = sender.wireCapEnabled && sender.keyAuOnWire.load(std::memory_order_acquire) &&
-                          encodeStartUs < sender.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL;
+                          encodeStartUs < sender.keyAuOnWireSinceUs.load(std::memory_order_acquire) + 6'000'000ULL &&
+                          sender.keyAuOnWireMediaEpoch.load(std::memory_order_relaxed) ==
+                              sender.mediaSessionEpoch.load(std::memory_order_acquire) &&
+                          sender.keyAuOnWireGeneration.load(std::memory_order_relaxed) == streamGeneration;
    const bool forceKeyInFlight =
        (encoder.forceKeySubmittedAtUs != 0 && encodeStartUs < encoder.forceKeySubmittedAtUs + 300'000) || keyOnWire;
    // r4: due by real inputs since the last key of any kind, not by the capture seq -- see
@@ -280,6 +285,11 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                              (encoder.realInputsSinceKey >= encoder.activeKeyint);
    (void)seq;
    const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
+   // The frame that will ACTUALLY be forced as a key this tick. A keyWanted frame that cannot force
+   // right now (a key of this session is already in flight) is emitted as a DELTA, so for the cap gate
+   // it is an ordinary delta -- it must NOT ride the key always-admit exception, or it would overflow a
+   // full queue into the resync-IDR loop F2 describes while the real key is already on its way. (r3 F2)
+   const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
    // The hard wire-rate cap's input gate (bitrate-hard-cap r1/r2): while the wire is backlogged -- the
    // sender queue has not drained -- skip this capture frame BEFORE it is encoded, so the stream drops
    // fps to what the wire carries instead of encoding a delta that overflows the queue into a
@@ -297,7 +307,9 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      }
      EncodeAdmissionInputs adm;
      adm.wireCapActive = true;
-     adm.keyWanted = keyWanted;
+     // Admit-always only for a frame that will actually be a forced key this tick, not every keyWanted
+     // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
+     adm.keyWanted = forceKeyFrame;
      adm.servedBootstrap = servedBootstrap;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
@@ -305,7 +317,6 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
        return Flow::Continue;
      }
    }
-   const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
    // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
    if (forceKeyFrame) {
      if (scheduledKey) encoder.keyReasons |= kHostKeyReasonScheduled;

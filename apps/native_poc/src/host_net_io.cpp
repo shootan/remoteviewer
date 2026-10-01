@@ -182,6 +182,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // The hard wire-rate cap: wait for tokens for this exact datagram (its length + the IP/UDP
     // header the OS adds) before it goes out. A video chunk is never dropped for want of tokens --
     // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
+    const bool isFirstDatagram = packetOrdinal == 1;  // (just incremented; the frame's first send)
     if (wire && wire->limiter) {
       if (wire->limiter->Acquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes, liveEpoch,
                                  itemEpoch) == WireLimiter::Acq::Cancelled) {
@@ -189,11 +190,30 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
         return false;
       }
     }
+    // F3 (r3): the real permission point for the FIRST datagram is AFTER all its pacing/token waits.
+    // If the input epoch moved while this not-yet-started AU waited for tokens, it is of a flushed
+    // input and must not begin on the wire. A later datagram is mid-AU (already started) and keeps
+    // going -- the existing one-AU-per-flush exception. media-epoch is already covered by Acquire.
+    if (isFirstDatagram && wire && wire->inputEpoch &&
+        wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch) {
+      wireAborted = true;
+      return false;
+    }
     const uint64_t callStartUs = stats ? qpc_now_us() : 0;
     const int n = haveSink ? wire->sink(datagram.data(), datagramLen, parity)
                            : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
                                     reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) return false;
+    // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
+    // pre-send reservation, and recorded even if the AU is aborted after this point.
+    if (wire) {
+      if (wire->outWireDatagrams) ++*wire->outWireDatagrams;
+      if (parity) {
+        if (wire->outWireParityBytes) *wire->outWireParityBytes += static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+      } else {
+        if (wire->outWireDataBytes) *wire->outWireDataBytes += static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+      }
+    }
     if (stats) {
       ++stats->datagrams;
       stats->headerBytes += sizeof(header);

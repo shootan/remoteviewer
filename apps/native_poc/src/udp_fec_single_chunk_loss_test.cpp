@@ -50,6 +50,7 @@
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "session_video_pipeline.hpp"
+#include "time_utils.hpp"  // qpc_now_us -- the sender drains recorded replays on the real clock (r3 F1)
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "mfplat.lib")
@@ -371,9 +372,11 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
       }
       ++r.nacksServed;
       const uint16_t count = std::min<uint16_t>(p.missingCount, kUdpVideoNackMaxMissing);
-      // What the host's reader thread does with a NACK (host_startup_control.cpp).
+      // What the host's reader thread does with a NACK (host_startup_control.cpp): RECORD it (r3 F1).
       sender.RetransmitAu(loop.tx, loop.rxAddr, p.streamGeneration, p.seq, p.missing, count);
-      // The replay is at most `count` datagrams; RetransmitAu may also send nothing (budget, miss).
+      // What the sender thread then does every loop: drain the recorded replays (DrainPendingReplays).
+      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), 0);
+      // The replay is at most `count` datagrams; the drain may also send nothing (budget, miss).
       const auto replays = loop.DrainCount(count, 30);
       feed(replays, nowUs, true);
     }
@@ -453,7 +456,8 @@ RunResult run_stream(Loop& loop, const std::vector<Au>& aus, bool tight, Policy 
     if (r.replayProbeSeq != 0) {
       (void)loop.DrainCount(64, 5);  // nothing should be pending; clear anything that is
       const uint16_t index = 0;
-      sender.RetransmitAu(loop.tx, loop.rxAddr, 1, r.replayProbeSeq, &index, 1);
+      sender.RetransmitAu(loop.tx, loop.rxAddr, 1, r.replayProbeSeq, &index, 1);  // record (r3 F1)
+      sender.DrainPendingReplays(loop.tx, loop.rxAddr, static_cast<uint64_t>(qpc_now_us()), 0);  // then send
       const auto replay = loop.DrainCount(1, 200);
       if (replay.size() == 1 && replay[0].size() >= sizeof(UdpVideoChunkHeader)) {
         UdpVideoChunkHeader h{};
