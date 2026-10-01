@@ -39,6 +39,9 @@ struct SessionVideoPipelineConfig {
   // allowance after the last NACK, and a failure budget for an AU that keeps making progress.
   uint64_t replyAllowanceUs = 50000;
   uint64_t giveUpHardCapUs = 5000000;
+  // NACK scheduler tuning (bitrate-hard-cap r2): lets the progress-based vs legacy age-based tail be
+  // selected (tailAgeBasedLegacy) and the graces set. Default = the product's default scheduler.
+  VideoNackConfig nackConfig{};
 };
 
 struct SessionVideoPipelineStats {
@@ -65,6 +68,7 @@ class SessionVideoPipeline {
   SessionVideoPipeline(const SessionVideoPipelineConfig& cfg, Callbacks cb)
       : cfg_(cfg), cb_(std::move(cb)) {
     if (HoldEnabled()) assembler_.ConfigureInOrderHold(cfg_.holdUs, cfg_.maxConcurrent);
+    nack_.Configure(cfg_.nackConfig);
   }
 
   bool HoldEnabled() const { return cfg_.nackEnabled && cfg_.holdUs > 0; }

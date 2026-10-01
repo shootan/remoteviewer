@@ -298,6 +298,18 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         sender.keyAuOnWireSinceUs.store(sendStartUs, std::memory_order_release);
         sender.keyAuOnWire.store(true, std::memory_order_release);
       }
+      // Cache this AU BEFORE it is sent (bitrate-hard-cap r2): a cap-paced large AU takes up to ~1.4 s
+      // to go out, and a NACK that arrives during that window must find it in the cache and be replayed
+      // AT ONCE -- not after the whole send, which can be later than the receiver's stuck-head give-up
+      // (its last data chunk, not the parity tail, is what keeps it alive). Caching at send-start makes
+      // an in-flight NACK an immediate hit; a replay runs on the reader thread, bounded by the shared
+      // wire budget, concurrently with the original send (the receiver dedupes any overlap). A send
+      // that then fails leaves a cached (gen,seq) that simply rolls out -- a new recovery is a new seq.
+      // No-op unless the client negotiated NACK. (was: cached after a successful send.)
+      sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
+                     egress.fecSingleChunkTightStride, item.bytes.data(), item.bytes.size());
+      // Serve anything deferred from the brief gap before this AU was cached (now a hit).
+      sender.ServeDeferredNacks(clientSession.clientSock, peer, item.udpHdr.streamGeneration, item.udpHdr.seq);
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
@@ -305,13 +317,6 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       if (item.keyFrame) sender.keyAuOnWire.store(false, std::memory_order_release);
       const uint64_t sendDoneUs = qpc_now_us();
       if (outcome == UdpSendOutcome::Sent) {
-        // Cache this AU so a client NACK can be answered with just the missing chunks (no-op unless
-        // the client negotiated NACK). (video NACK.)
-        sender.StoreAu(item.udpHdr.streamGeneration, item.udpHdr.seq, item.udpHdr, args.udpMtu,
-                       egress.fecSingleChunkTightStride, item.bytes.data(), item.bytes.size());
-        // Now cached: serve any NACK that missed while this AU was still being sent (r2), to the
-        // current media peer. One bounded post-send recovery; the shared wire budget still bounds it.
-        sender.ServeDeferredNacks(clientSession.clientSock, peer, item.udpHdr.streamGeneration, item.udpHdr.seq);
         const uint64_t durUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
         sender.lastSendStartUs.store(sendStartUs, std::memory_order_relaxed);
         sender.txFrames.fetch_add(1, std::memory_order_relaxed);

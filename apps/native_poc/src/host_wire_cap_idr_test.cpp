@@ -31,11 +31,14 @@
 #include <string>
 #include <vector>
 
+#include <map>
+
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
+#include "session_video_pipeline.hpp"
 #include "udp_video_nack.hpp"
 
 using namespace remote60::native_poc;
@@ -55,18 +58,7 @@ struct Datagram {
   std::vector<uint8_t> bytes;
 };
 
-// Emit one IDR through the real chunker + the wire limiter on a fake clock; capture the datagrams
-// and the virtual time each was permitted (= the cap-paced arrival schedule).
-std::vector<Datagram> cap_paced_idr(uint64_t capBps, size_t idrBytes) {
-  std::vector<Datagram> out;
-  uint64_t nowUs = 1'000'000;
-  WireLimiter lim([&nowUs] { return nowUs; },
-                  [&nowUs](uint64_t deadlineUs, uint64_t) -> bool {
-                    if (deadlineUs > nowUs) nowUs = deadlineUs;
-                    return true;
-                  });
-  lim.SetRate(capBps, clamp_udp_mtu(kMtu) + 28u);
-  std::vector<uint8_t> payload(idrBytes, 0xAB);
+UdpVideoChunkHeader idr_base(size_t idrBytes) {
   UdpVideoChunkHeader base{};
   base.magic = kMagic;
   base.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
@@ -80,6 +72,37 @@ std::vector<Datagram> cap_paced_idr(uint64_t capBps, size_t idrBytes) {
   base.streamGeneration = 7;
   base.captureQpcUs = 1000000;
   base.sendQpcUs = 1000030;
+  return base;
+}
+
+// The exact datagram the host's selective-retransmit would put on the wire for one chunk index.
+std::vector<uint8_t> replay_datagram(const std::vector<uint8_t>& payload, size_t idrBytes, uint16_t index) {
+  std::vector<uint8_t> out;
+  WireEgress wire;
+  wire.sink = [&out](const uint8_t* dg, int len, bool) -> int {
+    out.assign(dg, dg + len);
+    return len;
+  };
+  uint64_t wb = 0, dgc = 0;
+  uint16_t idx = index;
+  send_udp_chunk_indices(INVALID_SOCKET, sockaddr_in{}, payload.data(), payload.size(), idr_base(idrBytes), kMtu,
+                         true, &idx, 1, &wb, &dgc, &wire, nullptr);
+  return out;
+}
+
+// Emit one IDR through the real chunker + the wire limiter on a fake clock; capture the datagrams
+// and the virtual time each was permitted (= the cap-paced arrival schedule).
+std::vector<Datagram> cap_paced_idr(uint64_t capBps, size_t idrBytes) {
+  std::vector<Datagram> out;
+  uint64_t nowUs = 1'000'000;
+  WireLimiter lim([&nowUs] { return nowUs; },
+                  [&nowUs](uint64_t deadlineUs, uint64_t) -> bool {
+                    if (deadlineUs > nowUs) nowUs = deadlineUs;
+                    return true;
+                  });
+  lim.SetRate(capBps, clamp_udp_mtu(kMtu) + 28u);
+  std::vector<uint8_t> payload(idrBytes, 0xAB);
+  const UdpVideoChunkHeader base = idr_base(idrBytes);
   WireEgress wire;
   wire.limiter = &lim;
   wire.sink = [&out, &nowUs](const uint8_t* dg, int len, bool) -> int {
@@ -231,6 +254,141 @@ void measure_stalled_tail() {
         "tailNacks=" + std::to_string(tailNacks));
 }
 
+// ---------------------------------------------------------------- the product-path timeline
+// Drives the REAL SessionVideoPipeline (the shared/Android receiver: its give-up is
+// GiveUpStuckHead -- spent && replyOver && noProgress && oldEnough, 245 ms / 5 s -- and its
+// keyframe requests go through Request()/Break(), NOT spent_for()). The host's defer-then-serve of
+// a NACK that misses the cache during send is modelled here (its real implementation -- DeferNack /
+// ServeDeferredNacks / RetransmitAu -- is validated on the real SenderState by host_wire_cap_defer_test).
+// A timeline is printed; the pass/fail is on the product give-up, so roundsExhausted alone never
+// decides an IDR loop. (bitrate-hard-cap r2, verifier note.)
+struct TimelineResult {
+  uint64_t nacks = 0, keyframeRequests = 0, giveUps = 0, discontinuities = 0, deferredServed = 0;
+  bool delivered = false;
+  uint64_t deliveredAtUs = 0;
+};
+
+TimelineResult timeline(uint64_t capBps, size_t idrBytes, std::vector<uint16_t> drops, bool legacy, const char* label) {
+  const auto dgs = cap_paced_idr(capBps, idrBytes);
+  const std::vector<uint8_t> payload(idrBytes, 0xAB);
+  const uint64_t firstUs = dgs.front().emitUs;
+  const uint64_t lastSendUs = dgs.back().emitUs;  // the host finishes sending (StoreAu) here
+  const uint64_t rttUs = 10000;                   // one-way model delay for a replay to arrive
+  auto isDrop = [&](uint16_t i) { return std::find(drops.begin(), drops.end(), i) != drops.end(); };
+
+  TimelineResult tr;
+  SessionVideoPipelineConfig pc;
+  pc.nackEnabled = true;
+  pc.holdUs = 120000;
+  pc.maxConcurrent = 8;
+  pc.nackConfig.tailAgeBasedLegacy = legacy;
+
+  // Events still to feed the pipeline: originals (minus the dropped chunk) + scheduled replays.
+  std::multimap<uint64_t, std::vector<uint8_t>> feed;
+  for (size_t i = 0; i < dgs.size(); ++i) {
+    if (isDrop(static_cast<uint16_t>(i))) continue;  // chunk(s) lost on the wire
+    feed.emplace(dgs[i].emitUs, dgs[i].bytes);
+  }
+  std::vector<std::pair<uint64_t, std::vector<uint16_t>>> deferred;  // served after lastSendUs
+  uint64_t nowUs = firstUs;
+  int tlLines = 0;
+  auto tl = [&](const char* ev, const std::string& extra = {}) {
+    if (tlLines++ < 24)
+      std::printf("      [%s %6.1fms] %s %s\n", label, (nowUs - firstUs) / 1000.0, ev, extra.c_str());
+  };
+
+  SessionVideoPipeline::Callbacks cb;
+  cb.deliver = [&](UdpH264AssembledFrame&&) {
+    if (!tr.delivered) {
+      tr.delivered = true;
+      tr.deliveredAtUs = nowUs;
+      tl("DELIVER (IDR complete)");
+    }
+  };
+  cb.requestKeyframe = [&] {
+    ++tr.keyframeRequests;
+    tl("REQUEST-KEYFRAME (product give-up path)");
+  };
+  cb.discontinuity = [&] { ++tr.discontinuities; };
+  cb.sendNack = [&](const UdpVideoNackPacket& p) {
+    ++tr.nacks;
+    std::vector<uint16_t> miss(p.missing, p.missing + p.missingCount);
+    // The host caches the AU at send-start (r2), so a NACK during the (long, cap-paced) send is an
+    // immediate cache HIT and the missing chunk is replayed at once -- not held until send-end, which
+    // would be later than the receiver's give-up.
+    tl("NACK", "chunks=" + std::to_string(p.missingCount) + " (cache HIT at send-start -> replay)");
+    for (uint16_t idx : miss) {
+      if (isDrop(idx)) {
+        feed.emplace(nowUs + rttUs, replay_datagram(payload, idrBytes, idx));
+        ++tr.deferredServed;  // reused counter: "a hole chunk replayed in answer to a NACK"
+      }
+    }
+  };
+  SessionVideoPipeline pipe(pc, cb);
+
+  // Drive: advance through feed events and 25 ms ticks until delivered or a 6 s deadline.
+  uint64_t nextTickUs = firstUs;
+  bool servedDeferred = false;
+  const uint64_t deadlineUs = firstUs + 6'000'000;
+  while (nowUs < deadlineUs) {
+    const uint64_t nextFeedUs = feed.empty() ? UINT64_MAX : feed.begin()->first;
+    (void)servedDeferred;
+    (void)deferred;
+    const uint64_t advanceTo = std::min(nextFeedUs, nextTickUs);
+    if (advanceTo == UINT64_MAX) break;
+    nowUs = advanceTo;
+    if (nowUs == nextTickUs) {
+      pipe.OnTick(nowUs);
+      nextTickUs += 25000;
+    }
+    while (!feed.empty() && feed.begin()->first <= nowUs) {
+      auto it = feed.begin();
+      std::vector<uint8_t> bytes = it->second;
+      feed.erase(it);
+      pipe.OnDatagram(bytes.data(), bytes.size(), nowUs);
+    }
+    tr.giveUps = pipe.stats().stuckHeadGiveUps;
+    if (tr.delivered && feed.empty()) break;
+  }
+  tr.giveUps = pipe.stats().stuckHeadGiveUps;
+  std::printf("    %s: delivered=%d at=%.0fms nacks=%llu keyframeReq=%llu giveUps=%llu deferredServed=%llu\n", label,
+              tr.delivered ? 1 : 0, tr.delivered ? (tr.deliveredAtUs - firstUs) / 1000.0 : -1.0,
+              (unsigned long long)tr.nacks, (unsigned long long)tr.keyframeRequests, (unsigned long long)tr.giveUps,
+              (unsigned long long)tr.deferredServed);
+  return tr;
+}
+
+void test_timeline() {
+  std::printf("\n--- product-path timeline (real SessionVideoPipeline give-up, not spent_for) ---\n");
+  // 1) Lossless cap-paced IDR, FIXED receiver: no NACK, no give-up, no keyframe request, delivered.
+  {
+    const auto r = timeline(1'500'000, 208u * 1024u, {}, /*legacy=*/false, "lossless-fixed");
+    check("lossless + fixed receiver: IDR delivered, no NACK, no give-up, no keyframe request",
+          r.delivered && r.nacks == 0 && r.giveUps == 0 && r.keyframeRequests == 0);
+  }
+  // 2) Lossless, LEGACY (old 0.2.147 age-based) receiver: premature NACKs, BUT the product give-up
+  //    needs noProgress -- the tail keeps arriving, so it does NOT give up and does NOT request a
+  //    keyframe; the IDR still completes. This is the r2 point: roundsExhausted != IDR loop.
+  {
+    const auto r = timeline(1'500'000, 208u * 1024u, {}, /*legacy=*/true, "lossless-legacy");
+    check("lossless + LEGACY receiver: premature NACKs but NO give-up / NO keyframe (progress) -- no loop",
+          r.delivered && r.nacks > 0 && r.giveUps == 0 && r.keyframeRequests == 0,
+          "nacks=" + std::to_string(r.nacks) + " giveUps=" + std::to_string(r.giveUps) +
+              " keyReq=" + std::to_string(r.keyframeRequests));
+  }
+  // 3) A real hole DURING send (cache miss), FIXED receiver + host deferred-NACK: the hole is held
+  //    and served once the AU is cached, so the IDR completes with no give-up / no keyframe request.
+  {
+    // Two chunks in ONE FEC group (consecutive, non-interleaved) -> FEC cannot repair -> the hole
+    // MUST be recovered by the deferred NACK served after the AU is cached.
+    const auto r = timeline(1'500'000, 208u * 1024u, {40, 41}, /*legacy=*/false, "hole-during-send");
+    check("FEC-unrecoverable hole during send: cached-at-send-start NACK replay recovers it, IDR delivered, no give-up",
+          r.delivered && r.deferredServed > 0 && r.giveUps == 0 && r.keyframeRequests == 0,
+          "replays=" + std::to_string(r.deferredServed) + " giveUps=" + std::to_string(r.giveUps) +
+              " delivered=" + std::to_string(r.delivered ? 1 : 0));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -242,6 +400,7 @@ int main() {
   measure(1'500'000, 208u * 1024u, "208KB@1.5Mbps");
   measure_legacy_vs_fixed();
   measure_stalled_tail();
+  test_timeline();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", g_failed ? "FAILED" : "PASSED", g_checks, g_failed);
   // This test PASSES when it REPRODUCES the problem; it is evidence for the receiver fix decision.
   return g_failed ? 1 : 0;
