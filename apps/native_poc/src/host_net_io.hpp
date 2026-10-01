@@ -27,12 +27,26 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "native_socket.hpp"  // WinsockScope (the host used a byte-identical private copy; now the shared one)
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc {
+
+class WireLimiter;  // host_wire_limiter.hpp
+
+// The hard wire-rate cap wired into the send path (bitrate-hard-cap r1). Both are optional and
+// null in the ordinary call: `limiter` null leaves the legacy behaviour (pacing only, no cap);
+// `sink` null sends through the real socket. A test passes a limiter driven by a fake clock and a
+// sink that records (time, length, kind) so the same send code is measured deterministically.
+struct WireEgress {
+  WireLimiter* limiter = nullptr;  // charged datagramLen + 28 (IP+UDP) before each datagram
+  // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
+  // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
+  std::function<int(const uint8_t* datagram, int len, bool parity)> sink;
+};
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */
 ULONG resolve_bind_address(const std::string& bindAddress);
@@ -128,7 +142,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                                     size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                     uint32_t mtuBytes, SendPathStats* stats,
                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
-                                    const UdpEgressConfig& egress);
+                                    const UdpEgressConfig& egress, const WireEgress* wire = nullptr);
 
 bool send_udp_chunks(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
@@ -138,7 +152,7 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                      uint32_t mtuBytes, SendPathStats* stats,
                                      const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
-                                     const UdpEgressConfig& egress);
+                                     const UdpEgressConfig& egress, const WireEgress* wire = nullptr);
 
 // Selective retransmit: re-send only the data chunks named in `indices` for the AU described by
 // `payload`/`baseHeader`/`mtuBytes`/`tightSingleChunk`, using the exact same chunk geometry as the
@@ -148,11 +162,17 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
 // Out-of-range indices are skipped. (video NACK.)
 // outWireBytes / outDatagrams (optional): what the replay actually put on the wire, header
 // included, for the per-flow byte accounting (quality r1).
+// `wire` (bitrate-hard-cap r1): the common limiter + optional sink. Retransmit charges the SAME
+// bucket as the live send through TryAcquire (non-blocking -- the reader thread must not wait on the
+// wire): a chunk that does not fit the budget now is left for the client's IDR fallback, so a NACK
+// storm cannot push the stream over the cap. `outSuppressed` (optional) counts chunks skipped that way.
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
                                       size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                       uint32_t mtuBytes, bool tightSingleChunk,
                                       const uint16_t* indices, uint16_t count,
                                       uint64_t* outWireBytes = nullptr,
-                                      uint64_t* outDatagrams = nullptr);
+                                      uint64_t* outDatagrams = nullptr,
+                                      const WireEgress* wire = nullptr,
+                                      uint64_t* outSuppressed = nullptr);
 
 }  // namespace remote60::native_poc

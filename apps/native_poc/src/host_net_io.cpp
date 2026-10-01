@@ -23,11 +23,17 @@
 #include <vector>
 
 #include "host_net_io.hpp"
+#include "host_wire_limiter.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
 
 namespace remote60::native_poc {
+
+// The bytes the OS adds below the UDP payload on IPv4: 20 (IP) + 8 (UDP). The wire cap charges each
+// datagram its payload length plus this, so the account is the IP-layer bytes of the video stream,
+// not just its UDP payload. (bitrate-hard-cap r1, plan point 1.)
+constexpr uint64_t kWireIpUdpHeaderBytes = 28;
 
 ULONG resolve_bind_address(const std::string& bindAddress) {
   if (bindAddress.empty()) return htonl(INADDR_ANY);
@@ -137,8 +143,11 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                                     size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                     uint32_t mtuBytes, SendPathStats* stats,
                                     const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
-                                    const UdpEgressConfig& egress) {
-  if (!payload || payloadSize == 0 || s == INVALID_SOCKET) return UdpSendOutcome::TransportError;
+                                    const UdpEgressConfig& egress, const WireEgress* wire) {
+  // With a sink the socket is unused (a test observes datagrams instead); without one a real socket
+  // is required.
+  const bool haveSink = wire && wire->sink;
+  if (!payload || payloadSize == 0 || (s == INVALID_SOCKET && !haveSink)) return UdpSendOutcome::TransportError;
   const uint64_t startUs = qpc_now_us();
   // One geometry for the data chunks, the parity, the pacing budget and (through the NACK cache,
   // which stores the same inputs) the replay of this frame.
@@ -158,6 +167,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
       udp_pace_budget_us(egress, static_cast<size_t>(pacedPayloadBytes), packetCount,
                          (baseHeader.flags & 0x1u) != 0);
   uint32_t packetOrdinal = 0;
+  bool wireAborted = false;  // the limiter cancelled (stop / epoch) -- not a transport error
 
   auto send_packet = [&](const UdpVideoChunkHeader& header, const uint8_t* bytes,
                          uint32_t byteCount) -> bool {
@@ -167,10 +177,22 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     ++packetOrdinal;
     std::memcpy(datagram.data(), &header, sizeof(header));
     std::memcpy(datagram.data() + sizeof(header), bytes, byteCount);
+    const int datagramLen = static_cast<int>(sizeof(header) + byteCount);
+    const bool parity = (header.flags & 0x10u) != 0;
+    // The hard wire-rate cap: wait for tokens for this exact datagram (its length + the IP/UDP
+    // header the OS adds) before it goes out. A video chunk is never dropped for want of tokens --
+    // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
+    if (wire && wire->limiter) {
+      if (wire->limiter->Acquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes, liveEpoch,
+                                 itemEpoch) == WireLimiter::Acq::Cancelled) {
+        wireAborted = true;
+        return false;
+      }
+    }
     const uint64_t callStartUs = stats ? qpc_now_us() : 0;
-    const int n = sendto(s, reinterpret_cast<const char*>(datagram.data()),
-                         static_cast<int>(sizeof(header) + byteCount), 0,
-                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    const int n = haveSink ? wire->sink(datagram.data(), datagramLen, parity)
+                           : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
+                                    reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) return false;
     if (stats) {
       ++stats->datagrams;
@@ -205,7 +227,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
-    if (!send_packet(h, payload + offset, chunkSize)) return UdpSendOutcome::TransportError;
+    if (!send_packet(h, payload + offset, chunkSize)) return wireAborted ? UdpSendOutcome::EpochChanged : UdpSendOutcome::TransportError;
   }
 
   // One XOR parity datagram per eight data datagrams repairs one loss in every group. The
@@ -247,7 +269,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     h.chunkIndex = static_cast<uint16_t>(firstChunk);
     h.chunkCount = static_cast<uint16_t>(chunkCount);
     h.chunkStride = stride;
-    if (!send_packet(h, parity.data(), stride)) return UdpSendOutcome::TransportError;
+    if (!send_packet(h, parity.data(), stride)) return wireAborted ? UdpSendOutcome::EpochChanged : UdpSendOutcome::TransportError;
   }
 
   if (stats) {
@@ -268,9 +290,9 @@ UdpSendOutcome send_udp_chunks_timed(SOCKET s, const sockaddr_in& peer, const ui
                                      size_t payloadSize, const UdpVideoChunkHeader& baseHeader,
                                      uint32_t mtuBytes, SendPathStats* stats,
                                      const std::atomic<uint64_t>* liveEpoch, uint64_t itemEpoch,
-                                     const UdpEgressConfig& egress) {
+                                     const UdpEgressConfig& egress, const WireEgress* wire) {
   return send_udp_chunks_impl(s, peer, payload, payloadSize, baseHeader, mtuBytes, stats, liveEpoch,
-                              itemEpoch, egress);
+                              itemEpoch, egress, wire);
 }
 
 UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const uint8_t* payload,
@@ -278,8 +300,11 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
                                       uint32_t mtuBytes, bool tightSingleChunk,
                                       const uint16_t* indices, uint16_t count,
                                       uint64_t* outWireBytes,
-                                      uint64_t* outDatagrams) {
-  if (!payload || payloadSize == 0 || s == INVALID_SOCKET || !indices || count == 0)
+                                      uint64_t* outDatagrams,
+                                      const WireEgress* wire,
+                                      uint64_t* outSuppressed) {
+  const bool haveSink = wire && wire->sink;
+  if (!payload || payloadSize == 0 || (s == INVALID_SOCKET && !haveSink) || !indices || count == 0)
     return UdpSendOutcome::TransportError;
   // The same geometry as the original send: the receiver discards an assembly whose stride a
   // later chunk contradicts, so a replay with the wrong stride would destroy what it repairs.
@@ -303,11 +328,20 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     h.flags &= static_cast<uint16_t>(~(0x2u | 0x4u | 0x10u));  // recompute first/last, never parity
     if (offset == 0) h.flags |= 0x2u;
     if (offset + chunkSize >= payloadSize) h.flags |= 0x4u;
+    const int datagramLen = static_cast<int>(sizeof(h) + chunkSize);
+    // The common wire cap, non-blocking on this (reader) thread: a replay chunk that does not fit
+    // the shared budget now is left out so a NACK burst cannot push the stream over the cap -- the
+    // client's keyframe fallback recovers it. Not a transport error; keep going to the next index.
+    if (wire && wire->limiter &&
+        !wire->limiter->TryAcquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes)) {
+      if (outSuppressed) ++*outSuppressed;
+      continue;
+    }
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
-    const int sent = sendto(s, reinterpret_cast<const char*>(datagram.data()),
-                 static_cast<int>(sizeof(h) + chunkSize), 0,
-                 reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    const int sent = haveSink ? wire->sink(datagram.data(), datagramLen, false)
+                              : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
+                                       reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (sent > 0) {
       if (outWireBytes) *outWireBytes += static_cast<uint64_t>(sent);
       if (outDatagrams) ++*outDatagrams;

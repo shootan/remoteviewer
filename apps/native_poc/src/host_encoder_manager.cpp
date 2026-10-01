@@ -121,6 +121,12 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
               << " bitrate=" << encoder.activeBitrate << "\n";
   }
+  // The hard wire cap follows the active bitrate too (ABR / governor downshift lowers it; an upshift
+  // raises it). Changing the rate preserves the bucket's credit -- it is not a refill lane. (r1)
+  if (sender.wireCapEnabled &&
+      sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(encoder.activeBitrate)) {
+    sender.UpdateWireCap(static_cast<uint64_t>(encoder.activeBitrate));
+  }
   res.captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
   encoder.RefreshFrameIntervals(capture, frameGating);
   return true;

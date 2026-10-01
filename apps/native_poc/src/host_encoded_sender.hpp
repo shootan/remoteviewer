@@ -14,11 +14,13 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "host_net_io.hpp"
+#include "host_wire_limiter.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 
@@ -108,11 +110,28 @@ struct SenderState {
   std::atomic<uint64_t> nackRequests{0};          // telemetry: NACK packets served
   std::atomic<uint64_t> nackMisses{0};            // telemetry: NACKs for an AU no longer cached
   std::atomic<uint64_t> nackSuppressed{0};        // telemetry: retransmits skipped over the budget
-  // Retransmit byte budget (token bucket): caps replayed bytes to a fraction of the live send rate
-  // so a NACK storm cannot amplify congestion. Guarded by nackBudgetMu; refilled on demand. (Codex.)
-  std::mutex nackBudgetMu;
-  uint64_t nackBudgetTokensBytes = 0;
-  uint64_t nackBudgetLastUs = 0;
+  // ---- Hard wire-rate cap (bitrate-hard-cap r1) ----
+  // One token bucket for everything this stream puts on the wire -- data, parity, NACK replay --
+  // charged each datagram's length + 28 (IP/UDP). The sender thread waits on it (never drops a
+  // video chunk); the reader thread spends non-blockingly for NACK (a replay that does not fit is
+  // suppressed, as the old 15%-of-peak bucket did, but now from the SAME budget so there is no lane
+  // around the cap). Constructed lazily by StartWireCap with the qpc clock and a cancellable sleep;
+  // null until then (cap inactive -> legacy pacing-only behaviour). Rate follows the active bitrate
+  // through UpdateWireCap (ApplyTarget); a rate change never refills the bucket (plan point 4).
+  std::unique_ptr<WireLimiter> wireLimiter;
+  bool wireCapEnabled = false;  // REMOTE60_NATIVE_WIRE_CAP (default on); fixed after startup
+  uint32_t wireCapMtu = 1200;   // clamp_udp_mtu(args.udpMtu); the Lmax source for the bucket depth
+  std::atomic<uint64_t> wireCapBps{0};  // the cap now in force (telemetry; 0 = disabled)
+  // Build the limiter (idempotent) and set the cap. enabled=false sets rate 0 (cap off).
+  void StartWireCap(uint64_t capBps, uint32_t mtu, bool enabled);
+  // A new active bitrate (ApplyTarget / ABR / governor fps step): move the cap, preserving credit.
+  void UpdateWireCap(uint64_t capBps);
+  // The egress passed to the send path: the limiter when the cap is active, no test sink.
+  WireEgress MakeWireEgress() {
+    WireEgress w;
+    w.limiter = wireLimiter.get();
+    return w;
+  }
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
   // `tightSingleChunk` is the egress.fecSingleChunkTightStride the AU was chunked with.
   void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,

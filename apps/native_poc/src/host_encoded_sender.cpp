@@ -30,6 +30,36 @@
 
 namespace remote60::native_poc {
 
+void SenderState::StartWireCap(uint64_t capBps, uint32_t mtu, bool enabled) {
+  wireCapEnabled = enabled;
+  wireCapMtu = mtu;
+  if (!wireLimiter) {
+    wireLimiter = std::make_unique<WireLimiter>(
+        [] { return qpc_now_us(); },
+        // A cancellable sleep: wait in 1 ms slices so a Cancel (epoch roll / peer change) or Stop
+        // (shutdown) breaks the wait within a slice; udp_pace_wait_until gives the sub-ms precision
+        // the per-datagram spacing needs (one ~1200 B datagram is ~2 ms apart at 6 Mbps).
+        [this](uint64_t deadlineUs, uint64_t seq) -> bool {
+          for (;;) {
+            const uint64_t now = qpc_now_us();
+            if (now >= deadlineUs) return true;
+            if (wireLimiter->cancel_seq() != seq || wireLimiter->stopped()) return false;
+            udp_pace_wait_until(std::min<uint64_t>(deadlineUs, now + 1000ULL));
+          }
+        });
+  }
+  const uint32_t lmax = clamp_udp_mtu(mtu) + 28u;
+  wireLimiter->SetRate(enabled ? capBps : 0ULL, lmax);
+  wireCapBps.store(enabled ? capBps : 0ULL, std::memory_order_relaxed);
+}
+
+void SenderState::UpdateWireCap(uint64_t capBps) {
+  if (!wireLimiter) return;
+  const uint32_t lmax = clamp_udp_mtu(wireCapMtu) + 28u;
+  wireLimiter->SetRate(wireCapEnabled ? capBps : 0ULL, lmax);
+  wireCapBps.store(wireCapEnabled ? capBps : 0ULL, std::memory_order_relaxed);
+}
+
 void SenderState::StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
                           uint32_t mtu, bool tightSingleChunk, const uint8_t* payload,
                           size_t payloadSize) {
@@ -69,36 +99,22 @@ void SenderState::RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t ge
     mtu = it->mtu;
     tightSingleChunk = it->tightSingleChunk;
   }
-  // Retransmit byte budget: refill a token bucket at ~15% of the live send rate and only spend if
-  // the requested chunks fit, so a NACK storm cannot amplify congestion. (Codex: byte budget.)
-  {
-    const uint64_t nowUs = static_cast<uint64_t>(qpc_now_us());
-    const uint32_t peakBps = pacePeakBps.load(std::memory_order_relaxed);  // bits/s; 0 = unpaced
-    const uint64_t rateBytesPerSec =
-        ((peakBps > 0 ? static_cast<uint64_t>(peakBps) : 48000000ULL) / 8ULL) * 15ULL / 100ULL;
-    const uint64_t capBytes = rateBytesPerSec / 2ULL + 65536ULL;  // ~0.5s burst + one frame's slack
-    const uint64_t estBytes = static_cast<uint64_t>(count) * static_cast<uint64_t>(mtu ? mtu : 1400);
-    std::lock_guard<std::mutex> lk(nackBudgetMu);
-    if (nackBudgetLastUs == 0) {
-      nackBudgetTokensBytes = capBytes;  // prime the bucket on first use
-    } else if (nowUs > nackBudgetLastUs) {
-      nackBudgetTokensBytes += (nowUs - nackBudgetLastUs) * rateBytesPerSec / 1000000ULL;
-      if (nackBudgetTokensBytes > capBytes) nackBudgetTokensBytes = capBytes;
-    }
-    nackBudgetLastUs = nowUs;
-    if (nackBudgetTokensBytes < estBytes) {
-      nackSuppressed.fetch_add(1, std::memory_order_relaxed);
-      return;  // over budget -> let the client's IDR fallback handle it instead of flooding
-    }
-    nackBudgetTokensBytes -= estBytes;
-  }
+  // Retransmit byte budget (bitrate-hard-cap r1): the replay spends the SAME wire bucket as the live
+  // send, non-blockingly (TryAcquire inside send_udp_chunk_indices) -- a chunk that does not fit the
+  // budget now is suppressed and the client's IDR fallback recovers it, so a NACK storm cannot push
+  // the stream over the cap, and there is no separate retransmit lane around it. When the cap is off
+  // (wireLimiter null) every chunk goes, as before. The reader thread never blocks on the wire.
+  WireEgress wire = MakeWireEgress();
   uint64_t replayBytes = 0;
   uint64_t replayDatagrams = 0;
+  uint64_t replaySuppressed = 0;
   (void)send_udp_chunk_indices(sock, peer, payload.data(), payload.size(), baseHeader, mtu,
-                               tightSingleChunk, missing, count, &replayBytes, &replayDatagrams);
+                               tightSingleChunk, missing, count, &replayBytes, &replayDatagrams,
+                               &wire, &replaySuppressed);
   txNackBytes.fetch_add(replayBytes, std::memory_order_relaxed);
   txNackDatagrams.fetch_add(replayDatagrams, std::memory_order_relaxed);
-  nackRetransmitChunks.fetch_add(count, std::memory_order_relaxed);
+  nackRetransmitChunks.fetch_add(replayDatagrams, std::memory_order_relaxed);
+  if (replaySuppressed > 0) nackSuppressed.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SenderState::StartThread(VideoTransport transport, bool useH264, const Args& args,
@@ -207,10 +223,13 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       const uint64_t sendStartUs = qpc_now_us();
       item.udpHdr.sendQpcUs = sendStartUs;
       SendPathStats pathStats{};
+      // The hard wire cap, shared with the NACK path. Null limiter (cap off) leaves the send exactly
+      // as it was. Acquire waits for tokens per datagram and aborts (-> EpochChanged) on stop/epoch.
+      WireEgress wireEgress = sender.MakeWireEgress();
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
-                                item.mediaEpoch, egress);
+                                item.mediaEpoch, egress, &wireEgress);
       const uint64_t sendDoneUs = qpc_now_us();
       if (outcome == UdpSendOutcome::Sent) {
         // Cache this AU so a client NACK can be answered with just the missing chunks (no-op unless
@@ -350,6 +369,9 @@ void SenderState::PumpUdpHello(VideoTransport transport, EncoderState& encoder) 
     sender.lastKeyAuBytes.store(0, std::memory_order_relaxed);
     sender.lastKeyAuChunks.store(0, std::memory_order_relaxed);
   }
+  // A sender asleep in the limiter for an old-epoch frame must wake to see the new epoch and abort;
+  // Acquire re-checks mediaSessionEpoch after this wake. (bitrate-hard-cap r1)
+  if (sender.wireLimiter) sender.wireLimiter->Cancel();
   encoder.RequestKey(kHostKeyReasonPeer);
   sender.firstKeyEnqueuedUs = 0;  // re-anchor the per-epoch IDR telemetry on the new session
   std::cout << "[native-video-host] udp peer updated; media barrier armed epoch="

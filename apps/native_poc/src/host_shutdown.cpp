@@ -155,6 +155,9 @@ void shutdown_host(HostContext& hx) {
   // The sender still holds clientSession.clientSock; stop it before the socket closes.
   sender.stop.store(true, std::memory_order_release);
   sender.cv.notify_all();
+  // The sender may be asleep inside the wire limiter waiting for tokens (not on cv); stop the
+  // limiter so that Acquire returns Cancelled at once and the thread can see sender.stop. (r1)
+  if (sender.wireLimiter) sender.wireLimiter->Stop();
   if (sender.thread.joinable()) sender.thread.join();
   // The agent's send callback owns the media socket too. Stop it before any socket is closed.
   clientSession.directoryAgent.Stop();

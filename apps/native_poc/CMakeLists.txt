@@ -2802,6 +2802,19 @@ add_executable(remote60_udp_fec_interleave_test
 target_include_directories(remote60_udp_fec_interleave_test PRIVATE src)
 target_link_libraries(remote60_udp_fec_interleave_test PRIVATE common ws2_32)
 
+# bitrate-hard-cap r1: the hard wire-rate cap bucket math + the real send path (send_udp_chunks_timed
+# / send_udp_chunk_indices) charged through one shared limiter on a fake clock + recording sink, with
+# sliding-window maxima and bypass negative controls. Pure-logic (no sockets, no threads).
+add_executable(remote60_host_wire_limiter_test
+  src/host_net_io.cpp
+  src/host_wire_limiter_test.cpp
+)
+target_include_directories(remote60_host_wire_limiter_test PRIVATE src)
+target_link_libraries(remote60_host_wire_limiter_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_wire_limiter_test PRIVATE /utf-8)
+endif()
+
 # fec-single-chunk-stride: the host's real chunker over loopback, its datagrams judged by the real
 # shared assembler -- boundary sizes, loss counter-examples, the NACK replay geometry, both layouts.
 add_executable(remote60_udp_fec_single_chunk_test

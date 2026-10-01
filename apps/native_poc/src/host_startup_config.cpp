@@ -310,6 +310,15 @@ void startup_log_config(HostContext& hx) {
         static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL)),
         std::memory_order_relaxed);
     sender.keyframePacePeakBps.store(sender.udpKeyframePacePeakBps, std::memory_order_relaxed);
+    // The hard wire-rate cap (bitrate-hard-cap r1): the user's bitrate is the ceiling for everything
+    // this stream puts on the wire (data + FEC + NACK + IP/UDP headers) in every 1 s / 250 ms window,
+    // unlike pacePeakBps which only spreads one frame's burst at several times the mean. On by
+    // default; REMOTE60_NATIVE_WIRE_CAP=0 restores the pacing-only behaviour (the rollback lever).
+    const bool wireCapOn = !(env_string_or_empty("REMOTE60_NATIVE_WIRE_CAP") == "0");
+    sender.StartWireCap(static_cast<uint64_t>(args.bitrate), args.udpMtu, wireCapOn);
+    std::cout << "[native-video-host] wireCap=" << (wireCapOn ? "on" : "off")
+              << " wireCapBps=" << sender.wireCapBps.load(std::memory_order_relaxed)
+              << " wireCapMtu=" << clamp_udp_mtu(args.udpMtu) << "\n";
     std::cout << "[native-video-host] h264 pacing=" << (sender.noPacingH264 ? "off" : "on")
               << " udpPacePeakPercent=" << sender.udpPacePeakPercent
               << " udpPacePeakBps=" << sender.pacePeakBps.load(std::memory_order_relaxed)
