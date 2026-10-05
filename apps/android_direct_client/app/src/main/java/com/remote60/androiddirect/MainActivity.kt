@@ -1665,16 +1665,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showViewerControls(emphasized = true)
             handleViewerBack("viewer_back")
         }
-        // apk-ui r3: one keyboard button. It opens the PC keyboard panel (키보드 · 단축키 · 휴대폰 자판);
-        // with the phone keyboard up, the same button puts it away.
+        // apk-ui r3: one keyboard button. apk-keyboard-phone-first r1: the phone keyboard comes first,
+        // then the PC keyboard panel (휴대폰 자판 · 키보드 · 단축키 · F키), then closed.
         viewerKeyboardButton.setOnClickListener {
             showViewerControls(emphasized = true)
-            if (viewerImeCaptureView.hasFocus()) {
-                hideViewerKeyboard("rail_keyboard")
-            } else {
-                viewerKeyPanel?.reservedHeightPx =
-                    if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) railMinimumHeightPx() else 0
-                viewerKeyPanel?.toggle()
+            when (ViewerKeyboardCycle.onPress(viewerImeCaptureView.hasFocus(), viewerKeyPanel?.isOpen == true)) {
+                ViewerKeyboardCycle.Action.SHOW_PHONE -> toggleViewerKeyboard()
+                ViewerKeyboardCycle.Action.PHONE_TO_PANEL -> {
+                    hideViewerKeyboard("rail_keyboard")
+                    viewerKeyPanel?.reservedHeightPx =
+                        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) railMinimumHeightPx() else 0
+                    viewerKeyPanel?.show()
+                }
+                ViewerKeyboardCycle.Action.CLOSE_PANEL -> viewerKeyPanel?.hide()
             }
         }
         findViewById<View>(R.id.viewerMenuDisconnectButton).setOnClickListener { confirmDisconnectFromViewer() }
