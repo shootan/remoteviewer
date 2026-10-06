@@ -1385,13 +1385,28 @@ int wmain(int argc, wchar_t** argv) {
   if (!stationLock.Acquire("viewer_paste_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("viewer_paste_e2e_test");
   const DWORD interactiveClipBefore = GetClipboardSequenceNumber();
   std::cout << "screenshots: " << narrow(outDir) << "\n";
+  // Where the user's clipboard moved, if it did, and whose it is then: the process that owns it
+  // (name only -- nothing on it is read). This test never writes it; a move is somebody else's copy.
+  const auto clip_owner = [] {
+    DWORD pid = 0;
+    if (HWND o = GetClipboardOwner()) GetWindowThreadProcessId(o, &pid);
+    const std::wstring path = pid ? process_path(pid) : std::wstring();
+    return "owner pid " + std::to_string(pid) + " " + narrow(path.substr(path.find_last_of(L'\\') + 1));
+  };
+  const auto phase_seq = [&](const char* phase) {
+    std::printf("      WinSta0 clipboard after %s: seq %lu, %s\n", phase, GetClipboardSequenceNumber(), clip_owner().c_str());
+  };
+  std::printf("      WinSta0 clipboard at start: seq %lu, %s\n", interactiveClipBefore, clip_owner().c_str());
   run_child_on_private_station(outDir, false);
+  phase_seq("the private-station run");
   run_child_on_private_station(outDir, true);
+  phase_seq("the legacy-host run");
   run_bar_on_visible_desktop(outDir);
+  phase_seq("the visible-desktop bar");
   const DWORD interactiveClipAfter = GetClipboardSequenceNumber();
   check("the user's clipboard (WinSta0) did not move: " + std::to_string(interactiveClipBefore) + " -> " +
             std::to_string(interactiveClipAfter),
-        interactiveClipBefore == interactiveClipAfter);
+        interactiveClipBefore == interactiveClipAfter, clip_owner());
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }
