@@ -54,6 +54,9 @@ class ControlClient {
   // Paste on demand (t-y4wj64jw): the text paste exchange (80/81) and the image / file paste
   // outcomes, handed to the UI thread. 1 = exchanged, 0 = nothing, -1 = link failure.
   int pump_paste(remote60::native_poc::ControlLink& link);
+  // One clipboard poll (text R->P and the host's copy generation). `forced`: not waiting for the
+  // interval (a paste's probe). 1 = polled, 0 = not yet due, -1 = link failure.
+  int poll_host_clipboard(remote60::native_poc::ControlLink& link, bool forced);
   // --- control resume (item 8, C3) ---
   // The worker's three moves. Kept here rather than in the loop because the loop already
   // has one job, and because "is the picture still arriving" has to be answered with the

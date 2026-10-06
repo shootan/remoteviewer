@@ -131,6 +131,33 @@ PasteFailure paste_failure_for_files(uint8_t verdict) {
 
 int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
   auto& clip = ctx.control.clipboard;
+  // r4: a paste waits for one fresh poll before it sends -- a copy made on the host a moment ago,
+  // inside the 700 ms poll interval, must still win over this PC's older copy.
+  {
+    uint64_t probeId = 0;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.probeRequested) {
+        clip.probeRequested = false;
+        probeId = clip.probeId;
+      }
+    }
+    if (probeId != 0) {
+      const int r = poll_host_clipboard(link, /*forced=*/true);
+      PasteAnswer a;
+      a.id = probeId;
+      a.probe = true;
+      if (r < 0) {
+        a.failure = PasteFailure::Link;
+        post_paste_answer(ctx, a);
+        return -1;
+      }
+      a.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
+      a.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      post_paste_answer(ctx, a);
+      return 1;
+    }
+  }
   // Images and files settle inside their clients; their outcome is passed on as soon as it exists.
   {
     remote60::native_poc::ClipImageClient::PasteOutcome io;
@@ -256,12 +283,27 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
   }
   // (b) Otherwise poll the host for a change, on an interval -- the host cannot push, so this is the
   // only way host -> viewer text arrives.
+  return poll_host_clipboard(link, false);
+}
+
+int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, bool forced) {
+  auto& clip = ctx.control.clipboard;
   const uint64_t nowUs = qpc_now_us();
-  if (!clip.policy.ShouldPoll(nowUs)) return 0;
+  if (!forced && !clip.policy.ShouldPoll(nowUs)) return 0;
   clip.policy.NotePolled(nowUs);
   remote60::native_poc::ClipboardPollReply reply;
   if (!remote60::native_poc::poll_clipboard(link, clip.policy.knownGeneration(), nowUs, &reply)) {
     return -1;
+  }
+  // Paste on demand r4: a copy made on the host in any way (menu, at that PC, an image) shows here
+  // as a higher copy generation. The first value of a session is where it starts, not a copy.
+  if (reply.hasCopyGen) {
+    const bool known = clip.hostCopyGenKnown.exchange(true, std::memory_order_acq_rel);
+    const uint64_t before = clip.hostCopyGen.exchange(reply.copyGen, std::memory_order_acq_rel);
+    if (known && reply.copyGen > before) {
+      std::cout << "[native-video-client][paste] remote copy on the host (any format) copyGen=" << reply.copyGen
+                << (forced ? " (seen by a paste's check)" : "") << "\n";
+    }
   }
   // The first reply of a session only sets the generation: its contents are from before this
   // session and must not land on top of what the user copied since (the stale-revival bug).
@@ -339,6 +381,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
       ctx.control.clipboard.policy.OnConnected();
       ctx.control.clipboard.connGen.fetch_add(1, std::memory_order_acq_rel);
       ctx.control.clipboard.havePasteText = false;  // asked on the previous connection
+      ctx.control.clipboard.probeRequested = false;
+      ctx.control.clipboard.hostCopyGenKnown.store(false, std::memory_order_release);  // a new session's baseline
     }
     // Paste on demand: whether this host confirms a paste. Set every pong, like the bits around it.
     ctx.control.clipboard.hostPasteOnDemand.store(

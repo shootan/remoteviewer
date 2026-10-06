@@ -64,6 +64,13 @@ struct ClipboardSyncState {
   std::atomic<uint64_t> connGen{0};
   // The text paste the UI thread left for the control thread (under mu). Images and files go
   // through their own clients (SubmitSnapshotForPaste / SubmitLocalFilesForPaste).
+  // Paste on demand r4: the host's copy generation from the last poll (control writes, UI reads), and
+  // whether this host sends one at all (an older host does not: then r2 behaviour).
+  std::atomic<uint64_t> hostCopyGen{0};
+  std::atomic<bool> hostCopyGenKnown{false};
+  // A paste asks for one poll NOW, before it sends anything (under mu): did the host copy since?
+  bool probeRequested = false;
+  uint64_t probeId = 0;
   bool havePasteText = false;
   uint64_t pasteTextId = 0;
   uint32_t pasteTextRevision = 0;

@@ -58,6 +58,9 @@ struct MockHost {
   std::u16string text;
   std::u16string lastApplied;  // the last text a client update pushed
   int updatesApplied = 0;
+  // Paste on demand r4: a host that also sends its copy generation (flags bit1 + reserved).
+  bool withCopyGen = false;
+  uint32_t copyGen = 0;
 };
 
 // Processes one whole client message and returns the reply bytes, mirroring the two handlers in
@@ -90,7 +93,9 @@ std::vector<uint8_t> host_process(MockHost& host, const std::vector<uint8_t>& ms
     ControlClipboardRequestMessage req{};
     std::memcpy(&req, msg.data(), sizeof(req));
     const bool hasData = host.generation > req.knownGeneration && !host.text.empty();
-    return build_clipboard_data(req.seq, host.generation, hasData, host.text, host.hash, 0);
+    std::vector<uint8_t> reply = build_clipboard_data(req.seq, host.generation, hasData, host.text, host.hash, 0);
+    if (host.withCopyGen) remote60::native_poc::clipboard_data_set_copy_gen(&reply, host.copyGen);  // as Serve does
+    return reply;
   }
   return {};
 }
@@ -145,6 +150,41 @@ void test_poll(const std::u16string& hostText, const std::string& label) {
   ok(poll_clipboard(link, 5, 0, &current), label + ": a current client gets a reply too");
   ok(!current.hasData, label + ": with no data");
   ok(current.generation == 5, label + ": still carrying the generation");
+}
+
+// r4: a reply carrying the copy generation reads exactly as before -- size, text, hash, generation
+// -- for a reader of bit0 only, and the new field reads where it is.
+void test_copy_gen() {
+  MockHost host;
+  host.text = u"host text with a copy generation";
+  host.hash = clipboard_fnv1a(host.text);
+  host.generation = 9;
+  host.withCopyGen = true;
+  host.copyGen = 0xA1B2C3u;
+  LoopbackLink link(&host);
+  ClipboardPollReply reply;
+  ok(poll_clipboard(link, 0, 0, &reply), "copy-gen: a reply with bit1 parses (same size, same type)");
+  ok(reply.hasData && reply.text == host.text && reply.hash == host.hash && reply.generation == 9,
+     "copy-gen: the text part is unchanged by bit1");
+  ok(reply.hasCopyGen && reply.copyGen == 0xA1B2C3u, "copy-gen: the generation reads from reserved");
+  ClipboardPollReply none;
+  ok(poll_clipboard(link, 9, 0, &none), "copy-gen: a reply with bit1 and no data parses");
+  ok(!none.hasData && none.text.empty() && none.hasCopyGen && none.copyGen == 0xA1B2C3u,
+     "copy-gen: no data (bit0 clear), the generation still there");
+  // What an older viewer read: the fixed part, bit0 for data, never `reserved`.
+  const std::vector<uint8_t> raw = host_process(host, remote60::native_poc::build_clipboard_request(1, 0, 0));
+  remote60::native_poc::ControlClipboardDataHeader h{};
+  std::memcpy(&h, raw.data(), sizeof(h));
+  ok(h.header.size == sizeof(remote60::native_poc::ControlClipboardDataHeader) && (h.flags & remote60::native_poc::kClipboardDataFlagHasData) != 0 &&
+         raw.size() == sizeof(h) + host.text.size() * 2,
+     "copy-gen: an older reader sees the same size, bit0 and payload length");
+  MockHost old;
+  old.text = u"x";
+  old.hash = clipboard_fnv1a(old.text);
+  old.generation = 1;
+  LoopbackLink oldLink(&old);
+  ClipboardPollReply fromOld;
+  ok(poll_clipboard(oldLink, 0, 0, &fromOld) && !fromOld.hasCopyGen, "copy-gen: an older host (no bit1) says nothing of it");
 }
 
 void test_update(const std::u16string& viewerText, const std::string& label) {
@@ -230,6 +270,7 @@ int main() {
   test_update(std::u16string(4096, u'z'), "update-large");
 
   test_stale_session_scenario();
+  test_copy_gen();
 
   std::printf("clipboard_wire_test: %s (%d passed, %d failed)\n", gFail == 0 ? "PASS" : "FAIL",
               gPass, gFail);

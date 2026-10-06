@@ -2,6 +2,7 @@
 
 #include "clipboard_monitor.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 
@@ -35,6 +36,11 @@ LRESULT CALLBACK ClipboardMonitor::WndProc(HWND hwnd, UINT msg, WPARAM wParam, L
   auto* self = reinterpret_cast<ClipboardMonitor*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   switch (msg) {
     case WM_CLIPBOARDUPDATE: {
+      if (self && self->onChange_) {
+        DWORD owner = 0;
+        if (HWND o = GetClipboardOwner()) GetWindowThreadProcessId(o, &owner);
+        self->onChange_(owner);
+      }
       if (self) self->ReportFiles(hwnd);
       if (self && self->onText_) {
         // Win32 hands back wchar_t; the core and the wire speak UTF-16 code units, which on
@@ -126,9 +132,10 @@ void ClipboardMonitor::SetOnFiles(OnFilesFn fn) {
   (void)Invoke([this](HWND hwnd) { ReportFiles(hwnd); }, 2000);
 }
 
-bool ClipboardMonitor::Start(OnTextFn onText) {
+bool ClipboardMonitor::Start(OnTextFn onText, OnChangeFn onChange) {
   if (thread_.joinable()) return running_.load(std::memory_order_acquire);
   onText_ = std::move(onText);
+  onChange_ = std::move(onChange);
   ready_.store(false, std::memory_order_release);
   thread_ = std::thread([this]() { ThreadMain(); });
   threadId_ = GetThreadId(thread_.native_handle());
@@ -195,7 +202,8 @@ bool HostClipboardHub::Start() {
       core_.SeedBaseline(wide_to_u16(wide));
     }
   }
-  const bool ok = monitor_.Start([this](const std::u16string& text) { OnLocalText(text); });
+  const bool ok = monitor_.Start([this](const std::u16string& text) { OnLocalText(text); },
+                                 [this](DWORD ownerPid) { OnChange(ownerPid); });
   started_.store(ok, std::memory_order_release);
   if (ok) {
     std::cout << "[native-video-host][clipboard] monitor started\n";
@@ -220,6 +228,24 @@ void HostClipboardHub::OnLocalText(const std::u16string& text) {
   ++generation_;
   text_ = text;
   hash_ = hash;
+}
+
+void HostClipboardHub::NoteOwnHelper(DWORD pid) {
+  if (pid == 0) return;
+  std::lock_guard<std::mutex> lock(helperMu_);
+  ownHelpers_.push_back(pid);
+  if (ownHelpers_.size() > 8) ownHelpers_.erase(ownHelpers_.begin());
+}
+
+void HostClipboardHub::OnChange(DWORD ownerPid) {
+  bool own = ownerPid != 0 && ownerPid == GetCurrentProcessId();
+  if (!own && ownerPid != 0) {
+    std::lock_guard<std::mutex> lock(helperMu_);
+    own = std::find(ownHelpers_.begin(), ownHelpers_.end(), ownerPid) != ownHelpers_.end();
+  }
+  if (own) return;  // this host's own write: a paste it applied, an image it published, files its helper put
+  const uint64_t gen = copyGen_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  std::cout << "[native-video-host][clipboard] copy on this PC copyGen=" << gen << " owner=" << ownerPid << "\n";
 }
 
 HostClipboardHub::Snapshot HostClipboardHub::Get() {
@@ -276,8 +302,7 @@ HostClipboardHub::PasteOutcome HostClipboardHub::ApplyPaste(const std::u16string
     out.win32 = job->win32;
     out.clipSeq = job->clipSeq;
   }
-  std::lock_guard<std::mutex> lock(mu_);
-  out.userCopyGen = generation_;
+  out.userCopyGen = copyGen_.load(std::memory_order_acquire);
   return out;
 }
 

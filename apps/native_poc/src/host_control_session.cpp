@@ -1289,8 +1289,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
       HostClipboardHub::Snapshot snap;
       if (clipboard) snap = clipboard->Get();
       const bool hasData = snap.generation > req.knownGeneration && !snap.text.empty();
-      const std::vector<uint8_t> reply = remote60::native_poc::build_clipboard_data(
+      std::vector<uint8_t> reply = remote60::native_poc::build_clipboard_data(
           req.seq, snap.generation, hasData, snap.text, snap.hash, qpc_now_us());
+      // Paste on demand r4: the copy generation rides every reply (bit1 + reserved).
+      if (clipboard) {
+        remote60::native_poc::clipboard_data_set_copy_gen(&reply, static_cast<uint32_t>(clipboard->CopyGen()));
+      }
       if (!link.Write(reply.data(), reply.size())) break;
       continue;
     }

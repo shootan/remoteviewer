@@ -130,6 +130,17 @@ inline std::vector<uint8_t> build_clipboard_data(uint32_t seq, uint64_t generati
   return out;
 }
 
+// Paste on demand r4: puts the host's copy generation into a ControlClipboardData reply built above
+// (flags bit1 + `reserved`). Only the host calls it; the layout and size do not change.
+inline void clipboard_data_set_copy_gen(std::vector<uint8_t>* reply, uint32_t copyGen) {
+  if (!reply || reply->size() < sizeof(ControlClipboardDataHeader)) return;
+  ControlClipboardDataHeader h{};
+  std::memcpy(&h, reply->data(), sizeof(h));
+  h.flags |= kClipboardDataFlagHostCopyGen;
+  h.reserved = copyGen;
+  std::memcpy(reply->data(), &h, sizeof(h));
+}
+
 // --- echo-loop state machine ------------------------------------------------------------------
 
 enum class ClipboardLocalDecision {

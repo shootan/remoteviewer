@@ -671,6 +671,8 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   }
 
   int heldApply = 0;
+  bool* dropClipUpdatesRef = nullptr;  // set below, once the flag exists (the pump is defined first)
+  int* droppedRef = nullptr;
   const auto pump_until = [&](const std::function<bool()>& done, int budgetMs) {
     const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
     for (;;) {
@@ -679,6 +681,10 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
         if (msg.message == remote60::native_poc::viewer::kMsgApplyClipboard) {  // see the header
           delete reinterpret_cast<std::u16string*>(msg.lParam);
           ++heldApply;
+          continue;
+        }
+        if (msg.message == WM_CLIPBOARDUPDATE && dropClipUpdatesRef && *dropClipUpdatesRef) {  // a copy "on the remote PC"
+          ++*droppedRef;
           continue;
         }
         TranslateMessage(&msg);
@@ -708,6 +714,35 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     return ctx.control.clipboard.nextSeq;
   };
   const auto bar_text = [&] { return clip_transfer_bar_text(clip_transfer_bar_current()); };
+  // r4, the shared station: one clipboard serves "this PC" and "the remote PC" here, so a copy made
+  // here is ALSO a copy on the host, which counts it (its copy generation). On two PCs the viewer
+  // knows the host's count before a copy it makes; here the count moves with the copy. So a copy
+  // here is followed by waiting until the viewer has seen the host's count move and then telling the
+  // viewer of the copy again -- the order two PCs have. A copy made "on the remote PC" is the other
+  // way round: the viewer is NOT told (its WM_CLIPBOARDUPDATE is dropped), only the host counts it.
+  bool dropClipUpdates = false;
+  int droppedClipUpdates = 0;
+  dropClipUpdatesRef = &dropClipUpdates;
+  droppedRef = &droppedClipUpdates;
+  // Each copy here is its own window of the host's order: the host counts it exactly once (set
+  // below, once `mark` exists).
+  std::function<void()> beforeCopyHere;
+  const auto copy_here = [&](const std::function<bool()>& put) {
+    if (beforeCopyHere) beforeCopyHere();
+    const uint64_t g0 = ctx.control.clipboard.hostCopyGen.load();
+    const bool ok = put();
+    pump_until([&] { return ctx.control.clipboard.hostCopyGen.load() > g0; }, 3000);
+    SendMessageW(viewerWindow, WM_CLIPBOARDUPDATE, 0, 0);
+    idle(100);
+    return ok;
+  };
+  const auto copy_remote = [&](const std::function<bool()>& put, int settleMs) {
+    dropClipUpdates = true;
+    const bool ok = put();
+    idle(settleMs);
+    dropClipUpdates = false;
+    return ok;
+  };
   std::string shot;
 
   if (launched) {
@@ -732,7 +767,8 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   // stdout reaches its file only when it exits). Tokens: d / u = a key edge (input event 5 / 6),
   // m = a mouse edge, A = paste-apply written (result 0), F = paste-apply failed, I = an image
   // published, P = files published by the helper, R = a file offer refused, U = a copy-time text
-  // update (51, never expected). The paste chord is "dduu"; the release of the modifier that reached
+  // update (51, never expected), C = a copy the host counted (r4: never one of its own writes). The
+  // paste chord is "dduu"; the release of the modifier that reached
   // the host before the gesture is the "u" before the request.
   struct Expect {
     std::string name;
@@ -749,6 +785,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     e.ok = ok ? ok : [want](const std::string& got) { return got == want; };
     expects.push_back(std::move(e));
   };
+  beforeCopyHere = [&] { mark("(a copy here: the host counts it once)", "C"); };
   const auto station_text = [&](DWORD* owner) {
     std::u16string t;
     *owner = 0;
@@ -773,7 +810,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
   if (controlUp && legacy) {
     std::cout << "\n--- legacy host: a copy here, Ctrl+V: no key, the bar says update ---\n";
-    put_text(u"legacy local copy");
+    copy_here([&] { return put_text(u"legacy local copy"); });
     idle(300);
     mark("legacy: Ctrl+V on this PC's copy -> Ctrl as typed, nothing written, no V", "du");
     const uint32_t s0 = text_sends();
@@ -809,7 +846,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     const uint32_t a0 = text_sends();
     const auto ic0 = ctx.control.clipImage.GetCounters();
     const auto fc0 = ctx.control.fileCopy.GetCounters();
-    mark("A: copies here (text, image, files) reach nothing on the host", "");
+    mark("A: copies here (text, image, files) reach nothing on the host (it only counts them)", "CCC");
     check("a text copy is made here", put_text(u"copied here only"));
     idle(1600);
     check("an image copy is made here", station_put(CF_DIBV5, noise_dibv5(32, 32, 7)));
@@ -825,7 +862,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     // ---------------------------------------------------------------- B. text Ctrl+V
     std::cout << "\n--- B. text: Ctrl+V sends it, the key follows the host's answer ---\n";
     const std::u16string t1 = u"붙여넣기 on demand #1";
-    put_text(t1);
+    copy_here([&] { return put_text(t1); });
     idle(300);
     mark("B: Ctrl+V -> Ctrl released, written, THEN the chord", "duAdduu");
     const uint32_t sB = text_sends();
@@ -847,7 +884,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     // ---------------------------------------------------------------- C. Shift+Insert
     std::cout << "\n--- C. text: Shift+Insert ---\n";
     const std::u16string t2 = u"shift insert paste";
-    put_text(t2);
+    copy_here([&] { return put_text(t2); });
     idle(300);
     mark("C: Shift+Insert -> Shift released, written, then Shift+Insert", "duAdduu");
     const uint32_t sC = text_sends();
@@ -890,7 +927,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
     // ---------------------------------------------------------------- F. fast keys while waiting
     std::cout << "\n--- F. V pressed twice, its repeat, and Ctrl+B typed while waiting ---\n";
-    put_text(u"fast keys");
+    copy_here([&] { return put_text(u"fast keys"); });
     idle(300);
     mark("F: two pastes in order, the repeat none, Ctrl+B after both (as Ctrl+B)", "duAdduuAdduudduu");
     const uint32_t sF = text_sends();
@@ -949,7 +986,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
     // ---------------------------------------------------------------- I. waiting: Esc, mouse, timeout, retry
     std::cout << "\n--- I1. waiting (host paused): the bar says so; Esc cancels ---\n";
-    put_text(u"waiting text");
+    copy_here([&] { return put_text(u"waiting text"); });
     idle(300);
     // The request had not left (the worker was still waiting on the paused host for the Ctrl edges),
     // so the cancel withdraws it: nothing is written at all, which is the better of the two outcomes.
@@ -1005,7 +1042,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     check("Retry sent the paste again", text_sends() == sR + 1);
 
     std::cout << "\n--- I5. an answer naming another paste arrives while one waits: ignored ---\n";
-    put_text(u"the real one");
+    copy_here([&] { return put_text(u"the real one"); });
     idle(300);
     mark("I5: a stray answer is ignored; the real one -> written, THEN one chord", "duAdduu");
     set_process_suspended(hostPid, true);
@@ -1028,7 +1065,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     idle(500);
 
     std::cout << "\n--- I4. the host cannot write its clipboard: no key, the reason ---\n";
-    put_text(u"busy clipboard");
+    copy_here([&] { return put_text(u"busy clipboard"); });
     idle(300);
     mark("I4: the host's clipboard is busy -> the write fails, NO chord", "duF");
     set_process_suspended(hostPid, true);
@@ -1045,7 +1082,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
     // ---------------------------------------------------------------- J. an image
     std::cout << "\n--- J. an image: Ctrl+V after the host published it ---\n";
-    station_put(CF_DIBV5, noise_dibv5(96, 64, 0x5151u));
+    copy_here([&] { return station_put(CF_DIBV5, noise_dibv5(96, 64, 0x5151u)); });
     idle(300);
     mark("J: an image -> published, THEN the chord", "duIdduu");
     const uint64_t pubJ = ctx.control.clipImage.GetCounters().published;
@@ -1056,7 +1093,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
     // ---------------------------------------------------------------- K. files, and a helper restart
     std::cout << "\n--- K. files: Ctrl+V after the host's helper published them ---\n";
-    put_files({fileA});
+    copy_here([&] { return put_files({fileA}); });
     idle(300);
     mark("K: files -> the helper published them, THEN the chord", "duPdduu");
     const uint64_t accK = ctx.control.fileCopy.GetCounters().offersAccepted;
@@ -1072,6 +1109,9 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
               helperPath.find(L"GNLinkClipHelper.exe") != std::wstring::npos,
           narrow(helperPath));
     std::cout << "\n--- K2. the host's helper goes away; the next paste starts a new one ---\n";
+    // Its clipboard goes with it, which the host may see as a change with no owner (not its own write).
+    mark("K2a: this run's helper stopped (its clipboard may go with it)", "C or nothing",
+         [](const std::string& g) { return g.empty() || g == "C"; });
     bool killed = false;
     if (helperPid && e2e_path_is_under(helperPath, dir)) {
       if (HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, helperPid)) {
@@ -1081,7 +1121,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     }
     check("this run's helper (identified by the clipboard it owned and its path) is stopped", killed);
     idle(1000);
-    put_files({fileA});  // the same files copied again: on a shared station the helper's own publish was the last copy
+    copy_here([&] { return put_files({fileA}); });  // the same files copied again: on a shared station the helper's own publish was the last copy
     idle(300);
     mark("K2: after the helper died -> a new helper published them, THEN the chord", "duPdduu");
     const uint64_t accK2 = ctx.control.fileCopy.GetCounters().offersAccepted;
@@ -1095,7 +1135,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
 
     // ---------------------------------------------------------------- L. the remote PC's copy is the newest
     std::cout << "\n--- L. a copy made on the remote PC (Ctrl+C there): Ctrl+V pastes its own ---\n";
-    put_text(u"this PC's older copy");
+    copy_here([&] { return put_text(u"this PC's older copy"); });
     idle(300);
     mark("L: Ctrl+C there, then Ctrl+V -> the keys as typed, nothing written", "dduduu");
     const uint32_t sL = text_sends();
@@ -1110,8 +1150,11 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     idle(1000);
     check("nothing was sent", text_sends() == sL);
     std::cout << "\n--- L2. the remote PC's text arriving here (R->P) is the newest copy too ---\n";
-    put_text(u"this PC again");
+    copy_here([&] { return put_text(u"this PC again"); });
     idle(300);
+    // This viewer writing the remote PC's text here is, on the shared station, a change the host
+    // did not make: it counts it.
+    mark("L2a: the remote PC's text written here (R->P apply)", "C");
     SendMessageW(viewerWindow, remote60::native_poc::viewer::kMsgApplyClipboard, 0,
                  reinterpret_cast<LPARAM>(new std::u16string(u"text copied on the remote PC")));  // the product's apply
     idle(300);
@@ -1120,10 +1163,51 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     idle(1000);
     check("nothing was sent", text_sends() == sL);
 
+    // ---------------------------------------------------------------- R. copies made ON the remote PC (r4)
+    std::cout << "\n--- R1. a text copy on the remote PC, Ctrl+V within ~100 ms: the paste's check finds it ---\n";
+    copy_here([&] { return put_text(u"this PC's copy before R"); });
+    mark("R1: remote text copy, Ctrl+V at once -> counted, checked, the host's own paste (nothing sent)", "Cdudduu");
+    const uint32_t sR1 = text_sends();
+    const uint64_t pubR = ctx.control.clipImage.GetCounters().offered;
+    const uint64_t offR = ctx.control.fileCopy.GetCounters().offersSent;
+    const uint64_t t0R1 = qpc_now_us();
+    copy_remote([&] { return put_text(u"copied ON the remote PC"); }, 30);
+    ctrl_v();
+    const uint64_t gestureMsR1 = (qpc_now_us() - t0R1) / 1000;
+    idle(1200);
+    DWORD ownerR1 = 0;
+    check("R1: Ctrl+V came within ~100 ms of the remote copy", gestureMsR1 <= 150, std::to_string(gestureMsR1) + " ms");
+    check("R1: nothing was sent, and the remote clipboard is still the remote copy",
+          text_sends() == sR1 && station_text(&ownerR1) == u"copied ON the remote PC" && ownerR1 != hostPid);
+    std::cout << "\n--- R2. an image copied on the remote PC: Ctrl+V pastes the host's own ---\n";
+    mark("R2: remote image copy -> counted; Ctrl+V goes as typed", "Cdduu");
+    copy_remote([&] { return station_put(CF_DIBV5, noise_dibv5(48, 48, 0x77u)); }, 1500);
+    ctrl_v();
+    idle(1200);
+    check("R2: no image was offered, no text sent", ctx.control.clipImage.GetCounters().offered == pubR && text_sends() == sR1);
+    std::cout << "\n--- R3. files copied on the remote PC: Ctrl+V pastes the host's own ---\n";
+    mark("R3: remote files copy -> counted; Ctrl+V goes as typed", "Cdduu");
+    copy_remote([&] { return put_files({fileA}); }, 1500);
+    ctrl_v();
+    idle(1200);
+    check("R3: no files were offered", ctx.control.fileCopy.GetCounters().offersSent == offR);
+    std::cout << "\n--- R4. then a copy on this PC: Ctrl+V sends it again ---\n";
+    copy_here([&] { return put_text(u"this PC's copy after R"); });
+    mark("R4: a copy here after the remote ones -> written, then the chord", "duAdduu");
+    const uint32_t sR4 = text_sends();
+    ctrl_v();
+    answered(sR4);
+    idle(400);
+    DWORD ownerR4 = 0;
+    check("R4: this PC's copy is on the remote clipboard, written by the host",
+          station_text(&ownerR4) == u"this PC's copy after R" && ownerR4 == hostPid);
+    check("the viewer was not told of the remote copies (dropped notifications)", droppedClipUpdates >= 3,
+          std::to_string(droppedClipUpdates));
+
     // ---------------------------------------------------------------- M. the host-IME (physical) path
     std::cout << "\n--- M. host-IME mode: the same admission, the chord as scan codes ---\n";
     SendMessageW(viewerWindow, remote60::native_poc::viewer::kMsgHostImeActivate, 0, 0);
-    put_text(u"physical path text");
+    copy_here([&] { return put_text(u"physical path text"); });
     idle(300);
     mark("M: physical path -> written (the scan-code edges are not input events)", "A");
     // The worker logs every physical-key exchange it completes ("actionKind=12", PhysicalKey) to
@@ -1181,6 +1265,8 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
           else if (line.find(" eventKind=2 ") != std::string::npos || line.find(" eventKind=3 ") != std::string::npos) c = 'm';
         } else if (line.find("[clipboard] paste-apply id=") != std::string::npos) {
           c = line.find(" result=0 ") != std::string::npos ? 'A' : 'F';
+        } else if (line.find("[clipboard] copy on this PC copyGen=") != std::string::npos) {
+          c = 'C';
         } else if (line.find("[clipboard] update applied") != std::string::npos) {
           c = 'U';
         } else if (line.find("[clip-image] end state=published") != std::string::npos) {

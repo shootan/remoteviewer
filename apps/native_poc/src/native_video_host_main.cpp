@@ -286,12 +286,14 @@ int main(int argc, char** argv) {
     // launch the shipped host uses. Everything else is the product path.
     remote60::native_poc::HostFileCopyService::Config fcfg;
     fcfg.enabled = true;
-    fcfg.launcher = [](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
+    fcfg.launcher = [&clipboardHub](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
       wchar_t path[MAX_PATH] = L"";
       const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
       std::wstring exe(path, n);
       exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
-      return remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
+      const bool ok = remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
+      if (ok) clipboardHub.NoteOwnHelper(link->helper_pid());
+      return ok;
     };
     fcfg.videoBusy = [&sender]() {
       std::lock_guard<std::mutex> lock(sender.mu);
@@ -310,13 +312,15 @@ int main(int argc, char** argv) {
       std::wstring s = path;
       return s.substr(0, s.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
     }();
-    fcfg.launcher = [helperExe](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
+    fcfg.launcher = [helperExe, &clipboardHub](remote60::native_poc::file_copy::HelperLink* link, std::string* why) {
       // A refusal is logged by the service with `why` (class, stage, error, token facts); a start is
       // logged here with the same token facts, so the field log shows what the helper ran as.
       std::string tokens;
       const bool ok = remote60::native_poc::file_copy::launch_file_copy_helper(helperExe, link, why, 10000, &tokens);
       if (ok) {
         std::cout << "[native-video-host][file-copy] helper started pid=" << link->helper_pid() << " (" << tokens << ")\n";
+        // Its clipboard writes are this host's own, not a copy made at this PC (paste on demand r4).
+        clipboardHub.NoteOwnHelper(link->helper_pid());
       }
       return ok;
     };

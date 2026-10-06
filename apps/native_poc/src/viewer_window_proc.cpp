@@ -281,6 +281,13 @@ struct PasteSnapshot {
 };
 PasteSnapshot gWaitingSnap;  // the gesture waiting behind the pending one
 
+// r4: the host's copy generation when this PC's clipboard last changed, and the paste whose check
+// (one fresh poll) is outstanding with the snapshot it will send if the host has not copied since.
+uint64_t gGenAtLocalCopy = 0;
+bool gGenAtLocalValid = false;
+uint64_t gProbeId = 0;
+PasteSnapshot gProbeSnap;
+
 // Modifiers released on the host at a gesture while still held here. The next ordinary key that goes
 // out first puts them back down, so Ctrl kept held after a paste still makes Ctrl+A a Ctrl+A.
 constexpr uint8_t kModCtrl = 1;
@@ -591,6 +598,14 @@ void dispatch_paste(ViewerState& ctx, const PasteGate::Ticket& t, PasteSnapshot 
 // A paste given up here: its request is withdrawn where it still can be, so a late write does not
 // follow (a text not yet sent is dropped; an image transfer is cancelled; a file answer is ignored).
 void abandon_paste(ViewerState& ctx, const PasteGate::Ticket& t) {
+  if (t.id != 0 && t.id == gProbeId) {
+    gProbeId = 0;
+    gProbeSnap = PasteSnapshot{};
+    auto& clip = ctx.control.clipboard;
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (clip.probeRequested && clip.probeId == t.id) clip.probeRequested = false;
+    return;  // nothing of it was sent
+  }
   switch (t.format) {
     case PasteFormat::Text: {
       auto& clip = ctx.control.clipboard;
@@ -612,10 +627,33 @@ void abandon_paste(ViewerState& ctx, const PasteGate::Ticket& t) {
   }
 }
 
+// r4: whether a copy was made on the host after this PC's clipboard last changed. The first
+// generation known for this PC's copy is its baseline (a session that opens on a local copy, Q2).
+bool remote_copied_since_local(uint64_t gen, bool known) {
+  if (!known) return false;  // an older host: it does not say, so r2 behaviour
+  if (!gGenAtLocalValid) {
+    gGenAtLocalCopy = gen;
+    gGenAtLocalValid = true;
+    return false;
+  }
+  return gen > gGenAtLocalCopy;
+}
+
+// The send of a paste whose route is Send: first one fresh poll (the check), then -- only if the
+// host has not copied since this PC's copy -- the request. The keys stay held meanwhile.
+void begin_send(ViewerState& ctx, const PasteGate::Ticket& t, PasteSnapshot snap) {
+  gProbeId = t.id;
+  gProbeSnap = std::move(snap);
+  auto& clip = ctx.control.clipboard;
+  std::lock_guard<std::mutex> lock(clip.mu);
+  clip.probeRequested = true;
+  clip.probeId = t.id;
+}
+
 void after_paste_settled(ViewerState& ctx, HWND hwnd) {
   PasteGate::Ticket next;
   if (gPaste.Promote(qpc_now_us(), &next)) {
-    dispatch_paste(ctx, next, std::move(gWaitingSnap));
+    begin_send(ctx, next, std::move(gWaitingSnap));
     gWaitingSnap = PasteSnapshot{};
   }
   if (!gPaste.Pending()) KillTimer(hwnd, kPasteTimerId);
@@ -656,7 +694,7 @@ void start_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t sca
   switch (gPaste.Admit(t, qpc_now_us())) {
     case PasteGate::Admitted::Started:
       gPasteLine = PasteLine{};
-      dispatch_paste(ctx, t, std::move(snap));
+      begin_send(ctx, t, std::move(snap));
       SetTimer(hwnd, kPasteTimerId, kPasteTimerMs, nullptr);
       remote60::native_poc::clip_transfer_bar_refresh();
       break;
@@ -671,6 +709,36 @@ void start_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t sca
 }
 
 void on_paste_answer(ViewerState& ctx, HWND hwnd, const PasteAnswer& a) {
+  if (a.probe) {
+    // The check before sending. Only the paste it was asked for, still pending, takes it.
+    if (a.id == 0 || a.id != gProbeId || !gPaste.Pending() || gPaste.pending().id != a.id) {
+      paste_log("check answer ignored (not the pending paste)");
+      return;
+    }
+    gProbeId = 0;
+    PasteSnapshot snap = std::move(gProbeSnap);
+    gProbeSnap = PasteSnapshot{};
+    if (a.failure != PasteFailure::None) {
+      PasteAnswer fail = a;
+      fail.probe = false;
+      on_paste_answer(ctx, hwnd, fail);  // the link went: the paste fails as any other would
+      return;
+    }
+    if (remote_copied_since_local(a.hostCopyGen, a.genKnown)) {
+      // A copy made on the host after this PC's: the host pastes its own. Nothing is sent; the key
+      // goes as the paste would have, rebuilt, now.
+      gLatestCopy.NoteRemoteCopy();
+      paste_log("pass-through (check): remote copy on the host (any format) copyGen=" + std::to_string(a.hostCopyGen) +
+                " > " + std::to_string(gGenAtLocalCopy) + " -- nothing sent");
+      PasteAnswer own = a;
+      own.probe = false;
+      own.applied = true;
+      on_paste_answer(ctx, hwnd, own);
+      return;
+    }
+    dispatch_paste(ctx, gPaste.pending(), std::move(snap));
+    return;
+  }
   PasteGate::Ticket done;
   const PasteGate::Outcome o = gPaste.OnAnswer(a.id, a.applied, paste_conn_gen(ctx), paste_target_gen(ctx), &done);
   std::ostringstream os;
@@ -722,6 +790,13 @@ void on_paste_timer(ViewerState& ctx, HWND hwnd) {
 
 // What a paste gesture leads to, for a key press and for the bar's Retry alike.
 bool run_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t scan, bool ext, const char* source) {
+  // r4: a copy already seen on the host after this PC's (the last poll) makes the host's the newest.
+  if (gLatestCopy.LocalIsLatest() &&
+      remote_copied_since_local(ctx.control.clipboard.hostCopyGen.load(std::memory_order_acquire),
+                                ctx.control.clipboard.hostCopyGenKnown.load(std::memory_order_acquire))) {
+    gLatestCopy.NoteRemoteCopy();
+    paste_log("remote copy on the host (any format): the remote PC's clipboard is the newest");
+  }
   const PasteRoute route = route_paste(paste_feature_on(ctx),
                                        ctx.control.clipboard.hostPasteOnDemand.load(std::memory_order_acquire),
                                        gLatestCopy.LocalIsLatest());
@@ -811,6 +886,9 @@ void note_local_clipboard_change(ViewerState& ctx) {
     return;
   }
   gLatestCopy.NoteLocalCopy();
+  // r4: what the host's copy generation was when this copy was made; a higher one later is newer.
+  gGenAtLocalValid = ctx.control.clipboard.hostCopyGenKnown.load(std::memory_order_acquire);
+  gGenAtLocalCopy = ctx.control.clipboard.hostCopyGen.load(std::memory_order_acquire);
 }
 
 }  // namespace
@@ -890,6 +968,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // A clipboard session opened. Nothing is pushed any more; what this PC holds is the newest
       // copy if it holds anything that can be pasted (Q2: it was copied before connecting).
       gLatestCopy.ResetForSession(local_clipboard_pasteable());
+      gGenAtLocalValid = false;  // this session's first generation is the baseline
       paste_log(std::string("session: newest copy is ") + (gLatestCopy.LocalIsLatest() ? "this PC's" : "the remote PC's"));
       return 0;
     case kMsgPasteResult: {

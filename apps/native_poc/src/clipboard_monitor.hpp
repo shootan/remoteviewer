@@ -40,12 +40,15 @@ class ClipboardMonitor {
   // File copy (t-zdmsd4gb): every clipboard change, with the sequence number and what CF_HDROP names
   // (empty = no files). Path strings only; nothing is opened.
   using OnFilesFn = std::function<void(uint64_t seq, std::vector<std::wstring> paths)>;
+  // Paste on demand r4: every clipboard change, any format, with the process that owns the clipboard
+  // after it (0 = no owner). Called on the monitor thread before the text and file callbacks.
+  using OnChangeFn = std::function<void(DWORD ownerPid)>;
 
   ~ClipboardMonitor() { Stop(); }
 
   // Starts the thread and waits until the listener window is up. Returns false if it could not be
   // created (in which case the host simply has no clipboard sync and says so).
-  bool Start(OnTextFn onText);
+  bool Start(OnTextFn onText, OnChangeFn onChange = nullptr);
   void Stop();
 
   // Sets the clipboard to `text`. Safe to call from any thread; the work is marshalled to the
@@ -73,6 +76,7 @@ class ClipboardMonitor {
   std::atomic<HWND> hwnd_{nullptr};
   DWORD threadId_ = 0;
   OnTextFn onText_;
+  OnChangeFn onChange_;
   std::mutex filesMu_;
   OnFilesFn onFiles_;
 };
@@ -126,8 +130,17 @@ class HostClipboardHub {
   // File copy: where this PC's copies of files go (HostFileCopyService::OnHostClipboard).
   void SetFileListener(ClipboardMonitor::OnFilesFn fn) { monitor_.SetOnFiles(std::move(fn)); }
 
+  // Paste on demand r4: the copy generation -- changes of this clipboard in any format that this
+  // host did not make. Its own writes are recognised by who owns the clipboard after them: this
+  // process (the monitor window writes text and images) or a clipboard helper it launched (files;
+  // NoteOwnHelper). Everything else -- a menu copy, a copy at this PC, an image -- counts.
+  uint64_t CopyGen() const { return copyGen_.load(std::memory_order_acquire); }
+  // The file-copy launcher reports each helper it starts, before the helper can publish anything.
+  void NoteOwnHelper(DWORD pid);
+
  private:
   void OnLocalText(const std::u16string& text);
+  void OnChange(DWORD ownerPid);
 
   ClipboardMonitor monitor_;
   std::mutex mu_;
@@ -136,6 +149,9 @@ class HostClipboardHub {
   uint64_t hash_ = 0;
   std::u16string text_;
   std::atomic<bool> started_{false};
+  std::atomic<uint64_t> copyGen_{0};
+  std::mutex helperMu_;
+  std::vector<DWORD> ownHelpers_;  // the last few helper pids (a helper is restarted, not reused)
 };
 
 }  // namespace remote60::native_poc

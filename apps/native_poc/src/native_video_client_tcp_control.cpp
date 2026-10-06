@@ -196,6 +196,8 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
     out->generation = rsp.generation;
     out->hash = rsp.contentHash;
     out->text = std::move(text);
+    out->hasCopyGen = (rsp.flags & kClipboardDataFlagHostCopyGen) != 0;
+    out->copyGen = out->hasCopyGen ? rsp.reserved : 0;
   }
   return true;
 }

@@ -105,6 +105,10 @@ struct PasteAnswer {
   PasteFormat format = PasteFormat::None;
   PasteFailure failure = PasteFailure::None;  // when not applied
   uint32_t detail = 0;                        // the wire's reason (result/stage/verdict), for the log
+  // r4: the answer to a paste's check before sending (one fresh poll), not to the paste itself.
+  bool probe = false;
+  bool genKnown = false;      // the host sends a copy generation
+  uint64_t hostCopyGen = 0;   // its value now
 };
 
 /** One key edge typed while a paste was pending, kept to be sent after it. */

@@ -398,6 +398,12 @@ struct ControlClipboardDataHeader {
   uint64_t hostSendQpcUs = 0;
 };
 constexpr uint32_t kClipboardDataFlagHasData = 0x1u;
+// Paste on demand r4 (t-y4wj64jw, assigned by the verifier): when set, `reserved` carries the host's
+// copy generation -- every change of its clipboard in ANY format (text, image, files, a menu copy,
+// a copy made at the host PC) except the host's own writes. A viewer that knows a copy happened
+// there after its own pastes the host's clipboard instead of sending its own. Older viewers read
+// bit0 only and never looked at `reserved`, so the reply is unchanged for them.
+constexpr uint32_t kClipboardDataFlagHostCopyGen = 0x2u;
 
 struct ControlStreamStateMessage {
   MessageHeader header{};

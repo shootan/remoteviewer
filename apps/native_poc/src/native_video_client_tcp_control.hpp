@@ -77,6 +77,9 @@ struct ClipboardPollReply {
   uint64_t generation = 0;
   uint64_t hash = 0;
   std::u16string text;
+  // Paste on demand r4: the host's copy generation (kClipboardDataFlagHostCopyGen), when it sent one.
+  bool hasCopyGen = false;
+  uint32_t copyGen = 0;
 };
 bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
                     ClipboardPollReply* out);
