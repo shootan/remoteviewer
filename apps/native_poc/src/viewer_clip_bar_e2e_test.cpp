@@ -77,6 +77,7 @@
 #include "viewer_udp_session.hpp"
 #include "viewer_window_proc.hpp"
 #include "viewer_paste_ui.hpp"
+#include "viewer_paste_gate.hpp"
 #include "test_scratch_dir.hpp"
 #include "e2e_station_lock.hpp"
 
@@ -345,6 +346,24 @@ int run_clipboard_child(const wchar_t* resultFile) {
     SendMessageW(hwnd, WM_KEYUP, 'V', 1 | (0x2F << 16) | (1u << 30) | (1u << 31));
     ks[VK_CONTROL] = ks[VK_LCONTROL] = 0;
     SetKeyboardState(ks);
+    // r4: a paste first asks the host (one poll) whether it copied since. No control worker runs
+    // here, so the answer it would post is posted the same way -- as from a host that does not say
+    // (no copy generation), which sends the paste.
+    uint64_t probeId = 0;
+    {
+      std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
+      if (ctx.control.clipboard.probeRequested) {
+        ctx.control.clipboard.probeRequested = false;
+        probeId = ctx.control.clipboard.probeId;
+      }
+    }
+    if (probeId != 0) {
+      auto* answer = new remote60::native_poc::viewer::PasteAnswer();
+      answer->id = probeId;
+      answer->probe = true;
+      answer->genKnown = false;
+      SendMessageW(hwnd, remote60::native_poc::viewer::kMsgPasteResult, 0, reinterpret_cast<LPARAM>(answer));
+    }
   };
 
   // 1. An image copy alone reaches nothing: no package, no offer.
