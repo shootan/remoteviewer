@@ -238,6 +238,49 @@ void HostClipboardHub::ApplyRemote(const std::u16string& text, uint64_t hash) {
   (void)monitor_.SetText(text);
 }
 
+HostClipboardHub::PasteOutcome HostClipboardHub::ApplyPaste(const std::u16string& text, uint64_t hash,
+                                                            DWORD timeoutMs) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    // The decision is ignored on purpose: SkipDuplicate (applied before) and SkipEcho (the host's own
+    // earlier copy) both still need the write, because what is on the clipboard NOW may be neither.
+    // Either way the content is recorded, so the write's own notification reads as an echo.
+    (void)core_.OnRemoteData(text, hash);
+  }
+  struct Job {
+    std::wstring text;
+    std::atomic<bool> abandoned{false};
+    bool ok = false;
+    uint8_t stage = 0;
+    uint32_t win32 = 0;
+    uint32_t clipSeq = 0;
+  };
+  auto job = std::make_shared<Job>();
+  job->text = u16_to_wide(text);
+  const bool finished = monitor_.Invoke(
+      [job](HWND hwnd) {
+        // The caller has already answered "failed" to a write it stopped waiting for; doing it late
+        // would put text on the clipboard the viewer was told is not there.
+        if (job->abandoned.load()) return;
+        job->ok = clipboard_set_unicode_text_staged(hwnd, job->text, &job->stage, &job->win32);
+        job->clipSeq = GetClipboardSequenceNumber();
+      },
+      timeoutMs);
+  PasteOutcome out;
+  if (!finished) {
+    job->abandoned.store(true);
+    out.stage = 4;
+  } else {
+    out.ok = job->ok;
+    out.stage = job->stage;
+    out.win32 = job->win32;
+    out.clipSeq = job->clipSeq;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  out.userCopyGen = generation_;
+  return out;
+}
+
 ClipPublishResult HostClipboardHub::PublishImage(uint64_t expectSequence, HGLOBAL pngGlobal, HGLOBAL dibv5,
                                                  const std::u16string& text) {
   struct Job {

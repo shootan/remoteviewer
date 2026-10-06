@@ -143,6 +143,24 @@ class ClipImageClient : private BulkUplinkSource {
   void SubmitSnapshot(ClipSnapshot snap);
 
   /**
+   * Paste on demand (t-y4wj64jw), UI thread: the image a Ctrl+V found on this PC's clipboard, sent
+   * for paste `pasteId`. The same path as SubmitSnapshot -- package, offer, transfer -- with one
+   * difference: its end is recorded as that paste's outcome (TakePasteOutcome), and only a Published
+   * end (the host's clipboard holds it) counts as applied. A paste still unsettled is superseded.
+   */
+  void SubmitSnapshotForPaste(ClipSnapshot snap, uint64_t pasteId);
+  /** UI thread: the paste gave up (timeout, cancel): its transfer is stopped, nothing is recorded. */
+  void AbandonPaste(uint64_t pasteId);
+  struct PasteOutcome {
+    uint64_t id = 0;
+    bool applied = false;                     // Published: on the host's clipboard
+    ClipOutcome outcome = ClipOutcome::None;  // how it ended (see ClipOutcome)
+    uint8_t detail = 0;
+  };
+  /** Control thread: a paste's end, once. */
+  bool TakePasteOutcome(PasteOutcome* out);
+
+  /**
    * UI thread: a local copy WITHOUT an image. Whatever image is pending or running is older than
    * what the user has now, so it must not land on the host after it.
    */
@@ -259,6 +277,9 @@ class ClipImageClient : private BulkUplinkSource {
   void Log(const std::string& line);
   void EndActive(ClipImageState finalState, ClipImageReason why);  // caller holds mu_; bulk closed after
   void RecordOutcome(ClipOutcome o, uint8_t detail);  // caller holds mu_
+  // caller holds mu_: the copy `gen` ended; when it is the paste's, that is the paste's outcome
+  void SettlePaste(uint64_t gen, bool applied, ClipOutcome o, uint8_t detail);
+  void SubmitSnapshotLocked(ClipSnapshot snap);  // caller holds mu_
   // A cancel's answer (or a later Status) for the awaited transfer. Non-terminal: keep waiting.
   void ApplyCancelAnswer(const ControlClipImageStatusReplyMessage& r);  // caller holds mu_
   void SettleAwaiting(ClipOutcome o, uint8_t detail);  // caller holds mu_: the cancel's outcome, then any deferred notice
@@ -339,6 +360,11 @@ class ClipImageClient : private BulkUplinkSource {
   ClipOutcome lastOutcome_ = ClipOutcome::None;
   uint8_t lastDetail_ = 0;
   Counters counters_;
+  // Paste on demand: the paste the copy `pasteGen_` was submitted for (0 = none), and its end.
+  uint64_t pasteId_ = 0;
+  uint64_t pasteGen_ = 0;
+  bool havePasteOutcome_ = false;
+  PasteOutcome pasteOutcome_;
 
   // The bulk sender (while a transfer is accepted): shared code with the file path.
   BulkUplink uplink_;

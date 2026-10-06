@@ -120,4 +120,47 @@ inline bool clipboard_set_unicode_text(HWND owner, const std::wstring& text) {
   return ok;
 }
 
+// The same write, saying where it failed: 1 = OpenClipboard, 2 = EmptyClipboard, 3 = allocating or
+// setting the data; `win32` is GetLastError at that point. Paste on demand reports this to the viewer
+// (paste_apply_wire.hpp PasteApplyStage), because "the paste key was not sent" is only actionable with
+// the reason beside it.
+inline bool clipboard_set_unicode_text_staged(HWND owner, const std::wstring& text, uint8_t* stage, uint32_t* win32) {
+  *stage = 0;
+  *win32 = 0;
+  if (!clipboard_open_with_retry(owner)) {
+    *stage = 1;
+    *win32 = GetLastError();
+    return false;
+  }
+  bool ok = false;
+  if (!EmptyClipboard()) {
+    *stage = 2;
+    *win32 = GetLastError();
+  } else {
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (global) {
+      if (void* dst = GlobalLock(global)) {
+        std::memcpy(dst, text.c_str(), text.size() * sizeof(wchar_t));
+        static_cast<wchar_t*>(dst)[text.size()] = L'\0';
+        GlobalUnlock(global);
+        if (SetClipboardData(CF_UNICODETEXT, global)) {
+          ok = true;
+          global = nullptr;  // the clipboard owns the memory now
+        }
+      }
+      if (!ok) {
+        *stage = 3;
+        *win32 = GetLastError();
+      }
+      if (global) GlobalFree(global);
+    } else {
+      *stage = 3;
+      *win32 = GetLastError();
+    }
+  }
+  CloseClipboard();
+  return ok;
+}
+
 }  // namespace remote60::native_poc

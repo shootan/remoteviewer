@@ -101,6 +101,10 @@ constexpr UINT kMsgPushClipboardNow = WM_APP + 15;
 // have swallowed a key-up and left a modifier held on the host. Deliberately not a new
 // input path: the same two calls WM_KILLFOCUS makes, for the same reason.
 constexpr UINT kMsgControlResumed = WM_APP + 16;
+// Paste on demand (t-y4wj64jw): the control thread's answer for one paste -- the host wrote its
+// clipboard (text), published the image, accepted the files, or did not. lParam is a heap
+// PasteAnswer (viewer_paste_gate.hpp) the handler owns. Only then does the paste key go.
+constexpr UINT kMsgPasteResult = WM_APP + 17;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.
@@ -114,6 +118,10 @@ constexpr uint64_t kThumbRetryAfterFailureUs = 60000000;  // 60 s
 constexpr UINT_PTR kCursorOverlayTimerId = 0x711;
 constexpr UINT_PTR kPacedPresentTimerId = 0x712;  // one-shot: a held frame's remaining wait (F-11)
 constexpr UINT_PTR kRenderRetryTimerId = 0x713;
+// Paste on demand: while a paste waits for its answer, its deadline is judged here on the UI thread,
+// so a control thread that never answers still ends the paste (without its key).
+constexpr UINT_PTR kPasteTimerId = 0x714;
+constexpr UINT kPasteTimerMs = 50;
 constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
 constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point
 

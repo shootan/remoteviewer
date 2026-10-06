@@ -4,6 +4,7 @@
 #include "viewer_log.hpp"
 #include "viewer_clip_image_wiring.hpp"
 #include "viewer_clip_transfer_bar.hpp"
+#include "viewer_paste_ui.hpp"
 #include "time_utils.hpp"
 
 #include <cstdlib>
@@ -79,6 +80,10 @@ void create_clip_transfer_bar(ViewerState& ctx) {
   hooks.onLog = [&ctx](const std::string& line) { log_client_line(ctx, line); };
   hooks.fileProgress = [&ctx] { return ctx.control.fileCopy.GetProgress(); };
   hooks.onFileCancel = [&ctx] { ctx.control.fileCopy.CancelPaste(); };
+  // Paste on demand (t-y4wj64jw): a Ctrl+V waiting for its answer, or why it was not sent.
+  hooks.pasteView = [&ctx] { return paste_bar_view(ctx); };
+  hooks.onPasteCancel = [&ctx] { paste_cancel_from_bar(ctx); };
+  hooks.onPasteRetry = [&ctx] { paste_retry_from_bar(ctx); };
   remote60::native_poc::clip_transfer_bar_create(ctx.session.hwnd, std::move(hooks));
 }
 

@@ -49,6 +49,23 @@ struct ClipBarView {
   bool fileCancel = false;
   bool imageForFile = false;  // D5: the image is being stopped because files are being pasted
   std::wstring fileText;
+  // Paste on demand (t-y4wj64jw): when set, the bar is about a Ctrl+V -- sending what was copied
+  // here, or why the paste key was not sent -- and draws `pasteText`. Cancel while it waits, Retry
+  // after a failure that may go the next time.
+  bool isPaste = false;
+  bool pasteCancel = false;
+  bool pasteRetry = false;
+  bool pasteFailed = false;
+  std::wstring pasteText;
+};
+
+/** What the paste side wants the bar to say; inactive = nothing (the image / file views decide). */
+struct ClipPasteBarView {
+  bool active = false;
+  std::wstring text;
+  bool cancel = false;
+  bool retry = false;
+  bool failed = false;
 };
 
 /** The one line the bar draws. */
@@ -56,8 +73,11 @@ std::wstring clip_transfer_bar_text(const ClipBarView& v);
 
 /** Whether the Cancel button is offered (only while sending). */
 inline bool clip_transfer_bar_has_cancel(const ClipBarView& v) {
+  if (v.isPaste) return v.pasteCancel;
   return v.isFile ? v.fileCancel : v.phase == ClipBarPhase::Sending;
 }
+/** Whether the Retry button is offered (a paste that failed and may go the next time). */
+inline bool clip_transfer_bar_has_retry(const ClipBarView& v) { return v.isPaste && v.pasteRetry; }
 
 /**
  * File copy (D6): the bar's view of the file state, Hidden when there is nothing to say. What is known
@@ -89,6 +109,10 @@ struct ClipTransferBarHooks {
   // File copy (D6). While the file view has something to say it takes the bar; Cancel then cancels the paste.
   std::function<FileCopyClient::Progress()> fileProgress;
   std::function<void()> onFileCancel;
+  // Paste on demand. While the paste view is active it takes the bar.
+  std::function<ClipPasteBarView()> pasteView;
+  std::function<void()> onPasteCancel;
+  std::function<void()> onPasteRetry;
 };
 
 /** Creates the bar for `owner` (hidden until a transfer starts). Later calls are ignored. */
@@ -100,6 +124,10 @@ void clip_transfer_bar_destroy();
 /** For tests: the bar's window and its Cancel button (client coordinates; empty when not offered). */
 HWND clip_transfer_bar_window();
 RECT clip_transfer_bar_cancel_rect();
+RECT clip_transfer_bar_retry_rect();
+/** The bar asks its providers again now (it also does every 250 ms). For the paste side, which
+ * changes on a key press rather than on a transfer's progress. */
+void clip_transfer_bar_refresh();
 /** For tests: what the bar is showing now. */
 ClipBarView clip_transfer_bar_current();
 

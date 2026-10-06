@@ -252,6 +252,9 @@ add_library(remote60_clip_image STATIC
   # The viewer's transfer bar (percent, seconds, Cancel): in the library because every target built
   # from the viewer's window procedure moves and destroys it.
   src/viewer_clip_transfer_bar.cpp
+  # Paste on demand (t-y4wj64jw): which keys are a paste and the one pending paste -- pure, but every
+  # target built from the viewer's window procedure needs it, like the bar.
+  src/viewer_paste_gate.cpp
 )
 target_include_directories(remote60_clip_image PUBLIC src)
 target_link_libraries(remote60_clip_image PUBLIC remote60_file_copy_paste bcrypt windowscodecs ole32 shlwapi user32 gdi32 ws2_32)
@@ -1115,6 +1118,49 @@ if(MSVC)
 endif()
 add_dependencies(remote60_viewer_clip_bar_e2e_test remote60_native_video_host_clipsink)
 
+# Paste on demand (t-y4wj64jw): a copy here sends nothing; Ctrl+V / Shift+Insert in the product's window
+# sends the clipboard and the key follows the REAL host's answer (its clipboard written, its image
+# published, its helper's files published) into a window of this process. On a private window station
+# (nobody's real clipboard), with a run against a host that withholds the capability (an older host).
+add_executable(remote60_viewer_paste_e2e_test
+  src/viewer_paste_e2e_test.cpp
+  src/viewer_clip_image_wiring.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_input_forward.cpp
+  src/viewer_control_client.cpp
+  src/viewer_present.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/viewer_unlock.cpp
+  src/client_session_toolbar.cpp
+  src/input_macro.cpp
+  src/viewer_session_watchdog.cpp
+  src/viewer_cursor_overlay.cpp
+  src/viewer_frame_gate.cpp
+  src/sealed_unlock.cpp
+  src/mf_h264_codec.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_paste_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_paste_e2e_test PRIVATE
+  remote60_clip_image
+  remote60_test_scratch_dir
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_paste_e2e_test PRIVATE /utf-8)
+endif()
+# The ClipSink TEST host: the product host whose file helper may run as this user on a private station
+# (and whose received images go to a folder); its clipboard hub and paste-apply are the product's.
+add_dependencies(remote60_viewer_paste_e2e_test remote60_native_video_host_clipsink remote60_file_copy_helper)
+
 # mouse-xbutton r1: the button vocabulary (wire bit <-> VK <-> MK_* / XBUTTON / MOUSEEVENTF_*), and
 # the host's window-mode injection against a window of this process: X1 / X2 arrive as
 # WM_XBUTTONDOWN/UP naming the right button, an unknown key posts nothing (it used to become a LEFT
@@ -1480,6 +1526,24 @@ if(MSVC)
 endif()
 
 # Payload names from a manifest, and every shape of them that must not become a path.
+# Paste on demand (t-y4wj64jw): the viewer's paste decisions (which keys, the pending paste, the keys
+# typed meanwhile, the rebuilt chord) and the 80/81 codec. Both pure.
+add_executable(remote60_viewer_paste_gate_test
+  src/viewer_paste_gate.cpp
+  src/viewer_paste_gate_test.cpp
+)
+target_include_directories(remote60_viewer_paste_gate_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_viewer_paste_gate_test PRIVATE /utf-8)
+endif()
+add_executable(remote60_paste_apply_wire_test
+  src/paste_apply_wire_test.cpp
+)
+target_include_directories(remote60_paste_apply_wire_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_paste_apply_wire_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_payload_name_test
   src/payload_name.cpp
   src/payload_name_test.cpp

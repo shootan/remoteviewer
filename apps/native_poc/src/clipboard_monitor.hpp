@@ -102,6 +102,20 @@ class HostClipboardHub {
   // recognised as an echo and does not raise the generation.
   void ApplyRemote(const std::u16string& text, uint64_t hash);
 
+  // Paste on demand (t-y4wj64jw): put a client's text on the host clipboard NOW and say whether it is
+  // there. Unlike ApplyRemote it always writes -- the host clipboard may hold something else since the
+  // same text was last applied (a copy made on the host, a helper that restarted) -- and it waits, up
+  // to `timeoutMs`, for the monitor thread to finish the write. Recorded as applied first, so the
+  // change notification the write provokes is an echo and does not raise the generation.
+  struct PasteOutcome {
+    bool ok = false;
+    uint8_t stage = 0;      // PasteApplyStage (paste_apply_wire.hpp); 4 = timed out
+    uint32_t win32 = 0;
+    uint32_t clipSeq = 0;   // GetClipboardSequenceNumber after the write
+    uint64_t userCopyGen = 0;  // the generation: copies of text made on the host itself
+  };
+  PasteOutcome ApplyPaste(const std::u16string& text, uint64_t hash, DWORD timeoutMs);
+
   // Clipboard image v1: publish PNG + CF_DIBV5 (+ same-copy text) on the monitor thread, with the
   // clipboard held and only if its sequence number is still `expectSequence` (plan r2 8-4). Takes
   // ownership of both HGLOBALs. On Published the text is recorded as applied before the change

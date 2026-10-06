@@ -210,6 +210,53 @@ void FileCopyClient::SubmitLocalFiles(const std::vector<std::wstring>& paths, ui
   Log(os.str());
 }
 
+void FileCopyClient::SubmitLocalFilesForPaste(const std::vector<std::wstring>& paths, uint64_t revision,
+                                              uint64_t pasteId) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    SettlePasteLocked(false, static_cast<uint8_t>(fn::Verdict::Busy));  // an older paste still here is replaced
+  }
+  SubmitLocalFiles(paths, revision);
+  std::lock_guard<std::mutex> lock(mu_);
+  if (offer_.pending) {
+    pasteId_ = pasteId;
+    pasteOfferId_ = offer_.offerId;
+    Log("paste files offer queued");
+  } else {
+    // Refused here, before anything went out: that is the paste's answer.
+    pasteId_ = pasteId;
+    pasteOfferId_ = 0;
+    SettlePasteLocked(false, counters_.lastVerdict);
+  }
+}
+
+void FileCopyClient::AbandonPaste(uint64_t pasteId) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (pasteId != 0 && pasteId_ == pasteId) {
+    pasteId_ = 0;
+    pasteOfferId_ = 0;
+  }
+}
+
+bool FileCopyClient::TakePasteOutcome(PasteOutcome* out) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!havePasteOutcome_) return false;
+  *out = pasteOutcome_;
+  havePasteOutcome_ = false;
+  return true;
+}
+
+void FileCopyClient::SettlePasteLocked(bool applied, uint8_t verdict) {
+  if (pasteId_ == 0) return;
+  pasteOutcome_ = PasteOutcome{pasteId_, applied, verdict};
+  havePasteOutcome_ = true;
+  pasteId_ = 0;
+  pasteOfferId_ = 0;
+  std::ostringstream os;
+  os << "paste files settled applied=" << (applied ? 1 : 0) << " verdict=" << static_cast<int>(verdict);
+  Log(os.str());
+}
+
 void FileCopyClient::ClearLocalOffer() {
   std::lock_guard<std::mutex> lock(mu_);
   if (offer_.live) withdrawOfferId_ = offer_.offerId;
@@ -369,6 +416,11 @@ int FileCopyClient::PumpOffer(ControlLink& link) {
   counters_.lastVerdict = static_cast<uint8_t>(r.verdict);
   if (!offer_.pending || offer_.offerId != o.offerId) return 1;  // replaced meanwhile: the newer goes next
   offer_.pending = false;
+  // The answer IS the paste's outcome when this offer was made for one: Accept is the host's helper
+  // having put the files on its clipboard (host_file_copy.cpp HandleOffer waits for that).
+  if (pasteId_ != 0 && pasteOfferId_ == o.offerId) {
+    SettlePasteLocked(r.verdict == fn::Verdict::Accept && r.offerId == o.offerId, static_cast<uint8_t>(r.verdict));
+  }
   if (r.verdict == fn::Verdict::Accept && r.offerId == o.offerId) {
     offer_.live = true;
     offer_.nextQueryUs = BulkPacer::NowUs() + kFilePasteQueryIntervalUs;
@@ -964,6 +1016,7 @@ void FileCopyClient::EndSession() {
   {
     std::lock_guard<std::mutex> lock(mu_);
     EndPaste(fn::PasteState::Withdrawn, fn::PasteEndReason::Session);
+    SettlePasteLocked(false, static_cast<uint8_t>(fn::Verdict::StaleEpoch));
     offer_ = OfferState{};
     retired_ = OfferState{};
     withdrawOfferId_ = 0;

@@ -37,9 +37,10 @@
 //
 // The clipboard boundary itself (Codex review of 4528dc9 ②) is driven by a CHILD of this test on a
 // private window station, whose clipboard is its own: real formats put there, the product's
-// WndProc hearing WM_CLIPBOARDUPDATE, capture_local_clipboard reading it -- a new copy voids an
-// older image still being encoded, the viewer's own echo does not, a copy over the size limit says
-// it was not sent. No host is needed for that part.
+// WndProc hearing WM_CLIPBOARDUPDATE -- which since paste on demand (t-y4wj64jw) sends nothing --
+// and a Ctrl+V in the window reading the copy then and handing it to the image client; a copy made
+// after the gesture leaves the pasted image alone, a copy over a limit ends the paste with its
+// reason and no text in its place. No host is needed for that part.
 //
 // Scratch lives in the repository (test_scratch_dir: created by this run, reparse-checked, removed
 // only after the host is known to have exited), never in %TEMP%.
@@ -75,6 +76,7 @@
 #include "viewer_state.hpp"
 #include "viewer_udp_session.hpp"
 #include "viewer_window_proc.hpp"
+#include "viewer_paste_ui.hpp"
 #include "test_scratch_dir.hpp"
 #include "e2e_station_lock.hpp"
 
@@ -272,7 +274,7 @@ std::string narrow(const std::wstring& w) {
 
 // ------------------------------------------------------------------ the clipboard-boundary child
 // Runs on a private window station (its clipboard is not the user's). Everything below the product
-// window is the product's: WndProc -> capture_local_clipboard -> ClipImageClient.
+// window is the product's: WndProc (Ctrl+V) -> paste on demand's snapshot read -> ClipImageClient.
 bool station_open() {
   for (int i = 0; i < 50; ++i) {
     if (OpenClipboard(nullptr)) return true;
@@ -331,28 +333,53 @@ int run_clipboard_child(const wchar_t* resultFile) {
     }
   };
 
-  // 1. An ordinary image copy reaches the image client through the product's path.
+  // Paste on demand (t-y4wj64jw): a copy no longer goes anywhere; Ctrl+V in the window sends it.
+  ctx.session.inputEnabled.store(true);
+  ctx.control.clipboard.hostPasteOnDemand.store(true);  // what the pong would say (no host here)
+  const auto ctrl_v = [&] {
+    BYTE ks[256]{};
+    GetKeyboardState(ks);
+    ks[VK_CONTROL] = ks[VK_LCONTROL] = 0x80;
+    SetKeyboardState(ks);
+    SendMessageW(hwnd, WM_KEYDOWN, 'V', 1 | (0x2F << 16));
+    SendMessageW(hwnd, WM_KEYUP, 'V', 1 | (0x2F << 16) | (1u << 30) | (1u << 31));
+    ks[VK_CONTROL] = ks[VK_LCONTROL] = 0;
+    SetKeyboardState(ks);
+  };
+
+  // 1. An image copy alone reaches nothing: no package, no offer.
   check("an image copy is put on the private clipboard", station_put(kDibv5, dib_bytes(64, 64, 1)));
   SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
   settle();
-  check("WM_CLIPBOARDUPDATE -> capture_local_clipboard -> the client packages it",
+  check("WM_CLIPBOARDUPDATE alone submits nothing (a copy here does not change the remote PC)",
+        image.GetCounters().submitted == 0 && packaged() == 0);
+
+  // 2. Ctrl+V in the window: the copy is read now and goes through the product's path.
+  ctrl_v();
+  settle();
+  check("Ctrl+V -> the window procedure reads the image -> the client packages it",
         image.GetCounters().submitted == 1 && packaged() == 1);
 
-  // 2. A genuine new copy (text) while an older image is still being encoded: the older one is void.
-  const uint64_t p2 = packaged();
-  station_put(kDibv5, dib_bytes(2048, 2048, 2));
-  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // encoding starts (a 2048 x 2048 noise PNG: ~100 ms+)
-  station_put(CF_UNICODETEXT, text_bytes(u"a newer copy by the user"));
-  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // the user copied something else meanwhile
-  settle();
-  check("a newer copy makes the image still being encoded void (nothing of it is offered)", packaged() == p2);
-
-  // 2b. The case the old code missed: the new copy is an image the clipboard read refuses (over the
-  //     snapshot limit before anything is copied). It cancelled nothing, so the older image still went.
+  // 3. A newer copy while the pasted image is still being encoded does NOT void it: what is pasted is
+  //    what was on the clipboard at the gesture (the old rule voided it, for a copy that went at once).
   {
-    const uint64_t p2b = packaged();
-    station_put(kDibv5, dib_bytes(2048, 2048, 5));
-    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // the older image starts encoding
+    const uint64_t p3 = packaged();
+    // The gate holds one paste and one waiting; the first never gets an answer here (no host), so
+    // the window is recreated state-wise by cancelling it: focus leaves.
+    SendMessageW(hwnd, WM_KILLFOCUS, 0, 0);
+    station_put(kDibv5, dib_bytes(2048, 2048, 2));
+    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+    ctrl_v();  // encoding starts (a 2048 x 2048 noise PNG: ~100 ms+)
+    station_put(CF_UNICODETEXT, text_bytes(u"a newer copy by the user"));
+    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+    settle();
+    check("a copy made after Ctrl+V leaves the pasted image alone (it is packaged)", packaged() == p3 + 1);
+    SendMessageW(hwnd, WM_KILLFOCUS, 0, 0);
+  }
+
+  // 4. An image over the read limit: Ctrl+V reads it, refuses it, sends nothing and says so.
+  {
+    const uint64_t s4 = image.GetCounters().submitted;
     std::vector<uint8_t> huge(65u * 1024u * 1024u + 4096u, 0);  // over kMaxDibSnapshotBytes
     BITMAPV5HEADER bh{};
     bh.bV5Size = sizeof(bh);
@@ -364,30 +391,29 @@ int run_clipboard_child(const wchar_t* resultFile) {
     std::memcpy(huge.data(), &bh, sizeof(bh));
     check("an image copy over the read limit is put on the private clipboard", station_put(kDibv5, huge));
     SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+    ctrl_v();
     settle();
-    check("a new image the read refuses still makes the older image void", packaged() == p2b);
-    const auto pr2 = image.GetProgress();
-    check("...and says the new one was not sent (too large)",
-          pr2.outcome == ClipOutcome::NotSent && pr2.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+    const auto pv = remote60::native_poc::viewer::paste_bar_view(ctx);
+    check("Ctrl+V on an image over the limit sends nothing", image.GetCounters().submitted == s4);
+    check("...and the paste line says it was too large, the paste not run",
+          pv.active && pv.text.find(L"너무 커서") != std::wstring::npos && pv.failed);
   }
 
-  // 3. The viewer's own echo -- the host's text it just wrote -- is NOT a new copy.
-  const uint64_t p3 = packaged();
-  station_put(kDibv5, dib_bytes(2048, 2048, 3));
-  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
-  SendMessageW(hwnd, remote60::native_poc::viewer::kMsgApplyClipboard, 0,
-               reinterpret_cast<LPARAM>(new std::u16string(u"text from the host")));  // the product's apply
-  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);  // what that write provokes
-  settle();
-  check("the echo of the viewer's own write does not void the image being encoded", packaged() == p3 + 1);
-
-  // 4. A copy over the size limit: the older one is void and the user is told this one did not go.
-  station_put(kDibv5, dib_bytes(8193, 1, 4));
-  SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
-  settle();
-  const auto pr = image.GetProgress();
-  check("an image over the size limit ends with 'not sent: too large'",
-        pr.outcome == ClipOutcome::NotSent && pr.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+  // 5. Over the size the package accepts (8193 px wide): read fine, refused by the package worker --
+  //    the paste's outcome, not a silent text fallback.
+  {
+    station_put(kDibv5, dib_bytes(8193, 1, 4));
+    SendMessageW(hwnd, WM_CLIPBOARDUPDATE, 0, 0);
+    ctrl_v();
+    settle();
+    remote60::native_poc::ClipImageClient::PasteOutcome o;
+    const bool settled = image.TakePasteOutcome(&o);
+    check("an image over the package limit ends that paste as 'not sent: too large'",
+          settled && !o.applied && o.outcome == ClipOutcome::NotSent &&
+              o.detail == static_cast<uint8_t>(ClipPackageResult::TooLarge));
+    std::u16string fallback;
+    check("...and leaves no text to send instead", !image.TakeFallbackText(&fallback) || fallback.empty());
+  }
 
   image.Stop();
   DestroyWindow(hwnd);

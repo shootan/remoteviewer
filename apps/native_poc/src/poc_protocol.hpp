@@ -95,6 +95,12 @@ enum class MessageType : uint16_t {
   ControlFileStatusReply = 76,
   FileBulkPull = 77,
   FileBulkChunk = 78,
+  // 79 stays reserved for file copy. Paste on demand (t-y4wj64jw, numbers assigned by the verifier):
+  // the viewer sends the text it is about to paste and the host answers with the OUTCOME of writing
+  // its clipboard -- not a receipt. Gated on kCaptureFlagPasteOnDemandV1; layouts in
+  // paste_apply_wire.hpp, which only the Windows viewer and the host compile.
+  ControlPasteTextApply = 80,
+  ControlPasteApplied = 81,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -276,6 +282,12 @@ constexpr uint32_t kCaptureFlagMouseXButtonsV1 = 0x400u;
 // Medium clipboard helper can run as the interactive user. Meaningful only with kUdpFeatureBulkChannel.
 // A viewer sends no file message to a host that does not advertise it.
 constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
+// Paste on demand v1 (t-y4wj64jw): the host takes ControlPasteTextApply (80) and answers
+// ControlPasteApplied (81) with whether its OS clipboard was actually written; a clip image
+// Published and a file OfferReply Accept likewise mean "on the clipboard". A viewer sends 80 only to
+// a host that advertises this: an older host discards an unknown type without answering, and the
+// strict request/response link would then wait on a reply that never comes.
+constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

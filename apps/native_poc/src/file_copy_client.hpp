@@ -114,6 +114,24 @@ class FileCopyClient {
   /** UI thread: the clipboard no longer names files -- the offer is withdrawn (not a running paste). */
   void ClearLocalOffer();
 
+  /**
+   * Paste on demand (t-y4wj64jw), UI thread: the files a Ctrl+V found on this PC's clipboard, offered
+   * for paste `pasteId` -- always a new offer, even for the same files, because the remote clipboard
+   * may have changed since the last one (a copy there, a helper restart). Its OfferReply is the
+   * paste's outcome: Accept means the host's helper put the files on its clipboard. A copy that
+   * cannot be offered at all (too many, nothing readable) is the outcome at once.
+   */
+  void SubmitLocalFilesForPaste(const std::vector<std::wstring>& paths, uint64_t revision, uint64_t pasteId);
+  /** UI thread: the paste gave up; a later answer is not recorded. */
+  void AbandonPaste(uint64_t pasteId);
+  struct PasteOutcome {
+    uint64_t id = 0;
+    bool applied = false;  // OfferReply Accept
+    uint8_t verdict = 0;   // file_copy::net::Verdict
+  };
+  /** Control thread: a paste's outcome, once. */
+  bool TakePasteOutcome(PasteOutcome* out);
+
   /** Control thread, idle turn. 1 = exchanged, 0 = nothing to do, -1 = link failure. */
   int Pump(ControlLink& link);
 
@@ -332,6 +350,12 @@ class FileCopyClient {
   void ReleasePreemptLocked();  // caller holds mu_: the paste is over -- the stopped image may resume
   PasteKey cancelKey_;
   Progress result_;                    // the "last" / offer fields of GetProgress
+  // Paste on demand: the paste the offer `pasteOfferId_` was made for (0 = none), and its outcome.
+  uint64_t pasteId_ = 0;
+  uint64_t pasteOfferId_ = 0;
+  bool havePasteOutcome_ = false;
+  PasteOutcome pasteOutcome_;
+  void SettlePasteLocked(bool applied, uint8_t verdict);  // caller holds mu_
   uint64_t preparingOffer_ = 0;
   uint32_t nextSeq_ = 0;
   Counters counters_;

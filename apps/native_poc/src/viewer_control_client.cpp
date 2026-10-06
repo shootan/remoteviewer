@@ -16,6 +16,8 @@
 
 #include "viewer_unlock.hpp"
 #include "peer_version.hpp"
+#include "paste_apply_wire.hpp"
+#include "viewer_paste_gate.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -73,11 +75,142 @@ int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) 
   return 1;
 }
 
+namespace {
+
+// Paste on demand: hands one paste's answer to the UI thread, which owns the key it releases.
+void post_paste_answer(ViewerState& ctx, const PasteAnswer& a) {
+  if (!ctx.session.hwnd) return;
+  auto* copy = new PasteAnswer(a);
+  if (!PostMessageW(ctx.session.hwnd, kMsgPasteResult, 0, reinterpret_cast<LPARAM>(copy))) delete copy;
+}
+
+PasteFailure paste_failure_for_text(remote60::native_poc::PasteApplyResult r) {
+  switch (r) {
+    case remote60::native_poc::PasteApplyResult::Failed:
+      return PasteFailure::HostWrite;
+    case remote60::native_poc::PasteApplyResult::TooLarge:
+      return PasteFailure::TooLarge;
+    default:
+      return PasteFailure::Refused;
+  }
+}
+
+PasteFailure paste_failure_for_image(const remote60::native_poc::ClipImageClient::PasteOutcome& o) {
+  using remote60::native_poc::ClipImageReason;
+  using remote60::native_poc::ClipOutcome;
+  if (o.outcome == ClipOutcome::NotSent) {
+    return static_cast<remote60::native_poc::ClipPackageResult>(o.detail) ==
+                   remote60::native_poc::ClipPackageResult::TooLarge
+               ? PasteFailure::TooLarge
+               : PasteFailure::ReadFailed;
+  }
+  if (o.outcome == ClipOutcome::Cancelled) {
+    const auto why = static_cast<ClipImageReason>(o.detail);
+    if (why == ClipImageReason::User) return PasteFailure::Cancelled;
+    if (why == ClipImageReason::Session) return PasteFailure::Link;
+  }
+  return PasteFailure::Refused;
+}
+
+PasteFailure paste_failure_for_files(uint8_t verdict) {
+  namespace fn = remote60::native_poc::file_copy::net;
+  switch (static_cast<fn::Verdict>(verdict)) {
+    case fn::Verdict::HelperUnavailable:
+      return PasteFailure::HelperUnavailable;
+    case fn::Verdict::StaleEpoch:
+      return PasteFailure::Link;
+    case fn::Verdict::TooLarge:
+    case fn::Verdict::TooMany:
+      return PasteFailure::TooLarge;
+    default:
+      return PasteFailure::Refused;
+  }
+}
+
+}  // namespace
+
+int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
+  auto& clip = ctx.control.clipboard;
+  // Images and files settle inside their clients; their outcome is passed on as soon as it exists.
+  {
+    remote60::native_poc::ClipImageClient::PasteOutcome io;
+    if (ctx.control.clipImage.TakePasteOutcome(&io)) {
+      PasteAnswer a;
+      a.id = io.id;
+      a.format = PasteFormat::Image;
+      a.applied = io.applied;
+      a.failure = io.applied ? PasteFailure::None : paste_failure_for_image(io);
+      a.detail = static_cast<uint32_t>(io.outcome) << 8 | io.detail;
+      post_paste_answer(ctx, a);
+    }
+    remote60::native_poc::FileCopyClient::PasteOutcome fo;
+    if (ctx.control.fileCopy.TakePasteOutcome(&fo)) {
+      PasteAnswer a;
+      a.id = fo.id;
+      a.format = PasteFormat::Files;
+      a.applied = fo.applied;
+      a.failure = fo.applied ? PasteFailure::None : paste_failure_for_files(fo.verdict);
+      a.detail = fo.verdict;
+      post_paste_answer(ctx, a);
+    }
+  }
+  std::u16string text;
+  uint64_t id = 0, hash = 0;
+  uint32_t revision = 0, seq = 0;
+  {
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (!clip.havePasteText) return 0;
+    clip.havePasteText = false;
+    text = std::move(clip.pasteText);
+    clip.pasteText.clear();
+    id = clip.pasteTextId;
+    hash = clip.pasteTextHash;
+    revision = clip.pasteTextRevision;
+    seq = ++clip.nextSeq;
+  }
+  PasteAnswer a;
+  a.id = id;
+  a.format = PasteFormat::Text;
+  if (!clip.hostPasteOnDemand.load(std::memory_order_acquire)) {
+    // The UI asked for a host that has since gone (a reconnect to an older one): nothing is sent.
+    a.failure = PasteFailure::UpdateNeeded;
+    post_paste_answer(ctx, a);
+    return 0;
+  }
+  const uint64_t startUs = qpc_now_us();
+  const std::vector<uint8_t> req =
+      remote60::native_poc::build_paste_text_apply(seq, id, revision, text, hash, startUs);
+  remote60::native_poc::ControlPasteAppliedMessage reply{};
+  const bool exchanged = link.Write(req.data(), req.size()) && link.EndMessage() && link.Read(&reply, sizeof(reply)) &&
+                         remote60::native_poc::paste_applied_valid(reply, seq, id);
+  if (!exchanged) {
+    a.failure = PasteFailure::Link;
+    post_paste_answer(ctx, a);
+    std::cout << "[native-video-client][paste] text exchange failed (link)\n";
+    return -1;
+  }
+  const auto result = static_cast<remote60::native_poc::PasteApplyResult>(reply.result);
+  a.applied = result == remote60::native_poc::PasteApplyResult::Applied;
+  a.failure = a.applied ? PasteFailure::None : paste_failure_for_text(result);
+  a.detail = static_cast<uint32_t>(reply.result) << 24 | static_cast<uint32_t>(reply.stage) << 16 | (reply.win32 & 0xffff);
+  std::cout << "[native-video-client][paste] text answer result=" << static_cast<int>(reply.result)
+            << " stage=" << static_cast<int>(reply.stage) << " win32=" << reply.win32
+            << " utf16Count=" << text.size() << " ms=" << (qpc_now_us() - startUs) / 1000
+            << " hostUserCopyGen=" << reply.hostUserCopyGen << "\n";
+  post_paste_answer(ctx, a);
+  return 1;
+}
+
 int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) {
   auto& clip = ctx.control.clipboard;
   if (!clip.enabled.load(std::memory_order_relaxed) ||
       !clip.hostSupports.load(std::memory_order_relaxed)) {
     return 0;
+  }
+  // Paste on demand first: a key is being held for its answer.
+  {
+    const int p = pump_paste(link);
+    if (p != 0) return p;
   }
   // Once per session, ask the UI thread for whatever is on the clipboard now and send it. This is
   // what makes the machine the user just connected from the source of truth: the host's clipboard
@@ -92,14 +225,10 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
     // File copy (t-zdmsd4gb): offer / 700 ms paste query / prepare, one per idle turn.
     const int f = ctx.control.fileCopy.Pump(link);
     if (f != 0) return f;
-    // The host refused an image copy (too large, busy, ...): its text still travels, by text sync.
+    // Paste on demand: an image the host refused is a failed paste, not a cue to send its text
+    // instead -- the user pasted the image, and something else must not arrive in its place (Q3).
     std::u16string fallback;
-    if (ctx.control.clipImage.TakeFallbackText(&fallback) && !fallback.empty()) {
-      std::lock_guard<std::mutex> lock(clip.mu);
-      clip.pendingHash = remote60::native_poc::clipboard_fnv1a(fallback);
-      clip.pendingText = std::move(fallback);
-      clip.hasPending = true;
-    }
+    (void)ctx.control.clipImage.TakeFallbackText(&fallback);
   }
   // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
   // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
@@ -208,7 +337,13 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
       std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
       ctx.control.clipboard.core.Reset();
       ctx.control.clipboard.policy.OnConnected();
+      ctx.control.clipboard.connGen.fetch_add(1, std::memory_order_acq_rel);
+      ctx.control.clipboard.havePasteText = false;  // asked on the previous connection
     }
+    // Paste on demand: whether this host confirms a paste. Set every pong, like the bits around it.
+    ctx.control.clipboard.hostPasteOnDemand.store(
+        clipboardHost && (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPasteOnDemandV1) != 0,
+        std::memory_order_release);
     ctx.control.clipboard.hostSupports.store(clipboardHost, std::memory_order_relaxed);
     // Clipboard image v1: only together with the text sync (images ride its on/off and its session
     // rules) and the bulk channel the HelloAck agreed to.

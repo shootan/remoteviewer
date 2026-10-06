@@ -191,6 +191,7 @@ ClipBarView file_transfer_bar_view(const FileCopyClient::Progress& p, uint64_t n
 }
 
 std::wstring clip_transfer_bar_text(const ClipBarView& v) {
+  if (v.isPaste) return v.pasteText;
   if (v.isFile) return v.fileText;
   if (v.phase == ClipBarPhase::Sending) {
     const uint64_t pct = v.bytesTotal ? (std::min<uint64_t>)(99, v.bytesDone * 100 / v.bytesTotal) : 0;
@@ -287,7 +288,9 @@ struct Bar {
   uint64_t seenFinished = 0;
   uint64_t resultUntilUs = 1;  // 1 = "nothing polled yet" (see clip_transfer_bar_view)
   RECT cancel{};
+  RECT retry{};
   bool pressed = false;
+  bool retryPressed = false;
   int dpi = 96;
   HFONT font = nullptr;
   HBRUSH background = nullptr;
@@ -323,6 +326,13 @@ void reposition() {
   const int height = t.cy + pad * 2;
   int width = t.cx + pad * 2;
   g.cancel = RECT{};
+  g.retry = RECT{};
+  if (clip_transfer_bar_has_retry(g.view)) {
+    const SIZE b = measure(L"다시 시도");
+    const int bw = b.cx + scaled(28);
+    g.retry = RECT{width, scaled(5), width + bw, height - scaled(5)};
+    width += bw + pad;
+  }
   if (clip_transfer_bar_has_cancel(g.view)) {
     const SIZE b = measure(L"취소");
     const int bw = b.cx + scaled(28);
@@ -341,6 +351,11 @@ void reposition() {
     g.cancel.right = width - pad;
     g.cancel.left = g.cancel.right - bw;
   }
+  if (g.retry.right > width - pad) {
+    const int bw = g.retry.right - g.retry.left;
+    g.retry.right = width - pad;
+    g.retry.left = g.retry.right - bw;
+  }
   const int x = origin.x + (std::max)(0, (clientW - width) / 2);
   const int y = origin.y + (std::max)(0, clientH - height - scaled(16));
   SetWindowPos(g.hwnd, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | (IsWindowVisible(g.hwnd) ? 0u : SWP_SHOWWINDOW));
@@ -357,6 +372,20 @@ void poll() {
     const ClipBarView fv = file_transfer_bar_view(g.hooks.fileProgress(), nowUs, &g.fileState);
     if (fv.isFile) g.view = fv;
   }
+  // A Ctrl+V waiting for its answer, or one that did not happen, is what the user is looking at.
+  if (g.hooks.pasteView) {
+    const ClipPasteBarView pv = g.hooks.pasteView();
+    if (pv.active) {
+      ClipBarView v;
+      v.phase = pv.failed || pv.retry ? ClipBarPhase::Result : ClipBarPhase::Sending;
+      v.isPaste = true;
+      v.pasteText = pv.text;
+      v.pasteCancel = pv.cancel;
+      v.pasteRetry = pv.retry;
+      v.pasteFailed = pv.failed;
+      g.view = v;
+    }
+  }
   if (g.view.phase != before.phase && g.hooks.onLog) {
     std::string line = "[clip-bar] phase=" + std::to_string(static_cast<int>(g.view.phase));
     if (g.view.phase == ClipBarPhase::Result) {
@@ -365,6 +394,8 @@ void poll() {
     g.hooks.onLog(line);
   }
   const bool changed = g.view.phase != before.phase || g.view.isFile != before.isFile || g.view.fileText != before.fileText ||
+                       g.view.isPaste != before.isPaste || g.view.pasteText != before.pasteText ||
+                       g.view.pasteRetry != before.pasteRetry || g.view.pasteCancel != before.pasteCancel ||
                        g.view.bytesDone != before.bytesDone ||
                        g.view.elapsedMs / 1000 != before.elapsedMs / 1000 || g.view.outcome != before.outcome ||
                        g.view.detail != before.detail;
@@ -384,10 +415,13 @@ void paint(HDC target) {
   SetBkMode(hdc, TRANSPARENT);
   HGDIOBJ oldFont = g.font ? SelectObject(hdc, g.font) : nullptr;
   const int pad = scaled(10);
-  RECT textRect{pad, 0, (g.cancel.right > 0 ? g.cancel.left : w) - pad / 2, h};
-  const bool failed = g.view.phase == ClipBarPhase::Result &&
-                      (g.view.outcome == ClipOutcome::Failed || g.view.outcome == ClipOutcome::NotSent ||
-                       g.view.outcome == ClipOutcome::Refused || g.view.outcome == ClipOutcome::CancelUnconfirmed);
+  const int firstButton = g.retry.right > 0 ? g.retry.left : (g.cancel.right > 0 ? g.cancel.left : w);
+  RECT textRect{pad, 0, firstButton - pad / 2, h};
+  const bool failed = g.view.isPaste ? g.view.pasteFailed
+                                     : g.view.phase == ClipBarPhase::Result &&
+                                           (g.view.outcome == ClipOutcome::Failed || g.view.outcome == ClipOutcome::NotSent ||
+                                            g.view.outcome == ClipOutcome::Refused ||
+                                            g.view.outcome == ClipOutcome::CancelUnconfirmed);
   SetTextColor(hdc, failed ? RGB(242, 150, 140) : RGB(232, 236, 242));
   const std::wstring text = clip_transfer_bar_text(g.view);
   DrawTextW(hdc, text.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -398,6 +432,13 @@ void paint(HDC target) {
     SetTextColor(hdc, RGB(232, 236, 242));
     DrawTextW(hdc, L"취소", -1, &b, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
   }
+  if (g.retry.right > 0) {
+    RECT b = g.retry;
+    FillRect(hdc, &b, g.retryPressed ? g.buttonDown : g.button);
+    FrameRect(hdc, &b, g.border);
+    SetTextColor(hdc, RGB(232, 236, 242));
+    DrawTextW(hdc, L"다시 시도", -1, &b, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  }
   if (oldFont) SelectObject(hdc, oldFont);
   BitBlt(target, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
   SelectObject(hdc, oldBmp);
@@ -407,6 +448,10 @@ void paint(HDC target) {
 
 bool in_cancel(int x, int y) {
   return g.cancel.right > 0 && x >= g.cancel.left && x < g.cancel.right && y >= g.cancel.top && y < g.cancel.bottom;
+}
+
+bool in_retry(int x, int y) {
+  return g.retry.right > 0 && x >= g.retry.left && x < g.retry.right && y >= g.retry.top && y < g.retry.bottom;
 }
 
 LRESULT CALLBACK bar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -431,7 +476,8 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_LBUTTONDOWN:
       g.pressed = in_cancel(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-      if (g.pressed) SetCapture(hwnd);
+      g.retryPressed = !g.pressed && in_retry(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      if (g.pressed || g.retryPressed) SetCapture(hwnd);
       if (g.hooks.onLog) {
         g.hooks.onLog("[clip-bar] down x=" + std::to_string(GET_X_LPARAM(lp)) + " y=" + std::to_string(GET_Y_LPARAM(lp)) +
                       " onCancel=" + (g.pressed ? "1" : "0"));
@@ -440,9 +486,23 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_LBUTTONUP: {
       const bool was = g.pressed;
+      const bool wasRetry = g.retryPressed;
       g.pressed = false;
+      g.retryPressed = false;
       if (GetCapture() == hwnd) ReleaseCapture();
       InvalidateRect(hwnd, nullptr, FALSE);
+      if (wasRetry) {
+        if (!in_retry(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || !clip_transfer_bar_has_retry(g.view)) {
+          if (g.hooks.onLog) g.hooks.onLog("[clip-bar] retry up ignored");
+          return 0;
+        }
+        if (g.hooks.onLog) {
+          g.hooks.onLog(std::string("[clip-bar] paste retry clicked, callback ") + (g.hooks.onPasteRetry ? "present" : "MISSING"));
+        }
+        if (g.hooks.onPasteRetry) g.hooks.onPasteRetry();
+        poll();
+        return 0;
+      }
       if (!was) return 0;
       if (!in_cancel(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
         if (g.hooks.onLog) g.hooks.onLog("[clip-bar] up ignored: released off Cancel");
@@ -455,7 +515,10 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (g.hooks.onLog) {
         g.hooks.onLog(std::string("[clip-bar] cancel clicked, callback ") + (g.hooks.onCancel ? "present" : "MISSING"));
       }
-      if (g.view.isFile) {
+      if (g.view.isPaste) {
+        if (g.hooks.onLog) g.hooks.onLog("[clip-bar] paste cancel clicked");
+        if (g.hooks.onPasteCancel) g.hooks.onPasteCancel();
+      } else if (g.view.isFile) {
         if (g.hooks.onLog) g.hooks.onLog("[clip-bar] file paste cancel clicked");
         if (g.hooks.onFileCancel) g.hooks.onFileCancel();
       } else if (g.hooks.onCancel) {
@@ -529,6 +592,10 @@ void clip_transfer_bar_destroy() {
 
 HWND clip_transfer_bar_window() { return g.hwnd; }
 RECT clip_transfer_bar_cancel_rect() { return g.cancel; }
+RECT clip_transfer_bar_retry_rect() { return g.retry; }
+void clip_transfer_bar_refresh() {
+  if (g.hwnd) poll();
+}
 ClipBarView clip_transfer_bar_current() { return g.view; }
 
 }  // namespace remote60::native_poc

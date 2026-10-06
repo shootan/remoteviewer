@@ -33,6 +33,7 @@
 
 #include "clipboard_monitor.hpp"
 #include "clipboard_sync.hpp"
+#include "paste_apply_wire.hpp"
 #include "host_clip_image.hpp"
 #include "host_thumbnail_budget.hpp"
 #include "host_thumbnail_helper.hpp"
@@ -49,6 +50,18 @@
 #include "time_utils.hpp"
 
 namespace remote60::native_poc {
+
+namespace {
+// Paste on demand (t-y4wj64jw): whether kCaptureFlagPasteOnDemandV1 is advertised. On unless
+// REMOTE60_PASTE_ON_DEMAND starts with 0 / f / n. Read per pong, like mouse_xbuttons_enabled.
+bool paste_on_demand_advertised() {
+  char buf[8]{};
+  const DWORD n = GetEnvironmentVariableA("REMOTE60_PASTE_ON_DEMAND", buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf)) return true;
+  const char c = buf[0];
+  return !(c == '0' || c == 'f' || c == 'F' || c == 'n' || c == 'N');
+}
+}  // namespace
 
 namespace {
 
@@ -408,6 +421,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagClipboardTextV1;
+      // Paste on demand: this host answers 80 with the outcome of the clipboard write (81). The same
+      // condition as text sync, because the write goes through the same hub. REMOTE60_PASTE_ON_DEMAND=0
+      // withholds the bit (operational off switch; the e2e uses it to stand in for an older host).
+      if (clipboard && clipboard->enabled() && paste_on_demand_advertised())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPasteOnDemandV1;
       // Clipboard image v1: the image receiver runs. A viewer also needs kUdpFeatureBulkChannel in
       // its HelloAck before it offers anything.
       if (clientSession.clipImage && clientSession.clipImage->Enabled())
@@ -1214,6 +1232,52 @@ void ControlSessionServer::Serve(ControlLink& link) {
       std::cout << "[native-video-host][clipboard] update applied seq=" << upd.seq
                 << " utf16Count=" << upd.utf16Count << "\n";
       send_input_ack(upd.seq);
+      continue;
+    }
+
+    // Paste on demand (t-y4wj64jw): the viewer is holding a paste key until this answer says the text
+    // is on this clipboard. So the answer is the write's outcome, decided here and only here -- never
+    // a receipt. Only reached on a host that advertised kCaptureFlagPasteOnDemandV1.
+    if (type == MessageType::ControlPasteTextApply &&
+        header.size == sizeof(remote60::native_poc::ControlPasteTextApplyMessage)) {
+      remote60::native_poc::ControlPasteTextApplyMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      const uint64_t startUs = qpc_now_us();
+      remote60::native_poc::PasteApplyResult result = remote60::native_poc::paste_text_apply_precheck(req);
+      remote60::native_poc::PasteApplyStage stage = remote60::native_poc::PasteApplyStage::None;
+      uint32_t win32 = 0, clipSeq = 0, userGen = 0;
+      const size_t payloadBytes = static_cast<size_t>(req.utf16Count) * sizeof(uint16_t);
+      if (result != remote60::native_poc::PasteApplyResult::Applied) {
+        if (payloadBytes > 0 && !link.Discard(payloadBytes)) break;
+      } else {
+        std::vector<uint8_t> payload(payloadBytes);
+        if (!link.Read(payload.data(), payloadBytes)) break;
+        std::u16string text;
+        if (!remote60::native_poc::clipboard_parse_payload(payload.data(), payload.size(), req.utf16Count, &text) ||
+            remote60::native_poc::clipboard_fnv1a(text) != req.contentHash) {
+          result = remote60::native_poc::PasteApplyResult::BadRequest;
+        } else if (!clipboard || !clipboard->enabled()) {
+          result = remote60::native_poc::PasteApplyResult::Disabled;
+        } else {
+          // Bounded: the viewer's own deadline is 3 s for text, and this control thread serves
+          // nothing else while it waits (a file Offer already waits up to 5 s in the same place).
+          const HostClipboardHub::PasteOutcome o = clipboard->ApplyPaste(text, req.contentHash, 2000);
+          result = o.ok ? remote60::native_poc::PasteApplyResult::Applied : remote60::native_poc::PasteApplyResult::Failed;
+          stage = static_cast<remote60::native_poc::PasteApplyStage>(o.stage);
+          win32 = o.win32;
+          clipSeq = o.clipSeq;
+          userGen = static_cast<uint32_t>(o.userCopyGen);
+        }
+      }
+      const auto reply = remote60::native_poc::make_paste_applied(req.seq, req.pasteRequestId, result, stage, win32,
+                                                                  clipSeq, userGen);
+      // Contents are never logged; the request id, the size and the outcome are what a field log needs.
+      std::cout << "[native-video-host][clipboard] paste-apply id=" << std::hex << req.pasteRequestId << std::dec
+                << " utf16Count=" << req.utf16Count << " result=" << static_cast<int>(result)
+                << " stage=" << static_cast<int>(stage) << " win32=" << win32 << " ms=" << (qpc_now_us() - startUs) / 1000
+                << " hostUserCopyGen=" << userGen << "\n";
+      if (!link.Write(&reply, sizeof(reply))) break;
       continue;
     }
 

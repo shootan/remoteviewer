@@ -54,6 +54,21 @@ struct ClipboardSyncState {
   // control thread only: the session-boundary rules (baseline poll, one-shot push, poll interval),
   // shared with the Android session so both clients behave the same.
   remote60::native_poc::ClipboardClientPolicy policy;
+
+  // Paste on demand (t-y4wj64jw). A copy here sends nothing; a Ctrl+V in the window sends what is on
+  // the clipboard then and waits for the host to say it is on ITS clipboard.
+  // Host advertised kCaptureFlagPasteOnDemandV1 (pong; control writes, UI reads).
+  std::atomic<bool> hostPasteOnDemand{false};
+  // Bumped each time a clipboard session opens (the first pong with the clipboard bit): an answer
+  // asked on an earlier connection cannot release a key on this one.
+  std::atomic<uint64_t> connGen{0};
+  // The text paste the UI thread left for the control thread (under mu). Images and files go
+  // through their own clients (SubmitSnapshotForPaste / SubmitLocalFilesForPaste).
+  bool havePasteText = false;
+  uint64_t pasteTextId = 0;
+  uint32_t pasteTextRevision = 0;
+  std::u16string pasteText;
+  uint64_t pasteTextHash = 0;
 };
 
 struct ControlChannelState {

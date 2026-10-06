@@ -51,6 +51,9 @@ class ControlClient {
   // an interval. Runs on the same idle turns as the thumbnail fetch, and only when the host
   // advertised the capability. Returns: 1 did work, 0 nothing to do, -1 link failure (drop session).
   int pump_clipboard_sync(remote60::native_poc::ControlLink& link);
+  // Paste on demand (t-y4wj64jw): the text paste exchange (80/81) and the image / file paste
+  // outcomes, handed to the UI thread. 1 = exchanged, 0 = nothing, -1 = link failure.
+  int pump_paste(remote60::native_poc::ControlLink& link);
   // --- control resume (item 8, C3) ---
   // The worker's three moves. Kept here rather than in the loop because the loop already
   // has one job, and because "is the picture still arriving" has to be answered with the

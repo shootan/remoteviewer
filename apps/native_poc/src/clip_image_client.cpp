@@ -162,6 +162,55 @@ void ClipImageClient::Stop() {
 
 void ClipImageClient::SubmitSnapshot(ClipSnapshot snap) {
   std::lock_guard<std::mutex> lock(mu_);
+  SubmitSnapshotLocked(std::move(snap));
+}
+
+void ClipImageClient::SubmitSnapshotForPaste(ClipSnapshot snap, uint64_t pasteId) {
+  std::lock_guard<std::mutex> lock(mu_);
+  // One paste at a time is the caller's rule; an older one still here has been replaced.
+  SettlePaste(pasteGen_, false, ClipOutcome::Cancelled, static_cast<uint8_t>(ClipImageReason::Superseded));
+  SubmitSnapshotLocked(std::move(snap));
+  pasteId_ = pasteId;
+  pasteGen_ = snapshotGen_;
+  Log("paste image submitted");
+}
+
+void ClipImageClient::AbandonPaste(uint64_t pasteId) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (pasteId == 0 || pasteId_ != pasteId) return;
+  pasteId_ = 0;
+  // The same as the bar's Cancel: the copy being packaged or offered is dropped, a running transfer
+  // is cancelled on the host -- so an image the user gave up on does not land there later.
+  ++snapshotGen_;
+  haveSnapshot_ = false;
+  havePending_ = false;
+  pending_ = ClipPackage{};
+  haveFallback_ = false;
+  fallbackText_.clear();
+  RequestCancel(ClipImageReason::User);
+  Log("paste image abandoned");
+}
+
+bool ClipImageClient::TakePasteOutcome(PasteOutcome* out) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!havePasteOutcome_) return false;
+  *out = pasteOutcome_;
+  havePasteOutcome_ = false;
+  return true;
+}
+
+void ClipImageClient::SettlePaste(uint64_t gen, bool applied, ClipOutcome o, uint8_t detail) {
+  if (pasteId_ == 0 || gen != pasteGen_) return;
+  pasteOutcome_ = PasteOutcome{pasteId_, applied, o, detail};
+  havePasteOutcome_ = true;
+  pasteId_ = 0;
+  std::ostringstream os;
+  os << "paste image settled applied=" << (applied ? 1 : 0) << " outcome=" << static_cast<int>(o)
+     << " detail=" << static_cast<int>(detail);
+  Log(os.str());
+}
+
+void ClipImageClient::SubmitSnapshotLocked(ClipSnapshot snap) {
   ++counters_.submitted;
   snapshot_ = std::move(snap);
   haveSnapshot_ = true;
@@ -328,6 +377,7 @@ void ClipImageClient::AfterFilePaste(bool mayResume) {
 
 void ClipImageClient::CancelByUser() {
   std::lock_guard<std::mutex> lock(mu_);
+  SettlePaste(pasteGen_, false, ClipOutcome::Cancelled, static_cast<uint8_t>(ClipImageReason::User));
   ++snapshotGen_;  // a snapshot being packaged is this same copy
   haveSnapshot_ = false;
   havePending_ = false;
@@ -385,6 +435,7 @@ void ClipImageClient::PackageWorker() {
     std::lock_guard<std::mutex> lock(mu_);
     if (gen != snapshotGen_) continue;  // a newer copy arrived meanwhile: this one is dead
     if (r != ClipPackageResult::Ok) {
+      SettlePaste(gen, false, ClipOutcome::NotSent, static_cast<uint8_t>(r));
       // (A running transfer of an older copy was already cancelled when this copy was submitted.)
       std::ostringstream os;
       os << "package refused result=" << static_cast<int>(r) << " (not sent; text, if any, goes by text sync)";
@@ -433,6 +484,13 @@ void ClipImageClient::EndActive(ClipImageState finalState, ClipImageReason why) 
   lastBytesTotal_ = sender_.offer().packageBytes();
   counters_.lastState = static_cast<uint8_t>(finalState);
   counters_.lastReason = static_cast<uint8_t>(why);
+  // Published is the host saying the image is on its clipboard -- the only end a paste may follow.
+  SettlePaste(offerGen_, finalState == ClipImageState::Published,
+              finalState == ClipImageState::Published  ? ClipOutcome::Published
+              : finalState == ClipImageState::Superseded ? ClipOutcome::HostSuperseded
+              : finalState == ClipImageState::Cancelled  ? ClipOutcome::Cancelled
+                                                         : ClipOutcome::Failed,
+              static_cast<uint8_t>(why));
   switch (finalState) {
     case ClipImageState::Published:
       ++counters_.published;
@@ -578,6 +636,7 @@ int ClipImageClient::Pump(ControlLink& link) {
         Log(os.str());
       } else {
         ++counters_.refused;
+        SettlePaste(offerGen_, false, ClipOutcome::Refused, r.verdict);
         ClearCancelFor(m.transferId);  // the refused offer's cancel ends with it (P1)
         if (arbiter_) arbiter_->Release(m.transferId);
         std::ostringstream os;
@@ -629,6 +688,7 @@ void ClipImageClient::EndSession() {
   {
     std::lock_guard<std::mutex> lock(mu_);
     EndActive(ClipImageState::Cancelled, ClipImageReason::Session);
+    SettlePaste(pasteGen_, false, ClipOutcome::Cancelled, static_cast<uint8_t>(ClipImageReason::Session));
     if (awaiting_.on) SettleAwaiting(ClipOutcome::CancelUnconfirmed, static_cast<uint8_t>(awaiting_.why));
     deferredNotSent_ = false;
     havePending_ = false;

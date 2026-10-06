@@ -5,7 +5,9 @@
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
 
+#include <random>
 #include <set>
+#include <sstream>
 
 #include "clipboard_win32.hpp"
 #include "viewer_clip_transfer_bar.hpp"
@@ -15,6 +17,8 @@
 #include "viewer_gdi_util.hpp"
 #include "viewer_state.hpp"
 #include "viewer_input_forward.hpp"
+#include "viewer_paste_gate.hpp"
+#include "viewer_paste_ui.hpp"
 #include "viewer_unlock.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
@@ -252,80 +256,598 @@ bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
   return false;
 }
 
-/**
- * Reads this machine's clipboard and leaves it pending for the control thread to send.
- *
- * One implementation for the two moments it is wanted -- the clipboard changed, and a session just
- * opened -- because they must decide identically. The core is what decides: empty, oversize,
- * already sent, or the echo of something just applied from the host all mean "do not send". The
- * network I/O is not done here; this runs on the UI thread, which is the one that owns the
- * listener window and may therefore touch the clipboard at all.
- */
-void capture_local_clipboard(ViewerState& ctx, HWND hwnd, bool allowImage) {
-  auto& clip = ctx.control.clipboard;
-  if (!clip.enabled.load(std::memory_order_relaxed) ||
-      !clip.hostSupports.load(std::memory_order_relaxed)) {
+// ---------------------------------------------------------------- paste on demand (t-y4wj64jw)
+//
+// A copy on this PC changes nothing on the remote PC. Ctrl+V / Shift+Insert in this window sends the
+// clipboard as it is at that moment, and the paste key follows only once the remote PC has said the
+// content is on ITS clipboard. Until then the V / Insert is held here (never in the input queue,
+// which drops what waits over 2 s), the modifiers that already reached the host are released at
+// once, and the key sequence is rebuilt from scratch when the answer comes. A failure sends no key:
+// the remote PC's older clipboard is never pasted in the user's name.
+
+namespace {
+
+PasteGate gPaste;
+LatestCopy gLatestCopy;
+
+// What a gesture found on this PC's clipboard, read on this thread at the moment of the gesture.
+struct PasteSnapshot {
+  PasteFormat format = PasteFormat::None;
+  uint32_t revision = 0;  // GetClipboardSequenceNumber at the gesture
+  std::u16string text;
+  uint64_t hash = 0;
+  remote60::native_poc::ClipSnapshot image;
+  std::vector<std::wstring> paths;  // never logged
+};
+PasteSnapshot gWaitingSnap;  // the gesture waiting behind the pending one
+
+// Modifiers released on the host at a gesture while still held here. The next ordinary key that goes
+// out first puts them back down, so Ctrl kept held after a paste still makes Ctrl+A a Ctrl+A.
+constexpr uint8_t kModCtrl = 1;
+constexpr uint8_t kModShift = 2;
+uint8_t gReleasedMods = 0;
+
+// The bar's line after a paste that did not happen (5 s), and what Retry repeats.
+struct PasteLine {
+  std::wstring text;
+  bool retry = false;
+  bool failed = false;
+  uint64_t untilUs = 0;
+};
+PasteLine gPasteLine;
+struct PasteGesture {
+  PasteKey key = PasteKey::None;
+  uint16_t scan = 0;
+  bool ext = false;
+};
+PasteGesture gLastFailed;
+
+void paste_log(const std::string& line) { std::cout << "[native-video-client][paste] " << line << "\n"; }
+
+uint64_t new_paste_id() {
+  static std::mt19937_64 rng{static_cast<uint64_t>(std::random_device{}()) ^ qpc_now_us()};
+  uint64_t v = 0;
+  while (v == 0) v = rng();
+  return v;
+}
+
+PasteMods local_paste_mods() {
+  PasteMods m;
+  m.ctrl = GetKeyState(VK_CONTROL) < 0;
+  m.shift = GetKeyState(VK_SHIFT) < 0;
+  m.alt = GetKeyState(VK_MENU) < 0;
+  m.win = GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0;
+  return m;
+}
+
+bool is_modifier_vk(WPARAM wp) {
+  switch (wp) {
+    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+    case VK_MENU: case VK_LMENU: case VK_RMENU:
+    case VK_LWIN: case VK_RWIN:
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint16_t lp_scan(LPARAM lp) { return static_cast<uint16_t>((lp >> 16) & 0xff); }
+bool lp_ext(LPARAM lp) { return (lp & (1 << 24)) != 0; }
+
+// The feature applies: input goes to the host, clipboard sync is on, and the host has clipboard sync.
+bool paste_feature_on(ViewerState& ctx) {
+  const auto& clip = ctx.control.clipboard;
+  return ctx.session.inputEnabled.load() && clip.enabled.load(std::memory_order_relaxed) &&
+         clip.hostSupports.load(std::memory_order_relaxed);
+}
+uint64_t paste_conn_gen(ViewerState& ctx) { return ctx.control.clipboard.connGen.load(std::memory_order_acquire); }
+uint64_t paste_target_gen(ViewerState& ctx) { return ctx.sel.epoch.load(std::memory_order_acquire); }
+
+bool paste_retryable(PasteFailure f) {
+  switch (f) {
+    case PasteFailure::Timeout:
+    case PasteFailure::HostWrite:
+    case PasteFailure::Refused:
+    case PasteFailure::HelperUnavailable:
+    case PasteFailure::Link:
+    case PasteFailure::ReadFailed:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void show_paste_failure(PasteFailure f, PasteKey key, uint16_t scan, bool ext) {
+  const std::wstring text = paste_failure_text(f);
+  if (text.empty()) return;
+  gPasteLine.text = text;
+  gPasteLine.failed = f != PasteFailure::Cancelled && f != PasteFailure::Busy;
+  gPasteLine.retry = paste_retryable(f);
+  gPasteLine.untilUs = qpc_now_us() + remote60::native_poc::kClipBarResultUs;
+  gLastFailed = PasteGesture{key, scan, ext};
+  remote60::native_poc::clip_transfer_bar_refresh();
+}
+
+// Whether the down of this key reached the host (so its repeats and its up follow it).
+bool key_forwarded(ViewerState& ctx, WPARAM wp, LPARAM lp) {
+  if (host_ime_mode(ctx)) return gPhysicalDown.count(static_cast<uint16_t>(lp_scan(lp) | (lp_ext(lp) ? 0x100 : 0))) > 0;
+  return wp < 256 && ctx.input.forwardedKeyDown[wp].load(std::memory_order_relaxed);
+}
+
+// The modifiers that already reached the host go up NOW: they must not stay held on the remote PC
+// for as long as the paste takes. The user's own release later finds nothing to release and is
+// dropped by the trackers, as for any key the host never saw.
+void release_paste_modifiers(ViewerState& ctx) {
+  struct Vk {
+    UINT vk;
+    uint8_t bit;
+  };
+  for (const Vk& k : {Vk{VK_CONTROL, kModCtrl}, Vk{VK_LCONTROL, kModCtrl}, Vk{VK_RCONTROL, kModCtrl},
+                      Vk{VK_SHIFT, kModShift}, Vk{VK_LSHIFT, kModShift}, Vk{VK_RSHIFT, kModShift}}) {
+    if (forward_key_up(ctx, k.vk)) {
+      enqueue_input_event(ctx, 6, 0, 0, 0, k.vk);
+      gReleasedMods |= k.bit;
+    }
+  }
+  struct Scan {
+    uint16_t key;
+    UINT vk;
+    uint8_t bit;
+  };
+  for (const Scan& s : {Scan{0x1D, VK_CONTROL, kModCtrl}, Scan{0x11D, VK_CONTROL, kModCtrl},
+                        Scan{0x2A, VK_SHIFT, kModShift}, Scan{0x36, VK_SHIFT, kModShift}}) {
+    if (gPhysicalDown.count(s.key) == 0) continue;
+    if (enqueue_physical_key(ctx, false, static_cast<uint16_t>(s.vk), static_cast<uint16_t>(s.key & 0xff),
+                             (s.key & 0x100) != 0, false)) {
+      gPhysicalDown.erase(s.key);
+      gReleasedMods |= s.bit;
+    }
+  }
+}
+
+uint8_t local_mod_mask() {
+  return static_cast<uint8_t>((GetKeyState(VK_CONTROL) < 0 ? kHeldCtrl : 0) | (GetKeyState(VK_SHIFT) < 0 ? kHeldShift : 0));
+}
+
+// Whether the host holds this modifier down as far as this viewer sent it (either key of the pair).
+bool host_holds_mod(ViewerState& ctx, uint8_t bit) {
+  if (host_ime_mode(ctx)) {
+    return bit == kHeldCtrl ? (gPhysicalDown.count(0x1D) || gPhysicalDown.count(0x11D))
+                            : (gPhysicalDown.count(0x2A) || gPhysicalDown.count(0x36));
+  }
+  const auto& down = ctx.input.forwardedKeyDown;
+  return bit == kHeldCtrl ? (down[VK_CONTROL].load() || down[VK_LCONTROL].load() || down[VK_RCONTROL].load())
+                          : (down[VK_SHIFT].load() || down[VK_LSHIFT].load() || down[VK_RSHIFT].load());
+}
+
+// Puts the host's Ctrl / Shift where `wanted` says. For keys replayed after a paste: each goes out
+// with the modifiers that were held when it was typed, not with whatever is held now.
+void sync_host_modifiers(ViewerState& ctx, uint8_t wanted) {
+  for (const uint8_t bit : {kHeldCtrl, kHeldShift}) {
+    const bool want = (wanted & bit) != 0;
+    const bool holds = host_holds_mod(ctx, bit);
+    if (want && !holds) {
+      const UINT vk = bit == kHeldCtrl ? VK_CONTROL : VK_SHIFT;
+      const uint16_t scan = bit == kHeldCtrl ? 0x1D : 0x2A;
+      if (host_ime_mode(ctx)) {
+        if (enqueue_physical_key(ctx, true, static_cast<uint16_t>(vk), scan, false, false)) gPhysicalDown.insert(scan);
+      } else if (forward_key_down(ctx, vk)) {
+        enqueue_input_event(ctx, 5, 0, 0, 0, vk);
+      }
+    } else if (!want && holds) {
+      for (const UINT vk : bit == kHeldCtrl ? std::initializer_list<UINT>{VK_CONTROL, VK_LCONTROL, VK_RCONTROL}
+                                            : std::initializer_list<UINT>{VK_SHIFT, VK_LSHIFT, VK_RSHIFT}) {
+        if (forward_key_up(ctx, vk)) enqueue_input_event(ctx, 6, 0, 0, 0, vk);
+      }
+      for (const uint16_t key : bit == kHeldCtrl ? std::initializer_list<uint16_t>{0x1D, 0x11D}
+                                                 : std::initializer_list<uint16_t>{0x2A, 0x36}) {
+        if (gPhysicalDown.count(key) &&
+            enqueue_physical_key(ctx, false, static_cast<uint16_t>(bit == kHeldCtrl ? VK_CONTROL : VK_SHIFT),
+                                 static_cast<uint16_t>(key & 0xff), (key & 0x100) != 0, false)) {
+          gPhysicalDown.erase(key);
+        }
+      }
+    }
+    gReleasedMods = static_cast<uint8_t>(gReleasedMods & ~bit);
+  }
+}
+
+// Before an ordinary key goes out: a modifier released at a gesture and still held here goes back
+// down first, so the host sees the combination the user is typing.
+void resync_released_modifiers(ViewerState& ctx) {
+  struct Mod {
+    uint8_t bit;
+    UINT vk;
+    uint16_t scan;
+  };
+  for (const Mod& m : {Mod{kModCtrl, VK_CONTROL, 0x1D}, Mod{kModShift, VK_SHIFT, 0x2A}}) {
+    if ((gReleasedMods & m.bit) == 0) continue;
+    gReleasedMods = static_cast<uint8_t>(gReleasedMods & ~m.bit);
+    if (GetKeyState(m.vk) >= 0) continue;  // let go meanwhile: nothing to put back
+    if (host_ime_mode(ctx)) {
+      if (enqueue_physical_key(ctx, true, static_cast<uint16_t>(m.vk), m.scan, false, false)) gPhysicalDown.insert(m.scan);
+    } else if (forward_key_down(ctx, m.vk)) {
+      enqueue_input_event(ctx, 5, 0, 0, 0, m.vk);
+    }
+  }
+}
+
+// One key edge on its way to the host, by whichever path this session uses -- the forwarding the
+// window procedure always did, plus the modifier bookkeeping above.
+// `replay`: a key held during a paste, sent afterwards -- its modifiers were put in place by the
+// caller from what was held when it was typed, so the live keyboard is not consulted.
+void forward_key(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, bool replay = false) {
+  const bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+  if (down && !replay && !is_modifier_vk(wp)) resync_released_modifiers(ctx);
+  if (!down) {
+    if (wp == VK_CONTROL || wp == VK_LCONTROL || wp == VK_RCONTROL) gReleasedMods &= static_cast<uint8_t>(~kModCtrl);
+    if (wp == VK_SHIFT || wp == VK_LSHIFT || wp == VK_RSHIFT) gReleasedMods &= static_cast<uint8_t>(~kModShift);
+  }
+  if (host_ime_mode(ctx)) {
+    forward_physical(ctx, hwnd, wp, lp, down);
     return;
   }
-  // Clipboard image v1 (direction A): a copy that holds an image travels as one package -- the
-  // image and the text of the same copy together -- so text sync does not send that text on its own.
-  // Only for a genuine change: connecting does not push a possibly large image (the one-shot push
-  // stays text-only, as it was).
-  auto& image = ctx.control.clipImage;
-  // A genuine new copy -- not the one-shot push at connect (allowImage false), not the echo of host
-  // text this viewer just wrote -- makes everything older void AT ONCE: the package being made, the
-  // transfer running, the text of a refused older image. Before this, a new image only cancelled
-  // the old transfer once it had been encoded, and an image that could not be read cancelled nothing.
-  const bool echo = GetClipboardSequenceNumber() == clip.ownWriteSeq.load(std::memory_order_relaxed);
-  // File copy (t-zdmsd4gb): a genuine copy of files is an offer -- names and sizes only; nothing is
-  // read until a paste on the remote PC asks. Any other genuine copy withdraws the offer (a paste
-  // already running is not touched).
-  auto& files = ctx.control.fileCopy;
-  if (files.Usable() && allowImage && !echo) {
-    std::vector<std::wstring> paths;
-    // One over the offer limit, so the rules say "too many" rather than offering part of the copy.
-    (void)clipboard_read_file_paths(hwnd, remote60::native_poc::file_copy::kMaxFiles + 1, &paths);
-    if (!paths.empty()) {
-      image.CancelForNewerCopy();  // an older image is older than this copy
-      files.SubmitLocalFiles(paths, GetClipboardSequenceNumber());
-      return;
-    }
-    files.ClearLocalOffer();
+  if (down) {
+    if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
+  } else if (forward_key_up(ctx, wp)) {
+    enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
   }
-  if (image.Usable() && allowImage && !echo) {
-    image.CancelForNewerCopy();
-    if (remote60::native_poc::clip_image_available()) {
-      remote60::native_poc::ClipSnapshot snap;
-      const remote60::native_poc::ClipSnapshotResult read = remote60::native_poc::clip_image_read_snapshot(hwnd, &snap);
-      if (read == remote60::native_poc::ClipSnapshotResult::Ok) {
-        if (!snap.text.empty()) {
-          // Recorded as sent, so a later poll that brings the same text back is not re-applied.
-          std::lock_guard<std::mutex> lock(clip.mu);
-          uint64_t hash = 0;
-          (void)clip.core.OnLocalChange(snap.text, &hash);
-        }
-        image.SubmitSnapshot(std::move(snap));
-        return;
-      }
-      // An image the user copied that cannot go: say so. Its text, if any, still goes below.
-      image.NoteLocalCopyNotSent(read == remote60::native_poc::ClipSnapshotResult::TooLarge
-                                     ? remote60::native_poc::ClipPackageResult::TooLarge
-                                     : remote60::native_poc::ClipPackageResult::ReadFailed);
+}
+
+// The paste itself, complete and balanced, on the path this session sends keys by.
+void send_paste_chord(ViewerState& ctx, const PasteGate::Ticket& t) {
+  const bool physical = host_ime_mode(ctx);
+  for (const PasteStep& s : paste_chord(t.key, t.scan, t.ext)) {
+    if (physical) {
+      (void)enqueue_physical_key(ctx, s.down, s.vk, s.scan, s.ext, false);
+    } else {
+      enqueue_input_event(ctx, s.down ? 5 : 6, 0, 0, 0, s.vk);
     }
   }
-  // Win32 gives wchar_t; the core and the wire carry UTF-16 code units, which is the same 16 bits
-  // here but not on Android, so the conversion is explicit (clipboard_win32.hpp).
+}
+
+bool local_clipboard_pasteable() {
+  static const UINT kPng = RegisterClipboardFormatW(L"PNG");
+  return IsClipboardFormatAvailable(CF_HDROP) || IsClipboardFormatAvailable(CF_UNICODETEXT) ||
+         IsClipboardFormatAvailable(CF_DIB) || IsClipboardFormatAvailable(CF_DIBV5) ||
+         IsClipboardFormatAvailable(CF_BITMAP) || (kPng && IsClipboardFormatAvailable(kPng));
+}
+
+// The clipboard as it is now, in the order a copy is read: files, an image, text (Q3: nothing is
+// substituted -- an image that cannot go is a failure, not its text).
+PasteFailure read_paste_snapshot(ViewerState& ctx, HWND hwnd, PasteSnapshot* s) {
+  s->revision = GetClipboardSequenceNumber();
+  std::vector<std::wstring> paths;
+  if (!remote60::native_poc::clipboard_read_file_paths(hwnd, remote60::native_poc::file_copy::kMaxFiles + 1, &paths)) {
+    return PasteFailure::ReadFailed;
+  }
+  if (!paths.empty()) {
+    if (!ctx.control.fileCopy.Usable()) return PasteFailure::Refused;  // the remote PC takes no files
+    s->format = PasteFormat::Files;
+    s->paths = std::move(paths);
+    return PasteFailure::None;
+  }
+  if (remote60::native_poc::clip_image_available()) {
+    remote60::native_poc::ClipSnapshot snap;
+    const auto r = remote60::native_poc::clip_image_read_snapshot(hwnd, &snap);
+    if (r == remote60::native_poc::ClipSnapshotResult::Ok) {
+      if (!ctx.control.clipImage.Usable()) return PasteFailure::Refused;  // the remote PC takes no images
+      s->format = PasteFormat::Image;
+      s->image = std::move(snap);
+      return PasteFailure::None;
+    }
+    if (r == remote60::native_poc::ClipSnapshotResult::TooLarge) return PasteFailure::TooLarge;
+    if (r != remote60::native_poc::ClipSnapshotResult::NoImage) return PasteFailure::ReadFailed;
+  }
   std::wstring wide;
-  if (!remote60::native_poc::clipboard_read_unicode_text(hwnd, &wide)) return;
-  const std::u16string text = remote60::native_poc::wide_to_u16(wide);
-  uint64_t hash = 0;
-  std::lock_guard<std::mutex> lock(clip.mu);
-  if (clip.core.OnLocalChange(text, &hash) ==
-      remote60::native_poc::ClipboardLocalDecision::Send) {
-    clip.pendingText = text;
-    clip.pendingHash = hash;
-    clip.hasPending = true;
+  if (!remote60::native_poc::clipboard_read_unicode_text(hwnd, &wide)) return PasteFailure::ReadFailed;
+  if (wide.empty()) return PasteFailure::Empty;
+  s->text = remote60::native_poc::wide_to_u16(wide);
+  if (s->text.size() > remote60::native_poc::kClipboardTextMaxUtf16) return PasteFailure::TooLarge;
+  s->hash = remote60::native_poc::clipboard_fnv1a(s->text);
+  s->format = PasteFormat::Text;
+  return PasteFailure::None;
+}
+
+const char* paste_format_name(PasteFormat f) {
+  switch (f) {
+    case PasteFormat::Text: return "text";
+    case PasteFormat::Image: return "image";
+    case PasteFormat::Files: return "files";
+    default: return "none";
   }
+}
+
+void dispatch_paste(ViewerState& ctx, const PasteGate::Ticket& t, PasteSnapshot snap) {
+  std::ostringstream os;
+  os << "send id=" << std::hex << t.id << std::dec << " format=" << paste_format_name(t.format)
+     << " revision=" << snap.revision;
+  switch (t.format) {
+    case PasteFormat::Text: {
+      os << " utf16Count=" << snap.text.size();
+      auto& clip = ctx.control.clipboard;
+      std::lock_guard<std::mutex> lock(clip.mu);
+      clip.havePasteText = true;
+      clip.pasteTextId = t.id;
+      clip.pasteTextRevision = snap.revision;
+      clip.pasteTextHash = snap.hash;
+      clip.pasteText = std::move(snap.text);
+      break;
+    }
+    case PasteFormat::Image:
+      ctx.control.clipImage.SubmitSnapshotForPaste(std::move(snap.image), t.id);
+      break;
+    case PasteFormat::Files:
+      os << " files=" << snap.paths.size();
+      ctx.control.fileCopy.SubmitLocalFilesForPaste(snap.paths, snap.revision, t.id);
+      break;
+    default:
+      break;
+  }
+  paste_log(os.str());
+}
+
+// A paste given up here: its request is withdrawn where it still can be, so a late write does not
+// follow (a text not yet sent is dropped; an image transfer is cancelled; a file answer is ignored).
+void abandon_paste(ViewerState& ctx, const PasteGate::Ticket& t) {
+  switch (t.format) {
+    case PasteFormat::Text: {
+      auto& clip = ctx.control.clipboard;
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.havePasteText && clip.pasteTextId == t.id) {
+        clip.havePasteText = false;
+        clip.pasteText.clear();
+      }
+      break;
+    }
+    case PasteFormat::Image:
+      ctx.control.clipImage.AbandonPaste(t.id);
+      break;
+    case PasteFormat::Files:
+      ctx.control.fileCopy.AbandonPaste(t.id);
+      break;
+    default:
+      break;
+  }
+}
+
+void after_paste_settled(ViewerState& ctx, HWND hwnd) {
+  PasteGate::Ticket next;
+  if (gPaste.Promote(qpc_now_us(), &next)) {
+    dispatch_paste(ctx, next, std::move(gWaitingSnap));
+    gWaitingSnap = PasteSnapshot{};
+  }
+  if (!gPaste.Pending()) KillTimer(hwnd, kPasteTimerId);
+  remote60::native_poc::clip_transfer_bar_refresh();
+}
+
+void cancel_pastes(ViewerState& ctx, HWND hwnd, PasteFailure why, const char* reason) {
+  if (!gPaste.Pending() && !gPaste.HasWaiting()) return;
+  const std::vector<PasteGate::Ticket> ended = gPaste.CancelAll();
+  for (const PasteGate::Ticket& t : ended) abandon_paste(ctx, t);
+  gWaitingSnap = PasteSnapshot{};
+  KillTimer(hwnd, kPasteTimerId);
+  paste_log(std::string("cancelled (") + reason + ") ended=" + std::to_string(ended.size()) + " -- no paste key sent");
+  if (!ended.empty() && why != PasteFailure::Silent) show_paste_failure(why, ended[0].key, ended[0].scan, ended[0].ext);
+  remote60::native_poc::clip_transfer_bar_refresh();
+}
+
+void start_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t scan, bool ext) {
+  release_paste_modifiers(ctx);
+  PasteSnapshot snap;
+  const PasteFailure readFailure = read_paste_snapshot(ctx, hwnd, &snap);
+  if (readFailure != PasteFailure::None) {
+    paste_log("not sent: this PC's clipboard " + std::to_string(static_cast<int>(readFailure)) + " -- no paste key sent");
+    show_paste_failure(readFailure, key, scan, ext);
+    return;
+  }
+  PasteGate::Ticket t;
+  t.id = new_paste_id();
+  t.connGen = paste_conn_gen(ctx);
+  t.targetGen = paste_target_gen(ctx);
+  t.key = key;
+  t.scan = scan;
+  t.ext = ext;
+  t.format = snap.format;
+  t.budgetUs = snap.format == PasteFormat::Text    ? kPasteTextDeadlineUs
+               : snap.format == PasteFormat::Files ? kPasteFilesDeadlineUs
+                                                   : 0;
+  switch (gPaste.Admit(t, qpc_now_us())) {
+    case PasteGate::Admitted::Started:
+      gPasteLine = PasteLine{};
+      dispatch_paste(ctx, t, std::move(snap));
+      SetTimer(hwnd, kPasteTimerId, kPasteTimerMs, nullptr);
+      remote60::native_poc::clip_transfer_bar_refresh();
+      break;
+    case PasteGate::Admitted::Waiting:
+      gWaitingSnap = std::move(snap);
+      paste_log("waiting behind the pending paste");
+      break;
+    case PasteGate::Admitted::Dropped:
+      paste_log("dropped: a paste is pending and another is already waiting");
+      break;
+  }
+}
+
+void on_paste_answer(ViewerState& ctx, HWND hwnd, const PasteAnswer& a) {
+  PasteGate::Ticket done;
+  const PasteGate::Outcome o = gPaste.OnAnswer(a.id, a.applied, paste_conn_gen(ctx), paste_target_gen(ctx), &done);
+  std::ostringstream os;
+  os << "answer id=" << std::hex << a.id << std::dec << " format=" << paste_format_name(a.format)
+     << " applied=" << (a.applied ? 1 : 0) << " failure=" << static_cast<int>(a.failure) << " detail=0x" << std::hex
+     << a.detail << std::dec;
+  if (o == PasteGate::Outcome::Ignored) {
+    paste_log(os.str() + " ignored (not the pending paste)");
+    return;
+  }
+  const uint64_t ms = (qpc_now_us() - done.startedUs) / 1000;
+  if (o == PasteGate::Outcome::Inject) {
+    send_paste_chord(ctx, done);
+    // Keys typed while waiting go after the paste, in order -- unless another paste is waiting, in
+    // which case they were typed after that one too and wait for it.
+    size_t flushed = 0;
+    if (!gPaste.HasWaiting()) {
+      for (const HeldKey& k : gPaste.TakeHeld()) {
+        const bool keyDown = k.msg == WM_KEYDOWN || k.msg == WM_SYSKEYDOWN;
+        if (keyDown && !is_modifier_vk(static_cast<WPARAM>(k.wp))) sync_host_modifiers(ctx, k.mods);
+        forward_key(ctx, hwnd, k.msg, static_cast<WPARAM>(k.wp), static_cast<LPARAM>(k.lp), /*replay=*/true);
+        ++flushed;
+      }
+      // Then the modifiers as they are on this keyboard now.
+      if (flushed) sync_host_modifiers(ctx, local_mod_mask());
+    }
+    paste_log(os.str() + " -> paste key sent ms=" + std::to_string(ms) + " heldKeysSent=" + std::to_string(flushed));
+  } else {
+    // Applied but on another connection or target: the key would land where the user did not paste.
+    const PasteFailure f = a.applied ? PasteFailure::Silent : a.failure;
+    paste_log(os.str() + " -> no paste key sent ms=" + std::to_string(ms) +
+              (a.applied ? " (connection or target changed)" : ""));
+    show_paste_failure(f, done.key, done.scan, done.ext);
+  }
+  after_paste_settled(ctx, hwnd);
+}
+
+void on_paste_timer(ViewerState& ctx, HWND hwnd) {
+  PasteGate::Ticket expired;
+  if (gPaste.OnTick(qpc_now_us(), &expired)) {
+    abandon_paste(ctx, expired);
+    paste_log("timed out id=" + std::to_string(expired.id) + " format=" + paste_format_name(expired.format) +
+              " -- no paste key sent");
+    show_paste_failure(PasteFailure::Timeout, expired.key, expired.scan, expired.ext);
+    after_paste_settled(ctx, hwnd);
+  }
+  if (!gPaste.Pending()) KillTimer(hwnd, kPasteTimerId);
+}
+
+// What a paste gesture leads to, for a key press and for the bar's Retry alike.
+bool run_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t scan, bool ext, const char* source) {
+  const PasteRoute route = route_paste(paste_feature_on(ctx),
+                                       ctx.control.clipboard.hostPasteOnDemand.load(std::memory_order_acquire),
+                                       gLatestCopy.LocalIsLatest());
+  switch (route) {
+    case PasteRoute::Forward:
+      return false;
+    case PasteRoute::PassThrough:
+      paste_log(std::string("pass-through (") + source + "): the remote PC's copy is the newest");
+      return false;
+    case PasteRoute::UpdateNeeded:
+      paste_log(std::string("update needed (") + source + "): the host does not confirm a paste -- no paste key sent");
+      show_paste_failure(PasteFailure::UpdateNeeded, key, scan, ext);
+      return true;
+    case PasteRoute::Send:
+      start_paste_gesture(ctx, hwnd, key, scan, ext);
+      return true;
+  }
+  return false;
+}
+
+// True when paste on demand took the key: held behind a pending paste, swallowed, or a gesture.
+bool paste_intercept(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  const bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+  const bool repeat = down && (lp & (1 << 30)) != 0;
+  const bool mod = is_modifier_vk(wp);
+  if (gPaste.Pending()) {
+    if (down && wp == VK_ESCAPE) {
+      cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "escape");
+      return true;
+    }
+    if (down) {
+      if (!mod) {
+        const PasteKey k = classify_paste_key(static_cast<uint32_t>(wp), local_paste_mods());
+        if (k != PasteKey::None) {
+          if (!repeat) start_paste_gesture(ctx, hwnd, k, lp_scan(lp), lp_ext(lp));
+          return true;  // a repeat of the held paste key is not another paste
+        }
+      }
+      if (!gPaste.Hold(HeldKey{msg, static_cast<uint64_t>(wp), static_cast<int64_t>(lp), local_mod_mask()})) {
+        cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "too many keys while waiting");
+      }
+      return true;
+    }
+    // An up is held only when its down is; any other release goes now -- releases are never delayed.
+    if (gPaste.HoldsDown(static_cast<uint64_t>(wp))) {
+      if (!gPaste.Hold(HeldKey{msg, static_cast<uint64_t>(wp), static_cast<int64_t>(lp), local_mod_mask()})) {
+        cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "too many keys while waiting");
+      }
+      return true;
+    }
+    return false;
+  }
+  if (!down || mod) return false;
+  const PasteMods mods = local_paste_mods();
+  const PasteKey k = classify_paste_key(static_cast<uint32_t>(wp), mods);
+  if (k == PasteKey::None) {
+    if (!repeat && paste_feature_on(ctx) && is_copy_key(static_cast<uint32_t>(wp), mods)) {
+      gLatestCopy.NoteRemoteCopy();
+      paste_log("copy key sent to the remote PC: its clipboard is the newest copy");
+    }
+    return false;
+  }
+  // A held paste key's repeats follow its first press: forwarded if that went, swallowed if not.
+  if (repeat) return !key_forwarded(ctx, wp, lp);
+  return run_paste_gesture(ctx, hwnd, k, lp_scan(lp), lp_ext(lp), "key");
+}
+
+LRESULT on_key_message(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  const bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+  if (down && on_local_hotkey(ctx, hwnd, wp)) return 0;
+  if (kInputPolicyForceBlock) return 0;
+  if (paste_intercept(ctx, hwnd, msg, wp, lp)) return 0;
+  forward_key(ctx, hwnd, msg, wp, lp);
+  return 0;
+}
+
+// A clipboard change on this PC. Nothing is sent; it only decides what the next Ctrl+V pastes.
+void note_local_clipboard_change(ViewerState& ctx) {
+  auto& clip = ctx.control.clipboard;
+  if (GetClipboardSequenceNumber() == clip.ownWriteSeq.load(std::memory_order_relaxed)) return;  // the host's text, written here
+  // Files the remote PC copied, put here by this PC's clipboard helper, are virtual files (no
+  // CF_HDROP): that is the remote PC's copy arriving, not a copy made here.
+  static const UINT kVirtualFiles = RegisterClipboardFormatW(L"FileGroupDescriptorW");
+  if (kVirtualFiles && IsClipboardFormatAvailable(kVirtualFiles) && !IsClipboardFormatAvailable(CF_HDROP)) {
+    gLatestCopy.NoteRemoteCopy();
+    paste_log("remote copy arrived (virtual files): the remote PC's clipboard is the newest");
+    return;
+  }
+  gLatestCopy.NoteLocalCopy();
+}
+
+}  // namespace
+
+remote60::native_poc::ClipPasteBarView paste_bar_view(ViewerState& ctx) {
+  remote60::native_poc::ClipPasteBarView v;
+  if (gPaste.Pending()) {
+    if (gPaste.pending().format == PasteFormat::Image) {
+      const auto p = ctx.control.clipImage.GetProgress();
+      if (p.active || p.cancelling) return v;  // the image's own line: percent, seconds, Cancel
+    }
+    v.active = true;
+    v.text = L"붙여넣을 내용을 원격 PC에 보내는 중…";
+    v.cancel = true;
+    return v;
+  }
+  if (gPasteLine.untilUs > qpc_now_us()) {
+    v.active = true;
+    v.text = gPasteLine.text;
+    v.retry = gPasteLine.retry;
+    v.failed = gPasteLine.failed;
+  }
+  return v;
+}
+
+void paste_cancel_from_bar(ViewerState& ctx) {
+  if (ctx.session.hwnd) cancel_pastes(ctx, ctx.session.hwnd, PasteFailure::Cancelled, "bar");
+}
+
+void paste_retry_from_bar(ViewerState& ctx) {
+  if (!ctx.session.hwnd || gLastFailed.key == PasteKey::None || gPaste.Pending()) return;
+  gPasteLine = PasteLine{};
+  const PasteGesture g = gLastFailed;
+  if (!run_paste_gesture(ctx, ctx.session.hwnd, g.key, g.scan, g.ext, "retry")) {
+    paste_log("retry not sent: the remote PC's copy is the newest, or the feature is off");
+  }
+  remote60::native_poc::clip_transfer_bar_refresh();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -350,6 +872,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      cancel_pastes(ctx, hwnd, PasteFailure::Silent, "window destroyed");
       RemoveClipboardFormatListener(hwnd);  // stop hearing clipboard changes (K1)
       release_all_physical(ctx);  // nothing should stay held on the host
       restore_local_ime(hwnd);  // re-attach the IME we detached for host-side IME mode
@@ -359,14 +882,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PostQuitMessage(0);
       return 0;
     case WM_CLIPBOARDUPDATE:
-      // Clipboard text sync (K1): the local clipboard changed.
-      capture_local_clipboard(ctx, hwnd, true);
+      // Paste on demand: a copy here changes nothing on the remote PC. It only makes this PC's
+      // clipboard the newest copy, which is what the next Ctrl+V in this window will send.
+      note_local_clipboard_change(ctx);
       return 0;
     case kMsgPushClipboardNow:
-      // The control thread opened a session and wants this machine's current clipboard sent, so
-      // that what the user copied most recently wins over whatever the host was holding.
-      capture_local_clipboard(ctx, hwnd, false);
+      // A clipboard session opened. Nothing is pushed any more; what this PC holds is the newest
+      // copy if it holds anything that can be pasted (Q2: it was copied before connecting).
+      gLatestCopy.ResetForSession(local_clipboard_pasteable());
+      paste_log(std::string("session: newest copy is ") + (gLatestCopy.LocalIsLatest() ? "this PC's" : "the remote PC's"));
       return 0;
+    case kMsgPasteResult: {
+      std::unique_ptr<PasteAnswer> answer(reinterpret_cast<PasteAnswer*>(lp));
+      if (answer) on_paste_answer(ctx, hwnd, *answer);
+      return 0;
+    }
     case kMsgApplyClipboard: {
       // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
       // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write
@@ -376,6 +906,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         (void)remote60::native_poc::clipboard_set_unicode_text(
             hwnd, remote60::native_poc::u16_to_wide(*text));
         ctx.control.clipboard.ownWriteSeq.store(GetClipboardSequenceNumber(), std::memory_order_relaxed);
+        gLatestCopy.NoteRemoteCopy();  // a copy made on the remote PC: the next Ctrl+V pastes it there
       }
       return 0;
     }
@@ -411,6 +942,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Wider than focus loss (RV-01): every modifier gets an up whether or not this client
       // remembers pressing it (the same list as session start), and mouse buttons are released
       // too -- a drag that was under way when the channel died left its button down on the host.
+      cancel_pastes(ctx, hwnd, PasteFailure::Silent, "control resumed");
       int heldKeys = 0;
       for (int vk = 0; vk < 256; ++vk) {
         if (ctx.input.forwardedKeyDown[vk].load(std::memory_order_relaxed)) ++heldKeys;
@@ -514,6 +1046,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_LBUTTONDOWN:
+      cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "mouse");
       if (mouse_suppressed(ctx, "down")) return 0;
       if (point_in_toggle_button(ctx, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
         ctx.picker.toggleDown.store(true, std::memory_order_relaxed);
@@ -587,10 +1120,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_RBUTTONDOWN:
+      cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "mouse");
       return on_secondary_button(ctx, hwnd, true, 2, VK_RBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_RBUTTONUP:
       return on_secondary_button(ctx, hwnd, false, 2, VK_RBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MBUTTONDOWN:
+      cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "mouse");
       return on_secondary_button(ctx, hwnd, true, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     case WM_MBUTTONUP:
       return on_secondary_button(ctx, hwnd, false, 4, VK_MBUTTON, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
@@ -606,6 +1141,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       const uint16_t bit = mouse_vk_to_wire(vk);
       if (bit == 0) return TRUE;  // neither X1 nor X2: nothing to forward
       const bool down = msg != WM_XBUTTONUP;
+      if (down) cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "mouse");
       if (down && !ctx.session.hostMouseXButtons.load(std::memory_order_acquire)) {
         // The host has not said it takes X buttons: an older host, or no pong yet. Its input
         // path turned an unknown button key into a LEFT click, so nothing is sent -- said once.
@@ -695,6 +1231,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       int32_t vy = 0;
       if (!map_client_point_to_video_coords(ctx, hwnd, p.x, p.y, &vx, &vy)) return 0;
       if (msg == WM_POINTERDOWN) {
+        cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "touch");
         if (ctx.input.activeTouchDown.load(std::memory_order_relaxed)) return 0;
         SetFocus(hwnd);
         SetCapture(hwnd);
@@ -750,47 +1287,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (host_ime_mode(ctx)) return 0;  // host composes; no local composition to forward
       (void)send_ime_result_text(ctx, hwnd, lp);
       return 0;
+    // Every key edge, legacy VK and host-IME physical alike, goes through the same admission: the
+    // local hotkeys, then paste on demand, then the forwarding this window always did.
     case WM_KEYDOWN:
-      if (on_local_hotkey(ctx, hwnd, wp)) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      if (host_ime_mode(ctx)) {
-        forward_physical(ctx, hwnd, wp, lp, true);
-        return 0;
-      }
-      if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
-      return 0;
     case WM_KEYUP:
-      if (kInputPolicyForceBlock) return 0;
-      if (host_ime_mode(ctx)) {
-        forward_physical(ctx, hwnd, wp, lp, false);
-        return 0;
-      }
-      if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
-      return 0;
     case WM_SYSKEYDOWN:
-      if (on_local_hotkey(ctx, hwnd, wp)) return 0;
-      if (kInputPolicyForceBlock) return 0;
-      if (host_ime_mode(ctx)) {
-        forward_physical(ctx, hwnd, wp, lp, true);
-        return 0;
-      }
-      if (forward_key_down(ctx, wp)) enqueue_input_event(ctx, 5, 0, 0, 0, static_cast<uint32_t>(wp));
-      return 0;
     case WM_SYSKEYUP:
-      if (kInputPolicyForceBlock) return 0;
-      if (host_ime_mode(ctx)) {
-        forward_physical(ctx, hwnd, wp, lp, false);
-        return 0;
-      }
-      if (forward_key_up(ctx, wp)) enqueue_input_event(ctx, 6, 0, 0, 0, static_cast<uint32_t>(wp));
-      return 0;
+      return on_key_message(ctx, hwnd, msg, wp, lp);
     case WM_SETFOCUS:
       // Detach the local IME before the first keystroke so no first char is eaten as VK_PROCESSKEY.
       if (host_ime_mode(ctx)) ensure_local_ime_off(hwnd);
       return 0;
     case WM_KILLFOCUS:
       // Focus is about to leave, so no more key-ups will reach this window. Release whatever
-      // is held now, before Alt/Win/Alt+Tab strands it on the host.
+      // is held now, before Alt/Win/Alt+Tab strands it on the host. A paste waiting for its answer
+      // ends without its key: the key would go to wherever the remote focus is by then.
+      cancel_pastes(ctx, hwnd, PasteFailure::Silent, "focus left");
       if (!kInputPolicyForceBlock) {
         enqueue_release_for_pressed_keys(ctx);
         release_all_physical(ctx);
@@ -819,6 +1331,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // One-shot: the held frame's wait is over (F-11).
         KillTimer(hwnd, kPacedPresentTimerId);
         request_video_paint(ctx, hwnd);
+        return 0;
+      }
+      if (wp == kPasteTimerId) {
+        on_paste_timer(ctx, hwnd);
         return 0;
       }
       if (wp == kCursorOverlayTimerId) {
