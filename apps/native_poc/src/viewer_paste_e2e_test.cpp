@@ -42,6 +42,7 @@
 #include <shlobj.h>  // DROPFILES
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -580,6 +581,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   }
   check("the host started", launched);
   const DWORD hostPid = hostPi.dwProcessId;
+  std::printf("TEST-PID host %lu\n", hostPid);
 
   ViewerState ctx;
   SOCKET sock = INVALID_SOCKET;
@@ -1312,6 +1314,8 @@ void run_bar_on_visible_desktop(const std::wstring& outDir) {
 }
 
 /** Runs a child on a private window station; its PASS/FAIL lines count here. */
+std::vector<DWORD> gTestPids;  // this process, its children, the hosts they started
+
 void run_child_on_private_station(const std::wstring& outDir, bool legacy) {
   std::cout << "\n=== child on a private window station" << (legacy ? " (legacy host)" : "") << " ===\n";
   HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
@@ -1336,6 +1340,7 @@ void run_child_on_private_station(const std::wstring& outDir, bool legacy) {
   PROCESS_INFORMATION pi{};
   DWORD code = 99;
   if (ws && dk && CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+    gTestPids.push_back(pi.dwProcessId);
     WaitForSingleObject(pi.hProcess, 600000);
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -1345,6 +1350,7 @@ void run_child_on_private_station(const std::wstring& outDir, bool legacy) {
   std::string line;
   while (std::getline(in, line)) {
     std::cout << "  child: " << line << "\n";
+    if (line.rfind("TEST-PID host ", 0) == 0) gTestPids.push_back(static_cast<DWORD>(std::strtoul(line.c_str() + 14, nullptr, 10)));
     if (line.rfind("PASS", 0) == 0) ++gChecks;
     if (line.rfind("FAIL", 0) == 0) {
       ++gChecks;
@@ -1404,9 +1410,43 @@ int wmain(int argc, wchar_t** argv) {
   run_bar_on_visible_desktop(outDir);
   phase_seq("the visible-desktop bar");
   const DWORD interactiveClipAfter = GetClipboardSequenceNumber();
-  check("the user's clipboard (WinSta0) did not move: " + std::to_string(interactiveClipBefore) + " -> " +
-            std::to_string(interactiveClipAfter),
-        interactiveClipBefore == interactiveClipAfter, clip_owner());
+  // The guard is about THIS test: if the user's clipboard moved, whose is it now? This process, a
+  // child of it or anything they started (by parent pid) is a FAIL; an owner that cannot be found is
+  // a FAIL; any other process is somebody else's copy, said as INFO.
+  if (interactiveClipBefore == interactiveClipAfter) {
+    check("the user's clipboard (WinSta0) did not move: " + std::to_string(interactiveClipBefore), true);
+  } else {
+    gTestPids.push_back(GetCurrentProcessId());
+    DWORD owner = 0;
+    if (HWND o = GetClipboardOwner()) GetWindowThreadProcessId(o, &owner);
+    DWORD parent = 0;
+    if (owner) {
+      HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      PROCESSENTRY32W pe{};
+      pe.dwSize = sizeof(pe);
+      if (snap != INVALID_HANDLE_VALUE && Process32FirstW(snap, &pe)) {
+        do {
+          if (pe.th32ProcessID == owner) parent = pe.th32ParentProcessID;
+        } while (Process32NextW(snap, &pe));
+      }
+      if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+    }
+    const auto ours = [](DWORD pid) {
+      return pid != 0 && std::find(gTestPids.begin(), gTestPids.end(), pid) != gTestPids.end();
+    };
+    const std::string seqs = std::to_string(interactiveClipBefore) + " -> " + std::to_string(interactiveClipAfter);
+    const std::string who = clip_owner() + " parent " + std::to_string(parent);
+    if (owner == 0) {
+      check("the user's clipboard moved (" + seqs + ") and its owner cannot be found -- not attributable", false, who);
+    } else if (ours(owner) || ours(parent)) {
+      check("the user's clipboard moved (" + seqs + ") and THIS test (or what it started) owns it", false, who);
+    } else {
+      std::printf("INFO  the user's clipboard moved (%s), owned by a process this test did not start: %s. "
+                  "Limit: a write by this test followed by a later outside write would be hidden behind it.\n",
+                  seqs.c_str(), who.c_str());
+      check("the user's clipboard: no change attributable to this test (owner is outside it)", true, who);
+    }
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }
