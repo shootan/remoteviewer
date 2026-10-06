@@ -354,6 +354,8 @@ void set_mods(bool ctrl, bool shift) {
   GetKeyboardState(ks);
   ks[VK_CONTROL] = ks[VK_LCONTROL] = ctrl ? 0x80 : 0;
   ks[VK_SHIFT] = ks[VK_LSHIFT] = shift ? 0x80 : 0;
+  // Every other modifier explicitly up: a held Alt / Win / right-hand key would make it no paste.
+  for (const int vk : {VK_RCONTROL, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN}) ks[vk] = 0;
   SetKeyboardState(ks);
 }
 
@@ -1254,16 +1256,34 @@ void run_bar_on_visible_desktop(const std::wstring& outDir) {
   ctx.control.clipboard.hostPasteOnDemand.store(false);
   remote60::native_poc::viewer::create_clip_transfer_bar(ctx);
   SendMessageW(w, WM_CLIPBOARDUPDATE, 0, 0);  // this PC's copy is the newest
-  BYTE ks[256]{};
-  GetKeyboardState(ks);
+  // This thread's key state on the user's desktop is not ours alone: GetKeyboardState can hand back
+  // a modifier the user is holding, and Alt / Win / Shift with V is not a paste (classify_paste_key).
+  // So every modifier is set explicitly for the gesture, and the state found is put back after.
+  BYTE original[256]{};
+  GetKeyboardState(original);
+  const auto show = [](const char* when) {
+    std::printf("      diag(%s): ctrl=%d shift=%d alt=%d lwin=%d rwin=%d (GetKeyState high bit)\n", when,
+                GetKeyState(VK_CONTROL) < 0, GetKeyState(VK_SHIFT) < 0, GetKeyState(VK_MENU) < 0,
+                GetKeyState(VK_LWIN) < 0, GetKeyState(VK_RWIN) < 0);
+  };
+  show("found");
+  std::printf("      diag: inputEnabled=%d sync=%d hostSupports=%d hostConfirms=%d\n", ctx.session.inputEnabled.load() ? 1 : 0,
+              ctx.control.clipboard.enabled.load() ? 1 : 0, ctx.control.clipboard.hostSupports.load() ? 1 : 0,
+              ctx.control.clipboard.hostPasteOnDemand.load() ? 1 : 0);
+  BYTE ks[256];
+  std::memcpy(ks, original, sizeof(ks));
+  for (const int vk : {VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN}) ks[vk] = 0;
   ks[VK_CONTROL] = ks[VK_LCONTROL] = 0x80;
+  ks[VK_RCONTROL] = 0;
   SetKeyboardState(ks);
+  show("at the gesture");
   SendMessageW(w, WM_KEYDOWN, VK_CONTROL, key_lp(VK_CONTROL, false));
   SendMessageW(w, WM_KEYDOWN, 'V', key_lp('V', false));
   SendMessageW(w, WM_KEYUP, 'V', key_lp('V', true));
   ks[VK_CONTROL] = ks[VK_LCONTROL] = 0;
   SetKeyboardState(ks);
   SendMessageW(w, WM_KEYUP, VK_CONTROL, key_lp(VK_CONTROL, true));
+  SetKeyboardState(original);
   const DWORD until = GetTickCount() + 600;
   while (GetTickCount() < until) {
     MSG m;
