@@ -85,6 +85,8 @@
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
 #include "prelogin_ready_signal.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_machine_store.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
@@ -241,11 +243,38 @@ int startup_connect_client(HostContext& hx) {
 
     // The directory agent shares this socket on purpose: the public address it publishes has
     // to be the one NAT maps for the media stream, and that is a property of this socket.
+    // Prelogin (r4 #3): the SYSTEM worker has no per-user host.json, so load the directory credential
+    // from the DPAPI-sealed machine record and register/heartbeat as the machine -- this is what makes
+    // the box visible in the client list at the login screen. No record (or disabled) -> stays offline.
+    std::string preloadHostId, preloadHostToken;
+    if (args.preloginMode && clientSession.directoryUrl.empty()) {
+      wchar_t programData[MAX_PATH] = {};
+      if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) != 0) {
+        const std::wstring recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
+        remote60::native_poc::prelogin::MachineRecord rec;
+        uint32_t w = 0;
+        if (remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w) ==
+            remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
+          remote60::native_poc::prelogin::DirectoryCredential dc;
+          if (rec.enabled && remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
+            clientSession.directoryUrl = rec.directoryOrigin;
+            clientSession.directoryId = dc.accountId;
+            preloadHostId = dc.hostId;
+            preloadHostToken = dc.hostToken;
+            std::cout << "[native-video-host][prelogin] machine credential loaded hostId=" << dc.hostId << "\n";
+          }
+        } else {
+          std::cout << "[native-video-host][prelogin] no usable machine credential -> staying offline\n";
+        }
+      }
+    }
     if (!clientSession.directoryUrl.empty()) {
       remote60::native_poc::directory::HostAgentConfig dirCfg;
       dirCfg.url = clientSession.directoryUrl;
       dirCfg.accountId = clientSession.directoryId;
       dirCfg.password = clientSession.directoryPw;
+      dirCfg.preloadedHostId = preloadHostId;
+      dirCfg.preloadedHostToken = preloadHostToken;
       dirCfg.hostName = args.directoryHostName;
       dirCfg.observeUdpPort = args.directoryObservePort;
       dirCfg.localUdpPort = clientSession.mediaBindPort;

@@ -85,6 +85,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_control.cpp
   src/host_startup_graphics.cpp
   src/prelogin_ready_signal.cpp
+  src/prelogin_machine_store.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -219,6 +220,7 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowsapp
   advapi32
   bcrypt
+  crypt32
   windowscodecs
   shlwapi
 )

@@ -120,6 +120,29 @@ int main() {
           "same inputs still Usable (no hidden network dependency)");
   }
 
+  std::printf("[directory credential codec carried in the credential bytes (r4 #3)]\n");
+  {
+    DirectoryCredential dc;
+    dc.accountId = "acct-42";
+    dc.hostId = "host-abcdef";
+    dc.hostToken = "tok-0123456789";
+    const auto bytes = PackDirectoryCredential(dc);
+    DirectoryCredential back;
+    check(UnpackDirectoryCredential(bytes, &back), "unpack a packed directory credential");
+    check(back.accountId == dc.accountId && back.hostId == dc.hostId && back.hostToken == dc.hostToken,
+          "accountId / hostId / hostToken round-trip");
+    std::vector<uint8_t> extra = bytes;
+    extra.push_back(0x00);
+    check(!UnpackDirectoryCredential(extra, &back), "NEGATIVE: trailing garbage -> reject");
+    std::vector<uint8_t> truncated(bytes.begin(), bytes.end() - 1);
+    check(!UnpackDirectoryCredential(truncated, &back), "NEGATIVE: truncated -> reject");
+    // Empty strings are valid (an un-enrolled record) but must round-trip exactly.
+    DirectoryCredential empty, emptyBack;
+    check(UnpackDirectoryCredential(PackDirectoryCredential(empty), &emptyBack) &&
+              emptyBack.hostToken.empty(),
+          "empty credential round-trips");
+  }
+
   if (gFailures != 0) {
     std::printf("prelogin_machine_record_test: FAIL (%d)\n", gFailures);
     return 1;
