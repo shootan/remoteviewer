@@ -31,6 +31,12 @@ struct DxgiDesktopCaptureConfig {
   // of the device (readback worker, MF encoder). 0 = re-enter immediately (legacy behaviour).
   uint32_t acquireIdleSleepUs = 0;
   bool landscapeOnly = true;
+  // Prelogin (prelogin-service r4 #1): the capture worker SetThreadDesktop()s onto the input desktop
+  // before it duplicates, and re-attaches whenever the duplication is lost (a secure-desktop / session
+  // switch). When set, the FIRST DuplicateOutput is owned by the worker (after it has attached) rather
+  // than by the caller thread in Start(), so the attach always precedes duplication. Default false keeps
+  // the post-login host byte-identical.
+  bool attachToInputDesktop = false;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
 };
 

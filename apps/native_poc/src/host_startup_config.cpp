@@ -228,6 +228,9 @@ int startup_configure_from_env(HostContext& hx) {
       "REMOTE60_NATIVE_QUEUE_WAIT_TIMEOUT_US", 0, 0,
       static_cast<uint32_t>(kQueueWaitTimeoutUsDefault));
   capture.gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
+  // Prelogin (r4 #1): the DXGI/GDI capture workers bind to the input desktop so the pre-login secure
+  // desktop is captured. Set once here from the parsed flag; the post-login host leaves it false.
+  capture.preloginAttachInputDesktop = args.preloginMode;
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);

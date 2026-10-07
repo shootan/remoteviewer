@@ -142,6 +142,10 @@ struct CaptureState {
   uint32_t queueWaitTimeoutUsOverride = 0;
   bool gpuScalerRequested = false;
   bool gpuScalerHealthy = false;
+  // Prelogin (prelogin-service r4 #1): set once at startup from Args::preloginMode. When true the DXGI
+  // capture worker binds its thread to the input desktop (and the GDI worker is told the same), so the
+  // pre-login secure desktop is captured. Default false keeps the post-login host unchanged.
+  bool preloginAttachInputDesktop = false;
   int framePoolBuffers = 0;
   // Current capture target as published to the control thread (window list / status replies).
   std::atomic<uint32_t> targetPid{0};
