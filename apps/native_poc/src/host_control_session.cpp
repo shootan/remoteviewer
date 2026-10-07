@@ -593,12 +593,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
         continue;
       }
       remote60::native_poc::RebootRequestInputs in;
-      // R2: directory-authenticated session only; a token-less LAN Hello peer is NotAuthorized.
-      in.directoryAuthenticated = clientSession.directoryAuthenticated.load(std::memory_order_acquire);
-      // Remote reboot is available on any host; the directory-auth check above and the single-flight
-      // dedup in DecideReboot are the gate (prelogin-service r4 item 6). The OS call is made by whoever
-      // holds the shutdown privilege: the SYSTEM prelogin worker, or the elevated logged-in host (admin
-      // v1). A host without the privilege gets ERROR_PRIVILEGE_NOT_HELD back as Failed -- never forced.
+      // R2/S3: authorize against THIS served session, not just the shared bool. The auth must hold AND
+      // the session epoch must still be the one this Serve began with -- a superseded/stale link cannot
+      // borrow a current auth. (The full per-link auth flag threaded from ingress, and closing the direct
+      // TCP/LAN listener in prelogin, are the remaining S3 depth.)
+      auto reboot_authorized = [&]() {
+        return clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
+               clientSession.epoch.load(std::memory_order_acquire) == servedEpoch;
+      };
+      in.directoryAuthenticated = reboot_authorized();
+      // Remote reboot is available on any host; the auth above + the single-flight dedup in DecideReboot
+      // are the gate (r4 item 6). The OS call is made by whoever holds the shutdown privilege (SYSTEM
+      // prelogin worker / elevated admin host); a host without it returns Failed -- never forced.
       in.featureAllowsReboot = true;
       in.requestId = req.requestId;
       remote60::native_poc::RebootDecision decision;
@@ -609,11 +615,19 @@ void ControlSessionServer::Serve(ControlLink& link) {
       uint32_t win32 = 0;
       remote60::native_poc::RebootResult result = remote60::native_poc::RebootResultFor(decision);
       if (remote60::native_poc::RebootShouldCallOs(decision)) {
-        win32 = request_system_reboot();  // the ONE fixed local restart
-        if (win32 != 0) {
-          result = remote60::native_poc::RebootResult::Failed;  // never auto-escalate to forced (R4)
+        // S3 fence: re-check authorization at the OS call. A revoke / session change between the gate and
+        // here must abort the restart, not fire it on stale authority.
+        if (!reboot_authorized()) {
+          result = remote60::native_poc::RebootResult::NotAuthorized;
           std::lock_guard<std::mutex> lock(gRebootGateMu);
-          gRebootGate = remote60::native_poc::RebootGateState{};  // the OS call failed; allow a retry
+          gRebootGate = remote60::native_poc::RebootGateState{};  // revoked mid-flight: clear the in-flight
+        } else {
+          win32 = request_system_reboot();  // the ONE fixed local restart
+          if (win32 != 0) {
+            result = remote60::native_poc::RebootResult::Failed;  // never auto-escalate to forced (R4)
+            std::lock_guard<std::mutex> lock(gRebootGateMu);
+            gRebootGate = remote60::native_poc::RebootGateState{};  // the OS call failed; allow a retry
+          }
         }
       }
       std::cout << "[native-video-host][control][reboot] requestId=" << req.requestId
