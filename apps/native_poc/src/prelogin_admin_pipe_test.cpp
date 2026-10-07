@@ -34,19 +34,25 @@ struct World {
   int calls = 0;
   uint32_t failSetStartType = 0;
   bool failRemember = false;   // r5 G6
+  bool failFloor = false;       // r6 G6: the floor cannot be read
   uint32_t failWrite = 0;
   int osReboots = 0;          // r2: the OS seam
   uint32_t osRebootResult = 0;
   int readies = 0;
   uint32_t readySession = 0;
   uint64_t readyStart = 0;
+  std::string readyNonce;
   pl::AdminPrimitives primitives() {
     pl::AdminPrimitives p;
     p.requestOsReboot = [this]() -> uint32_t { ++osReboots; return osRebootResult; };
-    p.noteUserHostReady = [this](uint32_t s, uint64_t t) { ++readies; readySession = s; readyStart = t; };
+    p.noteUserHostReady = [this](uint32_t s, uint64_t t, const std::string& n) { ++readies; readySession = s; readyStart = t; readyNonce = n; };
     p.recordPath = [this] { ++calls; return std::wstring(L"C:\\ProgramData\\GNLink\\credential\\machine.cred"); };
     p.machineId = [this] { ++calls; return std::string("11111111-2222-3333-4444-555555555555"); };
-    p.readFloor = [this] { ++calls; return floor; };
+    p.readFloor = [this](uint64_t* out) {
+      ++calls;
+      *out = floor;
+      return !failFloor;
+    };
     p.raiseFloor = [this](uint64_t f) { ++calls; if (f > floor) floor = f; return true; };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       ++calls;
@@ -260,6 +266,21 @@ int main() {
     w.failWrite = 5;
     pl::AdminPrimitives p = w.primitives();
     const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    {
+      World u;
+      pl::AdminPrimitives up = u.primitives();
+      pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, up);
+      u.failFloor = true;  // the floor becomes unreadable (r6 G6: not floor 0)
+      const pl::AdminReply on2 = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, up);
+      check("r6 G6: the floor cannot be read: on is refused (Failed), the existing record is not replaced",
+            on2.status == pl::AdminStatus::Failed && on2.win32 == ERROR_READ_FAULT && u.files.size() == 1);
+      pl::AdminRequest off;
+      off.op = pl::AdminOp::Disable;
+      const uint64_t recGen = u.files.begin()->second.ownerGeneration;
+      const pl::AdminReply o = pl::HandleAdminRequest(pl::EncodeAdminRequest(off), true, up);
+      check("...and off still withdraws (record gone, floor raised past it) but says Failed",
+            o.status == pl::AdminStatus::Failed && u.files.empty() && u.floor > recGen);
+    }
     check("G6: on, but the record cannot be written: Failed, and the start type is put back (DEMAND), not left AUTO",
           r.status == pl::AdminStatus::Failed && r.win32 == 5 && !r.enabled && w.files.empty() && w.startType == 3,
           std::to_string(w.startType));
@@ -394,17 +415,25 @@ int main() {
     }
     {
       pl::UserHostReadyTracker t;
-      check("handoff: no ready yet -> not complete (the prelogin worker keeps the lease)", !t.Completes(3, 500));
-      t.Note(3, 400);
-      check("handoff: a ready from a host started BEFORE this launch (an old generation) -> discarded", !t.Completes(3, 500));
-      t.Note(4, 600);
-      check("handoff: a ready from another session -> not complete", !t.Completes(3, 500));
-      t.Note(3, 600);
-      check("handoff: a ready from this session's host started after the launch -> complete", t.Completes(3, 500));
+      check("handoff: no ready yet -> not complete (the prelogin worker keeps the lease)", !t.Completes(3, 500, "n-1"));
+      t.Note(3, 400, "n-1");
+      check("handoff: a ready from a host started BEFORE this launch (an old generation) -> discarded", !t.Completes(3, 500, "n-1"));
+      t.Note(4, 600, "n-1");
+      check("handoff: a ready from another session -> not complete", !t.Completes(3, 500, "n-1"));
+      t.Note(3, 600, "n-1");
+      check("handoff: a ready from this session's host started after the launch -> complete", t.Completes(3, 500, "n-1"));
       t.Reset();
-      check("handoff: a repeated LOGON relaunch resets it; the earlier ready no longer counts", !t.Completes(3, 700));
-      t.Note(3, 650);
-      check("...and a ready from before that relaunch is stale", !t.Completes(3, 700));
+      check("handoff: a repeated LOGON relaunch resets it; the earlier ready no longer counts", !t.Completes(3, 700, "n-1"));
+      t.Note(3, 650, "n-1");
+      check("...and a ready from before that relaunch is stale", !t.Completes(3, 700, "n-1"));
+      t.Note(3, 800, "n-0");
+      check("r6 G9: a ready from a host of this session, after the launch, but not THIS launch's (another nonce) -> not complete",
+            !t.Completes(3, 700, "n-1"));
+      t.Note(3, 800, "");
+      check("...nor one that names no nonce", !t.Completes(3, 700, "n-1"));
+      t.Note(3, 800, "n-1");
+      check("...while the launch's own nonce completes it", t.Completes(3, 700, "n-1"));
+      check("...and a launch without a nonce is never completed", !t.Completes(3, 700, ""));
     }
     {
       // The real pipe: the product's host check is the image path. This test is not GNLinkStream.exe.

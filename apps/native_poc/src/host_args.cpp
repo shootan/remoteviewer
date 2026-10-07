@@ -178,6 +178,10 @@ Args parse_args(int argc, char** argv) {
       }
     }
   }
+  // r6 G1: pin the prelogin role's required transport/codec when they are at their defaults so that
+  // `--prelogin` alone enters the UDP+H264 directory-registration path. A conflicting EXPLICIT value is
+  // left unchanged here on purpose: resolve_transport refuses it with a diagnostic (no silent fallback).
+  if (a.preloginMode) (void)ApplyPreloginRoleContract(a.transport, a.codec);
   return a;
 }
 

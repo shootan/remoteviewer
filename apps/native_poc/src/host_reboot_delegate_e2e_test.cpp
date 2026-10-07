@@ -191,7 +191,8 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, const std
   std::vector<wchar_t> env = remote60::native_poc::e2e::e2e_isolated_environment(appData);
   env.pop_back();  // re-terminated below
   for (const std::wstring& kv : {L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_ADMIN_PIPE=" + pipe,
-                                 L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())}) {
+                                 L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId()),
+                                 std::wstring(L"REMOTE60_PRELOGIN_READY_NONCE=e2e-launch-7")}) {
     env.insert(env.end(), kv.begin(), kv.end());
     env.push_back(L'\0');
   }
@@ -229,6 +230,7 @@ struct Service {
   int readies = 0;
   uint32_t readySession = 0;
   uint64_t readyStart = 0;
+  std::string readyNonce;
   bool readyAfterHeartbeat = false;
   std::function<bool()> heartbeatSeen;
   pl::RebootLedger ledger;
@@ -240,7 +242,7 @@ struct Service {
       pl::AdminPrimitives p;
       p.recordPath = [] { return std::wstring(); };
       p.machineId = [] { return std::string(); };
-      p.readFloor = [] { return uint64_t{0}; };
+      p.readFloor = [](uint64_t* out) { *out = 0; return true; };
       p.raiseFloor = [](uint64_t) { return true; };
       p.readRecord = [](const std::wstring&, pl::MachineRecord*) { return false; };
       p.writeRecord = [](const std::wstring&, const pl::MachineRecord&) -> uint32_t { return 5; };
@@ -256,7 +258,8 @@ struct Service {
         ++osReboots;
         return 0;  // "the OS accepted it" -- nothing is restarted
       };
-      p.noteUserHostReady = [this](uint32_t s, uint64_t st) {
+      p.noteUserHostReady = [this](uint32_t s, uint64_t st, const std::string& n) {
+        readyNonce = n;
         std::lock_guard<std::mutex> l(mu);
         ++readies;
         readySession = s;
@@ -369,10 +372,13 @@ int wmain(int argc, wchar_t** argv) {
     pl::UserHostReadyTracker tracker;
     {
       std::lock_guard<std::mutex> l(service.mu);
-      tracker.Note(service.readySession, service.readyStart);
+      tracker.Note(service.readySession, service.readyStart, service.readyNonce);
     }
-    check("...which completes a handoff launched before this host started (same session)", tracker.Completes(hostSession, hostStart - 1));
-    check("...and not one launched after it (a later LOGON: this host's ready is stale)", !tracker.Completes(hostSession, hostStart + 10000000));
+    check("r6 G9: the ready carries the nonce this host was started with", service.readyNonce == "e2e-launch-7", service.readyNonce);
+    check("...which completes a handoff launched before this host started (same session, that launch's nonce)",
+          tracker.Completes(hostSession, hostStart - 1, "e2e-launch-7"));
+    check("...but not another launch's (another nonce)", !tracker.Completes(hostSession, hostStart - 1, "e2e-launch-8"));
+    check("...and not one launched after it (a later LOGON: this host's ready is stale)", !tracker.Completes(hostSession, hostStart + 10000000, "e2e-launch-7"));
 
     // ---- item 6, unauthenticated: the gate stops it
     {

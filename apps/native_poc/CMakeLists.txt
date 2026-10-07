@@ -2323,6 +2323,32 @@ add_executable(remote60_prelogin_ready_signal_test
 )
 target_include_directories(remote60_prelogin_ready_signal_test PRIVATE src)
 
+# prelogin-service r6 G9: child-launch adoption gate (Job-bind required; launch-token re-judgement).
+add_executable(remote60_prelogin_child_launch_test
+  src/prelogin_child_launch_test.cpp
+)
+target_include_directories(remote60_prelogin_child_launch_test PRIVATE src)
+
+# prelogin-service r6 G1: the prelogin role pins udp+h264 (the real `--prelogin` command), refuses TCP/raw.
+add_executable(remote60_prelogin_role_args_test
+  src/prelogin_role_args_test.cpp
+  src/host_args.cpp
+)
+target_include_directories(remote60_prelogin_role_args_test PRIVATE src)
+target_link_libraries(remote60_prelogin_role_args_test PRIVATE common)
+
+# prelogin-service r6 G2: ingress authentication policy (token-less first hello refused; no side channel).
+add_executable(remote60_prelogin_ingress_policy_test
+  src/prelogin_ingress_policy_test.cpp
+)
+target_include_directories(remote60_prelogin_ingress_policy_test PRIVATE src)
+
+# prelogin-service r6 G6: --prelogin worker adopts only a record Usable under the owner floor + binding.
+add_executable(remote60_prelogin_worker_binding_test
+  src/prelogin_worker_binding_test.cpp
+)
+target_include_directories(remote60_prelogin_worker_binding_test PRIVATE src)
+
 # prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
 add_executable(remote60_prelogin_supervisor_test
   src/prelogin_supervisor_test.cpp
@@ -2368,6 +2394,14 @@ add_executable(remote60_prelogin_machine_store_test
 )
 target_include_directories(remote60_prelogin_machine_store_test PRIVATE src)
 target_link_libraries(remote60_prelogin_machine_store_test PRIVATE crypt32 advapi32)
+
+# prelogin-service r6 G5: trusted-ancestry validation (owner + reparse) counter-examples.
+add_executable(remote60_prelogin_machine_store_g5_test
+  src/prelogin_machine_store_g5_test.cpp
+  src/prelogin_machine_store.cpp
+)
+target_include_directories(remote60_prelogin_machine_store_g5_test PRIVATE src)
+target_link_libraries(remote60_prelogin_machine_store_g5_test PRIVATE crypt32 advapi32)
 
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp

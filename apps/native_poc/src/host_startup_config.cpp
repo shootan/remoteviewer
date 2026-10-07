@@ -275,6 +275,18 @@ int resolve_transport(const Args& args, bool useRaw, bool useH264, VideoTranspor
     std::cerr << "[native-video-host] raw codec over udp is not supported in current phase (use codec=h264)\n";
     return 16;
   }
+  // r6 G1: the prelogin role requires the UDP+H264 directory-registration path. Refuse an explicit
+  // TCP/raw fallback outright -- a prelogin worker on TCP never heartbeats, so the box is never online.
+  if (args.preloginMode) {
+    if (!useH264) {
+      std::cerr << "[native-video-host] prelogin requires codec=h264 (raw refused)\n";
+      return 16;
+    }
+    if (transport != VideoTransport::Udp) {
+      std::cerr << "[native-video-host] prelogin requires transport=udp (tcp fallback refused)\n";
+      return 16;
+    }
+  }
   return 0;
 }
 

@@ -72,7 +72,7 @@ struct World {
     pl::AdminPrimitives p;
     p.recordPath = [this] { std::lock_guard<std::mutex> l(mu); ++calls; return kPath; };
     p.machineId = [this] { std::lock_guard<std::mutex> l(mu); ++calls; return std::string("ui-test-machine"); };
-    p.readFloor = [this] { std::lock_guard<std::mutex> l(mu); ++calls; return floor; };
+    p.readFloor = [this](uint64_t* out) { std::lock_guard<std::mutex> l(mu); ++calls; *out = floor; return true; };
     p.raiseFloor = [this](uint64_t f) { std::lock_guard<std::mutex> l(mu); ++calls; if (f > floor) floor = f; return true; };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       std::lock_guard<std::mutex> l(mu);

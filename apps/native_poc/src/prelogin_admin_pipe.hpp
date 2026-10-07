@@ -68,6 +68,9 @@ struct AdminRequest {
   // alone would make two viewers' first requests one request (r5 G10).
   uint32_t requestId = 0;
   uint64_t peerKey = 0;
+  // Ready only: the per-launch nonce the service gave the Host it started (REMOTE60_PRELOGIN_READY_NONCE;
+  // r6 G9). Only the host that launch started can name it.
+  std::string readyNonce;
 };
 
 struct AdminReply {
@@ -113,24 +116,28 @@ struct RebootLedger {
 // Item 7: the user Host's ready, as the service received it, and whether it completes THIS handoff:
 // from the console session, from a host process started after the service launched this user Host
 // (a ready from an earlier session's host, or from before a repeated LOGON, does not count).
+// r5 merge with r6 G9: and from the host THAT launch started -- the nonce it was given matches.
 struct UserHostReadyTracker {
   std::mutex mu;
   bool have = false;
   uint32_t sessionId = 0;
   uint64_t processStartTime = 0;
-  void Note(uint32_t session, uint64_t startTime) {
+  std::string nonce;
+  void Note(uint32_t session, uint64_t startTime, const std::string& readyNonce) {
     std::lock_guard<std::mutex> l(mu);
     have = true;
     sessionId = session;
     processStartTime = startTime;
+    nonce = readyNonce;
   }
   void Reset() {
     std::lock_guard<std::mutex> l(mu);
     have = false;
   }
-  bool Completes(uint32_t consoleSession, uint64_t launchTime) {
+  bool Completes(uint32_t consoleSession, uint64_t launchTime, const std::string& launchNonce) {
     std::lock_guard<std::mutex> l(mu);
-    return have && sessionId == consoleSession && launchTime != 0 && processStartTime >= launchTime;
+    return have && sessionId == consoleSession && launchTime != 0 && processStartTime >= launchTime &&
+           !launchNonce.empty() && nonce == launchNonce;
   }
 };
 
@@ -143,7 +150,9 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out);
 struct AdminPrimitives {
   std::function<std::wstring()> recordPath;                 // the machine record's fixed path
   std::function<std::string()> machineId;                   // HKLM MachineGuid
-  std::function<uint64_t()> readFloor;                      // the durable owner-generation floor
+  // The durable owner-generation floor: false when it cannot be read (r6 G6 -- an unreadable floor is
+  // not floor 0; the decision fails safe).
+  std::function<bool(uint64_t*)> readFloor;
   std::function<bool(uint64_t)> raiseFloor;                 // monotonic
   std::function<bool(const std::wstring&, MachineRecord*)> readRecord;   // false = none / unreadable
   std::function<uint32_t(const std::wstring&, const MachineRecord&)> writeRecord;  // 0 = ok, else win32
@@ -157,7 +166,7 @@ struct AdminPrimitives {
   std::function<void()> forgetRememberedStartType;
   // r2: the ONE fixed local restart (0 = the OS accepted it, else win32), and where a ready goes.
   std::function<uint32_t()> requestOsReboot;
-  std::function<void(uint32_t session, uint64_t processStartTime)> noteUserHostReady;
+  std::function<void(uint32_t session, uint64_t processStartTime, const std::string& nonce)> noteUserHostReady;
 };
 
 // The one decision per request (pure over the primitives and the ledger).

@@ -8,18 +8,31 @@
 // crosses the session boundary (service in session 0, Host in the console session); both the elevated
 // user Host and the SYSTEM service can create/open it.
 //
+// r6 G9: the readiness object name is now bound to a PER-LAUNCH nonce the service hands the Host it just
+// started (env REMOTE60_PRELOGIN_READY_NONCE). A fixed name let ANY GNLinkStream/Host of the install
+// satisfy the handoff; with a nonce only the host THIS launch started can signal the event the service
+// waits on. An empty nonce keeps the legacy base name (standalone/self-test).
+//
 // Win32 lives in prelogin_ready_signal.cpp.
+
+#include <string>
 
 namespace remote60::native_poc::prelogin {
 
-// Host side: create (if needed) and set the ready event. Idempotent; returns false on a Win32 failure.
+// Host side: create (if needed) and set the ready event. The nonce is read from the environment variable
+// REMOTE60_PRELOGIN_READY_NONCE that the launching service set. Idempotent; returns false on Win32 failure.
 bool SignalUserHostReady();
 
-// Service side: true iff the ready event currently exists and is signaled.
-bool UserHostReadySignaled();
+// Service side: true iff the ready event for `nonce` currently exists and is signaled. Empty nonce = the
+// legacy base name.
+bool UserHostReadySignaled(const std::wstring& nonce = std::wstring());
 
-// Service side: clear the ready event before launching a fresh user Host, so a previous session's
-// signal cannot be mistaken for the new Host's readiness.
-void ResetUserHostReady();
+// Service side: clear the ready event for `nonce` before launching a fresh user Host, so a previous
+// session's (or a foreign host's) signal cannot be mistaken for the new Host's readiness.
+void ResetUserHostReady(const std::wstring& nonce = std::wstring());
+
+// Host-side test hook: read the nonce the launching service injected (empty if none). Exposed so the
+// unit test can exercise the env-driven name selection without a second process.
+std::wstring ReadReadyNonceFromEnv();
 
 }  // namespace remote60::native_poc::prelogin

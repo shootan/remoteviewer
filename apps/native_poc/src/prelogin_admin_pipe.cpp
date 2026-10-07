@@ -105,6 +105,7 @@ std::vector<uint8_t> EncodeAdminRequest(const AdminRequest& r) {
     put_u32(&o, r.requestId);
     put_u64(&o, r.peerKey);
   }
+  if (r.op == AdminOp::Ready) put_str(&o, r.readyNonce);
   return o;
 }
 
@@ -124,6 +125,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
     }
   }
   if (out->op == AdminOp::Reboot && (!rd.u32(&out->requestId) || !rd.u64(&out->peerKey))) return false;
+  if (out->op == AdminOp::Ready && !rd.str(&out->readyNonce, 128)) return false;
   return rd.done();
 }
 
@@ -173,7 +175,7 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
       return reply;
     }
     if (r.op == AdminOp::Ready) {
-      if (p.noteUserHostReady) p.noteUserHostReady(who.sessionId, who.processStartTime);
+      if (p.noteUserHostReady) p.noteUserHostReady(who.sessionId, who.processStartTime, r.readyNonce);
       reply.status = AdminStatus::Ok;
       return reply;
     }
@@ -214,19 +216,28 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
   if (r.op == AdminOp::Query) {
     reply.status = AdminStatus::Ok;
     reply.enabled = p.featureEnabled();
-    reply.ownerGeneration = p.readFloor();
+    uint64_t floor = 0;
+    reply.ownerGeneration = p.readFloor(&floor) ? floor : 0;
     return reply;
   }
   const std::wstring path = p.recordPath();
   MachineRecord old;
   const bool had = !path.empty() && p.readRecord(path, &old);
-  const uint64_t gen = (std::max)(had ? old.ownerGeneration : 0ull, p.readFloor()) + 1;
+  uint64_t floor = 0;
+  const bool floorKnown = p.readFloor(&floor);
+  const uint64_t gen = (std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull) + 1;
   if (r.op == AdminOp::Enable) {
     if (r.directoryUrl.empty() || r.accountId.empty() || r.hostId.empty() || r.hostToken.empty()) {
       reply.status = AdminStatus::BadRequest;
       return reply;
     }
     const std::string machine = p.machineId();
+    if (!floorKnown) {  // r6 G6: a record above an unknown floor might sit below a revoke -- fail safe
+      reply.status = AdminStatus::Failed;
+      reply.win32 = ERROR_READ_FAULT;
+      reply.enabled = p.featureEnabled();
+      return reply;
+    }
     if (path.empty() || machine.empty()) {
       reply.status = AdminStatus::Failed;
       return reply;
@@ -290,8 +301,9 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
   const bool haveOriginal = p.loadRememberedStartType(&original);
   const uint32_t s = p.setStartType(haveOriginal ? original : kStartDemand);
   if (s == 0 && haveOriginal) p.forgetRememberedStartType();
-  reply.status = (rm == 0 && s == 0) ? AdminStatus::Ok : AdminStatus::Failed;
-  reply.win32 = rm != 0 ? rm : s;
+  // An unreadable floor: the record is still removed and the floor raised past it, but say Failed.
+  reply.status = (rm == 0 && s == 0 && floorKnown) ? AdminStatus::Ok : AdminStatus::Failed;
+  reply.win32 = rm != 0 ? rm : s != 0 ? s : floorKnown ? 0 : ERROR_READ_FAULT;
   reply.enabled = p.featureEnabled();
   reply.ownerGeneration = gen;
   return reply;
@@ -660,6 +672,10 @@ void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t wa
     }
     AdminRequest r;
     r.op = AdminOp::Ready;
+    // r6 G9: the nonce the service gave the Host that started this process (inherited from it).
+    wchar_t nonce[129] = {};
+    const DWORD n = GetEnvironmentVariableW(L"REMOTE60_PRELOGIN_READY_NONCE", nonce, 129);
+    if (n > 0 && n < 129) r.readyNonce.assign(nonce, nonce + n);
     for (int i = 0; i < attempts; ++i) {
       if (SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok) return;
       Sleep(delayMs);
