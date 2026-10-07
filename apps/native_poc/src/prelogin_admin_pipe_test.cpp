@@ -33,6 +33,8 @@ struct World {
   uint32_t remembered = 0;
   int calls = 0;
   uint32_t failSetStartType = 0;
+  bool failRemember = false;   // r5 G6
+  uint32_t failWrite = 0;
   int osReboots = 0;          // r2: the OS seam
   uint32_t osRebootResult = 0;
   int readies = 0;
@@ -53,7 +55,12 @@ struct World {
       *out = it->second;
       return true;
     };
-    p.writeRecord = [this](const std::wstring& path, const pl::MachineRecord& r) -> uint32_t { ++calls; files[path] = r; return 0; };
+    p.writeRecord = [this](const std::wstring& path, const pl::MachineRecord& r) -> uint32_t {
+      ++calls;
+      if (failWrite) return failWrite;
+      files[path] = r;
+      return 0;
+    };
     p.removeRecord = [this](const std::wstring& path) -> uint32_t { ++calls; files.erase(path); return 0; };
     p.featureEnabled = [this] {
       ++calls;
@@ -73,7 +80,13 @@ struct World {
       return 0;
     };
     p.loadRememberedStartType = [this](uint32_t* out) { ++calls; if (!haveRemembered) return false; *out = remembered; return true; };
-    p.rememberStartType = [this](uint32_t t) { ++calls; haveRemembered = true; remembered = t; return true; };
+    p.rememberStartType = [this](uint32_t t) {
+      ++calls;
+      if (failRemember) return false;
+      haveRemembered = true;
+      remembered = t;
+      return true;
+    };
     p.forgetRememberedStartType = [this] { ++calls; haveRemembered = false; };
     return p;
   }
@@ -231,8 +244,25 @@ int main() {
     w.failSetStartType = 1060;
     pl::AdminPrimitives p = w.primitives();
     const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
-    check("on, but the start type cannot be set: Failed with the error, and not half on (record withdrawn, floor raised)",
-          r.status == pl::AdminStatus::Failed && r.win32 == 1060 && !r.enabled && w.files.empty() && w.floor >= 2);
+    check("on, but the start type cannot be set: Failed with the error, and nothing was ever published (no record)",
+          r.status == pl::AdminStatus::Failed && r.win32 == 1060 && !r.enabled && w.files.empty());
+  }
+  {
+    World w;
+    w.failRemember = true;
+    pl::AdminPrimitives p = w.primitives();
+    const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    check("G6: on, but the original start type cannot be remembered: Failed, NOTHING changed (no record, start type as it was)",
+          r.status == pl::AdminStatus::Failed && !r.enabled && w.files.empty() && w.startType == 3);
+  }
+  {
+    World w;
+    w.failWrite = 5;
+    pl::AdminPrimitives p = w.primitives();
+    const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    check("G6: on, but the record cannot be written: Failed, and the start type is put back (DEMAND), not left AUTO",
+          r.status == pl::AdminStatus::Failed && r.win32 == 5 && !r.enabled && w.files.empty() && w.startType == 3,
+          std::to_string(w.startType));
   }
   {
     World w;

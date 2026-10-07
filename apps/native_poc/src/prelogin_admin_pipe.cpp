@@ -243,22 +243,34 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
     dc.hostId = r.hostId;
     dc.hostToken = r.hostToken;
     rec.credential = PackDirectoryCredential(dc);
-    const uint32_t w = p.writeRecord(path, rec);
-    if (w != 0) {
-      reply.status = AdminStatus::Failed;
-      reply.win32 = w;
-      return reply;
-    }
-    // The start type as it was before the feature, remembered once (a second enable keeps the first).
+    // r5 G6: nothing is published until everything else is in place, so the service's reconcile can
+    // never find a half-on state. First the start type as it was before the feature, remembered once (a
+    // second enable keeps the first) -- and if it cannot be remembered, nothing changes at all.
     uint32_t remembered = 0, current = 0;
-    if (!p.loadRememberedStartType(&remembered) && p.queryStartType(&current)) p.rememberStartType(current);
+    uint32_t original = 0;
+    if (p.loadRememberedStartType(&remembered)) {
+      original = remembered;
+    } else if (!p.queryStartType(&current) || !p.rememberStartType(current)) {
+      reply.status = AdminStatus::Failed;
+      reply.win32 = ERROR_CANTWRITE;
+      reply.enabled = p.featureEnabled();
+      return reply;
+    } else {
+      original = current;
+    }
     const uint32_t s = p.setStartType(kStartAuto);
     if (s != 0) {
-      // Not half on: the record just written is withdrawn the way "off" withdraws it.
-      (void)p.raiseFloor(gen + 1);
-      (void)p.removeRecord(path);
       reply.status = AdminStatus::Failed;
       reply.win32 = s;
+      reply.enabled = p.featureEnabled();
+      return reply;
+    }
+    // Then the record, last: until it exists the feature is simply off.
+    const uint32_t w = p.writeRecord(path, rec);
+    if (w != 0) {
+      (void)p.setStartType(original);  // back as it was
+      reply.status = AdminStatus::Failed;
+      reply.win32 = w;
       reply.enabled = p.featureEnabled();
       return reply;
     }

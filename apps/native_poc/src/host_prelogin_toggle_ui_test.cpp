@@ -244,6 +244,15 @@ struct Ui {
     }
     return ok;
   }
+  static bool invoke(IUIAutomationElement* e) {
+    IUIAutomationInvokePattern* i = nullptr;
+    bool ok = false;
+    if (e && SUCCEEDED(e->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&i))) && i) {
+      ok = SUCCEEDED(i->Invoke());
+      i->Release();
+    }
+    return ok;
+  }
   // Visible, enabled, on screen, and the element at its centre is itself (nothing covers it).
   bool reachable(IUIAutomationElement* e, std::string* why) {
     BOOL offscreen = TRUE, enabled = FALSE;
@@ -267,6 +276,7 @@ struct Ui {
 
 constexpr int kIdPreloginAccess = 1025;
 constexpr int kIdPreloginStatus = 1027;
+constexpr int kIdSignOut = 1012;  // host_app_main.cpp ControlId::IdSignOut
 
 }  // namespace
 
@@ -397,6 +407,30 @@ int wmain() {
     check("...and the service was not touched", world.calls == callsBefore && world.files.empty() && world.startType == 3,
           std::to_string(world.calls - callsBefore));
     check("screenshot: refused", save_window_bmp(hwnd, (shots / L"prelogin_toggle_3_refused.bmp").wstring()));
+
+    // r5 G6: signing out of GNLink withdraws the machine's pre-login access -- it was granted with this
+    // account's credential.
+    server.stop();
+    server.start(&world, pipe, [](void*) { return true; });
+    check("on once more (for the sign-out case)", Ui::toggle(box));
+    const bool onAgain = wait_until([&] { std::lock_guard<std::mutex> l(world.mu); return world.files.count(kPath) == 1; }, 8000);
+    check("...the record is there", onAgain);
+    uint64_t floorBefore = 0;
+    {
+      std::lock_guard<std::mutex> l(world.mu);
+      floorBefore = world.floor;
+    }
+    wait_until([&] { return Ui::name_of(status).find(L"켜짐") == 0; }, 5000);
+    IUIAutomationElement* signOut = ui.find_by_id(kIdSignOut);
+    check("G6: \"Sign out\" is pressed through UI Automation", signOut && Ui::invoke(signOut));
+    if (signOut) signOut->Release();
+    const bool withdrawn = wait_until([&] { std::lock_guard<std::mutex> l(world.mu); return world.files.empty(); }, 8000);
+    {
+      std::lock_guard<std::mutex> l(world.mu);
+      check("G6: ...and the service withdrew pre-login access: the record is gone, the floor raised past it",
+            withdrawn && world.floor > floorBefore && world.startType == 3, std::to_string(world.floor));
+    }
+    check("screenshot: signed out", save_window_bmp(hwnd, (shots / L"prelogin_toggle_4_signed_out.bmp").wstring()));
   }
   if (box) box->Release();
   if (status) status->Release();

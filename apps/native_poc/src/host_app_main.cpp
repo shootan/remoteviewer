@@ -1537,7 +1537,12 @@ void perform_sign_in() {
 }
 
 
+void withdraw_prelogin_access(const char* why);  // r5 G6, below
+
 void sign_out(bool keepAccount) {
+  // r5 G6: the machine's pre-login access was granted with THIS account's credential -- signing out or
+  // changing account withdraws it (the service raises its floor; the record cannot come back).
+  withdraw_prelogin_access(keepAccount ? "account change" : "sign out");
   {
     std::lock_guard<std::mutex> lock(g.ownerMu);
     g.cache.hostToken.clear();
@@ -1701,6 +1706,26 @@ void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool as
     result->want = r.op == remote60::native_poc::prelogin::AdminOp::Enable;
     result->reply = prelogin_admin_call(r);
     if (!r.hostToken.empty()) SecureZeroMemory(&r.hostToken[0], r.hostToken.size());
+    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) {
+      delete result;
+      gPreloginBusy.store(false);
+    }
+  }).detach();
+}
+
+void withdraw_prelogin_access(const char* why) {
+  namespace pl = remote60::native_poc::prelogin;
+  append_host_app_log(std::string("[host-app] prelogin access withdrawn on ") + why);
+  pl::AdminRequest r;
+  r.op = pl::AdminOp::Disable;
+  // Not gated on a request already out: this one must go. Its answer updates the box like any other.
+  gPreloginBusy.store(true);
+  EnableWindow(g.preloginCheck, FALSE);
+  std::thread([r] {
+    auto* result = new PreloginReplyResult;
+    result->asked = true;
+    result->want = false;
+    result->reply = prelogin_admin_call(r);
     if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) {
       delete result;
       gPreloginBusy.store(false);
