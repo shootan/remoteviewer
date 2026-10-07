@@ -18,10 +18,58 @@ namespace {
 // exactly those two principals.
 constexpr wchar_t kProtectedSddl[] = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
-bool write_all_atomic(const std::wstring& path, const uint8_t* data, size_t len, uint32_t* win32) {
-  const std::wstring tmp = path + L".tmp";
-  HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                         FILE_ATTRIBUTE_NORMAL, nullptr);
+// Build the protected (SYSTEM+Admins-only) security descriptor. Caller LocalFree()s it.
+PSECURITY_DESCRIPTOR make_protected_sd() {
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kProtectedSddl, SDDL_REVISION_1, &sd, nullptr)) {
+    return nullptr;
+  }
+  return sd;
+}
+
+// Ensure the credential directory exists with the protected DACL from the start, so the file it holds is
+// never exposed through a readable parent (Codex S1). Idempotent.
+bool ensure_protected_parent(const std::wstring& filePath, uint32_t* win32) {
+  const size_t slash = filePath.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return true;
+  const std::wstring dir = filePath.substr(0, slash);
+  PSECURITY_DESCRIPTOR sd = make_protected_sd();
+  if (!sd) { if (win32) *win32 = GetLastError(); return false; }
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.lpSecurityDescriptor = sd;
+  bool ok = CreateDirectoryW(dir.c_str(), &sa) != FALSE;
+  if (!ok && GetLastError() == ERROR_ALREADY_EXISTS) {
+    // Already there: re-assert the protected DACL so a loosely-created parent is tightened.
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
+      ok = SetNamedSecurityInfoW(const_cast<wchar_t*>(dir.c_str()), SE_FILE_OBJECT,
+                                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
+                                 nullptr, dacl, nullptr) == ERROR_SUCCESS;
+    }
+  }
+  if (!ok && win32) *win32 = GetLastError();
+  LocalFree(sd);
+  return ok;
+}
+
+// Write to a UNIQUE temp created WITH the protected SD (so it is never readable in a window), then
+// atomically replace the final path. CREATE_NEW + a unique name defeats a pre-planted temp; the final
+// REPLACE_EXISTING rename removes any pre-planted file/symlink at the destination name.
+bool write_all_protected(const std::wstring& path, const uint8_t* data, size_t len, uint32_t* win32) {
+  PSECURITY_DESCRIPTOR sd = make_protected_sd();
+  if (!sd) { if (win32) *win32 = GetLastError(); return false; }
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.lpSecurityDescriptor = sd;
+  wchar_t uniq[80] = {};
+  _snwprintf_s(uniq, _TRUNCATE, L".%lu.%llu.tmp", GetCurrentProcessId(),
+               static_cast<unsigned long long>(GetTickCount64()));
+  const std::wstring tmp = path + uniq;
+  HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, &sa, CREATE_NEW,
+                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  LocalFree(sd);
   if (h == INVALID_HANDLE_VALUE) { if (win32) *win32 = GetLastError(); return false; }
   const uint8_t* p = data;
   size_t remaining = len;
@@ -37,38 +85,12 @@ bool write_all_atomic(const std::wstring& path, const uint8_t* data, size_t len,
   if (!ok && win32) *win32 = GetLastError();
   CloseHandle(h);
   if (!ok) { DeleteFileW(tmp.c_str()); return false; }
-  // Atomic replace (single-file rename is atomic; MOVEFILE_WRITE_THROUGH flushes the directory entry).
   if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     if (win32) *win32 = GetLastError();
     DeleteFileW(tmp.c_str());
     return false;
   }
   return true;
-}
-
-bool apply_protected_dacl(const std::wstring& path, uint32_t* win32) {
-  PSECURITY_DESCRIPTOR sd = nullptr;
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kProtectedSddl, SDDL_REVISION_1, &sd, nullptr)) {
-    if (win32) *win32 = GetLastError();
-    return false;
-  }
-  BOOL present = FALSE, defaulted = FALSE;
-  PACL dacl = nullptr;
-  bool ok = false;
-  if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
-    const DWORD rc = SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT,
-                                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                           nullptr, nullptr, dacl, nullptr);
-    if (rc == ERROR_SUCCESS) {
-      ok = true;
-    } else if (win32) {
-      *win32 = rc;
-    }
-  } else if (win32) {
-    *win32 = GetLastError();
-  }
-  LocalFree(sd);
-  return ok;
 }
 
 bool read_all(const std::wstring& path, std::vector<uint8_t>* out, uint32_t* win32) {
@@ -98,8 +120,11 @@ bool read_all(const std::wstring& path, std::vector<uint8_t>* out, uint32_t* win
 }  // namespace
 
 MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const MachineRecord& r,
-                                             bool applyProtectedDacl, uint32_t* win32) {
+                                             uint32_t* win32) {
   if (win32) *win32 = 0;
+  // The protected parent is established BEFORE the blob exists, so there is never a readable-parent
+  // window (Codex S1). A failure here keeps any existing good record untouched (nothing was written).
+  if (!ensure_protected_parent(path, win32)) return MachineStoreStatus::Dacl;
   std::vector<uint8_t> plain = SerializeMachineRecord(r);
   DATA_BLOB in{static_cast<DWORD>(plain.size()), plain.data()};
   DATA_BLOB out{0, nullptr};
@@ -110,11 +135,11 @@ MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const Mac
     return MachineStoreStatus::Protect;
   }
   SecureZeroMemory(plain.data(), plain.size());
-  const bool wrote = write_all_atomic(path, out.pbData, out.cbData, win32);
+  // The temp is created WITH the protected DACL and atomically replaces the final path, so the published
+  // blob carries the SYSTEM+Admins-only DACL from creation -- no post-hoc SetNamedSecurityInfo window.
+  const bool wrote = write_all_protected(path, out.pbData, out.cbData, win32);
   LocalFree(out.pbData);
-  if (!wrote) return MachineStoreStatus::Write;
-  if (applyProtectedDacl && !apply_protected_dacl(path, win32)) return MachineStoreStatus::Dacl;
-  return MachineStoreStatus::Ok;
+  return wrote ? MachineStoreStatus::Ok : MachineStoreStatus::Write;
 }
 
 MachineStoreStatus ReadAndOpenMachineRecord(const std::wstring& path, MachineRecord* out, uint32_t* win32) {

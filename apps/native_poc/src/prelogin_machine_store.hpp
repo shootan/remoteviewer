@@ -23,18 +23,20 @@ namespace remote60::native_poc::prelogin {
 enum class MachineStoreStatus {
   Ok,
   Protect,    // CryptProtectData failed
-  Write,      // writing / atomic replace failed
-  Dacl,       // applying the protected DACL failed
+  Write,      // creating the protected temp / writing / atomic replace failed
+  Dacl,       // building the protected security descriptor / the protected parent failed
   Read,       // reading the file failed
   Unprotect,  // CryptUnprotectData failed (missing / tampered / wrong machine)
   Parse,      // the decrypted bytes are not a valid record
 };
 
-// Serialize -> DPAPI LOCAL_MACHINE protect -> atomic write (temp + replace). If applyProtectedDacl, set
-// a SYSTEM+Administrators-only protected DACL on the file. `win32` (optional) gets GetLastError on
-// failure. The plaintext/credential is never written unencrypted and never logged.
+// Serialize -> DPAPI LOCAL_MACHINE protect -> write to a UNIQUE temp that is created WITH the protected
+// (SYSTEM+Administrators-only) security descriptor FROM THE START (no window where the blob is readable),
+// then atomically replace the final path. The protection is NOT optional -- there is no unprotected
+// production path (Codex S1). `win32` (optional) gets GetLastError on failure. The plaintext/credential
+// is never written unencrypted and never logged.
 MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const MachineRecord& r,
-                                             bool applyProtectedDacl, uint32_t* win32);
+                                             uint32_t* win32);
 
 // Read -> DPAPI unprotect -> parse. A missing file, a tampered blob, or a blob sealed on another machine
 // fails at Unprotect; a decrypted-but-malformed blob fails at Parse.
