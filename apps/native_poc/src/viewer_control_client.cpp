@@ -1,6 +1,7 @@
 // See viewer_control_client.hpp. Bodies are the controlThread lambda of native_video_client_main.cpp,
 // verbatim (viewer split refactor Phase 2-4).
 
+#include "prelogin_input_gate.hpp"
 #include "viewer_control_client.hpp"
 
 #include <iostream>
@@ -382,6 +383,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
     // every pong like the others so a reconnect never inherits a stale answer.
     ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+    ctx.session.hostRoleKnown.store(true, std::memory_order_release);  // r7 H6
     if ((pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) == 0) {
       ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
     }
@@ -658,6 +660,7 @@ bool ControlClient::pump_control_resume(
 }
 void ControlClient::Run() {
   ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel);  // r5 G11: a new connection's run
+  ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
   std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
@@ -873,6 +876,15 @@ void ControlClient::Run() {
             &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
             &ctx.control.inputQueue, &action, nullptr,
             bandwidthObserve ? &bandwidthSnapshot : nullptr)) {
+      // r7 H6: the last look before an input leaves -- it may have been queued before the host's role was
+      // known, or before it changed. Held back here exactly as at the keyboard.
+      if (!remote60::native_poc::prelogin::ViewerMaySendAction(
+              remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
+              action)) {
+        ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
       const bool actionOk = execute_control_action(*controlLink, action, &response);

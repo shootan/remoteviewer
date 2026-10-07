@@ -157,7 +157,8 @@ struct Host {
   ~Host() { Stop(); }
 };
 
-bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, const std::wstring& pipe, HANDLE restricted) {
+bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t tcpControlPort, const std::wstring& pipe,
+               HANDLE restricted) {
   if (!host->staging.Create(L"reboot_delegate")) return false;
   host->dir = host->staging.path();
   const std::wstring myDir = directory_of(self_path());
@@ -178,7 +179,8 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, const std
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
   const std::wstring wurl(url.begin(), url.end());
   std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
-                     L" --bind-port " + std::to_wstring(mediaPort) + L" --directory-url " + wurl +
+                     L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " + std::to_wstring(tcpControlPort) +
+                     L" --directory-url " + wurl +
                      L" --directory-id tester --directory-pw e2e-pass-1234 --seconds 90" + L" --directory-cache \"" + host->dir +
                      L"host_cache.json\"";
   std::string why;
@@ -300,6 +302,54 @@ bool host_e2e_allowed() {
   return n > 0 && value[0] == L'1';
 }
 
+// r7 H4: a second link -- the host's TCP control listener -- that never authenticated anything. It sends
+// 84 as a raw message and reads until 85 (other messages are skipped). Returns the result, or -1.
+int tcp_link_reboot(uint16_t port, uint32_t requestId) {
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s == INVALID_SOCKET) return -1;
+  sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  InetPtonW(AF_INET, L"127.0.0.1", &to.sin_addr);
+  DWORD timeout = 10000;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+  int result = -1;
+  if (connect(s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0) {
+    const std::vector<uint8_t> req = remote60::native_poc::build_reboot_request(requestId);
+    if (send(s, reinterpret_cast<const char*>(req.data()), static_cast<int>(req.size()), 0) == static_cast<int>(req.size())) {
+      auto read_exact = [&](void* out, int n) {
+        char* p = static_cast<char*>(out);
+        while (n > 0) {
+          const int got = recv(s, p, n, 0);
+          if (got <= 0) return false;
+          p += got;
+          n -= got;
+        }
+        return true;
+      };
+      const ULONGLONG until = GetTickCount64() + 10000;
+      while (GetTickCount64() < until) {
+        remote60::native_poc::MessageHeader h{};
+        if (!read_exact(&h, sizeof(h)) || h.size < sizeof(h)) break;
+        std::vector<uint8_t> body(h.size - sizeof(h));
+        if (!body.empty() && !read_exact(body.data(), static_cast<int>(body.size()))) break;
+        if (h.type == static_cast<uint16_t>(remote60::native_poc::MessageType::ControlRebootReply) &&
+            h.size == sizeof(remote60::native_poc::ControlRebootReplyMessage)) {
+          remote60::native_poc::ControlRebootReplyMessage rep{};
+          std::memcpy(&rep, &h, sizeof(h));
+          std::memcpy(reinterpret_cast<uint8_t*>(&rep) + sizeof(h), body.data(), body.size());
+          if (rep.requestId == requestId) {
+            result = rep.result;
+            break;
+          }
+        }
+      }
+    }
+  }
+  closesocket(s);
+  return result;
+}
+
 bool wait_outcome(remote60::native_poc::ClientSessionController& c, uint32_t* id, int* outcome, uint32_t* win32) {
   return wait_until([&] { return c.TakeRebootOutcome(id, outcome, win32); }, 10000);
 }
@@ -344,7 +394,9 @@ int wmain(int argc, wchar_t** argv) {
   HANDLE restricted = token_without_shutdown_privilege();
   Host host;
   const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
-  const bool started = restricted && mediaPort != 0 && StartHost(&host, dir.url(), mediaPort, pipe, restricted);
+  const uint16_t tcpControlPort = remote60::native_poc::e2e::e2e_pick_free_tcp_port();  // r7 H4: a second link
+  const bool started = restricted && mediaPort != 0 && tcpControlPort != 0 &&
+                       StartHost(&host, dir.url(), mediaPort, tcpControlPort, pipe, restricted);
   check("the host (test build, staged as GNLinkStream.exe) started without SeShutdownPrivilege", started);
   const int priv = started ? process_has_shutdown_privilege(host.pi.hProcess) : -1;
   const bool safe = priv == 0;
@@ -443,6 +495,14 @@ int wmain(int argc, wchar_t** argv) {
       check("G11: the logged-in host advertises durable pre-login (0x8000) because its service says it is on", durable,
             std::to_string(authed.HostCaptureFlags()));
       check("...and not \"at the logon screen now\" (0x2000)", (authed.HostCaptureFlags() & remote60::native_poc::kCaptureFlagPreloginV1) == 0);
+      // r7 H4: while that authenticated UDP session is up, a SEPARATE link (the TCP control listener, which
+      // authenticated nothing) asks for the restart. It must not borrow the UDP session's directory auth.
+      const int tcpResult = tcp_link_reboot(tcpControlPort, 0x7c4u);
+      check("H4: 84 on an unauthenticated TCP link while a directory-authenticated UDP session is up: NotAuthorized",
+            tcpResult == 2, std::to_string(tcpResult));
+      check("...and the service's OS seam was NOT called (0)", service.reboots() == 0, std::to_string(service.reboots()));
+      check("...the host logged that request as not authorized",
+            host.Count("[native-video-host][control][reboot] requestId=" + std::to_string(0x7c4u) + " auth=0 result=2") == 1);
       const uint32_t id = authed.RequestReboot();
       uint32_t gotId = 0, win32 = 0;
       int outcome = -1;

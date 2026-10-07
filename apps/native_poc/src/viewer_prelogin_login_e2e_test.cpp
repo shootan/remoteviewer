@@ -133,17 +133,23 @@ int process_has_shutdown_privilege(HANDLE process) {
 
 // ------------------------------------------------------------------ the windows the typing may reach
 // Two windows on their own thread: the one the host is told to type into (by title), and a decoy that
-// holds the focus in the negative control. Both have a focused EDIT that records what it receives.
+// holds the focus in the negative control. Both have a focused EDIT that records what it receives. r7 H5:
+// the target is shaped like a logon box -- a user-name EDIT and a password EDIT (ES_PASSWORD); the typing
+// may reach only the password field, so which child gets the focus on activation is set per case.
+HWND focus_child(HWND w) {
+  HWND c = static_cast<HWND>(GetPropW(w, L"r60focus"));
+  return c ? c : GetWindow(w, GW_CHILD);
+}
 struct Targets {
   std::wstring title, decoyTitle;
-  HWND main = nullptr, edit = nullptr, decoy = nullptr, decoyEdit = nullptr;
+  HWND main = nullptr, edit = nullptr, userEdit = nullptr, decoy = nullptr, decoyEdit = nullptr;
   std::thread t;
   std::atomic<bool> ready{false};
   DWORD tid = 0;
 
   static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_SETFOCUS || (m == WM_ACTIVATE && LOWORD(w) != WA_INACTIVE)) {
-      HWND child = GetWindow(h, GW_CHILD);
+      HWND child = focus_child(h);
       if (child) SetFocus(child);
       return 0;
     }
@@ -161,10 +167,13 @@ struct Targets {
       wc.lpszClassName = L"Remote60PreloginLoginTarget";
       wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
       RegisterClassExW(&wc);
-      main = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, 420, 110,
+      main = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, 420, 130,
                              nullptr, nullptr, wc.hInstance, nullptr);
-      edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 10, 380, 26, main,
-                             nullptr, wc.hInstance, nullptr);
+      userEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 6, 380, 26, main,
+                                 nullptr, wc.hInstance, nullptr);
+      edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD, 10, 38, 380,
+                             26, main, nullptr, wc.hInstance, nullptr);
+      SetPropW(main, L"r60focus", edit);  // the password field, as the logon UI focuses it
       decoy = CreateWindowExW(0, wc.lpszClassName, decoyTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 170, 420,
                               110, nullptr, nullptr, wc.hInstance, nullptr);
       decoyEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 10, 380, 26,
@@ -178,14 +187,16 @@ struct Targets {
       DestroyWindow(decoy);
       DestroyWindow(main);
     });
-    return wait_until([this] { return ready.load(); }, 5000) && main && edit && decoy && decoyEdit;
+    return wait_until([this] { return ready.load(); }, 5000) && main && edit && userEdit && decoy && decoyEdit;
   }
   static std::wstring text(HWND e) {
     wchar_t b[256] = {};
     GetWindowTextW(e, b, 255);
     return b;
   }
+  void FocusOn(HWND child) { SetPropW(main, L"r60focus", child); }
   void Clear() {
+    SetWindowTextW(userEdit, L"");
     SetWindowTextW(edit, L"");
     SetWindowTextW(decoyEdit, L"");
   }
@@ -208,7 +219,7 @@ bool bring_front(HWND w) {
     ShowWindow(w, SW_SHOWNORMAL);
     BringWindowToTop(w);
     SetForegroundWindow(w);
-    SetFocus(GetWindow(w, GW_CHILD));
+    SetFocus(focus_child(w));
     if (wt != me) AttachThreadInput(me, wt, FALSE);
     if (ft && ft != me) AttachThreadInput(me, ft, FALSE);
     if (GetForegroundWindow() == w) return true;
@@ -639,7 +650,9 @@ int wmain(int argc, wchar_t** argv) {
   const bool started = restricted && hostPort != 0 &&
                        start_host(&host, dir, directory.url(), hostPort, notPrelogin ? Start::LoggedIn : Start::Service,
                                   targets.title, restricted,
-                                  sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000" : L"");
+                                  sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000"
+                                  : notPrelogin ? L""
+                                                : L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=3000");  // r7 H6
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
         started);
@@ -685,8 +698,21 @@ int wmain(int argc, wchar_t** argv) {
     const bool up = phone.Connect(a) &&
                     wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
     check("the session connects, directory-authenticated", up, phone.Snapshot().status);
+    // r7 H6: the host's first pong is late (test seam, 3 s). Typed now, the role is not known yet -- and an
+    // unknown role is the logon screen: nothing is queued, and nothing reaches the host after the pong.
+    const bool roleUnknown = phone.HostCaptureFlags() == 0;
+    const std::u16string early = u"Hx";
+    const bool earlyText = phone.QueueInputText(reinterpret_cast<const uint16_t*>(early.data()), early.size());
+    const bool earlyKey = phone.QueueInputEvent(5, 0, 0, 0, 'Q', 0) || phone.QueueInputEvent(6, 0, 0, 0, 'Q', 0);
+    const uint64_t heldEarly = phone.PreloginInputHeldBack();
     check("...and sees the host at the logon screen (0x2000)",
           wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+    Sleep(1500);
+    check("H6: typed before the first pong (the role not known yet)", roleUnknown, std::to_string(phone.HostCaptureFlags()));
+    check("H6: ...the text and the character key were not queued (unknown = the logon screen), 3 held back",
+          !earlyText && !earlyKey && heldEarly == 3, std::to_string(heldEarly));
+    check("H6: ...and after the prelogin pong nothing of them reached the host",
+          host.Count("dropped non-navigation key") == 0 && host.Count("first pong delayed 3000 ms") == 1);
     const std::u16string text(kSecret.begin(), kSecret.end());
     const bool textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
     const bool letterQueued = phone.QueueInputEvent(5, 0, 0, 0, 'P', 0);
@@ -696,8 +722,8 @@ int wmain(int argc, wchar_t** argv) {
     Sleep(2000);
     check("G8: text is not queued for a host at the logon screen", !textQueued);
     check("...nor a character key (down or up)", !letterQueued && !letterUpQueued);
-    check("...and the session counted what it held back (3)", phone.PreloginInputHeldBack() == 3,
-          std::to_string(phone.PreloginInputHeldBack()));
+    check("...and the session counted what it held back (3)", phone.PreloginInputHeldBack() - heldEarly == 3,
+          std::to_string(phone.PreloginInputHeldBack() - heldEarly));
     check("...while a navigation key and the pointer still go", tabQueued && moveQueued);
     check("...and the host dropped nothing: no character reached it", host.Count("dropped non-navigation key") == 0);
     phone.Disconnect();
@@ -812,6 +838,40 @@ int wmain(int argc, wchar_t** argv) {
     ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
     ctx.control.connected.store(true, std::memory_order_relaxed);
     worker = std::thread([&] { control.Run(); });
+    // r7 H6: the host's first pong is late (test seam, 3 s). Keys typed now -- the role not known yet --
+    // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
+    // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
+    // (the main --prelogin run; the other modes start their host without the delay).
+    if (connected && !notPrelogin && !sessionEnds) {
+      {
+        std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
+        ctx.frameBuf.frame.width = 320;
+        ctx.frameBuf.frame.height = 240;
+      }
+      ctx.picker.visible.store(false, std::memory_order_relaxed);
+      Sleep(300);  // the control thread is up and has sent its first ping
+      const bool roleUnknown = ctx.session.hostCaptureFlags.load() == 0;
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const uint64_t heldBefore = ctx.session.preloginInputHeldBack.load();
+      for (WPARAM vk : {static_cast<WPARAM>('Q'), static_cast<WPARAM>('Z')}) {
+        SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
+        SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
+      }
+      const bool pong = wait_until([&] { return (ctx.session.hostCaptureFlags.load() & kCaptureFlagPreloginV1) != 0; }, 8000);
+      Sleep(1500);
+      check("H6 (PC): keys typed before the first pong (the role not known yet)", roleUnknown && pong,
+            std::to_string(ctx.session.hostCaptureFlags.load()));
+      check("H6 (PC): ...held back at the keyboard (4 edges), none sent",
+            ctx.session.preloginInputHeldBack.load() - heldBefore == 4 && ctx.session.inputEventsSent.load() == sentBefore,
+            std::to_string(ctx.session.preloginInputHeldBack.load() - heldBefore) + " held, " +
+                std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
+      check("H6 (PC): ...no notice yet (the role was not known), and the host received none of them",
+            !ctx.session.preloginHeldBackNoticed.load() && host.Count("dropped non-navigation key") == 0 &&
+                host.Count("first pong delayed 3000 ms") == 1);
+      // The bar shows itself for 2.5 s on entry, then collapses; this wait outlasted that. Shown again, as
+      // on entry, for the steps that click it.
+      session_toolbar_set_visible(true);
+    }
   }
 
   const auto pump_until = [&](const std::function<bool()>& done, int budgetMs) {
@@ -828,6 +888,13 @@ int wmain(int argc, wchar_t** argv) {
     }
   };
   HWND bar = nullptr;
+  // An operator thread works the windows of THIS thread (bring_front attaches to its input and moves the
+  // focus): this thread keeps pumping until the operator has finished, then joins -- never a bare join,
+  // which deadlocked the run when the operator was still in bring_front (r7: 2 of 12 sweep runs hung).
+  const auto join_pumping = [&](std::thread& t) {
+    pump_until([&] { return WaitForSingleObject(static_cast<HANDLE>(t.native_handle()), 0) == WAIT_OBJECT_0; }, 120000);
+    t.join();
+  };
   // The x of the toolbar item with this id, found by pressing along the bar (the toolbar logs the id
   // under the press). A press there and a release elsewhere fires nothing, so the sweep is inert.
   const auto find_item = [&](const std::string& id) {
@@ -943,7 +1010,7 @@ int wmain(int argc, wchar_t** argv) {
     PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
     PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
     pump_until([&] { return !boxText.empty(); }, 25000);
-    op.join();
+    join_pumping(op);
     check("the click opened the product's password window", run.sawPrompt, utf8(run.promptTitle));
     check("...titled \"GNLink — Windows 로그인\"", run.promptTitle == kPreloginPromptTitle);
     check("...took every character typed into it", run.typedAll);
@@ -985,7 +1052,7 @@ int wmain(int argc, wchar_t** argv) {
     pump_until([&] { return run2.sawPrompt || !box2.empty(); }, 8000);
     SetKeyboardState(keys);
     pump_until([&] { return !box2.empty(); }, 25000);
-    op2.join();
+    join_pumping(op2);
     check("Ctrl+Alt+U opened the \"Windows 로그인\" window (not the unlock prompt)", run2.sawPrompt && run2.promptTitle == kPreloginPromptTitle,
           utf8(run2.promptTitle));
     check("THE SECRET ARRIVED AGAIN, BYTE FOR BYTE", Targets::text(targets.edit) == kSecret, hexw(Targets::text(targets.edit)));
@@ -1012,7 +1079,7 @@ int wmain(int argc, wchar_t** argv) {
     PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
     PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
     pump_until([&] { return !box3.empty(); }, 30000);
-    op3.join();
+    join_pumping(op3);
     (void)box3Captured;
     check("the prompt was used", run3.sawPrompt && run3.typedAll);
     check("NEGATIVE: NOTHING reached the test window", Targets::text(targets.edit).empty(), hexw(Targets::text(targets.edit)));
@@ -1021,6 +1088,43 @@ int wmain(int argc, wchar_t** argv) {
     check("the result says it was not typed (the target was not the logon screen)",
           box3.find(L"입력하지 않았습니다") != std::wstring::npos, utf8(box3));
     check("the host's result line: stage 1 (RejectedPolicy)", host.Count(" stage=1 win32=0") == 1);
+
+    // ---- 3b. r7 H5: the right window, the wrong field -- the focus is in its user-name box
+    std::cout << "\n--- 3b. r7 H5 NEGATIVE: the target window is in front but its user-name field has the focus ---\n";
+    Sleep(600);
+    targets.Clear();
+    targets.FocusOn(targets.userEdit);
+    OperatorRun run3b;
+    std::wstring box3b;
+    bool userFocused = false;
+    std::thread op3b([&] {
+      operate_prompt(&run3b, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.main);
+      {
+        const DWORD wt = GetWindowThreadProcessId(targets.main, nullptr);
+        GUITHREADINFO gi{sizeof(gi)};
+        userFocused = GetGUIThreadInfo(wt, &gi) && gi.hwndFocus == targets.userEdit;
+      }
+      HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
+      if (box) {
+        box3b = result_box_text(box);
+        save_capture(box, L"result_wrong_field");
+        close_result(box);
+      }
+    });
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
+    pump_until([&] { return !box3b.empty(); }, 30000);
+    op3b.join();
+    targets.FocusOn(targets.edit);
+    check("the prompt was used", run3b.sawPrompt && run3b.typedAll);
+    check("...the target window was in front with its USER-NAME field focused", userFocused);
+    check("H5 NEGATIVE: NOTHING was typed into the user-name field", Targets::text(targets.userEdit).empty(),
+          hexw(Targets::text(targets.userEdit)));
+    check("H5 NEGATIVE: ...nor into the password field", Targets::text(targets.edit).empty(), hexw(Targets::text(targets.edit)));
+    check("...the result says it was not typed", box3b.find(L"입력하지 않았습니다") != std::wstring::npos, utf8(box3b));
+    check("...the host's result line: stage 1 (RejectedPolicy), a second time", host.Count(" stage=1 win32=0") == 2);
 
 
     // ---- 4. r5 G8: typing at the logon screen goes nowhere -- it is not even sent
@@ -1049,7 +1153,7 @@ int wmain(int argc, wchar_t** argv) {
         SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
       }
       pump_until([&] { return !notice.empty(); }, 10000);
-      op4.join();
+      join_pumping(op4);
       SendMessageW(viewerWindow, WM_KEYDOWN, VK_TAB, 1);  // a navigation key still goes
       SendMessageW(viewerWindow, WM_KEYUP, VK_TAB, 0xC0000001);
       pump_until([] { return false; }, 1500);
@@ -1095,7 +1199,7 @@ int wmain(int argc, wchar_t** argv) {
         PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(rx, (rc.bottom - rc.top) / 2));
       }
       pump_until([&] { return !answer.empty(); }, 20000);
-      op5.join();
+      join_pumping(op5);
       // The host delegates to its service; this run's test pipe has no server, so the service cannot be
       // reached: Failed (ERROR_SERVICE_NOT_ACTIVE). Nothing can restart this PC (and the host's token
       // cannot either).
@@ -1142,7 +1246,7 @@ int wmain(int argc, wchar_t** argv) {
     std::cout << "    [step] prompt done\n";
     // Pumped while the operator moves the focus: deactivating the viewer is a message to THIS thread.
     pump_until([&] { return opDone.load(); }, 10000);
-    op.join();
+    join_pumping(op);
     std::cout << "    [step] operator done\n";
     check("the password was typed into the prompt and sent", run.sawPrompt && run.typedAll);
     Sleep(1500);  // the sealed request is at the host, waiting (no pumping: the viewer is about to go)
@@ -1193,7 +1297,7 @@ int wmain(int argc, wchar_t** argv) {
     pump_until([&] { return run.sawPrompt; }, 8000);
     SetKeyboardState(keys);
     pump_until([] { return false; }, 1000);
-    op.join();
+    join_pumping(op);
     check("Ctrl+Alt+U opened the EXISTING unlock prompt (GNLinkUnlockPrompt), as before", run.sawPrompt,
           utf8(run.promptTitle));
     check("NEGATIVE: no \"Windows 로그인\" window exists", FindWindowW(kPreloginPromptClass, nullptr) == nullptr);
@@ -1219,7 +1323,7 @@ int wmain(int argc, wchar_t** argv) {
     });
     ctx.session.preloginCredRequested.store(true);
     pump_until([&] { return !box.empty(); }, 12000);
-    op2.join();
+    join_pumping(op2);
     check("...is answered locally: \"not at the logon screen\"", box.find(L"로그인 화면 상태가 아니") != std::wstring::npos, utf8(box));
     check("NEGATIVE: the prelogin path reached the host 0 times", host.Count("[native-video-host][prelogin-cred]") == 0);
     check("...and the queued password is gone from the viewer", ctx.session.preloginCredPassword.empty());
@@ -1239,7 +1343,7 @@ int wmain(int argc, wchar_t** argv) {
     // logon screen -- not "logged in": which account, and its desktop, it has not seen (that is G).
     ctx.session.preloginInjectedAtUs.store(qpc_now_us());
     pump_until([&] { return !logon.empty(); }, 12000);
-    op3.join();
+    join_pumping(op3);
     check("A POSTED \"left the logon screen\" WINDOW, DIFFERENT FROM \"typed\", that does not claim a login",
           logon.find(L"로그인 화면을 벗어났습니다") != std::wstring::npos && logon.find(L"입력했습니다") == std::wstring::npos &&
               logon.find(L"로그인되었습니다") == std::wstring::npos,

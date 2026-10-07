@@ -141,11 +141,17 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       mailbox(mailbox),
       clipboard(clipboard) {}
 
-void ControlSessionServer::Serve(ControlLink& link) {
+void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthenticated) {
   // Which session this conversation belongs to. Checked again at the bottom before touching any
   // shared stream state, so a session that ends after its successor has started cannot turn the
   // successor's stream off. (Ledger H-28.)
   const uint64_t servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (r7 H6): the first pong of this conversation is answered late
+  // (GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS, at most 5 s) so a test can type while the viewer does not
+  // know yet what this host is. Nothing else changes.
+  bool firstPongDelayed = false;
+#endif
   // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
   clientSession.injectedInput.BeginServe(servedEpoch);
   // A new session starts with the stream on, exactly like the first client of a fresh
@@ -460,6 +466,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlPingMessage ping{};
       ping.header = header;
       if (!link.Read(&ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      if (!firstPongDelayed) {
+        firstPongDelayed = true;
+        wchar_t v[16] = {};
+        if (GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS", v, 16) > 0) {
+          const DWORD ms = static_cast<DWORD>(_wtoi(v));
+          std::cout << "[native-video-host][test-seam] first pong delayed " << ms << " ms\n";
+          Sleep(ms > 5000 ? 5000 : ms);
+        }
+      }
+#endif
       ControlPongMessage pong{};
       pong.header.magic = remote60::native_poc::kMagic;
       pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
@@ -633,8 +650,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // the session epoch must still be the one this Serve began with -- a superseded/stale link cannot
       // borrow a current auth. (The full per-link auth flag threaded from ingress, and closing the direct
       // TCP/LAN listener in prelogin, are the remaining S3 depth.)
+      // r7 H4: and THIS link must be the authenticated one -- a separate TCP link borrows nothing.
       auto reboot_authorized = [&]() {
-        return clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
+        return linkDirectoryAuthenticated && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
                clientSession.epoch.load(std::memory_order_acquire) == servedEpoch;
       };
       const bool authorized = reboot_authorized();

@@ -101,9 +101,10 @@ struct World {
 
 const std::wstring kPath = L"C:\\ProgramData\\GNLink\\credential\\machine.cred";
 
-pl::AdminRequest enable_request() {
+pl::AdminRequest enable_request(uint64_t expectedFloor = 0) {
   pl::AdminRequest r;
   r.op = pl::AdminOp::Enable;
+  r.expectedFloor = expectedFloor;  // r7 H2: the floor the requester read (Query) before asking
   r.directoryUrl = "https://gnlink.example:8443";
   r.accountId = "host-user";
   r.hostId = "h-1234";
@@ -208,7 +209,7 @@ int main() {
     World w;
     w.floor = 5;
     pl::AdminPrimitives p = w.primitives();
-    const pl::AdminReply on = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    const pl::AdminReply on = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(5)), true, p);
     const auto it = w.files.find(kPath);
     check("on: Ok and the service now says it is on", on.status == pl::AdminStatus::Ok && on.enabled);
     check("...the record is written by the service: enabled, above the floor, this machine, the server's URL",
@@ -221,7 +222,7 @@ int main() {
               dc.hostId == "h-1234" && dc.hostToken == "token-abcdef");
     check("...the start type was remembered (DEMAND) and raised to AUTO", w.haveRemembered && w.remembered == 3 && w.startType == 2);
     const pl::MachineRecord before = it->second;
-    const pl::AdminReply again = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    const pl::AdminReply again = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(5)), true, p);
     check("a second on keeps the first remembered start type (not AUTO)", again.status == pl::AdminStatus::Ok && w.remembered == 3);
     pl::AdminRequest off;
     off.op = pl::AdminOp::Disable;
@@ -235,6 +236,34 @@ int main() {
     pl::AdminRequest q;
     q.op = pl::AdminOp::Query;
     check("...and a query says off", !pl::HandleAdminRequest(pl::EncodeAdminRequest(q), true, p).enabled);
+  }
+  {
+    // r7 H2: an Enable decided before a sign-out's Disable arrives after it. The old owner's request names the
+    // floor it read; the Disable raised the floor; the late Enable is refused and the feature stays off.
+    World w;
+    pl::AdminPrimitives p = w.primitives();
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply seen = pl::HandleAdminRequest(pl::EncodeAdminRequest(q), true, p);  // the old owner reads
+    pl::AdminRequest off;
+    off.op = pl::AdminOp::Disable;
+    pl::HandleAdminRequest(pl::EncodeAdminRequest(off), true, p);  // sign out gets in first
+    const uint64_t floorAfterOff = w.floor;
+    const pl::AdminReply late = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(seen.ownerGeneration)), true, p);
+    check("H2: a late Enable decided before a Disable: Stale, not made the newest",
+          late.status == pl::AdminStatus::Stale && !late.enabled, std::to_string(static_cast<int>(late.status)));
+    check("...nothing written, the feature stays off, the start type as it was, the floor unchanged",
+          w.files.empty() && !p.featureEnabled() && w.startType == 3 && w.floor == floorAfterOff);
+    pl::AdminReply back;
+    check("...Stale round-trips through the reply encoding",
+          pl::DecodeAdminReply(pl::EncodeAdminReply(late), &back) && back.status == pl::AdminStatus::Stale &&
+              back.ownerGeneration == floorAfterOff);
+    const pl::AdminReply fresh = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(late.ownerGeneration)), true, p);
+    check("...a new owner who read the new floor may turn it on", fresh.status == pl::AdminStatus::Ok && fresh.enabled);
+    pl::AdminRequest rt = enable_request(42);
+    pl::AdminRequest rtBack;
+    check("...the expected floor round-trips in the Enable request",
+          pl::DecodeAdminRequest(pl::EncodeAdminRequest(rt), &rtBack) && rtBack.expectedFloor == 42);
   }
   {
     World w;

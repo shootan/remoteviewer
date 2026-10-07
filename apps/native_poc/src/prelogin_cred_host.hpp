@@ -80,6 +80,9 @@ class PreloginCredReceiver {
   void Finish(uint32_t requestId, UnlockStage stage, uint32_t win32);  // under mu_
 
   std::mutex mu_;
+  // r7 H5: the last look (still valid? the same target?) and the typing are one step under this lock, and
+  // EndSession takes it before it cancels -- so once EndSession has returned, no typing can begin.
+  std::mutex commitMu_;
   std::thread worker_;
   bool inflight_ = false;
   uint64_t inflightCookie_ = 0;
@@ -106,9 +109,11 @@ class PreloginCredReceiver {
 
 // The product's typing, target and environment: one SendInput of Unicode units; the target is the
 // foreground window of %SystemRoot%\System32\LogonUI.exe running as LocalSystem in this worker's session
-// while the input desktop is Winlogon (a test build of the host, REMOTE60_STREAM_TEST_SEAM, may name a
-// test window's title instead -- GNLINK_STREAM_TEST_CRED_TARGET_TITLE); the environment is the console
-// session and the input desktop's name. And the host id the challenge carries.
+// while the input desktop is Winlogon -- AND (r7 H5) the element that has the keyboard focus is a password
+// field of that same process (UI Automation IsPassword): a user-name box of the same window is not a
+// target. (A test build of the host, REMOTE60_STREAM_TEST_SEAM, may name a test window's title instead of
+// LogonUI -- GNLINK_STREAM_TEST_CRED_TARGET_TITLE; the password-field rule is the same.) The environment
+// is the console session and the input desktop's name. And the host id the challenge carries.
 PreloginCredReceiver::InjectFn ProductCredInject();
 PreloginCredReceiver::TargetFn ProductCredTarget();
 PreloginCredReceiver::EnvironmentFn ProductCredEnvironment();

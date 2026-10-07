@@ -34,6 +34,10 @@
 #include <shlwapi.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -1737,75 +1741,160 @@ void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply
   SetWindowTextW(g.preloginStatus, text.c_str());
 }
 
-// r5 G4: the request runs on its own thread -- a pipe that does not answer cannot hold the window --
-// and its answer comes back as kPreloginReplyMessage. The checkbox waits disabled meanwhile.
+// r5 G4 + r7 H2: requests to the service go one at a time, in the order they were made, on one worker
+// thread (a pipe that does not answer cannot hold the window). Each carries the owner epoch it was made
+// under: signing out / changing account starts a new epoch, so an Enable still waiting in the queue is
+// dropped unsent, and an answer that comes back for an older epoch does not touch the window. An Enable
+// that is already on its way is fenced by the service itself: it carries the floor the Host just read,
+// and a Disable that got in first has raised it (AdminStatus::Stale). Answers come back as
+// kPreloginReplyMessage.
 struct PreloginReplyResult {
   remote60::native_poc::prelogin::AdminReply reply;
   bool asked = false;  // the user changed it (not a refresh)
   bool want = false;
+  bool withdrawal = false;  // the Disable of a sign-out / account change
+  uint64_t epoch = 0;
 };
+struct PreloginJob {
+  remote60::native_poc::prelogin::AdminRequest r;
+  bool asked = false;
+  bool withdrawal = false;
+  uint64_t epoch = 0;
+};
+std::mutex gPreloginQueueMu;
+std::condition_variable gPreloginQueueCv;
+std::deque<PreloginJob> gPreloginQueue;
+int gPreloginInFlight = 0;  // jobs taken and not yet answered (under gPreloginQueueMu)
+std::atomic<uint64_t> gPreloginOwnerEpoch{1};
 std::atomic<bool> gPreloginBusy{false};
 
-void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool asked) {
-  if (gPreloginBusy.exchange(true)) return;  // one at a time; the one out will refresh the box
-  EnableWindow(g.preloginCheck, FALSE);
-  if (asked) SetWindowTextW(g.preloginStatus, L"보안 입력 서비스에 요청하는 중...");
-  std::thread([r = std::move(r), asked]() mutable {
-    auto* result = new PreloginReplyResult;
-    result->asked = asked;
-    result->want = r.op == remote60::native_poc::prelogin::AdminOp::Enable;
-    result->reply = prelogin_admin_call(r);
-    if (!r.hostToken.empty()) SecureZeroMemory(&r.hostToken[0], r.hostToken.size());
-    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) {
-      delete result;
-      gPreloginBusy.store(false);
+void prelogin_worker_loop() {
+  namespace pl = remote60::native_poc::prelogin;
+  for (;;) {
+    PreloginJob job;
+    {
+      std::unique_lock<std::mutex> lk(gPreloginQueueMu);
+      gPreloginQueueCv.wait(lk, [] { return !gPreloginQueue.empty(); });
+      job = std::move(gPreloginQueue.front());
+      gPreloginQueue.pop_front();
+      ++gPreloginInFlight;
     }
-  }).detach();
+    auto* result = new PreloginReplyResult;
+    result->asked = job.asked;
+    result->want = job.r.op == pl::AdminOp::Enable;
+    result->withdrawal = job.withdrawal;
+    result->epoch = job.epoch;
+    if (job.r.op == pl::AdminOp::Enable && job.epoch != gPreloginOwnerEpoch.load()) {
+      // Made for an owner who has since signed out: never sent.
+      result->reply.status = pl::AdminStatus::Stale;
+    } else {
+      if (job.r.op == pl::AdminOp::Enable) {
+        // The floor as it is now: the service takes this Enable only if nothing raised it since.
+        pl::AdminRequest q;
+        q.op = pl::AdminOp::Query;
+        const pl::AdminReply now = prelogin_admin_call(q);
+        if (now.status != pl::AdminStatus::Ok) {
+          result->reply = now;
+        } else {
+          job.r.expectedFloor = now.ownerGeneration;
+          result->reply = prelogin_admin_call(job.r);
+        }
+      } else {
+        result->reply = prelogin_admin_call(job.r);
+      }
+    }
+    if (!job.r.hostToken.empty()) SecureZeroMemory(&job.r.hostToken[0], job.r.hostToken.size());
+    if (job.withdrawal) {
+      // Said once it is known how it ended -- not when it was asked for.
+      append_host_app_log(std::string("[host-app] prelogin access withdrawal: status=") +
+                          std::to_string(static_cast<int>(result->reply.status)) +
+                          " enabled=" + (result->reply.enabled ? "1" : "0") + " win32=" + std::to_string(result->reply.win32));
+    }
+    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    {
+      std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+      --gPreloginInFlight;
+    }
+    gPreloginQueueCv.notify_all();
+  }
+}
+
+void prelogin_enqueue(PreloginJob job) {
+  static std::once_flag started;
+  std::call_once(started, [] { std::thread(prelogin_worker_loop).detach(); });
+  gPreloginBusy.store(true);
+  EnableWindow(g.preloginCheck, FALSE);
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    gPreloginQueue.push_back(std::move(job));
+  }
+  gPreloginQueueCv.notify_all();
+}
+
+// Closing the window waits (bounded) for what is queued -- above all a withdrawal -- to be answered.
+bool prelogin_drain(uint32_t ms) {
+  std::unique_lock<std::mutex> lk(gPreloginQueueMu);
+  return gPreloginQueueCv.wait_for(lk, std::chrono::milliseconds(ms),
+                                   [] { return gPreloginQueue.empty() && gPreloginInFlight == 0; });
+}
+
+void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool asked) {
+  if (asked) SetWindowTextW(g.preloginStatus, L"보안 입력 서비스에 요청하는 중...");
+  PreloginJob job;
+  job.r = std::move(r);
+  job.asked = asked;
+  job.epoch = gPreloginOwnerEpoch.load();
+  prelogin_enqueue(std::move(job));
 }
 
 void withdraw_prelogin_access(const char* why) {
   namespace pl = remote60::native_poc::prelogin;
-  append_host_app_log(std::string("[host-app] prelogin access withdrawn on ") + why);
-  pl::AdminRequest r;
-  r.op = pl::AdminOp::Disable;
-  // Not gated on a request already out: this one must go. Its answer updates the box like any other.
-  gPreloginBusy.store(true);
-  EnableWindow(g.preloginCheck, FALSE);
-  std::thread([r] {
-    auto* result = new PreloginReplyResult;
-    result->asked = true;
-    result->want = false;
-    result->reply = prelogin_admin_call(r);
-    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) {
-      delete result;
-      gPreloginBusy.store(false);
-    }
-  }).detach();
+  // A new owner epoch first: an Enable of the old owner still in the queue is now never sent.
+  const uint64_t epoch = gPreloginOwnerEpoch.fetch_add(1) + 1;
+  append_host_app_log(std::string("[host-app] prelogin access withdrawal requested on ") + why);
+  PreloginJob job;
+  job.r.op = pl::AdminOp::Disable;
+  job.asked = true;
+  job.withdrawal = true;
+  job.epoch = epoch;
+  prelogin_enqueue(std::move(job));
 }
 
 void on_prelogin_reply(PreloginReplyResult* result) {
   std::unique_ptr<PreloginReplyResult> owned(result);
-  if (owned->asked) {
+  namespace pl = remote60::native_poc::prelogin;
+  bool idle = false;
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    idle = gPreloginQueue.empty() && gPreloginInFlight == 0;
+  }
+  // An answer made for an owner who has since signed out says nothing about the window now.
+  const bool current = owned->epoch == gPreloginOwnerEpoch.load();
+  if (owned->asked && !owned->withdrawal) {
     append_host_app_log(std::string("[host-app] prelogin access ") + (owned->want ? "on" : "off") +
                         " requested: status=" + std::to_string(static_cast<int>(owned->reply.status)) +
-                        " enabled=" + (owned->reply.enabled ? "1" : "0") + " win32=" + std::to_string(owned->reply.win32));
+                        " enabled=" + (owned->reply.enabled ? "1" : "0") + " win32=" + std::to_string(owned->reply.win32) +
+                        (current ? "" : " (an earlier owner's; not shown)"));
   }
-  show_prelogin_reply(owned->reply, owned->asked);
-  // r6 V3: who starts GNLink at logon follows the service's answer, never a guess.
-  namespace pl = remote60::native_poc::prelogin;
-  if (owned->reply.status == pl::AdminStatus::Ok) {
-    if (pl::PreloginServiceOwnsUserStartup(owned->reply.enabled, /*serviceEnrollmentConfirmed=*/owned->reply.enabled)) {
-      prelogin_take_over_autostart();
-    } else if (owned->asked && !owned->want) {
-      prelogin_give_back_autostart();
+  if (current) {
+    show_prelogin_reply(owned->reply, owned->asked);
+    // r6 V3: who starts GNLink at logon follows the service's answer, never a guess.
+    if (owned->reply.status == pl::AdminStatus::Ok) {
+      if (pl::PreloginServiceOwnsUserStartup(owned->reply.enabled, /*serviceEnrollmentConfirmed=*/owned->reply.enabled)) {
+        prelogin_take_over_autostart();
+      } else if (owned->asked && !owned->want) {
+        prelogin_give_back_autostart();
+      }
+      // While the service starts it, "Start with Windows" is on and not the user's to switch.
+      SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
+                   owned->reply.enabled || autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+      EnableWindow(g.startWithWindowsCheck, !owned->reply.enabled);
     }
-    // While the service starts it, "Start with Windows" is on and not the user's to switch.
-    SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
-                 owned->reply.enabled || autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
-    EnableWindow(g.startWithWindowsCheck, !owned->reply.enabled);
   }
-  EnableWindow(g.preloginCheck, TRUE);
-  gPreloginBusy.store(false);
+  if (idle) {
+    EnableWindow(g.preloginCheck, TRUE);
+    gPreloginBusy.store(false);
+  }
 }
 
 /** What the service says now -- the checkbox shows the service's state, never a guess. */
@@ -2330,6 +2419,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       set_status(L"작업 중 오류가 발생했습니다. 다시 시도해 주세요.");
       return 0;
     case WM_DESTROY: {
+      // r7 H2: a withdrawal (sign-out) still on its way is waited for, not abandoned with the window.
+      if (!prelogin_drain(8000)) append_host_app_log("[host-app] prelogin request still pending at close (8 s)");
       { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
       append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
                           std::to_string(GetCurrentProcessId()));

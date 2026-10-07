@@ -28,6 +28,7 @@
 
 // Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
 #include "prelogin_child_launch.hpp"
+#include "prelogin_user_host_launch.hpp"
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -1057,29 +1058,6 @@ std::wstring make_launch_nonce() {
   return buf;
 }
 
-// Build the user's own environment block (CreateEnvironmentBlock for the launch token's profile -- G9:
-// NOT the SYSTEM service's inherited environment) with the readiness nonce injected. On failure the block
-// still carries at least the nonce so the ready binding holds.
-std::vector<wchar_t> build_user_env_with_nonce(HANDLE token, const std::wstring& nonce) {
-  std::vector<wchar_t> out;
-  const std::wstring var = L"REMOTE60_PRELOGIN_READY_NONCE=" + nonce;
-  LPVOID penv = nullptr;
-  if (CreateEnvironmentBlock(&penv, token, FALSE) && penv) {
-    const wchar_t* p = static_cast<const wchar_t*>(penv);
-    while (*p) {
-      const size_t len = wcslen(p);
-      if (_wcsnicmp(p, L"REMOTE60_PRELOGIN_READY_NONCE=", 29) != 0)
-        out.insert(out.end(), p, p + len + 1);  // copy entry incl. its null
-      p += len + 1;
-    }
-    DestroyEnvironmentBlock(penv);
-  }
-  out.insert(out.end(), var.begin(), var.end());
-  out.push_back(L'\0');  // terminate our entry
-  out.push_back(L'\0');  // double-null terminate the block
-  return out;
-}
-
 // Launch the logged-on user's own Host with the verified user/linked-Full token (the service-owned
 // handoff that replaces the elevated HKCU Run). The token matrix is resolved by the console probe
 // classifiers; here we obtain the primary token and, for a Limited token, its linked Full.
@@ -1125,18 +1103,22 @@ void launch_user_host(DWORD consoleSession) {
   // A fresh per-launch nonce binds the ready event to THIS host. Clear any prior/foreign signal first.
   const std::wstring nonce = make_launch_nonce();
   ResetUserHostReady(nonce);
-  std::vector<wchar_t> env = build_user_env_with_nonce(launchToken, nonce);
+  // r7 H1: the user's own environment with this launch's nonce -- or no launch at all (a Host without its
+  // nonce could never complete the handoff). The start itself is the one call the H1 test also makes.
+  std::vector<wchar_t> env;
+  DWORD envErr = 0;
+  if (!remote60::native_poc::prelogin::BuildUserHostEnvironment(launchToken, nonce, &env, &envErr)) {
+    diag("prelogin: handoff aborted -- the user's environment could not be built err=%lu", envErr);
+    if (linked) CloseHandle(linked);
+    CloseHandle(userToken);
+    return;
+  }
   const std::wstring exe = sibling_exe_path(L"GNLinkHost.exe");
-  wchar_t command[32768]{};
-  _snwprintf_s(command, _TRUNCATE, L"\"%s\" --tray", exe.c_str());
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
-  std::wstring desktopSpec = L"winsta0\\Default";
-  startup.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION proc{};
-  const BOOL created = CreateProcessAsUserW(launchToken, nullptr, command, nullptr, nullptr, FALSE,
-                                            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
-                                            nullptr, env.data(), &startup, &proc);
+  DWORD startErr = 0;
+  const bool created =
+      remote60::native_poc::prelogin::StartUserHostSuspended(launchToken, exe, env, L"winsta0\\Default", &proc, &startErr);
+  if (!created) diag("prelogin: user host CreateProcessAsUser failed err=%lu", startErr);
   bool adopted = false;
   if (created) {
     // G9: same Job gate as the SYSTEM worker -- never resume a host we could not bind to the Job.

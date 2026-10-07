@@ -92,12 +92,27 @@ struct World {
   bool haveRemembered = false;
   uint32_t remembered = 0;
   int calls = 0;
+  // r7 H2: the order the service handled Enables (E) and Disables (D) in, and a stall: armed, the next
+  // floor read waits until released -- the service is busy with that request, later ones queue at the pipe.
+  std::string order;
+  std::atomic<bool> stallArmed{false};
+  std::atomic<bool> stalled{false};
+  HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   pl::AdminPrimitives primitives() {
     pl::AdminPrimitives p;
     p.recordPath = [this] { std::lock_guard<std::mutex> l(mu); ++calls; return kPath; };
-    p.machineId = [this] { std::lock_guard<std::mutex> l(mu); ++calls; return std::string("ui-test-machine"); };
-    p.readFloor = [this](uint64_t* out) { std::lock_guard<std::mutex> l(mu); ++calls; *out = floor; return true; };
-    p.raiseFloor = [this](uint64_t f) { std::lock_guard<std::mutex> l(mu); ++calls; if (f > floor) floor = f; return true; };
+    p.machineId = [this] { std::lock_guard<std::mutex> l(mu); ++calls; order += 'E'; return std::string("ui-test-machine"); };
+    p.readFloor = [this](uint64_t* out) {
+      if (stallArmed.exchange(false)) {
+        stalled = true;
+        WaitForSingleObject(release, 15000);
+      }
+      std::lock_guard<std::mutex> l(mu);
+      ++calls;
+      *out = floor;
+      return true;
+    };
+    p.raiseFloor = [this](uint64_t f) { std::lock_guard<std::mutex> l(mu); ++calls; order += 'D'; if (f > floor) floor = f; return true; };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       std::lock_guard<std::mutex> l(mu);
       ++calls;
@@ -462,29 +477,58 @@ int wmain() {
           std::to_string(world.calls - callsBefore));
     check("screenshot: refused", save_window_bmp(hwnd, (shots / L"prelogin_toggle_3_refused.bmp").wstring()));
 
-    // r5 G6: signing out of GNLink withdraws the machine's pre-login access -- it was granted with this
-    // account's credential.
+    // r5 G6 + r7 H2: signing out of GNLink withdraws the machine's pre-login access -- also when the user
+    // had just asked for it and that request has not reached the service yet. The service is kept busy
+    // (another client's request stalls in it), "on" is clicked, then "Sign out": both wait at the pipe.
+    // When the service is free, the Disable must be the last word: before r7 the two requests raced on
+    // their own threads, and an Enable that got in after the Disable turned access back on.
     server.stop();
     server.start(&world, pipe, [](void*) { return true; });
-    check("on once more (for the sign-out case)", Ui::toggle(box));
-    const bool onAgain = wait_until([&] { std::lock_guard<std::mutex> l(world.mu); return world.files.count(kPath) == 1; }, 8000);
-    check("...the record is there", onAgain);
     uint64_t floorBefore = 0;
     {
       std::lock_guard<std::mutex> l(world.mu);
       floorBefore = world.floor;
+      world.order.clear();
     }
-    wait_until([&] { return Ui::name_of(status).find(L"켜짐") == 0; }, 5000);
+    ResetEvent(world.release);
+    world.stallArmed = true;
+    std::thread busy([&] {
+      pl::AdminRequest q;
+      q.op = pl::AdminOp::Query;
+      pl::SendPreloginAdminRequest(q, 5000, pipe.c_str(), [](void*) { return true; });
+    });
+    const bool serviceBusy = wait_until([&] { return world.stalled.load(); }, 5000);
+    check("H2: the service is busy with another request (stalled)", serviceBusy);
+    check("H2: \"on\" is clicked while it is busy", Ui::toggle(box));
+    Sleep(200);
     IUIAutomationElement* signOut = ui.find_by_id(kIdSignOut);
-    check("G6: \"Sign out\" is pressed through UI Automation", signOut && Ui::invoke(signOut));
+    check("G6/H2: ...and \"Sign out\" is pressed right after, through UI Automation", signOut && Ui::invoke(signOut));
     if (signOut) signOut->Release();
-    const bool withdrawn = wait_until([&] { std::lock_guard<std::mutex> l(world.mu); return world.files.empty(); }, 8000);
+    Sleep(100);
+    check("screenshot: signed out", save_window_bmp(hwnd, (shots / L"prelogin_toggle_4_signed_out.bmp").wstring()));
+    // r7 H2: and the app is closed (tray Exit) while both requests still wait -- closing must not abandon
+    // the sign-out's withdrawal. (Before r7 they died with the process: the service never heard of it.)
+    PostMessageW(hwnd, WM_COMMAND, 2005 /* host_app_main.cpp IdMenuExit */, 0);
+    Sleep(200);
+    SetEvent(world.release);
+    busy.join();
+    const bool exited = WaitForSingleObject(pi.hProcess, 15000) == WAIT_OBJECT_0;
+    check("H2: GNLinkHost closed (tray Exit)", exited);
+    const bool settled = wait_until([&] {
+      std::lock_guard<std::mutex> l(world.mu);
+      return world.order.find('D') != std::string::npos;
+    }, 8000);
+    Sleep(1500);  // anything still on its way arrives
     {
       std::lock_guard<std::mutex> l(world.mu);
-      check("G6: ...and the service withdrew pre-login access: the record is gone, the floor raised past it",
-            withdrawn && world.floor > floorBefore && world.startType == 3, std::to_string(world.floor));
+      const auto it = world.files.find(kPath);
+      const bool on = it != world.files.end() && it->second.enabled && it->second.ownerGeneration >= world.floor;
+      check("H2: when the service is free, the sign-out's Disable is the last word: access is OFF",
+            settled && !on && world.files.empty(), "service order " + world.order);
+      check("H2: ...no Enable was handled after the Disable", world.order.find("DE") == std::string::npos, world.order);
+      check("G6: ...the floor raised past what was there, the start type put back",
+            world.floor > floorBefore && world.startType == 3, std::to_string(world.floor));
     }
-    check("screenshot: signed out", save_window_bmp(hwnd, (shots / L"prelogin_toggle_4_signed_out.bmp").wstring()));
   }
   if (box) box->Release();
   if (status) status->Release();

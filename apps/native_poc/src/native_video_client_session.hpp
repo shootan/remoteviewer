@@ -249,6 +249,7 @@ class ClientSessionController {
   std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint32_t> hostCaptureFlags_{0};
   std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
+  std::atomic<bool> hostRoleKnown_{false};          // r7 H6: a pong of this session has said what the host is
   // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
   std::mutex rebootMu_;
   uint32_t rebootPendingId_ = 0;

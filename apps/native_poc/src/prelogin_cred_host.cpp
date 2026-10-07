@@ -4,6 +4,7 @@
 #include "prelogin_cred_host.hpp"
 
 #include <windows.h>
+#include <UIAutomation.h>
 
 #include <cstring>
 #include <string>
@@ -158,10 +159,14 @@ void PreloginCredReceiver::Deliver(uint16_t* units, uint16_t count, uint32_t req
   bool typed = false;
   if (dropped != UnlockStage::Injected) {
     stage = dropped;
-  } else if (target != 0 && still_valid()) {
-    // The same target, taken again at the last moment; the whole password in one SendInput; then once
-    // more. A target that moved before is not typed into; one that moved during is a failure, not "typed".
-    if ((target_ ? target_() : 0) == target) {
+  } else if (target != 0) {
+    // r7 H5: one step, under commitMu_ (EndSession waits for it, then cancels): still valid -> the same
+    // target taken again -> the whole password in one SendInput -> once more. A request cancelled before
+    // this step is never typed; one that is typing finishes before the cancel returns.
+    std::lock_guard<std::mutex> commit(commitMu_);
+    if (!still_valid()) {
+      stage = dropped;
+    } else if ((target_ ? target_() : 0) == target) {
       typed = inject_ && inject_(units, count, &err);
       if (!typed) {
         stage = UnlockStage::InternalError;
@@ -172,8 +177,6 @@ void PreloginCredReceiver::Deliver(uint16_t* units, uint16_t count, uint32_t req
         stage = UnlockStage::Injected;
       }
     }
-  } else if (dropped != UnlockStage::Injected) {
-    stage = dropped;
   }
   su::SecureZero(units, su::kMaxPasswordUtf16 * sizeof(uint16_t));
   delete[] units;
@@ -184,6 +187,7 @@ void PreloginCredReceiver::Deliver(uint16_t* units, uint16_t count, uint32_t req
 }
 
 void PreloginCredReceiver::EndSession(uint64_t cookie) {
+  std::lock_guard<std::mutex> commit(commitMu_);  // r7 H5: not while a typing is being committed
   std::lock_guard<std::mutex> lock(mu_);
   if (inflight_ && inflightCookie_ == cookie) cancel_.store(true, std::memory_order_release);
   if (haveChallenge_ && challengeCookie_ == cookie) haveChallenge_ = false;  // its challenge dies with it
@@ -245,6 +249,26 @@ bool process_is_local_system(HANDLE proc) {
   return system;
 }
 
+// r7 H5: the element that has the keyboard focus is a password field, in process `pid`.
+bool focused_password_field_in(DWORD pid) {
+  const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  bool ok = false;
+  IUIAutomation* uia = nullptr;
+  if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) && uia) {
+    IUIAutomationElement* focused = nullptr;
+    if (SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
+      BOOL isPassword = FALSE;
+      int owner = 0;
+      ok = SUCCEEDED(focused->get_CurrentIsPassword(&isPassword)) && isPassword &&
+           SUCCEEDED(focused->get_CurrentProcessId(&owner)) && static_cast<DWORD>(owner) == pid;
+      focused->Release();
+    }
+    uia->Release();
+  }
+  if (SUCCEEDED(init)) CoUninitialize();
+  return ok;
+}
+
 uint64_t identity_of(HWND w, DWORD pid) {
   return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(w)) & 0xFFFFFFFFull) | (static_cast<uint64_t>(pid) << 32) | 1ull;
 }
@@ -262,6 +286,7 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
     wchar_t got[256] = {};
     DWORD pid = 0;
     if (!fg || GetWindowTextW(fg, got, 256) <= 0 || title != got || !GetWindowThreadProcessId(fg, &pid)) return 0;
+    if (!focused_password_field_in(pid)) return 0;  // r7 H5: the same field rule as the product
     return identity_of(fg, pid);
   };
 #else
@@ -286,7 +311,8 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
                                             TRUE) == CSTR_EQUAL;
     const bool system = image && process_is_local_system(p);
     CloseHandle(p);
-    return system ? identity_of(fg, pid) : 0;
+    // r7 H5: and the focus is in a password field of it -- not the user-name box of the same window.
+    return system && focused_password_field_in(pid) ? identity_of(fg, pid) : 0;
   };
 #endif
 }

@@ -86,6 +86,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_graphics.cpp
   src/prelogin_ready_signal.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_cred_host.cpp
   src/sealed_unlock.cpp
@@ -233,8 +234,10 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
+  src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
   src/prelogin_ready_signal.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
@@ -244,6 +247,7 @@ target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
   advapi32
   user32
+  userenv
   wtsapi32
   crypt32
   remote60_sealed_unlock
@@ -2216,6 +2220,30 @@ if(MSVC)
   target_compile_options(remote60_prelogin_worker_launch_test PRIVATE /utf-8)
 endif()
 
+# prelogin-ui r7 (H1): the service's launch of the user's GNLinkHost, made with the service's own two
+# functions on a staged copy of this test (environment + nonce + working directory).
+add_executable(remote60_prelogin_user_host_launch_test
+  src/prelogin_user_host_launch_test.cpp
+  src/prelogin_user_host_launch.cpp
+)
+target_include_directories(remote60_prelogin_user_host_launch_test PRIVATE src)
+target_link_libraries(remote60_prelogin_user_host_launch_test PRIVATE advapi32 userenv remote60_test_scratch_dir)
+
+# prelogin-ui r7 (H3): the machine record's path -- every level checked (owner + DACL, no redirect) on a
+# handle that stays open while the record is used.
+add_executable(remote60_prelogin_store_chain_test
+  src/prelogin_store_chain_test.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
+target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# prelogin-ui r7 (H6): the viewer's input gate before the role is known and at the send.
+add_executable(remote60_prelogin_input_gate_test
+  src/prelogin_input_gate_test.cpp
+)
+target_include_directories(remote60_prelogin_input_gate_test PRIVATE src)
+
 # prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" -- the product receiver with
 # its typing and target question as seams; the viewer's sealing for both purposes.
 add_executable(remote60_prelogin_cred_host_test
@@ -2224,7 +2252,7 @@ add_executable(remote60_prelogin_cred_host_test
   src/sealed_unlock.cpp
 )
 target_include_directories(remote60_prelogin_cred_host_test PRIVATE src)
-target_link_libraries(remote60_prelogin_cred_host_test PRIVATE bcrypt user32 advapi32)
+target_link_libraries(remote60_prelogin_cred_host_test PRIVATE bcrypt user32 advapi32 ole32 oleaut32)
 if(MSVC)
   target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
 endif()
@@ -2404,6 +2432,7 @@ target_include_directories(remote60_prelogin_machine_record_test PRIVATE src)
 add_executable(remote60_prelogin_machine_store_test
   src/prelogin_machine_store_test.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
 )
 target_include_directories(remote60_prelogin_machine_store_test PRIVATE src)
 target_link_libraries(remote60_prelogin_machine_store_test PRIVATE crypt32 advapi32)
@@ -2412,6 +2441,7 @@ target_link_libraries(remote60_prelogin_machine_store_test PRIVATE crypt32 advap
 add_executable(remote60_prelogin_machine_store_g5_test
   src/prelogin_machine_store_g5_test.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
 )
 target_include_directories(remote60_prelogin_machine_store_g5_test PRIVATE src)
 target_link_libraries(remote60_prelogin_machine_store_g5_test PRIVATE crypt32 advapi32)

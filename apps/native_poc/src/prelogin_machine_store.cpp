@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "fixed_directory.hpp"
+#include "prelogin_store_chain.hpp"
 
 namespace remote60::native_poc::prelogin {
 
@@ -77,41 +78,6 @@ PSECURITY_DESCRIPTOR make_protected_sd() {
   return sd;
 }
 
-// Ensure the credential directory exists with the protected DACL from the start, so the file it holds is
-// never exposed through a readable parent (Codex S1). Idempotent.
-bool ensure_protected_parent(const std::wstring& filePath, uint32_t* win32) {
-  const size_t slash = filePath.find_last_of(L"\\/");
-  if (slash == std::wstring::npos) return true;
-  const std::wstring dir = filePath.substr(0, slash);
-  PSECURITY_DESCRIPTOR sd = make_protected_sd();
-  if (!sd) { if (win32) *win32 = GetLastError(); return false; }
-  SECURITY_ATTRIBUTES sa{};
-  sa.nLength = sizeof(sa);
-  sa.lpSecurityDescriptor = sd;
-  bool ok = CreateDirectoryW(dir.c_str(), &sa) != FALSE;
-  if (!ok && GetLastError() == ERROR_ALREADY_EXISTS) {
-    // G5: a pre-existing parent is trusted ONLY if it is a real directory (not a reparse redirect) owned
-    // by SYSTEM/Administrators. A non-admin who pre-created it stays the owner (keeps WRITE_DAC), so
-    // re-asserting the DACL would NOT remove their control -- reject rather than "repair then trust".
-    if (!path_is_protected_object(dir, nullptr)) {
-      if (win32) *win32 = ERROR_ACCESS_DENIED;
-      LocalFree(sd);
-      return false;
-    }
-    // Trusted ancestry: re-assert the protected DACL so a loosely-created-but-trusted parent is tightened.
-    BOOL present = FALSE, defaulted = FALSE;
-    PACL dacl = nullptr;
-    if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
-      ok = SetNamedSecurityInfoW(const_cast<wchar_t*>(dir.c_str()), SE_FILE_OBJECT,
-                                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
-                                 nullptr, dacl, nullptr) == ERROR_SUCCESS;
-    }
-  }
-  if (!ok && win32) *win32 = GetLastError();
-  LocalFree(sd);
-  return ok;
-}
-
 // Write to a UNIQUE temp created WITH the protected SD (so it is never readable in a window), then
 // atomically replace the final path. CREATE_NEW + a unique name defeats a pre-planted temp; the final
 // REPLACE_EXISTING rename removes any pre-planted file/symlink at the destination name.
@@ -151,45 +117,20 @@ bool write_all_protected(const std::wstring& path, const uint8_t* data, size_t l
   return true;
 }
 
-bool read_all(const std::wstring& path, std::vector<uint8_t>* out, uint32_t* win32) {
-  // G5: open WITHOUT following a reparse point and validate the OPENED object (non-reparse + trusted
-  // owner) before reading a single byte, so a redirected/hostile object is never decrypted.
-  HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-  if (h == INVALID_HANDLE_VALUE) { if (win32) *win32 = GetLastError(); return false; }
-  if (!handle_is_protected_object(h)) {
-    if (win32) *win32 = ERROR_ACCESS_DENIED;  // reparse redirect or untrusted owner -> refuse
-    CloseHandle(h);
-    return false;
-  }
-  LARGE_INTEGER size = {};
-  if (!GetFileSizeEx(h, &size) || size.QuadPart > (64 * 1024 * 1024)) {
-    if (win32) *win32 = GetLastError();
-    CloseHandle(h);
-    return false;
-  }
-  out->resize(static_cast<size_t>(size.QuadPart));
-  size_t off = 0;
-  bool ok = true;
-  while (off < out->size()) {
-    DWORD got = 0;
-    DWORD want = static_cast<DWORD>(out->size() - off > 0x10000000 ? 0x10000000 : out->size() - off);
-    if (!ReadFile(h, out->data() + off, want, &got, nullptr) || got == 0) { ok = false; break; }
-    off += got;
-  }
-  if (!ok && win32) *win32 = GetLastError();
-  CloseHandle(h);
-  return ok;
-}
-
 }  // namespace
 
 MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const MachineRecord& r,
                                              uint32_t* win32) {
   if (win32) *win32 = 0;
-  // The protected parent is established BEFORE the blob exists, so there is never a readable-parent
-  // window (Codex S1). A failure here keeps any existing good record untouched (nothing was written).
-  if (!ensure_protected_parent(path, win32)) return MachineStoreStatus::Dacl;
+  // r7 H3: every level of the path is checked (owner AND DACL, not a redirect) and HELD open without delete
+  // sharing until the write is done -- the folder the record goes into is the folder that was checked.
+  // Missing GNLink levels are created protected; an existing hostile one is refused, not "repaired".
+  HeldChain chain;
+  const DWORD held = HoldRecordChain(path, /*create=*/true, OwnerIsSystemOrAdministrators, &chain);
+  if (held != 0) {
+    if (win32) *win32 = held;
+    return MachineStoreStatus::Dacl;
+  }
   std::vector<uint8_t> plain = SerializeMachineRecord(r);
   DATA_BLOB in{static_cast<DWORD>(plain.size()), plain.data()};
   DATA_BLOB out{0, nullptr};
@@ -209,18 +150,20 @@ MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const Mac
 
 MachineStoreStatus ReadAndOpenMachineRecord(const std::wstring& path, MachineRecord* out, uint32_t* win32) {
   if (win32) *win32 = 0;
-  // G5: validate the PARENT ancestry too -- a junction/symlink at the directory component would be
-  // followed when resolving the path even though the final open uses FILE_FLAG_OPEN_REPARSE_POINT.
-  const size_t slash = path.find_last_of(L"\\/");
-  if (slash != std::wstring::npos) {
-    const std::wstring dir = path.substr(0, slash);
-    if (!path_is_protected_object(dir, nullptr)) {
-      if (win32) *win32 = ERROR_ACCESS_DENIED;
-      return MachineStoreStatus::Read;
-    }
+  // r7 H3: the whole path, from %ProgramData% down, checked on handles and held while the record is read;
+  // the record itself checked (owner, DACL: SYSTEM/Administrators only) on the handle it is read through.
+  HeldChain chain;
+  const DWORD held = HoldRecordChain(path, /*create=*/false, OwnerIsSystemOrAdministrators, &chain);
+  if (held != 0) {
+    if (win32) *win32 = held;
+    return MachineStoreStatus::Read;
   }
   std::vector<uint8_t> sealed;
-  if (!read_all(path, &sealed, win32)) return MachineStoreStatus::Read;
+  const DWORD readErr = ReadHeldRecord(path, OwnerIsSystemOrAdministrators, &sealed);
+  if (readErr != 0) {
+    if (win32) *win32 = readErr;
+    return MachineStoreStatus::Read;
+  }
   DATA_BLOB in{static_cast<DWORD>(sealed.size()), sealed.data()};
   DATA_BLOB plain{0, nullptr};
   if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &plain)) {

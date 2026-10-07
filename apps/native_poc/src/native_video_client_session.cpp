@@ -264,7 +264,9 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   }
   if (kind < 1 || kind > 6) return false;
   // r5 G8: a host at the logon screen is sent navigation keys only -- never a character in plaintext.
-  if (!prelogin::ViewerMaySendInputEvent(hostCaptureFlags_.load(std::memory_order_relaxed), kind, keyCode)) {
+  if (!prelogin::ViewerMaySendInputEvent(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
+                                                                      hostCaptureFlags_.load(std::memory_order_relaxed)),
+                                         kind, keyCode)) {
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -280,7 +282,8 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
     if (!CanQueueControlRequestLocked()) return false;
   }
   // r5 G8: no text at all to a host at the logon screen (a password goes by "Windows 로그인").
-  if (!prelogin::ViewerMaySendText(hostCaptureFlags_.load(std::memory_order_relaxed))) {
+  if (!prelogin::ViewerMaySendText(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
+                                                                hostCaptureFlags_.load(std::memory_order_relaxed)))) {
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -505,6 +508,13 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         break;
       }
 
+      // r7 H6: the last look before an input leaves (queued before the role was known, or before it changed).
+      if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
+                                                                      hostCaptureFlags_.load(std::memory_order_relaxed)),
+                                         action)) {
+        preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       TcpControlResponse response{};
       if (!execute_control_action(*controlLink, action, &response)) {
         if (!stopRequested_.load(std::memory_order_acquire)) {
@@ -524,6 +534,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
           hostCaptureFlags_.store(response.pong.captureTargetFlags, std::memory_order_relaxed);
+          hostRoleKnown_.store(true, std::memory_order_release);  // r7 H6
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
           {
@@ -1073,6 +1084,7 @@ void ClientSessionController::ResetUnlocked() {
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
   hostCaptureFlags_.store(0, std::memory_order_relaxed);
+  hostRoleKnown_.store(false, std::memory_order_release);  // r7 H6: unknown again until the next pong
   {
     // A request not sent yet does not survive into another session; an answer already taken stays.
     std::lock_guard<std::mutex> lk(rebootMu_);

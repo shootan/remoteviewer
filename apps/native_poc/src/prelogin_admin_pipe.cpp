@@ -114,6 +114,7 @@ std::vector<uint8_t> EncodeAdminRequest(const AdminRequest& r) {
     put_str(&o, r.accountId);
     put_str(&o, r.hostId);
     put_str(&o, r.hostToken);
+    put_u64(&o, r.expectedFloor);
   }
   if (r.op == AdminOp::Reboot) {
     put_u32(&o, r.requestId);
@@ -134,7 +135,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
   out->op = static_cast<AdminOp>(op);
   if (out->op == AdminOp::Enable) {
     if (!rd.str(&out->directoryUrl, kAdminMaxString) || !rd.str(&out->accountId, kAdminMaxString) ||
-        !rd.str(&out->hostId, kAdminMaxString) || !rd.str(&out->hostToken, kAdminMaxToken)) {
+        !rd.str(&out->hostId, kAdminMaxString) || !rd.str(&out->hostToken, kAdminMaxToken) || !rd.u64(&out->expectedFloor)) {
       return false;
     }
   }
@@ -158,7 +159,8 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
   Reader rd{b};
   uint32_t magic = 0;
   uint8_t status = 0, enabled = 0;
-  if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u8(&status) || status > static_cast<uint8_t>(AdminStatus::Unavailable) ||
+  if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u8(&status) ||
+      (status > static_cast<uint8_t>(AdminStatus::Unavailable) && status != static_cast<uint8_t>(AdminStatus::Stale)) ||
       !rd.u8(&enabled) || enabled > 1 || !rd.u32(&out->win32) || !rd.u64(&out->ownerGeneration) ||
       !rd.u8(&out->rebootResult) || out->rebootResult > 3 || !rd.done()) {
     return false;
@@ -253,6 +255,13 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
       return reply;
     }
     const std::string machine = p.machineId();
+    if (floorKnown && floor != r.expectedFloor) {
+      // r7 H2: decided before a Disable that has since raised the floor -- the old owner's, refused.
+      reply.status = AdminStatus::Stale;
+      reply.enabled = p.featureEnabled();
+      reply.ownerGeneration = floor;
+      return reply;
+    }
     if (!floorKnown) {  // r6 G6: a record above an unknown floor might sit below a revoke -- fail safe
       reply.status = AdminStatus::Failed;
       reply.win32 = ERROR_READ_FAULT;

@@ -77,6 +77,10 @@ struct SessionState {
   // r5 G8: input not sent because the host is at the logon screen (characters, text), and whether the
   // window has said so since the host last arrived at it.
   std::atomic<uint64_t> preloginInputHeldBack{0};
+  // r7 H6: a pong of THIS connection has said what the host is (its flags are then meaningful). False at
+  // the start of every connection (ControlClient::Run).
+  std::atomic<bool> hostRoleKnown{false};
+  std::atomic<uint64_t> preloginHeldBackAtSend{0};  // input queued earlier, not sent once the role was known
   std::atomic<bool> preloginHeldBackNoticed{false};
   // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
   // sent. Written by the control thread on every pong (release), read by the UI thread's window

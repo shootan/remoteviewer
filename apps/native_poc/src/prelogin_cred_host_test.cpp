@@ -53,6 +53,9 @@ struct Seams {
   std::atomic<bool> failTyping{false};
   std::atomic<int> targetCalls{0};
   int moveTargetAtCall = 0;            // from this target() call on, another window is in front
+  std::function<void(int call)> onTarget;  // r7 H5: something happens at a given target() call
+  std::atomic<bool> typedAfterEnd{false};   // r7 H5: a typing began after EndSession had returned
+  std::atomic<bool> endReturned{false};
   bool moveTargetDuringTyping = false;  // the typing itself moves it
   PreloginCredReceiver::InjectFn inject() {
     return [this](const uint16_t* u, uint16_t n, uint32_t* err) {
@@ -61,6 +64,7 @@ struct Seams {
         return false;
       }
       if (moveTargetDuringTyping) targetId = 8;
+      if (endReturned.load()) typedAfterEnd = true;
       std::lock_guard<std::mutex> l(mu);
       typed.emplace_back(u, u + n);
       return true;
@@ -69,6 +73,7 @@ struct Seams {
   PreloginCredReceiver::TargetFn target() {
     return [this]() -> uint64_t {
       const int call = ++targetCalls;
+      if (onTarget) onTarget(call);
       if (moveTargetAtCall != 0 && call >= moveTargetAtCall) return 9;
       return targetId.load();
     };
@@ -328,6 +333,53 @@ int main() {
           [&] { return std::string(stage_word(res2.stage)) + " " + std::to_string(res2.win32Error); });
     check("...while the typing that did happen is still counted (the units went; the result says it went wrong)",
           r2.injections() == 1);
+  }
+
+  {
+    std::printf("\n--- r7 H5: the last look and the typing are one step against the session's end ---\n");
+    // The session ends exactly at the final look (the second target() call: found, then taken again). The
+    // end runs on another thread; the final look waits up to 300 ms for it to return. Before r7 it returned
+    // at once (it only set a flag the look had already passed) and the password was typed AFTER it -- for
+    // a session that had ended. Now the end waits for the committed step, so no typing begins after it.
+    Seams seams;
+    std::thread ender;
+    PreloginCredReceiver* receiver = nullptr;
+    seams.onTarget = [&](int call) {
+      if (call != 2) return;
+      ender = std::thread([&] {
+        receiver->EndSession(cookie);
+        seams.endReturned = true;
+      });
+      const ULONGLONG until = GetTickCount64() + 300;
+      while (!seams.endReturned.load() && GetTickCount64() < until) Sleep(5);
+    };
+    {
+      PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
+      receiver = &r;
+      const auto ch = r.Challenge(challenge_req(81), cookie);
+      r.Sealed(seal(ch, secret, true), cookie);
+      ControlUnlockStatusResultMessage res{};
+      wait_result(r, 81, &res);
+      if (ender.joinable()) ender.join();
+      check("H5: the session ending at the final look: no typing begins after the end returned",
+            seams.targetCalls.load() >= 2 && !seams.typedAfterEnd.load(),
+            [&] { return std::to_string(seams.count()) + " typed, " + std::string(stage_word(res.stage)); });
+      check("...and once it has returned, the receiver reports no further typing", r.injections() <= 1);
+    }
+    Seams first;
+    PreloginCredReceiver* r2p = nullptr;
+    first.onTarget = [&](int call) {
+      if (call == 1) r2p->EndSession(cookie);  // ended (and returned) before the committed step
+    };
+    PreloginCredReceiver r2(first.inject(), first.target(), first.environment(), 0x1234, 600);
+    r2p = &r2;
+    const auto ch2 = r2.Challenge(challenge_req(82), cookie);
+    r2.Sealed(seal(ch2, secret, true), cookie);
+    ControlUnlockStatusResultMessage res2{};
+    const bool got2 = wait_result(r2, 82, &res2);
+    check("H5: the session ended just before the final step (target already found): nothing typed, RejectedStaleTopology",
+          got2 && res2.stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) && first.count() == 0,
+          [&] { return std::string(stage_word(res2.stage)) + ", " + std::to_string(first.count()) + " typed"; });
   }
 
   {

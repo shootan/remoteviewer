@@ -13,9 +13,14 @@ namespace {
 // r5 G8: a host at the logon screen is not sent a character (prelogin_input_gate.hpp). What was held
 // back is counted, and the first time the window is told once, so the user is pointed at
 // "Windows 로그인" instead of typing into a screen that will not receive it.
-uint32_t host_flags(ViewerState& ctx) { return ctx.session.hostCaptureFlags.load(std::memory_order_relaxed); }
+uint32_t host_flags(ViewerState& ctx) {
+  return remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                           ctx.session.hostCaptureFlags.load(std::memory_order_relaxed));
+}
 void held_back_at_logon(ViewerState& ctx) {
   ctx.session.preloginInputHeldBack.fetch_add(1, std::memory_order_relaxed);
+  // Said only when the host is KNOWN to be at the logon screen -- not for the moment before its first pong.
+  if (!ctx.session.hostRoleKnown.load(std::memory_order_acquire)) return;
   if (!ctx.session.preloginHeldBackNoticed.exchange(true, std::memory_order_acq_rel) && ctx.session.hwnd) {
     PostMessageW(ctx.session.hwnd, kMsgPreloginTypingHeldBack, 0, 0);
   }

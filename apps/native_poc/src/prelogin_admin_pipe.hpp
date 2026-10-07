@@ -39,7 +39,7 @@ namespace remote60::native_poc::prelogin {
 
 constexpr wchar_t kPreloginAdminPipeName[] = L"\\\\.\\pipe\\GNLinkPreloginAdmin";
 constexpr uint32_t kAdminMagic = 0x41504C47u;  // "GLPA"
-constexpr uint16_t kAdminVersion = 2;  // 2: Reboot carries the requesting peer (r5 G10)
+constexpr uint16_t kAdminVersion = 3;  // 2: Reboot carries the requesting peer (r5 G10); 3: Enable its floor (r7 H2)
 constexpr size_t kAdminMaxString = 512;
 constexpr size_t kAdminMaxToken = 2048;
 
@@ -54,6 +54,7 @@ enum class AdminStatus : uint8_t {
   Failed = 3,      // the store or the service configuration failed; win32 says why
   Unavailable = 4, // client side: the service's pipe is not there (not installed / not running)
   Untrusted = 5,   // client side: the pipe's server is not the installed service -- nothing was sent
+  Stale = 6,       // r7 H2: an Enable decided on a floor that has since been raised (a Disable came first)
 };
 
 struct AdminRequest {
@@ -63,6 +64,10 @@ struct AdminRequest {
   std::string accountId;
   std::string hostId;
   std::string hostToken;  // NEVER logged
+  // r7 H2: the owner floor the requester read just before asking (Query's ownerGeneration). The service
+  // takes the Enable only while the floor is still that: a Disable (sign-out, account change) that got
+  // in first raised it, and this Enable -- the old owner's -- is refused (Stale), not made the newest.
+  uint64_t expectedFloor = 0;
   // Reboot only: the viewer's request id (never 0), and which remote peer asked (the host's control
   // session) -- with the requesting host process, the dedup key. Viewers number from 1 each, so the id
   // alone would make two viewers' first requests one request (r5 G10).

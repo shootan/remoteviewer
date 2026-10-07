@@ -169,7 +169,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             {
               TcpControlLink link(acceptedSock);
               link.SetWriteCounter(&sender.txControlBytes);
-              controlServer.Serve(link);
+              controlServer.Serve(link, /*linkDirectoryAuthenticated=*/false);  // r7 H4: nobody's link
             }
             // This thread is the ONLY closer of an accepted control socket, and the close
             // happens under controlClientSockMu. shutdown_host holds the same mutex for its
@@ -907,7 +907,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // refused. Inside here the channel is in use, and re-keying it would break a link that
         // is working -- the reader reads this flag to decide (item 8).
         clientSession.controlServing.store(true, std::memory_order_release);
-        controlServer.Serve(link);
+        // r7 H4: this channel is the peer's whose Hello was admitted; what that admission was (directory
+        // capability or a LAN Hello) is the session's flag, re-read at every privileged request.
+        controlServer.Serve(link, /*linkDirectoryAuthenticated=*/true);
         clientSession.controlServing.store(false, std::memory_order_release);
         // Closed is not finished. Retransmits running out means this client is gone, which is
         // the ordinary end of a session and the reason to wait for the next one.
