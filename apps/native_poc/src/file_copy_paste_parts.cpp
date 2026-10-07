@@ -144,6 +144,11 @@ bool FileHelperChannel::SendTo(uint64_t instance, const fc::PipeFrame& f) {
   return false;
 }
 
+DWORD FileHelperChannel::CurrentPid() const {
+  std::lock_guard<std::mutex> s(sendMu_);
+  return cur_.link ? cur_.link->helper_pid() : 0;
+}
+
 bool FileHelperChannel::Running() const {
   std::lock_guard<std::mutex> s(sendMu_);
   return cur_.link && cur_.link->pipe_open() && cur_.link->helper_alive();

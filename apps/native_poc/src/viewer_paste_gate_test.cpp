@@ -177,6 +177,51 @@ int main() {
     check("on timeout too", g.HeldCount() == 0);
   }
 
+  // ---------------------------------------------------------------- r5 F2: keys between two pastes
+  {
+    PasteGate g;
+    g.Admit(ticket(1), 0);
+    g.Hold(HeldKey{0x0100, 0x0D, 0});  // Enter, typed after paste A
+    g.Hold(HeldKey{0x0101, 0x0D, 0});
+    check("a second paste waits", g.Admit(ticket(2), 10) == PasteGate::Admitted::Waiting);
+    g.Hold(HeldKey{0x0100, 'X', 0});  // X, typed after paste B
+    PasteGate::Ticket done;
+    check("A applied", g.OnAnswer(1, true, 1, 1, &done) == PasteGate::Outcome::Inject);
+    const auto between = g.TakeHeldBeforeWaiting();
+    check("A -> Enter -> B: Enter goes between the two pastes", between.size() == 2 && between[0].wp == 0x0D &&
+                                                                   between[1].wp == 0x0D);
+    check("...and X stays for after B", g.HeldCount() == 1);
+    PasteGate::Ticket next;
+    check("B is promoted", g.Promote(20, &next) && next.id == 2);
+    check("B applied", g.OnAnswer(2, true, 1, 1, &done) == PasteGate::Outcome::Inject);
+    const auto after = g.TakeHeldBeforeWaiting();
+    check("after B: X", after.size() == 1 && after[0].wp == 'X');
+  }
+  {
+    PasteGate g;
+    g.Admit(ticket(1), 0);
+    g.Hold(HeldKey{0x0100, 0x0D, 0});
+    g.Admit(ticket(2), 10);
+    g.Hold(HeldKey{0x0100, 'X', 0});
+    PasteGate::Ticket done;
+    check("A fails", g.OnAnswer(1, false, 1, 1, &done) == PasteGate::Outcome::Fail);
+    check("...the key typed after the failed A goes with it, the one after B waits for B", g.HeldCount() == 1);
+    PasteGate::Ticket next;
+    g.Promote(20, &next);
+    const auto after = g.TakeHeldBeforeWaiting();
+    check("...and is X", after.size() == 1 && after[0].wp == 'X');
+  }
+  {
+    PasteGate g;
+    g.Admit(ticket(1), 0);
+    g.Hold(HeldKey{0x0100, 0x0D, 0});
+    g.Admit(ticket(2), 10);
+    g.Hold(HeldKey{0x0100, 'X', 0});
+    PasteGate::Ticket exp;
+    check("A times out", g.OnTick(kPasteTextDeadlineUs, &exp));
+    check("...its keys go, B's stay", g.HeldCount() == 1);
+  }
+
   // ---------------------------------------------------------------- the bar's lines
   check("a failure says the paste did not run",
         paste_failure_text(PasteFailure::Timeout).find(L"붙여넣기를 실행하지 않았습니다") != std::wstring::npos);

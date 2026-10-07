@@ -71,6 +71,10 @@ struct ClipboardSyncState {
   // A paste asks for one poll NOW, before it sends anything (under mu): did the host copy since?
   bool probeRequested = false;
   uint64_t probeId = 0;
+  // r5 (F1): a copy here asks for one poll right after it, so the host generation that marks it is
+  // known (its baseline). The token is the local clipboard sequence of that copy.
+  bool baselineRequested = false;
+  uint64_t baselineToken = 0;
   bool havePasteText = false;
   uint64_t pasteTextId = 0;
   uint32_t pasteTextRevision = 0;

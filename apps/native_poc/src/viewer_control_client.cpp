@@ -142,6 +142,27 @@ int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
         probeId = clip.probeId;
       }
     }
+    // r5 (F1): the baseline a copy here asked for, before anything else: a paste's check compares with it.
+    uint64_t baselineToken = 0;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.baselineRequested) {
+        clip.baselineRequested = false;
+        baselineToken = clip.baselineToken;
+      }
+    }
+    if (baselineToken != 0) {
+      const int r = poll_host_clipboard(link, /*forced=*/true);
+      if (r < 0) return -1;
+      PasteAnswer b;
+      b.id = baselineToken;
+      b.probe = true;
+      b.baseline = true;
+      b.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
+      b.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      post_paste_answer(ctx, b);
+      if (probeId == 0) return 1;
+    }
     if (probeId != 0) {
       const int r = poll_host_clipboard(link, /*forced=*/true);
       PasteAnswer a;
@@ -382,6 +403,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
       ctx.control.clipboard.connGen.fetch_add(1, std::memory_order_acq_rel);
       ctx.control.clipboard.havePasteText = false;  // asked on the previous connection
       ctx.control.clipboard.probeRequested = false;
+      ctx.control.clipboard.baselineRequested = false;
       ctx.control.clipboard.hostCopyGenKnown.store(false, std::memory_order_release);  // a new session's baseline
     }
     // Paste on demand: whether this host confirms a paste. Set every pong, like the bits around it.

@@ -167,6 +167,12 @@ class FileCopyClient {
    * code calls this; the build gate checks the shipped viewer does not carry it.
    */
   void SetHelperProbeForTest(std::function<void(uint64_t instance, int point)> probe);
+  /**
+   * Paste on demand r5 (F3): the process id of this PC's clipboard helper now running (0 = none). A
+   * clipboard owned by it holds the REMOTE PC's files (R->P) -- the only virtual files that are a
+   * remote copy; the same formats from any other program are a copy made here.
+   */
+  DWORD HelperPid() const { return helper_.CurrentPid(); }
   /** Whether a paste of this viewer's files is running (pinned, bulk open). */
   bool PasteActive() const {
     std::lock_guard<std::mutex> lock(mu_);

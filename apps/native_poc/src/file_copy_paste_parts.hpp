@@ -118,6 +118,8 @@ class FileHelperChannel {
   uint64_t owner() const { return owner_.load(); }
   /** The current helper's instance number (0 = none): the receiver takes frames of this one only. */
   uint64_t instance() const { return instance_.load(); }
+  /** The process id of the current helper (0 = none running). Its clipboard publishes carry it as owner. */
+  DWORD CurrentPid() const;
   bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr, uint64_t* instance = nullptr);
   bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr, uint64_t* instance = nullptr);
   bool Running() const;

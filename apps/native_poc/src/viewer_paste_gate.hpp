@@ -107,6 +107,7 @@ struct PasteAnswer {
   uint32_t detail = 0;                        // the wire's reason (result/stage/verdict), for the log
   // r4: the answer to a paste's check before sending (one fresh poll), not to the paste itself.
   bool probe = false;
+  bool baseline = false;      // r5: the poll right after a copy here (id = that copy's clipboard sequence)
   bool genKnown = false;      // the host sends a copy generation
   uint64_t hostCopyGen = 0;   // its value now
 };
@@ -161,6 +162,10 @@ class PasteGate {
                               // (an image: its transfer has a size-based one, and a Cancel button)
     uint64_t startedUs = 0;   // set by Admit (Started) or Promote
     uint64_t deadlineUs = 0;  // startedUs + budgetUs, or 0
+    // r5 (F1): the host copy generation that marks this PC's copy the gesture pastes -- fixed at the
+    // gesture, so a later copy here cannot move it. baseValid false: not known yet (local wins).
+    uint64_t baseGen = 0;
+    bool baseValid = false;
   };
 
   enum class Admitted : uint8_t { Started = 0, Waiting = 1, Dropped = 2 };
@@ -195,12 +200,20 @@ class PasteGate {
   /** Whether a key down for `wp` is among the held ones (its up is then held too). */
   bool HoldsDown(uint64_t wp) const;
   std::vector<HeldKey> TakeHeld();
+  /**
+   * r5 (F2): the keys typed between the pending paste and the one waiting behind it -- they go
+   * between the two pastes, not after both. Without a waiting paste: every held key.
+   */
+  std::vector<HeldKey> TakeHeldBeforeWaiting();
   size_t HeldCount() const { return held_.size(); }
 
  private:
+  // Keys before the waiting paste are dropped with a failed pending one; those after it wait for it.
+  void DropHeldBeforeWaiting();
   Ticket pending_;
   Ticket waiting_;
   std::deque<HeldKey> held_;
+  size_t waitingAt_ = 0;  // with a waiting paste: how many held keys were typed before it
 };
 
 /** The bar's line for a failed paste (Silent and None: empty). */
