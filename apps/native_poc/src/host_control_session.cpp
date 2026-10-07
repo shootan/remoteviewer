@@ -47,6 +47,9 @@
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
 #include "prelogin_control_allowlist.hpp"
+#include "prelogin_reboot_gate.hpp"
+#include "reboot_wire.hpp"
+#include <mutex>
 #include "peer_version.hpp"
 #include "time_utils.hpp"
 
@@ -74,6 +77,43 @@ struct FlushControlMessageOnExit {
   }
 };
 
+}  // namespace
+
+namespace {
+// One remote restart in flight per host process, shared across both control dispatcher threads.
+std::mutex gRebootGateMu;
+remote60::native_poc::RebootGateState gRebootGate;
+
+// Enable a named privilege on this process token (SYSTEM has SE_SHUTDOWN_NAME but it must be enabled).
+bool enable_process_privilege(const char* name) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
+  LUID luid{};
+  bool ok = LookupPrivilegeValueA(nullptr, name, &luid) != FALSE;
+  if (ok) {
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    ok = AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr) != FALSE &&
+         GetLastError() == ERROR_SUCCESS;
+  }
+  CloseHandle(token);
+  return ok;
+}
+
+// The fixed local restart (prelogin-service r3 R2/R4): short grace, non-forced, planned reason. The
+// client never names a machine/flags/text. Runs in the SYSTEM prelogin worker (which holds the
+// privilege); a non-elevated logged-in host must delegate to the service (follow-on, see (f)).
+uint32_t request_system_reboot() {
+  if (!enable_process_privilege(SE_SHUTDOWN_NAME)) return ERROR_PRIVILEGE_NOT_HELD;
+  wchar_t msg[] = L"GNLink 원격 요청으로 다시 시작합니다.";
+  const BOOL ok = InitiateSystemShutdownExW(nullptr, msg, /*dwTimeout=*/5, /*bForceAppsClosed=*/FALSE,
+                                            /*bRebootAfterShutdown=*/TRUE,
+                                            SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_MINOR_RECONFIG |
+                                                SHTDN_REASON_FLAG_PLANNED);
+  return ok ? 0u : GetLastError();
+}
 }  // namespace
 
 ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& stop,
@@ -434,6 +474,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
         // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
         // the reboot confirm popup keys its "no connect until login" warning on.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+        // The prelogin (SYSTEM) worker is owner-permitted + holds the shutdown privilege, so it offers
+        // remote reboot. The logged-in-host feature-gated advertise is the follow-on (f).
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagRemoteRebootV1;
       }
       // Clipboard text sync (K1): advertised only when the hub is running, so a viewer never sends
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
@@ -517,6 +560,43 @@ void ControlSessionServer::Serve(ControlLink& link) {
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusResult);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlRebootRequest &&
+        header.size == sizeof(remote60::native_poc::ControlRebootRequestMessage)) {
+      remote60::native_poc::ControlRebootRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.requestId, sizeof(req) - sizeof(MessageHeader))) break;
+      remote60::native_poc::RebootRequestInputs in;
+      // R2: directory-authenticated session only; a token-less LAN Hello peer is NotAuthorized.
+      in.directoryAuthenticated = clientSession.directoryAuthenticated.load(std::memory_order_acquire);
+      // Feature gate: the SYSTEM prelogin worker holds the shutdown privilege and is owner-permitted.
+      // The logged-in-host feature-gated path (and its delegation of the OS call to the service) is a
+      // follow-on (f); such a host answers Refused here for now.
+      in.featureAllowsReboot = args.preloginMode;
+      in.requestId = req.requestId;
+      remote60::native_poc::RebootDecision decision;
+      {
+        std::lock_guard<std::mutex> lock(gRebootGateMu);
+        decision = remote60::native_poc::DecideReboot(gRebootGate, in);
+      }
+      uint32_t win32 = 0;
+      remote60::native_poc::RebootResult result = remote60::native_poc::RebootResultFor(decision);
+      if (remote60::native_poc::RebootShouldCallOs(decision)) {
+        win32 = request_system_reboot();  // the ONE fixed local restart
+        if (win32 != 0) {
+          result = remote60::native_poc::RebootResult::Failed;  // never auto-escalate to forced (R4)
+          std::lock_guard<std::mutex> lock(gRebootGateMu);
+          gRebootGate = remote60::native_poc::RebootGateState{};  // the OS call failed; allow a retry
+        }
+      }
+      std::cout << "[native-video-host][control][reboot] requestId=" << req.requestId
+                << " auth=" << (in.directoryAuthenticated ? 1 : 0)
+                << " result=" << static_cast<unsigned>(result) << " win32=" << win32 << "\n";
+      const remote60::native_poc::ControlRebootReplyMessage rsp =
+          remote60::native_poc::make_reboot_reply(req.requestId, result, win32);
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }
