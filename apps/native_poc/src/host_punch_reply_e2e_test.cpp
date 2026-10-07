@@ -210,7 +210,7 @@ std::wstring isolation_args(const std::wstring& stagingDir) {
 }
 
 bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t mediaPort,
-               uint16_t controlPort, const char* tag) {
+               uint16_t controlPort, const char* tag, bool prelogin = false) {
   if (mediaPort == 0 || controlPort == 0) {
     // A port the picker could not provide must not reach the host: --bind-port 0 reads as "no
     // candidates" and the host would fall back to the product's default port. Nothing is staged,
@@ -251,7 +251,12 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
   const std::wstring url(directoryUrl.begin(), directoryUrl.end());
   // Loopback on purpose: a wildcard listener is what raises the firewall prompt.
-  std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
+  // r6 G1: in prelogin mode the role flag is the ONLY transport/codec input -- `--prelogin` must itself
+  // pin udp+h264 and reach the directory-registration path. Passing --directory-url skips the DPAPI
+  // machine-record load (that is the elevation-gated part), so this exercises the SAME registration code
+  // with test-account creds instead of the sealed record.
+  const std::wstring roleArgs = prelogin ? L" --prelogin" : L" --transport udp --codec h264";
+  std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\"" + roleArgs +
                      L" --bind-address 127.0.0.1" +
                      L" --bind-port " + std::to_wstring(mediaPort) +
                      L" --control-port " + std::to_wstring(controlPort) +
@@ -760,6 +765,34 @@ int wmain(int argc, wchar_t** argv) {
     client.Disconnect();
     host.Stop();
     check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
+  }
+
+  // ======================================================= prelogin: the --prelogin role goes ONLINE
+  // r6 G1: the service launches the worker with `--prelogin` only. Before the fix that resolved to
+  // TCP/raw and SKIPPED the UDP registration branch, so the box never heartbeat and never showed online
+  // after reboot. Here the SAME flag drives the real host to register + heartbeat against the fixture
+  // directory -- online. (Counter-example pre-fix: register count stays 0 and "directory online" never
+  // prints.)
+  {
+    FakeDirectory dir;
+    check("[prelogin] the fake directory starts", dir.Start());
+    ScriptDirectory(dir, "h-prelogin", capabilityBody(token, kIssuedIp, kIssuedPort));
+
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
+    check("[prelogin] a real GNLinkStream starts with --prelogin only",
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(),
+                    "prelogin", /*prelogin=*/true));
+    // The flag alone had to reach the UDP directory-registration path: it registered and the host said
+    // it is online. A TCP resolution (the defect) would make both of these never happen.
+    check("[prelogin] --prelogin registered with the directory (so it is online after reboot)",
+          host.WaitFor("directory online", 30000) || dir.Count("/api/host/register") >= 1, host.tail());
+    check("[prelogin] ...and it did so over UDP (register only happens in the UDP branch)",
+          dir.Count("/api/host/register") >= 1,
+          "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    host.Stop();
+    check("[prelogin] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // Punch LOSS is not covered in this round. Not "cannot be covered" -- the earlier note said

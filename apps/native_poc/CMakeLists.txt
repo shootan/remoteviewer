@@ -2201,6 +2201,14 @@ add_executable(remote60_prelogin_child_launch_test
 )
 target_include_directories(remote60_prelogin_child_launch_test PRIVATE src)
 
+# prelogin-service r6 G1: the prelogin role pins udp+h264 (the real `--prelogin` command), refuses TCP/raw.
+add_executable(remote60_prelogin_role_args_test
+  src/prelogin_role_args_test.cpp
+  src/host_args.cpp
+)
+target_include_directories(remote60_prelogin_role_args_test PRIVATE src)
+target_link_libraries(remote60_prelogin_role_args_test PRIVATE common)
+
 # prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
 add_executable(remote60_prelogin_supervisor_test
   src/prelogin_supervisor_test.cpp
