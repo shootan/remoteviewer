@@ -2118,6 +2118,12 @@ add_executable(remote60_unlock_protocol_test
 target_include_directories(remote60_unlock_protocol_test PRIVATE src)
 target_link_libraries(remote60_unlock_protocol_test PRIVATE remote60_sealed_unlock)
 
+# prelogin-service A1 section 1: the pure supervisor state-machine decision core + negative controls.
+add_executable(remote60_prelogin_supervisor_state_test
+  src/prelogin_supervisor_state_test.cpp
+)
+target_include_directories(remote60_prelogin_supervisor_state_test PRIVATE src)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
@@ -2849,6 +2855,16 @@ add_executable(remote60_winlogon_capture_probe
 )
 target_link_libraries(remote60_winlogon_capture_probe PRIVATE d3d11 dxgi gdi32 advapi32 user32)
 set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonProbe")
+
+# A0 isolated probe for the prelogin-service feature: proves the sealed (ECDH+AES-GCM) credential
+# blob, once opened, is delivered as real Unicode keystrokes to a test-owned window (crypto->IPC->
+# input), with a defocused negative control. Non-elevated, current session only. Diagnostic harness.
+add_executable(remote60_prelogin_a0_probe
+  tools/prelogin_a0_probe.cpp
+)
+target_include_directories(remote60_prelogin_a0_probe PRIVATE src)
+target_link_libraries(remote60_prelogin_a0_probe PRIVATE remote60_sealed_unlock user32)
+set_target_properties(remote60_prelogin_a0_probe PROPERTIES OUTPUT_NAME "PreloginA0Probe")
 
 # Also diagnostic-only. Measures how often the desktop actually changes, with no encoder or
 # client in the way, so 구현계획 A1 can be settled by measurement instead of inference.
