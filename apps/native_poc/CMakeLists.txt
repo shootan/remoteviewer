@@ -2148,6 +2148,14 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service r3 (d-viewer): native reboot confirm popup + UI-evidence test (PrintWindow + WM_COMMAND).
+add_executable(remote60_viewer_reboot_prompt_test
+  src/viewer_reboot_prompt_test.cpp
+  src/viewer_reboot_prompt.cpp
+)
+target_include_directories(remote60_viewer_reboot_prompt_test PRIVATE src)
+target_link_libraries(remote60_viewer_reboot_prompt_test PRIVATE user32 gdi32)
+
 # prelogin-service A1 section f: per-user autostart cleanup (service-owns-startup gate + scoped delete).
 add_executable(remote60_prelogin_autostart_test
   src/prelogin_autostart_test.cpp
