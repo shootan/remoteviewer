@@ -62,6 +62,14 @@ struct SessionState {
   // Set by the reboot confirm (the UI thread, after the user picks 확인); the control thread drains it
   // and sends ControlRebootRequest exactly once. (prelogin-service r3 R3.)
   std::atomic<bool> rebootRequested{false};
+  // "Windows 로그인" (prelogin-ui r3, item 5): the UI thread's prompt leaves the password here and
+  // sets the flag; the control thread takes it (swap under the lock), seals it, and zeroes it. Never
+  // stored anywhere else. preloginInjectedAtUs: when the host last said "typed", so the first pong
+  // without kCaptureFlagPreloginV1 after it can be told apart as the actual logon.
+  std::atomic<bool> preloginCredRequested{false};
+  std::mutex preloginCredMu;
+  std::wstring preloginCredPassword;
+  std::atomic<uint64_t> preloginInjectedAtUs{0};
   // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
   // sent. Written by the control thread on every pong (release), read by the UI thread's window
   // procedure and the input fence (acquire). False until the first pong and after teardown, and an

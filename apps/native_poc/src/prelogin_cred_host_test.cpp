@@ -1,0 +1,264 @@
+// prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" (PreloginCredReceiver).
+//
+// The product class, with its two OS edges replaced: the typing (records the units instead of
+// SendInput) and the "is the input target the logon UI" question. The viewer's half is sealed here
+// with the same primitives and the same challenge mapping (unlock_wire.hpp) the viewer uses.
+//
+//   * prelogin purpose: opened, typed once, exactly the units sent; a retransmit types nothing more
+//   * an UNLOCK-purpose blob (the lock-screen unlock's sealing) is refused at the tag: nothing typed
+//   * the target is not the logon UI: RejectedPolicy after the wait, nothing typed
+//   * the target turns up within the wait: typed
+//   * stale request id / other session cookie / a replay after use / the rate limit
+//   * the control thread is not held while the worker waits for the target
+//   * the typing fails: InternalError with its win32 code
+
+#include <windows.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "prelogin_cred_host.hpp"
+#include "unlock_wire.hpp"
+
+using namespace remote60::native_poc;
+namespace su = remote60::native_poc::sealed_unlock;
+using remote60::native_poc::prelogin::PreloginCredReceiver;
+
+namespace {
+
+int gChecks = 0, gFailures = 0;
+void check(const char* what, bool ok, const std::string& detail = {}) {
+  ++gChecks;
+  if (!ok) ++gFailures;
+  std::printf("%s  %s%s%s\n", ok ? "PASS" : "FAIL", what, detail.empty() ? "" : "  ", detail.c_str());
+}
+// The detail read AFTER the outcome expression ran (arguments are evaluated in no fixed order).
+template <typename F, typename = decltype(std::declval<F>()())>
+void check(const char* what, bool ok, F detail) {
+  check(what, ok, std::string(detail()));
+}
+
+struct Seams {
+  std::mutex mu;
+  std::vector<std::vector<uint16_t>> typed;
+  std::atomic<bool> atTarget{true};
+  std::atomic<bool> failTyping{false};
+  PreloginCredReceiver::InjectFn inject() {
+    return [this](const uint16_t* u, uint16_t n, uint32_t* err) {
+      if (failTyping.load()) {
+        *err = 5;
+        return false;
+      }
+      std::lock_guard<std::mutex> l(mu);
+      typed.emplace_back(u, u + n);
+      return true;
+    };
+  }
+  PreloginCredReceiver::TargetFn target() {
+    return [this] { return atTarget.load(); };
+  }
+  size_t count() {
+    std::lock_guard<std::mutex> l(mu);
+    return typed.size();
+  }
+};
+
+ControlUnlockChallengeRequestMessage challenge_req(uint32_t id) {
+  ControlUnlockChallengeRequestMessage r{};
+  r.requestId = id;
+  return r;
+}
+
+// The viewer's sealing (viewer_unlock.cpp sealed_exchange), for either purpose.
+ControlUnlockSealedRequestMessage seal(const ControlUnlockChallengeMessage& ch, const std::vector<uint16_t>& units,
+                                       bool prelogin) {
+  ControlUnlockSealedRequestMessage s{};
+  su::EcdhKeyPair key;
+  uint8_t clientPub[su::kPubKeyBytes] = {};
+  key.Generate();
+  key.ExportPublic(clientPub);
+  const su::UnlockContext c = ContextFromChallenge(ch, clientPub);
+  const auto kdf = prelogin ? su::BuildPreloginCredKdfInfo(c) : su::BuildKdfInfo(c);
+  const auto aad = prelogin ? su::BuildPreloginCredAad(c) : su::BuildAad(c);
+  uint8_t aesKey[su::kAesKeyBytes] = {};
+  su::DeriveAesKey(key, ch.hostPub, ch.salt, kdf.data(), kdf.size(), aesKey);
+  uint8_t plain[su::kPlaintextBytes] = {};
+  su::PackPassword(units.data(), static_cast<uint16_t>(units.size()), plain);
+  su::RandomBytes(s.nonce, su::kNonceBytes);
+  su::AesGcmSeal(aesKey, s.nonce, aad.data(), aad.size(), plain, su::kPlaintextBytes, s.cipher, s.tag);
+  s.requestId = ch.requestId;
+  std::memcpy(s.challengeId, ch.challengeId, sizeof(s.challengeId));
+  std::memcpy(s.clientPub, clientPub, sizeof(s.clientPub));
+  return s;
+}
+
+bool wait_result(PreloginCredReceiver& r, uint32_t id, ControlUnlockStatusResultMessage* out, int ms = 5000) {
+  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+  while (std::chrono::steady_clock::now() < end) {
+    if (r.PollResult(id, out)) return true;
+    Sleep(20);
+  }
+  return r.PollResult(id, out);
+}
+
+const char* stage_word(uint16_t s) {
+  switch (static_cast<UnlockStage>(s)) {
+    case UnlockStage::Injected: return "Injected";
+    case UnlockStage::DecryptFailed: return "DecryptFailed";
+    case UnlockStage::RejectedPolicy: return "RejectedPolicy";
+    case UnlockStage::RejectedStaleTopology: return "RejectedStaleTopology";
+    case UnlockStage::Timeout: return "Timeout";
+    case UnlockStage::InternalError: return "InternalError";
+    case UnlockStage::ChallengeIssued: return "ChallengeIssued";
+    default: return "other";
+  }
+}
+
+void next_challenge_window() { Sleep(520); }  // the receiver's 500 ms rate limit
+
+}  // namespace
+
+int main() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  std::printf("prelogin credential receiver (prelogin-ui r3, item 5)\n\n");
+  const std::vector<uint16_t> secret = {L'T', L'e', L's', L't', 0x00E4, 0xAC00, L'9', L'!', L' ', L'"'};
+  const uint64_t cookie = 0xC00C1E5ull;
+
+  {
+    std::printf("--- the prelogin purpose: opened, typed once, exactly ---\n");
+    Seams seams;
+    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 600);
+    std::vector<std::string> lines;
+    r.onResult = [&](uint32_t id, uint16_t stage, uint32_t w) {
+      lines.push_back(std::to_string(id) + " " + std::to_string(stage) + " " + std::to_string(w));
+    };
+    const auto ch = r.Challenge(challenge_req(11), cookie);
+    check("the challenge is issued", ch.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued), stage_word(ch.status));
+    auto req = seal(ch, secret, true);
+    const auto t0 = std::chrono::steady_clock::now();
+    r.Sealed(req, cookie);
+    const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    ControlUnlockStatusResultMessage res{};
+    check("the result is Injected (typed)", wait_result(r, 11, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected),
+          [&] { return std::string(stage_word(res.stage)); });
+    check("...terminal, no win32", res.terminal == 1 && res.win32Error == 0);
+    check("EXACTLY the units sent were typed, once", seams.count() == 1 && seams.typed[0] == secret,
+          std::to_string(seams.count()) + " typings");
+    check("the control thread was not held for the typing", heldMs < 200, std::to_string(heldMs) + " ms");
+    r.Sealed(req, cookie);  // the viewer retransmits
+    Sleep(200);
+    check("a retransmit of the same request types nothing more and answers the same",
+          seams.count() == 1 && r.PollResult(11, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected));
+    req.requestId = 12;
+    r.Sealed(req, cookie);
+    check("the same blob again under another request id: refused (no challenge for it), nothing typed",
+          wait_result(r, 12, &res, 500) && res.stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) &&
+              seams.count() == 1,
+          [&] { return std::string(stage_word(res.stage)); });
+    check("the result line names request and stage only", lines.size() == 2 && lines[0] == "11 8 0", lines.empty() ? "" : lines[0]);
+    check("injections() counts the one typing", r.injections() == 1);
+  }
+
+  {
+    std::printf("\n--- an UNLOCK-purpose blob (the lock-screen unlock's sealing) ---\n");
+    Seams seams;
+    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 600);
+    const auto ch = r.Challenge(challenge_req(21), cookie);
+    r.Sealed(seal(ch, secret, false), cookie);
+    ControlUnlockStatusResultMessage res{};
+    check("REFUSED at the tag: DecryptFailed", wait_result(r, 21, &res) && res.stage == static_cast<uint16_t>(UnlockStage::DecryptFailed),
+          [&] { return std::string(stage_word(res.stage)); });
+    Sleep(200);
+    check("...and NOTHING was typed", seams.count() == 0);
+    next_challenge_window();
+    const auto ch2 = r.Challenge(challenge_req(22), cookie);
+    r.Sealed(seal(ch2, secret, true), cookie);
+    check("a fresh prelogin-purpose credential after it still goes through",
+          wait_result(r, 22, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) && seams.count() == 1);
+  }
+
+  {
+    std::printf("\n--- the input target is not the logon UI ---\n");
+    Seams seams;
+    seams.atTarget = false;
+    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 500);
+    const auto ch = r.Challenge(challenge_req(31), cookie);
+    const auto t0 = std::chrono::steady_clock::now();
+    r.Sealed(seal(ch, secret, true), cookie);
+    const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("the control thread is not held while the worker waits", heldMs < 200, std::to_string(heldMs) + " ms");
+    ControlUnlockStatusResultMessage res{};
+    check("no result while it waits", !r.PollResult(31, &res));
+    check("RejectedPolicy after the wait", wait_result(r, 31, &res) && res.stage == static_cast<uint16_t>(UnlockStage::RejectedPolicy),
+          [&] { return std::string(stage_word(res.stage)); });
+    check("...and NOTHING was typed", seams.count() == 0);
+
+    std::printf("\n--- the target turns up within the wait ---\n");
+    next_challenge_window();
+    const auto ch2 = r.Challenge(challenge_req(32), cookie);
+    r.Sealed(seal(ch2, secret, true), cookie);
+    Sleep(250);
+    seams.atTarget = true;
+    check("typed once it is there", wait_result(r, 32, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) &&
+                                        seams.count() == 1 && seams.typed[0] == secret,
+          [&] { return std::string(stage_word(res.stage)); });
+  }
+
+  {
+    std::printf("\n--- binding: request id, session cookie, rate limit, expiry of use ---\n");
+    Seams seams;
+    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 300);
+    const auto ch = r.Challenge(challenge_req(41), cookie);
+    const auto again = r.Challenge(challenge_req(42), cookie);
+    check("a second challenge inside 500 ms is refused (RejectedPolicy)",
+          again.status == static_cast<uint16_t>(UnlockStage::RejectedPolicy), stage_word(again.status));
+    auto req = seal(ch, secret, true);
+    r.Sealed(req, cookie + 1);
+    ControlUnlockStatusResultMessage res{};
+    check("another control session's cookie: refused, nothing typed",
+          wait_result(r, 41, &res, 500) && res.stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) && seams.count() == 0,
+          [&] { return std::string(stage_word(res.stage)); });
+    next_challenge_window();
+    const auto ch3 = r.Challenge(challenge_req(43), cookie);
+    auto stale = seal(ch3, secret, true);
+    stale.requestId = 99;
+    r.Sealed(stale, cookie);
+    check("a request id the challenge was not issued for: refused",
+          wait_result(r, 99, &res, 500) && res.stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) && seams.count() == 0);
+    auto tampered = seal(ch3, secret, true);
+    tampered.cipher[3] ^= 0x01;
+    r.Sealed(tampered, cookie);
+    check("a tampered ciphertext: DecryptFailed, nothing typed",
+          wait_result(r, 43, &res, 500) && res.stage == static_cast<uint16_t>(UnlockStage::DecryptFailed) && seams.count() == 0);
+  }
+
+  {
+    std::printf("\n--- the typing fails ---\n");
+    Seams seams;
+    seams.failTyping = true;
+    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 300);
+    const auto ch = r.Challenge(challenge_req(51), cookie);
+    r.Sealed(seal(ch, secret, true), cookie);
+    ControlUnlockStatusResultMessage res{};
+    check("InternalError with the OS's code", wait_result(r, 51, &res) &&
+                                                  res.stage == static_cast<uint16_t>(UnlockStage::InternalError) && res.win32Error == 5,
+          [&] { return std::string(stage_word(res.stage)); });
+    check("...and it is not counted as typed", r.injections() == 0);
+  }
+
+  {
+    std::printf("\n--- the product's target question, here ---\n");
+    // This process is not LogonUI.exe, so the product's answer must be no -- whatever is in front.
+    const auto productTarget = remote60::native_poc::prelogin::ProductCredTarget();
+    check("ProductCredTarget(): the foreground here is not the logon UI", !productTarget());
+  }
+
+  std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
+  return gFailures ? 1 : 0;
+}

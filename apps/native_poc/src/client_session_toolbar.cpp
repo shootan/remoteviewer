@@ -34,6 +34,7 @@ enum ButtonId : int {
   kButtonShowDesktop = 4,
   kButtonSwitchWindow = 5,
   kButtonReboot = 6,  // prelogin-service r3: opens the reboot confirm popup
+  kButtonPreloginLogin = 7,  // prelogin-ui r3: "Windows 로그인" while the host is at the logon screen
 };
 
 struct Button {
@@ -190,6 +191,8 @@ SIZE rebuild_layout() {
   // Remote reboot (prelogin-service r3): inside the toolbar (never a bare standalone button), gated on
   // the host advertising the capability so an old host never shows an item it cannot serve.
   if (g.callbacks.onReboot && g.state.rebootSupported) add(kButtonReboot, L"다시 시작", false);
+  // "Windows 로그인" (prelogin-ui r3): only while the host says it is at the pre-login screen.
+  if (g.callbacks.onPreloginLogin && g.state.preloginCredAvailable) add(kButtonPreloginLogin, L"Windows 로그인", false);
 
   const int statusWidth = text_width(status_text());
   SIZE size{};
@@ -460,6 +463,9 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       } else if (pressed == kButtonReboot) {
         if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] reboot clicked");
         if (g.callbacks.onReboot) g.callbacks.onReboot();
+      } else if (pressed == kButtonPreloginLogin) {
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] windows login clicked");
+        if (g.callbacks.onPreloginLogin) g.callbacks.onPreloginLogin();
       }
       return 0;
     }

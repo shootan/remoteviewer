@@ -15,6 +15,7 @@
 #include "viewer_recv_liveness.hpp"
 
 #include "viewer_unlock.hpp"
+#include "reboot_menu_policy.hpp"
 #include "peer_version.hpp"
 #include "paste_apply_wire.hpp"
 #include "viewer_paste_gate.hpp"
@@ -357,6 +358,20 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
     // every pong like the others so a reconnect never inherits a stale answer.
     ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+    // "Windows 로그인": typed is not logged in. The logon is the host leaving the pre-login screen
+    // after the password went in (within two minutes of it); only then is "logged in" shown.
+    if (const uint64_t typedAt = ctx.session.preloginInjectedAtUs.load(std::memory_order_acquire)) {
+      const bool stillAtLogon = (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) != 0;
+      const bool recent = qpc_now_us() - typedAt < 120000000ull;
+      if (!stillAtLogon || !recent) {
+        ctx.session.preloginInjectedAtUs.store(0, std::memory_order_release);
+        if (!stillAtLogon && recent) {
+          std::cout << "[native-video-client][prelogin-login] host left the logon screen after the typed password\n";
+          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult,
+                       static_cast<WPARAM>(remote60::native_poc::UnlockStage::SessionUnlocked), 0);
+        }
+      }
+    }
     // Mouse X buttons (back / forward): sent only to a host that says it maps them. Set every
     // pong like the others, so a reconnect never inherits an answer. (mouse-xbutton r1)
     ctx.session.hostMouseXButtons.store(
@@ -707,6 +722,31 @@ void ControlClient::Run() {
           std::cout << "[native-video-client][unlock] no usable stored password (set it again)\n";
         }
       }
+    }
+    // "Windows 로그인" (prelogin-ui r3, item 5): the prompt left a password; seal it under the prelogin
+    // purpose, let the host's pre-login worker type it, zero it, and tell the window what happened.
+    if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) {
+      std::wstring pw;
+      {
+        std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+        pw.swap(ctx.session.preloginCredPassword);
+      }
+      ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+      uint16_t stage = kPreloginNotAtLogon;
+      uint32_t win32 = 0;
+      std::string status = "not sent: the host is no longer at the logon screen";
+      if (!pw.empty() &&
+          remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc,
+                                                   ctx.session.hostCaptureFlags.load(std::memory_order_relaxed))
+              .sealedEntryAvailable) {
+        (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
+      }
+      if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+      std::cout << "[native-video-client][prelogin-login] " << status << " stage=" << stage << " win32=" << win32 << "\n";
+      if (stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Injected)) {
+        ctx.session.preloginInjectedAtUs.store(qpc_now_us(), std::memory_order_release);
+      }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, stage, static_cast<LPARAM>(win32));
     }
     // Remote reboot (prelogin-service r3): the confirm popup set rebootRequested on the UI thread. Send
     // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.

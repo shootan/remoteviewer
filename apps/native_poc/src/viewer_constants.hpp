@@ -105,6 +105,9 @@ constexpr UINT kMsgControlResumed = WM_APP + 16;
 // clipboard (text), published the image, accepted the files, or did not. lParam is a heap
 // PasteAnswer (viewer_paste_gate.hpp) the handler owns. Only then does the paste key go.
 constexpr UINT kMsgPasteResult = WM_APP + 17;
+// "Windows 로그인" (prelogin-ui r3, item 5): the control thread's outcome. wParam is the terminal
+// UnlockStage (or kPreloginNotAtLogon / 0), lParam the host's win32 error. Shown in a result window.
+constexpr UINT kMsgPreloginCredResult = WM_APP + 18;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

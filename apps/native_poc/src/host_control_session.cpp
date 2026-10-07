@@ -49,6 +49,7 @@
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_filter.hpp"
 #include "prelogin_reboot_gate.hpp"
+#include "prelogin_cred_host.hpp"
 #include "prelogin_admin_pipe.hpp"
 #include "reboot_wire.hpp"
 #include <mutex>
@@ -102,6 +103,23 @@ bool enable_process_privilege(const char* name) {
   }
   CloseHandle(token);
   return ok;
+}
+
+// prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" (prelogin_cred_host.hpp).
+// Its result line names the request and the stage, never the credential.
+remote60::native_poc::prelogin::PreloginCredReceiver& prelogin_cred() {
+  static remote60::native_poc::prelogin::PreloginCredReceiver receiver(
+      remote60::native_poc::prelogin::ProductCredInject(), remote60::native_poc::prelogin::ProductCredTarget(),
+      remote60::native_poc::prelogin::ProductCredHostId());
+  static const bool logged = [] {
+    receiver.onResult = [](uint32_t requestId, uint16_t stage, uint32_t win32) {
+      std::cout << "[native-video-host][prelogin-cred] requestId=" << requestId << " stage=" << stage
+                << " win32=" << win32 << "\n";
+    };
+    return true;
+  }();
+  (void)logged;
+  return receiver;
 }
 
 // The fixed local restart (prelogin-service r3 R2/R4): short grace, non-forced, planned reason. The
@@ -535,7 +553,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockChallengeMessage rsp{};
-      if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
+      if (args.preloginMode) {
+        // prelogin-ui r3 (item 5): before login the worker answers it -- the "Windows 로그인" credential.
+        rsp = prelogin_cred().Challenge(req, unlockCookie);
+      } else if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
         rsp = ControlUnlockChallengeMessage{};
         rsp.requestId = req.requestId;
         rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
@@ -553,7 +574,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       const uint32_t sealedRequestId = req.requestId;  // preserve before we wipe the ciphertext copy
-      gUnlockRelay.SealedAsync(req, unlockCookie);
+      if (args.preloginMode) {
+        prelogin_cred().Sealed(req, unlockCookie);  // opened under the prelogin purpose, typed, zeroed
+      } else {
+        gUnlockRelay.SealedAsync(req, unlockCookie);
+      }
       SecureZeroMemory(&req, sizeof(req));  // drop the ciphertext copy promptly
       ControlUnlockAcceptedMessage rsp{};
       rsp.header.magic = remote60::native_poc::kMagic;
@@ -571,7 +596,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockStatusResultMessage rsp{};
-      if (!gUnlockRelay.PollResult(req.requestId, &rsp)) {
+      const bool haveResult = args.preloginMode ? prelogin_cred().PollResult(req.requestId, &rsp)
+                                                : gUnlockRelay.PollResult(req.requestId, &rsp);
+      if (!haveResult) {
         rsp.requestId = req.requestId;
         rsp.stage = static_cast<uint16_t>(UnlockStage::ConnectStarted);  // still running
         rsp.terminal = 0;

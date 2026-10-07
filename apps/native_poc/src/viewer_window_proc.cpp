@@ -20,6 +20,7 @@
 #include "viewer_paste_gate.hpp"
 #include "viewer_paste_ui.hpp"
 #include "viewer_unlock.hpp"
+#include "reboot_menu_policy.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
 #include "viewer_nv12_renderer.hpp"
@@ -210,10 +211,35 @@ void picker_release(ViewerState& ctx, HWND hwnd, const ClientLayout& layout, int
   }
 }
 
+void request_prelogin_login(ViewerState& ctx, HWND owner) {
+  const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+  if (!remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc, flags).sealedEntryAvailable) {
+    std::cout << "[native-video-client][prelogin-login] host is not at the logon screen; not offered\n";
+    return;
+  }
+  if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) return;  // one already on its way
+  std::wstring pw;
+  const bool entered = prompt_prelogin_password(owner, &pw);
+  if (entered) {
+    std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+    pw.swap(ctx.session.preloginCredPassword);  // pw now holds whatever was there (nothing, normally)
+  }
+  if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+  if (!entered) return;  // cancelled: nothing sent
+  ctx.session.preloginCredRequested.store(true, std::memory_order_release);
+}
+
 // The Ctrl+Alt local hotkeys of WM_KEYDOWN: F5 refresh the window list, F9 capture overview,
 // [ ] bitrate down/up, ; ' keyint down/up. True when consumed.
 bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
   if (local_hotkey_modifiers_active() && wp == 'U') {  // Ctrl+Alt+U: unlock the host lock screen
+    // A host at the pre-login screen has no lock screen to unlock: the same keys are "Windows 로그인".
+    if (remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc,
+                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed))
+            .sealedEntryAvailable) {
+      request_prelogin_login(ctx, hwnd);
+      return true;
+    }
     if (!has_unlock_password(0)) {
       std::wstring pw;
       if (!prompt_unlock_password(hwnd, &pw)) return true;  // cancelled
@@ -974,6 +1000,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgPasteResult: {
       std::unique_ptr<PasteAnswer> answer(reinterpret_cast<PasteAnswer*>(lp));
       if (answer) on_paste_answer(ctx, hwnd, *answer);
+      return 0;
+    }
+    case kMsgPreloginCredResult: {
+      // "Windows 로그인": typed (Injected) and logged in (SessionUnlocked, seen afterwards) are two
+      // different windows of text; neither carries the password.
+      show_prelogin_cred_result(hwnd, prelogin_cred_result_text(static_cast<uint16_t>(wp), static_cast<uint32_t>(lp)));
       return 0;
     }
     case kMsgApplyClipboard: {

@@ -109,6 +109,9 @@ void push_session_toolbar_state(ViewerState& ctx) {
   // Remote reboot menu item is shown only when the host advertises the capability (prelogin-service r3).
   state.rebootSupported = remote60::native_poc::DecideRebootMenu(
                               ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)).menuEnabled;
+  state.preloginCredAvailable = remote60::native_poc::DecidePreloginCred(
+                                    remote60::native_poc::ViewerPlatform::Pc,
+                                    ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)).sealedEntryAvailable;
   state.relay = ctx.session.relayPath.load(std::memory_order_relaxed);
   state.pathKnown = ctx.session.relayPathKnown.load(std::memory_order_relaxed);
   const auto metricsSnapshot = ctx.metrics.Snapshot();

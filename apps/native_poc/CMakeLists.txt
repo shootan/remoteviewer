@@ -87,6 +87,8 @@ add_executable(remote60_native_video_host_poc
   src/prelogin_ready_signal.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_admin_pipe.cpp
+  src/prelogin_cred_host.cpp
+  src/sealed_unlock.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -1089,6 +1091,44 @@ if(MSVC)
   target_compile_options(remote60_viewer_mouse_xbutton_e2e_test PRIVATE /utf-8)
 endif()
 add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_host_poc)
+
+# prelogin-ui r3 (item 5): "Windows 로그인" end to end -- the product's toolbar item / Ctrl+Alt+U,
+# password window and control worker, sealed under the prelogin purpose, to the test build of the host
+# in --prelogin (directory-authenticated, SeShutdownPrivilege deleted), typed into a window of the test.
+add_executable(remote60_viewer_prelogin_login_e2e_test
+  src/viewer_prelogin_login_e2e_test.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_input_forward.cpp
+  src/viewer_control_client.cpp
+  src/viewer_present.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/viewer_unlock.cpp
+  src/client_session_toolbar.cpp
+  src/input_macro.cpp
+  src/viewer_session_watchdog.cpp
+  src/viewer_cursor_overlay.cpp
+  src/viewer_frame_gate.cpp
+  src/sealed_unlock.cpp
+  src/mf_h264_codec.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_prelogin_login_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_prelogin_login_e2e_test PRIVATE
+  remote60_clip_image remote60_test_scratch_dir
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt advapi32
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_prelogin_login_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_viewer_prelogin_login_e2e_test remote60_native_video_host_migration_seam)
 
 # clip-image ④ (3rd rate agreement, DECISIONS §5): the transfer bar -- percent, seconds, Cancel --
 # through the product's window procedure, image client wiring and control worker, against a real
@@ -2159,6 +2199,19 @@ target_include_directories(remote60_prelogin_admin_pipe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_admin_pipe_test PRIVATE advapi32)
 if(MSVC)
   target_compile_options(remote60_prelogin_admin_pipe_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" -- the product receiver with
+# its typing and target question as seams; the viewer's sealing for both purposes.
+add_executable(remote60_prelogin_cred_host_test
+  src/prelogin_cred_host_test.cpp
+  src/prelogin_cred_host.cpp
+  src/sealed_unlock.cpp
+)
+target_include_directories(remote60_prelogin_cred_host_test PRIVATE src)
+target_link_libraries(remote60_prelogin_cred_host_test PRIVATE bcrypt user32 advapi32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
 endif()
 
 # prelogin-ui r1 (item 4): the toggle in GNLinkHost's own window (the asInvoker test build), worked

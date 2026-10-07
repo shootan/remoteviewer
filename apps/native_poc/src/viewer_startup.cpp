@@ -261,6 +261,8 @@ int create_window_and_toolbar(ViewerContext& ctx) {
         ctx.session.rebootRequested.store(true, std::memory_order_release);
       }
     };
+    // "Windows 로그인" (prelogin-ui r3): the same entry as Ctrl+Alt+U at a pre-login host.
+    toolbarCallbacks.onPreloginLogin = [&ctx] { request_prelogin_login(ctx, ctx.session.hwnd); };
     remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);
     push_session_toolbar_state(ctx);

@@ -629,6 +629,9 @@ void toggle_macro_window(ViewerState&, HWND) {}
 bool save_unlock_password(uint64_t, const std::wstring&) { return false; }
 bool has_unlock_password(uint64_t) { return false; }
 bool prompt_unlock_password(HWND, std::wstring*) { return false; }
+bool prompt_prelogin_password(HWND, std::wstring*) { return false; }
+std::wstring prelogin_cred_result_text(uint16_t, uint32_t) { return {}; }
+void show_prelogin_cred_result(HWND, const std::wstring&) {}
 void poll_session_liveness(ViewerState&, HWND) {}
 
 }  // namespace remote60::native_poc::viewer
