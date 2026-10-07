@@ -48,6 +48,7 @@
 #include "udp_control_channel.hpp"
 #include "viewer_control_client.hpp"
 #include "viewer_control_resume.hpp"
+#include "viewer_input_forward.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_state.hpp"
 #include "viewer_unlock.hpp"
@@ -1166,6 +1167,28 @@ int wmain(int argc, wchar_t** argv) {
       check("...a navigation key (Tab) still went (2 edges)", sent == 2, std::to_string(sent));
       check("...and the host dropped nothing: no character key ever reached it",
             host.Count("dropped non-navigation key") == droppedBefore);
+    }
+
+    // ---- 4b. r7 H6: an input already in the queue is looked at again right before it leaves
+    std::cout << "\n--- 4b. r7 H6: a character key already queued (before the role was known) is not sent ---\n";
+    {
+      // The keyboard's gate is passed by putting the key straight into the send queue with the product's
+      // own message builder and enqueue (what the gate itself calls) -- a key that got in while the host
+      // looked like a desktop. The control thread's last look must hold it back.
+      const uint64_t atSendBefore = ctx.session.preloginHeldBackAtSend.load();
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const int droppedBefore = host.Count("dropped non-navigation key");
+      for (uint16_t kind : {static_cast<uint16_t>(5), static_cast<uint16_t>(6)}) {
+        remote60::native_poc::viewer::enqueue_control_input_message(
+            ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, kind, 0, 0, 0, 0, 'K', qpc_now_us()));
+      }
+      pump_until([&] { return ctx.session.preloginHeldBackAtSend.load() - atSendBefore >= 2; }, 5000);
+      pump_until([] { return false; }, 1000);
+      check("H6: both edges were held back at the send (the last look), none sent",
+            ctx.session.preloginHeldBackAtSend.load() - atSendBefore == 2 && ctx.session.inputEventsSent.load() == sentBefore,
+            std::to_string(ctx.session.preloginHeldBackAtSend.load() - atSendBefore) + " held at send, " +
+                std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
+      check("...and the host never saw them", host.Count("dropped non-navigation key") == droppedBefore);
     }
 
     // ---- 5. r5 G11: the remote restart's answer is shown, not only logged
