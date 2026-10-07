@@ -146,4 +146,36 @@ inline bool ParseMachineRecord(const uint8_t* b, size_t n, MachineRecord* out) {
   return true;
 }
 
+// --- directory credential carried inside the record's `credential` bytes ---------------------------
+// The directory client identifies a host by STRING accountId / hostId / hostToken (host.json), which the
+// SYSTEM prelogin worker cannot read from the per-user cache. So the machine record's opaque `credential`
+// blob carries exactly those three strings; the record's directoryOrigin is the URL. This keeps the
+// record struct stable while giving the worker the real directory credential to adopt (r4 #3).
+struct DirectoryCredential {
+  std::string accountId;
+  std::string hostId;
+  std::string hostToken;
+};
+
+inline std::vector<uint8_t> PackDirectoryCredential(const DirectoryCredential& c) {
+  std::vector<uint8_t> o;
+  detail::put_bytes(&o, reinterpret_cast<const uint8_t*>(c.accountId.data()), c.accountId.size());
+  detail::put_bytes(&o, reinterpret_cast<const uint8_t*>(c.hostId.data()), c.hostId.size());
+  detail::put_bytes(&o, reinterpret_cast<const uint8_t*>(c.hostToken.data()), c.hostToken.size());
+  return o;
+}
+
+inline bool UnpackDirectoryCredential(const std::vector<uint8_t>& b, DirectoryCredential* out) {
+  size_t off = 0;
+  std::vector<uint8_t> a, h, t;
+  if (!detail::get_bytes(b.data(), b.size(), &off, &a)) return false;
+  if (!detail::get_bytes(b.data(), b.size(), &off, &h)) return false;
+  if (!detail::get_bytes(b.data(), b.size(), &off, &t)) return false;
+  if (off != b.size()) return false;  // trailing garbage -> reject
+  out->accountId.assign(a.begin(), a.end());
+  out->hostId.assign(h.begin(), h.end());
+  out->hostToken.assign(t.begin(), t.end());
+  return true;
+}
+
 }  // namespace remote60::native_poc::prelogin

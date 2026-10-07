@@ -464,6 +464,14 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   observeToken_ = random_token(16);
   LoadCache();
 
+  // Prelogin machine credential (r4 #3): adopt the SYSTEM-held hostId/hostToken, overriding any per-user
+  // cache. The agent then has a token (EnsureRegistered is a no-op) and heartbeats as the machine.
+  if (!cfg_.preloadedHostToken.empty() && !cfg_.preloadedHostId.empty()) {
+    hostToken_ = cfg_.preloadedHostToken;
+    hostId_ = cfg_.preloadedHostId;
+    std::cout << "[native-video-host] directory using machine credential hostId=" << hostId_ << "\n";
+  }
+
   if (hostToken_.empty() && cfg_.password.empty()) {
     if (outError) {
       *outError = "no cached host token; supply --directory-pw once to register this machine";

@@ -85,6 +85,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_control.cpp
   src/host_startup_graphics.cpp
   src/prelogin_ready_signal.cpp
+  src/prelogin_machine_store.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -219,6 +220,7 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowsapp
   advapi32
   bcrypt
+  crypt32
   windowscodecs
   shlwapi
 )
@@ -2204,6 +2206,13 @@ add_executable(remote60_prelogin_input_filter_test
   src/prelogin_input_filter_test.cpp
 )
 target_include_directories(remote60_prelogin_input_filter_test PRIVATE src)
+
+# prelogin-service r4 item 2: input SendInput-path evidence (own window; nav filter drops characters).
+add_executable(remote60_prelogin_input_inject_e2e_test
+  src/prelogin_input_inject_e2e_test.cpp
+)
+target_include_directories(remote60_prelogin_input_inject_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_input_inject_e2e_test PRIVATE user32)
 
 # prelogin-service r4 item 7: handoff ready-signal primitive.
 add_executable(remote60_prelogin_ready_signal_test
