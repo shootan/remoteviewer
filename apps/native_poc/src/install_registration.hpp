@@ -63,6 +63,11 @@ struct RegistrationTarget {
   std::wstring clientExeName;
   std::wstring serviceExeName;
   std::wstring streamExeName;
+  // Prelogin remote access (prelogin-service r3, f): when the feature is enabled, register the service
+  // AUTO_START (reachable before login) by passing --install-service-prelogin instead of
+  // --install-service. install_service preserves an existing AUTO on update and never force-DEMANDs, so
+  // an update that forgets to set this does not turn a feature-on box off.
+  bool preloginEnabled = false;
 
   bool validate(std::string* detail = nullptr) const;
 };

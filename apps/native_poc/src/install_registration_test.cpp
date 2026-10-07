@@ -192,6 +192,24 @@ int main() {
           narrow(read_value(subkey, L"UninstallString")));
   }
 
+  // ---------------------------------------------------------------- prelogin install flag (f)
+  {
+    Recorder rec;
+    RegistrationTarget t = base_target(subkey, L"0.2.150");
+    t.preloginEnabled = true;
+    const RegistrationResult r = register_install(t, rec.ops());
+    check("prelogin registration succeeds", r.ok, r.detail);
+    check("prelogin install passes --install-service-prelogin (AUTO_START)",
+          rec.ran_containing(L"--install-service-prelogin"), narrow(rec.ran.empty() ? L"" : rec.ran[0]));
+  }
+  {
+    Recorder rec;
+    const RegistrationResult r = register_install(base_target(subkey, L"0.2.150"), rec.ops());
+    check("default (feature off) registration succeeds", r.ok, r.detail);
+    check("NEGATIVE: the default install does NOT use the prelogin arg",
+          !rec.ran_containing(L"-prelogin"));
+  }
+
   {
     // Registering again with a different version must move DisplayVersion. This is what an update
     // does, and it is the case re-running the OLD installer binary could not have got right.
