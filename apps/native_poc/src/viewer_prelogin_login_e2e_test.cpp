@@ -36,6 +36,8 @@
 #include "control_resume_e2e_support.hpp"
 #include "directory_fake_server.hpp"
 
+#include <sddl.h>
+
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -46,6 +48,7 @@
 #include "native_video_client_tcp_control.hpp"
 #include "time_utils.hpp"
 #include "udp_control_channel.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "viewer_control_client.hpp"
 #include "viewer_control_resume.hpp"
 #include "viewer_input_forward.hpp"
@@ -203,6 +206,57 @@ struct Targets {
   }
   void Stop() {
     if (tid) PostThreadMessageW(tid, WM_QUIT, 0, 0);
+    if (t.joinable()) t.join();
+  }
+};
+
+// r9 R5: the service's side of Ctrl+Alt+Del, served by this test on the host's test pipe for one step:
+// the product's admin server and decision, with the OS call (SendSAS) standing in as a counter that
+// answers what the test sets.
+struct SasService {
+  std::mutex mu;
+  int calls = 0;
+  uint32_t callerSession = 0;
+  uint8_t answer = 0;      // PreloginSasResult to give
+  uint32_t answerWin32 = 0;
+  bool answerCad = false;  // DisableCAD
+  remote60::native_poc::prelogin::RebootLedger ledger;
+  std::atomic<bool> run{false};
+  std::thread t;
+  void start(const std::wstring& pipe, const std::wstring& hostImage) {
+    run = true;
+    t = std::thread([this, pipe, hostImage] {
+      namespace pl = remote60::native_poc::prelogin;
+      pl::AdminPrimitives p;
+      p.recordPath = [] { return std::wstring(); };
+      p.readFloor = [](uint64_t* out) { *out = 0; return true; };
+      p.featureEnabled = [] { return true; };
+      p.requestSas = [this](uint32_t session, uint32_t* win32, bool* cad) -> uint8_t {
+        std::lock_guard<std::mutex> l(mu);
+        ++calls;
+        callerSession = session;
+        *win32 = answerWin32;
+        *cad = answerCad;
+        return answer;
+      };
+      HANDLE tok = nullptr;
+      OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok);
+      DWORD need = 0;
+      GetTokenInformation(tok, TokenUser, nullptr, 0, &need);
+      std::string buf(need, '\0');
+      GetTokenInformation(tok, TokenUser, buf.data(), need, &need);
+      CloseHandle(tok);
+      LPWSTR sid = nullptr;
+      ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, &sid);
+      const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + std::wstring(sid) + L")";
+      LocalFree(sid);
+      pl::RunPreloginAdminServer(p, [this] { return run.load(); }, pipe.c_str(), sddl.c_str(), [](void*) { return true; },
+                                 [hostImage](void* h) { return pl::ClientImageIs(h, hostImage); }, &ledger);
+    });
+    Sleep(200);
+  }
+  void stop() {
+    run = false;
     if (t.joinable()) t.join();
   }
 };
@@ -396,8 +450,9 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
   const std::wstring wurl(url.begin(), url.end());
   std::vector<std::wstring> fixtures = {
       L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_CRED_TARGET_TITLE=" + targetTitle,
-      // a test pipe nobody serves: the host never reaches this PC's installed service
-      L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId())};
+      // a test pipe nobody serves (except this test, for the Ctrl+Alt+Del step): never this PC's service
+      L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()),
+      L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())};
   if (!extraEnv.empty()) fixtures.push_back(extraEnv);
   std::wstring cmd;
   std::vector<wchar_t> env;
@@ -748,6 +803,18 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(phone.PreloginInputHeldBack() - heldEarly));
     check("...while a navigation key and the pointer still go", tabQueued && moveQueued);
     check("...and the host dropped nothing: no character reached it", host.Count("dropped non-navigation key") == 0);
+    // r9 R5: Ctrl+Alt+Del from the shared session (the Android app's). Nobody serves this run's admin pipe, so
+    // the worker's delegation cannot reach a service: Failed, ERROR_SERVICE_NOT_ACTIVE -- the request went the
+    // whole way to it and the answer came back.
+    const uint32_t sasId = phone.RequestSas();
+    uint32_t gotSas = 0, sasWin32 = 0;
+    int sasOutcome = -1;
+    const bool sasAnswered = sasId != 0 && wait_until([&] { return phone.TakeSasOutcome(&gotSas, &sasOutcome, &sasWin32); }, 15000);
+    check("r9: the shared session sent the pre-login host nothing outside its allowlist (the link stayed up)",
+          host.Count("[control][prelogin] rejected control type=") == 0, host.log().substr(host.log().size() > 600 ? host.log().size() - 600 : 0));
+    check("R5: the shared session asks Ctrl+Alt+Del of the pre-login host (0x20000) and gets its answer",
+          sasAnswered && gotSas == sasId && sasOutcome == 4 && sasWin32 == 1062,
+          "id " + std::to_string(sasId) + " flags " + std::to_string(phone.HostCaptureFlags()) + " outcome " + std::to_string(sasOutcome) + " win32 " + std::to_string(sasWin32) + (sasAnswered ? std::string() : " | host: " + host.log().substr(host.log().size() > 1500 ? host.log().size() - 1500 : 0)));
     phone.Disconnect();
   }
 
@@ -785,6 +852,11 @@ int wmain(int argc, wchar_t** argv) {
       toolbarLines.push_back(line);
     };
     cb.onPreloginLogin = [&ctx] { remote60::native_poc::viewer::request_prelogin_login(ctx, ctx.session.hwnd); };
+    // r9 R5: Ctrl+Alt+Del, as viewer_startup.cpp wires it.
+    cb.onSas = [&ctx] {
+      ctx.session.sasRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire), std::memory_order_release);
+      ctx.session.sasRequested.store(true, std::memory_order_release);
+    };
     // The restart item, as viewer_startup.cpp wires it (r5 G11: the confirm is bound to this connection).
     cb.onReboot = [&ctx] {
       const uint32_t f = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
@@ -1254,6 +1326,77 @@ int wmain(int argc, wchar_t** argv) {
       check("...as the host answered it (auth=1, result=3 Failed)", host.Count(" auth=1 result=3 win32=1062") == 1);
     }
 
+    // ---- 5b. r9 R5: Ctrl+Alt+Del at the logon screen, through the worker to the service
+    std::cout << "\n--- 5b. r9 R5: Ctrl+Alt+Del from the toolbar reaches the service; its answer is shown ---\n";
+    {
+      SasService svc;
+      svc.start(L"\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()), dir + L"GNLinkStream.exe");
+      remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+      session_toolbar_set_visible(true);
+      session_toolbar_follow_owner();
+      pump_until([] { return false; }, 300);
+      const int sx = find_item("8");
+      check("R5: the toolbar lays out \"Ctrl+Alt+Del\" (item 8) -- the pre-login host offers it (0x20000)",
+            sx >= 0 && (flags() & remote60::native_poc::kCaptureFlagPreloginSasV1) != 0, std::to_string(sx));
+      auto click_and_read = [&](const wchar_t* capture) {
+        std::wstring answer;
+        std::thread op([&] {
+          HWND b = wait_window(kPreloginResultClass, nullptr, 15000);
+          if (b) {
+            answer = result_box_text(b);
+            save_capture(b, capture);
+            close_result(b);
+          }
+        });
+        if (sx >= 0) {
+          session_toolbar_set_visible(true);
+          pump_until([] { return false; }, 200);
+          RECT rc{};
+          GetClientRect(bar, &rc);
+          PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(sx, (rc.bottom - rc.top) / 2));
+          PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(sx, (rc.bottom - rc.top) / 2));
+        }
+        pump_until([&] { return !answer.empty(); }, 20000);
+        join_pumping(op);
+        return answer;
+      };
+      const std::wstring sent = click_and_read(L"sas_result_sent");
+      DWORD hostSession = 0;
+      ProcessIdToSessionId(host.pi.dwProcessId, &hostSession);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        check("R5: the click reached the service once, asked for the worker's own session",
+              svc.calls == 1 && svc.callerSession == hostSession, std::to_string(svc.calls));
+      }
+      check("R5: ...and the viewer SHOWS the answer: sent to the logon screen", sent.find(L"Ctrl+Alt+Del 을 보냈습니다") != std::wstring::npos,
+            utf8(sent));
+      check("...as the host answered it (result 0)", host.Count("[native-video-host][control][sas] requestId=") == 1 &&
+                                                         host.Count(" result=0 win32=0") >= 1);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        svc.answer = 1;  // PolicyDenied
+        svc.answerWin32 = 0;  // SoftwareSASGeneration = 0
+      }
+      Sleep(600);
+      const std::wstring denied = click_and_read(L"sas_result_policy");
+      check("R5: a policy that does not allow it is SAID, with the policy and its value (not \"sent\")",
+            denied.find(L"SoftwareSASGeneration=0") != std::wstring::npos && denied.find(L"보냈습니다") == std::wstring::npos,
+            utf8(denied));
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        svc.answer = 5;  // SentUnconfirmed: the policy is not set (this PC's case)
+        svc.answerWin32 = 0;
+        svc.answerCad = true;  // and DisableCAD is set
+      }
+      Sleep(600);
+      const std::wstring unconfirmed = click_and_read(L"sas_result_unconfirmed");
+      check("R5: policy unset: sent, said to be UNCONFIRMED (look at the logon screen), and DisableCAD is said",
+            unconfirmed.find(L"보냈습니다") != std::wstring::npos && unconfirmed.find(L"확인되지 않습니다") != std::wstring::npos &&
+                unconfirmed.find(L"필요 없도록") != std::wstring::npos,
+            utf8(unconfirmed));
+      svc.stop();
+    }
+
     // ---- typed is not logged in: no "logged in" while the host stays at the logon screen
     pump_until([] { return false; }, 1500);
     check("no \"logged in\" window appeared (the host is still at the logon screen)",
@@ -1325,6 +1468,8 @@ int wmain(int argc, wchar_t** argv) {
     session_toolbar_follow_owner();
     pump_until([] { return false; }, 300);
     check("NEGATIVE: the toolbar lays out NO \"Windows 로그인\" item", find_item("7") < 0);
+    check("NEGATIVE: ...nor \"Ctrl+Alt+Del\" (r9 R5: only a pre-login host offers it)", find_item("8") < 0 &&
+              (ctx.session.hostCaptureFlags.load() & remote60::native_poc::kCaptureFlagPreloginSasV1) == 0);
     save_capture(bar, L"toolbar_not_prelogin");
 
     std::cout << "\n--- Ctrl+Alt+U takes the existing unlock path ---\n";

@@ -1200,6 +1200,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       show_prelogin_notice(hwnd, kRebootResultTitle,
                            reboot_result_text(static_cast<uint8_t>(wp), static_cast<uint32_t>(lp)));
       return 0;
+    case kMsgSasResult:
+      // r9 R5: what Ctrl+Alt+Del came to -- sent, or why not (the remote policy, not at the logon screen ...).
+      show_prelogin_notice(hwnd, kSasResultTitle, sas_result_text(static_cast<uint8_t>(wp & 0xFF), static_cast<uint32_t>(lp),
+                                                                  static_cast<uint8_t>((wp >> 8) & 0xFF)));
+      return 0;
     case kMsgPreloginCredResult: {
       // "Windows 로그인": typed (Injected) and logged in (SessionUnlocked, seen afterwards) are two
       // different windows of text; neither carries the password.

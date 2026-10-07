@@ -66,6 +66,9 @@ struct SessionState {
   // starts serving a connection; a confirm made for an earlier one is not sent on this one.
   std::atomic<uint64_t> controlRunGen{0};
   std::atomic<uint64_t> rebootRequestedRunGen{0};
+  // r9 R5: "Ctrl+Alt+Del" clicked (UI thread) for this control connection; the control thread sends one 83.
+  std::atomic<bool> sasRequested{false};
+  std::atomic<uint64_t> sasRequestedRunGen{0};
   // "Windows 로그인" (prelogin-ui r3, item 5): the UI thread's prompt leaves the password here and
   // sets the flag; the control thread takes it (swap under the lock), seals it, and zeroes it. Never
   // stored anywhere else. preloginInjectedAtUs: when the host last said "typed", so the first pong

@@ -104,8 +104,8 @@ enum class MessageType : uint16_t {
   // Prelogin remote access (prelogin-service, numbers assigned by the verifier). 82~83 are the prelogin
   // control pair; their fixed payloads are defined with the prelogin worker unit (prelogin_wire.hpp).
   // Gated on kCaptureFlagPreloginV1; an old host never sees them.
-  ControlPreloginStatus = 82,   // host -> viewer: prelogin sub-state + reason (e.g. UnsupportedUser)
-  ControlPreloginControl = 83,  // viewer -> host: prelogin-scoped request (reserved; payload with worker)
+  ControlPreloginStatus = 82,   // host -> viewer: the answer to 83 (r9 R5: op Sas -> PreloginSasResult)
+  ControlPreloginControl = 83,  // viewer -> host: a pre-login request (r9 R5: op 1 = Ctrl+Alt+Del / SAS)
   // Remote reboot (prelogin-service r2, user decision 2026-10-07). A directory-authenticated viewer
   // asks the host to restart; the SYSTEM service performs InitiateShutdownW. Works in prelogin too.
   // Gated on kCaptureFlagRemoteRebootV1; an old host leaves the menu item disabled. Layout in
@@ -320,6 +320,9 @@ constexpr uint32_t kCaptureFlagPreloginEnabledV1 = 0x8000u;
 // file offer says which copy on the host it was made of (its copy generation). A viewer asks 86 only
 // of a host that advertises this; an older host is asked 67 as before (its offers carry no order).
 constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
+// prelogin-ui r9 R5: Ctrl+Alt+Del can be asked of this host (ControlPreloginControl op Sas, 83 -> 82). Only a
+// --prelogin worker advertises it; the answer may still be "policy does not allow" (prelogin_sas_wire.hpp).
+constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

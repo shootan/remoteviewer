@@ -112,6 +112,8 @@ void push_session_toolbar_state(ViewerState& ctx) {
   state.preloginCredAvailable = remote60::native_poc::DecidePreloginCred(
                                     remote60::native_poc::ViewerPlatform::Pc,
                                     ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)).sealedEntryAvailable;
+  state.sasAvailable = (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) &
+                        remote60::native_poc::kCaptureFlagPreloginSasV1) != 0;  // r9 R5
   state.relay = ctx.session.relayPath.load(std::memory_order_relaxed);
   state.pathKnown = ctx.session.relayPathKnown.load(std::memory_order_relaxed);
   const auto metricsSnapshot = ctx.metrics.Snapshot();

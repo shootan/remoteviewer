@@ -3,6 +3,8 @@
 #include <sddl.h>
 #include <userenv.h>
 #include <tlhelp32.h>
+#include <sas.h>
+#pragma comment(lib, "sas.lib")
 #include <wtsapi32.h>
 #pragma comment(lib, "Wtsapi32.lib")
 #pragma comment(lib, "Userenv.lib")
@@ -31,6 +33,7 @@
 #include "prelogin_child_launch.hpp"
 #include "prelogin_user_host_launch.hpp"
 #include "prelogin_user_host_policy.hpp"
+#include "prelogin_sas_wire.hpp"
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -934,6 +937,54 @@ bool prelogin_feature_enabled() {
   return ValidateMachineRecord(rec, ctx) == RecordVerdict::Usable;
 }
 
+// r9 R5: Ctrl+Alt+Del for the console session's logon screen. The caller (the --prelogin worker) must be in
+// the console session, with nobody logged on there; the local policy SoftwareSASGeneration must let services
+// generate it (read, never changed). SendSAS(FALSE) is made while impersonating this service's token moved
+// into that session. It returns nothing: "Sent" is that the call was made.
+uint8_t request_sas_for(uint32_t callerSession, uint32_t* win32, bool* cadNotRequired) {
+  using remote60::native_poc::PreloginSasResult;
+  *win32 = 0;
+  // DisableCAD = 1: this PC's logon does not ask for Ctrl+Alt+Del at all (said to the viewer).
+  DWORD cad = 0;
+  DWORD cadCb = sizeof(cad);
+  *cadNotRequired = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                                 L"DisableCAD", RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &cad, &cadCb) ==
+                        ERROR_SUCCESS &&
+                    cad != 0;
+  const DWORD console = WTSGetActiveConsoleSessionId();
+  HANDLE userToken = nullptr;
+  const bool userLoggedOn = console != 0xFFFFFFFFu && WTSQueryUserToken(console, &userToken);
+  if (userToken) CloseHandle(userToken);
+  DWORD policy = 0;
+  DWORD cb = sizeof(policy);
+  const LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                                  L"SoftwareSASGeneration", RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &policy, &cb);
+  const int policyValue = st == ERROR_SUCCESS ? static_cast<int>(policy) : remote60::native_poc::prelogin::kSasPolicyUnset;
+  const PreloginSasResult d =
+      remote60::native_poc::prelogin::DecideSas(callerSession == console, userLoggedOn, policyValue);
+  diag("prelogin: SAS asked by session %lu (console %lu, user %d, policy %d) -> %d", static_cast<unsigned long>(callerSession),
+       static_cast<unsigned long>(console), userLoggedOn ? 1 : 0, policyValue, static_cast<int>(d));
+  if (d == PreloginSasResult::PolicyDenied) *win32 = static_cast<uint32_t>(policyValue);
+  if (d != PreloginSasResult::Sent && d != PreloginSasResult::SentUnconfirmed) return static_cast<uint8_t>(d);
+  HANDLE self = nullptr;
+  HANDLE inSession = nullptr;
+  DWORD session = console;
+  const bool ready = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE, &self) &&
+                     DuplicateTokenEx(self, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenImpersonation, &inSession) &&
+                     SetTokenInformation(inSession, TokenSessionId, &session, sizeof(session)) &&
+                     SetThreadToken(nullptr, inSession);
+  if (!ready) *win32 = GetLastError();
+  if (self) CloseHandle(self);
+  if (!ready) {
+    if (inSession) CloseHandle(inSession);
+    return static_cast<uint8_t>(PreloginSasResult::Failed);
+  }
+  SendSAS(FALSE);
+  RevertToSelf();
+  CloseHandle(inSession);
+  return static_cast<uint8_t>(d);  // Sent, or SentUnconfirmed when the policy is not set
+}
+
 // The admin pipe's primitives as this service binds them (the running service and --uninstall-service).
 void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitives* p) {
   remote60::native_poc::prelogin::BindProductStartType(p, kSecureInputServiceName);
@@ -951,6 +1002,7 @@ void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitiv
   };
   static const std::shared_ptr<std::mutex> transaction = std::make_shared<std::mutex>();
   p->transaction = transaction;
+  p->requestSas = request_sas_for;  // r9 R5
   // r6 V7: the only server a record may name -- the product's.
   p->allowedDirectoryUrl = remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl();
 }

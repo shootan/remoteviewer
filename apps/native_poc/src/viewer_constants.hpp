@@ -115,6 +115,8 @@ constexpr UINT kMsgPreloginCredResult = WM_APP + 19;
 constexpr UINT kMsgPreloginTypingHeldBack = WM_APP + 20;
 // r5 G11: the remote restart's answer for the window (wParam RebootResult, or 0xFF = no answer; lParam win32).
 constexpr UINT kMsgRebootResult = WM_APP + 21;
+// r9 R5: wp = PreloginSasResult (or kSasNotSent / kSasNoAnswer) | status flags << 8, lp = win32
+constexpr UINT kMsgSasResult = WM_APP + 22;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

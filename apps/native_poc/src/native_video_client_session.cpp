@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 
+#include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
 
 namespace remote60::native_poc {
@@ -214,6 +215,33 @@ uint32_t ClientSessionController::RequestReboot() {
   rebootPendingId_ = id;
   rebootHasOutcome_ = false;
   return id;
+}
+
+uint32_t ClientSessionController::RequestSas() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return 0;
+  }
+  if ((hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginSasV1) == 0) return 0;
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (sasPendingId_ != 0) return 0;
+  static std::random_device rd;
+  uint32_t id = 0;
+  while (id == 0) id = rd();
+  sasPendingId_ = id;
+  sasHasOutcome_ = false;
+  return id;
+}
+
+bool ClientSessionController::TakeSasOutcome(uint32_t* requestId, int* outcome, uint32_t* win32, uint8_t* flags) {
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (!sasHasOutcome_) return false;
+  sasHasOutcome_ = false;
+  *requestId = sasOutcomeId_;
+  *outcome = sasOutcome_;
+  *win32 = sasWin32_;
+  if (flags) *flags = sasFlags_;
+  return true;
 }
 
 bool ClientSessionController::TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32) {
@@ -452,9 +480,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     controlScheduler_.Reset(args.controlIntervalMs, now_us());
-    if (controlActive) {
-      windowPanel_.RequestList("window_list_request pending");
-    }
+    // r9: the window list is asked once the first pong has said the host is NOT at the logon screen -- a
+    // pre-login host closes the control link on a window-list request (it is outside its allowlist), which
+    // took the Android app's link down at every logon screen.
     snapshot_.state = ClientSessionState::Connected;
     snapshot_.lastError.clear();
     snapshot_.controlLoopActive = controlActive;
@@ -515,6 +543,13 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
+      // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
+      if (hostRoleKnown_.load(std::memory_order_acquire) &&
+          (hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginV1) != 0 &&
+          !prelogin::IsControlAllowedInPrelogin(outbound_message_type(action))) {
+        continue;
+      }
       TcpControlResponse response{};
       if (!execute_control_action(*controlLink, action, &response)) {
         if (!stopRequested_.load(std::memory_order_acquire)) {
@@ -534,7 +569,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
           hostCaptureFlags_.store(response.pong.captureTargetFlags, std::memory_order_relaxed);
-          hostRoleKnown_.store(true, std::memory_order_release);  // r7 H6
+          if (!hostRoleKnown_.exchange(true, std::memory_order_acq_rel) &&  // r7 H6
+              (response.pong.captureTargetFlags & kCaptureFlagPreloginV1) == 0) {
+            windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect (above)
+          }
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
           {
@@ -629,6 +667,40 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         if (!exchanged) {
           // A restart takes the link down; the app shows the request's state, not a failure.
           if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("control link closed after a reboot request");
+          break;
+        }
+      }
+    }
+
+    // r9 R5: Ctrl+Alt+Del, once per request.
+    if (!didWork && controlLink->Alive()) {
+      uint32_t rid = 0;
+      {
+        std::lock_guard<std::mutex> lock(rebootMu_);
+        rid = sasPendingId_;
+        sasPendingId_ = 0;
+      }
+      if (rid != 0) {
+        ControlOutboundAction sasAction{};
+        sasAction.kind = ControlOutboundActionKind::PreloginControl;
+        sasAction.preloginControl = make_sas_request(rid);
+        sasAction.expectedResponseType = MessageType::ControlPreloginStatus;
+        sasAction.expectedResponseSize = sizeof(ControlPreloginStatusMessage);
+        TcpControlResponse sasResp{};
+        const bool exchanged = execute_control_action(*controlLink, sasAction, &sasResp);
+        const bool answered = exchanged && sasResp.kind == TcpControlResponseKind::PreloginStatus &&
+                              sasResp.preloginStatus.requestId == rid;
+        {
+          std::lock_guard<std::mutex> lock(rebootMu_);
+          sasHasOutcome_ = true;
+          sasOutcomeId_ = rid;
+          sasOutcome_ = answered ? static_cast<int>(sasResp.preloginStatus.result) : kRebootOutcomeNoReply;
+          sasWin32_ = answered ? sasResp.preloginStatus.win32 : 0;
+          sasFlags_ = answered ? sasResp.preloginStatus.flags : 0;
+        }
+        didWork = true;
+        if (!exchanged) {
+          if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("control link closed after a SAS request");
           break;
         }
       }
@@ -1090,6 +1162,7 @@ void ClientSessionController::ResetUnlocked() {
     std::lock_guard<std::mutex> lk(rebootMu_);
     rebootPendingId_ = 0;
     rebootInFlight_ = false;
+    sasPendingId_ = 0;
   }
   // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
   // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a

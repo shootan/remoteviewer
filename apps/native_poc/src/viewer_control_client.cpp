@@ -1,6 +1,7 @@
 // See viewer_control_client.hpp. Bodies are the controlThread lambda of native_video_client_main.cpp,
 // verbatim (viewer split refactor Phase 2-4).
 
+#include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
 #include "viewer_control_client.hpp"
 
@@ -819,6 +820,37 @@ void ControlClient::Run() {
         }
       }
     }
+    // r9 R5: "Ctrl+Alt+Del" at a pre-login host -- one ControlPreloginControl (83), its answer shown.
+    if (ctx.session.sasRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      if (ctx.session.sasRequestedRunGen.load(std::memory_order_acquire) !=
+              ctx.session.controlRunGen.load(std::memory_order_acquire) ||
+          (flags & remote60::native_poc::kCaptureFlagPreloginSasV1) == 0) {
+        std::cout << "[native-video-client][sas] not sent (another connection / not offered)\n";
+        PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNotSent, 0);
+      } else {
+        static std::atomic<uint32_t> sasSeq{0};
+        const uint32_t rid = sasSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::PreloginControl;
+        action.preloginControl = remote60::native_poc::make_sas_request(rid);
+        action.expectedResponseType = MessageType::ControlPreloginStatus;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlPreloginStatusMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(*controlLink, action, &resp) && resp.kind == TcpControlResponseKind::PreloginStatus &&
+            resp.preloginStatus.requestId == rid) {
+          std::cout << "[native-video-client][sas] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.preloginStatus.result)
+                    << " win32=" << resp.preloginStatus.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult,
+                       static_cast<WPARAM>(resp.preloginStatus.result) | (static_cast<WPARAM>(resp.preloginStatus.flags) << 8),
+                       static_cast<LPARAM>(resp.preloginStatus.win32));
+        } else {
+          std::cout << "[native-video-client][sas] requestId=" << rid << " no valid reply\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNoAnswer, 0);
+        }
+      }
+    }
     // Host-IME entry: before draining input, align the host IME to English and confirm, so the
     // switch to physical routing (posted below) never lets an English key compose as jamo. Runs at
     // most one round-trip; keeps ordering because it precedes NextAction on the serial link.
@@ -883,6 +915,13 @@ void ControlClient::Run() {
                                                                  ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
               action)) {
         ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
+      // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
+      if (ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+          (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
+          !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(action))) {
         continue;
       }
       TcpControlResponse response{};

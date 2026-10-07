@@ -35,6 +35,7 @@ enum ButtonId : int {
   kButtonSwitchWindow = 5,
   kButtonReboot = 6,  // prelogin-service r3: opens the reboot confirm popup
   kButtonPreloginLogin = 7,  // prelogin-ui r3: "Windows 로그인" while the host is at the logon screen
+  kButtonSas = 8,            // prelogin-ui r9 R5: Ctrl+Alt+Del at the logon screen (through the service)
 };
 
 struct Button {
@@ -193,6 +194,7 @@ SIZE rebuild_layout() {
   if (g.callbacks.onReboot && g.state.rebootSupported) add(kButtonReboot, L"다시 시작", false);
   // "Windows 로그인" (prelogin-ui r3): only while the host says it is at the pre-login screen.
   if (g.callbacks.onPreloginLogin && g.state.preloginCredAvailable) add(kButtonPreloginLogin, L"Windows 로그인", false);
+  if (g.callbacks.onSas && g.state.sasAvailable) add(kButtonSas, L"Ctrl+Alt+Del", false);
 
   const int statusWidth = text_width(status_text());
   SIZE size{};
@@ -466,6 +468,9 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       } else if (pressed == kButtonPreloginLogin) {
         if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] windows login clicked");
         if (g.callbacks.onPreloginLogin) g.callbacks.onPreloginLogin();
+      } else if (pressed == kButtonSas) {
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] ctrl+alt+del clicked");
+        if (g.callbacks.onSas) g.callbacks.onSas();
       }
       return 0;
     }

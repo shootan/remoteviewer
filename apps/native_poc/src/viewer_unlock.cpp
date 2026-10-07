@@ -233,6 +233,32 @@ std::wstring reboot_result_text(uint8_t result, uint32_t win32) {
   }
 }
 
+std::wstring sas_result_text(uint8_t result, uint32_t win32, uint8_t flags) {
+  const std::wstring cad = (flags & 0x01) != 0  // kPreloginStatusFlagCadNotRequired
+                               ? L"\n이 PC는 로그인할 때 Ctrl+Alt+Del 이 필요 없도록 설정돼 있습니다."
+                               : L"";
+  switch (result) {
+    case 0:
+      return L"원격 PC 로그인 화면에 Ctrl+Alt+Del 을 보냈습니다.\n화면이 바뀌었는지는 원격 화면에서 확인하세요." + cad;
+    case 5:
+      return L"원격 PC 로그인 화면에 Ctrl+Alt+Del 을 보냈습니다.\n이 PC의 정책(SoftwareSASGeneration)이 설정돼 있지 않아 "
+             L"받아들여졌는지는 확인되지 않습니다. 로그인 화면이 바뀌었는지 원격 화면에서 확인하세요." + cad;
+    case 1:
+      return L"원격 PC의 정책이 Ctrl+Alt+Del 을 프로그램이 보내는 것을 허용하지 않습니다 "
+             L"(SoftwareSASGeneration=" + std::to_wstring(win32) + L"). 관리자가 정책을 허용해야 합니다." + cad;
+    case 2:
+      return L"보내지 않았습니다: 원격 PC가 지금 로그인 화면 상태가 아닙니다.";
+    case 3:
+      return L"원격 PC가 거절했습니다: 이 연결로는 보낼 수 없습니다 (서버 인증 연결만 가능).";
+    case 4:
+      return L"원격 PC가 Ctrl+Alt+Del 을 보내지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    case kSasNotSent:
+      return L"보내지 않았습니다: 누른 뒤 연결이 바뀌었거나 이 PC가 지원하지 않습니다.";
+    default:
+      return L"원격 PC의 답을 받지 못했습니다.";
+  }
+}
+
 void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& text) {
   // Its own small window rather than MessageBox: the same shape as the prompt, with a fixed class and
   // control ids, so what it says can be read and its button pressed by a test like any other control.

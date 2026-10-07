@@ -129,6 +129,11 @@ class ClientSessionController {
   // link gave none (closed / desynchronised). False while there is nothing new.
   static constexpr int kRebootOutcomeNoReply = 100;
   bool TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32);
+  // r9 R5: Ctrl+Alt+Del at a pre-login host (0x20000). The request id, or 0 when nothing is sent. The answer,
+  // once: outcome = PreloginSasResult (0..4), or kRebootOutcomeNoReply when the link gave none.
+  uint32_t RequestSas();
+  // *flags (optional): kPreloginStatusFlag* -- e.g. the PC's logon needs no Ctrl+Alt+Del (DisableCAD).
+  bool TakeSasOutcome(uint32_t* requestId, int* outcome, uint32_t* win32, uint8_t* flags = nullptr);
   bool RequestStreamActive(bool active);
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
@@ -258,6 +263,13 @@ class ClientSessionController {
   uint32_t rebootOutcomeId_ = 0;
   int rebootOutcome_ = 0;
   uint32_t rebootWin32_ = 0;
+  // r9 R5: the same for Ctrl+Alt+Del (under rebootMu_).
+  uint32_t sasPendingId_ = 0;
+  bool sasHasOutcome_ = false;
+  uint32_t sasOutcomeId_ = 0;
+  int sasOutcome_ = 0;
+  uint32_t sasWin32_ = 0;
+  uint8_t sasFlags_ = 0;
   std::atomic<uint64_t> sessionBytesReceived_{0};
 
   // Clipboard text sync (K1). clipMu_ guards the core and the two one-slot mailboxes: the app

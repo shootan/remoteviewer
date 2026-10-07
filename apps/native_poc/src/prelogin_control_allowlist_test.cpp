@@ -63,10 +63,10 @@ int main() {
   expect(MessageType::ControlPasteApplied, false, "ControlPasteApplied");
   expect(MessageType::RawFrameBgra, false, "RawFrameBgra(debug)");
 
-  std::printf("[NEGATIVE: prelogin control pair 82/83 denied until the worker defines them]\n");
-  // The prelogin control pair is NOT auto-allowed; it is added explicitly when its payload is defined.
-  expect(MessageType::ControlPreloginStatus, false, "ControlPreloginStatus(82, payload TBD)");
-  expect(MessageType::ControlPreloginControl, false, "ControlPreloginControl(83, reserved)");
+  std::printf("[the prelogin control pair 82/83: defined in r9 R5 (Ctrl+Alt+Del), allowed explicitly]\n");
+  // Allowed by type; the handler still requires the link's own directory-authenticated session.
+  expect(MessageType::ControlPreloginStatus, true, "ControlPreloginStatus(82, the SAS answer)");
+  expect(MessageType::ControlPreloginControl, true, "ControlPreloginControl(83, op SAS)");
   expect(static_cast<MessageType>(9999), false, "arbitrary 9999 (future/garbage)");
 
   if (gFailures != 0) {

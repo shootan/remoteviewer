@@ -75,5 +75,10 @@ constexpr uint8_t kRebootNotSent = 0xFE;   // not sent: the confirm was for anot
 // What the restart window says for a RebootResult (0 Accepted, 1 Refused, 2 NotAuthorized, 3 Failed) or
 // kRebootNoAnswer.
 std::wstring reboot_result_text(uint8_t result, uint32_t win32);
+// r9 R5: what "Ctrl+Alt+Del" came to (PreloginSasResult 0..4, or the two local outcomes below).
+constexpr wchar_t kSasResultTitle[] = L"GNLink — Ctrl+Alt+Del";
+constexpr uint8_t kSasNoAnswer = 0xFF;
+constexpr uint8_t kSasNotSent = 0xFE;
+std::wstring sas_result_text(uint8_t result, uint32_t win32, uint8_t flags = 0);
 
 }  // namespace remote60::native_poc::viewer

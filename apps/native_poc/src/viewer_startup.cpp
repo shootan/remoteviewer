@@ -265,6 +265,12 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     };
     // "Windows 로그인" (prelogin-ui r3): the same entry as Ctrl+Alt+U at a pre-login host.
     toolbarCallbacks.onPreloginLogin = [&ctx] { request_prelogin_login(ctx, ctx.session.hwnd); };
+    // r9 R5: Ctrl+Alt+Del at a pre-login host: no confirm (it only brings up the logon screen's prompt).
+    toolbarCallbacks.onSas = [&ctx] {
+      ctx.session.sasRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                           std::memory_order_release);
+      ctx.session.sasRequested.store(true, std::memory_order_release);
+    };
     remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);
     push_session_toolbar_state(ctx);

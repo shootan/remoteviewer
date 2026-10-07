@@ -51,6 +51,7 @@
 #include "prelogin_reboot_gate.hpp"
 #include "prelogin_cred_host.hpp"
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_sas_wire.hpp"
 #include "reboot_wire.hpp"
 #include <mutex>
 #include "peer_version.hpp"
@@ -520,6 +521,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
         // the reboot confirm popup keys its "no connect until login" warning on.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginSasV1;  // r9 R5: Ctrl+Alt+Del here
       } else if (durable_prelogin_enabled()) {
         // r5 G11: a logged-in host says so too when the service has pre-login access on, so the restart
         // popup does not warn "no connect until someone logs in" for a PC that will be reachable.
@@ -641,6 +643,38 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusResult);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlPreloginControl &&
+        header.size == sizeof(remote60::native_poc::ControlPreloginControlMessage)) {
+      remote60::native_poc::ControlPreloginControlMessage req{};
+      req.header = header;
+      if (!link.Read(&req.requestId, sizeof(req) - sizeof(MessageHeader))) break;
+      if (req.requestId == 0) continue;  // never echoable
+      // r9 R5: Ctrl+Alt+Del at the logon screen, by the service. Only a --prelogin worker, only on this
+      // link's own directory-authenticated session; the service decides the rest (session, policy).
+      using remote60::native_poc::PreloginSasResult;
+      PreloginSasResult result = PreloginSasResult::Failed;
+      uint32_t win32 = 0;
+      bool cadNotRequired = false;
+      if (req.op != remote60::native_poc::kPreloginControlOpSas) {
+        result = PreloginSasResult::Failed;
+        win32 = ERROR_NOT_SUPPORTED;
+      } else if (!args.preloginMode) {
+        result = PreloginSasResult::NotAtLogon;
+      } else if (!link_directory_authenticated()) {
+        result = PreloginSasResult::NotAuthorized;
+      } else {
+        result = static_cast<PreloginSasResult>(remote60::native_poc::prelogin::DelegateSasToService(&win32, &cadNotRequired));
+      }
+      std::cout << "[native-video-host][control][sas] requestId=" << req.requestId
+                << " result=" << static_cast<unsigned>(result) << " win32=" << win32 << " cad-not-required="
+                << (cadNotRequired ? 1 : 0) << "\n";
+      const auto rsp = remote60::native_poc::make_prelogin_status(
+          req.requestId, req.op, result, win32,
+          cadNotRequired ? remote60::native_poc::kPreloginStatusFlagCadNotRequired : uint8_t{0});
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }

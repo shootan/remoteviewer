@@ -47,7 +47,7 @@ constexpr size_t kAdminMaxToken = 2048;
 // r2: Reboot and Ready come from the streaming host (this install's GNLinkStream, elevated or SYSTEM),
 // not from GNLinkHost: the remote restart a directory-authenticated viewer asked for (item 6), and the
 // user Host's "registered and serving" that completes the prelogin handoff (item 7).
-enum class AdminOp : uint8_t { Query = 1, Enable = 2, Disable = 3, Reboot = 4, Ready = 5 };
+enum class AdminOp : uint8_t { Query = 1, Enable = 2, Disable = 3, Reboot = 4, Ready = 5, Sas = 6 };  // 6: r9 R5
 enum class AdminStatus : uint8_t {
   Ok = 0,
   Refused = 1,     // the client is not an elevated administrator (or, for Reboot/Ready, not the host)
@@ -176,6 +176,9 @@ struct AdminPrimitives {
   // r2: the ONE fixed local restart (0 = the OS accepted it, else win32), and where a ready goes.
   std::function<uint32_t()> requestOsReboot;
   std::function<void(uint32_t session, uint64_t processStartTime, const std::string& nonce)> noteUserHostReady;
+  // r9 R5: Ctrl+Alt+Del for the caller's session (the --prelogin worker's): a PreloginSasResult, *win32.
+  // *cadNotRequired: DisableCAD is set (the logon needs no Ctrl+Alt+Del) -- carried in the reply's `enabled`.
+  std::function<uint8_t(uint32_t callerSession, uint32_t* win32, bool* cadNotRequired)> requestSas;
   // r9 R1/R2: the durable "pre-login access must be OFF" mark (HKLM\SOFTWARE\GNLink\PreloginRevokePending).
   // The Host sets it before a sign-out's Disable, uninstall before anything else. While it is there the
   // feature is off (the service's featureEnabled and the worker's adoption read it), and the next request
@@ -264,6 +267,9 @@ ServerCheck HostServiceServerCheck();
 // Item 6: the restart the gate admitted, done by the service. Returns RebootResult; *win32 its error.
 // A service that cannot be reached is Failed (ERROR_SERVICE_NOT_ACTIVE) -- never a local fallback.
 uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32);
+// r9 R5: Ctrl+Alt+Del, done by the service (SendSAS). Returns a PreloginSasResult; a service that cannot be
+// reached is Failed (ERROR_SERVICE_NOT_ACTIVE).
+uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired);
 // r5 G11: whether pre-login access is on (the service's Query), for the logged-in host's Pong 0x8000.
 // False when the service cannot be asked.
 bool QueryDurablePreloginEnabled();

@@ -9,6 +9,36 @@
 
 namespace remote60::native_poc {
 
+MessageType outbound_message_type(const ControlOutboundAction& action) {
+  uint16_t t = 0;
+  switch (action.kind) {
+    case ControlOutboundActionKind::Ping: t = action.ping.header.type; break;
+    case ControlOutboundActionKind::WindowListRequest: t = action.windowListRequest.header.type; break;
+    case ControlOutboundActionKind::WindowSelect: t = action.windowSelect.header.type; break;
+    case ControlOutboundActionKind::MonitorListRequest: t = action.monitorListRequest.header.type; break;
+    case ControlOutboundActionKind::MonitorSelect: t = action.monitorSelect.header.type; break;
+    case ControlOutboundActionKind::StreamState: t = action.streamState.header.type; break;
+    case ControlOutboundActionKind::CaptureMode: t = action.captureMode.header.type; break;
+    case ControlOutboundActionKind::Metrics: t = action.metrics.header.type; break;
+    case ControlOutboundActionKind::KeyframeRequest: t = action.keyframe.header.type; break;
+    case ControlOutboundActionKind::RuntimeTune: t = action.runtimeTune.header.type; break;
+    case ControlOutboundActionKind::DesktopBackend: t = action.desktopBackend.header.type; break;
+    case ControlOutboundActionKind::InputEvent: t = action.inputEvent.header.type; break;
+    case ControlOutboundActionKind::InputText: t = action.inputText.header.type; break;
+    case ControlOutboundActionKind::PhysicalKey: t = action.physicalKey.header.type; break;
+    case ControlOutboundActionKind::UnlockChallengeRequest: t = action.unlockChallengeReq.header.type; break;
+    case ControlOutboundActionKind::UnlockSealedRequest: t = action.unlockSealed.header.type; break;
+    case ControlOutboundActionKind::UnlockStatusRequest: t = action.unlockStatusReq.header.type; break;
+    case ControlOutboundActionKind::ImeStateRequest: t = action.imeStateReq.header.type; break;
+    case ControlOutboundActionKind::ClientBandwidth: t = action.clientBandwidth.header.type; break;
+    case ControlOutboundActionKind::RebootRequest: t = action.reboot.header.type; break;
+    case ControlOutboundActionKind::PreloginControl: t = action.preloginControl.header.type; break;
+    case ControlOutboundActionKind::None:
+    default: break;
+  }
+  return static_cast<MessageType>(t);
+}
+
 bool send_control_action(ControlLink& link, const ControlOutboundAction& action) {
   switch (action.kind) {
     case ControlOutboundActionKind::Ping:
@@ -51,6 +81,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.clientBandwidth, sizeof(action.clientBandwidth));
     case ControlOutboundActionKind::RebootRequest:
       return link.Write(&action.reboot, sizeof(action.reboot));
+    case ControlOutboundActionKind::PreloginControl:
+      return link.Write(&action.preloginControl, sizeof(action.preloginControl));
     case ControlOutboundActionKind::None:
     default:
       return false;
@@ -118,6 +150,11 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->rebootReply.header = header;
       return link.Read(&out->rebootReply.requestId,
                        sizeof(out->rebootReply) - sizeof(MessageHeader));
+    case MessageType::ControlPreloginStatus:
+      out->kind = TcpControlResponseKind::PreloginStatus;
+      out->preloginStatus.header = header;
+      return link.Read(&out->preloginStatus.requestId,
+                       sizeof(out->preloginStatus) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

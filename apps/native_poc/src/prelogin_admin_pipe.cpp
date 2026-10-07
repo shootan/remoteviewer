@@ -130,7 +130,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
   uint16_t version = 0;
   uint8_t op = 0;
   if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u16(&version) || version != kAdminVersion || !rd.u8(&op)) return false;
-  if (op < static_cast<uint8_t>(AdminOp::Query) || op > static_cast<uint8_t>(AdminOp::Ready)) return false;
+  if (op < static_cast<uint8_t>(AdminOp::Query) || op > static_cast<uint8_t>(AdminOp::Sas)) return false;
   *out = AdminRequest{};
   out->op = static_cast<AdminOp>(op);
   if (out->op == AdminOp::Enable) {
@@ -162,7 +162,7 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
   if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u8(&status) ||
       (status > static_cast<uint8_t>(AdminStatus::Unavailable) && status != static_cast<uint8_t>(AdminStatus::Stale)) ||
       !rd.u8(&enabled) || enabled > 1 || !rd.u32(&out->win32) || !rd.u64(&out->ownerGeneration) ||
-      !rd.u8(&out->rebootResult) || out->rebootResult > 3 || !rd.done()) {
+      !rd.u8(&out->rebootResult) || out->rebootResult > 5 || !rd.done()) {  // 0..3 Reboot, 0..5 Sas (r9 R5)
     return false;
   }
   out->status = static_cast<AdminStatus>(status);
@@ -273,11 +273,19 @@ AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, cons
     reply.status = AdminStatus::BadRequest;
     return reply;
   }
-  if (r.op == AdminOp::Reboot || r.op == AdminOp::Ready) {
-    // Only this install's streaming host asks these (item 6 / 7).
+  if (r.op == AdminOp::Reboot || r.op == AdminOp::Ready || r.op == AdminOp::Sas) {
+    // Only this install's streaming host asks these (item 6 / 7, r9 R5).
     if (!who.hostProcess) {
       reply.status = AdminStatus::Refused;
-      reply.rebootResult = 2;
+      reply.rebootResult = r.op == AdminOp::Sas ? 3 : 2;  // NotAuthorized, either way
+      return reply;
+    }
+    if (r.op == AdminOp::Sas) {
+      // r9 R5: the answer travels in rebootResult (a PreloginSasResult for this op); `enabled` = DisableCAD.
+      reply.status = AdminStatus::Ok;
+      bool cadNotRequired = false;
+      reply.rebootResult = p.requestSas ? p.requestSas(who.sessionId, &reply.win32, &cadNotRequired) : 4;
+      reply.enabled = cadNotRequired;
       return reply;
     }
     if (r.op == AdminOp::Ready) {
@@ -762,13 +770,32 @@ uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* 
   *win32 = 0;
   if (reply.status == AdminStatus::Ok) {
     *win32 = reply.win32;
-    return reply.rebootResult;
+    return reply.rebootResult <= 3 ? reply.rebootResult : 3;  // a Sas-range value is no RebootResult
   }
   if (reply.status == AdminStatus::Refused) return 2;  // the service did not take this host as the host
   *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE
            : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
                                                     : reply.win32;
   return 3;
+}
+
+uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired) {
+  *cadNotRequired = false;
+  AdminRequest r;
+  r.op = AdminOp::Sas;
+  const std::wstring pipe = HostServicePipeName();
+  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck());
+  *win32 = 0;
+  if (reply.status == AdminStatus::Ok) {
+    *win32 = reply.win32;
+    *cadNotRequired = reply.enabled;
+    return reply.rebootResult;
+  }
+  if (reply.status == AdminStatus::Refused) return 3;  // NotAuthorized: the service did not take this host
+  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE
+           : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
+                                                    : reply.win32;
+  return 4;  // Failed
 }
 
 bool QueryDurablePreloginEnabled() {

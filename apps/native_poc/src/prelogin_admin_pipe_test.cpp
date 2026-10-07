@@ -321,6 +321,45 @@ int main() {
                                                         n.calls == before);
   }
   {
+    // r9 R5: Ctrl+Alt+Del is asked by the streaming host only, for its own session.
+    World w;
+    pl::AdminPrimitives p = w.primitives();
+    uint32_t asked = 0;
+    int sasCalls = 0;
+    p.requestSas = [&](uint32_t session, uint32_t* win32, bool* cad) -> uint8_t {
+      ++sasCalls;
+      asked = session;
+      *win32 = 0;
+      *cad = true;
+      return 0;
+    };
+    pl::AdminRequest sas;
+    sas.op = pl::AdminOp::Sas;
+    pl::AdminRequest back;
+    check("R5: the Sas op round-trips (no payload)", pl::DecodeAdminRequest(pl::EncodeAdminRequest(sas), &back) &&
+                                                      back.op == pl::AdminOp::Sas);
+    pl::ClientFacts host;
+    host.elevatedAdmin = true;
+    host.hostProcess = true;
+    host.sessionId = 1;
+    const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(sas), host, p, nullptr);
+    check("R5: from the streaming host: the service is asked for THAT host's session, once; Sent (+ DisableCAD)",
+          r.status == pl::AdminStatus::Ok && r.rebootResult == 0 && r.enabled && sasCalls == 1 && asked == 1);
+    pl::ClientFacts admin;
+    admin.elevatedAdmin = true;  // an elevated admin, but not the streaming host
+    const pl::AdminReply refused = pl::HandleAdminRequest(pl::EncodeAdminRequest(sas), admin, p, nullptr);
+    check("R5: from any other client: Refused (NotAuthorized), the service is not asked",
+          refused.status == pl::AdminStatus::Refused && refused.rebootResult == 3 && sasCalls == 1);
+    pl::AdminReply unconfirmed;
+    unconfirmed.status = pl::AdminStatus::Ok;
+    unconfirmed.rebootResult = 5;  // SentUnconfirmed (the policy unset)
+    unconfirmed.enabled = true;    // DisableCAD
+    pl::AdminReply unconfirmedBack;
+    check("R5: every Sas answer (up to SentUnconfirmed = 5) and the DisableCAD bit survive the reply encoding",
+          pl::DecodeAdminReply(pl::EncodeAdminReply(unconfirmed), &unconfirmedBack) && unconfirmedBack.rebootResult == 5 &&
+              unconfirmedBack.enabled);
+  }
+  {
     World w;
     w.startType = 4;  // DISABLED before the feature
     pl::AdminPrimitives p = w.primitives();

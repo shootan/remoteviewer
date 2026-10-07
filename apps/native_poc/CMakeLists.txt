@@ -1102,6 +1102,7 @@ add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_ho
 # in --prelogin (directory-authenticated, SeShutdownPrivilege deleted), typed into a window of the test.
 add_executable(remote60_viewer_prelogin_login_e2e_test
   src/viewer_prelogin_login_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
   src/viewer_reboot_prompt.cpp
   src/native_video_client_session.cpp
   src/viewer_window_proc.cpp
@@ -2053,6 +2054,10 @@ target_include_directories(remote60_prelogin_ready_chain_e2e_test PRIVATE src)
 target_link_libraries(remote60_prelogin_ready_chain_e2e_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt
   remote60_test_scratch_dir)
 add_dependencies(remote60_prelogin_ready_chain_e2e_test remote60_host_app_ui_test remote60_native_video_host_migration_seam)
+
+# prelogin-ui r9 (R5): Ctrl+Alt+Del at the logon screen -- wire, allowlist, the service's decision.
+add_executable(remote60_prelogin_sas_test src/prelogin_sas_test.cpp)
+target_include_directories(remote60_prelogin_sas_test PRIVATE src)
 
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp

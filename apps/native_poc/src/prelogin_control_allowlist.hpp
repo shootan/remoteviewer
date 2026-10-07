@@ -62,13 +62,15 @@ inline bool IsControlAllowedInPrelogin(MessageType t) {
     //     The reply is outbound. ---
     case MessageType::ControlRebootRequest:
     case MessageType::ControlRebootReply:
+    // --- r9 R5: Ctrl+Alt+Del (SAS) through the service; the handler requires the authenticated link. ---
+    case MessageType::ControlPreloginControl:
+    case MessageType::ControlPreloginStatus:
       return true;
     default:
       // Everything else is denied in prelogin: ControlInputText (char text), ControlPhysicalKey (raw
       // vk/scan bypass), ControlImeState* (host IME composition), window enumeration/selection/
       // thumbnail, all clipboard (text/image/bulk), all file copy (+bulk), paste-on-demand, raw BGRA,
-      // and any not-yet-defined type -- including the prelogin control pair 82/83 until the worker unit
-      // defines their payloads and adds them here explicitly.
+      // and any not-yet-defined type.
       return false;
   }
 }
