@@ -502,6 +502,20 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // held mask only to a host that says so -- an older host made an unknown key a LEFT click.
       if (mouse_xbuttons_enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagMouseXButtonsV1;
+      // Prelogin exposes the MINIMUM surface (Codex review 3.3): strip every user-data feature bit so a
+      // new viewer never even polls clipboard/IME/image/file/paste/x-button here (the allowlist would
+      // close the link on the inbound message; not advertising it keeps a correct viewer from sending
+      // one at all). Prelogin keeps only stream/heartbeat/version/secure-desktop + the sealed credential
+      // path + the prelogin/reboot bits set earlier.
+      if (args.preloginMode) {
+        pong.captureTargetFlags &= ~(remote60::native_poc::kCaptureFlagHostImeV1 |
+                                     remote60::native_poc::kCaptureFlagHostImePulseStateV2 |
+                                     remote60::native_poc::kCaptureFlagClipboardTextV1 |
+                                     remote60::native_poc::kCaptureFlagPasteOnDemandV1 |
+                                     remote60::native_poc::kCaptureFlagClipboardImageV1 |
+                                     remote60::native_poc::kCaptureFlagFileCopyV1 |
+                                     remote60::native_poc::kCaptureFlagMouseXButtonsV1);
+      }
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       remote60::native_poc::utf8_copy_bounded(pong.captureTargetProcess,
@@ -572,6 +586,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
       remote60::native_poc::ControlRebootRequestMessage req{};
       req.header = header;
       if (!link.Read(&req.requestId, sizeof(req) - sizeof(MessageHeader))) break;
+      // A malformed request id (0) is never echoable and cannot be deduped -- drop it (Codex review S4;
+      // Serve was not calling reboot_request_valid). A correct viewer never sends 0.
+      if (!remote60::native_poc::reboot_request_valid(req)) {
+        std::cout << "[native-video-host][control][reboot] dropped malformed request (id=0)\n";
+        continue;
+      }
       remote60::native_poc::RebootRequestInputs in;
       // R2: directory-authenticated session only; a token-less LAN Hello peer is NotAuthorized.
       in.directoryAuthenticated = clientSession.directoryAuthenticated.load(std::memory_order_acquire);
