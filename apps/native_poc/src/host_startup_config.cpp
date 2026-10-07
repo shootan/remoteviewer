@@ -229,8 +229,12 @@ int startup_configure_from_env(HostContext& hx) {
       static_cast<uint32_t>(kQueueWaitTimeoutUsDefault));
   capture.gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
   // Prelogin (r4 #1): the DXGI/GDI capture workers bind to the input desktop so the pre-login secure
-  // desktop is captured. Set once here from the parsed flag; the post-login host leaves it false.
-  capture.preloginAttachInputDesktop = args.preloginMode;
+  // desktop is captured. Set once here from the parsed flag; the post-login host leaves it false. The
+  // REMOTE60_PRELOGIN_CAPTURE_ATTACH env enables ONLY this capture-attach (the exact same code path),
+  // without the prelogin control gating, so a Default-desktop e2e can prove frames-reach-the-viewer with
+  // the attach active -- a product-equivalent that does not require the directory-auth prelogin session.
+  capture.preloginAttachInputDesktop =
+      args.preloginMode || env_truthy("REMOTE60_PRELOGIN_CAPTURE_ATTACH");
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
