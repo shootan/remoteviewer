@@ -57,12 +57,18 @@ inline bool IsControlAllowedInPrelogin(MessageType t) {
     case MessageType::ControlUnlockAccepted:
     case MessageType::ControlUnlockStatusRequest:
     case MessageType::ControlUnlockStatusResult:
+    // --- remote reboot (prelogin-service r2): the request is inbound and valid in prelogin; the host
+    //     still requires a directory-authenticated session (a SEPARATE gate, not this type filter).
+    //     The reply is outbound. ---
+    case MessageType::ControlRebootRequest:
+    case MessageType::ControlRebootReply:
       return true;
     default:
       // Everything else is denied in prelogin: ControlInputText (char text), ControlPhysicalKey (raw
       // vk/scan bypass), ControlImeState* (host IME composition), window enumeration/selection/
       // thumbnail, all clipboard (text/image/bulk), all file copy (+bulk), paste-on-demand, raw BGRA,
-      // and any not-yet-defined type (incl. the reserved 82..85 band until each is explicitly added).
+      // and any not-yet-defined type -- including the prelogin control pair 82/83 until the worker unit
+      // defines their payloads and adds them here explicitly.
       return false;
   }
 }

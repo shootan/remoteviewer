@@ -101,6 +101,17 @@ enum class MessageType : uint16_t {
   // paste_apply_wire.hpp, which only the Windows viewer and the host compile.
   ControlPasteTextApply = 80,
   ControlPasteApplied = 81,
+  // Prelogin remote access (prelogin-service, numbers assigned by the verifier). 82~83 are the prelogin
+  // control pair; their fixed payloads are defined with the prelogin worker unit (prelogin_wire.hpp).
+  // Gated on kCaptureFlagPreloginV1; an old host never sees them.
+  ControlPreloginStatus = 82,   // host -> viewer: prelogin sub-state + reason (e.g. UnsupportedUser)
+  ControlPreloginControl = 83,  // viewer -> host: prelogin-scoped request (reserved; payload with worker)
+  // Remote reboot (prelogin-service r2, user decision 2026-10-07). A directory-authenticated viewer
+  // asks the host to restart; the SYSTEM service performs InitiateShutdownW. Works in prelogin too.
+  // Gated on kCaptureFlagRemoteRebootV1; an old host leaves the menu item disabled. Layout in
+  // reboot_wire.hpp.
+  ControlRebootRequest = 84,    // viewer -> host: requestId
+  ControlRebootReply = 85,      // host -> viewer: requestId, result (Accepted/Refused/NotAuthorized/Failed), win32
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -288,6 +299,14 @@ constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
 // a host that advertises this: an older host discards an unknown type without answering, and the
 // strict request/response link would then wait on a reply that never comes.
 constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
+// Prelogin remote access v1 (prelogin-service): the host advertises that it is (or can be) serving a
+// pre-login secure desktop so the viewer can label the session and gate the sealed "Windows 로그인"
+// credential entry. A viewer sends the prelogin control pair (82/83) only to a host that advertises it.
+constexpr uint32_t kCaptureFlagPreloginV1 = 0x2000u;
+// Remote reboot v1 (prelogin-service r2): the host takes ControlRebootRequest (84) and answers
+// ControlRebootReply (85). A viewer enables its in-menu reboot item (with the confirm popup) only when
+// it sees this bit; an old host leaves the item disabled with a reason.
+constexpr uint32_t kCaptureFlagRemoteRebootV1 = 0x4000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

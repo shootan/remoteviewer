@@ -39,6 +39,8 @@ int main() {
   expect(MessageType::ControlUnlockChallengeRequest, true, "ControlUnlockChallengeRequest(sealed)");
   expect(MessageType::ControlUnlockSealedRequest, true, "ControlUnlockSealedRequest(sealed)");
   expect(MessageType::ControlUnlockStatusResult, true, "ControlUnlockStatusResult(sealed)");
+  expect(MessageType::ControlRebootRequest, true, "ControlRebootRequest(84, inbound)");
+  expect(MessageType::ControlRebootReply, true, "ControlRebootReply(85, outbound)");
 
   std::printf("[NEGATIVE: characters/raw key must NOT be plaintext in prelogin]\n");
   expect(MessageType::ControlInputText, false, "ControlInputText(char text)");
@@ -61,10 +63,10 @@ int main() {
   expect(MessageType::ControlPasteApplied, false, "ControlPasteApplied");
   expect(MessageType::RawFrameBgra, false, "RawFrameBgra(debug)");
 
-  std::printf("[NEGATIVE: undefined / reserved-but-not-yet-defined types default-deny]\n");
-  // The reserved prelogin band 82..85 is NOT auto-allowed; each must be added explicitly when defined.
-  expect(static_cast<MessageType>(82), false, "reserved 82 (undefined)");
-  expect(static_cast<MessageType>(85), false, "reserved 85 (undefined)");
+  std::printf("[NEGATIVE: prelogin control pair 82/83 denied until the worker defines them]\n");
+  // The prelogin control pair is NOT auto-allowed; it is added explicitly when its payload is defined.
+  expect(MessageType::ControlPreloginStatus, false, "ControlPreloginStatus(82, payload TBD)");
+  expect(MessageType::ControlPreloginControl, false, "ControlPreloginControl(83, reserved)");
   expect(static_cast<MessageType>(9999), false, "arbitrary 9999 (future/garbage)");
 
   if (gFailures != 0) {

@@ -2130,6 +2130,12 @@ add_executable(remote60_prelogin_control_allowlist_test
 )
 target_include_directories(remote60_prelogin_control_allowlist_test PRIVATE src)
 
+# prelogin-service r2: remote-reboot wire codec (message types 84/85).
+add_executable(remote60_reboot_wire_test
+  src/reboot_wire_test.cpp
+)
+target_include_directories(remote60_reboot_wire_test PRIVATE src)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
