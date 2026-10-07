@@ -2144,6 +2144,12 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
+add_executable(remote60_prelogin_supervisor_test
+  src/prelogin_supervisor_test.cpp
+)
+target_include_directories(remote60_prelogin_supervisor_test PRIVATE src)
+
 # prelogin-service r3: remote-reboot host-side authorization + dedup gate (pure).
 add_executable(remote60_prelogin_reboot_gate_test
   src/prelogin_reboot_gate_test.cpp
