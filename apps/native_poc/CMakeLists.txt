@@ -2148,6 +2148,14 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service A1 section f: per-user autostart cleanup (service-owns-startup gate + scoped delete).
+add_executable(remote60_prelogin_autostart_test
+  src/prelogin_autostart_test.cpp
+  src/prelogin_autostart.cpp
+)
+target_include_directories(remote60_prelogin_autostart_test PRIVATE src)
+target_link_libraries(remote60_prelogin_autostart_test PRIVATE advapi32)
+
 # prelogin-service r3: viewer reboot-menu / prelogin-credential policy (R1 warning + PC-first) pure.
 add_executable(remote60_reboot_menu_policy_test
   src/reboot_menu_policy_test.cpp
