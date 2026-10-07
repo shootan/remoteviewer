@@ -816,7 +816,27 @@ void unlock_pipe_loop() {
 using namespace remote60::native_poc::prelogin;
 
 HANDLE gPreloginWorker = nullptr;  // GNLinkStream.exe --prelogin, SYSTEM, console input desktop
+DWORD gPreloginWorkerSession = 0xFFFFFFFFu;  // the console session that worker was launched for (S5 identity)
 HANDLE gUserHostProcess = nullptr; // GNLinkHost.exe --tray, launched for the logged-on user at handoff
+DWORD gUserHostSession = 0xFFFFFFFFu;        // the session that host was launched for (S5 identity)
+// All launched children join this Job with KILL_ON_JOB_CLOSE, so a SYSTEM worker can never outlive the
+// service: if the service process dies for any reason, closing its last handle to the job kills them
+// (Codex S5 lifetime boundary). Created lazily on the first launch.
+HANDLE gChildJob = nullptr;
+
+HANDLE ensure_child_job() {
+  if (gChildJob) return gChildJob;
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (!job) return nullptr;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+  info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+    CloseHandle(job);
+    return nullptr;
+  }
+  gChildJob = job;
+  return gChildJob;
+}
 
 std::wstring sibling_exe_path(const wchar_t* name) {
   const std::wstring self = current_executable_path();
@@ -842,9 +862,45 @@ std::wstring machine_record_path() {
   return std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
 }
 
-// Reads + validates the machine record to decide whether prelogin is enabled on this box. Full origin
-// binding is enforced by the directory register path; here we require a present, enabled, machine-bound,
-// non-revoked record. Returns false (feature off) on any failure -- never fails open.
+// The durable owner-generation FLOOR, kept OUTSIDE the record (HKLM, SYSTEM/Admins) so it cannot be
+// rolled back by restoring an old on-disk blob (Codex S2). Disable/revoke bumps it above the current
+// record's generation; a restored older-generation record then validates as Revoked. Default 0.
+constexpr wchar_t kOwnerFloorKey[] = L"SOFTWARE\\GNLink";
+constexpr wchar_t kOwnerFloorValue[] = L"PreloginOwnerFloor";
+
+uint64_t read_prelogin_owner_floor() {
+  uint64_t v = 0;
+  DWORD cb = sizeof(v);
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, kOwnerFloorKey, kOwnerFloorValue,
+                   RRF_RT_REG_QWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &v, &cb) != ERROR_SUCCESS) {
+    return 0;
+  }
+  return v;
+}
+
+// Raise the floor to `floor` (monotonic; never lowers). Called by the disable/revoke path so a later
+// restore of an old enabled blob is rejected. Returns true on success.
+bool raise_prelogin_owner_floor(uint64_t floor) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kOwnerFloorKey, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr,
+                      &key, nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+  uint64_t cur = 0;
+  DWORD cb = sizeof(cur);
+  RegGetValueW(HKEY_LOCAL_MACHINE, kOwnerFloorKey, kOwnerFloorValue, RRF_RT_REG_QWORD, nullptr, &cur, &cb);
+  bool ok = true;
+  if (floor > cur) {
+    ok = RegSetValueExW(key, kOwnerFloorValue, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&floor),
+                        sizeof(floor)) == ERROR_SUCCESS;
+  }
+  RegCloseKey(key);
+  return ok;
+}
+
+// Reads + validates the machine record to decide whether prelogin is enabled on this box RIGHT NOW. The
+// revoke floor comes from the durable external store, NOT the record itself, so an OFF/revoked state and
+// a restored old blob are both rejected. Returns false (feature off) on any failure -- never fails open.
 bool prelogin_feature_enabled() {
   const std::wstring path = machine_record_path();
   if (path.empty()) return false;
@@ -855,7 +911,7 @@ bool prelogin_feature_enabled() {
   ctx.currentMachineId = current_machine_guid();
   ctx.expectedAccountId = 0;        // any account enrolled on this machine
   ctx.originAllowed = true;         // origin binding verified at register time; not re-litigated here
-  ctx.minOwnerGeneration = rec.ownerGeneration;  // no externally-recorded revoke floor at this layer
+  ctx.minOwnerGeneration = read_prelogin_owner_floor();  // EXTERNAL durable floor (S2): record cannot self-pass
   ctx.featureGateEnabled = true;
   return ValidateMachineRecord(rec, ctx) == RecordVerdict::Usable;
 }
@@ -886,11 +942,15 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
   std::wstring desktopSpec = L"winsta0\\" + desktopName;
   startup.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION proc{};
+  // CREATE_SUSPENDED so the child is assigned to the kill-on-close Job BEFORE it runs (S5): it can never
+  // escape the job or do anything before the lifetime boundary is in place.
   ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
-                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup,
-                            &proc) != FALSE;
+                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, nullptr,
+                            nullptr, &startup, &proc) != FALSE;
   CloseHandle(childToken);
   if (!ok) return nullptr;
+  if (HANDLE job = ensure_child_job()) (void)AssignProcessToJobObject(job, proc.hProcess);
+  ResumeThread(proc.hThread);
   CloseHandle(proc.hThread);
   return proc.hProcess;
 }
@@ -909,10 +969,13 @@ void stop_child(HANDLE* h) {
 }
 
 void ensure_prelogin_worker(DWORD consoleSession) {
-  if (child_alive(gPreloginWorker)) return;
-  stop_child(&gPreloginWorker);  // reap a dead handle
+  // Reuse the existing worker ONLY if it is alive AND was launched for THIS console session (Codex S5):
+  // after a fast-user-switch / console change the old child must never be mistaken for the new session's.
+  if (child_alive(gPreloginWorker) && gPreloginWorkerSession == consoleSession) return;
+  stop_child(&gPreloginWorker);  // dead handle, or a different-session child -> never reuse
   gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon",
                                                     sibling_exe_path(L"GNLinkStream.exe"), L"--prelogin");
+  gPreloginWorkerSession = gPreloginWorker ? consoleSession : 0xFFFFFFFFu;
   diag("prelogin: worker launch on console session=%u -> %s", consoleSession,
        gPreloginWorker ? "ok" : "FAILED");
 }
@@ -921,8 +984,10 @@ void ensure_prelogin_worker(DWORD consoleSession) {
 // handoff that replaces the elevated HKCU Run). The token matrix is resolved by the console probe
 // classifiers; here we obtain the primary token and, for a Limited token, its linked Full.
 void launch_user_host(DWORD consoleSession) {
-  if (child_alive(gUserHostProcess)) return;
+  // Reuse only an alive host launched for THIS session (Codex S5 identity).
+  if (child_alive(gUserHostProcess) && gUserHostSession == consoleSession) return;
   stop_child(&gUserHostProcess);
+  gUserHostSession = 0xFFFFFFFFu;
   // Clear any prior session's readiness so the handoff waits for THIS host's real ready signal (r4 #7).
   ResetUserHostReady();
   HANDLE userToken = nullptr;
@@ -951,23 +1016,35 @@ void launch_user_host(DWORD consoleSession) {
   startup.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION proc{};
   const BOOL ok = CreateProcessAsUserW(launchToken, nullptr, command, nullptr, nullptr, FALSE,
-                                       CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, nullptr, nullptr,
-                                       &startup, &proc);
+                                       CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
+                                       nullptr, nullptr, &startup, &proc);
   if (ok) {
+    if (HANDLE job = ensure_child_job()) (void)AssignProcessToJobObject(job, proc.hProcess);  // S5 lifetime
+    ResumeThread(proc.hThread);
     CloseHandle(proc.hThread);
     gUserHostProcess = proc.hProcess;
+    gUserHostSession = consoleSession;  // S5 identity
   }
   diag("prelogin: user host handoff -> %s", ok ? "launched" : "FAILED");
   if (linked) CloseHandle(linked);
   CloseHandle(userToken);
 }
 
-SupervisorObservation observe_console(bool featureEnabled) {
+// Observe the console for ONE reconcile tick. `consoleOut` returns the exact console session this
+// observation was taken against, so the reconcile uses the SAME session for any launch (Codex S5: do not
+// re-query WTSGetActiveConsoleSessionId and risk launching on a different session). Feature-enabled is
+// re-evaluated EVERY tick from the durable record+floor (Codex S2: a live OFF/revoke takes effect without
+// a service restart, and an enable is honoured because the loop always runs).
+SupervisorObservation observe_console(DWORD* consoleOut, bool consoleChanged) {
   SupervisorObservation obs;
-  obs.featureEnabled = featureEnabled;
-  obs.machineCredentialValid = featureEnabled;  // the same record gates both at this layer
-  obs.consoleChanged = gSessionChangePending.exchange(false, std::memory_order_acq_rel);
+  const bool enabled = prelogin_feature_enabled();
+  obs.featureEnabled = enabled;
+  obs.machineCredentialValid = enabled;  // the same durable record+floor gates both
+  // consoleChanged comes from the monotonic topology generation tracked by the loop -- NOT from
+  // exchanging gSessionChangePending, which is ensure_agent's to consume (Codex S5 event-race).
+  obs.consoleChanged = consoleChanged;
   const DWORD console = WTSGetActiveConsoleSessionId();
+  if (consoleOut) *consoleOut = console;
   obs.consoleSessionValid = (console != 0xFFFFFFFFu);
   if (!obs.consoleSessionValid) return obs;
   HANDLE userToken = nullptr;
@@ -986,11 +1063,17 @@ SupervisorObservation observe_console(bool featureEnabled) {
   return obs;
 }
 
-void prelogin_reconcile_loop(bool featureEnabled) {
+void prelogin_reconcile_loop() {
   PreloginSupervisor sup;
+  uint32_t lastTopoGen = gSessionTopologyGeneration.load(std::memory_order_acquire);
   while (gRunning.load(std::memory_order_acquire)) {
-    const SupervisorObservation obs = observe_console(featureEnabled);
-    const DWORD console = WTSGetActiveConsoleSessionId();
+    // Track the monotonic topology generation as OUR own last-seen (Codex S5): a session change bumps
+    // it, and we react once, without racing ensure_agent for the pending flag.
+    const uint32_t topoGen = gSessionTopologyGeneration.load(std::memory_order_acquire);
+    const bool consoleChanged = (topoGen != lastTopoGen);
+    lastTopoGen = topoGen;
+    DWORD console = 0xFFFFFFFFu;
+    const SupervisorObservation obs = observe_console(&console, consoleChanged);  // console = this obs's snapshot
     const PreloginSupervisor::Outcome out = sup.Reconcile(obs);
     switch (out.action) {
       case SupervisorAction::RunPreloginWorker:
@@ -1040,14 +1123,13 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
   std::thread unlockThread(unlock_pipe_loop);
 
-  // Prelogin supervisor: only when the machine record enables it, so an existing feature-off deployment
-  // keeps exactly the previous behaviour. (prelogin-service §1.)
-  const bool preloginEnabled = prelogin_feature_enabled();
-  std::thread preloginThread;
-  if (preloginEnabled) {
-    diag("prelogin: feature enabled -> starting supervisor reconcile loop");
-    preloginThread = std::thread(prelogin_reconcile_loop, preloginEnabled);
-  }
+  // Prelogin supervisor: ALWAYS runs (Codex S2). It re-reads the durable record+floor every tick, so a
+  // live enable is honoured without a service restart and a live OFF/revoke takes effect immediately.
+  // When the feature is off the supervisor simply decides Disabled -> StopAll each tick (no child, no
+  // screen/input), so a feature-off deployment still sees no prelogin behaviour -- just a 1s reconcile
+  // that does nothing. (A missing record makes prelogin_feature_enabled return fast.)
+  diag("prelogin: starting supervisor reconcile loop (feature re-checked each tick)");
+  std::thread preloginThread(prelogin_reconcile_loop);
 
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();
