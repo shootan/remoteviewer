@@ -3,9 +3,15 @@
 // Remote reboot (prelogin-service r2, user decision 2026-10-07): the two fixed control messages.
 //
 // Role:    ControlRebootRequest (84, viewer -> host) asks the host to restart; ControlRebootReply
-//          (85, host -> viewer) answers with the OUTCOME, not a receipt. The host performs the actual
-//          restart from its SYSTEM service via InitiateShutdownW; the viewer only shows "restarting"
-//          and must not treat the ensuing disconnect as an error. Gated on kCaptureFlagRemoteRebootV1
+//          (85, host -> viewer) answers with the OUTCOME, not a receipt (Accepted = the OS accepted the
+//          restart request, NOT reboot complete -- Codex r4 R3). The host performs the actual restart
+//          from its SYSTEM service; the baseline is a short grace + non-forced call
+//          (InitiateSystemShutdownExW(NULL, msg, 5, FALSE, TRUE, planned-reason); InitiateShutdownW is
+//          the alternative compared in the service unit), and a failure is NEVER auto-escalated to a
+//          forced restart. The viewer only shows "restarting" and must not treat the ensuing disconnect
+//          as an error. One confirm popup -> one requestId; the service dedups so a retransmit causes no
+//          second OS call, and the viewer never auto-generates a fresh request on a lost ACK. Gated on
+//          kCaptureFlagRemoteRebootV1
 //          so an old host (which drains an unknown opcode without replying) is never sent one -- its
 //          menu item stays disabled with a reason.
 // Auth:    the host accepts this ONLY on a directory-authenticated session; a token-less LAN Hello
@@ -31,10 +37,10 @@ struct ControlRebootRequestMessage {
 static_assert(sizeof(ControlRebootRequestMessage) == 16, "reboot request wire drift");
 
 enum class RebootResult : uint8_t {
-  Accepted = 0,       // the host accepted and is initiating the restart
+  Accepted = 0,       // the OS ACCEPTED the restart request -- NOT "reboot complete" (Codex r4 R3)
   Refused = 1,        // declined (feature off / host policy / a restart is already in flight)
   NotAuthorized = 2,  // the session is not directory-authenticated
-  Failed = 3,         // InitiateShutdownW failed; win32 says why
+  Failed = 3,         // the shutdown call failed; win32 says why
 };
 constexpr uint8_t kRebootResultMax = 3;
 

@@ -299,14 +299,23 @@ constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
 // a host that advertises this: an older host discards an unknown type without answering, and the
 // strict request/response link would then wait on a reply that never comes.
 constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
-// Prelogin remote access v1 (prelogin-service): the host advertises that it is (or can be) serving a
-// pre-login secure desktop so the viewer can label the session and gate the sealed "Windows 로그인"
-// credential entry. A viewer sends the prelogin control pair (82/83) only to a host that advertises it.
+// Prelogin remote access v1 (prelogin-service): the host is serving a pre-login secure desktop RIGHT
+// NOW (no interactive user; the remote login screen is live). This is the momentary state, so the
+// viewer can label the session and gate the sealed "Windows 로그인" credential entry. A viewer sends
+// the prelogin control pair (82/83) only to a host that advertises it. (Codex r4 R1: this is distinct
+// from the durable-enabled signal below -- do not conflate "in prelogin now" with "will come up before
+// login after a reboot".)
 constexpr uint32_t kCaptureFlagPreloginV1 = 0x2000u;
 // Remote reboot v1 (prelogin-service r2): the host takes ControlRebootRequest (84) and answers
 // ControlRebootReply (85). A viewer enables its in-menu reboot item (with the confirm popup) only when
 // it sees this bit; an old host leaves the item disabled with a reason.
 constexpr uint32_t kCaptureFlagRemoteRebootV1 = 0x4000u;
+// Prelogin DURABLE-ENABLED (prelogin-service r3, Codex r4 R1): the host has pre-login remote access
+// turned on, so AFTER A REBOOT it will be reachable before anyone logs in. This is independent of
+// kCaptureFlagPreloginV1 -- a logged-in host advertises THIS (durable on) but not that (not in prelogin
+// now). The reboot confirm popup keys its "...can't connect until someone logs in" warning on the
+// ABSENCE of this bit, so a feature-on host is never falsely warned.
+constexpr uint32_t kCaptureFlagPreloginEnabledV1 = 0x8000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
