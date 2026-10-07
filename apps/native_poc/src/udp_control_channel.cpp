@@ -344,6 +344,19 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
   }
 }
 
+bool UdpControlChannel::IsControlDatagram(const void* data, size_t len) {
+  if (!data || len < sizeof(uint32_t) + sizeof(uint16_t)) return false;
+  const auto* bytes = static_cast<const uint8_t*>(data);
+  uint32_t magic = 0;
+  uint16_t kind = 0;
+  std::memcpy(&magic, bytes, sizeof(magic));
+  std::memcpy(&kind, bytes + sizeof(magic), sizeof(kind));
+  if (magic != kMagic) return false;
+  return kind == static_cast<uint16_t>(UdpPacketKind::ControlData) ||
+         kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) ||
+         kind == static_cast<uint16_t>(UdpPacketKind::ControlNack);
+}
+
 bool UdpControlChannel::OnPacket(const void* data, size_t len) {
   if (!data || len < sizeof(uint32_t) + sizeof(uint16_t)) return false;
   const auto* bytes = static_cast<const uint8_t*>(data);

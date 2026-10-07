@@ -532,6 +532,80 @@ int wmain(int argc, wchar_t** argv) {
     check("a control request makes the round trip over the tunnel", roundTrip,
           client.Snapshot().status);
 
+    // ---- udp-control-peer (1): a DIFFERENT wire endpoint cannot inject control -----------------
+    // Real host ingress: A (above) is the adopted session. B is a second loopback socket on another
+    // port (same IP, different port) sending well-formed control -- a forged ACK and a ControlData.
+    // The host must DROP them before the parser (log the limited aggregate), leave A's session and
+    // control loop untouched, and send B nothing. (The pre-0.2.151 path consumed any magic+kind
+    // datagram regardless of source -- so this check does not even print on a build without the gate.)
+    {
+      SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      check("[inject] a second endpoint B opens a socket", b != INVALID_SOCKET);
+      if (b != INVALID_SOCKET) {
+        sockaddr_in blocal{};
+        blocal.sin_family = AF_INET;
+        blocal.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        blocal.sin_port = 0;  // a different port than A -> same IP, different port
+        bind(b, reinterpret_cast<sockaddr*>(&blocal), sizeof(blocal));
+        DWORD rcvTo = 1200;
+        setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
+        sockaddr_in hostAddr{};
+        hostAddr.sin_family = AF_INET;
+        hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        hostAddr.sin_port = htons(mediaPort);
+
+        remote60::native_poc::UdpControlAckPacket forgedAck{};  // magic + kind=ControlAck by default
+        forgedAck.streamId = 0x1234;
+        forgedAck.messageSeq = 999999;
+        // A ControlData-kind datagram (well-formed enough to be CLASSIFIED as control; the gate drops
+        // it before the channel parser ever runs).
+        struct {
+          uint32_t magic = remote60::native_poc::kMagic;
+          uint16_t kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+          uint16_t pad = 0;
+          uint8_t body[24] = {};
+        } forgedData;
+
+        const int kBursts = 6;
+        for (int i = 0; i < kBursts; ++i) {
+          sendto(b, reinterpret_cast<const char*>(&forgedAck), sizeof(forgedAck), 0,
+                 reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+          sendto(b, reinterpret_cast<const char*>(&forgedData), sizeof(forgedData), 0,
+                 reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        }
+
+        // The host logs the limited drop aggregate ONLY because the gate fired on B's real ingress.
+        check("[inject] the host drops control from the non-session endpoint B",
+              host.WaitFor("dropped control from non-session peer", 6000), host.tail());
+
+        // B receives no reply at all -- the host neither ACKs nor answers a stranger.
+        char junk[256];
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int got = recvfrom(b, junk, sizeof(junk), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+        check("[inject] the host sends B nothing back", got <= 0,
+              got > 0 ? ("B got " + std::to_string(got) + " bytes") : "");
+        closesocket(b);
+      }
+
+      // A's session is untouched by B's injection: still connected, control loop still running, and a
+      // fresh control round trip still completes over A's tunnel.
+      check("[inject] A's session stays connected through B's injection",
+            client.Snapshot().state == remote60::native_poc::ClientSessionState::Connected &&
+                client.Snapshot().controlLoopActive,
+            client.Snapshot().status);
+      // A control send still goes out on A's live loop, and a window-list reply still arrives -- the
+      // tunnel A owns is unaffected by B's dropped injection.
+      const bool aStillWorks =
+          client.RequestWindowList() &&
+          wait_until([&] {
+            const auto s = client.Snapshot();
+            return s.state == remote60::native_poc::ClientSessionState::Connected && s.controlLoopActive;
+          }, 8000);
+      check("[inject] A's control loop still serves after the injection", aStillWorks,
+            client.Snapshot().status);
+    }
+
     // PunchAny re-sends while it waits, so the host saw more than one punch from one source.
     // They are all answered, and the per-source budget is 25 -- duplicates are bounded.
     const int replied = host.Count("replied=1");

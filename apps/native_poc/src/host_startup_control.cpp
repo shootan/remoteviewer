@@ -322,6 +322,10 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         }
       }
       int lastLoggedRecvError = 0;
+      // udp-control-peer ①: a limited aggregate of control/NACK datagrams dropped because they came
+      // from a wire peer that is not the one the session adopted. No token/payload is ever logged.
+      uint64_t foreignControlDrops = 0;
+      uint64_t foreignControlLogUs = 0;
       while (!stop.load()) {
         uint8_t rx[kUdpReceiveBufferBytes];
         sockaddr_in peer{};
@@ -505,6 +509,17 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
           }
         }
 
+        // udp-control-peer (1): everything from here that mutates per-session state or answers on the
+        // session's behalf -- the video-NACK retransmit and the control channel -- must come from the
+        // CURRENTLY ADOPTED wire peer (address family + IP + port). The peer tuple is set/advanced only
+        // by an authenticated Hello above, so an authenticated A->A' port move is honoured and the old
+        // endpoint's later packets are refused. Bulk shares the same gate; bootstrap (directory
+        // punch/observe) and Hello keep their own admission elsewhere. Same IP, different port = refused.
+        const bool fromAdoptedPeer =
+            peer.sin_family == AF_INET &&
+            sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
+            sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port;
+
         // Video NACK: replay just the missing chunks of an AU from the sender's recent-AU cache.
         // A no-op unless the client negotiated it (sender.nackEnabled). (video NACK.)
         if (len >= sizeof(UdpVideoNackPacket)) {
@@ -516,7 +531,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             uint16_t missingCount = nack.missingCount;
             if (missingCount > remote60::native_poc::kUdpVideoNackMaxMissing)
               missingCount = remote60::native_poc::kUdpVideoNackMaxMissing;
-            if (missingCount > 0) {
+            // Only the session peer may trigger a retransmit; a stranger's NACK is dropped (it would
+            // otherwise make the host send video to a non-session endpoint). The datagram is consumed.
+            if (fromAdoptedPeer && missingCount > 0) {
               sender.RetransmitAu(clientSession.clientSock, peer, nack.streamGeneration, nack.seq,
                                   nack.missing, missingCount);
             }
@@ -779,21 +796,31 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         }
         // Clipboard image v1: the bulk stream (stream id bit30) goes to its own channel, BEFORE the
         // control channel -- which claims every ControlData/Ack/Nack datagram whatever its stream
-        // id and would drop these. Only from the current peer.
+        // id and would drop these. Only from the current peer (shared fromAdoptedPeer gate).
         // File copy's bulk streams (bases 0 / 3) first; they are never the image's.
-        if (clientSession.fileCopy &&
-            sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
-            sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port &&
-            clientSession.fileCopy->OnDatagram(rx, len)) {
+        if (fromAdoptedPeer && clientSession.fileCopy && clientSession.fileCopy->OnDatagram(rx, len)) {
           continue;
         }
-        if (clientSession.clipImage &&
-            sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&
-            sender.udpPeerPortNet.load(std::memory_order_acquire) == peer.sin_port &&
-            clientSession.clipImage->OnDatagram(rx, len)) {
+        if (fromAdoptedPeer && clientSession.clipImage && clientSession.clipImage->OnDatagram(rx, len)) {
           continue;
         }
-        if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
+        // The control channel accepts ControlData/Ack/Nack ONLY from the adopted peer -- the fix for
+        // this file: OnPacket claimed any magic+kind datagram before looking at its source, so another
+        // LAN endpoint could inject input/control or forge ACK/NACK into the authenticated session. A
+        // control datagram from a non-adopted peer is dropped BEFORE the parser, changing no channel or
+        // tx state and sending no reply; non-control datagrams still reach the directory bootstrap path.
+        if (fromAdoptedPeer) {
+          if (clientSession.udpControlChannel.OnPacket(rx, len)) continue;
+        } else if (remote60::native_poc::UdpControlChannel::IsControlDatagram(rx, len)) {
+          ++foreignControlDrops;
+          const uint64_t nowUs = remote60::native_poc::qpc_now_us();
+          if (nowUs - foreignControlLogUs >= 5000000ull) {
+            foreignControlLogUs = nowUs;
+            std::cout << "[native-video-host][control] dropped control from non-session peer total="
+                      << foreignControlDrops << "\n";
+          }
+          continue;
+        }
         (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, len, peer);
       }
       clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::Shutdown);
