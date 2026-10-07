@@ -31,6 +31,7 @@ void FileHelperChannel::SetOwner(uint64_t owner) {
       prev_ = std::move(cur_);
       cur_ = Helper{};
       instance_.store(0);
+      curPid_.store(0, std::memory_order_release);
     }
   }
   if (dying) dying->Close();
@@ -97,6 +98,7 @@ bool FileHelperChannel::EnsureLocked(uint64_t owner, std::string* why, bool* sta
       prev_ = std::move(cur_);
       cur_ = Helper{fresh, owner, inst};
       instance_.store(inst);
+      curPid_.store(fresh->helper_pid(), std::memory_order_release);
       if (instance) *instance = inst;
       adopted = true;
     }
@@ -185,6 +187,7 @@ void FileHelperChannel::Stop() {
       std::lock_guard<std::mutex> s(sendMu_);
       if (cur_.link) cur_.link->Close();
       if (prev_.link) prev_.link->Close();
+      curPid_.store(0, std::memory_order_release);
     }
     a = std::move(reader_);
     b = std::move(prevReader_);

@@ -975,12 +975,35 @@ int run_driver() {
       ++calls;
       return fakeShell;
     };
-    // The ended fixture's last handle goes, so its PID names no process any more.
+    // The ended fixture's last handle (this test's) goes. Its PID names no process only once EVERY
+    // handle to it is closed -- one held anywhere else keeps the ended process openable (r9: a run where
+    // that held saw OpenProcess succeed and the refusal come one step later, at the recheck). The
+    // precondition is measured, not assumed.
+    const DWORD fxPid = fx.dwProcessId;
     CloseHandle(fx.hProcess);
     CloseHandle(fx.hThread);
+    const DWORD waitStart = GetTickCount();
+    bool pidGone = false;
+    while (!pidGone && GetTickCount() - waitStart < 5000) {
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, fxPid);
+      if (!h) {
+        pidGone = true;
+      } else {
+        CloseHandle(h);
+        Sleep(20);
+      }
+    }
+    std::printf("      the ended fixture's PID stopped naming a process after %lu ms (gone=%d)\n",
+                static_cast<unsigned long>(GetTickCount() - waitStart), pidGone ? 1 : 0);
     const bool gone = acquire(&stage, &why, &cls, &got);
-    check("a 'shell' PID whose process is gone is refused before any token (no-shell at OpenProcess)",
-          !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-process", stage + " " + why);
+    if (pidGone) {
+      check("a 'shell' PID whose process is gone is refused before any token (no-shell at OpenProcess)",
+            !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-process", stage + " " + why);
+    } else {
+      // Still openable (another holder): the ended shell is then refused at the recheck -- NoShell, no token.
+      check("a 'shell' PID of an ended process still held open elsewhere: refused, no token (no-shell at the recheck)",
+            !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-recheck" && why == "shell-exited", stage + " " + why);
+    }
     auto handles = [] {
       DWORD n = 0;
       GetProcessHandleCount(GetCurrentProcess(), &n);
@@ -1125,8 +1148,10 @@ int run_driver() {
     wrong.nonce[7] ^= 1;
     check("ONE BIT OFF IN THE NONCE IS REFUSED", std::string(verify_hello(wrong, nonce, 500, 500).why) == "nonce-mismatch");
     Hello ver = h;
-    ver.version = 2;
+    ver.version = kPipeVersion + 1;
     check("a wrong version is refused", !verify_hello(ver, nonce, 500, 500).ok);
+    ver.version = 1;  // r7: a helper before PublishRemoteFilesIfUnchanged is never used (never sent 18)
+    check("a version-1 helper is refused (the pipe is version 2)", kPipeVersion == 2 && !verify_hello(ver, nonce, 500, 500).ok);
   }
 
   // ---------------------------------------------------------------- the Medium launch rule (pure)
@@ -1208,6 +1233,30 @@ int run_driver() {
     if (bad.helper_process() && WaitForSingleObject(bad.helper_process(), 5000) == WAIT_OBJECT_0) GetExitCodeProcess(bad.helper_process(), &code);
     check("...and the helper exits (no HelloAck) with 4", code == 4, "exit=" + std::to_string(code));
     bad.Close();
+  }
+
+  // ---------------------------------------------------------------- r8: a version-1 helper binary
+  {
+    // An older install's helper (REMOTE60_E2E_OLD_BIN, e.g. 0.2.150's): the real binary, on the
+    // product's launch path, on this station. It speaks pipe version 1: refused at its Hello, so a
+    // viewer never uses it -- never sends it PublishRemoteFilesIfUnchanged (18).
+    wchar_t buf[MAX_PATH] = L"";
+    const DWORD n = GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+      std::printf("SKIP  a version-1 helper binary (REMOTE60_E2E_OLD_BIN not set)\n");
+    } else {
+      std::printf("\n--- a version-1 helper (an older install's binary) ---\n");
+      HelperLink v1;
+      std::string why;
+      check("a server pipe for it", v1.CreateServerPipe(userSid, &why), why);
+      const bool launched = v1.Launch(std::wstring(buf, n) + L"\\GNLinkClipHelper.exe", nullptr, station.desktop.c_str(),
+                                      L"--idle-ms 3000", &why);
+      check("...it is launched", launched, why);
+      std::string helloWhy;
+      const bool hello = launched && v1.AwaitHello(10000, &helloWhy);
+      check("A VERSION-1 HELPER IS REFUSED AT ITS HELLO (never used, never sent 18)", launched && !hello, helloWhy);
+      v1.Close();
+    }
   }
 
   // ---------------------------------------------------------------- the helper, for real
@@ -1352,6 +1401,21 @@ int run_driver() {
     return child->Start(cmd, station.desktop.c_str());
   };
   const std::vector<RemoteFileItem> twoFiles = {item(u"remote_0.bin", 1024 * 1024 + 7), item(u"remote_b.txt", 5)};
+  {
+    // r7 (D2): a publish bound to a clipboard revision that is no longer this station's is refused
+    // by the real helper, before anything is put on the clipboard.
+    PublishRemoteFiles g;
+    g.offerId = 70;
+    g.items = twoFiles;
+    g.ifUnchanged = true;
+    g.expectSeq = 0xFFFFFFF0u;  // not the station's sequence
+    PipeFrame f;
+    PublishResult r;
+    const bool answered = link.Send(encode(g)) && link.Receive(&f, 5000) && decode(f, &r);
+    check("PublishRemoteFilesIfUnchanged over a stale revision is refused (ClipboardChanged)",
+          answered && r.offerId == 70 && r.status == Status::ClipboardChanged,
+          answered ? std::string("status=") + status_name(r.status) : std::string("no answer"));
+  }
   {
     std::string detail;
     check("PublishRemoteFiles offer 7 (2 files)", expect_publish_ok(link, 7, twoFiles, &detail), detail);

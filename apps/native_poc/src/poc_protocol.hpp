@@ -316,6 +316,10 @@ constexpr uint32_t kCaptureFlagRemoteRebootV1 = 0x4000u;
 // now). The reboot confirm popup keys its "...can't connect until someone logs in" warning on the
 // ABSENCE of this bit, so a feature-on host is never falsely warned.
 constexpr uint32_t kCaptureFlagPreloginEnabledV1 = 0x8000u;
+// Paste on demand r7 (D2): this host answers the ordered offer query (file messages 86/87): each R->P
+// file offer says which copy on the host it was made of (its copy generation). A viewer asks 86 only
+// of a host that advertises this; an older host is asked 67 as before (its offers carry no order).
+constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

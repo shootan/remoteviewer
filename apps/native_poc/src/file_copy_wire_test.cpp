@@ -80,6 +80,21 @@ int main() {
     fresh.items = {item(0, u"x.txt", 3)};
     check("OfferQueryReply changed: the list travels once", round_trip(fresh, &back) && !back.unchanged &&
                                                                 back.offerId == 77 && back.items.size() == 1);
+    // r7 (D2): 87 = 68's body + the offer's copy generation; 68's parser stays exact.
+    fresh.copyGen = 0x0102030405060708ull;
+    OfferQueryReply ordered;
+    const std::vector<uint8_t> b87 = body_ordered(fresh);
+    check("87 round-trips with the offer's copy generation",
+          parse_ordered(b87, &ordered) && ordered.copyGen == fresh.copyGen && ordered.offerId == 77 && ordered.items.size() == 1 &&
+              b87.size() == body(fresh).size() + 8);
+    check("87's body is refused by 68's parser (no field appended to 68)", !parse(b87, &back));
+    check("68's body is refused by 87's parser", !parse_ordered(body(fresh), &ordered));
+    same.copyGen = 9;
+    check("87 unchanged: still the copy generation at the end", parse_ordered(body_ordered(same), &ordered) && ordered.unchanged &&
+                                                                    ordered.copyGen == 9);
+    std::vector<uint8_t> padded = b87;
+    padded.push_back(0);
+    check("87 padded is refused", !parse_ordered(padded, &ordered));
   }
   {
     PasteQueryReply r{42, PasteState::Begun, 9, PasteEndReason::None}, back;
@@ -127,6 +142,8 @@ int main() {
           h.header.type == 65 && h.header.size == sizeof(FileControlHeader) && h.seq == 5 && h.payloadBytes == 10);
     check("65~76 are file control, 64 and 77 are not", is_file_control(65) && is_file_control(76) && !is_file_control(64) &&
                                                            !is_file_control(77));
+    check("86/87 (r7) are file control, 85 and 88 are not", is_file_control(86) && is_file_control(87) && !is_file_control(85) &&
+                                                              !is_file_control(88));
   }
   {
     Pull p;

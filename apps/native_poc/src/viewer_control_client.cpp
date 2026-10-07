@@ -143,6 +143,28 @@ int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
         probeId = clip.probeId;
       }
     }
+    // r5 (F1): the baseline a copy here asked for, before anything else: a paste's check compares with it.
+    uint64_t baselineToken = 0;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.baselineRequested) {
+        clip.baselineRequested = false;
+        baselineToken = clip.baselineToken;
+      }
+    }
+    if (baselineToken != 0) {
+      const int r = poll_host_clipboard(link, /*forced=*/true);
+      if (r < 0) return -1;
+      PasteAnswer b;
+      b.id = baselineToken;
+      b.probe = true;
+      b.baseline = true;
+      b.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
+      b.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      b.connGen = clip.connGen.load(std::memory_order_acquire);
+      post_paste_answer(ctx, b);
+      if (probeId == 0) return 1;
+    }
     if (probeId != 0) {
       const int r = poll_host_clipboard(link, /*forced=*/true);
       PasteAnswer a;
@@ -155,6 +177,7 @@ int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
       }
       a.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
       a.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      a.connGen = clip.connGen.load(std::memory_order_acquire);
       post_paste_answer(ctx, a);
       return 1;
     }
@@ -309,17 +332,18 @@ int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, 
   // The first reply of a session only sets the generation: its contents are from before this
   // session and must not land on top of what the user copied since (the stale-revival bug).
   if (clip.policy.OnPollReply(reply.generation, reply.hasData)) {
-    bool apply = false;
-    {
-      std::lock_guard<std::mutex> lock(clip.mu);
-      apply = clip.core.OnRemoteData(reply.text, reply.hash) ==
-              remote60::native_poc::ClipboardRemoteDecision::Apply;
-    }
-    // Apply on the UI thread, which owns the clipboard listener window. The core already recorded
-    // this as applied, so the change notification the write provokes is dropped as an echo.
-    if (apply && ctx.session.hwnd) {
-      PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0,
-                   reinterpret_cast<LPARAM>(new std::u16string(std::move(reply.text))));
+    // r7 (D1): whether the remote PC's text lands here is decided on the UI thread, which records this
+    // PC's copies -- here it is only handed over, with what that decision needs from this one reply:
+    // its copy generation and the connection it came on (this thread bumps connGen, so it is the
+    // poll's). The UI thread also writes it, as the owner of the clipboard listener window.
+    if (reply.hasData && !reply.text.empty() && ctx.session.hwnd) {
+      auto* item = new RemoteTextApply;
+      item->text = std::move(reply.text);
+      item->hash = reply.hash;
+      item->hasCopyGen = reply.hasCopyGen;
+      item->copyGen = reply.copyGen;
+      item->connGen = clip.connGen.load(std::memory_order_acquire);
+      if (!PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0, reinterpret_cast<LPARAM>(item))) delete item;
     }
   }
   return 1;
@@ -400,6 +424,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
       ctx.control.clipboard.connGen.fetch_add(1, std::memory_order_acq_rel);
       ctx.control.clipboard.havePasteText = false;  // asked on the previous connection
       ctx.control.clipboard.probeRequested = false;
+      ctx.control.clipboard.baselineRequested = false;
       ctx.control.clipboard.hostCopyGenKnown.store(false, std::memory_order_release);  // a new session's baseline
     }
     // Paste on demand: whether this host confirms a paste. Set every pong, like the bits around it.
@@ -416,6 +441,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.control.fileCopy.SetHostSupports(
         clipboardHost && ctx.session.bulkChannelNegotiated &&
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileCopyV1) != 0);
+    ctx.control.fileCopy.SetHostOrdersOffers(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileOfferCopyGenV1) != 0);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;

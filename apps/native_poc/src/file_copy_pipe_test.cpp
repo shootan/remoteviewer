@@ -97,6 +97,20 @@ void test_round_trips() {
     empty.offerId = 9;
     check("...zero items round-trips (the helper refuses it, the codec does not)",
           through_wire(encode(empty), &w) && decode(w, &d) && d.items.empty());
+    // r7 (D2): the publish bound to a clipboard revision is its own message (18), version 2.
+    check("PublishRemoteFiles goes as 10 and is not 'if unchanged'",
+          encode(m).type == PipeMsg::PublishRemoteFiles && decode(encode(m), &d) && !d.ifUnchanged);
+    PublishRemoteFiles g = m;
+    g.ifUnchanged = true;
+    g.expectSeq = 0xA1B2C3D4u;
+    check("PublishRemoteFilesIfUnchanged (18) round-trips with its revision",
+          through_wire(encode(g), &w) && w.type == PipeMsg::PublishRemoteFilesIfUnchanged && decode(w, &d) &&
+              d.ifUnchanged && d.expectSeq == 0xA1B2C3D4u && d.items.size() == 2 && same_item(d.items[1], m.items[1]));
+    check("...truncated / padded refused", truncated_rejected(w, &d) && padded_rejected(w, &d));
+    PipeFrame as10 = w;
+    as10.type = PipeMsg::PublishRemoteFiles;  // 18's body read as 10: the revision is a trailing extra
+    check("...18's body is not a valid 10 (no silent drop of the revision)", !decode(as10, &d));
+    check("the pipe version is 2 (a version-1 helper is refused at Hello, never sent 18)", kPipeVersion == 2);
   }
   {
     PublishResult m;

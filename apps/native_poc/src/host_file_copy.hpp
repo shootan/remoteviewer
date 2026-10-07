@@ -158,7 +158,9 @@ class HostFileCopyService {
    * empty when it names nothing. Strings only -- nothing is opened here. Identified as the user by
    * the helper once a negotiated session asks (A1).
    */
-  void OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths);
+  // `copyGen` (paste on demand r7): the host's copy generation including this change
+  // (HostClipboardHub::CopyGen, read on the same monitor thread right after it counted it).
+  void OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths, uint64_t copyGen = 0);
 
   /**
    * The session ended or rolled over: offers of the viewer, any paste and the helper go. `newEpoch`
@@ -225,6 +227,7 @@ class HostFileCopyService {
   };
   struct HostOffer {  // R->P
     uint64_t revision = 0;  // the clipboard sequence it describes (0 = none yet)
+    uint64_t copyGen = 0;   // r7: the copy generation of that clipboard change (87)
     uint64_t offerId = 0;   // 0 = the clipboard names no file
     std::vector<file_copy::net::OfferItem> items;
     std::vector<HostFile> files;
@@ -288,7 +291,7 @@ class HostFileCopyService {
   bool HandleKnown(uint16_t type, const std::vector<uint8_t>& body, uint64_t epoch, uint16_t* replyType,
                    std::vector<uint8_t>* reply);  // the switch of HandleControl
   std::vector<uint8_t> HandleOffer(const file_copy::net::Offer& m, uint64_t epoch);
-  std::vector<uint8_t> HandleOfferQuery(const file_copy::net::OfferQuery& m, uint64_t epoch);
+  std::vector<uint8_t> HandleOfferQuery(const file_copy::net::OfferQuery& m, uint64_t epoch, bool ordered = false);
   std::vector<uint8_t> HandlePasteQuery(const file_copy::net::PasteQuery& m, uint64_t epoch);
   std::vector<uint8_t> HandlePrepare(const file_copy::net::Prepare& m, uint64_t epoch);
   std::vector<uint8_t> HandlePrepareRtoP(const file_copy::net::Prepare& m, uint64_t epoch);
@@ -349,6 +352,7 @@ class HostFileCopyService {
   // R->P: the newest clipboard content, the offer made of it, and the one it replaced (a paste may
   // have begun on it just before).
   uint64_t clipSeq_ = 0;
+  uint64_t clipCopyGen_ = 0;    // r7: the copy generation of clipSeq_'s change
   std::vector<std::wstring> clipPaths_;
   // A session's first OfferQuery fixes its baseline: what the clipboard held before (sequence <=
   // baseline) is never offered to it -- connecting never replaces the viewer's clipboard (the text
@@ -357,6 +361,7 @@ class HostFileCopyService {
   uint64_t baselineSeq_ = 0;
   bool statWanted_ = false;     // a negotiated session asked and the clipboard is not identified yet
   uint64_t statSeq_ = 0;        // the clipboard sequence the StatFiles in flight describes
+  uint64_t statCopyGen_ = 0;    // and its copy generation (r7)
   uint64_t statId_ = 0;         // its request id (0 = none in flight)
   uint64_t nextStatId_ = 1;
   HostOffer hostOffer_, hostRetired_;

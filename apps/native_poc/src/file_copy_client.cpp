@@ -110,7 +110,16 @@ void FileCopyClient::SetAllowed(bool v) {
     offer_ = OfferState{};
     retired_ = OfferState{};
     prepareQueue_.clear();
-    disconnect = publishedOfferId_ != 0 || R2PEnabled();
+    // r8 (E2): an approved publish not sent yet is not sent; one being sent goes with the helper.
+    ++publishGen_;
+    // r9 (F1): the remote clipboard as seen before the switch is not a copy to publish after it: the
+    // next query (on) takes it as a baseline, as a new session does.
+    remote_ = RemoteOffer{};
+    remoteRetired_ = RemoteOffer{};
+    remoteBaselineTaken_ = false;
+    nextOfferQueryUs_ = 0;
+    disconnect = publishedOfferId_ != 0 || R2PEnabled() || publishSendingGen_ != 0;
+    publishSendingGen_ = 0;
     publishedOfferId_ = 0;
     closeUplinkPending_ = false;
   }
@@ -607,25 +616,43 @@ void FileCopyClient::EndPaste(fn::PasteState state, fn::PasteEndReason reason) {
 
 int FileCopyClient::PumpOfferQuery(ControlLink& link) {
   fn::OfferQuery q;
+  uint64_t askedGen = 0;  // r9 (F1): the publish generation this query is asked in
   {
     std::lock_guard<std::mutex> lock(mu_);
     q.knownRevision = remote_.revision;
+    askedGen = publishGen_;
     ++counters_.offerQueries;
   }
+  // r7 (D2): a host that says so is asked the ordered query, whose offers carry their copy generation.
+  const bool ordered = hostOrdersOffers_.load(std::memory_order_acquire);
   std::vector<uint8_t> raw;
-  if (!Exchange(link, fn::FileMsg::OfferQuery, fn::body(q), fn::FileMsg::OfferQueryReply, &raw)) return -1;
+  if (!Exchange(link, ordered ? fn::FileMsg::OfferQueryOrdered : fn::FileMsg::OfferQuery, fn::body(q),
+                ordered ? fn::FileMsg::OfferQueryOrderedReply : fn::FileMsg::OfferQueryReply, &raw)) {
+    return -1;
+  }
   fn::OfferQueryReply r;
-  if (!fn::parse(raw, &r)) return -1;
+  if (!(ordered ? fn::parse_ordered(raw, &r) : fn::parse(raw, &r))) return -1;
+  if (helperProbe_) helperProbe_(r.unchanged ? 0 : r.offerId, 7);  // test only: a reply is in, not adopted yet
+  // r9 (F1): a reply asked in an ended generation (switched off, the session's end) is dropped -- it
+  // is not adopted, and not given the new generation. The generation the offer is adopted in is the
+  // one it goes to the gate with, taken in the same critical section.
   if (r.unchanged) {
     std::lock_guard<std::mutex> lock(mu_);
+    if (askedGen != publishGen_) return 1;
     remoteBaselineTaken_ = true;
     return 1;
   }
   bool publish = false, clear = false;
   uint64_t clearId = 0;
   fc::PublishRemoteFiles pub;
+  std::function<void(RemoteFilesForGate)> gate;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (askedGen != publishGen_) {
+      Log("offer reply dropped: switched off or the session ended while it was asked");
+      return 1;
+    }
+    gate = publishGate_;
     if (remote_.offerId != 0) remoteRetired_ = remote_;  // a paste may have begun on it just before
     remote_ = RemoteOffer{};
     remote_.revision = r.revision;
@@ -659,23 +686,16 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     }
   }
   if (publish) {
-    const size_t files = pub.items.size();
-    Post([this, pub, files] {
-      std::string why;
-      uint64_t inst = 0;
-      if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
-      const bool up = helper_.Ensure(&why, &inst);
-      if (!up || !helper_.SendTo(inst, fc::encode(pub))) {
-        Log("remote copy not published: helper unavailable (" + why + ")");
-        std::lock_guard<std::mutex> lock(mu_);
-        ++result_.noHelper, result_.noHelperHere = true;
-        result_.noHelperHereMissing = !up && helper_.lastLaunchFailure() == fc::LaunchFailure::Missing;
-        return;
-      }
-      std::ostringstream os;
-      os << "remote copy of " << files << " file(s) to publish";
-      Log(os.str());
-    });
+    if (gate) {
+      RemoteFilesForGate g;
+      g.pub = std::move(pub);
+      g.hasCopyGen = ordered;
+      g.copyGen = r.copyGen;
+      g.publishGen = askedGen;  // == the generation it was adopted in (checked above, same section)
+      gate(std::move(g));  // the viewer decides (r7); PublishApproved follows if it may land here
+    } else {
+      PostPublish(std::move(pub), 0);
+    }
   } else if (clear) {
     Post([this, clearId] {
       fc::ClearRemoteFiles c;
@@ -686,6 +706,70 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     ++counters_.remoteCleared;
   }
   return 1;
+}
+
+void FileCopyClient::SetPublishGate(std::function<void(RemoteFilesForGate)> gate) {
+  std::lock_guard<std::mutex> lock(mu_);
+  publishGate_ = std::move(gate);
+}
+
+bool FileCopyClient::PublishCurrentLocked(uint64_t publishGen, uint64_t offerId) const {
+  return allowed_.load(std::memory_order_acquire) && publishGen == publishGen_ && offerId != 0 &&
+         offerId == remote_.offerId;
+}
+
+void FileCopyClient::PublishApproved(fc::PublishRemoteFiles pub, uint32_t expectSeq, uint64_t publishGen) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!PublishCurrentLocked(publishGen, pub.offerId)) {
+      Log("remote copy not published: switched off, the session ended or a newer one came meanwhile");
+      return;
+    }
+  }
+  pub.ifUnchanged = true;  // the helper checks this PC's clipboard is still where the viewer decided
+  pub.expectSeq = expectSeq;
+  PostPublish(std::move(pub), publishGen);
+}
+
+void FileCopyClient::PostPublish(fc::PublishRemoteFiles pub, uint64_t publishGen) {
+  const size_t files = pub.items.size();
+  Post([this, pub, files, publishGen] {
+    // publishGen 0: no gate (a client without a viewer window), published as before.
+    const auto still = [&](const char* when) {
+      if (publishGen == 0) return true;
+      std::lock_guard<std::mutex> lock(mu_);
+      if (PublishCurrentLocked(publishGen, pub.offerId)) return true;
+      Log(std::string("remote copy not published (") + when + "): switched off, the session ended or a newer one came");
+      return false;
+    };
+    if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
+    if (!still("before the helper")) return;
+    std::string why;
+    uint64_t inst = 0;
+    const bool up = helper_.Ensure(&why, &inst);
+    if (up && publishGen != 0) {
+      // The send commits it: an end of this generation from here on takes the helper down (and what
+      // it published); one before this point is seen here and nothing is sent. SendTo(inst) fails on
+      // a helper that went meanwhile.
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!PublishCurrentLocked(publishGen, pub.offerId)) {
+        Log("remote copy not published (after the helper started): switched off, the session ended or a newer one came");
+        return;
+      }
+      publishSendingGen_ = publishGen;
+    }
+    if (!up || !helper_.SendTo(inst, fc::encode(pub))) {
+      Log("remote copy not published: helper unavailable (" + why + ")");
+      std::lock_guard<std::mutex> lock(mu_);
+      if (publishSendingGen_ == publishGen) publishSendingGen_ = 0;
+      ++result_.noHelper, result_.noHelperHere = true;
+      result_.noHelperHereMissing = !up && helper_.lastLaunchFailure() == fc::LaunchFailure::Missing;
+      return;
+    }
+    std::ostringstream os;
+    os << "remote copy of " << files << " file(s) to publish";
+    Log(os.str());
+  });
 }
 
 bool FileCopyClient::HelperCurrentLocked(uint64_t instance, bool gone) {
@@ -709,6 +793,11 @@ void FileCopyClient::OnHelperFrame(uint64_t instance, const fc::PipeFrame& f) {
       if (!fc::decode(f, &m)) break;
       std::lock_guard<std::mutex> lock(mu_);
       if (!HelperCurrentLocked(instance, false)) break;
+      publishSendingGen_ = 0;  // answered: published (recorded below) or not
+      if (m.status == fc::Status::ClipboardChanged) {
+        Log("remote copy not published: a copy was made here after it was approved (r7)");
+        break;
+      }
       if (m.status == fc::Status::Ok && m.offerId == remote_.offerId) {
         publishedOfferId_ = m.offerId;
         ++counters_.remotePublished;
@@ -1026,7 +1115,9 @@ void FileCopyClient::EndSession() {
     prepareQueue_.clear();
     remote_ = RemoteOffer{};
     remoteRetired_ = RemoteOffer{};
-    disconnect = publishedOfferId_ != 0 || R2PEnabled();
+    ++publishGen_;  // r8 (E2): this session's approved publishes end with it
+    disconnect = publishedOfferId_ != 0 || R2PEnabled() || publishSendingGen_ != 0;
+    publishSendingGen_ = 0;
     publishedOfferId_ = 0;
     nextOfferQueryUs_ = 0;
     remoteBaselineTaken_ = false;

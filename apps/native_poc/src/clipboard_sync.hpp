@@ -200,12 +200,21 @@ class ClipboardSyncCore {
   // BEFORE the caller actually writes the OS clipboard, so the change notification that the write
   // provokes is recognised as an echo by the next OnLocalChange and is not sent back.
   ClipboardRemoteDecision OnRemoteData(const std::u16string& text, uint64_t hash) {
+    const ClipboardRemoteDecision d = CheckRemoteData(text, hash);
+    if (d == ClipboardRemoteDecision::Apply) NoteApplied(hash);
+    return d;
+  }
+  // The same decision without recording it, for a caller that may still not write (paste on demand
+  // r7: the viewer's UI thread decides last); NoteApplied once it has written.
+  ClipboardRemoteDecision CheckRemoteData(const std::u16string& text, uint64_t hash) const {
     if (text.empty()) return ClipboardRemoteDecision::SkipEmpty;
     if (haveSent_ && hash == lastSentHash_) return ClipboardRemoteDecision::SkipEcho;
     if (haveApplied_ && hash == lastAppliedHash_) return ClipboardRemoteDecision::SkipDuplicate;
+    return ClipboardRemoteDecision::Apply;
+  }
+  void NoteApplied(uint64_t hash) {
     lastAppliedHash_ = hash;
     haveApplied_ = true;
-    return ClipboardRemoteDecision::Apply;
   }
 
   void Reset() {

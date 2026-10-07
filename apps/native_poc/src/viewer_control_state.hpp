@@ -37,6 +37,27 @@ namespace remote60::native_poc::viewer {
 // sends it, and polls the host for changes the other way. `enabled` is the viewer's on/off toggle
 // (default on); `hostSupports` is set from the pong capability bit. The core and the pending item
 // are guarded by `mu` because the UI thread produces and the control thread consumes.
+// The remote PC's text for the UI thread, with what decides whether it may land here -- all from the
+// one poll reply it came in (r7, D1): the host's copy generation then and the connection it came on.
+// The UI thread decides against this PC's copy state as it is when it handles it (it records the
+// copies here), and checks once more with the clipboard held.
+struct RemoteTextApply {
+  std::u16string text;
+  uint64_t hash = 0;
+  bool hasCopyGen = false;  // an older host sends none: no order fence then (r2 behaviour)
+  uint64_t copyGen = 0;
+  uint64_t connGen = 0;
+  int deferrals = 0;        // times put back behind a clipboard change here not handled yet
+};
+
+// r7 (D2): a remote copy of files the file client asks the UI thread about, with the connection the
+// offer came on (read where it was asked, on the control thread).
+struct RemoteFilesDecide {
+  remote60::native_poc::FileCopyClient::RemoteFilesForGate files;
+  uint64_t connGen = 0;
+  int deferrals = 0;
+};
+
 struct ClipboardSyncState {
   std::atomic<bool> enabled{true};        // the toolbar toggle; off means no send and no poll
   std::atomic<bool> hostSupports{false};  // host advertised kCaptureFlagClipboardTextV1 (pong)
@@ -71,6 +92,13 @@ struct ClipboardSyncState {
   // A paste asks for one poll NOW, before it sends anything (under mu): did the host copy since?
   bool probeRequested = false;
   uint64_t probeId = 0;
+  // r5 (F1): a copy here asks for one poll right after it, so the host generation that marks it is
+  // known (its baseline). The token is the local clipboard sequence of that copy.
+  bool baselineRequested = false;
+  uint64_t baselineToken = 0;
+  // The clipboard sequence of this PC's last copy, as the UI thread recorded it (published for
+  // observers; the UI thread itself decides with its own copy state, r7).
+  std::atomic<uint64_t> localCopySeq{0};
   bool havePasteText = false;
   uint64_t pasteTextId = 0;
   uint32_t pasteTextRevision = 0;

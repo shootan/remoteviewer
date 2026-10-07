@@ -2,6 +2,9 @@
 
 #include "viewer_paste_gate.hpp"
 
+#include <algorithm>
+#include <cstddef>
+
 namespace remote60::native_poc::viewer {
 
 namespace {
@@ -77,6 +80,7 @@ PasteGate::Admitted PasteGate::Admit(const Ticket& t, uint64_t nowUs) {
   }
   if (waiting_.id == 0) {
     waiting_ = t;
+    waitingAt_ = held_.size();  // the keys typed so far come before it
     return Admitted::Waiting;
   }
   return Admitted::Dropped;
@@ -89,7 +93,7 @@ PasteGate::Outcome PasteGate::OnAnswer(uint64_t id, bool applied, uint64_t connG
   // The answer is for this paste, but the session or the target it was asked for is gone: the key
   // would land somewhere the user did not paste into.
   if (!applied || connGen != done->connGen || targetGen != done->targetGen) {
-    held_.clear();
+    DropHeldBeforeWaiting();
     return Outcome::Fail;
   }
   return Outcome::Inject;
@@ -99,7 +103,7 @@ bool PasteGate::OnTick(uint64_t nowUs, Ticket* expired) {
   if (pending_.id == 0 || pending_.deadlineUs == 0 || nowUs < pending_.deadlineUs) return false;
   *expired = pending_;
   pending_ = Ticket{};
-  held_.clear();
+  DropHeldBeforeWaiting();
   return true;
 }
 
@@ -107,6 +111,7 @@ bool PasteGate::Promote(uint64_t nowUs, Ticket* started) {
   if (pending_.id != 0 || waiting_.id == 0) return false;
   pending_ = waiting_;
   waiting_ = Ticket{};
+  waitingAt_ = 0;  // what is held now was typed after the paste that has just become pending
   pending_.startedUs = nowUs;
   pending_.deadlineUs = pending_.budgetUs ? nowUs + pending_.budgetUs : 0;
   *started = pending_;
@@ -119,7 +124,9 @@ std::vector<PasteGate::Ticket> PasteGate::CancelAll() {
   if (waiting_.id != 0) ended.push_back(waiting_);
   pending_ = Ticket{};
   waiting_ = Ticket{};
+  dropped_.insert(dropped_.end(), held_.begin(), held_.end());
   held_.clear();
+  waitingAt_ = 0;
   return ended;
 }
 
@@ -141,6 +148,35 @@ bool PasteGate::HoldsDown(uint64_t wp) const {
 std::vector<HeldKey> PasteGate::TakeHeld() {
   std::vector<HeldKey> out(held_.begin(), held_.end());
   held_.clear();
+  waitingAt_ = 0;
+  return out;
+}
+
+std::vector<HeldKey> PasteGate::TakeHeldBeforeWaiting() {
+  if (waiting_.id == 0) return TakeHeld();
+  const size_t n = (std::min)(waitingAt_, held_.size());
+  std::vector<HeldKey> out(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
+  held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
+  waitingAt_ = 0;
+  return out;
+}
+
+void PasteGate::DropHeldBeforeWaiting() {
+  if (waiting_.id == 0) {
+    dropped_.insert(dropped_.end(), held_.begin(), held_.end());
+    held_.clear();
+    waitingAt_ = 0;
+    return;
+  }
+  const size_t n = (std::min)(waitingAt_, held_.size());
+  dropped_.insert(dropped_.end(), held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
+  held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
+  waitingAt_ = 0;
+}
+
+std::vector<HeldKey> PasteGate::TakeDropped() {
+  std::vector<HeldKey> out;
+  out.swap(dropped_);
   return out;
 }
 
