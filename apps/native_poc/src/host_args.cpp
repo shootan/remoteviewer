@@ -114,6 +114,8 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
     } else if (k == "--enable-input-injection") {
       a.enableInputInjection = true;
+    } else if (k == "--prelogin") {
+      a.preloginMode = true;
     } else if (k == "--directory-url" && i + 1 < argc) {
       a.directoryUrl = argv[++i];
     } else if (k == "--directory-cache" && i + 1 < argc) {

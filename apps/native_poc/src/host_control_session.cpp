@@ -46,6 +46,7 @@
 #include "file_copy_wire.hpp"
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
+#include "prelogin_control_allowlist.hpp"
 #include "peer_version.hpp"
 #include "time_utils.hpp"
 
@@ -373,6 +374,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
     const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
     const auto type = static_cast<MessageType>(header.type);
 
+    // Prelogin: the pre-login worker exposes only the minimum control surface (prelogin-service §3).
+    // A control type outside the allowlist (clipboard/file/paste/char-text/raw-key/window-enum/IME/...)
+    // is a misbehaving, old, or hostile peer; close the link rather than risk a half-read variable
+    // body. A correct viewer gates these on kCaptureFlagPreloginV1 and never sends them here.
+    if (args.preloginMode && !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(type)) {
+      std::cout << "[native-video-host][control][prelogin] rejected control type="
+                << static_cast<unsigned>(header.type) << "\n";
+      break;
+    }
+
     if (type == MessageType::ControlVersionRequest && header.size == sizeof(ControlVersionMessage)) {
       ControlVersionMessage request{};
       if (!link.Read(&request.seq, sizeof(request) - sizeof(MessageHeader))) break;
@@ -417,6 +428,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (capture.frameHeartbeatEnabled.load())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
+      if (args.preloginMode) {
+        // Serving the pre-login secure desktop right now (prelogin-service r3 R1: the momentary signal).
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginV1;
+        // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
+        // the reboot confirm popup keys its "no connect until login" warning on.
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+      }
       // Clipboard text sync (K1): advertised only when the hub is running, so a viewer never sends
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())

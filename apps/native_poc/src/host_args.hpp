@@ -77,6 +77,12 @@ struct Args {
   std::string directoryPw;
   std::string directoryHostName;
   uint16_t directoryObservePort = 0;
+  // Prelogin remote access (prelogin-service): run as the SYSTEM pre-login worker on the console's
+  // secure desktop. In this mode the host advertises kCaptureFlagPreloginV1, enforces the prelogin
+  // control allowlist on every inbound control message (clipboard/file/paste/char-text/raw-key etc.
+  // rejected), and only accepts credential text over the sealed prelogin path. Launched by the
+  // GNLinkInputService supervisor; never set for an ordinary logged-in host.
+  bool preloginMode = false;
 };
 
 // Command line (+ optional --config JSON profile) -> Args. Defined in host_args.cpp.
