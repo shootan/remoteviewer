@@ -515,8 +515,34 @@ int main() {
                                                    [](void*) { return true; });
     const ULONGLONG took = GetTickCount64() - t0;
     s.stop();
-    check("G3: a second server on a name already served does not start (FILE_FLAG_FIRST_PIPE_INSTANCE)",
+    check("G3: a second server on a name already served does not start",
           !second && took < 1000, std::to_string(took) + " ms");
+  }
+  {
+    // Someone took the name FIRST, the way a squatter would -- a server that allows any number of
+    // instances -- before the service starts: the service must not join it as one more instance.
+    World w;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-squat";
+    const std::wstring sddl = current_user_sddl();
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr);
+    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+    HANDLE squat = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                    PIPE_UNLIMITED_INSTANCES, 4096, 8192, 0, &sa);
+    LocalFree(sd);
+    std::atomic<bool> run2{true};
+    std::thread stopper([&run2] {
+      Sleep(1500);
+      run2 = false;
+    });
+    const bool served = pl::RunPreloginAdminServer(w.primitives(), [&run2] { return run2.load(); }, name.c_str(), sddl.c_str(),
+                                                   [](void*) { return true; });
+    stopper.join();
+    if (squat != INVALID_HANDLE_VALUE) CloseHandle(squat);
+    check("G3: the name already held (unlimited instances) by someone else: the service does not serve on it "
+          "(FILE_FLAG_FIRST_PIPE_INSTANCE)",
+          squat != INVALID_HANDLE_VALUE && !served);
   }
 
   // ---------------------------------------------------------------- r5 G4: every wait is bounded
