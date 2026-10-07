@@ -474,10 +474,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
         // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
         // the reboot confirm popup keys its "no connect until login" warning on.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
-        // The prelogin (SYSTEM) worker is owner-permitted + holds the shutdown privilege, so it offers
-        // remote reboot. The logged-in-host feature-gated advertise is the follow-on (f).
-        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagRemoteRebootV1;
       }
+      // Remote reboot is offered by ANY host -- prelogin AND the logged-in session (the case the user
+      // hits most). The controls are the directory-authenticated session, the confirm popup, and the
+      // single-flight dedup, NOT the mode. A host that is not durable-enabled simply did not advertise
+      // 0x8000 above, so the viewer shows the "no connect until login after restart" warning.
+      // (prelogin-service r4 item 6.)
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagRemoteRebootV1;
       // Clipboard text sync (K1): advertised only when the hub is running, so a viewer never sends
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())
@@ -572,10 +575,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
       remote60::native_poc::RebootRequestInputs in;
       // R2: directory-authenticated session only; a token-less LAN Hello peer is NotAuthorized.
       in.directoryAuthenticated = clientSession.directoryAuthenticated.load(std::memory_order_acquire);
-      // Feature gate: the SYSTEM prelogin worker holds the shutdown privilege and is owner-permitted.
-      // The logged-in-host feature-gated path (and its delegation of the OS call to the service) is a
-      // follow-on (f); such a host answers Refused here for now.
-      in.featureAllowsReboot = args.preloginMode;
+      // Remote reboot is available on any host; the directory-auth check above and the single-flight
+      // dedup in DecideReboot are the gate (prelogin-service r4 item 6). The OS call is made by whoever
+      // holds the shutdown privilege: the SYSTEM prelogin worker, or the elevated logged-in host (admin
+      // v1). A host without the privilege gets ERROR_PRIVILEGE_NOT_HELD back as Failed -- never forced.
+      in.featureAllowsReboot = true;
       in.requestId = req.requestId;
       remote60::native_poc::RebootDecision decision;
       {
