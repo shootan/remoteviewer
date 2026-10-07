@@ -2124,6 +2124,12 @@ add_executable(remote60_prelogin_supervisor_state_test
 )
 target_include_directories(remote60_prelogin_supervisor_state_test PRIVATE src)
 
+# prelogin-service A1 section 3: the default-deny prelogin control-message allowlist + negative controls.
+add_executable(remote60_prelogin_control_allowlist_test
+  src/prelogin_control_allowlist_test.cpp
+)
+target_include_directories(remote60_prelogin_control_allowlist_test PRIVATE src)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
