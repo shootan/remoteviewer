@@ -97,6 +97,7 @@ struct World {
   // floor read waits until released -- the service is busy with that request, later ones queue at the pipe.
   std::string order;
   bool failRaise = false;  // r9 R1: the service cannot raise its floor (the Disable fails)
+  uint64_t issued = 0;     // r11 U1
   std::atomic<bool> stallArmed{false};
   std::atomic<bool> stalled{false};
   HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -125,6 +126,22 @@ struct World {
     // r9 R1: the owed-revoke mark where the Host test build writes it (its own key, never the real one).
     p.revokePending = [] { return pl::ReadRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest"); };
     p.clearRevokePending = [] { return pl::WriteRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest", false); };
+    p.markRevokePending = [] { return pl::WriteRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest", true); };
+    // r11 U1: the issued-generation bound (in memory) and whether a record file is there.
+    p.readIssued = [this](uint64_t* out) {
+      std::lock_guard<std::mutex> l(mu);
+      *out = issued;
+      return issued != 0 ? 1 : 0;
+    };
+    p.raiseIssued = [this](uint64_t g) {
+      std::lock_guard<std::mutex> l(mu);
+      if (g > issued) issued = g;
+      return true;
+    };
+    p.probeRecord = [this](const std::wstring& path) -> int {
+      std::lock_guard<std::mutex> l(mu);
+      return files.count(path) ? 1 : 0;
+    };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       std::lock_guard<std::mutex> l(mu);
       ++calls;

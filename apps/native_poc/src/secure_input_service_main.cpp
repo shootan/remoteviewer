@@ -114,6 +114,11 @@ std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 std::atomic<bool> gSessionChangePending{false};
 std::atomic<uint32_t> gPendingSessionEvent{0};
 std::atomic<uint32_t> gPendingSessionId{0};
+// r11 U2: bumped on every console connect / disconnect (the console's attachment changed), and the value
+// when the current requester connected. A pre-login message is delivered only within the attachment its
+// worker connected in (secure_input_desktop_fence.hpp LogonOnlyTargetSession).
+std::atomic<uint32_t> gConsoleGeneration{0};
+std::atomic<uint32_t> gConsoleGenerationAtConnect{0};
 // Bumped on every session-topology change. The unlock path snapshots it at challenge issue and
 // re-checks it before decrypt and before WTSConnectSession, so a password can never be injected into
 // a session that changed mid-flight -- the semantic fence d9a2444's lazy reset does not give ordinary
@@ -313,7 +318,7 @@ std::wstring current_input_desktop_name() {
   return ok ? name : L"Default";
 }
 
-bool ensure_agent() {
+bool ensure_agent(DWORD sessionId) {
   // Consume any session change signalled by the SCM handler here, on the agent-owning thread. The
   // handler only sets a flag because it runs on the SCM dispatcher thread while this thread owns
   // gAgent; tearing the agent down there raced with our WriteFile/start_agent and use-after-closed
@@ -324,7 +329,6 @@ bool ensure_agent() {
          gPendingSessionId.load(std::memory_order_relaxed), gAgent.sessionId);
     if (gAgent.process) stop_agent();
   }
-  const DWORD sessionId = target_session();
   if (sessionId == kInvalidSessionId) return false;
   const std::wstring desktop = current_input_desktop_name();
   if (gAgent.process && gAgent.writePipe && gAgent.sessionId == sessionId &&
@@ -342,17 +346,22 @@ bool ensure_agent() {
   return start_agent(sessionId, desktop);
 }
 
-bool forward_to_agent(const SecureInputMessage& message) {
-  if (!ensure_agent()) return false;
-  if (write_exact(gAgent.writePipe, &message, sizeof(message))) return true;
-  // A failed write means the agent died; re-resolve rather than reusing the old session, since
-  // the reason it died may be that its session went away.
-  const DWORD retrySession = target_session();
-  if (retrySession == kInvalidSessionId ||
-      !start_agent(retrySession, current_input_desktop_name())) {
-    return false;
-  }
-  return write_exact(gAgent.writePipe, &message, sizeof(message));
+// r11 U2: a pre-login message's only possible target -- its worker's session, still the console, within
+// the console attachment it connected in. No fallback.
+DWORD logon_only_target_session() {
+  const DWORD target = remote60::native_poc::LogonOnlyTargetSession(
+      gRequesterSession.load(std::memory_order_acquire), WTSGetActiveConsoleSessionId(),
+      gConsoleGenerationAtConnect.load(std::memory_order_acquire), gConsoleGeneration.load(std::memory_order_acquire));
+  return target;
+}
+
+remote60::native_poc::ForwardOutcome forward_to_agent(const SecureInputMessage& message) {
+  return remote60::native_poc::ForwardSecureInput(
+      message, [] { return static_cast<uint32_t>(target_session()); },
+      [] { return static_cast<uint32_t>(logon_only_target_session()); },
+      [](uint32_t session) { return ensure_agent(session); },
+      [](uint32_t session) { return start_agent(session, current_input_desktop_name()); },
+      [](const SecureInputMessage& m) { return write_exact(gAgent.writePipe, &m, sizeof(m)); });
 }
 
 void report_service_status(DWORD state, DWORD error = NO_ERROR) {
@@ -388,6 +397,9 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
       gPendingSessionId.store(notification ? notification->dwSessionId : 0u,
                               std::memory_order_relaxed);
       gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);
+      if (eventType == WTS_CONSOLE_CONNECT || eventType == WTS_CONSOLE_DISCONNECT) {
+        gConsoleGeneration.fetch_add(1, std::memory_order_release);  // r11 U2
+      }
       gSessionChangePending.store(true, std::memory_order_release);
     }
     return NO_ERROR;
@@ -998,9 +1010,20 @@ void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitiv
   p->machineId = current_machine_guid;
   p->readFloor = [](uint64_t* out) { return ReadPreloginOwnerFloor(out); };  // r6 G6: fallible
   p->raiseFloor = raise_prelogin_owner_floor;
+  // r11 U1: the issued-generation bound, next to the floor.
+  p->readIssued = [](uint64_t* out) {
+    return remote60::native_poc::prelogin::ReadIssuedGenerationAt(HKEY_LOCAL_MACHINE, kOwnerFloorKey, out);
+  };
+  p->raiseIssued = [](uint64_t g) {
+    return remote60::native_poc::prelogin::RaiseIssuedGenerationAt(HKEY_LOCAL_MACHINE, kOwnerFloorKey, g);
+  };
   p->featureEnabled = prelogin_feature_enabled;
   // r9 R1/R2: the owed-revoke mark, and one writer in this process (admin server + reconcile).
   p->revokePending = [] { return remote60::native_poc::prelogin::ReadPreloginRevokePending(); };
+  p->markRevokePending = [] {  // r11 U1: a revoke that cannot be proven stays owed
+    return remote60::native_poc::prelogin::WriteRevokePendingAt(HKEY_LOCAL_MACHINE,
+                                                                remote60::native_poc::prelogin::kOwnerFloorKey, true);
+  };
   p->clearRevokePending = [] {
     return remote60::native_poc::prelogin::WriteRevokePendingAt(HKEY_LOCAL_MACHINE,
                                                                 remote60::native_poc::prelogin::kOwnerFloorKey, false);
@@ -1263,26 +1286,39 @@ DWORD find_user_host_in_session(DWORD session) {
   return found;
 }
 
+// r11 U3: first thing every tick, whichever branch follows (WatchedHostOnTick): a watched Host of another
+// session is let go -- it is that user's, still logged on there -- and only a Host this service started in
+// the console session, which has no user any more, is stopped.
+void settle_watched_hosts(DWORD console, bool preloginWorkerTick) {
+  using remote60::native_poc::prelogin::WatchedHostStep;
+  if (gUserHostProcess) {
+    const WatchedHostStep step =
+        remote60::native_poc::prelogin::WatchedHostOnTick(gUserHostSession, console, preloginWorkerTick, true);
+    if (step == WatchedHostStep::LetGo) {
+      diag("prelogin: the started user host belongs to session %lu, the console is %lu: no longer watched",
+           static_cast<unsigned long>(gUserHostSession), static_cast<unsigned long>(console));
+      CloseHandle(gUserHostProcess);  // not stopped: it is that user's
+      gUserHostProcess = nullptr;
+    } else if (step == WatchedHostStep::Stop) {
+      stop_child(&gUserHostProcess);
+    }
+  }
+  if (gAdoptedHost &&
+      remote60::native_poc::prelogin::WatchedHostOnTick(gAdoptedSession, console, preloginWorkerTick, false) !=
+          WatchedHostStep::Keep) {
+    CloseHandle(gAdoptedHost);  // the user's own: never stopped
+    gAdoptedHost = nullptr;
+    gAdoptedHostPid = 0;
+  }
+}
+
 // One tick of the user-Host side of the handoff.
 void reconcile_user_host(DWORD console) {
   using remote60::native_poc::prelogin::UserHostDecision;
   remote60::native_poc::prelogin::UserHostObservation o;
   o.logon = console_logon_key(console);
   o.nowMs = GetTickCount64();
-  // r10 N1: a Host is watched only in the session it runs in. After a switch of user (another session at the
-  // console) the earlier user's Host keeps running there -- it is let go, not stopped, and the new console
-  // session is judged on its own.
-  if (gUserHostProcess && gUserHostSession != console) {
-    diag("prelogin: the started user host belongs to session %lu, the console is %lu: no longer watched",
-         static_cast<unsigned long>(gUserHostSession), static_cast<unsigned long>(console));
-    CloseHandle(gUserHostProcess);  // not stopped: it is that user's
-    gUserHostProcess = nullptr;
-  }
-  if (gAdoptedHost && gAdoptedSession != console) {
-    CloseHandle(gAdoptedHost);
-    gAdoptedHost = nullptr;
-    gAdoptedHostPid = 0;
-  }
+  // (r10 N1 / r11 U3: a Host of another session was already let go this tick -- settle_watched_hosts.)
   HANDLE* watched = gUserHostProcess ? &gUserHostProcess : (gAdoptedHost ? &gAdoptedHost : nullptr);
   if (watched) {
     if (WaitForSingleObject(*watched, 0) == WAIT_OBJECT_0) {
@@ -1392,13 +1428,9 @@ void prelogin_reconcile_loop() {
     DWORD console = 0xFFFFFFFFu;
     const SupervisorObservation obs = observe_console(&console, consoleChanged);  // console = this obs's snapshot
     const PreloginSupervisor::Outcome out = sup.Reconcile(obs);
+    settle_watched_hosts(console, out.action == SupervisorAction::RunPreloginWorker);  // r11 U3
     switch (out.action) {
       case SupervisorAction::RunPreloginWorker:
-        stop_child(&gUserHostProcess);
-        if (gAdoptedHost) {  // the user's own Host: only no longer watched (the session it ran in is gone)
-          CloseHandle(gAdoptedHost);
-          gAdoptedHost = nullptr;
-        }
         gLogonSeenMs = 0;
         if (obs.consoleSessionValid) ensure_prelogin_worker(console);
         break;
@@ -1491,6 +1523,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
       // Identify the requester before reading anything from it. This is the only point at which
       // the host's session can be learned, and everything downstream depends on it.
       const uint32_t requester = requester_session_of(pipe);
+      gConsoleGenerationAtConnect.store(gConsoleGeneration.load(std::memory_order_acquire), std::memory_order_release);
       gRequesterSession.store(requester, std::memory_order_release);
       gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester changed -> fence
       diag("control pipe connected, requester session=%u", requester);
@@ -1500,7 +1533,12 @@ void WINAPI service_main(DWORD, wchar_t**) {
         SecureInputMessage message{};
         if (!read_exact(pipe, &message, sizeof(message))) break;
         if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
-        (void)forward_to_agent(message);
+        if (forward_to_agent(message) == remote60::native_poc::ForwardOutcome::LogonBindingLost) {
+          // r11 U2: the worker's session is no longer the console it connected at -- this message and
+          // whatever it queued behind it are dropped (the pipe goes; a worker still serving reconnects).
+          diag("pre-login input dropped: requester session=%u is not the console it connected at", requester);
+          break;
+        }
       }
       (void)DisconnectNamedPipe(pipe);
       // The requester is gone; do not keep its session as the answer for whoever connects next.

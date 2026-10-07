@@ -306,8 +306,10 @@ int wmain(int argc, wchar_t** argv) {
   Sleep(3000);
   {
     std::lock_guard<std::mutex> l(service.mu);
+    bool fromB = false;  // (A keeps saying its own ready -- r11 U4 -- so count B's nonce, not all readies)
+    for (const auto& r : service.readies) fromB = fromB || r.first == "chain-launch-B";
     check("...and no ready of its launch ever comes (why the old service started one every second)",
-          service.readies.size() == readiesBefore &&
+          service.readies.size() >= readiesBefore && !fromB &&
               !service.tracker.Completes(mySession, launchA, "chain-launch-B"));
   }
   // The product start policy, fed what the service would observe: B (started) ended with that exit code,
@@ -333,6 +335,30 @@ int wmain(int argc, wchar_t** argv) {
   check("W1: with B's real exit code and A running, the start policy adopts A and starts nothing more",
         next == pl::UserHostDecision::Adopt && launches == 0, std::to_string(launches));
 
+  // r11 U4: the service goes away while A runs -- its ready tracker with it -- and a NEW service (an empty
+  // tracker) comes up 15 s later, after A's first sends (10 tries) would all have been spent. It adopts A;
+  // A's streaming child must say its ready again, or the handoff never completes.
+  {
+    service.stop();
+    Service later;
+    Sleep(15000);
+    const uint64_t laterStarted = filetime_now();
+    later.start(pipe, stream.wstring());
+    const bool again = wait_until([&] {
+      std::lock_guard<std::mutex> l(later.mu);
+      return !later.readies.empty();
+    }, 20000);
+    const auto parentOf = [](uint32_t pid, uint64_t start) { return pl::ParentProcessOf(pid, start); };
+    check("U4: a service started after the Host (its tracker new) receives A's ready again, within the refresh",
+          again, std::to_string(GetTickCount64()));
+    check("U4: ...and it completes the ADOPTED Host's handoff (sent by A's own streaming child)",
+          again && later.tracker.CompletesAdopted(mySession, a.pi.dwProcessId, parentOf),
+          std::to_string(later.readyPid));
+    check("...not for another process taken for the adopted Host",
+          !later.tracker.CompletesAdopted(mySession, GetCurrentProcessId(), parentOf));
+    (void)laterStarted;
+    later.stop();
+  }
   if (b.started) {
     CloseHandle(b.pi.hProcess);
     CloseHandle(b.pi.hThread);

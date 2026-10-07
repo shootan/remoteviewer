@@ -116,6 +116,8 @@ int main() {
     bool probeError = false;   // whether a record file is there cannot be told
     bool startTypeFails = false;  // the service is already gone: its start type cannot be put back
     bool markWorks = true;
+    int issuedState = 1;       // r11 U1: the issued bound: 1 kept (7, what Enable issued), 0 none kept, -1 unreadable
+    bool recordThere = true;   // a record file at the start
   };
   struct Out {
     pl::UninstallRevokeResult r;
@@ -133,6 +135,7 @@ int main() {
     bool remembered = true;
     bool mark = false;
     std::string log;
+    uint64_t issued = 7;
     pl::AdminPrimitives p;
     p.recordPath = [] { return std::wstring(L"rec"); };
     p.machineId = [] { return std::string("m"); };
@@ -143,8 +146,14 @@ int main() {
       if (f > floor) floor = f;
       return true;
     };
+    p.readIssued = [&](uint64_t* out) {
+      *out = o.issuedState == 1 ? issued : 0;
+      return o.issuedState;
+    };
+    p.raiseIssued = [&](uint64_t g) { if (g > issued) issued = g; return true; };
     p.revokePending = [&] { return mark ? 1 : 0; };
     p.clearRevokePending = [&] { mark = false; return true; };
+    p.markRevokePending = [&] { mark = true; return true; };
     p.readRecord = [&](const std::wstring& path, pl::MachineRecord* out) {
       if (o.readFails) return false;
       auto it = files.find(path);
@@ -175,11 +184,29 @@ int main() {
     pl::MachineRecord rec;
     rec.ownerGeneration = 7;
     rec.enabled = true;
-    files[L"rec"] = rec;
+    rec.machineId = "m";
+    rec.hostId = 1;
+    rec.credential = {1, 2, 3};
+    if (o.recordThere) files[L"rec"] = rec;
     const pl::UninstallRevokeResult r = pl::RevokeForUninstall(
         p, [&] { log += "mark "; if (o.markWorks) mark = true; return o.markWorks; },
         [&] { log += "stop "; return o.stopWorks; });
     return Out{r, !files.empty(), mark, p.featureEnabled(), floor, startType, remembered, log};
+  };
+  // r11 U1: a copy of the generation-7 record, put back after the revoke -- what the product's own
+  // ValidateMachineRecord says of it over the floor the revoke left.
+  auto restored_copy_verdict = [](uint64_t floorAfter) {
+    pl::MachineRecord copy;
+    copy.ownerGeneration = 7;
+    copy.enabled = true;
+    copy.machineId = "m";
+    copy.hostId = 1;
+    copy.credential = {1, 2, 3};
+    pl::BindingContext ctx;
+    ctx.currentMachineId = "m";
+    ctx.originAllowed = true;
+    ctx.minOwnerGeneration = floorAfter;
+    return pl::ValidateMachineRecord(copy, ctx);
   };
   {
     Opt o;
@@ -253,6 +280,52 @@ int main() {
     const auto r = uninstall_case(o);
     check("T1: nothing recorded and nothing done: NOT revoked and NOT marked (the caller must say \"unconfirmed\")",
           !r.r.revoked && !r.r.marked && !r.mark && r.recordLeft);
+  }
+  {
+    Opt o;
+    o.title = "U1: floor 3, record 7 -- the record cannot be read, its removal works";
+    o.readFails = true;
+    const auto r = uninstall_case(o);
+    check("U1: the floor goes above the ISSUED bound (7), not above an unread record taken for 0 (r10: 4)",
+          r.r.revoked && r.floor > 7, std::to_string(r.floor));
+    check("...a copy of the generation-7 record restored afterwards is Revoked (product ValidateMachineRecord)",
+          restored_copy_verdict(r.floor) == pl::RecordVerdict::Revoked);
+  }
+  {
+    Opt o;
+    o.title = "U1: unreadable record, and no issued bound was ever kept";
+    o.readFails = true;
+    o.issuedState = 0;
+    const auto r = uninstall_case(o);
+    check("U1: no proof the floor is above it: NOT revoked, the mark STAYS, the record is LEFT (its generation is "
+          "the only evidence)",
+          !r.r.revoked && !r.r.boundProven && r.mark && r.recordLeft && !r.enabled,
+          "floor " + std::to_string(r.floor));
+  }
+  {
+    Opt o;
+    o.title = "U1: the issued bound cannot be read";
+    o.issuedState = -1;
+    const auto r = uninstall_case(o);
+    check("U1: NOT revoked, the mark stays (the record could be read -- the bound still is not known)",
+          !r.r.revoked && r.mark && !r.enabled);
+  }
+  {
+    Opt o;
+    o.title = "U1: no record file before the removal, the bound kept";
+    o.recordThere = false;
+    const auto r = uninstall_case(o);
+    check("U1: revoked, the floor above the issued 7 -- a copy of that record restored later is Revoked",
+          r.r.revoked && r.floor > 7 && restored_copy_verdict(r.floor) == pl::RecordVerdict::Revoked,
+          std::to_string(r.floor));
+  }
+  {
+    Opt o;
+    o.title = "U1: no record file and no bound ever kept (nothing was ever issued)";
+    o.recordThere = false;
+    o.issuedState = 0;
+    const auto r = uninstall_case(o);
+    check("U1: nothing was issued, nothing is there: revoked", r.r.revoked && !r.mark);
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

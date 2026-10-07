@@ -40,6 +40,37 @@ inline bool ReadPreloginOwnerFloor(uint64_t* out) {
   return false;  // any other status (access denied, wrong type, corruption) -> unknown, fail safe
 }
 
+// r11 U1: the highest owner generation ever issued (QWORD next to the floor). Enable raises it before its
+// record is published, so a revoke can put the floor above every record that may still exist -- also one
+// it cannot read. 1 = a value, 0 = none ever issued (*out = 0), -1 = unreadable.
+inline constexpr wchar_t kIssuedGenerationValue[] = L"PreloginIssuedGeneration";
+
+inline int ReadIssuedGenerationAt(HKEY root, const wchar_t* subkey, uint64_t* out) {
+  uint64_t v = 0;
+  DWORD cb = sizeof(v);
+  const LSTATUS st = RegGetValueW(root, subkey, kIssuedGenerationValue, RRF_RT_REG_QWORD | RRF_SUBKEY_WOW6464KEY,
+                                  nullptr, &v, &cb);
+  if (out) *out = st == ERROR_SUCCESS ? v : 0;
+  if (st == ERROR_SUCCESS) return 1;
+  if (st == ERROR_FILE_NOT_FOUND) return 0;
+  return -1;
+}
+
+// Monotonic: never lowers it; false when the current value cannot be read or the new one not written.
+inline bool RaiseIssuedGenerationAt(HKEY root, const wchar_t* subkey, uint64_t generation) {
+  uint64_t cur = 0;
+  if (ReadIssuedGenerationAt(root, subkey, &cur) < 0) return false;
+  if (generation <= cur) return true;
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(root, subkey, 0, nullptr, 0, KEY_WRITE | KEY_WOW64_64KEY, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+  const bool ok = RegSetValueExW(key, kIssuedGenerationValue, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&generation),
+                                 sizeof(generation)) == ERROR_SUCCESS;
+  RegCloseKey(key);
+  return ok;
+}
+
 // r9 R1/R2: "pre-login access must be OFF" -- a DWORD next to the floor, set before a sign-out's Disable and
 // at uninstall, cleared by the service once the revoke really happened (prelogin_admin_pipe.hpp). Only ever
 // turns access off, so a stray mark fails safe. 1 = set, 0 = not set, -1 = unreadable (callers: as set).

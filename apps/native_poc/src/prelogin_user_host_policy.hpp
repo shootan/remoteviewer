@@ -45,6 +45,22 @@ struct UserHostObservation {
 // An exception status, not an exit the program (or the user, through Task Manager) chose.
 inline bool ExitWasCrash(uint32_t exitCode) { return (exitCode & 0x80000000u) != 0; }
 
+// r11 U3: what happens, at the top of every reconcile tick, to a Host the service watches (one it started or
+// adopted) -- whatever the tick then does. A Host in another session than the console is a user's who is
+// still logged on there (a switch of user): let go, never stopped -- also when the new console session has
+// nobody logged on yet and the tick starts the pre-login worker (r10 let go only on the user-Host branch, so
+// that branch's stop terminated A's Host). Only a Host the service started in the console session itself,
+// on a tick where that session has no user any more, is stopped. No console right now: nothing decided.
+enum class WatchedHostStep { Keep, LetGo, Stop };
+
+inline WatchedHostStep WatchedHostOnTick(uint32_t hostSession, uint32_t consoleSession, bool preloginWorkerTick,
+                                         bool startedByService) {
+  if (consoleSession == 0xFFFFFFFFu) return WatchedHostStep::Keep;
+  if (hostSession != consoleSession) return WatchedHostStep::LetGo;
+  if (preloginWorkerTick) return startedByService ? WatchedHostStep::Stop : WatchedHostStep::LetGo;
+  return WatchedHostStep::Keep;
+}
+
 class UserHostLaunchPolicy {
  public:
   UserHostDecision Decide(const UserHostObservation& o) {

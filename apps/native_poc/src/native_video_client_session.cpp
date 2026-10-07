@@ -147,20 +147,19 @@ bool ClientSessionController::RequestWindowList() {
   // is, the request waits for it (the pong sends it, or answers "not here"); at a host known to be at the
   // logon screen it is answered at once and not sent. The app's own call right after connecting
   // (MainActivity) used to go out before that pong.
-  const bool atLogonScreen = (hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginV1) != 0;
-  if (!hostRoleKnown_.load(std::memory_order_acquire) || atLogonScreen) {
-    if (!hostRoleKnown_.load(std::memory_order_acquire)) {
-      windowListDeferred_.store(true, std::memory_order_release);
-      windowPanel_.SetStatus("window_list_request waiting for the host");
-    } else {
-      windowPanel_.SetStatus("window list not available at the logon screen");
-    }
-    const auto waiting = windowPanel_.Snapshot();
-    std::lock_guard<std::mutex> lock(mu_);
-    SyncWindowPanelSnapshotLocked(waiting);
-    UpdateConnectedStatusLocked(waiting.status);
-    return !atLogonScreen || !hostRoleKnown_.load(std::memory_order_acquire);
-  }
+  // r11 U5: decided, marked and shown in one transition with the first pong's (client_host_role_gate.hpp).
+  const HostRoleGate::ListRequest d =
+      hostRole_.RequestList(kCaptureFlagPreloginV1, [this](HostRoleGate::ListRequest decided) {
+        if (decided == HostRoleGate::ListRequest::Send) return;
+        windowPanel_.SetStatus(decided == HostRoleGate::ListRequest::Deferred
+                                   ? "window_list_request waiting for the host"
+                                   : "window list not available at the logon screen");
+        const auto shown = windowPanel_.Snapshot();
+        std::lock_guard<std::mutex> lock(mu_);
+        SyncWindowPanelSnapshotLocked(shown);
+        UpdateConnectedStatusLocked(shown.status);
+      });
+  if (d != HostRoleGate::ListRequest::Send) return d == HostRoleGate::ListRequest::Deferred;
 
   windowPanel_.RequestList("window_list_request pending");
   {
@@ -224,7 +223,7 @@ uint32_t ClientSessionController::RequestReboot() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return 0;
   }
-  if ((hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagRemoteRebootV1) == 0) return 0;
+  if ((hostRole_.Load().flags & kCaptureFlagRemoteRebootV1) == 0) return 0;
   std::lock_guard<std::mutex> lock(rebootMu_);
   if (rebootPendingId_ != 0 || rebootInFlight_) return 0;  // one out at a time
   static std::random_device rd;
@@ -240,7 +239,7 @@ uint32_t ClientSessionController::RequestSas() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return 0;
   }
-  if ((hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginSasV1) == 0) return 0;
+  if ((hostRole_.Load().flags & kCaptureFlagPreloginSasV1) == 0) return 0;
   std::lock_guard<std::mutex> lock(rebootMu_);
   if (sasPendingId_ != 0) return 0;
   static std::random_device rd;
@@ -310,9 +309,8 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   }
   if (kind < 1 || kind > 6) return false;
   // r5 G8: a host at the logon screen is sent navigation keys only -- never a character in plaintext.
-  if (!prelogin::ViewerMaySendInputEvent(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
-                                                                      hostCaptureFlags_.load(std::memory_order_relaxed)),
-                                         kind, keyCode)) {
+  const HostRoleGate::Role role = hostRole_.Load();  // r11 U5: one word, a pair that was true together
+  if (!prelogin::ViewerMaySendInputEvent(prelogin::EffectiveHostFlags(role.known, role.flags), kind, keyCode)) {
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -328,8 +326,8 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
     if (!CanQueueControlRequestLocked()) return false;
   }
   // r5 G8: no text at all to a host at the logon screen (a password goes by "Windows 로그인").
-  if (!prelogin::ViewerMaySendText(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
-                                                                hostCaptureFlags_.load(std::memory_order_relaxed)))) {
+  const HostRoleGate::Role role = hostRole_.Load();
+  if (!prelogin::ViewerMaySendText(prelogin::EffectiveHostFlags(role.known, role.flags))) {
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -555,16 +553,14 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
 
       // r7 H6: the last look before an input leaves (queued before the role was known, or before it changed).
-      if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(hostRoleKnown_.load(std::memory_order_acquire),
-                                                                      hostCaptureFlags_.load(std::memory_order_relaxed)),
-                                         action)) {
+      const HostRoleGate::Role role = hostRole_.Load();  // r11 U5
+      if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(role.known, role.flags), action)) {
         preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
       // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
       // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
-      if (hostRoleKnown_.load(std::memory_order_acquire) &&
-          (hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginV1) != 0 &&
+      if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0 &&
           !prelogin::IsControlAllowedInPrelogin(outbound_message_type(action))) {
         continue;
       }
@@ -586,20 +582,20 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           hostSecureDesktopActive_.store(
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
-          hostCaptureFlags_.store(response.pong.captureTargetFlags, std::memory_order_relaxed);
-          if (!hostRoleKnown_.exchange(true, std::memory_order_acq_rel)) {  // r7 H6: the first pong
-            const bool deferred = windowListDeferred_.exchange(false, std::memory_order_acq_rel);
-            if ((response.pong.captureTargetFlags & kCaptureFlagPreloginV1) == 0) {
-              windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect (above)
-            } else if (deferred) {
-              // r10: asked before the pong, at a host that turns out to be at the logon screen: answered here.
-              windowPanel_.SetStatus("window list not available at the logon screen");
-              const auto answered = windowPanel_.Snapshot();
-              std::lock_guard<std::mutex> lock(mu_);
-              SyncWindowPanelSnapshotLocked(answered);
-              UpdateConnectedStatusLocked(answered.status);
-            }
-          }
+          // r7 H6 / r11 U5: the role, and on the first pong the deferred request, in one transition.
+          (void)hostRole_.Pong(response.pong.captureTargetFlags, kCaptureFlagPreloginV1,
+                               [this](HostRoleGate::FirstPong first) {
+                                 if (first == HostRoleGate::FirstPong::SendList) {
+                                   windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect
+                                 } else if (first == HostRoleGate::FirstPong::AnswerNotHere) {
+                                   // r10: asked before the pong, at a host at the logon screen: answered here.
+                                   windowPanel_.SetStatus("window list not available at the logon screen");
+                                   const auto answered = windowPanel_.Snapshot();
+                                   std::lock_guard<std::mutex> lock(mu_);
+                                   SyncWindowPanelSnapshotLocked(answered);
+                                   UpdateConnectedStatusLocked(answered.status);
+                                 }
+                               });
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
           {
@@ -1182,8 +1178,7 @@ void ClientSessionController::ResetUnlocked() {
     thumbFetchQueue_.clear();
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
-  hostCaptureFlags_.store(0, std::memory_order_relaxed);
-  hostRoleKnown_.store(false, std::memory_order_release);  // r7 H6: unknown again until the next pong
+  hostRole_.Reset();  // r7 H6: unknown again until the next pong (r10: nothing deferred either)
   {
     // A request not sent yet does not survive into another session; an answer already taken stays.
     std::lock_guard<std::mutex> lk(rebootMu_);
@@ -1191,7 +1186,6 @@ void ClientSessionController::ResetUnlocked() {
     rebootInFlight_ = false;
     sasPendingId_ = 0;
   }
-  windowListDeferred_.store(false, std::memory_order_release);
   // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
   // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a
   // preference, not session state. (The capability is re-learned from the next pong.)

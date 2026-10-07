@@ -368,7 +368,11 @@ int startup_connect_client(HostContext& hx) {
               [&agent = clientSession.directoryAgent] {
                 const std::string s = agent.StatusLine();
                 return s.rfind("online", 0) == 0 || s.rfind("punching", 0) == 0;
-              });
+              },
+              180000, 10, 1000, std::wstring(), nullptr,
+              // r11 U4: and again for as long as this host runs -- a service that starts or restarts after
+              // it adopts its GNLinkHost and needs this ready to hand over.
+              remote60::native_poc::prelogin::kUserHostReadyRefreshMs);
         }
       }
     }

@@ -41,4 +41,48 @@ AgentStep AgentHandleMessage(const SecureInputMessage& message, Attach attach, D
   return inject(message) ? AgentStep::Injected : AgentStep::NotInjected;
 }
 
+// r11 U2: WHICH SESSION a pre-login message may go to. The desktop fence above only knows a desktop's NAME,
+// and every console session has a "Winlogon". An ordinary (logged-on host's) message falls back to the
+// console session when its requester is inactive or cannot be told (secure_input_session.hpp) -- right for
+// a disconnected RDP host, wrong for the pre-login worker: the console may by then be ANOTHER session at
+// its own logon screen, and the operator's input meant for A's would land on B's.
+//
+// So a pre-login message goes only to the session of the worker that sent it (the pipe's requester, as
+// the service read it at connect -- never anything the message says), only while that session is still
+// the console, and only within the console attachment it connected in (`consoleGeneration`, bumped on
+// every console connect / disconnect): anything else is dropped, never re-aimed.
+inline constexpr uint32_t kNoSession = 0xffffffffu;
+
+inline uint32_t LogonOnlyTargetSession(uint32_t requesterSession, uint32_t consoleSession,
+                                       uint32_t consoleGenerationAtConnect, uint32_t consoleGenerationNow) {
+  if (requesterSession == kNoSession || requesterSession == 0) return kNoSession;
+  if (requesterSession != consoleSession) return kNoSession;
+  if (consoleGenerationAtConnect != consoleGenerationNow) return kNoSession;
+  return requesterSession;
+}
+
+enum class ForwardOutcome { Written, NoTarget, LogonBindingLost, WriteFailed };
+
+// The service's forward of one message (secure_input_service_main's forward_to_agent): the target, an agent
+// there, the write; a failed write re-resolves the target once and restarts the agent there. For a
+// pre-login message both resolutions are LogonOnlyTargetSession -- the retry included, so a session that
+// changed between the two cannot receive it. `ordinaryTarget` / `logonTarget` return kNoSession for none.
+template <typename OrdinaryTarget, typename LogonTarget, typename Ensure, typename Restart, typename Write>
+ForwardOutcome ForwardSecureInput(const SecureInputMessage& message, OrdinaryTarget ordinaryTarget,
+                                  LogonTarget logonTarget, Ensure ensureAgentIn, Restart restartAgentIn, Write write) {
+  const bool logonOnly = (message.flags & kSecureInputFlagLogonDesktopOnly) != 0;
+  const auto pick = [&]() -> uint32_t { return logonOnly ? logonTarget() : ordinaryTarget(); };
+  const auto none = [&] { return logonOnly ? ForwardOutcome::LogonBindingLost : ForwardOutcome::NoTarget; };
+  uint32_t session = pick();
+  if (session == kNoSession) return none();
+  if (!ensureAgentIn(session)) return ForwardOutcome::WriteFailed;
+  if (write(message)) return ForwardOutcome::Written;
+  // A failed write means the agent died; re-resolve rather than reusing the old session, since the reason
+  // it died may be that its session went away.
+  session = pick();
+  if (session == kNoSession) return none();
+  if (!restartAgentIn(session)) return ForwardOutcome::WriteFailed;
+  return write(message) ? ForwardOutcome::Written : ForwardOutcome::WriteFailed;
+}
+
 }  // namespace remote60::native_poc

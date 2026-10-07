@@ -12,6 +12,7 @@
 
 #include "clipboard_sync.hpp"
 #include "native_socket.hpp"
+#include "client_host_role_gate.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
 
@@ -118,7 +119,7 @@ class ClientSessionController {
   }
   // The connected host's Pong capture flags (0 until the first pong). The Android viewer's menu rules
   // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
-  uint32_t HostCaptureFlags() const { return hostCaptureFlags_.load(std::memory_order_relaxed); }
+  uint32_t HostCaptureFlags() const { return hostRole_.Load().flags; }
   uint64_t PreloginInputHeldBack() const { return preloginInputHeldBack_.load(std::memory_order_relaxed); }
   // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
   // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
@@ -252,10 +253,10 @@ class ClientSessionController {
   // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
-  std::atomic<uint32_t> hostCaptureFlags_{0};
   std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
-  std::atomic<bool> hostRoleKnown_{false};          // r7 H6: a pong of this session has said what the host is
-  std::atomic<bool> windowListDeferred_{false};     // r10: asked before the first pong; answered by it
+  // r7 H6 / r10 / r11 U5: what the host is (the pong's flags, and whether a pong of this session said so) and
+  // the window-list request asked before that -- one state, changed by one transition at a time.
+  HostRoleGate hostRole_;
   // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
   std::mutex rebootMu_;
   uint32_t rebootPendingId_ = 0;

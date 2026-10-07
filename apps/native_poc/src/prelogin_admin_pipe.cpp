@@ -173,23 +173,57 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
 
 namespace {
 
+int read_issued(const AdminPrimitives& p, uint64_t* out) {
+  *out = 0;
+  return p.readIssued ? p.readIssued(out) : -1;
+}
+
 // Disable: the floor first (an old blob can never come back), then the record, then the start type.
-AdminReply disable_now(const AdminPrimitives& p, bool* floorRaised = nullptr, uint32_t* removeError = nullptr) {
+//
+// r11 U1: the floor must be above every generation that was ever ISSUED, not above the one record this
+// call happened to read -- Enable may have issued generations far above the floor, and a copy of any of
+// those records restored later would otherwise validate again. The issued bound proves it; when there is
+// no bound (it cannot be read, or none was ever kept and the record that is there cannot be read), the
+// floor still rises as far as is known, but the record is LEFT (what it says may be the only evidence of
+// its generation), the reply is Failed and the owed-revoke mark is set -- access stays off and the revoke
+// stays owed until it can be proven.
+AdminReply disable_now(const AdminPrimitives& p, bool* floorRaised = nullptr, uint32_t* removeError = nullptr,
+                       bool* boundProven = nullptr) {
   AdminReply reply;
   if (floorRaised) *floorRaised = false;
   if (removeError) *removeError = ERROR_CANCELLED;  // not attempted
+  if (boundProven) *boundProven = false;
   const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
   MachineRecord old;
   const bool had = !path.empty() && p.readRecord && p.readRecord(path, &old);
   uint64_t floor = 0;
   const bool floorKnown = p.readFloor && p.readFloor(&floor);
-  const uint64_t gen = (std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull) + 1;
+  uint64_t issued = 0;
+  const int issuedState = read_issued(p, &issued);
+  // No bound kept means no generation was ever issued with one (every Enable keeps it first): then the
+  // record that is there -- read -- or no record at all is everything there is.
+  const bool recordAbsent = !had && !path.empty() && p.probeRecord && p.probeRecord(path) == 0;
+  // (An unreadable floor does not undo the proof: the raise is monotonic, so the floor ends at gen or above;
+  // the reply still says Failed for it, below.)
+  const bool proven = issuedState == 1 || (issuedState == 0 && (had || recordAbsent));
+  const uint64_t gen =
+      (std::max)((std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull), issued) + 1;
   if (!p.raiseFloor || !p.raiseFloor(gen)) {
     reply.status = AdminStatus::Failed;
     reply.enabled = p.featureEnabled && p.featureEnabled();
+    if (!proven && p.markRevokePending) (void)p.markRevokePending();
     return reply;
   }
   if (floorRaised) *floorRaised = true;
+  if (boundProven) *boundProven = proven;
+  if (!proven) {
+    const bool marked = p.markRevokePending && p.markRevokePending();
+    reply.status = AdminStatus::Failed;
+    reply.win32 = marked ? ERROR_READ_FAULT : ERROR_CANTWRITE;
+    reply.enabled = p.featureEnabled && p.featureEnabled();
+    reply.ownerGeneration = gen;
+    return reply;
+  }
   const uint32_t rm = path.empty() || !p.removeRecord ? 0 : p.removeRecord(path);
   if (removeError) *removeError = path.empty() ? ERROR_INVALID_PARAMETER : rm;
   uint32_t original = kStartDemand;
@@ -244,7 +278,7 @@ UninstallRevokeResult RevokeForUninstall(const AdminPrimitives& p, const std::fu
   {
     std::unique_lock<std::mutex> lock;
     if (p.transaction) lock = std::unique_lock<std::mutex>(*p.transaction);
-    out.reply = disable_now(p, &out.floorRaised, &out.removeError);
+    out.reply = disable_now(p, &out.floorRaised, &out.removeError, &out.boundProven);
   }
   // r10 T1: the postcondition is what the revoke actually DID -- the durable floor raised, the record's
   // removal reported, and the record file absent now -- not the reply (a start type that cannot be put back
@@ -252,7 +286,8 @@ UninstallRevokeResult RevokeForUninstall(const AdminPrimitives& p, const std::fu
   // error is not absence), and not featureEnabled (the mark this removal set already turns that off).
   const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
   out.recordState = !path.empty() && p.probeRecord ? p.probeRecord(path) : -1;
-  out.revoked = out.floorRaised && out.removeError == 0 && out.recordState == 0;
+  // r11 U1: and the floor is above every generation ever issued -- raised past an unread record is not.
+  out.revoked = out.floorRaised && out.boundProven && out.removeError == 0 && out.recordState == 0;
   if (out.revoked && p.clearRevokePending) (void)p.clearRevokePending();
   return out;
 }
@@ -354,7 +389,10 @@ AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, cons
   const bool had = !path.empty() && p.readRecord(path, &old);
   uint64_t floor = 0;
   const bool floorKnown = p.readFloor(&floor);
-  const uint64_t gen = (std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull) + 1;
+  uint64_t issued = 0;
+  const int issuedState = read_issued(p, &issued);
+  const uint64_t gen =
+      (std::max)((std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull), issued) + 1;
   if (r.op == AdminOp::Enable) {
     if (r.directoryUrl.empty() || r.accountId.empty() || r.hostId.empty() || r.hostToken.empty()) {
       reply.status = AdminStatus::BadRequest;
@@ -383,6 +421,15 @@ AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, cons
     }
     if (path.empty() || machine.empty()) {
       reply.status = AdminStatus::Failed;
+      return reply;
+    }
+    // r11 U1: the generation is issued -- durably, above every earlier one -- before any record carries it,
+    // so a later revoke knows how high its floor must go even when it cannot read the record. A bound that
+    // cannot be read or kept: nothing is issued.
+    if (issuedState < 0 || !p.raiseIssued || !p.raiseIssued(gen)) {
+      reply.status = AdminStatus::Failed;
+      reply.win32 = issuedState < 0 ? ERROR_READ_FAULT : ERROR_CANTWRITE;
+      reply.enabled = p.featureEnabled();
       return reply;
     }
     MachineRecord rec;
@@ -836,12 +883,12 @@ bool QueryDurablePreloginEnabled() {
 }
 
 void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs, int attempts, uint32_t delayMs,
-                                     const std::wstring& pipeName, ServerCheck check) {
+                                     const std::wstring& pipeName, ServerCheck check, uint32_t refreshMs) {
   const std::wstring pipe = pipeName.empty() ? HostServicePipeName() : pipeName;
   if (!check) check = HostServiceServerCheck();
-  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe, check] {
+  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe, check, refreshMs] {
     const ULONGLONG until = GetTickCount64() + waitReadyMs;
-    while (readyNow && !readyNow()) {
+    while (refreshMs == 0 && readyNow && !readyNow()) {  // (refreshing: the loop below waits, unbounded)
       if (GetTickCount64() >= until) return;  // never registered: no ready, the service keeps prelogin
       Sleep(250);
     }
@@ -851,9 +898,24 @@ void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t wa
     wchar_t nonce[129] = {};
     const DWORD n = GetEnvironmentVariableW(L"REMOTE60_PRELOGIN_READY_NONCE", nonce, 129);
     if (n > 0 && n < 129) r.readyNonce.assign(nonce, nonce + n);
-    for (int i = 0; i < attempts; ++i) {
-      if (SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok) return;
-      Sleep(delayMs);
+    if (refreshMs == 0) {
+      for (int i = 0; i < attempts; ++i) {
+        if (SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok) return;
+        Sleep(delayMs);
+      }
+      return;
+    }
+    // r11 U4: for the life of this process. The service keeps a ready only in memory: a service started
+    // after this Host (or restarted while it runs) adopts it and would wait for a ready that, sent once, never
+    // comes again. So while the directory still accepts this host it is said again every `refreshMs` -- over
+    // the same admin pipe, checked by the service the same way (image, session, start time; the adopted
+    // Host's case by the sender's real parent) -- quickly at first, then at the refresh pace.
+    int failures = 0;
+    for (;;) {
+      bool ok = false;
+      if (!readyNow || readyNow()) ok = SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok;
+      failures = ok ? 0 : failures + 1;
+      Sleep(!ok && failures <= attempts ? delayMs : refreshMs);
     }
   }).detach();
 }

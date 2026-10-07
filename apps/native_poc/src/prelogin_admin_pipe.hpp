@@ -172,6 +172,15 @@ struct AdminPrimitives {
   // not floor 0; the decision fails safe).
   std::function<bool(uint64_t*)> readFloor;
   std::function<bool(uint64_t)> raiseFloor;                 // monotonic
+  // r11 U1: the highest owner generation ever ISSUED (HKLM\SOFTWARE\GNLink\PreloginIssuedGeneration),
+  // raised by Enable BEFORE its record is published, so a revoke can put the floor above every record
+  // that may still exist as a copy -- not only above the one it managed to read. 1 = a value (*out),
+  // 0 = none was ever issued (*out = 0), -1 = cannot be read. Unbound: cannot be read (fail closed).
+  std::function<int(uint64_t*)> readIssued;
+  std::function<bool(uint64_t)> raiseIssued;                // monotonic
+  // r11 U1: set the owed-revoke mark (below) -- a Disable that cannot prove its floor is above every issued
+  // generation leaves access off this way instead of reporting the revoke done. Unbound: not set.
+  std::function<bool()> markRevokePending;
   std::function<bool(const std::wstring&, MachineRecord*)> readRecord;   // false = none / unreadable
   std::function<uint32_t(const std::wstring&, const MachineRecord&)> writeRecord;  // 0 = ok, else win32
   std::function<uint32_t(const std::wstring&)> removeRecord;            // 0 = ok / already gone
@@ -227,8 +236,10 @@ AdminReply CompletePendingRevoke(const AdminPrimitives& p);
 // and its record publish), then the Disable decision. Succeeds only when access is really gone: the
 // record absent and the feature off. The floor stays (r8 V4). Failure keeps the mark.
 struct UninstallRevokeResult {
-  bool revoked = false;  // the postcondition held: floor raised AND record removed AND the record ABSENT
+  bool revoked = false;  // the postcondition held: floor raised above every issued generation AND record
+                         // removed AND the record ABSENT
   bool floorRaised = false;
+  bool boundProven = false;  // r11 U1: the floor is above every generation ever issued, not just a number
   uint32_t removeError = 0;
   int recordState = -1;  // probeRecord after: 0 absent, 1 present, -1 cannot tell
   bool marked = false;
@@ -298,9 +309,14 @@ bool QueryDurablePreloginEnabled();
 // Item 7: tell the service this user Host is registered and serving -- once `readyNow()` says so (the
 // first successful directory heartbeat), polled for up to `waitReadyMs`; then up to `attempts` sends,
 // `delayMs` apart, on a background thread. Bounded both ways; the service keeps prelogin until one lands.
+// r11 U4: `refreshMs` != 0 -- not bounded: after that, for the life of the process, said again every
+// `refreshMs` while `readyNow()` holds (a service that starts or restarts later learns it from the Host
+// already running); failures retry `attempts` times `delayMs` apart, then at the refresh pace.
+inline constexpr uint32_t kUserHostReadyRefreshMs = 5000;
 void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs = 180000, int attempts = 10,
                                      uint32_t delayMs = 1000, const std::wstring& pipeName = std::wstring(),
-                                     ServerCheck check = nullptr);  // null: HostServiceServerCheck()
+                                     ServerCheck check = nullptr,  // null: HostServiceServerCheck()
+                                     uint32_t refreshMs = 0);
 #endif
 
 }  // namespace remote60::native_poc::prelogin

@@ -39,6 +39,12 @@ struct World {
   bool failRaise = false;     // r9: the floor cannot be raised
   bool markBound = false;     // r9 R1: the owed-revoke mark (unbound in the older cases)
   int mark = 0;
+  bool issuedKept = false;     // r11 U1: the issued bound has a value (false: none ever kept)
+  uint64_t issued = 0;
+  bool issuedUnreadable = false;
+  bool failRaiseIssued = false;
+  bool failReadRecord = false;  // the record is there but cannot be read (ACL / IO / DPAPI)
+  std::string order;            // "issued " / "record " as Enable does them
   int osReboots = 0;          // r2: the OS seam
   uint32_t osRebootResult = 0;
   int readies = 0;
@@ -66,8 +72,24 @@ struct World {
       p.revokePending = [this] { return mark; };
       p.clearRevokePending = [this] { mark = 0; return true; };
     }
+    p.markRevokePending = [this] { mark = 1; return true; };
+    p.readIssued = [this](uint64_t* out) {
+      ++calls;
+      *out = issuedKept ? issued : 0;
+      return issuedUnreadable ? -1 : issuedKept ? 1 : 0;
+    };
+    p.raiseIssued = [this](uint64_t g) {
+      ++calls;
+      if (failRaiseIssued || issuedUnreadable) return false;
+      order += "issued ";
+      issuedKept = true;
+      if (g > issued) issued = g;
+      return true;
+    };
+    p.probeRecord = [this](const std::wstring& path) -> int { return files.count(path) ? 1 : 0; };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       ++calls;
+      if (failReadRecord) return false;
       auto it = files.find(path);
       if (it == files.end()) return false;
       *out = it->second;
@@ -76,6 +98,7 @@ struct World {
     p.writeRecord = [this](const std::wstring& path, const pl::MachineRecord& r) -> uint32_t {
       ++calls;
       if (failWrite) return failWrite;
+      order += "record ";
       files[path] = r;
       return 0;
     };
@@ -277,6 +300,89 @@ int main() {
     pl::AdminRequest rtBack;
     check("...the expected floor round-trips in the Enable request",
           pl::DecodeAdminRequest(pl::EncodeAdminRequest(rt), &rtBack) && rtBack.expectedFloor == 42);
+  }
+  {
+    // r11 U1: Enable issues its generation durably BEFORE the record carries it, and a revoke puts the floor
+    // above every generation issued -- also when the record it removes cannot be read.
+    World w;
+    w.floor = 3;
+    pl::AdminPrimitives p = w.primitives();
+    for (int i = 0; i < 4; ++i) pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(3)), true, p);
+    const pl::MachineRecord seven = w.files[kPath];
+    check("U1: four Enables over floor 3: the record is at 7, the issued bound is 7, issued BEFORE each record",
+          seven.ownerGeneration == 7 && w.issuedKept && w.issued == 7 &&
+              w.order.rfind("issued record ", 0) == 0 && w.order.find("record issued record ") != std::string::npos,
+          std::to_string(seven.ownerGeneration) + " / " + w.order);
+    w.failReadRecord = true;  // floor 3, record 7, only its read fails
+    pl::AdminRequest off;
+    off.op = pl::AdminOp::Disable;
+    const pl::AdminReply o = pl::HandleAdminRequest(pl::EncodeAdminRequest(off), true, p);
+    check("U1: Disable with the record unreadable: the floor goes above the issued 7 (r10 took it for 0: 4)",
+          o.status == pl::AdminStatus::Ok && w.floor > 7 && w.files.empty(), std::to_string(w.floor));
+    w.failReadRecord = false;
+    w.files[kPath] = seven;  // the old generation-7 copy put back
+    check("...that copy put back is NOT usable (product ValidateMachineRecord: Revoked)", !p.featureEnabled());
+  }
+  {
+    World w;
+    w.issuedUnreadable = true;
+    pl::AdminPrimitives p = w.primitives();
+    const pl::AdminReply on = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    check("U1: Enable when the issued bound cannot be read: Failed, nothing issued, no record, start type as it was",
+          on.status == pl::AdminStatus::Failed && on.win32 == ERROR_READ_FAULT && w.files.empty() && w.startType == 3);
+    World k;
+    k.failRaiseIssued = true;
+    pl::AdminPrimitives kp = k.primitives();
+    const pl::AdminReply kon = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, kp);
+    check("U1: Enable when the bound cannot be kept: Failed, no record published, start type as it was",
+          kon.status == pl::AdminStatus::Failed && k.files.empty() && k.startType == 3);
+    World f;
+    f.failWrite = ERROR_ACCESS_DENIED;
+    pl::AdminPrimitives fp = f.primitives();
+    pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, fp);
+    check("U1: a record that then fails to be written leaves the bound raised (above, never below)",
+          f.files.empty() && f.issuedKept && f.issued == 1);
+  }
+  {
+    // r11 U1: no bound was ever kept (a record from before it) and the record cannot be read: the revoke
+    // cannot prove where its floor must go -- access stays off, the revoke stays owed, the record stays.
+    World w;
+    w.markBound = true;
+    w.floor = 3;
+    pl::AdminPrimitives p = w.primitives();
+    pl::MachineRecord legacy;
+    legacy.accountId = 1;
+    legacy.hostId = 2;
+    legacy.ownerGeneration = 7;
+    legacy.enabled = true;
+    legacy.directoryOrigin = "https://gnlink.example:8443";
+    legacy.machineId = "11111111-2222-3333-4444-555555555555";
+    legacy.credential = {1, 2, 3};
+    w.files[kPath] = legacy;
+    w.failReadRecord = true;
+    pl::AdminRequest off;
+    off.op = pl::AdminOp::Disable;
+    const pl::AdminReply o = pl::HandleAdminRequest(pl::EncodeAdminRequest(off), true, p);
+    w.failReadRecord = false;
+    check("U1: unprovable Disable: Failed, the mark is SET, the record LEFT, the feature off",
+          o.status == pl::AdminStatus::Failed && w.mark == 1 && w.files.size() == 1 && !p.featureEnabled(),
+          "floor " + std::to_string(w.floor));
+    w.failReadRecord = true;
+    check("...the service's tick cannot prove it either: still owed", pl::CompletePendingRevoke(p).status ==
+                                                                          pl::AdminStatus::Failed && w.mark == 1);
+    w.failReadRecord = false;
+    check("...once the record can be read: carried out above it (floor > 7), the mark cleared",
+          pl::CompletePendingRevoke(p).status == pl::AdminStatus::Ok && w.mark == 0 && w.floor > 7 && w.files.empty(),
+          std::to_string(w.floor));
+    w.files[kPath] = legacy;
+    check("...and that record put back is Revoked", !p.featureEnabled());
+    World u;
+    u.markBound = true;
+    u.issuedUnreadable = true;
+    pl::AdminPrimitives up = u.primitives();
+    u.mark = 1;
+    check("U1: an owed revoke whose bound cannot be read stays owed (mark kept)",
+          pl::CompletePendingRevoke(up).status == pl::AdminStatus::Failed && u.mark == 1);
   }
   {
     // r9 R1: a sign-out's Disable that never finished. The Host put the mark down first; the next request

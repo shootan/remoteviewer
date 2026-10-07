@@ -2063,6 +2063,10 @@ target_include_directories(remote60_prelogin_sas_test PRIVATE src)
 add_executable(remote60_secure_input_desktop_fence_test src/secure_input_desktop_fence_test.cpp)
 target_include_directories(remote60_secure_input_desktop_fence_test PRIVATE src)
 
+# prelogin-ui r11 (U5): the window-list request and the first pong as one state.
+add_executable(remote60_client_host_role_gate_test src/client_host_role_gate_test.cpp)
+target_include_directories(remote60_client_host_role_gate_test PRIVATE src)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )

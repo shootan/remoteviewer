@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <string>
 
+#include "prelogin_supervisor.hpp"
 #include "prelogin_user_host_policy.hpp"
 
 namespace pl = remote60::native_poc::prelogin;
@@ -101,6 +102,58 @@ int main() {
     (void)f.Decide(obs(1, 0));
     f.OnLaunchFailed(0);
     check("a start that could not be made counts as a quick death (waits)", f.Decide(obs(1, 100)) == D::None);
+  }
+  {
+    // r11 U3: the service's tick as it runs it -- the supervisor's decision for the observation, then the
+    // watched Host settled for that tick (settle_watched_hosts), then the branch. The service started A's
+    // Host in session 1; the console then goes to session 2 where nobody is logged on yet.
+    std::printf("\n--- r11 U3: HasUser A, then B at the console with nobody logged on ---\n");
+    using pl::SupervisorAction;
+    using pl::WatchedHostStep;
+    pl::PreloginSupervisor sup;
+    struct Watched {
+      uint32_t session = 1;
+      bool watched = true;
+      int terminated = 0;
+      int workerStarts = 0;
+      uint32_t workerSession = 0xFFFFFFFFu;
+    } w;
+    auto tick = [&](uint32_t console, pl::UserTokenObservation user, bool changed) {
+      pl::SupervisorObservation o;
+      o.featureEnabled = true;
+      o.machineCredentialValid = true;
+      o.consoleSessionValid = true;
+      o.consoleChanged = changed;
+      o.userToken = user;
+      o.privilege = pl::UserPrivilege::AdminFull;
+      const auto out = sup.Reconcile(o);
+      if (w.watched) {
+        const WatchedHostStep step =
+            pl::WatchedHostOnTick(w.session, console, out.action == SupervisorAction::RunPreloginWorker, true);
+        if (step == WatchedHostStep::Stop) ++w.terminated;
+        if (step != WatchedHostStep::Keep) w.watched = false;
+      }
+      if (out.action == SupervisorAction::RunPreloginWorker) {
+        ++w.workerStarts;
+        w.workerSession = console;
+      }
+      return out.action;
+    };
+    (void)tick(1, pl::UserTokenObservation::HasUser, false);
+    check("U3: A logged on at the console: A's Host watched, kept", w.watched && w.terminated == 0);
+    const SupervisorAction b = tick(2, pl::UserTokenObservation::NoInteractiveUser, true);
+    check("U3: console -> B with nobody logged on: the pre-login worker runs in B",
+          b == SupervisorAction::RunPreloginWorker && w.workerStarts == 1 && w.workerSession == 2);
+    check("...and A's Host (still logged on in session 1) is let go, terminated 0 times (r10: stopped)",
+          !w.watched && w.terminated == 0);
+    Watched same;
+    check("U3: a Host the service started in the console session itself, which now has no user: stopped",
+          pl::WatchedHostOnTick(1, 1, true, true) == WatchedHostStep::Stop);
+    check("...an ADOPTED one there (the user's own) is only let go",
+          pl::WatchedHostOnTick(1, 1, true, false) == WatchedHostStep::LetGo);
+    check("...HasUser A -> HasUser B: let go (r10 N1 kept)", pl::WatchedHostOnTick(1, 2, false, true) == WatchedHostStep::LetGo);
+    check("...no console this instant: nothing decided", pl::WatchedHostOnTick(1, 0xFFFFFFFFu, true, true) == WatchedHostStep::Keep);
+    (void)same;
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
