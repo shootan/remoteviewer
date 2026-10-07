@@ -2144,6 +2144,13 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service A1 section 3: prelogin credential sealed purpose (distinct AAD/KDF labels) isolation.
+add_executable(remote60_prelogin_cred_seal_test
+  src/prelogin_cred_seal_test.cpp
+)
+target_include_directories(remote60_prelogin_cred_seal_test PRIVATE src)
+target_link_libraries(remote60_prelogin_cred_seal_test PRIVATE remote60_sealed_unlock)
+
 # prelogin-service A1 section 2: machine credential record (pure binding/revocation + serialization).
 add_executable(remote60_prelogin_machine_record_test
   src/prelogin_machine_record_test.cpp

@@ -372,6 +372,27 @@ std::vector<uint8_t> BuildKdfInfo(const UnlockContext& ctx) {
   return v;
 }
 
+// Prelogin credential purpose: identical context bytes, DISTINCT labels. The different label makes both
+// the derived key (KDF info) and the AAD diverge from the Unlock path, so a prelogin blob and an unlock
+// blob can never open under each other's context, and an old (unlock-only) peer rejects a prelogin blob.
+std::vector<uint8_t> BuildPreloginCredAad(const UnlockContext& ctx) {
+  std::vector<uint8_t> v;
+  static const char kLabel[] = "GNLink-Prelogin-Cred-v1-AAD";
+  v.insert(v.end(), kLabel, kLabel + sizeof(kLabel) - 1);
+  const auto body = serialize_context(ctx);
+  v.insert(v.end(), body.begin(), body.end());
+  return v;
+}
+
+std::vector<uint8_t> BuildPreloginCredKdfInfo(const UnlockContext& ctx) {
+  std::vector<uint8_t> v;
+  static const char kLabel[] = "GNLink-Prelogin-Cred-v1-KDF";
+  v.insert(v.end(), kLabel, kLabel + sizeof(kLabel) - 1);
+  const auto body = serialize_context(ctx);
+  v.insert(v.end(), body.begin(), body.end());
+  return v;
+}
+
 // --- replay / challenge state machine -----------------------------------------------------------
 
 void UnlockChallengeState::Issue(const uint8_t challengeId[kChallengeIdBytes],
