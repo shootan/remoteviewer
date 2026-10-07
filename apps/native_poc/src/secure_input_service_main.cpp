@@ -21,6 +21,12 @@
 #include "secure_input_session.hpp"
 #include "secure_input_diag_budget.hpp"
 
+// Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
+#include "prelogin_console_probe.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_machine_store.hpp"
+#include "prelogin_supervisor.hpp"
+
 namespace {
 
 using remote60::native_poc::DesktopRect;
@@ -796,6 +802,227 @@ void unlock_pipe_loop() {
 
 }  // namespace
 
+// ------------------------------------------------------------------ prelogin supervisor (feature-gated)
+//
+// This whole block is DORMANT unless the machine credential record exists and enables prelogin, so an
+// existing deployment with the feature off sees exactly the previous secure-input behaviour. When on, a
+// bounded reconcile thread observes the physical console and drives PreloginSupervisor: it launches the
+// SYSTEM GNLinkStream --prelogin worker on the console's input desktop when no user is logged on, and
+// hands off to the user's own GNLinkHost at login (replacing the elevated HKCU Run that never ran before
+// login). The pure decision logic is unit-tested (prelogin_supervisor_test); the live WTS/token/child
+// Win32 here is exercised under SYSTEM in the elevated G-phase.
+
+using namespace remote60::native_poc::prelogin;
+
+HANDLE gPreloginWorker = nullptr;  // GNLinkStream.exe --prelogin, SYSTEM, console input desktop
+HANDLE gUserHostProcess = nullptr; // GNLinkHost.exe --tray, launched for the logged-on user at handoff
+
+std::wstring sibling_exe_path(const wchar_t* name) {
+  const std::wstring self = current_executable_path();
+  const size_t slash = self.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return {};
+  return self.substr(0, slash + 1) + name;
+}
+
+// ASCII, to match how the directory client stores machineId in the record (RegGetValueA MachineGuid).
+std::string current_machine_guid() {
+  char buf[128] = {};
+  DWORD cb = sizeof(buf);
+  if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid",
+                   RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, buf, &cb) != ERROR_SUCCESS) {
+    return {};
+  }
+  return std::string(buf);
+}
+
+std::wstring machine_record_path() {
+  wchar_t programData[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) == 0) return {};
+  return std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
+}
+
+// Reads + validates the machine record to decide whether prelogin is enabled on this box. Full origin
+// binding is enforced by the directory register path; here we require a present, enabled, machine-bound,
+// non-revoked record. Returns false (feature off) on any failure -- never fails open.
+bool prelogin_feature_enabled() {
+  const std::wstring path = machine_record_path();
+  if (path.empty()) return false;
+  MachineRecord rec;
+  uint32_t win32 = 0;
+  if (ReadAndOpenMachineRecord(path, &rec, &win32) != MachineStoreStatus::Ok) return false;
+  BindingContext ctx;
+  ctx.currentMachineId = current_machine_guid();
+  ctx.expectedAccountId = 0;        // any account enrolled on this machine
+  ctx.originAllowed = true;         // origin binding verified at register time; not re-litigated here
+  ctx.minOwnerGeneration = rec.ownerGeneration;  // no externally-recorded revoke floor at this layer
+  ctx.featureGateEnabled = true;
+  return ValidateMachineRecord(rec, ctx) == RecordVerdict::Usable;
+}
+
+// Launch a SYSTEM child in `sessionId` on `desktopName` (winsta0\<desktop>). Mirrors start_agent's token
+// handling but takes no inherited pipe; the child runs the full product engine. Returns the process
+// handle (caller owns) or nullptr.
+HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& desktopName,
+                                      const std::wstring& exe, const wchar_t* args) {
+  if (exe.empty()) return nullptr;
+  HANDLE serviceToken = nullptr;
+  HANDLE childToken = nullptr;
+  bool ok = OpenProcessToken(GetCurrentProcess(),
+                             TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_SESSIONID,
+                             &serviceToken) &&
+            DuplicateTokenEx(serviceToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary,
+                             &childToken) &&
+            SetTokenInformation(childToken, TokenSessionId, &sessionId, sizeof(sessionId));
+  if (serviceToken) CloseHandle(serviceToken);
+  if (!ok) {
+    if (childToken) CloseHandle(childToken);
+    return nullptr;
+  }
+  wchar_t command[32768]{};
+  _snwprintf_s(command, _TRUNCATE, L"\"%s\" %s", exe.c_str(), args);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  std::wstring desktopSpec = L"winsta0\\" + desktopName;
+  startup.lpDesktop = desktopSpec.data();
+  PROCESS_INFORMATION proc{};
+  ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup,
+                            &proc) != FALSE;
+  CloseHandle(childToken);
+  if (!ok) return nullptr;
+  CloseHandle(proc.hThread);
+  return proc.hProcess;
+}
+
+bool child_alive(HANDLE h) { return h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT; }
+
+void stop_child(HANDLE* h) {
+  if (*h) {
+    if (child_alive(*h)) {
+      (void)TerminateProcess(*h, 0);
+      (void)WaitForSingleObject(*h, 1000);
+    }
+    CloseHandle(*h);
+    *h = nullptr;
+  }
+}
+
+void ensure_prelogin_worker(DWORD consoleSession) {
+  if (child_alive(gPreloginWorker)) return;
+  stop_child(&gPreloginWorker);  // reap a dead handle
+  gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon",
+                                                    sibling_exe_path(L"GNLinkStream.exe"), L"--prelogin");
+  diag("prelogin: worker launch on console session=%u -> %s", consoleSession,
+       gPreloginWorker ? "ok" : "FAILED");
+}
+
+// Launch the logged-on user's own Host with the verified user/linked-Full token (the service-owned
+// handoff that replaces the elevated HKCU Run). The token matrix is resolved by the console probe
+// classifiers; here we obtain the primary token and, for a Limited token, its linked Full.
+void launch_user_host(DWORD consoleSession) {
+  if (child_alive(gUserHostProcess)) return;
+  stop_child(&gUserHostProcess);
+  HANDLE userToken = nullptr;
+  if (!WTSQueryUserToken(consoleSession, &userToken)) {
+    diag("prelogin: handoff WTSQueryUserToken failed err=%lu", GetLastError());
+    return;
+  }
+  HANDLE launchToken = userToken;
+  HANDLE linked = nullptr;
+  TOKEN_ELEVATION_TYPE et = TokenElevationTypeDefault;
+  DWORD ret = 0;
+  if (GetTokenInformation(userToken, TokenElevationType, &et, sizeof(et), &ret) &&
+      et == TokenElevationTypeLimited) {
+    TOKEN_LINKED_TOKEN lt = {};
+    if (GetTokenInformation(userToken, TokenLinkedToken, &lt, sizeof(lt), &ret) && lt.LinkedToken) {
+      linked = lt.LinkedToken;
+      launchToken = linked;  // use the Full linked token (Q4 Limited+linked path)
+    }
+  }
+  const std::wstring exe = sibling_exe_path(L"GNLinkHost.exe");
+  wchar_t command[32768]{};
+  _snwprintf_s(command, _TRUNCATE, L"\"%s\" --tray", exe.c_str());
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  std::wstring desktopSpec = L"winsta0\\Default";
+  startup.lpDesktop = desktopSpec.data();
+  PROCESS_INFORMATION proc{};
+  const BOOL ok = CreateProcessAsUserW(launchToken, nullptr, command, nullptr, nullptr, FALSE,
+                                       CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, nullptr, nullptr,
+                                       &startup, &proc);
+  if (ok) {
+    CloseHandle(proc.hThread);
+    gUserHostProcess = proc.hProcess;
+  }
+  diag("prelogin: user host handoff -> %s", ok ? "launched" : "FAILED");
+  if (linked) CloseHandle(linked);
+  CloseHandle(userToken);
+}
+
+SupervisorObservation observe_console(bool featureEnabled) {
+  SupervisorObservation obs;
+  obs.featureEnabled = featureEnabled;
+  obs.machineCredentialValid = featureEnabled;  // the same record gates both at this layer
+  obs.consoleChanged = gSessionChangePending.exchange(false, std::memory_order_acq_rel);
+  const DWORD console = WTSGetActiveConsoleSessionId();
+  obs.consoleSessionValid = (console != 0xFFFFFFFFu);
+  if (!obs.consoleSessionValid) return obs;
+  HANDLE userToken = nullptr;
+  if (WTSQueryUserToken(console, &userToken)) {
+    obs.userToken = UserTokenObservation::HasUser;
+    const PrivilegeFacts facts = GatherPrivilegeFactsFromToken(reinterpret_cast<void*>(userToken));
+    obs.privilege = ClassifyPrivilege(facts);
+    CloseHandle(userToken);
+    // First approximation of "ready": the user Host we launched is alive. A true ready signal from the
+    // host (profile/network/first-frame) is a follow-up IPC; using process-liveness keeps the handoff
+    // strictly after a launch, never on the bare LOGON. (Documented seam.)
+    obs.userHostReady = child_alive(gUserHostProcess);
+  } else {
+    obs.userToken = ClassifyTokenObservation(false, GetLastError());
+  }
+  return obs;
+}
+
+void prelogin_reconcile_loop(bool featureEnabled) {
+  PreloginSupervisor sup;
+  while (gRunning.load(std::memory_order_acquire)) {
+    const SupervisorObservation obs = observe_console(featureEnabled);
+    const DWORD console = WTSGetActiveConsoleSessionId();
+    const PreloginSupervisor::Outcome out = sup.Reconcile(obs);
+    switch (out.action) {
+      case SupervisorAction::RunPreloginWorker:
+        stop_child(&gUserHostProcess);
+        if (obs.consoleSessionValid) ensure_prelogin_worker(console);
+        break;
+      case SupervisorAction::StartUserHostFull:
+      case SupervisorAction::StartUserHostLinkedFull:
+      case SupervisorAction::StartUserHostDefault:
+        // Keep the prelogin worker up until the handoff completes; begin/continue the user host.
+        if (obs.consoleSessionValid) launch_user_host(console);
+        break;
+      case SupervisorAction::None:
+        if (out.handoff == HandoffAction::CompleteHandoff) stop_child(&gPreloginWorker);
+        break;
+      case SupervisorAction::StopAll:
+      case SupervisorAction::EnterUnsupportedUser:
+      case SupervisorAction::EnterFault:
+      case SupervisorAction::HoldNoCredential:
+      case SupervisorAction::HoldNoConsole:
+        stop_child(&gPreloginWorker);
+        break;
+      case SupervisorAction::RetryTransient:
+        break;  // keep any healthy child
+    }
+    // Bounded cadence; the SESSIONCHANGE handler flips gSessionChangePending for prompt reconciles.
+    for (int i = 0; i < 10 && gRunning.load(std::memory_order_acquire); ++i) {
+      if (gSessionChangePending.load(std::memory_order_acquire)) break;
+      Sleep(100);
+    }
+  }
+  stop_child(&gPreloginWorker);
+  stop_child(&gUserHostProcess);
+}
+
 void WINAPI service_main(DWORD, wchar_t**) {
   // Ex rather than the plain handler so SERVICE_CONTROL_SESSIONCHANGE can be delivered; the
   // plain form cannot receive it, and without it the agent outlives the session it was made for.
@@ -809,6 +1036,15 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // The sealed-unlock exchange lives on its own thread + duplex pipe so its request/response (and a
   // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
   std::thread unlockThread(unlock_pipe_loop);
+
+  // Prelogin supervisor: only when the machine record enables it, so an existing feature-off deployment
+  // keeps exactly the previous behaviour. (prelogin-service §1.)
+  const bool preloginEnabled = prelogin_feature_enabled();
+  std::thread preloginThread;
+  if (preloginEnabled) {
+    diag("prelogin: feature enabled -> starting supervisor reconcile loop");
+    preloginThread = std::thread(prelogin_reconcile_loop, preloginEnabled);
+  }
 
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();
@@ -842,6 +1078,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     }
   }
   stop_agent();
+  if (preloginThread.joinable()) preloginThread.join();
   // Wake the unlock worker out of any blocking ConnectNamedPipe/ReadFile and wait for it to exit.
   // CancelSynchronousIo only acts while the thread is inside a synchronous wait, so loop until the
   // thread actually ends. (Codex #370 BLOCKER A.)

@@ -227,12 +227,16 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
+  src/prelogin_console_probe.cpp
+  src/prelogin_machine_store.cpp
 )
 set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
   advapi32
   user32
+  wtsapi32
+  crypt32
   remote60_sealed_unlock
 )
 
