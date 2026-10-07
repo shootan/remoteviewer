@@ -92,5 +92,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
     gHostTest.preloginServerPid = static_cast<uint32_t>(wcstoul(test_env(L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID").c_str(), nullptr, 10));
   }
   gHostTest.streamExe = own_executable_path();
+  // r9 W3: a real streaming TEST build (GNLinkStreamMigrationTest, staged inside the fixture root) in place
+  // of the stand-in -- for the GNLinkHost -> GNLinkStream -> service ready chain. Only inside the root.
+  const std::wstring realStream = test_env(L"GNLINK_HOST_TEST_STREAM_EXE");
+  if (!realStream.empty()) {
+    if (!inside(root, realStream) || !std::filesystem::exists(realStream)) return 2;
+    gHostTest.streamExe = realStream;
+  }
   return host_product_entry(instance, previous, commandLine, show);
 }

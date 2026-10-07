@@ -35,6 +35,7 @@
 #include <thread>
 #include <vector>
 
+#include "stream_child_env.hpp"
 #include "directory_fake_server.hpp"
 #include "e2e_isolation.hpp"
 #include "native_video_client_session.hpp"
@@ -176,7 +177,6 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(host->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
-  SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
   const std::wstring wurl(url.begin(), url.end());
   std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
                      L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " + std::to_wstring(tcpControlPort) +
@@ -199,6 +199,9 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
     env.push_back(L'\0');
   }
   env.push_back(L'\0');
+  // r9 W4: the logged-in host's switches as GNLinkHost gives them to its child (stream_child_env.hpp), not a
+  // FORCE set by hand.
+  env = remote60::native_poc::BuildEnvironmentBlock(env.data(), remote60::native_poc::ProductStreamChildEnv(false));
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
   STARTUPINFOW si{};

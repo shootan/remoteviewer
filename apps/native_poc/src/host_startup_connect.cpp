@@ -289,7 +289,11 @@ int startup_connect_client(HostContext& hx) {
           const bool ownServer = remote60::native_poc::directory::directory_origin_key(rec.directoryOrigin) ==
                                  remote60::native_poc::directory::directory_origin_key(
                                      remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl());
-          if (!ownServer) {
+          // r9 R1/R2: a revoke still owed (sign-out / uninstall), or a mark that cannot be read: offline.
+          const bool revokeOwed = remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0;
+          if (revokeOwed) {
+            std::cout << "[native-video-host][prelogin] pre-login access is being withdrawn -> staying offline\n";
+          } else if (!ownServer) {
             std::cout << "[native-video-host][prelogin] machine credential names another server -> staying offline\n";
           } else if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
                          rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
@@ -471,7 +475,8 @@ int startup_connect_client(HostContext& hx) {
           std::cerr << "[native-video-host] rejected udp hello with invalid directory capability\n";
           continue;
         }
-        clientSession.directoryAuthenticated.store(true, std::memory_order_release);
+        // r9 R3: the first session, admitted by the capability: its epoch's standing, then the flag.
+        (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
         helloAuthenticated = true;
       }

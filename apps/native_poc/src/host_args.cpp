@@ -202,6 +202,10 @@ Args parse_args(int argc, char** argv) {
     if (!a.bindPortCandidates.empty()) a.bindPort = a.bindPortCandidates.front();
   }
   if (const char* v = std::getenv("GNLINK_STREAM_TEST_SECONDS")) a.seconds = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+  // r9 W3: GNLinkHost names its child's TCP control port (43001), which the real GNLink may hold.
+  if (const char* v = std::getenv("GNLINK_STREAM_TEST_CONTROL_PORT")) {
+    a.controlPort = static_cast<uint16_t>(std::strtoul(v, nullptr, 10));
+  }
 #endif
   if (a.preloginMode) {
     (void)ApplyPreloginRoleContract(a.transport, a.codec);

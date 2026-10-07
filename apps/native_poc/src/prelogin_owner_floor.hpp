@@ -40,4 +40,38 @@ inline bool ReadPreloginOwnerFloor(uint64_t* out) {
   return false;  // any other status (access denied, wrong type, corruption) -> unknown, fail safe
 }
 
+// r9 R1/R2: "pre-login access must be OFF" -- a DWORD next to the floor, set before a sign-out's Disable and
+// at uninstall, cleared by the service once the revoke really happened (prelogin_admin_pipe.hpp). Only ever
+// turns access off, so a stray mark fails safe. 1 = set, 0 = not set, -1 = unreadable (callers: as set).
+inline constexpr wchar_t kRevokePendingValue[] = L"PreloginRevokePending";
+
+inline int ReadRevokePendingAt(HKEY root, const wchar_t* subkey) {
+  DWORD v = 0;
+  DWORD cb = sizeof(v);
+  const LSTATUS st = RegGetValueW(root, subkey, kRevokePendingValue, RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr,
+                                  &v, &cb);
+  if (st == ERROR_SUCCESS) return v != 0 ? 1 : 0;
+  if (st == ERROR_FILE_NOT_FOUND) return 0;
+  return -1;
+}
+
+inline bool WriteRevokePendingAt(HKEY root, const wchar_t* subkey, bool set) {
+  if (!set) {
+    const LSTATUS st = RegDeleteKeyValueW(root, subkey, kRevokePendingValue);
+    return st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND;
+  }
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(root, subkey, 0, nullptr, 0, KEY_WRITE | KEY_WOW64_64KEY, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+  const DWORD one = 1;
+  const bool ok = RegSetValueExW(key, kRevokePendingValue, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one),
+                                 sizeof(one)) == ERROR_SUCCESS;
+  RegCloseKey(key);
+  return ok;
+}
+
+// The product's mark (HKLM, SYSTEM/Administrators).
+inline int ReadPreloginRevokePending() { return ReadRevokePendingAt(HKEY_LOCAL_MACHINE, kOwnerFloorKey); }
+
 }  // namespace remote60::native_poc::prelogin

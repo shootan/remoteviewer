@@ -51,6 +51,7 @@ TEST_MARKERS = [
     'GNLINK_RECOVERY_TEST_ROOT',  # client_recovery_ui_test.cpp
     'stream-test-seam',           # directory_client.cpp, REMOTE60_STREAM_TEST_SEAM
     'GNLINK_STREAM_TEST_',        # the same seam's environment (DIRECTORY, FORMER_NAME)
+    'REMOTE60_PRELOGIN_CAPTURE_ATTACH',  # host_startup_config.cpp: the capture-attach trigger, test build only
     'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM
 ]
 

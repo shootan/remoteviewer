@@ -467,8 +467,8 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               std::cerr << "[native-video-host] rejected unauthenticated reconnect during directory session\n";
               continue;
             }
-            clientSession.directoryAuthenticated.store(directoryAuthenticated,
-                                                std::memory_order_release);
+            // r9 R3: the shared flag is no longer written here, ahead of the epoch -- AdmitHello below
+            // writes the epoch, this session's standing and the flag, in that order.
             // Accepted: from here this Hello is the session's. (C5) Every per-client option it
             // carries is stored only now -- the FEC layout and NACK used to be stored before the
             // refusals above too, so a refused Hello could change them under the running session.
@@ -504,7 +504,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               // Even when the endpoint is unchanged: a new client has a new decoder, and sending
               // it deltas against frames it never saw leaves it grey until the next keyframe.
               sender.udpPeerChanged.store(true, std::memory_order_release);
-              const uint64_t epoch = clientSession.BeginEpoch();
+            }
+            const uint64_t epoch = clientSession.AdmitHello(directoryAuthenticated, startsSession);
+            if (startsSession) {
               std::cout << "[native-video-host][control] session epoch=" << epoch
                         << (changed ? " peer=new" : " peer=same") << "\n";
               clientSession.AwaitControlReady(epoch);

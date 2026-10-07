@@ -2023,6 +2023,37 @@ target_link_libraries(remote60_host_sender_epoch_test PRIVATE
   advapi32
 )
 
+# prelogin-ui r9 (R3): directory auth is bound to the admitted epoch (SessionState::AdmitHello).
+add_executable(remote60_host_session_admission_test
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/udp_control_channel.cpp
+  src/host_session_admission_test.cpp
+)
+target_include_directories(remote60_host_session_admission_test PRIVATE src)
+target_link_libraries(remote60_host_session_admission_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt)
+
+# prelogin-ui r9 (R4/W1): when the service starts the logged-on user's GNLinkHost.
+add_executable(remote60_prelogin_user_host_policy_test src/prelogin_user_host_policy_test.cpp)
+target_include_directories(remote60_prelogin_user_host_policy_test PRIVATE src)
+
+# prelogin-ui r9 (W3 + W1): the handoff's ready end to end -- GNLinkHost's test build -> its streaming test
+# build -> this test serving the admin pipe -- and a second GNLinkHost "--tray" yielding (exit 0).
+add_executable(remote60_prelogin_ready_chain_e2e_test
+  src/prelogin_ready_chain_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_prelogin_ready_chain_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_ready_chain_e2e_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt
+  remote60_test_scratch_dir)
+add_dependencies(remote60_prelogin_ready_chain_e2e_test remote60_host_app_ui_test remote60_native_video_host_migration_seam)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )

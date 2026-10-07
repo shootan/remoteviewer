@@ -142,6 +142,34 @@ struct SessionState {
 
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---
   // Open a new session epoch for a just-connected client; returns the epoch to wait on.
+  // r9 R3: the epoch whose session a directory capability admitted (0 = none). What a dispatcher may do
+  // on the strength of directory auth is decided against THIS and its own epoch -- never by the shared
+  // flag alone, which a newer session's admission sets while an older dispatcher is still running.
+  std::atomic<uint64_t> directoryAuthEpoch{0};
+
+  // An admitted Hello: a new epoch first (when it starts a session), then this session's standing, then
+  // the shared flag -- in that order, so a dispatcher of an earlier epoch can never see the newcomer's
+  // authorization as its own. `step` (tests only) is told after each write. Returns the session's epoch.
+  uint64_t AdmitHello(bool directoryAuth, bool startsSession, const std::function<void(const char*)>& step = {}) {
+    uint64_t e = epoch.load(std::memory_order_acquire);
+    if (startsSession) {
+      e = BeginEpoch();
+      if (step) step("epoch");
+    }
+    directoryAuthEpoch.store(directoryAuth ? e : 0, std::memory_order_release);
+    if (step) step("auth-epoch");
+    directoryAuthenticated.store(directoryAuth, std::memory_order_release);
+    if (step) step("auth");
+    return e;
+  }
+
+  // Directory-authenticated, for a dispatcher serving `servedEpoch` (and only if that is still the session).
+  bool DirectoryAuthenticatedFor(uint64_t servedEpoch) const {
+    return directoryAuthenticated.load(std::memory_order_acquire) &&
+           directoryAuthEpoch.load(std::memory_order_acquire) == servedEpoch &&
+           epoch.load(std::memory_order_acquire) == servedEpoch;
+  }
+
   uint64_t BeginEpoch() {
     SessionState& clientSession = *this;
     const uint64_t epoch = clientSession.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;

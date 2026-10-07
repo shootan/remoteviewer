@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "prelogin_logon_desktop.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -240,6 +241,16 @@ int startup_configure_from_env(HostContext& hx) {
   // desktop (REMOTE60_PRELOGIN_CAPTURE_ATTACH is read by the test build alone).
   capture.preloginAttachInputDesktop = args.preloginMode;
 #endif
+  // r9 W2: the --prelogin worker serves the logon desktop only. A test build's worker runs in a test user's
+  // session, which has no logon desktop: it may name the one it serves (GNLINK_STREAM_TEST_LOGON_DESKTOP).
+  if (args.preloginMode) {
+    capture.preloginServingDesktop = remote60::native_poc::prelogin::kLogonDesktopName;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+    if (const char* v = std::getenv("GNLINK_STREAM_TEST_LOGON_DESKTOP")) {
+      capture.preloginServingDesktop = std::wstring(v, v + std::strlen(v));
+    }
+#endif
+  }
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);

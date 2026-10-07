@@ -51,6 +51,7 @@
 
 #include "directory_client.hpp"
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_owner_floor.hpp"
 #include "prelogin_autostart.hpp"
 #include "secure_input_protocol.hpp"
 #include "host_app_log.hpp"
@@ -1615,7 +1616,9 @@ void sign_out(bool keepAccount) {
   apply_signed_in_ui(false);
   SetWindowTextW(g.passwordEdit, L"");
   if (!keepAccount) SetWindowTextW(g.accountEdit, L"");
-  set_status(L"Signed out.");
+  // r9 R1: the local sign-out is done; the machine's pre-login access is not yet known to be withdrawn --
+  // the withdrawal's answer replaces this (on_prelogin_reply).
+  set_status(L"로그아웃했습니다. 로그인 전 원격 접속 해제를 확인하는 중...");
 }
 
 // ---------------------------------------------------------------- window
@@ -1795,6 +1798,10 @@ void prelogin_worker_loop() {
         const pl::AdminReply now = prelogin_admin_call(q);
         if (now.status != pl::AdminStatus::Ok) {
           result->reply = now;
+        } else if (job.epoch != gPreloginOwnerEpoch.load()) {
+          // r9: the owner signed out while this waited for the Query -- whose answer may already be the
+          // floor of that sign-out's revoke. Not sent.
+          result->reply.status = pl::AdminStatus::Stale;
         } else {
           job.r.expectedFloor = now.ownerGeneration;
           result->reply = prelogin_admin_call(job.r);
@@ -1847,10 +1854,28 @@ void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool as
   prelogin_enqueue(std::move(job));
 }
 
+// r9 R1: the durable "pre-login access must be off" mark (prelogin_owner_floor.hpp), written BEFORE the
+// Disable is sent: from that moment the feature is off for the service and the worker, and the service
+// completes the revoke itself if this request fails, times out or dies with the window. A test build
+// writes its own key (it is not elevated, and must never touch the real one).
+#ifdef REMOTE60_HOST_TEST_SEAM
+const HKEY kRevokeMarkRoot = HKEY_CURRENT_USER;
+const wchar_t kRevokeMarkKey[] = L"Software\\GNLinkHostUiTest";
+#else
+const HKEY kRevokeMarkRoot = HKEY_LOCAL_MACHINE;
+const wchar_t kRevokeMarkKey[] = L"SOFTWARE\\GNLink";
+#endif
+std::atomic<bool> gPreloginRevokeMarked{false};
+
 void withdraw_prelogin_access(const char* why) {
   namespace pl = remote60::native_poc::prelogin;
-  // A new owner epoch first: an Enable of the old owner still in the queue is now never sent.
+  // A new owner epoch first: an Enable of the old owner still in the queue -- or waiting for its Query's
+  // answer -- is now never sent. THEN the mark (r9: in this order, so that an old-owner Enable whose Query
+  // ran after the mark cannot pass on the floor that revoke produced).
   const uint64_t epoch = gPreloginOwnerEpoch.fetch_add(1) + 1;
+  const bool marked = pl::WriteRevokePendingAt(kRevokeMarkRoot, kRevokeMarkKey, true);
+  gPreloginRevokeMarked.store(marked);
+  append_host_app_log(std::string("[host-app] prelogin revoke mark ") + (marked ? "set" : "NOT set (write failed)"));
   append_host_app_log(std::string("[host-app] prelogin access withdrawal requested on ") + why);
   PreloginJob job;
   job.r.op = pl::AdminOp::Disable;
@@ -1870,6 +1895,24 @@ void on_prelogin_reply(PreloginReplyResult* result) {
   }
   // An answer made for an owner who has since signed out says nothing about the window now.
   const bool current = owned->epoch == gPreloginOwnerEpoch.load();
+  if (owned->withdrawal) {
+    // r9 R1: signing out is not "done" until the machine's pre-login access is known to be withdrawn --
+    // and a withdrawal that did not finish is said, with what still holds.
+    const bool ok = owned->reply.status == pl::AdminStatus::Ok && !owned->reply.enabled;
+    std::wstring text;
+    if (ok) {
+      text = L"로그아웃했습니다. 로그인 전 원격 접속도 해제했습니다.";
+    } else if (gPreloginRevokeMarked.load()) {
+      text = L"로그아웃했습니다. 로그인 전 원격 접속은 막혔지만 해제를 아직 끝내지 못했습니다 (상태 " +
+             std::to_wstring(static_cast<int>(owned->reply.status)) + L", 오류 " + std::to_wstring(owned->reply.win32) +
+             L"). 보안 입력 서비스가 다시 시도합니다.";
+    } else {
+      text = L"로그아웃했습니다. 그러나 로그인 전 원격 접속을 해제하지 못했습니다 (상태 " +
+             std::to_wstring(static_cast<int>(owned->reply.status)) + L", 오류 " + std::to_wstring(owned->reply.win32) +
+             L"). GNLink Host 를 관리자로 다시 열어 로그아웃해 주세요.";
+    }
+    set_status(text.c_str());
+  }
   if (owned->asked && !owned->withdrawal) {
     append_host_app_log(std::string("[host-app] prelogin access ") + (owned->want ? "on" : "off") +
                         " requested: status=" + std::to_string(static_cast<int>(owned->reply.status)) +

@@ -146,6 +146,10 @@ struct CaptureState {
   // capture worker binds its thread to the input desktop (and the GDI worker is told the same), so the
   // pre-login secure desktop is captured. Default false keeps the post-login host unchanged.
   bool preloginAttachInputDesktop = false;
+  // r9 W2 (--prelogin only): the desktop the worker serves (prelogin_logon_desktop.hpp), and whether the
+  // input desktop is it right now (the desktop guard updates it; input is injected only while true).
+  std::wstring preloginServingDesktop;
+  std::atomic<bool> preloginDesktopServing{false};
   int framePoolBuffers = 0;
   // Current capture target as published to the control thread (window list / status replies).
   std::atomic<uint32_t> targetPid{0};

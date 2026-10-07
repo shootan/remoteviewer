@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_owner_floor.hpp"
 
 namespace pl = remote60::native_poc::prelogin;
 
@@ -95,6 +96,7 @@ struct World {
   // r7 H2: the order the service handled Enables (E) and Disables (D) in, and a stall: armed, the next
   // floor read waits until released -- the service is busy with that request, later ones queue at the pipe.
   std::string order;
+  bool failRaise = false;  // r9 R1: the service cannot raise its floor (the Disable fails)
   std::atomic<bool> stallArmed{false};
   std::atomic<bool> stalled{false};
   HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -112,7 +114,17 @@ struct World {
       *out = floor;
       return true;
     };
-    p.raiseFloor = [this](uint64_t f) { std::lock_guard<std::mutex> l(mu); ++calls; order += 'D'; if (f > floor) floor = f; return true; };
+    p.raiseFloor = [this](uint64_t f) {
+      std::lock_guard<std::mutex> l(mu);
+      ++calls;
+      order += 'D';
+      if (failRaise) return false;
+      if (f > floor) floor = f;
+      return true;
+    };
+    // r9 R1: the owed-revoke mark where the Host test build writes it (its own key, never the real one).
+    p.revokePending = [] { return pl::ReadRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest"); };
+    p.clearRevokePending = [] { return pl::WriteRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest", false); };
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       std::lock_guard<std::mutex> l(mu);
       ++calls;
@@ -130,6 +142,7 @@ struct World {
     p.removeRecord = [this](const std::wstring& path) -> uint32_t { std::lock_guard<std::mutex> l(mu); ++calls; files.erase(path); return 0; };
     p.allowedDirectoryUrl = allowedUrl;  // r6 V7: the fixture server the window signs in to
     p.featureEnabled = [this] {
+      if (pl::ReadRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest") != 0) return false;  // r9: as the service
       std::lock_guard<std::mutex> l(mu);
       ++calls;
       auto it = files.find(kPath);
@@ -317,11 +330,17 @@ struct Ui {
 constexpr int kIdPreloginAccess = 1025;
 constexpr int kIdPreloginStatus = 1027;
 constexpr int kIdSignOut = 1012;  // host_app_main.cpp ControlId::IdSignOut
+constexpr int kIdStatus = 1006;   // host_app_main.cpp ControlId::IdStatus (the window's status line)
 
 }  // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // r9 R1: --revoke-fails ends with a sign-out whose Disable FAILS at the service, instead of the H2 race.
+  bool revokeFails = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--revoke-fails") revokeFails = true;
+  }
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   wchar_t self[MAX_PATH] = {};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -477,6 +496,53 @@ int wmain() {
           std::to_string(world.calls - callsBefore));
     check("screenshot: refused", save_window_bmp(hwnd, (shots / L"prelogin_toggle_3_refused.bmp").wstring()));
 
+    if (revokeFails) {
+      // r9 R1: the sign-out's Disable fails at the service (its floor cannot be raised). Signing out must not
+      // look finished, the failure must be said, and access must not stay on: the Host's mark makes it off
+      // at once, and the service's next tick carries the revoke out once it can.
+      server.stop();
+      server.start(&world, pipe, [](void*) { return true; });
+      check("on once more (for the failing sign-out)", Ui::toggle(box));
+      const bool onAgain = wait_until([&] { std::lock_guard<std::mutex> l(world.mu); return world.files.count(kPath) == 1; }, 8000);
+      check("...the record is there", onAgain);
+      wait_until([&] { return Ui::name_of(status).find(L"켜짐") == 0; }, 5000);
+      {
+        std::lock_guard<std::mutex> l(world.mu);
+        world.failRaise = true;
+      }
+      IUIAutomationElement* signOut = ui.find_by_id(kIdSignOut);
+      check("R1: \"Sign out\" is pressed through UI Automation", signOut && Ui::invoke(signOut));
+      if (signOut) signOut->Release();
+      IUIAutomationElement* line = ui.find_by_id(kIdStatus);
+      std::wstring said;
+      const bool told = wait_until([&] {
+        said = line ? Ui::name_of(line) : std::wstring();
+        return said.find(L"끝내지 못했습니다") != std::wstring::npos;
+      }, 10000);
+      check("R1: the window does NOT say the sign-out is done: it says the withdrawal has not finished", told &&
+                said.find(L"Signed out.") == std::wstring::npos, narrow(said));
+      check("screenshot: the withdrawal not finished", save_window_bmp(hwnd, (shots / L"prelogin_toggle_5_revoke_failed.bmp").wstring()));
+      pl::AdminPrimitives tick = world.primitives();
+      {
+        std::lock_guard<std::mutex> l(world.mu);
+        check("R1: the record is still there (the Disable failed) ...", world.files.count(kPath) == 1);
+      }
+      check("...but the mark is down, so the service already says OFF",
+            pl::ReadRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest") == 1 && !tick.featureEnabled());
+      {
+        std::lock_guard<std::mutex> l(world.mu);
+        world.failRaise = false;
+      }
+      const pl::AdminReply owed = pl::CompletePendingRevoke(tick);  // the service's next reconcile tick
+      {
+        std::lock_guard<std::mutex> l(world.mu);
+        check("R1: the service's next tick carries the revoke out: record gone, mark cleared",
+              owed.status == pl::AdminStatus::Ok && world.files.empty() &&
+                  pl::ReadRevokePendingAt(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest") == 0,
+              std::to_string(static_cast<int>(owed.status)));
+      }
+      if (line) line->Release();
+    } else {
     // r5 G6 + r7 H2: signing out of GNLink withdraws the machine's pre-login access -- also when the user
     // had just asked for it and that request has not reached the service yet. The service is kept busy
     // (another client's request stalls in it), "on" is clicked, then "Sign out": both wait at the pipe.
@@ -529,6 +595,7 @@ int wmain() {
       check("G6: ...the floor raised past what was there, the start type put back",
             world.floor > floorBefore && world.startType == 3, std::to_string(world.floor));
     }
+    }  // !revokeFails
   }
   if (box) box->Release();
   if (status) status->Release();

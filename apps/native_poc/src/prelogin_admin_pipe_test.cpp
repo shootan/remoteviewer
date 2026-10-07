@@ -36,6 +36,9 @@ struct World {
   bool failRemember = false;   // r5 G6
   bool failFloor = false;       // r6 G6: the floor cannot be read
   uint32_t failWrite = 0;
+  bool failRaise = false;     // r9: the floor cannot be raised
+  bool markBound = false;     // r9 R1: the owed-revoke mark (unbound in the older cases)
+  int mark = 0;
   int osReboots = 0;          // r2: the OS seam
   uint32_t osRebootResult = 0;
   int readies = 0;
@@ -53,7 +56,16 @@ struct World {
       *out = floor;
       return !failFloor;
     };
-    p.raiseFloor = [this](uint64_t f) { ++calls; if (f > floor) floor = f; return true; };
+    p.raiseFloor = [this](uint64_t f) {
+      ++calls;
+      if (failRaise) return false;
+      if (f > floor) floor = f;
+      return true;
+    };
+    if (markBound) {
+      p.revokePending = [this] { return mark; };
+      p.clearRevokePending = [this] { mark = 0; return true; };
+    }
     p.readRecord = [this](const std::wstring& path, pl::MachineRecord* out) {
       ++calls;
       auto it = files.find(path);
@@ -70,6 +82,7 @@ struct World {
     p.removeRecord = [this](const std::wstring& path) -> uint32_t { ++calls; files.erase(path); return 0; };
     p.featureEnabled = [this] {
       ++calls;
+      if (markBound && mark != 0) return false;  // r9: the service reads the mark first
       auto it = files.find(L"C:\\ProgramData\\GNLink\\credential\\machine.cred");
       if (it == files.end()) return false;
       pl::BindingContext ctx;
@@ -264,6 +277,48 @@ int main() {
     pl::AdminRequest rtBack;
     check("...the expected floor round-trips in the Enable request",
           pl::DecodeAdminRequest(pl::EncodeAdminRequest(rt), &rtBack) && rtBack.expectedFloor == 42);
+  }
+  {
+    // r9 R1: a sign-out's Disable that never finished. The Host put the mark down first; the next request
+    // (here the Host's own Query, as before an Enable) carries the revoke out before it answers.
+    World w;
+    w.markBound = true;
+    pl::AdminPrimitives p = w.primitives();
+    pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
+    const uint64_t recGen = w.files.begin()->second.ownerGeneration;
+    w.mark = 1;  // the sign-out's mark; its Disable is lost
+    check("R1: with the mark down the feature is off at once, before any revoke ran", !p.featureEnabled() && w.files.size() == 1);
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply qr = pl::HandleAdminRequest(pl::EncodeAdminRequest(q), true, p);
+    check("R1: the next request carries the owed revoke out first: record gone, floor past it, mark cleared",
+          w.files.empty() && w.floor > recGen && w.mark == 0, std::to_string(w.floor));
+    check("...and the Query reports the floor after it, off", qr.status == pl::AdminStatus::Ok && !qr.enabled &&
+                                                                  qr.ownerGeneration == w.floor);
+    const pl::AdminReply again = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(qr.ownerGeneration)), true, p);
+    check("...a new owner who read that floor may turn it on again", again.status == pl::AdminStatus::Ok && again.enabled);
+
+    World f;
+    f.markBound = true;
+    pl::AdminPrimitives fp = f.primitives();
+    pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, fp);
+    f.mark = 1;
+    f.failRaise = true;
+    const pl::AdminReply owed = pl::CompletePendingRevoke(fp);
+    check("R1: the owed revoke fails (the floor cannot be raised): Failed, the mark STAYS, the feature stays off",
+          owed.status == pl::AdminStatus::Failed && f.mark == 1 && !fp.featureEnabled());
+    const pl::AdminReply on = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request(f.floor)), true, fp);
+    check("...and nothing can be turned on above a revoke still owed (the Enable is refused, nothing written over it)",
+          on.status == pl::AdminStatus::Failed && f.mark == 1 && !fp.featureEnabled());
+    f.failRaise = false;
+    check("...once it can be carried out, it is (the service's next tick), and the mark goes",
+          pl::CompletePendingRevoke(fp).status == pl::AdminStatus::Ok && f.mark == 0 && f.files.empty());
+    World n;
+    n.markBound = true;
+    pl::AdminPrimitives np = n.primitives();
+    const int before = n.calls;
+    check("nothing owed: the tick touches nothing", pl::CompletePendingRevoke(np).status == pl::AdminStatus::Ok &&
+                                                        n.calls == before);
   }
   {
     World w;

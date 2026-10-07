@@ -146,6 +146,16 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   // shared stream state, so a session that ends after its successor has started cannot turn the
   // successor's stream off. (Ledger H-28.)
   const uint64_t servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
+  // r7 H4 + r9 R3: what directory auth allows on THIS link -- the link's own standing (TCP: none), and the
+  // admission of exactly this epoch (SessionState::AdmitHello), never the shared flag a newer session's
+  // Hello sets while this dispatcher still serves the old one.
+  // r9 W2: a --prelogin worker injects only while the input desktop is the logon desktop it serves.
+  auto prelogin_not_serving = [&]() {
+    return args.preloginMode && !capture.preloginDesktopServing.load(std::memory_order_acquire);
+  };
+  auto link_directory_authenticated = [&]() {
+    return linkDirectoryAuthenticated && clientSession.DirectoryAuthenticatedFor(servedEpoch);
+  };
 #ifdef REMOTE60_STREAM_TEST_SEAM
   // TEST BUILD ONLY (r7 H6): the first pong of this conversation is answered late
   // (GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS, at most 5 s) so a test can type while the viewer does not
@@ -651,10 +661,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // borrow a current auth. (The full per-link auth flag threaded from ingress, and closing the direct
       // TCP/LAN listener in prelogin, are the remaining S3 depth.)
       // r7 H4: and THIS link must be the authenticated one -- a separate TCP link borrows nothing.
-      auto reboot_authorized = [&]() {
-        return linkDirectoryAuthenticated && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
-               clientSession.epoch.load(std::memory_order_acquire) == servedEpoch;
-      };
+      auto reboot_authorized = [&]() { return link_directory_authenticated(); };
       const bool authorized = reboot_authorized();
       uint32_t win32 = 0;
       remote60::native_poc::RebootResult result = remote60::native_poc::RebootResult::NotAuthorized;
@@ -793,7 +800,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled && !preloginBlockedKey) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !prelogin_not_serving()) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -817,7 +824,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           inputRouter.secureAttempts.fetch_add(1, std::memory_order_relaxed);
           if (!desktopMode) {
             inputRouter.secureSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
-          } else if (!clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
+          } else if (!link_directory_authenticated()) {
             // A plain-LAN session has no capability token, and the agent will not act without
             // one. Nothing about the click is wrong; it simply cannot be authorised.
             inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
@@ -890,7 +897,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
               inputRouter.freshProbeSecure.fetch_add(1, std::memory_order_relaxed);
               // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
               if (desktopMode &&
-                  clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
+                  link_directory_authenticated() &&
                   secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                 injectResult = InputInjectResult::Injected;
                 resolvedTarget = " secure-system-agent(reprobe)";
@@ -918,8 +925,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
                   directFailStage == InputFailStage::SetCursorPos ||
                   directFailStage == InputFailStage::SendInputMouse ||
                   directFailStage == InputFailStage::SendInputKey;
-              if (brokerRetryableStage && desktopMode &&
-                  clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
+              if (brokerRetryableStage && desktopMode && link_directory_authenticated()) {
                 inputRouter.defaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
                 if (secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                   // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
@@ -1039,8 +1045,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
         InputInjectResult injectResult = InputInjectResult::Failed;
-        if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
-            !interactive_desktop_is_default() &&
+        if (desktopMode && link_directory_authenticated() && !interactive_desktop_is_default() &&
             secure_dispatch_text(capture, inputRouter, text,
                                  inputRouter.domainW.load(std::memory_order_acquire),
                                  inputRouter.domainH.load(std::memory_order_acquire)).sent) {

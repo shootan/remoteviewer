@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -175,6 +176,16 @@ struct AdminPrimitives {
   // r2: the ONE fixed local restart (0 = the OS accepted it, else win32), and where a ready goes.
   std::function<uint32_t()> requestOsReboot;
   std::function<void(uint32_t session, uint64_t processStartTime, const std::string& nonce)> noteUserHostReady;
+  // r9 R1/R2: the durable "pre-login access must be OFF" mark (HKLM\SOFTWARE\GNLink\PreloginRevokePending).
+  // The Host sets it before a sign-out's Disable, uninstall before anything else. While it is there the
+  // feature is off (the service's featureEnabled and the worker's adoption read it), and the next request
+  // or reconcile tick of the service completes the revoke and only then clears it -- so a Disable that
+  // failed, timed out or never arrived cannot leave access on. 1 = set, 0 = not, -1 = unreadable (as set).
+  // Unbound: never pending.
+  std::function<int()> revokePending;
+  std::function<bool()> clearRevokePending;
+  // r9 R2: one writer per process -- the admin server's requests and the reconcile's revoke both take it.
+  std::shared_ptr<std::mutex> transaction;
 };
 
 // The one decision per request (pure over the primitives and the ledger).
@@ -187,13 +198,23 @@ inline AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, bool c
   return HandleAdminRequest(request, who, p, nullptr);
 }
 
-// r6 V4: what removing GNLink does to pre-login access -- exactly what turning it off does (Disable):
-// the floor rises past the record, the record and the remembered start type go. The floor stays.
-inline AdminReply WithdrawPreloginAccessForUninstall(const AdminPrimitives& p) {
-  AdminRequest off;
-  off.op = AdminOp::Disable;
-  return HandleAdminRequest(EncodeAdminRequest(off), true, p);
-}
+// r9 R1: a pending revoke (the mark) carried out now: the floor rises, the record goes, and the mark is
+// cleared only when that worked. Ok when nothing was pending. The service calls it every reconcile tick.
+AdminReply CompletePendingRevoke(const AdminPrimitives& p);
+
+// r9 R2: what removing GNLink does to pre-login access, as one writer. `markPending` first (durable: a
+// revoke that does not finish here is finished by any later service start), then `stopService` (the live
+// service and its admin server stop before this process writes: no Enable can be between its floor check
+// and its record publish), then the Disable decision. Succeeds only when access is really gone: the
+// record absent and the feature off. The floor stays (r8 V4). Failure keeps the mark.
+struct UninstallRevokeResult {
+  bool revoked = false;  // the postcondition held
+  bool marked = false;
+  bool serviceStopped = false;
+  AdminReply reply;      // the Disable's answer (a start-type failure alone does not fail the uninstall)
+};
+UninstallRevokeResult RevokeForUninstall(const AdminPrimitives& p, const std::function<bool()>& markPending,
+                                         const std::function<bool()>& stopService);
 
 // FNV-1a 64 of an id string, never 0 -- the record's numeric accountId / hostId (the strings travel in
 // the packed credential, which is what the --prelogin worker uses).

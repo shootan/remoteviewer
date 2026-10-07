@@ -170,8 +170,98 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
   return true;
 }
 
+namespace {
+
+// Disable: the floor first (an old blob can never come back), then the record, then the start type.
+AdminReply disable_now(const AdminPrimitives& p) {
+  AdminReply reply;
+  const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
+  MachineRecord old;
+  const bool had = !path.empty() && p.readRecord && p.readRecord(path, &old);
+  uint64_t floor = 0;
+  const bool floorKnown = p.readFloor && p.readFloor(&floor);
+  const uint64_t gen = (std::max)(had ? old.ownerGeneration : 0ull, floorKnown ? floor : 0ull) + 1;
+  if (!p.raiseFloor || !p.raiseFloor(gen)) {
+    reply.status = AdminStatus::Failed;
+    reply.enabled = p.featureEnabled && p.featureEnabled();
+    return reply;
+  }
+  const uint32_t rm = path.empty() || !p.removeRecord ? 0 : p.removeRecord(path);
+  uint32_t original = kStartDemand;
+  const bool haveOriginal = p.loadRememberedStartType && p.loadRememberedStartType(&original);
+  const uint32_t s = p.setStartType ? p.setStartType(haveOriginal ? original : kStartDemand) : 0;
+  if (s == 0 && haveOriginal && p.forgetRememberedStartType) p.forgetRememberedStartType();
+  // An unreadable floor: the record is still removed and the floor raised past it, but say Failed.
+  reply.status = (rm == 0 && s == 0 && floorKnown) ? AdminStatus::Ok : AdminStatus::Failed;
+  reply.win32 = rm != 0 ? rm : s != 0 ? s : floorKnown ? 0 : ERROR_READ_FAULT;
+  reply.enabled = p.featureEnabled && p.featureEnabled();
+  reply.ownerGeneration = gen;
+  return reply;
+}
+
+bool revoke_pending(const AdminPrimitives& p) { return p.revokePending && p.revokePending() != 0; }
+
+// Under the transaction: the pending revoke, if any, carried out; the mark cleared only on success.
+AdminReply complete_pending_revoke_locked(const AdminPrimitives& p) {
+  AdminReply reply;
+  reply.status = AdminStatus::Ok;
+  if (!revoke_pending(p)) return reply;
+  reply = disable_now(p);
+  if (reply.status == AdminStatus::Ok && p.clearRevokePending && !p.clearRevokePending()) {
+    reply.status = AdminStatus::Failed;
+    reply.win32 = ERROR_CANTWRITE;
+  }
+  return reply;
+}
+
+AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, const ClientFacts& who,
+                                       const AdminPrimitives& p, RebootLedger* ledger);
+
+}  // namespace
+
+AdminReply CompletePendingRevoke(const AdminPrimitives& p) {
+  std::unique_lock<std::mutex> lock;
+  if (p.transaction) lock = std::unique_lock<std::mutex>(*p.transaction);
+  return complete_pending_revoke_locked(p);
+}
+
+UninstallRevokeResult RevokeForUninstall(const AdminPrimitives& p, const std::function<bool()>& markPending,
+                                         const std::function<bool()>& stopService) {
+  UninstallRevokeResult out;
+  out.marked = markPending && markPending();
+  out.serviceStopped = stopService && stopService();
+  if (!out.serviceStopped) {
+    // Two writers would race (the live service's Enable between its floor check and its publish). The
+    // mark is down: the service finishes the revoke itself on its next tick or start.
+    out.reply.status = AdminStatus::Unavailable;
+    return out;
+  }
+  {
+    std::unique_lock<std::mutex> lock;
+    if (p.transaction) lock = std::unique_lock<std::mutex>(*p.transaction);
+    out.reply = disable_now(p);
+  }
+  // The postcondition, not the reply: the start type cannot always be put back while the service is being
+  // removed, and that is not access left on.
+  const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
+  MachineRecord left;
+  const bool recordLeft = !path.empty() && p.readRecord && p.readRecord(path, &left);
+  out.revoked = !recordLeft && !(p.featureEnabled && p.featureEnabled());
+  if (out.revoked && p.clearRevokePending) (void)p.clearRevokePending();
+  return out;
+}
+
 AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientFacts& who, const AdminPrimitives& p,
                               RebootLedger* ledger) {
+  std::unique_lock<std::mutex> lock;
+  if (p.transaction) lock = std::unique_lock<std::mutex>(*p.transaction);
+  return handle_admin_request_locked(request, who, p, ledger);
+}
+
+namespace {
+
+AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, const ClientFacts& who,
+                                       const AdminPrimitives& p, RebootLedger* ledger) {
   AdminReply reply;
   if (!who.elevatedAdmin) {  // nothing about the request is read for a client that may not ask
     reply.status = AdminStatus::Refused;
@@ -228,6 +318,15 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
     ledger->answered.emplace_back(key, reply);
     if (ledger->answered.size() > 32) ledger->answered.erase(ledger->answered.begin());
     return reply;
+  }
+  // r9 R1: a revoke that is still owed is carried out before anything is answered or decided -- a Query
+  // reports the floor after it, an Enable is decided against it (and may then be Stale), a Disable is it.
+  if (revoke_pending(p)) {
+    const AdminReply owed = complete_pending_revoke_locked(p);
+    if (r.op == AdminOp::Disable) return owed;
+    if (owed.status != AdminStatus::Ok && r.op == AdminOp::Enable) {
+      return owed;  // still owed: nothing may be turned on above it
+    }
   }
   if (r.op == AdminOp::Query) {
     reply.status = AdminStatus::Ok;
@@ -320,24 +419,14 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
     reply.ownerGeneration = gen;
     return reply;
   }
-  // Disable: the floor first (an old blob can never come back), then the record, then the start type.
-  if (!p.raiseFloor(gen)) {
-    reply.status = AdminStatus::Failed;
-    reply.enabled = p.featureEnabled();
-    return reply;
-  }
-  const uint32_t rm = path.empty() ? 0 : p.removeRecord(path);
-  uint32_t original = kStartDemand;
-  const bool haveOriginal = p.loadRememberedStartType(&original);
-  const uint32_t s = p.setStartType(haveOriginal ? original : kStartDemand);
-  if (s == 0 && haveOriginal) p.forgetRememberedStartType();
-  // An unreadable floor: the record is still removed and the floor raised past it, but say Failed.
-  reply.status = (rm == 0 && s == 0 && floorKnown) ? AdminStatus::Ok : AdminStatus::Failed;
-  reply.win32 = rm != 0 ? rm : s != 0 ? s : floorKnown ? 0 : ERROR_READ_FAULT;
-  reply.enabled = p.featureEnabled();
-  reply.ownerGeneration = gen;
+  // Disable (r9: the one definition, disable_now -- the reconcile's owed revoke and uninstall use it too).
+  (void)gen;
+  reply = disable_now(p);
+  if (reply.status == AdminStatus::Ok && revoke_pending(p) && p.clearRevokePending) (void)p.clearRevokePending();
   return reply;
 }
+
+}  // namespace
 
 #ifdef _WIN32
 

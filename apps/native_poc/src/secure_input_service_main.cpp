@@ -2,6 +2,7 @@
 #include <bcrypt.h>
 #include <sddl.h>
 #include <userenv.h>
+#include <tlhelp32.h>
 #include <wtsapi32.h>
 #pragma comment(lib, "Wtsapi32.lib")
 #pragma comment(lib, "Userenv.lib")
@@ -29,6 +30,7 @@
 // Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
 #include "prelogin_child_launch.hpp"
 #include "prelogin_user_host_launch.hpp"
+#include "prelogin_user_host_policy.hpp"
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -913,6 +915,8 @@ bool raise_prelogin_owner_floor(uint64_t floor) {
 // revoke floor comes from the durable external store, NOT the record itself, so an OFF/revoked state and
 // a restored old blob are both rejected. Returns false (feature off) on any failure -- never fails open.
 bool prelogin_feature_enabled() {
+  // r9 R1/R2: a revoke still owed (or a mark that cannot be read) means off, whatever the record says.
+  if (remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0) return false;
   const std::wstring path = machine_record_path();
   if (path.empty()) return false;
   MachineRecord rec;
@@ -939,6 +943,14 @@ void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitiv
   p->readFloor = [](uint64_t* out) { return ReadPreloginOwnerFloor(out); };  // r6 G6: fallible
   p->raiseFloor = raise_prelogin_owner_floor;
   p->featureEnabled = prelogin_feature_enabled;
+  // r9 R1/R2: the owed-revoke mark, and one writer in this process (admin server + reconcile).
+  p->revokePending = [] { return remote60::native_poc::prelogin::ReadPreloginRevokePending(); };
+  p->clearRevokePending = [] {
+    return remote60::native_poc::prelogin::WriteRevokePendingAt(HKEY_LOCAL_MACHINE,
+                                                                remote60::native_poc::prelogin::kOwnerFloorKey, false);
+  };
+  static const std::shared_ptr<std::mutex> transaction = std::make_shared<std::mutex>();
+  p->transaction = transaction;
   // r6 V7: the only server a record may name -- the product's.
   p->allowedDirectoryUrl = remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl();
 }
@@ -1143,6 +1155,95 @@ void launch_user_host(DWORD consoleSession) {
   CloseHandle(userToken);
 }
 
+// r9 R4/W1: the user's Host after logon -- started by this service, or the one the user already runs
+// (adopted: watched, never stopped by the service). prelogin_user_host_policy.hpp decides.
+remote60::native_poc::prelogin::UserHostLaunchPolicy gUserHostPolicy;
+HANDLE gAdoptedHost = nullptr;
+
+// This logon's identity: the console session and its logon time (a lock/unlock is the same logon).
+uint64_t console_logon_key(DWORD session) {
+  WTSINFOW* info = nullptr;
+  DWORD bytes = 0;
+  uint64_t logonTime = 0;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSSessionInfo, reinterpret_cast<LPWSTR*>(&info),
+                                  &bytes) &&
+      info) {
+    logonTime = static_cast<uint64_t>(info->LogonTime.QuadPart);
+    WTSFreeMemory(info);
+  }
+  return (logonTime << 8) ^ session;
+}
+
+// A GNLinkHost of THIS install running in `session` (its image is this install's GNLinkHost.exe): its pid.
+DWORD find_user_host_in_session(DWORD session) {
+  const std::wstring image = sibling_exe_path(L"GNLinkHost.exe");
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return 0;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  DWORD found = 0;
+  for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe)) {
+    if (_wcsicmp(pe.szExeFile, L"GNLinkHost.exe") != 0) continue;
+    DWORD sid = 0xFFFFFFFFu;
+    if (!ProcessIdToSessionId(pe.th32ProcessID, &sid) || sid != session) continue;
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+    if (!p) continue;
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD n = MAX_PATH * 2;
+    if (QueryFullProcessImageNameW(p, 0, path, &n) && _wcsicmp(path, image.c_str()) == 0) found = pe.th32ProcessID;
+    CloseHandle(p);
+  }
+  CloseHandle(snap);
+  return found;
+}
+
+// One tick of the user-Host side of the handoff.
+void reconcile_user_host(DWORD console) {
+  using remote60::native_poc::prelogin::UserHostDecision;
+  remote60::native_poc::prelogin::UserHostObservation o;
+  o.logon = console_logon_key(console);
+  o.nowMs = GetTickCount64();
+  HANDLE* watched = gUserHostProcess ? &gUserHostProcess : (gAdoptedHost ? &gAdoptedHost : nullptr);
+  if (watched) {
+    if (WaitForSingleObject(*watched, 0) == WAIT_OBJECT_0) {
+      DWORD code = 0;
+      GetExitCodeProcess(*watched, &code);
+      o.watchedExited = true;
+      o.watchedExitCode = code;
+      diag("prelogin: user host %s ended exit=%lu", watched == &gAdoptedHost ? "(adopted)" : "(started)",
+           static_cast<unsigned long>(code));
+      CloseHandle(*watched);
+      *watched = nullptr;
+    } else {
+      o.watchedAlive = true;
+    }
+  }
+  DWORD otherPid = 0;
+  if (!o.watchedAlive) {
+    otherPid = find_user_host_in_session(console);
+    o.otherRunning = otherPid != 0;
+  }
+  switch (gUserHostPolicy.Decide(o)) {
+    case UserHostDecision::Adopt:
+      gAdoptedHost = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, otherPid);
+      diag("prelogin: the user's GNLinkHost is already running (pid %lu): adopted, none started",
+           static_cast<unsigned long>(otherPid));
+      break;
+    case UserHostDecision::Launch:
+      launch_user_host(console);
+      if (!gUserHostProcess) gUserHostPolicy.OnLaunchFailed(GetTickCount64());
+      break;
+    case UserHostDecision::None:
+      break;
+  }
+}
+
+// r9 W2: once a user is logged on, the SYSTEM pre-login worker may stay only for the logon transition (it
+// stops itself the moment the input desktop is the user's -- host_startup_config's desktop guard); if the
+// handoff has not completed within this, it is stopped here regardless.
+constexpr uint64_t kWorkerAfterLogonMs = 30000;
+uint64_t gLogonSeenMs = 0;
+
 // Observe the console for ONE reconcile tick. `consoleOut` returns the exact console session this
 // observation was taken against, so the reconcile uses the SAME session for any launch (Codex S5: do not
 // re-query WTSGetActiveConsoleSessionId and risk launching on a different session). Feature-enabled is
@@ -1181,7 +1282,20 @@ SupervisorObservation observe_console(DWORD* consoleOut, bool consoleChanged) {
 void prelogin_reconcile_loop() {
   PreloginSupervisor sup;
   uint32_t lastTopoGen = gSessionTopologyGeneration.load(std::memory_order_acquire);
+  // r9 R1/R2: a revoke owed by a sign-out or an uninstall is carried out here (first thing after a start,
+  // then every tick until it worked) -- under the same writer lock as the admin server.
+  remote60::native_poc::prelogin::AdminPrimitives revokePrimitives;
+  bind_service_admin_primitives(&revokePrimitives);
+  int lastRevokeStatus = -1;
   while (gRunning.load(std::memory_order_acquire)) {
+    if (remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0) {
+      const auto owed = remote60::native_poc::prelogin::CompletePendingRevoke(revokePrimitives);
+      if (static_cast<int>(owed.status) != lastRevokeStatus) {
+        diag("prelogin: owed revoke -> status=%d win32=%lu", static_cast<int>(owed.status),
+             static_cast<unsigned long>(owed.win32));
+        lastRevokeStatus = static_cast<int>(owed.status);
+      }
+    }
     // Track the monotonic topology generation as OUR own last-seen (Codex S5): a session change bumps
     // it, and we react once, without racing ensure_agent for the pending flag.
     const uint32_t topoGen = gSessionTopologyGeneration.load(std::memory_order_acquire);
@@ -1193,13 +1307,26 @@ void prelogin_reconcile_loop() {
     switch (out.action) {
       case SupervisorAction::RunPreloginWorker:
         stop_child(&gUserHostProcess);
+        if (gAdoptedHost) {  // the user's own Host: only no longer watched (the session it ran in is gone)
+          CloseHandle(gAdoptedHost);
+          gAdoptedHost = nullptr;
+        }
+        gLogonSeenMs = 0;
         if (obs.consoleSessionValid) ensure_prelogin_worker(console);
         break;
       case SupervisorAction::StartUserHostFull:
       case SupervisorAction::StartUserHostLinkedFull:
       case SupervisorAction::StartUserHostDefault:
-        // Keep the prelogin worker up until the handoff completes; begin/continue the user host.
-        if (obs.consoleSessionValid) launch_user_host(console);
+        // r9 R4/W1: start the user's Host only as the policy says (adopt one already running, never one the
+        // user closed, a crashed one with backoff) -- not on every tick until a ready.
+        if (obs.consoleSessionValid) reconcile_user_host(console);
+        // r9 W2: the pre-login worker serves the logon transition only, bounded.
+        if (gLogonSeenMs == 0) gLogonSeenMs = GetTickCount64();
+        if (gPreloginWorker && GetTickCount64() - gLogonSeenMs >= kWorkerAfterLogonMs) {
+          diag("prelogin: logged on %llus without a handoff: the pre-login worker is stopped",
+               static_cast<unsigned long long>(kWorkerAfterLogonMs / 1000));
+          stop_child(&gPreloginWorker);
+        }
         break;
       case SupervisorAction::None:
         if (out.handoff == HandoffAction::CompleteHandoff) stop_child(&gPreloginWorker);
@@ -1631,48 +1758,61 @@ int install_service(bool preloginEnabled) {
   return 0;
 }
 
-int uninstall_service() {
-  // r6 V4: removing GNLink withdraws pre-login access exactly as turning it off does (the same decision,
-  // HandleAdminRequest Disable): the floor rises past the record, the record goes, the remembered start
-  // type goes. The floor itself stays -- it is what keeps a restored copy of the old record revoked if
-  // GNLink is installed again. Done before the service is deleted, while its primitives still apply.
-  {
-    remote60::native_poc::prelogin::AdminPrimitives p;
-    bind_service_admin_primitives(&p);
-    const auto reply = remote60::native_poc::prelogin::WithdrawPreloginAccessForUninstall(p);
-    diag("uninstall: pre-login access withdrawn status=%d win32=%lu", static_cast<int>(reply.status),
-         static_cast<unsigned long>(reply.win32));
+// The service stopped (or absent): true once the SCM says STOPPED within ~10 s.
+bool stop_service_and_wait(SC_HANDLE service) {
+  if (!service) return true;  // not installed: nothing runs that could write
+  SERVICE_STATUS status{};
+  (void)ControlService(service, SERVICE_CONTROL_STOP, &status);
+  for (int i = 0; i < 100; ++i) {
+    SERVICE_STATUS_PROCESS live{};
+    DWORD bytes = 0;
+    if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&live), sizeof(live), &bytes)) {
+      return false;
+    }
+    if (live.dwCurrentState == SERVICE_STOPPED) return true;
+    Sleep(100);
   }
+  return false;
+}
+
+int uninstall_service() {
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) return static_cast<int>(GetLastError());
-  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName,
-                                   SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
-  if (!service) {
-    const DWORD err = GetLastError();
+  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
+  const DWORD openErr = service ? ERROR_SUCCESS : GetLastError();
+  if (!service && openErr != ERROR_SERVICE_DOES_NOT_EXIST) {
     CloseServiceHandle(manager);
-    // Already absent is the desired end state, not a failure.
-    return err == ERROR_SERVICE_DOES_NOT_EXIST ? 0 : static_cast<int>(err);
+    return static_cast<int>(openErr);
   }
-  SERVICE_STATUS status{};
-  if (ControlService(service, SERVICE_CONTROL_STOP, &status)) {
-    // The SCM refuses DeleteService while the service is still running.
-    for (int i = 0; i < 50; ++i) {
-      SERVICE_STATUS_PROCESS live{};
-      DWORD bytes = 0;
-      if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
-                                reinterpret_cast<BYTE*>(&live), sizeof(live), &bytes)) {
-        break;
-      }
-      if (live.dwCurrentState == SERVICE_STOPPED) break;
-      Sleep(100);
-    }
+  // r6 V4 + r9 R2: removing GNLink withdraws pre-login access as turning it off does, as ONE writer: the mark
+  // first (durable -- whatever happens next, any later service start finishes the revoke before it serves),
+  // then the service stops (its admin server with it: no Enable between its floor check and its publish),
+  // then the Disable decision here. The floor stays (r8 V4). Success only if the record is really gone.
+  remote60::native_poc::prelogin::AdminPrimitives p;
+  bind_service_admin_primitives(&p);
+  const auto revoke = remote60::native_poc::prelogin::RevokeForUninstall(
+      p,
+      [] {
+        return remote60::native_poc::prelogin::WriteRevokePendingAt(HKEY_LOCAL_MACHINE,
+                                                                    remote60::native_poc::prelogin::kOwnerFloorKey, true);
+      },
+      [service] { return stop_service_and_wait(service); });
+  diag("uninstall: pre-login access revoked=%d marked=%d stopped=%d status=%d win32=%lu", revoke.revoked ? 1 : 0,
+       revoke.marked ? 1 : 0, revoke.serviceStopped ? 1 : 0, static_cast<int>(revoke.reply.status),
+       static_cast<unsigned long>(revoke.reply.win32));
+  DWORD err = ERROR_SUCCESS;
+  if (service) {
+    const BOOL deleted = DeleteService(service);
+    err = deleted ? ERROR_SUCCESS : GetLastError();
+    CloseServiceHandle(service);
+    // Marked-for-delete means it disappears once the last handle closes, which just happened.
+    if (!deleted && err == ERROR_SERVICE_MARKED_FOR_DELETE) err = ERROR_SUCCESS;
   }
-  const BOOL deleted = DeleteService(service);
-  const DWORD err = deleted ? ERROR_SUCCESS : GetLastError();
-  CloseServiceHandle(service);
   CloseServiceHandle(manager);
-  // Marked-for-delete means it disappears once the last handle closes, which just happened.
-  if (!deleted && err != ERROR_SERVICE_MARKED_FOR_DELETE) return static_cast<int>(err);
+  if (err != ERROR_SUCCESS) return static_cast<int>(err);
+  // Not a success while access may remain: the mark stays down (a reinstall's service revokes first) and
+  // the caller is told.
+  if (!revoke.revoked) return static_cast<int>(revoke.reply.win32 != 0 ? revoke.reply.win32 : ERROR_ACCESS_DENIED);
   return 0;
 }
 

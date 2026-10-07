@@ -37,6 +37,10 @@ struct DxgiDesktopCaptureConfig {
   // than by the caller thread in Start(), so the attach always precedes duplication. Default false keeps
   // the post-login host byte-identical.
   bool attachToInputDesktop = false;
+  // prelogin-ui r9 W2: with attachToInputDesktop, the ONLY desktop this worker may bind to (the logon
+  // desktop for the SYSTEM pre-login worker). Another input desktop -- a logged-on user's -- is refused:
+  // its pixels are never duplicated. Empty: any (the capture-attach test path).
+  std::wstring requiredInputDesktop;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
 };
 

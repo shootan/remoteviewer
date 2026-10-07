@@ -105,17 +105,28 @@ int main() {
     check("one that ran a while (>= 15 s) starts the wait over (1 s)", b.OnExit(t, t + 20000) == 1000);
     check("a start that failed outright counts as a quick death", b.OnLaunchFailed(t) == 2000);
   }
-  {
-    // V4: uninstall = off. In-memory primitives standing in for the store, the floor and the SCM.
+  // V4 + r9 R2: uninstall = off, as one writer. In-memory primitives standing in for the store, the
+  // floor, the SCM and the mark; `log` records the order things happened in.
+  auto uninstall_case = [&](bool floorWorks, bool stopWorks, const char* title) {
+    std::printf("\n--- uninstall: %s ---\n", title);
     std::map<std::wstring, pl::MachineRecord> files;
     uint64_t floor = 3;
     uint32_t startType = 2;
     bool remembered = true;
+    bool mark = false;
+    std::string log;
     pl::AdminPrimitives p;
     p.recordPath = [] { return std::wstring(L"rec"); };
     p.machineId = [] { return std::string("m"); };
     p.readFloor = [&](uint64_t* out) { *out = floor; return true; };
-    p.raiseFloor = [&](uint64_t f) { if (f > floor) floor = f; return true; };
+    p.raiseFloor = [&](uint64_t f) {
+      log += "floor ";
+      if (!floorWorks) return false;
+      if (f > floor) floor = f;
+      return true;
+    };
+    p.revokePending = [&] { return mark ? 1 : 0; };
+    p.clearRevokePending = [&] { mark = false; return true; };
     p.readRecord = [&](const std::wstring& path, pl::MachineRecord* out) {
       auto it = files.find(path);
       if (it == files.end()) return false;
@@ -124,7 +135,7 @@ int main() {
     };
     p.writeRecord = [&](const std::wstring& path, const pl::MachineRecord& r) -> uint32_t { files[path] = r; return 0; };
     p.removeRecord = [&](const std::wstring& path) -> uint32_t { files.erase(path); return 0; };
-    p.featureEnabled = [&] { return !files.empty(); };
+    p.featureEnabled = [&] { return !mark && !files.empty(); };
     p.queryStartType = [&](uint32_t* out) { *out = startType; return true; };
     p.setStartType = [&](uint32_t t) -> uint32_t { startType = t; return 0; };
     p.loadRememberedStartType = [&](uint32_t* out) { if (!remembered) return false; *out = 3; return true; };
@@ -134,11 +145,39 @@ int main() {
     rec.ownerGeneration = 7;
     rec.enabled = true;
     files[L"rec"] = rec;
-    const pl::AdminReply r = pl::WithdrawPreloginAccessForUninstall(p);
-    check("V4: uninstall withdraws pre-login access: the record is gone",
-          r.status == pl::AdminStatus::Ok && files.empty() && !r.enabled);
-    check("...the floor rose past it (an old copy restored after a reinstall stays revoked)", floor > 7, std::to_string(floor));
-    check("...and the remembered start type is put back and forgotten", startType == 3 && !remembered);
+    const pl::UninstallRevokeResult r = pl::RevokeForUninstall(
+        p, [&] { log += "mark "; mark = true; return true; }, [&] { log += "stop "; return stopWorks; });
+    struct Out {
+      pl::UninstallRevokeResult r;
+      bool recordLeft, mark, enabled;
+      uint64_t floor;
+      uint32_t startType;
+      bool remembered;
+      std::string log;
+    };
+    return Out{r, !files.empty(), mark, p.featureEnabled(), floor, startType, remembered, log};
+  };
+  {
+    const auto o = uninstall_case(true, true, "the normal case");
+    check("V4: uninstall withdraws pre-login access: revoked, the record is gone", o.r.revoked && !o.recordLeft && !o.enabled);
+    check("...the floor rose past it (an old copy restored after a reinstall stays revoked)", o.floor > 7,
+          std::to_string(o.floor));
+    check("...and the remembered start type is put back and forgotten", o.startType == 3 && !o.remembered);
+    check("R2: in this order: the mark, the service stopped, THEN the floor (one writer)", o.log == "mark stop floor ", o.log);
+    check("...and the mark is cleared once it really worked", !o.mark);
+  }
+  {
+    const auto o = uninstall_case(false, true, "the floor cannot be raised");
+    check("R2: the revoke failed: NOT reported as revoked", !o.r.revoked && o.r.reply.status == pl::AdminStatus::Failed);
+    check("...the record is still there, but the mark stays down: the feature is off and a reinstall's service "
+          "revokes first",
+          o.recordLeft && o.mark && !o.enabled);
+  }
+  {
+    const auto o = uninstall_case(true, false, "the service does not stop");
+    check("R2: the service did not stop: this process writes NOTHING (no second writer)",
+          !o.r.revoked && o.log == "mark stop " && o.recordLeft && o.floor == 3, o.log);
+    check("...the mark is down: the live service finishes the revoke itself", o.mark && !o.enabled);
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

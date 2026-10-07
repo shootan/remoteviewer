@@ -422,6 +422,11 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
     fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_ADDRESS=127.0.0.1");
     fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_PORT=" + std::to_wstring(port));
     fixtures.push_back(L"GNLINK_STREAM_TEST_SECONDS=150");
+    // r9 W2: this worker runs in the test user's session, whose input desktop is "Default" -- the stand-in
+    // for the logon desktop it serves here (the product's worker serves "Winlogon" only).
+    if (extraEnv.rfind(L"GNLINK_STREAM_TEST_LOGON_DESKTOP=", 0) != 0) {
+      fixtures.push_back(L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Default");
+    }
     cmd = L"\"" + dir + L"GNLinkStream.exe\" " + remote60::native_poc::prelogin::PreloginWorkerArgs();
     const std::vector<wchar_t> base = test_base_environment(dir, fixtures);
     // OldServiceEnvironment: what the service handed the worker before r6 -- its own environment, no
@@ -647,6 +652,22 @@ int wmain(int argc, wchar_t** argv) {
     check("r6 V7: a machine record naming another server is not used (the worker stays offline)",
           refused && other.log().find("machine credential loaded") == std::string::npos);
     other.Stop();
+    // r9 W2: a worker whose input desktop is NOT the logon desktop it serves -- what a SYSTEM worker left
+    // running after a logon sees: the user's "Default". It must not serve it: it leaves at once (exit 14),
+    // never says it is serving, and never registers.
+    Host left;
+    const bool leftStarted = start_host(&left, dir, directory.url(), hostPort, Start::Service, targets.title, restricted,
+                                        L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Winlogon");
+    DWORD leftRc = STILL_ACTIVE;
+    const bool leftEnded = leftStarted && WaitForSingleObject(left.pi.hProcess, 15000) == WAIT_OBJECT_0 &&
+                           GetExitCodeProcess(left.pi.hProcess, &leftRc);
+    check("r9 W2: a worker whose input desktop is a user's (not the logon desktop) leaves at once, exit 14",
+          leftEnded && leftRc == 14 && left.log().find("no longer the logon desktop") != std::string::npos,
+          std::to_string(leftRc));
+    check("...it never served it and never registered",
+          left.log().find("serving the logon desktop") == std::string::npos &&
+              left.log().find("step=heartbeat ok=1") == std::string::npos);
+    left.Stop();
   }
   const bool started = restricted && hostPort != 0 &&
                        start_host(&host, dir, directory.url(), hostPort, notPrelogin ? Start::LoggedIn : Start::Service,

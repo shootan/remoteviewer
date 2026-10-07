@@ -252,9 +252,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   const std::wstring url(directoryUrl.begin(), directoryUrl.end());
   // Loopback on purpose: a wildcard listener is what raises the firewall prompt.
   // r6 G1: in prelogin mode the role flag is the ONLY transport/codec input -- `--prelogin` must itself
-  // pin udp+h264 and reach the directory-registration path. Passing --directory-url skips the DPAPI
-  // machine-record load (that is the elevation-gated part), so this exercises the SAME registration code
-  // with test-account creds instead of the sealed record.
+  // pin udp+h264. r6 V5 (updated r9 W4): the directory arguments given here are NOT a way in -- a
+  // --prelogin worker ignores them and takes its credential from the machine record only, so this run is
+  // the negative: the shipped binary, handed a directory to register with, never registers. (The
+  // positive -- the worker registering from a sealed machine record -- is viewer_prelogin_login_e2e's,
+  // on the test build.)
   const std::wstring roleArgs = prelogin ? L" --prelogin" : L" --transport udp --codec h264";
   std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\"" + roleArgs +
                      L" --bind-address 127.0.0.1" +
@@ -806,9 +808,17 @@ int wmain(int argc, wchar_t** argv) {
     check("[prelogin] r6 V5: it says the directory arguments are ignored",
           host.WaitFor("directory arguments/environment ignored", 15000), host.tail());
     Sleep(6000);  // long enough for a register that was going to happen
-    check("[prelogin] r6 V5: ...and it did NOT register with them (no machine record here -> offline)",
-          dir.Count("/api/host/register") == 0 && host.log().find("no machine credential enrolled") != std::string::npos,
-          "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    check("[prelogin] r6 V5: ...and it did NOT register with them",
+          dir.Count("/api/host/register") == 0, "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    // r9 W2 on the SHIPPED binary: this test runs in a user's session, whose input desktop is "Default" --
+    // exactly what a SYSTEM worker left over after a logon would see. It serves the logon desktop only, so
+    // it has left (exit 14) without ever serving.
+    DWORD rc = STILL_ACTIVE;
+    const bool ended = WaitForSingleObject(host.pi.hProcess, 5000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+    check("[prelogin] r9 W2: the shipped worker, on a user's desktop, left at once (exit 14) and never served it",
+          ended && rc == 14 && host.log().find("no longer the logon desktop") != std::string::npos &&
+              host.log().find("serving the logon desktop") == std::string::npos,
+          std::to_string(rc));
     // r6 G2 negative control: a --control-port was passed, yet prelogin opens NO separate TCP control
     // listener (the UDP control channel is the only path), so this startup line never prints.
     check("[prelogin] no separate TCP control listener is opened (G2 side channel off)",
