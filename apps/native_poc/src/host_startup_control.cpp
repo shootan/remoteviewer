@@ -512,9 +512,11 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // udp-control-peer (1): everything from here that mutates per-session state or answers on the
         // session's behalf -- the video-NACK retransmit and the control channel -- must come from the
         // CURRENTLY ADOPTED wire peer (address family + IP + port). The peer tuple is set/advanced only
-        // by an authenticated Hello above, so an authenticated A->A' port move is honoured and the old
-        // endpoint's later packets are refused. Bulk shares the same gate; bootstrap (directory
-        // punch/observe) and Hello keep their own admission elsewhere. Same IP, different port = refused.
+        // by a Hello that passes the EXISTING admission above (a token-less LAN Hello is still accepted
+        // on a host with no active directory session; an active directory session rejects unauthenticated
+        // Hellos), so an admitted A->A' port move is honoured and the old endpoint's later packets are
+        // refused. Bulk shares the same gate; bootstrap (directory punch/observe) and Hello keep their
+        // own admission elsewhere. Same IP, different port = refused.
         const bool fromAdoptedPeer =
             peer.sin_family == AF_INET &&
             sender.udpPeerIpNet.load(std::memory_order_acquire) == peer.sin_addr.s_addr &&

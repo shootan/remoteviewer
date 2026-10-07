@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <thread>
@@ -230,8 +231,17 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   const std::wstring myDir = directory_of(self_path());
   // GNLinkCapture is staged as a copy of this binary in --thumbnail mode: the host starts one and
   // it must not answer, exactly as the sibling e2e does.
-  if (!CopyFileW((myDir + L"GNLinkStream.exe").c_str(),
-                 (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
+  // udp-control-peer r2 negative control: REMOTE60_E2E_OLD_BIN points at a GNLinkStream.exe built
+  // WITHOUT the peer gate (host_startup_control.cpp at b6f4b18). The injection case then dispatches B's
+  // control and fails -- proving the gate is load-bearing. Unset -> the freshly built (fixed) host.
+  std::wstring streamSrc = myDir + L"GNLinkStream.exe";
+  {
+    wchar_t oldBin[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
+      streamSrc = oldBin;
+    }
+  }
+  if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
       !CopyFileW(self_path().c_str(), (host->dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
     return false;
   }
@@ -532,77 +542,118 @@ int wmain(int argc, wchar_t** argv) {
     check("a control request makes the round trip over the tunnel", roundTrip,
           client.Snapshot().status);
 
-    // ---- udp-control-peer (1): a DIFFERENT wire endpoint cannot inject control -----------------
-    // Real host ingress: A (above) is the adopted session. B is a second loopback socket on another
-    // port (same IP, different port) sending well-formed control -- a forged ACK and a ControlData.
-    // The host must DROP them before the parser (log the limited aggregate), leave A's session and
-    // control loop untouched, and send B nothing. (The pre-0.2.151 path consumed any magic+kind
-    // datagram regardless of source -- so this check does not even print on a build without the gate.)
+    // ---- udp-control-peer (1): a DIFFERENT wire endpoint cannot inject VALID control -------------
+    // A (above) is the adopted session; the host's client->host control stream is
+    // kUdpControlStreamClientToHost (1), its host->client stream is (2). B is a second loopback socket
+    // (same IP, different port). B sends a VALID, well-framed window-select on stream 1 -- a single
+    // complete fragment, messageSeq ahead of A's -- i.e. exactly what the pre-fix OnPacket WOULD have
+    // reassembled and dispatched (unlike a wrong-stream datagram the old parser drops anyway). The
+    // host's render loop logs "requestedId=<id>" for every window-select it actually processes, so the
+    // DISTINCTIVE id B uses is a behavioural probe:
+    //   - fixed build: the gate drops B before the parser, B's id NEVER appears, and A's own later
+    //     (fence) request IS processed -> this case PASSES;
+    //   - gate-removed build (REMOTE60_E2E_OLD_BIN): B is dispatched, so its id appears AND its high
+    //     messageSeq advances the host's rx sequence past A's fence, which is then swallowed -> the
+    //     fence assertion FAILs and the process exits non-zero. That is the real negative control.
     {
+      const uint64_t kBInjectedId = 0xB0B0B0B0B0B0B0B0ull;  // only B would ever request this
+      const uint64_t kAFenceId = 0x0F0F0F0F0F0F0F0Full;     // A requests this AFTER B's injection
+      const std::string bNeedle = "requestedId=" + std::to_string(kBInjectedId);
+      const std::string aNeedle = "requestedId=" + std::to_string(kAFenceId);
+
       SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-      check("[inject] a second endpoint B opens a socket", b != INVALID_SOCKET);
-      if (b != INVALID_SOCKET) {
+      const bool bOpen = b != INVALID_SOCKET;
+      check("[inject] a second endpoint B opens a socket", bOpen);
+      if (bOpen) {
         sockaddr_in blocal{};
         blocal.sin_family = AF_INET;
         blocal.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        blocal.sin_port = 0;  // a different port than A -> same IP, different port
-        bind(b, reinterpret_cast<sockaddr*>(&blocal), sizeof(blocal));
-        DWORD rcvTo = 1200;
+        blocal.sin_port = 0;  // same IP as A, a different port
+        check("[inject] B binds its own port (a drop is then a real block, not a send failure)",
+              bind(b, reinterpret_cast<sockaddr*>(&blocal), sizeof(blocal)) == 0);
+        DWORD rcvTo = 1000;
         setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
         sockaddr_in hostAddr{};
         hostAddr.sin_family = AF_INET;
         hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         hostAddr.sin_port = htons(mediaPort);
 
-        remote60::native_poc::UdpControlAckPacket forgedAck{};  // magic + kind=ControlAck by default
-        forgedAck.streamId = 0x1234;
-        forgedAck.messageSeq = 999999;
-        // A ControlData-kind datagram (well-formed enough to be CLASSIFIED as control; the gate drops
-        // it before the channel parser ever runs).
-        struct {
-          uint32_t magic = remote60::native_poc::kMagic;
-          uint16_t kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
-          uint16_t pad = 0;
-          uint8_t body[24] = {};
-        } forgedData;
-
-        const int kBursts = 6;
-        for (int i = 0; i < kBursts; ++i) {
-          sendto(b, reinterpret_cast<const char*>(&forgedAck), sizeof(forgedAck), 0,
+        // A VALID single-fragment window-select on the host's client->host stream.
+        auto send_valid_window_select = [&](uint32_t messageSeq, uint64_t windowId) {
+          remote60::native_poc::ControlWindowSelectMessage msg{};
+          msg.header.magic = remote60::native_poc::kMagic;
+          msg.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlWindowSelect);
+          msg.header.size = static_cast<uint16_t>(sizeof(msg));
+          msg.seq = 7;
+          msg.windowId = windowId;
+          remote60::native_poc::UdpControlChunkHeader head{};
+          head.magic = remote60::native_poc::kMagic;
+          head.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+          head.size = static_cast<uint16_t>(sizeof(head));
+          head.streamId = remote60::native_poc::kUdpControlStreamClientToHost;  // the host's rx stream
+          head.messageSeq = messageSeq;
+          head.totalSize = sizeof(msg);
+          head.fragIndex = 0;
+          head.fragCount = 1;
+          head.fragOffset = 0;
+          head.fragSize = sizeof(msg);
+          uint8_t dgram[sizeof(head) + sizeof(msg)];
+          std::memcpy(dgram, &head, sizeof(head));
+          std::memcpy(dgram + sizeof(head), &msg, sizeof(msg));
+          sendto(b, reinterpret_cast<const char*>(dgram), sizeof(dgram), 0,
                  reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
-          sendto(b, reinterpret_cast<const char*>(&forgedData), sizeof(forgedData), 0,
+        };
+        for (int i = 0; i < 5; ++i) send_valid_window_select(1000000u + i, kBInjectedId);  // ahead of A
+        // A forged ACK on the host's real tx stream, and an incomplete fragment -- neither may disturb A.
+        remote60::native_poc::UdpControlAckPacket forgedAck{};
+        forgedAck.streamId = remote60::native_poc::kUdpControlStreamHostToClient;
+        forgedAck.messageSeq = 1000000u;
+        sendto(b, reinterpret_cast<const char*>(&forgedAck), sizeof(forgedAck), 0,
+               reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        {
+          remote60::native_poc::UdpControlChunkHeader frag{};
+          frag.magic = remote60::native_poc::kMagic;
+          frag.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+          frag.size = static_cast<uint16_t>(sizeof(frag));
+          frag.streamId = remote60::native_poc::kUdpControlStreamClientToHost;
+          frag.messageSeq = 2000000u;
+          frag.totalSize = 64;  // claims 64 bytes but only sends fragment 0 of 2 -> never completes
+          frag.fragIndex = 0;
+          frag.fragCount = 2;
+          frag.fragOffset = 0;
+          frag.fragSize = 16;
+          uint8_t fdg[sizeof(frag) + 16] = {};
+          std::memcpy(fdg, &frag, sizeof(frag));
+          sendto(b, reinterpret_cast<const char*>(fdg), sizeof(fdg), 0,
                  reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
         }
 
-        // The host logs the limited drop aggregate ONLY because the gate fired on B's real ingress.
-        check("[inject] the host drops control from the non-session endpoint B",
+        // The host logs the limited drop aggregate the moment the gate fires on B's real ingress.
+        check("[inject] the host logs dropping control from the non-session endpoint B",
               host.WaitFor("dropped control from non-session peer", 6000), host.tail());
-
-        // B receives no reply at all -- the host neither ACKs nor answers a stranger.
+        // B gets nothing back (the host answers A's tuple, so this is necessary not sufficient -- the
+        // load-bearing checks are the id assertions below).
         char junk[256];
         sockaddr_in from{};
         int fromLen = sizeof(from);
         const int got = recvfrom(b, junk, sizeof(junk), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
         check("[inject] the host sends B nothing back", got <= 0,
-              got > 0 ? ("B got " + std::to_string(got) + " bytes") : "");
+              got > 0 ? (std::to_string(got) + " bytes") : "");
         closesocket(b);
       }
 
-      // A's session is untouched by B's injection: still connected, control loop still running, and a
-      // fresh control round trip still completes over A's tunnel.
-      check("[inject] A's session stays connected through B's injection",
+      // Ordering fence: A legitimately requests a distinctive id AFTER B's injection. On the fixed build
+      // the gate dropped B, so A's request is the next window-select the host processes.
+      check("[inject] A can still queue a control request after the injection",
+            client.RequestWindowSelect(kAFenceId));
+      check("[inject] the host processes A's post-injection request (ordering fence)",
+            host.WaitFor(aNeedle.c_str(), 12000), host.tail());
+      // THE load-bearing assertion: B's valid-but-foreign window-select never reached the dispatcher.
+      check("[inject] B's injected window-select never reached the host (dropped before the parser)",
+            host.log().find(bNeedle) == std::string::npos, "B's requestedId must be absent from the host log");
+      check("[inject] A's session stays connected and serving through the injection",
             client.Snapshot().state == remote60::native_poc::ClientSessionState::Connected &&
                 client.Snapshot().controlLoopActive,
-            client.Snapshot().status);
-      // A control send still goes out on A's live loop, and a window-list reply still arrives -- the
-      // tunnel A owns is unaffected by B's dropped injection.
-      const bool aStillWorks =
-          client.RequestWindowList() &&
-          wait_until([&] {
-            const auto s = client.Snapshot();
-            return s.state == remote60::native_poc::ClientSessionState::Connected && s.controlLoopActive;
-          }, 8000);
-      check("[inject] A's control loop still serves after the injection", aStillWorks,
             client.Snapshot().status);
     }
 
