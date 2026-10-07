@@ -403,6 +403,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
               ++tokenLen;
             }
+            // Prelogin (r4 #3): before anyone logs in, ONLY a directory-authenticated peer gets a
+            // session. A token-less LAN Hello (and the direct-LAN fallback it would open) must get no
+            // screen and no input -- reject it outright rather than fall through to direct-LAN mode.
+            if (args.preloginMode && tokenLen == 0) {
+              std::cerr << "[native-video-host][prelogin] rejected token-less LAN Hello "
+                           "(no screen/input before login)\n";
+              continue;
+            }
             bool directoryAuthenticated = false;
             bool newSession = false;
             if (tokenLen > 0) {
