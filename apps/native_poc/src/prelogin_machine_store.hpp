@@ -46,4 +46,19 @@ MachineStoreStatus ReadAndOpenMachineRecord(const std::wstring& path, MachineRec
 // service to audit the on-disk protection and for tests to assert the ACL shape.
 bool ReadDaclSddl(const std::wstring& path, std::wstring* outSddl);
 
+// --- G5: trusted-ancestry validation (read AND create paths) ---------------------------------------
+//
+// Codex G5: fixing the create-time DACL left the READ path and a pre-existing parent unvalidated. A
+// non-admin who pre-creates the directory stays its owner (keeps WRITE_DAC), and a reparse point can
+// redirect the opened object -- machine-scope DPAPI is not a substitute for this origin/access control.
+// Both the create and read paths now require: the object is NOT a reparse point AND is owned by SYSTEM or
+// BUILTIN\Administrators. A hostile pre-existing path is rejected, not "repaired then trusted".
+
+// Pure-ish: is `sid` the Local System or BUILTIN\Administrators SID? (exposed for the counter-example test)
+bool OwnerSidIsTrusted(const void* sid);
+
+// Open `path` (file or directory) WITHOUT following reparse points and verify it is a real, non-reparse
+// object owned by a trusted principal. Returns Ok, Dacl (reparse or untrusted owner), or Read (cannot open).
+MachineStoreStatus ValidateProtectedPath(const std::wstring& path, uint32_t* win32);
+
 }  // namespace remote60::native_poc::prelogin

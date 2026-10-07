@@ -18,6 +18,53 @@ namespace {
 // exactly those two principals.
 constexpr wchar_t kProtectedSddl[] = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
+// G5: an owner SID is trusted only if it is Local System or BUILTIN\Administrators. A directory/file owned
+// by any other principal (e.g. a non-admin who pre-created the parent) is rejected -- that owner retains
+// WRITE_DAC and could re-open the ACL, so re-asserting the DACL is not enough.
+bool owner_sid_trusted(PSID owner) {
+  if (!owner || !IsValidSid(owner)) return false;
+  BYTE buf[SECURITY_MAX_SID_SIZE];
+  DWORD n = sizeof(buf);
+  if (CreateWellKnownSid(WinLocalSystemSid, nullptr, buf, &n) && EqualSid(owner, buf)) return true;
+  n = sizeof(buf);
+  if (CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, buf, &n) && EqualSid(owner, buf)) return true;
+  return false;
+}
+
+// Validate an ALREADY-OPEN handle: the object must not be a reparse point and must be owned by a trusted
+// principal. Validating the opened object (not a re-opened path) closes the TOCTOU between check and use.
+bool handle_is_protected_object(HANDLE h) {
+  BY_HANDLE_FILE_INFORMATION bi{};
+  if (!GetFileInformationByHandle(h, &bi)) return false;
+  if (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return false;  // a redirect, not the real object
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  PSID owner = nullptr;
+  if (GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr,
+                      &sd) != ERROR_SUCCESS)
+    return false;
+  const bool ok = owner_sid_trusted(owner);
+  if (sd) LocalFree(sd);
+  return ok;
+}
+
+// Open a path (file or directory) WITHOUT following reparse points and validate it. `missing` reports a
+// plain not-found (distinct from a present-but-hostile object). Returns false for reparse/untrusted/open
+// failure.
+bool path_is_protected_object(const std::wstring& path, bool* missing) {
+  if (missing) *missing = false;
+  HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    const DWORD e = GetLastError();
+    if (missing && (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)) *missing = true;
+    return false;
+  }
+  const bool ok = handle_is_protected_object(h);
+  CloseHandle(h);
+  return ok;
+}
+
 // Build the protected (SYSTEM+Admins-only) security descriptor. Caller LocalFree()s it.
 PSECURITY_DESCRIPTOR make_protected_sd() {
   PSECURITY_DESCRIPTOR sd = nullptr;
@@ -40,7 +87,15 @@ bool ensure_protected_parent(const std::wstring& filePath, uint32_t* win32) {
   sa.lpSecurityDescriptor = sd;
   bool ok = CreateDirectoryW(dir.c_str(), &sa) != FALSE;
   if (!ok && GetLastError() == ERROR_ALREADY_EXISTS) {
-    // Already there: re-assert the protected DACL so a loosely-created parent is tightened.
+    // G5: a pre-existing parent is trusted ONLY if it is a real directory (not a reparse redirect) owned
+    // by SYSTEM/Administrators. A non-admin who pre-created it stays the owner (keeps WRITE_DAC), so
+    // re-asserting the DACL would NOT remove their control -- reject rather than "repair then trust".
+    if (!path_is_protected_object(dir, nullptr)) {
+      if (win32) *win32 = ERROR_ACCESS_DENIED;
+      LocalFree(sd);
+      return false;
+    }
+    // Trusted ancestry: re-assert the protected DACL so a loosely-created-but-trusted parent is tightened.
     BOOL present = FALSE, defaulted = FALSE;
     PACL dacl = nullptr;
     if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
@@ -94,9 +149,16 @@ bool write_all_protected(const std::wstring& path, const uint8_t* data, size_t l
 }
 
 bool read_all(const std::wstring& path, std::vector<uint8_t>* out, uint32_t* win32) {
+  // G5: open WITHOUT following a reparse point and validate the OPENED object (non-reparse + trusted
+  // owner) before reading a single byte, so a redirected/hostile object is never decrypted.
   HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, nullptr);
+                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (h == INVALID_HANDLE_VALUE) { if (win32) *win32 = GetLastError(); return false; }
+  if (!handle_is_protected_object(h)) {
+    if (win32) *win32 = ERROR_ACCESS_DENIED;  // reparse redirect or untrusted owner -> refuse
+    CloseHandle(h);
+    return false;
+  }
   LARGE_INTEGER size = {};
   if (!GetFileSizeEx(h, &size) || size.QuadPart > (64 * 1024 * 1024)) {
     if (win32) *win32 = GetLastError();
@@ -144,6 +206,16 @@ MachineStoreStatus SealAndWriteMachineRecord(const std::wstring& path, const Mac
 
 MachineStoreStatus ReadAndOpenMachineRecord(const std::wstring& path, MachineRecord* out, uint32_t* win32) {
   if (win32) *win32 = 0;
+  // G5: validate the PARENT ancestry too -- a junction/symlink at the directory component would be
+  // followed when resolving the path even though the final open uses FILE_FLAG_OPEN_REPARSE_POINT.
+  const size_t slash = path.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) {
+    const std::wstring dir = path.substr(0, slash);
+    if (!path_is_protected_object(dir, nullptr)) {
+      if (win32) *win32 = ERROR_ACCESS_DENIED;
+      return MachineStoreStatus::Read;
+    }
+  }
   std::vector<uint8_t> sealed;
   if (!read_all(path, &sealed, win32)) return MachineStoreStatus::Read;
   DATA_BLOB in{static_cast<DWORD>(sealed.size()), sealed.data()};
@@ -171,6 +243,16 @@ bool ReadDaclSddl(const std::wstring& path, std::wstring* outSddl) {
   if (str) LocalFree(str);
   LocalFree(sd);
   return ok;
+}
+
+bool OwnerSidIsTrusted(const void* sid) { return owner_sid_trusted(const_cast<PSID>(sid)); }
+
+MachineStoreStatus ValidateProtectedPath(const std::wstring& path, uint32_t* win32) {
+  if (win32) *win32 = 0;
+  bool missing = false;
+  if (path_is_protected_object(path, &missing)) return MachineStoreStatus::Ok;
+  if (win32) *win32 = missing ? ERROR_FILE_NOT_FOUND : ERROR_ACCESS_DENIED;
+  return missing ? MachineStoreStatus::Read : MachineStoreStatus::Dacl;  // reparse/untrusted -> Dacl
 }
 
 }  // namespace remote60::native_poc::prelogin
