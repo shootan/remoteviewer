@@ -2144,6 +2144,12 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service A1 section 3: ready-handoff single-owner lease + generation fence (pure).
+add_executable(remote60_prelogin_handoff_test
+  src/prelogin_handoff_test.cpp
+)
+target_include_directories(remote60_prelogin_handoff_test PRIVATE src)
+
 # prelogin-service A1 section 3: prelogin credential sealed purpose (distinct AAD/KDF labels) isolation.
 add_executable(remote60_prelogin_cred_seal_test
   src/prelogin_cred_seal_test.cpp
