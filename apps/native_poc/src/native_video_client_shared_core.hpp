@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "poc_protocol.hpp"
+#include "reboot_wire.hpp"
 
 namespace remote60::native_poc {
 
@@ -224,6 +225,7 @@ enum class ControlOutboundActionKind : uint8_t {
   UnlockStatusRequest,
   ImeStateRequest,
   ClientBandwidth,  // C0 stage 1, no reply
+  RebootRequest,    // prelogin-service r3: ControlRebootRequest (84), expects ControlRebootReply (85)
 };
 
 struct ControlOutboundAction {
@@ -249,6 +251,7 @@ struct ControlOutboundAction {
   ControlUnlockStatusRequestMessage unlockStatusReq{};
   ControlImeStateRequestMessage imeStateReq{};
   ControlClientBandwidthMessage clientBandwidth{};
+  ControlRebootRequestMessage reboot{};  // prelogin-service r3 (reboot_wire.hpp)
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
 };
 

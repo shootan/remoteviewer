@@ -354,6 +354,9 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.unlockSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
         std::memory_order_relaxed);
+    // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
+    // every pong like the others so a reconnect never inherits a stale answer.
+    ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
     // Mouse X buttons (back / forward): sent only to a host that says it maps them. Set every
     // pong like the others, so a reconnect never inherits an answer. (mouse-xbutton r1)
     ctx.session.hostMouseXButtons.store(
@@ -702,6 +705,35 @@ void ControlClient::Run() {
         } else {
           clear_unlock_password(0);  // a present-but-unreadable file would block re-prompt forever
           std::cout << "[native-video-client][unlock] no usable stored password (set it again)\n";
+        }
+      }
+    }
+    // Remote reboot (prelogin-service r3): the confirm popup set rebootRequested on the UI thread. Send
+    // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.
+    if (ctx.session.rebootRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      if ((flags & remote60::native_poc::kCaptureFlagRemoteRebootV1) == 0) {
+        std::cout << "[native-video-client][reboot] host does not advertise remote reboot\n";
+      } else {
+        static std::atomic<uint32_t> rebootSeq{0};
+        const uint32_t rid = rebootSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::RebootRequest;
+        action.reboot.header.magic = remote60::native_poc::kMagic;
+        action.reboot.header.type = static_cast<uint16_t>(MessageType::ControlRebootRequest);
+        action.reboot.header.size = static_cast<uint16_t>(sizeof(action.reboot));
+        action.reboot.requestId = rid;
+        action.expectedResponseType = MessageType::ControlRebootReply;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlRebootReplyMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(*controlLink, action, &resp) &&
+            resp.kind == TcpControlResponseKind::RebootReply && resp.rebootReply.requestId == rid) {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.rebootReply.result)
+                    << " win32=" << resp.rebootReply.win32 << "\n";
+        } else {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " no valid reply (link closed/desynced); not auto-retrying\n";
         }
       }
     }

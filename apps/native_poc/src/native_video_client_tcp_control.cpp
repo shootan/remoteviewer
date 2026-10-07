@@ -49,6 +49,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.imeStateReq, sizeof(action.imeStateReq));
     case ControlOutboundActionKind::ClientBandwidth:
       return link.Write(&action.clientBandwidth, sizeof(action.clientBandwidth));
+    case ControlOutboundActionKind::RebootRequest:
+      return link.Write(&action.reboot, sizeof(action.reboot));
     case ControlOutboundActionKind::None:
     default:
       return false;
@@ -111,6 +113,11 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->imeStateResponse.header = header;
       return link.Read(&out->imeStateResponse.seq,
                        sizeof(out->imeStateResponse) - sizeof(MessageHeader));
+    case MessageType::ControlRebootReply:
+      out->kind = TcpControlResponseKind::RebootReply;
+      out->rebootReply.header = header;
+      return link.Read(&out->rebootReply.requestId,
+                       sizeof(out->rebootReply) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

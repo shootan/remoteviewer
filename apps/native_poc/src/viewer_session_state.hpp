@@ -55,6 +55,13 @@ struct SessionState {
   std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
   std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
   std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
+  // Raw host Pong capability bits, refreshed every pong so the toolbar/menu can decide the reboot and
+  // prelogin affordances via reboot_menu_policy (DecideRebootMenu / DecidePreloginCred). 0 until the
+  // first pong and after teardown, so a reconnect never inherits a stale answer. (prelogin-service r3.)
+  std::atomic<uint32_t> hostCaptureFlags{0};
+  // Set by the reboot confirm (the UI thread, after the user picks 확인); the control thread drains it
+  // and sends ControlRebootRequest exactly once. (prelogin-service r3 R3.)
+  std::atomic<bool> rebootRequested{false};
   // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
   // sent. Written by the control thread on every pong (release), read by the UI thread's window
   // procedure and the input fence (acquire). False until the first pong and after teardown, and an
