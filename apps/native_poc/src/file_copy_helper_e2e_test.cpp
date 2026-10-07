@@ -975,12 +975,35 @@ int run_driver() {
       ++calls;
       return fakeShell;
     };
-    // The ended fixture's last handle goes, so its PID names no process any more.
+    // The ended fixture's last handle (this test's) goes. Its PID names no process only once EVERY
+    // handle to it is closed -- one held anywhere else keeps the ended process openable (r9: a run where
+    // that held saw OpenProcess succeed and the refusal come one step later, at the recheck). The
+    // precondition is measured, not assumed.
+    const DWORD fxPid = fx.dwProcessId;
     CloseHandle(fx.hProcess);
     CloseHandle(fx.hThread);
+    const DWORD waitStart = GetTickCount();
+    bool pidGone = false;
+    while (!pidGone && GetTickCount() - waitStart < 5000) {
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, fxPid);
+      if (!h) {
+        pidGone = true;
+      } else {
+        CloseHandle(h);
+        Sleep(20);
+      }
+    }
+    std::printf("      the ended fixture's PID stopped naming a process after %lu ms (gone=%d)\n",
+                static_cast<unsigned long>(GetTickCount() - waitStart), pidGone ? 1 : 0);
     const bool gone = acquire(&stage, &why, &cls, &got);
-    check("a 'shell' PID whose process is gone is refused before any token (no-shell at OpenProcess)",
-          !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-process", stage + " " + why);
+    if (pidGone) {
+      check("a 'shell' PID whose process is gone is refused before any token (no-shell at OpenProcess)",
+            !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-process", stage + " " + why);
+    } else {
+      // Still openable (another holder): the ended shell is then refused at the recheck -- NoShell, no token.
+      check("a 'shell' PID of an ended process still held open elsewhere: refused, no token (no-shell at the recheck)",
+            !gone && !got && cls == LaunchFailure::NoShell && stage == "shell-recheck" && why == "shell-exited", stage + " " + why);
+    }
     auto handles = [] {
       DWORD n = 0;
       GetProcessHandleCount(GetCurrentProcess(), &n);

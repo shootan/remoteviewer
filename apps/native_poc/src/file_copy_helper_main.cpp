@@ -246,8 +246,17 @@ struct Shared {
 
 Shared gShared;
 
+// r9 (F2): the fence between the end of this helper's connection (the viewer switched off, its session
+// ended, the host went) and a publish the STA thread commits. A publish queued before the end is
+// refused if the end is seen first; held while the publish is checked and committed, so the end comes
+// either wholly before the commit (refused) or after it (then the shutdown takes it off).
+std::mutex gCommitMu;
+
 void post_shutdown(WPARAM why) {
-  if (gShared.disconnectPosted.exchange(true)) return;
+  {
+    std::lock_guard<std::mutex> fence(gCommitMu);
+    if (gShared.disconnectPosted.exchange(true)) return;
+  }
   if (gShared.hwnd) PostMessageW(gShared.hwnd, kMsgShutdown, why, 0);
 }
 
@@ -538,6 +547,14 @@ void on_publish(std::unique_ptr<PublishRemoteFiles> m) {
   // r7); other Windows builds are unverified. Here, when the window is not found or the clipboard
   // cannot be held, the publish is refused rather than made unguarded; what an OLE that behaves
   // otherwise would do past this point has not been measured.
+  std::unique_lock<std::mutex> fence(gCommitMu);  // r9 (F2): until the publish is committed or refused
+  if (gShared.disconnectPosted.load()) {
+    fence.unlock();
+    result.status = Status::Aborted;
+    logf("publish offer=%llu refused: the connection ended before it was committed", static_cast<unsigned long long>(m->offerId));
+    gShared.send->Push(encode(result));
+    return;
+  }
   HWND guardWnd = nullptr;  // held for the check; OleSetClipboard opens it again and closes it
   if (m->ifUnchanged) {
     IDataObject* probe = nullptr;

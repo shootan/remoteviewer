@@ -49,6 +49,7 @@
 
 #include "e2e_isolation.hpp"
 #include "control_resume_e2e_support.hpp"
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cstdio>
@@ -1011,6 +1012,32 @@ int wmain(int argc, wchar_t** argv) {
             << " host text apply(s)\n";
   check("no host text arrived to apply (the station clipboard was emptied before the host started)", heldApply == 0);
   const DWORD interactiveClipAfter = GetClipboardSequenceNumber();
+  if (interactiveClipAfter != interactiveClipBefore) {
+    // r9: whose it is now, for the record (the check itself is unchanged): the owning process, its
+    // image and its parent -- nothing on the clipboard is read.
+    DWORD owner = 0, parent = 0;
+    if (HWND o = GetClipboardOwner()) GetWindowThreadProcessId(o, &owner);
+    wchar_t image[MAX_PATH] = L"";
+    if (owner) {
+      if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owner)) {
+        DWORD n = MAX_PATH;
+        QueryFullProcessImageNameW(h, 0, image, &n);
+        CloseHandle(h);
+      }
+      HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+          if (pe.th32ProcessID == owner) parent = pe.th32ParentProcessID;
+        }
+        CloseHandle(snap);
+      }
+    }
+    std::wstring w(image);
+    std::cout << "      WinSta0 clipboard now owned by pid " << owner << " (" << std::string(w.begin(), w.end()).substr(w.find_last_of(L'\\') + 1)
+              << ") parent " << parent << "; this test pid " << GetCurrentProcessId() << "\n";
+  }
   check("the user's clipboard (WinSta0) did not move: " + std::to_string(interactiveClipBefore) + " -> " +
             std::to_string(interactiveClipAfter),
         interactiveClipBefore == interactiveClipAfter);
