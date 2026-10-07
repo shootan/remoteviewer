@@ -2181,6 +2181,13 @@ add_executable(remote60_prelogin_input_filter_test
 )
 target_include_directories(remote60_prelogin_input_filter_test PRIVATE src)
 
+# prelogin-service r4 item 2: input SendInput-path evidence (own window; nav filter drops characters).
+add_executable(remote60_prelogin_input_inject_e2e_test
+  src/prelogin_input_inject_e2e_test.cpp
+)
+target_include_directories(remote60_prelogin_input_inject_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_input_inject_e2e_test PRIVATE user32)
+
 # prelogin-service r4 item 7: handoff ready-signal primitive.
 add_executable(remote60_prelogin_ready_signal_test
   src/prelogin_ready_signal_test.cpp
