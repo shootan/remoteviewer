@@ -25,6 +25,7 @@
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "prelogin_ready_signal.hpp"
 #include "prelogin_supervisor.hpp"
 
@@ -1131,6 +1132,22 @@ void WINAPI service_main(DWORD, wchar_t**) {
   diag("prelogin: starting supervisor reconcile loop (feature re-checked each tick)");
   std::thread preloginThread(prelogin_reconcile_loop);
 
+  // prelogin-ui r1 (item 4): GNLinkHost's "로그인 전에도 원격 접속 허용" reaches this service -- the single
+  // writer of the machine record and of its own start mode -- over its own admin-only pipe
+  // (prelogin_admin_pipe.cpp). The primitives are this file's own.
+  remote60::native_poc::prelogin::AdminPrimitives adminPrimitives;
+  remote60::native_poc::prelogin::BindProductStartType(&adminPrimitives, kSecureInputServiceName);
+  remote60::native_poc::prelogin::BindProductMachineStore(&adminPrimitives);
+  adminPrimitives.recordPath = machine_record_path;
+  adminPrimitives.machineId = current_machine_guid;
+  adminPrimitives.readFloor = read_prelogin_owner_floor;
+  adminPrimitives.raiseFloor = raise_prelogin_owner_floor;
+  adminPrimitives.featureEnabled = prelogin_feature_enabled;
+  std::thread adminThread([&adminPrimitives] {
+    remote60::native_poc::prelogin::RunPreloginAdminServer(
+        adminPrimitives, [] { return gRunning.load(std::memory_order_acquire); });
+  });
+
   while (gRunning.load(std::memory_order_acquire)) {
     HANDLE pipe = create_secure_pipe();
     if (pipe == INVALID_HANDLE_VALUE) break;
@@ -1164,6 +1181,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
   }
   stop_agent();
   if (preloginThread.joinable()) preloginThread.join();
+  if (adminThread.joinable()) adminThread.join();  // its connect wait checks gRunning every 250 ms
   // Wake the unlock worker out of any blocking ConnectNamedPipe/ReadFile and wait for it to exit.
   // CancelSynchronousIo only acts while the thread is inside a synchronous wait, so loop until the
   // thread actually ends. (Codex #370 BLOCKER A.)

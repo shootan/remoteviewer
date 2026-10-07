@@ -45,6 +45,8 @@
 #include <vector>
 
 #include "directory_client.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "secure_input_protocol.hpp"
 #include "host_app_log.hpp"
 #include "update_readiness.hpp"
 #include "log_upload.hpp"
@@ -112,6 +114,9 @@ enum ControlId : int {
   IdBadge,
   IdOpenLog,
   IdVersion,
+  IdPreloginAccess,  // prelogin-ui r1 (item 4)
+  IdPreloginHint,
+  IdPreloginStatus,
 };
 
 enum MenuId : int {
@@ -174,6 +179,9 @@ struct HostTestSeam {
   std::wstring streamExe;
   // Stands in for kMigratableDirectoryOrigins, which names a server no test may talk to.
   std::vector<std::string> migratableOrigins;
+  // The test's own stand-in for the service's admin pipe (\\.\pipe\GNLinkTest-...), so the real
+  // GNLinkSecureInput is never asked; and nothing here starts a service.
+  std::wstring preloginPipe;
 };
 HostTestSeam gHostTest;
 
@@ -797,6 +805,10 @@ struct AppState {
   HWND signedHostLabel = nullptr;
   HWND statusBadge = nullptr;
   HWND startWithWindowsCheck = nullptr;
+  // "로그인 전에도 원격 접속 허용" (prelogin-ui r1, item 4): the toggle, what it means, what happened.
+  HWND preloginCheck = nullptr;
+  HWND preloginHint = nullptr;
+  HWND preloginStatus = nullptr;
   HWND switchAccountButton = nullptr;
   HWND signOutButton = nullptr;
   HWND openLogButton = nullptr;
@@ -1081,6 +1093,8 @@ void show_tray_menu(HWND window) {
 
 // ---------------------------------------------------------------- sign in
 
+void refresh_prelogin_toggle();  // prelogin-ui r1 (item 4), below
+
 void apply_signed_in_ui(bool signedIn) {
   g.signedIn = signedIn;
   const int form = signedIn ? SW_HIDE : SW_SHOW;
@@ -1104,6 +1118,10 @@ void apply_signed_in_ui(bool signedIn) {
   ShowWindow(g.signedHostLabel, card);
   ShowWindow(g.statusBadge, card);
   ShowWindow(g.startWithWindowsCheck, card);
+  ShowWindow(g.preloginCheck, card);
+  ShowWindow(g.preloginHint, card);
+  ShowWindow(g.preloginStatus, card);
+  if (signedIn) refresh_prelogin_toggle();
   // Signing out belonged in the window, not buried in the tray menu where nobody looks.
   ShowWindow(g.switchAccountButton, card);
   ShowWindow(g.signOutButton, card);
@@ -1557,7 +1575,8 @@ void apply_fonts() {
       g.passwordEdit,    g.hostNameLabel,      g.hostNameEdit,     g.createAccountCheck,
       g.signupKeyLabel,  g.signupKeyEdit,      g.signInButton,
       g.signedAccountLabel, g.signedHostLabel,
-      g.statusBadge,     g.startWithWindowsCheck, g.switchAccountButton, g.signOutButton,
+      g.statusBadge,     g.startWithWindowsCheck, g.preloginCheck, g.preloginHint, g.preloginStatus,
+      g.switchAccountButton, g.signOutButton,
       g.openLogButton,   g.statusLabel,     g.versionLabel,
   };
   for (HWND control : bodyControls) {
@@ -1592,6 +1611,90 @@ HWND make_button(HWND parent, int id, const wchar_t* text, DWORD style) {
                                  nullptr, nullptr);
   SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
   return control;
+}
+
+// ---------------------------------------------------------------- 로그인 전 원격 접속 (prelogin-ui r1)
+
+std::wstring prelogin_admin_pipe_name() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  // A run that brings no stand-in gets a name nothing serves: "not running", never the real service.
+  return gHostTest.preloginPipe.empty() ? std::wstring(L"\\\\.\\pipe\\GNLinkTest-none") : gHostTest.preloginPipe;
+#else
+  return remote60::native_poc::prelogin::kPreloginAdminPipeName;
+#endif
+}
+
+/** One request to the service. Turning it on starts the service first if it is not running. */
+remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r) {
+  namespace pl = remote60::native_poc::prelogin;
+  const std::wstring pipe = prelogin_admin_pipe_name();
+  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str());
+#ifndef REMOTE60_HOST_TEST_SEAM
+  if (reply.status == pl::AdminStatus::Unavailable && r.op != pl::AdminOp::Query) {
+    // The service is DEMAND-start until this feature is on: start it (this process is elevated).
+    if (SC_HANDLE m = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
+      if (SC_HANDLE s = OpenServiceW(m, remote60::native_poc::kSecureInputServiceName, SERVICE_START)) {
+        StartServiceW(s, 0, nullptr);
+        CloseServiceHandle(s);
+      }
+      CloseServiceHandle(m);
+    }
+    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str());
+  }
+#endif
+  return reply;
+}
+
+void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply, bool asked) {
+  namespace pl = remote60::native_poc::prelogin;
+  std::wstring text;
+  switch (reply.status) {
+    case pl::AdminStatus::Ok:
+      text = reply.enabled ? L"켜짐: 재부팅 직후 로그인 화면에서도 접속할 수 있습니다." : L"꺼짐";
+      break;
+    case pl::AdminStatus::Refused:
+      text = L"관리자 권한으로 실행된 GNLink Host 에서만 바꿀 수 있습니다.";
+      break;
+    case pl::AdminStatus::Unavailable:
+      text = asked ? L"보안 입력 서비스에 연결하지 못했습니다 (설치 확인)." : L"꺼짐 (보안 입력 서비스가 실행 중이 아님)";
+      break;
+    default:
+      text = L"설정을 바꾸지 못했습니다 (오류 " + std::to_wstring(reply.win32) + L").";
+      break;
+  }
+  SendMessageW(g.preloginCheck, BM_SETCHECK, reply.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  SetWindowTextW(g.preloginStatus, text.c_str());
+}
+
+/** What the service says now -- the checkbox shows the service's state, never a guess. */
+void refresh_prelogin_toggle() {
+  namespace pl = remote60::native_poc::prelogin;
+  pl::AdminRequest q;
+  q.op = pl::AdminOp::Query;
+  show_prelogin_reply(prelogin_admin_call(q), /*asked=*/false);
+}
+
+void on_prelogin_toggle() {
+  namespace pl = remote60::native_poc::prelogin;
+  const bool want = SendMessageW(g.preloginCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  pl::AdminRequest r;
+  r.op = want ? pl::AdminOp::Enable : pl::AdminOp::Disable;
+  if (want) {
+    if (g.cache.hostId.empty() || g.cache.hostToken.empty()) {
+      SendMessageW(g.preloginCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+      SetWindowTextW(g.preloginStatus, L"이 PC가 서버에 등록된 뒤에 켤 수 있습니다.");
+      return;
+    }
+    r.directoryUrl = host_directory_url();
+    r.accountId = g.cache.accountId;
+    r.hostId = g.cache.hostId;
+    r.hostToken = g.cache.hostToken;  // to the service only; never logged
+  }
+  const pl::AdminReply reply = prelogin_admin_call(r);
+  append_host_app_log(std::string("[host-app] prelogin access ") + (want ? "on" : "off") +
+                      " requested: status=" + std::to_string(static_cast<int>(reply.status)) +
+                      " enabled=" + (reply.enabled ? "1" : "0") + " win32=" + std::to_string(reply.win32));
+  show_prelogin_reply(reply, /*asked=*/true);
 }
 
 // Creation order is tab order; the layout functions only assign positions.
@@ -1640,6 +1743,13 @@ void build_controls(HWND window) {
       BS_AUTOCHECKBOX);
   SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
                autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+  // Off by default, and only the service turns it on (prelogin-ui r1, item 4): nothing here writes the
+  // machine record or the service's start mode itself, and an upgrade never ticks this.
+  g.preloginCheck = make_button(window, IdPreloginAccess, L"로그인 전에도 원격 접속 허용", BS_AUTOCHECKBOX);
+  g.preloginHint = make_label(window, IdPreloginHint,
+                              L"재부팅 직후 Windows 로그인 화면에서도 이 PC에 접속합니다. 로그인 화면 입력은 관리자 "
+                              L"계정·PC 뷰어로 가능하고(v1), 휴대폰에서의 로그인 입력은 다음 버전부터입니다.");
+  g.preloginStatus = make_label(window, IdPreloginStatus, L"");
   g.switchAccountButton = make_button(window, IdSwitchAccount, L"Change account", 0);
   g.signOutButton = make_button(window, IdSignOut, L"Sign out", 0);
   g.openLogButton = make_button(window, IdOpenLog, L"Open log", 0);
@@ -1730,7 +1840,13 @@ int layout_signed_in() {
   y += sc(70);
 
   place(g.startWithWindowsCheck, margin, y, contentW, sc(24));
-  y += sc(34);
+  y += sc(30);
+  place(g.preloginCheck, margin, y, contentW, sc(24));
+  y += sc(26);
+  place(g.preloginHint, margin + sc(18), y, contentW - sc(18), sc(62));  // three lines, with descenders
+  y += sc(64);
+  place(g.preloginStatus, margin + sc(18), y, contentW - sc(18), sc(20));
+  y += sc(28);
 
   place(g.switchAccountButton, margin, y, sc(140), sc(30));
   place(g.signOutButton, margin + sc(150), y, sc(110), sc(30));
@@ -1881,6 +1997,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       const int id = LOWORD(wParam);
       if (id == IdSignIn) {
         perform_sign_in();
+        return 0;
+      }
+      if (id == IdPreloginAccess) {
+        on_prelogin_toggle();
         return 0;
       }
       if (id == IdStartWithWindows) {

@@ -83,6 +83,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
     gHostTest.migratableOrigins.push_back(formerName);
   }
   gHostTest.cachePath = narrow((std::filesystem::path(appData) / "remote60" / "host.json").wstring());
+  // prelogin-ui r1 (item 4): the runner's stand-in for the service's admin pipe; only a test pipe.
+  const std::wstring adminPipe = test_env(L"GNLINK_HOST_TEST_PRELOGIN_PIPE");
+  if (!adminPipe.empty()) {
+    if (adminPipe.rfind(L"\\\\.\\pipe\\GNLinkTest-", 0) != 0) return 2;
+    gHostTest.preloginPipe = adminPipe;
+  }
   gHostTest.streamExe = own_executable_path();
   return host_product_entry(instance, previous, commandLine, show);
 }

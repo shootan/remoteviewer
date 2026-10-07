@@ -233,6 +233,8 @@ add_executable(remote60_secure_input_service
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_ready_signal.cpp
+  src/prelogin_admin_pipe.cpp
+  src/prelogin_admin_service.cpp
 )
 set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
@@ -560,6 +562,7 @@ add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
   src/update_readiness.cpp
   src/host_app_main.cpp
+  src/prelogin_admin_pipe.cpp
   src/directory_client.cpp
   src/update_endpoint.cpp
   src/url_origin.cpp
@@ -2144,6 +2147,31 @@ add_executable(remote60_reboot_wire_test
   src/reboot_wire_test.cpp
 )
 target_include_directories(remote60_reboot_wire_test PRIVATE src)
+
+# prelogin-ui r1 (item 4): "로그인 전에도 원격 접속 허용" -- the admin pipe's codec, the service's decision
+# over in-memory primitives, and the real pipe's refusals (non-elevated client, the product DACL).
+add_executable(remote60_prelogin_admin_pipe_test
+  src/prelogin_admin_pipe_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_prelogin_admin_pipe_test PRIVATE src)
+target_link_libraries(remote60_prelogin_admin_pipe_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_admin_pipe_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r1 (item 4): the toggle in GNLinkHost's own window (the asInvoker test build), worked
+# through UI Automation, against a test pipe served by the product's admin server and decision.
+add_executable(remote60_host_prelogin_toggle_ui_test
+  src/host_prelogin_toggle_ui_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_host_prelogin_toggle_ui_test PRIVATE src)
+target_link_libraries(remote60_host_prelogin_toggle_ui_test PRIVATE advapi32 ole32 oleaut32 user32 gdi32)
+if(MSVC)
+  target_compile_options(remote60_host_prelogin_toggle_ui_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_prelogin_toggle_ui_test remote60_host_app_ui_test)
 
 # prelogin-ui r1 (item 8): the reboot-menu / prelogin-credential rule against the vectors the Android
 # JVM test also reads (apps/shared/reboot_menu_vectors.txt).
