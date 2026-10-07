@@ -706,3 +706,32 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetSessionBytesReceive
     JNIEnv* /* env */, jobject /* this */) {
   return static_cast<jlong>(g_session_controller.SessionBytesReceived());
 }
+
+// Remote reboot from the phone (prelogin-ui r1, item 8). The host's Pong capture flags for the menu's
+// rule (RemoteRebootPolicy.kt / reboot_menu_policy.hpp), one request per confirm, and its answer.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHostCaptureFlags(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_session_controller.HostCaptureFlags());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestReboot(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_session_controller.RequestReboot());
+}
+
+// [requestId, outcome, win32] once, or null while there is nothing new. outcome 0..3 = RebootResult,
+// 100 = no answer came (the link closed or desynchronised) -- not sent again by itself.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeTakeRebootOutcome(
+    JNIEnv* env, jobject /* this */) {
+  uint32_t id = 0, win32 = 0;
+  int outcome = 0;
+  if (!g_session_controller.TakeRebootOutcome(&id, &outcome, &win32)) return nullptr;
+  jlongArray out = env->NewLongArray(3);
+  if (!out) return nullptr;
+  const jlong v[3] = {static_cast<jlong>(id), static_cast<jlong>(outcome), static_cast<jlong>(win32)};
+  env->SetLongArrayRegion(out, 0, 3, v);
+  return out;
+}

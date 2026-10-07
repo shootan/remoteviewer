@@ -254,4 +254,7 @@
     <string name="ui_status_connecting">연결하는 중…</string>
     <string name="ui_status_connected">연결됨</string>
     <string name="ui_switch_busy">전환하는 중입니다. 잠시 뒤에 다시 눌러 주세요</string>
+    <!-- prelogin-ui r1 (item 8) -->
+    <string name="ui_remote_reboot">원격 PC 다시 시작</string>
+    <string name="ui_remote_reboot_confirm">다시 시작</string>
 </resources>

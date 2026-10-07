@@ -2143,6 +2143,32 @@ add_executable(remote60_reboot_wire_test
 )
 target_include_directories(remote60_reboot_wire_test PRIVATE src)
 
+# prelogin-ui r1 (item 8): the reboot-menu / prelogin-credential rule against the vectors the Android
+# JVM test also reads (apps/shared/reboot_menu_vectors.txt).
+add_executable(remote60_reboot_menu_vectors_test
+  src/reboot_menu_vectors_test.cpp
+)
+target_include_directories(remote60_reboot_menu_vectors_test PRIVATE src)
+target_compile_definitions(remote60_reboot_menu_vectors_test PRIVATE
+  "REMOTE60_REBOOT_MENU_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/reboot_menu_vectors.txt\""
+)
+
+# prelogin-ui r1 (item 8): the phone's session controller -> 84 -> a real host (started WITHOUT
+# SeShutdownPrivilege) -> 85 back. REMOTE60_ALLOW_HOST_E2E=1.
+add_executable(remote60_android_session_reboot_e2e_test
+  src/android_session_reboot_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_android_session_reboot_e2e_test PRIVATE src)
+target_link_libraries(remote60_android_session_reboot_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_android_session_reboot_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_android_session_reboot_e2e_test remote60_native_video_host_poc)
+
 # prelogin-service A1 section 1: live console observation layer (token/privilege classifiers) + live self-check.
 add_executable(remote60_prelogin_console_probe_test
   src/prelogin_console_probe_test.cpp

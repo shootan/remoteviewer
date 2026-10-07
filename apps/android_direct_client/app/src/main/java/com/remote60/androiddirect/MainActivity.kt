@@ -433,6 +433,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             closeViewerMenu("diagnostics")
             toggleViewerLogDialog()
         }
+        findViewById<View>(R.id.viewerMenuRebootButton).setOnClickListener {
+            closeViewerMenu("reboot")
+            confirmRemoteReboot()
+        }
 
         windowSheetAdapter = WindowSheetAdapter()
         viewerWindowList.adapter = windowSheetAdapter
@@ -471,6 +475,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         prepareViewerForSheet()
         renderQualityControls()
         renderClipboardButton()
+        renderRebootMenuItem()
         viewerMenuOverlay.visibility = View.VISIBLE
         diagnosticsLog.log("viewer_menu", "action=open")
     }
@@ -706,8 +711,68 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return hostEdit.text.toString().trim()
     }
 
+    /** The menu's restart item follows the host's capability; a disabled item says why. */
+    private fun renderRebootMenuItem() {
+        val menu = RemoteRebootPolicy.menu(NativeSessionBridge.nativeHostCaptureFlags())
+        val button = findViewById<View>(R.id.viewerMenuRebootButton) ?: return
+        button.isEnabled = menu.enabled
+        button.alpha = if (menu.enabled) 1.0f else 0.5f
+        findViewById<TextView>(R.id.viewerMenuRebootReason)?.apply {
+            text = if (menu.enabled) "" else RemoteRebootPolicy.DISABLED_REASON
+            visibility = if (menu.enabled) View.GONE else View.VISIBLE
+        }
+    }
+
+    /** The confirm popup. "다시 시작" sends one request; "취소" sends nothing. */
+    private fun confirmRemoteReboot() {
+        if (rebootDialog?.isShowing == true) return
+        val menu = RemoteRebootPolicy.menu(NativeSessionBridge.nativeHostCaptureFlags())
+        if (!rebootFlow.onMenu(menu)) {
+            if (!menu.enabled) Toast.makeText(this, RemoteRebootPolicy.DISABLED_REASON, Toast.LENGTH_LONG).show()
+            return
+        }
+        diagnosticsLog.log("remote_reboot", "action=confirm_open warning=${menu.showPreloginWarning}")
+        rebootDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.ui_remote_reboot)
+            .setMessage(RemoteRebootPolicy.confirmMessage(menu))
+            .setPositiveButton(R.string.ui_remote_reboot_confirm) { _, _ ->
+                val sent = rebootFlow.onConfirm()
+                diagnosticsLog.log("remote_reboot", "action=confirm sent=$sent id=${rebootFlow.requestId}")
+                rebootFlow.statusText()?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+            }
+            .setNegativeButton(R.string.ui_cancel) { _, _ -> rebootFlow.onCancel() }
+            .create()
+        rebootDialog?.setOnCancelListener { rebootFlow.onCancel() }
+        rebootDialog?.setOnDismissListener {
+            rebootDialog = null
+            applyImmersiveMode()
+        }
+        rebootDialog?.show()
+    }
+
+    /** The request's answer, polled on the status ticker (the bridge has no native->Java callback). */
+    private fun pollRebootOutcome() {
+        val o = NativeSessionBridge.nativeTakeRebootOutcome() ?: return
+        rebootFlow.onOutcome(o[0].toInt(), o[1].toInt(), o[2])
+        diagnosticsLog.log("remote_reboot", "action=outcome id=${o[0]} outcome=${o[1]} win32=${o[2]} phase=${rebootFlow.phase}")
+        rebootFlow.statusText()?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+    }
+
+    /** The phone has no sealed credential entry yet: on the pre-login screen it says so instead. */
+    private fun showPreloginCredentialNote(): Boolean {
+        if (!RemoteRebootPolicy.showCredentialUpdateNote(NativeSessionBridge.nativeHostCaptureFlags())) return false
+        diagnosticsLog.log("prelogin_credential", "action=update_note")
+        AlertDialog.Builder(this)
+            .setTitle(R.string.unlock_title)
+            .setMessage(RemoteRebootPolicy.CREDENTIAL_UPDATE_NOTE)
+            .setPositiveButton(R.string.quick_close, null)
+            .show()
+        return true
+    }
+
     private fun showUnlockDialog() {
         if (unlockDialog?.isShowing == true) return
+        if (showPreloginCredentialNote()) return  // never a plaintext entry on the pre-login screen
         val existing = savedUnlockPassword()
         val input = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -766,6 +831,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * delivering the text before the submit arrives, since they travel as separate messages.
      */
     private fun sendUnlockSequence(password: String) {
+        if (showPreloginCredentialNote()) return  // a saved password is not typed into the pre-login screen either
         if (password.isEmpty()) {
             Toast.makeText(this, R.string.unlock_no_password, Toast.LENGTH_SHORT).show()
             return
@@ -1202,6 +1268,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             viewerControlsBar.animate().alpha(viewerControlsDimAlpha).setDuration(220L).start()
         }
     }
+
+    // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request; its answer and the restart's
+    // disconnect are shown as the request's state, never as an error, and nothing is re-sent by itself.
+    private val rebootFlow = RemoteRebootFlow { NativeSessionBridge.nativeRequestReboot() }
+    private var rebootDialog: AlertDialog? = null
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPollRunnable = object : Runnable {
@@ -3552,6 +3623,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // sent is collected on the poll that is already running, and the button follows the host's
         // advertised capability as soon as the first pong reports it.
         drainIncomingClipboard()
+        pollRebootOutcome()
         // Once per session the session asks for this phone's clipboard, so a PC still holding an
         // older copy does not pull it back over what the user copied since.
         if (NativeSessionBridge.nativeTakeClipboardPushRequest()) {
@@ -3568,6 +3640,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
         connectFlowActive = isConnecting || isConnected
+        if (!isConnecting && !isConnected && rebootFlow.onDisconnected()) {
+            // The restart took the connection: the request's state, not an error.
+            val text = rebootFlow.statusText()
+            diagnosticsLog.log("remote_reboot", "action=disconnected phase=${rebootFlow.phase}")
+            rebootFlow.reset()
+            if (text != null) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.ui_remote_reboot)
+                    .setMessage(text)
+                    .setPositiveButton(R.string.quick_close, null)
+                    .show()
+            }
+        }
 
         val idleScene = homeScene()
         val onIdleScreen = currentScene == UiScene.LOGIN || currentScene == UiScene.HOSTS ||

@@ -187,6 +187,24 @@
                     android:drawableStart="@drawable/ic_ui_unlock"
                     android:text="@string/quick_unlock" />
 
+                <!-- prelogin-ui r1 (item 8): restart the remote PC, enabled only when the host takes
+                     the request (Pong 0x4000), else disabled with the reason below it. -->
+                <Button
+                    android:id="@+id/viewerMenuRebootButton"
+                    style="@style/UiSheetRow"
+                    android:drawableStart="@drawable/ic_ui_refresh"
+                    android:text="@string/ui_remote_reboot" />
+
+                <TextView
+                    android:id="@+id/viewerMenuRebootReason"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:textSize="12sp"
+                    android:alpha="0.7"
+                    android:visibility="gone" />
+
                 <Button
                     android:id="@+id/viewerMenuDiagnosticsButton"
                     style="@style/UiSheetRow"

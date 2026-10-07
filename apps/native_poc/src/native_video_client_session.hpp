@@ -116,6 +116,18 @@ class ClientSessionController {
   bool HostSecureDesktopActive() const {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
+  // The connected host's Pong capture flags (0 until the first pong). The Android viewer's menu rules
+  // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
+  uint32_t HostCaptureFlags() const { return hostCaptureFlags_.load(std::memory_order_relaxed); }
+  // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
+  // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
+  // control thread sends ControlRebootRequest (84) once; an answer that does not come is NOT asked for
+  // again -- the user decides (Codex r4 R3).
+  uint32_t RequestReboot();
+  // The answer for the request, once: outcome = RebootResult (0..3), or kRebootOutcomeNoReply when the
+  // link gave none (closed / desynchronised). False while there is nothing new.
+  static constexpr int kRebootOutcomeNoReply = 100;
+  bool TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32);
   bool RequestStreamActive(bool active);
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
@@ -234,6 +246,15 @@ class ClientSessionController {
   // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
+  std::atomic<uint32_t> hostCaptureFlags_{0};
+  // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
+  std::mutex rebootMu_;
+  uint32_t rebootPendingId_ = 0;
+  bool rebootInFlight_ = false;
+  bool rebootHasOutcome_ = false;
+  uint32_t rebootOutcomeId_ = 0;
+  int rebootOutcome_ = 0;
+  uint32_t rebootWin32_ = 0;
   std::atomic<uint64_t> sessionBytesReceived_{0};
 
   // Clipboard text sync (K1). clipMu_ guards the core and the two one-slot mailboxes: the app

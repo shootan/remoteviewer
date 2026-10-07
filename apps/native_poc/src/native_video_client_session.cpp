@@ -4,10 +4,13 @@
 #include "thumbnail_fetch_policy.hpp"
 
 #include "native_video_client_tcp_control.hpp"
+#include "reboot_wire.hpp"
 #include "poc_protocol.hpp"
 #include "udp_video_nack.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <random>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -193,6 +196,32 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
 
 bool ClientSessionController::RequestDesktopMode() {
   return RequestWindowSelect(0);
+}
+
+uint32_t ClientSessionController::RequestReboot() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return 0;
+  }
+  if ((hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagRemoteRebootV1) == 0) return 0;
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (rebootPendingId_ != 0 || rebootInFlight_) return 0;  // one out at a time
+  static std::random_device rd;
+  uint32_t id = 0;
+  while (id == 0) id = rd();
+  rebootPendingId_ = id;
+  rebootHasOutcome_ = false;
+  return id;
+}
+
+bool ClientSessionController::TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32) {
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (!rebootHasOutcome_) return false;
+  rebootHasOutcome_ = false;
+  *requestId = rebootOutcomeId_;
+  *outcome = rebootOutcome_;
+  *win32 = rebootWin32_;
+  return true;
 }
 
 bool ClientSessionController::RequestStreamActive(bool active) {
@@ -482,6 +511,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           hostSecureDesktopActive_.store(
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
+          hostCaptureFlags_.store(response.pong.captureTargetFlags, std::memory_order_relaxed);
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
           {
@@ -538,6 +568,46 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         case TcpControlResponseKind::None:
         default:
           break;
+      }
+    }
+
+    // Remote reboot (prelogin-ui r1): the confirmed request goes once. Its answer -- or that none came --
+    // is handed to the app; nothing is re-sent by itself.
+    if (!didWork && controlLink->Alive()) {
+      uint32_t rid = 0;
+      {
+        std::lock_guard<std::mutex> lock(rebootMu_);
+        if (rebootPendingId_ != 0) {
+          rid = rebootPendingId_;
+          rebootPendingId_ = 0;
+          rebootInFlight_ = true;
+        }
+      }
+      if (rid != 0) {
+        ControlOutboundAction rebootAction{};
+        rebootAction.kind = ControlOutboundActionKind::RebootRequest;
+        const std::vector<uint8_t> wire = build_reboot_request(rid);
+        std::memcpy(&rebootAction.reboot, wire.data(), sizeof(rebootAction.reboot));
+        rebootAction.expectedResponseType = MessageType::ControlRebootReply;
+        rebootAction.expectedResponseSize = sizeof(ControlRebootReplyMessage);
+        TcpControlResponse rebootResp{};
+        const bool exchanged = execute_control_action(*controlLink, rebootAction, &rebootResp);
+        const bool answered = exchanged && rebootResp.kind == TcpControlResponseKind::RebootReply &&
+                              reboot_reply_valid(rebootResp.rebootReply, rid);
+        {
+          std::lock_guard<std::mutex> lock(rebootMu_);
+          rebootInFlight_ = false;
+          rebootHasOutcome_ = true;
+          rebootOutcomeId_ = rid;
+          rebootOutcome_ = answered ? static_cast<int>(rebootResp.rebootReply.result) : kRebootOutcomeNoReply;
+          rebootWin32_ = answered ? rebootResp.rebootReply.win32 : 0;
+        }
+        didWork = true;
+        if (!exchanged) {
+          // A restart takes the link down; the app shows the request's state, not a failure.
+          if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("control link closed after a reboot request");
+          break;
+        }
       }
     }
 
@@ -990,6 +1060,13 @@ void ClientSessionController::ResetUnlocked() {
     thumbFetchQueue_.clear();
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
+  hostCaptureFlags_.store(0, std::memory_order_relaxed);
+  {
+    // A request not sent yet does not survive into another session; an answer already taken stays.
+    std::lock_guard<std::mutex> lk(rebootMu_);
+    rebootPendingId_ = 0;
+    rebootInFlight_ = false;
+  }
   // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
   // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a
   // preference, not session state. (The capability is re-learned from the next pong.)
