@@ -91,6 +91,7 @@ class FileCopyClient {
   void SetHostSupports(bool v) { hostSupports_.store(v, std::memory_order_release); }
   /** Pong carried kCaptureFlagFileOfferCopyGenV1: offers are asked with 86 and say their copy (r7). */
   void SetHostOrdersOffers(bool v) { hostOrdersOffers_.store(v, std::memory_order_release); }
+  bool HostOrdersOffers() const { return hostOrdersOffers_.load(std::memory_order_acquire); }
   /**
    * Paste on demand r7 (D2): a remote copy of files is not published here at once. It goes to the
    * gate (the viewer's UI thread, which records this PC's copies), with the copy generation of the
@@ -102,9 +103,17 @@ class FileCopyClient {
     file_copy::PublishRemoteFiles pub;
     bool hasCopyGen = false;  // an older host: no order
     uint64_t copyGen = 0;
+    uint64_t publishGen = 0;  // r8 (E2): the publish generation the offer was seen in
   };
   void SetPublishGate(std::function<void(RemoteFilesForGate)> gate);
-  void PublishApproved(file_copy::PublishRemoteFiles pub, uint32_t expectSeq);
+  /**
+   * The gate's yes. Published only while the approval still holds: the same publish generation
+   * (switching off and the session's end start a new one), file copy allowed and the offer still the
+   * remote clipboard's -- checked when it is queued, before the helper is looked for, and again after
+   * (a helper start can take long); a generation ended while its publish was being sent takes the
+   * helper down, and with it what it published (r8, E2).
+   */
+  void PublishApproved(file_copy::PublishRemoteFiles pub, uint32_t expectSeq, uint64_t publishGen);
   /**
    * The viewer's own switch (A2: file_copy_allowed on this side). Off while something runs: the
    * running paste either way ends (Disabled) -- pins released, the sender and the receiver closed,
@@ -314,7 +323,8 @@ class FileCopyClient {
   void EndReceiveLocked(file_copy::net::PasteEndReason reason);  // caller holds mu_; queues the End
   void RefuseDescriptor(uint64_t instance, uint64_t offerId, uint64_t pasteOp, file_copy::Status why);
   void Post(std::function<void()> task);  // runs on the worker (helper start / publish / clear)
-  void PostPublish(file_copy::PublishRemoteFiles pub);
+  void PostPublish(file_copy::PublishRemoteFiles pub, uint64_t publishGen);
+  bool PublishCurrentLocked(uint64_t publishGen, uint64_t offerId) const;
   void WorkerLoop();
   bool R2PEnabled() const { return launcher_ != nullptr; }
   void Log(const std::string& line);
@@ -331,6 +341,8 @@ class FileCopyClient {
   std::atomic<bool> hostSupports_{false};
   std::atomic<bool> hostOrdersOffers_{false};
   std::function<void(RemoteFilesForGate)> publishGate_;  // under mu_
+  uint64_t publishGen_ = 1;          // under mu_ (r8 E2): bumped by switching off and the session's end
+  uint64_t publishSendingGen_ = 0;   // under mu_: a publish of this generation may have reached the helper
   std::atomic<bool> allowed_{true};
   std::atomic<bool> running_{false};
 

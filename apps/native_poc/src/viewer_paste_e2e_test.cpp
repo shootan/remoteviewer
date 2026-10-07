@@ -72,6 +72,7 @@
 #include "viewer_window_proc.hpp"
 #include "test_scratch_dir.hpp"
 #include "e2e_station_lock.hpp"
+#include "file_copy_helper_host.hpp"
 
 namespace ts = remote60::native_poc::test_support;
 
@@ -497,6 +498,14 @@ int count_lines(const std::wstring& path, const std::string& needle) {
 // r5 F3b: a run with this PC's file helper ON, so the remote PC's files reach this clipboard the way
 // GNLink puts them there (the other runs leave it off: see the header).
 bool gR2P = false;
+// r8 (E3): a run against an older host build (its GNLinkStreamClipSink.exe and GNLinkClipHelper.exe
+// in this directory, e.g. 0.2.150's), REMOTE60_E2E_OLD_BIN. Empty: that run is skipped and says so.
+std::wstring gOldHostDir;
+std::wstring old_bin_dir() {
+  wchar_t buf[MAX_PATH] = L"";
+  const DWORD n = GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", buf, MAX_PATH);
+  return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
+}
 
 int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, bool legacy) {
   FILE* out = _wfreopen(resultFile.c_str(), L"w", stdout);
@@ -506,19 +515,23 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
-  const char* tag = gR2P ? "r2p" : legacy ? "legacy" : "paste";
+  const char* tag = !gOldHostDir.empty() ? "oldhost" : gR2P ? "r2p" : legacy ? "legacy" : "paste";
   const uint16_t port = e2e_pick_free_udp_port();
   check("a free UDP port for the host", port != 0, std::to_string(port));
 
-  const std::wstring scratch = ts::make_scratch_dir(gR2P ? L"paste_r2p" : legacy ? L"paste_legacy" : L"paste");
+  const std::wstring scratch =
+      ts::make_scratch_dir(!gOldHostDir.empty() ? L"paste_oldhost" : gR2P ? L"paste_r2p" : legacy ? L"paste_legacy" : L"paste");
   check("a scratch directory inside the repository", !scratch.empty(), ts::scratch_root_problem());
   if (scratch.empty() || port == 0) return 1;
   const std::wstring dir = scratch + L"\\";
   const std::wstring me = self_path();
   const std::wstring myDir = directory_of(me);
-  const bool staged = CopyFileW((myDir + L"GNLinkStreamClipSink.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
+  // The host and ITS clipboard helper (an older host brings its own); the viewer's helper is always
+  // the one beside this test.
+  const std::wstring hostDir = gOldHostDir.empty() ? myDir : gOldHostDir + L"\\";
+  const bool staged = CopyFileW((hostDir + L"GNLinkStreamClipSink.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
                       CopyFileW(me.c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE) &&
-                      CopyFileW((myDir + L"GNLinkClipHelper.exe").c_str(), (dir + L"GNLinkClipHelper.exe").c_str(), FALSE);
+                      CopyFileW((hostDir + L"GNLinkClipHelper.exe").c_str(), (dir + L"GNLinkClipHelper.exe").c_str(), FALSE);
   check("the product host, a never-answering helper and the clipboard helper are staged", staged);
 
   // The station's clipboard starts empty: whatever another test left is not this run's copy.
@@ -650,7 +663,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     remote60::native_poc::viewer::start_clip_image_client(ctx, 1200);
     // The test difference (header): no R->P helper here -- on a shared station this PC's own CF_HDROP
     // copy would come back as the remote PC's files. Set before any pong, so nothing has used it.
-    if (!gR2P) ctx.control.fileCopy.SetHelperLauncher(nullptr);
+    if (!gR2P && gOldHostDir.empty()) ctx.control.fileCopy.SetHelperLauncher(nullptr);
     remote60::native_poc::viewer::create_clip_transfer_bar(ctx);
     ingress = std::thread([&] {
       std::vector<uint8_t> buf(2048);
@@ -1030,10 +1043,118 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
       idle(1500);
       check("D2c: Ctrl+V sends nothing (the remote PC's own)", text_sends() == s && ctx.control.fileCopy.GetCounters().offersSent == off);
     }
+
+    // ---------------------------------------------------------------- r8 E2: an approved publish outlived by its session / switch
+    // Held at the seam before the helper (point 6) while file copy is switched off, or the session
+    // ends; released, nothing may land. Then the pair: a new remote copy is published as before.
+    const auto held_publish_then = [&](const char* name, const std::wstring& file, char fill, const std::function<void()>& meanwhile) {
+      copy_here([&] { return put_text(std::u16string(u"E2 L0 ") + static_cast<char16_t>(fill)); });
+      const HANDLE hit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      const HANDLE go = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      ctx.control.fileCopy.SetHelperProbeForTest([hit, go](uint64_t, int point) {
+        if (point != 6) return;
+        SetEvent(hit);
+        WaitForSingleObject(go, 10000);
+      });
+      std::ofstream(file, std::ios::binary) << std::string(1200, fill);
+      dropClipUpdates = true;
+      put_files({file});
+      const bool held = pump_until([&] { return WaitForSingleObject(hit, 0) == WAIT_OBJECT_0; }, 8000);
+      dropClipUpdates = false;
+      check(std::string(name) + ": the approved publish is held before the helper", held);
+      const DWORD seqBefore = GetClipboardSequenceNumber();
+      meanwhile();
+      SetEvent(go);
+      idle(2500);
+      ctx.control.fileCopy.SetHelperProbeForTest(nullptr);
+      check(std::string(name) + ": released, nothing was published here (the clipboard is untouched)",
+            GetClipboardSequenceNumber() == seqBefore && !helper_owns(),
+            std::to_string(GetClipboardSequenceNumber() - seqBefore) + " change(s)");
+      CloseHandle(hit);
+      CloseHandle(go);
+    };
+    const auto later_copy_published = [&](const char* name, const std::wstring& file, char fill) {
+      pump_until([&] { return ctx.control.fileCopy.Usable(); }, 10000);
+      idle(2500);  // a new session's first offer query is its baseline
+      baseline_settled();
+      std::ofstream(file, std::ios::binary) << std::string(1400, fill);
+      dropClipUpdates = true;
+      put_files({file});
+      const bool published = pump_until(helper_owns, 20000);
+      dropClipUpdates = false;
+      check(std::string(name) + ": a later remote copy is published here as before", published);
+      // On the shared station the host sees the helper's virtual files as no files: its offer clears
+      // and this viewer then takes them off this clipboard -- a change the host counts. Waited out here,
+      // so it does not fall into the next case's copy.
+      pump_until([&] { return !helper_owns(); }, 4000);
+      idle(300);
+    };
+    std::cout << "\n--- E2a. an approved publish held before the helper, file copy switched off and on meanwhile: nothing lands ---\n";
+    mark("E2a (asserted directly)", "anything", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    // Off and on again before it is released: what it was approved under has ended all the same.
+    held_publish_then("E2a", filesDir + L"\\remote g.txt", 'g', [&] {
+      ctx.control.fileCopy.SetAllowed(false);
+      ctx.control.fileCopy.SetAllowed(true);
+    });
+    later_copy_published("E2a", filesDir + L"\\remote h.txt", 'h');
+    std::cout << "\n--- E2b. an approved publish held before the helper, the session ends meanwhile: nothing lands ---\n";
+    mark("E2b (asserted directly)", "anything", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    held_publish_then("E2b", filesDir + L"\\remote i.txt", 'i', [&] { ctx.control.fileCopy.EndSession(); });
+    later_copy_published("E2b", filesDir + L"\\remote j.txt", 'j');
+
     mark("end", "");
   }
 
-  if (controlUp && !legacy && !gR2P) {
+  if (controlUp && !gOldHostDir.empty()) {
+    // ---------------------------------------------------------------- r8 E3: this viewer, an older host
+    beforeCopyHere = nullptr;  // the older host's log is not read for these cases
+    afterCopyHere = nullptr;
+    std::cout << "\n--- X. this viewer with an older host (no Pong 0x10000): text ordered, files not over a copy here ---\n";
+    check("X: the older host does not say its file offers' order (no Pong 0x10000)",
+          pump_until([&] { return ctx.control.fileCopy.Usable(); }, 15000) && !ctx.control.fileCopy.HostOrdersOffers());
+    idle(2500);  // the first offer query is the baseline
+    const std::wstring filesDir = dir + L"files";
+    CreateDirectoryW(filesDir.c_str(), nullptr);
+    const auto helper_owns = [&] {
+      DWORD o = 0;
+      if (HWND w = GetClipboardOwner()) GetWindowThreadProcessId(w, &o);
+      return o != 0 && o == ctx.control.fileCopy.HelperPid();
+    };
+    copy_here([&] { return put_text(u"X L here"); });
+    const uint64_t seen0 = ctx.control.fileCopy.GetCounters().remoteOffersSeen;
+    const std::wstring fileX = filesDir + L"\\remote x.txt";
+    std::ofstream(fileX, std::ios::binary) << std::string(900, 'x');
+    dropClipUpdates = true;
+    put_files({fileX});  // a copy of files on the remote PC
+    const bool seen = pump_until([&] { return ctx.control.fileCopy.GetCounters().remoteOffersSeen > seen0; }, 15000);
+    dropClipUpdates = false;
+    idle(2000);
+    // On the shared station the files ARE the clipboard now (the host's copy); what the case is about
+    // is that this viewer's helper did not publish them over this PC's copy, and said why.
+    check("X: the older host's files were offered", seen);
+    check("X: this viewer's helper did not publish them (this PC's copy kept)", !helper_owns());
+    const std::wstring bar = bar_text();
+    check("X: the bar says the remote PC needs updating", bar.find(L"업데이트") != std::wstring::npos, narrow(bar));
+    copy_here([&] { return put_text(u"X L2 here"); });
+    passApplies = true;  // the product's own R->P text apply runs here
+    const bool put = copy_remote([&] { return put_text(u"X R text on the remote PC"); }, 300);
+    DWORD o = 0;
+    // Waited for, not timed: the copy the host counts and the poll that brings it.
+    const bool landed = pump_until([&] { return station_text(&o) == u"X R text on the remote PC" && o == GetCurrentProcessId(); }, 6000);
+    passApplies = false;
+    check("X: the older host's later text is written here (its text is ordered)", put && landed,
+          "put " + std::to_string(put) + " owner " + std::to_string(o) + " hostCopyGen " +
+              std::to_string(ctx.control.clipboard.hostCopyGen.load()) + " knownGen " +
+              std::to_string(ctx.control.clipboard.policy.knownGeneration()) + " held-back " + std::to_string(heldApply));
+    copy_here([&] { return put_text(u"X L3 here"); });
+    const uint32_t s = text_sends();
+    ctrl_v();
+    answered(s);
+    check("X: Ctrl+V of this PC's copy still pastes on the older host", text_sends() == s + 1);
+    mark("end", "");
+  }
+
+  if (controlUp && !legacy && !gR2P && gOldHostDir.empty()) {
     // ---------------------------------------------------------------- A. a copy here sends nothing
     std::cout << "\n--- A. copies on this PC: text, an image, files -- nothing goes to the remote PC ---\n";
     const std::wstring filesDir = dir + L"files";
@@ -1887,7 +2008,9 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     std::cout << "      host: paste-apply lines " << applies << " (not applied " << failed << "), text v1 updates "
               << legacyUpdates << ", held-back host texts " << heldApply << "\n";
     check("host log: no copy-time text update (51) at all", legacyUpdates == 0);
-    if (legacy || gR2P) {
+    if (!gOldHostDir.empty()) {
+      // the older host's log lines are its own; only the paste above was asked
+    } else if (legacy || gR2P) {
       check("host log: the host was never asked to paste", applies == 0);
     } else {
       check("host log: one paste-apply line per text request the viewer sent", applies == static_cast<int>(text_sends()),
@@ -1895,7 +2018,9 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
       check("host log: exactly one write failed (the busy clipboard, at OpenClipboard)",
             failed == 1 && count_lines(hostLogPath, " result=1 stage=1 ") == 1, std::to_string(failed));
     }
-    CopyFileW(hostLogPath.c_str(), (outDir + L"\\host_" + (gR2P ? L"r2p" : legacy ? L"legacy" : L"paste") + L".log").c_str(), FALSE);
+    CopyFileW(hostLogPath.c_str(),
+              (outDir + L"\\host_" + (!gOldHostDir.empty() ? L"oldhost" : gR2P ? L"r2p" : legacy ? L"legacy" : L"paste") + L".log").c_str(),
+              FALSE);
   }
   check("the scratch run directory is removed", hostGone && ts::remove_scratch_run_dir());
   std::printf("CHILD RESULT: %s  (%d checks, %d failed) [%s]\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures, tag);
@@ -1994,9 +2119,9 @@ void run_bar_on_visible_desktop(const std::wstring& outDir) {
 /** Runs a child on a private window station; its PASS/FAIL lines count here. */
 std::vector<DWORD> gTestPids;  // this process, its children, the hosts they started
 
-void run_child_on_private_station(const std::wstring& outDir, bool legacy, bool r2p = false) {
+void run_child_on_private_station(const std::wstring& outDir, bool legacy, bool r2p = false, const std::wstring& oldHost = L"") {
   std::cout << "\n=== child on a private window station" << (legacy ? " (legacy host)" : "") << (r2p ? " (R->P helper on)" : "")
-            << " ===\n";
+            << (oldHost.empty() ? "" : " (an older host build)") << " ===\n";
   HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
   wchar_t name[256] = L"";
   DWORD len = 0;
@@ -2009,10 +2134,14 @@ void run_child_on_private_station(const std::wstring& outDir, bool legacy, bool 
     SetProcessWindowStation(orig);
   }
   check("a private window station for the child", ws != nullptr && dk != nullptr);
-  const std::wstring result = outDir + (r2p ? L"\\child_r2p.txt" : legacy ? L"\\child_legacy.txt" : L"\\child_paste.txt");
+  const std::wstring result = outDir + (!oldHost.empty() ? L"\\child_oldhost.txt"
+                                        : r2p             ? L"\\child_r2p.txt"
+                                        : legacy          ? L"\\child_legacy.txt"
+                                                          : L"\\child_paste.txt");
   std::wstring desktop = std::wstring(name) + L"\\Default";
   std::wstring cmd = L"\"" + self_path() + L"\" --paste-child \"" + result + L"\" --out \"" + outDir + L"\"" +
-                     (legacy ? L" --legacy-host" : L"") + (r2p ? L" --r2p" : L"");
+                     (legacy ? L" --legacy-host" : L"") + (r2p ? L" --r2p" : L"") +
+                     (oldHost.empty() ? L"" : L" --old-host \"" + oldHost + L"\"");
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   si.lpDesktop = desktop.data();
@@ -2074,6 +2203,7 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--paste-child" && i + 1 < argc) childResult = argv[++i];
     if (a == L"--legacy-host") legacy = true;
     if (a == L"--r2p") gR2P = true;
+    if (a == L"--old-host" && i + 1 < argc) gOldHostDir = argv[++i];
   }
   if (!childResult.empty()) return run_paste_child(childResult, outDir, legacy);
   if (!host_e2e_allowed()) {
@@ -2106,6 +2236,12 @@ int wmain(int argc, wchar_t** argv) {
   phase_seq("the legacy-host run");
   run_child_on_private_station(outDir, false, true);
   phase_seq("the R->P helper run");
+  if (old_bin_dir().empty()) {
+    std::printf("SKIP  the older-host run: REMOTE60_E2E_OLD_BIN not set (a directory with an older GNLinkStreamClipSink.exe + GNLinkClipHelper.exe)\n");
+  } else {
+    run_child_on_private_station(outDir, false, false, old_bin_dir());
+    phase_seq("the older-host run");
+  }
   run_bar_on_visible_desktop(outDir);
   phase_seq("the visible-desktop bar");
   const DWORD interactiveClipAfter = GetClipboardSequenceNumber();

@@ -986,11 +986,21 @@ void apply_remote_text(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteTextAp
   gLatestCopy.NoteRemoteCopy();  // a copy made on the remote PC: the next Ctrl+V pastes it there
 }
 
+// r8 (E3): a host that does not say which copy its file offers are (no Pong 0x10000 -- 0.2.150 too,
+// although it orders its text): their order against this PC's copy cannot be known. This PC's copy is
+// kept and the user is told the remote PC needs updating.
+void show_remote_files_update_needed() {
+  gPasteLine.text = L"원격 PC에서 복사한 파일을 가져오려면 원격 PC의 GNLink 를 업데이트해야 합니다 (이 PC 클립보드는 그대로 둡니다)";
+  gPasteLine.failed = true;
+  gPasteLine.retry = false;
+  gPasteLine.untilUs = qpc_now_us() + remote60::native_poc::kClipBarResultUs;
+  remote60::native_poc::clip_transfer_bar_refresh();
+}
+
 // The remote PC's files, published here only if newer than this PC's copy -- the text's rule (r7 D2).
 // The clipboard revision decided on is read with the clipboard held, and only when no change here is
 // waiting to be handled; the helper then publishes only over that revision (it checks with the
 // clipboard held), so a copy made here after this decision is never covered by the late publish.
-bool gToldUnorderedFiles = false;
 void decide_remote_files(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteFilesDecide> d) {
   if (d->connGen != paste_conn_gen(ctx)) {
     paste_log("remote files not published here: they came on an earlier connection");
@@ -1000,9 +1010,12 @@ void decide_remote_files(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteFile
     paste_log("remote files not published here: older than this PC's copy (copyGen=" + std::to_string(d->files.copyGen) + ")");
     return;
   }
-  if (!d->files.hasCopyGen && !gToldUnorderedFiles) {
-    gToldUnorderedFiles = true;
-    paste_log("this host does not order its file copies (older host): its files are published without the order rule");
+  if (!d->files.hasCopyGen && (gLocalBasePending || gGenAtLocalValid || gLatestCopy.LocalIsLatest())) {
+    // r8 (E3): unordered files are published only when no copy here is in play -- none recorded this
+    // session and the remote PC's copy already the newest. Otherwise this PC's copy is kept.
+    paste_log("remote files not published here: this host does not order its file copies (it needs updating); this PC's copy is kept");
+    show_remote_files_update_needed();
+    return;
   }
   if (!remote60::native_poc::clipboard_open_with_retry(hwnd)) {
     paste_log("remote files not published here: this PC's clipboard is busy");
@@ -1021,7 +1034,7 @@ void decide_remote_files(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteFile
     if (!PostMessageW(hwnd, kMsgDecideRemoteFiles, 0, reinterpret_cast<LPARAM>(again))) delete again;
     return;
   }
-  ctx.control.fileCopy.PublishApproved(std::move(d->files.pub), seq);
+  ctx.control.fileCopy.PublishApproved(std::move(d->files.pub), seq, d->files.publishGen);
 }
 
 // A clipboard change on this PC. Nothing is sent; it only decides what the next Ctrl+V pastes.

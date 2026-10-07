@@ -530,9 +530,14 @@ void on_publish(std::unique_ptr<PublishRemoteFiles> m) {
   // r7 (D2): a publish approved over a given clipboard revision lands only on that revision. The
   // check is made with the clipboard held by OLE's own clipboard window of this thread, which
   // OleSetClipboard then opens again (the same window may) -- nothing else can change the clipboard
-  // between the check and the publish. Measured on Windows 11 26200 (private station): OleGetClipboard
-  // creates that window without changing the clipboard; OleSetClipboard succeeds with it held and
-  // closes it. Without that window, or the clipboard, the publish is refused -- never unguarded.
+  // between the check and the publish.
+  // LIMIT (r8): this rests on OLE internals that are not part of its documented contract -- the
+  // private window class name "CLIPBRDWNDCLASS", that OleGetClipboard creates that window, and that
+  // OleSetClipboard opens the clipboard again with it held. All three were measured on ONE machine
+  // only (Windows 11 build 26200, a private window station, .claude/exp/ole_open_exp.cpp of t-y4wj64jw
+  // r7); other Windows builds are unverified. Here, when the window is not found or the clipboard
+  // cannot be held, the publish is refused rather than made unguarded; what an OLE that behaves
+  // otherwise would do past this point has not been measured.
   HWND guardWnd = nullptr;  // held for the check; OleSetClipboard opens it again and closes it
   if (m->ifUnchanged) {
     IDataObject* probe = nullptr;

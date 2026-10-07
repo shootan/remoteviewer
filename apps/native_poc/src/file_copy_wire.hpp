@@ -363,7 +363,7 @@ inline bool parse_ordered(const std::vector<uint8_t>& b, OfferQueryReply* m) {
   if (b.size() < 8) return false;
   const std::vector<uint8_t> head(b.begin(), b.end() - 8);
   if (!parse(head, m)) return false;
-  ByteReader r(std::vector<uint8_t>(b.end() - 8, b.end()));
+  ByteReader r(b.data() + b.size() - 8, 8);  // the input's own tail: alive for the whole call (r8 E1)
   return r.u64(&m->copyGen) && r.done();
 }
 

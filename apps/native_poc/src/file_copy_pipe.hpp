@@ -297,6 +297,9 @@ class ByteReader {
  public:
   ByteReader(const uint8_t* p, size_t n) : p_(p), n_(n) {}
   explicit ByteReader(const std::vector<uint8_t>& v) : p_(v.data()), n_(v.size()) {}
+  // The reader keeps only a pointer: a temporary vector would be freed at the end of the statement
+  // that made the reader, before anything is read (paste on demand r8, E1). Not allowed to compile.
+  explicit ByteReader(std::vector<uint8_t>&&) = delete;
   bool ok() const { return ok_; }
   bool done() const { return ok_ && pos_ == n_; }
   size_t remaining() const { return n_ - pos_; }

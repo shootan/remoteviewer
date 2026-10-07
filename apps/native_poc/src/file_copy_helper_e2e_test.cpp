@@ -1212,6 +1212,30 @@ int run_driver() {
     bad.Close();
   }
 
+  // ---------------------------------------------------------------- r8: a version-1 helper binary
+  {
+    // An older install's helper (REMOTE60_E2E_OLD_BIN, e.g. 0.2.150's): the real binary, on the
+    // product's launch path, on this station. It speaks pipe version 1: refused at its Hello, so a
+    // viewer never uses it -- never sends it PublishRemoteFilesIfUnchanged (18).
+    wchar_t buf[MAX_PATH] = L"";
+    const DWORD n = GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+      std::printf("SKIP  a version-1 helper binary (REMOTE60_E2E_OLD_BIN not set)\n");
+    } else {
+      std::printf("\n--- a version-1 helper (an older install's binary) ---\n");
+      HelperLink v1;
+      std::string why;
+      check("a server pipe for it", v1.CreateServerPipe(userSid, &why), why);
+      const bool launched = v1.Launch(std::wstring(buf, n) + L"\\GNLinkClipHelper.exe", nullptr, station.desktop.c_str(),
+                                      L"--idle-ms 3000", &why);
+      check("...it is launched", launched, why);
+      std::string helloWhy;
+      const bool hello = launched && v1.AwaitHello(10000, &helloWhy);
+      check("A VERSION-1 HELPER IS REFUSED AT ITS HELLO (never used, never sent 18)", launched && !hello, helloWhy);
+      v1.Close();
+    }
+  }
+
   // ---------------------------------------------------------------- the helper, for real
   std::printf("\n--- the helper starts, proves itself, and is under the Job ---\n");
   HelperLink link;
