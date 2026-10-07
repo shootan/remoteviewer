@@ -791,6 +791,11 @@ int wmain(int argc, wchar_t** argv) {
     check("[prelogin] ...and it did so over UDP (register only happens in the UDP branch)",
           dir.Count("/api/host/register") >= 1,
           "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    // r6 G2 negative control: a --control-port was passed, yet prelogin opens NO separate TCP control
+    // listener (the UDP control channel is the only path), so this startup line never prints.
+    check("[prelogin] no separate TCP control listener is opened (G2 side channel off)",
+          host.log().find("control waiting port=") == std::string::npos,
+          "prelogin must not expose an unauthenticated TCP control link");
     host.Stop();
     check("[prelogin] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }

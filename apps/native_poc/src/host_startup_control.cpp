@@ -55,6 +55,7 @@
 #include "capture_cadence_gate.hpp"
 #include "control_resume.hpp"
 #include "host_diag_log.hpp"
+#include "prelogin_ingress_policy.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "encode_resolution_ladder.hpp"
@@ -112,7 +113,10 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;
-  if (args.controlPort > 0) {
+  // r6 G2: in prelogin the ONLY control path is the authenticated UDP control channel tunnelled over the
+  // media socket. A separate TCP control listener would accept an unauthenticated link that borrows the
+  // shared directoryAuthenticated+epoch state, so it is not opened in prelogin.
+  if (args.controlPort > 0 && remote60::native_poc::prelogin::PreloginAllowsSideChannel(args.preloginMode)) {
     clientSession.controlListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (clientSession.controlListenSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] control listen socket create failed port=" << args.controlPort << "\n";
