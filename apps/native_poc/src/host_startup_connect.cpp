@@ -88,6 +88,8 @@
 #include "prelogin_ingress_policy.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_worker_binding.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
@@ -258,18 +260,34 @@ int startup_connect_client(HostContext& hx) {
         const std::wstring recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
         remote60::native_poc::prelogin::MachineRecord rec;
         uint32_t w = 0;
-        if (remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w) ==
-            remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
+        const auto readStatus =
+            remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w);
+        if (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
+          // r6 G6: adopt ONLY a record that is Usable under the SAME binding the service gate uses --
+          // current machine id + the durable owner floor. A server-revoke/floor-raise, a copied blob, a
+          // wrong-machine record, or a floor that cannot be read all keep the worker OFFLINE, rather than
+          // the old `enabled && Unpack` that ignored the revoke.
+          uint64_t floor = 0;
+          const bool floorKnown = remote60::native_poc::prelogin::ReadPreloginOwnerFloor(&floor);
           remote60::native_poc::prelogin::DirectoryCredential dc;
-          if (rec.enabled && remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
+          if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
+                  rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
+              remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
             clientSession.directoryUrl = rec.directoryOrigin;
             clientSession.directoryId = dc.accountId;
             preloadHostId = dc.hostId;
             preloadHostToken = dc.hostToken;
             std::cout << "[native-video-host][prelogin] machine credential loaded hostId=" << dc.hostId << "\n";
+          } else {
+            std::cout << "[native-video-host][prelogin] machine credential revoked/unbound -> staying offline\n";
           }
         } else {
-          std::cout << "[native-video-host][prelogin] no usable machine credential -> staying offline\n";
+          // Distinguish a genuinely un-enrolled box (no file) from a read/validation error.
+          std::cout << "[native-video-host][prelogin] "
+                    << (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Read
+                            ? "no machine credential enrolled"
+                            : "machine credential unreadable")
+                    << " -> staying offline\n";
         }
       }
     }

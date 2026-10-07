@@ -2215,6 +2215,12 @@ add_executable(remote60_prelogin_ingress_policy_test
 )
 target_include_directories(remote60_prelogin_ingress_policy_test PRIVATE src)
 
+# prelogin-service r6 G6: --prelogin worker adopts only a record Usable under the owner floor + binding.
+add_executable(remote60_prelogin_worker_binding_test
+  src/prelogin_worker_binding_test.cpp
+)
+target_include_directories(remote60_prelogin_worker_binding_test PRIVATE src)
+
 # prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
 add_executable(remote60_prelogin_supervisor_test
   src/prelogin_supervisor_test.cpp

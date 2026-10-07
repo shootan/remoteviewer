@@ -31,6 +31,7 @@
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
+#include "prelogin_owner_floor.hpp"
 #include "prelogin_ready_signal.hpp"
 #include "prelogin_supervisor.hpp"
 
@@ -874,18 +875,8 @@ std::wstring machine_record_path() {
 // The durable owner-generation FLOOR, kept OUTSIDE the record (HKLM, SYSTEM/Admins) so it cannot be
 // rolled back by restoring an old on-disk blob (Codex S2). Disable/revoke bumps it above the current
 // record's generation; a restored older-generation record then validates as Revoked. Default 0.
-constexpr wchar_t kOwnerFloorKey[] = L"SOFTWARE\\GNLink";
-constexpr wchar_t kOwnerFloorValue[] = L"PreloginOwnerFloor";
-
-uint64_t read_prelogin_owner_floor() {
-  uint64_t v = 0;
-  DWORD cb = sizeof(v);
-  if (RegGetValueW(HKEY_LOCAL_MACHINE, kOwnerFloorKey, kOwnerFloorValue,
-                   RRF_RT_REG_QWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &v, &cb) != ERROR_SUCCESS) {
-    return 0;
-  }
-  return v;
-}
+// The read primitive (with error-vs-absent distinction) is shared with the --prelogin worker in
+// prelogin_owner_floor.hpp (G6); kOwnerFloorKey/kOwnerFloorValue come from there.
 
 // Raise the floor to `floor` (monotonic; never lowers). Called by the disable/revoke path so a later
 // restore of an old enabled blob is rejected. Returns true on success.
@@ -916,11 +907,14 @@ bool prelogin_feature_enabled() {
   MachineRecord rec;
   uint32_t win32 = 0;
   if (ReadAndOpenMachineRecord(path, &rec, &win32) != MachineStoreStatus::Ok) return false;
+  uint64_t floor = 0;
+  // G6: a floor that cannot be read is NOT floor 0 -- fail safe (feature off) rather than fail open.
+  if (!ReadPreloginOwnerFloor(&floor)) return false;
   BindingContext ctx;
   ctx.currentMachineId = current_machine_guid();
   ctx.expectedAccountId = 0;        // any account enrolled on this machine
   ctx.originAllowed = true;         // origin binding verified at register time; not re-litigated here
-  ctx.minOwnerGeneration = read_prelogin_owner_floor();  // EXTERNAL durable floor (S2): record cannot self-pass
+  ctx.minOwnerGeneration = floor;   // EXTERNAL durable floor (S2): record cannot self-pass
   ctx.featureGateEnabled = true;
   return ValidateMachineRecord(rec, ctx) == RecordVerdict::Usable;
 }
