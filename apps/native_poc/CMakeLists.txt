@@ -406,6 +406,7 @@ add_dependencies(remote60_file_copy_helper_e2e_test remote60_file_copy_helper)
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_startup.cpp
+  src/viewer_reboot_prompt.cpp
   src/viewer_clip_image_wiring.cpp
   src/viewer_shutdown.cpp
   src/viewer_present.cpp
@@ -2483,6 +2484,17 @@ target_include_directories(remote60_session_toolbar_click_test PRIVATE src)
 target_link_libraries(remote60_session_toolbar_click_test PRIVATE user32 gdi32 shell32)
 if(MSVC)
   target_compile_options(remote60_session_toolbar_click_test PRIVATE /utf-8)
+endif()
+
+# prelogin-service r3 (d-viewer): the in-toolbar remote-reboot item renders + routes to onReboot.
+add_executable(remote60_session_toolbar_reboot_test
+  src/session_toolbar_reboot_test.cpp
+  src/client_session_toolbar.cpp
+)
+target_include_directories(remote60_session_toolbar_reboot_test PRIVATE src)
+target_link_libraries(remote60_session_toolbar_reboot_test PRIVATE user32 gdi32 shell32)
+if(MSVC)
+  target_compile_options(remote60_session_toolbar_reboot_test PRIVATE /utf-8)
 endif()
 
 # Clipboard text sync core (K1): the wire codec and the echo-loop state machine, with no Win32,

@@ -33,6 +33,7 @@ enum ButtonId : int {
   // Chords the local OS eats before they can be typed at the remote machine.
   kButtonShowDesktop = 4,
   kButtonSwitchWindow = 5,
+  kButtonReboot = 6,  // prelogin-service r3: opens the reboot confirm popup
 };
 
 struct Button {
@@ -186,6 +187,9 @@ SIZE rebuild_layout() {
   if (g.callbacks.onSwitchWindow) add(kButtonSwitchWindow, L"화면전환", false);
   const std::wstring monitors = monitor_label();
   if (!monitors.empty()) add(kButtonMonitor, monitors + L" ▾", false);
+  // Remote reboot (prelogin-service r3): inside the toolbar (never a bare standalone button), gated on
+  // the host advertising the capability so an old host never shows an item it cannot serve.
+  if (g.callbacks.onReboot && g.state.rebootSupported) add(kButtonReboot, L"다시 시작", false);
 
   const int statusWidth = text_width(status_text());
   SIZE size{};
@@ -453,6 +457,9 @@ LRESULT CALLBACK toolbar_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
           }
         }
+      } else if (pressed == kButtonReboot) {
+        if (g.callbacks.onLog) g.callbacks.onLog("[toolbar] reboot clicked");
+        if (g.callbacks.onReboot) g.callbacks.onReboot();
       }
       return 0;
     }

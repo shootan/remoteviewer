@@ -6,6 +6,8 @@
 #include <windowsx.h>
 #include "viewer_gdi_util.hpp"
 #include "viewer_startup.hpp"
+#include "viewer_reboot_prompt.hpp"
+#include "poc_protocol.hpp"
 
 #include "viewer_cancel_channel.hpp"
 #include "bounded_process_exit.hpp"
@@ -249,6 +251,15 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
       ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
+    };
+    // Remote reboot (prelogin-service r3): the in-menu item opens a confirm popup; the warning line is
+    // shown when the host is NOT durable-enabled. Only on 확인 does the control thread send one request.
+    toolbarCallbacks.onReboot = [&ctx] {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const bool warn = (flags & remote60::native_poc::kCaptureFlagPreloginEnabledV1) == 0;
+      if (remote60::native_poc::show_reboot_confirm(ctx.session.hwnd, warn)) {
+        ctx.session.rebootRequested.store(true, std::memory_order_release);
+      }
     };
     remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);

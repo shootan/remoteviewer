@@ -30,6 +30,7 @@ struct SessionToolbarCallbacks {
    */
   std::function<void()> onShowDesktop;   // Win+D on the host
   std::function<void()> onSwitchWindow;  // Alt+Tab on the host
+  std::function<void()> onReboot;        // prelogin-service r3: open the reboot confirm popup
   std::function<void(uint32_t monitorId)> onMonitor;
   /**
    * Where this window says what it did with a click.
@@ -98,6 +99,7 @@ struct SessionToolbarState {
   bool connected = false;
   bool inputOn = false;
   bool macroOpen = false;
+  bool rebootSupported = false;  // host advertised kCaptureFlagRemoteRebootV1 (prelogin-service r3)
   SessionHealth health = SessionHealth::Good;  // the dot beside the frame rate
   bool relay = false;  // the billed path, so it is worth saying out loud
   /**
