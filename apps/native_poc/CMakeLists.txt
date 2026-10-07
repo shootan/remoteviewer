@@ -2195,6 +2195,12 @@ add_executable(remote60_prelogin_ready_signal_test
 )
 target_include_directories(remote60_prelogin_ready_signal_test PRIVATE src)
 
+# prelogin-service r6 G9: child-launch adoption gate (Job-bind required; launch-token re-judgement).
+add_executable(remote60_prelogin_child_launch_test
+  src/prelogin_child_launch_test.cpp
+)
+target_include_directories(remote60_prelogin_child_launch_test PRIVATE src)
+
 # prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
 add_executable(remote60_prelogin_supervisor_test
   src/prelogin_supervisor_test.cpp

@@ -1,9 +1,14 @@
 #include <windows.h>
+#include <bcrypt.h>
 #include <sddl.h>
+#include <userenv.h>
 #include <wtsapi32.h>
 #pragma comment(lib, "Wtsapi32.lib")
+#pragma comment(lib, "Userenv.lib")
+#pragma comment(lib, "Bcrypt.lib")
 
 #include <thread>
+#include <vector>
 
 #include "poc_protocol.hpp"
 #include "sealed_unlock.hpp"
@@ -22,6 +27,7 @@
 #include "secure_input_diag_budget.hpp"
 
 // Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
+#include "prelogin_child_launch.hpp"
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -819,6 +825,9 @@ HANDLE gPreloginWorker = nullptr;  // GNLinkStream.exe --prelogin, SYSTEM, conso
 DWORD gPreloginWorkerSession = 0xFFFFFFFFu;  // the console session that worker was launched for (S5 identity)
 HANDLE gUserHostProcess = nullptr; // GNLinkHost.exe --tray, launched for the logged-on user at handoff
 DWORD gUserHostSession = 0xFFFFFFFFu;        // the session that host was launched for (S5 identity)
+// Per-launch readiness nonce (G9): the service injects this into the user Host it starts, and ONLY that
+// host can signal the ready event the service waits on -- a foreign/stale GNLinkStream cannot.
+std::wstring gUserHostReadyNonce;
 // All launched children join this Job with KILL_ON_JOB_CLOSE, so a SYSTEM worker can never outlive the
 // service: if the service process dies for any reason, closing its last handle to the job kills them
 // (Codex S5 lifetime boundary). Created lazily on the first launch.
@@ -949,9 +958,21 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
                             nullptr, &startup, &proc) != FALSE;
   CloseHandle(childToken);
   if (!ok) return nullptr;
-  if (HANDLE job = ensure_child_job()) (void)AssignProcessToJobObject(job, proc.hProcess);
-  ResumeThread(proc.hThread);
+  // G9: NEVER resume a child we could not bind to the kill-on-close Job. ensure_child_job() or the
+  // assignment failing means the lifetime boundary is absent -- an un-jobbed SYSTEM worker would outlive
+  // the service. Terminate the still-suspended child and report failure instead of adopting it.
+  HANDLE job = ensure_child_job();
+  const bool jobAssigned = (job != nullptr) && (AssignProcessToJobObject(job, proc.hProcess) != FALSE);
+  const bool resumed = jobAssigned && (ResumeThread(proc.hThread) != static_cast<DWORD>(-1));
+  const ChildLaunchDisposition disp = DecideChildAdoption(/*createdSuspended=*/true, jobAssigned, resumed);
   CloseHandle(proc.hThread);
+  if (disp != ChildLaunchDisposition::Adopt) {
+    (void)TerminateProcess(proc.hProcess, 0);
+    (void)WaitForSingleObject(proc.hProcess, 1000);
+    CloseHandle(proc.hProcess);
+    diag("prelogin: child launch aborted (job=%d resume=%d) -> terminated, not adopted", jobAssigned, resumed);
+    return nullptr;
+  }
   return proc.hProcess;
 }
 
@@ -980,6 +1001,45 @@ void ensure_prelogin_worker(DWORD consoleSession) {
        gPreloginWorker ? "ok" : "FAILED");
 }
 
+// Per-launch readiness nonce (G9): unguessable so only the host THIS launch started can satisfy the
+// handoff. Random preferred; a tick+counter fallback still yields a per-launch unique value.
+std::wstring make_launch_nonce() {
+  unsigned char b[8]{};
+  if (BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0) {
+    wchar_t hex[17]{};
+    for (int i = 0; i < 8; ++i) _snwprintf_s(hex + i * 2, 3, _TRUNCATE, L"%02x", b[i]);
+    return hex;
+  }
+  static std::atomic<uint32_t> ctr{0};
+  wchar_t buf[32]{};
+  _snwprintf_s(buf, _TRUNCATE, L"%08llx%08x", static_cast<unsigned long long>(GetTickCount64()),
+               ctr.fetch_add(1, std::memory_order_relaxed));
+  return buf;
+}
+
+// Build the user's own environment block (CreateEnvironmentBlock for the launch token's profile -- G9:
+// NOT the SYSTEM service's inherited environment) with the readiness nonce injected. On failure the block
+// still carries at least the nonce so the ready binding holds.
+std::vector<wchar_t> build_user_env_with_nonce(HANDLE token, const std::wstring& nonce) {
+  std::vector<wchar_t> out;
+  const std::wstring var = L"REMOTE60_PRELOGIN_READY_NONCE=" + nonce;
+  LPVOID penv = nullptr;
+  if (CreateEnvironmentBlock(&penv, token, FALSE) && penv) {
+    const wchar_t* p = static_cast<const wchar_t*>(penv);
+    while (*p) {
+      const size_t len = wcslen(p);
+      if (_wcsnicmp(p, L"REMOTE60_PRELOGIN_READY_NONCE=", 29) != 0)
+        out.insert(out.end(), p, p + len + 1);  // copy entry incl. its null
+      p += len + 1;
+    }
+    DestroyEnvironmentBlock(penv);
+  }
+  out.insert(out.end(), var.begin(), var.end());
+  out.push_back(L'\0');  // terminate our entry
+  out.push_back(L'\0');  // double-null terminate the block
+  return out;
+}
+
 // Launch the logged-on user's own Host with the verified user/linked-Full token (the service-owned
 // handoff that replaces the elevated HKCU Run). The token matrix is resolved by the console probe
 // classifiers; here we obtain the primary token and, for a Limited token, its linked Full.
@@ -988,8 +1048,6 @@ void launch_user_host(DWORD consoleSession) {
   if (child_alive(gUserHostProcess) && gUserHostSession == consoleSession) return;
   stop_child(&gUserHostProcess);
   gUserHostSession = 0xFFFFFFFFu;
-  // Clear any prior session's readiness so the handoff waits for THIS host's real ready signal (r4 #7).
-  ResetUserHostReady();
   HANDLE userToken = nullptr;
   if (!WTSQueryUserToken(consoleSession, &userToken)) {
     diag("prelogin: handoff WTSQueryUserToken failed err=%lu", GetLastError());
@@ -1007,6 +1065,21 @@ void launch_user_host(DWORD consoleSession) {
       launchToken = linked;  // use the Full linked token (Q4 Limited+linked path)
     }
   }
+  // G9: re-judge the FINAL launch token at the instant of launch, not just at the earlier observation.
+  // If the token drifted to a non-admin / unresolvable state, abort the handoff rather than start a Host
+  // with the wrong authority.
+  const PrivilegeFacts facts = GatherPrivilegeFactsFromToken(reinterpret_cast<void*>(launchToken));
+  const UserPrivilege priv = ClassifyPrivilege(facts);
+  if (!LaunchTokenAcceptable(priv)) {
+    diag("prelogin: handoff aborted -- launch token not a supported admin at launch time");
+    if (linked) CloseHandle(linked);
+    CloseHandle(userToken);
+    return;
+  }
+  // A fresh per-launch nonce binds the ready event to THIS host. Clear any prior/foreign signal first.
+  const std::wstring nonce = make_launch_nonce();
+  ResetUserHostReady(nonce);
+  std::vector<wchar_t> env = build_user_env_with_nonce(launchToken, nonce);
   const std::wstring exe = sibling_exe_path(L"GNLinkHost.exe");
   wchar_t command[32768]{};
   _snwprintf_s(command, _TRUNCATE, L"\"%s\" --tray", exe.c_str());
@@ -1015,17 +1088,29 @@ void launch_user_host(DWORD consoleSession) {
   std::wstring desktopSpec = L"winsta0\\Default";
   startup.lpDesktop = desktopSpec.data();
   PROCESS_INFORMATION proc{};
-  const BOOL ok = CreateProcessAsUserW(launchToken, nullptr, command, nullptr, nullptr, FALSE,
-                                       CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
-                                       nullptr, nullptr, &startup, &proc);
-  if (ok) {
-    if (HANDLE job = ensure_child_job()) (void)AssignProcessToJobObject(job, proc.hProcess);  // S5 lifetime
-    ResumeThread(proc.hThread);
+  const BOOL created = CreateProcessAsUserW(launchToken, nullptr, command, nullptr, nullptr, FALSE,
+                                            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
+                                            nullptr, env.data(), &startup, &proc);
+  bool adopted = false;
+  if (created) {
+    // G9: same Job gate as the SYSTEM worker -- never resume a host we could not bind to the Job.
+    HANDLE job = ensure_child_job();
+    const bool jobAssigned = (job != nullptr) && (AssignProcessToJobObject(job, proc.hProcess) != FALSE);
+    const bool resumed = jobAssigned && (ResumeThread(proc.hThread) != static_cast<DWORD>(-1));
     CloseHandle(proc.hThread);
-    gUserHostProcess = proc.hProcess;
-    gUserHostSession = consoleSession;  // S5 identity
+    if (DecideChildAdoption(/*createdSuspended=*/true, jobAssigned, resumed) ==
+        ChildLaunchDisposition::Adopt) {
+      gUserHostProcess = proc.hProcess;
+      gUserHostSession = consoleSession;   // S5 identity
+      gUserHostReadyNonce = nonce;         // the service now waits ONLY on this launch's ready event
+      adopted = true;
+    } else {
+      (void)TerminateProcess(proc.hProcess, 0);
+      (void)WaitForSingleObject(proc.hProcess, 1000);
+      CloseHandle(proc.hProcess);
+    }
   }
-  diag("prelogin: user host handoff -> %s", ok ? "launched" : "FAILED");
+  diag("prelogin: user host handoff -> %s", adopted ? "launched" : "FAILED");
   if (linked) CloseHandle(linked);
   CloseHandle(userToken);
 }
@@ -1056,7 +1141,7 @@ SupervisorObservation observe_console(DWORD* consoleOut, bool consoleChanged) {
     // Real ready signal (r4 #7): the handoff completes only when the launched user Host is BOTH alive
     // AND has signalled it reached its ready point (directory-registered + serving), never on the bare
     // LOGON or on mere process existence.
-    obs.userHostReady = child_alive(gUserHostProcess) && UserHostReadySignaled();
+    obs.userHostReady = child_alive(gUserHostProcess) && UserHostReadySignaled(gUserHostReadyNonce);
   } else {
     obs.userToken = ClassifyTokenObservation(false, GetLastError());
   }
