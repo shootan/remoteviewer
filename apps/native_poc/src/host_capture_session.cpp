@@ -566,6 +566,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       // tunable for the A/B the field test needs: 100/0 = legacy, 8/0 = timeout only, 8/2000 = both.
       config.acquireTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_TIMEOUT_MS", 8, 1, 1000);
       config.acquireIdleSleepUs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_IDLE_SLEEP_US", 2000, 0, 100000);
+      config.attachToInputDesktop = capture.preloginAttachInputDesktop;  // r4 #1: prelogin binds to the input desktop
       // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
       // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
       config.onPointer = [&](int32_t px, int32_t py, bool visible) {

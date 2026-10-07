@@ -217,7 +217,7 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
 RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
                    uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                    uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
-                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false) {
+                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false, bool desktopAttach = false) {
   RunResult r;
   CreateDirectoryW(runDir.c_str(), nullptr);
   const std::wstring me = self_path();
@@ -252,11 +252,17 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     // lossless run below asserts "lossless -> premature NACK 0" so the pin does not erase the cap-ON
     // evidence that the r2 progress-based tail fix holds on real hardware. (bitrate-hard-cap r2.)
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_WIRE_CAP", wireCapOn ? L"1" : L"0");
+    // prelogin-service r4 #1: exercise the input-desktop capture attach (the --prelogin capture path)
+    // on the DEFAULT desktop. desktopAttach drops the window-capture args so the host takes the DXGI
+    // desktop/monitor path, and the env enables the SetThreadDesktop(input) attach through the same code
+    // path as --prelogin (without the prelogin control gating, so this ordinary Hello still connects).
+    SetEnvironmentVariableW(L"REMOTE60_PRELOGIN_CAPTURE_ATTACH", desktopAttach ? L"1" : L"0");
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) + L" --seconds " +
                        std::to_wstring(seconds + 30) + L" --input-injection-mode none" +
-                       remote60::native_poc::e2e::e2e_capture_window_args(target.title);
+                       (desktopAttach ? std::wstring(L"")
+                                      : remote60::native_poc::e2e::e2e_capture_window_args(target.title));
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check(noInjection, "the host is started with input injection off");
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -653,7 +659,9 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
   CloseHandle(job);
   r.host = read_host_log(hostLogPath);
-  {
+  if (!desktopAttach) {
+    // Only meaningful for window capture. In desktopAttach mode (prelogin r4 #1) the host captures the
+    // whole desktop/monitor, not this test's window, so there is no per-window ownership to assert.
     std::string captureLine;
     const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
     std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
@@ -1037,6 +1045,7 @@ int main(int argc, char** argv) {
   bool matrix = false;
   bool paired = false;
   bool v2 = false;
+  bool preloginCapture = false;  // prelogin-service r4 #1: desktop capture with the input-desktop attach
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1062,6 +1071,8 @@ int main(int argc, char** argv) {
       keepDir = true;
     } else if (a == "--matrix") {
       matrix = true;
+    } else if (a == "--prelogin-capture") {
+      preloginCapture = true;
     }
   }
   char allow[8]{};
@@ -1106,6 +1117,25 @@ int main(int argc, char** argv) {
     run_paired(hostExe, baselineHost, dir, seconds);
   } else if (matrix) {
     run_matrix(hostExe, dir, seconds);
+  } else if (preloginCapture) {
+    // prelogin-service r4 #1: the --prelogin capture path (input-desktop attach) against the DEFAULT
+    // desktop, proving a frame reaches the real viewer receive path with the attach active. (Only the
+    // attach trigger differs from production -- the attach code and the whole encoder/transport/receive
+    // pipeline are the product's; the real Winlogon target is the G-phase.)
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    check(port != 0, "prelogin-capture: a free UDP port for the host", u(port));
+    if (port != 0) {
+      const std::wstring runDir = dir + L"prelogin_capture\\";
+      const RunResult r = run_host(hostExe, runDir, Content::Video, /*tight=*/true, port, seconds, 0, 1,
+                                   /*wireCapOn=*/false, kBitrate, kFps, 0, 0, /*v2FrameGate=*/false,
+                                   /*desktopAttach=*/true);
+      print_run(Content::Video, true, 0, 1, r);
+      check(r.launched && r.hello, "prelogin-capture: the desktop-capture host started and answered Hello");
+      check(r.delivered > 0,
+            "prelogin-capture: frames reached the viewer with the input-desktop capture attach active",
+            "delivered=" + u(r.delivered));
+      check(r.decoded > 0, "prelogin-capture: a frame decoded at the viewer", "decoded=" + u(r.decoded));
+    }
   } else
   for (Content content : contents) {
     const char* cls = content_name(content);

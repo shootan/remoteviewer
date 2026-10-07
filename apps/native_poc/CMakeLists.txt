@@ -3120,6 +3120,13 @@ target_include_directories(remote60_prelogin_a0_probe PRIVATE src)
 target_link_libraries(remote60_prelogin_a0_probe PRIVATE remote60_sealed_unlock user32)
 set_target_properties(remote60_prelogin_a0_probe PROPERTIES OUTPUT_NAME "PreloginA0Probe")
 
+# prelogin-service r4 item 1: capture mechanism probe (SetThreadDesktop(input) -> DXGI / BitBlt fallback).
+add_executable(remote60_prelogin_capture_probe
+  tools/prelogin_capture_probe.cpp
+)
+target_link_libraries(remote60_prelogin_capture_probe PRIVATE d3d11 dxgi gdi32 user32)
+set_target_properties(remote60_prelogin_capture_probe PROPERTIES OUTPUT_NAME "PreloginCaptureProbe")
+
 # Also diagnostic-only. Measures how often the desktop actually changes, with no encoder or
 # client in the way, so 구현계획 A1 can be settled by measurement instead of inference.
 add_executable(remote60_desktop_update_rate
