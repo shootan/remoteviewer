@@ -460,6 +460,38 @@ void raw_send_window_select(SOCKET s, const sockaddr_in& host, uint32_t messageS
          sizeof(host));
 }
 
+// Reads host->client datagrams until one is a ControlData on `streamId` (matching `wantSeq`, or any seq
+// when wantSeq==0) within timeoutMs. Returns true on match and reports the seq in *outSeq.
+bool raw_wait_ctrl_data(SOCKET s, uint32_t streamId, uint32_t wantSeq, int timeoutMs, uint32_t* outSeq) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (std::chrono::steady_clock::now() < deadline) {
+    uint8_t buf[2048];
+    sockaddr_in from{};
+    int fl = sizeof(from);
+    const int n = recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0,
+                           reinterpret_cast<sockaddr*>(&from), &fl);
+    if (n < static_cast<int>(sizeof(remote60::native_poc::UdpControlChunkHeader))) continue;
+    remote60::native_poc::UdpControlChunkHeader h{};
+    std::memcpy(&h, buf, sizeof(h));
+    if (h.magic != remote60::native_poc::kMagic) continue;
+    if (h.kind != static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData)) continue;
+    if (h.streamId != streamId) continue;
+    if (wantSeq != 0 && h.messageSeq != wantSeq) continue;
+    if (outSeq) *outSeq = h.messageSeq;
+    return true;
+  }
+  return false;
+}
+
+void raw_send_ctrl_ack(SOCKET s, const sockaddr_in& host, uint32_t streamId, uint32_t seq) {
+  remote60::native_poc::UdpControlAckPacket a{};
+  a.streamId = streamId;
+  a.messageSeq = seq;
+  a.missingCount = 0;
+  sendto(s, reinterpret_cast<const char*>(&a), sizeof(a), 0, reinterpret_cast<const sockaddr*>(&host),
+         sizeof(host));
+}
+
 // A loopback UDP socket bound to `bindIp` (an ephemeral port), with a short receive timeout.
 SOCKET raw_open(const char* bindIp) {
   SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -866,6 +898,75 @@ int wmain(int argc, wchar_t** argv) {
     closesocket(a2);
     host.Stop();
     check("[move] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
+  }
+
+  // ============================================= F2: a spoofed ACK matched to REAL outstanding tx
+  // raw-A authenticates and triggers a reliable host->client response, then WITHHOLDS its ACK, so the
+  // host keeps retransmitting that exact messageSeq. B (a different port) then spoofs a ControlAck for
+  // THAT real outstanding seq. The gate must drop B's ACK, so the host keeps retransmitting; a genuine
+  // ACK from raw-A (the adopted peer) then stops it -- proving the ACK path works and only the foreign
+  // ACK is ignored.
+  //   fixed: retransmit continues after B's ACK, stops after A's ACK -> PASS.
+  //   gate-removed: B's ACK is honoured -> retransmit stops after B -> the "continues" assertion FAILs.
+  {
+    FakeDirectory dir;
+    check("[ackspoof] the fake directory starts", dir.Start());
+    ScriptDirectory(dir, "h-ack", capabilityBody(token, kIssuedIp, kIssuedPort));
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"1");
+    check("[ackspoof] a real GNLinkStream starts",
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "ack"));
+    check("[ackspoof] the host registers",
+          host.WaitFor("directory registered", 20000) || host.WaitFor("directory online", 20000), host.tail());
+
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    hostAddr.sin_port = htons(mediaPort);
+
+    SOCKET a = raw_open("127.0.0.1");
+    check("[ackspoof] raw-A opens a socket", a != INVALID_SOCKET);
+    // Authenticate and ask for a desktop select; the host replies with a reliable ControlWindowSelected
+    // on the host->client stream. raw-A does NOT ack it, so the host will retransmit.
+    uint32_t outstanding = 0;
+    bool haveSeq = false;
+    for (int i = 0; i < 20 && !haveSeq; ++i) {
+      raw_send_hello(a, hostAddr, token);
+      Sleep(150);
+      raw_send_window_select(a, hostAddr, 1 + i, 0 /*desktop*/);
+      haveSeq = raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, 0, 1500, &outstanding);
+    }
+    check("[ackspoof] the host sent a reliable host->client response raw-A can see", haveSeq, host.tail());
+    // It retransmits while unacked: raw-A sees the SAME seq again.
+    check("[ackspoof] the host retransmits the unacked response",
+          raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 3000, nullptr),
+          host.tail());
+
+    // B spoofs an ACK for that exact outstanding seq, from a different port.
+    SOCKET b = raw_open("127.0.0.1");
+    check("[ackspoof] B opens a different port", b != INVALID_SOCKET);
+    for (int i = 0; i < 8; ++i)
+      raw_send_ctrl_ack(b, hostAddr, remote60::native_poc::kUdpControlStreamHostToClient, outstanding);
+
+    // The gate drops B's ACK, so the host still retransmits the same seq to raw-A.
+    check("[ackspoof] B's spoofed ACK does NOT stop the retransmit (dropped as a foreign ACK)",
+          raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 4000, nullptr),
+          host.tail());
+
+    // A genuine ACK from raw-A (the adopted peer) DOES stop it -- the ACK path works, only B was ignored.
+    for (int i = 0; i < 3; ++i)
+      raw_send_ctrl_ack(a, hostAddr, remote60::native_poc::kUdpControlStreamHostToClient, outstanding);
+    // Drain any in-flight copies, then confirm it has gone quiet for that seq.
+    raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 800, nullptr);
+    check("[ackspoof] after raw-A's genuine ACK the retransmit of that seq stops",
+          !raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 3000, nullptr),
+          host.tail());
+
+    closesocket(a);
+    closesocket(b);
+    host.Stop();
+    check("[ackspoof] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // ================================================================== a token nobody issued
