@@ -286,6 +286,15 @@ PasteSnapshot gWaitingSnap;  // the gesture waiting behind the pending one
 uint64_t gGenAtLocalCopy = 0;
 bool gGenAtLocalValid = false;
 uint64_t gLocalCopySeq = 0;  // r5: the clipboard sequence of the last copy here (its baseline poll's token)
+
+// r6 (C2): the control thread decides whether the remote PC's text may land here from this.
+void publish_local_copy_state(ViewerState& ctx, bool pending) {
+  auto& clip = ctx.control.clipboard;
+  clip.localCopySeq.store(gLocalCopySeq, std::memory_order_release);
+  clip.localBaseGen.store(gGenAtLocalCopy, std::memory_order_release);
+  clip.localBaseValid.store(gGenAtLocalValid, std::memory_order_release);
+  clip.localBasePending.store(pending, std::memory_order_release);
+}
 uint64_t gProbeId = 0;
 PasteSnapshot gProbeSnap;
 
@@ -654,6 +663,20 @@ void begin_send(ViewerState& ctx, const PasteGate::Ticket& t, PasteSnapshot snap
   clip.probeId = t.id;
 }
 
+// r6 (C3): after a failure, timeout or cancel, the held key edges that were dropped. A down that
+// already went out (sent between two pastes) is held on the host: its up is sent now, or that key
+// stays down there. Downs never sent, and ups of keys the host does not hold, go nowhere.
+void release_dropped_keys(ViewerState& ctx, HWND hwnd) {
+  size_t released = 0;
+  for (const HeldKey& k : gPaste.TakeDropped()) {
+    const bool up = k.msg == WM_KEYUP || k.msg == WM_SYSKEYUP;
+    if (!up || !key_forwarded(ctx, static_cast<WPARAM>(k.wp), static_cast<LPARAM>(k.lp))) continue;
+    forward_key(ctx, hwnd, k.msg, static_cast<WPARAM>(k.wp), static_cast<LPARAM>(k.lp), /*replay=*/true);
+    ++released;
+  }
+  if (released) paste_log("released " + std::to_string(released) + " key(s) whose down had already gone out");
+}
+
 void after_paste_settled(ViewerState& ctx, HWND hwnd) {
   PasteGate::Ticket next;
   if (gPaste.Promote(qpc_now_us(), &next)) {
@@ -668,6 +691,7 @@ void cancel_pastes(ViewerState& ctx, HWND hwnd, PasteFailure why, const char* re
   if (!gPaste.Pending() && !gPaste.HasWaiting()) return;
   const std::vector<PasteGate::Ticket> ended = gPaste.CancelAll();
   for (const PasteGate::Ticket& t : ended) abandon_paste(ctx, t);
+  release_dropped_keys(ctx, hwnd);
   gWaitingSnap = PasteSnapshot{};
   KillTimer(hwnd, kPasteTimerId);
   paste_log(std::string("cancelled (") + reason + ") ended=" + std::to_string(ended.size()) + " -- no paste key sent");
@@ -694,6 +718,7 @@ void start_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t sca
   t.format = snap.format;
   t.baseGen = gGenAtLocalCopy;
   t.baseValid = gGenAtLocalValid;
+  t.localSeq = gLocalCopySeq;
   t.budgetUs = snap.format == PasteFormat::Text    ? kPasteTextDeadlineUs
                : snap.format == PasteFormat::Files ? kPasteFilesDeadlineUs
                                                    : 0;
@@ -717,10 +742,13 @@ void start_paste_gesture(ViewerState& ctx, HWND hwnd, PasteKey key, uint16_t sca
 void on_paste_answer(ViewerState& ctx, HWND hwnd, const PasteAnswer& a) {
   if (a.probe && a.baseline) {
     // The poll right after a copy here: its generation marks that copy -- if it is still the last one.
-    if (a.id == gLocalCopySeq && !gGenAtLocalValid && a.genKnown) {
-      gGenAtLocalCopy = a.hostCopyGen;
-      gGenAtLocalValid = true;
-      paste_log("baseline for this PC's copy: host copyGen=" + std::to_string(a.hostCopyGen));
+    if (a.id == gLocalCopySeq && a.connGen == paste_conn_gen(ctx) && !gGenAtLocalValid) {
+      if (a.genKnown) {
+        gGenAtLocalCopy = a.hostCopyGen;
+        gGenAtLocalValid = true;
+        paste_log("baseline for this PC's copy: host copyGen=" + std::to_string(a.hostCopyGen));
+      }
+      publish_local_copy_state(ctx, /*pending=*/false);
     }
     return;
   }
@@ -743,19 +771,25 @@ void on_paste_answer(ViewerState& ctx, HWND hwnd, const PasteAnswer& a) {
     // here since then does not move it. No baseline yet: the order is unknown and this PC's copy
     // wins; this check's value becomes the baseline if that copy is still the last one here.
     const PasteGate::Ticket& tk = gPaste.pending();
+    // r6 (C1): this answer may change what the viewer thinks of THIS PC's copy only while the copy
+    // this paste took is still the last one here, on the connection it was asked on. Otherwise it
+    // decides this paste alone.
+    const bool current = tk.localSeq == gLocalCopySeq && tk.connGen == paste_conn_gen(ctx) &&
+                         a.connGen == paste_conn_gen(ctx);
     bool hostNewer = false;
     if (a.genKnown) {
       if (tk.baseValid) {
         hostNewer = a.hostCopyGen > tk.baseGen;
-      } else if (!gGenAtLocalValid) {
+      } else if (current && !gGenAtLocalValid) {
         gGenAtLocalCopy = a.hostCopyGen;
         gGenAtLocalValid = true;
+        publish_local_copy_state(ctx, /*pending=*/false);
       }
     }
     if (hostNewer) {
       // A copy made on the host after this PC's: the host pastes its own. Nothing is sent; the key
       // goes as the paste would have, rebuilt, now.
-      gLatestCopy.NoteRemoteCopy();
+      if (current) gLatestCopy.NoteRemoteCopy();
       paste_log("pass-through (check): remote copy on the host (any format) copyGen=" + std::to_string(a.hostCopyGen) +
                 " > " + std::to_string(tk.baseGen) + " -- nothing sent");
       PasteAnswer own = a;
@@ -799,6 +833,7 @@ void on_paste_answer(ViewerState& ctx, HWND hwnd, const PasteAnswer& a) {
     paste_log(os.str() + " -> no paste key sent ms=" + std::to_string(ms) +
               (a.applied ? " (connection or target changed)" : ""));
     show_paste_failure(f, done.key, done.scan, done.ext);
+    release_dropped_keys(ctx, hwnd);
   }
   after_paste_settled(ctx, hwnd);
 }
@@ -810,6 +845,7 @@ void on_paste_timer(ViewerState& ctx, HWND hwnd) {
     paste_log("timed out id=" + std::to_string(expired.id) + " format=" + paste_format_name(expired.format) +
               " -- no paste key sent");
     show_paste_failure(PasteFailure::Timeout, expired.key, expired.scan, expired.ext);
+    release_dropped_keys(ctx, hwnd);
     after_paste_settled(ctx, hwnd);
   }
   if (!gPaste.Pending()) KillTimer(hwnd, kPasteTimerId);
@@ -920,6 +956,7 @@ void note_local_clipboard_change(ViewerState& ctx) {
   // r5 (F1): this copy's baseline is the host generation of a poll made after it, not the last one seen.
   gLocalCopySeq = GetClipboardSequenceNumber();
   gGenAtLocalValid = false;
+  publish_local_copy_state(ctx, /*pending=*/true);
   {
     std::lock_guard<std::mutex> lock(clip.mu);
     clip.baselineRequested = true;
@@ -1005,8 +1042,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // copy if it holds anything that can be pasted (Q2: it was copied before connecting).
       gLatestCopy.ResetForSession(local_clipboard_pasteable());
       gGenAtLocalValid = false;  // this session's first generation is the baseline
+      publish_local_copy_state(ctx, /*pending=*/false);
       if (gLatestCopy.LocalIsLatest()) {  // the copy made before connecting gets its baseline now
         gLocalCopySeq = GetClipboardSequenceNumber();
+        publish_local_copy_state(ctx, /*pending=*/true);
         std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
         ctx.control.clipboard.baselineRequested = true;
         ctx.control.clipboard.baselineToken = gLocalCopySeq;
@@ -1022,7 +1061,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
       // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write
       // provokes is recognised as an echo and not sent back.
-      std::unique_ptr<std::u16string> text(reinterpret_cast<std::u16string*>(lp));
+      std::unique_ptr<RemoteTextApply> item(reinterpret_cast<RemoteTextApply*>(lp));
+      // r6 (C2): sent before a copy made here since? Then it is older than that copy: not written.
+      if (item && item->localSeq != gLocalCopySeq) {
+        paste_log("remote text not written here: a copy was made here after it was sent");
+        item.reset();
+      }
+      const std::u16string* text = item ? &item->text : nullptr;
       if (text) {
         (void)remote60::native_poc::clipboard_set_unicode_text(
             hwnd, remote60::native_poc::u16_to_wide(*text));

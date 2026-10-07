@@ -118,8 +118,12 @@ class FileHelperChannel {
   uint64_t owner() const { return owner_.load(); }
   /** The current helper's instance number (0 = none): the receiver takes frames of this one only. */
   uint64_t instance() const { return instance_.load(); }
-  /** The process id of the current helper (0 = none running). Its clipboard publishes carry it as owner. */
-  DWORD CurrentPid() const;
+  /**
+   * The process id of the current helper (0 = none). Its clipboard publishes carry it as owner. Read
+   * without any lock (r6, C4): the UI thread asks on every clipboard change, and the send lock is
+   * held across a pipe write that may wait seconds for a helper that does not read.
+   */
+  DWORD CurrentPid() const { return curPid_.load(std::memory_order_acquire); }
   bool EnsureAs(uint64_t owner, std::string* why, bool* stale = nullptr, uint64_t* instance = nullptr);
   bool SendAs(uint64_t owner, const file_copy::PipeFrame& f, bool* stale = nullptr, uint64_t* instance = nullptr);
   bool Running() const;
@@ -161,6 +165,7 @@ class FileHelperChannel {
   GoneOfFn onGoneOf_;
   std::atomic<uint64_t> owner_{0};
   std::atomic<uint64_t> instance_{0};  // cur_'s instance (0 = none); set under sendMu_
+  std::atomic<DWORD> curPid_{0};       // cur_'s helper pid (0 = none); set with cur_, read lock-free
   uint64_t nextInstance_ = 0;          // under mu_
   mutable std::mutex mu_;  // starts, one at a time; the reader threads
   // sendMu_: owner_, cur_ and prev_ change only under it, and every send holds it -- so once

@@ -45,9 +45,13 @@ int gFailures = 0;
 void check(const std::string& name, bool ok, const std::string& detail = {}) {
   ++gChecks;
   if (!ok) ++gFailures;
-  std::cout << (ok ? "PASS  " : "FAIL  ") << name;
-  if (!detail.empty()) std::cout << "  " << detail;
-  std::cout << "\n";
+  // One write for the whole line: the product's own threads log to the same stdout, and a line built
+  // from several insertions can be split by them (a parent that counts lines then miscounts).
+  std::string line = (ok ? "PASS  " : "FAIL  ") + name;
+  if (!detail.empty()) line += "  " + detail;
+  line += "\n";
+  std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
+  std::cout.flush();
 }
 
 // Checks this run could not judge either way. They are not passes: the summary line says how

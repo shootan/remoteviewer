@@ -506,7 +506,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
-  const char* tag = legacy ? "legacy" : "paste";
+  const char* tag = gR2P ? "r2p" : legacy ? "legacy" : "paste";
   const uint16_t port = e2e_pick_free_udp_port();
   check("a free UDP port for the host", port != 0, std::to_string(port));
 
@@ -675,6 +675,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   }
 
   int heldApply = 0;
+  bool passApplies = false;  // r6 (C2): a case that lets the product's R->P text apply run
   bool* dropClipUpdatesRef = nullptr;  // set below, once the flag exists (the pump is defined first)
   int* droppedRef = nullptr;
   const auto pump_until = [&](const std::function<bool()>& done, int budgetMs) {
@@ -682,8 +683,8 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     for (;;) {
       MSG msg;
       while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        if (msg.message == remote60::native_poc::viewer::kMsgApplyClipboard) {  // see the header
-          delete reinterpret_cast<std::u16string*>(msg.lParam);
+        if (msg.message == remote60::native_poc::viewer::kMsgApplyClipboard && !passApplies) {  // see the header
+          delete reinterpret_cast<remote60::native_poc::viewer::RemoteTextApply*>(msg.lParam);
           ++heldApply;
           continue;
         }
@@ -733,6 +734,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
   // Each copy here is its own window of the host's order: the host counts it exactly once (set
   // below, once `mark` exists).
   std::function<void()> beforeCopyHere;
+  std::function<void()> afterCopyHere;  // closes the copy's window (r6: copies inside a case)
   int watchdogResumes = 0;
   const auto with_worker_paused = [&](const std::function<void()>& body) {
     const HANDLE h = worker.joinable() ? reinterpret_cast<HANDLE>(worker.native_handle()) : nullptr;
@@ -775,6 +777,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
       idle(150);  // the viewer hears the copy now and asks for its baseline
     });
     baseline_settled();
+    if (afterCopyHere) afterCopyHere();
     return ok;
   };
   const auto copy_remote = [&](const std::function<bool()>& put, int settleMs) {
@@ -827,6 +830,7 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     expects.push_back(std::move(e));
   };
   beforeCopyHere = [&] { mark("(a copy here: the host counts it once)", "C"); };
+  afterCopyHere = [&] { mark("(after a copy here)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; }); };
   const auto station_text = [&](DWORD* owner) {
     std::u16string t;
     *owner = 0;
@@ -1233,7 +1237,8 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     // did not make: it counts it.
     mark("L2a: the remote PC's text written here (R->P apply)", "C");
     SendMessageW(viewerWindow, remote60::native_poc::viewer::kMsgApplyClipboard, 0,
-                 reinterpret_cast<LPARAM>(new std::u16string(u"text copied on the remote PC")));  // the product's apply
+                 reinterpret_cast<LPARAM>(new remote60::native_poc::viewer::RemoteTextApply{
+                     u"text copied on the remote PC", ctx.control.clipboard.localCopySeq.load()}));  // the product's apply
     idle(300);
     mark("L2: after R->P text, Ctrl+V -> the keys as typed, nothing written", "dduu");
     ctrl_v();
@@ -1361,6 +1366,164 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
           narrow(v3.pasteText));
     check("the worker was never left paused (no watchdog resume)", watchdogResumes == 0, std::to_string(watchdogResumes));
 
+    // ---------------------------------------------------------------- r6 helpers
+    // Only the clipboard notifications are taken off the queue (paste answers stay queued, in order):
+    // lets a case decide WHEN the viewer hears a copy relative to an answer already posted.
+    const auto clip_updates_only = [&](bool drop, int ms) {
+      const DWORD until = GetTickCount() + static_cast<DWORD>(ms);
+      while (GetTickCount() < until) {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, WM_CLIPBOARDUPDATE, WM_CLIPBOARDUPDATE, PM_REMOVE)) {
+          if (drop) {
+            ++droppedClipUpdates;
+          } else {
+            DispatchMessageW(&m);
+          }
+        }
+        Sleep(5);
+      }
+    };
+    const auto keys_ctrl_v = [&] {  // the keys of a Ctrl+V, dispatched now, nothing else pumped
+      set_mods(true, false);
+      key(WM_KEYDOWN, VK_CONTROL);
+      key(WM_KEYDOWN, 'V');
+      key(WM_KEYUP, 'V');
+      set_mods(false, false);
+      key(WM_KEYUP, VK_CONTROL);
+    };
+
+    // ---------------------------------------------------------------- r6 C1: an older paste's answer
+    std::cout << "\n--- C1A. paste T1 on L1 (baseline not back), its answer held, then R and L2: L2 keeps its own baseline ---\n";
+    mark("C1A (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    {
+      const uint32_t s0 = text_sends();
+      with_worker_paused([&] {
+        put_text(u"C1A L1");
+        clip_updates_only(false, 100);  // the viewer hears L1 (baseline pending)
+        keys_ctrl_v();                  // T1: its ticket has no baseline yet
+      });
+      Sleep(700);                       // the worker answers L1's baseline and T1's check; nothing is pumped
+      with_worker_paused([&] {
+        dropClipUpdates = true;
+        put_text(u"C1A R on the remote PC");
+        clip_updates_only(true, 80);    // a copy there: the viewer is not told
+        dropClipUpdates = false;
+        put_text(u"C1A L2 here, after R");
+        clip_updates_only(false, 100);  // the viewer hears L2 -- before T1's answer is handled
+      });
+      pump_until([&] { return text_sends() >= s0 + 1 && !remote60::native_poc::viewer::paste_bar_view(ctx).active; }, 6000);
+      baseline_settled();
+      const uint32_t s1 = text_sends();
+      ctrl_v();                         // T2 on L2
+      answered(s1);
+      idle(400);
+      DWORD owner = 0;
+      // On the shared station T1's own write (L1) lands on the one clipboard after L2, so the content
+      // T2 reads is not L2 here -- on two PCs the host's write never touches this PC's clipboard. What
+      // the case is about is that T2 is SENT, not taken for a remote copy (the defect: T1's answer
+      // set L2's baseline to before R, and T2 then passed through).
+      (void)owner;
+      check("C1A: the paste after L2 is sent (T1's late answer did not set L2's baseline)", text_sends() == s1 + 1,
+            "sends " + std::to_string(text_sends() - s1));
+    }
+    std::cout << "\n--- C1B. T1's check says the host copied after L1, L2 is made before that answer is handled: L2 still Local ---\n";
+    mark("C1B (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    {
+      copy_here([&] { return put_text(u"C1B L1"); });
+      copy_remote([&] { return station_put(CF_DIBV5, noise_dibv5(24, 24, 0xC1Bu)); }, 30);
+      keys_ctrl_v();                    // T1: the worker checks, finds R (after L1), posts; not pumped
+      Sleep(700);
+      with_worker_paused([&] {
+        put_text(u"C1B L2 here, after R");
+        clip_updates_only(false, 100);  // L2 heard before T1's answer
+      });
+      idle(1200);                       // T1's answer: its own paste goes through, L2 is untouched
+      baseline_settled();
+      const uint32_t s1 = text_sends();
+      ctrl_v();                         // T2 on L2
+      answered(s1);
+      idle(400);
+      DWORD owner = 0;
+      check("C1B: L2 is pasted as L2 (T1's 'host newer' did not mark L2 remote)",
+            text_sends() == s1 + 1 && station_text(&owner) == u"C1B L2 here, after R" && owner == hostPid,
+            "sends " + std::to_string(text_sends() - s1));
+    }
+
+    // ---------------------------------------------------------------- r6 C2: remote text vs a copy here
+    std::cout << "\n--- C2. text R on the remote PC, then L here, then L's baseline poll: R is NOT written over L ---\n";
+    mark("C2 (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    {
+      passApplies = true;  // the product's own R->P apply runs in this case
+      int appliesBefore = heldApply;
+      with_worker_paused([&] {
+        dropClipUpdates = true;
+        put_text(u"C2 R on the remote PC");
+        idle(80);
+        dropClipUpdates = false;
+        put_text(u"C2 L here, after R");
+        idle(150);
+      });
+      baseline_settled();
+      idle(900);  // a regular poll too: R must not land either
+      DWORD owner = 0;
+      const std::u16string now = station_text(&owner);
+      check("C2: L is still this PC's clipboard (R not written over it)", now == u"C2 L here, after R", narrow16(now));
+      const uint32_t s1 = text_sends();
+      ctrl_v();
+      answered(s1);
+      idle(400);
+      check("C2: Ctrl+V sends L", text_sends() == s1 + 1 && station_text(&owner) == u"C2 L here, after R" && owner == hostPid);
+      std::cout << "\n--- C2b. a text copy on the remote PC AFTER L's baseline: written here at once, Ctrl+V pastes it ---\n";
+      copy_remote([&] { return put_text(u"C2b R2 on the remote PC, after the baseline"); }, 1600);  // a regular poll brings it
+      const std::u16string after = station_text(&owner);
+      check("C2b: the later remote text was written here (owner: this viewer)",
+            after == u"C2b R2 on the remote PC, after the baseline" && owner == GetCurrentProcessId(), narrow16(after));
+      const uint32_t s2 = text_sends();
+      ctrl_v();
+      idle(1200);
+      check("C2b: Ctrl+V sends nothing (the remote PC's own)", text_sends() == s2);
+      passApplies = false;
+      (void)appliesBefore;
+    }
+
+    // ---------------------------------------------------------------- r6 C3: a key across two pastes
+    std::cout << "\n--- C3. paste A, X down, paste B, X up; A applied (X down goes out), B cancelled: X comes back up ---\n";
+    mark("C3 (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
+    {
+      copy_here([&] { return put_text(u"C3 text"); });
+      set_process_suspended(hostPid, true);
+      keys_ctrl_v();                    // A
+      key(WM_KEYDOWN, 'X');             // held (A pending)
+      keys_ctrl_v();                    // B waits behind A
+      key(WM_KEYUP, 'X');               // held, after B
+      set_process_suspended(hostPid, false);
+      // One message at a time until A's answer has sent the part before B (X down goes out).
+      bool xDownOut = false;
+      const DWORD until = GetTickCount() + 6000;
+      while (!xDownOut && GetTickCount() < until) {
+        MSG m;
+        if (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+          if (m.message == remote60::native_poc::viewer::kMsgApplyClipboard) {
+            delete reinterpret_cast<remote60::native_poc::viewer::RemoteTextApply*>(m.lParam);
+            continue;
+          }
+          TranslateMessage(&m);
+          DispatchMessageW(&m);
+          xDownOut = ctx.input.forwardedKeyDown['X'].load();
+        } else {
+          Sleep(2);
+        }
+      }
+      check("C3: A applied, and the X down typed between the pastes went out", xDownOut);
+      // B is cancelled while it waits -- by Esc, which ends the paste without a release-all (focus
+      // loss would release every key anyway and hide the defect).
+      key(WM_KEYDOWN, VK_ESCAPE);
+      key(WM_KEYUP, VK_ESCAPE);
+      idle(800);
+      check("C3: after B is cancelled the host no longer holds X (its up was sent)", !ctx.input.forwardedKeyDown['X'].load());
+    }
+
+    mark("(after the r6 cases)", "anything", [](const std::string& g) { return g.find('U') == std::string::npos; });
     // ---------------------------------------------------------------- M. the host-IME (physical) path
     std::cout << "\n--- M. host-IME mode: the same admission, the chord as scan codes ---\n";
     SendMessageW(viewerWindow, remote60::native_poc::viewer::kMsgHostImeActivate, 0, 0);
@@ -1590,16 +1753,33 @@ void run_child_on_private_station(const std::wstring& outDir, bool legacy, bool 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
   }
+  // The child's own count is the result (its CHILD RESULT line). Counting PASS / FAIL lines here is
+  // only a cross-check: the product's threads write to the child's stdout too, and a check line they
+  // split no longer starts with PASS -- which is why a run once reported 160 checks where 162 ran.
   std::ifstream in(result);
   std::string line;
+  int linePass = 0, lineFail = 0, childChecks = -1, childFailures = -1;
   while (std::getline(in, line)) {
     std::cout << "  child: " << line << "\n";
     if (line.rfind("TEST-PID host ", 0) == 0) gTestPids.push_back(static_cast<DWORD>(std::strtoul(line.c_str() + 14, nullptr, 10)));
-    if (line.rfind("PASS", 0) == 0) ++gChecks;
-    if (line.rfind("FAIL", 0) == 0) {
-      ++gChecks;
-      ++gFailures;
+    if (line.rfind("PASS", 0) == 0) ++linePass;
+    if (line.rfind("FAIL", 0) == 0) ++lineFail;
+    const size_t at = line.find("CHILD RESULT: ");
+    if (at != std::string::npos) {
+      const size_t open = line.find('(', at);
+      if (open != std::string::npos) std::sscanf(line.c_str() + open, "(%d checks, %d failed)", &childChecks, &childFailures);
     }
+  }
+  if (childChecks >= 0 && childFailures >= 0) {
+    gChecks += childChecks;
+    gFailures += childFailures;
+    if (linePass + lineFail != childChecks || lineFail != childFailures) {
+      std::printf("INFO  the child's lines read %d PASS / %d FAIL, its own count %d checks / %d failed -- the count is its own\n",
+                  linePass, lineFail, childChecks, childFailures);
+    }
+  } else {
+    check("the child reported its result (a CHILD RESULT line)", false, "lines read: " + std::to_string(linePass) + " PASS, " +
+                                                                           std::to_string(lineFail) + " FAIL");
   }
   check(std::string("the child exited 0") + (legacy ? " (legacy host)" : ""), code == 0, std::to_string(code));
   if (dk) CloseDesktop(dk);

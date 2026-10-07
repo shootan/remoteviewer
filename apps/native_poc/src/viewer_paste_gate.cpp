@@ -124,6 +124,7 @@ std::vector<PasteGate::Ticket> PasteGate::CancelAll() {
   if (waiting_.id != 0) ended.push_back(waiting_);
   pending_ = Ticket{};
   waiting_ = Ticket{};
+  dropped_.insert(dropped_.end(), held_.begin(), held_.end());
   held_.clear();
   waitingAt_ = 0;
   return ended;
@@ -162,13 +163,21 @@ std::vector<HeldKey> PasteGate::TakeHeldBeforeWaiting() {
 
 void PasteGate::DropHeldBeforeWaiting() {
   if (waiting_.id == 0) {
+    dropped_.insert(dropped_.end(), held_.begin(), held_.end());
     held_.clear();
     waitingAt_ = 0;
     return;
   }
   const size_t n = (std::min)(waitingAt_, held_.size());
+  dropped_.insert(dropped_.end(), held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
   held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(n));
   waitingAt_ = 0;
+}
+
+std::vector<HeldKey> PasteGate::TakeDropped() {
+  std::vector<HeldKey> out;
+  out.swap(dropped_);
+  return out;
 }
 
 std::wstring paste_failure_text(PasteFailure f) {

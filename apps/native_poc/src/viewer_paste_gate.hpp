@@ -108,6 +108,7 @@ struct PasteAnswer {
   // r4: the answer to a paste's check before sending (one fresh poll), not to the paste itself.
   bool probe = false;
   bool baseline = false;      // r5: the poll right after a copy here (id = that copy's clipboard sequence)
+  uint64_t connGen = 0;       // r6 (C1): the connection the poll was made on
   bool genKnown = false;      // the host sends a copy generation
   uint64_t hostCopyGen = 0;   // its value now
 };
@@ -166,6 +167,9 @@ class PasteGate {
     // gesture, so a later copy here cannot move it. baseValid false: not known yet (local wins).
     uint64_t baseGen = 0;
     bool baseValid = false;
+    // r6 (C1): which copy here this paste took (its clipboard sequence): only while it is still the
+    // last copy here may this paste's answer change what the viewer thinks of the copies.
+    uint64_t localSeq = 0;
   };
 
   enum class Admitted : uint8_t { Started = 0, Waiting = 1, Dropped = 2 };
@@ -206,6 +210,12 @@ class PasteGate {
    */
   std::vector<HeldKey> TakeHeldBeforeWaiting();
   size_t HeldCount() const { return held_.size(); }
+  /**
+   * r6 (C3): the key edges a failure, timeout or cancel threw away, since the last call. A down
+   * that already went out (an earlier part sent after the paste before) still needs its up: the
+   * caller sends the ups of keys the host holds and lets the rest go.
+   */
+  std::vector<HeldKey> TakeDropped();
 
  private:
   // Keys before the waiting paste are dropped with a failed pending one; those after it wait for it.
@@ -213,6 +223,7 @@ class PasteGate {
   Ticket pending_;
   Ticket waiting_;
   std::deque<HeldKey> held_;
+  std::vector<HeldKey> dropped_;
   size_t waitingAt_ = 0;  // with a waiting paste: how many held keys were typed before it
 };
 

@@ -28,6 +28,8 @@
 #include <vector>
 
 #include "file_copy_paste_parts.hpp"
+#include "file_copy_helper_host.hpp"
+#include <tlhelp32.h>
 
 using namespace remote60::native_poc;
 namespace fc = remote60::native_poc::file_copy;
@@ -251,6 +253,112 @@ int main() {
     (void)ch.Ensure(&why);
     check("a start that succeeds clears the class", ch.lastLaunchFailure() == fc::LaunchFailure::None);
     ch.Stop();
+  }
+
+  // paste on demand r6 (C4): the helper's pid is read without the send lock. A real helper, frozen so
+  // it reads nothing, makes a send wait (the pipe fills, the write blocks up to its timeout) while it
+  // holds that lock -- the UI thread asks for the pid on every clipboard change and must not wait.
+  std::printf("\n--- helper: its pid while a send is stuck ---\n");
+  {
+    wchar_t self[MAX_PATH] = L"";
+    const DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring helperExe(self, n);
+    helperExe = helperExe.substr(0, helperExe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
+    // On a private station: nothing it might do to a clipboard is the user's.
+    HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+    wchar_t wsName[256] = L"";
+    DWORD wsLen = 0;
+    if (ws) GetUserObjectInformationW(ws, UOI_NAME, wsName, sizeof(wsName), &wsLen);
+    HWINSTA orig = GetProcessWindowStation();
+    HDESK dk = nullptr;
+    if (ws) {
+      SetProcessWindowStation(ws);
+      dk = CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+      SetProcessWindowStation(orig);
+    }
+    const std::wstring desktop = std::wstring(wsName) + L"\\Default";
+    if (GetFileAttributesW(helperExe.c_str()) == INVALID_FILE_ATTRIBUTES || !ws || !dk) {
+      std::printf("SKIP  the helper pid under a stuck send: no helper beside the test or no private station\n");
+    } else {
+      DWORD helperPid = 0;
+      FileHelperChannel ch;
+      FileHelperChannel::Config cfg;
+      cfg.launcher = [&](fc::HelperLink* link, std::string* why) {
+        const bool ok = fc::launch_file_copy_helper_as_self(helperExe, desktop.c_str(), L"", link, why);
+        if (ok) helperPid = link->helper_pid();
+        return ok;
+      };
+      ch.Configure(cfg, [](uint64_t, uint64_t, const fc::PipeFrame&) {}, [](uint64_t, uint64_t) {});
+      std::string why;
+      uint64_t inst = 0;
+      ch.SetOwner(1);
+      const bool up = ch.EnsureAs(1, &why, nullptr, &inst);
+      check("a real helper starts (on a private station)", up && helperPid != 0, why);
+      if (up && helperPid != 0) {
+        check("its pid is known", ch.CurrentPid() == helperPid);
+        // Freeze it: it reads nothing from now on.
+        int frozen = 0;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te{};
+        te.dwSize = sizeof(te);
+        if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
+          do {
+            if (te.th32OwnerProcessID != helperPid) continue;
+            if (HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID)) {
+              SuspendThread(t);
+              CloseHandle(t);
+              ++frozen;
+            }
+          } while (Thread32Next(snap, &te));
+        }
+        if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+        check("the helper is frozen", frozen > 0);
+        std::atomic<bool> stop{false};
+        std::atomic<int> sends{0};
+        std::atomic<uint64_t> longestSendMs{0};
+        std::thread sender([&] {
+          fc::PipeFrame f;
+          f.type = fc::PipeMsg::Hello;
+          f.payload.assign(32 * 1024, 0x5A);
+          while (!stop.load()) {
+            const ULONGLONG t0 = GetTickCount64();
+            (void)ch.SendTo(inst, f);
+            const ULONGLONG ms = GetTickCount64() - t0;
+            if (ms > longestSendMs.load()) longestSendMs.store(ms);
+            ++sends;
+            if (ms > 1000) break;  // a send that waited: the lock was held across it
+          }
+        });
+        // Let the pipe fill and a send settle into its wait, then ask for the pid.
+        Sleep(1500);
+        const ULONGLONG t0 = GetTickCount64();
+        const DWORD pid = ch.CurrentPid();
+        const ULONGLONG askMs = GetTickCount64() - t0;
+        stop.store(true);
+        sender.join();
+        check("a send was stuck (it waited on the frozen helper)", longestSendMs.load() > 1000,
+              std::to_string(longestSendMs.load()) + " ms after " + std::to_string(sends.load()) + " sends");
+        check("...and the pid was answered at once meanwhile (no wait on the send lock)", askMs < 100 && pid == helperPid,
+              std::to_string(askMs) + " ms");
+        // Thaw and end it.
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        te.dwSize = sizeof(te);
+        if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
+          do {
+            if (te.th32OwnerProcessID != helperPid) continue;
+            if (HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID)) {
+              ResumeThread(t);
+              CloseHandle(t);
+            }
+          } while (Thread32Next(snap, &te));
+        }
+        if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+      }
+      ch.Stop();
+      check("after Stop the pid is gone", ch.CurrentPid() == 0);
+    }
+    if (dk) CloseDesktop(dk);
+    if (ws) CloseWindowStation(ws);
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "PASSED", gChecks, gFailures);

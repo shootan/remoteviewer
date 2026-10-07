@@ -160,6 +160,7 @@ int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
       b.baseline = true;
       b.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
       b.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      b.connGen = clip.connGen.load(std::memory_order_acquire);
       post_paste_answer(ctx, b);
       if (probeId == 0) return 1;
     }
@@ -175,6 +176,7 @@ int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
       }
       a.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
       a.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      a.connGen = clip.connGen.load(std::memory_order_acquire);
       post_paste_answer(ctx, a);
       return 1;
     }
@@ -329,6 +331,17 @@ int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, 
   // The first reply of a session only sets the generation: its contents are from before this
   // session and must not land on top of what the user copied since (the stale-revival bug).
   if (clip.policy.OnPollReply(reply.generation, reply.hasData)) {
+    // r6 (C2): the remote PC's text is only newer than this PC's copy if the host counted it AFTER
+    // that copy's baseline. Text it already had then -- or while the baseline is still on its way --
+    // is older by the order rule, and writing it here would overwrite the copy the user just made.
+    if (reply.hasData && reply.hasCopyGen &&
+        (clip.localBasePending.load(std::memory_order_acquire) ||
+         (clip.localBaseValid.load(std::memory_order_acquire) &&
+          reply.copyGen <= clip.localBaseGen.load(std::memory_order_acquire)))) {
+      std::cout << "[native-video-client][paste] remote text not written here: older than this PC's copy (copyGen="
+                << reply.copyGen << ")\n";
+      return 1;
+    }
     bool apply = false;
     {
       std::lock_guard<std::mutex> lock(clip.mu);
@@ -338,8 +351,8 @@ int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, 
     // Apply on the UI thread, which owns the clipboard listener window. The core already recorded
     // this as applied, so the change notification the write provokes is dropped as an echo.
     if (apply && ctx.session.hwnd) {
-      PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0,
-                   reinterpret_cast<LPARAM>(new std::u16string(std::move(reply.text))));
+      auto* item = new RemoteTextApply{std::move(reply.text), clip.localCopySeq.load(std::memory_order_acquire)};
+      if (!PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0, reinterpret_cast<LPARAM>(item))) delete item;
     }
   }
   return 1;

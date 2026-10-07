@@ -37,6 +37,13 @@ namespace remote60::native_poc::viewer {
 // sends it, and polls the host for changes the other way. `enabled` is the viewer's on/off toggle
 // (default on); `hostSupports` is set from the pong capability bit. The core and the pending item
 // are guarded by `mu` because the UI thread produces and the control thread consumes.
+// r6 (C2): the remote PC's text for the UI thread to write here, with the copy here it was posted
+// after -- a copy made here since then wins, and the text is not written over it.
+struct RemoteTextApply {
+  std::u16string text;
+  uint64_t localSeq = 0;
+};
+
 struct ClipboardSyncState {
   std::atomic<bool> enabled{true};        // the toolbar toggle; off means no send and no poll
   std::atomic<bool> hostSupports{false};  // host advertised kCaptureFlagClipboardTextV1 (pong)
@@ -75,6 +82,13 @@ struct ClipboardSyncState {
   // known (its baseline). The token is the local clipboard sequence of that copy.
   bool baselineRequested = false;
   uint64_t baselineToken = 0;
+  // r6 (C2): the state of this PC's last copy, written by the UI thread, read by the control thread
+  // before it lets the remote PC's text land here: text the host had by this copy's baseline (or
+  // while that baseline is still on its way) is older than the copy and must not overwrite it.
+  std::atomic<uint64_t> localCopySeq{0};
+  std::atomic<bool> localBasePending{false};
+  std::atomic<bool> localBaseValid{false};
+  std::atomic<uint64_t> localBaseGen{0};
   bool havePasteText = false;
   uint64_t pasteTextId = 0;
   uint32_t pasteTextRevision = 0;
