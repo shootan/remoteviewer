@@ -2144,6 +2144,12 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service r3: remote-reboot host-side authorization + dedup gate (pure).
+add_executable(remote60_prelogin_reboot_gate_test
+  src/prelogin_reboot_gate_test.cpp
+)
+target_include_directories(remote60_prelogin_reboot_gate_test PRIVATE src)
+
 # prelogin-service A1 section 3: ready-handoff single-owner lease + generation fence (pure).
 add_executable(remote60_prelogin_handoff_test
   src/prelogin_handoff_test.cpp
