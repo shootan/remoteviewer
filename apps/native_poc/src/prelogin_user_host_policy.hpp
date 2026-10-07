@@ -12,11 +12,12 @@
 // The policy, per logon (a new console session or a new logon in it starts over):
 //   * a GNLinkHost of this install already running in the session is the user's Host: it is watched,
 //     nothing is started;
-//   * one the service started, or the one it watched, that ends with exit code 0 was closed on purpose
-//     (tray Exit, an update standing down, or a second instance yielding to the first): not started
-//     again for this logon;
-//   * one that ends otherwise (a crash) is started again, with the same bounded backoff as the pre-login
-//     worker (1 s doubling to 60 s while it dies within 15 s; prelogin_worker_launch.hpp);
+//   * one the service started, or the one it watched, that ends with an ordinary exit code was closed on
+//     purpose -- 0 (tray Exit, an update standing down, a second instance yielding to the first) and 1 (Task
+//     Manager's "End task" is TerminateProcess(..., 1)) alike: not started again for this logon (r10);
+//   * one that ends with an exception status (a crash: NTSTATUS 0x8xxxxxxx / 0xCxxxxxxx) is started again,
+//     with the same bounded backoff as the pre-login worker (1 s doubling to 60 s while it dies within 15 s;
+//     prelogin_worker_launch.hpp);
 //   * with none running and none started yet, one is started.
 
 #include <cstdint>
@@ -41,6 +42,9 @@ struct UserHostObservation {
   uint64_t nowMs = 0;
 };
 
+// An exception status, not an exit the program (or the user, through Task Manager) chose.
+inline bool ExitWasCrash(uint32_t exitCode) { return (exitCode & 0x80000000u) != 0; }
+
 class UserHostLaunchPolicy {
  public:
   UserHostDecision Decide(const UserHostObservation& o) {
@@ -52,7 +56,7 @@ class UserHostLaunchPolicy {
     }
     if (o.watchedAlive) return UserHostDecision::None;
     if (o.watchedExited) {
-      if (o.watchedExitCode == 0) {
+      if (!ExitWasCrash(o.watchedExitCode)) {
         userClosed_ = true;  // closed on purpose (or yielded to another instance): not again this logon
       } else {
         (void)backoff_.OnExit(launchedAtMs_, o.nowMs);  // a crash: started again, but not at once

@@ -51,6 +51,7 @@
 #include "prelogin_reboot_gate.hpp"
 #include "prelogin_cred_host.hpp"
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "prelogin_sas_wire.hpp"
 #include "reboot_wire.hpp"
 #include <mutex>
@@ -151,8 +152,13 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   // admission of exactly this epoch (SessionState::AdmitHello), never the shared flag a newer session's
   // Hello sets while this dispatcher still serves the old one.
   // r9 W2: a --prelogin worker injects only while the input desktop is the logon desktop it serves.
+  // r10 T2: and not from a cached look either -- the input desktop is asked again for this event: it must be
+  // the desktop the worker serves (the logon desktop; a test build's named one), or nothing is injected.
   auto prelogin_not_serving = [&]() {
-    return args.preloginMode && !capture.preloginDesktopServing.load(std::memory_order_acquire);
+    if (!args.preloginMode) return false;
+    if (!capture.preloginDesktopServing.load(std::memory_order_acquire)) return true;
+    const std::wstring now = remote60::native_poc::prelogin::InputDesktopName();
+    return now.empty() || _wcsicmp(now.c_str(), capture.preloginServingDesktop.c_str()) != 0;
   };
   auto link_directory_authenticated = [&]() {
     return linkDirectoryAuthenticated && clientSession.DirectoryAuthenticatedFor(servedEpoch);

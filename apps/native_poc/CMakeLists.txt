@@ -2059,6 +2059,10 @@ add_dependencies(remote60_prelogin_ready_chain_e2e_test remote60_host_app_ui_tes
 add_executable(remote60_prelogin_sas_test src/prelogin_sas_test.cpp)
 target_include_directories(remote60_prelogin_sas_test PRIVATE src)
 
+# prelogin-ui r10 (T2): the SYSTEM input agent injects a pre-login message only on the logon desktop.
+add_executable(remote60_secure_input_desktop_fence_test src/secure_input_desktop_fence_test.cpp)
+target_include_directories(remote60_secure_input_desktop_fence_test PRIVATE src)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )

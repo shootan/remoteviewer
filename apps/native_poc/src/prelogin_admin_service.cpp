@@ -91,6 +91,12 @@ void BindProductMachineStore(AdminPrimitives* p) {
     if (SealAndWriteMachineRecord(path, r, &w) == MachineStoreStatus::Ok) return 0;
     return w != 0 ? w : ERROR_WRITE_FAULT;
   };
+  p->probeRecord = [](const std::wstring& path) -> int {  // r10 T1: there or not, not readable or not
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) return 1;
+    const DWORD e = GetLastError();
+    return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? 0 : -1;
+  };
   p->removeRecord = [](const std::wstring& path) -> uint32_t {
     if (DeleteFileW(path.c_str())) return 0;
     const DWORD e = GetLastError();

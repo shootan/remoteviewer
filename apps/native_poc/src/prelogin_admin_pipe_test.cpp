@@ -48,7 +48,7 @@ struct World {
   pl::AdminPrimitives primitives() {
     pl::AdminPrimitives p;
     p.requestOsReboot = [this]() -> uint32_t { ++osReboots; return osRebootResult; };
-    p.noteUserHostReady = [this](uint32_t s, uint64_t t, const std::string& n) { ++readies; readySession = s; readyStart = t; readyNonce = n; };
+    p.noteUserHostReady = [this](uint32_t s, uint64_t t, const std::string& n, uint32_t) { ++readies; readySession = s; readyStart = t; readyNonce = n; };
     p.recordPath = [this] { ++calls; return std::wstring(L"C:\\ProgramData\\GNLink\\credential\\machine.cred"); };
     p.machineId = [this] { ++calls; return std::string("11111111-2222-3333-4444-555555555555"); };
     p.readFloor = [this](uint64_t* out) {
@@ -560,6 +560,20 @@ int main() {
     {
       pl::UserHostReadyTracker t;
       check("handoff: no ready yet -> not complete (the prelogin worker keeps the lease)", !t.Completes(3, 500, "n-1"));
+      {
+        // r10: an adopted Host (not launched by the service: no nonce) -- its own streaming child's ready.
+        pl::UserHostReadyTracker a;
+        a.Note(3, 900, "", 4242);  // the stream, pid 4242
+        const auto parentOf = [](uint32_t pid, uint64_t start) -> uint32_t {
+          return (pid == 4242 && start == 900) ? 77u : 0u;  // its parent: the adopted GNLinkHost, pid 77
+        };
+        check("r10: the adopted Host's own child's ready completes the handoff (no nonce needed)",
+              a.CompletesAdopted(3, 77, parentOf));
+        check("...not when the sender is another Host's child", !a.CompletesAdopted(3, 78, parentOf));
+        check("...nor from another session", !a.CompletesAdopted(4, 77, parentOf));
+        check("...nor when that process is gone / its pid reused (the parent cannot be told)",
+              !a.CompletesAdopted(3, 77, [](uint32_t, uint64_t) { return 0u; }));
+      }
       t.Note(3, 400, "n-1");
       check("handoff: a ready from a host started BEFORE this launch (an old generation) -> discarded", !t.Completes(3, 500, "n-1"));
       t.Note(4, 600, "n-1");

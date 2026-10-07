@@ -86,10 +86,17 @@ int main() {
     check("...but after the wait (2 s)", p.Decide(obs(1, 2400)) == D::None && p.Decide(obs(1, 2500)) == D::Launch);
     auto again = obs(1, 2600);
     again.watchedExited = true;
-    again.watchedExitCode = 1;
+    again.watchedExitCode = 0xC0000409u;
     (void)p.Decide(again);
     check("...dying again doubles the wait (4 s)", p.Decide(obs(1, 6500)) == D::None && p.Decide(obs(1, 6600)) == D::Launch);
     check("a crash is not taken as the user closing it", !p.userClosed());
+    pl::UserHostLaunchPolicy tm;
+    (void)tm.Decide(obs(1, 0));
+    auto ended = obs(1, 5000);
+    ended.watchedExited = true;
+    ended.watchedExitCode = 1;  // Task Manager "End task"
+    check("r10: ended from Task Manager (exit 1) is the user's choice: not started again",
+          tm.Decide(ended) == D::None && tm.Decide(obs(1, 120000)) == D::None && tm.userClosed());
     pl::UserHostLaunchPolicy f;
     (void)f.Decide(obs(1, 0));
     f.OnLaunchFailed(0);

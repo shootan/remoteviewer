@@ -29,7 +29,7 @@ struct SecureInputMessage {
   int32_t wheelDelta = 0;
   uint32_t keyCode = 0;
   uint16_t textCount = 0;
-  uint16_t reserved = 0;
+  uint16_t flags = 0;  // r10 T2: kSecureInputFlag* (secure_input_desktop_fence.hpp); was reserved (0)
   // Where the client's coordinate space sits on the desktop, in desktop coordinates. Zero
   // width/height means "unknown", which makes the agent fall back to the virtual screen. A
   // monitor left of the primary gives a negative origin, so these are signed.

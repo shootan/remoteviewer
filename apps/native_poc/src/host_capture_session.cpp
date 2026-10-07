@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_backend_policy.hpp"
@@ -466,6 +467,9 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
     }
     if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
+      if (capture.monitorInfo->width < capture.monitorInfo->height && !capture.preloginServingDesktop.empty()) {
+        remote60::native_poc::prelogin::PreloginStopServing("rotated monitor (dxgi unsupported)");
+      }
       if (capture.monitorInfo->width < capture.monitorInfo->height) {
         backend.active = DesktopCaptureBackend::Wgc;
         capture.SetDxgiFallbackReason("rotation_unsupported");
@@ -486,6 +490,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         item = refreshedItem;
       }
     } else if (backend.active == DesktopCaptureBackend::Wgc) {
+      if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("wgc requested");
       auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)",
                                                       capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
       if (!refreshedItem) return false;
@@ -631,6 +636,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
       if (!started) {
         std::cout << "[native-video-host] fallback_reason=" << dxgiDetail << "\n";
+        if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("dxgi start: " + dxgiDetail);
         backend.active = DesktopCaptureBackend::Wgc;
         auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(dxgi-fallback)",
                                                         capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
@@ -659,6 +665,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
     }
     if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi) {
+      if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("gdi requested");
       GdiCaptureProcessConfig config;
       config.width = newW;
       config.height = newH;

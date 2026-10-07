@@ -614,6 +614,7 @@ int wmain(int argc, wchar_t** argv) {
   bool notPrelogin = false;
   bool sessionEnds = false;
   bool androidSession = false;
+  bool captureFallback = false;
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
@@ -623,6 +624,7 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--not-prelogin") notPrelogin = true;
     if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
+    if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
   }
   if (!host_e2e_allowed() || GetEnvironmentVariableW(L"REMOTE60_ALLOW_UI_TEST", nullptr, 0) == 0) {
     std::printf("SKIP  viewer_prelogin_login_e2e_test (starts a listening host and types into its own window)\n");
@@ -728,6 +730,7 @@ int wmain(int argc, wchar_t** argv) {
                        start_host(&host, dir, directory.url(), hostPort, notPrelogin ? Start::LoggedIn : Start::Service,
                                   targets.title, restricted,
                                   sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000"
+                                  : captureFallback ? L"GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS=8000"
                                   : notPrelogin ? L""
                                                 : L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=3000");  // r7 H6
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
@@ -775,6 +778,9 @@ int wmain(int argc, wchar_t** argv) {
     const bool up = phone.Connect(a) &&
                     wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
     check("the session connects, directory-authenticated", up, phone.Snapshot().status);
+    // r10: what the app does right after connecting (MainActivity): ask the window list -- before the first
+    // pong. It must wait for that pong, which answers it ("not here") without sending it.
+    const bool listAccepted = phone.RequestWindowList();
     // r7 H6: the host's first pong is late (test seam, 3 s). Typed now, the role is not known yet -- and an
     // unknown role is the logon screen: nothing is queued, and nothing reaches the host after the pong.
     const bool roleUnknown = phone.HostCaptureFlags() == 0;
@@ -810,6 +816,10 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t gotSas = 0, sasWin32 = 0;
     int sasOutcome = -1;
     const bool sasAnswered = sasId != 0 && wait_until([&] { return phone.TakeSasOutcome(&gotSas, &sasOutcome, &sasWin32); }, 15000);
+    check("r10: the app's window-list request made before the first pong was taken, then answered \"not here\"",
+          listAccepted && phone.WindowPanelSnapshotCopy().status.find("not available at the logon screen") != std::string::npos,
+          phone.WindowPanelSnapshotCopy().status);
+    check("r10: ...and asked again at the logon screen it is refused at once (not sent)", !phone.RequestWindowList());
     check("r9: the shared session sent the pre-login host nothing outside its allowlist (the link stayed up)",
           host.Count("[control][prelogin] rejected control type=") == 0, host.log().substr(host.log().size() > 600 ? host.log().size() - 600 : 0));
     check("R5: the shared session asks Ctrl+Alt+Del of the pre-login host (0x20000) and gets its answer",
@@ -926,6 +936,21 @@ int wmain(int argc, wchar_t** argv) {
     });
     connected = wait_until([&] { return media.load() > 0; }, 20000);
     check("video is arriving", connected, std::to_string(media.load()) + " media datagrams");
+    if (captureFallback) {
+      // r10 T2: mid-stream the DXGI worker finds the input desktop is not the one served and asks for a
+      // fallback. Before login there is none: the worker must stop serving and leave (exit 15) -- not move
+      // to WGC (which is bound to no desktop) and go on streaming.
+      std::cout << "\n--- r10 T2: DXGI gives up mid-stream (the desktop is no longer the logon desktop) ---\n";
+      DWORD rc = STILL_ACTIVE;
+      const bool left = WaitForSingleObject(host.pi.hProcess, 30000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+      check("T2: the worker stopped serving and left, exit 15 -- no other capture before login", left && rc == 15,
+            std::to_string(rc));
+      check("...it said why (the desktop not served)", host.log().find("capture cannot continue on the logon desktop") != std::string::npos &&
+                                                         host.log().find("prelogin_desktop_not_served") != std::string::npos);
+      check("...and never started WGC", host.log().find("CreateForMonitor") == std::string::npos &&
+                                            host.log().find("desktop_backend=wgc") == std::string::npos);
+      connected = false;  // the worker is gone: nothing after this is asked of it
+    }
     static remote60::native_poc::viewer::Args args;
     args.inputLogEvery = 0;
     static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/false);
@@ -936,7 +961,7 @@ int wmain(int argc, wchar_t** argv) {
     // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
     // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
     // (the main --prelogin run; the other modes start their host without the delay).
-    if (connected && !notPrelogin && !sessionEnds) {
+    if (connected && !notPrelogin && !sessionEnds && !captureFallback) {
       {
         std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
         ctx.frameBuf.frame.width = 320;
@@ -1053,14 +1078,14 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   const bool ready = connected && pump_until([&] { return ctx.control.lastRttUs.load() > 0; }, 25000);
-  if (!androidSession) check("the worker completes a round trip with the host", ready);
+  if (!androidSession && !captureFallback) check("the worker completes a round trip with the host", ready);
   const auto flags = [&] { return ctx.session.hostCaptureFlags.load(); };
   if (ready) {
     bar = FindWindowExW(nullptr, nullptr, L"Remote60SessionToolbar", nullptr);
     check("the toolbar window exists", bar != nullptr);
   }
 
-  if (ready && bar && !notPrelogin && !sessionEnds) {
+  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback) {
     std::cout << "\n--- the host is at the pre-login screen ---\n";
     check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
           std::to_string(flags()));

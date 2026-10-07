@@ -1,5 +1,6 @@
 #include "secure_input_broker.hpp"
 #include "bounded_pipe_io.hpp"
+#include "secure_input_desktop_fence.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -149,7 +150,14 @@ bool SecureInputBrokerClient::ConnectLocked() {
   return false;
 }
 
-bool SecureInputBrokerClient::WriteLocked(const SecureInputMessage& message) {
+void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  flags_ = on ? static_cast<uint16_t>(flags_ | kSecureInputFlagLogonDesktopOnly)
+              : static_cast<uint16_t>(flags_ & ~kSecureInputFlagLogonDesktopOnly);
+}
+
+bool SecureInputBrokerClient::WriteLocked(SecureInputMessage message) {
+  message.flags = static_cast<uint16_t>(message.flags | flags_);  // r10 T2: the agent's fence reads it
   if (!ConnectLocked()) return false;
   if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
   CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE;

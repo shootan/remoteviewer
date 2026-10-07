@@ -24,6 +24,7 @@
 #include "product_version.hpp"
 #include "version_compare.hpp"
 #include "install_registration.hpp"
+#include "prelogin_uninstall_codes.hpp"
 
 namespace {
 
@@ -534,11 +535,19 @@ int do_uninstall(bool fromTemp) {
   (void)RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, KEY_WOW64_64KEY, 0);
 
   if (serviceResult != 0) {
-    // r9 R2: said, not swallowed. Access is off (the mark), but the record could not be withdrawn here.
-    report(L"GNLink Host was removed, but its sign-in-screen access could not be fully withdrawn (error " +
-               std::to_wstring(serviceResult) +
-               L"). It stays switched off; installing GNLink again finishes withdrawing it first.",
-           true);
+    // r9 R2 / r10 T1: said, not swallowed -- and each case in its own words (only the first is "off").
+    std::wstring text;
+    if (serviceResult == remote60::native_poc::prelogin::kUninstallRevokeOwed) {
+      text = L"GNLink Host was removed, but its sign-in-screen access could not be fully withdrawn. It stays "
+             L"switched off; installing GNLink again finishes withdrawing it first.";
+    } else if (serviceResult == remote60::native_poc::prelogin::kUninstallServiceNotRemoved) {
+      text = L"GNLink Host was removed and its sign-in-screen access withdrawn, but the GNLink security service "
+             L"could not be deleted. Restart the PC and run the uninstaller again.";
+    } else {
+      text = L"GNLink Host was removed, but it could NOT be confirmed that its sign-in-screen access was withdrawn "
+             L"(" + std::to_wstring(serviceResult) + L"). Run the uninstaller again as an administrator.";
+    }
+    report(text, true);
     return kUninstallPreloginNotRevoked;
   }
   report(filesRemoved ? L"GNLink Host was removed."

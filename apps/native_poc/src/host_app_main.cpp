@@ -1895,9 +1895,10 @@ void on_prelogin_reply(PreloginReplyResult* result) {
   }
   // An answer made for an owner who has since signed out says nothing about the window now.
   const bool current = owned->epoch == gPreloginOwnerEpoch.load();
-  if (owned->withdrawal) {
+  if (owned->withdrawal && owned->epoch == gPreloginOwnerEpoch.load()) {
     // r9 R1: signing out is not "done" until the machine's pre-login access is known to be withdrawn --
-    // and a withdrawal that did not finish is said, with what still holds.
+    // and a withdrawal that did not finish is said, with what still holds. r10: only the latest owner
+    // change's answer is shown (an earlier sign-out's late answer does not speak for this one).
     const bool ok = owned->reply.status == pl::AdminStatus::Ok && !owned->reply.enabled;
     std::wstring text;
     if (ok) {

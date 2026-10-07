@@ -32,8 +32,10 @@
 // Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
 #include "prelogin_child_launch.hpp"
 #include "prelogin_user_host_launch.hpp"
+#include "secure_input_desktop_fence.hpp"
 #include "prelogin_user_host_policy.hpp"
-#include "prelogin_sas_wire.hpp"
+#include "prelogin_sas_policy.hpp"
+#include "prelogin_uninstall_codes.hpp"
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -952,19 +954,22 @@ uint8_t request_sas_for(uint32_t callerSession, uint32_t* win32, bool* cadNotReq
                         ERROR_SUCCESS &&
                     cad != 0;
   const DWORD console = WTSGetActiveConsoleSessionId();
+  // r10 T3: the console's user as ClassifyTokenObservation reads it (only ERROR_NO_TOKEN is "nobody"), and
+  // the policy as Missing / Value / Error -- a failed read is neither "nobody logged on" nor "not set".
   HANDLE userToken = nullptr;
-  const bool userLoggedOn = console != 0xFFFFFFFFu && WTSQueryUserToken(console, &userToken);
+  const bool tokenOk = console != 0xFFFFFFFFu && WTSQueryUserToken(console, &userToken);
+  const DWORD tokenErr = tokenOk ? 0 : GetLastError();
   if (userToken) CloseHandle(userToken);
-  DWORD policy = 0;
-  DWORD cb = sizeof(policy);
-  const LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
-                                  L"SoftwareSASGeneration", RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &policy, &cb);
-  const int policyValue = st == ERROR_SUCCESS ? static_cast<int>(policy) : remote60::native_poc::prelogin::kSasPolicyUnset;
-  const PreloginSasResult d =
-      remote60::native_poc::prelogin::DecideSas(callerSession == console, userLoggedOn, policyValue);
-  diag("prelogin: SAS asked by session %lu (console %lu, user %d, policy %d) -> %d", static_cast<unsigned long>(callerSession),
-       static_cast<unsigned long>(console), userLoggedOn ? 1 : 0, policyValue, static_cast<int>(d));
-  if (d == PreloginSasResult::PolicyDenied) *win32 = static_cast<uint32_t>(policyValue);
+  const auto user = remote60::native_poc::prelogin::ClassifyTokenObservation(tokenOk, tokenErr);
+  const auto policy = remote60::native_poc::prelogin::ReadSasPolicy(
+      HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", L"SoftwareSASGeneration");
+  const auto decision = remote60::native_poc::prelogin::DecideSas(callerSession == console, user, tokenErr, policy);
+  const PreloginSasResult d = decision.result;
+  diag("prelogin: SAS asked by session %lu (console %lu, user %d err %lu, policy state %d value %lu err %lu) -> %d",
+       static_cast<unsigned long>(callerSession), static_cast<unsigned long>(console), static_cast<int>(user),
+       static_cast<unsigned long>(tokenErr), static_cast<int>(policy.state), static_cast<unsigned long>(policy.value),
+       static_cast<unsigned long>(policy.error), static_cast<int>(d));
+  *win32 = decision.win32;
   if (d != PreloginSasResult::Sent && d != PreloginSasResult::SentUnconfirmed) return static_cast<uint8_t>(d);
   HANDLE self = nullptr;
   HANDLE inSession = nullptr;
@@ -1211,19 +1216,28 @@ void launch_user_host(DWORD consoleSession) {
 // (adopted: watched, never stopped by the service). prelogin_user_host_policy.hpp decides.
 remote60::native_poc::prelogin::UserHostLaunchPolicy gUserHostPolicy;
 HANDLE gAdoptedHost = nullptr;
+DWORD gAdoptedHostPid = 0;
+DWORD gAdoptedSession = 0xFFFFFFFFu;  // r10 N1: the session the adopted Host runs in
 
-// This logon's identity: the console session and its logon time (a lock/unlock is the same logon).
+// This logon's identity: the console session and its logon time (a lock/unlock is the same logon). r10: a
+// query that fails keeps the last key known for that session -- a failure is not a new logon (it would
+// forget that the user closed their Host).
 uint64_t console_logon_key(DWORD session) {
+  static DWORD lastSession = 0xFFFFFFFFu;
+  static uint64_t lastKey = 0;
   WTSINFOW* info = nullptr;
   DWORD bytes = 0;
-  uint64_t logonTime = 0;
   if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSSessionInfo, reinterpret_cast<LPWSTR*>(&info),
                                   &bytes) &&
       info) {
-    logonTime = static_cast<uint64_t>(info->LogonTime.QuadPart);
+    const uint64_t logonTime = static_cast<uint64_t>(info->LogonTime.QuadPart);
     WTSFreeMemory(info);
+    lastSession = session;
+    lastKey = (logonTime << 8) ^ session;
+    return lastKey;
   }
-  return (logonTime << 8) ^ session;
+  if (session == lastSession) return lastKey;
+  return (static_cast<uint64_t>(0xFFFFFFFFu) << 8) ^ session;  // never queried: one stable key per session
 }
 
 // A GNLinkHost of THIS install running in `session` (its image is this install's GNLinkHost.exe): its pid.
@@ -1255,6 +1269,20 @@ void reconcile_user_host(DWORD console) {
   remote60::native_poc::prelogin::UserHostObservation o;
   o.logon = console_logon_key(console);
   o.nowMs = GetTickCount64();
+  // r10 N1: a Host is watched only in the session it runs in. After a switch of user (another session at the
+  // console) the earlier user's Host keeps running there -- it is let go, not stopped, and the new console
+  // session is judged on its own.
+  if (gUserHostProcess && gUserHostSession != console) {
+    diag("prelogin: the started user host belongs to session %lu, the console is %lu: no longer watched",
+         static_cast<unsigned long>(gUserHostSession), static_cast<unsigned long>(console));
+    CloseHandle(gUserHostProcess);  // not stopped: it is that user's
+    gUserHostProcess = nullptr;
+  }
+  if (gAdoptedHost && gAdoptedSession != console) {
+    CloseHandle(gAdoptedHost);
+    gAdoptedHost = nullptr;
+    gAdoptedHostPid = 0;
+  }
   HANDLE* watched = gUserHostProcess ? &gUserHostProcess : (gAdoptedHost ? &gAdoptedHost : nullptr);
   if (watched) {
     if (WaitForSingleObject(*watched, 0) == WAIT_OBJECT_0) {
@@ -1266,6 +1294,7 @@ void reconcile_user_host(DWORD console) {
            static_cast<unsigned long>(code));
       CloseHandle(*watched);
       *watched = nullptr;
+      if (watched == &gAdoptedHost) gAdoptedHostPid = 0;
     } else {
       o.watchedAlive = true;
     }
@@ -1278,6 +1307,8 @@ void reconcile_user_host(DWORD console) {
   switch (gUserHostPolicy.Decide(o)) {
     case UserHostDecision::Adopt:
       gAdoptedHost = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, otherPid);
+      gAdoptedHostPid = gAdoptedHost ? otherPid : 0;
+      gAdoptedSession = console;
       diag("prelogin: the user's GNLinkHost is already running (pid %lu): adopted, none started",
            static_cast<unsigned long>(otherPid));
       break;
@@ -1323,8 +1354,13 @@ SupervisorObservation observe_console(DWORD* consoleOut, bool consoleChanged) {
     // AND has signalled it reached its ready point (directory-registered + serving), never on the bare
     // LOGON or on mere process existence.
     // The host's ready over the admin pipe, for THIS session, launch and launch nonce (r2 item 7 + r6 G9).
-    obs.userHostReady = child_alive(gUserHostProcess) &&
-                        gUserHostReady.Completes(console, gUserHostLaunchTime.load(), narrow_nonce(gUserHostReadyNonce));
+    obs.userHostReady = (child_alive(gUserHostProcess) &&
+                         gUserHostReady.Completes(console, gUserHostLaunchTime.load(), narrow_nonce(gUserHostReadyNonce))) ||
+                        // r10: or the adopted Host (session + image checked) -- its own streaming child's ready.
+                        (gAdoptedHost && gAdoptedSession == console && WaitForSingleObject(gAdoptedHost, 0) == WAIT_TIMEOUT &&
+                         gUserHostReady.CompletesAdopted(console, gAdoptedHostPid, [](uint32_t pid, uint64_t start) {
+                           return remote60::native_poc::prelogin::ParentProcessOf(pid, start);
+                         }));
   } else {
     obs.userToken = ClassifyTokenObservation(false, GetLastError());
   }
@@ -1433,8 +1469,8 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // prelogin-ui r2: the restart the streaming host's gate admitted (item 6) and the user Host's ready
   // (item 7) -- both only from this install's GNLinkStream, elevated or SYSTEM.
   remote60::native_poc::prelogin::BindProductReboot(&adminPrimitives);
-  adminPrimitives.noteUserHostReady = [](uint32_t session, uint64_t started, const std::string& nonce) {
-    gUserHostReady.Note(session, started, nonce);
+  adminPrimitives.noteUserHostReady = [](uint32_t session, uint64_t started, const std::string& nonce, uint32_t pid) {
+    gUserHostReady.Note(session, started, nonce, pid);
   };
   static remote60::native_poc::prelogin::RebootLedger rebootLedger;
   const std::wstring hostImage = sibling_exe_path(L"GNLinkStream.exe");
@@ -1749,13 +1785,20 @@ int run_agent(HANDLE readPipe) {
     if (message.kind == static_cast<uint16_t>(SecureInputKind::Shutdown)) break;
     // Re-attach every message on purpose: the desktop can change between any two events, and a
     // handle kept from the previous one points at the desktop that is no longer receiving input.
+    // r10 T2: then the fence -- a pre-login message is injected only if that desktop is the logon one.
     bool journalPlayback = false;
-    if (!attach_to_input_desktop(&ownedDesktop, &journalPlayback)) {
+    const auto step = remote60::native_poc::AgentHandleMessage(
+        message, [&] { return attach_to_input_desktop(&ownedDesktop, &journalPlayback); },
+        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); });
+    if (step == remote60::native_poc::AgentStep::AttachFailed) {
       report_agent_state(L"(attach failed)", false, false, false);
       continue;
     }
-    const bool injected = inject_message(message);
-    report_agent_state(current_desktop_name().c_str(), true, journalPlayback, injected);
+    if (step == remote60::native_poc::AgentStep::RefusedNotLogonDesktop) {
+      diag("agent: a pre-login message was not injected -- the input desktop is no longer the logon desktop");
+    }
+    report_agent_state(current_desktop_name().c_str(), true, journalPlayback,
+                       step == remote60::native_poc::AgentStep::Injected);
   }
   diag("agent exiting");
   if (ownedDesktop) CloseDesktop(ownedDesktop);
@@ -1828,13 +1871,21 @@ bool stop_service_and_wait(SC_HANDLE service) {
 }
 
 int uninstall_service() {
+  namespace pl = remote60::native_poc::prelogin;
+  // r10 T1: the mark goes down before anything that can fail -- an SCM that cannot be opened must not
+  // leave the withdrawal unrecorded.
+  const bool markedFirst = pl::WriteRevokePendingAt(HKEY_LOCAL_MACHINE, pl::kOwnerFloorKey, true);
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-  if (!manager) return static_cast<int>(GetLastError());
+  if (!manager) {
+    diag("uninstall: SCM not opened err=%lu; mark=%d", GetLastError(), markedFirst ? 1 : 0);
+    return markedFirst ? pl::kUninstallRevokeOwed : pl::kUninstallRevokeUnconfirmed;
+  }
   SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
   const DWORD openErr = service ? ERROR_SUCCESS : GetLastError();
   if (!service && openErr != ERROR_SERVICE_DOES_NOT_EXIST) {
     CloseServiceHandle(manager);
-    return static_cast<int>(openErr);
+    diag("uninstall: service not opened err=%lu; mark=%d", openErr, markedFirst ? 1 : 0);
+    return markedFirst ? pl::kUninstallRevokeOwed : pl::kUninstallRevokeUnconfirmed;
   }
   // r6 V4 + r9 R2: removing GNLink withdraws pre-login access as turning it off does, as ONE writer: the mark
   // first (durable -- whatever happens next, any later service start finishes the revoke before it serves),
@@ -1844,13 +1895,14 @@ int uninstall_service() {
   bind_service_admin_primitives(&p);
   const auto revoke = remote60::native_poc::prelogin::RevokeForUninstall(
       p,
-      [] {
-        return remote60::native_poc::prelogin::WriteRevokePendingAt(HKEY_LOCAL_MACHINE,
-                                                                    remote60::native_poc::prelogin::kOwnerFloorKey, true);
+      [markedFirst] {
+        return markedFirst || remote60::native_poc::prelogin::WriteRevokePendingAt(
+                                  HKEY_LOCAL_MACHINE, remote60::native_poc::prelogin::kOwnerFloorKey, true);
       },
       [service] { return stop_service_and_wait(service); });
-  diag("uninstall: pre-login access revoked=%d marked=%d stopped=%d status=%d win32=%lu", revoke.revoked ? 1 : 0,
-       revoke.marked ? 1 : 0, revoke.serviceStopped ? 1 : 0, static_cast<int>(revoke.reply.status),
+  diag("uninstall: pre-login access revoked=%d marked=%d stopped=%d floor=%d remove=%lu record=%d status=%d win32=%lu",
+       revoke.revoked ? 1 : 0, revoke.marked ? 1 : 0, revoke.serviceStopped ? 1 : 0, revoke.floorRaised ? 1 : 0,
+       static_cast<unsigned long>(revoke.removeError), revoke.recordState, static_cast<int>(revoke.reply.status),
        static_cast<unsigned long>(revoke.reply.win32));
   DWORD err = ERROR_SUCCESS;
   if (service) {
@@ -1861,10 +1913,13 @@ int uninstall_service() {
     if (!deleted && err == ERROR_SERVICE_MARKED_FOR_DELETE) err = ERROR_SUCCESS;
   }
   CloseServiceHandle(manager);
-  if (err != ERROR_SUCCESS) return static_cast<int>(err);
-  // Not a success while access may remain: the mark stays down (a reinstall's service revokes first) and
-  // the caller is told.
-  if (!revoke.revoked) return static_cast<int>(revoke.reply.win32 != 0 ? revoke.reply.win32 : ERROR_ACCESS_DENIED);
+  // r10 T1: what is left, most serious first -- access not known to be off, then access off but the
+  // withdrawal still owed, then the service alone not removed.
+  if (!revoke.revoked) return revoke.marked ? pl::kUninstallRevokeOwed : pl::kUninstallRevokeUnconfirmed;
+  if (err != ERROR_SUCCESS) {
+    diag("uninstall: DeleteService failed err=%lu", static_cast<unsigned long>(err));
+    return pl::kUninstallServiceNotRemoved;
+  }
   return 0;
 }
 

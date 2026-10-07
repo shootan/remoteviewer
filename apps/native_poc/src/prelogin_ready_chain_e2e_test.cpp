@@ -97,6 +97,7 @@ uint64_t filetime_now() {
 struct Service {
   std::mutex mu;
   std::vector<std::pair<std::string, uint64_t>> readies;  // nonce, process start
+  uint32_t readyPid = 0;
   uint32_t readySession = 0;
   pl::UserHostReadyTracker tracker;
   pl::RebootLedger ledger;
@@ -119,11 +120,12 @@ struct Service {
       p.loadRememberedStartType = [](uint32_t*) { return false; };
       p.rememberStartType = [](uint32_t) { return false; };
       p.forgetRememberedStartType = [] {};
-      p.noteUserHostReady = [this](uint32_t s, uint64_t started, const std::string& n) {
+      p.noteUserHostReady = [this](uint32_t s, uint64_t started, const std::string& n, uint32_t pid) {
         std::lock_guard<std::mutex> l(mu);
         readies.emplace_back(n, started);
         readySession = s;
-        tracker.Note(s, started, n);
+        readyPid = pid;
+        tracker.Note(s, started, n, pid);
       };
       const std::wstring sddl = user_sddl();
       pl::RunPreloginAdminServer(p, [this] { return run.load(); }, pipe.c_str(), sddl.c_str(), [](void*) { return true; },
@@ -279,6 +281,15 @@ int wmain(int argc, wchar_t** argv) {
     check("W3: ...which completes the handoff for that launch (session, launch time, nonce)",
           service.tracker.Completes(mySession, launchA, "chain-launch-A"));
     check("...but not for another launch's nonce", !service.tracker.Completes(mySession, launchA, "chain-launch-B"));
+  }
+  // r10: had the service ADOPTED this GNLinkHost (a Host it did not start: no nonce of its own), the same
+  // ready completes the handoff through who sent it -- the real parent of the real sender is that Host.
+  {
+    const auto parentOf = [](uint32_t pid, uint64_t start) { return pl::ParentProcessOf(pid, start); };
+    check("r10: the ready's sender is GNLinkHost's own streaming child (its real parent)",
+          service.tracker.CompletesAdopted(mySession, a.pi.dwProcessId, parentOf), std::to_string(service.readyPid));
+    check("...and it does not complete it for another process taken for the adopted Host",
+          !service.tracker.CompletesAdopted(mySession, GetCurrentProcessId(), parentOf));
   }
 
   // W1: what the c196833 service did next -- start another GNLinkHost "--tray" while A runs.

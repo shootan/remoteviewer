@@ -270,6 +270,14 @@ int wmain(int argc, wchar_t** argv) {
     check("...and answered it not authorized (auth=0 result=2)",
           count_lines(hostLogPath, "[native-video-host][control][reboot] requestId=") == 1 &&
               count_lines(hostLogPath, " auth=0 result=2 ") == 1);
+    if (gFailures != 0) {  // the host's own account of what went wrong, before its directory goes
+      std::ifstream in(hostLogPath);
+      std::string line, tail[40];
+      int n = 0;
+      while (std::getline(in, line)) tail[n++ % 40] = line;
+      std::printf("--- host log (last %d lines) ---\n", n < 40 ? n : 40);
+      for (int i = (n < 40 ? 0 : n - 40); i < n; ++i) std::printf("  host: %s\n", tail[i % 40].c_str());
+    }
     CloseHandle(hostPi.hProcess);
     CloseHandle(hostPi.hThread);
   }

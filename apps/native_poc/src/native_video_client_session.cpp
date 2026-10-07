@@ -143,6 +143,24 @@ bool ClientSessionController::RequestWindowList() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
+  // r10: a pre-login host closes the link on a window-list request. Before the first pong says what the host
+  // is, the request waits for it (the pong sends it, or answers "not here"); at a host known to be at the
+  // logon screen it is answered at once and not sent. The app's own call right after connecting
+  // (MainActivity) used to go out before that pong.
+  const bool atLogonScreen = (hostCaptureFlags_.load(std::memory_order_relaxed) & kCaptureFlagPreloginV1) != 0;
+  if (!hostRoleKnown_.load(std::memory_order_acquire) || atLogonScreen) {
+    if (!hostRoleKnown_.load(std::memory_order_acquire)) {
+      windowListDeferred_.store(true, std::memory_order_release);
+      windowPanel_.SetStatus("window_list_request waiting for the host");
+    } else {
+      windowPanel_.SetStatus("window list not available at the logon screen");
+    }
+    const auto waiting = windowPanel_.Snapshot();
+    std::lock_guard<std::mutex> lock(mu_);
+    SyncWindowPanelSnapshotLocked(waiting);
+    UpdateConnectedStatusLocked(waiting.status);
+    return !atLogonScreen || !hostRoleKnown_.load(std::memory_order_acquire);
+  }
 
   windowPanel_.RequestList("window_list_request pending");
   {
@@ -569,9 +587,18 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
           hostCaptureFlags_.store(response.pong.captureTargetFlags, std::memory_order_relaxed);
-          if (!hostRoleKnown_.exchange(true, std::memory_order_acq_rel) &&  // r7 H6
-              (response.pong.captureTargetFlags & kCaptureFlagPreloginV1) == 0) {
-            windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect (above)
+          if (!hostRoleKnown_.exchange(true, std::memory_order_acq_rel)) {  // r7 H6: the first pong
+            const bool deferred = windowListDeferred_.exchange(false, std::memory_order_acq_rel);
+            if ((response.pong.captureTargetFlags & kCaptureFlagPreloginV1) == 0) {
+              windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect (above)
+            } else if (deferred) {
+              // r10: asked before the pong, at a host that turns out to be at the logon screen: answered here.
+              windowPanel_.SetStatus("window list not available at the logon screen");
+              const auto answered = windowPanel_.Snapshot();
+              std::lock_guard<std::mutex> lock(mu_);
+              SyncWindowPanelSnapshotLocked(answered);
+              UpdateConnectedStatusLocked(answered.status);
+            }
           }
           // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
           // every pong, so reconnecting to a different host cannot carry the old answer forward.
@@ -1164,6 +1191,7 @@ void ClientSessionController::ResetUnlocked() {
     rebootInFlight_ = false;
     sasPendingId_ = 0;
   }
+  windowListDeferred_.store(false, std::memory_order_release);
   // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
   // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a
   // preference, not session state. (The capability is re-learned from the next pong.)

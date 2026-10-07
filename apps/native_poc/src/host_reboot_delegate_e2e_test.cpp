@@ -264,7 +264,7 @@ struct Service {
         ++osReboots;
         return 0;  // "the OS accepted it" -- nothing is restarted
       };
-      p.noteUserHostReady = [this](uint32_t s, uint64_t st, const std::string& n) {
+      p.noteUserHostReady = [this](uint32_t s, uint64_t st, const std::string& n, uint32_t) {
         readyNonce = n;
         std::lock_guard<std::mutex> l(mu);
         ++readies;

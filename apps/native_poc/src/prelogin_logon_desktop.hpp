@@ -17,12 +17,25 @@
 
 #include <windows.h>
 
+#include <iostream>
 #include <string>
 
 namespace remote60::native_poc::prelogin {
 
 inline constexpr wchar_t kLogonDesktopName[] = L"Winlogon";
 inline constexpr int kLeftLogonDesktopExit = 14;
+// r10 T2: before login only DXGI, bound to the logon desktop, captures. When it cannot go on -- the input
+// desktop is not the one served, or duplication failed -- there is no other backend to fall back to (WGC
+// and GDI are not bound to a desktop): the worker stops serving and leaves.
+inline constexpr int kPreloginCaptureStoppedExit = 15;
+
+[[noreturn]] inline void PreloginStopServing(const std::string& why) {
+  std::cout << "[native-video-host][prelogin] capture cannot continue on the logon desktop (" << why
+            << "): no other capture before login -- stop serving and leave (r10 T2)" << std::endl;
+  std::cerr.flush();
+  TerminateProcess(GetCurrentProcess(), kPreloginCaptureStoppedExit);
+  for (;;) Sleep(1000);
+}
 
 // The input desktop's name now; empty when it cannot be opened.
 inline std::wstring InputDesktopName() {

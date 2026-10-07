@@ -12,6 +12,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
+#include <tlhelp32.h>
 
 #include "secure_input_protocol.hpp"
 #endif
@@ -173,8 +174,10 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
 namespace {
 
 // Disable: the floor first (an old blob can never come back), then the record, then the start type.
-AdminReply disable_now(const AdminPrimitives& p) {
+AdminReply disable_now(const AdminPrimitives& p, bool* floorRaised = nullptr, uint32_t* removeError = nullptr) {
   AdminReply reply;
+  if (floorRaised) *floorRaised = false;
+  if (removeError) *removeError = ERROR_CANCELLED;  // not attempted
   const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
   MachineRecord old;
   const bool had = !path.empty() && p.readRecord && p.readRecord(path, &old);
@@ -186,7 +189,9 @@ AdminReply disable_now(const AdminPrimitives& p) {
     reply.enabled = p.featureEnabled && p.featureEnabled();
     return reply;
   }
+  if (floorRaised) *floorRaised = true;
   const uint32_t rm = path.empty() || !p.removeRecord ? 0 : p.removeRecord(path);
+  if (removeError) *removeError = path.empty() ? ERROR_INVALID_PARAMETER : rm;
   uint32_t original = kStartDemand;
   const bool haveOriginal = p.loadRememberedStartType && p.loadRememberedStartType(&original);
   const uint32_t s = p.setStartType ? p.setStartType(haveOriginal ? original : kStartDemand) : 0;
@@ -239,14 +244,15 @@ UninstallRevokeResult RevokeForUninstall(const AdminPrimitives& p, const std::fu
   {
     std::unique_lock<std::mutex> lock;
     if (p.transaction) lock = std::unique_lock<std::mutex>(*p.transaction);
-    out.reply = disable_now(p);
+    out.reply = disable_now(p, &out.floorRaised, &out.removeError);
   }
-  // The postcondition, not the reply: the start type cannot always be put back while the service is being
-  // removed, and that is not access left on.
+  // r10 T1: the postcondition is what the revoke actually DID -- the durable floor raised, the record's
+  // removal reported, and the record file absent now -- not the reply (a start type that cannot be put back
+  // while the service is being removed is not access left on), not "it cannot be read" (an ACL / IO / DPAPI
+  // error is not absence), and not featureEnabled (the mark this removal set already turns that off).
   const std::wstring path = p.recordPath ? p.recordPath() : std::wstring();
-  MachineRecord left;
-  const bool recordLeft = !path.empty() && p.readRecord && p.readRecord(path, &left);
-  out.revoked = !recordLeft && !(p.featureEnabled && p.featureEnabled());
+  out.recordState = !path.empty() && p.probeRecord ? p.probeRecord(path) : -1;
+  out.revoked = out.floorRaised && out.removeError == 0 && out.recordState == 0;
   if (out.revoked && p.clearRevokePending) (void)p.clearRevokePending();
   return out;
 }
@@ -289,7 +295,7 @@ AdminReply handle_admin_request_locked(const std::vector<uint8_t>& request, cons
       return reply;
     }
     if (r.op == AdminOp::Ready) {
-      if (p.noteUserHostReady) p.noteUserHostReady(who.sessionId, who.processStartTime, r.readyNonce);
+      if (p.noteUserHostReady) p.noteUserHostReady(who.sessionId, who.processStartTime, r.readyNonce, who.processId);
       reply.status = AdminStatus::Ok;
       return reply;
     }
@@ -777,6 +783,29 @@ uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* 
            : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
                                                     : reply.win32;
   return 3;
+}
+
+uint32_t ParentProcessOf(uint32_t pid, uint64_t startTime) {
+  HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!p) return 0;
+  FILETIME c{}, e{}, k{}, u{};
+  const bool timed = GetProcessTimes(p, &c, &e, &k, &u) != FALSE;
+  CloseHandle(p);
+  const uint64_t created = (static_cast<uint64_t>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
+  if (!timed || created != startTime) return 0;  // not the process that sent it
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return 0;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  uint32_t parent = 0;
+  for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+    if (pe.th32ProcessID == pid) {
+      parent = pe.th32ParentProcessID;
+      break;
+    }
+  }
+  CloseHandle(snap);
+  return parent;
 }
 
 uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired) {

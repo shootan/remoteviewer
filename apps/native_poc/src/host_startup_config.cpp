@@ -138,6 +138,9 @@ int startup_configure_from_env(HostContext& hx) {
   auto& encoder = hx.encoder;
   auto& capture = hx.capture;
   inputRouter.injectionMode = parse_input_injection_mode(args.inputInjectionMode);
+  // r10 T2: everything the pre-login worker hands the SYSTEM input agent may land only on the logon
+  // desktop -- the agent checks it after its own attach (secure_input_desktop_fence.hpp).
+  if (args.preloginMode) inputRouter.broker.SetLogonDesktopOnly(true);
   inputRouter.injectionEnabled =
       args.enableInputInjection &&
       (inputRouter.injectionMode == InputInjectionMode::BackgroundMessage) &&

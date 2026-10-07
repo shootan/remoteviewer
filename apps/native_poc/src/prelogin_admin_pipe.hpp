@@ -128,13 +128,25 @@ struct UserHostReadyTracker {
   bool have = false;
   uint32_t sessionId = 0;
   uint64_t processStartTime = 0;
+  uint32_t processId = 0;  // r10: who sent it (the adopted Host's case is bound by its parent)
   std::string nonce;
-  void Note(uint32_t session, uint64_t startTime, const std::string& readyNonce) {
+  void Note(uint32_t session, uint64_t startTime, const std::string& readyNonce, uint32_t pid = 0) {
     std::lock_guard<std::mutex> l(mu);
     have = true;
     sessionId = session;
     processStartTime = startTime;
     nonce = readyNonce;
+    processId = pid;
+  }
+  // r10: a GNLinkHost the user already ran (adopted -- the service checked its session and image) was not
+  // started with a launch nonce, so its streaming child's ready carries none. It completes the handoff when
+  // it comes from that Host's own child in the console session: `parentOf(pid, startTime)` answers the
+  // sender's parent (0 when that process -- this pid at that start time -- is gone or cannot be read).
+  bool CompletesAdopted(uint32_t consoleSession, uint32_t adoptedHostPid,
+                        const std::function<uint32_t(uint32_t pid, uint64_t startTime)>& parentOf) {
+    std::lock_guard<std::mutex> l(mu);
+    return have && adoptedHostPid != 0 && processId != 0 && sessionId == consoleSession && parentOf &&
+           parentOf(processId, processStartTime) == adoptedHostPid;
   }
   void Reset() {
     std::lock_guard<std::mutex> l(mu);
@@ -163,6 +175,9 @@ struct AdminPrimitives {
   std::function<bool(const std::wstring&, MachineRecord*)> readRecord;   // false = none / unreadable
   std::function<uint32_t(const std::wstring&, const MachineRecord&)> writeRecord;  // 0 = ok, else win32
   std::function<uint32_t(const std::wstring&)> removeRecord;            // 0 = ok / already gone
+  // r10 T1: is a record file there at all -- not "can it be read" (readRecord is false for an ACL / IO /
+  // DPAPI error too). 0 = absent, 1 = present, -1 = cannot tell. Unbound: cannot tell.
+  std::function<int(const std::wstring&)> probeRecord;
   std::function<bool()> featureEnabled;                     // the service's own judgement of "on now"
   // r6 V7: the one directory server a record may name (the product's); Enable refuses any other. Empty:
   // nothing is accepted (fail closed).
@@ -175,7 +190,8 @@ struct AdminPrimitives {
   std::function<void()> forgetRememberedStartType;
   // r2: the ONE fixed local restart (0 = the OS accepted it, else win32), and where a ready goes.
   std::function<uint32_t()> requestOsReboot;
-  std::function<void(uint32_t session, uint64_t processStartTime, const std::string& nonce)> noteUserHostReady;
+  std::function<void(uint32_t session, uint64_t processStartTime, const std::string& nonce, uint32_t processId)>
+      noteUserHostReady;
   // r9 R5: Ctrl+Alt+Del for the caller's session (the --prelogin worker's): a PreloginSasResult, *win32.
   // *cadNotRequired: DisableCAD is set (the logon needs no Ctrl+Alt+Del) -- carried in the reply's `enabled`.
   std::function<uint8_t(uint32_t callerSession, uint32_t* win32, bool* cadNotRequired)> requestSas;
@@ -211,7 +227,10 @@ AdminReply CompletePendingRevoke(const AdminPrimitives& p);
 // and its record publish), then the Disable decision. Succeeds only when access is really gone: the
 // record absent and the feature off. The floor stays (r8 V4). Failure keeps the mark.
 struct UninstallRevokeResult {
-  bool revoked = false;  // the postcondition held
+  bool revoked = false;  // the postcondition held: floor raised AND record removed AND the record ABSENT
+  bool floorRaised = false;
+  uint32_t removeError = 0;
+  int recordState = -1;  // probeRecord after: 0 absent, 1 present, -1 cannot tell
   bool marked = false;
   bool serviceStopped = false;
   AdminReply reply;      // the Disable's answer (a start-type failure alone does not fail the uninstall)
@@ -267,6 +286,9 @@ ServerCheck HostServiceServerCheck();
 // Item 6: the restart the gate admitted, done by the service. Returns RebootResult; *win32 its error.
 // A service that cannot be reached is Failed (ERROR_SERVICE_NOT_ACTIVE) -- never a local fallback.
 uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32);
+// r10: the parent of process `pid` -- only while that process is the one created at `startTime` (a reused
+// pid answers 0). 0 when it cannot be told.
+uint32_t ParentProcessOf(uint32_t pid, uint64_t startTime);
 // r9 R5: Ctrl+Alt+Del, done by the service (SendSAS). Returns a PreloginSasResult; a service that cannot be
 // reached is Failed (ERROR_SERVICE_NOT_ACTIVE).
 uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired);

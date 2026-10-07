@@ -82,19 +82,4 @@ inline ControlPreloginStatusMessage make_prelogin_status(uint32_t requestId, uin
   return m;
 }
 
-namespace prelogin {
-
-// SoftwareSASGeneration as read: -1 = not set (no value), else the DWORD.
-constexpr int kSasPolicyUnset = -1;
-
-// The service's decision before it calls SendSAS. Pure.
-inline PreloginSasResult DecideSas(bool callerIsConsoleSession, bool userLoggedOnAtConsole, int softwareSasGeneration) {
-  if (!callerIsConsoleSession || userLoggedOnAtConsole) return PreloginSasResult::NotAtLogon;
-  if (softwareSasGeneration == 1 || softwareSasGeneration == 3) return PreloginSasResult::Sent;  // services may
-  // Unset: neither assumed to allow it nor to forbid it -- tried, and said to be unconfirmed (verifier r9).
-  if (softwareSasGeneration == kSasPolicyUnset) return PreloginSasResult::SentUnconfirmed;
-  return PreloginSasResult::PolicyDenied;  // 0 (none), 2 (Ease of Access only), anything else
-}
-
-}  // namespace prelogin
 }  // namespace remote60::native_poc
