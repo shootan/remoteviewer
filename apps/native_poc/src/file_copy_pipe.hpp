@@ -50,7 +50,9 @@
 namespace remote60::native_poc::file_copy {
 
 constexpr uint32_t kPipeMagic = 0x504C4347u;  // bytes 'G' 'C' 'L' 'P' on the wire
-constexpr uint16_t kPipeVersion = 1;
+// 2 (paste on demand r7): PublishRemoteFilesIfUnchanged. A helper of another version is refused at
+// Hello (file_copy_helper_host.cpp), so a viewer never sends 18 to a helper that would not honour it.
+constexpr uint16_t kPipeVersion = 2;
 constexpr size_t kFrameHeaderBytes = 16;
 constexpr wchar_t kPipeNamePrefix[] = L"\\\\.\\pipe\\GNLinkClip-";
 constexpr size_t kPipeNameRandomBytes = 16;  // 128-bit, hex in the pipe name
@@ -67,6 +69,7 @@ enum class PipeMsg : uint16_t {
   HelloAck = 2,
   Shutdown = 3,
   PublishRemoteFiles = 10,
+  PublishRemoteFilesIfUnchanged = 18,  // r7: PublishRemoteFiles, only over clipboard sequence expectSeq
   ClearRemoteFiles = 11,
   PasteBegin = 12,
   PasteDescriptor = 13,
@@ -105,6 +108,7 @@ enum class Status : uint16_t {
   BadRequest = 16,       // index / offset / length outside the item
   PathThroughLink = 17,  // the path reaches the file through a junction / symlinked directory
   NotLocal = 18,         // the file is not on a local drive letter (UNC, mapped, unlettered volume)
+  ClipboardChanged = 19, // r7: a publish refused -- this PC's clipboard changed since it was approved
 };
 
 enum class EndReason : uint16_t {
@@ -164,6 +168,10 @@ struct Hello {
 struct PublishRemoteFiles {
   uint64_t offerId = 0;
   std::vector<RemoteFileItem> items;
+  // r7 (D2): sent as PublishRemoteFilesIfUnchanged -- the helper publishes only if this PC's
+  // clipboard sequence is still `expectSeq`, checked with the clipboard held.
+  bool ifUnchanged = false;
+  uint32_t expectSeq = 0;
 };
 struct PublishResult {
   uint64_t offerId = 0;
@@ -469,10 +477,12 @@ inline PipeFrame encode(const PublishRemoteFiles& m) {
   w.u64(m.offerId);
   w.u32(static_cast<uint32_t>(m.items.size()));
   for (const auto& it : m.items) detail::put_item(w, it);
-  return {PipeMsg::PublishRemoteFiles, w.take()};
+  if (m.ifUnchanged) w.u32(m.expectSeq);
+  return {m.ifUnchanged ? PipeMsg::PublishRemoteFilesIfUnchanged : PipeMsg::PublishRemoteFiles, w.take()};
 }
 inline bool decode(const PipeFrame& f, PublishRemoteFiles* m) {
-  if (f.type != PipeMsg::PublishRemoteFiles) return false;
+  if (f.type != PipeMsg::PublishRemoteFiles && f.type != PipeMsg::PublishRemoteFilesIfUnchanged) return false;
+  m->ifUnchanged = f.type == PipeMsg::PublishRemoteFilesIfUnchanged;
   ByteReader r(f.payload);
   uint32_t count = 0;
   if (!r.u64(&m->offerId) || !detail::get_count(r, kMaxFiles, &count)) return false;
@@ -480,6 +490,7 @@ inline bool decode(const PipeFrame& f, PublishRemoteFiles* m) {
   for (auto& it : m->items) {
     if (!detail::get_item(r, &it)) return false;
   }
+  if (m->ifUnchanged && !r.u32(&m->expectSeq)) return false;
   return r.done();
 }
 
@@ -816,6 +827,7 @@ inline const char* status_name(Status s) {
     case Status::BadRequest: return "bad-request";
     case Status::PathThroughLink: return "path-through-link";
     case Status::NotLocal: return "not-local";
+    case Status::ClipboardChanged: return "clipboard-changed";
   }
   return "?";
 }

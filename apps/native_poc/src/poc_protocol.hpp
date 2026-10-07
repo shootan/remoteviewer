@@ -288,6 +288,10 @@ constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
 // a host that advertises this: an older host discards an unknown type without answering, and the
 // strict request/response link would then wait on a reply that never comes.
 constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
+// Paste on demand r7 (D2): this host answers the ordered offer query (file messages 86/87): each R->P
+// file offer says which copy on the host it was made of (its copy generation). A viewer asks 86 only
+// of a host that advertises this; an older host is asked 67 as before (its offers carry no order).
+constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

@@ -89,6 +89,22 @@ class FileCopyClient {
   void SetBulkNegotiated(bool v) { bulkNegotiated_.store(v, std::memory_order_release); }
   /** Pong carried kCaptureFlagFileCopyV1. */
   void SetHostSupports(bool v) { hostSupports_.store(v, std::memory_order_release); }
+  /** Pong carried kCaptureFlagFileOfferCopyGenV1: offers are asked with 86 and say their copy (r7). */
+  void SetHostOrdersOffers(bool v) { hostOrdersOffers_.store(v, std::memory_order_release); }
+  /**
+   * Paste on demand r7 (D2): a remote copy of files is not published here at once. It goes to the
+   * gate (the viewer's UI thread, which records this PC's copies), with the copy generation of the
+   * host's copy if the host says it; the gate answers with PublishApproved and this PC's clipboard
+   * revision it decided on, and the helper publishes only over that revision. No gate set: published
+   * at once, as before (a client without a viewer window: the file-copy tests).
+   */
+  struct RemoteFilesForGate {
+    file_copy::PublishRemoteFiles pub;
+    bool hasCopyGen = false;  // an older host: no order
+    uint64_t copyGen = 0;
+  };
+  void SetPublishGate(std::function<void(RemoteFilesForGate)> gate);
+  void PublishApproved(file_copy::PublishRemoteFiles pub, uint32_t expectSeq);
   /**
    * The viewer's own switch (A2: file_copy_allowed on this side). Off while something runs: the
    * running paste either way ends (Disabled) -- pins released, the sender and the receiver closed,
@@ -298,6 +314,7 @@ class FileCopyClient {
   void EndReceiveLocked(file_copy::net::PasteEndReason reason);  // caller holds mu_; queues the End
   void RefuseDescriptor(uint64_t instance, uint64_t offerId, uint64_t pasteOp, file_copy::Status why);
   void Post(std::function<void()> task);  // runs on the worker (helper start / publish / clear)
+  void PostPublish(file_copy::PublishRemoteFiles pub);
   void WorkerLoop();
   bool R2PEnabled() const { return launcher_ != nullptr; }
   void Log(const std::string& line);
@@ -312,6 +329,8 @@ class FileCopyClient {
 
   std::atomic<bool> bulkNegotiated_{false};
   std::atomic<bool> hostSupports_{false};
+  std::atomic<bool> hostOrdersOffers_{false};
+  std::function<void(RemoteFilesForGate)> publishGate_;  // under mu_
   std::atomic<bool> allowed_{true};
   std::atomic<bool> running_{false};
 

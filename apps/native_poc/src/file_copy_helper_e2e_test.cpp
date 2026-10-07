@@ -1125,8 +1125,10 @@ int run_driver() {
     wrong.nonce[7] ^= 1;
     check("ONE BIT OFF IN THE NONCE IS REFUSED", std::string(verify_hello(wrong, nonce, 500, 500).why) == "nonce-mismatch");
     Hello ver = h;
-    ver.version = 2;
+    ver.version = kPipeVersion + 1;
     check("a wrong version is refused", !verify_hello(ver, nonce, 500, 500).ok);
+    ver.version = 1;  // r7: a helper before PublishRemoteFilesIfUnchanged is never used (never sent 18)
+    check("a version-1 helper is refused (the pipe is version 2)", kPipeVersion == 2 && !verify_hello(ver, nonce, 500, 500).ok);
   }
 
   // ---------------------------------------------------------------- the Medium launch rule (pure)
@@ -1352,6 +1354,21 @@ int run_driver() {
     return child->Start(cmd, station.desktop.c_str());
   };
   const std::vector<RemoteFileItem> twoFiles = {item(u"remote_0.bin", 1024 * 1024 + 7), item(u"remote_b.txt", 5)};
+  {
+    // r7 (D2): a publish bound to a clipboard revision that is no longer this station's is refused
+    // by the real helper, before anything is put on the clipboard.
+    PublishRemoteFiles g;
+    g.offerId = 70;
+    g.items = twoFiles;
+    g.ifUnchanged = true;
+    g.expectSeq = 0xFFFFFFF0u;  // not the station's sequence
+    PipeFrame f;
+    PublishResult r;
+    const bool answered = link.Send(encode(g)) && link.Receive(&f, 5000) && decode(f, &r);
+    check("PublishRemoteFilesIfUnchanged over a stale revision is refused (ClipboardChanged)",
+          answered && r.offerId == 70 && r.status == Status::ClipboardChanged,
+          answered ? std::string("status=") + status_name(r.status) : std::string("no answer"));
+  }
   {
     std::string detail;
     check("PublishRemoteFiles offer 7 (2 files)", expect_publish_ok(link, 7, twoFiles, &detail), detail);

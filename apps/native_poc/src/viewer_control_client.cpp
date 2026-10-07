@@ -331,27 +331,17 @@ int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, 
   // The first reply of a session only sets the generation: its contents are from before this
   // session and must not land on top of what the user copied since (the stale-revival bug).
   if (clip.policy.OnPollReply(reply.generation, reply.hasData)) {
-    // r6 (C2): the remote PC's text is only newer than this PC's copy if the host counted it AFTER
-    // that copy's baseline. Text it already had then -- or while the baseline is still on its way --
-    // is older by the order rule, and writing it here would overwrite the copy the user just made.
-    if (reply.hasData && reply.hasCopyGen &&
-        (clip.localBasePending.load(std::memory_order_acquire) ||
-         (clip.localBaseValid.load(std::memory_order_acquire) &&
-          reply.copyGen <= clip.localBaseGen.load(std::memory_order_acquire)))) {
-      std::cout << "[native-video-client][paste] remote text not written here: older than this PC's copy (copyGen="
-                << reply.copyGen << ")\n";
-      return 1;
-    }
-    bool apply = false;
-    {
-      std::lock_guard<std::mutex> lock(clip.mu);
-      apply = clip.core.OnRemoteData(reply.text, reply.hash) ==
-              remote60::native_poc::ClipboardRemoteDecision::Apply;
-    }
-    // Apply on the UI thread, which owns the clipboard listener window. The core already recorded
-    // this as applied, so the change notification the write provokes is dropped as an echo.
-    if (apply && ctx.session.hwnd) {
-      auto* item = new RemoteTextApply{std::move(reply.text), clip.localCopySeq.load(std::memory_order_acquire)};
+    // r7 (D1): whether the remote PC's text lands here is decided on the UI thread, which records this
+    // PC's copies -- here it is only handed over, with what that decision needs from this one reply:
+    // its copy generation and the connection it came on (this thread bumps connGen, so it is the
+    // poll's). The UI thread also writes it, as the owner of the clipboard listener window.
+    if (reply.hasData && !reply.text.empty() && ctx.session.hwnd) {
+      auto* item = new RemoteTextApply;
+      item->text = std::move(reply.text);
+      item->hash = reply.hash;
+      item->hasCopyGen = reply.hasCopyGen;
+      item->copyGen = reply.copyGen;
+      item->connGen = clip.connGen.load(std::memory_order_acquire);
       if (!PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0, reinterpret_cast<LPARAM>(item))) delete item;
     }
   }
@@ -433,6 +423,8 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.control.fileCopy.SetHostSupports(
         clipboardHost && ctx.session.bulkChannelNegotiated &&
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileCopyV1) != 0);
+    ctx.control.fileCopy.SetHostOrdersOffers(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileOfferCopyGenV1) != 0);
   }
   const uint64_t rttUs =
       (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;

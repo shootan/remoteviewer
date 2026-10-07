@@ -105,6 +105,9 @@ constexpr UINT kMsgControlResumed = WM_APP + 16;
 // clipboard (text), published the image, accepted the files, or did not. lParam is a heap
 // PasteAnswer (viewer_paste_gate.hpp) the handler owns. Only then does the paste key go.
 constexpr UINT kMsgPasteResult = WM_APP + 17;
+// Paste on demand r7 (D2): the remote PC's files for the UI thread to decide on (lParam:
+// RemoteFilesDecide*, owned by the receiver) -- published here only if newer than this PC's copy.
+constexpr UINT kMsgDecideRemoteFiles = WM_APP + 18;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

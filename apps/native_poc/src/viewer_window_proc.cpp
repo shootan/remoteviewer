@@ -286,14 +286,11 @@ PasteSnapshot gWaitingSnap;  // the gesture waiting behind the pending one
 uint64_t gGenAtLocalCopy = 0;
 bool gGenAtLocalValid = false;
 uint64_t gLocalCopySeq = 0;  // r5: the clipboard sequence of the last copy here (its baseline poll's token)
+bool gLocalBasePending = false;  // r6: that copy's baseline poll is still on its way
 
-// r6 (C2): the control thread decides whether the remote PC's text may land here from this.
 void publish_local_copy_state(ViewerState& ctx, bool pending) {
-  auto& clip = ctx.control.clipboard;
-  clip.localCopySeq.store(gLocalCopySeq, std::memory_order_release);
-  clip.localBaseGen.store(gGenAtLocalCopy, std::memory_order_release);
-  clip.localBaseValid.store(gGenAtLocalValid, std::memory_order_release);
-  clip.localBasePending.store(pending, std::memory_order_release);
+  gLocalBasePending = pending;
+  ctx.control.clipboard.localCopySeq.store(gLocalCopySeq, std::memory_order_release);
 }
 uint64_t gProbeId = 0;
 PasteSnapshot gProbeSnap;
@@ -906,7 +903,10 @@ bool paste_intercept(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     // An up is held only when its down is; any other release goes now -- releases are never delayed.
     if (gPaste.HoldsDown(static_cast<uint64_t>(wp))) {
       if (!gPaste.Hold(HeldKey{msg, static_cast<uint64_t>(wp), static_cast<int64_t>(lp), local_mod_mask()})) {
+        // r7 (D3): this up is the edge that did not fit. The paste is cancelled, and the up goes on
+        // like any release: to the host if it holds the key (its down went out before), else nowhere.
         cancel_pastes(ctx, hwnd, PasteFailure::Cancelled, "too many keys while waiting");
+        return false;
       }
       return true;
     }
@@ -934,6 +934,94 @@ LRESULT on_key_message(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM 
   if (paste_intercept(ctx, hwnd, msg, wp, lp)) return 0;
   forward_key(ctx, hwnd, msg, wp, lp);
   return 0;
+}
+
+// r7 (D1): a change of this PC's clipboard that this thread has not handled yet -- a copy here not
+// recorded yet. Its notification is in this queue: the change has closed the clipboard, which is when
+// the system posts it.
+bool clipboard_change_unhandled(HWND hwnd) {
+  MSG m;
+  return PeekMessageW(&m, hwnd, WM_CLIPBOARDUPDATE, WM_CLIPBOARDUPDATE, PM_NOREMOVE) != FALSE;
+}
+
+// The remote PC's text, written here only if it is newer than this PC's copy by the order rule
+// (r5 F1, r6 C2) -- decided on this thread, which records the copies here, against the copy state as
+// it is now (r7 D1). The last check is made with the clipboard held, when nothing else can change it:
+// a change whose notification is still queued (a copy here not recorded yet) puts the text back behind
+// it, to be decided again once that copy is.
+void apply_remote_text(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteTextApply> item) {
+  auto& clip = ctx.control.clipboard;
+  if (item->connGen != paste_conn_gen(ctx)) {
+    paste_log("remote text not written here: it came on an earlier connection");
+    return;
+  }
+  if (item->hasCopyGen && (gLocalBasePending || (gGenAtLocalValid && item->copyGen <= gGenAtLocalCopy))) {
+    paste_log("remote text not written here: older than this PC's copy (copyGen=" + std::to_string(item->copyGen) + ")");
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (clip.core.CheckRemoteData(item->text, item->hash) != remote60::native_poc::ClipboardRemoteDecision::Apply) return;
+  }
+  bool refused = false;
+  const bool written = remote60::native_poc::clipboard_set_unicode_text_if(
+      hwnd, remote60::native_poc::u16_to_wide(item->text), [hwnd] { return !clipboard_change_unhandled(hwnd); }, &refused);
+  if (refused) {
+    if (item->deferrals >= 8) {
+      paste_log("remote text not written here: this PC's clipboard kept changing");
+      return;
+    }
+    ++item->deferrals;
+    RemoteTextApply* again = item.release();
+    if (!PostMessageW(hwnd, kMsgApplyClipboard, 0, reinterpret_cast<LPARAM>(again))) delete again;
+    return;
+  }
+  if (!written) return;
+  clip.ownWriteSeq.store(GetClipboardSequenceNumber(), std::memory_order_relaxed);
+  {
+    // Recorded now, before the notification the write provokes is handled (queued, this thread).
+    std::lock_guard<std::mutex> lock(clip.mu);
+    clip.core.NoteApplied(item->hash);
+  }
+  gLatestCopy.NoteRemoteCopy();  // a copy made on the remote PC: the next Ctrl+V pastes it there
+}
+
+// The remote PC's files, published here only if newer than this PC's copy -- the text's rule (r7 D2).
+// The clipboard revision decided on is read with the clipboard held, and only when no change here is
+// waiting to be handled; the helper then publishes only over that revision (it checks with the
+// clipboard held), so a copy made here after this decision is never covered by the late publish.
+bool gToldUnorderedFiles = false;
+void decide_remote_files(ViewerState& ctx, HWND hwnd, std::unique_ptr<RemoteFilesDecide> d) {
+  if (d->connGen != paste_conn_gen(ctx)) {
+    paste_log("remote files not published here: they came on an earlier connection");
+    return;
+  }
+  if (d->files.hasCopyGen && (gLocalBasePending || (gGenAtLocalValid && d->files.copyGen <= gGenAtLocalCopy))) {
+    paste_log("remote files not published here: older than this PC's copy (copyGen=" + std::to_string(d->files.copyGen) + ")");
+    return;
+  }
+  if (!d->files.hasCopyGen && !gToldUnorderedFiles) {
+    gToldUnorderedFiles = true;
+    paste_log("this host does not order its file copies (older host): its files are published without the order rule");
+  }
+  if (!remote60::native_poc::clipboard_open_with_retry(hwnd)) {
+    paste_log("remote files not published here: this PC's clipboard is busy");
+    return;
+  }
+  const bool unhandled = clipboard_change_unhandled(hwnd);
+  const uint32_t seq = static_cast<uint32_t>(GetClipboardSequenceNumber());
+  CloseClipboard();
+  if (unhandled) {
+    if (d->deferrals >= 8) {
+      paste_log("remote files not published here: this PC's clipboard kept changing");
+      return;
+    }
+    ++d->deferrals;
+    RemoteFilesDecide* again = d.release();
+    if (!PostMessageW(hwnd, kMsgDecideRemoteFiles, 0, reinterpret_cast<LPARAM>(again))) delete again;
+    return;
+  }
+  ctx.control.fileCopy.PublishApproved(std::move(d->files.pub), seq);
 }
 
 // A clipboard change on this PC. Nothing is sent; it only decides what the next Ctrl+V pastes.
@@ -1057,23 +1145,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (answer) on_paste_answer(ctx, hwnd, *answer);
       return 0;
     }
+    case kMsgDecideRemoteFiles: {
+      std::unique_ptr<RemoteFilesDecide> d(reinterpret_cast<RemoteFilesDecide*>(lp));
+      if (d) decide_remote_files(ctx, hwnd, std::move(d));
+      return 0;
+    }
     case kMsgApplyClipboard: {
-      // The control thread handed us the host's clipboard text (heap-allocated) to put on the OS
-      // clipboard. The core already recorded it as applied, so the WM_CLIPBOARDUPDATE this write
-      // provokes is recognised as an echo and not sent back.
+      // The control thread handed us the host's clipboard text (heap-allocated) with what decides
+      // whether it lands here (r7). Written, it is recorded as applied, so the WM_CLIPBOARDUPDATE the
+      // write provokes is recognised as an echo and not sent back.
       std::unique_ptr<RemoteTextApply> item(reinterpret_cast<RemoteTextApply*>(lp));
-      // r6 (C2): sent before a copy made here since? Then it is older than that copy: not written.
-      if (item && item->localSeq != gLocalCopySeq) {
-        paste_log("remote text not written here: a copy was made here after it was sent");
-        item.reset();
-      }
-      const std::u16string* text = item ? &item->text : nullptr;
-      if (text) {
-        (void)remote60::native_poc::clipboard_set_unicode_text(
-            hwnd, remote60::native_poc::u16_to_wide(*text));
-        ctx.control.clipboard.ownWriteSeq.store(GetClipboardSequenceNumber(), std::memory_order_relaxed);
-        gLatestCopy.NoteRemoteCopy();  // a copy made on the remote PC: the next Ctrl+V pastes it there
-      }
+      if (item) apply_remote_text(ctx, hwnd, std::move(item));
       return 0;
     }
     case kMsgApplyWindowList: {

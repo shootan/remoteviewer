@@ -297,7 +297,8 @@ void reader_main() {
         logf("host says shutdown");
         post_shutdown(0);
         break;
-      case PipeMsg::PublishRemoteFiles: {
+      case PipeMsg::PublishRemoteFiles:
+      case PipeMsg::PublishRemoteFilesIfUnchanged: {
         auto m = std::make_unique<PublishRemoteFiles>();
         if (!decode(f, m.get())) {
           logf("PublishRemoteFiles malformed");
@@ -526,11 +527,47 @@ void on_publish(std::unique_ptr<PublishRemoteFiles> m) {
     gShared.send->Push(encode(result));
     return;
   }
+  // r7 (D2): a publish approved over a given clipboard revision lands only on that revision. The
+  // check is made with the clipboard held by OLE's own clipboard window of this thread, which
+  // OleSetClipboard then opens again (the same window may) -- nothing else can change the clipboard
+  // between the check and the publish. Measured on Windows 11 26200 (private station): OleGetClipboard
+  // creates that window without changing the clipboard; OleSetClipboard succeeds with it held and
+  // closes it. Without that window, or the clipboard, the publish is refused -- never unguarded.
+  HWND guardWnd = nullptr;  // held for the check; OleSetClipboard opens it again and closes it
+  if (m->ifUnchanged) {
+    IDataObject* probe = nullptr;
+    if (SUCCEEDED(OleGetClipboard(&probe)) && probe) probe->Release();
+    HWND oleWnd = nullptr;
+    for (HWND w = nullptr; (w = FindWindowExW(HWND_MESSAGE, w, L"CLIPBRDWNDCLASS", nullptr)) != nullptr;) {
+      if (GetWindowThreadProcessId(w, nullptr) == GetCurrentThreadId()) {
+        oleWnd = w;
+        break;
+      }
+    }
+    bool held = false;
+    for (int i = 0; oleWnd && !held && i < 20; ++i) {
+      held = OpenClipboard(oleWnd) != FALSE;
+      if (!held) Sleep(10);
+    }
+    const DWORD seq = GetClipboardSequenceNumber();
+    if (!held || seq != m->expectSeq) {
+      if (held) CloseClipboard();
+      result.status = held ? Status::ClipboardChanged : Status::Refused;
+      logf("publish offer=%llu refused (%s, seq=%lu expected=%lu)", static_cast<unsigned long long>(m->offerId),
+           held ? "this PC's clipboard changed since it was approved" : "the clipboard could not be held",
+           static_cast<unsigned long>(seq), static_cast<unsigned long>(m->expectSeq));
+      gShared.send->Push(encode(result));
+      return;
+    }
+    guardWnd = oleWnd;
+  }
   retire_or_abort(EndReason::Cleared);
   DataObjectConfig cfg;
   auto* obj = new RemoteFilesDataObject(m->offerId, m->items, &gOwner.transport, cfg,
                                         [](const std::string& line) { gLog.Line(line); });
   const HRESULT hr = OleSetClipboard(obj);
+  // OleSetClipboard closes the clipboard it opened; if it failed before that, the hold is still ours.
+  if (guardWnd && GetOpenClipboardWindow() == guardWnd) CloseClipboard();
   if (FAILED(hr)) {
     logf("publish offer=%llu OleSetClipboard hr=0x%08lx", static_cast<unsigned long long>(m->offerId),
          static_cast<unsigned long>(hr));

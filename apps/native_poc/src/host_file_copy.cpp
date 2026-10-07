@@ -280,12 +280,14 @@ void HostFileCopyService::WorkerLoop() {
       if (hostOffer_.offerId != 0) hostRetired_ = hostOffer_;
       hostOffer_ = HostOffer{};
       hostOffer_.revision = seq;
+      hostOffer_.copyGen = clipCopyGen_;
       Log("host copy not offered: helper unavailable (" + why + ")");
       continue;
     }
     s.requestId = nextStatId_++;
     statId_ = s.requestId;
     statSeq_ = seq;
+    statCopyGen_ = clipCopyGen_;  // seq == clipSeq_ here: the same change
     lock.unlock();
     const bool sent = helper_.SendTo(inst, fc::encode(s));
     lock.lock();
@@ -298,10 +300,11 @@ void HostFileCopyService::WorkerLoop() {
 
 // ------------------------------------------------------------------------------ R->P: this PC's clipboard
 
-void HostFileCopyService::OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths) {
+void HostFileCopyService::OnHostClipboard(uint64_t seq, std::vector<std::wstring> paths, uint64_t copyGen) {
   std::lock_guard<std::mutex> lock(mu_);
   if (seq == clipSeq_ && paths == clipPaths_) return;
   clipSeq_ = seq;
+  clipCopyGen_ = copyGen;
   // The limit is the copy's (r2 ⑤): more than the limit is not offered at all -- not as whichever
   // files came first. (The monitor hands over one over the limit to say so.)
   const bool tooMany = paths.size() > fc::kMaxFiles;
@@ -336,6 +339,7 @@ void HostFileCopyService::OnStats(uint64_t owner, uint64_t instance, const fc::S
   statId_ = 0;
   HostOffer o;
   o.revision = statSeq_;
+  o.copyGen = statCopyGen_;
   uint64_t excluded = 0;
   for (size_t i = 0; i < m.entries.size() && i < clipPaths_.size(); ++i) {
     const fc::StatEntry& e = m.entries[i];
@@ -390,7 +394,7 @@ const HostFileCopyService::HostOffer* HostFileCopyService::FindHostOffer(uint64_
   return nullptr;
 }
 
-std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery& m, uint64_t epoch) {
+std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery& m, uint64_t epoch, bool ordered) {
   std::lock_guard<std::mutex> lock(mu_);
   if (!Current(epoch)) return {};
   ++counters_.offerQueries;
@@ -399,7 +403,7 @@ std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery&
   if (!file_copy_allowed()) {
     r.revision = 0;
     r.unchanged = m.knownRevision == 0;
-    return fn::body(r);
+    return ordered ? fn::body_ordered(r) : fn::body(r);
   }
   if (!baselineSet_) {
     baselineSet_ = true;
@@ -413,7 +417,7 @@ std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery&
     }
     r.revision = baselineSeq_;
     r.unchanged = m.knownRevision == r.revision;
-    return fn::body(r);
+    return ordered ? fn::body_ordered(r) : fn::body(r);
   }
   // A negotiated session is asking: a copy not identified yet is identified now (A1).
   if (clipSeq_ != hostOffer_.revision && !clipPaths_.empty() && statId_ == 0 && !statWanted_) {
@@ -425,8 +429,9 @@ std::vector<uint8_t> HostFileCopyService::HandleOfferQuery(const fn::OfferQuery&
   if (!r.unchanged) {
     r.offerId = hostOffer_.offerId;
     r.items = hostOffer_.items;  // empty when the clipboard names no file
+    r.copyGen = hostOffer_.copyGen;
   }
-  return fn::body(r);
+  return ordered ? fn::body_ordered(r) : fn::body(r);
 }
 
 std::vector<uint8_t> HostFileCopyService::HandlePrepareRtoP(const fn::Prepare& m, uint64_t epoch) {
@@ -727,6 +732,13 @@ bool HostFileCopyService::HandleKnown(uint16_t type, const std::vector<uint8_t>&
       if (!fn::parse(body, &m)) return false;
       *replyType = static_cast<uint16_t>(fn::FileMsg::OfferQueryReply);
       *reply = HandleOfferQuery(m, servedEpoch);
+      return true;
+    }
+    case fn::FileMsg::OfferQueryOrdered: {  // r7: the same, the offer's copy generation added
+      fn::OfferQuery m;
+      if (!fn::parse(body, &m)) return false;
+      *replyType = static_cast<uint16_t>(fn::FileMsg::OfferQueryOrderedReply);
+      *reply = HandleOfferQuery(m, servedEpoch, /*ordered=*/true);
       return true;
     }
     case fn::FileMsg::PasteQuery: {

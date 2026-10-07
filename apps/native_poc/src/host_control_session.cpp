@@ -434,6 +434,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // handler asks the same question again (file_copy_allowed): the bit is not the only gate.
       if (clientSession.fileCopy && clientSession.fileCopy->Advertised())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFileCopyV1;
+      // Paste on demand r7 (D2): its file offers say which copy they are (86/87), with paste on demand.
+      if (clientSession.fileCopy && clientSession.fileCopy->Advertised() && clipboard && clipboard->enabled() &&
+          paste_on_demand_advertised())
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFileOfferCopyGenV1;
       // Mouse X buttons (back / forward): a viewer sends VK_XBUTTON1/2 edges and X bits in its
       // held mask only to a host that says so -- an older host made an unknown key a LEFT click.
       if (mouse_xbuttons_enabled())

@@ -329,8 +329,10 @@ int main(int argc, char** argv) {
       return !sender.queue.empty();
     };
     fileCopyService.Configure(fcfg, &hostBulkArbiter);
-    clipboardHub.SetFileListener([&fileCopyService](uint64_t seq, std::vector<std::wstring> paths) {
-      fileCopyService.OnHostClipboard(seq, std::move(paths));
+    // Called on the monitor thread right after the hub counted the change (if it was a copy): the
+    // copy generation read here is that change's (paste on demand r7, the offer's order).
+    clipboardHub.SetFileListener([&fileCopyService, &clipboardHub](uint64_t seq, std::vector<std::wstring> paths) {
+      fileCopyService.OnHostClipboard(seq, std::move(paths), clipboardHub.CopyGen());
     });
     clientSession.fileCopy = &fileCopyService;
     clientSession.onFileCopySessionEnd = [&fileCopyService](uint64_t epoch) { fileCopyService.OnSessionEnd(epoch); };

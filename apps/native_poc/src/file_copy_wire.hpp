@@ -54,6 +54,9 @@ enum class FileMsg : uint16_t {
   StatusReply = 76,        // H->V
   Pull = 77,               // bulk, receiver -> sender: send me [offset, offset + len) of file i
   Chunk = 78,              // bulk, sender -> receiver: those bytes and their SHA-256
+  // Paste on demand r7 (D2), only with a host that advertises kCaptureFlagFileOfferCopyGenV1:
+  OfferQueryOrdered = 86,       // V->H  OfferQuery's body
+  OfferQueryOrderedReply = 87,  // H->V  OfferQueryReply's body + the copy generation of the offer
 };
 
 constexpr uint32_t kMaxControlPayload = 64u * 1024u;   // an offer of 100 max-length names fits
@@ -145,6 +148,9 @@ struct OfferQueryReply {
   bool unchanged = true;           // revision == knownRevision: no list follows
   uint64_t offerId = 0;
   std::vector<OfferItem> items;
+  // 87 only (r7): the host's copy generation of the clipboard change this offer was made of -- the
+  // order of that copy against the copies on the viewer's PC. 68 does not carry it.
+  uint64_t copyGen = 0;
 };
 
 struct PasteQuery {
@@ -344,6 +350,23 @@ inline bool parse(const std::vector<uint8_t>& b, OfferQueryReply* m) {
   return r.done();
 }
 
+// 87: 68's body, then the copy generation (a separate message, so 68's parser stays exact).
+inline std::vector<uint8_t> body_ordered(const OfferQueryReply& m) {
+  std::vector<uint8_t> b = body(m);
+  ByteWriter w;
+  w.u64(m.copyGen);
+  const std::vector<uint8_t> tail = w.take();
+  b.insert(b.end(), tail.begin(), tail.end());
+  return b;
+}
+inline bool parse_ordered(const std::vector<uint8_t>& b, OfferQueryReply* m) {
+  if (b.size() < 8) return false;
+  const std::vector<uint8_t> head(b.begin(), b.end() - 8);
+  if (!parse(head, m)) return false;
+  ByteReader r(std::vector<uint8_t>(b.end() - 8, b.end()));
+  return r.u64(&m->copyGen) && r.done();
+}
+
 inline std::vector<uint8_t> body(const PasteQuery& m) {
   ByteWriter w;
   w.u64(m.offerId);
@@ -467,7 +490,7 @@ inline bool frame_control(FileMsg type, uint32_t seq, const std::vector<uint8_t>
 }
 
 /** Whether `type` is one of the file-copy control messages (65~76). */
-inline bool is_file_control(uint16_t type) { return type >= 65 && type <= 76; }
+inline bool is_file_control(uint16_t type) { return (type >= 65 && type <= 76) || type == 86 || type == 87; }
 
 // ---- bulk framing: MessageHeader + body, one bulk-channel message
 

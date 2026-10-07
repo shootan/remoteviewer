@@ -95,10 +95,18 @@ inline bool clipboard_read_file_paths(HWND owner, size_t maxPaths, std::vector<s
   return true;
 }
 
-// Replaces the clipboard with `text` as CF_UNICODETEXT. Returns false when the clipboard could not
-// be opened or the data could not be set.
-inline bool clipboard_set_unicode_text(HWND owner, const std::wstring& text) {
+// Replaces the clipboard with `text` as CF_UNICODETEXT, if `still_ok()` -- asked once the clipboard is
+// open, when nothing else can change it -- says so (`*refused` then false). Returns false when it was
+// refused, or the clipboard could not be opened or the data could not be set.
+template <class StillOk>
+inline bool clipboard_set_unicode_text_if(HWND owner, const std::wstring& text, StillOk still_ok, bool* refused) {
+  *refused = false;
   if (!clipboard_open_with_retry(owner)) return false;
+  if (!still_ok()) {
+    *refused = true;
+    CloseClipboard();
+    return false;
+  }
   bool ok = false;
   if (EmptyClipboard()) {
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
@@ -118,6 +126,13 @@ inline bool clipboard_set_unicode_text(HWND owner, const std::wstring& text) {
   }
   CloseClipboard();
   return ok;
+}
+
+// Replaces the clipboard with `text` as CF_UNICODETEXT. Returns false when the clipboard could not
+// be opened or the data could not be set.
+inline bool clipboard_set_unicode_text(HWND owner, const std::wstring& text) {
+  bool refused = false;
+  return clipboard_set_unicode_text_if(owner, text, [] { return true; }, &refused);
 }
 
 // The same write, saying where it failed: 1 = OpenClipboard, 2 = EmptyClipboard, 3 = allocating or

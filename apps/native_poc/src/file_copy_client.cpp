@@ -612,10 +612,15 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     q.knownRevision = remote_.revision;
     ++counters_.offerQueries;
   }
+  // r7 (D2): a host that says so is asked the ordered query, whose offers carry their copy generation.
+  const bool ordered = hostOrdersOffers_.load(std::memory_order_acquire);
   std::vector<uint8_t> raw;
-  if (!Exchange(link, fn::FileMsg::OfferQuery, fn::body(q), fn::FileMsg::OfferQueryReply, &raw)) return -1;
+  if (!Exchange(link, ordered ? fn::FileMsg::OfferQueryOrdered : fn::FileMsg::OfferQuery, fn::body(q),
+                ordered ? fn::FileMsg::OfferQueryOrderedReply : fn::FileMsg::OfferQueryReply, &raw)) {
+    return -1;
+  }
   fn::OfferQueryReply r;
-  if (!fn::parse(raw, &r)) return -1;
+  if (!(ordered ? fn::parse_ordered(raw, &r) : fn::parse(raw, &r))) return -1;
   if (r.unchanged) {
     std::lock_guard<std::mutex> lock(mu_);
     remoteBaselineTaken_ = true;
@@ -659,23 +664,20 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     }
   }
   if (publish) {
-    const size_t files = pub.items.size();
-    Post([this, pub, files] {
-      std::string why;
-      uint64_t inst = 0;
-      if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
-      const bool up = helper_.Ensure(&why, &inst);
-      if (!up || !helper_.SendTo(inst, fc::encode(pub))) {
-        Log("remote copy not published: helper unavailable (" + why + ")");
-        std::lock_guard<std::mutex> lock(mu_);
-        ++result_.noHelper, result_.noHelperHere = true;
-        result_.noHelperHereMissing = !up && helper_.lastLaunchFailure() == fc::LaunchFailure::Missing;
-        return;
-      }
-      std::ostringstream os;
-      os << "remote copy of " << files << " file(s) to publish";
-      Log(os.str());
-    });
+    std::function<void(RemoteFilesForGate)> gate;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      gate = publishGate_;
+    }
+    if (gate) {
+      RemoteFilesForGate g;
+      g.pub = std::move(pub);
+      g.hasCopyGen = ordered;
+      g.copyGen = r.copyGen;
+      gate(std::move(g));  // the viewer decides (r7); PublishApproved follows if it may land here
+    } else {
+      PostPublish(std::move(pub));
+    }
   } else if (clear) {
     Post([this, clearId] {
       fc::ClearRemoteFiles c;
@@ -686,6 +688,44 @@ int FileCopyClient::PumpOfferQuery(ControlLink& link) {
     ++counters_.remoteCleared;
   }
   return 1;
+}
+
+void FileCopyClient::SetPublishGate(std::function<void(RemoteFilesForGate)> gate) {
+  std::lock_guard<std::mutex> lock(mu_);
+  publishGate_ = std::move(gate);
+}
+
+void FileCopyClient::PublishApproved(fc::PublishRemoteFiles pub, uint32_t expectSeq) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (pub.offerId != remote_.offerId) {
+      Log("remote copy not published: a newer one came meanwhile");
+      return;
+    }
+  }
+  pub.ifUnchanged = true;  // the helper checks this PC's clipboard is still where the viewer decided
+  pub.expectSeq = expectSeq;
+  PostPublish(std::move(pub));
+}
+
+void FileCopyClient::PostPublish(fc::PublishRemoteFiles pub) {
+  const size_t files = pub.items.size();
+  Post([this, pub, files] {
+    std::string why;
+    uint64_t inst = 0;
+    if (helperProbe_) helperProbe_(0, 6);  // test only: the publish is about to look for / start a helper
+    const bool up = helper_.Ensure(&why, &inst);
+    if (!up || !helper_.SendTo(inst, fc::encode(pub))) {
+      Log("remote copy not published: helper unavailable (" + why + ")");
+      std::lock_guard<std::mutex> lock(mu_);
+      ++result_.noHelper, result_.noHelperHere = true;
+      result_.noHelperHereMissing = !up && helper_.lastLaunchFailure() == fc::LaunchFailure::Missing;
+      return;
+    }
+    std::ostringstream os;
+    os << "remote copy of " << files << " file(s) to publish";
+    Log(os.str());
+  });
 }
 
 bool FileCopyClient::HelperCurrentLocked(uint64_t instance, bool gone) {
@@ -709,6 +749,10 @@ void FileCopyClient::OnHelperFrame(uint64_t instance, const fc::PipeFrame& f) {
       if (!fc::decode(f, &m)) break;
       std::lock_guard<std::mutex> lock(mu_);
       if (!HelperCurrentLocked(instance, false)) break;
+      if (m.status == fc::Status::ClipboardChanged) {
+        Log("remote copy not published: a copy was made here after it was approved (r7)");
+        break;
+      }
       if (m.status == fc::Status::Ok && m.offerId == remote_.offerId) {
         publishedOfferId_ = m.offerId;
         ++counters_.remotePublished;

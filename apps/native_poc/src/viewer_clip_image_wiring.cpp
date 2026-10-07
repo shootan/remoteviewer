@@ -52,6 +52,16 @@ void start_clip_image_client(ViewerState& ctx, uint32_t udpMtu) {
     exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"GNLinkClipHelper.exe";
     return remote60::native_poc::file_copy::launch_file_copy_helper_as_self(exe, nullptr, L"", link, why);
   });
+  // Paste on demand r7 (D2): the remote PC's files land here only if newer than this PC's copy --
+  // decided on the UI thread, which records the copies here (viewer_window_proc.cpp).
+  ctx.control.fileCopy.SetPublishGate([&ctx](remote60::native_poc::FileCopyClient::RemoteFilesForGate f) {
+    const HWND hwnd = ctx.session.hwnd;
+    if (!hwnd) return;
+    auto* d = new RemoteFilesDecide;
+    d->files = std::move(f);
+    d->connGen = ctx.control.clipboard.connGen.load(std::memory_order_acquire);
+    if (!PostMessageW(hwnd, kMsgDecideRemoteFiles, 0, reinterpret_cast<LPARAM>(d))) delete d;
+  });
   // D5: a paste (an explicit act) stops a running image and waits for its confirmed end; the image
   // may go again afterwards under the conditions ClipImageClient::AfterFilePaste checks.
   ctx.control.fileCopy.SetImagePreemption([&ctx] { return ctx.control.clipImage.PreemptForFilePaste(); },
