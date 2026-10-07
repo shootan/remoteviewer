@@ -1131,7 +1131,14 @@ int run_agent(HANDLE readPipe) {
 // needs the rights to create or repoint a LocalSystem service. The image path is whatever this
 // binary already is: an installer that put it under Program Files therefore registers an
 // admin-only path, and there is no code left that can walk it back out to a writable folder.
-int install_service() {
+// `preloginEnabled` raises the service to AUTO_START so it comes up before any user logs in (the
+// prelogin-service feature). Start-mode discipline (prelogin-service §1 / Codex r3): a re-install or
+// update must NEVER silently downgrade an existing AUTO back to DEMAND, and installing without the
+// feature must not force a feature-on box off. So on an EXISTING service we only ever RAISE to AUTO when
+// the feature is explicitly enabled; otherwise we leave the start type untouched (SERVICE_NO_CHANGE). A
+// fresh install defaults to DEMAND (feature off) unless prelogin is enabled at install time. The runtime
+// feature toggle flips the mode through set_prelogin_start_mode(), not through a re-install.
+int install_service(bool preloginEnabled) {
   const std::wstring exe = current_executable_path();
   if (exe.empty()) return 1;
   const std::wstring quoted = L"\"" + exe + L"\"";
@@ -1139,13 +1146,16 @@ int install_service() {
   if (!manager) return static_cast<int>(GetLastError());
   SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_CHANGE_CONFIG);
   if (service) {
-    (void)ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
-                               SERVICE_ERROR_NORMAL, quoted.c_str(), nullptr, nullptr, nullptr,
-                               nullptr, nullptr, nullptr);
+    // Preserve the current start type unless the feature is explicitly on (then raise to AUTO). Never
+    // force DEMAND here -- that is the downgrade the contract forbids.
+    const DWORD startType = preloginEnabled ? SERVICE_AUTO_START : SERVICE_NO_CHANGE;
+    (void)ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, startType, SERVICE_ERROR_NORMAL,
+                               quoted.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
   } else {
+    const DWORD startType = preloginEnabled ? SERVICE_AUTO_START : SERVICE_DEMAND_START;
     service = CreateServiceW(manager, kSecureInputServiceName, L"GNLink secure desktop input",
                              SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
-                             SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, quoted.c_str(),
+                             startType, SERVICE_ERROR_NORMAL, quoted.c_str(),
                              nullptr, nullptr, nullptr, nullptr, nullptr);
   }
   if (!service) {
@@ -1160,6 +1170,27 @@ int install_service() {
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
   return 0;
+}
+
+// Flip only the start type (AUTO when the prelogin feature is enabled, DEMAND when disabled), leaving
+// the binary path / type / error control untouched. The feature toggle calls this; it never resurrects
+// a feature that was turned off, and it is the single place that moves the start mode at runtime.
+int set_prelogin_start_mode(bool enabled) {
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (!manager) return static_cast<int>(GetLastError());
+  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_CHANGE_CONFIG);
+  if (!service) {
+    const DWORD err = GetLastError();
+    CloseServiceHandle(manager);
+    return static_cast<int>(err);
+  }
+  const DWORD startType = enabled ? SERVICE_AUTO_START : SERVICE_DEMAND_START;
+  const BOOL ok = ChangeServiceConfigW(service, SERVICE_NO_CHANGE, startType, SERVICE_NO_CHANGE,
+                                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+  const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+  return static_cast<int>(err);
 }
 
 int uninstall_service() {
@@ -1201,7 +1232,12 @@ int wmain(int argc, wchar_t** argv) {
     const uintptr_t value = static_cast<uintptr_t>(_wcstoui64(argv[2], nullptr, 10));
     return run_agent(reinterpret_cast<HANDLE>(value));
   }
-  if (argc == 2 && std::wstring(argv[1]) == L"--install-service") return install_service();
+  if (argc == 2 && std::wstring(argv[1]) == L"--install-service") return install_service(/*preloginEnabled=*/false);
+  // Install with the prelogin feature on (service comes up AUTO, before login).
+  if (argc == 2 && std::wstring(argv[1]) == L"--install-service-prelogin") return install_service(/*preloginEnabled=*/true);
+  // Runtime feature toggle: raise to AUTO / drop to DEMAND without a re-install.
+  if (argc == 2 && std::wstring(argv[1]) == L"--prelogin-autostart") return set_prelogin_start_mode(true);
+  if (argc == 2 && std::wstring(argv[1]) == L"--prelogin-demandstart") return set_prelogin_start_mode(false);
   if (argc == 2 && std::wstring(argv[1]) == L"--uninstall-service") return uninstall_service();
   SERVICE_TABLE_ENTRYW table[] = {
       {const_cast<wchar_t*>(kSecureInputServiceName), service_main},
