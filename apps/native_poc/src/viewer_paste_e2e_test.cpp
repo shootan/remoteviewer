@@ -1383,6 +1383,40 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
         Sleep(5);
       }
     };
+    // Waits WITHOUT pumping (answers stay queued) until the worker has taken both requests -- the
+    // copy's baseline poll and the paste's check -- and posted their answers.
+    const auto requests_answered_unpumped = [&] {
+      const DWORD until = GetTickCount() + 3000;
+      for (;;) {
+        bool pending = false;
+        {
+          std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
+          pending = ctx.control.clipboard.baselineRequested || ctx.control.clipboard.probeRequested;
+        }
+        if (!pending || GetTickCount() >= until) break;
+        Sleep(5);
+      }
+      Sleep(250);  // the polls themselves and the posts
+    };
+    // A copy "on the remote PC": its notification is taken off the queue and dropped -- waited for, so
+    // it cannot arrive later and be taken for a copy here.
+    const auto remote_copy_unpumped = [&](const std::function<bool()>& put) {
+      const int before = droppedClipUpdates;
+      const bool ok = put();
+      const DWORD until = GetTickCount() + 2000;
+      while (droppedClipUpdates == before && GetTickCount() < until) clip_updates_only(true, 20);
+      return ok && droppedClipUpdates > before;
+    };
+    // A copy here: only its notification is handled (answers stay queued), until the viewer has
+    // recorded it -- the copy sequence it publishes is the clipboard's.
+    const auto local_copy_unpumped = [&](const std::function<bool()>& put) {
+      const bool ok = put();
+      const DWORD until = GetTickCount() + 2000;
+      while (ctx.control.clipboard.localCopySeq.load() != GetClipboardSequenceNumber() && GetTickCount() < until) {
+        clip_updates_only(false, 20);
+      }
+      return ok && ctx.control.clipboard.localCopySeq.load() == GetClipboardSequenceNumber();
+    };
     const auto keys_ctrl_v = [&] {  // the keys of a Ctrl+V, dispatched now, nothing else pumped
       set_mods(true, false);
       key(WM_KEYDOWN, VK_CONTROL);
@@ -1397,20 +1431,19 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     mark("C1A (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
     {
       const uint32_t s0 = text_sends();
+      bool order = true;
       with_worker_paused([&] {
-        put_text(u"C1A L1");
-        clip_updates_only(false, 100);  // the viewer hears L1 (baseline pending)
-        keys_ctrl_v();                  // T1: its ticket has no baseline yet
+        // L1 is an image: the test host files a pasted image away instead of writing the shared
+        // clipboard, so T1's own paste cannot reappear here as a new copy (on two PCs it never would).
+        order = local_copy_unpumped([&] { return station_put(CF_DIBV5, noise_dibv5(24, 24, 0xC1Au)); }) && order;
+        keys_ctrl_v();                                                            // T1: no baseline in its ticket
       });
-      Sleep(700);                       // the worker answers L1's baseline and T1's check; nothing is pumped
+      requests_answered_unpumped();     // L1's baseline and T1's check are answered (gen before R), not handled
       with_worker_paused([&] {
-        dropClipUpdates = true;
-        put_text(u"C1A R on the remote PC");
-        clip_updates_only(true, 80);    // a copy there: the viewer is not told
-        dropClipUpdates = false;
-        put_text(u"C1A L2 here, after R");
-        clip_updates_only(false, 100);  // the viewer hears L2 -- before T1's answer is handled
+        order = remote_copy_unpumped([&] { return put_text(u"C1A R on the remote PC"); }) && order;
+        order = local_copy_unpumped([&] { return put_text(u"C1A L2 here, after R"); }) && order;  // before T1's answer
       });
+      check("C1A: the order was made as meant (answers queued, R unseen, L2 recorded first)", order);
       pump_until([&] { return text_sends() >= s0 + 1 && !remote60::native_poc::viewer::paste_bar_view(ctx).active; }, 6000);
       baseline_settled();
       const uint32_t s1 = text_sends();
@@ -1430,13 +1463,14 @@ int run_paste_child(const std::wstring& resultFile, const std::wstring& outDir, 
     mark("C1B (asserted directly)", "no copy-time update", [](const std::string& g) { return g.find('U') == std::string::npos; });
     {
       copy_here([&] { return put_text(u"C1B L1"); });
-      copy_remote([&] { return station_put(CF_DIBV5, noise_dibv5(24, 24, 0xC1Bu)); }, 30);
+      const bool rDropped = remote_copy_unpumped([&] { return station_put(CF_DIBV5, noise_dibv5(24, 24, 0xC1Bu)); });
       keys_ctrl_v();                    // T1: the worker checks, finds R (after L1), posts; not pumped
-      Sleep(700);
+      requests_answered_unpumped();
+      bool order = true;
       with_worker_paused([&] {
-        put_text(u"C1B L2 here, after R");
-        clip_updates_only(false, 100);  // L2 heard before T1's answer
+        order = local_copy_unpumped([&] { return put_text(u"C1B L2 here, after R"); });  // L2 recorded before T1's answer
       });
+      check("C1B: the order was made as meant (R unseen, T1's answer queued, L2 recorded first)", order && rDropped);
       idle(1200);                       // T1's answer: its own paste goes through, L2 is untouched
       baseline_settled();
       const uint32_t s1 = text_sends();
