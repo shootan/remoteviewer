@@ -25,6 +25,7 @@
 #include "prelogin_console_probe.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
+#include "prelogin_ready_signal.hpp"
 #include "prelogin_supervisor.hpp"
 
 namespace {
@@ -922,6 +923,8 @@ void ensure_prelogin_worker(DWORD consoleSession) {
 void launch_user_host(DWORD consoleSession) {
   if (child_alive(gUserHostProcess)) return;
   stop_child(&gUserHostProcess);
+  // Clear any prior session's readiness so the handoff waits for THIS host's real ready signal (r4 #7).
+  ResetUserHostReady();
   HANDLE userToken = nullptr;
   if (!WTSQueryUserToken(consoleSession, &userToken)) {
     diag("prelogin: handoff WTSQueryUserToken failed err=%lu", GetLastError());
@@ -973,10 +976,10 @@ SupervisorObservation observe_console(bool featureEnabled) {
     const PrivilegeFacts facts = GatherPrivilegeFactsFromToken(reinterpret_cast<void*>(userToken));
     obs.privilege = ClassifyPrivilege(facts);
     CloseHandle(userToken);
-    // First approximation of "ready": the user Host we launched is alive. A true ready signal from the
-    // host (profile/network/first-frame) is a follow-up IPC; using process-liveness keeps the handoff
-    // strictly after a launch, never on the bare LOGON. (Documented seam.)
-    obs.userHostReady = child_alive(gUserHostProcess);
+    // Real ready signal (r4 #7): the handoff completes only when the launched user Host is BOTH alive
+    // AND has signalled it reached its ready point (directory-registered + serving), never on the bare
+    // LOGON or on mere process existence.
+    obs.userHostReady = child_alive(gUserHostProcess) && UserHostReadySignaled();
   } else {
     obs.userToken = ClassifyTokenObservation(false, GetLastError());
   }

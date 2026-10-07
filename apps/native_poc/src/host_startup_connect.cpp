@@ -84,6 +84,7 @@
 #include "host_input_router.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
+#include "prelogin_ready_signal.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
@@ -278,6 +279,10 @@ int startup_connect_client(HostContext& hx) {
         std::cerr << "[native-video-host] directory disabled: " << dirError << "\n";
       } else {
         std::cout << "[native-video-host] directory agent started url=" << clientSession.directoryUrl << "\n";
+        // r4 #7: this user Host reached its ready point (directory-registered + about to serve). Tell the
+        // prelogin service so it completes the prelogin->user handoff on a real signal, not process life.
+        // The prelogin worker is not a handoff target and does not signal.
+        if (!args.preloginMode) remote60::native_poc::prelogin::SignalUserHostReady();
       }
     }
 

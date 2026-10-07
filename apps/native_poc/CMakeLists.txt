@@ -84,6 +84,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_connect.cpp
   src/host_startup_control.cpp
   src/host_startup_graphics.cpp
+  src/prelogin_ready_signal.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -229,6 +230,7 @@ add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_ready_signal.cpp
 )
 set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
@@ -2170,6 +2172,13 @@ add_executable(remote60_reboot_menu_policy_test
   src/reboot_menu_policy_test.cpp
 )
 target_include_directories(remote60_reboot_menu_policy_test PRIVATE src)
+
+# prelogin-service r4 item 7: handoff ready-signal primitive.
+add_executable(remote60_prelogin_ready_signal_test
+  src/prelogin_ready_signal_test.cpp
+  src/prelogin_ready_signal.cpp
+)
+target_include_directories(remote60_prelogin_ready_signal_test PRIVATE src)
 
 # prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
 add_executable(remote60_prelogin_supervisor_test
