@@ -2144,6 +2144,20 @@ add_executable(remote60_prelogin_console_probe_test
 target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
 
+# prelogin-service A1 section 2: machine credential record (pure binding/revocation + serialization).
+add_executable(remote60_prelogin_machine_record_test
+  src/prelogin_machine_record_test.cpp
+)
+target_include_directories(remote60_prelogin_machine_record_test PRIVATE src)
+
+# prelogin-service A1 section 2: machine credential store (DPAPI LOCAL_MACHINE seal + protected DACL).
+add_executable(remote60_prelogin_machine_store_test
+  src/prelogin_machine_store_test.cpp
+  src/prelogin_machine_store.cpp
+)
+target_include_directories(remote60_prelogin_machine_store_test PRIVATE src)
+target_link_libraries(remote60_prelogin_machine_store_test PRIVATE crypt32 advapi32)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )
