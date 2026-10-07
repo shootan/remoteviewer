@@ -2173,6 +2173,12 @@ add_executable(remote60_reboot_menu_policy_test
 )
 target_include_directories(remote60_reboot_menu_policy_test PRIVATE src)
 
+# prelogin-service r4 item 2 / Codex 3.1: prelogin plaintext-input filter (navigation only).
+add_executable(remote60_prelogin_input_filter_test
+  src/prelogin_input_filter_test.cpp
+)
+target_include_directories(remote60_prelogin_input_filter_test PRIVATE src)
+
 # prelogin-service r4 item 7: handoff ready-signal primitive.
 add_executable(remote60_prelogin_ready_signal_test
   src/prelogin_ready_signal_test.cpp

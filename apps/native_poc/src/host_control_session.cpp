@@ -47,6 +47,7 @@
 #include "host_window_enum.hpp"
 #include "poc_protocol.hpp"
 #include "prelogin_control_allowlist.hpp"
+#include "prelogin_input_filter.hpp"
 #include "prelogin_reboot_gate.hpp"
 #include "reboot_wire.hpp"
 #include <mutex>
@@ -733,6 +734,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
       const uint64_t inputReceivedUs = qpc_now_us();
       std::string resolvedTarget;
+      // Prelogin payload filter (r4 #2 / Codex 3.1): kind 5/6 are key_down/key_up. Before login only
+      // navigation keys may be injected as plaintext; a character/chord key is dropped here (never
+      // injected) so credentials cannot leak into a field as cleartext -- they come via the sealed path.
+      // The event is still acknowledged below so the viewer's strict request/response loop is not stalled.
+      const bool preloginBlockedKey =
+          args.preloginMode && (input.kind == 5 || input.kind == 6) &&
+          !remote60::native_poc::prelogin::IsPreloginNavKeyAllowed(input.keyCode);
+      if (preloginBlockedKey) {
+        std::cout << "[native-video-host][input][prelogin] dropped non-navigation key seq=" << input.seq
+                  << " key=" << input.keyCode << " (characters use the sealed credential path)\n";
+      }
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)
       const bool releaseAlreadyDone =
@@ -741,7 +753,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
