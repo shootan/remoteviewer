@@ -538,6 +538,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
                                      remote60::native_poc::kCaptureFlagPasteOnDemandV1 |
                                      remote60::native_poc::kCaptureFlagClipboardImageV1 |
                                      remote60::native_poc::kCaptureFlagFileCopyV1 |
+                                     remote60::native_poc::kCaptureFlagFileOfferCopyGenV1 |  // 86/87: not allowed here
                                      remote60::native_poc::kCaptureFlagMouseXButtonsV1);
       }
       pong.captureRebindCount = target.rebindCount;

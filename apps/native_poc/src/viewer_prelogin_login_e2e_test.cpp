@@ -717,6 +717,15 @@ int wmain(int argc, wchar_t** argv) {
     std::cout << "\n--- the host is at the pre-login screen ---\n";
     check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
           std::to_string(flags()));
+    {
+      // Nothing a pre-login host does not take may be advertised: a viewer would send it, and the host
+      // closes the link on any control message outside its allowlist.
+      const uint32_t userOnly = kCaptureFlagHostImeV1 | kCaptureFlagHostImePulseStateV2 | kCaptureFlagClipboardTextV1 |
+                                kCaptureFlagPasteOnDemandV1 | kCaptureFlagClipboardImageV1 | kCaptureFlagFileCopyV1 |
+                                kCaptureFlagFileOfferCopyGenV1 | kCaptureFlagMouseXButtonsV1;
+      check("...and NONE of the user-environment capabilities (clipboard, files incl. 86/87, IME, X buttons)",
+            (flags() & userOnly) == 0, std::to_string(flags() & userOnly));
+    }
     remote60::native_poc::viewer::push_session_toolbar_state(ctx);
     session_toolbar_follow_owner();
     pump_until([] { return false; }, 300);
