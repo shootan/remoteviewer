@@ -4,6 +4,7 @@
 #include "prelogin_admin_pipe.hpp"
 
 #include <algorithm>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -96,6 +97,7 @@ std::vector<uint8_t> EncodeAdminRequest(const AdminRequest& r) {
     put_str(&o, r.hostId);
     put_str(&o, r.hostToken);
   }
+  if (r.op == AdminOp::Reboot) put_u32(&o, r.requestId);
   return o;
 }
 
@@ -105,10 +107,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
   uint16_t version = 0;
   uint8_t op = 0;
   if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u16(&version) || version != kAdminVersion || !rd.u8(&op)) return false;
-  if (op != static_cast<uint8_t>(AdminOp::Query) && op != static_cast<uint8_t>(AdminOp::Enable) &&
-      op != static_cast<uint8_t>(AdminOp::Disable)) {
-    return false;
-  }
+  if (op < static_cast<uint8_t>(AdminOp::Query) || op > static_cast<uint8_t>(AdminOp::Ready)) return false;
   *out = AdminRequest{};
   out->op = static_cast<AdminOp>(op);
   if (out->op == AdminOp::Enable) {
@@ -117,6 +116,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
       return false;
     }
   }
+  if (out->op == AdminOp::Reboot && !rd.u32(&out->requestId)) return false;
   return rd.done();
 }
 
@@ -127,6 +127,7 @@ std::vector<uint8_t> EncodeAdminReply(const AdminReply& r) {
   put_u8(&o, r.enabled ? 1 : 0);
   put_u32(&o, r.win32);
   put_u64(&o, r.ownerGeneration);
+  put_u8(&o, r.rebootResult);
   return o;
 }
 
@@ -135,7 +136,8 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
   uint32_t magic = 0;
   uint8_t status = 0, enabled = 0;
   if (!rd.u32(&magic) || magic != kAdminMagic || !rd.u8(&status) || status > static_cast<uint8_t>(AdminStatus::Unavailable) ||
-      !rd.u8(&enabled) || enabled > 1 || !rd.u32(&out->win32) || !rd.u64(&out->ownerGeneration) || !rd.done()) {
+      !rd.u8(&enabled) || enabled > 1 || !rd.u32(&out->win32) || !rd.u64(&out->ownerGeneration) ||
+      !rd.u8(&out->rebootResult) || out->rebootResult > 3 || !rd.done()) {
     return false;
   }
   out->status = static_cast<AdminStatus>(status);
@@ -143,15 +145,54 @@ bool DecodeAdminReply(const std::vector<uint8_t>& b, AdminReply* out) {
   return true;
 }
 
-AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, bool clientIsAdmin, const AdminPrimitives& p) {
+AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientFacts& who, const AdminPrimitives& p,
+                              RebootLedger* ledger) {
   AdminReply reply;
-  if (!clientIsAdmin) {  // nothing about the request is read for a client that may not ask
+  if (!who.elevatedAdmin) {  // nothing about the request is read for a client that may not ask
     reply.status = AdminStatus::Refused;
+    reply.rebootResult = 2;  // NotAuthorized, should a reboot have been meant
     return reply;
   }
   AdminRequest r;
   if (!DecodeAdminRequest(request, &r)) {
     reply.status = AdminStatus::BadRequest;
+    return reply;
+  }
+  if (r.op == AdminOp::Reboot || r.op == AdminOp::Ready) {
+    // Only this install's streaming host asks these (item 6 / 7).
+    if (!who.hostProcess) {
+      reply.status = AdminStatus::Refused;
+      reply.rebootResult = 2;
+      return reply;
+    }
+    if (r.op == AdminOp::Ready) {
+      if (p.noteUserHostReady) p.noteUserHostReady(who.sessionId, who.processStartTime);
+      reply.status = AdminStatus::Ok;
+      return reply;
+    }
+    if (r.requestId == 0 || !ledger || !p.requestOsReboot) {
+      reply.status = AdminStatus::BadRequest;
+      return reply;
+    }
+    std::lock_guard<std::mutex> lock(ledger->mu);
+    for (const auto& a : ledger->answered) {
+      if (a.first == r.requestId) return a.second;  // the same id: the same answer, no second OS call
+    }
+    reply.status = AdminStatus::Ok;
+    if (ledger->inFlight) {
+      reply.rebootResult = 1;  // Refused: a restart is already under way
+    } else {
+      const uint32_t w = p.requestOsReboot();
+      if (w == 0) {
+        reply.rebootResult = 0;  // Accepted: the OS took it -- not "done"
+        ledger->inFlight = true;
+      } else {
+        reply.rebootResult = 3;  // Failed, never escalated to a forced restart
+        reply.win32 = w;
+      }
+    }
+    ledger->answered.emplace_back(r.requestId, reply);
+    if (ledger->answered.size() > 32) ledger->answered.erase(ledger->answered.begin());
     return reply;
   }
   if (r.op == AdminOp::Query) {
@@ -238,6 +279,17 @@ bool ClientIsElevatedAdministrator(void* pipeHandle) {
   RevertToSelf();
   if (!opened) return false;
   bool ok = false;
+  {
+    // LocalSystem (the --prelogin worker) is admitted as such.
+    BYTE system[SECURITY_MAX_SID_SIZE];
+    DWORD systemSize = sizeof(system);
+    BOOL isSystem = FALSE;
+    if (CreateWellKnownSid(WinLocalSystemSid, nullptr, system, &systemSize) &&
+        CheckTokenMembership(token, system, &isSystem) && isSystem) {
+      CloseHandle(token);
+      return true;
+    }
+  }
   TOKEN_ELEVATION elevation{};
   DWORD n = 0;
   if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &n) && elevation.TokenIsElevated) {
@@ -251,8 +303,36 @@ bool ClientIsElevatedAdministrator(void* pipeHandle) {
   return ok;
 }
 
+bool ClientImageIs(void* pipeHandle, const std::wstring& expectedImage) {
+  ULONG pid = 0;
+  if (expectedImage.empty() || !GetNamedPipeClientProcessId(static_cast<HANDLE>(pipeHandle), &pid) || pid == 0) return false;
+  HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!proc) return false;
+  wchar_t path[MAX_PATH * 2] = {};
+  DWORD n = MAX_PATH * 2;
+  const bool ok = QueryFullProcessImageNameW(proc, 0, path, &n) != FALSE &&
+                  CompareStringOrdinal(path, static_cast<int>(n), expectedImage.c_str(), static_cast<int>(expectedImage.size()), TRUE) ==
+                      CSTR_EQUAL;
+  CloseHandle(proc);
+  return ok;
+}
+
+namespace {
+void client_session_and_start(HANDLE pipe, ClientFacts* who) {
+  ULONG pid = 0;
+  if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return;
+  DWORD session = 0;
+  if (ProcessIdToSessionId(pid, &session)) who->sessionId = session;
+  if (HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+    FILETIME c{}, e{}, k{}, u{};
+    if (GetProcessTimes(proc, &c, &e, &k, &u)) who->processStartTime = (static_cast<uint64_t>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
+    CloseHandle(proc);
+  }
+}
+}  // namespace
+
 void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning, const wchar_t* pipeName,
-                            const wchar_t* sddl, AdminIdentityCheck isAdmin) {
+                            const wchar_t* sddl, AdminIdentityCheck isAdmin, AdminIdentityCheck isHost, RebootLedger* ledger) {
   while (keepRunning()) {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return;
@@ -293,8 +373,11 @@ void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keep
       }
       if (read) {
         request.resize(got);
-        const bool admin = isAdmin(pipe);
-        const AdminReply reply = HandleAdminRequest(request, admin, p);
+        ClientFacts who;
+        who.elevatedAdmin = isAdmin(pipe);
+        who.hostProcess = isHost && isHost(pipe);
+        client_session_and_start(pipe, &who);
+        const AdminReply reply = HandleAdminRequest(request, who, p, ledger);
         const std::vector<uint8_t> out = EncodeAdminReply(reply);
         DWORD wrote = 0;
         ResetEvent(ov.hEvent);
@@ -354,6 +437,53 @@ AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, cons
   }
   CloseHandle(pipe);
   return reply;
+}
+
+std::wstring HostServicePipeName() {
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (GNLinkStreamMigrationTest): a test pipe, never the service's.
+  wchar_t v[256] = {};
+  const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_ADMIN_PIPE", v, 256);
+  const std::wstring name(v, n < 256 ? n : 0);
+  if (name.rfind(L"\\\\.\\pipe\\GNLinkTest-", 0) == 0) return name;
+  return L"\\\\.\\pipe\\GNLinkTest-none";
+#else
+  return kPreloginAdminPipeName;
+#endif
+}
+
+uint8_t DelegateRebootToService(uint32_t requestId, uint32_t* win32) {
+  AdminRequest r;
+  r.op = AdminOp::Reboot;
+  r.requestId = requestId;
+  const std::wstring pipe = HostServicePipeName();
+  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str());
+  *win32 = 0;
+  if (reply.status == AdminStatus::Ok) {
+    *win32 = reply.win32;
+    return reply.rebootResult;
+  }
+  if (reply.status == AdminStatus::Refused) return 2;  // the service did not take this host as the host
+  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE : reply.win32;
+  return 3;
+}
+
+void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs, int attempts, uint32_t delayMs,
+                                     const std::wstring& pipeName) {
+  const std::wstring pipe = pipeName.empty() ? HostServicePipeName() : pipeName;
+  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe] {
+    const ULONGLONG until = GetTickCount64() + waitReadyMs;
+    while (readyNow && !readyNow()) {
+      if (GetTickCount64() >= until) return;  // never registered: no ready, the service keeps prelogin
+      Sleep(250);
+    }
+    AdminRequest r;
+    r.op = AdminOp::Ready;
+    for (int i = 0; i < attempts; ++i) {
+      if (SendPreloginAdminRequest(r, 2000, pipe.c_str()).status == AdminStatus::Ok) return;
+      Sleep(delayMs);
+    }
+  }).detach();
 }
 
 #endif

@@ -22,7 +22,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "prelogin_machine_record.hpp"
@@ -35,10 +37,13 @@ constexpr uint16_t kAdminVersion = 1;
 constexpr size_t kAdminMaxString = 512;
 constexpr size_t kAdminMaxToken = 2048;
 
-enum class AdminOp : uint8_t { Query = 1, Enable = 2, Disable = 3 };
+// r2: Reboot and Ready come from the streaming host (this install's GNLinkStream, elevated or SYSTEM),
+// not from GNLinkHost: the remote restart a directory-authenticated viewer asked for (item 6), and the
+// user Host's "registered and serving" that completes the prelogin handoff (item 7).
+enum class AdminOp : uint8_t { Query = 1, Enable = 2, Disable = 3, Reboot = 4, Ready = 5 };
 enum class AdminStatus : uint8_t {
   Ok = 0,
-  Refused = 1,     // the client is not an elevated administrator
+  Refused = 1,     // the client is not an elevated administrator (or, for Reboot/Ready, not the host)
   BadRequest = 2,  // malformed / unknown op / missing credential
   Failed = 3,      // the store or the service configuration failed; win32 says why
   Unavailable = 4, // client side: the service's pipe is not there (not installed / not running)
@@ -51,6 +56,8 @@ struct AdminRequest {
   std::string accountId;
   std::string hostId;
   std::string hostToken;  // NEVER logged
+  // Reboot only: the viewer's request id (never 0) -- the dedup key.
+  uint32_t requestId = 0;
 };
 
 struct AdminReply {
@@ -58,6 +65,46 @@ struct AdminReply {
   bool enabled = false;          // pre-login access is on after this request
   uint32_t win32 = 0;
   uint64_t ownerGeneration = 0;  // the generation the record / floor now carries
+  uint8_t rebootResult = 0;      // Reboot: RebootResult (0 Accepted, 1 Refused, 2 NotAuthorized, 3 Failed)
+};
+
+// Who is asking, as the server established it from the pipe (never from the request).
+struct ClientFacts {
+  bool elevatedAdmin = false;    // an elevated Administrators member, or LocalSystem
+  bool hostProcess = false;      // the process is this install's streaming host (GNLinkStream.exe)
+  uint32_t sessionId = 0xFFFFFFFFu;
+  uint64_t processStartTime = 0; // FILETIME of the client process's creation
+};
+
+// The service's restart ledger (S4): one OS call per accepted restart, the same answer for the same id.
+struct RebootLedger {
+  std::mutex mu;
+  bool inFlight = false;                                    // an accepted restart is under way
+  std::vector<std::pair<uint32_t, AdminReply>> answered;    // the last answers, by request id
+};
+
+// Item 7: the user Host's ready, as the service received it, and whether it completes THIS handoff:
+// from the console session, from a host process started after the service launched this user Host
+// (a ready from an earlier session's host, or from before a repeated LOGON, does not count).
+struct UserHostReadyTracker {
+  std::mutex mu;
+  bool have = false;
+  uint32_t sessionId = 0;
+  uint64_t processStartTime = 0;
+  void Note(uint32_t session, uint64_t startTime) {
+    std::lock_guard<std::mutex> l(mu);
+    have = true;
+    sessionId = session;
+    processStartTime = startTime;
+  }
+  void Reset() {
+    std::lock_guard<std::mutex> l(mu);
+    have = false;
+  }
+  bool Completes(uint32_t consoleSession, uint64_t launchTime) {
+    std::lock_guard<std::mutex> l(mu);
+    return have && sessionId == consoleSession && launchTime != 0 && processStartTime >= launchTime;
+  }
 };
 
 std::vector<uint8_t> EncodeAdminRequest(const AdminRequest& r);
@@ -81,30 +128,57 @@ struct AdminPrimitives {
   std::function<bool(uint32_t*)> loadRememberedStartType;   // false = none remembered
   std::function<bool(uint32_t)> rememberStartType;
   std::function<void()> forgetRememberedStartType;
+  // r2: the ONE fixed local restart (0 = the OS accepted it, else win32), and where a ready goes.
+  std::function<uint32_t()> requestOsReboot;
+  std::function<void(uint32_t session, uint64_t processStartTime)> noteUserHostReady;
 };
 
-// The one decision per request (pure over the primitives). clientIsAdmin = the server's identity check.
-AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, bool clientIsAdmin, const AdminPrimitives& p);
+// The one decision per request (pure over the primitives and the ledger).
+AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientFacts& who, const AdminPrimitives& p,
+                              RebootLedger* ledger);
+// GNLinkHost's ops only (Query / Enable / Disable): clientIsAdmin is the server's identity check.
+inline AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, bool clientIsAdmin, const AdminPrimitives& p) {
+  ClientFacts who;
+  who.elevatedAdmin = clientIsAdmin;
+  return HandleAdminRequest(request, who, p, nullptr);
+}
 
 // FNV-1a 64 of an id string, never 0 -- the record's numeric accountId / hostId (the strings travel in
 // the packed credential, which is what the --prelogin worker uses).
 uint64_t AdminIdHash(const std::string& s);
 
 #ifdef _WIN32
-// The server loop: one client at a time, while keepRunning(). `pipeName`/`sddl`/`isAdmin` are the
-// product's unless a test passes its own (a test pipe name, the test user's DACL, a stand-in check).
+// The server loop: one client at a time, while keepRunning(). `pipeName`/`sddl`/`isAdmin`/`isHost` are
+// the product's unless a test passes its own (a test pipe name, the test user's DACL, a stand-in check).
 using AdminIdentityCheck = std::function<bool(void* pipe)>;
-bool ClientIsElevatedAdministrator(void* pipe);
+bool ClientIsElevatedAdministrator(void* pipe);  // elevated Administrators member, or LocalSystem
+// The client process's image is exactly `expectedImage` (case-insensitive full path).
+bool ClientImageIs(void* pipe, const std::wstring& expectedImage);
 void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning,
                             const wchar_t* pipeName = kPreloginAdminPipeName,
                             const wchar_t* sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
-                            AdminIdentityCheck isAdmin = ClientIsElevatedAdministrator);
+                            AdminIdentityCheck isAdmin = ClientIsElevatedAdministrator,
+                            AdminIdentityCheck isHost = nullptr, RebootLedger* ledger = nullptr);
+// The service's restart (SeShutdownPrivilege + InitiateSystemShutdownExW, a short grace, NOT forced).
+void BindProductReboot(AdminPrimitives* p);
 // The product's start-type and record primitives: the SCM (and HKLM\SOFTWARE\GNLink
 // PreloginOriginalStartType for the pre-enable type), and prelogin_machine_store + DeleteFileW.
 void BindProductStartType(AdminPrimitives* p, const wchar_t* serviceName);
 void BindProductMachineStore(AdminPrimitives* p);
 // GNLinkHost's side: one request, one reply. Unavailable when the pipe is not there within waitMs.
 AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName = kPreloginAdminPipeName);
+
+// The streaming host's side (r2). The pipe is the product's; a test build of the host
+// (REMOTE60_STREAM_TEST_SEAM) may name a \\.\pipe\GNLinkTest- pipe from its environment.
+std::wstring HostServicePipeName();
+// Item 6: the restart the gate admitted, done by the service. Returns RebootResult; *win32 its error.
+// A service that cannot be reached is Failed (ERROR_SERVICE_NOT_ACTIVE) -- never a local fallback.
+uint8_t DelegateRebootToService(uint32_t requestId, uint32_t* win32);
+// Item 7: tell the service this user Host is registered and serving -- once `readyNow()` says so (the
+// first successful directory heartbeat), polled for up to `waitReadyMs`; then up to `attempts` sends,
+// `delayMs` apart, on a background thread. Bounded both ways; the service keeps prelogin until one lands.
+void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs = 180000, int attempts = 10,
+                                     uint32_t delayMs = 1000, const std::wstring& pipeName = std::wstring());
 #endif
 
 }  // namespace remote60::native_poc::prelogin

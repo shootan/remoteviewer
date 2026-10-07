@@ -49,6 +49,7 @@
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_filter.hpp"
 #include "prelogin_reboot_gate.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "reboot_wire.hpp"
 #include <mutex>
 #include "peer_version.hpp"
@@ -623,11 +624,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
           std::lock_guard<std::mutex> lock(gRebootGateMu);
           gRebootGate = remote60::native_poc::RebootGateState{};  // revoked mid-flight: clear the in-flight
         } else {
-          win32 = request_system_reboot();  // the ONE fixed local restart
-          if (win32 != 0) {
-            result = remote60::native_poc::RebootResult::Failed;  // never auto-escalate to forced (R4)
+          // prelogin-ui r2 (item 6): the ONE fixed local restart is the service's (it holds the shutdown
+          // privilege in every mode, dedups by request id and caches the answer); this host only asks.
+          const uint8_t delegated = remote60::native_poc::prelogin::DelegateRebootToService(req.requestId, &win32);
+          result = static_cast<remote60::native_poc::RebootResult>(delegated);
+          if (result != remote60::native_poc::RebootResult::Accepted) {
+            // never auto-escalate to forced (R4); not accepted: the host gate allows a later retry
             std::lock_guard<std::mutex> lock(gRebootGateMu);
-            gRebootGate = remote60::native_poc::RebootGateState{};  // the OS call failed; allow a retry
+            gRebootGate = remote60::native_poc::RebootGateState{};
           }
         }
       }

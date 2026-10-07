@@ -84,6 +84,7 @@
 #include "host_input_router.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "prelogin_ready_signal.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
@@ -311,7 +312,17 @@ int startup_connect_client(HostContext& hx) {
         // r4 #7: this user Host reached its ready point (directory-registered + about to serve). Tell the
         // prelogin service so it completes the prelogin->user handoff on a real signal, not process life.
         // The prelogin worker is not a handoff target and does not signal.
-        if (!args.preloginMode) remote60::native_poc::prelogin::SignalUserHostReady();
+        // prelogin-ui r2 (item 7): ready goes to the service over its admin pipe, where it is tied to
+        // this process's session and start time (the named event any admin process could set is gone).
+        if (!args.preloginMode) {
+          remote60::native_poc::prelogin::NotifyUserHostReadyInBackground(
+              // "online" is set by a successful heartbeat; "punching" only right after one (it carried
+              // capabilities) -- either says the directory accepted this host.
+              [&agent = clientSession.directoryAgent] {
+                const std::string s = agent.StatusLine();
+                return s.rfind("online", 0) == 0 || s.rfind("punching", 0) == 0;
+              });
+        }
       }
     }
 

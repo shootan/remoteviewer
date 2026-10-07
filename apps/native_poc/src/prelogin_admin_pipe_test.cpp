@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <functional>
 #include <thread>
 
 #include "prelogin_admin_pipe.hpp"
@@ -32,8 +33,15 @@ struct World {
   uint32_t remembered = 0;
   int calls = 0;
   uint32_t failSetStartType = 0;
+  int osReboots = 0;          // r2: the OS seam
+  uint32_t osRebootResult = 0;
+  int readies = 0;
+  uint32_t readySession = 0;
+  uint64_t readyStart = 0;
   pl::AdminPrimitives primitives() {
     pl::AdminPrimitives p;
+    p.requestOsReboot = [this]() -> uint32_t { ++osReboots; return osRebootResult; };
+    p.noteUserHostReady = [this](uint32_t s, uint64_t t) { ++readies; readySession = s; readyStart = t; };
     p.recordPath = [this] { ++calls; return std::wstring(L"C:\\ProgramData\\GNLink\\credential\\machine.cred"); };
     p.machineId = [this] { ++calls; return std::string("11111111-2222-3333-4444-555555555555"); };
     p.readFloor = [this] { ++calls; return floor; };
@@ -98,6 +106,15 @@ std::wstring current_user_sddl() {
   return s;
 }
 
+bool wait_until_ms(const std::function<bool()>& done, int ms) {
+  const ULONGLONG until = GetTickCount64() + ms;
+  while (GetTickCount64() < until) {
+    if (done()) return true;
+    Sleep(50);
+  }
+  return done();
+}
+
 bool process_is_elevated() {
   HANDLE tok = nullptr;
   OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok);
@@ -112,10 +129,12 @@ bool process_is_elevated() {
 struct TestServer {
   std::atomic<bool> run{true};
   std::thread t;
-  void start(World* w, const std::wstring& name, const std::wstring& sddl, pl::AdminIdentityCheck check) {
-    t = std::thread([this, w, name, sddl, check] {
+  pl::RebootLedger ledger;
+  void start(World* w, const std::wstring& name, const std::wstring& sddl, pl::AdminIdentityCheck check,
+             pl::AdminIdentityCheck host = nullptr) {
+    t = std::thread([this, w, name, sddl, check, host] {
       pl::AdminPrimitives p = w->primitives();
-      pl::RunPreloginAdminServer(p, [this] { return run.load(); }, name.c_str(), sddl.c_str(), check);
+      pl::RunPreloginAdminServer(p, [this] { return run.load(); }, name.c_str(), sddl.c_str(), check, host, &ledger);
     });
     Sleep(200);
   }
@@ -272,6 +291,157 @@ int main() {
   {
     const pl::AdminReply r = pl::SendPreloginAdminRequest(enable_request(), 200, L"\\\\.\\pipe\\GNLinkTest-admin-nobody");
     check("no service listening: Unavailable", r.status == pl::AdminStatus::Unavailable);
+  }
+
+  // ---------------------------------------------------------------- r2: reboot (item 6) and ready (item 7)
+  {
+    pl::AdminRequest rb;
+    rb.op = pl::AdminOp::Reboot;
+    rb.requestId = 0x1234;
+    pl::AdminRequest rb2 = rb;
+    rb2.requestId = 0x5678;
+    pl::ClientFacts host;
+    host.elevatedAdmin = true;
+    host.hostProcess = true;
+    {
+      World w;
+      pl::RebootLedger ledger;
+      pl::AdminPrimitives p = w.primitives();
+      pl::ClientFacts notHost = host;
+      notHost.hostProcess = false;
+      const pl::AdminReply a = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), notHost, p, &ledger);
+      check("reboot from a process that is not this install's streaming host: Refused, OS seam 0",
+            a.status == pl::AdminStatus::Refused && a.rebootResult == 2 && w.osReboots == 0);
+      pl::ClientFacts notAdmin = host;
+      notAdmin.elevatedAdmin = false;
+      const pl::AdminReply b = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), notAdmin, p, &ledger);
+      check("reboot from the host binary run without elevation: Refused, OS seam 0",
+            b.status == pl::AdminStatus::Refused && w.osReboots == 0);
+      pl::AdminRequest zero = rb;
+      zero.requestId = 0;
+      check("reboot id 0: BadRequest, OS seam 0",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(zero), host, p, &ledger).status == pl::AdminStatus::BadRequest && w.osReboots == 0);
+      const pl::AdminReply c = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), host, p, &ledger);
+      check("reboot from the host: Accepted, OS seam called ONCE", c.status == pl::AdminStatus::Ok && c.rebootResult == 0 && w.osReboots == 1);
+      const pl::AdminReply d = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), host, p, &ledger);
+      check("the same id again: the same answer (Accepted), no second OS call", d.rebootResult == 0 && w.osReboots == 1);
+      const pl::AdminReply e = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb2), host, p, &ledger);
+      check("another id while the restart is under way: Refused, no second OS call", e.rebootResult == 1 && w.osReboots == 1);
+      check("...and asked again, still Refused (its own answer cached)",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(rb2), host, p, &ledger).rebootResult == 1 && w.osReboots == 1);
+    }
+    {
+      World w;
+      w.osRebootResult = 1115;  // ERROR_SHUTDOWN_IN_PROGRESS
+      pl::RebootLedger ledger;
+      pl::AdminPrimitives p = w.primitives();
+      const pl::AdminReply a = pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), host, p, &ledger);
+      check("the OS refuses: Failed with its error, never escalated (one call)", a.rebootResult == 3 && a.win32 == 1115 && w.osReboots == 1);
+      check("...the same id: the same Failed, no second call",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(rb), host, p, &ledger).rebootResult == 3 && w.osReboots == 1);
+      w.osRebootResult = 0;
+      check("...a NEW id after a failure may try again (one more call)",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(rb2), host, p, &ledger).rebootResult == 0 && w.osReboots == 2);
+    }
+    {
+      World w;
+      pl::AdminPrimitives p = w.primitives();
+      pl::AdminRequest ready;
+      ready.op = pl::AdminOp::Ready;
+      pl::ClientFacts h = host;
+      h.sessionId = 3;
+      h.processStartTime = 1000;
+      pl::ClientFacts notHost = h;
+      notHost.hostProcess = false;
+      check("ready from a process that is not the host: Refused, not recorded",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(ready), notHost, p, nullptr).status == pl::AdminStatus::Refused && w.readies == 0);
+      check("ready from the host: recorded with the session and start time the SERVER established",
+            pl::HandleAdminRequest(pl::EncodeAdminRequest(ready), h, p, nullptr).status == pl::AdminStatus::Ok && w.readies == 1 &&
+                w.readySession == 3 && w.readyStart == 1000);
+    }
+    {
+      pl::UserHostReadyTracker t;
+      check("handoff: no ready yet -> not complete (the prelogin worker keeps the lease)", !t.Completes(3, 500));
+      t.Note(3, 400);
+      check("handoff: a ready from a host started BEFORE this launch (an old generation) -> discarded", !t.Completes(3, 500));
+      t.Note(4, 600);
+      check("handoff: a ready from another session -> not complete", !t.Completes(3, 500));
+      t.Note(3, 600);
+      check("handoff: a ready from this session's host started after the launch -> complete", t.Completes(3, 500));
+      t.Reset();
+      check("handoff: a repeated LOGON relaunch resets it; the earlier ready no longer counts", !t.Completes(3, 700));
+      t.Note(3, 650);
+      check("...and a ready from before that relaunch is stale", !t.Completes(3, 700));
+    }
+    {
+      // The real pipe: the product's host check is the image path. This test is not GNLinkStream.exe.
+      World w;
+      TestServer s;
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-d";
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; },
+              [](void* pipe) { return pl::ClientImageIs(pipe, L"C:\\Program Files\\GNLink\\GNLinkStream.exe"); });
+      const pl::AdminReply forged = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
+      pl::AdminRequest ready;
+      ready.op = pl::AdminOp::Ready;
+      const pl::AdminReply forgedReady = pl::SendPreloginAdminRequest(ready, 3000, name.c_str());
+      s.stop();
+      check("over the real pipe, a client that is not the install's GNLinkStream.exe: reboot Refused, OS seam 0",
+            forged.status == pl::AdminStatus::Refused && w.osReboots == 0);
+      check("...and its ready is Refused, not recorded", forgedReady.status == pl::AdminStatus::Refused && w.readies == 0);
+    }
+    {
+      wchar_t me[MAX_PATH] = {};
+      GetModuleFileNameW(nullptr, me, MAX_PATH);
+      const std::wstring self = me;
+      World w;
+      TestServer s;
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-e";
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; },
+              [self](void* pipe) { return pl::ClientImageIs(pipe, self); });  // this test stands in as "the host"
+      const pl::AdminReply a = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
+      const pl::AdminReply b = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
+      pl::AdminRequest ready;
+      ready.op = pl::AdminOp::Ready;
+      const pl::AdminReply c = pl::SendPreloginAdminRequest(ready, 3000, name.c_str());
+      s.stop();
+      FILETIME cr{}, ex{}, k{}, u{};
+      GetProcessTimes(GetCurrentProcess(), &cr, &ex, &k, &u);
+      const uint64_t myStart = (static_cast<uint64_t>(cr.dwHighDateTime) << 32) | cr.dwLowDateTime;
+      DWORD mySession = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &mySession);
+      check("over the real pipe, the host's reboot: Accepted, OS seam once; the retransmit: same answer, still once",
+            a.rebootResult == 0 && b.rebootResult == 0 && w.osReboots == 1);
+      check("over the real pipe, the host's ready: recorded with ITS session and process start time",
+            c.status == pl::AdminStatus::Ok && w.readies == 1 && w.readySession == mySession && w.readyStart == myStart);
+    }
+    {
+      // The host's side of item 7, bounded both ways: never registered -> nothing is sent; the service
+      // not there yet -> retried until it is (and no further).
+      wchar_t me[MAX_PATH] = {};
+      GetModuleFileNameW(nullptr, me, MAX_PATH);
+      const std::wstring self = me;
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-f";
+      World w;
+      TestServer s;
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      pl::NotifyUserHostReadyInBackground([] { return false; }, 400, 5, 100, name);
+      Sleep(1500);
+      check("ready while the host never registered: nothing is sent (the service keeps prelogin)", w.readies == 0);
+      s.stop();
+      std::atomic<bool> registered{false};
+      pl::NotifyUserHostReadyInBackground([&registered] { return registered.load(); }, 10000, 8, 400, name);
+      Sleep(300);
+      check("...and not before registration, even with the service up later", w.readies == 0);
+      registered = true;
+      Sleep(900);  // the first attempts find no pipe
+      World w2;
+      TestServer s2;
+      s2.start(&w2, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      const bool arrived = wait_until_ms([&] { return w2.readies >= 1; }, 5000);
+      s2.stop();
+      check("registered, the service not up yet: the ready is retried and arrives once it is", arrived && w2.readies == 1,
+            std::to_string(w2.readies));
+    }
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

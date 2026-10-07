@@ -86,6 +86,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_graphics.cpp
   src/prelogin_ready_signal.cpp
   src/prelogin_machine_store.cpp
+  src/prelogin_admin_pipe.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -2172,6 +2173,24 @@ if(MSVC)
   target_compile_options(remote60_host_prelogin_toggle_ui_test PRIVATE /utf-8)
 endif()
 add_dependencies(remote60_host_prelogin_toggle_ui_test remote60_host_app_ui_test)
+
+# prelogin-ui r2 (items 6, 7): a viewer's restart on a directory-authenticated session through the host's
+# gate and the admin pipe to the service's OS seam (once), and the host's ready after registration --
+# GNLinkStreamMigrationTest without SeShutdownPrivilege, a fake directory, the product's pipe server.
+add_executable(remote60_host_reboot_delegate_e2e_test
+  src/host_reboot_delegate_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_host_reboot_delegate_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_reboot_delegate_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_host_reboot_delegate_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_reboot_delegate_e2e_test remote60_native_video_host_migration_seam)
 
 # prelogin-ui r1 (item 8): the reboot-menu / prelogin-credential rule against the vectors the Android
 # JVM test also reads (apps/shared/reboot_menu_vectors.txt).

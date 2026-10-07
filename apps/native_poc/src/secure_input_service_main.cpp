@@ -820,6 +820,11 @@ HANDLE gPreloginWorker = nullptr;  // GNLinkStream.exe --prelogin, SYSTEM, conso
 DWORD gPreloginWorkerSession = 0xFFFFFFFFu;  // the console session that worker was launched for (S5 identity)
 HANDLE gUserHostProcess = nullptr; // GNLinkHost.exe --tray, launched for the logged-on user at handoff
 DWORD gUserHostSession = 0xFFFFFFFFu;        // the session that host was launched for (S5 identity)
+// prelogin-ui r2 (item 7): the user Host's ready arrives over the admin pipe from this install's
+// GNLinkStream, with its session and process start time; it completes the handoff only if it is from
+// the console session and from a host started after this launch (prelogin_admin_pipe.hpp).
+remote60::native_poc::prelogin::UserHostReadyTracker gUserHostReady;
+std::atomic<uint64_t> gUserHostLaunchTime{0};
 // All launched children join this Job with KILL_ON_JOB_CLOSE, so a SYSTEM worker can never outlive the
 // service: if the service process dies for any reason, closing its last handle to the job kills them
 // (Codex S5 lifetime boundary). Created lazily on the first launch.
@@ -991,6 +996,12 @@ void launch_user_host(DWORD consoleSession) {
   gUserHostSession = 0xFFFFFFFFu;
   // Clear any prior session's readiness so the handoff waits for THIS host's real ready signal (r4 #7).
   ResetUserHostReady();
+  gUserHostReady.Reset();  // prelogin-ui r2: and record when this launch began (an older host's ready is stale)
+  {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    gUserHostLaunchTime.store((static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime);
+  }
   HANDLE userToken = nullptr;
   if (!WTSQueryUserToken(consoleSession, &userToken)) {
     diag("prelogin: handoff WTSQueryUserToken failed err=%lu", GetLastError());
@@ -1057,7 +1068,8 @@ SupervisorObservation observe_console(DWORD* consoleOut, bool consoleChanged) {
     // Real ready signal (r4 #7): the handoff completes only when the launched user Host is BOTH alive
     // AND has signalled it reached its ready point (directory-registered + serving), never on the bare
     // LOGON or on mere process existence.
-    obs.userHostReady = child_alive(gUserHostProcess) && UserHostReadySignaled();
+    // prelogin-ui r2 (item 7): the ready is the host's, over the admin pipe, for THIS session and launch.
+    obs.userHostReady = child_alive(gUserHostProcess) && gUserHostReady.Completes(console, gUserHostLaunchTime.load());
   } else {
     obs.userToken = ClassifyTokenObservation(false, GetLastError());
   }
@@ -1143,9 +1155,18 @@ void WINAPI service_main(DWORD, wchar_t**) {
   adminPrimitives.readFloor = read_prelogin_owner_floor;
   adminPrimitives.raiseFloor = raise_prelogin_owner_floor;
   adminPrimitives.featureEnabled = prelogin_feature_enabled;
-  std::thread adminThread([&adminPrimitives] {
+  // prelogin-ui r2: the restart the streaming host's gate admitted (item 6) and the user Host's ready
+  // (item 7) -- both only from this install's GNLinkStream, elevated or SYSTEM.
+  remote60::native_poc::prelogin::BindProductReboot(&adminPrimitives);
+  adminPrimitives.noteUserHostReady = [](uint32_t session, uint64_t started) { gUserHostReady.Note(session, started); };
+  static remote60::native_poc::prelogin::RebootLedger rebootLedger;
+  const std::wstring hostImage = sibling_exe_path(L"GNLinkStream.exe");
+  std::thread adminThread([&adminPrimitives, hostImage] {
     remote60::native_poc::prelogin::RunPreloginAdminServer(
-        adminPrimitives, [] { return gRunning.load(std::memory_order_acquire); });
+        adminPrimitives, [] { return gRunning.load(std::memory_order_acquire); },
+        remote60::native_poc::prelogin::kPreloginAdminPipeName, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+        remote60::native_poc::prelogin::ClientIsElevatedAdministrator,
+        [hostImage](void* pipe) { return remote60::native_poc::prelogin::ClientImageIs(pipe, hostImage); }, &rebootLedger);
   });
 
   while (gRunning.load(std::memory_order_acquire)) {

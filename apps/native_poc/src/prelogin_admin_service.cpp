@@ -99,4 +99,25 @@ void BindProductMachineStore(AdminPrimitives* p) {
 }
 
 
+void BindProductReboot(AdminPrimitives* p) {
+  p->requestOsReboot = []() -> uint32_t {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return GetLastError();
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    const bool looked = LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege", &tp.Privileges[0].Luid) != FALSE;
+    const bool adjusted = looked && AdjustTokenPrivileges(token, FALSE, &tp, 0, nullptr, nullptr) &&
+                          GetLastError() == ERROR_SUCCESS;
+    CloseHandle(token);
+    if (!adjusted) return ERROR_PRIVILEGE_NOT_HELD;
+    wchar_t msg[] = L"GNLink 원격 요청으로 다시 시작합니다.";
+    const BOOL ok = InitiateSystemShutdownExW(nullptr, msg, /*dwTimeout=*/5, /*bForceAppsClosed=*/FALSE,
+                                              /*bRebootAfterShutdown=*/TRUE,
+                                              SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_MINOR_RECONFIG |
+                                                  SHTDN_REASON_FLAG_PLANNED);
+    return ok ? 0u : GetLastError();
+  };
+}
+
 }  // namespace remote60::native_poc::prelogin
