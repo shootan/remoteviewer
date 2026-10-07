@@ -1,7 +1,7 @@
 #pragma once
 
 // "Windows 로그인" -- the pre-login worker's end of the sealed credential (prelogin-ui r3, item 5 of
-// prelogin-service).
+// prelogin-service; r5 G7).
 //
 // Role:   in --prelogin mode the host is the SYSTEM worker on the console's Winlogon desktop; there is no
 //         user session for the service's lock-screen unlock to connect. The same sealed exchange
@@ -12,9 +12,18 @@
 //         typed as Unicode keystrokes into the logon UI -- only when the input target is the one this
 //         worker types into (LogonUI.exe in the product), never into whatever else has focus -- and
 //         zeroed at once. Nothing is stored or logged.
+// Bound:  (r5 G7) the opened password waits for the logon UI only while everything it was sent for still
+//         holds: its control session (EndSession drops it), its challenge (a new challenge, or the
+//         challenge's expiry, drops it), and the console session and input desktop it was opened under
+//         (the environment identity). Any change: it is zeroed and nothing is typed. The target is
+//         identified, not just recognised -- its identity is taken again immediately before the typing
+//         (one SendInput for the whole password) and after it; a target that changed before is not
+//         typed into, one that changed during is reported as a failure.
 // Result: Injected (8) means "typed", NOT "logged in"; the viewer shows the two differently.
-// Thread: one control thread at a time per host; the lock only guards against a second dispatcher.
+// Thread: the control thread calls Challenge/Sealed/PollResult/EndSession; the waiting and typing run on
+//         one worker thread; the lock guards both.
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -27,24 +36,35 @@ namespace remote60::native_poc::prelogin {
 
 class PreloginCredReceiver {
  public:
-  // Types `count` UTF-16 units; false when the OS refused (win32 in *err).
+  // Types `count` UTF-16 units in one go; false when the OS refused (win32 in *err).
   using InjectFn = std::function<bool(const uint16_t* units, uint16_t count, uint32_t* err)>;
-  // True when the input target is the logon UI this worker may type into.
-  using TargetFn = std::function<bool()>;
+  // The identity of the logon UI that holds the input now; 0 when the input is not at it.
+  using TargetFn = std::function<uint64_t()>;
+  // The identity of where the worker is: the console session and the input desktop.
+  using EnvironmentFn = std::function<uint64_t()>;
 
-  PreloginCredReceiver(InjectFn inject, TargetFn target, uint64_t hostId, uint32_t targetWaitMs = 3000)
-      : inject_(std::move(inject)), target_(std::move(target)), hostId_(hostId), targetWaitMs_(targetWaitMs) {}
+  PreloginCredReceiver(InjectFn inject, TargetFn target, EnvironmentFn environment, uint64_t hostId,
+                       uint32_t targetWaitMs = 3000, uint32_t challengeLifetimeMs = 30000)
+      : inject_(std::move(inject)),
+        target_(std::move(target)),
+        environment_(std::move(environment)),
+        hostId_(hostId),
+        targetWaitMs_(targetWaitMs),
+        challengeLifetimeMs_(challengeLifetimeMs) {}
   ~PreloginCredReceiver();
   PreloginCredReceiver(const PreloginCredReceiver&) = delete;
   PreloginCredReceiver& operator=(const PreloginCredReceiver&) = delete;
 
-  // 40 -> 41. A rejected request answers with its stage (not ChallengeIssued).
+  // 40 -> 41. A rejected request answers with its stage (not ChallengeIssued). A new challenge drops
+  // a credential still waiting from the previous one.
   ControlUnlockChallengeMessage Challenge(const ControlUnlockChallengeRequestMessage& req, uint64_t cookie);
   // 42: open now (a failure is the result at once); the wait for the logon UI and the typing run on
   // a worker thread, so the control thread answers 43 without waiting. The result is kept for 44.
   void Sealed(const ControlUnlockSealedRequestMessage& req, uint64_t cookie);
   // 44 -> 45: false while there is no result for `requestId` (still waiting for the target / typing).
   bool PollResult(uint32_t requestId, ControlUnlockStatusResultMessage* out);
+  // The control session with this cookie ended: a credential of it still waiting is dropped, untyped.
+  void EndSession(uint64_t cookie);
 
   // Told every terminal result (request id, stage, win32) -- never the credential. Set before use.
   std::function<void(uint32_t requestId, uint16_t stage, uint32_t win32)> onResult;
@@ -55,20 +75,27 @@ class PreloginCredReceiver {
   }
 
  private:
-  void Deliver(uint16_t* units, uint16_t count, uint32_t requestId);  // the worker: owns and frees `units`
+  // The worker: owns and frees `units`.
+  void Deliver(uint16_t* units, uint16_t count, uint32_t requestId, uint64_t environment, uint64_t expiresMs);
+  void Finish(uint32_t requestId, UnlockStage stage, uint32_t win32);  // under mu_
 
   std::mutex mu_;
   std::thread worker_;
   bool inflight_ = false;
-  uint32_t inflightId_ = 0;
+  uint64_t inflightCookie_ = 0;
+  std::atomic<bool> cancel_{false};  // set by EndSession / a new Challenge for the one in flight
   InjectFn inject_;
   TargetFn target_;
+  EnvironmentFn environment_;
   uint64_t hostId_;
   uint32_t targetWaitMs_;
+  uint32_t challengeLifetimeMs_;
   sealed_unlock::EcdhKeyPair key_;
   uint8_t salt_[sealed_unlock::kSaltBytes] = {};
   ControlUnlockChallengeMessage challenge_{};
   bool haveChallenge_ = false;
+  uint64_t challengeExpiresMs_ = 0;
+  uint64_t challengeCookie_ = 0;
   sealed_unlock::UnlockChallengeState state_;
   uint32_t generation_ = 0;
   uint64_t lastChallengeMs_ = 0;
@@ -77,11 +104,16 @@ class PreloginCredReceiver {
   uint64_t injections_ = 0;
 };
 
-// The product's typing and target: SendInput Unicode units; the target is the foreground window of
-// LogonUI.exe (a test build of the host, REMOTE60_STREAM_TEST_SEAM, may name a test window's title
-// instead -- GNLINK_STREAM_TEST_CRED_TARGET_TITLE). And the host id the challenge carries.
+// The product's typing, target and environment: one SendInput of Unicode units; the target is the
+// foreground window of %SystemRoot%\System32\LogonUI.exe running as LocalSystem in this worker's session
+// while the input desktop is Winlogon (a test build of the host, REMOTE60_STREAM_TEST_SEAM, may name a
+// test window's title instead -- GNLINK_STREAM_TEST_CRED_TARGET_TITLE); the environment is the console
+// session and the input desktop's name. And the host id the challenge carries.
 PreloginCredReceiver::InjectFn ProductCredInject();
 PreloginCredReceiver::TargetFn ProductCredTarget();
+PreloginCredReceiver::EnvironmentFn ProductCredEnvironment();
 uint64_t ProductCredHostId();
+// How long the worker waits for the logon UI (3 s; a test build may set GNLINK_STREAM_TEST_CRED_WAIT_MS).
+uint32_t ProductCredTargetWaitMs();
 
 }  // namespace remote60::native_poc::prelogin

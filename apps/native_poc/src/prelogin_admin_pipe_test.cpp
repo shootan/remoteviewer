@@ -125,6 +125,9 @@ bool process_is_elevated() {
   return e.TokenIsElevated != 0;
 }
 
+// r5 G3: the server these tests serve is this process; the client is told to trust exactly it.
+const pl::ServerCheck self_server = [](void* pipe) { return pl::ServerIsProcess(pipe, GetCurrentProcessId()); };
+
 // Runs a server on a test pipe until stopped; the requests are the client's, the decision the product's.
 struct TestServer {
   std::atomic<bool> run{true};
@@ -249,7 +252,7 @@ int main() {
     TestServer s;
     const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-a";
     s.start(&w, name, current_user_sddl(), pl::ClientIsElevatedAdministrator);
-    const pl::AdminReply r = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str());
+    const pl::AdminReply r = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str(), self_server);
     s.stop();
     if (!elevated) {
       check("the product's check over a real pipe: a non-elevated client is Refused, nothing written",
@@ -264,7 +267,7 @@ int main() {
     TestServer s;
     const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-b";
     s.start(&w, name, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", [](void*) { return true; });
-    const pl::AdminReply r = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str());
+    const pl::AdminReply r = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str(), self_server);
     s.stop();
     if (!elevated) {
       check("the product's DACL: a non-elevated client is denied at open (Refused), nothing written",
@@ -278,11 +281,11 @@ int main() {
     TestServer s;
     const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-c";
     s.start(&w, name, current_user_sddl(), [](void*) { return true; });
-    const pl::AdminReply on = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str());
+    const pl::AdminReply on = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str(), self_server);
     pl::AdminRequest off;
     off.op = pl::AdminOp::Disable;
     const bool wroteOn = w.files.count(kPath) == 1;
-    const pl::AdminReply o = pl::SendPreloginAdminRequest(off, 3000, name.c_str());
+    const pl::AdminReply o = pl::SendPreloginAdminRequest(off, 3000, name.c_str(), self_server);
     s.stop();
     check("over the real pipe: on reaches the service (record written, AUTO)", on.status == pl::AdminStatus::Ok && on.enabled && wroteOn);
     check("over the real pipe: off reaches it (record gone, start type back)",
@@ -380,10 +383,10 @@ int main() {
       const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-d";
       s.start(&w, name, current_user_sddl(), [](void*) { return true; },
               [](void* pipe) { return pl::ClientImageIs(pipe, L"C:\\Program Files\\GNLink\\GNLinkStream.exe"); });
-      const pl::AdminReply forged = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
+      const pl::AdminReply forged = pl::SendPreloginAdminRequest(rb, 3000, name.c_str(), self_server);
       pl::AdminRequest ready;
       ready.op = pl::AdminOp::Ready;
-      const pl::AdminReply forgedReady = pl::SendPreloginAdminRequest(ready, 3000, name.c_str());
+      const pl::AdminReply forgedReady = pl::SendPreloginAdminRequest(ready, 3000, name.c_str(), self_server);
       s.stop();
       check("over the real pipe, a client that is not the install's GNLinkStream.exe: reboot Refused, OS seam 0",
             forged.status == pl::AdminStatus::Refused && w.osReboots == 0);
@@ -398,11 +401,11 @@ int main() {
       const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-e";
       s.start(&w, name, current_user_sddl(), [](void*) { return true; },
               [self](void* pipe) { return pl::ClientImageIs(pipe, self); });  // this test stands in as "the host"
-      const pl::AdminReply a = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
-      const pl::AdminReply b = pl::SendPreloginAdminRequest(rb, 3000, name.c_str());
+      const pl::AdminReply a = pl::SendPreloginAdminRequest(rb, 3000, name.c_str(), self_server);
+      const pl::AdminReply b = pl::SendPreloginAdminRequest(rb, 3000, name.c_str(), self_server);
       pl::AdminRequest ready;
       ready.op = pl::AdminOp::Ready;
-      const pl::AdminReply c = pl::SendPreloginAdminRequest(ready, 3000, name.c_str());
+      const pl::AdminReply c = pl::SendPreloginAdminRequest(ready, 3000, name.c_str(), self_server);
       s.stop();
       FILETIME cr{}, ex{}, k{}, u{};
       GetProcessTimes(GetCurrentProcess(), &cr, &ex, &k, &u);
@@ -424,12 +427,12 @@ int main() {
       World w;
       TestServer s;
       s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
-      pl::NotifyUserHostReadyInBackground([] { return false; }, 400, 5, 100, name);
+      pl::NotifyUserHostReadyInBackground([] { return false; }, 400, 5, 100, name, self_server);
       Sleep(1500);
       check("ready while the host never registered: nothing is sent (the service keeps prelogin)", w.readies == 0);
       s.stop();
       std::atomic<bool> registered{false};
-      pl::NotifyUserHostReadyInBackground([&registered] { return registered.load(); }, 10000, 8, 400, name);
+      pl::NotifyUserHostReadyInBackground([&registered] { return registered.load(); }, 10000, 8, 400, name, self_server);
       Sleep(300);
       check("...and not before registration, even with the service up later", w.readies == 0);
       registered = true;
@@ -442,6 +445,144 @@ int main() {
       check("registered, the service not up yet: the ready is retried and arrives once it is", arrived && w2.readies == 1,
             std::to_string(w2.readies));
     }
+  }
+
+  // ---------------------------------------------------------------- r5 G3: the client checks the server
+  {
+    // A server that is not the installed service -- this test, standing in for a process that took the
+    // name -- is sent nothing: not the Enable credential, not a Query whose answer would be believed.
+    World w;
+    std::atomic<int> requestsRead{0};
+    TestServer s;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-g";
+    s.start(&w, name, current_user_sddl(), [&requestsRead](void*) { ++requestsRead; return true; });
+    const pl::AdminReply on = pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str());  // the product's check
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply query = pl::SendPreloginAdminRequest(q, 3000, name.c_str());
+    const pl::AdminReply other =
+        pl::SendPreloginAdminRequest(enable_request(), 3000, name.c_str(), [](void* p) { return pl::ServerIsProcess(p, 4); });
+    Sleep(300);
+    s.stop();
+    check("G3: a pipe server that is not the installed GNLinkSecureInput: Enable is Untrusted",
+          on.status == pl::AdminStatus::Untrusted, std::to_string(static_cast<int>(on.status)));
+    check("...and so is a Query", query.status == pl::AdminStatus::Untrusted);
+    check("...and a server that is not the process named", other.status == pl::AdminStatus::Untrusted);
+    check("...and the server read NOTHING from any of them (no credential crossed)",
+          requestsRead.load() == 0 && w.calls == 0 && w.files.empty(), std::to_string(requestsRead.load()));
+  }
+  {
+    // The service owns the name: a second server -- or the service starting after someone took it --
+    // does not serve beside the first.
+    World w;
+    TestServer s;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-h";
+    s.start(&w, name, current_user_sddl(), [](void*) { return true; });
+    std::atomic<bool> run2{true};
+    const std::wstring sddl = current_user_sddl();
+    const ULONGLONG t0 = GetTickCount64();
+    const bool second = pl::RunPreloginAdminServer(w.primitives(), [&run2] { return run2.load(); }, name.c_str(), sddl.c_str(),
+                                                   [](void*) { return true; });
+    const ULONGLONG took = GetTickCount64() - t0;
+    s.stop();
+    check("G3: a second server on a name already served does not start (FILE_FLAG_FIRST_PIPE_INSTANCE)",
+          !second && took < 1000, std::to_string(took) + " ms");
+  }
+
+  // ---------------------------------------------------------------- r5 G4: every wait is bounded
+  {
+    // A server that accepts and then says nothing: the client gives up within its I/O bound.
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-silent";
+    HANDLE silent = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1,
+                                     4096, 4096, 0, nullptr);
+    std::thread acceptor([silent] { ConnectNamedPipe(silent, nullptr); });
+    Sleep(100);
+    const ULONGLONG t0 = GetTickCount64();
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply r = pl::SendPreloginAdminRequest(q, 1000, name.c_str(), self_server, 600);
+    const ULONGLONG took = GetTickCount64() - t0;
+    acceptor.join();
+    CloseHandle(silent);
+    check("G4: a server that never answers: the client returns within its bound, not Ok",
+          r.status != pl::AdminStatus::Ok && took < 2500, std::to_string(took) + " ms, win32 " + std::to_string(r.win32));
+  }
+  {
+    // A client that connects and never writes: the server's read is bounded and the next client is served.
+    World w;
+    TestServer s;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-i";
+    s.start(&w, name, current_user_sddl(), [](void*) { return true; });
+    HANDLE mute = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    const ULONGLONG t0 = GetTickCount64();
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply r = pl::SendPreloginAdminRequest(q, 9000, name.c_str(), self_server);
+    const ULONGLONG took = GetTickCount64() - t0;
+    if (mute != INVALID_HANDLE_VALUE) CloseHandle(mute);
+    s.stop();
+    check("G4: a client that never writes holds the server only until its read bound; the next is served",
+          mute != INVALID_HANDLE_VALUE && r.status == pl::AdminStatus::Ok && took < 8000, std::to_string(took) + " ms");
+  }
+  {
+    // Stopping the service while a read is pending: the server returns promptly (the cancelled read is
+    // waited out before its buffer goes away).
+    World w;
+    TestServer s;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-j";
+    s.start(&w, name, current_user_sddl(), [](void*) { return true; });
+    HANDLE mute = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    Sleep(200);  // the server is in its read
+    const ULONGLONG t0 = GetTickCount64();
+    s.stop();
+    const ULONGLONG took = GetTickCount64() - t0;
+    if (mute != INVALID_HANDLE_VALUE) CloseHandle(mute);
+    check("G4: stop during a pending read: the server returns within a second", took < 1000, std::to_string(took) + " ms");
+  }
+
+  // ---------------------------------------------------------------- r5 G10: whose request it is
+  {
+    World w;
+    pl::RebootLedger ledger;
+    uint64_t now = 1000;
+    ledger.nowMs = [&now] { return now; };
+    pl::AdminPrimitives p = w.primitives();
+    pl::ClientFacts h;
+    h.elevatedAdmin = true;
+    h.hostProcess = true;
+    h.processId = 100;
+    h.processStartTime = 5;
+    pl::AdminRequest a;
+    a.op = pl::AdminOp::Reboot;
+    a.requestId = 1;  // every PC viewer's first id
+    a.peerKey = 0xAAAA;
+    pl::AdminRequest b = a;
+    b.peerKey = 0xBBBB;  // another viewer, same id
+    const pl::AdminReply ra = pl::HandleAdminRequest(pl::EncodeAdminRequest(a), h, p, &ledger);
+    const pl::AdminReply rb = pl::HandleAdminRequest(pl::EncodeAdminRequest(b), h, p, &ledger);
+    check("G10: two viewers' request 1 are two requests: the first Accepted, the second Refused (in flight) -- not the first's answer",
+          ra.rebootResult == 0 && rb.rebootResult == 1 && w.osReboots == 1);
+    pl::ClientFacts other = h;
+    other.processId = 101;
+    check("...the same peer key and id from another host process is another request too",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(a), other, p, &ledger).rebootResult == 1 && w.osReboots == 1);
+    check("...while the first viewer's retransmit gets its own answer (Accepted), no second call",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(a), h, p, &ledger).rebootResult == 0 && w.osReboots == 1);
+    now += pl::kRebootInFlightMs - 1;
+    pl::AdminRequest c = a;
+    c.requestId = 3;
+    check("...still in flight just before the limit: Refused",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(c), h, p, &ledger).rebootResult == 1);
+    now += 2;
+    pl::AdminRequest d = a;
+    d.requestId = 5;
+    check("an accepted restart that never happened (cancelled) stops blocking: a new request is Accepted again",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(d), h, p, &ledger).rebootResult == 0 && w.osReboots == 2);
+    pl::AdminRequest e = a;
+    e.peerKey = 0x1;
+    pl::AdminRequest back;
+    check("the Reboot request carries its peer key across the wire",
+          pl::DecodeAdminRequest(pl::EncodeAdminRequest(e), &back) && back.peerKey == 0x1 && back.requestId == 1);
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

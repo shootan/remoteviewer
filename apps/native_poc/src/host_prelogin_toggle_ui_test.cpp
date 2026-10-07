@@ -309,7 +309,9 @@ int wmain() {
     FreeEnvironmentStringsW(block);
     for (const std::wstring& kv : {L"GNLINK_HOST_TEST_ROOT=" + root.wstring(), L"LOCALAPPDATA=" + (root / L"appdata").wstring(),
                                    std::wstring(L"GNLINK_HOST_TEST_DIRECTORY=") + std::wstring(url.begin(), url.end()),
-                                   L"GNLINK_HOST_TEST_PRELOGIN_PIPE=" + pipe}) {
+                                   L"GNLINK_HOST_TEST_PRELOGIN_PIPE=" + pipe,
+                                   // r5 G3: the Host trusts this test's server -- this process -- and nothing else.
+                                   L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())}) {
       env += kv;
       env.push_back(L'\0');
     }

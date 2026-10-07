@@ -632,6 +632,8 @@ bool prompt_unlock_password(HWND, std::wstring*) { return false; }
 bool prompt_prelogin_password(HWND, std::wstring*) { return false; }
 std::wstring prelogin_cred_result_text(uint16_t, uint32_t) { return {}; }
 void show_prelogin_cred_result(HWND, const std::wstring&) {}
+void show_prelogin_notice(HWND, const wchar_t*, const std::wstring&) {}
+std::wstring reboot_result_text(uint8_t, uint32_t) { return {}; }
 void poll_session_liveness(ViewerState&, HWND) {}
 
 }  // namespace remote60::native_poc::viewer

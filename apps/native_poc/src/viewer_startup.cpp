@@ -258,6 +258,8 @@ int create_window_and_toolbar(ViewerContext& ctx) {
       const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
       const bool warn = (flags & remote60::native_poc::kCaptureFlagPreloginEnabledV1) == 0;
       if (remote60::native_poc::show_reboot_confirm(ctx.session.hwnd, warn)) {
+        ctx.session.rebootRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                                std::memory_order_release);
         ctx.session.rebootRequested.store(true, std::memory_order_release);
       }
     };

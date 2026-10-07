@@ -5,8 +5,22 @@
 #include "viewer_common.hpp"
 #include "viewer_state.hpp"
 #include "mouse_button_map.hpp"  // after viewer_common.hpp: it owns the windows.h configuration
+#include "prelogin_input_gate.hpp"
 
 namespace remote60::native_poc::viewer {
+
+namespace {
+// r5 G8: a host at the logon screen is not sent a character (prelogin_input_gate.hpp). What was held
+// back is counted, and the first time the window is told once, so the user is pointed at
+// "Windows 로그인" instead of typing into a screen that will not receive it.
+uint32_t host_flags(ViewerState& ctx) { return ctx.session.hostCaptureFlags.load(std::memory_order_relaxed); }
+void held_back_at_logon(ViewerState& ctx) {
+  ctx.session.preloginInputHeldBack.fetch_add(1, std::memory_order_relaxed);
+  if (!ctx.session.preloginHeldBackNoticed.exchange(true, std::memory_order_acq_rel) && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgPreloginTypingHeldBack, 0, 0);
+  }
+}
+}  // namespace
 
 void enqueue_control_input_message(ViewerState& ctx, const QueuedControlInputMessage& msg) {
   ctx.control.inputQueue.Enqueue(msg);
@@ -36,6 +50,10 @@ bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
                           bool repeat, bool makeOnly) {
   if (kInputPolicyForceBlock) return false;
   if (!ctx.session.inputEnabled.load()) return false;
+  if (!remote60::native_poc::prelogin::ViewerMaySendPhysicalKey(host_flags(ctx), vk)) {
+    held_back_at_logon(ctx);
+    return false;
+  }
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlPhysicalKey;
   msg.physicalKey.header.magic = remote60::native_poc::kMagic;
@@ -55,6 +73,10 @@ bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
 void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t count) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
+  if (!remote60::native_poc::prelogin::ViewerMaySendText(host_flags(ctx))) {
+    held_back_at_logon(ctx);
+    return;
+  }
   // Chunking and sequencing are the shared enqueue_control_input_text (F-09), the same code the
   // Android session runs.
   (void)remote60::native_poc::enqueue_control_input_text(ctx.control.inputQueue, text, count,
@@ -184,6 +206,10 @@ int enqueue_release_all_modifiers(ViewerState& ctx) {
 void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta, uint32_t keyCode) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
+  if (!remote60::native_poc::prelogin::ViewerMaySendInputEvent(host_flags(ctx), kind, keyCode)) {
+    held_back_at_logon(ctx);
+    return;
+  }
   uint16_t buttons = ctx.input.mouseButtons.load();
   if (!fence_mouse_for_host(ctx, kind, keyCode, &buttons)) return;
   // The message is the shared make_control_input_event (F-09); only the live button state and
@@ -202,6 +228,10 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
 void enqueue_macro_step(ViewerState& ctx, const remote60::native_poc::MacroStep& step) {
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
+  if (!remote60::native_poc::prelogin::ViewerMaySendInputEvent(host_flags(ctx), step.kind, step.keyCode)) {
+    held_back_at_logon(ctx);
+    return;
+  }
   uint16_t buttons = step.buttons;
   if (!fence_mouse_for_host(ctx, step.kind, step.keyCode, &buttons)) return;
   enqueue_control_input_message(

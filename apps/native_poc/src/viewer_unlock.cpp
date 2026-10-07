@@ -212,6 +212,28 @@ bool prompt_prelogin_password(HWND owner, std::wstring* out) {
 }
 
 void show_prelogin_cred_result(HWND owner, const std::wstring& text) {
+  show_prelogin_notice(owner, kPreloginResultTitle, text);
+}
+
+std::wstring reboot_result_text(uint8_t result, uint32_t win32) {
+  switch (result) {
+    case 0:
+      return L"원격 PC가 다시 시작 요청을 받아들였습니다 (몇 초 뒤 다시 시작).\n"
+             L"연결이 끊기면 다시 시작이 끝난 뒤 접속하세요.";
+    case 1:
+      return L"원격 PC가 거절했습니다: 이미 다시 시작하는 중입니다.";
+    case 2:
+      return L"원격 PC가 거절했습니다: 이 연결로는 다시 시작할 수 없습니다 (서버 인증 연결만 가능).";
+    case 3:
+      return L"원격 PC가 다시 시작하지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    case kRebootNotSent:
+      return L"보내지 않았습니다: 확인한 뒤 연결이 바뀌었거나 이 PC가 원격 다시 시작을 지원하지 않습니다.";
+    default:
+      return L"원격 PC의 답을 받지 못했습니다. 다시 시작됐는지는 원격 화면이나 재접속으로 확인하세요.";
+  }
+}
+
+void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& text) {
   // Its own small window rather than MessageBox: the same shape as the prompt, with a fixed class and
   // control ids, so what it says can be read and its button pressed by a test like any other control.
   WNDCLASSW wc{};
@@ -222,7 +244,7 @@ void show_prelogin_cred_result(HWND owner, const std::wstring& text) {
   wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
   RegisterClassW(&wc);
   PromptState st;  // no `out`: the OK button only closes it
-  HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, kPreloginResultClass, kPreloginResultTitle,
+  HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, kPreloginResultClass, title,
                               WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 440, 170, owner, nullptr, wc.hInstance, nullptr);
   if (!hwnd) return;
   RECT wr{};
@@ -425,7 +447,10 @@ std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32) {
       return L"원격 PC 로그인 화면에 비밀번호를 입력했습니다.\n"
              L"로그인되었는지는 원격 화면에서 확인하세요. (입력함 = 로그인 성공이 아닙니다)";
     case UnlockStage::SessionUnlocked:
-      return L"원격 PC에 로그인되었습니다.";
+      // r5 G11: what was observed, and no more -- the host left the logon screen after the typing. Which
+      // account, and whether its desktop is up, is not something this viewer has seen.
+      return L"원격 PC가 로그인 화면을 벗어났습니다 (비밀번호 입력 뒤).\n"
+             L"로그인된 계정과 화면은 원격 화면에서 확인하세요.";
     case UnlockStage::RejectedPolicy:
       return L"원격 PC의 입력 대상이 로그인 화면이 아니어서 입력하지 않았습니다.\n"
              L"원격 화면에서 비밀번호 칸을 띄운 뒤 다시 시도하세요.";

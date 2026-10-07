@@ -85,7 +85,6 @@ struct FlushControlMessageOnExit {
 namespace {
 // One remote restart in flight per host process, shared across both control dispatcher threads.
 std::mutex gRebootGateMu;
-remote60::native_poc::RebootGateState gRebootGate;
 
 // Enable a named privilege on this process token (SYSTEM has SE_SHUTDOWN_NAME but it must be enabled).
 bool enable_process_privilege(const char* name) {
@@ -105,12 +104,30 @@ bool enable_process_privilege(const char* name) {
   return ok;
 }
 
+// prelogin-ui r5 (G11): whether the service has pre-login access on, as last asked. Asked in the
+// background every 30 s (never on the pong path, which must not wait on a pipe); false until known.
+bool durable_prelogin_enabled() {
+  static std::atomic<bool> enabled{false};
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        enabled.store(remote60::native_poc::prelogin::QueryDurablePreloginEnabled(), std::memory_order_release);
+        Sleep(30000);
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+  return enabled.load(std::memory_order_acquire);
+}
+
 // prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" (prelogin_cred_host.hpp).
 // Its result line names the request and the stage, never the credential.
 remote60::native_poc::prelogin::PreloginCredReceiver& prelogin_cred() {
   static remote60::native_poc::prelogin::PreloginCredReceiver receiver(
       remote60::native_poc::prelogin::ProductCredInject(), remote60::native_poc::prelogin::ProductCredTarget(),
-      remote60::native_poc::prelogin::ProductCredHostId());
+      remote60::native_poc::prelogin::ProductCredEnvironment(), remote60::native_poc::prelogin::ProductCredHostId(),
+      remote60::native_poc::prelogin::ProductCredTargetWaitMs());
   static const bool logged = [] {
     receiver.onResult = [](uint32_t requestId, uint16_t stage, uint32_t win32) {
       std::cout << "[native-video-host][prelogin-cred] requestId=" << requestId << " stage=" << stage
@@ -363,6 +380,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
   static remote60::native_poc::HostUnlockRelay gUnlockRelay;
   const uint64_t unlockCookie =
       (static_cast<uint64_t>(qpc_now_us()) << 20) ^ reinterpret_cast<uintptr_t>(&stop);
+  // r5 G7: when this control session ends, however it ends, a "Windows 로그인" credential it sent that is
+  // still waiting for the logon UI is dropped untyped.
+  struct EndPreloginCredOnExit {
+    bool prelogin;
+    uint64_t cookie;
+    ~EndPreloginCredOnExit() {
+      if (prelogin) {
+        prelogin_cred().EndSession(cookie);
+        std::cout << "[native-video-host][prelogin-cred] control session ended\n";
+      }
+    }
+  } endPreloginCredOnExit{args.preloginMode, unlockCookie};
   // Host-side IME: scan|E0 of physical keys we actually injected as down. Their matching up must be
   // released even if the policy gate has since closed (foreground/secure change), or a modifier
   // stays stuck on the host. Released for all on connection end. (Codex #370 BLOCKER C.)
@@ -493,6 +522,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginV1;
         // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
         // the reboot confirm popup keys its "no connect until login" warning on.
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+      } else if (durable_prelogin_enabled()) {
+        // r5 G11: a logged-in host says so too when the service has pre-login access on, so the restart
+        // popup does not warn "no connect until someone logs in" for a PC that will be reachable.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
       }
       // Remote reboot is offered by ANY host -- prelogin AND the logged-in session (the case the user
@@ -626,7 +659,6 @@ void ControlSessionServer::Serve(ControlLink& link) {
         std::cout << "[native-video-host][control][reboot] dropped malformed request (id=0)\n";
         continue;
       }
-      remote60::native_poc::RebootRequestInputs in;
       // R2/S3: authorize against THIS served session, not just the shared bool. The auth must hold AND
       // the session epoch must still be the one this Serve began with -- a superseded/stale link cannot
       // borrow a current auth. (The full per-link auth flag threaded from ingress, and closing the direct
@@ -635,40 +667,23 @@ void ControlSessionServer::Serve(ControlLink& link) {
         return clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
                clientSession.epoch.load(std::memory_order_acquire) == servedEpoch;
       };
-      in.directoryAuthenticated = reboot_authorized();
-      // Remote reboot is available on any host; the auth above + the single-flight dedup in DecideReboot
-      // are the gate (r4 item 6). The OS call is made by whoever holds the shutdown privilege (SYSTEM
-      // prelogin worker / elevated admin host); a host without it returns Failed -- never forced.
-      in.featureAllowsReboot = true;
-      in.requestId = req.requestId;
-      remote60::native_poc::RebootDecision decision;
-      {
-        std::lock_guard<std::mutex> lock(gRebootGateMu);
-        decision = remote60::native_poc::DecideReboot(gRebootGate, in);
-      }
+      const bool authorized = reboot_authorized();
       uint32_t win32 = 0;
-      remote60::native_poc::RebootResult result = remote60::native_poc::RebootResultFor(decision);
-      if (remote60::native_poc::RebootShouldCallOs(decision)) {
-        // S3 fence: re-check authorization at the OS call. A revoke / session change between the gate and
-        // here must abort the restart, not fire it on stale authority.
-        if (!reboot_authorized()) {
-          result = remote60::native_poc::RebootResult::NotAuthorized;
-          std::lock_guard<std::mutex> lock(gRebootGateMu);
-          gRebootGate = remote60::native_poc::RebootGateState{};  // revoked mid-flight: clear the in-flight
-        } else {
-          // prelogin-ui r2 (item 6): the ONE fixed local restart is the service's (it holds the shutdown
-          // privilege in every mode, dedups by request id and caches the answer); this host only asks.
-          const uint8_t delegated = remote60::native_poc::prelogin::DelegateRebootToService(req.requestId, &win32);
+      remote60::native_poc::RebootResult result = remote60::native_poc::RebootResult::NotAuthorized;
+      if (authorized) {
+        // r5 G10: the host answers nothing on its own -- no early Accepted for a retransmit, no refusal of
+        // its own. Every authorized request goes to the service, which keeps the one restart and the one
+        // answer per request (this host process, this control session, this id); the host relays it. The
+        // OS call is the service's (it holds the shutdown privilege); a failure is Failed -- never forced.
+        std::lock_guard<std::mutex> lock(gRebootGateMu);  // one delegation at a time from this host
+        if (reboot_authorized()) {  // revoked / superseded while waiting: not on stale authority
+          const uint8_t delegated =
+              remote60::native_poc::prelogin::DelegateRebootToService(req.requestId, unlockCookie, &win32);
           result = static_cast<remote60::native_poc::RebootResult>(delegated);
-          if (result != remote60::native_poc::RebootResult::Accepted) {
-            // never auto-escalate to forced (R4); not accepted: the host gate allows a later retry
-            std::lock_guard<std::mutex> lock(gRebootGateMu);
-            gRebootGate = remote60::native_poc::RebootGateState{};
-          }
         }
       }
       std::cout << "[native-video-host][control][reboot] requestId=" << req.requestId
-                << " auth=" << (in.directoryAuthenticated ? 1 : 0)
+                << " auth=" << (authorized ? 1 : 0)
                 << " result=" << static_cast<unsigned>(result) << " win32=" << win32 << "\n";
       const remote60::native_poc::ControlRebootReplyMessage rsp =
           remote60::native_poc::make_reboot_reply(req.requestId, result, win32);
@@ -778,8 +793,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
           args.preloginMode && (input.kind == 5 || input.kind == 6) &&
           !remote60::native_poc::prelogin::IsPreloginNavKeyAllowed(input.keyCode);
       if (preloginBlockedKey) {
+        // r5 G8: which key it was is not written down -- it may be a character of a password.
         std::cout << "[native-video-host][input][prelogin] dropped non-navigation key seq=" << input.seq
-                  << " key=" << input.keyCode << " (characters use the sealed credential path)\n";
+                  << " (characters use the sealed credential path)\n";
       }
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)

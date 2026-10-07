@@ -18,6 +18,8 @@
 #include <string>
 #include <thread>
 
+#include "prelogin_input_gate.hpp"
+
 namespace remote60::native_poc {
 
 namespace {
@@ -261,6 +263,11 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
     if (!CanQueueControlRequestLocked()) return false;
   }
   if (kind < 1 || kind > 6) return false;
+  // r5 G8: a host at the logon screen is sent navigation keys only -- never a character in plaintext.
+  if (!prelogin::ViewerMaySendInputEvent(hostCaptureFlags_.load(std::memory_order_relaxed), kind, keyCode)) {
+    preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
 
   inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
                                                keyCode, now_us()));
@@ -271,6 +278,11 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
+  }
+  // r5 G8: no text at all to a host at the logon screen (a password goes by "Windows 로그인").
+  if (!prelogin::ViewerMaySendText(hostCaptureFlags_.load(std::memory_order_relaxed))) {
+    preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
   return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
 }

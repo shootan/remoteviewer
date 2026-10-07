@@ -66,5 +66,14 @@ bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const s
 std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32);
 // The result window (modal, owned by `owner`): the text and a 확인 button. Returns when it is closed.
 void show_prelogin_cred_result(HWND owner, const std::wstring& text);
+// The same window with another title: the "typing held back at the logon screen" notice (r5 G8) and the
+// remote restart's answer (r5 G11). Its class and control ids are the result window's.
+void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& text);
+constexpr wchar_t kRebootResultTitle[] = L"GNLink — 원격 PC 다시 시작";
+constexpr uint8_t kRebootNoAnswer = 0xFF;  // the request went, no valid answer came back
+constexpr uint8_t kRebootNotSent = 0xFE;   // not sent: the confirm was for another connection / no capability
+// What the restart window says for a RebootResult (0 Accepted, 1 Refused, 2 NotAuthorized, 3 Failed) or
+// kRebootNoAnswer.
+std::wstring reboot_result_text(uint8_t result, uint32_t win32);
 
 }  // namespace remote60::native_poc::viewer

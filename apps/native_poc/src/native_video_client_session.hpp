@@ -119,6 +119,7 @@ class ClientSessionController {
   // The connected host's Pong capture flags (0 until the first pong). The Android viewer's menu rules
   // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
   uint32_t HostCaptureFlags() const { return hostCaptureFlags_.load(std::memory_order_relaxed); }
+  uint64_t PreloginInputHeldBack() const { return preloginInputHeldBack_.load(std::memory_order_relaxed); }
   // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
   // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
   // control thread sends ControlRebootRequest (84) once; an answer that does not come is NOT asked for
@@ -247,6 +248,7 @@ class ClientSessionController {
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint32_t> hostCaptureFlags_{0};
+  std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
   // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
   std::mutex rebootMu_;
   uint32_t rebootPendingId_ = 0;

@@ -190,7 +190,8 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, const std
   CreateDirectoryW(appData.c_str(), nullptr);
   std::vector<wchar_t> env = remote60::native_poc::e2e::e2e_isolated_environment(appData);
   env.pop_back();  // re-terminated below
-  for (const std::wstring& kv : {L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_ADMIN_PIPE=" + pipe}) {
+  for (const std::wstring& kv : {L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_ADMIN_PIPE=" + pipe,
+                                 L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())}) {
     env.insert(env.end(), kv.begin(), kv.end());
     env.push_back(L'\0');
   }
@@ -244,7 +245,7 @@ struct Service {
       p.readRecord = [](const std::wstring&, pl::MachineRecord*) { return false; };
       p.writeRecord = [](const std::wstring&, const pl::MachineRecord&) -> uint32_t { return 5; };
       p.removeRecord = [](const std::wstring&) -> uint32_t { return 0; };
-      p.featureEnabled = [] { return false; };
+      p.featureEnabled = [] { return true; };  // r5 G11: pre-login access is on, as the service says
       p.queryStartType = [](uint32_t*) { return false; };
       p.setStartType = [](uint32_t) -> uint32_t { return 5; };
       p.loadRememberedStartType = [](uint32_t*) { return false; };
@@ -428,6 +429,13 @@ int wmain(int argc, wchar_t** argv) {
                       wait_until([&] { return authed.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
       check("a session with the directory's capability connects (directory-authenticated)", up, authed.Snapshot().status);
       wait_until([&] { return (authed.HostCaptureFlags() & remote60::native_poc::kCaptureFlagRemoteRebootV1) != 0; }, 8000);
+      // r5 G11: a LOGGED-IN host (not --prelogin) whose service has pre-login access on says so, so the
+      // restart popup does not warn "no connect until someone logs in".
+      const bool durable =
+          wait_until([&] { return (authed.HostCaptureFlags() & remote60::native_poc::kCaptureFlagPreloginEnabledV1) != 0; }, 8000);
+      check("G11: the logged-in host advertises durable pre-login (0x8000) because its service says it is on", durable,
+            std::to_string(authed.HostCaptureFlags()));
+      check("...and not \"at the logon screen now\" (0x2000)", (authed.HostCaptureFlags() & remote60::native_poc::kCaptureFlagPreloginV1) == 0);
       const uint32_t id = authed.RequestReboot();
       uint32_t gotId = 0, win32 = 0;
       int outcome = -1;

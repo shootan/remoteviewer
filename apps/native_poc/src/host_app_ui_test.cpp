@@ -88,6 +88,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
   if (!adminPipe.empty()) {
     if (adminPipe.rfind(L"\\\\.\\pipe\\GNLinkTest-", 0) != 0) return 2;
     gHostTest.preloginPipe = adminPipe;
+    // r5 G3: and the only server this build trusts on it -- the test that serves it, by process id.
+    gHostTest.preloginServerPid = static_cast<uint32_t>(wcstoul(test_env(L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID").c_str(), nullptr, 10));
   }
   gHostTest.streamExe = own_executable_path();
   return host_product_entry(instance, previous, commandLine, show);

@@ -16,9 +16,15 @@
 //         deny-only and cannot open it), remote clients are rejected, and the server additionally
 //         checks the impersonated client token: an Administrators member with an elevated token.
 //         A refused client gets Refused and nothing is done.
+//         And the other way (r5 G3): a client writes NOTHING -- no Enable credential, no Reboot -- until
+//         it has established that the pipe's server process is the running GNLinkSecureInput service
+//         (the SCM's process id for it, and that process's image is the service's configured binary).
+//         The server owns the name for its whole life (FILE_FLAG_FIRST_PIPE_INSTANCE, one instance
+//         reused), so there is no window in which another process could take it between requests.
 // Thread: the server runs on its own thread in the service; each request is one connect, one message
-//         each way. Pure parts (codec, HandleAdminRequest, the enable/disable bookkeeping over injected
-//         primitives) are testable without the service.
+//         each way. Every wait is bounded and every cancelled I/O is waited to completion before its
+//         buffer, OVERLAPPED or event goes away (r5 G4). Pure parts (codec, HandleAdminRequest, the
+//         enable/disable bookkeeping over injected primitives) are testable without the service.
 
 #include <cstdint>
 #include <functional>
@@ -33,7 +39,7 @@ namespace remote60::native_poc::prelogin {
 
 constexpr wchar_t kPreloginAdminPipeName[] = L"\\\\.\\pipe\\GNLinkPreloginAdmin";
 constexpr uint32_t kAdminMagic = 0x41504C47u;  // "GLPA"
-constexpr uint16_t kAdminVersion = 1;
+constexpr uint16_t kAdminVersion = 2;  // 2: Reboot carries the requesting peer (r5 G10)
 constexpr size_t kAdminMaxString = 512;
 constexpr size_t kAdminMaxToken = 2048;
 
@@ -47,6 +53,7 @@ enum class AdminStatus : uint8_t {
   BadRequest = 2,  // malformed / unknown op / missing credential
   Failed = 3,      // the store or the service configuration failed; win32 says why
   Unavailable = 4, // client side: the service's pipe is not there (not installed / not running)
+  Untrusted = 5,   // client side: the pipe's server is not the installed service -- nothing was sent
 };
 
 struct AdminRequest {
@@ -56,8 +63,11 @@ struct AdminRequest {
   std::string accountId;
   std::string hostId;
   std::string hostToken;  // NEVER logged
-  // Reboot only: the viewer's request id (never 0) -- the dedup key.
+  // Reboot only: the viewer's request id (never 0), and which remote peer asked (the host's control
+  // session) -- with the requesting host process, the dedup key. Viewers number from 1 each, so the id
+  // alone would make two viewers' first requests one request (r5 G10).
   uint32_t requestId = 0;
+  uint64_t peerKey = 0;
 };
 
 struct AdminReply {
@@ -73,14 +83,31 @@ struct ClientFacts {
   bool elevatedAdmin = false;    // an elevated Administrators member, or LocalSystem
   bool hostProcess = false;      // the process is this install's streaming host (GNLinkStream.exe)
   uint32_t sessionId = 0xFFFFFFFFu;
+  uint32_t processId = 0;
   uint64_t processStartTime = 0; // FILETIME of the client process's creation
 };
 
-// The service's restart ledger (S4): one OS call per accepted restart, the same answer for the same id.
+// The service's restart ledger (S4, r5 G10): one OS call per accepted restart; the same request -- the
+// same requesting host process, the same remote peer, the same id -- gets the same answer. An accepted
+// restart that has not happened within kRebootInFlightMs was cancelled (the OS restart is not forced and
+// can be aborted): the ledger stops refusing then, rather than refusing forever.
+struct RebootKey {
+  uint32_t processId = 0;
+  uint64_t processStartTime = 0;
+  uint64_t peerKey = 0;
+  uint32_t requestId = 0;
+  bool operator==(const RebootKey& o) const {
+    return processId == o.processId && processStartTime == o.processStartTime && peerKey == o.peerKey &&
+           requestId == o.requestId;
+  }
+};
+constexpr uint64_t kRebootInFlightMs = 180000;
 struct RebootLedger {
   std::mutex mu;
   bool inFlight = false;                                    // an accepted restart is under way
-  std::vector<std::pair<uint32_t, AdminReply>> answered;    // the last answers, by request id
+  uint64_t inFlightSinceMs = 0;
+  std::vector<std::pair<RebootKey, AdminReply>> answered;   // the last answers, by request
+  std::function<uint64_t()> nowMs;                          // a test's clock; GetTickCount64 when empty
 };
 
 // Item 7: the user Host's ready, as the service received it, and whether it completes THIS handoff:
@@ -154,31 +181,49 @@ using AdminIdentityCheck = std::function<bool(void* pipe)>;
 bool ClientIsElevatedAdministrator(void* pipe);  // elevated Administrators member, or LocalSystem
 // The client process's image is exactly `expectedImage` (case-insensitive full path).
 bool ClientImageIs(void* pipe, const std::wstring& expectedImage);
-void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning,
+// False when the name could not be owned (another process holds it: FILE_FLAG_FIRST_PIPE_INSTANCE).
+// Returns when keepRunning() turns false, within a quarter second plus at most one bounded I/O.
+bool RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning,
                             const wchar_t* pipeName = kPreloginAdminPipeName,
                             const wchar_t* sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
                             AdminIdentityCheck isAdmin = ClientIsElevatedAdministrator,
                             AdminIdentityCheck isHost = nullptr, RebootLedger* ledger = nullptr);
+// The client's check of the server (r5 G3), made before a byte is written.
+using ServerCheck = std::function<bool(void* pipe)>;
+// The product's: the server process is the one the SCM runs as GNLinkSecureInput, and its image is the
+// service's configured binary.
+bool ServerIsInstalledService(void* pipe);
+// The server process is exactly `pid` (test builds: the test that serves the pipe).
+bool ServerIsProcess(void* pipe, uint32_t pid);
 // The service's restart (SeShutdownPrivilege + InitiateSystemShutdownExW, a short grace, NOT forced).
 void BindProductReboot(AdminPrimitives* p);
 // The product's start-type and record primitives: the SCM (and HKLM\SOFTWARE\GNLink
 // PreloginOriginalStartType for the pre-enable type), and prelogin_machine_store + DeleteFileW.
 void BindProductStartType(AdminPrimitives* p, const wchar_t* serviceName);
 void BindProductMachineStore(AdminPrimitives* p);
-// GNLinkHost's side: one request, one reply. Unavailable when the pipe is not there within waitMs.
-AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName = kPreloginAdminPipeName);
+// GNLinkHost's side: one request, one reply. Unavailable when the pipe is not there within waitMs;
+// Untrusted (nothing written) when `verifyServer` does not accept the server; the write and the read
+// each take at most ioMs, a timed-out one cancelled and waited out.
+AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName = kPreloginAdminPipeName,
+                                    const ServerCheck& verifyServer = ServerIsInstalledService, uint32_t ioMs = 5000);
 
 // The streaming host's side (r2). The pipe is the product's; a test build of the host
-// (REMOTE60_STREAM_TEST_SEAM) may name a \\.\pipe\GNLinkTest- pipe from its environment.
+// (REMOTE60_STREAM_TEST_SEAM) may name a \\.\pipe\GNLinkTest- pipe from its environment, and its server
+// check is "the process GNLINK_STREAM_TEST_ADMIN_SERVER_PID names" (none named: nothing is trusted).
 std::wstring HostServicePipeName();
+ServerCheck HostServiceServerCheck();
 // Item 6: the restart the gate admitted, done by the service. Returns RebootResult; *win32 its error.
 // A service that cannot be reached is Failed (ERROR_SERVICE_NOT_ACTIVE) -- never a local fallback.
-uint8_t DelegateRebootToService(uint32_t requestId, uint32_t* win32);
+uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32);
+// r5 G11: whether pre-login access is on (the service's Query), for the logged-in host's Pong 0x8000.
+// False when the service cannot be asked.
+bool QueryDurablePreloginEnabled();
 // Item 7: tell the service this user Host is registered and serving -- once `readyNow()` says so (the
 // first successful directory heartbeat), polled for up to `waitReadyMs`; then up to `attempts` sends,
 // `delayMs` apart, on a background thread. Bounded both ways; the service keeps prelogin until one lands.
 void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs = 180000, int attempts = 10,
-                                     uint32_t delayMs = 1000, const std::wstring& pipeName = std::wstring());
+                                     uint32_t delayMs = 1000, const std::wstring& pipeName = std::wstring(),
+                                     ServerCheck check = nullptr);  // null: HostServiceServerCheck()
 #endif
 
 }  // namespace remote60::native_poc::prelogin

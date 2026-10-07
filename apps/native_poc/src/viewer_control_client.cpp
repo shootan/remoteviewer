@@ -382,6 +382,9 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
     // every pong like the others so a reconnect never inherits a stale answer.
     ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+    if ((pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) == 0) {
+      ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
+    }
     // "Windows 로그인": typed is not logged in. The logon is the host leaving the pre-login screen
     // after the password went in (within two minutes of it); only then is "logged in" shown.
     if (const uint64_t typedAt = ctx.session.preloginInjectedAtUs.load(std::memory_order_acquire)) {
@@ -654,6 +657,7 @@ bool ControlClient::pump_control_resume(
   }
 }
 void ControlClient::Run() {
+  ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel);  // r5 G11: a new connection's run
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
   std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
@@ -779,8 +783,13 @@ void ControlClient::Run() {
     // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.
     if (ctx.session.rebootRequested.exchange(false, std::memory_order_acq_rel)) {
       const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
-      if ((flags & remote60::native_poc::kCaptureFlagRemoteRebootV1) == 0) {
+      const uint64_t confirmedFor = ctx.session.rebootRequestedRunGen.load(std::memory_order_acquire);
+      if (confirmedFor != ctx.session.controlRunGen.load(std::memory_order_acquire)) {
+        std::cout << "[native-video-client][reboot] confirmed for an earlier connection; not sent\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
+      } else if ((flags & remote60::native_poc::kCaptureFlagRemoteRebootV1) == 0) {
         std::cout << "[native-video-client][reboot] host does not advertise remote reboot\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
       } else {
         static std::atomic<uint32_t> rebootSeq{0};
         const uint32_t rid = rebootSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
@@ -798,9 +807,12 @@ void ControlClient::Run() {
           std::cout << "[native-video-client][reboot] requestId=" << rid
                     << " result=" << static_cast<unsigned>(resp.rebootReply.result)
                     << " win32=" << resp.rebootReply.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, resp.rebootReply.result,
+                       static_cast<LPARAM>(resp.rebootReply.win32));
         } else {
           std::cout << "[native-video-client][reboot] requestId=" << rid
                     << " no valid reply (link closed/desynced); not auto-retrying\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNoAnswer, 0);
         }
       }
     }

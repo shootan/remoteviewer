@@ -79,6 +79,8 @@ constexpr UINT kUpdateCheckDoneMessage = WM_APP + 3;
 // The waiter thread's verdict. Posted rather than acted on directly because deciding to exit is
 // a UI-thread decision, and because the wait can outlive the dialog the user answered.
 constexpr UINT kUpdateHandoffDoneMessage = WM_APP + 4;
+// prelogin-ui r5 (G4): the service's answer to a pre-login access request, made off the UI thread.
+constexpr UINT kPreloginReplyMessage = WM_APP + 8;
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusIntervalMs = 2000;
 // Matches IDI_GNLINK in host_app.rc.
@@ -182,6 +184,7 @@ struct HostTestSeam {
   // The test's own stand-in for the service's admin pipe (\\.\pipe\GNLinkTest-...), so the real
   // GNLinkSecureInput is never asked; and nothing here starts a service.
   std::wstring preloginPipe;
+  uint32_t preloginServerPid = 0;  // r5 G3: the test process serving it -- the only server trusted
 };
 HostTestSeam gHostTest;
 
@@ -1624,11 +1627,21 @@ std::wstring prelogin_admin_pipe_name() {
 #endif
 }
 
+/** r5 G3: who may answer -- the installed service; in the test build, the test that serves the pipe. */
+remote60::native_poc::prelogin::ServerCheck prelogin_admin_server_check() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  const uint32_t pid = gHostTest.preloginServerPid;
+  return [pid](void* pipe) { return remote60::native_poc::prelogin::ServerIsProcess(pipe, pid); };
+#else
+  return remote60::native_poc::prelogin::ServerIsInstalledService;
+#endif
+}
+
 /** One request to the service. Turning it on starts the service first if it is not running. */
 remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r) {
   namespace pl = remote60::native_poc::prelogin;
   const std::wstring pipe = prelogin_admin_pipe_name();
-  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str());
+  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str(), prelogin_admin_server_check());
 #ifndef REMOTE60_HOST_TEST_SEAM
   if (reply.status == pl::AdminStatus::Unavailable && r.op != pl::AdminOp::Query) {
     // The service is DEMAND-start until this feature is on: start it (this process is elevated).
@@ -1639,7 +1652,7 @@ remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::n
       }
       CloseServiceHandle(m);
     }
-    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str());
+    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str(), prelogin_admin_server_check());
   }
 #endif
   return reply;
@@ -1658,6 +1671,9 @@ void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply
     case pl::AdminStatus::Unavailable:
       text = asked ? L"보안 입력 서비스에 연결하지 못했습니다 (설치 확인)." : L"꺼짐 (보안 입력 서비스가 실행 중이 아님)";
       break;
+    case pl::AdminStatus::Untrusted:
+      text = L"보안 입력 서비스로 확인되지 않는 상대여서 보내지 않았습니다.";
+      break;
     default:
       text = L"설정을 바꾸지 못했습니다 (오류 " + std::to_wstring(reply.win32) + L").";
       break;
@@ -1666,12 +1682,50 @@ void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply
   SetWindowTextW(g.preloginStatus, text.c_str());
 }
 
+// r5 G4: the request runs on its own thread -- a pipe that does not answer cannot hold the window --
+// and its answer comes back as kPreloginReplyMessage. The checkbox waits disabled meanwhile.
+struct PreloginReplyResult {
+  remote60::native_poc::prelogin::AdminReply reply;
+  bool asked = false;  // the user changed it (not a refresh)
+  bool want = false;
+};
+std::atomic<bool> gPreloginBusy{false};
+
+void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool asked) {
+  if (gPreloginBusy.exchange(true)) return;  // one at a time; the one out will refresh the box
+  EnableWindow(g.preloginCheck, FALSE);
+  if (asked) SetWindowTextW(g.preloginStatus, L"보안 입력 서비스에 요청하는 중...");
+  std::thread([r = std::move(r), asked]() mutable {
+    auto* result = new PreloginReplyResult;
+    result->asked = asked;
+    result->want = r.op == remote60::native_poc::prelogin::AdminOp::Enable;
+    result->reply = prelogin_admin_call(r);
+    if (!r.hostToken.empty()) SecureZeroMemory(&r.hostToken[0], r.hostToken.size());
+    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) {
+      delete result;
+      gPreloginBusy.store(false);
+    }
+  }).detach();
+}
+
+void on_prelogin_reply(PreloginReplyResult* result) {
+  std::unique_ptr<PreloginReplyResult> owned(result);
+  if (owned->asked) {
+    append_host_app_log(std::string("[host-app] prelogin access ") + (owned->want ? "on" : "off") +
+                        " requested: status=" + std::to_string(static_cast<int>(owned->reply.status)) +
+                        " enabled=" + (owned->reply.enabled ? "1" : "0") + " win32=" + std::to_string(owned->reply.win32));
+  }
+  show_prelogin_reply(owned->reply, owned->asked);
+  EnableWindow(g.preloginCheck, TRUE);
+  gPreloginBusy.store(false);
+}
+
 /** What the service says now -- the checkbox shows the service's state, never a guess. */
 void refresh_prelogin_toggle() {
   namespace pl = remote60::native_poc::prelogin;
   pl::AdminRequest q;
   q.op = pl::AdminOp::Query;
-  show_prelogin_reply(prelogin_admin_call(q), /*asked=*/false);
+  prelogin_call_async(q, /*asked=*/false);
 }
 
 void on_prelogin_toggle() {
@@ -1690,11 +1744,7 @@ void on_prelogin_toggle() {
     r.hostId = g.cache.hostId;
     r.hostToken = g.cache.hostToken;  // to the service only; never logged
   }
-  const pl::AdminReply reply = prelogin_admin_call(r);
-  append_host_app_log(std::string("[host-app] prelogin access ") + (want ? "on" : "off") +
-                      " requested: status=" + std::to_string(static_cast<int>(reply.status)) +
-                      " enabled=" + (reply.enabled ? "1" : "0") + " win32=" + std::to_string(reply.win32));
-  show_prelogin_reply(reply, /*asked=*/true);
+  prelogin_call_async(std::move(r), /*asked=*/true);
 }
 
 // Creation order is tab order; the layout functions only assign positions.
@@ -2184,6 +2234,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       ShowWindow(window, SW_HIDE);
       return 0;
 
+    case kPreloginReplyMessage:
+      on_prelogin_reply(reinterpret_cast<PreloginReplyResult*>(lParam));
+      return 0;
     case WM_APP + 7:
       g.signInBusy.store(false); EnableWindow(g.signInButton, TRUE);
       set_status(L"작업 중 오류가 발생했습니다. 다시 시도해 주세요.");

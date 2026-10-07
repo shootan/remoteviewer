@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -47,21 +48,33 @@ void check(const char* what, bool ok, F detail) {
 struct Seams {
   std::mutex mu;
   std::vector<std::vector<uint16_t>> typed;
-  std::atomic<bool> atTarget{true};
+  std::atomic<uint64_t> targetId{7};       // the logon UI's identity; 0 = the input is not at it
+  std::atomic<uint64_t> environmentId{1};  // console session + input desktop
   std::atomic<bool> failTyping{false};
+  std::atomic<int> targetCalls{0};
+  int moveTargetAtCall = 0;            // from this target() call on, another window is in front
+  bool moveTargetDuringTyping = false;  // the typing itself moves it
   PreloginCredReceiver::InjectFn inject() {
     return [this](const uint16_t* u, uint16_t n, uint32_t* err) {
       if (failTyping.load()) {
         *err = 5;
         return false;
       }
+      if (moveTargetDuringTyping) targetId = 8;
       std::lock_guard<std::mutex> l(mu);
       typed.emplace_back(u, u + n);
       return true;
     };
   }
   PreloginCredReceiver::TargetFn target() {
-    return [this] { return atTarget.load(); };
+    return [this]() -> uint64_t {
+      const int call = ++targetCalls;
+      if (moveTargetAtCall != 0 && call >= moveTargetAtCall) return 9;
+      return targetId.load();
+    };
+  }
+  PreloginCredReceiver::EnvironmentFn environment() {
+    return [this]() -> uint64_t { return environmentId.load(); };
   }
   size_t count() {
     std::lock_guard<std::mutex> l(mu);
@@ -133,7 +146,7 @@ int main() {
   {
     std::printf("--- the prelogin purpose: opened, typed once, exactly ---\n");
     Seams seams;
-    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 600);
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
     std::vector<std::string> lines;
     r.onResult = [&](uint32_t id, uint16_t stage, uint32_t w) {
       lines.push_back(std::to_string(id) + " " + std::to_string(stage) + " " + std::to_string(w));
@@ -168,7 +181,7 @@ int main() {
   {
     std::printf("\n--- an UNLOCK-purpose blob (the lock-screen unlock's sealing) ---\n");
     Seams seams;
-    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 600);
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
     const auto ch = r.Challenge(challenge_req(21), cookie);
     r.Sealed(seal(ch, secret, false), cookie);
     ControlUnlockStatusResultMessage res{};
@@ -186,8 +199,8 @@ int main() {
   {
     std::printf("\n--- the input target is not the logon UI ---\n");
     Seams seams;
-    seams.atTarget = false;
-    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 500);
+    seams.targetId = 0;
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 500);
     const auto ch = r.Challenge(challenge_req(31), cookie);
     const auto t0 = std::chrono::steady_clock::now();
     r.Sealed(seal(ch, secret, true), cookie);
@@ -204,7 +217,7 @@ int main() {
     const auto ch2 = r.Challenge(challenge_req(32), cookie);
     r.Sealed(seal(ch2, secret, true), cookie);
     Sleep(250);
-    seams.atTarget = true;
+    seams.targetId = 7;
     check("typed once it is there", wait_result(r, 32, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) &&
                                         seams.count() == 1 && seams.typed[0] == secret,
           [&] { return std::string(stage_word(res.stage)); });
@@ -213,7 +226,7 @@ int main() {
   {
     std::printf("\n--- binding: request id, session cookie, rate limit, expiry of use ---\n");
     Seams seams;
-    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 300);
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 300);
     const auto ch = r.Challenge(challenge_req(41), cookie);
     const auto again = r.Challenge(challenge_req(42), cookie);
     check("a second challenge inside 500 ms is refused (RejectedPolicy)",
@@ -242,7 +255,7 @@ int main() {
     std::printf("\n--- the typing fails ---\n");
     Seams seams;
     seams.failTyping = true;
-    PreloginCredReceiver r(seams.inject(), seams.target(), 0x1234, 300);
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 300);
     const auto ch = r.Challenge(challenge_req(51), cookie);
     r.Sealed(seal(ch, secret, true), cookie);
     ControlUnlockStatusResultMessage res{};
@@ -253,10 +266,75 @@ int main() {
   }
 
   {
+    std::printf("\n--- r5 G7: what the password was opened for must still hold when it is typed ---\n");
+    // Each case: the target is NOT there when the password arrives, something changes while the worker
+    // waits, then the target appears -- and nothing may be typed.
+    auto run_case = [&](const char* what, const std::function<void(PreloginCredReceiver&, Seams&)>& meanwhile, UnlockStage want,
+                        uint32_t lifetimeMs = 30000) {
+      Seams seams;
+      seams.targetId = 0;
+      PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 2000, lifetimeMs);
+      const auto ch = r.Challenge(challenge_req(61), cookie);
+      r.Sealed(seal(ch, secret, true), cookie);
+      Sleep(250);
+      meanwhile(r, seams);
+      seams.targetId = 7;  // the logon UI shows up afterwards
+      ControlUnlockStatusResultMessage res{};
+      const bool got = wait_result(r, 61, &res, 4000);
+      Sleep(150);
+      check(what, got && res.stage == static_cast<uint16_t>(want) && seams.count() == (want == UnlockStage::Injected ? 1u : 0u),
+            [&] { return std::string(stage_word(res.stage)) + ", " + std::to_string(seams.count()) + " typed"; });
+    };
+    run_case("its control session ended while it waited: dropped, nothing typed",
+             [&](PreloginCredReceiver& r, Seams&) { r.EndSession(cookie); }, UnlockStage::RejectedStaleTopology);
+    run_case("another control session ending does not touch it (then the target comes: typed)",
+             [&](PreloginCredReceiver& r, Seams& s) {
+               r.EndSession(cookie + 1);
+               (void)s;
+             },
+             UnlockStage::Injected);
+    run_case("a new challenge while it waited: dropped, nothing typed",
+             [&](PreloginCredReceiver& r, Seams&) {
+               Sleep(400);  // past the challenge rate limit
+               r.Challenge(challenge_req(62), cookie);
+             },
+             UnlockStage::RejectedStaleTopology);
+    run_case("the console session / input desktop changed while it waited: dropped, nothing typed",
+             [&](PreloginCredReceiver&, Seams& s) { s.environmentId = 99; }, UnlockStage::RejectedStaleTopology);
+    run_case("its challenge expired while it waited: Timeout, nothing typed",
+             [&](PreloginCredReceiver&, Seams&) { Sleep(600); }, UnlockStage::Timeout, /*lifetimeMs=*/700);
+  }
+  {
+    std::printf("\n--- r5 G7: the target is identified, not just recognised ---\n");
+    Seams seams;
+    seams.moveTargetAtCall = 2;  // found (call 1), then another logon UI window by the last look (call 2)
+    PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
+    const auto ch = r.Challenge(challenge_req(71), cookie);
+    r.Sealed(seal(ch, secret, true), cookie);
+    ControlUnlockStatusResultMessage res{};
+    const bool got = wait_result(r, 71, &res);
+    check("the target found is not the one in front at the last look: nothing typed (RejectedPolicy)",
+          got && res.stage == static_cast<uint16_t>(UnlockStage::RejectedPolicy) && seams.count() == 0,
+          [&] { return std::string(stage_word(res.stage)); });
+    Seams moved;
+    moved.moveTargetDuringTyping = true;
+    PreloginCredReceiver r2(moved.inject(), moved.target(), moved.environment(), 0x1234, 600);
+    const auto ch2 = r2.Challenge(challenge_req(72), cookie);
+    r2.Sealed(seal(ch2, secret, true), cookie);
+    ControlUnlockStatusResultMessage res2{};
+    const bool got2 = wait_result(r2, 72, &res2);
+    check("the target changed DURING the typing: reported as a failure (InternalError 1400), not as \"typed\"",
+          got2 && res2.stage == static_cast<uint16_t>(UnlockStage::InternalError) && res2.win32Error == ERROR_INVALID_WINDOW_HANDLE,
+          [&] { return std::string(stage_word(res2.stage)) + " " + std::to_string(res2.win32Error); });
+    check("...while the typing that did happen is still counted (the units went; the result says it went wrong)",
+          r2.injections() == 1);
+  }
+
+  {
     std::printf("\n--- the product's target question, here ---\n");
     // This process is not LogonUI.exe, so the product's answer must be no -- whatever is in front.
     const auto productTarget = remote60::native_poc::prelogin::ProductCredTarget();
-    check("ProductCredTarget(): the foreground here is not the logon UI", !productTarget());
+    check("ProductCredTarget(): the foreground here is not the logon UI", productTarget() == 0);
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

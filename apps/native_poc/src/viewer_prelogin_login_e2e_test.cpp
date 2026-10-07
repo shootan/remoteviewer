@@ -52,6 +52,8 @@
 #include "viewer_state.hpp"
 #include "viewer_unlock.hpp"
 #include "viewer_window_proc.hpp"
+#include "viewer_reboot_prompt.hpp"
+#include "native_video_client_session.hpp"
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::e2e;
@@ -291,7 +293,7 @@ struct Host {
 };
 
 bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, bool prelogin,
-                const std::wstring& targetTitle, HANDLE restricted) {
+                const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
   if (!CopyFileW((myDir + L"GNLinkStreamMigrationTest.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) ||
@@ -327,7 +329,8 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
   for (const std::wstring& kv :
        {L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_CRED_TARGET_TITLE=" + targetTitle,
         // a test pipe nobody serves: the host never reaches this PC's installed service
-        L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId())}) {
+        L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()),
+        extraEnv.empty() ? std::wstring(L"GNLINK_STREAM_TEST_UNUSED=1") : extraEnv}) {
     env.insert(env.end(), kv.begin(), kv.end());
     env.push_back(L'\0');
   }
@@ -452,6 +455,8 @@ HWND wait_window(const wchar_t* cls, const wchar_t* title, int ms) {
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   bool notPrelogin = false;
+  bool sessionEnds = false;
+  bool androidSession = false;
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
@@ -459,6 +464,8 @@ int wmain(int argc, wchar_t** argv) {
       return 0;
     }
     if (a == L"--not-prelogin") notPrelogin = true;
+    if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
+    if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
   }
   if (!host_e2e_allowed() || GetEnvironmentVariableW(L"REMOTE60_ALLOW_UI_TEST", nullptr, 0) == 0) {
     std::printf("SKIP  viewer_prelogin_login_e2e_test (starts a listening host and types into its own window)\n");
@@ -468,8 +475,10 @@ int wmain(int argc, wchar_t** argv) {
   Tee tee(std::cout.rdbuf());
   std::cout.rdbuf(&tee);
   std::cout.setf(std::ios::unitbuf);
-  std::cout << "mode: " << (notPrelogin ? "host WITHOUT --prelogin (negative: the existing unlock path)"
-                                        : "host in --prelogin (\"Windows 로그인\")")
+  std::cout << "mode: " << (notPrelogin      ? "host WITHOUT --prelogin (negative: the existing unlock path)"
+                            : sessionEnds    ? "host in --prelogin; the viewer goes away while its password waits"
+                            : androidSession ? "host in --prelogin; the shared session (Android) types"
+                                             : "host in --prelogin (\"Windows 로그인\")")
             << "\n";
   {
     wchar_t cap[MAX_PATH] = {};
@@ -521,11 +530,63 @@ int wmain(int argc, wchar_t** argv) {
   Host host;
   const uint16_t hostPort = e2e_pick_free_udp_port();
   const bool started = restricted && hostPort != 0 &&
-                       start_host(&host, dir, directory.url(), hostPort, !notPrelogin, targets.title, restricted);
+                       start_host(&host, dir, directory.url(), hostPort, !notPrelogin, targets.title, restricted,
+                                  sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000" : L"");
   check("the host (test build, staged as GNLinkStream.exe) started", started);
   const bool punched =
       started && wait_until([&] { return host.log().find("directory punch ->") != std::string::npos; }, 30000);
   check("the host registered and collected the viewer's capability from its heartbeat", punched);
+
+
+  if (punched && androidSession) {
+    // r5 G8 for the Android app's input: the shared session (ClientSessionController, what the app drives
+    // through JNI) against the same pre-login host, directory-authenticated.
+    std::cout << "\n--- r5 G8: the shared session the Android app drives ---\n";
+    struct Sink : remote60::native_poc::ClientEncodedFrameSink {
+      void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& f) override { (void)f; }
+      void OnVideoStreamReset() override {}
+    } sink;
+    u_long nb = 1;
+    ioctlsocket(sock, FIONBIO, &nb);
+    char drain[2048];
+    while (recv(sock, drain, sizeof(drain), 0) > 0) {
+    }
+    nb = 0;
+    ioctlsocket(sock, FIONBIO, &nb);
+    remote60::native_poc::ClientSessionController phone;
+    remote60::native_poc::ClientSessionConnectArgs a;
+    a.host = "127.0.0.1";
+    a.videoPort = hostPort;
+    a.controlPort = hostPort;
+    a.requireUdpHello = true;
+    a.requireTcpControl = false;
+    a.controlOverUdp = true;
+    a.controlIntervalMs = 200;
+    a.peerAuthToken = token;
+    a.udpHandshakeTimeoutMs = 4000;
+    a.preparedUdpSocket = static_cast<remote60::native_poc::SocketHandle>(sock);
+    a.encodedFrameSink = &sink;
+    sock = INVALID_SOCKET;  // the session owns it now
+    const bool up = phone.Connect(a) &&
+                    wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
+    check("the session connects, directory-authenticated", up, phone.Snapshot().status);
+    check("...and sees the host at the logon screen (0x2000)",
+          wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+    const std::u16string text(kSecret.begin(), kSecret.end());
+    const bool textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
+    const bool letterQueued = phone.QueueInputEvent(5, 0, 0, 0, 'P', 0);
+    const bool letterUpQueued = phone.QueueInputEvent(6, 0, 0, 0, 'P', 0);
+    const bool tabQueued = phone.QueueInputEvent(5, 0, 0, 0, VK_TAB, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_TAB, 0);
+    const bool moveQueued = phone.QueueInputEvent(1, 10, 10, 0, 0, 0);
+    Sleep(2000);
+    check("G8: text is not queued for a host at the logon screen", !textQueued);
+    check("...nor a character key (down or up)", !letterQueued && !letterUpQueued);
+    check("...and the session counted what it held back (3)", phone.PreloginInputHeldBack() == 3,
+          std::to_string(phone.PreloginInputHeldBack()));
+    check("...while a navigation key and the pointer still go", tabQueued && moveQueued);
+    check("...and the host dropped nothing: no character reached it", host.Count("dropped non-navigation key") == 0);
+    phone.Disconnect();
+  }
 
   // ------------------------------------------------------------------ the viewer, for real
   ViewerState ctx;
@@ -538,7 +599,7 @@ int wmain(int argc, wchar_t** argv) {
   bool connected = false;
   std::vector<std::string> toolbarLines;
   std::mutex toolbarMu;
-  if (punched) {
+  if (punched && !androidSession) {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = remote60::native_poc::viewer::WndProc;  // the product's
@@ -561,6 +622,16 @@ int wmain(int argc, wchar_t** argv) {
       toolbarLines.push_back(line);
     };
     cb.onPreloginLogin = [&ctx] { remote60::native_poc::viewer::request_prelogin_login(ctx, ctx.session.hwnd); };
+    // The restart item, as viewer_startup.cpp wires it (r5 G11: the confirm is bound to this connection).
+    cb.onReboot = [&ctx] {
+      const uint32_t f = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const bool warn = (f & remote60::native_poc::kCaptureFlagPreloginEnabledV1) == 0;
+      if (remote60::native_poc::show_reboot_confirm(ctx.session.hwnd, warn)) {
+        ctx.session.rebootRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                                std::memory_order_release);
+        ctx.session.rebootRequested.store(true, std::memory_order_release);
+      }
+    };
     check("the session toolbar is created", session_toolbar_create(viewerWindow, std::move(cb)));
     session_toolbar_set_visible(true);
 
@@ -706,14 +777,14 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   const bool ready = connected && pump_until([&] { return ctx.control.lastRttUs.load() > 0; }, 25000);
-  check("the worker completes a round trip with the host", ready);
+  if (!androidSession) check("the worker completes a round trip with the host", ready);
   const auto flags = [&] { return ctx.session.hostCaptureFlags.load(); };
   if (ready) {
     bar = FindWindowExW(nullptr, nullptr, L"Remote60SessionToolbar", nullptr);
     check("the toolbar window exists", bar != nullptr);
   }
 
-  if (ready && bar && !notPrelogin) {
+  if (ready && bar && !notPrelogin && !sessionEnds) {
     std::cout << "\n--- the host is at the pre-login screen ---\n";
     check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
           std::to_string(flags()));
@@ -836,10 +907,151 @@ int wmain(int argc, wchar_t** argv) {
           box3.find(L"입력하지 않았습니다") != std::wstring::npos, utf8(box3));
     check("the host's result line: stage 1 (RejectedPolicy)", host.Count(" stage=1 win32=0") == 1);
 
+
+    // ---- 4. r5 G8: typing at the logon screen goes nowhere -- it is not even sent
+    std::cout << "\n--- 4. r5 G8: characters typed in the viewer are not sent to a host at the logon screen ---\n";
+    {
+      {
+        std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
+        ctx.frameBuf.frame.width = 320;
+        ctx.frameBuf.frame.height = 240;
+      }
+      ctx.picker.visible.store(false, std::memory_order_relaxed);
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const uint64_t heldBefore = ctx.session.preloginInputHeldBack.load();
+      const int droppedBefore = host.Count("dropped non-navigation key");
+      std::wstring notice;
+      std::thread op4([&] {
+        HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
+        if (b) {
+          notice = result_box_text(b);
+          save_capture(b, L"typing_held_back_notice");
+          close_result(b);
+        }
+      });
+      for (WPARAM vk : {static_cast<WPARAM>('P'), static_cast<WPARAM>('W'), static_cast<WPARAM>('7')}) {
+        SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
+        SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
+      }
+      pump_until([&] { return !notice.empty(); }, 10000);
+      op4.join();
+      SendMessageW(viewerWindow, WM_KEYDOWN, VK_TAB, 1);  // a navigation key still goes
+      SendMessageW(viewerWindow, WM_KEYUP, VK_TAB, 0xC0000001);
+      pump_until([] { return false; }, 1500);
+      const uint64_t held = ctx.session.preloginInputHeldBack.load() - heldBefore;
+      const uint64_t sent = ctx.session.inputEventsSent.load() - sentBefore;
+      check("G8: the character keys were held back in the viewer (6 edges), not sent", held == 6, std::to_string(held));
+      check("...the window said so once, pointing at \"Windows 로그인\"",
+            notice.find(L"보내지 않았습니다") != std::wstring::npos && notice.find(L"Windows 로그인") != std::wstring::npos,
+            utf8(notice));
+      check("...a navigation key (Tab) still went (2 edges)", sent == 2, std::to_string(sent));
+      check("...and the host dropped nothing: no character key ever reached it",
+            host.Count("dropped non-navigation key") == droppedBefore);
+    }
+
+    // ---- 5. r5 G11: the remote restart's answer is shown, not only logged
+    std::cout << "\n--- 5. r5 G11: the PC viewer shows what the restart request came to ---\n";
+    {
+      remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+      session_toolbar_follow_owner();
+      pump_until([] { return false; }, 300);
+      const int rx = find_item("6");
+      check("the toolbar lays out \"다시 시작\" (item 6) -- the host advertises remote reboot", rx >= 0, std::to_string(rx));
+      std::wstring answer;
+      bool confirmed = false;
+      std::thread op5([&] {
+        HWND c = wait_window(L"GNLinkRebootConfirm", nullptr, 8000);
+        if (c) {
+          confirmed = true;
+          PostMessageW(GetDlgItem(c, 1), BM_CLICK, 0, 0);  // 다시 시작
+          wait_until([&] { return !IsWindow(c); }, 3000);
+        }
+        HWND b = wait_window(kPreloginResultClass, nullptr, 15000);
+        if (b) {
+          answer = result_box_text(b);
+          save_capture(b, L"reboot_result_failed");
+          close_result(b);
+        }
+      });
+      if (rx >= 0) {
+        RECT rc{};
+        GetClientRect(bar, &rc);
+        PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(rx, (rc.bottom - rc.top) / 2));
+        PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(rx, (rc.bottom - rc.top) / 2));
+      }
+      pump_until([&] { return !answer.empty(); }, 20000);
+      op5.join();
+      // The host delegates to its service; this run's test pipe has no server, so the service cannot be
+      // reached: Failed (ERROR_SERVICE_NOT_ACTIVE). Nothing can restart this PC (and the host's token
+      // cannot either).
+      check("the confirm popup was answered", confirmed);
+      check("G11: the answer is SHOWN in the viewer: \"다시 시작하지 못했습니다 (오류 1062)\"",
+            answer.find(L"다시 시작하지 못했습니다") != std::wstring::npos && answer.find(L"1062") != std::wstring::npos,
+            utf8(answer));
+      check("...as the host answered it (auth=1, result=3 Failed)", host.Count(" auth=1 result=3 win32=1062") == 1);
+    }
+
     // ---- typed is not logged in: no "logged in" while the host stays at the logon screen
     pump_until([] { return false; }, 1500);
     check("no \"logged in\" window appeared (the host is still at the logon screen)",
           FindWindowW(kPreloginResultClass, nullptr) == nullptr && (flags() & kCaptureFlagPreloginV1) != 0);
+  }
+
+
+  if (ready && bar && sessionEnds) {
+    // r5 G7, on the real worker path: the password is opened and waits for the logon UI (the focus is
+    // elsewhere; this host waits up to 25 s); the viewer then goes away; the host's control session ends;
+    // only THEN does the target come to the front -- and nothing may be typed into it.
+    std::cout << "\n--- r5 G7: the viewer goes away while its password waits ---\n";
+    check("the host is at the logon screen", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    const int x = find_item("7");
+    check("the \"Windows 로그인\" item is there", x >= 0);
+    targets.Clear();
+    OperatorRun run;
+    std::atomic<bool> opDone{false};
+    std::thread op([&] {
+      operate_prompt(&run, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.decoy);  // not the logon UI: the worker waits
+      opDone = true;
+    });
+    RECT rc{};
+    GetClientRect(bar, &rc);
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, (rc.bottom - rc.top) / 2));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, (rc.bottom - rc.top) / 2));
+    std::cout << "    [step] clicked the item\n";
+    pump_until([&] { return run.sawPrompt && !FindWindowW(kPreloginPromptClass, nullptr); }, 10000);
+    std::cout << "    [step] prompt done\n";
+    // Pumped while the operator moves the focus: deactivating the viewer is a message to THIS thread.
+    pump_until([&] { return opDone.load(); }, 10000);
+    op.join();
+    std::cout << "    [step] operator done\n";
+    check("the password was typed into the prompt and sent", run.sawPrompt && run.typedAll);
+    Sleep(1500);  // the sealed request is at the host, waiting (no pumping: the viewer is about to go)
+    check("...and is waiting at the host (no result yet)", host.Count("[native-video-host][prelogin-cred] requestId=") == 0);
+    // The viewer goes away: its control thread stops, its socket closes. The host's control session
+    // ends when ten silent seconds have passed.
+    ctx.session.running.store(false);
+    if (worker.joinable()) worker.join();
+    ingressStop.store(true);
+    if (ingress.joinable()) ingress.join();
+    closesocket(ctx.session.sock);
+    ctx.session.sock = INVALID_SOCKET;
+    std::cout << "    [step] the viewer is gone\n";
+    const bool ended = wait_until([&] { return host.Count("[native-video-host][prelogin-cred] control session ended") >= 1; }, 20000);
+    check("the host's control session for that viewer ended (while the password still waited)", ended &&
+          host.Count("[native-video-host][prelogin-cred] requestId=") <= 1);
+    bring_front(targets.main);  // now the "logon UI" is in front
+    wait_until([&] { return host.Count("[native-video-host][prelogin-cred] requestId=") >= 1; }, 5000);
+    Sleep(500);
+    check("G7: NOTHING was typed into the target that came afterwards", Targets::text(targets.edit).empty(),
+          hexw(Targets::text(targets.edit)));
+    check("...nor into the window that had the focus", Targets::text(targets.decoyEdit).empty());
+    check("...the worker dropped it as stale (stage 2), never Injected",
+          host.Count(" stage=2 win32=0") == 1 && host.Count(" stage=8 ") == 0);
   }
 
   if (ready && bar && notPrelogin) {
@@ -907,13 +1119,15 @@ int wmain(int argc, wchar_t** argv) {
         close_result(b);
       }
     });
-    // As if this viewer had just been told "typed" by a pre-login host: the next pong from a host that
-    // is not at the logon screen is the logon. (The handoff to the user's host is the G check.)
+    // As if this viewer had just been told "typed" by a pre-login host: the next pong from a host that is
+    // not at the logon screen is what it observed. r5 G11: it says exactly that -- the host LEFT the
+    // logon screen -- not "logged in": which account, and its desktop, it has not seen (that is G).
     ctx.session.preloginInjectedAtUs.store(qpc_now_us());
     pump_until([&] { return !logon.empty(); }, 12000);
     op3.join();
-    check("A POSTED \"logged in\" WINDOW, DIFFERENT FROM \"typed\"", logon.find(L"로그인되었습니다") != std::wstring::npos &&
-                                                                     logon.find(L"입력했습니다") == std::wstring::npos,
+    check("A POSTED \"left the logon screen\" WINDOW, DIFFERENT FROM \"typed\", that does not claim a login",
+          logon.find(L"로그인 화면을 벗어났습니다") != std::wstring::npos && logon.find(L"입력했습니다") == std::wstring::npos &&
+              logon.find(L"로그인되었습니다") == std::wstring::npos,
           utf8(logon));
   }
 

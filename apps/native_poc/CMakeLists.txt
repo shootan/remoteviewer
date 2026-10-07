@@ -1097,6 +1097,8 @@ add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_ho
 # in --prelogin (directory-authenticated, SeShutdownPrivilege deleted), typed into a window of the test.
 add_executable(remote60_viewer_prelogin_login_e2e_test
   src/viewer_prelogin_login_e2e_test.cpp
+  src/viewer_reboot_prompt.cpp
+  src/native_video_client_session.cpp
   src/viewer_window_proc.cpp
   src/viewer_input_forward.cpp
   src/viewer_control_client.cpp

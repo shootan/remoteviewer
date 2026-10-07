@@ -4,11 +4,15 @@
 #include "prelogin_admin_pipe.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cwctype>
 #include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
+
+#include "secure_input_protocol.hpp"
 #endif
 
 
@@ -97,7 +101,10 @@ std::vector<uint8_t> EncodeAdminRequest(const AdminRequest& r) {
     put_str(&o, r.hostId);
     put_str(&o, r.hostToken);
   }
-  if (r.op == AdminOp::Reboot) put_u32(&o, r.requestId);
+  if (r.op == AdminOp::Reboot) {
+    put_u32(&o, r.requestId);
+    put_u64(&o, r.peerKey);
+  }
   return o;
 }
 
@@ -116,7 +123,7 @@ bool DecodeAdminRequest(const std::vector<uint8_t>& b, AdminRequest* out) {
       return false;
     }
   }
-  if (out->op == AdminOp::Reboot && !rd.u32(&out->requestId)) return false;
+  if (out->op == AdminOp::Reboot && (!rd.u32(&out->requestId) || !rd.u64(&out->peerKey))) return false;
   return rd.done();
 }
 
@@ -175,9 +182,17 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
       return reply;
     }
     std::lock_guard<std::mutex> lock(ledger->mu);
+    // The request is this host process's, this remote peer's, this id (r5 G10).
+    RebootKey key;
+    key.processId = who.processId;
+    key.processStartTime = who.processStartTime;
+    key.peerKey = r.peerKey;
+    key.requestId = r.requestId;
     for (const auto& a : ledger->answered) {
-      if (a.first == r.requestId) return a.second;  // the same id: the same answer, no second OS call
+      if (a.first == key) return a.second;  // the same request: the same answer, no second OS call
     }
+    const uint64_t now = ledger->nowMs ? ledger->nowMs() : GetTickCount64();
+    if (ledger->inFlight && now - ledger->inFlightSinceMs >= kRebootInFlightMs) ledger->inFlight = false;  // it was cancelled
     reply.status = AdminStatus::Ok;
     if (ledger->inFlight) {
       reply.rebootResult = 1;  // Refused: a restart is already under way
@@ -186,12 +201,13 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
       if (w == 0) {
         reply.rebootResult = 0;  // Accepted: the OS took it -- not "done"
         ledger->inFlight = true;
+        ledger->inFlightSinceMs = now;
       } else {
         reply.rebootResult = 3;  // Failed, never escalated to a forced restart
         reply.win32 = w;
       }
     }
-    ledger->answered.emplace_back(r.requestId, reply);
+    ledger->answered.emplace_back(key, reply);
     if (ledger->answered.size() > 32) ledger->answered.erase(ledger->answered.begin());
     return reply;
   }
@@ -321,6 +337,7 @@ namespace {
 void client_session_and_start(HANDLE pipe, ClientFacts* who) {
   ULONG pid = 0;
   if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return;
+  who->processId = pid;
   DWORD session = 0;
   if (ProcessIdToSessionId(pid, &session)) who->sessionId = session;
   if (HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
@@ -329,49 +346,144 @@ void client_session_and_start(HANDLE pipe, ClientFacts* who) {
     CloseHandle(proc);
   }
 }
+
+constexpr DWORD kNoLimit = INFINITE;
+
+// One overlapped operation that was started (`started` = its call's return value), finished: waited
+// for up to `ms` (kNoLimit: until keepRunning() turns false), in quarter-second slices so a stop is
+// noticed. On timeout or stop it is cancelled AND its completion is waited for, so the OVERLAPPED, the
+// buffer and the event the caller owns are never released while the kernel may still write to them
+// (r5 G4: CancelIoEx only asks). True when it completed successfully; *n the bytes.
+bool finish_io(HANDLE h, OVERLAPPED* ov, BOOL started, DWORD ms, const std::function<bool()>& keepRunning, DWORD* n,
+               DWORD* error = nullptr) {
+  DWORD got = 0;
+  if (!started) {
+    const DWORD e = GetLastError();
+    if (e != ERROR_IO_PENDING) {
+      if (error) *error = e;
+      return false;
+    }
+    const ULONGLONG end = ms == kNoLimit ? 0 : GetTickCount64() + ms;
+    for (;;) {
+      DWORD slice = 250;
+      if (ms != kNoLimit) {
+        const ULONGLONG now = GetTickCount64();
+        slice = now >= end ? 0 : static_cast<DWORD>((std::min)(end - now, 250ull));
+      }
+      if (WaitForSingleObject(ov->hEvent, slice) == WAIT_OBJECT_0) break;
+      const bool expired = ms != kNoLimit && GetTickCount64() >= end;
+      if (expired || (keepRunning && !keepRunning())) {
+        CancelIoEx(h, ov);
+        GetOverlappedResult(h, ov, &got, TRUE);  // the cancel is only a request: wait for the completion
+        if (error) *error = expired ? WAIT_TIMEOUT : ERROR_OPERATION_ABORTED;
+        return false;
+      }
+    }
+  }
+  const BOOL ok = GetOverlappedResult(h, ov, &got, FALSE);
+  if (!ok && error) *error = GetLastError();
+  if (n) *n = got;
+  return ok != FALSE;
+}
+
+std::wstring process_image(DWORD pid) {
+  std::wstring out;
+  if (HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD n = MAX_PATH * 2;
+    if (QueryFullProcessImageNameW(proc, 0, path, &n)) out.assign(path, n);
+    CloseHandle(proc);
+  }
+  return out;
+}
+
+// The executable of a service's configured command line: the quoted path, or the text up to ".exe".
+std::wstring service_binary(const wchar_t* commandLine) {
+  std::wstring s = commandLine ? commandLine : L"";
+  if (!s.empty() && s[0] == L'"') {
+    const size_t close = s.find(L'"', 1);
+    return close == std::wstring::npos ? std::wstring() : s.substr(1, close - 1);
+  }
+  std::wstring lower = s;
+  for (auto& c : lower) c = static_cast<wchar_t>(towlower(c));
+  const size_t exe = lower.find(L".exe");
+  return exe == std::wstring::npos ? s : s.substr(0, exe + 4);
+}
 }  // namespace
 
-void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning, const wchar_t* pipeName,
-                            const wchar_t* sddl, AdminIdentityCheck isAdmin, AdminIdentityCheck isHost, RebootLedger* ledger) {
-  while (keepRunning()) {
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return;
-    SECURITY_ATTRIBUTES security{};
-    security.nLength = sizeof(security);
-    security.lpSecurityDescriptor = descriptor;
-    HANDLE pipe = CreateNamedPipeW(pipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                   PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1,
-                                   4096, 8192, 0, &security);
-    LocalFree(descriptor);
-    if (pipe == INVALID_HANDLE_VALUE) return;
-    OVERLAPPED ov{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    bool connected = ConnectNamedPipe(pipe, &ov) != FALSE;
-    if (!connected) {
-      const DWORD e = GetLastError();
-      if (e == ERROR_PIPE_CONNECTED) {
-        connected = true;
-      } else if (e == ERROR_IO_PENDING) {
-        while (keepRunning()) {
-          if (WaitForSingleObject(ov.hEvent, 250) == WAIT_OBJECT_0) {
-            DWORD ignored = 0;
-            connected = GetOverlappedResult(pipe, &ov, &ignored, FALSE) != FALSE;
-            break;
-          }
-        }
-        if (!connected) CancelIoEx(pipe, &ov);
+bool ServerIsProcess(void* pipeHandle, uint32_t pid) {
+  ULONG server = 0;
+  return pid != 0 && GetNamedPipeServerProcessId(static_cast<HANDLE>(pipeHandle), &server) && server == pid;
+}
+
+bool ServerIsInstalledService(void* pipeHandle) {
+  ULONG server = 0;
+  if (!GetNamedPipeServerProcessId(static_cast<HANDLE>(pipeHandle), &server) || server == 0) return false;
+  bool ok = false;
+  SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (!scm) return false;
+  if (SC_HANDLE svc = OpenServiceW(scm, kSecureInputServiceName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG)) {
+    SERVICE_STATUS_PROCESS status{};
+    DWORD need = 0;
+    if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &need) &&
+        status.dwCurrentState == SERVICE_RUNNING && status.dwProcessId == server) {
+      // The running service holds that process id; and that process is the installed service binary.
+      QueryServiceConfigW(svc, nullptr, 0, &need);
+      std::vector<uint8_t> buf(need ? need : 1);
+      auto* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
+      if (need && QueryServiceConfigW(svc, cfg, need, &need)) {
+        const std::wstring expected = service_binary(cfg->lpBinaryPathName);
+        const std::wstring actual = process_image(server);
+        ok = !expected.empty() && !actual.empty() &&
+             CompareStringOrdinal(expected.c_str(), static_cast<int>(expected.size()), actual.c_str(),
+                                  static_cast<int>(actual.size()), TRUE) == CSTR_EQUAL;
       }
+    }
+    CloseServiceHandle(svc);
+  }
+  CloseServiceHandle(scm);
+  return ok;
+}
+
+bool RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keepRunning, const wchar_t* pipeName,
+                            const wchar_t* sddl, AdminIdentityCheck isAdmin, AdminIdentityCheck isHost, RebootLedger* ledger) {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return false;
+  SECURITY_ATTRIBUTES security{};
+  security.nLength = sizeof(security);
+  security.lpSecurityDescriptor = descriptor;
+  // One instance, created first and kept (r5 G3): if the name is already someone's, this fails rather than
+  // serving beside them; and it is never closed and re-made between requests, so nobody can take it then.
+  HANDLE pipe = CreateNamedPipeW(pipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1,
+                                 4096, 8192, 0, &security);
+  LocalFree(descriptor);
+  if (pipe == INVALID_HANDLE_VALUE) return false;
+  HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!event) {
+    CloseHandle(pipe);
+    return false;
+  }
+  while (keepRunning()) {
+    OVERLAPPED ov{};
+    ov.hEvent = event;
+    ResetEvent(event);
+    bool connected = false;
+    if (ConnectNamedPipe(pipe, &ov)) {
+      connected = true;
+    } else if (GetLastError() == ERROR_PIPE_CONNECTED) {
+      connected = true;
+    } else {
+      connected = finish_io(pipe, &ov, FALSE, kNoLimit, keepRunning, nullptr);
     }
     if (connected) {
       std::vector<uint8_t> request(8192);
       DWORD got = 0;
-      ResetEvent(ov.hEvent);
-      BOOL read = ReadFile(pipe, request.data(), static_cast<DWORD>(request.size()), &got, &ov);
-      if (!read && GetLastError() == ERROR_IO_PENDING) {
-        read = WaitForSingleObject(ov.hEvent, 5000) == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &ov, &got, FALSE);
-        if (!read) CancelIoEx(pipe, &ov);
-      }
-      if (read) {
+      ov = OVERLAPPED{};
+      ov.hEvent = event;
+      ResetEvent(event);
+      const BOOL r = ReadFile(pipe, request.data(), static_cast<DWORD>(request.size()), &got, &ov);
+      if (finish_io(pipe, &ov, r, 5000, keepRunning, &got)) {
         request.resize(got);
         ClientFacts who;
         who.elevatedAdmin = isAdmin(pipe);
@@ -379,31 +491,42 @@ void RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keep
         client_session_and_start(pipe, &who);
         const AdminReply reply = HandleAdminRequest(request, who, p, ledger);
         const std::vector<uint8_t> out = EncodeAdminReply(reply);
+        ov = OVERLAPPED{};
+        ov.hEvent = event;
+        ResetEvent(event);
         DWORD wrote = 0;
-        ResetEvent(ov.hEvent);
-        if (!WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &wrote, &ov) && GetLastError() == ERROR_IO_PENDING) {
-          if (WaitForSingleObject(ov.hEvent, 5000) != WAIT_OBJECT_0) CancelIoEx(pipe, &ov);
+        const BOOL w = WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &wrote, &ov);
+        if (finish_io(pipe, &ov, w, 5000, keepRunning, &wrote)) {
+          // Let the client read it before the pipe is disconnected (which drops unread data): wait, bounded,
+          // for the client to close its end. No FlushFileBuffers -- it can wait on the client forever.
+          uint8_t probe = 0;
+          DWORD n = 0;
+          ov = OVERLAPPED{};
+          ov.hEvent = event;
+          ResetEvent(event);
+          const BOOL c = ReadFile(pipe, &probe, 1, &n, &ov);
+          finish_io(pipe, &ov, c, 2000, keepRunning, &n);
         }
-        FlushFileBuffers(pipe);
       }
-      DisconnectNamedPipe(pipe);
     }
-    CloseHandle(ov.hEvent);
-    CloseHandle(pipe);
+    DisconnectNamedPipe(pipe);
   }
+  CloseHandle(event);
+  CloseHandle(pipe);
+  return true;
 }
 
-AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName) {
+AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName,
+                                    const ServerCheck& verifyServer, uint32_t ioMs) {
   AdminReply reply;
   reply.status = AdminStatus::Unavailable;
-  // The server serves one client at a time and makes its next instance after each: between two
-  // requests the name can be briefly absent (FILE_NOT_FOUND) or taken (PIPE_BUSY). Both are waited
-  // out within waitMs; anything else is the answer.
+  // The server serves one client at a time: while it does, the name is taken (PIPE_BUSY). That is
+  // waited out within waitMs; so is a name not there yet (FILE_NOT_FOUND); anything else is the answer.
   const ULONGLONG deadline = GetTickCount64() + waitMs;
   HANDLE pipe = INVALID_HANDLE_VALUE;
   for (;;) {
     pipe = CreateFileW(pipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                       SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+                       FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
     if (pipe != INVALID_HANDLE_VALUE) break;
     const DWORD e = GetLastError();
     reply.win32 = e;
@@ -419,22 +542,44 @@ AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, cons
       Sleep(50);
     }
   }
+  // r5 G3: who is at the other end is settled BEFORE anything is written -- a credential (Enable) or a
+  // request whose answer would be believed never goes to a server that is not the installed service.
+  if (!verifyServer || !verifyServer(pipe)) {
+    CloseHandle(pipe);
+    reply = AdminReply{};
+    reply.status = AdminStatus::Untrusted;
+    return reply;
+  }
   DWORD mode = PIPE_READMODE_MESSAGE;
   SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+  HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   const std::vector<uint8_t> out = EncodeAdminRequest(r);
-  DWORD wrote = 0;
   std::vector<uint8_t> in(64);
-  DWORD got = 0;
-  if (WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &wrote, nullptr) &&
-      ReadFile(pipe, in.data(), static_cast<DWORD>(in.size()), &got, nullptr)) {
+  DWORD wrote = 0, got = 0, error = 0;
+  OVERLAPPED ov{};
+  ov.hEvent = event;
+  bool ok = event != nullptr;
+  if (ok) {
+    const BOOL w = WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &wrote, &ov);
+    ok = finish_io(pipe, &ov, w, ioMs, nullptr, &wrote, &error) && wrote == out.size();
+  }
+  if (ok) {
+    ov = OVERLAPPED{};
+    ov.hEvent = event;
+    ResetEvent(event);
+    const BOOL rd = ReadFile(pipe, in.data(), static_cast<DWORD>(in.size()), &got, &ov);
+    ok = finish_io(pipe, &ov, rd, ioMs, nullptr, &got, &error);
+  }
+  if (ok) {
     in.resize(got);
     if (!DecodeAdminReply(in, &reply)) {
       reply = AdminReply{};
       reply.status = AdminStatus::BadRequest;
     }
   } else {
-    reply.win32 = GetLastError();
+    reply.win32 = error;
   }
+  if (event) CloseHandle(event);
   CloseHandle(pipe);
   return reply;
 }
@@ -452,26 +597,50 @@ std::wstring HostServicePipeName() {
 #endif
 }
 
-uint8_t DelegateRebootToService(uint32_t requestId, uint32_t* win32) {
+ServerCheck HostServiceServerCheck() {
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY: the test that serves the test pipe names itself; nobody named, nobody trusted.
+  wchar_t v[32] = {};
+  const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID", v, 32);
+  const uint32_t pid = n > 0 && n < 32 ? static_cast<uint32_t>(wcstoul(v, nullptr, 10)) : 0;
+  return [pid](void* pipe) { return ServerIsProcess(pipe, pid); };
+#else
+  return ServerIsInstalledService;
+#endif
+}
+
+uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32) {
   AdminRequest r;
   r.op = AdminOp::Reboot;
   r.requestId = requestId;
+  r.peerKey = peerKey;
   const std::wstring pipe = HostServicePipeName();
-  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str());
+  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck());
   *win32 = 0;
   if (reply.status == AdminStatus::Ok) {
     *win32 = reply.win32;
     return reply.rebootResult;
   }
   if (reply.status == AdminStatus::Refused) return 2;  // the service did not take this host as the host
-  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE : reply.win32;
+  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE
+           : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
+                                                    : reply.win32;
   return 3;
 }
 
+bool QueryDurablePreloginEnabled() {
+  AdminRequest r;
+  r.op = AdminOp::Query;
+  const std::wstring pipe = HostServicePipeName();
+  const AdminReply reply = SendPreloginAdminRequest(r, 500, pipe.c_str(), HostServiceServerCheck(), 2000);
+  return reply.status == AdminStatus::Ok && reply.enabled;
+}
+
 void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs, int attempts, uint32_t delayMs,
-                                     const std::wstring& pipeName) {
+                                     const std::wstring& pipeName, ServerCheck check) {
   const std::wstring pipe = pipeName.empty() ? HostServicePipeName() : pipeName;
-  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe] {
+  if (!check) check = HostServiceServerCheck();
+  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe, check] {
     const ULONGLONG until = GetTickCount64() + waitReadyMs;
     while (readyNow && !readyNow()) {
       if (GetTickCount64() >= until) return;  // never registered: no ready, the service keeps prelogin
@@ -480,7 +649,7 @@ void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t wa
     AdminRequest r;
     r.op = AdminOp::Ready;
     for (int i = 0; i < attempts; ++i) {
-      if (SendPreloginAdminRequest(r, 2000, pipe.c_str()).status == AdminStatus::Ok) return;
+      if (SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok) return;
       Sleep(delayMs);
     }
   }).detach();
