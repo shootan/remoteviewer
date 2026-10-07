@@ -159,6 +159,11 @@ int main(int argc, char** argv) {
   startup_process_setup();
 
   const Args args = parse_args(argc, argv);
+  if (args.preloginMode && args.preloginRefusedConfig) {
+    std::cerr << "[native-video-host][prelogin] --config is not accepted with --prelogin (the service starts the "
+                 "worker with --prelogin alone)\n";
+    return 12;
+  }
   // Viewer input routing: injection mode, SYSTEM broker, counters, cursor forwarder (InputRouterState, Phase 1-9).
   InputRouterState inputRouter;
   const bool useRaw = (args.codec == "raw");

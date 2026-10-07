@@ -255,14 +255,27 @@ int startup_connect_client(HostContext& hx) {
     // from the DPAPI-sealed machine record and register/heartbeat as the machine -- this is what makes
     // the box visible in the client list at the login screen. No record (or disabled) -> stays offline.
     std::string preloadHostId, preloadHostToken;
-    if (args.preloginMode && clientSession.directoryUrl.empty()) {
+    if (args.preloginMode) {
+      // r6 V5: in --prelogin the machine record is the ONLY credential -- directory arguments and
+      // REMOTE60_DIRECTORY_* were cleared at config time, so nothing can stand in for it.
+      std::wstring recPath;
+      remote60::native_poc::prelogin::MachineRecord rec;
+      uint32_t w = 0;
+      auto readStatus = remote60::native_poc::prelogin::MachineStoreStatus::Read;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY (GNLinkStreamMigrationTest): the record a test sealed (machine-scope DPAPI, the
+      // product's format) in its own root, named by GNLINK_STREAM_TEST_MACHINE_RECORD. The G5 owner check
+      // on the folder is NOT applied (a non-elevated test cannot make a SYSTEM-owned folder); the
+      // unseal, the binding (machine id + floor) and everything after are the product's.
+      readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecordForTest(&recPath, &rec, &w);
+#else
       wchar_t programData[MAX_PATH] = {};
       if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) != 0) {
-        const std::wstring recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
-        remote60::native_poc::prelogin::MachineRecord rec;
-        uint32_t w = 0;
-        const auto readStatus =
-            remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w);
+        recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
+        readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w);
+      }
+#endif
+      {
         if (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
           // r6 G6: adopt ONLY a record that is Usable under the SAME binding the service gate uses --
           // current machine id + the durable owner floor. A server-revoke/floor-raise, a copied blob, a
@@ -271,9 +284,16 @@ int startup_connect_client(HostContext& hx) {
           uint64_t floor = 0;
           const bool floorKnown = remote60::native_poc::prelogin::ReadPreloginOwnerFloor(&floor);
           remote60::native_poc::prelogin::DirectoryCredential dc;
-          if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
-                  rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
-              remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
+          // r6 V7: and only for the product's own server -- a record naming any other address is not
+          // used, whoever wrote it.
+          const bool ownServer = remote60::native_poc::directory::directory_origin_key(rec.directoryOrigin) ==
+                                 remote60::native_poc::directory::directory_origin_key(
+                                     remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl());
+          if (!ownServer) {
+            std::cout << "[native-video-host][prelogin] machine credential names another server -> staying offline\n";
+          } else if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
+                         rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
+                     remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
             clientSession.directoryUrl = rec.directoryOrigin;
             clientSession.directoryId = dc.accountId;
             preloadHostId = dc.hostId;

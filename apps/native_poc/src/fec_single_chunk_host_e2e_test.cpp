@@ -121,6 +121,12 @@ struct HostAccount {
   uint64_t wireCapAppliedBitrate = 0;
 };
 
+bool file_has(const std::wstring& path, const char* needle) {
+  std::ifstream in(path, std::ios::binary);
+  std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return all.find(needle) != std::string::npos;
+}
+
 HostAccount read_host_log(const std::wstring& path) {
   HostAccount a;
   std::ifstream in(path);
@@ -1125,16 +1131,31 @@ int main(int argc, char** argv) {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     check(port != 0, "prelogin-capture: a free UDP port for the host", u(port));
     if (port != 0) {
+      // r6 V5: the trigger (REMOTE60_PRELOGIN_CAPTURE_ATTACH) is read by the TEST build of the host only,
+      // so this run uses it (the same sources; the attach and the pipeline are the product's) -- and the
+      // attach is checked in the host's own words, not inferred from frames arriving (they arrive
+      // without it too).
+      const std::wstring testHost = directory_of(me) + L"GNLinkStreamMigrationTest.exe";
       const std::wstring runDir = dir + L"prelogin_capture\\";
-      const RunResult r = run_host(hostExe, runDir, Content::Video, /*tight=*/true, port, seconds, 0, 1,
+      const RunResult r = run_host(testHost, runDir, Content::Video, /*tight=*/true, port, seconds, 0, 1,
                                    /*wireCapOn=*/false, kBitrate, kFps, 0, 0, /*v2FrameGate=*/false,
                                    /*desktopAttach=*/true);
       print_run(Content::Video, true, 0, 1, r);
       check(r.launched && r.hello, "prelogin-capture: the desktop-capture host started and answered Hello");
+      check(file_has(runDir + L"host.log", "prelogin capture thread attached to the input desktop"),
+            "prelogin-capture: the host's capture thread attached to the input desktop (its own log)");
       check(r.delivered > 0,
             "prelogin-capture: frames reached the viewer with the input-desktop capture attach active",
             "delivered=" + u(r.delivered));
       check(r.decoded > 0, "prelogin-capture: a frame decoded at the viewer", "decoded=" + u(r.decoded));
+      // r6 V5 negative: the SHIPPED binary, given the same trigger, does not attach.
+      const uint16_t port2 = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+      const std::wstring runDir2 = dir + L"prelogin_capture_product\\";
+      const RunResult r2 = run_host(hostExe, runDir2, Content::Video, /*tight=*/true, port2, seconds, 0, 1,
+                                    /*wireCapOn=*/false, kBitrate, kFps, 0, 0, /*v2FrameGate=*/false,
+                                    /*desktopAttach=*/true);
+      check(r2.launched && r2.hello && !file_has(runDir2 + L"host.log", "prelogin capture thread attached"),
+            "r6 V5: the shipped GNLinkStream ignores REMOTE60_PRELOGIN_CAPTURE_ATTACH (no attach)");
     }
   } else
   for (Content content : contents) {

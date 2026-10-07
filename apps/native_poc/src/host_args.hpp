@@ -83,6 +83,8 @@ struct Args {
   // rejected), and only accepts credential text over the sealed prelogin path. Launched by the
   // GNLinkInputService supervisor; never set for an ordinary logged-in host.
   bool preloginMode = false;
+  // r6 V5: --config was given with --prelogin (not loaded; the host refuses to start).
+  bool preloginRefusedConfig = false;
 };
 
 // r6 G1: the prelogin SYSTEM worker MUST run the directory-registering UDP+H264 path. The TCP/raw

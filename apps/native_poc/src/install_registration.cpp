@@ -96,9 +96,7 @@ RegistrationResult register_install(const RegistrationTarget& target, const Regi
   // the one the files actually live at.
   {
     const std::wstring serviceExe = target.installDir + L"\\" + target.serviceExeName;
-    // Prelogin on -> AUTO_START so the service is up before anyone logs in (prelogin-service r3, f).
-    const std::wstring serviceArg =
-        target.preloginEnabled ? L"--install-service-prelogin" : L"--install-service";
+    const std::wstring serviceArg = L"--install-service";
     const int code = ops.runProcess(serviceExe, serviceArg);
     if (code != 0) {
       // The installer today reports overall success after this fails, having only shown a message

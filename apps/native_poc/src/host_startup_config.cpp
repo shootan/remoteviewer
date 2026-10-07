@@ -233,8 +233,13 @@ int startup_configure_from_env(HostContext& hx) {
   // REMOTE60_PRELOGIN_CAPTURE_ATTACH env enables ONLY this capture-attach (the exact same code path),
   // without the prelogin control gating, so a Default-desktop e2e can prove frames-reach-the-viewer with
   // the attach active -- a product-equivalent that does not require the directory-auth prelogin session.
-  capture.preloginAttachInputDesktop =
-      args.preloginMode || env_truthy("REMOTE60_PRELOGIN_CAPTURE_ATTACH");
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  capture.preloginAttachInputDesktop = args.preloginMode || env_truthy("REMOTE60_PRELOGIN_CAPTURE_ATTACH");
+#else
+  // r6 V5: the shipped binary takes no test trigger -- only --prelogin attaches capture to the input
+  // desktop (REMOTE60_PRELOGIN_CAPTURE_ATTACH is read by the test build alone).
+  capture.preloginAttachInputDesktop = args.preloginMode;
+#endif
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
@@ -403,6 +408,16 @@ void startup_configure_session(HostContext& hx) {
   clientSession.directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
   clientSession.directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
   clientSession.directoryPw = arg_or_env(args.directoryPw, "REMOTE60_DIRECTORY_PW");
+  if (args.preloginMode) {
+    // r6 V5: before login the machine record is the only credential (host_startup_connect). A
+    // directory given on the command line or in the environment would stand in for it -- ignored.
+    if (!clientSession.directoryUrl.empty() || !clientSession.directoryId.empty() || !clientSession.directoryPw.empty()) {
+      std::cerr << "[native-video-host][prelogin] directory arguments/environment ignored: the machine record is the credential\n";
+    }
+    clientSession.directoryUrl.clear();
+    clientSession.directoryId.clear();
+    clientSession.directoryPw.clear();
+  }
   if (!clientSession.directoryUrl.empty() && transport != VideoTransport::Udp) {
     std::cerr << "[native-video-host] directory requires transport=udp; ignoring directory url\n";
   }

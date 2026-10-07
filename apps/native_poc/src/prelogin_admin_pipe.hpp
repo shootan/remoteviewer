@@ -158,6 +158,9 @@ struct AdminPrimitives {
   std::function<uint32_t(const std::wstring&, const MachineRecord&)> writeRecord;  // 0 = ok, else win32
   std::function<uint32_t(const std::wstring&)> removeRecord;            // 0 = ok / already gone
   std::function<bool()> featureEnabled;                     // the service's own judgement of "on now"
+  // r6 V7: the one directory server a record may name (the product's); Enable refuses any other. Empty:
+  // nothing is accepted (fail closed).
+  std::string allowedDirectoryUrl;
   // Start type: the current one, setting one, and where the pre-enable one is remembered.
   std::function<bool(uint32_t*)> queryStartType;
   std::function<uint32_t(uint32_t)> setStartType;           // 0 = ok, else win32
@@ -179,9 +182,20 @@ inline AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, bool c
   return HandleAdminRequest(request, who, p, nullptr);
 }
 
+// r6 V4: what removing GNLink does to pre-login access -- exactly what turning it off does (Disable):
+// the floor rises past the record, the record and the remembered start type go. The floor stays.
+inline AdminReply WithdrawPreloginAccessForUninstall(const AdminPrimitives& p) {
+  AdminRequest off;
+  off.op = AdminOp::Disable;
+  return HandleAdminRequest(EncodeAdminRequest(off), true, p);
+}
+
 // FNV-1a 64 of an id string, never 0 -- the record's numeric accountId / hostId (the strings travel in
 // the packed credential, which is what the --prelogin worker uses).
 uint64_t AdminIdHash(const std::string& s);
+// r6 V7: the same scheme://host[:port] (case-insensitive; path ignored); an empty or malformed URL never
+// matches.
+bool same_origin(const std::string& a, const std::string& b);
 
 #ifdef _WIN32
 // The server loop: one client at a time, while keepRunning(). `pipeName`/`sddl`/`isAdmin`/`isHost` are

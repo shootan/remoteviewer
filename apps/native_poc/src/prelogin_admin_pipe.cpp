@@ -4,6 +4,7 @@
 #include "prelogin_admin_pipe.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cwctype>
 #include <thread>
@@ -80,6 +81,19 @@ struct Reader {
 };
 
 }  // namespace
+
+// The same scheme://host[:port], ignoring case and a trailing slash or path. Empty never matches.
+bool same_origin(const std::string& a, const std::string& b) {
+  auto origin = [](std::string u) {
+    for (auto& c : u) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const size_t scheme = u.find("://");
+    if (scheme == std::string::npos) return std::string();
+    const size_t path = u.find('/', scheme + 3);
+    return path == std::string::npos ? u : u.substr(0, path);
+  };
+  const std::string oa = origin(a), ob = origin(b);
+  return !oa.empty() && oa == ob;
+}
 
 uint64_t AdminIdHash(const std::string& s) {
   uint64_t h = 1469598103934665603ull;
@@ -229,6 +243,13 @@ AdminReply HandleAdminRequest(const std::vector<uint8_t>& request, const ClientF
   if (r.op == AdminOp::Enable) {
     if (r.directoryUrl.empty() || r.accountId.empty() || r.hostId.empty() || r.hostToken.empty()) {
       reply.status = AdminStatus::BadRequest;
+      return reply;
+    }
+    // r6 V7: the worker registers with what the record names -- so the record names the product's own
+    // server or nothing. An administrator's request for any other address is refused, not recorded.
+    if (!same_origin(r.directoryUrl, p.allowedDirectoryUrl)) {
+      reply.status = AdminStatus::BadRequest;
+      reply.win32 = ERROR_INVALID_PARAMETER;
       return reply;
     }
     const std::string machine = p.machineId();

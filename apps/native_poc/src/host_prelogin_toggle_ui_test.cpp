@@ -60,7 +60,31 @@ bool wait_until(const std::function<bool()>& done, int ms) {
 
 const std::wstring kPath = L"C:\\ProgramData\\GNLink\\credential\\machine.cred";
 
+// r6 V3: the Run value in the test build's own key (Software\\GNLinkHostUiTest\\Run, never the user's).
+void set_test_run_value(bool on) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest\\Run", 0, nullptr, 0, KEY_WRITE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  const wchar_t value[] = L"\"C:\\nowhere\\GNLinkHost.exe\" --tray";
+  if (on) {
+    RegSetValueExW(key, L"GNLink", 0, REG_SZ, reinterpret_cast<const BYTE*>(value), sizeof(value));
+  } else {
+    RegDeleteValueW(key, L"GNLink");
+  }
+  RegCloseKey(key);
+}
+bool test_run_value_present() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest\\Run", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+  const bool present = RegQueryValueExW(key, L"GNLink", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+  RegCloseKey(key);
+  return present;
+}
+
 struct World {
+  std::string allowedUrl;
   std::mutex mu;
   std::map<std::wstring, pl::MachineRecord> files;
   uint64_t floor = 0;
@@ -89,6 +113,7 @@ struct World {
       return 0;
     };
     p.removeRecord = [this](const std::wstring& path) -> uint32_t { std::lock_guard<std::mutex> l(mu); ++calls; files.erase(path); return 0; };
+    p.allowedDirectoryUrl = allowedUrl;  // r6 V7: the fixture server the window signs in to
     p.featureEnabled = [this] {
       std::lock_guard<std::mutex> l(mu);
       ++calls;
@@ -303,6 +328,7 @@ int wmain() {
   }
   const std::wstring pipe = L"\\\\.\\pipe\\GNLinkTest-prelogin-ui-" + std::to_wstring(GetCurrentProcessId());
   World world;
+  world.allowedUrl = url;
   Server server;
   server.start(&world, pipe, [](void*) { return true; });  // stands in for the admin check (asInvoker build)
 
@@ -331,6 +357,10 @@ int wmain() {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+  // r6 V3: as if "Start with Windows" were on before -- in the TEST build's own key (the test build never
+  // touches the user's real Run key: kRunKey under REMOTE60_HOST_TEST_SEAM).
+  RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest");
+  set_test_run_value(true);
   std::wstring cmd = L"\"" + hostExe.wstring() + L"\"";
   STARTUPINFOW si{};
   si.cb = sizeof(si);
@@ -384,6 +414,28 @@ int wmain() {
                                                                Ui::name_of(status).find(L"켜짐") == 0,
           narrow(Ui::name_of(status)));
     check("screenshot: on", save_window_bmp(hwnd, (shots / L"prelogin_toggle_1_on.bmp").wstring()));
+    // r6 V3: the service now starts GNLinkHost at logon -- the Run entry that would start a second one is gone.
+    check("r6 V3: with access on, the Run entry is removed (the service starts GNLink at logon)",
+          wait_until([] { return !test_run_value_present(); }, 3000));
+
+    // r6 V3: and a second GNLinkHost in this session does not run beside the first.
+    {
+      PROCESS_INFORMATION second{};
+      STARTUPINFOW si2{};
+      si2.cb = sizeof(si2);
+      std::wstring cmd2 = L"\"" + hostExe.wstring() + L"\" --tray";
+      const bool s2 = CreateProcessW(nullptr, cmd2.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, env.data(),
+                                     root.wstring().c_str(), &si2, &second) != FALSE;
+      if (s2) AssignProcessToJobObject(job, second.hProcess);
+      DWORD rc = STILL_ACTIVE;
+      const bool left = s2 && WaitForSingleObject(second.hProcess, 8000) == WAIT_OBJECT_0 && GetExitCodeProcess(second.hProcess, &rc);
+      check("r6 V3: a second GNLinkHost started in the same session leaves at once (exit 0), the first stays",
+            left && rc == 0 && IsWindow(hwnd), std::to_string(rc));
+      if (s2) {
+        CloseHandle(second.hThread);
+        CloseHandle(second.hProcess);
+      }
+    }
 
     // Off.
     check("toggled off through UI Automation", Ui::toggle(box));
@@ -394,6 +446,8 @@ int wmain() {
     check("the window says it is off", Ui::toggle_state(box) == ToggleState_Off && Ui::name_of(status) == L"꺼짐",
           narrow(Ui::name_of(status)));
     check("screenshot: off again", save_window_bmp(hwnd, (shots / L"prelogin_toggle_2_off.bmp").wstring()));
+    check("r6 V3: with access off, the Run entry it took over is given back",
+          wait_until([] { return test_run_value_present(); }, 3000));
 
     // The product's admin check: this run is not elevated, so the service refuses and nothing moves.
     server.stop();
@@ -437,6 +491,7 @@ int wmain() {
   if (ui.root) ui.root->Release();
   if (ui.uia) ui.uia->Release();
   server.stop();
+  RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\GNLinkHostUiTest");
   if (started) {
     TerminateProcess(pi.hProcess, 0);
     WaitForSingleObject(pi.hProcess, 5000);

@@ -565,6 +565,7 @@ add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
   src/update_readiness.cpp
   src/host_app_main.cpp
+  src/prelogin_autostart.cpp
   src/prelogin_admin_pipe.cpp
   src/directory_client.cpp
   src/update_endpoint.cpp
@@ -1125,7 +1126,7 @@ add_executable(remote60_viewer_prelogin_login_e2e_test
 target_include_directories(remote60_viewer_prelogin_login_e2e_test PRIVATE src)
 target_link_libraries(remote60_viewer_prelogin_login_e2e_test PRIVATE
   remote60_clip_image remote60_test_scratch_dir
-  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt advapi32
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt advapi32 crypt32
   d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
 if(MSVC)
   target_compile_options(remote60_viewer_prelogin_login_e2e_test PRIVATE /utf-8)
@@ -2201,6 +2202,18 @@ target_include_directories(remote60_prelogin_admin_pipe_test PRIVATE src)
 target_link_libraries(remote60_prelogin_admin_pipe_test PRIVATE advapi32)
 if(MSVC)
   target_compile_options(remote60_prelogin_admin_pipe_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r6 (V1, V4): the pre-login worker's launch contract (environment, arguments, restart backoff)
+# and what uninstall withdraws.
+add_executable(remote60_prelogin_worker_launch_test
+  src/prelogin_worker_launch_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_prelogin_worker_launch_test PRIVATE src)
+target_link_libraries(remote60_prelogin_worker_launch_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_worker_launch_test PRIVATE /utf-8)
 endif()
 
 # prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" -- the product receiver with

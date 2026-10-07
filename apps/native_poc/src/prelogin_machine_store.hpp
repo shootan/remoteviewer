@@ -61,4 +61,17 @@ bool OwnerSidIsTrusted(const void* sid);
 // object owned by a trusted principal. Returns Ok, Dacl (reparse or untrusted owner), or Read (cannot open).
 MachineStoreStatus ValidateProtectedPath(const std::wstring& path, uint32_t* win32);
 
+// r6 V7: the only directory server a pre-login worker registers with, and the only one the service
+// records (kFixedDirectoryUrl; a test build of the host names its loopback fixture,
+// GNLINK_STREAM_TEST_DIRECTORY, instead).
+std::string PreloginAllowedDirectoryUrl();
+
+#ifdef REMOTE60_STREAM_TEST_SEAM
+// TEST BUILD ONLY (GNLinkStreamMigrationTest, r6 V2): the record at GNLINK_STREAM_TEST_MACHINE_RECORD --
+// read, machine-DPAPI unsealed and parsed exactly as ReadAndOpenMachineRecord does, without the G5
+// owner/ancestry check on its folder (a non-elevated test cannot make a SYSTEM-owned one). *path gets
+// the path used. No variable: Read.
+MachineStoreStatus ReadAndOpenMachineRecordForTest(std::wstring* path, MachineRecord* out, uint32_t* win32);
+#endif
+
 }  // namespace remote60::native_poc::prelogin

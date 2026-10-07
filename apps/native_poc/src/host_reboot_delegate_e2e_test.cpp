@@ -247,6 +247,7 @@ struct Service {
       p.readRecord = [](const std::wstring&, pl::MachineRecord*) { return false; };
       p.writeRecord = [](const std::wstring&, const pl::MachineRecord&) -> uint32_t { return 5; };
       p.removeRecord = [](const std::wstring&) -> uint32_t { return 0; };
+      p.allowedDirectoryUrl = "http://127.0.0.1:1";  // not used here (no Enable)
       p.featureEnabled = [] { return true; };  // r5 G11: pre-login access is on, as the service says
       p.queryStartType = [](uint32_t*) { return false; };
       p.setStartType = [](uint32_t) -> uint32_t { return 5; };

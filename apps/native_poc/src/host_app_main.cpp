@@ -42,10 +42,12 @@
 #include "host_recovery_policy.hpp"
 #include "async_worker_group.hpp"
 #include "child_environment.hpp"
+#include "stream_child_env.hpp"
 #include <vector>
 
 #include "directory_client.hpp"
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_autostart.hpp"
 #include "secure_input_protocol.hpp"
 #include "host_app_log.hpp"
 #include "update_readiness.hpp"
@@ -612,12 +614,12 @@ class StreamingHostProcess {
       // H.264 is still behind a build-time experiment switch in the streaming host, and a
       // build without it refuses --codec h264 and exits immediately. The product has no other
       // path, so the switch is turned on for the child rather than left to how it was built.
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+      // (The values are stream_child_env.hpp's ProductStreamChildEnv -- the service's pre-login worker
+      // gets the same ones, r6 V1.)
       // The product encoder preset, stated instead of inherited: whatever happens to be in
       // the parent environment must not silently change how every session encodes. Chosen by
       // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
       // latency p95; text legibility is already protected by the peak-constrained VBR policy.
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
       // GPU surface encode bypasses the CPU readback that stalls (captureUnmapWait) when
       // another app -- a game -- holds the GPU. It is opt-in (nv12SurfaceRequested_, default
       // off) because it depends on the driver, and it is forced off after repeated crashes so
@@ -625,7 +627,9 @@ class StreamingHostProcess {
       // the value the child sees is always this decision, not whatever the environment held.
       const bool nv12Surface = nv12SurfaceRequested_.load(std::memory_order_relaxed) &&
                                !nv12SurfaceForcedOff;
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_NV12_SURFACE", nv12Surface ? L"1" : L"0");
+      for (const auto& kv : remote60::native_poc::ProductStreamChildEnv(nv12Surface)) {
+        SetEnvironmentVariableW(kv.first.c_str(), kv.second.c_str());
+      }
 
       AppendLogLineOnce(nv12Surface
                             ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
@@ -876,7 +880,13 @@ void set_status(const std::wstring& text) {
 
 // ---------------------------------------------------------------- autostart
 
+#ifdef REMOTE60_HOST_TEST_SEAM
+// TEST BUILD ONLY: a key of its own, never the user's real Run key (r6 V3 -- turning pre-login access on
+// now takes the Run entry away, and a test run must not take the user's).
+const wchar_t kRunKey[] = L"Software\\GNLinkHostUiTest\\Run";
+#else
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#endif
 /**
  * The name Task Manager's Startup tab shows, which is why it matters what it says.
  *
@@ -933,6 +943,46 @@ void set_autostart(bool enabled) {
     RegDeleteValueW(key, kRunValue);
     // Off has to mean off even on a machine that only ever had the old name.
     RegDeleteValueW(key, kLegacyRunValue);
+  }
+  RegCloseKey(key);
+}
+
+// r6 V3: with pre-login access on, the SERVICE starts GNLinkHost at logon (secure_input_service_main.cpp
+// launch_user_host). The Run entry would start a second one, so it goes -- only once the service has
+// confirmed it is on (PreloginServiceOwnsUserStartup), and remembered, so turning the feature off puts
+// back what the user had. The single-instance guard in wWinMain covers the moment both could start.
+#ifdef REMOTE60_HOST_TEST_SEAM
+const wchar_t kTakeoverKey[] = L"Software\\GNLinkHostUiTest";
+#else
+const wchar_t kTakeoverKey[] = L"Software\\GNLink";
+#endif
+const wchar_t kTakeoverValue[] = L"PreloginTookOverAutostart";
+
+void prelogin_take_over_autostart() {
+  const bool had = autostart_enabled();
+  HKEY key = nullptr;
+  if (had && RegCreateKeyExW(HKEY_CURRENT_USER, kTakeoverKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) ==
+                 ERROR_SUCCESS) {
+    const DWORD one = 1;
+    RegSetValueExW(key, kTakeoverValue, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one));
+    RegCloseKey(key);
+  }
+  const wchar_t* const names[] = {kRunValue, kLegacyRunValue};
+  const bool removed = remote60::native_poc::prelogin::RemoveUserRunValues(HKEY_CURRENT_USER, kRunKey, names, 2);
+  append_host_app_log(std::string("[host-app] prelogin access on: the service starts GNLink at logon; Run entry ") +
+                      (removed ? "removed" : "could NOT be removed") + (had ? " (it was on; given back when off)" : ""));
+}
+
+void prelogin_give_back_autostart() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kTakeoverKey, 0, KEY_READ | KEY_WRITE, &key) != ERROR_SUCCESS) return;
+  DWORD v = 0, size = sizeof(v);
+  const bool took = RegQueryValueExW(key, kTakeoverValue, nullptr, nullptr, reinterpret_cast<LPBYTE>(&v), &size) ==
+                        ERROR_SUCCESS && v == 1;
+  if (took) {
+    set_autostart(true);
+    RegDeleteValueW(key, kTakeoverValue);
+    append_host_app_log("[host-app] prelogin access off: the Run entry it took over is back");
   }
   RegCloseKey(key);
 }
@@ -1741,6 +1791,19 @@ void on_prelogin_reply(PreloginReplyResult* result) {
                         " enabled=" + (owned->reply.enabled ? "1" : "0") + " win32=" + std::to_string(owned->reply.win32));
   }
   show_prelogin_reply(owned->reply, owned->asked);
+  // r6 V3: who starts GNLink at logon follows the service's answer, never a guess.
+  namespace pl = remote60::native_poc::prelogin;
+  if (owned->reply.status == pl::AdminStatus::Ok) {
+    if (pl::PreloginServiceOwnsUserStartup(owned->reply.enabled, /*serviceEnrollmentConfirmed=*/owned->reply.enabled)) {
+      prelogin_take_over_autostart();
+    } else if (owned->asked && !owned->want) {
+      prelogin_give_back_autostart();
+    }
+    // While the service starts it, "Start with Windows" is on and not the user's to switch.
+    SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
+                 owned->reply.enabled || autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(g.startWithWindowsCheck, !owned->reply.enabled);
+  }
   EnableWindow(g.preloginCheck, TRUE);
   gPreloginBusy.store(false);
 }
@@ -2299,6 +2362,35 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  // r6 V3: one GNLinkHost per session. With pre-login access on, the service starts it at logon; a Run
+  // entry left from before (or the user starting it by hand) must not make a second one -- that one
+  // brings the first to the front instead (unless it was itself a --tray start) and leaves.
+#ifdef REMOTE60_HOST_TEST_SEAM
+  wchar_t testRoot[MAX_PATH] = {};
+  GetEnvironmentVariableW(L"GNLINK_HOST_TEST_ROOT", testRoot, MAX_PATH);
+  uint32_t rootHash = 2166136261u;
+  for (const wchar_t* c = testRoot; *c; ++c) rootHash = (rootHash ^ static_cast<uint16_t>(*c)) * 16777619u;
+  const std::wstring instanceName = L"Local\\GNLinkHostUiTest-" + std::to_wstring(rootHash);
+#else
+  const std::wstring instanceName = L"Local\\GNLinkHostSingleInstance";
+#endif
+  HANDLE singleInstance = CreateMutexW(nullptr, FALSE, instanceName.c_str());
+  if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+    const bool tray = commandLine && wcsstr(commandLine, L"--tray") != nullptr;
+    if (HWND other = FindWindowW(kWindowClass, nullptr); other && !tray) {
+      ShowWindow(other, SW_SHOWNORMAL);
+      SetForegroundWindow(other);
+    }
+    CloseHandle(singleInstance);
+    return 0;
+  }
+  struct InstanceScope {
+    HANDLE h;
+    ~InstanceScope() {
+      if (h) CloseHandle(h);
+    }
+  } instanceScope{singleInstance};
 
   WSADATA wsa{};
   WSAStartup(MAKEWORD(2, 2), &wsa);

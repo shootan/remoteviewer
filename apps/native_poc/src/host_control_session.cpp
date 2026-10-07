@@ -86,24 +86,6 @@ namespace {
 // One remote restart in flight per host process, shared across both control dispatcher threads.
 std::mutex gRebootGateMu;
 
-// Enable a named privilege on this process token (SYSTEM has SE_SHUTDOWN_NAME but it must be enabled).
-bool enable_process_privilege(const char* name) {
-  HANDLE token = nullptr;
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
-  LUID luid{};
-  bool ok = LookupPrivilegeValueA(nullptr, name, &luid) != FALSE;
-  if (ok) {
-    TOKEN_PRIVILEGES tp{};
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    ok = AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr) != FALSE &&
-         GetLastError() == ERROR_SUCCESS;
-  }
-  CloseHandle(token);
-  return ok;
-}
-
 // prelogin-ui r5 (G11): whether the service has pre-login access on, as last asked. Asked in the
 // background every 30 s (never on the pong path, which must not wait on a pipe); false until known.
 bool durable_prelogin_enabled() {
@@ -139,18 +121,6 @@ remote60::native_poc::prelogin::PreloginCredReceiver& prelogin_cred() {
   return receiver;
 }
 
-// The fixed local restart (prelogin-service r3 R2/R4): short grace, non-forced, planned reason. The
-// client never names a machine/flags/text. Runs in the SYSTEM prelogin worker (which holds the
-// privilege); a non-elevated logged-in host must delegate to the service (follow-on, see (f)).
-uint32_t request_system_reboot() {
-  if (!enable_process_privilege(SE_SHUTDOWN_NAME)) return ERROR_PRIVILEGE_NOT_HELD;
-  wchar_t msg[] = L"GNLink 원격 요청으로 다시 시작합니다.";
-  const BOOL ok = InitiateSystemShutdownExW(nullptr, msg, /*dwTimeout=*/5, /*bForceAppsClosed=*/FALSE,
-                                            /*bRebootAfterShutdown=*/TRUE,
-                                            SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_MINOR_RECONFIG |
-                                                SHTDN_REASON_FLAG_PLANNED);
-  return ok ? 0u : GetLastError();
-}
 }  // namespace
 
 ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& stop,

@@ -59,6 +59,16 @@ int main() {
     ok(a.preloginMode, "`--prelogin` sets prelogin mode");
     ok(a.transport == "udp", "`--prelogin` alone pins transport=udp (not the TCP default)");
     ok(a.codec == "h264", "`--prelogin` alone pins codec=h264 (not raw)");
+    // r6 V6: the same listeners GNLinkHost gives its child (43000, then 3478).
+    ok(a.bindPortCandidates.size() == 2 && a.bindPortCandidates[0] == 43000 && a.bindPortCandidates[1] == 3478,
+       "r6 V6: `--prelogin` alone listens on 43000 and 3478, as the logged-in host does");
+  }
+  {
+    // r6 V5: a profile is not taken with --prelogin (and the host refuses to start: preloginRefusedConfig).
+    const Args a = run_parse({"GNLinkStream", "--prelogin", "--config", "C:\\nonexistent\\profile.json"});
+    ok(a.preloginRefusedConfig, "r6 V5: `--prelogin --config ...` is marked refused (the host exits 12)");
+    const Args b = run_parse({"GNLinkStream", "--config", "C:\\nonexistent\\profile.json"});
+    ok(!b.preloginRefusedConfig, "...while a logged-in host still takes its --config");
   }
   {
     // An explicit TCP is left intact by the parser so resolve_transport can refuse it (negative control).

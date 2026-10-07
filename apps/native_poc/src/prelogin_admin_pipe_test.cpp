@@ -78,6 +78,7 @@ struct World {
       ctx.minOwnerGeneration = floor;
       return pl::ValidateMachineRecord(it->second, ctx) == pl::RecordVerdict::Usable;
     };
+    p.allowedDirectoryUrl = "https://gnlink.example:8443";  // r6 V7: the server records may name
     p.queryStartType = [this](uint32_t* out) { ++calls; *out = startType; return true; };
     p.setStartType = [this](uint32_t t) -> uint32_t {
       ++calls;
@@ -252,6 +253,26 @@ int main() {
     const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, p);
     check("on, but the start type cannot be set: Failed with the error, and nothing was ever published (no record)",
           r.status == pl::AdminStatus::Failed && r.win32 == 1060 && !r.enabled && w.files.empty());
+  }
+  {
+    // r6 V7: a record names the product's own server, or nothing.
+    World w;
+    pl::AdminPrimitives p = w.primitives();
+    pl::AdminRequest other = enable_request();
+    other.directoryUrl = "https://elsewhere.example";
+    const pl::AdminReply r = pl::HandleAdminRequest(pl::EncodeAdminRequest(other), true, p);
+    check("r6 V7: on, naming another server: refused (BadRequest), nothing written, start type as it was",
+          r.status == pl::AdminStatus::BadRequest && w.files.empty() && w.startType == 3);
+    pl::AdminRequest path = enable_request();
+    path.directoryUrl = "HTTPS://GNLINK.EXAMPLE:8443/some/path";
+    check("...the same origin in another case / with a path is the same server (accepted)",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(path), true, p).status == pl::AdminStatus::Ok);
+    World e;
+    pl::AdminPrimitives ep = e.primitives();
+    ep.allowedDirectoryUrl.clear();
+    check("...and with no server configured nothing is accepted (fail closed)",
+          pl::HandleAdminRequest(pl::EncodeAdminRequest(enable_request()), true, ep).status == pl::AdminStatus::BadRequest &&
+              e.files.empty());
   }
   {
     World w;

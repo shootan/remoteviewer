@@ -8,7 +8,10 @@
 #include <aclapi.h>     // SetNamedSecurityInfoW / GetNamedSecurityInfoW
 #include <sddl.h>       // ConvertStringSecurityDescriptorToSecurityDescriptorW / ...ToString...
 
+#include <cstdlib>
 #include <vector>
+
+#include "fixed_directory.hpp"
 
 namespace remote60::native_poc::prelogin {
 
@@ -254,5 +257,44 @@ MachineStoreStatus ValidateProtectedPath(const std::wstring& path, uint32_t* win
   if (win32) *win32 = missing ? ERROR_FILE_NOT_FOUND : ERROR_ACCESS_DENIED;
   return missing ? MachineStoreStatus::Read : MachineStoreStatus::Dacl;  // reparse/untrusted -> Dacl
 }
+
+std::string PreloginAllowedDirectoryUrl() {
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  const char* fixture = std::getenv("GNLINK_STREAM_TEST_DIRECTORY");
+  return fixture ? std::string(fixture) : std::string();
+#else
+  return kFixedDirectoryUrl;
+#endif
+}
+
+#ifdef REMOTE60_STREAM_TEST_SEAM
+MachineStoreStatus ReadAndOpenMachineRecordForTest(std::wstring* path, MachineRecord* out, uint32_t* win32) {
+  if (win32) *win32 = 0;
+  wchar_t buf[MAX_PATH * 2] = {};
+  const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_MACHINE_RECORD", buf, MAX_PATH * 2);
+  if (n == 0 || n >= MAX_PATH * 2) return MachineStoreStatus::Read;
+  *path = std::wstring(buf, n);
+  HANDLE f = CreateFileW(path->c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (f == INVALID_HANDLE_VALUE) {
+    if (win32) *win32 = GetLastError();
+    return MachineStoreStatus::Read;
+  }
+  std::vector<uint8_t> sealed(static_cast<size_t>(GetFileSize(f, nullptr)));
+  DWORD got = 0;
+  const bool ok = sealed.empty() || ReadFile(f, sealed.data(), static_cast<DWORD>(sealed.size()), &got, nullptr);
+  CloseHandle(f);
+  if (!ok || got != sealed.size()) return MachineStoreStatus::Read;
+  DATA_BLOB in{static_cast<DWORD>(sealed.size()), sealed.data()};
+  DATA_BLOB plain{0, nullptr};
+  if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &plain)) {
+    if (win32) *win32 = GetLastError();
+    return MachineStoreStatus::Unprotect;
+  }
+  const bool parsed = ParseMachineRecord(plain.pbData, plain.cbData, out);
+  SecureZeroMemory(plain.pbData, plain.cbData);
+  LocalFree(plain.pbData);
+  return parsed ? MachineStoreStatus::Ok : MachineStoreStatus::Parse;
+}
+#endif
 
 }  // namespace remote60::native_poc::prelogin

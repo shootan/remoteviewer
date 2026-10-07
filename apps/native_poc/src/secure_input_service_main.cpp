@@ -35,6 +35,7 @@
 #include "prelogin_owner_floor.hpp"
 #include "prelogin_ready_signal.hpp"
 #include "prelogin_supervisor.hpp"
+#include "prelogin_worker_launch.hpp"
 
 namespace {
 
@@ -928,11 +929,25 @@ bool prelogin_feature_enabled() {
   return ValidateMachineRecord(rec, ctx) == RecordVerdict::Usable;
 }
 
+// The admin pipe's primitives as this service binds them (the running service and --uninstall-service).
+void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitives* p) {
+  remote60::native_poc::prelogin::BindProductStartType(p, kSecureInputServiceName);
+  remote60::native_poc::prelogin::BindProductMachineStore(p);
+  p->recordPath = machine_record_path;
+  p->machineId = current_machine_guid;
+  p->readFloor = [](uint64_t* out) { return ReadPreloginOwnerFloor(out); };  // r6 G6: fallible
+  p->raiseFloor = raise_prelogin_owner_floor;
+  p->featureEnabled = prelogin_feature_enabled;
+  // r6 V7: the only server a record may name -- the product's.
+  p->allowedDirectoryUrl = remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl();
+}
+
+
 // Launch a SYSTEM child in `sessionId` on `desktopName` (winsta0\<desktop>). Mirrors start_agent's token
 // handling but takes no inherited pipe; the child runs the full product engine. Returns the process
 // handle (caller owns) or nullptr.
 HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& desktopName,
-                                      const std::wstring& exe, const wchar_t* args) {
+                                      const std::wstring& exe, const wchar_t* args, const wchar_t* environment) {
   if (exe.empty()) return nullptr;
   HANDLE serviceToken = nullptr;
   HANDLE childToken = nullptr;
@@ -957,8 +972,8 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
   // CREATE_SUSPENDED so the child is assigned to the kill-on-close Job BEFORE it runs (S5): it can never
   // escape the job or do anything before the lifetime boundary is in place.
   ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
-                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, nullptr,
-                            nullptr, &startup, &proc) != FALSE;
+                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                            const_cast<wchar_t*>(environment), nullptr, &startup, &proc) != FALSE;
   CloseHandle(childToken);
   if (!ok) return nullptr;
   // G9: NEVER resume a child we could not bind to the kill-on-close Job. ensure_child_job() or the
@@ -996,10 +1011,32 @@ void ensure_prelogin_worker(DWORD consoleSession) {
   // Reuse the existing worker ONLY if it is alive AND was launched for THIS console session (Codex S5):
   // after a fast-user-switch / console change the old child must never be mistaken for the new session's.
   if (child_alive(gPreloginWorker) && gPreloginWorkerSession == consoleSession) return;
+  // r6 V1: a worker that ended is said out loud (its exit code, how long it ran), and one that keeps
+  // dying is retried less and less often (prelogin_worker_launch.hpp), not every second for ever.
+  static remote60::native_poc::prelogin::WorkerRestartBackoff backoff;
+  static ULONGLONG launchedAt = 0;
+  const ULONGLONG now = GetTickCount64();
+  if (gPreloginWorker && !child_alive(gPreloginWorker)) {
+    DWORD rc = 0;
+    GetExitCodeProcess(gPreloginWorker, &rc);
+    const uint64_t wait = backoff.OnExit(launchedAt, now);
+    diag("prelogin: worker exited rc=%lu after %llu ms; next start in %llu ms", rc,
+         static_cast<unsigned long long>(now - launchedAt), static_cast<unsigned long long>(wait));
+  }
   stop_child(&gPreloginWorker);  // dead handle, or a different-session child -> never reuse
-  gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon",
-                                                    sibling_exe_path(L"GNLinkStream.exe"), L"--prelogin");
+  if (!backoff.MayLaunch(now)) return;
+  // r6 V1: the worker gets the product's streaming switches in an explicit environment (the same
+  // values GNLinkHost gives its child) -- the service's own environment has none of them, and without
+  // the encoder switch GNLinkStream refuses h264 and exits rc=11.
+  wchar_t* own = GetEnvironmentStringsW();
+  const std::vector<wchar_t> environment = remote60::native_poc::prelogin::PreloginWorkerEnvironment(own);
+  if (own) FreeEnvironmentStringsW(own);
+  const std::wstring args = remote60::native_poc::prelogin::PreloginWorkerArgs();
+  gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon", sibling_exe_path(L"GNLinkStream.exe"),
+                                                    args.c_str(), environment.data());
   gPreloginWorkerSession = gPreloginWorker ? consoleSession : 0xFFFFFFFFu;
+  launchedAt = now;
+  if (!gPreloginWorker) backoff.OnLaunchFailed(now);
   diag("prelogin: worker launch on console session=%u -> %s", consoleSession,
        gPreloginWorker ? "ok" : "FAILED");
 }
@@ -1231,13 +1268,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // writer of the machine record and of its own start mode -- over its own admin-only pipe
   // (prelogin_admin_pipe.cpp). The primitives are this file's own.
   remote60::native_poc::prelogin::AdminPrimitives adminPrimitives;
-  remote60::native_poc::prelogin::BindProductStartType(&adminPrimitives, kSecureInputServiceName);
-  remote60::native_poc::prelogin::BindProductMachineStore(&adminPrimitives);
-  adminPrimitives.recordPath = machine_record_path;
-  adminPrimitives.machineId = current_machine_guid;
-  adminPrimitives.readFloor = [](uint64_t* out) { return ReadPreloginOwnerFloor(out); };  // r6 G6: fallible
-  adminPrimitives.raiseFloor = raise_prelogin_owner_floor;
-  adminPrimitives.featureEnabled = prelogin_feature_enabled;
+  bind_service_admin_primitives(&adminPrimitives);
   // prelogin-ui r2: the restart the streaming host's gate admitted (item 6) and the user Host's ready
   // (item 7) -- both only from this install's GNLinkStream, elevated or SYSTEM.
   remote60::native_poc::prelogin::BindProductReboot(&adminPrimitives);
@@ -1583,7 +1614,7 @@ int run_agent(HANDLE readPipe) {
 // feature must not force a feature-on box off. So on an EXISTING service we only ever RAISE to AUTO when
 // the feature is explicitly enabled; otherwise we leave the start type untouched (SERVICE_NO_CHANGE). A
 // fresh install defaults to DEMAND (feature off) unless prelogin is enabled at install time. The runtime
-// feature toggle flips the mode through set_prelogin_start_mode(), not through a re-install.
+// feature toggle flips the mode through the admin pipe's Enable/Disable, not through a re-install.
 int install_service(bool preloginEnabled) {
   const std::wstring exe = current_executable_path();
   if (exe.empty()) return 1;
@@ -1618,28 +1649,18 @@ int install_service(bool preloginEnabled) {
   return 0;
 }
 
-// Flip only the start type (AUTO when the prelogin feature is enabled, DEMAND when disabled), leaving
-// the binary path / type / error control untouched. The feature toggle calls this; it never resurrects
-// a feature that was turned off, and it is the single place that moves the start mode at runtime.
-int set_prelogin_start_mode(bool enabled) {
-  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-  if (!manager) return static_cast<int>(GetLastError());
-  SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName, SERVICE_CHANGE_CONFIG);
-  if (!service) {
-    const DWORD err = GetLastError();
-    CloseServiceHandle(manager);
-    return static_cast<int>(err);
-  }
-  const DWORD startType = enabled ? SERVICE_AUTO_START : SERVICE_DEMAND_START;
-  const BOOL ok = ChangeServiceConfigW(service, SERVICE_NO_CHANGE, startType, SERVICE_NO_CHANGE,
-                                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-  const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
-  CloseServiceHandle(service);
-  CloseServiceHandle(manager);
-  return static_cast<int>(err);
-}
-
 int uninstall_service() {
+  // r6 V4: removing GNLink withdraws pre-login access exactly as turning it off does (the same decision,
+  // HandleAdminRequest Disable): the floor rises past the record, the record goes, the remembered start
+  // type goes. The floor itself stays -- it is what keeps a restored copy of the old record revoked if
+  // GNLink is installed again. Done before the service is deleted, while its primitives still apply.
+  {
+    remote60::native_poc::prelogin::AdminPrimitives p;
+    bind_service_admin_primitives(&p);
+    const auto reply = remote60::native_poc::prelogin::WithdrawPreloginAccessForUninstall(p);
+    diag("uninstall: pre-login access withdrawn status=%d win32=%lu", static_cast<int>(reply.status),
+         static_cast<unsigned long>(reply.win32));
+  }
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) return static_cast<int>(GetLastError());
   SC_HANDLE service = OpenServiceW(manager, kSecureInputServiceName,
@@ -1678,12 +1699,10 @@ int wmain(int argc, wchar_t** argv) {
     const uintptr_t value = static_cast<uintptr_t>(_wcstoui64(argv[2], nullptr, 10));
     return run_agent(reinterpret_cast<HANDLE>(value));
   }
+  // r6 V7: the start type moves only through the admin pipe's Enable/Disable (the record, the start type
+  // and the floor in their one order). The install / toggle switches that moved it on their own --
+  // --install-service-prelogin, --prelogin-autostart, --prelogin-demandstart -- had no caller and are gone.
   if (argc == 2 && std::wstring(argv[1]) == L"--install-service") return install_service(/*preloginEnabled=*/false);
-  // Install with the prelogin feature on (service comes up AUTO, before login).
-  if (argc == 2 && std::wstring(argv[1]) == L"--install-service-prelogin") return install_service(/*preloginEnabled=*/true);
-  // Runtime feature toggle: raise to AUTO / drop to DEMAND without a re-install.
-  if (argc == 2 && std::wstring(argv[1]) == L"--prelogin-autostart") return set_prelogin_start_mode(true);
-  if (argc == 2 && std::wstring(argv[1]) == L"--prelogin-demandstart") return set_prelogin_start_mode(false);
   if (argc == 2 && std::wstring(argv[1]) == L"--uninstall-service") return uninstall_service();
   SERVICE_TABLE_ENTRYW table[] = {
       {const_cast<wchar_t*>(kSecureInputServiceName), service_main},

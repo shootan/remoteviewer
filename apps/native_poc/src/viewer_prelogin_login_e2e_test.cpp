@@ -54,6 +54,11 @@
 #include "viewer_window_proc.hpp"
 #include "viewer_reboot_prompt.hpp"
 #include "native_video_client_session.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_worker_launch.hpp"
+#include "stream_child_env.hpp"
+#include <wincrypt.h>
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::e2e;
@@ -292,7 +297,71 @@ struct Host {
   }
 };
 
-bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, bool prelogin,
+// A machine record for this PC, as the service writes one (prelogin_machine_store.cpp: the product's
+// format, sealed with machine-scope DPAPI), naming the fixture directory. Its owner generation is above
+// the durable floor this PC has now, so the worker's binding check (machine id + floor) accepts it.
+bool seal_machine_record(const std::wstring& path, const std::string& url) {
+  namespace pl = remote60::native_poc::prelogin;
+  char guid[128] = {};
+  DWORD size = sizeof(guid);
+  if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid",
+                   RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, guid, &size) != ERROR_SUCCESS) {
+    return false;
+  }
+  uint64_t floor = 0;
+  if (!pl::ReadPreloginOwnerFloor(&floor)) return false;
+  pl::MachineRecord rec;
+  rec.accountId = 0x7E57;
+  rec.hostId = 0x7E58;
+  rec.ownerGeneration = floor + 1;
+  rec.enabled = true;
+  rec.directoryOrigin = url;
+  rec.machineId = guid;
+  pl::DirectoryCredential dc;
+  dc.accountId = "tester";
+  dc.hostId = "h-prelogin";
+  dc.hostToken = std::string(32, 'e');
+  rec.credential = pl::PackDirectoryCredential(dc);
+  std::vector<uint8_t> plain = pl::SerializeMachineRecord(rec);
+  DATA_BLOB in{static_cast<DWORD>(plain.size()), plain.data()};
+  DATA_BLOB out{0, nullptr};
+  const bool sealed = CryptProtectData(&in, L"GNLink prelogin machine credential (e2e)", nullptr, nullptr, nullptr,
+                                       CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN, &out) != FALSE;
+  SecureZeroMemory(plain.data(), plain.size());
+  if (!sealed) return false;
+  std::ofstream f(path, std::ios::binary);
+  f.write(reinterpret_cast<const char*>(out.pbData), out.cbData);
+  LocalFree(out.pbData);
+  return f.good();
+}
+
+enum class Start { Service, OldServiceEnvironment, LoggedIn, ServiceRecordForAnotherServer };
+
+// The environment the test starts from: its own, without a single REMOTE60_ switch (only the starter
+// under test may state those), with LOCALAPPDATA and ProgramData inside the staging directory, and the
+// test build's declared fixtures (GNLINK_STREAM_TEST_*). Nothing else.
+std::vector<wchar_t> test_base_environment(const std::wstring& dir, const std::vector<std::wstring>& fixtures) {
+  std::vector<wchar_t> out;
+  LPWCH env = GetEnvironmentStringsW();
+  for (const wchar_t* p = env; p && *p; p += wcslen(p) + 1) {
+    if (_wcsnicmp(p, L"REMOTE60_", 9) == 0 || _wcsnicmp(p, L"LOCALAPPDATA=", 13) == 0 ||
+        _wcsnicmp(p, L"ProgramData=", 12) == 0 || _wcsnicmp(p, L"GNLINK_", 7) == 0) {
+      continue;
+    }
+    out.insert(out.end(), p, p + wcslen(p) + 1);
+  }
+  if (env) FreeEnvironmentStringsW(env);
+  std::vector<std::wstring> mine = {L"LOCALAPPDATA=" + dir + L"host_localappdata", L"ProgramData=" + dir + L"programdata"};
+  mine.insert(mine.end(), fixtures.begin(), fixtures.end());
+  for (const std::wstring& kv : mine) {
+    out.insert(out.end(), kv.begin(), kv.end());
+    out.push_back(L'\0');
+  }
+  out.push_back(L'\0');
+  return out;
+}
+
+bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, Start how,
                 const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
@@ -300,6 +369,8 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
       !CopyFileW(self_path().c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
     return false;
   }
+  CreateDirectoryW((dir + L"host_localappdata").c_str(), nullptr);
+  CreateDirectoryW((dir + L"programdata").c_str(), nullptr);
   SECURITY_ATTRIBUTES sa{};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
@@ -310,31 +381,45 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(host->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
-  SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
-  SetEnvironmentVariableW(L"REMOTE60_NATIVE_FRAME_GATING_DISABLE", L"1");
-  SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATIC_SCENE_FPS", L"15");
   const std::wstring wurl(url.begin(), url.end());
-  std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
-                     L" --bind-port " + std::to_wstring(port) + L" --directory-url " + wurl +
-                     L" --directory-id tester --directory-pw e2e-pass-1234 --seconds 150" + L" --directory-cache \"" + dir +
-                     L"host_cache.json\"" + (prelogin ? L" --prelogin" : L"");
+  std::vector<std::wstring> fixtures = {
+      L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_CRED_TARGET_TITLE=" + targetTitle,
+      // a test pipe nobody serves: the host never reaches this PC's installed service
+      L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId())};
+  if (!extraEnv.empty()) fixtures.push_back(extraEnv);
+  std::wstring cmd;
+  std::vector<wchar_t> env;
+  if (how == Start::LoggedIn) {
+    // A logged-in host, the way GNLinkHost starts one (its switches from ProductStreamChildEnv).
+    cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" + L" --bind-port " +
+          std::to_wstring(port) + L" --directory-url " + wurl + L" --directory-id tester --directory-pw e2e-pass-1234" +
+          L" --seconds 150 --directory-cache \"" + dir + L"host_cache.json\"";
+    const std::vector<wchar_t> base = test_base_environment(dir, fixtures);
+    env = remote60::native_poc::BuildEnvironmentBlock(base.data(), remote60::native_poc::ProductStreamChildEnv(false));
+  } else {
+    // r6 V2: the pre-login worker exactly as the service starts it -- its argument list and its
+    // environment from prelogin_worker_launch.hpp, the functions the service calls. The test adds only
+    // its declared fixtures: the machine record's path, a loopback address/free port/lifetime (the
+    // product port may be the real GNLink's on this PC), and the directory fixture.
+    const std::wstring record = dir + L"programdata\\machine.cred";
+    // ServiceRecordForAnotherServer: a record that names some other address (r6 V7 negative).
+    if (!seal_machine_record(record, how == Start::ServiceRecordForAnotherServer ? std::string("http://127.0.0.1:1") : url)) {
+      return false;
+    }
+    fixtures.push_back(L"GNLINK_STREAM_TEST_MACHINE_RECORD=" + record);
+    fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_ADDRESS=127.0.0.1");
+    fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_PORT=" + std::to_wstring(port));
+    fixtures.push_back(L"GNLINK_STREAM_TEST_SECONDS=150");
+    cmd = L"\"" + dir + L"GNLinkStream.exe\" " + remote60::native_poc::prelogin::PreloginWorkerArgs();
+    const std::vector<wchar_t> base = test_base_environment(dir, fixtures);
+    // OldServiceEnvironment: what the service handed the worker before r6 -- its own environment, no
+    // product switches (the V1 counter-example).
+    env = how == Start::OldServiceEnvironment ? base : remote60::native_poc::prelogin::PreloginWorkerEnvironment(base.data());
+  }
   std::string why;
   const bool isolated = e2e_command_is_isolated(cmd, dir, &why);
   check("the host command is isolated from the user's files", isolated, why);
   if (!isolated) return false;
-  const std::wstring appData = dir + L"host_localappdata";
-  CreateDirectoryW(appData.c_str(), nullptr);
-  std::vector<wchar_t> env = e2e_isolated_environment(appData);
-  env.pop_back();
-  for (const std::wstring& kv :
-       {L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_CRED_TARGET_TITLE=" + targetTitle,
-        // a test pipe nobody serves: the host never reaches this PC's installed service
-        L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()),
-        extraEnv.empty() ? std::wstring(L"GNLINK_STREAM_TEST_UNUSED=1") : extraEnv}) {
-    env.insert(env.end(), kv.begin(), kv.end());
-    env.push_back(L'\0');
-  }
-  env.push_back(L'\0');
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
   STARTUPINFOW si{};
@@ -529,10 +614,40 @@ int wmain(int argc, wchar_t** argv) {
   HANDLE restricted = token_without_shutdown_privilege();
   Host host;
   const uint16_t hostPort = e2e_pick_free_udp_port();
+  if (!notPrelogin && restricted && hostPort != 0) {
+    // r6 V1 counter-example, first: the worker started the way the service started it BEFORE r6 -- the
+    // same argument list, the service's own environment with none of the product's switches -- ends at
+    // once (rc 11: the h264 switch is missing). This is what every reboot did.
+    Host old;
+    const bool oldStarted = start_host(&old, dir, directory.url(), hostPort, Start::OldServiceEnvironment, targets.title, restricted);
+    DWORD rc = STILL_ACTIVE;
+    const bool ended = oldStarted && WaitForSingleObject(old.pi.hProcess, 15000) == WAIT_OBJECT_0 &&
+                       GetExitCodeProcess(old.pi.hProcess, &rc);
+    check("r6 V1 counter-example: with the service's old environment the worker exits at once, rc 11 (h264 refused)",
+          ended && rc == 11 && old.log().find("unsupported codec") != std::string::npos, std::to_string(rc));
+    old.Stop();
+    // r6 V7: a record naming any server but the product's (here: the fixture) is not used -- offline.
+    Host other;
+    const bool otherStarted = start_host(&other, dir, directory.url(), hostPort, Start::ServiceRecordForAnotherServer,
+                                         targets.title, restricted);
+    const bool refused = otherStarted &&
+                         wait_until([&] { return other.log().find("names another server -> staying offline") != std::string::npos; }, 15000);
+    check("r6 V7: a machine record naming another server is not used (the worker stays offline)",
+          refused && other.log().find("machine credential loaded") == std::string::npos);
+    other.Stop();
+  }
   const bool started = restricted && hostPort != 0 &&
-                       start_host(&host, dir, directory.url(), hostPort, !notPrelogin, targets.title, restricted,
+                       start_host(&host, dir, directory.url(), hostPort, notPrelogin ? Start::LoggedIn : Start::Service,
+                                  targets.title, restricted,
                                   sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000" : L"");
-  check("the host (test build, staged as GNLinkStream.exe) started", started);
+  check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
+                    : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
+        started);
+  if (!notPrelogin && started) {
+    check("r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)",
+          wait_until([&] { return host.log().find("machine credential loaded hostId=h-prelogin") != std::string::npos; }, 20000),
+          host.log().substr(0, 600));
+  }
   const bool punched =
       started && wait_until([&] { return host.log().find("directory punch ->") != std::string::npos; }, 30000);
   check("the host registered and collected the viewer's capability from its heartbeat", punched);

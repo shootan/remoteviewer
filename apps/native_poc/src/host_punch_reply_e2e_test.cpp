@@ -279,6 +279,22 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   check("the host gets a LOCALAPPDATA inside the staging directory", envIsolated,
         "the diagnostic mirror writes under whatever LOCALAPPDATA it is handed");
   if (!cmdIsolated || !envIsolated) return false;  // never start a host that could reach the user's files
+  if (prelogin) {
+    // A --prelogin worker reads the machine record under %ProgramData%: this one gets an empty folder of
+    // its own, so a record on this PC (if there ever is one) can never be read or registered with.
+    const std::wstring programData = host->dir + L"programdata";
+    CreateDirectoryW(programData.c_str(), nullptr);
+    const std::wstring kv = L"ProgramData=" + programData;
+    std::vector<wchar_t> rebuilt;
+    for (const wchar_t* p = env.data(); *p; p += wcslen(p) + 1) {
+      if (_wcsnicmp(p, L"ProgramData=", 12) == 0) continue;
+      rebuilt.insert(rebuilt.end(), p, p + wcslen(p) + 1);
+    }
+    rebuilt.insert(rebuilt.end(), kv.begin(), kv.end());
+    rebuilt.push_back(L'\0');
+    rebuilt.push_back(L'\0');
+    env.swap(rebuilt);
+  }
   host->cachePath = host->dir + L"host_cache.json";
 
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -310,6 +326,10 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
       host->output.append(buf, got);
     }
   });
+  // r6 V5: a --prelogin worker given directory arguments ignores them and never starts its directory
+  // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
+  // above; the case checks the offline result itself.
+  if (prelogin) return host->WaitFor("[native-video-host][prelogin]", 20000);
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
   const std::string wantPath(host->cachePath.begin(), host->cachePath.end());
@@ -767,12 +787,11 @@ int wmain(int argc, wchar_t** argv) {
     check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
-  // ======================================================= prelogin: the --prelogin role goes ONLINE
-  // r6 G1: the service launches the worker with `--prelogin` only. Before the fix that resolved to
-  // TCP/raw and SKIPPED the UDP registration branch, so the box never heartbeat and never showed online
-  // after reboot. Here the SAME flag drives the real host to register + heartbeat against the fixture
-  // directory -- online. (Counter-example pre-fix: register count stays 0 and "directory online" never
-  // prints.)
+  // ======================================================= prelogin: nothing stands in for the machine record
+  // r6 V5 (replaces the r6 G1 "online" case here): a --prelogin worker's only credential is the machine
+  // record. Directory arguments -- what this case used to hand it so it would register -- are ignored,
+  // so the real host stays OFFLINE with them. That the --prelogin worker does come online, started the
+  // way the service starts it and from a machine record, is viewer_prelogin_login_e2e_test --service-start.
   {
     FakeDirectory dir;
     check("[prelogin] the fake directory starts", dir.Start());
@@ -781,15 +800,14 @@ int wmain(int argc, wchar_t** argv) {
     SpawnedHost host;
     const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
-    check("[prelogin] a real GNLinkStream starts with --prelogin only",
+    check("[prelogin] a real GNLinkStream starts with --prelogin and directory arguments",
           StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(),
                     "prelogin", /*prelogin=*/true));
-    // The flag alone had to reach the UDP directory-registration path: it registered and the host said
-    // it is online. A TCP resolution (the defect) would make both of these never happen.
-    check("[prelogin] --prelogin registered with the directory (so it is online after reboot)",
-          host.WaitFor("directory online", 30000) || dir.Count("/api/host/register") >= 1, host.tail());
-    check("[prelogin] ...and it did so over UDP (register only happens in the UDP branch)",
-          dir.Count("/api/host/register") >= 1,
+    check("[prelogin] r6 V5: it says the directory arguments are ignored",
+          host.WaitFor("directory arguments/environment ignored", 15000), host.tail());
+    Sleep(6000);  // long enough for a register that was going to happen
+    check("[prelogin] r6 V5: ...and it did NOT register with them (no machine record here -> offline)",
+          dir.Count("/api/host/register") == 0 && host.log().find("no machine credential enrolled") != std::string::npos,
           "registrations: " + std::to_string(dir.Count("/api/host/register")));
     // r6 G2 negative control: a --control-port was passed, yet prelogin opens NO separate TCP control
     // listener (the UDP control channel is the only path), so this startup line never prints.
