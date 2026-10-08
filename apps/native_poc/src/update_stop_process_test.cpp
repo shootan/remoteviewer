@@ -2143,14 +2143,23 @@ int main(int argc, char** argv) {
     else
       std::printf("note  member(file-id): 8.3 disabled on this volume; alias case not run\n");
 
-    // A hard link to the payload -> same file -> Target.
-    const std::wstring hardlink = installDir + L"\\GNLinkHost-hardlink.exe";
-    if (CreateHardLinkW(hardlink.c_str(), payload.c_str(), nullptr)) {
-      // Its leaf differs, so it is compared against installDir\\GNLinkHost-hardlink.exe (itself) -> Target;
-      // the point is the SAME-file recognition the file-id compare gives, which a string prefix cannot.
-      check("member(file-id): a hard link opens as the same file", verdict(hardlink, installDir) == TargetMembership::Target);
-      DeleteFileW(hardlink.c_str());
+    // A hard link in ANOTHER directory, with the payload NAME, to the installed payload -> compared
+    // against installDir\\GNLinkHost.exe (the ORIGINAL, not itself) -> same file -> Target. The plain
+    // copy with the same name (outsideExe) is a DIFFERENT file -> NotTarget (asserted above): together
+    // they show file identity sees across the path difference, which the earlier self-compare did not.
+    const std::wstring aliasDir = base + L"\\aliasdir";
+    CreateDirectoryW(aliasDir.c_str(), nullptr);
+    const std::wstring hlink = aliasDir + L"\\GNLinkHost.exe";
+    if (CreateHardLinkW(hlink.c_str(), payload.c_str(), nullptr)) {
+      check("member(file-id): a hard link (other dir, payload name) to the installed payload -> Target",
+            verdict(hlink, installDir) == TargetMembership::Target);
+      check("member(file-id): NEGATIVE a plain copy (other dir, payload name) is a different file -> NotTarget",
+            verdict(outsideExe, installDir) == TargetMembership::NotTarget);
+      DeleteFileW(hlink.c_str());
+    } else {
+      std::printf("note  member(file-id): hard link not supported on this volume; case not run\n");
     }
+    RemoveDirectoryW(aliasDir.c_str());
 
     // A junction into installDir: the payload reached through it is the same file -> Target.
     const std::wstring link = base + L"\\junc";
@@ -2225,6 +2234,60 @@ int main(int argc, char** argv) {
       for (const auto& t : filtered)
         if (t.pid == piA.dwProcessId)
           check("member(proc): A is membership-confirmed (not a refuse-blocker)", t.membershipConfirmed);
+
+      // E1: drive the REAL PrepareForSwap/requestStop, not just the enumerate vector. The stop request
+      // is a test-owned stub that records which pids were asked (no real process is closed here).
+      const std::wstring staging = base + L"\\staging";
+      CreateDirectoryW(staging.c_str(), nullptr);
+      auto run_prepare = [&](std::function<std::vector<ProcessTarget>()> enumFn, std::vector<DWORD>* asked) {
+        UpdateEffectsConfig c = config_for(installDir, staging, 0);
+        c.payloadNames = {L"GNLinkHost.exe"};
+        c.enumerateTargets = std::move(enumFn);
+        c.requestStop = [asked](const ProcessTarget& t) { asked->push_back(t.pid); return true; };
+        WindowsUpdateEffects e(c);
+        return std::make_pair(e.PrepareForSwap(), e.last_error());
+      };
+      auto countPid = [](const std::vector<DWORD>& v, DWORD pid) {
+        int n = 0; for (DWORD p : v) if (p == pid) ++n; return n;
+      };
+      // Filtered (production) enumerate -> only A reaches the stop path.
+      {
+        std::vector<DWORD> asked;
+        const auto r = run_prepare([&] { return enumerate_product_processes({L"GNLinkHost.exe"}, installDir); }, &asked);
+        check("member(behavior): PrepareForSwap asks A (the payload) to stop", countPid(asked, piA.dwProcessId) >= 1, r.second);
+        check("member(behavior): NEGATIVE B (outside) is never asked to stop (0)", countPid(asked, piB.dwProcessId) == 0);
+        check("member(behavior): NEGATIVE C (backup) is never asked to stop (0)", countPid(asked, piC.dwProcessId) == 0);
+      }
+      // Filter-removed control: unfiltered enumerate -> B and C DO become stop targets (the property fails).
+      {
+        std::vector<DWORD> asked;
+        run_prepare([&] { return enumerate_product_processes({L"GNLinkHost.exe"}); }, &asked);
+        check("member(behavior): control -- WITHOUT the filter, B and C ARE asked to stop (filter is load-bearing)",
+              countPid(asked, piB.dwProcessId) >= 1 && countPid(asked, piC.dwProcessId) >= 1);
+      }
+      // Unknown-rejection is load-bearing: a membershipConfirmed=false target REFUSES the swap and is
+      // never asked; flipping ONLY that flag to true lets the same target proceed and be asked.
+      {
+        ProcessTarget u;
+        u.pid = piB.dwProcessId;
+        u.imagePath = outsideExe;
+        u.creationTime = 1;
+        u.hasWindow = true;  // so a confirmed one routes straight to a direct stop request
+        u.identityKnown = true;
+        u.membershipConfirmed = false;
+        std::vector<DWORD> asked;
+        const auto r = run_prepare([u] { return std::vector<ProcessTarget>{u}; }, &asked);
+        check("member(behavior): a membership-Unknown target REFUSES the swap", !r.first);
+        check("member(behavior): ...and is never asked to stop (0)", countPid(asked, u.pid) == 0);
+        ProcessTarget confirmed = u;
+        confirmed.membershipConfirmed = true;
+        std::vector<DWORD> asked2;
+        run_prepare([confirmed] { return std::vector<ProcessTarget>{confirmed}; }, &asked2);
+        check("member(behavior): control -- the SAME target membership-confirmed IS asked to stop "
+              "(Unknown-refusal is load-bearing)",
+              countPid(asked2, confirmed.pid) >= 1);
+      }
+      RemoveDirectoryW(staging.c_str());
     }
     // Release the children (by event), then make sure none is left (by handle, never by name).
     if (hA) SetEvent(hA);
