@@ -1219,7 +1219,7 @@ bool H264Encoder::set_d3d11_device(ID3D11Device* device) {
   return true;
 }
 
-bool H264Encoder::configure_types() {
+bool H264Encoder::configure_types(const char* stageReason) {
   if (!enc_) return false;
 
   // stutter-keyframe r1 (step-4a observability, cadence-neutral): try the GOP size BEFORE the output
@@ -1233,12 +1233,12 @@ bool H264Encoder::configure_types() {
     const HRESULT preSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, preGop);
     uint32_t preReadback = 0;
     const bool preGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &preReadback);
-    char preLine[192];
+    char preLine[224];
     std::snprintf(preLine, sizeof(preLine),
-                  "[native-video-host] h264 gop-config stage=pre-type backend=%s requestedGop=%u "
+                  "[native-video-host] h264 gop-config stage=pre-type reason=%s backend=%s requestedGop=%u "
                   "setHr=0x%08lX readbackOk=%d readbackGop=%u",
-                  backendName_, preGop, static_cast<unsigned long>(preSetHr), preGetOk ? 1 : 0,
-                  preReadback);
+                  stageReason ? stageReason : "init", backendName_, preGop,
+                  static_cast<unsigned long>(preSetHr), preGetOk ? 1 : 0, preReadback);
     std::cout << preLine << "\n";
   }
 
@@ -1953,7 +1953,9 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
         if (odb.pEvents) odb.pEvents->Release();
         ++encodeStats->processOutputStreamChangeCount;
-        if (!configure_types()) return false;
+        // r2 F3: a mid-stream re-type, not the initial configure -- the pre-type GOP log says so, so a
+        // field reader does not mistake a renegotiation probe for the first init.
+        if (!configure_types("retype")) return false;
         continue;
       }
       if (FAILED(po)) {

@@ -231,7 +231,7 @@ class H264Encoder {
   void shutdown();
 
  private:
-  bool configure_types();
+  bool configure_types(const char* stageReason = "init");
   void apply_low_latency_codec_api();
   bool apply_rate_control(const char* reason);
   bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,

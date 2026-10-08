@@ -136,7 +136,15 @@ class FakeHost {
     if (getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return false;
     port_ = ntohs(addr.sin_port);
     (void)set_recv_timeout(sock_, 5);
-    if (!enc_.initialize(kWidth, kHeight, 60, 3000000, plan.keyintFrames)) {
+    // stutter-keyframe r2 F3: REMOTE60_RECOVERY_TEST_KEYINT overrides EVERY scenario's GOP, so the
+    // FULL existing recovery suite can be re-run at 4x (2400 = the 60251d3 condition) in one pass --
+    // not just the two S-longgop blocks. Default keeps each scenario's own keyintFrames (600).
+    uint32_t keyint = plan.keyintFrames;
+    if (const char* kv = std::getenv("REMOTE60_RECOVERY_TEST_KEYINT")) {
+      const uint32_t parsed = static_cast<uint32_t>(std::strtoul(kv, nullptr, 10));
+      if (parsed > 0) keyint = parsed;
+    }
+    if (!enc_.initialize(kWidth, kHeight, 60, 3000000, keyint)) {
       std::printf("  fake host: H264Encoder::initialize failed\n");
       return false;
     }
