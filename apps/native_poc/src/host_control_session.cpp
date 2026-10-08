@@ -116,6 +116,8 @@ remote60::native_poc::prelogin::PreloginCredReceiver& prelogin_cred() {
       remote60::native_poc::prelogin::ProductCredEnvironment(), remote60::native_poc::prelogin::ProductCredHostId(),
       remote60::native_poc::prelogin::ProductCredTargetWaitMs());
   static const bool logged = [] {
+    // r17 R16-1: nothing issued, opened or typed once this worker has left the logon desktop.
+    receiver.stillServing = [] { return !remote60::native_poc::prelogin::PreloginLeftLatch().load(); };
     receiver.onResult = [](uint32_t requestId, uint16_t stage, uint32_t win32) {
       std::cout << "[native-video-host][prelogin-cred] requestId=" << requestId << " stage=" << stage
                 << " win32=" << win32 << "\n";
@@ -161,7 +163,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
     if (!args.preloginMode) return false;
     if (!capture.preloginDesktopServing.load(std::memory_order_acquire)) return true;
     const std::wstring now = remote60::native_poc::prelogin::InputDesktopName();
-    return now.empty() || _wcsicmp(now.c_str(), capture.preloginServingDesktop.c_str()) != 0;
+    // r17 R16-1: what this path SEES is the same permanent leave as the watch's (exit 14), not only this
+    // input refused.
+    return remote60::native_poc::prelogin::PreloginInputRefused(now, capture.preloginServingDesktop);
   };
   auto link_directory_authenticated = [&]() {
     return linkDirectoryAuthenticated && clientSession.DirectoryAuthenticatedFor(servedEpoch);

@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <tuple>
 #include <cstring>
 #include <map>
 #include <string>
@@ -246,6 +247,47 @@ int main(int argc, char** argv) {
       CloseHandle(pi.hProcess);
     }
     check("R15-3: no handle: not alive", !sus::CallerProcessAlive(nullptr));
+  }
+  {
+    // r17 R16-2: a REAL pipe connection. The caller (this process) stays alive and keeps its pid on the pipe,
+    // but closes its pipe handle: the connection is broken. Before the final step: refused, WTS 0. With the
+    // connection kept: the unlock goes through once (the control).
+    auto run = [&](bool closeClient, uint32_t id) {
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-unlock-conn-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                std::to_wstring(id);
+      HANDLE server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                                       1, 4096, 4096, 0, nullptr);
+      HANDLE client = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      const bool connected = ConnectNamedPipe(server, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
+      Os os;
+      Conn a(GetCurrentProcessId(), 2);
+      a.us.caller.process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentProcessId());
+      a.us.callerStillThere = [server, &a] { return sus::UnlockConnectionAlive(server, a.us.caller); };
+      const SecureUnlockChallengeResponse ca = challenge(a, os, id);
+      ULONG pidAfter = 0;
+      if (closeClient && client != INVALID_HANDLE_VALUE) {
+        CloseHandle(client);
+        client = INVALID_HANDLE_VALUE;
+      }
+      const bool pidStill = GetNamedPipeClientProcessId(server, &pidAfter) && pidAfter == GetCurrentProcessId();
+      const SecureUnlockResult r = sealed(a, os, seal(ca, u"pw"));
+      const size_t wts = os.wts.size();
+      if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
+      CloseHandle(server);
+      CloseHandle(a.us.caller.process);
+      return std::make_tuple(connected && ca.stage == st(UnlockStage::ChallengeIssued), pidStill, r.stage, wts);
+    };
+    const auto broken = run(true, 81);
+    check("R16-2: the client closed only its pipe handle (process alive, its pid still answered on the pipe): "
+          "refused, WTSConnectSession 0 times",
+          std::get<0>(broken) && std::get<1>(broken) && std::get<2>(broken) == st(UnlockStage::RejectedStaleTopology) &&
+              std::get<3>(broken) == 0,
+          "pidStill=" + std::to_string(std::get<1>(broken)) + " stage=" + std::to_string(std::get<2>(broken)) + " wts=" +
+              std::to_string(std::get<3>(broken)));
+    const auto kept = run(false, 82);
+    check("R16-2: control -- the connection kept: the unlock goes through, WTSConnectSession once",
+          std::get<0>(kept) && std::get<2>(kept) == st(UnlockStage::SessionUnlocked) && std::get<3>(kept) == 1,
+          "stage=" + std::to_string(std::get<2>(kept)) + " wts=" + std::to_string(std::get<3>(kept)));
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

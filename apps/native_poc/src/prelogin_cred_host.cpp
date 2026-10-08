@@ -24,6 +24,10 @@ ControlUnlockChallengeMessage PreloginCredReceiver::Challenge(const ControlUnloc
   std::lock_guard<std::mutex> lock(mu_);
   ControlUnlockChallengeMessage m{};
   m.requestId = req.requestId;
+  if (stillServing && !stillServing()) {  // r17 R16-1: this worker has left the logon desktop
+    m.status = static_cast<uint16_t>(UnlockStage::RejectedPolicy);
+    return m;
+  }
   // The same limit as the service: an unauthenticated peer must not spin key generation.
   const uint64_t now = now_ms();
   if (lastChallengeMs_ != 0 && now - lastChallengeMs_ < 500) {
@@ -80,7 +84,8 @@ void PreloginCredReceiver::Sealed(const ControlUnlockSealedRequestMessage& req, 
   std::lock_guard<std::mutex> lock(mu_);
   if (haveResult_ && result_.requestId == req.requestId) return;  // a retransmit: typed once, answered the same
   if (inflight_) return;  // one credential at a time; a retransmit of it (or anything else) waits for its result
-  if (!haveChallenge_ || req.requestId != challenge_.requestId) {
+  if (!haveChallenge_ || req.requestId != challenge_.requestId || (stillServing && !stillServing())) {
+    // r17 R16-1: also a challenge issued before this worker left the logon desktop
     Finish(req.requestId, UnlockStage::RejectedStaleTopology, 0);
     return;
   }
@@ -138,7 +143,7 @@ void PreloginCredReceiver::Deliver(uint16_t* units, uint16_t count, uint32_t req
   // ended / a new challenge), not expired, same console session and input desktop.
   UnlockStage dropped = UnlockStage::Injected;  // Injected = still valid
   auto still_valid = [&] {
-    if (cancel_.load(std::memory_order_acquire)) {
+    if (cancel_.load(std::memory_order_acquire) || (stillServing && !stillServing())) {
       dropped = UnlockStage::RejectedStaleTopology;
     } else if (now_ms() >= expiresMs) {
       dropped = UnlockStage::Timeout;

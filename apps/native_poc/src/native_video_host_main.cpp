@@ -393,17 +393,19 @@ int main(int argc, char** argv) {
     // r9 W2: the SYSTEM pre-login worker serves the logon desktop only. The first time the input desktop is
     // another -- a user has logged on and it is now theirs -- it stops serving and leaves at once, whatever
     // the handoff's state (prelogin_logon_desktop.hpp). Input is injected only while this says "serving".
+    // r17 R16-1: one leave for the whole worker -- the watch's and any other path's that sees another desktop.
+    static const auto leave = [](const std::wstring& name) {
+      std::cout << "[native-video-host][prelogin] the input desktop is no longer the logon desktop (now \""
+                << std::string(name.begin(), name.end()) << "\"): stop serving and leave (r9 W2)" << std::endl;
+      std::cerr.flush();
+      TerminateProcess(GetCurrentProcess(), remote60::native_poc::prelogin::kLeftLogonDesktopExit);
+    };
+    remote60::native_poc::prelogin::PreloginLeaveHandler() = leave;
     preloginDesktopWatch.Start([&capture](remote60::native_poc::StoppableWorker& w) {
       remote60::native_poc::prelogin::RunLogonDesktopWatch(
           w, capture.preloginServingDesktop, capture.preloginDesktopServing,
           [] { return remote60::native_poc::prelogin::InputDesktopName(); },
-          [] { std::cout << "[native-video-host][prelogin] serving the logon desktop\n"; },
-          [](const std::wstring& name) {
-            std::cout << "[native-video-host][prelogin] the input desktop is no longer the logon desktop (now \""
-                      << std::string(name.begin(), name.end()) << "\"): stop serving and leave (r9 W2)" << std::endl;
-            std::cerr.flush();
-            TerminateProcess(GetCurrentProcess(), remote60::native_poc::prelogin::kLeftLogonDesktopExit);
-          });
+          [] { std::cout << "[native-video-host][prelogin] serving the logon desktop\n"; }, leave);
     });
   }
   if (!ws.ok) {

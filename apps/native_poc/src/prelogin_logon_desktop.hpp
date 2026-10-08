@@ -18,6 +18,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <functional>
 #include <iostream>
 #include <string>
 
@@ -50,6 +51,35 @@ inline std::wstring InputDesktopName() {
     CloseDesktop(d);
   }
   return name;
+}
+
+// r17 R16-1: ONE permanent "this worker has left" for the whole process. Whichever prelogin path actually
+// sees an input desktop other than the one served -- the watch, or the control path's fresh look before an
+// input -- latches it, and the first to latch runs the leave handler (the product's: exit 14). The
+// credential receiver refuses once it is set, so a challenge issued before is never used after, even when
+// the desktop has come back to the logon one before the process ended.
+inline std::atomic<bool>& PreloginLeftLatch() {
+  static std::atomic<bool> left{false};
+  return left;
+}
+inline std::function<void(const std::wstring&)>& PreloginLeaveHandler() {
+  static std::function<void(const std::wstring&)> handler;
+  return handler;
+}
+// A prelogin path saw `name` (empty = could not be told: not an observation of another desktop).
+inline void PreloginSawDesktop(const std::wstring& name, const std::wstring& served) {
+  if (name.empty() || _wcsicmp(name.c_str(), served.c_str()) == 0) return;
+  if (!PreloginLeftLatch().exchange(true, std::memory_order_acq_rel)) {
+    if (PreloginLeaveHandler()) PreloginLeaveHandler()(name);
+  }
+}
+
+// r17 R16-1: the control path's look right before an input (`now` = the input desktop asked afresh): refused
+// unless it is the served desktop and this worker has not left; seeing another desktop latches the leave.
+inline bool PreloginInputRefused(const std::wstring& now, const std::wstring& served) {
+  PreloginSawDesktop(now, served);
+  return now.empty() || _wcsicmp(now.c_str(), served.c_str()) != 0 ||
+         PreloginLeftLatch().load(std::memory_order_acquire);
 }
 
 // The decision over successive observations. Pure.
@@ -86,14 +116,16 @@ void RunLogonDesktopWatch(StoppableWorker& w, const std::wstring& servedDesktop,
   bool announced = false;
   while (!w.Stopping()) {
     const std::wstring name = desktopName();
-    const bool now = guard.Observe(name);
+    // r17 R16-1: another path (the control path) may have seen it first -- the same permanent leave.
+    const bool now = guard.Observe(name) && !PreloginLeftLatch().load(std::memory_order_acquire);
     serving.store(now, std::memory_order_release);
+    if (PreloginLeftLatch().load(std::memory_order_acquire) && !guard.left()) return;  // its handler has run
     if (now && !announced) {
       onFirstServing();
       announced = true;
     }
     if (guard.left()) {
-      onLeft(name);
+      if (!PreloginLeftLatch().exchange(true, std::memory_order_acq_rel)) onLeft(name);  // r17: one latch
       return;
     }
     if (!w.Wait(periodMs)) return;

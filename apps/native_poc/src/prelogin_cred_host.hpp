@@ -68,6 +68,9 @@ class PreloginCredReceiver {
 
   // Told every terminal result (request id, stage, win32) -- never the credential. Set before use.
   std::function<void(uint32_t requestId, uint16_t stage, uint32_t win32)> onResult;
+  // r17 R16-1: false once this worker has left the logon desktop (PreloginLeftLatch): no challenge is
+  // issued, no sealed credential is opened, and one already waiting is not typed. Unset: always serving.
+  std::function<bool()> stillServing;
 
   uint64_t injections() {  // how many credentials were typed (tests, diag)
     std::lock_guard<std::mutex> lock(mu_);

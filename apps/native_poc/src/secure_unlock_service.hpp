@@ -47,6 +47,18 @@ inline bool CallerProcessAlive(HANDLE process) {
   return process != nullptr && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
 }
 
+// r17 R16-2: THIS connection is still there -- the caller process alive (its held handle), the pipe's client
+// still that process, AND the connection itself not broken: a client that closed only its pipe handle keeps
+// its pid (GetNamedPipeClientProcessId still answers it) while the pipe is broken (PeekNamedPipe fails with
+// ERROR_BROKEN_PIPE). Non-blocking; called on the thread that owns the pipe.
+inline bool UnlockConnectionAlive(HANDLE pipe, const UnlockCaller& caller) {
+  if (!CallerProcessAlive(caller.process)) return false;
+  ULONG pid = 0;
+  if (!GetNamedPipeClientProcessId(pipe, &pid) || pid != caller.processId) return false;
+  DWORD avail = 0;
+  return PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr) != FALSE;
+}
+
 // The OS, as the decisions need it (the service binds the real calls; tests bind stand-ins).
 struct UnlockPrimitives {
   std::function<bool(uint32_t session, bool* known)> sessionIsLocked;

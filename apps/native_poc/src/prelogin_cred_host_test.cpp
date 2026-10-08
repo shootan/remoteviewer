@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "prelogin_cred_host.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
 using namespace remote60::native_poc;
@@ -206,6 +207,39 @@ int main() {
     check("r16: ...a challenge the new worker issued goes through (typed once)",
           wait_result(after, 32, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) && seams.count() == 1,
           [&] { return std::string(stage_word(res.stage)); });
+  }
+
+  {
+    // r17 R16-1: ONE worker, not ended: its control path sees the screen saver right before an input
+    // (PreloginInputRefused, what host_control_session calls), and the desktop is back at the logon one
+    // before anything else looks. The worker has left for good (the leave handler ran -- the product's exits
+    // 14); a challenge it issued BEFORE is not used after, and none is issued any more.
+    std::printf("\n--- the control path saw another desktop: the same worker refuses its old challenge ---\n");
+    namespace pl = remote60::native_poc::prelogin;
+    pl::PreloginLeftLatch().store(false);
+    std::vector<std::wstring> leaves;
+    pl::PreloginLeaveHandler() = [&leaves](const std::wstring& n) { leaves.push_back(n); };
+    Seams seams;
+    PreloginCredReceiver w(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
+    w.stillServing = [] { return !pl::PreloginLeftLatch().load(); };  // as host_control_session binds it
+    const auto c = w.Challenge(challenge_req(41), cookie);
+    const bool refusedOnSaver = pl::PreloginInputRefused(L"Screen-saver", L"Winlogon");  // the control path's look
+    const bool refusedBack = pl::PreloginInputRefused(L"Winlogon", L"Winlogon");          // back at the logon desktop
+    w.Sealed(seal(c, secret, true), cookie);
+    ControlUnlockStatusResultMessage res{};
+    check("r17 R16-1: control saw the screen saver: that input refused, the worker LEFT (leave handler once), and "
+          "back at Winlogon it is still refused",
+          refusedOnSaver && refusedBack && leaves.size() == 1 && leaves[0] == L"Screen-saver" && pl::PreloginLeftLatch().load(),
+          std::to_string(leaves.size()) + " leaves");
+    check("r17 R16-1: ...the challenge issued before is refused at Sealed, nothing typed",
+          c.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued) && wait_result(w, 41, &res, 1000) &&
+              res.stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) && seams.count() == 0,
+          [&] { return std::string(stage_word(res.stage)); });
+    next_challenge_window();
+    check("r17 R16-1: ...and no new challenge is issued by the worker that left",
+          w.Challenge(challenge_req(42), cookie).status == static_cast<uint16_t>(UnlockStage::RejectedPolicy));
+    pl::PreloginLeftLatch().store(false);  // the rest of this test is a fresh worker
+    pl::PreloginLeaveHandler() = nullptr;
   }
 
   {

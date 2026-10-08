@@ -595,11 +595,8 @@ void unlock_pipe_loop() {
       us.caller = unlock_caller_of(pipe);
       // r16 R15-3: the very process connected at the start is still running (its own handle, held since)
       // and is still the one on this connection.
-      us.callerStillThere = [pipe, &us] {
-        if (!sus::CallerProcessAlive(us.caller.process)) return false;
-        ULONG pid = 0;
-        return GetNamedPipeClientProcessId(pipe, &pid) && pid == us.caller.processId;
-      };
+      // r17 R16-2: and the connection itself is not broken (a client that closed only its handle).
+      us.callerStillThere = [pipe, &us] { return sus::UnlockConnectionAlive(pipe, us.caller); };
       const sus::Write write = [pipe](const void* d, size_t n) { (void)write_exact(pipe, d, static_cast<DWORD>(n)); };
       uint8_t buf[512];
       while (gRunning.load(std::memory_order_acquire)) {
