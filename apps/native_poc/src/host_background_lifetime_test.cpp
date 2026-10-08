@@ -212,7 +212,7 @@ int main() {
             inRead = false;
             return std::wstring(desktop);
           },
-          [] {}, [&left](const std::wstring&) { ++left; }, [] { return false; }, nullptr, 50);
+          [] {}, [&left](const std::wstring&) { ++left; }, 50);
     });
     wait_until([&] { return reads.load() >= 3 || left.load() > 0; }, 3000);
     if (left.load() == 0) wait_until([&] { return inRead.load(); }, 3000);

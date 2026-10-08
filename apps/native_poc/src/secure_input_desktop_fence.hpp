@@ -17,7 +17,6 @@
 
 #include <string>
 
-#include "prelogin_logon_desktop.hpp"
 #include "secure_input_protocol.hpp"
 
 namespace remote60::native_poc {
@@ -30,23 +29,6 @@ inline bool AgentMayInject(uint16_t flags, const std::wstring& attachedDesktop) 
   return _wcsicmp(attachedDesktop.c_str(), kSecureInputLogonDesktop) == 0;
 }
 
-// r15 L6 (limited): a pre-login message is stamped with the desktop the worker decided it for. Without
-// kSecureInputFlagScreenSaverWake it was decided on the logon desktop and is injected only there (r10); with
-// it, it was decided on the screen saver as a wake and is injected only there -- that desktop exactly
-// (IsScreenSaverDesktop), a wake event (the pointer moving, a navigation key: never text, a click or a
-// wheel), and only while nobody is logged on at the console, asked again here by the agent itself. So input
-// queued on one desktop is dropped on the other (Winlogon -> screen saver -> Winlogon included).
-constexpr uint16_t kSecureInputFlagScreenSaverWake = 0x0002;  // SecureInputMessage::flags
-
-template <typename NoUser>
-bool AgentMayInjectMessage(const SecureInputMessage& message, const std::wstring& attachedDesktop, NoUser noInteractiveUser) {
-  if ((message.flags & kSecureInputFlagLogonDesktopOnly) == 0) return true;
-  if ((message.flags & kSecureInputFlagScreenSaverWake) == 0) return AgentMayInject(message.flags, attachedDesktop);
-  return message.kind == static_cast<uint16_t>(SecureInputKind::InputEvent) &&
-         prelogin::IsScreenSaverWakeEvent(message.eventKind) && prelogin::IsScreenSaverDesktop(attachedDesktop) &&
-         noInteractiveUser();
-}
-
 enum class AgentStep { Injected, NotInjected, AttachFailed, RefusedNotLogonDesktop };
 
 // One message, as the agent handles it: attach to the input desktop as it is NOW, then the fence, then the
@@ -54,13 +36,8 @@ enum class AgentStep { Injected, NotInjected, AttachFailed, RefusedNotLogonDeskt
 // or a test's.
 template <typename Attach, typename DesktopName, typename Inject>
 AgentStep AgentHandleMessage(const SecureInputMessage& message, Attach attach, DesktopName desktopName, Inject inject) {
-  return AgentHandleMessage(message, attach, desktopName, inject, [] { return false; });
-}
-template <typename Attach, typename DesktopName, typename Inject, typename NoUser>
-AgentStep AgentHandleMessage(const SecureInputMessage& message, Attach attach, DesktopName desktopName, Inject inject,
-                             NoUser noInteractiveUser) {
   if (!attach()) return AgentStep::AttachFailed;
-  if (!AgentMayInjectMessage(message, desktopName(), noInteractiveUser)) return AgentStep::RefusedNotLogonDesktop;
+  if (!AgentMayInject(message.flags, desktopName())) return AgentStep::RefusedNotLogonDesktop;
   return inject(message) ? AgentStep::Injected : AgentStep::NotInjected;
 }
 

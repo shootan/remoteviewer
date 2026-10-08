@@ -25,7 +25,6 @@
 #include <vector>
 
 #include "prelogin_cred_host.hpp"
-#include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
 using namespace remote60::native_poc;
@@ -117,18 +116,6 @@ ControlUnlockSealedRequestMessage seal(const ControlUnlockChallengeMessage& ch, 
   return s;
 }
 
-}  // namespace
-
-// r15 L6: the product's environment of a credential challenge (where it was opened) is a different one after
-// the input desktop changed and came back (Winlogon -> screen saver -> Winlogon).
-static bool environment_moves_with_the_desktop_generation() {
-  const auto env = remote60::native_poc::prelogin::ProductCredEnvironment();
-  const uint64_t before = env();
-  remote60::native_poc::prelogin::InputDesktopGeneration().fetch_add(2);  // away and back
-  return env() != before;
-}
-
-namespace {
 bool wait_result(PreloginCredReceiver& r, uint32_t id, ControlUnlockStatusResultMessage* out, int ms = 5000) {
   const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
   while (std::chrono::steady_clock::now() < end) {
@@ -194,6 +181,31 @@ int main() {
           [&] { return std::string(stage_word(res.stage)); });
     check("the result line names request and stage only", lines.size() == 2 && lines[0] == "11 8 0", lines.empty() ? "" : lines[0]);
     check("injections() counts the one typing", r.injections() == 1);
+  }
+
+  {
+    // r16 (scope cut, user's choice A): the screen saver is NOT served. A worker whose input desktop becomes
+    // the screen saver (or Default) leaves (exit 14) and the service starts a NEW worker -- a new receiver
+    // with nothing outstanding. A challenge the old worker issued is not honoured by the new one.
+    std::printf("\n--- a new worker after the desktop changed: the old challenge is not honoured ---\n");
+    Seams seams;
+    ControlUnlockChallengeMessage oldCh{};
+    {
+      PreloginCredReceiver before(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
+      oldCh = before.Challenge(challenge_req(31), cookie);
+    }  // the worker left (exit 14)
+    PreloginCredReceiver after(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);
+    after.Sealed(seal(oldCh, secret, true), cookie);
+    ControlUnlockStatusResultMessage res{};
+    check("r16: the old worker's challenge, sealed to the new worker: refused, nothing typed",
+          oldCh.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued) && wait_result(after, 31, &res, 1000) &&
+              res.stage != static_cast<uint16_t>(UnlockStage::Injected) && seams.count() == 0,
+          [&] { return std::string(stage_word(res.stage)); });
+    const auto fresh = after.Challenge(challenge_req(32), cookie);
+    after.Sealed(seal(fresh, secret, true), cookie);
+    check("r16: ...a challenge the new worker issued goes through (typed once)",
+          wait_result(after, 32, &res) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) && seams.count() == 1,
+          [&] { return std::string(stage_word(res.stage)); });
   }
 
   {
@@ -402,9 +414,6 @@ int main() {
     check("ProductCredTarget(): the foreground here is not the logon UI", productTarget() == 0);
   }
 
-  check("r15 L6: a credential challenge's environment is another one after the input desktop went away and came back "
-        "(Winlogon -> screen saver -> Winlogon): nothing asked before is typed after",
-        environment_moves_with_the_desktop_generation());
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

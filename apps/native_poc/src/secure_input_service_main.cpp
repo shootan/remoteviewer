@@ -561,15 +561,18 @@ sus::UnlockCaller unlock_caller_of(HANDLE pipe) {
   if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return c;
   DWORD session = 0;
   if (!ProcessIdToSessionId(pid, &session)) return c;
-  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!h) return c;
   FILETIME cr{}, ex{}, k{}, u{};
   const bool timed = GetProcessTimes(h, &cr, &ex, &k, &u) != FALSE;
-  CloseHandle(h);
-  if (!timed) return c;
+  if (!timed) {
+    CloseHandle(h);
+    return c;
+  }
   c.processId = pid;
   c.processStartTime = (static_cast<uint64_t>(cr.dwHighDateTime) << 32) | cr.dwLowDateTime;
   c.session = session;
+  c.process = h;  // r16 R15-3: held for the connection's life (the caller closes it)
   return c;
 }
 
@@ -590,10 +593,12 @@ void unlock_pipe_loop() {
       // r15 R14-2: this connection's caller, from the pipe -- and the same process must still be on it at
       // the irreversible step.
       us.caller = unlock_caller_of(pipe);
+      // r16 R15-3: the very process connected at the start is still running (its own handle, held since)
+      // and is still the one on this connection.
       us.callerStillThere = [pipe, &us] {
-        const sus::UnlockCaller now = unlock_caller_of(pipe);
-        return now.processId != 0 && now.processId == us.caller.processId &&
-               now.processStartTime == us.caller.processStartTime && now.session == us.caller.session;
+        if (!sus::CallerProcessAlive(us.caller.process)) return false;
+        ULONG pid = 0;
+        return GetNamedPipeClientProcessId(pipe, &pid) && pid == us.caller.processId;
       };
       const sus::Write write = [pipe](const void* d, size_t n) { (void)write_exact(pipe, d, static_cast<DWORD>(n)); };
       uint8_t buf[512];
@@ -624,6 +629,7 @@ void unlock_pipe_loop() {
         }
       }
       (void)DisconnectNamedPipe(pipe);
+      if (us.caller.process) CloseHandle(us.caller.process);  // r16 R15-3
     }
     CloseHandle(pipe);  // the worker exclusively owns this pipe
   }
@@ -1621,9 +1627,7 @@ int run_agent(HANDLE readPipe) {
     bool journalPlayback = false;
     const auto step = remote60::native_poc::AgentHandleMessage(
         message, [&] { return attach_to_input_desktop(&ownedDesktop, &journalPlayback); },
-        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); },
-        // r15 L6: a screen-saver wake only while nobody is logged on at the console -- asked here, again.
-        [] { return remote60::native_poc::prelogin::ConsoleHasNoInteractiveUser(); });
+        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); });
     if (step == remote60::native_poc::AgentStep::AttachFailed) {
       report_agent_state(L"(attach failed)", false, false, false);
       continue;

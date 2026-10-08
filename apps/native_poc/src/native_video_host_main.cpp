@@ -403,9 +403,7 @@ int main(int argc, char** argv) {
                       << std::string(name.begin(), name.end()) << "\"): stop serving and leave (r9 W2)" << std::endl;
             std::cerr.flush();
             TerminateProcess(GetCurrentProcess(), remote60::native_poc::prelogin::kLeftLogonDesktopExit);
-          },
-          // r15 L6: the screen saver over the logon screen is served for waking -- nobody logged on only.
-          [] { return remote60::native_poc::prelogin::ConsoleHasNoInteractiveUser(); }, &capture.preloginWakeOnly);
+          });
     });
   }
   if (!ws.ok) {

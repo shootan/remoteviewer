@@ -103,9 +103,7 @@ struct DxgiDesktopCaptureSession::Impl {
       wchar_t name[64] = {};
       DWORD needed = 0;
       const bool named = GetUserObjectInformationW(desk, UOI_NAME, name, sizeof(name), &needed) != FALSE;
-      const bool served = named && (_wcsicmp(name, config.requiredInputDesktop.c_str()) == 0 ||
-                                    (config.alsoServedInputDesktop && config.alsoServedInputDesktop(name)));
-      if (!served) {
+      if (!named || _wcsicmp(name, config.requiredInputDesktop.c_str()) != 0) {
         log("capture", "prelogin capture refused: the input desktop is not the one served");
         CloseDesktop(desk);
         refusedDesktop = true;

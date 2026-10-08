@@ -36,7 +36,16 @@ struct UnlockCaller {
   uint32_t processId = 0;
   uint64_t processStartTime = 0;
   uint32_t session = kNoSession;
+  // r16 R15-3: the caller's process, opened (SYNCHRONIZE) when the connection was made and held for its
+  // life -- whether THAT process is still running is asked of this handle, not of a pid that may by then
+  // name another process (or of metadata that stays readable after it exited).
+  HANDLE process = nullptr;
 };
+
+// r16 R15-3: the process behind `process` has not exited.
+inline bool CallerProcessAlive(HANDLE process) {
+  return process != nullptr && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+}
 
 // The OS, as the decisions need it (the service binds the real calls; tests bind stand-ins).
 struct UnlockPrimitives {

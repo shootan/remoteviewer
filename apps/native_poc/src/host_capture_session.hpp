@@ -150,7 +150,6 @@ struct CaptureState {
   // input desktop is it right now (the desktop guard updates it; input is injected only while true).
   std::wstring preloginServingDesktop;
   std::atomic<bool> preloginDesktopServing{false};
-  std::atomic<bool> preloginWakeOnly{false};  // r15 L6: serving the screen saver, for waking only
   int framePoolBuffers = 0;
   // Current capture target as published to the control thread (window list / status replies).
   std::atomic<uint32_t> targetPid{0};

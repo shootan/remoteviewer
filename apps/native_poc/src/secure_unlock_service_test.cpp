@@ -143,7 +143,11 @@ SecureUnlockResult sealed(Conn& c, Os& os, const SecureUnlockSealedRequest& s) {
 uint16_t st(UnlockStage s) { return static_cast<uint16_t>(s); }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "--child") == 0) {  // r16: a caller process that lives a moment
+    Sleep(400);
+    return 0;
+  }
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("the sealed unlock, bound to its own caller (prelogin-ui r15, R14-2)\n\n");
   {
@@ -211,6 +215,37 @@ int main() {
     Conn none(0, sus::kNoSession);
     check("a caller whose session could not be read is refused",
           challenge(none, os, 61).stage == st(UnlockStage::RejectedPolicy));
+  }
+  {
+    // r16 R15-3: the caller's liveness from the handle held since the connection -- a process that has exited
+    // is gone even while its handle (here: ours) keeps its metadata readable.
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(self) + L"\" --child";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const bool started = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                                        &si, &pi) != FALSE;
+    Os os;
+    Conn a(started ? pi.dwProcessId : 0, 2);
+    a.us.caller.process = started ? pi.hProcess : nullptr;
+    a.us.callerStillThere = [&a] { return sus::CallerProcessAlive(a.us.caller.process); };
+    const bool aliveAtFirst = sus::CallerProcessAlive(a.us.caller.process);
+    const SecureUnlockChallengeResponse ca = challenge(a, os, 71);
+    if (started) WaitForSingleObject(pi.hProcess, 5000);  // the caller exits; the handle stays open
+    DWORD code = 0;
+    const bool metadataReadable = started && GetExitCodeProcess(pi.hProcess, &code);
+    const SecureUnlockResult r = sealed(a, os, seal(ca, u"pw"));
+    check("R15-3: the caller process exited before the final step (its handle still open, metadata readable): "
+          "refused, WTSConnectSession 0 times",
+          started && aliveAtFirst && metadataReadable && r.stage == st(UnlockStage::RejectedStaleTopology) && os.wts.empty(),
+          std::to_string(os.wts.size()) + " calls");
+    if (started) {
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    check("R15-3: no handle: not alive", !sus::CallerProcessAlive(nullptr));
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

@@ -573,14 +573,6 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       config.acquireIdleSleepUs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_IDLE_SLEEP_US", 2000, 0, 100000);
       config.attachToInputDesktop = capture.preloginAttachInputDesktop;  // r4 #1: prelogin binds to the input desktop
       config.requiredInputDesktop = capture.preloginServingDesktop;      // r9 W2: and only to the one it serves
-      if (!capture.preloginServingDesktop.empty()) {
-        // r15 L6: or the screen saver over the logon screen, nobody logged on -- the same rule as the watch,
-        // the input path and the SYSTEM agent; a switch to it re-attaches (no other backend, no Default).
-        config.alsoServedInputDesktop = [](const std::wstring& name) {
-          return remote60::native_poc::prelogin::IsScreenSaverDesktop(name) &&
-                 remote60::native_poc::prelogin::ConsoleHasNoInteractiveUser();
-        };
-      }
       // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
       // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
       config.onPointer = [&](int32_t px, int32_t py, bool visible) {
