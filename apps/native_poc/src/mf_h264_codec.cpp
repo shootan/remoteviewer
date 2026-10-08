@@ -1198,6 +1198,26 @@ bool H264Encoder::set_d3d11_device(ID3D11Device* device) {
 bool H264Encoder::configure_types() {
   if (!enc_) return false;
 
+  // stutter-keyframe r1 (step-4a observability, cadence-neutral): try the GOP size BEFORE the output
+  // media type is set and log the readback, so the field test can see whether the company PC's MFT
+  // honours a pre-type GOP (some MFTs only apply AVEncMPVGOPSize before SetOutputType). This does NOT
+  // change the key period -- it sets the same value the authoritative post-type set in
+  // apply_low_latency_codec_api applies afterwards; it only adds a comparison point. A readback that
+  // equals the request pre-type but gets clamped post-type (or vice versa) tells the ordering story.
+  {
+    const uint32_t preGop = std::max<uint32_t>(1, keyint_);
+    const HRESULT preSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, preGop);
+    uint32_t preReadback = 0;
+    const bool preGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &preReadback);
+    char preLine[192];
+    std::snprintf(preLine, sizeof(preLine),
+                  "[native-video-host] h264 gop-config stage=pre-type backend=%s requestedGop=%u "
+                  "setHr=0x%08lX readbackOk=%d readbackGop=%u",
+                  backendName_, preGop, static_cast<unsigned long>(preSetHr), preGetOk ? 1 : 0,
+                  preReadback);
+    std::cout << preLine << "\n";
+  }
+
   auto make_output_h264_type = [&]() -> Microsoft::WRL::ComPtr<IMFMediaType> {
     Microsoft::WRL::ComPtr<IMFMediaType> outType;
     if (FAILED(MFCreateMediaType(&outType)) || !outType) return nullptr;
@@ -1482,7 +1502,7 @@ void H264Encoder::apply_low_latency_codec_api() {
   const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
   char gopLine[192];
   std::snprintf(gopLine, sizeof(gopLine),
-                "[native-video-host] h264 gop-config backend=%s requestedGop=%u setHr=0x%08lX "
+                "[native-video-host] h264 gop-config stage=post-type backend=%s requestedGop=%u setHr=0x%08lX "
                 "readbackOk=%d readbackGop=%u",
                 backendName_, requestedGop, static_cast<unsigned long>(gopSetHr),
                 gopGetOk ? 1 : 0, gopReadback);
