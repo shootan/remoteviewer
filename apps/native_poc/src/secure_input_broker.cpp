@@ -147,10 +147,12 @@ bool SecureInputBrokerClient::ConnectLocked() {
     // NOT fall back to it -- no UAC/lock-screen input reaches a fake. Per-handle trust; reconnect
     // re-verifies. SQOS IDENTIFICATION is set inside OpenVerifiedServicePipe.
     TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
+    ServerIdentityFacts diag;
     pipe_ = static_cast<HANDLE>(OpenVerifiedServicePipe(
         kSecureInputPipeName, GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-        kSecureInputServiceName, 100, &st));
-    if (pipe_ != INVALID_HANDLE_VALUE) return true;
+        kSecureInputServiceName, 100, &st, nullptr, &diag));
+    if (pipe_ != INVALID_HANDLE_VALUE) { LogTrustChange("secure-input", st, diag); return true; }
+    LogTrustChange("secure-input", st, diag);  // R3: keep the stage/error locally, once per change
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   } while (std::chrono::steady_clock::now() < deadline);
   return false;

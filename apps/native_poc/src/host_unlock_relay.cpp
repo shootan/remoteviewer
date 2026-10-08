@@ -90,9 +90,11 @@ void* HostUnlockRelay::ConnectPipe() {
     // (Untrusted/Unavailable) -- we do NOT fall back to it, and never send it a ChallengeRequest. Trust
     // is only for this handle; every reconnect runs this again. SQOS IDENTIFICATION is set inside.
     TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
+    ServerIdentityFacts diag;
     HANDLE pipe = static_cast<HANDLE>(OpenVerifiedServicePipe(
         kSecureUnlockPipeName, GENERIC_READ | GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL,
-        kSecureInputServiceName, 100, &st));
+        kSecureInputServiceName, 100, &st, nullptr, &diag));
+    LogTrustChange("unlock", st, diag);  // R3: keep the stage/error locally, once per change
     if (pipe != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_MESSAGE;
       (void)SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);

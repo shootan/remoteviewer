@@ -28,6 +28,17 @@ enum class TrustedPipeStatus {
 
 const char* trusted_pipe_status_name(TrustedPipeStatus s);
 
+// Which step established or failed the identity -- kept for the local diagnostic (R3), never on the wire.
+enum class PipeVerifyStage {
+  None,
+  ServerPid,      // GetNamedPipeServerProcessId
+  ServiceStatus,  // SCM QueryServiceStatusEx (running + pid)
+  ServerImage,    // OpenProcess + QueryFullProcessImageName + file id of the server
+  ServiceBinary,  // QueryServiceConfig binary + its file id
+  FinalRecheck,   // end-of-collection: server still alive AND still the SCM's running pid
+};
+const char* pipe_verify_stage_name(PipeVerifyStage s);
+
 // Facts the Win32 layer gathers about one open client pipe handle vs the installed service.
 struct ServerIdentityFacts {
   bool serverPidKnown = false;      // GetNamedPipeServerProcessId succeeded
@@ -37,15 +48,30 @@ struct ServerIdentityFacts {
   bool serverImageKnown = false;    // the server process was opened and its image file identity read
   bool serviceBinaryKnown = false;  // the service's configured binary file identity was read
   bool imageSameFile = false;       // the two are the SAME file (volume + file index)
+  // R2: at the END of collection, the SAME server process object was still alive AND the SCM still
+  // reported that same pid RUNNING for the service. False = a stop/replace happened across the window,
+  // or it could not be re-confirmed -> not trusted. (A missing-but-not-contradicted value stays true so
+  // the pure classifier for the earlier facts is unchanged; the Win32 gatherer sets it explicitly.)
+  bool finalConsistent = true;
+  // R3 diagnostic (local only): the first step that failed and its original Win32 error.
+  PipeVerifyStage failStage = PipeVerifyStage::None;
+  uint32_t failWin32 = 0;
 };
 
-// Pure verdict. Trusted ONLY when the server pid is the SCM's running-service pid AND the server
-// process's image is the same file as the service binary. A missing pid/running/image fact is
-// Unavailable (fail closed); a confirmed mismatch is Untrusted.
+// Pure verdict. Trusted ONLY when the server pid is the SCM's running-service pid, the server image is
+// the same file as the service binary, AND the end-of-collection re-check held. A missing pid/running/
+// image/recheck fact is Unavailable (fail closed); a confirmed mismatch is Untrusted.
 TrustedPipeStatus ClassifyServerIdentity(const ServerIdentityFacts& f);
 
-// Win32: gather the facts for an already-open client pipe handle and a service name.
+// Win32: gather the facts for an already-open client pipe handle and a service name. Holds the server
+// process handle across the whole collection so the pid cannot be reused mid-check, and re-confirms the
+// live pid/SCM pid at the end (R2). Records the first failing step + its Win32 error (R3).
 ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* serviceName);
+
+// R3: record a one-line LOCAL diagnostic for a verification result, but only when it CHANGES for this
+// `channel` (so a persistent squatter does not spam a line per input/connect). Keeps the failing stage,
+// the original Win32 error, and the verdict. Nothing goes on the wire; nothing is read from credentials.
+void LogTrustChange(const char* channel, TrustedPipeStatus status, const ServerIdentityFacts& facts);
 
 // A gatherer seam: production uses GatherServerIdentity; tests inject a fixture that returns synthetic
 // facts for a test-owned server (so no real service/credential is touched). Never a shipping bypass:
@@ -56,8 +82,12 @@ using ServerIdentityGatherer = ServerIdentityFacts (*)(void* pipeHandle, const w
 // name, then verify the server. On Trusted, returns the handle (caller owns). On anything else, closes
 // the handle it opened and returns INVALID (nullptr-equivalent via the out status); never falls back to
 // an unverified server and never touches any other process. `gather` defaults to the production gatherer.
+// `waitMs` 0 means NMPWAIT_USE_DEFAULT_WAIT (NOT a non-blocking return) -- stated so a later caller
+// (e.g. prelogin's fast-fail path) does not read 0 as "return immediately".
+// `diagOut` (optional) receives the gathered facts incl. the failing stage + Win32 error, so the caller
+// can keep a local diagnostic (R3) without re-querying anything.
 void* OpenVerifiedServicePipe(const wchar_t* name, uint32_t desiredAccess, uint32_t flagsAndAttributes,
                               const wchar_t* serviceName, uint32_t waitMs, TrustedPipeStatus* status,
-                              ServerIdentityGatherer gather = nullptr);
+                              ServerIdentityGatherer gather = nullptr, ServerIdentityFacts* diagOut = nullptr);
 
 }  // namespace remote60::native_poc
