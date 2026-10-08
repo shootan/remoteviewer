@@ -2909,6 +2909,15 @@ if(MSVC)
   target_compile_options(remote60_host_key_period_policy_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r2 (F1): the forced-key decision + rejection back-off/repair. Pure, no MFT.
+add_executable(remote60_host_force_key_decision_test
+  src/host_force_key_decision_test.cpp
+)
+target_include_directories(remote60_host_force_key_decision_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_force_key_decision_test PRIVATE /utf-8)
+endif()
+
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
 # The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
 # while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /

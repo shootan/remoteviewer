@@ -463,7 +463,12 @@ std::string mft_attr_string(IMFActivate* act, const GUID& attr) {
   return out;
 }
 
-void log_mft_identity(IMFActivate* act) {
+// role is "encoder"/"decoder" so the field comparison does not mix the two MFTs a host activates
+// (an AMD encoder and the Microsoft decoder both log here). vendorId "?" is a legal absent optional
+// attribute -- not inferred. The name-match and CLSID-fallback selection paths are not on the live
+// h264 enum path (try_activate_first is), so their identity is not captured; that gap is noted at
+// those sites rather than guessed here.
+void log_mft_identity(IMFActivate* act, const char* role) {
   if (!act) return;
   const std::string friendly = mft_attr_string(act, MFT_FRIENDLY_NAME_Attribute);
   const std::string vendor = mft_attr_string(act, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
@@ -471,8 +476,9 @@ void log_mft_identity(IMFActivate* act) {
   std::string clsid = "?";
   GUID g{};
   if (SUCCEEDED(act->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g))) clsid = guid_to_string(g);
-  std::cout << "[native-video-host] h264 mft-identity friendlyName=\"" << friendly << "\" clsid="
-            << clsid << " vendorId=" << vendor << " hwUrl=\"" << hwUrl << "\"\n";
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=\"" << friendly << "\" clsid=" << clsid << " vendorId=" << vendor
+            << " hwUrl=\"" << hwUrl << "\"\n";
 }
 
 enum class MftBackendMode {
@@ -506,14 +512,15 @@ void release_activate_array(IMFActivate** activates, UINT32 count) {
   CoTaskMemFree(activates);
 }
 
-bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** outTransform) {
+bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** outTransform,
+                        const char* role = "?") {
   if (!activates || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
     if (!activates[i]) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
-      log_mft_identity(activates[i]);  // stutter-keyframe r1: record which MFT we actually took
+      log_mft_identity(activates[i], role);  // stutter-keyframe r1/r2: which MFT we took + its role
       *outTransform = candidate;
       return true;
     }
@@ -619,7 +626,10 @@ bool create_video_mft_from_enum(const GUID& category, const GUID& inSubtype, con
   if (FAILED(hr) || count == 0 || !activates) return false;
 
   IMFTransform* transform = nullptr;
-  const bool ok = try_activate_first(activates, count, &transform);
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
+  const bool ok = try_activate_first(activates, count, &transform, role);
   release_activate_array(activates, count);
   if (!ok || !transform) return false;
   *outTransform = transform;

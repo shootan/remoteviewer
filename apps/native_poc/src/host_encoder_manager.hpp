@@ -311,9 +311,15 @@ struct EncoderState {
   // Stats-interval encode counters.
   uint64_t encodedFrames = 0;
   uint64_t forceKeyInputCount = 0;       // key inputs handed to the encoder
-  // stutter-keyframe r1 (recovery-1): forced-key requests the MFT REJECTED (AVEncVideoForceKeyFrame
-  // SetValue failed). These do NOT arm the 300ms submit latch, so the next tick re-forces.
+  // stutter-keyframe r1/r2 F1: forced-key requests the MFT REJECTED (AVEncVideoForceKeyFrame SetValue
+  // failed). A rejection does NOT arm the real in-flight latch; it sets a bounded retry back-off
+  // (forceKeyRetryAtUs) so the next force is retried after an interval rather than every tick (which
+  // would make every input ride the admit-always key gate under the cap), and a bounded streak
+  // escalates to a repair. forceKeyRejectedCount is cumulative (diagnostic); forceKeyRejectStreak is
+  // the consecutive run, reset on an accepted force or a key AU.
   uint64_t forceKeyRejectedCount = 0;
+  uint64_t forceKeyRetryAtUs = 0;      // do not re-attempt a forced key before this qpc (back-off)
+  uint32_t forceKeyRejectStreak = 0;   // consecutive rejections; triggers a repair at the threshold
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;

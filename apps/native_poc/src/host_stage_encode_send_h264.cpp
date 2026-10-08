@@ -290,9 +290,12 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // decide_force_key (host_force_key_decision.hpp) is the shared pure form of this decision; the
    // recovery-roundtrip test drives the identical function. keyWanted: a request, the first frame, or
    // the periodic schedule. forceKeyFrame: forced this tick only if no key of this session is in
-   // flight -- else it rides as a delta so it does not overflow the queue into a resync-IDR loop. (r3 F2)
-   const ForceKeyDecision keyDecision =
-       decide_force_key({encoder.forceKeyNext, encoder.encodedSeq == 0, scheduledKey, forceKeyInFlight});
+   // flight AND we are not inside a rejection back-off (r2 F1) -- else it rides as a delta so it does
+   // not overflow the queue into a resync-IDR loop or make every input an admit-always exception.
+   const bool forceRetryPending =
+       (encoder.forceKeyRetryAtUs != 0 && encodeStartUs < encoder.forceKeyRetryAtUs);
+   const ForceKeyDecision keyDecision = decide_force_key(
+       {encoder.forceKeyNext, encoder.encodedSeq == 0, scheduledKey, forceKeyInFlight, forceRetryPending});
    const bool keyWanted = keyDecision.keyWanted;
    const bool forceKeyFrame = keyDecision.forceKeyFrame;
    // The hard wire-rate cap's input gate (bitrate-hard-cap r1/r2): while the wire is backlogged -- the
@@ -437,26 +440,34 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   encoder.encodeErrorSinceUs = 0;
   watchdog.EnterMainPhase(MainLoopPhase::Loop);
   if (forceKeyFrame) {
-    // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
-    // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
-    // stutter-keyframe r1 (recovery-1): and only when the MFT ACCEPTED the force request. The
-    // AVEncVideoForceKeyFrame SetValue can be rejected (forceKeySetHr != S_OK); arming the 300ms
-    // latch for a rejected force would suppress the retry while no IDR is ever coming -- a lost
-    // recovery key. On rejection, leave forceKeyNext set (it is only cleared when a key AU is
-    // actually accepted) so the next tick re-forces, and log it once.
-    const bool forceArmed = encodeStats.forceKeyRequested == 0 || encodeStats.forceKeySetHr == 0;
-    if (forceArmed) {
+    // Latch/count only for inputs the encoder actually reached: a failed encode never touched the MFT.
+    // stutter-keyframe r2 F1: the AVEncVideoForceKeyFrame SetValue is honoured only on S_OK. On an
+    // accept, arm the REAL in-flight latch (one key input is in flight) and clear the rejection streak.
+    // On a rejection, do NOT fake the in-flight latch -- set a bounded retry back-off so the next
+    // attempt waits an interval (deltas meanwhile take the normal backlog gate, not admit-always), and
+    // after a bounded streak escalate to a repair so recovery cannot stall for ever. forceKeyNext stays
+    // set until a key AU is actually accepted (_au.cpp), so the request survives the back-off.
+    const ForceKeyPostEncodeDecision pe = decide_force_key_post_encode(
+        {/*attemptedForce=*/true, encodeStats.forceKeyRequested != 0, encodeStats.forceKeySetHr == 0,
+         encodeStartUs, encoder.forceKeyRejectStreak});
+    encoder.forceKeyRejectStreak = pe.newRejectStreak;
+    if (pe.armInFlightLatch) {
       ++encoder.forceKeyInputCount;
       encoder.forceKeySubmittedAtUs = encodeStartUs;
-    } else {
+      encoder.forceKeyRetryAtUs = 0;
+    }
+    if (pe.setRetryBackoff) {
       ++encoder.forceKeyRejectedCount;
-      if ((encoder.forceKeyRejectedCount % 30) == 1) {
+      encoder.forceKeyRetryAtUs = pe.retryAtUs;
+      if ((encoder.forceKeyRejectedCount % 30) == 1 || pe.triggerRepair) {
         std::cout << "[native-video-host] forceKeyFrame REJECTED by MFT hr=0x" << std::hex
                   << static_cast<unsigned long>(static_cast<uint32_t>(encodeStats.forceKeySetHr))
                   << std::dec << " count=" << encoder.forceKeyRejectedCount
-                  << " (retry armed, no latch)\n";
+                  << " backoffUs=" << kForceKeyRetryBackoffUs << " repair=" << (pe.triggerRepair ? 1 : 0)
+                  << "\n";
       }
     }
+    if (pe.triggerRepair) encoder.RequestOutputRepair(encodeStartUs);
   }
   if (!surfaceEncoded) {
     nv12Us = encodeStats.colorConvertUs;

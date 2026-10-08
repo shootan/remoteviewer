@@ -557,6 +557,10 @@ if (!servedBootstrap) {
 if ((hdr.flags & 1u) != 0) {
   encoder.forceKeyNext = false;
   encoder.forceKeySubmittedAtUs = 0;
+  // stutter-keyframe r2 F1: the request is satisfied by a real key AU -- clear the rejection back-off
+  // and streak so a later request starts clean (no stale back-off suppressing it).
+  encoder.forceKeyRetryAtUs = 0;
+  encoder.forceKeyRejectStreak = 0;
   // One line per key AU accepted for sending, with what asked for it (quality r1). "encoder_gop"
   // (r4) means no host request was pending: the encoder's own GOP produced the IDR. sinceLastKeyMs
   // is from the
@@ -566,17 +570,20 @@ if ((hdr.flags & 1u) != 0) {
       (encoder.lastKeyAcceptedUs > 0 && keyNowUs >= encoder.lastKeyAcceptedUs)
           ? (keyNowUs - encoder.lastKeyAcceptedUs) / 1000
           : 0;
-  // stutter-keyframe r1 (observe-1): sendDurUs is this key AU's own hand-off/staging cost, and
-  // skipsSinceLastKey is how many delta captures the cap-gate dropped in the window that ended with
-  // this IDR -- together they show a periodic IDR being serialized under the hard cap while deltas
-  // are skipped (the stutter). skipsSinceLastKey is a window delta of the cumulative counter.
-  const uint64_t skipsSinceLastKey = (stats.wireOverloadSkipCount >= encoder.wireSkipAtLastKey)
-                                         ? (stats.wireOverloadSkipCount - encoder.wireSkipAtLastKey)
-                                         : 0;
+  // stutter-keyframe r1/r2 F2: enqueueDurUs is this key AU's hand-off/STAGING cost to the sender
+  // queue (sendStartUs->sendDoneUs here), NOT the paced wire-send time -- the actual cap-paced send
+  // runs later on the sender thread (see host_encoded_sender's `wire seq=... key=1 ... sendDurUs`).
+  // skipsSincePrevKeyAccepted is the cap-gate skip count accumulated between the PREVIOUS key accept
+  // and this one (it includes the previous key's send tail + any congestion), NOT skips during THIS
+  // IDR's send. These are a coarse per-period proxy; pin the real IDR wire cost to the sender wire log
+  // by seq/epoch. The counter is main-owned and read single-threaded here (no sender-thread race).
+  const uint64_t skipsSincePrevKeyAccepted = (stats.wireOverloadSkipCount >= encoder.wireSkipAtLastKey)
+                                                 ? (stats.wireOverloadSkipCount - encoder.wireSkipAtLastKey)
+                                                 : 0;
   std::cout << "[native-video-host][keyframe] seq=" << hdr.seq << " bytes=" << hdr.payloadSize
             << " reasons=" << host_key_reason_names(encoder.keyReasons)
-            << " sinceLastKeyMs=" << sinceLastKeyMs << " sendDurUs=" << sendDurUs
-            << " skipsSinceLastKey=" << skipsSinceLastKey
+            << " sinceLastKeyMs=" << sinceLastKeyMs << " enqueueDurUs=" << sendDurUs
+            << " skipsSincePrevKeyAccepted=" << skipsSincePrevKeyAccepted
             << " kick=" << (servedBootstrap ? 1 : 0)
             << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
             << " bitrate=" << encoder.activeBitrate << "\n";
