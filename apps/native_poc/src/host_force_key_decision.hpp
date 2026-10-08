@@ -80,7 +80,9 @@ inline ForceKeyPostEncodeDecision decide_force_key_post_encode(const ForceKeyPos
     d.newRejectStreak = in.rejectStreak;  // nothing attempted; carry the streak unchanged
     return d;
   }
-  const bool accepted = !in.setValueRequested || in.setValueOk;  // S_OK (or no setter ran) = armed
+  // r3 S1: armed ONLY when the setter actually ran AND returned S_OK. An attempted force whose setter
+  // did not run (or returned non-S_OK) is NOT a real in-flight key -- do not latch or clear the streak.
+  const bool accepted = in.setValueRequested && in.setValueOk;
   if (accepted) {
     d.armInFlightLatch = true;
     d.newRejectStreak = 0;  // a clean attempt clears the streak

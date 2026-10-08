@@ -381,6 +381,13 @@ struct EncoderState {
     // after which an AU from an older input is pre-flush. Most callers also force the next input
     // to be an IDR; the epoch gate re-forces it itself if one does not (P11).
     capture.inputEpoch.fetch_add(1, std::memory_order_acq_rel);
+    // stutter-keyframe r3 S2: the forced-key rejection back-off/streak belong to the previous encoder
+    // and input epoch. Clear them at THIS boundary (codec reinit / flush / geometry) so a stale
+    // 300ms back-off or a carried-over streak cannot suppress or near-repair the new epoch's selection/
+    // first-frame force. This is a real codec/input-epoch boundary, not a per-request reset, so it does
+    // not let an ordinary viewer re-request bypass the back-off of a still-rejecting same-epoch encoder.
+    forceKeyRetryAtUs = 0;
+    forceKeyRejectStreak = 0;
   }
   // The single choke point every encoder parameter change goes through (runtime tune, capture-UI
   // overview/focus, ABR/M9 refit): fits the box to the source aspect, rebuilds or re-tunes the MFT,

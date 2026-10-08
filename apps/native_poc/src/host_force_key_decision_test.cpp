@@ -70,6 +70,21 @@ int main() {
     const ForceKeyPostEncodeDecision d = decide_force_key_post_encode({false, false, false, 0, 3});
     check("no force attempt leaves the streak unchanged", d.newRejectStreak == 3 && !d.armInFlightLatch);
   }
+  // --- S1: attempted but the setter did NOT run must NOT arm the latch (armed = ran AND S_OK) ----
+  {
+    const ForceKeyPostEncodeDecision d =
+        decide_force_key_post_encode({/*attempted=*/true, /*setValueRequested=*/false,
+                                      /*setValueOk=*/false, 5'000'000, 2});
+    check("attempted + setter-not-run does NOT arm the latch (treated as a rejection)",
+          !d.armInFlightLatch && d.setRetryBackoff);
+    check("attempted + setter-not-run does NOT reset the streak", d.newRejectStreak == 3);
+  }
+  // --- S1: setValueOk without the setter having run also does not arm (both must hold) -----------
+  {
+    const ForceKeyPostEncodeDecision d =
+        decide_force_key_post_encode({true, /*requested=*/false, /*ok=*/true, 5'000'000, 0});
+    check("ok=true but setter-not-run does NOT arm the latch", !d.armInFlightLatch && d.setRetryBackoff);
+  }
 
   // --- THE F1 scenario: a persistently-rejecting MFT over 5s of 60fps ticks. Attempts must be
   //     BOUNDED by the back-off (not every tick), deltas between attempts must be gated normally

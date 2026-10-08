@@ -1,24 +1,24 @@
-// The REAL host keyframe-recovery roundtrip at a LONG GOP (stutter-keyframe r2, step 2).
+// A COMPONENT test of the host keyframe-recovery decision at a LONG GOP (stutter-keyframe r2 step 2,
+// scope clarified r3 S3).
 //
 // r1's recovery rig had the FakeHost force a key directly in SendFrame, so it never exercised the
-// host's own request->force state machine. The contract (Codex 2-4) requires, BEFORE the key period
-// is extended (step 4b), one timeline that runs the PRODUCT path:
+// host's own request->force decision at a long GOP. This test does, using the REAL
+// HostMainLoopMailbox, the REAL map_keyframe_reasons_to_host and the REAL decide_force_key -- the
+// exact functions host_stage_time_limit.cpp and host_stage_encode_send_h264.cpp call -- into the REAL
+// H264Encoder, and the emitted IDR is decoded by the REAL H264Decoder.
 //
-//   viewer ControlRequestKeyFrame -> host mailbox -> reason mapping -> encoder.RequestKey
-//     -> (next encode) the force-key decision -> the MFT's forced NAL5 IDR -> decode resumes.
+// SCOPE (r3 S3 -- do NOT overclaim): this is NOT the full control roundtrip. The request is Posted
+// to the mailbox DIRECTLY (no network / no control handler). The force-key bookkeeping
+// (forceKeyNext / realInputsSinceKey / the 300ms latch) is MIRRORED in locals; the new post-encode
+// back-off (decide_force_key_post_encode) is NOT exercised here -- that is host_force_key_decision_test.
+// The decoder sees a LOSSLESS stream (no pre-request frame loss / reference-chain break), so this shows
+// a key REQUEST producing a real NAL5 IDR that decodes, NOT loss-then-decoder-resume -- that is the
+// receiver loss tests (viewer_udp_recovery_test) and the r3 real-capture path. recoveryIdrFrame is the
+// encode-CALL index, not the accepted-input provenance (an async MFT can return an earlier input's AU).
 //
-// Here the viewer request flows through the REAL HostMainLoopMailbox, the REAL
-// map_keyframe_reasons_to_host and the REAL decide_force_key -- the exact functions
-// host_stage_time_limit.cpp and host_stage_encode_send_h264.cpp call (host_force_key_decision.hpp) --
-// into the REAL H264Encoder, and the emitted IDR is decoded by the REAL H264Decoder. The force-key
-// bookkeeping locals (forceKeyNext / realInputsSinceKey / the 300ms submit latch) mirror
-// EncoderState line-for-line; each is annotated with the product line it stands in for.
-//
-// Positive: at a 300-frame (10s @ 30fps) GOP, no periodic IDR appears on its own, and a viewer
-// request produces an IDR within a few frames that DECODES. Negative control: with NO request at the
-// same long GOP, no IDR appears after the first frame -> the forced key is load-bearing (remove it and
-// the "an IDR appears" recovery assertion fails), which is exactly why 4b (a long period) is safe
-// only with this roundtrip intact.
+// Positive: at a 300-frame GOP, no periodic IDR appears on its own, and a viewer request produces a
+// real-NAL5 IDR within a few frames that decodes. Negative control: with NO request at the same long
+// GOP, no IDR appears after the first frame -> the forced key is load-bearing.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -52,6 +52,21 @@ constexpr uint32_t kH = 240;
 constexpr uint32_t kFps = 30;
 constexpr int64_t kHnsPerUs = 10;
 
+// r3 S3: scan the Annex-B bytes for a NAL type 5 (IDR slice) directly, rather than trusting only the
+// encoder's au.keyFrame (which is CleanPoint OR NAL5). Confirms the recovery AU is a real IDR.
+bool scan_has_nal5(const std::vector<uint8_t>& b) {
+  size_t i = 0;
+  const size_t n = b.size();
+  while (i + 3 < n) {
+    const bool sc3 = b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1;
+    const bool sc4 = i + 4 < n && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 0 && b[i + 3] == 1;
+    if (sc4) { if ((b[i + 4] & 0x1F) == 5) return true; i += 4; continue; }
+    if (sc3) { if ((b[i + 3] & 0x1F) == 5) return true; i += 3; continue; }
+    ++i;
+  }
+  return false;
+}
+
 // A gentle horizontal-gradient scroll: smooth motion so the encoder has no scene change to key on,
 // and every frame differs so it is not a static-screen no-op.
 std::vector<uint8_t> picture(uint32_t index) {
@@ -73,6 +88,7 @@ struct RoundtripResult {
   uint32_t recoveryIdrFrame = 0xFFFFFFFF;// the IDR produced for that request
   uint32_t idrCountAfterFirst = 0;       // IDRs emitted AFTER the first-frame IDR
   uint32_t decodedAfterRecovery = 0;     // frames the decoder produced from the recovery IDR onward
+  bool recoveryIdrHasNal5 = false;       // the recovery AU's Annex-B bytes carry a real NAL type 5
   bool ok = true;
 };
 
@@ -148,7 +164,10 @@ RoundtripResult run_roundtrip(uint32_t frames, uint32_t requestAtFrame, uint32_t
         }
         if (recoveryArmed && r.recoveryIdrFrame == 0xFFFFFFFF) {
           r.recoveryIdrFrame = i;
-          std::printf("[roundtrip] forced IDR frame=%u bytes=%zu (NAL5) -> decode\n", i, au.bytes.size());
+          r.recoveryIdrHasNal5 = scan_has_nal5(au.bytes);  // S3: verify a real NAL5, not just keyFrame
+          std::printf("[roundtrip] forced IDR encodeCall=%u bytes=%zu rawNAL5=%d -> decode (note: frame "
+                      "is the encode-call index, not the accepted-input provenance; async MFT)\n",
+                      i, au.bytes.size(), r.recoveryIdrHasNal5 ? 1 : 0);
         }
         // host_stage_encode_send_h264_au.cpp:558/577 -- a key AU accepted clears the request + period.
         forceKeyNext = false;
@@ -206,7 +225,10 @@ int main() {
           r.recoveryIdrFrame != 0xFFFFFFFF && r.requestFrame != 0xFFFFFFFF &&
               r.recoveryIdrFrame >= r.requestFrame && r.recoveryIdrFrame <= r.requestFrame + 5,
           "request=" + std::to_string(r.requestFrame) + " idr=" + std::to_string(r.recoveryIdrFrame));
-    check("the recovery IDR DECODED (stream resumes)", r.decodedAfterRecovery > 0,
+    check("the recovery AU carries a real NAL5 IDR (raw Annex-B scan, not just keyFrame)",
+          r.recoveryIdrHasNal5);
+    check("the recovery IDR DECODED (lossless component path; real loss-recovery is the receiver "
+          "tests + r3 capture)", r.decodedAfterRecovery > 0,
           "decodedAfterRecovery=" + std::to_string(r.decodedAfterRecovery));
   }
 
@@ -225,7 +247,10 @@ int main() {
   // --- cadence (step 4b evidence): the REAL NAL interval at the baseline vs the extended GOP, this
   //     PC's MFT. Baseline 120 (4s@30fps) keys periodically; candidate 300 (10s) does not within 8s. -
   {
-    std::printf("[C] NAL cadence: baseline keyint=120 keys periodically; candidate keyint=300 does not in 8s\n");
+    // S3: this is a FRAME-DOMAIN observation (synthesised timestamps, no wall-clock run), not a measure
+    // of 8s of real time or a stutter ratio -- the real stutter/time numbers are r3 C (real capture).
+    std::printf("[C] NAL cadence (FRAME-DOMAIN): baseline keyint=120 keys within ~120 frames; candidate"
+                " keyint=300 emits no periodic IDR within 240 frames\n");
     uint32_t baseGap = 0;
     const RoundtripResult rb = run_roundtrip(/*frames=*/220, /*requestAtFrame=*/0xFFFFFFFF, /*keyint=*/120, &baseGap);
     check("baseline 120-GOP: a periodic IDR appears", rb.idrCountAfterFirst >= 1,
