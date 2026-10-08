@@ -529,7 +529,7 @@ bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** ou
 }
 
 bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wchar_t* nameNeedle,
-                                IMFTransform** outTransform) {
+                                IMFTransform** outTransform, const char* role = "?") {
   if (!activates || !nameNeedle || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
@@ -546,6 +546,7 @@ bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wch
     if (!nameMatch) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
       *outTransform = candidate;
       return true;
     }
@@ -555,7 +556,7 @@ bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wch
 
 bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
                                  const wchar_t* const* nameNeedles, size_t needleCount,
-                                 IMFTransform** outTransform) {
+                                 IMFTransform** outTransform, const char* role = "?") {
   if (!activates || !nameNeedles || needleCount == 0 || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
@@ -581,6 +582,7 @@ bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
     if (!nameMatch) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
       *outTransform = candidate;
       return true;
     }
@@ -588,7 +590,8 @@ bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
   return false;
 }
 
-bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform) {
+bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform,
+                                  const char* role = "?") {
   if (!clsidString || !outTransform) return false;
   *outTransform = nullptr;
   CLSID clsid{};
@@ -596,6 +599,12 @@ bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** out
   IMFTransform* transform = nullptr;
   const HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform));
   if (FAILED(hr) || !transform) return false;
+  // r2 obs: a CoCreateInstance has no IMFActivate attributes (no friendly name/vendor), but the CLSID
+  // and role still pin which MFT the fallback took for the field comparison.
+  char buf[128] = {};
+  (void)WideCharToMultiByte(CP_UTF8, 0, clsidString, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=? clsid=" << buf << " vendorId=? hwUrl=? via=clsid-fallback\n";
   *outTransform = transform;
   return true;
 }
@@ -655,8 +664,11 @@ bool create_video_mft_from_enum_matching_names(const GUID& category, const GUID&
   if (FAILED(hr) || count == 0 || !activates) return false;
 
   IMFTransform* transform = nullptr;
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
   const bool ok =
-      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform);
+      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform, role);
   release_activate_array(activates, count);
   if (!ok || !transform) return false;
   *outTransform = transform;
@@ -788,7 +800,7 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
       *outBackendName = "amf_mft_h264enc";
       return true;
     }
-    if (create_mft_from_clsid_string(L"{adc9bc80-0f41-46c6-ab75-d693d793597d}", &transform)) {
+    if (create_mft_from_clsid_string(L"{adc9bc80-0f41-46c6-ab75-d693d793597d}", &transform, "encoder")) {
       *outTransform = transform;
       *outUsingHardware = true;
       *outBackendName = "amf_mft_h264enc";
@@ -916,7 +928,7 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
       transform->Release();
       transform = nullptr;
     }
-    if (create_mft_from_clsid_string(L"{17796aeb-0f66-4663-b8fb-99cbee0224ce}", &transform)) {
+    if (create_mft_from_clsid_string(L"{17796aeb-0f66-4663-b8fb-99cbee0224ce}", &transform, "decoder")) {
       if (decoder_supports_h264_input(transform)) {
         *outTransform = transform;
         *outUsingHardware = true;

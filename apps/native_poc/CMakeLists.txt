@@ -2918,6 +2918,17 @@ if(MSVC)
   target_compile_options(remote60_host_force_key_decision_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r3 (B): HW vs SW 1080p30 encode measurement (the SW-transition decision input).
+add_executable(remote60_host_encoder_backend_bench
+  src/mf_h264_codec.cpp
+  src/host_encoder_backend_bench.cpp
+)
+target_include_directories(remote60_host_encoder_backend_bench PRIVATE src)
+target_link_libraries(remote60_host_encoder_backend_bench PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_backend_bench PRIVATE /utf-8)
+endif()
+
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
 # The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
 # while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /
