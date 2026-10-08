@@ -2881,6 +2881,15 @@ if(MSVC)
   target_compile_options(remote60_host_wire_limiter_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r2 (step 4b): the pure periodic-key period policy. No MFT / no sockets.
+add_executable(remote60_host_key_period_policy_test
+  src/host_key_period_policy_test.cpp
+)
+target_include_directories(remote60_host_key_period_policy_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_key_period_policy_test PRIVATE /utf-8)
+endif()
+
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
 # The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
 # while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /

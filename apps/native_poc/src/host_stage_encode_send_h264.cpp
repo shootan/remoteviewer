@@ -44,6 +44,7 @@
 #include "capture_backend_dxgi.hpp"
 #include "d3d_capture_readback.hpp"
 #include "encode_resolution_ladder.hpp"
+#include "host_force_key_decision.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_abr.hpp"
 #include "host_args.hpp"
@@ -286,12 +287,14 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    const bool scheduledKey = !servedBootstrap && (encoder.activeKeyint > 0) &&
                              (encoder.realInputsSinceKey >= encoder.activeKeyint);
    (void)seq;
-   const bool keyWanted = encoder.forceKeyNext || (encoder.encodedSeq == 0) || scheduledKey;
-   // The frame that will ACTUALLY be forced as a key this tick. A keyWanted frame that cannot force
-   // right now (a key of this session is already in flight) is emitted as a DELTA, so for the cap gate
-   // it is an ordinary delta -- it must NOT ride the key always-admit exception, or it would overflow a
-   // full queue into the resync-IDR loop F2 describes while the real key is already on its way. (r3 F2)
-   const bool forceKeyFrame = keyWanted && !forceKeyInFlight;
+   // decide_force_key (host_force_key_decision.hpp) is the shared pure form of this decision; the
+   // recovery-roundtrip test drives the identical function. keyWanted: a request, the first frame, or
+   // the periodic schedule. forceKeyFrame: forced this tick only if no key of this session is in
+   // flight -- else it rides as a delta so it does not overflow the queue into a resync-IDR loop. (r3 F2)
+   const ForceKeyDecision keyDecision =
+       decide_force_key({encoder.forceKeyNext, encoder.encodedSeq == 0, scheduledKey, forceKeyInFlight});
+   const bool keyWanted = keyDecision.keyWanted;
+   const bool forceKeyFrame = keyDecision.forceKeyFrame;
    // The hard wire-rate cap's input gate (bitrate-hard-cap r1/r2): while the wire is backlogged -- the
    // sender queue has not drained -- skip this capture frame BEFORE it is encoded, so the stream drops
    // fps to what the wire carries instead of encoding a delta that overflows the queue into a
