@@ -216,6 +216,7 @@ struct Targets {
 struct SasService {
   std::mutex mu;
   int calls = 0;
+  int reboots = 0;  // r13: the service's OS restart seam (a counter here -- nothing restarts)
   uint32_t callerSession = 0;
   uint8_t answer = 0;      // PreloginSasResult to give
   uint32_t answerWin32 = 0;
@@ -238,6 +239,11 @@ struct SasService {
         *win32 = answerWin32;
         *cad = answerCad;
         return answer;
+      };
+      p.requestOsReboot = [this]() -> uint32_t {
+        std::lock_guard<std::mutex> l(mu);
+        ++reboots;
+        return 0;
       };
       HANDLE tok = nullptr;
       OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok);
@@ -431,7 +437,14 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
                 const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
-  if (!CopyFileW((myDir + L"GNLinkStreamMigrationTest.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) ||
+  // r13 negative control: REMOTE60_E2E_OLD_BIN names a streaming TEST build without the udp-control-peer
+  // gate (feat/prelogin-ui adfa892, before main 89155e4 was merged). Unset: the one built beside this test.
+  std::wstring streamSrc = myDir + L"GNLinkStreamMigrationTest.exe";
+  {
+    wchar_t oldBin[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') streamSrc = oldBin;
+  }
+  if (!CopyFileW(streamSrc.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) ||
       !CopyFileW(self_path().c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
     return false;
   }
@@ -615,6 +628,7 @@ int wmain(int argc, wchar_t** argv) {
   bool sessionEnds = false;
   bool androidSession = false;
   bool captureFallback = false;
+  bool foreignPeer = false;
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
@@ -625,6 +639,10 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
+    if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
+      foreignPeer = true;
+      androidSession = true;  // the same shared-session setup; its own steps below
+    }
   }
   if (!host_e2e_allowed() || GetEnvironmentVariableW(L"REMOTE60_ALLOW_UI_TEST", nullptr, 0) == 0) {
     std::printf("SKIP  viewer_prelogin_login_e2e_test (starts a listening host and types into its own window)\n");
@@ -763,6 +781,11 @@ int wmain(int argc, wchar_t** argv) {
     ioctlsocket(sock, FIONBIO, &nb);
     remote60::native_poc::ClientSessionController phone;
     remote60::native_poc::ClientSessionConnectArgs a;
+    sockaddr_in phoneLocal{};  // A: the adopted endpoint (its port), for the record
+    {
+      int pl = sizeof(phoneLocal);
+      getsockname(sock, reinterpret_cast<sockaddr*>(&phoneLocal), &pl);
+    }
     a.host = "127.0.0.1";
     a.videoPort = hostPort;
     a.controlPort = hostPort;
@@ -778,6 +801,113 @@ int wmain(int argc, wchar_t** argv) {
     const bool up = phone.Connect(a) &&
                     wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
     check("the session connects, directory-authenticated", up, phone.Snapshot().status);
+    if (foreignPeer) {
+      // r13: main's udp-control-peer gate (0.2.152) in front of what a pre-login host does for its session:
+      // Ctrl+Alt+Del (83 -> the service's SendSAS), a restart (84 -> the service's OS restart) and input.
+      // B is another endpoint (same IP, another port) sending VALID control datagrams on the host's
+      // client->host stream, ahead of A's sequence -- what the parser would take. Each carries an id only B
+      // uses; the host logs every 83/84 it handles and every key it drops, so B's ids in the host log, or a
+      // service seam reached, are the probe. (B's key is a CHARACTER key: a host that took it would drop it
+      // -- logged -- and inject nothing; nothing of B's can reach this desktop even on a build without the
+      // gate.) A then does the same through its own session: the positive control.
+      std::cout << "\n--- r13: a non-adopted endpoint's 83 / 84 / input at a pre-login host ---\n";
+      check("...and sees the host at the logon screen (0x2000)",
+            wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+      SasService svc;
+      svc.start(L"\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()), dir + L"GNLinkStream.exe");
+      constexpr uint32_t kBSas = 0xB83B83u, kBReboot = 0xB84B84u, kBInputSeq = 0xB0B0B0u;
+      constexpr uint32_t kASasMin = 1;
+      SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      sockaddr_in bl{};
+      bl.sin_family = AF_INET;
+      InetPtonW(AF_INET, L"127.0.0.1", &bl.sin_addr);
+      const bool bBound = b != INVALID_SOCKET && bind(b, reinterpret_cast<sockaddr*>(&bl), sizeof(bl)) == 0;
+      int bll = sizeof(bl);
+      getsockname(b, reinterpret_cast<sockaddr*>(&bl), &bll);
+      check("[foreign] B binds its own port (same IP as A, another port)", bBound && bl.sin_port != phoneLocal.sin_port,
+            std::to_string(ntohs(bl.sin_port)) + " vs A " + std::to_string(ntohs(phoneLocal.sin_port)));
+      sockaddr_in hostAddr{};
+      hostAddr.sin_family = AF_INET;
+      InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
+      hostAddr.sin_port = htons(hostPort);
+      auto send_control = [&](uint32_t messageSeq, const void* msg, size_t n) {
+        remote60::native_poc::UdpControlChunkHeader head{};
+        head.magic = remote60::native_poc::kMagic;
+        head.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+        head.size = static_cast<uint16_t>(sizeof(head));
+        head.streamId = remote60::native_poc::kUdpControlStreamClientToHost;
+        head.messageSeq = messageSeq;
+        head.totalSize = static_cast<uint32_t>(n);
+        head.fragIndex = 0;
+        head.fragCount = 1;
+        head.fragOffset = 0;
+        head.fragSize = static_cast<uint16_t>(n);
+        std::vector<uint8_t> dg(sizeof(head) + n);
+        std::memcpy(dg.data(), &head, sizeof(head));
+        std::memcpy(dg.data() + sizeof(head), msg, n);
+        sendto(b, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+               reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+      };
+      if (bBound) {
+        const remote60::native_poc::ControlPreloginControlMessage sas = remote60::native_poc::make_sas_request(kBSas);
+        const std::vector<uint8_t> reboot = remote60::native_poc::build_reboot_request(kBReboot);
+        remote60::native_poc::ControlInputEventMessage key{};
+        key.header.magic = remote60::native_poc::kMagic;
+        key.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlInputEvent);
+        key.header.size = static_cast<uint16_t>(sizeof(key));
+        key.seq = kBInputSeq;
+        key.kind = 5;  // key_down
+        key.keyCode = 'Q';
+        for (int round = 0; round < 3; ++round) {  // in sequence, ahead of A
+          send_control(1000000u + round * 3 + 0, &sas, sizeof(sas));
+          send_control(1000000u + round * 3 + 1, reboot.data(), reboot.size());
+          send_control(1000000u + round * 3 + 2, &key, sizeof(key));
+          Sleep(150);
+        }
+      }
+      check("[foreign] the host logs dropping control from the non-session endpoint B",
+            wait_until([&] { return host.log().find("dropped control from non-session peer") != std::string::npos; }, 6000));
+      Sleep(1500);
+      const bool bSasSeen = host.log().find("[control][sas] requestId=" + std::to_string(kBSas)) != std::string::npos;
+      const bool bRebootSeen = host.log().find("[control][reboot] requestId=" + std::to_string(kBReboot)) != std::string::npos;
+      const bool bInputSeen = host.log().find("seq=" + std::to_string(kBInputSeq)) != std::string::npos;
+      int sasCalls = 0, reboots = 0;
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        sasCalls = svc.calls;
+        reboots = svc.reboots;
+      }
+      check("[foreign] B's Ctrl+Alt+Del (83) never reached the host's handler, nor the service's SendSAS (0 calls)",
+            !bSasSeen && sasCalls == 0, std::to_string(sasCalls) + " calls");
+      check("[foreign] B's restart (84) never reached the host's handler, nor the service's OS restart (0)",
+            !bRebootSeen && reboots == 0, std::to_string(reboots) + " restarts");
+      check("[foreign] B's input never reached the host's input handler", !bInputSeen);
+      if (b != INVALID_SOCKET) closesocket(b);
+      // The positive control: A, the adopted endpoint, asks the same through its own session.
+      const uint32_t aSas = phone.RequestSas();
+      uint32_t gotSas = 0, sasWin32 = 0;
+      int sasOutcome = -1;
+      const bool aSasAnswered = aSas >= kASasMin && wait_until([&] { return phone.TakeSasOutcome(&gotSas, &sasOutcome, &sasWin32); }, 15000);
+      const uint32_t aReboot = phone.RequestReboot();
+      uint32_t gotReboot = 0, rebootWin32 = 0;
+      int rebootOutcome = -1;
+      const bool aRebootAnswered =
+          aReboot != 0 && wait_until([&] { return phone.TakeRebootOutcome(&gotReboot, &rebootOutcome, &rebootWin32); }, 15000);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        sasCalls = svc.calls;
+        reboots = svc.reboots;
+      }
+      check("[foreign] positive control: A's Ctrl+Alt+Del reaches the service once and is answered (Sent)",
+            aSasAnswered && gotSas == aSas && sasOutcome == 0 && sasCalls == 1, std::to_string(sasCalls) + " calls, outcome " + std::to_string(sasOutcome));
+      check("[foreign] positive control: A's restart reaches the service's OS seam once and is answered (Accepted)",
+            aRebootAnswered && gotReboot == aReboot && rebootOutcome == 0 && reboots == 1,
+            std::to_string(reboots) + " restarts, outcome " + std::to_string(rebootOutcome));
+      check("[foreign] A's session stays connected through B's injection",
+            phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected, phone.Snapshot().status);
+      svc.stop();
+      phone.Disconnect();
+    } else {
     // r10: what the app does right after connecting (MainActivity): ask the window list -- before the first
     // pong. It must wait for that pong, which answers it ("not here") without sending it.
     const bool listAccepted = phone.RequestWindowList();
@@ -826,6 +956,7 @@ int wmain(int argc, wchar_t** argv) {
           sasAnswered && gotSas == sasId && sasOutcome == 4 && sasWin32 == 1062,
           "id " + std::to_string(sasId) + " flags " + std::to_string(phone.HostCaptureFlags()) + " outcome " + std::to_string(sasOutcome) + " win32 " + std::to_string(sasWin32) + (sasAnswered ? std::string() : " | host: " + host.log().substr(host.log().size() > 1500 ? host.log().size() - 1500 : 0)));
     phone.Disconnect();
+    }  // r13: !foreignPeer
   }
 
   // ------------------------------------------------------------------ the viewer, for real
