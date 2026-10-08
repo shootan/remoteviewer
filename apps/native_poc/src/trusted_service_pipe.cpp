@@ -26,10 +26,13 @@ const char* trusted_pipe_status_name(TrustedPipeStatus s) {
 const char* pipe_verify_stage_name(PipeVerifyStage s) {
   switch (s) {
     case PipeVerifyStage::None: return "none";
+    case PipeVerifyStage::Open: return "open";
     case PipeVerifyStage::ServerPid: return "server-pid";
     case PipeVerifyStage::ServiceStatus: return "service-status";
     case PipeVerifyStage::ServerImage: return "server-image";
     case PipeVerifyStage::ServiceBinary: return "service-binary";
+    case PipeVerifyStage::ServerPidMismatch: return "server-pid-mismatch";
+    case PipeVerifyStage::ImageMismatch: return "image-mismatch";
     case PipeVerifyStage::FinalRecheck: return "final-recheck";
   }
   return "?";
@@ -59,18 +62,21 @@ struct FileId {
   bool read = false;
 };
 
-FileId file_id_of(const std::wstring& path) {
+FileId file_id_of(const std::wstring& path, uint32_t* errOut = nullptr) {
   FileId id;
-  if (path.empty()) return id;
+  if (errOut) *errOut = 0;
+  if (path.empty()) { if (errOut) *errOut = ERROR_PATH_NOT_FOUND; return id; }
   HANDLE h = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-  if (h == INVALID_HANDLE_VALUE) return id;
+  if (h == INVALID_HANDLE_VALUE) { if (errOut) *errOut = GetLastError(); return id; }  // capture NOW
   BY_HANDLE_FILE_INFORMATION bi{};
   if (GetFileInformationByHandle(h, &bi)) {
     id.volume = bi.dwVolumeSerialNumber;
     id.indexHigh = bi.nFileIndexHigh;
     id.indexLow = bi.nFileIndexLow;
     id.read = true;
+  } else if (errOut) {
+    *errOut = GetLastError();
   }
   CloseHandle(h);
   return id;
@@ -174,16 +180,26 @@ ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* servic
     if (!serverProc) {
       note_fail(PipeVerifyStage::ServerImage, GetLastError());
     } else {
-      const FileId img = file_id_of(image_of_process(serverProc));
+      uint32_t imgErr = 0, binErr = 0;
+      const FileId img = file_id_of(image_of_process(serverProc), &imgErr);  // err captured inside
       f.serverImageKnown = img.read;
-      if (!img.read) note_fail(PipeVerifyStage::ServerImage, GetLastError());
-      const FileId bin = file_id_of(service_binary_path(serviceName));
+      if (!img.read) note_fail(PipeVerifyStage::ServerImage, imgErr);
+      const FileId bin = file_id_of(service_binary_path(serviceName), &binErr);
       f.serviceBinaryKnown = bin.read;
-      if (!bin.read) note_fail(PipeVerifyStage::ServiceBinary, GetLastError());
+      if (!bin.read) note_fail(PipeVerifyStage::ServiceBinary, binErr);
       f.imageSameFile = img.read && bin.read && img.volume == bin.volume &&
                         img.indexHigh == bin.indexHigh && img.indexLow == bin.indexLow;
     }
   }
+
+  // Record the DISTINGUISHING reason for an otherwise-complete-but-not-trusted result (R3): a pid that
+  // does not match the SCM's running pid, or an image that is a different file. win32=0 here -- the
+  // syscalls succeeded; it is the comparison that refused.
+  if (f.serverPidKnown && f.serviceRunning && f.serverPid != f.servicePid)
+    note_fail(PipeVerifyStage::ServerPidMismatch, 0);
+  else if (f.serverPidKnown && f.serviceRunning && f.serverImageKnown && f.serviceBinaryKnown &&
+           !f.imageSameFile)
+    note_fail(PipeVerifyStage::ImageMismatch, 0);
 
   // R2 final re-check: with the server handle still held, confirm it is still alive AND the SCM still
   // reports that SAME pid RUNNING. A stop/replace across the window (or an inability to re-confirm)
@@ -223,11 +239,17 @@ void* OpenVerifiedServicePipe(const wchar_t* name, uint32_t desiredAccess, uint3
                               const wchar_t* serviceName, uint32_t waitMs, TrustedPipeStatus* status,
                               ServerIdentityGatherer gather, ServerIdentityFacts* diagOut) {
   if (status) *status = TrustedPipeStatus::Unavailable;
+  if (diagOut) *diagOut = ServerIdentityFacts{};  // default: finalConsistent=false, stage=None
   (void)WaitNamedPipeW(name, waitMs == 0 ? NMPWAIT_USE_DEFAULT_WAIT : waitMs);
   // SECURITY_IDENTIFICATION: let the server identify the caller, but grant it no impersonation power.
   HANDLE pipe = CreateFileW(name, desiredAccess, 0, nullptr, OPEN_EXISTING,
                             flagsAndAttributes | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
-  if (pipe == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+  if (pipe == INVALID_HANDLE_VALUE) {
+    // R3: the open itself failed -- distinguish absent (FILE_NOT_FOUND) / access denied / busy, instead
+    // of collapsing all into a bare Unavailable with stage=None.
+    if (diagOut) { diagOut->failStage = PipeVerifyStage::Open; diagOut->failWin32 = GetLastError(); }
+    return INVALID_HANDLE_VALUE;
+  }
   const ServerIdentityGatherer g = gather ? gather : &GatherServerIdentity;
   const ServerIdentityFacts facts = g(pipe, serviceName);
   const TrustedPipeStatus verdict = ClassifyServerIdentity(facts);

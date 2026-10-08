@@ -31,11 +31,14 @@ const char* trusted_pipe_status_name(TrustedPipeStatus s);
 // Which step established or failed the identity -- kept for the local diagnostic (R3), never on the wire.
 enum class PipeVerifyStage {
   None,
-  ServerPid,      // GetNamedPipeServerProcessId
-  ServiceStatus,  // SCM QueryServiceStatusEx (running + pid)
-  ServerImage,    // OpenProcess + QueryFullProcessImageName + file id of the server
-  ServiceBinary,  // QueryServiceConfig binary + its file id
-  FinalRecheck,   // end-of-collection: server still alive AND still the SCM's running pid
+  Open,            // WaitNamedPipe / CreateFile to the name failed (absent / access denied / busy)
+  ServerPid,       // GetNamedPipeServerProcessId
+  ServiceStatus,   // SCM QueryServiceStatusEx (running + pid); not-installed vs stopped vs denied
+  ServerImage,     // OpenProcess + QueryFullProcessImageName + file id of the server
+  ServiceBinary,   // QueryServiceConfig binary + its file id
+  ServerPidMismatch,  // pipe server pid != the SCM's running pid
+  ImageMismatch,      // server image is a different file than the service binary
+  FinalRecheck,       // end-of-collection: server still alive AND still the SCM's running pid
 };
 const char* pipe_verify_stage_name(PipeVerifyStage s);
 
@@ -49,10 +52,10 @@ struct ServerIdentityFacts {
   bool serviceBinaryKnown = false;  // the service's configured binary file identity was read
   bool imageSameFile = false;       // the two are the SAME file (volume + file index)
   // R2: at the END of collection, the SAME server process object was still alive AND the SCM still
-  // reported that same pid RUNNING for the service. False = a stop/replace happened across the window,
-  // or it could not be re-confirmed -> not trusted. (A missing-but-not-contradicted value stays true so
-  // the pure classifier for the earlier facts is unchanged; the Win32 gatherer sets it explicitly.)
-  bool finalConsistent = true;
+  // reported that same pid RUNNING for the service. The default is FALSE so an un-collected facts
+  // value (e.g. a CreateFile that never reached the gatherer) is never accidentally trusted; the Win32
+  // gatherer sets it true only after an actual passing re-check.
+  bool finalConsistent = false;
   // R3 diagnostic (local only): the first step that failed and its original Win32 error.
   PipeVerifyStage failStage = PipeVerifyStage::None;
   uint32_t failWin32 = 0;

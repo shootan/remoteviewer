@@ -149,8 +149,9 @@ bool SecureInputBrokerClient::ConnectLocked() {
     TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
     ServerIdentityFacts diag;
     pipe_ = static_cast<HANDLE>(OpenVerifiedServicePipe(
-        kSecureInputPipeName, GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-        kSecureInputServiceName, 100, &st, nullptr, &diag));
+        testPipeName_ ? testPipeName_ : kSecureInputPipeName, GENERIC_WRITE,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+        testServiceName_ ? testServiceName_ : kSecureInputServiceName, 100, &st, testGatherer_, &diag));
     if (pipe_ != INVALID_HANDLE_VALUE) { LogTrustChange("secure-input", st, diag); return true; }
     LogTrustChange("secure-input", st, diag);  // R3: keep the stage/error locally, once per change
     std::this_thread::sleep_for(std::chrono::milliseconds(25));

@@ -15,6 +15,7 @@
 
 #include "poc_protocol.hpp"
 #include "secure_unlock_ipc.hpp"
+#include "trusted_service_pipe.hpp"
 
 namespace remote60::native_poc {
 
@@ -22,6 +23,20 @@ class HostUnlockRelay {
  public:
   HostUnlockRelay() = default;
   ~HostUnlockRelay();
+
+  /**
+   * TEST ONLY (secure-pipe-identity gate): point the REAL verified connect at a test pipe/service name
+   * and an injected gatherer; shipping uses the production defaults with no runtime option to change
+   * them. ProbeConnectForTest runs exactly the production ConnectPipe (verify included) once and reports
+   * whether it yielded a trusted handle, closing it -- the relay's connect gate without the crypto.
+   */
+  void SetVerificationEndpointForTest(const wchar_t* pipeName, const wchar_t* serviceName,
+                                      ServerIdentityGatherer gather) {
+    testPipeName_ = pipeName;
+    testServiceName_ = serviceName;
+    testGatherer_ = gather;
+  }
+  bool ProbeConnectForTest();
 
   // Control thread: synchronous, fast (no WTSConnectSession here). Fills `out` with the service's
   // challenge (or a rejection stage). Returns false if the service is unreachable / timed out.
@@ -62,6 +77,10 @@ class HostUnlockRelay {
   std::map<uint32_t, ControlUnlockChallengeMessage> challengeResults_;
   // Sealed job results, keyed by requestId.
   std::map<uint32_t, ControlUnlockStatusResultMessage> sealedResults_;
+
+  const wchar_t* testPipeName_ = nullptr;     // nullptr -> production kSecureUnlockPipeName
+  const wchar_t* testServiceName_ = nullptr;  // nullptr -> production kSecureInputServiceName
+  ServerIdentityGatherer testGatherer_ = nullptr;  // nullptr -> production GatherServerIdentity
 };
 
 }  // namespace remote60::native_poc

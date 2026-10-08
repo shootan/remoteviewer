@@ -29,49 +29,101 @@ const wchar_t kTestPipe[] = L"\\\\.\\pipe\\GNLinkTspTestPipe";
 const wchar_t kTestService[] = L"GNLinkTspTestSvc";
 
 SERVICE_STATUS_HANDLE g_status = nullptr;
-std::atomic<bool> g_run{true};
-HANDLE g_pipe = INVALID_HANDLE_VALUE;
+HANDLE g_stop = nullptr;  // manual-reset STOP latch: set once by the handler, observed by every wait
 
-void set_state(DWORD state) {
+void set_state(DWORD state, DWORD exitCode = NO_ERROR) {
   SERVICE_STATUS s{};
   s.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   s.dwCurrentState = state;
   s.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP : 0;
+  s.dwWin32ExitCode = exitCode;
   if (g_status) SetServiceStatus(g_status, &s);
 }
 
 void WINAPI svc_ctrl(DWORD c) {
   if (c == SERVICE_CONTROL_STOP) {
-    g_run.store(false);
     set_state(SERVICE_STOP_PENDING);
-    if (g_pipe != INVALID_HANDLE_VALUE) CancelIoEx(g_pipe, nullptr);
+    if (g_stop) SetEvent(g_stop);  // a latch, not a one-shot CancelIoEx: every blocking wait sees it
   }
 }
+
+// True if STOP was requested. Overlapped waits also wake on g_stop directly.
+bool stopping() { return g_stop && WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0; }
 
 void WINAPI svc_main(DWORD, wchar_t**) {
   g_status = RegisterServiceCtrlHandlerW(kTestService, svc_ctrl);
   if (!g_status) return;
   set_state(SERVICE_START_PENDING);
+  g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // manual-reset
+
+  // Build the DACL + the pipe BEFORE reporting RUNNING: a failure here reports STOPPED with an error,
+  // so the probe never trusts a "RUNNING" fixture that has no pipe.
   PSECURITY_DESCRIPTOR sd = nullptr;
-  ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
-                                                       &sd, nullptr);
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+                                                            SDDL_REVISION_1, &sd, nullptr)) {
+    set_state(SERVICE_STOPPED, GetLastError());
+    if (g_stop) CloseHandle(g_stop);
+    return;
+  }
   SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
-  g_pipe = CreateNamedPipeW(kTestPipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT |
-                                PIPE_REJECT_REMOTE_CLIENTS,
-                            1, 4096, 4096, 0, &sa);
+  HANDLE pipe = CreateNamedPipeW(
+      kTestPipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096,
+      0, &sa);
   if (sd) LocalFree(sd);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    set_state(SERVICE_STOPPED, GetLastError());  // name squatted or create failed -> fail closed
+    if (g_stop) CloseHandle(g_stop);
+    return;
+  }
+
+  OVERLAPPED ov{};
+  ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   set_state(SERVICE_RUNNING);
-  while (g_run.load() && g_pipe != INVALID_HANDLE_VALUE) {
-    const BOOL c = ConnectNamedPipe(g_pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
-    if (!g_run.load()) break;
-    if (!c) break;
+
+  // Bounded, overlapped serve loop. STOP is honoured at FOUR points: (1) before Connect, (2) between a
+  // completed Connect and the Read, (3) while Connect is pending, (4) while Read is pending.
+  for (;;) {
+    if (stopping()) break;  // (1)
+    ResetEvent(ov.hEvent);
+    BOOL connected = ConnectNamedPipe(pipe, &ov);
+    DWORD gle = GetLastError();
+    if (!connected && gle == ERROR_IO_PENDING) {
+      HANDLE w[2] = {ov.hEvent, g_stop};
+      if (WaitForMultipleObjects(2, w, FALSE, INFINITE) != WAIT_OBJECT_0) {  // (3) stop won
+        CancelIoEx(pipe, &ov);
+        DWORD b = 0;
+        GetOverlappedResult(pipe, &ov, &b, TRUE);  // reap the cancelled connect
+        break;
+      }
+      DWORD b = 0;
+      GetOverlappedResult(pipe, &ov, &b, TRUE);
+      connected = TRUE;
+    } else if (!connected && gle != ERROR_PIPE_CONNECTED) {
+      break;  // a real connect error -> stop serving (fail closed)
+    }
+    if (stopping()) { DisconnectNamedPipe(pipe); break; }  // (2)
+
+    ResetEvent(ov.hEvent);
     char buf[64];
     DWORD got = 0;
-    (void)ReadFile(g_pipe, buf, sizeof(buf), &got, nullptr);  // drain; a probe sends nothing
-    DisconnectNamedPipe(g_pipe);
+    BOOL rok = ReadFile(pipe, buf, sizeof(buf), &got, &ov);  // drain; a probe sends nothing
+    if (!rok && GetLastError() == ERROR_IO_PENDING) {
+      HANDLE w[2] = {ov.hEvent, g_stop};
+      if (WaitForMultipleObjects(2, w, FALSE, INFINITE) != WAIT_OBJECT_0) {  // (4) stop won
+        CancelIoEx(pipe, &ov);
+        GetOverlappedResult(pipe, &ov, &got, TRUE);
+        DisconnectNamedPipe(pipe);
+        break;
+      }
+      GetOverlappedResult(pipe, &ov, &got, TRUE);
+    }
+    DisconnectNamedPipe(pipe);  // ready for the next client; name stays owned
   }
-  if (g_pipe != INVALID_HANDLE_VALUE) CloseHandle(g_pipe);
+
+  CloseHandle(ov.hEvent);
+  CloseHandle(pipe);
+  if (g_stop) CloseHandle(g_stop);
   set_state(SERVICE_STOPPED);
 }
 

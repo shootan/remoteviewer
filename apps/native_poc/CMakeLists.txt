@@ -2135,6 +2135,16 @@ add_executable(remote60_trusted_service_pipe_probe
 target_include_directories(remote60_trusted_service_pipe_probe PRIVATE src)
 target_link_libraries(remote60_trusted_service_pipe_probe PRIVATE advapi32)
 
+# secure-pipe-identity B2: pre-publish isolated gate for the two product clients (real broker/relay).
+add_executable(remote60_secure_pipe_client_gate_test
+  src/secure_pipe_client_gate_test.cpp
+  src/secure_input_broker.cpp
+  src/host_unlock_relay.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_secure_pipe_client_gate_test PRIVATE src)
+target_link_libraries(remote60_secure_pipe_client_gate_test PRIVATE common advapi32)
+
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
 )

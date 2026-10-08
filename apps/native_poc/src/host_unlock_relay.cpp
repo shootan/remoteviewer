@@ -92,8 +92,9 @@ void* HostUnlockRelay::ConnectPipe() {
     TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
     ServerIdentityFacts diag;
     HANDLE pipe = static_cast<HANDLE>(OpenVerifiedServicePipe(
-        kSecureUnlockPipeName, GENERIC_READ | GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL,
-        kSecureInputServiceName, 100, &st, nullptr, &diag));
+        testPipeName_ ? testPipeName_ : kSecureUnlockPipeName, GENERIC_READ | GENERIC_WRITE,
+        FILE_ATTRIBUTE_NORMAL, testServiceName_ ? testServiceName_ : kSecureInputServiceName, 100, &st,
+        testGatherer_, &diag));
     LogTrustChange("unlock", st, diag);  // R3: keep the stage/error locally, once per change
     if (pipe != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_MESSAGE;
@@ -103,6 +104,17 @@ void* HostUnlockRelay::ConnectPipe() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   } while (std::chrono::steady_clock::now() < deadline && running_.load());
   return INVALID_HANDLE_VALUE;
+}
+
+bool HostUnlockRelay::ProbeConnectForTest() {
+  // Drive the PRODUCTION ConnectPipe (verify included) once; report whether it produced a trusted
+  // handle. running_ must be true for the connect loop to run; restore it afterwards.
+  const bool was = running_.exchange(true);
+  HANDLE h = static_cast<HANDLE>(ConnectPipe());
+  running_.store(was);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  CloseHandle(h);
+  return true;
 }
 
 void HostUnlockRelay::WorkerLoop() {
