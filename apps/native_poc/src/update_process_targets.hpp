@@ -30,6 +30,24 @@ namespace remote60::native_poc::update {
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames);
 
 /**
+ * Same, but each match is classified against this installation's exact payload file by FILE IDENTITY
+ * (installDir\<name>, compared by volume + file index -- not by a directory-prefix string):
+ *   - a CONFIRMED-different file (another install, a build/test tree, a copy under installDir\backup)
+ *     is DROPPED -- never asked to close or waited on;
+ *   - the real payload reached through an alias/junction/8.3/hardlink is KEPT (same file);
+ *   - a match that could NOT be confirmed either way (the running image or the installed payload could
+ *     not be opened) is KEPT with membershipConfirmed=false, so PrepareForSwap refuses and names it
+ *     rather than dropping it as external or asking it to stop.
+ * `installDir` empty means no filtering. This is the install-membership check the 2026-10-08 incident
+ * needed, at the precision the r2 review required.
+ */
+std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames,
+                                                       const std::wstring& installDir);
+
+/** Gather file-identity facts comparing a running image to installDir\<its leaf name>. For tests. */
+TargetMatchFacts gather_target_match_facts(const std::wstring& imagePath, const std::wstring& installDir);
+
+/**
  * Asks one process to close: WM_CLOSE to its top-level windows, then a console CTRL event for the
  * windowless ones.
  *

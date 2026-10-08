@@ -236,6 +236,35 @@ int main(int argc, char** argv) {
               open_failure_name(OpenFailure::Unknown));
   }
 
+  // target membership (updater-helper-lifecycle r2 M1/M2): a same-named process is a target only when
+  // its running image opens to the SAME FILE as this installation's payload. Pure over the gathered
+  // facts; the Win32 file-identity gather (resolving junction/8.3/case/hardlink) is exercised in
+  // update_stop_process_test.
+  {
+    // Both files opened and are the same file -> a real target.
+    check("target: same file as the payload -> Target",
+          classify_target_membership(TargetMatchFacts{/*image*/ true, /*target*/ true, /*same*/ true}) ==
+              TargetMembership::Target);
+    // Both opened, different files -> NotTarget (external, or a non-payload copy under installDir).
+    check("NEGATIVE not-target: a different file -> NotTarget",
+          classify_target_membership(TargetMatchFacts{true, true, false}) == TargetMembership::NotTarget);
+    // M1: the running image could not be opened -> never asserted external or internal, Unknown.
+    check("unknown: the running image could not be opened -> Unknown (M1)",
+          classify_target_membership(TargetMatchFacts{false, true, false}) == TargetMembership::Unknown);
+    // M1: the installed payload could not be opened to compare -> Unknown, not Outside.
+    check("unknown: the payload file could not be opened -> Unknown (M1)",
+          classify_target_membership(TargetMatchFacts{true, false, false}) == TargetMembership::Unknown);
+    check("unknown: neither opened -> Unknown",
+          classify_target_membership(TargetMatchFacts{false, false, false}) == TargetMembership::Unknown);
+    // sameFile can never be true unless both opened (the Win32 layer guarantees it); the verdict is
+    // Target only on both-opened-and-same.
+    check("the three names are distinct",
+          std::string(target_membership_name(TargetMembership::Target)) !=
+                  target_membership_name(TargetMembership::NotTarget) &&
+              std::string(target_membership_name(TargetMembership::Unknown)) !=
+                  target_membership_name(TargetMembership::Target));
+  }
+
   // The table is only worth what its anchors are worth, so both ends are tied to the real API:
   // the two codes this machine can actually produce are checked through OpenProcess itself.
   {

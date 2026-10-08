@@ -60,6 +60,29 @@ namespace {
 int gChecks = 0;
 int gFailures = 0;
 
+// Find a top-level window owned by `pid` on a given desktop (the helper runs on the test's private
+// station; its owner window is a hidden top-level window there). Used by the WM_CLOSE lifecycle
+// reproduction (updater-helper-lifecycle (2)/(3)).
+struct PidWindow {
+  DWORD pid = 0;
+  HWND found = nullptr;
+};
+BOOL CALLBACK find_pid_window(HWND hwnd, LPARAM param) {
+  auto* pw = reinterpret_cast<PidWindow*>(param);
+  DWORD owner = 0;
+  GetWindowThreadProcessId(hwnd, &owner);
+  if (owner == pw->pid) {
+    pw->found = hwnd;
+    return FALSE;  // stop
+  }
+  return TRUE;
+}
+HWND window_of_pid_on_desktop(DWORD pid, HDESK desk) {
+  PidWindow pw{pid, nullptr};
+  EnumDesktopWindows(desk, find_pid_window, reinterpret_cast<LPARAM>(&pw));
+  return pw.found;
+}
+
 // This process is a plain user process: Medium, not elevated (the usual test run). An elevated run
 // takes the other branch of the token checks.
 bool this_process_is_plain() {
@@ -1277,6 +1300,74 @@ int run_driver() {
     // The Job: the helper is inside it (a process in a KILL_ON_JOB_CLOSE job cannot be outside).
     BOOL inJob = FALSE;
     check("...the helper is in a Job", IsProcessInJob(link.helper_process(), nullptr, &inJob) && inJob);
+  }
+
+  // ------------------------------------------------- (2)/(3) WM_CLOSE lifecycle + publish ban
+  // (2) The incident shape: a helper that received a bare WM_CLOSE went WINDOWLESS but kept running,
+  // so the updater could no longer ask it to close and abandoned the swap. WM_CLOSE must run the real
+  // shutdown (ban publishes + post WM_QUIT) and the process must EXIT.
+  // (3) M3: with an offer ON the (private) clipboard, WM_CLOSE must withdraw it AND a publish arriving
+  // after the close must NOT commit a new clipboard. The helper runs on the test's PRIVATE station so
+  // this touches only that station's clipboard, never the user's. Its own pipe/process, apart from `link`.
+  std::printf("\n--- (2)/(3) WM_CLOSE: exit, withdraw the offer, ban later publishes ---\n");
+  {
+    HelperLink wc;
+    std::string wcWhy;
+    check("[wmclose] a server pipe for the WM_CLOSE helper", wc.CreateServerPipe(userSid, &wcWhy), wcWhy);
+    const std::wstring wcLog = root + L"\\wmclose_helper.log";
+    check("[wmclose] launched on the private station",
+          wc.Launch(helperExe, nullptr, station.desktop.c_str(),
+                    L"--idle-ms 60000 --log \"" + wcLog + L"\"", &wcWhy), wcWhy);
+    const bool wcHello = wc.AwaitHello(10000, &wcWhy);
+    check("[wmclose] the helper connected and is in its message loop", wcHello, wcWhy);
+    if (wcHello) {
+      // (3) An offer on the private clipboard, so there is active state WM_CLOSE must clean up.
+      std::string pubWhy;
+      std::vector<RemoteFileItem> items;
+      RemoteFileItem it;
+      it.name = u"m3.txt";
+      it.size = 4;
+      items.push_back(it);
+      check("[wmclose] an offer is published before close", expect_publish_ok(wc, 501, items, &pubWhy), pubWhy);
+
+      HWND hwnd = nullptr;
+      for (int i = 0; i < 50 && !hwnd; ++i) {  // the window appears right after Hello
+        hwnd = window_of_pid_on_desktop(wc.helper_pid(), station.dk);
+        if (!hwnd) Sleep(100);
+      }
+      check("[wmclose] the helper owns a top-level window", hwnd != nullptr);
+      if (hwnd) {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        // (3) A publish racing/after the close must NOT commit a new clipboard: the ban refuses it
+        // (Status != Ok), or the helper has already gone (send/receive fails). Never a fresh offer.
+        PublishRemoteFiles after;
+        after.offerId = 502;
+        after.items = items;
+        bool committed = false;
+        if (wc.Send(encode(after))) {
+          PipeFrame f;
+          PublishResult r;
+          if (wc.Receive(&f, 3000) && decode(f, &r)) committed = (r.status == Status::Ok);
+        }
+        check("[wmclose] a publish after WM_CLOSE does NOT commit a new clipboard (M3 ban)", !committed);
+
+        // (2) Fixed: WM_CLOSE -> shutdown() -> PostQuitMessage -> exit. Pre-fix: the window is
+        // destroyed but GetMessage keeps looping, so the process survives and this times out.
+        const bool exited = WaitForSingleObject(wc.helper_process(), 8000) == WAIT_OBJECT_0;
+        check("[wmclose] the helper EXITS after WM_CLOSE (does not survive windowless)", exited,
+              exited ? "" : "still running 8s after WM_CLOSE -- the windowless-survivor bug");
+        if (exited)
+          check("[wmclose] no window of that pid remains",
+                window_of_pid_on_desktop(wc.helper_pid(), station.dk) == nullptr);
+      }
+    }
+    // Clean up by HANDLE (never by name): if the helper is still alive it is this test's leftover.
+    if (wc.helper_process() && WaitForSingleObject(wc.helper_process(), 0) == WAIT_TIMEOUT) {
+      TerminateProcess(wc.helper_process(), 9);
+      WaitForSingleObject(wc.helper_process(), 3000);
+      if (!tail_of(wcLog, 40).empty()) std::wprintf(L"%s", tail_of(wcLog, 40).c_str());  // preserve evidence
+    }
+    wc.Close();
   }
 
   // ---------------------------------------------------------------- R->P: the user's files

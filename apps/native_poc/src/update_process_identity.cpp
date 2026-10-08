@@ -93,6 +93,23 @@ bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure*
   return true;
 }
 
+const char* target_membership_name(TargetMembership m) {
+  switch (m) {
+    case TargetMembership::Target: return "target";
+    case TargetMembership::NotTarget: return "not-target";
+    case TargetMembership::Unknown: return "unknown";
+  }
+  return "?";
+}
+
+TargetMembership classify_target_membership(const TargetMatchFacts& f) {
+  // A failure to read EITHER file is never a confident verdict: not "external" (which would drop a
+  // real target held open through an alias) and not "ours" (which would ask a stranger to close).
+  // It is Unknown, and the swap refuses on it, naming the pid (M1).
+  if (!f.imageOpened || !f.targetOpened) return TargetMembership::Unknown;
+  return f.sameFile ? TargetMembership::Target : TargetMembership::NotTarget;
+}
+
 const char* identity_match_name(IdentityMatch m) {
   switch (m) {
     case IdentityMatch::Same: return "same";

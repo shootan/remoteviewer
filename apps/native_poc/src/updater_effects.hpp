@@ -138,7 +138,8 @@ struct UpdaterDeps {
  * behaviour this had before there was a credential at all.
  */
 UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
-                                    const UpdateEndpoint& endpoint = {});
+                                    const UpdateEndpoint& endpoint = {},
+                                    const std::wstring& installDir = {});
 
 /**
  * Assembles the effects from options and dependencies, and runs one update.
