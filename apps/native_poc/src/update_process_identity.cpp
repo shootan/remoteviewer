@@ -93,6 +93,37 @@ bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure*
   return true;
 }
 
+const char* install_membership_name(InstallMembership m) {
+  switch (m) {
+    case InstallMembership::Inside: return "inside";
+    case InstallMembership::Outside: return "outside";
+    case InstallMembership::Unknown: return "unknown";
+  }
+  return "?";
+}
+
+InstallMembership classify_install_membership(const std::wstring& normalizedImagePath,
+                                              const std::wstring& normalizedInstallDir) {
+  // Either side missing -> cannot judge. The path side is the incident case (an image whose path
+  // could not be read); the dir side is defensive (an updater with no installDir filters nothing).
+  if (normalizedImagePath.empty() || normalizedInstallDir.empty()) return InstallMembership::Unknown;
+
+  // Compare without a trailing separator on the directory, then require the next character in the
+  // image path to be a separator (or the strings to be equal) so that "C:\\App" does not match
+  // "C:\\AppOther\\x.exe". Case-insensitive, matching every other path compare in this updater.
+  std::wstring dir = normalizedInstallDir;
+  while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+  if (dir.empty()) return InstallMembership::Unknown;
+
+  if (normalizedImagePath.size() < dir.size()) return InstallMembership::Outside;
+  if (_wcsnicmp(normalizedImagePath.c_str(), dir.c_str(), dir.size()) != 0)
+    return InstallMembership::Outside;
+  if (normalizedImagePath.size() == dir.size()) return InstallMembership::Inside;  // exact (unlikely)
+  const wchar_t boundary = normalizedImagePath[dir.size()];
+  return (boundary == L'\\' || boundary == L'/') ? InstallMembership::Inside
+                                                 : InstallMembership::Outside;
+}
+
 const char* identity_match_name(IdentityMatch m) {
   switch (m) {
     case IdentityMatch::Same: return "same";

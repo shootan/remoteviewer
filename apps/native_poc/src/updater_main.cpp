@@ -336,7 +336,7 @@ int updater_main(int argc, wchar_t** argv) {
     }
   }
 
-  UpdaterEffects effects(options, production_updater_deps(log_line, endpoint));
+  UpdaterEffects effects(options, production_updater_deps(log_line, endpoint, options.installDir));
   if (!effects.build(&why)) {
     log_line("could not assemble the effects: " + why);
     return 4;

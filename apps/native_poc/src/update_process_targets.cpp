@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <iterator>
+
 namespace remote60::native_poc::update {
 namespace {
 
@@ -171,6 +173,57 @@ std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::ws
   }
   CloseHandle(snapshot);
   return targets;
+}
+
+std::wstring normalize_identity_path(const std::wstring& path) {
+  if (path.empty()) return {};
+  std::wstring result;
+  // The canonical final path resolves junctions, symlinks, 8.3 short names and case. Opening with
+  // no access + BACKUP_SEMANTICS works for any file the updater can at least name.
+  HANDLE h = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (h != INVALID_HANDLE_VALUE) {
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetFinalPathNameByHandleW(h, buf, static_cast<DWORD>(std::size(buf)),
+                                              FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n > 0 && n < std::size(buf)) result.assign(buf, n);
+    CloseHandle(h);
+  }
+  if (result.empty()) {
+    // Could not open (gone, or no access): best-effort string normalization (full path + long form).
+    wchar_t full[MAX_PATH * 2];
+    const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
+    if (n > 0 && n < std::size(full)) {
+      wchar_t lng[MAX_PATH * 2];
+      const DWORD m = GetLongPathNameW(full, lng, static_cast<DWORD>(std::size(lng)));
+      result = (m > 0 && m < std::size(lng)) ? std::wstring(lng, m) : std::wstring(full, n);
+    } else {
+      result = path;
+    }
+  }
+  if (result.rfind(L"\\\\?\\", 0) == 0) result.erase(0, 4);  // same form on both sides of the compare
+  return result;
+}
+
+std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames,
+                                                       const std::wstring& installDir) {
+  std::vector<ProcessTarget> all = enumerate_product_processes(imageNames);
+  if (installDir.empty()) return all;  // no install dir -> no membership filtering
+  const std::wstring normDir = normalize_identity_path(installDir);
+  std::vector<ProcessTarget> kept;
+  kept.reserve(all.size());
+  for (ProcessTarget& target : all) {
+    // Unknown identity (path could not be read) is NEVER asserted external -- carried forward so the
+    // swap refuses on it, naming the pid. Only a CONFIDENTLY-outside path is dropped.
+    if (target.identityKnown && !target.imagePath.empty()) {
+      const std::wstring normImg = normalize_identity_path(target.imagePath);
+      const InstallMembership m = classify_install_membership(normImg.empty() ? target.imagePath : normImg,
+                                                              normDir.empty() ? installDir : normDir);
+      if (m == InstallMembership::Outside) continue;  // a same-named process that is not ours
+    }
+    kept.push_back(std::move(target));
+  }
+  return kept;
 }
 
 bool request_process_stop(const ProcessTarget& target) {

@@ -30,6 +30,20 @@ namespace remote60::native_poc::update {
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames);
 
 /**
+ * Same, but drops every match that CONFIDENTLY lives outside `installDir` (a build tree, a test
+ * scratch dir, another install) -- those are not this installation's processes and must never be
+ * asked to close or waited on. A match whose path cannot be established is KEPT (conservative: the
+ * swap still refuses on it, naming the pid/path, rather than proceeding over an unknown). `installDir`
+ * empty means no filtering. Paths are normalized (long form, resolved junction/symlink/8.3/case)
+ * before comparison. This is the install-membership check the incident of 2026-10-08 needed.
+ */
+std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames,
+                                                       const std::wstring& installDir);
+
+/** Normalize a path for membership comparison: canonical long form, resolved aliases. Exposed for tests. */
+std::wstring normalize_identity_path(const std::wstring& path);
+
+/**
  * Asks one process to close: WM_CLOSE to its top-level windows, then a console CTRL event for the
  * windowless ones.
  *

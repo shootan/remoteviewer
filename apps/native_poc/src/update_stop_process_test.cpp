@@ -22,10 +22,13 @@
 // Build: remote60_update_stop_process_test. Run: prints PASS lines, exit 0.
 
 #include <windows.h>
+#include <winioctl.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <fstream>
 #include <memory>
@@ -2087,6 +2090,86 @@ int main(int argc, char** argv) {
           (gFailures == 0 && gSkipped == 0) ? "the sweep ran and skipped it"
                                             : "the run was not clean, so nothing was swept");
     DeleteFileW(foreignNote.c_str());
+  }
+
+  // install-membership live normalization (updater-helper-lifecycle (1)): the pure classifier is
+  // proven in update_identity_match_test; here the Win32 normalize_identity_path is driven against
+  // REAL alias paths -- an 8.3 short name and a directory junction -- so an image reached through an
+  // alias into installDir is still recognised as Inside, and one outside is Outside.
+  {
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    const std::wstring base = std::wstring(tmp) + L"gnlink_member_" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring installDir = base + L"\\InstallationDirectoryWithALongName";
+    const std::wstring outsideDir = base + L"\\SomewhereElseEntirely";
+    CreateDirectoryW(base.c_str(), nullptr);
+    CreateDirectoryW(installDir.c_str(), nullptr);
+    CreateDirectoryW(outsideDir.c_str(), nullptr);
+    const std::wstring insideExe = installDir + L"\\GNLinkClipHelper.exe";
+    const std::wstring outsideExe = outsideDir + L"\\GNLinkClipHelper.exe";
+    { std::ofstream(insideExe) << "x"; std::ofstream(outsideExe) << "x"; }
+
+    // (a) 8.3 short name of the inside image resolves back under installDir.
+    wchar_t shortBuf[MAX_PATH] = {};
+    const DWORD sn = GetShortPathNameW(insideExe.c_str(), shortBuf, MAX_PATH);
+    if (sn > 0 && sn < MAX_PATH && std::wstring(shortBuf) != insideExe) {
+      check("membership(live): an 8.3 short-name alias normalizes to Inside",
+            classify_install_membership(normalize_identity_path(shortBuf),
+                                        normalize_identity_path(installDir)) == InstallMembership::Inside);
+    } else {
+      std::printf("note  membership(live): 8.3 short names disabled on this volume; alias case not run\n");
+    }
+
+    // (b) a directory junction into installDir resolves to Inside.
+    const std::wstring link = base + L"\\junc";
+    bool madeJunction = false;
+    if (CreateDirectoryW(link.c_str(), nullptr)) {
+      HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+      if (h != INVALID_HANDLE_VALUE) {
+        const std::wstring subst = L"\\??\\" + installDir;
+        const size_t substBytes = subst.size() * sizeof(wchar_t);
+        const size_t pathBuf = substBytes + sizeof(wchar_t) * 2;  // subst\0 + empty print\0
+#pragma pack(push, 1)
+        struct MountPoint {
+          DWORD tag; WORD len; WORD res; WORD soff; WORD slen; WORD poff; WORD plen; WCHAR buf[1];
+        };
+#pragma pack(pop)
+        std::vector<uint8_t> raw(offsetof(MountPoint, buf) + pathBuf, 0);
+        auto* rp = reinterpret_cast<MountPoint*>(raw.data());
+        rp->tag = IO_REPARSE_TAG_MOUNT_POINT;
+        rp->len = static_cast<WORD>(8 + pathBuf);
+        rp->soff = 0;
+        rp->slen = static_cast<WORD>(substBytes);
+        rp->poff = static_cast<WORD>(substBytes + sizeof(wchar_t));
+        rp->plen = 0;
+        std::memcpy(rp->buf, subst.c_str(), substBytes + sizeof(wchar_t));
+        DWORD ret = 0;
+        madeJunction = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, raw.data(),
+                                       static_cast<DWORD>(raw.size()), nullptr, 0, &ret, nullptr) != FALSE;
+        CloseHandle(h);
+      }
+    }
+    if (madeJunction) {
+      const std::wstring viaJunction = link + L"\\GNLinkClipHelper.exe";
+      check("membership(live): an image reached through a junction into installDir is Inside",
+            classify_install_membership(normalize_identity_path(viaJunction),
+                                        normalize_identity_path(installDir)) == InstallMembership::Inside);
+      RemoveDirectoryW(link.c_str());
+    } else {
+      std::printf("note  membership(live): could not create a junction on this volume; case not run\n");
+    }
+
+    // (c) an image genuinely outside installDir is Outside (the incident case).
+    check("membership(live): NEGATIVE a same-named image outside installDir is Outside",
+          classify_install_membership(normalize_identity_path(outsideExe),
+                                      normalize_identity_path(installDir)) == InstallMembership::Outside);
+
+    DeleteFileW(insideExe.c_str());
+    DeleteFileW(outsideExe.c_str());
+    RemoveDirectoryW(installDir.c_str());
+    RemoveDirectoryW(outsideDir.c_str());
+    RemoveDirectoryW(base.c_str());
   }
 
   // The totals, said out loud. A run that skips a guarded group reports fewer checks than

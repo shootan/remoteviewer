@@ -128,6 +128,32 @@ enum class IdentityFailure {
 bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure* why = nullptr);
 
 /**
+ * Whether a same-named process belongs to the installation this updater is replacing.
+ *
+ * A name match is not membership: a build tree, a test scratch dir, or another install can hold a
+ * process of the same image name, and asking it to close (or waiting on it) blocks an update that
+ * has nothing to do with it. This is the incident of 2026-10-08, where a test-leftover
+ * GNLinkClipHelper.exe outside installDir abandoned the 0.2.152 update.
+ */
+enum class InstallMembership {
+  Inside,   // the image lives under installDir -- a real target
+  Outside,  // the image lives elsewhere -- confidently NOT ours, never stopped or waited on
+  Unknown,  // the image path could not be established -- never asserted either way (conservative)
+};
+
+/**
+ * Pure membership test. Inputs must ALREADY be normalized (long form, resolved aliases) -- the Win32
+ * normalization lives in update_process_targets.cpp. Empty imagePath -> Unknown; empty installDir ->
+ * Unknown (cannot judge). Otherwise Inside iff imagePath is installDir itself or a path beneath it,
+ * on a real separator boundary, compared case-insensitively.
+ */
+InstallMembership classify_install_membership(const std::wstring& normalizedImagePath,
+                                              const std::wstring& normalizedInstallDir);
+
+/** Name for logs/tests. */
+const char* install_membership_name(InstallMembership m);
+
+/**
  * True when the process behind `handle` is still the one `target` described.
  *
  * False means the PID was reused or the process is gone -- either way, not our target.

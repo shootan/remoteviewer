@@ -236,6 +236,39 @@ int main(int argc, char** argv) {
               open_failure_name(OpenFailure::Unknown));
   }
 
+  // install-membership (updater-helper-lifecycle (1)): a same-named process is a target only when its
+  // image lives under installDir. Pure over already-normalized paths; the Win32 normalization that
+  // resolves 8.3/junction/case is exercised separately in update_stop_process_test.
+  {
+    const std::wstring dir = L"C:\\Program Files\\GNLink";
+    // 설치 내 A: an image beneath installDir.
+    check("inside: an image under installDir is a target",
+          classify_install_membership(L"C:\\Program Files\\GNLink\\GNLinkClipHelper.exe", dir) ==
+              InstallMembership::Inside);
+    // 설치 밖 B: the incident -- a same-named process in a build/test tree.
+    check("NEGATIVE outside: a same-named image elsewhere is NOT a target",
+          classify_install_membership(
+              L"D:\\remote\\worktrees\\feat\\build\\GNLinkClipHelper.exe", dir) ==
+              InstallMembership::Outside);
+    // Case-insensitive: Windows paths compare without case.
+    check("inside: case-insensitive match",
+          classify_install_membership(L"c:\\program files\\gnlink\\GNLinkHost.exe", dir) ==
+              InstallMembership::Inside);
+    // Boundary: a sibling directory sharing a prefix must NOT be read as inside.
+    check("NEGATIVE boundary: a prefix-sharing sibling dir is outside",
+          classify_install_membership(L"C:\\Program Files\\GNLinkOther\\GNLinkHost.exe", dir) ==
+              InstallMembership::Outside);
+    // Unknown: an image path that could not be read is never asserted either way.
+    check("unknown: an empty image path -> Unknown (conservative, never dropped)",
+          classify_install_membership(L"", dir) == InstallMembership::Unknown);
+    check("unknown: an empty installDir -> Unknown (no filtering)",
+          classify_install_membership(L"C:\\x\\GNLinkHost.exe", L"") == InstallMembership::Unknown);
+    // A trailing separator on installDir must not change the verdict.
+    check("inside: trailing separator on installDir is ignored",
+          classify_install_membership(L"C:\\Program Files\\GNLink\\GNLinkHost.exe",
+                                      L"C:\\Program Files\\GNLink\\") == InstallMembership::Inside);
+  }
+
   // The table is only worth what its anchors are worth, so both ends are tied to the real API:
   // the two codes this machine can actually produce are checked through OpenProcess itself.
   {

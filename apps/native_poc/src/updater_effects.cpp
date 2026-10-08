@@ -230,7 +230,7 @@ bool UpdaterDeps::validate(std::string* detail) const {
 }
 
 UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
-                                   const UpdateEndpoint& endpoint) {
+                                   const UpdateEndpoint& endpoint, const std::wstring& installDir) {
   UpdaterDeps deps;
   deps.log = log ? std::move(log) : [](const std::string&) {};
 
@@ -249,8 +249,13 @@ UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
         credential_allowed(endpoint, url) ? endpoint.credentialHeader : std::string();
     return https_get_file(url, destPath, maxBytes, error, credential) == FetchStatus::Ok;
   };
-  // The two calls that can reach a real GNLinkHost.exe.
-  deps.enumerateTargets = []() { return enumerate_product_processes(product_image_names()); };
+  // The two calls that can reach a real GNLinkHost.exe. Enumeration is now filtered to THIS
+  // installation: a same-named process confidently outside installDir (a build tree, a test scratch
+  // dir, another install) is not ours to close or wait on (incident 2026-10-08). installDir empty
+  // (an updater that was not told where it installs) falls back to no filtering, as before.
+  deps.enumerateTargets = [installDir]() {
+    return enumerate_product_processes(product_image_names(), installDir);
+  };
   deps.requestStop = [](const ProcessTarget& target) { return request_process_stop(target); };
   deps.registrationOps = production_registration_ops();
   deps.makeRelaunch = [](const RelaunchConfig& config, const std::vector<ProcessTarget>& stopped) {
