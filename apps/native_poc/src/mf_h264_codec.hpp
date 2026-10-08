@@ -202,6 +202,11 @@ class H264Encoder {
                             H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
+  // stutter-keyframe r3 B: force the SOFTWARE MFT on the next initialize() (the one-time clamp->SW
+  // transition). Persists across the shutdown+initialize a reinit does. Idempotent; cleared only by a
+  // caller that sets it false. A failed SW create keeps the previous backend (fail-safe in the create).
+  void set_force_software_backend(bool on) { forceSoftwareBackend_ = on; }
+  bool force_software_backend() const { return forceSoftwareBackend_; }
   // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
   // each AU reports the flag of the input that produced it. (0.2.97)
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
@@ -247,6 +252,7 @@ class H264Encoder {
   uint32_t bitrate_ = 0;
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
   uint32_t keyint_ = 0;
+  bool forceSoftwareBackend_ = false;  // r3 B: next initialize() takes the SW MFT (clamp->SW transition)
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;

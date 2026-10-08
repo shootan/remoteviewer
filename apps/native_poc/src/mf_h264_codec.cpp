@@ -783,11 +783,26 @@ bool create_h264_decoder_transform_from_mode(MftBackendMode backendMode, IMFTran
   return true;
 }
 
-bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
+bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHardware,
+                                   const char** outBackendName, bool forceSoftware = false) {
   if (!outTransform || !outUsingHardware || !outBackendName) return false;
   *outTransform = nullptr;
   *outUsingHardware = false;
   *outBackendName = "none";
+
+  // stutter-keyframe r3 B: a runtime one-time clamp->SW transition forces the software MFT regardless
+  // of the env/vendor fast paths, so a clamping HW encoder is replaced by a GOP-honouring SW one. If
+  // the SW MFT is unavailable, fall through to the normal selection (the original backend) -- the
+  // contract's "keep the original backend on failure"; the clamp persists but the stream does not break.
+  if (forceSoftware) {
+    IMFTransform* sw = nullptr;
+    if (create_h264_encoder_transform_from_mode(MftBackendMode::SoftwareOnly, &sw, outUsingHardware,
+                                                outBackendName) && sw) {
+      *outTransform = sw;
+      return true;
+    }
+    codec_debug_log("clamp->SW transition: software MFT unavailable, keeping the original backend");
+  }
 
   IMFTransform* transform = nullptr;
   const std::string backendRaw = env_string_local("REMOTE60_NATIVE_ENCODER_BACKEND");
@@ -1663,7 +1678,9 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   } else {
     IMFTransform* encRaw = nullptr;
     codec_debug_log("encoder initialize: create transform");
-    if (!create_h264_encoder_transform(&encRaw, &usingHardware_, &backendName_) || !encRaw) return false;
+    if (!create_h264_encoder_transform(&encRaw, &usingHardware_, &backendName_, forceSoftwareBackend_) ||
+        !encRaw)
+      return false;
     codec_debug_log("encoder initialize: transform created");
     enc_.Attach(encRaw);
   }
