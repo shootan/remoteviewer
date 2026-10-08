@@ -1,5 +1,7 @@
 #include "secure_input_broker.hpp"
 #include "bounded_pipe_io.hpp"
+#include "secure_input_protocol.hpp"  // kSecureInputServiceName
+#include "trusted_service_pipe.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -140,9 +142,14 @@ bool SecureInputBrokerClient::ConnectLocked() {
   // discovery and open until the startup budget expires.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   do {
-    (void)WaitNamedPipeW(kSecureInputPipeName, 100);
-    pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+    // secure-pipe-identity: verify the pipe's server IS the installed GNLinkSecureInput service BEFORE
+    // any input byte is written. A local squatter on the name (service stopped) is refused and we do
+    // NOT fall back to it -- no UAC/lock-screen input reaches a fake. Per-handle trust; reconnect
+    // re-verifies. SQOS IDENTIFICATION is set inside OpenVerifiedServicePipe.
+    TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
+    pipe_ = static_cast<HANDLE>(OpenVerifiedServicePipe(
+        kSecureInputPipeName, GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+        kSecureInputServiceName, 100, &st));
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   } while (std::chrono::steady_clock::now() < deadline);

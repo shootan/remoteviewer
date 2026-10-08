@@ -401,9 +401,14 @@ HANDLE create_secure_pipe() {
   SECURITY_ATTRIBUTES security{};
   security.nLength = sizeof(security);
   security.lpSecurityDescriptor = descriptor;
+  // FILE_FLAG_FIRST_PIPE_INSTANCE (secure-pipe-identity): this must be the FIRST instance of the name.
+  // If a local process squatted it while the service was stopped, CreateNamedPipe fails here and the
+  // service does NOT join the squatter's name -- it fails closed. The single owner handle is then reused
+  // across connections (DisconnectNamedPipe, not close+recreate), so the name is owned without a gap
+  // while the service runs. The SY/BA DACL + PIPE_REJECT_REMOTE_CLIENTS are unchanged.
   HANDLE pipe = CreateNamedPipeW(
-      kSecureInputPipeName, PIPE_ACCESS_INBOUND, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
-                                                    PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      kSecureInputPipeName, PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
       1, 0, 64 * 1024, 0, &security);
   LocalFree(descriptor);
   return pipe;
@@ -506,9 +511,11 @@ HANDLE create_unlock_pipe() {
   SECURITY_ATTRIBUTES security{};
   security.nLength = sizeof(security);
   security.lpSecurityDescriptor = descriptor;
+  // FILE_FLAG_FIRST_PIPE_INSTANCE (secure-pipe-identity): see create_secure_pipe. A preempted name fails
+  // closed here rather than the service joining a squatter that could seal the viewer's password.
   HANDLE pipe = CreateNamedPipeW(
       remote60::native_poc::kSecureUnlockPipeName,
-      PIPE_ACCESS_DUPLEX,
+      PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
       1, 8 * 1024, 8 * 1024, 0, &security);
   LocalFree(descriptor);
@@ -749,17 +756,21 @@ void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& r
 }
 
 void unlock_pipe_loop() {
+  // ONE owner handle for the worker's life (secure-pipe-identity): created FIRST so a squatted name
+  // fails closed HERE (unlock disabled) instead of the worker spinning to re-take a name someone else
+  // owns, and reused across connections so the name is owned without a gap while the service runs.
+  HANDLE pipe = create_unlock_pipe();
+  if (pipe == INVALID_HANDLE_VALUE) {
+    diag("unlock pipe create failed (name preempted or error) -> unlock disabled, fail closed");
+    return;
+  }
   while (gRunning.load(std::memory_order_acquire)) {
-    HANDLE pipe = create_unlock_pipe();
-    if (pipe == INVALID_HANDLE_VALUE) { Sleep(500); continue; }
     // ConnectNamedPipe blocks; shutdown wakes it with CancelSynchronousIo on this thread, which
     // returns ERROR_OPERATION_ABORTED. Re-check gRunning after it returns, however it returned.
     const BOOL connected =
         ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
-    if (!gRunning.load(std::memory_order_acquire)) {
-      CloseHandle(pipe);
-      break;
-    }
+    if (!gRunning.load(std::memory_order_acquire)) break;
+    if (!connected) break;  // a connect error that is not shutdown -> stop serving (fail closed)
     if (connected) {
       UnlockSession us;
       uint8_t buf[512];
@@ -788,10 +799,10 @@ void unlock_pipe_loop() {
           break;  // unknown/malformed
         }
       }
-      (void)DisconnectNamedPipe(pipe);
+      (void)DisconnectNamedPipe(pipe);  // ready the SAME instance for the next client; name stays owned
     }
-    CloseHandle(pipe);  // the worker exclusively owns this pipe
   }
+  CloseHandle(pipe);  // the worker exclusively owns this pipe
 }
 
 }  // namespace
@@ -810,12 +821,18 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // possibly-blocking WTSConnectSession) never touch the input path. (Codex #365/#366.)
   std::thread unlockThread(unlock_pipe_loop);
 
-  while (gRunning.load(std::memory_order_acquire)) {
-    HANDLE pipe = create_secure_pipe();
-    if (pipe == INVALID_HANDLE_VALUE) break;
+  // ONE owner handle for the life of the service (secure-pipe-identity): created FIRST (fail closed if
+  // the name was squatted) and reused across connections with DisconnectNamedPipe, so no gap opens for a
+  // squatter between connections. A create failure is fail-closed -- the service does not spin re-taking
+  // a name someone else owns.
+  HANDLE pipe = create_secure_pipe();
+  if (pipe == INVALID_HANDLE_VALUE) {
+    diag("secure input pipe create failed (name preempted or error) -> serving disabled, fail closed");
+  } else {
     gClientPipe.store(pipe, std::memory_order_release);
-    const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
-    if (connected) {
+    while (gRunning.load(std::memory_order_acquire)) {
+      const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
+      if (!connected) break;  // shutdown closed the handle to wake us, or a connect error
       // Identify the requester before reading anything from it. This is the only point at which
       // the host's session can be learned, and everything downstream depends on it.
       const uint32_t requester = requester_session_of(pipe);
@@ -830,7 +847,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
         if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
         (void)forward_to_agent(message);
       }
-      (void)DisconnectNamedPipe(pipe);
+      (void)DisconnectNamedPipe(pipe);  // ready the SAME instance for the next client; name stays owned
       // The requester is gone; do not keep its session as the answer for whoever connects next.
       gRequesterSession.store(kInvalidSessionId, std::memory_order_release);
       gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester gone -> fence

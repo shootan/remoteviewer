@@ -110,6 +110,7 @@ add_executable(remote60_native_video_host_poc
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
   src/secure_input_broker.cpp
+  src/trusted_service_pipe.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
 
@@ -2117,6 +2118,14 @@ add_executable(remote60_unlock_protocol_test
 )
 target_include_directories(remote60_unlock_protocol_test PRIVATE src)
 target_link_libraries(remote60_unlock_protocol_test PRIVATE remote60_sealed_unlock)
+
+# secure-pipe-identity: trusted service-pipe client layer (server identity verification).
+add_executable(remote60_trusted_service_pipe_test
+  src/trusted_service_pipe_test.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_trusted_service_pipe_test PRIVATE src)
+target_link_libraries(remote60_trusted_service_pipe_test PRIVATE advapi32)
 
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
