@@ -566,13 +566,22 @@ if ((hdr.flags & 1u) != 0) {
       (encoder.lastKeyAcceptedUs > 0 && keyNowUs >= encoder.lastKeyAcceptedUs)
           ? (keyNowUs - encoder.lastKeyAcceptedUs) / 1000
           : 0;
+  // stutter-keyframe r1 (observe-1): sendDurUs is this key AU's own hand-off/staging cost, and
+  // skipsSinceLastKey is how many delta captures the cap-gate dropped in the window that ended with
+  // this IDR -- together they show a periodic IDR being serialized under the hard cap while deltas
+  // are skipped (the stutter). skipsSinceLastKey is a window delta of the cumulative counter.
+  const uint64_t skipsSinceLastKey = (stats.wireOverloadSkipCount >= encoder.wireSkipAtLastKey)
+                                         ? (stats.wireOverloadSkipCount - encoder.wireSkipAtLastKey)
+                                         : 0;
   std::cout << "[native-video-host][keyframe] seq=" << hdr.seq << " bytes=" << hdr.payloadSize
             << " reasons=" << host_key_reason_names(encoder.keyReasons)
-            << " sinceLastKeyMs=" << sinceLastKeyMs
+            << " sinceLastKeyMs=" << sinceLastKeyMs << " sendDurUs=" << sendDurUs
+            << " skipsSinceLastKey=" << skipsSinceLastKey
             << " kick=" << (servedBootstrap ? 1 : 0)
             << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
             << " bitrate=" << encoder.activeBitrate << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
+  encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
   encoder.keyReasons = kHostKeyReasonNone;
   encoder.realInputsSinceKey = 0;  // r4: any key restarts the period
 }

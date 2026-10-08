@@ -436,8 +436,24 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   if (forceKeyFrame) {
     // Latch/count only for inputs the encoder actually ACCEPTED: a failed encode never
     // reached the MFT, and arming the latch for it would suppress the retry for 300ms.
-    ++encoder.forceKeyInputCount;
-    encoder.forceKeySubmittedAtUs = encodeStartUs;
+    // stutter-keyframe r1 (recovery-1): and only when the MFT ACCEPTED the force request. The
+    // AVEncVideoForceKeyFrame SetValue can be rejected (forceKeySetHr != S_OK); arming the 300ms
+    // latch for a rejected force would suppress the retry while no IDR is ever coming -- a lost
+    // recovery key. On rejection, leave forceKeyNext set (it is only cleared when a key AU is
+    // actually accepted) so the next tick re-forces, and log it once.
+    const bool forceArmed = encodeStats.forceKeyRequested == 0 || encodeStats.forceKeySetHr == 0;
+    if (forceArmed) {
+      ++encoder.forceKeyInputCount;
+      encoder.forceKeySubmittedAtUs = encodeStartUs;
+    } else {
+      ++encoder.forceKeyRejectedCount;
+      if ((encoder.forceKeyRejectedCount % 30) == 1) {
+        std::cout << "[native-video-host] forceKeyFrame REJECTED by MFT hr=0x" << std::hex
+                  << static_cast<unsigned long>(static_cast<uint32_t>(encodeStats.forceKeySetHr))
+                  << std::dec << " count=" << encoder.forceKeyRejectedCount
+                  << " (retry armed, no latch)\n";
+      }
+    }
   }
   if (!surfaceEncoded) {
     nv12Us = encodeStats.colorConvertUs;

@@ -175,6 +175,11 @@ struct EncoderState {
   // followed by a "scheduled" one at 282, and a kick frame that pushed the encoder's own GOP over
   // its boundary made the MFT emit an IDR the host then repeated (reasons=none, then scheduled).
   uint32_t realInputsSinceKey = 0;
+  // stutter-keyframe r1 (observe-1): snapshot of stats.wireOverloadSkipCount at the previous key AU.
+  // The delta of wireOverloadSkipCount between two keys is how many capture frames the cap-gate
+  // dropped during the window that ended with this IDR -- the periodic-stutter signal, so each
+  // [keyframe] line carries the skips its own period cost.
+  uint64_t wireSkipAtLastKey = 0;
   void RequestKey(uint32_t reason) {
     forceKeyNext = true;
     keyReasons |= reason;
@@ -306,6 +311,9 @@ struct EncoderState {
   // Stats-interval encode counters.
   uint64_t encodedFrames = 0;
   uint64_t forceKeyInputCount = 0;       // key inputs handed to the encoder
+  // stutter-keyframe r1 (recovery-1): forced-key requests the MFT REJECTED (AVEncVideoForceKeyFrame
+  // SetValue failed). These do NOT arm the 300ms submit latch, so the next tick re-forces.
+  uint64_t forceKeyRejectedCount = 0;
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;

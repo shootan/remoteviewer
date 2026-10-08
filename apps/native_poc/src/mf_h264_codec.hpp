@@ -78,6 +78,13 @@ struct H264EncodeFrameStats {
   // the encoder is rebuilt. The stage closes the emit gate and asks for that rebuild.
   uint8_t provenanceInvalid = 0;
   uint8_t asyncEnabled = 0;
+  // stutter-keyframe r1 (recovery-1): this encode call asked the MFT for a forced key, and the raw
+  // HRESULT the CODECAPI_AVEncVideoForceKeyFrame SetValue returned. The setter return used to be
+  // discarded, so a rejected force looked identical to an accepted one in the recovery timeline. The
+  // force applies to the NEXT accepted input, so a non-S_OK here means the key was never even armed
+  // (fail the recovery contract) -- distinct from an armed force whose IDR has not surfaced yet.
+  uint8_t forceKeyRequested = 0;
+  int32_t forceKeySetHr = 0;  // S_OK when not requested; the SetValue HRESULT when requested
 };
 
 bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,

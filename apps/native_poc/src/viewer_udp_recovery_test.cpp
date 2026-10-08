@@ -105,6 +105,12 @@ struct LossPlan {
   // Once dropFirstSend has fired, no later AU is sent at all -- the screen went static right after
   // the loss, whatever the asynchronous encoder still emits in the same call (S17/S18).
   bool stopAfterDrop = false;
+  // stutter-keyframe r1 (recovery-2): the encoder GOP (keyint) the fake host encodes with. The
+  // periodic-stutter fix wants a MUCH longer key period, so the recovery contract must be proven to
+  // hold WITHOUT a short periodic IDR masking a failed forced recovery -- 60251d3 reverted a 4x GOP
+  // because the rig stopped resuming on the forced recovery IDR. Default 600 (10s at 60fps) keeps
+  // every existing scenario unchanged; the long-GOP scenario raises it to 2400 (the 4x case).
+  uint32_t keyintFrames = 600;
 };
 
 struct CachedAu {
@@ -130,7 +136,7 @@ class FakeHost {
     if (getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return false;
     port_ = ntohs(addr.sin_port);
     (void)set_recv_timeout(sock_, 5);
-    if (!enc_.initialize(kWidth, kHeight, 60, 3000000, 600)) {
+    if (!enc_.initialize(kWidth, kHeight, 60, 3000000, plan.keyintFrames)) {
       std::printf("  fake host: H264Encoder::initialize failed\n");
       return false;
     }
@@ -1958,6 +1964,74 @@ int run_real_recv_smoke(const std::wstring& hostExe, int seconds) {
   return 0;
 }
 
+// S-longgop (stutter-keyframe r1, recovery-2): the periodic-stutter fix raises the key period far
+// past any in-window IDR, so the recovery contract must hold on the FORCED recovery IDR ALONE -- no
+// short periodic GOP can mask a failed forced recovery. 60251d3 reverted a 4x GOP because the rig
+// stopped resuming here; this scenario reproduces that configuration (a 2400-frame / ~40s GOP, 4x the
+// rig's 600) and asserts both halves of the contract:
+//   positive: a whole-P loss recovers via the honored key request, and the IDR that rescued was
+//             request-driven (at a 40s GOP no unsolicited periodic IDR exists to mask it); and
+//   negative control: the IDENTICAL loss with the key WITHHELD forever must NOT resume -- proving the
+//             forced key, not a periodic IDR, is what rescues (Codex contract 2.3).
+void scenario_long_gop_forced_recovery_resumes() {
+  std::printf("[S-longgop] 4x (2400-frame/~40s) GOP: forced recovery IDR resumes; withheld key does not\n");
+  // --- positive: honored recovery key after a whole-P loss resumes, with no periodic IDR masking ---
+  {
+    FakeHost host;
+    ViewerRig rig;
+    std::atomic<uint32_t> lostP{0};
+    LossPlan plan;
+    plan.keyintFrames = 2400;           // 4x the rig's 600; ~40s -- no unsolicited periodic IDR in-window
+    plan.answerNacks = false;           // take the IDR-fallback recovery path, not NACK repair
+    plan.honorKeyframeRequests = true;
+    plan.dropFirstSend = [&](uint32_t seq, uint16_t idx, bool key, uint16_t count) {
+      (void)idx;
+      if (!key && count >= 3 && seq >= 40 && lostP.load() == 0) lostP = seq;
+      return seq == lostP.load();       // drop the WHOLE P (all chunks): unrecoverable without a key
+    };
+    if (!start_session(host, rig, plan)) { ++gFailures; return; }
+    const uint64_t keyframesBefore = host.keyframes_sent();
+    const uint64_t requestsBefore = host.keyframe_requests();
+    pump(host, rig, 2000);
+    const uint32_t t = lostP.load();
+    CHECK(t != 0, "a multi-chunk P frame was chosen for the loss");
+    CHECK(host.keyframe_requests() >= requestsBefore + 1, "the viewer asked for a recovery key");
+    CHECK(rig.maxPublishedSeq.load() > t + 10,
+          "stream resumed on the forced IDR (max seq " + std::to_string(rig.maxPublishedSeq.load()) + ")");
+    CHECK(!rig.gate.waitForKeyFrame, "not waiting for a keyframe at the end");
+    // Every IDR here was request-driven: at a 40s GOP no unsolicited periodic IDR can have masked it.
+    CHECK(host.keyframes_sent() - keyframesBefore <= (host.keyframe_requests() - requestsBefore) + 1,
+          "recovery was the forced IDR, not a periodic one (keys=" +
+              std::to_string(host.keyframes_sent() - keyframesBefore) + " reqs=" +
+              std::to_string(host.keyframe_requests() - requestsBefore) + ")");
+  }
+  // --- negative control: same loss, key WITHHELD forever -> the stream must NOT resume -------------
+  {
+    FakeHost host;
+    ViewerRig rig;
+    std::atomic<uint32_t> lostP{0};
+    LossPlan plan;
+    plan.keyintFrames = 2400;
+    plan.answerNacks = false;
+    plan.honorKeyframeRequests = false;  // the forced recovery key is removed
+    plan.dropFirstSend = [&](uint32_t seq, uint16_t idx, bool key, uint16_t count) {
+      (void)idx;
+      if (!key && count >= 3 && seq >= 40 && lostP.load() == 0) lostP = seq;
+      return seq == lostP.load();
+    };
+    if (!start_session(host, rig, plan)) { ++gFailures; return; }
+    pump(host, rig, 2000);
+    const uint32_t t = lostP.load();
+    CHECK(t != 0, "[neg] a multi-chunk P frame was chosen for the loss");
+    CHECK(host.keyframe_requests() >= 1, "[neg] the viewer kept asking for the (withheld) key");
+    // The forced key is load-bearing: withheld at a 40s GOP, nothing resumes the stream past the loss.
+    CHECK(rig.maxPublishedSeq.load() <= t,
+          "[neg] withheld key: stream did NOT resume (stuck at " +
+              std::to_string(rig.maxPublishedSeq.load()) + " vs loss " + std::to_string(t) + ")");
+    CHECK(rig.gate.waitForKeyFrame, "[neg] still waiting for a keyframe");
+  }
+}
+
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   WinsockScope ws;
@@ -2045,6 +2119,7 @@ int main(int argc, char** argv) {
   scenario_pre_fix_host_shapes_no_false_congestion();
   scenario_host_epoch_gate_end_to_end();
   scenario_real_sender_flush_boundary_end_to_end();
+  scenario_long_gop_forced_recovery_resumes();
   MFShutdown();
   if (gFailures == 0) {
     std::printf("viewer_udp_recovery_test: PASS\n");

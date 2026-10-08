@@ -429,6 +429,38 @@ void codec_debug_log(const char* msg) {
   std::fflush(stderr);
 }
 
+// stutter-keyframe r1 (observe-1): the activated MFT's friendly name / CLSID / vendor are read today
+// only to substring-match a needle and then freed, so the NAS host.log never records WHICH encoder a
+// host actually used -- the GOP-clamp investigation could not name the company PC's MFT ("미확인"). Log
+// the identity of the transform we actually activate, unconditionally (same [native-video-host] stream
+// as the gop-config line), so a clamp can be tied to a concrete vendor/driver. A read failure prints
+// "?" rather than suppressing the line.
+std::string mft_attr_string(IMFActivate* act, const GUID& attr) {
+  if (!act) return "?";
+  WCHAR* w = nullptr;
+  UINT32 cch = 0;
+  std::string out = "?";
+  if (SUCCEEDED(act->GetAllocatedString(attr, &w, &cch)) && w) {
+    char buf[256] = {};
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr) > 1)
+      out = buf;
+  }
+  if (w) CoTaskMemFree(w);
+  return out;
+}
+
+void log_mft_identity(IMFActivate* act) {
+  if (!act) return;
+  const std::string friendly = mft_attr_string(act, MFT_FRIENDLY_NAME_Attribute);
+  const std::string vendor = mft_attr_string(act, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+  const std::string hwUrl = mft_attr_string(act, MFT_ENUM_HARDWARE_URL_Attribute);
+  std::string clsid = "?";
+  GUID g{};
+  if (SUCCEEDED(act->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g))) clsid = guid_to_string(g);
+  std::cout << "[native-video-host] h264 mft-identity friendlyName=\"" << friendly << "\" clsid="
+            << clsid << " vendorId=" << vendor << " hwUrl=\"" << hwUrl << "\"\n";
+}
+
 enum class MftBackendMode {
   Auto,
   HardwareOnly,
@@ -467,6 +499,7 @@ bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** ou
     if (!activates[i]) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i]);  // stutter-keyframe r1: record which MFT we actually took
       *outTransform = candidate;
       return true;
     }
@@ -1830,7 +1863,16 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
 
   if (forceKeyFrame) {
-    (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+    // stutter-keyframe r1 (recovery-1): keep the setter HRESULT instead of discarding it. A rejected
+    // force means the MFT never armed the key for the next input, which the recovery timeline must be
+    // able to see; S_OK only means "armed", not "the IDR this call returns is that key" (async MFT
+    // output can still be an earlier input).
+    const HRESULT forceHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+    encodeStats->forceKeyRequested = 1;
+    encodeStats->forceKeySetHr = static_cast<int32_t>(forceHr);
+    if (FAILED(forceHr)) {
+      codec_debug_log("encode_sample_common: ForceKeyFrame SetValue REJECTED (key not armed)");
+    }
   }
 
   auto drain_outputs = [&]() -> bool {
