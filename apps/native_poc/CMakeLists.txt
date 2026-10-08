@@ -2123,6 +2123,7 @@ target_link_libraries(remote60_unlock_protocol_test PRIVATE remote60_sealed_unlo
 add_executable(remote60_trusted_service_pipe_test
   src/trusted_service_pipe_test.cpp
   src/trusted_service_pipe.cpp
+  src/probe_serve.cpp
 )
 target_include_directories(remote60_trusted_service_pipe_test PRIVATE src)
 target_link_libraries(remote60_trusted_service_pipe_test PRIVATE advapi32)
@@ -2131,6 +2132,7 @@ target_link_libraries(remote60_trusted_service_pipe_test PRIVATE advapi32)
 add_executable(remote60_trusted_service_pipe_probe
   src/trusted_service_pipe_probe.cpp
   src/trusted_service_pipe.cpp
+  src/probe_serve.cpp
 )
 target_include_directories(remote60_trusted_service_pipe_probe PRIVATE src)
 target_link_libraries(remote60_trusted_service_pipe_probe PRIVATE advapi32)

@@ -82,20 +82,24 @@ FileId file_id_of(const std::wstring& path, uint32_t* errOut = nullptr) {
   return id;
 }
 
-std::wstring image_of_process(HANDLE p) {
+std::wstring image_of_process(HANDLE p, uint32_t* errOut = nullptr) {
+  if (errOut) *errOut = 0;
   wchar_t buf[MAX_PATH * 2];
   DWORD size = static_cast<DWORD>(std::size(buf));
   std::wstring out;
   if (QueryFullProcessImageNameW(p, 0, buf, &size)) out.assign(buf, size);
+  else if (errOut) *errOut = GetLastError();  // C3: keep the real error (e.g. 5), not file_id's 3
   return out;
 }
 
 // The executable path from a service's configured ImagePath (strip a leading quote/token + arguments).
-std::wstring service_binary_path(const wchar_t* serviceName) {
+std::wstring service_binary_path(const wchar_t* serviceName, uint32_t* errOut = nullptr) {
+  if (errOut) *errOut = 0;
   SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-  if (!scm) return {};
+  if (!scm) { if (errOut) *errOut = GetLastError(); return {}; }
   SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_CONFIG);
   if (!svc) {
+    if (errOut) *errOut = GetLastError();
     CloseServiceHandle(scm);
     return {};
   }
@@ -180,13 +184,20 @@ ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* servic
     if (!serverProc) {
       note_fail(PipeVerifyStage::ServerImage, GetLastError());
     } else {
-      uint32_t imgErr = 0, binErr = 0;
-      const FileId img = file_id_of(image_of_process(serverProc), &imgErr);  // err captured inside
+      // C3: keep the ORIGINAL error of the step that actually failed. A query failure returns an empty
+      // path; passing that to file_id_of would overwrite the real error (e.g. 5 access-denied / 122
+      // buffer) with ERROR_PATH_NOT_FOUND. So read the path+its error first, and only file_id a path
+      // that was actually obtained.
+      uint32_t imgQErr = 0, binQErr = 0;
+      const std::wstring imgPath = image_of_process(serverProc, &imgQErr);
+      const std::wstring binPath = service_binary_path(serviceName, &binQErr);
+      uint32_t imgFErr = 0, binFErr = 0;
+      const FileId img = file_id_of(imgPath, &imgFErr);
+      const FileId bin = file_id_of(binPath, &binFErr);
       f.serverImageKnown = img.read;
-      if (!img.read) note_fail(PipeVerifyStage::ServerImage, imgErr);
-      const FileId bin = file_id_of(service_binary_path(serviceName), &binErr);
+      if (!img.read) note_fail(PipeVerifyStage::ServerImage, imgPath.empty() ? imgQErr : imgFErr);
       f.serviceBinaryKnown = bin.read;
-      if (!bin.read) note_fail(PipeVerifyStage::ServiceBinary, binErr);
+      if (!bin.read) note_fail(PipeVerifyStage::ServiceBinary, binPath.empty() ? binQErr : binFErr);
       f.imageSameFile = img.read && bin.read && img.volume == bin.volume &&
                         img.indexHigh == bin.indexHigh && img.indexLow == bin.indexLow;
     }
@@ -205,11 +216,17 @@ ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* servic
   // reports that SAME pid RUNNING. A stop/replace across the window (or an inability to re-confirm)
   // makes finalConsistent false -> the classifier refuses.
   if (serverProc) {
-    const bool stillAlive = WaitForSingleObject(serverProc, 0) == WAIT_TIMEOUT;  // not signalled = alive
+    const DWORD waitRc = WaitForSingleObject(serverProc, 0);
+    const bool stillAlive = waitRc == WAIT_TIMEOUT;  // not signalled = alive; WAIT_FAILED = cannot tell
     uint32_t svcPid2 = 0, svcErr2 = 0;
     const bool stillRunning = service_running_pid(serviceName, &svcPid2, &svcErr2);
     f.finalConsistent = stillAlive && stillRunning && svcPid2 == f.serverPid;
-    if (!f.finalConsistent) note_fail(PipeVerifyStage::FinalRecheck, stillRunning ? 0 : svcErr2);
+    if (!f.finalConsistent) {
+      // Preserve WHY the re-check failed: a failed wait (WAIT_FAILED) keeps its error; otherwise the
+      // SCM re-query error (0 when the service is simply gone/stopped or the pid moved).
+      const uint32_t rc = (waitRc == WAIT_FAILED) ? GetLastError() : (stillRunning ? 0 : svcErr2);
+      note_fail(PipeVerifyStage::FinalRecheck, rc);
+    }
     CloseHandle(serverProc);
   } else {
     f.finalConsistent = false;  // never opened the process -> cannot have re-confirmed it

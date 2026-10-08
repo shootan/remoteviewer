@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 
+#include "probe_serve.hpp"
 #include "trusted_service_pipe.hpp"
 
 using namespace remote60::native_poc;
@@ -260,6 +261,53 @@ int main() {
       }
       CloseHandle(owner);  // Stop: owner releases the name in a bounded way
     }
+  }
+
+  // --- C4: the probe serve loop honours STOP at each point, bounded, WITHOUT the SCM ----------------
+  {
+    auto run_scenario = [&](const char* label, int mode, ProbeServeExit expect) {
+      const std::wstring pn = L"\\\\.\\pipe\\gnlink-c4-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                              std::to_wstring(mode);
+      HANDLE pipe = CreateNamedPipeW(pn.c_str(),
+                                     PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                                     PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 4096, 4096,
+                                     0, nullptr);
+      if (pipe == INVALID_HANDLE_VALUE) { check(label, false, "pipe create failed"); return; }
+      HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      std::atomic<int> got{-1};
+      if (mode == 0) SetEvent(stop);  // (1) stop before the loop even starts
+      std::thread t([&] { got.store(static_cast<int>(ProbeServeLoop(pipe, stop))); });
+      HANDLE cli = INVALID_HANDLE_VALUE;
+      if (mode == 1) {
+        Sleep(200);  // (3) loop is parked in the pending ConnectNamedPipe
+        SetEvent(stop);
+      } else if (mode == 2) {
+        // (2)/(4) a client connects (connect completes) but never writes; then stop while the read is
+        // pending. Either the between-check or the read-wait catches it -- both are bounded stop exits.
+        for (int k = 0; k < 50 && cli == INVALID_HANDLE_VALUE; ++k) {
+          cli = CreateFileW(pn.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+          if (cli == INVALID_HANDLE_VALUE) Sleep(20);
+        }
+        Sleep(200);
+        SetEvent(stop);
+      }
+      const bool bounded = t.joinable() && (WaitForSingleObject(t.native_handle(), 4000) == WAIT_OBJECT_0);
+      if (t.joinable()) t.join();
+      if (cli != INVALID_HANDLE_VALUE) CloseHandle(cli);
+      CloseHandle(stop);
+      CloseHandle(pipe);
+      const auto exit = static_cast<ProbeServeExit>(got.load());
+      if (mode == 2) {
+        check(label, bounded && (exit == ProbeServeExit::StopBetween || exit == ProbeServeExit::StopDuringRead),
+              std::string("bounded=") + (bounded ? "1" : "0") + " exit=" + probe_serve_exit_name(exit));
+      } else {
+        check(label, bounded && exit == expect,
+              std::string("bounded=") + (bounded ? "1" : "0") + " exit=" + probe_serve_exit_name(exit));
+      }
+    };
+    run_scenario("probe-serve(1): STOP before Connect -> bounded exit", 0, ProbeServeExit::StopBeforeConnect);
+    run_scenario("probe-serve(3): STOP while Connect pending -> bounded exit", 1, ProbeServeExit::StopDuringConnect);
+    run_scenario("probe-serve(2/4): client connected, STOP before/at Read -> bounded exit", 2, ProbeServeExit::StopDuringRead);
   }
 
   if (gFailures != 0) { std::printf("trusted_service_pipe_test: FAIL (%d)\n", gFailures); return 1; }

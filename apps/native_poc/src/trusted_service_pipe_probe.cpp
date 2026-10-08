@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <string>
 
+#include "probe_serve.hpp"
 #include "trusted_service_pipe.hpp"
 
 using namespace remote60::native_poc;
@@ -47,14 +48,12 @@ void WINAPI svc_ctrl(DWORD c) {
   }
 }
 
-// True if STOP was requested. Overlapped waits also wake on g_stop directly.
-bool stopping() { return g_stop && WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0; }
-
 void WINAPI svc_main(DWORD, wchar_t**) {
   g_status = RegisterServiceCtrlHandlerW(kTestService, svc_ctrl);
   if (!g_status) return;
   set_state(SERVICE_START_PENDING);
   g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // manual-reset
+  if (!g_stop) { set_state(SERVICE_STOPPED, GetLastError()); return; }  // C4: a failed CreateEvent fails closed
 
   // Build the DACL + the pipe BEFORE reporting RUNNING: a failure here reports STOPPED with an error,
   // so the probe never trusts a "RUNNING" fixture that has no pipe.
@@ -77,53 +76,13 @@ void WINAPI svc_main(DWORD, wchar_t**) {
     return;
   }
 
-  OVERLAPPED ov{};
-  ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   set_state(SERVICE_RUNNING);
+  // The 4-stop-point overlapped loop is the shared ProbeServeLoop (exercised non-elevated in the
+  // fixture test). EventError (CreateEvent/GetOverlappedResult failure) exits fail-closed.
+  (void)ProbeServeLoop(pipe, g_stop);
 
-  // Bounded, overlapped serve loop. STOP is honoured at FOUR points: (1) before Connect, (2) between a
-  // completed Connect and the Read, (3) while Connect is pending, (4) while Read is pending.
-  for (;;) {
-    if (stopping()) break;  // (1)
-    ResetEvent(ov.hEvent);
-    BOOL connected = ConnectNamedPipe(pipe, &ov);
-    DWORD gle = GetLastError();
-    if (!connected && gle == ERROR_IO_PENDING) {
-      HANDLE w[2] = {ov.hEvent, g_stop};
-      if (WaitForMultipleObjects(2, w, FALSE, INFINITE) != WAIT_OBJECT_0) {  // (3) stop won
-        CancelIoEx(pipe, &ov);
-        DWORD b = 0;
-        GetOverlappedResult(pipe, &ov, &b, TRUE);  // reap the cancelled connect
-        break;
-      }
-      DWORD b = 0;
-      GetOverlappedResult(pipe, &ov, &b, TRUE);
-      connected = TRUE;
-    } else if (!connected && gle != ERROR_PIPE_CONNECTED) {
-      break;  // a real connect error -> stop serving (fail closed)
-    }
-    if (stopping()) { DisconnectNamedPipe(pipe); break; }  // (2)
-
-    ResetEvent(ov.hEvent);
-    char buf[64];
-    DWORD got = 0;
-    BOOL rok = ReadFile(pipe, buf, sizeof(buf), &got, &ov);  // drain; a probe sends nothing
-    if (!rok && GetLastError() == ERROR_IO_PENDING) {
-      HANDLE w[2] = {ov.hEvent, g_stop};
-      if (WaitForMultipleObjects(2, w, FALSE, INFINITE) != WAIT_OBJECT_0) {  // (4) stop won
-        CancelIoEx(pipe, &ov);
-        GetOverlappedResult(pipe, &ov, &got, TRUE);
-        DisconnectNamedPipe(pipe);
-        break;
-      }
-      GetOverlappedResult(pipe, &ov, &got, TRUE);
-    }
-    DisconnectNamedPipe(pipe);  // ready for the next client; name stays owned
-  }
-
-  CloseHandle(ov.hEvent);
   CloseHandle(pipe);
-  if (g_stop) CloseHandle(g_stop);
+  CloseHandle(g_stop);
   set_state(SERVICE_STOPPED);
 }
 
