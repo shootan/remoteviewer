@@ -17,6 +17,7 @@
 // only for that one open handle; a reconnect or a service restart re-verifies.
 
 #include <cstdint>
+#include <string>
 
 namespace remote60::native_poc {
 
@@ -80,6 +81,19 @@ void LogTrustChange(const char* channel, TrustedPipeStatus status, const ServerI
 // facts for a test-owned server (so no real service/credential is touched). Never a shipping bypass:
 // the default is the real gatherer and there is no env/option to skip it.
 using ServerIdentityGatherer = ServerIdentityFacts (*)(void* pipeHandle, const wchar_t* serviceName);
+
+// r6 D3 (tests): the Win32 calls whose failures the diagnostics keep, replaceable to inject a failure, and
+// the two steps that use them. Production never changes the seam (defaults: the real functions).
+struct TrustedPipeWin32Seam {
+  int(__stdcall* queryServiceConfig)(void* service, void* config, unsigned long size, unsigned long* needed) =
+      &DefaultQueryServiceConfig;
+  unsigned long(__stdcall* waitForSingleObject)(void* handle, unsigned long ms) = &DefaultWaitForSingleObject;
+  static int __stdcall DefaultQueryServiceConfig(void* service, void* config, unsigned long size, unsigned long* needed);
+  static unsigned long __stdcall DefaultWaitForSingleObject(void* handle, unsigned long ms);
+};
+TrustedPipeWin32Seam& TrustedPipeWin32ForTest();
+std::wstring ServiceBinaryPathForTest(const wchar_t* serviceName, uint32_t* errOut);
+bool FinalRecheckForTest(void* serverProcess, const wchar_t* serviceName, uint32_t serverPid, uint32_t* errOut);
 
 // Open `name` as a client with SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, wait up to waitMs for the
 // name, then verify the server. On Trusted, returns the handle (caller owns). On anything else, closes

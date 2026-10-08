@@ -29,6 +29,9 @@ void check(const char* what, bool ok, const std::string& detail = {}) {
   if (!ok) { ++gFailures; if (!detail.empty()) std::printf("        %s\n", detail.c_str()); }
 }
 
+constexpr uint64_t kSyntheticHostId = 0x5EED5EED5EEDull;
+constexpr uint64_t kSyntheticExpiresMs = 777777;
+
 // Injected gatherer: the test decides the verdict for its own test endpoint (the real SCM-backed
 // gatherer is proven under UAC + in trusted_service_pipe_test; here we drive the CLIENT paths).
 std::atomic<bool> g_trusted{false};
@@ -46,7 +49,9 @@ ServerIdentityFacts gate_gather(void*, const wchar_t*) {
 }
 
 struct Sink {
-  enum class Mode { Drain, Unlock };  // Drain: count input bytes; Unlock: answer a ChallengeRequest
+  // Drain: count input bytes; Unlock: answer a ChallengeRequest with ChallengeIssued + synthetic fields;
+  // UnlockCorrupt: answer with a damaged reply (bad magic); UnlockSilent: never answer (then hang up).
+  enum class Mode { Drain, Unlock, UnlockCorrupt, UnlockSilent };
   std::wstring name;
   Mode mode = Mode::Drain;
   std::thread th;
@@ -67,16 +72,22 @@ struct Sink {
           DWORD got = 0;
           if (ReadFile(p, buf, sizeof(buf), &got, nullptr) && got > 0) {
             bytes.fetch_add((int)got);
-            if (mode == Mode::Unlock && got >= sizeof(SecureUnlockChallengeRequest)) {
-              // Answer the relay's ChallengeRequest with a well-formed ChallengeResponse (synthetic;
-              // no real crypto / no stored password). Echo the requestId so the relay accepts it.
+            if ((mode == Mode::Unlock || mode == Mode::UnlockCorrupt) && got >= sizeof(SecureUnlockChallengeRequest)) {
+              // r6 D2: a ChallengeIssued reply with fields only this fixture would put there (no real
+              // crypto / no stored password), echoing the requestId.
               SecureUnlockChallengeRequest req{};
               std::memcpy(&req, buf, sizeof(req));
               SecureUnlockChallengeResponse resp{};  // magic/size/kind defaulted
               resp.requestId = req.requestId;
-              resp.stage = 0;  // not InternalError -> a valid issued challenge
+              resp.stage = static_cast<uint16_t>(UnlockStage::ChallengeIssued);
+              resp.hostId = kSyntheticHostId;
+              resp.expiresMs = kSyntheticExpiresMs;
+              std::memset(resp.challengeId, 0xA5, sizeof(resp.challengeId));
+              if (mode == Mode::UnlockCorrupt) resp.magic ^= 0xFFu;  // the damaged reply
               DWORD wrote = 0;
               WriteFile(p, &resp, sizeof(resp), &wrote, nullptr);
+            } else if (mode == Mode::UnlockSilent) {
+              Sleep(300);  // the reply never comes; the connection is then dropped
             }
           }
         }
@@ -165,56 +176,116 @@ int main(int argc, char** argv) {
     std::wstring cmd = std::wstring(L"\"") + self + L"\" --mutant";
     std::vector<wchar_t> mut(cmd.begin(), cmd.end());
     mut.push_back(L'\0');
+    // r6 D2: the child's verdict is read, not assumed: it ended (WAIT_OBJECT_0), its exit code was read, it
+    // is exactly 1 (the assertion's failure -- not a hang's STILL_ACTIVE, not a crash's status), and its
+    // own output names THAT assertion as failed. A child that does not end is ended and the case fails.
+    SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+    HANDLE outRead = nullptr, outWrite = nullptr;
+    CreatePipe(&outRead, &outWrite, &inherit, 0);
+    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = outWrite;
+    si.hStdError = outWrite;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi{};
     DWORD code = 0;
-    const bool launched = CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+    const bool launched = CreateProcessW(nullptr, mut.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                                           nullptr, nullptr, &si, &pi) != FALSE;
+    CloseHandle(outWrite);
+    std::string childOut;
+    std::thread reader([&] {
+      char b[512];
+      DWORD n = 0;
+      while (ReadFile(outRead, b, sizeof(b), &n, nullptr) && n > 0) childOut.append(b, n);
+    });
+    DWORD waited = WAIT_FAILED;
+    bool codeRead = false;
     if (launched) {
-      WaitForSingleObject(pi.hProcess, 15000);
-      GetExitCodeProcess(pi.hProcess, &code);
+      waited = WaitForSingleObject(pi.hProcess, 15000);
+      if (waited != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 99);  // ours: reclaimed, and the case fails below
+        WaitForSingleObject(pi.hProcess, 5000);
+      }
+      codeRead = GetExitCodeProcess(pi.hProcess, &code) != FALSE;
       CloseHandle(pi.hThread);
       CloseHandle(pi.hProcess);
     }
-    check("broker: mutation -- the SAME assertion FAILS with verification removed (child exit != 0)",
-          launched && code != 0, "child exit=" + std::to_string(code));
+    reader.join();
+    CloseHandle(outRead);
+    const bool assertionFailed = childOut.find("FAIL  [mutant] broker_refuses") != std::string::npos;
+    check("broker: mutation -- the SAME assertion FAILS with verification removed (ended, exit exactly 1, "
+          "that assertion reported failed)",
+          launched && waited == WAIT_OBJECT_0 && codeRead && code == 1 && assertionFailed,
+          "wait=" + std::to_string(waited) + " exit=" + std::to_string(code) + " assertionFailed=" +
+              std::to_string(assertionFailed ? 1 : 0));
   }
 
   // --- unlock relay: a REAL ChallengeSync round trip over the verified pipe ----------------------
-  const std::wstring upipe = L"\\\\.\\pipe\\gnlink-gate-unlock-" + std::to_wstring(GetCurrentProcessId());
-  Sink usink;
-  usink.Start(upipe, Sink::Mode::Unlock);
-  Sleep(80);
-  g_trusted.store(true);
-  usink.bytes.store(0);
-  {
+  // r6 D2: the positive is the service's ACTUAL answer arriving through the relay -- ChallengeIssued and
+  // the fixture's own synthetic fields -- so a damaged or missing reply (which the relay turns into an
+  // InternalError result for the same requestId) does not pass it.
+  auto relay_round_trip = [&](Sink::Mode mode, uint32_t requestId, std::string* detail) {
+    const std::wstring upipe = L"\\\\.\\pipe\\gnlink-gate-unlock-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                               std::to_wstring(requestId);
+    Sink usink;
+    usink.Start(upipe, mode);
+    Sleep(80);
+    g_trusted.store(true);
     HostUnlockRelay relay;
     relay.SetVerificationEndpointForTest(upipe.c_str(), svc, &gate_gather);
     ControlUnlockChallengeRequestMessage req{};
-    req.requestId = 7;
+    req.requestId = requestId;
     ControlUnlockChallengeMessage out{};
-    const bool got = relay.ChallengeSync(req, /*cookie=*/1234, &out, 4000);
-    check("relay: a TRUSTED endpoint completes the ChallengeSync round trip (real WorkerLoop)",
-          got && out.requestId == 7, "got=" + std::to_string(got));
-    check("relay: the sink received the ChallengeRequest", usink.bytes.load() > 0);
+    const bool got = relay.ChallengeSync(req, /*cookie=*/1234, &out, 6000);
+    uint8_t want[sizeof(out.challengeId)];
+    std::memset(want, 0xA5, sizeof(want));
+    const bool issued = got && out.requestId == requestId &&
+                        out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued) &&
+                        out.hostId == kSyntheticHostId && out.expiresMs == kSyntheticExpiresMs &&
+                        std::memcmp(out.challengeId, want, sizeof(want)) == 0;
+    *detail = "got=" + std::to_string(got) + " status=" + std::to_string(out.status) + " sinkBytes=" +
+              std::to_string(usink.bytes.load());
+    const bool sinkHeard = usink.bytes.load() > 0;
     relay.Stop();
-  }
-  g_trusted.store(false);
-  usink.bytes.store(0);
+    usink.Stop();
+    return issued && sinkHeard;
+  };
+  std::string d;
+  check("relay: a TRUSTED endpoint's ChallengeIssued, with the fixture's fields, comes back through the real WorkerLoop",
+        relay_round_trip(Sink::Mode::Unlock, 7, &d), d);
+  check("relay: control -- a DAMAGED reply does not pass that positive", !relay_round_trip(Sink::Mode::UnlockCorrupt, 9, &d), d);
+  check("relay: control -- NO reply does not pass that positive", !relay_round_trip(Sink::Mode::UnlockSilent, 10, &d), d);
+
+  // NEGATIVE: within a bound that includes the connect budget (3 s), an EXPLICIT refusal comes back
+  // (InternalError for the request) and the fake sink got nothing -- also after the worker is gone.
   {
+    const std::wstring upipe = L"\\\\.\\pipe\\gnlink-gate-unlock-" + std::to_wstring(GetCurrentProcessId()) + L"-neg";
+    Sink usink;
+    usink.Start(upipe, Sink::Mode::Unlock);
+    Sleep(80);
+    g_trusted.store(false);
+    usink.bytes.store(0);
     HostUnlockRelay relay;
     relay.SetVerificationEndpointForTest(upipe.c_str(), svc, &gate_gather);
     ControlUnlockChallengeRequestMessage req{};
     req.requestId = 8;
     ControlUnlockChallengeMessage out{};
-    const bool got = relay.ChallengeSync(req, 1234, &out, 2000);
-    check("relay: NEGATIVE a NOT-trusted endpoint fails the ChallengeSync (no connect)", !got);
+    const auto t0 = GetTickCount64();
+    const bool got = relay.ChallengeSync(req, 1234, &out, 8000);
+    const auto ms = GetTickCount64() - t0;
+    check("relay: NEGATIVE a NOT-trusted endpoint is refused explicitly in time (InternalError result, <8 s)",
+          got && out.requestId == 8 && out.status == static_cast<uint16_t>(UnlockStage::InternalError),
+          "got=" + std::to_string(got) + " status=" + std::to_string(out.status) + " " + std::to_string(ms) + " ms");
     check("relay: NEGATIVE the fake sink received 0 bytes (no ChallengeRequest leaked)",
           usink.bytes.load() == 0, std::to_string(usink.bytes.load()) + " bytes");
     relay.Stop();
+    Sleep(300);
+    check("relay: NEGATIVE ...and still 0 bytes after the relay's worker has ended", usink.bytes.load() == 0,
+          std::to_string(usink.bytes.load()) + " bytes");
+    usink.Stop();
   }
-  usink.Stop();
 
   sink.Stop();
   if (gFailures != 0) { std::printf("secure_pipe_client_gate_test: FAIL (%d)\n", gFailures); return 1; }

@@ -69,21 +69,36 @@ void WINAPI svc_main(DWORD, wchar_t**) {
       kTestPipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096,
       0, &sa);
+  const DWORD pipeErr = pipe == INVALID_HANDLE_VALUE ? GetLastError() : 0;  // r6 D4: before LocalFree
   if (sd) LocalFree(sd);
   if (pipe == INVALID_HANDLE_VALUE) {
-    set_state(SERVICE_STOPPED, GetLastError());  // name squatted or create failed -> fail closed
+    set_state(SERVICE_STOPPED, pipeErr);  // name squatted or create failed -> fail closed
     if (g_stop) CloseHandle(g_stop);
+    return;
+  }
+  // r6 D4: the loop's I/O event exists BEFORE RUNNING is reported (a fixture that cannot serve never says
+  // it runs).
+  HANDLE io = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!io) {
+    const DWORD ioErr = GetLastError();
+    CloseHandle(pipe);
+    CloseHandle(g_stop);
+    set_state(SERVICE_STOPPED, ioErr);
     return;
   }
 
   set_state(SERVICE_RUNNING);
-  // The 4-stop-point overlapped loop is the shared ProbeServeLoop (exercised non-elevated in the
-  // fixture test). EventError (CreateEvent/GetOverlappedResult failure) exits fail-closed.
-  (void)ProbeServeLoop(pipe, g_stop);
+  // The 4-stop-point overlapped loop is the shared ProbeServeRun (exercised non-elevated in the fixture
+  // test). A wait / completion / connect failure ends it fail-closed and its error is kept: the service
+  // stops with that error as its exit code (sc query shows it), not as a clean stop.
+  const ProbeServeResult r = ProbeServeRun(pipe, g_stop, io);
 
+  CloseHandle(io);
   CloseHandle(pipe);
   CloseHandle(g_stop);
-  set_state(SERVICE_STOPPED);
+  const bool stopped = r.exit == ProbeServeExit::StopBeforeConnect || r.exit == ProbeServeExit::StopDuringConnect ||
+                       r.exit == ProbeServeExit::StopBetween || r.exit == ProbeServeExit::StopDuringRead;
+  set_state(SERVICE_STOPPED, stopped ? NO_ERROR : (r.win32 != 0 ? r.win32 : ERROR_GEN_FAILURE));
 }
 
 int run_probe() {

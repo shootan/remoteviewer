@@ -89,6 +89,10 @@ struct FakeServer {
     }
   }
 };
+
+// r6 D4: the probe loop's points as a scenario names them (ProbeServePoint's order), plus "none".
+enum class ProbePoint { None = -1, BeforeConnect = 0, ConnectPending = 1, Between = 2, ReadPending = 3 };
+std::atomic<int> current_point{-1};  // where the loop last said it is (its `at` hook)
 }  // namespace
 
 int main() {
@@ -265,49 +269,127 @@ int main() {
 
   // --- C4: the probe serve loop honours STOP at each point, bounded, WITHOUT the SCM ----------------
   {
-    auto run_scenario = [&](const char* label, int mode, ProbeServeExit expect) {
+    // r6 D4: each stop point on its own, set exactly there by the loop's test hook (not by timing), and a
+    // failed wait (WAIT_FAILED, injected) at the pending connect and at the pending read: the exit is
+    // classified, the injected error kept, the pending I/O cancelled AND collected (reaped), and the end
+    // bounded -- a loop that does not return fails the test and ends this process (no endless join).
+    enum class Drive { None, Client };
+    auto run_scenario = [&](const char* label, int id, Drive drive, ProbePoint stopAt, ProbePoint failAt,
+                            ProbeServeExit expect, uint32_t expectWin32, int expectReapedAt) {
       const std::wstring pn = L"\\\\.\\pipe\\gnlink-c4-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-                              std::to_wstring(mode);
+                              std::to_wstring(id);
       HANDLE pipe = CreateNamedPipeW(pn.c_str(),
                                      PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
                                      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 4096, 4096,
                                      0, nullptr);
       if (pipe == INVALID_HANDLE_VALUE) { check(label, false, "pipe create failed"); return; }
       HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-      std::atomic<int> got{-1};
-      if (mode == 0) SetEvent(stop);  // (1) stop before the loop even starts
-      std::thread t([&] { got.store(static_cast<int>(ProbeServeLoop(pipe, stop))); });
+      HANDLE io = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      std::atomic<int> reapedAt{-1};
+      ProbeServeHooks hooks;
+      hooks.at = [&](ProbeServePoint p) {
+        if (static_cast<int>(p) == static_cast<int>(stopAt)) SetEvent(stop);
+      };
+      hooks.wait = [&, failAt](uint32_t n, void* const* h) -> uint32_t {
+        // the loop's own wait, unless this scenario fails it at this point
+        if (failAt != ProbePoint::None && current_point.load() == static_cast<int>(failAt)) {
+          SetLastError(ERROR_INVALID_HANDLE);
+          return WAIT_FAILED;
+        }
+        return WaitForMultipleObjects(n, reinterpret_cast<const HANDLE*>(h), FALSE, INFINITE);
+      };
+      hooks.reaped = [&](ProbeServePoint p) { reapedAt.store(static_cast<int>(p)); };
+      auto at = hooks.at;
+      hooks.at = [&, at](ProbeServePoint p) {
+        current_point.store(static_cast<int>(p));
+        at(p);
+      };
+      std::atomic<bool> done{false};
+      ProbeServeResult result;
+      std::thread t([&] {
+        result = ProbeServeRun(pipe, stop, io, &hooks);
+        done = true;
+      });
       HANDLE cli = INVALID_HANDLE_VALUE;
-      if (mode == 1) {
-        Sleep(200);  // (3) loop is parked in the pending ConnectNamedPipe
-        SetEvent(stop);
-      } else if (mode == 2) {
-        // (2)/(4) a client connects (connect completes) but never writes; then stop while the read is
-        // pending. Either the between-check or the read-wait catches it -- both are bounded stop exits.
-        for (int k = 0; k < 50 && cli == INVALID_HANDLE_VALUE; ++k) {
+      if (drive == Drive::Client) {  // a client connects and never writes
+        for (int k = 0; k < 100 && cli == INVALID_HANDLE_VALUE; ++k) {
           cli = CreateFileW(pn.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
           if (cli == INVALID_HANDLE_VALUE) Sleep(20);
         }
-        Sleep(200);
-        SetEvent(stop);
       }
-      const bool bounded = t.joinable() && (WaitForSingleObject(t.native_handle(), 4000) == WAIT_OBJECT_0);
-      if (t.joinable()) t.join();
+      bool bounded = false;
+      for (int k = 0; k < 200 && !(bounded = done.load()); ++k) Sleep(20);  // 4 s
+      if (!bounded) {
+        check(label, false, "the loop did not return within 4 s");
+        std::printf("trusted_service_pipe_test: FAIL (%d)\n", gFailures);
+        std::fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 1);  // never an endless join
+      }
+      t.join();
       if (cli != INVALID_HANDLE_VALUE) CloseHandle(cli);
+      CloseHandle(io);
       CloseHandle(stop);
       CloseHandle(pipe);
-      const auto exit = static_cast<ProbeServeExit>(got.load());
-      if (mode == 2) {
-        check(label, bounded && (exit == ProbeServeExit::StopBetween || exit == ProbeServeExit::StopDuringRead),
-              std::string("bounded=") + (bounded ? "1" : "0") + " exit=" + probe_serve_exit_name(exit));
-      } else {
-        check(label, bounded && exit == expect,
-              std::string("bounded=") + (bounded ? "1" : "0") + " exit=" + probe_serve_exit_name(exit));
-      }
+      check(label,
+            result.exit == expect && result.win32 == expectWin32 && reapedAt.load() == expectReapedAt,
+            std::string("exit=") + probe_serve_exit_name(result.exit) + " win32=" + std::to_string(result.win32) +
+                " reaped@" + std::to_string(reapedAt.load()));
     };
-    run_scenario("probe-serve(1): STOP before Connect -> bounded exit", 0, ProbeServeExit::StopBeforeConnect);
-    run_scenario("probe-serve(3): STOP while Connect pending -> bounded exit", 1, ProbeServeExit::StopDuringConnect);
-    run_scenario("probe-serve(2/4): client connected, STOP before/at Read -> bounded exit", 2, ProbeServeExit::StopDuringRead);
+    const int none = -1;
+    const int cp = static_cast<int>(ProbeServePoint::ConnectPending);
+    const int rp = static_cast<int>(ProbeServePoint::ReadPending);
+    run_scenario("probe-serve(1): STOP before the connect -> stop-before-connect", 1, Drive::None,
+                 ProbePoint::BeforeConnect, ProbePoint::None, ProbeServeExit::StopBeforeConnect, 0, none);
+    run_scenario("probe-serve(3): STOP while the connect is pending -> stop-during-connect, the connect reaped", 3,
+                 Drive::None, ProbePoint::ConnectPending, ProbePoint::None, ProbeServeExit::StopDuringConnect, 0, cp);
+    run_scenario("probe-serve(2): connected, STOP before the read -> stop-between", 2, Drive::Client,
+                 ProbePoint::Between, ProbePoint::None, ProbeServeExit::StopBetween, 0, none);
+    run_scenario("probe-serve(4): STOP while the read is pending -> stop-during-read, the read reaped", 4, Drive::Client,
+                 ProbePoint::ReadPending, ProbePoint::None, ProbeServeExit::StopDuringRead, 0, rp);
+    run_scenario("probe-serve D4: WAIT_FAILED on the pending connect -> event-error 6 kept, the connect reaped", 5,
+                 Drive::None, ProbePoint::None, ProbePoint::ConnectPending, ProbeServeExit::EventError,
+                 ERROR_INVALID_HANDLE, cp);
+    run_scenario("probe-serve D4: WAIT_FAILED on the pending read -> event-error 6 kept, the read reaped", 6, Drive::Client,
+                 ProbePoint::None, ProbePoint::ReadPending, ProbeServeExit::EventError, ERROR_INVALID_HANDLE, rp);
+  }
+
+  // --- r6 D3: the original error survives to the diagnostic ------------------------------------------
+  {
+    auto& seam = TrustedPipeWin32ForTest();
+    const auto realQuery = seam.queryServiceConfig;
+    const auto realWait = seam.waitForSingleObject;
+    uint32_t err = 0;
+    const std::wstring real = ServiceBinaryPathForTest(L"EventLog", &err);  // a service every Windows has
+    check("D3: a real service's binary path is read (no error)", !real.empty() && err == 0, std::to_string(err));
+    static int calls = 0;
+    calls = 0;
+    seam.queryServiceConfig = [](void* s, void* c, unsigned long n, unsigned long* need) -> int {
+      if (++calls == 2) {  // the size query passes, the real query fails
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+      }
+      return TrustedPipeWin32Seam::DefaultQueryServiceConfig(s, c, n, need);
+    };
+    const std::wstring second = ServiceBinaryPathForTest(L"EventLog", &err);
+    check("D3: the second QueryServiceConfig failing keeps ITS error (5), not 0", second.empty() && err == ERROR_ACCESS_DENIED,
+          std::to_string(err));
+    seam.queryServiceConfig = [](void*, void*, unsigned long, unsigned long*) -> int {
+      SetLastError(ERROR_ACCESS_DENIED);  // the size query fails for a reason that is not "too small"
+      return FALSE;
+    };
+    const std::wstring first = ServiceBinaryPathForTest(L"EventLog", &err);
+    check("D3: the size query failing for real keeps its error (5), told apart from INSUFFICIENT_BUFFER",
+          first.empty() && err == ERROR_ACCESS_DENIED, std::to_string(err));
+    seam.queryServiceConfig = realQuery;
+    seam.waitForSingleObject = [](void*, unsigned long) -> unsigned long {
+      SetLastError(ERROR_INVALID_HANDLE);
+      return WAIT_FAILED;
+    };
+    uint32_t rerr = 0;
+    const bool consistent = FinalRecheckForTest(GetCurrentProcess(), L"GNLinkD3NoSuchService", GetCurrentProcessId(), &rerr);
+    check("D3: WAIT_FAILED in the final re-check keeps the wait's own error (6), not the SCM's that came after",
+          !consistent && rerr == ERROR_INVALID_HANDLE, std::to_string(rerr));
+    seam.waitForSingleObject = realWait;
   }
 
   if (gFailures != 0) { std::printf("trusted_service_pipe_test: FAIL (%d)\n", gFailures); return 1; }

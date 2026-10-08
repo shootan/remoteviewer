@@ -92,6 +92,24 @@ std::wstring image_of_process(HANDLE p, uint32_t* errOut = nullptr) {
   return out;
 }
 
+}  // namespace
+
+// r6 D3: the two Win32 calls whose failures the diagnostics must keep, replaceable by a test (default: the
+// real ones).
+int __stdcall TrustedPipeWin32Seam::DefaultQueryServiceConfig(void* service, void* config, unsigned long size,
+                                                             unsigned long* needed) {
+  return QueryServiceConfigW(static_cast<SC_HANDLE>(service), static_cast<LPQUERY_SERVICE_CONFIGW>(config), size, needed);
+}
+unsigned long __stdcall TrustedPipeWin32Seam::DefaultWaitForSingleObject(void* handle, unsigned long ms) {
+  return WaitForSingleObject(static_cast<HANDLE>(handle), ms);
+}
+TrustedPipeWin32Seam& TrustedPipeWin32ForTest() {
+  static TrustedPipeWin32Seam seam;
+  return seam;
+}
+
+namespace {
+
 // The executable path from a service's configured ImagePath (strip a leading quote/token + arguments).
 std::wstring service_binary_path(const wchar_t* serviceName, uint32_t* errOut = nullptr) {
   if (errOut) *errOut = 0;
@@ -104,12 +122,21 @@ std::wstring service_binary_path(const wchar_t* serviceName, uint32_t* errOut = 
     return {};
   }
   DWORD needed = 0;
-  QueryServiceConfigW(svc, nullptr, 0, &needed);
   std::wstring out;
+  // r6 D3: the size query is EXPECTED to fail with ERROR_INSUFFICIENT_BUFFER; any other failure (or none
+  // with no size) is the real error, kept as it is right after the call.
+  const auto query = TrustedPipeWin32ForTest().queryServiceConfig;
+  if (!query(svc, nullptr, 0, &needed)) {
+    const DWORD e = GetLastError();
+    if (e != ERROR_INSUFFICIENT_BUFFER && errOut) *errOut = e;
+  }
+  if (needed == 0 && errOut && *errOut == 0) *errOut = ERROR_INVALID_DATA;
   if (needed > 0) {
     std::vector<uint8_t> buf(needed);
     auto* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
-    if (QueryServiceConfigW(svc, cfg, needed, &needed) && cfg->lpBinaryPathName) {
+    const BOOL got = query(svc, cfg, needed, &needed);
+    if (!got && errOut) *errOut = GetLastError();  // r6 D3: the second query's own failure
+    if (got && cfg->lpBinaryPathName) {
       std::wstring raw = cfg->lpBinaryPathName;
       // "C:\dir\svc.exe" args  OR  C:\dir\svc.exe args
       if (!raw.empty() && raw.front() == L'"') {
@@ -151,7 +178,29 @@ bool service_running_pid(const wchar_t* serviceName, uint32_t* pidOut, uint32_t*
   return true;
 }
 
+// R2 final re-check: the server process still alive AND the SCM still reporting that same pid RUNNING.
+// r6 D3: a failed wait's error is taken RIGHT AFTER the wait (before the SCM calls overwrite it); otherwise
+// the SCM re-query's error (0 when the service is simply stopped or the pid moved).
+bool final_recheck(HANDLE serverProc, const wchar_t* serviceName, uint32_t serverPid, uint32_t* errOut) {
+  *errOut = 0;
+  const DWORD waitRc = TrustedPipeWin32ForTest().waitForSingleObject(serverProc, 0);
+  const DWORD waitErr = waitRc == WAIT_FAILED ? GetLastError() : 0;
+  const bool stillAlive = waitRc == WAIT_TIMEOUT;  // not signalled = alive; WAIT_FAILED = cannot tell
+  uint32_t svcPid2 = 0, svcErr2 = 0;
+  const bool stillRunning = service_running_pid(serviceName, &svcPid2, &svcErr2);
+  const bool ok = stillAlive && stillRunning && svcPid2 == serverPid;
+  if (!ok) *errOut = waitRc == WAIT_FAILED ? waitErr : (stillRunning ? 0 : svcErr2);
+  return ok;
+}
+
 }  // namespace
+
+std::wstring ServiceBinaryPathForTest(const wchar_t* serviceName, uint32_t* errOut) {
+  return service_binary_path(serviceName, errOut);
+}
+bool FinalRecheckForTest(void* serverProcess, const wchar_t* serviceName, uint32_t serverPid, uint32_t* errOut) {
+  return final_recheck(static_cast<HANDLE>(serverProcess), serviceName, serverPid, errOut);
+}
 
 ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* serviceName) {
   ServerIdentityFacts f;
@@ -216,17 +265,9 @@ ServerIdentityFacts GatherServerIdentity(void* pipeHandle, const wchar_t* servic
   // reports that SAME pid RUNNING. A stop/replace across the window (or an inability to re-confirm)
   // makes finalConsistent false -> the classifier refuses.
   if (serverProc) {
-    const DWORD waitRc = WaitForSingleObject(serverProc, 0);
-    const bool stillAlive = waitRc == WAIT_TIMEOUT;  // not signalled = alive; WAIT_FAILED = cannot tell
-    uint32_t svcPid2 = 0, svcErr2 = 0;
-    const bool stillRunning = service_running_pid(serviceName, &svcPid2, &svcErr2);
-    f.finalConsistent = stillAlive && stillRunning && svcPid2 == f.serverPid;
-    if (!f.finalConsistent) {
-      // Preserve WHY the re-check failed: a failed wait (WAIT_FAILED) keeps its error; otherwise the
-      // SCM re-query error (0 when the service is simply gone/stopped or the pid moved).
-      const uint32_t rc = (waitRc == WAIT_FAILED) ? GetLastError() : (stillRunning ? 0 : svcErr2);
-      note_fail(PipeVerifyStage::FinalRecheck, rc);
-    }
+    uint32_t rc = 0;
+    f.finalConsistent = final_recheck(serverProc, serviceName, f.serverPid, &rc);
+    if (!f.finalConsistent) note_fail(PipeVerifyStage::FinalRecheck, rc);
     CloseHandle(serverProc);
   } else {
     f.finalConsistent = false;  // never opened the process -> cannot have re-confirmed it

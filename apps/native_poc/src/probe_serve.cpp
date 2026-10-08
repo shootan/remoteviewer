@@ -18,65 +18,98 @@ const char* probe_serve_exit_name(ProbeServeExit e) {
 }
 
 namespace {
+
 bool stop_set(HANDLE stop) { return stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0; }
+
+enum class IoEnd {
+  Completed,   // the I/O finished with success
+  IoFailed,    // the I/O finished with an error (*err)
+  Stopped,     // STOP: cancelled and collected
+  WaitFailed,  // the wait itself failed (*err): cancelled and collected
+};
+
+// A pending overlapped I/O, waited with STOP. Whatever ends the wait, the I/O is complete when this
+// returns: a STOP or a failed wait cancels it and collects its completion (D4).
+IoEnd finish_pending(HANDLE pipe, OVERLAPPED* ov, HANDLE stop, const ProbeServeHooks* hooks, ProbeServePoint point,
+                     DWORD* bytes, DWORD* err) {
+  *err = 0;
+  HANDLE w[2] = {ov->hEvent, stop};
+  const DWORD r = (hooks && hooks->wait) ? hooks->wait(2, w) : WaitForMultipleObjects(2, w, FALSE, INFINITE);
+  if (r == WAIT_OBJECT_0) {
+    if (GetOverlappedResult(pipe, ov, bytes, FALSE)) return IoEnd::Completed;
+    *err = GetLastError();  // the I/O completed with this error
+    return IoEnd::IoFailed;
+  }
+  const DWORD waitErr = (r == WAIT_FAILED) ? GetLastError() : ERROR_INVALID_FUNCTION;  // before any other call
+  (void)CancelIoEx(pipe, ov);
+  (void)GetOverlappedResult(pipe, ov, bytes, TRUE);  // the cancel is a request: wait for the completion
+  if (hooks && hooks->reaped) hooks->reaped(point);
+  if (r == WAIT_OBJECT_0 + 1) return IoEnd::Stopped;
+  *err = waitErr;
+  return IoEnd::WaitFailed;
+}
+
+// A read that ended because the client went away (or sent more than the probe reads) is not a fault.
+bool client_gone(DWORD err) {
+  return err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || err == ERROR_MORE_DATA ||
+         err == ERROR_NO_DATA;
+}
+
 }  // namespace
 
-ProbeServeExit ProbeServeLoop(void* pipeHandle, void* stopEvent) {
+ProbeServeResult ProbeServeRun(void* pipeHandle, void* stopEvent, void* ioEvent, const ProbeServeHooks* hooks) {
   HANDLE pipe = static_cast<HANDLE>(pipeHandle);
   HANDLE stop = static_cast<HANDLE>(stopEvent);
+  if (!ioEvent) return {ProbeServeExit::EventError, ERROR_INVALID_HANDLE};
   OVERLAPPED ov{};
-  ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (!ov.hEvent) return ProbeServeExit::EventError;  // C4: a failed CreateEvent is not ignored
-  ProbeServeExit result = ProbeServeExit::ConnectError;
+  ov.hEvent = static_cast<HANDLE>(ioEvent);
+  char buf[64];  // outlives every read issued into it (each is complete before the next step)
+  auto at = [&](ProbeServePoint p) {
+    if (hooks && hooks->at) hooks->at(p);
+  };
   for (;;) {
-    if (stop_set(stop)) { result = ProbeServeExit::StopBeforeConnect; break; }  // (1)
+    at(ProbeServePoint::BeforeConnect);
+    if (stop_set(stop)) return {ProbeServeExit::StopBeforeConnect, 0};  // (1)
     ResetEvent(ov.hEvent);
-    BOOL connected = ConnectNamedPipe(pipe, &ov);
-    DWORD gle = GetLastError();
+    const BOOL connected = ConnectNamedPipe(pipe, &ov);
+    const DWORD gle = connected ? 0 : GetLastError();
     if (!connected && gle == ERROR_IO_PENDING) {
-      HANDLE w[2] = {ov.hEvent, stop};
-      DWORD r = WaitForMultipleObjects(2, w, FALSE, INFINITE);
-      if (r == WAIT_FAILED) { result = ProbeServeExit::EventError; break; }
-      if (r != WAIT_OBJECT_0) {  // (3) STOP won
-        CancelIoEx(pipe, &ov);
-        DWORD b = 0;
-        GetOverlappedResult(pipe, &ov, &b, TRUE);
-        result = ProbeServeExit::StopDuringConnect;
-        break;
-      }
-      DWORD b = 0;
-      if (!GetOverlappedResult(pipe, &ov, &b, TRUE)) { result = ProbeServeExit::EventError; break; }
-      connected = TRUE;
+      at(ProbeServePoint::ConnectPending);
+      DWORD b = 0, err = 0;
+      const IoEnd e = finish_pending(pipe, &ov, stop, hooks, ProbeServePoint::ConnectPending, &b, &err);
+      if (e == IoEnd::Stopped) return {ProbeServeExit::StopDuringConnect, 0};  // (3)
+      if (e == IoEnd::WaitFailed) return {ProbeServeExit::EventError, err};
+      if (e == IoEnd::IoFailed) return {ProbeServeExit::ConnectError, err};
     } else if (!connected && gle != ERROR_PIPE_CONNECTED) {
-      result = ProbeServeExit::ConnectError;
-      break;
+      return {ProbeServeExit::ConnectError, gle};
     }
+    at(ProbeServePoint::Between);
     if (stop_set(stop)) {  // (2)
       DisconnectNamedPipe(pipe);
-      result = ProbeServeExit::StopBetween;
-      break;
+      return {ProbeServeExit::StopBetween, 0};
     }
     ResetEvent(ov.hEvent);
-    char buf[64];
     DWORD got = 0;
-    BOOL rok = ReadFile(pipe, buf, sizeof(buf), &got, &ov);  // drain; a probe sends nothing
-    if (!rok && GetLastError() == ERROR_IO_PENDING) {
-      HANDLE w[2] = {ov.hEvent, stop};
-      DWORD r = WaitForMultipleObjects(2, w, FALSE, INFINITE);
-      if (r == WAIT_FAILED) { result = ProbeServeExit::EventError; break; }
-      if (r != WAIT_OBJECT_0) {  // (4) STOP won
-        CancelIoEx(pipe, &ov);
-        GetOverlappedResult(pipe, &ov, &got, TRUE);
+    const BOOL rok = ReadFile(pipe, buf, sizeof(buf), &got, &ov);  // drain; a probe sends nothing
+    const DWORD rerr = rok ? 0 : GetLastError();
+    if (!rok && rerr == ERROR_IO_PENDING) {
+      at(ProbeServePoint::ReadPending);
+      DWORD err = 0;
+      const IoEnd e = finish_pending(pipe, &ov, stop, hooks, ProbeServePoint::ReadPending, &got, &err);
+      if (e == IoEnd::Stopped) {  // (4)
         DisconnectNamedPipe(pipe);
-        result = ProbeServeExit::StopDuringRead;
-        break;
+        return {ProbeServeExit::StopDuringRead, 0};
       }
-      GetOverlappedResult(pipe, &ov, &got, TRUE);  // completed read
+      if (e == IoEnd::WaitFailed || (e == IoEnd::IoFailed && !client_gone(err))) {
+        DisconnectNamedPipe(pipe);
+        return {ProbeServeExit::EventError, err};
+      }
+    } else if (!rok && !client_gone(rerr)) {
+      DisconnectNamedPipe(pipe);
+      return {ProbeServeExit::EventError, rerr};
     }
     DisconnectNamedPipe(pipe);  // ready for the next client; name stays owned
   }
-  CloseHandle(ov.hEvent);
-  return result;
 }
 
 }  // namespace remote60::native_poc
