@@ -253,10 +253,11 @@ Shared gShared;
 std::mutex gCommitMu;
 
 void post_shutdown(WPARAM why) {
-  {
-    std::lock_guard<std::mutex> fence(gCommitMu);
-    if (gShared.disconnectPosted.exchange(true)) return;
-  }
+  // The hwnd read + post is under the same fence the teardown nulls it with, so a signal from a
+  // still-draining thread either posts to a live window or sees it already gone -- never posts to a
+  // handle being destroyed. PostMessage is async, so holding the fence across it does not block.
+  std::lock_guard<std::mutex> fence(gCommitMu);
+  if (gShared.disconnectPosted.exchange(true)) return;
   if (gShared.hwnd) PostMessageW(gShared.hwnd, kMsgShutdown, why, 0);
 }
 
@@ -694,7 +695,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ENDSESSION:
       if (wp) shutdown("session ending");
       return 0;
+    case WM_CLOSE:
+      // The polite "please close" the updater (and anyone else) sends. It MUST run the real shutdown
+      // -- which posts WM_QUIT -- not fall through to DefWindowProc. DefWindowProc's WM_CLOSE calls
+      // DestroyWindow, and this WndProc's WM_DESTROY returns 0 without PostQuitMessage, so the window
+      // would vanish while GetMessage kept looping: the helper would live on as a WINDOWLESS process
+      // that nothing can then ask to close (incident 2026-10-08). shutdown() is idempotent.
+      shutdown("window close requested");
+      return 0;
     case WM_DESTROY:
+      // Belt and braces: if the window is ever torn down by any path, make sure the message loop ends
+      // rather than spinning forever on a destroyed window.
+      PostQuitMessage(0);
       return 0;
     default:
       return DefWindowProcW(hwnd, msg, wp, lp);
@@ -786,7 +798,14 @@ int wmain(int argc, wchar_t** argv) {
   if (watch.joinable()) watch.join();
   if (host) CloseHandle(host);
   KillTimer(gShared.hwnd, kTimerId);
-  DestroyWindow(gShared.hwnd);
+  {
+    // Null the handle under the same fence post_shutdown takes, so a late signal from a still-draining
+    // thread cannot PostMessage to a window that is about to be (or has been) destroyed.
+    std::lock_guard<std::mutex> fence(gCommitMu);
+    HWND doomed = gShared.hwnd;
+    gShared.hwnd = nullptr;
+    if (doomed) DestroyWindow(doomed);
+  }
   CloseHandle(gShared.pipe);
   gShared.pipe = INVALID_HANDLE_VALUE;
   OleUninitialize();

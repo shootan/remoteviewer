@@ -60,6 +60,28 @@ namespace {
 int gChecks = 0;
 int gFailures = 0;
 
+// Find a top-level window owned by `pid` on the CURRENT desktop. Used by the WM_CLOSE lifecycle
+// reproduction (updater-helper-lifecycle (2)): the helper's owner window is a hidden top-level window.
+struct PidWindow {
+  DWORD pid = 0;
+  HWND found = nullptr;
+};
+BOOL CALLBACK find_pid_window(HWND hwnd, LPARAM param) {
+  auto* pw = reinterpret_cast<PidWindow*>(param);
+  DWORD owner = 0;
+  GetWindowThreadProcessId(hwnd, &owner);
+  if (owner == pw->pid) {
+    pw->found = hwnd;
+    return FALSE;  // stop
+  }
+  return TRUE;
+}
+HWND window_of_pid(DWORD pid) {
+  PidWindow pw{pid, nullptr};
+  EnumWindows(find_pid_window, reinterpret_cast<LPARAM>(&pw));
+  return pw.found;
+}
+
 // This process is a plain user process: Medium, not elevated (the usual test run). An elevated run
 // takes the other branch of the token checks.
 bool this_process_is_plain() {
@@ -1277,6 +1299,52 @@ int run_driver() {
     // The Job: the helper is inside it (a process in a KILL_ON_JOB_CLOSE job cannot be outside).
     BOOL inJob = FALSE;
     check("...the helper is in a Job", IsProcessInJob(link.helper_process(), nullptr, &inJob) && inJob);
+  }
+
+  // ---------------------------------------------------------------- (2) WM_CLOSE lifecycle
+  // The incident shape: a helper that received a bare WM_CLOSE went WINDOWLESS but kept running, so
+  // the updater could no longer ask it to close and abandoned the swap. WM_CLOSE must run the real
+  // shutdown (which posts WM_QUIT) and the process must EXIT. A dedicated helper is launched on THIS
+  // desktop (not the private station) so the test can find its window with EnumWindows; its own pipe
+  // and process, independent of `link` above.
+  std::printf("\n--- (2) WM_CLOSE makes the helper exit, not go windowless ---\n");
+  {
+    HelperLink wc;
+    std::string wcWhy;
+    check("[wmclose] a server pipe for the WM_CLOSE helper", wc.CreateServerPipe(userSid, &wcWhy), wcWhy);
+    const std::wstring wcLog = root + L"\\wmclose_helper.log";
+    check("[wmclose] launched on this desktop",
+          wc.Launch(helperExe, nullptr, /*desktop=*/nullptr,
+                    L"--idle-ms 60000 --log \"" + wcLog + L"\"", &wcWhy), wcWhy);
+    const bool wcHello = wc.AwaitHello(10000, &wcWhy);
+    check("[wmclose] the helper connected and is in its message loop", wcHello, wcWhy);
+    if (wcHello) {
+      HWND hwnd = nullptr;
+      for (int i = 0; i < 50 && !hwnd; ++i) {  // the window appears right after Hello
+        hwnd = window_of_pid(wc.helper_pid());
+        if (!hwnd) Sleep(100);
+      }
+      check("[wmclose] the helper owns a top-level window", hwnd != nullptr);
+      if (hwnd) {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        // Fixed: WM_CLOSE -> shutdown() -> PostQuitMessage -> the process exits. Pre-fix: the window
+        // is destroyed but GetMessage keeps looping, so the process survives and this times out.
+        const bool exited = WaitForSingleObject(wc.helper_process(), 8000) == WAIT_OBJECT_0;
+        check("[wmclose] the helper EXITS after WM_CLOSE (does not survive windowless)", exited,
+              exited ? "" : "still running 8s after WM_CLOSE -- the windowless-survivor bug");
+        if (exited) {
+          // And it is gone -- no window, no process left to leak into an update.
+          check("[wmclose] no window of that pid remains", window_of_pid(wc.helper_pid()) == nullptr);
+        }
+      }
+    }
+    // Clean up by HANDLE (never by name): if the helper is still alive it is this test's leftover.
+    if (wc.helper_process() && WaitForSingleObject(wc.helper_process(), 0) == WAIT_TIMEOUT) {
+      TerminateProcess(wc.helper_process(), 9);
+      WaitForSingleObject(wc.helper_process(), 3000);
+      if (!tail_of(wcLog, 40).empty()) std::wprintf(L"%s", tail_of(wcLog, 40).c_str());  // preserve evidence
+    }
+    wc.Close();
   }
 
   // ---------------------------------------------------------------- R->P: the user's files
