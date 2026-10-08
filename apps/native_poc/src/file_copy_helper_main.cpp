@@ -600,6 +600,20 @@ void on_publish(std::unique_ptr<PublishRemoteFiles> m) {
     return;
   }
   gOwner.current = obj;  // our ref; OLE holds its own
+  // A close that BEGAN while we were committing -- a WM_CLOSE dispatched by OLE's own message pump on
+  // this STA thread -- set the publish ban after our check above passed. Re-check it here, still under
+  // the fence: if closing has started, this offer must not outlive it. Take it back off the clipboard
+  // and release it, so a remote offer cannot change this PC's clipboard after the connection ended (M3).
+  if (gShared.disconnectPosted.load(std::memory_order_acquire)) {
+    if (OleIsCurrentClipboard(gOwner.current) == S_OK) OleSetClipboard(nullptr);
+    gOwner.current->Release();
+    gOwner.current = nullptr;
+    result.status = Status::Aborted;
+    logf("publish offer=%llu taken back: the connection ended during its commit",
+         static_cast<unsigned long long>(m->offerId));
+    gShared.send->Push(encode(result));
+    return;
+  }
   logf("publish offer=%llu items=%u on the clipboard", static_cast<unsigned long long>(m->offerId), result.count);
   gShared.send->Push(encode(result));
 }
@@ -621,6 +635,12 @@ void on_clear(std::unique_ptr<ClearRemoteFiles> m) {
 }
 
 void shutdown(const char* why) {
+  // Closing has started: ban any publish from here on (M3), for EVERY entry to shutdown -- pipe-gone,
+  // host-gone, WM_CLOSE, WM_DESTROY, session end. A plain atomic store, NOT under gCommitMu: on_publish
+  // holds gCommitMu across OLE, which can pump the STA and re-enter this on the same thread, so taking
+  // gCommitMu here would self-deadlock. on_publish re-checks this flag after its commit (still under
+  // its own fence), so a close that begins mid-commit still takes the offer back off the clipboard.
+  gShared.disconnectPosted.store(true, std::memory_order_release);
   if (gOwner.quitting) return;
   gOwner.quitting = true;
   logf("shutdown: %s", why);
@@ -697,16 +717,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_CLOSE:
       // The polite "please close" the updater (and anyone else) sends. It MUST run the real shutdown
-      // -- which posts WM_QUIT -- not fall through to DefWindowProc. DefWindowProc's WM_CLOSE calls
-      // DestroyWindow, and this WndProc's WM_DESTROY returns 0 without PostQuitMessage, so the window
-      // would vanish while GetMessage kept looping: the helper would live on as a WINDOWLESS process
-      // that nothing can then ask to close (incident 2026-10-08). shutdown() is idempotent.
+      // -- which bans further publishes (M3) and posts WM_QUIT -- not fall through to DefWindowProc.
+      // DefWindowProc's WM_CLOSE calls DestroyWindow, and WM_DESTROY returned 0 without PostQuitMessage,
+      // so the window would vanish while GetMessage kept looping: the helper would live on as a
+      // WINDOWLESS process nothing can then ask to close (incident 2026-10-08). shutdown() is idempotent.
       shutdown("window close requested");
       return 0;
     case WM_DESTROY:
-      // Belt and braces: if the window is ever torn down by any path, make sure the message loop ends
-      // rather than spinning forever on a destroyed window.
-      PostQuitMessage(0);
+      // Belt and braces: any path that tears the window down runs the same closing contract (publish
+      // ban + object cleanup + WM_QUIT), rather than spinning forever on a destroyed window.
+      shutdown("window destroyed");
+      PostQuitMessage(0);  // in case shutdown already ran (quitting): still end the loop
       return 0;
     default:
       return DefWindowProcW(hwnd, msg, wp, lp);

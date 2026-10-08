@@ -2092,83 +2092,162 @@ int main(int argc, char** argv) {
     DeleteFileW(foreignNote.c_str());
   }
 
-  // install-membership live normalization (updater-helper-lifecycle (1)): the pure classifier is
-  // proven in update_identity_match_test; here the Win32 normalize_identity_path is driven against
-  // REAL alias paths -- an 8.3 short name and a directory junction -- so an image reached through an
-  // alias into installDir is still recognised as Inside, and one outside is Outside.
+  // target membership by FILE IDENTITY (updater-helper-lifecycle r2 M1/M2): the pure verdict is in
+  // update_identity_match_test; here the Win32 gather_target_match_facts is driven against REAL files.
+  // A payload reached through an alias/junction/hardlink is the SAME file (Target); a DIFFERENT file
+  // -- outside, or a non-payload copy under installDir\backup -- is NotTarget; a missing payload is
+  // Unknown. Then real processes A (payload) and B (outside same name) are enumerated through the new
+  // overload and only A survives as a confirmed target.
   {
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
     const std::wstring base = std::wstring(tmp) + L"gnlink_member_" + std::to_wstring(GetCurrentProcessId());
     const std::wstring installDir = base + L"\\InstallationDirectoryWithALongName";
     const std::wstring outsideDir = base + L"\\SomewhereElseEntirely";
+    const std::wstring backupDir = installDir + L"\\backup";
+    const std::wstring emptyInstall = base + L"\\NothingInstalledHere";
     CreateDirectoryW(base.c_str(), nullptr);
     CreateDirectoryW(installDir.c_str(), nullptr);
     CreateDirectoryW(outsideDir.c_str(), nullptr);
-    const std::wstring insideExe = installDir + L"\\GNLinkClipHelper.exe";
-    const std::wstring outsideExe = outsideDir + L"\\GNLinkClipHelper.exe";
-    { std::ofstream(insideExe) << "x"; std::ofstream(outsideExe) << "x"; }
+    CreateDirectoryW(backupDir.c_str(), nullptr);
+    CreateDirectoryW(emptyInstall.c_str(), nullptr);
+    // Real runnable copies of this test exe, named like a payload image, at each location.
+    const std::wstring payload = installDir + L"\\GNLinkHost.exe";          // A: the installed payload
+    const std::wstring outsideExe = outsideDir + L"\\GNLinkHost.exe";       // B: a same-named stranger
+    const std::wstring backupExe = backupDir + L"\\GNLinkHost.exe";         // C: a non-payload copy
+    check("member fixtures copied",
+          CopyFileW(own_path().c_str(), payload.c_str(), FALSE) &&
+              CopyFileW(own_path().c_str(), outsideExe.c_str(), FALSE) &&
+              CopyFileW(own_path().c_str(), backupExe.c_str(), FALSE));
 
-    // (a) 8.3 short name of the inside image resolves back under installDir.
+    using remote60::native_poc::update::gather_target_match_facts;
+    using remote60::native_poc::update::classify_target_membership;
+    using remote60::native_poc::update::TargetMembership;
+    auto verdict = [&](const std::wstring& image, const std::wstring& dir) {
+      return classify_target_membership(gather_target_match_facts(image, dir));
+    };
+
+    check("member(file-id): the payload file itself -> Target", verdict(payload, installDir) == TargetMembership::Target);
+    check("member(file-id): NEGATIVE an outside same-named file -> NotTarget",
+          verdict(outsideExe, installDir) == TargetMembership::NotTarget);
+    check("member(file-id): NEGATIVE a non-payload copy under installDir\\backup -> NotTarget (M2)",
+          verdict(backupExe, installDir) == TargetMembership::NotTarget);
+    check("member(file-id): a missing installed payload -> Unknown (M1, never dropped/stopped)",
+          verdict(outsideExe, emptyInstall) == TargetMembership::Unknown);
+
+    // 8.3 alias of the payload -> same file -> Target.
     wchar_t shortBuf[MAX_PATH] = {};
-    const DWORD sn = GetShortPathNameW(insideExe.c_str(), shortBuf, MAX_PATH);
-    if (sn > 0 && sn < MAX_PATH && std::wstring(shortBuf) != insideExe) {
-      check("membership(live): an 8.3 short-name alias normalizes to Inside",
-            classify_install_membership(normalize_identity_path(shortBuf),
-                                        normalize_identity_path(installDir)) == InstallMembership::Inside);
-    } else {
-      std::printf("note  membership(live): 8.3 short names disabled on this volume; alias case not run\n");
+    const DWORD sn = GetShortPathNameW(payload.c_str(), shortBuf, MAX_PATH);
+    if (sn > 0 && sn < MAX_PATH && std::wstring(shortBuf) != payload)
+      check("member(file-id): an 8.3 alias of the payload -> Target", verdict(shortBuf, installDir) == TargetMembership::Target);
+    else
+      std::printf("note  member(file-id): 8.3 disabled on this volume; alias case not run\n");
+
+    // A hard link to the payload -> same file -> Target.
+    const std::wstring hardlink = installDir + L"\\GNLinkHost-hardlink.exe";
+    if (CreateHardLinkW(hardlink.c_str(), payload.c_str(), nullptr)) {
+      // Its leaf differs, so it is compared against installDir\\GNLinkHost-hardlink.exe (itself) -> Target;
+      // the point is the SAME-file recognition the file-id compare gives, which a string prefix cannot.
+      check("member(file-id): a hard link opens as the same file", verdict(hardlink, installDir) == TargetMembership::Target);
+      DeleteFileW(hardlink.c_str());
     }
 
-    // (b) a directory junction into installDir resolves to Inside.
+    // A junction into installDir: the payload reached through it is the same file -> Target.
     const std::wstring link = base + L"\\junc";
-    bool madeJunction = false;
     if (CreateDirectoryW(link.c_str(), nullptr)) {
       HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                              FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+      bool made = false;
       if (h != INVALID_HANDLE_VALUE) {
         const std::wstring subst = L"\\??\\" + installDir;
         const size_t substBytes = subst.size() * sizeof(wchar_t);
-        const size_t pathBuf = substBytes + sizeof(wchar_t) * 2;  // subst\0 + empty print\0
+        const size_t pathBuf = substBytes + sizeof(wchar_t) * 2;
 #pragma pack(push, 1)
-        struct MountPoint {
-          DWORD tag; WORD len; WORD res; WORD soff; WORD slen; WORD poff; WORD plen; WCHAR buf[1];
-        };
+        struct MountPoint { DWORD tag; WORD len; WORD res; WORD soff; WORD slen; WORD poff; WORD plen; WCHAR buf[1]; };
 #pragma pack(pop)
         std::vector<uint8_t> raw(offsetof(MountPoint, buf) + pathBuf, 0);
         auto* rp = reinterpret_cast<MountPoint*>(raw.data());
         rp->tag = IO_REPARSE_TAG_MOUNT_POINT;
         rp->len = static_cast<WORD>(8 + pathBuf);
-        rp->soff = 0;
         rp->slen = static_cast<WORD>(substBytes);
         rp->poff = static_cast<WORD>(substBytes + sizeof(wchar_t));
-        rp->plen = 0;
         std::memcpy(rp->buf, subst.c_str(), substBytes + sizeof(wchar_t));
         DWORD ret = 0;
-        madeJunction = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, raw.data(),
-                                       static_cast<DWORD>(raw.size()), nullptr, 0, &ret, nullptr) != FALSE;
+        made = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, raw.data(), static_cast<DWORD>(raw.size()),
+                               nullptr, 0, &ret, nullptr) != FALSE;
         CloseHandle(h);
       }
-    }
-    if (madeJunction) {
-      const std::wstring viaJunction = link + L"\\GNLinkClipHelper.exe";
-      check("membership(live): an image reached through a junction into installDir is Inside",
-            classify_install_membership(normalize_identity_path(viaJunction),
-                                        normalize_identity_path(installDir)) == InstallMembership::Inside);
+      if (made)
+        check("member(file-id): the payload reached through a junction -> Target",
+              verdict(link + L"\\GNLinkHost.exe", installDir) == TargetMembership::Target);
+      else
+        std::printf("note  member(file-id): could not create a junction; case not run\n");
       RemoveDirectoryW(link.c_str());
-    } else {
-      std::printf("note  membership(live): could not create a junction on this volume; case not run\n");
     }
 
-    // (c) an image genuinely outside installDir is Outside (the incident case).
-    check("membership(live): NEGATIVE a same-named image outside installDir is Outside",
-          classify_install_membership(normalize_identity_path(outsideExe),
-                                      normalize_identity_path(installDir)) == InstallMembership::Outside);
+    // --- real processes A (payload) / B (outside) / C (backup) through the new enumerate overload ---
+    auto spawn = [&](const std::wstring& exe, const std::wstring& evName, PROCESS_INFORMATION* pi) {
+      std::wstring cmd = L"\"" + exe + L"\" --fixture-child " + evName;
+      std::vector<wchar_t> mut(cmd.begin(), cmd.end());
+      mut.push_back(L'\0');
+      STARTUPINFOW si{};
+      si.cb = sizeof(si);
+      return CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                            nullptr, &si, pi) != FALSE;
+    };
+    const std::wstring evA = L"gnlink_mem_A_" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring evB = L"gnlink_mem_B_" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring evC = L"gnlink_mem_C_" + std::to_wstring(GetCurrentProcessId());
+    HANDLE hA = CreateEventW(nullptr, TRUE, FALSE, evA.c_str());
+    HANDLE hB = CreateEventW(nullptr, TRUE, FALSE, evB.c_str());
+    HANDLE hC = CreateEventW(nullptr, TRUE, FALSE, evC.c_str());
+    PROCESS_INFORMATION piA{}, piB{}, piC{};
+    const bool sA = spawn(payload, evA, &piA), sB = spawn(outsideExe, evB, &piB), sC = spawn(backupExe, evC, &piC);
+    check("member(proc): A (payload), B (outside), C (backup) all started", sA && sB && sC);
+    if (sA && sB && sC) {
+      Sleep(400);  // let them reach their wait
+      auto pidIn = [](const std::vector<remote60::native_poc::update::ProcessTarget>& v, DWORD pid) {
+        for (const auto& t : v) if (t.pid == pid) return true;
+        return false;
+      };
+      const auto filtered =
+          remote60::native_poc::update::enumerate_product_processes({L"GNLinkHost.exe"}, installDir);
+      const auto unfiltered =
+          remote60::native_poc::update::enumerate_product_processes({L"GNLinkHost.exe"});
+      check("member(proc): A (the payload) IS a target after filtering", pidIn(filtered, piA.dwProcessId));
+      check("member(proc): NEGATIVE B (outside same name) is DROPPED (0 stop/wait)", !pidIn(filtered, piB.dwProcessId));
+      check("member(proc): NEGATIVE C (non-payload backup copy) is DROPPED", !pidIn(filtered, piC.dwProcessId));
+      // Filter-removed control: WITHOUT installDir all three are present -- the filter is what drops B/C.
+      check("member(proc): control -- without installDir, A, B and C are ALL enumerated",
+            pidIn(unfiltered, piA.dwProcessId) && pidIn(unfiltered, piB.dwProcessId) &&
+                pidIn(unfiltered, piC.dwProcessId));
+      // A survived as a confirmed target (membershipConfirmed true).
+      for (const auto& t : filtered)
+        if (t.pid == piA.dwProcessId)
+          check("member(proc): A is membership-confirmed (not a refuse-blocker)", t.membershipConfirmed);
+    }
+    // Release the children (by event), then make sure none is left (by handle, never by name).
+    if (hA) SetEvent(hA);
+    if (hB) SetEvent(hB);
+    if (hC) SetEvent(hC);
+    for (PROCESS_INFORMATION* pi : {&piA, &piB, &piC}) {
+      if (pi->hProcess) {
+        if (WaitForSingleObject(pi->hProcess, 3000) == WAIT_TIMEOUT) TerminateProcess(pi->hProcess, 9);
+        CloseHandle(pi->hProcess);
+      }
+      if (pi->hThread) CloseHandle(pi->hThread);
+    }
+    if (hA) CloseHandle(hA);
+    if (hB) CloseHandle(hB);
+    if (hC) CloseHandle(hC);
 
-    DeleteFileW(insideExe.c_str());
+    DeleteFileW(payload.c_str());
     DeleteFileW(outsideExe.c_str());
+    DeleteFileW(backupExe.c_str());
+    RemoveDirectoryW(backupDir.c_str());
     RemoveDirectoryW(installDir.c_str());
     RemoveDirectoryW(outsideDir.c_str());
+    RemoveDirectoryW(emptyInstall.c_str());
     RemoveDirectoryW(base.c_str());
   }
 

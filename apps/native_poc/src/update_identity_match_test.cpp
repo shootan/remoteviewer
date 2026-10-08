@@ -236,37 +236,33 @@ int main(int argc, char** argv) {
               open_failure_name(OpenFailure::Unknown));
   }
 
-  // install-membership (updater-helper-lifecycle (1)): a same-named process is a target only when its
-  // image lives under installDir. Pure over already-normalized paths; the Win32 normalization that
-  // resolves 8.3/junction/case is exercised separately in update_stop_process_test.
+  // target membership (updater-helper-lifecycle r2 M1/M2): a same-named process is a target only when
+  // its running image opens to the SAME FILE as this installation's payload. Pure over the gathered
+  // facts; the Win32 file-identity gather (resolving junction/8.3/case/hardlink) is exercised in
+  // update_stop_process_test.
   {
-    const std::wstring dir = L"C:\\Program Files\\GNLink";
-    // 설치 내 A: an image beneath installDir.
-    check("inside: an image under installDir is a target",
-          classify_install_membership(L"C:\\Program Files\\GNLink\\GNLinkClipHelper.exe", dir) ==
-              InstallMembership::Inside);
-    // 설치 밖 B: the incident -- a same-named process in a build/test tree.
-    check("NEGATIVE outside: a same-named image elsewhere is NOT a target",
-          classify_install_membership(
-              L"D:\\remote\\worktrees\\feat\\build\\GNLinkClipHelper.exe", dir) ==
-              InstallMembership::Outside);
-    // Case-insensitive: Windows paths compare without case.
-    check("inside: case-insensitive match",
-          classify_install_membership(L"c:\\program files\\gnlink\\GNLinkHost.exe", dir) ==
-              InstallMembership::Inside);
-    // Boundary: a sibling directory sharing a prefix must NOT be read as inside.
-    check("NEGATIVE boundary: a prefix-sharing sibling dir is outside",
-          classify_install_membership(L"C:\\Program Files\\GNLinkOther\\GNLinkHost.exe", dir) ==
-              InstallMembership::Outside);
-    // Unknown: an image path that could not be read is never asserted either way.
-    check("unknown: an empty image path -> Unknown (conservative, never dropped)",
-          classify_install_membership(L"", dir) == InstallMembership::Unknown);
-    check("unknown: an empty installDir -> Unknown (no filtering)",
-          classify_install_membership(L"C:\\x\\GNLinkHost.exe", L"") == InstallMembership::Unknown);
-    // A trailing separator on installDir must not change the verdict.
-    check("inside: trailing separator on installDir is ignored",
-          classify_install_membership(L"C:\\Program Files\\GNLink\\GNLinkHost.exe",
-                                      L"C:\\Program Files\\GNLink\\") == InstallMembership::Inside);
+    // Both files opened and are the same file -> a real target.
+    check("target: same file as the payload -> Target",
+          classify_target_membership(TargetMatchFacts{/*image*/ true, /*target*/ true, /*same*/ true}) ==
+              TargetMembership::Target);
+    // Both opened, different files -> NotTarget (external, or a non-payload copy under installDir).
+    check("NEGATIVE not-target: a different file -> NotTarget",
+          classify_target_membership(TargetMatchFacts{true, true, false}) == TargetMembership::NotTarget);
+    // M1: the running image could not be opened -> never asserted external or internal, Unknown.
+    check("unknown: the running image could not be opened -> Unknown (M1)",
+          classify_target_membership(TargetMatchFacts{false, true, false}) == TargetMembership::Unknown);
+    // M1: the installed payload could not be opened to compare -> Unknown, not Outside.
+    check("unknown: the payload file could not be opened -> Unknown (M1)",
+          classify_target_membership(TargetMatchFacts{true, false, false}) == TargetMembership::Unknown);
+    check("unknown: neither opened -> Unknown",
+          classify_target_membership(TargetMatchFacts{false, false, false}) == TargetMembership::Unknown);
+    // sameFile can never be true unless both opened (the Win32 layer guarantees it); the verdict is
+    // Target only on both-opened-and-same.
+    check("the three names are distinct",
+          std::string(target_membership_name(TargetMembership::Target)) !=
+                  target_membership_name(TargetMembership::NotTarget) &&
+              std::string(target_membership_name(TargetMembership::Unknown)) !=
+                  target_membership_name(TargetMembership::Target));
   }
 
   // The table is only worth what its anchors are worth, so both ends are tied to the real API:

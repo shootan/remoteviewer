@@ -69,6 +69,20 @@ struct ProcessTarget {
    */
   bool identityKnown = true;
 
+  /**
+   * False when this enumerated process matched a payload image NAME but could not be CONFIRMED to be
+   * this installation's exact payload file (updater-helper-lifecycle r2 M1/M2).
+   *
+   * Membership is decided by FILE IDENTITY against installDir\<name>, not by a directory-prefix
+   * string: a copy under installDir\backup, a same-named process elsewhere, and an alias of the real
+   * payload are all told apart by whether they open to the SAME file. When the comparison cannot be
+   * made (the running image or the installed payload could not be opened), membership is Unknown and
+   * this is false -- and a false value, like identityKnown, makes PrepareForSwap REFUSE the swap and
+   * name the pid, rather than dropping the process as external or asking it to stop. Only a process
+   * confirmed NOT to be the payload file is dropped from the target list before this ever matters.
+   */
+  bool membershipConfirmed = true;
+
   // Identity only. parentPid and hasWindow describe the moment, not the process: the same process
   // is the same process whether or not it had opened a window yet.
   bool operator==(const ProcessTarget& other) const {
@@ -128,30 +142,37 @@ enum class IdentityFailure {
 bool capture_process_identity(uint32_t pid, ProcessTarget* out, IdentityFailure* why = nullptr);
 
 /**
- * Whether a same-named process belongs to the installation this updater is replacing.
+ * Whether a same-named process is THIS installation's exact payload file.
  *
- * A name match is not membership: a build tree, a test scratch dir, or another install can hold a
- * process of the same image name, and asking it to close (or waiting on it) blocks an update that
- * has nothing to do with it. This is the incident of 2026-10-08, where a test-leftover
- * GNLinkClipHelper.exe outside installDir abandoned the 0.2.152 update.
+ * A name match is not membership: a build tree, a test scratch dir, another install, or a copy under
+ * installDir\backup can all hold a process of the same image name, and asking it to close (or waiting
+ * on it) blocks an update that has nothing to do with it (incident 2026-10-08). Membership is decided
+ * by FILE IDENTITY -- the running image opened to the SAME file as installDir\<name> -- not by a
+ * directory-prefix string, so an alias/junction/8.3/hardlink of the real payload is Target while a
+ * different file (even one under installDir) is NotTarget.
  */
-enum class InstallMembership {
-  Inside,   // the image lives under installDir -- a real target
-  Outside,  // the image lives elsewhere -- confidently NOT ours, never stopped or waited on
-  Unknown,  // the image path could not be established -- never asserted either way (conservative)
+enum class TargetMembership {
+  Target,     // confirmed the same file as the payload at installDir\<name> -- a real target
+  NotTarget,  // confirmed a DIFFERENT file -- confidently not ours, dropped (never stopped/waited)
+  Unknown,    // could not be confirmed either way -- never dropped, never asked: the swap refuses on it
+};
+
+/** Facts the Win32 layer gathers comparing one running image to the installed payload file. */
+struct TargetMatchFacts {
+  bool imageOpened = false;   // the running process's image file could be opened + read
+  bool targetOpened = false;  // installDir\<name>, the payload file, could be opened + read
+  bool sameFile = false;      // the two handles report the same volume + file index
 };
 
 /**
- * Pure membership test. Inputs must ALREADY be normalized (long form, resolved aliases) -- the Win32
- * normalization lives in update_process_targets.cpp. Empty imagePath -> Unknown; empty installDir ->
- * Unknown (cannot judge). Otherwise Inside iff imagePath is installDir itself or a path beneath it,
- * on a real separator boundary, compared case-insensitively.
+ * Pure membership verdict from the gathered facts. Target iff BOTH files opened and are the same
+ * file; NotTarget iff both opened and differ; Unknown if either could not be opened (so a failure to
+ * read the running image OR the installed payload never turns into a confident Inside/Outside).
  */
-InstallMembership classify_install_membership(const std::wstring& normalizedImagePath,
-                                              const std::wstring& normalizedInstallDir);
+TargetMembership classify_target_membership(const TargetMatchFacts& facts);
 
 /** Name for logs/tests. */
-const char* install_membership_name(InstallMembership m);
+const char* target_membership_name(TargetMembership m);
 
 /**
  * True when the process behind `handle` is still the one `target` described.

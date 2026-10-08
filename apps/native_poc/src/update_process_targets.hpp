@@ -30,18 +30,22 @@ namespace remote60::native_poc::update {
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames);
 
 /**
- * Same, but drops every match that CONFIDENTLY lives outside `installDir` (a build tree, a test
- * scratch dir, another install) -- those are not this installation's processes and must never be
- * asked to close or waited on. A match whose path cannot be established is KEPT (conservative: the
- * swap still refuses on it, naming the pid/path, rather than proceeding over an unknown). `installDir`
- * empty means no filtering. Paths are normalized (long form, resolved junction/symlink/8.3/case)
- * before comparison. This is the install-membership check the incident of 2026-10-08 needed.
+ * Same, but each match is classified against this installation's exact payload file by FILE IDENTITY
+ * (installDir\<name>, compared by volume + file index -- not by a directory-prefix string):
+ *   - a CONFIRMED-different file (another install, a build/test tree, a copy under installDir\backup)
+ *     is DROPPED -- never asked to close or waited on;
+ *   - the real payload reached through an alias/junction/8.3/hardlink is KEPT (same file);
+ *   - a match that could NOT be confirmed either way (the running image or the installed payload could
+ *     not be opened) is KEPT with membershipConfirmed=false, so PrepareForSwap refuses and names it
+ *     rather than dropping it as external or asking it to stop.
+ * `installDir` empty means no filtering. This is the install-membership check the 2026-10-08 incident
+ * needed, at the precision the r2 review required.
  */
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames,
                                                        const std::wstring& installDir);
 
-/** Normalize a path for membership comparison: canonical long form, resolved aliases. Exposed for tests. */
-std::wstring normalize_identity_path(const std::wstring& path);
+/** Gather file-identity facts comparing a running image to installDir\<its leaf name>. For tests. */
+TargetMatchFacts gather_target_match_facts(const std::wstring& imagePath, const std::wstring& installDir);
 
 /**
  * Asks one process to close: WM_CLOSE to its top-level windows, then a console CTRL event for the

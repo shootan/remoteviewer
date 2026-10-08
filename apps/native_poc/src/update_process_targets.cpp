@@ -175,51 +175,71 @@ std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::ws
   return targets;
 }
 
-std::wstring normalize_identity_path(const std::wstring& path) {
-  if (path.empty()) return {};
-  std::wstring result;
-  // The canonical final path resolves junctions, symlinks, 8.3 short names and case. Opening with
-  // no access + BACKUP_SEMANTICS works for any file the updater can at least name.
+namespace {
+// The file a handle refers to, independent of the path used to reach it: a volume + a file index.
+// Two paths (an alias, a junction, an 8.3 name, a hard link) that open to this same pair are the same
+// file; two that differ are different files even under the same directory.
+struct FileId {
+  DWORD volume = 0;
+  DWORD indexHigh = 0;
+  DWORD indexLow = 0;
+  bool read = false;
+};
+
+FileId file_id_of(const std::wstring& path) {
+  FileId id;
+  if (path.empty()) return id;
+  // Follow reparse points (no OPEN_REPARSE_POINT) so a junction/symlink resolves to its target file;
+  // no access requested, shared every way, so a running image in use still opens.
   HANDLE h = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-  if (h != INVALID_HANDLE_VALUE) {
-    wchar_t buf[MAX_PATH * 2];
-    const DWORD n = GetFinalPathNameByHandleW(h, buf, static_cast<DWORD>(std::size(buf)),
-                                              FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (n > 0 && n < std::size(buf)) result.assign(buf, n);
-    CloseHandle(h);
+  if (h == INVALID_HANDLE_VALUE) return id;
+  BY_HANDLE_FILE_INFORMATION bi{};
+  if (GetFileInformationByHandle(h, &bi)) {
+    id.volume = bi.dwVolumeSerialNumber;
+    id.indexHigh = bi.nFileIndexHigh;
+    id.indexLow = bi.nFileIndexLow;
+    id.read = true;
   }
-  if (result.empty()) {
-    // Could not open (gone, or no access): best-effort string normalization (full path + long form).
-    wchar_t full[MAX_PATH * 2];
-    const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
-    if (n > 0 && n < std::size(full)) {
-      wchar_t lng[MAX_PATH * 2];
-      const DWORD m = GetLongPathNameW(full, lng, static_cast<DWORD>(std::size(lng)));
-      result = (m > 0 && m < std::size(lng)) ? std::wstring(lng, m) : std::wstring(full, n);
-    } else {
-      result = path;
-    }
-  }
-  if (result.rfind(L"\\\\?\\", 0) == 0) result.erase(0, 4);  // same form on both sides of the compare
-  return result;
+  CloseHandle(h);
+  return id;
+}
+
+std::wstring leaf_of(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+}  // namespace
+
+TargetMatchFacts gather_target_match_facts(const std::wstring& imagePath, const std::wstring& installDir) {
+  TargetMatchFacts f;
+  if (imagePath.empty() || installDir.empty()) return f;  // cannot form the comparison -> Unknown
+  std::wstring dir = installDir;
+  while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+  const std::wstring targetPath = dir + L"\\" + leaf_of(imagePath);  // this installation's payload file
+  const FileId image = file_id_of(imagePath);
+  const FileId target = file_id_of(targetPath);
+  f.imageOpened = image.read;
+  f.targetOpened = target.read;
+  f.sameFile = image.read && target.read && image.volume == target.volume &&
+               image.indexHigh == target.indexHigh && image.indexLow == target.indexLow;
+  return f;
 }
 
 std::vector<ProcessTarget> enumerate_product_processes(const std::vector<std::wstring>& imageNames,
                                                        const std::wstring& installDir) {
   std::vector<ProcessTarget> all = enumerate_product_processes(imageNames);
   if (installDir.empty()) return all;  // no install dir -> no membership filtering
-  const std::wstring normDir = normalize_identity_path(installDir);
   std::vector<ProcessTarget> kept;
   kept.reserve(all.size());
   for (ProcessTarget& target : all) {
-    // Unknown identity (path could not be read) is NEVER asserted external -- carried forward so the
-    // swap refuses on it, naming the pid. Only a CONFIDENTLY-outside path is dropped.
+    // A process whose pid identity could not be read is already carried as identityKnown=false (the
+    // swap refuses on it); membership is only asked of the ones we DID identify and have a path for.
     if (target.identityKnown && !target.imagePath.empty()) {
-      const std::wstring normImg = normalize_identity_path(target.imagePath);
-      const InstallMembership m = classify_install_membership(normImg.empty() ? target.imagePath : normImg,
-                                                              normDir.empty() ? installDir : normDir);
-      if (m == InstallMembership::Outside) continue;  // a same-named process that is not ours
+      const TargetMembership m =
+          classify_target_membership(gather_target_match_facts(target.imagePath, installDir));
+      if (m == TargetMembership::NotTarget) continue;             // a different file -> not ours, drop
+      if (m == TargetMembership::Unknown) target.membershipConfirmed = false;  // refuse + name, do not stop
     }
     kept.push_back(std::move(target));
   }

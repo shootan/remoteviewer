@@ -674,6 +674,17 @@ bool WindowsUpdateEffects::PrepareForSwap() {
       if (config_.trace) config_.trace(lastError_);
       return false;
     }
+    if (!target.membershipConfirmed) {
+      // Matched a payload name but could not be CONFIRMED to be this installation's exact payload file
+      // (M1/M2): the running image or the installed payload could not be opened to compare file
+      // identity. Never dropped as external, never asked to stop -- the swap refuses and names it, so
+      // the user is told exactly what is blocking, with its path.
+      lastError_ = "cannot confirm pid " + std::to_string(target.pid) + " (" + to_utf8(target.imagePath) +
+                   ") is this installation's payload file -- its file identity could not be verified, "
+                   "so the update will not proceed over it";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
     if (!target.hasWindow) {
       if (owner_of(target) != nullptr) {
         ownedChildPids_.push_back(target.pid);
@@ -805,6 +816,14 @@ bool WindowsUpdateEffects::Quiesce() {
                    to_utf8(target.imagePath) +
                    ") -- it is running and this updater cannot open it, so whether it still holds "
                    "the files this update replaces is unknown";
+      if (config_.trace) config_.trace(lastError_);
+      return false;
+    }
+    if (!target.membershipConfirmed) {
+      // Same refusal as PrepareForSwap, for the fallback-enumeration path (M1/M2): a name match whose
+      // payload file identity could not be verified is never waited-over.
+      lastError_ = "cannot confirm pid " + std::to_string(target.pid) + " (" + to_utf8(target.imagePath) +
+                   ") is this installation's payload file -- its file identity could not be verified";
       if (config_.trace) config_.trace(lastError_);
       return false;
     }
