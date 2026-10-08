@@ -589,6 +589,15 @@ if ((hdr.flags & 1u) != 0) {
             << " bitrate=" << encoder.activeBitrate << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
   encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
+  // stutter-keyframe r3 B: feed the clamp detector ONLY on an encoder-self IDR (no host reason =
+  // "encoder_gop"), with the real inputs-since-last-key as the measured interval. A clamp first-latch
+  // logs once; the response (SW transition / admission) is decided separately.
+  if (encoder.keyReasons == kHostKeyReasonNone) {
+    if (encoder.clampDetector.OnEncoderSelfKey(encoder.realInputsSinceKey, encoder.activeKeyint)) {
+      std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
+                << encoder.realInputsSinceKey << " policyKeyint=" << encoder.activeKeyint << "\n";
+    }
+  }
   encoder.keyReasons = kHostKeyReasonNone;
   encoder.realInputsSinceKey = 0;  // r4: any key restarts the period
 }

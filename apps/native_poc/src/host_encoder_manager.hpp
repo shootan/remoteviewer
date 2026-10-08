@@ -15,6 +15,7 @@
 
 #include "host_capture_session.hpp"
 #include "host_frame_gate.hpp"
+#include "host_gop_clamp_detector.hpp"
 #include "mf_h264_codec.hpp"
 #include "host_epoch_gate.hpp"
 #include "host_rate_governor.hpp"
@@ -320,6 +321,10 @@ struct EncoderState {
   uint64_t forceKeyRejectedCount = 0;
   uint64_t forceKeyRetryAtUs = 0;      // do not re-attempt a forced key before this qpc (back-off)
   uint32_t forceKeyRejectStreak = 0;   // consecutive rejections; triggers a repair at the threshold
+  // stutter-keyframe r3 B: runtime GOP-clamp detection from the real NAL cadence (encoder-self IDR
+  // interval << policy). Fed at each encoder_gop key AU; the response (SW transition / admission) is
+  // decided separately. Reset on a fresh encoder init.
+  GopClampDetector clampDetector;
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;
