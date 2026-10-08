@@ -243,6 +243,56 @@ int main() {
   }
 
   {
+    // r18 R17-1: neither the watch nor the control path looks; only the credential's own target lookup does
+    // (ProductCredTargetWith, the product's target with its desktop name and logon-UI field stood in). Its
+    // first look finds the screen saver, the next one Winlogon with the password field. The first look is the
+    // worker's permanent leave: the pending credential is never typed.
+    std::printf("\n--- the credential's target lookup saw another desktop: the pending credential is not typed ---\n");
+    namespace pl = remote60::native_poc::prelogin;
+    pl::PreloginLeftLatch().store(false);
+    std::vector<std::wstring> leaves;
+    pl::PreloginLeaveHandler() = [&leaves](const std::wstring& n) { leaves.push_back(n); };
+    std::atomic<int> looks{0};
+    auto desktop = [&looks]() -> std::wstring { return looks.fetch_add(1) == 0 ? L"Screen-saver" : L"Winlogon"; };
+    Seams seams;
+    PreloginCredReceiver w(seams.inject(), pl::ProductCredTargetWith(desktop, [] { return uint64_t{42}; }, L"Winlogon"),
+                           seams.environment(), 0x1234, 1500);
+    w.stillServing = [] { return !pl::PreloginLeftLatch().load(); };
+    const auto c = w.Challenge(challenge_req(51), cookie);
+    w.Sealed(seal(c, secret, true), cookie);
+    ControlUnlockStatusResultMessage res{};
+    const bool done = wait_result(w, 51, &res, 4000);
+    check("r18 R17-1: the target lookup saw the screen saver, then Winlogon with the field: the worker LEFT (once) "
+          "and the pending credential was NOT typed",
+          done && res.stage != static_cast<uint16_t>(UnlockStage::Injected) && seams.count() == 0 && leaves.size() == 1 &&
+              leaves[0] == L"Screen-saver",
+          [&] { return std::string(stage_word(res.stage)) + ", " + std::to_string(leaves.size()) + " leaves, " +
+                       std::to_string(seams.count()) + " typed"; });
+    pl::PreloginLeftLatch().store(false);
+    leaves.clear();
+    std::atomic<int> waits{0};
+    auto field = [&waits]() -> uint64_t { return waits.fetch_add(1) < 3 ? 0 : 42; };  // the field appears later
+    Seams s2;
+    PreloginCredReceiver w2(s2.inject(), pl::ProductCredTargetWith([] { return std::wstring(L"Winlogon"); }, field, L"Winlogon"),
+                            s2.environment(), 0x1234, 1500);
+    w2.stillServing = [] { return !pl::PreloginLeftLatch().load(); };
+    next_challenge_window();
+    const auto c2 = w2.Challenge(challenge_req(52), cookie);
+    w2.Sealed(seal(c2, secret, true), cookie);
+    check("r18 R17-1: control -- on Winlogon with the password field not there YET: the ordinary wait, then typed once, "
+          "no leave",
+          wait_result(w2, 52, &res, 4000) && res.stage == static_cast<uint16_t>(UnlockStage::Injected) && s2.count() == 1 &&
+              leaves.empty() && !pl::PreloginLeftLatch().load(),
+          [&] { return std::string(stage_word(res.stage)); });
+    const auto env = pl::ProductCredEnvironmentWith([] { return std::wstring(L"Screen-saver"); }, L"Winlogon");
+    (void)env();
+    check("r18 R17-1: the environment lookup seeing another desktop is the same leave", pl::PreloginLeftLatch().load() &&
+                                                                                           leaves.size() == 1);
+    pl::PreloginLeftLatch().store(false);
+    pl::PreloginLeaveHandler() = nullptr;
+  }
+
+  {
     std::printf("\n--- an UNLOCK-purpose blob (the lock-screen unlock's sealing) ---\n");
     Seams seams;
     PreloginCredReceiver r(seams.inject(), seams.target(), seams.environment(), 0x1234, 600);

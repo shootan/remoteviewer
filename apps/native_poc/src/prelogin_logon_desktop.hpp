@@ -66,9 +66,17 @@ inline std::function<void(const std::wstring&)>& PreloginLeaveHandler() {
   static std::function<void(const std::wstring&)> handler;
   return handler;
 }
+// r18 R17-1: the desktop this worker serves, for the paths that look at the input desktop without the
+// capture state at hand (the credential receiver's target / environment). Set once at startup in --prelogin
+// (host_startup_config); empty otherwise -- then nothing is latched.
+inline std::wstring& PreloginServedDesktop() {
+  static std::wstring served;
+  return served;
+}
+
 // A prelogin path saw `name` (empty = could not be told: not an observation of another desktop).
 inline void PreloginSawDesktop(const std::wstring& name, const std::wstring& served) {
-  if (name.empty() || _wcsicmp(name.c_str(), served.c_str()) == 0) return;
+  if (served.empty() || name.empty() || _wcsicmp(name.c_str(), served.c_str()) == 0) return;
   if (!PreloginLeftLatch().exchange(true, std::memory_order_acq_rel)) {
     if (PreloginLeaveHandler()) PreloginLeaveHandler()(name);
   }

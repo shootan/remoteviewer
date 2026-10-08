@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
 namespace remote60::native_poc::prelogin {
@@ -279,6 +280,34 @@ uint64_t identity_of(HWND w, DWORD pid) {
 }
 }  // namespace
 
+PreloginCredReceiver::TargetFn ProductCredTargetWith(std::function<std::wstring()> desktopName,
+                                                     std::function<uint64_t()> logonUiPasswordField, std::wstring served) {
+  return [desktopName, logonUiPasswordField, served]() -> uint64_t {
+    const std::wstring now = desktopName();
+    PreloginSawDesktop(now, served);  // r18 R17-1: another desktop seen here is the worker's leave
+    if (now.empty() || _wcsicmp(now.c_str(), served.c_str()) != 0) return 0;
+    return logonUiPasswordField();  // on the served desktop: 0 while the password field is not there yet
+  };
+}
+
+PreloginCredReceiver::EnvironmentFn ProductCredEnvironmentWith(std::function<std::wstring()> desktopName, std::wstring served) {
+  return [desktopName, served]() -> uint64_t {
+    uint64_t h = 1469598103934665603ull;
+    const DWORD console = WTSGetActiveConsoleSessionId();
+    for (int i = 0; i < 4; ++i) {
+      h ^= (console >> (8 * i)) & 0xFF;
+      h *= 1099511628211ull;
+    }
+    const std::wstring now = desktopName();
+    PreloginSawDesktop(now, served);  // r18 R17-1
+    for (wchar_t c : now) {
+      h ^= static_cast<uint16_t>(c);
+      h *= 1099511628211ull;
+    }
+    return h;
+  };
+}
+
 PreloginCredReceiver::TargetFn ProductCredTarget() {
 #ifdef REMOTE60_STREAM_TEST_SEAM
   // TEST BUILD ONLY (GNLinkStreamMigrationTest): the test's own window, by its title.
@@ -287,6 +316,7 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
   const std::wstring title(want, n < 256 ? n : 0);
   return [title]() -> uint64_t {
     if (title.empty()) return 0;
+    PreloginSawDesktop(input_desktop_name(), PreloginServedDesktop());  // r18 R17-1: the same leave
     HWND fg = GetForegroundWindow();
     wchar_t got[256] = {};
     DWORD pid = 0;
@@ -298,10 +328,10 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
   wchar_t sysDir[MAX_PATH] = {};
   const UINT len = GetSystemDirectoryW(sysDir, MAX_PATH);
   const std::wstring logonUi = std::wstring(sysDir, len < MAX_PATH ? len : 0) + L"\\LogonUI.exe";
-  return [logonUi]() -> uint64_t {
-    // The input is on the Winlogon desktop, its foreground window belongs to the system's LogonUI.exe
-    // (that full path, not just a process called so), running as LocalSystem in this worker's session.
-    if (_wcsicmp(input_desktop_name().c_str(), L"Winlogon") != 0) return 0;
+  // The input is on the Winlogon desktop (r18 R17-1: any other desktop seen here is the worker's leave),
+  // its foreground window belongs to the system's LogonUI.exe (that full path, not just a process called so),
+  // running as LocalSystem in this worker's session.
+  return ProductCredTargetWith(input_desktop_name, [logonUi]() -> uint64_t {
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
     if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid == 0) return 0;
@@ -318,24 +348,12 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
     CloseHandle(p);
     // r7 H5: and the focus is in a password field of it -- not the user-name box of the same window.
     return system && focused_password_field_in(pid) ? identity_of(fg, pid) : 0;
-  };
+  }, L"Winlogon");
 #endif
 }
 
 PreloginCredReceiver::EnvironmentFn ProductCredEnvironment() {
-  return []() -> uint64_t {
-    uint64_t h = 1469598103934665603ull;
-    const DWORD console = WTSGetActiveConsoleSessionId();
-    for (int i = 0; i < 4; ++i) {
-      h ^= (console >> (8 * i)) & 0xFF;
-      h *= 1099511628211ull;
-    }
-    for (wchar_t c : input_desktop_name()) {
-      h ^= static_cast<uint16_t>(c);
-      h *= 1099511628211ull;
-    }
-    return h;
-  };
+  return ProductCredEnvironmentWith(input_desktop_name, PreloginServedDesktop());
 }
 
 uint32_t ProductCredTargetWaitMs() {

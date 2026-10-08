@@ -120,6 +120,14 @@ class PreloginCredReceiver {
 PreloginCredReceiver::InjectFn ProductCredInject();
 PreloginCredReceiver::TargetFn ProductCredTarget();
 PreloginCredReceiver::EnvironmentFn ProductCredEnvironment();
+// r18 R17-1: the same two with what they look at named -- the input desktop's name, the logon UI's password
+// field (identity, 0 = none) and the desktop served. Every look at the input desktop that finds a desktop
+// OTHER than the served one is the worker's permanent leave (PreloginSawDesktop: the latch + exit 14), not
+// just "no target now"; the served desktop with no password field yet is the ordinary wait. The product
+// functions above are these with the real sources.
+PreloginCredReceiver::TargetFn ProductCredTargetWith(std::function<std::wstring()> desktopName,
+                                                     std::function<uint64_t()> logonUiPasswordField, std::wstring served);
+PreloginCredReceiver::EnvironmentFn ProductCredEnvironmentWith(std::function<std::wstring()> desktopName, std::wstring served);
 uint64_t ProductCredHostId();
 // How long the worker waits for the logon UI (3 s; a test build may set GNLINK_STREAM_TEST_CRED_WAIT_MS).
 uint32_t ProductCredTargetWaitMs();

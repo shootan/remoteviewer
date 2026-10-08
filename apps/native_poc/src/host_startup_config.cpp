@@ -253,6 +253,7 @@ int startup_configure_from_env(HostContext& hx) {
       capture.preloginServingDesktop = std::wstring(v, v + std::strlen(v));
     }
 #endif
+    remote60::native_poc::prelogin::PreloginServedDesktop() = capture.preloginServingDesktop;  // r18 R17-1
   }
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
