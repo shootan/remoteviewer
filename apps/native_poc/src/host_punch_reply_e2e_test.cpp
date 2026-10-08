@@ -1219,16 +1219,20 @@ int wmain(int argc, wchar_t** argv) {
     check("[prelogin] a real GNLinkStream starts with --prelogin and directory arguments",
           StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(),
                     "prelogin", /*prelogin=*/true));
-    check("[prelogin] r6 V5: it says the directory arguments are ignored",
-          host.WaitFor("directory arguments/environment ignored", 15000), host.tail());
-    Sleep(6000);  // long enough for a register that was going to happen
-    check("[prelogin] r6 V5: ...and it did NOT register with them",
-          dir.Count("/api/host/register") == 0, "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    // r14 (Codex 3c8b350): the SHIPPED worker here is judged by what it must do on a user's desktop -- leave
+    // at once (exit 14), serve nothing, register nothing. Whether it got as far as the line that says the
+    // directory arguments are ignored is a race with that correct exit (the desktop watch starts right after
+    // the configuration), so it is not asked here; that the arguments are ignored is
+    // viewer_prelogin_login_e2e_test's r6 V5 case, on a worker that serves and so reaches that step.
     // r9 W2 on the SHIPPED binary: this test runs in a user's session, whose input desktop is "Default" --
     // exactly what a SYSTEM worker left over after a logon would see. It serves the logon desktop only, so
     // it has left (exit 14) without ever serving.
     DWORD rc = STILL_ACTIVE;
-    const bool ended = WaitForSingleObject(host.pi.hProcess, 5000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+    const bool ended = WaitForSingleObject(host.pi.hProcess, 15000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+    Sleep(2000);  // a register already on its way would have arrived (the process is gone: nothing new)
+    check("[prelogin] r6 V5: it did NOT register with the directory arguments it was given",
+          dir.Count("/api/host/register") == 0 && dir.Count("/api/host/heartbeat") == 0,
+          "registrations: " + std::to_string(dir.Count("/api/host/register")));
     check("[prelogin] r9 W2: the shipped worker, on a user's desktop, left at once (exit 14) and never served it",
           ended && rc == 14 && host.log().find("no longer the logon desktop") != std::string::npos &&
               host.log().find("serving the logon desktop") == std::string::npos,

@@ -814,22 +814,31 @@ ServerCheck HostServiceServerCheck() {
 #endif
 }
 
+uint32_t DelegationWin32(const AdminReply& reply) {
+  if (reply.status == AdminStatus::Untrusted) return ERROR_ACCESS_DENIED;
+  if (reply.status != AdminStatus::Unavailable) return reply.win32;
+  // r14 L4: "not running" only when there is no pipe; a service busy with another request (the pipe stayed
+  // taken for the whole wait), or one that did not answer in time, is said as such.
+  if (reply.win32 == ERROR_PIPE_BUSY || reply.win32 == WAIT_TIMEOUT || reply.win32 == ERROR_SEM_TIMEOUT) return reply.win32;
+  return ERROR_SERVICE_NOT_ACTIVE;
+}
+
 uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32) {
   AdminRequest r;
   r.op = AdminOp::Reboot;
   r.requestId = requestId;
   r.peerKey = peerKey;
   const std::wstring pipe = HostServicePipeName();
-  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck());
+  // r14 L4: at most 3 s for the pipe and 3 s for each of the write and the read -- the control dispatcher
+  // waits on this.
+  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck(), 3000);
   *win32 = 0;
   if (reply.status == AdminStatus::Ok) {
     *win32 = reply.win32;
     return reply.rebootResult <= 3 ? reply.rebootResult : 3;  // a Sas-range value is no RebootResult
   }
   if (reply.status == AdminStatus::Refused) return 2;  // the service did not take this host as the host
-  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE
-           : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
-                                                    : reply.win32;
+  *win32 = DelegationWin32(reply);
   return 3;
 }
 
@@ -861,7 +870,9 @@ uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired) {
   AdminRequest r;
   r.op = AdminOp::Sas;
   const std::wstring pipe = HostServicePipeName();
-  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck());
+  // r14 L4: at most 3 s for the pipe and 3 s for each of the write and the read -- the control dispatcher
+  // waits on this.
+  const AdminReply reply = SendPreloginAdminRequest(r, 3000, pipe.c_str(), HostServiceServerCheck(), 3000);
   *win32 = 0;
   if (reply.status == AdminStatus::Ok) {
     *win32 = reply.win32;
@@ -869,17 +880,15 @@ uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired) {
     return reply.rebootResult;
   }
   if (reply.status == AdminStatus::Refused) return 3;  // NotAuthorized: the service did not take this host
-  *win32 = reply.status == AdminStatus::Unavailable ? ERROR_SERVICE_NOT_ACTIVE
-           : reply.status == AdminStatus::Untrusted ? ERROR_ACCESS_DENIED
-                                                    : reply.win32;
+  *win32 = DelegationWin32(reply);
   return 4;  // Failed
 }
 
-bool QueryDurablePreloginEnabled() {
+bool QueryDurablePreloginEnabled(const std::function<bool()>& keepRunning) {
   AdminRequest r;
   r.op = AdminOp::Query;
   const std::wstring pipe = HostServicePipeName();
-  const AdminReply reply = SendPreloginAdminRequest(r, 500, pipe.c_str(), HostServiceServerCheck(), 2000);
+  const AdminReply reply = SendPreloginAdminRequest(r, 500, pipe.c_str(), HostServiceServerCheck(), 2000, keepRunning);
   return reply.status == AdminStatus::Ok && reply.enabled;
 }
 

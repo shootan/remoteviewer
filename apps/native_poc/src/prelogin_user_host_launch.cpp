@@ -58,4 +58,19 @@ bool StartUserHostSuspended(HANDLE token, const std::wstring& exe, const std::ve
   return created != FALSE;
 }
 
+bool LaunchUserHost(HANDLE token, const std::wstring& exe, const std::vector<wchar_t>& environment,
+                    const wchar_t* desktop, PROCESS_INFORMATION* pi, DWORD* win32) {
+  if (!StartUserHostSuspended(token, exe, environment, desktop, pi, win32)) return false;
+  if (ResumeThread(pi->hThread) == static_cast<DWORD>(-1)) {
+    if (win32) *win32 = GetLastError();
+    (void)TerminateProcess(pi->hProcess, 0);
+    (void)WaitForSingleObject(pi->hProcess, 1000);
+    CloseHandle(pi->hThread);
+    CloseHandle(pi->hProcess);
+    *pi = PROCESS_INFORMATION{};
+    return false;
+  }
+  return true;
+}
+
 }  // namespace remote60::native_poc::prelogin

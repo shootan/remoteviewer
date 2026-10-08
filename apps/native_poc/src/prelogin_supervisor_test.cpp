@@ -4,6 +4,7 @@
 // keeps the prelogin worker until ready; a console change mid-startup re-targets the handoff to the new
 // generation; unsupported / disabled release the lease).
 
+#include "prelogin_reconcile_pacer.hpp"
 #include "prelogin_supervisor.hpp"
 
 #include <cstdio>
@@ -126,6 +127,53 @@ int main() {
     o = sup.Reconcile(off);
     check(o.state == SupervisorState::Disabled && sup.handoff().owner == LeaseOwner::None,
           "feature off -> Disabled, lease released");
+  }
+
+  std::printf("[r14 H1: the reconcile loop does not spin after a session event; the budget is a span of time]\n");
+  {
+    // The service's loop, on a simulated clock: one session event (a logon / lock / console connect) at the
+    // start, nothing after -- as when no secure input follows. r13 waited on gSessionChangePending, which
+    // only ensure_agent clears: every wait returned at once.
+    uint64_t clockMs = 0;
+    uint32_t generation = 0;
+    int ticks = 0;
+    generation = 1;  // the event
+    uint32_t seen = 0;  // the generation the loop last reconciled (the event is new to it)
+    while (clockMs < 10000 && ticks < 100000) {
+      ++ticks;
+      const uint32_t atTickStart = generation;  // the tick reads it first (and reconciles the change)
+      (void)seen;
+      seen = atTickStart;
+      clockMs += 1;  // the tick's own work
+      WaitReconcileTick(atTickStart, [] { return true; }, [&] { return generation; },
+                        [&](uint32_t ms) { clockMs += ms; });
+    }
+    std::printf("  ticks in 10 s after one session event: %d\n", ticks);
+    check(ticks <= 11, "H1: after a session event the loop reconciles about once a second (no spin)");
+    // A change DURING a wait ends it early (prompt reconcile), once.
+    uint32_t g = 5;
+    int slices = 0;
+    const int slept = WaitReconcileTick(5, [] { return true; }, [&] { return g; }, [&](uint32_t) { if (++slices == 3) g = 6; });
+    check(slept == 3, "H1: an event during the wait ends it at once");
+    check(WaitReconcileTick(6, [] { return true; }, [&] { return g; }, [](uint32_t) {}) == kReconcileSlices,
+          "H1: ...and the next wait is a full period again");
+  }
+  {
+    // The transient budget: 10 ambiguous ticks within milliseconds (session events) are not a Fault; ten
+    // over at least 10 s are.
+    PreloginSupervisor sup;
+    sup.Reconcile(noUser());
+    SupervisorObservation flap = noUser();
+    flap.userToken = UserTokenObservation::QueryTransientError;
+    bool faultEarly = false;
+    for (int i = 0; i < 50; ++i) {
+      flap.nowMs = 1000 + i * 10;  // 50 ticks in half a second
+      if (sup.Reconcile(flap).state == SupervisorState::Fault) faultEarly = true;
+    }
+    check(!faultEarly && sup.handoff().owner == LeaseOwner::PreloginWorker,
+          "H1: 50 ambiguous ticks within 0.5 s: no Fault, the healthy worker kept");
+    flap.nowMs = 1000 + 10000;
+    check(sup.Reconcile(flap).state == SupervisorState::Fault, "H1: ...still ambiguous 10 s later: Fault (bounded)");
   }
 
   if (gFailures != 0) {

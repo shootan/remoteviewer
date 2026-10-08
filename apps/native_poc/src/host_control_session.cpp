@@ -90,15 +90,18 @@ std::mutex gRebootGateMu;
 
 // prelogin-ui r5 (G11): whether the service has pre-login access on, as last asked. Asked in the
 // background every 30 s (never on the pong path, which must not wait on a pipe); false until known.
+// r14 L2: on an owned thread (stoppable_worker.hpp), declared after the value it writes -- so at exit it is
+// stopped (its 30 s wait woken, a query in flight cancelled) and joined before that value goes.
 bool durable_prelogin_enabled() {
   static std::atomic<bool> enabled{false};
+  static remote60::native_poc::StoppableWorker poll;
   static const bool started = [] {
-    std::thread([] {
-      for (;;) {
-        enabled.store(remote60::native_poc::prelogin::QueryDurablePreloginEnabled(), std::memory_order_release);
-        Sleep(30000);
-      }
-    }).detach();
+    poll.Start([](remote60::native_poc::StoppableWorker& w) {
+      const std::function<bool()> keep = [&w] { return !w.Stopping(); };
+      do {
+        enabled.store(remote60::native_poc::prelogin::QueryDurablePreloginEnabled(keep), std::memory_order_release);
+      } while (w.Wait(30000));
+    });
     return true;
   }();
   (void)started;

@@ -727,6 +727,33 @@ int wmain(int argc, wchar_t** argv) {
     check("r6 V7: a machine record naming another server is not used (the worker stays offline)",
           refused && other.log().find("machine credential loaded") == std::string::npos);
     other.Stop();
+    // r6 V5, isolated (r14): a worker given a directory in its environment -- the place a credential could be
+    // slipped in besides the machine record -- reaches the configuration step (it serves this desktop, so it
+    // does not leave first), says the directory is ignored, and never talks to it. Its record names another
+    // server, so it stays offline altogether and touches no part of the run that follows. Same thread, in
+    // order: the "ignored" line is written before "names another server", so waiting for the latter is no race.
+    {
+      FakeDirectory decoy;
+      check("r6 V5: a decoy directory starts", decoy.Start());
+      decoy.Script("/healthz", {Reply{200, "{\"ok\":true}"}});
+      decoy.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-decoy\",\"hostToken\":\"" + std::string(32, 'd') + "\"}"}});
+      decoy.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true}"}});
+      const std::string du = decoy.url();
+      Host ign;
+      const bool ignStarted = start_host(&ign, dir, directory.url(), hostPort, Start::ServiceRecordForAnotherServer, targets.title,
+                                         restricted, L"REMOTE60_DIRECTORY_URL=" + std::wstring(du.begin(), du.end()));
+      const bool reached = ignStarted && wait_until([&] {
+        return ign.log().find("names another server -> staying offline") != std::string::npos;
+      }, 15000);
+      Sleep(3000);  // a register that was going to happen
+      check("r6 V5: a worker given a directory in its environment reaches its configuration and says it is ignored",
+            reached && ign.log().find("directory arguments/environment ignored") != std::string::npos,
+            ign.log().substr(0, 800));
+      check("r6 V5: ...and never talks to that directory (0 register, 0 heartbeat)",
+            decoy.Count("/api/host/register") == 0 && decoy.Count("/api/host/heartbeat") == 0 && decoy.Count("/healthz") == 0,
+            std::to_string(decoy.Count("/api/host/register")) + " registrations");
+      ign.Stop();
+    }
     // r9 W2: a worker whose input desktop is NOT the logon desktop it serves -- what a SYSTEM worker left
     // running after a logon sees: the user's "Default". It must not serve it: it leaves at once (exit 14),
     // never says it is serving, and never registers.

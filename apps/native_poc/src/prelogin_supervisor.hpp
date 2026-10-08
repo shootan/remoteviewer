@@ -25,6 +25,8 @@ struct SupervisorObservation {
   UserTokenObservation userToken = UserTokenObservation::QueryTransientError;
   UserPrivilege privilege = UserPrivilege::PrivilegeQueryError;  // meaningful only when userToken == HasUser
   bool userHostReady = false;   // the user Host for the CURRENT generation reported ready + owns its lease
+  // r14 H1: when this observation was taken (ms, monotonic); 0 = unknown -- the budget is then a count only.
+  uint64_t nowMs = 0;
 };
 
 class PreloginSupervisor {
@@ -35,7 +37,10 @@ class PreloginSupervisor {
     HandoffAction handoff;      // the concrete handoff transition taken this tick (None if steady)
   };
 
-  explicit PreloginSupervisor(uint32_t maxTransientRetries = 10) : maxRetries_(maxTransientRetries) {}
+  // r14 H1: the transient budget is `maxTransientRetries` ambiguous ticks AND at least `minTransientWindowMs`
+  // since the first of them -- a burst of quick ticks (session events) cannot spend it in milliseconds.
+  explicit PreloginSupervisor(uint32_t maxTransientRetries = 10, uint64_t minTransientWindowMs = 10000)
+      : maxRetries_(maxTransientRetries), minWindowMs_(minTransientWindowMs) {}
 
   Outcome Reconcile(const SupervisorObservation& obs) {
     if (obs.consoleChanged) OnConsoleChanged(h_);
@@ -49,8 +54,13 @@ class PreloginSupervisor {
     in.userHostReady = obs.userHostReady;
     in.transientRetries = retries_;
     in.maxTransientRetries = maxRetries_;
+    // r14 H1: not exhausted before the window has passed since the first ambiguous tick.
+    if (retries_ >= maxRetries_ && obs.nowMs != 0 && obs.nowMs - firstTransientMs_ < minWindowMs_ && maxRetries_ > 0) {
+      in.transientRetries = maxRetries_ - 1;
+    }
 
     const SupervisorDecision d = DecideSupervisor(in);
+    if (d.action == SupervisorAction::RetryTransient && retries_ == 0) firstTransientMs_ = obs.nowMs;
     retries_ = (d.action == SupervisorAction::RetryTransient) ? retries_ + 1 : 0;
 
     HandoffAction ha = HandoffAction::None;
@@ -101,6 +111,8 @@ class PreloginSupervisor {
   HandoffState h_;
   uint32_t retries_ = 0;
   uint32_t maxRetries_;
+  uint64_t minWindowMs_;
+  uint64_t firstTransientMs_ = 0;
   SupervisorState lastState_ = SupervisorState::Disabled;
 };
 

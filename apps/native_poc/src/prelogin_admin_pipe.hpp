@@ -301,6 +301,10 @@ ServerCheck HostServiceServerCheck();
 // Item 6: the restart the gate admitted, done by the service. Returns RebootResult; *win32 its error.
 // A service that cannot be reached is Failed (ERROR_SERVICE_NOT_ACTIVE) -- never a local fallback.
 uint8_t DelegateRebootToService(uint32_t requestId, uint64_t peerKey, uint32_t* win32);
+// r14 L4: the win32 a failed delegation reports: ERROR_SERVICE_NOT_ACTIVE only when there is no service pipe;
+// ERROR_PIPE_BUSY when the service stayed busy with another request for the whole wait; WAIT_TIMEOUT when it
+// did not answer in time; ERROR_ACCESS_DENIED for a server that is not the service.
+uint32_t DelegationWin32(const AdminReply& reply);
 // r10: the parent of process `pid` -- only while that process is the one created at `startTime` (a reused
 // pid answers 0). 0 when it cannot be told.
 uint32_t ParentProcessOf(uint32_t pid, uint64_t startTime);
@@ -309,7 +313,7 @@ uint32_t ParentProcessOf(uint32_t pid, uint64_t startTime);
 uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired);
 // r5 G11: whether pre-login access is on (the service's Query), for the logged-in host's Pong 0x8000.
 // False when the service cannot be asked.
-bool QueryDurablePreloginEnabled();
+bool QueryDurablePreloginEnabled(const std::function<bool()>& keepRunning = nullptr);  // r14 L2: cancellable
 // Item 7: tell the service this user Host is registered and serving -- once `readyNow()` says so (the
 // first successful directory heartbeat), polled for up to `waitReadyMs`; then up to `attempts` sends,
 // `delayMs` apart. Bounded both ways; the service keeps prelogin until one lands.

@@ -84,7 +84,6 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_connect.cpp
   src/host_startup_control.cpp
   src/host_startup_graphics.cpp
-  src/prelogin_ready_signal.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
   src/prelogin_admin_pipe.cpp
@@ -238,7 +237,6 @@ add_executable(remote60_secure_input_service
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
-  src/prelogin_ready_signal.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
 )
@@ -2079,6 +2077,14 @@ target_include_directories(remote60_prelogin_sas_test PRIVATE src)
 add_executable(remote60_secure_input_desktop_fence_test src/secure_input_desktop_fence_test.cpp)
 target_include_directories(remote60_secure_input_desktop_fence_test PRIVATE src)
 
+# prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
+add_executable(remote60_secure_input_pipe_server_test
+  src/secure_input_pipe_server_test.cpp
+  src/secure_input_broker.cpp
+)
+target_include_directories(remote60_secure_input_pipe_server_test PRIVATE src)
+target_link_libraries(remote60_secure_input_pipe_server_test PRIVATE advapi32)
+
 # prelogin-ui r11 (U5): the window-list request and the first pong as one state.
 add_executable(remote60_client_host_role_gate_test src/client_host_role_gate_test.cpp)
 target_include_directories(remote60_client_host_role_gate_test PRIVATE src)
@@ -2284,6 +2290,7 @@ endif()
 # functions on a staged copy of this test (environment + nonce + working directory).
 add_executable(remote60_prelogin_user_host_launch_test
   src/prelogin_user_host_launch_test.cpp
+  src/update_job_guard.cpp
   src/prelogin_user_host_launch.cpp
 )
 target_include_directories(remote60_prelogin_user_host_launch_test PRIVATE src)
@@ -2416,13 +2423,6 @@ add_executable(remote60_prelogin_input_inject_e2e_test
 )
 target_include_directories(remote60_prelogin_input_inject_e2e_test PRIVATE src)
 target_link_libraries(remote60_prelogin_input_inject_e2e_test PRIVATE user32)
-
-# prelogin-service r4 item 7: handoff ready-signal primitive.
-add_executable(remote60_prelogin_ready_signal_test
-  src/prelogin_ready_signal_test.cpp
-  src/prelogin_ready_signal.cpp
-)
-target_include_directories(remote60_prelogin_ready_signal_test PRIVATE src)
 
 # prelogin-service r6 G9: child-launch adoption gate (Job-bind required; launch-token re-judgement).
 add_executable(remote60_prelogin_child_launch_test

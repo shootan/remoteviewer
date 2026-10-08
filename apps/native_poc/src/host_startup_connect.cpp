@@ -85,7 +85,6 @@
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
 #include "prelogin_admin_pipe.hpp"
-#include "prelogin_ready_signal.hpp"
 #include "prelogin_ingress_policy.hpp"
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"

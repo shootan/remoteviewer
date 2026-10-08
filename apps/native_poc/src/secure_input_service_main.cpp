@@ -40,8 +40,9 @@
 #include "prelogin_machine_record.hpp"
 #include "prelogin_machine_store.hpp"
 #include "prelogin_admin_pipe.hpp"
+#include "prelogin_reconcile_pacer.hpp"
+#include "secure_input_pipe_server.hpp"
 #include "prelogin_owner_floor.hpp"
-#include "prelogin_ready_signal.hpp"
 #include "prelogin_supervisor.hpp"
 #include "prelogin_worker_launch.hpp"
 
@@ -103,22 +104,25 @@ void diag(const char* format, ...) {
 SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gStatus{};
 std::atomic<bool> gRunning{true};
-std::atomic<HANDLE> gClientPipe{INVALID_HANDLE_VALUE};
+// r14 M1: every instance of the secure-input pipe (listening or serving), so STOP can end them all; and
+// the one agent behind them, shared by the connection threads under this lock.
+remote60::native_poc::PipeConnectionRegistry gSecureInputPipes;
+std::mutex gAgentMu;
 // The session of the process holding the control pipe -- the streaming host. Captured once when
 // the pipe connects, because that is the only moment the requester is identifiable.
 std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 
 // Set by the SCM SESSIONCHANGE handler (the service control-dispatcher thread) and consumed by the
 // agent-owning main thread in ensure_agent. The handler must never touch gAgent itself -- see the
-// handler for why. Signalling through atomics keeps gAgent single-owner. (Codex review #363.)
+// handler for why. Signalling through atomics keeps gAgent off the SCM thread (Codex review #363); r14 M1:
+// the connection threads that own it take gAgentMu.
 std::atomic<bool> gSessionChangePending{false};
 std::atomic<uint32_t> gPendingSessionEvent{0};
 std::atomic<uint32_t> gPendingSessionId{0};
-// r11 U2: bumped on every console connect / disconnect (the console's attachment changed), and the value
-// when the current requester connected. A pre-login message is delivered only within the attachment its
+// r11 U2: bumped on every console connect / disconnect (the console's attachment changed); each connection
+// keeps the value it connected at (r14 M1). A pre-login message is delivered only within the attachment its
 // worker connected in (secure_input_desktop_fence.hpp LogonOnlyTargetSession).
 std::atomic<uint32_t> gConsoleGeneration{0};
-std::atomic<uint32_t> gConsoleGenerationAtConnect{0};
 // Bumped on every session-topology change. The unlock path snapshots it at challenge issue and
 // re-checks it before decrypt and before WTSConnectSession, so a password can never be injected into
 // a session that changed mid-flight -- the semantic fence d9a2444's lazy reset does not give ordinary
@@ -283,8 +287,7 @@ bool query_session_active(uint32_t session, bool* known) {
 
 // Resolves the session the agent belongs in and says why, once per change. Silence here is what
 // let the wrong-session bug live: the write succeeded, so everything downstream looked healthy.
-DWORD target_session() {
-  const uint32_t requester = gRequesterSession.load(std::memory_order_acquire);
+DWORD target_session(uint32_t requester) {  // r14 M1: the connection's own requester
   bool requesterKnown = false;
   const bool requesterActive = query_session_active(requester, &requesterKnown);
   const DWORD console = WTSGetActiveConsoleSessionId();
@@ -348,17 +351,22 @@ bool ensure_agent(DWORD sessionId) {
 
 // r11 U2: a pre-login message's only possible target -- its worker's session, still the console, within
 // the console attachment it connected in. No fallback.
-DWORD logon_only_target_session() {
+DWORD logon_only_target_session(uint32_t requester, uint32_t consoleGenerationAtConnect) {
   const DWORD target = remote60::native_poc::LogonOnlyTargetSession(
-      gRequesterSession.load(std::memory_order_acquire), WTSGetActiveConsoleSessionId(),
-      gConsoleGenerationAtConnect.load(std::memory_order_acquire), gConsoleGeneration.load(std::memory_order_acquire));
+      requester, WTSGetActiveConsoleSessionId(), consoleGenerationAtConnect,
+      gConsoleGeneration.load(std::memory_order_acquire));
   return target;
 }
 
-remote60::native_poc::ForwardOutcome forward_to_agent(const SecureInputMessage& message) {
+// r14 M1: one connection's message -- its requester and console attachment as that connection learned them
+// at connect. Called with gAgentMu held (the agent is shared by every connection).
+remote60::native_poc::ForwardOutcome forward_to_agent(const SecureInputMessage& message, uint32_t requester,
+                                                      uint32_t consoleGenerationAtConnect) {
   return remote60::native_poc::ForwardSecureInput(
-      message, [] { return static_cast<uint32_t>(target_session()); },
-      [] { return static_cast<uint32_t>(logon_only_target_session()); },
+      message, [requester] { return static_cast<uint32_t>(target_session(requester)); },
+      [requester, consoleGenerationAtConnect] {
+        return static_cast<uint32_t>(logon_only_target_session(requester, consoleGenerationAtConnect));
+      },
       [](uint32_t session) { return ensure_agent(session); },
       [](uint32_t session) { return start_agent(session, current_input_desktop_name()); },
       [](const SecureInputMessage& m) { return write_exact(gAgent.writePipe, &m, sizeof(m)); });
@@ -407,12 +415,8 @@ DWORD WINAPI service_control(DWORD control, DWORD eventType, LPVOID eventData, L
   if (control != SERVICE_CONTROL_STOP) return NO_ERROR;
   report_service_status(SERVICE_STOP_PENDING);
   gRunning.store(false, std::memory_order_release);
-  HANDLE pipe = gClientPipe.exchange(INVALID_HANDLE_VALUE, std::memory_order_acq_rel);
-  if (pipe != INVALID_HANDLE_VALUE) {
-    (void)CancelIoEx(pipe, nullptr);
-    (void)DisconnectNamedPipe(pipe);
-    CloseHandle(pipe);
-  }
+  // r14 M1: every secure-input pipe instance's I/O ends (each is closed by the thread that owns it).
+  gSecureInputPipes.Stop();
   // The unlock worker is woken by service_main's shutdown (CancelSynchronousIo); the STOP handler
   // must stay short and must not touch the worker's pipe. (Codex #370 BLOCKER A.)
   return NO_ERROR;
@@ -429,20 +433,8 @@ uint32_t requester_session_of(HANDLE pipe) {
 }
 
 HANDLE create_secure_pipe() {
-  PSECURITY_DESCRIPTOR descriptor = nullptr;
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &descriptor, nullptr)) {
-    return INVALID_HANDLE_VALUE;
-  }
-  SECURITY_ATTRIBUTES security{};
-  security.nLength = sizeof(security);
-  security.lpSecurityDescriptor = descriptor;
-  HANDLE pipe = CreateNamedPipeW(
-      kSecureInputPipeName, PIPE_ACCESS_INBOUND, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
-                                                    PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-      1, 0, 64 * 1024, 0, &security);
-  LocalFree(descriptor);
-  return pipe;
+  // r14 M1: one instance per client (secure_input_pipe_server.hpp).
+  return remote60::native_poc::CreateSecureInputPipeInstance(kSecureInputPipeName, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
 }
 
 // ================= Sealed unlock (SYSTEM side) ==================================================
@@ -1192,9 +1184,9 @@ void launch_user_host(DWORD consoleSession) {
     CloseHandle(userToken);
     return;
   }
-  // A fresh per-launch nonce binds the ready event to THIS host. Clear any prior/foreign signal first.
+  // A fresh per-launch nonce binds the ready to THIS host (the ready itself comes over the admin pipe;
+  // r14 L5: the Global\ event it once used, and its reset here, are gone).
   const std::wstring nonce = make_launch_nonce();
-  ResetUserHostReady(nonce);
   // r7 H1: the user's own environment with this launch's nonce -- or no launch at all (a Host without its
   // nonce could never complete the handoff). The start itself is the one call the H1 test also makes.
   std::vector<wchar_t> env;
@@ -1208,27 +1200,18 @@ void launch_user_host(DWORD consoleSession) {
   const std::wstring exe = sibling_exe_path(L"GNLinkHost.exe");
   PROCESS_INFORMATION proc{};
   DWORD startErr = 0;
+  // r14 H3 / L3: started and resumed OUTSIDE the kill-on-close job (that job is the SYSTEM worker's): the
+  // user's Host outlives a service stop / restart / crash, and its in-app update can break away.
   const bool created =
-      remote60::native_poc::prelogin::StartUserHostSuspended(launchToken, exe, env, L"winsta0\\Default", &proc, &startErr);
-  if (!created) diag("prelogin: user host CreateProcessAsUser failed err=%lu", startErr);
+      remote60::native_poc::prelogin::LaunchUserHost(launchToken, exe, env, L"winsta0\\Default", &proc, &startErr);
+  if (!created) diag("prelogin: user host start failed err=%lu", startErr);
   bool adopted = false;
   if (created) {
-    // G9: same Job gate as the SYSTEM worker -- never resume a host we could not bind to the Job.
-    HANDLE job = ensure_child_job();
-    const bool jobAssigned = (job != nullptr) && (AssignProcessToJobObject(job, proc.hProcess) != FALSE);
-    const bool resumed = jobAssigned && (ResumeThread(proc.hThread) != static_cast<DWORD>(-1));
     CloseHandle(proc.hThread);
-    if (DecideChildAdoption(/*createdSuspended=*/true, jobAssigned, resumed) ==
-        ChildLaunchDisposition::Adopt) {
-      gUserHostProcess = proc.hProcess;
-      gUserHostSession = consoleSession;   // S5 identity
-      gUserHostReadyNonce = nonce;         // the service now waits ONLY on this launch's ready event
-      adopted = true;
-    } else {
-      (void)TerminateProcess(proc.hProcess, 0);
-      (void)WaitForSingleObject(proc.hProcess, 1000);
-      CloseHandle(proc.hProcess);
-    }
+    gUserHostProcess = proc.hProcess;
+    gUserHostSession = consoleSession;   // S5 identity
+    gUserHostReadyNonce = nonce;         // the service now waits ONLY on this launch's ready
+    adopted = true;
   }
   diag("prelogin: user host handoff -> %s", adopted ? "launched" : "FAILED");
   if (linked) CloseHandle(linked);
@@ -1426,7 +1409,8 @@ void prelogin_reconcile_loop() {
     const bool consoleChanged = (topoGen != lastTopoGen);
     lastTopoGen = topoGen;
     DWORD console = 0xFFFFFFFFu;
-    const SupervisorObservation obs = observe_console(&console, consoleChanged);  // console = this obs's snapshot
+    SupervisorObservation obs = observe_console(&console, consoleChanged);
+    obs.nowMs = GetTickCount64();  // r14 H1: the transient budget is a span of time, not a count of turns  // console = this obs's snapshot
     const PreloginSupervisor::Outcome out = sup.Reconcile(obs);
     settle_watched_hosts(console, out.action == SupervisorAction::RunPreloginWorker);  // r11 U3
     switch (out.action) {
@@ -1461,14 +1445,20 @@ void prelogin_reconcile_loop() {
       case SupervisorAction::RetryTransient:
         break;  // keep any healthy child
     }
-    // Bounded cadence; the SESSIONCHANGE handler flips gSessionChangePending for prompt reconciles.
-    for (int i = 0; i < 10 && gRunning.load(std::memory_order_acquire); ++i) {
-      if (gSessionChangePending.load(std::memory_order_acquire)) break;
-      Sleep(100);
-    }
+    // r14 H1: bounded cadence on what this loop OWNS -- the topology generation this tick began with (a
+    // later session event ends the wait once). gSessionChangePending is ensure_agent's: it stayed set until
+    // the next secure input and made every wait return at once (the loop spun at 100% CPU).
+    (void)remote60::native_poc::prelogin::WaitReconcileTick(
+        topoGen, [] { return gRunning.load(std::memory_order_acquire); },
+        [] { return gSessionTopologyGeneration.load(std::memory_order_acquire); }, [](uint32_t ms) { Sleep(ms); });
   }
   stop_child(&gPreloginWorker);
-  stop_child(&gUserHostProcess);
+  // r14 L3: the service stopping does not stop the user's Host -- it is only no longer watched (a new
+  // service adopts it, r11 U4).
+  if (gUserHostProcess) {
+    CloseHandle(gUserHostProcess);
+    gUserHostProcess = nullptr;
+  }
 }
 
 void WINAPI service_main(DWORD, wchar_t**) {
@@ -1514,44 +1504,45 @@ void WINAPI service_main(DWORD, wchar_t**) {
         [hostImage](void* pipe) { return remote60::native_poc::prelogin::ClientImageIs(pipe, hostImage); }, &rebootLedger);
   });
 
-  while (gRunning.load(std::memory_order_acquire)) {
-    HANDLE pipe = create_secure_pipe();
-    if (pipe == INVALID_HANDLE_VALUE) break;
-    gClientPipe.store(pipe, std::memory_order_release);
-    const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
-    if (connected) {
-      // Identify the requester before reading anything from it. This is the only point at which
-      // the host's session can be learned, and everything downstream depends on it.
-      const uint32_t requester = requester_session_of(pipe);
-      gConsoleGenerationAtConnect.store(gConsoleGeneration.load(std::memory_order_acquire), std::memory_order_release);
-      gRequesterSession.store(requester, std::memory_order_release);
-      gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester changed -> fence
-      diag("control pipe connected, requester session=%u", requester);
-      // A new requester may live in a different session than the agent already running.
-      if (gAgent.process && gAgent.sessionId != target_session()) stop_agent();
-      while (gRunning.load(std::memory_order_acquire)) {
-        SecureInputMessage message{};
-        if (!read_exact(pipe, &message, sizeof(message))) break;
-        if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
-        if (forward_to_agent(message) == remote60::native_poc::ForwardOutcome::LogonBindingLost) {
-          // r11 U2: the worker's session is no longer the console it connected at -- this message and
-          // whatever it queued behind it are dropped (the pipe goes; a worker still serving reconnects).
-          diag("pre-login input dropped: requester session=%u is not the console it connected at", requester);
-          break;
+  // r14 M1: every client on its own instance and thread (a disconnected user's streaming host no longer holds
+  // the pipe from the console's worker or the new user's host).
+  remote60::native_poc::RunMultiClientPipeServer(
+      [] { return gRunning.load(std::memory_order_acquire); }, [] { return create_secure_pipe(); },
+      [](HANDLE pipe) {
+        // Identify the requester before reading anything from it. This is the only point at which the
+        // host's session can be learned, and everything downstream depends on it -- for THIS connection.
+        const uint32_t requester = requester_session_of(pipe);
+        const uint32_t consoleGenerationAtConnect = gConsoleGeneration.load(std::memory_order_acquire);
+        // The latest connection is the streaming host the sealed unlock path speaks for (as before).
+        gRequesterSession.store(requester, std::memory_order_release);
+        gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester changed -> fence
+        diag("control pipe connected, requester session=%u", requester);
+        while (gRunning.load(std::memory_order_acquire)) {
+          SecureInputMessage message{};
+          if (!read_exact(pipe, &message, sizeof(message))) break;
+          if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
+          remote60::native_poc::ForwardOutcome outcome;
+          {
+            std::lock_guard<std::mutex> agent(gAgentMu);
+            outcome = forward_to_agent(message, requester, consoleGenerationAtConnect);
+          }
+          if (outcome == remote60::native_poc::ForwardOutcome::LogonBindingLost) {
+            // r11 U2: the worker's session is no longer the console it connected at -- this message and
+            // whatever it queued behind it are dropped (the pipe goes; a worker still serving reconnects).
+            diag("pre-login input dropped: requester session=%u is not the console it connected at", requester);
+            break;
+          }
         }
-      }
-      (void)DisconnectNamedPipe(pipe);
-      // The requester is gone; do not keep its session as the answer for whoever connects next.
-      gRequesterSession.store(kInvalidSessionId, std::memory_order_release);
-      gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester gone -> fence
-    }
-    HANDLE expected = pipe;
-    if (gClientPipe.compare_exchange_strong(expected, INVALID_HANDLE_VALUE,
-                                            std::memory_order_acq_rel)) {
-      CloseHandle(pipe);
-    }
+        // This requester is gone; it is no longer the answer for the unlock path (unless a newer one took it).
+        uint32_t mine = requester;
+        gRequesterSession.compare_exchange_strong(mine, kInvalidSessionId, std::memory_order_acq_rel);
+        gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester gone -> fence
+      },
+      &gSecureInputPipes);
+  {
+    std::lock_guard<std::mutex> agent(gAgentMu);
+    stop_agent();
   }
-  stop_agent();
   if (preloginThread.joinable()) preloginThread.join();
   if (adminThread.joinable()) adminThread.join();  // its connect wait checks gRunning every 250 ms
   // Wake the unlock worker out of any blocking ConnectNamedPipe/ReadFile and wait for it to exit.

@@ -90,6 +90,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
     gHostTest.preloginPipe = adminPipe;
     // r5 G3: and the only server this build trusts on it -- the test that serves it, by process id.
     gHostTest.preloginServerPid = static_cast<uint32_t>(wcstoul(test_env(L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID").c_str(), nullptr, 10));
+    // r14 H2: "start the service" is the test's event (only a GNLinkTest- name).
+    const std::wstring startEvent = test_env(L"GNLINK_HOST_TEST_PRELOGIN_START_EVENT");
+    if (!startEvent.empty()) {
+      if (startEvent.rfind(L"GNLinkTest-", 0) != 0) return 2;
+      gHostTest.preloginStartEvent = startEvent;
+    }
   }
   gHostTest.streamExe = own_executable_path();
   // r9 W3: a real streaming TEST build (GNLinkStreamMigrationTest, staged inside the fixture root) in place

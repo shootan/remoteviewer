@@ -192,6 +192,9 @@ struct HostTestSeam {
   // GNLinkSecureInput is never asked; and nothing here starts a service.
   std::wstring preloginPipe;
   uint32_t preloginServerPid = 0;  // r5 G3: the test process serving it -- the only server trusted
+  // r14 H2: the OS boundary of "start the service" (StartServiceW) in this build: a \\.\-free event
+  // name (GNLinkTest-...) the test waits on to bring its server up. Empty: nothing is started.
+  std::wstring preloginStartEvent;
 };
 HostTestSeam gHostTest;
 
@@ -1699,25 +1702,47 @@ remote60::native_poc::prelogin::ServerCheck prelogin_admin_server_check() {
 #endif
 }
 
-/** One request to the service. Turning it on starts the service first if it is not running. */
-remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r) {
+// r14 L1: set when the window closes -- a request still in flight is cancelled (prelogin_stop_requests).
+std::atomic<bool> gPreloginCancel{false};
+
+/** Start the service (DEMAND-start until this feature is on; this process is elevated). The test build's
+    OS boundary is the test's event instead of the SCM. */
+bool start_prelogin_service() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  if (gHostTest.preloginStartEvent.empty()) return false;
+  HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, gHostTest.preloginStartEvent.c_str());
+  const bool ok = e && SetEvent(e);
+  if (e) CloseHandle(e);
+  return ok;
+#else
+  bool ok = false;
+  if (SC_HANDLE m = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
+    if (SC_HANDLE s = OpenServiceW(m, remote60::native_poc::kSecureInputServiceName, SERVICE_START)) {
+      ok = StartServiceW(s, 0, nullptr) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+      CloseServiceHandle(s);
+    }
+    CloseServiceHandle(m);
+  }
+  return ok;
+#endif
+}
+
+/** One request to the service. `startIfDown`: a service that is not running is started first and asked again
+    -- every step of turning the feature on and off (r14 H2: also the Query an Enable begins with; a plain
+    status Query does not start it). */
+remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r,
+                                                               bool startIfDown) {
   namespace pl = remote60::native_poc::prelogin;
   const std::wstring pipe = prelogin_admin_pipe_name();
-  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str(), prelogin_admin_server_check());
-#ifndef REMOTE60_HOST_TEST_SEAM
-  if (reply.status == pl::AdminStatus::Unavailable && r.op != pl::AdminOp::Query) {
-    // The service is DEMAND-start until this feature is on: start it (this process is elevated).
-    if (SC_HANDLE m = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
-      if (SC_HANDLE s = OpenServiceW(m, remote60::native_poc::kSecureInputServiceName, SERVICE_START)) {
-        StartServiceW(s, 0, nullptr);
-        CloseServiceHandle(s);
-      }
-      CloseServiceHandle(m);
-    }
-    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str(), prelogin_admin_server_check());
+  const std::function<bool()> keep = [] { return !gPreloginCancel.load(); };  // r14 L1: the close cancels it
+  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str(), prelogin_admin_server_check(), 5000, keep);
+  if (reply.status == pl::AdminStatus::Unavailable && startIfDown && keep() && start_prelogin_service()) {
+    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str(), prelogin_admin_server_check(), 5000, keep);
   }
-#endif
   return reply;
+}
+remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r) {
+  return prelogin_admin_call(r, r.op != remote60::native_poc::prelogin::AdminOp::Query);
 }
 
 void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply, bool asked) {
@@ -1770,6 +1795,11 @@ std::deque<PreloginJob> gPreloginQueue;
 int gPreloginInFlight = 0;  // jobs taken and not yet answered (under gPreloginQueueMu)
 std::atomic<uint64_t> gPreloginOwnerEpoch{1};
 std::atomic<bool> gPreloginBusy{false};
+// r14 L1: the requests' thread has an owner (stoppable_worker.hpp): WM_DESTROY drains (bounded), then stops
+// it -- the queue wait woken, a request in flight cancelled (gPreloginStopping), joined -- before the
+// window and the statics it touches go.
+bool gPreloginStopping = false;  // under gPreloginQueueMu
+remote60::native_poc::StoppableWorker gPreloginRequests;
 
 void prelogin_worker_loop() {
   namespace pl = remote60::native_poc::prelogin;
@@ -1777,7 +1807,8 @@ void prelogin_worker_loop() {
     PreloginJob job;
     {
       std::unique_lock<std::mutex> lk(gPreloginQueueMu);
-      gPreloginQueueCv.wait(lk, [] { return !gPreloginQueue.empty(); });
+      gPreloginQueueCv.wait(lk, [] { return gPreloginStopping || !gPreloginQueue.empty(); });
+      if (gPreloginStopping) return;
       job = std::move(gPreloginQueue.front());
       gPreloginQueue.pop_front();
       ++gPreloginInFlight;
@@ -1795,7 +1826,9 @@ void prelogin_worker_loop() {
         // The floor as it is now: the service takes this Enable only if nothing raised it since.
         pl::AdminRequest q;
         q.op = pl::AdminOp::Query;
-        const pl::AdminReply now = prelogin_admin_call(q);
+        // r14 H2: this Query is the first step of turning it on -- a service not running yet (just
+        // installed, or the feature was off at boot) is started here, not reported "not reachable".
+        const pl::AdminReply now = prelogin_admin_call(q, /*startIfDown=*/true);
         if (now.status != pl::AdminStatus::Ok) {
           result->reply = now;
         } else if (job.epoch != gPreloginOwnerEpoch.load()) {
@@ -1827,8 +1860,7 @@ void prelogin_worker_loop() {
 }
 
 void prelogin_enqueue(PreloginJob job) {
-  static std::once_flag started;
-  std::call_once(started, [] { std::thread(prelogin_worker_loop).detach(); });
+  if (!gPreloginRequests.Running()) gPreloginRequests.Start([](remote60::native_poc::StoppableWorker&) { prelogin_worker_loop(); });
   gPreloginBusy.store(true);
   EnableWindow(g.preloginCheck, FALSE);
   {
@@ -1843,6 +1875,22 @@ bool prelogin_drain(uint32_t ms) {
   std::unique_lock<std::mutex> lk(gPreloginQueueMu);
   return gPreloginQueueCv.wait_for(lk, std::chrono::milliseconds(ms),
                                    [] { return gPreloginQueue.empty() && gPreloginInFlight == 0; });
+}
+
+// r14 L1: after the drain -- stop the requests' thread: no new job, the one in flight cancelled (its pipe
+// wait / I/O ends, waited out), joined. Then the answers it posted that the window will never handle are freed.
+void prelogin_stop_requests(HWND window) {
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    gPreloginStopping = true;
+  }
+  gPreloginCancel.store(true);
+  gPreloginQueueCv.notify_all();
+  gPreloginRequests.Stop();
+  MSG m;
+  while (PeekMessageW(&m, window, kPreloginReplyMessage, kPreloginReplyMessage, PM_REMOVE)) {
+    delete reinterpret_cast<PreloginReplyResult*>(m.lParam);
+  }
 }
 
 void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool asked) {
@@ -2465,6 +2513,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     case WM_DESTROY: {
       // r7 H2: a withdrawal (sign-out) still on its way is waited for, not abandoned with the window.
       if (!prelogin_drain(8000)) append_host_app_log("[host-app] prelogin request still pending at close (8 s)");
+      prelogin_stop_requests(window);  // r14 L1: then the thread itself, cancelled and joined
       { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
       append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
                           std::to_string(GetCurrentProcessId()));

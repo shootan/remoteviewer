@@ -125,7 +125,7 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
     if (status) *status = "secure input service start timed out";
     return false;
   }
-  if (!ConnectLocked()) {
+  if (!ConnectLocked(3000)) {
     if (status) *status = win32_error_text("secure input pipe connect");
     return false;
   }
@@ -133,16 +133,26 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
   return true;
 }
 
-bool SecureInputBrokerClient::ConnectLocked() {
+bool SecureInputBrokerClient::ConnectLocked(uint32_t budgetMs) {
   if (pipe_ != INVALID_HANDLE_VALUE) return true;
+  if (budgetMs == 0) {
+    // r14 M1: the input path (the UDP reader thread) never waits here -- an input that cannot be handed over
+    // now is not held for seconds. One try; a failure holds the next try back for a moment.
+    if (GetTickCount64() < nextConnectMs_) return false;
+    pipe_ = CreateFileW(pipeName_.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+    if (pipe_ != INVALID_HANDLE_VALUE) return true;
+    nextConnectMs_ = GetTickCount64() + kReconnectCooldownMs;
+    return false;
+  }
   // A service may report SERVICE_RUNNING just before its worker creates the named pipe.
   // WaitNamedPipe returns immediately with ERROR_FILE_NOT_FOUND during that small window, so
   // a single call permanently pushed the host onto the non-secure fallback path. Retry both
   // discovery and open until the startup budget expires.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
   do {
-    (void)WaitNamedPipeW(kSecureInputPipeName, 100);
-    pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+    (void)WaitNamedPipeW(pipeName_.c_str(), 100);
+    pipe_ = CreateFileW(pipeName_.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
@@ -158,7 +168,7 @@ void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
 
 bool SecureInputBrokerClient::WriteLocked(SecureInputMessage message) {
   message.flags = static_cast<uint16_t>(message.flags | flags_);  // r10 T2: the agent's fence reads it
-  if (!ConnectLocked()) return false;
+  if (!ConnectLocked(0)) return false;  // r14 M1: never waits on the input path
   if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
   CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE;
   // Do not replay an uncertain write: a key/button edge may already have reached the service.

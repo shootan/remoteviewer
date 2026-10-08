@@ -1028,6 +1028,27 @@ int main() {
           mute != INVALID_HANDLE_VALUE && r.status == pl::AdminStatus::Ok && took < 8000, std::to_string(took) + " ms");
   }
   {
+    // r14 L4: a delegation that finds the service busy with another client is not "the service is not
+    // running" (r13 said ERROR_SERVICE_NOT_ACTIVE for both).
+    World w;
+    TestServer s;
+    const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l4";
+    s.start(&w, name, current_user_sddl(), [](void*) { return true; });
+    HANDLE mute = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    pl::AdminRequest q;
+    q.op = pl::AdminOp::Query;
+    const pl::AdminReply busy = pl::SendPreloginAdminRequest(q, 1000, name.c_str(), self_server, 3000);
+    if (mute != INVALID_HANDLE_VALUE) CloseHandle(mute);
+    s.stop();
+    const pl::AdminReply absent = pl::SendPreloginAdminRequest(q, 300, name.c_str(), self_server, 3000);
+    check("L4: the service busy with another client for the whole wait: said ERROR_PIPE_BUSY, not \"not running\"",
+          mute != INVALID_HANDLE_VALUE && busy.status == pl::AdminStatus::Unavailable &&
+              pl::DelegationWin32(busy) == ERROR_PIPE_BUSY,
+          std::to_string(busy.win32) + " -> " + std::to_string(pl::DelegationWin32(busy)));
+    check("L4: ...no service pipe at all: ERROR_SERVICE_NOT_ACTIVE", pl::DelegationWin32(absent) == ERROR_SERVICE_NOT_ACTIVE,
+          std::to_string(absent.win32));
+  }
+  {
     // Stopping the service while a read is pending: the server returns promptly (the cancelled read is
     // waited out before its buffer goes away).
     World w;

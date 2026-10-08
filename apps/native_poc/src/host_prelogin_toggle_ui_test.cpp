@@ -355,8 +355,13 @@ int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   // r9 R1: --revoke-fails ends with a sign-out whose Disable FAILS at the service, instead of the H2 race.
   bool revokeFails = false;
+  // r14 H2: --service-down starts with the service NOT running (just installed; or the feature was off at
+  // boot and no viewer has connected): turning it on must start it -- here the test's event stands in for
+  // the SCM, and the test brings its server up only when the window asks for it.
+  bool serviceDown = false;
   for (int i = 1; i < argc; ++i) {
     if (std::wstring(argv[i]) == L"--revoke-fails") revokeFails = true;
+    if (std::wstring(argv[i]) == L"--service-down") serviceDown = true;
   }
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   wchar_t self[MAX_PATH] = {};
@@ -381,7 +386,20 @@ int wmain(int argc, wchar_t** argv) {
   World world;
   world.allowedUrl = url;
   Server server;
-  server.start(&world, pipe, [](void*) { return true; });  // stands in for the admin check (asInvoker build)
+  const std::wstring startEventName = L"GNLinkTest-prelogin-start-" + std::to_wstring(GetCurrentProcessId());
+  HANDLE startEvent = CreateEventW(nullptr, TRUE, FALSE, startEventName.c_str());
+  std::atomic<bool> startAsked{false};
+  std::thread starter;
+  if (!serviceDown) {
+    server.start(&world, pipe, [](void*) { return true; });  // stands in for the admin check (asInvoker build)
+  } else {
+    starter = std::thread([&] {  // "the SCM": the service comes up when the window starts it
+      if (WaitForSingleObject(startEvent, 60000) == WAIT_OBJECT_0) {
+        startAsked = true;
+        server.start(&world, pipe, [](void*) { return true; });
+      }
+    });
+  }
 
   // The window, with only the fixture's paths and the test pipe.
   std::wstring env;
@@ -398,7 +416,8 @@ int wmain(int argc, wchar_t** argv) {
                                    std::wstring(L"GNLINK_HOST_TEST_DIRECTORY=") + std::wstring(url.begin(), url.end()),
                                    L"GNLINK_HOST_TEST_PRELOGIN_PIPE=" + pipe,
                                    // r5 G3: the Host trusts this test's server -- this process -- and nothing else.
-                                   L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())}) {
+                                   L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId()),
+                                   L"GNLINK_HOST_TEST_PRELOGIN_START_EVENT=" + startEventName}) {
       env += kv;
       env.push_back(L'\0');
     }
@@ -443,8 +462,15 @@ int wmain(int argc, wchar_t** argv) {
     wait_until([&] { return ui.reachable(box, &why); }, 5000);
     check("the toggle is visible, enabled, on screen and not covered at its centre", ui.reachable(box, &why), why);
     wait_until([&] { return !Ui::name_of(status).empty(); }, 5000);
-    check("it starts off, as the service says (asked on show)", Ui::toggle_state(box) == ToggleState_Off && Ui::name_of(status) == L"꺼짐",
-          narrow(Ui::name_of(status)));
+    if (!serviceDown) {
+      check("it starts off, as the service says (asked on show)", Ui::toggle_state(box) == ToggleState_Off && Ui::name_of(status) == L"꺼짐",
+            narrow(Ui::name_of(status)));
+    } else {
+      check("H2: the service is not running: off, and the window says so -- the status query did NOT start it",
+            Ui::toggle_state(box) == ToggleState_Off && Ui::name_of(status).find(L"실행 중이 아님") != std::wstring::npos &&
+                !startAsked.load(),
+            narrow(Ui::name_of(status)));
+    }
     check("screenshot: off", save_window_bmp(hwnd, (shots / L"prelogin_toggle_0_off.bmp").wstring()));
 
     // On.
@@ -459,6 +485,10 @@ int wmain(int argc, wchar_t** argv) {
     check("the service wrote the record from the window's request: enabled, the host's credential",
           on && rec.enabled && pl::UnpackDirectoryCredential(rec.credential, &dc) && dc.accountId == "host-user" &&
               dc.hostId == "h-ui-1" && dc.hostToken == "tok-ui-fixture" && rec.directoryOrigin == url);
+    if (serviceDown) {
+      check("H2: turning it on STARTED the service (r13: the Enable's first Query did not, and it failed: "
+            "\"보안 입력 서비스에 연결하지 못했습니다\")", startAsked.load());
+    }
     check("...and raised its start type to AUTO, remembering DEMAND", world.startType == 2 && world.haveRemembered && world.remembered == 3);
     wait_until([&] { return Ui::name_of(status).find(L"켜짐") == 0; }, 5000);
     check("the window says it is on, and the box is ticked", Ui::toggle_state(box) == ToggleState_On &&
@@ -469,6 +499,7 @@ int wmain(int argc, wchar_t** argv) {
     check("r6 V3: with access on, the Run entry is removed (the service starts GNLink at logon)",
           wait_until([] { return !test_run_value_present(); }, 3000));
 
+    if (!serviceDown) {  // r14 H2: the --service-down run ends here; the rest is the ordinary run's
     // r6 V3: and a second GNLinkHost in this session does not run beside the first.
     {
       PROCESS_INFORMATION second{};
@@ -613,7 +644,13 @@ int wmain(int argc, wchar_t** argv) {
             world.floor > floorBefore && world.startType == 3, std::to_string(world.floor));
     }
     }  // !revokeFails
+    }  // !serviceDown
   }
+  if (starter.joinable()) {
+    SetEvent(startEvent);  // never asked: let the stand-in end
+    starter.join();
+  }
+  CloseHandle(startEvent);
   if (box) box->Release();
   if (status) status->Release();
   if (ui.root) ui.root->Release();

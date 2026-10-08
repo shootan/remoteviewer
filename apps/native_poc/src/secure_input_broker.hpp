@@ -14,6 +14,8 @@ namespace remote60::native_poc {
 class SecureInputBrokerClient {
  public:
   SecureInputBrokerClient() = default;
+  // Tests: another pipe than the service's (a \\.\pipe\GNLinkTest-... one).
+  explicit SecureInputBrokerClient(std::wstring pipeName) : pipeName_(std::move(pipeName)) {}
   ~SecureInputBrokerClient();
   SecureInputBrokerClient(const SecureInputBrokerClient&) = delete;
   SecureInputBrokerClient& operator=(const SecureInputBrokerClient&) = delete;
@@ -47,12 +49,18 @@ class SecureInputBrokerClient {
   bool connected() const;
 
  private:
-  bool ConnectLocked();
+  static constexpr uint64_t kReconnectCooldownMs = 1000;
+  // r14 M1: `budgetMs` -- the startup connect waits for the service's pipe (3 s); the input path does not
+  // wait at all (it runs on the UDP reader thread): one try, and after a failure no new try for
+  // kReconnectCooldownMs.
+  bool ConnectLocked(uint32_t budgetMs);
   bool WriteLocked(SecureInputMessage message);
   void apply_target_rect_locked(SecureInputMessage* message) const;
 
   mutable std::mutex mu_;
   HANDLE pipe_ = INVALID_HANDLE_VALUE;
+  std::wstring pipeName_ = kSecureInputPipeName;
+  uint64_t nextConnectMs_ = 0;  // r14 M1: no connect attempt before this (GetTickCount64)
   int32_t targetOriginX_ = 0;
   uint16_t flags_ = 0;  // r10 T2: stamped on every message (SetLogonDesktopOnly)
   int32_t targetOriginY_ = 0;

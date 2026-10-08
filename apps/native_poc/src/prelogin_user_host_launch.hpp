@@ -28,4 +28,13 @@ bool BuildUserHostEnvironment(HANDLE token, const std::wstring& nonce, std::vect
 bool StartUserHostSuspended(HANDLE token, const std::wstring& exe, const std::vector<wchar_t>& environment,
                             const wchar_t* desktop, PROCESS_INFORMATION* pi, DWORD* win32);
 
+// r14 H3 / L3: the service's whole start of the user's Host -- StartUserHostSuspended, then resumed. NOT in
+// the service's kill-on-close job: that job is for the SYSTEM pre-login worker, which must never outlive
+// the service. The user's Host is the user's program: a service that stops, restarts or crashes must not
+// take it down (L3), and its in-app update starts the updater with CREATE_BREAKAWAY_FROM_JOB, which a
+// kill-on-close job without BREAKAWAY_OK refuses -- the update was then refused as WouldDieWithParent (H3).
+// True with *pi filled (the caller owns both handles); a Host that cannot be resumed is terminated.
+bool LaunchUserHost(HANDLE token, const std::wstring& exe, const std::vector<wchar_t>& environment,
+                    const wchar_t* desktop, PROCESS_INFORMATION* pi, DWORD* win32);
+
 }  // namespace remote60::native_poc::prelogin

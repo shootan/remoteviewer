@@ -21,6 +21,7 @@
 
 #include "e2e_isolation.hpp"
 #include "prelogin_user_host_launch.hpp"
+#include "update_job_guard.hpp"
 
 namespace pl = remote60::native_poc::prelogin;
 
@@ -45,8 +46,26 @@ int child_report() {
   GetEnvironmentVariableW(L"REMOTE60_PRELOGIN_READY_NONCE", nonce, 128);
   GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
   GetCurrentDirectoryW(MAX_PATH, cwd);
+  // r14 H3: what GNLinkHost's in-app update does next -- start the updater with CREATE_BREAKAWAY_FROM_JOB,
+  // and if that is refused, judge whether it may go on (host_app_main.cpp, update_job_guard).
+  namespace upd = remote60::native_poc::update;
+  std::wstring cmd = L"\"" + self_path() + L"\" --noop";
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION up{};
+  const bool broke = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW,
+                                    nullptr, nullptr, &si, &up) != FALSE;
+  if (broke) {
+    WaitForSingleObject(up.hProcess, 5000);
+    CloseHandle(up.hThread);
+    CloseHandle(up.hProcess);
+  }
+  const upd::JobKind kind = upd::job_kind_of_current_process();
+  const upd::LaunchGuardVerdict verdict = upd::judge_launch(kind, broke);
   std::wofstream out(folder_of(self_path()) + L"\\child_report.txt");
-  out << L"nonce=" << nonce << L"\n" << L"userprofile=" << profile << L"\n" << L"cwd=" << cwd << L"\n";
+  out << L"nonce=" << nonce << L"\n" << L"userprofile=" << profile << L"\n" << L"cwd=" << cwd << L"\n"
+      << L"update=" << (verdict == upd::LaunchGuardVerdict::Ok ? L"ok" : L"refused") << L" breakaway=" << (broke ? 1 : 0)
+      << L" job=" << static_cast<int>(kind) << L"\n";
   return 0;
 }
 
@@ -69,6 +88,7 @@ HANDLE own_primary_token() {
 int wmain(int argc, wchar_t** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::wstring(argv[i]) == L"--tray") return child_report();  // started as "GNLinkHost.exe --tray"
+    if (std::wstring(argv[i]) == L"--noop") return 0;                // the "updater" the child starts
   }
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("the service's user-Host launch (prelogin-ui r7, H1)\n\n");
@@ -89,10 +109,10 @@ int wmain(int argc, wchar_t** argv) {
   check("the user's environment is built, with the nonce", built, std::to_string(err));
 
   PROCESS_INFORMATION pi{};
-  const bool started = built && pl::StartUserHostSuspended(token, hostExe, env, nullptr, &pi, &err);
-  check("H1: the Host starts (suspended), the way the service starts it", started, std::to_string(err));
+  // r14 H3: the service's whole start (LaunchUserHost: suspended, then resumed -- no kill-on-close job)
+  const bool started = built && pl::LaunchUserHost(token, hostExe, env, nullptr, &pi, &err);
+  check("H1: the Host starts, the way the service starts it", started, std::to_string(err));
   if (started) {
-    ResumeThread(pi.hThread);
     WaitForSingleObject(pi.hProcess, 15000);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -108,7 +128,34 @@ int wmain(int argc, wchar_t** argv) {
   check("H1: ...and its own folder as the working directory",
         report.find(L"cwd=" + folder + L"\n") != std::wstring::npos || report.find(L"cwd=" + folder + L"\\\n") != std::wstring::npos,
         narrow(folder));
+  const remote60::native_poc::update::JobKind mine = remote60::native_poc::update::job_kind_of_current_process();
+  std::printf("  (this test runs in job kind %d: 0 none, 1 harmless, 2 kill-on-close)\n", static_cast<int>(mine));
+  check("r14 H3: in the Host the service started, the in-app update may start its updater (breakaway or no job)",
+        report.find(L"update=ok") != std::wstring::npos, narrow(report));
   DeleteFileW((dir + L"child_report.txt").c_str());
+  {
+    // r14 H3 negative control: the r13 start -- bound to a kill-on-close job without BREAKAWAY_OK (the
+    // service's child job), then resumed. The same update is refused.
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info));
+    PROCESS_INFORMATION old{};
+    DWORD oe = 0;
+    const bool s = built && pl::StartUserHostSuspended(token, hostExe, env, nullptr, &old, &oe);
+    if (s) {
+      AssignProcessToJobObject(job, old.hProcess);
+      ResumeThread(old.hThread);
+      WaitForSingleObject(old.hProcess, 15000);
+      CloseHandle(old.hThread);
+      CloseHandle(old.hProcess);
+    }
+    CloseHandle(job);
+    const std::wstring oldReport = read_report(dir + L"child_report.txt");
+    check("r14 H3 NEGATIVE: a Host in the service's kill-on-close job (r13) has its update refused",
+          oldReport.find(L"update=refused") != std::wstring::npos, narrow(oldReport));
+    DeleteFileW((dir + L"child_report.txt").c_str());
+  }
 
   // Negative control: the call as it was (lpEnvironment = nullptr, the block as lpCurrentDirectory).
   {
