@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <thread>
@@ -230,8 +231,17 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   const std::wstring myDir = directory_of(self_path());
   // GNLinkCapture is staged as a copy of this binary in --thumbnail mode: the host starts one and
   // it must not answer, exactly as the sibling e2e does.
-  if (!CopyFileW((myDir + L"GNLinkStream.exe").c_str(),
-                 (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
+  // udp-control-peer r2 negative control: REMOTE60_E2E_OLD_BIN points at a GNLinkStream.exe built
+  // WITHOUT the peer gate (host_startup_control.cpp at b6f4b18). The injection case then dispatches B's
+  // control and fails -- proving the gate is load-bearing. Unset -> the freshly built (fixed) host.
+  std::wstring streamSrc = myDir + L"GNLinkStream.exe";
+  {
+    wchar_t oldBin[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
+      streamSrc = oldBin;
+    }
+  }
+  if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
       !CopyFileW(self_path().c_str(), (host->dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
     return false;
   }
@@ -442,6 +452,90 @@ void ScriptDirectory(FakeDirectory& dir, const std::string& hostId, const std::s
   dir.Script("/api/host/heartbeat", {Reply{200, heartbeat}});
 }
 
+// --- raw-socket viewer primitives (udp-control-peer r3): bypass ClientSessionController so the test
+// controls the source port/address directly (A->A' move, foreign endpoints). -----------------------
+void raw_send_hello(SOCKET s, const sockaddr_in& host, const std::string& token) {
+  remote60::native_poc::UdpHelloPacket h{};  // magic/kind/size/version/features default (FEC set)
+  const size_t n = token.size() < sizeof(h.authToken) - 1 ? token.size() : sizeof(h.authToken) - 1;
+  std::memcpy(h.authToken, token.data(), n);
+  sendto(s, reinterpret_cast<const char*>(&h), sizeof(h), 0, reinterpret_cast<const sockaddr*>(&host),
+         sizeof(host));
+}
+
+void raw_send_window_select(SOCKET s, const sockaddr_in& host, uint32_t messageSeq, uint64_t windowId) {
+  remote60::native_poc::ControlWindowSelectMessage msg{};
+  msg.header.magic = remote60::native_poc::kMagic;
+  msg.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlWindowSelect);
+  msg.header.size = static_cast<uint16_t>(sizeof(msg));
+  msg.seq = 7;
+  msg.windowId = windowId;
+  remote60::native_poc::UdpControlChunkHeader head{};
+  head.magic = remote60::native_poc::kMagic;
+  head.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+  head.size = static_cast<uint16_t>(sizeof(head));
+  head.streamId = remote60::native_poc::kUdpControlStreamClientToHost;  // the host's rx stream
+  head.messageSeq = messageSeq;
+  head.totalSize = sizeof(msg);
+  head.fragIndex = 0;
+  head.fragCount = 1;
+  head.fragOffset = 0;
+  head.fragSize = sizeof(msg);
+  uint8_t dg[sizeof(head) + sizeof(msg)];
+  std::memcpy(dg, &head, sizeof(head));
+  std::memcpy(dg + sizeof(head), &msg, sizeof(msg));
+  sendto(s, reinterpret_cast<const char*>(dg), sizeof(dg), 0, reinterpret_cast<const sockaddr*>(&host),
+         sizeof(host));
+}
+
+// Reads host->client datagrams until one is a ControlData on `streamId` (matching `wantSeq`, or any seq
+// when wantSeq==0) within timeoutMs. Returns true on match and reports the seq in *outSeq.
+bool raw_wait_ctrl_data(SOCKET s, uint32_t streamId, uint32_t wantSeq, int timeoutMs, uint32_t* outSeq) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (std::chrono::steady_clock::now() < deadline) {
+    uint8_t buf[2048];
+    sockaddr_in from{};
+    int fl = sizeof(from);
+    const int n = recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0,
+                           reinterpret_cast<sockaddr*>(&from), &fl);
+    if (n < static_cast<int>(sizeof(remote60::native_poc::UdpControlChunkHeader))) continue;
+    remote60::native_poc::UdpControlChunkHeader h{};
+    std::memcpy(&h, buf, sizeof(h));
+    if (h.magic != remote60::native_poc::kMagic) continue;
+    if (h.kind != static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData)) continue;
+    if (h.streamId != streamId) continue;
+    if (wantSeq != 0 && h.messageSeq != wantSeq) continue;
+    if (outSeq) *outSeq = h.messageSeq;
+    return true;
+  }
+  return false;
+}
+
+void raw_send_ctrl_ack(SOCKET s, const sockaddr_in& host, uint32_t streamId, uint32_t seq) {
+  remote60::native_poc::UdpControlAckPacket a{};
+  a.streamId = streamId;
+  a.messageSeq = seq;
+  a.missingCount = 0;
+  sendto(s, reinterpret_cast<const char*>(&a), sizeof(a), 0, reinterpret_cast<const sockaddr*>(&host),
+         sizeof(host));
+}
+
+// A loopback UDP socket bound to `bindIp` (an ephemeral port), with a short receive timeout.
+SOCKET raw_open(const char* bindIp) {
+  SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (s == INVALID_SOCKET) return s;
+  sockaddr_in local{};
+  local.sin_family = AF_INET;
+  inet_pton(AF_INET, bindIp, &local.sin_addr);
+  local.sin_port = 0;
+  if (bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+    closesocket(s);
+    return INVALID_SOCKET;
+  }
+  DWORD rcvTo = 1000;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
+  return s;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -559,6 +653,184 @@ int wmain(int argc, wchar_t** argv) {
     check("a control request makes the round trip over the tunnel", roundTrip,
           client.Snapshot().status);
 
+    // ---- udp-control-peer (1): a DIFFERENT wire endpoint cannot inject VALID control -------------
+    // A (above) is the adopted session; the host's client->host control stream is
+    // kUdpControlStreamClientToHost (1), its host->client stream is (2). B is a second loopback socket
+    // (same IP, different port). B sends a VALID, well-framed window-select on stream 1 -- a single
+    // complete fragment, messageSeq ahead of A's -- i.e. exactly what the pre-fix OnPacket WOULD have
+    // reassembled and dispatched (unlike a wrong-stream datagram the old parser drops anyway). The
+    // host's render loop logs "requestedId=<id>" for every window-select it actually processes, so the
+    // DISTINCTIVE id B uses is a behavioural probe:
+    //   - fixed build: the gate drops B before the parser, B's id NEVER appears, and A's own later
+    //     (fence) request IS processed -> this case PASSES;
+    //   - gate-removed build (REMOTE60_E2E_OLD_BIN): B is dispatched, so its id appears AND its high
+    //     messageSeq advances the host's rx sequence past A's fence, which is then swallowed -> the
+    //     fence assertion FAILs and the process exits non-zero. That is the real negative control.
+    {
+      const uint64_t kBInjectedId = 0xB0B0B0B0B0B0B0B0ull;  // only B would ever request this
+      const uint64_t kAFenceId = 0x0F0F0F0F0F0F0F0Full;     // A requests this AFTER B's injection
+      const std::string bNeedle = "requestedId=" + std::to_string(kBInjectedId);
+      const std::string aNeedle = "requestedId=" + std::to_string(kAFenceId);
+
+      SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      const bool bOpen = b != INVALID_SOCKET;
+      check("[inject] a second endpoint B opens a socket", bOpen);
+      if (bOpen) {
+        sockaddr_in blocal{};
+        blocal.sin_family = AF_INET;
+        blocal.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        blocal.sin_port = 0;  // same IP as A, a different port
+        check("[inject] B binds its own port (a drop is then a real block, not a send failure)",
+              bind(b, reinterpret_cast<sockaddr*>(&blocal), sizeof(blocal)) == 0);
+        DWORD rcvTo = 1000;
+        setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
+        sockaddr_in hostAddr{};
+        hostAddr.sin_family = AF_INET;
+        hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        hostAddr.sin_port = htons(mediaPort);
+
+        // A VALID single-fragment window-select on the host's client->host stream.
+        auto send_valid_window_select = [&](uint32_t messageSeq, uint64_t windowId) {
+          remote60::native_poc::ControlWindowSelectMessage msg{};
+          msg.header.magic = remote60::native_poc::kMagic;
+          msg.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlWindowSelect);
+          msg.header.size = static_cast<uint16_t>(sizeof(msg));
+          msg.seq = 7;
+          msg.windowId = windowId;
+          remote60::native_poc::UdpControlChunkHeader head{};
+          head.magic = remote60::native_poc::kMagic;
+          head.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+          head.size = static_cast<uint16_t>(sizeof(head));
+          head.streamId = remote60::native_poc::kUdpControlStreamClientToHost;  // the host's rx stream
+          head.messageSeq = messageSeq;
+          head.totalSize = sizeof(msg);
+          head.fragIndex = 0;
+          head.fragCount = 1;
+          head.fragOffset = 0;
+          head.fragSize = sizeof(msg);
+          uint8_t dgram[sizeof(head) + sizeof(msg)];
+          std::memcpy(dgram, &head, sizeof(head));
+          std::memcpy(dgram + sizeof(head), &msg, sizeof(msg));
+          sendto(b, reinterpret_cast<const char*>(dgram), sizeof(dgram), 0,
+                 reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        };
+        for (int i = 0; i < 5; ++i) send_valid_window_select(1000000u + i, kBInjectedId);  // ahead of A
+        // A forged ACK on the host's real tx stream, and an incomplete fragment -- neither may disturb A.
+        remote60::native_poc::UdpControlAckPacket forgedAck{};
+        forgedAck.streamId = remote60::native_poc::kUdpControlStreamHostToClient;
+        forgedAck.messageSeq = 1000000u;
+        sendto(b, reinterpret_cast<const char*>(&forgedAck), sizeof(forgedAck), 0,
+               reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        {
+          remote60::native_poc::UdpControlChunkHeader frag{};
+          frag.magic = remote60::native_poc::kMagic;
+          frag.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+          frag.size = static_cast<uint16_t>(sizeof(frag));
+          frag.streamId = remote60::native_poc::kUdpControlStreamClientToHost;
+          frag.messageSeq = 2000000u;
+          frag.totalSize = 64;  // claims 64 bytes but only sends fragment 0 of 2 -> never completes
+          frag.fragIndex = 0;
+          frag.fragCount = 2;
+          frag.fragOffset = 0;
+          frag.fragSize = 16;
+          uint8_t fdg[sizeof(frag) + 16] = {};
+          std::memcpy(fdg, &frag, sizeof(frag));
+          sendto(b, reinterpret_cast<const char*>(fdg), sizeof(fdg), 0,
+                 reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        }
+
+        // The host logs the limited drop aggregate the moment the gate fires on B's real ingress.
+        check("[inject] the host logs dropping control from the non-session endpoint B",
+              host.WaitFor("dropped control from non-session peer", 6000), host.tail());
+        // B gets nothing back (the host answers A's tuple, so this is necessary not sufficient -- the
+        // load-bearing checks are the id assertions below).
+        char junk[256];
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int got = recvfrom(b, junk, sizeof(junk), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+        check("[inject] the host sends B nothing back", got <= 0,
+              got > 0 ? (std::to_string(got) + " bytes") : "");
+        closesocket(b);
+      }
+
+      // Ordering fence: A legitimately requests a distinctive id AFTER B's injection. On the fixed build
+      // the gate dropped B, so A's request is the next window-select the host processes.
+      check("[inject] A can still queue a control request after the injection",
+            client.RequestWindowSelect(kAFenceId));
+      check("[inject] the host processes A's post-injection request (ordering fence)",
+            host.WaitFor(aNeedle.c_str(), 12000), host.tail());
+      // THE load-bearing assertion: B's valid-but-foreign window-select never reached the dispatcher.
+      check("[inject] B's injected window-select never reached the host (dropped before the parser)",
+            host.log().find(bNeedle) == std::string::npos, "B's requestedId must be absent from the host log");
+      check("[inject] A's session stays connected and serving through the injection",
+            client.Snapshot().state == remote60::native_poc::ClientSessionState::Connected &&
+                client.Snapshot().controlLoopActive,
+            client.Snapshot().status);
+    }
+
+    // ---- F2: a DIFFERENT IP (loopback alias 127.0.0.2), a real ControlNack, and a video-NACK ------
+    {
+      sockaddr_in hostAddr{};
+      hostAddr.sin_family = AF_INET;
+      hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      hostAddr.sin_port = htons(mediaPort);
+
+      // (a) Different IP: a valid window-select from 127.0.0.2 (a loopback alias, a DIFFERENT source IP
+      // than A's 127.0.0.1) must be refused -- the gate compares IP as well as port.
+      const uint64_t kIpId = 0xC0C0C0C0C0C0C0C0ull;
+      const std::string ipNeedle = "requestedId=" + std::to_string(kIpId);
+      SOCKET c = raw_open("127.0.0.2");
+      if (c != INVALID_SOCKET) {
+        for (int i = 0; i < 5; ++i) raw_send_window_select(c, hostAddr, 3000000u + i, kIpId);
+        // (b) A real ControlNack on the host's tx stream from the same foreign IP.
+        remote60::native_poc::UdpControlAckPacket nack{};
+        nack.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlNack);
+        nack.size = static_cast<uint16_t>(sizeof(nack));
+        nack.streamId = remote60::native_poc::kUdpControlStreamHostToClient;
+        nack.messageSeq = 3000000u;
+        nack.missingCount = 1;
+        nack.missing[0] = 0;
+        sendto(c, reinterpret_cast<const char*>(&nack), sizeof(nack), 0,
+               reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        closesocket(c);
+      } else {
+        note("127.0.0.2 socket unavailable; different-IP case skipped");
+      }
+
+      // (c) video-NACK from a foreign endpoint D must draw NO retransmit (the host must not send video
+      // to a non-session endpoint). D listens briefly and must receive nothing.
+      SOCKET d = raw_open("127.0.0.1");
+      if (d != INVALID_SOCKET) {
+        remote60::native_poc::UdpVideoNackPacket vnack{};
+        vnack.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::VideoNack);
+        vnack.size = sizeof(vnack);
+        vnack.streamGeneration = 1;
+        vnack.seq = 0;
+        vnack.missingCount = 1;
+        vnack.missing[0] = 0;
+        for (int i = 0; i < 4; ++i)
+          sendto(d, reinterpret_cast<const char*>(&vnack), sizeof(vnack), 0,
+                 reinterpret_cast<sockaddr*>(&hostAddr), sizeof(hostAddr));
+        char junk[2048];
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int got = recvfrom(d, junk, sizeof(junk), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+        check("[inject] a foreign video-NACK draws no retransmit to the stranger", got <= 0,
+              got > 0 ? (std::to_string(got) + " bytes") : "");
+        closesocket(d);
+      }
+
+      // Fence + assertion: a fresh A request is processed; the different-IP id never was.
+      const uint64_t kFenceIp = 0x0303030303030303ull;
+      const std::string fenceIp = "requestedId=" + std::to_string(kFenceIp);
+      check("[inject] A can still request after the foreign-IP / nack / video-nack probes",
+            client.RequestWindowSelect(kFenceIp));
+      check("[inject] the host processes A's request after the F2 probes (ordering fence)",
+            host.WaitFor(fenceIp.c_str(), 12000), host.tail());
+      check("[inject] the different-IP (127.0.0.2) window-select never reached the host",
+            host.log().find(ipNeedle) == std::string::npos, "127.0.0.2 id must be absent");
+    }
+
     // PunchAny re-sends while it waits, so the host saw more than one punch from one source.
     // They are all answered, and the per-source budget is 25 -- duplicates are bounded.
     const int replied = host.Count("replied=1");
@@ -580,6 +852,148 @@ int wmain(int argc, wchar_t** argv) {
     host.Stop();
     check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
     relay.Stop();
+  }
+
+  // ============================================= F1: authenticated A->A' port move re-adoption
+  // A real host; A1 (one loopback port) authenticates with the capability and its window-select is
+  // processed. A2 (a DIFFERENT port, SAME capability token) sends an admitted Hello -> the host
+  // re-adopts A2 as the session peer (contract item 4: same token + already-bound IP, new port =
+  // accepted). A2's window-select is then processed, and A1's LATER window-select from the OLD port
+  // must be refused. Distinctive window ids make each attribution unambiguous.
+  //   fixed: A1-stale id is dropped (never logged); gate-removed: it is processed (logged) -> FAIL.
+  {
+    const uint64_t kIdA = 0xA1A1A1A1A1A1A1A1ull;       // A1 (original port) before the move
+    const uint64_t kIdAPrime = 0xA2A2A2A2A2A2A2A2ull;  // A2 (new port) after the move
+    const uint64_t kIdStale = 0xDEAD5741DEAD5741ull;    // A1's LATE packet from the old port
+    const std::string aNeedle = "requestedId=" + std::to_string(kIdA);
+    const std::string aPrimeNeedle = "requestedId=" + std::to_string(kIdAPrime);
+    const std::string staleNeedle = "requestedId=" + std::to_string(kIdStale);
+
+    FakeDirectory dir;
+    check("[move] the fake directory starts", dir.Start());
+    ScriptDirectory(dir, "h-move", capabilityBody(token, kIssuedIp, kIssuedPort));
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"1");  // hold the capability quickly
+    check("[move] a real GNLinkStream starts",
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "move"));
+    check("[move] the host registers (holds the capability for Hello auth)",
+          host.WaitFor("directory registered", 20000) || host.WaitFor("directory online", 20000), host.tail());
+
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    hostAddr.sin_port = htons(mediaPort);
+
+    SOCKET a1 = raw_open("127.0.0.1");
+    check("[move] A1 opens a socket", a1 != INVALID_SOCKET);
+    // A1 authenticates and its window-select is processed. Retry: the capability lands on a heartbeat.
+    bool aUp = false;
+    for (int i = 0; i < 20 && !aUp; ++i) {
+      raw_send_hello(a1, hostAddr, token);
+      Sleep(200);
+      raw_send_window_select(a1, hostAddr, 1, kIdA);
+      aUp = host.WaitFor(aNeedle.c_str(), 1200);
+    }
+    check("[move] A1 authenticates and its window-select is processed", aUp, host.tail());
+
+    SOCKET a2 = raw_open("127.0.0.1");  // a DIFFERENT ephemeral port -> the move
+    check("[move] A2 opens a different port", a2 != INVALID_SOCKET);
+    bool movedUp = false;
+    for (int i = 0; i < 20 && !movedUp; ++i) {
+      raw_send_hello(a2, hostAddr, token);  // same capability token, new port -> re-adoption
+      Sleep(200);
+      raw_send_window_select(a2, hostAddr, 2, kIdAPrime);
+      movedUp = host.WaitFor(aPrimeNeedle.c_str(), 1200);
+    }
+    check("[move] after the admitted Hello from A2, A2's window-select is processed (re-adopted)",
+          movedUp, host.tail());
+
+    // A1 (the OLD endpoint) now sends a well-formed window-select. It must be refused.
+    for (int i = 0; i < 5; ++i) raw_send_window_select(a1, hostAddr, 3 + i, kIdStale);
+    // Fence: a FRESH A2 request confirms the host is still processing (ordering), then assert A1-stale
+    // never appeared.
+    const uint64_t kFence2 = 0x0202020202020202ull;
+    const std::string fence2 = "requestedId=" + std::to_string(kFence2);
+    raw_send_window_select(a2, hostAddr, 10, kFence2);
+    check("[move] the host keeps serving A2 after A1's late packet (ordering fence)",
+          host.WaitFor(fence2.c_str(), 12000), host.tail());
+    check("[move] A1's late packet from the OLD endpoint is refused (never processed)",
+          host.log().find(staleNeedle) == std::string::npos, "A1 stale id must be absent");
+
+    closesocket(a1);
+    closesocket(a2);
+    host.Stop();
+    check("[move] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
+  }
+
+  // ============================================= F2: a spoofed ACK matched to REAL outstanding tx
+  // raw-A authenticates and triggers a reliable host->client response, then WITHHOLDS its ACK, so the
+  // host keeps retransmitting that exact messageSeq. B (a different port) then spoofs a ControlAck for
+  // THAT real outstanding seq. The gate must drop B's ACK, so the host keeps retransmitting; a genuine
+  // ACK from raw-A (the adopted peer) then stops it -- proving the ACK path works and only the foreign
+  // ACK is ignored.
+  //   fixed: retransmit continues after B's ACK, stops after A's ACK -> PASS.
+  //   gate-removed: B's ACK is honoured -> retransmit stops after B -> the "continues" assertion FAILs.
+  {
+    FakeDirectory dir;
+    check("[ackspoof] the fake directory starts", dir.Start());
+    ScriptDirectory(dir, "h-ack", capabilityBody(token, kIssuedIp, kIssuedPort));
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"1");
+    check("[ackspoof] a real GNLinkStream starts",
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "ack"));
+    check("[ackspoof] the host registers",
+          host.WaitFor("directory registered", 20000) || host.WaitFor("directory online", 20000), host.tail());
+
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    hostAddr.sin_port = htons(mediaPort);
+
+    SOCKET a = raw_open("127.0.0.1");
+    check("[ackspoof] raw-A opens a socket", a != INVALID_SOCKET);
+    // Authenticate and ask for a desktop select; the host replies with a reliable ControlWindowSelected
+    // on the host->client stream. raw-A does NOT ack it, so the host will retransmit.
+    uint32_t outstanding = 0;
+    bool haveSeq = false;
+    for (int i = 0; i < 20 && !haveSeq; ++i) {
+      raw_send_hello(a, hostAddr, token);
+      Sleep(150);
+      raw_send_window_select(a, hostAddr, 1 + i, 0 /*desktop*/);
+      haveSeq = raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, 0, 1500, &outstanding);
+    }
+    check("[ackspoof] the host sent a reliable host->client response raw-A can see", haveSeq, host.tail());
+    // It retransmits while unacked: raw-A sees the SAME seq again.
+    check("[ackspoof] the host retransmits the unacked response",
+          raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 3000, nullptr),
+          host.tail());
+
+    // B spoofs an ACK for that exact outstanding seq, from a different port.
+    SOCKET b = raw_open("127.0.0.1");
+    check("[ackspoof] B opens a different port", b != INVALID_SOCKET);
+    for (int i = 0; i < 8; ++i)
+      raw_send_ctrl_ack(b, hostAddr, remote60::native_poc::kUdpControlStreamHostToClient, outstanding);
+
+    // The gate drops B's ACK, so the host still retransmits the same seq to raw-A.
+    check("[ackspoof] B's spoofed ACK does NOT stop the retransmit (dropped as a foreign ACK)",
+          raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 4000, nullptr),
+          host.tail());
+
+    // A genuine ACK from raw-A (the adopted peer) DOES stop it -- the ACK path works, only B was ignored.
+    for (int i = 0; i < 3; ++i)
+      raw_send_ctrl_ack(a, hostAddr, remote60::native_poc::kUdpControlStreamHostToClient, outstanding);
+    // Drain any in-flight copies, then confirm it has gone quiet for that seq.
+    raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 800, nullptr);
+    check("[ackspoof] after raw-A's genuine ACK the retransmit of that seq stops",
+          !raw_wait_ctrl_data(a, remote60::native_poc::kUdpControlStreamHostToClient, outstanding, 3000, nullptr),
+          host.tail());
+
+    closesocket(a);
+    closesocket(b);
+    host.Stop();
+    check("[ackspoof] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // ================================================================== a token nobody issued

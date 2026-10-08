@@ -87,6 +87,13 @@ class UdpControlChannel {
   /** Feed a datagram that the media protocol did not recognise. True when it was ours. */
   bool OnPacket(const void* data, size_t len);
 
+  /**
+   * True iff this datagram is a control datagram (magic + ControlData/Ack/Nack kind) -- i.e. one that
+   * OnPacket would CLAIM. Stateless and lock-free, so the caller can decide, BEFORE OnPacket touches any
+   * channel state, whether a datagram from a non-adopted wire peer must be dropped (udp-control-peer ①).
+   */
+  static bool IsControlDatagram(const void* data, size_t len);
+
   /** Queue and transmit one whole control message. Returns false once the channel is closed. */
   bool Send(const void* data, size_t len);
 
