@@ -157,11 +157,27 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   // r9 W2: a --prelogin worker injects only while the input desktop is the logon desktop it serves.
   // r10 T2: and not from a cached look either -- the input desktop is asked again for this event: it must be
   // the desktop the worker serves (the logon desktop; a test build's named one), or nothing is injected.
-  auto prelogin_not_serving = [&]() {
+  // r15 L6: or, for a wake event only (the pointer moving, a navigation key), the screen saver over the logon
+  // screen while nobody is logged on -- asked afresh, like the desktop.
+  // The decision is also stamped on what goes to the SYSTEM agent (the broker's per-message flag), so the
+  // agent injects it only on the desktop it was decided for.
+  auto prelogin_not_serving = [&](uint16_t eventKind) {
     if (!args.preloginMode) return false;
+    inputRouter.broker.SetDecidedOnScreenSaver(false);
     if (!capture.preloginDesktopServing.load(std::memory_order_acquire)) return true;
     const std::wstring now = remote60::native_poc::prelogin::InputDesktopName();
-    return now.empty() || _wcsicmp(now.c_str(), capture.preloginServingDesktop.c_str()) != 0;
+    if (now.empty()) return true;
+    if (_wcsicmp(now.c_str(), capture.preloginServingDesktop.c_str()) == 0) return false;
+    const bool wake = remote60::native_poc::prelogin::IsScreenSaverDesktop(now) &&
+                      remote60::native_poc::prelogin::IsScreenSaverWakeEvent(eventKind) &&
+                      remote60::native_poc::prelogin::ConsoleHasNoInteractiveUser();
+    if (wake) inputRouter.broker.SetDecidedOnScreenSaver(true);
+    return !wake;
+  };
+  // r15 L6: the sealed credential only where the logon UI takes it -- the desktop served, not the screen saver.
+  auto prelogin_credential_desktop = [&]() {
+    const std::wstring now = remote60::native_poc::prelogin::InputDesktopName();
+    return !now.empty() && _wcsicmp(now.c_str(), capture.preloginServingDesktop.c_str()) == 0;
   };
   auto link_directory_authenticated = [&]() {
     return linkDirectoryAuthenticated && clientSession.DirectoryAuthenticatedFor(servedEpoch);
@@ -599,7 +615,11 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockChallengeMessage rsp{};
-      if (args.preloginMode) {
+      if (args.preloginMode && !prelogin_credential_desktop()) {
+        // r15 L6: not on the screen saver (or any desktop but the logon one): nothing is issued to hold.
+        rsp.requestId = req.requestId;
+        rsp.status = static_cast<uint16_t>(UnlockStage::RejectedPolicy);
+      } else if (args.preloginMode) {
         // prelogin-ui r3 (item 5): before login the worker answers it -- the "Windows 로그인" credential.
         rsp = prelogin_cred().Challenge(req, unlockCookie);
       } else if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
@@ -843,7 +863,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !prelogin_not_serving()) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !prelogin_not_serving(input.kind)) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);

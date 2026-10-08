@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
 namespace remote60::native_poc::prelogin {
@@ -327,6 +328,12 @@ PreloginCredReceiver::EnvironmentFn ProductCredEnvironment() {
     }
     for (wchar_t c : input_desktop_name()) {
       h ^= static_cast<uint16_t>(c);
+      h *= 1099511628211ull;
+    }
+    // r15 L6: and which time it is this desktop -- Winlogon -> screen saver -> Winlogon is another one.
+    const uint32_t gen = InputDesktopGeneration().load(std::memory_order_acquire);
+    for (int i = 0; i < 4; ++i) {
+      h ^= (gen >> (8 * i)) & 0xFF;
       h *= 1099511628211ull;
     }
     return h;

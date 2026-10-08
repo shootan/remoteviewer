@@ -233,6 +233,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
+  src/secure_unlock_service.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -2076,6 +2077,14 @@ target_include_directories(remote60_prelogin_sas_test PRIVATE src)
 # prelogin-ui r10 (T2): the SYSTEM input agent injects a pre-login message only on the logon desktop.
 add_executable(remote60_secure_input_desktop_fence_test src/secure_input_desktop_fence_test.cpp)
 target_include_directories(remote60_secure_input_desktop_fence_test PRIVATE src)
+
+# prelogin-ui r15 (R14-2): the sealed unlock bound to its own unlock-pipe caller.
+add_executable(remote60_secure_unlock_service_test
+  src/secure_unlock_service_test.cpp
+  src/secure_unlock_service.cpp
+)
+target_include_directories(remote60_secure_unlock_service_test PRIVATE src)
+target_link_libraries(remote60_secure_unlock_service_test PRIVATE remote60_sealed_unlock)
 
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test

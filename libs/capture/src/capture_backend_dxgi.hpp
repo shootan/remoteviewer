@@ -41,6 +41,9 @@ struct DxgiDesktopCaptureConfig {
   // desktop for the SYSTEM pre-login worker). Another input desktop -- a logged-on user's -- is refused:
   // its pixels are never duplicated. Empty: any (the capture-attach test path).
   std::wstring requiredInputDesktop;
+  // r15 L6: with requiredInputDesktop, another input desktop this worker may also bind to right now (the
+  // pre-login worker: the screen saver over the logon screen, nobody logged on). Asked at every attach.
+  std::function<bool(const std::wstring& name)> alsoServedInputDesktop;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
 };
 

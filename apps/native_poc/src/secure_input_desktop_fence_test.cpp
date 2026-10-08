@@ -179,6 +179,63 @@ int main() {
     check("...and its retry after a failed write re-resolves as before",
           r.forward(loggedIn) == n::ForwardOutcome::Written && r.injected[2] == 1);
   }
+  // r15 L6 (limited): the screen saver over the logon screen.
+  {
+    namespace pl = remote60::native_poc::prelogin;
+    auto noUser = [] { return true; };
+    auto someone = [] { return false; };
+    using DS = pl::DesktopServe;
+    check("L6: the logon desktop is served", pl::DecideLogonDesktop(L"Winlogon", L"Winlogon", someone) == DS::Serve);
+    check("L6: the screen saver with NOBODY logged on: served for waking only",
+          pl::DecideLogonDesktop(L"Screen-saver", L"Winlogon", noUser) == DS::WakeOnly &&
+              pl::DecideLogonDesktop(L"screen-saver", L"Winlogon", noUser) == DS::WakeOnly);
+    check("L6: the screen saver when a user may be logged on (or it cannot be told): not served, not left",
+          pl::DecideLogonDesktop(L"Screen-saver", L"Winlogon", someone) == DS::Hold);
+    check("L6: exact names only -- a prefix or look-alike is another desktop (left)",
+          pl::DecideLogonDesktop(L"Screen-saverX", L"Winlogon", noUser) == DS::Leave &&
+              pl::DecideLogonDesktop(L"Screen", L"Winlogon", noUser) == DS::Leave &&
+              pl::DecideLogonDesktop(L"ScreenSaver2", L"Winlogon", noUser) == DS::Leave);
+    check("L6: Default still leaves (exit 14), whoever is logged on",
+          pl::DecideLogonDesktop(L"Default", L"Winlogon", noUser) == DS::Leave);
+    // Winlogon -> screen saver -> Winlogon, nobody logged on: never left, two desktop changes counted.
+    pl::LogonDesktopGuard g(L"Winlogon");
+    const uint32_t gen0 = pl::InputDesktopGeneration().load();
+    const DS a = g.Observe(L"Winlogon", noUser);
+    const DS b = g.Observe(L"Screen-saver", noUser);
+    const DS c = g.Observe(L"Winlogon", noUser);
+    check("L6: Winlogon -> screen saver -> Winlogon (nobody logged on): served, woken, served -- never left",
+          a == DS::Serve && b == DS::WakeOnly && c == DS::Serve && !g.left());
+    check("L6: ...and each change is a new desktop generation (what was asked before is not carried over)",
+          pl::InputDesktopGeneration().load() - gen0 == 2, std::to_string(pl::InputDesktopGeneration().load() - gen0));
+    pl::LogonDesktopGuard d(L"Winlogon");
+    (void)d.Observe(L"Screen-saver", noUser);
+    check("L6: screen saver -> Default: left", d.Observe(L"Default", noUser) == DS::Leave && d.left());
+
+    // The SYSTEM agent's last look, on the screen saver.
+    n::SecureInputMessage move{};
+    move.kind = static_cast<uint16_t>(n::SecureInputKind::InputEvent);
+    move.flags = n::kSecureInputFlagLogonDesktopOnly | n::kSecureInputFlagScreenSaverWake;  // decided as a wake
+    move.eventKind = 1;
+    n::SecureInputMessage logonMove = move;  // decided on the logon desktop
+    logonMove.flags = n::kSecureInputFlagLogonDesktopOnly;
+    n::SecureInputMessage click = move;
+    click.eventKind = 2;
+    n::SecureInputMessage text = move;
+    text.kind = static_cast<uint16_t>(n::SecureInputKind::InputText);
+    check("L6: agent: a pointer move from the pre-login worker wakes the screen saver (nobody logged on)",
+          n::AgentMayInjectMessage(move, L"Screen-saver", noUser));
+    check("L6: agent: ...not a click, not text", !n::AgentMayInjectMessage(click, L"Screen-saver", noUser) &&
+                                                     !n::AgentMayInjectMessage(text, L"Screen-saver", noUser));
+    check("L6: agent: ...not when someone may be logged on", !n::AgentMayInjectMessage(move, L"Screen-saver", someone));
+    check("L6: agent: ...and Default never", !n::AgentMayInjectMessage(move, L"Default", noUser));
+    n::SecureInputMessage logonClick = click;
+    logonClick.flags = n::kSecureInputFlagLogonDesktopOnly;
+    check("L6: agent: Winlogon keeps everything it had (a click decided there)",
+          n::AgentMayInjectMessage(logonClick, L"Winlogon", someone));
+    check("L6: agent: input decided on the logon desktop is dropped on the screen saver, and a wake decided on "
+          "the screen saver is dropped on the logon desktop (the old desktop's input is not carried over)",
+          !n::AgentMayInjectMessage(logonMove, L"Screen-saver", noUser) && !n::AgentMayInjectMessage(move, L"Winlogon", noUser));
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

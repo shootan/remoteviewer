@@ -42,6 +42,7 @@
 #include "prelogin_admin_pipe.hpp"
 #include "prelogin_reconcile_pacer.hpp"
 #include "secure_input_pipe_server.hpp"
+#include "secure_unlock_service.hpp"
 #include "prelogin_owner_floor.hpp"
 #include "prelogin_supervisor.hpp"
 #include "prelogin_worker_launch.hpp"
@@ -108,9 +109,6 @@ std::atomic<bool> gRunning{true};
 // the one agent behind them, shared by the connection threads under this lock.
 remote60::native_poc::PipeConnectionRegistry gSecureInputPipes;
 std::mutex gAgentMu;
-// The session of the process holding the control pipe -- the streaming host. Captured once when
-// the pipe connects, because that is the only moment the requester is identifiable.
-std::atomic<uint32_t> gRequesterSession{kInvalidSessionId};
 
 // Set by the SCM SESSIONCHANGE handler (the service control-dispatcher thread) and consumed by the
 // agent-owning main thread in ensure_agent. The handler must never touch gAgent itself -- see the
@@ -511,20 +509,6 @@ using remote60::native_poc::SecureUnlockResult;
 using remote60::native_poc::UnlockStage;
 namespace su = remote60::native_poc::sealed_unlock;
 
-// Per-connection unlock state, owned by the unlock thread.
-struct UnlockSession {
-  su::EcdhKeyPair key;
-  su::UnlockChallengeState challenge;
-  su::UnlockContext ctx{};                 // the issued context (clientPub filled at seal time)
-  uint8_t salt[su::kSaltBytes] = {};
-  bool hasChallenge = false;
-  uint32_t badAttempts = 0;                // invalid-tag DoS guard
-  uint32_t terminalRequestId = 0;          // cached terminal result (idempotent duplicate)
-  bool hasTerminal = false;
-  SecureUnlockResult terminal{};
-  uint64_t lastChallengeMs = 0;            // rate-limit issuance (capability is advertised on the wire)
-};
-
 HANDLE create_unlock_pipe() {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -543,237 +527,50 @@ HANDLE create_unlock_pipe() {
   return pipe;
 }
 
-SecureUnlockResult make_result(uint32_t requestId, uint32_t jobId, UnlockStage stage, bool terminal,
-                               uint32_t win32 = 0) {
-  SecureUnlockResult r{};
-  r.requestId = requestId;
-  r.jobId = jobId;
-  r.stage = stage_code(stage);
-  r.terminal = terminal ? 1 : 0;
-  r.win32Error = win32;
-  return r;
+// r15 R14-2: the sealed unlock's decisions live in secure_unlock_service.cpp; these are the real calls.
+namespace sus = remote60::native_poc::sealed_unlock_service;
+
+const sus::UnlockPrimitives& unlock_primitives() {
+  static const sus::UnlockPrimitives p = [] {
+    sus::UnlockPrimitives q;
+    q.sessionIsLocked = [](uint32_t session, bool* known) { return session_is_locked(session, known); };
+    q.sessionIsActive = [](uint32_t session, bool* known) { return query_session_active(session, known); };
+    q.consoleSession = [] { return static_cast<uint32_t>(WTSGetActiveConsoleSessionId()); };
+    q.accountIdOf = [](uint32_t session, bool* known) { return account_id_of(session, known); };
+    q.hostId = [] { return host_id(); };
+    q.topologyGeneration = [] { return gSessionTopologyGeneration.load(std::memory_order_acquire); };
+    q.nowMs = [] { return now_ms(); };
+    q.wtsConnect = [](uint32_t requester, uint32_t console, const wchar_t* pw, DWORD* gle) {
+      SetLastError(0);
+      const BOOL ok = WTSConnectSessionW(requester, console, const_cast<wchar_t*>(pw), FALSE);
+      *gle = GetLastError();
+      return ok != FALSE;
+    };
+    q.running = [] { return gRunning.load(std::memory_order_acquire); };
+    q.sleep = [](uint32_t ms) { Sleep(ms); };
+    q.log = [](const char* line) { diag("%s", line); };
+    return q;
+  }();
+  return p;
 }
 
-void handle_challenge_request(UnlockSession& us, const SecureUnlockChallengeRequest& req, HANDLE pipe) {
-  SecureUnlockChallengeResponse resp{};
-  resp.requestId = req.requestId;
-  resp.clientSessionCookie = req.clientSessionCookie;
-
-  const uint32_t requester = gRequesterSession.load(std::memory_order_acquire);
-  const uint32_t console = WTSGetActiveConsoleSessionId();
-  bool lockKnown = false;
-  const bool locked = session_is_locked(requester, &lockKnown);
-  const uint32_t topo = gSessionTopologyGeneration.load(std::memory_order_acquire);
-  bool reqStateKnown = false;
-  const bool reqActive = query_session_active(requester, &reqStateKnown);
-  const bool consoleUsable = (console != kInvalidSessionId && console != 0u);
-
-  // Only issue for a genuinely locked requester that is DISCONNECTED, with a valid console to
-  // reconnect it onto (Codex #370 HIGH 2). Not-locked / still-active / no-console -> RejectedPolicy,
-  // so we never move an active RDP session or seal a password toward a UAC prompt / usable desktop.
-  if (requester == kInvalidSessionId || !lockKnown || !locked || !consoleUsable ||
-      !reqStateKnown || reqActive) {
-    resp.stage = stage_code(UnlockStage::RejectedPolicy);
-    (void)write_exact(pipe, &resp, sizeof(resp));
-    return;
-  }
-
-  // Rate-limit challenge issuance: the capability is advertised on the wire, so an external client can
-  // ask; do not let it spin ECDH keygen / WTS queries. (Codex 3rd review.)
-  const uint64_t nowChallengeMs = now_ms();
-  if (us.lastChallengeMs != 0 && nowChallengeMs - us.lastChallengeMs < 500) {
-    resp.stage = stage_code(UnlockStage::RejectedPolicy);
-    (void)write_exact(pipe, &resp, sizeof(resp));
-    return;
-  }
-  us.lastChallengeMs = nowChallengeMs;
-
-  us.hasChallenge = false;
-  if (!us.key.Generate()) {
-    resp.stage = stage_code(UnlockStage::InternalError);
-    (void)write_exact(pipe, &resp, sizeof(resp));
-    return;
-  }
-  uint8_t hostPub[su::kPubKeyBytes] = {};
-  uint8_t challengeId[su::kChallengeIdBytes] = {};
-  if (!us.key.ExportPublic(hostPub) || !su::RandomBytes(us.salt, su::kSaltBytes) ||
-      !su::RandomBytes(challengeId, su::kChallengeIdBytes)) {
-    resp.stage = stage_code(UnlockStage::InternalError);
-    (void)write_exact(pipe, &resp, sizeof(resp));
-    return;
-  }
-
-  su::UnlockContext c{};
-  c.protocolVersion = 1;
-  c.hostId = host_id();
-  c.clientSessionCookie = req.clientSessionCookie;
-  std::memcpy(c.challengeId, challengeId, su::kChallengeIdBytes);
-  c.requestId = req.requestId;
-  c.requesterSession = requester;
-  c.consoleSession = console;
-  c.lockGeneration = topo;   // lock/unlock bumps the topology counter too
-  c.topologyGeneration = topo;
-  c.issuedMs = now_ms();
-  c.expiresMs = c.issuedMs + 30000;
-  bool accountKnown = false;
-  c.accountId = account_id_of(requester, &accountKnown);
-  if (!accountKnown) {
-    resp.stage = stage_code(UnlockStage::RejectedPolicy);
-    (void)write_exact(pipe, &resp, sizeof(resp));
-    return;
-  }
-  std::memcpy(c.hostPub, hostPub, su::kPubKeyBytes);
-  us.ctx = c;
-  us.challenge.Issue(challengeId, req.clientSessionCookie, topo, c.issuedMs, c.expiresMs);
-  us.hasChallenge = true;
-  us.badAttempts = 0;
-
-  resp.stage = stage_code(UnlockStage::ChallengeIssued);
-  std::memcpy(resp.challengeId, challengeId, su::kChallengeIdBytes);
-  std::memcpy(resp.hostPub, hostPub, su::kPubKeyBytes);
-  std::memcpy(resp.salt, us.salt, su::kSaltBytes);
-  resp.hostId = c.hostId;
-  resp.accountId = c.accountId;
-  resp.requesterSession = c.requesterSession;
-  resp.consoleSession = c.consoleSession;
-  resp.lockGeneration = c.lockGeneration;
-  resp.topologyGeneration = c.topologyGeneration;
-  resp.issuedMs = c.issuedMs;
-  resp.expiresMs = c.expiresMs;
-  diag("unlock challenge issued requestId=%u requester=%u console=%u topo=%u", req.requestId,
-       requester, console, topo);
-  (void)write_exact(pipe, &resp, sizeof(resp));
-}
-
-void handle_sealed_request(UnlockSession& us, const SecureUnlockSealedRequest& req, HANDLE pipe) {
-  const uint32_t jobId = gUnlockJobCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-
-  // Idempotent duplicate of a finished job.
-  if (us.hasTerminal && us.terminalRequestId == req.requestId) {
-    SecureUnlockResult r = us.terminal;
-    r.jobId = jobId;
-    (void)write_exact(pipe, &r, sizeof(r));
-    return;
-  }
-
-  auto reject = [&](UnlockStage stage, uint32_t win32 = 0) {
-    const SecureUnlockResult r = make_result(req.requestId, jobId, stage, true, win32);
-    us.hasTerminal = true;
-    us.terminalRequestId = req.requestId;
-    us.terminal = r;
-    (void)write_exact(pipe, &r, sizeof(r));
-  };
-  auto rejectNoCache = [&](UnlockStage stage) {  // do not cache: allows a fresh retry after new challenge
-    const SecureUnlockResult r = make_result(req.requestId, jobId, stage, true);
-    (void)write_exact(pipe, &r, sizeof(r));
-  };
-
-  if (!us.hasChallenge) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
-  // The sealed request's outer requestId must equal the challenge's, or a valid ciphertext could be
-  // replayed under a different outer id and cached against it (Codex #370 BLOCKER D). The AAD binds
-  // us.ctx.requestId, so a mismatch would also fail the tag; reject before we even try.
-  if (req.requestId != us.ctx.requestId) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
-
-  const uint32_t topoNow = gSessionTopologyGeneration.load(std::memory_order_acquire);
-  const auto verdict = us.challenge.Verify(req.challengeId, req.clientSessionCookie,
-                                           us.ctx.topologyGeneration, now_ms());
-  if (verdict == su::ChallengeVerdict::AlreadyConsumed) {
-    if (us.hasTerminal && us.terminalRequestId == req.requestId) {
-      SecureUnlockResult r = us.terminal; r.jobId = jobId; (void)write_exact(pipe, &r, sizeof(r)); return;
-    }
-    rejectNoCache(UnlockStage::RejectedPolicy); return;
-  }
-  if (verdict == su::ChallengeVerdict::Expired) { rejectNoCache(UnlockStage::Timeout); return; }
-  if (verdict != su::ChallengeVerdict::Valid) { rejectNoCache(UnlockStage::RejectedPolicy); return; }
-  // Topology changed since issue (session moved/locked/unlocked): refuse before touching crypto.
-  if (topoNow != us.ctx.topologyGeneration) { rejectNoCache(UnlockStage::RejectedStaleTopology); return; }
-
-  // Rebuild the exact context (add the client's public point) and derive the key.
-  su::UnlockContext c = us.ctx;
-  std::memcpy(c.clientPub, req.clientPub, su::kPubKeyBytes);
-  const auto kdf = su::BuildKdfInfo(c);
-  const auto aad = su::BuildAad(c);
-  uint8_t aesKey[su::kAesKeyBytes] = {};
-  if (!su::DeriveAesKey(us.key, req.clientPub, us.salt, kdf.data(), kdf.size(), aesKey)) {
-    su::SecureZero(aesKey, sizeof(aesKey));
-    rejectNoCache(UnlockStage::InternalError);
-    return;
-  }
-  uint8_t plain[su::kPlaintextBytes] = {};
-  const bool opened = su::AesGcmOpen(aesKey, req.nonce, aad.data(), aad.size(), req.cipher,
-                                     su::kPlaintextBytes, req.tag, plain);
-  su::SecureZero(aesKey, sizeof(aesKey));
-  if (!opened) {
-    su::SecureZero(plain, sizeof(plain));
-    if (++us.badAttempts >= 5) { us.challenge.ClearOutstanding(); us.hasChallenge = false; }
-    rejectNoCache(UnlockStage::DecryptFailed);  // invalid tag does NOT consume the challenge
-    return;
-  }
-  // Re-check topology one last time right before we commit + act.
-  if (gSessionTopologyGeneration.load(std::memory_order_acquire) != us.ctx.topologyGeneration) {
-    su::SecureZero(plain, sizeof(plain));
-    rejectNoCache(UnlockStage::RejectedStaleTopology);
-    return;
-  }
-  us.challenge.Consume(req.challengeId);  // exactly-once from here
-  us.hasChallenge = false;
-
-  uint16_t pw[su::kMaxPasswordUtf16] = {};
-  uint16_t pwCount = 0;
-  const bool unpacked = su::UnpackPassword(plain, pw, &pwCount);
-  su::SecureZero(plain, sizeof(plain));
-  if (!unpacked) { su::SecureZero(pw, sizeof(pw)); reject(UnlockStage::InternalError); return; }
-
-  wchar_t pwz[su::kMaxPasswordUtf16 + 1] = {};
-  for (uint16_t i = 0; i < pwCount; ++i) pwz[i] = static_cast<wchar_t>(pw[i]);
-  su::SecureZero(pw, sizeof(pw));
-
-  // Third topology fence, right before the irreversible WTS call (Codex #370 HIGH 1): if the session
-  // moved/locked/unlocked since the password was decrypted, do not act on a stale target.
-  if (gSessionTopologyGeneration.load(std::memory_order_acquire) != us.ctx.topologyGeneration) {
-    su::SecureZero(pwz, sizeof(pwz));
-    reject(UnlockStage::RejectedStaleTopology);
-    return;
-  }
-  // Directly re-verify the requester/console identity right before the irreversible call: the topology
-  // counter has a tiny store-vs-bump window on requester change, and a missed WTS event could leave it
-  // stale. If identity moved, abort. (Codex 3rd review.)
-  if (gRequesterSession.load(std::memory_order_acquire) != us.ctx.requesterSession ||
-      WTSGetActiveConsoleSessionId() != us.ctx.consoleSession) {
-    su::SecureZero(pwz, sizeof(pwz));
-    reject(UnlockStage::RejectedStaleTopology);
-    return;
-  }
-  // Reconnect the disconnected requester session onto the console with the account's password. bWait
-  // FALSE returns promptly (Codex #370 BLOCKER 3): we confirm the unlock by polling the lock state
-  // rather than blocking this thread inside WTS.
-  SetLastError(0);
-  const BOOL ok = WTSConnectSessionW(us.ctx.requesterSession, us.ctx.consoleSession, pwz, FALSE);
-  const DWORD gle = GetLastError();
-  su::SecureZero(pwz, sizeof(pwz));
-
-  if (ok) {
-    // WTSConnectSession returned true; confirm the unlock actually took by polling lock state.
-    bool unlocked = false;
-    for (int i = 0; i < 20 && gRunning.load(std::memory_order_acquire); ++i) {
-      bool k = false;
-      if (!session_is_locked(us.ctx.requesterSession, &k) && k) { unlocked = true; break; }
-      Sleep(150);
-    }
-    diag("unlock WTSConnectSession ok, unlocked=%d requester=%u console=%u", unlocked ? 1 : 0,
-         us.ctx.requesterSession, us.ctx.consoleSession);
-    reject(unlocked ? UnlockStage::SessionUnlocked : UnlockStage::WtsConnectAccepted);
-  } else {
-    diag("unlock WTSConnectSession failed gle=%lu requester=%u console=%u", gle,
-         us.ctx.requesterSession, us.ctx.consoleSession);
-    // Wrong password / account restriction -> AuthFailed (no retry storm). Others -> InternalError.
-    const UnlockStage stage =
-        (gle == ERROR_LOGON_FAILURE || gle == ERROR_ACCOUNT_RESTRICTION ||
-         gle == ERROR_PASSWORD_EXPIRED || gle == ERROR_ACCOUNT_DISABLED)
-            ? UnlockStage::AuthFailed
-            : UnlockStage::InternalError;
-    reject(stage, gle);
-  }
+// The process on the other end of the unlock pipe: id, creation time, session -- read once at connect.
+sus::UnlockCaller unlock_caller_of(HANDLE pipe) {
+  sus::UnlockCaller c;
+  ULONG pid = 0;
+  if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return c;
+  DWORD session = 0;
+  if (!ProcessIdToSessionId(pid, &session)) return c;
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!h) return c;
+  FILETIME cr{}, ex{}, k{}, u{};
+  const bool timed = GetProcessTimes(h, &cr, &ex, &k, &u) != FALSE;
+  CloseHandle(h);
+  if (!timed) return c;
+  c.processId = pid;
+  c.processStartTime = (static_cast<uint64_t>(cr.dwHighDateTime) << 32) | cr.dwLowDateTime;
+  c.session = session;
+  return c;
 }
 
 void unlock_pipe_loop() {
@@ -789,7 +586,16 @@ void unlock_pipe_loop() {
       break;
     }
     if (connected) {
-      UnlockSession us;
+      sus::UnlockSession us;
+      // r15 R14-2: this connection's caller, from the pipe -- and the same process must still be on it at
+      // the irreversible step.
+      us.caller = unlock_caller_of(pipe);
+      us.callerStillThere = [pipe, &us] {
+        const sus::UnlockCaller now = unlock_caller_of(pipe);
+        return now.processId != 0 && now.processId == us.caller.processId &&
+               now.processStartTime == us.caller.processStartTime && now.session == us.caller.session;
+      };
+      const sus::Write write = [pipe](const void* d, size_t n) { (void)write_exact(pipe, d, static_cast<DWORD>(n)); };
       uint8_t buf[512];
       while (gRunning.load(std::memory_order_acquire)) {
         DWORD read = 0;
@@ -805,12 +611,13 @@ void unlock_pipe_loop() {
             read == sizeof(SecureUnlockChallengeRequest)) {
           SecureUnlockChallengeRequest req{};
           std::memcpy(&req, buf, sizeof(req));
-          handle_challenge_request(us, req, pipe);
+          sus::HandleChallengeRequest(us, req, unlock_primitives(), write);
         } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::SealedRequest) &&
                    read == sizeof(SecureUnlockSealedRequest)) {
           SecureUnlockSealedRequest req{};
           std::memcpy(&req, buf, sizeof(req));
-          handle_sealed_request(us, req, pipe);
+          sus::HandleSealedRequest(us, req, gUnlockJobCounter.fetch_add(1, std::memory_order_relaxed) + 1,
+                                   unlock_primitives(), write);
           su::SecureZero(&req, sizeof(req));
         } else {
           break;  // unknown/malformed
@@ -1508,18 +1315,18 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // the pipe from the console's worker or the new user's host).
   remote60::native_poc::RunMultiClientPipeServer(
       [] { return gRunning.load(std::memory_order_acquire); }, [] { return create_secure_pipe(); },
-      [](HANDLE pipe) {
+      [](HANDLE pipe, HANDLE stop) {
         // Identify the requester before reading anything from it. This is the only point at which the
         // host's session can be learned, and everything downstream depends on it -- for THIS connection.
         const uint32_t requester = requester_session_of(pipe);
         const uint32_t consoleGenerationAtConnect = gConsoleGeneration.load(std::memory_order_acquire);
-        // The latest connection is the streaming host the sealed unlock path speaks for (as before).
-        gRequesterSession.store(requester, std::memory_order_release);
-        gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester changed -> fence
+        // r15 R14-2: nothing process-wide is published -- the unlock path binds its own caller, and an input
+        // connection coming or going is not a session-topology change.
         diag("control pipe connected, requester session=%u", requester);
         while (gRunning.load(std::memory_order_acquire)) {
           SecureInputMessage message{};
-          if (!read_exact(pipe, &message, sizeof(message))) break;
+          // r15 R14-1: overlapped, woken by the server's stop event (secure_input_pipe_server.hpp).
+          if (!remote60::native_poc::ReadPipeMessage(pipe, &message, sizeof(message), stop)) break;
           if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
           remote60::native_poc::ForwardOutcome outcome;
           {
@@ -1533,10 +1340,6 @@ void WINAPI service_main(DWORD, wchar_t**) {
             break;
           }
         }
-        // This requester is gone; it is no longer the answer for the unlock path (unless a newer one took it).
-        uint32_t mine = requester;
-        gRequesterSession.compare_exchange_strong(mine, kInvalidSessionId, std::memory_order_acq_rel);
-        gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);  // requester gone -> fence
       },
       &gSecureInputPipes);
   {
@@ -1818,7 +1621,9 @@ int run_agent(HANDLE readPipe) {
     bool journalPlayback = false;
     const auto step = remote60::native_poc::AgentHandleMessage(
         message, [&] { return attach_to_input_desktop(&ownedDesktop, &journalPlayback); },
-        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); });
+        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); },
+        // r15 L6: a screen-saver wake only while nobody is logged on at the console -- asked here, again.
+        [] { return remote60::native_poc::prelogin::ConsoleHasNoInteractiveUser(); });
     if (step == remote60::native_poc::AgentStep::AttachFailed) {
       report_agent_state(L"(attach failed)", false, false, false);
       continue;

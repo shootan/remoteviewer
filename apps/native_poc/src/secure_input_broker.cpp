@@ -160,6 +160,12 @@ bool SecureInputBrokerClient::ConnectLocked(uint32_t budgetMs) {
   return false;
 }
 
+void SecureInputBrokerClient::SetDecidedOnScreenSaver(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  flags_ = on ? static_cast<uint16_t>(flags_ | kSecureInputFlagScreenSaverWake)
+              : static_cast<uint16_t>(flags_ & ~kSecureInputFlagScreenSaverWake);
+}
+
 void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
   std::lock_guard<std::mutex> lock(mu_);
   flags_ = on ? static_cast<uint16_t>(flags_ | kSecureInputFlagLogonDesktopOnly)

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "prelogin_cred_host.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
 using namespace remote60::native_poc;
@@ -116,6 +117,18 @@ ControlUnlockSealedRequestMessage seal(const ControlUnlockChallengeMessage& ch, 
   return s;
 }
 
+}  // namespace
+
+// r15 L6: the product's environment of a credential challenge (where it was opened) is a different one after
+// the input desktop changed and came back (Winlogon -> screen saver -> Winlogon).
+static bool environment_moves_with_the_desktop_generation() {
+  const auto env = remote60::native_poc::prelogin::ProductCredEnvironment();
+  const uint64_t before = env();
+  remote60::native_poc::prelogin::InputDesktopGeneration().fetch_add(2);  // away and back
+  return env() != before;
+}
+
+namespace {
 bool wait_result(PreloginCredReceiver& r, uint32_t id, ControlUnlockStatusResultMessage* out, int ms = 5000) {
   const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
   while (std::chrono::steady_clock::now() < end) {
@@ -389,6 +402,9 @@ int main() {
     check("ProductCredTarget(): the foreground here is not the logon UI", productTarget() == 0);
   }
 
+  check("r15 L6: a credential challenge's environment is another one after the input desktop went away and came back "
+        "(Winlogon -> screen saver -> Winlogon): nothing asked before is typed after",
+        environment_moves_with_the_desktop_generation());
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }
