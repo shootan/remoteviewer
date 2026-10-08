@@ -750,12 +750,24 @@ int main() {
       World w;
       TestServer s;
       s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
-      pl::NotifyUserHostReadyInBackground([] { return false; }, 400, 5, 100, name, self_server);
+      pl::UserHostReadyNotifier never;
+      pl::UserHostReadyNotifier::Options o1;
+      o1.waitReadyMs = 400;
+      o1.attempts = 5;
+      o1.delayMs = 100;
+      o1.pipeName = name;
+      o1.check = self_server;
+      never.Start([] { return false; }, o1);
       Sleep(1500);
       check("ready while the host never registered: nothing is sent (the service keeps prelogin)", w.readies == 0);
       s.stop();
       std::atomic<bool> registered{false};
-      pl::NotifyUserHostReadyInBackground([&registered] { return registered.load(); }, 10000, 8, 400, name, self_server);
+      pl::UserHostReadyNotifier later;
+      pl::UserHostReadyNotifier::Options o2 = o1;
+      o2.waitReadyMs = 10000;
+      o2.attempts = 8;
+      o2.delayMs = 400;
+      later.Start([&registered] { return registered.load(); }, o2);
       Sleep(300);
       check("...and not before registration, even with the service up later", w.readies == 0);
       registered = true;
@@ -767,6 +779,148 @@ int main() {
       s2.stop();
       check("registered, the service not up yet: the ready is retried and arrives once it is", arrived && w2.readies == 1,
             std::to_string(w2.readies));
+    }
+  }
+
+  // ---------------------------------------------------------------- r12 L1: the Ready notifier's owner
+  {
+    wchar_t me[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, me, MAX_PATH);
+    const std::wstring self = me;
+    pl::UserHostReadyNotifier::Options refresh;
+    refresh.refreshMs = 1000;  // the product's 5 s, shortened; the same loop
+    refresh.check = self_server;
+    {
+      // Stopped while it sleeps between refreshes.
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l1a";
+      World w;
+      TestServer s;
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      std::atomic<int> calls{0};
+      pl::UserHostReadyNotifier n;
+      pl::UserHostReadyNotifier::Options o = refresh;
+      o.pipeName = name;
+      n.Start([&calls] { ++calls; return true; }, o);
+      const bool first = wait_until_ms([&] { return w.readies >= 1; }, 5000);
+      Sleep(200);  // now in the refresh wait
+      const ULONGLONG t0 = GetTickCount64();
+      n.Stop();
+      const ULONGLONG took = GetTickCount64() - t0;
+      const int callsAtStop = calls.load(), readiesAtStop = w.readies;
+      Sleep(2500);  // two refresh periods
+      s.stop();
+      check("L1: stopped while it sleeps between refreshes: Stop returns at once (the wait is woken)",
+            first && took < 500, std::to_string(took) + " ms");
+      check("L1: ...and after Stop: readyNow is not called again and no Ready is sent (2.5 s, refresh 1 s)",
+            calls.load() == callsAtStop && w.readies == readiesAtStop,
+            std::to_string(calls.load() - callsAtStop) + " calls, " + std::to_string(w.readies - readiesAtStop) + " readies");
+    }
+    {
+      // Stopped while readyNow itself runs: Stop waits for it, and nothing is sent after it.
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l1b";
+      World w;
+      TestServer s;
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      std::atomic<bool> inside{false}, release{false};
+      std::atomic<int> calls{0};
+      pl::UserHostReadyNotifier n;
+      pl::UserHostReadyNotifier::Options o = refresh;
+      o.pipeName = name;
+      n.Start([&] {
+        ++calls;
+        inside = true;
+        while (!release) Sleep(10);
+        inside = false;
+        return true;
+      }, o);
+      wait_until_ms([&] { return inside.load(); }, 3000);
+      std::thread releaser([&] { Sleep(300); release = true; });
+      const ULONGLONG t0 = GetTickCount64();
+      n.Stop();
+      const ULONGLONG took = GetTickCount64() - t0;
+      releaser.join();
+      const bool insideAfter = inside.load();
+      const int callsAtStop = calls.load();
+      Sleep(1500);
+      s.stop();
+      check("L1: stopped while readyNow runs: Stop returns only after it finished (the callback is not left running)",
+            !insideAfter && took >= 250 && took < 2000, std::to_string(took) + " ms");
+      check("L1: ...and the Ready it was about to decide is NOT sent, nor any later one",
+            n.sendsStarted() == 0 && w.readies == 0 && calls.load() == callsAtStop,
+            std::to_string(n.sendsStarted()) + " sends, " + std::to_string(w.readies) + " readies");
+    }
+    {
+      // Stopped while it waits for the service's answer: a server that takes the request and never replies.
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l1c";
+      HANDLE server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                                       1, 4096, 4096, 0, nullptr);
+      std::atomic<bool> connected{false};
+      std::thread accept([&] {
+        if (ConnectNamedPipe(server, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) connected = true;
+      });
+      pl::UserHostReadyNotifier n;
+      pl::UserHostReadyNotifier::Options o = refresh;
+      o.pipeName = name;
+      n.Start([] { return true; }, o);
+      wait_until_ms([&] { return connected.load(); }, 3000);
+      Sleep(400);  // the request is written; the client waits for the answer (up to 5 s)
+      const ULONGLONG t0 = GetTickCount64();
+      n.Stop();
+      const ULONGLONG took = GetTickCount64() - t0;
+      accept.join();
+      DisconnectNamedPipe(server);
+      CloseHandle(server);
+      check("L1: stopped while it waits for the service's answer: the request is cancelled and waited out, Stop "
+            "returns within a second (not the 5 s I/O bound)",
+            connected.load() && n.sendsStarted() == 1 && took < 1000, std::to_string(took) + " ms");
+    }
+    {
+      // The owner goes out of scope with what readyNow reads (declared before it): destroyed after it stopped.
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l1d";
+      World w;
+      TestServer s;
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      static std::atomic<bool> gone{false};
+      static std::atomic<int> afterGone{0};
+      struct Agent {
+        std::string status = "online";
+        ~Agent() { gone = true; }
+      };
+      {
+        Agent agent;  // what the product's readyNow reads (the directory agent's status)
+        pl::UserHostReadyNotifier n;
+        pl::UserHostReadyNotifier::Options o = refresh;
+        o.pipeName = name;
+        n.Start([&agent] {
+          if (gone) ++afterGone;
+          return agent.status == "online";
+        }, o);
+        wait_until_ms([&] { return w.readies >= 1; }, 5000);
+      }  // n destroyed first (declared last), then agent
+      const int readiesAtEnd = w.readies;
+      Sleep(2500);
+      s.stop();
+      check("L1: the owner leaves scope with what readyNow reads: no call after it is gone, no Ready after",
+            gone.load() && afterGone.load() == 0 && w.readies == readiesAtEnd && readiesAtEnd >= 1,
+            std::to_string(afterGone.load()) + " calls after, " + std::to_string(w.readies - readiesAtEnd) + " readies after");
+    }
+    {
+      // U4 kept: the service not there at first, then up -- the refresh still finds it.
+      const std::wstring name = L"\\\\.\\pipe\\GNLinkTest-admin-" + std::to_wstring(GetCurrentProcessId()) + L"-l1e";
+      pl::UserHostReadyNotifier n;
+      pl::UserHostReadyNotifier::Options o = refresh;
+      o.pipeName = name;
+      o.attempts = 2;
+      o.delayMs = 200;
+      n.Start([] { return true; }, o);
+      Sleep(1500);  // its quick retries are spent
+      World w;
+      TestServer s;
+      s.start(&w, name, current_user_sddl(), [](void*) { return true; }, [self](void* pipe) { return pl::ClientImageIs(pipe, self); });
+      const bool arrived = wait_until_ms([&] { return w.readies >= 1; }, 4000);
+      n.Stop();
+      s.stop();
+      check("U4 kept: a service that comes up after the quick retries still gets the Ready at the refresh pace", arrived);
     }
   }
 

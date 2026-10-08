@@ -721,7 +721,7 @@ bool RunPreloginAdminServer(const AdminPrimitives& p, std::function<bool()> keep
 }
 
 AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName,
-                                    const ServerCheck& verifyServer, uint32_t ioMs) {
+                                    const ServerCheck& verifyServer, uint32_t ioMs, const std::function<bool()>& keepRunning) {
   AdminReply reply;
   reply.status = AdminStatus::Unavailable;
   // The server serves one client at a time: while it does, the name is taken (PIPE_BUSY). That is
@@ -740,6 +740,7 @@ AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, cons
     }
     const ULONGLONG now = GetTickCount64();
     if ((e != ERROR_FILE_NOT_FOUND && e != ERROR_PIPE_BUSY) || now >= deadline) return reply;
+    if (keepRunning && !keepRunning()) return reply;  // r12 L1: the caller is stopping
     if (e == ERROR_PIPE_BUSY) {
       WaitNamedPipeW(pipeName, static_cast<DWORD>((std::min)(deadline - now, 500ull)));
     } else {
@@ -765,14 +766,14 @@ AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, cons
   bool ok = event != nullptr;
   if (ok) {
     const BOOL w = WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &wrote, &ov);
-    ok = finish_io(pipe, &ov, w, ioMs, nullptr, &wrote, &error) && wrote == out.size();
+    ok = finish_io(pipe, &ov, w, ioMs, keepRunning, &wrote, &error) && wrote == out.size();
   }
   if (ok) {
     ov = OVERLAPPED{};
     ov.hEvent = event;
     ResetEvent(event);
     const BOOL rd = ReadFile(pipe, in.data(), static_cast<DWORD>(in.size()), &got, &ov);
-    ok = finish_io(pipe, &ov, rd, ioMs, nullptr, &got, &error);
+    ok = finish_io(pipe, &ov, rd, ioMs, keepRunning, &got, &error);
   }
   if (ok) {
     in.resize(got);
@@ -882,15 +883,24 @@ bool QueryDurablePreloginEnabled() {
   return reply.status == AdminStatus::Ok && reply.enabled;
 }
 
-void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs, int attempts, uint32_t delayMs,
-                                     const std::wstring& pipeName, ServerCheck check, uint32_t refreshMs) {
-  const std::wstring pipe = pipeName.empty() ? HostServicePipeName() : pipeName;
-  if (!check) check = HostServiceServerCheck();
-  std::thread([readyNow, waitReadyMs, attempts, delayMs, pipe, check, refreshMs] {
+void UserHostReadyNotifier::Start(std::function<bool()> readyNow, Options o) {
+  const std::wstring pipe = o.pipeName.empty() ? HostServicePipeName() : o.pipeName;
+  ServerCheck check = o.check ? o.check : HostServiceServerCheck();
+  sends_ = 0;
+  worker_.Start([this, readyNow, o, pipe, check](StoppableWorker& w) {
+    const uint32_t waitReadyMs = o.waitReadyMs, delayMs = o.delayMs, refreshMs = o.refreshMs;
+    const int attempts = o.attempts;
+    // r12 L1: every step asks the owner first; a request in flight is cancelled when it stops.
+    const std::function<bool()> keep = [&w] { return !w.Stopping(); };
+    const auto send = [&](const AdminRequest& r) {
+      if (w.Stopping()) return false;
+      sends_.fetch_add(1);
+      return SendPreloginAdminRequest(r, 2000, pipe.c_str(), check, 5000, keep).status == AdminStatus::Ok;
+    };
     const ULONGLONG until = GetTickCount64() + waitReadyMs;
-    while (refreshMs == 0 && readyNow && !readyNow()) {  // (refreshing: the loop below waits, unbounded)
+    while (refreshMs == 0 && readyNow && !w.Stopping() && !readyNow()) {  // (refreshing: the loop below waits)
       if (GetTickCount64() >= until) return;  // never registered: no ready, the service keeps prelogin
-      Sleep(250);
+      if (!w.Wait(250)) return;
     }
     AdminRequest r;
     r.op = AdminOp::Ready;
@@ -900,8 +910,8 @@ void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t wa
     if (n > 0 && n < 129) r.readyNonce.assign(nonce, nonce + n);
     if (refreshMs == 0) {
       for (int i = 0; i < attempts; ++i) {
-        if (SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok) return;
-        Sleep(delayMs);
+        if (send(r)) return;
+        if (!w.Wait(delayMs)) return;
       }
       return;
     }
@@ -911,13 +921,13 @@ void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t wa
     // the same admin pipe, checked by the service the same way (image, session, start time; the adopted
     // Host's case by the sender's real parent) -- quickly at first, then at the refresh pace.
     int failures = 0;
-    for (;;) {
+    while (!w.Stopping()) {
       bool ok = false;
-      if (!readyNow || readyNow()) ok = SendPreloginAdminRequest(r, 2000, pipe.c_str(), check).status == AdminStatus::Ok;
+      if (!readyNow || readyNow()) ok = send(r);
       failures = ok ? 0 : failures + 1;
-      Sleep(!ok && failures <= attempts ? delayMs : refreshMs);
+      if (!w.Wait(!ok && failures <= attempts ? delayMs : refreshMs)) return;
     }
-  }).detach();
+  });
 }
 
 #endif

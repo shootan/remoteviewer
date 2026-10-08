@@ -17,8 +17,11 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <iostream>
 #include <string>
+
+#include "stoppable_worker.hpp"
 
 namespace remote60::native_poc::prelogin {
 
@@ -70,5 +73,31 @@ class LogonDesktopGuard {
   std::wstring serving_;
   bool left_ = false;
 };
+
+// The worker's watch, as its owner runs it (r12 L1: an owned StoppableWorker, not a detached for(;;) over
+// the capture state). Every `periodMs` the input desktop is read and judged; `serving` says the verdict to
+// the input / capture paths; `onFirstServing` once; `onLeft(name)` when the desktop was another (the
+// product's leaves the process; a returning one ends the watch). Stopped by its owner: the wait wakes and
+// the loop returns before the owner's Stop() does -- before what it writes is destroyed.
+template <typename DesktopName, typename OnServing, typename OnLeft>
+void RunLogonDesktopWatch(StoppableWorker& w, const std::wstring& servedDesktop, std::atomic<bool>& serving,
+                          DesktopName desktopName, OnServing onFirstServing, OnLeft onLeft, uint32_t periodMs = 100) {
+  LogonDesktopGuard guard(servedDesktop);
+  bool announced = false;
+  while (!w.Stopping()) {
+    const std::wstring name = desktopName();
+    const bool now = guard.Observe(name);
+    serving.store(now, std::memory_order_release);
+    if (now && !announced) {
+      onFirstServing();
+      announced = true;
+    }
+    if (guard.left()) {
+      onLeft(name);
+      return;
+    }
+    if (!w.Wait(periodMs)) return;
+  }
+}
 
 }  // namespace remote60::native_poc::prelogin

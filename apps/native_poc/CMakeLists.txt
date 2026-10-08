@@ -2036,6 +2036,22 @@ add_executable(remote60_host_session_admission_test
 target_include_directories(remote60_host_session_admission_test PRIVATE src)
 target_link_libraries(remote60_host_session_admission_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt)
 
+# prelogin-ui r12 (L1): the periodic Ready and the pre-login desktop watch end before what they read.
+add_executable(remote60_host_background_lifetime_test
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/udp_control_channel.cpp
+  src/prelogin_admin_pipe.cpp
+  src/host_background_lifetime_test.cpp
+)
+target_include_directories(remote60_host_background_lifetime_test PRIVATE src)
+target_link_libraries(remote60_host_background_lifetime_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt)
+if(MSVC)
+  target_compile_options(remote60_host_background_lifetime_test PRIVATE /utf-8)
+endif()
+
 # prelogin-ui r9 (R4/W1): when the service starts the logged-on user's GNLinkHost.
 add_executable(remote60_prelogin_user_host_policy_test src/prelogin_user_host_policy_test.cpp)
 target_include_directories(remote60_prelogin_user_host_policy_test PRIVATE src)

@@ -26,6 +26,7 @@
 //         buffer, OVERLAPPED or event goes away (r5 G4). Pure parts (codec, HandleAdminRequest, the
 //         enable/disable bookkeeping over injected primitives) are testable without the service.
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "prelogin_machine_record.hpp"
+#include "stoppable_worker.hpp"
 
 namespace remote60::native_poc::prelogin {
 
@@ -285,9 +287,11 @@ void BindProductStartType(AdminPrimitives* p, const wchar_t* serviceName);
 void BindProductMachineStore(AdminPrimitives* p);
 // GNLinkHost's side: one request, one reply. Unavailable when the pipe is not there within waitMs;
 // Untrusted (nothing written) when `verifyServer` does not accept the server; the write and the read
-// each take at most ioMs, a timed-out one cancelled and waited out.
+// each take at most ioMs, a timed-out one cancelled and waited out. r12 L1: `keepRunning` false ends it
+// sooner -- the wait for the pipe, or the I/O in flight (cancelled and waited out) -- as Unavailable.
 AdminReply SendPreloginAdminRequest(const AdminRequest& r, uint32_t waitMs, const wchar_t* pipeName = kPreloginAdminPipeName,
-                                    const ServerCheck& verifyServer = ServerIsInstalledService, uint32_t ioMs = 5000);
+                                    const ServerCheck& verifyServer = ServerIsInstalledService, uint32_t ioMs = 5000,
+                                    const std::function<bool()>& keepRunning = nullptr);
 
 // The streaming host's side (r2). The pipe is the product's; a test build of the host
 // (REMOTE60_STREAM_TEST_SEAM) may name a \\.\pipe\GNLinkTest- pipe from its environment, and its server
@@ -308,15 +312,37 @@ uint8_t DelegateSasToService(uint32_t* win32, bool* cadNotRequired);
 bool QueryDurablePreloginEnabled();
 // Item 7: tell the service this user Host is registered and serving -- once `readyNow()` says so (the
 // first successful directory heartbeat), polled for up to `waitReadyMs`; then up to `attempts` sends,
-// `delayMs` apart, on a background thread. Bounded both ways; the service keeps prelogin until one lands.
-// r11 U4: `refreshMs` != 0 -- not bounded: after that, for the life of the process, said again every
-// `refreshMs` while `readyNow()` holds (a service that starts or restarts later learns it from the Host
-// already running); failures retry `attempts` times `delayMs` apart, then at the refresh pace.
+// `delayMs` apart. Bounded both ways; the service keeps prelogin until one lands.
+// r11 U4: `refreshMs` != 0 -- after that, for as long as it runs, said again every `refreshMs` while
+// `readyNow()` holds (a service that starts or restarts later learns it from the Host already running);
+// failures retry `attempts` times `delayMs` apart, then at the refresh pace; no bounded first wait.
+// r12 L1: it runs on a thread this object OWNS (stoppable_worker.hpp). Stop() -- also the destructor --
+// wakes any wait, cancels a request in flight (waited out) and joins: once it returns, readyNow is not
+// called again and no Ready is sent. The owner is stopped before whatever readyNow reads is destroyed
+// (host_session.hpp SessionState, host_shutdown.cpp).
 inline constexpr uint32_t kUserHostReadyRefreshMs = 5000;
-void NotifyUserHostReadyInBackground(std::function<bool()> readyNow, uint32_t waitReadyMs = 180000, int attempts = 10,
-                                     uint32_t delayMs = 1000, const std::wstring& pipeName = std::wstring(),
-                                     ServerCheck check = nullptr,  // null: HostServiceServerCheck()
-                                     uint32_t refreshMs = 0);
+class UserHostReadyNotifier {
+ public:
+  struct Options {
+    uint32_t waitReadyMs = 180000;
+    int attempts = 10;
+    uint32_t delayMs = 1000;
+    uint32_t refreshMs = 0;
+    std::wstring pipeName;  // empty: HostServicePipeName()
+    ServerCheck check;      // null: HostServiceServerCheck()
+  };
+  UserHostReadyNotifier() = default;
+  UserHostReadyNotifier(const UserHostReadyNotifier&) = delete;
+  UserHostReadyNotifier& operator=(const UserHostReadyNotifier&) = delete;
+  ~UserHostReadyNotifier() { Stop(); }
+  void Start(std::function<bool()> readyNow, Options options);
+  void Stop() { worker_.Stop(); }
+  uint32_t sendsStarted() const { return sends_.load(); }  // Ready requests begun (tests)
+
+ private:
+  std::atomic<uint32_t> sends_{0};
+  StoppableWorker worker_;
+};
 #endif
 
 }  // namespace remote60::native_poc::prelogin

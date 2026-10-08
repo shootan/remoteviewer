@@ -20,6 +20,7 @@
 #include "directory_client.hpp"
 #include "host_injected_input.hpp"
 #include "native_socket.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
@@ -52,12 +53,20 @@ struct SocketCloser {
   enum class DirectoryHello { Rejected, Retransmit, NewSession };
 
 struct SessionState {
-  ~SessionState() { directoryAgent.Stop(); }  // before member/socket destruction, including early startup failure
+  // r12 L1: the Ready notifier (which reads directoryAgent) first, then the agent -- before member/socket
+  // destruction, including an early startup failure.
+  ~SessionState() {
+    readyNotifier.Stop();
+    directoryAgent.Stop();
+  }
   // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
   std::string directoryUrl;
   std::string directoryId;
   std::string directoryPw;
   remote60::native_poc::directory::HostAgent directoryAgent;
+  // r11 U4 / r12 L1: the user Host's periodic Ready to the service; reads directoryAgent's status. Declared
+  // after it (destroyed before it) and stopped first by ~SessionState and shutdown_host.
+  remote60::native_poc::prelogin::UserHostReadyNotifier readyNotifier;
   // Media sockets. lanSock is the legacy-port listener; retiredSock holds whichever socket the
   // handshake did not choose but that still has an owner (the directory agent keeps
   // heartbeating on it).

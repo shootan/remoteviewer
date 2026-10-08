@@ -362,17 +362,20 @@ int startup_connect_client(HostContext& hx) {
         // prelogin-ui r2 (item 7): ready goes to the service over its admin pipe, where it is tied to
         // this process's session and start time (the named event any admin process could set is gone).
         if (!args.preloginMode) {
-          remote60::native_poc::prelogin::NotifyUserHostReadyInBackground(
+          // r12 L1: on the session's own notifier -- stopped (and joined) before the directory agent it
+          // reads, at shutdown and at any earlier unwind (host_session.hpp, host_shutdown.cpp).
+          remote60::native_poc::prelogin::UserHostReadyNotifier::Options readyOptions;
+          // r11 U4: and again for as long as this host runs -- a service that starts or restarts after it
+          // adopts its GNLinkHost and needs this ready to hand over.
+          readyOptions.refreshMs = remote60::native_poc::prelogin::kUserHostReadyRefreshMs;
+          clientSession.readyNotifier.Start(
               // "online" is set by a successful heartbeat; "punching" only right after one (it carried
               // capabilities) -- either says the directory accepted this host.
               [&agent = clientSession.directoryAgent] {
                 const std::string s = agent.StatusLine();
                 return s.rfind("online", 0) == 0 || s.rfind("punching", 0) == 0;
               },
-              180000, 10, 1000, std::wstring(), nullptr,
-              // r11 U4: and again for as long as this host runs -- a service that starts or restarts after
-              // it adopts its GNLinkHost and needs this ready to hand over.
-              remote60::native_poc::prelogin::kUserHostReadyRefreshMs);
+              readyOptions);
         }
       }
     }
