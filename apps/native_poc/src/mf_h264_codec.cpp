@@ -77,6 +77,20 @@ bool get_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t* out) {
   return false;
 }
 
+// stutter-keyframe r2 (step 5): record whether a per-frame-type / key QP control is even SUPPORTED on
+// this MFT -- do NOT apply it. Codex contract 3: AVEncVideoEncodeFrameTypeQP is a fixed-QP contract,
+// and a global Min/MaxQP cannot be scoped to a single auto-emitted IDR of an async MFT, so a key-only
+// byte cap via QP is not reliable. r2 records support for the field decision rather than forcing
+// fixed-QP on the whole stream; the existing whole-stream maxQp ceiling (apply_rate_control) is
+// unchanged. This is the "record" path of the contract's "support only, else record".
+const char* codecapi_support_str(IMFTransform* transform, const GUID& key) {
+  if (!transform) return "noxform";
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return "noapi";
+  if (codecApi->IsSupported(&key) != S_OK) return "unsupported";
+  return (codecApi->IsModifiable(&key) == S_OK) ? "supported+modifiable" : "supported";
+}
+
 bool set_codecapi_bool(IMFTransform* transform, const GUID& key, bool value) {
   if (!transform) return false;
   Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
@@ -1512,6 +1526,12 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, qualityVsSpeed);
   std::cout << "[native-video-host] h264 encoder-hints lowLatency=" << (lowLatency ? 1 : 0)
             << " realTime=" << (realTime ? 1 : 0) << " qualityVsSpeed=" << qualityVsSpeed << "\n";
+  // stutter-keyframe r2 (step 5): record key-QP controllability for the field decision (not applied).
+  std::cout << "[native-video-host] h264 key-qp-probe frameTypeQP="
+            << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeFrameTypeQP)
+            << " encodeQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeQP)
+            << " minQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMinQP)
+            << " maxQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMaxQP) << "\n";
 }
 
 /**

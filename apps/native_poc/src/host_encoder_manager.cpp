@@ -20,6 +20,7 @@
 #include "encode_resolution_ladder.hpp"
 #include "host_abr.hpp"
 #include "host_bgra_scale.hpp"
+#include "host_key_period_policy.hpp"
 #include "host_capture_session.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_encoder_manager.hpp"
@@ -38,7 +39,24 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   // (runtime tune, capture-UI overview/focus, ABR/M9 refit) -- pinning it in just one caller
   // let another quietly revert the override with its own cached keyint. Ceiling bookkeeping
   // upstream stays based on what the CLIENT actually requested.
-  if (encoder.keyintOverride != 0) targetKeyint = encoder.keyintOverride;
+  // stutter-keyframe r2 (step 4b): raise the periodic key period to the >=10s floor so periodic IDRs
+  // -- the stutter source serialized under the hard cap -- become rare. Applied HERE, the single
+  // choke point every caller passes, so the encoder's own GOP (codec.initialize below) AND the host
+  // scheduled key (activeKeyint) extend together; removing only one would let the other key instead
+  // (Codex contract 1). An explicit REMOTE60_NATIVE_KEYINT_OVERRIDE still wins verbatim (compute_
+  // effective_keyint handles it). Forced keys -- recovery, first frame, selection/epoch -- bypass
+  // activeKeyint, so this never delays them; the recovery roundtrip at a long GOP is proven by
+  // host_recovery_roundtrip_test and viewer_udp_recovery_test scenario_long_gop_forced_recovery.
+  {
+    const uint32_t requestedKeyint = targetKeyint;
+    targetKeyint = compute_effective_keyint({requestedKeyint, targetFps, encoder.keyintOverride});
+    if (targetKeyint != requestedKeyint && targetKeyint != encoder.activeKeyint) {
+      std::cout << "[native-video-host] key-period configured=" << requestedKeyint
+                << " effective=" << targetKeyint << " fps=" << targetFps
+                << " override=" << encoder.keyintOverride << " floorSec=" << kKeyPeriodSecondsFloor
+                << "\n";
+    }
+  }
   const uint64_t nowUs = qpc_now_us();
   const auto& previousTarget = encoder.retryTarget;
   if (encoder.targetPending && nowUs < encoder.targetRetryAtUs &&

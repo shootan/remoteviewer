@@ -795,6 +795,25 @@ target_link_libraries(remote60_mf_h264_codec_test PRIVATE
   ole32
 )
 
+# stutter-keyframe r2 (step 2): the real host keyframe-recovery roundtrip at a long GOP -- real
+# mailbox + shared decide_force_key + real MFT encode/decode. Same MF links as the codec test.
+add_executable(remote60_host_recovery_roundtrip_test
+  src/mf_h264_codec.cpp
+  src/host_recovery_roundtrip_test.cpp
+)
+target_include_directories(remote60_host_recovery_roundtrip_test PRIVATE src)
+target_link_libraries(remote60_host_recovery_roundtrip_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
+if(MSVC)
+  target_compile_options(remote60_host_recovery_roundtrip_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_video_playout_clock_test
   src/video_playout_clock_test.cpp
 )
