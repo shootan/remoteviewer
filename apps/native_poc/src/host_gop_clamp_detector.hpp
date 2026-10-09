@@ -43,10 +43,35 @@ struct GopClampDetector {
     return firstLatch;
   }
 
+  // A forced key / epoch boundary / lost provenance breaks the consecutive self-IDR streak (so a
+  // short streak cannot span a boundary, G2) but does NOT clear a clamp already latched.
+  void NoteBoundary() { shortStreak = 0; }
+
   void Reset() {
     shortStreak = 0;
     clamped = false;
   }
 };
+
+// r4 G: decide how a key AU feeds the detector, from its PER-AU provenance (not host globals). Only a
+// real IDR (rawIdr) produced by a non-forced input with known provenance and the same codec/input
+// epoch as the last self-IDR yields a valid self-IDR interval (in accepted-input ordinals). A forced
+// key, an epoch change, or lost provenance (ordinal 0) is a BOUNDARY: it re-baselines and breaks the
+// streak, never counting as a short interval (G1/G2). Pure, so the wiring counter-examples are tests.
+struct SelfIdrSample {
+  bool valid = false;        // a real self-IDR with a measurable interval from the last one
+  bool boundary = false;     // a forced/epoch/unknown key: re-baseline + break the streak
+  uint32_t intervalInputs = 0;
+};
+inline SelfIdrSample classify_self_idr(bool rawIdr, bool inputWasForcedKey, uint64_t ordinal,
+                                       uint64_t epoch, uint64_t lastOrdinal, uint64_t lastEpoch) {
+  SelfIdrSample s;
+  if (!rawIdr) return s;  // not a real IDR -> ignore entirely (CleanPoint-only AUs do not count)
+  if (inputWasForcedKey || ordinal == 0) { s.boundary = true; return s; }  // forced / unknown provenance
+  if (lastOrdinal == 0 || epoch != lastEpoch || ordinal <= lastOrdinal) { s.boundary = true; return s; }
+  s.valid = true;
+  s.intervalInputs = static_cast<uint32_t>(ordinal - lastOrdinal);
+  return s;
+}
 
 }  // namespace remote60::native_poc

@@ -321,10 +321,13 @@ struct EncoderState {
   uint64_t forceKeyRejectedCount = 0;
   uint64_t forceKeyRetryAtUs = 0;      // do not re-attempt a forced key before this qpc (back-off)
   uint32_t forceKeyRejectStreak = 0;   // consecutive rejections; triggers a repair at the threshold
-  // stutter-keyframe r3 B: runtime GOP-clamp detection from the real NAL cadence (encoder-self IDR
-  // interval << policy). Fed at each encoder_gop key AU; the response (SW transition / admission) is
-  // decided separately. Reset on a fresh encoder init.
+  // stutter-keyframe r3 B / r4 G: runtime GOP-clamp detection from the real NAL cadence, fed by
+  // PER-AU provenance (accepted-input ordinal + forced flag + raw NAL5), not host globals. The
+  // last self-IDR's ordinal/epoch are the baseline the next interval is measured from; reset on a
+  // fresh encoder init (ordinals restart) so no interval spans codec instances.
   GopClampDetector clampDetector;
+  uint64_t lastSelfIdrOrdinal = 0;
+  uint64_t lastSelfIdrEpoch = 0;
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;

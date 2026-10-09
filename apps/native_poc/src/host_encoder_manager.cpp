@@ -96,6 +96,8 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     encoder.ResetTimelineAnchors(capture);
     encoder.ResetStarvationEpisode();
     encoder.clampDetector.Reset();  // r3 B: a fresh transform may clamp differently; re-detect
+    encoder.lastSelfIdrOrdinal = 0;  // r4 G: ordinals restart per codec instance
+    encoder.lastSelfIdrEpoch = 0;
     // shutdown+initialize discarded any pending key input; a stale latch here would delay the
     // fresh encoder's needed IDR by up to the 300ms retry window.
     encoder.forceKeySubmittedAtUs = 0;

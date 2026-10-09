@@ -589,13 +589,26 @@ if ((hdr.flags & 1u) != 0) {
             << " bitrate=" << encoder.activeBitrate << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
   encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
-  // stutter-keyframe r3 B: feed the clamp detector ONLY on an encoder-self IDR (no host reason =
-  // "encoder_gop"), with the real inputs-since-last-key as the measured interval. A clamp first-latch
-  // logs once; the response (SW transition / admission) is decided separately.
-  if (encoder.keyReasons == kHostKeyReasonNone) {
-    if (encoder.clampDetector.OnEncoderSelfKey(encoder.realInputsSinceKey, encoder.activeKeyint)) {
-      std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
-                << encoder.realInputsSinceKey << " policyKeyint=" << encoder.activeKeyint << "\n";
+  // stutter-keyframe r4 G: feed the clamp detector from the AU's PER-AU provenance -- the MFT-accepted
+  // input ordinal (real+synthetic), whether that input was a forced key, and a raw NAL5 scan -- not
+  // the host's realInputsSinceKey/keyReasons (G1/G2). classify_self_idr yields a real self-IDR interval
+  // only for a non-forced real IDR in the same codec/input epoch; a forced key / epoch change / lost
+  // provenance is a boundary that re-baselines and breaks the streak.
+  {
+    const SelfIdrSample s =
+        classify_self_idr(au.rawIdr, au.inputWasForcedKey, au.acceptedInputOrdinal, au.inputEpoch,
+                          encoder.lastSelfIdrOrdinal, encoder.lastSelfIdrEpoch);
+    if (s.valid) {
+      if (encoder.clampDetector.OnEncoderSelfKey(s.intervalInputs, encoder.activeKeyint)) {
+        std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
+                  << s.intervalInputs << " policyKeyint=" << encoder.activeKeyint << "\n";
+      }
+    } else if (s.boundary) {
+      encoder.clampDetector.NoteBoundary();
+    }
+    if (au.rawIdr) {  // re-baseline on any real IDR; ordinal 0 (unknown) forces a fresh baseline next
+      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;
+      encoder.lastSelfIdrEpoch = au.inputEpoch;
     }
   }
   encoder.keyReasons = kHostKeyReasonNone;

@@ -24,6 +24,13 @@ struct H264AccessUnit {
   // The host's flush epoch the input was accepted in (0 = untagged). Same FIFO: lets the emit
   // stage tell a pre-flush AU from the first AU of the new epoch (P11, host_epoch_gate.hpp).
   uint64_t inputEpoch = 0;
+  // stutter-keyframe r4 G: clamp-detector provenance (carried through the same FIFO as synthetic/
+  // epoch). acceptedInputOrdinal = the MFT-accepted-input count that produced this AU (G1).
+  // inputWasForcedKey = that input carried a host key request (G2). rawIdr = the Annex-B bytes carry a
+  // real NAL type 5 (not just CleanPoint), so the detector confirms a true IDR, not any clean point.
+  uint64_t acceptedInputOrdinal = 0;
+  bool inputWasForcedKey = false;
+  bool rawIdr = false;
 };
 
 struct DecodedFrameNv12 {
@@ -104,6 +111,13 @@ struct PendingInput {
   int64_t tsHns = 0;
   bool synthetic = false;
   uint64_t epoch = 0;
+  // stutter-keyframe r4 G: provenance for the clamp detector. acceptedOrdinal is a monotonic count of
+  // inputs the MFT actually accepted (real AND synthetic/kick), so the self-IDR interval is measured
+  // in true encoder inputs -- not the host's realInputsSinceKey, which excludes synthetic and counts
+  // before the codec accepts (G1). forcedKey marks an input the host requested a key for, so a forced
+  // IDR is not mistaken for the encoder's own periodic one (G2).
+  uint64_t acceptedOrdinal = 0;
+  bool forcedKey = false;
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -247,6 +261,7 @@ class H264Encoder {
   uint32_t bitrate_ = 0;
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
   uint32_t keyint_ = 0;
+  uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;

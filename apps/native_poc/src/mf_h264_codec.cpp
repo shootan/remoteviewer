@@ -1705,6 +1705,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
+  acceptedInputCounter_ = 0;  // r4 G: ordinals restart per codec instance (detector re-baselines too)
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -2014,8 +2015,10 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         const bool sampleKey = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) &&
                                cleanPoint != 0;
         H264AccessUnit au{};
-        const bool maybeKey = sampleKey || annexb_contains_idr(bytes.data(), bytes.size());
+        const bool rawNal5 = annexb_contains_idr(bytes.data(), bytes.size());  // r4 G: a real IDR slice
+        const bool maybeKey = sampleKey || rawNal5;
         au.keyFrame = maybeKey;
+        au.rawIdr = rawNal5;
         int64_t outSampleTimeHns = 0;
         const bool hasOutputSampleTime =
             SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
@@ -2032,11 +2035,15 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
         // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
         uint64_t auEpoch = 0;
+        uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
+        bool auForcedKey = false;
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
           normalizedAuSampleTimeHns = provenance.tsHns;
           auSynthetic = provenance.synthetic;
           auEpoch = provenance.epoch;
+          auOrdinal = provenance.acceptedOrdinal;
+          auForcedKey = provenance.forcedKey;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -2051,6 +2058,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.sampleTimeFromOutput = sampleTimeFromOutput;
         au.synthetic = auSynthetic;
         au.inputEpoch = auEpoch;
+        au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
+        au.inputWasForcedKey = auForcedKey;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -2097,7 +2106,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     return finish_call(false);
   }
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
-  pendingInputs_.Push(PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_});
+  pendingInputs_.Push(
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.
