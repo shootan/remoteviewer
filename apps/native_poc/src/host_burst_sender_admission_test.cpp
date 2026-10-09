@@ -267,6 +267,89 @@ int main() {
           maxWin <= twoR + L, "maxWin=" + std::to_string(maxWin) + " 2r+L=" + std::to_string(twoR + L));
   }
 
+  // --- Case 5: E1 (Codex 26ce462) -- the D1 defect was the TIME GAP between two clock reads (the loop's
+  //     `now` vs NextReadyUs's own read). case4's clock advances only on WAIT, so consecutive reads are
+  //     equal and it cannot reproduce that gap. Here an ADVANCING-READ clock (every read is strictly
+  //     later) shows: the FIXED NextReadyUs (0-sentinel) reports ready in bounded steps regardless of the
+  //     gap; the OLD "return a fresh nowUs_() and compare deadline <= earlier-snapshot" never reaches
+  //     ready -- the busy-spin. (noProgress==0 in case4 alone does NOT prove D1; this does.) ------------
+  {
+    uint64_t rc = 100'000'000;
+    WireLimiter lim([&rc] { return rc += 20'000; }, [](uint64_t, uint64_t) { return true; });  // +20ms every READ
+    lim.SetRate(cap, 1600);
+    bool everReadyNew = false, everReadyOld = false;
+    int stepsToReady = -1;
+    for (int i = 0; i < 2000; ++i) {
+      const uint64_t nowSnap = rc + 7;                 // the admission loop's own `now` read (advances)
+      const uint64_t d = lim.NextReadyUs(1228);        // FIXED: 0 == ready now (no fresh clock read)
+      const bool readyNew = (d == 0);
+      // OLD behaviour modelled: NextReadyUs returned nowUs_() for the ready case -- a LATER read than the
+      // loop's snapshot -- so `deadline <= now` compared a later time against an earlier one.
+      const uint64_t dOld = rc + 7;                    // a fresh (later) read, as the old code did
+      const bool readyOld = (dOld <= nowSnap);
+      if (readyNew && stepsToReady < 0) stepsToReady = i;
+      everReadyNew = everReadyNew || readyNew;
+      everReadyOld = everReadyOld || readyOld;
+    }
+    check("case5 E1: fixed NextReadyUs (0-sentinel) reaches ready under an advancing-read clock (bounded)",
+          everReadyNew && stepsToReady >= 0, "stepsToReady=" + std::to_string(stepsToReady));
+    check("case5 E1: the OLD fresh-now-return comparison NEVER reaches ready (the D1 busy-spin)",
+          !everReadyOld);
+  }
+
+  // --- Case 6: E2 (Codex 26ce462) -- the SAME input as a grant burst, but the normal TAIL bypasses the
+  //     window Reserve while still being SENT/accounted (the r6 defect). The independent TX trace's 2s
+  //     window must then FAIL the same 2r + L bound -- so the bound genuinely catches r6, not only the
+  //     null-ledger bypass of case3. (Not case3's different-size inputs.) --------------------------------
+  {
+    uint64_t clk = 10'000'000;
+    WireLimiter lim([&] { return clk; }, [](uint64_t, uint64_t) { return true; });
+    lim.SetRate(cap, 1600);
+    clk += 3'000'000;
+    BurstLedger led;
+    led.SetRate(cap, clk - 3'000'000);
+    const BurstAuId owner{1, 1, 1, 201, true};
+    (void)led.GrantForIdr(clk, owner);
+    std::vector<std::pair<uint64_t, uint64_t>> trace;
+    const uint32_t mtu6 = 1200;
+    const uint32_t stride = mtu6 - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+    std::vector<uint8_t> payload(static_cast<size_t>(stride) * 150, 0x6C);  // ~grant-quota-sized burst
+    UdpVideoChunkHeader base{};
+    base.magic = kMagic; base.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
+    base.codec = static_cast<uint16_t>(UdpCodec::H264); base.seq = 201; base.streamGeneration = 1;
+    base.payloadSize = static_cast<uint32_t>(payload.size());
+    WireEgress wire;
+    wire.limiter = &lim; wire.burstLedger = &led; wire.auHasGrant = true; wire.burstOwner = owner;
+    wire.nowFn = [&] { return clk; };
+    wire.waitFn = [&](uint64_t target) { if (target > clk) clk = target; };
+    wire.sink = [&](const uint8_t*, int len, bool) -> int {
+      trace.emplace_back(clk, static_cast<uint64_t>(len) + 28u);
+      return len;
+    };
+    SendPathStats st{}; UdpEgressConfig eg; eg.pacePeakBps = 0;
+    sockaddr_in peer{}; peer.sin_family = AF_INET;
+    (void)send_udp_chunks_impl(INVALID_SOCKET, peer, payload.data(), payload.size(), base, mtu6, &st,
+                               nullptr, 0, eg, &wire);
+    const uint64_t grantWire = [&] { uint64_t s = 0; for (auto& e : trace) s += e.second; return s; }();
+    // r6 model: the normal TAIL is SENT/accounted but NOT window-gated -- CommitSent WITHOUT Reserve, at
+    // the current clock (no throttle). Append it to the SAME trace.
+    const uint64_t tailDg = static_cast<uint64_t>(mtu6) + 28u;
+    uint64_t tail = 0;
+    while (tail < 220'000) { led.CommitSent(clk, tailDg); trace.emplace_back(clk, tailDg); tail += tailDg; }
+    uint64_t maxWin = 0;
+    for (size_t i = 0; i < trace.size(); ++i) {
+      uint64_t sum = 0;
+      for (size_t j = i + 1; j-- > 0;) {
+        if (trace[i].first - trace[j].first >= 2'000'000ULL) break;
+        sum += trace[j].second;
+      }
+      maxWin = std::max(maxWin, sum);
+    }
+    check("case6 E2: an r6 tail (Reserve bypassed, still sent) FAILS the same 2s bound (the bound catches r6)",
+          maxWin > twoR + L, "maxWin=" + std::to_string(maxWin) + " 2r+L=" + std::to_string(twoR + L) +
+          " grantWire=" + std::to_string(grantWire));
+  }
+
   std::printf("\nhost_burst_sender_admission_test: %s (%d checks, %d failed)\n", gFailed ? "FAIL" : "PASS",
               gChecks, gFailed);
   return gFailed ? 1 : 0;
