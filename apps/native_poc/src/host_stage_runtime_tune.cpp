@@ -205,12 +205,16 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
   {
     uint32_t reqSeq = 0;
     uint64_t requestedWindowId = 0;
+    uint64_t txnId = 0;
+    std::wstring requestedMonitorDevice;
     bool hasWindowSelectRequest = false;
     {
       std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
       if (windowSelectionTxn.pending) {
         reqSeq = windowSelectionTxn.reqSeq;
         requestedWindowId = windowSelectionTxn.requestedWindowId;
+        txnId = windowSelectionTxn.txnId;
+        requestedMonitorDevice = windowSelectionTxn.requestedMonitorDevice;
         hasWindowSelectRequest = true;
         windowSelectionTxn.pending = false;
       }
@@ -222,10 +226,13 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       std::string responseReason;
       std::string responseTitle;
       const bool applied = apply_selected_window_capture(hx, 
-          requestedWindowId, nowUs, &responseFlags, &responseWindowId, &responseStreamGeneration,
-          &responseReason, &responseTitle);
+          requestedWindowId, requestedMonitorDevice, nowUs, &responseFlags, &responseWindowId,
+          &responseStreamGeneration, &responseReason, &responseTitle);
       {
         std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+        // t-970r4zgo: only the request taken above is answered with this result; one that has
+        // replaced it since (its asker gave up) is left pending for its own turn.
+        windowSelectionTxn.completedTxnId = txnId;
         windowSelectionTxn.responseFlags = responseFlags;
         windowSelectionTxn.responseWindowId = responseWindowId;
         windowSelectionTxn.responseStreamGeneration = responseStreamGeneration;

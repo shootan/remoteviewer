@@ -3,6 +3,7 @@
 
 #include "thumbnail_fetch_policy.hpp"
 
+#include "monitor_select_target.hpp"
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "udp_video_nack.hpp"
@@ -167,9 +168,27 @@ bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
-  // Refused when the host never advertised support, so the caller can say so rather than leave
-  // the user waiting on a request that will not be sent.
-  return windowPanel_.RequestMonitorSelect(monitorId);
+  // t-970r4zgo: through the window-select transaction, which the host answers only once the
+  // capture is on that screen, with the stream generation the selection gate waits for. A host
+  // that has not said it does this on THIS connection is refused here at once -- the legacy
+  // ControlMonitorSelect is answered with a list before anything is applied and carries no
+  // generation, which is why a selecting viewer waited 6 s and gave up. The caller can tell the
+  // user the host needs updating.
+  const auto panel = windowPanel_.Snapshot();
+  if (!panel.hostSupportsMonitors || !panel.hostSupportsMonitorSelect) {
+    windowPanel_.SetStatus("monitor_select_unsupported: host_update_required");
+    return false;
+  }
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag)) {
+    return false;
+  }
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
 }
 
 bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
@@ -179,7 +198,10 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   }
 
   const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
-  if (!windowPanel_.RequestSelect(windowId, statusText)) {
+  // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
+  if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
     return false;
   }
 
@@ -512,6 +534,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               std::memory_order_relaxed);
           // The window list is fetched on every connect, so it is where the host says whether it
           // knows the monitor messages at all. Asking one that does not would hang the loop.
+          windowPanel_.SetHostSupportsMonitorSelect(
+              (response.windowList.flags & kControlWindowListFlagMonitors) != 0 &&
+              (response.windowList.flags & kControlWindowListFlagMonitorSelectTransactionV1) != 0);
           if (windowPanel_.SetHostSupportsMonitors(
                   (response.windowList.flags & kControlWindowListFlagMonitors) != 0)) {
             windowPanel_.RequestMonitorList();
@@ -526,7 +551,13 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         case TcpControlResponseKind::WindowSelected: {
           windowPanel_.ApplyWindowSelected(response.windowSelected);
           if (encodedFrameSink_) {
-            encodedFrameSink_->OnWindowSelectionControlResult(response.windowSelected);
+            // t-970r4zgo: the answer is to THIS request (same seq, same target) or it opens nothing.
+            ControlWindowSelectedMessage answer = response.windowSelected;
+            if (answer.seq != action.windowSelect.seq || answer.windowId != action.windowSelect.windowId) {
+              answer.flags &= ~0x1u;
+              answer.streamGeneration = 0;
+            }
+            encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
           }
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);

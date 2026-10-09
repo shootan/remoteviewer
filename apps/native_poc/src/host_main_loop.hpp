@@ -207,7 +207,10 @@ void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter
 // session includes that), defined in host_loop_helpers.cpp.
 void pump_cursor_forward(HostContext& hx, uint64_t nowUs);
 bool reconnect_tcp_data_session(HostContext& hx, const char* reason);
-bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, uint64_t nowUs,
+// requestedMonitorDevice: for a monitor-select target (monitor_select_target.hpp), the screen the
+// control thread resolved it to; empty otherwise. t-970r4zgo.
+bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
+                                   const std::wstring& requestedMonitorDevice, uint64_t nowUs,
                                    uint32_t* outFlags, uint64_t* outWindowId,
                                    uint64_t* outStreamGeneration,
                                    std::string* outReason, std::string* outTitle);

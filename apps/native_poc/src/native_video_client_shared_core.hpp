@@ -250,6 +250,10 @@ struct ControlOutboundAction {
   ControlImeStateRequestMessage imeStateReq{};
   ControlClientBandwidthMessage clientBandwidth{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
+  // t-970r4zgo: for a WindowSelect, the local selection it was asked for (the sink's tag when the
+  // request was queued). The answer is handed to the sink with it, so a late answer to an earlier
+  // selection cannot open a later selection's gate.
+  uint64_t selectionTag = 0;
 };
 
 /**
@@ -583,6 +587,10 @@ struct WindowPanelSnapshot {
   // The attached screens, and which one desktop mode is showing. Empty until the host answers,
   // and it only will if it advertised support -- an older one drains the request in silence.
   bool hostSupportsMonitors = false;
+  // t-970r4zgo: this connection's host selects a monitor through the window-select transaction
+  // (kControlWindowListFlagMonitorSelectTransactionV1). Learnt from this connection's window
+  // list only; reset with the panel on every connect.
+  bool hostSupportsMonitorSelect = false;
   uint32_t selectedMonitorId = 0;
   std::vector<MonitorEntry> monitors;
 };
@@ -601,8 +609,9 @@ class WindowPanelStateModel {
   void Reset();
   void RequestList(const char* statusText = nullptr);
   bool TakeListRequest();
-  bool RequestSelect(uint64_t windowId, const char* statusText = nullptr);
-  bool TakeSelectRequest(uint64_t* outWindowId);
+  bool RequestSelect(uint64_t windowId, const char* statusText = nullptr, uint64_t selectionTag = 0);
+  bool TakeSelectRequest(uint64_t* outWindowId, uint64_t* outSelectionTag = nullptr);
+  void SetHostSupportsMonitorSelect(bool supported);
   void RequestMonitorList();
   bool TakeMonitorListRequest();
   /** Returns true when support was newly discovered, so the caller can fetch the list once. */
@@ -632,6 +641,7 @@ class WindowPanelStateModel {
   bool listRequestPending_ = false;
   bool selectRequestPending_ = false;
   uint64_t pendingSelectId_ = 0;
+  uint64_t pendingSelectTag_ = 0;
   bool monitorListRequestPending_ = false;
   bool monitorSelectRequestPending_ = false;
   uint32_t pendingMonitorId_ = 0;

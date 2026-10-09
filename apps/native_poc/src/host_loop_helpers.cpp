@@ -49,6 +49,7 @@
 #include "host_bottleneck.hpp"
 #include "host_capture_device.hpp"
 #include "host_capture_session.hpp"
+#include "monitor_select_target.hpp"
 #include "host_client_metrics.hpp"
 #include "host_control_session.hpp"
 #include "host_encoded_sender.hpp"
@@ -361,7 +362,8 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
   return false;
 }
 
-bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, uint64_t nowUs,
+bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
+                                   const std::wstring& requestedMonitorDevice, uint64_t nowUs,
                                    uint32_t* outFlags, uint64_t* outWindowId,
                                    uint64_t* outStreamGeneration,
                                    std::string* outReason, std::string* outTitle) {
@@ -412,6 +414,12 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
     prevHostCaptureProcess = capture.targetProcess;
     prevHostCaptureTitle = capture.targetTitle;
   }
+  // t-970r4zgo: the picked screen is part of the target too -- a failed monitor select must give
+  // back the screen, its index and its geometry (the secure-input rect is derived from it), not
+  // just the window fields.
+  const std::wstring prevSelectedMonitorDevice = capture.selectedMonitorDevice;
+  const uint32_t prevSelectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
+  const auto prevMonitorInfo = capture.monitorInfo;
 
   auto restore_previous_target = [&]() {
     item = prevItem;
@@ -429,7 +437,10 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
       std::lock_guard<std::mutex> lk(capture.metaMu);
       capture.targetProcess = prevHostCaptureProcess;
       capture.targetTitle = prevHostCaptureTitle;
+      capture.selectedMonitorDevice = prevSelectedMonitorDevice;
     }
+    capture.selectedMonitorId.store(prevSelectedMonitorId, std::memory_order_release);
+    capture.monitorInfo = prevMonitorInfo;
   };
 
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem nextItem{nullptr};
@@ -445,8 +456,47 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
   uint64_t nextHwnd = 0;
   uint32_t nextFlags = 0;
   const uint64_t nextCaptureStreamGeneration = prevCaptureStreamGeneration + 1;
+  // t-970r4zgo: a monitor-select target is desktop mode on that screen. It is classified before
+  // any HWND use; internally the selection is "desktop + the screen's device", never the target id.
+  const SelectTarget selectTarget = classify_select_target(requestedWindowId);
+  std::wstring nextMonitorDevice = prevSelectedMonitorDevice;
+  if (selectTarget.kind == SelectTargetKind::Malformed) {
+    if (outReason) *outReason = "invalid_target";
+    return false;
+  }
 
-  if (requestedWindowId == 0) {
+  if (selectTarget.kind == SelectTargetKind::Monitor) {
+    if (requestedMonitorDevice.empty()) {
+      if (outReason) *outReason = "monitor_not_listed";
+      return false;
+    }
+    // The screen the client was listed under that id must still be attached -- by device name,
+    // so an index that now means another screen is not taken for it.
+    const auto monitors = enumerate_monitors();
+    const MonitorListEntry* screen = nullptr;
+    for (const auto& m : monitors) {
+      if (m.device == requestedMonitorDevice) screen = &m;
+    }
+    if (!screen) {
+      if (outReason) *outReason = "monitor_gone";
+      return false;
+    }
+    if (backend.requested == DesktopCaptureBackend::Wgc || backend.active == DesktopCaptureBackend::Wgc ||
+        !screen->primary) {
+      nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(monitor-select)", screen->handle);
+      if (!nextItem) {
+        if (outReason) *outReason = "monitor_capture_item_failed";
+        if (outTitle) *outTitle = screen->name;
+        return false;
+      }
+    } else {
+      nextItem = nullptr;
+    }
+    nextSelectedWindowId = 0;
+    nextReason = "monitor_selected";
+    nextTitle = screen->name;
+    nextMonitorDevice = screen->device;
+  } else if (requestedWindowId == 0) {
     if (backend.requested == DesktopCaptureBackend::Wgc ||
         backend.active == DesktopCaptureBackend::Wgc) {
       nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
@@ -501,12 +551,21 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
     std::lock_guard<std::mutex> lk(capture.metaMu);
     capture.targetProcess = nextProcess;
     capture.targetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
+    capture.selectedMonitorDevice = nextMonitorDevice;
   }
   nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
   watchdog.lastCaptureRestartUs = nowUs;
   if (!restart_capture_session(hx)) {
     restore_previous_target();
     if (outReason) *outReason = "capture_restart_failed";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
+  if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
+    // The screen went between the check above and the restart, which fell back (host_monitor_
+    // selection.hpp). The capture is consistent -- on the fallback screen -- but it is not what
+    // was asked for, so it is not acknowledged as such.
+    if (outReason) *outReason = "monitor_gone";
     if (outTitle) *outTitle = nextTitle;
     return false;
   }
@@ -539,7 +598,9 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
   capture.FlushCapturePipelineState(res, frameGating, stats, "window-select");
 
   if (outFlags) *outFlags = 0x1u;
-  if (outWindowId) *outWindowId = nextSelectedWindowId;
+  // A monitor select is answered with the target id it was asked with (the marker), not the
+  // internal "desktop" 0, so the client can tell which request this completes.
+  if (outWindowId) *outWindowId = selectTarget.kind == SelectTargetKind::Monitor ? requestedWindowId : nextSelectedWindowId;
   if (outStreamGeneration) *outStreamGeneration = nextCaptureStreamGeneration;
   if (outReason) *outReason = nextReason;
   if (outTitle) *outTitle = nextTitle;

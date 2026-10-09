@@ -768,6 +768,11 @@ target_link_libraries(remote60_udp_control_e2e_test PRIVATE
 add_executable(remote60_host_monitor_selection_test src/host_monitor_selection_test.cpp)
 target_include_directories(remote60_host_monitor_selection_test PRIVATE src)
 
+# t-970r4zgo (2): the monitor-select target id, the APK selection gate and the panel answer. Pure.
+add_executable(remote60_monitor_select_wire_test src/monitor_select_wire_test.cpp src/native_video_client_shared_core.cpp)
+target_include_directories(remote60_monitor_select_wire_test PRIVATE src)
+target_link_libraries(remote60_monitor_select_wire_test PRIVATE common ws2_32)
+
 # t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
 # reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
 # the primary, the retry does not run forever, a transient empty enumeration keeps the retry.

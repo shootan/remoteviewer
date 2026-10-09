@@ -435,6 +435,19 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
   auto& dxgiCaptureSession = res.dxgiCaptureSession;
   auto& gdiCaptureProcess = res.gdiCaptureProcess;
   capture.DetachCaptureSession(res, token);
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (GNLinkStreamMigrationTest; never GNLinkStream): while the named file exists
+  // every capture restart fails here, after the detach, as a real one would -- the e2e checks that
+  // a selection whose restart fails gives the previous target back (t-970r4zgo).
+  {
+    wchar_t failPath[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FAIL_RESTART_FILE", failPath, MAX_PATH);
+    if (n > 0 && n < MAX_PATH && GetFileAttributesW(failPath) != INVALID_FILE_ATTRIBUTES) {
+      std::cerr << "[stream-test-seam] capture restart failed (injected)\n";
+      return false;
+    }
+  }
+#endif
   try {
     if (!capture.windowModeActive) {
       // Every desktop backend opens the primary monitor (DXGI duplicates it, the WGC restart item

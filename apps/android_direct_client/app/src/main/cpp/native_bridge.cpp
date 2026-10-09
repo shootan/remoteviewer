@@ -129,6 +129,7 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
   }
   oss << "],";
   oss << "\"hostSupportsMonitors\":" << (snapshot.hostSupportsMonitors ? "true" : "false") << ",";
+  oss << "\"hostSupportsMonitorSelect\":" << (snapshot.hostSupportsMonitorSelect ? "true" : "false") << ",";
   oss << "\"selectedMonitorId\":" << snapshot.selectedMonitorId << ",";
   oss << "\"monitors\":[";
   for (size_t i = 0; i < snapshot.monitors.size(); ++i) {

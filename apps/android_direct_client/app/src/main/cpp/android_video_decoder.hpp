@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "native_video_client_session.hpp"
+#include "selection_ack_gate.hpp"
 #include "video_playout_clock.hpp"
 
 struct ANativeWindow;
@@ -38,6 +39,10 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
+  // t-970r4zgo: the selection a select request is queued under, and its answer for that selection.
+  uint64_t CurrentSelectionTag() override;
+  void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& msg,
+                                         uint64_t requestTag) override;
   void AbortWindowSelection();
   std::string DebugStatus();
   uint64_t VideoSizePacked();
@@ -69,9 +74,10 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint32_t outputHeight_ = 0;
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
-  uint64_t pendingSelectionGeneration_ = 0;
+  // Which selection is armed, whether its answer is still awaited and which stream generation it
+  // answered with (selection_ack_gate.hpp; shared with the Windows tests).
+  remote60::native_poc::SelectionAckGate gate_;
   uint64_t readySelectionGeneration_ = 0;
-  uint64_t expectedStreamGeneration_ = 0;
   uint64_t latestInputStreamGeneration_ = 0;
   uint64_t latestOutputStreamGeneration_ = 0;
   uint64_t lastOutputPresentationUs_ = 0;
@@ -113,7 +119,6 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;
   uint64_t oversizedInputFrameDropCount_ = 0;
-  bool awaitingSelectionAck_ = false;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> pendingFrame_;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> bootstrapFrame_;
   std::vector<uint8_t> csd0_;

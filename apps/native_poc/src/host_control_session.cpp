@@ -46,6 +46,7 @@
 #include "file_copy_wire.hpp"
 #include "host_window_enum.hpp"
 #include "host_monitor_selection.hpp"
+#include "monitor_select_target.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
 #include "time_utils.hpp"
@@ -123,6 +124,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
     // Says the monitor messages exist here. A client that asked an older host would wait for a
     // reply that never comes, since unknown opcodes are drained silently.
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitors;
+    // And that a monitor can be selected through the window-select transaction (applied, then
+    // acknowledged with the new stream generation). Clients without it keep ControlMonitorSelect.
+    rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1;
     rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
     const auto windows = enumerate_shareable_windows();
     rsp.itemCount = std::min<uint32_t>(
@@ -136,6 +140,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
               << "\n";
     return link.Write(&rsp, sizeof(rsp));
   };
+  // The screens, by device name, in the order of the last monitor list THIS connection was sent:
+  // a monitor-select target names an index into the list the client saw, so it is resolved here
+  // and not against whatever is enumerated when the request arrives (a screen added or removed
+  // in between would otherwise turn "monitor 1" into another physical screen).
+  std::vector<std::wstring> monitorListSent;
   auto send_monitor_list = [&](uint32_t seq) -> bool {
     ControlMonitorListMessage rsp{};
     rsp.header.magic = remote60::native_poc::kMagic;
@@ -169,6 +178,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (src.primary) dst.flags |= remote60::native_poc::kControlMonitorFlagPrimary;
       remote60::native_poc::utf8_copy_bounded(dst.name, sizeof(dst.name), src.name);
     }
+    monitorListSent.clear();
+    for (uint32_t i = 0; i < rsp.itemCount; ++i) monitorListSent.push_back(monitors[i].device);
     std::cout << "[native-video-host][control] monitor-list seq=" << seq
               << " count=" << rsp.itemCount << " selectedId=" << rsp.selectedMonitorId << "\n";
     return link.Write(&rsp, sizeof(rsp));
@@ -978,6 +989,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
       rsp.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
       rsp.hostSendQpcUs = qpc_now_us();
 
+      // t-970r4zgo: a monitor-select target is classified before anything treats the id as an
+      // HWND. Malformed ids in its namespace are refused here, and a monitor id is resolved to
+      // the screen THIS connection was listed under that id -- not one listed or re-indexed since.
+      const SelectRequestResolution resolved = resolve_select_request(req.windowId, monitorListSent);
+      const std::wstring& monitorDevice = resolved.device;
+      const char* refused = resolved.refused;
+
       if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
         rsp.flags |= 0x2u;
         remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
@@ -985,9 +1003,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
         if (req.windowId == 0) {
           remote60::native_poc::utf8_copy_bounded(rsp.title, sizeof(rsp.title), "desktop");
         }
+      } else if (refused) {
+        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason), refused);
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " applied=0 reason=" << refused << "\n";
       } else {
+        uint64_t myTxn = 0;
         {
           std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+          myTxn = ++windowSelectionTxn.nextTxnId;
+          windowSelectionTxn.txnId = myTxn;
+          windowSelectionTxn.requestedMonitorDevice = monitorDevice;
           windowSelectionTxn.pending = true;
           windowSelectionTxn.completed = false;
           windowSelectionTxn.reqSeq = req.seq;
@@ -1006,16 +1032,26 @@ void ControlSessionServer::Serve(ControlLink& link) {
         // so waiting only for completion would hold the whole session handover behind a reply
         // nobody is left to read. Polled, because a rollover closes the channel rather than
         // touching this transaction.
-        while (!stop.load() && !windowSelectionTxn.completed && link.Alive()) {
+        const auto mine = [&] { return windowSelectionTxn.completed && windowSelectionTxn.completedTxnId == myTxn; };
+        while (!stop.load() && !mine() && link.Alive()) {
           windowSelectionTxn.cv.wait_for(lk, std::chrono::milliseconds(100));
         }
-        rsp.flags = windowSelectionTxn.responseFlags;
-        rsp.windowId = windowSelectionTxn.responseWindowId;
-        rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
+        if (mine()) {
+          rsp.flags = windowSelectionTxn.responseFlags;
+          rsp.windowId = windowSelectionTxn.responseWindowId;
+          rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
+          remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
+                                                  windowSelectionTxn.responseReason);
+          remote60::native_poc::fill_window_title(rsp.title, windowSelectionTxn.responseTitle);
+        } else {
+          // Not this request's result (stopped, the link died, or another request took over):
+          // nothing is claimed, and the shared fields are left to whoever they belong to.
+          rsp.flags = 0;
+          rsp.windowId = req.windowId;
+          rsp.streamGeneration = 0;
+          remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason), "not_completed");
+        }
         rsp.hostSendQpcUs = qpc_now_us();
-        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
-                                                windowSelectionTxn.responseReason);
-        remote60::native_poc::fill_window_title(rsp.title, windowSelectionTxn.responseTitle);
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;

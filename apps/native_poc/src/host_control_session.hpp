@@ -48,6 +48,14 @@ struct WindowSelectionTxn {
   bool completed = false;
   uint32_t reqSeq = 0;
   uint64_t requestedWindowId = 0;
+  // t-970r4zgo: which request this is. The main loop completes only the transaction it took; a
+  // request that replaced it (its asker gave up on a dead link) is not answered with its result.
+  uint64_t txnId = 0;
+  uint64_t nextTxnId = 0;
+  uint64_t completedTxnId = 0;
+  // A monitor-select target (monitor_select_target.hpp): the screen's device name, resolved on the
+  // control thread against the monitor list THIS connection was sent; empty for a window/desktop.
+  std::wstring requestedMonitorDevice;
   uint32_t responseFlags = 0;
   uint64_t responseWindowId = 0;
   uint64_t responseStreamGeneration = 0;

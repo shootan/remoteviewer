@@ -919,6 +919,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Empty on a host that predates the monitor messages, which is also what
         // hostSupportsMonitors reports -- asking such a host would stall the control loop.
         val hostSupportsMonitors: Boolean = false,
+        // The host selects a screen through the window-select transaction (applied, then
+        // acknowledged with the stream generation the viewer waits for). Without it a screen pick
+        // can never be acknowledged, so it is not attempted (t-970r4zgo).
+        val hostSupportsMonitorSelect: Boolean = false,
         val selectedMonitorId: Int = 0,
         val monitors: List<MonitorPanelItem> = emptyList(),
     ) {
@@ -2248,6 +2252,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {
+        // A screen pick on a host that cannot acknowledge one used to wait 6 s and fall back to
+        // the list without a word. Say why, and do not start the switch (t-970r4zgo).
+        if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
+            !parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).hostSupportsMonitorSelect
+        ) {
+            diagnosticsLog.log(
+                "select_unsupported",
+                "targetId=$targetId label=$label tab=$tab origin=$origin reason=host_update_required"
+            )
+            Toast.makeText(this, R.string.ui_monitor_select_needs_host_update, Toast.LENGTH_LONG).show()
+            return false
+        }
         val selectionGeneration = ++selectionGenerationCounter
         desiredStreamActive = true
         if (!requestStreamActive(true, "selection_$origin")) {
@@ -4543,6 +4559,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastSelectHostSendQpcUs = root.optLong("lastSelectHostSendQpcUs"),
                 items = items,
                 hostSupportsMonitors = root.optBoolean("hostSupportsMonitors"),
+                hostSupportsMonitorSelect = root.optBoolean("hostSupportsMonitorSelect"),
                 selectedMonitorId = root.optInt("selectedMonitorId"),
                 monitors = buildList {
                     val monitorsJson = root.optJSONArray("monitors")

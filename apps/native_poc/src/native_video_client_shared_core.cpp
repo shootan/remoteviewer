@@ -1,5 +1,7 @@
 #include "native_video_client_shared_core.hpp"
 
+#include "monitor_select_target.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <chrono>
@@ -555,8 +557,10 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
   }
 
   uint64_t pendingWindowId = 0;
-  if (windowPanel->TakeSelectRequest(&pendingWindowId)) {
+  uint64_t pendingSelectionTag = 0;
+  if (windowPanel->TakeSelectRequest(&pendingWindowId, &pendingSelectionTag)) {
     out->kind = ControlOutboundActionKind::WindowSelect;
+    out->selectionTag = pendingSelectionTag;
     out->expectedResponseType = MessageType::ControlWindowSelected;
     out->expectedResponseSize = expected_message_size(MessageType::ControlWindowSelected);
     out->windowSelect.header.magic = kMagic;
@@ -1221,6 +1225,7 @@ void WindowPanelStateModel::Reset() {
   listRequestPending_ = false;
   selectRequestPending_ = false;
   pendingSelectId_ = 0;
+  pendingSelectTag_ = 0;
   monitorListRequestPending_ = false;
   monitorSelectRequestPending_ = false;
   pendingMonitorId_ = 0;
@@ -1239,21 +1244,28 @@ bool WindowPanelStateModel::TakeListRequest() {
   return true;
 }
 
-bool WindowPanelStateModel::RequestSelect(uint64_t windowId, const char* statusText) {
+bool WindowPanelStateModel::RequestSelect(uint64_t windowId, const char* statusText, uint64_t selectionTag) {
   std::lock_guard<std::mutex> lk(mu_);
   if (state_.selectionLocked) return false;
   selectRequestPending_ = true;
   pendingSelectId_ = windowId;
+  pendingSelectTag_ = selectionTag;
   if (statusText) state_.status = statusText;
   return true;
 }
 
-bool WindowPanelStateModel::TakeSelectRequest(uint64_t* outWindowId) {
+bool WindowPanelStateModel::TakeSelectRequest(uint64_t* outWindowId, uint64_t* outSelectionTag) {
   std::lock_guard<std::mutex> lk(mu_);
   if (!selectRequestPending_) return false;
   selectRequestPending_ = false;
   if (outWindowId) *outWindowId = pendingSelectId_;
+  if (outSelectionTag) *outSelectionTag = pendingSelectTag_;
   return true;
+}
+
+void WindowPanelStateModel::SetHostSupportsMonitorSelect(bool supported) {
+  std::lock_guard<std::mutex> lk(mu_);
+  state_.hostSupportsMonitorSelect = supported;
 }
 
 void WindowPanelStateModel::RequestMonitorList() {
@@ -1394,7 +1406,19 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const Control
   state_.lastSelectHostSendQpcUs = msg.hostSendQpcUs;
   const std::string reason = fixed_cstr_to_string(msg.reason, sizeof(msg.reason));
   const std::string title = fixed_cstr_to_string(msg.title, sizeof(msg.title));
-  if (ok) {
+  const SelectTarget target = classify_select_target(msg.windowId);
+  if (ok && target.kind == SelectTargetKind::Monitor) {
+    // t-970r4zgo: a monitor selected through the window-select transaction. The host is in
+    // desktop mode on that screen (its window list says selectedWindowId 0), so the panel is too;
+    // the screen is the monitor selection, and the title is the screen's.
+    state_.selectedId = 0;
+    state_.selectedMonitorId = target.monitorId;
+    state_.selectedTitle = title.empty() ? "desktop" : title;
+    set_selected_target_dimensions(&state_);
+    state_.status = std::string("window_selected: ") + state_.selectedTitle;
+  } else if (ok && target.kind == SelectTargetKind::Malformed) {
+    state_.status = "window_select_failed: invalid_target";
+  } else if (ok) {
     state_.selectedId = msg.windowId;
     state_.selectedTitle = (msg.windowId == 0) ? "desktop" : (title.empty() ? "window" : title);
     set_selected_target_dimensions(&state_);
@@ -1413,7 +1437,7 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const Control
       << " locked=" << (locked ? 1 : 0)
       << " hostSendQpcUs=" << msg.hostSendQpcUs;
   result.logLine = oss.str();
-  result.ok = ok;
+  result.ok = ok && target.kind != SelectTargetKind::Malformed;
   return result;
 }
 

@@ -50,6 +50,14 @@ class ClientEncodedFrameSink {
   // so one drop produces one request and the session's own rate limiter still applies.
   virtual bool ConsumeDecoderKeyframeRequest() { return false; }
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
+  // t-970r4zgo: the local selection a select request belongs to -- read when the request is
+  // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
+  virtual uint64_t CurrentSelectionTag() { return 0; }
+  // The answer to a select request, with the tag that request was queued under. A sink that
+  // tracks selections applies it only to that selection; the default ignores the tag.
+  virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
+    OnWindowSelectionControlResult(msg);
+  }
 };
 
 enum class ClientSessionState : uint8_t {
