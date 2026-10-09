@@ -793,22 +793,22 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
   // 0 budget and does not fire. So the e2e bound here is the wire cap's established cap*1.10; the TIGHT
   // 2r admission of a GRANT is proven at the unit level (host_burst_ledger_test B1-1/S2 and the real
   // send path in host_burst_sender_admission_test), not re-derived from this RX-perturbed figure.
-  // V1/C2 (Codex 89c08de): assert against the ACTUAL documented envelopes, not a flat percentage. The
-  // WireLimiter is a token bucket R*T + B with B = max(Lmax, R/100) (host_wire_limiter.hpp): over a 2s
-  // window its SENT bytes are <= 2r + B. The B1 burst's grant is window-admitted on top, so the whole
-  // stream (strict + burst) still fits the limiter's 2r + B envelope; add one datagram for the 2s
-  // measurement edge. A saturated row sits right at ~2r + B in the STRICT run too (the limiter, not the
-  // burst); the burst never exceeds it. The TIGHT per-grant 2r admission is unit-proven (B1-1/S2 and the
-  // real send path in host_burst_sender_admission_test), not re-derived from this figure.
+  // V1/C2 (Codex 597aca2): with the unified admission (C1) EVERY B1 datagram -- normal, grant and replay
+  // -- passes the 2s window Reserve, which only admits when committed + bytes <= 2r. So the committed 2s
+  // window never exceeds 2r; the bound is 2r + ONE datagram (the single in-flight / 2s measurement edge),
+  // NOT 2r + B. The limiter's bucket depth B is the LEGACY strict-only (cap-off) envelope and must NOT
+  // widen the B1 judgment to allow a constant-rate overshoot. r8: in burst mode require burstWin2s > 0 so
+  // a host that logged nothing (max=0) cannot pass by absence of evidence.
   const uint64_t cap2r = r.host.cap2r ? r.host.cap2r : capBps / 4;  // 2r = 2*(cap/8) bytes
-  const uint64_t Rbytes = cap2r / 2;                                 // r = cap/8 bytes/s
   const uint64_t Ldg = 1500;                                         // one datagram (<=MTU 1400 + 28), rounded
-  const uint64_t Bdepth = std::max<uint64_t>(Ldg, Rbytes / 100);     // bucket depth = max(Lmax, R/100)
-  const uint64_t txEnvelope = cap2r + Bdepth + Ldg;                  // 2r + B + measurement edge
-  if (r.host.maxBurstWin2s > 0 || burstMode)
-    check(r.host.maxBurstWin2s <= txEnvelope,
-          tag + ": host burstWin2s within the WireLimiter 2r + B envelope (strict rT+B contract; burst adds no excess)",
-          "burstWin2s=" + std::to_string(r.host.maxBurstWin2s) + " envelope(2r+B+L)=" + std::to_string(txEnvelope));
+  const uint64_t txBound = cap2r + Ldg;                              // 2r + one datagram (B1 contract)
+  if (burstMode)
+    check(r.host.maxBurstWin2s > 0, tag + ": burst mode logged a 2s window (evidence present, not max=0)",
+          "burstWin2s=" + std::to_string(r.host.maxBurstWin2s));
+  if (r.host.maxBurstWin2s > 0)
+    check(r.host.maxBurstWin2s <= txBound,
+          tag + ": host burstWin2s <= 2r + one datagram (the B1 2s contract; unified admission caps it)",
+          "burstWin2s=" + std::to_string(r.host.maxBurstWin2s) + " bound(2r+L)=" + std::to_string(txBound));
   // p2s is the client-RECEIVED trace: OS/network queueing can compress arrivals tighter than the send
   // spacing, so it is a DIAGNOSTIC of arrival shape with a jitter tolerance, NOT the contract. A gross RX
   // overshoot still fails (a real wire-rate break would show here too).

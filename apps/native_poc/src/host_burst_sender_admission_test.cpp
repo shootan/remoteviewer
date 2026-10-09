@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "host_net_io.hpp"
@@ -182,8 +183,9 @@ int main() {
   //     admits NORMAL traffic too, so a prior grant burst + following normal cannot exceed 2r + B + L.
   //     The B1 bound is the WireLimiter 2r + B envelope; B = max(L, r/100). ----------------------------
   {
-    const uint64_t Bdepth = std::max<uint64_t>(L, r / 100);
-    const uint64_t bound = twoR + Bdepth + L;
+    // C2 (Codex 597aca2): the B1 bound is 2r + one datagram, NOT 2r + B (the bucket depth B is the
+    // legacy strict-only envelope; the unified admission gates every datagram at 2r).
+    const uint64_t bound = twoR + L;
     // Positive: a prior grant burst committed 150000; a normal 100000 AU (fits under 2r) sent through the
     // REAL send function is window-ADMITTED (committed into the window), total <= bound.
     BurstLedger led;
@@ -204,6 +206,65 @@ int main() {
     const uint64_t negEffective = 150'000 + negSink;
     check("case3 C1 NEGATIVE: bypassing the window on the real original send path exceeds 2r + B + L",
           negEffective > bound, "effective=" + std::to_string(negEffective) + " bound=" + std::to_string(bound));
+  }
+
+  // --- Case 4: D2 (Codex 597aca2) -- DETERMINISTIC real-send grant->quota-exhaust->normal-tail on ONE
+  //     injected clock shared by the limiter, the admission loop, the ledger window and the wait. The
+  //     independent TX trace's 2s window must stay <= 2r + L (the tail IS window-gated); a regression to
+  //     r6 (tail accounted but not gated) would push it past 2r, so this assertion catches r6. The wait
+  //     counts no-progress ticks, so the D1 busy-spin (a non-advancing loop) is caught, not hung. --------
+  {
+    uint64_t clk = 10'000'000;          // shared fake clock (us)
+    uint64_t noProgress = 0;            // D1 busy-spin detector: waits that did not advance time
+    WireLimiter lim([&] { return clk; }, [](uint64_t, uint64_t) { return true; });
+    lim.SetRate(cap, 1600);
+    clk += 3'000'000;                   // advance so the bucket fills to B at the real rate (deterministic)
+    BurstLedger led;
+    led.SetRate(cap, clk - 3'000'000);  // warm (>= 2s of history on the shared clock)
+    const BurstAuId owner{1, 1, 1, 200, true};
+    const uint64_t grant = led.GrantForIdr(clk, owner);
+    check("case4 D2: a grant is issued", grant > 0, "grant=" + std::to_string(grant));
+
+    std::vector<std::pair<uint64_t, uint64_t>> trace;  // (send clk, wire bytes) -- the independent TX trace
+    const uint32_t mtu4 = 1200;
+    const uint32_t stride = mtu4 - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+    std::vector<uint8_t> payload(static_cast<size_t>(stride) * 330, 0x6B);  // ~400KB: grant quota exhausts mid-AU
+    UdpVideoChunkHeader base{};
+    base.magic = kMagic; base.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
+    base.codec = static_cast<uint16_t>(UdpCodec::H264); base.seq = 200; base.streamGeneration = 1;
+    base.payloadSize = static_cast<uint32_t>(payload.size());
+    WireEgress wire;
+    wire.limiter = &lim;
+    wire.burstLedger = &led;
+    wire.auHasGrant = true;
+    wire.burstOwner = owner;
+    wire.nowFn = [&] { return clk; };
+    wire.waitFn = [&](uint64_t target) { if (target <= clk) { ++noProgress; ++clk; } else clk = target; };
+    wire.sink = [&](const uint8_t*, int len, bool) -> int {
+      trace.emplace_back(clk, static_cast<uint64_t>(len) + 28u);
+      return len;
+    };
+    SendPathStats st{};
+    UdpEgressConfig eg; eg.pacePeakBps = 0;
+    sockaddr_in peer{}; peer.sin_family = AF_INET;
+    const UdpSendOutcome oc = send_udp_chunks_impl(INVALID_SOCKET, peer, payload.data(), payload.size(), base,
+                                                   mtu4, &st, nullptr, 0, eg, &wire);
+    check("case4 D2: the AU sent to completion (no busy-spin / hang)", oc == UdpSendOutcome::Sent,
+          "datagrams=" + std::to_string(trace.size()));
+    check("case4 D2 (D1): the admission loop made progress every wait (no busy-spin)", noProgress == 0,
+          "noProgress=" + std::to_string(noProgress));
+    // 2s window peak over the independent TX trace.
+    uint64_t maxWin = 0;
+    for (size_t i = 0; i < trace.size(); ++i) {
+      uint64_t sum = 0;
+      for (size_t j = i + 1; j-- > 0;) {
+        if (trace[i].first - trace[j].first >= 2'000'000ULL) break;
+        sum += trace[j].second;
+      }
+      maxWin = std::max(maxWin, sum);
+    }
+    check("case4 D2: grant burst + window-gated normal tail keeps every 2s window <= 2r + L (catches r6)",
+          maxWin <= twoR + L, "maxWin=" + std::to_string(maxWin) + " 2r+L=" + std::to_string(twoR + L));
   }
 
   std::printf("\nhost_burst_sender_admission_test: %s (%d checks, %d failed)\n", gFailed ? "FAIL" : "PASS",

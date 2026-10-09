@@ -100,16 +100,17 @@ class WireLimiter {
     }
   }
 
-  // Peek (non-consuming): the clock time at which `bytes` tokens will be available, <= nowUs() when
-  // they are available now. For the unified send-path admission (stutter-keyframe r6 C1) that peeks the
-  // rate and the 2s window together and does ONE cancellable wait to the later of the two, then spends.
-  // A disabled cap is always ready now.
+  // Peek (non-consuming) for the unified send-path admission (stutter-keyframe r6 C1 / r8 D1). Returns
+  // 0 == "ready NOW" (tokens available), else the absolute clock deadline at which `bytes` will be
+  // available. r8 D1: it must NOT return a fresh nowUs_() for the ready case -- the caller compares
+  // against its OWN `now` snapshot, and a fresh (later) clock read would make `deadline <= now` false
+  // even when ready, busy-spinning the loop. A disabled cap is ready now (0).
   uint64_t NextReadyUs(uint64_t bytes) {
-    if (!enabled_.load(std::memory_order_relaxed)) return nowUs_();
+    if (!enabled_.load(std::memory_order_relaxed)) return 0;
     std::lock_guard<std::mutex> lk(mu_);
-    if (R_ == 0) return nowUs_();
+    if (R_ == 0) return 0;
     RefillLocked();
-    if (tokens_ >= bytes) return nowUs_();
+    if (tokens_ >= bytes) return 0;  // ready now (sentinel, NOT a fresh clock read)
     const uint64_t need = bytes - tokens_;
     return lastRefillUs_ + (need * 1000000ULL + R_ - 1ULL) / R_;
   }

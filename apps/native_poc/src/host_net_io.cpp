@@ -205,14 +205,28 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
     const bool grantCovered = b1Active && wire->auHasGrant &&
                               wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes;
+    // r8 D2: one injected time axis for the admission loop (null in production -> real qpc / sleep).
+    const auto NOW = [&]() -> uint64_t { return (wire && wire->nowFn) ? wire->nowFn() : qpc_now_us(); };
+    const auto WAIT = [&](uint64_t target) { if (wire && wire->waitFn) wire->waitFn(target); else udp_pace_wait_until(target); };
     if (b1Active) {
       for (;;) {
-        const uint64_t now = qpc_now_us();
+        const uint64_t now = NOW();
         const bool windowRoom = wire->burstLedger->HasRoom(now, wireBytes);
-        // rate: a grant peak-paces (bypasses the strict rate); a normal datagram waits for a token.
-        const uint64_t rateReadyUs =
-            grantCovered ? wire->burstLedger->PeakReadyUs(now) : wire->limiter->NextReadyUs(wireBytes);
-        if (windowRoom && rateReadyUs <= now) {
+        // rate readiness: a grant peak-paces (bypasses the strict rate); a normal datagram needs a token.
+        // r8 D1: readiness is a BOOL / 0-sentinel against THIS `now` snapshot -- never a fresh clock read
+        // (a later clock would make `deadline <= now` false even when ready, busy-spinning the loop).
+        uint64_t rateDeadlineUs;  // only meaningful when NOT ready (the wait target)
+        bool rateReady;
+        if (grantCovered) {
+          const uint64_t p = wire->burstLedger->PeakReadyUs(now);  // uses `now`, returns now when ready
+          rateReady = (p <= now);
+          rateDeadlineUs = p;
+        } else {
+          const uint64_t d = wire->limiter->NextReadyUs(wireBytes);  // 0 == ready now
+          rateReady = (d == 0);
+          rateDeadlineUs = (d == 0) ? now : d;
+        }
+        if (windowRoom && rateReady) {
           if (mediaStopFence()) { wireAborted = true; return false; }  // fence at the send instant (S1/R2)
           // Commit the window, then take the rate. If either slips (a concurrent SetRate between peek and
           // take), undo and re-evaluate rather than over-admit.
@@ -229,7 +243,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
         }
         if (mediaStopFence()) { wireAborted = true; return false; }
         const uint64_t windowAtUs = windowRoom ? now : wire->burstLedger->RoomAtUs(now, wireBytes);
-        udp_pace_wait_until(std::min<uint64_t>(std::max<uint64_t>(windowAtUs, rateReadyUs), now + 2000ULL));
+        WAIT(std::min<uint64_t>(std::max<uint64_t>(windowAtUs, rateDeadlineUs), now + 2000ULL));
       }
     } else if (wire && wire->limiter) {
       // Cap off (disabled limiter) or no ledger: the legacy strict-rate Acquire (permits at once when
@@ -254,7 +268,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // r4 B1 / r6 C1: commit the reservation into the 2s window at the REAL send time (1:1). Every B1
     // datagram -- normal or grant -- reserved in the unified admission above, so the window reflects
     // exactly what left the wire (normal traffic is now window-admitted too, closing the C1 gap).
-    if (reserved) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
+    if (reserved) wire->burstLedger->CommitSent(NOW(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {

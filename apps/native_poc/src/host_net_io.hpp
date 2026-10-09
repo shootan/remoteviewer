@@ -85,6 +85,14 @@ struct WireEgress {
   // most a few replay chunks per original datagram, so original data keeps priority and the shared
   // cap still bounds the sum). It runs outside any limiter lock. null = no interleave (legacy/tests).
   std::function<void()> betweenDatagrams;
+  // r8 D2 (Codex 597aca2): injected clock + wait for a DETERMINISTIC test of the unified admission loop.
+  // Null in production -> the loop uses qpc_now_us() and udp_pace_wait_until (real clock/sleep). A test
+  // sets both (and points WireLimiter at the SAME clock) so the loop's now, the ledger window timestamps,
+  // and the pacing wait share ONE controllable time axis -- this is what makes the D1 busy-spin and the
+  // grant->quota->tail sequence reproducible without a real-clock race. Same injection pattern as
+  // WireLimiter's clock; null here means no behaviour change (the shipped host never sets them).
+  std::function<uint64_t()> nowFn;       // admission-loop clock (ledger window timestamps too)
+  std::function<void(uint64_t)> waitFn;  // admission-loop cancellable wait (advances the fake clock in tests)
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */
