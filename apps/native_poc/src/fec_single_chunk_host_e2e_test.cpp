@@ -727,6 +727,13 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
     for (size_t i = 1; i < r.deliverUs.size(); ++i) gap = std::max(gap, r.deliverUs[i] - r.deliverUs[i - 1]);
     deliverGapMaxMs = gap / 1000.0;
   }
+  // stutter-keyframe r3 C: the COUNT of >250ms output gaps (the periodic-IDR stutter metric the
+  // contract asks for), not just the max. Computed from the retained per-frame deliver/decode times.
+  uint32_t deliverGap250 = 0, decodeGap250 = 0;
+  for (size_t i = 1; i < r.deliverUs.size(); ++i)
+    if (r.deliverUs[i] - r.deliverUs[i - 1] > 250'000ULL) ++deliverGap250;
+  for (size_t i = 1; i < r.decodeOutUs.size(); ++i)
+    if (r.decodeOutUs[i] - r.decodeOutUs[i - 1] > 250'000ULL) ++decodeGap250;
   // Realtime decode layer.
   double decodeFps = 0, decodeGapMaxMs = 0, decodeLatP95Ms = 0, decodeLatMaxMs = 0, firstDecodeMs = 0;
   if (r.decodeOutUs.size() >= 2) {
@@ -751,11 +758,11 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
   std::printf("MATRIX %s: cap=%llu applied=%u/%ufps | win1s=%.0f (%.1f%%) win250=%.0f (%.1f%%) | "
               "deliveredFps=%.1f deliverGapMax=%.0fms firstFrame=%.0fms | realtimeDecoded=%u decodeFps=%.1f "
               "firstDecode=%.0fms decodeGapMax=%.0fms decodeLatP95=%.0fms decodeLatMax=%.0fms | idr/s=%.2f keyReq=%u "
-              "disc=%u nacks=%u giveUps=%u decErr=%u decoder=%s rxDropped=%llu\n",
+              "disc=%u nacks=%u giveUps=%u decErr=%u decoder=%s rxDropped=%llu gap250(deliver/decode)=%u/%u\n",
               label, (unsigned long long)capBps, r.appliedBitrate, r.appliedFps, p1s, 100.0 * p1s / capBps, p250,
               100.0 * p250 / capBps, deliveredFps, deliverGapMaxMs, firstFrameMs, r.realtimeDecoded, decodeFps,
               firstDecodeMs, decodeGapMaxMs, decodeLatP95Ms, decodeLatMaxMs, idrPerSec, r.keyReq, r.disc, r.nacks,
-              r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped);
+              r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped, deliverGap250, decodeGap250);
   std::printf("       %s host: queueWaitMax=%llums queueDepthMax=%llu wireCapBps=%llu | recoveryMax=%.0fms recoveries=%u\n",
               label, (unsigned long long)(r.host.maxQueueWaitUs / 1000), (unsigned long long)r.host.maxQueueDepth,
               (unsigned long long)r.host.wireCapBps, r.recoveryMaxUs / 1000.0, r.recoveryCount);
