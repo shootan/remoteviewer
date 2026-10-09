@@ -47,6 +47,7 @@
 #include "host_window_enum.hpp"
 #include "host_monitor_selection.hpp"
 #include "monitor_select_target.hpp"
+#include "stream_test_hold.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
 #include "time_utils.hpp"
@@ -1172,7 +1173,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // reconnect, so doing this open-coded here was a data race on the throttle that decides how
       // often the stream is forced to an IDR. (Ledger H-04.)
       double keyReqTokensNow = 0.0;
-      if (encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
+      bool refusedByTest = false;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY: while the hold file "refuse_keys" exists, every request takes the
+      // limiter's refusal branch below (the e2e of a refused IDR request, t-970r4zgo r4).
+      refusedByTest = stream_test_hold_set("refuse_keys");
+      if (refusedByTest) {
+        std::cout << "[stream-test-seam] keyframe-request refused seq=" << req.seq << "\n";
+      }
+#endif
+      if (!refusedByTest && encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
         mailbox.PostRequestKeyframe(kKeyframeReasonViewer, req.reason);
         const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
         std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq

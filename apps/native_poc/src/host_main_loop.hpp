@@ -213,7 +213,8 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
                                    const std::wstring& requestedMonitorDevice, uint64_t nowUs,
                                    uint32_t* outFlags, uint64_t* outWindowId,
                                    uint64_t* outStreamGeneration,
-                                   std::string* outReason, std::string* outTitle);
+                                   std::string* outReason, std::string* outTitle,
+                                   uint64_t ownerEpoch = 0);
 
 // The twelve stages of one tick, in call order.
 Flow stage_time_limit(HostContext& hx, TickContext& tc);    // seconds limit, barrier recovery

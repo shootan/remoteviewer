@@ -605,6 +605,9 @@ struct WindowListApplyResult {
 struct WindowSelectApplyResult {
   std::string logLine;
   bool ok = false;
+  // r4 M2-A: false = the answer belongs to another selection than the one now requested, and the
+  // panel was left as it was.
+  bool shown = true;
 };
 
 class WindowPanelStateModel {
@@ -637,6 +640,10 @@ class WindowPanelStateModel {
   void SetDisplayStatus(const std::string& displayStatus);
   WindowListApplyResult ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount);
   WindowSelectApplyResult ApplyWindowSelected(const ControlWindowSelectedMessage& msg);
+  // r4 M2-A: the answer to a request queued under `selectionTag`. Shown only if that is still the
+  // selection most recently requested here -- compared and applied under the one lock RequestSelect
+  // takes, so a pick made between the two cannot be overwritten. selectionTag 0 = untracked, shown.
+  WindowSelectApplyResult ApplyWindowSelectedFor(const ControlWindowSelectedMessage& msg, uint64_t selectionTag);
   void Scroll(int deltaSteps, int visibleCount);
   bool TryResolveWindowIdForVisibleRow(int row, int visibleCount, uint64_t* outWindowId) const;
   WindowPanelSnapshot Snapshot() const;
@@ -649,6 +656,7 @@ class WindowPanelStateModel {
   bool selectRequestPending_ = false;
   uint64_t pendingSelectId_ = 0;
   uint64_t pendingSelectTag_ = 0;
+  uint64_t currentSelectTag_ = 0;  // the selection most recently requested (r4 M2-A)
   uint64_t pendingSelectListRevision_ = ~0ULL;
   // The last applied monitor list, entry by entry (with the host's device names), to tell a
   // changed list from the same one fetched again.

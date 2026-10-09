@@ -489,6 +489,26 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
     }
     // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
+    // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
+    // answer and was dropped) is asked for again until it arrives -- a request taken here may still
+    // be refused by the host's limiter. Once per second at most, eight times, through the limiter.
+    {
+      const uint64_t owed = encodedFrameSink_ ? encodedFrameSink_->KeyframeOwedFor() : 0;
+      if (owed != owedSelection_) {
+        owedSelection_ = owed;
+        owedAttempts_ = 0;
+        owedNextUs_ = 0;
+      }
+      constexpr uint32_t kOwedKeyMaxAttempts = 8;
+      constexpr uint64_t kOwedKeyRetryUs = 1000000;
+      if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_ &&
+          keyframeRequests_.Request(2, loopNowUs).queued) {
+        ++owedAttempts_;
+        owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+        std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
+                     static_cast<unsigned long long>(owed), owedAttempts_);
+      }
+    }
     if (decoderRekeyPending_.load(std::memory_order_acquire) && keyframeRequests_.Request(2, loopNowUs).queued) {
       decoderRekeyPending_.store(false, std::memory_order_release);
       std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
@@ -572,20 +592,6 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
             answer.flags &= ~0x1u;
             answer.streamGeneration = 0;
           }
-          // r3 M2: and it is SHOWN only if it belongs to the selection now in progress. The panel's
-          // status is what the APK moves its selection on (window_selected / window_select_failed);
-          // a late answer to an earlier pick -- success or failure -- must not move a later one.
-          // Requests queued untracked (tag 0) are shown as before.
-          const uint64_t currentSelection = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
-          if (action.selectionTag == 0 || action.selectionTag == currentSelection) {
-            windowPanel_.ApplyWindowSelected(answer);
-          } else {
-            std::fprintf(stderr,
-                         "[native-video-client-session] select answer seq=%u ok=%u for selection %llu while %llu is "
-                         "in progress: not shown\n",
-                         answer.seq, answer.flags & 0x1u, static_cast<unsigned long long>(action.selectionTag),
-                         static_cast<unsigned long long>(currentSelection));
-          }
           if (encodedFrameSink_) {
             encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
             // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
@@ -595,6 +601,17 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               decoderRekeyPending_.store(true, std::memory_order_release);
               std::fprintf(stderr, "[native-video-client-session] keyframe request after the select answer held by the limiter\n");
             }
+          }
+          // r3 M2 / r4 M2-A: and it is SHOWN only if it belongs to the selection now requested. The
+          // panel's status is what the APK moves its selection on (window_selected /
+          // window_select_failed); a late answer to an earlier pick -- success or failure -- must not
+          // move a later one. The panel compares and applies under the lock its RequestSelect takes,
+          // so a pick made while this answer was being handled cannot be overwritten.
+          if (!windowPanel_.ApplyWindowSelectedFor(answer, action.selectionTag).shown) {
+            std::fprintf(stderr,
+                         "[native-video-client-session] select answer seq=%u ok=%u for selection %llu: a later "
+                         "selection is requested, not shown\n",
+                         answer.seq, answer.flags & 0x1u, static_cast<unsigned long long>(action.selectionTag));
           }
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);
@@ -1048,6 +1065,9 @@ void ClientSessionController::ResetUnlocked() {
   snapshot_ = ClientSessionSnapshot{};
   windowPanel_.Reset();
   decoderRekeyPending_.store(false, std::memory_order_release);
+  owedSelection_ = 0;
+  owedAttempts_ = 0;
+  owedNextUs_ = 0;
   streamState_.Reset();
   captureMode_.Reset();
   keyframeRequests_.Reset();

@@ -53,6 +53,9 @@ class ClientEncodedFrameSink {
   // t-970r4zgo: the local selection a select request belongs to -- read when the request is
   // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
   virtual uint64_t CurrentSelectionTag() { return 0; }
+  // r4 M1-A: the selection (its tag) that is still owed an IDR of its answered generation, or 0.
+  // While non-zero the session asks for one, bounded, until the sink admits such an IDR.
+  virtual uint64_t KeyframeOwedFor() { return 0; }
   // The answer to a select request, with the tag that request was queued under. A sink that
   // tracks selections applies it only to that selection; the default ignores the tag.
   virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
@@ -127,6 +130,8 @@ class ClientSessionController {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
   bool RequestStreamActive(bool active);
+  // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
+  void ClearPendingDecoderKeyframe() { decoderRekeyPending_.store(false, std::memory_order_release); }
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
@@ -267,6 +272,11 @@ class ClientSessionController {
   // tried on every control-loop pass, so it does not wait for the next frame -- after a dropped
   // lone IDR there may be none.
   std::atomic<bool> decoderRekeyPending_{false};
+  // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
+  // Control-loop thread only.
+  uint64_t owedSelection_ = 0;
+  uint32_t owedAttempts_ = 0;
+  uint64_t owedNextUs_ = 0;
   std::atomic<bool> clipInitialPushWanted_{false};
 };
 

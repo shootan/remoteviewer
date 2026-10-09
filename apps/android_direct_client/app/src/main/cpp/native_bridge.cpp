@@ -347,6 +347,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeAbortVideoSwitch(
     JNIEnv* /* env */, jobject /* this */) {
   g_video_decoder_sink.AbortWindowSelection();
+  // The switch is abandoned: an IDR the decoder was still owed is not asked for (r4 M1-A).
+  g_session_controller.ClearPendingDecoderKeyframe();
 }
 
 extern "C" JNIEXPORT jlong JNICALL

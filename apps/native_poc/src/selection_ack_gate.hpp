@@ -16,8 +16,9 @@ namespace remote60::native_poc {
 //     late answer to an earlier pick cannot open a later pick's gate;
 //   * control and video travel separately, so the new generation's first IDR can arrive BEFORE
 //     the answer and be dropped. If any frame of the answered generation was dropped while
-//     waiting, the answer asks for a fresh IDR (bounded by the session's keyframe rate limit)
-//     instead of waiting on deltas that reference a picture the decoder never had.
+//     waiting, the selection is OWED a key frame (KeyOwed) until an IDR of that generation is
+//     actually admitted -- not merely until one was asked for: a request can be refused on the
+//     way (either side's limiter). The session asks again, bounded, while it is owed (r4 M1-A).
 // It never opens on a frame before the answer.
 class SelectionAckGate {
  public:
@@ -32,6 +33,7 @@ class SelectionAckGate {
     awaiting_ = true;
     expected_ = 0;
     droppedCount_ = 0;
+    keyOwed_ = false;
   }
 
   void Reset() {
@@ -39,6 +41,7 @@ class SelectionAckGate {
     awaiting_ = false;
     expected_ = 0;
     droppedCount_ = 0;
+    keyOwed_ = false;
   }
 
   Ack OnAck(bool ok, uint64_t streamGeneration, uint64_t requestTag) {
@@ -49,21 +52,26 @@ class SelectionAckGate {
       return {AckResult::Failed, false};
     }
     expected_ = streamGeneration;
-    return {AckResult::Applied, DroppedWhileAwaiting(streamGeneration)};
+    keyOwed_ = DroppedWhileAwaiting(streamGeneration);
+    return {AckResult::Applied, keyOwed_};
   }
 
   // True = the frame may be decoded. Frames before the answer are dropped (and their generation
   // remembered); after it, only the answered generation passes.
-  bool Admit(uint64_t frameStreamGeneration) {
+  // isKey: the frame is an IDR -- one of the answered generation pays what the selection is owed.
+  bool Admit(uint64_t frameStreamGeneration, bool isKey = false) {
     if (pending_ != 0 && awaiting_) {
       RememberDropped(frameStreamGeneration);
       return false;
     }
     if (pending_ != 0 && expected_ == 0) return false;
     if (expected_ != 0 && frameStreamGeneration != expected_) return false;
+    if (isKey && expected_ != 0 && frameStreamGeneration == expected_) keyOwed_ = false;
     return true;
   }
 
+  // The answered selection still has no IDR of its generation (see the class comment).
+  bool KeyOwed() const { return keyOwed_; }
   uint64_t pending() const { return pending_; }
   bool awaiting() const { return awaiting_; }
   uint64_t expected() const { return expected_; }
@@ -95,6 +103,7 @@ class SelectionAckGate {
   uint64_t expected_ = 0;
   uint64_t dropped_[kDroppedMemory] = {};
   size_t droppedCount_ = 0;
+  bool keyOwed_ = false;
 };
 
 }  // namespace remote60::native_poc

@@ -243,7 +243,7 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       const bool sameSession = ownerEpoch == 0 || ownerEpoch == currentEpoch;
       const bool applied = sameSession && apply_selected_window_capture(hx,
           requestedWindowId, requestedMonitorDevice, nowUs, &responseFlags, &responseWindowId,
-          &responseStreamGeneration, &responseReason, &responseTitle);
+          &responseStreamGeneration, &responseReason, &responseTitle, ownerEpoch);
       if (!sameSession) {
         responseFlags = 0;
         responseReason = "stale_session";

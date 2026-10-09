@@ -1226,6 +1226,7 @@ void WindowPanelStateModel::Reset() {
   selectRequestPending_ = false;
   pendingSelectId_ = 0;
   pendingSelectTag_ = 0;
+  currentSelectTag_ = 0;
   pendingSelectListRevision_ = ~0ULL;
   lastMonitorEntries_.clear();
   monitorListRequestPending_ = false;
@@ -1253,6 +1254,7 @@ bool WindowPanelStateModel::RequestSelect(uint64_t windowId, const char* statusT
   selectRequestPending_ = true;
   pendingSelectId_ = windowId;
   pendingSelectTag_ = selectionTag;
+  currentSelectTag_ = selectionTag;
   pendingSelectListRevision_ =
       monitorListRevision == ~0ULL ? state_.monitorListRevision : monitorListRevision;
   if (statusText) state_.status = statusText;
@@ -1415,8 +1417,17 @@ WindowListApplyResult WindowPanelStateModel::ApplyWindowList(const ControlWindow
 }
 
 WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelected(const ControlWindowSelectedMessage& msg) {
+  return ApplyWindowSelectedFor(msg, 0);
+}
+
+WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelectedFor(const ControlWindowSelectedMessage& msg,
+                                                                     uint64_t selectionTag) {
   WindowSelectApplyResult result{};
   std::lock_guard<std::mutex> lk(mu_);
+  if (selectionTag != 0 && selectionTag != currentSelectTag_) {
+    result.shown = false;
+    return result;
+  }
   const bool ok = ((msg.flags & 0x1u) != 0);
   const bool locked = ((msg.flags & 0x2u) != 0);
   state_.selectionLocked = state_.selectionLocked || locked;

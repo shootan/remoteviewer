@@ -184,6 +184,51 @@ int main() {
               id == 0x00000000000A0B2CULL);
   }
 
+  {
+    std::puts("\n--- r4 M1-A: the selection is owed its generation's IDR until one is admitted ---");
+    SelectionAckGate g;
+    g.Prepare(21);
+    (void)g.Admit(60, true);  // the answered generation's IDR, before the answer: dropped
+    const auto ack = g.OnAck(true, 60, 21);
+    check("answered after its IDR was dropped: owed", ack.result == SelectionAckGate::AckResult::Applied && g.KeyOwed());
+    check("a delta of that generation passes but does not pay it", g.Admit(60, false) && g.KeyOwed());
+    check("an IDR of another generation is not admitted and does not pay it", !g.Admit(59, true) && g.KeyOwed());
+    check("an IDR of that generation pays it", g.Admit(60, true) && !g.KeyOwed());
+    g.Prepare(22);
+    (void)g.Admit(61, true);
+    (void)g.OnAck(true, 61, 22);
+    g.Reset();
+    check("abandoned (Reset): nothing owed", !g.KeyOwed());
+    g.Prepare(23);
+    (void)g.OnAck(true, 62, 23);
+    check("its IDR not dropped before the answer: nothing owed", !g.KeyOwed());
+  }
+  {
+    std::puts("\n--- r4 M2-A: an answer is shown only for the selection most recently requested ---");
+    WindowPanelStateModel panel;
+    ControlWindowSelectedMessage a{};
+    a.seq = 1;
+    a.flags = 0;  // A failed
+    a.windowId = encode_monitor_select_target(0);
+    std::snprintf(a.reason, sizeof(a.reason), "%s", "capture_restart_failed");
+    panel.RequestSelect(encode_monitor_select_target(0), "monitor_select_requested", 31);
+    uint64_t id = 0;
+    (void)panel.TakeSelectRequest(&id);  // A went out
+    panel.RequestSelect(encode_monitor_select_target(1), "monitor_select_requested", 32);  // then B was picked
+    const auto r = panel.ApplyWindowSelectedFor(a, 31);
+    check("A's late failure is not shown while B is the requested selection",
+          !r.shown && panel.Snapshot().status == "monitor_select_requested", panel.Snapshot().status);
+    ControlWindowSelectedMessage b = a;
+    b.seq = 2;
+    b.flags = 0x1u;
+    b.windowId = encode_monitor_select_target(1);
+    b.streamGeneration = 70;
+    check("B's own answer is shown", panel.ApplyWindowSelectedFor(b, 32).shown &&
+                                         panel.Snapshot().status.rfind("window_selected", 0) == 0);
+    check("an untracked answer (tag 0) is shown as before", panel.ApplyWindowSelectedFor(a, 0).shown &&
+                                                                panel.Snapshot().status.rfind("window_select_failed", 0) == 0);
+  }
+
   if (gFailures == 0) {
     std::printf("\nRESULT: ALL PASS  (%d checks, 0 failed)\n", gChecks);
     return 0;

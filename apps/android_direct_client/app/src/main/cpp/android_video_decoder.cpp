@@ -170,7 +170,7 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 
   PumpCodecLocked();
 
-  if (!gate_.Admit(frame.header.streamGeneration)) {
+  if (!gate_.Admit(frame.header.streamGeneration, (frame.header.flags & 1u) != 0)) {
     ++staleFrameDropCount_;
     if ((staleFrameDropCount_ % 30u) == 1u) {
       char line[192];
@@ -316,6 +316,11 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
   OnWindowSelectionControlResultFor(msg, tag);
 }
 
+uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return gate_.KeyOwed() ? gate_.pending() : 0;
+}
+
 uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
   std::lock_guard<std::mutex> lock(mu_);
   return gate_.pending();
@@ -338,7 +343,8 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
     ResetPtsStateLocked();
     // The new generation's IDR got here before its answer and was dropped: ask for another
     // rather than wait on deltas that reference it (rate-limited by the session).
-    if (ack.requestKeyframe) decoderKeyframeRequest_ = true;
+    // An IDR of this generation already came and was dropped: the selection is now owed one
+    // (gate_.KeyOwed), which the session asks for until it arrives (KeyframeOwedFor, r4 M1-A).
     std::snprintf(line, sizeof(line),
                   "selection ack localGen=%llu streamGen=%llu hostSendQpcUs=%llu rekey=%u",
                   static_cast<unsigned long long>(gate_.pending()),

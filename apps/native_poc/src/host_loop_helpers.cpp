@@ -367,7 +367,8 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
                                    const std::wstring& requestedMonitorDevice, uint64_t nowUs,
                                    uint32_t* outFlags, uint64_t* outWindowId,
                                    uint64_t* outStreamGeneration,
-                                   std::string* outReason, std::string* outTitle) {
+                                   std::string* outReason, std::string* outTitle,
+                                   uint64_t ownerEpoch) {
   auto& useH264 = hx.useH264;
   auto& captureWindowRebindIntervalUs = hx.captureWindowRebindIntervalUs;
   auto& nextCaptureWindowCheckUs = hx.nextCaptureWindowCheckUs;
@@ -559,19 +560,17 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
 #ifdef REMOTE60_STREAM_TEST_SEAM
   stream_test_hold_wait("restart", hx.stop);  // test build: checked, target switched, not yet restarted
 #endif
-  if (!restart_capture_session(hx)) {
-    restore_previous_target();
-    if (outReason) *outReason = "capture_restart_failed";
-    if (outTitle) *outTitle = nextTitle;
-    return false;
-  }
-  if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
-    // r3 M3: the screen went between the check above and the restart, and the restart opened the
-    // fallback screen instead (host_monitor_selection.hpp). That is not the pick and it is not
-    // what was shown before, so it is neither acknowledged nor left standing: the previous target
-    // and its generation are given back and the capture is restarted on it. If the previous
-    // screen is gone too, that restart falls back by the ordinary rule -- the state is then that
-    // confirmed fallback, under the previous generation, and the answer still says the pick failed.
+  // r4 M5-A: the session this selection was made in must still be the current one at each step that
+  // changes what the next viewer sees -- not only before the function was entered. (ownerEpoch 0 =
+  // not bound to a session.)
+  const auto stillOwner = [&] {
+    return ownerEpoch == 0 || hx.clientSession.epoch.load(std::memory_order_acquire) == ownerEpoch;
+  };
+  // The target is given back and the capture reopened on it: a pick that must not stand once the
+  // capture has already been restarted for it. If the previous screen is gone too, that restart
+  // falls back by the ordinary rule -- the state is then that confirmed fallback, under the
+  // previous generation.
+  const auto rollBackRestarted = [&](const char* why) {
     restore_previous_target();
     watchdog.lastCaptureRestartUs = nowUs;
     if (restart_capture_session(hx)) {
@@ -582,17 +581,46 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
       encoder.ResetTimelineAnchors(capture);
       encoder.RequestKey(kHostKeyReasonSelection);
       capture.FlushCapturePipelineState(res, frameGating, stats, "monitor-select-rollback");
-      std::cout << "[native-video-host][control] monitor-select rolled back: the picked screen went during the "
-                   "restart; previous target restored streamGen="
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restored streamGen="
                 << capture.streamGenerationState.load(std::memory_order_acquire) << "\n";
     } else {
       // The previous target could not be reopened now; the restart retry takes it from here.
-      std::cout << "[native-video-host][control] monitor-select rolled back; previous target restart pending\n";
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restart pending\n";
     }
     if (outStreamGeneration) *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
-    if (outReason) *outReason = "monitor_gone";
+    if (outReason) *outReason = why;
     if (outTitle) *outTitle = nextTitle;
     return false;
+  };
+  if (!stillOwner()) {
+    // Replaced before the capture was touched: give the target back, nothing to reopen.
+    restore_previous_target();
+    std::cout << "[native-video-host][control] window-select: the session changed before the restart; "
+                 "previous target kept\n";
+    if (outReason) *outReason = "stale_session";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
+  if (!restart_capture_session(hx)) {
+    restore_previous_target();
+    if (outReason) *outReason = "capture_restart_failed";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
+  if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
+    // r3 M3: the screen went between the check above and the restart, and the restart opened the
+    // fallback screen instead (host_monitor_selection.hpp). That is not the pick and it is not
+    // what was shown before, so it is neither acknowledged nor left standing.
+    return rollBackRestarted("monitor_gone");
+  }
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restarted", hx.stop);  // test build: restarted on the pick, not yet committed
+#endif
+  if (!stillOwner()) {
+    // r4 M5-A: replaced while the capture was being restarted for it.
+    return rollBackRestarted("stale_session");
   }
 
   capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);

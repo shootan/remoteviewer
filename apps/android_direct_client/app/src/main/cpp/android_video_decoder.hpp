@@ -41,6 +41,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void PrepareForWindowSelection(uint64_t selectionGeneration);
   // t-970r4zgo: the selection a select request is queued under, and its answer for that selection.
   uint64_t CurrentSelectionTag() override;
+  uint64_t KeyframeOwedFor() override;
   void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& msg,
                                          uint64_t requestTag) override;
   void AbortWindowSelection();

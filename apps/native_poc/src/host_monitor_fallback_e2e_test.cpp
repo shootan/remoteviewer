@@ -67,7 +67,8 @@ class CountingSink : public ClientEncodedFrameSink {
  public:
   void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) override {
     std::lock_guard<std::mutex> lk(mu_);
-    if (!gate_.Admit(frame.header.streamGeneration)) {
+    const bool isKey = (frame.header.flags & 0x1u) != 0;
+    if (!gate_.Admit(frame.header.streamGeneration, isKey)) {
       ++dropped_;
       if ((frame.header.flags & 0x1u) != 0 && heldAckGen_ != 0 && frame.header.streamGeneration == heldAckGen_) {
         droppedHeldKey_ = true;  // the answered generation's IDR, here before its (held) answer
@@ -75,6 +76,7 @@ class CountingSink : public ClientEncodedFrameSink {
       return;
     }
     ++frames_;
+    if (isKey) ++admittedKeys_;
     lastGen_ = frame.header.streamGeneration;
     if ((frame.header.flags & 0x1u) != 0 && gate_.pending() != 0 && ready_ != gate_.pending()) {
       ready_ = gate_.pending();
@@ -92,6 +94,11 @@ class CountingSink : public ClientEncodedFrameSink {
     const bool r = rekey_;
     rekey_ = false;
     return r;
+  }
+  // The APK decoder's: the selection still owed its generation's IDR (r4 M1-A).
+  uint64_t KeyframeOwedFor() override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return gate_.KeyOwed() ? gate_.pending() : 0;
   }
   uint64_t CurrentSelectionTag() override {
     std::lock_guard<std::mutex> lk(mu_);
@@ -114,10 +121,7 @@ class CountingSink : public ClientEncodedFrameSink {
     } else if (a.result == SelectionAckGate::AckResult::Applied) {
       ++applied_;
       ackGen_ = msg.streamGeneration;
-      if (a.requestKeyframe) {
-        rekey_ = true;
-        ++rekeys_;
-      }
+      if (a.requestKeyframe) ++rekeys_;  // owed now; the session asks (KeyframeOwedFor), not this sink
     } else {
       ++failed_;
       failReason_.assign(msg.reason, strnlen(msg.reason, sizeof(msg.reason)));
@@ -156,6 +160,8 @@ class CountingSink : public ClientEncodedFrameSink {
     return field;                 \
   }
   GETTER(uint64_t, frames, frames_)
+  GETTER(uint64_t, admittedKeys, admittedKeys_)
+  GETTER(bool, keyOwed, gate_.KeyOwed())
   GETTER(uint64_t, lastGen, lastGen_)
   GETTER(uint64_t, dropped, dropped_)
   GETTER(uint64_t, applied, applied_)
@@ -176,7 +182,7 @@ class CountingSink : public ClientEncodedFrameSink {
  private:
   mutable std::mutex mu_;
   SelectionAckGate gate_;
-  uint64_t frames_ = 0, dropped_ = 0, applied_ = 0, failed_ = 0, ignored_ = 0, rekeys_ = 0;
+  uint64_t frames_ = 0, dropped_ = 0, applied_ = 0, failed_ = 0, ignored_ = 0, rekeys_ = 0, admittedKeys_ = 0;
   uint64_t ready_ = 0, readyGen_ = 0, ackGen_ = 0, lastGen_ = 0;
   bool rekey_ = false;
   std::string failReason_;
@@ -549,9 +555,12 @@ int main(int argc, char** argv) {
   std::wstring oldHost, oldClient;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "--thumbnail") {  // staged as GNLinkCapture.exe; answers nothing
-      Sleep(120000);
-      return 0;
+    if (a == "--thumbnail") {
+      // Staged as GNLinkCapture.exe. Fails at once rather than never answering: a helper that never
+      // answers costs the host its 1 s deadline per window, and the client's strictly sequential
+      // control loop waits through every one of them -- a select answer's IDR request then sat
+      // seconds behind them (the verifier's intermittent phase-12 failure, 2026-10-09 20:38).
+      return 3;
     }
     if ((a == "--old-host" || a == "--old-client") && i + 1 < argc) {
       const std::string v = argv[++i];
@@ -1004,12 +1013,18 @@ int main(int argc, char** argv) {
   }
 
   {
-    std::puts("\n--- 11. (r3 M5) a pick whose session is gone is not applied to the next session ---");
+    std::puts("\n--- 11. (r3 M5 / r4 M5-A) a pick whose session is gone is not applied to the next session ---");
     write_mode(self.monitorsPath(), "extra");
-    for (int round = 0; round < 2; ++round) {
-      const bool afterTake = round == 1;
-      const wchar_t* point = afterTake ? L"apply" : L"take";
-      std::printf("      (round %d: held %s)\n", round + 1, afterTake ? "after the main loop took it" : "before it is taken");
+    // Where the session is replaced: before the main loop takes the pick, after it took it, after the
+    // target was switched but before the restart, after the restart but before it is committed.
+    const wchar_t* points[] = {L"take", L"apply", L"restart", L"restarted"};
+    const char* heldLog[] = {nullptr, "holding at apply", "holding at restart", "holding at restarted"};
+    const char* why[] = {"withdrawn (asker gone", "reason=stale_session", "session changed before the restart",
+                         "rolled back (stale_session)"};
+    for (int round = 0; round < 4; ++round) {
+      const bool afterTake = round >= 1;
+      const wchar_t* point = points[round];
+      std::printf("      (round %d: held at %ls)\n", round + 1, point);
       CountingSink sinkA;
       ClientSessionController a;
       uint32_t before = 0;
@@ -1019,18 +1034,19 @@ int main(int argc, char** argv) {
         const auto onPrimary = pick_screen(a, sinkA, 0);
         check("A starts on the primary", onPrimary.applied && onPrimary.ready, onPrimary.detail);
         before = a.WindowPanelSnapshotCopy().selectedMonitorId;
-        const size_t holds0 = count_of(read_all(log), "holding at apply");
+        const size_t holds0 = heldLog[round] ? count_of(read_all(log), heldLog[round]) : 0;
         write_mode(self.holdPath(point), "1");
         sinkA.Prepare(++gSelection);
         check("A picks the added screen", a.RequestMonitorSelect(picked));
         if (afterTake) {
-          check("taken and held", wait_until([&] { return count_of(read_all(log), "holding at apply") > holds0; }, 10000));
+          check("held there", wait_until([&] { return count_of(read_all(log), heldLog[round]) > holds0; }, 10000));
         } else {
           std::this_thread::sleep_for(std::chrono::milliseconds(800));  // reached the host, left pending
         }
       }
       const size_t applied0 =
           count_of(read_all(log), "requestedId=" + std::to_string(encode_monitor_select_target(picked)) + " applied=1");
+      const size_t why0 = count_of(read_all(log), why[round]);
       a.Disconnect();
       CountingSink sinkB;
       ClientSessionController b;
@@ -1040,13 +1056,15 @@ int main(int argc, char** argv) {
       const std::string text = read_all(log);
       check("A's pick was NOT applied to B's session",
             count_of(text, "requestedId=" + std::to_string(encode_monitor_select_target(picked)) + " applied=1") == applied0);
-      check(afterTake ? "the host said why (stale_session)" : "A's asker withdrew it (withdrawn)",
-            text.find(afterTake ? "reason=stale_session" : "withdrawn (asker gone") != std::string::npos);
+      check(std::string("the host said why: ") + why[round], count_of(text, why[round]) > why0);
       if (bUp) {
         fresh_monitor_list(b, log, real + 1);
         check("B sees the screen A had, unchanged", b.WindowPanelSnapshotCopy().selectedMonitorId == before,
               panel_said(b.WindowPanelSnapshotCopy()));
         b.RequestStreamActive(true);
+        check("and its picture flows (the capture is consistent)", wait_until([&] { return sinkB.frames() >= 1; }, 15000));
+        check("the secure-input rect is known", last_rect(read_all(log)).find("/0x0") == std::string::npos,
+              "rect=" + last_rect(read_all(log)));
         const auto own = pick_screen(b, sinkB, picked);
         check("B's own pick completes", own.applied && own.ready, own.detail);
       }
@@ -1118,13 +1136,123 @@ int main(int argc, char** argv) {
             "requests=" + std::to_string(key_requests_received(read_all(log)) - keyReq0) +
                 " framesWhileCut=" + std::to_string(sink.frames() - frames0));
       cutVideo.store(false);
-      sink.ArmConsumeOnce();  // the IDR asked for was cut too; the decoder asks again, as the APK's would
-      check("video back: the fresh IDR of B's generation makes B ready",
+      // No request is made by this test from here: the selection is still owed its IDR (r4 M1-A).
+      check("video back: B recovers by itself -- an IDR of its generation arrives and makes it ready",
             wait_until([&] { return sink.ready() == selB; }, 15000) && sink.readyGen() == sink.heldAckGen(),
             "ready=" + std::to_string(sink.ready()) + " readyGen=" + std::to_string(sink.readyGen()));
     }
     c.Disconnect();
     if (proxyUp) proxy.Stop();
+  }
+
+  {
+    std::puts("\n--- 12b. (r4 M1-A) the answer's IDR request is REFUSED by the host's limiter: the selection still "
+              "gets its IDR, with no help from outside ---");
+    // The answered generation's IDR comes before its (held) answer and is dropped; the host's
+    // limiter then refuses the request made for it (the test build's refuse_keys point makes its
+    // real refusal branch run). The video keeps flowing -- only deltas, no gap -- and nothing in
+    // this test asks for anything: the session's bounded retry must get the IDR.
+    write_mode(self.monitorsPath(), "extra");
+    CountingSink sink;
+    ClientSessionController c;
+    if (arrive(c, &sink, "viewer 10 connects")) {
+      wait_until([&] { return c.WindowPanelSnapshotCopy().monitors.size() == real + 1; }, 6000);
+      c.RequestStreamActive(true);
+      const auto a = pick_screen(c, sink, 0);
+      check("on the primary", a.applied && a.ready, a.detail);
+      std::this_thread::sleep_for(std::chrono::milliseconds(700));  // both limiters idle
+      sink.ArmHoldAck();
+      const uint64_t selB = ++gSelection;
+      sink.Prepare(selB);
+      check("pick the added screen", c.RequestMonitorSelect(picked));
+      check("its answer is held, and its generation's IDR arrives first and is dropped",
+            wait_until([&] { return sink.ackHeld() && sink.droppedHeldKey(); }, 15000));
+      const std::string before = read_all(log);
+      const size_t refused0 = count_of(before, "[stream-test-seam] keyframe-request refused");
+      const size_t accepted0 = count_of(before, "[control] keyframe-request seq=");
+      const uint64_t keys0 = sink.admittedKeys();
+      write_mode(self.holdPath(L"refuse_keys"), "1");
+      sink.ReleaseAck();
+      check("the request made for the answered selection reaches the host and is refused",
+            wait_until([&] { return count_of(read_all(log), "[stream-test-seam] keyframe-request refused") > refused0; }, 5000));
+      check("... and right then no IDR has been admitted, the selection is still owed one",
+            sink.admittedKeys() == keys0 && sink.keyOwed() && sink.ready() != selB);
+      DeleteFileW(self.holdPath(L"refuse_keys").c_str());
+      // Evaluated before the detail strings are built (argument order is unspecified).
+      const bool askedAgain =
+          wait_until([&] { return count_of(read_all(log), "[control] keyframe-request seq=") > accepted0; }, 4000);
+      check("the session asks again by itself and the host takes it (no request from this test)", askedAgain,
+            "accepted=" + std::to_string(count_of(read_all(log), "[control] keyframe-request seq=") - accepted0));
+      const bool readyB = wait_until([&] { return sink.ready() == selB; }, 8000) &&
+                          sink.readyGen() == sink.heldAckGen() && !sink.keyOwed();
+      check("an IDR of B's generation arrives and is admitted: B ready, nothing owed", readyB,
+            "ready=" + std::to_string(sink.ready()) + " readyGen=" + std::to_string(sink.readyGen()) +
+                " keys=" + std::to_string(sink.admittedKeys() - keys0));
+    }
+    c.Disconnect();
+  }
+
+  {
+    std::puts("\n--- 13. (r4 M2-A) B is picked while A's answer is being handled, before it reaches the panel ---");
+    // The answer is handed to the sink before the panel; the sink's hook (on the session's control
+    // thread, inside that handling) arms B and queues it right there -- the window between reading
+    // which selection is current and applying the answer. A's answer must not reach the panel.
+    write_mode(self.monitorsPath(), "extra");
+    CountingSink sink;
+    ClientSessionController c;
+    if (arrive(c, &sink, "viewer 11 connects")) {
+      wait_until([&] { return c.WindowPanelSnapshotCopy().monitors.size() == real + 1; }, 6000);
+      c.RequestStreamActive(true);
+      const auto start = pick_screen(c, sink, 0);
+      check("on the primary", start.applied && start.ready, start.detail);
+      for (int round = 0; round < 2; ++round) {
+        const bool failA = round == 1;
+        const uint32_t screenA = round == 0 ? picked : 0;
+        const uint32_t screenB = round == 0 ? 0 : picked;
+        std::printf("      (round %d: A's answer is a %s)\n", round + 1, failA ? "FAILURE" : "success");
+        std::atomic<int> answers{0};
+        std::atomic<bool> bQueued{false};
+        std::string statusAtB;
+        uint32_t seqAtB = 0, seqBeforeA = 0;
+        uint64_t selB = 0;
+        sink.onAnswer = [&](const ControlWindowSelectedMessage&, uint64_t) {
+          const int n = answers.fetch_add(1);
+          if (n == 0) {
+            // A's answer is in hand; the panel has not seen it yet. The user picks B now.
+            if (failA) write_mode(self.holdPath(L"take"), "1");  // B waits at the host until A's failure is over
+            selB = ++gSelection;
+            sink.Prepare(selB);
+            bQueued.store(c.RequestMonitorSelect(screenB));
+          } else if (n == 1) {
+            // B's answer, before the panel: what has the panel shown since B was queued?
+            const auto p = c.WindowPanelSnapshotCopy();
+            statusAtB = p.status;
+            seqAtB = p.lastSelectSeq;
+          }
+        };
+        seqBeforeA = c.WindowPanelSnapshotCopy().lastSelectSeq;
+        if (failA) write_mode(self.failRestartPath(), "1");
+        sink.Prepare(++gSelection);
+        check("round " + std::to_string(round + 1) + ": pick A", c.RequestMonitorSelect(screenA));
+        check("A's answer arrives, and B is queued inside its handling",
+              wait_until([&] { return answers.load() >= 1; }, 15000) && bQueued.load());
+        if (failA) {
+          DeleteFileW(self.failRestartPath().c_str());
+          std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // the host's restart backoff
+          DeleteFileW(self.holdPath(L"take").c_str());
+        }
+        check("B's answer arrives", wait_until([&] { return answers.load() >= 2; }, 15000));
+        check("until then the panel showed nothing of A: still B's 'requested', lastSelectSeq unchanged",
+              statusAtB == "monitor_select_requested" && seqAtB == seqBeforeA,
+              "status=" + statusAtB + " seq " + std::to_string(seqBeforeA) + "->" + std::to_string(seqAtB));
+        check("B completes: its own answer shown, ready on its generation",
+              wait_until([&] { return sink.ready() == selB; }, 15000) &&
+                  c.WindowPanelSnapshotCopy().status.rfind("window_selected", 0) == 0,
+              c.WindowPanelSnapshotCopy().status);
+        sink.onAnswer = nullptr;
+      }
+    }
+    c.Disconnect();
   }
 
   return finish(self, log);
