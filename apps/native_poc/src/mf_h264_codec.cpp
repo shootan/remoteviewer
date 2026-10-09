@@ -1536,6 +1536,7 @@ void H264Encoder::apply_low_latency_codec_api() {
   const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
   uint32_t gopReadback = 0;
   const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
+  gopReadbackClamped_ = gopGetOk && gopReadback < requestedGop;  // r4 G3: the MFT clamped the GOP
   char gopLine[192];
   std::snprintf(gopLine, sizeof(gopLine),
                 "[native-video-host] h264 gop-config stage=post-type backend=%s requestedGop=%u setHr=0x%08lX "
@@ -1706,6 +1707,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
   acceptedInputCounter_ = 0;  // r4 G: ordinals restart per codec instance (detector re-baselines too)
+  ++codecInstanceId_;         // r4 G1: a new codec instance -- the clamp detector resets on this change
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 

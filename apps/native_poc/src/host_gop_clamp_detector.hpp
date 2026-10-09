@@ -59,8 +59,11 @@ struct GopClampDetector {
 // key, an epoch change, or lost provenance (ordinal 0) is a BOUNDARY: it re-baselines and breaks the
 // streak, never counting as a short interval (G1/G2). Pure, so the wiring counter-examples are tests.
 struct SelfIdrSample {
-  bool valid = false;        // a real self-IDR with a measurable interval from the last one
-  bool boundary = false;     // a forced/epoch/unknown key: re-baseline + break the streak
+  bool valid = false;        // a real self-IDR with a measurable self->self interval from the last one
+  bool baseline = false;     // a real self-IDR that STARTS a baseline (first one, or the first after a
+                             // boundary/epoch change): set lastOrdinal, but produce NO interval
+  bool boundary = false;     // a forced/unknown key: break the streak AND invalidate the baseline, so
+                             // the next self-IDR starts fresh (never a forced->self interval, G2)
   uint32_t intervalInputs = 0;
 };
 inline SelfIdrSample classify_self_idr(bool rawIdr, bool inputWasForcedKey, uint64_t ordinal,
@@ -68,7 +71,10 @@ inline SelfIdrSample classify_self_idr(bool rawIdr, bool inputWasForcedKey, uint
   SelfIdrSample s;
   if (!rawIdr) return s;  // not a real IDR -> ignore entirely (CleanPoint-only AUs do not count)
   if (inputWasForcedKey || ordinal == 0) { s.boundary = true; return s; }  // forced / unknown provenance
-  if (lastOrdinal == 0 || epoch != lastEpoch || ordinal <= lastOrdinal) { s.boundary = true; return s; }
+  if (lastOrdinal == 0 || epoch != lastEpoch || ordinal <= lastOrdinal) {  // no prior baseline in this
+    s.baseline = true;  // epoch -> this self-IDR starts one; do not count a cross-boundary interval
+    return s;
+  }
   s.valid = true;
   s.intervalInputs = static_cast<uint32_t>(ordinal - lastOrdinal);
   return s;

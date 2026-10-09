@@ -328,6 +328,7 @@ struct EncoderState {
   GopClampDetector clampDetector;
   uint64_t lastSelfIdrOrdinal = 0;
   uint64_t lastSelfIdrEpoch = 0;
+  uint64_t clampDetectorCodecId = 0;  // r4 G1: the codec instance the detector state belongs to
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;

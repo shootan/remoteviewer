@@ -216,6 +216,12 @@ class H264Encoder {
                             H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
+  // r4 G1: a monotonic id bumped on every successful initialize(), so the clamp detector can reset its
+  // latch/baseline on ANY codec reinit path (not just ApplyTarget's main branch) by watching it change.
+  uint64_t instance_id() const { return codecInstanceId_; }
+  // r4 G3: the MFT clamped the GOP below the policy (post-type readbackGop < requestedGop). Combined
+  // with the short self-IDR cadence it distinguishes a real clamp from content scene-change keys.
+  bool gop_readback_clamped() const { return gopReadbackClamped_; }
   // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
   // each AU reports the flag of the input that produced it. (0.2.97)
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
@@ -262,6 +268,8 @@ class H264Encoder {
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
   uint32_t keyint_ = 0;
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
+  uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
+  bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;

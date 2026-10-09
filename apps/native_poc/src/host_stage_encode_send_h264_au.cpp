@@ -608,20 +608,35 @@ if ((hdr.flags & 1u) != 0) {
   // only for a non-forced real IDR in the same codec/input epoch; a forced key / epoch change / lost
   // provenance is a boundary that re-baselines and breaks the streak.
   {
+    // r4 G1: reset the detector + baseline whenever the codec instance changed (any reinit path), so an
+    // old latch/baseline never carries to a new encoder.
+    const uint64_t codecId = encoder.codec.instance_id();
+    if (codecId != encoder.clampDetectorCodecId) {
+      encoder.clampDetector.Reset();
+      encoder.lastSelfIdrOrdinal = 0;
+      encoder.lastSelfIdrEpoch = 0;
+      encoder.clampDetectorCodecId = codecId;
+    }
     const SelfIdrSample s =
         classify_self_idr(au.rawIdr, au.inputWasForcedKey, au.acceptedInputOrdinal, au.inputEpoch,
                           encoder.lastSelfIdrOrdinal, encoder.lastSelfIdrEpoch);
     if (s.valid) {
-      if (encoder.clampDetector.OnEncoderSelfKey(s.intervalInputs, encoder.activeKeyint)) {
+      // r4 G3: a short self->self interval only latches a clamp when the MFT also clamped the GOP
+      // readback -- so content scene-change keys (readback == requested) stay strict, not burst.
+      if (encoder.codec.gop_readback_clamped() &&
+          encoder.clampDetector.OnEncoderSelfKey(s.intervalInputs, encoder.activeKeyint)) {
         std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
                   << s.intervalInputs << " policyKeyint=" << encoder.activeKeyint << "\n";
       }
-    } else if (s.boundary) {
-      encoder.clampDetector.NoteBoundary();
-    }
-    if (au.rawIdr) {  // re-baseline on any real IDR; ordinal 0 (unknown) forces a fresh baseline next
-      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;
+      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // this self is the baseline for the next
       encoder.lastSelfIdrEpoch = au.inputEpoch;
+    } else if (s.baseline) {
+      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // start a baseline; no interval counted
+      encoder.lastSelfIdrEpoch = au.inputEpoch;
+    } else if (s.boundary) {
+      encoder.clampDetector.NoteBoundary();                  // forced/unknown: break streak + invalidate
+      encoder.lastSelfIdrOrdinal = 0;
+      encoder.lastSelfIdrEpoch = 0;
     }
   }
   encoder.keyReasons = kHostKeyReasonNone;

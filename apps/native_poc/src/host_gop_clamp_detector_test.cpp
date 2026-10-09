@@ -76,17 +76,19 @@ int main() {
   check("G: a non-NAL5 (CleanPoint-only) key is ignored entirely",
         !classify_self_idr(false, false, 400, 1, 100, 1).valid &&
             !classify_self_idr(false, false, 400, 1, 100, 1).boundary);
-  check("G: an epoch change is a boundary (no cross-epoch interval)",
-        classify_self_idr(true, false, 400, 2, 100, 1).boundary);
+  check("G: an epoch change STARTS a baseline, not a cross-epoch interval",
+        classify_self_idr(true, false, 400, 2, 100, 1).baseline &&
+            !classify_self_idr(true, false, 400, 2, 100, 1).valid);
   check("G: lost provenance (ordinal 0) is a boundary", classify_self_idr(true, false, 0, 1, 100, 1).boundary);
 
-  // mirror the _au.cpp feed: classify -> OnEncoderSelfKey / NoteBoundary -> re-baseline on any raw IDR.
+  // mirror the _au.cpp feed: valid -> interval + baseline; baseline -> set baseline (no interval);
+  // boundary -> NoteBoundary + invalidate the baseline (next self starts fresh).
   const auto feed = [](GopClampDetector& d, uint64_t& lastOrd, uint64_t& lastEp, uint32_t keyint,
                        bool rawIdr, bool forced, uint64_t ordinal, uint64_t epoch) {
     const SelfIdrSample s = classify_self_idr(rawIdr, forced, ordinal, epoch, lastOrd, lastEp);
-    if (s.valid) (void)d.OnEncoderSelfKey(s.intervalInputs, keyint);
-    else if (s.boundary) d.NoteBoundary();
-    if (rawIdr) { lastOrd = ordinal; lastEp = epoch; }
+    if (s.valid) { (void)d.OnEncoderSelfKey(s.intervalInputs, keyint); lastOrd = ordinal; lastEp = epoch; }
+    else if (s.baseline) { lastOrd = ordinal; lastEp = epoch; }
+    else if (s.boundary) { d.NoteBoundary(); lastOrd = 0; lastEp = 0; }
   };
 
   // G1 counter-example: a NORMAL GOP=300 encoder whose self-IDRs ride synthetic/idle refresh inputs.
