@@ -137,6 +137,21 @@ class BurstLedger {
     std::lock_guard<std::mutex> lk(mu_);
     if (pendingBytes_ >= bytes) pendingBytes_ -= bytes; else pendingBytes_ = 0;
   }
+  // r4 R6 C1 (Codex 89c08de): peek -- is there 2s-window room for `bytes` right now, WITHOUT reserving?
+  // The unified send-path admission (host_net_io) peeks the window + the rate together and does one wait,
+  // then Reserves once both are ready. A disabled cap always has room.
+  bool HasRoom(uint64_t nowUs, uint64_t bytes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Prune(nowUs);
+    if (r_ == 0) return true;
+    return windowBytes_ + pendingBytes_ + bytes <= AdmissionBudgetBytes(nowUs);
+  }
+  // Peek the grant peak-pacer's next send instant WITHOUT advancing it (the cursor advances once, at
+  // commit, via BurstSendDeadlineUs). <= nowUs means "ready now".
+  uint64_t PeakReadyUs(uint64_t nowUs) {
+    std::lock_guard<std::mutex> lk(mu_);
+    return burstPacerUs_ < nowUs ? nowUs : burstPacerUs_;
+  }
   // The earliest nowUs at which the window would have room for `bytes` (for a cancellable wait).
   uint64_t RoomAtUs(uint64_t nowUs, uint64_t bytes) {
     std::lock_guard<std::mutex> lk(mu_);

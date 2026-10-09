@@ -185,48 +185,55 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
     const bool isFirstDatagram = packetOrdinal == 1;  // (just incremented; the frame's first send)
     const uint64_t wireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
-    // r4 B1 (corrected per Codex): in B1 mode (cap on) EVERY datagram passes the 2s rolling-window
-    // admission -- Reserve its wire cost, waiting (cancellably) for room if the window is full --
-    // before it is paced and sent. A grant lets the owning IDR's covered datagrams peak-pace instead
-    // of the strict token rate, but it does NOT bypass the window. The reservation is CommitSent on a
-    // real send and CancelUnsent on any abort, so the window reflects exactly what left the wire.
+    // r4 B1 / r6 C1 (Codex 89c08de): in B1 mode (cap on) EVERY datagram is admitted by ONE unified
+    // decision -- the 2s rolling window AND the rate permission (strict token rate for a normal datagram,
+    // the grant peak-pacer for a grant-covered one) -- settled with ONE cancellable wait to the LATER of
+    // the two ready times. When both have room/tokens the datagram passes immediately, so in steady state
+    // the timing is exactly the limiter's (no premature-NACK regression -- an earlier fix that let normal
+    // traffic BYPASS the window broke the cap: after a grant burst the following strict traffic was not
+    // window-admitted and the 2s sum exceeded 2r). After a grant has spent the window slack, a normal
+    // datagram now waits HERE on the window (not a second wait), so the 2s average holds (C1 arithmetic).
     const bool b1Active = wire && wire->burstLedger && wire->limiter && wire->limiter->enabled();
     bool reserved = false;
-    // r4 R6 S1 (Codex 72a22d2): for an ORIGINAL AU, media rollover and Stop abort at EVERY datagram, but
-    // an input-only flush must NOT cut an AU that has already started on the wire -- the standing "a
-    // started AU completes; the new epoch's IDR follows it" exception (host_epoch_gate / the non-grant
-    // Acquire path, which checks media+Stop only). The input fence for an original is the FIRST datagram
-    // only (F3, below). (A replay, by contrast, IS input-fenced every datagram -- in send_udp_chunk_indices.)
+    // S1 (Codex 72a22d2): media rollover + Stop fence EVERY datagram at the send instant; an original
+    // AU's input fence is the FIRST datagram only (F3, below) so an input-only flush does not cut an AU
+    // already on the wire. (A replay IS input-fenced every datagram -- in send_udp_chunk_indices.)
     const auto mediaStopFence = [&]() -> bool {
       return (wire->limiter && wire->limiter->stopped()) ||
              (liveEpoch && liveEpoch->load(std::memory_order_acquire) != itemEpoch);
     };
     const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
-    // r6 (Codex 72a22d2, premature-NACK regression): the 2s window WAIT applies ONLY to a datagram that
-    // can exceed the strict rate on its own -- a GRANT-covered IDR datagram, which peak-paces and bypasses
-    // the limiter. A NORMAL datagram is already paced at the strict rate by WireLimiter::Acquire and
-    // cannot push the 2s window past 2r + one datagram by itself, so it is only ACCOUNTED into the window
-    // (CommitSent after it actually leaves), never made to WAIT on it. The earlier code Reserve-waited
-    // EVERY datagram, double-pacing the stream so the client NACKed chunks that were merely delayed
-    // (b7c9164, with no ledger, did not). Replays ride TryAcquire on top of the original, so they ARE
-    // window-gated -- that path (send_udp_chunk_indices) is unchanged.
     const bool grantCovered = b1Active && wire->auHasGrant &&
                               wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes;
-    if (grantCovered) {
-      for (;;) {  // the window is the grant's ONLY cap (it bypasses the limiter): wait for room
+    if (b1Active) {
+      for (;;) {
         const uint64_t now = qpc_now_us();
-        if (wire->burstLedger->Reserve(now, wireBytes)) { reserved = true; break; }
-        if (mediaStopFence()) { wireAborted = true; return false; }  // give up an unsent datagram on fence
-        udp_pace_wait_until(std::min<uint64_t>(wire->burstLedger->RoomAtUs(now, wireBytes), now + 2000ULL));
+        const bool windowRoom = wire->burstLedger->HasRoom(now, wireBytes);
+        // rate: a grant peak-paces (bypasses the strict rate); a normal datagram waits for a token.
+        const uint64_t rateReadyUs =
+            grantCovered ? wire->burstLedger->PeakReadyUs(now) : wire->limiter->NextReadyUs(wireBytes);
+        if (windowRoom && rateReadyUs <= now) {
+          if (mediaStopFence()) { wireAborted = true; return false; }  // fence at the send instant (S1/R2)
+          // Commit the window, then take the rate. If either slips (a concurrent SetRate between peek and
+          // take), undo and re-evaluate rather than over-admit.
+          if (!wire->burstLedger->Reserve(now, wireBytes)) continue;
+          if (grantCovered) {
+            wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
+            (void)wire->burstLedger->BurstSendDeadlineUs(now, wireBytes);  // advance the peak cursor once
+          } else if (!wire->limiter->TryAcquire(wireBytes)) {
+            wire->burstLedger->CancelUnsent(wireBytes);
+            continue;
+          }
+          reserved = true;
+          break;
+        }
+        if (mediaStopFence()) { wireAborted = true; return false; }
+        const uint64_t windowAtUs = windowRoom ? now : wire->burstLedger->RoomAtUs(now, wireBytes);
+        udp_pace_wait_until(std::min<uint64_t>(std::max<uint64_t>(windowAtUs, rateReadyUs), now + 2000ULL));
       }
-      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
-      // Peak-pace this grant-covered datagram (strict rate is bypassed for the grant owner's IDR).
-      udp_pace_wait_until(wire->burstLedger->BurstSendDeadlineUs(qpc_now_us(), wireBytes));
-      // r4 R5 R2 (Codex e1bc633): the grant skips WireLimiter::Acquire (the normal fence point), so after
-      // the peak wait re-check the SAME media+Stop fence (S1: NOT input, so an input-only flush lets an
-      // already-started AU complete), cancelling the reservation on a rollover/Stop during the wait.
-      if (mediaStopFence()) { releaseIfReserved(); wireAborted = true; return false; }
     } else if (wire && wire->limiter) {
+      // Cap off (disabled limiter) or no ledger: the legacy strict-rate Acquire (permits at once when
+      // the cap is disabled), which also checks Stop/media-epoch during its own wait.
       if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {
         wireAborted = true;
         return false;
@@ -244,10 +251,10 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                            : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
                                     reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) { releaseIfReserved(); return false; }
-    // r4 B1 / r6: account this datagram into the 2s window at the REAL send time (1:1). A grant datagram
-    // committed its prior reservation; a normal datagram is accounted directly (it never reserved -- it
-    // was limiter-paced, not window-gated). CommitSent handles both (pending underflows to 0 when none).
-    if (b1Active) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
+    // r4 B1 / r6 C1: commit the reservation into the 2s window at the REAL send time (1:1). Every B1
+    // datagram -- normal or grant -- reserved in the unified admission above, so the window reflects
+    // exactly what left the wire (normal traffic is now window-admitted too, closing the C1 gap).
+    if (reserved) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {

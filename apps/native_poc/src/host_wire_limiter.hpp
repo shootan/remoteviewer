@@ -100,6 +100,20 @@ class WireLimiter {
     }
   }
 
+  // Peek (non-consuming): the clock time at which `bytes` tokens will be available, <= nowUs() when
+  // they are available now. For the unified send-path admission (stutter-keyframe r6 C1) that peeks the
+  // rate and the 2s window together and does ONE cancellable wait to the later of the two, then spends.
+  // A disabled cap is always ready now.
+  uint64_t NextReadyUs(uint64_t bytes) {
+    if (!enabled_.load(std::memory_order_relaxed)) return nowUs_();
+    std::lock_guard<std::mutex> lk(mu_);
+    if (R_ == 0) return nowUs_();
+    RefillLocked();
+    if (tokens_ >= bytes) return nowUs_();
+    const uint64_t need = bytes - tokens_;
+    return lastRefillUs_ + (need * 1000000ULL + R_ - 1ULL) / R_;
+  }
+
   // Non-blocking: spend `bytes` only if they are available now. Returns false (and counts a
   // suppression) when they are not -- the reader thread must not block on the wire.
   bool TryAcquire(uint64_t bytes) {
