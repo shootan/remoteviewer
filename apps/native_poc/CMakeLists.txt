@@ -2956,6 +2956,18 @@ if(MSVC)
   target_compile_options(remote60_host_burst_ledger_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r6 (V2): the 2s window admission is load-bearing in the REAL send path. Drives the
+# production send_udp_chunk_indices through a sink; removing the ledger pointer fails the same 2r bound.
+add_executable(remote60_host_burst_sender_admission_test
+  src/host_net_io.cpp
+  src/host_burst_sender_admission_test.cpp
+)
+target_include_directories(remote60_host_burst_sender_admission_test PRIVATE src)
+target_link_libraries(remote60_host_burst_sender_admission_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_burst_sender_admission_test PRIVATE /utf-8)
+endif()
+
 # stutter-keyframe r3 (B): HW vs SW 1080p30 encode measurement (the SW-transition decision input).
 add_executable(remote60_host_encoder_backend_bench
   src/mf_h264_codec.cpp

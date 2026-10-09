@@ -145,6 +145,13 @@ struct SenderState {
   // via WireEgress while the cap is on, and grants a bounded burst to a clamp-detected real self-IDR.
   BurstLedger burstLedger;
   bool wireCapEnabled = false;  // REMOTE60_NATIVE_WIRE_CAP (default on); fixed after startup
+  // r4 R6 S3 (Codex 72a22d2): the conservative congestion gate for the burst. A burst accelerates an IDR
+  // above the strict rate; doing that into a path that is already losing packets worsens congestion. We
+  // reuse the existing loss signal -- the client's NACK requests + pending replays -- to WITHHOLD the
+  // grant (strict fallback) when the path showed loss recently. No new BWE probe. Sender-thread only.
+  static constexpr uint64_t kBurstCongestionWindowUs = 1'000'000;  // recent-loss look-back
+  uint64_t burstPrevNackReq = 0;   // nackRequests at the last burst decision (detect new loss since)
+  uint64_t burstLastLossUs = 0;    // qpc of the last observed NACK growth (0 = none seen)
   // Cap-OFF fallback NACK budget (bitrate-hard-cap r2): when the hard cap is off (kill-switch, or no
   // limiter) the shared bucket does not bound the replay, so the old flood defence stays -- a token
   // bucket at ~15% of the live send rate, ~0.5 s burst. With the cap ON the shared wire bucket bounds

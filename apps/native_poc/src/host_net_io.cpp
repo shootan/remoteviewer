@@ -192,41 +192,42 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // real send and CancelUnsent on any abort, so the window reflects exactly what left the wire.
     const bool b1Active = wire && wire->burstLedger && wire->limiter && wire->limiter->enabled();
     bool reserved = false;
-    const auto fenceHit = [&]() -> bool {
-      return wire->limiter->stopped() ||
-             (liveEpoch && liveEpoch->load(std::memory_order_acquire) != itemEpoch) ||
-             (wire->inputEpoch &&
-              wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch);
+    // r4 R6 S1 (Codex 72a22d2): for an ORIGINAL AU, media rollover and Stop abort at EVERY datagram, but
+    // an input-only flush must NOT cut an AU that has already started on the wire -- the standing "a
+    // started AU completes; the new epoch's IDR follows it" exception (host_epoch_gate / the non-grant
+    // Acquire path, which checks media+Stop only). The input fence for an original is the FIRST datagram
+    // only (F3, below). (A replay, by contrast, IS input-fenced every datagram -- in send_udp_chunk_indices.)
+    const auto mediaStopFence = [&]() -> bool {
+      return (wire->limiter && wire->limiter->stopped()) ||
+             (liveEpoch && liveEpoch->load(std::memory_order_acquire) != itemEpoch);
     };
-    if (b1Active) {
-      for (;;) {
+    const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
+    // r6 (Codex 72a22d2, premature-NACK regression): the 2s window WAIT applies ONLY to a datagram that
+    // can exceed the strict rate on its own -- a GRANT-covered IDR datagram, which peak-paces and bypasses
+    // the limiter. A NORMAL datagram is already paced at the strict rate by WireLimiter::Acquire and
+    // cannot push the 2s window past 2r + one datagram by itself, so it is only ACCOUNTED into the window
+    // (CommitSent after it actually leaves), never made to WAIT on it. The earlier code Reserve-waited
+    // EVERY datagram, double-pacing the stream so the client NACKed chunks that were merely delayed
+    // (b7c9164, with no ledger, did not). Replays ride TryAcquire on top of the original, so they ARE
+    // window-gated -- that path (send_udp_chunk_indices) is unchanged.
+    const bool grantCovered = b1Active && wire->auHasGrant &&
+                              wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes;
+    if (grantCovered) {
+      for (;;) {  // the window is the grant's ONLY cap (it bypasses the limiter): wait for room
         const uint64_t now = qpc_now_us();
         if (wire->burstLedger->Reserve(now, wireBytes)) { reserved = true; break; }
-        if (fenceHit()) { wireAborted = true; return false; }  // give up an unsent datagram on fence
-        const uint64_t roomAt = wire->burstLedger->RoomAtUs(now, wireBytes);
-        udp_pace_wait_until(std::min<uint64_t>(roomAt, now + 2000ULL));  // 2ms slices to re-check fence
+        if (mediaStopFence()) { wireAborted = true; return false; }  // give up an unsent datagram on fence
+        udp_pace_wait_until(std::min<uint64_t>(wire->burstLedger->RoomAtUs(now, wireBytes), now + 2000ULL));
       }
-    }
-    const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
-    // Pace: a grant-covered datagram of the grant owner peak-paces; everything else waits on the
-    // limiter's strict rate. Both are still bounded by the window reservation above.
-    bool burstCovered = false;
-    if (b1Active && wire->auHasGrant &&
-        wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes) {
-      burstCovered = true;
+      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
       // Peak-pace this grant-covered datagram (strict rate is bypassed for the grant owner's IDR).
       udp_pace_wait_until(wire->burstLedger->BurstSendDeadlineUs(qpc_now_us(), wireBytes));
-      // r4 R5 R2 (Codex e1bc633): a grant-covered datagram skips WireLimiter::Acquire, which is the
-      // normal path's permission point (it re-checks stop + media/input epoch after its token wait). So
-      // after the peak wait we must re-check the same fence HERE; otherwise a rollover/Stop that happened
-      // during the wait would let an old datagram go out. On a fence, cancel the window reservation and
-      // abort (wireAborted, not a transport error). The grant is NOT debited on a fenced datagram.
-      if (fenceHit()) { releaseIfReserved(); wireAborted = true; return false; }
-      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
-    }
-    if (!burstCovered && wire && wire->limiter) {
+      // r4 R5 R2 (Codex e1bc633): the grant skips WireLimiter::Acquire (the normal fence point), so after
+      // the peak wait re-check the SAME media+Stop fence (S1: NOT input, so an input-only flush lets an
+      // already-started AU complete), cancelling the reservation on a rollover/Stop during the wait.
+      if (mediaStopFence()) { releaseIfReserved(); wireAborted = true; return false; }
+    } else if (wire && wire->limiter) {
       if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {
-        releaseIfReserved();
         wireAborted = true;
         return false;
       }
@@ -243,8 +244,10 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
                            : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
                                     reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (n <= 0) { releaseIfReserved(); return false; }
-    // r4 B1: commit the reservation into the 2s window at the REAL send time (1:1 with this datagram).
-    if (reserved) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
+    // r4 B1 / r6: account this datagram into the 2s window at the REAL send time (1:1). A grant datagram
+    // committed its prior reservation; a normal datagram is accounted directly (it never reserved -- it
+    // was limiter-paced, not window-gated). CommitSent handles both (pending underflows to 0 when none).
+    if (b1Active) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {

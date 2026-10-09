@@ -481,8 +481,22 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // after this send regardless of outcome (abort/epoch), so no grant leaks.
       const BurstAuId burstOwner{item.mediaEpoch, item.udpHdr.streamGeneration, item.inputEpoch,
                                  item.udpHdr.seq, /*valid=*/true};
-      if (item.clampBurstEligible && sender.wireCapEnabled) {
-        if (sender.burstLedger.GrantForIdr(qpc_now_us(), burstOwner) > 0) {
+      // r4 R6 S3: the conservative congestion gate. Observe the existing loss signal -- the client's NACK
+      // requests (grew since the last decision?) and pending replays -- and WITHHOLD the burst (strict
+      // fallback) when the path lost packets within the last kBurstCongestionWindowUs or has replays in
+      // flight. The adaptive rate controller lowers capBps on sustained loss (which lowers peak+grant via
+      // SetRate); this gate adds an immediate per-IDR brake so a burst never accelerates into fresh loss.
+      const uint64_t burstNowUs = qpc_now_us();
+      const uint64_t nackReqNow = sender.nackRequests.load(std::memory_order_relaxed);
+      if (nackReqNow != sender.burstPrevNackReq) {
+        sender.burstLastLossUs = burstNowUs;  // new NACK(s) since the last decision -> fresh loss now
+        sender.burstPrevNackReq = nackReqNow;
+      }
+      const bool recentLoss =
+          sender.pendingReplayCount.load(std::memory_order_relaxed) > 0 ||
+          (sender.burstLastLossUs != 0 && burstNowUs - sender.burstLastLossUs < SenderState::kBurstCongestionWindowUs);
+      if (item.clampBurstEligible && sender.wireCapEnabled && !recentLoss) {
+        if (sender.burstLedger.GrantForIdr(burstNowUs, burstOwner) > 0) {
           wireEgress.auHasGrant = true;  // this AU's covered datagrams peak-pace within the window
           wireEgress.burstOwner = burstOwner;
         }

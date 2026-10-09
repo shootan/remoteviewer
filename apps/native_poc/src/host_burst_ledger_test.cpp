@@ -134,6 +134,35 @@ int main() {
           cov <= (r - 150'000), "cov=" + std::to_string(cov));
   }
 
+  // --- S2 (Codex 72a22d2): a rate DOWNSHIFT leaves transition debt. The conservative admission budget
+  //     min(mixed integral, new flat 2r) never lets a NEW admission push the window past the new 2r, so
+  //     the "571000 committed vs 501375 shrunk integral" violation Codex arithmetic-derived cannot form.
+  //     Numbers mirror the review (datagram cost 1000): 6M burst 262000, downshift to 1.5M (2r=375000).
+  {
+    BurstLedger L; L.SetRate(6'000'000, 0);  // 6M from t=0; warm by t=W
+    uint64_t t = W;
+    check("S2: a 262000 burst is admitted under 6M (262000 < 2*r6=1.5M)", L.Reserve(t, 262'000));
+    L.CommitSent(t, 262'000);
+    L.SetRate(1'500'000, t);  // downshift: new 2r=375000; integral still ~1.5M but admission is capped at 2r_new
+    check("S2: new sends are admitted only up to the new 2r total (375000-262000=113000)", L.Reserve(t, 113'000));
+    L.CommitSent(t, 113'000);
+    check("S2: the window is exactly the new 2r, NOT the integral's ~571000", L.window_bytes(t) == 375'000);
+    check("S2: a further new reserve is REFUSED -- debt counts against the new cap (no integral credit)",
+          !L.Reserve(t, 1'000));
+    // STALL: new sends stay blocked while the debt occupies the new budget -- a deliberate safe backoff on
+    // a downshift. Here all debt was committed at t, so it blocks until it expires one window later.
+    check("S2: new sends still blocked 1.5s into the transition (debt not yet expired)",
+          !L.Reserve(t + 1'500'000, 1'000));
+    // As the integral shrinks past this point it NEVER drops below the committed window, because we never
+    // admitted past 375000 (the whole point): no retroactive violation forms.
+    check("S2: the window (<=375000) is never exceeded by the shrunk integral",
+          L.window_bytes(t + 1'800'000) <= 375'000);
+    // Once the debt fully ages out (one window later), a full new-rate 2s window is available at the new 2r.
+    const uint64_t t3 = t + kBurstWindowUs + 1;
+    check("S2: after the debt drains, the new 2r is fully available again",
+          L.window_bytes(t3) == 0 && L.Reserve(t3, 375'000));
+  }
+
   // --- NEGATIVE CONTROL: without the admission (CommitSent directly, no Reserve gate) the 2s window
   //     is exceeded -- the window admission is load-bearing. ----------------------------------------
   {

@@ -4,11 +4,19 @@
 // Codex 4fba8a1 review (B1-1/B1-2/B1-3).
 //
 // User option 1: on a clamp-detected encoder-self IDR let the IDR exceed the instantaneous strict
-// rate for a moment, while the AVERAGE over every 2s window stays within the user's rate. The single
-// invariant, over the COMMON ledger (original H.264 + protocol header + FEC/parity + real NACK
-// retransmit + UDP/IP overhead), is:
+// rate for a moment, while the AVERAGE over every 2s window stays within the user's rate. The invariant,
+// over the COMMON ledger (original H.264 + protocol header + FEC/parity + real NACK retransmit + UDP/IP
+// overhead), is an ADMISSION rule at a CONSTANT rate:
 //
-//     for all t:  A(t-2s, t]  <=  2 * r         (r = capBps/8 bytes/s)
+//     no datagram is admitted that makes A(t-2s, t] exceed 2 * r      (r = capBps/8 bytes/s)
+//
+// At a constant rate this keeps A(t-2s,t] <= 2r for all t. Across a rate DOWNSHIFT it does NOT hold
+// retroactively for the trailing window: bytes sent legally under the old higher rate stay in the window
+// for up to 2s (transition DEBT -- never refunded), so the trailing sum can exceed the new rate's 2r
+// until that debt ages out. The rule's guarantee is that NO NEW admission grows the window past the
+// stricter of {mixed integral, new flat 2r} (S2, AdmissionBudgetBytes), so the debt only drains and a
+// full 2s window made solely of new-rate sends is back within the new 2r. See the S2 transition rule and
+// its arithmetic counter-example in host_burst_ledger_test.cpp.
 //
 // B1-1: the window is the ADMISSION for EVERY B1 datagram, not just a grant quota. The send path calls
 // Reserve(nowUs, bytes) before each datagram; it only sends if the window (committed + pending) has
@@ -82,8 +90,9 @@ class BurstLedger {
     if (rateHist_.empty() || rateHist_.back().r != newR) rateHist_.push_back({nowUs, newR});
     if (newR < prevR && grantActive_) {
       // downshift (B1-3 / R3): clamp the active grant's remaining to BOTH the new per-key cap
-      // (minus what it has already spent) AND the new mixed-window headroom.
-      const uint64_t budget = WindowBudgetBytes(nowUs);
+      // (minus what it has already spent) AND the new admission headroom (S2: flat new 2r, not the
+      // still-high mixed integral).
+      const uint64_t budget = AdmissionBudgetBytes(nowUs);
       const uint64_t headroom =
           (budget > windowBytes_ + pendingBytes_) ? (budget - windowBytes_ - pendingBytes_) : 0ULL;
       const uint64_t newPerKey = std::min<uint64_t>(kBurstGrantMaxBytes, newR);
@@ -112,7 +121,7 @@ class BurstLedger {
     std::lock_guard<std::mutex> lk(mu_);
     Prune(nowUs);
     if (r_ == 0) { pendingBytes_ += bytes; return true; }
-    if (windowBytes_ + pendingBytes_ + bytes > WindowBudgetBytes(nowUs)) return false;
+    if (windowBytes_ + pendingBytes_ + bytes > AdmissionBudgetBytes(nowUs)) return false;
     pendingBytes_ += bytes;
     return true;
   }
@@ -132,7 +141,7 @@ class BurstLedger {
   uint64_t RoomAtUs(uint64_t nowUs, uint64_t bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     Prune(nowUs);
-    const uint64_t budget = WindowBudgetBytes(nowUs);
+    const uint64_t budget = AdmissionBudgetBytes(nowUs);
     if (r_ == 0 || windowBytes_ + pendingBytes_ + bytes <= budget) return nowUs;
     uint64_t need = (windowBytes_ + pendingBytes_ + bytes) - budget;  // bytes that must expire first
     for (const auto& e : sent_) {
@@ -155,7 +164,7 @@ class BurstLedger {
     if (lastGrantOwner_ == owner) return 0;                                         // no re-grant same AU
     Prune(nowUs);
     const uint64_t perGrantCap = std::min<uint64_t>(kBurstGrantMaxBytes, r_);       // min(256KiB, r*1s)
-    const uint64_t budget = WindowBudgetBytes(nowUs);
+    const uint64_t budget = AdmissionBudgetBytes(nowUs);
     const uint64_t windowRem = (budget > windowBytes_ + pendingBytes_) ? (budget - windowBytes_ - pendingBytes_) : 0ULL;
     const uint64_t grant = std::min<uint64_t>(perGrantCap, windowRem);
     if (grant == 0) return 0;
@@ -191,13 +200,14 @@ class BurstLedger {
     grantRemaining_ = 0;
   }
   // Peak-pace one burst datagram: the wall time it may be sent at (<= peak), advancing the cursor.
-  // r4 R5 R6 (Codex e1bc633): the peak is a FIXED function of the current cap R -- max(R, min(4R,
-  // 12Mbps)). There is no separate per-burst path-headroom probe wired into this hot path; the
-  // congestion chain is the cap itself. The adaptive rate controller already lowers capBps_ under
-  // loss/RTT (via UpdateWireCap/SetRate), which lowers this peak proportionally, AND a downshift
-  // re-limits the active grant's remaining budget (SetRate, R3). So congestion shrinks both the peak and
-  // the in-flight grant; the 2s average cap (the window admission) bounds the total regardless. This is
-  // the conservative-within-contract behavior -- it never accelerates ABOVE the contract's peak.
+  // r4 R6 S3 (Codex 72a22d2): the peak stays the original contract -- max(R, min(4R, 12Mbps)), a fixed
+  // function of the current cap R, NOT changed here. The congestion chain is explicit and twofold:
+  // (1) the SENDER gates GrantForIdr on the existing loss signal (client NACK requests + pending
+  // replays): a path that lost packets within kBurstCongestionWindowUs gets NO grant, so a burst never
+  // accelerates into fresh loss (strict fallback -- see host_encoded_sender.cpp). (2) the adaptive rate
+  // controller lowers capBps on sustained loss, which lowers this peak proportionally and, via a
+  // downshift SetRate, re-limits the in-flight grant (R3/S2). The 2s window admission bounds the average
+  // regardless. No new BWE probe. This is a real observed-signal brake, not just a comment.
   uint64_t BurstSendDeadlineUs(uint64_t nowUs, uint64_t bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     if (burstPacerUs_ < nowUs) burstPacerUs_ = nowUs;
@@ -245,6 +255,17 @@ class BurstLedger {
       if (b > a) budget += rateHist_[i].r * (b - a) / 1'000'000ULL;
     }
     return budget;
+  }
+  // r4 R6 S2 (Codex 72a22d2): the ADMISSION budget is min(mixed integral, flat new-rate 2r). The mixed
+  // integral alone is wrong for a DOWNSHIFT: the high-rate history still in the window makes the integral
+  // larger than the new rate's flat 2r, so a new byte admitted against the integral could exceed the new
+  // cap once that history ages out. Capping admission at the current rate's flat 2r means a downshift
+  // admits NOTHING new until the trailing window drains below 2r (the committed high-rate bytes are
+  // transition DEBT -- legal when sent, never refunded, drained by expiry, and never grown by a new
+  // admission). For an UPSHIFT the integral is the smaller term (it has not yet earned the higher rate),
+  // so min() keeps the no-retroactive-credit ramp. A full 2s window of one rate makes both terms 2r.
+  uint64_t AdmissionBudgetBytes(uint64_t nowUs) const {
+    return std::min<uint64_t>(WindowBudgetBytes(nowUs), 2ULL * r_);
   }
   struct Entry { uint64_t us; uint64_t bytes; };
   struct RateSeg { uint64_t us; uint64_t r; };
