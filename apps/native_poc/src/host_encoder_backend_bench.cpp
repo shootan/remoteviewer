@@ -100,34 +100,9 @@ Row bench_paced(const char* backend, uint32_t bitrate, uint32_t seconds) {
   return r;
 }
 
-// clamp->SW transition: start HW, pace ~1s, force SW + reinit, measure wall-clock from reinit return
-// to the FIRST emitted AU under a 30 fps paced feed (the real first-output latency of the switch).
-double transition_first_output_ms(uint32_t bitrate) {
-  _putenv_s("REMOTE60_NATIVE_ENCODER_BACKEND", "mft_hw");
-  H264Encoder enc;
-  if (!enc.initialize(kW, kH, kFps, bitrate, 300)) return -1.0;
-  std::vector<uint8_t> nv12(static_cast<size_t>(kW) * kH * 3 / 2, 128);
-  uint64_t deadline = now_us();
-  for (uint32_t i = 0; i < kFps; ++i) {  // ~1s HW, paced
-    deadline += kFrameUs; fill(nv12, i);
-    std::vector<H264AccessUnit> u; (void)enc.encode_frame(nv12, i == 0, static_cast<int64_t>(now_us()) * kHnsPerUs, &u);
-    const uint64_t n = now_us(); if (n < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n));
-  }
-  enc.set_force_software_backend(true);
-  enc.shutdown();
-  const uint64_t t0 = now_us();
-  if (!enc.initialize(kW, kH, kFps, bitrate, 300)) return -1.0;
-  deadline = now_us();
-  for (uint32_t i = 0; i < kFps * 5; ++i) {  // up to 5s paced, wait for the first output AU
-    deadline += kFrameUs; fill(nv12, 1000 + i);
-    std::vector<H264AccessUnit> u;
-    (void)enc.encode_frame(nv12, i == 0, static_cast<int64_t>(now_us()) * kHnsPerUs, &u);
-    if (!u.empty()) { const double ms = (now_us() - t0) / 1000.0; enc.shutdown(); return ms; }
-    const uint64_t n = now_us(); if (n < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n));
-  }
-  enc.shutdown();
-  return -2.0;  // no output within 5s
-}
+// (The clamp->SW transition-latency measurement was removed with the SW auto-transition: the user
+// chose option 1, IDR burst, so the SW path is not a shipping response. The HW-vs-SW 30fps paced CPU
+// table below remains as the corrected record -- backend selected via the env, no runtime seam.)
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -147,9 +122,7 @@ int main(int argc, char** argv) {
                   (unsigned long long)r.p50, (unsigned long long)r.p95, (unsigned long long)r.mx, r.outFrames);
     }
   }
-  std::printf("  clamp->SW transition first-output (paced, ms): ");
-  for (uint32_t br : rates) std::printf("%u Mbps=%.0f  ", br / 1000000u, transition_first_output_ms(br));
-  std::printf("\nhost_encoder_backend_bench: DONE\n");
+  std::printf("host_encoder_backend_bench: DONE\n");
   MFShutdown();
   return 0;
 }
