@@ -89,23 +89,6 @@ struct EncoderState {
     codecNeedsInit = targetPending = true;
     targetRetryAtUs = nowUs;
   }
-
-  // stutter-keyframe r3 B: the one-time clamp->SW transition (direction = SW). On a detected clamp,
-  // force the software MFT on the next init and trigger a reinit through the same retry path as a
-  // repair -- so the epoch/SPS-PPS/first-IDR preservation of ApplyTarget applies. Bounded: once per
-  // encoder lifetime (clampSwTransitionDone), no round-trip; a failed SW create keeps the original
-  // backend (create fail-safe). Returns true if a transition was triggered this call.
-  bool clampSwTransitionDone = false;
-  bool RequestClampSwTransition(uint64_t nowUs) {
-    if (!decide_clamp_sw_transition(clampDetector.clamped, clampSwTransitionDone)) return false;
-    if (targetPending) return false;  // a reinit is already queued; the flag stays set, retried next
-    clampSwTransitionDone = true;
-    codec.set_force_software_backend(true);
-    retryTarget = {nominalEncodeW, nominalEncodeH, activeFps, activeBitrate, activeKeyint};
-    codecNeedsInit = targetPending = true;
-    targetRetryAtUs = nowUs;
-    return true;
-  }
   bool mfStarted = false;
   bool experimentEnabled = false;   // REMOTE60_NATIVE_ENCODED_EXPERIMENT(_FORCE)
   std::string tuneMode;             // REMOTE60_NATIVE_ENCODER_TUNE_MODE (default low_latency)

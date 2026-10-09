@@ -262,44 +262,6 @@ int main() {
           rc.idrCountAfterFirst == 0, "idrCountAfterFirst=" + std::to_string(rc.idrCountAfterFirst));
   }
 
-  // --- D: the runtime clamp->SW transition mechanism end to end on a REAL encoder. set_force_
-  //     software_backend(true) + reinit must actually yield the software MFT and keep encoding (the
-  //     host triggers exactly this via RequestClampSwTransition). ------------------------------------
-  {
-    std::printf("[D] runtime SW-force transition on a real encoder\n");
-    H264Encoder enc;
-    if (enc.initialize(kW, kH, kFps, 1500000, 300)) {
-      const std::string before = enc.backend_name();
-      std::vector<H264AccessUnit> u0;
-      (void)enc.encode_frame(picture(0), true, 0, &u0);
-      enc.set_force_software_backend(true);
-      enc.shutdown();
-      const bool reinit = enc.initialize(kW, kH, kFps, 1500000, 300);
-      const std::string after = enc.backend_name();
-      // The SW async MFT does not drain its first AU on the first call; encode a few frames and check
-      // cumulative output (the bench confirmed SW encodes fine over a run).
-      size_t swUnits = 0;
-      bool encOk = reinit;
-      uint32_t firstOut = 0;
-      for (uint32_t i = 1; i <= 60 && encOk; ++i) {
-        std::vector<H264AccessUnit> u;
-        encOk = enc.encode_frame(picture(i), i == 1, static_cast<int64_t>(i) * 33333, &u);
-        if (!u.empty() && firstOut == 0) firstOut = i;
-        swUnits += u.size();
-      }
-      std::printf("[roundtrip] SW firstOutputFrame=%u of 60\n", firstOut);
-      std::printf("[roundtrip] backend before=%s after-forceSW=%s swUnits=%zu\n", before.c_str(),
-                  after.c_str(), swUnits);
-      check("SW-force reinit selects the software MFT", after.find("sw") != std::string::npos,
-            "after=" + after);
-      check("the SW encoder still produces output", encOk && swUnits > 0,
-            "swUnits=" + std::to_string(swUnits));
-      enc.shutdown();
-    } else {
-      check("SW-force transition precondition (encoder init)", false);
-    }
-  }
-
   MFShutdown();
   if (gFailures == 0) {
     std::printf("host_recovery_roundtrip_test: PASS\n");

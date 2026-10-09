@@ -594,11 +594,8 @@ if ((hdr.flags & 1u) != 0) {
   // logs once; the response (SW transition / admission) is decided separately.
   if (encoder.keyReasons == kHostKeyReasonNone) {
     if (encoder.clampDetector.OnEncoderSelfKey(encoder.realInputsSinceKey, encoder.activeKeyint)) {
-      // r3 B direction = SW: on the first clamp latch, request the one-time bounded SW transition.
-      const bool transitioning = encoder.RequestClampSwTransition(keyNowUs);
       std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
-                << encoder.realInputsSinceKey << " policyKeyint=" << encoder.activeKeyint
-                << " -> swTransition=" << (transitioning ? 1 : 0) << "\n";
+                << encoder.realInputsSinceKey << " policyKeyint=" << encoder.activeKeyint << "\n";
     }
   }
   encoder.keyReasons = kHostKeyReasonNone;

@@ -49,12 +49,4 @@ struct GopClampDetector {
   }
 };
 
-// The one-time clamp response decision (stutter-keyframe r3 B, direction = SW transition). Transition
-// to the software encoder exactly once per detected clamp: when a clamp is latched and we have not
-// already transitioned. Bounded (no round-trip), so a persistent clamp cannot thrash backends. Pure,
-// so the clamp-fake test's "remove the transition" mutation is just `transitionDone` forced true.
-inline bool decide_clamp_sw_transition(bool clamped, bool transitionAlreadyDone) {
-  return clamped && !transitionAlreadyDone;
-}
-
 }  // namespace remote60::native_poc

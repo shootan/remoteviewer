@@ -67,37 +67,6 @@ int main() {
     check("activeKeyint 0 never latches", !d.OnEncoderSelfKey(1, 0) && !d.clamped);
   }
 
-  // --- the one-time SW transition decision -------------------------------------------------------
-  check("transition fires when clamped & not yet done", decide_clamp_sw_transition(true, false));
-  check("transition does NOT fire a second time (bounded, no round-trip)",
-        !decide_clamp_sw_transition(true, true));
-  check("transition does NOT fire without a clamp", !decide_clamp_sw_transition(false, false));
-
-  // --- clamp-fake path: detect -> transition -> recover; and the mutation (transition removed) ----
-  // Models the company clamp as short self-IDRs. The real SW reinit is exercised by the bench / C;
-  // here the seam is: a transition Resets the detector and the (SW) encoder then honours the policy.
-  {
-    GopClampDetector d;
-    for (uint32_t i = 0; i < kClampWindow; ++i) (void)d.OnEncoderSelfKey(30, policy);  // clamp
-    const bool transition = decide_clamp_sw_transition(d.clamped, /*done=*/false);
-    check("clamp-fake: a clamp is detected and a transition is decided", d.clamped && transition);
-    // Apply the transition: SW honours the GOP -> Reset + policy-length self-IDRs -> no re-latch.
-    d.Reset();
-    for (int i = 0; i < 5; ++i) (void)d.OnEncoderSelfKey(300, policy);
-    check("clamp-fake: after the SW transition the clamp does NOT recur (recovered)", !d.clamped);
-  }
-  {
-    // Mutation: the transition is REMOVED (always "already done"). The clamp persists -- the same
-    // "recovered" assertion now FAILS, which is what makes the transition load-bearing.
-    GopClampDetector d;
-    for (uint32_t i = 0; i < kClampWindow; ++i) (void)d.OnEncoderSelfKey(30, policy);
-    const bool transition = decide_clamp_sw_transition(d.clamped, /*done=*/true);  // removed
-    // No transition applied -> the encoder keeps clamping -> still latched.
-    for (uint32_t i = 0; i < kClampWindow; ++i) (void)d.OnEncoderSelfKey(30, policy);
-    check("clamp-fake MUTATION: with the transition removed the clamp persists (load-bearing)",
-          !transition && d.clamped);
-  }
-
   if (gFailures == 0) { std::printf("host_gop_clamp_detector_test: PASS\n"); return 0; }
   std::printf("host_gop_clamp_detector_test: FAIL (%d)\n", gFailures);
   return 1;
