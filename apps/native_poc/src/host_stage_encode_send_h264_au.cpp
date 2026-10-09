@@ -338,6 +338,21 @@ const uint64_t sendWaitUs =
 const uint64_t callbackToSendStartUs = (sendStartUs >= callbackUs) ? (sendStartUs - callbackUs) : 0;
 hdr.sendQpcUs = sendStartUs;
 
+// r4 R5 R5-3 (Codex e1bc633): reset the clamp detector + baseline on a codec-instance change BEFORE the
+// burst-eligibility read below (and the detector feed later). A reinit invalidates the prior latch, so
+// reading encoder.clampDetector.clamped for clampBurstEligible must see the cleared state, not a stale
+// latch from the old encoder. This runs per-AU (cheap integer compare) so the first AU after any reinit
+// -- key or not -- clears it.
+{
+  const uint64_t codecId = encoder.codec.instance_id();
+  if (codecId != encoder.clampDetectorCodecId) {
+    encoder.clampDetector.Reset();
+    encoder.lastSelfIdrOrdinal = 0;
+    encoder.lastSelfIdrEpoch = 0;
+    encoder.clampDetectorCodecId = codecId;
+  }
+}
+
 bool sentOk = false;
 bool enqueuedForSend = false;
 if (transport == VideoTransport::Tcp) {
@@ -362,13 +377,20 @@ if (transport == VideoTransport::Tcp) {
     // r4 B1: eligible for a burst grant only if the clamp is latched AND this is a real self-IDR (raw
     // NAL5, not host-forced). The clamp feed for THIS AU runs later in this function, so clamped is the
     // latched state as of the prior AU -- fine, since a clamp stays latched once established.
-    // REMOTE60_NATIVE_FORCE_CLAMP_BURST is a TEST-ONLY seam (default off): this PC's MFT does not clamp,
-    // so the clamp-fake measurement forces eligibility to exercise the burst path. It still requires a
-    // real self-IDR -- it only substitutes for the detector latch, never the raw-NAL5/non-forced gate.
+    // REMOTE60_NATIVE_FORCE_CLAMP_BURST is a TEST-ONLY seam that forces burst eligibility on this PC's
+    // non-clamping MFT so the clamp-fake measurement can exercise the burst path. It is compiled in
+    // ONLY when REMOTE60_CLAMP_BURST_TEST_SEAM is defined (the GNLinkStreamClampBurst test build); the
+    // shipped GNLinkStream never contains the getenv or the variable string (clip_image_build_gate_test
+    // enforces its absence). It still requires a real self-IDR -- it only substitutes for the detector
+    // latch, never the raw-NAL5/non-forced gate.
+#ifdef REMOTE60_CLAMP_BURST_TEST_SEAM
     static const bool kForceClampBurst = [] {
       const char* v = std::getenv("REMOTE60_NATIVE_FORCE_CLAMP_BURST");
       return v && (v[0] == '1' || v[0] == 't' || v[0] == 'T');
     }();
+#else
+    constexpr bool kForceClampBurst = false;  // shipped build: no test seam, no string
+#endif
     item.clampBurstEligible =
         (encoder.clampDetector.clamped || kForceClampBurst) && au.rawIdr && !au.inputWasForcedKey;
     item.frameIntervalUs = encoder.activeFrameIntervalUs;
@@ -608,15 +630,8 @@ if ((hdr.flags & 1u) != 0) {
   // only for a non-forced real IDR in the same codec/input epoch; a forced key / epoch change / lost
   // provenance is a boundary that re-baselines and breaks the streak.
   {
-    // r4 G1: reset the detector + baseline whenever the codec instance changed (any reinit path), so an
-    // old latch/baseline never carries to a new encoder.
-    const uint64_t codecId = encoder.codec.instance_id();
-    if (codecId != encoder.clampDetectorCodecId) {
-      encoder.clampDetector.Reset();
-      encoder.lastSelfIdrOrdinal = 0;
-      encoder.lastSelfIdrEpoch = 0;
-      encoder.clampDetectorCodecId = codecId;
-    }
+    // r4 G1: the detector + baseline reset on a codec-instance change already ran earlier in this
+    // function (before the burst-eligibility read, R5-3), so clampDetectorCodecId is current here.
     const SelfIdrSample s =
         classify_self_idr(au.rawIdr, au.inputWasForcedKey, au.acceptedInputOrdinal, au.inputEpoch,
                           encoder.lastSelfIdrOrdinal, encoder.lastSelfIdrEpoch);
@@ -631,6 +646,11 @@ if ((hdr.flags & 1u) != 0) {
       encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // this self is the baseline for the next
       encoder.lastSelfIdrEpoch = au.inputEpoch;
     } else if (s.baseline) {
+      // r4 R5 R5-2 (Codex e1bc633): a baseline (first self-IDR, or the first after an epoch change) has
+      // NO self->self interval, so it must ALSO break the consecutive short-streak -- otherwise 2 short
+      // intervals in the old epoch + 1 in the new would latch a clamp across the boundary. It differs
+      // from a boundary only in that it KEEPS a new baseline ordinal (a boundary resets to 0/fresh).
+      encoder.clampDetector.NoteBoundary();                  // break the streak across the baseline
       encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // start a baseline; no interval counted
       encoder.lastSelfIdrEpoch = au.inputEpoch;
     } else if (s.boundary) {

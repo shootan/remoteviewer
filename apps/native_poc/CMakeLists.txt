@@ -172,9 +172,29 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the stutter-keyframe B1 clamp-fake measurement (r4): the same sources as
+# GNLinkStream, with REMOTE60_CLAMP_BURST_TEST_SEAM defined so REMOTE60_NATIVE_FORCE_CLAMP_BURST forces
+# burst eligibility on this PC's non-clamping MFT. Its own output name, never packaged;
+# clip_image_build_gate_test checks the shipped GNLinkStream.exe carries none of it.
+get_target_property(_clampburst_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_clampburst_seam ${_clampburst_host_sources})
+set_target_properties(remote60_native_video_host_clampburst_seam PROPERTIES
+  OUTPUT_NAME "GNLinkStreamClampBurst")
+target_include_directories(remote60_native_video_host_clampburst_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_clampburst_seam PRIVATE
+  REMOTE60_CLAMP_BURST_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_clampburst_seam PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
 add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink
-                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test)
+                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test
+                 remote60_native_video_host_clampburst_seam)
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp

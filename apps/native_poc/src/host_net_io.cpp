@@ -213,9 +213,16 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     bool burstCovered = false;
     if (b1Active && wire->auHasGrant &&
         wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes) {
-      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
       burstCovered = true;
+      // Peak-pace this grant-covered datagram (strict rate is bypassed for the grant owner's IDR).
       udp_pace_wait_until(wire->burstLedger->BurstSendDeadlineUs(qpc_now_us(), wireBytes));
+      // r4 R5 R2 (Codex e1bc633): a grant-covered datagram skips WireLimiter::Acquire, which is the
+      // normal path's permission point (it re-checks stop + media/input epoch after its token wait). So
+      // after the peak wait we must re-check the same fence HERE; otherwise a rollover/Stop that happened
+      // during the wait would let an old datagram go out. On a fence, cancel the window reservation and
+      // abort (wireAborted, not a transport error). The grant is NOT debited on a fenced datagram.
+      if (fenceHit()) { releaseIfReserved(); wireAborted = true; return false; }
+      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
     }
     if (!burstCovered && wire && wire->limiter) {
       if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {

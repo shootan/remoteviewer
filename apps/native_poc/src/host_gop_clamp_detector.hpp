@@ -61,7 +61,8 @@ struct GopClampDetector {
 struct SelfIdrSample {
   bool valid = false;        // a real self-IDR with a measurable self->self interval from the last one
   bool baseline = false;     // a real self-IDR that STARTS a baseline (first one, or the first after a
-                             // boundary/epoch change): set lastOrdinal, but produce NO interval
+                             // boundary/epoch change): set lastOrdinal, produce NO interval, and (caller)
+                             // break the streak -- a streak cannot span a baseline (R5-2)
   bool boundary = false;     // a forced/unknown key: break the streak AND invalidate the baseline, so
                              // the next self-IDR starts fresh (never a forced->self interval, G2)
   uint32_t intervalInputs = 0;

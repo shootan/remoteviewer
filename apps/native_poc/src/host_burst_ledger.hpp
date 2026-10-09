@@ -26,6 +26,17 @@
 // (epoch/codec/peer changes fence a grant but never wipe history or the cooldown), and on a downshift
 // re-limits the active grant's remaining budget to the new window headroom.
 //
+// r4 R5 R3 (Codex e1bc633): the window cap is NOT a flat 2*r_current applied retroactively across the
+// whole 2s (that gives an upshift free retroactive credit, and leaves a downshift's old 256 KiB grant
+// oversized). It is the time-weighted integral of the MIXED rate history over the window:
+//
+//     Budget(t) = integral over tau in (t-2s, t] of r(tau) d(tau)   (== 2r for a constant rate)
+//
+// so a higher rate only earns budget for the time AFTER the change (no retroactive credit), a lower rate
+// earns less going forward, and the span before the first SetRate contributes r=0 (this subsumes the
+// cold-start/warm-up ramp). On a downshift the active grant's remaining is additionally clamped to the
+// new per-key cap min(256KiB, newR) minus what it has already spent, and to the new window headroom.
+//
 // Thread: SetRate runs on the main loop (ApplyTarget); Reserve/CommitSent/CancelUnsent/Grant* on the
 // sender thread. All state is under mu_.
 
@@ -62,16 +73,26 @@ class BurstLedger {
     std::lock_guard<std::mutex> lk(mu_);
     Prune(nowUs);
     const uint64_t newR = capBps / 8ULL;
-    if (newR < r_ && grantActive_) {
-      // downshift: re-limit the active grant's remaining to the new window headroom (B1-3).
-      const uint64_t headroom = (2ULL * newR > windowBytes_ + pendingBytes_)
-                                    ? (2ULL * newR - windowBytes_ - pendingBytes_)
-                                    : 0ULL;
-      grantRemaining_ = std::min(grantRemaining_, headroom);
-    }
+    const uint64_t prevR = r_;
     r_ = newR;
     capBps_ = capBps;
     if (!started_) { startedUs_ = nowUs; started_ = true; }  // first rate set: warm-up start (no free credit)
+    // Record the rate change in the mixed-rate history (coalesce a repeated same-rate SetRate so a
+    // frequent ApplyTarget caller does not pile up identical segments).
+    if (rateHist_.empty() || rateHist_.back().r != newR) rateHist_.push_back({nowUs, newR});
+    if (newR < prevR && grantActive_) {
+      // downshift (B1-3 / R3): clamp the active grant's remaining to BOTH the new per-key cap
+      // (minus what it has already spent) AND the new mixed-window headroom.
+      const uint64_t budget = WindowBudgetBytes(nowUs);
+      const uint64_t headroom =
+          (budget > windowBytes_ + pendingBytes_) ? (budget - windowBytes_ - pendingBytes_) : 0ULL;
+      const uint64_t newPerKey = std::min<uint64_t>(kBurstGrantMaxBytes, newR);
+      const uint64_t spent = (grantGranted_ > grantRemaining_) ? grantGranted_ - grantRemaining_ : 0ULL;
+      const uint64_t perKeyRem = (newPerKey > spent) ? newPerKey - spent : 0ULL;
+      grantRemaining_ = std::min<uint64_t>({grantRemaining_, perKeyRem, headroom});
+      grantGranted_ = spent + grantRemaining_;
+      if (grantRemaining_ == 0) grantActive_ = false;
+    }
   }
   uint64_t rate_bytes() const {
     std::lock_guard<std::mutex> lk(mu_);
@@ -91,7 +112,7 @@ class BurstLedger {
     std::lock_guard<std::mutex> lk(mu_);
     Prune(nowUs);
     if (r_ == 0) { pendingBytes_ += bytes; return true; }
-    if (windowBytes_ + pendingBytes_ + bytes > 2ULL * r_) return false;
+    if (windowBytes_ + pendingBytes_ + bytes > WindowBudgetBytes(nowUs)) return false;
     pendingBytes_ += bytes;
     return true;
   }
@@ -111,8 +132,9 @@ class BurstLedger {
   uint64_t RoomAtUs(uint64_t nowUs, uint64_t bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     Prune(nowUs);
-    if (r_ == 0 || windowBytes_ + pendingBytes_ + bytes <= 2ULL * r_) return nowUs;
-    uint64_t need = (windowBytes_ + pendingBytes_ + bytes) - 2ULL * r_;  // bytes that must expire first
+    const uint64_t budget = WindowBudgetBytes(nowUs);
+    if (r_ == 0 || windowBytes_ + pendingBytes_ + bytes <= budget) return nowUs;
+    uint64_t need = (windowBytes_ + pendingBytes_ + bytes) - budget;  // bytes that must expire first
     for (const auto& e : sent_) {
       if (need == 0) return e.us + kBurstWindowUs;
       need = (need > e.bytes) ? need - e.bytes : 0;
@@ -133,11 +155,13 @@ class BurstLedger {
     if (lastGrantOwner_ == owner) return 0;                                         // no re-grant same AU
     Prune(nowUs);
     const uint64_t perGrantCap = std::min<uint64_t>(kBurstGrantMaxBytes, r_);       // min(256KiB, r*1s)
-    const uint64_t windowRem = (2ULL * r_ > windowBytes_ + pendingBytes_) ? (2ULL * r_ - windowBytes_ - pendingBytes_) : 0ULL;
+    const uint64_t budget = WindowBudgetBytes(nowUs);
+    const uint64_t windowRem = (budget > windowBytes_ + pendingBytes_) ? (budget - windowBytes_ - pendingBytes_) : 0ULL;
     const uint64_t grant = std::min<uint64_t>(perGrantCap, windowRem);
     if (grant == 0) return 0;
     grantActive_ = true;
     grantRemaining_ = grant;
+    grantGranted_ = grant;
     grantOwner_ = owner;
     lastGrantUs_ = nowUs;
     everGranted_ = true;
@@ -167,6 +191,13 @@ class BurstLedger {
     grantRemaining_ = 0;
   }
   // Peak-pace one burst datagram: the wall time it may be sent at (<= peak), advancing the cursor.
+  // r4 R5 R6 (Codex e1bc633): the peak is a FIXED function of the current cap R -- max(R, min(4R,
+  // 12Mbps)). There is no separate per-burst path-headroom probe wired into this hot path; the
+  // congestion chain is the cap itself. The adaptive rate controller already lowers capBps_ under
+  // loss/RTT (via UpdateWireCap/SetRate), which lowers this peak proportionally, AND a downshift
+  // re-limits the active grant's remaining budget (SetRate, R3). So congestion shrinks both the peak and
+  // the in-flight grant; the 2s average cap (the window admission) bounds the total regardless. This is
+  // the conservative-within-contract behavior -- it never accelerates ABOVE the contract's peak.
   uint64_t BurstSendDeadlineUs(uint64_t nowUs, uint64_t bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     if (burstPacerUs_ < nowUs) burstPacerUs_ = nowUs;
@@ -192,10 +223,34 @@ class BurstLedger {
       windowBytes_ -= sent_.front().bytes;
       sent_.pop_front();
     }
+    // Drop rate segments that the window has fully slid past, but always keep the one that is active at
+    // the window's start (its rate still governs the oldest edge of the window).
+    const uint64_t winStart = nowUs >= kBurstWindowUs ? nowUs - kBurstWindowUs : 0ULL;
+    while (rateHist_.size() >= 2 && rateHist_[1].us <= winStart) rateHist_.pop_front();
+  }
+  // R3 mixed-rate budget: integral of r(tau) over (nowUs-2s, nowUs], using the rate history. Units: r is
+  // bytes/s and the window is 2s, so for a CONSTANT rate this equals r * 2s == 2r -- the same flat "2r"
+  // byte budget as before (the "2" in "2r" is the 2-second window times r). The span before the first
+  // recorded rate contributes 0 (cold-start ramp / no retroactive credit on a cold or upshifted ledger).
+  // Lock held.
+  uint64_t WindowBudgetBytes(uint64_t nowUs) const {
+    if (rateHist_.empty()) return 0;
+    const uint64_t winStart = nowUs >= kBurstWindowUs ? nowUs - kBurstWindowUs : 0ULL;
+    uint64_t budget = 0;
+    for (size_t i = 0; i < rateHist_.size(); ++i) {
+      const uint64_t segStart = rateHist_[i].us;
+      const uint64_t segEnd = (i + 1 < rateHist_.size()) ? rateHist_[i + 1].us : nowUs;
+      const uint64_t a = std::max<uint64_t>(segStart, winStart);
+      const uint64_t b = std::min<uint64_t>(segEnd, nowUs);
+      if (b > a) budget += rateHist_[i].r * (b - a) / 1'000'000ULL;
+    }
+    return budget;
   }
   struct Entry { uint64_t us; uint64_t bytes; };
+  struct RateSeg { uint64_t us; uint64_t r; };
   mutable std::mutex mu_;
   std::deque<Entry> sent_;
+  std::deque<RateSeg> rateHist_;  // R3 mixed-rate: (us, r) step history for the window budget integral
   uint64_t windowBytes_ = 0;
   uint64_t pendingBytes_ = 0;  // reserved-but-not-yet-committed
   uint64_t r_ = 0;
@@ -204,6 +259,7 @@ class BurstLedger {
   bool started_ = false;
   bool grantActive_ = false;
   uint64_t grantRemaining_ = 0;
+  uint64_t grantGranted_ = 0;  // the grant's original size (for the downshift spent-vs-remaining split)
   BurstAuId grantOwner_;
   BurstAuId lastGrantOwner_;   // the last AU granted (same-AU cooldown)
   uint64_t lastGrantUs_ = 0;

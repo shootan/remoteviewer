@@ -25,30 +25,54 @@ int main() {
   const uint64_t r = cap / 8;
   const uint64_t twoR = 2 * r;
 
+  // The window budget ramps from 0 over the first 2s (R3 mixed-rate / warm-up), so these admission tests
+  // run at W == 2s, where a constant-rate ledger's budget is the full flat 2r.
+  const uint64_t W = kBurstWindowUs;
+
   // --- B1-1: every datagram passes the 2s window admission; the 300000 + 75000 + 20000 sequence is
   //     blocked at the replay. ---------------------------------------------------------------------
   {
-    BurstLedger L; L.SetRate(cap, 0);
-    // 300000 of recent history (as committed sends).
-    L.CommitSent(1, 300'000);
-    check("window at 300000 after history", L.window_bytes(1) == 300'000);
+    BurstLedger L; L.SetRate(cap, 0);  // started at t=0; warm by t=W
+    check("budget is the flat 2r once warm", L.window_bytes(W) == 0);  // (no sends yet)
+    // 300000 of recent history (as committed sends), all inside (W-2s, W].
+    L.CommitSent(W, 300'000);
+    check("window at 300000 after history", L.window_bytes(W) == 300'000);
     // a 75000 grant datagram reserves+commits -> window 375000 (== 2r, admitted).
-    check("reserve 75000 fits (300000+75000 == 2r)", L.Reserve(1, 75'000));
-    L.CommitSent(1, 75'000);
-    check("window now exactly 2r", L.window_bytes(1) == twoR);
+    check("reserve 75000 fits (300000+75000 == 2r)", L.Reserve(W, 75'000));
+    L.CommitSent(W, 75'000);
+    check("window now exactly 2r", L.window_bytes(W) == twoR);
     // a further 20000 (replay or normal) is REFUSED -- 395000 > 2r. This is the counter-example.
-    check("B1-1: a further 20000 is REFUSED by the window (395000 > 2r)", !L.Reserve(1, 20'000));
+    check("B1-1: a further 20000 is REFUSED by the window (395000 > 2r)", !L.Reserve(W, 20'000));
     check("peak window stayed <= 2r", L.max_window_bytes() <= twoR);
   }
   // --- CancelUnsent returns a reservation; a disabled cap always permits -------------------------
   {
     BurstLedger L; L.SetRate(cap, 0);
-    check("reserve near full", L.Reserve(1, twoR));
-    check("second reserve refused (pending full)", !L.Reserve(1, 1));
+    check("reserve near full", L.Reserve(W, twoR));
+    check("second reserve refused (pending full)", !L.Reserve(W, 1));
     L.CancelUnsent(twoR);
-    check("after cancel, reserve fits again", L.Reserve(1, twoR));
+    check("after cancel, reserve fits again", L.Reserve(W, twoR));
     BurstLedger off; off.SetRate(0, 0);
     check("disabled cap permits any reserve", off.Reserve(1, 9'999'999));
+  }
+  // --- R3 cold ramp: a cold ledger has NO full 2r budget -- a burst that would fit when warm is
+  //     refused right after start (no retroactive/cold credit). ------------------------------------
+  {
+    BurstLedger L; L.SetRate(cap, 0);  // started at t=0
+    check("[R3] at t=0.5s the budget is only ~r*0.5s, so a 2r reserve is refused",
+          !L.Reserve(500'000, twoR));
+    check("[R3] the same 2r reserve fits once warm at 2s", L.Reserve(W, twoR));
+  }
+  // --- R3 upshift gives NO retroactive credit: raising the rate only earns budget for time AFTER the
+  //     change, so a warm ledger at the OLD rate cannot immediately burst at the new 2r. -----------
+  {
+    BurstLedger L; L.SetRate(cap, 0);         // r=187500 from t=0; warm at t=W
+    L.SetRate(2 * cap, W);                     // upshift to 2r_old at t=2s
+    // Right after the upshift the window still integrates the old rate for the preceding 2s; only an
+    // instant has passed at the new rate, so the budget is ~2r_old (375000), NOT 2*(2r_old)=750000.
+    check("[R3] no retroactive credit: just-upshifted budget still ~old 2r, 500000 refused",
+          !L.Reserve(W, 500'000));
+    check("[R3] old 2r still fits at the upshift instant", L.Reserve(W, twoR));
   }
 
   // --- B1-3 warm-up: no grant on a cold ledger; only after kBurstWarmupUs ------------------------
@@ -86,14 +110,28 @@ int main() {
     check("same AU is NOT re-granted after its grant ends", L.GrantForIdr(t + kBurstMinIntervalUs + 1, au(1)) == 0);
     check("a different AU >=1s later IS granted", L.GrantForIdr(t + kBurstMinIntervalUs + 1, au(2)) > 0);
   }
-  // --- B1-3 downshift re-limits the active grant --------------------------------------------------
+  // --- B1-3 / R3 downshift re-limits the active grant to the NEW per-key cap (not just the window) ---
   {
-    BurstLedger L; L.SetRate(6'000'000, 0);  // r=750000, grant up to 750000
+    BurstLedger L; L.SetRate(6'000'000, 0);  // r=750000, grant up to 256KiB
     const uint64_t t = kBurstWarmupUs + 1;
     const uint64_t g = L.GrantForIdr(t, au(1));
     check("6Mbps grant == min(256KiB, r) = 256KiB", g == kBurstGrantMaxBytes);
-    L.SetRate(1'500'000, t);  // downshift: new 2r = 375000, window ~0 -> grant re-limited to <= 375000
-    check("downshift re-limits the active grant coverage", L.GrantCoverage(au(1), 9'999'999) <= twoR);
+    L.SetRate(1'500'000, t);  // downshift 6M->1.5M: new per-key = min(256KiB, 187500) = 187500
+    const uint64_t cov = L.GrantCoverage(au(1), 9'999'999);
+    check("[R3] downshift 6M->1.5M re-limits the grant to the new per-key 187500",
+          cov <= r, "cov=" + std::to_string(cov) + " r=" + std::to_string(r));
+  }
+  // --- R3 downshift accounts for ALREADY-SPENT grant: a grant that has spent part of its budget is
+  //     re-limited so spent + remaining <= the new per-key cap. ------------------------------------
+  {
+    BurstLedger L; L.SetRate(6'000'000, 0);  // r=750000
+    const uint64_t t = kBurstWarmupUs + 1;
+    (void)L.GrantForIdr(t, au(1));                 // granted 256KiB
+    L.DebitGrant(au(1), 150'000);                  // spent 150000; remaining ~112144
+    L.SetRate(1'500'000, t);                       // downshift: new per-key 187500, spent 150000
+    const uint64_t cov = L.GrantCoverage(au(1), 9'999'999);
+    check("[R3] spent 150000 + remaining <= new per-key 187500 (remaining <= 37500)",
+          cov <= (r - 150'000), "cov=" + std::to_string(cov));
   }
 
   // --- NEGATIVE CONTROL: without the admission (CommitSent directly, no Reserve gate) the 2s window

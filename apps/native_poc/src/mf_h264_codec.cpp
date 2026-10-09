@@ -1536,7 +1536,10 @@ void H264Encoder::apply_low_latency_codec_api() {
   const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
   uint32_t gopReadback = 0;
   const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
-  gopReadbackClamped_ = gopGetOk && gopReadback < requestedGop;  // r4 G3: the MFT clamped the GOP
+  // r4 R5 R5-1 (Codex e1bc633): a clamp is a POSITIVE readback strictly below the request. A readback of
+  // 0 is "unknown" (the MFT did not report a GOP), NOT a clamp -- promoting 0 to a clamp would wrongly
+  // gate the burst on an encoder that never clamps. Require gopReadback > 0.
+  gopReadbackClamped_ = gopGetOk && gopReadback > 0 && gopReadback < requestedGop;  // r4 G3: MFT clamped
   char gopLine[192];
   std::snprintf(gopLine, sizeof(gopLine),
                 "[native-video-host] h264 gop-config stage=post-type backend=%s requestedGop=%u setHr=0x%08lX "

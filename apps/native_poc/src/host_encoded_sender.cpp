@@ -236,6 +236,13 @@ bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint
     wire.itemMediaEpoch = currentEpoch;
     wire.inputEpoch = inputEpochRef;       // live input fence -- a flushed AU's replay stops
     wire.itemInputEpoch = itemInputEpoch;
+    // r4 R5 R1 (Codex e1bc633): a NACK replay is a REAL wire send and must pass the common 2s window.
+    // The earlier fresh `WireEgress wire;` left burstLedger null, so cap-on replays bypassed the window
+    // (and were missing from burstWin2s). Connect the one ledger here; it only engages when the limiter
+    // (cap) is also set below (b1Active = wire && burstLedger && limiter && enabled()). The replay has no
+    // grant (auHasGrant stays false), so it goes through pure per-datagram window admission like any
+    // other datagram -- it never spends the original AU's grant (that grant has been EndGrant'd by now).
+    wire.burstLedger = &burstLedger;
     if (capEnforcing) {
       wire.limiter = wireLimiter.get();
       // Interleave (maxChunks != 0, during a saturated original send) blocks for a fair share of the

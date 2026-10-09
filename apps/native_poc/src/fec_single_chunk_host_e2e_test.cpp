@@ -714,6 +714,14 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
                     double maxDecodeLatMs = 0.0) {
   const double p1s = window_peak_bps(r.wireEvents, 1'000'000);
   const double p250 = window_peak_bps(r.wireEvents, 250'000);
+  // r4 R5 (Codex e1bc633): the burst contract is the 2s rolling average, so the 2s window of the EXTERNAL
+  // received packet trace (original + FEC + NACK, all in wireEvents) is the real pass/fail. In burst mode
+  // the 250ms/1s windows INTENTIONALLY exceed the cap (that is Option 1); only p2s must stay within it.
+  const double p2s = window_peak_bps(r.wireEvents, 2'000'000);
+  char burstEnv[8] = {0};
+  const bool burstMode = GetEnvironmentVariableA("REMOTE60_NATIVE_FORCE_CLAMP_BURST", burstEnv,
+                                                 sizeof(burstEnv)) > 0 &&
+                         (burstEnv[0] == '1' || burstEnv[0] == 't' || burstEnv[0] == 'T');
   double deliveredFps = 0, firstFrameMs = 0, deliverGapMaxMs = 0, idrPerSec = 0;
   if (r.deliverUs.size() >= 2) {
     const uint64_t span = r.deliverUs.back() - r.deliverUs.front();
@@ -763,12 +771,26 @@ void matrix_metrics(const char* label, uint64_t capBps, const RunResult& r, doub
               100.0 * p250 / capBps, deliveredFps, deliverGapMaxMs, firstFrameMs, r.realtimeDecoded, decodeFps,
               firstDecodeMs, decodeGapMaxMs, decodeLatP95Ms, decodeLatMaxMs, idrPerSec, r.keyReq, r.disc, r.nacks,
               r.giveUps, r.decodeErrors, r.decoder.c_str(), (unsigned long long)r.rxDropped, deliverGap250, decodeGap250);
+  std::printf("       %s wire-window: win2s=%.0f (%.1f%% of cap) mode=%s\n", label, p2s, 100.0 * p2s / capBps,
+              burstMode ? "burst(2s gate)" : "strict(250ms/1s+2s gates)");
   std::printf("       %s host: queueWaitMax=%llums queueDepthMax=%llu wireCapBps=%llu | recoveryMax=%.0fms recoveries=%u\n",
               label, (unsigned long long)(r.host.maxQueueWaitUs / 1000), (unsigned long long)r.host.maxQueueDepth,
               (unsigned long long)r.host.wireCapBps, r.recoveryMaxUs / 1000.0, r.recoveryCount);
   const std::string tag = std::string("matrix ") + label;
-  check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
-  check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
+  // The 2s window is the burst contract and must hold in BOTH modes (A(2s) <= 2r <=> 2s-avg bitrate <=
+  // cap). Allow +15% headroom here: p2s is the client-RECEIVED trace, but a single large IDR can land its
+  // bytes in a tighter-than-2s cluster and the two-pointer peak over a short run magnifies that edge; the
+  // authoritative sent-side figure is the host's burstWin2s (host.log), asserted separately.
+  check(p2s <= capBps * 1.15, tag + ": every 2 s window <= cap +15% (the burst contract)");
+  // The 250ms/1s strict windows are the pass/fail ONLY in strict mode; in burst mode they intentionally
+  // exceed the cap (Option 1) and are reported for information, with the 2s gate above governing.
+  if (!burstMode) {
+    check(p1s <= capBps * 1.10, tag + ": every 1 s window <= cap +10%");
+    check(p250 <= capBps * 1.10, tag + ": every 250 ms window <= cap +10%");
+  } else {
+    std::printf("       %s [burst] 250ms=%.1f%% 1s=%.1f%% of cap intentionally exceed; 2s gate governs\n",
+                label, 100.0 * p250 / capBps, 100.0 * p1s / capBps);
+  }
   check(r.realtimeDecoded >= 2 && r.decodeErrors == 0, tag + ": the realtime decoder produced frames (no decode error)");
   check(firstDecodeMs >= 0 && firstDecodeMs <= 3000, tag + ": the first frame decodes within a bounded time");
   // r4 R4-2 / addendum: a pre-fixed responsiveness ceiling on the REALTIME DECODE gap, so a candidate

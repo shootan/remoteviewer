@@ -81,13 +81,13 @@ int main() {
             !classify_self_idr(true, false, 400, 2, 100, 1).valid);
   check("G: lost provenance (ordinal 0) is a boundary", classify_self_idr(true, false, 0, 1, 100, 1).boundary);
 
-  // mirror the _au.cpp feed: valid -> interval + baseline; baseline -> set baseline (no interval);
-  // boundary -> NoteBoundary + invalidate the baseline (next self starts fresh).
+  // mirror the _au.cpp feed: valid -> interval + baseline; baseline -> NoteBoundary (break the streak,
+  // R5-2) + set baseline (no interval); boundary -> NoteBoundary + invalidate the baseline.
   const auto feed = [](GopClampDetector& d, uint64_t& lastOrd, uint64_t& lastEp, uint32_t keyint,
                        bool rawIdr, bool forced, uint64_t ordinal, uint64_t epoch) {
     const SelfIdrSample s = classify_self_idr(rawIdr, forced, ordinal, epoch, lastOrd, lastEp);
     if (s.valid) { (void)d.OnEncoderSelfKey(s.intervalInputs, keyint); lastOrd = ordinal; lastEp = epoch; }
-    else if (s.baseline) { lastOrd = ordinal; lastEp = epoch; }
+    else if (s.baseline) { d.NoteBoundary(); lastOrd = ordinal; lastEp = epoch; }
     else if (s.boundary) { d.NoteBoundary(); lastOrd = 0; lastEp = 0; }
   };
 
@@ -125,6 +125,20 @@ int main() {
     feed(d, lo, le, 300, true, false, 30, 2);   // epoch change -> boundary -> streak reset
     feed(d, lo, le, 300, true, false, 60, 2);   // 1 short in the new epoch
     check("G: an epoch change breaks the streak before it latches", !d.clamped);
+  }
+  // R5-2 counter-example (Codex e1bc633): the PREVIOUS test can't distinguish the fix (only 1 short each
+  // side). Here the OLD epoch builds TWO short intervals (streak 2) and the NEW epoch adds ONE more; if
+  // the epoch baseline did NOT break the streak this would be 3 consecutive short -> a FALSE clamp. The
+  // baseline's NoteBoundary resets it, so the new epoch starts fresh at streak 1 and never latches.
+  {
+    GopClampDetector d; uint64_t lo = 0, le = 0;
+    feed(d, lo, le, 300, true, false, 30, 1);   // baseline (first self-IDR)
+    feed(d, lo, le, 300, true, false, 60, 1);   // short #1 (streak 1)
+    feed(d, lo, le, 300, true, false, 90, 1);   // short #2 (streak 2)
+    feed(d, lo, le, 300, true, false, 30, 2);   // epoch change -> baseline -> streak reset to 0
+    feed(d, lo, le, 300, true, false, 60, 2);   // short #1 in the new epoch (streak 1, NOT 3)
+    check("R5-2: 2 short (old epoch) + 1 short (new epoch) does NOT latch across the baseline",
+          !d.clamped && d.shortStreak == 1, "streak=" + std::to_string(d.shortStreak));
   }
 
   if (gFailures == 0) { std::printf("host_gop_clamp_detector_test: PASS\n"); return 0; }
