@@ -923,6 +923,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // acknowledged with the stream generation the viewer waits for). Without it a screen pick
         // can never be acknowledged, so it is not attempted (t-970r4zgo).
         val hostSupportsMonitorSelect: Boolean = false,
+        // Which monitor list `monitors` is; a pick is sent against it (t-970r4zgo r3).
+        val monitorListRevision: Long = 0L,
         val selectedMonitorId: Int = 0,
         val monitors: List<MonitorPanelItem> = emptyList(),
     ) {
@@ -1016,6 +1018,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var targetListAdapter: TargetCardAdapter
     private val targetListLabels = mutableListOf<String>()
     private val targetListIds = mutableListOf<Long>()
+    // The monitorListRevision of the screens currently drawn in the target list.
+    private var targetListMonitorRevision = 0L
     private var targetListSelectedId = 0L
     private val thumbnailBitmaps = HashMap<Long, Bitmap>()
     private val thumbnailVersions = HashMap<Long, Long>()
@@ -2283,13 +2287,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // A screen id rather than a window id, when the host reported more than one.
             TargetTab.DESKTOP ->
                 if (targetId >= MONITOR_ID_BASE) {
-                    NativeSessionBridge.nativeSelectMonitor((targetId - MONITOR_ID_BASE).toInt())
+                    // Against the list the user was shown: if a newer one replaced it, this is
+                    // refused (and said) rather than read as another screen.
+                    NativeSessionBridge.nativeSelectMonitorAt(
+                        (targetId - MONITOR_ID_BASE).toInt(), targetListMonitorRevision
+                    )
                 } else {
                     NativeSessionBridge.nativeSelectDesktopMode()
                 }
             TargetTab.SETTINGS -> false
         }
         if (!ok) {
+            if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
+                parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).status
+                    .contains("monitor_list_changed")
+            ) {
+                Toast.makeText(this, R.string.ui_monitor_list_changed, Toast.LENGTH_SHORT).show()
+            }
             desiredStreamActive = false
             requestStreamActive(false, "selection_failed")
             NativeSessionBridge.nativeAbortVideoSwitch()
@@ -3600,7 +3614,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         if (selectionStage != SelectionStage.IDLE) {
-            if (panelSnapshot.status.startsWith("window_select_failed")) {
+            val selectionVerdict = SelectionStatusPolicy.verdict(panelSnapshot.status)
+            if (selectionVerdict == SelectionStatusPolicy.Verdict.FAILED) {
                 diagnosticsLog.log(
                     "select_failed",
                     "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
@@ -3608,7 +3623,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
                 moveToTargets("select_failed", abortPendingSwitch = true)
             } else {
-                if (!pendingSelectionAckLogged && panelSnapshot.status.startsWith("window_selected")) {
+                if (!pendingSelectionAckLogged && selectionVerdict == SelectionStatusPolicy.Verdict.ACKED) {
                     selectionStage = SelectionStage.WAITING_FIRST_FRAME
                     pendingSelectionAckLogged = true
                     diagnosticsLog.log(
@@ -3755,6 +3770,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // still the honest label. With more, they are numbered as the host ordered them:
                 // primary first, then left to right, so "Monitor 2" is the same screen every time.
                 val monitors = panelSnapshot.monitors
+                targetListMonitorRevision = panelSnapshot.monitorListRevision
                 if (monitors.size > 1) {
                     monitors.forEach { mon ->
                         val primaryMark = if (mon.primary) " • " + getString(R.string.monitor_primary) else ""
@@ -4560,6 +4576,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 items = items,
                 hostSupportsMonitors = root.optBoolean("hostSupportsMonitors"),
                 hostSupportsMonitorSelect = root.optBoolean("hostSupportsMonitorSelect"),
+                monitorListRevision = root.optLong("monitorListRevision"),
                 selectedMonitorId = root.optInt("selectedMonitorId"),
                 monitors = buildList {
                     val monitorsJson = root.optJSONArray("monitors")

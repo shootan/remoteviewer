@@ -50,6 +50,7 @@
 #include "host_capture_device.hpp"
 #include "host_capture_session.hpp"
 #include "monitor_select_target.hpp"
+#include "stream_test_hold.hpp"
 #include "host_client_metrics.hpp"
 #include "host_control_session.hpp"
 #include "host_encoded_sender.hpp"
@@ -555,6 +556,9 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
   }
   nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
   watchdog.lastCaptureRestartUs = nowUs;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restart", hx.stop);  // test build: checked, target switched, not yet restarted
+#endif
   if (!restart_capture_session(hx)) {
     restore_previous_target();
     if (outReason) *outReason = "capture_restart_failed";
@@ -562,9 +566,30 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
     return false;
   }
   if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
-    // The screen went between the check above and the restart, which fell back (host_monitor_
-    // selection.hpp). The capture is consistent -- on the fallback screen -- but it is not what
-    // was asked for, so it is not acknowledged as such.
+    // r3 M3: the screen went between the check above and the restart, and the restart opened the
+    // fallback screen instead (host_monitor_selection.hpp). That is not the pick and it is not
+    // what was shown before, so it is neither acknowledged nor left standing: the previous target
+    // and its generation are given back and the capture is restarted on it. If the previous
+    // screen is gone too, that restart falls back by the ordinary rule -- the state is then that
+    // confirmed fallback, under the previous generation, and the answer still says the pick failed.
+    restore_previous_target();
+    watchdog.lastCaptureRestartUs = nowUs;
+    if (restart_capture_session(hx)) {
+      ++capture.restartCount;
+      capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+      capture.lastCallbackUs.store(0, std::memory_order_release);
+      encoder.ResetTimelineAnchors(capture);
+      encoder.RequestKey(kHostKeyReasonSelection);
+      capture.FlushCapturePipelineState(res, frameGating, stats, "monitor-select-rollback");
+      std::cout << "[native-video-host][control] monitor-select rolled back: the picked screen went during the "
+                   "restart; previous target restored streamGen="
+                << capture.streamGenerationState.load(std::memory_order_acquire) << "\n";
+    } else {
+      // The previous target could not be reopened now; the restart retry takes it from here.
+      std::cout << "[native-video-host][control] monitor-select rolled back; previous target restart pending\n";
+    }
+    if (outStreamGeneration) *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
     if (outReason) *outReason = "monitor_gone";
     if (outTitle) *outTitle = nextTitle;
     return false;

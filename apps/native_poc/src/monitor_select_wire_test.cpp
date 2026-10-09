@@ -148,6 +148,42 @@ int main() {
                                                                           panel.Snapshot().selectedMonitorId == 1);
   }
 
+  {
+    std::puts("\n--- r3 M4: a screen pick goes out only against the list it was made from ---");
+    WindowPanelStateModel panel;
+    auto list_of = [](uint32_t count, const char* second) {
+      ControlMonitorListMessage m{};
+      m.itemCount = count;
+      for (uint32_t i = 0; i < count; ++i) {
+        m.items[i].id = i;
+        m.items[i].x = static_cast<int32_t>(i * 1920);
+        m.items[i].width = 1920;
+        m.items[i].height = 1080;
+        std::snprintf(m.items[i].name, sizeof(m.items[i].name), "%s", i == 0 ? "DISPLAY1" : second);
+      }
+      return m;
+    };
+    panel.ApplyMonitorList(list_of(2, "DISPLAY2"));
+    const uint64_t r1 = panel.Snapshot().monitorListRevision;
+    panel.ApplyMonitorList(list_of(2, "DISPLAY2"));
+    check("the same list fetched again keeps its revision", panel.Snapshot().monitorListRevision == r1);
+    panel.ApplyMonitorList(list_of(2, "DISPLAY3"));
+    const uint64_t r2 = panel.Snapshot().monitorListRevision;
+    check("another screen at the same index is a new revision", r2 != r1);
+    uint64_t id = 0;
+    check("a pick made against the current list is sent",
+          panel.RequestSelect(encode_monitor_select_target(1), "monitor_select_requested", 0, r2) &&
+              panel.TakeSelectRequest(&id) && id == encode_monitor_select_target(1));
+    check("a pick queued, then a different list arrives before it is sent: NOT sent, said so",
+          panel.RequestSelect(encode_monitor_select_target(1), "monitor_select_requested", 0, r2) &&
+              (panel.ApplyMonitorList(list_of(1, "")), !panel.TakeSelectRequest(&id)) &&
+              panel.Snapshot().status == "window_select_failed: monitor_list_changed",
+          panel.Snapshot().status);
+    check("a window pick is not fenced by the monitor list",
+          panel.RequestSelect(0x00000000000A0B2CULL, "window_select_requested", 0, r1) && panel.TakeSelectRequest(&id) &&
+              id == 0x00000000000A0B2CULL);
+  }
+
   if (gFailures == 0) {
     std::printf("\nRESULT: ALL PASS  (%d checks, 0 failed)\n", gChecks);
     return 0;

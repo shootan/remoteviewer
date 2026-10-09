@@ -53,6 +53,10 @@ struct WindowSelectionTxn {
   uint64_t txnId = 0;
   uint64_t nextTxnId = 0;
   uint64_t completedTxnId = 0;
+  // r3 M5: the session the request was made in (SessionState::epoch when it was served). The main
+  // loop applies a request only while that session is still the current one; its asker cancels a
+  // request it gave up on before the main loop took it.
+  uint64_t ownerEpoch = 0;
   // A monitor-select target (monitor_select_target.hpp): the screen's device name, resolved on the
   // control thread against the monitor list THIS connection was sent; empty for a window/desktop.
   std::wstring requestedMonitorDevice;

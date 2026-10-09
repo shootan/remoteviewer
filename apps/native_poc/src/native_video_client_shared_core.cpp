@@ -1226,6 +1226,8 @@ void WindowPanelStateModel::Reset() {
   selectRequestPending_ = false;
   pendingSelectId_ = 0;
   pendingSelectTag_ = 0;
+  pendingSelectListRevision_ = ~0ULL;
+  lastMonitorEntries_.clear();
   monitorListRequestPending_ = false;
   monitorSelectRequestPending_ = false;
   pendingMonitorId_ = 0;
@@ -1244,12 +1246,15 @@ bool WindowPanelStateModel::TakeListRequest() {
   return true;
 }
 
-bool WindowPanelStateModel::RequestSelect(uint64_t windowId, const char* statusText, uint64_t selectionTag) {
+bool WindowPanelStateModel::RequestSelect(uint64_t windowId, const char* statusText, uint64_t selectionTag,
+                                          uint64_t monitorListRevision) {
   std::lock_guard<std::mutex> lk(mu_);
   if (state_.selectionLocked) return false;
   selectRequestPending_ = true;
   pendingSelectId_ = windowId;
   pendingSelectTag_ = selectionTag;
+  pendingSelectListRevision_ =
+      monitorListRevision == ~0ULL ? state_.monitorListRevision : monitorListRevision;
   if (statusText) state_.status = statusText;
   return true;
 }
@@ -1258,6 +1263,14 @@ bool WindowPanelStateModel::TakeSelectRequest(uint64_t* outWindowId, uint64_t* o
   std::lock_guard<std::mutex> lk(mu_);
   if (!selectRequestPending_) return false;
   selectRequestPending_ = false;
+  // r3 M4: a screen pick goes out only against the list it was made from. The host resolves the
+  // index against the last list it sent on this connection, so after a newer list it could be
+  // another screen.
+  if (classify_select_target(pendingSelectId_).kind == SelectTargetKind::Monitor &&
+      pendingSelectListRevision_ != state_.monitorListRevision) {
+    state_.status = "window_select_failed: monitor_list_changed";
+    return false;
+  }
   if (outWindowId) *outWindowId = pendingSelectId_;
   if (outSelectionTag) *outSelectionTag = pendingSelectTag_;
   return true;
@@ -1316,6 +1329,14 @@ void WindowPanelStateModel::ApplyMonitorList(const ControlMonitorListMessage& ms
   std::lock_guard<std::mutex> lk(mu_);
   state_.monitors.clear();
   const uint32_t count = std::min<uint32_t>(msg.itemCount, kControlMonitorListMaxEntries);
+  bool same = count == lastMonitorEntries_.size();
+  for (uint32_t i = 0; same && i < count; ++i) {
+    same = std::memcmp(&lastMonitorEntries_[i], &msg.items[i], sizeof(ControlMonitorEntry)) == 0;
+  }
+  if (!same) {
+    lastMonitorEntries_.assign(msg.items, msg.items + count);
+    ++state_.monitorListRevision;
+  }
   for (uint32_t i = 0; i < count; ++i) {
     const auto& src = msg.items[i];
     MonitorEntry e{};

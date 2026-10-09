@@ -1013,6 +1013,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
           std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
           myTxn = ++windowSelectionTxn.nextTxnId;
           windowSelectionTxn.txnId = myTxn;
+          windowSelectionTxn.ownerEpoch = servedEpoch;
           windowSelectionTxn.requestedMonitorDevice = monitorDevice;
           windowSelectionTxn.pending = true;
           windowSelectionTxn.completed = false;
@@ -1046,6 +1047,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
         } else {
           // Not this request's result (stopped, the link died, or another request took over):
           // nothing is claimed, and the shared fields are left to whoever they belong to.
+          // r3 M5: and a request of ours the main loop has not taken yet is withdrawn, so it is
+          // never applied to whichever session comes next.
+          if (windowSelectionTxn.pending && windowSelectionTxn.txnId == myTxn) {
+            windowSelectionTxn.pending = false;
+            std::cout << "[native-video-host][control] window-select seq=" << req.seq
+                      << " withdrawn (asker gone before it was applied)\n";
+          }
           rsp.flags = 0;
           rsp.windowId = req.windowId;
           rsp.streamGeneration = 0;

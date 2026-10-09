@@ -70,6 +70,7 @@
 #include "mf_h264_codec.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
+#include "stream_test_hold.hpp"
 #include "time_utils.hpp"
 
 using namespace winrt::Windows::Graphics::Capture;
@@ -206,28 +207,47 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
     uint32_t reqSeq = 0;
     uint64_t requestedWindowId = 0;
     uint64_t txnId = 0;
+    uint64_t ownerEpoch = 0;
     std::wstring requestedMonitorDevice;
     bool hasWindowSelectRequest = false;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+    const bool takeHeld = stream_test_hold_set("take");  // test build: leave it pending
+#else
+    const bool takeHeld = false;
+#endif
     {
       std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
-      if (windowSelectionTxn.pending) {
+      if (windowSelectionTxn.pending && !takeHeld) {
         reqSeq = windowSelectionTxn.reqSeq;
         requestedWindowId = windowSelectionTxn.requestedWindowId;
         txnId = windowSelectionTxn.txnId;
+        ownerEpoch = windowSelectionTxn.ownerEpoch;
         requestedMonitorDevice = windowSelectionTxn.requestedMonitorDevice;
         hasWindowSelectRequest = true;
         windowSelectionTxn.pending = false;
       }
     }
     if (hasWindowSelectRequest) {
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      stream_test_hold_wait("apply", hx.stop);  // test build: taken, not yet applied
+#endif
       uint32_t responseFlags = 0;
       uint64_t responseWindowId = requestedWindowId;
       uint64_t responseStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
       std::string responseReason;
       std::string responseTitle;
-      const bool applied = apply_selected_window_capture(hx, 
+      // r3 M5: a request belongs to the session it was made in. One whose session has been
+      // replaced since (the asker went away, another viewer connected) is not applied to the
+      // successor's capture -- checked here, at the last moment before anything is changed.
+      const uint64_t currentEpoch = hx.clientSession.epoch.load(std::memory_order_acquire);
+      const bool sameSession = ownerEpoch == 0 || ownerEpoch == currentEpoch;
+      const bool applied = sameSession && apply_selected_window_capture(hx,
           requestedWindowId, requestedMonitorDevice, nowUs, &responseFlags, &responseWindowId,
           &responseStreamGeneration, &responseReason, &responseTitle);
+      if (!sameSession) {
+        responseFlags = 0;
+        responseReason = "stale_session";
+      }
       {
         std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
         // t-970r4zgo: only the request taken above is answered with this result; one that has

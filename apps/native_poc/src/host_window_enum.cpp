@@ -176,16 +176,27 @@ std::vector<MonitorListEntry> enumerate_monitors() {
       const std::string m(mode);
       if (m.rfind("none", 0) == 0) {
         out.clear();
-      } else if (m.rfind("extra", 0) == 0 && !out.empty()) {
-        MonitorListEntry extra = out.front();
+      } else if ((m.rfind("extra", 0) == 0 || m.rfind("only3", 0) == 0) && !out.empty()) {
+        // "extra" adds GNLINKTEST2, "extra3" adds GNLINKTEST2 and GNLINKTEST3, "only3" just GNLINKTEST3.
+        MonitorListEntry base = out.front();
         for (const auto& e : out) {
-          if (e.primary) extra = e;
+          if (e.primary) base = e;
         }
-        extra.primary = false;
-        extra.x = extra.x + static_cast<int32_t>(extra.width);  // listed to the right of the primary
-        extra.name = "GNLINKTEST2";
-        extra.device = L"\\\\.\\GNLINKTEST2";
-        out.push_back(std::move(extra));
+        base.primary = false;
+        if (m.rfind("only3", 0) != 0) {
+          MonitorListEntry extra = base;
+          extra.x = base.x + static_cast<int32_t>(base.width);  // listed to the right of the primary
+          extra.name = "GNLINKTEST2";
+          extra.device = L"\\\\.\\GNLINKTEST2";
+          out.push_back(std::move(extra));
+        }
+        if (m.rfind("extra3", 0) == 0 || m.rfind("only3", 0) == 0) {
+          MonitorListEntry extra = base;
+          extra.x = base.x + 2 * static_cast<int32_t>(base.width);
+          extra.name = "GNLINKTEST3";
+          extra.device = L"\\\\.\\GNLINKTEST3";
+          out.push_back(std::move(extra));
+        }
       }
     }
   }

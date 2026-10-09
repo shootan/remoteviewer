@@ -140,6 +140,9 @@ bool ClientSessionController::RequestWindowList() {
   }
 
   windowPanel_.RequestList("window_list_request pending");
+  // r3 M4: and the screens, where the host lists them -- the APK refreshes its targets through
+  // here (sheet, back to the list), and a screen that went while connected must leave the list.
+  if (windowPanel_.Snapshot().hostSupportsMonitors) windowPanel_.RequestMonitorList();
   {
     // A manual refresh should also refresh the previews.
     std::lock_guard<std::mutex> lk(thumbMu_);
@@ -163,7 +166,7 @@ bool ClientSessionController::RequestMonitorList() {
   return true;
 }
 
-bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId) {
+bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
@@ -179,8 +182,16 @@ bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId) {
     windowPanel_.SetStatus("monitor_select_unsupported: host_update_required");
     return false;
   }
+  if (listRevision != ~0ULL && listRevision != panel.monitorListRevision) {
+    // r3 M4: the user picked from a list that has been replaced since; the index may now be
+    // another screen. Refused here so the caller can ask again from the list now shown.
+    windowPanel_.SetStatus("monitor_select_failed: monitor_list_changed");
+    return false;
+  }
+  decoderRekeyPending_.store(false, std::memory_order_release);  // a new pick: the old one's IDR is moot
   const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
-  if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag)) {
+  if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag,
+                                  panel.monitorListRevision)) {
     return false;
   }
   const auto panelSnapshot = windowPanel_.Snapshot();
@@ -200,6 +211,7 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
   // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
   if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
+  decoderRekeyPending_.store(false, std::memory_order_release);
   const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
   if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
     return false;
@@ -476,6 +488,11 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         }
       }
     }
+    // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
+    if (decoderRekeyPending_.load(std::memory_order_acquire) && keyframeRequests_.Request(2, loopNowUs).queued) {
+      decoderRekeyPending_.store(false, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+    }
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
                                      &desktopBackend_)) {
@@ -549,15 +566,35 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           break;
         }
         case TcpControlResponseKind::WindowSelected: {
-          windowPanel_.ApplyWindowSelected(response.windowSelected);
+          // t-970r4zgo: the answer is to THIS request (same seq, same target) or it opens nothing.
+          ControlWindowSelectedMessage answer = response.windowSelected;
+          if (answer.seq != action.windowSelect.seq || answer.windowId != action.windowSelect.windowId) {
+            answer.flags &= ~0x1u;
+            answer.streamGeneration = 0;
+          }
+          // r3 M2: and it is SHOWN only if it belongs to the selection now in progress. The panel's
+          // status is what the APK moves its selection on (window_selected / window_select_failed);
+          // a late answer to an earlier pick -- success or failure -- must not move a later one.
+          // Requests queued untracked (tag 0) are shown as before.
+          const uint64_t currentSelection = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+          if (action.selectionTag == 0 || action.selectionTag == currentSelection) {
+            windowPanel_.ApplyWindowSelected(answer);
+          } else {
+            std::fprintf(stderr,
+                         "[native-video-client-session] select answer seq=%u ok=%u for selection %llu while %llu is "
+                         "in progress: not shown\n",
+                         answer.seq, answer.flags & 0x1u, static_cast<unsigned long long>(action.selectionTag),
+                         static_cast<unsigned long long>(currentSelection));
+          }
           if (encodedFrameSink_) {
-            // t-970r4zgo: the answer is to THIS request (same seq, same target) or it opens nothing.
-            ControlWindowSelectedMessage answer = response.windowSelected;
-            if (answer.seq != action.windowSelect.seq || answer.windowId != action.windowSelect.windowId) {
-              answer.flags &= ~0x1u;
-              answer.streamGeneration = 0;
-            }
             encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
+            // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
+            // dropped). Queued now, not at the next frame.
+            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest() &&
+                !keyframeRequests_.Request(2, now_us()).queued) {
+              decoderRekeyPending_.store(true, std::memory_order_release);
+              std::fprintf(stderr, "[native-video-client-session] keyframe request after the select answer held by the limiter\n");
+            }
           }
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);
@@ -712,7 +749,8 @@ void ClientSessionController::VideoReceiveMain() {
     // The decoder may have had to discard what it was just handed. Ask for an IDR now
     // rather than letting every later delta decode against a reference that never arrived.
     if (currentSink->ConsumeDecoderKeyframeRequest()) {
-      (void)keyframeRequests_.Request(2, now_us());
+      // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
+      if (!keyframeRequests_.Request(2, now_us()).queued) decoderRekeyPending_.store(true, std::memory_order_release);
     }
   };
   callbacks.requestKeyframe = [&]() {
@@ -1009,6 +1047,7 @@ void ClientSessionController::ResetUnlocked() {
   CloseSocketsUnlocked();
   snapshot_ = ClientSessionSnapshot{};
   windowPanel_.Reset();
+  decoderRekeyPending_.store(false, std::memory_order_release);
   streamState_.Reset();
   captureMode_.Reset();
   keyframeRequests_.Reset();

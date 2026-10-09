@@ -120,7 +120,9 @@ class ClientSessionController {
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
   bool RequestMonitorList();
-  bool RequestMonitorSelect(uint32_t monitorId);
+  // listRevision: the WindowPanelSnapshot::monitorListRevision the index was read from (~0 = the
+  // current list). A pick made from a list that has since been replaced is refused at once.
+  bool RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision = ~0ULL);
   bool HostSecureDesktopActive() const {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
@@ -260,6 +262,11 @@ class ClientSessionController {
   ClipboardClientPolicy clipPolicy_;
   std::atomic<bool> clipboardEnabled_{true};
   std::atomic<bool> hostSupportsClipboard_{false};
+  // r3 M1: an IDR the decoder asked for (its selection's IDR beat the answer, or a delta had to
+  // be dropped) that the keyframe limiter refused for now. Kept until the limiter takes it, and
+  // tried on every control-loop pass, so it does not wait for the next frame -- after a dropped
+  // lone IDR there may be none.
+  std::atomic<bool> decoderRekeyPending_{false};
   std::atomic<bool> clipInitialPushWanted_{false};
 };
 
