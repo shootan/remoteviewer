@@ -467,10 +467,22 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // suppressed -- unlimited here (between-AU), the interleave hook bounds the during-send work.
       sender.DrainPendingReplays(clientSession.clientSock, peer, qpc_now_us(),
                                  sender.mediaSessionEpoch.load(std::memory_order_acquire));
+      // r4 B1: arm a burst grant for a clamp-detected real self-IDR, bound to THIS AU's send. The
+      // ledger grants only within the 2s window remaining (and <= min(256KiB,r*1s), one at a time,
+      // >=1s apart); its original+parity datagrams ride the grant (send_packet), the rest stay strict.
+      // A NACK replay of this AU goes strict (recorded in the window) -- conservative. Released right
+      // after this send regardless of outcome (abort/epoch), so no grant leaks.
+      if (item.clampBurstEligible && sender.wireCapEnabled) {
+        const uint64_t estAuWireBytes = item.bytes.size() + item.bytes.size() / 4 + 2048;  // +FEC/hdr est
+        if (sender.burstLedger.GrantForIdr(qpc_now_us(), estAuWireBytes) > 0) {
+          wireEgress.auHasGrant = true;  // the ledger holds the grant + peak-pacer cursor for this AU
+        }
+      }
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                 item.mediaEpoch, egress, &wireEgress);
+      if (wireEgress.auHasGrant) sender.burstLedger.EndGrant();  // release the single grant
       // Clear the on-wire flag only if it is still THIS key (a rollover may have handed it elsewhere).
       if (item.keyFrame) sender.ClearKeyOnWireIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
       // F4 (r3): count what ACTUALLY left, regardless of the outcome (a partial/aborted AU still put

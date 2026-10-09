@@ -84,7 +84,19 @@ class BurstLedger {
     grantRemaining_ = grant;
     lastGrantUs_ = nowUs;
     everGranted_ = true;
+    burstPacerUs_ = 0;  // reset the peak pacer for this grant
     return grant;
+  }
+
+  // Peak-pace one burst datagram: return the wall time it may be sent at (<= peak_bytes_per_s),
+  // advancing the per-grant cursor. Called on the sender thread while a grant is active, so the
+  // mutable cursor lives here (the WireEgress the send path sees is const). nowUs seeds the cursor.
+  uint64_t BurstSendDeadlineUs(uint64_t nowUs, uint64_t bytes) {
+    if (burstPacerUs_ < nowUs) burstPacerUs_ = nowUs;
+    const uint64_t deadline = burstPacerUs_;
+    const uint64_t peak = peak_bytes_per_s();
+    if (peak > 0) burstPacerUs_ += (bytes * 1'000'000ULL) / peak;
+    return deadline;
   }
 
   // While an AU's datagrams go out under a grant, debit the grant. Returns how many of `bytes` the
@@ -102,6 +114,7 @@ class BurstLedger {
     grantRemaining_ = 0;
   }
   bool grant_active() const { return grantActive_; }
+  uint64_t grant_remaining() const { return grantActive_ ? grantRemaining_ : 0; }
 
  private:
   void Prune(uint64_t nowUs) {
@@ -119,6 +132,7 @@ class BurstLedger {
   uint64_t grantRemaining_ = 0;
   uint64_t lastGrantUs_ = 0;
   bool everGranted_ = false;
+  uint64_t burstPacerUs_ = 0;  // peak-pacer cursor for the active grant
 };
 
 }  // namespace remote60::native_poc

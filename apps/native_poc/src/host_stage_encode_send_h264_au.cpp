@@ -358,6 +358,11 @@ if (transport == VideoTransport::Tcp) {
   } else {
     EncodedSendItem item;
     item.keyFrame = (hdr.flags & 1u) != 0;
+    // r4 B1: eligible for a burst grant only if the clamp is latched AND this is a real self-IDR (raw
+    // NAL5, not host-forced). The clamp feed for THIS AU runs later in this function, so clamped is the
+    // latched state as of the prior AU -- fine, since a clamp stays latched once established.
+    item.clampBurstEligible =
+        encoder.clampDetector.clamped && au.rawIdr && !au.inputWasForcedKey;
     item.frameIntervalUs = encoder.activeFrameIntervalUs;
     item.udpHdr.magic = remote60::native_poc::kMagic;
     item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);

@@ -184,9 +184,21 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // header the OS adds) before it goes out. A video chunk is never dropped for want of tokens --
     // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
     const bool isFirstDatagram = packetOrdinal == 1;  // (just incremented; the frame's first send)
-    if (wire && wire->limiter) {
-      if (wire->limiter->Acquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes, liveEpoch,
-                                 itemEpoch) == WireLimiter::Acq::Cancelled) {
+    const uint64_t wireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+    // r4 B1 (grant/burst): if this AU holds a burst grant and the grant fully covers this datagram,
+    // it skips the strict token wait and is paced to the peak cap instead; otherwise (and once the
+    // grant is spent) it waits on the limiter as usual. Every datagram is still Record(len+28)'d into
+    // the 2s window below, so the grant -- bounded at grant time by the window remaining -- keeps the
+    // rolling average within 2r.
+    bool burstCovered = false;
+    if (wire && wire->auHasGrant && wire->burstLedger && wire->burstLedger->grant_remaining() >= wireBytes) {
+      wire->burstLedger->DebitGrant(wireBytes);
+      burstCovered = true;
+      // peak pace: do not dump the grant unpaced on the socket (the cursor lives in the ledger).
+      udp_pace_wait_until(wire->burstLedger->BurstSendDeadlineUs(qpc_now_us(), wireBytes));
+    }
+    if (!burstCovered && wire && wire->limiter) {
+      if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {
         wireAborted = true;
         return false;
       }

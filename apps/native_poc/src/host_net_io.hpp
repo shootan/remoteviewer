@@ -49,6 +49,11 @@ struct WireEgress {
   // average A(t-2s,t] reflects the true wire bytes. Only touched on the sender thread while the cap is
   // enabled (the reader thread sends only when the cap is off), so it needs no lock. null = not tracked.
   BurstLedger* burstLedger = nullptr;
+  // r4 B1 (grant/burst): this AU holds a burst grant (a clamp-detected real self-IDR). A datagram the
+  // grant fully covers skips the strict token wait and is peak-paced via the ledger
+  // (BurstSendDeadlineUs, max(R,min(4R,12Mbps))); once the grant is spent, the rest waits on the
+  // limiter as usual. The pacer cursor lives in the (non-const) BurstLedger, as `wire` here is const.
+  bool auHasGrant = false;
   // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
   // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
   std::function<int(const uint8_t* datagram, int len, bool parity)> sink;

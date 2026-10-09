@@ -56,6 +56,10 @@ struct EncodedSendItem {
   // before a flush must not start on the wire after it (host_epoch_gate.hpp states the scope --
   // one AU already being chunked when the flush happens completes). 0 = untagged (raw path).
   uint64_t inputEpoch = 0;
+  // stutter-keyframe r4 B1: this AU is a clamp-detected real self-IDR eligible for a burst grant (set
+  // at enqueue from clampDetector.clamped && au.rawIdr && !au.inputWasForcedKey). The sender asks the
+  // burst ledger for a grant for this AU only; normal/non-clamp AUs stay strict.
+  bool clampBurstEligible = false;
 };
 
 // Encoded-frame sender (Phase 1-2 state struct). The encode/main thread enqueues AUs; the sender
