@@ -531,7 +531,12 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
                     << " chunks=" << pathStats.payloadChunkCount << " wireIntUs=" << wireIntUs
                     << " targetIntUs=" << frameIntervalUs << " queueWaitUs=" << queueWaitUs
                     << " sendDurUs=" << durUs << " queueDepth=" << queueDepthAtDequeue
-                    << " epoch=" << item.mediaEpoch << "\n";
+                    << " epoch=" << item.mediaEpoch
+                    // r4 B1 telemetry: the clamp-burst eligibility of this AU, the peak 2s-window bytes
+                    // observed, and the contract ceiling 2r -- the clamp-fake measurement reads these.
+                    << " clampBurst=" << (item.clampBurstEligible ? 1 : 0)
+                    << " burstWin2s=" << sender.burstLedger.max_window_bytes()
+                    << " cap2r=" << (2u * sender.burstLedger.rate_bytes()) << "\n";
         }
       } else if (outcome == UdpSendOutcome::EpochChanged) {
         // A rollover bumped the media epoch mid-frame; the remaining chunks were aborted so old-

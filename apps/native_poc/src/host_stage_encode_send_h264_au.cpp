@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -361,8 +362,15 @@ if (transport == VideoTransport::Tcp) {
     // r4 B1: eligible for a burst grant only if the clamp is latched AND this is a real self-IDR (raw
     // NAL5, not host-forced). The clamp feed for THIS AU runs later in this function, so clamped is the
     // latched state as of the prior AU -- fine, since a clamp stays latched once established.
+    // REMOTE60_NATIVE_FORCE_CLAMP_BURST is a TEST-ONLY seam (default off): this PC's MFT does not clamp,
+    // so the clamp-fake measurement forces eligibility to exercise the burst path. It still requires a
+    // real self-IDR -- it only substitutes for the detector latch, never the raw-NAL5/non-forced gate.
+    static const bool kForceClampBurst = [] {
+      const char* v = std::getenv("REMOTE60_NATIVE_FORCE_CLAMP_BURST");
+      return v && (v[0] == '1' || v[0] == 't' || v[0] == 'T');
+    }();
     item.clampBurstEligible =
-        encoder.clampDetector.clamped && au.rawIdr && !au.inputWasForcedKey;
+        (encoder.clampDetector.clamped || kForceClampBurst) && au.rawIdr && !au.inputWasForcedKey;
     item.frameIntervalUs = encoder.activeFrameIntervalUs;
     item.udpHdr.magic = remote60::native_poc::kMagic;
     item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);

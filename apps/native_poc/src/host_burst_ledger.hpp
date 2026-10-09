@@ -56,7 +56,9 @@ class BurstLedger {
     sent_.push_back({nowUs, bytes});
     windowBytes_ += bytes;
     Prune(nowUs);
+    if (windowBytes_ > maxWindowBytes_) maxWindowBytes_ = windowBytes_;  // telemetry: the 2s-window peak
   }
+  uint64_t max_window_bytes() const { return maxWindowBytes_; }  // peak A(t-2s,t] observed (<= 2r target)
 
   uint64_t window_bytes(uint64_t nowUs) {
     Prune(nowUs);
@@ -133,6 +135,7 @@ class BurstLedger {
   uint64_t lastGrantUs_ = 0;
   bool everGranted_ = false;
   uint64_t burstPacerUs_ = 0;  // peak-pacer cursor for the active grant
+  uint64_t maxWindowBytes_ = 0;  // telemetry
 };
 
 }  // namespace remote60::native_poc
