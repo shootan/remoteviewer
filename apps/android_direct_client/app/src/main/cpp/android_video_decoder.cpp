@@ -163,6 +163,9 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   if (!EnsureCodecLocked(configuredWidth_, configuredHeight_)) {
     log_info("video surface set; codec waiting for keyframe/csd");
   }
+  // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
+  // afresh now that it can be decoded.
+  gate_.Rearm();
 }
 
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
@@ -170,7 +173,8 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 
   PumpCodecLocked();
 
-  if (!gate_.Admit(frame.header.streamGeneration, (frame.header.flags & 1u) != 0)) {
+  const bool isKeyFrame = (frame.header.flags & 1u) != 0;
+  if (!gate_.Admit(frame.header.streamGeneration, isKeyFrame)) {
     ++staleFrameDropCount_;
     if ((staleFrameDropCount_ % 30u) == 1u) {
       char line[192];
@@ -196,10 +200,10 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   if (codecConfigUpdated && codec_) {
     ResetCodecLocked();
   }
-  if (!EnsureCodecLocked(frame.header.width, frame.header.height)) {
-    return;
-  }
-  if (!codec_) {
+  if (!EnsureCodecLocked(frame.header.width, frame.header.height) || !codec_) {
+    // r5 N1: dropped for want of a decoder (no surface, csd, codec create/configure/start): an
+    // IDR of the answered generation that ends here was not delivered, so it is still owed.
+    if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     return;
   }
 
@@ -318,7 +322,7 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
 
 uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
   std::lock_guard<std::mutex> lock(mu_);
-  return gate_.KeyOwed() ? gate_.pending() : 0;
+  return gate_.OwedToken();
 }
 
 uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
@@ -597,6 +601,8 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
 
   ++inputFrameCount_;
   lastInputQueueSteadyUs_ = steady_now_us();
+  // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
+  if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
@@ -646,6 +652,10 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   // packet loss made each loss cost a visible timeline jump on top of the missing frames.
   // When the timeline really has moved, the clock notices by itself: a new stream generation,
   // a capture timestamp going backwards, or a gap too large to pace across all reanchor it.
+  // r5 N1: a held IDR thrown away with the codec was never delivered.
+  if (pendingFrame_.has_value() && (pendingFrame_->header.flags & 1u) != 0) {
+    gate_.KeyLost(pendingFrame_->header.streamGeneration);
+  }
   pendingFrame_.reset();
   pendingFrameCount_ = 0;
   pendingFrameQueueRetryCount_ = 0;

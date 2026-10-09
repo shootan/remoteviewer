@@ -193,7 +193,20 @@ int main() {
     check("answered after its IDR was dropped: owed", ack.result == SelectionAckGate::AckResult::Applied && g.KeyOwed());
     check("a delta of that generation passes but does not pay it", g.Admit(60, false) && g.KeyOwed());
     check("an IDR of another generation is not admitted and does not pay it", !g.Admit(59, true) && g.KeyOwed());
-    check("an IDR of that generation pays it", g.Admit(60, true) && !g.KeyOwed());
+    // r5 N1: passing the gate is not delivery -- the decoder may still drop it.
+    check("an IDR of that generation PASSING the gate does not pay it", g.Admit(60, true) && g.KeyOwed());
+    const uint64_t t1 = g.OwedToken();
+    g.KeyLost(60);
+    check("dropped by the decoder (no surface): still owed, same duty", g.KeyOwed() && g.OwedToken() == t1);
+    g.Rearm();
+    check("a surface arrives: still owed, the duty re-armed (new token)", g.KeyOwed() && g.OwedToken() != t1);
+    g.KeyDelivered(59);
+    check("another generation delivered does not pay it", g.KeyOwed());
+    g.KeyDelivered(60);
+    check("an IDR of that generation DELIVERED to the decoder pays it", !g.KeyOwed() && g.OwedToken() == 0);
+    g.KeyLost(60);
+    check("one of that generation lost afterwards owes one again (new duty)", g.KeyOwed() && g.OwedToken() != 0);
+    g.KeyDelivered(60);
     g.Prepare(22);
     (void)g.Admit(61, true);
     (void)g.OnAck(true, 61, 22);

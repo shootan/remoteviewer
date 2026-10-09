@@ -773,6 +773,20 @@ add_executable(remote60_monitor_select_wire_test src/monitor_select_wire_test.cp
 target_include_directories(remote60_monitor_select_wire_test PRIVATE src)
 target_link_libraries(remote60_monitor_select_wire_test PRIVATE common ws2_32)
 
+# t-970r4zgo r5 N1: the APK's decoder sink -- android_video_decoder.cpp itself, unchanged -- built
+# against a stand-in NDK (src/test_fake_ndk, test only) to check when an owed IDR counts as paid.
+add_executable(remote60_android_decoder_owed_key_test
+  src/android_decoder_owed_key_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
+  src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
+
 # t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
 # reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
 # the primary, the retry does not run forever, a transient empty enumeration keeps the retry.

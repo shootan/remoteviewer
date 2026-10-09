@@ -1027,6 +1027,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
           windowSelectionTxn.responseTitle.clear();
         }
         windowSelectionTxn.cv.notify_all();
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " pending\n";
 
         std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
         // Also give up when the link dies. The client that asked for this selection may be the

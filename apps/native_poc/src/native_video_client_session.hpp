@@ -53,8 +53,9 @@ class ClientEncodedFrameSink {
   // t-970r4zgo: the local selection a select request belongs to -- read when the request is
   // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
   virtual uint64_t CurrentSelectionTag() { return 0; }
-  // r4 M1-A: the selection (its tag) that is still owed an IDR of its answered generation, or 0.
-  // While non-zero the session asks for one, bounded, until the sink admits such an IDR.
+  // r4 M1-A / r5 N1: non-zero while a selection is still owed an IDR of its answered generation --
+  // until such an IDR is handed to the decoder. An opaque token: it changes when the duty is
+  // re-armed (the decoder became able again), and the session's bounded retries start over.
   virtual uint64_t KeyframeOwedFor() { return 0; }
   // The answer to a select request, with the tag that request was queued under. A sink that
   // tracks selections applies it only to that selection; the default ignores the tag.

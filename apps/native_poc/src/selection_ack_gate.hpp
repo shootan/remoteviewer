@@ -17,8 +17,12 @@ namespace remote60::native_poc {
 //   * control and video travel separately, so the new generation's first IDR can arrive BEFORE
 //     the answer and be dropped. If any frame of the answered generation was dropped while
 //     waiting, the selection is OWED a key frame (KeyOwed) until an IDR of that generation is
-//     actually admitted -- not merely until one was asked for: a request can be refused on the
-//     way (either side's limiter). The session asks again, bounded, while it is owed (r4 M1-A).
+//     actually HANDED TO THE DECODER (KeyDelivered) -- not when one was asked for (a request can
+//     be refused on the way, either side's limiter, r4 M1-A) and not when one merely passed this
+//     gate (the decoder can still drop it: no surface yet, codec not up, r5 N1). An IDR of that
+//     generation dropped for want of a decoder (KeyLost) owes one again. The session asks,
+//     bounded, while it is owed; OwedToken changes when the duty is re-armed (a new surface),
+//     so the session's bounded retries start over for a decoder that has just become able.
 // It never opens on a frame before the answer.
 class SelectionAckGate {
  public:
@@ -35,6 +39,27 @@ class SelectionAckGate {
     droppedCount_ = 0;
     keyOwed_ = false;
   }
+
+  // An IDR of the answered generation reached the decoder (queued): the duty is paid.
+  void KeyDelivered(uint64_t frameStreamGeneration) {
+    if (expected_ != 0 && frameStreamGeneration == expected_) keyOwed_ = false;
+  }
+
+  // An IDR of the answered generation passed the gate but the decoder could not take it (no
+  // surface, codec not configured, ...): the selection is owed one (again).
+  void KeyLost(uint64_t frameStreamGeneration) {
+    if (pending_ == 0 || expected_ == 0 || frameStreamGeneration != expected_ || keyOwed_) return;
+    keyOwed_ = true;
+    ++owedToken_;
+  }
+
+  // The decoder became able to take an IDR (a surface arrived): if one is owed, ask afresh.
+  void Rearm() {
+    if (keyOwed_) ++owedToken_;
+  }
+
+  // Non-zero while an IDR is owed; changes each time the duty is (re)armed.
+  uint64_t OwedToken() const { return keyOwed_ ? owedToken_ : 0; }
 
   void Reset() {
     pending_ = 0;
@@ -53,20 +78,22 @@ class SelectionAckGate {
     }
     expected_ = streamGeneration;
     keyOwed_ = DroppedWhileAwaiting(streamGeneration);
+    if (keyOwed_) ++owedToken_;
     return {AckResult::Applied, keyOwed_};
   }
 
   // True = the frame may be decoded. Frames before the answer are dropped (and their generation
   // remembered); after it, only the answered generation passes.
-  // isKey: the frame is an IDR -- one of the answered generation pays what the selection is owed.
+  // Whether the frame may go to the decoder. Passing here pays nothing (KeyDelivered does);
+  // isKey is kept for the callers' symmetry.
   bool Admit(uint64_t frameStreamGeneration, bool isKey = false) {
+    (void)isKey;
     if (pending_ != 0 && awaiting_) {
       RememberDropped(frameStreamGeneration);
       return false;
     }
     if (pending_ != 0 && expected_ == 0) return false;
     if (expected_ != 0 && frameStreamGeneration != expected_) return false;
-    if (isKey && expected_ != 0 && frameStreamGeneration == expected_) keyOwed_ = false;
     return true;
   }
 
@@ -104,6 +131,7 @@ class SelectionAckGate {
   uint64_t dropped_[kDroppedMemory] = {};
   size_t droppedCount_ = 0;
   bool keyOwed_ = false;
+  uint64_t owedToken_ = 0;
 };
 
 }  // namespace remote60::native_poc
