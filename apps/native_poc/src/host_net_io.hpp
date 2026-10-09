@@ -32,11 +32,11 @@
 
 #include "native_socket.hpp"  // WinsockScope (the host used a byte-identical private copy; now the shared one)
 #include "poc_protocol.hpp"
+#include "host_burst_ledger.hpp"  // BurstLedger + BurstAuId (r4 B1)
 
 namespace remote60::native_poc {
 
 class WireLimiter;  // host_wire_limiter.hpp
-class BurstLedger;  // host_burst_ledger.hpp (r4 B1)
 
 // The hard wire-rate cap wired into the send path (bitrate-hard-cap r1). Both are optional and
 // null in the ordinary call: `limiter` null leaves the legacy behaviour (pacing only, no cap);
@@ -49,11 +49,12 @@ struct WireEgress {
   // average A(t-2s,t] reflects the true wire bytes. Only touched on the sender thread while the cap is
   // enabled (the reader thread sends only when the cap is off), so it needs no lock. null = not tracked.
   BurstLedger* burstLedger = nullptr;
-  // r4 B1 (grant/burst): this AU holds a burst grant (a clamp-detected real self-IDR). A datagram the
-  // grant fully covers skips the strict token wait and is peak-paced via the ledger
-  // (BurstSendDeadlineUs, max(R,min(4R,12Mbps))); once the grant is spent, the rest waits on the
-  // limiter as usual. The pacer cursor lives in the (non-const) BurstLedger, as `wire` here is const.
+  // r4 B1 (grant/burst): this AU holds a burst grant (a clamp-detected real self-IDR), owned by
+  // burstOwner (media epoch, generation, input epoch, seq). A datagram the grant covers skips the
+  // strict token wait and is peak-paced; the window admission still applies. GrantCoverage/DebitGrant
+  // check burstOwner so only this AU's own datagrams spend its grant.
   bool auHasGrant = false;
+  BurstAuId burstOwner;
   // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
   // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
   std::function<int(const uint8_t* datagram, int len, bool parity)> sink;

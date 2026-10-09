@@ -51,7 +51,7 @@ void SenderState::StartWireCap(uint64_t capBps, uint32_t mtu, bool enabled) {
   }
   const uint32_t lmax = clamp_udp_mtu(mtu) + 28u;
   wireLimiter->SetRate(enabled ? capBps : 0ULL, lmax);
-  burstLedger.SetRate(enabled ? capBps : 0ULL);  // r4 B1: same rate; 0 (cap off) makes the ledger inert
+  burstLedger.SetRate(enabled ? capBps : 0ULL, qpc_now_us());  // r4 B1: same rate + now for warm-up/mixed-rate
   wireCapBps.store(enabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
@@ -59,7 +59,7 @@ void SenderState::UpdateWireCap(uint64_t capBps) {
   if (!wireLimiter) return;
   const uint32_t lmax = clamp_udp_mtu(wireCapMtu) + 28u;
   wireLimiter->SetRate(wireCapEnabled ? capBps : 0ULL, lmax);
-  burstLedger.SetRate(wireCapEnabled ? capBps : 0ULL);  // r4 B1
+  burstLedger.SetRate(wireCapEnabled ? capBps : 0ULL, qpc_now_us());  // r4 B1
   wireCapBps.store(wireCapEnabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
@@ -472,17 +472,19 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // >=1s apart); its original+parity datagrams ride the grant (send_packet), the rest stay strict.
       // A NACK replay of this AU goes strict (recorded in the window) -- conservative. Released right
       // after this send regardless of outcome (abort/epoch), so no grant leaks.
+      const BurstAuId burstOwner{item.mediaEpoch, item.udpHdr.streamGeneration, item.inputEpoch,
+                                 item.udpHdr.seq, /*valid=*/true};
       if (item.clampBurstEligible && sender.wireCapEnabled) {
-        const uint64_t estAuWireBytes = item.bytes.size() + item.bytes.size() / 4 + 2048;  // +FEC/hdr est
-        if (sender.burstLedger.GrantForIdr(qpc_now_us(), estAuWireBytes) > 0) {
-          wireEgress.auHasGrant = true;  // the ledger holds the grant + peak-pacer cursor for this AU
+        if (sender.burstLedger.GrantForIdr(qpc_now_us(), burstOwner) > 0) {
+          wireEgress.auHasGrant = true;  // this AU's covered datagrams peak-pace within the window
+          wireEgress.burstOwner = burstOwner;
         }
       }
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                 item.mediaEpoch, egress, &wireEgress);
-      if (wireEgress.auHasGrant) sender.burstLedger.EndGrant();  // release the single grant
+      if (wireEgress.auHasGrant) sender.burstLedger.EndGrant(burstOwner);  // only the owner ends it
       // Clear the on-wire flag only if it is still THIS key (a rollover may have handed it elsewhere).
       if (item.keyFrame) sender.ClearKeyOnWireIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
       // F4 (r3): count what ACTUALLY left, regardless of the outcome (a partial/aborted AU still put

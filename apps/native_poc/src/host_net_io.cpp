@@ -185,30 +185,49 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
     const bool isFirstDatagram = packetOrdinal == 1;  // (just incremented; the frame's first send)
     const uint64_t wireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
-    // r4 B1 (grant/burst): if this AU holds a burst grant and the grant fully covers this datagram,
-    // it skips the strict token wait and is paced to the peak cap instead; otherwise (and once the
-    // grant is spent) it waits on the limiter as usual. Every datagram is still Record(len+28)'d into
-    // the 2s window below, so the grant -- bounded at grant time by the window remaining -- keeps the
-    // rolling average within 2r.
+    // r4 B1 (corrected per Codex): in B1 mode (cap on) EVERY datagram passes the 2s rolling-window
+    // admission -- Reserve its wire cost, waiting (cancellably) for room if the window is full --
+    // before it is paced and sent. A grant lets the owning IDR's covered datagrams peak-pace instead
+    // of the strict token rate, but it does NOT bypass the window. The reservation is CommitSent on a
+    // real send and CancelUnsent on any abort, so the window reflects exactly what left the wire.
+    const bool b1Active = wire && wire->burstLedger && wire->limiter && wire->limiter->enabled();
+    bool reserved = false;
+    const auto fenceHit = [&]() -> bool {
+      return wire->limiter->stopped() ||
+             (liveEpoch && liveEpoch->load(std::memory_order_acquire) != itemEpoch) ||
+             (wire->inputEpoch &&
+              wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch);
+    };
+    if (b1Active) {
+      for (;;) {
+        const uint64_t now = qpc_now_us();
+        if (wire->burstLedger->Reserve(now, wireBytes)) { reserved = true; break; }
+        if (fenceHit()) { wireAborted = true; return false; }  // give up an unsent datagram on fence
+        const uint64_t roomAt = wire->burstLedger->RoomAtUs(now, wireBytes);
+        udp_pace_wait_until(std::min<uint64_t>(roomAt, now + 2000ULL));  // 2ms slices to re-check fence
+      }
+    }
+    const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
+    // Pace: a grant-covered datagram of the grant owner peak-paces; everything else waits on the
+    // limiter's strict rate. Both are still bounded by the window reservation above.
     bool burstCovered = false;
-    if (wire && wire->auHasGrant && wire->burstLedger && wire->burstLedger->grant_remaining() >= wireBytes) {
-      wire->burstLedger->DebitGrant(wireBytes);
+    if (b1Active && wire->auHasGrant &&
+        wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes) {
+      wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
       burstCovered = true;
-      // peak pace: do not dump the grant unpaced on the socket (the cursor lives in the ledger).
       udp_pace_wait_until(wire->burstLedger->BurstSendDeadlineUs(qpc_now_us(), wireBytes));
     }
     if (!burstCovered && wire && wire->limiter) {
       if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {
+        releaseIfReserved();
         wireAborted = true;
         return false;
       }
     }
     // F3 (r3): the real permission point for the FIRST datagram is AFTER all its pacing/token waits.
-    // If the input epoch moved while this not-yet-started AU waited for tokens, it is of a flushed
-    // input and must not begin on the wire. A later datagram is mid-AU (already started) and keeps
-    // going -- the existing one-AU-per-flush exception. media-epoch is already covered by Acquire.
     if (isFirstDatagram && wire && wire->inputEpoch &&
         wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch) {
+      releaseIfReserved();
       wireAborted = true;
       return false;
     }
@@ -216,7 +235,9 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     const int n = haveSink ? wire->sink(datagram.data(), datagramLen, parity)
                            : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
                                     reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
-    if (n <= 0) return false;
+    if (n <= 0) { releaseIfReserved(); return false; }
+    // r4 B1: commit the reservation into the 2s window at the REAL send time (1:1 with this datagram).
+    if (reserved) wire->burstLedger->CommitSent(qpc_now_us(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {
@@ -226,10 +247,6 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
       } else {
         if (wire->outWireDataBytes) *wire->outWireDataBytes += static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
       }
-      // r4 B1: 1:1 common-ledger record of this data/parity datagram, only while the cap is ON (then
-      // all sends are on the sender thread, so the lock-free ledger is single-writer).
-      if (wire->burstLedger && wire->limiter && wire->limiter->enabled())
-        wire->burstLedger->Record(qpc_now_us(), static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
     }
     if (stats) {
       ++stats->datagrams;
@@ -413,6 +430,19 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
         break;
       }
     }
+    // r4 B1: a replay is a B1 datagram -- it must also pass the 2s window admission. If the window is
+    // full, suppress this replay (the client's IDR fallback covers it) and give the limiter token back,
+    // so a replay cannot push the rolling average past 2r (Codex B1-1's 20000-replay counter-example).
+    const uint64_t nackWireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+    bool nackReserved = false;
+    if (wire && wire->burstLedger && wire->limiter && wire->limiter->enabled()) {
+      if (!wire->burstLedger->Reserve(qpc_now_us(), nackWireBytes)) {
+        wire->limiter->Refund(nackWireBytes);
+        if (outSuppressed) ++*outSuppressed;
+        continue;
+      }
+      nackReserved = true;
+    }
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
     const int sent = haveSink ? wire->sink(datagram.data(), datagramLen, false)
@@ -421,10 +451,9 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (sent > 0) {
       if (outWireBytes) *outWireBytes += static_cast<uint64_t>(sent);
       if (outDatagrams) ++*outDatagrams;
-      // r4 B1: 1:1 common-ledger record of this NACK retransmit datagram (len + 28, matching data/
-      // parity -- the raw `sent` above omits the IP/UDP header). Cap-ON sender thread only.
-      if (wire->burstLedger && wire->limiter && wire->limiter->enabled())
-        wire->burstLedger->Record(qpc_now_us(), static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
+      if (nackReserved) wire->burstLedger->CommitSent(qpc_now_us(), nackWireBytes);  // real send -> window
+    } else if (nackReserved) {
+      wire->burstLedger->CancelUnsent(nackWireBytes);
     }
   }
   return UdpSendOutcome::Sent;
