@@ -2927,6 +2927,15 @@ if(MSVC)
   target_compile_options(remote60_host_gop_clamp_detector_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r4 (B1): the conditional IDR burst + 2s rolling-window ledger. Pure, no MFT.
+add_executable(remote60_host_burst_ledger_test
+  src/host_burst_ledger_test.cpp
+)
+target_include_directories(remote60_host_burst_ledger_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_burst_ledger_test PRIVATE /utf-8)
+endif()
+
 # stutter-keyframe r3 (B): HW vs SW 1080p30 encode measurement (the SW-transition decision input).
 add_executable(remote60_host_encoder_backend_bench
   src/mf_h264_codec.cpp
