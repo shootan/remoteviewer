@@ -36,6 +36,7 @@
 namespace remote60::native_poc {
 
 class WireLimiter;  // host_wire_limiter.hpp
+class BurstLedger;  // host_burst_ledger.hpp (r4 B1)
 
 // The hard wire-rate cap wired into the send path (bitrate-hard-cap r1). Both are optional and
 // null in the ordinary call: `limiter` null leaves the legacy behaviour (pacing only, no cap);
@@ -43,6 +44,11 @@ class WireLimiter;  // host_wire_limiter.hpp
 // sink that records (time, length, kind) so the same send code is measured deterministically.
 struct WireEgress {
   WireLimiter* limiter = nullptr;  // charged datagramLen + 28 (IP+UDP) before each datagram
+  // stutter-keyframe r4 B1: the common 2s-window burst ledger. When the cap is ON, EVERY datagram that
+  // actually leaves is Record(len+28)'d here 1:1 (data, parity, NACK retransmit) so the rolling-window
+  // average A(t-2s,t] reflects the true wire bytes. Only touched on the sender thread while the cap is
+  // enabled (the reader thread sends only when the cap is off), so it needs no lock. null = not tracked.
+  BurstLedger* burstLedger = nullptr;
   // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
   // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
   std::function<int(const uint8_t* datagram, int len, bool parity)> sink;

@@ -21,6 +21,7 @@
 
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
+#include "host_burst_ledger.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 
@@ -135,6 +136,10 @@ struct SenderState {
   // null until then (cap inactive -> legacy pacing-only behaviour). Rate follows the active bitrate
   // through UpdateWireCap (ApplyTarget); a rate change never refills the bucket (plan point 4).
   std::unique_ptr<WireLimiter> wireLimiter;
+  // stutter-keyframe r4 B1: the common 2s rolling-window burst ledger, beside the limiter. Rate set
+  // from the same capBps at StartWireCap/UpdateWireCap. Records every wire datagram (data/parity/NACK)
+  // via WireEgress while the cap is on, and grants a bounded burst to a clamp-detected real self-IDR.
+  BurstLedger burstLedger;
   bool wireCapEnabled = false;  // REMOTE60_NATIVE_WIRE_CAP (default on); fixed after startup
   // Cap-OFF fallback NACK budget (bitrate-hard-cap r2): when the hard cap is off (kill-switch, or no
   // limiter) the shared bucket does not bound the replay, so the old flood defence stays -- a token
@@ -204,6 +209,7 @@ struct SenderState {
   WireEgress MakeWireEgress() {
     WireEgress w;
     w.limiter = wireLimiter.get();
+    w.burstLedger = &burstLedger;  // r4 B1: 1:1 wire-byte recording into the common 2s window
     return w;
   }
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)

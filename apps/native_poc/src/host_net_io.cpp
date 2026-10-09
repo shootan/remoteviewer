@@ -24,6 +24,7 @@
 
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
+#include "host_burst_ledger.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -213,6 +214,10 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
       } else {
         if (wire->outWireDataBytes) *wire->outWireDataBytes += static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
       }
+      // r4 B1: 1:1 common-ledger record of this data/parity datagram, only while the cap is ON (then
+      // all sends are on the sender thread, so the lock-free ledger is single-writer).
+      if (wire->burstLedger && wire->limiter && wire->limiter->enabled())
+        wire->burstLedger->Record(qpc_now_us(), static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
     }
     if (stats) {
       ++stats->datagrams;
@@ -404,6 +409,10 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (sent > 0) {
       if (outWireBytes) *outWireBytes += static_cast<uint64_t>(sent);
       if (outDatagrams) ++*outDatagrams;
+      // r4 B1: 1:1 common-ledger record of this NACK retransmit datagram (len + 28, matching data/
+      // parity -- the raw `sent` above omits the IP/UDP header). Cap-ON sender thread only.
+      if (wire->burstLedger && wire->limiter && wire->limiter->enabled())
+        wire->burstLedger->Record(qpc_now_us(), static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes);
     }
   }
   return UdpSendOutcome::Sent;

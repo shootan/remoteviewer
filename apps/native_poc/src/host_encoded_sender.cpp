@@ -51,6 +51,7 @@ void SenderState::StartWireCap(uint64_t capBps, uint32_t mtu, bool enabled) {
   }
   const uint32_t lmax = clamp_udp_mtu(mtu) + 28u;
   wireLimiter->SetRate(enabled ? capBps : 0ULL, lmax);
+  burstLedger.SetRate(enabled ? capBps : 0ULL);  // r4 B1: same rate; 0 (cap off) makes the ledger inert
   wireCapBps.store(enabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
@@ -58,6 +59,7 @@ void SenderState::UpdateWireCap(uint64_t capBps) {
   if (!wireLimiter) return;
   const uint32_t lmax = clamp_udp_mtu(wireCapMtu) + 28u;
   wireLimiter->SetRate(wireCapEnabled ? capBps : 0ULL, lmax);
+  burstLedger.SetRate(wireCapEnabled ? capBps : 0ULL);  // r4 B1
   wireCapBps.store(wireCapEnabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
