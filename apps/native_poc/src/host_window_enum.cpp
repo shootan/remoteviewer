@@ -150,10 +150,46 @@ std::vector<MonitorListEntry> enumerate_monitors() {
     char narrow[64]{};
     WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
     e.name = narrow;
+    e.device = info.szDevice;
     if (e.width > 0 && e.height > 0) list->push_back(std::move(e));
     return TRUE;
   };
   EnumDisplayMonitors(nullptr, nullptr, cb, reinterpret_cast<LPARAM>(&out));
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (GNLinkStreamMigrationTest; never GNLinkStream): the monitor-fallback e2e
+  // plugs and unplugs a screen without touching the PC's displays. The file named by the variable
+  // says what is attached: "extra" = the real screens plus a second one (the primary's own handle,
+  // so it can be captured, under its own device name), "none" = nothing enumerated (a display
+  // reconfiguration in progress), anything else or no file = the real screens.
+  {
+    wchar_t path[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_MONITORS_FILE", path, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+      char mode[16] = {};
+      HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (f != INVALID_HANDLE_VALUE) {
+        DWORD got = 0;
+        ReadFile(f, mode, sizeof(mode) - 1, &got, nullptr);
+        CloseHandle(f);
+      }
+      const std::string m(mode);
+      if (m.rfind("none", 0) == 0) {
+        out.clear();
+      } else if (m.rfind("extra", 0) == 0 && !out.empty()) {
+        MonitorListEntry extra = out.front();
+        for (const auto& e : out) {
+          if (e.primary) extra = e;
+        }
+        extra.primary = false;
+        extra.x = extra.x + static_cast<int32_t>(extra.width);  // listed to the right of the primary
+        extra.name = "GNLINKTEST2";
+        extra.device = L"\\\\.\\GNLINKTEST2";
+        out.push_back(std::move(extra));
+      }
+    }
+  }
+#endif
   std::stable_sort(out.begin(), out.end(),
                    [](const MonitorListEntry& a, const MonitorListEntry& b) {
                      if (a.primary != b.primary) return a.primary;

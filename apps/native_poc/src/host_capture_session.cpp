@@ -47,6 +47,7 @@
 #include "host_frame_gate.hpp"
 #include "host_input_inject.hpp"
 #include "host_kick.hpp"
+#include "host_monitor_selection.hpp"
 #include "host_session.hpp"
 #include "host_stats.hpp"
 #include "host_string_util.hpp"
@@ -444,21 +445,26 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       if (!capture.selectedMonitorDevice.empty()) {
         capture.monitorInfo.reset();
         const auto monitors = enumerate_monitors();
-        for (size_t i = 0; i < monitors.size(); ++i) {
-          MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-          if (GetMonitorInfoW(monitors[i].handle, &info) &&
-              capture.selectedMonitorDevice == info.szDevice) {
-            const auto& m = monitors[i];
-            capture.monitorInfo = PrimaryMonitorInfo{m.handle, m.width, m.height, m.x, m.y};
-            capture.selectedMonitorId.store(static_cast<uint32_t>(i), std::memory_order_release);
-            // The GDI helper's IPC currently describes only the primary monitor. WGC captures
-            // the explicitly selected monitor without lying about its pixels or input origin.
-            if (backend.active == DesktopCaptureBackend::Gdi && !m.primary)
-              backend.active = DesktopCaptureBackend::Wgc;
-            break;
-          }
+        // t-970r4zgo: a picked screen the enumeration no longer lists is gone, and the host opens
+        // the primary rather than retrying the missing one forever; only an empty enumeration
+        // (absence not established) keeps the retry aimed at the same screen.
+        const SelectedMonitorChoice choice = choose_selected_monitor(monitors, capture.selectedMonitorDevice);
+        if (choice.outcome == SelectedMonitorOutcome::Unconfirmed) return false;
+        const auto& m = monitors[choice.index];
+        if (choice.outcome == SelectedMonitorOutcome::FellBack) {
+          std::cout << "[native-video-host] monitor-fallback selected device gone; opening id=" << choice.index
+                    << " (" << m.name << (m.primary ? ", primary" : "") << ") " << m.width << "x" << m.height
+                    << " at " << m.x << "," << m.y << " count=" << monitors.size() << "\n";
+          std::lock_guard<std::mutex> lk(capture.metaMu);
+          capture.selectedMonitorDevice = m.device;  // not reverted when the old screen returns
+          if (capture.targetProcess == "monitor") capture.targetTitle = m.name;
         }
-        if (!capture.monitorInfo) return false;  // unplugged: retry the same device, not primary
+        capture.monitorInfo = PrimaryMonitorInfo{m.handle, m.width, m.height, m.x, m.y};
+        capture.selectedMonitorId.store(static_cast<uint32_t>(choice.index), std::memory_order_release);
+        // The GDI helper's IPC currently describes only the primary monitor. WGC captures
+        // the explicitly selected monitor without lying about its pixels or input origin.
+        if (backend.active == DesktopCaptureBackend::Gdi && !m.primary)
+          backend.active = DesktopCaptureBackend::Wgc;
       }
       if (!capture.monitorInfo.has_value()) {
         std::cerr << "[native-video-host] primary monitor query failed on restart\n";

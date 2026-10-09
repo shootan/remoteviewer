@@ -764,6 +764,24 @@ target_link_libraries(remote60_udp_control_e2e_test PRIVATE
   ws2_32
 )
 
+# t-970r4zgo: which screen a desktop capture opens once the picked one may be gone. Pure logic.
+add_executable(remote60_host_monitor_selection_test src/host_monitor_selection_test.cpp)
+target_include_directories(remote60_host_monitor_selection_test PRIVATE src)
+
+# t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
+# reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
+# the primary, the retry does not run forever, a transient empty enumeration keeps the retry.
+add_executable(remote60_host_monitor_fallback_e2e_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/host_monitor_fallback_e2e_test.cpp
+)
+target_include_directories(remote60_host_monitor_fallback_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_monitor_fallback_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir)
+add_dependencies(remote60_host_monitor_fallback_e2e_test remote60_native_video_host_migration_seam)
+
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
 add_executable(remote60_capture_readback_test
   src/d3d_capture_readback.cpp

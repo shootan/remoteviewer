@@ -45,6 +45,7 @@
 #include "host_file_copy.hpp"
 #include "file_copy_wire.hpp"
 #include "host_window_enum.hpp"
+#include "host_monitor_selection.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
 #include "time_utils.hpp"
@@ -143,6 +144,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.seq = seq;
     rsp.selectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
     const auto monitors = enumerate_monitors();
+    // t-970r4zgo: the selection named against THIS list, by the rule the capture restart opens
+    // the screen with -- a picked screen that is gone is reported as the one shown instead
+    // (the primary), not as a stale index that may now be out of range or another screen.
+    std::wstring selectedDevice;
+    {
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      selectedDevice = capture.selectedMonitorDevice;
+    }
+    const SelectedMonitorChoice choice = choose_selected_monitor(monitors, selectedDevice);
+    if (choice.outcome == SelectedMonitorOutcome::Found || choice.outcome == SelectedMonitorOutcome::FellBack) {
+      rsp.selectedMonitorId = static_cast<uint32_t>(choice.index);
+    }
     rsp.itemCount = std::min<uint32_t>(static_cast<uint32_t>(monitors.size()),
                                        remote60::native_poc::kControlMonitorListMaxEntries);
     for (uint32_t i = 0; i < rsp.itemCount; ++i) {
