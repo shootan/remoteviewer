@@ -257,6 +257,11 @@ inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
     case WSAEWOULDBLOCK:
     case WSAETIMEDOUT:
     case WSAEINTR:
+    // t-970r4zgo r10: a blocking recv with SO_RCVTIMEO on an (overlapped-capable) Winsock socket was
+    // seen to return SOCKET_ERROR with WSA_IO_PENDING (997) -- the receive was still in flight, the
+    // socket is not dead. Classed Terminal, it ended a live session: the receive thread stopped, so did
+    // the control ACKs, and the host gave the peer up (verifier_intermittent3, err=997).
+    case WSA_IO_PENDING:
       return UdpRecvClass::Retryable;
     case WSAEMSGSIZE:
       return UdpRecvClass::TruncatedDrop;

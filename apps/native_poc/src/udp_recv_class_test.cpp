@@ -45,6 +45,9 @@ int main() {
   check("WSAEWOULDBLOCK is Retryable", classify_udp_recv(-1, WSAEWOULDBLOCK) == UdpRecvClass::Retryable);
   check("WSAETIMEDOUT is Retryable", classify_udp_recv(-1, WSAETIMEDOUT) == UdpRecvClass::Retryable);
   check("WSAEINTR is Retryable", classify_udp_recv(-1, WSAEINTR) == UdpRecvClass::Retryable);
+  check("WSA_IO_PENDING (997) is Retryable, NOT terminal (a receive still in flight)",
+        classify_udp_recv(-1, WSA_IO_PENDING) == UdpRecvClass::Retryable &&
+            !udp_recv_is_terminal(classify_udp_recv(-1, WSA_IO_PENDING)));
   check("WSAEMSGSIZE is TruncatedDrop (oversize discarded, not terminal)",
         classify_udp_recv(-1, WSAEMSGSIZE) == UdpRecvClass::TruncatedDrop);
   check("WSAEMSGSIZE is NOT terminal", !udp_recv_is_terminal(classify_udp_recv(-1, WSAEMSGSIZE)));

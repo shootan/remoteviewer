@@ -801,7 +801,9 @@ add_executable(remote60_android_decoder_owed_key_test
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
 )
 target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
-  src/test_fake_ndk
+  # A directory, not a source: written with the source-dir prefix, which cmake_sources_exist_test skips
+  # (it checks bare src/... entries as FILES). The fake NDK's files are listed above and stay checked.
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )

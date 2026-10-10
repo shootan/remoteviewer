@@ -445,13 +445,21 @@ long last_logged_selected_id(const std::string& text) {
 // for one more such line and for the panel to hold what that reply said.
 bool fresh_monitor_list(ClientSessionController& c, const std::wstring& log, size_t wantCount) {
   const size_t before = count_of(read_all(log), "monitor-list seq=");
-  if (!c.RequestMonitorList()) return false;
-  return wait_until([&] {
+  const bool requested = c.RequestMonitorList();
+  const bool ok = requested && wait_until([&] {
     const std::string text = read_all(log);
     const auto p = c.WindowPanelSnapshotCopy();
     return count_of(text, "monitor-list seq=") > before && p.monitors.size() == wantCount &&
            static_cast<long>(p.selectedMonitorId) == last_logged_selected_id(text);
   }, 6000);
+  // r10: the checks after this read the panel; without a NEW reply they would judge the previous one
+  // (verifier_intermittent3: "selectedId=0" passed on a list fetched before the session had died).
+  if (!ok) {
+    check("a fresh monitor-list reply (" + std::to_string(wantCount) + " screens) arrived", false,
+          std::string(requested ? "no new reply" : "not requested") + " -- session=" + c.Snapshot().status + " / " +
+              c.Snapshot().lastError);
+  }
+  return ok;
 }
 
 // The last rect the host handed the secure-input agent, as logged ("(x,y)/WxH"), or "".

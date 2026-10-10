@@ -173,6 +173,31 @@ int main() {
     // s is controller-owned (closed by ~c). (r4 T2)
   }
 
+  // --- B2 (t-970r4zgo r10): WSA_IO_PENDING (997), seen from a real blocking recv in the verifier's run
+  //     (verifier_intermittent3: "udp video receive terminal ... err=997"), is survived and the next VALID
+  //     key frame is delivered. Before r10 it was Terminal and ended a live session.
+  {
+    SOCKET s = make_loopback_udp();
+    ClientSessionController c;
+    MinimalSink sink;
+    std::atomic<int> idx{0};
+    c.SetUdpRecvHookForTest([&](uint8_t* buf, size_t cap, int& err) -> int {
+      const int i = idx.fetch_add(1, std::memory_order_relaxed);
+      err = 0;
+      switch (i) {
+        case 0: err = WSA_IO_PENDING; return -1;                       // the receive still in flight
+        case 1: return static_cast<int>(build_key_frame(buf, cap, 3)); // VALID key frame after it
+        default: c.RequestStopForTest(); return 0;
+      }
+    });
+    std::thread t([&] { c.RunVideoReceiveForTest(static_cast<SocketHandle>(s), &sink); });
+    t.join();
+    check("WSA_IO_PENDING (997) is survived and the following valid key frame is DELIVERED",
+          sink.frames() > 0 && c.Snapshot().state != ClientSessionState::Error,
+          "frames=" + std::to_string(sink.frames()));
+    // s is controller-owned (closed by ~c).
+  }
+
   // --- C (U1): a genuine terminal recv error still ends the session ---------------------------------
   {
     SOCKET s = make_loopback_udp();
