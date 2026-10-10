@@ -93,29 +93,38 @@ int main(int argc, char** argv) {
   // QP climb, each second's AU + wire load is the raw 30fps offered budget, to compare against the cap
   // + overhead BEFORE blaming burst/queue for the cap-ON skips.
   const bool govOff = [] { const char* e = std::getenv("BAKEOFF_NOGOV"); return e && *e && std::strcmp(e, "0"); }();
-  const uint32_t bitrate = rateKbps * 1000u;
+  const uint32_t capBitrate = rateKbps * 1000u;  // the wire cap R -- FIXED (test-only decoupling)
+  // r7 budget-separation A/B: the encoder mean target, independent of the wire cap here. In the PRODUCT
+  // these are coupled -- ApplyTarget calls sender.UpdateWireCap(encoder.activeBitrate)
+  // (host_encoder_manager.cpp:146-149) -- so lowering the encoder target would also lower the cap and
+  // leave no overhead headroom; applying this candidate therefore needs that coupling split in product.
+  const uint32_t encTargetKbps = [&] { const char* e = std::getenv("BAKEOFF_ENC_TARGET_KBPS"); return (e && *e) ? (uint32_t)std::atoi(e) : rateKbps; }();
+  const uint32_t encTargetBitrate = encTargetKbps * 1000u;
   const uint32_t keyintFrames = 10u * fps;
   const uint32_t mtu = 1200;
   const uint64_t gen = 7, kEpoch = 1;
   bool invalid = false; const char* invalidWhy = "";
 
   std::printf("host_encoder_realpath_trace (REAL encoder+admission+SenderState+WireLimiter+assembler; "
-              "AMD path): rate=%uk fps=%u phase=%us cap=%s gov=%s, idle->motion->idle\n",
-              rateKbps, fps, phaseSec, capOn ? "ON" : "OFF(real, limiter disabled)", govOff ? "OFF(fixed qp32)" : "ON");
+              "AMD path): capR=%uk encTarget=%uk fps=%u phase=%us cap=%s gov=%s, idle->motion->idle\n",
+              rateKbps, encTargetKbps, fps, phaseSec, capOn ? "ON" : "OFF(real, limiter disabled)",
+              govOff ? "OFF(fixed qp32)" : "ON");
 
   WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
   MFStartup(MF_VERSION);
   _putenv_s("REMOTE60_NATIVE_MAX_QP", "");            // product default ceiling; governor moves it live
   _putenv_s("REMOTE60_NATIVE_ENCODER_BACKEND", "mft_hw");
 
-  // --- real loopback receiver socket ---
+  // --- real loopback receiver socket (setup errors are INVALID, Codex r7) ---
   SOCKET rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (rx == INVALID_SOCKET) { std::printf("RESULT: INVALID (rx socket)\n"); MFShutdown(); WSACleanup(); return 2; }
   sockaddr_in rxAddr{}; rxAddr.sin_family = AF_INET; rxAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); rxAddr.sin_port = 0;
-  bind(rx, reinterpret_cast<sockaddr*>(&rxAddr), sizeof(rxAddr));
+  if (bind(rx, reinterpret_cast<sockaddr*>(&rxAddr), sizeof(rxAddr)) != 0) { std::printf("RESULT: INVALID (bind err=%d)\n", WSAGetLastError()); closesocket(rx); MFShutdown(); WSACleanup(); return 2; }
   int alen = sizeof(rxAddr); getsockname(rx, reinterpret_cast<sockaddr*>(&rxAddr), &alen);
   int rcvbuf = 8 * 1024 * 1024; setsockopt(rx, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&rcvbuf), sizeof(rcvbuf));
-  u_long nb = 1; ioctlsocket(rx, FIONBIO, &nb);
+  u_long nb = 1; if (ioctlsocket(rx, FIONBIO, &nb) != 0) { std::printf("RESULT: INVALID (FIONBIO)\n"); closesocket(rx); MFShutdown(); WSACleanup(); return 2; }
   SOCKET tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (tx == INVALID_SOCKET) { std::printf("RESULT: INVALID (tx socket)\n"); closesocket(rx); MFShutdown(); WSACleanup(); return 2; }
 
   // --- real receiver thread: reassemble AUs, record publish-ready frame arrival wall times ---
   std::atomic<bool> rxStop{false};
@@ -151,13 +160,18 @@ int main(int argc, char** argv) {
   // --- real sender ---
   SenderState sender;
   sender.nackEnabled.store(true, std::memory_order_relaxed);
-  if (capOn) sender.StartWireCap(bitrate, mtu, /*enabled=*/true);  // real token-bucket wire cap at target
+  if (capOn) sender.StartWireCap(capBitrate, mtu, /*enabled=*/true);  // real token-bucket wire cap at R (fixed)
   // cap OFF: leave wireLimiter null (legacy pacing only) -- a genuine cap-off, no re-injected R limit.
   { std::lock_guard<std::mutex> lk(sender.mu); sender.peer = rxAddr; sender.peerReady = true; sender.udpPeer = rxAddr; sender.udpPeerReady = true; }
   Args args; args.udpMtu = mtu;
   SessionState session; session.clientSock = tx;
   MainLoopMailbox mailbox;
   sender.StartThread(VideoTransport::Udp, true, args, session, mailbox);
+  if (!sender.thread.joinable()) {  // sender thread failed to start (Codex r7 setup INVALID)
+    std::printf("RESULT: INVALID (sender thread not started)\n");
+    rxStop.store(true); if (rxThread.joinable()) rxThread.join();
+    closesocket(rx); closesocket(tx); MFShutdown(); WSACleanup(); return 2;
+  }
 
   // --- effective config log (Codex r5 items 3/4): contrast with the product's startup/ApplyTarget ---
   std::printf("config: mtu=%u wireCapEnabled=%d wireCapArmed=%d pacePeakBps=%u(0=default; product derives from "
@@ -171,7 +185,7 @@ int main(int argc, char** argv) {
 
   // --- real encoder ---
   H264Encoder enc;
-  if (!enc.initialize(bakeoff::kW, bakeoff::kH, fps, bitrate, keyintFrames)) {
+  if (!enc.initialize(bakeoff::kW, bakeoff::kH, fps, encTargetBitrate, keyintFrames)) {
     std::printf("RESULT: INVALID (encoder init failed)\n");
     sender.stop.store(true, std::memory_order_release); sender.cv.notify_all();
     if (sender.wireLimiter) sender.wireLimiter->Stop();
@@ -202,6 +216,10 @@ int main(int argc, char** argv) {
               "maxQp reqFps| asmAU_fps auGapMs silenceMs\n");
 
   uint32_t queueMaxSec = 0; bool encodeFailed = false;
+  // Codex r7: actually COUNT the product staging conditions (don't claim "<=3 so nothing fired").
+  uint64_t keySupersedeWouldFire = 0;   // a key AU pushed while the queue was non-empty (product would supersede backlog)
+  uint64_t outputHardLimitWouldFire = 0; // an AU pushed at queue depth >= 6 (product output hard-limit)
+  uint32_t queueMaxRun = 0;
   uint64_t deadline = qpc_now_us();
   for (uint32_t i = 0; i < totalFrames; ++i) {
     deadline += frameUs;
@@ -226,9 +244,18 @@ int main(int argc, char** argv) {
           secAuBytes += u.bytes.size(); ++secAuOut;
           // NOTE (Codex r5 item 3): direct push -- the product's staging / key supersede / waitingForKey /
           // DropAndResync / epoch ownership (host_stage_encode_send_h264_au.cpp:420-514) is NOT reused; the
-          // output hard-limit is 6 there (distinct from the input admission threshold 2). queueMax below
-          // shows whether those overflow paths could even have fired.
-          { std::lock_guard<std::mutex> lk(sender.mu); sender.queue.push_back(make_item(++seqNo, gen, u.bytes, u.keyFrame || u.rawIdr, kEpoch, fps)); }
+          // output hard-limit is 6 there (distinct from the input admission threshold 2). The counts
+          // below record whether those product conditions WOULD have fired (observed, not asserted).
+          const bool auKey = u.keyFrame || u.rawIdr;
+          uint32_t depthAfter;
+          { std::lock_guard<std::mutex> lk(sender.mu);
+            const uint32_t depthBefore = (uint32_t)sender.queue.size();
+            if (auKey && depthBefore > 0) ++keySupersedeWouldFire;      // product: key supersedes backlog
+            if (depthBefore >= 6) ++outputHardLimitWouldFire;          // product: output hard-limit 6
+            sender.queue.push_back(make_item(++seqNo, gen, u.bytes, auKey, kEpoch, fps));
+            depthAfter = (uint32_t)sender.queue.size(); }
+          if (depthAfter > queueMaxSec) queueMaxSec = depthAfter;       // Codex r7: max AFTER push, not only pre-gate
+          if (depthAfter > queueMaxRun) queueMaxRun = depthAfter;
           sender.cv.notify_one();
         }
       }
@@ -251,7 +278,7 @@ int main(int argc, char** argv) {
       const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;  // cap off: txDelta only
       const uint64_t govBytesPerSec = elapsedUs > 0 ? (uint64_t)(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
       if (!govOff) {
-        const RateDecision dec = gov.OnSecond(govBytesPerSec, bitrate, gUserFps);
+        const RateDecision dec = gov.OnSecond(govBytesPerSec, encTargetBitrate, gUserFps);  // governor target = encoder target
         if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; }
         curFps = dec.fps;  // supply-sampling lever only; fps step not wired to ApplyTarget (scope note)
       }
@@ -261,19 +288,20 @@ int main(int argc, char** argv) {
       // assembler Completed-AU rate + inter-arrival gap in the HALF-OPEN [secStartUs, nowUs) window,
       // + silence age since the last completed AU (Codex r5 item 5):
       double auGapMs = 0, silenceMs = 0; uint64_t asmAu = 0, lastDelivery = 0;
-      { std::lock_guard<std::mutex> lk(gapMu);
+      { std::lock_guard<std::mutex> lk(gapMu);  // deliveryUs is written by rxThread -- always locked
         for (size_t k = 0; k < deliveryUs.size(); ++k) {
-          if (deliveryUs[k] >= secStartUs && deliveryUs[k] < nowUs) {
+          if (deliveryUs[k] >= secStartUs && deliveryUs[k] < nowUs) {  // half-open [secStart, now)
             ++asmAu;
             if (k > 0) { const double g = (deliveryUs[k] - deliveryUs[k - 1]) / 1000.0; if (g > auGapMs) auGapMs = g; }
           }
         }
         if (!deliveryUs.empty()) lastDelivery = deliveryUs.back(); }
-      if (asmAu == 0 && lastDelivery) silenceMs = (nowUs - lastDelivery) / 1000.0;  // no new AU this sec
-      std::printf("%4u|%-6s|%7u %5u %5u %5u| %10.0f %11.0f %14.0f | %8u | %5u %6u| %9llu %7.1f %9.1f %s\n",
+      if (asmAu == 0 && lastDelivery && nowUs > lastDelivery) silenceMs = (nowUs - lastDelivery) / 1000.0;  // guard underflow
+      const double asmAuFps = asmAu / elapsedSec;  // Codex r7: a rate, normalised by real elapsed
+      std::printf("%4u|%-6s|%7u %5u %5u %5u| %10.0f %11.0f %14.0f | %8u | %5u %6u| %9.1f %7.1f %9.1f %s\n",
                   (i + 1) / fps, scene.c_str(), secOffered, secAdmitted, secAuOut, secSkips,
                   secAuBytes * 8.0 / 1000.0 / elapsedSec, govBytesPerSec * 8.0 / 1000.0, wireKbpsOvh,
-                  queueMaxSec, curMaxQp, curFps, (unsigned long long)asmAu, auGapMs, silenceMs,
+                  queueMaxSec, curMaxQp, curFps, asmAuFps, auGapMs, silenceMs,
                   govOff ? "(gov off)" : "");
       secStartUs = nowUs; secAuBytes = 0; secAuOut = secSkips = secOffered = secAdmitted = 0; queueMaxSec = 0;
       lastWireBytes = wb; lastDatagrams = dg;
@@ -284,22 +312,24 @@ int main(int argc, char** argv) {
   }
 
   // drain briefly so late AUs reach the receiver; report what did not come back (Codex r5 item 5).
-  const uint64_t deliveredBeforeDrain = (uint64_t)deliveryUs.size();
+  uint64_t deliveredBeforeDrain; { std::lock_guard<std::mutex> lk(gapMu); deliveredBeforeDrain = (uint64_t)deliveryUs.size(); }  // locked (rxThread live)
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   const uint32_t pendingAtStop = enc.pending_input_depth();
   sender.stop.store(true, std::memory_order_release); sender.cv.notify_all();
   if (sender.wireLimiter) sender.wireLimiter->Stop();
   if (sender.thread.joinable()) sender.thread.join();
-  rxStop.store(true); if (rxThread.joinable()) rxThread.join();
+  rxStop.store(true); if (rxThread.joinable()) rxThread.join();  // rxThread stopped -> deliveryUs now single-owner
   const bool sendFailed = sender.sendFailed.load(std::memory_order_relaxed);
   enc.shutdown();
   if (encodeFailed) { invalid = true; invalidWhy = "encode_frame returned false"; }
   else if (sendFailed) { invalid = true; invalidWhy = "sender sendFailed"; }
   std::printf("\nhost_encoder_realpath_trace: %s%s (datagrams=%llu, assembledAU=%zu, "
-              "recoveredDuringDrain=%zu, encoderPendingAtStop=%u)\n",
+              "recoveredDuringDrain=%zu, encoderPendingAtStop=%u, queueMaxRun=%u, "
+              "keySupersedeWouldFire=%llu, outputHardLimitWouldFire=%llu)\n",
               invalid ? "INVALID: " : "DONE", invalid ? invalidWhy : "",
               (unsigned long long)datagrams.load(), deliveryUs.size(),
-              (size_t)(deliveryUs.size() - deliveredBeforeDrain), pendingAtStop);
+              (size_t)(deliveryUs.size() - deliveredBeforeDrain), pendingAtStop, queueMaxRun,
+              (unsigned long long)keySupersedeWouldFire, (unsigned long long)outputHardLimitWouldFire);
   MFShutdown(); WSACleanup();
   return invalid ? 1 : 0;
 }
