@@ -143,7 +143,8 @@ int main() {
     sendTo("", 0);
     t.join();
     check("external Stop breaks the blocked receive loop (join returns)", true);
-    if (c.Snapshot().state != ClientSessionState::Error) closesocket(rx);  // single owner
+    // rx is controller-owned (RunVideoReceiveForTest stores it in udpVideoSocket_; ~c -> Disconnect
+    // -> StopWorker -> shutdown_socket closes it). Only tx is test-owned. (r4 T2: no double close.)
     closesocket(tx);
   }
 
@@ -169,7 +170,7 @@ int main() {
     check("reset is survived and the following valid key frame is DELIVERED",
           sink.frames() > 0 && c.Snapshot().state != ClientSessionState::Error,
           "frames=" + std::to_string(sink.frames()));
-    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);
+    // s is controller-owned (closed by ~c). (r4 T2)
   }
 
   // --- C (U1): a genuine terminal recv error still ends the session ---------------------------------
@@ -183,7 +184,7 @@ int main() {
     check("a terminal recv error (WSAENOTSOCK) ends the session",
           c.Snapshot().state == ClientSessionState::Error &&
               c.Snapshot().lastError == "udp video receive failed");
-    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);  // terminal -> controller already closed it
+    // s is controller-owned (closed by ~c). (r4 T2)
   }
 
   // --- D (U1/U2): a reset flood is rate-bounded -- no CPU spin / log flood --------------------------
@@ -206,7 +207,7 @@ int main() {
     t.join();
     check("a reset flood is rate-bounded (~1 kHz anti-spin, no CPU peg)", calls.load() <= 400,
           "calls=" + std::to_string(calls.load()));
-    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);
+    // s is controller-owned (closed by ~c). (r4 T2)
   }
 
   // --- E (U1.3, Codex r3 V1): with NACK/hold and control-over-UDP ENABLED, a drop/error stream must
@@ -275,7 +276,7 @@ int main() {
           "closed=" + std::to_string(ctl.IsClosed()) + " sends=" + std::to_string(controlSends.load()));
     check("V1: the incomplete AU is NEVER delivered through drops (discards are not healthy/ACK)",
           sink.frames() == 0, "frames=" + std::to_string(sink.frames()));
-    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);  // single owner (no double close)
+    // s is controller-owned (closed by ~c). obs is test-owned. (r4 T2: no double close.)
     closesocket(obs);
   }
 
