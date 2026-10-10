@@ -228,33 +228,90 @@ int main() {
           all);
   }
 
-  // hostapp-log-upload r1: the streaming-child exit line carries the exit code (NTSTATUS hex + decimal),
-  // pid, run time, preceding state (last child line), an optional WER dump path, and the relaunch count.
-  // This is the incident's gap: a child that crashed AFTER a long run (0xC0000005) logged no code.
+  // hostapp-log-upload r2: the shared exit-line formatter carries the exit code (hex + unsigned
+  // decimal), pid, run time, a restart_planned intent (NOT a relaunch claim), an optional WER dump
+  // path, and the sanitised preceding line. The incident's gap was a child that died AFTER a long run
+  // (0xC0000005) logging no code; the clean path now logs the real code and flags it ABNORMAL.
   {
-    const std::string line = format_streaming_host_exit_log(
-        0xC0000005UL, /*pid=*/4321, /*ranMs=*/200000ULL, "dxgi-acquire stats stopped",
-        " dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp", /*relaunch=*/2, /*abnormalLongRun=*/true);
-    check("exit line carries the NTSTATUS exit code as hex (removal mutation: dropping it fails here)",
+    HostExitLog ex;
+    ex.kind = "the streaming host exited";
+    ex.codeKnown = true;
+    ex.code = 0xC0000005UL;
+    ex.pid = 4321;
+    ex.ranMs = 200000ULL;
+    ex.extra = "(ABNORMAL: nonzero after a long run)";
+    ex.restartPlanned = true;
+    ex.dumpNote = " dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp";
+    ex.preceding = sanitize_preceding_line("dxgi-acquire stats stopped");
+    const std::string line = format_host_exit_log(ex);
+    check("exit line carries the exit code as hex (removal mutation: dropping it fails here)",
           line.find("code=0xC0000005") != std::string::npos, line);
-    check("exit line carries the decimal code too", line.find("(3221225477)") != std::string::npos, line);
+    check("exit line carries the unsigned decimal code too",
+          line.find("(3221225477)") != std::string::npos, line);
     check("exit line carries the child pid", line.find("pid=4321") != std::string::npos, line);
     check("exit line carries the run time", line.find("ranMs=200000") != std::string::npos, line);
-    check("exit line carries the preceding state (last child line)",
+    check("exit line carries the sanitised preceding state",
           line.find("lastLine=\"dxgi-acquire stats stopped\"") != std::string::npos, line);
     check("exit line carries the WER dump path when present",
           line.find("dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp") != std::string::npos, line);
-    check("exit line carries the relaunch count", line.find("relaunching(#2)") != std::string::npos, line);
+    check("exit line states restart_planned (not a relaunch claim)",
+          line.find("restart_planned=true") != std::string::npos, line);
     check("a nonzero code after a long run is flagged ABNORMAL",
           line.find("(ABNORMAL: nonzero after a long run)") != std::string::npos, line);
-    check("the line is the [host-app] exit record", line.rfind("[host-app] the streaming host exited", 0) == 0,
-          line);
+    check("the line is the [host-app] exit record",
+          line.rfind("[host-app] the streaming host exited", 0) == 0, line);
 
-    const std::string clean = format_streaming_host_exit_log(0UL, 99, 60000ULL, "", "", 1, false);
+    HostExitLog clean;
+    clean.codeKnown = true; clean.code = 0; clean.pid = 99; clean.ranMs = 60000ULL;
+    clean.restartPlanned = true; clean.preceding = sanitize_preceding_line("");
+    const std::string cleanLine = format_host_exit_log(clean);
     check("a clean exit still logs the code (0x00000000) -- never codeless",
-          clean.find("code=0x00000000 (0)") != std::string::npos, clean);
+          cleanLine.find("code=0x00000000 (0)") != std::string::npos, cleanLine);
     check("a clean exit is NOT flagged ABNORMAL and has no dump note",
-          clean.find("ABNORMAL") == std::string::npos && clean.find("dump=") == std::string::npos, clean);
+          cleanLine.find("ABNORMAL") == std::string::npos && cleanLine.find("dump=") == std::string::npos,
+          cleanLine);
+    check("an empty preceding line reads 'none'", cleanLine.find("lastLine=\"none\"") != std::string::npos,
+          cleanLine);
+
+    // H2: a failed GetExitCodeProcess must not look like a clean 0 exit.
+    HostExitLog unknown;
+    unknown.codeKnown = false; unknown.queryError = 6; unknown.pid = 7; unknown.ranMs = 10;
+    unknown.restartPlanned = false; unknown.preceding = sanitize_preceding_line("x");
+    const std::string unk = format_host_exit_log(unknown);
+    check("an unknown exit code is recorded as unknown, not 0",
+          unk.find("code=unknown queryError=6") != std::string::npos &&
+              unk.find("code=0x") == std::string::npos, unk);
+    check("a Stop-terminated exit states restart_planned=false",
+          unk.find("restart_planned=false") != std::string::npos, unk);
+  }
+
+  // hostapp-log-upload r2 (H3): the preceding field is sanitised raw child output: redact credential
+  // markers, escape to one line, UTF-8-safe truncate -- in that order.
+  {
+    const std::string s = sanitize_preceding_line(
+        "connected token=SECRETzzz password=hunter2 Authorization: Bearer abc.def ok");
+    check("a token= value is redacted", s.find("SECRETzzz") == std::string::npos &&
+          s.find("token=<redacted>") != std::string::npos, s);
+    check("a password= value is redacted", s.find("hunter2") == std::string::npos, s);
+    check("a Bearer value is redacted", s.find("abc.def") == std::string::npos, s);
+    check("non-secret text is kept", s.find("connected") != std::string::npos && s.find("ok") != std::string::npos, s);
+
+    const std::string esc = sanitize_preceding_line("line\rwith\nbreaks and a \" quote");
+    check("CR/LF become escapes, not real line breaks",
+          esc.find('\n') == std::string::npos && esc.find('\r') == std::string::npos, esc);
+    check("a quote is escaped", esc.find("\\\"") != std::string::npos, esc);
+
+    // UTF-8-safe truncation: a long run of 2-byte characters must not be cut mid-sequence.
+    std::string multi;
+    for (int k = 0; k < 200; ++k) multi += "\xC3\xA9";  // 'é' x200 = 400 bytes
+    const std::string cut = sanitize_preceding_line(multi, 40);
+    size_t body = cut.size();
+    const std::string tail = "...(cut)";
+    if (body >= tail.size() && cut.compare(body - tail.size(), tail.size(), tail) == 0) body -= tail.size();
+    bool evenBytes = (body % 2) == 0;  // each 'é' is 2 bytes; a clean boundary keeps it even
+    check("truncation does not split a UTF-8 multibyte character", evenBytes && body <= 40,
+          std::to_string(body));
+    check("empty input sanitises to 'none'", sanitize_preceding_line("   ") == "none");
   }
 
   remove_all(dir);

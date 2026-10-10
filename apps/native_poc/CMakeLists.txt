@@ -652,6 +652,25 @@ if(MSVC)
   )
 endif()
 
+# hostapp-log-upload r2 (V1): the real supervisor exit-observation -> enqueue -> uploader -> server
+# chain. Same seam as the UI test (product host_app_main.cpp compiled in, entry renamed,
+# REMOTE60_HOST_TEST_SEAM on, streaming child replaced by this exe), but a CONSOLE test that drives
+# StreamingHostProcess directly and asserts on a fake log server -- no window, no UI Automation.
+add_executable(remote60_host_exit_upload_test
+  src/host_exit_upload_test.cpp
+  ${_host_ui_test_sources}
+)
+target_compile_definitions(remote60_host_exit_upload_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_exit_upload_test PRIVATE /utf-8)
+target_include_directories(remote60_host_exit_upload_test PRIVATE src)
+target_link_libraries(remote60_host_exit_upload_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+)
+
 # One file the user can carry to another machine. It embeds the four product executables and
 # installs them under %ProgramFiles%\GNLink, which is the only place the LocalSystem input
 # service can live without handing SYSTEM to anyone who can write the install folder.

@@ -676,11 +676,12 @@ void test_diag_has_no_token() {
   CHECK(d.find("late answer for a previous owner discarded") != std::string::npos);
 }
 
-// hostapp-log-upload r1: the supervisor's [host-app] streaming-host-exit line (the one that was
-// local-only, so the NAS had no exit cause) is uploaded on the SAME "host" stream the device's host.log
-// uses, carrying its NTSTATUS exit code -- so the crash cause lands on the NAS. (The product wires this
-// at append_host_app_log / AppendLogLineOnce -> log_upload_enqueue("host", line), next to the child's
-// own-output enqueue.) A removal of that enqueue would leave the server with no such line.
+// hostapp-log-upload r2: an uploader-level check only -- an exit-shaped [host-app] line enqueued on
+// the "host" stream reaches the fake server with its body intact. This does NOT prove the product's
+// supervisor actually enqueues it (this test calls log_upload_enqueue directly); that end-to-end
+// wiring -- real supervisor exit observation -> append_host_app_log/AppendLogLineOnce -> uploader ->
+// server, with the product enqueue-removal mutation failing -- is covered by
+// remote60_host_exit_upload_test (host_exit_upload_test.cpp), which compiles the real host_app_main.cpp.
 void test_host_app_exit_line_goes_to_host_stream(FakeLogServer& server) {
   std::printf("[host-app-exit] the exit line uploads on the host stream with its code\n");
   server.Clear();
@@ -688,9 +689,16 @@ void test_host_app_exit_line_goes_to_host_stream(FakeLogServer& server) {
   c.hostToken = "HOST-TOKEN";
   std::string reason;
   CHECK(log_upload_configure(c, &reason));
-  const std::string exitLine = remote60::native_poc::format_streaming_host_exit_log(
-      0xC0000005UL, /*pid=*/4321, /*ranMs=*/200000ULL, "dxgi-acquire stats stopped", /*dumpNote=*/"",
-      /*relaunch=*/2, /*abnormalLongRun=*/true);
+  remote60::native_poc::HostExitLog ex;
+  ex.kind = "the streaming host exited";
+  ex.codeKnown = true;
+  ex.code = 0xC0000005UL;
+  ex.pid = 4321;
+  ex.ranMs = 200000ULL;
+  ex.extra = "(ABNORMAL: nonzero after a long run)";
+  ex.restartPlanned = true;
+  ex.preceding = remote60::native_poc::sanitize_preceding_line("dxgi-acquire stats stopped");
+  const std::string exitLine = remote60::native_poc::format_host_exit_log(ex);
   log_upload_enqueue("host", exitLine);
   CHECK(server.WaitFor(1, 2000));
   auto reqs = server.Requests();
