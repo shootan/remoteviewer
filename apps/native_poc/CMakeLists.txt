@@ -3118,6 +3118,30 @@ if(MSVC)
   target_compile_options(remote60_host_wire_cap_sender_thread_test PRIVATE /utf-8)
 endif()
 
+# encoder-bakeoff r4 (MEASUREMENT-ONLY, test-only): the REAL send path from leaf components -- real
+# H264Encoder + admission gate + SenderState/WireLimiter/sender-thread + the real UdpH264FrameAssembler
+# receiver over loopback. Union of the sender-thread test's sources and the shared-core assembler's.
+add_executable(remote60_host_encoder_realpath_trace
+  src/mf_h264_codec.cpp
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/directory_client.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/host_encoder_realpath_trace.cpp
+)
+target_include_directories(remote60_host_encoder_realpath_trace PRIVATE src)
+target_link_libraries(remote60_host_encoder_realpath_trace PRIVATE capture common ws2_32 winhttp
+  runtimeobject windowsapp advapi32 d3d11 dxgi gdi32 user32 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_realpath_trace PRIVATE /utf-8)
+endif()
+# No BAKEOFF_OPENH264: the trace only uses fill_scene/kW/kH + H264Encoder from bakeoff_common.hpp.
+
 # fec-single-chunk-stride: the host's real chunker over loopback, its datagrams judged by the real
 # shared assembler -- boundary sizes, loss counter-examples, the NACK replay geometry, both layouts.
 add_executable(remote60_udp_fec_single_chunk_test
