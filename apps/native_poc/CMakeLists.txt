@@ -3140,6 +3140,27 @@ target_link_libraries(remote60_udp_control_channel_test PRIVATE
 add_executable(remote60_viewer_udp_ingress_test src/viewer_udp_ingress_test.cpp)
 target_link_libraries(remote60_viewer_udp_ingress_test PRIVATE ws2_32)
 
+# udp-recv-exit r1: the UDP recv classification shared by the client receive loop and the viewer ingress.
+add_executable(remote60_udp_recv_class_test src/udp_recv_class_test.cpp)
+target_link_libraries(remote60_udp_recv_class_test PRIVATE ws2_32)
+if(MSVC)
+  target_compile_options(remote60_udp_recv_class_test PRIVATE /utf-8)
+endif()
+
+# udp-recv-exit r1: the REAL shared client receive loop driven with a scripted recv seam.
+add_executable(remote60_client_udp_recv_loop_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/client_udp_recv_loop_test.cpp
+)
+target_include_directories(remote60_client_udp_recv_loop_test PRIVATE src)
+target_link_libraries(remote60_client_udp_recv_loop_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_client_udp_recv_loop_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_capture_final_update_test src/d3d_capture_readback.cpp src/capture_final_update_test.cpp)
 target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)
 

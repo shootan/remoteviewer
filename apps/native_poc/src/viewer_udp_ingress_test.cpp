@@ -3,10 +3,19 @@
 #include <stdexcept>
 
 int main() {
-  using remote60::native_poc::viewer::udp_ingress_retryable_error;
-  if (!udp_ingress_retryable_error(WSAEINTR) || !udp_ingress_retryable_error(WSAETIMEDOUT) ||
-      !udp_ingress_retryable_error(WSAEWOULDBLOCK) || !udp_ingress_retryable_error(WSAEMSGSIZE) ||
-      udp_ingress_retryable_error(WSAECONNRESET)) return 4;
+  using remote60::native_poc::viewer::udp_ingress_recv_retryable;
+  using remote60::native_poc::viewer::udp_ingress_select_retryable;
+  // udp-recv-exit r2 U2: select and recv use DISTINCT error sets. select: timeout/would-block/interrupt
+  // only. recv: that set PLUS the datagram advisories WSAEMSGSIZE and WSAECONNRESET (aligned with the
+  // shared client's reset policy). A bad socket is terminal in both. An advisory (reset/oversize) is NOT
+  // a select-retryable (select delivers no datagram).
+  if (!udp_ingress_select_retryable(WSAEINTR) || !udp_ingress_select_retryable(WSAETIMEDOUT) ||
+      !udp_ingress_select_retryable(WSAEWOULDBLOCK) ||
+      udp_ingress_select_retryable(WSAEMSGSIZE) || udp_ingress_select_retryable(WSAECONNRESET) ||
+      udp_ingress_select_retryable(WSAENOTSOCK)) return 4;
+  if (!udp_ingress_recv_retryable(WSAEINTR) || !udp_ingress_recv_retryable(WSAETIMEDOUT) ||
+      !udp_ingress_recv_retryable(WSAEWOULDBLOCK) || !udp_ingress_recv_retryable(WSAEMSGSIZE) ||
+      !udp_ingress_recv_retryable(WSAECONNRESET) || udp_ingress_recv_retryable(WSAENOTSOCK)) return 5;
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2,2), &wsa)) return 1;
   SOCKET rx = socket(AF_INET, SOCK_DGRAM, 0), tx = socket(AF_INET, SOCK_DGRAM, 0);
