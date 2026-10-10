@@ -950,6 +950,51 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- apk-keyboard-tabs r1: [휴대폰 자판 | PC 키], directly above whichever keyboard is up.
+             Its slot is just above the panel; with the phone keyboard up (the panel gone) it is
+             lifted by the IME inset (ViewerKeyboardCycle.barTranslationYPx), since this window
+             is not resized for the IME. Gone while neither keyboard is up. As wide as its two
+             tabs: across the full width it covered the foot of the landscape rail's keyboard
+             button. -->
+        <LinearLayout
+            android:id="@+id/viewerKeyboardTabs"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:background="#E6151920"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:visibility="gone">
+
+            <Button
+                android:id="@+id/viewerKeyboardTabPhone"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/viewer_control_button_background"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="@string/key_panel_tab_phone"
+                android:textAllCaps="false"
+                android:textColor="#F4F0E8"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/viewerKeyboardTabPcKeys"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/viewer_control_button_background"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="@string/key_panel_tab_pc_keys"
+                android:textAllCaps="false"
+                android:textColor="#F4F0E8"
+                android:textSize="12sp" />
+        </LinearLayout>
+
         <include layout="@layout/viewer_key_panel" />
     </LinearLayout>
 

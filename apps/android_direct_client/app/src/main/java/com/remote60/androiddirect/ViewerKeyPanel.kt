@@ -219,6 +219,12 @@ class ViewerKeyPanel(
     val isOpen: Boolean get() = root.visibility == View.VISIBLE
 
     /**
+     * Called after every show() and hide(), whoever made it (the rail button, the close button,
+     * Back, a scene change), so the [휴대폰 자판 | PC 키] bar above the panel goes with it.
+     */
+    var onOpenChanged: (() -> Unit)? = null
+
+    /**
      * Height the panel must leave to the rest of the viewer. In landscape the rail stands beside
      * the picture above the panel, and four 48dp buttons need their room (apk-ui r3d).
      */
@@ -235,6 +241,7 @@ class ViewerKeyPanel(
     fun show() {
         root.visibility = View.VISIBLE
         applyPanelHeight()
+        onOpenChanged?.invoke()
     }
 
     // The panel pushes the picture up rather than covering it, so it gets a fixed share of
@@ -262,6 +269,7 @@ class ViewerKeyPanel(
             it.height = LinearLayout.LayoutParams.WRAP_CONTENT
         }
         root.visibility = View.GONE
+        onOpenChanged?.invoke()
     }
 
     private fun dp(v: Float): Int = (v * context.resources.displayMetrics.density).toInt()

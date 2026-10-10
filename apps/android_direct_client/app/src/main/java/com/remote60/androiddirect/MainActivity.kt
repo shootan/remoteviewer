@@ -222,9 +222,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             getString(if (forcePortrait) R.string.ui_rotate_portrait else R.string.ui_rotate_auto)
         layoutViewerSheets(deviceLandscape)
         // The key panel may take no more than leaves the side rail its four 48dp buttons.
-        viewerKeyPanel?.reservedHeightPx = if (deviceLandscape) railMinimumHeightPx() else 0
+        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx(deviceLandscape)
         fitRailCells()
     }
+
+    /**
+     * What the key panel leaves to the rest of the viewer: in landscape the rail's four buttons,
+     * which stand beside the picture above the panel, and the tab bar between them and the panel.
+     */
+    private fun keyPanelReservedHeightPx(deviceLandscape: Boolean): Int =
+        if (deviceLandscape) railMinimumHeightPx() + viewerKeyboardTabs.layoutParams.height else 0
 
     /** Four buttons at the 48dp floor, their 1dp margins, and the bar's padding. */
     private fun railMinimumHeightPx(): Int =
@@ -339,7 +346,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Let the next viewer entry re-evaluate orientation from scratch. */
     private fun resetViewerOrientationState() {
         lastAppliedLandscape = null
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        applySceneOrientation()
+    }
+
+    /**
+     * Outside the viewer the screen goes back to how the lists are held (SceneOrientationPolicy):
+     * upright on a phone, the device's own way on a tablet. Runs on every scene render, so a
+     * disconnect, an error or a lost host releases the viewer's landscape lock as well as Back does.
+     */
+    private fun applySceneOrientation() {
+        val inViewer = currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING
+        val wanted = when (SceneOrientationPolicy.forScene(inViewer, resources.configuration.smallestScreenWidthDp)) {
+            SceneOrientationPolicy.Request.VIEWER_DECIDES -> return
+            SceneOrientationPolicy.Request.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            SceneOrientationPolicy.Request.FOLLOW_DEVICE -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        // The next viewer entry decides again from its content.
+        lastAppliedLandscape = null
+        if (requestedOrientation == wanted) return
+        requestedOrientation = wanted
+        diagnosticsLog.log("orientation_released", "scene=$currentScene requested=$wanted")
     }
 
     private fun formatMegabytes(bytes: Long): String {
@@ -1012,6 +1038,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerLoadingPanel: View
     private lateinit var viewerLoadingText: TextView
     private lateinit var viewerImeCaptureView: ImeCaptureView
+    // apk-keyboard-tabs r1: [휴대폰 자판 | PC 키] above whichever keyboard is up.
+    private lateinit var viewerKeyboardTabs: View
+    private lateinit var viewerKeyboardTabPhone: Button
+    private lateinit var viewerKeyboardTabPcKeys: Button
+    /** The IME's height over the window bottom, from the last insets; 0 while it is down. */
+    private var imeBottomPx = 0
     private lateinit var viewerInputPreviewText: TextView
     private lateinit var viewerModeBanner: TextView
     private lateinit var videoTextureView: TextureView
@@ -1463,6 +1495,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
         viewerLoadingText = findViewById(R.id.viewerLoadingText)
         viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
+        viewerKeyboardTabs = findViewById(R.id.viewerKeyboardTabs)
+        viewerKeyboardTabPhone = findViewById(R.id.viewerKeyboardTabPhone)
+        viewerKeyboardTabPcKeys = findViewById(R.id.viewerKeyboardTabPcKeys)
+        viewerKeyboardTabPhone.setOnClickListener {
+            if (ViewerKeyboardCycle.onPhoneTab(viewerKeyboardMode()) == ViewerKeyboardCycle.Action.PC_KEYS_TO_PHONE) {
+                diagnosticsLog.log("viewer_keyboard_tab", "to=phone")
+                viewerKeyPanel?.hide()
+                toggleViewerKeyboard()
+            }
+        }
+        viewerKeyboardTabPcKeys.setOnClickListener {
+            if (ViewerKeyboardCycle.onPcKeysTab(viewerKeyboardMode()) == ViewerKeyboardCycle.Action.PHONE_TO_PC_KEYS) {
+                diagnosticsLog.log("viewer_keyboard_tab", "to=pc_keys")
+                showViewerKeyPanelInsteadOfPhone("tab_pc_keys")
+            }
+        }
+        // The capture view holding focus is what "the phone keyboard is up" means here; however it
+        // gains or loses it (rail button, tab, the IME put away, a scene change), the bar follows.
+        viewerImeCaptureView.setOnFocusChangeListener { _, _ -> renderViewerKeyboardTabs() }
+        viewerKeyPanel?.onOpenChanged = { renderViewerKeyboardTabs() }
         viewerInputPreviewText = findViewById(R.id.viewerInputPreviewText)
         videoTextureView = findViewById(R.id.videoTextureView)
 
@@ -1673,19 +1725,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showViewerControls(emphasized = true)
             handleViewerBack("viewer_back")
         }
-        // apk-ui r3: one keyboard button. apk-keyboard-phone-first r1: the phone keyboard comes first,
-        // then the PC keyboard panel (휴대폰 자판 · 키보드 · 단축키 · F키), then closed.
+        // apk-ui r3: one keyboard button. apk-keyboard-phone-first r1: the phone keyboard comes first.
+        // apk-keyboard-tabs r1: the PC key panel is one tab away on the bar above the phone keyboard
+        // (a second press of this button is covered by a landscape phone keyboard); the button
+        // closes whichever is up.
         viewerKeyboardButton.setOnClickListener {
             showViewerControls(emphasized = true)
-            when (ViewerKeyboardCycle.onPress(viewerImeCaptureView.hasFocus(), viewerKeyPanel?.isOpen == true)) {
+            when (ViewerKeyboardCycle.onKeyboardButton(viewerKeyboardMode())) {
                 ViewerKeyboardCycle.Action.SHOW_PHONE -> toggleViewerKeyboard()
-                ViewerKeyboardCycle.Action.PHONE_TO_PANEL -> {
+                ViewerKeyboardCycle.Action.CLOSE_ALL -> {
                     hideViewerKeyboard("rail_keyboard")
-                    viewerKeyPanel?.reservedHeightPx =
-                        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) railMinimumHeightPx() else 0
-                    viewerKeyPanel?.show()
+                    viewerKeyPanel?.hide()
                 }
-                ViewerKeyboardCycle.Action.CLOSE_PANEL -> viewerKeyPanel?.hide()
+                else -> Unit
             }
         }
         findViewById<View>(R.id.viewerMenuDisconnectButton).setOnClickListener { confirmDisconnectFromViewer() }
@@ -1693,10 +1745,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Back while it is up). Whatever it was showing as typed goes with it (apk-ui r3 (7)).
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { view, insets ->
             val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            imeBottomPx = if (imeVisible) insets.getInsets(WindowInsetsCompat.Type.ime()).bottom else 0
             if (imeWasVisible && !imeVisible && viewerImeCaptureView.hasFocus()) {
                 hideViewerKeyboard("ime_hidden")
             }
             imeWasVisible = imeVisible
+            renderViewerKeyboardTabs()
             ViewCompat.onApplyWindowInsets(view, insets)
         }
         renderStatus()
@@ -3230,6 +3284,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         touchDownVideoY = 0
     }
 
+    private fun viewerKeyboardMode(): ViewerKeyboardCycle.Mode =
+        ViewerKeyboardCycle.mode(viewerImeCaptureView.hasFocus(), viewerKeyPanel?.isOpen == true)
+
+    /** 'PC 키': the phone keyboard goes down and the PC key panel takes its place. */
+    private fun showViewerKeyPanelInsteadOfPhone(reason: String) {
+        hideViewerKeyboard(reason)
+        viewerKeyPanel?.reservedHeightPx =
+            keyPanelReservedHeightPx(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        viewerKeyPanel?.show()
+    }
+
+    /** Shows, places and marks the [휴대폰 자판 | PC 키] bar for what is up now. */
+    private fun renderViewerKeyboardTabs() {
+        if (!::viewerKeyboardTabs.isInitialized) return
+        val mode = viewerKeyboardMode()
+        val visible = ViewerKeyboardCycle.barVisible(mode, imeBottomPx)
+        viewerKeyboardTabs.visibility = if (visible) View.VISIBLE else View.GONE
+        viewerKeyboardTabs.translationY =
+            ViewerKeyboardCycle.barTranslationYPx(mode, imeBottomPx, panelHeightPx = 0).toFloat()
+        viewerKeyboardTabPhone.alpha = if (mode == ViewerKeyboardCycle.Mode.PHONE) 1.0f else 0.55f
+        viewerKeyboardTabPcKeys.alpha = if (mode == ViewerKeyboardCycle.Mode.PC_KEYS) 1.0f else 0.55f
+    }
+
     private fun toggleViewerKeyboard() {
         showViewerControls(emphasized = true)
         if (viewerImeCaptureView.hasFocus()) {
@@ -4350,6 +4427,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
             dismissViewerLogDialog()
             releaseViewerModifiers()
+            applySceneOrientation()
         }
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
             releaseVideoSurface()
