@@ -21,6 +21,7 @@
 
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
+#include "host_burst_ledger.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 
@@ -55,6 +56,10 @@ struct EncodedSendItem {
   // before a flush must not start on the wire after it (host_epoch_gate.hpp states the scope --
   // one AU already being chunked when the flush happens completes). 0 = untagged (raw path).
   uint64_t inputEpoch = 0;
+  // stutter-keyframe r4 B1: this AU is a clamp-detected real self-IDR eligible for a burst grant (set
+  // at enqueue from clampDetector.clamped && au.rawIdr && !au.inputWasForcedKey). The sender asks the
+  // burst ledger for a grant for this AU only; normal/non-clamp AUs stay strict.
+  bool clampBurstEligible = false;
 };
 
 // Encoded-frame sender (Phase 1-2 state struct). The encode/main thread enqueues AUs; the sender
@@ -135,7 +140,18 @@ struct SenderState {
   // null until then (cap inactive -> legacy pacing-only behaviour). Rate follows the active bitrate
   // through UpdateWireCap (ApplyTarget); a rate change never refills the bucket (plan point 4).
   std::unique_ptr<WireLimiter> wireLimiter;
+  // stutter-keyframe r4 B1: the common 2s rolling-window burst ledger, beside the limiter. Rate set
+  // from the same capBps at StartWireCap/UpdateWireCap. Records every wire datagram (data/parity/NACK)
+  // via WireEgress while the cap is on, and grants a bounded burst to a clamp-detected real self-IDR.
+  BurstLedger burstLedger;
   bool wireCapEnabled = false;  // REMOTE60_NATIVE_WIRE_CAP (default on); fixed after startup
+  // r4 R6 S3 (Codex 72a22d2): the conservative congestion gate for the burst. A burst accelerates an IDR
+  // above the strict rate; doing that into a path that is already losing packets worsens congestion. We
+  // reuse the existing loss signal -- the client's NACK requests + pending replays -- to WITHHOLD the
+  // grant (strict fallback) when the path showed loss recently. No new BWE probe. Sender-thread only.
+  static constexpr uint64_t kBurstCongestionWindowUs = 1'000'000;  // recent-loss look-back
+  uint64_t burstPrevNackReq = 0;   // nackRequests at the last burst decision (detect new loss since)
+  uint64_t burstLastLossUs = 0;    // qpc of the last observed NACK growth (0 = none seen)
   // Cap-OFF fallback NACK budget (bitrate-hard-cap r2): when the hard cap is off (kill-switch, or no
   // limiter) the shared bucket does not bound the replay, so the old flood defence stays -- a token
   // bucket at ~15% of the live send rate, ~0.5 s burst. With the cap ON the shared wire bucket bounds
@@ -204,6 +220,7 @@ struct SenderState {
   WireEgress MakeWireEgress() {
     WireEgress w;
     w.limiter = wireLimiter.get();
+    w.burstLedger = &burstLedger;  // r4 B1: 1:1 wire-byte recording into the common 2s window
     return w;
   }
   // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)

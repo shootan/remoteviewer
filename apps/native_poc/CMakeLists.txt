@@ -172,9 +172,29 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the stutter-keyframe B1 clamp-fake measurement (r4): the same sources as
+# GNLinkStream, with REMOTE60_CLAMP_BURST_TEST_SEAM defined so REMOTE60_NATIVE_FORCE_CLAMP_BURST forces
+# burst eligibility on this PC's non-clamping MFT. Its own output name, never packaged;
+# clip_image_build_gate_test checks the shipped GNLinkStream.exe carries none of it.
+get_target_property(_clampburst_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_clampburst_seam ${_clampburst_host_sources})
+set_target_properties(remote60_native_video_host_clampburst_seam PROPERTIES
+  OUTPUT_NAME "GNLinkStreamClampBurst")
+target_include_directories(remote60_native_video_host_clampburst_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_clampburst_seam PRIVATE
+  REMOTE60_CLAMP_BURST_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_clampburst_seam PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
 add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink
-                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test)
+                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test
+                 remote60_native_video_host_clampburst_seam)
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
@@ -831,6 +851,25 @@ target_link_libraries(remote60_mf_h264_codec_test PRIVATE
   wmcodecdspuuid
   ole32
 )
+
+# stutter-keyframe r2 (step 2): the real host keyframe-recovery roundtrip at a long GOP -- real
+# mailbox + shared decide_force_key + real MFT encode/decode. Same MF links as the codec test.
+add_executable(remote60_host_recovery_roundtrip_test
+  src/mf_h264_codec.cpp
+  src/host_recovery_roundtrip_test.cpp
+)
+target_include_directories(remote60_host_recovery_roundtrip_test PRIVATE src)
+target_link_libraries(remote60_host_recovery_roundtrip_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
+if(MSVC)
+  target_compile_options(remote60_host_recovery_roundtrip_test PRIVATE /utf-8)
+endif()
 
 add_executable(remote60_video_playout_clock_test
   src/video_playout_clock_test.cpp
@@ -2916,6 +2955,65 @@ target_include_directories(remote60_host_wire_limiter_test PRIVATE src)
 target_link_libraries(remote60_host_wire_limiter_test PRIVATE common ws2_32)
 if(MSVC)
   target_compile_options(remote60_host_wire_limiter_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r2 (step 4b): the pure periodic-key period policy. No MFT / no sockets.
+add_executable(remote60_host_key_period_policy_test
+  src/host_key_period_policy_test.cpp
+)
+target_include_directories(remote60_host_key_period_policy_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_key_period_policy_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r2 (F1): the forced-key decision + rejection back-off/repair. Pure, no MFT.
+add_executable(remote60_host_force_key_decision_test
+  src/host_force_key_decision_test.cpp
+)
+target_include_directories(remote60_host_force_key_decision_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_force_key_decision_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r3 (B): the runtime GOP-clamp detector. Pure, no MFT.
+add_executable(remote60_host_gop_clamp_detector_test
+  src/host_gop_clamp_detector_test.cpp
+)
+target_include_directories(remote60_host_gop_clamp_detector_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_gop_clamp_detector_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r4 (B1): the conditional IDR burst + 2s rolling-window ledger. Pure, no MFT.
+add_executable(remote60_host_burst_ledger_test
+  src/host_burst_ledger_test.cpp
+)
+target_include_directories(remote60_host_burst_ledger_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_burst_ledger_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r6 (V2): the 2s window admission is load-bearing in the REAL send path. Drives the
+# production send_udp_chunk_indices through a sink; removing the ledger pointer fails the same 2r bound.
+add_executable(remote60_host_burst_sender_admission_test
+  src/host_net_io.cpp
+  src/host_burst_sender_admission_test.cpp
+)
+target_include_directories(remote60_host_burst_sender_admission_test PRIVATE src)
+target_link_libraries(remote60_host_burst_sender_admission_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_host_burst_sender_admission_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r3 (B): HW vs SW 1080p30 encode measurement (the SW-transition decision input).
+add_executable(remote60_host_encoder_backend_bench
+  src/mf_h264_codec.cpp
+  src/host_encoder_backend_bench.cpp
+)
+target_include_directories(remote60_host_encoder_backend_bench PRIVATE src)
+target_link_libraries(remote60_host_encoder_backend_bench PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_backend_bench PRIVATE /utf-8)
 endif()
 
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
