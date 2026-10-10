@@ -92,7 +92,14 @@ int main(int argc, char** argv) {
   // governor OFF (fixed qp32/fps30) = the full-rate offered-load reference (Codex r5 item 6): with no
   // QP climb, each second's AU + wire load is the raw 30fps offered budget, to compare against the cap
   // + overhead BEFORE blaming burst/queue for the cap-ON skips.
-  const bool govOff = [] { const char* e = std::getenv("BAKEOFF_NOGOV"); return e && *e && std::strcmp(e, "0"); }();
+  bool govOff = [] { const char* e = std::getenv("BAKEOFF_NOGOV"); return e && *e && std::strcmp(e, "0"); }();
+  // r8 effect-isolation: BAKEOFF_FIXED_QP pins the encoder MaxQP cold and runs the governor OFF, so the
+  // ONLY variable between A/B is the encoder target bundle (mean+peak+VBV). BAKEOFF_QP_NOAPPLY runs the
+  // governor but does NOT apply its QP (set_max_qp not called) nor the fps lever -- a "QP-update-not-
+  // applied" control (NOT a claim of being identical to NVIDIA, where cold 32 is accepted but reads 51).
+  const uint32_t fixedQp = [] { const char* e = std::getenv("BAKEOFF_FIXED_QP"); return (e && *e) ? (uint32_t)std::atoi(e) : 0u; }();
+  const bool qpNoApply = [] { const char* e = std::getenv("BAKEOFF_QP_NOAPPLY"); return e && *e && std::strcmp(e, "0"); }();
+  if (fixedQp) govOff = true;  // fixed QP => governor not applied at all
   const uint32_t capBitrate = rateKbps * 1000u;  // the wire cap R -- FIXED (test-only decoupling)
   // r7 budget-separation A/B: the encoder mean target, independent of the wire cap here. In the PRODUCT
   // these are coupled -- ApplyTarget calls sender.UpdateWireCap(encoder.activeBitrate)
@@ -112,8 +119,13 @@ int main(int argc, char** argv) {
 
   WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
   MFStartup(MF_VERSION);
-  _putenv_s("REMOTE60_NATIVE_MAX_QP", "");            // product default ceiling; governor moves it live
+  if (fixedQp) _putenv_s("REMOTE60_NATIVE_MAX_QP", std::to_string(fixedQp).c_str());  // cold-pin for isolation
+  else _putenv_s("REMOTE60_NATIVE_MAX_QP", "");       // product default ceiling (32); governor moves it live
   _putenv_s("REMOTE60_NATIVE_ENCODER_BACKEND", "mft_hw");
+  std::printf("mode: %s fixedQp=%u qpNoApply=%d\n",
+              fixedQp ? "EFFECT-ISOLATION(gov off, fixed QP)" : (qpNoApply ? "QP-UPDATE-NOT-APPLIED(gov decides, QP not set)" : (govOff ? "gov off" : "full policy(gov on)")),
+              fixedQp, (int)qpNoApply);
+  const uint32_t coldQp = fixedQp ? fixedQp : 32u;  // the QP the encoder starts at
 
   // --- real loopback receiver socket (setup errors are INVALID, Codex r7) ---
   SOCKET rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -204,7 +216,7 @@ int main(int argc, char** argv) {
   uint64_t secStartUs = qpc_now_us();
   uint64_t secAuBytes = 0; uint32_t secAuOut = 0, secSkips = 0, secOffered = 0, secAdmitted = 0;
   uint64_t lastWireBytes = 0, lastDatagrams = 0;
-  uint32_t curMaxQp = 32, curFps = fps, fpsAcc = 0, seqNo = 0;
+  uint32_t curMaxQp = coldQp, curFps = fps, fpsAcc = 0, seqNo = 0, decMaxQpLog = coldQp;
   // governor-input state, replicated EXACTLY from host_stage_stats_h264.cpp:160-186 (real counters):
   uint64_t gTotalSkips = 0, gPrevTxBytes = 0, gPrevTxFrames = 0, gPrevSkips = 0, gPrevAvgSent = 0, gPrevTickUs = 0;
   const uint32_t gUserFps = fps;  // ceiling; target/userFps change would governor.Reset() (fixed scenario)
@@ -279,8 +291,12 @@ int main(int argc, char** argv) {
       const uint64_t govBytesPerSec = elapsedUs > 0 ? (uint64_t)(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
       if (!govOff) {
         const RateDecision dec = gov.OnSecond(govBytesPerSec, encTargetBitrate, gUserFps);  // governor target = encoder target
-        if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; }
-        curFps = dec.fps;  // supply-sampling lever only; fps step not wired to ApplyTarget (scope note)
+        decMaxQpLog = dec.maxQp;  // what the governor DECIDED (recorded even when not applied)
+        if (!qpNoApply) {
+          if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; }
+          curFps = dec.fps;  // supply-sampling lever only; fps step not wired to ApplyTarget (scope note)
+        }
+        // qpNoApply: decision recorded in decMaxQpLog but NOT applied (set_max_qp uncalled, fps unchanged).
       }
       // received wire incl IPv4 28B/datagram, normalised by real elapsed (Codex r5 item 5):
       const uint64_t payloadDelta = wb - lastWireBytes, dgDelta = dg - lastDatagrams;
@@ -298,11 +314,14 @@ int main(int argc, char** argv) {
         if (!deliveryUs.empty()) lastDelivery = deliveryUs.back(); }
       if (asmAu == 0 && lastDelivery && nowUs > lastDelivery) silenceMs = (nowUs - lastDelivery) / 1000.0;  // guard underflow
       const double asmAuFps = asmAu / elapsedSec;  // Codex r7: a rate, normalised by real elapsed
+      char note[48] = "";
+      if (fixedQp) std::snprintf(note, sizeof(note), "(fixedQp%u)", fixedQp);
+      else if (qpNoApply) std::snprintf(note, sizeof(note), "(noapply; govDec=%u)", decMaxQpLog);
+      else if (govOff) std::snprintf(note, sizeof(note), "(gov off)");
       std::printf("%4u|%-6s|%7u %5u %5u %5u| %10.0f %11.0f %14.0f | %8u | %5u %6u| %9.1f %7.1f %9.1f %s\n",
                   (i + 1) / fps, scene.c_str(), secOffered, secAdmitted, secAuOut, secSkips,
                   secAuBytes * 8.0 / 1000.0 / elapsedSec, govBytesPerSec * 8.0 / 1000.0, wireKbpsOvh,
-                  queueMaxSec, curMaxQp, curFps, asmAuFps, auGapMs, silenceMs,
-                  govOff ? "(gov off)" : "");
+                  queueMaxSec, curMaxQp, curFps, asmAuFps, auGapMs, silenceMs, note);
       secStartUs = nowUs; secAuBytes = 0; secAuOut = secSkips = secOffered = secAdmitted = 0; queueMaxSec = 0;
       lastWireBytes = wb; lastDatagrams = dg;
     }
