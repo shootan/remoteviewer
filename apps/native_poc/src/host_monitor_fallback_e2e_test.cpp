@@ -93,7 +93,7 @@ class CountingSink : public ClientEncodedFrameSink {
       consumeOnce_ = false;
       consumedOnce_ = true;
       // The session hands this straight to its limiter, in this same call chain: the fill's request.
-      fillAt_ = std::chrono::steady_clock::now();
+      fillAt_ = std::chrono::steady_clock::now();  // just before the limiter call, not its result
       return true;
     }
     const bool r = rekey_;
@@ -104,7 +104,8 @@ class CountingSink : public ClientEncodedFrameSink {
   uint64_t KeyframeOwedFor() override {
     std::lock_guard<std::mutex> lk(mu_);
     // The first time an owed duty is reported, the session asks its limiter for that IDR right
-    // after this returns, on the same thread: the answer's own request.
+    // after this returns, on the same thread: the answer's own request -- stamped just BEFORE the
+    // limiter call; whether the limiter then refused it is not observed here.
     if (gate_.OwedToken() != 0 && !owedAskSeen_) {
       owedAskSeen_ = true;
       owedAskAt_ = std::chrono::steady_clock::now();
@@ -1187,7 +1188,9 @@ int main(int argc, char** argv) {
         sink.ReleaseAck();
         (void)tFill;
         // r6 E1: the premise is the gap between the fill's request and the answer's own request,
-        // both stamped where the session makes them -- not when this thread happened to look.
+        // both stamped in the sink just before the session hands each to its limiter -- not when this
+        // thread happened to look. It says the second request came inside the limiter's window, i.e.
+        // that the limiter should refuse it; the refusal itself is not visible from here (r7).
         wait_until([&] { return sink.FillToOwedAskMs() >= 0; }, 5000);
         msAfterFill = sink.FillToOwedAskMs();
         premise = filled && msAfterFill >= 0 && msAfterFill < 110;
@@ -1199,8 +1202,9 @@ int main(int argc, char** argv) {
           wait_until([&] { return sink.ready() == selB; }, 15000);
         }
       }
-      check("[premise] the answer's own IDR request came within the client limiter's 120 ms of the fill's "
-            "(both stamped where the session made them)", premise,
+      check("[premise] the answer's own IDR request reached the client limiter within its 120 ms of the fill's "
+            "(both stamped just before the session calls the limiter; the refusal itself is not observed here)",
+            premise,
             "gap " + std::to_string(msAfterFill) + " ms");
       if (!premise) {
         std::puts("NOTJUDGED  the two checks below need that premise (the client limiter refusing the answer's "
