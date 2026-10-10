@@ -1,466 +1,43 @@
-// Encoder rate-control bakeoff (encoder-bakeoff r1) -- MEASUREMENT-ONLY experiment, not shipped.
+// Encoder rate-control bakeoff (encoder-bakeoff r2) -- MEASUREMENT-ONLY, not shipped.
 //
-// Why: the shipping HW MFT overshoots its target (incident 10-11: 3 Mbps target -> 8-12 Mbps
-// generated; the wire cap then drops frames and periodic/scene IDRs serialise into ~0.2-0.5 s
-// stalls). OSLink on the same PC stays near its target with a software encoder. This tool drives
-// the SAME product encoder path (H264Encoder, backend chosen by REMOTE60_NATIVE_ENCODER_BACKEND)
-// and, for OSS encoders, a parallel wrapper, over identical deterministic 1080p30 PACED scenes at
-// 1.5/3/6 Mbps, and reports how well each keeps the target plus its CPU/latency/quality cost.
+// r2 corrects the r1 measurement boundaries Codex flagged:
+//  - the warm-up is paced on the same real deadlines as the body (no "overloaded run shown as 30fps");
+//    input / output / accepted FPS, elapsed and deadline-miss count are reported.
+//  - AU bytes are attributed to their SOURCE PTS (acceptedInputOrdinal / sampleTimeHns), not the
+//    current encode call, and the 1 s / 250 ms peaks are true media-time windows over that series.
+//  - the average uses NOMINAL seconds (measured frames / fps); it is labelled as such.
+//  - the async tail is accounted (submitted / returned / pending at end); encode latency is
+//    input-submit -> AU-return (not the encode_frame call wall time).
+//  - scene generation and (PSNR) decode CPU are measured and EXCLUDED from the encoder CPU figure.
+//  - PSNR matches by EXACT PTS; decode failures / unmatched frames are counted, never scored.
+//  - VBV is reported in ms; IDR counts NAL type 5 only (au.rawIdr), not every clean point.
+//  - a run with any INIT/ENCODE failure is marked invalid rather than folded into DONE.
 //
-// It changes NO product default and links NO GPL code into any product target. mft_sw and the SW
-// decoder used for PSNR need no GPU, so this is safe to run beside an unrelated GPU measurement;
-// mft_hw uses the GPU encoder and must be run when the GPU is free (pass it explicitly).
+// It drives the SAME product encoder path (H264Encoder, backend via REMOTE60_NATIVE_ENCODER_BACKEND)
+// and an OpenH264 (BSD) adapter; no product default is changed, no GPL is linked. This is the bare
+// encoder (NO RateGovernor / wire cap / sender queue) -- that product control path is measured
+// separately by remote60_host_encoder_product_trace.
 //
-// Usage: remote60_host_encoder_bakeoff [secondsPerConfig=20] [scenes=static,scroll,drag,motion]
-//                                      [backends=mft_sw] [ratesKbps=1500,3000,6000] [keyint=300]
-//   env BAKEOFF_PSNR=1  -> decode (forced SW) and report luma PSNR vs source (slower).
-//   Rate-control knobs are the product env vars (REMOTE60_NATIVE_RATE_CONTROL, _RC_MODE_NUM,
-//   _PEAK_BITRATE_PERCENT, _MAX_QP, ...); set them before a run to measure an RC variant.
+// Usage: remote60_host_encoder_bakeoff [sec=20] [scenes=static,scroll,drag,motion]
+//            [backends=mft_sw] [ratesKbps=1500,3000,6000] [fps=30] [keyintSec=10]
+//   env BAKEOFF_PSNR=1       -> SW-decode and report exact-PTS luma PSNR (CPU excluded from encoder).
+//   env BAKEOFF_COLDQP=X     -> cold-init the encoder's MaxQP ceiling at X (REMOTE60_NATIVE_MAX_QP).
+//   env BAKEOFF_LIVEQP=X     -> run the first half at the default ceiling, then set_max_qp(X) live and
+//                              run the second half; the two halves are reported separately (does the
+//                              governor's live QP change actually move the output?).
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <mfapi.h>
-
-#include "mf_h264_codec.hpp"
+#include "bakeoff_common.hpp"
 
 #include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <deque>
-#include <memory>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
-using namespace remote60::native_poc;
+using namespace bakeoff;
 
 namespace {
-constexpr uint32_t kW = 1920;
-constexpr uint32_t kH = 1080;
-constexpr uint32_t kFps = 30;
-constexpr uint64_t kFrameUs = 1'000'000ULL / kFps;  // 33333
-constexpr int64_t kHnsPerUs = 10;
-constexpr size_t kLuma = static_cast<size_t>(kW) * kH;
-constexpr size_t kNv12 = kLuma * 3 / 2;
-
-// ---- deterministic scenes ---------------------------------------------------------------------
-// Every backend sees byte-identical frames for a given (scene, frameIndex), so comparisons are fair.
-// Chroma is flat 128 (monochrome): luma carries essentially all the H.264 bits and all the motion we
-// are testing, and a flat UV keeps the input reproducible without a colour model. A deterministic
-// hash gives high-spatial-frequency "desktop-like" texture that does not compress to nothing.
-
-inline uint8_t tex(uint32_t x, uint32_t y) {
-  uint32_t h = x * 2654435761u ^ y * 2246822519u;
-  h ^= h >> 13;
-  h *= 3266489917u;
-  h ^= h >> 16;
-  return static_cast<uint8_t>(h);
-}
-
-// Smooth-ish desktop background: large low-frequency gradient + a faint fixed texture, so "static"
-// is realistic (not a flat field that encodes to ~0) yet compresses well when unchanged.
-inline uint8_t deskbg(uint32_t x, uint32_t y) {
-  const int grad = static_cast<int>((x >> 3) + (y >> 3)) & 0x7F;      // slow ramp, 0..127
-  const int fleck = (tex(x >> 2, y >> 2) & 0x1F) - 16;                // +-16 fixed speckle
-  int v = 64 + grad + fleck;
-  return static_cast<uint8_t>(v < 0 ? 0 : v > 255 ? 255 : v);
-}
-
-void fill_scene(const std::string& scene, std::vector<uint8_t>& nv12, uint32_t i) {
-  uint8_t* Y = nv12.data();
-  if (scene == "static") {
-    // A detailed still desktop. Identical every frame after 0 -> tests how small a steady frame is
-    // and how a periodic IDR spikes against it.
-    for (uint32_t y = 0; y < kH; ++y)
-      for (uint32_t x = 0; x < kW; ++x) Y[static_cast<size_t>(y) * kW + x] = deskbg(x, y);
-  } else if (scene == "scroll") {
-    // Vertical text-scroll: the whole frame shifts up by 4 px/frame over a textured page. Global
-    // uniform motion -- the easy case for inter prediction, but constant change.
-    const uint32_t dy = (i * 4);
-    for (uint32_t y = 0; y < kH; ++y) {
-      const uint32_t sy = y + dy;
-      uint8_t* row = &Y[static_cast<size_t>(y) * kW];
-      for (uint32_t x = 0; x < kW; ++x) {
-        // page texture: horizontal "lines of text" (dark bands) over deskbg
-        const bool textline = ((sy % 24) < 3) && ((tex(x >> 3, sy >> 3) & 1) != 0);
-        row[x] = textline ? 24 : deskbg(x, sy);
-      }
-    }
-  } else if (scene == "drag") {
-    // Dragging a window: a sharp-edged opaque rectangle slides diagonally across a still textured
-    // desktop. Localised motion + a moving hard edge (occlusion), the common desktop case.
-    const uint32_t wW = 900, wH = 600;
-    const uint32_t bx = (i * 9) % (kW - wW);
-    const uint32_t by = (i * 6) % (kH - wH);
-    for (uint32_t y = 0; y < kH; ++y) {
-      uint8_t* row = &Y[static_cast<size_t>(y) * kW];
-      for (uint32_t x = 0; x < kW; ++x) {
-        if (x >= bx && x < bx + wW && y >= by && y < by + wH) {
-          // window chrome: title bar + content with its own fine texture
-          const bool title = (y - by) < 32;
-          row[x] = title ? 200 : static_cast<uint8_t>(140 + (tex(x, y) & 0x3F) - 32);
-        } else {
-          row[x] = deskbg(x, y);
-        }
-      }
-    }
-  } else {  // "motion" -- full-screen high motion (video / game lock-screen): every pixel changes.
-    const uint32_t ox = i * 13, oy = i * 7;
-    for (uint32_t y = 0; y < kH; ++y) {
-      uint8_t* row = &Y[static_cast<size_t>(y) * kW];
-      for (uint32_t x = 0; x < kW; ++x) {
-        // scrolling plasma + moving high-frequency detail: hard to inter-predict, like the stutter
-        // lock-screen animation that provoked the incident.
-        const int plasma = static_cast<int>(
-            128 + 100 * std::sin((x + ox) * 0.015) * std::cos((y + oy) * 0.018));
-        const int detail = (tex(x + ox, y + oy) & 0x3F) - 32;
-        int v = plasma + detail;
-        row[x] = static_cast<uint8_t>(v < 0 ? 0 : v > 255 ? 255 : v);
-      }
-    }
-  }
-  std::fill(nv12.begin() + kLuma, nv12.end(), static_cast<uint8_t>(128));  // flat chroma
-}
-
-// ---- timing / cpu -----------------------------------------------------------------------------
-uint64_t proc_cpu_us() {
-  FILETIME c{}, e{}, k{}, u{};
-  if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
-  const auto to_us = [](const FILETIME& f) {
-    ULARGE_INTEGER v; v.LowPart = f.dwLowDateTime; v.HighPart = f.dwHighDateTime; return v.QuadPart / 10ULL;
-  };
-  return to_us(k) + to_us(u);
-}
-uint64_t now_us() {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-}
-
-double psnr_from_mse(double mse) {
-  if (mse <= 1e-9) return 99.0;                 // identical -> report a ceiling
-  return 10.0 * std::log10(255.0 * 255.0 / mse);
-}
-
-// ---- encoder abstraction ----------------------------------------------------------------------
-// Both the product MFT path and the OSS OpenH264 path feed NV12 and hand back H264AccessUnit-shaped
-// output, so the metrics loop is identical for either.
-struct IEnc {
-  virtual bool init(uint32_t w, uint32_t h, uint32_t fps, uint32_t bitrate, uint32_t keyint) = 0;
-  virtual bool encode(const std::vector<uint8_t>& nv12, bool key, int64_t tsHns,
-                      std::vector<H264AccessUnit>* out) = 0;
-  virtual void shutdown() = 0;
-  virtual ~IEnc() = default;
-};
-
-// The product encoder, backend chosen by REMOTE60_NATIVE_ENCODER_BACKEND (set by the caller).
-struct MftEnc : IEnc {
-  H264Encoder enc;
-  bool init(uint32_t w, uint32_t h, uint32_t fps, uint32_t bitrate, uint32_t keyint) override {
-    return enc.initialize(w, h, fps, bitrate, keyint);
-  }
-  bool encode(const std::vector<uint8_t>& nv12, bool key, int64_t tsHns,
-              std::vector<H264AccessUnit>* out) override {
-    return enc.encode_frame(nv12, key, tsHns, out);
-  }
-  void shutdown() override { enc.shutdown(); }
-};
-
-#ifdef BAKEOFF_OPENH264
-#include <wels/codec_api.h>
-#include <wels/codec_app_def.h>
-#include <wels/codec_def.h>
-// OpenH264 (Cisco, BSD). Loaded at runtime (WelsCreateSVCEncoder / WelsDestroySVCEncoder) from the
-// DLL named by BAKEOFF_OPENH264_DLL (default openh264.dll on PATH / next to the exe). NV12 -> I420
-// (chroma is flat 128, so the U and V planes are constant). Low-latency: single spatial/temporal
-// layer, RC_BITRATE_MODE, frame-skip OFF (we measure true generation vs target, like the MFT path).
-struct OpenH264Enc : IEnc {
-  using CreateFn = int (*)(ISVCEncoder**);
-  using DestroyFn = void (*)(ISVCEncoder*);
-  HMODULE dll = nullptr;
-  DestroyFn destroy = nullptr;
-  ISVCEncoder* enc = nullptr;
-  uint32_t w_ = 0, h_ = 0;
-  std::vector<uint8_t> uPlane, vPlane;
-
-  bool init(uint32_t w, uint32_t h, uint32_t fps, uint32_t bitrate, uint32_t keyint) override {
-    w_ = w; h_ = h;
-    const char* dllName = std::getenv("BAKEOFF_OPENH264_DLL");
-    dll = LoadLibraryA(dllName && *dllName ? dllName : "openh264.dll");
-    if (!dll) { std::printf("  (openh264: LoadLibrary failed err=%lu)\n", GetLastError()); return false; }
-    auto create = reinterpret_cast<CreateFn>(GetProcAddress(dll, "WelsCreateSVCEncoder"));
-    destroy = reinterpret_cast<DestroyFn>(GetProcAddress(dll, "WelsDestroySVCEncoder"));
-    if (!create || !destroy || create(&enc) != 0 || !enc) { std::printf("  (openh264: create failed)\n"); return false; }
-
-    SEncParamExt p{};
-    enc->GetDefaultParams(&p);
-    p.iUsageType = CAMERA_VIDEO_REAL_TIME;
-    p.iPicWidth = static_cast<int>(w);
-    p.iPicHeight = static_cast<int>(h);
-    p.fMaxFrameRate = static_cast<float>(fps);
-    p.iTargetBitrate = static_cast<int>(bitrate);
-    p.iMaxBitrate = static_cast<int>(bitrate);   // CBR-ish cap at target, like the streaming case
-    p.iRCMode = RC_BITRATE_MODE;
-    p.bEnableFrameSkip = false;                   // do not drop frames -> measure real overshoot
-    p.uiIntraPeriod = keyint;
-    p.iTemporalLayerNum = 1;
-    p.iSpatialLayerNum = 1;
-    p.iComplexityMode = MEDIUM_COMPLEXITY;
-    p.bEnableDenoise = false;
-    p.bEnableSceneChangeDetect = true;           // like a real encoder's periodic+scene IDR behaviour
-    p.iMultipleThreadIdc = 1;                     // single-threaded: deterministic, CPU-cost comparable
-    p.sSpatialLayers[0].iVideoWidth = static_cast<int>(w);
-    p.sSpatialLayers[0].iVideoHeight = static_cast<int>(h);
-    p.sSpatialLayers[0].fFrameRate = static_cast<float>(fps);
-    p.sSpatialLayers[0].iSpatialBitrate = static_cast<int>(bitrate);
-    p.sSpatialLayers[0].iMaxSpatialBitrate = static_cast<int>(bitrate);
-    if (enc->InitializeExt(&p) != 0) { std::printf("  (openh264: InitializeExt failed)\n"); return false; }
-    int traceLevel = 0;  // WELS_LOG_QUIET -- keep the bakeoff table clean
-    enc->SetOption(ENCODER_OPTION_TRACE_LEVEL, &traceLevel);
-    int fmt = videoFormatI420;
-    enc->SetOption(ENCODER_OPTION_DATAFORMAT, &fmt);
-    uPlane.assign(static_cast<size_t>(w / 2) * (h / 2), 128);
-    vPlane.assign(static_cast<size_t>(w / 2) * (h / 2), 128);
-    return true;
-  }
-
-  bool encode(const std::vector<uint8_t>& nv12, bool key, int64_t tsHns,
-              std::vector<H264AccessUnit>* out) override {
-    if (key) enc->ForceIntraFrame(true);
-    SSourcePicture pic{};
-    pic.iColorFormat = videoFormatI420;
-    pic.iPicWidth = static_cast<int>(w_);
-    pic.iPicHeight = static_cast<int>(h_);
-    pic.iStride[0] = static_cast<int>(w_);
-    pic.iStride[1] = static_cast<int>(w_ / 2);
-    pic.iStride[2] = static_cast<int>(w_ / 2);
-    pic.pData[0] = const_cast<uint8_t*>(nv12.data());  // Y plane is the NV12 luma, byte-identical
-    pic.pData[1] = uPlane.data();
-    pic.pData[2] = vPlane.data();
-    pic.uiTimeStamp = tsHns / 10000;                   // hns -> ms
-    SFrameBSInfo info{};
-    const int rv = enc->EncodeFrame(&pic, &info);
-    if (rv != 0) return false;
-    if (info.eFrameType == videoFrameTypeSkip || info.iLayerNum <= 0) return true;  // nothing emitted
-    H264AccessUnit au;
-    for (int l = 0; l < info.iLayerNum; ++l) {
-      const SLayerBSInfo& li = info.sLayerInfo[l];
-      size_t layerBytes = 0;
-      for (int n = 0; n < li.iNalCount; ++n) layerBytes += static_cast<size_t>(li.pNalLengthInByte[n]);
-      au.bytes.insert(au.bytes.end(), li.pBsBuf, li.pBsBuf + layerBytes);
-    }
-    au.keyFrame = (info.eFrameType == videoFrameTypeIDR || info.eFrameType == videoFrameTypeI);
-    au.rawIdr = (info.eFrameType == videoFrameTypeIDR);
-    au.sampleTimeHns = tsHns;
-    out->push_back(std::move(au));
-    return true;
-  }
-
-  void shutdown() override {
-    if (enc) { enc->Uninitialize(); if (destroy) destroy(enc); enc = nullptr; }
-    if (dll) { FreeLibrary(dll); dll = nullptr; }
-  }
-};
-#endif  // BAKEOFF_OPENH264
-
-std::unique_ptr<IEnc> make_encoder(const std::string& backend) {
-  if (backend == "openh264") {
-#ifdef BAKEOFF_OPENH264
-    return std::make_unique<OpenH264Enc>();
-#else
-    return nullptr;  // harness built without OpenH264
-#endif
-  }
-  _putenv_s("REMOTE60_NATIVE_ENCODER_BACKEND", backend.c_str());  // mft_hw / mft_sw / mft_auto
-  return std::make_unique<MftEnc>();
-}
-
-struct Row {
-  bool ok = false;
-  std::string scene, backend;
-  uint32_t targetKbps = 0;
-  double cpuCores = 0, cpuMsPerFrame = 0;
-  uint64_t encP50 = 0, encP95 = 0, encMax = 0;
-  double frMean = 0;
-  uint32_t frP95 = 0, frMax = 0;
-  double avgKbps = 0;                            // mean emitted bitrate over the paced run
-  double win1sMaxKbps = 0, win250Maxkbps = 0;    // sliding-window peaks
-  double win1sRatio = 0, win250Ratio = 0;        // peak / target
-  uint32_t idrCount = 0, idrMaxBytes = 0;
-  double idrPerSec = 0;
-  double psnr = 0;
-  uint32_t psnrFrames = 0;
-  uint32_t outFrames = 0, inFrames = 0;
-};
-
-// ---- the paced run ----------------------------------------------------------------------------
-Row run_one(const std::string& scene, const char* backend, uint32_t bitrateKbps, uint32_t seconds,
-            uint32_t keyint, bool doPsnr) {
-  Row r;
-  r.scene = scene;
-  r.backend = backend;
-  r.targetKbps = bitrateKbps;
-  const uint32_t bitrate = bitrateKbps * 1000u;
-
-  auto encp = make_encoder(backend);
-  if (!encp) { std::printf("  (%s: harness built without this backend)\n", backend); return r; }
-  if (!encp->init(kW, kH, kFps, bitrate, keyint)) return r;
-
-  H264Decoder dec;
-  bool decOk = false;
-  if (doPsnr) {
-    _putenv_s("REMOTE60_NATIVE_DECODER_BACKEND", "mft_sw");  // force SW decode -> no GPU for PSNR
-    decOk = dec.initialize(kW, kH, kFps);
-  }
-
-  std::vector<uint8_t> nv12(kNv12, 128);
-  const uint32_t nframes = seconds * kFps;
-  // 2 s warm-up excluded from CPU/stat windows: enough for the async MFT to drain the large startup
-  // IDR (it can surface several frames late) so a one-off bootstrap spike does not pollute the
-  // steady-state windowed-peak metric. Mid-stream periodic/scene IDRs stay in the measured window.
-  const uint32_t kWarmup = 2 * kFps;
-
-  std::vector<uint64_t> enc_us; enc_us.reserve(nframes);
-  std::vector<uint32_t> frameBytes(nframes, 0);  // emitted AU bytes attributed to each paced frame
-  std::vector<uint32_t> idrBytes;
-
-  // PSNR: keep a small ring of recent source luma keyed by sampleTimeHns so a decoded frame can find
-  // its source without storing the whole clip. Low-latency no-B output stays in order; the ring just
-  // tolerates a few frames of decoder lag.
-  struct SrcLuma { int64_t ts; std::vector<uint8_t> y; };
-  std::deque<SrcLuma> srcRing;
-  double mseSum = 0; uint32_t mseFrames = 0;
-
-  uint64_t cpu0 = 0, wall0 = 0, deadline = 0;
-  for (uint32_t i = 0; i < nframes + kWarmup; ++i) {
-    if (i == kWarmup) { cpu0 = proc_cpu_us(); wall0 = now_us(); deadline = now_us(); }
-    deadline += kFrameUs;
-    fill_scene(scene, nv12, i);
-    // Relative, frame-based media timeline from 0 (monotonic, +1 frame each step). Pacing/CPU still
-    // use the real wall clock (now_us); only the SAMPLE timestamp fed to the codec is this clean
-    // timeline -- so OpenH264 reads a correct 30 fps and PSNR matching stays unambiguous.
-    const int64_t tsHns = static_cast<int64_t>(i) * (10'000'000LL / kFps);
-
-    std::vector<H264AccessUnit> units;
-    const uint64_t t0 = now_us();
-    if (!encp->encode(nv12, i == 0, tsHns, &units)) { encp->shutdown(); if (decOk) dec.shutdown(); return r; }
-    const uint64_t dt = now_us() - t0;
-
-    if (doPsnr && decOk) {
-      srcRing.push_back(SrcLuma{tsHns, std::vector<uint8_t>(nv12.begin(), nv12.begin() + kLuma)});
-      while (srcRing.size() > 24) srcRing.pop_front();
-    }
-
-    if (i >= kWarmup) {
-      enc_us.push_back(dt);
-      ++r.inFrames;
-    }
-    for (const auto& u : units) {
-      if (i >= kWarmup) {
-        const uint32_t sz = static_cast<uint32_t>(u.bytes.size());
-        frameBytes[i - kWarmup] += sz;
-        ++r.outFrames;
-        if (u.keyFrame || u.rawIdr) { idrBytes.push_back(sz); }
-      }
-      if (doPsnr && decOk) {
-        std::vector<DecodedFrameNv12> outF;
-        dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF);
-        for (const auto& f : outF) {
-          // find source by nearest sampleTime in the ring
-          const SrcLuma* best = nullptr; int64_t bestD = INT64_MAX;
-          for (const auto& s : srcRing) {
-            const int64_t d = std::llabs(s.ts - f.sampleTimeHns);
-            if (d < bestD) { bestD = d; best = &s; }
-          }
-          if (best && f.bytes.size() >= kLuma && i >= kWarmup) {
-            // compare the visible luma region row by row (decoded plane may be 1088 tall / padded)
-            const uint32_t vh = f.visibleHeight ? f.visibleHeight : kH;
-            const uint32_t vw = f.visibleWidth ? f.visibleWidth : kW;
-            const uint32_t srcStride = kW, dstStride = f.width ? f.width : kW;
-            double sse = 0; const uint32_t hh = std::min(vh, kH), ww = std::min(vw, kW);
-            for (uint32_t y = 0; y < hh; ++y) {
-              const uint8_t* sp = best->y.data() + static_cast<size_t>(y) * srcStride;
-              const uint8_t* dp = f.bytes.data() + static_cast<size_t>(y + f.visibleTop) * dstStride + f.visibleLeft;
-              for (uint32_t x = 0; x < ww; ++x) { const int e = static_cast<int>(sp[x]) - static_cast<int>(dp[x]); sse += double(e) * e; }
-            }
-            mseSum += sse / (double(hh) * ww);
-            ++mseFrames;
-          }
-        }
-      }
-    }
-
-    const uint64_t n = now_us();
-    if (n < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n));
-  }
-  const uint64_t wall = now_us() - wall0;
-  const uint64_t cpu = proc_cpu_us() - cpu0;
-  encp->shutdown();
-  if (decOk) dec.shutdown();
-  if (enc_us.empty() || wall == 0) return r;
-
-  // ---- reduce ----
-  std::sort(enc_us.begin(), enc_us.end());
-  r.encP50 = enc_us[enc_us.size() / 2];
-  r.encP95 = enc_us[(enc_us.size() * 95) / 100];
-  r.encMax = enc_us.back();
-  r.cpuCores = double(cpu) / double(wall);
-  r.cpuMsPerFrame = r.outFrames ? (double(cpu) / 1000.0 / r.outFrames) : 0.0;
-
-  uint64_t totalBytes = 0; std::vector<uint32_t> fb;
-  for (uint32_t b : frameBytes) { totalBytes += b; fb.push_back(b); }
-  std::vector<uint32_t> sorted = fb; std::sort(sorted.begin(), sorted.end());
-  r.frMax = sorted.empty() ? 0 : sorted.back();
-  r.frP95 = sorted.empty() ? 0 : sorted[(sorted.size() * 95) / 100];
-  r.frMean = fb.empty() ? 0 : double(totalBytes) / fb.size();
-  const double durS = double(fb.size()) / kFps;
-  r.avgKbps = durS > 0 ? double(totalBytes) * 8.0 / 1000.0 / durS : 0;
-
-  // sliding windows over the per-frame byte series (30 frames = 1 s, 8 frames ~= 250 ms)
-  const uint32_t w1 = kFps, w250 = (kFps + 2) / 4;  // 30, 8
-  uint64_t acc = 0; double max1 = 0;
-  for (size_t k = 0; k < fb.size(); ++k) {
-    acc += fb[k];
-    if (k >= w1) acc -= fb[k - w1];
-    if (k + 1 >= w1) max1 = std::max(max1, double(acc));
-  }
-  acc = 0; double max250 = 0;
-  for (size_t k = 0; k < fb.size(); ++k) {
-    acc += fb[k];
-    if (k >= w250) acc -= fb[k - w250];
-    if (k + 1 >= w250) max250 = std::max(max250, double(acc));
-  }
-  r.win1sMaxKbps = max1 * 8.0 / 1000.0;                       // bytes in 1 s -> kbps
-  r.win250Maxkbps = max250 * 8.0 / 1000.0 / (double(w250) / kFps);  // normalise 250 ms -> per-second
-  r.win1sRatio = bitrateKbps ? r.win1sMaxKbps / bitrateKbps : 0;
-  r.win250Ratio = bitrateKbps ? r.win250Maxkbps / bitrateKbps : 0;
-
-  r.idrCount = static_cast<uint32_t>(idrBytes.size());
-  r.idrMaxBytes = idrBytes.empty() ? 0 : *std::max_element(idrBytes.begin(), idrBytes.end());
-  r.idrPerSec = durS > 0 ? r.idrCount / durS : 0;
-
-  if (doPsnr && mseFrames) { r.psnr = psnr_from_mse(mseSum / mseFrames); r.psnrFrames = mseFrames; }
-  r.ok = true;
-  return r;
-}
-
-void print_header() {
-  std::printf("\n%-7s %-8s %6s | %7s %8s | %9s %8s %8s | %8s %8s | %6s/%-6s %6s/%-6s | %5s %7s | %6s\n",
-              "scene", "backend", "tgtKbps", "cpuCore", "cpuMs/f", "frMeanB", "frP95B", "frMaxB",
-              "avgKbps", "idrMaxB", "1s", "x", "250ms", "x", "idr/s", "encP95us", "PSNR");
-}
-void print_row(const Row& r) {
-  if (!r.ok) { std::printf("%-7s %-8s %6u | INIT/ENCODE FAILED\n", r.scene.c_str(), r.backend.c_str(), r.targetKbps); return; }
-  std::printf("%-7s %-8s %6u | %7.2f %8.2f | %9.0f %8u %8u | %8.0f %8u | %6.0f/%-6.2f %6.0f/%-6.2f | %5.2f %7llu | %6.2f\n",
-              r.scene.c_str(), r.backend.c_str(), r.targetKbps, r.cpuCores, r.cpuMsPerFrame,
-              r.frMean, r.frP95, r.frMax, r.avgKbps, r.idrMaxBytes,
-              r.win1sMaxKbps, r.win1sRatio, r.win250Maxkbps, r.win250Ratio, r.idrPerSec,
-              (unsigned long long)r.encP95, r.psnr);
-}
 
 std::vector<std::string> split(const std::string& s, char sep) {
   std::vector<std::string> out; std::string cur;
@@ -468,6 +45,230 @@ std::vector<std::string> split(const std::string& s, char sep) {
   if (!cur.empty()) out.push_back(cur);
   return out;
 }
+
+struct Half {
+  double avgKbps = 0;              // NOMINAL: total AU bytes in the half * 8 / (frames/fps)
+  double win1sMaxKbps = 0, win250MaxKbps = 0;     // media-time windows by source PTS
+  double win1sRatio = 0, win250Ratio = 0;
+  double frMean = 0; uint32_t frP95 = 0, frMax = 0;
+  uint32_t idrCount = 0, idrMaxBytes = 0; double idrPerSec = 0;
+  double psnr = 0; uint32_t psnrMatched = 0, psnrUnmatched = 0, psnrDecodeFail = 0;
+};
+
+struct Row {
+  bool valid = false;
+  std::string scene, backend; uint32_t targetKbps = 0, fps = 0;
+  // pacing / accounting
+  uint32_t submitted = 0, returnedAUs = 0, pendingAtEnd = 0, deadlineMisses = 0;
+  double inFps = 0, outFps = 0;      // measured
+  double encoderCpuCores = 0;        // scene-gen + decode CPU subtracted
+  double sceneGenCores = 0, decodeCores = 0;
+  uint64_t latP50 = 0, latP95 = 0, latMax = 0;  // input-submit -> AU-return, us
+  double vbvMs = 0;
+  Half whole;                        // the measured region as one half (COLDQP / plain)
+  bool split = false; Half a, b; uint32_t liveQp = 0;  // LIVEQP: before/after the live change
+};
+
+// media-time windowed peak over a per-source-frame byte series: max bytes in any window of
+// `winFrames` consecutive source frames, expressed as kbps (bytes*8/1000 / windowSeconds).
+double window_peak_kbps(const std::vector<uint32_t>& bytesByFrame, uint32_t winFrames, uint32_t fps) {
+  if (bytesByFrame.empty() || winFrames == 0) return 0;
+  uint64_t acc = 0; double mx = 0;
+  for (size_t k = 0; k < bytesByFrame.size(); ++k) {
+    acc += bytesByFrame[k];
+    if (k >= winFrames) acc -= bytesByFrame[k - winFrames];
+    if (k + 1 >= winFrames) mx = std::max(mx, static_cast<double>(acc));
+  }
+  const double winSec = static_cast<double>(winFrames) / fps;
+  return mx * 8.0 / 1000.0 / winSec;
+}
+
+void reduce_half(Half& h, const std::vector<uint32_t>& bytesByFrame, const std::vector<uint32_t>& idrBytes,
+                 uint32_t fps, uint32_t targetKbps) {
+  uint64_t total = 0; std::vector<uint32_t> sorted;
+  for (uint32_t b : bytesByFrame) { total += b; sorted.push_back(b); }
+  std::sort(sorted.begin(), sorted.end());
+  const double nominalSec = bytesByFrame.empty() ? 0 : static_cast<double>(bytesByFrame.size()) / fps;
+  h.avgKbps = nominalSec > 0 ? total * 8.0 / 1000.0 / nominalSec : 0;
+  h.frMean = bytesByFrame.empty() ? 0 : static_cast<double>(total) / bytesByFrame.size();
+  h.frMax = sorted.empty() ? 0 : sorted.back();
+  h.frP95 = sorted.empty() ? 0 : sorted[(sorted.size() * 95) / 100];
+  const uint32_t w1 = fps, w250 = std::max(1u, (fps + 2) / 4);
+  h.win1sMaxKbps = window_peak_kbps(bytesByFrame, w1, fps);
+  h.win250MaxKbps = window_peak_kbps(bytesByFrame, w250, fps);
+  h.win1sRatio = targetKbps ? h.win1sMaxKbps / targetKbps : 0;
+  h.win250Ratio = targetKbps ? h.win250MaxKbps / targetKbps : 0;
+  h.idrCount = static_cast<uint32_t>(idrBytes.size());
+  h.idrMaxBytes = idrBytes.empty() ? 0 : *std::max_element(idrBytes.begin(), idrBytes.end());
+  h.idrPerSec = nominalSec > 0 ? h.idrCount / nominalSec : 0;
+}
+
+Row run(const std::string& scene, const std::string& backend, uint32_t targetKbps, uint32_t seconds,
+        uint32_t fps, uint32_t keyintSec, bool doPsnr, uint32_t coldQp, uint32_t liveQp) {
+  Row r; r.scene = scene; r.backend = backend; r.targetKbps = targetKbps; r.fps = fps; r.liveQp = liveQp;
+  r.split = liveQp != 0;
+  const uint32_t bitrate = targetKbps * 1000u;
+  const uint32_t keyintFrames = std::max(1u, keyintSec * fps);
+  const uint64_t frameUs = 1'000'000ULL / fps;
+  r.vbvMs = 200.0;  // product low_latency_vbv_bytes = bitrate/40 -> (bitrate/40)*8*1000/bitrate = 200ms
+
+  if (coldQp) _putenv_s("REMOTE60_NATIVE_MAX_QP", std::to_string(coldQp).c_str());
+  else _putenv_s("REMOTE60_NATIVE_MAX_QP", "");  // product default (32)
+
+  auto enc = make_encoder(backend);
+  if (!enc) { std::printf("  (%s: harness built without this backend)\n", backend.c_str()); return r; }
+  if (!enc->init(kW, kH, fps, bitrate, keyintFrames)) return r;
+
+  H264Decoder dec; bool decOk = false;
+  if (doPsnr) { _putenv_s("REMOTE60_NATIVE_DECODER_BACKEND", "mft_sw"); decOk = dec.initialize(kW, kH, fps); }
+
+  std::vector<uint8_t> nv12(kNv12, 128);
+  const uint32_t warmup = 2 * fps;                 // paced, excluded from stats
+  const uint32_t body = seconds * fps;
+  const uint32_t total = warmup + body;
+  const uint32_t liveSwitchAt = warmup + body / 2;  // LIVEQP: switch at the half point
+
+  // per-source-frame byte series (indexed by source frame ordinal within the measured body)
+  std::vector<uint32_t> bytesByFrame(body, 0), idrBytes;
+  std::vector<uint32_t> bytesA, idrA, bytesB, idrB;  // LIVEQP halves (by source frame)
+  std::vector<uint64_t> lat;                          // input-submit -> AU-return us
+  std::map<uint64_t, uint64_t> submitUsByOrdinal;     // ordinal -> submit wall us
+  std::map<int64_t, std::vector<uint8_t>> srcLumaByPts; // PSNR: exact-PTS source luma
+  double mseSum = 0; uint32_t mseN = 0, psnrUnmatched = 0, psnrDecodeFail = 0;
+
+  // Scene-generation cost, measured ALONE (encoder idle, single-threaded) so the async encoder's
+  // own threads are not misattributed to it. Subtracted from the measured CPU to leave encoder cost.
+  uint64_t perFrameGenUs = 0;
+  { const uint64_t c0 = proc_cpu_us();
+    for (uint32_t k = 0; k < fps; ++k) fill_scene(scene, nv12, warmup + k);
+    perFrameGenUs = (proc_cpu_us() - c0) / std::max(1u, fps); }
+
+  uint64_t sceneGenUs = 0, decodeUs = 0;
+  uint64_t cpu0 = 0, wall0 = 0, deadline = now_us();
+  uint64_t submittedOrdinal = 0;
+  bool switched = false;
+
+  for (uint32_t i = 0; i < total; ++i) {
+    if (i == warmup) { cpu0 = proc_cpu_us(); wall0 = now_us(); }  // begin measured region
+    if (r.split && !switched && i == liveSwitchAt) { enc->set_max_qp(liveQp); switched = true; }
+    deadline += frameUs;
+
+    fill_scene(scene, nv12, i);  // gen cost accounted via the calibration above, not inline
+
+    const int64_t tsHns = static_cast<int64_t>(i) * static_cast<int64_t>(10'000'000LL / fps);
+    const bool key = (i == 0);
+    const uint64_t submitWall = now_us();
+    // the encoder assigns acceptedInputOrdinal; it accepts 1 input per call, so the NEXT ordinal is
+    // submittedOrdinal+1. Record submit time against it for the input->AU latency.
+    ++submittedOrdinal;
+    submitUsByOrdinal[submittedOrdinal] = submitWall;
+    if (i >= warmup) ++r.submitted;
+    if (doPsnr && decOk) srcLumaByPts[tsHns] = std::vector<uint8_t>(nv12.begin(), nv12.begin() + kLuma);
+
+    std::vector<H264AccessUnit> units;
+    if (!enc->encode(nv12, key, tsHns, &units)) { enc->shutdown(); if (decOk) dec.shutdown(); return r; }
+    const uint64_t auWall = now_us();
+
+    for (const auto& u : units) {
+      // input->AU latency by exact ordinal (async-correct)
+      auto it = submitUsByOrdinal.find(u.acceptedInputOrdinal);
+      const uint64_t subWall = it != submitUsByOrdinal.end() ? it->second : submitWall;
+      const int64_t srcPts = u.sampleTimeHns;
+      const int64_t srcFrameIdx = fps ? srcPts / static_cast<int64_t>(10'000'000LL / fps) : -1;
+      const bool inBody = srcFrameIdx >= static_cast<int64_t>(warmup) &&
+                          srcFrameIdx < static_cast<int64_t>(total);
+      if (inBody) {
+        ++r.returnedAUs;
+        lat.push_back(auWall - subWall);
+        const uint32_t idx = static_cast<uint32_t>(srcFrameIdx - warmup);
+        const uint32_t sz = static_cast<uint32_t>(u.bytes.size());
+        if (idx < bytesByFrame.size()) bytesByFrame[idx] += sz;
+        if (u.rawIdr) idrBytes.push_back(sz);
+        if (r.split) {
+          const bool firstHalf = srcFrameIdx < static_cast<int64_t>(liveSwitchAt);
+          if (firstHalf) { if (idx < bytesByFrame.size()) { if (bytesA.size() <= idx) bytesA.resize(idx + 1, 0); bytesA[idx] += sz; } if (u.rawIdr) idrA.push_back(sz); }
+          else { if (bytesB.size() <= idx) bytesB.resize(idx + 1, 0); bytesB[idx] += sz; if (u.rawIdr) idrB.push_back(sz); }
+        }
+      }
+      if (doPsnr && decOk) {
+        const uint64_t d0 = proc_cpu_us();
+        std::vector<DecodedFrameNv12> outF;
+        dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF);
+        decodeUs += proc_cpu_us() - d0;
+        for (const auto& f : outF) {
+          auto sit = srcLumaByPts.find(f.sampleTimeHns);  // EXACT PTS match only
+          if (sit == srcLumaByPts.end()) { ++psnrUnmatched; continue; }
+          if (f.bytes.size() < kLuma) { ++psnrDecodeFail; continue; }
+          const int64_t fidx = fps ? f.sampleTimeHns / static_cast<int64_t>(10'000'000LL / fps) : -1;
+          if (fidx < static_cast<int64_t>(warmup)) continue;  // warm-up frames not scored
+          const uint32_t vh = std::min(f.visibleHeight ? f.visibleHeight : kH, kH);
+          const uint32_t vw = std::min(f.visibleWidth ? f.visibleWidth : kW, kW);
+          const uint32_t dstStride = f.width ? f.width : kW;
+          double sse = 0;
+          for (uint32_t y = 0; y < vh; ++y) {
+            const uint8_t* sp = sit->second.data() + static_cast<size_t>(y) * kW;
+            const uint8_t* dp = f.bytes.data() + static_cast<size_t>(y + f.visibleTop) * dstStride + f.visibleLeft;
+            for (uint32_t x = 0; x < vw; ++x) { const int e = int(sp[x]) - int(dp[x]); sse += double(e) * e; }
+          }
+          mseSum += sse / (double(vh) * vw); ++mseN;
+          srcLumaByPts.erase(sit);
+        }
+      }
+    }
+    const uint64_t n = now_us();
+    if (n < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n));
+    else if (i >= warmup && (n - deadline) > frameUs / 2) ++r.deadlineMisses;  // fell >half a frame behind
+  }
+
+  const uint64_t wall = now_us() - wall0;
+  const uint64_t cpu = proc_cpu_us() - cpu0;
+  r.pendingAtEnd = enc->pending_depth();
+  enc->shutdown();
+  if (decOk) dec.shutdown();
+  if (wall == 0) return r;
+
+  const double wallSec = wall / 1e6;
+  sceneGenUs = perFrameGenUs * body;  // gen happens every measured frame; calibrated single-thread cost
+  r.inFps = r.submitted / wallSec;
+  r.outFps = r.returnedAUs / wallSec;
+  const uint64_t encCpu = cpu > (sceneGenUs + decodeUs) ? cpu - sceneGenUs - decodeUs : 0;
+  r.encoderCpuCores = double(encCpu) / double(wall);
+  r.sceneGenCores = double(sceneGenUs) / double(wall);
+  r.decodeCores = double(decodeUs) / double(wall);
+  std::sort(lat.begin(), lat.end());
+  if (!lat.empty()) { r.latP50 = lat[lat.size()/2]; r.latP95 = lat[(lat.size()*95)/100]; r.latMax = lat.back(); }
+
+  reduce_half(r.whole, bytesByFrame, idrBytes, fps, targetKbps);
+  if (r.split) { reduce_half(r.a, bytesA, idrA, fps, targetKbps); reduce_half(r.b, bytesB, idrB, fps, targetKbps); }
+  if (doPsnr) { r.whole.psnr = mseN ? psnr_from_mse(mseSum / mseN) : 0; r.whole.psnrMatched = mseN;
+                r.whole.psnrUnmatched = psnrUnmatched; r.whole.psnrDecodeFail = psnrDecodeFail; }
+  r.valid = true;
+  return r;
+}
+
+void print_header() {
+  std::printf("\n%-7s %-9s %5s %4s | valid inFps outFps dmiss pend | encCore(gen/dec) | lat us p50/p95/max | "
+              "avgKbps frMeanB frP95B frMaxB | 1s/x 250ms/x | idr/s idrMaxB | vbvMs | PSNR(match/unm/fail)\n",
+              "scene","backend","tgt","fps");
+}
+void print_half(const char* tag, const Row& r, const Half& h) {
+  std::printf("%-7s %-9s %5u %4u | %s %5.1f %5.1f %5u %4u | %5.2f(%.2f/%.2f) | %6llu/%6llu/%7llu | "
+              "%7.0f %7.0f %6u %6u | %.0f/%.2f %.0f/%.2f | %.2f %6u | %.0f | %.2f(%u/%u/%u) %s\n",
+              r.scene.c_str(), r.backend.c_str(), r.targetKbps, r.fps, r.valid?"ok ":"BAD",
+              r.inFps, r.outFps, r.deadlineMisses, r.pendingAtEnd,
+              r.encoderCpuCores, r.sceneGenCores, r.decodeCores,
+              (unsigned long long)r.latP50,(unsigned long long)r.latP95,(unsigned long long)r.latMax,
+              h.avgKbps, h.frMean, h.frP95, h.frMax, h.win1sMaxKbps, h.win1sRatio, h.win250MaxKbps, h.win250Ratio,
+              h.idrPerSec, h.idrMaxBytes, r.vbvMs, h.psnr, h.psnrMatched, h.psnrUnmatched, h.psnrDecodeFail, tag);
+}
+void print_row(const Row& r) {
+  if (!r.valid) { std::printf("%-7s %-9s %5u %4u | INIT/ENCODE FAILED (invalid run)\n",
+                              r.scene.c_str(), r.backend.c_str(), r.targetKbps, r.fps); return; }
+  if (r.split) { char ta[32], tb[32]; std::snprintf(ta,sizeof(ta),"[live before:qp32]"); std::snprintf(tb,sizeof(tb),"[live after:qp%u]", r.liveQp);
+                 print_half(ta, r, r.a); print_half(tb, r, r.b); }
+  else print_half("", r, r.whole);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -476,33 +277,28 @@ int main(int argc, char** argv) {
   const std::string scenesArg = argc > 2 ? argv[2] : "static,scroll,drag,motion";
   const std::string backendsArg = argc > 3 ? argv[3] : "mft_sw";
   const std::string ratesArg = argc > 4 ? argv[4] : "1500,3000,6000";
-  const uint32_t keyint = argc > 5 ? static_cast<uint32_t>(std::max(1, std::atoi(argv[5]))) : 300u;
-  const bool doPsnr = []() { const char* e = std::getenv("BAKEOFF_PSNR"); return e && *e && std::strcmp(e, "0") != 0; }();
+  const uint32_t fps = argc > 5 ? static_cast<uint32_t>(std::max(1, std::atoi(argv[5]))) : 30u;
+  const uint32_t keyintSec = argc > 6 ? static_cast<uint32_t>(std::max(1, std::atoi(argv[6]))) : 10u;
+  const bool doPsnr = []{ const char* e = std::getenv("BAKEOFF_PSNR"); return e && *e && std::strcmp(e,"0"); }();
+  const uint32_t coldQp = []{ const char* e = std::getenv("BAKEOFF_COLDQP"); return e&&*e?(uint32_t)std::atoi(e):0u; }();
+  const uint32_t liveQp = []{ const char* e = std::getenv("BAKEOFF_LIVEQP"); return e&&*e?(uint32_t)std::atoi(e):0u; }();
 
-  const auto scenes = split(scenesArg, ',');
-  const auto backends = split(backendsArg, ',');
-  std::vector<uint32_t> rates; for (auto& s : split(ratesArg, ',')) rates.push_back(static_cast<uint32_t>(std::atoi(s.c_str())));
+  const auto scenes = split(scenesArg, ','); const auto backends = split(backendsArg, ',');
+  std::vector<uint32_t> rates; for (auto& s : split(ratesArg, ',')) rates.push_back((uint32_t)std::atoi(s.c_str()));
 
-  std::printf("host_encoder_bakeoff (1080p %ufps PACED, %us/config, keyint=%u, PSNR=%s)\n",
-              kFps, seconds, keyint, doPsnr ? "on(SW decode)" : "off");
-  std::printf("scenes=%s backends=%s ratesKbps=%s\n", scenesArg.c_str(), backendsArg.c_str(), ratesArg.c_str());
-  const char* rc = std::getenv("REMOTE60_NATIVE_RATE_CONTROL");
-  const char* pk = std::getenv("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT");
-  const char* mq = std::getenv("REMOTE60_NATIVE_MAX_QP");
-  std::printf("rc_env: RATE_CONTROL=%s PEAK_BITRATE_PERCENT=%s MAX_QP=%s\n",
-              rc ? rc : "(default VBR)", pk ? pk : "(default)", mq ? mq : "(default 32)");
-
+  std::printf("host_encoder_bakeoff r2 (1080p %ufps PACED incl warm-up, %us/config, keyint=%us=%uframes)\n",
+              fps, seconds, keyintSec, keyintSec*fps);
+  std::printf("scenes=%s backends=%s ratesKbps=%s PSNR=%s coldQp=%u liveQp=%u\n",
+              scenesArg.c_str(), backendsArg.c_str(), ratesArg.c_str(), doPsnr?"on":"off", coldQp, liveQp);
   MFStartup(MF_VERSION);
   print_header();
-  for (const auto& scene : scenes) {
-    for (uint32_t br : rates) {
-      for (const auto& b : backends) {
-        const Row r = run_one(scene, b.c_str(), br, seconds, keyint, doPsnr);
-        print_row(r);
-      }
-    }
+  bool anyInvalid = false;
+  for (const auto& sc : scenes) for (uint32_t br : rates) for (const auto& b : backends) {
+    const Row r = run(sc, b, br, seconds, fps, keyintSec, doPsnr, coldQp, liveQp);
+    print_row(r);
+    if (!r.valid) anyInvalid = true;
   }
-  std::printf("\nhost_encoder_bakeoff: DONE\n");
+  std::printf("\nhost_encoder_bakeoff: %s\n", anyInvalid ? "DONE (some INVALID runs -- see BAD rows)" : "DONE (all runs valid)");
   MFShutdown();
   return 0;
 }

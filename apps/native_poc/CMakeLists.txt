@@ -3023,27 +3023,40 @@ if(MSVC)
   target_compile_options(remote60_host_encoder_backend_bench PRIVATE /utf-8)
 endif()
 
-# encoder-bakeoff r1 (MEASUREMENT-ONLY experiment branch, not merged): rate-control bakeoff across
-# deterministic 1080p30 scenes -- drives the SAME product encoder path (H264Encoder) and a SW decoder
-# for PSNR. No product default changes; no GPL. See src/host_encoder_bakeoff.cpp.
-add_executable(remote60_host_encoder_bakeoff
-  src/mf_h264_codec.cpp
-  src/host_encoder_bakeoff.cpp
-)
-target_include_directories(remote60_host_encoder_bakeoff PRIVATE src)
-target_link_libraries(remote60_host_encoder_bakeoff PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
-if(MSVC)
-  target_compile_options(remote60_host_encoder_bakeoff PRIVATE /utf-8)
-endif()
-# OpenH264 (BSD) is optional and loaded at runtime (no import lib). If its headers were fetched into
-# the untracked experiment dir, compile the OpenH264 adapter in. Absolute path is fine: experiment-only.
+# encoder-bakeoff r2 (MEASUREMENT-ONLY experiment branch, not merged): drives the SAME product
+# encoder path (H264Encoder) + an OpenH264 (BSD) adapter. No product default changes; no GPL linked.
+#   remote60_host_encoder_bakeoff        -- corrected rate/CPU/latency/PSNR measurement + cold/live QP
+#   remote60_host_encoder_product_trace  -- real RateGovernor + admission gate + wire-limiter trace
+#   remote60_host_nvidia_probe           -- self-contained MaxQP reported-vs-applied probe for NVIDIA
 set(_oh264_inc "${CMAKE_CURRENT_SOURCE_DIR}/../../.claude/openh264/include")
+set(_oh264_ok FALSE)
 if(EXISTS "${_oh264_inc}/wels/codec_api.h")
-  target_compile_definitions(remote60_host_encoder_bakeoff PRIVATE BAKEOFF_OPENH264)
-  target_include_directories(remote60_host_encoder_bakeoff PRIVATE "${_oh264_inc}")
+  set(_oh264_ok TRUE)
   message(STATUS "encoder-bakeoff: OpenH264 adapter ENABLED (${_oh264_inc})")
 else()
   message(STATUS "encoder-bakeoff: OpenH264 headers not found, adapter disabled")
+endif()
+
+add_executable(remote60_host_encoder_bakeoff src/mf_h264_codec.cpp src/host_encoder_bakeoff.cpp)
+add_executable(remote60_host_encoder_product_trace src/mf_h264_codec.cpp src/host_encoder_product_trace.cpp)
+foreach(_bk_tgt remote60_host_encoder_bakeoff remote60_host_encoder_product_trace)
+  target_include_directories(${_bk_tgt} PRIVATE src)
+  target_link_libraries(${_bk_tgt} PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+  if(MSVC)
+    target_compile_options(${_bk_tgt} PRIVATE /utf-8)
+  endif()
+  if(_oh264_ok)
+    target_compile_definitions(${_bk_tgt} PRIVATE BAKEOFF_OPENH264)
+    target_include_directories(${_bk_tgt} PRIVATE "${_oh264_inc}")
+  endif()
+endforeach()
+
+# Self-contained NVIDIA probe: NO OpenH264 (one exe to hand to the user, system MF only).
+add_executable(remote60_host_nvidia_probe src/mf_h264_codec.cpp src/host_nvidia_probe.cpp)
+target_include_directories(remote60_host_nvidia_probe PRIVATE src)
+target_link_libraries(remote60_host_nvidia_probe PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_nvidia_probe PRIVATE /utf-8)
 endif()
 
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
