@@ -167,8 +167,10 @@ int main(int argc, char** argv) {
   uint64_t secStartUs = qpc_now_us();
   uint64_t secAuBytes = 0; uint32_t secEncoded = 0, secSkips = 0, secAccepted = 0;
   uint64_t lastWireBytes = 0;
-  double avgAuBytes = (double)bitrate / 8.0 / fps;
   uint32_t curMaxQp = 32, curFps = fps, fpsAcc = 0, seqNo = 0;
+  // governor-input state, replicated EXACTLY from host_stage_stats_h264.cpp:160-186 (real counters):
+  uint64_t gTotalSkips = 0, gPrevTxBytes = 0, gPrevTxFrames = 0, gPrevSkips = 0, gPrevAvgSent = 0, gPrevTickUs = 0;
+  uint32_t gUserFps = fps;  // the ceiling; target/userFps change would governor.Reset() (not in this scenario)
 
   std::printf("\n sec|phase |accepted encoded skips| realAU_kbps genEst_kbps wire_kbps | queue | maxQp fps | "
               "pub_fps maxGapMs\n");
@@ -187,7 +189,7 @@ int main(int argc, char** argv) {
       uint32_t qdepth; { std::lock_guard<std::mutex> lk(sender.mu); qdepth = (uint32_t)sender.queue.size(); }
       EncodeAdmissionInputs ad; ad.wireCapActive = capOn; ad.keyWanted = key; ad.senderQueueDepth = qdepth; ad.senderQueueMax = 2;
       if (decide_encode_admission(ad) == EncodeAdmission::SkipOverloaded) {
-        ++secSkips;
+        ++secSkips; ++gTotalSkips;  // cumulative, like HostStats::wireOverloadSkipCount
       } else {
         std::vector<H264AccessUnit> units;
         enc.encode_frame(nv12, key, (int64_t)i * (int64_t)(10'000'000LL / fps), &units);
@@ -204,10 +206,20 @@ int main(int argc, char** argv) {
       const double elapsedSec = (nowUs - secStartUs) / 1e6;
       const uint64_t wb = wireBytes.load();
       const uint64_t wireDelta = wb - lastWireBytes;
-      if (secEncoded) avgAuBytes = (double)secAuBytes / secEncoded;
-      // product generated-load estimate (replicated formula, real counters): AU bytes + skipped*avg
-      const uint64_t genEstBytes = (uint64_t)(secAuBytes + secSkips * avgAuBytes);
-      const RateDecision dec = gov.OnSecond(genEstBytes, bitrate, fps);
+      // ---- governor input, EXACTLY as host_stage_stats_h264.cpp:160-186 (real sender counters) ----
+      const bool wireCapActive = sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled();
+      const uint64_t txNow = sender.txBytes.load(std::memory_order_relaxed);
+      const uint64_t txDelta = txNow >= gPrevTxBytes ? txNow - gPrevTxBytes : 0; gPrevTxBytes = txNow;
+      const uint64_t framesNow = sender.txFrames.load(std::memory_order_relaxed);
+      const uint64_t framesDelta = framesNow >= gPrevTxFrames ? framesNow - gPrevTxFrames : 0; gPrevTxFrames = framesNow;
+      const uint64_t skipsDelta = gTotalSkips >= gPrevSkips ? gTotalSkips - gPrevSkips : 0; gPrevSkips = gTotalSkips;
+      const uint64_t elapsedUs = (gPrevTickUs > 0 && nowUs > gPrevTickUs) ? nowUs - gPrevTickUs : 1000000ULL; gPrevTickUs = nowUs;
+      const uint64_t avgSentFrameBytes = framesDelta > 0 ? txDelta / framesDelta : gPrevAvgSent;
+      if (framesDelta > 0) gPrevAvgSent = avgSentFrameBytes;
+      const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;  // cap off: txDelta only
+      const uint64_t govBytesPerSec = elapsedUs > 0 ? (uint64_t)(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
+      // (target/userFps change -> governor.Reset(); fixed here, so no Reset fires.)
+      const RateDecision dec = gov.OnSecond(govBytesPerSec, bitrate, gUserFps);
       const char* note = "";
       if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; note = "qp"; }
       curFps = dec.fps;
@@ -220,7 +232,8 @@ int main(int argc, char** argv) {
         for (uint64_t t : deliveryUs) if (t >= secStartUs) ++pub; }
       std::printf("%4u|%-6s|%8u %7u %5u| %10.0f %11.0f %9llu | %5u | %5u %3u | %6llu %8.1f %s\n",
                   (i + 1) / fps, scene.c_str(), secAccepted, secEncoded, secSkips,
-                  secAuBytes * 8.0 / 1000.0 / elapsedSec, genEstBytes * 8.0 / 1000.0 / elapsedSec,
+                  secAuBytes * 8.0 / 1000.0 / elapsedSec,          // real encoded-AU kbps (separate)
+                  govBytesPerSec * 8.0 / 1000.0,                    // governor-input estimate (product formula)
                   (unsigned long long)(wireDelta * 8 / 1000), qdepth, curMaxQp, curFps,
                   (unsigned long long)pub, maxGapMs, note);
       secStartUs = nowUs; secAuBytes = 0; secEncoded = secSkips = secAccepted = 0;
