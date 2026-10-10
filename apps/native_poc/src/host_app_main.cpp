@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
@@ -258,7 +259,23 @@ std::wstring log_file_path() {
  * everything else is still fire-and-forget, but the failure is counted rather than discarded.
  */
 bool append_host_app_log(const std::string& line) {
-  return remote60::native_poc::host_app_log().WriteStamped(line);
+  const bool wrote = remote60::native_poc::host_app_log().WriteStamped(line);
+  // hostapp-log-upload r1: also mirror these [host-app] supervisor lines (health / lifecycle / update)
+  // to the NAS "host" stream so they are not local-only. Same rationale/stream as AppendLogLineOnce.
+  remote60::native_poc::log_upload_enqueue("host", line);
+  return wrote;
+}
+
+// hostapp-log-upload r1: if Windows Error Reporting LocalDumps is configured, a crashed child leaves a
+// minidump at %LOCALAPPDATA%\CrashDumps\<exe>.<pid>.dmp. Return " dump=<path>" when one exists (PATH
+// ONLY -- the dump is never uploaded), else "". Best-effort: absent LocalDumps config -> no file -> "".
+std::string local_crash_dump_note(uint32_t pid) {
+  const char* localAppData = std::getenv("LOCALAPPDATA");
+  if (!localAppData || !*localAppData) return {};
+  const std::string path =
+      std::string(localAppData) + "\\CrashDumps\\GNLinkStream.exe." + std::to_string(pid) + ".dmp";
+  if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return {};
+  return " dump=" + path;
 }
 
 // Everything the sign-in worker produces, handed to the UI thread by value. Deliberately plain
@@ -451,6 +468,13 @@ class StreamingHostProcess {
   /** A supervisor line, stamped. Same writer, same lock, same rotation. */
   void AppendLogLineOnce(const std::string& line) {
     remote60::native_poc::host_app_log().WriteStamped(line);
+    // hostapp-log-upload r1: the supervisor's own [host-app] lines (lifecycle / health / "the streaming
+    // host exited (code ...)") used to live ONLY in the local host_app.log, so the NAS had 0 of them and
+    // a crash had no cause there. Send them to the SAME "host" stream the child's output already uses
+    // (:ReadChildOutput), so the exit line sits in the device's NAS host.log right after the stream's
+    // last output. "host" is an existing server-accepted stream (no server change). No secrets: these
+    // lines are lifecycle/health/update/exit text, never tokens or credentials.
+    remote60::native_poc::log_upload_enqueue("host", line);
   }
 
   // No longer owns a handle. The shared writer owns the only one, and rotation happens inside
@@ -470,6 +494,7 @@ class StreamingHostProcess {
         // Rotation moved into the writer, where it is under the same lock as the append. Doing
         // it here meant the other writer could be mid-append into a file being renamed.
         AppendLogLine(line);
+        if (!line.empty()) lastChildLine_ = line;  // r1: kept for the exit log's preceding-state field
         note_child_log_line(line);
         remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
@@ -684,6 +709,16 @@ class StreamingHostProcess {
       const bool watchdogRecovery =
           (childExitCode == kChildWatchdogExitCode) || dxgiWorkerWatchdog;
       const bool crashed = !watchdogRecovery && (childExitCode != 0) && (ranMs < 15000);
+      // hostapp-log-upload r1: every exit line now carries the exit code as NTSTATUS hex (e.g.
+      // 0xC0000005) AND decimal, the child pid, the last thing the child said (preceding state), a WER
+      // LocalDumps path if one exists, and the upcoming relaunch count. The reader thread is joined
+      // above, so lastChildLine_ is safe to read here.
+      const unsigned long codeU = static_cast<unsigned long>(childExitCode);
+      const uint32_t childPidForLog = pi.dwProcessId;
+      std::string preceding = lastChildLine_;
+      if (preceding.size() > 160) preceding = preceding.substr(preceding.size() - 160);  // bounded tail
+      const std::string dumpNote = local_crash_dump_note(childPidForLog);
+      const unsigned relaunch = restarts_.load(std::memory_order_relaxed) + 1u;
       if (watchdogRecovery) {
         // Count repeats in a rolling 5-minute window; a persistently wedging host still backs off.
         if (watchdogWindowStartMs == 0 || (GetTickCount64() - watchdogWindowStartMs) > 300000ULL) {
@@ -691,27 +726,33 @@ class StreamingHostProcess {
           watchdogRecoveries = 0;
         }
         ++watchdogRecoveries;
-        char line[192];
+        char line[512];
         std::snprintf(line, sizeof(line),
-                      "[host-app] streaming host self-terminated (%s) code=%lu "
-                      "ranMs=%llu recoveries5m=%u -- relaunching",
-                      dxgiWorkerWatchdog ? "dxgi-worker watchdog" : "main-loop watchdog",
-                      static_cast<unsigned long>(childExitCode),
-                      static_cast<unsigned long long>(ranMs), watchdogRecoveries);
+                      "[host-app] streaming host self-terminated (%s) code=0x%08lX (%lu) pid=%u "
+                      "ranMs=%llu recoveries5m=%u lastLine=\"%s\"%s -- relaunching(#%u)",
+                      dxgiWorkerWatchdog ? "dxgi-worker watchdog" : "main-loop watchdog", codeU, codeU,
+                      childPidForLog, static_cast<unsigned long long>(ranMs), watchdogRecoveries,
+                      preceding.c_str(), dumpNote.c_str(), relaunch);
         AppendLogLineOnce(line);
         // A watchdog kill is not evidence the surface path is bad, so leave crashStreak alone.
       } else if (crashed) {
         ++crashStreak;
-        char line[160];
+        char line[512];
         std::snprintf(line, sizeof(line),
-                      "[host-app] streaming host exited abnormally code=%lu ranMs=%llu streak=%u%s",
-                      static_cast<unsigned long>(childExitCode),
-                      static_cast<unsigned long long>(ranMs), crashStreak,
-                      (crashStreak >= 2 && nv12Surface) ? " -- disabling nv12 surface" : "");
+                      "[host-app] streaming host exited abnormally code=0x%08lX (%lu) pid=%u ranMs=%llu "
+                      "streak=%u lastLine=\"%s\"%s%s -- relaunching(#%u)",
+                      codeU, codeU, childPidForLog, static_cast<unsigned long long>(ranMs), crashStreak,
+                      preceding.c_str(), dumpNote.c_str(),
+                      (crashStreak >= 2 && nv12Surface) ? " -- disabling nv12 surface" : "", relaunch);
         AppendLogLineOnce(line);
       } else {
         crashStreak = 0;
-        AppendLogLineOnce("[host-app] the streaming host exited");
+        // The incident (10-11 01:31:58, Home PC): the child died AFTER running > 15 s, so it is not the
+        // "crashed" class above, yet its exit code was never logged -- the NAS had no cause. Log the real
+        // code here too; a nonzero code on this path is an abnormal exit that merely outran the 15 s gate.
+        AppendLogLineOnce(remote60::native_poc::format_streaming_host_exit_log(
+            codeU, childPidForLog, static_cast<unsigned long long>(ranMs), preceding, dumpNote, relaunch,
+            /*abnormalLongRun=*/childExitCode != 0));
       }
       {
         // Sole owner of these handles (see TerminateChild). Clearing child_ first, under the
@@ -749,6 +790,9 @@ class StreamingHostProcess {
   std::mutex mu_;
   mutable std::mutex statusMu_;
   std::string directoryStatus_ = "starting";
+  // hostapp-log-upload r1: the child's last non-empty output line, for the exit log's "preceding state".
+  // Written on the reader thread; read on the supervisor thread only AFTER reader.join() (a sync point).
+  std::string lastChildLine_;
   PROCESS_INFORMATION child_{};
   std::thread supervisor_;
   std::atomic<bool> running_{false};

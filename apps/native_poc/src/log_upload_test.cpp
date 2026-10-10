@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "log_upload.hpp"
+#include "host_app_log.hpp"  // hostapp-log-upload r1: the supervisor exit-line formatter
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -675,6 +676,34 @@ void test_diag_has_no_token() {
   CHECK(d.find("late answer for a previous owner discarded") != std::string::npos);
 }
 
+// hostapp-log-upload r1: the supervisor's [host-app] streaming-host-exit line (the one that was
+// local-only, so the NAS had no exit cause) is uploaded on the SAME "host" stream the device's host.log
+// uses, carrying its NTSTATUS exit code -- so the crash cause lands on the NAS. (The product wires this
+// at append_host_app_log / AppendLogLineOnce -> log_upload_enqueue("host", line), next to the child's
+// own-output enqueue.) A removal of that enqueue would leave the server with no such line.
+void test_host_app_exit_line_goes_to_host_stream(FakeLogServer& server) {
+  std::printf("[host-app-exit] the exit line uploads on the host stream with its code\n");
+  server.Clear();
+  LogUploadConfig c = base_config(server, "acct/machine-A");
+  c.hostToken = "HOST-TOKEN";
+  std::string reason;
+  CHECK(log_upload_configure(c, &reason));
+  const std::string exitLine = remote60::native_poc::format_streaming_host_exit_log(
+      0xC0000005UL, /*pid=*/4321, /*ranMs=*/200000ULL, "dxgi-acquire stats stopped", /*dumpNote=*/"",
+      /*relaunch=*/2, /*abnormalLongRun=*/true);
+  log_upload_enqueue("host", exitLine);
+  CHECK(server.WaitFor(1, 2000));
+  auto reqs = server.Requests();
+  CHECK(!reqs.empty());
+  if (!reqs.empty()) {
+    CHECK(reqs[0].stream() == "host");          // same device stream as GNLinkStream's own host.log
+    CHECK(reqs[0].body == exitLine + "\n");      // the exact [host-app] exit line reached the NAS
+    CHECK(reqs[0].body.find("[host-app] the streaming host exited code=0xC0000005") != std::string::npos);
+  }
+  // Leave the uploader stopped, like every other test, so process exit does not join a live worker.
+  log_upload_stop();
+}
+
 }  // namespace
 
 int main() {
@@ -710,6 +739,7 @@ int main() {
   test_diag_has_no_token();
   test_401_pause_with_full_queue_does_not_spin(server);
   test_drop_reasons_are_named(server);
+  test_host_app_exit_line_goes_to_host_stream(server);
   server.Stop();
   server2.Stop();
 

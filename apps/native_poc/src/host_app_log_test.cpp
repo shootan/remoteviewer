@@ -228,6 +228,35 @@ int main() {
           all);
   }
 
+  // hostapp-log-upload r1: the streaming-child exit line carries the exit code (NTSTATUS hex + decimal),
+  // pid, run time, preceding state (last child line), an optional WER dump path, and the relaunch count.
+  // This is the incident's gap: a child that crashed AFTER a long run (0xC0000005) logged no code.
+  {
+    const std::string line = format_streaming_host_exit_log(
+        0xC0000005UL, /*pid=*/4321, /*ranMs=*/200000ULL, "dxgi-acquire stats stopped",
+        " dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp", /*relaunch=*/2, /*abnormalLongRun=*/true);
+    check("exit line carries the NTSTATUS exit code as hex (removal mutation: dropping it fails here)",
+          line.find("code=0xC0000005") != std::string::npos, line);
+    check("exit line carries the decimal code too", line.find("(3221225477)") != std::string::npos, line);
+    check("exit line carries the child pid", line.find("pid=4321") != std::string::npos, line);
+    check("exit line carries the run time", line.find("ranMs=200000") != std::string::npos, line);
+    check("exit line carries the preceding state (last child line)",
+          line.find("lastLine=\"dxgi-acquire stats stopped\"") != std::string::npos, line);
+    check("exit line carries the WER dump path when present",
+          line.find("dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp") != std::string::npos, line);
+    check("exit line carries the relaunch count", line.find("relaunching(#2)") != std::string::npos, line);
+    check("a nonzero code after a long run is flagged ABNORMAL",
+          line.find("(ABNORMAL: nonzero after a long run)") != std::string::npos, line);
+    check("the line is the [host-app] exit record", line.rfind("[host-app] the streaming host exited", 0) == 0,
+          line);
+
+    const std::string clean = format_streaming_host_exit_log(0UL, 99, 60000ULL, "", "", 1, false);
+    check("a clean exit still logs the code (0x00000000) -- never codeless",
+          clean.find("code=0x00000000 (0)") != std::string::npos, clean);
+    check("a clean exit is NOT flagged ABNORMAL and has no dump note",
+          clean.find("ABNORMAL") == std::string::npos && clean.find("dump=") == std::string::npos, clean);
+  }
+
   remove_all(dir);
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
             << "  (" << gChecks << " checks, " << gFailures << " failed)\n";

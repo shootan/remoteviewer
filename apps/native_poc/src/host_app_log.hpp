@@ -75,4 +75,23 @@ class HostAppLog {
 /** The process-wide log at %LOCALAPPDATA%\GNLink\host_app.log. */
 HostAppLog& host_app_log();
 
+// hostapp-log-upload r1: the one-line record of a streaming-child exit. Pure, so the supervisor and a
+// test build the SAME line. It carries the exit code as NTSTATUS hex (e.g. 0xC0000005) AND decimal, the
+// child pid, how long it ran, the last thing the child said (preceding state), an optional WER dump path
+// (passed in -- PATH ONLY, never the dump), and the upcoming relaunch count. `abnormalLongRun` marks the
+// case the incident hit: a nonzero code on a child that outran the short-crash gate, which earlier logged
+// no code at all. dumpNote is "" or " dump=<path>". The text is one line and holds no tokens/credentials.
+inline std::string format_streaming_host_exit_log(unsigned long code, unsigned int pid,
+                                                  unsigned long long ranMs, const std::string& preceding,
+                                                  const std::string& dumpNote, unsigned int relaunch,
+                                                  bool abnormalLongRun) {
+  char buf[512];
+  std::snprintf(buf, sizeof(buf),
+                "[host-app] the streaming host exited code=0x%08lX (%lu) pid=%u ranMs=%llu %slastLine=\"%s\"%s"
+                " -- relaunching(#%u)",
+                code, code, pid, ranMs, abnormalLongRun ? "(ABNORMAL: nonzero after a long run) " : "",
+                preceding.c_str(), dumpNote.c_str(), relaunch);
+  return buf;
+}
+
 }  // namespace remote60::native_poc
