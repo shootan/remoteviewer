@@ -14,7 +14,7 @@
 // NOT reused (and so NOT claimed as product behaviour): the HostContext orchestration and
 // stats_tick_h264 (both need the un-instantiable HostContext, and the tick's clock is hard-wired to
 // qpc). The governor is fed the PRODUCT's generated-load estimate formula
-// (txAUbytes + skips*avgSentFrameBytes; host_stage_stats_h264.cpp:183,208) computed here from the
+// (txDelta + skipsDelta*avgSentFrameBytes; host_stage_stats_h264.cpp:160-186) computed here from the
 // real per-second counters on a REAL elapsed clock. This is an estimate-formula replication, flagged.
 //
 // cap ON (default) arms the real WireLimiter at the target; cap OFF genuinely disables the limiter
@@ -89,14 +89,19 @@ int main(int argc, char** argv) {
   const uint32_t fps = argc > 2 ? (uint32_t)std::max(1, std::atoi(argv[2])) : 30u;
   const uint32_t phaseSec = argc > 3 ? (uint32_t)std::max(2, std::atoi(argv[3])) : 8u;
   const bool capOn = !(argc > 4 && std::string(argv[4]) == "off");
+  // governor OFF (fixed qp32/fps30) = the full-rate offered-load reference (Codex r5 item 6): with no
+  // QP climb, each second's AU + wire load is the raw 30fps offered budget, to compare against the cap
+  // + overhead BEFORE blaming burst/queue for the cap-ON skips.
+  const bool govOff = [] { const char* e = std::getenv("BAKEOFF_NOGOV"); return e && *e && std::strcmp(e, "0"); }();
   const uint32_t bitrate = rateKbps * 1000u;
   const uint32_t keyintFrames = 10u * fps;
   const uint32_t mtu = 1200;
   const uint64_t gen = 7, kEpoch = 1;
+  bool invalid = false; const char* invalidWhy = "";
 
   std::printf("host_encoder_realpath_trace (REAL encoder+admission+SenderState+WireLimiter+assembler; "
-              "AMD path): rate=%uk fps=%u phase=%us cap=%s, idle->motion->idle\n",
-              rateKbps, fps, phaseSec, capOn ? "ON" : "OFF(real, limiter disabled)");
+              "AMD path): rate=%uk fps=%u phase=%us cap=%s gov=%s, idle->motion->idle\n",
+              rateKbps, fps, phaseSec, capOn ? "ON" : "OFF(real, limiter disabled)", govOff ? "OFF(fixed qp32)" : "ON");
 
   WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
   MFStartup(MF_VERSION);
@@ -154,27 +159,49 @@ int main(int argc, char** argv) {
   MainLoopMailbox mailbox;
   sender.StartThread(VideoTransport::Udp, true, args, session, mailbox);
 
+  // --- effective config log (Codex r5 items 3/4): contrast with the product's startup/ApplyTarget ---
+  std::printf("config: mtu=%u wireCapEnabled=%d wireCapArmed=%d pacePeakBps=%u(0=default; product derives from "
+              "ApplyTarget -- NOT set here) keyframePacePeakBps=%u fecInterleaved=%d admissionThreshold=2 "
+              "outputHardLimit=6(product host_stage_encode_send_h264; NOT reused -- see note) epoch=%llu "
+              "nackWired=NO fpsLeverWiredToApplyTarget=NO enqueueStaging=direct-push(no supersede/waitingForKey/"
+              "DropAndResync) clampBurst=default-off\n",
+              mtu, (int)sender.wireCapEnabled, (int)(sender.wireLimiter && sender.wireLimiter->enabled()),
+              sender.pacePeakBps.load(), sender.keyframePacePeakBps.load(), (int)sender.fecInterleaved.load(),
+              (unsigned long long)kEpoch);
+
   // --- real encoder ---
   H264Encoder enc;
-  if (!enc.initialize(bakeoff::kW, bakeoff::kH, fps, bitrate, keyintFrames)) { std::printf("enc init failed\n"); return 2; }
+  if (!enc.initialize(bakeoff::kW, bakeoff::kH, fps, bitrate, keyintFrames)) {
+    std::printf("RESULT: INVALID (encoder init failed)\n");
+    sender.stop.store(true, std::memory_order_release); sender.cv.notify_all();
+    if (sender.wireLimiter) sender.wireLimiter->Stop();
+    if (sender.thread.joinable()) sender.thread.join();      // joinable thread cleaned up (Codex r5)
+    rxStop.store(true); if (rxThread.joinable()) rxThread.join();
+    MFShutdown(); WSACleanup(); return 2;
+  }
   RateGovernor gov;
 
   std::vector<uint8_t> nv12(bakeoff::kNv12, 128);
   const uint32_t totalFrames = 3 * phaseSec * fps;
   const uint64_t frameUs = 1'000'000ULL / fps;
 
-  // per-second accumulators (real elapsed)
+  // per-second accumulators (real elapsed). offered = pre-gate inputs; admitted = gate-passed encodes;
+  // AU = access units the encoder emitted (Codex r5 item 5: these three are distinct).
   uint64_t secStartUs = qpc_now_us();
-  uint64_t secAuBytes = 0; uint32_t secEncoded = 0, secSkips = 0, secAccepted = 0;
-  uint64_t lastWireBytes = 0;
+  uint64_t secAuBytes = 0; uint32_t secAuOut = 0, secSkips = 0, secOffered = 0, secAdmitted = 0;
+  uint64_t lastWireBytes = 0, lastDatagrams = 0;
   uint32_t curMaxQp = 32, curFps = fps, fpsAcc = 0, seqNo = 0;
   // governor-input state, replicated EXACTLY from host_stage_stats_h264.cpp:160-186 (real counters):
   uint64_t gTotalSkips = 0, gPrevTxBytes = 0, gPrevTxFrames = 0, gPrevSkips = 0, gPrevAvgSent = 0, gPrevTickUs = 0;
-  uint32_t gUserFps = fps;  // the ceiling; target/userFps change would governor.Reset() (not in this scenario)
+  const uint32_t gUserFps = fps;  // ceiling; target/userFps change would governor.Reset() (fixed scenario)
 
-  std::printf("\n sec|phase |accepted encoded skips| realAU_kbps genEst_kbps wire_kbps | queue | maxQp fps | "
-              "pub_fps maxGapMs\n");
+  // header: wire_kbps is RECEIVED UDP payload + 28B/datagram IPv4 overhead, / real elapsed; asmAU_fps is
+  // UdpH264FrameAssembler Completed-AU reassembly rate (NO decoder/FrameGate/FrameBuffer/renderer, NO NACK
+  // round-trip); auGapMs/silenceMs are reassembly inter-arrival and age-since-last.
+  std::printf("\n sec|phase |offered admit AUout skips| realAU_kbps govEst_kbps wire_kbps(ovh) | queueMax | "
+              "maxQp reqFps| asmAU_fps auGapMs silenceMs\n");
 
+  uint32_t queueMaxSec = 0; bool encodeFailed = false;
   uint64_t deadline = qpc_now_us();
   for (uint32_t i = 0; i < totalFrames; ++i) {
     deadline += frameUs;
@@ -182,19 +209,25 @@ int main(int argc, char** argv) {
     const std::string scene = (phase == 1) ? "motion" : "static";
     bakeoff::fill_scene(scene, nv12, i);
 
-    fpsAcc += curFps; const bool fpsTick = fpsAcc >= fps; if (fpsTick) fpsAcc -= fps;
+    fpsAcc += curFps; const bool fpsTick = fpsAcc >= fps; if (fpsTick) fpsAcc -= fps;  // fps lever: supply sampling only (NOT ApplyTarget/codec reinit)
     const bool key = (i == 0);
     if (fpsTick) {
-      ++secAccepted;
+      ++secOffered;  // offered BEFORE the gate (Codex r5: not "accepted")
       uint32_t qdepth; { std::lock_guard<std::mutex> lk(sender.mu); qdepth = (uint32_t)sender.queue.size(); }
+      if (qdepth > queueMaxSec) queueMaxSec = qdepth;
       EncodeAdmissionInputs ad; ad.wireCapActive = capOn; ad.keyWanted = key; ad.senderQueueDepth = qdepth; ad.senderQueueMax = 2;
       if (decide_encode_admission(ad) == EncodeAdmission::SkipOverloaded) {
         ++secSkips; ++gTotalSkips;  // cumulative, like HostStats::wireOverloadSkipCount
       } else {
+        ++secAdmitted;
         std::vector<H264AccessUnit> units;
-        enc.encode_frame(nv12, key, (int64_t)i * (int64_t)(10'000'000LL / fps), &units);
+        if (!enc.encode_frame(nv12, key, (int64_t)i * (int64_t)(10'000'000LL / fps), &units)) encodeFailed = true;
         for (auto& u : units) {
-          secAuBytes += u.bytes.size(); ++secEncoded;
+          secAuBytes += u.bytes.size(); ++secAuOut;
+          // NOTE (Codex r5 item 3): direct push -- the product's staging / key supersede / waitingForKey /
+          // DropAndResync / epoch ownership (host_stage_encode_send_h264_au.cpp:420-514) is NOT reused; the
+          // output hard-limit is 6 there (distinct from the input admission threshold 2). queueMax below
+          // shows whether those overflow paths could even have fired.
           { std::lock_guard<std::mutex> lk(sender.mu); sender.queue.push_back(make_item(++seqNo, gen, u.bytes, u.keyFrame || u.rawIdr, kEpoch, fps)); }
           sender.cv.notify_one();
         }
@@ -203,9 +236,7 @@ int main(int argc, char** argv) {
 
     const uint64_t nowUs = qpc_now_us();
     if (nowUs - secStartUs >= 1'000'000ULL) {
-      const double elapsedSec = (nowUs - secStartUs) / 1e6;
-      const uint64_t wb = wireBytes.load();
-      const uint64_t wireDelta = wb - lastWireBytes;
+      const uint64_t wb = wireBytes.load(), dg = datagrams.load();
       // ---- governor input, EXACTLY as host_stage_stats_h264.cpp:160-186 (real sender counters) ----
       const bool wireCapActive = sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled();
       const uint64_t txNow = sender.txBytes.load(std::memory_order_relaxed);
@@ -214,45 +245,61 @@ int main(int argc, char** argv) {
       const uint64_t framesDelta = framesNow >= gPrevTxFrames ? framesNow - gPrevTxFrames : 0; gPrevTxFrames = framesNow;
       const uint64_t skipsDelta = gTotalSkips >= gPrevSkips ? gTotalSkips - gPrevSkips : 0; gPrevSkips = gTotalSkips;
       const uint64_t elapsedUs = (gPrevTickUs > 0 && nowUs > gPrevTickUs) ? nowUs - gPrevTickUs : 1000000ULL; gPrevTickUs = nowUs;
+      const double elapsedSec = elapsedUs / 1e6;
       const uint64_t avgSentFrameBytes = framesDelta > 0 ? txDelta / framesDelta : gPrevAvgSent;
       if (framesDelta > 0) gPrevAvgSent = avgSentFrameBytes;
       const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;  // cap off: txDelta only
       const uint64_t govBytesPerSec = elapsedUs > 0 ? (uint64_t)(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
-      // (target/userFps change -> governor.Reset(); fixed here, so no Reset fires.)
-      const RateDecision dec = gov.OnSecond(govBytesPerSec, bitrate, gUserFps);
-      const char* note = "";
-      if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; note = "qp"; }
-      curFps = dec.fps;
-      uint32_t qdepth; { std::lock_guard<std::mutex> lk(sender.mu); qdepth = (uint32_t)sender.queue.size(); }
-      // publish-ready (reassembled) frame count + worst inter-delivery gap this second (NOT display)
-      double maxGapMs = 0; uint64_t pub = 0;
+      if (!govOff) {
+        const RateDecision dec = gov.OnSecond(govBytesPerSec, bitrate, gUserFps);
+        if (dec.maxQp != curMaxQp) { enc.set_max_qp(dec.maxQp); curMaxQp = dec.maxQp; }
+        curFps = dec.fps;  // supply-sampling lever only; fps step not wired to ApplyTarget (scope note)
+      }
+      // received wire incl IPv4 28B/datagram, normalised by real elapsed (Codex r5 item 5):
+      const uint64_t payloadDelta = wb - lastWireBytes, dgDelta = dg - lastDatagrams;
+      const double wireKbpsOvh = (payloadDelta + 28.0 * dgDelta) * 8.0 / 1000.0 / elapsedSec;
+      // assembler Completed-AU rate + inter-arrival gap in the HALF-OPEN [secStartUs, nowUs) window,
+      // + silence age since the last completed AU (Codex r5 item 5):
+      double auGapMs = 0, silenceMs = 0; uint64_t asmAu = 0, lastDelivery = 0;
       { std::lock_guard<std::mutex> lk(gapMu);
-        for (size_t k = 1; k < deliveryUs.size(); ++k)
-          if (deliveryUs[k] >= secStartUs) { const double g = (deliveryUs[k] - deliveryUs[k - 1]) / 1000.0; if (g > maxGapMs) maxGapMs = g; }
-        for (uint64_t t : deliveryUs) if (t >= secStartUs) ++pub; }
-      std::printf("%4u|%-6s|%8u %7u %5u| %10.0f %11.0f %9llu | %5u | %5u %3u | %6llu %8.1f %s\n",
-                  (i + 1) / fps, scene.c_str(), secAccepted, secEncoded, secSkips,
-                  secAuBytes * 8.0 / 1000.0 / elapsedSec,          // real encoded-AU kbps (separate)
-                  govBytesPerSec * 8.0 / 1000.0,                    // governor-input estimate (product formula)
-                  (unsigned long long)(wireDelta * 8 / 1000), qdepth, curMaxQp, curFps,
-                  (unsigned long long)pub, maxGapMs, note);
-      secStartUs = nowUs; secAuBytes = 0; secEncoded = secSkips = secAccepted = 0;
-      lastWireBytes = wb;
+        for (size_t k = 0; k < deliveryUs.size(); ++k) {
+          if (deliveryUs[k] >= secStartUs && deliveryUs[k] < nowUs) {
+            ++asmAu;
+            if (k > 0) { const double g = (deliveryUs[k] - deliveryUs[k - 1]) / 1000.0; if (g > auGapMs) auGapMs = g; }
+          }
+        }
+        if (!deliveryUs.empty()) lastDelivery = deliveryUs.back(); }
+      if (asmAu == 0 && lastDelivery) silenceMs = (nowUs - lastDelivery) / 1000.0;  // no new AU this sec
+      std::printf("%4u|%-6s|%7u %5u %5u %5u| %10.0f %11.0f %14.0f | %8u | %5u %6u| %9llu %7.1f %9.1f %s\n",
+                  (i + 1) / fps, scene.c_str(), secOffered, secAdmitted, secAuOut, secSkips,
+                  secAuBytes * 8.0 / 1000.0 / elapsedSec, govBytesPerSec * 8.0 / 1000.0, wireKbpsOvh,
+                  queueMaxSec, curMaxQp, curFps, (unsigned long long)asmAu, auGapMs, silenceMs,
+                  govOff ? "(gov off)" : "");
+      secStartUs = nowUs; secAuBytes = 0; secAuOut = secSkips = secOffered = secAdmitted = 0; queueMaxSec = 0;
+      lastWireBytes = wb; lastDatagrams = dg;
     }
 
     const uint64_t n2 = qpc_now_us();
     if (n2 < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n2));
   }
 
-  // drain briefly so the last AUs reach the receiver
+  // drain briefly so late AUs reach the receiver; report what did not come back (Codex r5 item 5).
+  const uint64_t deliveredBeforeDrain = (uint64_t)deliveryUs.size();
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  const uint32_t pendingAtStop = enc.pending_input_depth();
   sender.stop.store(true, std::memory_order_release); sender.cv.notify_all();
   if (sender.wireLimiter) sender.wireLimiter->Stop();
   if (sender.thread.joinable()) sender.thread.join();
   rxStop.store(true); if (rxThread.joinable()) rxThread.join();
+  const bool sendFailed = sender.sendFailed.load(std::memory_order_relaxed);
   enc.shutdown();
-  std::printf("\nhost_encoder_realpath_trace: DONE (datagrams=%llu, delivered=%zu)\n",
-              (unsigned long long)datagrams.load(), deliveryUs.size());
+  if (encodeFailed) { invalid = true; invalidWhy = "encode_frame returned false"; }
+  else if (sendFailed) { invalid = true; invalidWhy = "sender sendFailed"; }
+  std::printf("\nhost_encoder_realpath_trace: %s%s (datagrams=%llu, assembledAU=%zu, "
+              "recoveredDuringDrain=%zu, encoderPendingAtStop=%u)\n",
+              invalid ? "INVALID: " : "DONE", invalid ? invalidWhy : "",
+              (unsigned long long)datagrams.load(), deliveryUs.size(),
+              (size_t)(deliveryUs.size() - deliveredBeforeDrain), pendingAtStop);
   MFShutdown(); WSACleanup();
-  return 0;
+  return invalid ? 1 : 0;
 }
