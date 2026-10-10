@@ -2964,6 +2964,11 @@ add_executable(remote60_host_burst_sender_admission_test
 )
 target_include_directories(remote60_host_burst_sender_admission_test PRIVATE src)
 target_link_libraries(remote60_host_burst_sender_admission_test PRIVATE common ws2_32)
+# r11 (Codex 974c3a8): the r6-defect reproduction seam (WireEgress.bypassWindowForTest + its send-path
+# branch) is compiled in ONLY here. This target compiles its own src/host_net_io.cpp with the macro, so
+# the header field and the branch are consistent across its TUs; GNLinkStream/e2e/gate compile the same
+# host_net_io WITHOUT the macro, so the field and branch are preprocessed out of the product.
+target_compile_definitions(remote60_host_burst_sender_admission_test PRIVATE REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM)
 if(MSVC)
   target_compile_options(remote60_host_burst_sender_admission_test PRIVATE /utf-8)
 endif()

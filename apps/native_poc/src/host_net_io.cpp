@@ -208,10 +208,16 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // r8 D2: one injected time axis for the admission loop (null in production -> real qpc / sleep).
     const auto NOW = [&]() -> uint64_t { return (wire && wire->nowFn) ? wire->nowFn() : qpc_now_us(); };
     const auto WAIT = [&](uint64_t target) { if (wire && wire->waitFn) wire->waitFn(target); else udp_pace_wait_until(target); };
-    // r10 test-only (null in production): reproduce the r6 defect -- a NORMAL datagram skips ONLY the 2s
-    // window gate (no HasRoom/Reserve) while keeping the limiter's strict pacing and the CommitSent
-    // accounting. Lets a negative control drive the REAL send with the tail un-gated.
+    // r10/r11 test-only: reproduce the r6 defect -- a NORMAL datagram skips ONLY the 2s window gate (no
+    // HasRoom/Reserve) while keeping the limiter's strict pacing and the CommitSent accounting. The field
+    // and this branch are compiled in ONLY under REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM (defined solely
+    // on the admission-test target); in the product it is a compile-time false, so the whole seam is
+    // preprocessed/optimized away.
+#ifdef REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM
     const bool r6TailBypass = b1Active && wire->bypassWindowForTest && !grantCovered;
+#else
+    constexpr bool r6TailBypass = false;
+#endif
     if (b1Active) {
       for (;;) {
         const uint64_t now = NOW();
@@ -232,12 +238,14 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
         }
         if (windowRoom && rateReady) {
           if (mediaStopFence()) { wireAborted = true; return false; }  // fence at the send instant (S1/R2)
+#ifdef REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM
           if (r6TailBypass) {
             // r6 (test negative control): no window Reserve -- only the strict-rate token. CommitSent
             // still accounts it below (reserved stays false but the bypass marks it to account).
             if (!wire->limiter->TryAcquire(wireBytes)) continue;
             break;
           }
+#endif
           // Commit the window, then take the rate. If either slips (a concurrent SetRate between peek and
           // take), undo and re-evaluate rather than over-admit.
           if (!wire->burstLedger->Reserve(now, wireBytes)) continue;
