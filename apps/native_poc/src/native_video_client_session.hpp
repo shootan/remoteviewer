@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -189,6 +190,13 @@ class ClientSessionController {
   /** Total UDP video bytes received this session, for the on-screen data meter. */
   uint64_t SessionBytesReceived() const;
 
+  // udp-recv-exit r1 test seams (unreferenced in the shipped product -- the hook is never set, so the
+  // loop uses the real recv; Release /OPT:REF strips these). They let a test drive the REAL VideoReceive
+  // loop with scripted recv results (zero / oversize / reset / normal / terminal) deterministically.
+  void SetUdpRecvHookForTest(std::function<int(uint8_t*, size_t, int&)> hook) { udpRecvHookForTest_ = std::move(hook); }
+  void RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink);
+  void RequestStopForTest() { stopRequested_.store(true, std::memory_order_release); }
+
  private:
   ClientSessionController(const ClientSessionController&) = delete;
   ClientSessionController& operator=(const ClientSessionController&) = delete;
@@ -220,6 +228,7 @@ class ClientSessionController {
   ClientInputQueue inputQueue_;
   ClientControlScheduler controlScheduler_;
   ClientEncodedFrameSink* encodedFrameSink_ = nullptr;
+  std::function<int(uint8_t*, size_t, int&)> udpRecvHookForTest_;  // null in production -> real recv
   std::thread workerThread_;
   std::thread videoThread_;
   std::atomic<bool> stopRequested_{false};

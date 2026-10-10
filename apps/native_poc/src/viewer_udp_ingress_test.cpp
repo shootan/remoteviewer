@@ -4,9 +4,11 @@
 
 int main() {
   using remote60::native_poc::viewer::udp_ingress_retryable_error;
+  // udp-recv-exit r1: WSAECONNRESET is now ADVISORY (non-terminal) -- aligned with the shared client's
+  // reset policy. A clearly terminal code (bad socket) must still be terminal.
   if (!udp_ingress_retryable_error(WSAEINTR) || !udp_ingress_retryable_error(WSAETIMEDOUT) ||
       !udp_ingress_retryable_error(WSAEWOULDBLOCK) || !udp_ingress_retryable_error(WSAEMSGSIZE) ||
-      udp_ingress_retryable_error(WSAECONNRESET)) return 4;
+      !udp_ingress_retryable_error(WSAECONNRESET) || udp_ingress_retryable_error(WSAENOTSOCK)) return 4;
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2,2), &wsa)) return 1;
   SOCKET rx = socket(AF_INET, SOCK_DGRAM, 0), tx = socket(AF_INET, SOCK_DGRAM, 0);
