@@ -3023,6 +3023,29 @@ if(MSVC)
   target_compile_options(remote60_host_encoder_backend_bench PRIVATE /utf-8)
 endif()
 
+# encoder-bakeoff r1 (MEASUREMENT-ONLY experiment branch, not merged): rate-control bakeoff across
+# deterministic 1080p30 scenes -- drives the SAME product encoder path (H264Encoder) and a SW decoder
+# for PSNR. No product default changes; no GPL. See src/host_encoder_bakeoff.cpp.
+add_executable(remote60_host_encoder_bakeoff
+  src/mf_h264_codec.cpp
+  src/host_encoder_bakeoff.cpp
+)
+target_include_directories(remote60_host_encoder_bakeoff PRIVATE src)
+target_link_libraries(remote60_host_encoder_bakeoff PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_bakeoff PRIVATE /utf-8)
+endif()
+# OpenH264 (BSD) is optional and loaded at runtime (no import lib). If its headers were fetched into
+# the untracked experiment dir, compile the OpenH264 adapter in. Absolute path is fine: experiment-only.
+set(_oh264_inc "${CMAKE_CURRENT_SOURCE_DIR}/../../.claude/openh264/include")
+if(EXISTS "${_oh264_inc}/wels/codec_api.h")
+  target_compile_definitions(remote60_host_encoder_bakeoff PRIVATE BAKEOFF_OPENH264)
+  target_include_directories(remote60_host_encoder_bakeoff PRIVATE "${_oh264_inc}")
+  message(STATUS "encoder-bakeoff: OpenH264 adapter ENABLED (${_oh264_inc})")
+else()
+  message(STATUS "encoder-bakeoff: OpenH264 headers not found, adapter disabled")
+endif()
+
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
 # The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
 # while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /
