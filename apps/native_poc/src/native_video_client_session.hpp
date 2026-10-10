@@ -202,6 +202,10 @@ class ClientSessionController {
   // Enable the NACK/hold receive policy for a test so the loop's maintenance tick (NACK rounds, hold
   // expiry, stuck-head give-up) is exercised while recv results are being discarded.
   void SetHostSupportsNackForTest(bool v) { hostSupportsNack_.store(v, std::memory_order_release); }
+  // Enable the control-over-UDP branch, and reach the control channel, so a test can leave a control
+  // message outstanding and observe the loop's udpControl_.Tick() retransmit -> PeerLost during drops.
+  void SetControlOverUdpForTest(bool v) { controlOverUdp_.store(v, std::memory_order_release); }
+  UdpControlChannel& ControlChannelForTest() { return udpControl_; }
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;
