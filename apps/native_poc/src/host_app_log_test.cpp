@@ -301,6 +301,10 @@ int main() {
         {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa token=LATE_SYNTH after",
          "LATE_SYNTH"},
         {"line\rwith a cookie=CK_SYNTH\nand more", "CK_SYNTH"},
+        // r4: the "auth" marker that r3 dropped -- auth=V / x-auth: V / AUTH = V (case + spaces).
+        {"auth=SYNTH_D connected", "SYNTH_D"},
+        {"X-Auth: SYNTH_E header", "SYNTH_E"},
+        {"AUTH = SYNTH_F done", "SYNTH_F"},
     };
     bool allRedacted = true, noSecretLeft = true;
     for (const auto& c : leaks) {

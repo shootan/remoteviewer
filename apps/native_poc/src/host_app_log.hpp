@@ -91,8 +91,11 @@ HostAppLog& host_app_log();
 // diagnostic, not a claim that child output is secret-free (the child's own lines were already
 // uploaded verbatim on the same stream before this).
 inline bool hostlog_line_has_credential_marker(const std::string& rawLower) {
-  for (const char* m : {"token", "password", "passwd", "secret", "authorization", "bearer", "cookie",
-                        "session", "apikey", "api_key", "credential"}) {
+  // "auth" (r2 had it, r3 dropped it) catches auth=V / x-auth: V that "authorization" misses; it also
+  // subsumes "authorization". Over-matching benign "author"-like words is accepted (Codex: do not
+  // loosen the filter). Keep "authorization" listed for readability.
+  for (const char* m : {"token", "password", "passwd", "secret", "auth", "authorization", "bearer",
+                        "cookie", "session", "apikey", "api_key", "credential"}) {
     if (rawLower.find(m) != std::string::npos) return true;
   }
   return false;
