@@ -36,12 +36,16 @@ object ViewerKeyboardCycle {
         if (mode == Mode.PHONE) Action.PHONE_TO_PC_KEYS else Action.NONE
 
     /**
-     * Shown only while a keyboard is up, so the bar never stays behind on its own. With the phone
-     * keyboard it waits for the IME to have a height: before that its place is not known.
+     * Shown only while a keyboard is up, so the bar never stays behind on its own.
+     *
+     * With the phone keyboard asked for, it waits a moment for the IME to take its height, so the
+     * bar does not flash at the bottom and jump. If no IME shows up (a hardware keyboard, an IME
+     * set not to show, one that floats with no bottom inset) the bar still appears, at the bottom:
+     * focus is held, the button now closes, so the bar is the only way to the PC keys (r3 K1).
      */
-    fun barVisible(mode: Mode, imeBottomPx: Int): Boolean = when (mode) {
+    fun barVisible(mode: Mode, imeBottomPx: Int, awaitingIme: Boolean): Boolean = when (mode) {
         Mode.CLOSED -> false
-        Mode.PHONE -> imeBottomPx > 0
+        Mode.PHONE -> imeBottomPx > 0 || !awaitingIme
         Mode.PC_KEYS -> true
     }
 

@@ -171,6 +171,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         viewerSplit.orientation =
             if (deviceLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        // apk-keyboard-tabs r3 (K2): in landscape the rail stands beside the picture-tabs-panel
+        // column at full height instead of inside the split above the panel. The panel used to
+        // give up the rail's four buttons' height (and then the tab bar's), which left its rows too
+        // short for two-line key labels. In portrait the rail goes back to the split's bottom.
+        val scene = viewerScene as LinearLayout
+        val column = findViewById<LinearLayout>(R.id.viewerMainColumn)
+        val railHome: ViewGroup = if (deviceLandscape) scene else viewerSplit
+        if (viewerControlsBar.parent !== railHome) {
+            (viewerControlsBar.parent as? ViewGroup)?.removeView(viewerControlsBar)
+            railHome.addView(viewerControlsBar)
+        }
+        scene.orientation = if (deviceLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        column.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT)
+        }
         val lp = viewerControlsBar.layoutParams as LinearLayout.LayoutParams
         if (deviceLandscape) {
             lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
@@ -221,21 +238,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerRotateButton.text =
             getString(if (forcePortrait) R.string.ui_rotate_portrait else R.string.ui_rotate_auto)
         layoutViewerSheets(deviceLandscape)
-        // The key panel may take no more than leaves the side rail its four 48dp buttons.
-        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx(deviceLandscape)
+        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx()
         fitRailCells()
     }
 
     /**
-     * What the key panel leaves to the rest of the viewer: in landscape the rail's four buttons,
-     * which stand beside the picture above the panel, and the tab bar between them and the panel.
+     * What the key panel leaves to the rest of its column: the tab bar above it. The rail is no
+     * longer above the panel in landscape (it stands beside the column), so it needs nothing here.
      */
-    private fun keyPanelReservedHeightPx(deviceLandscape: Boolean): Int =
-        if (deviceLandscape) railMinimumHeightPx() + viewerKeyboardTabs.layoutParams.height else 0
-
-    /** Four buttons at the 48dp floor, their 1dp margins, and the bar's padding. */
-    private fun railMinimumHeightPx(): Int =
-        viewerControlsBar.childCount * (dp(48f) + dp(2f)) + viewerControlsBar.paddingTop + viewerControlsBar.paddingBottom
+    private fun keyPanelReservedHeightPx(): Int = viewerKeyboardTabs.layoutParams.height
 
     /**
      * Sizes the rail's buttons to the length the bar actually has (apk-ui r3d). With the key panel
@@ -359,7 +370,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val wanted = when (SceneOrientationPolicy.forScene(inViewer, resources.configuration.smallestScreenWidthDp)) {
             SceneOrientationPolicy.Request.VIEWER_DECIDES -> return
             SceneOrientationPolicy.Request.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-            SceneOrientationPolicy.Request.FOLLOW_DEVICE -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            SceneOrientationPolicy.Request.SYSTEM_DECIDES -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
         // The next viewer entry decides again from its content.
         lastAppliedLandscape = null
@@ -1044,6 +1055,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerKeyboardTabPcKeys: Button
     /** The IME's height over the window bottom, from the last insets; 0 while it is down. */
     private var imeBottomPx = 0
+    /** The phone keyboard was asked for and the IME has not taken its height yet (r3 K1). */
+    private var awaitingIme = false
+    /** How long the tab bar waits for the phone keyboard's IME to take its height. */
+    private val imeWaitMs = 600L
+    private val imeWaitOverRunnable = Runnable {
+        awaitingIme = false
+        renderViewerKeyboardTabs()
+    }
     private lateinit var viewerInputPreviewText: TextView
     private lateinit var viewerModeBanner: TextView
     private lateinit var videoTextureView: TextureView
@@ -1746,6 +1765,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { view, insets ->
             val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             imeBottomPx = if (imeVisible) insets.getInsets(WindowInsetsCompat.Type.ime()).bottom else 0
+            if (imeBottomPx > 0) awaitingIme = false
             if (imeWasVisible && !imeVisible && viewerImeCaptureView.hasFocus()) {
                 hideViewerKeyboard("ime_hidden")
             }
@@ -3290,8 +3310,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** 'PC 키': the phone keyboard goes down and the PC key panel takes its place. */
     private fun showViewerKeyPanelInsteadOfPhone(reason: String) {
         hideViewerKeyboard(reason)
-        viewerKeyPanel?.reservedHeightPx =
-            keyPanelReservedHeightPx(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx()
         viewerKeyPanel?.show()
     }
 
@@ -3299,7 +3318,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun renderViewerKeyboardTabs() {
         if (!::viewerKeyboardTabs.isInitialized) return
         val mode = viewerKeyboardMode()
-        val visible = ViewerKeyboardCycle.barVisible(mode, imeBottomPx)
+        val visible = ViewerKeyboardCycle.barVisible(mode, imeBottomPx, awaitingIme)
         viewerKeyboardTabs.visibility = if (visible) View.VISIBLE else View.GONE
         viewerKeyboardTabs.translationY =
             ViewerKeyboardCycle.barTranslationYPx(mode, imeBottomPx, panelHeightPx = 0).toFloat()
@@ -3315,6 +3334,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         diagnosticsLog.log("viewer_keyboard_tap", "scene=$currentScene")
         viewerImeCaptureView.resetPreviewState()
+        // Give the IME a moment to take its height before the tab bar shows; if none comes (a
+        // hardware keyboard, an IME that does not show), the bar appears at the bottom anyway.
+        awaitingIme = true
+        statusHandler.removeCallbacks(imeWaitOverRunnable)
+        statusHandler.postDelayed(imeWaitOverRunnable, imeWaitMs)
         viewerImeCaptureView.requestFocus()
         viewerImeCaptureView.post {
             val imm = getSystemService(InputMethodManager::class.java)

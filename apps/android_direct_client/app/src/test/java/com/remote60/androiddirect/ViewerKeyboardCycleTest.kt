@@ -59,10 +59,10 @@ class ViewerKeyboardCycleTest {
     fun aPhoneKeyboardTheSystemPutAwayTakesTheTabBarWithIt() {
         // Its own down arrow or Back: the IME goes, MainActivity drops the capture focus.
         val up = apply(closed, Action.SHOW_PHONE)
-        assertTrue(ViewerKeyboardCycle.barVisible(up.mode, imeBottomPx = 900))
+        assertTrue(ViewerKeyboardCycle.barVisible(up.mode, imeBottomPx = 900, awaitingIme = false))
         val putAway = up.copy(phone = false)
         assertEquals(Mode.CLOSED, putAway.mode)
-        assertFalse(ViewerKeyboardCycle.barVisible(putAway.mode, imeBottomPx = 0))
+        assertFalse(ViewerKeyboardCycle.barVisible(putAway.mode, imeBottomPx = 0, awaitingIme = false))
         assertEquals(Action.SHOW_PHONE, ViewerKeyboardCycle.onKeyboardButton(putAway.mode))
     }
 
@@ -71,21 +71,43 @@ class ViewerKeyboardCycleTest {
         val pc = apply(apply(closed, Action.SHOW_PHONE), Action.PHONE_TO_PC_KEYS)
         // The IME animates away after the switch; the panel is what is showing.
         assertEquals(Mode.PC_KEYS, pc.mode)
-        assertTrue(ViewerKeyboardCycle.barVisible(pc.mode, imeBottomPx = 0))
+        assertTrue(ViewerKeyboardCycle.barVisible(pc.mode, imeBottomPx = 0, awaitingIme = false))
     }
 
     @Test
     fun backOnThePanelClosesTheTabBarToo() {
         val pc = Shown(phone = false, panel = true)
         val afterBack = pc.copy(panel = false)
-        assertFalse(ViewerKeyboardCycle.barVisible(afterBack.mode, imeBottomPx = 0))
+        assertFalse(ViewerKeyboardCycle.barVisible(afterBack.mode, imeBottomPx = 0, awaitingIme = false))
     }
 
     @Test
     fun theTabBarIsNeverLeftOnItsOwn() {
         for (ime in listOf(0, 1, 300, 1200)) {
-            assertFalse("ime=$ime", ViewerKeyboardCycle.barVisible(Mode.CLOSED, ime))
+            for (awaiting in listOf(false, true)) {
+                assertFalse("ime=$ime awaiting=$awaiting", ViewerKeyboardCycle.barVisible(Mode.CLOSED, ime, awaiting))
+            }
         }
+    }
+
+    @Test
+    fun withNoImeShowingTheBarStillLeadsToThePcKeys() {
+        // r3 K1: a hardware keyboard (or an IME that does not show) leaves focus held and no
+        // bottom inset. The button now closes, so after the short wait the bar appears at its
+        // slot at the bottom and the PC keys stay one tap away.
+        val up = apply(closed, Action.SHOW_PHONE)
+        assertFalse("not while the IME may still come", ViewerKeyboardCycle.barVisible(up.mode, imeBottomPx = 0, awaitingIme = true))
+        assertTrue("after the wait", ViewerKeyboardCycle.barVisible(up.mode, imeBottomPx = 0, awaitingIme = false))
+        assertEquals(0, ViewerKeyboardCycle.barTranslationYPx(up.mode, imeBottomPx = 0, panelHeightPx = 0))
+        assertEquals(Mode.PC_KEYS, apply(up, ViewerKeyboardCycle.onPcKeysTab(up.mode)).mode)
+        // and it still closes: the button, or Back (the capture view drops focus).
+        assertEquals(Action.CLOSE_ALL, ViewerKeyboardCycle.onKeyboardButton(up.mode))
+        assertFalse(ViewerKeyboardCycle.barVisible(up.copy(phone = false).mode, imeBottomPx = 0, awaitingIme = false))
+    }
+
+    @Test
+    fun anImeThatComesInTimeIsNotWaitedFor() {
+        assertTrue(ViewerKeyboardCycle.barVisible(Mode.PHONE, imeBottomPx = 700, awaitingIme = true))
     }
 
     /** One device, its window and the IME it gets, in px. */

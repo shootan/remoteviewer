@@ -12,8 +12,10 @@ package com.remote60.androiddirect
  *
  * Phones go back to portrait: the lists and the login screen are laid out for it, and that is what
  * the user asked for ("데스크톱 나가면 다시 세로로"). Tablets (smallest width 600dp and up, e.g. the
- * SM-T975N) are left to the device instead: their natural way is landscape, often in a keyboard
- * cover, and the same screens fit there, so forcing them upright would be the new annoyance.
+ * SM-T975N) get the lock released instead (UNSPECIFIED): the system picks the orientation by its
+ * own and the user's rotation settings -- not a promise to keep whatever way it is held. Their
+ * natural way is landscape, often in a keyboard cover, and the same screens fit there, so forcing
+ * them upright would be the new annoyance.
  */
 object SceneOrientationPolicy {
     enum class Request {
@@ -21,15 +23,15 @@ object SceneOrientationPolicy {
         VIEWER_DECIDES,
         /** SCREEN_ORIENTATION_SENSOR_PORTRAIT. */
         PORTRAIT,
-        /** SCREEN_ORIENTATION_UNSPECIFIED: whichever way the device is held. */
-        FOLLOW_DEVICE,
+        /** SCREEN_ORIENTATION_UNSPECIFIED: the system's (and the user's rotation setting's) choice. */
+        SYSTEM_DECIDES,
     }
 
     const val TABLET_SMALLEST_WIDTH_DP = 600
 
     fun forScene(inViewer: Boolean, smallestScreenWidthDp: Int): Request = when {
         inViewer -> Request.VIEWER_DECIDES
-        smallestScreenWidthDp >= TABLET_SMALLEST_WIDTH_DP -> Request.FOLLOW_DEVICE
+        smallestScreenWidthDp >= TABLET_SMALLEST_WIDTH_DP -> Request.SYSTEM_DECIDES
         else -> Request.PORTRAIT
     }
 }

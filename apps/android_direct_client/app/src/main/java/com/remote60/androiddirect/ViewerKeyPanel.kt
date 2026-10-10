@@ -320,7 +320,18 @@ class ViewerKeyPanel(
                 val b = Button(context)
                 b.text = if (key.sub != null) "${key.label}\n${key.sub}" else key.label
                 b.isAllCaps = false
-                b.textSize = if (key.sub != null) 10f else 11f
+                // Two-line keys at 10sp without the font's extra top and bottom padding: a landscape
+                // phone row is ~25dp, and with the padding the second line reached the key's edge
+                // (apk-keyboard-tabs r3 K2). 한/영 is two lines too (its mode line), but a whole
+                // Hangul syllable draws below the unpadded line box, so it keeps the padding at 9sp.
+                when {
+                    key.vk == Vk.HANYEONG -> b.textSize = 9f
+                    key.sub != null -> {
+                        b.textSize = 10f
+                        b.includeFontPadding = false
+                    }
+                    else -> b.textSize = 11f
+                }
                 b.setTextColor(0xFFF4F0E8.toInt())
                 b.setBackgroundResource(R.drawable.viewer_control_button_background)
                 b.minWidth = 0

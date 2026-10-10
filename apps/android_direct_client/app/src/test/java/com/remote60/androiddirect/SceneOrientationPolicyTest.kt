@@ -39,9 +39,9 @@ class SceneOrientationPolicyTest {
     }
 
     @Test
-    fun aTabletIsLeftToTheWayItIsHeld() {
-        assertEquals(Request.FOLLOW_DEVICE, SceneOrientationPolicy.forScene(inViewer = false, tabletDp))
-        assertEquals(Request.FOLLOW_DEVICE, SceneOrientationPolicy.forScene(inViewer = false, SceneOrientationPolicy.TABLET_SMALLEST_WIDTH_DP))
+    fun aTabletIsLeftToTheSystemRotationPolicy() {
+        assertEquals(Request.SYSTEM_DECIDES, SceneOrientationPolicy.forScene(inViewer = false, tabletDp))
+        assertEquals(Request.SYSTEM_DECIDES, SceneOrientationPolicy.forScene(inViewer = false, SceneOrientationPolicy.TABLET_SMALLEST_WIDTH_DP))
         assertEquals(Request.PORTRAIT, SceneOrientationPolicy.forScene(inViewer = false, SceneOrientationPolicy.TABLET_SMALLEST_WIDTH_DP - 1))
     }
 }

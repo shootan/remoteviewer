@@ -51,6 +51,10 @@ class ImeCaptureView @JvmOverloads constructor(
     // synthetic keyboard inject directly into the focused View. Handle that route too so the
     // remote keystroke and local preview stay consistent.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // Back is the viewer's, not the remote's: with no soft keyboard up to take it first (a
+        // hardware keyboard), swallowing it here left the keyboard tabs with no Back to close them
+        // (apk-keyboard-tabs r3 K1). The activity closes the keyboard on it.
+        if (keyCode == KeyEvent.KEYCODE_BACK) return super.onKeyDown(keyCode, event)
         if (keyCode == KeyEvent.KEYCODE_DEL) {
             listener?.onDeleteBackward(1)
             deletePreviewCodePoints(1)
@@ -63,6 +67,7 @@ class ImeCaptureView @JvmOverloads constructor(
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK) return super.onKeyUp(keyCode, event)
         if (keyCode != KeyEvent.KEYCODE_DEL) {
             listener?.onSpecialKey(keyCode, KeyEvent.ACTION_UP)
         }
