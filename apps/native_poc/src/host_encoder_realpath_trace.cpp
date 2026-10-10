@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
   std::printf("host_encoder_realpath_trace (REAL encoder+admission+SenderState+WireLimiter+assembler; "
               "AMD path): capR=%uk encTarget=%uk fps=%u phase=%us cap=%s gov=%s, idle->motion->idle\n",
               rateKbps, encTargetKbps, fps, phaseSec, capOn ? "ON" : "OFF(real, limiter disabled)",
-              govOff ? "OFF(fixed qp32)" : "ON");
+              govOff ? "OFF" : "ON");  // authoritative mode/QP is the 'mode:' line + per-row note tags below
 
   WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
   MFStartup(MF_VERSION);
