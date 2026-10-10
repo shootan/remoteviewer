@@ -93,6 +93,17 @@ struct WireEgress {
   // WireLimiter's clock; null here means no behaviour change (the shipped host never sets them).
   std::function<uint64_t()> nowFn;       // admission-loop clock (ledger window timestamps too)
   std::function<void(uint64_t)> waitFn;  // admission-loop cancellable wait (advances the fake clock in tests)
+  // r10/r11 (Codex 974c3a8): reproduce the r6 defect in the REAL send path for a negative control -- a
+  // NORMAL (non-grant) datagram skips ONLY the 2s-window admission gate while still being strict-rate
+  // paced by the limiter, accounted (CommitSent) and sent through the sink. This field AND its send-path
+  // branch are COMPILED OUT of the product entirely: REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM is defined
+  // ONLY on the remote60_host_burst_sender_admission_test target (PRIVATE), so GNLinkStream and every
+  // e2e/gate compile host_net_io without it -- the field is absent and the branch is preprocessed away,
+  // not merely runtime-false. A test sets it to show that bypassing the window makes the 2r+L assertion
+  // FAIL on the real send path.
+#ifdef REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM
+  bool bypassWindowForTest = false;
+#endif
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */

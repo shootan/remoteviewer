@@ -208,10 +208,20 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // r8 D2: one injected time axis for the admission loop (null in production -> real qpc / sleep).
     const auto NOW = [&]() -> uint64_t { return (wire && wire->nowFn) ? wire->nowFn() : qpc_now_us(); };
     const auto WAIT = [&](uint64_t target) { if (wire && wire->waitFn) wire->waitFn(target); else udp_pace_wait_until(target); };
+    // r10/r11 test-only: reproduce the r6 defect -- a NORMAL datagram skips ONLY the 2s window gate (no
+    // HasRoom/Reserve) while keeping the limiter's strict pacing and the CommitSent accounting. The field
+    // and this branch are compiled in ONLY under REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM (defined solely
+    // on the admission-test target); in the product it is a compile-time false, so the whole seam is
+    // preprocessed/optimized away.
+#ifdef REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM
+    const bool r6TailBypass = b1Active && wire->bypassWindowForTest && !grantCovered;
+#else
+    constexpr bool r6TailBypass = false;
+#endif
     if (b1Active) {
       for (;;) {
         const uint64_t now = NOW();
-        const bool windowRoom = wire->burstLedger->HasRoom(now, wireBytes);
+        const bool windowRoom = r6TailBypass ? true : wire->burstLedger->HasRoom(now, wireBytes);
         // rate readiness: a grant peak-paces (bypasses the strict rate); a normal datagram needs a token.
         // r8 D1: readiness is a BOOL / 0-sentinel against THIS `now` snapshot -- never a fresh clock read
         // (a later clock would make `deadline <= now` false even when ready, busy-spinning the loop).
@@ -228,6 +238,14 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
         }
         if (windowRoom && rateReady) {
           if (mediaStopFence()) { wireAborted = true; return false; }  // fence at the send instant (S1/R2)
+#ifdef REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM
+          if (r6TailBypass) {
+            // r6 (test negative control): no window Reserve -- only the strict-rate token. CommitSent
+            // still accounts it below (reserved stays false but the bypass marks it to account).
+            if (!wire->limiter->TryAcquire(wireBytes)) continue;
+            break;
+          }
+#endif
           // Commit the window, then take the rate. If either slips (a concurrent SetRate between peek and
           // take), undo and re-evaluate rather than over-admit.
           if (!wire->burstLedger->Reserve(now, wireBytes)) continue;
@@ -268,7 +286,7 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // r4 B1 / r6 C1: commit the reservation into the 2s window at the REAL send time (1:1). Every B1
     // datagram -- normal or grant -- reserved in the unified admission above, so the window reflects
     // exactly what left the wire (normal traffic is now window-admitted too, closing the C1 gap).
-    if (reserved) wire->burstLedger->CommitSent(NOW(), wireBytes);
+    if (reserved || r6TailBypass) wire->burstLedger->CommitSent(NOW(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {
