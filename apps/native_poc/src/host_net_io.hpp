@@ -93,6 +93,13 @@ struct WireEgress {
   // WireLimiter's clock; null here means no behaviour change (the shipped host never sets them).
   std::function<uint64_t()> nowFn;       // admission-loop clock (ledger window timestamps too)
   std::function<void(uint64_t)> waitFn;  // admission-loop cancellable wait (advances the fake clock in tests)
+  // r10 (Codex 597aca2 release note): reproduce the r6 defect in the REAL send path for a negative
+  // control -- a NORMAL (non-grant) datagram skips ONLY the 2s-window admission gate while still being
+  // strict-rate paced by the limiter, accounted (CommitSent) and sent through the sink. false in
+  // production (the shipped loop always admits); a test sets it to show that bypassing the window makes
+  // the SAME 2r+L assertion FAIL. Grant-covered datagrams are unaffected. Same null-default test-seam
+  // category as nowFn/waitFn above -- it does NOT change the shipped behaviour.
+  bool bypassWindowForTest = false;
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */

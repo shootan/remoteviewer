@@ -297,29 +297,31 @@ int main() {
           !everReadyOld);
   }
 
-  // --- Case 6: E2 (Codex 26ce462) -- the SAME input as a grant burst, but the normal TAIL bypasses the
-  //     window Reserve while still being SENT/accounted (the r6 defect). The independent TX trace's 2s
-  //     window must then FAIL the same 2r + L bound -- so the bound genuinely catches r6, not only the
-  //     null-ledger bypass of case3. (Not case3's different-size inputs.) --------------------------------
+  // --- Case 6: E2 (Codex 597aca2 release note) -- the EXACT case4 input and setup (stride*330, one real
+  //     grant, the shared injected clock), driven through the REAL send_udp_chunks_impl, but with the
+  //     normal TAIL's window gate bypassed (wire.bypassWindowForTest) while its strict-rate pacing,
+  //     accounting and sink are kept -- the r6 defect, not a hand-built model. The same independent TX
+  //     trace's 2s window must then FAIL the same 2r + L bound that case4 (gated) passes. ----------------
   {
     uint64_t clk = 10'000'000;
     WireLimiter lim([&] { return clk; }, [](uint64_t, uint64_t) { return true; });
-    lim.SetRate(cap, 1600);
+    lim.SetRate(cap, 1600);           // the real cap: the tail is still strict-rate paced at r
     clk += 3'000'000;
     BurstLedger led;
     led.SetRate(cap, clk - 3'000'000);
-    const BurstAuId owner{1, 1, 1, 201, true};
+    const BurstAuId owner{1, 1, 1, 200, true};
     (void)led.GrantForIdr(clk, owner);
     std::vector<std::pair<uint64_t, uint64_t>> trace;
     const uint32_t mtu6 = 1200;
     const uint32_t stride = mtu6 - static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
-    std::vector<uint8_t> payload(static_cast<size_t>(stride) * 150, 0x6C);  // ~grant-quota-sized burst
+    std::vector<uint8_t> payload(static_cast<size_t>(stride) * 330, 0x6C);  // EXACT case4 input
     UdpVideoChunkHeader base{};
     base.magic = kMagic; base.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
-    base.codec = static_cast<uint16_t>(UdpCodec::H264); base.seq = 201; base.streamGeneration = 1;
+    base.codec = static_cast<uint16_t>(UdpCodec::H264); base.seq = 200; base.streamGeneration = 1;
     base.payloadSize = static_cast<uint32_t>(payload.size());
     WireEgress wire;
     wire.limiter = &lim; wire.burstLedger = &led; wire.auHasGrant = true; wire.burstOwner = owner;
+    wire.bypassWindowForTest = true;  // r6: the NORMAL tail skips ONLY the window gate (strict pacing kept)
     wire.nowFn = [&] { return clk; };
     wire.waitFn = [&](uint64_t target) { if (target > clk) clk = target; };
     wire.sink = [&](const uint8_t*, int len, bool) -> int {
@@ -328,14 +330,8 @@ int main() {
     };
     SendPathStats st{}; UdpEgressConfig eg; eg.pacePeakBps = 0;
     sockaddr_in peer{}; peer.sin_family = AF_INET;
-    (void)send_udp_chunks_impl(INVALID_SOCKET, peer, payload.data(), payload.size(), base, mtu6, &st,
-                               nullptr, 0, eg, &wire);
-    const uint64_t grantWire = [&] { uint64_t s = 0; for (auto& e : trace) s += e.second; return s; }();
-    // r6 model: the normal TAIL is SENT/accounted but NOT window-gated -- CommitSent WITHOUT Reserve, at
-    // the current clock (no throttle). Append it to the SAME trace.
-    const uint64_t tailDg = static_cast<uint64_t>(mtu6) + 28u;
-    uint64_t tail = 0;
-    while (tail < 220'000) { led.CommitSent(clk, tailDg); trace.emplace_back(clk, tailDg); tail += tailDg; }
+    const UdpSendOutcome oc = send_udp_chunks_impl(INVALID_SOCKET, peer, payload.data(), payload.size(), base,
+                                                   mtu6, &st, nullptr, 0, eg, &wire);
     uint64_t maxWin = 0;
     for (size_t i = 0; i < trace.size(); ++i) {
       uint64_t sum = 0;
@@ -345,9 +341,10 @@ int main() {
       }
       maxWin = std::max(maxWin, sum);
     }
-    check("case6 E2: an r6 tail (Reserve bypassed, still sent) FAILS the same 2s bound (the bound catches r6)",
-          maxWin > twoR + L, "maxWin=" + std::to_string(maxWin) + " 2r+L=" + std::to_string(twoR + L) +
-          " grantWire=" + std::to_string(grantWire));
+    check("case6 E2: the REAL send with the tail's window gate bypassed (r6) FAILS the same 2s bound",
+          oc == UdpSendOutcome::Sent && maxWin > twoR + L,
+          "maxWin=" + std::to_string(maxWin) + " 2r+L=" + std::to_string(twoR + L) +
+          " datagrams=" + std::to_string(trace.size()));
   }
 
   std::printf("\nhost_burst_sender_admission_test: %s (%d checks, %d failed)\n", gFailed ? "FAIL" : "PASS",
