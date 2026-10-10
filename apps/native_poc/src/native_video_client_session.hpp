@@ -190,12 +190,18 @@ class ClientSessionController {
   /** Total UDP video bytes received this session, for the on-screen data meter. */
   uint64_t SessionBytesReceived() const;
 
-  // udp-recv-exit r1 test seams (unreferenced in the shipped product -- the hook is never set, so the
-  // loop uses the real recv; Release /OPT:REF strips these). They let a test drive the REAL VideoReceive
-  // loop with scripted recv results (zero / oversize / reset / normal / terminal) deterministically.
+  // udp-recv-exit r1/r2 test seams. Precisely (r2 U wording): the hook MEMBER and the
+  // `if (udpRecvHookForTest_)` branch in VideoReceiveMain DO ship -- they are a null-default runtime
+  // check that is simply never true in production (no code path, env, message or user option sets the
+  // hook), so the shipped loop always calls the real recv; they are NOT claimed removed by /OPT:REF. The
+  // test-only METHODS below are unreferenced by the product and are what /OPT:REF can strip. They let a
+  // test drive the REAL VideoReceive loop with scripted recv results deterministically.
   void SetUdpRecvHookForTest(std::function<int(uint8_t*, size_t, int&)> hook) { udpRecvHookForTest_ = std::move(hook); }
   void RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink);
   void RequestStopForTest() { stopRequested_.store(true, std::memory_order_release); }
+  // Enable the NACK/hold receive policy for a test so the loop's maintenance tick (NACK rounds, hold
+  // expiry, stuck-head give-up) is exercised while recv results are being discarded.
+  void SetHostSupportsNackForTest(bool v) { hostSupportsNack_.store(v, std::memory_order_release); }
 
  private:
   ClientSessionController(const ClientSessionController&) = delete;

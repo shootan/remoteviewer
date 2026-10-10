@@ -792,11 +792,12 @@ void ClientSessionController::VideoReceiveMain() {
   // anti-spin gap. A discard is NOT a healthy/ACK/peer-alive event.
   uint64_t recvEmpty = 0, recvTruncated = 0, recvReset = 0, recvRetry = 0;
   bool loggedFirstDrop = false;
-  int lastLoggedErr = 0;
-  uint64_t lastValidRecvUs = now_us();
-  uint64_t lastImmediateDropUs = 0;
-  constexpr uint64_t kUdpDropSpinGapUs = 1000;  // immediate-return drops no faster than ~1 kHz (no spin)
-  constexpr uint64_t kUdpDropLogEvery = 512;    // periodic aggregate cadence
+  uint64_t lastDropLogUs = 0;
+  uint64_t lastDatagramUs = now_us();  // since the last POSITIVE-length recv (malformed or not -- a
+                                       // diagnostic of arrivals, NOT a peer-health/valid-receive marker)
+  uint64_t lastDropLoopUs = 0;
+  constexpr uint64_t kUdpDropSpinGapUs = 1000;      // bound EVERY drop-iteration to ~1 kHz (no CPU spin)
+  constexpr uint64_t kUdpDropLogGapUs = 1'000'000;  // bound drop diagnostics to ~1/s even as codes alternate
 
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
@@ -831,13 +832,15 @@ void ClientSessionController::VideoReceiveMain() {
     if (n <= 0) {
       if (stopRequested_.load(std::memory_order_acquire)) break;
       const UdpRecvClass cls = classify_udp_recv(n, recvErr);
+      const uint64_t sinceDatagramMs = (now_us() - lastDatagramUs) / 1000;
       if (cls == UdpRecvClass::Terminal) {
         std::fprintf(stderr,
-                     "[native-video-client-session] udp video receive terminal n=%d err=%d empty=%llu "
-                     "truncated=%llu reset=%llu sinceValidMs=%llu\n",
-                     n, recvErr, static_cast<unsigned long long>(recvEmpty),
+                     "[native-video-client-session] udp video receive terminal sock=%llu n=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu sinceDatagramMs=%llu\n",
+                     static_cast<unsigned long long>(udpSocket), n, recvErr,
+                     static_cast<unsigned long long>(recvEmpty),
                      static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
-                     static_cast<unsigned long long>((now_us() - lastValidRecvUs) / 1000));
+                     static_cast<unsigned long long>(sinceDatagramMs));
         SignalRuntimeFailure("udp video receive failed");
         break;
       }
@@ -845,43 +848,46 @@ void ClientSessionController::VideoReceiveMain() {
       // Discard the input (never hand a truncated prefix to the parser), keep the maintenance ticks going,
       // but do NOT count any of this as a healthy receive. The read timeout is also the channel heartbeat;
       // a quiet/dropping socket is exactly when a lost chunk or an expiring hold must still be serviced.
-      uint64_t dropTotal = 0;
       switch (cls) {
-        case UdpRecvClass::Empty: dropTotal = ++recvEmpty; break;
-        case UdpRecvClass::TruncatedDrop: dropTotal = ++recvTruncated; break;
-        case UdpRecvClass::ResetAdvisory: dropTotal = ++recvReset; break;
-        case UdpRecvClass::Retryable: dropTotal = ++recvRetry; break;
+        case UdpRecvClass::Empty: ++recvEmpty; break;
+        case UdpRecvClass::TruncatedDrop: ++recvTruncated; break;
+        case UdpRecvClass::ResetAdvisory: ++recvReset; break;
+        case UdpRecvClass::Retryable: ++recvRetry; break;
         default: break;
       }
-      const bool errChanged = (n < 0) && (recvErr != lastLoggedErr);
-      if (!loggedFirstDrop || errChanged || (dropTotal % kUdpDropLogEvery) == 1ULL) {
+      // r2 U2: TIME-bounded diagnostics -- the first drop, then at most ~1/s even when the error code
+      // alternates (reset<->oversize). All counters are preserved and printed, so nothing is lost; the
+      // receive thread's stderr cannot flood and stall input/control. The socket handle disambiguates
+      // sessions during this intermittent-#2 hunt.
+      const uint64_t logNow = now_us();
+      if (!loggedFirstDrop || (logNow - lastDropLogUs) >= kUdpDropLogGapUs) {
         loggedFirstDrop = true;
-        lastLoggedErr = recvErr;
+        lastDropLogUs = logNow;
         std::fprintf(stderr,
-                     "[native-video-client-session] udp recv drop class=%d n=%d errValid=%d err=%d "
-                     "empty=%llu truncated=%llu reset=%llu retry=%llu sinceValidMs=%llu stop=%d\n",
-                     static_cast<int>(cls), n, (n < 0) ? 1 : 0, recvErr,
-                     static_cast<unsigned long long>(recvEmpty), static_cast<unsigned long long>(recvTruncated),
-                     static_cast<unsigned long long>(recvReset), static_cast<unsigned long long>(recvRetry),
-                     static_cast<unsigned long long>((now_us() - lastValidRecvUs) / 1000),
+                     "[native-video-client-session] udp recv drop sock=%llu class=%d n=%d errValid=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu retry=%llu sinceDatagramMs=%llu stop=%d\n",
+                     static_cast<unsigned long long>(udpSocket), static_cast<int>(cls), n, (n < 0) ? 1 : 0,
+                     recvErr, static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>(recvRetry), static_cast<unsigned long long>(sinceDatagramMs),
                      stopRequested_.load(std::memory_order_acquire) ? 1 : 0);
       }
       if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
       pipeline.OnTick(now_us());
-      // Anti-spin: a timeout (Retryable) already waited, but Empty/Truncated/ResetAdvisory can return at
-      // once; if they stream in, bound the loop to ~1 kHz so a reset/empty flood cannot peg the CPU or the
-      // log. stop is re-checked at the loop top, so this stays bounded against shutdown.
-      if (cls != UdpRecvClass::Retryable) {
-        const uint64_t loopNow = now_us();
-        if (lastImmediateDropUs != 0 && loopNow - lastImmediateDropUs < kUdpDropSpinGapUs) {
-          std::this_thread::sleep_for(std::chrono::microseconds(kUdpDropSpinGapUs - (loopNow - lastImmediateDropUs)));
-        }
-        lastImmediateDropUs = now_us();
+      // r2 U2 anti-spin: do NOT assume a Retryable waited -- would-block/interrupted can return at once
+      // too. Bound EVERY drop iteration (empty/truncated/reset/retry alike) to ~1 kHz: if the previous
+      // drop iteration was less than the gap ago, sleep the remainder. A real blocking timeout naturally
+      // spans more than the gap, so it never sleeps; a flood of immediate returns cannot peg the CPU.
+      // stop is re-checked at the loop top, so this stays bounded against shutdown.
+      const uint64_t loopNow = now_us();
+      if (lastDropLoopUs != 0 && loopNow - lastDropLoopUs < kUdpDropSpinGapUs) {
+        std::this_thread::sleep_for(std::chrono::microseconds(kUdpDropSpinGapUs - (loopNow - lastDropLoopUs)));
       }
+      lastDropLoopUs = now_us();
       continue;
     }
-    lastValidRecvUs = now_us();
-    lastImmediateDropUs = 0;  // a real datagram breaks any immediate-drop streak
+    lastDatagramUs = now_us();
+    lastDropLoopUs = 0;  // a real datagram breaks any immediate-drop streak
 
     if (controlOverUdp_.load(std::memory_order_acquire) &&
         udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {

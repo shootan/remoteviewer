@@ -242,8 +242,13 @@ enum class UdpRecvClass {
 };
 
 // Classify a UDP recv() result. `nBytes` is recv's return; `err` is socket_last_error() captured
-// IMMEDIATELY after a SOCKET_ERROR (ignored when nBytes >= 0). Windows WSA codes and POSIX errno are
-// matched by their symbolic meaning, never by raw number across platforms.
+// IMMEDIATELY after a SOCKET_ERROR (ignored when nBytes >= 0). The n==0 (empty datagram) and the
+// Retryable set are platform-neutral. The TruncatedDrop / ResetAdvisory handling is WINDOWS-ONLY: it is
+// WSAEMSGSIZE (Windows returns a recv error for a truncated datagram) and WSAECONNRESET (Windows reports
+// an earlier send's ICMP Port Unreachable on the next recv). On POSIX a truncation is a normal n>0 read
+// with MSG_TRUNC (not EMSGSIZE on recv), and an unreachable peer is reported as ECONNREFUSED, not
+// ECONNRESET -- so the Windows advisory is NOT ported to POSIX by name; POSIX keeps its existing terminal
+// policy for those (only n==0 and the Retryable set change there). WSA/errno are matched by symbol.
 inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
   if (nBytes > 0) return UdpRecvClass::Datagram;
   if (nBytes == 0) return UdpRecvClass::Empty;
@@ -261,6 +266,8 @@ inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
       return UdpRecvClass::Terminal;
   }
 #else
+  // POSIX: only n==0 (handled above) and the Retryable set are non-terminal. EMSGSIZE/ECONNRESET keep the
+  // existing terminal policy -- the Windows advisory is not assumed equivalent here (udp-recv-exit r2 U3).
   switch (err) {
     case EAGAIN:
 #if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
@@ -269,10 +276,6 @@ inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
     case ETIMEDOUT:
     case EINTR:
       return UdpRecvClass::Retryable;
-    case EMSGSIZE:
-      return UdpRecvClass::TruncatedDrop;
-    case ECONNRESET:
-      return UdpRecvClass::ResetAdvisory;
     default:
       return UdpRecvClass::Terminal;
   }
