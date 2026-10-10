@@ -1,18 +1,26 @@
-// Encoder-bakeoff r2 -- PRODUCT-PATH trace. MEASUREMENT-ONLY, not shipped.
+// Encoder-bakeoff r3 -- control-loop MODEL (NOT the product send path). MEASUREMENT-ONLY, not shipped.
 //
-// r1 measured the bare encoder. Codex's point: the stutter comes from the product CONTROL path, not
-// the encoder alone. This drives the SAME product encoder (H264Encoder) wrapped in the SAME product
-// control pieces -- the real RateGovernor (host_rate_governor.hpp, OnSecond -> maxQp/fps ladder) and
-// the real encode-admission gate (host_encode_admission.hpp, skip a new capture frame before encode
-// while the wire-capped sender queue is backlogged) -- plus a single-threaded wire-limiter + 2-AU
-// sender-queue model paced at the user bitrate. It replays idle(static) -> motion -> idle(static) and
-// logs, per second: target, generated AU bytes, wire-sent bytes, skips, queue depth, the governor's
-// maxQp / fps, and the product's genKbps ESTIMATE (txDelta + skips*avgSentFrameBytes) so the field
-// log's 8-12 Mbps number can be read for what it is (a load estimate including skipped inputs).
+// ⚠️ r3 RE-LABEL (Codex): this uses the REAL encoder (H264Encoder), the REAL RateGovernor
+// (host_rate_governor.hpp) and the REAL admission gate (host_encode_admission.hpp), but it does NOT
+// run the product's WireLimiter / sender / stats tick / receiver. The wire is a single-threaded
+// arbitrary-queue + R/fps credit MODEL. Its specific divergences from the product (so no reader
+// mistakes it for the product path):
+//   * cap OFF here still drains the model link at exactly R/fps (off only disables the admission
+//     gate), so a "queue grows unbounded" under cap OFF is a property of THIS fixed virtual link, not
+//     of the product's cap-off send policy.
+//   * idle wire credit is unbounded (no product bounded bucket/ledger), which shifts the transient
+//     and the skip count.
+//   * the governor's avg-frame-bytes input here is the last drained queue.front() tail, not the
+//     product's txDelta/completed-frame average.
+//   * fps steps only change input sampling here; no codec reinit / product reset / target change.
+//   * the 1 s tick is fps iterations, not real elapsed; encode failures are ignored.
+// Therefore the r2 conclusions "AMD self-corrects in ~6 s" and "cap OFF queue explodes, so the cap is
+// needed" are RETRACTED as product claims and kept only as observations of this combined-policy
+// MODEL. A product claim needs the real sender/limiter/stats + receiver display/queue (see report r3
+// §C: structure proposed to the verifier before building).
 //
-// cap OFF (wireCapActive=false) is a CONTROL only: the gate never skips, so the queue is unbounded
-// and the figure shows what the encoder would have put on an unbounded wire. No product default is
-// changed; the governor/admission thresholds are their product defaults.
+// The governor is fed the product's generated-load estimate (sent + skips*avgSentFrame; matches
+// host_stage_stats_h264.cpp:183,208) so the ladder moves as in the field. No product default changed.
 //
 // Usage: remote60_host_encoder_product_trace [backend=mft_hw] [rateKbps=3000] [fps=30]
 //            [phaseSec=8] [cap=on|off]

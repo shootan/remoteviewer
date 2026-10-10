@@ -60,11 +60,14 @@ struct Row {
   std::string scene, backend; uint32_t targetKbps = 0, fps = 0;
   // pacing / accounting
   uint32_t submitted = 0, returnedAUs = 0, pendingAtEnd = 0, deadlineMisses = 0;
+  uint32_t supplyStalls = 0, latUnmatched = 0, drainRecovered = 0;
   double inFps = 0, outFps = 0;      // measured
-  double encoderCpuCores = 0;        // scene-gen + decode CPU subtracted
+  double totalCpuCores = 0;          // raw process CPU / wall (no subtraction)
+  double encoderCpuCores = 0;        // ESTIMATE: total - calibrated scene-gen - decode (see caveats)
   double sceneGenCores = 0, decodeCores = 0;
   uint64_t latP50 = 0, latP95 = 0, latMax = 0;  // input-submit -> AU-return, us
   double vbvMs = 0;
+  double genWallMsPerFrame = 0;      // scene-gen wall per frame; if > frame budget, the run is supply-bound
   Half whole;                        // the measured region as one half (COLDQP / plain)
   bool split = false; Half a, b; uint32_t liveQp = 0;  // LIVEQP: before/after the live change
 };
@@ -126,113 +129,115 @@ Row run(const std::string& scene, const std::string& backend, uint32_t targetKbp
   const uint32_t warmup = 2 * fps;                 // paced, excluded from stats
   const uint32_t body = seconds * fps;
   const uint32_t total = warmup + body;
-  const uint32_t liveSwitchAt = warmup + body / 2;  // LIVEQP: switch at the half point
+  const uint32_t drainN = 3 * fps;                 // extra paced inputs after body to flush the async tail
+  const uint32_t liveSwitchAt = warmup + body / 2; // LIVEQP: switch at the half point
+  const uint32_t halfA = liveSwitchAt - warmup, halfB = total - liveSwitchAt;
 
-  // per-source-frame byte series (indexed by source frame ordinal within the measured body)
+  // per-source-frame byte series, indexed within the measured body. B1 (Codex): the LIVEQP halves are
+  // FIXED-length and indexed from EACH half's start, so the "after" half is not padded with leading 0s.
   std::vector<uint32_t> bytesByFrame(body, 0), idrBytes;
-  std::vector<uint32_t> bytesA, idrA, bytesB, idrB;  // LIVEQP halves (by source frame)
-  std::vector<uint64_t> lat;                          // input-submit -> AU-return us
-  std::map<uint64_t, uint64_t> submitUsByOrdinal;     // ordinal -> submit wall us
-  std::map<int64_t, std::vector<uint8_t>> srcLumaByPts; // PSNR: exact-PTS source luma
+  std::vector<uint32_t> bytesA(r.split ? halfA : 0, 0), idrA, bytesB(r.split ? halfB : 0, 0), idrB;
+  std::vector<uint64_t> lat;
+  std::map<uint64_t, uint64_t> submitUsByOrdinal;
+  std::map<int64_t, std::vector<uint8_t>> srcLumaByPts;
   double mseSum = 0; uint32_t mseN = 0, psnrUnmatched = 0, psnrDecodeFail = 0;
 
-  // Scene-generation cost, measured ALONE (encoder idle, single-threaded) so the async encoder's
-  // own threads are not misattributed to it. Subtracted from the measured CPU to leave encoder cost.
-  uint64_t perFrameGenUs = 0;
-  { const uint64_t c0 = proc_cpu_us();
+  // Calibrate scene-generation cost ALONE (encoder idle, single thread): CPU (to subtract) and WALL
+  // (to judge whether generation -- not the encoder -- bounds the frame rate; Codex D 60fps).
+  uint64_t perFrameGenUs = 0, perFrameGenWallUs = 0;
+  { const uint64_t c0 = proc_cpu_us(), w0 = now_us();
     for (uint32_t k = 0; k < fps; ++k) fill_scene(scene, nv12, warmup + k);
-    perFrameGenUs = (proc_cpu_us() - c0) / std::max(1u, fps); }
+    perFrameGenUs = (proc_cpu_us() - c0) / std::max(1u, fps);
+    perFrameGenWallUs = (now_us() - w0) / std::max(1u, fps); }
+  r.genWallMsPerFrame = perFrameGenWallUs / 1000.0;
 
-  uint64_t sceneGenUs = 0, decodeUs = 0;
-  uint64_t cpu0 = 0, wall0 = 0, deadline = now_us();
+  uint64_t decodeUs = 0;
+  uint64_t cpu0 = 0, wall0 = 0, cpuBodyEnd = 0, wallBodyEnd = 0, deadline = now_us();
   uint64_t submittedOrdinal = 0;
   bool switched = false;
 
-  for (uint32_t i = 0; i < total; ++i) {
-    if (i == warmup) { cpu0 = proc_cpu_us(); wall0 = now_us(); }  // begin measured region
-    if (r.split && !switched && i == liveSwitchAt) { enc->set_max_qp(liveQp); switched = true; }
-    deadline += frameUs;
-
-    fill_scene(scene, nv12, i);  // gen cost accounted via the calibration above, not inline
-
-    const int64_t tsHns = static_cast<int64_t>(i) * static_cast<int64_t>(10'000'000LL / fps);
-    const bool key = (i == 0);
-    const uint64_t submitWall = now_us();
-    // the encoder assigns acceptedInputOrdinal; it accepts 1 input per call, so the NEXT ordinal is
-    // submittedOrdinal+1. Record submit time against it for the input->AU latency.
-    ++submittedOrdinal;
-    submitUsByOrdinal[submittedOrdinal] = submitWall;
-    if (i >= warmup) ++r.submitted;
-    if (doPsnr && decOk) srcLumaByPts[tsHns] = std::vector<uint8_t>(nv12.begin(), nv12.begin() + kLuma);
-
-    std::vector<H264AccessUnit> units;
-    if (!enc->encode(nv12, key, tsHns, &units)) { enc->shutdown(); if (decOk) dec.shutdown(); return r; }
-    const uint64_t auWall = now_us();
-
-    for (const auto& u : units) {
-      // input->AU latency by exact ordinal (async-correct)
+  // Account one returned AU to its SOURCE frame (shared by the body loop and the drain phase).
+  auto account = [&](const H264AccessUnit& u, uint64_t auWall, bool inDrain) {
+    const int64_t srcFrameIdx = fps ? u.sampleTimeHns / (int64_t)(10'000'000LL / fps) : -1;
+    const bool inBody = srcFrameIdx >= (int64_t)warmup && srcFrameIdx < (int64_t)total;
+    if (inBody) {
+      ++r.returnedAUs;
+      if (inDrain) ++r.drainRecovered;
       auto it = submitUsByOrdinal.find(u.acceptedInputOrdinal);
-      const uint64_t subWall = it != submitUsByOrdinal.end() ? it->second : submitWall;
-      const int64_t srcPts = u.sampleTimeHns;
-      const int64_t srcFrameIdx = fps ? srcPts / static_cast<int64_t>(10'000'000LL / fps) : -1;
-      const bool inBody = srcFrameIdx >= static_cast<int64_t>(warmup) &&
-                          srcFrameIdx < static_cast<int64_t>(total);
-      if (inBody) {
-        ++r.returnedAUs;
-        lat.push_back(auWall - subWall);
-        const uint32_t idx = static_cast<uint32_t>(srcFrameIdx - warmup);
-        const uint32_t sz = static_cast<uint32_t>(u.bytes.size());
-        if (idx < bytesByFrame.size()) bytesByFrame[idx] += sz;
-        if (u.rawIdr) idrBytes.push_back(sz);
-        if (r.split) {
-          const bool firstHalf = srcFrameIdx < static_cast<int64_t>(liveSwitchAt);
-          if (firstHalf) { if (idx < bytesByFrame.size()) { if (bytesA.size() <= idx) bytesA.resize(idx + 1, 0); bytesA[idx] += sz; } if (u.rawIdr) idrA.push_back(sz); }
-          else { if (bytesB.size() <= idx) bytesB.resize(idx + 1, 0); bytesB[idx] += sz; if (u.rawIdr) idrB.push_back(sz); }
-        }
-      }
-      if (doPsnr && decOk) {
-        const uint64_t d0 = proc_cpu_us();
-        std::vector<DecodedFrameNv12> outF;
-        dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF);
-        decodeUs += proc_cpu_us() - d0;
-        for (const auto& f : outF) {
-          auto sit = srcLumaByPts.find(f.sampleTimeHns);  // EXACT PTS match only
-          if (sit == srcLumaByPts.end()) { ++psnrUnmatched; continue; }
-          if (f.bytes.size() < kLuma) { ++psnrDecodeFail; continue; }
-          const int64_t fidx = fps ? f.sampleTimeHns / static_cast<int64_t>(10'000'000LL / fps) : -1;
-          if (fidx < static_cast<int64_t>(warmup)) continue;  // warm-up frames not scored
-          const uint32_t vh = std::min(f.visibleHeight ? f.visibleHeight : kH, kH);
-          const uint32_t vw = std::min(f.visibleWidth ? f.visibleWidth : kW, kW);
-          const uint32_t dstStride = f.width ? f.width : kW;
-          double sse = 0;
-          for (uint32_t y = 0; y < vh; ++y) {
-            const uint8_t* sp = sit->second.data() + static_cast<size_t>(y) * kW;
-            const uint8_t* dp = f.bytes.data() + static_cast<size_t>(y + f.visibleTop) * dstStride + f.visibleLeft;
-            for (uint32_t x = 0; x < vw; ++x) { const int e = int(sp[x]) - int(dp[x]); sse += double(e) * e; }
-          }
-          mseSum += sse / (double(vh) * vw); ++mseN;
-          srcLumaByPts.erase(sit);
-        }
+      if (it != submitUsByOrdinal.end()) lat.push_back(auWall - it->second);
+      else ++r.latUnmatched;  // ordinal not found -> counted, NOT substituted with a short latency
+      const uint32_t idx = (uint32_t)(srcFrameIdx - warmup);
+      const uint32_t sz = (uint32_t)u.bytes.size();
+      if (idx < bytesByFrame.size()) bytesByFrame[idx] += sz;
+      if (u.rawIdr) idrBytes.push_back(sz);
+      if (r.split) {
+        if (srcFrameIdx < (int64_t)liveSwitchAt) { const uint32_t ai = (uint32_t)(srcFrameIdx - warmup); if (ai < bytesA.size()) bytesA[ai] += sz; if (u.rawIdr) idrA.push_back(sz); }
+        else { const uint32_t bi = (uint32_t)(srcFrameIdx - liveSwitchAt); if (bi < bytesB.size()) bytesB[bi] += sz; if (u.rawIdr) idrB.push_back(sz); }
       }
     }
+    if (doPsnr && decOk) {
+      const uint64_t d0 = proc_cpu_us();
+      std::vector<DecodedFrameNv12> outF;
+      const bool dok = dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF);  // bool checked
+      decodeUs += proc_cpu_us() - d0;
+      if (!dok) ++psnrDecodeFail;
+      for (const auto& f : outF) {
+        // warm-up and drain-phase frames are fed to keep the decoder's reference chain but are NOT
+        // scored (no source luma was stored for them) -- they are not "unmatched" errors.
+        const int64_t fidx = fps ? f.sampleTimeHns / (int64_t)(10'000'000LL / fps) : -1;
+        if (fidx < (int64_t)warmup || fidx >= (int64_t)total) continue;
+        auto sit = srcLumaByPts.find(f.sampleTimeHns);  // EXACT PTS only, body frames
+        if (sit == srcLumaByPts.end()) { ++psnrUnmatched; continue; }  // a real body miss
+        if (f.bytes.size() < kLuma) { ++psnrDecodeFail; srcLumaByPts.erase(sit); continue; }
+        const uint32_t vh = std::min(f.visibleHeight ? f.visibleHeight : kH, kH);
+        const uint32_t vw = std::min(f.visibleWidth ? f.visibleWidth : kW, kW);
+        const uint32_t dstStride = f.width ? f.width : kW;
+        double sse = 0;
+        for (uint32_t y = 0; y < vh; ++y) {
+          const uint8_t* sp = sit->second.data() + (size_t)y * kW;
+          const uint8_t* dp = f.bytes.data() + (size_t)(y + f.visibleTop) * dstStride + f.visibleLeft;
+          for (uint32_t x = 0; x < vw; ++x) { const int e = int(sp[x]) - int(dp[x]); sse += double(e) * e; }
+        }
+        mseSum += sse / ((double)vh * vw); ++mseN; srcLumaByPts.erase(sit);
+      }
+    }
+  };
+
+  for (uint32_t i = 0; i < total + drainN; ++i) {
+    if (i == warmup) { cpu0 = proc_cpu_us(); wall0 = now_us(); }           // measured region begins
+    if (i == total) { cpuBodyEnd = proc_cpu_us(); wallBodyEnd = now_us(); } // body ends; drain follows
+    if (r.split && !switched && i == liveSwitchAt) { enc->set_max_qp(liveQp); switched = true; }
+    deadline += frameUs;
+    fill_scene(scene, nv12, i);
+    const int64_t tsHns = (int64_t)i * (int64_t)(10'000'000LL / fps);
+    const uint64_t submitWall = now_us();
+    ++submittedOrdinal; submitUsByOrdinal[submittedOrdinal] = submitWall;
+    if (i >= warmup && i < total) ++r.submitted;
+    if (doPsnr && decOk && i >= warmup && i < total) srcLumaByPts[tsHns] = std::vector<uint8_t>(nv12.begin(), nv12.begin() + kLuma);
+    std::vector<H264AccessUnit> units;
+    if (!enc->encode(nv12, i == 0, tsHns, &units)) { enc->shutdown(); if (decOk) dec.shutdown(); return r; }
+    const uint64_t auWall = now_us();
+    for (const auto& u : units) account(u, auWall, i >= total);
     const uint64_t n = now_us();
     if (n < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - n));
-    else if (i >= warmup && (n - deadline) > frameUs / 2) ++r.deadlineMisses;  // fell >half a frame behind
+    else if (i >= warmup && i < total && (n - deadline) > frameUs / 2) ++r.deadlineMisses;
   }
 
-  const uint64_t wall = now_us() - wall0;
-  const uint64_t cpu = proc_cpu_us() - cpu0;
+  // BODY wall/cpu only (drain excluded from the rate/CPU figures; drain just recovers the tail bytes).
+  const uint64_t wall = (wallBodyEnd ? wallBodyEnd : now_us()) - wall0;
+  const uint64_t cpu = (cpuBodyEnd ? cpuBodyEnd : proc_cpu_us()) - cpu0;
   r.pendingAtEnd = enc->pending_depth();
   enc->shutdown();
   if (decOk) dec.shutdown();
   if (wall == 0) return r;
 
   const double wallSec = wall / 1e6;
-  sceneGenUs = perFrameGenUs * body;  // gen happens every measured frame; calibrated single-thread cost
+  const uint64_t sceneGenUs = perFrameGenUs * body;
   r.inFps = r.submitted / wallSec;
-  r.outFps = r.returnedAUs / wallSec;
+  r.outFps = r.returnedAUs / wallSec;   // incl. drain-recovered (reported separately)
+  r.totalCpuCores = double(cpu) / double(wall);
   const uint64_t encCpu = cpu > (sceneGenUs + decodeUs) ? cpu - sceneGenUs - decodeUs : 0;
-  r.encoderCpuCores = double(encCpu) / double(wall);
+  r.encoderCpuCores = double(encCpu) / double(wall);  // ESTIMATE; PSNR runs are not encoder-only
   r.sceneGenCores = double(sceneGenUs) / double(wall);
   r.decodeCores = double(decodeUs) / double(wall);
   std::sort(lat.begin(), lat.end());
@@ -246,18 +251,24 @@ Row run(const std::string& scene, const std::string& backend, uint32_t targetKbp
   return r;
 }
 
-void print_header() {
-  std::printf("\n%-7s %-9s %5s %4s | valid inFps outFps dmiss pend | encCore(gen/dec) | lat us p50/p95/max | "
-              "avgKbps frMeanB frP95B frMaxB | 1s/x 250ms/x | idr/s idrMaxB | vbvMs | PSNR(match/unm/fail)\n",
+uint32_t short_win_frames(uint32_t fps) { return std::max(1u, (fps + 2) / 4); }
+
+void print_header(uint32_t fps) {
+  const uint32_t w = short_win_frames(fps);
+  std::printf("\n(window: 1s=%uf, short=%uf=%.0fms; cpu=total(enc-est/gen/dec) cores; lat=input->AU us; "
+              "genWall=scene-gen ms/frame vs frame budget %.1fms)\n", fps, w, 1000.0 * w / fps, 1000.0 / fps);
+  std::printf("%-7s %-9s %5s %4s | valid inFps outFps dmiss pend drainRec | cpu tot(enc/gen/dec) | "
+              "lat p50/p95/max unm | genWallMs | avgKbps frMeanB frP95B frMaxB | 1s/x short/x | idr/s idrMaxB | vbvMs | PSNR(m/un/fail)\n",
               "scene","backend","tgt","fps");
 }
 void print_half(const char* tag, const Row& r, const Half& h) {
-  std::printf("%-7s %-9s %5u %4u | %s %5.1f %5.1f %5u %4u | %5.2f(%.2f/%.2f) | %6llu/%6llu/%7llu | "
-              "%7.0f %7.0f %6u %6u | %.0f/%.2f %.0f/%.2f | %.2f %6u | %.0f | %.2f(%u/%u/%u) %s\n",
+  std::printf("%-7s %-9s %5u %4u | %s %5.1f %5.1f %5u %4u %7u | %.2f(%.2f/%.2f/%.2f) | "
+              "%6llu/%6llu/%7llu %3u | %6.1f | %7.0f %7.0f %6u %7u | %.0f/%.2f %.0f/%.2f | %.2f %7u | %.0f | %.2f(%u/%u/%u) %s\n",
               r.scene.c_str(), r.backend.c_str(), r.targetKbps, r.fps, r.valid?"ok ":"BAD",
-              r.inFps, r.outFps, r.deadlineMisses, r.pendingAtEnd,
-              r.encoderCpuCores, r.sceneGenCores, r.decodeCores,
-              (unsigned long long)r.latP50,(unsigned long long)r.latP95,(unsigned long long)r.latMax,
+              r.inFps, r.outFps, r.deadlineMisses, r.pendingAtEnd, r.drainRecovered,
+              r.totalCpuCores, r.encoderCpuCores, r.sceneGenCores, r.decodeCores,
+              (unsigned long long)r.latP50,(unsigned long long)r.latP95,(unsigned long long)r.latMax, r.latUnmatched,
+              r.genWallMsPerFrame,
               h.avgKbps, h.frMean, h.frP95, h.frMax, h.win1sMaxKbps, h.win1sRatio, h.win250MaxKbps, h.win250Ratio,
               h.idrPerSec, h.idrMaxBytes, r.vbvMs, h.psnr, h.psnrMatched, h.psnrUnmatched, h.psnrDecodeFail, tag);
 }
@@ -291,7 +302,7 @@ int main(int argc, char** argv) {
   std::printf("scenes=%s backends=%s ratesKbps=%s PSNR=%s coldQp=%u liveQp=%u\n",
               scenesArg.c_str(), backendsArg.c_str(), ratesArg.c_str(), doPsnr?"on":"off", coldQp, liveQp);
   MFStartup(MF_VERSION);
-  print_header();
+  print_header(fps);
   bool anyInvalid = false;
   for (const auto& sc : scenes) for (uint32_t br : rates) for (const auto& b : backends) {
     const Row r = run(sc, b, br, seconds, fps, keyintSec, doPsnr, coldQp, liveQp);
