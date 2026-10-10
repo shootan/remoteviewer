@@ -285,31 +285,47 @@ int main() {
           unk.find("restart_planned=false") != std::string::npos, unk);
   }
 
-  // hostapp-log-upload r2 (H3): the preceding field is sanitised raw child output: redact credential
-  // markers, escape to one line, UTF-8-safe truncate -- in that order.
+  // hostapp-log-upload r3 (H3/R1): a line containing ANY credential marker is redacted WHOLE -- the
+  // r2 token-wise redactor leaked space-separated / quoted / JSON values, so these synthetic forms
+  // must leave no secret byte. Non-secret lines pass through escaped+truncated. Order: redact, escape,
+  // UTF-8-safe truncate.
   {
-    const std::string s = sanitize_preceding_line(
-        "connected token=SECRETzzz password=hunter2 Authorization: Bearer abc.def ok");
-    check("a token= value is redacted", s.find("SECRETzzz") == std::string::npos &&
-          s.find("token=<redacted>") != std::string::npos, s);
-    check("a password= value is redacted", s.find("hunter2") == std::string::npos, s);
-    check("a Bearer value is redacted", s.find("abc.def") == std::string::npos, s);
-    check("non-secret text is kept", s.find("connected") != std::string::npos && s.find("ok") != std::string::npos, s);
+    struct Case { const char* in; const char* secret; };
+    const Case leaks[] = {
+        {"token= SYNTH_A", "SYNTH_A"},
+        {"password: SYNTH_B", "SYNTH_B"},
+        {"password=\"alpha beta\"", "beta"},
+        {"{\"password\": \"SYNTH_C\"}", "SYNTH_C"},
+        {"Authorization: Bearer abc.def", "abc.def"},
+        {"state ok secret=hunter2trailing", "hunter2trailing"},
+        {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa token=LATE_SYNTH after",
+         "LATE_SYNTH"},
+        {"line\rwith a cookie=CK_SYNTH\nand more", "CK_SYNTH"},
+    };
+    bool allRedacted = true, noSecretLeft = true;
+    for (const auto& c : leaks) {
+      const std::string s = sanitize_preceding_line(c.in);
+      if (s != "<redacted: credential marker>") { allRedacted = false; check(std::string("not whole-redacted: ") + c.in, false, s); }
+      if (s.find(c.secret) != std::string::npos) { noSecretLeft = false; check(std::string("secret leaked: ") + c.in, false, s); }
+    }
+    check("every credential-marker line is redacted whole", allRedacted);
+    check("no synthetic secret survives sanitisation (R1 counterexamples)", noSecretLeft);
 
-    const std::string esc = sanitize_preceding_line("line\rwith\nbreaks and a \" quote");
+    // A non-secret line passes through, with CR/LF/quote escaped to stay one line.
+    const std::string esc = sanitize_preceding_line("dxgi-acquire stopped\rafter\na \" quote");
+    check("a non-secret line is kept", esc.find("dxgi-acquire stopped") != std::string::npos, esc);
     check("CR/LF become escapes, not real line breaks",
           esc.find('\n') == std::string::npos && esc.find('\r') == std::string::npos, esc);
     check("a quote is escaped", esc.find("\\\"") != std::string::npos, esc);
 
-    // UTF-8-safe truncation: a long run of 2-byte characters must not be cut mid-sequence.
+    // UTF-8-safe truncation on a non-secret line: a long run of 2-byte chars must not be cut mid-seq.
     std::string multi;
-    for (int k = 0; k < 200; ++k) multi += "\xC3\xA9";  // 'é' x200 = 400 bytes
+    for (int k = 0; k < 200; ++k) multi += "\xC3\xA9";  // 'é' x200 = 400 bytes, no credential marker
     const std::string cut = sanitize_preceding_line(multi, 40);
     size_t body = cut.size();
     const std::string tail = "...(cut)";
     if (body >= tail.size() && cut.compare(body - tail.size(), tail.size(), tail) == 0) body -= tail.size();
-    bool evenBytes = (body % 2) == 0;  // each 'é' is 2 bytes; a clean boundary keeps it even
-    check("truncation does not split a UTF-8 multibyte character", evenBytes && body <= 40,
+    check("truncation does not split a UTF-8 multibyte character", (body % 2) == 0 && body <= 40,
           std::to_string(body));
     check("empty input sanitises to 'none'", sanitize_preceding_line("   ") == "none");
   }

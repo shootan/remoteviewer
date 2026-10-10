@@ -18,6 +18,7 @@
 #undef wWinMain
 
 #include "log_upload.hpp"
+#include "test_scratch_dir.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -136,6 +137,18 @@ std::vector<std::string> exit_lines(const std::string& body) {
   return out;
 }
 
+// The pid token exactly as the started/exit lines spell it ("pid=<n> "), so pid=3 never matches
+// pid=32768. Both lines always have a field after the pid, so the trailing space is safe.
+std::string pid_token(uint32_t pid) { return "pid=" + std::to_string(pid) + " "; }
+
+// The one exit line for a specific child pid (R2: bind the assertion to THIS child), or "".
+std::string exit_line_for_pid(const std::string& body, uint32_t pid) {
+  const std::string tok = pid_token(pid);
+  for (const auto& l : exit_lines(body))
+    if (l.find(tok) != std::string::npos) return l;
+  return {};
+}
+
 std::wstring widen_ascii(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 
 void set_launch(int idx, const std::string& line, unsigned long runMs, unsigned long exitCode) {
@@ -196,14 +209,14 @@ int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("host_exit_upload_test\n");
 
-  // Isolate LOCALAPPDATA (host_app.log, uploader diag, crash-dump probe) to a temp dir.
-  wchar_t tmp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, tmp);
-  const std::filesystem::path root =
-      std::filesystem::path(tmp) / ("gnlink-exitup-" + std::to_string(GetCurrentProcessId()));
-  std::filesystem::create_directories(root);
-  SetEnvironmentVariableW(L"LOCALAPPDATA", root.wstring().c_str());
-  gStateFile = (root / "launch-index.txt").wstring();
+  // Isolate LOCALAPPDATA (host_app.log, uploader diag, crash-dump probe) to a repo-INTERNAL scratch
+  // dir with boundary-checked cleanup (R3: AGENTS.md forbids a recursive delete outside the repo, so
+  // no %TEMP%/remove_all). make_scratch_dir refuses anything not provably under the validated root.
+  namespace ts = remote60::native_poc::test_support;
+  const std::wstring root = ts::make_scratch_dir(L"exitup");
+  if (root.empty()) { std::printf("scratch dir refused: %s\n", ts::scratch_root_problem().c_str()); return 2; }
+  SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
+  gStateFile = (std::filesystem::path(root) / "launch-index.txt").wstring();
   SetEnvironmentVariableW(L"GNLINK_FIXTURE_STATE", gStateFile.c_str());
 
   WSADATA wsa{};
@@ -233,6 +246,10 @@ int main() {
     sp.Configure(L"http://127.0.0.1:1/", L"acct", L"host-A");
     sp.Start();
 
+    // R2: bind the long-run assertion to the ACTUAL child pid, not just the string code.
+    uint32_t pidA = 0;
+    wait_until([&] { pidA = sp.ChildPid(); return pidA != 0; }, 5000);
+
     const bool sawBoth = wait_until([&] {
       const auto lines = exit_lines(server.body());
       bool a = false, b = false;
@@ -246,15 +263,17 @@ int main() {
     sp.Stop();
 
     const auto lines = exit_lines(server.body());
-    std::string childA, childB;
+    const std::string childA = pidA ? exit_line_for_pid(server.body(), pidA) : std::string();
+    std::string childB;
     for (const auto& l : lines) {
-      if (l.find("code=0xC0000005") != std::string::npos) childA = l;
       if (l.find("code=0x00000000 (0)") != std::string::npos &&
           l.find("lastLine=\"none\"") != std::string::npos)
         childB = l;
     }
-    check("the real supervisor uploaded a long-run nonzero exit line (removal mutation of the product "
-          "enqueue fails here)", sawBoth && !childA.empty(), childA);
+    check("captured the real long-run child pid", pidA != 0, std::to_string(pidA));
+    check("the real supervisor uploaded THIS child's long-run nonzero exit line (removal mutation of "
+          "the product enqueue fails here)",
+          sawBoth && !childA.empty() && childA.find("code=0xC0000005") != std::string::npos, childA);
     check("the long-run exit line carries the real code and is flagged ABNORMAL",
           childA.find("code=0xC0000005") != std::string::npos &&
               childA.find("(ABNORMAL: nonzero after a long run)") != std::string::npos, childA);
@@ -277,20 +296,45 @@ int main() {
     StreamingHostProcess sp;
     sp.Configure(L"http://127.0.0.1:1/", L"acct", L"host-B");
     sp.Start();
+    // R2: capture THIS session's actual child pid before Stop, and bind every assertion to it -- a
+    // record left over from Session 1's Stop must not be able to satisfy Session 2.
+    uint32_t pid2 = 0;
     const bool up = wait_until([&] {
-      return sp.ChildAlive() && server.body().find("LONGCHILD") != std::string::npos;
+      pid2 = sp.ChildPid();
+      return pid2 != 0 && server.body().find("LONGCHILD") != std::string::npos;
     }, 15000);
-    check("the long-lived stand-in child came up", up);
+    check("the long-lived stand-in child came up with a known pid", up && pid2 != 0, std::to_string(pid2));
     sp.Stop();  // running_=false, then the child is terminated -> exit observed with no relaunch planned
     const bool sawStop = wait_until([&] {
-      for (const auto& l : exit_lines(server.body()))
-        if (l.find("restart_planned=false") != std::string::npos) return true;
-      return false;
+      const std::string l = exit_line_for_pid(server.body(), pid2);
+      return !l.empty() && l.find("restart_planned=false") != std::string::npos;
     }, 15000);
-    check("H2: a Stop-terminated child logs restart_planned=false", sawStop);
-    bool sawStarted = server.body().find("[host-app] streaming host started pid=") != std::string::npos &&
-                      server.body().find("attempt=#1") != std::string::npos;
-    check("H2: the actual launch is a separate started/attempt line", sawStarted);
+    // Bound to pid2: if the clean branch forced restart_planned=true, THIS child's exit line fails here.
+    check("H2: THIS Stop-terminated child's exit line says restart_planned=false "
+          "(planned=true mutation fails here)", sawStop, exit_line_for_pid(server.body(), pid2));
+    const std::string startedNeedle =
+        "[host-app] streaming host started pid=" + std::to_string(pid2) + " attempt=#1";
+    check("H2: THIS child's launch is a separate started/attempt line",
+          server.body().find(startedNeedle) != std::string::npos, startedNeedle);
+  }
+
+  // ---- Session 3 (H3/R1 end-to-end): a child that prints a credential line -> its exit line's
+  //      lastLine is redacted whole, with no synthetic secret, through the real supervisor path. ----
+  {
+    reset_launch_index();
+    set_launch(0, "connecting token= SYNTH_LEAK session=abc", 200, 0);  // a secret-shaped child line
+    StreamingHostProcess sp;
+    sp.Configure(L"http://127.0.0.1:1/", L"acct", L"host-C");
+    sp.Start();
+    uint32_t pid3 = 0;
+    wait_until([&] { pid3 = sp.ChildPid(); return pid3 != 0; }, 5000);
+    wait_until([&] { return !exit_line_for_pid(server.body(), pid3).empty(); }, 15000);
+    sp.Stop();
+    const std::string ex3 = exit_line_for_pid(server.body(), pid3);
+    check("H3 e2e: the product exit line sanitises a credential-bearing preceding line",
+          !ex3.empty() && ex3.find("lastLine=\"<redacted: credential marker>\"") != std::string::npos, ex3);
+    check("H3 e2e: no synthetic secret appears in the exit line's lastLine",
+          !ex3.empty() && ex3.find("SYNTH_LEAK") == std::string::npos, ex3);
   }
 
   // ---- the free-function append_host_app_log also reaches the server --------------------------
@@ -303,8 +347,7 @@ int main() {
   log_upload_stop();
   server.Stop();
   WSACleanup();
-  std::error_code ec;
-  std::filesystem::remove_all(root, ec);
+  ts::remove_scratch_tree(root);  // boundary-checked; refuses anything not provably under the root
   std::printf("\n%s  (%d checks, %d failed)\n", gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED",
               gChecks, gFailures);
   return gFailures == 0 ? 0 : 1;

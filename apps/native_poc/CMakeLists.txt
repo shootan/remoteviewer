@@ -669,6 +669,7 @@ target_link_libraries(remote60_host_exit_upload_test PRIVATE
   shlwapi
   bcrypt
   winhttp
+  remote60_test_scratch_dir  # repo-internal scratch + boundary-checked cleanup (R3), never %TEMP%
 )
 
 # One file the user can carry to another machine. It embeds the four product executables and

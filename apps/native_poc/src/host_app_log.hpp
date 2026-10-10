@@ -34,9 +34,6 @@ namespace remote60::native_poc {
 
 namespace hostlog_detail {
 inline char lower_ascii(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
-inline bool contains_ci(const std::string& hayLower, const char* needle) {
-  return hayLower.find(needle) != std::string::npos;
-}
 }  // namespace hostlog_detail
 
 struct HostAppLogStats {
@@ -82,72 +79,40 @@ class HostAppLog {
 /** The process-wide log at %LOCALAPPDATA%\GNLink\host_app.log. */
 HostAppLog& host_app_log();
 
-// hostapp-log-upload r2 (H3): make an arbitrary child-output line safe to embed as the one-line
+// hostapp-log-upload r2/r3 (H3): make an arbitrary child-output line safe to embed as the one-line
 // "preceding state" field. This field is NOT a trusted summary -- it is raw child stdout -- so it is
-// bounded in three ordered steps (Codex H3): (1) REDACT common credential markers (token/password/
-// secret/authorization/bearer/cookie/session/api_key) by replacing their value with <redacted>,
-// including the "Bearer <v>" / "Authorization: <v>" next-token form; (2) ESCAPE so the result stays a
-// single line (backslash, quote, CR, LF, TAB, other control bytes); (3) UTF-8-SAFE TRUNCATE to a byte
-// budget without cutting a multibyte sequence. Empty/blank -> "none". Whitespace collapses to single
-// spaces. This is a safety boundary on a best-effort diagnostic, not a guarantee that child output is
-// secret-free (the child's own lines were already uploaded verbatim on the same stream before this).
-inline bool hostlog_key_is_sensitive(const std::string& keyLower) {
-  using hostlog_detail::contains_ci;
-  return contains_ci(keyLower, "token") || contains_ci(keyLower, "password") ||
-         contains_ci(keyLower, "passwd") || contains_ci(keyLower, "secret") ||
-         contains_ci(keyLower, "auth") || contains_ci(keyLower, "apikey") ||
-         contains_ci(keyLower, "api_key") || contains_ci(keyLower, "cookie") ||
-         contains_ci(keyLower, "session") || contains_ci(keyLower, "bearer");
+// bounded in three ordered steps (Codex H3, order kept): (1) REDACT -- if the line contains ANY
+// credential marker (token/password/secret/authorization/bearer/cookie/session/api_key/credential,
+// case-insensitive), the WHOLE line is replaced. r2's token-wise redactor left space-separated,
+// quoted and JSON values behind ("token= V", `password: V`, `password="a b"`, `{"password":"V"}`),
+// so r3 drops it for whole-line redaction (Codex R1); (2) ESCAPE so a non-secret line stays single
+// (backslash, quote, CR, LF, TAB, other control bytes); (3) UTF-8-SAFE TRUNCATE to a byte budget
+// without cutting a multibyte sequence. Empty/blank -> "none". A safety boundary on a best-effort
+// diagnostic, not a claim that child output is secret-free (the child's own lines were already
+// uploaded verbatim on the same stream before this).
+inline bool hostlog_line_has_credential_marker(const std::string& rawLower) {
+  for (const char* m : {"token", "password", "passwd", "secret", "authorization", "bearer", "cookie",
+                        "session", "apikey", "api_key", "credential"}) {
+    if (rawLower.find(m) != std::string::npos) return true;
+  }
+  return false;
 }
 
 inline std::string sanitize_preceding_line(const std::string& raw, size_t maxBytes = 160) {
-  // (1) redact, tokenising on any whitespace (so CR/LF cannot smuggle a second line past redaction).
-  std::string redacted;
-  bool prevAuthMarker = false;
-  size_t i = 0;
-  const size_t n = raw.size();
-  bool firstTok = true;
-  while (i < n) {
-    while (i < n && static_cast<unsigned char>(raw[i]) <= ' ') ++i;  // skip whitespace
-    if (i >= n) break;
-    size_t j = i;
-    while (j < n && static_cast<unsigned char>(raw[j]) > ' ') ++j;   // token [i, j)
-    std::string tok = raw.substr(i, j - i);
-    i = j;
-    std::string tokLower;
-    tokLower.reserve(tok.size());
-    for (char c : tok) tokLower += hostlog_detail::lower_ascii(c);
-    std::string out;
-    if (prevAuthMarker) {
-      // After an auth marker the credential is the next token -- unless this token is the SCHEME word
-      // ("Authorization: Bearer <secret>"), which we keep and let the following token be the secret.
-      if (tokLower == "bearer" || tokLower == "basic" || tokLower == "negotiate" ||
-          tokLower == "ntlm" || tokLower == "digest") {
-        out = tok;  // scheme kept; prevAuthMarker stays set so the real credential is redacted next
-      } else {
-        out = "<redacted>";
-        prevAuthMarker = false;
-      }
-    } else if (tokLower == "bearer" || tokLower == "authorization" || tokLower == "authorization:") {
-      out = tok;
-      prevAuthMarker = true;
-    } else {
-      size_t sep = tok.find_first_of("=:");
-      if (sep != std::string::npos && sep > 0 && hostlog_key_is_sensitive(tokLower.substr(0, sep))) {
-        out = tok.substr(0, sep + 1) + "<redacted>";
-      } else {
-        out = tok;
-      }
-    }
-    if (!firstTok) redacted += ' ';
-    redacted += out;
-    firstTok = false;
-  }
-  if (redacted.empty()) return "none";
-  // (2) escape to one line.
+  // blank -> none
+  bool blank = true;
+  for (unsigned char c : raw) if (c > ' ') { blank = false; break; }
+  if (blank) return "none";
+  // (1) redact: whole line if any credential marker appears (checked on the ORIGINAL bytes, before
+  // truncation, so a marker past the byte budget still triggers).
+  std::string lower;
+  lower.reserve(raw.size());
+  for (char c : raw) lower += hostlog_detail::lower_ascii(c);
+  if (hostlog_line_has_credential_marker(lower)) return "<redacted: credential marker>";
+  // (2) escape a non-secret line to one line.
   std::string esc;
-  esc.reserve(redacted.size() + 8);
-  for (unsigned char c : redacted) {
+  esc.reserve(raw.size() + 8);
+  for (unsigned char c : raw) {
     switch (c) {
       case '\\': esc += "\\\\"; break;
       case '"': esc += "\\\""; break;
