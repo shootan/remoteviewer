@@ -111,15 +111,18 @@ int main() {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa)) { std::printf("WSAStartup failed\n"); return 1; }
 
-  // --- A (U1.1/U1.2/U1.4): REAL loopback recv -- empty + oversize datagrams are survived and a following
-  //     VALID key frame is actually DELIVERED to the sink; an external Stop then breaks the blocked loop.
+  // --- A (U1.1/U1.2/U1.4 + nonblock r1): REAL loopback recv through the new nonblocking + readiness-wait
+  //     boundary -- empty + oversize datagrams are survived and a following VALID key frame is DELIVERED;
+  //     then an external Stop breaks an IDLE loop WITHOUT any wakeup datagram (the bounded readiness wait
+  //     wakes it to see stop). A revert to a blocking recv would hang here -> the bounded done check FAILs.
   {
     sockaddr_in rxAddr{};
     SOCKET rx = make_loopback_udp(&rxAddr);
     SOCKET tx = make_loopback_udp();
     ClientSessionController c;
     MinimalSink sink;
-    std::thread t([&] { c.RunVideoReceiveForTest(static_cast<SocketHandle>(rx), &sink); });
+    std::atomic<bool> done{false};
+    std::thread t([&] { c.RunVideoReceiveForTest(static_cast<SocketHandle>(rx), &sink); done.store(true); });
 
     auto sendTo = [&](const void* p, int len) {
       sendto(tx, static_cast<const char*>(p), len, 0, reinterpret_cast<sockaddr*>(&rxAddr), sizeof(rxAddr));
@@ -137,14 +140,14 @@ int main() {
     check("REAL recv: no terminal failure across empty/oversize",
           c.Snapshot().state != ClientSessionState::Error, "state=" + std::to_string((int)c.Snapshot().state));
 
-    // External Stop: request stop from THIS thread and wake the blocked recv with an empty datagram.
-    // If Stop did not break the loop, the join below would hang the test.
+    // External Stop on an IDLE socket, NO wakeup datagram: the readiness wait must tick and see stop.
     c.RequestStopForTest();
-    sendTo("", 0);
+    const bool broke = wait_until([&] { return done.load(); }, 1500);
+    check("external Stop breaks the IDLE receive loop via the readiness wait (no wakeup datagram needed)",
+          broke, "done=" + std::to_string(broke ? 1 : 0));
+    if (!broke) sendTo("", 0);  // a blocking-recv revert hung: unblock so the test can still join/exit
     t.join();
-    check("external Stop breaks the blocked receive loop (join returns)", true);
-    // rx is controller-owned (RunVideoReceiveForTest stores it in udpVideoSocket_; ~c -> Disconnect
-    // -> StopWorker -> shutdown_socket closes it). Only tx is test-owned. (r4 T2: no double close.)
+    // rx is controller-owned (closed by ~c). Only tx is test-owned. (r4 T2: no double close.)
     closesocket(tx);
   }
 
@@ -173,28 +176,19 @@ int main() {
     // s is controller-owned (closed by ~c). (r4 T2)
   }
 
-  // --- B2 (t-970r4zgo r10): WSA_IO_PENDING (997), seen from a real blocking recv in the verifier's run
-  //     (verifier_intermittent3: "udp video receive terminal ... err=997"), is survived and the next VALID
-  //     key frame is delivered. Before r10 it was Terminal and ended a live session.
+  // --- B2 (udp-recv-nonblock r1): the r10 "997 -> survive" line is WITHDRAWN. A plain recv's 997 has no
+  //     OVERLAPPED to reclaim, so it is NOT a safe retry -- it stays Terminal. (The root fix removes the
+  //     blocking recv that produced 997: the nonblocking + readiness model never issues it. caseA proves
+  //     that real boundary; this just pins that 997-if-it-ever-appears is terminal, not a silent retry.)
   {
     SOCKET s = make_loopback_udp();
     ClientSessionController c;
     MinimalSink sink;
-    std::atomic<int> idx{0};
-    c.SetUdpRecvHookForTest([&](uint8_t* buf, size_t cap, int& err) -> int {
-      const int i = idx.fetch_add(1, std::memory_order_relaxed);
-      err = 0;
-      switch (i) {
-        case 0: err = WSA_IO_PENDING; return -1;                       // the receive still in flight
-        case 1: return static_cast<int>(build_key_frame(buf, cap, 3)); // VALID key frame after it
-        default: c.RequestStopForTest(); return 0;
-      }
-    });
+    c.SetUdpRecvHookForTest([&](uint8_t*, size_t, int& err) -> int { err = WSA_IO_PENDING; return -1; });
     std::thread t([&] { c.RunVideoReceiveForTest(static_cast<SocketHandle>(s), &sink); });
     t.join();
-    check("WSA_IO_PENDING (997) is survived and the following valid key frame is DELIVERED",
-          sink.frames() > 0 && c.Snapshot().state != ClientSessionState::Error,
-          "frames=" + std::to_string(sink.frames()));
+    check("WSA_IO_PENDING (997) is NOT silently retried -- it ends the session (r10 line withdrawn)",
+          c.Snapshot().state == ClientSessionState::Error, "state=" + std::to_string((int)c.Snapshot().state));
     // s is controller-owned (closed by ~c).
   }
 

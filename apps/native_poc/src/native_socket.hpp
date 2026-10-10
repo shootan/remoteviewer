@@ -253,15 +253,15 @@ inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
   if (nBytes > 0) return UdpRecvClass::Datagram;
   if (nBytes == 0) return UdpRecvClass::Empty;
 #if defined(_WIN32)
+  // udp-recv-nonblock r1: the r10 "WSA_IO_PENDING(997) -> Retryable" line is WITHDRAWN. 997 is the
+  // explicit overlapped-WSARecv pending contract; a plain recv has no OVERLAPPED to reclaim that
+  // completion, so it cannot be classed a safe retry (late write / buffer reuse cannot be ruled out).
+  // The root fix is to stop issuing a blocking recv + SO_RCVTIMEO at all (nonblocking socket + bounded
+  // readiness wait -- see udp_receive_with_readiness); an abnormal 997 stays Terminal/diagnosable.
   switch (err) {
     case WSAEWOULDBLOCK:
     case WSAETIMEDOUT:
     case WSAEINTR:
-    // t-970r4zgo r10: a blocking recv with SO_RCVTIMEO on an (overlapped-capable) Winsock socket was
-    // seen to return SOCKET_ERROR with WSA_IO_PENDING (997) -- the receive was still in flight, the
-    // socket is not dead. Classed Terminal, it ended a live session: the receive thread stopped, so did
-    // the control ACKs, and the host gave the peer up (verifier_intermittent3, err=997).
-    case WSA_IO_PENDING:
       return UdpRecvClass::Retryable;
     case WSAEMSGSIZE:
       return UdpRecvClass::TruncatedDrop;
@@ -290,5 +290,48 @@ inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
 // A non-terminal class is discarded/advisory and MUST NOT be counted as a healthy/ACK/peer-alive event;
 // it just lets the receive loop continue and keep its maintenance going.
 inline bool udp_recv_is_terminal(UdpRecvClass c) { return c == UdpRecvClass::Terminal; }
+
+// udp-recv-nonblock r1: put the shared client's UDP video socket into nonblocking mode (Windows) so its
+// receive wait is a bounded readiness wait, not a blocking recv + SO_RCVTIMEO (which was seen to return
+// WSA_IO_PENDING(997) and end the session). On POSIX the receive stays a blocking recv with the socket's
+// SO_RCVTIMEO -- unchanged by this fix -- so this is a no-op that reports success. Returns false only if
+// the Windows mode switch itself fails.
+inline bool set_udp_nonblocking(SocketHandle socketHandle) {
+#if defined(_WIN32)
+  u_long mode = 1;
+  return ioctlsocket(socketHandle, FIONBIO, &mode) == 0;
+#else
+  (void)socketHandle;
+  return true;
+#endif
+}
+
+// Receive one UDP datagram with a BOUNDED wait. Windows: a nonblocking socket + select readiness wait --
+// a readiness timeout returns -1/WSAEWOULDBLOCK (so the caller runs its maintenance tick and re-checks
+// Stop), a readable socket is drained with a nonblocking recv (a lost readiness race is the same
+// WSAEWOULDBLOCK). No blocking recv, so no SO_RCVTIMEO 997 path. POSIX: the existing blocking recv with
+// the socket's SO_RCVTIMEO (timeoutMs is unused there -- this fix does not change the POSIX path). `err`
+// is the error captured IMMEDIATELY after a SOCKET_ERROR; 0 when n >= 0.
+inline int udp_receive_with_readiness(SocketHandle socketHandle, char* buf, int len, uint32_t timeoutMs,
+                                      int& err) {
+  err = 0;
+#if defined(_WIN32)
+  fd_set readable;
+  FD_ZERO(&readable);
+  FD_SET(socketHandle, &readable);
+  timeval tv{static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+  const int ready = select(0, &readable, nullptr, nullptr, &tv);
+  if (ready == 0) { err = WSAEWOULDBLOCK; return -1; }          // readiness timeout -> maintenance tick
+  if (ready == SOCKET_ERROR) { err = WSAGetLastError(); return -1; }
+  const int n = recv(socketHandle, buf, len, 0);               // nonblocking: a race returns WSAEWOULDBLOCK
+  if (n < 0) err = WSAGetLastError();
+  return n;
+#else
+  (void)timeoutMs;
+  const int n = recv(socketHandle, buf, len, 0);               // blocking + SO_RCVTIMEO (unchanged)
+  if (n < 0) err = errno;
+  return n;
+#endif
+}
 
 }  // namespace remote60::native_poc

@@ -45,9 +45,12 @@ int main() {
   check("WSAEWOULDBLOCK is Retryable", classify_udp_recv(-1, WSAEWOULDBLOCK) == UdpRecvClass::Retryable);
   check("WSAETIMEDOUT is Retryable", classify_udp_recv(-1, WSAETIMEDOUT) == UdpRecvClass::Retryable);
   check("WSAEINTR is Retryable", classify_udp_recv(-1, WSAEINTR) == UdpRecvClass::Retryable);
-  check("WSA_IO_PENDING (997) is Retryable, NOT terminal (a receive still in flight)",
-        classify_udp_recv(-1, WSA_IO_PENDING) == UdpRecvClass::Retryable &&
-            !udp_recv_is_terminal(classify_udp_recv(-1, WSA_IO_PENDING)));
+  // udp-recv-nonblock r1: the r10 "997 -> Retryable" line is WITHDRAWN. A plain recv has no OVERLAPPED to
+  // reclaim a 997 completion, so it is NOT a safe retry; it stays Terminal/diagnosable. The real fix is
+  // that the nonblocking + readiness-wait receive model never issues the blocking recv that produced 997.
+  check("WSA_IO_PENDING (997) is Terminal (NOT a generic retry -- the r10 line is withdrawn)",
+        classify_udp_recv(-1, WSA_IO_PENDING) == UdpRecvClass::Terminal &&
+            udp_recv_is_terminal(classify_udp_recv(-1, WSA_IO_PENDING)));
   check("WSAEMSGSIZE is TruncatedDrop (oversize discarded, not terminal)",
         classify_udp_recv(-1, WSAEMSGSIZE) == UdpRecvClass::TruncatedDrop);
   check("WSAEMSGSIZE is NOT terminal", !udp_recv_is_terminal(classify_udp_recv(-1, WSAEMSGSIZE)));

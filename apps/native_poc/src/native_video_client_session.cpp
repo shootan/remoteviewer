@@ -810,12 +810,21 @@ void ClientSessionController::VideoReceiveMain() {
     if (udpSocket == kInvalidSocket || !sink) break;
     currentSink = sink;
     currentSocket = udpSocket;
+    // udp-recv-nonblock r1: the receive wait is a BOUNDED readiness wait on a NONBLOCKING socket (Windows)
+    // -- never a blocking recv + SO_RCVTIMEO (which returned WSA_IO_PENDING(997) and ended the session).
+    // The readiness timeout is the maintenance tick (the hold's 20ms, else 100ms). POSIX keeps blocking
+    // recv + SO_RCVTIMEO (unchanged), so it still needs the timeout set here.
+    const uint32_t recvTimeoutMs = pipeline.HoldEnabled() ? kVideoReceiveTimeoutHoldMs : kVideoReceiveTimeoutMs;
     if (!loggedPolicy) {
       loggedPolicy = true;
-      // The hold expires on the clock, so the receive timeout is its tick.
+      // Confirm the socket is nonblocking at worker start (Codex R1: after Hello, before the wait). On
+      // POSIX this is a no-op and the blocking recv keeps its SO_RCVTIMEO tick.
+      const bool nb = set_udp_nonblocking(udpSocket);
+#ifndef _WIN32
       if (pipeline.HoldEnabled()) (void)set_recv_timeout(udpSocket, kVideoReceiveTimeoutHoldMs);
-      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu\n",
-                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs));
+#endif
+      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu nonblocking=%d\n",
+                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs), nb ? 1 : 0);
     }
 
     int recvErr = 0;
@@ -824,10 +833,9 @@ void ClientSessionController::VideoReceiveMain() {
       // Test seam: scripted recv result (n, err). Null in production.
       n = udpRecvHookForTest_(datagram.data(), datagram.size(), recvErr);
     } else {
-      n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
-      // Capture the error IMMEDIATELY on SOCKET_ERROR, in this thread, before any other call can overwrite
-      // it (diagnostic contract). n==0 is not an error -> error-valid is false (recvErr stays 0/unused).
-      if (n < 0) recvErr = socket_last_error();
+      // Bounded readiness wait + nonblocking recv; recvErr is captured immediately inside the helper.
+      n = udp_receive_with_readiness(udpSocket, reinterpret_cast<char*>(datagram.data()),
+                                     static_cast<int>(datagram.size()), recvTimeoutMs, recvErr);
     }
     if (n <= 0) {
       if (stopRequested_.load(std::memory_order_acquire)) break;
@@ -1094,7 +1102,17 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
   hostSupportsNack_.store(
       (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
 
+  // The hello handshake above ran in blocking mode. udp-recv-nonblock r1: now that Hello is done and
+  // BEFORE the receive worker starts, switch the UDP socket to nonblocking (Windows) so the worker uses a
+  // bounded readiness wait instead of a blocking recv + SO_RCVTIMEO (the WSA_IO_PENDING(997) session-end
+  // path). Confirm the switch -- a failure here means the receive model's premise does not hold. POSIX is
+  // a no-op (true) and keeps the SO_RCVTIMEO set above for its blocking recv.
   (void)set_recv_timeout(connected, kVideoReceiveTimeoutMs);
+  if (!set_udp_nonblocking(connected)) {
+    if (error) *error = "udp video socket could not be set nonblocking";
+    close_socket(&connected);
+    return false;
+  }
   if (stopRequested_.load(std::memory_order_acquire)) {
     close_socket(&connected);
     return false;
