@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -337,6 +338,21 @@ const uint64_t sendWaitUs =
 const uint64_t callbackToSendStartUs = (sendStartUs >= callbackUs) ? (sendStartUs - callbackUs) : 0;
 hdr.sendQpcUs = sendStartUs;
 
+// r4 R5 R5-3 (Codex e1bc633): reset the clamp detector + baseline on a codec-instance change BEFORE the
+// burst-eligibility read below (and the detector feed later). A reinit invalidates the prior latch, so
+// reading encoder.clampDetector.clamped for clampBurstEligible must see the cleared state, not a stale
+// latch from the old encoder. This runs per-AU (cheap integer compare) so the first AU after any reinit
+// -- key or not -- clears it.
+{
+  const uint64_t codecId = encoder.codec.instance_id();
+  if (codecId != encoder.clampDetectorCodecId) {
+    encoder.clampDetector.Reset();
+    encoder.lastSelfIdrOrdinal = 0;
+    encoder.lastSelfIdrEpoch = 0;
+    encoder.clampDetectorCodecId = codecId;
+  }
+}
+
 bool sentOk = false;
 bool enqueuedForSend = false;
 if (transport == VideoTransport::Tcp) {
@@ -358,6 +374,25 @@ if (transport == VideoTransport::Tcp) {
   } else {
     EncodedSendItem item;
     item.keyFrame = (hdr.flags & 1u) != 0;
+    // r4 B1: eligible for a burst grant only if the clamp is latched AND this is a real self-IDR (raw
+    // NAL5, not host-forced). The clamp feed for THIS AU runs later in this function, so clamped is the
+    // latched state as of the prior AU -- fine, since a clamp stays latched once established.
+    // REMOTE60_NATIVE_FORCE_CLAMP_BURST is a TEST-ONLY seam that forces burst eligibility on this PC's
+    // non-clamping MFT so the clamp-fake measurement can exercise the burst path. It is compiled in
+    // ONLY when REMOTE60_CLAMP_BURST_TEST_SEAM is defined (the GNLinkStreamClampBurst test build); the
+    // shipped GNLinkStream never contains the getenv or the variable string (clip_image_build_gate_test
+    // enforces its absence). It still requires a real self-IDR -- it only substitutes for the detector
+    // latch, never the raw-NAL5/non-forced gate.
+#ifdef REMOTE60_CLAMP_BURST_TEST_SEAM
+    static const bool kForceClampBurst = [] {
+      const char* v = std::getenv("REMOTE60_NATIVE_FORCE_CLAMP_BURST");
+      return v && (v[0] == '1' || v[0] == 't' || v[0] == 'T');
+    }();
+#else
+    constexpr bool kForceClampBurst = false;  // shipped build: no test seam, no string
+#endif
+    item.clampBurstEligible =
+        (encoder.clampDetector.clamped || kForceClampBurst) && au.rawIdr && !au.inputWasForcedKey;
     item.frameIntervalUs = encoder.activeFrameIntervalUs;
     item.udpHdr.magic = remote60::native_poc::kMagic;
     item.udpHdr.kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
@@ -557,6 +592,10 @@ if (!servedBootstrap) {
 if ((hdr.flags & 1u) != 0) {
   encoder.forceKeyNext = false;
   encoder.forceKeySubmittedAtUs = 0;
+  // stutter-keyframe r2 F1: the request is satisfied by a real key AU -- clear the rejection back-off
+  // and streak so a later request starts clean (no stale back-off suppressing it).
+  encoder.forceKeyRetryAtUs = 0;
+  encoder.forceKeyRejectStreak = 0;
   // One line per key AU accepted for sending, with what asked for it (quality r1). "encoder_gop"
   // (r4) means no host request was pending: the encoder's own GOP produced the IDR. sinceLastKeyMs
   // is from the
@@ -566,13 +605,60 @@ if ((hdr.flags & 1u) != 0) {
       (encoder.lastKeyAcceptedUs > 0 && keyNowUs >= encoder.lastKeyAcceptedUs)
           ? (keyNowUs - encoder.lastKeyAcceptedUs) / 1000
           : 0;
+  // stutter-keyframe r1/r2 F2: enqueueDurUs is this key AU's hand-off/STAGING cost to the sender
+  // queue (sendStartUs->sendDoneUs here), NOT the paced wire-send time -- the actual cap-paced send
+  // runs later on the sender thread (see host_encoded_sender's `wire seq=... key=1 ... sendDurUs`).
+  // skipsSincePrevKeyAccepted is the cap-gate skip count accumulated between the PREVIOUS key accept
+  // and this one (it includes the previous key's send tail + any congestion), NOT skips during THIS
+  // IDR's send. These are a coarse per-period proxy; pin the real IDR wire cost to the sender wire log
+  // by seq/epoch. The counter is main-owned and read single-threaded here (no sender-thread race).
+  const uint64_t skipsSincePrevKeyAccepted = (stats.wireOverloadSkipCount >= encoder.wireSkipAtLastKey)
+                                                 ? (stats.wireOverloadSkipCount - encoder.wireSkipAtLastKey)
+                                                 : 0;
   std::cout << "[native-video-host][keyframe] seq=" << hdr.seq << " bytes=" << hdr.payloadSize
             << " reasons=" << host_key_reason_names(encoder.keyReasons)
-            << " sinceLastKeyMs=" << sinceLastKeyMs
+            << " sinceLastKeyMs=" << sinceLastKeyMs << " enqueueDurUs=" << sendDurUs
+            << " skipsSincePrevKeyAccepted=" << skipsSincePrevKeyAccepted
             << " kick=" << (servedBootstrap ? 1 : 0)
             << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
             << " bitrate=" << encoder.activeBitrate << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
+  encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
+  // stutter-keyframe r4 G: feed the clamp detector from the AU's PER-AU provenance -- the MFT-accepted
+  // input ordinal (real+synthetic), whether that input was a forced key, and a raw NAL5 scan -- not
+  // the host's realInputsSinceKey/keyReasons (G1/G2). classify_self_idr yields a real self-IDR interval
+  // only for a non-forced real IDR in the same codec/input epoch; a forced key / epoch change / lost
+  // provenance is a boundary that re-baselines and breaks the streak.
+  {
+    // r4 G1: the detector + baseline reset on a codec-instance change already ran earlier in this
+    // function (before the burst-eligibility read, R5-3), so clampDetectorCodecId is current here.
+    const SelfIdrSample s =
+        classify_self_idr(au.rawIdr, au.inputWasForcedKey, au.acceptedInputOrdinal, au.inputEpoch,
+                          encoder.lastSelfIdrOrdinal, encoder.lastSelfIdrEpoch);
+    if (s.valid) {
+      // r4 G3: a short self->self interval only latches a clamp when the MFT also clamped the GOP
+      // readback -- so content scene-change keys (readback == requested) stay strict, not burst.
+      if (encoder.codec.gop_readback_clamped() &&
+          encoder.clampDetector.OnEncoderSelfKey(s.intervalInputs, encoder.activeKeyint)) {
+        std::cout << "[native-video-host] gop-clamp DETECTED via NAL cadence selfIdrIntervalInputs="
+                  << s.intervalInputs << " policyKeyint=" << encoder.activeKeyint << "\n";
+      }
+      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // this self is the baseline for the next
+      encoder.lastSelfIdrEpoch = au.inputEpoch;
+    } else if (s.baseline) {
+      // r4 R5 R5-2 (Codex e1bc633): a baseline (first self-IDR, or the first after an epoch change) has
+      // NO self->self interval, so it must ALSO break the consecutive short-streak -- otherwise 2 short
+      // intervals in the old epoch + 1 in the new would latch a clamp across the boundary. It differs
+      // from a boundary only in that it KEEPS a new baseline ordinal (a boundary resets to 0/fresh).
+      encoder.clampDetector.NoteBoundary();                  // break the streak across the baseline
+      encoder.lastSelfIdrOrdinal = au.acceptedInputOrdinal;  // start a baseline; no interval counted
+      encoder.lastSelfIdrEpoch = au.inputEpoch;
+    } else if (s.boundary) {
+      encoder.clampDetector.NoteBoundary();                  // forced/unknown: break streak + invalidate
+      encoder.lastSelfIdrOrdinal = 0;
+      encoder.lastSelfIdrEpoch = 0;
+    }
+  }
   encoder.keyReasons = kHostKeyReasonNone;
   encoder.realInputsSinceKey = 0;  // r4: any key restarts the period
 }

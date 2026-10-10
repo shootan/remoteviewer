@@ -51,6 +51,7 @@ void SenderState::StartWireCap(uint64_t capBps, uint32_t mtu, bool enabled) {
   }
   const uint32_t lmax = clamp_udp_mtu(mtu) + 28u;
   wireLimiter->SetRate(enabled ? capBps : 0ULL, lmax);
+  burstLedger.SetRate(enabled ? capBps : 0ULL, qpc_now_us());  // r4 B1: same rate + now for warm-up/mixed-rate
   wireCapBps.store(enabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
@@ -58,6 +59,7 @@ void SenderState::UpdateWireCap(uint64_t capBps) {
   if (!wireLimiter) return;
   const uint32_t lmax = clamp_udp_mtu(wireCapMtu) + 28u;
   wireLimiter->SetRate(wireCapEnabled ? capBps : 0ULL, lmax);
+  burstLedger.SetRate(wireCapEnabled ? capBps : 0ULL, qpc_now_us());  // r4 B1
   wireCapBps.store(wireCapEnabled ? capBps : 0ULL, std::memory_order_relaxed);
 }
 
@@ -234,6 +236,13 @@ bool SenderState::DrainPendingReplays(SOCKET sock, const sockaddr_in& peer, uint
     wire.itemMediaEpoch = currentEpoch;
     wire.inputEpoch = inputEpochRef;       // live input fence -- a flushed AU's replay stops
     wire.itemInputEpoch = itemInputEpoch;
+    // r4 R5 R1 (Codex e1bc633): a NACK replay is a REAL wire send and must pass the common 2s window.
+    // The earlier fresh `WireEgress wire;` left burstLedger null, so cap-on replays bypassed the window
+    // (and were missing from burstWin2s). Connect the one ledger here; it only engages when the limiter
+    // (cap) is also set below (b1Active = wire && burstLedger && limiter && enabled()). The replay has no
+    // grant (auHasGrant stays false), so it goes through pure per-datagram window admission like any
+    // other datagram -- it never spends the original AU's grant (that grant has been EndGrant'd by now).
+    wire.burstLedger = &burstLedger;
     if (capEnforcing) {
       wire.limiter = wireLimiter.get();
       // Interleave (maxChunks != 0, during a saturated original send) blocks for a fair share of the
@@ -465,10 +474,38 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
       // suppressed -- unlimited here (between-AU), the interleave hook bounds the during-send work.
       sender.DrainPendingReplays(clientSession.clientSock, peer, qpc_now_us(),
                                  sender.mediaSessionEpoch.load(std::memory_order_acquire));
+      // r4 B1: arm a burst grant for a clamp-detected real self-IDR, bound to THIS AU's send. The
+      // ledger grants only within the 2s window remaining (and <= min(256KiB,r*1s), one at a time,
+      // >=1s apart); its original+parity datagrams ride the grant (send_packet), the rest stay strict.
+      // A NACK replay of this AU goes strict (recorded in the window) -- conservative. Released right
+      // after this send regardless of outcome (abort/epoch), so no grant leaks.
+      const BurstAuId burstOwner{item.mediaEpoch, item.udpHdr.streamGeneration, item.inputEpoch,
+                                 item.udpHdr.seq, /*valid=*/true};
+      // r4 R6 S3: the conservative congestion gate. Observe the existing loss signal -- the client's NACK
+      // requests (grew since the last decision?) and pending replays -- and WITHHOLD the burst (strict
+      // fallback) when the path lost packets within the last kBurstCongestionWindowUs or has replays in
+      // flight. The adaptive rate controller lowers capBps on sustained loss (which lowers peak+grant via
+      // SetRate); this gate adds an immediate per-IDR brake so a burst never accelerates into fresh loss.
+      const uint64_t burstNowUs = qpc_now_us();
+      const uint64_t nackReqNow = sender.nackRequests.load(std::memory_order_relaxed);
+      if (nackReqNow != sender.burstPrevNackReq) {
+        sender.burstLastLossUs = burstNowUs;  // new NACK(s) since the last decision -> fresh loss now
+        sender.burstPrevNackReq = nackReqNow;
+      }
+      const bool recentLoss =
+          sender.pendingReplayCount.load(std::memory_order_relaxed) > 0 ||
+          (sender.burstLastLossUs != 0 && burstNowUs - sender.burstLastLossUs < SenderState::kBurstCongestionWindowUs);
+      if (item.clampBurstEligible && sender.wireCapEnabled && !recentLoss) {
+        if (sender.burstLedger.GrantForIdr(burstNowUs, burstOwner) > 0) {
+          wireEgress.auHasGrant = true;  // this AU's covered datagrams peak-pace within the window
+          wireEgress.burstOwner = burstOwner;
+        }
+      }
       const UdpSendOutcome outcome =
           send_udp_chunks_timed(clientSession.clientSock, peer, item.bytes.data(), item.bytes.size(),
                                 item.udpHdr, args.udpMtu, &pathStats, &sender.mediaSessionEpoch,
                                 item.mediaEpoch, egress, &wireEgress);
+      if (wireEgress.auHasGrant) sender.burstLedger.EndGrant(burstOwner);  // only the owner ends it
       // Clear the on-wire flag only if it is still THIS key (a rollover may have handed it elsewhere).
       if (item.keyFrame) sender.ClearKeyOnWireIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
       // F4 (r3): count what ACTUALLY left, regardless of the outcome (a partial/aborted AU still put
@@ -517,7 +554,12 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
                     << " chunks=" << pathStats.payloadChunkCount << " wireIntUs=" << wireIntUs
                     << " targetIntUs=" << frameIntervalUs << " queueWaitUs=" << queueWaitUs
                     << " sendDurUs=" << durUs << " queueDepth=" << queueDepthAtDequeue
-                    << " epoch=" << item.mediaEpoch << "\n";
+                    << " epoch=" << item.mediaEpoch
+                    // r4 B1 telemetry: the clamp-burst eligibility of this AU, the peak 2s-window bytes
+                    // observed, and the contract ceiling 2r -- the clamp-fake measurement reads these.
+                    << " clampBurst=" << (item.clampBurstEligible ? 1 : 0)
+                    << " burstWin2s=" << sender.burstLedger.max_window_bytes()
+                    << " cap2r=" << (2u * sender.burstLedger.rate_bytes()) << "\n";
         }
       } else if (outcome == UdpSendOutcome::EpochChanged) {
         // A rollover bumped the media epoch mid-frame; the remaining chunks were aborted so old-

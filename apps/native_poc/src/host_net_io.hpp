@@ -32,6 +32,7 @@
 
 #include "native_socket.hpp"  // WinsockScope (the host used a byte-identical private copy; now the shared one)
 #include "poc_protocol.hpp"
+#include "host_burst_ledger.hpp"  // BurstLedger + BurstAuId (r4 B1)
 
 namespace remote60::native_poc {
 
@@ -43,6 +44,17 @@ class WireLimiter;  // host_wire_limiter.hpp
 // sink that records (time, length, kind) so the same send code is measured deterministically.
 struct WireEgress {
   WireLimiter* limiter = nullptr;  // charged datagramLen + 28 (IP+UDP) before each datagram
+  // stutter-keyframe r4 B1: the common 2s-window burst ledger. When the cap is ON, EVERY datagram that
+  // actually leaves is Record(len+28)'d here 1:1 (data, parity, NACK retransmit) so the rolling-window
+  // average A(t-2s,t] reflects the true wire bytes. Only touched on the sender thread while the cap is
+  // enabled (the reader thread sends only when the cap is off), so it needs no lock. null = not tracked.
+  BurstLedger* burstLedger = nullptr;
+  // r4 B1 (grant/burst): this AU holds a burst grant (a clamp-detected real self-IDR), owned by
+  // burstOwner (media epoch, generation, input epoch, seq). A datagram the grant covers skips the
+  // strict token wait and is peak-paced; the window admission still applies. GrantCoverage/DebitGrant
+  // check burstOwner so only this AU's own datagrams spend its grant.
+  bool auHasGrant = false;
+  BurstAuId burstOwner;
   // Replaces sendto when set. datagram = header+payload bytes, len its length, parity true for an
   // FEC datagram (header flag 0x10). Return > 0 to mean "sent" (the byte count), <= 0 a failure.
   std::function<int(const uint8_t* datagram, int len, bool parity)> sink;
@@ -73,6 +85,14 @@ struct WireEgress {
   // most a few replay chunks per original datagram, so original data keeps priority and the shared
   // cap still bounds the sum). It runs outside any limiter lock. null = no interleave (legacy/tests).
   std::function<void()> betweenDatagrams;
+  // r8 D2 (Codex 597aca2): injected clock + wait for a DETERMINISTIC test of the unified admission loop.
+  // Null in production -> the loop uses qpc_now_us() and udp_pace_wait_until (real clock/sleep). A test
+  // sets both (and points WireLimiter at the SAME clock) so the loop's now, the ledger window timestamps,
+  // and the pacing wait share ONE controllable time axis -- this is what makes the D1 busy-spin and the
+  // grant->quota->tail sequence reproducible without a real-clock race. Same injection pattern as
+  // WireLimiter's clock; null here means no behaviour change (the shipped host never sets them).
+  std::function<uint64_t()> nowFn;       // admission-loop clock (ledger window timestamps too)
+  std::function<void(uint64_t)> waitFn;  // admission-loop cancellable wait (advances the fake clock in tests)
 };
 
 /** Network-order address for bind(); 0.0.0.0 when unset. A typo must not bind nowhere silently. */

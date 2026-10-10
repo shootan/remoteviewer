@@ -24,6 +24,13 @@ struct H264AccessUnit {
   // The host's flush epoch the input was accepted in (0 = untagged). Same FIFO: lets the emit
   // stage tell a pre-flush AU from the first AU of the new epoch (P11, host_epoch_gate.hpp).
   uint64_t inputEpoch = 0;
+  // stutter-keyframe r4 G: clamp-detector provenance (carried through the same FIFO as synthetic/
+  // epoch). acceptedInputOrdinal = the MFT-accepted-input count that produced this AU (G1).
+  // inputWasForcedKey = that input carried a host key request (G2). rawIdr = the Annex-B bytes carry a
+  // real NAL type 5 (not just CleanPoint), so the detector confirms a true IDR, not any clean point.
+  uint64_t acceptedInputOrdinal = 0;
+  bool inputWasForcedKey = false;
+  bool rawIdr = false;
 };
 
 struct DecodedFrameNv12 {
@@ -78,6 +85,13 @@ struct H264EncodeFrameStats {
   // the encoder is rebuilt. The stage closes the emit gate and asks for that rebuild.
   uint8_t provenanceInvalid = 0;
   uint8_t asyncEnabled = 0;
+  // stutter-keyframe r1 (recovery-1): this encode call asked the MFT for a forced key, and the raw
+  // HRESULT the CODECAPI_AVEncVideoForceKeyFrame SetValue returned. The setter return used to be
+  // discarded, so a rejected force looked identical to an accepted one in the recovery timeline. The
+  // force applies to the NEXT accepted input, so a non-S_OK here means the key was never even armed
+  // (fail the recovery contract) -- distinct from an armed force whose IDR has not surfaced yet.
+  uint8_t forceKeyRequested = 0;
+  int32_t forceKeySetHr = 0;  // S_OK when not requested; the SetValue HRESULT when requested
 };
 
 bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
@@ -97,6 +111,13 @@ struct PendingInput {
   int64_t tsHns = 0;
   bool synthetic = false;
   uint64_t epoch = 0;
+  // stutter-keyframe r4 G: provenance for the clamp detector. acceptedOrdinal is a monotonic count of
+  // inputs the MFT actually accepted (real AND synthetic/kick), so the self-IDR interval is measured
+  // in true encoder inputs -- not the host's realInputsSinceKey, which excludes synthetic and counts
+  // before the codec accepts (G1). forcedKey marks an input the host requested a key for, so a forced
+  // IDR is not mistaken for the encoder's own periodic one (G2).
+  uint64_t acceptedOrdinal = 0;
+  bool forcedKey = false;
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -195,6 +216,12 @@ class H264Encoder {
                             H264EncodeFrameStats* encodeStats = nullptr);
   const char* backend_name() const { return backendName_; }
   bool using_hardware() const { return usingHardware_; }
+  // r4 G1: a monotonic id bumped on every successful initialize(), so the clamp detector can reset its
+  // latch/baseline on ANY codec reinit path (not just ApplyTarget's main branch) by watching it change.
+  uint64_t instance_id() const { return codecInstanceId_; }
+  // r4 G3: the MFT clamped the GOP below the policy (post-type readbackGop < requestedGop). Combined
+  // with the short self-IDR cadence it distinguishes a real clamp from content scene-change keys.
+  bool gop_readback_clamped() const { return gopReadbackClamped_; }
   // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
   // each AU reports the flag of the input that produced it. (0.2.97)
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
@@ -224,7 +251,7 @@ class H264Encoder {
   void shutdown();
 
  private:
-  bool configure_types();
+  bool configure_types(const char* stageReason = "init");
   void apply_low_latency_codec_api();
   bool apply_rate_control(const char* reason);
   bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,
@@ -240,6 +267,9 @@ class H264Encoder {
   uint32_t bitrate_ = 0;
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
   uint32_t keyint_ = 0;
+  uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
+  uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
+  bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
   uint32_t outBufferBytes_ = 0;
   uint64_t frameIndex_ = 0;
   int64_t sampleDurationHns_ = 0;

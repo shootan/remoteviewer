@@ -24,6 +24,7 @@
 
 #include "host_net_io.hpp"
 #include "host_wire_limiter.hpp"
+#include "host_burst_ledger.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -183,19 +184,79 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     // header the OS adds) before it goes out. A video chunk is never dropped for want of tokens --
     // it waits -- so the reference chain is preserved; the wait aborts only on stop or an epoch roll.
     const bool isFirstDatagram = packetOrdinal == 1;  // (just incremented; the frame's first send)
-    if (wire && wire->limiter) {
-      if (wire->limiter->Acquire(static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes, liveEpoch,
-                                 itemEpoch) == WireLimiter::Acq::Cancelled) {
+    const uint64_t wireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+    // r4 B1 / r6 C1 (Codex 89c08de): in B1 mode (cap on) EVERY datagram is admitted by ONE unified
+    // decision -- the 2s rolling window AND the rate permission (strict token rate for a normal datagram,
+    // the grant peak-pacer for a grant-covered one) -- settled with ONE cancellable wait to the LATER of
+    // the two ready times. When both have room/tokens the datagram passes immediately, so in steady state
+    // the timing is exactly the limiter's (no premature-NACK regression -- an earlier fix that let normal
+    // traffic BYPASS the window broke the cap: after a grant burst the following strict traffic was not
+    // window-admitted and the 2s sum exceeded 2r). After a grant has spent the window slack, a normal
+    // datagram now waits HERE on the window (not a second wait), so the 2s average holds (C1 arithmetic).
+    const bool b1Active = wire && wire->burstLedger && wire->limiter && wire->limiter->enabled();
+    bool reserved = false;
+    // S1 (Codex 72a22d2): media rollover + Stop fence EVERY datagram at the send instant; an original
+    // AU's input fence is the FIRST datagram only (F3, below) so an input-only flush does not cut an AU
+    // already on the wire. (A replay IS input-fenced every datagram -- in send_udp_chunk_indices.)
+    const auto mediaStopFence = [&]() -> bool {
+      return (wire->limiter && wire->limiter->stopped()) ||
+             (liveEpoch && liveEpoch->load(std::memory_order_acquire) != itemEpoch);
+    };
+    const auto releaseIfReserved = [&]() { if (reserved) wire->burstLedger->CancelUnsent(wireBytes); };
+    const bool grantCovered = b1Active && wire->auHasGrant &&
+                              wire->burstLedger->GrantCoverage(wire->burstOwner, wireBytes) >= wireBytes;
+    // r8 D2: one injected time axis for the admission loop (null in production -> real qpc / sleep).
+    const auto NOW = [&]() -> uint64_t { return (wire && wire->nowFn) ? wire->nowFn() : qpc_now_us(); };
+    const auto WAIT = [&](uint64_t target) { if (wire && wire->waitFn) wire->waitFn(target); else udp_pace_wait_until(target); };
+    if (b1Active) {
+      for (;;) {
+        const uint64_t now = NOW();
+        const bool windowRoom = wire->burstLedger->HasRoom(now, wireBytes);
+        // rate readiness: a grant peak-paces (bypasses the strict rate); a normal datagram needs a token.
+        // r8 D1: readiness is a BOOL / 0-sentinel against THIS `now` snapshot -- never a fresh clock read
+        // (a later clock would make `deadline <= now` false even when ready, busy-spinning the loop).
+        uint64_t rateDeadlineUs;  // only meaningful when NOT ready (the wait target)
+        bool rateReady;
+        if (grantCovered) {
+          const uint64_t p = wire->burstLedger->PeakReadyUs(now);  // uses `now`, returns now when ready
+          rateReady = (p <= now);
+          rateDeadlineUs = p;
+        } else {
+          const uint64_t d = wire->limiter->NextReadyUs(wireBytes);  // 0 == ready now
+          rateReady = (d == 0);
+          rateDeadlineUs = (d == 0) ? now : d;
+        }
+        if (windowRoom && rateReady) {
+          if (mediaStopFence()) { wireAborted = true; return false; }  // fence at the send instant (S1/R2)
+          // Commit the window, then take the rate. If either slips (a concurrent SetRate between peek and
+          // take), undo and re-evaluate rather than over-admit.
+          if (!wire->burstLedger->Reserve(now, wireBytes)) continue;
+          if (grantCovered) {
+            wire->burstLedger->DebitGrant(wire->burstOwner, wireBytes);
+            (void)wire->burstLedger->BurstSendDeadlineUs(now, wireBytes);  // advance the peak cursor once
+          } else if (!wire->limiter->TryAcquire(wireBytes)) {
+            wire->burstLedger->CancelUnsent(wireBytes);
+            continue;
+          }
+          reserved = true;
+          break;
+        }
+        if (mediaStopFence()) { wireAborted = true; return false; }
+        const uint64_t windowAtUs = windowRoom ? now : wire->burstLedger->RoomAtUs(now, wireBytes);
+        WAIT(std::min<uint64_t>(std::max<uint64_t>(windowAtUs, rateDeadlineUs), now + 2000ULL));
+      }
+    } else if (wire && wire->limiter) {
+      // Cap off (disabled limiter) or no ledger: the legacy strict-rate Acquire (permits at once when
+      // the cap is disabled), which also checks Stop/media-epoch during its own wait.
+      if (wire->limiter->Acquire(wireBytes, liveEpoch, itemEpoch) == WireLimiter::Acq::Cancelled) {
         wireAborted = true;
         return false;
       }
     }
     // F3 (r3): the real permission point for the FIRST datagram is AFTER all its pacing/token waits.
-    // If the input epoch moved while this not-yet-started AU waited for tokens, it is of a flushed
-    // input and must not begin on the wire. A later datagram is mid-AU (already started) and keeps
-    // going -- the existing one-AU-per-flush exception. media-epoch is already covered by Acquire.
     if (isFirstDatagram && wire && wire->inputEpoch &&
         wire->inputEpoch->load(std::memory_order_acquire) != wire->itemInputEpoch) {
+      releaseIfReserved();
       wireAborted = true;
       return false;
     }
@@ -203,7 +264,11 @@ UdpSendOutcome send_udp_chunks_impl(SOCKET s, const sockaddr_in& peer, const uin
     const int n = haveSink ? wire->sink(datagram.data(), datagramLen, parity)
                            : sendto(s, reinterpret_cast<const char*>(datagram.data()), datagramLen, 0,
                                     reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
-    if (n <= 0) return false;
+    if (n <= 0) { releaseIfReserved(); return false; }
+    // r4 B1 / r6 C1: commit the reservation into the 2s window at the REAL send time (1:1). Every B1
+    // datagram -- normal or grant -- reserved in the unified admission above, so the window reflects
+    // exactly what left the wire (normal traffic is now window-admitted too, closing the C1 gap).
+    if (reserved) wire->burstLedger->CommitSent(NOW(), wireBytes);
     // F4 (r3): actual-wire bytes, the instant the datagram leaves -- separate from the limiter's
     // pre-send reservation, and recorded even if the AU is aborted after this point.
     if (wire) {
@@ -396,6 +461,19 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
         break;
       }
     }
+    // r4 B1: a replay is a B1 datagram -- it must also pass the 2s window admission. If the window is
+    // full, suppress this replay (the client's IDR fallback covers it) and give the limiter token back,
+    // so a replay cannot push the rolling average past 2r (Codex B1-1's 20000-replay counter-example).
+    const uint64_t nackWireBytes = static_cast<uint64_t>(datagramLen) + kWireIpUdpHeaderBytes;
+    bool nackReserved = false;
+    if (wire && wire->burstLedger && wire->limiter && wire->limiter->enabled()) {
+      if (!wire->burstLedger->Reserve(qpc_now_us(), nackWireBytes)) {
+        wire->limiter->Refund(nackWireBytes);
+        if (outSuppressed) ++*outSuppressed;
+        continue;
+      }
+      nackReserved = true;
+    }
     std::memcpy(datagram.data(), &h, sizeof(h));
     std::memcpy(datagram.data() + sizeof(h), payload + offset, chunkSize);
     const int sent = haveSink ? wire->sink(datagram.data(), datagramLen, false)
@@ -404,6 +482,9 @@ UdpSendOutcome send_udp_chunk_indices(SOCKET s, const sockaddr_in& peer, const u
     if (sent > 0) {
       if (outWireBytes) *outWireBytes += static_cast<uint64_t>(sent);
       if (outDatagrams) ++*outDatagrams;
+      if (nackReserved) wire->burstLedger->CommitSent(qpc_now_us(), nackWireBytes);  // real send -> window
+    } else if (nackReserved) {
+      wire->burstLedger->CancelUnsent(nackWireBytes);
     }
   }
   return UdpSendOutcome::Sent;
