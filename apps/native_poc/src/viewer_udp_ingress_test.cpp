@@ -1,6 +1,8 @@
 #include "viewer_udp_ingress.hpp"
+#include <atomic>
 #include <cstdio>
 #include <stdexcept>
+#include <vector>
 
 int main() {
   using remote60::native_poc::viewer::udp_ingress_recv_retryable;
@@ -75,6 +77,37 @@ int main() {
     int result = 0;
     for (int i = 0; i < 40 && result == 0; ++i) result = failed.Pop(output, sizeof(output));
     pass = pass && result == -1; // exception wakes the consumer and still joins safely
+  }
+  // r3 V2(b): a bad-datagram (oversize) flood advances the loop at the ARRIVAL rate; once the supply
+  // stops the loop returns to the idle select wait (no busy spin on no input); the dtor's Stop joins
+  // promptly. The tick callback counts loop iterations -- a spin would be orders of magnitude higher.
+  {
+    SOCKET rx3 = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in a3{};
+    a3.sin_family = AF_INET; a3.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a3.sin_port = 0;
+    bool floodPass = false;
+    if (rx3 != INVALID_SOCKET && bind(rx3, reinterpret_cast<sockaddr*>(&a3), sizeof(a3)) == 0) {
+      int l3 = sizeof(a3); getsockname(rx3, reinterpret_cast<sockaddr*>(&a3), &l3);
+      std::atomic<uint64_t> ticks{0};
+      {
+        remote60::native_poc::viewer::UdpIngress ing(
+            rx3, [](const uint8_t*, size_t) { return false; }, [&] { ticks.fetch_add(1, std::memory_order_relaxed); });
+        Sleep(120);
+        const uint64_t idle1 = ticks.load();                 // ~120ms/25ms ticks when idle (not a spin)
+        std::vector<char> big(2000, 7);                       // > 1600 recv buffer -> WSAEMSGSIZE -> dropped
+        for (int i = 0; i < 60; ++i)
+          sendto(tx, big.data(), static_cast<int>(big.size()), 0, reinterpret_cast<sockaddr*>(&a3), sizeof(a3));
+        for (int i = 0; i < 60 && ticks.load() <= idle1; ++i) Sleep(5);  // let the flood advance the loop
+        const uint64_t afterFlood = ticks.load();
+        Sleep(120);
+        const uint64_t idle2 = ticks.load();                 // supply stopped -> back to idle cadence
+        floodPass = idle1 <= 50 &&                            // idle is NOT spinning (would be thousands)
+                    afterFlood > idle1 &&                     // the flood advanced the loop (arrival rate)
+                    (idle2 - afterFlood) <= 50;               // after the flood, idle again (no spin)
+      }  // ing dtor: Stop must join promptly, or this test would hang
+      closesocket(rx3);
+    }
+    pass = pass && floodPass;
   }
   closesocket(rx); closesocket(rx2); closesocket(tx); WSACleanup();
   std::printf("viewer_udp_ingress_test: %s (two isolated sockets; control bypasses stalled video consumer)\n", pass ? "PASS" : "FAIL");

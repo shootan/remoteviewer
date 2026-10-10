@@ -143,7 +143,8 @@ int main() {
     sendTo("", 0);
     t.join();
     check("external Stop breaks the blocked receive loop (join returns)", true);
-    closesocket(rx); closesocket(tx);
+    if (c.Snapshot().state != ClientSessionState::Error) closesocket(rx);  // single owner
+    closesocket(tx);
   }
 
   // --- B (U1.2 reset): a scripted WSAECONNRESET is survived and a following VALID key frame is delivered.
@@ -168,7 +169,7 @@ int main() {
     check("reset is survived and the following valid key frame is DELIVERED",
           sink.frames() > 0 && c.Snapshot().state != ClientSessionState::Error,
           "frames=" + std::to_string(sink.frames()));
-    closesocket(s);
+    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);
   }
 
   // --- C (U1): a genuine terminal recv error still ends the session ---------------------------------
@@ -182,7 +183,7 @@ int main() {
     check("a terminal recv error (WSAENOTSOCK) ends the session",
           c.Snapshot().state == ClientSessionState::Error &&
               c.Snapshot().lastError == "udp video receive failed");
-    closesocket(s);
+    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);  // terminal -> controller already closed it
   }
 
   // --- D (U1/U2): a reset flood is rate-bounded -- no CPU spin / log flood --------------------------
@@ -205,44 +206,77 @@ int main() {
     t.join();
     check("a reset flood is rate-bounded (~1 kHz anti-spin, no CPU peg)", calls.load() <= 400,
           "calls=" + std::to_string(calls.load()));
-    closesocket(s);
+    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);
   }
 
-  // --- E (U1.3): with NACK/hold ENABLED, a stream of drops after an INCOMPLETE head keeps the
-  //     maintenance tick running (NACK rounds / hold / stuck-head give-up) and never delivers the
-  //     incomplete AU -- discards do not update healthy/ACK. (The exact NACK-round / hold-expiry timing
-  //     is covered by the pipeline's own tests and udp_control_e2e; here the point is that the receive
-  //     loop keeps ticking the pipeline while recv results are discarded.) ---------------------------
+  // --- E (U1.3, Codex r3 V1): with NACK/hold and control-over-UDP ENABLED, a drop/error stream must
+  //     keep BOTH maintenances running OBSERVABLY -- the pipeline actually SENDS a NACK for the
+  //     incomplete head (seen on the wire), and an outstanding control message is retransmitted until it
+  //     reaches PeerLost. The incomplete AU is never delivered (discards are not healthy/ACK). Removing
+  //     either drop-tick would leave zero NACKs / a never-closed channel, so these are behavioural
+  //     assertions, not tick counts.
   {
-    SOCKET s = make_loopback_udp();
+    sockaddr_in rxAddr{};
+    SOCKET s = make_loopback_udp(&rxAddr);
+    sockaddr_in obsAddr{};
+    SOCKET obs = make_loopback_udp(&obsAddr);
+    // Connect the video socket to the observer so the pipeline's sendNack (send(), not sendto) lands on
+    // obs; a short recv timeout on obs so its recv loop is bounded.
+    connect(s, reinterpret_cast<sockaddr*>(&obsAddr), sizeof(obsAddr));
+    DWORD obsTimeout = 50; setsockopt(obs, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&obsTimeout), sizeof(obsTimeout));
+
     ClientSessionController c;
     MinimalSink sink;
-    c.SetHostSupportsNackForTest(true);  // hold enabled -> the loop's tick is the maintenance heartbeat
+    c.SetHostSupportsNackForTest(true);
+    c.SetControlOverUdpForTest(true);
+    // An outstanding control message with a fast retransmit schedule so PeerLost is reached within the
+    // drop window. Its SendFn just counts the retransmits (it does not matter where they go).
+    std::atomic<uint64_t> controlSends{0};
+    auto& ctl = c.ControlChannelForTest();
+    UdpControlChannel::Timings timings; timings.retransmitIntervalUs = 2000; timings.maxAttempts = 3;
+    ctl.SetTimings(timings);
+    ctl.Configure([&](const void*, size_t) { controlSends.fetch_add(1, std::memory_order_relaxed); return true; },
+                  /*txStreamId=*/1, /*rxStreamId=*/2, /*mtuBytes=*/1200);
+    const uint8_t ctlMsg[4] = {1, 2, 3, 4};
+    ctl.Send(ctlMsg, sizeof(ctlMsg));  // outstanding; no ACK will ever arrive
+
     std::atomic<int> idx{0};
     const auto start = std::chrono::steady_clock::now();
     c.SetUdpRecvHookForTest([&](uint8_t* buf, size_t cap, int& err) -> int {
       const int i = idx.fetch_add(1, std::memory_order_relaxed);
       err = 0;
       if (i == 0) return static_cast<int>(build_incomplete_key_first_chunk(buf, cap, 1));  // owes a NACK
-      if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(300)) {
+      if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(400)) {
         c.RequestStopForTest();
         return 0;
       }
-      // alternate empty and reset drops -- both non-terminal, both discarded
-      if (i & 1) { err = WSAECONNRESET; return -1; }
+      if (i & 1) { err = WSAECONNRESET; return -1; }  // alternate empty / reset drops
       return 0;
     });
     std::thread t([&] { c.RunVideoReceiveForTest(static_cast<SocketHandle>(s), &sink); });
+
+    // Observe the NACK the pipeline sends for the incomplete head during the drop stream.
+    uint64_t nacksSeen = 0;
+    const auto obsDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < obsDeadline) {
+      uint8_t buf[256];
+      const int r = recv(obs, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+      if (r >= static_cast<int>(sizeof(UdpVideoNackPacket))) {
+        const auto* p = reinterpret_cast<const UdpVideoNackPacket*>(buf);
+        if (p->magic == kMagic && p->kind == static_cast<uint16_t>(UdpPacketKind::VideoNack)) ++nacksSeen;
+      }
+      if (nacksSeen > 0 && ctl.IsClosed()) break;
+    }
     t.join();
-    check("U1.3: NACK/hold on -- the incomplete AU is NEVER delivered through drops (no false healthy)",
+    check("V1: the pipeline SENT a real NACK for the incomplete head during the drop stream",
+          nacksSeen > 0, "nacksSeen=" + std::to_string(nacksSeen));
+    check("V1: an outstanding control message was RETRANSMITTED during drops and reached PeerLost",
+          ctl.IsClosed() && ctl.CloseReason() == ControlCloseReason::PeerLost && controlSends.load() >= 2,
+          "closed=" + std::to_string(ctl.IsClosed()) + " sends=" + std::to_string(controlSends.load()));
+    check("V1: the incomplete AU is NEVER delivered through drops (discards are not healthy/ACK)",
           sink.frames() == 0, "frames=" + std::to_string(sink.frames()));
-    check("U1.3: the session stays alive through the drop stream (maintenance ticks, no terminal)",
-          c.Snapshot().state != ClientSessionState::Error);
-    // The give-up/discontinuity may or may not fire within 300 ms depending on the NACK schedule; report
-    // it either way (not an assertion), the pipeline's own tests gate its exact timing.
-    std::printf("       (U1.3 note: discontinuities observed during drops = %llu)\n",
-                static_cast<unsigned long long>(sink.discontinuities()));
-    closesocket(s);
+    if (c.Snapshot().state != ClientSessionState::Error) closesocket(s);  // single owner (no double close)
+    closesocket(obs);
   }
 
   WSACleanup();

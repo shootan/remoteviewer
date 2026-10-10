@@ -80,7 +80,12 @@ class UdpIngress {
       FD_SET(socket_, &readSet);
       timeval timeout{0, 25000};
       const int ready = select(0, &readSet, nullptr, nullptr, &timeout);
-      if (ready == 0) continue;  // the 25 ms select timeout also bounds a repeated immediate recv error
+      // select's 25 ms is only the MAXIMUM wait: when the socket is idle it caps the loop to ~one
+      // iteration per 25 ms (the tick cadence); when datagrams (good or bad) are actually arriving it
+      // returns ready at once and the loop runs at the ARRIVAL rate, not faster. So a bad-datagram flood
+      // is bounded by how fast datagrams really arrive, and when the supply stops the loop falls back to
+      // the 25 ms wait -- no busy spin on no input. (udp-recv-exit r2/r3 U2.)
+      if (ready == 0) continue;
       if (ready < 0) {
         if (udp_ingress_select_retryable(WSAGetLastError())) continue;  // r2 U2: select-only error set
         break;
@@ -90,8 +95,9 @@ class UdpIngress {
       if (n <= 0) {
         const int error = WSAGetLastError();  // captured immediately after the SOCKET_ERROR
         // n==0 is a legal empty datagram; the recv advisory set (incl. WSAECONNRESET) is non-terminal.
-        // A repeated immediate recv error does not spin: the next iteration's select bounds the loop to
-        // its 25 ms tick before the next recv.
+        // A repeated immediate recv error is consumed one per iteration and re-tested by the next select:
+        // while such errors/datagrams keep arriving the loop follows their rate, and once they stop the
+        // select wait (<=25 ms) returns the loop to idle -- not a spin on no input.
         if (n == 0 || udp_ingress_recv_retryable(error)) continue;
         break;
       }
