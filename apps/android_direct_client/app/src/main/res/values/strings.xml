@@ -125,6 +125,7 @@
     <string name="hosts_manual_button">Connect by IP instead</string>
     <string name="key_panel_tab_extra">F keys</string>
     <string name="key_panel_tab_phone">Phone keyboard</string>
+    <string name="key_panel_tab_pc_keys">PC keys</string>
     <string name="virtual_mouse_roll">Roll</string>
     <string name="virtual_mouse_left">Left</string>
     <string name="virtual_mouse_right">Right</string>
