@@ -92,6 +92,8 @@ class CountingSink : public ClientEncodedFrameSink {
     if (consumeOnce_) {  // a decoder-discard request, on demand (fills the session's limiter)
       consumeOnce_ = false;
       consumedOnce_ = true;
+      // The session hands this straight to its limiter, in this same call chain: the fill's request.
+      fillAt_ = std::chrono::steady_clock::now();
       return true;
     }
     const bool r = rekey_;
@@ -101,6 +103,12 @@ class CountingSink : public ClientEncodedFrameSink {
   // The APK decoder's: the selection still owed its generation's IDR (r4 M1-A).
   uint64_t KeyframeOwedFor() override {
     std::lock_guard<std::mutex> lk(mu_);
+    // The first time an owed duty is reported, the session asks its limiter for that IDR right
+    // after this returns, on the same thread: the answer's own request.
+    if (gate_.OwedToken() != 0 && !owedAskSeen_) {
+      owedAskSeen_ = true;
+      owedAskAt_ = std::chrono::steady_clock::now();
+    }
     return gate_.OwedToken();
   }
   uint64_t CurrentSelectionTag() override {
@@ -136,10 +144,18 @@ class CountingSink : public ClientEncodedFrameSink {
   }
   // Test hooks: see the answer as it arrives (before the gate), hold it, demand one IDR.
   std::function<void(const ControlWindowSelectedMessage&, uint64_t)> onAnswer;
+  // ms from the fill's request to the answer's own (both measured where they are made); -1 if
+  // either has not happened.
+  long long FillToOwedAskMs() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!consumedOnce_ || !owedAskSeen_) return -1;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(owedAskAt_ - fillAt_).count();
+  }
   void ArmHoldAck() {
     std::lock_guard<std::mutex> lk(mu_);
     holdAck_ = true;
     heldAckGen_ = 0;
+    owedAskSeen_ = false;
     droppedHeldKey_ = false;
   }
   void ReleaseAck() {
@@ -192,6 +208,8 @@ class CountingSink : public ClientEncodedFrameSink {
   std::condition_variable cv_;
   bool holdAck_ = false, ackHeld_ = false, droppedHeldKey_ = false, consumeOnce_ = false, consumedOnce_ = false;
   uint64_t heldAckGen_ = 0;
+  std::chrono::steady_clock::time_point fillAt_{}, owedAskAt_{};
+  bool owedAskSeen_ = false;
 };
 
 template <typename Fn>
@@ -233,6 +251,8 @@ bool write_mode(const std::wstring& path, const char* mode) {
 }
 
 int gPort = 0;
+int gConnectRetries = 0;   // connects that needed their one retry (setup recovery, reported)
+int gPremiseRetries = 0;   // phase-12 set-ups redone because the timing premise did not hold
 
 // The screens this PC really has (the seam adds one to them, or takes all away).
 size_t real_screen_count() {
@@ -384,13 +404,19 @@ bool arrive(ClientSessionController& c, CountingSink* sink, const char* label, i
            wait_until([&] { return c.WindowPanelSnapshotCopy().hostSupportsMonitors; }, 6000);
   };
   bool ok = attempt();
+  bool retried = false;
   if (!ok) {
+    retried = true;
+    ++gConnectRetries;
     // Connecting is not what this test examines; on a loaded machine the UDP hello can miss its
     // budget. One retry, said so.
     std::printf("      (connect failed: %s / %s -- retrying once)\n", c.Snapshot().status.c_str(),
                 c.Snapshot().lastError.c_str());
     c.Disconnect();
     ok = attempt();
+  }
+  if (retried) {
+    std::printf("      (%s: connected only on the retry -- recorded, not a first-try connect)\n", label);
   }
   check(label, ok, c.Snapshot().status + " / " + c.Snapshot().lastError);
   return ok;
@@ -479,6 +505,8 @@ PickResult pick_screen(ClientSessionController& c, CountingSink& sink, uint32_t 
 
 int finish(SelfHost& self, const std::wstring& log) {
   const std::string full = read_all(log);
+  std::printf("\n(setup: %d connect(s) needed their retry; %d phase-12 set-up(s) redone for the timing premise)\n",
+              gConnectRetries, gPremiseRetries);
   std::printf("\n(host log %zu bytes: %zu fallback, %zu reattach failed, %zu reattached)\n", full.size(),
               count_of(full, "monitor-fallback"), count_of(full, "capture reattach failed"),
               count_of(full, "capture reattached"));
@@ -691,9 +719,14 @@ int main(int argc, char** argv) {
       sink.Prepare(selA);
       const std::string marker0 = "requestedId=" + std::to_string(encode_monitor_select_target(0)) + " applied=1";
       const size_t mark = read_all(log).size();
+      const size_t holds0 = count_of(read_all(log), "holding at apply");
+      write_mode(self.holdPath(L"apply"), "1");
       check("pick A queued under selection " + std::to_string(selA), c.RequestMonitorSelect(0));
+      check("A is taken and held at the host",
+            wait_until([&] { return count_of(read_all(log), "holding at apply") > holds0; }, 10000));
       const uint64_t selB = ++gSelection;
       sink.Prepare(selB);  // the user picks again before A is answered
+      DeleteFileW(self.holdPath(L"apply").c_str());
       const bool aApplied = wait_until([&] { return count_of(read_all(log), marker0, mark) >= 1; }, 15000);
       check("the host applied A", aApplied);
       check("A's answer reached the sink and was IGNORED (it is not selection " + std::to_string(selB) + "'s)",
@@ -1152,28 +1185,37 @@ int main(int argc, char** argv) {
         cutVideo.store(true);
         std::this_thread::sleep_for(std::chrono::milliseconds(40));  // in-flight datagrams drain
         sink.ReleaseAck();
-        msAfterFill =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - tFill).count();
-        premise = filled && msAfterFill < 110;
+        (void)tFill;
+        // r6 E1: the premise is the gap between the fill's request and the answer's own request,
+        // both stamped where the session makes them -- not when this thread happened to look.
+        wait_until([&] { return sink.FillToOwedAskMs() >= 0; }, 5000);
+        msAfterFill = sink.FillToOwedAskMs();
+        premise = filled && msAfterFill >= 0 && msAfterFill < 110;
         if (!premise) {
-          std::printf("      (attempt %d: the answer was released %lld ms after the fill -- premise not met, set up again)\n",
+          std::printf("      (attempt %d: the answer's request came %lld ms after the fill's -- premise not met, set up again)\n",
                       attempt, msAfterFill);
+          ++gPremiseRetries;
           cutVideo.store(false);
           wait_until([&] { return sink.ready() == selB; }, 15000);
         }
       }
-      check("a decoder-discard request was made just before the answer (limiter's 120 ms minimum interval)", premise,
-            "answer released " + std::to_string(msAfterFill) + " ms after it");
+      check("[premise] the answer's own IDR request came within the client limiter's 120 ms of the fill's "
+            "(both stamped where the session made them)", premise,
+            "gap " + std::to_string(msAfterFill) + " ms");
+      if (!premise) {
+        std::puts("NOTJUDGED  the two checks below need that premise (the client limiter refusing the answer's "
+                  "request); not judged in this run");
+      }
       const uint64_t frames0 = sink.frames();
-      const bool asked =
+      const bool asked = premise &&
           wait_until([&] { return key_requests_received(read_all(log)) >= keyReq0 + 2; }, 5000);
-      check("with the video cut, the host receives BOTH requests -- the answer's own, held past the client limiter",
+      if (premise) check("with the video cut, the host receives BOTH requests -- the answer's own, held past the client limiter",
             asked && sink.frames() == frames0,
             "requests=" + std::to_string(key_requests_received(read_all(log)) - keyReq0) +
                 " framesWhileCut=" + std::to_string(sink.frames() - frames0));
       cutVideo.store(false);
       // No request is made by this test from here: the selection is still owed its IDR (r4 M1-A).
-      check("video back: B recovers by itself -- an IDR of its generation arrives and makes it ready",
+      if (premise) check("video back: B recovers by itself -- an IDR of its generation arrives and makes it ready",
             wait_until([&] { return sink.ready() == selB; }, 15000) && sink.readyGen() == sink.heldAckGen(),
             "ready=" + std::to_string(sink.ready()) + " readyGen=" + std::to_string(sink.readyGen()));
     }
