@@ -14,10 +14,14 @@
 
 namespace remote60::native_poc::viewer {
 
-// Match the shared socket retry contract; an oversized UDP datagram is also nonterminal.
+// Non-terminal UDP recv errors (udp-recv-exit r1): a timeout/would-block/interrupt is a maintenance
+// tick; an oversized datagram is truncated-and-dropped; a Windows WSAECONNRESET is an earlier send's
+// ICMP Port Unreachable -- advisory about ONE datagram, not a reason to tear down the ingress. (This
+// matches the shared client's classify_udp_recv reset policy, so the two receive points agree.) select
+// and recv share this table here; a genuinely bad/closed socket still falls through to terminal.
 inline bool udp_ingress_retryable_error(int error) {
   return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK || error == WSAEINTR ||
-         error == WSAEMSGSIZE;
+         error == WSAEMSGSIZE || error == WSAECONNRESET;
 }
 
 // One socket owner. Control traffic is delivered immediately even while the video consumer is

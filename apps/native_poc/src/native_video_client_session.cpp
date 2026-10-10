@@ -785,6 +785,19 @@ void ClientSessionController::VideoReceiveMain() {
   bool loggedPolicy = false;
   uint64_t nextSummaryAt = 1;
 
+  // udp-recv-exit r1: a single UDP recv result -- a legal empty datagram, a truncated oversize one, or a
+  // Windows ICMP-driven reset -- is about ONE datagram, not the session. Classify the result, discard /
+  // treat-as-advisory and keep the maintenance going; only a genuine terminal error ends the loop. These
+  // counters drive bounded diagnostics (first drop + on error-code change + a periodic aggregate) and the
+  // anti-spin gap. A discard is NOT a healthy/ACK/peer-alive event.
+  uint64_t recvEmpty = 0, recvTruncated = 0, recvReset = 0, recvRetry = 0;
+  bool loggedFirstDrop = false;
+  int lastLoggedErr = 0;
+  uint64_t lastValidRecvUs = now_us();
+  uint64_t lastImmediateDropUs = 0;
+  constexpr uint64_t kUdpDropSpinGapUs = 1000;  // immediate-return drops no faster than ~1 kHz (no spin)
+  constexpr uint64_t kUdpDropLogEvery = 512;    // periodic aggregate cadence
+
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
     ClientEncodedFrameSink* sink = nullptr;
@@ -804,21 +817,71 @@ void ClientSessionController::VideoReceiveMain() {
                    nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs));
     }
 
-    const int n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+    int recvErr = 0;
+    int n;
+    if (udpRecvHookForTest_) {
+      // Test seam: scripted recv result (n, err). Null in production.
+      n = udpRecvHookForTest_(datagram.data(), datagram.size(), recvErr);
+    } else {
+      n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+      // Capture the error IMMEDIATELY on SOCKET_ERROR, in this thread, before any other call can overwrite
+      // it (diagnostic contract). n==0 is not an error -> error-valid is false (recvErr stays 0/unused).
+      if (n < 0) recvErr = socket_last_error();
+    }
     if (n <= 0) {
       if (stopRequested_.load(std::memory_order_acquire)) break;
-      if (last_socket_error_is_retryable()) {
-        // The read timeout is also the channel's heartbeat: without it a stalled control
-        // transfer would sit unrecovered on an otherwise silent link.
-        if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
-        // A quiet socket is exactly when a lost chunk goes unnoticed and a held AU's hold runs
-        // out: tick the pipeline (NACK rounds, hold expiry, stuck-head give-up).
-        pipeline.OnTick(now_us());
-        continue;
+      const UdpRecvClass cls = classify_udp_recv(n, recvErr);
+      if (cls == UdpRecvClass::Terminal) {
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp video receive terminal n=%d err=%d empty=%llu "
+                     "truncated=%llu reset=%llu sinceValidMs=%llu\n",
+                     n, recvErr, static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>((now_us() - lastValidRecvUs) / 1000));
+        SignalRuntimeFailure("udp video receive failed");
+        break;
       }
-      SignalRuntimeFailure("udp video receive failed");
-      break;
+      // Non-terminal: a legal empty datagram, a truncated oversize one, an advisory reset, or a timeout.
+      // Discard the input (never hand a truncated prefix to the parser), keep the maintenance ticks going,
+      // but do NOT count any of this as a healthy receive. The read timeout is also the channel heartbeat;
+      // a quiet/dropping socket is exactly when a lost chunk or an expiring hold must still be serviced.
+      uint64_t dropTotal = 0;
+      switch (cls) {
+        case UdpRecvClass::Empty: dropTotal = ++recvEmpty; break;
+        case UdpRecvClass::TruncatedDrop: dropTotal = ++recvTruncated; break;
+        case UdpRecvClass::ResetAdvisory: dropTotal = ++recvReset; break;
+        case UdpRecvClass::Retryable: dropTotal = ++recvRetry; break;
+        default: break;
+      }
+      const bool errChanged = (n < 0) && (recvErr != lastLoggedErr);
+      if (!loggedFirstDrop || errChanged || (dropTotal % kUdpDropLogEvery) == 1ULL) {
+        loggedFirstDrop = true;
+        lastLoggedErr = recvErr;
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp recv drop class=%d n=%d errValid=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu retry=%llu sinceValidMs=%llu stop=%d\n",
+                     static_cast<int>(cls), n, (n < 0) ? 1 : 0, recvErr,
+                     static_cast<unsigned long long>(recvEmpty), static_cast<unsigned long long>(recvTruncated),
+                     static_cast<unsigned long long>(recvReset), static_cast<unsigned long long>(recvRetry),
+                     static_cast<unsigned long long>((now_us() - lastValidRecvUs) / 1000),
+                     stopRequested_.load(std::memory_order_acquire) ? 1 : 0);
+      }
+      if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
+      pipeline.OnTick(now_us());
+      // Anti-spin: a timeout (Retryable) already waited, but Empty/Truncated/ResetAdvisory can return at
+      // once; if they stream in, bound the loop to ~1 kHz so a reset/empty flood cannot peg the CPU or the
+      // log. stop is re-checked at the loop top, so this stays bounded against shutdown.
+      if (cls != UdpRecvClass::Retryable) {
+        const uint64_t loopNow = now_us();
+        if (lastImmediateDropUs != 0 && loopNow - lastImmediateDropUs < kUdpDropSpinGapUs) {
+          std::this_thread::sleep_for(std::chrono::microseconds(kUdpDropSpinGapUs - (loopNow - lastImmediateDropUs)));
+        }
+        lastImmediateDropUs = now_us();
+      }
+      continue;
     }
+    lastValidRecvUs = now_us();
+    lastImmediateDropUs = 0;  // a real datagram breaks any immediate-drop streak
 
     if (controlOverUdp_.load(std::memory_order_acquire) &&
         udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
@@ -854,6 +917,16 @@ void ClientSessionController::VideoReceiveMain() {
                    static_cast<unsigned long long>(ps.discontinuities));
     }
   }
+}
+
+void ClientSessionController::RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    udpVideoSocket_ = udpSocket;
+    encodedFrameSink_ = sink;
+  }
+  stopRequested_.store(false, std::memory_order_release);
+  VideoReceiveMain();  // runs the REAL loop; the test's recv hook scripts the results and stops it
 }
 
 void ClientSessionController::StopWorker() {

@@ -218,4 +218,69 @@ inline bool last_socket_error_is_retryable() {
 #endif
 }
 
+// The socket error of the LAST socket call, captured now. Call it immediately after a SOCKET_ERROR so a
+// later call cannot overwrite it (udp-recv-exit r1 diagnostic contract).
+inline int socket_last_error() {
+#if defined(_WIN32)
+  return WSAGetLastError();
+#else
+  return errno;
+#endif
+}
+
+// How a UDP recv() result should be handled (udp-recv-exit r1). A UDP-ONLY policy: it does NOT change
+// last_socket_error_is_retryable() (used elsewhere) or recv_all()'s TCP semantics, where a 0 return is a
+// real EOF. For UDP a 0 return is a legal empty datagram and a single error indication (truncation, or a
+// Windows ICMP-driven reset) is about ONE datagram, not the whole session.
+enum class UdpRecvClass {
+  Datagram,       // n > 0: a datagram to validate/dispatch
+  Empty,          // n == 0: a legal empty UDP datagram -- discard and continue (NOT a TCP EOF)
+  Retryable,      // timeout / would-block / interrupted: the maintenance tick, then continue
+  TruncatedDrop,  // WSAEMSGSIZE: the datagram was larger than the buffer; discard the whole thing
+  ResetAdvisory,  // WSAECONNRESET (Windows UDP: an earlier send's ICMP Port Unreachable): advisory
+  Terminal        // anything else: keep the existing terminal path (bad/closed socket, ...)
+};
+
+// Classify a UDP recv() result. `nBytes` is recv's return; `err` is socket_last_error() captured
+// IMMEDIATELY after a SOCKET_ERROR (ignored when nBytes >= 0). Windows WSA codes and POSIX errno are
+// matched by their symbolic meaning, never by raw number across platforms.
+inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
+  if (nBytes > 0) return UdpRecvClass::Datagram;
+  if (nBytes == 0) return UdpRecvClass::Empty;
+#if defined(_WIN32)
+  switch (err) {
+    case WSAEWOULDBLOCK:
+    case WSAETIMEDOUT:
+    case WSAEINTR:
+      return UdpRecvClass::Retryable;
+    case WSAEMSGSIZE:
+      return UdpRecvClass::TruncatedDrop;
+    case WSAECONNRESET:
+      return UdpRecvClass::ResetAdvisory;
+    default:
+      return UdpRecvClass::Terminal;
+  }
+#else
+  switch (err) {
+    case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK:
+#endif
+    case ETIMEDOUT:
+    case EINTR:
+      return UdpRecvClass::Retryable;
+    case EMSGSIZE:
+      return UdpRecvClass::TruncatedDrop;
+    case ECONNRESET:
+      return UdpRecvClass::ResetAdvisory;
+    default:
+      return UdpRecvClass::Terminal;
+  }
+#endif
+}
+
+// A non-terminal class is discarded/advisory and MUST NOT be counted as a healthy/ACK/peer-alive event;
+// it just lets the receive loop continue and keep its maintenance going.
+inline bool udp_recv_is_terminal(UdpRecvClass c) { return c == UdpRecvClass::Terminal; }
+
 }  // namespace remote60::native_poc
