@@ -2001,11 +2001,12 @@ uint32_t H264Encoder::configured_max_qp() { return env_u32_or("REMOTE60_NATIVE_M
 RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
   if (!enc_) return RcRuntimeResult::Failed;
   const uint32_t effective = maxQp != 0 ? maxQp : configured_max_qp();
-  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log. Only when the
-  // instance is known to RUN that plan (r2 R2): a rejected Set or a readback mismatch means nothing is
-  // in force to be "unchanged".
-  if (rc_plan_effective() && rcPlan_.maxQpSet == (effective > 0 && effective <= 51) &&
-      (!rcPlan_.maxQpSet || rcPlan_.maxQp == effective)) {
+  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log. Judged on the
+  // CEILING'S OWN field (r4 Q1b): accepted and not contradicted by its readback, and the same value.
+  // Another field's mismatch (a stuck mean) is that field's business and must not turn every ceiling
+  // call into a whole-plan rewrite -- that was a per-tick loop the failure budget never saw.
+  if (rcPlan_.maxQpSet == (effective > 0 && effective <= 51) && (!rcPlan_.maxQpSet || rcPlan_.maxQp == effective) &&
+      (!rcPlan_.maxQpSet || rcFieldMaxQp_.applied())) {
     return RcRuntimeResult::Unchanged;
   }
   if (!runtime_max_qp_live()) {
@@ -2024,7 +2025,13 @@ RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
 RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
   if (!enc_) return RcRuntimeResult::Failed;
   const uint32_t mean = std::max<uint32_t>(100000, bitrate);
-  if (rc_plan_effective() && rcPlan_.meanBps == mean) return RcRuntimeResult::Unchanged;  // C3 no-op (r2: effective plan only)
+  // C3 no-op on the MEAN PATH'S OWN fields (r4 Q1b): mode/mean/peak/VBV accepted and not contradicted,
+  // same mean. The mode belongs to this path (a mean under a refused mode is not the mean that was
+  // asked for); a refused or stuck CEILING does not make a confirmed mean "not in force".
+  if (rcPlan_.meanBps == mean && rcFieldMode_.applied() && rcFieldMean_.applied() && rcFieldPeak_.applied() &&
+      rcFieldVbv_.applied()) {
+    return RcRuntimeResult::Unchanged;
+  }
   if (!runtime_mean_live()) {
     // A new mean on this profile is a new instance: the host takes its re-initialisation path with
     // the new E. bitrate_ is left as the running instance's value so configured_bitrate() tells the

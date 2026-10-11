@@ -223,7 +223,11 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
         }
         return rc;
       };
-      const auto seedInitialQp = [&] { (void)reconcileCeiling("decision"); };
+      // One apply path per decision (r4 Q1a): the reconcile's result is kept and the log below reads
+      // it -- the log must not call the setter again (a refused ceiling was being written twice a tick,
+      // the second time outside the failure budget).
+      EncoderState::CeilingReconcile lastReconcile{};
+      const auto seedInitialQp = [&] { lastReconcile = reconcileCeiling("decision"); };
       // r2 (Codex R4): the loop's input is PAYLOAD (bytes sent + the gate's skipped frames at the average
       // frame size); its target must be in the same unit -- the payload the wire can carry at R and this
       // frame rate, not R itself (a wire figure that includes parity and headers) and not E (a target
@@ -279,9 +283,13 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           } else if (after.maxQp != before.maxQp) {
             // C3: only an Applied answer counts as applied. Unproven (a static-ceiling instance) is
             // logged as such and never as success; the governor then knows its lever did nothing. The
-            // reconcile above (seedInitialQp after OnSecond) already issued the step; its answer is
-            // re-read here for the log by asking the codec, which is Unchanged when it is in force.
-            const RcRuntimeResult rr = encoder.codec.set_max_qp(after.maxQp);
+            // reconcile above (seedInitialQp after OnSecond) issued the step; THIS is its result -- no
+            // second setter call (r4 Q1a). An un-attempted reconcile means the ceiling was already in
+            // force on the instance (or the plan owns it): counted as applied only if the field confirms.
+            const RcRuntimeResult rr = lastReconcile.attempted
+                                           ? lastReconcile.result
+                                           : (encoder.codec.rc_max_qp_field_applied() ? RcRuntimeResult::Unchanged
+                                                                                      : RcRuntimeResult::Unproven);
             const bool applied = rr == RcRuntimeResult::Applied || rr == RcRuntimeResult::Unchanged;
             std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
                       << " fps=" << encoder.activeFps
@@ -292,7 +300,8 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                       << " applied=" << (applied ? 1 : 0)
                       << " result=" << (rr == RcRuntimeResult::Applied ? "applied"
                                         : rr == RcRuntimeResult::Unchanged ? "unchanged"
-                                        : rr == RcRuntimeResult::Unproven ? "unproven" : "failed") << "\n";
+                                        : rr == RcRuntimeResult::Unproven ? "unproven" : "failed")
+                      << " attempted=" << (lastReconcile.attempted ? 1 : 0) << " degraded=" << (lastReconcile.degraded ? 1 : 0) << "\n";
           }
         }
       }

@@ -249,6 +249,8 @@ class H264Encoder {
   bool rc_set_accepted() const { return rcSetAccepted_; }
   /** The requested plan is what the instance runs: Sets accepted and no known readback mismatch. */
   bool rc_plan_effective() const { return rcSetAccepted_ && rcPlanState_ != RcPlanState::Mismatch; }
+  /** The ceiling field alone is in force (accepted, not contradicted) -- the governor's no-op basis (r4 Q1b). */
+  bool rc_max_qp_field_applied() const { return rcFieldMaxQp_.applied(); }
   const MftIdentity& identity() const { return identity_; }
   /** The mean E this instance was configured with (what the MFT was told, not what it produces). */
   uint32_t configured_bitrate() const { return bitrate_; }

@@ -183,6 +183,7 @@ struct EncoderState {
   // poked: its plan owns the ceiling and the seed is ignored by its plan.
   uint32_t governorQpApplyFailures = 0;
   uint32_t governorLastDesiredQp = 0;
+  uint64_t governorFailInstance = 0;  // r4 Q1c: the failure budget belongs to (instance, desired)
   static constexpr uint32_t kGovernorQpApplyMaxFailures = 3;
   struct CeilingReconcile {
     bool attempted = false;                                // a SetValue was issued to the live instance
@@ -196,12 +197,20 @@ struct EncoderState {
     out.desired = desiredQp;
     out.codecBefore = codec.plan_max_qp();
     codec.set_initial_max_qp(desiredQp == configuredQp ? 0u : desiredQp);  // the next instance's seed
-    if (desiredQp != governorLastDesiredQp) {
+    if (desiredQp != governorLastDesiredQp || codec.instance_id() != governorFailInstance) {
+      // r4 Q1c: a new target OR a new instance gets its own bounded attempts; the old instance's spent
+      // budget does not follow the same desired onto its successor.
       governorLastDesiredQp = desiredQp;
-      governorQpApplyFailures = 0;  // a new target gets its own bounded attempts
+      governorFailInstance = codec.instance_id();
+      governorQpApplyFailures = 0;
     }
     if (!codec.started() || !codec.runtime_max_qp_live()) return out;  // no instance, or the plan owns it
-    if (codec.plan_max_qp() == desiredQp && codec.rc_plan_effective()) return out;  // already in force
+    // r4 Q1b: judged on the CEILING'S OWN field. Another field's mismatch (a stuck mean) is not a reason
+    // to re-issue a confirmed ceiling -- that was a whole-plan rewrite every tick that the budget never saw.
+    if (codec.plan_max_qp() == desiredQp && codec.rc_max_qp_field_applied()) {
+      governorQpApplyFailures = 0;  // confirmed in force: any older failure state is stale
+      return out;
+    }
     if (governorQpApplyFailures >= kGovernorQpApplyMaxFailures) {
       out.degraded = true;
       return out;

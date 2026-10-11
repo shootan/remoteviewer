@@ -249,6 +249,108 @@ int main() {
           !rc.attempted && !rc2.attempted && rig.fake->count_set("maxQp") == 0 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 44);
   }
 
+  // ------------------------------------------------------------------ [6] r4 Q1: the tick's QP path, counted per tick
+  // The stats tick's ceiling handling is ReconcileGovernorCeiling once per decision (the result feeds the
+  // log) -- there is no second setter call. These count the SetValue(maxQp) the fake receives per tick.
+  {
+    // Q1a: a refused ceiling -- exactly ONE write per tick, three ticks, then nothing (degraded).
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[6a] legacy first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    const uint32_t configured = H264Encoder::configured_max_qp();
+    for (int i = 0; i < 2; ++i) (void)gov.OnSecond(6'000'000 / 8 * 3, 6'000'000, 30);
+    check("[6a] the governor stepped to 35", gov.maxQp() == 35, s(gov.maxQp()));
+    rig.fake->rejectWith[CODECAPI_AVEncVideoMaxQP] = E_FAIL;
+    int total = 0, maxPerTick = 0;
+    for (int tick = 0; tick < 6; ++tick) {
+      rig.fake->clear_calls();
+      (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);  // the tick's one apply path
+      const int n = static_cast<int>(rig.fake->count_set("maxQp"));
+      total += n;
+      maxPerTick = std::max(maxPerTick, n);
+    }
+    check("[6a] r4 Q1a: a refused ceiling costs at most ONE SetValue per tick and three in total, then the instance is left alone",
+          maxPerTick == 1 && total == 3, "perTick=" + s(maxPerTick) + " total=" + s(total));
+    check("[6a] ...and the degraded state is visible", rig.encoder.governorQpApplyFailures == 3);
+  }
+  {
+    // Q1b: the MEAN is stuck (its readback never follows) while the ceiling is fine -- the ceiling's
+    // reconcile must judge its OWN field and issue nothing, not re-write the whole plan every tick.
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[6b] legacy first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    const uint32_t configured = H264Encoder::configured_max_qp();
+    (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    rig.fake->stuck[CODECAPI_AVEncCommonMeanBitRate] = 1;  // from now on the MFT reports a wrong mean
+    (void)rig.encoder.codec.reconfigure_bitrate(rig.encoder.EncoderBudgetFor(5'000'000, 30));  // a live change: mean now mismatched
+    check("[6b] the plan as a whole is not effective (mean mismatch)", !rig.encoder.codec.rc_plan_effective());
+    rig.fake->clear_calls();
+    for (int tick = 0; tick < 10; ++tick) (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[6b] r4 Q1b: ten ticks with a fine ceiling and a stuck mean: ZERO SetValue of any RC field (no whole-plan rewrite loop)",
+          rig.fake->count_set("maxQp") == 0 && rig.fake->count_set("mean") == 0 && rig.fake->count_set("mode") == 0,
+          "maxQp=" + s(rig.fake->count_set("maxQp")) + " mean=" + s(rig.fake->count_set("mean")));
+    check("[6b] ...and the ceiling is not counted as a failure", rig.encoder.governorQpApplyFailures == 0);
+  }
+  {
+    // Q1c: the failure budget is per (instance, desired): a new instance gets its own bounded attempts.
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[6c] legacy first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    const uint32_t configured = H264Encoder::configured_max_qp();
+    for (int i = 0; i < 2; ++i) (void)gov.OnSecond(6'000'000 / 8 * 3, 6'000'000, 30);  // 35
+    rig.fake->rejectWith[CODECAPI_AVEncVideoMaxQP] = E_FAIL;
+    for (int tick = 0; tick < 5; ++tick) (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[6c] three refusals on instance 1, then held", rig.encoder.governorQpApplyFailures == 3);
+    rig.fake->clear_calls();
+    (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[6c] ...same instance, same desired: no further attempt", rig.fake->count_set("maxQp") == 0);
+    // A geometry change builds a new instance (the seed carries the desired 35; the fake refuses it at
+    // init, so the new instance also runs without the ceiling) -- the runtime budget starts over.
+    check("[6c] a new instance", rig.apply(30, 6'000'000, 1280, 720) && rig.encoder.codec.instance_id() == 2);
+    rig.fake->clear_calls();
+    const auto r = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[6c] r4 Q1c: the NEW instance with the same desired gets a fresh bounded attempt (budget is per instance+desired)",
+          r.attempted && rig.fake->count_set("maxQp") == 1 && rig.encoder.governorQpApplyFailures == 1,
+          "attempted=" + s(r.attempted) + " failures=" + s(rig.encoder.governorQpApplyFailures));
+    rig.fake->rejectWith.clear();
+    (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[6c] ...and once the field is confirmed the failure state is cleared", rig.encoder.governorQpApplyFailures == 0 &&
+                                                                                      rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 35);
+  }
+
+  // ------------------------------------------------------------------ [7] r4 H1: the E-only sequence on the real scheduler
+  // What the Home bundle's E-only row must find on a static profile, pinned here on the real manager +
+  // scheduler + fake MFT with the interval shortened: adopt / cancel inside the interval / latest
+  // target wins / repeat is nothing. Timeline (interval I): A start; +>I B adopt(reinit); B->A defer;
+  // A->B cancel (desired == applied) before the deadline; wait; C adopt(reinit); D defer; E defer
+  // (replaces D); due -> E adopted once; E again -> nothing.
+  {
+    Rig rig(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    check("[7] A: first target", rig.apply(30, 6'000'000) && rig.encoder.codec.instance_id() == 1);
+    rig.waitInterval();
+    rig.clearKey();
+    check("[7] B after the interval: adopted at once (instance 2)", rig.apply(30, 5'000'000) && rig.encoder.codec.instance_id() == 2 && rig.keyRequested());
+    rig.clearKey();
+    check("[7] A inside the interval: deferred", rig.apply(30, 6'000'000) && rig.encoder.encoderRetarget.deferred && rig.encoder.codec.instance_id() == 2);
+    check("[7] B again before the deadline: the deferral is CANCELLED (desired == applied), nothing built, no key",
+          rig.apply(30, 5'000'000) && !rig.encoder.encoderRetarget.deferred && rig.encoder.codec.instance_id() == 2 && !rig.keyRequested());
+    rig.waitInterval();
+    check("[7] past the deadline a same-target call is nothing (the cancelled deferral never fires)",
+          rig.apply(30, 5'000'000) && rig.encoder.codec.instance_id() == 2 && !rig.keyRequested());
+    check("[7] C after the interval: adopted at once (instance 3)", rig.apply(30, 5'500'000) && rig.encoder.codec.instance_id() == 3);
+    rig.clearKey();
+    check("[7] D inside the interval: deferred", rig.apply(30, 5'200'000) && rig.encoder.encoderRetarget.deferred && rig.encoder.codec.instance_id() == 3);
+    check("[7] E inside the interval: still deferred, the latest target replaces D",
+          rig.apply(30, 5'400'000) && rig.encoder.encoderRetarget.deferred && rig.encoder.codec.instance_id() == 3 && rig.encoder.activeBitrate == 5'400'000);
+    rig.waitInterval();
+    const uint32_t eE = rig.encoder.EncoderBudgetFor(5'400'000, 30);
+    check("[7] due: E adopted ONCE (instance 4) with E(5.4M); D was never built",
+          rig.apply(30, 5'400'000) && rig.encoder.codec.instance_id() == 4 && rig.encoder.applied_encoder_bps() == eE && rig.keyRequested());
+    rig.clearKey();
+    check("[7] E repeated: nothing", rig.apply(30, 5'400'000) && rig.encoder.codec.instance_id() == 4 && !rig.keyRequested() && !rig.encoder.encoderRetarget.deferred);
+    check("[7] instances over the whole sequence: 4 (A, B, C, E) -- not 5, not 3", rig.encoder.codec.instance_id() == 4);
+  }
+
   MFShutdown();
   CoUninitialize();
   std::printf("\nhost_encoder_apply_target_test: %s (%d checks, %d failed)\n", g_failed == 0 ? "PASS" : "FAILED", g_checks, g_failed);
