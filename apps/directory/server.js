@@ -549,7 +549,15 @@ const relayLatestTokenByHost = new Map();
 // Punch carries no token (the client sends a bare packet), so the punch stage can only be gated
 // on "this address asked for a relay-eligible connect recently". Identity comes later, from the
 // token inside Hello.
-const relayEligibleByIp = new Map();
+//
+// Keyed by the client's WIRE address -- the source its OBSERVE actually arrived from -- and not by
+// the address we advertise for it. The two differ for a client on our own LAN: observedAddressFor
+// substitutes our public address so that remote peers get something dialable, but the punch and
+// Hello that client sends to the relay arrive from its wire address, and that is the only thing
+// the listener can look up. Keyed by the advertised address (2026-10-11, connects 94bc048e..),
+// a home viewer behind the same router as this server was eligible under 175.207.45.151 and
+// punched from 192.168.0.1, found nothing, and the relay never answered.
+const relayEligibleByWireIp = new Map();
 const relaySessions = new Set();         // authoritative; the maps below are only indexes into it
 const relaySessionByClient = new Map();  // "ip:port" of the phone  -> session
 const relaySessionByHost = new Map();    // "ip:port" of the host   -> session
@@ -1631,8 +1639,11 @@ function relaySweep() {
   for (const [token, rec] of relayAuthByToken) {
     if (now > rec.expiresAt) relayAuthByToken.delete(token);
   }
-  for (const [ip, rec] of relayEligibleByIp) {
-    if (now > rec.expiresAt) relayEligibleByIp.delete(ip);
+  for (const [ip, rec] of relayEligibleByWireIp) {
+    if (now > rec.expiresAt) relayEligibleByWireIp.delete(ip);
+  }
+  for (const [key, rec] of relayDiagBudgets) {
+    if (now - rec.since > 2 * RELAY_DIAG_WINDOW_MS) relayDiagBudgets.delete(key);
   }
   for (const session of [...relaySessions]) {
     // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
@@ -1681,23 +1692,77 @@ function relayScheduleReply(clientIp, clientPort, eligible) {
               `answering in ${RELAY_GRACE_MS}ms x${RELAY_PUNCH_REPLIES}`);
 }
 
+// Diagnostics for datagrams the relay refuses, bounded per (reason, source ip). The listener used
+// to drop an ineligible punch or a mismatched Hello without a word, which is how the wire/advertised
+// mix-up above stayed invisible: the log showed `eligible` and then nothing. One line per refusal
+// would be the opposite mistake -- a stranger's flood becomes our disk's problem -- so each key
+// gets a few lines per window and then one count when the window rolls.
+const RELAY_DIAG_WINDOW_MS = 10 * 1000;
+const RELAY_DIAG_LINES_PER_WINDOW = 3;
+const relayDiagBudgets = new Map();
+
+function relayDiag(key, line) {
+  const now = Date.now();
+  let b = relayDiagBudgets.get(key);
+  if (!b || now - b.since >= RELAY_DIAG_WINDOW_MS) {
+    if (b && b.suppressed > 0) {
+      console.log(`[relay] ${key} suppressed=${b.suppressed} inLastMs=${now - b.since}`);
+    }
+    b = { since: now, used: 0, suppressed: 0 };
+    relayDiagBudgets.set(key, b);
+  }
+  if (b.used >= RELAY_DIAG_LINES_PER_WINDOW) { b.suppressed++; return; }
+  b.used++;
+  console.log(line);
+}
+
 /**
  * A Hello with a valid capability is what actually creates a session.
  *
  * Punch cannot do this: it carries no token, and a company NAT puts every phone on one address,
  * so the source address alone identifies nothing. The token does -- it is 128 bits, minted for
  * this one connect, and the host holds its own copy.
+ *
+ * The source check compares against the WIRE address recorded when the capability was minted,
+ * for the same reason relayEligibleByWireIp is keyed that way: the advertised address is what
+ * other peers dial, the wire address is where this client's datagrams actually come from. A
+ * token presented from any other address is refused -- the comparison is exact, there is no
+ * second accepted alias, and the advertised address is never one.
  */
 function relayBindSession(rinfo, parsed) {
+  const src = `${rinfo.address}:${rinfo.port}`;
   const auth = relayAuthByToken.get(parsed.token);
-  if (!auth || Date.now() > auth.expiresAt) return null;
-  if (auth.clientIp !== rinfo.address) return null;
+  if (!auth || Date.now() > auth.expiresAt) {
+    // Unknown and expired look the same from here: expiry deletes the record on the next sweep,
+    // and either way nobody holding this token may open anything. The token itself is not printed.
+    relayDiag(`hello-rejected:unknown-token:${rinfo.address}`,
+              `[relay] hello rejected src=${src} reason=unknown-or-expired-token`);
+    return null;
+  }
+  if (auth.clientWireIp !== rinfo.address) {
+    relayDiag(`hello-rejected:wire-mismatch:${rinfo.address}`,
+              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=wire-mismatch ` +
+              `expectedWire=${auth.clientWireIp} advertised=${auth.clientAdvertisedIp}`);
+    return null;
+  }
   // Only the newest capability for a host may take it. Without this, a token that lost the host
   // could win it back the moment its owner retransmitted an old Hello.
-  if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) return null;
+  if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) {
+    relayDiag(`hello-rejected:superseded:${rinfo.address}`,
+              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=superseded-token`);
+    return null;
+  }
   const host = store.hosts[auth.hostId];
-  if (!host || !host.publicIp || !host.publicUdpPort) return null;
-  if (!accounts.hostIsActive(store, host)) return null;
+  if (!host || !host.publicIp || !host.publicUdpPort) {
+    relayDiag(`hello-rejected:no-host:${rinfo.address}`,
+              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-unknown`);
+    return null;
+  }
+  if (!accounts.hostIsActive(store, host)) {
+    relayDiag(`hello-rejected:inactive:${rinfo.address}`,
+              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-inactive`);
+    return null;
+  }
 
   // The newest connect wins. The alternative -- first session keeps the host -- reads as fair but
   // means a phone whose app was killed cannot come back: nobody is left to release the lease, and
@@ -1796,9 +1861,16 @@ function startRelayListener() {
         return;
       }
       if (parsed && parsed.kind === UDP_KIND_PUNCH) {
-        const eligible = relayEligibleByIp.get(rinfo.address);
+        // Looked up by the raw source address, which is the wire address by definition. The map
+        // is keyed by the wire address recorded at connect, so for a client on our own LAN both
+        // sides of this lookup are the LAN address, not the public one we advertise for it.
+        const eligible = relayEligibleByWireIp.get(rinfo.address);
         if (eligible && Date.now() <= eligible.expiresAt) {
           relayScheduleReply(rinfo.address, rinfo.port, eligible);
+        } else {
+          relayDiag(`punch-ignored:${rinfo.address}`,
+                    `[relay] punch ignored src=${rinfo.address}:${rinfo.port} ` +
+                    `reason=${eligible ? 'eligibility-expired' : 'not-eligible'}`);
         }
         return;
       }
@@ -1989,8 +2061,14 @@ async function handleConnect(req, res) {
   // the caller nothing but a retry.
   const observation = observationFor(body.observeToken);
   if (observation.state !== 'ok') return rejectWithoutObservation(res, observation);
+  // Two addresses, two jobs. `clientIp` is the ADVERTISED one: what the allowlist judges, what the
+  // host is told to punch toward, what a remote peer could dial. `clientWireIp` is where this
+  // client's datagrams actually arrive from, and it is the only address the relay listener can
+  // match a punch or a Hello against. They differ exactly when the client is on our own LAN (see
+  // observedAddressFor); for everyone else they are the same string.
   const clientIp = observation.obs.ip;
   const clientPort = observation.obs.port;
+  const clientWireIp = observation.obs.wireIp;
   if (!clientPort) return sendJson(res, 400, { error: 'client udp port unknown' });
 
   // One short id ties together the places this attempt shows up: here, the listener, the relay,
@@ -2008,6 +2086,16 @@ async function handleConnect(req, res) {
   console.log(`[capability] connect=${connectId} minted host=${host.hostId.slice(0, 8)} ` +
               `queued=${list.length} ttlMs=${PUNCH_TTL_MS}`);
   const relayEligible = relayEligibleFor(session.accountId, clientIp);
+  // Every observation this server records carries its wire tuple. One that does not is from a
+  // shape of record this code does not know, and a relay capability bound to a guessed address
+  // would be refused at the listener anyway -- the answer is a fresh observation, not a fallback
+  // to the advertised address (that fallback is the very bug this guards against). Refused
+  // before anything is written, same as a missing observation.
+  if (relayEligible && !clientWireIp) {
+    console.log(`[relay] connect refused reason=observation-without-wire ` +
+                `advertised=${clientIp}:${clientPort}`);
+    return sendJson(res, 409, { error: 'observation_required' });
+  }
 
   if (NAT_DIAG_ENABLED) {
     natDiagByIp.set(clientIp, { connectId, observedPort: clientPort, at: Date.now() });
@@ -2025,16 +2113,20 @@ async function handleConnect(req, res) {
     // The host's copy of this capability lives in `pendingPunch` and heartbeat deletes it on
     // read. This is a separate copy for the same token, so verifying a relayed Hello never costs
     // the host the authorisation it needs to accept that same Hello.
-    relayAuthByToken.set(punchToken, { hostId: host.hostId, clientIp, connectId, expiresAt });
+    //
+    // The Hello will be checked against `clientWireIp`; `clientAdvertisedIp` rides along for the
+    // refusal log only and is never compared against anything.
+    relayAuthByToken.set(punchToken, { hostId: host.hostId, clientWireIp, clientAdvertisedIp: clientIp,
+                                       connectId, expiresAt });
     // Newest wins, so the previous capability for this host stops being able to claim it. A phone
     // that was killed mid-session is the ordinary case, and its old token must not outrank the
     // one the user is holding now.
     const previous = relayLatestTokenByHost.get(host.hostId);
     if (previous && previous !== punchToken) relayAuthByToken.delete(previous);
     relayLatestTokenByHost.set(host.hostId, punchToken);
-    relayEligibleByIp.set(clientIp, { connectId, expiresAt, replied: new Set() });
+    relayEligibleByWireIp.set(clientWireIp, { connectId, expiresAt, replied: new Set() });
     console.log(`[relay] connect=${connectId} eligible client=${clientIp}:${clientPort} ` +
-                `host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
+                `wire=${clientWireIp} host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
   }
 
   // Every connect, not just the relayed ones. On the relay the host would otherwise never hear

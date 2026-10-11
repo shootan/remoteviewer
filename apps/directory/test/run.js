@@ -296,6 +296,19 @@ function cleanup() {
 
   await stopServer(server);
 
+  // The other direction: the VIEWER on the server's own LAN, going to a host that is not. Its own
+  // server (it reads the log), its own ports, and two mutants of server.js that each undo one
+  // half of the fix -- so that fixing punch without Hello, or Hello without punch, fails here.
+  console.log('\n--- relay wire address: lan viewer, remote host (fixed + 2 mutants) ---');
+  const wireFixed = await runTest(['relay_wire_test.js', 'fixed']);
+  const wirePunchOnly = await runTest(['relay_wire_test.js', 'punch-only']);
+  const wireHelloOnly = await runTest(['relay_wire_test.js', 'hello-only']);
+  if (wireFixed.code !== 0 || wirePunchOnly.code !== 0 || wireHelloOnly.code !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(1);
+  }
+
   // The connect diagnostics. This one starts and stops its own server on its own ports,
   // because it asserts on what the server prints and the ones above are spawned with stdout
   // discarded. Run last: it waits out a relay sweep, so it is the slow one.
