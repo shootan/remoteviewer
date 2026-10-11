@@ -66,6 +66,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { hostSendTargetFor } = require('./wake_target');
 const deviceCredentials = require('./device_credentials');
+const { createRelayDiag } = require('./relay_diag');
 const accounts = require('./accounts');
 const os = require('os');
 
@@ -1642,9 +1643,7 @@ function relaySweep() {
   for (const [ip, rec] of relayEligibleByWireIp) {
     if (now > rec.expiresAt) relayEligibleByWireIp.delete(ip);
   }
-  for (const [key, rec] of relayDiagBudgets) {
-    if (now - rec.since > 2 * RELAY_DIAG_WINDOW_MS) relayDiagBudgets.delete(key);
-  }
+  relayDiag.sweep();
   for (const session of [...relaySessions]) {
     // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
     // the close line rather than only in the post-mortem it produces.
@@ -1692,29 +1691,12 @@ function relayScheduleReply(clientIp, clientPort, eligible) {
               `answering in ${RELAY_GRACE_MS}ms x${RELAY_PUNCH_REPLIES}`);
 }
 
-// Diagnostics for datagrams the relay refuses, bounded per (reason, source ip). The listener used
-// to drop an ineligible punch or a mismatched Hello without a word, which is how the wire/advertised
-// mix-up above stayed invisible: the log showed `eligible` and then nothing. One line per refusal
-// would be the opposite mistake -- a stranger's flood becomes our disk's problem -- so each key
-// gets a few lines per window and then one count when the window rolls.
-const RELAY_DIAG_WINDOW_MS = 10 * 1000;
-const RELAY_DIAG_LINES_PER_WINDOW = 3;
-const relayDiagBudgets = new Map();
-
-function relayDiag(key, line) {
-  const now = Date.now();
-  let b = relayDiagBudgets.get(key);
-  if (!b || now - b.since >= RELAY_DIAG_WINDOW_MS) {
-    if (b && b.suppressed > 0) {
-      console.log(`[relay] ${key} suppressed=${b.suppressed} inLastMs=${now - b.since}`);
-    }
-    b = { since: now, used: 0, suppressed: 0 };
-    relayDiagBudgets.set(key, b);
-  }
-  if (b.used >= RELAY_DIAG_LINES_PER_WINDOW) { b.suppressed++; return; }
-  b.used++;
-  console.log(line);
-}
+// Diagnostics for datagrams the relay refuses: per (reason, source ip) lines, a hard cap on
+// tracked sources, and a global output budget -- see relay_diag.js for why all three. Nothing it
+// does changes what happens to the packet.
+const relayDiag = createRelayDiag({
+  windowMs: 10 * 1000, linesPerKey: 3, maxKeys: 256, linesPerWindow: 24,
+});
 
 /**
  * A Hello with a valid capability is what actually creates a session.
@@ -1735,32 +1717,32 @@ function relayBindSession(rinfo, parsed) {
   if (!auth || Date.now() > auth.expiresAt) {
     // Unknown and expired look the same from here: expiry deletes the record on the next sweep,
     // and either way nobody holding this token may open anything. The token itself is not printed.
-    relayDiag(`hello-rejected:unknown-token:${rinfo.address}`,
-              `[relay] hello rejected src=${src} reason=unknown-or-expired-token`);
+    relayDiag.note('hello-unknown-token', rinfo.address,
+                   `[relay] hello rejected src=${src} reason=unknown-or-expired-token`);
     return null;
   }
   if (auth.clientWireIp !== rinfo.address) {
-    relayDiag(`hello-rejected:wire-mismatch:${rinfo.address}`,
-              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=wire-mismatch ` +
-              `expectedWire=${auth.clientWireIp} advertised=${auth.clientAdvertisedIp}`);
+    relayDiag.note('hello-wire-mismatch', rinfo.address,
+                   `[relay] connect=${auth.connectId} hello rejected src=${src} reason=wire-mismatch ` +
+                   `expectedWire=${auth.clientWireIp} advertised=${auth.clientAdvertisedIp}`);
     return null;
   }
   // Only the newest capability for a host may take it. Without this, a token that lost the host
   // could win it back the moment its owner retransmitted an old Hello.
   if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) {
-    relayDiag(`hello-rejected:superseded:${rinfo.address}`,
-              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=superseded-token`);
+    relayDiag.note('hello-superseded', rinfo.address,
+                   `[relay] connect=${auth.connectId} hello rejected src=${src} reason=superseded-token`);
     return null;
   }
   const host = store.hosts[auth.hostId];
   if (!host || !host.publicIp || !host.publicUdpPort) {
-    relayDiag(`hello-rejected:no-host:${rinfo.address}`,
-              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-unknown`);
+    relayDiag.note('hello-host-unknown', rinfo.address,
+                   `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-unknown`);
     return null;
   }
   if (!accounts.hostIsActive(store, host)) {
-    relayDiag(`hello-rejected:inactive:${rinfo.address}`,
-              `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-inactive`);
+    relayDiag.note('hello-host-inactive', rinfo.address,
+                   `[relay] connect=${auth.connectId} hello rejected src=${src} reason=host-inactive`);
     return null;
   }
 
@@ -1868,9 +1850,9 @@ function startRelayListener() {
         if (eligible && Date.now() <= eligible.expiresAt) {
           relayScheduleReply(rinfo.address, rinfo.port, eligible);
         } else {
-          relayDiag(`punch-ignored:${rinfo.address}`,
-                    `[relay] punch ignored src=${rinfo.address}:${rinfo.port} ` +
-                    `reason=${eligible ? 'eligibility-expired' : 'not-eligible'}`);
+          relayDiag.note('punch-ignored', rinfo.address,
+                         `[relay] punch ignored src=${rinfo.address}:${rinfo.port} ` +
+                         `reason=${eligible ? 'eligibility-expired' : 'not-eligible'}`);
         }
         return;
       }
@@ -2070,6 +2052,18 @@ async function handleConnect(req, res) {
   const clientPort = observation.obs.port;
   const clientWireIp = observation.obs.wireIp;
   if (!clientPort) return sendJson(res, 400, { error: 'client udp port unknown' });
+  const relayEligible = relayEligibleFor(session.accountId, clientIp);
+  // Every observation this server records carries its wire tuple. One that does not is from a
+  // shape of record this code does not know, and a relay capability bound to a guessed address
+  // would be refused at the listener anyway -- the answer is a fresh observation, not a fallback
+  // to the advertised address (that fallback is the very bug this guards against). Refused here,
+  // before the capability is minted or queued for the host, so a 409 leaves nothing behind --
+  // same as a missing observation.
+  if (relayEligible && !clientWireIp) {
+    console.log(`[relay] connect refused reason=observation-without-wire ` +
+                `advertised=${clientIp}:${clientPort}`);
+    return sendJson(res, 409, { error: 'observation_required' });
+  }
 
   // One short id ties together the places this attempt shows up: here, the listener, the relay,
   // and the host log. Without it, concurrent attempts are indistinguishable.
@@ -2085,17 +2079,6 @@ async function handleConnect(req, res) {
   pendingPunch.set(host.hostId, list);
   console.log(`[capability] connect=${connectId} minted host=${host.hostId.slice(0, 8)} ` +
               `queued=${list.length} ttlMs=${PUNCH_TTL_MS}`);
-  const relayEligible = relayEligibleFor(session.accountId, clientIp);
-  // Every observation this server records carries its wire tuple. One that does not is from a
-  // shape of record this code does not know, and a relay capability bound to a guessed address
-  // would be refused at the listener anyway -- the answer is a fresh observation, not a fallback
-  // to the advertised address (that fallback is the very bug this guards against). Refused
-  // before anything is written, same as a missing observation.
-  if (relayEligible && !clientWireIp) {
-    console.log(`[relay] connect refused reason=observation-without-wire ` +
-                `advertised=${clientIp}:${clientPort}`);
-    return sendJson(res, 409, { error: 'observation_required' });
-  }
 
   if (NAT_DIAG_ENABLED) {
     natDiagByIp.set(clientIp, { connectId, observedPort: clientPort, at: Date.now() });

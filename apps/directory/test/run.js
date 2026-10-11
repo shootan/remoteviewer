@@ -299,11 +299,18 @@ function cleanup() {
   // The other direction: the VIEWER on the server's own LAN, going to a host that is not. Its own
   // server (it reads the log), its own ports, and two mutants of server.js that each undo one
   // half of the fix -- so that fixing punch without Hello, or Hello without punch, fails here.
-  console.log('\n--- relay wire address: lan viewer, remote host (fixed + 2 mutants) ---');
+  // First the refusal diagnostics' limits, serverless and with the clock in hand; then the socket
+  // runs. The fourth mode strips the wire address from OBSERVE records, the only way to reach
+  // that guard without a switch in the shipped server.
+  console.log('\n--- relay refusal diagnostics: limits ---');
+  const diagLimits = await runTest(['relay_diag_test.js']);
+  console.log('\n--- relay wire address: lan viewer, remote host (fixed + 3 mutants) ---');
   const wireFixed = await runTest(['relay_wire_test.js', 'fixed']);
   const wirePunchOnly = await runTest(['relay_wire_test.js', 'punch-only']);
   const wireHelloOnly = await runTest(['relay_wire_test.js', 'hello-only']);
-  if (wireFixed.code !== 0 || wirePunchOnly.code !== 0 || wireHelloOnly.code !== 0) {
+  const wireMissing = await runTest(['relay_wire_test.js', 'wire-missing']);
+  if (diagLimits.code !== 0 || wireFixed.code !== 0 || wirePunchOnly.code !== 0 ||
+      wireHelloOnly.code !== 0 || wireMissing.code !== 0) {
     cleanup();
     console.log('\nRESULT: FAILED');
     process.exit(1);
