@@ -53,6 +53,7 @@
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "host_e2e_marker_fixture.hpp"  // r8: shared Target/EventLog/decode_event_marker
+#include "host_encoder_budget.hpp"      // encoder-rc-budget r2: E(R, fps), the same function the host uses
 #include "session_video_pipeline.hpp"
 #include "viewer_constants.hpp"       // r7 V2: FrameGate env defaults
 #include "viewer_frame_gate.hpp"      // r7 V2: the real PC receive gate
@@ -123,6 +124,7 @@ struct HostAccount {
   uint32_t rcReconfigureWrites = 0, rcGovernorWrites = 0, rcInitWrites = 0;
   uint32_t governorQpSteps = 0, governorFpsSteps = 0, deferredRetargets = 0;
   std::vector<uint64_t> keyBytes;
+  std::vector<std::pair<uint64_t, uint64_t>> wireCapApplies;  // (bitrate, appliedQpcUs) of every same-clock apply marker
   // Isolation matrix (r2): max sender queue wait/depth from the host's own [wire] lines, and the
   // wire cap it logged at startup (wireCapBps=...), and how many capture frames the input gate skipped.
   uint64_t maxQueueWaitUs = 0, maxQueueDepth = 0, wireCapBps = 0, wireOverloadSkips = 0;
@@ -160,6 +162,7 @@ HostAccount read_host_log(const std::wstring& path) {
     if (line.find("wirecap applied ") != std::string::npos) {  // r5 G4 same-clock apply marker
       a.wireCapAppliedQpcUs = num_of(line, "appliedQpcUs");
       a.wireCapAppliedBitrate = num_of(line, "bitrate");
+      a.wireCapApplies.push_back({num_of(line, "bitrate"), num_of(line, "appliedQpcUs")});  // every one, in order (r2 V1)
     }
     // encoder-rc-budget C1-C4: the host's own account of R vs E, the plan per instance, and every
     // runtime rate-control write it made.
@@ -173,7 +176,7 @@ HostAccount read_host_log(const std::wstring& path) {
     }
     if (line.find(" h264 rc-identity instance=") != std::string::npos) ++a.rcInstances;
     if (line.find(" h264 rc-plan stage=pre-types") != std::string::npos) ++a.rcPlanPreTypes;
-    if (line.find(" h264 rc-plan stage=post-start") != std::string::npos) {
+    if (line.find(" h264 rc-plan stage=post-types") != std::string::npos) {
       ++a.rcPlanPostStart;
       a.rcPlanStates.push_back(value_of(line, "state"));
       a.rcPlanMeans.push_back(num_of(line, "mean"));
@@ -260,6 +263,18 @@ struct RunResult {
 // A scheduled runtime tune the harness's control thread sends at `atSec` (encoder-rc-budget C5:
 // down/up shifts and an fps transition in one run). bitrate 0 / fps 0 = that field not sent.
 struct TuneStep { uint32_t atSec = 0; uint32_t bitrate = 0; uint32_t fps = 0; };
+
+// The owed event ids (1..eventsOwed) that were never decoded. Ids are allocated in paint order, so the
+// events painted early enough to be owed are exactly 1..owed; a decoded id above owed is a late bonus
+// and never stands in for a missing one (r2, Codex V1).
+std::vector<uint32_t> missing_owed_ids(const RunResult& r) {
+  std::set<uint32_t> seen;
+  for (const auto& e : r.eventRecs) seen.insert(e.id);
+  std::vector<uint32_t> missing;
+  for (uint32_t id = 1; id <= r.eventsOwed; ++id)
+    if (!seen.count(id)) missing.push_back(id);
+  return missing;
+}
 
 // The quality sample for one decoded frame carrying event `id` (first decode of that id only).
 void note_psnr(RunResult& r, EventLog& events, uint32_t id, const DecodedFrameNv12& f) {
@@ -1303,11 +1318,20 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         // not be worse than the baseline beyond a tolerance; without a baseline the absolute ceiling holds.
         const RcRow* b = baselineHost.empty() ? nullptr : &rows[rows.size() - 2];
         if (cell.marker) {
-          const bool baseLostToo = b && b->evMatched < b->evExpected;
-          check(c.evExpected > 0 && (c.evMatched >= c.evExpected || (baseLostToo && c.evMatched >= b->evMatched)),
-                tag + ": candidate decoded every event it was owed (matched " + std::to_string(c.evMatched) + " owed " +
-                    std::to_string(c.evExpected) +
-                    (baseLostToo ? ", baseline " + std::to_string(b->evMatched) + "/" + std::to_string(b->evExpected) : "") + ")");
+          // r2 (Codex V1): the owed events are the IDs 1..owed (ids are allocated in paint order, and
+          // owed = those painted >= 1 s before the end); each one must have been decoded -- a count
+          // cannot hide a missing id behind a late extra one, and a loss on the baseline is reported
+          // beside the candidate, never used as the candidate's licence.
+          const std::vector<uint32_t> missing = missing_owed_ids(cand);
+          std::string missingStr;
+          for (uint32_t id : missing) missingStr += (missingStr.empty() ? "" : ",") + std::to_string(id);
+          check(cand.eventsOwed > 0 && missing.empty(),
+                tag + ": candidate decoded EVERY owed event id (owed 1.." + std::to_string(cand.eventsOwed) +
+                    (missing.empty() ? "" : ", missing " + missingStr) + ")");
+          if (b) {
+            const std::vector<uint32_t> baseMissing = missing_owed_ids(base);
+            if (!baseMissing.empty()) std::printf("       (baseline missed owed id(s) in this cell: %zu -- reported, not a licence)\n", baseMissing.size());
+          }
           const double stallBound = b ? std::max(2500.0, b->evMax * 1.25 + 250.0) : 2500.0;
           check(c.evMax <= stallBound, tag + ": candidate: no new multi-second stall on a change (max=" +
                                            std::to_string((int)c.evMax) + "ms bound=" + std::to_string((int)stallBound) + ")");
@@ -1364,24 +1388,35 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
     for (uint64_t m : r.host.rcPlanMeans) std::printf("%llu,", (unsigned long long)m);
     std::printf(" events=%u/%u decErr=%u\n", r.eventsMatched, r.eventsExpected, r.decodeErrors);
     check(r.tuneSentUs.size() == 3, "transitions: the three runtime tunes were sent");
-    // The wire from the downshift's apply instant to the upshift's send must respect 1.5M.
-    uint64_t downApplyUs = 0;
-    for (const auto& a : r.host.budgetActions) (void)a;
-    // Use the same-clock wirecap marker of the FIRST change (the downshift) -- it is the last one the host
-    // logged only if no upshift followed, so take the windows between the two tune sends instead.
-    std::vector<std::pair<uint64_t, uint32_t>> low;
-    if (r.tuneSentUs.size() == 3) {
-      for (const auto& e : r.wireEvents)
-        if (e.first >= r.tuneSentUs[0] + 400'000 && e.first < r.tuneSentUs[2]) low.push_back(e);
+    // r2 (Codex V1): the R judgement starts at the host's OWN same-clock apply marker for each change
+    // (`wirecap applied bitrate=... appliedQpcUs=...`), not at the tune's send time plus a guess. The
+    // first marker at 1.5M is the downshift's apply, the next marker at 6M the upshift's; every
+    // complete window from the down marker to the up marker must respect 1.5M, and from the up marker
+    // on, 6M. The request-to-apply latency of each is reported.
+    uint64_t downApplyUs = 0, upApplyUs = 0;
+    for (const auto& m : r.host.wireCapApplies) {
+      if (!downApplyUs && m.first == 1'500'000) downApplyUs = m.second;
+      else if (downApplyUs && !upApplyUs && m.first == 6'000'000 && m.second > downApplyUs) upApplyUs = m.second;
+    }
+    check(downApplyUs != 0 && upApplyUs != 0, "transitions: the host logged a same-clock wire-cap apply for the downshift AND the upshift",
+          "markers=" + std::to_string(r.host.wireCapApplies.size()));
+    if (r.tuneSentUs.size() == 3 && downApplyUs && upApplyUs)
+      std::printf("TRANSITION apply latency: down request->apply=%.0fms up request->apply=%.0fms\n",
+                  (static_cast<double>(downApplyUs) - static_cast<double>(r.tuneSentUs[0])) / 1000.0,
+                  (static_cast<double>(upApplyUs) - static_cast<double>(r.tuneSentUs[2])) / 1000.0);
+    std::vector<std::pair<uint64_t, uint32_t>> low, high;
+    for (const auto& e : r.wireEvents) {
+      if (downApplyUs && upApplyUs && e.first >= downApplyUs && e.first < upApplyUs) low.push_back(e);
+      if (upApplyUs && e.first >= upApplyUs) high.push_back(e);
     }
     const double low1s = window_peak_bps(low, 1'000'000);
+    const double low250 = window_peak_bps(low, 250'000);
     check(!low.empty() && low1s <= 1'500'000 * 1.10,
-          "transitions: after the downshift (from +400 ms) every 1 s window <= 1.5M +10% (" + std::to_string((int)low1s) + ")");
-    std::vector<std::pair<uint64_t, uint32_t>> high;
-    if (r.tuneSentUs.size() == 3)
-      for (const auto& e : r.wireEvents) if (e.first >= r.tuneSentUs[2] + 400'000) high.push_back(e);
+          "transitions: from the DOWN apply marker, every 1 s window <= 1.5M +10% (" + std::to_string((int)low1s) + ")");
+    check(!low.empty() && low250 <= 1'500'000 * 1.10,
+          "transitions: from the DOWN apply marker, every 250 ms window <= 1.5M +10% (" + std::to_string((int)low250) + ")");
     const double high1s = window_peak_bps(high, 1'000'000);
-    check(!high.empty() && high1s <= 6'000'000 * 1.10, "transitions: after the upshift every 1 s window <= 6M +10%");
+    check(!high.empty() && high1s <= 6'000'000 * 1.10, "transitions: from the UP apply marker, every 1 s window <= 6M +10%");
     check(r.host.effectiveWire == 6'000'000, "transitions: the wire cap ends at the upshift's R (6M)");
     check(r.host.desiredEncoder > 0 && r.host.desiredEncoder < 6'000'000 && r.host.appliedEncoder == r.host.desiredEncoder,
           "transitions: after the upshift the applied encoder E equals the desired E for 6M, below R");
@@ -1415,10 +1450,21 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
     std::printf(" E=%llu events=%u/%u decErr=%u\n", (unsigned long long)r.host.desiredEncoder, r.eventsMatched, r.eventsExpected,
                 r.decodeErrors);
     check(r.host.rcInstances == 2, "fps transition: the fps change built exactly one new instance (2 in the run)");
-    check(r.host.rcPlanPostStart == 2, "fps transition: every instance logged its plan readback (post-start)");
-    bool meansMatch = !r.host.rcPlanMeans.empty();
-    for (uint64_t m : r.host.rcPlanMeans) if (m != r.host.desiredEncoder) meansMatch = false;
-    check(meansMatch, "fps transition: every instance's plan mean is the host's E (desiredEncoder), not R");
+    check(r.host.rcPlanPostStart == 2, "fps transition: every instance logged its plan readback (post-types)");
+    // E depends on the frame rate (r2: the per-AU model), so the 30 fps instance and the 60 fps instance
+    // are OWED different means: each must equal E(R, its fps) from the same budget function the host
+    // uses, and neither may be R.
+    WireGeometry g;
+    g.mtuBytes = 1200;
+    g.chunkHeaderBytes = static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+    g.fecGroupSize = kUdpVideoFecGroupSize;
+    const uint32_t e30 = encoder_payload_budget_bps(3'000'000, g, EncoderBudgetPolicy{}, 30);
+    const uint32_t e60 = encoder_payload_budget_bps(3'000'000, g, EncoderBudgetPolicy{}, 60);
+    const bool meansMatch = r.host.rcPlanMeans.size() == 2 && r.host.rcPlanMeans[0] == e30 && r.host.rcPlanMeans[1] == e60 &&
+                            r.host.desiredEncoder == e60 && e30 < 3'000'000 && e60 < 3'000'000;
+    check(meansMatch, "fps transition: each instance's plan mean is E(R, its fps) -- " + std::to_string(e30) + " at 30, " +
+                          std::to_string(e60) + " at 60 -- not R",
+          r.host.rcPlanMeans.size() == 2 ? std::to_string(r.host.rcPlanMeans[0]) + "," + std::to_string(r.host.rcPlanMeans[1]) : "n/a");
     check(r.eventsOwed > 0 && r.eventsMatched >= r.eventsOwed, "fps transition: every owed event decoded (matched " +
                                                                    std::to_string(r.eventsMatched) + " owed " + std::to_string(r.eventsOwed) + ")");
     check(r.decodeErrors == 0, "fps transition: no decode error");
