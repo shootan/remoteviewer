@@ -77,6 +77,20 @@ bool get_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t* out) {
   return false;
 }
 
+// stutter-keyframe r2 (step 5): record whether a per-frame-type / key QP control is even SUPPORTED on
+// this MFT -- do NOT apply it. Codex contract 3: AVEncVideoEncodeFrameTypeQP is a fixed-QP contract,
+// and a global Min/MaxQP cannot be scoped to a single auto-emitted IDR of an async MFT, so a key-only
+// byte cap via QP is not reliable. r2 records support for the field decision rather than forcing
+// fixed-QP on the whole stream; the existing whole-stream maxQp ceiling (apply_rate_control) is
+// unchanged. This is the "record" path of the contract's "support only, else record".
+const char* codecapi_support_str(IMFTransform* transform, const GUID& key) {
+  if (!transform) return "noxform";
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return "noapi";
+  if (codecApi->IsSupported(&key) != S_OK) return "unsupported";
+  return (codecApi->IsModifiable(&key) == S_OK) ? "supported+modifiable" : "supported";
+}
+
 bool set_codecapi_bool(IMFTransform* transform, const GUID& key, bool value) {
   if (!transform) return false;
   Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
@@ -429,6 +443,44 @@ void codec_debug_log(const char* msg) {
   std::fflush(stderr);
 }
 
+// stutter-keyframe r1 (observe-1): the activated MFT's friendly name / CLSID / vendor are read today
+// only to substring-match a needle and then freed, so the NAS host.log never records WHICH encoder a
+// host actually used -- the GOP-clamp investigation could not name the company PC's MFT ("미확인"). Log
+// the identity of the transform we actually activate, unconditionally (same [native-video-host] stream
+// as the gop-config line), so a clamp can be tied to a concrete vendor/driver. A read failure prints
+// "?" rather than suppressing the line.
+std::string mft_attr_string(IMFActivate* act, const GUID& attr) {
+  if (!act) return "?";
+  WCHAR* w = nullptr;
+  UINT32 cch = 0;
+  std::string out = "?";
+  if (SUCCEEDED(act->GetAllocatedString(attr, &w, &cch)) && w) {
+    char buf[256] = {};
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr) > 1)
+      out = buf;
+  }
+  if (w) CoTaskMemFree(w);
+  return out;
+}
+
+// role is "encoder"/"decoder" so the field comparison does not mix the two MFTs a host activates
+// (an AMD encoder and the Microsoft decoder both log here). vendorId "?" is a legal absent optional
+// attribute -- not inferred. The name-match and CLSID-fallback selection paths are not on the live
+// h264 enum path (try_activate_first is), so their identity is not captured; that gap is noted at
+// those sites rather than guessed here.
+void log_mft_identity(IMFActivate* act, const char* role) {
+  if (!act) return;
+  const std::string friendly = mft_attr_string(act, MFT_FRIENDLY_NAME_Attribute);
+  const std::string vendor = mft_attr_string(act, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+  const std::string hwUrl = mft_attr_string(act, MFT_ENUM_HARDWARE_URL_Attribute);
+  std::string clsid = "?";
+  GUID g{};
+  if (SUCCEEDED(act->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g))) clsid = guid_to_string(g);
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=\"" << friendly << "\" clsid=" << clsid << " vendorId=" << vendor
+            << " hwUrl=\"" << hwUrl << "\"\n";
+}
+
 enum class MftBackendMode {
   Auto,
   HardwareOnly,
@@ -460,13 +512,15 @@ void release_activate_array(IMFActivate** activates, UINT32 count) {
   CoTaskMemFree(activates);
 }
 
-bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** outTransform) {
+bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** outTransform,
+                        const char* role = "?") {
   if (!activates || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
     if (!activates[i]) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // stutter-keyframe r1/r2: which MFT we took + its role
       *outTransform = candidate;
       return true;
     }
@@ -475,7 +529,7 @@ bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** ou
 }
 
 bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wchar_t* nameNeedle,
-                                IMFTransform** outTransform) {
+                                IMFTransform** outTransform, const char* role = "?") {
   if (!activates || !nameNeedle || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
@@ -492,6 +546,7 @@ bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wch
     if (!nameMatch) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
       *outTransform = candidate;
       return true;
     }
@@ -501,7 +556,7 @@ bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wch
 
 bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
                                  const wchar_t* const* nameNeedles, size_t needleCount,
-                                 IMFTransform** outTransform) {
+                                 IMFTransform** outTransform, const char* role = "?") {
   if (!activates || !nameNeedles || needleCount == 0 || !outTransform) return false;
   *outTransform = nullptr;
   for (UINT32 i = 0; i < count; ++i) {
@@ -527,6 +582,7 @@ bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
     if (!nameMatch) continue;
     IMFTransform* candidate = nullptr;
     if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
       *outTransform = candidate;
       return true;
     }
@@ -534,7 +590,8 @@ bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
   return false;
 }
 
-bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform) {
+bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform,
+                                  const char* role = "?") {
   if (!clsidString || !outTransform) return false;
   *outTransform = nullptr;
   CLSID clsid{};
@@ -542,6 +599,12 @@ bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** out
   IMFTransform* transform = nullptr;
   const HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform));
   if (FAILED(hr) || !transform) return false;
+  // r2 obs: a CoCreateInstance has no IMFActivate attributes (no friendly name/vendor), but the CLSID
+  // and role still pin which MFT the fallback took for the field comparison.
+  char buf[128] = {};
+  (void)WideCharToMultiByte(CP_UTF8, 0, clsidString, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=? clsid=" << buf << " vendorId=? hwUrl=? via=clsid-fallback\n";
   *outTransform = transform;
   return true;
 }
@@ -572,7 +635,10 @@ bool create_video_mft_from_enum(const GUID& category, const GUID& inSubtype, con
   if (FAILED(hr) || count == 0 || !activates) return false;
 
   IMFTransform* transform = nullptr;
-  const bool ok = try_activate_first(activates, count, &transform);
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
+  const bool ok = try_activate_first(activates, count, &transform, role);
   release_activate_array(activates, count);
   if (!ok || !transform) return false;
   *outTransform = transform;
@@ -598,8 +664,11 @@ bool create_video_mft_from_enum_matching_names(const GUID& category, const GUID&
   if (FAILED(hr) || count == 0 || !activates) return false;
 
   IMFTransform* transform = nullptr;
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
   const bool ok =
-      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform);
+      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform, role);
   release_activate_array(activates, count);
   if (!ok || !transform) return false;
   *outTransform = transform;
@@ -731,7 +800,7 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
       *outBackendName = "amf_mft_h264enc";
       return true;
     }
-    if (create_mft_from_clsid_string(L"{adc9bc80-0f41-46c6-ab75-d693d793597d}", &transform)) {
+    if (create_mft_from_clsid_string(L"{adc9bc80-0f41-46c6-ab75-d693d793597d}", &transform, "encoder")) {
       *outTransform = transform;
       *outUsingHardware = true;
       *outBackendName = "amf_mft_h264enc";
@@ -859,7 +928,7 @@ bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHa
       transform->Release();
       transform = nullptr;
     }
-    if (create_mft_from_clsid_string(L"{17796aeb-0f66-4663-b8fb-99cbee0224ce}", &transform)) {
+    if (create_mft_from_clsid_string(L"{17796aeb-0f66-4663-b8fb-99cbee0224ce}", &transform, "decoder")) {
       if (decoder_supports_h264_input(transform)) {
         *outTransform = transform;
         *outUsingHardware = true;
@@ -1162,8 +1231,28 @@ bool H264Encoder::set_d3d11_device(ID3D11Device* device) {
   return true;
 }
 
-bool H264Encoder::configure_types() {
+bool H264Encoder::configure_types(const char* stageReason) {
   if (!enc_) return false;
+
+  // stutter-keyframe r1 (step-4a observability, cadence-neutral): try the GOP size BEFORE the output
+  // media type is set and log the readback, so the field test can see whether the company PC's MFT
+  // honours a pre-type GOP (some MFTs only apply AVEncMPVGOPSize before SetOutputType). This does NOT
+  // change the key period -- it sets the same value the authoritative post-type set in
+  // apply_low_latency_codec_api applies afterwards; it only adds a comparison point. A readback that
+  // equals the request pre-type but gets clamped post-type (or vice versa) tells the ordering story.
+  {
+    const uint32_t preGop = std::max<uint32_t>(1, keyint_);
+    const HRESULT preSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, preGop);
+    uint32_t preReadback = 0;
+    const bool preGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &preReadback);
+    char preLine[224];
+    std::snprintf(preLine, sizeof(preLine),
+                  "[native-video-host] h264 gop-config stage=pre-type reason=%s backend=%s requestedGop=%u "
+                  "setHr=0x%08lX readbackOk=%d readbackGop=%u",
+                  stageReason ? stageReason : "init", backendName_, preGop,
+                  static_cast<unsigned long>(preSetHr), preGetOk ? 1 : 0, preReadback);
+    std::cout << preLine << "\n";
+  }
 
   auto make_output_h264_type = [&]() -> Microsoft::WRL::ComPtr<IMFMediaType> {
     Microsoft::WRL::ComPtr<IMFMediaType> outType;
@@ -1447,9 +1536,13 @@ void H264Encoder::apply_low_latency_codec_api() {
   const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
   uint32_t gopReadback = 0;
   const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
+  // r4 R5 R5-1 (Codex e1bc633): a clamp is a POSITIVE readback strictly below the request. A readback of
+  // 0 is "unknown" (the MFT did not report a GOP), NOT a clamp -- promoting 0 to a clamp would wrongly
+  // gate the burst on an encoder that never clamps. Require gopReadback > 0.
+  gopReadbackClamped_ = gopGetOk && gopReadback > 0 && gopReadback < requestedGop;  // r4 G3: MFT clamped
   char gopLine[192];
   std::snprintf(gopLine, sizeof(gopLine),
-                "[native-video-host] h264 gop-config backend=%s requestedGop=%u setHr=0x%08lX "
+                "[native-video-host] h264 gop-config stage=post-type backend=%s requestedGop=%u setHr=0x%08lX "
                 "readbackOk=%d readbackGop=%u",
                 backendName_, requestedGop, static_cast<unsigned long>(gopSetHr),
                 gopGetOk ? 1 : 0, gopReadback);
@@ -1459,6 +1552,12 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, qualityVsSpeed);
   std::cout << "[native-video-host] h264 encoder-hints lowLatency=" << (lowLatency ? 1 : 0)
             << " realTime=" << (realTime ? 1 : 0) << " qualityVsSpeed=" << qualityVsSpeed << "\n";
+  // stutter-keyframe r2 (step 5): record key-QP controllability for the field decision (not applied).
+  std::cout << "[native-video-host] h264 key-qp-probe frameTypeQP="
+            << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeFrameTypeQP)
+            << " encodeQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeQP)
+            << " minQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMinQP)
+            << " maxQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMaxQP) << "\n";
 }
 
 /**
@@ -1610,6 +1709,8 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
+  acceptedInputCounter_ = 0;  // r4 G: ordinals restart per codec instance (detector re-baselines too)
+  ++codecInstanceId_;         // r4 G1: a new codec instance -- the clamp detector resets on this change
   frameIndex_ = 0;
   sequenceHeaderAnnexb_.clear();
 
@@ -1830,7 +1931,16 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
 
   if (forceKeyFrame) {
-    (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+    // stutter-keyframe r1 (recovery-1): keep the setter HRESULT instead of discarding it. A rejected
+    // force means the MFT never armed the key for the next input, which the recovery timeline must be
+    // able to see; S_OK only means "armed", not "the IDR this call returns is that key" (async MFT
+    // output can still be an earlier input).
+    const HRESULT forceHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+    encodeStats->forceKeyRequested = 1;
+    encodeStats->forceKeySetHr = static_cast<int32_t>(forceHr);
+    if (FAILED(forceHr)) {
+      codec_debug_log("encode_sample_common: ForceKeyFrame SetValue REJECTED (key not armed)");
+    }
   }
 
   auto drain_outputs = [&]() -> bool {
@@ -1861,7 +1971,9 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
         if (odb.pEvents) odb.pEvents->Release();
         ++encodeStats->processOutputStreamChangeCount;
-        if (!configure_types()) return false;
+        // r2 F3: a mid-stream re-type, not the initial configure -- the pre-type GOP log says so, so a
+        // field reader does not mistake a renegotiation probe for the first init.
+        if (!configure_types("retype")) return false;
         continue;
       }
       if (FAILED(po)) {
@@ -1908,8 +2020,10 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         const bool sampleKey = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) &&
                                cleanPoint != 0;
         H264AccessUnit au{};
-        const bool maybeKey = sampleKey || annexb_contains_idr(bytes.data(), bytes.size());
+        const bool rawNal5 = annexb_contains_idr(bytes.data(), bytes.size());  // r4 G: a real IDR slice
+        const bool maybeKey = sampleKey || rawNal5;
         au.keyFrame = maybeKey;
+        au.rawIdr = rawNal5;
         int64_t outSampleTimeHns = 0;
         const bool hasOutputSampleTime =
             SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
@@ -1926,11 +2040,15 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
         // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
         uint64_t auEpoch = 0;
+        uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
+        bool auForcedKey = false;
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
           normalizedAuSampleTimeHns = provenance.tsHns;
           auSynthetic = provenance.synthetic;
           auEpoch = provenance.epoch;
+          auOrdinal = provenance.acceptedOrdinal;
+          auForcedKey = provenance.forcedKey;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -1945,6 +2063,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.sampleTimeFromOutput = sampleTimeFromOutput;
         au.synthetic = auSynthetic;
         au.inputEpoch = auEpoch;
+        au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
+        au.inputWasForcedKey = auForcedKey;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -1991,7 +2111,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     return finish_call(false);
   }
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
-  pendingInputs_.Push(PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_});
+  pendingInputs_.Push(
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.

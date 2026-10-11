@@ -41,6 +41,7 @@
 #include "capture_backend_dxgi.hpp"
 #include "d3d_capture_readback.hpp"
 #include "encode_resolution_ladder.hpp"
+#include "host_force_key_decision.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_abr.hpp"
 #include "host_args.hpp"
@@ -155,10 +156,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   uint16_t viewerKeyReason = 0;
   const uint32_t keyReasons = hx.mailbox.TakeKeyframeReasons(&viewerKeyReason);
   if (keyReasons != kKeyframeReasonNone) {
-    uint32_t hostReasons = kHostKeyReasonNone;
-    if ((keyReasons & kKeyframeReasonViewer) != 0) hostReasons |= kHostKeyReasonViewer;
-    if ((keyReasons & kKeyframeReasonSenderBarrier) != 0) hostReasons |= kHostKeyReasonSenderBarrier;
-    if ((keyReasons & kKeyframeReasonSenderBacklog) != 0) hostReasons |= kHostKeyReasonSenderBacklog;
+    const uint32_t hostReasons = map_keyframe_reasons_to_host(keyReasons);
     encoder.RequestKey(hostReasons);
     if ((keyReasons & kKeyframeReasonViewer) != 0) {
       std::cout << "[native-video-host][control] keyframe-request-consumed reason="

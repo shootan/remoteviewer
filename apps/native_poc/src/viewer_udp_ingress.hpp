@@ -14,10 +14,19 @@
 
 namespace remote60::native_poc::viewer {
 
-// Match the shared socket retry contract; an oversized UDP datagram is also nonterminal.
-inline bool udp_ingress_retryable_error(int error) {
-  return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK || error == WSAEINTR ||
-         error == WSAEMSGSIZE;
+// A transient SELECT error (udp-recv-exit r2 U2): only a timeout/would-block/interrupt -- select does not
+// deliver a datagram, so the recv-only truncation/reset advisories do NOT apply here. A genuinely bad
+// socket still falls through to terminal.
+inline bool udp_ingress_select_retryable(int error) {
+  return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK || error == WSAEINTR;
+}
+
+// A non-terminal UDP RECV error (udp-recv-exit r1/r2): the select set, plus the recv-datagram advisories
+// -- WSAEMSGSIZE (an oversized datagram was truncated, drop it) and WSAECONNRESET (a Windows ICMP Port
+// Unreachable for an earlier send -- advisory about ONE datagram). Matches the shared client's
+// classify_udp_recv reset policy so the two receive points agree. A bad/closed socket is still terminal.
+inline bool udp_ingress_recv_retryable(int error) {
+  return udp_ingress_select_retryable(error) || error == WSAEMSGSIZE || error == WSAECONNRESET;
 }
 
 // One socket owner. Control traffic is delivered immediately even while the video consumer is
@@ -71,16 +80,25 @@ class UdpIngress {
       FD_SET(socket_, &readSet);
       timeval timeout{0, 25000};
       const int ready = select(0, &readSet, nullptr, nullptr, &timeout);
+      // select's 25 ms is only the MAXIMUM wait: when the socket is idle it caps the loop to ~one
+      // iteration per 25 ms (the tick cadence); when datagrams (good or bad) are actually arriving it
+      // returns ready at once and the loop runs at the ARRIVAL rate, not faster. So a bad-datagram flood
+      // is bounded by how fast datagrams really arrive, and when the supply stops the loop falls back to
+      // the 25 ms wait -- no busy spin on no input. (udp-recv-exit r2/r3 U2.)
       if (ready == 0) continue;
       if (ready < 0) {
-        if (udp_ingress_retryable_error(WSAGetLastError())) continue;
+        if (udp_ingress_select_retryable(WSAGetLastError())) continue;  // r2 U2: select-only error set
         break;
       }
       Packet p;
       const int n = recv(socket_, reinterpret_cast<char*>(p.data.data()), static_cast<int>(p.data.size()), 0);
       if (n <= 0) {
-        const int error = WSAGetLastError();
-        if (n == 0 || udp_ingress_retryable_error(error)) continue;
+        const int error = WSAGetLastError();  // captured immediately after the SOCKET_ERROR
+        // n==0 is a legal empty datagram; the recv advisory set (incl. WSAECONNRESET) is non-terminal.
+        // A repeated immediate recv error is consumed one per iteration and re-tested by the next select:
+        // while such errors/datagrams keep arriving the loop follows their rate, and once they stop the
+        // select wait (<=25 ms) returns the loop to idle -- not a spin on no input.
+        if (n == 0 || udp_ingress_recv_retryable(error)) continue;
         break;
       }
       p.size = static_cast<size_t>(n);

@@ -218,4 +218,120 @@ inline bool last_socket_error_is_retryable() {
 #endif
 }
 
+// The socket error of the LAST socket call, captured now. Call it immediately after a SOCKET_ERROR so a
+// later call cannot overwrite it (udp-recv-exit r1 diagnostic contract).
+inline int socket_last_error() {
+#if defined(_WIN32)
+  return WSAGetLastError();
+#else
+  return errno;
+#endif
+}
+
+// How a UDP recv() result should be handled (udp-recv-exit r1). A UDP-ONLY policy: it does NOT change
+// last_socket_error_is_retryable() (used elsewhere) or recv_all()'s TCP semantics, where a 0 return is a
+// real EOF. For UDP a 0 return is a legal empty datagram and a single error indication (truncation, or a
+// Windows ICMP-driven reset) is about ONE datagram, not the whole session.
+enum class UdpRecvClass {
+  Datagram,       // n > 0: a datagram to validate/dispatch
+  Empty,          // n == 0: a legal empty UDP datagram -- discard and continue (NOT a TCP EOF)
+  Retryable,      // timeout / would-block / interrupted: the maintenance tick, then continue
+  TruncatedDrop,  // WSAEMSGSIZE: the datagram was larger than the buffer; discard the whole thing
+  ResetAdvisory,  // WSAECONNRESET (Windows UDP: an earlier send's ICMP Port Unreachable): advisory
+  Terminal        // anything else: keep the existing terminal path (bad/closed socket, ...)
+};
+
+// Classify a UDP recv() result. `nBytes` is recv's return; `err` is socket_last_error() captured
+// IMMEDIATELY after a SOCKET_ERROR (ignored when nBytes >= 0). The n==0 (empty datagram) and the
+// Retryable set are platform-neutral. The TruncatedDrop / ResetAdvisory handling is WINDOWS-ONLY: it is
+// WSAEMSGSIZE (Windows returns a recv error for a truncated datagram) and WSAECONNRESET (Windows reports
+// an earlier send's ICMP Port Unreachable on the next recv). On POSIX a truncation is a normal n>0 read
+// with MSG_TRUNC (not EMSGSIZE on recv), and an unreachable peer is reported as ECONNREFUSED, not
+// ECONNRESET -- so the Windows advisory is NOT ported to POSIX by name; POSIX keeps its existing terminal
+// policy for those (only n==0 and the Retryable set change there). WSA/errno are matched by symbol.
+inline UdpRecvClass classify_udp_recv(int nBytes, int err) {
+  if (nBytes > 0) return UdpRecvClass::Datagram;
+  if (nBytes == 0) return UdpRecvClass::Empty;
+#if defined(_WIN32)
+  // udp-recv-nonblock r1: the r10 "WSA_IO_PENDING(997) -> Retryable" line is WITHDRAWN. 997 is the
+  // explicit overlapped-WSARecv pending contract; a plain recv has no OVERLAPPED to reclaim that
+  // completion, so it cannot be classed a safe retry (late write / buffer reuse cannot be ruled out).
+  // The root fix is to stop issuing a blocking recv + SO_RCVTIMEO at all (nonblocking socket + bounded
+  // readiness wait -- see udp_receive_with_readiness); an abnormal 997 stays Terminal/diagnosable.
+  switch (err) {
+    case WSAEWOULDBLOCK:
+    case WSAETIMEDOUT:
+    case WSAEINTR:
+      return UdpRecvClass::Retryable;
+    case WSAEMSGSIZE:
+      return UdpRecvClass::TruncatedDrop;
+    case WSAECONNRESET:
+      return UdpRecvClass::ResetAdvisory;
+    default:
+      return UdpRecvClass::Terminal;
+  }
+#else
+  // POSIX: only n==0 (handled above) and the Retryable set are non-terminal. EMSGSIZE/ECONNRESET keep the
+  // existing terminal policy -- the Windows advisory is not assumed equivalent here (udp-recv-exit r2 U3).
+  switch (err) {
+    case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK:
+#endif
+    case ETIMEDOUT:
+    case EINTR:
+      return UdpRecvClass::Retryable;
+    default:
+      return UdpRecvClass::Terminal;
+  }
+#endif
+}
+
+// A non-terminal class is discarded/advisory and MUST NOT be counted as a healthy/ACK/peer-alive event;
+// it just lets the receive loop continue and keep its maintenance going.
+inline bool udp_recv_is_terminal(UdpRecvClass c) { return c == UdpRecvClass::Terminal; }
+
+// udp-recv-nonblock r1: put the shared client's UDP video socket into nonblocking mode (Windows) so its
+// receive wait is a bounded readiness wait, not a blocking recv + SO_RCVTIMEO (which was seen to return
+// WSA_IO_PENDING(997) and end the session). On POSIX the receive stays a blocking recv with the socket's
+// SO_RCVTIMEO -- unchanged by this fix -- so this is a no-op that reports success. Returns false only if
+// the Windows mode switch itself fails.
+inline bool set_udp_nonblocking(SocketHandle socketHandle) {
+#if defined(_WIN32)
+  u_long mode = 1;
+  return ioctlsocket(socketHandle, FIONBIO, &mode) == 0;
+#else
+  (void)socketHandle;
+  return true;
+#endif
+}
+
+// Receive one UDP datagram with a BOUNDED wait. Windows: a nonblocking socket + select readiness wait --
+// a readiness timeout returns -1/WSAEWOULDBLOCK (so the caller runs its maintenance tick and re-checks
+// Stop), a readable socket is drained with a nonblocking recv (a lost readiness race is the same
+// WSAEWOULDBLOCK). No blocking recv, so no SO_RCVTIMEO 997 path. POSIX: the existing blocking recv with
+// the socket's SO_RCVTIMEO (timeoutMs is unused there -- this fix does not change the POSIX path). `err`
+// is the error captured IMMEDIATELY after a SOCKET_ERROR; 0 when n >= 0.
+inline int udp_receive_with_readiness(SocketHandle socketHandle, char* buf, int len, uint32_t timeoutMs,
+                                      int& err) {
+  err = 0;
+#if defined(_WIN32)
+  fd_set readable;
+  FD_ZERO(&readable);
+  FD_SET(socketHandle, &readable);
+  timeval tv{static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+  const int ready = select(0, &readable, nullptr, nullptr, &tv);
+  if (ready == 0) { err = WSAEWOULDBLOCK; return -1; }          // readiness timeout -> maintenance tick
+  if (ready == SOCKET_ERROR) { err = WSAGetLastError(); return -1; }
+  const int n = recv(socketHandle, buf, len, 0);               // nonblocking: a race returns WSAEWOULDBLOCK
+  if (n < 0) err = WSAGetLastError();
+  return n;
+#else
+  (void)timeoutMs;
+  const int n = recv(socketHandle, buf, len, 0);               // blocking + SO_RCVTIMEO (unchanged)
+  if (n < 0) err = errno;
+  return n;
+#endif
+}
+
 }  // namespace remote60::native_poc

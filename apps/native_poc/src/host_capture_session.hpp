@@ -153,7 +153,9 @@ struct CaptureState {
   std::string targetTitle;
   std::atomic<uint64_t> selectedWindowId{0};
   std::atomic<uint32_t> selectedMonitorId{0};
-  std::wstring selectedMonitorDevice;  // main-loop owned stable device name, not an enum index
+  // The picked screen's stable device name, not an enum index. Written by the main loop under
+  // metaMu (monitor-select, the restart's fallback); the monitor-list reply reads it under metaMu.
+  std::wstring selectedMonitorDevice;
   // cross-thread: selection / capture-mode requests from the control thread, consumed by main.
   std::atomic<uint64_t> streamGenerationState{1};
   // Flush epoch (P11): bumped by EncoderState::ResetTimelineAnchors, i.e. on every capture flush,

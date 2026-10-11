@@ -81,6 +81,17 @@ int wmain(int argc, wchar_t** argv) {
   // And the product feature itself IS in the shipped host (the gate must not pass because the whole
   // feature was left out).
   check("the shipped host does carry the product's clip-image log tag", contains(shipped, "[native-video-host][clip-image]"));
+  // stutter-keyframe r4 B1: the clamp-burst-force test seam (REMOTE60_NATIVE_FORCE_CLAMP_BURST) exists
+  // only in the GNLinkStreamClampBurst test build, never in the shipped GNLinkStream.
+  {
+    const std::string clampSeam = "REMOTE60_NATIVE_FORCE_CLAMP_BURST";
+    const auto clampBuild = read_all(dir + L"\\GNLinkStreamClampBurst.exe");
+    check("positive control: the clamp-burst test build carries the seam (ASCII)", contains(clampBuild, clampSeam));
+    check("the shipped host does not carry the clamp-burst seam (ASCII)", !contains(shipped, clampSeam));
+    // the burst feature itself IS shipped (the gate must not pass by the whole feature being absent).
+    check("the shipped host does carry the product's clamp-burst log tag",
+          contains(shipped, "gop-clamp DETECTED via NAL cadence"));
+  }
   // The e2e station lock (e2e_station_lock.hpp) is test code: no product executable may carry it.
   {
     const std::string lockName = "GNLinkE2EClipboardStation";

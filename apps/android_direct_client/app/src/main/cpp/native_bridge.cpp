@@ -129,6 +129,8 @@ std::string window_panel_snapshot_json(const remote60::native_poc::WindowPanelSn
   }
   oss << "],";
   oss << "\"hostSupportsMonitors\":" << (snapshot.hostSupportsMonitors ? "true" : "false") << ",";
+  oss << "\"hostSupportsMonitorSelect\":" << (snapshot.hostSupportsMonitorSelect ? "true" : "false") << ",";
+  oss << "\"monitorListRevision\":" << snapshot.monitorListRevision << ",";
   oss << "\"selectedMonitorId\":" << snapshot.selectedMonitorId << ",";
   oss << "\"monitors\":[";
   for (size_t i = 0; i < snapshot.monitors.size(); ++i) {
@@ -345,6 +347,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeAbortVideoSwitch(
     JNIEnv* /* env */, jobject /* this */) {
   g_video_decoder_sink.AbortWindowSelection();
+  // The switch is abandoned: an IDR the decoder was still owed is not asked for (r4 M1-A).
+  g_session_controller.ClearPendingDecoderKeyframe();
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -382,6 +386,17 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectMonitor(
     JNIEnv* /* env */, jobject /* this */, jint monitor_id) {
   if (monitor_id < 0) return JNI_FALSE;
   return g_session_controller.RequestMonitorSelect(static_cast<uint32_t>(monitor_id))
+             ? JNI_TRUE : JNI_FALSE;
+}
+
+// t-970r4zgo r3: the same pick, with the monitorListRevision of the list it was made from, so a
+// list replaced in between is refused rather than its index read as another screen.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSelectMonitorAt(
+    JNIEnv* /* env */, jobject /* this */, jint monitor_id, jlong list_revision) {
+  if (monitor_id < 0 || list_revision < 0) return JNI_FALSE;
+  return g_session_controller.RequestMonitorSelect(static_cast<uint32_t>(monitor_id),
+                                                   static_cast<uint64_t>(list_revision))
              ? JNI_TRUE : JNI_FALSE;
 }
 

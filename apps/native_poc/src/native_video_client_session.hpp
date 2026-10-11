@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -50,6 +51,18 @@ class ClientEncodedFrameSink {
   // so one drop produces one request and the session's own rate limiter still applies.
   virtual bool ConsumeDecoderKeyframeRequest() { return false; }
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
+  // t-970r4zgo: the local selection a select request belongs to -- read when the request is
+  // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
+  virtual uint64_t CurrentSelectionTag() { return 0; }
+  // r4 M1-A / r5 N1: non-zero while a selection is still owed an IDR of its answered generation --
+  // until such an IDR is handed to the decoder. An opaque token: it changes when the duty is
+  // re-armed (the decoder became able again), and the session's bounded retries start over.
+  virtual uint64_t KeyframeOwedFor() { return 0; }
+  // The answer to a select request, with the tag that request was queued under. A sink that
+  // tracks selections applies it only to that selection; the default ignores the tag.
+  virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
+    OnWindowSelectionControlResult(msg);
+  }
 };
 
 enum class ClientSessionState : uint8_t {
@@ -112,11 +125,15 @@ class ClientSessionController {
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
   bool RequestMonitorList();
-  bool RequestMonitorSelect(uint32_t monitorId);
+  // listRevision: the WindowPanelSnapshot::monitorListRevision the index was read from (~0 = the
+  // current list). A pick made from a list that has since been replaced is refused at once.
+  bool RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision = ~0ULL);
   bool HostSecureDesktopActive() const {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
   bool RequestStreamActive(bool active);
+  // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
+  void ClearPendingDecoderKeyframe() { decoderRekeyPending_.store(false, std::memory_order_release); }
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
@@ -173,6 +190,23 @@ class ClientSessionController {
   /** Total UDP video bytes received this session, for the on-screen data meter. */
   uint64_t SessionBytesReceived() const;
 
+  // udp-recv-exit r1/r2 test seams. Precisely (r2 U wording): the hook MEMBER and the
+  // `if (udpRecvHookForTest_)` branch in VideoReceiveMain DO ship -- they are a null-default runtime
+  // check that is simply never true in production (no code path, env, message or user option sets the
+  // hook), so the shipped loop always calls the real recv; they are NOT claimed removed by /OPT:REF. The
+  // test-only METHODS below are unreferenced by the product and are what /OPT:REF can strip. They let a
+  // test drive the REAL VideoReceive loop with scripted recv results deterministically.
+  void SetUdpRecvHookForTest(std::function<int(uint8_t*, size_t, int&)> hook) { udpRecvHookForTest_ = std::move(hook); }
+  void RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink);
+  void RequestStopForTest() { stopRequested_.store(true, std::memory_order_release); }
+  // Enable the NACK/hold receive policy for a test so the loop's maintenance tick (NACK rounds, hold
+  // expiry, stuck-head give-up) is exercised while recv results are being discarded.
+  void SetHostSupportsNackForTest(bool v) { hostSupportsNack_.store(v, std::memory_order_release); }
+  // Enable the control-over-UDP branch, and reach the control channel, so a test can leave a control
+  // message outstanding and observe the loop's udpControl_.Tick() retransmit -> PeerLost during drops.
+  void SetControlOverUdpForTest(bool v) { controlOverUdp_.store(v, std::memory_order_release); }
+  UdpControlChannel& ControlChannelForTest() { return udpControl_; }
+
  private:
   ClientSessionController(const ClientSessionController&) = delete;
   ClientSessionController& operator=(const ClientSessionController&) = delete;
@@ -204,6 +238,7 @@ class ClientSessionController {
   ClientInputQueue inputQueue_;
   ClientControlScheduler controlScheduler_;
   ClientEncodedFrameSink* encodedFrameSink_ = nullptr;
+  std::function<int(uint8_t*, size_t, int&)> udpRecvHookForTest_;  // null in production -> real recv
   std::thread workerThread_;
   std::thread videoThread_;
   std::atomic<bool> stopRequested_{false};
@@ -252,6 +287,16 @@ class ClientSessionController {
   ClipboardClientPolicy clipPolicy_;
   std::atomic<bool> clipboardEnabled_{true};
   std::atomic<bool> hostSupportsClipboard_{false};
+  // r3 M1: an IDR the decoder asked for (its selection's IDR beat the answer, or a delta had to
+  // be dropped) that the keyframe limiter refused for now. Kept until the limiter takes it, and
+  // tried on every control-loop pass, so it does not wait for the next frame -- after a dropped
+  // lone IDR there may be none.
+  std::atomic<bool> decoderRekeyPending_{false};
+  // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
+  // Control-loop thread only.
+  uint64_t owedSelection_ = 0;
+  uint32_t owedAttempts_ = 0;
+  uint64_t owedNextUs_ = 0;
   std::atomic<bool> clipInitialPushWanted_{false};
 };
 

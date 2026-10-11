@@ -3,6 +3,7 @@
 
 #include "thumbnail_fetch_policy.hpp"
 
+#include "monitor_select_target.hpp"
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "udp_video_nack.hpp"
@@ -139,6 +140,9 @@ bool ClientSessionController::RequestWindowList() {
   }
 
   windowPanel_.RequestList("window_list_request pending");
+  // r3 M4: and the screens, where the host lists them -- the APK refreshes its targets through
+  // here (sheet, back to the list), and a screen that went while connected must leave the list.
+  if (windowPanel_.Snapshot().hostSupportsMonitors) windowPanel_.RequestMonitorList();
   {
     // A manual refresh should also refresh the previews.
     std::lock_guard<std::mutex> lk(thumbMu_);
@@ -162,14 +166,40 @@ bool ClientSessionController::RequestMonitorList() {
   return true;
 }
 
-bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId) {
+bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
-  // Refused when the host never advertised support, so the caller can say so rather than leave
-  // the user waiting on a request that will not be sent.
-  return windowPanel_.RequestMonitorSelect(monitorId);
+  // t-970r4zgo: through the window-select transaction, which the host answers only once the
+  // capture is on that screen, with the stream generation the selection gate waits for. A host
+  // that has not said it does this on THIS connection is refused here at once -- the legacy
+  // ControlMonitorSelect is answered with a list before anything is applied and carries no
+  // generation, which is why a selecting viewer waited 6 s and gave up. The caller can tell the
+  // user the host needs updating.
+  const auto panel = windowPanel_.Snapshot();
+  if (!panel.hostSupportsMonitors || !panel.hostSupportsMonitorSelect) {
+    windowPanel_.SetStatus("monitor_select_unsupported: host_update_required");
+    return false;
+  }
+  if (listRevision != ~0ULL && listRevision != panel.monitorListRevision) {
+    // r3 M4: the user picked from a list that has been replaced since; the index may now be
+    // another screen. Refused here so the caller can ask again from the list now shown.
+    windowPanel_.SetStatus("monitor_select_failed: monitor_list_changed");
+    return false;
+  }
+  decoderRekeyPending_.store(false, std::memory_order_release);  // a new pick: the old one's IDR is moot
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag,
+                                  panel.monitorListRevision)) {
+    return false;
+  }
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
 }
 
 bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
@@ -179,7 +209,11 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   }
 
   const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
-  if (!windowPanel_.RequestSelect(windowId, statusText)) {
+  // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
+  if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
     return false;
   }
 
@@ -454,6 +488,31 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         }
       }
     }
+    // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
+    // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
+    // answer and was dropped) is asked for again until it arrives -- a request taken here may still
+    // be refused by the host's limiter. Once per second at most, eight times, through the limiter.
+    {
+      const uint64_t owed = encodedFrameSink_ ? encodedFrameSink_->KeyframeOwedFor() : 0;
+      if (owed != owedSelection_) {
+        owedSelection_ = owed;
+        owedAttempts_ = 0;
+        owedNextUs_ = 0;
+      }
+      constexpr uint32_t kOwedKeyMaxAttempts = 8;
+      constexpr uint64_t kOwedKeyRetryUs = 1000000;
+      if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_ &&
+          keyframeRequests_.Request(2, loopNowUs).queued) {
+        ++owedAttempts_;
+        owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+        std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
+                     static_cast<unsigned long long>(owed), owedAttempts_);
+      }
+    }
+    if (decoderRekeyPending_.load(std::memory_order_acquire) && keyframeRequests_.Request(2, loopNowUs).queued) {
+      decoderRekeyPending_.store(false, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+    }
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
                                      &desktopBackend_)) {
@@ -512,6 +571,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
               std::memory_order_relaxed);
           // The window list is fetched on every connect, so it is where the host says whether it
           // knows the monitor messages at all. Asking one that does not would hang the loop.
+          windowPanel_.SetHostSupportsMonitorSelect(
+              (response.windowList.flags & kControlWindowListFlagMonitors) != 0 &&
+              (response.windowList.flags & kControlWindowListFlagMonitorSelectTransactionV1) != 0);
           if (windowPanel_.SetHostSupportsMonitors(
                   (response.windowList.flags & kControlWindowListFlagMonitors) != 0)) {
             windowPanel_.RequestMonitorList();
@@ -524,9 +586,32 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           break;
         }
         case TcpControlResponseKind::WindowSelected: {
-          windowPanel_.ApplyWindowSelected(response.windowSelected);
+          // t-970r4zgo: the answer is to THIS request (same seq, same target) or it opens nothing.
+          ControlWindowSelectedMessage answer = response.windowSelected;
+          if (answer.seq != action.windowSelect.seq || answer.windowId != action.windowSelect.windowId) {
+            answer.flags &= ~0x1u;
+            answer.streamGeneration = 0;
+          }
           if (encodedFrameSink_) {
-            encodedFrameSink_->OnWindowSelectionControlResult(response.windowSelected);
+            encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
+            // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
+            // dropped). Queued now, not at the next frame.
+            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest() &&
+                !keyframeRequests_.Request(2, now_us()).queued) {
+              decoderRekeyPending_.store(true, std::memory_order_release);
+              std::fprintf(stderr, "[native-video-client-session] keyframe request after the select answer held by the limiter\n");
+            }
+          }
+          // r3 M2 / r4 M2-A: and it is SHOWN only if it belongs to the selection now requested. The
+          // panel's status is what the APK moves its selection on (window_selected /
+          // window_select_failed); a late answer to an earlier pick -- success or failure -- must not
+          // move a later one. The panel compares and applies under the lock its RequestSelect takes,
+          // so a pick made while this answer was being handled cannot be overwritten.
+          if (!windowPanel_.ApplyWindowSelectedFor(answer, action.selectionTag).shown) {
+            std::fprintf(stderr,
+                         "[native-video-client-session] select answer seq=%u ok=%u for selection %llu: a later "
+                         "selection is requested, not shown\n",
+                         answer.seq, answer.flags & 0x1u, static_cast<unsigned long long>(action.selectionTag));
           }
           const auto panelSnapshot = windowPanel_.Snapshot();
           std::lock_guard<std::mutex> lock(mu_);
@@ -681,7 +766,8 @@ void ClientSessionController::VideoReceiveMain() {
     // The decoder may have had to discard what it was just handed. Ask for an IDR now
     // rather than letting every later delta decode against a reference that never arrived.
     if (currentSink->ConsumeDecoderKeyframeRequest()) {
-      (void)keyframeRequests_.Request(2, now_us());
+      // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
+      if (!keyframeRequests_.Request(2, now_us()).queued) decoderRekeyPending_.store(true, std::memory_order_release);
     }
   };
   callbacks.requestKeyframe = [&]() {
@@ -699,6 +785,20 @@ void ClientSessionController::VideoReceiveMain() {
   bool loggedPolicy = false;
   uint64_t nextSummaryAt = 1;
 
+  // udp-recv-exit r1: a single UDP recv result -- a legal empty datagram, a truncated oversize one, or a
+  // Windows ICMP-driven reset -- is about ONE datagram, not the session. Classify the result, discard /
+  // treat-as-advisory and keep the maintenance going; only a genuine terminal error ends the loop. These
+  // counters drive bounded diagnostics (first drop + on error-code change + a periodic aggregate) and the
+  // anti-spin gap. A discard is NOT a healthy/ACK/peer-alive event.
+  uint64_t recvEmpty = 0, recvTruncated = 0, recvReset = 0, recvRetry = 0;
+  bool loggedFirstDrop = false;
+  uint64_t lastDropLogUs = 0;
+  uint64_t lastDatagramUs = now_us();  // since the last POSITIVE-length recv (malformed or not -- a
+                                       // diagnostic of arrivals, NOT a peer-health/valid-receive marker)
+  uint64_t lastDropLoopUs = 0;
+  constexpr uint64_t kUdpDropSpinGapUs = 1000;      // bound EVERY drop-iteration to ~1 kHz (no CPU spin)
+  constexpr uint64_t kUdpDropLogGapUs = 1'000'000;  // bound drop diagnostics to ~1/s even as codes alternate
+
   while (!stopRequested_.load(std::memory_order_acquire)) {
     SocketHandle udpSocket = kInvalidSocket;
     ClientEncodedFrameSink* sink = nullptr;
@@ -710,29 +810,92 @@ void ClientSessionController::VideoReceiveMain() {
     if (udpSocket == kInvalidSocket || !sink) break;
     currentSink = sink;
     currentSocket = udpSocket;
+    // udp-recv-nonblock r1: the receive wait is a BOUNDED readiness wait on a NONBLOCKING socket (Windows)
+    // -- never a blocking recv + SO_RCVTIMEO (which returned WSA_IO_PENDING(997) and ended the session).
+    // The readiness timeout is the maintenance tick (the hold's 20ms, else 100ms). POSIX keeps blocking
+    // recv + SO_RCVTIMEO (unchanged), so it still needs the timeout set here.
+    const uint32_t recvTimeoutMs = pipeline.HoldEnabled() ? kVideoReceiveTimeoutHoldMs : kVideoReceiveTimeoutMs;
     if (!loggedPolicy) {
       loggedPolicy = true;
-      // The hold expires on the clock, so the receive timeout is its tick.
+      // Confirm the socket is nonblocking at worker start (Codex R1: after Hello, before the wait). On
+      // POSIX this is a no-op and the blocking recv keeps its SO_RCVTIMEO tick.
+      const bool nb = set_udp_nonblocking(udpSocket);
+#ifndef _WIN32
       if (pipeline.HoldEnabled()) (void)set_recv_timeout(udpSocket, kVideoReceiveTimeoutHoldMs);
-      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu\n",
-                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs));
+#endif
+      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu nonblocking=%d\n",
+                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs), nb ? 1 : 0);
     }
 
-    const int n = recv(udpSocket, reinterpret_cast<char*>(datagram.data()), static_cast<int>(datagram.size()), 0);
+    int recvErr = 0;
+    int n;
+    if (udpRecvHookForTest_) {
+      // Test seam: scripted recv result (n, err). Null in production.
+      n = udpRecvHookForTest_(datagram.data(), datagram.size(), recvErr);
+    } else {
+      // Bounded readiness wait + nonblocking recv; recvErr is captured immediately inside the helper.
+      n = udp_receive_with_readiness(udpSocket, reinterpret_cast<char*>(datagram.data()),
+                                     static_cast<int>(datagram.size()), recvTimeoutMs, recvErr);
+    }
     if (n <= 0) {
       if (stopRequested_.load(std::memory_order_acquire)) break;
-      if (last_socket_error_is_retryable()) {
-        // The read timeout is also the channel's heartbeat: without it a stalled control
-        // transfer would sit unrecovered on an otherwise silent link.
-        if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
-        // A quiet socket is exactly when a lost chunk goes unnoticed and a held AU's hold runs
-        // out: tick the pipeline (NACK rounds, hold expiry, stuck-head give-up).
-        pipeline.OnTick(now_us());
-        continue;
+      const UdpRecvClass cls = classify_udp_recv(n, recvErr);
+      const uint64_t sinceDatagramMs = (now_us() - lastDatagramUs) / 1000;
+      if (cls == UdpRecvClass::Terminal) {
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp video receive terminal sock=%llu n=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu sinceDatagramMs=%llu\n",
+                     static_cast<unsigned long long>(udpSocket), n, recvErr,
+                     static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>(sinceDatagramMs));
+        SignalRuntimeFailure("udp video receive failed");
+        break;
       }
-      SignalRuntimeFailure("udp video receive failed");
-      break;
+      // Non-terminal: a legal empty datagram, a truncated oversize one, an advisory reset, or a timeout.
+      // Discard the input (never hand a truncated prefix to the parser), keep the maintenance ticks going,
+      // but do NOT count any of this as a healthy receive. The read timeout is also the channel heartbeat;
+      // a quiet/dropping socket is exactly when a lost chunk or an expiring hold must still be serviced.
+      switch (cls) {
+        case UdpRecvClass::Empty: ++recvEmpty; break;
+        case UdpRecvClass::TruncatedDrop: ++recvTruncated; break;
+        case UdpRecvClass::ResetAdvisory: ++recvReset; break;
+        case UdpRecvClass::Retryable: ++recvRetry; break;
+        default: break;
+      }
+      // r2 U2: TIME-bounded diagnostics -- the first drop, then at most ~1/s even when the error code
+      // alternates (reset<->oversize). All counters are preserved and printed, so nothing is lost; the
+      // receive thread's stderr cannot flood and stall input/control. The socket handle disambiguates
+      // sessions during this intermittent-#2 hunt.
+      const uint64_t logNow = now_us();
+      if (!loggedFirstDrop || (logNow - lastDropLogUs) >= kUdpDropLogGapUs) {
+        loggedFirstDrop = true;
+        lastDropLogUs = logNow;
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp recv drop sock=%llu class=%d n=%d errValid=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu retry=%llu sinceDatagramMs=%llu stop=%d\n",
+                     static_cast<unsigned long long>(udpSocket), static_cast<int>(cls), n, (n < 0) ? 1 : 0,
+                     recvErr, static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>(recvRetry), static_cast<unsigned long long>(sinceDatagramMs),
+                     stopRequested_.load(std::memory_order_acquire) ? 1 : 0);
+      }
+      if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
+      pipeline.OnTick(now_us());
+      // r2 U2 anti-spin: do NOT assume a Retryable waited -- would-block/interrupted can return at once
+      // too. Bound EVERY drop iteration (empty/truncated/reset/retry alike) to ~1 kHz: if the previous
+      // drop iteration was less than the gap ago, sleep the remainder. A real blocking timeout naturally
+      // spans more than the gap, so it never sleeps; a flood of immediate returns cannot peg the CPU.
+      // stop is re-checked at the loop top, so this stays bounded against shutdown.
+      const uint64_t loopNow = now_us();
+      if (lastDropLoopUs != 0 && loopNow - lastDropLoopUs < kUdpDropSpinGapUs) {
+        std::this_thread::sleep_for(std::chrono::microseconds(kUdpDropSpinGapUs - (loopNow - lastDropLoopUs)));
+      }
+      lastDropLoopUs = now_us();
+      continue;
     }
+    lastDatagramUs = now_us();
+    lastDropLoopUs = 0;  // a real datagram breaks any immediate-drop streak
 
     if (controlOverUdp_.load(std::memory_order_acquire) &&
         udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
@@ -768,6 +931,16 @@ void ClientSessionController::VideoReceiveMain() {
                    static_cast<unsigned long long>(ps.discontinuities));
     }
   }
+}
+
+void ClientSessionController::RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    udpVideoSocket_ = udpSocket;
+    encodedFrameSink_ = sink;
+  }
+  stopRequested_.store(false, std::memory_order_release);
+  VideoReceiveMain();  // runs the REAL loop; the test's recv hook scripts the results and stops it
 }
 
 void ClientSessionController::StopWorker() {
@@ -929,7 +1102,17 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
   hostSupportsNack_.store(
       (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
 
+  // The hello handshake above ran in blocking mode. udp-recv-nonblock r1: now that Hello is done and
+  // BEFORE the receive worker starts, switch the UDP socket to nonblocking (Windows) so the worker uses a
+  // bounded readiness wait instead of a blocking recv + SO_RCVTIMEO (the WSA_IO_PENDING(997) session-end
+  // path). Confirm the switch -- a failure here means the receive model's premise does not hold. POSIX is
+  // a no-op (true) and keeps the SO_RCVTIMEO set above for its blocking recv.
   (void)set_recv_timeout(connected, kVideoReceiveTimeoutMs);
+  if (!set_udp_nonblocking(connected)) {
+    if (error) *error = "udp video socket could not be set nonblocking";
+    close_socket(&connected);
+    return false;
+  }
   if (stopRequested_.load(std::memory_order_acquire)) {
     close_socket(&connected);
     return false;
@@ -978,6 +1161,10 @@ void ClientSessionController::ResetUnlocked() {
   CloseSocketsUnlocked();
   snapshot_ = ClientSessionSnapshot{};
   windowPanel_.Reset();
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  owedSelection_ = 0;
+  owedAttempts_ = 0;
+  owedNextUs_ = 0;
   streamState_.Reset();
   captureMode_.Reset();
   keyframeRequests_.Reset();

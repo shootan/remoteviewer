@@ -171,6 +171,13 @@ constexpr uint32_t kControlWindowListFlagThumbnails = 0x2u;
 // opcode is drained without a reply, which would hang a client waiting for one. The window list
 // is fetched on every connect, so it is where support gets advertised.
 constexpr uint32_t kControlWindowListFlagMonitors = 0x4u;
+// t-970r4zgo: this host selects a monitor through the window-select transaction -- a
+// ControlWindowSelect whose windowId is a monitor-select target (monitor_select_target.hpp),
+// answered with ControlWindowSelected only once the capture is restarted on that screen (bit0 ok
+// + the new streamGeneration) or with the reason it was not. The legacy ControlMonitorSelect ->
+// ControlMonitorList exchange is unchanged. A client uses the new form only on a connection
+// whose window list carried this bit.
+constexpr uint32_t kControlWindowListFlagMonitorSelectTransactionV1 = 0x8u;
 // Two or three screens is the normal case and a dozen is somebody's video wall; the cap only
 // bounds the message.
 constexpr uint32_t kControlMonitorListMaxEntries = 8;

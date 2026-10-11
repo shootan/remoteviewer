@@ -45,6 +45,9 @@
 #include "host_file_copy.hpp"
 #include "file_copy_wire.hpp"
 #include "host_window_enum.hpp"
+#include "host_monitor_selection.hpp"
+#include "monitor_select_target.hpp"
+#include "stream_test_hold.hpp"
 #include "poc_protocol.hpp"
 #include "peer_version.hpp"
 #include "time_utils.hpp"
@@ -122,6 +125,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
     // Says the monitor messages exist here. A client that asked an older host would wait for a
     // reply that never comes, since unknown opcodes are drained silently.
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitors;
+    // And that a monitor can be selected through the window-select transaction (applied, then
+    // acknowledged with the new stream generation). Clients without it keep ControlMonitorSelect.
+    rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1;
     rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
     const auto windows = enumerate_shareable_windows();
     rsp.itemCount = std::min<uint32_t>(
@@ -135,6 +141,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
               << "\n";
     return link.Write(&rsp, sizeof(rsp));
   };
+  // The screens, by device name, in the order of the last monitor list THIS connection was sent:
+  // a monitor-select target names an index into the list the client saw, so it is resolved here
+  // and not against whatever is enumerated when the request arrives (a screen added or removed
+  // in between would otherwise turn "monitor 1" into another physical screen).
+  std::vector<std::wstring> monitorListSent;
   auto send_monitor_list = [&](uint32_t seq) -> bool {
     ControlMonitorListMessage rsp{};
     rsp.header.magic = remote60::native_poc::kMagic;
@@ -143,6 +154,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.seq = seq;
     rsp.selectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
     const auto monitors = enumerate_monitors();
+    // t-970r4zgo: the selection named against THIS list, by the rule the capture restart opens
+    // the screen with -- a picked screen that is gone is reported as the one shown instead
+    // (the primary), not as a stale index that may now be out of range or another screen.
+    std::wstring selectedDevice;
+    {
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      selectedDevice = capture.selectedMonitorDevice;
+    }
+    const SelectedMonitorChoice choice = choose_selected_monitor(monitors, selectedDevice);
+    if (choice.outcome == SelectedMonitorOutcome::Found || choice.outcome == SelectedMonitorOutcome::FellBack) {
+      rsp.selectedMonitorId = static_cast<uint32_t>(choice.index);
+    }
     rsp.itemCount = std::min<uint32_t>(static_cast<uint32_t>(monitors.size()),
                                        remote60::native_poc::kControlMonitorListMaxEntries);
     for (uint32_t i = 0; i < rsp.itemCount; ++i) {
@@ -156,6 +179,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (src.primary) dst.flags |= remote60::native_poc::kControlMonitorFlagPrimary;
       remote60::native_poc::utf8_copy_bounded(dst.name, sizeof(dst.name), src.name);
     }
+    monitorListSent.clear();
+    for (uint32_t i = 0; i < rsp.itemCount; ++i) monitorListSent.push_back(monitors[i].device);
     std::cout << "[native-video-host][control] monitor-list seq=" << seq
               << " count=" << rsp.itemCount << " selectedId=" << rsp.selectedMonitorId << "\n";
     return link.Write(&rsp, sizeof(rsp));
@@ -965,6 +990,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
       rsp.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
       rsp.hostSendQpcUs = qpc_now_us();
 
+      // t-970r4zgo: a monitor-select target is classified before anything treats the id as an
+      // HWND. Malformed ids in its namespace are refused here, and a monitor id is resolved to
+      // the screen THIS connection was listed under that id -- not one listed or re-indexed since.
+      const SelectRequestResolution resolved = resolve_select_request(req.windowId, monitorListSent);
+      const std::wstring& monitorDevice = resolved.device;
+      const char* refused = resolved.refused;
+
       if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
         rsp.flags |= 0x2u;
         remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
@@ -972,9 +1004,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
         if (req.windowId == 0) {
           remote60::native_poc::utf8_copy_bounded(rsp.title, sizeof(rsp.title), "desktop");
         }
+      } else if (refused) {
+        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason), refused);
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " applied=0 reason=" << refused << "\n";
       } else {
+        uint64_t myTxn = 0;
         {
           std::lock_guard<std::mutex> lk(windowSelectionTxn.mu);
+          myTxn = ++windowSelectionTxn.nextTxnId;
+          windowSelectionTxn.txnId = myTxn;
+          windowSelectionTxn.ownerEpoch = servedEpoch;
+          windowSelectionTxn.requestedMonitorDevice = monitorDevice;
           windowSelectionTxn.pending = true;
           windowSelectionTxn.completed = false;
           windowSelectionTxn.reqSeq = req.seq;
@@ -986,6 +1027,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
           windowSelectionTxn.responseTitle.clear();
         }
         windowSelectionTxn.cv.notify_all();
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " pending\n";
 
         std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
         // Also give up when the link dies. The client that asked for this selection may be the
@@ -993,16 +1036,33 @@ void ControlSessionServer::Serve(ControlLink& link) {
         // so waiting only for completion would hold the whole session handover behind a reply
         // nobody is left to read. Polled, because a rollover closes the channel rather than
         // touching this transaction.
-        while (!stop.load() && !windowSelectionTxn.completed && link.Alive()) {
+        const auto mine = [&] { return windowSelectionTxn.completed && windowSelectionTxn.completedTxnId == myTxn; };
+        while (!stop.load() && !mine() && link.Alive()) {
           windowSelectionTxn.cv.wait_for(lk, std::chrono::milliseconds(100));
         }
-        rsp.flags = windowSelectionTxn.responseFlags;
-        rsp.windowId = windowSelectionTxn.responseWindowId;
-        rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
+        if (mine()) {
+          rsp.flags = windowSelectionTxn.responseFlags;
+          rsp.windowId = windowSelectionTxn.responseWindowId;
+          rsp.streamGeneration = windowSelectionTxn.responseStreamGeneration;
+          remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
+                                                  windowSelectionTxn.responseReason);
+          remote60::native_poc::fill_window_title(rsp.title, windowSelectionTxn.responseTitle);
+        } else {
+          // Not this request's result (stopped, the link died, or another request took over):
+          // nothing is claimed, and the shared fields are left to whoever they belong to.
+          // r3 M5: and a request of ours the main loop has not taken yet is withdrawn, so it is
+          // never applied to whichever session comes next.
+          if (windowSelectionTxn.pending && windowSelectionTxn.txnId == myTxn) {
+            windowSelectionTxn.pending = false;
+            std::cout << "[native-video-host][control] window-select seq=" << req.seq
+                      << " withdrawn (asker gone before it was applied)\n";
+          }
+          rsp.flags = 0;
+          rsp.windowId = req.windowId;
+          rsp.streamGeneration = 0;
+          remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason), "not_completed");
+        }
         rsp.hostSendQpcUs = qpc_now_us();
-        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
-                                                windowSelectionTxn.responseReason);
-        remote60::native_poc::fill_window_title(rsp.title, windowSelectionTxn.responseTitle);
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;
@@ -1115,7 +1175,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // reconnect, so doing this open-coded here was a data race on the throttle that decides how
       // often the stream is forced to an IDR. (Ledger H-04.)
       double keyReqTokensNow = 0.0;
-      if (encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
+      bool refusedByTest = false;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY: while the hold file "refuse_keys" exists, every request takes the
+      // limiter's refusal branch below (the e2e of a refused IDR request, t-970r4zgo r4).
+      refusedByTest = stream_test_hold_set("refuse_keys");
+      if (refusedByTest) {
+        std::cout << "[stream-test-seam] keyframe-request refused seq=" << req.seq << "\n";
+      }
+#endif
+      if (!refusedByTest && encoder.TryTakeKeyRequestToken(nowUs, &keyReqTokensNow)) {
         mailbox.PostRequestKeyframe(kKeyframeReasonViewer, req.reason);
         const uint64_t reqCount = clientMetrics.keyFrameRequestCount.fetch_add(1) + 1;
         std::cout << "[native-video-host][control] keyframe-request seq=" << req.seq

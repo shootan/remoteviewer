@@ -51,6 +51,9 @@ struct MonitorListEntry {
   uint32_t height = 0;
   bool primary = false;
   std::string name;
+  // szDevice ("\\.\DISPLAY1"): what a picked screen is remembered by, since the index above
+  // moves when a display is added or removed (host_monitor_selection.hpp).
+  std::wstring device;
 };
 
 std::string get_window_process_name(HWND hwnd, uint32_t* outPid);

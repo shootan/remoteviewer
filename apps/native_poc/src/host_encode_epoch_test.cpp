@@ -829,6 +829,24 @@ void test_hold_observed_with_and_without_kick() {
 
 }  // namespace
 
+// r3 S2: the forced-key rejection back-off/streak must be cleared at a real codec/input-epoch
+// boundary (ResetTimelineAnchors), so a stale back-off from an old epoch cannot suppress the new
+// epoch's force -- but a plain viewer re-request (RequestKey) must NOT clear it (that would let an
+// ordinary request bypass the back-off of a still-rejecting same-epoch encoder).
+void test_clamp_backoff_cleared_on_epoch_boundary() {
+  std::printf("[S2] rejection back-off clears at the epoch boundary, not on a re-request\n");
+  CaptureState capture;
+  EncoderState enc;
+  enc.forceKeyRetryAtUs = 999999;  // an old-epoch rejection back-off is pending
+  enc.forceKeyRejectStreak = 7;
+  // A plain viewer re-request does NOT clear the back-off (same-epoch rejection stays throttled).
+  enc.RequestKey(kHostKeyReasonViewer);
+  CHECK(enc.forceKeyRetryAtUs == 999999 && enc.forceKeyRejectStreak == 7);
+  // The epoch/codec boundary DOES clear it, so the new epoch's force is not suppressed by old state.
+  enc.ResetTimelineAnchors(capture);
+  CHECK(enc.forceKeyRetryAtUs == 0 && enc.forceKeyRejectStreak == 0);
+}
+
 int main() {
   (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(MFStartup(MF_VERSION))) {
@@ -849,6 +867,7 @@ int main() {
   test_gate_rules_on_fabricated_aus();
   test_provenance_fifo_latch_and_gate();
   test_provenance_survives_failed_encode_calls();
+  test_clamp_backoff_cleared_on_epoch_boundary();
   test_hold_observed_with_and_without_kick();
   MFShutdown();
   CoUninitialize();

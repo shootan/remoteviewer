@@ -173,9 +173,29 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the stutter-keyframe B1 clamp-fake measurement (r4): the same sources as
+# GNLinkStream, with REMOTE60_CLAMP_BURST_TEST_SEAM defined so REMOTE60_NATIVE_FORCE_CLAMP_BURST forces
+# burst eligibility on this PC's non-clamping MFT. Its own output name, never packaged;
+# clip_image_build_gate_test checks the shipped GNLinkStream.exe carries none of it.
+get_target_property(_clampburst_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_clampburst_seam ${_clampburst_host_sources})
+set_target_properties(remote60_native_video_host_clampburst_seam PROPERTIES
+  OUTPUT_NAME "GNLinkStreamClampBurst")
+target_include_directories(remote60_native_video_host_clampburst_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_clampburst_seam PRIVATE
+  REMOTE60_CLAMP_BURST_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_clampburst_seam PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 add_executable(remote60_clip_image_build_gate_test src/clip_image_build_gate_test.cpp)
 add_dependencies(remote60_clip_image_build_gate_test remote60_native_video_host_poc remote60_native_video_host_clipsink
-                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test)
+                 remote60_native_video_client_poc remote60_file_copy_helper remote60_file_copy_net_e2e_test
+                 remote60_native_video_host_clampburst_seam)
 
 add_executable(remote60_gdi_capture_worker
   src/gdi_capture_worker_main.cpp
@@ -633,6 +653,26 @@ if(MSVC)
   )
 endif()
 
+# hostapp-log-upload r2 (V1): the real supervisor exit-observation -> enqueue -> uploader -> server
+# chain. Same seam as the UI test (product host_app_main.cpp compiled in, entry renamed,
+# REMOTE60_HOST_TEST_SEAM on, streaming child replaced by this exe), but a CONSOLE test that drives
+# StreamingHostProcess directly and asserts on a fake log server -- no window, no UI Automation.
+add_executable(remote60_host_exit_upload_test
+  src/host_exit_upload_test.cpp
+  ${_host_ui_test_sources}
+)
+target_compile_definitions(remote60_host_exit_upload_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_exit_upload_test PRIVATE /utf-8)
+target_include_directories(remote60_host_exit_upload_test PRIVATE src)
+target_link_libraries(remote60_host_exit_upload_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+  remote60_test_scratch_dir  # repo-internal scratch + boundary-checked cleanup (R3), never %TEMP%
+)
+
 # One file the user can carry to another machine. It embeds the four product executables and
 # installs them under %ProgramFiles%\GNLink, which is the only place the LocalSystem input
 # service can live without handing SYSTEM to anyone who can write the install folder.
@@ -765,6 +805,45 @@ target_link_libraries(remote60_udp_control_e2e_test PRIVATE
   ws2_32
 )
 
+# t-970r4zgo: which screen a desktop capture opens once the picked one may be gone. Pure logic.
+add_executable(remote60_host_monitor_selection_test src/host_monitor_selection_test.cpp)
+target_include_directories(remote60_host_monitor_selection_test PRIVATE src)
+
+# t-970r4zgo (2): the monitor-select target id, the APK selection gate and the panel answer. Pure.
+add_executable(remote60_monitor_select_wire_test src/monitor_select_wire_test.cpp src/native_video_client_shared_core.cpp)
+target_include_directories(remote60_monitor_select_wire_test PRIVATE src)
+target_link_libraries(remote60_monitor_select_wire_test PRIVATE common ws2_32)
+
+# t-970r4zgo r5 N1: the APK's decoder sink -- android_video_decoder.cpp itself, unchanged -- built
+# against a stand-in NDK (src/test_fake_ndk, test only) to check when an owed IDR counts as paid.
+add_executable(remote60_android_decoder_owed_key_test
+  src/android_decoder_owed_key_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
+  # A directory, not a source: written with the source-dir prefix, which cmake_sources_exist_test skips
+  # (it checks bare src/... entries as FILES). The fake NDK's files are listed above and stay checked.
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
+
+# t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
+# reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
+# the primary, the retry does not run forever, a transient empty enumeration keeps the retry.
+add_executable(remote60_host_monitor_fallback_e2e_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/host_monitor_fallback_e2e_test.cpp
+)
+target_include_directories(remote60_host_monitor_fallback_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_monitor_fallback_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir)
+add_dependencies(remote60_host_monitor_fallback_e2e_test remote60_native_video_host_migration_seam)
+
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
 add_executable(remote60_capture_readback_test
   src/d3d_capture_readback.cpp
@@ -795,6 +874,25 @@ target_link_libraries(remote60_mf_h264_codec_test PRIVATE
   wmcodecdspuuid
   ole32
 )
+
+# stutter-keyframe r2 (step 2): the real host keyframe-recovery roundtrip at a long GOP -- real
+# mailbox + shared decide_force_key + real MFT encode/decode. Same MF links as the codec test.
+add_executable(remote60_host_recovery_roundtrip_test
+  src/mf_h264_codec.cpp
+  src/host_recovery_roundtrip_test.cpp
+)
+target_include_directories(remote60_host_recovery_roundtrip_test PRIVATE src)
+target_link_libraries(remote60_host_recovery_roundtrip_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
+if(MSVC)
+  target_compile_options(remote60_host_recovery_roundtrip_test PRIVATE /utf-8)
+endif()
 
 add_executable(remote60_video_playout_clock_test
   src/video_playout_clock_test.cpp
@@ -2910,6 +3008,70 @@ if(MSVC)
   target_compile_options(remote60_host_wire_limiter_test PRIVATE /utf-8)
 endif()
 
+# stutter-keyframe r2 (step 4b): the pure periodic-key period policy. No MFT / no sockets.
+add_executable(remote60_host_key_period_policy_test
+  src/host_key_period_policy_test.cpp
+)
+target_include_directories(remote60_host_key_period_policy_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_key_period_policy_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r2 (F1): the forced-key decision + rejection back-off/repair. Pure, no MFT.
+add_executable(remote60_host_force_key_decision_test
+  src/host_force_key_decision_test.cpp
+)
+target_include_directories(remote60_host_force_key_decision_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_force_key_decision_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r3 (B): the runtime GOP-clamp detector. Pure, no MFT.
+add_executable(remote60_host_gop_clamp_detector_test
+  src/host_gop_clamp_detector_test.cpp
+)
+target_include_directories(remote60_host_gop_clamp_detector_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_gop_clamp_detector_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r4 (B1): the conditional IDR burst + 2s rolling-window ledger. Pure, no MFT.
+add_executable(remote60_host_burst_ledger_test
+  src/host_burst_ledger_test.cpp
+)
+target_include_directories(remote60_host_burst_ledger_test PRIVATE src)
+if(MSVC)
+  target_compile_options(remote60_host_burst_ledger_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r6 (V2): the 2s window admission is load-bearing in the REAL send path. Drives the
+# production send_udp_chunk_indices through a sink; removing the ledger pointer fails the same 2r bound.
+add_executable(remote60_host_burst_sender_admission_test
+  src/host_net_io.cpp
+  src/host_burst_sender_admission_test.cpp
+)
+target_include_directories(remote60_host_burst_sender_admission_test PRIVATE src)
+target_link_libraries(remote60_host_burst_sender_admission_test PRIVATE common ws2_32)
+# r11 (Codex 974c3a8): the r6-defect reproduction seam (WireEgress.bypassWindowForTest + its send-path
+# branch) is compiled in ONLY here. This target compiles its own src/host_net_io.cpp with the macro, so
+# the header field and the branch are consistent across its TUs; GNLinkStream/e2e/gate compile the same
+# host_net_io WITHOUT the macro, so the field and branch are preprocessed out of the product.
+target_compile_definitions(remote60_host_burst_sender_admission_test PRIVATE REMOTE60_BURST_WINDOW_BYPASS_TEST_SEAM)
+if(MSVC)
+  target_compile_options(remote60_host_burst_sender_admission_test PRIVATE /utf-8)
+endif()
+
+# stutter-keyframe r3 (B): HW vs SW 1080p30 encode measurement (the SW-transition decision input).
+add_executable(remote60_host_encoder_backend_bench
+  src/mf_h264_codec.cpp
+  src/host_encoder_backend_bench.cpp
+)
+target_include_directories(remote60_host_encoder_backend_bench PRIVATE src)
+target_link_libraries(remote60_host_encoder_backend_bench PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_backend_bench PRIVATE /utf-8)
+endif()
+
 # bitrate-hard-cap r1: the large IDR vs the real receiver (assembler + NACK scheduler) under the cap.
 # The real chunker emits a cap-paced IDR on a fake clock; the datagrams replay into the real receiver
 # while the real scheduler is polled -- reproducing and quantifying the premature-tail-NACK /
@@ -3033,6 +3195,27 @@ target_link_libraries(remote60_udp_control_channel_test PRIVATE
 
 add_executable(remote60_viewer_udp_ingress_test src/viewer_udp_ingress_test.cpp)
 target_link_libraries(remote60_viewer_udp_ingress_test PRIVATE ws2_32)
+
+# udp-recv-exit r1: the UDP recv classification shared by the client receive loop and the viewer ingress.
+add_executable(remote60_udp_recv_class_test src/udp_recv_class_test.cpp)
+target_link_libraries(remote60_udp_recv_class_test PRIVATE ws2_32)
+if(MSVC)
+  target_compile_options(remote60_udp_recv_class_test PRIVATE /utf-8)
+endif()
+
+# udp-recv-exit r1: the REAL shared client receive loop driven with a scripted recv seam.
+add_executable(remote60_client_udp_recv_loop_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/client_udp_recv_loop_test.cpp
+)
+target_include_directories(remote60_client_udp_recv_loop_test PRIVATE src)
+target_link_libraries(remote60_client_udp_recv_loop_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_client_udp_recv_loop_test PRIVATE /utf-8)
+endif()
 
 add_executable(remote60_capture_final_update_test src/d3d_capture_readback.cpp src/capture_final_update_test.cpp)
 target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)

@@ -250,6 +250,10 @@ struct ControlOutboundAction {
   ControlImeStateRequestMessage imeStateReq{};
   ControlClientBandwidthMessage clientBandwidth{};
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
+  // t-970r4zgo: for a WindowSelect, the local selection it was asked for (the sink's tag when the
+  // request was queued). The answer is handed to the sink with it, so a late answer to an earlier
+  // selection cannot open a later selection's gate.
+  uint64_t selectionTag = 0;
 };
 
 /**
@@ -583,6 +587,13 @@ struct WindowPanelSnapshot {
   // The attached screens, and which one desktop mode is showing. Empty until the host answers,
   // and it only will if it advertised support -- an older one drains the request in silence.
   bool hostSupportsMonitors = false;
+  // t-970r4zgo: this connection's host selects a monitor through the window-select transaction
+  // (kControlWindowListFlagMonitorSelectTransactionV1). Learnt from this connection's window
+  // list only; reset with the panel on every connect.
+  bool hostSupportsMonitorSelect = false;
+  // r3 M4: moves whenever a monitor list that differs from the last one is applied. A screen pick
+  // names an index into the list the user was shown; it is sent only against that same list.
+  uint64_t monitorListRevision = 0;
   uint32_t selectedMonitorId = 0;
   std::vector<MonitorEntry> monitors;
 };
@@ -594,6 +605,9 @@ struct WindowListApplyResult {
 struct WindowSelectApplyResult {
   std::string logLine;
   bool ok = false;
+  // r4 M2-A: false = the answer belongs to another selection than the one now requested, and the
+  // panel was left as it was.
+  bool shown = true;
 };
 
 class WindowPanelStateModel {
@@ -601,8 +615,13 @@ class WindowPanelStateModel {
   void Reset();
   void RequestList(const char* statusText = nullptr);
   bool TakeListRequest();
-  bool RequestSelect(uint64_t windowId, const char* statusText = nullptr);
-  bool TakeSelectRequest(uint64_t* outWindowId);
+  // monitorListRevision: for a monitor-select target, the list the index was taken from
+  // (kAnyMonitorListRevision = the current one). If another list arrives before the request goes
+  // out, it is not sent (status window_select_failed: monitor_list_changed).
+  bool RequestSelect(uint64_t windowId, const char* statusText = nullptr, uint64_t selectionTag = 0,
+                     uint64_t monitorListRevision = ~0ULL);
+  bool TakeSelectRequest(uint64_t* outWindowId, uint64_t* outSelectionTag = nullptr);
+  void SetHostSupportsMonitorSelect(bool supported);
   void RequestMonitorList();
   bool TakeMonitorListRequest();
   /** Returns true when support was newly discovered, so the caller can fetch the list once. */
@@ -621,6 +640,10 @@ class WindowPanelStateModel {
   void SetDisplayStatus(const std::string& displayStatus);
   WindowListApplyResult ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount);
   WindowSelectApplyResult ApplyWindowSelected(const ControlWindowSelectedMessage& msg);
+  // r4 M2-A: the answer to a request queued under `selectionTag`. Shown only if that is still the
+  // selection most recently requested here -- compared and applied under the one lock RequestSelect
+  // takes, so a pick made between the two cannot be overwritten. selectionTag 0 = untracked, shown.
+  WindowSelectApplyResult ApplyWindowSelectedFor(const ControlWindowSelectedMessage& msg, uint64_t selectionTag);
   void Scroll(int deltaSteps, int visibleCount);
   bool TryResolveWindowIdForVisibleRow(int row, int visibleCount, uint64_t* outWindowId) const;
   WindowPanelSnapshot Snapshot() const;
@@ -632,6 +655,12 @@ class WindowPanelStateModel {
   bool listRequestPending_ = false;
   bool selectRequestPending_ = false;
   uint64_t pendingSelectId_ = 0;
+  uint64_t pendingSelectTag_ = 0;
+  uint64_t currentSelectTag_ = 0;  // the selection most recently requested (r4 M2-A)
+  uint64_t pendingSelectListRevision_ = ~0ULL;
+  // The last applied monitor list, entry by entry (with the host's device names), to tell a
+  // changed list from the same one fetched again.
+  std::vector<ControlMonitorEntry> lastMonitorEntries_;
   bool monitorListRequestPending_ = false;
   bool monitorSelectRequestPending_ = false;
   uint32_t pendingMonitorId_ = 0;
