@@ -64,6 +64,23 @@
 //       unchanged anchors also print both halves. GOP is 4 s and the body 5 s, so a periodic IDR can
 //       land only in the second half -- the RESULT line lists the IDR body frames.
 //       main() exits 0 only when every row is VALID (exit 2 otherwise); DONE is not a verdict.
+// r4 (Codex follow-up, "minimal additions"):
+//   1. running attribution: R1-mean-only (reconfigure_bitrate 1.18M only) and R1-qp-only (set_max_qp 40
+//      only) next to R1 (both) and R1-sham (same values); R2-mean-only on motion. Which control moved
+//      the output is read from these rows only.
+//   2. rebuild survival: RE1 = P0 plan, at the midpoint the product's rebuild path (shutdown() +
+//      initialize(), new MFT instance; mf_h264_codec.cpp:1656 resets maxQpOverride_) with the SAME
+//      env, so the pre-types plan is re-fed -> the second instance's own snapshots show whether the
+//      chosen values survive. RE2 = the same rebuild followed by set_max_qp(32), which is what the
+//      product's governor does after a rebuild today (host_stage_stats_h264.cpp:205-207: override 0
+//      and governor maxQp (base 32) != configured -> set_max_qp(governor)), i.e. the late post-types
+//      MaxQP re-imposed. Geometry/fps/bitrate/keyint are unchanged across the rebuild (the mechanism
+//      under test is the rebuild + re-apply order, not the new fps value).
+//   3. P6 is now buffer 100 ms (18750 B at 1.5M) instead of 1 s: the small-buffer direction.
+//      Rejection / clamp is recorded as requested vs readback (config line).
+//   4. labels say "Set omitted (fresh MFT)" for maxQp=0 and "explicit 51" for 51; every row prints a
+//      delivery line (outFps / coverage / IDR count / PSNR matched) so a byte drop can be checked
+//      against missing or delayed output. PSNR is not a legibility proxy.
 // Rewrites (buffer size, LowLatency explicit-off) are done in the proxy and are logged as REWRITE /
 // INJECT, never silently.
 //
@@ -83,7 +100,7 @@
 // PSNR (luma, exact PTS, SW decoder mft_sw, last-24-frame source ring; unmatched/decode failures
 // are counted, never scored) is printed per row and before/after the midpoint on R rows.
 //
-// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_r3_result.txt   (send back the file)
+// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_r4_result.txt   (send back the file)
 // Options: --repeat N  (repeat the non-anchor rows N times; default 1, ~2 min at 1)  --no-psnr
 
 #include "bakeoff_common.hpp"
@@ -612,6 +629,8 @@ struct Row {
   const char* maxQpEnv = nullptr;   // REMOTE60_NATIVE_MAX_QP ("0" = product skips the MaxQP Set)
   uint32_t retargetMaxQp = 0;       // set_max_qp(N) at the midpoint, BEFORE reconfigure_bitrate
   bool shamAtMid = false;           // F3 control: same calls at the midpoint with the UNCHANGED values
+  bool reinitAtMid = false;         // r4-2: product rebuild path (shutdown+initialize, new MFT) at the midpoint
+  uint32_t reinitThenMaxQp = 0;     // r4-2: then set_max_qp(N) like the governor does after a rebuild (0 = none)
   ProxyCfg cfg{};
 };
 
@@ -687,8 +706,10 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
                               : r.cfg.bufferMultiplier  ? "x" + std::to_string(r.cfg.bufferMultiplier)
                                                         : std::string("product");
   const uint32_t cfgQp = H264Encoder::configured_max_qp();
-  const bool midAction = r.retargetMaxQp || r.retargetKbps || r.shamAtMid;
+  const bool midAction = r.retargetMaxQp || r.retargetKbps || r.shamAtMid || r.reinitAtMid;
   std::string rtDesc;
+  if (r.reinitAtMid) rtDesc += " @mid:REBUILD shutdown()+initialize() new MFT, same env" +
+                               (r.reinitThenMaxQp ? " then set_max_qp(" + std::to_string(r.reinitThenMaxQp) + ") (governor order today)" : std::string(" (plan re-fed pre-types)"));
   if (r.shamAtMid) rtDesc += " @mid:SHAM set_max_qp(" + std::to_string(cfgQp) + ")+reconfigure_bitrate(" + std::to_string(r.rateKbps) + "k) (unchanged values)";
   if (r.retargetMaxQp) rtDesc += " @mid:set_max_qp(" + std::to_string(r.retargetMaxQp) + ")";
   if (r.retargetKbps) rtDesc += " @mid:reconfigure_bitrate(" + std::to_string(r.retargetKbps) + "k)";
@@ -702,9 +723,10 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   auto invalid = [&]() { if (invalidRows) ++*invalidRows; };
   MftEnc enc;
   LoggingTransform* proxy = nullptr;
-  if (r.proxy) {
+  uint32_t abnormalAccum = 0;  // abnormal count of proxies already released (rebuild rows)
+  auto make_proxy = [&](bool printCaps) -> bool {
     IMFTransform* inner = create_hw_encoder_like_product();
-    if (!inner) { std::printf("  RESULT: INVALID exec=no-hw-MFT-for-proxy\n"); invalid(); return; }
+    if (!inner) return false;
     proxy = new LoggingTransform(inner, r.cfg);
     {
       Microsoft::WRL::ComPtr<IMFAttributes> attrs;
@@ -715,9 +737,11 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
       std::printf("  proxy: inner MF_TRANSFORM_ASYNC=%u\n", asyncFlag);
     }
     inner->Release();
-    if (r.cfg.printCaps) proxy->caps();
+    if (printCaps) proxy->caps();
     enc.enc.set_transform_for_test(proxy);  // the encoder holds its own reference until destroyed
-  }
+    return true;
+  };
+  if (r.proxy && !make_proxy(r.cfg.printCaps)) { std::printf("  RESULT: INVALID exec=no-hw-MFT-for-proxy\n"); invalid(); return; }
   const uint32_t bitrate = r.rateKbps * 1000u;
   const uint32_t keyintFrames = 4u * fps;  // a raw IDR ~every 4s -> at most one inside the 5s body
   if (!enc.init(kW, kH, fps, bitrate, keyintFrames)) {
@@ -753,12 +777,40 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   const uint64_t frameUs = 1'000'000ULL / fps;
   uint64_t deadline = now_us(), wall0 = 0, wallBodyEnd = 0;
   bool boundaryPassed = false;
+  uint32_t pendingAtRebuild = 0;  // r4-2: inputs the first instance had accepted but not output when shutdown() flushed it
   for (uint32_t i = 0; i < warmup + body + drainN; ++i) {
     if (i == warmup) wall0 = now_us();
     if (i == warmup + body) wallBodyEnd = now_us();
     const bool inDrain = i >= warmup + body;
     if (midAction && i == warmup + mid) {
       std::printf("  boundary: first input after the mid-point change = frame %u (body idx %u)\n", i, mid);
+      if (r.reinitAtMid) {
+        std::printf("  REBUILD at frame %u: product path shutdown()+initialize(%ux%u fps=%u bitrate=%u keyint=%u) on a NEW MFT instance; env unchanged (pre-types plan re-fed); maxQpOverride_ reset by initialize\n",
+                    i, kW, kH, fps, bitrate, keyintFrames);
+        pendingAtRebuild = enc.pending_depth();
+        std::printf("  REBUILD: first instance pending(accepted, not yet output)=%u -> shutdown() FLUSHes them (product behaviour: in-flight frames are lost at a rebuild)\n", pendingAtRebuild);
+        enc.enc.shutdown();
+        if (proxy) {
+          std::printf("  -- first instance summary --\n");
+          proxy->print_events();
+          proxy->dump_abnormal();
+          abnormalAccum += proxy->abnormal_total();
+          proxy->Release();
+          proxy = nullptr;
+          if (!make_proxy(false)) { std::printf("  REBUILD: no hw MFT for the second proxy\n"); encFail = true; failFrame = i; break; }
+          std::printf("  -- second instance (rebuilt) --\n");
+        }
+        if (!enc.init(kW, kH, fps, bitrate, keyintFrames)) {
+          std::printf("  REBUILD: initialize failed\n");
+          if (proxy) proxy->latch_failure();
+          encFail = true; failFrame = i; break;
+        }
+        if (r.reinitThenMaxQp) {
+          const bool ok = enc.enc.set_max_qp(r.reinitThenMaxQp);  // governor re-imposing its ceiling after a rebuild
+          std::printf("  set_max_qp(%u) after rebuild ok=%d (host_stage_stats_h264.cpp:205-207 order)\n", r.reinitThenMaxQp, ok ? 1 : 0);
+          if (proxy) { proxy->snapshot("after-governor(post-rebuild)"); std::printf("  config(after-governor post-rebuild): %s\n", proxy->config_status().c_str()); }
+        }
+      }
       if (r.shamAtMid) {
         const bool ok1 = enc.enc.set_max_qp(cfgQp);
         std::printf("  SHAM set_max_qp(%u) at frame %u ok=%d (same ceiling as configured)\n", cfgQp, i, ok1 ? 1 : 0);
@@ -832,13 +884,23 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   if (proxy) proxy->dump_latch();
 
   // F3 coverage: unique body frames returned / missing / duplicates, after the bounded drain.
-  uint32_t missing = 0, dup = 0, missTail = 0;
+  uint32_t missing = 0, dup = 0, missTail = 0, rebuildLoss = 0;
   const uint32_t judged = encFail ? (failFrame > warmup ? std::min(failFrame - warmup, body) : 0) : body;
-  std::string missList;
+  std::string missList, rebuildLossList;
   for (uint32_t k = 0; k < judged; ++k) {
-    if (auCount[k] == 0) { ++missing; if (k + drainN >= judged) ++missTail; if (missList.size() < 60) missList += (missList.empty() ? "" : ",") + std::to_string(k); }
+    if (auCount[k] == 0) {
+      // r4-2: a frame the first instance had accepted but not yet output when the rebuild's shutdown()
+      // flushed it. Counted apart (the product loses it too), not against VALID.
+      if (r.reinitAtMid && k < mid && k + pendingAtRebuild >= mid) {
+        ++rebuildLoss;
+        rebuildLossList += (rebuildLossList.empty() ? "" : ",") + std::to_string(k);
+        continue;
+      }
+      ++missing; if (k + drainN >= judged) ++missTail; if (missList.size() < 60) missList += (missList.empty() ? "" : ",") + std::to_string(k);
+    }
     else if (auCount[k] > 1) ++dup;
   }
+  const std::string rebuildNote = rebuildLoss ? " rebuild-boundary-loss=" + std::to_string(rebuildLoss) + " idx[" + rebuildLossList + "] (in-flight input flushed by the product's shutdown(); not counted against VALID)" : "";
 
   // 267ms peak over RETURN wall-clock windows (when the bytes actually came out of the encoder).
   double p267wall = 0;
@@ -854,7 +916,7 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
 
   const double outFps = wallSec > 0 ? returnedBody / wallSec : 0;
   const bool fpsShort = outFps < 0.9 * fps;
-  const uint32_t abnormalN = proxy ? proxy->abnormal_total() : 0;
+  const uint32_t abnormalN = (proxy ? proxy->abnormal_total() : 0) + abnormalAccum;
   const bool valid = !encFail && returnedBody > 0 && !fpsShort && missing == 0 && abnormalN == 0;
   const Window all = measure(bytesByFrame, 0, body, fps);
   std::printf("  avgKbps=%.0f (x%.2f)  1sPeak=%.0f (x%.2f)  267msPeak=%.0f (x%.2f)  267msPeakWall=%.0f (x%.2f)  "
@@ -864,6 +926,10 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   if (decOk)
     std::printf("  psnr: luma=%.2f n=%u unmatched=%u decodeFail=%u | firstHalf=%.2f (n=%u) secondHalf=%.2f (n=%u)\n",
                 psnr.all(), psnr.nA + psnr.nB, psnr.unmatched, psnr.decodeFail, psnr.a(), psnr.nA, psnr.b(), psnr.nB);
+  // r4-4: a byte drop must be read together with delivery -- fewer bytes from missing/late output is not a gain.
+  std::printf("  delivery: outFps=%.1f(body) coverage=%u/%u unique missing=%u dup=%u rebuildBoundaryLoss=%u drainRecovered=%u pending=%u idrN=%zu idrMax=%u psnrMatched=%u/%u\n",
+              outFps, judged - missing - rebuildLoss, body, missing, dup, rebuildLoss, drainRecovered, pending, idrFrames.size(), idrMax,
+              psnr.nA + psnr.nB, decOk ? body : 0);
   {
     // Both halves on EVERY row (F3): the unchanged rows are the control for the retarget rows.
     const Window a = measure(bytesByFrame, 0, mid, fps), b = measure(bytesByFrame, mid, body, fps);
@@ -890,9 +956,9 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
               valid ? "VALID" : "INVALID",
               encFail ? ("encode-false@frame" + std::to_string(failFrame) + "(" + (failFrame < warmup ? "warmup" : failFrame < warmup + body ? "body" : "drain") + ")").c_str()
                       : returnedBody == 0 ? "ok-but-no-output" : fpsShort ? "ok-but-fps-short" : "ok",
-              (missing == 0 && dup == 0) ? ("ok " + std::to_string(judged) + "/" + std::to_string(body) + " unique").c_str()
+              (missing == 0 && dup == 0) ? ("ok " + std::to_string(judged - rebuildLoss) + "/" + std::to_string(body) + " unique" + rebuildNote).c_str()
                                           : ("missing=" + std::to_string(missing) + (missTail ? "(tail-incomplete=" + std::to_string(missTail) + " after " + std::to_string(drainN) + "-frame drain)" : "") +
-                                             " dup=" + std::to_string(dup) + " idx[" + missList + "]").c_str(),
+                                             " dup=" + std::to_string(dup) + " idx[" + missList + "]" + rebuildNote).c_str(),
               proxy ? proxy->config_at_start().c_str() : "n/a(proxy-free)",
               abnormalN == 0 ? "ok" : ("abnormal=" + std::to_string(abnormalN) + " latest=" + proxy->last_abnormal()).c_str(),
               idrList.c_str());
@@ -909,7 +975,9 @@ int main(int argc, char** argv) {
     if (std::string(argv[i]) == "--repeat" && i + 1 < argc) repeat = static_cast<uint32_t>(std::max(1, std::atoi(argv[i + 1])));
     if (std::string(argv[i]) == "--no-psnr") g_psnr = false;
   }
-  std::printf("host_nvidia_probe v2 r3 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
+  std::printf("host_nvidia_probe v2 r4 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
+  std::printf("r4: running attribution rows (both / sham / mean-only / qp-only), rebuild rows RE1 (plan re-fed) and\n");
+  std::printf("RE2 (rebuild then set_max_qp(32) = governor order today), buffer 100ms instead of 1s, delivery line per row.\n");
   std::printf("CBR, VBV size, and the product's RUNNING levers (set_max_qp / reconfigure_bitrate) under it.\n");
   std::printf("r3 tool fixes (Codex F1-F3): encode-false latch + raw-call history before shutdown; NOTACCEPTING retry\n");
   std::printf("failure = abnormal; 'product-tolerated E_UNEXPECTED'; snapshots at types-applied / pre-first-set /\n");
@@ -955,33 +1023,38 @@ int main(int argc, char** argv) {
   // ---- drag @1.5M (product VBV here = bitrate/40 = 200ms = 37500B) ----
   { Row r = mk("A0-baseline-proxy(post-types,product)", "drag", 1500); r.cfg.printCaps = true; rows.push_back(r); }
   std::vector<Row> ladder;
-  ladder.push_back(pre("P0-pre-vbr-maxQp0", "drag", 1500, "0"));
-  ladder.push_back(pre("P1-pre-vbr-maxQp51", "drag", 1500, "51"));
+  ladder.push_back(pre("P0-pre-vbr-maxQp0(Set omitted, fresh MFT)", "drag", 1500, "0"));
+  ladder.push_back(pre("P1-pre-vbr-maxQp51(explicit 51)", "drag", 1500, "51"));
   ladder.push_back(pre("P2-pre-vbr-maxQp44", "drag", 1500, "44"));
   ladder.push_back(pre("P3-pre-vbr-maxQp40", "drag", 1500, "40"));
   ladder.push_back(pre("P3b-pre-vbr-maxQp32(r1)", "drag", 1500, "32"));
-  { Row r = pre("P4-pre-cbr-maxQp0", "drag", 1500, "0"); r.rc = "cbr"; ladder.push_back(r); }
-  { Row r = pre("P5-pre-vbr-maxQp0-buffer500ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 500); ladder.push_back(r); }
-  { Row r = pre("P6-pre-vbr-maxQp0-buffer1s", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 1000); ladder.push_back(r); }
-  { Row r = pre("R1-pre-vbr-maxQp0-running(qp40,1.18M)", "drag", 1500, "0"); r.retargetMaxQp = 40; r.retargetKbps = 1180; ladder.push_back(r); }
+  { Row r = pre("P4-pre-cbr-maxQp0(Set omitted)", "drag", 1500, "0"); r.rc = "cbr"; ladder.push_back(r); }
+  { Row r = pre("P5-pre-vbr-maxQp0(Set omitted)-buffer500ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 500); ladder.push_back(r); }
+  { Row r = pre("P6'-pre-vbr-maxQp0(Set omitted)-buffer100ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 100); ladder.push_back(r); }
+  { Row r = pre("R1-pre-vbr-maxQp0-running(qp40+1.18M both)", "drag", 1500, "0"); r.retargetMaxQp = 40; r.retargetKbps = 1180; ladder.push_back(r); }
   { Row r = pre("R1-sham-pre-vbr-maxQp0-running(same values)", "drag", 1500, "0"); r.shamAtMid = true; ladder.push_back(r); }
+  { Row r = pre("R1-mean-only-pre-vbr-maxQp0-running(1.18M only)", "drag", 1500, "0"); r.retargetKbps = 1180; ladder.push_back(r); }
+  { Row r = pre("R1-qp-only-pre-vbr-maxQp0-running(qp40 only)", "drag", 1500, "0"); r.retargetMaxQp = 40; ladder.push_back(r); }
+  { Row r = pre("RE1-pre-vbr-maxQp0-rebuild(plan re-fed)", "drag", 1500, "0"); r.reinitAtMid = true; ladder.push_back(r); }
+  { Row r = pre("RE2-pre-vbr-maxQp0-rebuild-then-set_max_qp32(governor order today)", "drag", 1500, "0"); r.reinitAtMid = true; r.reinitThenMaxQp = 32; ladder.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladder.begin(), ladder.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "drag", 1500));
   // ---- motion @3M ----
   rows.push_back(mk("A0-baseline-proxy(post-types,product)", "motion", 3000));
   std::vector<Row> ladderM;
-  ladderM.push_back(pre("P0-pre-vbr-maxQp0", "motion", 3000, "0"));
+  ladderM.push_back(pre("P0-pre-vbr-maxQp0(Set omitted, fresh MFT)", "motion", 3000, "0"));
   ladderM.push_back(pre("P2-pre-vbr-maxQp44", "motion", 3000, "44"));
-  { Row r = pre("P4-pre-cbr-maxQp0", "motion", 3000, "0"); r.rc = "cbr"; ladderM.push_back(r); }
-  { Row r = pre("R2-pre-vbr-maxQp0-running(qp40,2.36M)", "motion", 3000, "0"); r.retargetMaxQp = 40; r.retargetKbps = 2360; ladderM.push_back(r); }
+  { Row r = pre("P4-pre-cbr-maxQp0(Set omitted)", "motion", 3000, "0"); r.rc = "cbr"; ladderM.push_back(r); }
+  { Row r = pre("R2-pre-vbr-maxQp0-running(qp40+2.36M both)", "motion", 3000, "0"); r.retargetMaxQp = 40; r.retargetKbps = 2360; ladderM.push_back(r); }
   { Row r = pre("R2-sham-pre-vbr-maxQp0-running(same values)", "motion", 3000, "0"); r.shamAtMid = true; ladderM.push_back(r); }
+  { Row r = pre("R2-mean-only-pre-vbr-maxQp0-running(2.36M only)", "motion", 3000, "0"); r.retargetKbps = 2360; ladderM.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladderM.begin(), ladderM.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "motion", 3000));
 
   const uint64_t t0 = now_us();
   uint32_t invalidRows = 0;
   for (const auto& r : rows) probe(r, fps, sec, &invalidRows);
-  std::printf("\nhost_nvidia_probe v2 r3: DONE. %zu rows in %.0fs. SUMMARY valid=%zu invalid=%u (exit %d). DONE is not a verdict; read each RESULT line.\n",
+  std::printf("\nhost_nvidia_probe v2 r4: DONE. %zu rows in %.0fs. SUMMARY valid=%zu invalid=%u (exit %d). DONE is not a verdict; read each RESULT line.\n",
               rows.size(), (now_us() - t0) / 1e6, rows.size() - invalidRows, invalidRows, invalidRows ? 2 : 0);
   std::printf("Fewer bytes with an encode failure / missing output / fps drop is NOT an improvement.\n");
   std::printf("Send this whole file back.\n");
