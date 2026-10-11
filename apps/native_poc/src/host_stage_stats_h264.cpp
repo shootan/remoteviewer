@@ -207,14 +207,29 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // rebuild, instead of restored afterwards with a late post-type SetValue (C4). r2 (Codex R3): it
       // used to be pinned at the top of the tick, so a step taken in this tick (38 -> 40) was followed
       // by a rebuild that started at 38. A static-ceiling profile ignores the seed (its plan sets 44).
-      const auto seedInitialQp = [&] {
-        encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
+      // r3 (Codex S2): not only the seed -- the LIVE legacy instance follows the loop's current ceiling
+      // too (a Reset brings a 40 instance back to 32 at once instead of leaving it until the next step),
+      // bounded and degraded-on-refusal; a static-ceiling instance is never poked. Logged when it does
+      // something or gives up.
+      const auto reconcileCeiling = [&](const char* why) {
+        const EncoderState::CeilingReconcile rc = encoder.ReconcileGovernorCeiling(governor.maxQp(), H264Encoder::configured_max_qp());
+        if (rc.attempted || rc.degraded) {
+          std::cout << "[native-video-host][rate-governor] ceiling-reconcile why=" << why << " desired=" << rc.desired
+                    << " codecBefore=" << rc.codecBefore << " attempted=" << (rc.attempted ? 1 : 0)
+                    << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
+                                      : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
+                                      : rc.result == RcRuntimeResult::Unproven ? "unproven" : "failed")
+                    << " failures=" << encoder.governorQpApplyFailures << " degraded=" << (rc.degraded ? 1 : 0) << "\n";
+        }
+        return rc;
       };
+      const auto seedInitialQp = [&] { (void)reconcileCeiling("decision"); };
       // r2 (Codex R4): the loop's input is PAYLOAD (bytes sent + the gate's skipped frames at the average
       // frame size); its target must be in the same unit -- the payload the wire can carry at R and this
       // frame rate, not R itself (a wire figure that includes parity and headers) and not E (a target
       // with the overshoot slack removed). E == payloadBudget / 1.12; the 125% / 85% bands sit on
-      // payloadBudget, so 2.5 Mbps of payload at R 3 Mbps reads as ~106% (in band), not 83% (under).
+      // payloadBudget, so 2.5 Mbps of payload at R 3 Mbps / 30 fps (budget ~2.14 Mbps) reads as ~117%
+      // (in band, near over), not 83% (under).
       const uint32_t payloadBudgetBps = encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps);
       if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
         // A new target, or the user chose another frame rate: start over from the floor.
@@ -241,9 +256,9 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                                                         encoder.nominalEncodeW, encoder.nominalEncodeH,
                                                         after.fps, encoder.activeBitrate, encoder.activeKeyint);
             if (fpsApplied) {
-              // The rebuilt instance started at the loop's ceiling (set_initial_max_qp); this answers
-              // Unchanged on legacy and Unproven on a static profile -- neither issues a SetValue.
-              (void)encoder.codec.set_max_qp(after.maxQp);
+              // The rebuilt instance started at the loop's ceiling (seeded); the reconcile confirms and
+              // issues nothing when it is in force (static profile: never poked).
+              (void)reconcileCeiling("fps-rebuilt");
               // Same as ABR: the GDI worker captures at the rate it was started with.
               if (!capture.windowModeActive.load(std::memory_order_acquire) &&
                   backend.active == DesktopCaptureBackend::Gdi && restart_capture_session(hx)) {
@@ -252,6 +267,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
               }
             } else {
               governor.Reset();  // the encoder refused; do not keep a state that describes nothing
+              (void)reconcileCeiling("fps-apply-failed");  // r3 S2: seed and live ceiling follow the Reset too
             }
             std::cout << "[native-video-host][rate-governor] fps " << prevFps << "->" << after.fps
                       << " userFps=" << userFps << " maxQp=" << after.maxQp
@@ -262,9 +278,11 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                       << " applied=" << (fpsApplied ? 1 : 0) << "\n";
           } else if (after.maxQp != before.maxQp) {
             // C3: only an Applied answer counts as applied. Unproven (a static-ceiling instance) is
-            // logged as such and never as success; the governor then knows its lever did nothing.
+            // logged as such and never as success; the governor then knows its lever did nothing. The
+            // reconcile above (seedInitialQp after OnSecond) already issued the step; its answer is
+            // re-read here for the log by asking the codec, which is Unchanged when it is in force.
             const RcRuntimeResult rr = encoder.codec.set_max_qp(after.maxQp);
-            const bool applied = rr == RcRuntimeResult::Applied;
+            const bool applied = rr == RcRuntimeResult::Applied || rr == RcRuntimeResult::Unchanged;
             std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
                       << " fps=" << encoder.activeFps
                       << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)

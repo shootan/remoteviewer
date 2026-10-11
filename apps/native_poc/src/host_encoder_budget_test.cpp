@@ -92,7 +92,8 @@ int main() {
           s(at60.encoderBps) + " < " + s(asym.encoderBps));
     check("...and its own wire cost at 60 fps fits the budget", at60.wireAtFpsBps <= at60.wireAfterReserveBps && at60.wireAtFpsBps > 0,
           s(at60.wireAtFpsBps) + " <= " + s(at60.wireAfterReserveBps));
-    check("...the AU it priced is E/8/fps", at60.auBytesAtFps == at60.payloadWireBps / 8 / 60, s(at60.auBytesAtFps));
+    check("...the AU it priced is the payload budget per frame (payloadWireBps/8/fps, before the overshoot slack)",
+          at60.auBytesAtFps == at60.payloadWireBps / 8 / 60, s(at60.auBytesAtFps));
     const EncoderBudgetBreakdown at30big = encoder_budget_for(6'000'000, shipped, EncoderBudgetPolicy{}, 30);
     const EncoderBudgetBreakdown asym6 = encoder_budget_for(6'000'000, shipped, EncoderBudgetPolicy{});
     // ~18 KB AUs: 17 chunks -> a THIRD parity group that is one chunk deep; the ceil costs ~5% here,

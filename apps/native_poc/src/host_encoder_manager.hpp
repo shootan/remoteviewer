@@ -174,6 +174,45 @@ struct EncoderState {
   // C4: the governor's current ceiling, pinned in the codec for the next legacy rebuild
   // (codec.set_initial_max_qp) instead of being restored late with a post-type SetValue.
   uint64_t rateGovernorCodecInstance = 0;  // the codec instance the governor's ladder was configured for
+  // r3 (Codex S2): the governor's desired ceiling, the LIVE instance's ceiling and the NEXT instance's
+  // seed are reconciled in one place after every decision that moves the loop (Reset, OnSecond, a
+  // failed fps apply) -- the policy is "the loop's current ceiling is the ceiling": a Reset brings the
+  // live legacy instance back to the floor too, not only the next instance. Bounded: a ceiling the MFT
+  // keeps refusing or holding is retried kGovernorQpApplyMaxFailures times, then held as degraded
+  // (logged, instance left as it is) until the desired value changes. A static-ceiling profile is never
+  // poked: its plan owns the ceiling and the seed is ignored by its plan.
+  uint32_t governorQpApplyFailures = 0;
+  uint32_t governorLastDesiredQp = 0;
+  static constexpr uint32_t kGovernorQpApplyMaxFailures = 3;
+  struct CeilingReconcile {
+    bool attempted = false;                                // a SetValue was issued to the live instance
+    RcRuntimeResult result = RcRuntimeResult::Unchanged;   // its answer (Unchanged when nothing was issued)
+    uint32_t desired = 0;
+    uint32_t codecBefore = 0;                              // the instance's requested ceiling before
+    bool degraded = false;                                 // held after the bounded retries
+  };
+  CeilingReconcile ReconcileGovernorCeiling(uint32_t desiredQp, uint32_t configuredQp) {
+    CeilingReconcile out;
+    out.desired = desiredQp;
+    out.codecBefore = codec.plan_max_qp();
+    codec.set_initial_max_qp(desiredQp == configuredQp ? 0u : desiredQp);  // the next instance's seed
+    if (desiredQp != governorLastDesiredQp) {
+      governorLastDesiredQp = desiredQp;
+      governorQpApplyFailures = 0;  // a new target gets its own bounded attempts
+    }
+    if (!codec.started() || !codec.runtime_max_qp_live()) return out;  // no instance, or the plan owns it
+    if (codec.plan_max_qp() == desiredQp && codec.rc_plan_effective()) return out;  // already in force
+    if (governorQpApplyFailures >= kGovernorQpApplyMaxFailures) {
+      out.degraded = true;
+      return out;
+    }
+    out.attempted = true;
+    out.result = codec.set_max_qp(desiredQp == configuredQp ? 0u : desiredQp);
+    if (out.result == RcRuntimeResult::Applied || out.result == RcRuntimeResult::Unchanged) governorQpApplyFailures = 0;
+    else ++governorQpApplyFailures;
+    out.degraded = governorQpApplyFailures >= kGovernorQpApplyMaxFailures;
+    return out;
+  }
   static EncoderBudgetPolicy BudgetPolicy() {
     EncoderBudgetPolicy p;
     // Field tuning levers for the two allowances (percent). Not test switches: the computed budget is

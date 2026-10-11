@@ -20,11 +20,15 @@
 // (88 bytes, packed) plus 28 bytes of UDP/IP. Two models of that cost live here:
 //   - the large-AU asymptote, wire ~= P * (1 + 1/groupSize) * (1 + (header + 28) / (mtu - header)),
 //     used when no frame rate is known (fps 0) -- the factors the diagnostic line prints;
-//   - the per-AU model at a frame rate: the AU an encoder holding mean E produces at `fps` is E/8/fps
-//     bytes, its exact chunk / parity / header cost is paid `fps` times a second, and E is the
-//     largest mean whose wire cost fits (bisection; the cost is monotone in E). This is what the
-//     product uses: at 1.5 Mbps / 60 fps an AU of ~2 KB is two data chunks plus a 1112-byte parity
-//     plus three headers -- 115% of R under the asymptote (Codex, r2), inside R here.
+//   - the per-AU model at a frame rate: an encoder holding a payload mean P produces P/8/fps bytes per
+//     frame; that AU's exact chunk / parity / header cost is paid `fps` times a second, and P is the
+//     largest mean whose wire cost fits (bisection; the cost is monotone in P). E is P minus the
+//     overshoot slack. This is what the product uses: at 1.5 Mbps / 60 fps an AU of ~2 KB is two data
+//     chunks plus a 1112-byte parity plus three headers -- 115% of R under the asymptote (Codex, r2),
+//     inside R here. It prices SAME-SIZE AUs at a steady cadence with the default tight single-chunk
+//     parity: a real stream's IDR/P distribution, ceil boundaries and cadence differ, and the padded
+//     parity layout (REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE=0) costs more for small AUs than this
+//     model says -- the margins below and the limiter/gate remain necessary, not optional.
 // Two further allowances, each named and set once, and both NOMINAL:
 //   nackReservePercent       -- a slice of R the model does not give to video, so that NACK replay has
 //                               room. It is a margin in this arithmetic, not a reservation anything
@@ -65,7 +69,8 @@ struct EncoderBudgetBreakdown {
   uint32_t wireAfterReserveBps = 0;    // R minus the nominal NACK margin: what payload+parity+headers may use
   uint32_t payloadWireBps = 0;         // the payload the wire can carry at that budget (asymptote, or per-AU at fps)
   uint32_t encoderBps = 0;             // ... minus the overshoot slack: the mean to hand the encoder (E)
-  uint32_t auBytesAtFps = 0;           // per-AU model only: the AU size E/8/fps the model priced
+  uint32_t auBytesAtFps = 0;           // per-AU model only: the AU the model priced = payloadWireBps/8/fps (the payload budget
+                                       // per frame, BEFORE the overshoot slack is taken off to make E)
   uint32_t wireAtFpsBps = 0;           // per-AU model only: the wire cost of payloadWireBps at fps (<= wireAfterReserveBps)
 };
 

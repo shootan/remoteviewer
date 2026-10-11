@@ -190,6 +190,65 @@ int main() {
     check("[4] the same target again: 0 writes, 0 keys", rig.apply(30, 3'000'000) && rig.fake->calls.size() == calls0 && !rig.keyRequested());
   }
 
+  // ------------------------------------------------------------------ [5] r3 S2: governor ceiling vs the live instance
+  {
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[5] legacy first target", rig.apply(30, 6'000'000));
+    rig.clearKey();
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    const uint32_t configured = H264Encoder::configured_max_qp();
+    // Drive the loop to its cap the way the stats tick does: 3x over for several seconds.
+    for (int i = 0; i < 8; ++i) (void)gov.OnSecond(6'000'000 / 8 * 3, 6'000'000, 30);
+    check("[5] the governor reaches 40", gov.maxQp() == 40, s(gov.maxQp()));
+    // The stats tick's reconcile after a decision: the live legacy instance follows the loop.
+    (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[5] ...and the live instance runs 40", rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 40 && rig.encoder.codec.plan_max_qp() == 40,
+          s(rig.fake->set_value(CODECAPI_AVEncVideoMaxQP)));
+    // A new R: the tick Resets the loop to its floor. The INSTANCE must come back to the floor too
+    // (Codex S2: before r3 only the next-instance seed moved and the live 40 stayed until the next step).
+    gov.Reset();
+    const auto rc = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[5] r3 S2: after Reset the live instance is brought back to the floor (32), not left at 40",
+          rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 32 && rig.encoder.codec.plan_max_qp() == 32 && rc.attempted,
+          "codec=" + s(rig.fake->set_value(CODECAPI_AVEncVideoMaxQP)) + " governor=" + s(gov.maxQp()));
+    // Same desired again on the next tick: nothing issued.
+    rig.fake->clear_calls();
+    const auto rc2 = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[5] r3 S2: a second reconcile at the same ceiling issues nothing", !rc2.attempted && rig.fake->count_set("maxQp") == 0);
+    // The MFT refuses the ceiling: the failure is reported, retried a bounded number of times, then held.
+    for (int i = 0; i < 5; ++i) (void)gov.OnSecond(6'000'000 / 8 * 3, 6'000'000, 30);
+    rig.fake->rejectWith[CODECAPI_AVEncVideoMaxQP] = E_FAIL;
+    rig.fake->clear_calls();
+    int attempts = 0;
+    for (int tick = 0; tick < 6; ++tick) {
+      const auto r = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+      if (r.attempted) ++attempts;
+    }
+    check("[5] r3 S2: a refused ceiling is retried a bounded number of times (3), then held as degraded",
+          attempts == 3 && rig.encoder.governorQpApplyFailures == 3, "attempts=" + s(attempts));
+    check("[5] r3 S2: ...and the instance's recorded ceiling is NOT advanced to the refused value",
+          rig.encoder.codec.plan_max_qp() != gov.maxQp() || !rig.encoder.codec.rc_plan_effective(), s(rig.encoder.codec.plan_max_qp()));
+    // The next instance is seeded with the loop's current ceiling, so a rebuild does not fall back to 32.
+    rig.fake->rejectWith.clear();
+    (void)rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[5] a rebuild starts at the loop's current ceiling (seeded)",
+          rig.apply(60, 6'000'000) && rig.encoder.codec.instance_id() == 2 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == gov.maxQp(),
+          s(rig.fake->set_value(CODECAPI_AVEncVideoMaxQP)) + " vs " + s(gov.maxQp()));
+  }
+  {
+    // Static profile: the reconcile never issues a SetValue, whatever the governor's state.
+    Rig rig(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    check("[5n] nvidia first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    gov.Reconfigure(governor_config_for(RcProfile::NvidiaPreTypes, H264Encoder::configured_max_qp(), 44));
+    rig.fake->clear_calls();
+    const auto rc = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), H264Encoder::configured_max_qp());
+    gov.Reset();
+    const auto rc2 = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), H264Encoder::configured_max_qp());
+    check("[5n] r3 S2: a static-ceiling instance is never poked by the reconcile (0 SetValue, 44 stays)",
+          !rc.attempted && !rc2.attempted && rig.fake->count_set("maxQp") == 0 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 44);
+  }
+
   MFShutdown();
   CoUninitialize();
   std::printf("\nhost_encoder_apply_target_test: %s (%d checks, %d failed)\n", g_failed == 0 ? "PASS" : "FAILED", g_checks, g_failed);
