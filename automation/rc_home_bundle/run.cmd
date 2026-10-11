@@ -242,6 +242,66 @@ if "%NETDRIVE%"=="1" >>"%ID%" echo NOTE: %HERE:~0,2% is a network drive; the run
 set "RC=0"
 if /i "%MODE%"=="diag" goto :diag
 if /i "%MODE%"=="home4" goto :home4
+echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
+echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
+"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 18 --keep-dir --save-frames > "%OUT%\transitions.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\transitions.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE: no capture item for the harness window even with the visible fallback -- the matrix is skipped
+  >"%OUT%\matrix.exit" echo skipped-capture-unavailable
+  goto :done
+)
+if /i "%MODE%"=="quick" goto :done
+echo [2/2] matrix (5 scenes x 30/60 x 1.5/3/6, baseline vs candidate; ~20 min)...
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\matrix.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\matrix.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+goto :done
+
+:diag
+echo [diag] five short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
+echo [D1/5] control: textscroll 30fps 6M 1080p, candidate, 10 s
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 6000000 --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\d1_control.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\d1_control.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE in the control phase -- nothing else can be measured; stopping
+  goto :done
+)
+echo [D2/5] scaler: textscroll 30fps 1.5M, 1080p page -^> 720p encode through the GPU scaler, candidate then baseline, 10 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\d2_scaler.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\d2_scaler.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [D3/5] no-scaler: the same cell with a 1280x720 page, candidate then baseline, 10 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1280x720 --seconds 10 --keep-dir > "%OUT%\d3_noscaler.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\d3_noscaler.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [D4/5] motion: 60fps 6M 1080p, candidate first then baseline, 12 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\d4_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\d4_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [D5/5] transitions: down/up, fps, E-only, 16 s each
+"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir > "%OUT%\d5_transitions.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\d5_transitions.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+goto :done
+
+:home4
 echo [home4] eight short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
 set "DIAG=0"
 set "INCOMPLETE=0"
@@ -322,120 +382,6 @@ set "PHASE_RC=%errorlevel%"
 echo      exit %PHASE_RC%
 if not "%PHASE_RC%"=="0" set "RC=1"
 if "%INCOMPLETE%"=="1" set "RC=1"
-goto :done
-
-:done
-)
-if /i "%MODE%"=="quick" goto :done
-echo [2/2] matrix (5 scenes x 30/60 x 1.5/3/6, baseline vs candidate; ~20 min)...
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\matrix.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\matrix.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-goto :done
-
-:diag
-echo [diag] five short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
-echo [D1/5] control: textscroll 30fps 6M 1080p, candidate, 10 s
-"%E2E%" --host "%CAND%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 6000000 --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\d1_control.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\d1_control.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-if "%PHASE_RC%"=="3" (
-  echo      CAPTURE-UNAVAILABLE in the control phase -- nothing else can be measured; stopping
-  goto :done
-)
-echo [D2/5] scaler: textscroll 30fps 1.5M, 1080p page -^> 720p encode through the GPU scaler, candidate then baseline, 10 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\d2_scaler.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\d2_scaler.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [D3/5] no-scaler: the same cell with a 1280x720 page, candidate then baseline, 10 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1280x720 --seconds 10 --keep-dir > "%OUT%\d3_noscaler.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\d3_noscaler.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [D4/5] motion: 60fps 6M 1080p, candidate first then baseline, 12 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\d4_motion.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\d4_motion.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [D5/5] transitions: down/up, fps, E-only, 16 s each
-"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir > "%OUT%\d5_transitions.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\d5_transitions.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-goto :done
-
-:home4
-echo [home4] seven short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
-rem cmd expands %PHASE_RC% inside a parenthesised block at parse time (it came out empty on the first dry
-rem run: "exit " and an "ECHO is off." exit file), so the original-candidate phases use labels, not a block.
-if not exist "%ORIG%" goto :home4_noorig
-echo [H1/7] orig-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL candidate then baseline, 10 s each
-"%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h1_orig_720p.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h1_orig_720p.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-if "%PHASE_RC%"=="3" (
-  echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
-  goto :done
-)
-echo [H2/7] orig-motion: motion 60fps 6M 1080p, ORIGINAL candidate then baseline, 12 s each
-"%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h2_orig_motion.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h2_orig_motion.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-goto :home4_r9
-:home4_noorig
-echo [H1-H2/7] skipped: GNLinkStream.orig.exe is not beside run.cmd -- the original candidate's stall evidence is not collected
->"%OUT%\h1_orig_720p.exit" echo skipped-no-orig
->"%OUT%\h2_orig_motion.exit" echo skipped-no-orig
-:home4_r9
-echo [H3/7] r9-motion: motion 60fps 6M 1080p, r9 candidate then baseline, 12 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h3_r9_motion.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h3_r9_motion.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-if "%PHASE_RC%"=="3" (
-  echo      CAPTURE-UNAVAILABLE -- nothing else can be measured; stopping
-  goto :done
-)
-echo [H4/7] r9-text: textscroll 60fps 6M 1080p, r9 candidate then baseline, 12 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h4_r9_text.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h4_r9_text.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [H5/7] r9-720p: textscroll 30fps 1.5M through the GPU scaler, r9 candidate then baseline, 10 s each
-"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h5_r9_720p.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h5_r9_720p.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [H6/7] r9-trans: down/up, fps, E-only transitions, r9 candidate, 16 s each
-"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir > "%OUT%\h6_r9_trans.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\h6_r9_trans.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-if not "%PHASE_RC%"=="0" set "RC=1"
-echo [H7/7] cbr51: motion 60fps 6M with the CBR mode override, r9 candidate only, 12 s (a contrast row)
-set REMOTE60_NATIVE_RC_MODE_NUM=0
-"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h7_cbr51_motion.log" 2>&1
-set "PHASE_RC=%errorlevel%"
-set REMOTE60_NATIVE_RC_MODE_NUM=
->"%OUT%\h7_cbr51_motion.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC%
-rem H7 is a contrast row: its own checks (candidate-only absolute gates) do not decide the set's result.
 goto :done
 
 :done
