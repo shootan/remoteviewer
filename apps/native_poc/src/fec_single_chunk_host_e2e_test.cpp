@@ -642,9 +642,11 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     SessionVideoPipeline::Callbacks cb;
     std::atomic<uint64_t> lastDeliverUs{0};  // r8: when the host last delivered a frame (the hang detector's clock)
     std::atomic<uint32_t> deliveredAtomic{0};  // r9: the live-loop's copy of r.delivered (no data race with the ingress thread)
+    std::atomic<uint64_t> deliveredBytesAtomic{0};  // r9: payload bytes delivered, for the starvation trigger's "idle wire" test
     cb.deliver = [&](UdpH264AssembledFrame&& f) {
       ++r.delivered;
       deliveredAtomic.fetch_add(1, std::memory_order_relaxed);
+      deliveredBytesAtomic.fetch_add(f.payload.size(), std::memory_order_relaxed);
       lastDeliverUs.store(qpc_now_us(), std::memory_order_relaxed);
       if (r.firstSeq == 0) r.firstSeq = f.header.seq;
       if (lastDelivered != 0 && f.header.seq > lastDelivered + 1) {
@@ -896,9 +898,12 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
       // r9: the low-fps progress snapshot. The Home PC's stalled motion runs kept delivering ~1 small AU
       // per second (trailing kicks) after their capture publication stopped, so a 5 s silence never came.
       // Each second: if the fixture painted >= 10 times (a continuous scene -- a discrete one paints
-      // every ~2 s and is left alone) but <= 1 frame was delivered, for 3 seconds running, dump once.
+      // every ~2 s and is left alone), <= 1 frame was delivered AND the wire carried under a fifth of R
+      // (a saturated low-rate cell also delivers ~1 fps, but at R: that is the gate working, not a
+      // stall -- the Home stall delivered 72-byte AUs on an idle wire), for 3 seconds running, dump once.
       uint64_t nextSecondUs = liveStartUs + 1'000'000ull;
       uint32_t prevDelivered = 0;
+      uint64_t prevDeliveredBytes = 0;
       uint64_t prevPaints = target.paints();
       int lowFpsStreak = 0;
       while (qpc_now_us() < liveUntilUs) {
@@ -916,11 +921,14 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
           if (nowUs >= nextSecondUs) {
             nextSecondUs += 1'000'000ull;
             const uint64_t paintsNow = target.paints();
+            const uint64_t bytesNow = deliveredBytesAtomic.load(std::memory_order_acquire);
             const bool painting = paintsNow - prevPaints >= 10;
             const bool starving = deliveredNow - prevDelivered <= 1;
-            lowFpsStreak = (painting && starving) ? lowFpsStreak + 1 : 0;
+            const bool wireIdle = (bytesNow - prevDeliveredBytes) * 8 * 5 < static_cast<uint64_t>(bitrate);  // < R/5 this second
+            lowFpsStreak = (painting && starving && wireIdle) ? lowFpsStreak + 1 : 0;
             prevPaints = paintsNow;
             prevDelivered = deliveredNow;
+            prevDeliveredBytes = bytesNow;
             lowFps = lowFpsStreak >= 3;
           }
           if (silent || forced || lowFps) {
@@ -931,7 +939,7 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
               char why[200];
               std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, fixture paints=%llu, window-mode=%s)",
                             forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS"
-                                   : lowFps ? "fixture painting but <=1 frame/s delivered for 3 s (capture publication or encode starved)"
+                                   : lowFps ? "fixture painting, wire idle (<R/5) but <=1 frame/s delivered for 3 s (capture publication or encode starved)"
                                             : "host alive but no frame delivered",
                             deliveredNow, silentUs / 1e6, (unsigned long long)target.paints(), r.windowMode.c_str());
               r.hangDump = write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, why);
@@ -2060,8 +2068,12 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
 
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  // r9: offline mode -- read a hang dump back with symbols and exit. No hosts, no WSA/MF.
+  // r9: offline modes -- no hosts, no WSA/MF.
   for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--pe-id" && i + 1 < argc) {  // RSDS GUID/Age of an exe, for identity.txt
+      std::wstring exe(argv[i + 1], argv[i + 1] + std::strlen(argv[i + 1]));
+      return remote60::native_poc::e2e::pe_identity(exe);
+    }
     if (std::string(argv[i]) == "--dump-check" && i + 1 < argc) {
       std::wstring dump(argv[i + 1], argv[i + 1] + std::strlen(argv[i + 1]));
       std::wstring symbols;

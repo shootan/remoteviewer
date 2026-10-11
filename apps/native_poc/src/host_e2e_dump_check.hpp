@@ -382,4 +382,41 @@ inline int dump_check(const std::wstring& dumpPath, const std::wstring& symbolDi
   return ok ? 0 : 1;
 }
 
+// The RSDS (CodeView) record of a PE file on disk: PDB GUID/Age and name -- what identity.txt records
+// beside each exe hash so a dump's module can be matched to the PDB that was kept with that build.
+inline int pe_identity(const std::wstring& exePath) {
+  ImageFile img;
+  if (!img.open(exePath, 0, 0)) {
+    std::printf("PE-ID: %s: not a PE64 file or unreadable\n", narrow(exePath).c_str());
+    img.close();
+    return 1;
+  }
+  const IMAGE_DATA_DIRECTORY& dd = img.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+  int rc = 1;
+  if (dd.VirtualAddress && dd.Size >= sizeof(IMAGE_DEBUG_DIRECTORY)) {
+    // RVA -> file offset through the sections (the image is not mapped as an image here)
+    img.base = 0;
+    img.size = img.nt->OptionalHeader.SizeOfImage;
+    std::vector<uint8_t> dir(dd.Size);
+    if (img.read(dd.VirtualAddress, dir.data(), dd.Size)) {
+      const auto* e = reinterpret_cast<const IMAGE_DEBUG_DIRECTORY*>(dir.data());
+      for (size_t i = 0; i < dd.Size / sizeof(IMAGE_DEBUG_DIRECTORY); ++i) {
+        if (e[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW || e[i].PointerToRawData + e[i].SizeOfData > img.fileSize || e[i].SizeOfData < 24) continue;
+        const uint8_t* cv = img.data + e[i].PointerToRawData;
+        if (std::memcmp(cv, "RSDS", 4) != 0) continue;
+        GUID g{};
+        uint32_t age = 0;
+        std::memcpy(&g, cv + 4, sizeof(GUID));
+        std::memcpy(&age, cv + 20, 4);
+        std::string pdb(reinterpret_cast<const char*>(cv + 24), strnlen(reinterpret_cast<const char*>(cv + 24), e[i].SizeOfData - 24));
+        std::printf("PE-ID: %s rsds=%s age=%u pdb=%s\n", narrow(base_name(exePath)).c_str(), guid_str(g).c_str(), age, pdb.c_str());
+        rc = 0;
+      }
+    }
+  }
+  if (rc != 0) std::printf("PE-ID: %s rsds=none (no CodeView debug directory: built without a PDB)\n", narrow(base_name(exePath)).c_str());
+  img.close();
+  return rc;
+}
+
 }  // namespace remote60::native_poc::e2e

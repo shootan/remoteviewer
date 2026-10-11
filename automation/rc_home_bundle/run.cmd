@@ -193,6 +193,13 @@ if exist "%ORIG%" (
 ) else (
   >>"%ID%" echo orig=absent
 )
+rem r9 (6): the PDB identity (RSDS GUID/Age) of each host exe, so a hang dump's module can be matched to the
+rem PDB kept with that build (the PDBs themselves travel with the verifier's bundle, not in the results).
+>>"%ID%" echo == pdb identity (RSDS GUID/Age per exe) ==
+>>"%ID%" 2>&1 "%E2E%" --pe-id "%CAND%"
+>>"%ID%" 2>&1 "%E2E%" --pe-id "%BASE%"
+if exist "%ORIG%" >>"%ID%" 2>&1 "%E2E%" --pe-id "%ORIG%"
+>>"%ID%" 2>&1 "%E2E%" --pe-id "%E2E_SRC%"
 >>"%ID%" echo == os ==
 >>"%ID%" ver
 rem wmic is gone from Windows 11 24H2 (optional feature) and wrote UTF-16 when it existed: CIM via
@@ -276,28 +283,31 @@ goto :done
 
 :home4
 echo [home4] seven short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
-if exist "%ORIG%" (
-  echo [H1/7] orig-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL candidate then baseline, 10 s each
-  "%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h1_orig_720p.log" 2>&1
-  set "PHASE_RC=%errorlevel%"
-  >"%OUT%\h1_orig_720p.exit" echo %PHASE_RC%
-  echo      exit %PHASE_RC%
-  if not "%PHASE_RC%"=="0" set "RC=1"
-  if "%PHASE_RC%"=="3" (
-    echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
-    goto :done
-  )
-  echo [H2/7] orig-motion: motion 60fps 6M 1080p, ORIGINAL candidate then baseline, 12 s each
-  "%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h2_orig_motion.log" 2>&1
-  set "PHASE_RC=%errorlevel%"
-  >"%OUT%\h2_orig_motion.exit" echo %PHASE_RC%
-  echo      exit %PHASE_RC%
-  if not "%PHASE_RC%"=="0" set "RC=1"
-) else (
-  echo [H1-H2/7] skipped: GNLinkStream.orig.exe is not beside run.cmd -- the original candidate's stall evidence is not collected
-  >"%OUT%\h1_orig_720p.exit" echo skipped-no-orig
-  >"%OUT%\h2_orig_motion.exit" echo skipped-no-orig
+rem cmd expands %PHASE_RC% inside a parenthesised block at parse time (it came out empty on the first dry
+rem run: "exit " and an "ECHO is off." exit file), so the original-candidate phases use labels, not a block.
+if not exist "%ORIG%" goto :home4_noorig
+echo [H1/7] orig-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL candidate then baseline, 10 s each
+"%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h1_orig_720p.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h1_orig_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
+  goto :done
 )
+echo [H2/7] orig-motion: motion 60fps 6M 1080p, ORIGINAL candidate then baseline, 12 s each
+"%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h2_orig_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h2_orig_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+goto :home4_r9
+:home4_noorig
+echo [H1-H2/7] skipped: GNLinkStream.orig.exe is not beside run.cmd -- the original candidate's stall evidence is not collected
+>"%OUT%\h1_orig_720p.exit" echo skipped-no-orig
+>"%OUT%\h2_orig_motion.exit" echo skipped-no-orig
+:home4_r9
 echo [H3/7] r9-motion: motion 60fps 6M 1080p, r9 candidate then baseline, 12 s each
 "%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h3_r9_motion.log" 2>&1
 set "PHASE_RC=%errorlevel%"

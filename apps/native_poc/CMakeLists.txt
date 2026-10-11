@@ -112,14 +112,17 @@ add_executable(remote60_native_video_host_poc
   src/secure_input_broker.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
-# encoder-rc-budget r9: a PDB beside the shipped host so a hang dump taken by the e2e harness on another
-# machine can be read back with names (the Home PC's main-loop hangs left only "phase=Loop"). /Zi does
-# not change code generation; /DEBUG with /OPT:REF,ICF keeps the Release linker's dead-code and COMDAT
-# folding so the image is the same shape as before, plus a debug directory (RSDS GUID/Age) that names
-# the PDB. Explicit flags rather than MSVC_DEBUG_INFORMATION_FORMAT: that property needs policy CMP0141
-# (CMake 3.25) and this tree's minimum is 3.20, so the property is silently ignored here. The PDB is a
-# build artefact to keep WITH the exe hash, never installed.
-if(MSVC)
+# encoder-rc-budget r9 (⑥): OPT-IN diagnostic PDBs for the host and the e2e harness, so a hang dump taken
+# by the harness on another machine can be read back with names (the Home PC's main-loop hangs left only
+# "phase=Loop"). Default OFF: the shipping build is unchanged. With -DREMOTE60_DIAG_PDB=ON the Release
+# host gets /Zi (no change to code generation) and /DEBUG with /OPT:REF,ICF (the Release linker's
+# dead-code and COMDAT folding kept, so the image is the same shape) plus a debug directory (RSDS GUID/
+# Age) that names the PDB -- the exe hash differs from the OFF build by that directory. Explicit flags
+# rather than MSVC_DEBUG_INFORMATION_FORMAT: that property needs policy CMP0141 (CMake 3.25) and this
+# tree's minimum is 3.20, so the property is silently ignored here. The PDB is a build artefact to keep
+# WITH the exe hash (the bundle's identity.txt records the GUID/Age), never installed.
+option(REMOTE60_DIAG_PDB "Emit PDBs for GNLinkStream and the e2e harness in Release (diagnostic bundles only)" OFF)
+if(MSVC AND REMOTE60_DIAG_PDB)
   target_compile_options(remote60_native_video_host_poc PRIVATE "$<$<CONFIG:Release>:/Zi>")
   target_link_options(remote60_native_video_host_poc PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
 endif()
@@ -2363,10 +2366,19 @@ target_link_libraries(remote60_fec_single_chunk_host_e2e_test PRIVATE
 if(MSVC)
   target_compile_options(remote60_fec_single_chunk_host_e2e_test PRIVATE /utf-8)
 endif()
-# r9: the harness with a PDB too (same reasons; it is the process that reads the dumps back).
-if(MSVC)
+# r9 (⑥): the harness with a PDB too under the same opt-in.
+if(MSVC AND REMOTE60_DIAG_PDB)
   target_compile_options(remote60_fec_single_chunk_host_e2e_test PRIVATE "$<$<CONFIG:Release>:/Zi>")
   target_link_options(remote60_fec_single_chunk_host_e2e_test PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
+endif()
+
+# r9 (⑥): the dump reader -- the Windows Debugger Engine (dbgeng.dll ships with Windows) prints every
+# thread's symbolised stack from a hang dump with the PDB directory given; test-support, never shipped.
+add_executable(remote60_dump_stacks src/dump_stacks_tool.cpp)
+target_include_directories(remote60_dump_stacks PRIVATE src)
+target_link_libraries(remote60_dump_stacks PRIVATE dbgeng ole32)
+if(MSVC)
+  target_compile_options(remote60_dump_stacks PRIVATE /utf-8)
 endif()
 
 # quality r1: ABR with a client that never sends decode metrics, APK-style present-only, or stops.
