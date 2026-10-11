@@ -66,6 +66,8 @@
 
 #include <mfapi.h>
 #include <mmsystem.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")  // encoder-rc-budget r8: the hang dump of a stalled host
 
 #pragma comment(lib, "mfplat.lib")
 
@@ -226,6 +228,7 @@ struct RunResult {
   std::string hostLastLine;          // the last host.log line, the exit reason in the host's words
   std::string windowMode;            // fixture window mode this run used (invisible / visible-plain)
   std::string probeHr;               // the harness's own WGC CreateForWindow HRESULT for that mode (wgc-probe)
+  std::string hangDump;              // r8: path of the minidump taken when the host stopped delivering (empty = none)
   bool hello = false;
   bool nackNegotiated = false;
   HostAccount host;
@@ -366,6 +369,43 @@ void delete_saved_frames(const std::wstring& runDir) {
   do { if (DeleteFileW((runDir + fd.cFileName).c_str())) ++n; } while (FindNextFileW(h, &fd));
   FindClose(h);
   std::printf("monitor-fallback guard: removed %u saved frame(s) from %s\n", n, std::string(runDir.begin(), runDir.end()).c_str());
+}
+
+// encoder-rc-budget r8: the Home PC's hosts (candidate AND baseline) stopped mid-run with the watchdog's
+// "main-loop hang phase=Loop" and nothing else to go on -- the phase says only "somewhere in the loop".
+// So when a host is alive but has delivered nothing for kHangDumpAfterUs (the first frame, or the next
+// one), the harness writes a minidump of the HOST process into the run directory before the host's own
+// watchdog (10 s) kills it: thread stacks, handle data, unloaded modules -- a few MB, not full memory.
+// Open it with the matching PDB (the exe hash is in identity.txt) in WinDbg/cdb: `!analyze -v` /
+// `~*k`. Test-support only; it needs no product change and takes nothing from a healthy run.
+constexpr uint64_t kHangDumpAfterUs = 5'000'000;
+std::string write_hang_dump(HANDLE process, DWORD pid, const std::wstring& runDir, const char* why) {
+  wchar_t name[64];
+  std::swprintf(name, 64, L"hang-pid%lu.dmp", static_cast<unsigned long>(pid));
+  const std::wstring path = runDir + name;
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    std::printf("HANG-DUMP: could not create %s (gle=%lu)\n", std::string(path.begin(), path.end()).c_str(), GetLastError());
+    return std::string();
+  }
+  const MINIDUMP_TYPE type = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithHandleData | MiniDumpWithUnloadedModules |
+                                                        MiniDumpWithIndirectlyReferencedMemory);
+  const BOOL ok = MiniDumpWriteDump(process, pid, file, type, nullptr, nullptr, nullptr);
+  const DWORD gle = ok ? 0 : GetLastError();
+  LARGE_INTEGER size{};
+  GetFileSizeEx(file, &size);
+  CloseHandle(file);
+  std::printf("HANG-DUMP: %s -> %s (%s, %lld bytes%s%lu)\n", why, std::string(path.begin(), path.end()).c_str(), ok ? "written" : "FAILED",
+              static_cast<long long>(size.QuadPart), ok ? ", gle=" : ", gle=", gle);
+  return ok ? std::string(path.begin(), path.end()) : std::string();
+}
+// Test-support only: REMOTE60_E2E_HANG_DUMP_AFTER_MS=<n> forces a dump n ms into the live window of
+// every run even though frames flow -- to prove the dump path on a machine whose hosts do not hang.
+uint64_t forced_hang_dump_after_us() {
+  char buf[32]{};
+  const DWORD n = GetEnvironmentVariableA("REMOTE60_E2E_HANG_DUMP_AFTER_MS", buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf)) return 0;
+  return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10)) * 1000ull;
 }
 
 int gCaptureUnavailableRuns = 0;  // runs whose capture item could not be created even after the fallback
@@ -589,8 +629,10 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     cfg.holdUs = r.nackNegotiated ? 120000 : 0;
     cfg.maxConcurrent = 8;
     SessionVideoPipeline::Callbacks cb;
+    std::atomic<uint64_t> lastDeliverUs{0};  // r8: when the host last delivered a frame (the hang detector's clock)
     cb.deliver = [&](UdpH264AssembledFrame&& f) {
       ++r.delivered;
+      lastDeliverUs.store(qpc_now_us(), std::memory_order_relaxed);
       if (r.firstSeq == 0) r.firstSeq = f.header.seq;
       if (lastDelivered != 0 && f.header.seq > lastDelivered + 1) {
         ++r.gaps;
@@ -834,8 +876,26 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     // now, and the one line that means the host is capturing the USER'S SCREEN (it could not find our
     // window and fell back to the monitor) ends it now too, by terminating the host.
     {
-      const uint64_t liveUntilUs = qpc_now_us() + static_cast<uint64_t>(seconds) * 1'000'000ull;
+      const uint64_t liveStartUs = qpc_now_us();
+      const uint64_t liveUntilUs = liveStartUs + static_cast<uint64_t>(seconds) * 1'000'000ull;
+      const uint64_t forcedDumpUs = forced_hang_dump_after_us();
+      bool dumped = false;
       while (qpc_now_us() < liveUntilUs) {
+        if (!dumped) {
+          // r8: alive but silent -- the first frame never came, or the frames stopped. One dump per run.
+          const uint64_t nowUs = qpc_now_us();
+          const uint64_t last = std::max(lastDeliverUs.load(std::memory_order_relaxed), liveStartUs);
+          const bool silent = nowUs - last >= kHangDumpAfterUs;
+          const bool forced = forcedDumpUs != 0 && nowUs - liveStartUs >= forcedDumpUs;
+          if (silent || forced) {
+            char why[160];
+            std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, window-mode=%s)",
+                          forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS" : "host alive but no frame delivered",
+                          r.delivered, (nowUs - last) / 1e6, r.windowMode.c_str());
+            r.hangDump = write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, why);
+            dumped = true;
+          }
+        }
         if (WaitForSingleObject(hostPi.hProcess, 200) == WAIT_OBJECT_0) {
           r.hostExitedEarly = true;
           DWORD code = 0;
@@ -894,9 +954,9 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   r.hostLastLine = host_log_last_line(hostLogPath);
   r.captureItemFailed = host_log_contains(hostLogPath, "capture item create failed");
   if (host_log_contains(hostLogPath, "fallback=monitor")) r.monitorFallbackSeen = true;
-  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s last=\"%s\"\n",
+  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s hang-dump=%s last=\"%s\"\n",
               r.hostExitedEarly ? 1 : 0, r.hostExitCode, r.captureItemFailed ? 1 : 0, r.monitorFallbackSeen ? 1 : 0,
-              r.windowMode.c_str(), r.probeHr.c_str(), r.hostLastLine.c_str());
+              r.windowMode.c_str(), r.probeHr.c_str(), r.hangDump.empty() ? "none" : r.hangDump.c_str(), r.hostLastLine.c_str());
   if (r.monitorFallbackSeen) delete_saved_frames(runDir);
   check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
         r.hostLastLine);

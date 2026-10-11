@@ -51,6 +51,9 @@ rem                    instance, realtime decode gaps, event-matched change->pic
 rem                    PSNR (whole picture + text rows), IDR sizes, payload actually sent.
 rem   test-scratch\    per run: host.log and event_*.pgm (the first decoded frame of each change event,
 rem                    visible Y plane) -- the actual text the viewer got, for a human to read.
+rem                    hang-pid<N>.dmp: a minidump of the HOST (thread stacks) taken by the harness when a
+rem                    live host delivered no frame for 5 s -- the stuck stack of a "main-loop hang". Open
+rem                    with the PDB of the exe whose hash identity.txt records (WinDbg: ~*k).
 rem   identity.txt     hashes of the three exes (hash lines only), OS version/build (CIM), GPU + driver
 rem                    (CIM), session list, the REMOTE60_* variable NAMES still set, folder + a
 rem                    network-drive note. One encoding: UTF-8 (chcp 65001), ASCII in practice.
