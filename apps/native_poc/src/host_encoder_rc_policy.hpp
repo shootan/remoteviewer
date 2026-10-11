@@ -165,9 +165,11 @@ inline RateGovernorConfig governor_config_for(RcProfile profile, uint32_t config
 // flight. ABR, M9, the governor's fps stage and the user's tune can each ask within the same second,
 // so requests are COALESCED: the first one past the minimum interval is adopted now; one that arrives
 // inside the interval is deferred to the interval's end and the LATEST target wins there. Same target
-// twice = nothing. The interval is the knob below (2 s: longer than the ABR/M9 hysteresis tick, short
-// enough that a user's bitrate change is visible within two seconds). Failure retry is NOT here: that
-// stays with ApplyTarget's existing bounded back-off.
+// twice = nothing. The interval is the knob below. 2 s is a POLICY VALUE AWAITING FIELD VERIFICATION
+// (longer than the ABR/M9 hysteresis tick, short enough that a user's bitrate change is visible within
+// two seconds); it has not yet been measured on an NVIDIA instance against the stall it is meant to
+// avoid, and it moves if that measurement says so. Failure retry is NOT here: that stays with
+// ApplyTarget's existing bounded back-off.
 struct EncoderRetargetScheduler {
   uint64_t minIntervalUs = 2'000'000;
   uint64_t lastReinitUs = 0;      // qpc of the last encoder (re)initialisation, 0 = never

@@ -36,6 +36,7 @@ int main() {
           b.headerFactorX1000 == expectHeaderX1000, s(b.headerFactorX1000) + " expected " + s(expectHeaderX1000));
     check("the 6 Mbps seed lands near 0.70 R (0.66..0.74), a consequence of the geometry not a constant",
           b.encoderBps > 6'000'000 * 66 / 100 && b.encoderBps < 6'000'000 * 74 / 100, s(b.encoderBps));
+    check("the packed chunk header is 88 bytes (what the doc values and the default geometry state)", hdr == 88 && WireGeometry{}.chunkHeaderBytes == hdr, s(hdr));
     check("E is strictly below R", b.encoderBps < 6'000'000);
     check("the NACK reserve is taken from R once", b.wireAfterReserveBps == 5'700'000, s(b.wireAfterReserveBps));
   }
@@ -76,6 +77,55 @@ int main() {
     const EncoderBudgetBreakdown n = encoder_budget_for(1'199'200, shipped, noMargins);
     check("with both allowances at 0, E is exactly R over the fec and header factors",
           n.encoderBps == n.payloadWireBps && n.wireAfterReserveBps == 1'199'200, s(n.encoderBps));
+  }
+
+  // ------------------------------------------------------------------ r2: the per-AU model at a frame rate
+  {
+    const EncoderBudgetBreakdown asym = encoder_budget_for(1'500'000, shipped, EncoderBudgetPolicy{});
+    const EncoderBudgetBreakdown at60 = encoder_budget_for(1'500'000, shipped, EncoderBudgetPolicy{}, 60);
+    // Codex's counter-example: an encoder holding the asymptotic E exactly, at 60 fps, costs more wire
+    // than R -- two data chunks plus a full-stride parity plus three headers per ~2 KB AU.
+    const uint64_t asymWireAt60 = wire_bps_at_fps(asym.payloadWireBps, 60, shipped);
+    check("1.5 Mbps / 60 fps: the asymptotic payload would cost MORE wire than the budget (the ceil cost the asymptote ignores)",
+          asymWireAt60 > asym.wireAfterReserveBps, s(asymWireAt60) + " vs " + s(asym.wireAfterReserveBps));
+    check("...so the per-AU model hands the encoder less than the asymptote", at60.encoderBps < asym.encoderBps,
+          s(at60.encoderBps) + " < " + s(asym.encoderBps));
+    check("...and its own wire cost at 60 fps fits the budget", at60.wireAtFpsBps <= at60.wireAfterReserveBps && at60.wireAtFpsBps > 0,
+          s(at60.wireAtFpsBps) + " <= " + s(at60.wireAfterReserveBps));
+    check("...the AU it priced is E/8/fps", at60.auBytesAtFps == at60.payloadWireBps / 8 / 60, s(at60.auBytesAtFps));
+    const EncoderBudgetBreakdown at30big = encoder_budget_for(6'000'000, shipped, EncoderBudgetPolicy{}, 30);
+    const EncoderBudgetBreakdown asym6 = encoder_budget_for(6'000'000, shipped, EncoderBudgetPolicy{});
+    // ~18 KB AUs: 17 chunks -> a THIRD parity group that is one chunk deep; the ceil costs ~5% here,
+    // which is exactly the cost the asymptote cannot see (and why the product uses this model).
+    check("6 Mbps / 30 fps (AUs of ~18 KB): the per-AU model is below the asymptote and within 12% of it",
+          at30big.encoderBps <= asym6.encoderBps && at30big.encoderBps >= asym6.encoderBps * 88 / 100,
+          s(at30big.encoderBps) + " vs " + s(asym6.encoderBps));
+    check("the model is monotone in the frame rate (more frames per second, less per frame and more header cost)",
+          encoder_budget_for(3'000'000, shipped, EncoderBudgetPolicy{}, 60).encoderBps <=
+              encoder_budget_for(3'000'000, shipped, EncoderBudgetPolicy{}, 30).encoderBps);
+    // One AU's exact cost, as the product chunks it: 2134 B -> 2 chunks of stride 1112 + 1 parity of 1112 + 3 x (88+28).
+    const uint32_t hdr = static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+    const uint64_t stride = 1200 - hdr;
+    check("wire_bytes_per_au matches udp_chunk_geometry for a 2-chunk AU", wire_bytes_per_au(2134, shipped) == 2134 + stride + 3 * (hdr + 28),
+          s(wire_bytes_per_au(2134, shipped)));
+    check("...and for a single-chunk AU the parity is the AU's own size (tight stride)",
+          wire_bytes_per_au(500, shipped) == 500 + 500 + 2 * (hdr + 28), s(wire_bytes_per_au(500, shipped)));
+  }
+
+  // ------------------------------------------------------------------ r2 (Codex R4): the governor's unit
+  {
+    // 2.5 Mbps of generated PAYLOAD at R = 3 Mbps / 30 fps: against R it reads 83% ("under", the loop
+    // would raise quality while the wire is already full); against the payload the wire can carry it
+    // reads over 100% (in band or over). The governor must be fed the latter.
+    const uint32_t payloadBudget = encoder_budget_for(3'000'000, shipped, EncoderBudgetPolicy{}, 30).payloadWireBps;
+    check("the payload budget at R=3M/30fps sits between 2.0 and 2.5 Mbps (per-AU cost at ~9 KB AUs)",
+          payloadBudget > 2'000'000 && payloadBudget < 2'500'000, s(payloadBudget));
+    const uint64_t vsWire = 2'500'000ULL * 100 / 3'000'000ULL;
+    const uint64_t vsPayload = 2'500'000ULL * 100 / payloadBudget;
+    check("2.5 Mbps payload: 83% of R but >= 100% of the payload budget -- the unit the loop is now compared in",
+          vsWire == 83 && vsPayload >= 100, "vsWire=" + s(vsWire) + "% vsPayload=" + s(vsPayload) + "%");
+    check("E is the payload budget with the overshoot slack removed (E == budget / 1.12)",
+          encoder_budget_for(3'000'000, shipped, EncoderBudgetPolicy{}, 30).encoderBps == payloadBudget * 100 / 112);
   }
 
   // ------------------------------------------------------------------ C2: identity -> profile
