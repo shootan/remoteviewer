@@ -117,7 +117,7 @@ int main() {
     check("[1] NVIDIA: the plan is applied once, not pre AND post (5 SetValues)", rc_set_count(*fake) == 5,
           std::to_string(rc_set_count(*fake)));
     check("[1] the product logs the plan with profile, stage and readback state",
-          has(log, "rc-plan") && has(log, "profile=nvidia_pre_types") && has(log, "stage=pre-types") && has(log, "stage=post-start"),
+          has(log, "rc-plan") && has(log, "profile=nvidia_pre_types") && has(log, "stage=pre-types") && has(log, "stage=post-types"),
           log.substr(0, 400));
     check("[1] ...and the readback state is accepted (the fake reports what was set)", has(log, "state=accepted"));
 
@@ -178,16 +178,96 @@ int main() {
     const std::string log = capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
     check("[5] initialize still succeeds when the readback disagrees (a mismatch is not a failure)", ok);
     check("[5] the product classifies the readback as a mismatch and names the fields",
-          has(log, "state=mismatch") && has(log, "maxQp"), log.substr(log.find("stage=post-start") == std::string::npos ? 0 : log.find("stage=post-start"), 300));
+          has(log, "state=mismatch") && has(log, "maxQp"), log.substr(log.find("stage=post-types") == std::string::npos ? 0 : log.find("stage=post-types"), 300));
+    // r2: the readback (and its one retry) happen BEFORE the stream is started -- nothing queries a
+    // running async instance. The fake records ProcessMessage(BEGIN_STREAMING=0x..., START) after them.
+    {
+      int lastGet = -1, firstStart = -1;
+      for (size_t i = 0; i < fake->calls.size(); ++i) {
+        if (fake->calls[i].rfind("GetValue:", 0) == 0) lastGet = static_cast<int>(i);
+        if (firstStart < 0 && fake->calls[i] == "ProcessMessage:" + std::to_string(static_cast<unsigned>(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING)))
+          firstStart = static_cast<int>(i);
+      }
+      check("[5] r2: every readback GetValue precedes BEGIN_STREAMING (no query on a running instance)",
+            lastGet >= 0 && firstStart > lastGet, "lastGet=" + std::to_string(lastGet) + " beginStreaming=" + std::to_string(firstStart));
+    }
     // Bounded: the pre-types plan (5) plus at most ONE post-type re-set of the mismatched fields (4).
     const size_t sets = rc_set_count(*fake);
     check("[5] at most one bounded post-type re-set of the mismatched fields (5 + <=4 SetValues, no loop)",
           sets >= 5 && sets <= 9, std::to_string(sets));
     check("[5] the retry is counted in the log, once", has(log, "retried=1"));
     fake->clear_calls();
+    const RcRuntimeResult rbMean = enc.reconfigure_bitrate(kE);
+    const RcRuntimeResult rbQp = enc.set_max_qp(44);
+    check("[5] ...and the running instance is not poked again because of it", rc_set_count(*fake) == 0, join(fake->calls));
+    // r2 (Codex R2): a plan the MFT did NOT confirm is not "the plan the instance runs". The same
+    // request is therefore not Unchanged -- on this profile it is Unproven (nothing issued), never a
+    // claim that 44 is in force while the readback says 51.
+    check("[5] r2: after a readback mismatch the same request is NOT reported Unchanged (S_OK is not applied)",
+          rbMean != RcRuntimeResult::Unchanged && rbQp != RcRuntimeResult::Unchanged,
+          std::string("mean=") + std::to_string(static_cast<int>(rbMean)) + " qp=" + std::to_string(static_cast<int>(rbQp)));
+    check("[5] r2: the instance's state is Mismatch, not Accepted", enc.rc_plan_state() == RcPlanState::Mismatch);
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
+
+  // ------------------------------------------------------------------ [7] r2: a rejected Set is not Applied (legacy)
+  {
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_1002", L"AMDh264Encoder");
+    fake->rejectWith[CODECAPI_AVEncVideoMaxQP] = E_FAIL;  // the MFT refuses the ceiling property
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    (void)capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[7] initialize succeeds even though MaxQP is refused (a refused property is not a failed encoder)", ok);
+    fake->clear_calls();
+    const RcRuntimeResult r1 = enc.set_max_qp(35);
+    check("[7] r2: a live ceiling change whose SetValue is REJECTED is reported Failed, not Applied",
+          r1 == RcRuntimeResult::Failed, std::to_string(static_cast<int>(r1)));
+    const RcRuntimeResult r2 = enc.set_max_qp(35);
+    check("[7] r2: ...and asking again is not Unchanged (nothing is in force to be unchanged)",
+          r2 != RcRuntimeResult::Unchanged, std::to_string(static_cast<int>(r2)));
+    check("[7] r2: the refusal is visible as a mismatch/unknown plan state, not Accepted",
+          enc.rc_plan_state() != RcPlanState::Accepted);
+    // The mean, which the MFT accepts, still works live and reports what it did.
+    const RcRuntimeResult r3 = enc.reconfigure_bitrate(kE / 2);
+    check("[7] a live mean change the MFT accepts is Applied", r3 == RcRuntimeResult::Applied && fake->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE / 2);
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
+  {
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_1002", L"AMDh264Encoder");
+    fake->rejectWith[CODECAPI_AVEncCommonRateControlMode] = E_FAIL;  // the mode is refused
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    (void)capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[7b] initialize succeeds with the mode refused", ok);
+    check("[7b] r2: a refused RCMode leaves the plan state not Accepted", enc.rc_plan_state() != RcPlanState::Accepted);
+    const RcRuntimeResult r1 = enc.reconfigure_bitrate(kE);
+    check("[7b] r2: the same mean on an instance whose plan was not accepted is not Unchanged", r1 != RcRuntimeResult::Unchanged,
+          std::to_string(static_cast<int>(r1)));
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
+  {
+    // readback unknown (the MFT reports nothing): recorded as unknown, no loop, and the same plan IS
+    // treated as the instance's (a Set the MFT accepted and cannot report is not a mismatch).
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    fake->readbackUnsupported = true;
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    const std::string log = capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[7c] initialize succeeds when the MFT cannot report its values", ok);
+    check("[7c] r2: the state is Unknown and logged as such, with no retry", enc.rc_plan_state() == RcPlanState::Unknown && has(log, "state=unknown") && has(log, "retried=0"));
+    fake->clear_calls();
     (void)enc.reconfigure_bitrate(kE);
     (void)enc.set_max_qp(44);
-    check("[5] ...and the running instance is not poked again because of it", rc_set_count(*fake) == 0, join(fake->calls));
+    check("[7c] r2: unknown is not mismatch: the same plan issues nothing (no re-set loop)", rc_set_count(*fake) == 0, join(fake->calls));
     enc.shutdown();
     enc.set_transform_for_test(nullptr);
     fake->Release();

@@ -246,6 +246,9 @@ class H264Encoder {
   RcProfile rc_profile() const { return rcProfile_; }
   const RcPlan& rc_plan() const { return rcPlan_; }
   RcPlanState rc_plan_state() const { return rcPlanState_; }
+  bool rc_set_accepted() const { return rcSetAccepted_; }
+  /** The requested plan is what the instance runs: Sets accepted and no known readback mismatch. */
+  bool rc_plan_effective() const { return rcSetAccepted_ && rcPlanState_ != RcPlanState::Mismatch; }
   const MftIdentity& identity() const { return identity_; }
   /** The mean E this instance was configured with (what the MFT was told, not what it produces). */
   uint32_t configured_bitrate() const { return bitrate_; }
@@ -330,8 +333,17 @@ class H264Encoder {
   MftIdentity identity_;
   RcProfile rcProfile_ = RcProfile::Legacy;
   RcPlan rcPlan_;
-  bool rcPlanApplied_ = false;  // the plan above is what the running instance holds (no-op basis)
+  // r2 (Codex R2): three separate facts about rcPlan_, never folded into one bool.
+  //   rcPlan_        -- what was REQUESTED of the instance (the last plan issued to it);
+  //   rcSetAccepted_ -- every SetValue of that plan returned S_OK (mode and MaxQP included);
+  //   rcPlanState_   -- what the MFT READS BACK against it: Accepted / Mismatch / Unknown.
+  // "The instance runs this plan" (rc_plan_effective) needs the Sets accepted and no known mismatch;
+  // Unknown (the MFT reports nothing) is tolerated there and said so in the log, never turned into a
+  // rebuild loop. A rejected Set or a known mismatch is never reported as Applied or Unchanged.
+  bool rcSetAccepted_ = false;
   RcPlanState rcPlanState_ = RcPlanState::Unknown;
+  bool lastRateSetOk_ = false;  // the last apply_rate_control: mean/peak/VBV SetValues accepted
+  bool lastQpSetOk_ = false;    // ... and the MaxQP SetValue (true when none was requested)
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)

@@ -1668,15 +1668,36 @@ bool H264Encoder::apply_rate_control(const char* reason) {
             << " readbackMode=" << rbMode << " readbackMean=" << rbMean << " readbackPeak=" << rbPeak
             << " readbackVbv=" << rbVbv << " readbackMaxQp=" << rbMaxQp
             << "\n";
-  // encoder-rc-budget C3: what this instance now holds is the no-op basis for the next call.
+  // encoder-rc-budget C3 / r2 R2: what was requested, whether EVERY Set was accepted (the mode and
+  // the ceiling included -- `ok` above covers mean/peak/VBV only), and what the readback just taken
+  // says. The no-op basis for the next call is the effective plan, not the request.
   rcPlan_.rcMode = rcMode;
   rcPlan_.meanBps = mean;
   rcPlan_.peakBps = peak;
   rcPlan_.vbvBytes = vbvBytes;
   rcPlan_.maxQpSet = maxQp > 0 && maxQp <= 51;
   rcPlan_.maxQp = rcPlan_.maxQpSet ? maxQp : 0;
-  rcPlanApplied_ = ok;
-  return ok;
+  const bool allAccepted = ok && rcSet && (!rcPlan_.maxQpSet || qpSet);
+  rcSetAccepted_ = allAccepted;
+  // What each runtime caller asked about: the mean path (mean/peak/VBV) and the ceiling path report
+  // their OWN acceptance, so a ceiling the MFT refuses does not turn every accepted mean change into
+  // a "failure" that rebuilds the instance -- while the effective-plan basis above stays strict.
+  lastRateSetOk_ = ok;
+  lastQpSetOk_ = !rcPlan_.maxQpSet || qpSet;
+  {
+    bool mismatch = false, unknown = false;
+    auto judge = [&](long long got, long long want) {
+      if (got < 0) unknown = true;
+      else if (got != want) mismatch = true;
+    };
+    judge(rbMode, rcMode);
+    judge(rbMean, mean);
+    judge(rbPeak, peak);
+    judge(rbVbv, vbvBytes);
+    if (rcPlan_.maxQpSet) judge(rbMaxQp, maxQp);
+    rcPlanState_ = mismatch ? RcPlanState::Mismatch : (unknown ? RcPlanState::Unknown : RcPlanState::Accepted);
+  }
+  return ok;  // unchanged contract for the init caller: the mean/peak/VBV acceptance
 }
 
 // ------------------------------------------------------------------ encoder-rc-budget C2/C3
@@ -1803,7 +1824,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   // post-type SetValue after every rebuild (C4).
   maxQpOverride_ = initialMaxQp_;
   rcPlan_ = RcPlan{};
-  rcPlanApplied_ = false;
+  rcSetAccepted_ = false;
   rcPlanState_ = RcPlanState::Unknown;
   stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
@@ -1853,7 +1874,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   if (rcProfile_ == RcProfile::NvidiaPreTypes) {
     // Before the media types: on this MFT that is the only point at which mode/peak/VBV/MaxQP are
     // applied (Home PC probe v2, 2026-10-11). Set once; not re-issued after the types.
-    rcPlanApplied_ = apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);
+    rcSetAccepted_ = apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);
   } else if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) {
     // quality r6 diagnostic switch (legacy profile only): the rate control also before the media types.
     (void)apply_rate_control("pre_types");
@@ -1865,30 +1886,36 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   }
   codec_debug_log("encoder initialize: types configured");
   apply_low_latency_codec_api();
-  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-  codec_debug_log("encoder initialize: stream started");
-  started_ = true;
   {
-    // What the instance holds now, against the plan. On the NVIDIA profile a mismatch gets ONE
-    // post-type re-set of the disagreeing fields and one more readback -- bounded to this initialize,
-    // never a loop, never a reason to rebuild (b: a readback that is not supported is Unknown, not a
-    // mismatch). The legacy profile is classified only; apply_rate_control already logged its own.
+    // What the instance holds after the types, against the plan -- read BEFORE the stream is started,
+    // so no GetValue touches an async MFT that may already be producing (r2: the post-start readback
+    // was the one new call on the output path of a running instance; the epoch hold test is where
+    // that would show). On the NVIDIA profile a mismatch gets ONE post-type re-set of the disagreeing
+    // fields and one more readback -- bounded to this initialize, never a loop, never a reason to
+    // rebuild (b: a readback that is not supported is Unknown, not a mismatch). The legacy profile is
+    // classified from the same readback; apply_rate_control logged its own values already.
     std::string detail, mismatched;
     rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
     int retried = 0;
     if (rcProfile_ == RcProfile::NvidiaPreTypes && rcPlanState_ == RcPlanState::Mismatch) {
-      (void)apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
+      const bool retryOk = apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
+      rcSetAccepted_ = rcSetAccepted_ && retryOk;
       retried = 1;
       rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
     }
-    std::cout << "[native-video-host] h264 rc-plan stage=post-start instance=" << (codecInstanceId_ + 1)
+    std::cout << "[native-video-host] h264 rc-plan stage=post-types instance=" << (codecInstanceId_ + 1)
               << " profile=" << rc_profile_name(rcProfile_) << " mean=" << rcPlan_.meanBps
               << " maxQp=" << (rcPlan_.maxQpSet ? static_cast<long long>(rcPlan_.maxQp) : -1LL) << detail
+              << " setAccepted=" << (rcSetAccepted_ ? 1 : 0)
               << " state=" << (rcPlanState_ == RcPlanState::Accepted ? "accepted"
                                : rcPlanState_ == RcPlanState::Mismatch ? "mismatch" : "unknown")
+              << " effective=" << (rc_plan_effective() ? 1 : 0)
               << (mismatched.empty() ? "" : " mismatched=" + mismatched) << " retried=" << retried << "\n";
   }
+  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+  codec_debug_log("encoder initialize: stream started");
+  started_ = true;
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
@@ -1948,8 +1975,10 @@ uint32_t H264Encoder::configured_max_qp() { return env_u32_or("REMOTE60_NATIVE_M
 RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
   if (!enc_) return RcRuntimeResult::Failed;
   const uint32_t effective = maxQp != 0 ? maxQp : configured_max_qp();
-  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log.
-  if (rcPlanApplied_ && rcPlan_.maxQpSet == (effective > 0 && effective <= 51) &&
+  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log. Only when the
+  // instance is known to RUN that plan (r2 R2): a rejected Set or a readback mismatch means nothing is
+  // in force to be "unchanged".
+  if (rc_plan_effective() && rcPlan_.maxQpSet == (effective > 0 && effective <= 51) &&
       (!rcPlan_.maxQpSet || rcPlan_.maxQp == effective)) {
     return RcRuntimeResult::Unchanged;
   }
@@ -1959,13 +1988,16 @@ RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
     return RcRuntimeResult::Unproven;
   }
   maxQpOverride_ = maxQp;
-  return apply_rate_control("governor") ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+  (void)apply_rate_control("governor");
+  // Applied only if the ceiling's own SetValue was accepted (r2 R2: a refused MaxQP is Failed even
+  // when the mean/peak/VBV it re-issued alongside were fine).
+  return lastQpSetOk_ ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
 RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
   if (!enc_) return RcRuntimeResult::Failed;
   const uint32_t mean = std::max<uint32_t>(100000, bitrate);
-  if (rcPlanApplied_ && rcPlan_.meanBps == mean) return RcRuntimeResult::Unchanged;  // C3 no-op
+  if (rc_plan_effective() && rcPlan_.meanBps == mean) return RcRuntimeResult::Unchanged;  // C3 no-op (r2: effective plan only)
   if (!runtime_mean_live()) {
     // A new mean on this profile is a new instance: the host takes its re-initialisation path with
     // the new E. bitrate_ is left as the running instance's value so configured_bitrate() tells the
@@ -1973,7 +2005,10 @@ RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
     return RcRuntimeResult::Unproven;
   }
   bitrate_ = mean;
-  return apply_rate_control("reconfigure") ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+  (void)apply_rate_control("reconfigure");
+  // Applied if the mean/peak/VBV were accepted; a ceiling the MFT refuses is the ceiling path's
+  // failure (set_max_qp), not a reason to rebuild on every mean change.
+  return lastRateSetOk_ ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
 bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,

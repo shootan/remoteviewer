@@ -64,6 +64,8 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
   std::map<GUID, uint32_t, GuidLess> stuck;
   // Keys whose SetValue should fail (models an unsupported property).
   std::map<GUID, HRESULT, GuidLess> rejectWith;
+  // GetValue fails for every key (models an MFT that accepts Sets but reports nothing: "unknown").
+  bool readbackUnsupported = false;
   bool typesSet = false;
 
   explicit FakeEncoderMft(const wchar_t* vendorId, const wchar_t* friendlyName) {
@@ -127,6 +129,7 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
   STDMETHODIMP GetValue(const GUID* key, VARIANT* value) override {
     if (!key || !value) return E_POINTER;
     calls.push_back("GetValue:" + rc_key_name(*key));
+    if (readbackUnsupported) return E_NOTIMPL;
     auto st = stuck.find(*key);
     auto it = values_.find(*key);
     if (st == stuck.end() && it == values_.end()) return E_FAIL;  // never set, nothing stuck: "unknown"
@@ -223,7 +226,15 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
   STDMETHODIMP ProcessMessage(MFT_MESSAGE_TYPE msg, ULONG_PTR) override {
     calls.push_back("ProcessMessage:" + std::to_string(static_cast<unsigned>(msg)));
     if (msg == MFT_MESSAGE_NOTIFY_START_OF_STREAM) started_ = true;
-    if (msg == MFT_MESSAGE_NOTIFY_END_OF_STREAM) started_ = false;
+    if (msg == MFT_MESSAGE_NOTIFY_END_OF_STREAM) {
+      // The product's shutdown(): the same fake may be adopted again by the next initialize(), and
+      // that is a NEW instance -- its SetValues before SetInputType are pre-types again.
+      started_ = false;
+      typesSet = false;
+      inType_.Reset();
+      outType_.Reset();
+      values_.clear();
+    }
     return S_OK;
   }
   STDMETHODIMP ProcessInput(DWORD, IMFSample*, DWORD) override { return E_NOTIMPL; }
