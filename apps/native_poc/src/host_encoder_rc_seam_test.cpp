@@ -111,8 +111,12 @@ int main() {
     check("[1] NVIDIA: peak is 200% of E (the current multiplier)", fake->set_value(CODECAPI_AVEncCommonMaxBitRate) == kE * 2);
     check("[1] NVIDIA: VBV is 200 ms of E in bytes", fake->set_value(CODECAPI_AVEncCommonBufferSize) == kE / 8 * 200 / 1000,
           std::to_string(fake->set_value(CODECAPI_AVEncCommonBufferSize)));
-    check("[1] NVIDIA: MaxQP is set EXPLICITLY to 44", fake->count_set("maxQp") >= 1 && fake->set_value(CODECAPI_AVEncVideoMaxQP) == 44,
+    // r9 (Codex r8 contract): the explicit ceiling is 51 -- the encoder may go as high as it needs; 44 was
+    // a quality floor that a high-entropy 1080p scene could not get under at R (Home 3rd run, motion 6M).
+    check("[1] NVIDIA: MaxQP is set EXPLICITLY to 51 (r9)", fake->count_set("maxQp") >= 1 && fake->set_value(CODECAPI_AVEncVideoMaxQP) == 51,
           std::to_string(fake->set_value(CODECAPI_AVEncVideoMaxQP)));
+    check("[1] NVIDIA: 44 is never written to this instance (r9: the old first-candidate ceiling is gone)",
+          !has(join(fake->calls), "SetValue:maxQp=44"), join(fake->calls));
     check("[1] NVIDIA: 32 is never written to this instance", !has(join(fake->calls), "SetValue:maxQp=32"));
     check("[1] NVIDIA: the plan is applied once, not pre AND post (5 SetValues)", rc_set_count(*fake) == 5,
           std::to_string(rc_set_count(*fake)));
@@ -134,8 +138,8 @@ int main() {
     (void)enc.reconfigure_bitrate(kE / 2);
     check("[4] NVIDIA: set_max_qp(40) and reconfigure_bitrate(E/2) on a RUNNING instance issue 0 SetValue",
           rc_set_count(*fake) == 0, join(fake->calls));
-    check("[4] NVIDIA: the instance still holds its initial plan (mean E, MaxQP 44)",
-          fake->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE && fake->set_value(CODECAPI_AVEncVideoMaxQP) == 44);
+    check("[4] NVIDIA: the instance still holds its initial plan (mean E, MaxQP 51)",
+          fake->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE && fake->set_value(CODECAPI_AVEncVideoMaxQP) == 51);
 
     // ---------------------------------------------------------------- [2] a new instance: re-applied
     const uint64_t firstInstance = enc.instance_id();
@@ -145,7 +149,7 @@ int main() {
     check("[2] the second initialize succeeds and is a new instance", ok && enc.instance_id() != firstInstance);
     const auto sets2 = rc_sets(*fake2);
     check("[2] NVIDIA: the NEW instance gets the whole plan again, before its types (no cross-instance cache)",
-          sets2.size() == 5 && all_pre_types(sets2) && fake2->set_value(CODECAPI_AVEncVideoMaxQP) == 44 &&
+          sets2.size() == 5 && all_pre_types(sets2) && fake2->set_value(CODECAPI_AVEncVideoMaxQP) == 51 &&
               fake2->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE,
           join(fake2->calls));
     // A new E on a new instance is the host's path for a bitrate change on this profile.
@@ -156,7 +160,7 @@ int main() {
           ok && all_pre_types(rc_sets(*fake3)) && fake3->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE / 2 &&
               fake3->set_value(CODECAPI_AVEncCommonMaxBitRate) == kE &&
               fake3->set_value(CODECAPI_AVEncCommonBufferSize) == (kE / 2) / 8 * 200 / 1000 &&
-              fake3->set_value(CODECAPI_AVEncVideoMaxQP) == 44);
+              fake3->set_value(CODECAPI_AVEncVideoMaxQP) == 51);
     enc.shutdown();
     enc.set_transform_for_test(nullptr);
     fake->Release();

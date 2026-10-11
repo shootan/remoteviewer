@@ -101,7 +101,13 @@ struct RcPlanInputs {
   uint32_t legacyMaxQp = 32;         // the governor's current ceiling, or configured_max_qp (0 = unset)
 };
 
-constexpr uint32_t kNvidiaFirstCandidateMaxQp = 44;
+// The NVIDIA plan's explicit ceiling. 44 (r1..r8) was a QUALITY FLOOR: on the Home PC's 1080p motion
+// scene (xorshift noise over half the page) the encoder could not get a P-frame under ~160 KB at QP 44,
+// so the output stayed over R whatever the mean said and the wire gate dropped most frames (Home 3rd run,
+// motion 6M: delivered 24.7 -> 2.2 fps). Codex r8 contract: an explicit 51 -- the encoder MAY use the
+// whole QP range when the content demands it; it is a ceiling, not a target. Mode (vbr_peak), peak
+// multiplier, VBV and the E/R split are unchanged; CBR 51 is a contrast row, not the policy.
+constexpr uint32_t kNvidiaFirstCandidateMaxQp = 51;
 constexpr uint32_t kNvidiaVbvMilliseconds = 200;
 
 inline uint32_t peak_for(uint32_t meanBps, uint32_t peakPercent) {
@@ -115,7 +121,7 @@ inline RcPlan make_rc_plan(RcProfile profile, const RcPlanInputs& in) {
   plan.meanBps = in.meanBps;
   plan.peakBps = peak_for(in.meanBps, in.peakPercent);
   if (profile == RcProfile::NvidiaPreTypes) {
-    // vbr_peak, the current peak multiplier, 200 ms of VBV in bytes, an EXPLICIT 44 ceiling. The
+    // vbr_peak, the current peak multiplier, 200 ms of VBV in bytes, an EXPLICIT 51 ceiling (r9). The
     // diagnostic mode override is honoured so a field experiment can still pick CBR here.
     plan.rcMode = in.rcModeOverride != 0xFFFFFFFFu ? in.rcModeOverride : 1u;
     plan.vbvBytes = static_cast<uint32_t>(

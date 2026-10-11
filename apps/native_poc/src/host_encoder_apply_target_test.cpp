@@ -245,8 +245,8 @@ int main() {
     const auto rc = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), H264Encoder::configured_max_qp());
     gov.Reset();
     const auto rc2 = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), H264Encoder::configured_max_qp());
-    check("[5n] r3 S2: a static-ceiling instance is never poked by the reconcile (0 SetValue, 44 stays)",
-          !rc.attempted && !rc2.attempted && rig.fake->count_set("maxQp") == 0 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 44);
+    check("[5n] r3 S2: a static-ceiling instance is never poked by the reconcile (0 SetValue, the plan's 51 stays)",
+          !rc.attempted && !rc2.attempted && rig.fake->count_set("maxQp") == 0 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 51);
   }
 
   // ------------------------------------------------------------------ [6] r4 Q1: the tick's QP path, counted per tick

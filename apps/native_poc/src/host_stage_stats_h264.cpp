@@ -189,7 +189,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // The user's frame rate is the ceiling; the loop only ever goes below it (r6).
       const uint32_t userFps = rate.userFpsCeiling > 0 ? rate.userFpsCeiling : encoder.activeFps;
       // encoder-rc-budget C4: the ladder follows the LIVE codec instance's profile. A static-ceiling
-      // instance (NVIDIA pre-types, MaxQP 44 for its life) gets base == cap == 44, so the quantiser
+      // instance (NVIDIA pre-types, its plan's MaxQP -- 51 since r9 -- for its life) gets base == cap == that ceiling, so the quantiser
       // stage never asks for a step the instance cannot take and calm/reset never "restores" 32; its
       // frame-rate stage engages directly. A legacy instance keeps today's 32..40 ladder.
       if (encoder.codec.instance_id() != encoder.rateGovernorCodecInstance) {

@@ -166,7 +166,7 @@ int main() {
     check("nvidia plan: mean is E", nv.meanBps == 2'121'000);
     check("nvidia plan: peak keeps the current multiplier (200%)", nv.peakBps == 4'242'000, s(nv.peakBps));
     check("nvidia plan: VBV is 200 ms of E, in BYTES (E/8*0.2)", nv.vbvBytes == 2'121'000 / 8 * 200 / 1000, s(nv.vbvBytes));
-    check("nvidia plan: MaxQP is SET, explicitly, to 44 (not 32, not omitted)", nv.maxQpSet && nv.maxQp == 44);
+    check("nvidia plan: MaxQP is SET, explicitly, to 51 (r9; not 44, not 32, not omitted)", nv.maxQpSet && nv.maxQp == 51);
     const RcPlan lg = make_rc_plan(RcProfile::Legacy, in);
     check("legacy plan: mode 1 unless cbr", lg.rcMode == 1);
     check("legacy plan: today's VBV and the configured 32 ceiling", lg.vbvBytes == 2'121'000 / 40 && lg.maxQpSet && lg.maxQp == 32);
