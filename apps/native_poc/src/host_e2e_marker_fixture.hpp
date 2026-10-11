@@ -223,26 +223,47 @@ inline uint32_t decode_event_marker(const uint8_t* y, uint32_t codedW, uint32_t 
 
 // ---------------------------------------------------------------------------- the target
 
-// How the fixture window is created (encoder-rc-budget r6). Invisible is the default: alpha 1/255,
-// WS_EX_TRANSPARENT, tool window, never activated. On the Home PC (RTX 3070 Ti, Windows 10) WGC's
-// CreateForWindow REFUSED that window for every run ("capture item create failed", the host's exit
-// 8) while the same style is accepted on the Windows 11 build machine -- so the harness retries ONCE
-// with VisibleFallback: a plain visible popup, same size and title, topmost, never activated, no
-// layered/transparent/tool styles. It is visible to the user for the rest of the harness run; it
-// shows only the harness's own test page. The harness never falls back to a MONITOR capture: that
-// would put the user's screen into the saved PGM frames.
-enum class FixtureWindowMode { Invisible, VisibleFallback };
+// How the fixture window is created (encoder-rc-budget r6/r7). Invisible is the default: alpha
+// 1/255, WS_EX_TRANSPARENT, tool window, never activated. On the Home PC (Windows 10 22H2, RTX 3070
+// Ti) WGC's CreateForWindow refused that window for every run ("capture item create failed", the
+// host's exit 8) AND refused the r6 fallback -- a caption-less WS_EX_TOPMOST|WS_EX_NOACTIVATE popup
+// -- while the Windows 11 build machine accepts both. The working hypothesis (r7): Windows 10's WGC
+// only captures windows that are Alt-Tab / taskbar citizens. The ladder is therefore:
+//   Invisible      the default above.
+//   VisiblePlain   a frameless WS_POPUP with WS_EX_APPWINDOW (taskbar entry, Alt-Tab, activatable),
+//                  no NOACTIVATE / TOPMOST / TOOLWINDOW / LAYERED / TRANSPARENT, centred on screen,
+//                  shown without taking focus. Window rect == page (kWinW x kWinH): the host captures
+//                  it whole and every geometry expectation of the measurement holds.
+//   VisibleFramed  the same as an ordinary WS_OVERLAPPEDWINDOW (caption, borders), the host told
+//                  --capture-window-client-only. Last resort only: the product's client crop under
+//                  WGC is off by a few pixels and jitters (1922x1093 <-> 1922x1092 on the build
+//                  machine), which rebuilds the encoder and breaks the size/instance expectations --
+//                  a run in this mode answers "does Windows 10 capture a captioned window", not the
+//                  transition counts. Named in every line so nobody reads it as a measurement.
+// Visible modes show the user one extra window (taskbar entry) with only the harness's own test
+// page for the rest of the harness run. The harness never falls back to a MONITOR capture: that
+// would put the user's screen into the saved PGM frames. Before any host is started the harness
+// asks WGC itself (host_e2e_wgc_probe.hpp) and records the HRESULT per mode.
+enum class FixtureWindowMode { Invisible, VisiblePlain, VisibleFramed };
 inline FixtureWindowMode gFixtureWindowMode = FixtureWindowMode::Invisible;
-inline const char* fixture_window_mode_name() {
-  return gFixtureWindowMode == FixtureWindowMode::VisibleFallback ? "visible-fallback" : "invisible";
+inline const char* fixture_window_mode_name(FixtureWindowMode m) {
+  return m == FixtureWindowMode::VisiblePlain ? "visible-plain" : m == FixtureWindowMode::VisibleFramed ? "visible-framed" : "invisible";
 }
+/** The next rung of the ladder, or false at its end. */
+inline bool fixture_next_window_mode(FixtureWindowMode m, FixtureWindowMode* next) {
+  if (m == FixtureWindowMode::Invisible) { *next = FixtureWindowMode::VisiblePlain; return true; }
+  if (m == FixtureWindowMode::VisiblePlain) { *next = FixtureWindowMode::VisibleFramed; return true; }
+  return false;
+}
+inline const char* fixture_window_mode_name() { return fixture_window_mode_name(gFixtureWindowMode); }
 // Test-support only (the harness exe reads it; no product binary does): REMOTE60_E2E_FIXTURE_PROBE
 // forces the fixture into a style meant to make CreateForWindow fail, so the fallback and the
 // fail-fast paths can be exercised on a machine whose WGC accepts the normal window.
 //   cloak    -- DWMWA_CLOAK on the window (visible to the window finder, not composed)
 //   noredir  -- WS_EX_NOREDIRECTIONBITMAP (no redirection surface for DWM/WGC)
-//   simulate -- no window change; the HARNESS treats the run as "capture item create failed" after
-//               the host ran (exercises the retry/fail-fast bookkeeping only, says so in the log)
+//   simulate -- no window change; the harness's own WGC probe reports E_INVALIDARG for the mode
+//               instead of asking WGC (exercises the mode ladder / fail-fast bookkeeping only, and
+//               says so in the wgc-probe line)
 // A ":both" suffix applies the probe to the visible fallback too (the fail-fast case); without it
 // only the invisible attempt is probed and the fallback is a real retry.
 struct FixtureProbe { std::string style; bool both = false; };
@@ -534,12 +555,22 @@ class Target {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60FecSingleChunkTarget";
     RegisterClassExW(&wc);
-    const bool visible = gFixtureWindowMode == FixtureWindowMode::VisibleFallback;
+    const bool visible = gFixtureWindowMode != FixtureWindowMode::Invisible;
+    const bool framed = gFixtureWindowMode == FixtureWindowMode::VisibleFramed;
     const bool probing = fixture_probe_applies();
-    DWORD exStyle = visible ? (WS_EX_TOPMOST | WS_EX_NOACTIVATE)
-                            : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+    DWORD exStyle = visible ? WS_EX_APPWINDOW : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT);
     if (probing && fixture_probe().style == "noredir") exStyle |= WS_EX_NOREDIRECTIONBITMAP;
-    hwnd_ = CreateWindowExW(exStyle, wc.lpszClassName, title.c_str(), WS_POPUP, 0, 0, kWinW, kWinH, nullptr, nullptr,
+    const DWORD style = framed ? WS_OVERLAPPEDWINDOW : WS_POPUP;
+    // The CLIENT area is the page (kWinW x kWinH) in every mode. Plain: window == page. Framed: the
+    // frame is added around it and the window is placed so its top-left is on screen (a 1080p page on
+    // a 1080p screen: the frame hangs off the bottom/right, which DWM still composes).
+    RECT outer{0, 0, kWinW, kWinH};
+    if (framed) AdjustWindowRectEx(&outer, style, FALSE, exStyle);
+    const int outerW = outer.right - outer.left, outerH = outer.bottom - outer.top;
+    const int screenW = GetSystemMetrics(SM_CXSCREEN), screenH = GetSystemMetrics(SM_CYSCREEN);
+    const int x = visible ? std::max(0, (screenW - outerW) / 2) : 0;
+    const int y = visible ? std::max(0, (screenH - outerH) / 2) : 0;
+    hwnd_ = CreateWindowExW(exStyle, wc.lpszClassName, title.c_str(), style, x, y, outerW, outerH, nullptr, nullptr,
                             wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));

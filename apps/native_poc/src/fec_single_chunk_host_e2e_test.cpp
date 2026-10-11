@@ -53,6 +53,7 @@
 #include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "host_e2e_marker_fixture.hpp"  // r8: shared Target/EventLog/decode_event_marker
+#include "host_e2e_wgc_probe.hpp"       // encoder-rc-budget r7: ask WGC ourselves, with the HRESULT
 #include "host_encoder_budget.hpp"      // encoder-rc-budget r2: E(R, fps), the same function the host uses
 #include "session_video_pipeline.hpp"
 #include "viewer_constants.hpp"       // r7 V2: FrameGate env defaults
@@ -223,7 +224,8 @@ struct RunResult {
   bool captureItemFailed = false;  // host.log: "capture item create failed" (WGC CreateForWindow refused)
   bool monitorFallbackSeen = false;  // host.log: "capture-window target not found; fallback=monitor" -- the user's screen
   std::string hostLastLine;          // the last host.log line, the exit reason in the host's words
-  std::string windowMode;            // fixture window mode this run used (invisible / visible-fallback)
+  std::string windowMode;            // fixture window mode this run used (invisible / visible-plain)
+  std::string probeHr;               // the harness's own WGC CreateForWindow HRESULT for that mode (wgc-probe)
   bool hello = false;
   bool nackNegotiated = false;
   HostAccount host;
@@ -369,12 +371,48 @@ void delete_saved_frames(const std::wstring& runDir) {
 int gCaptureUnavailableRuns = 0;  // runs whose capture item could not be created even after the fallback
 bool capture_unavailable() { return gCaptureUnavailableRuns > 0; }
 
+// r7: the harness asks WGC itself, once per window mode, on a window built exactly as the run would
+// build it. The HRESULT is the OS's own answer (the host's log discards it). A simulated refusal
+// (REMOTE60_E2E_FIXTURE_PROBE=simulate) is marked as such in the line.
+struct WgcProbe { bool done = false; HRESULT hr = S_OK; bool simulated = false; };
+WgcProbe gWgcProbe[3];
+WgcProbe& wgc_probe_slot(FixtureWindowMode m) { return gWgcProbe[static_cast<int>(m)]; }
+std::string hr_hex(HRESULT hr) {
+  char b[16];
+  std::snprintf(b, sizeof(b), "0x%08lx", static_cast<unsigned long>(hr));
+  return b;
+}
+const WgcProbe& wgc_probe_mode(FixtureWindowMode mode) {
+  WgcProbe& pr = wgc_probe_slot(mode);
+  if (pr.done) return pr;
+  const FixtureWindowMode saved = gFixtureWindowMode;
+  gFixtureWindowMode = mode;
+  Target probeWindow;
+  probeWindow.title = L"remote60 fec single-chunk wgc-probe " + std::to_wstring(GetCurrentProcessId());
+  const bool up = probeWindow.Start();
+  const bool simulate = fixture_probe().style == "simulate" && fixture_probe_applies();
+  if (!up) pr.hr = E_FAIL;
+  else if (simulate) { pr.hr = E_INVALIDARG; pr.simulated = true; }
+  else pr.hr = remote60::native_poc::e2e::wgc_probe_create_for_window(probeWindow.hwnd());
+  std::printf("wgc-probe: mode=%s hwnd=0x%llx hr=%s%s%s\n", fixture_window_mode_name(mode),
+              static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(probeWindow.hwnd())), hr_hex(pr.hr).c_str(),
+              SUCCEEDED(pr.hr) ? " (accepted)" : " (REFUSED)", pr.simulated ? " [simulated by REMOTE60_E2E_FIXTURE_PROBE]" : "");
+  probeWindow.Stop();
+  gFixtureWindowMode = saved;
+  pr.done = true;
+  return pr;
+}
+
 RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
                         uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                         uint32_t bitrate, uint32_t fps, uint32_t downshiftBitrate, uint32_t downshiftAtSec,
                         bool v2FrameGate, const std::vector<TuneStep>* tunes) {
   RunResult r;
   r.windowMode = fixture_window_mode_name();
+  {
+    const WgcProbe& pr = wgc_probe_slot(gFixtureWindowMode);
+    r.probeHr = pr.done ? hr_hex(pr.hr) + (pr.simulated ? "(simulated)" : "") : "not-probed";
+  }
   CreateDirectoryW(runDir.c_str(), nullptr);
   r.frameDir = runDir;
   const std::wstring me = self_path();
@@ -389,9 +427,12 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   target.content = content;
   target.title = L"remote60 fec single-chunk target " + std::to_wstring(GetCurrentProcessId()) + L" " +
                  std::wstring(tight ? L"tight" : L"padded");
-  check(target.Start(), gFixtureWindowMode == FixtureWindowMode::VisibleFallback
-                            ? "an on-screen VISIBLE window (window-mode=visible-fallback) is up for the host to capture"
-                            : "an on-screen, invisible, click-through window is up for the host to capture");
+  check(target.Start(), gFixtureWindowMode == FixtureWindowMode::VisiblePlain
+                            ? "an on-screen frameless VISIBLE window (window-mode=visible-plain, a taskbar window) is up for the host to capture"
+                            : gFixtureWindowMode == FixtureWindowMode::VisibleFramed
+                                  ? "an on-screen captioned VISIBLE window (window-mode=visible-framed, LAST RESORT: client crop jitters, geometry "
+                                    "checks are not a measurement in this mode) is up for the host to capture"
+                                  : "an on-screen, invisible, click-through window is up for the host to capture");
   const HWND targetHwnd = target.hwnd();
 
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
@@ -415,7 +456,8 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) + L" --seconds " +
                        std::to_wstring(seconds + 30) + L" --input-injection-mode none" +
-                       remote60::native_poc::e2e::e2e_capture_window_args(target.title);
+                       remote60::native_poc::e2e::e2e_capture_window_args(target.title) +
+                       (gFixtureWindowMode == FixtureWindowMode::VisibleFramed ? L" --capture-window-client-only" : L"");
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check(noInjection, "the host is started with input injection off");
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -852,13 +894,9 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   r.hostLastLine = host_log_last_line(hostLogPath);
   r.captureItemFailed = host_log_contains(hostLogPath, "capture item create failed");
   if (host_log_contains(hostLogPath, "fallback=monitor")) r.monitorFallbackSeen = true;
-  if (fixture_probe().style == "simulate" && fixture_probe_applies()) {
-    std::printf("PROBE simulate: the harness treats this run as 'capture item create failed' (the host itself ran; test-support only)\n");
-    r.captureItemFailed = true;
-  }
-  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s last=\"%s\"\n",
+  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s last=\"%s\"\n",
               r.hostExitedEarly ? 1 : 0, r.hostExitCode, r.captureItemFailed ? 1 : 0, r.monitorFallbackSeen ? 1 : 0,
-              r.windowMode.c_str(), r.hostLastLine.c_str());
+              r.windowMode.c_str(), r.probeHr.c_str(), r.hostLastLine.c_str());
   if (r.monitorFallbackSeen) delete_saved_frames(runDir);
   check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
         r.hostLastLine);
@@ -888,14 +926,53 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
                    uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
                    uint32_t downshiftAtSec = 0, bool v2FrameGate = false,
                    const std::vector<TuneStep>* tunes = nullptr) {
+  // r7: ask WGC before starting a host. A refused mode is skipped without a host launch; the ladder
+  // is invisible -> visible-plain -> visible-framed and stops there (no focus-stealing variants).
+  const auto fallback_notice = [&](FixtureWindowMode to, const std::string& why) {
+    std::printf("CAPTURE-FALLBACK: %s; switching to window-mode=%s for the rest of this harness run: %s showing only the "
+                "harness's test page is now on this screen (a taskbar entry). Please leave it alone and do not close it. No "
+                "monitor capture.%s\n",
+                why.c_str(), fixture_window_mode_name(to),
+                to == FixtureWindowMode::VisiblePlain ? "a frameless 1920x1080-page window" : "an ordinary captioned window",
+                to == FixtureWindowMode::VisibleFramed
+                    ? " LAST RESORT: the host's client-area crop jitters by a few pixels in this mode, so size/instance checks are "
+                      "not a measurement here -- only whether Windows captures a captioned window."
+                    : "");
+  };
+  for (;;) {
+    const WgcProbe& pr = wgc_probe_mode(gFixtureWindowMode);
+    if (SUCCEEDED(pr.hr)) break;
+    FixtureWindowMode next;
+    if (!fixture_next_window_mode(gFixtureWindowMode, &next)) {
+      std::string all;
+      for (int m = 0; m < 3; ++m) {
+        const WgcProbe& q = gWgcProbe[m];
+        all += std::string(" ") + fixture_window_mode_name(static_cast<FixtureWindowMode>(m)) + " hr=" +
+               (q.done ? hr_hex(q.hr) + (q.simulated ? "(simulated)" : "") : std::string("n/a"));
+      }
+      RunResult refused;
+      refused.windowMode = fixture_window_mode_name();
+      refused.captureItemFailed = true;
+      refused.probeHr = hr_hex(pr.hr) + (pr.simulated ? "(simulated)" : "");
+      refused.hostLastLine = "wgc-probe refused every window mode:" + all + " -- no host was started";
+      std::printf("host-exit: early=0 code=0 captureItemFailed=1 monitorFallback=0 window-mode=%s probe-hr=%s last=\"%s\"\n",
+                  refused.windowMode.c_str(), refused.probeHr.c_str(), refused.hostLastLine.c_str());
+      ++gCaptureUnavailableRuns;
+      check(false, "a capture item could be created for the fixture window (window-mode=" + refused.windowMode + ")", refused.hostLastLine);
+      return refused;
+    }
+    fallback_notice(next, std::string("WGC refused the ") + fixture_window_mode_name() + " fixture window (wgc-probe hr=" + hr_hex(pr.hr) +
+                              (pr.simulated ? "(simulated)" : "") + ")");
+    gFixtureWindowMode = next;
+  }
   RunResult r = run_host_once(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed, wireCapOn, bitrate, fps,
                               downshiftBitrate, downshiftAtSec, v2FrameGate, tunes);
-  if (r.captureItemFailed && gFixtureWindowMode == FixtureWindowMode::Invisible) {
-    std::printf("CAPTURE-FALLBACK: the host could not create a capture item for the INVISIBLE fixture window (host said: %s). "
-                "Retrying this run ONCE with a VISIBLE window (window-mode=visible-fallback): a %dx%d window showing only the "
-                "harness's test page stays visible on this screen for the rest of this harness run. No monitor capture.\n",
-                r.hostLastLine.c_str(), kWinW, kWinH);
-    gFixtureWindowMode = FixtureWindowMode::VisibleFallback;
+  FixtureWindowMode nextAfterHost;
+  if (r.captureItemFailed && fixture_next_window_mode(gFixtureWindowMode, &nextAfterHost)) {
+    // The probe accepted but the host did not (second line of defence; r6): one rung up, one retry.
+    fallback_notice(nextAfterHost, std::string("the host could not create a capture item for the ") + fixture_window_mode_name() +
+                                       " fixture window although the probe accepted it (host said: " + r.hostLastLine + ")");
+    gFixtureWindowMode = nextAfterHost;
     std::wstring retryDir = runDir;
     while (!retryDir.empty() && retryDir.back() == L'\\') retryDir.pop_back();
     retryDir += L"_visible\\";

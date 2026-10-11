@@ -22,17 +22,22 @@ rem then the matrix is NOT run (matrix.exit says skipped) and this script return
 rem
 rem THE WINDOW THE HOST CAPTURES. The harness paints its test page into its own window and the host
 rem captures THAT window, never the screen. By default the window is invisible (alpha 1/255,
-rem click-through, tool window). On the Home PC (RTX 3070 Ti, Windows 10) WGC refused to create a
+rem click-through, tool window). On the Home PC (Windows 10 22H2, RTX 3070 Ti) WGC refused to create a
 rem capture item for that window in every run ("capture item create failed" in host.log, the host
-rem exits 8) -- the same window is accepted on the Windows 11 build machine. When the harness sees that
-rem refusal it retries the run ONCE with a VISIBLE window of the same size and keeps that mode for the
-rem rest of the phase: a plain topmost 1920x1080 window showing only the test page (text/scroll/video
-rem patterns) is then VISIBLE ON YOUR SCREEN while the harness runs. It is not your desktop and it is
-rem never your desktop that gets captured or saved -- a host that cannot find the harness window and
-rem offers its monitor fallback is terminated by the harness and that run's frames are deleted.
-rem Every phase line carries window-mode=invisible or window-mode=visible-fallback; each run's
-rem host-exit: line quotes the host's last log line (its exit reason) so a dead host is named, not
-rem waited out.
+rem exits 8) and refused the first fallback (a caption-less topmost popup) too -- both are accepted on
+rem the Windows 11 build machine. Before starting any host the harness now asks WGC itself for each
+rem window mode and prints the answer: "wgc-probe: mode=invisible|visible-plain hr=0x........". A
+rem refused mode is skipped (no host is started for it). The ladder is invisible -> visible-plain:
+rem   visible-plain = an ORDINARY WINDOW with a caption and a taskbar entry, 1920x1080 page inside,
+rem   centred on screen, shown without taking focus. WHILE THE HARNESS RUNS YOU WILL SEE ONE EXTRA
+rem   WINDOW ON THE TASKBAR titled "remote60 fec single-chunk target ...". Leave it alone: do not
+rem   close, move, minimise or cover it. It shows only the test page (text/scroll/video patterns).
+rem It is never your desktop that gets captured or saved -- a host that cannot find the harness window
+rem and offers its monitor fallback is terminated by the harness and that run's frames are deleted.
+rem If WGC refuses both modes the phase ends at once with exit 3 and both HRESULTs in the log.
+rem Every phase line carries window-mode=invisible or window-mode=visible-plain; each run's host-exit:
+rem line quotes the probe HRESULT and the host's last log line (its exit reason) so a dead host is
+rem named, not waited out.
 rem
 rem What one run collects:
 rem   transitions.log  6M->1.5M->6M (R at once from the host's own apply marker, E per instance, the
@@ -136,7 +141,7 @@ net use %HERE:~0,2% >nul 2>&1 && >>"%ID%" echo WARNING: running from a network d
 
 set "RC=0"
 echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
-echo      if WGC refuses the invisible window, a VISIBLE 1920x1080 test window appears on this screen (window-mode=visible-fallback)
+echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
 "%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 18 --keep-dir --save-frames > "%OUT%\transitions.log" 2>&1
 set "PHASE_RC=%errorlevel%"
 >"%OUT%\transitions.exit" echo %PHASE_RC%
