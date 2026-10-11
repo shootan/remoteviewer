@@ -11,8 +11,10 @@ rem captures only the harness's invisible window). Results land in .\results\<ti
 rem else: the harness is copied into that folder before it runs, so its test-scratch (host.log and the
 rem event_*.pgm frames per run) is created there and belongs to this run alone.
 rem
-rem   run.cmd         transitions + matrix (the comparison; ~25 min)
-rem   run.cmd quick   transitions only (the transition smoke; a few minutes)
+rem   run.cmd         transitions + matrix: the control smoke plus the decode COMPARISON material
+rem                   (baseline beside candidate; ~25 min)
+rem   run.cmd quick   transitions only: the CONTROL smoke (R/E/plan/coalescing paths; a few minutes).
+rem                   It is not a quality comparison and must not be reported as one.
 rem Exit code: 0 only when every phase that ran returned 0. Each phase's own exit code is in
 rem results\<timestamp>\<phase>.exit; a non-zero there is a FAIL line in that phase's .log.
 rem
@@ -34,16 +36,20 @@ rem   "rc-identity ... vendorId=VEN_10DE profile=nvidia_pre_types"
 rem   "rc-plan stage=pre-types ... maxQp=44"           the plan went in before the media types
 rem   "rc-plan stage=post-types ... setAccepted=1 state=accepted effective=1"
 rem                                                    every Set accepted and the readback agrees
-rem   and the AU sizes actually moved with E: the stats lines' appliedEncoder changes across the E-only
-rem   run while "size=1920x1080" never does, and the sent payload follows it.
+rem   and the ENCODER OUTPUT actually moved with E: the stats lines' appliedEncoder changes across the
+rem   E-only run while "size=1920x1080" never does, and the sent payload follows it. appliedEncoder and
+rem   sentPayload are the plan value and the post-gate wire, NOT the AU output itself -- the AU effect
+rem   is read from the per-run [keyframe]/stats AU sizes and the event_*.pgm frames.
 rem In the E-only run: "encoder-budget ... action=deferred" then "deferred retarget applied" once.
-rem In every matrix row: rcWrites=0 -- this counts reconfigure AND governor writes (the ceiling is
-rem static on this profile; a governor write there would be a real finding).
+rem In every matrix row: rcWrites=0 -- this counts reconfigure AND governor writes (reconf=0 gov=0; the
+rem ceiling is static on this profile; a governor write there would be a real finding). The E-only
+rem line likewise: rcReconfigureWrites=0 rcGovernorWrites=0.
 rem win267 is the EXTERNAL wire over a 267 ms window (the receive side's clock), not the probe AU.
 rem A run whose profile is not nvidia_pre_types, or whose plan reads back mismatch/unknown, is not
 rem evidence for the NVIDIA policy -- report it as what it is.
-rem Not covered here (section 5 of the report): FrameGate behaviour, real recovery after a stall,
-rem low-rate 1080p DesktopText (below 1.5 Mbps).
+rem Not covered here and still unverified (section 5 of the report): FrameGate behaviour, real
+rem recovery after a stall, DesktopText at 1080p. Note the 1.5M and 3M window cells run at 720p (the
+rem ladder steps down below 6M); only the 6M cells are 1080p.
 
 setlocal
 set "HERE=%~dp0"
@@ -55,8 +61,10 @@ if not exist "%OUT%" echo cannot create %OUT% & exit /b 2
 
 rem Nothing inherited may change what the host does: clear EVERY REMOTE60_NATIVE_* override a shell
 rem might carry (rate control, governor, async poll, decoder backend, static-scene fps, keyint, ...),
-rem so the run measures the product's defaults. The namespace is cleared as a whole; the names that
-rem remain under REMOTE60_* afterwards are recorded in identity.txt.
+rem so the run measures the product's defaults. The namespace is cleared as a whole; the NAMES that
+rem remain under REMOTE60_* afterwards are recorded in identity.txt -- names only: a shell may carry
+rem REMOTE60_DIR_ADMIN_KEY / REMOTE60_SIGNUP_KEY and the like, and no value of any variable may end
+rem up in the folder that is handed back.
 for /f "tokens=1 delims==" %%v in ('set REMOTE60_NATIVE_ 2^>nul') do set "%%v="
 rem The harness starts real hosts: this is the explicit opt-in it requires.
 set REMOTE60_ALLOW_HOST_E2E=1
@@ -84,8 +92,8 @@ certutil -hashfile "%CAND%" SHA256                                 >> "%OUT%\ide
 certutil -hashfile "%BASE%" SHA256                                 >> "%OUT%\identity.txt"
 wmic path win32_VideoController get Name,DriverVersion /format:list >> "%OUT%\identity.txt" 2>nul
 qwinsta                                                             >> "%OUT%\identity.txt" 2>nul
-echo == REMOTE60_* still set after clearing REMOTE60_NATIVE_* ==      >> "%OUT%\identity.txt"
->>"%OUT%\identity.txt" 2>nul set REMOTE60_
+echo == REMOTE60_* names still set after clearing REMOTE60_NATIVE_* (names only, never values) == >> "%OUT%\identity.txt"
+for /f "tokens=1 delims==" %%v in ('set REMOTE60_ 2^>nul') do >>"%OUT%\identity.txt" echo %%v
 echo %date% %time%                                                  >> "%OUT%\identity.txt"
 
 set "RC=0"
