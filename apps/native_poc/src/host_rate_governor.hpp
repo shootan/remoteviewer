@@ -137,6 +137,16 @@ class RateGovernor {
     fpsStep_ = 0;
     over_ = under_ = overAtCap_ = fpsOk_ = 0;
   }
+  /**
+   * encoder-rc-budget C4: the ladder follows the live encoder instance's profile (host_encoder_rc_policy
+   * governor_config_for) -- a static-ceiling profile pins base == cap so the quantiser stage never asks
+   * for a step the instance cannot take. Starts over from the new floor.
+   */
+  void Reconfigure(const RateGovernorConfig& config) {
+    config_ = config;
+    Reset();
+  }
+  const RateGovernorConfig& config() const { return config_; }
 
  private:
   RateDecision Current(uint32_t userFps) const { return RateDecision{qp_, FpsForStep(userFps, fpsStep_)}; }
