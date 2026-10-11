@@ -83,6 +83,7 @@
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
 #include "host_encoder_manager.hpp"
+#include "host_key_period_policy.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
 #include "host_control_session.hpp"
@@ -337,7 +338,13 @@ void startup_configure_encode_geometry(HostContext& hx) {
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
   // client, winning over both the CLI default and runtime tunes.
   encoder.keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
-  encoder.activeKeyint = encoder.keyintOverride != 0 ? encoder.keyintOverride : args.keyint;
+  // The same key-period policy ApplyTarget applies to every later target (the >=10 s floor, an explicit
+  // override winning verbatim), applied to the FIRST instance too (encoder-rc-budget r4, Codex). Before
+  // this the first instance ran at args.keyint and the first runtime tune -- whatever it asked for --
+  // rebuilt the encoder because its effective keyint differed from the active one. That rebuild was not
+  // an RC effect and must not be measured as one; now a tune that changes nothing changes nothing.
+  // This can lower the initial periodic-IDR rate on a host whose args.keyint was below the floor.
+  encoder.activeKeyint = compute_effective_keyint({args.keyint, args.fps, encoder.keyintOverride});
   encoder.activeFrameIntervalUs =
       std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
   encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
