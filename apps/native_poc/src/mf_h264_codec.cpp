@@ -468,6 +468,15 @@ std::string mft_attr_string(IMFActivate* act, const GUID& attr) {
 // attribute -- not inferred. The name-match and CLSID-fallback selection paths are not on the live
 // h264 enum path (try_activate_first is), so their identity is not captured; that gap is noted at
 // those sites rather than guessed here.
+// encoder-rc-budget C2: the identity of the encoder MFT the LAST creation path activated, kept here
+// so initialize() can adopt it after create_h264_encoder_transform returns. The creation helpers
+// only hand back an IMFTransform; the vendor id lives on the IMFActivate they consumed. Set only for
+// role "encoder" (the decoder's identity is of no use to the rate-control policy), cleared at the
+// start of every encoder creation so a stale value cannot describe a later transform. Single
+// threaded: initialize() runs on the host's main loop.
+MftIdentity g_lastEncoderIdentity;
+bool g_lastEncoderIdentityValid = false;
+
 void log_mft_identity(IMFActivate* act, const char* role) {
   if (!act) return;
   const std::string friendly = mft_attr_string(act, MFT_FRIENDLY_NAME_Attribute);
@@ -479,6 +488,12 @@ void log_mft_identity(IMFActivate* act, const char* role) {
   std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
             << " friendlyName=\"" << friendly << "\" clsid=" << clsid << " vendorId=" << vendor
             << " hwUrl=\"" << hwUrl << "\"\n";
+  if (role && std::strcmp(role, "encoder") == 0) {
+    g_lastEncoderIdentity.friendlyName = friendly;
+    g_lastEncoderIdentity.vendorId = vendor;
+    g_lastEncoderIdentity.clsid = clsid;
+    g_lastEncoderIdentityValid = true;
+  }
 }
 
 enum class MftBackendMode {
@@ -605,6 +620,11 @@ bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** out
   (void)WideCharToMultiByte(CP_UTF8, 0, clsidString, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
   std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
             << " friendlyName=? clsid=" << buf << " vendorId=? hwUrl=? via=clsid-fallback\n";
+  if (role && std::strcmp(role, "encoder") == 0) {
+    g_lastEncoderIdentity = MftIdentity{};
+    g_lastEncoderIdentity.clsid = buf;  // vendor stays "?": a CoCreateInstance has no activate attributes
+    g_lastEncoderIdentityValid = true;
+  }
   *outTransform = transform;
   return true;
 }
@@ -788,6 +808,8 @@ bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHa
   *outTransform = nullptr;
   *outUsingHardware = false;
   *outBackendName = "none";
+  g_lastEncoderIdentity = MftIdentity{};  // whatever this call activates is the identity, nothing older
+  g_lastEncoderIdentityValid = false;
 
   IMFTransform* transform = nullptr;
   const std::string backendRaw = env_string_local("REMOTE60_NATIVE_ENCODER_BACKEND");
@@ -1517,7 +1539,11 @@ void H264Encoder::apply_low_latency_codec_api() {
   }
   if (realTime) (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
 
-  (void)apply_rate_control("init");
+  // encoder-rc-budget C2: the legacy profile sets its rate control here, after the types -- today's
+  // order, read back as set on the AMD MFT. The NVIDIA profile already set its plan before the types
+  // and does not re-issue it: on that MFT a post-types SetValue returns S_OK without being applied,
+  // and a needless SetValue on a running instance is the thing C3 rules out.
+  if (rcProfile_ != RcProfile::NvidiaPreTypes) (void)apply_rate_control("init");
 
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
@@ -1642,7 +1668,126 @@ bool H264Encoder::apply_rate_control(const char* reason) {
             << " readbackMode=" << rbMode << " readbackMean=" << rbMean << " readbackPeak=" << rbPeak
             << " readbackVbv=" << rbVbv << " readbackMaxQp=" << rbMaxQp
             << "\n";
+  // encoder-rc-budget C3: what this instance now holds is the no-op basis for the next call.
+  rcPlan_.rcMode = rcMode;
+  rcPlan_.meanBps = mean;
+  rcPlan_.peakBps = peak;
+  rcPlan_.vbvBytes = vbvBytes;
+  rcPlan_.maxQpSet = maxQp > 0 && maxQp <= 51;
+  rcPlan_.maxQp = rcPlan_.maxQpSet ? maxQp : 0;
+  rcPlanApplied_ = ok;
   return ok;
+}
+
+// ------------------------------------------------------------------ encoder-rc-budget C2/C3
+
+// Who the transform is: the activate the creation path consumed (vendor id, friendly name, CLSID),
+// supplemented from the transform's own attribute store for whatever the activate did not say -- the
+// CLSID fallback has no activate, a test transform has only its attributes. Vendor id is the one
+// field policy decides on, and it is never inferred from the friendly name.
+void H264Encoder::adopt_identity() {
+  identity_ = MftIdentity{};
+  if (!testTransform_ && g_lastEncoderIdentityValid) identity_ = g_lastEncoderIdentity;
+  if (enc_) {
+    Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+    if (SUCCEEDED(enc_->GetAttributes(&attrs)) && attrs) {
+      auto str = [&](const GUID& key) -> std::string {
+        WCHAR* w = nullptr;
+        UINT32 cch = 0;
+        std::string out = "?";
+        if (SUCCEEDED(attrs->GetAllocatedString(key, &w, &cch)) && w) {
+          char buf[256] = {};
+          if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr) > 1)
+            out = buf;
+        }
+        if (w) CoTaskMemFree(w);
+        return out;
+      };
+      if (identity_.vendorId == "?") identity_.vendorId = str(MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+      if (identity_.friendlyName == "?") identity_.friendlyName = str(MFT_FRIENDLY_NAME_Attribute);
+      GUID g{};
+      if (identity_.clsid == "?" && SUCCEEDED(attrs->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g)))
+        identity_.clsid = guid_to_string(g);
+    }
+  }
+  rcProfile_ = rc_profile_for(identity_);
+}
+
+// The plan for this instance at mean E: the same inputs apply_rate_control reads (so the legacy plan
+// is exactly today's values), handed to the pure policy.
+RcPlan H264Encoder::build_rc_plan(uint32_t meanBps, uint32_t legacyMaxQp) const {
+  RcPlanInputs in;
+  const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
+  in.cbr = useCbr;
+  in.peakPercent = env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 200u);
+  in.rcModeOverride = env_u32_or("REMOTE60_NATIVE_RC_MODE_NUM", 0xFFFFFFFFu);
+  const uint32_t meanOverride = env_u32_or("REMOTE60_NATIVE_RC_MEAN_OVERRIDE", 0u);
+  in.meanBps = meanOverride >= 100000u ? meanOverride : meanBps;
+  in.legacyVbvBytes = stableTextTune_ ? stable_text_vbv_bytes(in.meanBps) : low_latency_vbv_bytes(in.meanBps);
+  in.legacyMaxQp = legacyMaxQp;
+  return make_rc_plan(rcProfile_, in);
+}
+
+// Issues the plan's SetValues (all of them, or only the fields whose readback disagreed) and logs one
+// line per stage. Returns whether every issued SetValue was accepted.
+bool H264Encoder::apply_rc_plan(const RcPlan& plan, const char* stage, bool onlyMismatched) {
+  if (!enc_) return false;
+  std::string detail, mismatched;
+  if (onlyMismatched) (void)read_back_rc_plan(plan, &detail, &mismatched);
+  auto wants = [&](const char* field) {
+    return !onlyMismatched || mismatched.find(field) != std::string::npos;
+  };
+  bool ok = true;
+  int issued = 0;
+  if (wants("mode")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, plan.rcMode) && ok; ++issued; }
+  if (wants("mean")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, plan.meanBps) && ok; ++issued; }
+  if (wants("peak")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, plan.peakBps) && ok; ++issued; }
+  if (wants("vbv")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, plan.vbvBytes) && ok; ++issued; }
+  if (plan.maxQpSet && wants("maxQp")) {
+    ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, plan.maxQp) && ok;
+    ++issued;
+  }
+  std::cout << "[native-video-host] h264 rc-plan stage=" << stage << " instance=" << (codecInstanceId_ + 1)
+            << " profile=" << rc_profile_name(rcProfile_) << " backend=" << backendName_
+            << " vendor=" << identity_.vendorId << " mode=" << plan.rcMode << " mean=" << plan.meanBps
+            << " peak=" << plan.peakBps << " vbvBytes=" << plan.vbvBytes
+            << " maxQp=" << (plan.maxQpSet ? static_cast<long long>(plan.maxQp) : -1LL)
+            << " maxQpSet=" << (plan.maxQpSet ? 1 : 0) << " issued=" << issued << " setOk=" << (ok ? 1 : 0) << "\n";
+  return ok;
+}
+
+// Reads the five values back and compares them with the plan. -1 = the MFT would not report that
+// field (unknown, which is not a mismatch).
+RcPlanState H264Encoder::read_back_rc_plan(const RcPlan& plan, std::string* outDetail, std::string* outMismatched) {
+  if (!enc_) return RcPlanState::Unknown;
+  auto readback = [this](const GUID& key) -> long long {
+    uint32_t v = 0;
+    return get_codecapi_u32(enc_.Get(), key, &v) ? static_cast<long long>(v) : -1LL;
+  };
+  struct Field { const char* name; long long got; long long want; bool checked; };
+  const Field fields[] = {
+      {"mode", readback(CODECAPI_AVEncCommonRateControlMode), plan.rcMode, true},
+      {"mean", readback(CODECAPI_AVEncCommonMeanBitRate), plan.meanBps, true},
+      {"peak", readback(CODECAPI_AVEncCommonMaxBitRate), plan.peakBps, true},
+      {"vbv", readback(CODECAPI_AVEncCommonBufferSize), plan.vbvBytes, true},
+      {"maxQp", readback(CODECAPI_AVEncVideoMaxQP), plan.maxQp, plan.maxQpSet},
+  };
+  std::string detail, mismatched;
+  bool anyMismatch = false, allAccepted = true;
+  for (const Field& f : fields) {
+    detail += std::string(" readback") + f.name + "=" + std::to_string(f.got);
+    if (!f.checked) continue;
+    if (f.got < 0) { allAccepted = false; continue; }
+    if (f.got != f.want) {
+      anyMismatch = true;
+      allAccepted = false;
+      mismatched += (mismatched.empty() ? "" : ",") + std::string(f.name);
+    }
+  }
+  if (outDetail) *outDetail = detail;
+  if (outMismatched) *outMismatched = mismatched;
+  if (anyMismatch) return RcPlanState::Mismatch;
+  return allAccepted ? RcPlanState::Accepted : RcPlanState::Unknown;
 }
 
 bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint) {
@@ -1653,7 +1798,13 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   fps_ = std::max<uint32_t>(1, fps);
   bitrate_ = std::max<uint32_t>(100000, bitrate);
   keyint_ = std::max<uint32_t>(1, keyint);
-  maxQpOverride_ = 0;  // a new encoder starts from the configured ceiling (the governor resets too)
+  // A new legacy encoder starts from the ceiling the host asked for (set_initial_max_qp: the governor's
+  // current one), else the configured one. This replaces restoring the governor's ceiling with a late
+  // post-type SetValue after every rebuild (C4).
+  maxQpOverride_ = initialMaxQp_;
+  rcPlan_ = RcPlan{};
+  rcPlanApplied_ = false;
+  rcPlanState_ = RcPlanState::Unknown;
   stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
 
@@ -1693,8 +1844,20 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     }
   }
 
-  // quality r6 diagnostic switch: the rate control also before the media types.
-  if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) (void)apply_rate_control("pre_types");
+  // encoder-rc-budget C2: who this instance is decides its rate-control plan and when it is set.
+  adopt_identity();
+  rcPlan_ = build_rc_plan(bitrate_, maxQpOverride_ != 0 ? maxQpOverride_ : configured_max_qp());
+  std::cout << "[native-video-host] h264 rc-identity instance=" << (codecInstanceId_ + 1)
+            << " friendlyName=\"" << identity_.friendlyName << "\" clsid=" << identity_.clsid
+            << " vendorId=" << identity_.vendorId << " profile=" << rc_profile_name(rcProfile_) << "\n";
+  if (rcProfile_ == RcProfile::NvidiaPreTypes) {
+    // Before the media types: on this MFT that is the only point at which mode/peak/VBV/MaxQP are
+    // applied (Home PC probe v2, 2026-10-11). Set once; not re-issued after the types.
+    rcPlanApplied_ = apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);
+  } else if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) {
+    // quality r6 diagnostic switch (legacy profile only): the rate control also before the media types.
+    (void)apply_rate_control("pre_types");
+  }
   codec_debug_log("encoder initialize: configure types");
   if (!configure_types()) {
     shutdown();
@@ -1706,6 +1869,26 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
   codec_debug_log("encoder initialize: stream started");
   started_ = true;
+  {
+    // What the instance holds now, against the plan. On the NVIDIA profile a mismatch gets ONE
+    // post-type re-set of the disagreeing fields and one more readback -- bounded to this initialize,
+    // never a loop, never a reason to rebuild (b: a readback that is not supported is Unknown, not a
+    // mismatch). The legacy profile is classified only; apply_rate_control already logged its own.
+    std::string detail, mismatched;
+    rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
+    int retried = 0;
+    if (rcProfile_ == RcProfile::NvidiaPreTypes && rcPlanState_ == RcPlanState::Mismatch) {
+      (void)apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
+      retried = 1;
+      rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
+    }
+    std::cout << "[native-video-host] h264 rc-plan stage=post-start instance=" << (codecInstanceId_ + 1)
+              << " profile=" << rc_profile_name(rcProfile_) << " mean=" << rcPlan_.meanBps
+              << " maxQp=" << (rcPlan_.maxQpSet ? static_cast<long long>(rcPlan_.maxQp) : -1LL) << detail
+              << " state=" << (rcPlanState_ == RcPlanState::Accepted ? "accepted"
+                               : rcPlanState_ == RcPlanState::Mismatch ? "mismatch" : "unknown")
+              << (mismatched.empty() ? "" : " mismatched=" + mismatched) << " retried=" << retried << "\n";
+  }
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
@@ -1762,16 +1945,35 @@ void H264Encoder::report_sps_profile_once(const uint8_t* data, size_t size) {
 
 uint32_t H264Encoder::configured_max_qp() { return env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u); }
 
-bool H264Encoder::set_max_qp(uint32_t maxQp) {
-  if (!enc_) return false;
+RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
+  if (!enc_) return RcRuntimeResult::Failed;
+  const uint32_t effective = maxQp != 0 ? maxQp : configured_max_qp();
+  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log.
+  if (rcPlanApplied_ && rcPlan_.maxQpSet == (effective > 0 && effective <= 51) &&
+      (!rcPlan_.maxQpSet || rcPlan_.maxQp == effective)) {
+    return RcRuntimeResult::Unchanged;
+  }
+  if (!runtime_max_qp_live()) {
+    // The ceiling is static for this instance's life (MaxQP is a pre-start property on this MFT; a
+    // runtime SetValue returned S_OK and changed nothing observable). Not issued, not applied.
+    return RcRuntimeResult::Unproven;
+  }
   maxQpOverride_ = maxQp;
-  return apply_rate_control("governor");
+  return apply_rate_control("governor") ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
-bool H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
-  if (!enc_) return false;
-  bitrate_ = std::max<uint32_t>(100000, bitrate);
-  return apply_rate_control("reconfigure");
+RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
+  if (!enc_) return RcRuntimeResult::Failed;
+  const uint32_t mean = std::max<uint32_t>(100000, bitrate);
+  if (rcPlanApplied_ && rcPlan_.meanBps == mean) return RcRuntimeResult::Unchanged;  // C3 no-op
+  if (!runtime_mean_live()) {
+    // A new mean on this profile is a new instance: the host takes its re-initialisation path with
+    // the new E. bitrate_ is left as the running instance's value so configured_bitrate() tells the
+    // truth about what the MFT was told.
+    return RcRuntimeResult::Unproven;
+  }
+  bitrate_ = mean;
+  return apply_rate_control("reconfigure") ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
 bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,

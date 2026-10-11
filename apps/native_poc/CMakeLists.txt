@@ -914,6 +914,33 @@ add_executable(remote60_host_rate_governor_test
 )
 target_include_directories(remote60_host_rate_governor_test PRIVATE src)
 
+# encoder-rc-budget: E from R, the RC plan per MFT identity, runtime controls, governor config,
+# retarget coalescing (pure).
+add_executable(remote60_host_encoder_budget_test
+  src/host_encoder_budget_test.cpp
+)
+target_include_directories(remote60_host_encoder_budget_test PRIVATE src)
+
+# encoder-rc-budget: the seam -- the real H264Encoder driving a fake MFT (host_fake_encoder_mft.hpp):
+# RC before the media types on the NVIDIA profile, re-applied per instance, no-op on the same plan,
+# no SetValue on a running NVIDIA instance, legacy order kept for AMD. Same MF links as the codec test.
+add_executable(remote60_host_encoder_rc_seam_test
+  src/mf_h264_codec.cpp
+  src/host_encoder_rc_seam_test.cpp
+)
+target_include_directories(remote60_host_encoder_rc_seam_test PRIVATE src)
+target_link_libraries(remote60_host_encoder_rc_seam_test PRIVATE
+  d3d11
+  mfplat
+  mf
+  mfuuid
+  wmcodecdspuuid
+  ole32
+)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_rc_seam_test PRIVATE /utf-8)
+endif()
+
 # clip-image: limits, DIB header check, bulk demux/generations, bulk rate (pure).
 add_executable(remote60_clip_image_core_test
   src/clip_image_core_test.cpp

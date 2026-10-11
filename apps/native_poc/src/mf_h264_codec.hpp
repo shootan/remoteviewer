@@ -3,14 +3,37 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <string>
 #include <vector>
 
 #include <d3d11.h>
 #include <mfidl.h>
 #include <mftransform.h>
 #include <wrl/client.h>
+// The Windows headers above define min/max as macros unless NOMINMAX was set by the including
+// translation unit; the policy header below uses std::min/std::max.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include "host_encoder_rc_policy.hpp"
 
 namespace remote60::native_poc {
+
+// encoder-rc-budget C3: what a runtime rate-control call did to the RUNNING instance.
+//   Applied   -- SetValue issued and accepted (the legacy/AMD live path).
+//   Unchanged -- the instance already runs this plan: nothing was issued (same instance, same plan).
+//   Unproven  -- the profile does not trust runtime changes on this instance (NVIDIA pre-types):
+//                nothing was issued, and the caller must re-initialise with a new plan if it needs
+//                the change. Never to be counted as applied.
+//   Failed    -- SetValue was issued and rejected, or there is no instance.
+enum class RcRuntimeResult { Applied, Unchanged, Unproven, Failed };
+
+// What the MFT reported after types + stream start, against the plan it was given.
+enum class RcPlanState { Unknown, Accepted, Mismatch };
 
 struct H264AccessUnit {
   std::vector<uint8_t> bytes;
@@ -191,16 +214,46 @@ class H264Encoder {
   ~H264Encoder();
 
   bool set_d3d11_device(ID3D11Device* device);
+  /**
+   * A new encoder instance for (size, fps, mean E, keyint). encoder-rc-budget C2: `bitrate` is the
+   * encoder PAYLOAD mean E (host_encoder_budget.hpp), not the wire budget. Every call builds one RC
+   * plan for the identity of the MFT it activates (host_encoder_rc_policy.hpp) and hands it to the
+   * new instance -- before the media types on the NVIDIA profile, after them on the legacy one --
+   * then reads it back and classifies (rc_plan_state).
+   */
   bool initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint);
-  bool reconfigure_bitrate(uint32_t bitrate);
+  /**
+   * A new mean on the RUNNING instance. Unchanged when it already runs this mean; Applied on the
+   * legacy profile; Unproven on the NVIDIA profile (nothing issued -- re-initialise instead).
+   */
+  RcRuntimeResult reconfigure_bitrate(uint32_t bitrate);
   /**
    * quality r5: the quantiser ceiling at runtime (the rate governor). 0 returns to the configured
-   * one (REMOTE60_NATIVE_MAX_QP, default 32). A new encoder starts from the configured one again.
+   * one (REMOTE60_NATIVE_MAX_QP, default 32). Same results as reconfigure_bitrate; a static-ceiling
+   * profile answers Unproven without touching the MFT.
    */
-  bool set_max_qp(uint32_t maxQp);
+  RcRuntimeResult set_max_qp(uint32_t maxQp);
   uint32_t max_qp_override() const { return maxQpOverride_; }
+  /**
+   * The governor's ceiling the NEXT initialize() should start from on the legacy profile (0 = the
+   * configured one). Lets a rebuilt encoder start at the loop's ceiling instead of being restored to
+   * it with a late post-type SetValue (C4). Ignored by profiles with a static ceiling.
+   */
+  void set_initial_max_qp(uint32_t maxQp) { initialMaxQp_ = maxQp; }
   /** The configured ceiling (REMOTE60_NATIVE_MAX_QP, default 32; 0 = none). */
   static uint32_t configured_max_qp();
+  // encoder-rc-budget: the instance's policy and plan, for the host's governor and diagnostics.
+  RcProfile rc_profile() const { return rcProfile_; }
+  const RcPlan& rc_plan() const { return rcPlan_; }
+  RcPlanState rc_plan_state() const { return rcPlanState_; }
+  const MftIdentity& identity() const { return identity_; }
+  /** The mean E this instance was configured with (what the MFT was told, not what it produces). */
+  uint32_t configured_bitrate() const { return bitrate_; }
+  bool started() const { return started_; }
+  bool runtime_mean_live() const { return rc_runtime_controls_for(rcProfile_).liveMean; }
+  bool runtime_max_qp_live() const { return rc_runtime_controls_for(rcProfile_).liveMaxQp; }
+  /** The plan's ceiling when it set one (0 = none set). */
+  uint32_t plan_max_qp() const { return rcPlan_.maxQpSet ? rcPlan_.maxQp : 0; }
   bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
                     std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
   /** Converts BGRA directly into the Media Foundation input buffer, avoiding the temporary
@@ -254,6 +307,11 @@ class H264Encoder {
   bool configure_types(const char* stageReason = "init");
   void apply_low_latency_codec_api();
   bool apply_rate_control(const char* reason);
+  // encoder-rc-budget (mf_h264_codec.cpp, next to initialize):
+  void adopt_identity();                                   // from the activate / the transform's attributes
+  RcPlan build_rc_plan(uint32_t meanBps, uint32_t legacyMaxQp) const;
+  bool apply_rc_plan(const RcPlan& plan, const char* stage, bool onlyMismatched);
+  RcPlanState read_back_rc_plan(const RcPlan& plan, std::string* outDetail, std::string* outMismatched);
   bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,
                             std::vector<H264AccessUnit>* outUnits,
                             H264EncodeFrameStats* encodeStats, uint64_t encodeCallStartUs);
@@ -266,7 +324,14 @@ class H264Encoder {
   uint32_t fps_ = 0;
   uint32_t bitrate_ = 0;
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
+  uint32_t initialMaxQp_ = 0;   // set_initial_max_qp: the ceiling the next legacy instance starts from
   uint32_t keyint_ = 0;
+  // encoder-rc-budget: who this instance is and what it was told.
+  MftIdentity identity_;
+  RcProfile rcProfile_ = RcProfile::Legacy;
+  RcPlan rcPlan_;
+  bool rcPlanApplied_ = false;  // the plan above is what the running instance holds (no-op basis)
+  RcPlanState rcPlanState_ = RcPlanState::Unknown;
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
