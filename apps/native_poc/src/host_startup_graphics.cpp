@@ -331,7 +331,7 @@ void startup_configure_encode_geometry(HostContext& hx) {
   rate.userKeyintCeiling = args.keyint;
   encoder.activeBitrate = rate.abrHighBitrate;  // R: the user's wire budget
   // encoder-rc-budget C1: the first instance is told E for that R, like every later one (ApplyTarget).
-  encoder.desiredEncoderBps = encoder.EncoderBudgetFor(encoder.activeBitrate);
+  encoder.desiredEncoderBps = encoder.EncoderBudgetFor(encoder.activeBitrate, encoder.activeFps);
   // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
   // measured holding the previous frame an extra tick on 75% of key presents (the user's
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
@@ -391,12 +391,15 @@ int startup_init_encoder(HostContext& hx) {
     }
     encoder.encoderRetarget.NoteReinit(qpc_now_us());
     {
-      const EncoderBudgetBreakdown b = encoder_budget_for(encoder.activeBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy());
+      const EncoderBudgetBreakdown b =
+          encoder_budget_for(encoder.activeBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy(), encoder.activeFps);
       std::cout << "[native-video-host] encoder-budget requestedWire=" << encoder.activeBitrate
                 << " effectiveWire=" << hx.sender.wireCapBps.load(std::memory_order_relaxed)
                 << " desiredEncoder=" << encoder.desiredEncoderBps << " appliedEncoder=" << encoder.applied_encoder_bps()
+                << " rcEffective=" << (encoder.codec.rc_plan_effective() ? 1 : 0) << " payloadBudget=" << b.payloadWireBps
                 << " action=startup profile=" << rc_profile_name(encoder.codec.rc_profile())
                 << " fecX1000=" << b.fecFactorX1000 << " headerX1000=" << b.headerFactorX1000
+                << " auBytes=" << b.auBytesAtFps << " wireAtFpsBps=" << b.wireAtFpsBps
                 << " nackReservePct=" << EncoderState::BudgetPolicy().nackReservePercent
                 << " overshootPct=" << EncoderState::BudgetPolicy().encoderOvershootPercent << "\n";
     }

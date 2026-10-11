@@ -168,7 +168,8 @@ struct EncoderState {
   uint32_t activeBitrate = 0;
   uint32_t desiredEncoderBps = 0;
   uint32_t wireMtu = 1200;  // clamp_udp_mtu(args.udpMtu), set at startup; the header-cost input of the budget
-  // C3: coalescing of E changes that need a new instance (a profile without a live mean).
+  // C3: coalescing of E changes that need a new instance (a profile without a live mean). Its 2 s
+  // interval is a policy value awaiting field verification on the NVIDIA profile, not a measured optimum.
   EncoderRetargetScheduler encoderRetarget;
   // C4: the governor's current ceiling, pinned in the codec for the next legacy rebuild
   // (codec.set_initial_max_qp) instead of being restored late with a post-type SetValue.
@@ -188,11 +189,33 @@ struct EncoderState {
     g.fecGroupSize = kUdpVideoFecGroupSize;
     return g;
   }
-  /** E for a wire budget R under the live geometry: the ONE conversion point (C1). */
-  uint32_t EncoderBudgetFor(uint32_t wireBps) const { return encoder_payload_budget_bps(wireBps, WireGeometryNow(), BudgetPolicy()); }
+  /**
+   * E for a wire budget R under the live geometry at the frame rate the instance will run: the ONE
+   * conversion point (C1). The frame rate matters because the per-AU cost (a parity datagram per
+   * group, headers per datagram, ceil at every step) is paid per frame -- at 1.5 Mbps / 60 fps an AU
+   * of ~2 KB is two chunks and a parity, far above the large-AU asymptote (r2, Codex).
+   */
+  uint32_t EncoderBudgetFor(uint32_t wireBps, uint32_t fps) const {
+    return encoder_budget_for(wireBps, WireGeometryNow(), BudgetPolicy(), fps).encoderBps;
+  }
+  /**
+   * The PAYLOAD the wire can carry at R (R minus the nominal margin, divided by the parity and header
+   * cost at this frame rate) -- the unit the rate governor's generated-payload figure is compared
+   * against (r2, Codex R4). E = this / (1 + overshoot allowance); the governor's over/under bands sit
+   * on this number, not on R (a wire budget) and not on E (a target with slack removed).
+   */
+  uint32_t PayloadBudgetFor(uint32_t wireBps, uint32_t fps) const {
+    return encoder_budget_for(wireBps, WireGeometryNow(), BudgetPolicy(), fps).payloadWireBps;
+  }
   /** What a (re)initialize of the codec outside ApplyTarget hands it as the mean: E for the active R. */
-  uint32_t encoder_bitrate_for_init() const { return desiredEncoderBps != 0 ? desiredEncoderBps : EncoderBudgetFor(activeBitrate); }
-  /** The E the live instance holds, 0 when there is none. */
+  uint32_t encoder_bitrate_for_init() const {
+    return desiredEncoderBps != 0 ? desiredEncoderBps : EncoderBudgetFor(activeBitrate, activeFps);
+  }
+  /**
+   * The E the live instance was GIVEN (its configured mean), 0 when there is none. Whether the MFT
+   * confirmed the plan is a separate state (codec.rc_plan_state / rc_plan_effective): a mismatch is
+   * reported, it does not make the instance "unconfigured" -- that would re-build it every interval.
+   */
   uint32_t applied_encoder_bps() const { return codec.started() ? codec.configured_bitrate() : 0; }
   uint32_t keyintOverride = 0;      // REMOTE60_NATIVE_KEYINT_OVERRIDE (0 = off)
   uint32_t activeKeyint = 0;

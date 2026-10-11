@@ -85,13 +85,18 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   // no longer move together: a lower E never lowers the wire cap, and a lower R reaches the limiter
   // now, before any encoder transition (which may be deferred, below).
   const bool wireChanged = (targetBitrate != encoder.activeBitrate);
-  const uint32_t desiredE = encoder.EncoderBudgetFor(targetBitrate);
+  const uint32_t desiredE = encoder.EncoderBudgetFor(targetBitrate, targetFps);
   if (wireChanged ||
       (sender.wireCapEnabled && sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(targetBitrate))) {
     encoder.PublishWireBudget(sender, targetBitrate);
   }
   encoder.desiredEncoderBps = desiredE;
   const uint32_t appliedBefore = encoder.applied_encoder_bps();
+  const uint64_t instanceBefore = encoder.codec.instance_id();
+  // r2 (Codex R1): a deferral is judged against the CURRENT desired E on every call, including the
+  // one where E has come back to what the instance runs -- that is the cancellation. Done up front so
+  // no branch below can leave a stale deferral that the tick would keep waking up on.
+  if (desiredE == appliedBefore) (void)encoder.encoderRetarget.Decide(nowUs, desiredE, appliedBefore);
 
   // One re-initialisation sequence for every reason (geometry/fps/keyint, a failed live change, a
   // new E on a profile without a live mean). The fresh instance is told E and the governor's current
@@ -159,11 +164,15 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   encoder.targetPending = encoder.codecNeedsInit = false;
   encoder.targetRetryAtUs = encoder.encodeErrorSinceUs = 0;
   encoder.targetFailures = 0;
-  // The forced key every target change owes the viewer (C4: a no-op optimisation does not remove it).
-  // A DEFERRED encoder change owes it when the new instance is built -- that ApplyTarget call takes
-  // the reinit branch above and requests it then; forcing one now would send a large IDR at the
-  // very moment the wire budget was lowered, with the encoder still on the old E.
-  if (std::strcmp(action, "deferred") != 0) encoder.RequestKey(kHostKeyReasonEncoderTarget);
+  // The forced key an ENCODER change owes the viewer: a new instance (its stream starts over) or a
+  // live mean change (its output changes). Not a pure wire-budget change, not a repeated target, not
+  // a deferral -- a deferred change owes it when the new instance is built, and forcing one now would
+  // send a large IDR at the very moment the wire budget was lowered, with the encoder still on the
+  // old E. The keys a selection, a recovery or a new epoch demand are requested by those callers with
+  // their own reasons and are untouched here (C4). (r2, Codex R1: the previous rule requested one on
+  // every non-deferred call, so a cancelled deferral made the tick ask for a key every time.)
+  const bool encoderOutputChanged = encoder.codec.instance_id() != instanceBefore || std::strcmp(action, "live") == 0;
+  if (encoderOutputChanged) encoder.RequestKey(kHostKeyReasonEncoderTarget);
   encoder.activeEncodeH = targetH;
   encoder.activeFps = targetFps;
   encoder.activeBitrate = targetBitrate;
@@ -171,12 +180,16 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
   inputRouter.domainH.store(encoder.activeEncodeH, std::memory_order_release);
   if (wireChanged || std::strcmp(action, "none") != 0) {
-    const EncoderBudgetBreakdown b = encoder_budget_for(targetBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy());
+    const EncoderBudgetBreakdown b = encoder_budget_for(targetBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy(), targetFps);
     std::cout << "[native-video-host] encoder-budget requestedWire=" << targetBitrate
               << " effectiveWire=" << sender.wireCapBps.load(std::memory_order_relaxed)
               << " desiredEncoder=" << desiredE << " appliedEncoder=" << encoder.applied_encoder_bps()
+              << " rcEffective=" << (encoder.codec.rc_plan_effective() ? 1 : 0)
+              << " payloadBudget=" << b.payloadWireBps
               << " action=" << action << " profile=" << rc_profile_name(encoder.codec.rc_profile())
               << " fecX1000=" << b.fecFactorX1000 << " headerX1000=" << b.headerFactorX1000
+              << " auBytes=" << b.auBytesAtFps << " wireAtFpsBps=" << b.wireAtFpsBps
+              << " keyRequested=" << (encoderOutputChanged ? 1 : 0)
               << " deferredUntilUs=" << (encoder.encoderRetarget.deferred ? encoder.encoderRetarget.deferredUntilUs : 0ULL)
               << "\n";
   }

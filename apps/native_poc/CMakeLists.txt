@@ -941,6 +941,26 @@ if(MSVC)
   target_compile_options(remote60_host_encoder_rc_seam_test PRIVATE /utf-8)
 endif()
 
+# encoder-rc-budget r2: the REAL EncoderState::ApplyTarget + due path on the fake MFT -- cancelled
+# deferral, convergence to the latest target, no-op (0 writes / 0 instances / 0 keys), legacy live.
+add_executable(remote60_host_encoder_apply_target_test
+  src/host_encoder_manager.cpp
+  src/host_encoded_sender.cpp
+  src/host_net_io.cpp
+  src/mf_h264_codec.cpp
+  src/d3d_capture_readback.cpp
+  src/host_bgra_scale.cpp
+  src/gdi_capture_process.cpp
+  src/secure_input_broker.cpp
+  src/host_encoder_apply_target_test.cpp
+)
+target_include_directories(remote60_host_encoder_apply_target_test PRIVATE src)
+target_link_libraries(remote60_host_encoder_apply_target_test PRIVATE capture common ws2_32
+  runtimeobject windowsapp advapi32 d3d11 dxgi gdi32 user32 mfplat mf mfuuid wmcodecdspuuid ole32)
+if(MSVC)
+  target_compile_options(remote60_host_encoder_apply_target_test PRIVATE /utf-8)
+endif()
+
 # clip-image: limits, DIB header check, bulk demux/generations, bulk rate (pure).
 add_executable(remote60_clip_image_core_test
   src/clip_image_core_test.cpp

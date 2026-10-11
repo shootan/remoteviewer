@@ -202,12 +202,24 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                     << " baseQp=" << want.baseQp << " capQp=" << want.capQp << " instance=" << encoder.codec.instance_id() << "\n";
         }
       }
-      // The ceiling the next LEGACY rebuild starts from is the loop's current one -- set in the codec
-      // before any reinit instead of restored afterwards with a late post-type SetValue (C4).
-      encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
+      // The ceiling the next LEGACY rebuild starts from is the loop's CURRENT one -- pinned in the codec
+      // right after every decision that moves it (Reset, OnSecond), before any ApplyTarget that could
+      // rebuild, instead of restored afterwards with a late post-type SetValue (C4). r2 (Codex R3): it
+      // used to be pinned at the top of the tick, so a step taken in this tick (38 -> 40) was followed
+      // by a rebuild that started at 38. A static-ceiling profile ignores the seed (its plan sets 44).
+      const auto seedInitialQp = [&] {
+        encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
+      };
+      // r2 (Codex R4): the loop's input is PAYLOAD (bytes sent + the gate's skipped frames at the average
+      // frame size); its target must be in the same unit -- the payload the wire can carry at R and this
+      // frame rate, not R itself (a wire figure that includes parity and headers) and not E (a target
+      // with the overshoot slack removed). E == payloadBudget / 1.12; the 125% / 85% bands sit on
+      // payloadBudget, so 2.5 Mbps of payload at R 3 Mbps reads as ~106% (in band), not 83% (under).
+      const uint32_t payloadBudgetBps = encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps);
       if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
         // A new target, or the user chose another frame rate: start over from the floor.
         governor.Reset();
+        seedInitialQp();
         encoder.rateGovernorBitrate = encoder.activeBitrate;
         encoder.rateGovernorUserFps = userFps;
       } else {
@@ -216,11 +228,13 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           // Something else moved the frame rate (ABR, M9, the overview) since this loop set it:
           // that controller owns it now, and the loop starts over rather than fight it.
           governor.Reset();
+          seedInitialQp();
         } else {
           // (The late "put the loop's ceiling back after a rebuild" SetValue that used to live here is
-          // gone: a rebuilt legacy instance starts at the loop's ceiling through set_initial_max_qp above,
-          // and a static-ceiling instance must not be poked at all. C4.)
-          const RateDecision after = governor.OnSecond(govBytesPerSec, encoder.activeBitrate, userFps);
+          // gone: a rebuilt legacy instance starts at the loop's ceiling through seedInitialQp, and a
+          // static-ceiling instance must not be poked at all. C4.)
+          const RateDecision after = governor.OnSecond(govBytesPerSec, payloadBudgetBps, userFps);
+          seedInitialQp();  // the decision just taken is what the next rebuild starts from
           if (after.fps != before.fps) {
             const uint32_t prevFps = encoder.activeFps;
             const bool fpsApplied = encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender,
@@ -244,6 +258,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                       << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
                       << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " payloadBudgetKbps=" << (payloadBudgetBps / 1000U)
                       << " applied=" << (fpsApplied ? 1 : 0) << "\n";
           } else if (after.maxQp != before.maxQp) {
             // C3: only an Applied answer counts as applied. Unproven (a static-ceiling instance) is
@@ -255,6 +270,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                       << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
                       << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " payloadBudgetKbps=" << (payloadBudgetBps / 1000U)
                       << " applied=" << (applied ? 1 : 0)
                       << " result=" << (rr == RcRuntimeResult::Applied ? "applied"
                                         : rr == RcRuntimeResult::Unchanged ? "unchanged"
@@ -403,6 +419,8 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " rcProfile=" << rc_profile_name(encoder.codec.rc_profile())
             << " rcPlanState=" << (encoder.codec.rc_plan_state() == RcPlanState::Accepted ? "accepted"
                                    : encoder.codec.rc_plan_state() == RcPlanState::Mismatch ? "mismatch" : "unknown")
+            << " rcEffective=" << (encoder.codec.rc_plan_effective() ? 1 : 0)
+            << " payloadBudget=" << encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps)
             << " wireOverloadSkips=" << stats.wireOverloadSkipCount  // frames the cap's input gate skipped (cumulative)
             << " fpsTarget=" << encoder.activeFps
             << " keyintTarget=" << encoder.activeKeyint
