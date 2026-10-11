@@ -266,9 +266,11 @@ struct RunResult {
   uint32_t psnrDecodedW = 0, psnrDecodedH = 0;  // the decoded visible size the PSNR was taken at
 };
 
-// A scheduled runtime tune the harness's control thread sends at `atSec` (encoder-rc-budget C5:
-// down/up shifts and an fps transition in one run). bitrate 0 / fps 0 = that field not sent.
-struct TuneStep { uint32_t atSec = 0; uint32_t bitrate = 0; uint32_t fps = 0; };
+// A scheduled runtime tune the harness's control thread sends at `atMs` after the control thread's
+// start (encoder-rc-budget C5: down/up shifts and an fps transition in one run). Millisecond steps
+// (r4 H1): the E-only schedule must land INSIDE and OUTSIDE the host's real 2 s coalescing interval
+// on purpose, which whole seconds cannot place. bitrate 0 / fps 0 = that field not sent.
+struct TuneStep { uint32_t atMs = 0; uint32_t bitrate = 0; uint32_t fps = 0; };
 
 // The owed event ids (1..eventsOwed) that were never decoded. Ids are allocated in paint order, so the
 // events painted early enough to be owed are exactly 1..owed; a decoded id above owed is a late bonus
@@ -706,7 +708,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       std::vector<Pending> schedule;
       const uint64_t t0 = qpc_now_us();
       if (downshiftBitrate > 0) schedule.push_back({t0 + downshiftAtSec * 1'000'000ull, downshiftBitrate, 0, false});
-      if (tunes) for (const TuneStep& s : *tunes) schedule.push_back({t0 + s.atSec * 1'000'000ull, s.bitrate, s.fps, false});
+      if (tunes) for (const TuneStep& s : *tunes) schedule.push_back({t0 + s.atMs * 1'000ull, s.bitrate, s.fps, false});
       uint32_t dseq = 50000;
       while (!controlStop.load()) {
         for (Pending& p : schedule) {
@@ -1194,7 +1196,7 @@ struct RcRow {
          decodeLatMaxMs = 0, evP50 = 0, evP95 = 0, evMax = 0, psnrFullMean = 0, psnrFullMin = 0, psnrTextMean = 0,
          psnrTextMin = 0, sentPayloadKbps = 0, idrPerSec = 0, keyMaxKb = 0, keyMeanKb = 0;
   uint32_t gap250 = 0, evMatched = 0, evExpected = 0, decErr = 0, keyReq = 0, nacks = 0, psnrN = 0, rcInstances = 0,
-           rcReconfigureWrites = 0, decodedW = 0, decodedH = 0;
+           rcReconfigureWrites = 0, rcGovernorWrites = 0, decodedW = 0, decodedH = 0;
   uint64_t desiredEncoder = 0, appliedEncoder = 0, effectiveWire = 0, hostSkips = 0;
   std::string rcProfile, planState;
 };
@@ -1256,7 +1258,7 @@ RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wir
     row.keyMeanKb = static_cast<double>(sum) / r.host.keyBytes.size() / 1024.0;
   }
   row.decErr = r.decodeErrors; row.keyReq = r.keyReq; row.nacks = r.nacks;
-  row.rcInstances = r.host.rcInstances; row.rcReconfigureWrites = r.host.rcReconfigureWrites;
+  row.rcInstances = r.host.rcInstances; row.rcReconfigureWrites = r.host.rcReconfigureWrites; row.rcGovernorWrites = r.host.rcGovernorWrites;
   row.desiredEncoder = r.host.desiredEncoder; row.appliedEncoder = r.host.appliedEncoder;
   row.effectiveWire = r.host.effectiveWire; row.hostSkips = r.host.wireOverloadSkips;
   row.rcProfile = r.host.rcProfile;
@@ -1268,14 +1270,15 @@ void print_rc_row(const RcRow& w) {
   std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
               "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
               "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
-              "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u instances=%u "
+              "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u(reconf=%u gov=%u) instances=%u "
               "decErr=%u keyReq=%u nacks=%u\n",
               w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
               (unsigned long long)w.desiredEncoder, (unsigned long long)w.appliedEncoder, (unsigned long long)w.effectiveWire,
               w.rcProfile.c_str(), w.planState.c_str(), w.deliveredFps, w.decodeFps, w.gap250, w.decodeGapMaxMs,
               w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
               w.psnrFullMin, w.psnrTextMean, w.psnrTextMin, w.psnrN, w.decodedW, w.decodedH, w.idrPerSec, w.keyMaxKb,
-              w.keyMeanKb, (unsigned long long)w.hostSkips, w.rcReconfigureWrites, w.rcInstances, w.decErr, w.keyReq, w.nacks);
+              w.keyMeanKb, (unsigned long long)w.hostSkips, w.rcReconfigureWrites + w.rcGovernorWrites, w.rcReconfigureWrites, w.rcGovernorWrites,
+              w.rcInstances, w.decErr, w.keyReq, w.nacks);
 }
 
 int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselineHost, const std::wstring& dir, int seconds,
@@ -1402,9 +1405,9 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
   const int runSec = std::max(seconds, 16);
   {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
-    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 4), 1'500'000, 0},
-                                   {static_cast<uint32_t>(runSec / 4), 1'500'000, 0},   // the same target again (T2)
-                                   {static_cast<uint32_t>(runSec * 3 / 5), 6'000'000, 0}};
+    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 4) * 1000u, 1'500'000, 0},
+                                   {static_cast<uint32_t>(runSec / 4) * 1000u, 1'500'000, 0},   // the same target again (T2)
+                                   {static_cast<uint32_t>(runSec * 3 / 5) * 1000u, 6'000'000, 0}};
     const RunResult r = run_host(hostExe, dir + L"t_downup\\", Content::FullTransition, true, port, runSec, 0, 1, true,
                                  6'000'000, 30, 0, 0, false, &steps);
     std::printf("TRANSITION down/up: tunesSent=%zu budgetActions=", r.tuneSentUs.size());
@@ -1473,7 +1476,7 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
   }
   {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
-    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 2), 0, 60}};
+    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 2) * 1000u, 0, 60}};
     const RunResult r = run_host(hostExe, dir + L"t_fps\\", Content::FullTransition, true, port, runSec, 0, 1, true, 3'000'000, 30,
                                  0, 0, false, &steps);
     std::printf("TRANSITION fps 30->60: rcInstances=%u planPostStart=%u planStates=", r.host.rcInstances, r.host.rcPlanPostStart);
@@ -1515,80 +1518,93 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
   return 0;
 }
 
-// r3 (the Home bundle): E-ONLY transitions at a geometry the ladder leaves alone. 6 M and 5 M are both
-// above kLadderFullResMinBitrate, so on a 1080p page the encode size stays 1920x1080 and a tune changes
-// only R and E -- the case the coalescing exists for and the 6M<->1.5M rows cannot show (there the ladder
-// rebuilds for geometry on every profile). The sequence, with times from the host's start:
-//   t+4  5M (B)        t+5   6M (A again: a cancel inside the interval)
-//   t+9  5M (B)        t+10  5.5M (C: the latest target replaces B)
-//   t+14 5.5M (the same target again, well separated in time: must be a no-op)
-// On a profile with a live mean (legacy/AMD) every distinct change is one live write and no instance;
-// on the static profile (NVIDIA) B is never built, C is adopted once at the interval's end, the repeat
-// builds nothing. Both: R moves at once, the encode size never changes, every owed event decodes.
+// encoder-rc-budget C3/C5 E-only transitions at a FIXED geometry: the wire budget R moves while
+// nothing but E can change (1080p, 30 fps, 5..6 Mbps stays on the top ladder rung). Both profiles
+// receive the same ms schedule; what they must do with it differs (r4 H1 -- the same sequence is
+// pinned first on the real manager + scheduler + fake MFT in host_encoder_apply_target_test [7], this
+// is that sequence on the product host + real MFT, timed against the host's REAL 2 s interval):
+//
+//   t(ms)  request        static profile (NVIDIA: no live mean)     legacy (AMD: live mean)
+//   4000   B = 5.0M       >=2 s after startup -> adopt (inst 2)       live write
+//   5000   A = 6.0M       inside [4000,6000) -> deferred              live write
+//   5500   B = 5.0M       desired == applied -> deferral CANCELLED    live write
+//   9000   C = 5.5M       interval over -> adopt (inst 3)             live write
+//  10000   D = 5.2M       inside [9000,11000) -> deferred             live write
+//  10500   E = 5.4M       still inside -> deferred, LATEST wins       live write
+// ~11000   (host tick)    due -> E adopted ONCE (inst 4); D never built
+//  14000   E = 5.4M       repeat -> nothing                            nothing (same mean)
+//
+// So: static = 4 instances / 1 deferred adoption / 0 runtime writes; legacy = 1 instance / 6 live
+// writes / 0 rebuilds. Both: R follows every DISTINCT request at once (six apply markers, in order),
+// the encode size never changes, every owed event decodes. Startup no longer owes a rebuild to the
+// first tune (the startup keyint goes through the same key-period policy, r4), so a tune that changes
+// nothing changes nothing on either profile.
 int run_rc_eonly(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
-  std::printf("\n=== encoder-rc-budget r3 E-only transitions at a fixed geometry (6M <-> 5M <-> 5.5M, 1080p) ===\n");
+  std::printf("\n=== encoder-rc-budget r4 E-only transitions at a fixed geometry (6M <-> 5M <-> 5.5M <-> 5.2M <-> 5.4M, 1080p) ===\n");
   const int runSec = std::max(seconds, 18);
   const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
-  std::vector<TuneStep> steps = {{4, 5'000'000, 0}, {5, 6'000'000, 0}, {9, 5'000'000, 0}, {10, 5'500'000, 0}, {14, 5'500'000, 0}};
-  // The second step of each pair fires 1 s after the first: inside the 2 s coalescing interval, and far
-  // enough apart that the host's control mailbox sees two requests on two ticks, not one merged tune.
+  std::vector<TuneStep> steps = {{4000, 5'000'000, 0}, {5000, 6'000'000, 0},  {5500, 5'000'000, 0},  {9000, 5'500'000, 0},
+                                 {10000, 5'200'000, 0}, {10500, 5'400'000, 0}, {14000, 5'400'000, 0}};
   const RunResult r = run_host(hostExe, dir + L"t_eonly\\", Content::SingleChange, true, port, runSec, 0, 1, true, 6'000'000, 30, 0, 0,
                                false, &steps);
   std::printf("EONLY: tunesSent=%zu budgetActions=", r.tuneSentUs.size());
   for (const auto& a : r.host.budgetActions) std::printf("%s,", a.c_str());
-  std::printf(" rcInstances=%u rcReconfigureWrites=%u deferredApplied=%u effWire(last)=%llu E(desired/applied)=%llu/%llu profile=%s sizes=",
-              r.host.rcInstances, r.host.rcReconfigureWrites, r.host.deferredRetargets, (unsigned long long)r.host.effectiveWire,
-              (unsigned long long)r.host.desiredEncoder, (unsigned long long)r.host.appliedEncoder, r.host.rcProfile.c_str());
+  std::printf(" rcInstances=%u rcReconfigureWrites=%u rcGovernorWrites=%u deferredApplied=%u effWire(last)=%llu E(desired/applied)=%llu/%llu profile=%s sizes=",
+              r.host.rcInstances, r.host.rcReconfigureWrites, r.host.rcGovernorWrites, r.host.deferredRetargets,
+              (unsigned long long)r.host.effectiveWire, (unsigned long long)r.host.desiredEncoder, (unsigned long long)r.host.appliedEncoder,
+              r.host.rcProfile.c_str());
   for (const auto& s : r.host.sizes) std::printf("%s,", s.c_str());
-  std::printf(" wireCapApplies=");
-  for (const auto& m : r.host.wireCapApplies) std::printf("%llu@%llu,", (unsigned long long)m.first, (unsigned long long)m.second);
   std::printf(" events owed=%u matched=%u decErr=%u\n", r.eventsOwed, r.eventsMatched, r.decodeErrors);
-  check(r.tuneSentUs.size() == 5, "e-only: the five runtime tunes were sent");
+  // The adoption markers on the harness clock: when each tune left and when each R apply landed (the
+  // host's same-clock marker), so a reader sees where in the 2 s interval each request fell.
+  if (!r.tuneSentUs.empty()) {
+    const uint64_t t0 = r.tuneSentUs.front() - 4000ull * 1000ull;  // the schedule's origin: B left at +4000 ms
+    std::printf("EONLY tunes(ms from t0):");
+    for (uint64_t t : r.tuneSentUs) std::printf(" %+.0f", (static_cast<double>(t) - static_cast<double>(t0)) / 1000.0);
+    std::printf("\nEONLY wirecap applies (R@ms from t0):");
+    for (const auto& m : r.host.wireCapApplies)
+      std::printf(" %llu@%+.0f", (unsigned long long)m.first, (static_cast<double>(m.second) - static_cast<double>(t0)) / 1000.0);
+    std::printf("\n");
+  }
+  check(r.tuneSentUs.size() == 7, "e-only: the seven runtime tunes were sent");
   check(r.host.sizes.size() == 1 && r.host.sizes[0] == "1920x1080",
         "e-only: the encode size never changed (1920x1080 throughout; the ladder leaves 5M..6M alone)",
         r.host.sizes.empty() ? "no stats size" : r.host.sizes.front() + ".." + r.host.sizes.back());
-  // R moves at once for every DISTINCT request: 5M, 6M, 5M, 5.5M -- four apply markers after startup, in that order.
+  // R moves at once for every DISTINCT request, in order, and not for the repeat.
   {
     std::vector<uint64_t> seq;
     for (const auto& m : r.host.wireCapApplies) seq.push_back(m.first);
-    const std::vector<uint64_t> want = {5'000'000, 6'000'000, 5'000'000, 5'500'000};
-    check(seq == want, "e-only: the wire cap followed every distinct R at once, in order (5M,6M,5M,5.5M), and not the repeat",
+    const std::vector<uint64_t> want = {5'000'000, 6'000'000, 5'000'000, 5'500'000, 5'200'000, 5'400'000};
+    check(seq == want, "e-only: the wire cap followed every distinct R at once, in order (5M,6M,5M,5.5M,5.2M,5.4M), and not the repeat",
           std::to_string(seq.size()) + " markers");
   }
-  check(r.host.effectiveWire == 5'500'000 && r.host.desiredEncoder > 0 && r.host.desiredEncoder < 5'500'000,
-        "e-only: the run ends on R=5.5M with E below it");
-  // The FIRST runtime tune of a host rebuilds the encoder on every profile, whatever it asks: ApplyTarget
-  // raises the key period to its >=10 s floor (compute_effective_keyint) and startup did not, so
-  // targetKeyint != activeKeyint once. Pre-existing and unrelated to E; the harness names it rather
-  // than hides it. So: on legacy, changes 2..4 are live writes and the instance count is startup +
-  // that one rebuild; on the static profile, change 1 is that rebuild (E(5M) applied at once, so the
-  // 6M "cancel" is a real Decide(desired != applied) deferral that the following 5M request cancels),
-  // change 3 (5M) cancels, change 4 (5.5M) is deferred and adopted once; the repeat builds nothing.
+  check(r.host.effectiveWire == 5'400'000 && r.host.desiredEncoder > 0 && r.host.desiredEncoder < 5'400'000,
+        "e-only: the run ends on R=5.4M with E below it");
   const bool legacy = r.host.rcProfile == "legacy";
   const uint32_t rebuilds = r.host.rcInstances > 0 ? r.host.rcInstances - 1 : 0;
-  std::printf("EONLY first-tune rebuild (key-period floor, pre-existing): %s\n",
-              r.host.budgetActions.size() > 1 && r.host.budgetActions[1] == "reinit" ? "yes" : "no");
+  check(!(legacy && r.host.budgetActions.size() > 1 && r.host.budgetActions[1] == "reinit"),
+        "e-only: the first tune did NOT rebuild the encoder for a reason outside E (startup keyint follows the key-period policy, r4)");
   if (legacy) {
-    check(rebuilds + r.host.rcReconfigureWrites == 4, "e-only (legacy): four distinct changes = four transitions (live writes + rebuilds); the repeated "
-                                                          "target produced none (writes=" + std::to_string(r.host.rcReconfigureWrites) +
-                                                          " rebuilds=" + std::to_string(rebuilds) + ")");
-    bool laterAllLive = r.host.budgetActions.size() >= 5;
-    for (size_t i = 2; i < r.host.budgetActions.size() && laterAllLive; ++i) laterAllLive = r.host.budgetActions[i] == "live";
-    check(laterAllLive, "e-only (legacy): every change after the first is a LIVE mean change, not a rebuild");
-    check(rebuilds <= 1, "e-only (legacy): at most the one first-tune rebuild (" + std::to_string(rebuilds) + ")");
-    check(r.host.appliedEncoder == r.host.desiredEncoder, "e-only (legacy): the instance holds E(5.5M)");
+    check(r.host.rcReconfigureWrites == 6, "e-only (legacy): six distinct changes = six LIVE mean writes; the repeat produced none (writes=" +
+                                               std::to_string(r.host.rcReconfigureWrites) + ")");
+    check(rebuilds == 0, "e-only (legacy): no rebuild at all -- one instance for the whole run (" + std::to_string(r.host.rcInstances) + ")");
+    bool allLive = r.host.budgetActions.size() == 7;  // startup + six changes; the repeat logs nothing
+    for (size_t i = 1; i < r.host.budgetActions.size() && allLive; ++i) allLive = r.host.budgetActions[i] == "live";
+    check(allLive, "e-only (legacy): every logged change is a LIVE mean change (" + std::to_string(r.host.budgetActions.size()) + " actions)");
+    check(r.host.appliedEncoder == r.host.desiredEncoder, "e-only (legacy): the instance holds E(5.4M)");
   } else {
-    // Static profile: startup, the first-tune rebuild, ONE adoption (C). B after the cancel is never
-    // built; the repeat builds nothing; no runtime write ever.
-    check(r.host.rcInstances == 3, "e-only (static): startup + first-tune rebuild + ONE adoption for B->A(cancel)->B->C and the repeat (" +
-                                       std::to_string(r.host.rcInstances) + " instances)");
+    check(r.host.rcInstances == 4, "e-only (static): startup + B + C + E adopted = 4 instances; A was cancelled, D was superseded, the repeat "
+                                   "built nothing (" + std::to_string(r.host.rcInstances) + " instances)");
     check(r.host.deferredRetargets == 1, "e-only (static): the deferred retarget was applied exactly once, with the latest target (" +
                                              std::to_string(r.host.deferredRetargets) + ")");
     check(r.host.rcReconfigureWrites == 0, "e-only (static): no runtime RC write on a running instance");
-    check(r.host.appliedEncoder == r.host.desiredEncoder, "e-only (static): the adopted instance holds E(5.5M), not E(5M)");
-    bool deferredSeen = false;
-    for (const auto& a : r.host.budgetActions) if (a == "deferred") deferredSeen = true;
-    check(deferredSeen, "e-only (static): the host logged the deferral(s)");
+    check(r.host.appliedEncoder == r.host.desiredEncoder, "e-only (static): the adopted instance holds E(5.4M), not E(5.2M)");
+    // startup, B reinit, A deferred, B none (the cancel; R changed so it is logged), C reinit, D
+    // deferred, E deferred, the due tick's reinit. The repeat changes neither R nor E and logs nothing.
+    const std::vector<std::string> want = {"startup", "reinit", "deferred", "none", "reinit", "deferred", "deferred", "reinit"};
+    std::string got;
+    for (const auto& a : r.host.budgetActions) got += a + ",";
+    check(r.host.budgetActions == want, "e-only (static): the action sequence is adopt/defer/cancel/adopt/defer/defer(latest)/due-adopt", got);
   }
   {
     const std::vector<uint32_t> missing = missing_owed_ids(r);
