@@ -314,6 +314,37 @@ std::vector<uint32_t> missing_owed_ids(const RunResult& r) {
 // and compare it with the painted page -- the PSNR is a number, this is the picture. Only with
 // --keep-dir, since the run directory is otherwise removed.
 bool gSaveFrames = false;
+// r10 (Codex H2): the saved frames of a run, read back -- how many, their size, and whether the picture has
+// ink (dark pixels, i.e. text) rather than a blank page. Printed per marker run so the bundle's PGM
+// material is checked by content, not by file existence.
+struct PgmSummary { unsigned files = 0; unsigned w = 0, h = 0; double darkPct = 0; std::wstring first; };
+PgmSummary summarize_pgms(const std::wstring& dir) {
+  PgmSummary ps;
+  WIN32_FIND_DATAW fd{};
+  HANDLE hf = FindFirstFileW((dir + L"event_*.pgm").c_str(), &fd);
+  if (hf == INVALID_HANDLE_VALUE) return ps;
+  do {
+    ++ps.files;
+    if (ps.first.empty()) {
+      ps.first = dir + fd.cFileName;
+      FILE* fp = _wfopen(ps.first.c_str(), L"rb");
+      if (fp) {
+        unsigned w = 0, h = 0, maxv = 0;
+        if (std::fscanf(fp, "P5 %u %u %u", &w, &h, &maxv) == 3 && w && h) {
+          std::fgetc(fp);  // the single whitespace after maxval
+          std::vector<uint8_t> px(static_cast<size_t>(w) * h);
+          const size_t got = std::fread(px.data(), 1, px.size(), fp);
+          size_t dark = 0;
+          for (size_t i = 0; i < got; ++i) if (px[i] < 96) ++dark;
+          ps.w = w; ps.h = h; ps.darkPct = got ? 100.0 * dark / got : 0;
+        }
+        std::fclose(fp);
+      }
+    }
+  } while (FindNextFileW(hf, &fd));
+  FindClose(hf);
+  return ps;
+}
 void save_frame_pgm(const std::wstring& dir, uint32_t id, const DecodedFrameNv12& f) {
   if (dir.empty() || !f.bytes.data()) return;
   const uint32_t visW = f.visibleWidth ? f.visibleWidth : f.width;
@@ -412,15 +443,26 @@ std::string write_hang_dump(HANDLE process, DWORD pid, const std::wstring& runDi
 }
 // Test-support only: REMOTE60_E2E_HANG_DUMP_AFTER_MS=<n> forces a dump n ms into the live window of
 // every run even though frames flow -- to prove the dump path on a machine whose hosts do not hang.
+const char* gCurrentHostTag = "";  // r10: "cand" / "base" while a matrix pair runs (the forced dump can target one side)
 uint64_t forced_hang_dump_after_us() {
   char buf[32]{};
   const DWORD n = GetEnvironmentVariableA("REMOTE60_E2E_HANG_DUMP_AFTER_MS", buf, sizeof(buf));
   if (n == 0 || n >= sizeof(buf)) return 0;
+  // REMOTE60_E2E_HANG_DUMP_HOST=base|cand restricts the forced dump to that side of a matrix pair (test-support)
+  char only[16]{};
+  const DWORD m = GetEnvironmentVariableA("REMOTE60_E2E_HANG_DUMP_HOST", only, sizeof(only));
+  if (m != 0 && m < sizeof(only) && std::strcmp(only, gCurrentHostTag) != 0) return 0;
   return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10)) * 1000ull;
 }
 
 int gCaptureUnavailableRuns = 0;  // runs whose capture item could not be created even after the fallback
 bool capture_unavailable() { return gCaptureUnavailableRuns > 0; }
+// r10 (Codex H1): a matrix phase that runs the ORIGINAL candidate to collect its stall evidence. An invalid
+// candidate row there is the expected material: counted as DIAGNOSTIC-COLLECTED (exit 4 -- not success,
+// not a product failure) instead of a FAIL. Baseline validity and the candidate's own wire checks still
+// apply. Without this flag every invalid row is a FAIL.
+bool gDiagnosticMode = false;
+int gDiagnosticCollected = 0;
 
 // r7: the harness asks WGC itself, once per window mode, on a window built exactly as the run would
 // build it. The HRESULT is the OS's own answer (the host's log discards it). A simulated refusal
@@ -924,8 +966,10 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
             const uint64_t bytesNow = deliveredBytesAtomic.load(std::memory_order_acquire);
             const bool painting = paintsNow - prevPaints >= 10;
             const bool starving = deliveredNow - prevDelivered <= 1;
-            const bool wireIdle = (bytesNow - prevDeliveredBytes) * 8 * 5 < static_cast<uint64_t>(bitrate);  // < R/5 this second
-            lowFpsStreak = (painting && starving && wireIdle) ? lowFpsStreak + 1 : 0;
+            // delivered AU PAYLOAD under R/5 this second -- the assembler's output, not the wire (FEC/NACK/
+            // partial AUs are not in it); a diagnostic trigger, not a verdict on the capture
+            const bool payloadIdle = (bytesNow - prevDeliveredBytes) * 8 * 5 < static_cast<uint64_t>(bitrate);
+            lowFpsStreak = (painting && starving && payloadIdle) ? lowFpsStreak + 1 : 0;
             prevPaints = paintsNow;
             prevDelivered = deliveredNow;
             prevDeliveredBytes = bytesNow;
@@ -939,7 +983,7 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
               char why[200];
               std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, fixture paints=%llu, window-mode=%s)",
                             forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS"
-                                   : lowFps ? "fixture painting, wire idle (<R/5) but <=1 frame/s delivered for 3 s (capture publication or encode starved)"
+                                   : lowFps ? "fixture painting, delivered AU payload < R/5 and <=1 frame/s for 3 s (capture publication or encode starved; diagnostic trigger)"
                                             : "host alive but no frame delivered",
                             deliveredNow, silentUs / 1e6, (unsigned long long)target.paints(), r.windowMode.c_str());
               r.hangDump = write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, why);
@@ -1641,7 +1685,10 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
           const std::wstring runDir = dir + L"rc_" + std::wstring(cell.label, cell.label + std::strlen(cell.label)) + L"_" +
                                       std::to_wstring(fps) + L"_" + std::to_wstring(rate / 100000) + L"_" +
                                       std::wstring(tag, tag + std::strlen(tag)) + L"_" + std::to_wstring(idx++) + L"\\";
-          return run_host(host, runDir, cell.content, /*tight=*/true, port, seconds, 0, 1, /*wireCapOn=*/true, rate, fps);
+          gCurrentHostTag = tag;
+          RunResult rr = run_host(host, runDir, cell.content, /*tight=*/true, port, seconds, 0, 1, /*wireCapOn=*/true, rate, fps);
+          gCurrentHostTag = "";
+          return rr;
         };
         RunResult base, cand;
         RcRow baseRow, candRow;
@@ -1666,6 +1713,21 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         if (!ok) {
           std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
           return 3;
+        }
+        if (gSaveFrames && cell.marker) {
+          // r10 (Codex H2): the pictures this cell promised -- per host, with content, not just existence
+          auto pgm_line = [&](const char* who, const RunResult& rr) {
+            const PgmSummary ps = summarize_pgms(rr.frameDir);
+            std::printf("PGM host=%s scene=%s fps=%u R=%u files=%u size=%ux%u darkPct=%.1f first=%s\n", who, cell.label, fps, rate, ps.files, ps.w,
+                        ps.h, ps.darkPct, ps.first.empty() ? "-" : std::string(ps.first.begin(), ps.first.end()).c_str());
+            return ps;
+          };
+          const PgmSummary pc = pgm_line("candidate", cand);
+          if (!baselineHost.empty()) pgm_line("baseline", base);
+          const std::string tag0 = std::string("rc ") + cell.label + " " + std::to_string(fps) + "fps " + std::to_string(rate / 1000) + "k";
+          check(pc.files >= 1 && pc.w > 0 && pc.h > 0 && pc.darkPct > 0.5,
+                tag0 + ": --save-frames wrote the candidate's event frames and the first one has text ink (not a blank page)",
+                "files=" + std::to_string(pc.files) + " size=" + std::to_string(pc.w) + "x" + std::to_string(pc.h) + " darkPct=" + std::to_string(pc.darkPct));
         }
         const RcRow& c = candRow;  // the checks below read the candidate row; the baseline row is baseRow (any order)
         if (cell.marker) {
@@ -1697,11 +1759,31 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         // absolute ceiling would fail both alike and say nothing about the candidate. The candidate must
         // not be worse than the baseline beyond a tolerance; without a baseline the absolute ceiling holds.
         const RcRow* b = baselineHost.empty() ? nullptr : &baseRow;
-        if (c.dumped) {
-          // r9: MiniDumpWriteDump suspends the host while it writes; the gaps and latencies of a dumped run
-          // carry that pause and are not the product's. The dump itself is the result of this run.
-          std::printf("       (responsiveness checks not judged for this cell: a hang dump suspended the candidate host; dump=%s)\n",
-                      cand.hangDump.c_str());
+        // r10 (Codex H1): validity is a condition, not a note. An invalid candidate row (dead host, no frame,
+        // capture stall, dump) is a FAIL -- or, in a diagnostic phase, DIAGNOSTIC-COLLECTED (exit 4, never
+        // PASS). An invalid comparison baseline makes every baseline-relative check INCONCLUSIVE = FAIL: a
+        // stalled baseline's low fps or big gap must never be the candidate's licence. The candidate's own
+        // wire checks above stand on their own.
+        const std::string whyInvalid = std::string(c.hostDied ? "host died (exit " + std::to_string(c.hostExit) + ") " : "") +
+                                       (c.dumped ? "dumped " : "") + (c.stallMaxMs > 2000 ? "capture stalled " : "") +
+                                       (cand.delivered < 2 ? "no frames " : "");
+        if (!c.valid) {
+          if (gDiagnosticMode) {
+            ++gDiagnosticCollected;
+            std::printf("DIAGNOSTIC-COLLECTED %s: the candidate row is invalid (%s) -- the stall evidence of this run (dump=%s); not a PASS\n",
+                        tag.c_str(), whyInvalid.c_str(), cand.hangDump.empty() ? "none" : cand.hangDump.c_str());
+          } else {
+            check(false, tag + ": candidate row is a valid measurement", "INVALID: " + whyInvalid + (cand.hangDump.empty() ? "" : "dump=" + cand.hangDump));
+          }
+        }
+        const bool baselineInvalid = b && !b->valid;
+        if (baselineInvalid) {
+          check(false, tag + ": baseline row is a valid measurement (the baseline-relative checks below are INCONCLUSIVE, not a licence)",
+                std::string("INVALID baseline: ") + (b->hostDied ? "host died (exit " + std::to_string(b->hostExit) + ") " : "") +
+                    (b->dumped ? "dumped " : "") + (b->stallMaxMs > 2000 ? "capture stalled " : ""));
+        }
+        if (!c.valid) {
+          // nothing below is a measurement of this candidate run
         } else if (cell.marker) {
           // r2 (Codex V1): the owed events are the IDs 1..owed (ids are allocated in paint order, and
           // owed = those painted >= 1 s before the end); each one must have been decoded -- a count
@@ -1717,16 +1799,16 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
             const std::vector<uint32_t> baseMissing = missing_owed_ids(base);
             if (!baseMissing.empty()) std::printf("       (baseline missed owed id(s) in this cell: %zu -- reported, not a licence)\n", baseMissing.size());
           }
-          const double stallBound = b ? std::max(2500.0, b->evMax * 1.25 + 250.0) : 2500.0;
+          const double stallBound = (b && !baselineInvalid) ? std::max(2500.0, b->evMax * 1.25 + 250.0) : 2500.0;
           check(c.evMax <= stallBound, tag + ": candidate: no new multi-second stall on a change (max=" +
                                            std::to_string((int)c.evMax) + "ms bound=" + std::to_string((int)stallBound) + ")");
           check(c.psnrN > 0, tag + ": a matched PSNR was taken against the painted page");
         } else if (cell.maxDecodeGapMs > 0) {
-          const double gapBound = b ? std::max(cell.maxDecodeGapMs, b->decodeGapMaxMs * 1.25 + 250.0) : cell.maxDecodeGapMs;
+          const double gapBound = (b && !baselineInvalid) ? std::max(cell.maxDecodeGapMs, b->decodeGapMaxMs * 1.25 + 250.0) : cell.maxDecodeGapMs;
           check(c.decodeGapMaxMs <= gapBound, tag + ": candidate max realtime-decode gap not worse than baseline/ceiling (" +
                                                   std::to_string((int)c.decodeGapMaxMs) + "ms bound=" + std::to_string((int)gapBound) + ")");
         }
-        if (b && !c.dumped) {
+        if (b && c.valid && !baselineInvalid) {
           check(c.deliveredFps >= b->deliveredFps * 0.75 - 0.5, tag + ": candidate delivered fps not below 75% of baseline (" +
                                                                     std::to_string((int)c.deliveredFps) + " vs " +
                                                                     std::to_string((int)b->deliveredFps) + ")");
@@ -1734,14 +1816,10 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
           // least the baseline's rate -- 10% tolerance for a single noisy pair, and ONLY between two valid
           // rows: a dead, stalled or dumped host on either side is a failed run, not a rate to compare.
           if (std::strcmp(cell.label, "motion") == 0) {
-            if (c.valid && b->valid) {
-              check(c.deliveredFps >= b->deliveredFps * 0.9 - 0.5,
-                    tag + ": motion: candidate delivered fps >= baseline (10% tolerance; r9 positive condition) (" +
-                        std::to_string((int)c.deliveredFps) + " vs " + std::to_string((int)b->deliveredFps) + ")");
-            } else {
-              std::printf("       (motion positive condition not judged: candidate valid=%d baseline valid=%d -- a failed run, not a rate)\n",
-                          c.valid ? 1 : 0, b->valid ? 1 : 0);
-            }
+            // both rows valid here (the invalid cases failed above); a single-pair filter, not a shipping bound
+            check(c.deliveredFps >= b->deliveredFps * 0.9 - 0.5,
+                  tag + ": motion: candidate delivered fps >= baseline (10% tolerance; r9 positive condition, one pair) (" +
+                      std::to_string((int)c.deliveredFps) + " vs " + std::to_string((int)b->deliveredFps) + ")");
           }
         }
         if (!baselineHost.empty()) {
@@ -2101,6 +2179,7 @@ int main(int argc, char** argv) {
   std::string rcOnly;
   uint32_t rcFps = 0, rcRate = 0;
   bool rcCandFirst = false;
+  bool rcDiagnostic = false;
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -2116,6 +2195,8 @@ int main(int argc, char** argv) {
       rcRate = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));  // r8: one R (bps) of the matrix
     } else if (a == "--rc-order" && i + 1 < argc) {
       rcCandFirst = std::string(argv[++i]) == "cand-first";  // r8: candidate before baseline
+    } else if (a == "--rc-diagnostic") {
+      rcDiagnostic = true;  // r10: the ORIGINAL candidate's stall evidence run; invalid candidate rows = COLLECTED (exit 4), not PASS
     } else if (a == "--save-frames") {
       gSaveFrames = true;  // decoded event frames as PGM beside each run's host.log (needs --keep-dir)
     } else if (a == "--window" && i + 1 < argc) {
@@ -2183,6 +2264,7 @@ int main(int argc, char** argv) {
   }
 
   if (rcMatrix || rcTransitions) {
+    gDiagnosticMode = rcDiagnostic;
     if (rcMatrix) run_rc_matrix(hostExe, baselineHost, dir, seconds, rcOnly, rcFps, rcRate, rcCandFirst);
     if (rcTransitions) {
       run_rc_transitions(hostExe, dir, seconds);
@@ -2323,6 +2405,12 @@ int main(int argc, char** argv) {
   if (gFails != 0) {
     std::printf("fec_single_chunk_host_e2e_test: FAIL (%d of %d checks)\n", gFails, gCheckCount);
     return 1;
+  }
+  if (gDiagnosticCollected > 0) {
+    // r10: the original candidate's stall evidence was collected -- material, not a pass; exit 4
+    std::printf("fec_single_chunk_host_e2e_test: DIAGNOSTIC-COLLECTED (%d invalid candidate row(s) recorded with their dumps; %d checks otherwise passed) -- exit 4, not a PASS\n",
+                gDiagnosticCollected, gCheckCount);
+    return 4;
   }
   std::printf("fec_single_chunk_host_e2e_test: PASS (%d checks)\n", gCheckCount);
   return 0;

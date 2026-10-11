@@ -75,7 +75,8 @@ rem                    network-drive note. One encoding: UTF-8 (chcp 65001), ASC
 rem
 rem What counts as the NVIDIA policy having run (per INSTANCE, in each run's host.log):
 rem   "rc-identity ... vendorId=VEN_10DE profile=nvidia_pre_types"
-rem   "rc-plan stage=pre-types ... maxQp=44"           the plan went in before the media types
+rem   "rc-plan stage=pre-types ... maxQp=51"           the plan went in before the media types (the r9
+rem                                                    candidate; the ORIGINAL a510cfc host says maxQp=44)
 rem   "rc-plan stage=post-types ... setAccepted=1 state=accepted effective=1"
 rem                                                    every Set accepted and the readback agrees
 rem   and the ENCODER OUTPUT actually moved with E: the stats lines' appliedEncoder changes across the
@@ -108,20 +109,31 @@ rem                 candidate, with the fixture paint counter and the capture-st
 rem   D5 transitions the three transition runs (16 s): tune/deferred/key path, then the hang if it comes.
 rem Every hung host leaves hang-pid<N>.dmp (thread stacks) in its run folder.
 rem
-rem THE HOME4 SET (run.cmd home4). Phases H1-H2 run the ORIGINAL candidate (GNLinkStream.orig.exe, the
-rem a510cfc build) so the cause of the third run's stalls is recorded with stacks and is not hidden by
-rem the r9 fixes; H3-H6 run the r9 candidate; H7 is the contrast row. Every host that hangs or starves
-rem leaves hang-pid<N>.dmp; read them with the matching PDB:
-rem   remote60_fec_single_chunk_host_e2e_test.exe --dump-check <dmp> --symbols <folder with the exe and its .pdb>
-rem   H1 orig-720p   textscroll 30 fps 1.5M (1080p page -> 720p through the GPU scaler), orig then baseline
-rem   H2 orig-motion motion 60 fps 6M 1080p, orig then baseline (the capture-publication stall + QP 44)
+rem THE HOME4 SET (run.cmd home4). Phases H1-H2 run the ORIGINAL candidate so the cause of the third run's
+rem stalls is recorded and is not hidden by the r9 fixes; H3-H6 run the r9 candidate; H7 is the contrast
+rem row; H8 is the text-picture pair. Two originals, named apart (identity.txt has both hashes):
+rem   GNLinkStream.orig-b27.exe   the EXACT bytes the third run used (SHA256 b27c0b90..., 1,428,992 B; no PDB)
+rem   GNLinkStream.orig-sym.exe   the a510cfc source rebuilt with a PDB (a different link; its dumps read back
+rem                               with names; it is NOT byte-identical to b27 and does not stand in for it)
+rem H1 uses b27 (the stall itself, as it happened); H2 uses orig-sym (the stall with a readable stack).
+rem H1/H2 are DIAGNOSTIC: an invalid original row is "DIAGNOSTIC-COLLECTED" (phase exit 4), never a PASS and
+rem never a product failure; a missing original makes the set INCOMPLETE (this script returns 1). Every
+rem host that hangs or starves leaves hang-pid<N>.dmp; read them with the PDB that matches THAT exe:
+rem   remote60_dump_stacks.exe <dmp> <folder with that exe and its .pdb>
+rem   H1 orig-720p   textscroll 30 fps 1.5M (1080p page -> 720p through the GPU scaler), orig-b27 then baseline
+rem   H2 orig-motion motion 60 fps 6M 1080p, orig-sym then baseline (the capture-publication stall at the
+rem                  original's QP 44; this host has a PDB, so its dump reads back with names)
 rem   H3 r9-motion   motion 60 fps 6M, r9 candidate then baseline  (positive: candidate fps >= baseline)
 rem   H4 r9-text     textscroll 60 fps 6M, r9 candidate then baseline
 rem   H5 r9-720p     textscroll 30 fps 1.5M through the scaler, r9 candidate then baseline (bounded Map)
 rem   H6 r9-trans    the three transition runs (down/up, fps, E-only), r9 candidate
 rem   H7 cbr51       motion 60 fps 6M with REMOTE60_NATIVE_RC_MODE_NUM=0 (CBR, same E/GOP), r9 candidate
-rem                  only -- a contrast row for the mode question, not a policy
-rem The r9 host is the candidate of record; orig and r9 are different binaries (identity.txt has both).
+rem                  only -- a contrast row for the mode question, not a policy (its exit does not decide the set)
+rem   H8 text-pgm    singlechange 30 fps 6M 1080p, r9 candidate then baseline, --save-frames: the marker
+rem                  scene writes event_<id>_1920x1080.pgm (the first decoded frame of each change) for BOTH
+rem                  hosts, so a person can read the text at QP 51 beside the baseline's. (--save-frames only
+rem                  writes for marker scenes; motion/textscroll have no events -- r10 correction.)
+rem The r9 host is the candidate of record; the originals and r9 are different binaries.
 
 setlocal
 chcp 65001 >nul
@@ -168,8 +180,10 @@ set REMOTE60_TEST_SCRATCH_STANDALONE=1
 set "E2E_SRC=%WORK%remote60_fec_single_chunk_host_e2e_test.exe"
 set "CAND=%WORK%GNLinkStream.candidate.exe"
 set "BASE=%WORK%GNLinkStream.baseline.exe"
-set "ORIG=%WORK%GNLinkStream.orig.exe"
-if "%NETDRIVE%"=="1" if exist "%HERE%GNLinkStream.orig.exe" copy /y "%HERE%GNLinkStream.orig.exe" "%WORK%" >nul
+set "ORIGB27=%WORK%GNLinkStream.orig-b27.exe"
+set "ORIGSYM=%WORK%GNLinkStream.orig-sym.exe"
+if "%NETDRIVE%"=="1" if exist "%HERE%GNLinkStream.orig-b27.exe" copy /y "%HERE%GNLinkStream.orig-b27.exe" "%WORK%" >nul
+if "%NETDRIVE%"=="1" if exist "%HERE%GNLinkStream.orig-sym.exe" copy /y "%HERE%GNLinkStream.orig-sym.exe" "%WORK%" >nul
 if not exist "%E2E_SRC%" echo missing %E2E_SRC% & exit /b 2
 if not exist "%CAND%" echo missing %CAND% & exit /b 2
 if not exist "%BASE%" echo missing %BASE% & exit /b 2
@@ -187,18 +201,25 @@ certutil -hashfile "%E2E_SRC%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
 certutil -hashfile "%CAND%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
 >>"%ID%" echo baseline=%BASE%
 certutil -hashfile "%BASE%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
-if exist "%ORIG%" (
-  >>"%ID%" echo orig=%ORIG%
-  certutil -hashfile "%ORIG%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
+if exist "%ORIGB27%" (
+  >>"%ID%" echo orig-b27=%ORIGB27%
+  certutil -hashfile "%ORIGB27%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
 ) else (
-  >>"%ID%" echo orig=absent
+  >>"%ID%" echo orig-b27=absent
+)
+if exist "%ORIGSYM%" (
+  >>"%ID%" echo orig-sym=%ORIGSYM%
+  certutil -hashfile "%ORIGSYM%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
+) else (
+  >>"%ID%" echo orig-sym=absent
 )
 rem r9 (6): the PDB identity (RSDS GUID/Age) of each host exe, so a hang dump's module can be matched to the
 rem PDB kept with that build (the PDBs themselves travel with the verifier's bundle, not in the results).
 >>"%ID%" echo == pdb identity (RSDS GUID/Age per exe) ==
 >>"%ID%" 2>&1 "%E2E%" --pe-id "%CAND%"
 >>"%ID%" 2>&1 "%E2E%" --pe-id "%BASE%"
-if exist "%ORIG%" >>"%ID%" 2>&1 "%E2E%" --pe-id "%ORIG%"
+if exist "%ORIGB27%" >>"%ID%" 2>&1 "%E2E%" --pe-id "%ORIGB27%"
+if exist "%ORIGSYM%" >>"%ID%" 2>&1 "%E2E%" --pe-id "%ORIGSYM%"
 >>"%ID%" 2>&1 "%E2E%" --pe-id "%E2E_SRC%"
 >>"%ID%" echo == os ==
 >>"%ID%" ver
@@ -221,18 +242,89 @@ if "%NETDRIVE%"=="1" >>"%ID%" echo NOTE: %HERE:~0,2% is a network drive; the run
 set "RC=0"
 if /i "%MODE%"=="diag" goto :diag
 if /i "%MODE%"=="home4" goto :home4
-
-echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
-echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
-"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 18 --keep-dir --save-frames > "%OUT%\transitions.log" 2>&1
+echo [home4] eight short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
+set "DIAG=0"
+set "INCOMPLETE=0"
+rem cmd expands %PHASE_RC% inside a parenthesised block at parse time (it came out empty on the first dry
+rem run: "exit " and an "ECHO is off." exit file), so the original-candidate phases use labels, not a block.
+if not exist "%ORIGB27%" goto :home4_nob27
+echo [H1/8] orig-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL b27 then baseline, 10 s each (diagnostic)
+"%E2E%" --host "%ORIGB27%" --baseline "%BASE%" --rc-matrix --rc-diagnostic --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h1_orig_720p.log" 2>&1
 set "PHASE_RC=%errorlevel%"
->"%OUT%\transitions.exit" echo %PHASE_RC%
+>"%OUT%\h1_orig_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if "%PHASE_RC%"=="4" set "DIAG=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
+  set "RC=1"
+  goto :done
+)
+if not "%PHASE_RC%"=="0" if not "%PHASE_RC%"=="4" set "RC=1"
+goto :home4_sym
+:home4_nob27
+echo [H1/8] skipped: GNLinkStream.orig-b27.exe is not beside run.cmd -- the original stall is NOT collected; the set is INCOMPLETE
+>"%OUT%\h1_orig_720p.exit" echo skipped-no-orig-b27
+set "INCOMPLETE=1"
+:home4_sym
+if not exist "%ORIGSYM%" goto :home4_nosym
+echo [H2/8] orig-motion: motion 60fps 6M 1080p, ORIGINAL rebuilt-with-PDB then baseline, 12 s each (diagnostic)
+"%E2E%" --host "%ORIGSYM%" --baseline "%BASE%" --rc-matrix --rc-diagnostic --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h2_orig_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h2_orig_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if "%PHASE_RC%"=="4" set "DIAG=1"
+if not "%PHASE_RC%"=="0" if not "%PHASE_RC%"=="4" set "RC=1"
+goto :home4_r9
+:home4_nosym
+echo [H2/8] skipped: GNLinkStream.orig-sym.exe is not beside run.cmd -- no original dump with names; the set is INCOMPLETE
+>"%OUT%\h2_orig_motion.exit" echo skipped-no-orig-sym
+set "INCOMPLETE=1"
+:home4_r9
+echo [H3/8] r9-motion: motion 60fps 6M 1080p, r9 candidate then baseline, 12 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h3_r9_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h3_r9_motion.exit" echo %PHASE_RC%
 echo      exit %PHASE_RC%
 if not "%PHASE_RC%"=="0" set "RC=1"
 if "%PHASE_RC%"=="3" (
-  echo      CAPTURE-UNAVAILABLE: no capture item for the harness window even with the visible fallback -- the matrix is skipped
-  >"%OUT%\matrix.exit" echo skipped-capture-unavailable
+  echo      CAPTURE-UNAVAILABLE -- nothing else can be measured; stopping
   goto :done
+)
+echo [H4/8] r9-text: textscroll 60fps 6M 1080p, r9 candidate then baseline, 12 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h4_r9_text.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h4_r9_text.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H5/8] r9-720p: textscroll 30fps 1.5M through the GPU scaler, r9 candidate then baseline, 10 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h5_r9_720p.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_r9_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H6/8] r9-trans: down/up, fps, E-only transitions, r9 candidate, 16 s each (event frames saved)
+"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir --save-frames > "%OUT%\h6_r9_trans.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h6_r9_trans.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H7/8] cbr51: motion 60fps 6M with the CBR mode override, r9 candidate only, 12 s (a contrast row; does not decide the set)
+set REMOTE60_NATIVE_RC_MODE_NUM=0
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h7_cbr51_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+set REMOTE60_NATIVE_RC_MODE_NUM=
+>"%OUT%\h7_cbr51_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC% (contrast row)
+echo [H8/8] text-pgm: singlechange 30fps 6M 1080p, r9 candidate then baseline, 12 s, event frames saved for both
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only singlechange --rc-fps 30 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h8_text_pgm.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h8_text_pgm.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%INCOMPLETE%"=="1" set "RC=1"
+goto :done
+
+:done
 )
 if /i "%MODE%"=="quick" goto :done
 echo [2/2] matrix (5 scenes x 30/60 x 1.5/3/6, baseline vs candidate; ~20 min)...
@@ -349,11 +441,39 @@ goto :done
 :done
 rem The staged harness copy did its job; its hash is in identity.txt, the folder keeps the results only.
 del /q "%E2E%" >nul 2>&1
-if "%NETDRIVE%"=="1" (
-  mkdir "%HERE%results" 2>nul
-  echo copying the results back to %HERE%results\%STAMP% ...
-  robocopy "%OUT%" "%HERE%results\%STAMP%" /E /NFL /NDL /NJH /NJS /R:2 /W:2 >nul
-  if exist "%HERE%results\%STAMP%\identity.txt" (echo copied.) else (echo COPY-BACK FAILED: the results are still in %OUT%)
-)
-if "%RC%"=="0" (echo done, every phase 0. Hand back the folder: %HERE%results\%STAMP%) else (echo done with a FAILED or SKIPPED phase ^(see *.exit / FAIL / CAPTURE- / HANG-DUMP lines^). Hand back the folder: %HERE%results\%STAMP%)
+set "HANDBACK=%OUT%"
+if not "%NETDRIVE%"=="1" goto :copyback_done
+mkdir "%HERE%results" 2>nul
+echo copying the results back to %HERE%results\%STAMP% ...
+robocopy "%OUT%" "%HERE%results\%STAMP%" /E /NFL /NDL /NJH /NJS /R:2 /W:2 >nul
+set "ROBO=%errorlevel%"
+call :copyback_verify "%OUT%" "%HERE%results\%STAMP%"
+:copyback_done
+if "%RC%"=="0" if not "%DIAG%"=="1" echo done, every phase 0. Hand back the folder: %HANDBACK%
+if "%RC%"=="0" if "%DIAG%"=="1" echo done: the r9 phases passed; H1/H2 collected the ORIGINAL's stall evidence ^(exit 4 = material, not a pass^). Hand back the folder: %HANDBACK%
+if not "%RC%"=="0" echo done with a FAILED, SKIPPED or INCOMPLETE phase ^(see *.exit / FAIL / INVALID / CAPTURE- / HANG-DUMP lines^). Hand back the folder: %HANDBACK%
 endlocal & exit /b %RC%
+
+:copyback_verify
+rem robocopy exit codes below 8 are success classes; and every phase file of THIS run must be present at the
+rem destination (exit files, logs, identity) -- one file's existence is not "copied".
+set "SRC=%~1"
+set "DST=%~2"
+if %ROBO% GEQ 8 (
+  echo COPY-BACK FAILED ^(robocopy %ROBO%^): the results are still in %SRC%
+  set "RC=1"
+  goto :eof
+)
+set "MISSING=0"
+for %%f in ("%SRC%\*.exit" "%SRC%\*.log" "%SRC%\identity.txt") do if not exist "%DST%\%%~nxf" set /a MISSING+=1
+for /f %%d in ('dir /s /b /a-d "%SRC%\*.dmp" 2^>nul ^| find /c /v ""') do set "SRCDMP=%%d"
+for /f %%d in ('dir /s /b /a-d "%DST%\*.dmp" 2^>nul ^| find /c /v ""') do set "DSTDMP=%%d"
+if not "%SRCDMP%"=="%DSTDMP%" set /a MISSING+=1
+if "%MISSING%"=="0" (
+  echo copied: every phase file and %DSTDMP% dump^(s^) are at %DST%
+  set "HANDBACK=%DST%"
+) else (
+  echo COPY-BACK INCOMPLETE ^(%MISSING% item^(s^) missing^): hand back the LOCAL folder %SRC%
+  set "RC=1"
+)
+goto :eof

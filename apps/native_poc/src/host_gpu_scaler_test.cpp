@@ -111,11 +111,20 @@ int main() {
   {
     std::atomic<int> stillDrawing{2};
     std::atomic<int> mapCalls{0};
-    std::atomic<bool> mutexHeldDuringMap{false};
+    std::atomic<bool> mutexHeldDuringMap{true};  // cleared by any Map call that found the mutex free
     scaler.mapForTest = [&](ID3D11DeviceContext* c, ID3D11Resource* r, D3D11_MAPPED_SUBRESOURCE* out) -> HRESULT {
       ++mapCalls;
-      // the scaler must hold the shared mutex while it calls Map
-      if (mu.try_lock()) { mu.unlock(); } else { mutexHeldDuringMap = true; }
+      // the scaler must hold the shared mutex while it calls Map. Asked from ANOTHER thread: try_lock on
+      // a non-recursive mutex the calling thread owns is undefined (r10, Codex), so a helper thread
+      // probes -- if its try_lock fails, the lock is held (by the scaler, the only other party here).
+      {
+        std::atomic<bool> heldByOther{false};
+        std::thread probe([&] {
+          if (mu.try_lock()) mu.unlock(); else heldByOther = true;
+        });
+        probe.join();
+        if (!heldByOther) mutexHeldDuringMap = false; else mutexHeldDuringMap = mapCalls.load() == 1 ? true : mutexHeldDuringMap.load();
+      }
       if (stillDrawing.fetch_sub(1) > 0) return DXGI_ERROR_WAS_STILL_DRAWING;
       return c->Map(r, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, out);
     };
