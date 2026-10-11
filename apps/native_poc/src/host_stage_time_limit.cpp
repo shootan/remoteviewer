@@ -94,6 +94,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   auto& capture = hx.capture;
   auto& nowUs = tc.nowUs;
   watchdog.MarkMainProgress(MainLoopPhase::Loop);
+  watchdog.EnterSubphase(MainLoopSubphase::Tick);  // r9
   nowUs = qpc_now_us();
   // Attachment retries cannot depend on callbacks from the attachment that just failed.
   if (capture.restartPending && clientSession.streamControlActive.load(std::memory_order_acquire) &&
@@ -125,6 +126,7 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   // since the last re-initialisation) is applied here, at the interval's end, with the CURRENT target
   // -- the latest request wins. The wire side (R) was published when it was asked for.
   if (!encoder.targetPending && encoder.encoderRetarget.Due(nowUs)) {
+    watchdog.EnterSubphase(MainLoopSubphase::DeferredApply);  // r9: codec shutdown/initialize may run here
     if (encoder.ApplyTarget(capture, hx.res, hx.frameGating, hx.inputRouter, sender, encoder.nominalEncodeW,
                             encoder.nominalEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
       std::cout << "[native-video-host] encoder-budget deferred retarget applied desiredEncoder="

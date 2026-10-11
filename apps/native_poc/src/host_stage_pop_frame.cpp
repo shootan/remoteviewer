@@ -259,10 +259,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   }
   bool queueReady = false;
   if (!servedBootstrap) {
+    hx.watchdog.EnterSubphase(MainLoopSubphase::PopWait);  // r9
     std::unique_lock<std::mutex> lk(res.frame.mu);
     queueReady = res.frame.cv.wait_for(lk, std::chrono::microseconds(capture.EffectiveQueueWaitTimeoutUs(encoder)), [&] {
       return stop.load() || res.frame.version != stats.lastVersionSent;
     });
+    hx.watchdog.EnterSubphase(MainLoopSubphase::None);
     if (!queueReady && !stop.load()) {
       queueWaitReason = 1;
       ++stats.queueWaitTimeoutCount;
@@ -310,7 +312,9 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   if (poppedNv12Slot >= 0) {
     // The previous iteration bailed out before encoding (gating skip, stale drop);
     // release its claimed conversion now.
+    hx.watchdog.EnterSubphase(MainLoopSubphase::ReleaseSlot);  // r9
     res.captureReadback.ReleaseNv12Slot(poppedNv12Slot, poppedNv12Generation);
+    hx.watchdog.EnterSubphase(MainLoopSubphase::None);
   }
   poppedNv12Slot = nv12Slot;
   poppedNv12Generation = nv12Generation;

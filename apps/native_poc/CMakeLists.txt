@@ -112,6 +112,17 @@ add_executable(remote60_native_video_host_poc
   src/secure_input_broker.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
+# encoder-rc-budget r9: a PDB beside the shipped host so a hang dump taken by the e2e harness on another
+# machine can be read back with names (the Home PC's main-loop hangs left only "phase=Loop"). /Zi does
+# not change code generation; /DEBUG with /OPT:REF,ICF keeps the Release linker's dead-code and COMDAT
+# folding so the image is the same shape as before, plus a debug directory (RSDS GUID/Age) that names
+# the PDB. Explicit flags rather than MSVC_DEBUG_INFORMATION_FORMAT: that property needs policy CMP0141
+# (CMake 3.25) and this tree's minimum is 3.20, so the property is silently ignored here. The PDB is a
+# build artefact to keep WITH the exe hash, never installed.
+if(MSVC)
+  target_compile_options(remote60_native_video_host_poc PRIVATE "$<$<CONFIG:Release>:/Zi>")
+  target_link_options(remote60_native_video_host_poc PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
+endif()
 
 # Reuse this worktree's compiled production objects for the entry/unwind fixture. The only
 # replacement TU is main; all shutdown/control/watchdog implementations are the product objects.
@@ -916,6 +927,17 @@ target_include_directories(remote60_host_rate_governor_test PRIVATE src)
 
 # encoder-rc-budget: E from R, the RC plan per MFT identity, runtime controls, governor config,
 # retarget coalescing (pure).
+# encoder-rc-budget r9: the GPU scaler's bounded readiness on a real D3D11 device (WARP fallback).
+add_executable(remote60_host_gpu_scaler_test
+  src/host_gpu_scaler_test.cpp
+  src/host_bgra_scale.cpp
+)
+target_include_directories(remote60_host_gpu_scaler_test PRIVATE src)
+target_link_libraries(remote60_host_gpu_scaler_test PRIVATE common d3d11 dxgi dxguid)
+if(MSVC)
+  target_compile_options(remote60_host_gpu_scaler_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_host_encoder_budget_test
   src/host_encoder_budget_test.cpp
 )
@@ -2340,6 +2362,11 @@ target_link_libraries(remote60_fec_single_chunk_host_e2e_test PRIVATE
   mfplat mf mfuuid wmcodecdspuuid ole32)
 if(MSVC)
   target_compile_options(remote60_fec_single_chunk_host_e2e_test PRIVATE /utf-8)
+endif()
+# r9: the harness with a PDB too (same reasons; it is the process that reads the dumps back).
+if(MSVC)
+  target_compile_options(remote60_fec_single_chunk_host_e2e_test PRIVATE "$<$<CONFIG:Release>:/Zi>")
+  target_link_options(remote60_fec_single_chunk_host_e2e_test PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
 endif()
 
 # quality r1: ABR with a client that never sends decode metrics, APK-style present-only, or stops.

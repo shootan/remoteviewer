@@ -89,6 +89,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
   auto& clientMetrics = hx.clientMetrics;
   auto& backend = hx.backend;
   auto& watchdog = hx.watchdog;
+  watchdog.EnterSubphase(MainLoopSubphase::Stats);  // r9
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;

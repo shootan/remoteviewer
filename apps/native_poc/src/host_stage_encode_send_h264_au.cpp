@@ -475,6 +475,7 @@ if (transport == VideoTransport::Tcp) {
           // supersedes any key the queue.clear() above just discarded.
           sender.MarkKeyQueued(item.mediaEpoch, item.udpHdr.streamGeneration, au.inputEpoch,
                                item.udpHdr.seq, static_cast<uint64_t>(qpc_now_us()));
+          hx.watchdog.EnterSubphase(MainLoopSubphase::Enqueue);  // r9
           sender.queue.push_back(std::move(item));
           enqueuedForSend = true;
           // The backlog this batch was judged on is gone -- this key just cleared it. Leaving
@@ -515,6 +516,7 @@ if (transport == VideoTransport::Tcp) {
       }
     }
     if (enqueuedForSend) sender.cv.notify_one();
+    hx.watchdog.EnterSubphase(MainLoopSubphase::None);  // r9
     // Handing the frame off succeeded even when the queue policy discarded it; this
     // flag means "no transport failure", and clearing it here would tear the session
     // down. Whether the frame really went out is tracked by enqueuedForSend below.

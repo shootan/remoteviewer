@@ -8,27 +8,55 @@
 // Thread:  main encode loop only. Every D3D call is taken under the shared *d3dMutex handed to
 //          initialize(), because the capture readback worker shares the same immediate context.
 // Input:   BGRA buffer + geometry, target size.
-// Output:  scaled BGRA in outBgra, timing split in outTiming; false on any D3D failure (caller
-//          falls back to the CPU resize_bgra_bilinear path and marks the scaler unhealthy).
-// Callers: native_video_host_main.cpp (encode path when gpuScalerRequested).
+// Output:  scaled BGRA in outBgra, timing split in outTiming; false on any D3D failure OR when the
+//          copy is not readable within readyBudgetUs (caller falls back to the CPU
+//          resize_bgra_bilinear path on the ORIGINAL BGRA and marks the scaler unhealthy for the
+//          rest of this device generation -- host_capture_session recreates it with the device).
+// Callers: host_stage_encode_send_h264.cpp (encode path when gpuScalerRequested).
 //
-// Extracted verbatim from native_video_host_main.cpp (host split refactor Phase 0-3). Header-only
-// (all members were already defined in-class); behavior is byte-identical.
+// encoder-rc-budget r9 (Codex r8 contract, item 2): the Map(READ) used to be unbounded. On the Home PC
+// (Windows 10, RTX 3070 Ti, WGC window capture) every 720p cell -- the only cells that scale -- hung
+// the main loop before its first frame, baseline and candidate alike; the scaler is the first
+// suspect, not the proven cause (the dump decides). Map now asks with D3D11_MAP_FLAG_DO_NOT_WAIT and
+// treats DXGI_ERROR_WAS_STILL_DRAWING as "pending"; pending is polled OUTSIDE the shared mutex (1 ms
+// sleeps, never holding it), against ONE deadline taken at entry (lock wait included, never
+// restarted). A deadline is a Timeout: false, outBgra untouched (no half-written or stale buffer is
+// ever handed on). What this cannot bound: the mutex acquisition itself and the UpdateSubresource/
+// Blt/CopyResource/Map driver calls -- if one of those never returns, only the watchdog can act, and
+// it still does (nothing here stamps progress).
 
 #include <windows.h>
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "host_bottleneck.hpp"
+#include "host_watchdog.hpp"
 #include "time_utils.hpp"
 
 namespace remote60::native_poc {
+
+// r9: how long scale() may wait for the GPU copy before giving the frame to the CPU path. Three frame
+// periods, clamped to [60 ms, 200 ms]: the copy normally completes in well under a millisecond
+// (gpuScaleCopyMapAvgUs in the stats), so waiting past three periods is already a dropped-frame hitch
+// on screen, while the CPU bilinear 1080p->720p costs about 10-20 ms -- cheaper than waiting longer.
+// The lower clamp keeps a GPU that is briefly busy with the encoder from tripping the fallback at
+// 60 fps; the upper keeps a 15 fps setting from waiting a fifth of a second. This is the first value,
+// chosen from those two costs, and it is measured (lastWaitUs in the disable log line), not assumed.
+inline uint64_t scale_ready_budget_us(uint32_t fps) {
+  const uint64_t period = fps > 0 ? 1'000'000ULL / fps : 33'333ULL;
+  const uint64_t three = period * 3;
+  return three < 60'000ULL ? 60'000ULL : three > 200'000ULL ? 200'000ULL : three;
+}
 
 struct GpuBgraScaler {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -48,6 +76,31 @@ struct GpuBgraScaler {
   uint32_t dstW = 0;
   uint32_t dstH = 0;
   bool initialized = false;
+
+  // r9: bounded readiness. The caller sets the budget per call from the frame period (see
+  // scale_ready_budget_us); the outcome of the last call is kept for its log line.
+  enum class Outcome : uint32_t { Ok = 0, Timeout, Error };
+  uint64_t readyBudgetUs = 100'000;
+  Outcome lastOutcome = Outcome::Ok;
+  uint32_t lastMapPolls = 0;      // Map(DO_NOT_WAIT) calls that answered STILL_DRAWING
+  uint64_t lastWaitUs = 0;        // entry -> ready (or -> timeout)
+  std::atomic<uint32_t>* subphase = nullptr;             // the watchdog's MainLoopSubphase, if wired
+  std::atomic<uint64_t>* subphaseSinceUs = nullptr;
+  // Test seam: stands in for context->Map so a test can answer STILL_DRAWING n times, then pass
+  // through (not-ready -> ready), never pass (deadline), or fail (error). Null in the product.
+  std::function<HRESULT(ID3D11DeviceContext*, ID3D11Resource*, D3D11_MAPPED_SUBRESOURCE*)> mapForTest;
+
+  void stamp(MainLoopSubphase s) {
+    if (subphase) subphase->store(static_cast<uint32_t>(s), std::memory_order_release);
+    if (subphaseSinceUs) subphaseSinceUs->store(qpc_now_us(), std::memory_order_release);
+  }
+  HRESULT map_do_not_wait(D3D11_MAPPED_SUBRESOURCE* out) {
+    if (mapForTest) return mapForTest(context.Get(), dstStaging.Get(), out);
+    return context->Map(dstStaging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, out);
+  }
+  static const char* outcome_name(Outcome o) {
+    return o == Outcome::Ok ? "ok" : o == Outcome::Timeout ? "timeout" : "error";
+  }
 
   bool initialize(ID3D11Device* d, ID3D11DeviceContext* c, std::mutex* mu) {
     if (!d || !c) return false;
@@ -149,14 +202,23 @@ struct GpuBgraScaler {
     if (!src || !outBgra || srcStride < inW * 4) return false;
     D3DReadbackTiming localTiming{};
     D3D11_MAPPED_SUBRESOURCE mapped{};
+    lastOutcome = Outcome::Error;
+    lastMapPolls = 0;
+    lastWaitUs = 0;
+    const uint64_t entryUs = qpc_now_us();
+    const uint64_t deadlineUs = entryUs + readyBudgetUs;  // ONE deadline, from entry, never restarted
+    bool mappedOk = false;
+    uint64_t lockAcquiredUs = 0;
     {
+      stamp(MainLoopSubphase::ScaleLock);
       const uint64_t lockWaitStartUs = qpc_now_us();
       std::lock_guard<std::mutex> lk(*d3dMutex);
-      const uint64_t lockAcquiredUs = qpc_now_us();
+      lockAcquiredUs = qpc_now_us();
       localTiming.d3dWaitUs =
           (lockAcquiredUs >= lockWaitStartUs) ? (lockAcquiredUs - lockWaitStartUs) : 0;
-      if (!ensure_resources(inW, inH, outW, outH)) return false;
+      if (!ensure_resources(inW, inH, outW, outH)) { stamp(MainLoopSubphase::None); return false; }
 
+      stamp(MainLoopSubphase::ScaleUpload);
       context->UpdateSubresource(srcTexture.Get(), 0, nullptr, src, srcStride, 0);
 
       RECT srcRect{};
@@ -192,16 +254,50 @@ struct GpuBgraScaler {
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
       stream.pInputSurface = inputView.Get();
+      stamp(MainLoopSubphase::ScaleBlt);
       if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1, &stream))) {
+        stamp(MainLoopSubphase::None);
         return false;
       }
 
+      stamp(MainLoopSubphase::ScaleCopy);
       context->CopyResource(dstStaging.Get(), dstTexture.Get());
-      if (FAILED(context->Map(dstStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
-      const uint64_t copyMapDoneUs = qpc_now_us();
-      localTiming.copyMapUs =
-          (copyMapDoneUs >= lockAcquiredUs) ? (copyMapDoneUs - lockAcquiredUs) : 0;
+      stamp(MainLoopSubphase::ScaleMapWait);
+      const HRESULT mapHr = map_do_not_wait(&mapped);
+      if (SUCCEEDED(mapHr)) {
+        mappedOk = true;
+      } else if (mapHr != DXGI_ERROR_WAS_STILL_DRAWING) {
+        stamp(MainLoopSubphase::None);
+        return false;  // Outcome::Error
+      }
+    }  // the shared mutex is released before any waiting below
+    // Bounded readiness: the copy is still in flight. Poll with the mutex released between tries;
+    // the deadline is the one taken at entry. On timeout nothing has been read from the staging
+    // texture and outBgra is untouched -- the caller scales the original frame on the CPU.
+    while (!mappedOk) {
+      ++lastMapPolls;
+      if (qpc_now_us() >= deadlineUs) {
+        lastOutcome = Outcome::Timeout;
+        lastWaitUs = qpc_now_us() - entryUs;
+        stamp(MainLoopSubphase::None);
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));  // mutex NOT held
+      stamp(MainLoopSubphase::ScaleMapWait);
+      std::lock_guard<std::mutex> lk(*d3dMutex);
+      const HRESULT hr = map_do_not_wait(&mapped);
+      if (SUCCEEDED(hr)) {
+        mappedOk = true;
+      } else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+        stamp(MainLoopSubphase::None);
+        return false;  // Outcome::Error
+      }
     }
+    const uint64_t copyMapDoneUs = qpc_now_us();
+    localTiming.copyMapUs =
+        (copyMapDoneUs >= lockAcquiredUs) ? (copyMapDoneUs - lockAcquiredUs) : 0;
+    lastWaitUs = copyMapDoneUs - entryUs;
+    stamp(MainLoopSubphase::ScaleReadback);
     outBgra->resize(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 4);
     const uint32_t outStride = outW * 4;
     auto* dst = outBgra->data();
@@ -215,6 +311,7 @@ struct GpuBgraScaler {
     localTiming.memcpyUs =
         (memcpyDoneUs >= memcpyStartUs) ? (memcpyDoneUs - memcpyStartUs) : 0;
     {
+      stamp(MainLoopSubphase::ScaleUnmap);
       const uint64_t unmapWaitStartUs = qpc_now_us();
       std::lock_guard<std::mutex> lk(*d3dMutex);
       const uint64_t unmapLockAcquiredUs = qpc_now_us();
@@ -225,6 +322,8 @@ struct GpuBgraScaler {
       localTiming.unmapUs =
           (unmapDoneUs >= unmapLockAcquiredUs) ? (unmapDoneUs - unmapLockAcquiredUs) : 0;
     }
+    lastOutcome = Outcome::Ok;
+    stamp(MainLoopSubphase::None);
     if (outTiming) {
       *outTiming = localTiming;
     }

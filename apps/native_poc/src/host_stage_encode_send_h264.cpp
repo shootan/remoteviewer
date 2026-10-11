@@ -200,6 +200,10 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     bool scaleOk = false;
     if (capture.gpuScalerHealthy) {
       ++stats.gpuScaleAttempts;
+      // r9: the scaler names its steps to the watchdog and waits a bounded time for the GPU copy.
+      res.gpuScaler.subphase = &watchdog.mainLoopSubphase;
+      res.gpuScaler.subphaseSinceUs = &watchdog.mainLoopSubphaseSinceUs;
+      res.gpuScaler.readyBudgetUs = scale_ready_budget_us(encoder.activeFps);
       scaleOk = res.gpuScaler.scale(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH,
                                 &scaledBgra, &scaleReadbackTiming);
       if (scaleOk) {
@@ -217,16 +221,22 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         stats.gpuScaleUnmapMaxUs = std::max(stats.gpuScaleUnmapMaxUs, scaleReadbackTiming.unmapUs);
       } else {
         ++stats.gpuScaleFail;
+        // The latch: unhealthy for the rest of this device generation (host_capture_session re-creates
+        // the scaler with the device), so a GPU that timed out once is not asked again every frame.
         capture.gpuScalerHealthy = false;
-        std::cout << "[native-video-host] gpu scaler disabled after failure; fallback=cpu\n";
+        std::cout << "[native-video-host] gpu scaler disabled after " << GpuBgraScaler::outcome_name(res.gpuScaler.lastOutcome)
+                  << " budgetUs=" << res.gpuScaler.readyBudgetUs << " waitedUs=" << res.gpuScaler.lastWaitUs
+                  << " mapPolls=" << res.gpuScaler.lastMapPolls << "; fallback=cpu until the device is recreated\n";
       }
     }
     if (!scaleOk) {
       ++stats.gpuScaleCpuFallback;
+      watchdog.EnterSubphase(MainLoopSubphase::CpuScale);
       if (!resize_bgra_bilinear(payload->data(), w, h, stride, encoder.activeEncodeW, encoder.activeEncodeH, &scaledBgra)) {
         return Flow::Continue;
       }
     }
+    watchdog.EnterSubphase(MainLoopSubphase::None);
     encodeSrc = scaledBgra.data();
     encodeSrcW = encoder.activeEncodeW;
     encodeSrcH = encoder.activeEncodeH;
@@ -352,6 +362,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // The MFT encode is the prime suspect for a driver/GPU wedge that stops the whole loop
     // without returning; mark the phase so the watchdog attributes a hang here correctly.
     watchdog.EnterMainPhase(MainLoopPhase::EncodeCall);
+    watchdog.EnterSubphase(MainLoopSubphase::Encode);
     if (wantSurfaceEncode) {
       auto nv12Tex = res.captureReadback.Nv12SlotTexture(nv12Slot, nv12Generation);
       const EncoderState::EncodeCallResult surfaceCall =
@@ -439,6 +450,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // Encode returned; back to ordinary work for the watchdog's threshold.
   encoder.encodeErrorSinceUs = 0;
   watchdog.EnterMainPhase(MainLoopPhase::Loop);
+  watchdog.EnterSubphase(MainLoopSubphase::None);
   if (forceKeyFrame) {
     // Latch/count only for inputs the encoder actually reached: a failed encode never touched the MFT.
     // stutter-keyframe r2 F1: the AVEncVideoForceKeyFrame SetValue is honoured only on S_OK. On an

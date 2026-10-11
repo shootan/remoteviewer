@@ -374,12 +374,16 @@ void startup_start_main_loop_watchdog(HostContext& hx, MainLoopWatchdogThread& m
           : phase == static_cast<uint32_t>(MainLoopPhase::CaptureRestart) ? kHangSlowUs
           : kHangNormalUs;
       if (ageUs >= threshold) {
-        char rec[192];
+        // r9: the subphase the main thread last entered and how long ago -- the step the hang is in.
+        const uint32_t sub = watchdog.mainLoopSubphase.load(std::memory_order_acquire);
+        const uint64_t subSinceUs = watchdog.mainLoopSubphaseSinceUs.load(std::memory_order_acquire);
+        char rec[288];
         const int n = std::snprintf(
             rec, sizeof(rec),
-            "[native-video-host][watchdog] main-loop hang phase=%u ageUs=%llu lastSeq=%llu; "
+            "[native-video-host][watchdog] main-loop hang phase=%u subphase=%s subAgeUs=%llu ageUs=%llu lastSeq=%llu; "
             "terminating (exit 43) for supervisor relaunch\n",
-            phase, static_cast<unsigned long long>(ageUs),
+            phase, main_loop_subphase_name(sub),
+            static_cast<unsigned long long>(now > subSinceUs ? now - subSinceUs : 0), static_cast<unsigned long long>(ageUs),
             static_cast<unsigned long long>(watchdog.mainLoopLastSeq.load(std::memory_order_acquire)));
         terminate_with_diagnostic(kExitMainLoopWatchdog, rec,
             static_cast<DWORD>(std::clamp(n, 0, static_cast<int>(sizeof(rec) - 1))));

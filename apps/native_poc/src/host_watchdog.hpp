@@ -28,6 +28,38 @@ enum class MainLoopPhase : uint32_t {
   Shutdown,       // stop/wake/join/COM teardown; independent of the worker stop flag
   WaitingForClient,  // a listening host may legitimately have no client indefinitely
 };
+// encoder-rc-budget r9 (Codex r8 contract, item 1): WHERE in the Loop phase the main thread last was.
+// The Home PC's hangs reported "phase=Loop" and nothing more -- the phase covers everything between two
+// progress stamps. The subphase is a separate atomic the main thread sets as it enters each step and
+// the watchdog thread only reads for its hang record; it is NOT a progress stamp (setting it never
+// extends the hang threshold), so the watchdog's 10 s judgement is untouched.
+enum class MainLoopSubphase : uint32_t {
+  None = 0,
+  PopWait,        // waiting for the capture publication (bounded cv wait)
+  ReleaseSlot,    // releasing the previous NV12 slot to the readback
+  ScaleLock,      // GPU scaler: waiting for the shared D3D context mutex
+  ScaleUpload,    // GPU scaler: UpdateSubresource of the BGRA source
+  ScaleBlt,       // GPU scaler: VideoProcessorBlt
+  ScaleCopy,      // GPU scaler: CopyResource to the staging texture
+  ScaleMapWait,   // GPU scaler: Map(READ, DO_NOT_WAIT) polling for the copy to finish
+  ScaleReadback,  // GPU scaler: memcpy of the mapped rows (no lock held)
+  ScaleUnmap,     // GPU scaler: Unmap under the mutex
+  CpuScale,       // the CPU bilinear fallback
+  Encode,         // the MFT encode call (also MainLoopPhase::EncodeCall)
+  Enqueue,        // handing the AU to the sender queue
+  Stats,          // the once-a-second stats tick
+  Tick,           // stage_time_limit housekeeping
+  Tune,           // stage_runtime_tune (mailbox tune)
+  TuneApply,      // ApplyTarget from a runtime tune (codec shutdown/initialize may run here)
+  DeferredApply,  // ApplyTarget from the due deferred retarget (same)
+  Count
+};
+inline const char* main_loop_subphase_name(uint32_t v) {
+  static const char* const kNames[] = {"none", "pop-wait", "release-slot", "scale-lock", "scale-upload", "scale-blt",
+                                       "scale-copy", "scale-map-wait", "scale-readback", "scale-unmap", "cpu-scale",
+                                       "encode", "enqueue", "stats", "tick", "tune", "tune-apply", "deferred-apply"};
+  return v < static_cast<uint32_t>(MainLoopSubphase::Count) ? kNames[v] : "?";
+}
 // Terminate exit code the watchdog uses; the supervisor treats it as "wedged, relaunch fast" and
 // keeps it out of the crash streak / nv12 auto-disable (it is a recovery, not a crash).
 constexpr unsigned int kExitMainLoopWatchdog = 43;
@@ -72,6 +104,14 @@ struct WatchdogState {
   std::atomic<uint32_t> mainLoopPhase{static_cast<uint32_t>(MainLoopPhase::Startup)};
   std::atomic<uint64_t> mainLoopProgressUs{0};
   std::atomic<uint64_t> mainLoopLastSeq{0};
+  std::atomic<uint32_t> mainLoopSubphase{static_cast<uint32_t>(MainLoopSubphase::None)};  // r9: see MainLoopSubphase
+  std::atomic<uint64_t> mainLoopSubphaseSinceUs{0};  // r9: when the current subphase was entered
+
+  // r9: name the step the main thread is entering. Not a liveness stamp (see MainLoopSubphase).
+  void EnterSubphase(MainLoopSubphase s) {
+    mainLoopSubphase.store(static_cast<uint32_t>(s), std::memory_order_release);
+    mainLoopSubphaseSinceUs.store(qpc_now_us(), std::memory_order_release);
+  }
 
   // --- behaviour (Phase 2-1: former main() lambdas enter_main_phase / mark_main_progress) ---
   // Publish the phase the main loop is about to enter; the watchdog thread picks the hang
