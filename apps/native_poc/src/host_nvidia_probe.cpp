@@ -29,8 +29,24 @@
 // Rewrites (buffer size, LowLatency explicit-off) are done in the proxy and are logged as REWRITE /
 // INJECT, never silently.
 //
-// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_result.txt   (send back the file)
-// Options: --repeat N  (repeat the non-baseline rows N times; default 1, ~2 min at 1)
+// r2 (Home PC v2 result, .claude/verify_nvidia_probe_v2_homepc.md): on NVIDIA a SetValue AFTER the
+// media types returns S_OK but is not applied (only Mean sticks); BEFORE the types everything is
+// applied, and then MaxQP=32 over-produces like AMD. r2 therefore runs every row with the rate
+// control fed pre-types (REMOTE60_NATIVE_RC_BEFORE_TYPES=1, the product's own switch at
+// mf_h264_codec.cpp:1697 -- the product then applies it again post-types, both logged) and varies:
+//   P0 maxQp=0 (REMOTE60_NATIVE_MAX_QP=0: the product SKIPS the MaxQP SetValue, so a readback of 51
+//      there means "never set", not "set to 51") / P1 51 / P2 44 / P3 40 / P3b 32 (r1's row)
+//   P4 CBR maxQp=0 / P5 buffer 500ms / P6 buffer 1s (proxy REWRITE of the product's value)
+//   R1 maxQp=0 then at the body midpoint the product's own runtime path: set_max_qp(40)
+//      (apply_rate_control "governor") then reconfigure_bitrate(1.18M) ("reconfigure": Mean 1.18M,
+//      peak 2.36M, buffer 29500, MaxQP 40, product set order) -> after-governor / after-retarget
+//      snapshots say whether a RUNNING change is applied once the pre-types RC is in force.
+//   R2 the same on motion 3M -> 2.36M.
+// PSNR (luma, exact PTS, SW decoder mft_sw, last-24-frame source ring; unmatched/decode failures
+// are counted, never scored) is printed per row and before/after the midpoint on R rows.
+//
+// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_r2_result.txt   (send back the file)
+// Options: --repeat N  (repeat the non-anchor rows N times; default 1, ~2 min at 1)  --no-psnr
 
 #include "bakeoff_common.hpp"
 
@@ -437,7 +453,45 @@ struct Row {
   bool rcBeforeTypes = false;       // REMOTE60_NATIVE_RC_BEFORE_TYPES=1 (product then applies pre AND post)
   bool hintsOmitted = false;        // REMOTE60_NATIVE_LOW_LATENCY=0 + REMOTE60_NATIVE_REALTIME=0
   uint32_t retargetKbps = 0;        // reconfigure_bitrate at the body midpoint
+  const char* maxQpEnv = nullptr;   // REMOTE60_NATIVE_MAX_QP ("0" = product skips the MaxQP Set)
+  uint32_t retargetMaxQp = 0;       // set_max_qp(N) at the midpoint, BEFORE reconfigure_bitrate
   ProxyCfg cfg{};
+};
+
+bool g_psnr = true;
+
+// Luma PSNR against the deterministic source, exact PTS. The last kRing body frames are kept so a
+// delayed async output still finds its source; older ones count as unmatched (never scored).
+struct PsnrAcc {
+  static constexpr uint32_t kRing = 24;
+  std::vector<std::vector<uint8_t>> luma = std::vector<std::vector<uint8_t>>(kRing);
+  std::vector<int64_t> pts = std::vector<int64_t>(kRing, -1);
+  double mseA = 0, mseB = 0; uint32_t nA = 0, nB = 0, unmatched = 0, decodeFail = 0;
+  void keep(uint32_t i, int64_t ts, const std::vector<uint8_t>& nv12) {
+    auto& dst = luma[i % kRing];
+    dst.assign(nv12.begin(), nv12.begin() + kLuma);
+    pts[i % kRing] = ts;
+  }
+  void score(const DecodedFrameNv12& f, bool secondHalf) {
+    const std::vector<uint8_t>* src = nullptr;
+    for (uint32_t k = 0; k < kRing; ++k) if (pts[k] == f.sampleTimeHns) { src = &luma[k]; pts[k] = -1; break; }
+    if (!src) { ++unmatched; return; }
+    if (f.bytes.size() < kLuma) { ++decodeFail; return; }
+    const uint32_t vh = std::min(f.visibleHeight ? f.visibleHeight : kH, kH);
+    const uint32_t vw = std::min(f.visibleWidth ? f.visibleWidth : kW, kW);
+    const uint32_t dstStride = f.width ? f.width : kW;
+    double sse = 0;
+    for (uint32_t y = 0; y < vh; ++y) {
+      const uint8_t* sp = src->data() + (size_t)y * kW;
+      const uint8_t* dp = f.bytes.data() + (size_t)(y + f.visibleTop) * dstStride + f.visibleLeft;
+      for (uint32_t x = 0; x < vw; ++x) { const int e = int(sp[x]) - int(dp[x]); sse += double(e) * e; }
+    }
+    const double mse = sse / ((double)vh * vw);
+    if (secondHalf) { mseB += mse; ++nB; } else { mseA += mse; ++nA; }
+  }
+  double all() const { return (nA + nB) ? psnr_from_mse((mseA + mseB) / (nA + nB)) : 0; }
+  double a() const { return nA ? psnr_from_mse(mseA / nA) : 0; }
+  double b() const { return nB ? psnr_from_mse(mseB / nB) : 0; }
 };
 
 struct Window { uint64_t total = 0; double avg = 0, p1 = 0, p267 = 0; };
@@ -470,16 +524,21 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     _putenv_s("REMOTE60_NATIVE_LOW_LATENCY", "0");
     _putenv_s("REMOTE60_NATIVE_REALTIME", "0");
   }
+  if (r.maxQpEnv) _putenv_s("REMOTE60_NATIVE_MAX_QP", r.maxQpEnv);
 
   const std::string bufDesc = r.cfg.bufferOverrideBytes ? std::to_string(r.cfg.bufferOverrideBytes) + "B"
                               : r.cfg.bufferMultiplier  ? "x" + std::to_string(r.cfg.bufferMultiplier)
                                                         : std::string("product");
-  const std::string rtDesc = r.retargetKbps ? " retarget->" + std::to_string(r.retargetKbps) + "k@mid" : "";
-  std::printf("\n=== %s | scene=%s target=%uk proxy=%d rc=%s rcBeforeTypes=%d hints=%s buffer=%s%s maxQp=%u ===\n",
+  std::string rtDesc;
+  if (r.retargetMaxQp) rtDesc += " @mid:set_max_qp(" + std::to_string(r.retargetMaxQp) + ")";
+  if (r.retargetKbps) rtDesc += " @mid:reconfigure_bitrate(" + std::to_string(r.retargetKbps) + "k)";
+  const uint32_t cfgQp = H264Encoder::configured_max_qp();
+  const std::string qpDesc = cfgQp ? std::to_string(cfgQp) : std::string("0(no MaxQP Set; readback=MFT's own)");
+  std::printf("\n=== %s | scene=%s target=%uk proxy=%d rc=%s rcBeforeTypes=%d hints=%s buffer=%s%s maxQp=%s ===\n",
               r.label, r.scene, r.rateKbps, r.proxy ? 1 : 0, *r.rc ? r.rc : "vbr_peak(default)",
               r.rcBeforeTypes ? 1 : 0,
               r.cfg.llExplicitOff ? "explicit-off" : r.hintsOmitted ? "omitted" : "on(default)",
-              bufDesc.c_str(), rtDesc.c_str(), H264Encoder::configured_max_qp());
+              bufDesc.c_str(), rtDesc.c_str(), qpDesc.c_str());
 
   MftEnc enc;
   LoggingTransform* proxy = nullptr;
@@ -507,6 +566,15 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     return;
   }
 
+  H264Decoder dec;
+  bool decOk = false;
+  if (g_psnr) {
+    _putenv_s("REMOTE60_NATIVE_DECODER_BACKEND", "mft_sw");
+    decOk = dec.initialize(kW, kH, fps);
+    if (!decOk) std::printf("  psnr: SW decoder init failed -> no PSNR this row\n");
+  }
+  PsnrAcc psnr;
+
   std::vector<uint8_t> nv12(kNv12, 128);
   const uint32_t warmup = fps, body = seconds * fps, mid = body / 2;
   std::vector<uint32_t> bytesByFrame(body, 0);
@@ -522,6 +590,11 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
   uint64_t deadline = now_us(), wall0 = 0;
   for (uint32_t i = 0; i < warmup + body; ++i) {
     if (i == warmup) wall0 = now_us();
+    if (r.retargetMaxQp && i == warmup + mid) {
+      const bool ok = enc.enc.set_max_qp(r.retargetMaxQp);  // product governor path (maxQpOverride_)
+      std::printf("  set_max_qp(%u) at frame %u ok=%d\n", r.retargetMaxQp, i, ok ? 1 : 0);
+      if (proxy) proxy->snapshot("after-governor");
+    }
     if (r.retargetKbps && i == warmup + mid) {
       const bool ok = enc.enc.reconfigure_bitrate(r.retargetKbps * 1000u);
       std::printf("  retarget at frame %u -> %uk ok=%d\n", i, r.retargetKbps, ok ? 1 : 0);
@@ -530,6 +603,7 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     if (proxy) proxy->frame = i;
     deadline += frameUs;
     fill_scene(r.scene, nv12, i);
+    if (decOk && i >= warmup) psnr.keep(i, (int64_t)i * (int64_t)(10'000'000LL / fps), nv12);
     std::vector<H264AccessUnit> units;
     H264EncodeFrameStats st{};
     const bool ok = enc.enc.encode_frame(nv12, i == 0, (int64_t)i * (int64_t)(10'000'000LL / fps), &units, &st);
@@ -553,12 +627,22 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
         ++returned;
         if (u.rawIdr) { idrMax = std::max(idrMax, (uint32_t)u.bytes.size()); ++idrCount; }
       }
+      if (decOk) {
+        std::vector<DecodedFrameNv12> outF;
+        if (!dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF)) ++psnr.decodeFail;
+        for (const auto& f : outF) {
+          const int64_t fi = f.sampleTimeHns / (int64_t)(10'000'000LL / fps);
+          if (fi < (int64_t)warmup || fi >= (int64_t)(warmup + body)) continue;  // warm-up: fed, not scored
+          psnr.score(f, fi >= (int64_t)(warmup + mid));
+        }
+      }
     }
     if (t < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - t));
   }
   const double wallSec = (now_us() - wall0) / 1e6;
   const uint32_t pending = enc.pending_depth();
   enc.shutdown();
+  if (decOk) dec.shutdown();
 
   // Missing body frames, split body vs tail (the last 8 judged frames: async output still in flight).
   uint32_t missBody = 0, missTail = 0;
@@ -587,10 +671,14 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
               "idrMax=%u idrN=%u  outFps=%.1f pending=%u missBody=%u missTail=%u\n",
               all.avg, all.avg / r.rateKbps, all.p1, all.p1 / r.rateKbps, all.p267, all.p267 / r.rateKbps,
               p267wall, p267wall / r.rateKbps, idrMax, idrCount, outFps, pending, missBody, missTail);
-  if (r.retargetKbps) {
+  if (decOk)
+    std::printf("  psnr: luma=%.2f n=%u unmatched=%u decodeFail=%u | firstHalf=%.2f (n=%u) secondHalf=%.2f (n=%u)\n",
+                psnr.all(), psnr.nA + psnr.nB, psnr.unmatched, psnr.decodeFail, psnr.a(), psnr.nA, psnr.b(), psnr.nB);
+  if (r.retargetKbps || r.retargetMaxQp) {
     const Window a = measure(bytesByFrame, 0, mid, fps), b = measure(bytesByFrame, mid, body, fps);
+    const uint32_t afterTarget = r.retargetKbps ? r.retargetKbps : r.rateKbps;
     std::printf("  retarget: before avg=%.0f (x%.2f of %u) 267ms=%.0f | after avg=%.0f (x%.2f of %u) 1s=%.0f 267ms=%.0f\n",
-                a.avg, a.avg / r.rateKbps, r.rateKbps, a.p267, b.avg, b.avg / r.retargetKbps, r.retargetKbps,
+                a.avg, a.avg / r.rateKbps, r.rateKbps, a.p267, b.avg, b.avg / afterTarget, afterTarget,
                 b.p1, b.p267);
   }
   {
@@ -622,9 +710,17 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   uint32_t repeat = 1;
-  for (int i = 1; i + 1 < argc; ++i)
-    if (std::string(argv[i]) == "--repeat") repeat = static_cast<uint32_t>(std::max(1, std::atoi(argv[i + 1])));
-  std::printf("host_nvidia_probe v2 (encoder-bakeoff t-m9nlnthi): per-property raw Set/Get + phase readback\n");
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--repeat" && i + 1 < argc) repeat = static_cast<uint32_t>(std::max(1, std::atoi(argv[i + 1])));
+    if (std::string(argv[i]) == "--no-psnr") g_psnr = false;
+  }
+  std::printf("host_nvidia_probe v2 r2 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
+  std::printf("CBR, VBV size, and the product's RUNNING levers (set_max_qp / reconfigure_bitrate) under it.\n");
+  std::printf("maxQp=0 rows: REMOTE60_NATIVE_MAX_QP=0 -> the product never issues the MaxQP SetValue, so the\n");
+  std::printf("MaxQP readback in those snapshots is the MFT's own value (51 = never set), not a request.\n");
+  std::printf("rcBeforeTypes=1 rows: the product applies the rate control pre-types AND again post-types\n");
+  std::printf("(both logged); on NVIDIA only the pre-types pass is applied (Home PC v2 result).\n");
+  std::printf("psnr: luma vs the deterministic source, exact PTS, SW decoder; unmatched/decodeFail counted, not scored.\n");
   std::printf("Proxy path note: the test seam sets backendName_=test_transform -> on AMD the AMF-specific\n");
   std::printf("configure_types branch is skipped (NVIDIA uses the generic path anyway). Row 1 is proxy-free.\n");
   std::printf("RC_BEFORE_TYPES=1 rows: the product applies rate control pre-types AND again post-types.\n");
@@ -651,34 +747,39 @@ int main(int argc, char** argv) {
   };
 
   std::vector<Row> rows;
-  // drag @1.5M -- product buffer here is bitrate/40 = 200ms (37500B), so 200ms IS the baseline row.
-  { Row r = mk("baseline-direct", "drag", 1500); r.proxy = false; rows.push_back(r); }
-  { Row r = mk("baseline-proxy", "drag", 1500); r.cfg.printCaps = true; rows.push_back(r); }
-  std::vector<Row> improve;
-  { Row r = mk("cbr", "drag", 1500); r.rc = "cbr"; improve.push_back(r); }
-  { Row r = mk("rc-before-types", "drag", 1500); r.rcBeforeTypes = true; improve.push_back(r); }
-  { Row r = mk("buffer-500ms", "drag", 1500); r.cfg.bufferOverrideBytes = buf_ms(1500, 500); improve.push_back(r); }
-  { Row r = mk("buffer-1s", "drag", 1500); r.cfg.bufferOverrideBytes = buf_ms(1500, 1000); improve.push_back(r); }
-  { Row r = mk("retarget-1.18M", "drag", 1500); r.retargetKbps = 1180; improve.push_back(r); }
-  { Row r = mk("hints-omitted", "drag", 1500); r.hintsOmitted = true; improve.push_back(r); }
-  { Row r = mk("hints-explicit-off", "drag", 1500); r.hintsOmitted = true; r.cfg.llExplicitOff = true; improve.push_back(r); }
-  { Row r = mk("buffer-x8(optional)", "drag", 1500); r.cfg.bufferMultiplier = 8; improve.push_back(r); }
-  for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), improve.begin(), improve.end());
-  rows.push_back(mk("baseline-proxy-end", "drag", 1500));
-  // motion @3M
-  rows.push_back(mk("baseline-proxy", "motion", 3000));
-  std::vector<Row> improveM;
-  { Row r = mk("cbr", "motion", 3000); r.rc = "cbr"; improveM.push_back(r); }
-  { Row r = mk("buffer-500ms", "motion", 3000); r.cfg.bufferOverrideBytes = buf_ms(3000, 500); improveM.push_back(r); }
-  { Row r = mk("retarget-2.36M", "motion", 3000); r.retargetKbps = 2360; improveM.push_back(r); }
-  { Row r = mk("hints-omitted", "motion", 3000); r.hintsOmitted = true; improveM.push_back(r); }
-  { Row r = mk("hints-explicit-off", "motion", 3000); r.hintsOmitted = true; r.cfg.llExplicitOff = true; improveM.push_back(r); }
-  for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), improveM.begin(), improveM.end());
-  rows.push_back(mk("baseline-proxy-end", "motion", 3000));
+  auto pre = [&](const char* label, const char* scene, uint32_t kbps, const char* maxQp) {
+    Row r = mk(label, scene, kbps);
+    r.rcBeforeTypes = true;
+    r.maxQpEnv = maxQp;
+    return r;
+  };
+  // ---- drag @1.5M (product VBV here = bitrate/40 = 200ms = 37500B) ----
+  { Row r = mk("A0-baseline-proxy(post-types,product)", "drag", 1500); r.cfg.printCaps = true; rows.push_back(r); }
+  std::vector<Row> ladder;
+  ladder.push_back(pre("P0-pre-vbr-maxQp0", "drag", 1500, "0"));
+  ladder.push_back(pre("P1-pre-vbr-maxQp51", "drag", 1500, "51"));
+  ladder.push_back(pre("P2-pre-vbr-maxQp44", "drag", 1500, "44"));
+  ladder.push_back(pre("P3-pre-vbr-maxQp40", "drag", 1500, "40"));
+  ladder.push_back(pre("P3b-pre-vbr-maxQp32(r1)", "drag", 1500, "32"));
+  { Row r = pre("P4-pre-cbr-maxQp0", "drag", 1500, "0"); r.rc = "cbr"; ladder.push_back(r); }
+  { Row r = pre("P5-pre-vbr-maxQp0-buffer500ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 500); ladder.push_back(r); }
+  { Row r = pre("P6-pre-vbr-maxQp0-buffer1s", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 1000); ladder.push_back(r); }
+  { Row r = pre("R1-pre-vbr-maxQp0-running(qp40,1.18M)", "drag", 1500, "0"); r.retargetMaxQp = 40; r.retargetKbps = 1180; ladder.push_back(r); }
+  for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladder.begin(), ladder.end());
+  rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "drag", 1500));
+  // ---- motion @3M ----
+  rows.push_back(mk("A0-baseline-proxy(post-types,product)", "motion", 3000));
+  std::vector<Row> ladderM;
+  ladderM.push_back(pre("P0-pre-vbr-maxQp0", "motion", 3000, "0"));
+  ladderM.push_back(pre("P2-pre-vbr-maxQp44", "motion", 3000, "44"));
+  { Row r = pre("P4-pre-cbr-maxQp0", "motion", 3000, "0"); r.rc = "cbr"; ladderM.push_back(r); }
+  { Row r = pre("R2-pre-vbr-maxQp0-running(qp40,2.36M)", "motion", 3000, "0"); r.retargetMaxQp = 40; r.retargetKbps = 2360; ladderM.push_back(r); }
+  for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladderM.begin(), ladderM.end());
+  rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "motion", 3000));
 
   const uint64_t t0 = now_us();
   for (const auto& r : rows) probe(r, fps, sec);
-  std::printf("\nhost_nvidia_probe v2: DONE. %zu rows in %.0fs. Each row ends with RESULT: VALID/INVALID.\n",
+  std::printf("\nhost_nvidia_probe v2 r2: DONE. %zu rows in %.0fs. Each row ends with RESULT: VALID/INVALID.\n",
               rows.size(), (now_us() - t0) / 1e6);
   std::printf("Fewer bytes with an encode failure / missing output / fps drop is NOT an improvement.\n");
   std::printf("Send this whole file back.\n");
