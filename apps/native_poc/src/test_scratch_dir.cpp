@@ -204,8 +204,27 @@ const std::wstring& scratch_root() {
   // One object for the lifetime of the process, handed out by reference: see the header for what
   // returning a copy cost.
   static const std::wstring root = []() -> std::wstring {
-    const std::wstring configured = widen(REMOTE60_TEST_SCRATCH_ROOT);
-    const std::wstring repo = widen(REMOTE60_TEST_REPO_ROOT);
+    std::wstring configured = widen(REMOTE60_TEST_SCRATCH_ROOT);
+    std::wstring repo = widen(REMOTE60_TEST_REPO_ROOT);
+    // encoder-rc-budget r3 (the Home PC bundle): a test exe carried to another machine in ONE folder,
+    // with no repository there. REMOTE60_TEST_SCRATCH_STANDALONE=1 makes that folder the root: the
+    // scratch goes to <exe dir>\test-scratch, under the same guards (strictly inside, created by this
+    // run, no reparse point in the way). This is test-support code only -- no product binary links it
+    // -- and without the variable the build-time roots stay the one and only answer.
+    wchar_t standalone[8] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_TEST_SCRATCH_STANDALONE", standalone, 8) > 0 && standalone[0] == L'1') {
+      wchar_t exe[MAX_PATH * 2] = {};
+      const DWORD n = GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(std::size(exe)));
+      if (n > 0 && n < std::size(exe)) {
+        std::wstring dir(exe, n);
+        const size_t slash = dir.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+          dir.resize(slash);
+          repo = dir;
+          configured = dir + L"\\test-scratch";
+        }
+      }
+    }
     std::string why;
     if (validate_and_create_root(repo, configured, &why) != RootVerdict::Ok) {
       set_root_problem(why);
