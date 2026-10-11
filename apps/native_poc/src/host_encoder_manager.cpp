@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 #include "encode_resolution_ladder.hpp"
@@ -79,9 +80,24 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   const bool keyintChanged = (targetKeyint != encoder.activeKeyint);
   const bool fpsChanged = (targetFps != encoder.activeFps);
   const bool resizeChanged = (targetW != encoder.activeEncodeW || targetH != encoder.activeEncodeH);
-  const bool bitrateChanged = (targetBitrate != encoder.activeBitrate);
+  // encoder-rc-budget C1: `targetBitrate` is R, the wire budget. E is derived from it here -- the one
+  // conversion point -- and is what the encoder gets. The two are no longer the same number, and they
+  // no longer move together: a lower E never lowers the wire cap, and a lower R reaches the limiter
+  // now, before any encoder transition (which may be deferred, below).
+  const bool wireChanged = (targetBitrate != encoder.activeBitrate);
+  const uint32_t desiredE = encoder.EncoderBudgetFor(targetBitrate);
+  if (wireChanged ||
+      (sender.wireCapEnabled && sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(targetBitrate))) {
+    encoder.PublishWireBudget(sender, targetBitrate);
+  }
+  encoder.desiredEncoderBps = desiredE;
+  const uint32_t appliedBefore = encoder.applied_encoder_bps();
 
-  if (encoder.codecNeedsInit || keyintChanged || fpsChanged || resizeChanged) {
+  // One re-initialisation sequence for every reason (geometry/fps/keyint, a failed live change, a
+  // new E on a profile without a live mean). The fresh instance is told E and the governor's current
+  // legacy ceiling (codec.set_initial_max_qp, kept current by the stats tick) and gets its RC plan
+  // inside initialize() -- before the media types where the profile needs that (C2).
+  const auto reinitCodec = [&]() -> bool {
     encoder.codecNeedsInit = true;
     encoder.codec.shutdown();
     // The shutdown flushed the MFT, so every in-flight surface is released.
@@ -90,9 +106,8 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     }
     encoder.nv12PendingReleases.clear();
     encoder.surfaceEncodeHealthy = true;
-    if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
-      return failed();
-    }
+    if (!encoder.codec.initialize(targetW, targetH, targetFps, desiredE, targetKeyint)) return false;
+    encoder.encoderRetarget.NoteReinit(qpc_now_us());
     encoder.ResetTimelineAnchors(capture);
     encoder.ResetStarvationEpisode();
     encoder.clampDetector.Reset();  // r3 B: a fresh transform may clamp differently; re-detect
@@ -101,16 +116,42 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
     // shutdown+initialize discarded any pending key input; a stale latch here would delay the
     // fresh encoder's needed IDR by up to the 300ms retry window.
     encoder.forceKeySubmittedAtUs = 0;
-  } else if (bitrateChanged) {
-    if (!encoder.codec.reconfigure_bitrate(targetBitrate)) {
-      encoder.codec.shutdown();
-      if (!encoder.codec.initialize(targetW, targetH, targetFps, targetBitrate, targetKeyint)) {
-        return failed();
+    return true;
+  };
+
+  const char* action = "none";
+  if (encoder.codecNeedsInit || keyintChanged || fpsChanged || resizeChanged) {
+    if (!reinitCodec()) return failed();
+    action = "reinit";
+  } else if (desiredE != appliedBefore) {
+    // C3: the live instance runs a different E. Ask it first; what it answers decides the path.
+    const RcRuntimeResult live = encoder.codec.reconfigure_bitrate(desiredE);
+    if (live == RcRuntimeResult::Applied) {
+      action = "live";
+    } else if (live == RcRuntimeResult::Unchanged) {
+      action = "none";
+    } else if (live == RcRuntimeResult::Unproven) {
+      // This profile does not take a new mean on a running instance: a new E is a new instance, on
+      // the same safe path as a geometry change -- but COALESCED: inside the minimum interval since the
+      // last (re)initialisation the request is deferred to the interval's end, where the latest target
+      // wins (the tick calls back in). R was published above regardless, so the wire is protected
+      // while E lags. The forced key comes with the instance when it is built, not now.
+      switch (encoder.encoderRetarget.Decide(nowUs, desiredE, appliedBefore)) {
+        case EncoderRetargetScheduler::Verdict::ReinitNow:
+          if (!reinitCodec()) return failed();
+          action = "reinit";
+          break;
+        case EncoderRetargetScheduler::Verdict::Defer:
+          action = "deferred";
+          break;
+        case EncoderRetargetScheduler::Verdict::NoChange:
+          action = "none";
+          break;
       }
-      encoder.ResetTimelineAnchors(capture);
-      encoder.ResetStarvationEpisode();
-      // Same contract as the other reinit sites: shutdown discarded any pending key input.
-      encoder.forceKeySubmittedAtUs = 0;
+    } else {
+      // The live change was issued and rejected: the same rebuild as before this change.
+      if (!reinitCodec()) return failed();
+      action = "reinit-after-rejected-live";
     }
   }
 
@@ -118,44 +159,55 @@ bool EncoderState::ApplyTarget(CaptureState& capture, CaptureResources& res, Fra
   encoder.targetPending = encoder.codecNeedsInit = false;
   encoder.targetRetryAtUs = encoder.encodeErrorSinceUs = 0;
   encoder.targetFailures = 0;
-  encoder.RequestKey(kHostKeyReasonEncoderTarget);
+  // The forced key every target change owes the viewer (C4: a no-op optimisation does not remove it).
+  // A DEFERRED encoder change owes it when the new instance is built -- that ApplyTarget call takes
+  // the reinit branch above and requests it then; forcing one now would send a large IDR at the
+  // very moment the wire budget was lowered, with the encoder still on the old E.
+  if (std::strcmp(action, "deferred") != 0) encoder.RequestKey(kHostKeyReasonEncoderTarget);
   encoder.activeEncodeH = targetH;
   encoder.activeFps = targetFps;
   encoder.activeBitrate = targetBitrate;
   encoder.activeKeyint = targetKeyint;
   inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
   inputRouter.domainH.store(encoder.activeEncodeH, std::memory_order_release);
-  // The pacing budget follows the active bitrate. It used to be computed once at startup,
-  // so after an ABR downshift frames kept leaving at the launch rate (bursts the network
-  // just asked us to stop), and after an upshift sends were throttled below the new rate.
-  const uint64_t pacePeakBps = sender.noPacingH264
-                                   ? 0ULL
-                                   : std::max<uint64_t>(
-                                         sender.udpPacePeakFloorBps,
-                                         (static_cast<uint64_t>(encoder.activeBitrate) *
-                                          sender.udpPacePeakPercent) /
-                                             100ULL);
-  const uint32_t pacePeakBpsClamped =
-      static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL));
-  if (sender.pacePeakBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
-    sender.pacePeakBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
-    std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped
-              << " bitrate=" << encoder.activeBitrate << "\n";
-  }
-  // The hard wire cap follows the active bitrate too (ABR / governor downshift lowers it; an upshift
-  // raises it). Changing the rate preserves the bucket's credit -- it is not a refill lane. (r1)
-  if (sender.wireCapEnabled &&
-      sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(encoder.activeBitrate)) {
-    sender.UpdateWireCap(static_cast<uint64_t>(encoder.activeBitrate));
-    // r5 G4: a same-clock apply marker so a test (or field log) can pin the EXACT instant the wire cap
-    // changed -- the independent apply point, not a rate observed later. qpc here is the sender/receiver
-    // clock on loopback. Diagnostic only.
-    std::cout << "[native-video-host] wirecap applied bitrate=" << encoder.activeBitrate
-              << " appliedQpcUs=" << qpc_now_us() << "\n";
+  if (wireChanged || std::strcmp(action, "none") != 0) {
+    const EncoderBudgetBreakdown b = encoder_budget_for(targetBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy());
+    std::cout << "[native-video-host] encoder-budget requestedWire=" << targetBitrate
+              << " effectiveWire=" << sender.wireCapBps.load(std::memory_order_relaxed)
+              << " desiredEncoder=" << desiredE << " appliedEncoder=" << encoder.applied_encoder_bps()
+              << " action=" << action << " profile=" << rc_profile_name(encoder.codec.rc_profile())
+              << " fecX1000=" << b.fecFactorX1000 << " headerX1000=" << b.headerFactorX1000
+              << " deferredUntilUs=" << (encoder.encoderRetarget.deferred ? encoder.encoderRetarget.deferredUntilUs : 0ULL)
+              << "\n";
   }
   res.captureReadback.SetOutputSize(encoder.activeEncodeW, encoder.activeEncodeH);
   encoder.RefreshFrameIntervals(capture, frameGating);
   return true;
+}
+
+void EncoderState::PublishWireBudget(SenderState& sender, uint32_t wireBps) {
+  // The pacing budget follows the WIRE budget. It used to be computed once at startup, so after an
+  // ABR downshift frames kept leaving at the launch rate (bursts the network just asked us to stop),
+  // and after an upshift sends were throttled below the new rate.
+  const uint64_t pacePeakBps = sender.noPacingH264
+                                   ? 0ULL
+                                   : std::max<uint64_t>(sender.udpPacePeakFloorBps,
+                                                        (static_cast<uint64_t>(wireBps) * sender.udpPacePeakPercent) / 100ULL);
+  const uint32_t pacePeakBpsClamped = static_cast<uint32_t>(std::min<uint64_t>(pacePeakBps, 4000000000ULL));
+  if (sender.pacePeakBps.load(std::memory_order_relaxed) != pacePeakBpsClamped) {
+    sender.pacePeakBps.store(pacePeakBpsClamped, std::memory_order_relaxed);
+    std::cout << "[native-video-host] pacing update udpPacePeakBps=" << pacePeakBpsClamped << " bitrate=" << wireBps << "\n";
+  }
+  // The hard wire cap follows R (ABR / user downshift lowers it; an upshift raises it) -- and only R:
+  // the encoder's E is a different number and never reaches here (C1). Changing the rate preserves
+  // the bucket's credit -- it is not a refill lane. (r1)
+  if (sender.wireCapEnabled && sender.wireCapBps.load(std::memory_order_relaxed) != static_cast<uint64_t>(wireBps)) {
+    sender.UpdateWireCap(static_cast<uint64_t>(wireBps));
+    // r5 G4: a same-clock apply marker so a test (or field log) can pin the EXACT instant the wire cap
+    // changed -- the independent apply point, not a rate observed later. qpc here is the sender/receiver
+    // clock on loopback. Diagnostic only.
+    std::cout << "[native-video-host] wirecap applied bitrate=" << wireBps << " appliedQpcUs=" << qpc_now_us() << "\n";
+  }
 }
 
 void EncoderState::ApplyConfirmedCaptureGeometry(CaptureState& capture, CaptureResources& res,

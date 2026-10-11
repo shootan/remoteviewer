@@ -316,6 +316,8 @@ void startup_log_config(HostContext& hx) {
     // default; REMOTE60_NATIVE_WIRE_CAP=0 restores the pacing-only behaviour (the rollback lever).
     const bool wireCapOn = !(env_string_or_empty("REMOTE60_NATIVE_WIRE_CAP") == "0");
     sender.StartWireCap(static_cast<uint64_t>(args.bitrate), args.udpMtu, wireCapOn);
+    encoder.wireMtu = clamp_udp_mtu(args.udpMtu);  // encoder-rc-budget: the header-cost input of E
+
     std::cout << "[native-video-host] wireCap=" << (wireCapOn ? "on" : "off")
               << " wireCapBps=" << sender.wireCapBps.load(std::memory_order_relaxed)
               << " wireCapMtu=" << clamp_udp_mtu(args.udpMtu) << "\n";

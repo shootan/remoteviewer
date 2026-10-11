@@ -194,7 +194,8 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
         std::cout << "[native-video-host] epoch-gate encoder reset curEpoch=" << inputEpochNow
                   << " awaitDropped=" << encoder.epochGate.awaitDropped << " resets=" << encoder.epochGate.resetsRequested << "\n";
         encoder.codec.shutdown();
-        if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+        if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps,
+                                      encoder.encoder_bitrate_for_init(), encoder.activeKeyint)) {
           std::cerr << "[native-video-host] encoder reinitialize failed (epoch gate)\n";
           sendFailed = true;
           return AuFlow::Break;
@@ -256,7 +257,8 @@ if (guardStaleEncoded && encodedAgeUs > kMaxEncodedFrameAgeUs) {
     std::cout << "[native-video-host] encoder reset due to stale output age="
               << encodedAgeUs << "us consecutive=" << encoder.consecutiveStaleFrames << "\n";
     encoder.codec.shutdown();
-    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps,
+                                  encoder.encoder_bitrate_for_init(), encoder.activeKeyint)) {
     std::cerr << "[native-video-host] encoder reinitialize failed\n";
       sendFailed = true;
       return AuFlow::Break;

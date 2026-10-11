@@ -9,14 +9,17 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
 
 #include "host_capture_session.hpp"
+#include "host_encoder_budget.hpp"
 #include "host_frame_gate.hpp"
 #include "host_gop_clamp_detector.hpp"
 #include "mf_h264_codec.hpp"
+#include "poc_protocol.hpp"
 #include "host_epoch_gate.hpp"
 #include "host_rate_governor.hpp"
 #include "encode_resolution_ladder.hpp"
@@ -151,7 +154,46 @@ struct EncoderState {
   uint64_t pendingRefitSinceUs = 0;
   // Active rate parameters.
   uint32_t activeFps = 0;
+  // encoder-rc-budget C1: R and E are separate state, with one owner each.
+  //   activeBitrate      -- R, the WIRE budget the user / ABR / M9 allow for this stream (bps). The hard
+  //                         wire cap, the burst ledger, the pacing peak and the governor's target
+  //                         follow it; it is what every ApplyTarget caller passes as `targetBitrate`.
+  //   desiredEncoderBps  -- E, the payload mean the encoder should run at for the current R
+  //                         (EncoderBudgetFor: R minus parity, headers, NACK reserve, overshoot slack).
+  //   codec.configured_bitrate() -- the E the LIVE instance actually holds (applied_encoder_bps()).
+  //                         Set only by a successful initialize() or an Applied live reconfigure, never
+  //                         by an S_OK that the profile does not trust (C3).
+  // The conversion R -> E happens in EncoderBudgetFor and nowhere else; nothing downstream subtracts
+  // headroom a second time.
   uint32_t activeBitrate = 0;
+  uint32_t desiredEncoderBps = 0;
+  uint32_t wireMtu = 1200;  // clamp_udp_mtu(args.udpMtu), set at startup; the header-cost input of the budget
+  // C3: coalescing of E changes that need a new instance (a profile without a live mean).
+  EncoderRetargetScheduler encoderRetarget;
+  // C4: the governor's current ceiling, pinned in the codec for the next legacy rebuild
+  // (codec.set_initial_max_qp) instead of being restored late with a post-type SetValue.
+  uint64_t rateGovernorCodecInstance = 0;  // the codec instance the governor's ladder was configured for
+  static EncoderBudgetPolicy BudgetPolicy() {
+    EncoderBudgetPolicy p;
+    // Field tuning levers for the two allowances (percent). Not test switches: the computed budget is
+    // the product behaviour; these move its margins without a rebuild.
+    if (const char* v = std::getenv("REMOTE60_NATIVE_NACK_RESERVE_PERCENT"); v && *v) p.nackReservePercent = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+    if (const char* v = std::getenv("REMOTE60_NATIVE_ENCODER_OVERSHOOT_PERCENT"); v && *v) p.encoderOvershootPercent = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+    return p;
+  }
+  WireGeometry WireGeometryNow() const {
+    WireGeometry g;
+    g.mtuBytes = wireMtu;
+    g.chunkHeaderBytes = static_cast<uint32_t>(sizeof(UdpVideoChunkHeader));
+    g.fecGroupSize = kUdpVideoFecGroupSize;
+    return g;
+  }
+  /** E for a wire budget R under the live geometry: the ONE conversion point (C1). */
+  uint32_t EncoderBudgetFor(uint32_t wireBps) const { return encoder_payload_budget_bps(wireBps, WireGeometryNow(), BudgetPolicy()); }
+  /** What a (re)initialize of the codec outside ApplyTarget hands it as the mean: E for the active R. */
+  uint32_t encoder_bitrate_for_init() const { return desiredEncoderBps != 0 ? desiredEncoderBps : EncoderBudgetFor(activeBitrate); }
+  /** The E the live instance holds, 0 when there is none. */
+  uint32_t applied_encoder_bps() const { return codec.started() ? codec.configured_bitrate() : 0; }
   uint32_t keyintOverride = 0;      // REMOTE60_NATIVE_KEYINT_OVERRIDE (0 = off)
   uint32_t activeKeyint = 0;
   uint64_t activeFrameIntervalUs = 0;
@@ -271,10 +313,11 @@ struct EncoderState {
     if (!provenanceResyncPending) return false;
     if (!epoch_gate_take_reset_budget(epochGate, nowUs)) return false;  // budget spent: stay pending
     codec.shutdown();
-    if (!codec.initialize(activeEncodeW, activeEncodeH, activeFps, activeBitrate, activeKeyint)) {
+    if (!codec.initialize(activeEncodeW, activeEncodeH, activeFps, encoder_bitrate_for_init(), activeKeyint)) {
       ++provenanceResyncFailed;
       return false;  // still invalid, still pending, gate still closed
     }
+    encoderRetarget.NoteReinit(nowUs);
     ResetTimelineAnchors(capture);  // a new epoch: the gate re-judges and waits for its IDR
     ResetStarvationEpisode();
     forceKeySubmittedAtUs = 0;
@@ -382,6 +425,9 @@ struct EncoderState {
   bool ApplyTarget(CaptureState& capture, CaptureResources& res, FrameGatingState& frameGating,
                    InputRouterState& inputRouter, SenderState& sender, uint32_t targetW, uint32_t targetH,
                    uint32_t targetFps, uint32_t targetBitrate, uint32_t targetKeyint);
+  // encoder-rc-budget C1: the wire side of a target -- pacing peak and the hard wire cap follow R at
+  // once, before (and independently of) any encoder transition. Logs the same-clock apply marker.
+  void PublishWireBudget(SenderState& sender, uint32_t wireBps);
   // A confirmed source-size change: re-fit the encode target to the new geometry immediately.
   // `rate` (r3): when given, a change of capture priority (window <-> desktop) re-chooses the box
   // from the ladder for the new priority at the current ABR profile and bitrate.

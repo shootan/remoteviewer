@@ -188,6 +188,23 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       auto& governor = encoder.rateGovernor;
       // The user's frame rate is the ceiling; the loop only ever goes below it (r6).
       const uint32_t userFps = rate.userFpsCeiling > 0 ? rate.userFpsCeiling : encoder.activeFps;
+      // encoder-rc-budget C4: the ladder follows the LIVE codec instance's profile. A static-ceiling
+      // instance (NVIDIA pre-types, MaxQP 44 for its life) gets base == cap == 44, so the quantiser
+      // stage never asks for a step the instance cannot take and calm/reset never "restores" 32; its
+      // frame-rate stage engages directly. A legacy instance keeps today's 32..40 ladder.
+      if (encoder.codec.instance_id() != encoder.rateGovernorCodecInstance) {
+        encoder.rateGovernorCodecInstance = encoder.codec.instance_id();
+        const RateGovernorConfig want = governor_config_for(encoder.codec.rc_profile(), H264Encoder::configured_max_qp(),
+                                                            encoder.codec.plan_max_qp());
+        if (want.baseQp != governor.config().baseQp || want.capQp != governor.config().capQp) {
+          governor.Reconfigure(want);
+          std::cout << "[native-video-host][rate-governor] ladder profile=" << rc_profile_name(encoder.codec.rc_profile())
+                    << " baseQp=" << want.baseQp << " capQp=" << want.capQp << " instance=" << encoder.codec.instance_id() << "\n";
+        }
+      }
+      // The ceiling the next LEGACY rebuild starts from is the loop's current one -- set in the codec
+      // before any reinit instead of restored afterwards with a late post-type SetValue (C4).
+      encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
       if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
         // A new target, or the user chose another frame rate: start over from the floor.
         governor.Reset();
@@ -200,11 +217,9 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           // that controller owns it now, and the loop starts over rather than fight it.
           governor.Reset();
         } else {
-          // A rebuilt encoder (an fps or size change) starts at the configured ceiling: put the
-          // loop's own back instead of losing it.
-          if (encoder.codec.max_qp_override() == 0 && governor.maxQp() != H264Encoder::configured_max_qp()) {
-            (void)encoder.codec.set_max_qp(governor.maxQp());
-          }
+          // (The late "put the loop's ceiling back after a rebuild" SetValue that used to live here is
+          // gone: a rebuilt legacy instance starts at the loop's ceiling through set_initial_max_qp above,
+          // and a static-ceiling instance must not be poked at all. C4.)
           const RateDecision after = governor.OnSecond(govBytesPerSec, encoder.activeBitrate, userFps);
           if (after.fps != before.fps) {
             const uint32_t prevFps = encoder.activeFps;
@@ -212,7 +227,9 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                                                         encoder.nominalEncodeW, encoder.nominalEncodeH,
                                                         after.fps, encoder.activeBitrate, encoder.activeKeyint);
             if (fpsApplied) {
-              (void)encoder.codec.set_max_qp(after.maxQp);  // the rebuilt encoder, with the loop's ceiling
+              // The rebuilt instance started at the loop's ceiling (set_initial_max_qp); this answers
+              // Unchanged on legacy and Unproven on a static profile -- neither issues a SetValue.
+              (void)encoder.codec.set_max_qp(after.maxQp);
               // Same as ABR: the GDI worker captures at the rate it was started with.
               if (!capture.windowModeActive.load(std::memory_order_acquire) &&
                   backend.active == DesktopCaptureBackend::Gdi && restart_capture_session(hx)) {
@@ -229,13 +246,19 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
                       << " applied=" << (fpsApplied ? 1 : 0) << "\n";
           } else if (after.maxQp != before.maxQp) {
-            const bool applied = encoder.codec.set_max_qp(after.maxQp);
+            // C3: only an Applied answer counts as applied. Unproven (a static-ceiling instance) is
+            // logged as such and never as success; the governor then knows its lever did nothing.
+            const RcRuntimeResult rr = encoder.codec.set_max_qp(after.maxQp);
+            const bool applied = rr == RcRuntimeResult::Applied;
             std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
                       << " fps=" << encoder.activeFps
                       << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
                       << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
                       << " targetKbps=" << (encoder.activeBitrate / 1000U)
-                      << " applied=" << (applied ? 1 : 0) << "\n";
+                      << " applied=" << (applied ? 1 : 0)
+                      << " result=" << (rr == RcRuntimeResult::Applied ? "applied"
+                                        : rr == RcRuntimeResult::Unchanged ? "unchanged"
+                                        : rr == RcRuntimeResult::Unproven ? "unproven" : "failed") << "\n";
           }
         }
       }
@@ -372,6 +395,15 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " senderSendDurAvgUs=" << senderSendDurAvgUs
             << " senderSendDurMaxUs=" << sender.sendDurMaxUs.load(std::memory_order_relaxed)
             << " bitrateTarget=" << encoder.activeBitrate
+            // encoder-rc-budget C1 diagnostics: the four numbers that used to be one.
+            << " requestedWire=" << encoder.activeBitrate
+            << " effectiveWire=" << sender.wireCapBps.load(std::memory_order_relaxed)
+            << " desiredEncoder=" << encoder.desiredEncoderBps
+            << " appliedEncoder=" << encoder.applied_encoder_bps()
+            << " rcProfile=" << rc_profile_name(encoder.codec.rc_profile())
+            << " rcPlanState=" << (encoder.codec.rc_plan_state() == RcPlanState::Accepted ? "accepted"
+                                   : encoder.codec.rc_plan_state() == RcPlanState::Mismatch ? "mismatch" : "unknown")
+            << " wireOverloadSkips=" << stats.wireOverloadSkipCount  // frames the cap's input gate skipped (cumulative)
             << " fpsTarget=" << encoder.activeFps
             << " keyintTarget=" << encoder.activeKeyint
             << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH

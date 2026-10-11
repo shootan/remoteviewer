@@ -121,6 +121,16 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
       std::cout << "[native-video-host] encoder target retry recovered\n";
     }
   }
+  // encoder-rc-budget C3: an encoder E change that was deferred (coalesced inside the minimum interval
+  // since the last re-initialisation) is applied here, at the interval's end, with the CURRENT target
+  // -- the latest request wins. The wire side (R) was published when it was asked for.
+  if (!encoder.targetPending && encoder.encoderRetarget.Due(nowUs)) {
+    if (encoder.ApplyTarget(capture, hx.res, hx.frameGating, hx.inputRouter, sender, encoder.nominalEncodeW,
+                            encoder.nominalEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+      std::cout << "[native-video-host] encoder-budget deferred retarget applied desiredEncoder="
+                << encoder.desiredEncoderBps << " appliedEncoder=" << encoder.applied_encoder_bps() << "\n";
+    }
+  }
   // A02/A06: a provenance rebuild that could not run yet (the epoch gate's budget was spent, or
   // initialize() failed) is retried here, on the tick -- not in the encode path, which a static
   // desktop never reaches. The gate stays closed and every AU stays epoch 0 until it succeeds.

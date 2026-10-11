@@ -329,7 +329,9 @@ void startup_configure_encode_geometry(HostContext& hx) {
   // its fps/keyint arguments, and those must not leak in here.
   rate.userFpsCeiling = args.fps;
   rate.userKeyintCeiling = args.keyint;
-  encoder.activeBitrate = rate.abrHighBitrate;
+  encoder.activeBitrate = rate.abrHighBitrate;  // R: the user's wire budget
+  // encoder-rc-budget C1: the first instance is told E for that R, like every later one (ApplyTarget).
+  encoder.desiredEncoderBps = encoder.EncoderBudgetFor(encoder.activeBitrate);
   // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
   // measured holding the previous frame an extra tick on 75% of key presents (the user's
   // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
@@ -382,9 +384,21 @@ int startup_init_encoder(HostContext& hx) {
   auto& capture = hx.capture;
   auto& res = hx.res;
   if (useH264) {
-    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps, encoder.activeBitrate, encoder.activeKeyint)) {
+    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps,
+                                  encoder.encoder_bitrate_for_init(), encoder.activeKeyint)) {
       std::cerr << "[native-video-host] H264 encoder initialize failed\n";
       return 13;
+    }
+    encoder.encoderRetarget.NoteReinit(qpc_now_us());
+    {
+      const EncoderBudgetBreakdown b = encoder_budget_for(encoder.activeBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy());
+      std::cout << "[native-video-host] encoder-budget requestedWire=" << encoder.activeBitrate
+                << " effectiveWire=" << hx.sender.wireCapBps.load(std::memory_order_relaxed)
+                << " desiredEncoder=" << encoder.desiredEncoderBps << " appliedEncoder=" << encoder.applied_encoder_bps()
+                << " action=startup profile=" << rc_profile_name(encoder.codec.rc_profile())
+                << " fecX1000=" << b.fecFactorX1000 << " headerX1000=" << b.headerFactorX1000
+                << " nackReservePct=" << EncoderState::BudgetPolicy().nackReservePercent
+                << " overshootPct=" << EncoderState::BudgetPolicy().encoderOvershootPercent << "\n";
     }
     encoder.ResetTimelineAnchors(capture);
     const std::string requestedEncoderBackend = env_string_or_empty("REMOTE60_NATIVE_ENCODER_BACKEND");
