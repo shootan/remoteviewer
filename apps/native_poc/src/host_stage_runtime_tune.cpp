@@ -166,6 +166,7 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       // records its width/height arguments as the new nominal budget, and feeding the
       // already-fitted size back in would permanently shrink the box for every later
       // target switch.
+      hx.watchdog.EnterSubphase(MainLoopSubphase::TuneApply);  // r9: codec shutdown/initialize may run here
       if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, ladderW, ladderH, targetFps, targetBitrate, targetKeyint)) {
         std::cerr << "[native-video-host][control] runtime-config apply failed seq=" << reqSeq << "\n";
         hx.mailbox.RetryTuneEncoder(*tuneReq);
@@ -183,7 +184,15 @@ Flow stage_runtime_tune(HostContext& hx, TickContext& tc) {
       rate.abrGoodSeconds = 0;
       rate.abrModeratePressureSeconds = 0;
       rate.abrSeverePressureSeconds = 0;
-      encoder.RequestKey(kHostKeyReasonTune);
+      // encoder-rc-budget r9 (Codex r8 contract, item 4): no key from this caller. ApplyTarget requests
+      // the one key an encoder change owes (a new instance, or a live mean change -- reason
+      // kHostKeyReasonEncoderTarget, C4) and nothing for a no-op, a wire-only change or a DEFERRED E.
+      // The unconditional RequestKey(kHostKeyReasonTune) that stood here undid that: on the Home PC a
+      // 6M tune whose E was deferred (keyRequested=0) still sent a 218 KB "tune" key at the old E, and a
+      // repeated identical tune would have sent one too. Selection, geometry, recovery and epoch keys
+      // keep their own requesters. The ABR/cooldown resets above still run for every accepted tune,
+      // repeated ones included -- observed and left as is in this change (the contract asks for the
+      // comparison, not a behaviour change there).
       if (fpsChanged && !capture.windowModeActive.load(std::memory_order_acquire) &&
           backend.active == DesktopCaptureBackend::Gdi) {
         if (!restart_capture_session(hx)) {
