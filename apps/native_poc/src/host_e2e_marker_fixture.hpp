@@ -21,6 +21,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -305,8 +306,12 @@ class Target {
     if (thread_.joinable()) thread_.join();
   }
   HWND hwnd() const { return hwnd_; }
+  uint64_t paints() const { return paints_.load(std::memory_order_relaxed); }          // WM_PAINT handled
+  uint64_t last_paint_us() const { return lastPaintUs_.load(std::memory_order_relaxed); }  // qpc of the last one
 
  private:
+  std::atomic<uint64_t> paints_{0};
+  std::atomic<uint64_t> lastPaintUs_{0};
   static uint32_t xorshift(uint32_t& s) {
     s ^= s << 13;
     s ^= s >> 17;
@@ -536,6 +541,10 @@ class Target {
       HDC dc = BeginPaint(hwnd, &ps);
       self->Paint(dc);
       EndPaint(hwnd, &ps);
+      // r8: the fixture's own side of the capture boundary. When the host's capture counters stop, this
+      // says whether the window was still being repainted (then the break is WGC/readback/host) or not.
+      self->paints_.fetch_add(1, std::memory_order_relaxed);
+      self->lastPaintUs_.store(qpc_now_us(), std::memory_order_relaxed);
       return 0;
     }
     if (msg == WM_CLOSE) {

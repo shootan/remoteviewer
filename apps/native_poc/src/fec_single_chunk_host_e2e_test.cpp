@@ -132,6 +132,7 @@ struct HostAccount {
   // Isolation matrix (r2): max sender queue wait/depth from the host's own [wire] lines, and the
   // wire cap it logged at startup (wireCapBps=...), and how many capture frames the input gate skipped.
   uint64_t maxQueueWaitUs = 0, maxQueueDepth = 0, wireCapBps = 0, wireOverloadSkips = 0;
+  uint64_t captureStallMaxUs = 0;  // r8: max oldestSubmittingUs over the stats lines -- the capture thread stuck in Submit
   // r5 G4: the host's same-clock wire-cap apply marker (qpc) and the bitrate it applied. The LAST one
   // seen (a run has one downshift). 0 = none logged.
   uint64_t wireCapAppliedQpcUs = 0;
@@ -163,6 +164,7 @@ HostAccount read_host_log(const std::wstring& path) {
     }
     if (line.find(" wireCapBps=") != std::string::npos && a.wireCapBps == 0) a.wireCapBps = num_of(line, "wireCapBps");
     if (line.find(" wireOverloadSkips=") != std::string::npos) a.wireOverloadSkips = num_of(line, "wireOverloadSkips");
+    if (line.find(" oldestSubmittingUs=") != std::string::npos) a.captureStallMaxUs = std::max(a.captureStallMaxUs, num_of(line, "oldestSubmittingUs"));
     if (line.find("wirecap applied ") != std::string::npos) {  // r5 G4 same-clock apply marker
       a.wireCapAppliedQpcUs = num_of(line, "appliedQpcUs");
       a.wireCapAppliedBitrate = num_of(line, "bitrate");
@@ -229,6 +231,9 @@ struct RunResult {
   std::string windowMode;            // fixture window mode this run used (invisible / visible-plain)
   std::string probeHr;               // the harness's own WGC CreateForWindow HRESULT for that mode (wgc-probe)
   std::string hangDump;              // r8: path of the minidump taken when the host stopped delivering (empty = none)
+  bool hostExitedBeforeCleanup = false;  // r8: dead when the live window ended (its own exit, e.g. watchdog 43), not our TerminateProcess
+  uint64_t fixturePaints = 0;            // r8: WM_PAINTs the fixture handled during the run
+  double fixtureLastPaintAgeMs = 0;      // r8: age of the last fixture paint at the live window's end
   bool hello = false;
   bool nackNegotiated = false;
   HostAccount host;
@@ -941,8 +946,20 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     closesocket(sock);
   }
 
+  r.fixturePaints = target.paints();
+  {
+    const uint64_t lp = target.last_paint_us();
+    r.fixtureLastPaintAgeMs = lp ? (static_cast<double>(qpc_now_us()) - static_cast<double>(lp)) / 1000.0 : -1.0;
+  }
   target.Stop();
   if (hostPi.hProcess) {
+    // r8: a host that died during the live window but after the watcher's last look (or whose watchdog
+    // fired in the last 200 ms) must not be recorded as "exit 0 by our TerminateProcess".
+    if (!r.hostExitedEarly && WaitForSingleObject(hostPi.hProcess, 0) == WAIT_OBJECT_0) {
+      DWORD code = 0;
+      if (GetExitCodeProcess(hostPi.hProcess, &code)) r.hostExitCode = code;
+      r.hostExitedBeforeCleanup = true;
+    }
     TerminateProcess(hostPi.hProcess, 0);
     WaitForSingleObject(hostPi.hProcess, 5000);
     CloseHandle(hostPi.hProcess);
@@ -954,9 +971,15 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   r.hostLastLine = host_log_last_line(hostLogPath);
   r.captureItemFailed = host_log_contains(hostLogPath, "capture item create failed");
   if (host_log_contains(hostLogPath, "fallback=monitor")) r.monitorFallbackSeen = true;
-  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s hang-dump=%s last=\"%s\"\n",
-              r.hostExitedEarly ? 1 : 0, r.hostExitCode, r.captureItemFailed ? 1 : 0, r.monitorFallbackSeen ? 1 : 0,
-              r.windowMode.c_str(), r.probeHr.c_str(), r.hangDump.empty() ? "none" : r.hangDump.c_str(), r.hostLastLine.c_str());
+  std::printf("host-exit: early=%d exited-before-cleanup=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s "
+              "hang-dump=%s capture-stall-max-ms=%llu fixture-paints=%llu fixture-last-paint-age-ms=%.0f last=\"%s\"\n",
+              r.hostExitedEarly ? 1 : 0, r.hostExitedBeforeCleanup ? 1 : 0, r.hostExitCode, r.captureItemFailed ? 1 : 0,
+              r.monitorFallbackSeen ? 1 : 0, r.windowMode.c_str(), r.probeHr.c_str(), r.hangDump.empty() ? "none" : r.hangDump.c_str(),
+              (unsigned long long)(r.host.captureStallMaxUs / 1000), (unsigned long long)r.fixturePaints, r.fixtureLastPaintAgeMs,
+              r.hostLastLine.c_str());
+  // r8: a host that its own main-loop watchdog killed (exit 43) is a failed run, whatever else was counted.
+  check(!((r.hostExitedEarly || r.hostExitedBeforeCleanup) && r.hostExitCode == 43),
+        "the host was not killed by its main-loop watchdog (exit 43) during the live window", r.hostLastLine);
   if (r.monitorFallbackSeen) delete_saved_frames(runDir);
   check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
         r.hostLastLine);
@@ -1443,6 +1466,11 @@ struct RcRow {
            rcReconfigureWrites = 0, rcGovernorWrites = 0, decodedW = 0, decodedH = 0;
   uint64_t desiredEncoder = 0, appliedEncoder = 0, effectiveWire = 0, hostSkips = 0;
   std::string rcProfile, planState, windowMode;
+  unsigned long hostExit = 0;      // r8: the host's own exit code if it died (0 = alive at the end)
+  bool hostDied = false;
+  uint64_t stallMaxMs = 0;         // r8: capture thread's longest Submitting stall
+  uint64_t fixturePaints = 0;
+  bool valid = true;               // r8: false = not a throughput sample (dead host, no frame, stalled capture)
 };
 
 RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wireBps, int seconds, const RunResult& r) {
@@ -1507,17 +1535,26 @@ RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wir
   row.effectiveWire = r.host.effectiveWire; row.hostSkips = r.host.wireOverloadSkips;
   row.rcProfile = r.host.rcProfile;
   row.windowMode = r.windowMode;
+  row.hostDied = r.hostExitedEarly || r.hostExitedBeforeCleanup;
+  row.hostExit = row.hostDied ? r.hostExitCode : 0;
+  row.stallMaxMs = r.host.captureStallMaxUs / 1000;
+  row.fixturePaints = r.fixturePaints;
+  // A row is a throughput measurement only if the host lived, frames came, and the capture thread never
+  // stalled for more than 2 s. Otherwise it is a FAILED run and its numbers are not the product's rate.
+  row.valid = !row.hostDied && r.delivered >= 2 && row.stallMaxMs <= 2000;
   row.planState = r.host.rcPlanStates.empty() ? "-" : r.host.rcPlanStates.back();
   return row;
 }
 
 void print_rc_row(const RcRow& w) {
-  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u window-mode=%s | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
+  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u window-mode=%s valid=%d hostExit=%s stallMaxMs=%llu paints=%llu | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
               "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
               "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
               "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u(reconf=%u gov=%u) instances=%u "
               "decErr=%u keyReq=%u nacks=%u\n",
-              w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.windowMode.c_str(), w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
+              w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.windowMode.c_str(), w.valid ? 1 : 0,
+              w.hostDied ? std::to_string(w.hostExit).c_str() : "alive", (unsigned long long)w.stallMaxMs, (unsigned long long)w.fixturePaints,
+              w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
               (unsigned long long)w.desiredEncoder, (unsigned long long)w.appliedEncoder, (unsigned long long)w.effectiveWire,
               w.rcProfile.c_str(), w.planState.c_str(), w.deliveredFps, w.decodeFps, w.gap250, w.decodeGapMaxMs,
               w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
@@ -1526,8 +1563,10 @@ void print_rc_row(const RcRow& w) {
               w.rcInstances, w.decErr, w.keyReq, w.nacks);
 }
 
+// r8: --rc-fps / --rc-rate pick ONE cell; --rc-order cand-first runs the candidate before the baseline so
+// a GPU/time-order effect is not read as a host difference (the default order is baseline first).
 int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselineHost, const std::wstring& dir, int seconds,
-                  const std::string& only) {
+                  const std::string& only, uint32_t fpsOnly, uint32_t rateOnly, bool candFirst) {
   const RcCell cells[] = {
       {"textscroll", Content::TextScroll, false, 1200.0},        // small text, scrolling (full-frame real text motion)
       {"windowdrag", Content::WindowDrag, false, 1200.0},        // a window dragged over a text page
@@ -1544,7 +1583,9 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
   for (const RcCell& cell : cells) {
     if (!only.empty() && only != cell.label) continue;
     for (uint32_t fps : fpsList) {
+      if (fpsOnly != 0 && fps != fpsOnly) continue;
       for (uint32_t rate : rateList) {
+        if (rateOnly != 0 && rate != rateOnly) continue;
         auto one = [&](const std::wstring& host, const char* tag) -> RunResult {
           const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
           if (port == 0) return RunResult{};
@@ -1553,25 +1594,31 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
                                       std::wstring(tag, tag + std::strlen(tag)) + L"_" + std::to_wstring(idx++) + L"\\";
           return run_host(host, runDir, cell.content, /*tight=*/true, port, seconds, 0, 1, /*wireCapOn=*/true, rate, fps);
         };
-        RunResult base;
-        if (!baselineHost.empty()) {
+        RunResult base, cand;
+        RcRow baseRow, candRow;
+        const auto run_base = [&]() -> bool {
+          if (baselineHost.empty()) return true;
           base = one(baselineHost, "base");
-          if (capture_unavailable()) {
-            std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
-            return 3;
-          }
-          const RcRow b = rc_row_of("baseline", cell, fps, rate, seconds, base);
-          print_rc_row(b);
-          rows.push_back(b);
-        }
-        const RunResult cand = one(candidateHost, "cand");
-        if (capture_unavailable()) {
+          if (capture_unavailable()) return false;
+          baseRow = rc_row_of("baseline", cell, fps, rate, seconds, base);
+          print_rc_row(baseRow);
+          rows.push_back(baseRow);
+          return true;
+        };
+        const auto run_cand = [&]() -> bool {
+          cand = one(candidateHost, "cand");
+          if (capture_unavailable()) return false;
+          candRow = rc_row_of("candidate", cell, fps, rate, seconds, cand);
+          print_rc_row(candRow);
+          rows.push_back(candRow);
+          return true;
+        };
+        const bool ok = candFirst ? (run_cand() && run_base()) : (run_base() && run_cand());
+        if (!ok) {
           std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
           return 3;
         }
-        const RcRow c = rc_row_of("candidate", cell, fps, rate, seconds, cand);
-        print_rc_row(c);
-        rows.push_back(c);
+        const RcRow& c = candRow;  // the checks below read the candidate row; the baseline row is baseRow (any order)
         if (cell.marker) {
           // Which events were matched (id:latency ms) and which painted ids were not, for both hosts: a
           // lost event is named, not just counted.
@@ -1600,7 +1647,7 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         // under motion and the gate skips frames to hold the cap -- pre-existing, not this change), so an
         // absolute ceiling would fail both alike and say nothing about the candidate. The candidate must
         // not be worse than the baseline beyond a tolerance; without a baseline the absolute ceiling holds.
-        const RcRow* b = baselineHost.empty() ? nullptr : &rows[rows.size() - 2];
+        const RcRow* b = baselineHost.empty() ? nullptr : &baseRow;
         if (cell.marker) {
           // r2 (Codex V1): the owed events are the IDs 1..owed (ids are allocated in paint order, and
           // owed = those painted >= 1 s before the end); each one must have been decoded -- a count
@@ -1631,7 +1678,7 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
                                                                     std::to_string((int)b->deliveredFps) + ")");
         }
         if (!baselineHost.empty()) {
-          const RcRow& b = rows[rows.size() - 2];
+          const RcRow& b = baseRow;
           std::printf("RCDELTA scene=%s fps=%u R=%u | win1s %.1f->%.1f%% win250 %.1f->%.1f%% | gap250 %u->%u decodeGapMax %.0f->%.0fms "
                       "decodeLatP95 %.0f->%.0fms | ev p95 %.0f->%.0fms max %.0f->%.0fms | psnr text %.2f->%.2f full %.2f->%.2f | "
                       "keyMax %.0f->%.0fKB sentPayload %.0f->%.0fkbps hostSkips %llu->%llu\n",
@@ -1960,6 +2007,8 @@ int main(int argc, char** argv) {
   bool rcMatrix = false;
   bool rcTransitions = false;
   std::string rcOnly;
+  uint32_t rcFps = 0, rcRate = 0;
+  bool rcCandFirst = false;
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1969,6 +2018,12 @@ int main(int argc, char** argv) {
       rcTransitions = true;
     } else if (a == "--rc-only" && i + 1 < argc) {
       rcOnly = argv[++i];
+    } else if (a == "--rc-fps" && i + 1 < argc) {
+      rcFps = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));  // r8: one fps of the matrix
+    } else if (a == "--rc-rate" && i + 1 < argc) {
+      rcRate = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));  // r8: one R (bps) of the matrix
+    } else if (a == "--rc-order" && i + 1 < argc) {
+      rcCandFirst = std::string(argv[++i]) == "cand-first";  // r8: candidate before baseline
     } else if (a == "--save-frames") {
       gSaveFrames = true;  // decoded event frames as PGM beside each run's host.log (needs --keep-dir)
     } else if (a == "--window" && i + 1 < argc) {
@@ -2036,7 +2091,7 @@ int main(int argc, char** argv) {
   }
 
   if (rcMatrix || rcTransitions) {
-    if (rcMatrix) run_rc_matrix(hostExe, baselineHost, dir, seconds, rcOnly);
+    if (rcMatrix) run_rc_matrix(hostExe, baselineHost, dir, seconds, rcOnly, rcFps, rcRate, rcCandFirst);
     if (rcTransitions) {
       run_rc_transitions(hostExe, dir, seconds);
       run_rc_eonly(hostExe, dir, seconds);
