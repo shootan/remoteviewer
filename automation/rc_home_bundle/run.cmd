@@ -17,6 +17,11 @@ rem   run.cmd quick   transitions only: the CONTROL smoke (R/E/plan/coalescing p
 rem                   It is not a quality comparison and must not be reported as one.
 rem   run.cmd diag    r8: the SHORT DIAGNOSTIC SET (~4 min) for the Home PC main-loop hangs and the
 rem                   motion regression -- five phases, each separating two hypotheses (see below).
+rem   run.cmd home4   r9: the ONE Home PC run after the r9 fixes (~6 min): the ORIGINAL candidate's
+rem                   stall evidence first (dumps), then the r9 candidate on the same cells, then a
+rem                   CBR 51 contrast row. Needs GNLinkStream.orig.exe beside the three files (the
+rem                   a510cfc build the third run used); without it the original phases are skipped
+rem                   and say so.
 rem Exit code: 0 only when every phase that ran returned 0. Each phase's own exit code is in
 rem results\<timestamp>\<phase>.exit; 1 there means FAIL lines in that phase's .log; 3 means the
 rem harness could not get a capture item for its window even with the visible fallback (see below) --
@@ -102,6 +107,21 @@ rem   D4 motion     motion 60 fps 6M 1080p, CANDIDATE FIRST then baseline, 12 s 
 rem                 candidate, with the fixture paint counter and the capture-stall counter per run.
 rem   D5 transitions the three transition runs (16 s): tune/deferred/key path, then the hang if it comes.
 rem Every hung host leaves hang-pid<N>.dmp (thread stacks) in its run folder.
+rem
+rem THE HOME4 SET (run.cmd home4). Phases H1-H2 run the ORIGINAL candidate (GNLinkStream.orig.exe, the
+rem a510cfc build) so the cause of the third run's stalls is recorded with stacks and is not hidden by
+rem the r9 fixes; H3-H6 run the r9 candidate; H7 is the contrast row. Every host that hangs or starves
+rem leaves hang-pid<N>.dmp; read them with the matching PDB:
+rem   remote60_fec_single_chunk_host_e2e_test.exe --dump-check <dmp> --symbols <folder with the exe and its .pdb>
+rem   H1 orig-720p   textscroll 30 fps 1.5M (1080p page -> 720p through the GPU scaler), orig then baseline
+rem   H2 orig-motion motion 60 fps 6M 1080p, orig then baseline (the capture-publication stall + QP 44)
+rem   H3 r9-motion   motion 60 fps 6M, r9 candidate then baseline  (positive: candidate fps >= baseline)
+rem   H4 r9-text     textscroll 60 fps 6M, r9 candidate then baseline
+rem   H5 r9-720p     textscroll 30 fps 1.5M through the scaler, r9 candidate then baseline (bounded Map)
+rem   H6 r9-trans    the three transition runs (down/up, fps, E-only), r9 candidate
+rem   H7 cbr51       motion 60 fps 6M with REMOTE60_NATIVE_RC_MODE_NUM=0 (CBR, same E/GOP), r9 candidate
+rem                  only -- a contrast row for the mode question, not a policy
+rem The r9 host is the candidate of record; orig and r9 are different binaries (identity.txt has both).
 
 setlocal
 chcp 65001 >nul
@@ -148,6 +168,8 @@ set REMOTE60_TEST_SCRATCH_STANDALONE=1
 set "E2E_SRC=%WORK%remote60_fec_single_chunk_host_e2e_test.exe"
 set "CAND=%WORK%GNLinkStream.candidate.exe"
 set "BASE=%WORK%GNLinkStream.baseline.exe"
+set "ORIG=%WORK%GNLinkStream.orig.exe"
+if "%NETDRIVE%"=="1" if exist "%HERE%GNLinkStream.orig.exe" copy /y "%HERE%GNLinkStream.orig.exe" "%WORK%" >nul
 if not exist "%E2E_SRC%" echo missing %E2E_SRC% & exit /b 2
 if not exist "%CAND%" echo missing %CAND% & exit /b 2
 if not exist "%BASE%" echo missing %BASE% & exit /b 2
@@ -165,6 +187,12 @@ certutil -hashfile "%E2E_SRC%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
 certutil -hashfile "%CAND%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
 >>"%ID%" echo baseline=%BASE%
 certutil -hashfile "%BASE%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
+if exist "%ORIG%" (
+  >>"%ID%" echo orig=%ORIG%
+  certutil -hashfile "%ORIG%" SHA256 | findstr /r /i /c:"^[0-9a-f]*$" >>"%ID%"
+) else (
+  >>"%ID%" echo orig=absent
+)
 >>"%ID%" echo == os ==
 >>"%ID%" ver
 rem wmic is gone from Windows 11 24H2 (optional feature) and wrote UTF-16 when it existed: CIM via
@@ -185,6 +213,7 @@ if "%NETDRIVE%"=="1" >>"%ID%" echo NOTE: %HERE:~0,2% is a network drive; the run
 
 set "RC=0"
 if /i "%MODE%"=="diag" goto :diag
+if /i "%MODE%"=="home4" goto :home4
 
 echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
 echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
@@ -243,6 +272,68 @@ set "PHASE_RC=%errorlevel%"
 >"%OUT%\d5_transitions.exit" echo %PHASE_RC%
 echo      exit %PHASE_RC%
 if not "%PHASE_RC%"=="0" set "RC=1"
+goto :done
+
+:home4
+echo [home4] seven short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
+if exist "%ORIG%" (
+  echo [H1/7] orig-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL candidate then baseline, 10 s each
+  "%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h1_orig_720p.log" 2>&1
+  set "PHASE_RC=%errorlevel%"
+  >"%OUT%\h1_orig_720p.exit" echo %PHASE_RC%
+  echo      exit %PHASE_RC%
+  if not "%PHASE_RC%"=="0" set "RC=1"
+  if "%PHASE_RC%"=="3" (
+    echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
+    goto :done
+  )
+  echo [H2/7] orig-motion: motion 60fps 6M 1080p, ORIGINAL candidate then baseline, 12 s each
+  "%E2E%" --host "%ORIG%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h2_orig_motion.log" 2>&1
+  set "PHASE_RC=%errorlevel%"
+  >"%OUT%\h2_orig_motion.exit" echo %PHASE_RC%
+  echo      exit %PHASE_RC%
+  if not "%PHASE_RC%"=="0" set "RC=1"
+) else (
+  echo [H1-H2/7] skipped: GNLinkStream.orig.exe is not beside run.cmd -- the original candidate's stall evidence is not collected
+  >"%OUT%\h1_orig_720p.exit" echo skipped-no-orig
+  >"%OUT%\h2_orig_motion.exit" echo skipped-no-orig
+)
+echo [H3/7] r9-motion: motion 60fps 6M 1080p, r9 candidate then baseline, 12 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h3_r9_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h3_r9_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE -- nothing else can be measured; stopping
+  goto :done
+)
+echo [H4/7] r9-text: textscroll 60fps 6M 1080p, r9 candidate then baseline, 12 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h4_r9_text.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h4_r9_text.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H5/7] r9-720p: textscroll 30fps 1.5M through the GPU scaler, r9 candidate then baseline, 10 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h5_r9_720p.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_r9_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H6/7] r9-trans: down/up, fps, E-only transitions, r9 candidate, 16 s each
+"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir > "%OUT%\h6_r9_trans.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h6_r9_trans.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [H7/7] cbr51: motion 60fps 6M with the CBR mode override, r9 candidate only, 12 s (a contrast row)
+set REMOTE60_NATIVE_RC_MODE_NUM=0
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h7_cbr51_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+set REMOTE60_NATIVE_RC_MODE_NUM=
+>"%OUT%\h7_cbr51_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+rem H7 is a contrast row: its own checks (candidate-only absolute gates) do not decide the set's result.
 goto :done
 
 :done

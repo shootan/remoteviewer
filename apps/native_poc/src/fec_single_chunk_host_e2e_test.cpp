@@ -54,6 +54,7 @@
 #include "poc_protocol.hpp"
 #include "host_e2e_marker_fixture.hpp"  // r8: shared Target/EventLog/decode_event_marker
 #include "host_e2e_wgc_probe.hpp"       // encoder-rc-budget r7: ask WGC ourselves, with the HRESULT
+#include "host_e2e_dump_check.hpp"      // encoder-rc-budget r9: read a hang dump back, with symbols
 #include "host_encoder_budget.hpp"      // encoder-rc-budget r2: E(R, fps), the same function the host uses
 #include "session_video_pipeline.hpp"
 #include "viewer_constants.hpp"       // r7 V2: FrameGate env defaults
@@ -116,6 +117,7 @@ struct HostAccount {
   uint64_t txFrames = 0, txBytes = 0, parity = 0, chunkHdr = 0, videoDatagrams = 0, nackBytes = 0,
            nackDatagrams = 0, wireEst = 0;
   size_t keyframeLines = 0;
+  size_t keyTuneOnlyLines = 0;  // r9: [keyframe] lines whose reasons are "tune" alone -- a key no encoder change owed
   // encoder-rc-budget: the host's R/E account (last encoder-budget line), plan lines per instance,
   // runtime RC writes, governor steps, key AU sizes.
   uint64_t requestedWire = 0, effectiveWire = 0, desiredEncoder = 0, appliedEncoder = 0;
@@ -154,7 +156,11 @@ HostAccount read_host_log(const std::wstring& path) {
       last = line;
       ++a.statsLines;
     }
-    if (line.find("[keyframe]") != std::string::npos) ++a.keyframeLines;
+    if (line.find("[keyframe]") != std::string::npos) {
+      ++a.keyframeLines;
+      const std::string reasons = value_of(line, "reasons");
+      if (reasons.find("tune") != std::string::npos && reasons.find("encoder_target") == std::string::npos) ++a.keyTuneOnlyLines;
+    }
     if (line.find(" wire seq=") != std::string::npos) {
       a.maxQueueWaitUs = std::max(a.maxQueueWaitUs, num_of(line, "queueWaitUs"));
       a.maxQueueDepth = std::max(a.maxQueueDepth, num_of(line, "queueDepth"));
@@ -635,8 +641,10 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     cfg.maxConcurrent = 8;
     SessionVideoPipeline::Callbacks cb;
     std::atomic<uint64_t> lastDeliverUs{0};  // r8: when the host last delivered a frame (the hang detector's clock)
+    std::atomic<uint32_t> deliveredAtomic{0};  // r9: the live-loop's copy of r.delivered (no data race with the ingress thread)
     cb.deliver = [&](UdpH264AssembledFrame&& f) {
       ++r.delivered;
+      deliveredAtomic.fetch_add(1, std::memory_order_relaxed);
       lastDeliverUs.store(qpc_now_us(), std::memory_order_relaxed);
       if (r.firstSeq == 0) r.firstSeq = f.header.seq;
       if (lastDelivered != 0 && f.header.seq > lastDelivered + 1) {
@@ -885,20 +893,50 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
       const uint64_t liveUntilUs = liveStartUs + static_cast<uint64_t>(seconds) * 1'000'000ull;
       const uint64_t forcedDumpUs = forced_hang_dump_after_us();
       bool dumped = false;
+      // r9: the low-fps progress snapshot. The Home PC's stalled motion runs kept delivering ~1 small AU
+      // per second (trailing kicks) after their capture publication stopped, so a 5 s silence never came.
+      // Each second: if the fixture painted >= 10 times (a continuous scene -- a discrete one paints
+      // every ~2 s and is left alone) but <= 1 frame was delivered, for 3 seconds running, dump once.
+      uint64_t nextSecondUs = liveStartUs + 1'000'000ull;
+      uint32_t prevDelivered = 0;
+      uint64_t prevPaints = target.paints();
+      int lowFpsStreak = 0;
       while (qpc_now_us() < liveUntilUs) {
         if (!dumped) {
           // r8: alive but silent -- the first frame never came, or the frames stopped. One dump per run.
+          // Reads are ordered (atomics loaded after `now`) and the elapsed time saturates at 0: a
+          // delivery that lands between the two loads cannot make an unsigned wrap look like silence.
           const uint64_t nowUs = qpc_now_us();
-          const uint64_t last = std::max(lastDeliverUs.load(std::memory_order_relaxed), liveStartUs);
-          const bool silent = nowUs - last >= kHangDumpAfterUs;
-          const bool forced = forcedDumpUs != 0 && nowUs - liveStartUs >= forcedDumpUs;
-          if (silent || forced) {
-            char why[160];
-            std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, window-mode=%s)",
-                          forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS" : "host alive but no frame delivered",
-                          r.delivered, (nowUs - last) / 1e6, r.windowMode.c_str());
-            r.hangDump = write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, why);
-            dumped = true;
+          const uint64_t last = std::max(lastDeliverUs.load(std::memory_order_acquire), liveStartUs);
+          const uint64_t silentUs = nowUs > last ? nowUs - last : 0;
+          const uint32_t deliveredNow = deliveredAtomic.load(std::memory_order_acquire);
+          const bool silent = silentUs >= kHangDumpAfterUs;
+          const bool forced = forcedDumpUs != 0 && nowUs >= liveStartUs + forcedDumpUs;
+          bool lowFps = false;
+          if (nowUs >= nextSecondUs) {
+            nextSecondUs += 1'000'000ull;
+            const uint64_t paintsNow = target.paints();
+            const bool painting = paintsNow - prevPaints >= 10;
+            const bool starving = deliveredNow - prevDelivered <= 1;
+            lowFpsStreak = (painting && starving) ? lowFpsStreak + 1 : 0;
+            prevPaints = paintsNow;
+            prevDelivered = deliveredNow;
+            lowFps = lowFpsStreak >= 3;
+          }
+          if (silent || forced || lowFps) {
+            // alive? (a host that already died leaves nothing to dump; its exit is recorded below)
+            if (WaitForSingleObject(hostPi.hProcess, 0) == WAIT_OBJECT_0) {
+              dumped = true;  // nothing to take; the early-exit branch below records the exit code
+            } else {
+              char why[200];
+              std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, fixture paints=%llu, window-mode=%s)",
+                            forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS"
+                                   : lowFps ? "fixture painting but <=1 frame/s delivered for 3 s (capture publication or encode starved)"
+                                            : "host alive but no frame delivered",
+                            deliveredNow, silentUs / 1e6, (unsigned long long)target.paints(), r.windowMode.c_str());
+              r.hangDump = write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, why);
+              dumped = true;
+            }
           }
         }
         if (WaitForSingleObject(hostPi.hProcess, 200) == WAIT_OBJECT_0) {
@@ -1470,7 +1508,8 @@ struct RcRow {
   bool hostDied = false;
   uint64_t stallMaxMs = 0;         // r8: capture thread's longest Submitting stall
   uint64_t fixturePaints = 0;
-  bool valid = true;               // r8: false = not a throughput sample (dead host, no frame, stalled capture)
+  bool valid = true;               // r8: false = not a throughput sample (dead host, no frame, stalled capture, dumped)
+  bool dumped = false;             // r9: a hang dump was taken during this run
 };
 
 RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wireBps, int seconds, const RunResult& r) {
@@ -1539,22 +1578,24 @@ RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wir
   row.hostExit = row.hostDied ? r.hostExitCode : 0;
   row.stallMaxMs = r.host.captureStallMaxUs / 1000;
   row.fixturePaints = r.fixturePaints;
-  // A row is a throughput measurement only if the host lived, frames came, and the capture thread never
-  // stalled for more than 2 s. Otherwise it is a FAILED run and its numbers are not the product's rate.
-  row.valid = !row.hostDied && r.delivered >= 2 && row.stallMaxMs <= 2000;
+  // A row is a throughput measurement only if the host lived, frames came, the capture thread never
+  // stalled for more than 2 s, and no dump was taken (a MiniDumpWriteDump suspends the host for its
+  // duration, so a dumped run's latencies are not the product's). Otherwise it is a FAILED run.
+  row.dumped = !r.hangDump.empty();
+  row.valid = !row.hostDied && r.delivered >= 2 && row.stallMaxMs <= 2000 && !row.dumped;
   row.planState = r.host.rcPlanStates.empty() ? "-" : r.host.rcPlanStates.back();
   return row;
 }
 
 void print_rc_row(const RcRow& w) {
-  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u window-mode=%s valid=%d hostExit=%s stallMaxMs=%llu paints=%llu | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
+  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u window-mode=%s valid=%d hostExit=%s stallMaxMs=%llu paints=%llu dumped=%d | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
               "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
               "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
               "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u(reconf=%u gov=%u) instances=%u "
               "decErr=%u keyReq=%u nacks=%u\n",
               w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.windowMode.c_str(), w.valid ? 1 : 0,
               w.hostDied ? std::to_string(w.hostExit).c_str() : "alive", (unsigned long long)w.stallMaxMs, (unsigned long long)w.fixturePaints,
-              w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
+              w.dumped ? 1 : 0, w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
               (unsigned long long)w.desiredEncoder, (unsigned long long)w.appliedEncoder, (unsigned long long)w.effectiveWire,
               w.rcProfile.c_str(), w.planState.c_str(), w.deliveredFps, w.decodeFps, w.gap250, w.decodeGapMaxMs,
               w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
@@ -1648,7 +1689,12 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         // absolute ceiling would fail both alike and say nothing about the candidate. The candidate must
         // not be worse than the baseline beyond a tolerance; without a baseline the absolute ceiling holds.
         const RcRow* b = baselineHost.empty() ? nullptr : &baseRow;
-        if (cell.marker) {
+        if (c.dumped) {
+          // r9: MiniDumpWriteDump suspends the host while it writes; the gaps and latencies of a dumped run
+          // carry that pause and are not the product's. The dump itself is the result of this run.
+          std::printf("       (responsiveness checks not judged for this cell: a hang dump suspended the candidate host; dump=%s)\n",
+                      cand.hangDump.c_str());
+        } else if (cell.marker) {
           // r2 (Codex V1): the owed events are the IDs 1..owed (ids are allocated in paint order, and
           // owed = those painted >= 1 s before the end); each one must have been decoded -- a count
           // cannot hide a missing id behind a late extra one, and a loss on the baseline is reported
@@ -1672,10 +1718,23 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
           check(c.decodeGapMaxMs <= gapBound, tag + ": candidate max realtime-decode gap not worse than baseline/ceiling (" +
                                                   std::to_string((int)c.decodeGapMaxMs) + "ms bound=" + std::to_string((int)gapBound) + ")");
         }
-        if (b) {
+        if (b && !c.dumped) {
           check(c.deliveredFps >= b->deliveredFps * 0.75 - 0.5, tag + ": candidate delivered fps not below 75% of baseline (" +
                                                                     std::to_string((int)c.deliveredFps) + " vs " +
                                                                     std::to_string((int)b->deliveredFps) + ")");
+          // r9 positive condition (Codex r8 contract): on the motion scene the candidate must deliver at
+          // least the baseline's rate -- 10% tolerance for a single noisy pair, and ONLY between two valid
+          // rows: a dead, stalled or dumped host on either side is a failed run, not a rate to compare.
+          if (std::strcmp(cell.label, "motion") == 0) {
+            if (c.valid && b->valid) {
+              check(c.deliveredFps >= b->deliveredFps * 0.9 - 0.5,
+                    tag + ": motion: candidate delivered fps >= baseline (10% tolerance; r9 positive condition) (" +
+                        std::to_string((int)c.deliveredFps) + " vs " + std::to_string((int)b->deliveredFps) + ")");
+            } else {
+              std::printf("       (motion positive condition not judged: candidate valid=%d baseline valid=%d -- a failed run, not a rate)\n",
+                          c.valid ? 1 : 0, b->valid ? 1 : 0);
+            }
+          }
         }
         if (!baselineHost.empty()) {
           const RcRow& b = baseRow;
@@ -1777,6 +1836,10 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
                                                      std::to_string(r.eventsOwed) + (ms.empty() ? "" : ", missing " + ms) + ")");
     }
     check(r.decodeErrors == 0, "transitions: no decode error across the changes");
+    // r9 (③): the same target asked twice must not cost a key; the one key per encoder change comes from
+    // ApplyTarget (reason encoder_target). A key whose reasons are "tune" alone is the caller's extra.
+    check(r.host.keyTuneOnlyLines == 0, "transitions: no key was requested for a repeated/no-op/deferred tune (tune-only keys=" +
+                                            std::to_string(r.host.keyTuneOnlyLines) + ")");
   }
   {
     const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
@@ -1930,6 +1993,8 @@ int run_rc_eonly(const std::wstring& hostExe, const std::wstring& dir, int secon
                                                    (ms.empty() ? "" : ", missing " + ms) + ")");
   }
   check(r.decodeErrors == 0, "e-only: no decode error");
+  check(r.host.keyTuneOnlyLines == 0, "e-only: no key was requested for a repeated/no-op/deferred tune (tune-only keys=" +
+                                          std::to_string(r.host.keyTuneOnlyLines) + ")");
   // Where the host's forced keys went: every change on the static profile is one instance = one IDR;
   // on legacy a live change owes one forced key each. Reported, the exact count depends on the scene.
   std::printf("EONLY keys: hostKeyframeLines=%zu rxKeyFrames=%u\n", r.host.keyframeLines, r.keyFrames);
@@ -1995,6 +2060,21 @@ int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds
 
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // r9: offline mode -- read a hang dump back with symbols and exit. No hosts, no WSA/MF.
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--dump-check" && i + 1 < argc) {
+      std::wstring dump(argv[i + 1], argv[i + 1] + std::strlen(argv[i + 1]));
+      std::wstring symbols;
+      std::wstring hostModule = L"GNLinkStream.exe";
+      for (int j = 1; j + 1 < argc; ++j) {
+        if (std::string(argv[j]) == "--symbols") symbols.assign(argv[j + 1], argv[j + 1] + std::strlen(argv[j + 1]));
+        if (std::string(argv[j]) == "--host-module") hostModule.assign(argv[j + 1], argv[j + 1] + std::strlen(argv[j + 1]));
+      }
+      bool verbose = false;
+      for (int j = 1; j < argc; ++j) if (std::string(argv[j]) == "--dump-verbose") verbose = true;
+      return remote60::native_poc::e2e::dump_check(dump, symbols, hostModule, verbose);
+    }
+  }
   std::wstring hostExe;
   int seconds = 12;
   std::string contentArg = "all";
