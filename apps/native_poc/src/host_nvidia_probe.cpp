@@ -22,10 +22,48 @@
 //   * product-stats: every row (direct AND proxy) sums the product's own H264EncodeFrameStats, so
 //     the proxy-free row has the same drain/poll counters; drainEndUnexpected is derived there as
 //     drainLoops - needMoreInput - streamChange - errors (the product keeps no counter for it).
-// Known difference of the proxy path vs the product (printed in the header too): the seam sets
-// backendName_="test_transform", so on AMD the AMF-specific configure_types branch
-// (mf_h264_codec.cpp, strcmp "amf_mft_h264enc") is NOT taken; on NVIDIA the product uses the generic
-// path anyway. The first row runs WITHOUT the proxy (pure product) so the proxy rows can be compared.
+// Proxy path vs the product path (Codex 17519d8 review, item 1 corrected): every row pins
+// REMOTE60_NATIVE_ENCODER_BACKEND=mft_hw, and the proxy-free row logs backend=mft_enum_hw, so NEITHER
+// the direct row NOR the proxy rows take the AMF-specific configure_types branch (strcmp
+// "amf_mft_h264enc"); that branch only differs from an Auto / explicit-AMF product setting, which this
+// probe does not measure. The seam sets backendName_="test_transform" and usingHardware_=false; no
+// codec-configuration use of usingHardware_ was found in this CPU-NV12 path. MF attribute writes
+// (GetAttributes()->SetUINT32, e.g. MF_LOW_LATENCY=1) go to the inner object directly and are NOT in
+// the proxy's set[] log -- the snapshots read the attribute back instead.
+//
+// r3 (Codex 17519d8 F1..F3):
+//   F1  the proxy keeps a bounded raw-call history (call / hr / frame / phase, newest last) and, on
+//       encode-false, LATCHES it together with the latest abnormal HRESULT and the last ProcessInput
+//       HRESULT BEFORE the product's shutdown() runs (shutdown-time errors cannot mask the cause).
+//       MF_E_NOTACCEPTING: the first one in an encode call is tolerated (the product drains and
+//       retries once); a second one in the same call = the retry failed = abnormal
+//       (ProcessInput-retry). E_UNEXPECTED from ProcessOutput on an async MFT is reported as
+//       "product-tolerated E_UNEXPECTED" (the product's drain loop ends on it); the proxy-free row
+//       has no raw ProcessOutput HRESULT counts and says so (no derived count).
+//       GetEvent's own GetType/GetStatus failures and GetOutputStreamInfo failures are abnormal.
+//       A failing encode call with no MFT call recorded for that frame = unknown-before-MFT (the
+//       failure happened before the transform, e.g. sample creation) -- a collection boundary.
+//   F2  snapshot moments, in product order: caps (fresh MFT) / pre-types (just before the first real
+//       SetType; in RC_BEFORE_TYPES rows the pre RC is already in) / types-applied (both types
+//       accepted, before the product writes MF_LOW_LATENCY) / pre-first-set (first ICodecAPI
+//       SetValue after the types; the MF_LOW_LATENCY attribute is already written by then) /
+//       post-hints / before-begin-streaming / after-start-of-stream (START_OF_STREAM returned) /
+//       first-output-sample (first S_OK ProcessOutput with a sample) / after-governor /
+//       after-retarget. Every Get is logged with its HRESULT: "Key=UI4:n" means hr==S_OK exactly,
+//       "Key=UI4:n(hr=0x...)" a non-S_OK success, "Key=!0x..." a failure. The product's own
+//       readback GetValue calls are logged as get[phase].
+//   F3  RESULT is split: exec (encode calls) / coverage (unique body frames returned, missing,
+//       duplicates; an 8-frame bounded drain after the body recovers in-flight tail output, what is
+//       still missing is tail-incomplete) / config (after START_OF_STREAM: each rate-control key the
+//       product requested vs its readback -> applied | not-applied{...} | not-requested{...};
+//       a mismatch is a FINDING, not an encoder failure) / events (abnormal HRESULT count).
+//       VALID = exec ok AND no missing body frame after the drain AND no abnormal AND fps ok.
+//       Retarget rows log the boundary (first input after the change) and how many AUs returned
+//       after it belong to pre-change inputs (attributed to "before" by PTS). R*-sham rows re-apply
+//       the SAME values at the same moment (same call pattern, no change) as the control; the
+//       unchanged anchors also print both halves. GOP is 4 s and the body 5 s, so a periodic IDR can
+//       land only in the second half -- the RESULT line lists the IDR body frames.
+//       main() exits 0 only when every row is VALID (exit 2 otherwise); DONE is not a verdict.
 // Rewrites (buffer size, LowLatency explicit-off) are done in the proxy and are logged as REWRITE /
 // INJECT, never silently.
 //
@@ -45,7 +83,7 @@
 // PSNR (luma, exact PTS, SW decoder mft_sw, last-24-frame source ring; unmatched/decode failures
 // are counted, never scored) is printed per row and before/after the midpoint on R rows.
 //
-// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_r2_result.txt   (send back the file)
+// Run on the target PC:   host_nvidia_probe.exe > nvidia_probe_v2_r3_result.txt   (send back the file)
 // Options: --repeat N  (repeat the non-anchor rows N times; default 1, ~2 min at 1)  --no-psnr
 
 #include "bakeoff_common.hpp"
@@ -57,6 +95,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <map>
 #include <string>
 #include <thread>
@@ -133,7 +172,18 @@ struct ProxyCfg {
   bool printCaps = false;
 };
 
-struct AbnormalHr { std::string call; HRESULT hr; uint32_t count; uint64_t firstFrame; };
+struct AbnormalHr { std::string call; HRESULT hr; uint32_t count; uint64_t firstFrame; uint64_t lastFrame; };
+struct RawCall { std::string call; HRESULT hr; uint64_t frame; std::string phase; };
+
+// Get HRESULT rendering (F2): plain value = S_OK exactly; (hr=...) = other success; !hr = failure.
+std::string get_str(HRESULT hr, const VARIANT* v) {
+  if (FAILED(hr)) return "!" + hr_str(hr);
+  if (hr == S_OK) return var_str(v);
+  return var_str(v) + "(hr=" + hr_str(hr) + ")";
+}
+
+const GUID kRcKeys[] = {CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonMeanBitRate,
+                        CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncVideoMaxQP};
 
 class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaEventGenerator {
  public:
@@ -141,26 +191,26 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
     inner_->QueryInterface(IID_PPV_ARGS(&api_));
     inner_->QueryInterface(IID_PPV_ARGS(&gen_));
   }
-  std::atomic<uint64_t> frame{0};  // probe-side frame index, for the abnormal-HR log
+  std::atomic<uint64_t> frame{0};  // probe-side frame index, for the raw-call log
   std::string phase = "pre-types";
   bool asyncMft = false;           // MF_TRANSFORM_ASYNC on the inner MFT (set by the row before init)
 
-  // ---- snapshots ---------------------------------------------------------------------------
+  // ---- snapshots (F2: every Get carries its HRESULT) --------------------------------------
   void snapshot(const char* label) {
-    std::printf("  snap %-14s", label);
+    std::printf("  snap %-22s", label);
     if (!api_) { std::printf(" (no ICodecAPI)\n"); return; }
     for (const auto& k : kKeys) {
       VARIANT v; VariantInit(&v);
       const HRESULT hr = api_->GetValue(&k.guid, &v);
-      if (SUCCEEDED(hr)) std::printf(" %s=%s", k.name, var_str(&v).c_str());
-      else std::printf(" %s=!%s", k.name, hr_str(hr).c_str());
+      std::printf(" %s=%s", k.name, get_str(hr, &v).c_str());
       VariantClear(&v);
     }
     Microsoft::WRL::ComPtr<IMFAttributes> attrs;
     UINT32 ll = 0;
     if (SUCCEEDED(inner_->GetAttributes(&attrs)) && attrs) {
       const HRESULT hr = attrs->GetUINT32(MF_LOW_LATENCY, &ll);
-      if (SUCCEEDED(hr)) std::printf(" MF_LOW_LATENCY=%u", ll);
+      if (hr == S_OK) std::printf(" MF_LOW_LATENCY=%u", ll);
+      else if (SUCCEEDED(hr)) std::printf(" MF_LOW_LATENCY=%u(hr=%s)", ll, hr_str(hr).c_str());
       else std::printf(" MF_LOW_LATENCY=!%s", hr_str(hr).c_str());
     }
     std::printf("\n");
@@ -176,33 +226,78 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
       const HRESULT rhr = api_->GetParameterRange(&k.guid, &mn, &mx, &st);
       VARIANT cur; VariantInit(&cur);
       const HRESULT chr = api_->GetValue(&k.guid, &cur);
-      const std::string ds = SUCCEEDED(dhr) ? var_str(&d) : "!" + hr_str(dhr);
-      const std::string rs = SUCCEEDED(rhr) ? var_str(&mn) + ".." + var_str(&mx) + " step " + var_str(&st)
+      const std::string rs = SUCCEEDED(rhr) ? var_str(&mn) + ".." + var_str(&mx) + " step " + var_str(&st) +
+                                                  (rhr == S_OK ? "" : "(hr=" + hr_str(rhr) + ")")
                                             : "!" + hr_str(rhr);
-      const std::string cs = SUCCEEDED(chr) ? var_str(&cur) : "!" + hr_str(chr);
       std::printf("  caps %-16s supported=%s modifiable=%s default=%s range=%s cur=%s\n", k.name,
-                  hr_str(sup).c_str(), hr_str(mod).c_str(), ds.c_str(), rs.c_str(), cs.c_str());
+                  hr_str(sup).c_str(), hr_str(mod).c_str(), get_str(dhr, &d).c_str(), rs.c_str(),
+                  get_str(chr, &cur).c_str());
       VariantClear(&d); VariantClear(&mn); VariantClear(&mx); VariantClear(&st); VariantClear(&cur);
     }
   }
+
+  // ---- F3 config applied? requested (post-rewrite) value per RC key vs readback NOW ---------
+  std::string config_status() {
+    if (!api_) return "n/a(no ICodecAPI)";
+    std::string notApplied, notRequested;
+    for (const GUID& g : kRcKeys) {
+      const std::string name = key_name(&g);
+      auto it = requested_.find(name);
+      VARIANT v; VariantInit(&v);
+      const HRESULT hr = api_->GetValue(&g, &v);
+      if (it == requested_.end()) {
+        notRequested += (notRequested.empty() ? "" : ",") + name;
+      } else if (FAILED(hr) || v.vt != VT_UI4 || v.ulVal != it->second) {
+        notApplied += (notApplied.empty() ? "" : ",") + name + " req=" + std::to_string(it->second) +
+                      " rb=" + get_str(hr, &v);
+      }
+      VariantClear(&v);
+    }
+    std::string out = notApplied.empty() ? "applied" : "not-applied{" + notApplied + "}";
+    if (!notRequested.empty()) out += " not-requested{" + notRequested + "}";
+    return out;
+  }
+  std::string config_at_start() const { return configAtStart_.empty() ? "n/a(START_OF_STREAM not seen)" : configAtStart_; }
+
+  // ---- F1 latch + dumps -------------------------------------------------------------------
+  void latch_failure() {
+    latch_.set = true;
+    latch_.frame = frame.load();
+    latch_.phase = phase;
+    latch_.lastAbnormal = last_abnormal();
+    latch_.lastProcessInputHr = lastProcessInputHr_;
+    latch_.lastProcessInputFrame = lastProcessInputFrame_;
+    latch_.history.assign(history_.begin(), history_.end());
+  }
+  void dump_latch() {
+    if (!latch_.set) return;
+    bool mftCallThisFrame = false;
+    for (const auto& c : latch_.history) if (c.frame == latch_.frame) mftCallThisFrame = true;
+    std::printf("  encode-false latch (before shutdown): frame=%llu phase=%s latestAbnormal=%s lastProcessInput=%s@frame%llu%s\n",
+                static_cast<unsigned long long>(latch_.frame), latch_.phase.c_str(), latch_.lastAbnormal.c_str(),
+                hr_str(latch_.lastProcessInputHr).c_str(), static_cast<unsigned long long>(latch_.lastProcessInputFrame),
+                mftCallThisFrame ? "" : "  cause=unknown-before-MFT (no MFT call reached the proxy in the failing frame)");
+    std::printf("  raw-call history (newest last, max %zu):", kHistory);
+    for (const auto& c : latch_.history)
+      std::printf(" %s=%s@%llu/%s", c.call.c_str(), hr_str(c.hr).c_str(), static_cast<unsigned long long>(c.frame), c.phase.c_str());
+    std::printf("\n");
+  }
   void dump_abnormal() {
-    std::printf("  tolerated-hr: ProcessOutput E_UNEXPECTED(async drain-end) count=%u firstFrame=%llu\n",
+    std::printf("  product-tolerated E_UNEXPECTED: ProcessOutput count=%u firstFrame=%llu (async drain-end; the product breaks its drain loop on it)\n",
                 toleratedUnexpected_, static_cast<unsigned long long>(toleratedFirstFrame_));
+    std::printf("  tolerated ProcessInput MF_E_NOTACCEPTING (first per call, product drains+retries): %u\n", piNotAccepting_);
     if (abnormal_.empty()) std::printf("  abnormal-hr: none\n");
     for (const auto& a : abnormal_)
-      std::printf("  abnormal-hr: %s hr=%s count=%u firstFrame=%llu\n", a.call.c_str(), hr_str(a.hr).c_str(),
-                  a.count, static_cast<unsigned long long>(a.firstFrame));
+      std::printf("  abnormal-hr: %s hr=%s count=%u firstFrame=%llu lastFrame=%llu\n", a.call.c_str(), hr_str(a.hr).c_str(),
+                  a.count, static_cast<unsigned long long>(a.firstFrame), static_cast<unsigned long long>(a.lastFrame));
   }
-  std::string last_abnormal() const {
-    if (abnormal_.empty()) return "none";
-    const auto& a = abnormal_.back();
-    return a.call + " " + hr_str(a.hr);
-  }
+  uint32_t abnormal_total() const { uint32_t n = 0; for (const auto& a : abnormal_) n += a.count; return n; }
+  std::string last_abnormal() const { return lastAbnormal_.empty() ? "none" : lastAbnormal_; }  // latest occurrence
   void print_events() {
     std::printf("  async-events:");
     if (evCounts_.empty()) std::printf(" none");
     for (const auto& e : evCounts_) std::printf(" type%lu=%u", static_cast<unsigned long>(e.first), e.second);
-    std::printf("  processInput ok=%u notAccepting=%u  processOutput ok=%u  forceKey ok=%u\n", piOk_,
+    std::printf("  processInput ok=%u notAccepting(tolerated)=%u  processOutput ok=%u  forceKey ok=%u\n", piOk_,
                 piNotAccepting_, poOk_, forceKeyOk_);
   }
 
@@ -214,10 +309,10 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
     else if (riid == __uuidof(ICodecAPI) && api_) *ppv = static_cast<ICodecAPI*>(this);
     else if (riid == __uuidof(IMFMediaEventGenerator) && gen_) *ppv = static_cast<IMFMediaEventGenerator*>(this);
     else {
-      const HRESULT hr = inner_->QueryInterface(riid, ppv);  // anything else: the inner object's own
+      const HRESULT hr = inner_->QueryInterface(riid, ppv);  // anything else: the inner object's own (not proxied)
       wchar_t b[64] = {};
       StringFromGUID2(riid, b, 64);
-      std::printf("  proxy: forwarded QI %ls -> %s\n", b, hr_str(hr).c_str());
+      std::printf("  proxy: forwarded QI %ls -> %s (calls through this interface are NOT logged)\n", b, hr_str(hr).c_str());
       return hr;
     }
     AddRef();
@@ -236,11 +331,15 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   STDMETHODIMP GetParameterRange(const GUID* a, VARIANT* b, VARIANT* c, VARIANT* d) override { return api_->GetParameterRange(a, b, c, d); }
   STDMETHODIMP GetParameterValues(const GUID* a, VARIANT** b, ULONG* c) override { return api_->GetParameterValues(a, b, c); }
   STDMETHODIMP GetDefaultValue(const GUID* a, VARIANT* b) override { return api_->GetDefaultValue(a, b); }
-  STDMETHODIMP GetValue(const GUID* a, VARIANT* b) override { return api_->GetValue(a, b); }
+  STDMETHODIMP GetValue(const GUID* key, VARIANT* value) override {
+    const HRESULT hr = api_->GetValue(key, value);  // the product's own readback, logged raw
+    std::printf("  get[%s] %s -> %s\n", phase.c_str(), key_name(key).c_str(), get_str(hr, value).c_str());
+    return hr;
+  }
   STDMETHODIMP SetValue(const GUID* key, VARIANT* value) override {
-    if (typesSet_ && !postTypesSnapped_) {
-      postTypesSnapped_ = true;
-      snapshot("post-types");
+    if (typesSet_ && !preFirstSetSnapped_) {
+      preFirstSetSnapped_ = true;
+      snapshot("pre-first-set(attr-done)");  // the product wrote MF_LOW_LATENCY (attribute) before this
       if (cfg_.llExplicitOff) inject_ll_off();
     }
     const bool hintKey = key && (IsEqualGUID(*key, CODECAPI_AVLowLatencyMode) ||
@@ -264,9 +363,13 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
     if (forceKey && SUCCEEDED(hr)) {
       ++forceKeyOk_;  // per-IDR request: counted, not logged line by line
     } else {
+      if (forceKey) note_abnormal("SetValue(ForceKey)", hr);
       const std::string vs = note.empty() ? var_str(value) : var_str(value) + "=>" + var_str(&use);
       std::printf("  set[%s] %s %s%s -> %s\n", phase.c_str(), key_name(key).c_str(), vs.c_str(), note.c_str(),
                   hr_str(hr).c_str());
+      if (key && use.vt == VT_UI4) {
+        for (const GUID& g : kRcKeys) if (IsEqualGUID(*key, g)) requested_[key_name(key)] = use.ulVal;  // last request wins
+      }
     }
     return hr;
   }
@@ -285,11 +388,15 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
     if (SUCCEEDED(hr) && ev && *ev) {
       MediaEventType t = MEUnknown;
       HRESULT st = S_OK;
-      (*ev)->GetType(&t);
-      (*ev)->GetStatus(&st);
+      const HRESULT thr = (*ev)->GetType(&t);
+      const HRESULT shr = (*ev)->GetStatus(&st);
+      if (FAILED(thr)) note_abnormal("GetEvent.GetType", thr);
+      if (FAILED(shr)) note_abnormal("GetEvent.GetStatus", shr);
       ++evCounts_[t];
+      record("GetEvent(" + std::to_string(t) + ")", st);
       if (FAILED(st)) note_abnormal("event" + std::to_string(t) + ".status", st);
     } else if (FAILED(hr) && hr != MF_E_NO_EVENTS_AVAILABLE) {
+      record("GetEvent", hr);
       note_abnormal("GetEvent", hr);
     }
     return hr;
@@ -303,7 +410,11 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   STDMETHODIMP GetStreamCount(DWORD* a, DWORD* b) override { return inner_->GetStreamCount(a, b); }
   STDMETHODIMP GetStreamIDs(DWORD a, DWORD* b, DWORD c, DWORD* d) override { return inner_->GetStreamIDs(a, b, c, d); }
   STDMETHODIMP GetInputStreamInfo(DWORD a, MFT_INPUT_STREAM_INFO* b) override { return inner_->GetInputStreamInfo(a, b); }
-  STDMETHODIMP GetOutputStreamInfo(DWORD a, MFT_OUTPUT_STREAM_INFO* b) override { return inner_->GetOutputStreamInfo(a, b); }
+  STDMETHODIMP GetOutputStreamInfo(DWORD a, MFT_OUTPUT_STREAM_INFO* b) override {
+    const HRESULT hr = inner_->GetOutputStreamInfo(a, b);
+    if (FAILED(hr)) { record("GetOutputStreamInfo", hr); note_abnormal("GetOutputStreamInfo", hr); }
+    return hr;
+  }
   STDMETHODIMP GetAttributes(IMFAttributes** a) override { return inner_->GetAttributes(a); }
   STDMETHODIMP GetInputStreamAttributes(DWORD a, IMFAttributes** b) override { return inner_->GetInputStreamAttributes(a, b); }
   STDMETHODIMP GetOutputStreamAttributes(DWORD a, IMFAttributes** b) override { return inner_->GetOutputStreamAttributes(a, b); }
@@ -314,6 +425,7 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   STDMETHODIMP SetInputType(DWORD a, IMFMediaType* b, DWORD flags) override {
     before_type_set(flags);
     const HRESULT hr = inner_->SetInputType(a, b, flags);
+    if (!(flags & MFT_SET_TYPE_TEST_ONLY)) record(b ? "SetInputType" : "SetInputType(null)", hr);
     if (!(flags & MFT_SET_TYPE_TEST_ONLY) && b && SUCCEEDED(hr)) inSet_ = true;
     after_type_set();
     return hr;
@@ -321,6 +433,7 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   STDMETHODIMP SetOutputType(DWORD a, IMFMediaType* b, DWORD flags) override {
     before_type_set(flags);
     const HRESULT hr = inner_->SetOutputType(a, b, flags);
+    if (!(flags & MFT_SET_TYPE_TEST_ONLY)) record(b ? "SetOutputType" : "SetOutputType(null)", hr);
     if (!(flags & MFT_SET_TYPE_TEST_ONLY) && b && SUCCEEDED(hr)) outSet_ = true;
     after_type_set();
     return hr;
@@ -332,36 +445,48 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   STDMETHODIMP SetOutputBounds(LONGLONG a, LONGLONG b) override { return inner_->SetOutputBounds(a, b); }
   STDMETHODIMP ProcessEvent(DWORD a, IMFMediaEvent* b) override { return inner_->ProcessEvent(a, b); }
   STDMETHODIMP ProcessMessage(MFT_MESSAGE_TYPE m, ULONG_PTR p) override {
-    if (m == MFT_MESSAGE_NOTIFY_BEGIN_STREAMING && !streamSnapped_) {
-      streamSnapped_ = true;
-      if (typesSet_ && !postTypesSnapped_) { postTypesSnapped_ = true; snapshot("post-types"); }
-      snapshot("stream-start");
-      phase = "streaming";
+    if (m == MFT_MESSAGE_NOTIFY_BEGIN_STREAMING && !beginSnapped_) {
+      beginSnapped_ = true;
+      if (typesSet_ && !preFirstSetSnapped_) { preFirstSetSnapped_ = true; snapshot("pre-first-set(attr-done)"); }
+      snapshot("before-begin-streaming");
     }
     const HRESULT hr = inner_->ProcessMessage(m, p);
+    record("ProcessMessage(" + std::to_string(static_cast<int>(m)) + ")", hr);
     if (FAILED(hr)) note_abnormal("ProcessMessage" + std::to_string(static_cast<int>(m)), hr);
+    if (m == MFT_MESSAGE_NOTIFY_START_OF_STREAM && !startSnapped_) {
+      startSnapped_ = true;
+      phase = "streaming";
+      snapshot(SUCCEEDED(hr) ? "after-start-of-stream" : "after-start-of-stream(FAILED)");
+      configAtStart_ = config_status();
+      std::printf("  config(after-start-of-stream): %s\n", configAtStart_.c_str());
+    }
     return hr;
   }
   STDMETHODIMP ProcessInput(DWORD a, IMFSample* b, DWORD c) override {
     const HRESULT hr = inner_->ProcessInput(a, b, c);
+    record("ProcessInput", hr);
+    lastProcessInputHr_ = hr;
+    lastProcessInputFrame_ = frame.load();
     if (SUCCEEDED(hr)) ++piOk_;
-    else if (hr == MF_E_NOTACCEPTING) ++piNotAccepting_;  // the product drains and retries this one
-    else note_abnormal("ProcessInput", hr);
+    else if (hr == MF_E_NOTACCEPTING) {
+      if (naFrame_ != frame.load()) { naFrame_ = frame.load(); naCount_ = 0; }
+      if (++naCount_ == 1) ++piNotAccepting_;                   // the product drains and retries once
+      else note_abnormal("ProcessInput-retry(NOTACCEPTING again)", hr);  // the retry failed too
+    } else note_abnormal("ProcessInput", hr);
     return hr;
   }
   STDMETHODIMP ProcessOutput(DWORD flags, DWORD n, MFT_OUTPUT_DATA_BUFFER* buf, DWORD* status) override {
     const HRESULT hr = inner_->ProcessOutput(flags, n, buf, status);
+    record("ProcessOutput", hr);
     if (SUCCEEDED(hr)) {
       ++poOk_;
-      if (!firstFrameSnapped_ && buf && buf[0].pSample) {
-        firstFrameSnapped_ = true;
-        snapshot("first-frame");
+      if (!firstSampleSnapped_ && buf && buf[0].pSample) {
+        firstSampleSnapped_ = true;
+        snapshot("first-output-sample");
         phase = "running";
       }
     } else if (hr == E_UNEXPECTED && asyncMft) {
-      // The product's drain loop ends on this (asyncTransform_ && E_UNEXPECTED -> break): expected
-      // once per drain on an async MFT, so it is counted apart from the abnormal list.
-      if (toleratedUnexpected_++ == 0) toleratedFirstFrame_ = frame.load();
+      if (toleratedUnexpected_++ == 0) toleratedFirstFrame_ = frame.load();  // product-tolerated (drain-end)
     } else if (hr != MF_E_TRANSFORM_NEED_MORE_INPUT && hr != MF_E_TRANSFORM_STREAM_CHANGE) {
       note_abnormal("ProcessOutput", hr);
     }
@@ -370,11 +495,20 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
 
  private:
   ~LoggingTransform() = default;
+  static constexpr size_t kHistory = 24;
+  void record(const std::string& call, HRESULT hr) {
+    history_.push_back({call, hr, frame.load(), phase});
+    if (history_.size() > kHistory) history_.pop_front();
+  }
   void before_type_set(DWORD flags) {
     if (!(flags & MFT_SET_TYPE_TEST_ONLY) && !preTypesSnapped_) { preTypesSnapped_ = true; snapshot("pre-types"); }
   }
   void after_type_set() {
-    if (inSet_ && outSet_ && !typesSet_) { typesSet_ = true; phase = "post-types"; }
+    if (inSet_ && outSet_ && !typesSet_) {
+      typesSet_ = true;
+      phase = "post-types";
+      snapshot("types-applied");  // both types accepted; the product has not written MF_LOW_LATENCY yet
+    }
   }
   void inject_ll_off() {
     const GUID keys[] = {CODECAPI_AVLowLatencyMode, CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncCommonRealTime};
@@ -392,10 +526,12 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
       const HRESULT hr = attrs->SetUINT32(MF_LOW_LATENCY, 0);
       std::printf("  attr[%s] MF_LOW_LATENCY=0 INJECT(explicit-off) -> %s\n", phase.c_str(), hr_str(hr).c_str());
     }
+    snapshot("post-hints(explicit-off)");
   }
   void note_abnormal(const std::string& call, HRESULT hr) {
-    for (auto& a : abnormal_) if (a.call == call && a.hr == hr) { ++a.count; return; }
-    abnormal_.push_back({call, hr, 1, frame.load()});
+    lastAbnormal_ = call + " " + hr_str(hr) + "@frame" + std::to_string(frame.load());  // latest occurrence
+    for (auto& a : abnormal_) if (a.call == call && a.hr == hr) { ++a.count; a.lastFrame = frame.load(); return; }
+    abnormal_.push_back({call, hr, 1, frame.load(), frame.load()});
     std::printf("  abnormal %s hr=%s at frame %llu phase=%s\n", call.c_str(), hr_str(hr).c_str(),
                 static_cast<unsigned long long>(frame.load()), phase.c_str());
   }
@@ -406,10 +542,21 @@ class LoggingTransform : public IMFTransform, public ICodecAPI, public IMFMediaE
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> gen_;
   ProxyCfg cfg_;
   bool inSet_ = false, outSet_ = false, typesSet_ = false;
-  bool preTypesSnapped_ = false, postTypesSnapped_ = false, streamSnapped_ = false, firstFrameSnapped_ = false;
+  bool preTypesSnapped_ = false, preFirstSetSnapped_ = false, beginSnapped_ = false, startSnapped_ = false,
+       firstSampleSnapped_ = false;
   bool hintsSeen_ = false, postHintsSnapped_ = false;
   uint32_t toleratedUnexpected_ = 0;
   uint64_t toleratedFirstFrame_ = 0;
+  uint64_t naFrame_ = ~0ULL;
+  uint32_t naCount_ = 0;
+  HRESULT lastProcessInputHr_ = S_OK;
+  uint64_t lastProcessInputFrame_ = 0;
+  std::string lastAbnormal_;
+  std::string configAtStart_;
+  std::map<std::string, uint32_t> requested_;
+  std::deque<RawCall> history_;
+  struct { bool set = false; uint64_t frame = 0; std::string phase, lastAbnormal; HRESULT lastProcessInputHr = S_OK;
+           uint64_t lastProcessInputFrame = 0; std::vector<RawCall> history; } latch_;
   std::vector<AbnormalHr> abnormal_;
   std::map<MediaEventType, uint32_t> evCounts_;
   uint32_t piOk_ = 0, piNotAccepting_ = 0, poOk_ = 0, forceKeyOk_ = 0;
@@ -435,8 +582,17 @@ IMFTransform* create_hw_encoder_like_product() {
       WCHAR* name = nullptr;
       UINT32 cch = 0;
       acts[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &name, &cch);
-      std::printf("  proxy: inner MFT = enum[%u/%u] \"%ls\"\n", i, n, name ? name : L"?");
+      GUID clsid{};
+      acts[i]->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &clsid);
+      WCHAR* vendor = nullptr;
+      WCHAR* hwUrl = nullptr;
+      acts[i]->GetAllocatedString(MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, &vendor, &cch);
+      acts[i]->GetAllocatedString(MFT_ENUM_HARDWARE_URL_Attribute, &hwUrl, &cch);
+      std::printf("  proxy: inner MFT = enum[%u/%u] \"%ls\" clsid=%s vendorId=%ls hwUrl=\"%ls\" (compare with the direct row's mft-identity line)\n",
+                  i, n, name ? name : L"?", key_name(&clsid).c_str(), vendor ? vendor : L"?", hwUrl ? hwUrl : L"?");
       if (name) CoTaskMemFree(name);
+      if (vendor) CoTaskMemFree(vendor);
+      if (hwUrl) CoTaskMemFree(hwUrl);
     }
   }
   for (UINT32 i = 0; i < n; ++i) acts[i]->Release();
@@ -455,6 +611,7 @@ struct Row {
   uint32_t retargetKbps = 0;        // reconfigure_bitrate at the body midpoint
   const char* maxQpEnv = nullptr;   // REMOTE60_NATIVE_MAX_QP ("0" = product skips the MaxQP Set)
   uint32_t retargetMaxQp = 0;       // set_max_qp(N) at the midpoint, BEFORE reconfigure_bitrate
+  bool shamAtMid = false;           // F3 control: same calls at the midpoint with the UNCHANGED values
   ProxyCfg cfg{};
 };
 
@@ -515,7 +672,7 @@ Window measure(const std::vector<uint32_t>& b, size_t from, size_t to, uint32_t 
   return w;
 }
 
-void probe(const Row& r, uint32_t fps, uint32_t seconds) {
+void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) {
   for (const char* n : kRcEnv) _putenv_s(n, "");
   _putenv_s("REMOTE60_NATIVE_ENCODER_BACKEND", "mft_hw");
   if (*r.rc) _putenv_s("REMOTE60_NATIVE_RATE_CONTROL", r.rc);
@@ -529,10 +686,12 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
   const std::string bufDesc = r.cfg.bufferOverrideBytes ? std::to_string(r.cfg.bufferOverrideBytes) + "B"
                               : r.cfg.bufferMultiplier  ? "x" + std::to_string(r.cfg.bufferMultiplier)
                                                         : std::string("product");
+  const uint32_t cfgQp = H264Encoder::configured_max_qp();
+  const bool midAction = r.retargetMaxQp || r.retargetKbps || r.shamAtMid;
   std::string rtDesc;
+  if (r.shamAtMid) rtDesc += " @mid:SHAM set_max_qp(" + std::to_string(cfgQp) + ")+reconfigure_bitrate(" + std::to_string(r.rateKbps) + "k) (unchanged values)";
   if (r.retargetMaxQp) rtDesc += " @mid:set_max_qp(" + std::to_string(r.retargetMaxQp) + ")";
   if (r.retargetKbps) rtDesc += " @mid:reconfigure_bitrate(" + std::to_string(r.retargetKbps) + "k)";
-  const uint32_t cfgQp = H264Encoder::configured_max_qp();
   const std::string qpDesc = cfgQp ? std::to_string(cfgQp) : std::string("0(no MaxQP Set; readback=MFT's own)");
   std::printf("\n=== %s | scene=%s target=%uk proxy=%d rc=%s rcBeforeTypes=%d hints=%s buffer=%s%s maxQp=%s ===\n",
               r.label, r.scene, r.rateKbps, r.proxy ? 1 : 0, *r.rc ? r.rc : "vbr_peak(default)",
@@ -540,11 +699,12 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
               r.cfg.llExplicitOff ? "explicit-off" : r.hintsOmitted ? "omitted" : "on(default)",
               bufDesc.c_str(), rtDesc.c_str(), qpDesc.c_str());
 
+  auto invalid = [&]() { if (invalidRows) ++*invalidRows; };
   MftEnc enc;
   LoggingTransform* proxy = nullptr;
   if (r.proxy) {
     IMFTransform* inner = create_hw_encoder_like_product();
-    if (!inner) { std::printf("  RESULT: INVALID (no hw MFT for proxy)\n"); return; }
+    if (!inner) { std::printf("  RESULT: INVALID exec=no-hw-MFT-for-proxy\n"); invalid(); return; }
     proxy = new LoggingTransform(inner, r.cfg);
     {
       Microsoft::WRL::ComPtr<IMFAttributes> attrs;
@@ -559,10 +719,12 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     enc.enc.set_transform_for_test(proxy);  // the encoder holds its own reference until destroyed
   }
   const uint32_t bitrate = r.rateKbps * 1000u;
-  const uint32_t keyintFrames = 4u * fps;  // a raw IDR ~every 4s -> one inside the body
+  const uint32_t keyintFrames = 4u * fps;  // a raw IDR ~every 4s -> at most one inside the 5s body
   if (!enc.init(kW, kH, fps, bitrate, keyintFrames)) {
-    std::printf("  RESULT: INVALID (init failed) lastAbnormal=%s\n", proxy ? proxy->last_abnormal().c_str() : "n/a");
-    if (proxy) { proxy->dump_abnormal(); proxy->Release(); }
+    if (proxy) proxy->latch_failure();
+    std::printf("  RESULT: INVALID exec=init-failed latestAbnormal=%s\n", proxy ? proxy->last_abnormal().c_str() : "n/a(proxy-free)");
+    if (proxy) { proxy->dump_latch(); proxy->dump_abnormal(); proxy->Release(); }
+    invalid();
     return;
   }
 
@@ -577,9 +739,11 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
 
   std::vector<uint8_t> nv12(kNv12, 128);
   const uint32_t warmup = fps, body = seconds * fps, mid = body / 2;
-  std::vector<uint32_t> bytesByFrame(body, 0);
+  const uint32_t drainN = 8;  // F3: bounded tail recovery -- extra inputs after the body, outputs attributed by PTS
+  std::vector<uint32_t> bytesByFrame(body, 0), auCount(body, 0);
   std::vector<std::pair<uint64_t, uint32_t>> arrivals;  // (return wall-clock us, bytes) of body AUs
-  uint32_t idrMax = 0, idrCount = 0, returned = 0;
+  std::vector<uint32_t> idrFrames;
+  uint32_t idrMax = 0, returnedBody = 0, drainRecovered = 0, lateFromBeforeBoundary = 0;
   // Product-side counters, summed over the row (the same struct the host stage reads).
   struct { uint64_t calls = 0, drainLoops = 0, needMore = 0, streamChange = 0, errors = 0, notAccepting = 0,
                     pollNoEvent = 0, pollNeedInput = 0, pollHaveOutput = 0, needInputOnly = 0, asyncOn = 0,
@@ -587,23 +751,38 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
   bool encFail = false;
   uint32_t failFrame = 0;
   const uint64_t frameUs = 1'000'000ULL / fps;
-  uint64_t deadline = now_us(), wall0 = 0;
-  for (uint32_t i = 0; i < warmup + body; ++i) {
+  uint64_t deadline = now_us(), wall0 = 0, wallBodyEnd = 0;
+  bool boundaryPassed = false;
+  for (uint32_t i = 0; i < warmup + body + drainN; ++i) {
     if (i == warmup) wall0 = now_us();
-    if (r.retargetMaxQp && i == warmup + mid) {
-      const bool ok = enc.enc.set_max_qp(r.retargetMaxQp);  // product governor path (maxQpOverride_)
-      std::printf("  set_max_qp(%u) at frame %u ok=%d\n", r.retargetMaxQp, i, ok ? 1 : 0);
-      if (proxy) proxy->snapshot("after-governor");
-    }
-    if (r.retargetKbps && i == warmup + mid) {
-      const bool ok = enc.enc.reconfigure_bitrate(r.retargetKbps * 1000u);
-      std::printf("  retarget at frame %u -> %uk ok=%d\n", i, r.retargetKbps, ok ? 1 : 0);
-      if (proxy) proxy->snapshot("after-retarget");
+    if (i == warmup + body) wallBodyEnd = now_us();
+    const bool inDrain = i >= warmup + body;
+    if (midAction && i == warmup + mid) {
+      std::printf("  boundary: first input after the mid-point change = frame %u (body idx %u)\n", i, mid);
+      if (r.shamAtMid) {
+        const bool ok1 = enc.enc.set_max_qp(cfgQp);
+        std::printf("  SHAM set_max_qp(%u) at frame %u ok=%d (same ceiling as configured)\n", cfgQp, i, ok1 ? 1 : 0);
+        if (proxy) proxy->snapshot("after-governor(sham)");
+        const bool ok2 = enc.enc.reconfigure_bitrate(bitrate);
+        std::printf("  SHAM reconfigure_bitrate(%uk) at frame %u ok=%d (same target)\n", r.rateKbps, i, ok2 ? 1 : 0);
+        if (proxy) { proxy->snapshot("after-retarget(sham)"); std::printf("  config(after-retarget sham): %s\n", proxy->config_status().c_str()); }
+      }
+      if (r.retargetMaxQp) {
+        const bool ok = enc.enc.set_max_qp(r.retargetMaxQp);  // product governor path (maxQpOverride_)
+        std::printf("  set_max_qp(%u) at frame %u ok=%d\n", r.retargetMaxQp, i, ok ? 1 : 0);
+        if (proxy) proxy->snapshot("after-governor");
+      }
+      if (r.retargetKbps) {
+        const bool ok = enc.enc.reconfigure_bitrate(r.retargetKbps * 1000u);
+        std::printf("  retarget at frame %u -> %uk ok=%d\n", i, r.retargetKbps, ok ? 1 : 0);
+        if (proxy) { proxy->snapshot("after-retarget"); std::printf("  config(after-retarget): %s\n", proxy->config_status().c_str()); }
+      }
+      boundaryPassed = true;
     }
     if (proxy) proxy->frame = i;
     deadline += frameUs;
     fill_scene(r.scene, nv12, i);
-    if (decOk && i >= warmup) psnr.keep(i, (int64_t)i * (int64_t)(10'000'000LL / fps), nv12);
+    if (decOk && i >= warmup && !inDrain) psnr.keep(i, (int64_t)i * (int64_t)(10'000'000LL / fps), nv12);
     std::vector<H264AccessUnit> units;
     H264EncodeFrameStats st{};
     const bool ok = enc.enc.encode_frame(nv12, i == 0, (int64_t)i * (int64_t)(10'000'000LL / fps), &units, &st);
@@ -616,40 +795,50 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     if (!ok) {
       encFail = true;
       failFrame = i;
+      if (proxy) proxy->latch_failure();  // F1: before the product's shutdown() can add errors
+      std::printf("  encode-false at frame %u (%s) product-stats-of-call: errors=%u notAccepting=%u drainLoops=%llu\n", i,
+                  inDrain ? "drain" : i < warmup ? "warmup" : "body", st.processOutputErrorCount,
+                  st.processInputNotAcceptingCount, (unsigned long long)st.processOutputDrainLoops);
       break;
     }
     const uint64_t t = now_us();
     for (const auto& u : units) {
       const int64_t fidx = u.sampleTimeHns / (int64_t)(10'000'000LL / fps);
       if (fidx >= (int64_t)warmup && fidx < (int64_t)(warmup + body)) {
-        bytesByFrame[(size_t)(fidx - warmup)] += (uint32_t)u.bytes.size();
-        arrivals.push_back({t, (uint32_t)u.bytes.size()});
-        ++returned;
-        if (u.rawIdr) { idrMax = std::max(idrMax, (uint32_t)u.bytes.size()); ++idrCount; }
+        const size_t k = (size_t)(fidx - warmup);
+        bytesByFrame[k] += (uint32_t)u.bytes.size();
+        ++auCount[k];
+        if (inDrain) ++drainRecovered; else { arrivals.push_back({t, (uint32_t)u.bytes.size()}); ++returnedBody; }
+        if (boundaryPassed && fidx < (int64_t)(warmup + mid)) ++lateFromBeforeBoundary;
+        if (u.rawIdr) { idrMax = std::max(idrMax, (uint32_t)u.bytes.size()); idrFrames.push_back((uint32_t)k); }
       }
       if (decOk) {
         std::vector<DecodedFrameNv12> outF;
         if (!dec.decode_access_unit(u.bytes, u.keyFrame, u.sampleTimeHns, &outF)) ++psnr.decodeFail;
         for (const auto& f : outF) {
           const int64_t fi = f.sampleTimeHns / (int64_t)(10'000'000LL / fps);
-          if (fi < (int64_t)warmup || fi >= (int64_t)(warmup + body)) continue;  // warm-up: fed, not scored
+          if (fi < (int64_t)warmup || fi >= (int64_t)(warmup + body)) continue;  // warm-up/drain: fed, not scored
           psnr.score(f, fi >= (int64_t)(warmup + mid));
         }
       }
     }
     if (t < deadline) std::this_thread::sleep_for(std::chrono::microseconds(deadline - t));
   }
-  const double wallSec = (now_us() - wall0) / 1e6;
+  if (!wallBodyEnd) wallBodyEnd = now_us();
+  const double wallSec = wall0 ? (wallBodyEnd - wall0) / 1e6 : 0;
   const uint32_t pending = enc.pending_depth();
   enc.shutdown();
   if (decOk) dec.shutdown();
+  if (proxy) proxy->dump_latch();
 
-  // Missing body frames, split body vs tail (the last 8 judged frames: async output still in flight).
-  uint32_t missBody = 0, missTail = 0;
-  const uint32_t tailN = 8;
-  const uint32_t judged = encFail ? (failFrame > warmup ? failFrame - warmup : 0) : body;
-  for (uint32_t k = 0; k < judged; ++k)
-    if (bytesByFrame[k] == 0) (k + tailN >= judged ? missTail : missBody)++;
+  // F3 coverage: unique body frames returned / missing / duplicates, after the bounded drain.
+  uint32_t missing = 0, dup = 0, missTail = 0;
+  const uint32_t judged = encFail ? (failFrame > warmup ? std::min(failFrame - warmup, body) : 0) : body;
+  std::string missList;
+  for (uint32_t k = 0; k < judged; ++k) {
+    if (auCount[k] == 0) { ++missing; if (k + drainN >= judged) ++missTail; if (missList.size() < 60) missList += (missList.empty() ? "" : ",") + std::to_string(k); }
+    else if (auCount[k] > 1) ++dup;
+  }
 
   // 267ms peak over RETURN wall-clock windows (when the bytes actually came out of the encoder).
   double p267wall = 0;
@@ -663,45 +852,51 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds) {
     }
   }
 
-  const double outFps = wallSec > 0 ? returned / wallSec : 0;
+  const double outFps = wallSec > 0 ? returnedBody / wallSec : 0;
   const bool fpsShort = outFps < 0.9 * fps;
-  const bool valid = !encFail && returned > 0 && !fpsShort;
+  const uint32_t abnormalN = proxy ? proxy->abnormal_total() : 0;
+  const bool valid = !encFail && returnedBody > 0 && !fpsShort && missing == 0 && abnormalN == 0;
   const Window all = measure(bytesByFrame, 0, body, fps);
   std::printf("  avgKbps=%.0f (x%.2f)  1sPeak=%.0f (x%.2f)  267msPeak=%.0f (x%.2f)  267msPeakWall=%.0f (x%.2f)  "
-              "idrMax=%u idrN=%u  outFps=%.1f pending=%u missBody=%u missTail=%u\n",
+              "idrMax=%u idrN=%zu  outFps=%.1f(body) pending=%u drainRecovered=%u\n",
               all.avg, all.avg / r.rateKbps, all.p1, all.p1 / r.rateKbps, all.p267, all.p267 / r.rateKbps,
-              p267wall, p267wall / r.rateKbps, idrMax, idrCount, outFps, pending, missBody, missTail);
+              p267wall, p267wall / r.rateKbps, idrMax, idrFrames.size(), outFps, pending, drainRecovered);
   if (decOk)
     std::printf("  psnr: luma=%.2f n=%u unmatched=%u decodeFail=%u | firstHalf=%.2f (n=%u) secondHalf=%.2f (n=%u)\n",
                 psnr.all(), psnr.nA + psnr.nB, psnr.unmatched, psnr.decodeFail, psnr.a(), psnr.nA, psnr.b(), psnr.nB);
-  if (r.retargetKbps || r.retargetMaxQp) {
+  {
+    // Both halves on EVERY row (F3): the unchanged rows are the control for the retarget rows.
     const Window a = measure(bytesByFrame, 0, mid, fps), b = measure(bytesByFrame, mid, body, fps);
     const uint32_t afterTarget = r.retargetKbps ? r.retargetKbps : r.rateKbps;
-    std::printf("  retarget: before avg=%.0f (x%.2f of %u) 267ms=%.0f | after avg=%.0f (x%.2f of %u) 1s=%.0f 267ms=%.0f\n",
-                a.avg, a.avg / r.rateKbps, r.rateKbps, a.p267, b.avg, b.avg / afterTarget, afterTarget,
-                b.p1, b.p267);
+    std::printf("  halves%s: first avg=%.0f (x%.2f of %u) 1s=%.0f 267ms=%.0f | second avg=%.0f (x%.2f of %u) 1s=%.0f 267ms=%.0f%s\n",
+                midAction ? "(retarget)" : "(no change)", a.avg, a.avg / r.rateKbps, r.rateKbps, a.p1, a.p267,
+                b.avg, b.avg / afterTarget, afterTarget, b.p1, b.p267,
+                midAction ? (" | AUs returned after the change from pre-change inputs=" + std::to_string(lateFromBeforeBoundary) + " (attributed to 'first' by PTS)").c_str() : "");
   }
-  {
-    const uint64_t drainEndUnexpected =
-        ps.drainLoops - std::min(ps.drainLoops, ps.needMore + ps.streamChange + ps.errors);
-    std::printf("  product-stats: calls=%llu async=%llu drainLoops=%llu needMoreInput=%llu drainEndUnexpected=%llu "
-                "streamChange=%llu errors=%llu notAccepting=%llu pollNoEvent=%llu pollNeedInput=%llu "
-                "pollHaveOutput=%llu needInputOnlyCalls=%llu encodeCallAvgUs=%llu max=%llu\n",
-                (unsigned long long)ps.calls, (unsigned long long)ps.asyncOn, (unsigned long long)ps.drainLoops,
-                (unsigned long long)ps.needMore, (unsigned long long)drainEndUnexpected,
-                (unsigned long long)ps.streamChange, (unsigned long long)ps.errors,
-                (unsigned long long)ps.notAccepting, (unsigned long long)ps.pollNoEvent,
-                (unsigned long long)ps.pollNeedInput, (unsigned long long)ps.pollHaveOutput,
-                (unsigned long long)ps.needInputOnly, (unsigned long long)(ps.calls ? ps.encodeUs / ps.calls : 0),
-                (unsigned long long)ps.encodeUsMax);
-  }
+  std::printf("  product-stats: calls=%llu async=%llu drainLoops=%llu needMoreInput=%llu streamChange=%llu errors=%llu "
+              "notAccepting=%llu pollNoEvent=%llu pollNeedInput=%llu pollHaveOutput=%llu needInputOnlyCalls=%llu "
+              "encodeCallAvgUs=%llu max=%llu%s\n",
+              (unsigned long long)ps.calls, (unsigned long long)ps.asyncOn, (unsigned long long)ps.drainLoops,
+              (unsigned long long)ps.needMore, (unsigned long long)ps.streamChange, (unsigned long long)ps.errors,
+              (unsigned long long)ps.notAccepting, (unsigned long long)ps.pollNoEvent,
+              (unsigned long long)ps.pollNeedInput, (unsigned long long)ps.pollHaveOutput,
+              (unsigned long long)ps.needInputOnly, (unsigned long long)(ps.calls ? ps.encodeUs / ps.calls : 0),
+              (unsigned long long)ps.encodeUsMax,
+              proxy ? "" : " (proxy-free: no raw ProcessOutput HRESULT counts; the product keeps none for E_UNEXPECTED)");
   if (proxy) { proxy->print_events(); proxy->dump_abnormal(); }
-  std::printf("  RESULT: %s%s", valid ? "VALID" : "INVALID",
-              encFail ? "(encode-false)" : returned == 0 ? "(no-output)" : fpsShort ? "(fps-short)" : "");
-  if (encFail)
-    std::printf(" failFrame=%u stage=%s phase=%s lastAbnormal=%s", failFrame, failFrame < warmup ? "warmup" : "body",
-                proxy ? proxy->phase.c_str() : "n/a", proxy ? proxy->last_abnormal().c_str() : "n/a(no proxy)");
-  std::printf("\n");
+  std::string idrList;
+  for (uint32_t f : idrFrames) idrList += (idrList.empty() ? "" : ",") + std::to_string(f);
+  std::printf("  RESULT: %s  exec=%s  coverage=%s  config=%s  events=%s  idrBodyFrames=[%s] (GOP 4s vs body 5s: a periodic IDR can land only in the second half)\n",
+              valid ? "VALID" : "INVALID",
+              encFail ? ("encode-false@frame" + std::to_string(failFrame) + "(" + (failFrame < warmup ? "warmup" : failFrame < warmup + body ? "body" : "drain") + ")").c_str()
+                      : returnedBody == 0 ? "ok-but-no-output" : fpsShort ? "ok-but-fps-short" : "ok",
+              (missing == 0 && dup == 0) ? ("ok " + std::to_string(judged) + "/" + std::to_string(body) + " unique").c_str()
+                                          : ("missing=" + std::to_string(missing) + (missTail ? "(tail-incomplete=" + std::to_string(missTail) + " after " + std::to_string(drainN) + "-frame drain)" : "") +
+                                             " dup=" + std::to_string(dup) + " idx[" + missList + "]").c_str(),
+              proxy ? proxy->config_at_start().c_str() : "n/a(proxy-free)",
+              abnormalN == 0 ? "ok" : ("abnormal=" + std::to_string(abnormalN) + " latest=" + proxy->last_abnormal()).c_str(),
+              idrList.c_str());
+  if (!valid) invalid();
   if (proxy) proxy->Release();
 }
 
@@ -714,8 +909,14 @@ int main(int argc, char** argv) {
     if (std::string(argv[i]) == "--repeat" && i + 1 < argc) repeat = static_cast<uint32_t>(std::max(1, std::atoi(argv[i + 1])));
     if (std::string(argv[i]) == "--no-psnr") g_psnr = false;
   }
-  std::printf("host_nvidia_probe v2 r2 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
+  std::printf("host_nvidia_probe v2 r3 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
   std::printf("CBR, VBV size, and the product's RUNNING levers (set_max_qp / reconfigure_bitrate) under it.\n");
+  std::printf("r3 tool fixes (Codex F1-F3): encode-false latch + raw-call history before shutdown; NOTACCEPTING retry\n");
+  std::printf("failure = abnormal; 'product-tolerated E_UNEXPECTED'; snapshots at types-applied / pre-first-set /\n");
+  std::printf("before-begin-streaming / after-start-of-stream / first-output-sample; every Get shows its HRESULT\n");
+  std::printf("(plain = S_OK exactly); RESULT split into exec / coverage(8-frame drain) / config / events; sham rows.\n");
+  std::printf("Backend: every row pins mft_hw (direct row logs mft_enum_hw) -> no row takes the AMF-specific branch;\n");
+  std::printf("MF attribute writes by the product are not in set[] (read back in the snapshots instead).\n");
   std::printf("maxQp=0 rows: REMOTE60_NATIVE_MAX_QP=0 -> the product never issues the MaxQP SetValue, so the\n");
   std::printf("MaxQP readback in those snapshots is the MFT's own value (51 = never set), not a request.\n");
   std::printf("rcBeforeTypes=1 rows: the product applies the rate control pre-types AND again post-types\n");
@@ -725,8 +926,6 @@ int main(int argc, char** argv) {
   std::printf("configure_types branch is skipped (NVIDIA uses the generic path anyway). Row 1 is proxy-free.\n");
   std::printf("RC_BEFORE_TYPES=1 rows: the product applies rate control pre-types AND again post-types.\n");
   std::printf("MaxQP: every row pins REMOTE60_NATIVE_MAX_QP unset -> the product default (printed per row).\n");
-  std::printf("tolerated-hr: ProcessOutput E_UNEXPECTED on an async MFT is the product's own drain-end code\n");
-  std::printf("(drain_outputs breaks on it); product-stats.drainEndUnexpected shows the same count proxy-free.\n");
   std::printf("\nInherited REMOTE60_NATIVE_* at start (pinned per row below):\n");
   for (const char* n : kRcEnv) {
     const std::string v = env_get(n);
@@ -765,6 +964,7 @@ int main(int argc, char** argv) {
   { Row r = pre("P5-pre-vbr-maxQp0-buffer500ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 500); ladder.push_back(r); }
   { Row r = pre("P6-pre-vbr-maxQp0-buffer1s", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 1000); ladder.push_back(r); }
   { Row r = pre("R1-pre-vbr-maxQp0-running(qp40,1.18M)", "drag", 1500, "0"); r.retargetMaxQp = 40; r.retargetKbps = 1180; ladder.push_back(r); }
+  { Row r = pre("R1-sham-pre-vbr-maxQp0-running(same values)", "drag", 1500, "0"); r.shamAtMid = true; ladder.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladder.begin(), ladder.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "drag", 1500));
   // ---- motion @3M ----
@@ -774,16 +974,18 @@ int main(int argc, char** argv) {
   ladderM.push_back(pre("P2-pre-vbr-maxQp44", "motion", 3000, "44"));
   { Row r = pre("P4-pre-cbr-maxQp0", "motion", 3000, "0"); r.rc = "cbr"; ladderM.push_back(r); }
   { Row r = pre("R2-pre-vbr-maxQp0-running(qp40,2.36M)", "motion", 3000, "0"); r.retargetMaxQp = 40; r.retargetKbps = 2360; ladderM.push_back(r); }
+  { Row r = pre("R2-sham-pre-vbr-maxQp0-running(same values)", "motion", 3000, "0"); r.shamAtMid = true; ladderM.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladderM.begin(), ladderM.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "motion", 3000));
 
   const uint64_t t0 = now_us();
-  for (const auto& r : rows) probe(r, fps, sec);
-  std::printf("\nhost_nvidia_probe v2 r2: DONE. %zu rows in %.0fs. Each row ends with RESULT: VALID/INVALID.\n",
-              rows.size(), (now_us() - t0) / 1e6);
+  uint32_t invalidRows = 0;
+  for (const auto& r : rows) probe(r, fps, sec, &invalidRows);
+  std::printf("\nhost_nvidia_probe v2 r3: DONE. %zu rows in %.0fs. SUMMARY valid=%zu invalid=%u (exit %d). DONE is not a verdict; read each RESULT line.\n",
+              rows.size(), (now_us() - t0) / 1e6, rows.size() - invalidRows, invalidRows, invalidRows ? 2 : 0);
   std::printf("Fewer bytes with an encode failure / missing output / fps drop is NOT an improvement.\n");
   std::printf("Send this whole file back.\n");
   MFShutdown();
   if (SUCCEEDED(co)) CoUninitialize();
-  return 0;
+  return invalidRows ? 2 : 0;
 }
