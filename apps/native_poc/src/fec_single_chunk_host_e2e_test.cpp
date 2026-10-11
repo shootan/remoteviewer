@@ -215,6 +215,15 @@ HostAccount read_host_log(const std::wstring& path) {
 
 struct RunResult {
   bool launched = false;
+  // encoder-rc-budget r6: how the host ended. A host that exits during the live window (the Home PC:
+  // "capture item create failed", exit 8, 0.4 s after start) used to be waited out for the full run
+  // and then failed every downstream check with zeros; now the run stops at once and says why.
+  bool hostExitedEarly = false;
+  unsigned long hostExitCode = 0;
+  bool captureItemFailed = false;  // host.log: "capture item create failed" (WGC CreateForWindow refused)
+  bool monitorFallbackSeen = false;  // host.log: "capture-window target not found; fallback=monitor" -- the user's screen
+  std::string hostLastLine;          // the last host.log line, the exit reason in the host's words
+  std::string windowMode;            // fixture window mode this run used (invisible / visible-fallback)
   bool hello = false;
   bool nackNegotiated = false;
   HostAccount host;
@@ -327,12 +336,45 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
   return h;
 }
 
-RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
-                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
-                   uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
-                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false,
-                   const std::vector<TuneStep>* tunes = nullptr) {
+// The host's log while it may still be running (shared read; its stdout is block-buffered, so a line
+// shows up here only once flushed -- always at exit, maybe earlier). Used for the early-exit reason
+// and for the one line that must stop a run at once: the monitor fallback.
+bool host_log_contains(const std::wstring& path, const char* needle) {
+  std::ifstream in(path);
+  std::string line;
+  while (std::getline(in, line)) if (line.find(needle) != std::string::npos) return true;
+  return false;
+}
+std::string host_log_last_line(const std::wstring& path) {
+  std::ifstream in(path);
+  std::string line, last;
+  while (std::getline(in, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+    if (!line.empty()) last = line;
+  }
+  return last;
+}
+// The saved PGM frames of a run whose host captured the MONITOR instead of our window would be the
+// user's screen: they are removed, and the removal is printed.
+void delete_saved_frames(const std::wstring& runDir) {
+  WIN32_FIND_DATAW fd{};
+  HANDLE h = FindFirstFileW((runDir + L"event_*.pgm").c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return;
+  unsigned n = 0;
+  do { if (DeleteFileW((runDir + fd.cFileName).c_str())) ++n; } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  std::printf("monitor-fallback guard: removed %u saved frame(s) from %s\n", n, std::string(runDir.begin(), runDir.end()).c_str());
+}
+
+int gCaptureUnavailableRuns = 0;  // runs whose capture item could not be created even after the fallback
+bool capture_unavailable() { return gCaptureUnavailableRuns > 0; }
+
+RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
+                        uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
+                        uint32_t bitrate, uint32_t fps, uint32_t downshiftBitrate, uint32_t downshiftAtSec,
+                        bool v2FrameGate, const std::vector<TuneStep>* tunes) {
   RunResult r;
+  r.windowMode = fixture_window_mode_name();
   CreateDirectoryW(runDir.c_str(), nullptr);
   r.frameDir = runDir;
   const std::wstring me = self_path();
@@ -347,7 +389,9 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   target.content = content;
   target.title = L"remote60 fec single-chunk target " + std::to_wstring(GetCurrentProcessId()) + L" " +
                  std::wstring(tight ? L"tight" : L"padded");
-  check(target.Start(), "an on-screen, invisible, click-through window is up for the host to capture");
+  check(target.Start(), gFixtureWindowMode == FixtureWindowMode::VisibleFallback
+                            ? "an on-screen VISIBLE window (window-mode=visible-fallback) is up for the host to capture"
+                            : "an on-screen, invisible, click-through window is up for the host to capture");
   const HWND targetHwnd = target.hwnd();
 
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
@@ -744,7 +788,25 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       }
     });
 
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    // The live window. The host is watched, not slept through (r6): a host that exits ends the run
+    // now, and the one line that means the host is capturing the USER'S SCREEN (it could not find our
+    // window and fell back to the monitor) ends it now too, by terminating the host.
+    {
+      const uint64_t liveUntilUs = qpc_now_us() + static_cast<uint64_t>(seconds) * 1'000'000ull;
+      while (qpc_now_us() < liveUntilUs) {
+        if (WaitForSingleObject(hostPi.hProcess, 200) == WAIT_OBJECT_0) {
+          r.hostExitedEarly = true;
+          DWORD code = 0;
+          if (GetExitCodeProcess(hostPi.hProcess, &code)) r.hostExitCode = code;
+          break;
+        }
+        if (host_log_contains(hostLogPath, "fallback=monitor")) {
+          r.monitorFallbackSeen = true;
+          TerminateProcess(hostPi.hProcess, 9);
+          break;
+        }
+      }
+    }
 
     controlStop.store(true);
     if (controlThread.joinable()) controlThread.join();
@@ -787,6 +849,19 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
   CloseHandle(job);
   r.host = read_host_log(hostLogPath);
+  r.hostLastLine = host_log_last_line(hostLogPath);
+  r.captureItemFailed = host_log_contains(hostLogPath, "capture item create failed");
+  if (host_log_contains(hostLogPath, "fallback=monitor")) r.monitorFallbackSeen = true;
+  if (fixture_probe().style == "simulate" && fixture_probe_applies()) {
+    std::printf("PROBE simulate: the harness treats this run as 'capture item create failed' (the host itself ran; test-support only)\n");
+    r.captureItemFailed = true;
+  }
+  std::printf("host-exit: early=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s last=\"%s\"\n",
+              r.hostExitedEarly ? 1 : 0, r.hostExitCode, r.captureItemFailed ? 1 : 0, r.monitorFallbackSeen ? 1 : 0,
+              r.windowMode.c_str(), r.hostLastLine.c_str());
+  if (r.monitorFallbackSeen) delete_saved_frames(runDir);
+  check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
+        r.hostLastLine);
   {
     std::string captureLine;
     const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
@@ -799,6 +874,38 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
   // Decode is realtime now (the decodeThread above), so there is no post-hoc batch pass here.
   r.appliedBitrate = bitrate;
   r.appliedFps = fps;
+  return r;
+}
+
+// One run, with the one retry the Home PC needed (r6): when the host could not create a WGC capture
+// item for the invisible fixture window, the run is repeated ONCE with a visible window. The mode is
+// sticky for the rest of the process -- every later run starts visible instead of paying a failed
+// attempt each -- and every run prints its window-mode. If the visible window is refused too, the run
+// counts as capture-unavailable and the callers stop early (fail-fast) instead of producing rows of
+// zeros for fifteen minutes. Never a monitor fallback.
+RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
+                   uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
+                   uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
+                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false,
+                   const std::vector<TuneStep>* tunes = nullptr) {
+  RunResult r = run_host_once(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed, wireCapOn, bitrate, fps,
+                              downshiftBitrate, downshiftAtSec, v2FrameGate, tunes);
+  if (r.captureItemFailed && gFixtureWindowMode == FixtureWindowMode::Invisible) {
+    std::printf("CAPTURE-FALLBACK: the host could not create a capture item for the INVISIBLE fixture window (host said: %s). "
+                "Retrying this run ONCE with a VISIBLE window (window-mode=visible-fallback): a %dx%d window showing only the "
+                "harness's test page stays visible on this screen for the rest of this harness run. No monitor capture.\n",
+                r.hostLastLine.c_str(), kWinW, kWinH);
+    gFixtureWindowMode = FixtureWindowMode::VisibleFallback;
+    std::wstring retryDir = runDir;
+    while (!retryDir.empty() && retryDir.back() == L'\\') retryDir.pop_back();
+    retryDir += L"_visible\\";
+    const uint16_t retryPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    r = run_host_once(hostExe, retryDir, content, tight, retryPort != 0 ? retryPort : port, seconds, lossPermille, lossSeed,
+                      wireCapOn, bitrate, fps, downshiftBitrate, downshiftAtSec, v2FrameGate, tunes);
+  }
+  if (r.captureItemFailed) ++gCaptureUnavailableRuns;
+  check(!r.captureItemFailed, std::string("a capture item could be created for the fixture window (window-mode=") + r.windowMode + ")",
+        r.hostLastLine);
   return r;
 }
 
@@ -1198,7 +1305,7 @@ struct RcRow {
   uint32_t gap250 = 0, evMatched = 0, evExpected = 0, decErr = 0, keyReq = 0, nacks = 0, psnrN = 0, rcInstances = 0,
            rcReconfigureWrites = 0, rcGovernorWrites = 0, decodedW = 0, decodedH = 0;
   uint64_t desiredEncoder = 0, appliedEncoder = 0, effectiveWire = 0, hostSkips = 0;
-  std::string rcProfile, planState;
+  std::string rcProfile, planState, windowMode;
 };
 
 RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wireBps, int seconds, const RunResult& r) {
@@ -1262,17 +1369,18 @@ RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wir
   row.desiredEncoder = r.host.desiredEncoder; row.appliedEncoder = r.host.appliedEncoder;
   row.effectiveWire = r.host.effectiveWire; row.hostSkips = r.host.wireOverloadSkips;
   row.rcProfile = r.host.rcProfile;
+  row.windowMode = r.windowMode;
   row.planState = r.host.rcPlanStates.empty() ? "-" : r.host.rcPlanStates.back();
   return row;
 }
 
 void print_rc_row(const RcRow& w) {
-  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
+  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u window-mode=%s | win1s=%.1f%% win250=%.1f%% win267=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
               "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
               "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
               "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u(reconf=%u gov=%u) instances=%u "
               "decErr=%u keyReq=%u nacks=%u\n",
-              w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
+              w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.windowMode.c_str(), w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
               (unsigned long long)w.desiredEncoder, (unsigned long long)w.appliedEncoder, (unsigned long long)w.effectiveWire,
               w.rcProfile.c_str(), w.planState.c_str(), w.deliveredFps, w.decodeFps, w.gap250, w.decodeGapMaxMs,
               w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
@@ -1311,11 +1419,19 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         RunResult base;
         if (!baselineHost.empty()) {
           base = one(baselineHost, "base");
+          if (capture_unavailable()) {
+            std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
+            return 3;
+          }
           const RcRow b = rc_row_of("baseline", cell, fps, rate, seconds, base);
           print_rc_row(b);
           rows.push_back(b);
         }
         const RunResult cand = one(candidateHost, "cand");
+        if (capture_unavailable()) {
+          std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
+          return 3;
+        }
         const RcRow c = rc_row_of("candidate", cell, fps, rate, seconds, cand);
         print_rc_row(c);
         rows.push_back(c);
@@ -1410,7 +1526,11 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
                                    {static_cast<uint32_t>(runSec * 3 / 5) * 1000u, 6'000'000, 0}};
     const RunResult r = run_host(hostExe, dir + L"t_downup\\", Content::FullTransition, true, port, runSec, 0, 1, true,
                                  6'000'000, 30, 0, 0, false, &steps);
-    std::printf("TRANSITION down/up: tunesSent=%zu budgetActions=", r.tuneSentUs.size());
+    if (capture_unavailable()) {
+      std::printf("CAPTURE-UNAVAILABLE: no capture item even with the visible fallback; the remaining transition runs are skipped\n");
+      return 3;
+    }
+    std::printf("TRANSITION down/up: window-mode=%s tunesSent=%zu budgetActions=", r.windowMode.c_str(), r.tuneSentUs.size());
     for (const auto& a : r.host.budgetActions) std::printf("%s,", a.c_str());
     std::printf(" rcInstances=%u rcReconfigureWrites=%u deferred=%u effWire(last)=%llu E(desired/applied)=%llu/%llu profile=%s "
                 "planMeans=",
@@ -1479,6 +1599,10 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
     std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 2) * 1000u, 0, 60}};
     const RunResult r = run_host(hostExe, dir + L"t_fps\\", Content::FullTransition, true, port, runSec, 0, 1, true, 3'000'000, 30,
                                  0, 0, false, &steps);
+    if (capture_unavailable()) {
+      std::printf("CAPTURE-UNAVAILABLE: the fps transition run had no capture item; the remaining transition runs are skipped\n");
+      return 3;
+    }
     std::printf("TRANSITION fps 30->60: rcInstances=%u planPostStart=%u planStates=", r.host.rcInstances, r.host.rcPlanPostStart);
     for (const auto& s : r.host.rcPlanStates) std::printf("%s,", s.c_str());
     std::printf(" planMeans=");
@@ -1540,6 +1664,10 @@ int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int
 // first tune (the startup keyint goes through the same key-period policy, r4), so a tune that changes
 // nothing changes nothing on either profile.
 int run_rc_eonly(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
+  if (capture_unavailable()) {
+    std::printf("CAPTURE-UNAVAILABLE: the E-only run is skipped\n");
+    return 3;
+  }
   std::printf("\n=== encoder-rc-budget r4 E-only transitions at a fixed geometry (6M <-> 5M <-> 5.5M <-> 5.2M <-> 5.4M, 1080p) ===\n");
   const int runSec = std::max(seconds, 18);
   const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
@@ -1547,7 +1675,11 @@ int run_rc_eonly(const std::wstring& hostExe, const std::wstring& dir, int secon
                                  {10000, 5'200'000, 0}, {10500, 5'400'000, 0}, {14000, 5'400'000, 0}};
   const RunResult r = run_host(hostExe, dir + L"t_eonly\\", Content::SingleChange, true, port, runSec, 0, 1, true, 6'000'000, 30, 0, 0,
                                false, &steps);
-  std::printf("EONLY: tunesSent=%zu budgetActions=", r.tuneSentUs.size());
+  if (capture_unavailable()) {
+    std::printf("CAPTURE-UNAVAILABLE: the E-only run had no capture item; its checks are skipped\n");
+    return 3;
+  }
+  std::printf("EONLY: window-mode=%s tunesSent=%zu budgetActions=", r.windowMode.c_str(), r.tuneSentUs.size());
   for (const auto& a : r.host.budgetActions) std::printf("%s,", a.c_str());
   std::printf(" rcInstances=%u rcReconfigureWrites=%u rcGovernorWrites=%u deferredApplied=%u effWire(last)=%llu E(desired/applied)=%llu/%llu profile=%s sizes=",
               r.host.rcInstances, r.host.rcReconfigureWrites, r.host.rcGovernorWrites, r.host.deferredRetargets,
@@ -1879,7 +2011,7 @@ int main(int argc, char** argv) {
   // Cap-ON evidence (bitrate-hard-cap r2): the same lossless scenario with the hard wire cap ON must,
   // after the progress-based tail fix, still make NO premature NACK -- the pinned cap-OFF runs above
   // keep this test's FEC-layout purpose, this run keeps the cap-ON proof. Only on a lossless path.
-  if (!matrix && lossPermille == 0) {
+  if (!matrix && lossPermille == 0 && !capture_unavailable()) {
     const uint16_t capPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     if (capPort != 0) {
       const std::wstring capDir = dir + L"capon_lossless\\";
@@ -1898,6 +2030,12 @@ int main(int argc, char** argv) {
   WSACleanup();
   if (keepDir) std::printf("kept %s\n", std::string(dir.begin(), dir.end()).c_str());
   else check(staging.Remove(), "the staging directory is removed", staging.why());
+  if (capture_unavailable()) {
+    std::printf("fec_single_chunk_host_e2e_test: CAPTURE-UNAVAILABLE (%d run(s) without a capture item even with the visible fallback; "
+                "%d of %d checks failed) -- exit 3 so the runner skips what cannot be measured\n",
+                gCaptureUnavailableRuns, gFails, gCheckCount);
+    return 3;
+  }
   if (gFails != 0) {
     std::printf("fec_single_chunk_host_e2e_test: FAIL (%d of %d checks)\n", gFails, gCheckCount);
     return 1;

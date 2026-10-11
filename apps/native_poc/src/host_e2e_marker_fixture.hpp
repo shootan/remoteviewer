@@ -11,6 +11,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #ifdef min
 #undef min
 #endif
@@ -221,9 +223,54 @@ inline uint32_t decode_event_marker(const uint8_t* y, uint32_t codedW, uint32_t 
 
 // ---------------------------------------------------------------------------- the target
 
+// How the fixture window is created (encoder-rc-budget r6). Invisible is the default: alpha 1/255,
+// WS_EX_TRANSPARENT, tool window, never activated. On the Home PC (RTX 3070 Ti, Windows 10) WGC's
+// CreateForWindow REFUSED that window for every run ("capture item create failed", the host's exit
+// 8) while the same style is accepted on the Windows 11 build machine -- so the harness retries ONCE
+// with VisibleFallback: a plain visible popup, same size and title, topmost, never activated, no
+// layered/transparent/tool styles. It is visible to the user for the rest of the harness run; it
+// shows only the harness's own test page. The harness never falls back to a MONITOR capture: that
+// would put the user's screen into the saved PGM frames.
+enum class FixtureWindowMode { Invisible, VisibleFallback };
+inline FixtureWindowMode gFixtureWindowMode = FixtureWindowMode::Invisible;
+inline const char* fixture_window_mode_name() {
+  return gFixtureWindowMode == FixtureWindowMode::VisibleFallback ? "visible-fallback" : "invisible";
+}
+// Test-support only (the harness exe reads it; no product binary does): REMOTE60_E2E_FIXTURE_PROBE
+// forces the fixture into a style meant to make CreateForWindow fail, so the fallback and the
+// fail-fast paths can be exercised on a machine whose WGC accepts the normal window.
+//   cloak    -- DWMWA_CLOAK on the window (visible to the window finder, not composed)
+//   noredir  -- WS_EX_NOREDIRECTIONBITMAP (no redirection surface for DWM/WGC)
+//   simulate -- no window change; the HARNESS treats the run as "capture item create failed" after
+//               the host ran (exercises the retry/fail-fast bookkeeping only, says so in the log)
+// A ":both" suffix applies the probe to the visible fallback too (the fail-fast case); without it
+// only the invisible attempt is probed and the fallback is a real retry.
+struct FixtureProbe { std::string style; bool both = false; };
+inline const FixtureProbe& fixture_probe() {
+  static const FixtureProbe probe = [] {
+    FixtureProbe p;
+    char buf[64]{};
+    const DWORD n = GetEnvironmentVariableA("REMOTE60_E2E_FIXTURE_PROBE", buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return p;
+    p.style = buf;
+    const size_t colon = p.style.find(':');
+    if (colon != std::string::npos) {
+      p.both = p.style.substr(colon + 1) == "both";
+      p.style = p.style.substr(0, colon);
+    }
+    return p;
+  }();
+  return probe;
+}
+inline bool fixture_probe_applies() {
+  const FixtureProbe& p = fixture_probe();
+  return !p.style.empty() && (p.both || gFixtureWindowMode == FixtureWindowMode::Invisible);
+}
+
 // An on-screen window the user cannot see or hit: alpha 1/255, WS_EX_TRANSPARENT, never activated,
 // tool window (not in the host's window list, found by title). On screen because an off-screen
-// window is never composed and the host then sends only synthetic refresh frames.
+// window is never composed and the host then sends only synthetic refresh frames. See
+// FixtureWindowMode for the visible fallback.
 class Target {
  public:
   Content content = Content::StaticText;
@@ -487,12 +534,20 @@ class Target {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60FecSingleChunkTarget";
     RegisterClassExW(&wc);
-    hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                            wc.lpszClassName, title.c_str(), WS_POPUP, 0, 0, kWinW, kWinH, nullptr, nullptr,
+    const bool visible = gFixtureWindowMode == FixtureWindowMode::VisibleFallback;
+    const bool probing = fixture_probe_applies();
+    DWORD exStyle = visible ? (WS_EX_TOPMOST | WS_EX_NOACTIVATE)
+                            : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+    if (probing && fixture_probe().style == "noredir") exStyle |= WS_EX_NOREDIRECTIONBITMAP;
+    hwnd_ = CreateWindowExW(exStyle, wc.lpszClassName, title.c_str(), WS_POPUP, 0, 0, kWinW, kWinH, nullptr, nullptr,
                             wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-      SetLayeredWindowAttributes(hwnd_, 0, 1, LWA_ALPHA);
+      if (!visible) SetLayeredWindowAttributes(hwnd_, 0, 1, LWA_ALPHA);
+      if (probing && fixture_probe().style == "cloak") {
+        BOOL cloak = TRUE;
+        DwmSetWindowAttribute(hwnd_, DWMWA_CLOAK, &cloak, sizeof(cloak));
+      }
       ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
       timeBeginPeriod(1);
       SetTimer(hwnd_, 1, 33, nullptr);  // 30 Hz, the host's capture rate
