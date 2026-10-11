@@ -19,12 +19,13 @@
 //     (mf_h264_codec.cpp drain_outputs: asyncTransform_ && po == E_UNEXPECTED -> break), so on AMD
 //     every successful drain ends with one E_UNEXPECTED. The proxy counts it as "tolerated", not
 //     abnormal (AMD smoke 2026-10-11 first flagged it as abnormal and looked like a proxy defect).
-//   * product-stats: every row (direct AND proxy) sums the product's own H264EncodeFrameStats, so
-//     the proxy-free row has the same drain/poll counters; drainEndUnexpected is derived there as
-//     drainLoops - needMoreInput - streamChange - errors (the product keeps no counter for it).
-// Proxy path vs the product path (Codex 17519d8 review, item 1 corrected): every row pins
-// REMOTE60_NATIVE_ENCODER_BACKEND=mft_hw, and the proxy-free row logs backend=mft_enum_hw, so NEITHER
-// the direct row NOR the proxy rows take the AMF-specific configure_types branch (strcmp
+//   * product-stats: every row sums the product's own H264EncodeFrameStats (direct counters only; no
+//     derived E_UNEXPECTED count -- the product keeps none).
+// Since r2 every row runs through the proxy (proxy=1); the r1 direct-vs-proxy neutrality check
+// (baseline-direct == baseline-proxy on AMD and on the Home NVIDIA) was done with the r1 binary and is
+// NOT repeated by this binary. Proxy path vs the product path (Codex 17519d8 item 1): every row pins
+// REMOTE60_NATIVE_ENCODER_BACKEND=mft_hw (the product's own enumeration logs backend=mft_enum_hw), so
+// NO row takes the AMF-specific configure_types branch (strcmp
 // "amf_mft_h264enc"); that branch only differs from an Auto / explicit-AMF product setting, which this
 // probe does not measure. The seam sets backendName_="test_transform" and usingHardware_=false; no
 // codec-configuration use of usingHardware_ was found in this CPU-NV12 path. MF attribute writes
@@ -38,8 +39,7 @@
 //       MF_E_NOTACCEPTING: the first one in an encode call is tolerated (the product drains and
 //       retries once); a second one in the same call = the retry failed = abnormal
 //       (ProcessInput-retry). E_UNEXPECTED from ProcessOutput on an async MFT is reported as
-//       "product-tolerated E_UNEXPECTED" (the product's drain loop ends on it); the proxy-free row
-//       has no raw ProcessOutput HRESULT counts and says so (no derived count).
+//       "product-tolerated E_UNEXPECTED" (the product's drain loop ends on it); no derived count.
 //       GetEvent's own GetType/GetStatus failures and GetOutputStreamInfo failures are abnormal.
 //       A failing encode call with no MFT call recorded for that frame = unknown-before-MFT (the
 //       failure happened before the transform, e.g. sample creation) -- a collection boundary.
@@ -65,17 +65,34 @@
 //       land only in the second half -- the RESULT line lists the IDR body frames.
 //       main() exits 0 only when every row is VALID (exit 2 otherwise); DONE is not a verdict.
 // r4 (Codex follow-up, "minimal additions"):
-//   1. running attribution: R1-mean-only (reconfigure_bitrate 1.18M only) and R1-qp-only (set_max_qp 40
-//      only) next to R1 (both) and R1-sham (same values); R2-mean-only on motion. Which control moved
-//      the output is read from these rows only.
-//   2. rebuild survival: RE1 = P0 plan, at the midpoint the product's rebuild path (shutdown() +
-//      initialize(), new MFT instance; mf_h264_codec.cpp:1656 resets maxQpOverride_) with the SAME
-//      env, so the pre-types plan is re-fed -> the second instance's own snapshots show whether the
-//      chosen values survive. RE2 = the same rebuild followed by set_max_qp(32), which is what the
-//      product's governor does after a rebuild today (host_stage_stats_h264.cpp:205-207: override 0
-//      and governor maxQp (base 32) != configured -> set_max_qp(governor)), i.e. the late post-types
-//      MaxQP re-imposed. Geometry/fps/bitrate/keyint are unchanged across the rebuild (the mechanism
-//      under test is the rebuild + re-apply order, not the new fps value).
+//   1. running attribution (API-level, not single-property): R1-target-only calls reconfigure_bitrate
+//      (the product function re-applies Mode+Mean+Peak+VBV with the QP request unchanged -- P0 omits
+//      the MaxQP Set) and R1-qp-only calls set_max_qp(40) (the same full RC re-apply; only the QP
+//      request changes), next to R1 (both) and R1-sham (same values); R2-target-only on motion. Which
+//      product CALL moved the output is read from these rows only; a pure CODECAPI Mean-only cause is
+//      not proven by them.
+//   2. re-initialisation contrast, same 1920x1080@30 configuration: RE1 = P0 plan, then at the
+//      midpoint H264Encoder::shutdown() + initialize() (initialize resets maxQpOverride_,
+//      mf_h264_codec.cpp:1656) on a NEW MFT instance with the SAME env, i.e. the init-API order +
+//      plan re-feed only. The second instance's own snapshots show whether the chosen RC values come
+//      back. RE2 = the same re-init followed by a LATE set_max_qp(32): the partial-fix risk of leaving
+//      configured 0 + governor base 32 (host_stage_stats_h264.cpp:205-207 re-applies the governor
+//      ceiling when override==0 && governor!=configured; with today's shipped default 32/32 that
+//      condition is not met, and the real fps path :215 applies after.maxQp, not always 32).
+//      NOT represented: Host ApplyTarget, an actual fps/size change, timeline/epoch, pending-surface
+//      cleanup, RequestKey, wire budget, capture restart, receiver recovery. Those are closed in the
+//      product integration tests, not here.
+//      Before the new activation the old proxy AND the encoder's own testTransform_ reference are
+//      released (set_transform_for_test(nullptr)), so the old inner MFT is gone before the new one is
+//      activated -- the same lifetime as the product's non-test path (Codex b4cc57c D2).
+//      rebuild-boundary-loss is an estimate: it assumes sequential input and intact FIFO provenance
+//      (missing frames among the last pendingAtRebuild pre-rebuild inputs); the lost frame stays in
+//      the byte-average denominator. VALID on an RE row is therefore not "lossless".
+//   D1 (Codex b4cc57c): coverage dup==0 is part of VALID; --selftest-dup injects one duplicate AU into
+//      the first row to show INVALID + exit 2 deterministically.
+//   267msPeakWall collects AUs returned during the body only (drain-recovered AUs are in the PTS
+//   windows but not in the wall-clock window). VALID = exec/coverage/events gate; it does not mean
+//   low latency, quality, or lossless.
 //   3. P6 is now buffer 100 ms (18750 B at 1.5M) instead of 1 s: the small-buffer direction.
 //      Rejection / clamp is recorded as requested vs readback (config line).
 //   4. labels say "Set omitted (fresh MFT)" for maxQp=0 and "explicit 51" for 51; every row prints a
@@ -635,6 +652,7 @@ struct Row {
 };
 
 bool g_psnr = true;
+bool g_selftestDup = false;
 
 // Luma PSNR against the deterministic source, exact PTS. The last kRing body frames are kept so a
 // delayed async output still finds its source; older ones count as unmatched (never scored).
@@ -708,8 +726,8 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   const uint32_t cfgQp = H264Encoder::configured_max_qp();
   const bool midAction = r.retargetMaxQp || r.retargetKbps || r.shamAtMid || r.reinitAtMid;
   std::string rtDesc;
-  if (r.reinitAtMid) rtDesc += " @mid:REBUILD shutdown()+initialize() new MFT, same env" +
-                               (r.reinitThenMaxQp ? " then set_max_qp(" + std::to_string(r.reinitThenMaxQp) + ") (governor order today)" : std::string(" (plan re-fed pre-types)"));
+  if (r.reinitAtMid) rtDesc += " @mid:REINIT shutdown()+initialize() same config, old MFT released first, new MFT, same env" +
+                               (r.reinitThenMaxQp ? " then LATE set_max_qp(" + std::to_string(r.reinitThenMaxQp) + ") (partial-fix risk)" : std::string(" (plan re-fed pre-types)"));
   if (r.shamAtMid) rtDesc += " @mid:SHAM set_max_qp(" + std::to_string(cfgQp) + ")+reconfigure_bitrate(" + std::to_string(r.rateKbps) + "k) (unchanged values)";
   if (r.retargetMaxQp) rtDesc += " @mid:set_max_qp(" + std::to_string(r.retargetMaxQp) + ")";
   if (r.retargetKbps) rtDesc += " @mid:reconfigure_bitrate(" + std::to_string(r.retargetKbps) + "k)";
@@ -724,6 +742,8 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   MftEnc enc;
   LoggingTransform* proxy = nullptr;
   uint32_t abnormalAccum = 0;  // abnormal count of proxies already released (rebuild rows)
+  std::string latestAbnormalSaved = "none";  // latest abnormal of a released proxy (D2 null-proxy boundary)
+  auto latest_abnormal = [&]() -> std::string { return proxy ? proxy->last_abnormal() : latestAbnormalSaved; };
   auto make_proxy = [&](bool printCaps) -> bool {
     IMFTransform* inner = create_hw_encoder_like_product();
     if (!inner) return false;
@@ -746,7 +766,7 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   const uint32_t keyintFrames = 4u * fps;  // a raw IDR ~every 4s -> at most one inside the 5s body
   if (!enc.init(kW, kH, fps, bitrate, keyintFrames)) {
     if (proxy) proxy->latch_failure();
-    std::printf("  RESULT: INVALID exec=init-failed latestAbnormal=%s\n", proxy ? proxy->last_abnormal().c_str() : "n/a(proxy-free)");
+    std::printf("  RESULT: INVALID exec=init-failed latestAbnormal=%s (initialize() may already have run shutdown() internally)\n", proxy ? proxy->last_abnormal().c_str() : "n/a(no proxy)");
     if (proxy) { proxy->dump_latch(); proxy->dump_abnormal(); proxy->Release(); }
     invalid();
     return;
@@ -782,33 +802,41 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
     if (i == warmup) wall0 = now_us();
     if (i == warmup + body) wallBodyEnd = now_us();
     const bool inDrain = i >= warmup + body;
+    if (proxy) proxy->frame = i;  // tag the mid-point actions with the frame they precede
     if (midAction && i == warmup + mid) {
       std::printf("  boundary: first input after the mid-point change = frame %u (body idx %u)\n", i, mid);
       if (r.reinitAtMid) {
-        std::printf("  REBUILD at frame %u: product path shutdown()+initialize(%ux%u fps=%u bitrate=%u keyint=%u) on a NEW MFT instance; env unchanged (pre-types plan re-fed); maxQpOverride_ reset by initialize\n",
+        std::printf("  REINIT at frame %u: H264Encoder::shutdown()+initialize(%ux%u fps=%u bitrate=%u keyint=%u), same configuration, NEW MFT instance; env unchanged (pre-types plan re-fed); maxQpOverride_ reset by initialize\n",
                     i, kW, kH, fps, bitrate, keyintFrames);
         pendingAtRebuild = enc.pending_depth();
-        std::printf("  REBUILD: first instance pending(accepted, not yet output)=%u -> shutdown() FLUSHes them (product behaviour: in-flight frames are lost at a rebuild)\n", pendingAtRebuild);
+        std::printf("  REINIT: first instance pending(accepted, not yet output)=%u -> shutdown() FLUSHes them (product behaviour: in-flight frames are lost at a re-init)\n", pendingAtRebuild);
         enc.enc.shutdown();
         if (proxy) {
           std::printf("  -- first instance summary --\n");
           proxy->print_events();
           proxy->dump_abnormal();
           abnormalAccum += proxy->abnormal_total();
-          proxy->Release();
+          latestAbnormalSaved = proxy->last_abnormal();
+          // D2: drop BOTH references to the old proxy (ours and the encoder's testTransform_) BEFORE the
+          // new activation, so the old inner MFT is destroyed first -- the product's non-test lifetime.
+          enc.enc.set_transform_for_test(nullptr);
+          const ULONG left = proxy->Release();
           proxy = nullptr;
-          if (!make_proxy(false)) { std::printf("  REBUILD: no hw MFT for the second proxy\n"); encFail = true; failFrame = i; break; }
-          std::printf("  -- second instance (rebuilt) --\n");
+          std::printf("  REINIT: old proxy released before the new activation (refcount after release=%lu%s)\n",
+                      static_cast<unsigned long>(left), left == 0 ? ": old inner MFT destroyed" : ": STILL HELD somewhere");
+          if (!make_proxy(false)) { std::printf("  REINIT: no hw MFT for the second proxy\n"); encFail = true; failFrame = i; break; }
+          proxy->frame = i;
+          std::printf("  -- second instance (re-initialised) --\n");
         }
         if (!enc.init(kW, kH, fps, bitrate, keyintFrames)) {
-          std::printf("  REBUILD: initialize failed\n");
+          std::printf("  REINIT: initialize failed\n");
           if (proxy) proxy->latch_failure();
           encFail = true; failFrame = i; break;
         }
         if (r.reinitThenMaxQp) {
           const bool ok = enc.enc.set_max_qp(r.reinitThenMaxQp);  // governor re-imposing its ceiling after a rebuild
-          std::printf("  set_max_qp(%u) after rebuild ok=%d (host_stage_stats_h264.cpp:205-207 order)\n", r.reinitThenMaxQp, ok ? 1 : 0);
-          if (proxy) { proxy->snapshot("after-governor(post-rebuild)"); std::printf("  config(after-governor post-rebuild): %s\n", proxy->config_status().c_str()); }
+          std::printf("  LATE set_max_qp(%u) after re-init ok=%d (partial-fix risk: host_stage_stats_h264.cpp:205-207 re-applies the governor ceiling when override==0 && governor!=configured)\n", r.reinitThenMaxQp, ok ? 1 : 0);
+          if (proxy) { proxy->snapshot("after-late-qp(post-reinit)"); std::printf("  config(after-late-qp post-reinit): %s\n", proxy->config_status().c_str()); }
         }
       }
       if (r.shamAtMid) {
@@ -831,7 +859,6 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
       }
       boundaryPassed = true;
     }
-    if (proxy) proxy->frame = i;
     deadline += frameUs;
     fill_scene(r.scene, nv12, i);
     if (decOk && i >= warmup && !inDrain) psnr.keep(i, (int64_t)i * (int64_t)(10'000'000LL / fps), nv12);
@@ -884,6 +911,10 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   if (proxy) proxy->dump_latch();
 
   // F3 coverage: unique body frames returned / missing / duplicates, after the bounded drain.
+  if (g_selftestDup) {
+    static bool injected = false;
+    if (!injected && !encFail) { injected = true; ++auCount[0]; std::printf("  SELFTEST: injected one duplicate AU at body idx 0 (auCount=%u)\n", auCount[0]); }
+  }
   uint32_t missing = 0, dup = 0, missTail = 0, rebuildLoss = 0;
   const uint32_t judged = encFail ? (failFrame > warmup ? std::min(failFrame - warmup, body) : 0) : body;
   std::string missList, rebuildLossList;
@@ -917,7 +948,7 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
   const double outFps = wallSec > 0 ? returnedBody / wallSec : 0;
   const bool fpsShort = outFps < 0.9 * fps;
   const uint32_t abnormalN = (proxy ? proxy->abnormal_total() : 0) + abnormalAccum;
-  const bool valid = !encFail && returnedBody > 0 && !fpsShort && missing == 0 && abnormalN == 0;
+  const bool valid = !encFail && returnedBody > 0 && !fpsShort && missing == 0 && dup == 0 && abnormalN == 0;  // D1: dup gates too
   const Window all = measure(bytesByFrame, 0, body, fps);
   std::printf("  avgKbps=%.0f (x%.2f)  1sPeak=%.0f (x%.2f)  267msPeak=%.0f (x%.2f)  267msPeakWall=%.0f (x%.2f)  "
               "idrMax=%u idrN=%zu  outFps=%.1f(body) pending=%u drainRecovered=%u\n",
@@ -948,7 +979,7 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
               (unsigned long long)ps.pollNeedInput, (unsigned long long)ps.pollHaveOutput,
               (unsigned long long)ps.needInputOnly, (unsigned long long)(ps.calls ? ps.encodeUs / ps.calls : 0),
               (unsigned long long)ps.encodeUsMax,
-              proxy ? "" : " (proxy-free: no raw ProcessOutput HRESULT counts; the product keeps none for E_UNEXPECTED)");
+              proxy ? "" : " (no proxy: no raw ProcessOutput HRESULT counts; the product keeps none for E_UNEXPECTED)");
   if (proxy) { proxy->print_events(); proxy->dump_abnormal(); }
   std::string idrList;
   for (uint32_t f : idrFrames) idrList += (idrList.empty() ? "" : ",") + std::to_string(f);
@@ -959,8 +990,8 @@ void probe(const Row& r, uint32_t fps, uint32_t seconds, uint32_t* invalidRows) 
               (missing == 0 && dup == 0) ? ("ok " + std::to_string(judged - rebuildLoss) + "/" + std::to_string(body) + " unique" + rebuildNote).c_str()
                                           : ("missing=" + std::to_string(missing) + (missTail ? "(tail-incomplete=" + std::to_string(missTail) + " after " + std::to_string(drainN) + "-frame drain)" : "") +
                                              " dup=" + std::to_string(dup) + " idx[" + missList + "]" + rebuildNote).c_str(),
-              proxy ? proxy->config_at_start().c_str() : "n/a(proxy-free)",
-              abnormalN == 0 ? "ok" : ("abnormal=" + std::to_string(abnormalN) + " latest=" + proxy->last_abnormal()).c_str(),
+              proxy ? proxy->config_at_start().c_str() : "n/a(no proxy)",
+              abnormalN == 0 ? "ok" : ("abnormal=" + std::to_string(abnormalN) + " latest=" + latest_abnormal()).c_str(),
               idrList.c_str());
   if (!valid) invalid();
   if (proxy) proxy->Release();
@@ -974,8 +1005,10 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--repeat" && i + 1 < argc) repeat = static_cast<uint32_t>(std::max(1, std::atoi(argv[i + 1])));
     if (std::string(argv[i]) == "--no-psnr") g_psnr = false;
+    if (std::string(argv[i]) == "--selftest-dup") g_selftestDup = true;  // D1 counter-example: must end INVALID, exit 2
   }
-  std::printf("host_nvidia_probe v2 r4 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
+  if (g_selftestDup) std::printf("SELFTEST --selftest-dup: one duplicate AU is injected into the first row's coverage -> expect INVALID + exit 2.\n");
+  std::printf("host_nvidia_probe v2 r5 (encoder-bakeoff t-1gvx6hx8): rate control fed PRE-TYPES, MaxQP ladder,\n");
   std::printf("r4: running attribution rows (both / sham / mean-only / qp-only), rebuild rows RE1 (plan re-fed) and\n");
   std::printf("RE2 (rebuild then set_max_qp(32) = governor order today), buffer 100ms instead of 1s, delivery line per row.\n");
   std::printf("CBR, VBV size, and the product's RUNNING levers (set_max_qp / reconfigure_bitrate) under it.\n");
@@ -990,10 +1023,11 @@ int main(int argc, char** argv) {
   std::printf("rcBeforeTypes=1 rows: the product applies the rate control pre-types AND again post-types\n");
   std::printf("(both logged); on NVIDIA only the pre-types pass is applied (Home PC v2 result).\n");
   std::printf("psnr: luma vs the deterministic source, exact PTS, SW decoder; unmatched/decodeFail counted, not scored.\n");
-  std::printf("Proxy path note: the test seam sets backendName_=test_transform -> on AMD the AMF-specific\n");
-  std::printf("configure_types branch is skipped (NVIDIA uses the generic path anyway). Row 1 is proxy-free.\n");
-  std::printf("RC_BEFORE_TYPES=1 rows: the product applies rate control pre-types AND again post-types.\n");
-  std::printf("MaxQP: every row pins REMOTE60_NATIVE_MAX_QP unset -> the product default (printed per row).\n");
+  std::printf("All rows proxy=1 (the r1 direct-vs-proxy neutrality check is not repeated by this binary).\n");
+  std::printf("RE rows: same-configuration re-initialisation (shutdown+initialize, old MFT released before the new\n");
+  std::printf("activation) + plan re-feed; RE2 adds a late set_max_qp(32) = partial-fix risk (configured 0 + governor 32).\n");
+  std::printf("Not represented: Host ApplyTarget / real fps or size change / epoch / RequestKey / receiver.\n");
+  std::printf("target-only rows call reconfigure_bitrate = Mode+Mean+Peak+VBV re-applied with the QP request unchanged.\n");
   std::printf("\nInherited REMOTE60_NATIVE_* at start (pinned per row below):\n");
   for (const char* n : kRcEnv) {
     const std::string v = env_get(n);
@@ -1033,10 +1067,10 @@ int main(int argc, char** argv) {
   { Row r = pre("P6'-pre-vbr-maxQp0(Set omitted)-buffer100ms", "drag", 1500, "0"); r.cfg.bufferOverrideBytes = buf_ms(1500, 100); ladder.push_back(r); }
   { Row r = pre("R1-pre-vbr-maxQp0-running(qp40+1.18M both)", "drag", 1500, "0"); r.retargetMaxQp = 40; r.retargetKbps = 1180; ladder.push_back(r); }
   { Row r = pre("R1-sham-pre-vbr-maxQp0-running(same values)", "drag", 1500, "0"); r.shamAtMid = true; ladder.push_back(r); }
-  { Row r = pre("R1-mean-only-pre-vbr-maxQp0-running(1.18M only)", "drag", 1500, "0"); r.retargetKbps = 1180; ladder.push_back(r); }
-  { Row r = pre("R1-qp-only-pre-vbr-maxQp0-running(qp40 only)", "drag", 1500, "0"); r.retargetMaxQp = 40; ladder.push_back(r); }
-  { Row r = pre("RE1-pre-vbr-maxQp0-rebuild(plan re-fed)", "drag", 1500, "0"); r.reinitAtMid = true; ladder.push_back(r); }
-  { Row r = pre("RE2-pre-vbr-maxQp0-rebuild-then-set_max_qp32(governor order today)", "drag", 1500, "0"); r.reinitAtMid = true; r.reinitThenMaxQp = 32; ladder.push_back(r); }
+  { Row r = pre("R1-target-only-pre-vbr-maxQp0-running(reconfigure_bitrate 1.18M: Mean+Peak+VBV, QP unchanged)", "drag", 1500, "0"); r.retargetKbps = 1180; ladder.push_back(r); }
+  { Row r = pre("R1-qp-only-pre-vbr-maxQp0-running(set_max_qp 40 via full RC re-apply; only the QP request changes)", "drag", 1500, "0"); r.retargetMaxQp = 40; ladder.push_back(r); }
+  { Row r = pre("RE1-pre-vbr-maxQp0-reinit-same-config(shutdown+initialize, plan re-fed; init API order only)", "drag", 1500, "0"); r.reinitAtMid = true; ladder.push_back(r); }
+  { Row r = pre("RE2-pre-vbr-maxQp0-reinit-then-late-set_max_qp32(partial-fix risk: configured 0 + governor base 32)", "drag", 1500, "0"); r.reinitAtMid = true; r.reinitThenMaxQp = 32; ladder.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladder.begin(), ladder.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "drag", 1500));
   // ---- motion @3M ----
@@ -1047,14 +1081,14 @@ int main(int argc, char** argv) {
   { Row r = pre("P4-pre-cbr-maxQp0(Set omitted)", "motion", 3000, "0"); r.rc = "cbr"; ladderM.push_back(r); }
   { Row r = pre("R2-pre-vbr-maxQp0-running(qp40+2.36M both)", "motion", 3000, "0"); r.retargetMaxQp = 40; r.retargetKbps = 2360; ladderM.push_back(r); }
   { Row r = pre("R2-sham-pre-vbr-maxQp0-running(same values)", "motion", 3000, "0"); r.shamAtMid = true; ladderM.push_back(r); }
-  { Row r = pre("R2-mean-only-pre-vbr-maxQp0-running(2.36M only)", "motion", 3000, "0"); r.retargetKbps = 2360; ladderM.push_back(r); }
+  { Row r = pre("R2-target-only-pre-vbr-maxQp0-running(reconfigure_bitrate 2.36M: Mean+Peak+VBV, QP unchanged)", "motion", 3000, "0"); r.retargetKbps = 2360; ladderM.push_back(r); }
   for (uint32_t k = 0; k < repeat; ++k) rows.insert(rows.end(), ladderM.begin(), ladderM.end());
   rows.push_back(mk("A1-baseline-proxy-end(post-types,product)", "motion", 3000));
 
   const uint64_t t0 = now_us();
   uint32_t invalidRows = 0;
   for (const auto& r : rows) probe(r, fps, sec, &invalidRows);
-  std::printf("\nhost_nvidia_probe v2 r4: DONE. %zu rows in %.0fs. SUMMARY valid=%zu invalid=%u (exit %d). DONE is not a verdict; read each RESULT line.\n",
+  std::printf("\nhost_nvidia_probe v2 r5: DONE. %zu rows in %.0fs. SUMMARY valid=%zu invalid=%u (exit %d). DONE is not a verdict; read each RESULT line. VALID = exec/coverage(no missing, no dup)/events gate only -- it does not mean low latency, quality, or lossless.\n",
               rows.size(), (now_us() - t0) / 1e6, rows.size() - invalidRows, invalidRows, invalidRows ? 2 : 0);
   std::printf("Fewer bytes with an encode failure / missing output / fps drop is NOT an improvement.\n");
   std::printf("Send this whole file back.\n");
