@@ -342,8 +342,22 @@ class H264Encoder {
   // rebuild loop. A rejected Set or a known mismatch is never reported as Applied or Unchanged.
   bool rcSetAccepted_ = false;
   RcPlanState rcPlanState_ = RcPlanState::Unknown;
-  bool lastRateSetOk_ = false;  // the last apply_rate_control: mean/peak/VBV SetValues accepted
-  bool lastQpSetOk_ = false;    // ... and the MaxQP SetValue (true when none was requested)
+  // r3 (Codex S1): the same three facts PER FIELD, so a runtime call answers for the fields it
+  // changed -- Applied needs each of them accepted AND not contradicted by its own readback; a field
+  // the MFT cannot report (readback -1) is Unknown, tolerated, never promoted to confirmed. The last
+  // outcome of a field counts (a first refusal that a bounded retry then fixes is fixed).
+  struct RcFieldStatus {
+    bool requested = false;
+    bool setOk = false;
+    long long want = -1;
+    long long readback = -1;
+    bool knownMismatch() const { return requested && readback >= 0 && readback != want; }
+    bool confirmed() const { return requested && setOk && readback >= 0 && readback == want; }
+    bool applied() const { return requested && setOk && !knownMismatch(); }  // accepted, not contradicted
+  };
+  RcFieldStatus rcFieldMode_, rcFieldMean_, rcFieldPeak_, rcFieldVbv_, rcFieldMaxQp_;
+  void rc_fields_reset(const RcPlan& plan);                 // requested/want from a plan, outcomes cleared
+  void rc_fields_derive();                                  // rcSetAccepted_ / rcPlanState_ from the fields
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)

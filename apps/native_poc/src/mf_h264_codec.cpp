@@ -1629,10 +1629,10 @@ bool H264Encoder::apply_rate_control(const char* reason) {
                                   200000000ULL))
                             : maxBitrate;
   const bool rcSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, rcMode);
-  bool ok = true;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, mean) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, peak) && ok;
-  ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes) && ok;
+  const bool meanSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, mean);
+  const bool peakSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, peak);
+  const bool vbvSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes);
+  const bool ok = meanSet && peakSet && vbvSet;
 
   // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner. The rate
   // governor (quality r5) raises it while the output stays well over the target.
@@ -1668,36 +1668,50 @@ bool H264Encoder::apply_rate_control(const char* reason) {
             << " readbackMode=" << rbMode << " readbackMean=" << rbMean << " readbackPeak=" << rbPeak
             << " readbackVbv=" << rbVbv << " readbackMaxQp=" << rbMaxQp
             << "\n";
-  // encoder-rc-budget C3 / r2 R2: what was requested, whether EVERY Set was accepted (the mode and
-  // the ceiling included -- `ok` above covers mean/peak/VBV only), and what the readback just taken
-  // says. The no-op basis for the next call is the effective plan, not the request.
+  // encoder-rc-budget C3 / r2 R2 / r3 S1: what was requested, whether each Set was accepted and what
+  // each field reads back -- per field (RcFieldStatus), then the plan-level summaries derived from
+  // them. The no-op basis for the next call is the effective plan, not the request; a runtime caller
+  // is answered from the fields IT changed (set_max_qp / reconfigure_bitrate).
   rcPlan_.rcMode = rcMode;
   rcPlan_.meanBps = mean;
   rcPlan_.peakBps = peak;
   rcPlan_.vbvBytes = vbvBytes;
   rcPlan_.maxQpSet = maxQp > 0 && maxQp <= 51;
   rcPlan_.maxQp = rcPlan_.maxQpSet ? maxQp : 0;
-  const bool allAccepted = ok && rcSet && (!rcPlan_.maxQpSet || qpSet);
-  rcSetAccepted_ = allAccepted;
-  // What each runtime caller asked about: the mean path (mean/peak/VBV) and the ceiling path report
-  // their OWN acceptance, so a ceiling the MFT refuses does not turn every accepted mean change into
-  // a "failure" that rebuilds the instance -- while the effective-plan basis above stays strict.
-  lastRateSetOk_ = ok;
-  lastQpSetOk_ = !rcPlan_.maxQpSet || qpSet;
-  {
-    bool mismatch = false, unknown = false;
-    auto judge = [&](long long got, long long want) {
-      if (got < 0) unknown = true;
-      else if (got != want) mismatch = true;
-    };
-    judge(rbMode, rcMode);
-    judge(rbMean, mean);
-    judge(rbPeak, peak);
-    judge(rbVbv, vbvBytes);
-    if (rcPlan_.maxQpSet) judge(rbMaxQp, maxQp);
-    rcPlanState_ = mismatch ? RcPlanState::Mismatch : (unknown ? RcPlanState::Unknown : RcPlanState::Accepted);
-  }
+  rc_fields_reset(rcPlan_);
+  rcFieldMode_.setOk = rcSet;
+  rcFieldMean_.setOk = meanSet;
+  rcFieldPeak_.setOk = peakSet;
+  rcFieldVbv_.setOk = vbvSet;
+  rcFieldMaxQp_.setOk = qpSet;
+  rcFieldMode_.readback = rbMode;
+  rcFieldMean_.readback = rbMean;
+  rcFieldPeak_.readback = rbPeak;
+  rcFieldVbv_.readback = rbVbv;
+  rcFieldMaxQp_.readback = rbMaxQp;
+  rc_fields_derive();
   return ok;  // unchanged contract for the init caller: the mean/peak/VBV acceptance
+}
+
+void H264Encoder::rc_fields_reset(const RcPlan& plan) {
+  rcFieldMode_ = RcFieldStatus{true, false, plan.rcMode, -1};
+  rcFieldMean_ = RcFieldStatus{true, false, plan.meanBps, -1};
+  rcFieldPeak_ = RcFieldStatus{true, false, plan.peakBps, -1};
+  rcFieldVbv_ = RcFieldStatus{true, false, plan.vbvBytes, -1};
+  rcFieldMaxQp_ = RcFieldStatus{plan.maxQpSet, false, plan.maxQpSet ? static_cast<long long>(plan.maxQp) : -1LL, -1};
+}
+
+void H264Encoder::rc_fields_derive() {
+  const RcFieldStatus* fields[] = {&rcFieldMode_, &rcFieldMean_, &rcFieldPeak_, &rcFieldVbv_, &rcFieldMaxQp_};
+  bool allSet = true, anyMismatch = false, anyUnknown = false;
+  for (const RcFieldStatus* f : fields) {
+    if (!f->requested) continue;
+    if (!f->setOk) allSet = false;
+    if (f->knownMismatch()) anyMismatch = true;
+    else if (f->readback < 0) anyUnknown = true;
+  }
+  rcSetAccepted_ = allSet;
+  rcPlanState_ = anyMismatch ? RcPlanState::Mismatch : (anyUnknown ? RcPlanState::Unknown : RcPlanState::Accepted);
 }
 
 // ------------------------------------------------------------------ encoder-rc-budget C2/C3
@@ -1760,14 +1774,19 @@ bool H264Encoder::apply_rc_plan(const RcPlan& plan, const char* stage, bool only
   };
   bool ok = true;
   int issued = 0;
-  if (wants("mode")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, plan.rcMode) && ok; ++issued; }
-  if (wants("mean")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, plan.meanBps) && ok; ++issued; }
-  if (wants("peak")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, plan.peakBps) && ok; ++issued; }
-  if (wants("vbv")) { ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, plan.vbvBytes) && ok; ++issued; }
-  if (plan.maxQpSet && wants("maxQp")) {
-    ok = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, plan.maxQp) && ok;
+  // Per field (r3 S1): the field's LAST Set outcome is what counts, so a bounded retry that succeeds
+  // replaces the first refusal rather than being AND-ed with it.
+  auto issue = [&](RcFieldStatus& f, const GUID& key, uint32_t value) {
+    f.setOk = set_codecapi_u32(enc_.Get(), key, value);
+    ok = ok && f.setOk;
     ++issued;
-  }
+  };
+  if (!onlyMismatched) rc_fields_reset(plan);
+  if (wants("mode")) issue(rcFieldMode_, CODECAPI_AVEncCommonRateControlMode, plan.rcMode);
+  if (wants("mean")) issue(rcFieldMean_, CODECAPI_AVEncCommonMeanBitRate, plan.meanBps);
+  if (wants("peak")) issue(rcFieldPeak_, CODECAPI_AVEncCommonMaxBitRate, plan.peakBps);
+  if (wants("vbv")) issue(rcFieldVbv_, CODECAPI_AVEncCommonBufferSize, plan.vbvBytes);
+  if (plan.maxQpSet && wants("maxQp")) issue(rcFieldMaxQp_, CODECAPI_AVEncVideoMaxQP, plan.maxQp);
   std::cout << "[native-video-host] h264 rc-plan stage=" << stage << " instance=" << (codecInstanceId_ + 1)
             << " profile=" << rc_profile_name(rcProfile_) << " backend=" << backendName_
             << " vendor=" << identity_.vendorId << " mode=" << plan.rcMode << " mean=" << plan.meanBps
@@ -1785,18 +1804,19 @@ RcPlanState H264Encoder::read_back_rc_plan(const RcPlan& plan, std::string* outD
     uint32_t v = 0;
     return get_codecapi_u32(enc_.Get(), key, &v) ? static_cast<long long>(v) : -1LL;
   };
-  struct Field { const char* name; long long got; long long want; bool checked; };
-  const Field fields[] = {
-      {"mode", readback(CODECAPI_AVEncCommonRateControlMode), plan.rcMode, true},
-      {"mean", readback(CODECAPI_AVEncCommonMeanBitRate), plan.meanBps, true},
-      {"peak", readback(CODECAPI_AVEncCommonMaxBitRate), plan.peakBps, true},
-      {"vbv", readback(CODECAPI_AVEncCommonBufferSize), plan.vbvBytes, true},
-      {"maxQp", readback(CODECAPI_AVEncVideoMaxQP), plan.maxQp, plan.maxQpSet},
+  struct Field { const char* name; RcFieldStatus* status; long long got; long long want; bool checked; };
+  Field fields[] = {
+      {"mode", &rcFieldMode_, readback(CODECAPI_AVEncCommonRateControlMode), plan.rcMode, true},
+      {"mean", &rcFieldMean_, readback(CODECAPI_AVEncCommonMeanBitRate), plan.meanBps, true},
+      {"peak", &rcFieldPeak_, readback(CODECAPI_AVEncCommonMaxBitRate), plan.peakBps, true},
+      {"vbv", &rcFieldVbv_, readback(CODECAPI_AVEncCommonBufferSize), plan.vbvBytes, true},
+      {"maxQp", &rcFieldMaxQp_, readback(CODECAPI_AVEncVideoMaxQP), plan.maxQp, plan.maxQpSet},
   };
   std::string detail, mismatched;
   bool anyMismatch = false, allAccepted = true;
-  for (const Field& f : fields) {
+  for (Field& f : fields) {
     detail += std::string(" readback") + f.name + "=" + std::to_string(f.got);
+    if (f.status->requested) f.status->readback = f.got;  // r3 S1: the field keeps its own readback
     if (!f.checked) continue;
     if (f.got < 0) { allAccepted = false; continue; }
     if (f.got != f.want) {
@@ -1826,6 +1846,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   rcPlan_ = RcPlan{};
   rcSetAccepted_ = false;
   rcPlanState_ = RcPlanState::Unknown;
+  rc_fields_reset(RcPlan{});
   stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
   sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
 
@@ -1874,7 +1895,8 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   if (rcProfile_ == RcProfile::NvidiaPreTypes) {
     // Before the media types: on this MFT that is the only point at which mode/peak/VBV/MaxQP are
     // applied (Home PC probe v2, 2026-10-11). Set once; not re-issued after the types.
-    rcSetAccepted_ = apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);
+    (void)apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);  // per-field outcomes recorded inside
+    rc_fields_derive();
   } else if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) {
     // quality r6 diagnostic switch (legacy profile only): the rate control also before the media types.
     (void)apply_rate_control("pre_types");
@@ -1895,13 +1917,17 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     // rebuild (b: a readback that is not supported is Unknown, not a mismatch). The legacy profile is
     // classified from the same readback; apply_rate_control logged its own values already.
     std::string detail, mismatched;
-    rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
+    (void)read_back_rc_plan(rcPlan_, &detail, &mismatched);
+    rc_fields_derive();
     int retried = 0;
     if (rcProfile_ == RcProfile::NvidiaPreTypes && rcPlanState_ == RcPlanState::Mismatch) {
-      const bool retryOk = apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
-      rcSetAccepted_ = rcSetAccepted_ && retryOk;
+      // One bounded re-set of the disagreeing fields; each field's LAST outcome is what the summaries
+      // are derived from (r3 S1: a first refusal that this retry fixes is fixed, a field that stays
+      // Unknown is not promoted).
+      (void)apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
       retried = 1;
-      rcPlanState_ = read_back_rc_plan(rcPlan_, &detail, &mismatched);
+      (void)read_back_rc_plan(rcPlan_, &detail, &mismatched);
+      rc_fields_derive();
     }
     std::cout << "[native-video-host] h264 rc-plan stage=post-types instance=" << (codecInstanceId_ + 1)
               << " profile=" << rc_profile_name(rcProfile_) << " mean=" << rcPlan_.meanBps
@@ -1989,9 +2015,10 @@ RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
   }
   maxQpOverride_ = maxQp;
   (void)apply_rate_control("governor");
-  // Applied only if the ceiling's own SetValue was accepted (r2 R2: a refused MaxQP is Failed even
-  // when the mean/peak/VBV it re-issued alongside were fine).
-  return lastQpSetOk_ ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+  // Applied only if the ceiling's own field was accepted AND its readback does not contradict it (r3
+  // S1: an S_OK with the readback stuck at the old value is not applied). A refused MaxQP is Failed
+  // even when the mean/peak/VBV re-issued alongside were fine.
+  return rcFieldMaxQp_.applied() ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
 RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
@@ -2006,9 +2033,11 @@ RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
   }
   bitrate_ = mean;
   (void)apply_rate_control("reconfigure");
-  // Applied if the mean/peak/VBV were accepted; a ceiling the MFT refuses is the ceiling path's
-  // failure (set_max_qp), not a reason to rebuild on every mean change.
-  return lastRateSetOk_ ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+  // Applied if the mean/peak/VBV fields were accepted and none is contradicted by its readback (r3
+  // S1); a ceiling the MFT refuses or holds is the ceiling path's business (set_max_qp), not a reason
+  // to rebuild on every mean change. A Failed here takes the host's existing bounded rebuild path.
+  return (rcFieldMean_.applied() && rcFieldPeak_.applied() && rcFieldVbv_.applied()) ? RcRuntimeResult::Applied
+                                                                                     : RcRuntimeResult::Failed;
 }
 
 bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,

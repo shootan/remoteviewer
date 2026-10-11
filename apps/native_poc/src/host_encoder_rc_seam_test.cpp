@@ -253,6 +253,70 @@ int main() {
     enc.set_transform_for_test(nullptr);
     fake->Release();
   }
+  // ------------------------------------------------------------------ [8] r3 S1: S_OK but the readback disagrees (legacy)
+  {
+    // The MFT accepts every SetValue and reports the ceiling stuck at 32: a live set_max_qp(35) is
+    // NOT applied, whatever the HRESULT said -- the ceiling field's own readback contradicts it.
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_1002", L"AMDh264Encoder");
+    fake->stuck[CODECAPI_AVEncVideoMaxQP] = 32;
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    (void)capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[8] legacy with the ceiling readback stuck at 32: initialize succeeds", ok);
+    const RcRuntimeResult r1 = enc.set_max_qp(35);
+    check("[8] r3 S1: set_max_qp(35) with S_OK but readback 32 is NOT Applied (its own field is a known mismatch)",
+          r1 != RcRuntimeResult::Applied, std::to_string(static_cast<int>(r1)));
+    check("[8] r3 S1: ...the plan state says mismatch and the plan is not effective",
+          enc.rc_plan_state() == RcPlanState::Mismatch && !enc.rc_plan_effective());
+    // The mean, whose own readback follows, is still a real live change: Applied.
+    const RcRuntimeResult r2 = enc.reconfigure_bitrate(kE / 2);
+    check("[8] r3 S1: a mean change whose fields read back as set is Applied even while the ceiling is stuck",
+          r2 == RcRuntimeResult::Applied && fake->set_value(CODECAPI_AVEncCommonMeanBitRate) == kE / 2, std::to_string(static_cast<int>(r2)));
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
+  {
+    // The mean readback stuck at the previous value: a live reconfigure is not Applied, and the
+    // instance's configured mean must not be mistaken for a confirmed one.
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_1002", L"AMDh264Encoder");
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    (void)capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[8b] legacy: initialize", ok);
+    fake->stuck[CODECAPI_AVEncCommonMeanBitRate] = kE;   // from now on the MFT reports the OLD mean
+    const RcRuntimeResult r1 = enc.reconfigure_bitrate(kE / 2);
+    check("[8b] r3 S1: reconfigure_bitrate with S_OK but the mean readback stuck is NOT Applied",
+          r1 != RcRuntimeResult::Applied, std::to_string(static_cast<int>(r1)));
+    check("[8b] r3 S1: ...state mismatch, not effective", enc.rc_plan_state() == RcPlanState::Mismatch && !enc.rc_plan_effective());
+    const RcRuntimeResult r2 = enc.set_max_qp(35);
+    check("[8b] r3 S1: the ceiling, whose readback follows, is still Applied", r2 == RcRuntimeResult::Applied);
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
+  {
+    // r3 S1 (the :1902 AND): the pre-types Set of one field is refused once, the bounded post-type
+    // retry succeeds and the final readback matches -> the plan IS effective (the field's LAST
+    // outcome counts). When the retried field stays Unknown it is not promoted to confirmed.
+    FakeEncoderMft* fake = new FakeEncoderMft(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    fake->rejectFirstN[CODECAPI_AVEncCommonBufferSize] = 1;   // the first VBV Set fails, later ones succeed
+    fake->stuck[CODECAPI_AVEncCommonBufferSize] = 0;          // and until it is set, it reads back 0 (mismatch -> retry)
+    fake->stuckUntilSet = true;
+    H264Encoder enc;
+    enc.set_transform_for_test(fake);
+    bool ok = false;
+    const std::string log = capture([&] { ok = enc.initialize(kW, kH, kFps, kE, kKeyint); });
+    check("[8c] initialize with one first-time refusal succeeds", ok);
+    check("[8c] r3 S1: the retried field's LAST outcome counts: setAccepted=1, state accepted, effective",
+          enc.rc_set_accepted() && enc.rc_plan_state() == RcPlanState::Accepted && enc.rc_plan_effective(),
+          log.substr(log.find("stage=post-types") == std::string::npos ? 0 : log.find("stage=post-types"), 260));
+    enc.shutdown();
+    enc.set_transform_for_test(nullptr);
+    fake->Release();
+  }
   {
     // readback unknown (the MFT reports nothing): recorded as unknown, no loop, and the same plan IS
     // treated as the instance's (a Set the MFT accepted and cannot report is not a mismatch).

@@ -66,6 +66,10 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
   std::map<GUID, HRESULT, GuidLess> rejectWith;
   // GetValue fails for every key (models an MFT that accepts Sets but reports nothing: "unknown").
   bool readbackUnsupported = false;
+  // Keys whose first N SetValues fail, then succeed (models a property refused before some state).
+  std::map<GUID, int, GuidLess> rejectFirstN;
+  // With stuckUntilSet, a `stuck` readback applies only until that key's SetValue first SUCCEEDS.
+  bool stuckUntilSet = false;
   bool typesSet = false;
 
   explicit FakeEncoderMft(const wchar_t* vendorId, const wchar_t* friendlyName) {
@@ -148,7 +152,10 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
     calls.push_back("SetValue:" + n + "=" + std::to_string(v) + (typesSet ? ":post-types" : ":pre-types"));
     auto rj = rejectWith.find(*key);
     if (rj != rejectWith.end()) return rj->second;
+    auto rf = rejectFirstN.find(*key);
+    if (rf != rejectFirstN.end() && rf->second > 0) { --rf->second; return E_FAIL; }
     values_[*key] = v;
+    if (stuckUntilSet) stuck.erase(*key);
     return S_OK;
   }
   STDMETHODIMP RegisterForEvent(const GUID*, LONG_PTR) override { return E_NOTIMPL; }
