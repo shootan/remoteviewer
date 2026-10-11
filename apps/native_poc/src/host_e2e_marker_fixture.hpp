@@ -18,7 +18,9 @@
 #undef max
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -46,8 +48,15 @@ inline bool wait_until(const std::function<bool()>& done, int budgetMs) {
   return done();
 }
 
-constexpr int kWinW = 640;
-constexpr int kWinH = 360;
+// The fixture window's size. Runtime-settable (encoder-rc-budget C5: the matrix captures a 1080p page,
+// because a 640x360 page cannot say anything about 1080p text at 1.5 Mbps); every Target created after
+// a change uses the new size. Defaults are the original 640x360 so existing runs are unchanged.
+inline int kWinW = 640;
+inline int kWinH = 360;
+inline void set_fixture_window(int w, int h) {
+  kWinW = w > 64 ? w : 64;
+  kWinH = h > 64 ? h : 64;
+}
 
 // StaticText/LowMotion/Video are the original synthetic cases. TextScroll/WindowDrag/PartialVideo are
 // the r4-addendum "real desktop-like" cases the verifier asked for: a structured text page that
@@ -113,17 +122,89 @@ struct EventLog {
       if (kv.second <= cutoffUs) ++n;
     return n;
   }
+  // encoder-rc-budget C5 quality: the Y plane of the page as PAINTED for each event id (the marker
+  // included), so a decoded frame carrying that id can be compared with what was actually drawn --
+  // a matched PSNR, not a guess from an unrelated frame. BT.709 limited range, the pipeline's own.
+  struct RefY { int w = 0, h = 0; std::vector<uint8_t> y; };
+  std::map<uint32_t, RefY> refY;
+  void StoreRef(uint32_t id, int w, int h, const uint32_t* bgra) {
+    if (!bgra || w <= 0 || h <= 0) return;
+    RefY r;
+    r.w = w;
+    r.h = h;
+    r.y.resize(static_cast<size_t>(w) * h);
+    for (int yy = 0; yy < h; ++yy) {
+      for (int xx = 0; xx < w; ++xx) {
+        const uint32_t p = bgra[static_cast<size_t>(yy) * w + xx];
+        const int b = p & 0xFF, g = (p >> 8) & 0xFF, rr = (p >> 16) & 0xFF;
+        int yv = ((47 * rr + 157 * g + 16 * b + 128) >> 8) + 16;
+        r.y[static_cast<size_t>(yy) * w + xx] = static_cast<uint8_t>(yv < 0 ? 0 : (yv > 255 ? 255 : yv));
+      }
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    refY[id] = std::move(r);
+  }
+  bool Ref(uint32_t id, RefY* out) {
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = refY.find(id);
+    if (it == refY.end()) return false;
+    *out = it->second;
+    return true;
+  }
 };
+
+// PSNR (dB) of a decoded Y plane against the painted reference for the same event, over the VISIBLE
+// picture. The decoded picture may be smaller than the painted page (the host's encode ladder reduces
+// the size at a low rate): the reference is then box-averaged down to the decoded size, so the figure
+// is "how well does what the viewer sees reproduce what was drawn" at the size the viewer gets. Two
+// figures: the whole picture, and the TEXT rows (below the marker strip), the legibility proxy.
+struct PsnrResult { double full = 0; double text = 0; bool ok = false; };
+inline PsnrResult psnr_against_ref(const uint8_t* y, uint32_t codedW, uint32_t codedH, uint32_t visLeft, uint32_t visTop,
+                                   uint32_t visW, uint32_t visH, const EventLog::RefY& ref) {
+  PsnrResult out;
+  if (!y || visW == 0 || visH == 0 || ref.w <= 0 || ref.h <= 0) return out;
+  if (visLeft + visW > codedW || visTop + visH > codedH) return out;
+  double seFull = 0, seText = 0;
+  uint64_t nFull = 0, nText = 0;
+  const int textTop = static_cast<int>(static_cast<uint64_t>(kEvCell) * visH / static_cast<uint32_t>(ref.h)) + 1;
+  for (uint32_t yy = 0; yy < visH; ++yy) {
+    const int ry0 = static_cast<int>(static_cast<uint64_t>(yy) * ref.h / visH);
+    const int ry1 = static_cast<int>(std::max<uint64_t>(ry0 + 1, static_cast<uint64_t>(yy + 1) * ref.h / visH));
+    for (uint32_t xx = 0; xx < visW; ++xx) {
+      const int rx0 = static_cast<int>(static_cast<uint64_t>(xx) * ref.w / visW);
+      const int rx1 = static_cast<int>(std::max<uint64_t>(rx0 + 1, static_cast<uint64_t>(xx + 1) * ref.w / visW));
+      uint64_t sum = 0, cnt = 0;
+      for (int ry = ry0; ry < ry1 && ry < ref.h; ++ry)
+        for (int rx = rx0; rx < rx1 && rx < ref.w; ++rx) { sum += ref.y[static_cast<size_t>(ry) * ref.w + rx]; ++cnt; }
+      const double refv = cnt ? static_cast<double>(sum) / cnt : 0.0;
+      const double d = static_cast<double>(y[static_cast<size_t>(visTop + yy) * codedW + visLeft + xx]) - refv;
+      seFull += d * d;
+      ++nFull;
+      if (static_cast<int>(yy) >= textTop) { seText += d * d; ++nText; }
+    }
+  }
+  auto psnr = [](double se, uint64_t n) { if (!n) return 0.0; const double mse = se / n; return mse <= 1e-9 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse); };
+  out.full = psnr(seFull, nFull);
+  out.text = psnr(seText, nText);
+  out.ok = nFull > 0;
+  return out;
+}
 
 // Read the marker out of a decoded NV12 Y plane (coded stride = width; visible origin applied). Returns
 // 0 if the sync cell is not clearly white (no valid marker in this frame). H264 preserves the large
 // high-contrast cells; a center sample per cell thresholded at mid-luma survives both rates.
+// `visW` (encoder-rc-budget C5): the decoded VISIBLE width, so a picture the host's encode ladder
+// reduced below the painted page (1080p page encoded at 720p at a low rate) is read at the scaled cell
+// pitch -- the marker is kEvCell px wide on the PAINTED page; on the decoded one it is kEvCell*visW/kWinW.
+// 0 = unscaled (the original 640x360 runs, where the page and the picture are the same size).
 inline uint32_t decode_event_marker(const uint8_t* y, uint32_t codedW, uint32_t codedH, uint32_t visLeft,
-                                    uint32_t visTop) {
+                                    uint32_t visTop, uint32_t visW = 0) {
   if (!y || codedW == 0 || codedH == 0) return 0;
-  const uint32_t cy = visTop + kEvCell / 2;
-  auto sample = [&](int cell) -> int {
-    const uint32_t cx = visLeft + static_cast<uint32_t>(cell) * kEvCell + kEvCell / 2;
+  const double cell = (visW > 0 && kWinW > 0) ? static_cast<double>(kEvCell) * visW / kWinW : static_cast<double>(kEvCell);
+  if (cell < 4.0) return 0;  // too small to sample a centre reliably
+  const uint32_t cy = visTop + static_cast<uint32_t>(cell / 2);
+  auto sample = [&](int c) -> int {
+    const uint32_t cx = visLeft + static_cast<uint32_t>(c * cell + cell / 2);
     if (cx >= codedW || cy >= codedH) return -1;
     return y[static_cast<size_t>(cy) * codedW + cx];
   };
@@ -164,16 +245,20 @@ class Target {
     s ^= s << 5;
     return s;
   }
-  // The page: light background, lines of dark glyph-like cells. Identical every frame.
+  // The page: light background, lines of dark glyph-like cells. Identical every frame. The line and
+  // column counts follow the window so a 1080p page is a full page of small text, not a 640x360
+  // corner of one (the glyph cells stay 6x10 px: the small-text case the matrix is about).
   void PaintPage(HDC dc) {
     RECT client{0, 0, kWinW, kWinH};
     HBRUSH back = CreateSolidBrush(RGB(236, 236, 230));
     FillRect(dc, &client, back);
     DeleteObject(back);
     uint32_t s = 0x1234567u;
-    for (int line = 0; line < 22; ++line) {
+    const int lines = std::max(1, (kWinH - 24) / 15);
+    const int cols = std::max(1, (kWinW - 20) / 8);
+    for (int line = 0; line < lines; ++line) {
       const int top = 12 + line * 15;
-      for (int col = 0; col < 76; ++col) {
+      for (int col = 0; col < cols; ++col) {
         const uint32_t r = xorshift(s);
         if ((r & 7u) == 0) continue;
         const int left = 10 + col * 8;
@@ -196,7 +281,7 @@ class Target {
     if (content == Content::LowMotion) {
       // The caret cell and the block's track are repainted from the page, then the moving bits.
       HBRUSH back = CreateSolidBrush(RGB(236, 236, 230));
-      RECT caret{620, 12, 623, 24};
+      RECT caret{kWinW - 20, 12, kWinW - 17, 24};
       RECT track{0, kWinH - 20, kWinW, kWinH - 4};
       FillRect(memDc_, &caret, back);
       FillRect(memDc_, &track, back);
@@ -311,7 +396,8 @@ class Target {
   void DrawEventMarker() {
     if (!events || !pixels_) return;
     const int step = static_cast<int>(frame_ / 60);
-    if (step != markerStep_ || markerId_ == 0) {
+    const bool fresh = step != markerStep_ || markerId_ == 0;
+    if (fresh) {
       markerStep_ = step;
       markerId_ = events->Allocate(static_cast<uint64_t>(qpc_now_us()));
     }
@@ -324,6 +410,11 @@ class Target {
     };
     fillCell(0, true);  // sync cell
     for (int b = 0; b < 8; ++b) fillCell(b + 1, (markerId_ >> b) & 1u);
+    // The painted page for this event, as the quality reference of every decoded frame carrying its id.
+    if (fresh) {
+      GdiFlush();
+      events->StoreRef(markerId_, kWinW, kWinH, pixels_);
+    }
   }
   void EnsureSurface(HDC dc) {
     if (memDc_) return;

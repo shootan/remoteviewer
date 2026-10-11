@@ -112,6 +112,17 @@ struct HostAccount {
   uint64_t txFrames = 0, txBytes = 0, parity = 0, chunkHdr = 0, videoDatagrams = 0, nackBytes = 0,
            nackDatagrams = 0, wireEst = 0;
   size_t keyframeLines = 0;
+  // encoder-rc-budget: the host's R/E account (last encoder-budget line), plan lines per instance,
+  // runtime RC writes, governor steps, key AU sizes.
+  uint64_t requestedWire = 0, effectiveWire = 0, desiredEncoder = 0, appliedEncoder = 0;
+  std::string rcProfile;
+  std::vector<std::string> budgetActions;
+  uint32_t rcInstances = 0, rcPlanPreTypes = 0, rcPlanPostStart = 0;
+  std::vector<std::string> rcPlanStates;
+  std::vector<uint64_t> rcPlanMeans;
+  uint32_t rcReconfigureWrites = 0, rcGovernorWrites = 0, rcInitWrites = 0;
+  uint32_t governorQpSteps = 0, governorFpsSteps = 0, deferredRetargets = 0;
+  std::vector<uint64_t> keyBytes;
   // Isolation matrix (r2): max sender queue wait/depth from the host's own [wire] lines, and the
   // wire cap it logged at startup (wireCapBps=...), and how many capture frames the input gate skipped.
   uint64_t maxQueueWaitUs = 0, maxQueueDepth = 0, wireCapBps = 0, wireOverloadSkips = 0;
@@ -150,6 +161,34 @@ HostAccount read_host_log(const std::wstring& path) {
       a.wireCapAppliedQpcUs = num_of(line, "appliedQpcUs");
       a.wireCapAppliedBitrate = num_of(line, "bitrate");
     }
+    // encoder-rc-budget C1-C4: the host's own account of R vs E, the plan per instance, and every
+    // runtime rate-control write it made.
+    if (line.find(" encoder-budget requestedWire=") != std::string::npos) {
+      a.requestedWire = num_of(line, "requestedWire");
+      a.effectiveWire = num_of(line, "effectiveWire");
+      a.desiredEncoder = num_of(line, "desiredEncoder");
+      a.appliedEncoder = num_of(line, "appliedEncoder");
+      a.rcProfile = value_of(line, "profile");
+      a.budgetActions.push_back(value_of(line, "action"));
+    }
+    if (line.find(" h264 rc-identity instance=") != std::string::npos) ++a.rcInstances;
+    if (line.find(" h264 rc-plan stage=pre-types") != std::string::npos) ++a.rcPlanPreTypes;
+    if (line.find(" h264 rc-plan stage=post-start") != std::string::npos) {
+      ++a.rcPlanPostStart;
+      a.rcPlanStates.push_back(value_of(line, "state"));
+      a.rcPlanMeans.push_back(num_of(line, "mean"));
+    }
+    if (line.find(" h264 rate-control reason=reconfigure") != std::string::npos) ++a.rcReconfigureWrites;
+    if (line.find(" h264 rate-control reason=governor") != std::string::npos) ++a.rcGovernorWrites;
+    if (line.find(" h264 rate-control reason=init") != std::string::npos) ++a.rcInitWrites;
+    if (line.find("[rate-governor] maxQp ") != std::string::npos) ++a.governorQpSteps;
+    if (line.find("[rate-governor] fps ") != std::string::npos) ++a.governorFpsSteps;
+    if (line.find("[keyframe]") != std::string::npos) {
+      // the AU size of each key the host sent, for the "big IDR" question
+      const uint64_t bytes = num_of(line, "bytes");
+      if (bytes) a.keyBytes.push_back(bytes);
+    }
+    if (line.find("deferred retarget applied") != std::string::npos) ++a.deferredRetargets;
   }
   if (!last.empty()) {
     a.txFrames = num_of(last, "udpTxFrames");
@@ -187,6 +226,7 @@ struct RunResult {
   std::vector<uint8_t> deliverWasKey;     // 1 if the delivered AU was a keyframe
   uint32_t appliedBitrate = 0, appliedFps = 0;
   uint64_t switchUs = 0;  // when the runtime bitrate downshift was sent (0 = none)
+  std::vector<uint64_t> tuneSentUs;  // every scheduled runtime tune the control thread sent (qpc)
   uint64_t recoveryMaxUs = 0;  // max time from a discontinuity to the next delivered keyframe
   uint32_t recoveryCount = 0;
   // Realtime decode (r4 addendum): a decoder thread consumes AUs AS THEY ARE DELIVERED (not post-hoc),
@@ -203,6 +243,7 @@ struct RunResult {
   // = ids whose marker was decoded. This is the real single-change / full-transition response.
   std::vector<uint64_t> eventLatencyUs;
   uint32_t eventsExpected = 0, eventsMatched = 0;
+  uint32_t eventsOwed = 0;  // ids painted >= 1 s before the live window closed (the rc gates' definition)
   // Per-event detail for the V1 paired table: id, paint QPC, first decoded-marker QPC, latency.
   struct EventRec { uint32_t id = 0; uint64_t paintUs = 0, decodedUs = 0, latencyUs = 0; };
   std::vector<EventRec> eventRecs;
@@ -210,7 +251,29 @@ struct RunResult {
   // "no unnecessary repeated keyframe" check) and the IDRs that actually decoded through the gate.
   uint32_t v2KeyframeRequests = 0;
   uint32_t v2IdrDecoded = 0;
+  // encoder-rc-budget C5 quality: PSNR of the first decoded frame of each event against the page as
+  // painted for that event (host_e2e_marker_fixture psnr_against_ref) -- whole picture and text rows.
+  std::vector<double> psnrFull, psnrText;
+  uint32_t psnrDecodedW = 0, psnrDecodedH = 0;  // the decoded visible size the PSNR was taken at
 };
+
+// A scheduled runtime tune the harness's control thread sends at `atSec` (encoder-rc-budget C5:
+// down/up shifts and an fps transition in one run). bitrate 0 / fps 0 = that field not sent.
+struct TuneStep { uint32_t atSec = 0; uint32_t bitrate = 0; uint32_t fps = 0; };
+
+// The quality sample for one decoded frame carrying event `id` (first decode of that id only).
+void note_psnr(RunResult& r, EventLog& events, uint32_t id, const DecodedFrameNv12& f) {
+  EventLog::RefY ref;
+  if (!events.Ref(id, &ref)) return;
+  const uint32_t visW = f.visibleWidth ? f.visibleWidth : f.width;
+  const uint32_t visH = f.visibleHeight ? f.visibleHeight : f.height;
+  const PsnrResult p = psnr_against_ref(f.bytes.data(), f.width, f.height, f.visibleLeft, f.visibleTop, visW, visH, ref);
+  if (!p.ok) return;
+  r.psnrFull.push_back(p.full);
+  r.psnrText.push_back(p.text);
+  r.psnrDecodedW = visW;
+  r.psnrDecodedH = visH;
+}
 
 uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
   const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
@@ -224,7 +287,8 @@ uint64_t fnv1a_u64(uint64_t h, uint64_t v) {
 RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
                    uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                    uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
-                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false) {
+                   uint32_t downshiftAtSec = 0, bool v2FrameGate = false,
+                   const std::vector<TuneStep>* tunes = nullptr) {
   RunResult r;
   CreateDirectoryW(runDir.c_str(), nullptr);
   const std::wstring me = self_path();
@@ -441,13 +505,15 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
             v2PresentedCapUs = f.header.captureQpcUs;
             for (const auto& df : dout) {
               if (df.bytes.empty()) continue;
-              const uint32_t mid = decode_event_marker(df.bytes.data(), df.width, df.height, df.visibleLeft, df.visibleTop);
+              const uint32_t mid = decode_event_marker(df.bytes.data(), df.width, df.height, df.visibleLeft, df.visibleTop,
+                                                       df.visibleWidth ? df.visibleWidth : df.width);
               if (mid != 0 && v2seen.insert(mid).second) {
                 const uint64_t paintQpc = eventLog.PaintQpc(mid);
                 if (paintQpc != 0 && outUs >= paintQpc) {
                   r.eventLatencyUs.push_back(outUs - paintQpc);
                   r.eventRecs.push_back({mid, paintQpc, outUs, outUs - paintQpc});
                 }
+                note_psnr(r, eventLog, mid, df);
               }
             }
           } else {
@@ -510,13 +576,15 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
           // frame of each event to its paint QPC -> a true change->decoded-picture latency.
           const DecodedFrameNv12& f = out[k];
           if (!f.bytes.empty()) {
-            const uint32_t id = decode_event_marker(f.bytes.data(), f.width, f.height, f.visibleLeft, f.visibleTop);
+            const uint32_t id = decode_event_marker(f.bytes.data(), f.width, f.height, f.visibleLeft, f.visibleTop,
+                                                    f.visibleWidth ? f.visibleWidth : f.width);
             if (id != 0 && seenEvents.insert(id).second) {
               const uint64_t paintQpc = eventLog.PaintQpc(id);
               if (paintQpc != 0 && outUs >= paintQpc) {
                 r.eventLatencyUs.push_back(outUs - paintQpc);
                 r.eventRecs.push_back({id, paintQpc, outUs, outUs - paintQpc});
               }
+              note_psnr(r, eventLog, id, f);
             }
           }
         }
@@ -589,22 +657,31 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
       RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
       ClientInputQueue inputQueue;
       scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
-      const uint64_t downshiftSendUs = downshiftBitrate > 0 ? qpc_now_us() + downshiftAtSec * 1'000'000ull : 0;
-      bool downsent = false;
+      // The schedule of runtime tunes: the legacy single downshift, plus any TuneSteps the caller gave
+      // (encoder-rc-budget C5 transitions). Each is sent once at its time; the first one sent stamps
+      // switchUs (the downshift analysis), all of them are recorded in tuneSentUs.
+      struct Pending { uint64_t atUs; uint32_t bitrate, fps; bool sent; };
+      std::vector<Pending> schedule;
+      const uint64_t t0 = qpc_now_us();
+      if (downshiftBitrate > 0) schedule.push_back({t0 + downshiftAtSec * 1'000'000ull, downshiftBitrate, 0, false});
+      if (tunes) for (const TuneStep& s : *tunes) schedule.push_back({t0 + s.atSec * 1'000'000ull, s.bitrate, s.fps, false});
       uint32_t dseq = 50000;
       while (!controlStop.load()) {
-        if (downshiftSendUs && !downsent && qpc_now_us() >= downshiftSendUs) {
+        for (Pending& p : schedule) {
+          if (p.sent || qpc_now_us() < p.atUs) continue;
           ControlRuntimeEncoderConfigMessage m{};
           m.header.magic = kMagic;
           m.header.type = static_cast<uint16_t>(MessageType::ControlRuntimeEncoderConfig);
           m.header.size = static_cast<uint16_t>(sizeof(m));
           m.seq = ++dseq;
-          m.bitrate = downshiftBitrate;
-          m.flags = 0x1u;  // bitrate valid
+          m.bitrate = p.bitrate;
+          m.fps = p.fps;
+          m.flags = (p.bitrate ? 0x1u : 0u) | (p.fps ? 0x4u : 0u);  // bit0 bitrate valid, bit2 fps valid
           m.clientSendQpcUs = qpc_now_us();
           if (link.Write(&m, sizeof(m)) && link.EndMessage()) {
-            r.switchUs = qpc_now_us();
-            downsent = true;
+            if (r.switchUs == 0) r.switchUs = qpc_now_us();
+            r.tuneSentUs.push_back(qpc_now_us());
+            p.sent = true;
           }
         }
         if (pendingKeyRequest.exchange(false)) (void)keyframe.Request(2, qpc_now_us());
@@ -638,7 +715,13 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     dcv.notify_all();
     if (decodeThread.joinable()) decodeThread.join();
     r.decoded = r.realtimeDecoded;  // the matrix's correctness check now reflects the realtime decode
-    r.eventsExpected = eventLog.Count();            // ids painted
+    // ids painted EARLY ENOUGH to be decodable before the live window closed: an event painted in the
+    // last second is not owed to the receiver (the same boundary rule as viewer_udp_recovery_test's r9
+    // marker gate). The 1080p matrix at 6 Mbps showed the last event painted ~0.5 s before the end and
+    // missed by baseline and candidate alike -- a harness boundary, not a loss; it FAILed only when the
+    // two hosts happened to land on different sides of it. (encoder-rc-budget C5)
+    r.eventsExpected = eventLog.Count();  // ids painted (the paired/v2 modes' original definition)
+    r.eventsOwed = eventLog.CountUpTo(r.liveEndUs > 1'000'000 ? r.liveEndUs - 1'000'000 : 0);
     r.eventsMatched = static_cast<uint32_t>(r.eventLatencyUs.size());  // ids decoded + matched
     {
       std::lock_guard<std::mutex> lk(pmu);
@@ -1045,6 +1128,304 @@ int run_v2(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
   return 0;
 }
 
+// ------------------------------------------------------------- encoder-rc-budget C5: the RC matrix
+//
+// Five desktop-like scenes x {30, 60} fps x wire R {1.5, 3, 6} Mbps, on a 1080p page, candidate host
+// against the baseline host (f5de6e8, the same binary the field runs), cap ON, strict windows. Per run:
+// the wire against R (every 1 s / 250 ms window, external receive), the realtime decode (fps, >250 ms
+// gaps, present latency p95/max), the event-matched change->picture latency (marker scenes), the
+// matched PSNR against the painted page (marker scenes: whole picture + text rows), the host's own
+// R/E account and plan state, the IDR sizes it sent, and what it actually put on the wire as payload
+// (udpTxBytes over the live seconds -- the encoder's real output that was sent, not the genKbps
+// estimate). The baseline is REPORTED beside the candidate; the candidate is GATED: wire windows
+// within cap+10%, no decode error, no event lost, no multi-second stall.
+struct RcCell {
+  const char* label;
+  Content content;
+  bool marker;      // event-id scenes: latency + PSNR are event-matched
+  double maxDecodeGapMs;  // responsiveness ceiling for continuous-motion scenes (0 = none)
+};
+struct RcRow {
+  std::string host, scene;
+  uint32_t fps = 0, wireBps = 0;
+  double win1sPct = 0, win250Pct = 0, deliveredFps = 0, decodeFps = 0, decodeGapMaxMs = 0, decodeLatP95Ms = 0,
+         decodeLatMaxMs = 0, evP50 = 0, evP95 = 0, evMax = 0, psnrFullMean = 0, psnrFullMin = 0, psnrTextMean = 0,
+         psnrTextMin = 0, sentPayloadKbps = 0, idrPerSec = 0, keyMaxKb = 0, keyMeanKb = 0;
+  uint32_t gap250 = 0, evMatched = 0, evExpected = 0, decErr = 0, keyReq = 0, nacks = 0, psnrN = 0, rcInstances = 0,
+           rcReconfigureWrites = 0, decodedW = 0, decodedH = 0;
+  uint64_t desiredEncoder = 0, appliedEncoder = 0, effectiveWire = 0, hostSkips = 0;
+  std::string rcProfile, planState;
+};
+
+RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wireBps, int seconds, const RunResult& r) {
+  RcRow row;
+  row.host = host;
+  row.scene = cell.label;
+  row.fps = fps;
+  row.wireBps = wireBps;
+  row.win1sPct = 100.0 * window_peak_bps(r.wireEvents, 1'000'000) / wireBps;
+  row.win250Pct = 100.0 * window_peak_bps(r.wireEvents, 250'000) / wireBps;
+  if (r.deliverUs.size() >= 2) {
+    const uint64_t span = r.deliverUs.back() - r.deliverUs.front();
+    if (span > 0) {
+      row.deliveredFps = static_cast<double>(r.delivered) * 1e6 / static_cast<double>(span);
+      row.idrPerSec = static_cast<double>(r.keyFrames) * 1e6 / static_cast<double>(span);
+    }
+  }
+  if (r.decodeOutUs.size() >= 2) {
+    const uint64_t span = r.decodeOutUs.back() - r.decodeOutUs.front();
+    if (span > 0) row.decodeFps = static_cast<double>(r.realtimeDecoded) * 1e6 / static_cast<double>(span);
+    uint64_t gap = 0;
+    for (size_t i = 1; i < r.decodeOutUs.size(); ++i) {
+      const uint64_t g = r.decodeOutUs[i] - r.decodeOutUs[i - 1];
+      gap = std::max(gap, g);
+      if (g > 250'000ULL) ++row.gap250;
+    }
+    row.decodeGapMaxMs = gap / 1000.0;
+    std::vector<uint64_t> lat;
+    for (size_t i = 0; i < r.decodeLatencyUs.size() && i < r.decodeOutUs.size(); ++i)
+      if (r.liveEndUs == 0 || r.decodeOutUs[i] <= r.liveEndUs) lat.push_back(r.decodeLatencyUs[i]);
+    if (!lat.empty()) {
+      std::sort(lat.begin(), lat.end());
+      row.decodeLatP95Ms = lat[(lat.size() * 95) / 100] / 1000.0;
+      row.decodeLatMaxMs = lat.back() / 1000.0;
+    }
+  }
+  const EvStats ev = event_stats(r);
+  row.evP50 = ev.p50; row.evP95 = ev.p95; row.evMax = ev.max; row.evMatched = ev.matched;
+  row.evExpected = r.eventsOwed;  // what the receiver is OWED (painted >= 1 s before the end), not every paint
+  if (!r.psnrFull.empty()) {
+    double sf = 0, st = 0, mf = 1e9, mt = 1e9;
+    for (size_t i = 0; i < r.psnrFull.size(); ++i) {
+      sf += r.psnrFull[i]; st += r.psnrText[i];
+      mf = std::min(mf, r.psnrFull[i]); mt = std::min(mt, r.psnrText[i]);
+    }
+    row.psnrN = static_cast<uint32_t>(r.psnrFull.size());
+    row.psnrFullMean = sf / r.psnrFull.size(); row.psnrFullMin = mf;
+    row.psnrTextMean = st / r.psnrText.size(); row.psnrTextMin = mt;
+    row.decodedW = r.psnrDecodedW; row.decodedH = r.psnrDecodedH;
+  }
+  row.sentPayloadKbps = seconds > 0 ? static_cast<double>(r.host.txBytes) * 8.0 / 1000.0 / seconds : 0.0;
+  if (!r.host.keyBytes.empty()) {
+    uint64_t mx = 0, sum = 0;
+    for (uint64_t b : r.host.keyBytes) { mx = std::max(mx, b); sum += b; }
+    row.keyMaxKb = mx / 1024.0;
+    row.keyMeanKb = static_cast<double>(sum) / r.host.keyBytes.size() / 1024.0;
+  }
+  row.decErr = r.decodeErrors; row.keyReq = r.keyReq; row.nacks = r.nacks;
+  row.rcInstances = r.host.rcInstances; row.rcReconfigureWrites = r.host.rcReconfigureWrites;
+  row.desiredEncoder = r.host.desiredEncoder; row.appliedEncoder = r.host.appliedEncoder;
+  row.effectiveWire = r.host.effectiveWire; row.hostSkips = r.host.wireOverloadSkips;
+  row.rcProfile = r.host.rcProfile;
+  row.planState = r.host.rcPlanStates.empty() ? "-" : r.host.rcPlanStates.back();
+  return row;
+}
+
+void print_rc_row(const RcRow& w) {
+  std::printf("RCMATRIX host=%s scene=%s fps=%u R=%u | win1s=%.1f%% win250=%.1f%% sentPayload=%.0fkbps E=%llu/%llu(desired/applied) "
+              "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
+              "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
+              "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u instances=%u "
+              "decErr=%u keyReq=%u nacks=%u\n",
+              w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.win1sPct, w.win250Pct, w.sentPayloadKbps,
+              (unsigned long long)w.desiredEncoder, (unsigned long long)w.appliedEncoder, (unsigned long long)w.effectiveWire,
+              w.rcProfile.c_str(), w.planState.c_str(), w.deliveredFps, w.decodeFps, w.gap250, w.decodeGapMaxMs,
+              w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
+              w.psnrFullMin, w.psnrTextMean, w.psnrTextMin, w.psnrN, w.decodedW, w.decodedH, w.idrPerSec, w.keyMaxKb,
+              w.keyMeanKb, (unsigned long long)w.hostSkips, w.rcReconfigureWrites, w.rcInstances, w.decErr, w.keyReq, w.nacks);
+}
+
+int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselineHost, const std::wstring& dir, int seconds,
+                  const std::string& only) {
+  const RcCell cells[] = {
+      {"textscroll", Content::TextScroll, false, 1200.0},        // small text, scrolling (full-frame real text motion)
+      {"windowdrag", Content::WindowDrag, false, 1200.0},        // a window dragged over a text page
+      {"singlechange", Content::SingleChange, true, 0.0},        // idle -> one localised change
+      {"fulltransition", Content::FullTransition, true, 0.0},    // the whole page swaps
+      {"motion", Content::Video, false, 1200.0},                 // busy video-like motion (the IDR/burst stress)
+  };
+  const uint32_t fpsList[] = {30, 60};
+  const uint32_t rateList[] = {1'500'000, 3'000'000, 6'000'000};
+  std::printf("\n=== encoder-rc-budget C5 matrix: %dx%d page, %d s per run, candidate%s ===\n", kWinW, kWinH, seconds,
+              baselineHost.empty() ? " (no baseline host given)" : " vs baseline");
+  std::vector<RcRow> rows;
+  int idx = 0;
+  for (const RcCell& cell : cells) {
+    if (!only.empty() && only != cell.label) continue;
+    for (uint32_t fps : fpsList) {
+      for (uint32_t rate : rateList) {
+        auto one = [&](const std::wstring& host, const char* tag) -> RunResult {
+          const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+          if (port == 0) return RunResult{};
+          const std::wstring runDir = dir + L"rc_" + std::wstring(cell.label, cell.label + std::strlen(cell.label)) + L"_" +
+                                      std::to_wstring(fps) + L"_" + std::to_wstring(rate / 100000) + L"_" +
+                                      std::wstring(tag, tag + std::strlen(tag)) + L"_" + std::to_wstring(idx++) + L"\\";
+          return run_host(host, runDir, cell.content, /*tight=*/true, port, seconds, 0, 1, /*wireCapOn=*/true, rate, fps);
+        };
+        RunResult base;
+        if (!baselineHost.empty()) {
+          base = one(baselineHost, "base");
+          const RcRow b = rc_row_of("baseline", cell, fps, rate, seconds, base);
+          print_rc_row(b);
+          rows.push_back(b);
+        }
+        const RunResult cand = one(candidateHost, "cand");
+        const RcRow c = rc_row_of("candidate", cell, fps, rate, seconds, cand);
+        print_rc_row(c);
+        rows.push_back(c);
+        if (cell.marker) {
+          // Which events were matched (id:latency ms) and which painted ids were not, for both hosts: a
+          // lost event is named, not just counted.
+          auto events_line = [&](const char* who, const RunResult& r) {
+            std::printf("RCEVENTS host=%s scene=%s fps=%u R=%u painted=%u owed=%u matched:", who, cell.label, fps, rate,
+                        r.eventsExpected, r.eventsOwed);
+            std::set<uint32_t> seen;
+            for (const auto& e : r.eventRecs) { std::printf(" %u:%.0f", e.id, e.latencyUs / 1000.0); seen.insert(e.id); }
+            std::printf(" missing:");
+            for (uint32_t id = 1; id <= r.eventsExpected; ++id) if (!seen.count(id)) std::printf(" %u", id);
+            std::printf(" keyframes=%u decoded=%u hostKeyLines=%zu\n", r.keyFrames, r.realtimeDecoded, r.host.keyframeLines);
+          };
+          if (!baselineHost.empty()) events_line("baseline", base);
+          events_line("candidate", cand);
+        }
+        const std::string tag = std::string("rc ") + cell.label + " " + std::to_string(fps) + "fps " + std::to_string(rate / 1000) + "k";
+        check(cand.launched && cand.hello, tag + ": candidate host started and answered Hello");
+        check(c.win1sPct <= 110.0, tag + ": candidate every 1 s wire window <= R +10% (" + std::to_string((int)c.win1sPct) + "%)");
+        check(c.win250Pct <= 110.0, tag + ": candidate every 250 ms wire window <= R +10% (" + std::to_string((int)c.win250Pct) + "%)");
+        check(cand.realtimeDecoded >= 2 && cand.decodeErrors == 0, tag + ": candidate decodes without error");
+        check(c.desiredEncoder > 0 && c.desiredEncoder < rate, tag + ": the host's encoder budget E is below R (E=" +
+                                                                   std::to_string(c.desiredEncoder) + ")");
+        check(c.effectiveWire == rate, tag + ": the wire cap in force is R itself, not E (effWire=" + std::to_string(c.effectiveWire) + ")");
+        // Responsiveness and loss are judged AGAINST THE BASELINE where one ran: a 1080p text scroll at
+        // 1.5 Mbps saturates the wire on both hosts (the AMD encoder generates several times its mean
+        // under motion and the gate skips frames to hold the cap -- pre-existing, not this change), so an
+        // absolute ceiling would fail both alike and say nothing about the candidate. The candidate must
+        // not be worse than the baseline beyond a tolerance; without a baseline the absolute ceiling holds.
+        const RcRow* b = baselineHost.empty() ? nullptr : &rows[rows.size() - 2];
+        if (cell.marker) {
+          const bool baseLostToo = b && b->evMatched < b->evExpected;
+          check(c.evExpected > 0 && (c.evMatched >= c.evExpected || (baseLostToo && c.evMatched >= b->evMatched)),
+                tag + ": candidate decoded every event it was owed (matched " + std::to_string(c.evMatched) + " owed " +
+                    std::to_string(c.evExpected) +
+                    (baseLostToo ? ", baseline " + std::to_string(b->evMatched) + "/" + std::to_string(b->evExpected) : "") + ")");
+          const double stallBound = b ? std::max(2500.0, b->evMax * 1.25 + 250.0) : 2500.0;
+          check(c.evMax <= stallBound, tag + ": candidate: no new multi-second stall on a change (max=" +
+                                           std::to_string((int)c.evMax) + "ms bound=" + std::to_string((int)stallBound) + ")");
+          check(c.psnrN > 0, tag + ": a matched PSNR was taken against the painted page");
+        } else if (cell.maxDecodeGapMs > 0) {
+          const double gapBound = b ? std::max(cell.maxDecodeGapMs, b->decodeGapMaxMs * 1.25 + 250.0) : cell.maxDecodeGapMs;
+          check(c.decodeGapMaxMs <= gapBound, tag + ": candidate max realtime-decode gap not worse than baseline/ceiling (" +
+                                                  std::to_string((int)c.decodeGapMaxMs) + "ms bound=" + std::to_string((int)gapBound) + ")");
+        }
+        if (b) {
+          check(c.deliveredFps >= b->deliveredFps * 0.75 - 0.5, tag + ": candidate delivered fps not below 75% of baseline (" +
+                                                                    std::to_string((int)c.deliveredFps) + " vs " +
+                                                                    std::to_string((int)b->deliveredFps) + ")");
+        }
+        if (!baselineHost.empty()) {
+          const RcRow& b = rows[rows.size() - 2];
+          std::printf("RCDELTA scene=%s fps=%u R=%u | win1s %.1f->%.1f%% win250 %.1f->%.1f%% | gap250 %u->%u decodeGapMax %.0f->%.0fms "
+                      "decodeLatP95 %.0f->%.0fms | ev p95 %.0f->%.0fms max %.0f->%.0fms | psnr text %.2f->%.2f full %.2f->%.2f | "
+                      "keyMax %.0f->%.0fKB sentPayload %.0f->%.0fkbps hostSkips %llu->%llu\n",
+                      cell.label, fps, rate, b.win1sPct, c.win1sPct, b.win250Pct, c.win250Pct, b.gap250, c.gap250, b.decodeGapMaxMs,
+                      c.decodeGapMaxMs, b.decodeLatP95Ms, c.decodeLatP95Ms, b.evP95, c.evP95, b.evMax, c.evMax, b.psnrTextMean,
+                      c.psnrTextMean, b.psnrFullMean, c.psnrFullMean, b.keyMaxKb, c.keyMaxKb, b.sentPayloadKbps, c.sentPayloadKbps,
+                      (unsigned long long)b.hostSkips, (unsigned long long)c.hostSkips);
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// encoder-rc-budget C5 transitions on the candidate: the paths that build or re-tune an instance.
+//   T1 6M -> 1.5M (down), then 1.5M -> 6M (up): R applies at once (existing same-clock marker, every
+//      window after it within the new R); E follows (live on the legacy profile, a new instance on
+//      a static one) and the host logs desired/applied E for each.
+//   T2 the SAME target sent twice: no additional RC write, no additional instance (the C3 no-op).
+//   T3 an fps change 30 -> 60: a new instance, and that instance logs its plan (pre-types stage on the
+//      NVIDIA profile; init on legacy) with mean == the host's E.
+int run_rc_transitions(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
+  std::printf("\n=== encoder-rc-budget C5 transitions (candidate) ===\n");
+  const int runSec = std::max(seconds, 16);
+  {
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 4), 1'500'000, 0},
+                                   {static_cast<uint32_t>(runSec / 4), 1'500'000, 0},   // the same target again (T2)
+                                   {static_cast<uint32_t>(runSec * 3 / 5), 6'000'000, 0}};
+    const RunResult r = run_host(hostExe, dir + L"t_downup\\", Content::FullTransition, true, port, runSec, 0, 1, true,
+                                 6'000'000, 30, 0, 0, false, &steps);
+    std::printf("TRANSITION down/up: tunesSent=%zu budgetActions=", r.tuneSentUs.size());
+    for (const auto& a : r.host.budgetActions) std::printf("%s,", a.c_str());
+    std::printf(" rcInstances=%u rcReconfigureWrites=%u deferred=%u effWire(last)=%llu E(desired/applied)=%llu/%llu profile=%s "
+                "planMeans=",
+                r.host.rcInstances, r.host.rcReconfigureWrites, r.host.deferredRetargets, (unsigned long long)r.host.effectiveWire,
+                (unsigned long long)r.host.desiredEncoder, (unsigned long long)r.host.appliedEncoder, r.host.rcProfile.c_str());
+    for (uint64_t m : r.host.rcPlanMeans) std::printf("%llu,", (unsigned long long)m);
+    std::printf(" events=%u/%u decErr=%u\n", r.eventsMatched, r.eventsExpected, r.decodeErrors);
+    check(r.tuneSentUs.size() == 3, "transitions: the three runtime tunes were sent");
+    // The wire from the downshift's apply instant to the upshift's send must respect 1.5M.
+    uint64_t downApplyUs = 0;
+    for (const auto& a : r.host.budgetActions) (void)a;
+    // Use the same-clock wirecap marker of the FIRST change (the downshift) -- it is the last one the host
+    // logged only if no upshift followed, so take the windows between the two tune sends instead.
+    std::vector<std::pair<uint64_t, uint32_t>> low;
+    if (r.tuneSentUs.size() == 3) {
+      for (const auto& e : r.wireEvents)
+        if (e.first >= r.tuneSentUs[0] + 400'000 && e.first < r.tuneSentUs[2]) low.push_back(e);
+    }
+    const double low1s = window_peak_bps(low, 1'000'000);
+    check(!low.empty() && low1s <= 1'500'000 * 1.10,
+          "transitions: after the downshift (from +400 ms) every 1 s window <= 1.5M +10% (" + std::to_string((int)low1s) + ")");
+    std::vector<std::pair<uint64_t, uint32_t>> high;
+    if (r.tuneSentUs.size() == 3)
+      for (const auto& e : r.wireEvents) if (e.first >= r.tuneSentUs[2] + 400'000) high.push_back(e);
+    const double high1s = window_peak_bps(high, 1'000'000);
+    check(!high.empty() && high1s <= 6'000'000 * 1.10, "transitions: after the upshift every 1 s window <= 6M +10%");
+    check(r.host.effectiveWire == 6'000'000, "transitions: the wire cap ends at the upshift's R (6M)");
+    check(r.host.desiredEncoder > 0 && r.host.desiredEncoder < 6'000'000 && r.host.appliedEncoder == r.host.desiredEncoder,
+          "transitions: after the upshift the applied encoder E equals the desired E for 6M, below R");
+    // T2: the repeated target must not have produced another RC write / instance. Count what a change
+    // costs on this profile: legacy = one reconfigure write per change (2 changes), static = one instance
+    // per change. Either way the duplicate adds nothing.
+    // A user bitrate tune re-picks the encode ladder (a 1080p page goes to a smaller box at 1.5M), so
+    // on this page a change is a REBUILD on every profile (geometry changed), with the live write only
+    // when the size happens to stay. Either way: two distinct changes = two transitions, and the
+    // repeated target adds none -- that is the C3 no-op being tested, counted as writes + rebuilds.
+    const uint32_t transitions = r.host.rcReconfigureWrites + (r.host.rcInstances > 0 ? r.host.rcInstances - 1 : 0);
+    check(transitions == 2, "transitions: exactly two encoder transitions (live writes + rebuilds) for two distinct changes -- "
+                            "the repeated target produced none (writes=" + std::to_string(r.host.rcReconfigureWrites) +
+                            " instances=" + std::to_string(r.host.rcInstances) + ")");
+    const bool legacy = r.host.rcProfile == "legacy";
+    if (!legacy) check(r.host.rcReconfigureWrites == 0, "transitions (static profile): no runtime RC write at all");
+    check(r.host.rcPlanMeans.size() == r.host.rcInstances, "transitions: every instance logged its plan readback");
+    check(r.eventsOwed > 0 && r.eventsMatched >= r.eventsOwed, "transitions: every owed event decoded across both changes (matched " +
+                                                                   std::to_string(r.eventsMatched) + " owed " + std::to_string(r.eventsOwed) + ")");
+    check(r.decodeErrors == 0, "transitions: no decode error across the changes");
+  }
+  {
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    std::vector<TuneStep> steps = {{static_cast<uint32_t>(runSec / 2), 0, 60}};
+    const RunResult r = run_host(hostExe, dir + L"t_fps\\", Content::FullTransition, true, port, runSec, 0, 1, true, 3'000'000, 30,
+                                 0, 0, false, &steps);
+    std::printf("TRANSITION fps 30->60: rcInstances=%u planPostStart=%u planStates=", r.host.rcInstances, r.host.rcPlanPostStart);
+    for (const auto& s : r.host.rcPlanStates) std::printf("%s,", s.c_str());
+    std::printf(" planMeans=");
+    for (uint64_t m : r.host.rcPlanMeans) std::printf("%llu,", (unsigned long long)m);
+    std::printf(" E=%llu events=%u/%u decErr=%u\n", (unsigned long long)r.host.desiredEncoder, r.eventsMatched, r.eventsExpected,
+                r.decodeErrors);
+    check(r.host.rcInstances == 2, "fps transition: the fps change built exactly one new instance (2 in the run)");
+    check(r.host.rcPlanPostStart == 2, "fps transition: every instance logged its plan readback (post-start)");
+    bool meansMatch = !r.host.rcPlanMeans.empty();
+    for (uint64_t m : r.host.rcPlanMeans) if (m != r.host.desiredEncoder) meansMatch = false;
+    check(meansMatch, "fps transition: every instance's plan mean is the host's E (desiredEncoder), not R");
+    check(r.eventsOwed > 0 && r.eventsMatched >= r.eventsOwed, "fps transition: every owed event decoded (matched " +
+                                                                   std::to_string(r.eventsMatched) + " owed " + std::to_string(r.eventsOwed) + ")");
+    check(r.decodeErrors == 0, "fps transition: no decode error");
+  }
+  return 0;
+}
+
 // completion criterion 3: the product-equivalent host + real MFT + real decoder, across the scenario
 // matrix, each with the cap ON and every 1 s / 250 ms window measured on the real UDP receive.
 int run_matrix(const std::wstring& hostExe, const std::wstring& dir, int seconds) {
@@ -1113,10 +1494,23 @@ int main(int argc, char** argv) {
   bool matrix = false;
   bool paired = false;
   bool v2 = false;
+  bool rcMatrix = false;
+  bool rcTransitions = false;
+  std::string rcOnly;
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "--host" && i + 1 < argc) {
+    if (a == "--rc-matrix") {
+      rcMatrix = true;
+    } else if (a == "--rc-transitions") {
+      rcTransitions = true;
+    } else if (a == "--rc-only" && i + 1 < argc) {
+      rcOnly = argv[++i];
+    } else if (a == "--window" && i + 1 < argc) {
+      // encoder-rc-budget C5: the fixture page size, e.g. 1920x1080 (default 640x360).
+      int w = 0, h = 0;
+      if (std::sscanf(argv[++i], "%dx%d", &w, &h) == 2) set_fixture_window(w, h);
+    } else if (a == "--host" && i + 1 < argc) {
       const std::string v = argv[++i];
       hostExe.assign(v.begin(), v.end());
     } else if (a == "--baseline" && i + 1 < argc) {
@@ -1176,7 +1570,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (v2) {
+  if (rcMatrix || rcTransitions) {
+    if (rcMatrix) run_rc_matrix(hostExe, baselineHost, dir, seconds, rcOnly);
+    if (rcTransitions) run_rc_transitions(hostExe, dir, seconds);
+  } else if (v2) {
     run_v2(hostExe, dir, seconds);
   } else if (paired) {
     run_paired(hostExe, baselineHost, dir, seconds);
