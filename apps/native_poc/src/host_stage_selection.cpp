@@ -112,10 +112,13 @@ Flow stage_selection(HostContext& hx, TickContext& tc) {
                   << requestedId << "\n";
       } else {
         item = nextItem;
-        MONITORINFOEXW selectedInfo{};
-        selectedInfo.cbSize = sizeof(selectedInfo);
-        if (!GetMonitorInfoW(target.handle, &selectedInfo)) return Flow::Continue;
-        capture.selectedMonitorDevice = selectedInfo.szDevice;
+        // The device name the enumeration read for this entry: the restart finds the screen by
+        // the same name in the same list (host_monitor_selection.hpp).
+        if (target.device.empty()) return Flow::Continue;
+        {
+          std::lock_guard<std::mutex> lk(capture.metaMu);
+          capture.selectedMonitorDevice = target.device;
+        }
         capture.selectedMonitorId.store(requestedId, std::memory_order_release);
         // A monitor is a desktop target, so any window selection it replaces has to go.
         capture.windowModeActive = false;

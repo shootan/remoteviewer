@@ -20,7 +20,10 @@
         android:orientation="horizontal">
 
         <!-- apk-ui r3: the phone's own keyboard (text through the IME), for long Korean text or
-             anything the PC keyboard does not have. First since apk-keyboard-phone-first r1. -->
+             anything the PC keyboard does not have. First since apk-keyboard-phone-first r1.
+             Gone since apk-keyboard-tabs r1: the [휴대폰 자판 | PC 키] bar directly above the
+             panel (activity_main viewerKeyboardTabs) is the way back, the same tabs as above the
+             phone keyboard. -->
         <Button
             android:id="@+id/keyPanelTabPhone"
             android:layout_width="wrap_content"
@@ -32,7 +35,8 @@
             android:text="@string/key_panel_tab_phone"
             android:textAllCaps="false"
             android:textColor="#F4F0E8"
-            android:textSize="12sp" />
+            android:textSize="12sp"
+            android:visibility="gone" />
 
         <Button
             android:id="@+id/keyPanelTabKeys"

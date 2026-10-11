@@ -228,6 +228,112 @@ int main() {
           all);
   }
 
+  // hostapp-log-upload r2: the shared exit-line formatter carries the exit code (hex + unsigned
+  // decimal), pid, run time, a restart_planned intent (NOT a relaunch claim), an optional WER dump
+  // path, and the sanitised preceding line. The incident's gap was a child that died AFTER a long run
+  // (0xC0000005) logging no code; the clean path now logs the real code and flags it ABNORMAL.
+  {
+    HostExitLog ex;
+    ex.kind = "the streaming host exited";
+    ex.codeKnown = true;
+    ex.code = 0xC0000005UL;
+    ex.pid = 4321;
+    ex.ranMs = 200000ULL;
+    ex.extra = "(ABNORMAL: nonzero after a long run)";
+    ex.restartPlanned = true;
+    ex.dumpNote = " dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp";
+    ex.preceding = sanitize_preceding_line("dxgi-acquire stats stopped");
+    const std::string line = format_host_exit_log(ex);
+    check("exit line carries the exit code as hex (removal mutation: dropping it fails here)",
+          line.find("code=0xC0000005") != std::string::npos, line);
+    check("exit line carries the unsigned decimal code too",
+          line.find("(3221225477)") != std::string::npos, line);
+    check("exit line carries the child pid", line.find("pid=4321") != std::string::npos, line);
+    check("exit line carries the run time", line.find("ranMs=200000") != std::string::npos, line);
+    check("exit line carries the sanitised preceding state",
+          line.find("lastLine=\"dxgi-acquire stats stopped\"") != std::string::npos, line);
+    check("exit line carries the WER dump path when present",
+          line.find("dump=C:\\CrashDumps\\GNLinkStream.exe.4321.dmp") != std::string::npos, line);
+    check("exit line states restart_planned (not a relaunch claim)",
+          line.find("restart_planned=true") != std::string::npos, line);
+    check("a nonzero code after a long run is flagged ABNORMAL",
+          line.find("(ABNORMAL: nonzero after a long run)") != std::string::npos, line);
+    check("the line is the [host-app] exit record",
+          line.rfind("[host-app] the streaming host exited", 0) == 0, line);
+
+    HostExitLog clean;
+    clean.codeKnown = true; clean.code = 0; clean.pid = 99; clean.ranMs = 60000ULL;
+    clean.restartPlanned = true; clean.preceding = sanitize_preceding_line("");
+    const std::string cleanLine = format_host_exit_log(clean);
+    check("a clean exit still logs the code (0x00000000) -- never codeless",
+          cleanLine.find("code=0x00000000 (0)") != std::string::npos, cleanLine);
+    check("a clean exit is NOT flagged ABNORMAL and has no dump note",
+          cleanLine.find("ABNORMAL") == std::string::npos && cleanLine.find("dump=") == std::string::npos,
+          cleanLine);
+    check("an empty preceding line reads 'none'", cleanLine.find("lastLine=\"none\"") != std::string::npos,
+          cleanLine);
+
+    // H2: a failed GetExitCodeProcess must not look like a clean 0 exit.
+    HostExitLog unknown;
+    unknown.codeKnown = false; unknown.queryError = 6; unknown.pid = 7; unknown.ranMs = 10;
+    unknown.restartPlanned = false; unknown.preceding = sanitize_preceding_line("x");
+    const std::string unk = format_host_exit_log(unknown);
+    check("an unknown exit code is recorded as unknown, not 0",
+          unk.find("code=unknown queryError=6") != std::string::npos &&
+              unk.find("code=0x") == std::string::npos, unk);
+    check("a Stop-terminated exit states restart_planned=false",
+          unk.find("restart_planned=false") != std::string::npos, unk);
+  }
+
+  // hostapp-log-upload r3 (H3/R1): a line containing ANY credential marker is redacted WHOLE -- the
+  // r2 token-wise redactor leaked space-separated / quoted / JSON values, so these synthetic forms
+  // must leave no secret byte. Non-secret lines pass through escaped+truncated. Order: redact, escape,
+  // UTF-8-safe truncate.
+  {
+    struct Case { const char* in; const char* secret; };
+    const Case leaks[] = {
+        {"token= SYNTH_A", "SYNTH_A"},
+        {"password: SYNTH_B", "SYNTH_B"},
+        {"password=\"alpha beta\"", "beta"},
+        {"{\"password\": \"SYNTH_C\"}", "SYNTH_C"},
+        {"Authorization: Bearer abc.def", "abc.def"},
+        {"state ok secret=hunter2trailing", "hunter2trailing"},
+        {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa token=LATE_SYNTH after",
+         "LATE_SYNTH"},
+        {"line\rwith a cookie=CK_SYNTH\nand more", "CK_SYNTH"},
+        // r4: the "auth" marker that r3 dropped -- auth=V / x-auth: V / AUTH = V (case + spaces).
+        {"auth=SYNTH_D connected", "SYNTH_D"},
+        {"X-Auth: SYNTH_E header", "SYNTH_E"},
+        {"AUTH = SYNTH_F done", "SYNTH_F"},
+    };
+    bool allRedacted = true, noSecretLeft = true;
+    for (const auto& c : leaks) {
+      const std::string s = sanitize_preceding_line(c.in);
+      if (s != "<redacted: credential marker>") { allRedacted = false; check(std::string("not whole-redacted: ") + c.in, false, s); }
+      if (s.find(c.secret) != std::string::npos) { noSecretLeft = false; check(std::string("secret leaked: ") + c.in, false, s); }
+    }
+    check("every credential-marker line is redacted whole", allRedacted);
+    check("no synthetic secret survives sanitisation (R1 counterexamples)", noSecretLeft);
+
+    // A non-secret line passes through, with CR/LF/quote escaped to stay one line.
+    const std::string esc = sanitize_preceding_line("dxgi-acquire stopped\rafter\na \" quote");
+    check("a non-secret line is kept", esc.find("dxgi-acquire stopped") != std::string::npos, esc);
+    check("CR/LF become escapes, not real line breaks",
+          esc.find('\n') == std::string::npos && esc.find('\r') == std::string::npos, esc);
+    check("a quote is escaped", esc.find("\\\"") != std::string::npos, esc);
+
+    // UTF-8-safe truncation on a non-secret line: a long run of 2-byte chars must not be cut mid-seq.
+    std::string multi;
+    for (int k = 0; k < 200; ++k) multi += "\xC3\xA9";  // 'é' x200 = 400 bytes, no credential marker
+    const std::string cut = sanitize_preceding_line(multi, 40);
+    size_t body = cut.size();
+    const std::string tail = "...(cut)";
+    if (body >= tail.size() && cut.compare(body - tail.size(), tail.size(), tail) == 0) body -= tail.size();
+    check("truncation does not split a UTF-8 multibyte character", (body % 2) == 0 && body <= 40,
+          std::to_string(body));
+    check("empty input sanitises to 'none'", sanitize_preceding_line("   ") == "none");
+  }
+
   remove_all(dir);
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED")
             << "  (" << gChecks << " checks, " << gFailures << " failed)\n";

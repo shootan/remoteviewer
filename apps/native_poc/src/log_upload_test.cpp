@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "log_upload.hpp"
+#include "host_app_log.hpp"  // hostapp-log-upload r1: the supervisor exit-line formatter
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -675,6 +676,42 @@ void test_diag_has_no_token() {
   CHECK(d.find("late answer for a previous owner discarded") != std::string::npos);
 }
 
+// hostapp-log-upload r2: an uploader-level check only -- an exit-shaped [host-app] line enqueued on
+// the "host" stream reaches the fake server with its body intact. This does NOT prove the product's
+// supervisor actually enqueues it (this test calls log_upload_enqueue directly); that end-to-end
+// wiring -- real supervisor exit observation -> append_host_app_log/AppendLogLineOnce -> uploader ->
+// server, with the product enqueue-removal mutation failing -- is covered by
+// remote60_host_exit_upload_test (host_exit_upload_test.cpp), which compiles the real host_app_main.cpp.
+void test_host_app_exit_line_goes_to_host_stream(FakeLogServer& server) {
+  std::printf("[host-app-exit] the exit line uploads on the host stream with its code\n");
+  server.Clear();
+  LogUploadConfig c = base_config(server, "acct/machine-A");
+  c.hostToken = "HOST-TOKEN";
+  std::string reason;
+  CHECK(log_upload_configure(c, &reason));
+  remote60::native_poc::HostExitLog ex;
+  ex.kind = "the streaming host exited";
+  ex.codeKnown = true;
+  ex.code = 0xC0000005UL;
+  ex.pid = 4321;
+  ex.ranMs = 200000ULL;
+  ex.extra = "(ABNORMAL: nonzero after a long run)";
+  ex.restartPlanned = true;
+  ex.preceding = remote60::native_poc::sanitize_preceding_line("dxgi-acquire stats stopped");
+  const std::string exitLine = remote60::native_poc::format_host_exit_log(ex);
+  log_upload_enqueue("host", exitLine);
+  CHECK(server.WaitFor(1, 2000));
+  auto reqs = server.Requests();
+  CHECK(!reqs.empty());
+  if (!reqs.empty()) {
+    CHECK(reqs[0].stream() == "host");          // same device stream as GNLinkStream's own host.log
+    CHECK(reqs[0].body == exitLine + "\n");      // the exact [host-app] exit line reached the NAS
+    CHECK(reqs[0].body.find("[host-app] the streaming host exited code=0xC0000005") != std::string::npos);
+  }
+  // Leave the uploader stopped, like every other test, so process exit does not join a live worker.
+  log_upload_stop();
+}
+
 }  // namespace
 
 int main() {
@@ -710,6 +747,7 @@ int main() {
   test_diag_has_no_token();
   test_401_pause_with_full_queue_does_not_spin(server);
   test_drop_reasons_are_named(server);
+  test_host_app_exit_line_goes_to_host_stream(server);
   server.Stop();
   server2.Stop();
 

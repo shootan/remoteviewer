@@ -163,6 +163,9 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   if (!EnsureCodecLocked(configuredWidth_, configuredHeight_)) {
     log_info("video surface set; codec waiting for keyframe/csd");
   }
+  // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
+  // afresh now that it can be decoded.
+  gate_.Rearm();
 }
 
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
@@ -170,19 +173,16 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 
   PumpCodecLocked();
 
-  if (pendingSelectionGeneration_ != 0 && (awaitingSelectionAck_ || expectedStreamGeneration_ == 0)) {
-    ++staleFrameDropCount_;
-    return;
-  }
-  if (expectedStreamGeneration_ != 0 && frame.header.streamGeneration != expectedStreamGeneration_) {
+  const bool isKeyFrame = (frame.header.flags & 1u) != 0;
+  if (!gate_.Admit(frame.header.streamGeneration, isKeyFrame)) {
     ++staleFrameDropCount_;
     if ((staleFrameDropCount_ % 30u) == 1u) {
       char line[192];
       std::snprintf(line, sizeof(line),
                     "dropped stale frame streamGen=%llu expected=%llu pendingSel=%llu drops=%llu",
                     static_cast<unsigned long long>(frame.header.streamGeneration),
-                    static_cast<unsigned long long>(expectedStreamGeneration_),
-                    static_cast<unsigned long long>(pendingSelectionGeneration_),
+                    static_cast<unsigned long long>(gate_.expected()),
+                    static_cast<unsigned long long>(gate_.pending()),
                     static_cast<unsigned long long>(staleFrameDropCount_));
       log_info(line);
     }
@@ -200,10 +200,10 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   if (codecConfigUpdated && codec_) {
     ResetCodecLocked();
   }
-  if (!EnsureCodecLocked(frame.header.width, frame.header.height)) {
-    return;
-  }
-  if (!codec_) {
+  if (!EnsureCodecLocked(frame.header.width, frame.header.height) || !codec_) {
+    // r5 N1: dropped for want of a decoder (no surface, csd, codec create/configure/start): an
+    // IDR of the answered generation that ends here was not delivered, so it is still owed.
+    if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     return;
   }
 
@@ -239,14 +239,12 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   outputHeight_ = 0;
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
-  pendingSelectionGeneration_ = 0;
+  gate_.Reset();
   readySelectionGeneration_ = 0;
-  expectedStreamGeneration_ = 0;
   latestInputStreamGeneration_ = 0;
   latestOutputStreamGeneration_ = 0;
   lastOutputPresentationUs_ = 0;
   staleFrameDropCount_ = 0;
-  awaitingSelectionAck_ = false;
   csd0_.clear();
   csd1_.clear();
 }
@@ -313,28 +311,54 @@ bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
     const remote60::native_poc::ControlWindowSelectedMessage& msg) {
+  // Untagged: taken as the answer to whatever selection is armed (the old behaviour).
+  uint64_t tag = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    tag = gate_.pending();
+  }
+  OnWindowSelectionControlResultFor(msg, tag);
+}
+
+uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
   std::lock_guard<std::mutex> lock(mu_);
-  if ((msg.flags & 0x1u) != 0 && pendingSelectionGeneration_ != 0) {
-    expectedStreamGeneration_ = msg.streamGeneration;
-    awaitingSelectionAck_ = false;
-    ResetPtsStateLocked();
-    char line[192];
-    std::snprintf(line, sizeof(line),
-                  "selection ack localGen=%llu streamGen=%llu hostSendQpcUs=%llu",
-                  static_cast<unsigned long long>(pendingSelectionGeneration_),
-                  static_cast<unsigned long long>(expectedStreamGeneration_),
-                  static_cast<unsigned long long>(msg.hostSendQpcUs));
+  return gate_.OwedToken();
+}
+
+uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return gate_.pending();
+}
+
+void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
+    const remote60::native_poc::ControlWindowSelectedMessage& msg, uint64_t requestTag) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto ack = gate_.OnAck((msg.flags & 0x1u) != 0, msg.streamGeneration, requestTag);
+  char line[224];
+  if (ack.result == remote60::native_poc::SelectionAckGate::AckResult::Ignored) {
+    // t-970r4zgo: an answer to another selection (an earlier pick, or one already answered).
+    std::snprintf(line, sizeof(line), "selection ack ignored localGen=%llu requestTag=%llu flags=%u streamGen=%llu",
+                  static_cast<unsigned long long>(gate_.pending()), static_cast<unsigned long long>(requestTag),
+                  msg.flags, static_cast<unsigned long long>(msg.streamGeneration));
     log_info(line);
     return;
   }
-
-  awaitingSelectionAck_ = false;
-  expectedStreamGeneration_ = 0;
-  char line[160];
-  std::snprintf(line, sizeof(line),
-                "selection ack failed localGen=%llu flags=%u",
-                static_cast<unsigned long long>(pendingSelectionGeneration_),
-                msg.flags);
+  if (ack.result == remote60::native_poc::SelectionAckGate::AckResult::Applied) {
+    ResetPtsStateLocked();
+    // The new generation's IDR got here before its answer and was dropped: ask for another
+    // rather than wait on deltas that reference it (rate-limited by the session).
+    // An IDR of this generation already came and was dropped: the selection is now owed one
+    // (gate_.KeyOwed), which the session asks for until it arrives (KeyframeOwedFor, r4 M1-A).
+    std::snprintf(line, sizeof(line),
+                  "selection ack localGen=%llu streamGen=%llu hostSendQpcUs=%llu rekey=%u",
+                  static_cast<unsigned long long>(gate_.pending()),
+                  static_cast<unsigned long long>(gate_.expected()),
+                  static_cast<unsigned long long>(msg.hostSendQpcUs), ack.requestKeyframe ? 1u : 0u);
+    log_info(line);
+    return;
+  }
+  std::snprintf(line, sizeof(line), "selection ack failed localGen=%llu flags=%u",
+                static_cast<unsigned long long>(gate_.pending()), msg.flags);
   log_info(line);
 }
 
@@ -347,19 +371,17 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
   outputHeight_ = 0;
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
-  pendingSelectionGeneration_ = selectionGeneration;
-  expectedStreamGeneration_ = 0;
+  gate_.Prepare(selectionGeneration);
   latestInputStreamGeneration_ = 0;
   latestOutputStreamGeneration_ = 0;
   lastOutputPresentationUs_ = 0;
   staleFrameDropCount_ = 0;
-  awaitingSelectionAck_ = true;
   csd0_.clear();
   csd1_.clear();
 
   char line[160];
   std::snprintf(line, sizeof(line), "selection prepare localGen=%llu",
-                static_cast<unsigned long long>(pendingSelectionGeneration_));
+                static_cast<unsigned long long>(gate_.pending()));
   log_info(line);
 }
 
@@ -372,14 +394,12 @@ void AndroidVideoDecoderSink::AbortWindowSelection() {
   outputHeight_ = 0;
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
-  pendingSelectionGeneration_ = 0;
+  gate_.Reset();
   readySelectionGeneration_ = 0;
-  expectedStreamGeneration_ = 0;
   latestInputStreamGeneration_ = 0;
   latestOutputStreamGeneration_ = 0;
   lastOutputPresentationUs_ = 0;
   staleFrameDropCount_ = 0;
-  awaitingSelectionAck_ = false;
   csd0_.clear();
   csd1_.clear();
   log_info("selection aborted");
@@ -396,9 +416,9 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " csd=" + std::to_string(csd0_.empty() ? 0 : 1) + "/" + std::to_string(csd1_.empty() ? 0 : 1);
   status += " in=" + std::to_string(inputFrameCount_);
   status += " out=" + std::to_string(outputFrameCount_);
-  status += " sel=" + std::to_string(pendingSelectionGeneration_);
+  status += " sel=" + std::to_string(gate_.pending());
   status += " readySel=" + std::to_string(readySelectionGeneration_);
-  status += " expectGen=" + std::to_string(expectedStreamGeneration_);
+  status += " expectGen=" + std::to_string(gate_.expected());
   status += " inGen=" + std::to_string(latestInputStreamGeneration_);
   status += " outGen=" + std::to_string(latestOutputStreamGeneration_);
   status += " stale=" + std::to_string(staleFrameDropCount_);
@@ -417,7 +437,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " pendingRetry=" + std::to_string(pendingFrameQueueRetryCount_);
   status += " bootstrapReplay=" + std::to_string(bootstrapReplayCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
-  status += " awaitingAck=" + std::to_string(awaitingSelectionAck_ ? 1 : 0);
+  status += " awaitingAck=" + std::to_string(gate_.awaiting() ? 1 : 0);
   return status;
 }
 
@@ -520,8 +540,8 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
 
   if (codec_ &&
       bootstrapFrame_.has_value() &&
-      pendingSelectionGeneration_ != 0 &&
-      readySelectionGeneration_ != pendingSelectionGeneration_ &&
+      gate_.pending() != 0 &&
+      readySelectionGeneration_ != gate_.pending() &&
       outputFrameCount_ == 0 &&
       bootstrapReplayCount_ < kBootstrapReplayMaxCount &&
       lastInputQueueSteadyUs_ > 0 &&
@@ -532,8 +552,8 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
       char line[192];
       std::snprintf(line, sizeof(line),
                     "bootstrap replay queued localGen=%llu streamGen=%llu replay=%llu",
-                    static_cast<unsigned long long>(pendingSelectionGeneration_),
-                    static_cast<unsigned long long>(expectedStreamGeneration_),
+                    static_cast<unsigned long long>(gate_.pending()),
+                    static_cast<unsigned long long>(gate_.expected()),
                     static_cast<unsigned long long>(bootstrapReplayCount_));
       log_info(line);
     }
@@ -581,8 +601,10 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
 
   ++inputFrameCount_;
   lastInputQueueSteadyUs_ = steady_now_us();
-  if ((frame.header.flags & 1u) != 0 && pendingSelectionGeneration_ != 0 &&
-      readySelectionGeneration_ != pendingSelectionGeneration_) {
+  // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
+  if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
+  if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
+      readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
   }
   if ((inputFrameCount_ % 30) == 1) {
@@ -630,6 +652,10 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   // packet loss made each loss cost a visible timeline jump on top of the missing frames.
   // When the timeline really has moved, the clock notices by itself: a new stream generation,
   // a capture timestamp going backwards, or a gap too large to pace across all reanchor it.
+  // r5 N1: a held IDR thrown away with the codec was never delivered.
+  if (pendingFrame_.has_value() && (pendingFrame_->header.flags & 1u) != 0) {
+    gate_.KeyLost(pendingFrame_->header.streamGeneration);
+  }
   pendingFrame_.reset();
   pendingFrameCount_ = 0;
   pendingFrameQueueRetryCount_ = 0;
@@ -758,9 +784,9 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   // frames are handed over. It sat in the drain loop, which now returns early for every
   // normally-paced frame -- leaving the viewer waiting for an acknowledgement that had
   // already happened, and dropping back to the target list on a timeout while video played.
-  if (pendingSelectionGeneration_ != 0 &&
-      readySelectionGeneration_ != pendingSelectionGeneration_) {
-    readySelectionGeneration_ = pendingSelectionGeneration_;
+  if (gate_.pending() != 0 &&
+      readySelectionGeneration_ != gate_.pending()) {
+    readySelectionGeneration_ = gate_.pending();
     bootstrapFrame_.reset();
     bootstrapReplayCount_ = 0;
     char line[192];
@@ -795,7 +821,7 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
     if (outputIndex >= 0) {
       lastOutputPresentationUs_ =
           (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
-      latestOutputStreamGeneration_ = expectedStreamGeneration_;
+      latestOutputStreamGeneration_ = gate_.expected();
       const uint64_t nowUs = steady_now_us();
       // Hold it until its slot rather than pushing it to the surface now. The upper bound
       // only rejects nonsense timestamps; anything sane waits here, where waiting is free,

@@ -64,6 +64,8 @@ object NativeSessionBridge {
     external fun nativeSelectWindow(windowId: Long): Boolean
     external fun nativeSelectDesktopMode(): Boolean
     external fun nativeSelectMonitor(monitorId: Int): Boolean
+    // The pick together with the monitorListRevision of the list it was made from.
+    external fun nativeSelectMonitorAt(monitorId: Int, listRevision: Long): Boolean
     external fun nativeIsHostScreenLocked(): Boolean
     /** The host's Pong capture flags (remote reboot / prelogin bits; RemoteRebootPolicy). */
     external fun nativeHostCaptureFlags(): Int

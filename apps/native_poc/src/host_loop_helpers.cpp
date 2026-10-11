@@ -49,6 +49,8 @@
 #include "host_bottleneck.hpp"
 #include "host_capture_device.hpp"
 #include "host_capture_session.hpp"
+#include "monitor_select_target.hpp"
+#include "stream_test_hold.hpp"
 #include "host_client_metrics.hpp"
 #include "host_control_session.hpp"
 #include "host_encoded_sender.hpp"
@@ -361,10 +363,12 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
   return false;
 }
 
-bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, uint64_t nowUs,
+bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
+                                   const std::wstring& requestedMonitorDevice, uint64_t nowUs,
                                    uint32_t* outFlags, uint64_t* outWindowId,
                                    uint64_t* outStreamGeneration,
-                                   std::string* outReason, std::string* outTitle) {
+                                   std::string* outReason, std::string* outTitle,
+                                   uint64_t ownerEpoch) {
   auto& useH264 = hx.useH264;
   auto& captureWindowRebindIntervalUs = hx.captureWindowRebindIntervalUs;
   auto& nextCaptureWindowCheckUs = hx.nextCaptureWindowCheckUs;
@@ -412,6 +416,12 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
     prevHostCaptureProcess = capture.targetProcess;
     prevHostCaptureTitle = capture.targetTitle;
   }
+  // t-970r4zgo: the picked screen is part of the target too -- a failed monitor select must give
+  // back the screen, its index and its geometry (the secure-input rect is derived from it), not
+  // just the window fields.
+  const std::wstring prevSelectedMonitorDevice = capture.selectedMonitorDevice;
+  const uint32_t prevSelectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
+  const auto prevMonitorInfo = capture.monitorInfo;
 
   auto restore_previous_target = [&]() {
     item = prevItem;
@@ -429,7 +439,10 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
       std::lock_guard<std::mutex> lk(capture.metaMu);
       capture.targetProcess = prevHostCaptureProcess;
       capture.targetTitle = prevHostCaptureTitle;
+      capture.selectedMonitorDevice = prevSelectedMonitorDevice;
     }
+    capture.selectedMonitorId.store(prevSelectedMonitorId, std::memory_order_release);
+    capture.monitorInfo = prevMonitorInfo;
   };
 
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem nextItem{nullptr};
@@ -445,8 +458,47 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
   uint64_t nextHwnd = 0;
   uint32_t nextFlags = 0;
   const uint64_t nextCaptureStreamGeneration = prevCaptureStreamGeneration + 1;
+  // t-970r4zgo: a monitor-select target is desktop mode on that screen. It is classified before
+  // any HWND use; internally the selection is "desktop + the screen's device", never the target id.
+  const SelectTarget selectTarget = classify_select_target(requestedWindowId);
+  std::wstring nextMonitorDevice = prevSelectedMonitorDevice;
+  if (selectTarget.kind == SelectTargetKind::Malformed) {
+    if (outReason) *outReason = "invalid_target";
+    return false;
+  }
 
-  if (requestedWindowId == 0) {
+  if (selectTarget.kind == SelectTargetKind::Monitor) {
+    if (requestedMonitorDevice.empty()) {
+      if (outReason) *outReason = "monitor_not_listed";
+      return false;
+    }
+    // The screen the client was listed under that id must still be attached -- by device name,
+    // so an index that now means another screen is not taken for it.
+    const auto monitors = enumerate_monitors();
+    const MonitorListEntry* screen = nullptr;
+    for (const auto& m : monitors) {
+      if (m.device == requestedMonitorDevice) screen = &m;
+    }
+    if (!screen) {
+      if (outReason) *outReason = "monitor_gone";
+      return false;
+    }
+    if (backend.requested == DesktopCaptureBackend::Wgc || backend.active == DesktopCaptureBackend::Wgc ||
+        !screen->primary) {
+      nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(monitor-select)", screen->handle);
+      if (!nextItem) {
+        if (outReason) *outReason = "monitor_capture_item_failed";
+        if (outTitle) *outTitle = screen->name;
+        return false;
+      }
+    } else {
+      nextItem = nullptr;
+    }
+    nextSelectedWindowId = 0;
+    nextReason = "monitor_selected";
+    nextTitle = screen->name;
+    nextMonitorDevice = screen->device;
+  } else if (requestedWindowId == 0) {
     if (backend.requested == DesktopCaptureBackend::Wgc ||
         backend.active == DesktopCaptureBackend::Wgc) {
       nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
@@ -501,14 +553,74 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
     std::lock_guard<std::mutex> lk(capture.metaMu);
     capture.targetProcess = nextProcess;
     capture.targetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
+    capture.selectedMonitorDevice = nextMonitorDevice;
   }
   nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
   watchdog.lastCaptureRestartUs = nowUs;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restart", hx.stop);  // test build: checked, target switched, not yet restarted
+#endif
+  // r4 M5-A: the session this selection was made in must still be the current one at each step that
+  // changes what the next viewer sees -- not only before the function was entered. (ownerEpoch 0 =
+  // not bound to a session.)
+  const auto stillOwner = [&] {
+    return ownerEpoch == 0 || hx.clientSession.epoch.load(std::memory_order_acquire) == ownerEpoch;
+  };
+  // The target is given back and the capture reopened on it: a pick that must not stand once the
+  // capture has already been restarted for it. If the previous screen is gone too, that restart
+  // falls back by the ordinary rule -- the state is then that confirmed fallback, under the
+  // previous generation.
+  const auto rollBackRestarted = [&](const char* why) {
+    restore_previous_target();
+    watchdog.lastCaptureRestartUs = nowUs;
+    if (restart_capture_session(hx)) {
+      ++capture.restartCount;
+      capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+      capture.lastCallbackUs.store(0, std::memory_order_release);
+      encoder.ResetTimelineAnchors(capture);
+      encoder.RequestKey(kHostKeyReasonSelection);
+      capture.FlushCapturePipelineState(res, frameGating, stats, "monitor-select-rollback");
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restored streamGen="
+                << capture.streamGenerationState.load(std::memory_order_acquire) << "\n";
+    } else {
+      // The previous target could not be reopened now; the restart retry takes it from here.
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restart pending\n";
+    }
+    if (outStreamGeneration) *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+    if (outReason) *outReason = why;
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  };
+  if (!stillOwner()) {
+    // Replaced before the capture was touched: give the target back, nothing to reopen.
+    restore_previous_target();
+    std::cout << "[native-video-host][control] window-select: the session changed before the restart; "
+                 "previous target kept\n";
+    if (outReason) *outReason = "stale_session";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
   if (!restart_capture_session(hx)) {
     restore_previous_target();
     if (outReason) *outReason = "capture_restart_failed";
     if (outTitle) *outTitle = nextTitle;
     return false;
+  }
+  if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
+    // r3 M3: the screen went between the check above and the restart, and the restart opened the
+    // fallback screen instead (host_monitor_selection.hpp). That is not the pick and it is not
+    // what was shown before, so it is neither acknowledged nor left standing.
+    return rollBackRestarted("monitor_gone");
+  }
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restarted", hx.stop);  // test build: restarted on the pick, not yet committed
+#endif
+  if (!stillOwner()) {
+    // r4 M5-A: replaced while the capture was being restarted for it.
+    return rollBackRestarted("stale_session");
   }
 
   capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
@@ -539,7 +651,9 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId, 
   capture.FlushCapturePipelineState(res, frameGating, stats, "window-select");
 
   if (outFlags) *outFlags = 0x1u;
-  if (outWindowId) *outWindowId = nextSelectedWindowId;
+  // A monitor select is answered with the target id it was asked with (the marker), not the
+  // internal "desktop" 0, so the client can tell which request this completes.
+  if (outWindowId) *outWindowId = selectTarget.kind == SelectTargetKind::Monitor ? requestedWindowId : nextSelectedWindowId;
   if (outStreamGeneration) *outStreamGeneration = nextCaptureStreamGeneration;
   if (outReason) *outReason = nextReason;
   if (outTitle) *outTitle = nextTitle;

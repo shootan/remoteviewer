@@ -125,6 +125,7 @@
     <string name="hosts_manual_button">Connect by IP instead</string>
     <string name="key_panel_tab_extra">F keys</string>
     <string name="key_panel_tab_phone">Phone keyboard</string>
+    <string name="key_panel_tab_pc_keys">PC keys</string>
     <string name="virtual_mouse_roll">Roll</string>
     <string name="virtual_mouse_left">Left</string>
     <string name="virtual_mouse_right">Right</string>
@@ -257,4 +258,6 @@
     <!-- prelogin-ui r1 (item 8) -->
     <string name="ui_remote_reboot">원격 PC 다시 시작</string>
     <string name="ui_remote_reboot_confirm">다시 시작</string>
+    <string name="ui_monitor_list_changed">모니터 구성이 바뀌었습니다. 목록에서 다시 골라 주세요</string>
+    <string name="ui_monitor_select_needs_host_update">이 PC의 GNLink를 업데이트해야 모니터를 고를 수 있습니다</string>
 </resources>

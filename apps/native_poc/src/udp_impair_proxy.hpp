@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -71,6 +72,9 @@ class Proxy {
     threads_.clear();
   }
   sockaddr_in frontAddr{}, backAddr{};
+  // Optional, set before Start: a datagram it returns true for is dropped (up = client -> host).
+  // Lets a test cut one kind of traffic -- e.g. video, with the tunnelled control still flowing.
+  std::function<bool(const uint8_t*, int, bool)> dropIf;
   std::atomic<uint64_t> dropped{0};
   std::atomic<uint64_t> queueDropped{0};
 
@@ -107,6 +111,10 @@ class Proxy {
       const int n = recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl);
       if (n <= 0) continue;
       if (up) client_ = from;
+      if (dropIf && dropIf(buf, n, up)) {
+        ++dropped;
+        continue;
+      }
       if (im_.lossPerMille && rng() % 1000 < im_.lossPerMille) {
         ++dropped;
         continue;

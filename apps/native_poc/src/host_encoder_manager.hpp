@@ -15,6 +15,7 @@
 
 #include "host_capture_session.hpp"
 #include "host_frame_gate.hpp"
+#include "host_gop_clamp_detector.hpp"
 #include "mf_h264_codec.hpp"
 #include "host_epoch_gate.hpp"
 #include "host_rate_governor.hpp"
@@ -175,6 +176,11 @@ struct EncoderState {
   // followed by a "scheduled" one at 282, and a kick frame that pushed the encoder's own GOP over
   // its boundary made the MFT emit an IDR the host then repeated (reasons=none, then scheduled).
   uint32_t realInputsSinceKey = 0;
+  // stutter-keyframe r1 (observe-1): snapshot of stats.wireOverloadSkipCount at the previous key AU.
+  // The delta of wireOverloadSkipCount between two keys is how many capture frames the cap-gate
+  // dropped during the window that ended with this IDR -- the periodic-stutter signal, so each
+  // [keyframe] line carries the skips its own period cost.
+  uint64_t wireSkipAtLastKey = 0;
   void RequestKey(uint32_t reason) {
     forceKeyNext = true;
     keyReasons |= reason;
@@ -306,6 +312,23 @@ struct EncoderState {
   // Stats-interval encode counters.
   uint64_t encodedFrames = 0;
   uint64_t forceKeyInputCount = 0;       // key inputs handed to the encoder
+  // stutter-keyframe r1/r2 F1: forced-key requests the MFT REJECTED (AVEncVideoForceKeyFrame SetValue
+  // failed). A rejection does NOT arm the real in-flight latch; it sets a bounded retry back-off
+  // (forceKeyRetryAtUs) so the next force is retried after an interval rather than every tick (which
+  // would make every input ride the admit-always key gate under the cap), and a bounded streak
+  // escalates to a repair. forceKeyRejectedCount is cumulative (diagnostic); forceKeyRejectStreak is
+  // the consecutive run, reset on an accepted force or a key AU.
+  uint64_t forceKeyRejectedCount = 0;
+  uint64_t forceKeyRetryAtUs = 0;      // do not re-attempt a forced key before this qpc (back-off)
+  uint32_t forceKeyRejectStreak = 0;   // consecutive rejections; triggers a repair at the threshold
+  // stutter-keyframe r3 B / r4 G: runtime GOP-clamp detection from the real NAL cadence, fed by
+  // PER-AU provenance (accepted-input ordinal + forced flag + raw NAL5), not host globals. The
+  // last self-IDR's ordinal/epoch are the baseline the next interval is measured from; reset on a
+  // fresh encoder init (ordinals restart) so no interval spans codec instances.
+  GopClampDetector clampDetector;
+  uint64_t lastSelfIdrOrdinal = 0;
+  uint64_t lastSelfIdrEpoch = 0;
+  uint64_t clampDetectorCodecId = 0;  // r4 G1: the codec instance the detector state belongs to
   uint32_t encodedSeq = 0;
   uint64_t encodeFailCount = 0;
   uint64_t resetCount = 0;
@@ -345,6 +368,13 @@ struct EncoderState {
     // after which an AU from an older input is pre-flush. Most callers also force the next input
     // to be an IDR; the epoch gate re-forces it itself if one does not (P11).
     capture.inputEpoch.fetch_add(1, std::memory_order_acq_rel);
+    // stutter-keyframe r3 S2: the forced-key rejection back-off/streak belong to the previous encoder
+    // and input epoch. Clear them at THIS boundary (codec reinit / flush / geometry) so a stale
+    // 300ms back-off or a carried-over streak cannot suppress or near-repair the new epoch's selection/
+    // first-frame force. This is a real codec/input-epoch boundary, not a per-request reset, so it does
+    // not let an ordinary viewer re-request bypass the back-off of a still-rejecting same-epoch encoder.
+    forceKeyRetryAtUs = 0;
+    forceKeyRejectStreak = 0;
   }
   // The single choke point every encoder parameter change goes through (runtime tune, capture-UI
   // overview/focus, ABR/M9 refit): fits the box to the source aspect, rebuilds or re-tunes the MFT,
