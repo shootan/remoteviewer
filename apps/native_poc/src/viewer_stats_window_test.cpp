@@ -323,6 +323,20 @@ void TestSilentStillDemotes() {
          "M4 kept: frames stop arriving while the host sends -> stale_active still demotes");
 }
 
+void TestSparseArrivalUnderFullSendStillDemotes() {
+  // A collapse in which a frame gets through only every 3 s while the host sends 30 a second: every
+  // window spans a gap, so nothing is published -- the host must still see it as feedback lost.
+  Scenario s;
+  s.lengthUs = 40 * kSec;
+  Add(&s.arrivals, 1 * kSec, 10 * kSec, kFps);
+  for (uint64_t t = 10 * kSec; t < 40 * kSec; t += 3 * kSec) s.arrivals.push_back({t, true});
+  s.hostSentInSecond = SendWhile({{1 * kSec, 40 * kSec}}, kFps);
+  const Result r = Run(s);
+  std::printf("  sparse-arrival: %s\n", Describe(r).c_str());
+  expect(r.profile > 0 && r.firstDemoteAtSec >= 10 && r.firstDemoteAtSec <= 17,
+         "M4 kept: one frame in 3 s arriving under a full send -> still demotes");
+}
+
 void TestRates() {
   expect(StatsWindow::PerSecondX100(30, kSec) == 3000, "rate: 30 in 1 s = 30.00/s");
   expect(StatsWindow::PerSecondX100(15, kSec / 2) == 3000, "rate: 15 in 0.5 s = 30.00/s");
@@ -342,6 +356,7 @@ int main() {
   TestRealLowDecodeStillDemotes();
   TestRealLowArrivalStillDemotes();
   TestSilentStillDemotes();
+  TestSparseArrivalUnderFullSendStillDemotes();
   std::printf("viewer_stats_window_test: %d passed, %d failed\n", gPasses, gFailures);
   return gFailures == 0 ? 0 : 1;
 }
