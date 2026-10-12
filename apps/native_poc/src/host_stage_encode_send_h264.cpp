@@ -348,6 +348,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // is handed over -- an input the MFT accepted but whose call failed later still sits in its
     // timeline. (0.2.97)
     encoder.codec.set_next_input_synthetic(servedBootstrap);
+    encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
+    encoder.codec.set_next_input_content_version(tc.version);
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {

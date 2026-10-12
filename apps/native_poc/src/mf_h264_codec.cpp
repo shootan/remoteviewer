@@ -37,6 +37,10 @@
 namespace remote60::native_poc {
 namespace {
 
+// MFSampleExtension_VideoEncodeQP {B2EFE478-F979-4C66-B95E-EE2B82C82F36} (mfapi.h, UINT64), spelled
+// out so an older SDK without the declaration still builds (motion-settle r1 M0).
+constexpr GUID kVideoEncodeQpAttr = {0xb2efe478, 0xf979, 0x4c66, {0xb9, 0x5e, 0xee, 0x2b, 0x82, 0xc8, 0x2f, 0x36}};
+
 int clamp_u8_int(int v) {
   return std::min(255, std::max(0, v));
 }
@@ -2315,6 +2319,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         uint64_t auEpoch = 0;
         uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
         bool auForcedKey = false;
+        uint8_t auSyntheticReason = nextInputSyntheticReason_;
+        uint64_t auContentVersion = 0;  // no FIFO entry: unknown
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
           normalizedAuSampleTimeHns = provenance.tsHns;
@@ -2322,6 +2328,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
           auEpoch = provenance.epoch;
           auOrdinal = provenance.acceptedOrdinal;
           auForcedKey = provenance.forcedKey;
+          auSyntheticReason = provenance.syntheticReason;
+          auContentVersion = provenance.contentVersion;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -2338,6 +2346,19 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.inputEpoch = auEpoch;
         au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
         au.inputWasForcedKey = auForcedKey;
+        au.syntheticReason = auSyntheticReason;
+        au.contentVersion = auContentVersion;
+        au.codecInstance = codecInstanceId_;
+        // motion-settle r1 M0: the QP this output sample says it was coded with. Absent -> Unknown.
+        {
+          UINT64 qpRaw = 0;
+          const HRESULT qpHr = produced->GetUINT64(kVideoEncodeQpAttr, &qpRaw);
+          au.encodeQpHr = static_cast<int32_t>(qpHr);
+          if (SUCCEEDED(qpHr)) {
+            au.encodeQpRaw = qpRaw;
+            au.encodeQp = static_cast<int32_t>(qpRaw & 0xFFFFu);
+          }
+        }
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -2385,7 +2406,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   }
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
   pendingInputs_.Push(
-      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame});
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame,
+                   nextInputSyntheticReason_, nextInputContentVersion_});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.

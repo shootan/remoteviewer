@@ -54,7 +54,33 @@ struct H264AccessUnit {
   uint64_t acceptedInputOrdinal = 0;
   bool inputWasForcedKey = false;
   bool rawIdr = false;
+  // motion-settle r1 M0: why a synthetic input was served (kSyntheticReason*, 0 = a real capture),
+  // through the same FIFO; the encoder instance (instance_id()) that produced the AU; and the QP the
+  // MFT says it used for this output sample (MFSampleExtension_VideoEncodeQP, low 16 bits = the
+  // H.264 QP). encodeQp is -1 when the sample does not carry the attribute -- Unknown, never
+  // replaced by the MaxQP ceiling or derived from the byte count. encodeQpHr is the GetUINT64 result.
+  uint8_t syntheticReason = 0;
+  uint64_t contentVersion = 0;  // the host's capture version of the input (a synthetic input: the cached one's)
+  uint64_t codecInstance = 0;
+  int32_t encodeQp = -1;
+  uint64_t encodeQpRaw = 0;
+  int32_t encodeQpHr = 0;
 };
+
+// motion-settle r1 M0: what a synthetic encoder input was for (H264AccessUnit::syntheticReason).
+constexpr uint8_t kSyntheticReasonNone = 0;          // a real capture
+constexpr uint8_t kSyntheticReasonKick = 1;          // trailing-edge kick (host_kick.hpp)
+constexpr uint8_t kSyntheticReasonStaticRefresh = 2; // the periodic static refresh
+constexpr uint8_t kSyntheticReasonSettle = 3;        // a settle-refinement input (motion-settle M1)
+inline const char* synthetic_reason_name(uint8_t r) {
+  switch (r) {
+    case kSyntheticReasonNone: return "real";
+    case kSyntheticReasonKick: return "kick";
+    case kSyntheticReasonStaticRefresh: return "static_refresh";
+    case kSyntheticReasonSettle: return "settle";
+    default: return "unknown";
+  }
+}
 
 struct DecodedFrameNv12 {
   // Coded plane geometry -- the byte-buffer layout. H.264 aligns the coded height to 16
@@ -141,6 +167,8 @@ struct PendingInput {
   // IDR is not mistaken for the encoder's own periodic one (G2).
   uint64_t acceptedOrdinal = 0;
   bool forcedKey = false;
+  uint8_t syntheticReason = 0;  // motion-settle r1 M0 (kSyntheticReason*)
+  uint64_t contentVersion = 0;  // motion-settle r1 M0: the capture version the input carried
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -283,6 +311,10 @@ class H264Encoder {
   // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
   // each AU reports the flag of the input that produced it. (0.2.97)
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
+  // Why the NEXT input is synthetic (kSyntheticReason*); same FIFO (motion-settle r1 M0).
+  void set_next_input_synthetic_reason(uint8_t reason) { nextInputSyntheticReason_ = reason; }
+  // The capture version of the NEXT input; same FIFO (motion-settle r1 M0).
+  void set_next_input_content_version(uint64_t version) { nextInputContentVersion_ = version; }
   // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
   void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
   // A06: the accepted-input FIFO overflowed, so nothing this encoder emits may be trusted with
@@ -371,6 +403,8 @@ class H264Encoder {
   // actually produced it, rather than the input from the current encode call.
   PendingInputFifo pendingInputs_;
   bool nextInputSynthetic_ = false;
+  uint8_t nextInputSyntheticReason_ = 0;
+  uint64_t nextInputContentVersion_ = 0;
   uint64_t nextInputEpoch_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;

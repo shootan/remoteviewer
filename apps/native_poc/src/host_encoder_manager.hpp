@@ -24,6 +24,7 @@
 #include "host_rate_governor.hpp"
 #include "encode_resolution_ladder.hpp"
 #include "host_keyframe_reason.hpp"
+#include "host_au_trace.hpp"
 
 namespace remote60::native_poc {
 
@@ -425,6 +426,10 @@ struct EncoderState {
   uint64_t starveNeedInputOnlyCalls = 0;
   // Stats-interval encode counters.
   uint64_t encodedFrames = 0;
+  // motion-settle r1 M0: the QP the emitted AUs carried, by kind, until the next printed stats line;
+  // and how many per-AU trace lines this process has written (bounded, host_au_trace.hpp).
+  AuQpAccount qpWindow;
+  uint64_t auTraceLines = 0;
   uint64_t forceKeyInputCount = 0;       // key inputs handed to the encoder
   // stutter-keyframe r1/r2 F1: forced-key requests the MFT REJECTED (AVEncVideoForceKeyFrame SetValue
   // failed). A rejection does NOT arm the real in-flight latch; it sets a bounded retry back-off

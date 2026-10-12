@@ -184,6 +184,7 @@ struct TickContext {
   uint64_t queueSelectStartUs = 0;
   bool servedBootstrap = false;
   bool kickForcedKey = false;    // true only when this kick must open a closed media barrier (IDR)
+  uint8_t syntheticReason = 0;   // motion-settle r1 M0: why servedBootstrap (kSyntheticReason*)
   uint64_t queuePopUs = 0;
   uint64_t queueSelectWaitUs = 0;
   uint64_t frameAgeAtSelectUs = 0;

@@ -186,6 +186,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       bool rearm = false;
       if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonKick;
         // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
         // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
         if (barrierClosed) {
@@ -247,6 +248,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       kick.lastStaticRefreshAttemptUs = nowUs;
       if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonStaticRefresh;
         seq = 0;
         version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
         streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);

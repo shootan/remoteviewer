@@ -392,6 +392,13 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                                             cadence);
       if (h264Flow != Flow::Next) return h264Flow;
     }
+    if (statsPrintDue && encoder.qpWindow.aus > 0) {
+      // motion-settle r1 M0: the QP the encoder reported for this interval's AUs (Unknown apart).
+      std::cout << "[native-video-host][au-qp]";
+      encoder.qpWindow.Append(std::cout);
+      std::cout << " instance=" << encoder.codec.instance_id() << "\n";
+      encoder.qpWindow.Reset();
+    }
     sender.sentFrames = 0;
     encoder.encodedFrames = 0;
     sender.sentBytes = 0;

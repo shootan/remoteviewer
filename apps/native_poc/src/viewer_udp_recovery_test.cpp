@@ -49,6 +49,7 @@
 #include "viewer_udp_session.hpp"
 #include "viewer_video_receiver.hpp"
 #include "host_e2e_marker_fixture.hpp"  // r8: shared marker Target/EventLog/decode_event_marker/MarkerHost
+#include "host_e2e_text_fixture.hpp"    // motion-settle r1 M0: real-font scenes for --motion-settle
 
 using namespace remote60::native_poc;
 using namespace remote60::native_poc::viewer;
@@ -649,6 +650,10 @@ struct ViewerRig {
   std::atomic<bool> pinPresentAnchor{false};
   // A04 give-up tunables for the scenarios (0 = product default), set before Connect().
   uint64_t giveUpHardCapUs = 0;
+  // motion-settle r1: tunnel the control channel through the media socket the way the product's
+  // directory path does (viewer_startup.cpp attach_control_tunnel_and_log), so a run longer than the
+  // host's 10 s control read timeout keeps its session. Set before Connect(); a real host only.
+  bool udpControl = false;
   // A04: how many incomplete heads the receiver has abandoned (RecvStats). The keyframe-request
   // limiter can hide a repeated give-up, so scenarios assert on this rather than on requests.
   uint64_t give_ups() const { return receiver ? receiver->stats().udpStuckHeadGiveUps : 0; }
@@ -742,6 +747,12 @@ struct ViewerRig {
     (void)viewer_arm_udp_recv_timeout(s, recvTimeoutMs);
     ctx.session.sock = s;
     viewer_apply_udp_hello_ack(ackFeatures, requestNack, ctx.session);
+    if (udpControl) {
+      ctx.control.udpControl.Configure(
+          [s](const void* data, size_t len) { return send(s, static_cast<const char*>(data), static_cast<int>(len), 0) > 0; },
+          kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, args.udpMtu);
+      ctx.control.overUdp.store(true, std::memory_order_release);
+    }
     VideoReceiver::NackOptions nack;
     nack.enabled = ctx.session.hostSupportsNack;
     nack.holdUs = holdUs;
@@ -2040,6 +2051,551 @@ void scenario_long_gop_forced_recovery_resumes() {
   }
 }
 
+// ------------------------------------------------------------------------------------------------
+// motion-settle r1 M0: still -> motion -> still on real text, measured at the product receiver.
+//
+// An isolated GNLinkStream (WGC capture of e2etext::TextPageTarget, input injection off) streams to
+// the product receive chain (ViewerRig: VideoReceiver::Run -> assembler -> FrameGate -> decoder ->
+// FrameBuffer). A sampler polls the FrameBuffer every 2 ms, reads the 16-bit event id each decoded
+// picture carries and, for pictures of an episode's final event, the text-ROI PSNR against what was
+// painted. Definitions (Codex r1 §6):
+//   ref         the text-ROI PSNR of the final picture as decoded at the END of the hold (the long
+//               still the encoder had to refine it) -- the "valid long still reference";
+//   timeToSharp the first FrameBuffer sample of the final event within 1 dB of ref that stays within
+//               1 dB for the next 500 ms, minus the final event's paint time;
+//   onset       firstReaction = first decoded picture of the action (id >= onset id) - onset paint;
+//               first250/first1s = distinct action pictures decoded in those windows;
+//               maxGap1s = the longest wait for a new picture in the first second (from the onset paint);
+//               sustained = distinct pictures a second during seconds 2-4 of the long scroll (the same
+//               scene's normal motion supply), the denominator of the first-second ratio.
+// The host's own log (per-AU trace on) is kept beside the results and joined by seq offline.
+//
+//   remote60_viewer_udp_recovery_test --motion-settle <GNLinkStream.exe> --out <dir>
+//       [--bitrate N] [--fps N] [--episodes N] [--scenes a,b,..] [--hold-ms N] [--pre-ms N]
+//       [--label L] [--host-env NAME=VALUE]...
+//   (REMOTE60_ALLOW_HOST_E2E=1)
+// Tags: display-capture (a composed window on the interactive desktop), gpu (host encoder, viewer
+// decoder), network (loopback). Results are measurements; the run FAILs only on harness invalidity.
+
+namespace motionsettle {
+namespace et = remote60::native_poc::e2etext;
+
+struct Sample {
+  uint64_t atUs = 0;     // when the sampler saw it
+  uint64_t version = 0;
+  uint32_t id = 0;
+  uint32_t seq = 0;
+  bool key = false;
+  bool synthetic = false;
+  double psnr = -1.0;    // only for the watched final/pre id: text-ROI PSNR
+  double ink = -1.0;     // ... and over the glyph pixels (make_ink_mask); -1 when scaled
+  uint32_t visW = 0, visH = 0;
+};
+
+struct Shared {
+  std::mutex mu;
+  std::vector<Sample> samples;
+  std::atomic<uint32_t> watchFinalId{0};
+  std::atomic<uint32_t> watchPreId{0};
+  // The painted luma and glyph mask of the watched pictures. Swapped whole under mu (the sampler
+  // takes its own reference) -- an episode's new reference must not move under a running PSNR.
+  struct RefSet { std::vector<uint8_t> ref, mask; };
+  std::shared_ptr<const RefSet> finalSet, preSet;
+  int refW = 0, refH = 0;
+  // Crops for the first episodes of each scene: the decoded picture at its worst and at sharp.
+  std::vector<uint8_t> lastFinalY;  // latest decoded final picture (visible luma)
+  std::vector<uint8_t> worstFinalY;
+  double worstFinalPsnr = 1e9;
+  uint32_t lastVisW = 0, lastVisH = 0;
+};
+
+void Sampler(ViewerRig& rig, Shared& sh, std::atomic<bool>& stop, int paintedW, int paintedH) {
+  uint64_t seenVersion = 0;
+  while (!stop.load()) {
+    std::shared_ptr<std::vector<uint8_t>> bytes;
+    Sample s;
+    uint32_t codedW = 0, codedH = 0, visL = 0, visT = 0, visW = 0, visH = 0;
+    {
+      std::lock_guard<std::mutex> lk(rig.ctx.frameBuf.frame.mu);
+      const auto& f = rig.ctx.frameBuf.frame;
+      if (f.version != seenVersion && f.bytes && f.format == SharedFrame::PixelFormat::Nv12 && !f.bytes->empty()) {
+        seenVersion = f.version;
+        bytes = f.bytes;
+        s.version = f.version;
+        s.seq = f.seq;
+        s.key = f.key;
+        s.synthetic = f.synthetic;
+        codedW = f.codedWidth;
+        codedH = f.codedHeight;
+        visL = f.visibleLeft;
+        visT = f.visibleTop;
+        visW = f.width;
+        visH = f.height;
+      }
+    }
+    if (bytes) {
+      s.atUs = qpc_now_us();
+      s.visW = visW;
+      s.visH = visH;
+      s.id = et::read_marker16(bytes->data(), codedW, codedH, visL, visT, visW, visH, paintedW, paintedH);
+      const uint32_t watch = sh.watchFinalId.load();
+      const uint32_t watchPre = sh.watchPreId.load();
+      if (s.id != 0 && (s.id == watch || s.id == watchPre)) {
+        std::shared_ptr<const Shared::RefSet> set;
+        {
+          std::lock_guard<std::mutex> lk(sh.mu);
+          set = (s.id == watch) ? sh.finalSet : sh.preSet;
+        }
+        if (set) {
+          s.psnr = et::text_roi_psnr(bytes->data(), codedW, visL, visT, visW, visH, set->ref, sh.refW, sh.refH);
+          s.ink = et::ink_psnr(bytes->data(), codedW, visL, visT, visW, visH, set->ref, set->mask, sh.refW, sh.refH);
+        }
+        if (s.id == watch) {
+          std::vector<uint8_t> y(static_cast<size_t>(visW) * visH);
+          for (uint32_t r = 0; r < visH; ++r)
+            std::memcpy(y.data() + static_cast<size_t>(r) * visW, bytes->data() + static_cast<size_t>(visT + r) * codedW + visL, visW);
+          std::lock_guard<std::mutex> lk(sh.mu);
+          const double q = s.ink >= 0 ? s.ink : s.psnr;
+          if (q < sh.worstFinalPsnr) {
+            sh.worstFinalPsnr = q;
+            sh.worstFinalY = y;
+          }
+          sh.lastFinalY = std::move(y);
+          sh.lastVisW = visW;
+          sh.lastVisH = visH;
+        }
+      }
+      std::lock_guard<std::mutex> lk(sh.mu);
+      sh.samples.push_back(s);
+    }
+    Sleep(2);
+  }
+}
+
+// A crop of a luma plane as a binary PGM (the top-left text block below the marker strip).
+void WritePgmCrop(const std::wstring& path, const std::vector<uint8_t>& y, int w, int h) {
+  if (y.empty() || w <= 0 || h <= 0) return;
+  const int x0 = std::min(100, w / 8), y0 = std::min(et::kMarkerH + 20, h / 8);
+  const int cw = std::min(760, w - x0), ch = std::min(360, h - y0);
+  FILE* f = _wfopen(path.c_str(), L"wb");
+  if (!f) return;
+  std::fprintf(f, "P5\n%d %d\n255\n", cw, ch);
+  for (int r = 0; r < ch; ++r) std::fwrite(y.data() + static_cast<size_t>(y0 + r) * w + x0, 1, cw, f);
+  std::fclose(f);
+}
+
+struct EpisodeResult {
+  std::string scene;
+  int index = 0;
+  bool valid = true;
+  std::string invalidWhy;
+  // Quality figures are the glyph-pixel PSNR (ink) when the picture is at the painted size, else the
+  // text-ROI PSNR; refRoiPsnr is always the text-ROI one, for comparison across sizes.
+  double refPsnr = -1, worstPsnr = -1, prePsnr = -1, firstFinalPsnr = -1, refRoiPsnr = -1;
+  bool inkMeasured = false;
+  int64_t finalFirstSeenMs = -1;   // final picture first decoded - final paint
+  int64_t timeToSharpMs = -1;
+  int64_t firstReactionMs = -1;
+  uint32_t first250 = 0, first1s = 0, painted1s = 0;
+  int64_t maxGap1sMs = -1;
+  double sustainedFps = -1;        // long scroll only
+  uint32_t finalVersions = 0;      // decoded versions of the final picture (refinements seen)
+  uint32_t visW = 0, visH = 0;
+};
+
+double Percentile(std::vector<double> v, double p) {
+  if (v.empty()) return -1;
+  std::sort(v.begin(), v.end());
+  const double idx = p * (v.size() - 1);
+  const size_t lo = static_cast<size_t>(idx);
+  const size_t hi = std::min(v.size() - 1, lo + 1);
+  return v[lo] + (v[hi] - v[lo]) * (idx - lo);
+}
+
+EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& all, int index) {
+  EpisodeResult r;
+  r.scene = et::scene_name(rec.scene);
+  r.index = index;
+  // This episode's samples: seen between its start and its end.
+  std::vector<Sample> s;
+  for (const Sample& x : all)
+    if (x.atUs >= rec.startUs && x.atUs <= rec.endUs + 50000) s.push_back(x);
+  if (!rec.sourceStillAfterFinal) { r.valid = false; r.invalidWhy = "source changed after the final event"; }
+  if (rec.finalId == 0 || rec.onsetId == 0) { r.valid = false; r.invalidWhy = "no final/onset event"; }
+  // pre-still quality: the last decoded pre-still picture before the onset paint
+  auto q = [](const Sample& x) { return x.ink >= 0 ? x.ink : x.psnr; };
+  for (const Sample& x : s)
+    if (x.id == rec.preStillId && x.psnr >= 0 && x.atUs <= rec.onsetUs) r.prePsnr = q(x);
+  // final picture samples
+  std::vector<const Sample*> fin;
+  for (const Sample& x : s)
+    if (x.id == rec.finalId && x.psnr >= 0) fin.push_back(&x);
+  r.finalVersions = static_cast<uint32_t>(fin.size());
+  if (fin.empty()) {
+    r.valid = false;
+    if (r.invalidWhy.empty()) r.invalidWhy = "final picture never decoded";
+  } else {
+    r.visW = fin.back()->visW;
+    r.visH = fin.back()->visH;
+    r.refPsnr = q(*fin.back());
+    r.firstFinalPsnr = q(*fin.front());
+    r.refRoiPsnr = fin.back()->psnr;
+    r.inkMeasured = fin.back()->ink >= 0;
+    r.finalFirstSeenMs = static_cast<int64_t>(fin.front()->atUs) / 1000 - static_cast<int64_t>(rec.finalUs) / 1000;
+    r.worstPsnr = 1e9;
+    for (const Sample* x : fin) r.worstPsnr = std::min(r.worstPsnr, q(*x));
+    // time to sharp: within 1 dB of ref, and every later final sample for 500 ms too
+    for (size_t i = 0; i < fin.size(); ++i) {
+      if (q(*fin[i]) < r.refPsnr - 1.0) continue;
+      bool holds = true;
+      for (size_t j = i + 1; j < fin.size() && fin[j]->atUs <= fin[i]->atUs + 500000; ++j)
+        if (q(*fin[j]) < r.refPsnr - 1.0) { holds = false; break; }
+      // ... and the hold must have lasted 500 ms past it to know.
+      if (holds && fin[i]->atUs + 500000 <= rec.endUs) {
+        r.timeToSharpMs = static_cast<int64_t>(fin[i]->atUs - rec.finalUs) / 1000;
+        break;
+      }
+    }
+    if (r.timeToSharpMs < 0 && r.valid) { r.valid = false; r.invalidWhy = "never sharp within the hold"; }
+  }
+  // onset
+  std::set<uint32_t> seen;
+  uint64_t prevUs = rec.onsetUs;
+  uint64_t maxGap = 0;
+  for (const Sample& x : s) {
+    if (x.id < rec.onsetId || x.id > rec.finalId || x.id == 0) continue;
+    if (!seen.insert(x.id).second) continue;
+    if (r.firstReactionMs < 0) r.firstReactionMs = static_cast<int64_t>(x.atUs - rec.onsetUs) / 1000;
+    if (x.atUs <= rec.onsetUs + 250000) ++r.first250;
+    if (x.atUs <= rec.onsetUs + 1000000) {
+      ++r.first1s;
+      maxGap = std::max<uint64_t>(maxGap, x.atUs - prevUs);
+      prevUs = x.atUs;
+    }
+  }
+  if (rec.finalUs > rec.onsetUs + 1000000) maxGap = std::max<uint64_t>(maxGap, rec.onsetUs + 1000000 - prevUs);
+  r.maxGap1sMs = static_cast<int64_t>(maxGap / 1000);
+  for (const auto& kv : rec.paints)
+    if (kv.first >= rec.onsetId && kv.second <= rec.onsetUs + 1000000) ++r.painted1s;
+  if (rec.scene == et::Scene::ScrollLong) {
+    uint32_t n = 0;
+    std::set<uint32_t> ids;
+    for (const Sample& x : s)
+      if (x.id >= rec.onsetId && x.id <= rec.finalId && x.atUs >= rec.onsetUs + 2000000 && x.atUs < rec.onsetUs + 4000000 &&
+          ids.insert(x.id).second)
+        ++n;
+    r.sustainedFps = n / 2.0;
+  }
+  return r;
+}
+
+struct Options {
+  std::wstring hostExe;
+  std::wstring outDir;
+  uint32_t bitrate = 6000000;
+  uint32_t fps = 60;
+  int episodes = 8;
+  std::vector<et::Scene> scenes = {et::Scene::MinimizeRestore, et::Scene::Scroll1s, et::Scene::ScrollLong,
+                                   et::Scene::TypeChar, et::Scene::StopStart, et::Scene::Noise};
+  uint32_t holdMs = 6000;
+  uint32_t preMs = 2500;
+  std::string label = "run";
+  std::vector<std::wstring> hostEnv;
+};
+
+std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+int Run(const Options& o) {
+  CreateDirectoryW(o.outDir.c_str(), nullptr);
+  const std::wstring runDir = o.outDir + L"\\" + W(o.label) + L"\\";
+  CreateDirectoryW(runDir.c_str(), nullptr);
+  et::TextPageTarget target;
+  target.title = remote60::native_poc::e2e::e2e_unique_window_title(L"remote60 motion-settle target");
+  if (!target.Start()) {
+    std::printf("FAIL motion-settle: the fixture window did not start\n");
+    return 1;
+  }
+  // The host, isolated as in MarkerHost, capturing that window.
+  wchar_t selfExe[MAX_PATH]{};
+  GetModuleFileNameW(nullptr, selfExe, MAX_PATH);
+  if (!CopyFileW(o.hostExe.c_str(), (runDir + L"GNLinkStream.exe").c_str(), FALSE) ||
+      !CopyFileW(selfExe, (runDir + L"GNLinkCapture.exe").c_str(), FALSE)) {
+    std::printf("FAIL motion-settle: could not stage the host\n");
+    target.Stop();
+    return 1;
+  }
+  const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  uint64_t perEpisodeMs = o.preMs + o.holdMs + 6000;
+  const uint64_t seconds = (perEpisodeMs * o.episodes * o.scenes.size()) / 1000 + 60;
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_AU_TRACE", L"1");
+  for (const std::wstring& kv : o.hostEnv) {
+    const size_t eq = kv.find(L'=');
+    if (eq != std::wstring::npos) SetEnvironmentVariableW(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str());
+  }
+  const std::wstring hostLogPath = runDir + L"host.log";
+  const std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
+                           std::to_wstring(port) + L" --fps " + std::to_wstring(o.fps) + L" --bitrate " + std::to_wstring(o.bitrate) +
+                           L" --seconds " + std::to_wstring(seconds) + L" --input-injection-mode none" +
+                           remote60::native_poc::e2e::e2e_capture_window_args(target.title);
+  std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+  mutableCmd.push_back(L'\0');
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE hostLog = CreateFileW(hostLogPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = hostLog;
+  si.hStdError = hostLog;
+  const std::wstring isoAppData = runDir + L"localappdata";
+  CreateDirectoryW(isoAppData.c_str(), nullptr);
+  std::vector<wchar_t> isoEnv = remote60::native_poc::e2e::e2e_isolated_environment(isoAppData);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
+                      CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, isoEnv.data(), runDir.c_str(), &si, &pi)) {
+    std::printf("FAIL motion-settle: host did not start\n");
+    target.Stop();
+    return 1;
+  }
+  AssignProcessToJobObject(job, pi.hProcess);
+  ResumeThread(pi.hThread);
+
+  ViewerRig rig;
+  rig.args.fpsHint = o.fps;
+  rig.udpControl = true;
+  if (!rig.Connect(port, /*requestNack=*/true, /*holdUs=*/120000)) {
+    std::printf("FAIL motion-settle: viewer could not connect\n");
+    TerminateProcess(pi.hProcess, 0);
+    target.Stop();
+    return 1;
+  }
+  // The viewer's control thread, as the product runs it over the tunnel: pings keep the session
+  // served, the receiver's own once-a-second metrics go to the host (its ABR sees what this viewer
+  // measured), keyframe requests the FrameGate raised go out through the product scheduler.
+  std::atomic<bool> controlStop{false};
+  std::thread controlThread([&] {
+    UdpControlLink link(&rig.ctx.control.udpControl, 12000);
+    ClientControlScheduler& scheduler = rig.ctx.control.scheduler;
+    WindowPanelStateModel windowPanel;
+    scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
+    while (!controlStop.load()) {
+      const ClientRuntimeMetrics m = rig.ctx.metrics.Snapshot();
+      ClientControlMetricsSnapshot metrics{};
+      metrics.updatedQpcUs = m.updatedQpcUs;
+      metrics.message.width = m.width;
+      metrics.message.height = m.height;
+      metrics.message.recvFpsX100 = m.recvFpsX100;
+      metrics.message.decodedFpsX100 = m.decodedFpsX100;
+      metrics.message.recvMbpsX1000 = m.recvMbpsX1000;
+      metrics.message.skippedFrames = m.skippedFrames;
+      metrics.message.avgLatencyUs = m.avgLatencyUs;
+      metrics.message.maxLatencyUs = m.maxLatencyUs;
+      metrics.message.avgDecodeTailUs = m.avgDecodeTailUs;
+      metrics.message.maxDecodeTailUs = m.maxDecodeTailUs;
+      metrics.message.congestionState = m.congestionState;
+      metrics.message.queueDepthMax = m.queueDepthMax;
+      metrics.message.queueDepthH4p = m.queueDepthH4p;
+      metrics.message.udpAssemblyDropPm = m.udpAssemblyDropPm;
+      ControlOutboundAction action{};
+      const uint64_t now = qpc_now_us();
+      if (scheduler.NextAction(now, metrics, &windowPanel, &rig.ctx.control.streamState,
+                               &rig.ctx.control.captureModeRequests, &rig.ctx.control.keyframeRequests,
+                               &rig.ctx.control.runtimeTune, &rig.ctx.control.inputQueue, &action, nullptr, nullptr)) {
+        TcpControlResponse response;
+        if (execute_control_action(link, action, &response) && action.kind == ControlOutboundActionKind::Ping) {
+          scheduler.OnPingCompleted(qpc_now_us());
+        }
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+    }
+  });
+  Shared sh;
+  sh.refW = target.width;
+  sh.refH = target.height;
+  std::atomic<bool> stop{false};
+  std::thread sampler([&] { Sampler(rig, sh, stop, target.width, target.height); });
+  Sleep(3000);  // first IDR, decoder init
+
+  std::vector<EpisodeResult> results;
+  FILE* csv = _wfopen((runDir + L"episodes.csv").c_str(), L"w");
+  std::fprintf(csv, "label,scene,index,valid,why,visW,visH,prePsnr,firstFinalPsnr,worstPsnr,refPsnr,finalFirstSeenMs,timeToSharpMs,"
+                    "finalVersions,firstReactionMs,first250,first1s,painted1s,maxGap1sMs,sustainedFps,onsetId,finalId,onsetUs,finalUs,refRoiPsnr,ink\n");
+  for (et::Scene scene : o.scenes) {
+    for (int i = 0; i < o.episodes; ++i) {
+      et::EpisodeSpec spec;
+      spec.scene = scene;
+      spec.preIdleMs = o.preMs;
+      spec.holdMs = o.holdMs;
+      // The references are known only once the fixture has painted them: the window thread fills
+      // them in the record; until then watch nothing. The pre-still picture is painted first, the
+      // final one at the end of the action -- the sampler watches both as soon as they exist.
+      sh.watchFinalId = 0;
+      sh.watchPreId = 0;
+      {
+        std::lock_guard<std::mutex> lk(sh.mu);
+        sh.worstFinalPsnr = 1e9;
+        sh.worstFinalY.clear();
+        sh.lastFinalY.clear();
+      }
+      std::thread player;
+      et::EpisodeRecord rec;
+      std::atomic<bool> played{false};
+      player = std::thread([&] { rec = target.Play(spec); played = true; });
+      // Arm the watches from the live record (the fixture publishes ids as it paints them).
+      while (!played.load()) {
+        uint32_t preId = 0, finId = 0;
+        target.PeekIds(&preId, &finId);
+        if (preId != 0 && sh.watchPreId.load() != preId) {
+          auto set = std::make_shared<Shared::RefSet>();
+          set->ref = target.PreY();
+          set->mask = et::make_ink_mask(set->ref, target.width, target.height);
+          { std::lock_guard<std::mutex> lk(sh.mu); sh.preSet = set; }
+          sh.watchPreId = preId;
+        }
+        if (finId != 0 && sh.watchFinalId.load() != finId) {
+          auto set = std::make_shared<Shared::RefSet>();
+          set->ref = target.FinalY();
+          set->mask = et::make_ink_mask(set->ref, target.width, target.height);
+          { std::lock_guard<std::mutex> lk(sh.mu); sh.finalSet = set; }
+          sh.watchFinalId = finId;
+        }
+        Sleep(1);
+      }
+      player.join();
+      Sleep(100);
+      std::vector<Sample> snap;
+      {
+        std::lock_guard<std::mutex> lk(sh.mu);
+        snap = sh.samples;
+      }
+      EpisodeResult r = Analyse(rec, snap, i);
+      results.push_back(r);
+      std::fprintf(csv, "%s,%s,%d,%d,%s,%u,%u,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%u,%lld,%u,%u,%u,%lld,%.1f,%u,%u,%llu,%llu,%.2f,%d\n",
+                   o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, r.invalidWhy.c_str(), r.visW, r.visH, r.prePsnr,
+                   r.firstFinalPsnr, r.worstPsnr, r.refPsnr, (long long)r.finalFirstSeenMs, (long long)r.timeToSharpMs,
+                   r.finalVersions, (long long)r.firstReactionMs, r.first250, r.first1s, r.painted1s, (long long)r.maxGap1sMs,
+                   r.sustainedFps, rec.onsetId, rec.finalId, (unsigned long long)rec.onsetUs, (unsigned long long)rec.finalUs,
+                   r.refRoiPsnr, r.inkMeasured ? 1 : 0);
+      std::fflush(csv);
+      std::printf("EPISODE %s %-10s #%02d valid=%d sharp=%lldms ref=%.2f worst=%.2f pre=%.2f firstSeen=%lldms react=%lldms "
+                  "f250=%u f1s=%u/%u gap=%lldms sus=%.1f %s\n",
+                  o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, (long long)r.timeToSharpMs, r.refPsnr, r.worstPsnr,
+                  r.prePsnr, (long long)r.finalFirstSeenMs, (long long)r.firstReactionMs, r.first250, r.first1s, r.painted1s,
+                  (long long)r.maxGap1sMs, r.sustainedFps, r.invalidWhy.c_str());
+      if (i < 2) {
+        std::lock_guard<std::mutex> lk(sh.mu);
+        const std::wstring base = runDir + W(r.scene) + L"_" + std::to_wstring(i);
+        WritePgmCrop(base + L"_painted.pgm", rec.finalY, rec.w, rec.h);
+        WritePgmCrop(base + L"_worst.pgm", sh.worstFinalY, static_cast<int>(sh.lastVisW), static_cast<int>(sh.lastVisH));
+        WritePgmCrop(base + L"_settled.pgm", sh.lastFinalY, static_cast<int>(sh.lastVisW), static_cast<int>(sh.lastVisH));
+      }
+      // Drop samples older than this episode (memory).
+      {
+        std::lock_guard<std::mutex> lk(sh.mu);
+        sh.samples.erase(std::remove_if(sh.samples.begin(), sh.samples.end(),
+                                        [&](const Sample& x) { return x.atUs < rec.endUs; }),
+                         sh.samples.end());
+      }
+    }
+  }
+  std::fclose(csv);
+  stop = true;
+  sampler.join();
+  controlStop = true;
+  controlThread.join();
+  rig.Stop();
+  TerminateProcess(pi.hProcess, 0);
+  WaitForSingleObject(pi.hProcess, 5000);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  CloseHandle(hostLog);
+  CloseHandle(job);
+  target.Stop();
+
+  // Summary per scene.
+  FILE* sum = _wfopen((runDir + L"summary.txt").c_str(), L"w");
+  for (et::Scene scene : o.scenes) {
+    std::vector<double> sharp, react, gap, f1, ratio, sus, ref, worst;
+    int valid = 0, total = 0;
+    for (const EpisodeResult& r : results) {
+      if (r.scene != et::scene_name(scene)) continue;
+      ++total;
+      if (r.firstReactionMs >= 0) react.push_back(static_cast<double>(r.firstReactionMs));
+      if (r.maxGap1sMs >= 0) gap.push_back(static_cast<double>(r.maxGap1sMs));
+      f1.push_back(r.first1s);
+      if (r.painted1s > 0) ratio.push_back(static_cast<double>(r.first1s) / r.painted1s);
+      if (r.sustainedFps >= 0) sus.push_back(r.sustainedFps);
+      if (!r.valid) continue;
+      ++valid;
+      sharp.push_back(static_cast<double>(r.timeToSharpMs));
+      ref.push_back(r.refPsnr);
+      worst.push_back(r.worstPsnr);
+    }
+    char line[640];
+    std::snprintf(line, sizeof(line),
+                  "SUMMARY %s %-10s bitrate=%u fps=%u valid=%d/%d sharp_med=%.0f sharp_p95=%.0f sharp_max=%.0f "
+                  "react_p95=%.0f gap1s_p95=%.0f gap1s_max=%.0f first1s_med=%.0f deliv/painted_med=%.2f sustained_med=%.1f "
+                  "ref_med=%.2f worst_med=%.2f\n",
+                  o.label.c_str(), et::scene_name(scene), o.bitrate, o.fps, valid, total, Percentile(sharp, 0.5),
+                  Percentile(sharp, 0.95), Percentile(sharp, 1.0), Percentile(react, 0.95), Percentile(gap, 0.95),
+                  Percentile(gap, 1.0), Percentile(f1, 0.5), Percentile(ratio, 0.5), Percentile(sus, 0.5), Percentile(ref, 0.5),
+                  Percentile(worst, 0.5));
+    std::printf("%s", line);
+    std::fputs(line, sum);
+  }
+  std::fclose(sum);
+  return 0;
+}
+
+}  // namespace motionsettle
+
+int run_motion_settle(int argc, char** argv) {
+  motionsettle::Options o;
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    auto next = [&](std::string* v) { if (i + 1 < argc) { *v = argv[++i]; return true; } return false; };
+    std::string v;
+    if (a == "--motion-settle" && next(&v)) o.hostExe = motionsettle::W(v);
+    else if (a == "--out" && next(&v)) o.outDir = motionsettle::W(v);
+    else if (a == "--bitrate" && next(&v)) o.bitrate = static_cast<uint32_t>(std::stoul(v));
+    else if (a == "--fps" && next(&v)) o.fps = static_cast<uint32_t>(std::stoul(v));
+    else if (a == "--episodes" && next(&v)) o.episodes = std::stoi(v);
+    else if (a == "--hold-ms" && next(&v)) o.holdMs = static_cast<uint32_t>(std::stoul(v));
+    else if (a == "--pre-ms" && next(&v)) o.preMs = static_cast<uint32_t>(std::stoul(v));
+    else if (a == "--label" && next(&v)) o.label = v;
+    else if (a == "--host-env" && next(&v)) o.hostEnv.push_back(motionsettle::W(v));
+    else if (a == "--scenes" && next(&v)) {
+      o.scenes.clear();
+      size_t start = 0;
+      while (start <= v.size()) {
+        const size_t comma = v.find(',', start);
+        const std::string name = v.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        for (int s = 0; s <= static_cast<int>(remote60::native_poc::e2etext::Scene::Noise); ++s) {
+          const auto sc = static_cast<remote60::native_poc::e2etext::Scene>(s);
+          if (name == remote60::native_poc::e2etext::scene_name(sc)) o.scenes.push_back(sc);
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+      }
+    }
+  }
+  if (o.outDir.empty()) {
+    wchar_t tmp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tmp);
+    o.outDir = std::wstring(tmp) + L"remote60_motion_settle";
+  }
+  return motionsettle::Run(o);
+}
+
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
   WinsockScope ws;
@@ -2050,6 +2606,21 @@ int main(int argc, char** argv) {
   if (FAILED(MFStartup(MF_VERSION))) {
     std::printf("MFStartup failed\n");
     return 2;
+  }
+  // motion-settle r1 M0: the still -> motion -> still measurement against a real isolated host.
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--motion-settle") {
+      char allow[8]{};
+      if (GetEnvironmentVariableA("REMOTE60_ALLOW_HOST_E2E", allow, sizeof(allow)) == 0 || std::string(allow) != "1") {
+        std::printf("SKIP motion-settle: set REMOTE60_ALLOW_HOST_E2E=1 (spawns an isolated host).\nRESULT: SKIPPED\n");
+        MFShutdown();
+        return 77;
+      }
+      const int rc = run_motion_settle(argc, argv);
+      MFShutdown();
+      std::printf("viewer_udp_recovery_test(motion-settle): %s\n", rc == 0 ? "DONE" : "FAIL");
+      return rc;
+    }
   }
   // r8 V2-fix: env-gated real-host receive smoke (spawns an isolated GNLinkStream capturing a marker
   // window). Off by default so the unit scenarios below run in regression without a real host.

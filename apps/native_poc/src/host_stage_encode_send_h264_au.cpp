@@ -553,6 +553,33 @@ if (sentOk) {
     frameGating.refStride = stride;
   }
 }
+// motion-settle r1 M0: every AU that reached the send decision, with the QP its sample carried and
+// the provenance of the input behind it. The QP summary is always kept (one line per printed stats
+// tick); the per-AU line only with REMOTE60_NATIVE_AU_TRACE=1, bounded (host_au_trace.hpp).
+encoder.qpWindow.Note((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.encodeQp);
+if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
+  ++encoder.auTraceLines;
+  std::cout << "[native-video-host][au] seq=" << hdr.seq
+            << " key=" << (((hdr.flags & kEncodedFrameFlagKeyFrame) != 0) ? 1 : 0)
+            << " rawIdr=" << (au.rawIdr ? 1 : 0)
+            << " forced=" << (au.inputWasForcedKey ? 1 : 0)
+            << " src=" << synthetic_reason_name(au.syntheticReason)
+            << " qp=" << au.encodeQp
+            << " qpHr=0x" << std::hex << static_cast<uint32_t>(au.encodeQpHr) << std::dec
+            << " bytes=" << hdr.payloadSize
+            << " instance=" << au.codecInstance
+            << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
+            << " inputEpoch=" << au.inputEpoch
+            << " gen=" << hdr.streamGeneration
+            << " ordinal=" << au.acceptedInputOrdinal
+            << " contentVersion=" << au.contentVersion
+            << " captureUs=" << hdr.captureQpcUs
+            << " enqueueUs=" << sendStartUs
+            << " enqueued=" << (enqueuedForSend ? 1 : 0)
+            << " sentOk=" << (sentOk ? 1 : 0)
+            << " size=" << hdr.width << "x" << hdr.height
+            << "\n";
+}
 if (!sentOk) {
   if (transport == VideoTransport::Udp) {
     ++sender.udpTxFail;
