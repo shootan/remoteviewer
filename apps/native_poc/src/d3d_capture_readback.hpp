@@ -187,6 +187,35 @@ class D3dCaptureReadbackPipeline {
   // a WGC-callback stall would need. Telemetry only today. (Ledger H-25.)
   uint64_t OldestSubmittingAgeUs();
 
+  // r12: the three readers above no longer take slotMu_. In the fourth Home run the main thread's
+  // stats tick sat in OldestSubmittingAgeUs -> slotMu_ behind a worker that was itself waiting for
+  // the D3D11 device lock, and the watchdog fired on the main thread (exit 43). The ring now keeps a
+  // small snapshot -- oldest Submitting reservation, oldest GpuPending submit, pending count,
+  // generation, when it was refreshed -- rewritten under slotMu_ at every state transition
+  // (RefreshDiagLocked) and read through a bounded seqlock. The snapshot stores TIMESTAMPS, not
+  // ages: a frozen writer leaves the timestamps in place, so the ages the readers compute keep
+  // growing -- a stall is never disguised as an idle ring (0). `consistent` is false only when four
+  // reads in a row tore against a writer; the values are then the last read, flagged, not zeroed.
+  struct DiagSnapshot {
+    uint64_t oldestSubmittingReservedUs = 0;
+    uint64_t oldestGpuPendingSubmitUs = 0;
+    uint32_t gpuPendingCount = 0;
+    uint64_t generation = 0;
+    uint64_t updatedUs = 0;
+    bool consistent = true;
+  };
+  DiagSnapshot ReadDiag() const;
+  // How long ago the snapshot was refreshed (0 = never). A large value with a nonzero pending count
+  // means the ring's threads have not moved: the diagnostic for a frozen ring, readable without a lock.
+  uint64_t DiagAgeUs() const;
+
+  // Test seams (unset in the product; the harness and unit tests use them to pin the worker at a
+  // known point). beforeGpuPollForTest runs on the worker with contextMu_ held and slotMu_ NOT held,
+  // right before the GetData sweep; whileSlotLockedForTest runs with slotMu_ held, right after a
+  // slot was pinned Reading. Neither is a product switch: nothing reads them but the worker.
+  std::function<void()> beforeGpuPollForTest;
+  std::function<void()> whileSlotLockedForTest;
+
  private:
   // Submitting is the publication barrier. The worker only ever polls GpuPending, so a slot
   // stays invisible to it until Submit has finished the D3D work AND written the final meta --
@@ -210,6 +239,7 @@ class D3dCaptureReadbackPipeline {
   bool EnsureNv12Locked(uint32_t outW, uint32_t outH);
   void ReleaseNv12SlotLocked(int32_t slot, uint64_t generation);
   void WorkerLoop();
+  void RefreshDiagLocked();  // slotMu_ held: recompute the DiagSnapshot atomics from slots_
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -268,6 +298,14 @@ class D3dCaptureReadbackPipeline {
   std::atomic<uint64_t> preprocessFallbacks_{0};
   std::atomic<uint64_t> nv12Converted_{0};
   std::atomic<uint64_t> nv12RingBusy_{0};
+
+  // r12 diagnostic snapshot (see DiagSnapshot). Odd diagSeq_ = a writer is mid-update.
+  std::atomic<uint32_t> diagSeq_{0};
+  std::atomic<uint64_t> diagOldestSubmittingUs_{0};
+  std::atomic<uint64_t> diagOldestPendingUs_{0};
+  std::atomic<uint32_t> diagPendingCount_{0};
+  std::atomic<uint64_t> diagGeneration_{0};
+  std::atomic<uint64_t> diagUpdatedUs_{0};
 };
 
 }  // namespace remote60::native_poc

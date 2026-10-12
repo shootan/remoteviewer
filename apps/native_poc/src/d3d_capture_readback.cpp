@@ -144,9 +144,11 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
     if (FAILED(queryHr)) {
       std::fprintf(stderr, "[readback] query create failed hr=0x%08lx\n",
                    static_cast<unsigned long>(queryHr));
+      RefreshDiagLocked();
       return false;
     }
   }
+  RefreshDiagLocked();
   return true;
 }
 
@@ -242,39 +244,80 @@ void D3dCaptureReadbackPipeline::SetNv12Enabled(bool enabled) {
   nv12Enabled_ = enabled;
 }
 
-uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
-  std::lock_guard<std::mutex> lk(slotMu_);
-  uint64_t oldestSubmitUs = 0;
+// r12: the diagnostic readers are lock-free. They read the snapshot RefreshDiagLocked writes at
+// every slot transition; see DiagSnapshot in the header for what a stale snapshot means (ages keep
+// growing, never 0).
+void D3dCaptureReadbackPipeline::RefreshDiagLocked() {
+  uint64_t oldestSubmittingUs = 0;
+  uint64_t oldestPendingUs = 0;
+  uint32_t pending = 0;
   for (const auto& s : slots_) {
-    if ((s.state != SlotState::GpuPending && s.state != SlotState::Reading) || s.meta.submitUs == 0) continue;
-    if (oldestSubmitUs == 0 || s.meta.submitUs < oldestSubmitUs) oldestSubmitUs = s.meta.submitUs;
+    if (s.state == SlotState::Submitting && s.reservedUs != 0 &&
+        (oldestSubmittingUs == 0 || s.reservedUs < oldestSubmittingUs)) {
+      oldestSubmittingUs = s.reservedUs;
+    }
+    if (s.state == SlotState::GpuPending || s.state == SlotState::Reading) {
+      ++pending;
+      if (s.meta.submitUs != 0 && (oldestPendingUs == 0 || s.meta.submitUs < oldestPendingUs)) {
+        oldestPendingUs = s.meta.submitUs;
+      }
+    }
   }
-  if (oldestSubmitUs == 0) return 0;
+  // seqlock write: odd while the fields are being replaced. Readers that see an odd value or a
+  // changed value re-read a bounded number of times and then report `consistent=false`.
+  diagSeq_.fetch_add(1, std::memory_order_acq_rel);
+  diagOldestSubmittingUs_.store(oldestSubmittingUs, std::memory_order_release);
+  diagOldestPendingUs_.store(oldestPendingUs, std::memory_order_release);
+  diagPendingCount_.store(pending, std::memory_order_release);
+  diagGeneration_.store(generation_, std::memory_order_release);
+  diagUpdatedUs_.store(qpc_us(), std::memory_order_release);
+  diagSeq_.fetch_add(1, std::memory_order_release);
+}
+
+D3dCaptureReadbackPipeline::DiagSnapshot D3dCaptureReadbackPipeline::ReadDiag() const {
+  DiagSnapshot d;
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const uint32_t s0 = diagSeq_.load(std::memory_order_acquire);
+    d.oldestSubmittingReservedUs = diagOldestSubmittingUs_.load(std::memory_order_acquire);
+    d.oldestGpuPendingSubmitUs = diagOldestPendingUs_.load(std::memory_order_acquire);
+    d.gpuPendingCount = diagPendingCount_.load(std::memory_order_acquire);
+    d.generation = diagGeneration_.load(std::memory_order_acquire);
+    d.updatedUs = diagUpdatedUs_.load(std::memory_order_acquire);
+    const uint32_t s1 = diagSeq_.load(std::memory_order_acquire);
+    if ((s0 & 1u) == 0 && s0 == s1) {
+      d.consistent = true;
+      return d;
+    }
+  }
+  d.consistent = false;  // torn against a writer four times: the values are the last read, flagged
+  return d;
+}
+
+uint64_t D3dCaptureReadbackPipeline::DiagAgeUs() const {
+  const uint64_t updated = diagUpdatedUs_.load(std::memory_order_acquire);
+  if (updated == 0) return 0;
+  const uint64_t nowUs = qpc_us();
+  return nowUs > updated ? nowUs - updated : 0;
+}
+
+uint64_t D3dCaptureReadbackPipeline::OldestGpuPendingAgeUs() {
+  const DiagSnapshot d = ReadDiag();
+  if (d.oldestGpuPendingSubmitUs == 0) return 0;
   // Same clock as meta.submitUs (set from qpc_us() at submit), so the subtraction is meaningful
   // without the caller having to pass a timestamp on a possibly different clock.
   const uint64_t nowUs = qpc_us();
-  return nowUs > oldestSubmitUs ? nowUs - oldestSubmitUs : 0;
+  return nowUs > d.oldestGpuPendingSubmitUs ? nowUs - d.oldestGpuPendingSubmitUs : 0;
 }
 
 uint64_t D3dCaptureReadbackPipeline::OldestSubmittingAgeUs() {
-  std::lock_guard<std::mutex> lk(slotMu_);
-  uint64_t oldestUs = 0;
-  for (const auto& s : slots_) {
-    if (s.state != SlotState::Submitting || s.reservedUs == 0) continue;
-    if (oldestUs == 0 || s.reservedUs < oldestUs) oldestUs = s.reservedUs;
-  }
-  if (oldestUs == 0) return 0;
+  const DiagSnapshot d = ReadDiag();
+  if (d.oldestSubmittingReservedUs == 0) return 0;
   const uint64_t nowUs = qpc_us();
-  return nowUs > oldestUs ? nowUs - oldestUs : 0;
+  return nowUs > d.oldestSubmittingReservedUs ? nowUs - d.oldestSubmittingReservedUs : 0;
 }
 
 uint32_t D3dCaptureReadbackPipeline::GpuPendingCount() {
-  std::lock_guard<std::mutex> lk(slotMu_);
-  uint32_t pending = 0;
-  for (const auto& s : slots_) {
-    if (s.state == SlotState::GpuPending || s.state == SlotState::Reading) ++pending;
-  }
-  return pending;
+  return ReadDiag().gpuPendingCount;
 }
 
 bool D3dCaptureReadbackPipeline::EnsureNv12Locked(uint32_t outW, uint32_t outH) {
@@ -363,6 +406,7 @@ void D3dCaptureReadbackPipeline::Shutdown() {
   }
   std::lock_guard<std::mutex> lk(slotMu_);
   slots_.clear();
+  RefreshDiagLocked();
   vpEnumerator_.Reset();
   vpProcessor_.Reset();
   preSrcTexture_.Reset();
@@ -509,6 +553,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
     staging = slot->staging;
     query = slot->query;
     generationAtSubmit = generation_;
+    RefreshDiagLocked();
   }
 
   const uint64_t submitStartUs = qpc_us();
@@ -594,11 +639,13 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
   }
   // Everything that needs slotMu_ happens here, AFTER the context lock is released.
   //
-  // The two locks have exactly one legal order, slotMu_ -> contextMu_, because that is what
-  // WorkerLoop takes (it holds slotMu_ across its GetData sweep). Taking slotMu_ while still
-  // holding contextMu_ -- which the blt-failure handling used to do -- is the opposite order and
-  // deadlocks against that sweep. The NV12 branch is the one a driver without NV12 support takes
-  // on its very first frame, so it was reachable.
+  // Lock discipline (r12): slotMu_ and contextMu_ are never held together by any thread. The
+  // worker used to hold slotMu_ across its GetData sweep, which made slotMu_ -> contextMu_ the one
+  // legal order; since r12 the worker snapshots under slotMu_, polls under contextMu_ alone, and
+  // commits under slotMu_ again. Submit keeps the same shape -- reserve, D3D work, promote -- so
+  // the blt-failure handling that once took slotMu_ under contextMu_ (Ledger H-23) stays out of
+  // the context lock, and a thread that holds the D3D11 device's own lock (the WGC callback
+  // thread, fourth Home run) is never made to wait for either mutex: the callback only signals.
   //
   // Releasing the context lock first is only safe because the slot is still Submitting: the
   // worker cannot see it until this block promotes it. Doing the promotion last is the whole
@@ -648,6 +695,7 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
       nv12Broken_ = true;
       RB_DEBUG("nv12 blt failed on a superseded slot; surface path disabled");
     }
+    RefreshDiagLocked();
   }
   RB_DEBUG("submit seq=%llu gen=%llu promoted=%d", static_cast<unsigned long long>(submitSeqAtSubmit),
            static_cast<unsigned long long>(generationAtSubmit), promoted ? 1 : 0);
@@ -670,11 +718,24 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
   uint64_t workerD3dCallAccUs = 0;
   uint64_t nextPublishUs = 0;
   uint64_t publishGeneration = 0;
+  // r12 (fix 2): what the GPU poll needs from a slot, taken under slotMu_ and used outside it. The
+  // query is a strong reference so a reconfigure cannot free it mid-GetData; the identity
+  // (generation, index, submitSeq) decides afterwards whether the result still belongs to the slot.
+  struct Probe {
+    size_t index = 0;
+    uint64_t submitSeq = 0;
+    Microsoft::WRL::ComPtr<ID3D11Query> query;
+    HRESULT hr = S_FALSE;
+    BOOL done = FALSE;
+  };
+  std::vector<Probe> probes;
   while (running_.load(std::memory_order_acquire)) {
     Slot slotCopy;
     Slot* slotRef = nullptr;
     uint64_t generationAtPick = 0;
     uint64_t submitSeqAtPick = 0;
+    uint64_t generationAtProbe = 0;
+    probes.clear();
     {
       std::unique_lock<std::mutex> lk(slotMu_);
       workerCv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
@@ -708,36 +769,72 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
         workerCv_.wait_for(lk, std::chrono::microseconds(nextPublishUs - publishNowUs));
         continue; // clock driven: the last changed frame needs no subsequent callback
       }
-      // Which pending copies has the GPU finished? Checked outside the slot loop so the
-      // latest-wins pick sees a consistent snapshot.
+      // Snapshot the pending slots' identity and query references. The GetData sweep below runs
+      // WITHOUT slotMu_: until r12 this loop held slotMu_ across the sweep, and in the fourth Home
+      // run its GetData waited for the D3D11 device lock while the WGC callback -- which owned that
+      // lock -- waited for slotMu_ in Submit. Now this thread never holds slotMu_ while it can wait
+      // for the device, and nothing that holds the device ever needs slotMu_.
+      generationAtProbe = generation_;
+      for (size_t i = 0; i < slots_.size(); ++i) {
+        if (slots_[i].state != SlotState::GpuPending || !slots_[i].query) continue;
+        Probe p;
+        p.index = i;
+        p.submitSeq = slots_[i].submitSeq;
+        p.query = slots_[i].query;
+        probes.push_back(std::move(p));
+      }
+    }
+
+    // --- the D3D calls: contextMu_ only. Which pending copies has the GPU finished?
+    {
+      const uint64_t sweepLockStartUs = qpc_us();
+      std::lock_guard<std::mutex> d3dLock(*contextMu_);
+      workerCtxWaitAccUs += qpc_us() - sweepLockStartUs;
+      if (beforeGpuPollForTest) beforeGpuPollForTest();
+      for (auto& p : probes) {
+        // DONOTFLUSH: Submit already calls Flush() right after End(query), so the copy is on
+        // the GPU by the time we poll. Without the flag every poll is allowed to flush the
+        // context -- and this loop polls while holding the immediate-context lock the capture
+        // callback needs to submit the NEXT frame. (Ledger H-17.)
+        const uint64_t getDataStartUs = qpc_us();
+        p.hr = context_->GetData(p.query.Get(), &p.done, sizeof(p.done), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        workerD3dCallAccUs += qpc_us() - getDataStartUs;
+      }
+    }
+
+    // --- commit: re-lock and apply each result only to the slot it was probed from. A slot whose
+    // generation moved (reconfigure: CreateSlotsLocked already reclaimed its lease) or whose
+    // submitSeq/state moved (a newer Submit took the slot over while we polled) is left alone; its
+    // query result is not ours to apply, and the next poll sees the new slot.
+    {
+      std::unique_lock<std::mutex> lk(slotMu_);
+      if (!running_.load(std::memory_order_acquire)) return;
+      if (generation_ != generationAtProbe) {
+        RB_DEBUG("worker poll discarded: generation %llu -> %llu", static_cast<unsigned long long>(generationAtProbe),
+                 static_cast<unsigned long long>(generation_));
+        continue;
+      }
       std::vector<uint64_t> seq(slots_.size(), 0);
       std::vector<bool> ready(slots_.size(), false);
-      {
-        const uint64_t sweepLockStartUs = qpc_us();
-        std::lock_guard<std::mutex> d3dLock(*contextMu_);
-        workerCtxWaitAccUs += qpc_us() - sweepLockStartUs;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-          if (slots_[i].state != SlotState::GpuPending || !slots_[i].query) continue;
-          seq[i] = slots_[i].submitSeq;
-          BOOL done = FALSE;
-          // DONOTFLUSH: Submit already calls Flush() right after End(query), so the copy is on
-          // the GPU by the time we poll. Without the flag every poll is allowed to flush the
-          // context -- and this loop polls while holding the immediate-context lock the capture
-          // callback needs to submit the NEXT frame. (Ledger H-17.)
-          const uint64_t getDataStartUs = qpc_us();
-          const HRESULT hr = context_->GetData(slots_[i].query.Get(), &done, sizeof(done),
-                                               D3D11_ASYNC_GETDATA_DONOTFLUSH);
-          workerD3dCallAccUs += qpc_us() - getDataStartUs;
-          ready[i] = (hr == S_OK && done);
-          if (FAILED(hr) && hr != S_FALSE) {
-            // Device loss: this query will never signal. Free the slot instead of leaving it
-            // GpuPending forever -- a frozen ring is what turned one driver hiccup into a
-            // dead capture pipeline.
-            ReleaseNv12SlotLocked(slots_[i].meta.nv12Slot, slots_[i].meta.nv12Generation);
-            slots_[i].meta.nv12Slot = -1;
-            slots_[i].state = SlotState::Free;
-            seq[i] = 0;
-          }
+      bool anyStateChange = false;
+      for (const auto& p : probes) {
+        if (p.index >= slots_.size()) continue;
+        Slot& s = slots_[p.index];
+        if (!readback_slot_is_current(generation_, generationAtProbe, s.state, SlotState::GpuPending, s.submitSeq,
+                                      p.submitSeq)) {
+          continue;  // superseded while we polled
+        }
+        seq[p.index] = s.submitSeq;
+        ready[p.index] = (p.hr == S_OK && p.done);
+        if (FAILED(p.hr) && p.hr != S_FALSE) {
+          // Device loss: this query will never signal. Free the slot instead of leaving it
+          // GpuPending forever -- a frozen ring is what turned one driver hiccup into a
+          // dead capture pipeline.
+          ReleaseNv12SlotLocked(s.meta.nv12Slot, s.meta.nv12Generation);
+          s.meta.nv12Slot = -1;
+          s.state = SlotState::Free;
+          seq[p.index] = 0;
+          anyStateChange = true;
         }
       }
       size_t pendingCount = 0;
@@ -753,6 +850,7 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       size_t superseded = 0;
       const size_t pick = pick_latest_ready_slot(seq, ready, &superseded);
       if (pick == SIZE_MAX) {
+        if (anyStateChange) RefreshDiagLocked();
         // Copies are in flight but the GPU has not finished any; the CV predicate would
         // return immediately, so yield briefly instead of spinning on GetData.
         lk.unlock();
@@ -776,6 +874,8 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       slotCopy.meta = slotRef->meta;
       generationAtPick = generation_;
       submitSeqAtPick = slotRef->submitSeq;
+      RefreshDiagLocked();
+      if (whileSlotLockedForTest) whileSlotLockedForTest();
     }
 
     // Map/copy outside slotMu_ so the callback can keep submitting into other slots. The
@@ -884,6 +984,7 @@ void D3dCaptureReadbackPipeline::WorkerLoop() {
       }
       // else: a reconfigure replaced this slot. Deliberately NOT released from here -- see the
       // note in CreateSlotsLocked, which already reclaimed it. (Ledger H-03b.)
+      RefreshDiagLocked();
     }
     if (handOff) {
       // Attribution window = the polls since the last publish (or since the ring went idle) while

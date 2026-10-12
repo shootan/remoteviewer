@@ -3277,6 +3277,15 @@ endif()
 add_executable(remote60_capture_final_update_test src/d3d_capture_readback.cpp src/capture_final_update_test.cpp)
 target_link_libraries(remote60_capture_final_update_test PRIVATE d3d11 dxgi)
 
+# encoder-rc-budget r12: the lock-order counterexamples (device CS owner vs readback mutexes) on a
+# multithread-protected WARP device; the pre-r12 deadlock is a child process killed at a bound.
+add_executable(remote60_capture_readback_lock_test src/d3d_capture_readback.cpp src/capture_readback_lock_test.cpp)
+target_include_directories(remote60_capture_readback_lock_test PRIVATE src)
+target_link_libraries(remote60_capture_readback_lock_test PRIVATE d3d11 dxgi dxguid)
+if(MSVC)
+  target_compile_options(remote60_capture_readback_lock_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_windows_environment_snapshot_test src/windows_environment_snapshot_test.cpp)
 add_executable(remote60_host_diagnostic_log_test src/host_diagnostic_log_test.cpp)
 add_executable(remote60_peer_version_test src/peer_version_test.cpp src/udp_control_channel.cpp)
