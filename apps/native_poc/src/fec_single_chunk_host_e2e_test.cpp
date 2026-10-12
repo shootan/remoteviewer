@@ -491,6 +491,8 @@ uint64_t forced_hang_dump_after_us() {
 //   --host-log nul|run|dir:<path>   where the host's stdout goes (NUL device / the run dir [default] / a dir)
 //   --no-log-poll                   do not read host.log while the host runs (the monitor-fallback scan)
 //   --no-dump                       no hang dumps at all
+//   --host-seconds N                r12 diagnostic: the host's own --seconds (default live window + 30); a short N
+//                                   makes the host exit through its shutdown/detach path during the run
 //   --expect-backend <a>[|<b>]      r11b: every candidate row's host must have logged an encoder backend containing
 //                                   one of the needles (the software-MFT contrast row: mft_enum_sw|clsid_cmsh264enc)
 //   --low-fps-dump                  re-enable the 3 s low-fps trigger (OFF by default since r11: a host
@@ -515,6 +517,12 @@ int gDiagnosticCollected = 0;
 // which has none of the candidate's rc/E lines): the row is printed, the host-exit/host-log lines are the
 // result, and the only check is that the row is a valid measurement (alive, frames, no stall, no dump).
 bool gObserveMode = false;
+// r12: --host-seconds N overrides the host's own --seconds (default: the live window + 30 s, so the host
+// never ends on its own). With N shorter than the live window the host exits THROUGH ITS SHUTDOWN PATH
+// (host_shutdown -> DetachCaptureSession -> FrameSignalCollector::StopWithin -> pool close) while the
+// harness watches -- the one way to see the detach path run under a real WGC session without a viewer
+// protocol for "stop". The run then reads as a dead host (exit 0, hostExitedEarly); a diagnostic run only.
+int gHostSecondsOverride = 0;
 // r11b: --expect-backend <needle>[|<needle>...] -- every candidate row's host must have logged a backend
 // containing one of the needles (the SW contrast row: "mft_enum_sw|clsid_cmsh264enc"); a row whose host
 // silently used the hardware encoder FAILS instead of being read as a software measurement.
@@ -623,7 +631,7 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) + L" --seconds " +
-                       std::to_wstring(seconds + 30) + L" --input-injection-mode none" +
+                       std::to_wstring(gHostSecondsOverride > 0 ? gHostSecondsOverride : seconds + 30) + L" --input-injection-mode none" +
                        remote60::native_poc::e2e::e2e_capture_window_args(target.title) +
                        (gFixtureWindowMode == FixtureWindowMode::VisibleFramed ? L" --capture-window-client-only" : L"");
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
@@ -2373,6 +2381,8 @@ int main(int argc, char** argv) {
       gNoLogPoll = true;  // r11
     } else if (a == "--rc-observe") {
       gObserveMode = true;  // r11: liveness only (H0)
+    } else if (a == "--host-seconds" && i + 1 < argc) {
+      gHostSecondsOverride = std::atoi(argv[++i]);  // r12: diagnostic -- let the host end through its own shutdown path
     } else if (a == "--expect-backend" && i + 1 < argc) {
       gExpectBackend = argv[++i];  // r11b: the SW contrast row proves it ran the software encoder
     } else if (a == "--no-dump") {

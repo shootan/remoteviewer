@@ -17,10 +17,14 @@ rem   run.cmd quick   transitions only: the CONTROL smoke (R/E/plan/coalescing p
 rem                   It is not a quality comparison and must not be reported as one.
 rem   run.cmd diag    r8: the SHORT DIAGNOSTIC SET (~4 min) for the Home PC main-loop hangs and the
 rem                   motion regression -- five phases, each separating two hypotheses (see below).
-rem   run.cmd home5   r11: H0 (the log-write discrimination set, baseline only, ~2 min) FIRST, then SW1/SW2
-rem                   (r11b: the software-MFT contrast rows, candidate only, ~30 s), then the
-rem                   home4 phases. H0 answers "does the host stop when its stdout goes to a local file,
-rem                   to the network share, to NUL, with or without the harness reading the file?"
+rem   run.cmd home5   r12: the ONE Home PC run after the r12 fixes (~6 min): the original b27's stall
+rem                   evidence first (1-2 diagnostic rows, dumps), then the r12 candidate on the GPU rows
+rem                   (motion/text 60 fps 6M, baseline beside), the 720p cell, the transitions, the text
+rem                   PGM pair, then the software-MFT pair rows (REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw,
+rem                   candidate only; the WGC/D3D capture path stays -- mft_sw changes the ENCODER only).
+rem                   The H0 log-destination set (r11) is NOT part of it: the log-write hypothesis was
+rem                   withdrawn once the dumps were read with the right symbols.
+rem   run.cmd h0      r11: the H0 log-destination set alone (baseline only, ~2 min), optional diagnostic.
 rem   run.cmd home4   r9: the ONE Home PC run after the r9 fixes (~6 min): the ORIGINAL candidate's
 rem                   stall evidence first (dumps), then the r9 candidate on the same cells, then a
 rem                   CBR 51 contrast row. Needs GNLinkStream.orig.exe beside the three files (the
@@ -260,6 +264,7 @@ set "RC=0"
 if /i "%MODE%"=="diag" goto :diag
 if /i "%MODE%"=="home4" goto :home4
 if /i "%MODE%"=="home5" goto :home5
+if /i "%MODE%"=="h0" goto :h0set
 echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
 echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
 "%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 18 --keep-dir --save-frames > "%OUT%\transitions.log" 2>&1
@@ -320,7 +325,95 @@ if not "%PHASE_RC%"=="0" set "RC=1"
 goto :done
 
 :home5
-echo [home5] H0 first: five 10 s baseline runs of textscroll 30fps 6M 1080p, one per log destination
+echo [home5] r12 set: original b27 diagnostic rows, then the r12 candidate on the GPU rows, 720p, transitions, PGM, then the mft_sw pair
+echo         a taskbar test window may appear (window-mode=visible-plain): leave it alone
+set "DIAG=0"
+set "INCOMPLETE=0"
+if not exist "%ORIGB27%" goto :home5_nob27
+echo [1/9] b27-720p: textscroll 30fps 1.5M through the GPU scaler, ORIGINAL b27 then baseline, 10 s each (diagnostic; dump expected)
+"%E2E%" --host "%ORIGB27%" --baseline "%BASE%" --rc-matrix --rc-diagnostic --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h5_1_b27_720p.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_1_b27_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if "%PHASE_RC%"=="4" set "DIAG=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE in the first phase -- nothing else can be measured; stopping
+  set "RC=1"
+  goto :done
+)
+if not "%PHASE_RC%"=="0" if not "%PHASE_RC%"=="4" set "RC=1"
+echo [2/9] b27-motion: motion 60fps 6M 1080p, ORIGINAL b27 only, 12 s (diagnostic; the second stall row)
+"%E2E%" --host "%ORIGB27%" --rc-matrix --rc-diagnostic --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h5_2_b27_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_2_b27_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if "%PHASE_RC%"=="4" set "DIAG=1"
+if not "%PHASE_RC%"=="0" if not "%PHASE_RC%"=="4" set "RC=1"
+goto :home5_cand
+:home5_nob27
+echo [1/9][2/9] skipped: GNLinkStream.orig-b27.exe is not beside run.cmd -- the original stall is NOT collected; the set is INCOMPLETE
+>"%OUT%\h5_1_b27_720p.exit" echo skipped-no-orig-b27
+>"%OUT%\h5_2_b27_motion.exit" echo skipped-no-orig-b27
+set "INCOMPLETE=1"
+:home5_cand
+echo [3/9] r12-motion: motion 60fps 6M 1080p, r12 candidate then baseline, 12 s each (GPU row; positive = motion fps not below baseline)
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h5_3_r12_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_3_r12_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE -- nothing else can be measured; stopping
+  goto :done
+)
+echo [4/9] r12-text: textscroll 60fps 6M 1080p, r12 candidate then baseline, 12 s each (GPU row)
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir > "%OUT%\h5_4_r12_text.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_4_r12_text.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [5/9] r12-720p: textscroll 30fps 1.5M through the GPU scaler, r12 candidate then baseline, 10 s each
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only textscroll --rc-fps 30 --rc-rate 1500000 --rc-order cand-first --window 1920x1080 --seconds 10 --keep-dir > "%OUT%\h5_5_r12_720p.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_5_r12_720p.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [6/9] r12-trans: down/up, fps, E-only transitions, r12 candidate, 16 s each (event frames saved)
+"%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 16 --keep-dir --save-frames > "%OUT%\h5_6_r12_trans.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_6_r12_trans.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+echo [7/9] text-pgm: singlechange 30fps 6M 1080p, r12 candidate then baseline, 12 s, event frames saved for both (the last single change must arrive)
+"%E2E%" --host "%CAND%" --baseline "%BASE%" --rc-matrix --rc-only singlechange --rc-fps 30 --rc-rate 6000000 --rc-order cand-first --window 1920x1080 --seconds 12 --keep-dir --save-frames > "%OUT%\h5_7_text_pgm.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_7_text_pgm.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%PHASE_RC%"=="0" set "RC=1"
+rem The software-MFT pair (r11b/r12): the same two 6M 60 fps cells with the product's own selector
+rem REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw, r12 candidate only, set for these two runs and cleared after.
+rem mft_sw selects the ENCODER only -- capture and readback stay on WGC/D3D11, so these rows are not a
+rem "no GPU" contrast and not a way around the lock problem; they answer the CPU-encoder question (cores on
+rem the RCMATRIX line; a per-frame encode p95 is not in the host's log -- proposal). Contrast rows: recorded,
+rem not summed into the set's result; a row whose host did not log a software backend FAILS (--expect-backend).
+set REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw
+echo [8/9] mft_sw-motion: motion 60fps 6M 1080p, r12 candidate with the software H.264 MFT, 12 s (pair row; capture stays WGC/D3D)
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\h5_8_mftsw_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_8_mftsw_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC% (pair row)
+echo [9/9] mft_sw-text: textscroll 60fps 6M 1080p, r12 candidate with the software H.264 MFT, 12 s (pair row; capture stays WGC/D3D)
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\h5_9_mftsw_text.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h5_9_mftsw_text.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC% (pair row)
+set REMOTE60_NATIVE_ENCODER_BACKEND=
+findstr /c:"RCMATRIX" "%OUT%\h5_3_r12_motion.log" "%OUT%\h5_4_r12_text.log" "%OUT%\h5_8_mftsw_motion.log" "%OUT%\h5_9_mftsw_text.log" > "%OUT%\h5_pair_rcmatrix.txt" 2>nul
+if "%INCOMPLETE%"=="1" set "RC=1"
+goto :done
+
+:h0set
+echo [h0] H0 set: five 10 s baseline runs of textscroll 30fps 6M 1080p, one per log destination
 set "H0CELL=--rc-matrix --rc-observe --rc-only textscroll --rc-fps 30 --rc-rate 6000000 --window 1920x1080 --seconds 10 --keep-dir"
 echo [H0a] stdout to NUL
 "%E2E%" --host "%BASE%" %H0CELL% --host-log nul > "%OUT%\h0a_nul.log" 2>&1
@@ -360,28 +453,9 @@ set "PHASE_RC=%errorlevel%"
 >"%OUT%\h0e_nodump.exit" echo %PHASE_RC%
 echo      exit %PHASE_RC%
 rem H0 is discrimination material: its exits are recorded, not summed into the set's result.
-echo [home5] H0 done
-rem SW: the Microsoft software H.264 MFT as the contrast row (r11b, Codex: "OSLink does it on the CPU"). The same
-rem 6M 1080p 60 fps motion and textscroll cells as the HW rows, r9 candidate only, with the PRODUCT's own backend
-rem selector REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw (mf_h264_codec.cpp parse_mft_backend_mode) set for these two
-rem runs only and cleared after. The harness refuses a row whose host did not log a software backend
-rem (--expect-backend), and prints the host's CPU cores (process CPU / wall) and its encode-probe averages on the
-rem RCMATRIX line. On the bake-off PC (AMD) mft_sw held 1.0~1.1x the target at 0.5~1.8 cores; this is the NVIDIA
-rem PC's number. Contrast rows: recorded, not summed into the set's result.
-set REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw
-echo [SW1] software MFT: motion 60fps 6M 1080p, r9 candidate, 12 s (contrast row)
-"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\sw1_mftsw_motion.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\sw1_mftsw_motion.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC% (contrast row)
-echo [SW2] software MFT: textscroll 60fps 6M 1080p, r9 candidate, 12 s (contrast row)
-"%E2E%" --host "%CAND%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\sw2_mftsw_textscroll.log" 2>&1
-set "PHASE_RC=%errorlevel%"
->"%OUT%\sw2_mftsw_textscroll.exit" echo %PHASE_RC%
-echo      exit %PHASE_RC% (contrast row)
-set REMOTE60_NATIVE_ENCODER_BACKEND=
-findstr /c:"RCMATRIX" "%OUT%\sw1_mftsw_motion.log" "%OUT%\sw2_mftsw_textscroll.log" > "%OUT%\sw_rcmatrix.txt" 2>nul
-echo [home5] SW rows done; continuing with the home4 phases
+echo [h0] H0 done (discrimination material; exits recorded, not summed)
+goto :done
+
 
 :home4
 echo [home4] eight short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
