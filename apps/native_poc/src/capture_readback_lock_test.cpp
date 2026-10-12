@@ -504,7 +504,8 @@ int wmain(int argc, wchar_t** argv) {
     {
       FrameSignalCollector::StartSeams seams; seams.failEvent = true;
       FrameSignalCollector c([&] { drains.fetch_add(1); }, seams);
-      check(!c.Start() && !c.ok(), "[8] event creation failure -> Start() false, ok() false", c.start_error());
+      const bool startedE = c.Start();  // r14: evaluate Start first, read the message after it returned
+      check(!startedE && !c.ok(), "[8] event creation failure -> Start() false, ok() false", c.start_error());
       check(!c.Signal(), "[8] Signal on a collector that did not start is ignored");
       Sleep(30);
       check(drains.load() == 0, "[8] no worker ran");
@@ -513,7 +514,10 @@ int wmain(int argc, wchar_t** argv) {
     {
       FrameSignalCollector::StartSeams seams; seams.failThread = true;
       FrameSignalCollector c([&] { drains.fetch_add(1); }, seams);
-      check(!c.Start() && !c.ok(), "[8] thread start failure -> Start() false; the event handle was closed again", c.start_error());
+      const bool startedT = c.Start();
+      const std::string msgT = c.start_error();  // a stable literal, readable after the handler ended (Codex D1)
+      check(!startedT && !c.ok(), "[8] thread start failure -> Start() false; the event handle was closed again", msgT);
+      check(msgT == "thread creation failed", "[8] the start error is a fixed literal, not a dangling exception message", msgT);
       check(!c.Signal(), "[8] Signal ignored after a thread start failure");
       check(c.StopWithin(100), "[8] StopWithin clean after a thread start failure");
     }

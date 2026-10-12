@@ -76,8 +76,10 @@ class FrameSignalCollector {
     try {
       if (seams_.failThread) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again), "thread (injected)");
       worker_ = std::thread([this] { Loop(); });
-    } catch (const std::exception& e) {
-      startError_ = e.what();
+    } catch (const std::exception&) {
+      // r14 (Codex D1): a fixed literal, never e.what() -- that pointer belongs to the exception object
+      // and dangles once this handler ends, and the owner logs start_error() after Start() returned.
+      startError_ = "thread creation failed";
       CloseHandle(event_);
       event_ = nullptr;
       return false;
