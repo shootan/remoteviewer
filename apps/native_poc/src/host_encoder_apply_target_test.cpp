@@ -101,6 +101,9 @@ struct Rig {
 }  // namespace
 
 int main() {
+  // motion-settle r3: M2 (fast pressure) is a default-OFF comparison feature; section [8] tests it, so
+  // this process opts in. The default (off) is checked on the shipping configuration's own log.
+  _putenv_s("REMOTE60_NATIVE_FAST_PRESSURE", "1");  // the CRT copy getenv reads
   if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 2;
   if (FAILED(MFStartup(MF_VERSION))) return 2;
 
@@ -431,6 +434,47 @@ int main() {
           rig.apply(60, 6'000'000) && rig.encoder.codec.instance_id() == 2 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 32 &&
               !rig.encoder.SettleDipActive() && rig.encoder.EffectiveDesiredQp() == 32,
           s(rig.fake->set_value(CODECAPI_AVEncVideoMaxQP)));
+  }
+
+  // ------------------------------------------------------------------ [10] motion-settle r3 (c): MinQP alone
+  {
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    rig.fake->stuck[CODECAPI_AVEncVideoMinQP] = 0;  // the instance's own MinQP before anyone sets it
+    rig.fake->stuckUntilSet = true;
+    check("[10] AMD legacy first target", rig.apply(30, 6'000'000));
+    check("[10] the instance's ordinary MinQP is read at start (0) and confirmed",
+          rig.encoder.codec.ordinary_min_qp() == 0 && rig.encoder.codec.confirmed_min_qp() == 0, s(rig.encoder.codec.ordinary_min_qp()));
+    rig.fake->clear_calls();
+    const auto up = rig.encoder.codec.set_min_qp(26);
+    check("[10] a floor of 26 is ONE MinQP Set (no mode/mean/peak/vbv/maxQp) and confirmed by readback",
+          up == RcRuntimeResult::Applied && rig.fake->count_set("minQp") == 1 && rig.fake->count_set("maxQp") == 0 &&
+              rig.fake->count_set("mean") == 0 && rig.fake->count_set("mode") == 0 && rig.encoder.codec.confirmed_min_qp() == 26);
+    rig.fake->clear_calls();
+    check("[10] the same floor again: Unchanged, 0 Set",
+          rig.encoder.codec.set_min_qp(26) == RcRuntimeResult::Unchanged && rig.fake->count_set("minQp") == 0);
+    check("[10] the release goes back to the ordinary value (0), confirmed",
+          rig.encoder.codec.set_min_qp(0) == RcRuntimeResult::Applied && rig.encoder.codec.confirmed_min_qp() == 0);
+    rig.fake->rejectWith[CODECAPI_AVEncVideoMinQP] = E_FAIL;
+    check("[10] a refused Set is Failed and the confirmed value stays the readback (0)",
+          rig.encoder.codec.set_min_qp(26) == RcRuntimeResult::Failed && rig.encoder.codec.confirmed_min_qp() == 0);
+    rig.fake->rejectWith.clear();
+    rig.fake->stuckUntilSet = false;
+    rig.fake->stuck[CODECAPI_AVEncVideoMinQP] = 0;  // S_OK, readback stuck at 0
+    check("[10] an S_OK with a stuck readback is NOT applied",
+          rig.encoder.codec.set_min_qp(28) == RcRuntimeResult::Failed && rig.encoder.codec.confirmed_min_qp() == 0);
+  }
+  {
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");  // MinQP never readable on this instance
+    check("[10u] first target", rig.apply(30, 6'000'000));
+    rig.fake->clear_calls();
+    check("[10u] no ordinary MinQP known -> no floor: Unproven, 0 Set",
+          rig.encoder.codec.ordinary_min_qp() == -1 && rig.encoder.codec.set_min_qp(26) == RcRuntimeResult::Unproven &&
+              rig.fake->count_set("minQp") == 0);
+  }
+  {
+    Rig rig(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    check("[10n] nvidia first target", rig.apply(30, 6'000'000));
+    check("[10n] NVIDIA is not a live-ceiling instance: no floor, no dip (Set 0 by construction)", !rig.encoder.LiveCeilingEligible());
   }
 
   MFShutdown();

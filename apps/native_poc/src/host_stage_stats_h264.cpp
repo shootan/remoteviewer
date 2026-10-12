@@ -257,6 +257,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
           encoder.settleDipLastExitUs = t;
           ++encoder.settleDipExits;
         }
+        onset_floor_release(hx, t, "target");  // r3 (c): a new target ends a floor episode too
         governor.Reset();
         seedInitialQp();
         encoder.rateGovernorBitrate = encoder.activeBitrate;

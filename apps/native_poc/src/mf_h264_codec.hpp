@@ -267,6 +267,16 @@ class H264Encoder {
    * profile answers Unproven without touching the MFT.
    */
   RcRuntimeResult set_max_qp(uint32_t maxQp);
+  /**
+   * motion-settle r3 (c): the quantiser FLOOR (AVEncVideoMinQP) of the running instance, alone -- one
+   * SetValue and its readback; nothing else is re-issued. Unproven when the instance has no known
+   * ordinary MinQP (see ordinary_min_qp); Unchanged when the confirmed value is already this one.
+   */
+  RcRuntimeResult set_min_qp(uint32_t minQp);
+  /** The instance's own MinQP as read right after its start (-1 = unsupported or unreadable). */
+  int32_t ordinary_min_qp() const { return ordinaryMinQp_; }
+  /** The MinQP this instance runs now, confirmed by readback (-1 = not confirmed). */
+  int32_t confirmed_min_qp() const { return confirmedMinQp_; }
   uint32_t max_qp_override() const { return maxQpOverride_; }
   /**
    * The governor's ceiling the NEXT initialize() should start from on the legacy profile (0 = the
@@ -370,6 +380,8 @@ class H264Encoder {
   uint32_t fps_ = 0;
   uint32_t bitrate_ = 0;
   uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
+  int32_t ordinaryMinQp_ = -1;   // motion-settle r3 (c): MinQP read after start; -1 = unknown
+  int32_t confirmedMinQp_ = -1;  // ...and the value confirmed now (readback)
   uint32_t initialMaxQp_ = 0;   // set_initial_max_qp: the ceiling the next legacy instance starts from
   uint32_t keyint_ = 0;
   // encoder-rc-budget: who this instance is and what it was told.

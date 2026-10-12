@@ -342,6 +342,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      if (encoder.encodedSeq == 0) encoder.keyReasons |= kHostKeyReasonFirstFrame;
    }
    if (!servedBootstrap) ++encoder.realInputsSinceKey;
+   if (!servedBootstrap && encoder.onsetFloorActive) ++encoder.onsetFloorInputs;  // r3 (c): real accepted inputs
     const uint64_t encodeInputUs = captureStampUs;
     // Provenance rides the encoder's accepted-input FIFO so the wire synthetic flag lands on the AU
     // this input produces (an async MFT emits an older input's AU during this call). The stamp is

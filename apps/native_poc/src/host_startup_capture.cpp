@@ -347,14 +347,32 @@ int startup_start_capture(HostContext& hx) {
     sc.enabled = useH264 && env_u32_clamped("REMOTE60_NATIVE_SETTLE", 1, 0, 1) != 0;
     sc.quietUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_QUIET_MS", 170, 50, 1000)) * 1000ULL;
     sc.inputs = env_u32_clamped("REMOTE60_NATIVE_SETTLE_INPUTS", 8, 1, SettleRefiner::kMaxInputs);
+    // r3 candidate defaults by instance kind; REMOTE60_NATIVE_SETTLE_INPUTS / _DEADLINE_MS, when set,
+    // override both kinds (the comparison runs).
+    {
+      const bool inputsSet = std::getenv("REMOTE60_NATIVE_SETTLE_INPUTS") != nullptr;
+      const bool deadlineSet = std::getenv("REMOTE60_NATIVE_SETTLE_DEADLINE_MS") != nullptr;
+      if (inputsSet) kick.settleInputsLive = kick.settleInputsOther = sc.inputs;
+      if (deadlineSet) {
+        kick.settleDeadlineLiveUs = kick.settleDeadlineOtherUs =
+            static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_DEADLINE_MS", 1000, 100, 3000)) * 1000ULL;
+      }
+    }
     sc.minSpacingUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_SPACING_MS", 33, 0, 500)) * 1000ULL;
     sc.deadlineUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_DEADLINE_MS", 1000, 100, 3000)) * 1000ULL;
+    kick.settleBytePercent = env_u32_clamped("REMOTE60_NATIVE_SETTLE_BYTE_PCT", 50, 0, 200);
     kick.settle.Configure(sc);
     // r2 F: the temporary settle ceiling (0 = off; AMD legacy live only, decided per instance).
-    hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 0, 0, 51);
+    hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 16, 0, 51);  // r3 candidate: 16 (AMD live only)
+    // r3 (c): the onset floor (0 = off); its bounds are clamped to the comparison ceilings 8 / 500 ms.
+    hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 26, 0, 51);  // r3 candidate: 26 (AMD live only)
+    hx.encoder.onsetFloorMaxInputs = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_INPUTS", 4, 1, 8);
+    hx.encoder.onsetFloorMaxUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_MS", 250, 50, 500)) * 1000ULL;
     std::cout << "[native-video-host] settle enabled=" << (sc.enabled ? 1 : 0) << " quietMs=" << sc.quietUs / 1000
               << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
-              << " deadlineMs=" << sc.deadlineUs / 1000 << " dipQp=" << hx.encoder.settleDipQp << "\n";
+              << " deadlineMs=" << sc.deadlineUs / 1000 << " live=" << kick.settleInputsLive << "/" << kick.settleDeadlineLiveUs / 1000 << "ms other=" << kick.settleInputsOther << "/" << kick.settleDeadlineOtherUs / 1000 << "ms bytePct=" << kick.settleBytePercent << " dipQp=" << hx.encoder.settleDipQp
+              << " onsetFloorQp=" << hx.encoder.onsetFloorQp << " floorInputs=" << hx.encoder.onsetFloorMaxInputs
+              << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

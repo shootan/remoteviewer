@@ -78,6 +78,29 @@ struct EncoderState {
   uint64_t settleDipLastExitUs = 0;
   uint64_t settleDipEntries = 0, settleDipExits = 0, settleDipCancelRestores = 0;
   bool SettleDipActive() const { return settleDipEpisode != 0 && settleDipInstance == codec.instance_id(); }
+  // motion-settle r3 (c): a short quantiser FLOOR (MinQP) at the onset of real motion after a still --
+  // the encoder's rate control left at a low QP by a refinement starts a motion with frames 1.5-2x
+  // larger. AMD legacy live only; one QP-range owner with the ceiling: the floor never goes above the
+  // confirmed ordinary ceiling, F and the floor are never desired-active together, and the ORDER of the
+  // two Sets keeps MinQP <= MaxQP at every step (stage functions in host_stage_pop_frame.cpp).
+  // REMOTE60_NATIVE_ONSET_FLOOR_QP (0 = off), _INPUTS (real accepted inputs, <= 8), _MS (<= 500).
+  uint32_t onsetFloorQp = 0;
+  uint32_t onsetFloorMaxInputs = 4;
+  uint64_t onsetFloorMaxUs = 250000;
+  bool onsetFloorActive = false;        // a floor episode holds (its Set may still be unconfirmed)
+  uint64_t onsetFloorStartUs = 0;
+  uint64_t onsetFloorInstance = 0;
+  uint32_t onsetFloorInputs = 0;        // real accepted inputs since it began
+  uint32_t onsetFloorFailures = 0;      // session budget (3): refused / stuck / unknown Sets
+  bool onsetFloorDisabled = false;      // the session stopped using the floor (and F) after failures
+  bool onsetFloorReleasePending = false;
+  bool onsetFloorRepairDone = false;    // the one repair a failed release may take, per session
+  uint64_t onsetFloorEpisodes = 0, onsetFloorReleases = 0;
+  /** The floor is released and MinQP is confirmed back at the instance's ordinary value. */
+  bool MinQpAtOrdinary() const {
+    return !onsetFloorActive && !onsetFloorReleasePending &&
+           (codec.ordinary_min_qp() < 0 || codec.confirmed_min_qp() == codec.ordinary_min_qp());
+  }
   /** The ceiling the live instance should run now: the dip while it holds, else the ordinary desired. */
   uint32_t EffectiveDesiredQp() const {
     const uint32_t ordinary = rateGovernor.maxQp();
@@ -86,10 +109,12 @@ struct EncoderState {
   // Whether the fast path may act on this instance: the governor is on, the instance is the AMD legacy
   // profile with a live ceiling. An unknown legacy MFT keeps the slow loop only; a static-ceiling
   // profile (NVIDIA) never gets a runtime Set. REMOTE60_NATIVE_FAST_PRESSURE=0 turns it off.
+  // motion-settle r3: M2 is EXCLUDED from the shipping configuration (Codex r3 s5) -- a default-off
+  // comparison feature: only REMOTE60_NATIVE_FAST_PRESSURE=1 turns it (and its calm) on.
   bool FastPressureEligible() const {
     static const bool fastOn = [] {
       const char* f = std::getenv("REMOTE60_NATIVE_FAST_PRESSURE");
-      return !(f && f[0] == '0');
+      return f && f[0] == '1';
     }();
     return fastOn && LiveCeilingEligible();
   }

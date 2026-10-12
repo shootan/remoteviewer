@@ -41,6 +41,7 @@ inline std::string rc_key_name(const GUID& key) {
   if (guid_eq(key, CODECAPI_AVEncCommonMaxBitRate)) return "peak";
   if (guid_eq(key, CODECAPI_AVEncCommonBufferSize)) return "vbv";
   if (guid_eq(key, CODECAPI_AVEncVideoMaxQP)) return "maxQp";
+  if (guid_eq(key, CODECAPI_AVEncVideoMinQP)) return "minQp";
   if (guid_eq(key, CODECAPI_AVEncMPVGOPSize)) return "gop";
   if (guid_eq(key, CODECAPI_AVEncCommonQualityVsSpeed)) return "qvs";
   if (guid_eq(key, CODECAPI_AVLowLatencyMode)) return "lowLatency";

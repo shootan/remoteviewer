@@ -167,6 +167,29 @@ void TestBoundsWhenRefused() {
          "r2 A: the 3 s deadline ends the episode whatever its input budget (" + std::to_string(rs.served) + " served)");
 }
 
+void TestByteBudget() {
+  SettleRefiner s;
+  SettleConfig c;
+  c.inputs = 30;
+  c.deadlineUs = 3000000;
+  c.minSpacingUs = 0;
+  s.Configure(c);
+  s.SetByteBudget(100000);
+  s.NoteRealChange(0, Id(), 1);
+  uint32_t served = 0;
+  SettleEnd ended = SettleEnd::None;
+  for (uint64_t t = 0; t < 5000 * kMs && ended == SettleEnd::None; t += kMs) {
+    const SettleAction a = s.Poll(t, Id(), false, false, false);
+    if (a.serve) {
+      ++served;
+      s.NoteSubmitted();
+      s.NoteEmitted(30000);  // each refinement AU 30 KB
+    }
+    if (a.ended != SettleEnd::None) ended = a.ended;
+  }
+  expect(ended == SettleEnd::Budget && served == 4, "r3: the episode ends at its byte budget (4 x 30 KB > 100 KB), whatever its input count");
+}
+
 void TestDisabled() {
   SettleRefiner s;
   SettleConfig c;
@@ -199,6 +222,7 @@ int main() {
   TestPriorityAndDeadline();
   TestBoundsWhenRefused();
   TestDisabled();
+  TestByteBudget();
   TestTelemetry();
   std::printf("host_settle_test: %s (%d checks, %d failed)\n", gFailures == 0 ? "PASS" : "FAIL", gChecks, gFailures);
   return gFailures == 0 ? 0 : 1;

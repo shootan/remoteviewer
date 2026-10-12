@@ -217,6 +217,12 @@ void apply_effective_ceiling(HostContext& hx, uint64_t nowUs, const char* why, b
 // Ends the settle dip (if one is held) and restores the ordinary desired -- at once when `immediate`
 // (new real content or a key is about to be encoded), else in the next Set slot.
 void settle_dip_exit(HostContext& hx, uint64_t nowUs, const char* why, bool immediate);
+// motion-settle r3 (c): the onset floor. Begin = F already released, the ordinary ceiling confirmed,
+// then MinQP up. Release = MinQP back to the ordinary value, confirmed; bounded retries, then the floor
+// and F are disabled for the session and one repair is taken. Tick = the wall-clock / input-count end.
+void onset_floor_begin(HostContext& hx, uint64_t nowUs);
+void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why);
+void onset_floor_tick(HostContext& hx, uint64_t nowUs);
 // requestedMonitorDevice: for a monitor-select target (monitor_select_target.hpp), the screen the
 // control thread resolved it to; empty otherwise. t-970r4zgo.
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,

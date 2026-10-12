@@ -133,6 +133,91 @@ void settle_dip_exit(HostContext& hx, uint64_t nowUs, const char* why, bool imme
   apply_effective_ceiling(hx, nowUs, why, immediate);
 }
 
+void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why) {
+  EncoderState& encoder = hx.encoder;
+  if (!encoder.onsetFloorActive && !encoder.onsetFloorReleasePending) return;
+  const bool sameInstance = encoder.onsetFloorInstance == encoder.codec.instance_id();
+  encoder.onsetFloorActive = false;
+  if (!sameInstance || encoder.codec.ordinary_min_qp() < 0) {
+    // A new instance starts at its own ordinary MinQP: nothing of the floor is live on it.
+    encoder.onsetFloorReleasePending = false;
+    return;
+  }
+  const RcRuntimeResult r = encoder.codec.set_min_qp(static_cast<uint32_t>(encoder.codec.ordinary_min_qp()));
+  const bool ok = r == RcRuntimeResult::Applied || r == RcRuntimeResult::Unchanged;
+  encoder.onsetFloorReleasePending = !ok;
+  if (ok) ++encoder.onsetFloorReleases;
+  std::cout << "[native-video-host][onset-floor] release why=" << why << " ok=" << (ok ? 1 : 0)
+            << " minQp=" << encoder.codec.confirmed_min_qp() << " ordinaryMin=" << encoder.codec.ordinary_min_qp()
+            << " inputs=" << encoder.onsetFloorInputs
+            << " heldMs=" << ((nowUs > encoder.onsetFloorStartUs) ? (nowUs - encoder.onsetFloorStartUs) / 1000 : 0) << "\n";
+  if (!ok && ++encoder.onsetFloorFailures >= 3) {
+    // A floor that may still be live and cannot be confirmed released: no more floor, no more F (a
+    // dip under a stuck floor would break MinQP <= MaxQP), and once per session the existing repair
+    // path rebuilds the instance from the ordinary plan.
+    encoder.onsetFloorDisabled = true;
+    encoder.settleDipDisabledInstance = encoder.codec.instance_id();
+    if (!encoder.onsetFloorRepairDone) {
+      encoder.onsetFloorRepairDone = true;
+      encoder.RequestOutputRepair(nowUs);
+    }
+    encoder.onsetFloorReleasePending = false;
+    std::cout << "[native-video-host][onset-floor] release failed: floor and F off for the session, repair="
+              << (encoder.onsetFloorRepairDone ? 1 : 0) << "\n";
+  }
+}
+
+void onset_floor_begin(HostContext& hx, uint64_t nowUs) {
+  EncoderState& encoder = hx.encoder;
+  if (encoder.onsetFloorQp == 0 || encoder.onsetFloorDisabled || encoder.onsetFloorActive ||
+      encoder.onsetFloorReleasePending || !encoder.LiveCeilingEligible() || encoder.codec.ordinary_min_qp() < 0 ||
+      encoder.forceKeyNext) {
+    return;
+  }
+  // Order (Codex r3 s4): F is already released (settle_dip_exit before this call) -- the ordinary
+  // ceiling must be CONFIRMED in force before MinQP goes up, so MinQP <= MaxQP holds throughout.
+  const uint32_t ordinaryMax = encoder.rateGovernor.maxQp();
+  if (encoder.SettleDipActive() || encoder.codec.plan_max_qp() != ordinaryMax || !encoder.codec.rc_max_qp_field_applied()) {
+    std::cout << "[native-video-host][onset-floor] skipped: ordinary ceiling not confirmed (plan="
+              << encoder.codec.plan_max_qp() << " ordinary=" << ordinaryMax << ")\n";
+    return;
+  }
+  // The floor never above the confirmed ordinary ceiling (no MaxQP is raised for it), never below the
+  // instance's own MinQP (nothing to do then).
+  const uint32_t floorQp = std::min(encoder.onsetFloorQp, ordinaryMax);
+  if (static_cast<int32_t>(floorQp) <= encoder.codec.ordinary_min_qp()) return;
+  encoder.onsetFloorActive = true;
+  encoder.onsetFloorStartUs = nowUs;
+  encoder.onsetFloorInstance = encoder.codec.instance_id();
+  encoder.onsetFloorInputs = 0;
+  ++encoder.onsetFloorEpisodes;
+  const RcRuntimeResult r = encoder.codec.set_min_qp(floorQp);
+  const bool ok = r == RcRuntimeResult::Applied || r == RcRuntimeResult::Unchanged;
+  std::cout << "[native-video-host][onset-floor] begin floor=" << floorQp << " ok=" << (ok ? 1 : 0)
+            << " maxQp=" << encoder.codec.plan_max_qp() << " episodes=" << encoder.onsetFloorEpisodes << "\n";
+  if (!ok) {
+    // The Set may have half-landed: put the ordinary MinQP back (counted against the same budget).
+    ++encoder.onsetFloorFailures;
+    encoder.onsetFloorReleasePending = true;
+    onset_floor_release(hx, nowUs, "begin-failed");
+  }
+}
+
+void onset_floor_tick(HostContext& hx, uint64_t nowUs) {
+  EncoderState& encoder = hx.encoder;
+  if (encoder.onsetFloorReleasePending && !encoder.onsetFloorActive) {
+    onset_floor_release(hx, nowUs, "retry");
+    return;
+  }
+  if (!encoder.onsetFloorActive) return;
+  // Ends by wall time even when no frame comes (a still after a short motion), by real accepted
+  // inputs, by an instance change or an owed key -- never extended by further content changes.
+  if (encoder.onsetFloorInstance != encoder.codec.instance_id()) onset_floor_release(hx, nowUs, "instance");
+  else if (encoder.forceKeyNext) onset_floor_release(hx, nowUs, "key-owed");
+  else if (encoder.onsetFloorInputs >= encoder.onsetFloorMaxInputs) onset_floor_release(hx, nowUs, "inputs");
+  else if (nowUs >= encoder.onsetFloorStartUs + encoder.onsetFloorMaxUs) onset_floor_release(hx, nowUs, "deadline");
+}
+
 SettleIdentity settle_identity_now(HostContext& hx) {
   SettleIdentity id;
   id.mediaEpoch = hx.sender.mediaSessionEpoch.load(std::memory_order_acquire);
@@ -228,6 +313,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // encoder before the next encode -- the one reconcile path, at most one Set per interval.
   // A dip left over from an instance that is gone ends here (nothing of it is live).
   if (encoder.settleDipEpisode != 0 && !encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "instance-changed", false);
+  onset_floor_tick(hx, nowUs);  // r3 (c): the floor ends by wall time even when no frame arrives
   if (encoder.ceilingDirty && encoder.fastPressure.CanSetNow(nowUs)) apply_effective_ceiling(hx, nowUs, "deferred", false);
  
  
@@ -336,9 +422,18 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     bool keyOwed = encoder.forceKeyNext;
     if (transport == VideoTransport::Udp) {
       std::lock_guard<std::mutex> lk(sender.mu);
-      queueBusy = !sender.queue.empty();
+      // r3: an AU still going out counts as busy -- refinements go one at a time behind the wire.
+      queueBusy = !sender.queue.empty() || sender.auInFlight.load(std::memory_order_acquire);
       keyOwed = keyOwed || sender.waitingForKey;
     }
+    // r3 candidate: episode bounds by instance kind (taken by the next episode).
+    if (!kick.settle.active()) {
+      const bool live = encoder.LiveCeilingEligible();
+      kick.settle.SetBounds(live ? kick.settleInputsLive : kick.settleInputsOther,
+                            live ? kick.settleDeadlineLiveUs : kick.settleDeadlineOtherUs);
+    }
+    // r3: the refinement byte budget follows the live wire rate (percent of one second of R).
+    kick.settle.SetByteBudget(static_cast<uint64_t>(encoder.activeBitrate) / 8ULL * kick.settleBytePercent / 100ULL);
     bool realWaiting = false;
     {
       std::lock_guard<std::mutex> lk(res.frame.mu);
@@ -362,7 +457,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       bool changed = encoder.FastPressureEligible() && encoder.rateGovernor.OnCalm();  // calm is M2's
       const bool wireIdle = !sender.auInFlight.load(std::memory_order_acquire) &&
                             sender.pendingReplayCount.load(std::memory_order_relaxed) == 0;
-      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed &&
+      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed && encoder.MinQpAtOrdinary() &&
           encoder.settleDipDisabledInstance != encoder.codec.instance_id() &&
           (encoder.settleDipLastExitUs == 0 || nowUs >= encoder.settleDipLastExitUs + 500000) &&
           encoder.settleDipQp < encoder.rateGovernor.maxQp()) {

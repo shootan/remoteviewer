@@ -140,7 +140,12 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     if (contentChanged) {
       // r2 F: new content is about to be encoded -- the dip ends and the ordinary ceiling is restored
       // BEFORE this frame's encode, even inside the 250 ms Set interval (the one exception).
+      // r3 (c): when the screen had been still (no real change for the settle quiet), the floor then
+      // goes up -- after the ceiling is confirmed -- for the first real inputs of this motion only.
+      const uint64_t lastChangeUs = kick.settle.last_change_us();
+      const bool afterStill = lastChangeUs != 0 && queuePopUs >= lastChangeUs + kick.settle.config().quietUs;
       settle_dip_exit(hx, queuePopUs, "new-content", true);
+      if (afterStill) onset_floor_begin(hx, queuePopUs);
       kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);
     }
     if (frameGating.ShouldSkip(queuePopUs, keyReqPending, encoder.activeFrameIntervalUs, paceByTick)) {
@@ -151,7 +156,10 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     }
   }
   if (!servedBootstrap && useH264 && !frameGating.enabled && payload && !payload->empty()) {
+    const uint64_t lastChangeUs = kick.settle.last_change_us();
+    const bool afterStill = lastChangeUs != 0 && queuePopUs >= lastChangeUs + kick.settle.config().quietUs;
     settle_dip_exit(hx, queuePopUs, "new-content", true);
+    if (afterStill) onset_floor_begin(hx, queuePopUs);
     kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);  // no gate: every capture is a change
   }
   if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {

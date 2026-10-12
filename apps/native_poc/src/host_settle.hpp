@@ -55,7 +55,7 @@ struct SettleConfig {
   uint64_t deadlineUs = 1000000;  // after the episode starts: no further input
 };
 
-enum class SettleEnd : uint8_t { None, Complete, Expired, Cancelled, Superseded };
+enum class SettleEnd : uint8_t { None, Complete, Expired, Cancelled, Superseded, Budget };
 inline const char* settle_end_name(SettleEnd e) {
   switch (e) {
     case SettleEnd::None: return "none";
@@ -63,6 +63,7 @@ inline const char* settle_end_name(SettleEnd e) {
     case SettleEnd::Expired: return "expired";
     case SettleEnd::Cancelled: return "cancelled";
     case SettleEnd::Superseded: return "superseded";
+    case SettleEnd::Budget: return "budget";
   }
   return "?";
 }
@@ -135,6 +136,13 @@ class SettleRefiner {
       a.ended = End(SettleEnd::Complete);
       return a;
     }
+    // r3: a byte budget per episode (Codex r2 A: "a small fixed bundle + wall time / byte / backlog
+    // budgets first") -- the refinement must leave the 2 s wire window room for the next motion: an
+    // A-sized train under a low ceiling used it up and a motion frame waited 477 ms for tokens.
+    if (byteBudget_ > 0 && emittedBytesThisEpisode_ >= byteBudget_) {
+      a.ended = End(SettleEnd::Budget);
+      return a;
+    }
     if (queueBusy || realWaiting || keyOwed) return a;
     if (lastServeUs_ != 0 && nowUs < lastServeUs_ + cfg_.minSpacingUs) return a;
     // Every serve counts against the bound, accepted or not: a cache the identity check refuses or
@@ -164,6 +172,14 @@ class SettleRefiner {
     emittedBytesThisEpisode_ += bytes;
   }
 
+  // Per-instance bounds (r3 candidate): the caller widens them on the AMD live-ceiling instance only.
+  // Takes effect from the next episode; clamped to the hard ceilings like Configure.
+  void SetBounds(uint32_t inputs, uint64_t deadlineUs) {
+    cfg_.inputs = std::clamp<uint32_t>(inputs, 1, kMaxInputs);
+    cfg_.deadlineUs = std::clamp<uint64_t>(deadlineUs, 100000, kMaxDeadlineUs);
+  }
+  // The episode's byte budget (0 = none), set by the caller from the current wire rate.
+  void SetByteBudget(uint64_t bytes) { byteBudget_ = bytes; }
   bool active() const { return state_ == State::Active; }
   bool armed() const { return state_ == State::Armed; }
   uint32_t submitted() const { return submitted_; }
@@ -206,7 +222,8 @@ class SettleRefiner {
   uint32_t emittedThisEpisode_ = 0;
   uint64_t emittedBytesThisEpisode_ = 0;
   SettleEnd lastEnded_ = SettleEnd::None;
-  uint64_t endedCount_[5] = {0, 0, 0, 0, 0};
+  uint64_t endedCount_[6] = {0, 0, 0, 0, 0, 0};
+  uint64_t byteBudget_ = 0;
 };
 
 }  // namespace remote60::native_poc

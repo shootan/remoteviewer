@@ -1582,6 +1582,19 @@ void H264Encoder::apply_low_latency_codec_api() {
   (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, qualityVsSpeed);
   std::cout << "[native-video-host] h264 encoder-hints lowLatency=" << (lowLatency ? 1 : 0)
             << " realTime=" << (realTime ? 1 : 0) << " qualityVsSpeed=" << qualityVsSpeed << "\n";
+  // motion-settle r3 (c): the instance's ordinary MinQP, kept so a temporary floor can be returned to
+  // exactly this value. Unsupported or unreadable -> -1, and no floor is ever applied on this instance.
+  {
+    ordinaryMinQp_ = -1;
+    confirmedMinQp_ = -1;
+    uint32_t mn = 0;
+    if (std::strcmp(codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMinQP), "unsupported") != 0 &&
+        get_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMinQP, &mn) && mn <= 51) {
+      ordinaryMinQp_ = static_cast<int32_t>(mn);
+      confirmedMinQp_ = ordinaryMinQp_;
+    }
+    std::cout << "[native-video-host] h264 min-qp ordinary=" << ordinaryMinQp_ << " instance=" << codecInstanceId_ << "\n";
+  }
   // stutter-keyframe r2 (step 5): record key-QP controllability for the field decision (not applied).
   std::cout << "[native-video-host] h264 key-qp-probe frameTypeQP="
             << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeFrameTypeQP)
@@ -2041,6 +2054,21 @@ RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
   // Applied only if the ceiling's own field was accepted AND its readback does not contradict it (r3
   // S1: an S_OK with the readback stuck at the old value is not applied).
   return rcFieldMaxQp_.applied() ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+}
+
+RcRuntimeResult H264Encoder::set_min_qp(uint32_t minQp) {
+  if (!enc_) return RcRuntimeResult::Failed;
+  if (ordinaryMinQp_ < 0 || minQp > 51) return RcRuntimeResult::Unproven;
+  if (confirmedMinQp_ == static_cast<int32_t>(minQp)) return RcRuntimeResult::Unchanged;
+  const HRESULT hr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncVideoMinQP, minQp);
+  uint32_t rb = 0;
+  const bool rbOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMinQP, &rb);
+  // Confirmed only by a readback equal to the request; an S_OK with a stuck readback is not applied,
+  // and an unreadable value after a Set leaves the state UNKNOWN (-1), never assumed.
+  confirmedMinQp_ = (SUCCEEDED(hr) && rbOk && rb == minQp) ? static_cast<int32_t>(minQp) : (rbOk ? static_cast<int32_t>(rb) : -1);
+  std::cout << "[native-video-host] h264 min-qp set=" << minQp << " hr=0x" << std::hex << static_cast<uint32_t>(hr) << std::dec
+            << " readback=" << (rbOk ? static_cast<long long>(rb) : -1LL) << " instance=" << codecInstanceId_ << "\n";
+  return confirmedMinQp_ == static_cast<int32_t>(minQp) ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
 RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
