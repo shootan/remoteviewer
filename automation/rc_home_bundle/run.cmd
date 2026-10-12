@@ -17,6 +17,9 @@ rem   run.cmd quick   transitions only: the CONTROL smoke (R/E/plan/coalescing p
 rem                   It is not a quality comparison and must not be reported as one.
 rem   run.cmd diag    r8: the SHORT DIAGNOSTIC SET (~4 min) for the Home PC main-loop hangs and the
 rem                   motion regression -- five phases, each separating two hypotheses (see below).
+rem   run.cmd home5   r11: H0 (the log-write discrimination set, baseline only, ~2 min) FIRST, then the
+rem                   home4 phases. H0 answers "does the host stop when its stdout goes to a local file,
+rem                   to the network share, to NUL, with or without the harness reading the file?"
 rem   run.cmd home4   r9: the ONE Home PC run after the r9 fixes (~6 min): the ORIGINAL candidate's
 rem                   stall evidence first (dumps), then the r9 candidate on the same cells, then a
 rem                   CBR 51 contrast row. Needs GNLinkStream.orig.exe beside the three files (the
@@ -108,6 +111,19 @@ rem   D4 motion     motion 60 fps 6M 1080p, CANDIDATE FIRST then baseline, 12 s 
 rem                 candidate, with the fixture paint counter and the capture-stall counter per run.
 rem   D5 transitions the three transition runs (16 s): tune/deferred/key path, then the hang if it comes.
 rem Every hung host leaves hang-pid<N>.dmp (thread stacks) in its run folder.
+rem
+rem THE H0 SET (run.cmd home5 runs it first). In the fourth Home run EVERY host -- baseline, original, r9 --
+rem stopped logging 1-2 s after start with its main thread inside the stats line's write (ntdll under
+rem std::cout), while the third run (hosts logging to Z:) had healthy 6M cells. Five 10 s baseline-only runs
+rem of the same cell (textscroll 30 fps 6M 1080p) separate the suspects; each prints host-log: lines/s and
+rem its own exit, and a hang leaves a dump as usual:
+rem   H0a  host stdout -> NUL                       (no file write at all)
+rem   H0b  host.log in the LOCAL staging dir          (the fourth run's setting)
+rem   H0c  host.log on Z: (this folder)              (the third run's setting; only when Z: is a network drive)
+rem   H0d  local host.log, harness never reads it      (--no-log-poll: the 200 ms monitor-fallback scan off)
+rem   H0e  local host.log, no dump trigger at all      (--no-dump)
+rem Reading: a hang in b/d/e but not in a = the file write itself; in b but not d = the harness's reads;
+rem in b but not c = local disk/AV vs share; everywhere incl. a = not the log at all (D3D/driver).
 rem
 rem THE HOME4 SET (run.cmd home4). Phases H1-H2 run the ORIGINAL candidate so the cause of the third run's
 rem stalls is recorded and is not hidden by the r9 fixes; H3-H6 run the r9 candidate; H7 is the contrast
@@ -242,6 +258,7 @@ if "%NETDRIVE%"=="1" >>"%ID%" echo NOTE: %HERE:~0,2% is a network drive; the run
 set "RC=0"
 if /i "%MODE%"=="diag" goto :diag
 if /i "%MODE%"=="home4" goto :home4
+if /i "%MODE%"=="home5" goto :home5
 echo [1/2] transitions (6M-1.5M-6M, fps 30-60, E-only ms schedule at 1080p)...
 echo      if WGC refuses the invisible window, an ORDINARY 1920x1080 test window with a taskbar entry appears (window-mode=visible-plain): leave it alone, do not close it
 "%E2E%" --host "%CAND%" --rc-transitions --window 1920x1080 --seconds 18 --keep-dir --save-frames > "%OUT%\transitions.log" 2>&1
@@ -300,6 +317,49 @@ set "PHASE_RC=%errorlevel%"
 echo      exit %PHASE_RC%
 if not "%PHASE_RC%"=="0" set "RC=1"
 goto :done
+
+:home5
+echo [home5] H0 first: five 10 s baseline runs of textscroll 30fps 6M 1080p, one per log destination
+set "H0CELL=--rc-matrix --rc-observe --rc-only textscroll --rc-fps 30 --rc-rate 6000000 --window 1920x1080 --seconds 10 --keep-dir"
+echo [H0a] stdout to NUL
+"%E2E%" --host "%BASE%" %H0CELL% --host-log nul > "%OUT%\h0a_nul.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h0a_nul.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if "%PHASE_RC%"=="3" (
+  echo      CAPTURE-UNAVAILABLE -- nothing else can be measured; stopping
+  set "RC=1"
+  goto :done
+)
+echo [H0b] host.log in the local staging dir
+"%E2E%" --host "%BASE%" %H0CELL% --host-log run > "%OUT%\h0b_local.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h0b_local.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+if not "%NETDRIVE%"=="1" goto :h0_skip_c
+echo [H0c] host.log on the network share %HERE:~0,2%
+mkdir "%HERE%results\%STAMP%\h0c_hostlogs" 2>nul
+"%E2E%" --host "%BASE%" %H0CELL% --host-log "dir:%HERE%results\%STAMP%\h0c_hostlogs" > "%OUT%\h0c_share.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h0c_share.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+goto :h0_d
+:h0_skip_c
+echo [H0c] skipped: %HERE:~0,2% is not a network drive
+>"%OUT%\h0c_share.exit" echo skipped-not-network
+:h0_d
+echo [H0d] local host.log, harness does not read it while the host runs
+"%E2E%" --host "%BASE%" %H0CELL% --host-log run --no-log-poll > "%OUT%\h0d_nopoll.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h0d_nopoll.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+echo [H0e] local host.log, no dump trigger
+"%E2E%" --host "%BASE%" %H0CELL% --host-log run --no-dump > "%OUT%\h0e_nodump.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\h0e_nodump.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC%
+rem H0 is discrimination material: its exits are recorded, not summed into the set's result.
+echo [home5] H0 done; continuing with the home4 phases
 
 :home4
 echo [home4] eight short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone

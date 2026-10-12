@@ -421,24 +421,31 @@ void delete_saved_frames(const std::wstring& runDir) {
 // Open it with the matching PDB (the exe hash is in identity.txt) in WinDbg/cdb: `!analyze -v` /
 // `~*k`. Test-support only; it needs no product change and takes nothing from a healthy run.
 constexpr uint64_t kHangDumpAfterUs = 5'000'000;
-std::string write_hang_dump(HANDLE process, DWORD pid, const std::wstring& runDir, const char* why) {
+std::string write_hang_dump(HANDLE process, DWORD pid, const std::wstring& runDir, const char* why, bool fullMemory = false) {
   wchar_t name[64];
-  std::swprintf(name, 64, L"hang-pid%lu.dmp", static_cast<unsigned long>(pid));
+  std::swprintf(name, 64, fullMemory ? L"hang-pid%lu-full.dmp" : L"hang-pid%lu.dmp", static_cast<unsigned long>(pid));
+  const uint64_t t0 = qpc_now_us();
   const std::wstring path = runDir + name;
   HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     std::printf("HANG-DUMP: could not create %s (gle=%lu)\n", std::string(path.begin(), path.end()).c_str(), GetLastError());
     return std::string();
   }
-  const MINIDUMP_TYPE type = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithHandleData | MiniDumpWithUnloadedModules |
-                                                        MiniDumpWithIndirectlyReferencedMemory);
+  // fast: stacks + thread info + handles + unloaded modules + what the stacks point at; the module headers
+  // (r11) so a reader on another machine can identify ntdll/d3d11 builds without their images.
+  // full: everything, for lock owners and the objects behind the stacks (one per run, see the caller).
+  const MINIDUMP_TYPE type = fullMemory
+                                 ? static_cast<MINIDUMP_TYPE>(MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo |
+                                                              MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo)
+                                 : static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithHandleData | MiniDumpWithUnloadedModules |
+                                                              MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithModuleHeaders);
   const BOOL ok = MiniDumpWriteDump(process, pid, file, type, nullptr, nullptr, nullptr);
   const DWORD gle = ok ? 0 : GetLastError();
   LARGE_INTEGER size{};
   GetFileSizeEx(file, &size);
   CloseHandle(file);
-  std::printf("HANG-DUMP: %s -> %s (%s, %lld bytes%s%lu)\n", why, std::string(path.begin(), path.end()).c_str(), ok ? "written" : "FAILED",
-              static_cast<long long>(size.QuadPart), ok ? ", gle=" : ", gle=", gle);
+  std::printf("HANG-DUMP: %s -> %s (%s, %lld bytes, took %.0f ms%s, gle=%lu)\n", why, std::string(path.begin(), path.end()).c_str(),
+              ok ? "written" : "FAILED", static_cast<long long>(size.QuadPart), (qpc_now_us() - t0) / 1000.0, fullMemory ? ", FULL memory" : "", gle);
   return ok ? std::string(path.begin(), path.end()) : std::string();
 }
 // Test-support only: REMOTE60_E2E_HANG_DUMP_AFTER_MS=<n> forces a dump n ms into the live window of
@@ -455,6 +462,23 @@ uint64_t forced_hang_dump_after_us() {
   return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10)) * 1000ull;
 }
 
+// r11 (Home4): every host -- baseline, original, r9 -- stopped logging 1-2 s after start and the main thread
+// sat in ntdll under the stats write; the fourth run's deltas against the third were a LOCAL %TEMP% host.log
+// (the third wrote to Z:), the harness's 200 ms host.log polling, the 3 s low-fps dump and --save-frames.
+// These knobs let one short run per combination say which of them matters (run.cmd home5 / H0):
+//   --host-log nul|run|dir:<path>   where the host's stdout goes (NUL device / the run dir [default] / a dir)
+//   --no-log-poll                   do not read host.log while the host runs (the monitor-fallback scan)
+//   --no-dump                       no hang dumps at all
+//   --low-fps-dump                  re-enable the 3 s low-fps trigger (OFF by default since r11: a host
+//                                   that still delivers is not dumped; silence >= 5 s is the trigger)
+enum class HostLogDest { RunDir, Nul, Dir };
+HostLogDest gHostLogDest = HostLogDest::RunDir;
+std::wstring gHostLogDir;
+bool gNoLogPoll = false;
+bool gNoDump = false;
+bool gLowFpsDump = false;
+int gFullDumps = 0;  // full-memory dumps written by this harness process (cap 3)
+
 int gCaptureUnavailableRuns = 0;  // runs whose capture item could not be created even after the fallback
 bool capture_unavailable() { return gCaptureUnavailableRuns > 0; }
 // r10 (Codex H1): a matrix phase that runs the ORIGINAL candidate to collect its stall evidence. An invalid
@@ -463,6 +487,10 @@ bool capture_unavailable() { return gCaptureUnavailableRuns > 0; }
 // apply. Without this flag every invalid row is a FAIL.
 bool gDiagnosticMode = false;
 int gDiagnosticCollected = 0;
+// r11: --rc-observe runs a cell for its liveness only (the H0 log-destination set runs the BASELINE host,
+// which has none of the candidate's rc/E lines): the row is printed, the host-exit/host-log lines are the
+// result, and the only check is that the row is a valid measurement (alive, frames, no stall, no dump).
+bool gObserveMode = false;
 
 // r7: the harness asks WGC itself, once per window mode, on a window built exactly as the run would
 // build it. The HRESULT is the OS's own answer (the host's log discards it). A simulated refusal
@@ -533,7 +561,14 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
-  const std::wstring hostLogPath = runDir + L"host.log";
+  std::wstring hostLogPath = runDir + L"host.log";
+  if (gHostLogDest == HostLogDest::Dir && !gHostLogDir.empty()) {
+    // the run's own file name keeps the logs apart when every run of a phase shares one directory
+    std::wstring tag = runDir;
+    while (!tag.empty() && tag.back() == L'\\') tag.pop_back();
+    const size_t cut = tag.find_last_of(L"\\/");
+    hostLogPath = gHostLogDir + L"\\host_" + (cut == std::wstring::npos ? tag : tag.substr(cut + 1)) + L".log";
+  }
   HANDLE hostLog = INVALID_HANDLE_VALUE;
   PROCESS_INFORMATION hostPi{};
   {
@@ -558,8 +593,14 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
-    hostLog = CreateFileW(hostLogPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    hostLog = gHostLogDest == HostLogDest::Nul
+                  ? CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr)
+                  : CreateFileW(hostLogPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::printf("host-log: dest=%s path=%s poll=%d dump=%s\n",
+                gHostLogDest == HostLogDest::Nul ? "nul" : gHostLogDest == HostLogDest::Dir ? "dir" : "run-dir",
+                gHostLogDest == HostLogDest::Nul ? "NUL" : std::string(hostLogPath.begin(), hostLogPath.end()).c_str(), gNoLogPoll ? 0 : 1,
+                gNoDump ? "off" : (gLowFpsDump ? "silence>=5s+lowfps" : "silence>=5s"));
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     if (hostLog != INVALID_HANDLE_VALUE) {
@@ -948,6 +989,10 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
       uint64_t prevDeliveredBytes = 0;
       uint64_t prevPaints = target.paints();
       int lowFpsStreak = 0;
+      uint32_t prevDeliveredForSilence = 0;
+      uint64_t lastSilenceSampleUs = liveStartUs;
+      bool fullDumped = false;
+      uint64_t fastDumpAtUs = 0;
       while (qpc_now_us() < liveUntilUs) {
         if (!dumped) {
           // r8: alive but silent -- the first frame never came, or the frames stopped. One dump per run.
@@ -957,7 +1002,9 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
           const uint64_t last = std::max(lastDeliverUs.load(std::memory_order_acquire), liveStartUs);
           const uint64_t silentUs = nowUs > last ? nowUs - last : 0;
           const uint32_t deliveredNow = deliveredAtomic.load(std::memory_order_acquire);
-          const bool silent = silentUs >= kHangDumpAfterUs;
+          // r11: a host that is still delivering is never dumped (a dump suspends it); silence >= 5 s is the
+          // trigger, the low-fps trigger only when asked for, nothing with --no-dump.
+          const bool silent = silentUs >= kHangDumpAfterUs && deliveredNow == prevDeliveredForSilence;
           const bool forced = forcedDumpUs != 0 && nowUs >= liveStartUs + forcedDumpUs;
           bool lowFps = false;
           if (nowUs >= nextSecondUs) {
@@ -973,13 +1020,18 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
             prevPaints = paintsNow;
             prevDelivered = deliveredNow;
             prevDeliveredBytes = bytesNow;
-            lowFps = lowFpsStreak >= 3;
+            lowFps = gLowFpsDump && lowFpsStreak >= 3;
           }
-          if (silent || forced || lowFps) {
+          if (nowUs - lastSilenceSampleUs >= 4'000'000ull) {  // the delivered count 4 s ago: "silent" also means no delivery since
+            prevDeliveredForSilence = deliveredNow;
+            lastSilenceSampleUs = nowUs;
+          }
+          if (!gNoDump && (silent || forced || lowFps)) {
             // alive? (a host that already died leaves nothing to dump; its exit is recorded below)
             if (WaitForSingleObject(hostPi.hProcess, 0) == WAIT_OBJECT_0) {
               dumped = true;  // nothing to take; the early-exit branch below records the exit code
             } else {
+              fastDumpAtUs = qpc_now_us();
               char why[200];
               std::snprintf(why, sizeof(why), "%s (delivered=%u, silent %.1f s, fixture paints=%llu, window-mode=%s)",
                             forced ? "forced by REMOTE60_E2E_HANG_DUMP_AFTER_MS"
@@ -991,13 +1043,30 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
             }
           }
         }
+        if (dumped && !fullDumped && !gNoDump && fastDumpAtUs != 0 && gFullDumps < 3 && !r.hangDump.empty()) {
+          // r11: a fast dump has stacks; a FULL-memory dump also has the heap, so a debugger can read lock
+          // owners (!locks) and the D3D/stdout objects the stacks point at. Taken once, 3 s after the fast one,
+          // only if the host is still alive and still silent; at most one per run and three per harness run.
+          // REMOTE60_E2E_HANG_DUMP_FULL_FORCE=1 (test-support) takes it 1 s after a forced fast dump regardless
+          // of silence, to prove the path and measure its cost on a machine whose hosts do not hang.
+          static const bool fullForce = [] { char b[8]{}; return GetEnvironmentVariableA("REMOTE60_E2E_HANG_DUMP_FULL_FORCE", b, sizeof(b)) == 1 && b[0] == '1'; }();
+          const uint64_t nowUs2 = qpc_now_us();
+          const uint64_t last2 = std::max(lastDeliverUs.load(std::memory_order_acquire), liveStartUs);
+          const bool silentEnough = nowUs2 > last2 && nowUs2 - last2 >= kHangDumpAfterUs;
+          if (((nowUs2 - fastDumpAtUs >= 3'000'000ull && silentEnough) || (fullForce && nowUs2 - fastDumpAtUs >= 1'000'000ull)) &&
+              WaitForSingleObject(hostPi.hProcess, 0) != WAIT_OBJECT_0) {
+            ++gFullDumps;
+            fullDumped = true;
+            write_hang_dump(hostPi.hProcess, hostPi.dwProcessId, runDir, "still silent 3 s after the fast dump -- FULL memory", true);
+          }
+        }
         if (WaitForSingleObject(hostPi.hProcess, 200) == WAIT_OBJECT_0) {
           r.hostExitedEarly = true;
           DWORD code = 0;
           if (GetExitCodeProcess(hostPi.hProcess, &code)) r.hostExitCode = code;
           break;
         }
-        if (host_log_contains(hostLogPath, "fallback=monitor")) {
+        if (!gNoLogPoll && gHostLogDest != HostLogDest::Nul && host_log_contains(hostLogPath, "fallback=monitor")) {
           r.monitorFallbackSeen = true;
           TerminateProcess(hostPi.hProcess, 9);
           break;
@@ -1059,6 +1128,19 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   CloseHandle(job);
   r.host = read_host_log(hostLogPath);
   r.hostLastLine = host_log_last_line(hostLogPath);
+  {
+    // r11: how much the host wrote (the write that the Home4 main threads sat in) -- lines, bytes, per second
+    size_t lines = 0, bytes = 0;
+    if (gHostLogDest != HostLogDest::Nul) {
+      std::ifstream in(hostLogPath, std::ios::binary);
+      std::string line;
+      while (std::getline(in, line)) { ++lines; bytes += line.size() + 1; }
+    }
+    const double secs = static_cast<double>(seconds);
+    std::printf("host-log: lines=%zu bytes=%zu (%.1f lines/s, %.1f KB/s over the %d s live window; dest=%s)\n", lines, bytes,
+                secs > 0 ? lines / secs : 0.0, secs > 0 ? bytes / 1024.0 / secs : 0.0, seconds,
+                gHostLogDest == HostLogDest::Nul ? "NUL (not counted)" : "file");
+  }
   r.captureItemFailed = host_log_contains(hostLogPath, "capture item create failed");
   if (host_log_contains(hostLogPath, "fallback=monitor")) r.monitorFallbackSeen = true;
   std::printf("host-exit: early=%d exited-before-cleanup=%d code=%lu captureItemFailed=%d monitorFallback=%d window-mode=%s probe-hr=%s "
@@ -1073,7 +1155,9 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   if (r.monitorFallbackSeen) delete_saved_frames(runDir);
   check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
         r.hostLastLine);
-  {
+  if (gHostLogDest == HostLogDest::Nul) {
+    std::printf("capture: (host log went to NUL -- the capture-window line cannot be read; the window check is not judged in this run)\n");
+  } else {
     std::string captureLine;
     const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
     std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
@@ -1714,6 +1798,13 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
           std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
           return 3;
         }
+        if (gObserveMode) {
+          const std::string tagO = std::string("rc ") + cell.label + " " + std::to_string(fps) + "fps " + std::to_string(rate / 1000) + "k";
+          check(candRow.valid, tagO + ": observe: the host stayed alive, delivered frames, no capture stall, no dump (valid row)",
+                std::string("hostExit=") + (candRow.hostDied ? std::to_string(candRow.hostExit) : "alive") + " stallMaxMs=" + std::to_string(candRow.stallMaxMs) +
+                    " dumped=" + (candRow.dumped ? "1" : "0") + " delivered=" + std::to_string(cand.delivered));
+          continue;
+        }
         if (gSaveFrames && cell.marker) {
           // r10 (Codex H2): the pictures this cell promised -- per host, with content, not just existence
           auto pgm_line = [&](const char* who, const RunResult& rr) {
@@ -2197,6 +2288,19 @@ int main(int argc, char** argv) {
       rcCandFirst = std::string(argv[++i]) == "cand-first";  // r8: candidate before baseline
     } else if (a == "--rc-diagnostic") {
       rcDiagnostic = true;  // r10: the ORIGINAL candidate's stall evidence run; invalid candidate rows = COLLECTED (exit 4), not PASS
+    } else if (a == "--host-log" && i + 1 < argc) {  // r11: nul | run | dir:<path>
+      const std::string v = argv[++i];
+      if (v == "nul") gHostLogDest = HostLogDest::Nul;
+      else if (v.rfind("dir:", 0) == 0) { gHostLogDest = HostLogDest::Dir; gHostLogDir.assign(v.begin() + 4, v.end()); CreateDirectoryW(gHostLogDir.c_str(), nullptr); }
+      else gHostLogDest = HostLogDest::RunDir;
+    } else if (a == "--no-log-poll") {
+      gNoLogPoll = true;  // r11
+    } else if (a == "--rc-observe") {
+      gObserveMode = true;  // r11: liveness only (H0)
+    } else if (a == "--no-dump") {
+      gNoDump = true;  // r11
+    } else if (a == "--low-fps-dump") {
+      gLowFpsDump = true;  // r11: opt-in
     } else if (a == "--save-frames") {
       gSaveFrames = true;  // decoded event frames as PGM beside each run's host.log (needs --keep-dir)
     } else if (a == "--window" && i + 1 < argc) {
