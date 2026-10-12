@@ -209,6 +209,41 @@ class D3dCaptureReadbackPipeline {
   // means the ring's threads have not moved: the diagnostic for a frozen ring, readable without a lock.
   uint64_t DiagAgeUs() const;
 
+  // r13 (Codex C2): what the product's stats line and watchdog consume -- ONE snapshot, its validity,
+  // its generation and its freshness, with the ages already computed from that same snapshot. Calling
+  // the three legacy getters one after another read three snapshots and threw the `consistent` flag
+  // away, so a torn read (or an uninitialised ring) looked like a healthy idle ring (0/0/0) and the
+  // frozen-ring streak was reset on it. Consumers must not treat a non-Ok view as data: no peak
+  // update, no streak reset, no "recovered" -- Unknown stays Unknown.
+  enum class DiagValidity : uint8_t {
+    Ok,             // consistent snapshot of an initialised ring
+    Inconsistent,   // torn against a writer on every bounded retry (values are the last read, not 0)
+    Uninitialized,  // RefreshDiagLocked never ran (no ring yet / shut down before any slot existed)
+  };
+  static const char* diag_validity_name(DiagValidity v) {
+    switch (v) {
+      case DiagValidity::Ok: return "ok";
+      case DiagValidity::Inconsistent: return "torn";
+      default: return "uninit";
+    }
+  }
+  struct DiagView {
+    DiagValidity validity = DiagValidity::Uninitialized;
+    uint64_t generation = 0;
+    uint64_t updatedUs = 0;
+    uint64_t snapshotAgeUs = 0;          // now - updatedUs (0 when uninitialised)
+    uint64_t oldestGpuPendingAgeUs = 0;  // from the same snapshot
+    uint64_t oldestSubmittingAgeUs = 0;
+    uint32_t gpuPendingCount = 0;
+    bool ok() const { return validity == DiagValidity::Ok; }
+  };
+  DiagView ViewDiag() const;
+
+  // Test seam (unset in the product): runs inside RefreshDiagLocked between the two sequence
+  // increments, i.e. while the snapshot is odd/"being written" -- the writer-stuck case a reader has
+  // to report as Inconsistent rather than as numbers.
+  std::function<void()> midDiagWriteForTest;
+
   // Test seams (unset in the product; the harness and unit tests use them to pin the worker at a
   // known point). beforeGpuPollForTest runs on the worker with contextMu_ held and slotMu_ NOT held,
   // right before the GetData sweep; whileSlotLockedForTest runs with slotMu_ held, right after a

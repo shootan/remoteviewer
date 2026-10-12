@@ -213,7 +213,7 @@ bool CaptureState::CreateStaging(CaptureResources& res, EncoderState& encoder, b
   return true;
 }
 
-void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D* src, uint64_t callbackUs, uint64_t sourceCaptureUs, uint64_t captureAgeAtCallbackUs, uint64_t captureClockSkewUs, bool hasNewContent) {
+void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D* src, uint64_t callbackUs, uint64_t sourceCaptureUs, uint64_t captureAgeAtCallbackUs, uint64_t captureClockSkewUs, bool hasNewContent, uint64_t sourceAttachmentCookie) {
   CaptureState& capture = *this;
   auto& captureReadback = res.captureReadback;
   if (!src) return;
@@ -255,8 +255,13 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
   meta.captureUs = sourceCaptureUs;
   meta.captureAgeAtCallbackUs = captureAgeAtCallbackUs;
   meta.captureClockSkewUs = captureClockSkewUs;
+  // streamGeneration is the TARGET/selection generation (bumped by a screen or window pick, read by
+  // the consumer to drop frames of a superseded selection); it is read live because a pick does not
+  // re-attach by itself. The attachment cookie is the SOURCE identity and comes from the caller:
+  // the value its session was attached under, so a frame that crosses a detach keeps the old cookie
+  // and PublishFrame drops it instead of adopting it under the new attachment (r13, Codex C1).
   meta.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
-  meta.attachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
+  meta.attachmentCookie = sourceAttachmentCookie;
   if (capture.windowModeActive && capture.windowClientOnlyActive) {
     const HWND cropHwnd = reinterpret_cast<HWND>(
         static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
@@ -275,7 +280,7 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
   (void)captureReadback.Submit(src, meta);
 }
 
-void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop, winrt::event_token& token) {
+bool CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop, winrt::event_token& token) {
   CaptureState& capture = *this;
   auto& pool = res.pool;
   // r12: the attachment this worker belongs to, stamped ONCE here. A frame the worker gets to late is
@@ -287,7 +292,7 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
   // lock -- unlike the WGC thread, which the fourth Home run's dumps showed owning the D3D11 device's
   // critical section while it raised the event. `pool`, `res`, `capture`, `clientSession`, `stop` are
   // references: DetachCaptureSession stops this worker (bounded) before any of them changes.
-  auto collector = std::make_shared<FrameSignalCollector>([&, myAttachmentCookie] {
+  FrameSignalCollector::WorkFn drainAndPublish = [&, myAttachmentCookie] {
     if (stop.load()) return;
     if (capture.attachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
     try {
@@ -369,15 +374,48 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
       // new target/generation. (The frame object is still ours until this lambda returns; the
       // texture is copied inside Submit before that.)
       if (capture.attachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY (GNLinkStreamMigrationTest): while the named file exists, hold here -- between
+      // the cookie check above and the publish below -- so a detach can be crossed into this window
+      // on purpose (Codex C1 counterexample). Bounded; the product has no such wait.
+      {
+        wchar_t pausePath[MAX_PATH] = {};
+        const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_PAUSE_PUBLISH_FILE", pausePath, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+          for (int i = 0; i < 3000 && GetFileAttributesW(pausePath) != INVALID_FILE_ATTRIBUTES; ++i) Sleep(5);
+        }
+      }
+#endif
+      // The frame is stamped with THIS worker's attachment cookie, not the live one: if a detach
+      // crossed between the check above and here, the live cookie already moved and PublishFrame
+      // drops this frame by the cookie it carries (r13, Codex C1).
       capture.PublishCapturedTexture(res, src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs,
-                               captureClockSkewUs, true);
+                               captureClockSkewUs, true, myAttachmentCookie);
     } catch (...) {
     }
-  });
-  capture.frameCollector = collector;
-  if (!collector->ok()) {
-    std::cerr << "[native-video-host] wgc frame collector: event create failed; frames will not be collected\n";
+  };
+  // r13 (Codex C3): the collector must be RUNNING before the delegate exists and before the caller
+  // publishes capture-started. A failed start (event or thread) leaves nothing behind -- Start()
+  // closes the event it made -- and the attachment is reported as failed so the caller detaches and
+  // the ordinary restart retry (restartPending/backoff) runs.
+  FrameSignalCollector::StartSeams seams{};
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY: while the named file exists the collector's event creation fails (Codex C3
+  // counterexample: capture must not start, and must start again once the file is gone).
+  {
+    wchar_t failPath[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FAIL_COLLECTOR_FILE", failPath, MAX_PATH);
+    if (n > 0 && n < MAX_PATH && GetFileAttributesW(failPath) != INVALID_FILE_ATTRIBUTES) seams.failEvent = true;
   }
+#endif
+  auto collector = std::make_shared<FrameSignalCollector>(std::move(drainAndPublish), seams);
+  if (!collector->Start()) {
+    std::cerr << "[native-video-host] wgc frame collector start failed (" << collector->start_error()
+              << "); attachment NOT started cookie=" << myAttachmentCookie << "\n";
+    capture.frameCollector.reset();
+    return false;
+  }
+  capture.frameCollector = collector;
   std::cout << "[native-video-host] wgc-callback mode=signal-only cookie=" << myAttachmentCookie << "\n";
   // The delegate holds the collector by value, so a late invocation after detach finds a live,
   // closed object and returns. It takes no std::mutex and touches no capture state: the thread it
@@ -387,6 +425,7 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
                                         winrt::Windows::Foundation::IInspectable const&) {
     collector->Signal();
   });
+  return true;
 }
 
 void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_token& token) {
@@ -623,16 +662,20 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         capture.dxgiPointerUpdateUs.store(qpc_now_us(), std::memory_order_release);
       };
       std::string dxgiDetail;
-      auto startDxgi = [&](std::string* detailOut) {
+      // r13 (Codex C1): the DXGI session's frames carry the cookie of the attachment that started it
+      // (by value into the callback); DetachCaptureSession stops this session before it bumps nothing
+      // else, so a frame that is still being published when the cookie moves is dropped downstream.
+      const uint64_t dxgiAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
+      auto startDxgi = [&, dxgiAttachmentCookie](std::string* detailOut) {
         return dxgiCaptureSession.Start(
             config,
-            [&](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
-                uint32_t accumulatedFrames) {
+            [&, dxgiAttachmentCookie](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
+                                      uint32_t accumulatedFrames) {
               if (stop.load()) return;
               if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
               const uint64_t callbackUs = qpc_now_us();
               capture.PublishCapturedTexture(res, texture, callbackUs, callbackUs, 0, 0,
-                                       accumulatedFrames > 0);
+                                       accumulatedFrames > 0, dxgiAttachmentCookie);
             },
             [&](const std::string&, const std::string& message) {
               std::cout << "[native-video-host] " << message << "\n";
@@ -799,7 +842,15 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
     } catch (...) {
       std::cout << "[native-video-host] wgc_cursor_toggle=unsupported\n";
     }
-    capture.AttachFrameArrived(res, clientSession, stop, token);
+    if (!capture.AttachFrameArrived(res, clientSession, stop, token)) {
+      // r13 (Codex C3): no collector, no started capture. Detach tears the pool/session down and the
+      // caller's restart bookkeeping (restartPending + backoff) retries; nothing is reported ready.
+      std::cout << "[native-video-host] desktop_backend="
+                << (capture.windowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
+                << " capture-started=0 reason=collector-start-failed\n";
+      capture.DetachCaptureSession(res, token);
+      return false;
+    }
     session.StartCapture();
     std::cout << d3d_multithread_log_line("wgc-started", res.d3d.Get(), res.ctx.Get());
     capture.sessionStartedUs = qpc_now_us();
@@ -964,6 +1015,9 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
     if (meta.nv12Slot >= 0) {
       res.captureReadback.ReleaseNv12Slot(meta.nv12Slot, meta.nv12Generation);
     }
+    const uint64_t drops = capture.staleAttachmentDrops.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::cout << "[native-video-host] readback publish dropped reason=stale-attachment frameCookie=" << meta.attachmentCookie
+              << " liveCookie=" << capture.attachmentCookie.load(std::memory_order_acquire) << " drops=" << drops << "\n";
     return;
   }
   const uint64_t queuePushUs = qpc_now_us();

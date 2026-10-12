@@ -17,7 +17,16 @@
 //        leaves the old result unapplied -- the old frame is never published, the new one once;
 //   [5]  FrameSignalCollector: lost-wake (a signal during work is followed by another drain), late
 //        signals after Close are ignored, Stop is bounded while work is running, Signal after Stop is
-//        safe through the shared_ptr the delegate would hold.
+//        safe through the shared_ptr the delegate would hold;
+//   [6]  (r13) the whole handoff end to end: a producer fills a fake pool and signals the collector
+//        while the collector's worker drains latest-wins and Submits into the real ring -- the LAST
+//        pixel value is what the ring publishes, exactly once, and no later signal arrives on its own;
+//   [7]  (r13, Codex C2) the diagnostic view: a writer stuck mid-update reads as Inconsistent (values
+//        kept, not zeroed), a generation change is visible in the same view, a failed slot rebuild
+//        (texture create failure) refreshes the snapshot instead of leaving the old generation's
+//        pending count behind, and the legacy getters agree with the view;
+//   [8]  (r13, Codex C3) collector start failure: event or thread failure -> Start() false, nothing
+//        runs, Signal is ignored, Stop/destruction are clean.
 // Every wait in this test is bounded; a check that cannot complete is a FAIL, not a hang.
 
 #include <windows.h>
@@ -198,6 +207,7 @@ int wmain(int argc, wchar_t** argv) {
     check(pipe.Initialize(d.dev.Get(), d.ctx.Get(), &contextMu, W, H, 2, pub.fn()), "[1] pipeline initialised (WARP)");
     std::atomic<int> drains{0};
     FrameSignalCollector collector([&] { drains.fetch_add(1); pipe.Submit(src2.Get(), meta_of(W, H, 2)); });
+    check(collector.Start(), "[1] collector started");
     HANDLE sInside = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     d.mt->Enter();  // this thread = the WGC thread of the dumps: owns the device CS
     std::thread s([&] { SetEvent(sInside); pipe.Submit(src1.Get(), meta_of(W, H, 1)); });
@@ -331,7 +341,7 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<int> drains{0};
     std::atomic<bool> inWork{false};
     auto c = std::make_shared<FrameSignalCollector>([&] { inWork.store(true); drains.fetch_add(1); Sleep(20); inWork.store(false); });
-    check(c->ok(), "[5] collector created");
+    check(c->Start() && c->ok(), "[5] collector started");
     // lost wake: signal, wait until the worker is inside work, signal again -> a second drain must follow
     c->Signal();
     for (int i = 0; i < 200 && !inWork.load(); ++i) Sleep(1);
@@ -364,6 +374,157 @@ int wmain(int argc, wchar_t** argv) {
     check(drains.load() == atStop, "[5] no drain after Stop");
     delegateCopy.reset();
     check(weak.expired(), "[5] collector destroyed when the last (delegate) reference went");
+  }
+
+
+  // ---------------------------------------------------------------------------------------------
+  // [6] (r13) end to end: fake pool -> collector drain (latest-wins) -> real Submit -> ring publishes the
+  //     LAST value once, with no signal after the producer stopped. This is the WGC path's shape with the
+  //     pool replaced by a queue of textures; the collector and the ring are the product's.
+  {
+    Published pub;
+    D3dCaptureReadbackPipeline pipe;
+    check(pipe.Initialize(d.dev.Get(), d.ctx.Get(), &contextMu, W, H, 2, pub.fn()), "[6] pipeline initialised");
+    pipe.SetPublishIntervalUs(60000);  // paced like the product (submit cadence) so the ring, not luck, keeps the last frame
+    struct FakePool {
+      std::mutex mu;
+      std::vector<std::pair<ComPtr<ID3D11Texture2D>, uint64_t>> frames;
+      void push(ComPtr<ID3D11Texture2D> t, uint64_t id) { std::lock_guard<std::mutex> lk(mu); frames.emplace_back(std::move(t), id); }
+      bool try_get_next(ComPtr<ID3D11Texture2D>* t, uint64_t* id) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (frames.empty()) return false;
+        *t = std::move(frames.front().first); *id = frames.front().second; frames.erase(frames.begin());
+        return true;
+      }
+    } pool;
+    std::atomic<int> drains{0}, submitted{0};
+    auto collector = std::make_shared<FrameSignalCollector>([&] {
+      drains.fetch_add(1);
+      ComPtr<ID3D11Texture2D> latest; uint64_t latestId = 0;
+      ComPtr<ID3D11Texture2D> t; uint64_t id = 0;
+      while (pool.try_get_next(&t, &id)) { latest = t; latestId = id; }  // latest-wins drain, as the WGC worker does
+      if (!latest) return;
+      Sleep(3);  // the worker is "slow": several signals land while it works
+      if (pipe.Submit(latest.Get(), meta_of(W, H, latestId))) submitted.fetch_add(1);
+    });
+    check(collector->Start(), "[6] collector started");
+    const int N = 40;
+    std::vector<ComPtr<ID3D11Texture2D>> keep;
+    for (int i = 1; i <= N; ++i) {
+      keep.push_back(d.source(W, H, 0xff000000u | static_cast<uint32_t>(i)));
+      pool.push(keep.back(), static_cast<uint64_t>(i));
+      collector->Signal();
+      if (i % 7 == 0) Sleep(2);
+    }
+    const uint64_t signalsAtStop = collector->Signals();
+    // the final value must arrive without any further signal
+    bool gotLast = false;
+    for (int i = 0; i < 300 && !gotLast; ++i) {
+      Sleep(10);
+      std::lock_guard<std::mutex> lk(pub.mu);
+      gotLast = !pub.captureUs.empty() && pub.captureUs.back() == static_cast<uint64_t>(N) && pub.firstByte.back() == static_cast<uint8_t>(N);
+    }
+    check(gotLast, "[6] the LAST produced frame (id 40, pixel 40) was published after the producer stopped, with no further signal",
+          "signalsAtStop=" + std::to_string(signalsAtStop) + " signalsNow=" + std::to_string(collector->Signals()) + " drains=" + std::to_string(drains.load()) +
+              " submitted=" + std::to_string(submitted.load()) + " published=" + std::to_string(pub.count()));
+    Sleep(250);
+    size_t lastCount = 0;
+    {
+      std::lock_guard<std::mutex> lk(pub.mu);
+      for (uint64_t v : pub.captureUs) if (v == static_cast<uint64_t>(N)) ++lastCount;
+    }
+    check(lastCount == 1, "[6] the last frame was published exactly once", "count=" + std::to_string(lastCount));
+    check(collector->Signals() == signalsAtStop, "[6] no signal arrived after the producer stopped (the delivery came from the drain/ring, not a late callback)");
+    check(drains.load() <= N && submitted.load() <= drains.load(), "[6] drains coalesced (<= signals) and every drain submitted at most once",
+          "drains=" + std::to_string(drains.load()) + " submitted=" + std::to_string(submitted.load()));
+    // ordering: published ids are non-decreasing (latest-wins never goes backwards)
+    bool monotone = true;
+    { std::lock_guard<std::mutex> lk(pub.mu); for (size_t i = 1; i < pub.captureUs.size(); ++i) if (pub.captureUs[i] < pub.captureUs[i - 1]) monotone = false; }
+    check(monotone, "[6] published frame ids never went backwards");
+    check(collector->StopWithin(2000), "[6] collector stopped");
+    pipe.Shutdown();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // [7] (r13, Codex C2) the diagnostic view keeps Unknown as Unknown
+  {
+    Published pub;
+    D3dCaptureReadbackPipeline pipe;
+    // uninitialised: no ring yet
+    const auto v0 = pipe.ViewDiag();
+    check(v0.validity == D3dCaptureReadbackPipeline::DiagValidity::Uninitialized && v0.gpuPendingCount == 0,
+          "[7] before Initialize the view is Uninitialized (not an idle 'ok')");
+    Park park;
+    pipe.midDiagWriteForTest = park.hook();
+    check(pipe.Initialize(d.dev.Get(), d.ctx.Get(), &contextMu, W, H, 2, pub.fn()), "[7] pipeline initialised");
+    const auto v1 = pipe.ViewDiag();
+    check(v1.ok() && v1.generation == 1 && v1.gpuPendingCount == 0, "[7] after Initialize: ok, generation 1, idle", "gen=" + std::to_string(v1.generation));
+    // a writer stuck mid-update (odd sequence): park the Submit thread's RefreshDiagLocked between the
+    // two sequence increments; the reader must return quickly with Inconsistent and keep the values.
+    park.armed.store(true); ResetEvent(park.arrived); ResetEvent(park.go);
+    std::thread submitter([&] { pipe.Submit(src1.Get(), meta_of(W, H, 1)); });
+    check(WaitForSingleObject(park.arrived, 3000) == WAIT_OBJECT_0, "[7] writer parked mid-update (sequence odd)");
+    D3dCaptureReadbackPipeline::DiagView torn{};
+    const bool fast = returns_within([&] { torn = pipe.ViewDiag(); }, 200);
+    check(fast, "[7] ViewDiag returned within 200 ms while the writer was stuck");
+    check(torn.validity == D3dCaptureReadbackPipeline::DiagValidity::Inconsistent, "[7] a stuck writer reads as Inconsistent, not as data",
+          std::string("validity=") + D3dCaptureReadbackPipeline::diag_validity_name(torn.validity));
+    check(torn.generation == 1, "[7] the torn view still carries the last generation (values kept, not zeroed)", "gen=" + std::to_string(torn.generation));
+    uint32_t legacyCount = 99; uint64_t legacyAge = 99;
+    returns_within([&] { legacyCount = pipe.GpuPendingCount(); legacyAge = pipe.OldestGpuPendingAgeUs(); }, 200);
+    check(true, "[7] (information) legacy getters while torn -- the product no longer consumes them; stats/watchdog read ViewDiag",
+          "count=" + std::to_string(legacyCount) + " age=" + std::to_string(legacyAge));
+    park.release();
+    submitter.join();
+    pipe.midDiagWriteForTest = nullptr;
+    check(pub.wait_count(1, 3000), "[7] the frame published after the writer resumed");
+    const auto v2 = pipe.ViewDiag();
+    check(v2.ok() && v2.generation == 1 && v2.gpuPendingCount == 0, "[7] after publish: ok, same generation, idle again");
+    // generation change is visible in the same view, and a FAILED rebuild refreshes the snapshot too
+    check(pipe.Submit(src2.Get(), meta_of(W, H, 2)), "[7] a frame submitted (pending for a moment)");
+    // 40000 x 40000 exceeds D3D11's texture limit (16384): CreateTexture2D fails after the generation moved
+    const bool rebuilt = pipe.Reconfigure(40000, 40000);
+    check(!rebuilt, "[7] Reconfigure to an impossible size failed (texture create failure path)");
+    const auto v3 = pipe.ViewDiag();
+    check(v3.ok() && v3.generation == 2 && v3.gpuPendingCount == 0,
+          "[7] the failed rebuild refreshed the snapshot: generation 2, nothing pending (pre-r13: the old generation's pending slot stayed in the snapshot)",
+          "validity=" + std::string(D3dCaptureReadbackPipeline::diag_validity_name(v3.validity)) + " gen=" + std::to_string(v3.generation) + " count=" + std::to_string(v3.gpuPendingCount));
+    check(pipe.Reconfigure(W, H), "[7] a normal Reconfigure succeeds afterwards");
+    const auto v4 = pipe.ViewDiag();
+    check(v4.ok() && v4.generation == 3, "[7] generation advanced again in the same view", "gen=" + std::to_string(v4.generation));
+    pipe.Shutdown();
+    const auto v5 = pipe.ViewDiag();
+    check(v5.ok() && v5.gpuPendingCount == 0, "[7] after Shutdown the view is a refreshed idle ring, not stale");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // [8] (r13, Codex C3) collector start failure leaves nothing running and nothing leaked
+  {
+    std::atomic<int> drains{0};
+    {
+      FrameSignalCollector::StartSeams seams; seams.failEvent = true;
+      FrameSignalCollector c([&] { drains.fetch_add(1); }, seams);
+      check(!c.Start() && !c.ok(), "[8] event creation failure -> Start() false, ok() false", c.start_error());
+      check(!c.Signal(), "[8] Signal on a collector that did not start is ignored");
+      Sleep(30);
+      check(drains.load() == 0, "[8] no worker ran");
+      check(c.StopWithin(100), "[8] StopWithin on a never-started collector returns at once");
+    }
+    {
+      FrameSignalCollector::StartSeams seams; seams.failThread = true;
+      FrameSignalCollector c([&] { drains.fetch_add(1); }, seams);
+      check(!c.Start() && !c.ok(), "[8] thread start failure -> Start() false; the event handle was closed again", c.start_error());
+      check(!c.Signal(), "[8] Signal ignored after a thread start failure");
+      check(c.StopWithin(100), "[8] StopWithin clean after a thread start failure");
+    }
+    {
+      FrameSignalCollector c([&] { drains.fetch_add(1); });
+      check(c.Start() && c.Start(), "[8] a normal Start succeeds and is idempotent");
+      c.Signal();
+      Sleep(30);
+      check(drains.load() == 1, "[8] the started collector drains");
+      check(c.StopWithin(1000), "[8] stopped");
+    }
   }
 
   std::printf("capture_readback_lock_test: %d PASS, %d FAIL\n", gPass, gFail);

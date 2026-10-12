@@ -230,6 +230,9 @@ struct CaptureState {
   std::atomic<uint32_t> wgcPendingContentW{0};
   std::atomic<uint32_t> wgcPendingContentH{0};
   std::atomic<uint64_t> wgcContentSizeMismatchDrops{0};
+  // r13: readback completions PublishFrame dropped because their attachment cookie was not the live
+  // one (a frame whose Submit began under a previous attachment). The stats line prints it.
+  std::atomic<uint64_t> staleAttachmentDrops{0};
   uint32_t wgcSettleTrackW = 0;
   uint32_t wgcSettleTrackH = 0;
   uint64_t wgcSettleSinceUs = 0;
@@ -317,11 +320,19 @@ struct CaptureState {
   // (Re)create the staging/readback ring for a srcW x srcH capture surface.
   bool CreateStaging(CaptureResources& res, EncoderState& encoder, bool useH264, uint32_t srcW, uint32_t srcH);
   // Hand a captured texture to the readback ring (capture callback thread).
+  // r13 (Codex C1): `sourceAttachmentCookie` is the attachment the TEXTURE came from -- stamped by
+  // the caller from the value it captured when its session was attached, never re-read here. A
+  // detach that crosses the caller's own cookie check and this call bumps the live cookie; stamping
+  // the live value would put the new cookie on old pixels and walk them past PublishFrame's guard.
+  // 0 = no attachment identity (never checked).
   void PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D* src, uint64_t callbackUs,
                               uint64_t sourceCaptureUs, uint64_t captureAgeAtCallbackUs,
-                              uint64_t captureClockSkewUs, bool hasNewContent);
-  // Subscribe the WGC FrameArrived callback on the current pool.
-  void AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop,
+                              uint64_t captureClockSkewUs, bool hasNewContent,
+                              uint64_t sourceAttachmentCookie);
+  // Subscribe the WGC FrameArrived callback on the current pool. False (r13, Codex C3) = the
+  // collector could not start; nothing is subscribed and the attachment must not be published as
+  // started -- the caller detaches and lets the normal restart retry run.
+  bool AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop,
                           winrt::event_token& token);
   // Tear down the current capture attachment (WGC pool/session, DXGI or GDI backend).
   void DetachCaptureSession(CaptureResources& res, winrt::event_token& token);

@@ -332,6 +332,9 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
   const uint64_t lastPublishAtUs = capture.lastPublishUs.load(std::memory_order_acquire);
   const uint64_t lastPublishAgeUs =
       (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
+  // r13 (Codex C2): one snapshot, its validity and generation, consumed as a unit -- three separate
+  // getters read three snapshots and dropped the torn/uninitialised flag (a torn read printed as 0/0/0).
+  const auto rbDiag = res.captureReadback.ViewDiag();
   std::cout << "[native-video-host] encodedFrames=" << encoder.encodedFrames
             << " sentFrames=" << sender.sentFrames
             << " queuePushCount=" << stats.queuePushCount
@@ -347,6 +350,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
             << " captureRestarts=" << capture.restartCount
             << " wgcContentSizeMismatchDrops=" << capture.wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                << " staleAttachmentDrops=" << capture.staleAttachmentDrops.load(std::memory_order_relaxed)
             << " wgcPoolRecreates=" << capture.wgcPoolRecreates
             << " captureWindowRebindCount=" << capture.rebindCount.load(std::memory_order_relaxed)
             << " captureTargetPid=" << capture.targetPid.load(std::memory_order_relaxed)
@@ -407,10 +411,13 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
             << " captureUnmapWaitMaxUs=" << stats.captureUnmapWaitMaxUs
             << " oldestGpuPendingPeakUs=" << watchdog.oldestGpuPendingPeakUs
-            << " oldestSubmittingUs=" << res.captureReadback.OldestSubmittingAgeUs()
-            << " oldestGpuPendingNowUs=" << res.captureReadback.OldestGpuPendingAgeUs()
-            << " gpuPendingCount=" << res.captureReadback.GpuPendingCount()
-            << " rbDiagAgeUs=" << res.captureReadback.DiagAgeUs()  // r12: snapshot freshness; large + pending>0 = frozen ring
+            << " oldestSubmittingUs=" << rbDiag.oldestSubmittingAgeUs
+            << " oldestGpuPendingNowUs=" << rbDiag.oldestGpuPendingAgeUs
+            << " gpuPendingCount=" << rbDiag.gpuPendingCount
+            << " rbDiag=" << D3dCaptureReadbackPipeline::diag_validity_name(rbDiag.validity)  // ok | torn | uninit: non-ok = the three values are NOT data
+            << " rbDiagGen=" << rbDiag.generation
+            << " rbDiagAgeUs=" << rbDiag.snapshotAgeUs  // snapshot freshness; large + pending>0 = frozen ring
+            << " rbDiagInvalidSamples=" << watchdog.readbackDiagInvalidSamples
             << " gpuPendingCountPeak=" << watchdog.gpuPendingCountPeak
             << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
             << " readbackDrainRestarts=" << watchdog.drainRestartCount

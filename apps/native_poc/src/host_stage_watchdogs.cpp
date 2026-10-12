@@ -137,12 +137,27 @@ Flow stage_watchdogs(HostContext& hx, TickContext& tc) {
       clientSession.streamControlActive.load(std::memory_order_acquire) &&
       !capture.windowModeActive.load(std::memory_order_acquire) &&
       backend.active != DesktopCaptureBackend::Gdi) {
-    const uint64_t oldestPendingUs = res.captureReadback.OldestGpuPendingAgeUs();
+    // r13 (Codex C2): ONE snapshot with its validity. A torn or uninitialised snapshot is not data:
+    // it neither raises a peak nor advances the frozen streak, and it never resets the streak to 0
+    // (that reset is what would have declared a frozen ring "recovered" on a torn read).
+    const auto rbDiag = res.captureReadback.ViewDiag();
+    if (!rbDiag.ok()) {
+      ++watchdog.readbackDiagInvalidSamples;
+      if (watchdog.readbackDiagInvalidLastLogUs == 0 || nowUs - watchdog.readbackDiagInvalidLastLogUs >= 1'000'000) {
+        watchdog.readbackDiagInvalidLastLogUs = nowUs;
+        std::cout << "[native-video-host] readback diag not data validity="
+                  << D3dCaptureReadbackPipeline::diag_validity_name(rbDiag.validity) << " gen=" << rbDiag.generation
+                  << " snapshotAgeUs=" << rbDiag.snapshotAgeUs << " samples=" << watchdog.readbackDiagInvalidSamples
+                  << " frozenPollStreak=" << watchdog.frozenPollStreak << " (streak kept)\n";
+      }
+      return Flow::Next;
+    }
+    const uint64_t oldestPendingUs = rbDiag.oldestGpuPendingAgeUs;
     watchdog.oldestGpuPendingPeakUs = std::max(watchdog.oldestGpuPendingPeakUs, oldestPendingUs);
     // Same loop-rate sample feeds the readback-drain watchdog's per-1s-window peak; unlike the
     // frozen-ring peak above (reset per print interval) this one is reset every stats tick.
     watchdog.drainOldestPendingPeakUs = std::max(watchdog.drainOldestPendingPeakUs, oldestPendingUs);
-    watchdog.gpuPendingCountPeak = std::max(watchdog.gpuPendingCountPeak, res.captureReadback.GpuPendingCount());
+    watchdog.gpuPendingCountPeak = std::max(watchdog.gpuPendingCountPeak, rbDiag.gpuPendingCount);
     if (oldestPendingUs >= kCaptureFrozenWarnUs) {
       watchdog.readbackSlowWindowPeakUs = std::max(watchdog.readbackSlowWindowPeakUs, oldestPendingUs);
     }
@@ -192,7 +207,7 @@ Flow stage_watchdogs(HostContext& hx, TickContext& tc) {
         std::cout << "[native-video-host] capture-recovery reason=frozen-ring-refreeze"
                   << " action=process-restart exitCode=3"
                   << " oldestPendingUs=" << oldestPendingUs
-                  << " gpuPendingCount=" << res.captureReadback.GpuPendingCount()
+                  << " gpuPendingCount=" << rbDiag.gpuPendingCount
                   << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
                   << " captureRestarts=" << capture.restartCount
                   << " lastPublishAgeUs=" << refreezeLastPubAgeUs

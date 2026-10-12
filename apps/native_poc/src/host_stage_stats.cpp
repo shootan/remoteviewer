@@ -344,6 +344,7 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
                 << " captureRestarts=" << capture.restartCount
                 << " wgcContentSizeMismatchDrops=" << capture.wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                << " staleAttachmentDrops=" << capture.staleAttachmentDrops.load(std::memory_order_relaxed)
                 << " wgcPoolRecreates=" << capture.wgcPoolRecreates
                 << " captureWindowRebindCount=" << capture.rebindCount.load(std::memory_order_relaxed)
                 << " captureTargetPid=" << capture.targetPid.load(std::memory_order_relaxed)

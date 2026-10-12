@@ -85,6 +85,10 @@ struct WatchdogState {
   // lets a refreeze inside the window escalate to a full process restart.
   uint32_t frozenPollStreak = 0;
   uint64_t lastFrozenRestartUs = 0;
+  // r13 (Codex C2): readback diagnostic samples that were not data (torn snapshot / uninitialised
+  // ring). Such a sample neither advances nor resets the frozen streak; it is counted and logged.
+  uint64_t readbackDiagInvalidSamples = 0;
+  uint64_t readbackDiagInvalidLastLogUs = 0;
   uint64_t frozenRingRestartCount = 0;  // restarts driven specifically by the frozen ring
   uint64_t oldestGpuPendingPeakUs = 0;  // per-interval peak of the oldest GpuPending age
   uint32_t gpuPendingCountPeak = 0;     // per-interval peak GpuPending count

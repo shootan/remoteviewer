@@ -136,6 +136,9 @@ bool D3dCaptureReadbackPipeline::CreateSlotsLocked(uint32_t width, uint32_t heig
       std::fprintf(stderr, "[readback] staging create failed hr=0x%08lx removed=0x%08lx\n",
                    static_cast<unsigned long>(texHr),
                    static_cast<unsigned long>(device_->GetDeviceRemovedReason()));
+      // r13 (Codex C2): the generation already moved and the slots are half rebuilt; without this the
+      // snapshot still described the previous generation's pending slots as if they were live.
+      RefreshDiagLocked();
       return false;
     }
     D3D11_QUERY_DESC queryDesc{};
@@ -271,7 +274,32 @@ void D3dCaptureReadbackPipeline::RefreshDiagLocked() {
   diagPendingCount_.store(pending, std::memory_order_release);
   diagGeneration_.store(generation_, std::memory_order_release);
   diagUpdatedUs_.store(qpc_us(), std::memory_order_release);
+  if (midDiagWriteForTest) midDiagWriteForTest();
   diagSeq_.fetch_add(1, std::memory_order_release);
+}
+
+D3dCaptureReadbackPipeline::DiagView D3dCaptureReadbackPipeline::ViewDiag() const {
+  const DiagSnapshot d = ReadDiag();
+  DiagView v;
+  v.generation = d.generation;
+  v.updatedUs = d.updatedUs;
+  v.gpuPendingCount = d.gpuPendingCount;
+  if (!d.consistent) {
+    v.validity = DiagValidity::Inconsistent;
+  } else if (d.updatedUs == 0) {
+    v.validity = DiagValidity::Uninitialized;
+  } else {
+    v.validity = DiagValidity::Ok;
+  }
+  const uint64_t nowUs = qpc_us();
+  if (d.updatedUs != 0) v.snapshotAgeUs = nowUs > d.updatedUs ? nowUs - d.updatedUs : 0;
+  if (d.oldestGpuPendingSubmitUs != 0) {
+    v.oldestGpuPendingAgeUs = nowUs > d.oldestGpuPendingSubmitUs ? nowUs - d.oldestGpuPendingSubmitUs : 0;
+  }
+  if (d.oldestSubmittingReservedUs != 0) {
+    v.oldestSubmittingAgeUs = nowUs > d.oldestSubmittingReservedUs ? nowUs - d.oldestSubmittingReservedUs : 0;
+  }
+  return v;
 }
 
 D3dCaptureReadbackPipeline::DiagSnapshot D3dCaptureReadbackPipeline::ReadDiag() const {
@@ -646,6 +674,15 @@ bool D3dCaptureReadbackPipeline::Submit(ID3D11Texture2D* src, const CaptureFrame
   // the blt-failure handling that once took slotMu_ under contextMu_ (Ledger H-23) stays out of
   // the context lock, and a thread that holds the D3D11 device's own lock (the WGC callback
   // thread, fourth Home run) is never made to wait for either mutex: the callback only signals.
+  //
+  // What still runs under slotMu_ and can wait for the device's own lock (r13 wording, Codex):
+  // the device Create* calls in CreateSlotsLocked (Initialize/Reconfigure) and in
+  // EnsurePreprocessLocked/EnsureNv12Locked -- the latter inside Submit's reservation block, on an
+  // ACTIVE ring's first preprocessed frame and on every output-size change, not only at a quiet
+  // initialisation. ID3D11Device methods take the same multithread lock as context calls, so a
+  // thread that owns that lock and then waited for slotMu_ would close a cycle here. No such
+  // thread exists after r12 (the callback does not wait for slotMu_); this is recorded as the
+  // remaining lock-order edge, not as a cycle, and the diagnostics above stay valid through it.
   //
   // Releasing the context lock first is only safe because the slot is still Submitting: the
   // worker cannot see it until this block promotes it. Doing the promotion last is the whole

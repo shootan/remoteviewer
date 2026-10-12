@@ -147,6 +147,21 @@ if(CMAKE_GENERATOR MATCHES "Visual Studio")
   add_dependencies(remote60_host_runtime_failure_test remote60_native_video_host_poc)
 endif()
 
+# encoder-rc-budget r13 (Codex C1): the attachment-cookie crossing, on the product's own compiled objects
+# (CaptureState::PublishCapturedTexture / PublishFrame, the readback ring) with this file as main and a
+# WARP device. Same object-path reuse as the runtime failure fixture above (Visual Studio generator).
+if(CMAKE_GENERATOR MATCHES "Visual Studio")
+  add_executable(remote60_capture_attachment_test src/capture_attachment_test.cpp)
+  target_include_directories(remote60_capture_attachment_test PRIVATE src "${CMAKE_SOURCE_DIR}/libs/capture/src")
+  target_link_libraries(remote60_capture_attachment_test PRIVATE ${_host_failure_objects})
+  target_link_libraries(remote60_capture_attachment_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,LINK_LIBRARIES>)
+  target_compile_definitions(remote60_capture_attachment_test PRIVATE $<TARGET_PROPERTY:remote60_native_video_host_poc,COMPILE_DEFINITIONS>)
+  if(MSVC)
+    target_compile_options(remote60_capture_attachment_test PRIVATE /utf-8)
+  endif()
+  add_dependencies(remote60_capture_attachment_test remote60_native_video_host_poc)
+endif()
+
 # TEST BUILD of the host for clipboard-image runs next to a user's session: the same sources and
 # libraries as GNLinkStream, plus a publisher that writes received images to a folder
 # (REMOTE60_CLIP_IMAGE_TEST_SINK_DIR) instead of the clipboard. Its own output name, never packaged;
