@@ -20,6 +20,7 @@
 #endif
 
 #include "host_encoder_rc_policy.hpp"
+#include "h264_slice_qp.hpp"
 
 namespace remote60::native_poc {
 
@@ -65,6 +66,9 @@ struct H264AccessUnit {
   int32_t encodeQp = -1;
   uint64_t encodeQpRaw = 0;
   int32_t encodeQpHr = 0;
+  // The first slice's QP as the slice header states it (h264_slice_qp.hpp) -- read from the bytes, not
+  // inferred; -1 when the header could not be read. Not mb-level: the slice's starting QP.
+  int32_t sliceQp = -1;
 };
 
 // motion-settle r1 M0: what a synthetic encoder input was for (H264AccessUnit::syntheticReason).
@@ -405,6 +409,7 @@ class H264Encoder {
   bool nextInputSynthetic_ = false;
   uint8_t nextInputSyntheticReason_ = 0;
   uint64_t nextInputContentVersion_ = 0;
+  H264SliceQpReader sliceQpReader_;  // motion-settle r1 M0: SPS/PPS seen so far + each AU's slice QP
   uint64_t nextInputEpoch_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;
   bool spsProfileReported_ = false;

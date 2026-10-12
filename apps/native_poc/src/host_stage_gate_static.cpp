@@ -100,11 +100,15 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
   auto& captureStampUs = tc.captureStampUs;
   auto& queuePopUs = tc.queuePopUs;
   auto& frameAgeAtSelectUs = tc.frameAgeAtSelectUs;
+  // motion-settle r1 M1: whether this real capture changed the picture (0 permille is a byte-identical
+  // repeat of the last sent frame; nothing to compare with counts as a change).
+  bool contentChanged = true;
   if (!servedBootstrap && frameGating.enabled && useH264 && payload && !payload->empty()) {
     if (frameGating.refPayload && !frameGating.refPayload->empty() &&
         frameGating.refW == w && frameGating.refH == h && frameGating.refStride == stride) {
       frameGating.RecordChange(estimate_bgra_change_permille(
           payload->data(), frameGating.refPayload->data(), payload->size(), frameGating.sampleTarget));
+      contentChanged = frameGating.changePermilleLast > 0;
     } else {
       frameGating.RecordReferenceMiss();
     }
@@ -131,12 +135,18 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     // the same interval here a second time makes a slightly-early capture timestamp skip
     // the entire tick (measured 1-6 lost frames/s at 60fps). Keep this limiter only for
     // static throttling or the explicitly unpaced throughput path.
+    // A change arms the settle refinement BEFORE any gate below can hold the frame back: if this was
+    // the last change of a burst and it never reaches the encoder, the refinement still re-serves it.
+    if (contentChanged) kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);
     if (frameGating.ShouldSkip(queuePopUs, keyReqPending, encoder.activeFrameIntervalUs, paceByTick)) {
       ++frameGating.skipCount;
       if (frameGating.staticMode) ++frameGating.staticSkipCount;
       stats.lastVersionSent = version;
       return Flow::Continue;
     }
+  }
+  if (!servedBootstrap && useH264 && !frameGating.enabled && payload && !payload->empty()) {
+    kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);  // no gate: every capture is a change
   }
   if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {
     ++stats.stalePreEncodeDropCount;

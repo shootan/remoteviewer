@@ -45,6 +45,9 @@ struct RateGovernorConfig {
   uint32_t fpsUpPercent = 90;     // the payload predicted at the next rate up must be under this...
   uint32_t fpsUpAfterSec = 5;     // ...for this many consecutive seconds
   uint32_t minFps = 15;
+  // motion-settle r1 M2: the ceiling a fast-pressure boost asks for (clamped to [baseQp, capQp]; equal
+  // to baseQp = no fast stage, which is what a static-ceiling profile gets since its base == cap).
+  uint32_t fastQp = 38;
 };
 
 struct RateDecision {
@@ -72,9 +75,14 @@ class RateGovernor {
     if (targetBps == 0) return Current(userFps);
     const uint64_t percent = payloadBytes * 8ULL * 100ULL / targetBps;
     if (percent < config_.calmPercent) {
+      // A whole second this calm is the motion over (the slow loop's own calm). It also ends a fast
+      // boost: a second under 40% is not the middle of a motion, so this is not the fight Codex ruled
+      // out (calm wiping a boost while the motion still runs) -- the explicit calm (OnCalm) usually
+      // comes first anyway.
       qp_ = config_.baseQp;
       fpsStep_ = 0;
       over_ = under_ = overAtCap_ = fpsOk_ = 0;
+      fast_ = false;
       return Current(userFps);
     }
     if (percent > config_.overPercent) {
@@ -128,14 +136,41 @@ class RateGovernor {
     return Current(userFps);
   }
 
-  uint32_t maxQp() const { return qp_; }
+  /** The ONE desired ceiling: the slow ladder's, raised to the fast boost while one is held (M2). */
+  uint32_t maxQp() const { return fast_ ? std::max(qp_, FastQp()) : qp_; }
+  uint32_t slowQp() const { return qp_; }
+  bool fastActive() const { return fast_; }
   uint32_t fpsStep() const { return fpsStep_; }
+
+  /**
+   * motion-settle r1 M2: the fast half. Pressure from oversized motion AUs (host_fast_pressure.hpp)
+   * holds the ceiling at fastQp until an explicit calm -- the screen quiet, no new content, the sender
+   * backlog drained -- or a whole calm second. Returns whether the desired ceiling changed. A profile
+   * without a fast stage (fastQp <= baseQp, e.g. static: base == cap) never changes.
+   */
+  bool OnFastPressure() {
+    if (FastQp() <= config_.baseQp || fast_) return false;
+    const uint32_t before = maxQp();
+    fast_ = true;
+    return maxQp() != before;
+  }
+  /** Quiet, nothing new, backlog drained: the fast boost AND the slow ladder go back to the floor. */
+  bool OnCalm() {
+    const uint32_t before = maxQp();
+    fast_ = false;
+    if (fpsStep_ == 0) {  // a frame-rate step is unwound by the slow loop's own rules, not here
+      qp_ = config_.baseQp;
+      over_ = under_ = overAtCap_ = 0;
+    }
+    return maxQp() != before;
+  }
 
   /** A new encoder target or a new user frame rate: start again from the floor at full rate. */
   void Reset() {
     qp_ = config_.baseQp;
     fpsStep_ = 0;
     over_ = under_ = overAtCap_ = fpsOk_ = 0;
+    fast_ = false;
   }
   /**
    * encoder-rc-budget C4: the ladder follows the live encoder instance's profile (host_encoder_rc_policy
@@ -149,7 +184,8 @@ class RateGovernor {
   const RateGovernorConfig& config() const { return config_; }
 
  private:
-  RateDecision Current(uint32_t userFps) const { return RateDecision{qp_, FpsForStep(userFps, fpsStep_)}; }
+  RateDecision Current(uint32_t userFps) const { return RateDecision{maxQp(), FpsForStep(userFps, fpsStep_)}; }
+  uint32_t FastQp() const { return std::min(config_.capQp, std::max(config_.baseQp, config_.fastQp)); }
 
   RateGovernorConfig config_;
   uint32_t qp_;
@@ -158,6 +194,7 @@ class RateGovernor {
   uint32_t under_ = 0;
   uint32_t overAtCap_ = 0;
   uint32_t fpsOk_ = 0;
+  bool fast_ = false;  // M2: a fast-pressure boost is held
 };
 
 }  // namespace remote60::native_poc

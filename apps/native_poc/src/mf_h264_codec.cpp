@@ -1949,6 +1949,7 @@ bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint
   sampleTimeOutputTimestampTotalSamples_ = 0;
   sampleTimeOutputTimestampFallbackCount_ = 0;
   pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
+  sliceQpReader_ = H264SliceQpReader{};  // motion-settle M0: a new instance brings its own SPS/PPS
   acceptedInputCounter_ = 0;  // r4 G: ordinals restart per codec instance (detector re-baselines too)
   ++codecInstanceId_;         // r4 G1: a new codec instance -- the clamp detector resets on this change
   frameIndex_ = 0;
@@ -2019,10 +2020,26 @@ RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
     return RcRuntimeResult::Unproven;
   }
   maxQpOverride_ = maxQp;
-  (void)apply_rate_control("governor");
+  if (effective == 0 || effective > 51) {
+    // "No ceiling" cannot be issued as a value; the full plan path drops the field as it always did.
+    (void)apply_rate_control("governor");
+    return rcFieldMaxQp_.applied() || !rcPlan_.maxQpSet ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+  }
+  // motion-settle r1 M2: the ceiling ALONE. This used to go through apply_rate_control("governor"),
+  // which re-issued mode, mean, peak and VBV with every ceiling step -- four Sets the step did not ask
+  // for (and a re-issued mode/VBV is not free on every MFT). Now: one SetValue, its readback, and only
+  // the ceiling's own field and plan entry change; the other fields keep their last confirmed state.
+  const bool qpSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, effective);
+  uint32_t rb = 0;
+  const long long rbMaxQp = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, &rb) ? static_cast<long long>(rb) : -1LL;
+  rcPlan_.maxQpSet = true;
+  rcPlan_.maxQp = effective;
+  rcFieldMaxQp_ = RcFieldStatus{true, qpSet, static_cast<long long>(effective), rbMaxQp};
+  rc_fields_derive();
+  std::cout << "[native-video-host] h264 max-qp reason=governor maxQp=" << effective << " accepted=" << (qpSet ? 1 : 0)
+            << " readback=" << rbMaxQp << " instance=" << codecInstanceId_ << "\n";
   // Applied only if the ceiling's own field was accepted AND its readback does not contradict it (r3
-  // S1: an S_OK with the readback stuck at the old value is not applied). A refused MaxQP is Failed
-  // even when the mean/peak/VBV re-issued alongside were fine.
+  // S1: an S_OK with the readback stuck at the old value is not applied).
   return rcFieldMaxQp_.applied() ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
 }
 
@@ -2373,6 +2390,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
           au.bytes = std::move(bytes);
         }
         report_sps_profile_once(au.bytes.data(), au.bytes.size());
+        au.sliceQp = sliceQpReader_.Read(au.bytes.data(), au.bytes.size());
         ++encodeStats->processOutputSamples;
         encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
         outUnits->push_back(std::move(au));

@@ -212,7 +212,21 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // bounded and degraded-on-refusal; a static-ceiling instance is never poked. Logged when it does
       // something or gives up.
       const auto reconcileCeiling = [&](const char* why) {
+        // motion-settle r1 M2: one minimum interval between ceiling Sets for the fast and the slow half
+        // alike. Inside it, a change waits as ceilingDirty for the pop stage (before the next encode).
+        const uint64_t setNowUs = qpc_now_us();
+        if (!encoder.fastPressure.CanSetNow(setNowUs) && encoder.codec.plan_max_qp() != governor.maxQp() &&
+            encoder.codec.runtime_max_qp_live()) {
+          encoder.ceilingDirty = true;
+          // The next instance's seed still follows the decision at once (C4), only the live Set waits.
+          encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
+          EncoderState::CeilingReconcile deferred;
+          deferred.desired = governor.maxQp();
+          deferred.codecBefore = encoder.codec.plan_max_qp();
+          return deferred;
+        }
         const EncoderState::CeilingReconcile rc = encoder.ReconcileGovernorCeiling(governor.maxQp(), H264Encoder::configured_max_qp());
+        if (rc.attempted) encoder.fastPressure.NoteSet(setNowUs);
         if (rc.attempted || rc.degraded) {
           std::cout << "[native-video-host][rate-governor] ceiling-reconcile why=" << why << " desired=" << rc.desired
                     << " codecBefore=" << rc.codecBefore << " attempted=" << (rc.attempted ? 1 : 0)

@@ -80,6 +80,17 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+SettleIdentity settle_identity_now(HostContext& hx) {
+  SettleIdentity id;
+  id.mediaEpoch = hx.sender.mediaSessionEpoch.load(std::memory_order_acquire);
+  id.inputEpoch = hx.capture.inputEpoch.load(std::memory_order_acquire);
+  id.generation = hx.capture.streamGenerationState.load(std::memory_order_acquire);
+  id.attachment = hx.capture.selectedWindowId.load(std::memory_order_acquire) ^
+                  (hx.capture.targetHwnd.load(std::memory_order_acquire) * 0x9E3779B97F4A7C15ULL) ^
+                  (hx.capture.windowModeActive.load(std::memory_order_acquire) ? 1ULL : 0ULL);
+  return id;
+}
+
 Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   if (hx.encoder.targetPending) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -160,6 +171,25 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
  
  
   queueSelectStartUs = qpc_now_us();
+  // motion-settle r1 M2: a ceiling the fast path (or a calm) moved goes to the encoder before the next
+  // encode -- through the governor's one apply path, at most one Set per FastPressure interval.
+  if (encoder.ceilingDirty && encoder.fastPressure.CanSetNow(nowUs)) {
+    encoder.ceilingDirty = false;
+    const EncoderState::CeilingReconcile rc =
+        encoder.ReconcileGovernorCeiling(encoder.rateGovernor.maxQp(), H264Encoder::configured_max_qp());
+    if (rc.attempted) {
+      encoder.fastPressure.NoteSet(nowUs);
+      if (rc.result != RcRuntimeResult::Applied && rc.result != RcRuntimeResult::Unchanged) {
+        encoder.fastPressure.NoteFailure(encoder.codec.instance_id());
+      }
+    }
+    std::cout << "[native-video-host][rate-governor] fast-reconcile desired=" << rc.desired << " codecBefore=" << rc.codecBefore
+              << " fast=" << (encoder.rateGovernor.fastActive() ? 1 : 0) << " attempted=" << (rc.attempted ? 1 : 0)
+              << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
+                                : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
+                                : rc.result == RcRuntimeResult::Unproven ? "unproven" : "failed")
+              << " degraded=" << (encoder.fastPressure.Degraded(encoder.codec.instance_id()) ? 1 : 0) << "\n";
+  }
  
  
   if (kick.Due(nowUs)) {
@@ -257,6 +287,77 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         queuePushUs = nowUs;
         ++kick.staticRefreshCount;
       }
+    }
+  }
+  // motion-settle r1 M1: the settle refinement (host_settle.hpp). Only when nothing else was served
+  // this tick; never ahead of a real capture, a key the viewer is owed, or a sender backlog.
+  if (!servedBootstrap && useH264 && clientSession.streamControlActive.load(std::memory_order_acquire) &&
+      (kick.settle.armed() || kick.settle.active())) {
+    bool queueBusy = false;
+    bool keyOwed = encoder.forceKeyNext;
+    if (transport == VideoTransport::Udp) {
+      std::lock_guard<std::mutex> lk(sender.mu);
+      queueBusy = !sender.queue.empty();
+      keyOwed = keyOwed || sender.waitingForKey;
+    }
+    bool realWaiting = false;
+    {
+      std::lock_guard<std::mutex> lk(res.frame.mu);
+      realWaiting = (res.frame.version != stats.lastVersionSent) && res.frame.payload && !res.frame.payload->empty();
+    }
+    const uint32_t submittedBefore = kick.settle.submitted();
+    const uint32_t attemptsBefore = kick.settle.attempts();
+    const SettleAction act = kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed);
+    // M2's explicit calm: the screen has been quiet for the settle delay, nothing new is waiting and the
+    // sender backlog is drained -- the fast boost (and the slow ladder) go back to the floor, so the
+    // refinement inputs below are coded under the text ceiling. Checked at every refinement the episode
+    // serves (a serve means the queue is empty and no real frame waits), not only when it starts: after
+    // a heavy burst the episode starts with the queue still full, and a start-only check left the
+    // ceiling at 38 for the whole still (M0 harness, noise: slice QP 37-38 for seconds).
+    if ((act.started || act.serve) && !queueBusy && !realWaiting && encoder.FastPressureEligible() &&
+        encoder.rateGovernor.OnCalm()) {
+      encoder.ceilingDirty = true;
+      if (encoder.fastPressure.CanSetNow(nowUs)) {
+        encoder.ceilingDirty = false;
+        const EncoderState::CeilingReconcile rc =
+            encoder.ReconcileGovernorCeiling(encoder.rateGovernor.maxQp(), H264Encoder::configured_max_qp());
+        if (rc.attempted) {
+          encoder.fastPressure.NoteSet(nowUs);
+          if (rc.result != RcRuntimeResult::Applied && rc.result != RcRuntimeResult::Unchanged) {
+            encoder.fastPressure.NoteFailure(encoder.codec.instance_id());
+          }
+        }
+        std::cout << "[native-video-host][rate-governor] calm desired=" << rc.desired << " codecBefore=" << rc.codecBefore
+                  << " attempted=" << (rc.attempted ? 1 : 0) << "\n";
+      }
+    }
+    if (act.ended != SettleEnd::None &&
+        (kick.settleLastLogUs == 0 || nowUs >= kick.settleLastLogUs + 500000)) {
+      kick.settleLastLogUs = nowUs;
+      std::cout << "[native-video-host][settle] end=" << settle_end_name(act.ended)
+                << " submitted=" << submittedBefore << " attempts=" << attemptsBefore
+                << " emittedAus=" << kick.settle.emitted_this_episode()
+                << " emittedBytes=" << kick.settle.emitted_bytes_this_episode()
+                << " sinceStartMs=" << ((nowUs > kick.settle.start_us()) ? (nowUs - kick.settle.start_us()) / 1000 : 0)
+                << " contentVersion=" << kick.settle.content_version()
+                << " episodes=" << kick.settle.episodes() << "\n";
+    }
+    if (act.serve && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+      servedBootstrap = true;
+      tc.syntheticReason = kSyntheticReasonSettle;
+      // Codex r1 s3: when P refinement falls short, a bounded 1-IDR is MEASURED against it -- never the
+      // default. REMOTE60_NATIVE_SETTLE_IDR=1 makes the first refinement input of an episode a key.
+      static const bool settleIdr = [] {
+        const char* v = std::getenv("REMOTE60_NATIVE_SETTLE_IDR");
+        return v && v[0] == '1';
+      }();
+      if (settleIdr && kick.settle.submitted() == 0) encoder.RequestKey(kHostKeyReasonSettleIdr);
+      seq = 0;
+      version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+      streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+      captureUs = nowUs;
+      callbackUs = nowUs;
+      queuePushUs = nowUs;
     }
   }
   bool queueReady = false;

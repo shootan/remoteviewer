@@ -937,6 +937,19 @@ add_executable(remote60_host_abr_test
 )
 target_include_directories(remote60_host_abr_test PRIVATE src)
 
+# motion-settle r1 M1: the bounded settle refinement policy (pure).
+add_executable(remote60_host_settle_test src/host_settle_test.cpp)
+target_include_directories(remote60_host_settle_test PRIVATE src)
+
+# motion-settle r1 M0: the slice-header QP reader against the real encoders of this machine.
+add_executable(remote60_h264_slice_qp_test src/mf_h264_codec.cpp src/h264_slice_qp_test.cpp)
+target_include_directories(remote60_h264_slice_qp_test PRIVATE src)
+target_link_libraries(remote60_h264_slice_qp_test PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+
+# motion-settle r1 M2: the fast half of the ceiling loop and the governor's fast/calm inputs (pure).
+add_executable(remote60_host_fast_pressure_test src/host_fast_pressure_test.cpp)
+target_include_directories(remote60_host_fast_pressure_test PRIVATE src)
+
 # motion-settle r1 M4: the viewer's stats window through the control scheduler to the host ABR (pure).
 add_executable(remote60_viewer_stats_window_test
   src/viewer_stats_window_test.cpp

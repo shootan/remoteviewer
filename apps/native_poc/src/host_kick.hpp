@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <algorithm>
 
+#include "host_settle.hpp"
+
 namespace remote60::native_poc {
 
 // Trailing-edge kick + periodic static refresh + selection-first-keyframe fence (Phase 1-8 state
@@ -47,6 +49,9 @@ struct KickState {
   uint64_t stampClampCount = 0;         // telemetry: real frames whose stamp was moved forward
   uint64_t stampClampMaxUs = 0;         // telemetry: largest forward move
   uint64_t stampClampLastLogUs = 0;     // 1 Hz log rate limit
+  // motion-settle r1 M1: the bounded refinement of a screen that just stopped changing (host_settle.hpp).
+  SettleRefiner settle;
+  uint64_t settleLastLogUs = 0;         // its episode lines are rate limited to 2/s
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge

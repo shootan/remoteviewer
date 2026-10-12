@@ -328,7 +328,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // Admit-always only for a frame that will actually be a forced key this tick, not every keyWanted
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
-     adm.servedBootstrap = servedBootstrap;
+     // A settle refinement is an ordinary P under the cap: no admit-always (motion-settle r1 M1).
+     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonSettle;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
@@ -350,6 +351,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     encoder.codec.set_next_input_synthetic(servedBootstrap);
     encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
     encoder.codec.set_next_input_content_version(tc.version);
+    if (servedBootstrap && tc.syntheticReason == kSyntheticReasonSettle) kick.settle.NoteSubmitted();
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {

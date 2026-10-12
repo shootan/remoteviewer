@@ -2072,7 +2072,7 @@ void scenario_long_gop_forced_recovery_resumes() {
 //
 //   remote60_viewer_udp_recovery_test --motion-settle <GNLinkStream.exe> --out <dir>
 //       [--bitrate N] [--fps N] [--episodes N] [--scenes a,b,..] [--hold-ms N] [--pre-ms N]
-//       [--label L] [--host-env NAME=VALUE]...
+//       [--label L] [--host-env NAME=VALUE]... [--host-arg ARG]...
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 // Tags: display-capture (a composed window on the interactive desktop), gpu (host encoder, viewer
 // decoder), network (loopback). Results are measurements; the run FAILs only on harness invalidity.
@@ -2258,22 +2258,41 @@ EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& a
     }
     if (r.timeToSharpMs < 0 && r.valid) { r.valid = false; r.invalidWhy = "never sharp within the hold"; }
   }
-  // onset
+  // onset. The gap is a WAIT for a new picture: from the later of the previous delivery and the paint
+  // of the first picture after the one shown -- a stretch in which the source itself did not change
+  // (the minimised phase of minrestore, the still beats of stopstart) is not a gap of the stream.
+  const auto paintOf = [&](uint32_t id) -> uint64_t {
+    const auto it = rec.paints.find(id);
+    return it == rec.paints.end() ? 0 : it->second;
+  };
+  const uint64_t windowEndUs = rec.onsetUs + 1000000;
   std::set<uint32_t> seen;
   uint64_t prevUs = rec.onsetUs;
+  uint32_t shownId = rec.onsetId - 1;  // the onset paint is the first new picture
   uint64_t maxGap = 0;
   for (const Sample& x : s) {
     if (x.id < rec.onsetId || x.id > rec.finalId || x.id == 0) continue;
     if (!seen.insert(x.id).second) continue;
     if (r.firstReactionMs < 0) r.firstReactionMs = static_cast<int64_t>(x.atUs - rec.onsetUs) / 1000;
     if (x.atUs <= rec.onsetUs + 250000) ++r.first250;
-    if (x.atUs <= rec.onsetUs + 1000000) {
+    if (x.atUs <= windowEndUs) {
       ++r.first1s;
-      maxGap = std::max<uint64_t>(maxGap, x.atUs - prevUs);
-      prevUs = x.atUs;
+      if (x.id > shownId) {
+        const uint64_t nextPaint = paintOf(shownId + 1);
+        const uint64_t from = std::max(prevUs, nextPaint);
+        if (x.atUs > from) maxGap = std::max<uint64_t>(maxGap, x.atUs - from);
+        shownId = x.id;
+        prevUs = x.atUs;
+      }
     }
   }
-  if (rec.finalUs > rec.onsetUs + 1000000) maxGap = std::max<uint64_t>(maxGap, rec.onsetUs + 1000000 - prevUs);
+  {
+    // The window's tail: a newer picture painted inside it and not yet shown when it ends.
+    const uint64_t nextPaint = paintOf(shownId + 1);
+    if (nextPaint != 0 && nextPaint < windowEndUs && shownId < rec.finalId) {
+      maxGap = std::max<uint64_t>(maxGap, windowEndUs - std::max(prevUs, nextPaint));
+    }
+  }
   r.maxGap1sMs = static_cast<int64_t>(maxGap / 1000);
   for (const auto& kv : rec.paints)
     if (kv.first >= rec.onsetId && kv.second <= rec.onsetUs + 1000000) ++r.painted1s;
@@ -2301,6 +2320,7 @@ struct Options {
   uint32_t preMs = 2500;
   std::string label = "run";
   std::vector<std::wstring> hostEnv;
+  std::wstring hostArgs;  // extra host command-line arguments (e.g. --keyint for the M3 reproduction)
 };
 
 std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
@@ -2341,7 +2361,7 @@ int Run(const Options& o) {
   const std::wstring hostLogPath = runDir + L"host.log";
   const std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
                            std::to_wstring(port) + L" --fps " + std::to_wstring(o.fps) + L" --bitrate " + std::to_wstring(o.bitrate) +
-                           L" --seconds " + std::to_wstring(seconds) + L" --input-injection-mode none" +
+                           L" --seconds " + std::to_wstring(seconds) + L" --input-injection-mode none" + o.hostArgs +
                            remote60::native_poc::e2e::e2e_capture_window_args(target.title);
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
   mutableCmd.push_back(L'\0');
@@ -2426,6 +2446,10 @@ int Run(const Options& o) {
   Sleep(3000);  // first IDR, decoder init
 
   std::vector<EpisodeResult> results;
+  FILE* deliveries = _wfopen((runDir + L"deliveries.csv").c_str(), L"w");
+  FILE* paints = _wfopen((runDir + L"paints.csv").c_str(), L"w");
+  std::fprintf(deliveries, "label,scene,index,id,atUs,seq,key,synthetic,roiPsnr,inkPsnr\n");
+  std::fprintf(paints, "label,scene,index,id,paintUs\n");
   FILE* csv = _wfopen((runDir + L"episodes.csv").c_str(), L"w");
   std::fprintf(csv, "label,scene,index,valid,why,visW,visH,prePsnr,firstFinalPsnr,worstPsnr,refPsnr,finalFirstSeenMs,timeToSharpMs,"
                     "finalVersions,firstReactionMs,first250,first1s,painted1s,maxGap1sMs,sustainedFps,onsetId,finalId,onsetUs,finalUs,refRoiPsnr,ink\n");
@@ -2479,6 +2503,17 @@ int Run(const Options& o) {
       }
       EpisodeResult r = Analyse(rec, snap, i);
       results.push_back(r);
+      // The raw material, so any figure can be recomputed offline: every decoded picture the sampler
+      // saw in this episode, and every paint.
+      for (const Sample& x : snap) {
+        if (x.atUs < rec.startUs || x.atUs > rec.endUs + 50000) continue;
+        std::fprintf(deliveries, "%s,%s,%d,%u,%llu,%u,%d,%d,%.2f,%.2f\n", o.label.c_str(), r.scene.c_str(), i, x.id,
+                     (unsigned long long)x.atUs, x.seq, x.key ? 1 : 0, x.synthetic ? 1 : 0, x.psnr, x.ink);
+      }
+      for (const auto& kv : rec.paints)
+        std::fprintf(paints, "%s,%s,%d,%u,%llu\n", o.label.c_str(), r.scene.c_str(), i, kv.first, (unsigned long long)kv.second);
+      std::fflush(deliveries);
+      std::fflush(paints);
       std::fprintf(csv, "%s,%s,%d,%d,%s,%u,%u,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%u,%lld,%u,%u,%u,%lld,%.1f,%u,%u,%llu,%llu,%.2f,%d\n",
                    o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, r.invalidWhy.c_str(), r.visW, r.visH, r.prePsnr,
                    r.firstFinalPsnr, r.worstPsnr, r.refPsnr, (long long)r.finalFirstSeenMs, (long long)r.timeToSharpMs,
@@ -2508,6 +2543,8 @@ int Run(const Options& o) {
     }
   }
   std::fclose(csv);
+  std::fclose(deliveries);
+  std::fclose(paints);
   stop = true;
   sampler.join();
   controlStop = true;
@@ -2573,6 +2610,7 @@ int run_motion_settle(int argc, char** argv) {
     else if (a == "--pre-ms" && next(&v)) o.preMs = static_cast<uint32_t>(std::stoul(v));
     else if (a == "--label" && next(&v)) o.label = v;
     else if (a == "--host-env" && next(&v)) o.hostEnv.push_back(motionsettle::W(v));
+    else if (a == "--host-arg" && next(&v)) o.hostArgs += L" " + motionsettle::W(v);
     else if (a == "--scenes" && next(&v)) {
       o.scenes.clear();
       size_t start = 0;

@@ -208,6 +208,9 @@ void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter
 // session includes that), defined in host_loop_helpers.cpp.
 void pump_cursor_forward(HostContext& hx, uint64_t nowUs);
 bool reconnect_tcp_data_session(HostContext& hx, const char* reason);
+// motion-settle r1 M1: what a settle episode is bound to right now -- media/input epoch, stream
+// generation and the capture target (host_stage_pop_frame.cpp).
+SettleIdentity settle_identity_now(HostContext& hx);
 // requestedMonitorDevice: for a monitor-select target (monitor_select_target.hpp), the screen the
 // control thread resolved it to; empty otherwise. t-970r4zgo.
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,

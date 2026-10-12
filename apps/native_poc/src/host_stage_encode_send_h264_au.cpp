@@ -357,6 +357,7 @@ hdr.sendQpcUs = sendStartUs;
 
 bool sentOk = false;
 bool enqueuedForSend = false;
+uint32_t queueDepthAtEnqueue = 0;
 if (transport == VideoTransport::Tcp) {
   enqueuedForSend = true;
   sentOk = send_all_timed(clientSession.clientSock, &hdr, sizeof(hdr), &sendPathStats.headerUs,
@@ -456,6 +457,7 @@ if (transport == VideoTransport::Tcp) {
       // and the input gate handle congestion); the decision is purely current depth vs the hard cap,
       // so accepted output enqueues once a slot frees. Cap-off keeps the legacy pre-batch behaviour.
       const bool backloggedForDecision = backlog_resync_active(capActive, senderBacklogged);
+      queueDepthAtEnqueue = static_cast<uint32_t>(sender.queue.size());  // motion-settle M2: backlog behind this AU
       switch (decide_sender_queue_action(item.keyFrame, sender.waitingForKey, backloggedForDecision,
                                          sender.queue.size(), kSenderQueueMaxFrames)) {
         case SenderQueueAction::EnqueueKey: {
@@ -557,6 +559,27 @@ if (sentOk) {
 // the provenance of the input behind it. The QP summary is always kept (one line per printed stats
 // tick); the per-AU line only with REMOTE60_NATIVE_AU_TRACE=1, bounded (host_au_trace.hpp).
 encoder.qpWindow.Note((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.encodeQp);
+encoder.qpWindow.NoteSlice((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.sliceQp);
+if (au.syntheticReason == kSyntheticReasonSettle && enqueuedForSend) kick.settle.NoteEmitted(hdr.payloadSize);
+// motion-settle r1 M2: a real P far over the sustainable per-frame payload (with a backlog behind it, or
+// twice running) raises the governor's fast ceiling; it is applied before the next encode (pop stage).
+if (enqueuedForSend && !au.synthetic && (hdr.flags & kEncodedFrameFlagKeyFrame) == 0 && encoder.FastPressureEligible()) {
+  const uint64_t perFrameBudget =
+      encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps) / 8ULL / std::max<uint32_t>(1, encoder.activeFps);
+  if (encoder.fastPressure.NoteRealP(hdr.payloadSize, perFrameBudget, queueDepthAtEnqueue > 0) &&
+      !encoder.rateGovernor.fastActive() && !encoder.fastPressure.Degraded(encoder.codec.instance_id())) {
+    const uint64_t boostUs = qpc_now_us();
+    if (encoder.fastPressure.TakeBoost(boostUs)) {
+      if (encoder.rateGovernor.OnFastPressure()) encoder.ceilingDirty = true;
+      std::cout << "[native-video-host][rate-governor] fast-pressure seq=" << hdr.seq << " bytes=" << hdr.payloadSize
+                << " budget=" << perFrameBudget << " queueDepth=" << queueDepthAtEnqueue
+                << " desired=" << encoder.rateGovernor.maxQp() << " slow=" << encoder.rateGovernor.slowQp() << "\n";
+    } else {
+      std::cout << "[native-video-host][rate-governor] fast-pressure refused (toggle bound) seq=" << hdr.seq
+                << " refused=" << encoder.fastPressure.boosts_refused() << "\n";
+    }
+  }
+}
 if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
   ++encoder.auTraceLines;
   std::cout << "[native-video-host][au] seq=" << hdr.seq
@@ -566,6 +589,7 @@ if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
             << " src=" << synthetic_reason_name(au.syntheticReason)
             << " qp=" << au.encodeQp
             << " qpHr=0x" << std::hex << static_cast<uint32_t>(au.encodeQpHr) << std::dec
+            << " sliceQp=" << au.sliceQp
             << " bytes=" << hdr.payloadSize
             << " instance=" << au.codecInstance
             << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
@@ -652,7 +676,13 @@ if ((hdr.flags & 1u) != 0) {
             << " skipsSincePrevKeyAccepted=" << skipsSincePrevKeyAccepted
             << " kick=" << (servedBootstrap ? 1 : 0)
             << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
-            << " bitrate=" << encoder.activeBitrate << "\n";
+            << " bitrate=" << encoder.activeBitrate
+            // motion-settle r1 M3: THIS AU's own provenance, so two keys in a row can be classified from
+            // the default log -- "reasons" is the host's request set and is cleared by the first key AU,
+            // so a second key reading encoder_gop is not by itself proof of an unrequested self-IDR.
+            << " auForced=" << (au.inputWasForcedKey ? 1 : 0) << " rawIdr=" << (au.rawIdr ? 1 : 0)
+            << " ordinal=" << au.acceptedInputOrdinal << " src=" << synthetic_reason_name(au.syntheticReason)
+            << " instance=" << au.codecInstance << " sliceQp=" << au.sliceQp << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
   encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
   // stutter-keyframe r4 G: feed the clamp detector from the AU's PER-AU provenance -- the MFT-accepted

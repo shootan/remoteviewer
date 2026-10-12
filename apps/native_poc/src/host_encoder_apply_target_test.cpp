@@ -351,6 +351,50 @@ int main() {
     check("[7] instances over the whole sequence: 4 (A, B, C, E) -- not 5, not 3", rig.encoder.codec.instance_id() == 4);
   }
 
+  // ------------------------------------------------------------------ [8] motion-settle r1 M2: the ceiling alone
+  // A ceiling step (slow or fast) writes AVEncVideoMaxQP and nothing else: before M2, set_max_qp went
+  // through apply_rate_control and re-issued mode / mean / peak / VBV with every step.
+  {
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[8] AMD legacy first target", rig.apply(30, 6'000'000));
+    check("[8] the fast path is eligible on the AMD legacy instance", rig.encoder.FastPressureEligible());
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    const uint32_t configured = H264Encoder::configured_max_qp();
+    rig.fake->clear_calls();
+    check("[8] fast pressure raises the one desired ceiling to 38", gov.OnFastPressure() && gov.maxQp() == 38, s(gov.maxQp()));
+    const auto up = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[8] ...applied with ONE Set: maxQp only -- no mode, mean, peak or VBV re-issued",
+          up.attempted && up.result == RcRuntimeResult::Applied && rig.fake->count_set("maxQp") == 1 &&
+              rig.fake->count_set("mode") == 0 && rig.fake->count_set("mean") == 0 && rig.fake->count_set("peak") == 0 &&
+              rig.fake->count_set("vbv") == 0 && rig.encoder.codec.plan_max_qp() == 38,
+          "calls=" + s(rig.fake->calls.size()) + " maxQp=" + s(rig.fake->count_set("maxQp")) + " mean=" + s(rig.fake->count_set("mean")));
+    check("[8] ...and the other fields keep their confirmed state", rig.encoder.codec.rc_plan_effective());
+    rig.fake->clear_calls();
+    const auto same = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[8] the same desired again: 0 Set", !same.attempted && rig.fake->count_set("maxQp") == 0);
+    check("[8] calm brings the one ceiling back to 32", gov.OnCalm() && gov.maxQp() == 32);
+    const auto down = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), configured);
+    check("[8] ...again a maxQp-only Set", down.attempted && rig.fake->count_set("maxQp") == 1 && rig.fake->count_set("mean") == 0 &&
+                                               rig.encoder.codec.plan_max_qp() == 32);
+  }
+  {
+    Rig rig(L"VEN_8086", L"Intel Quick Sync Video H.264 Encoder MFT");
+    check("[8u] unknown legacy first target", rig.apply(30, 6'000'000));
+    check("[8u] an unknown legacy MFT keeps the slow loop only (fast path not eligible)", !rig.encoder.FastPressureEligible());
+  }
+  {
+    Rig rig(L"VEN_10DE", L"NVIDIA H.264 Encoder MFT");
+    check("[8n] nvidia first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    gov.Reconfigure(governor_config_for(RcProfile::NvidiaPreTypes, H264Encoder::configured_max_qp(), 51));
+    rig.fake->clear_calls();
+    const bool moved = gov.OnFastPressure();
+    const auto rc = rig.encoder.ReconcileGovernorCeiling(gov.maxQp(), H264Encoder::configured_max_qp());
+    check("[8n] NVIDIA: not eligible, no fast stage (base == cap), 0 runtime Set, static 51 stays",
+          !rig.encoder.FastPressureEligible() && !moved && !rc.attempted && rig.fake->count_set("maxQp") == 0 &&
+              rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 51);
+  }
+
   MFShutdown();
   CoUninitialize();
   std::printf("\nhost_encoder_apply_target_test: %s (%d checks, %d failed)\n", g_failed == 0 ? "PASS" : "FAILED", g_checks, g_failed);

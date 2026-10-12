@@ -39,7 +39,13 @@ struct AuQpAccount {
   AuQpKind synthDelta;   // P produced from a synthetic input (kick / static refresh / settle)
   uint64_t unknown = 0;  // AUs whose sample carried no QP attribute
   uint64_t aus = 0;
+  // The slice-header QP (h264_slice_qp.hpp), same split; always read, whatever the sample says.
+  AuQpKind sliceKey, sliceDelta, sliceSynthDelta;
 
+  void NoteSlice(bool keyFrame, bool synthetic, int32_t sliceQp) {
+    if (sliceQp < 0) return;
+    (keyFrame ? sliceKey : synthetic ? sliceSynthDelta : sliceDelta).Note(sliceQp);
+  }
   void Note(bool keyFrame, bool synthetic, int32_t qp) {
     ++aus;
     if (qp < 0) {
@@ -71,6 +77,9 @@ struct AuQpAccount {
     AppendKind(os, "qpP", delta);
     AppendKind(os, "qpSynthP", synthDelta);
     os << " qpUnknown=" << unknown;
+    AppendKind(os, "sliceQpKey", sliceKey);
+    AppendKind(os, "sliceQpP", sliceDelta);
+    AppendKind(os, "sliceQpSynthP", sliceSynthDelta);
   }
 };
 

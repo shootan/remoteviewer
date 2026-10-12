@@ -339,6 +339,20 @@ int startup_start_capture(HostContext& hx) {
       static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
       1000ULL;
   capture.frameHeartbeatEnabled.store(useH264 && kick.staticRefreshIntervalUs > 0);
+  // motion-settle r1 M1: a few refinement inputs of the cached latest capture once the screen has been
+  // still for a moment (host_settle.hpp). REMOTE60_NATIVE_SETTLE=0 turns it off (the measurement's
+  // negative control); the rest tune the bounds for field diagnosis.
+  {
+    SettleConfig sc;
+    sc.enabled = useH264 && env_u32_clamped("REMOTE60_NATIVE_SETTLE", 1, 0, 1) != 0;
+    sc.quietUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_QUIET_MS", 170, 50, 1000)) * 1000ULL;
+    sc.inputs = env_u32_clamped("REMOTE60_NATIVE_SETTLE_INPUTS", 8, 1, SettleRefiner::kMaxInputs);
+    sc.minSpacingUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_SPACING_MS", 33, 0, 500)) * 1000ULL;
+    kick.settle.Configure(sc);
+    std::cout << "[native-video-host] settle enabled=" << (sc.enabled ? 1 : 0) << " quietMs=" << sc.quietUs / 1000
+              << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
+              << " deadlineMs=" << sc.deadlineUs / 1000 << "\n";
+  }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.

@@ -396,6 +396,11 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
       // motion-settle r1 M0: the QP the encoder reported for this interval's AUs (Unknown apart).
       std::cout << "[native-video-host][au-qp]";
       encoder.qpWindow.Append(std::cout);
+      const SettleRefiner& settle = hx.kick.settle;
+      std::cout << " settleEpisodes=" << settle.episodes() << " settleSubmitted=" << settle.submitted_total()
+                << " settleEmitted=" << settle.emitted_total() << " settleBytes=" << settle.emitted_bytes_total()
+                << " settleExpired=" << settle.ended_total(SettleEnd::Expired)
+                << " settleCancelled=" << settle.ended_total(SettleEnd::Cancelled);
       std::cout << " instance=" << encoder.codec.instance_id() << "\n";
       encoder.qpWindow.Reset();
     }

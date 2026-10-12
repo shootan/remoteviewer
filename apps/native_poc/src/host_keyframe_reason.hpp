@@ -41,6 +41,7 @@ enum HostKeyReason : uint32_t {
   kHostKeyReasonProvenance = 1u << 20,      // provenance resync
   kHostKeyReasonFirstFrame = 1u << 21,      // encodedSeq == 0
   kHostKeyReasonScheduled = 1u << 22,       // the keyint schedule (periodic)
+  kHostKeyReasonSettleIdr = 1u << 23,       // motion-settle r1: the bounded 1-IDR comparison (env, measurement only)
 };
 
 /** "peer|encoder_target|abr" -- the set bits by name, lowest first; "encoder_gop" when empty. */
@@ -50,7 +51,7 @@ inline std::string host_key_reason_names(uint32_t reasons) {
       "encoder_target", "abr",         "m9",             "tune",           "ui_quality_mode",
       "refit",        "viewer",        "sender_barrier", "sender_backlog", "capture_restart",
       "stream_active", "encode_loss",  "encoder_reset",  "epoch_gate",     "barrier_kick",
-      "provenance",   "first_frame",   "scheduled",
+      "provenance",   "first_frame",   "scheduled",      "settle_idr",
   };
   std::string out;
   for (uint32_t bit = 0; bit < sizeof(kNames) / sizeof(kNames[0]); ++bit) {

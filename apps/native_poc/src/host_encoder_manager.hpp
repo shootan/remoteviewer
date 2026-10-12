@@ -25,6 +25,7 @@
 #include "encode_resolution_ladder.hpp"
 #include "host_keyframe_reason.hpp"
 #include "host_au_trace.hpp"
+#include "host_fast_pressure.hpp"
 
 namespace remote60::native_poc {
 
@@ -59,6 +60,25 @@ struct EncoderState {
   // quality r5: the closed loop on the quantiser ceiling (host_rate_governor.hpp). Off when the
   // configured ceiling is 0 or REMOTE60_NATIVE_RATE_GOVERNOR=0.
   RateGovernor rateGovernor{RateGovernorConfig{H264Encoder::configured_max_qp()}};
+  // motion-settle r1 M2: the fast half of the ceiling loop (host_fast_pressure.hpp). It only raises the
+  // governor's fast boost; the governor keeps the one desired ceiling and ReconcileGovernorCeiling the
+  // one apply path. ceilingDirty = the desired ceiling moved outside the 1 s tick and waits for the
+  // next Set slot (FastPressure::CanSetNow) before the next encode.
+  FastPressure fastPressure;
+  bool ceilingDirty = false;
+  // Whether the fast path may act on this instance: the governor is on, the instance is the AMD legacy
+  // profile with a live ceiling. An unknown legacy MFT keeps the slow loop only; a static-ceiling
+  // profile (NVIDIA) never gets a runtime Set. REMOTE60_NATIVE_FAST_PRESSURE=0 turns it off.
+  bool FastPressureEligible() const {
+    static const bool on = [] {
+      const char* g = std::getenv("REMOTE60_NATIVE_RATE_GOVERNOR");
+      const char* f = std::getenv("REMOTE60_NATIVE_FAST_PRESSURE");
+      return !(g && g[0] == '0') && !(f && f[0] == '0') && H264Encoder::configured_max_qp() != 0;
+    }();
+    if (!on || !codec.started() || codec.rc_profile() != RcProfile::Legacy || !codec.runtime_max_qp_live()) return false;
+    const MftIdentity& id = codec.identity();
+    return id.vendorId == "VEN_1002" || id.friendlyName.find("AMD") != std::string::npos;
+  }
   uint64_t rateGovernorLastTxBytes = 0;
   uint32_t rateGovernorBitrate = 0;
   uint32_t rateGovernorUserFps = 0;  // r6: the user's frame rate the loop was started against
