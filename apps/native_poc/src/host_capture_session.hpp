@@ -27,7 +27,7 @@
 
 #include "capture_backend_dxgi.hpp"
 #include "capture_cadence_gate.hpp"
-#include "capture_callback_gate.hpp"
+#include "frame_signal_collector.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_frame_state.hpp"
@@ -196,7 +196,9 @@ struct CaptureState {
   int64_t timelineOriginUs = -1;
   // Backend session flags, restart accounting and fallback reasons.
   std::atomic<bool> sessionReady{false};
-  std::shared_ptr<CaptureCallbackGate> callbackGate;
+  // r12: the WGC FrameArrived delegate only signals this; its worker drains the pool and publishes.
+  // Owned per attachment: created in AttachFrameArrived, stopped (bounded) in DetachCaptureSession.
+  std::shared_ptr<FrameSignalCollector> frameCollector;
   std::atomic<bool> frameHeartbeatEnabled{false};
   std::atomic<bool> dxgiFallbackRequested{false};
   std::atomic<bool> gdiFallbackRequested{false};

@@ -277,24 +277,25 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
 
 void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clientSession, std::atomic<bool>& stop, winrt::event_token& token) {
   CaptureState& capture = *this;
-  auto& frame = res.frame;
   auto& pool = res.pool;
-  auto gate = std::make_shared<CaptureCallbackGate>();
-  capture.callbackGate = gate;
-  token = pool.FrameArrived([&, gate](Direct3D11CaptureFramePool const& framePool,
-                                winrt::Windows::Foundation::IInspectable const&) {
-    CaptureCallbackLease lease(gate.get());
-    if (!lease) return;
+  // r12: the attachment this worker belongs to, stamped ONCE here. A frame the worker gets to late is
+  // dropped when the cookie has moved; it is never re-stamped under a newer target/geometry/generation.
+  const uint64_t myAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
+  // The collector's worker owns everything the FrameArrived handler used to do: TryGetNextFrame,
+  // the ContentSize gate, the timestamp alignment, PublishCapturedTexture (cadenceMu, resourceMu,
+  // the readback's slotMu_/contextMu_). It may block on those mutexes because it holds no framework
+  // lock -- unlike the WGC thread, which the fourth Home run's dumps showed owning the D3D11 device's
+  // critical section while it raised the event. `pool`, `res`, `capture`, `clientSession`, `stop` are
+  // references: DetachCaptureSession stops this worker (bounded) before any of them changes.
+  auto collector = std::make_shared<FrameSignalCollector>([&, myAttachmentCookie] {
     if (stop.load()) return;
-    // Snapshot the capture attachment cookie on entry, before reading any capture geometry or
-    // generation. If a main-thread recreate bumps it while this callback runs, the pre-publish
-    // recheck below drops the frame instead of stamping it with the new target/generation.
-    const uint64_t myAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
+    if (capture.attachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
     try {
-      auto latest = framePool.TryGetNextFrame();
+      auto latest = pool.TryGetNextFrame();
       if (!latest) return;
-      // Drain queued frames and keep only the newest one to avoid stale-frame backlog.
-      while (auto newer = framePool.TryGetNextFrame()) {
+      // Drain queued frames and keep only the newest one to avoid stale-frame backlog. The older
+      // frames go back to the pool as their objects are released here.
+      while (auto newer = pool.TryGetNextFrame()) {
         latest = newer;
       }
       if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
@@ -304,7 +305,7 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
       // with the window. Copying the whole surface would fold the stale size-delta band (undefined
       // pixels beyond ContentSize) into the encoded frame -- that reads as "an old frame mixed into
       // the current one". Microsoft's own sample gates on ContentSize and recreates the pool when
-      // it changes. Here the callback NEVER recreates capture resources: it records the pending
+      // it changes. Here the worker NEVER recreates capture resources: it records the pending
       // content size + a flag and drops the frame, and the main thread settles then recreates.
       const auto contentSize = latest.ContentSize();
       const uint32_t contentW = contentSize.Width > 0 ? static_cast<uint32_t>(contentSize.Width) : 0;
@@ -363,14 +364,28 @@ void CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
           }
         }
       }
-      // A recreate may have started while this callback was running. If the attachment cookie
-      // moved, this frame belongs to the previous attachment -- drop it rather than publish it
-      // under the new target/generation.
+      // A recreate may have started while this drain was running. If the attachment cookie moved,
+      // this frame belongs to the previous attachment -- drop it rather than publish it under the
+      // new target/generation. (The frame object is still ours until this lambda returns; the
+      // texture is copied inside Submit before that.)
       if (capture.attachmentCookie.load(std::memory_order_acquire) != myAttachmentCookie) return;
       capture.PublishCapturedTexture(res, src.Get(), callbackUs, sourceCaptureUs, captureAgeAtCallbackUs,
                                captureClockSkewUs, true);
     } catch (...) {
     }
+  });
+  capture.frameCollector = collector;
+  if (!collector->ok()) {
+    std::cerr << "[native-video-host] wgc frame collector: event create failed; frames will not be collected\n";
+  }
+  std::cout << "[native-video-host] wgc-callback mode=signal-only cookie=" << myAttachmentCookie << "\n";
+  // The delegate holds the collector by value, so a late invocation after detach finds a live,
+  // closed object and returns. It takes no std::mutex and touches no capture state: the thread it
+  // runs on may own the D3D11 device lock (fourth Home run), and anything it waited for that a
+  // D3D-calling thread holds would be the lock-order cycle r12 removes.
+  token = pool.FrameArrived([collector](Direct3D11CaptureFramePool const&,
+                                        winrt::Windows::Foundation::IInspectable const&) {
+    collector->Signal();
   });
 }
 
@@ -380,8 +395,9 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   auto& session = res.session;
   auto& dxgiCaptureSession = res.dxgiCaptureSession;
   auto& gdiCaptureProcess = res.gdiCaptureProcess;
-  auto gate = capture.callbackGate;
-  if (gate) gate->Close();
+  auto collector = capture.frameCollector;
+  // r12: new FrameArrived signals are ignored from here; the worker finishes the drain it is in.
+  if (collector) collector->Close();
   // Invalidate any capture callback or readback completion that began under the current
   // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
   // instead of being published under the post-recreate target/geometry/generation.
@@ -405,6 +421,16 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   } catch (...) {
   }
   token = winrt::event_token{};
+  // r12: stop the collector's worker BEFORE the session and pool close and before anything it
+  // references changes. This thread holds none of the worker's mutexes here (resourceMu, cadenceMu,
+  // slotMu_, contextMu_) and not the device lock, so the wait cannot deadlock against it; it is
+  // bounded like the old callback drain, and a worker that has not returned in 10 s is stuck inside
+  // Submit/publish under a frozen device -- destroying the pool under it would be worse, so the same
+  // exit 44 diagnostic stops the host.
+  if (collector && !collector->StopWithin(10000)) {
+    const char message[] = "[capture] WGC frame collector did not stop; stopping before resource destruction\n";
+    terminate_with_diagnostic(44, message, sizeof(message) - 1);
+  }
   try {
     if (session) session.Close();
   } catch (...) {
@@ -414,11 +440,11 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   } catch (...) {
   }
   const bool hadPool = static_cast<bool>(pool);
-  if (gate && !gate->Drain(std::chrono::milliseconds(10000))) {
-    const char message[] = "[capture] WGC callback did not drain; stopping before resource destruction\n";
-    terminate_with_diagnostic(44, message, sizeof(message) - 1);
+  if (collector) {
+    std::cout << "[native-video-host] wgc-collector stopped signals=" << collector->Signals()
+              << " drains=" << collector->Drains() << " lateIgnored=" << collector->IgnoredAfterClose() << "\n";
   }
-  capture.callbackGate.reset();
+  capture.frameCollector.reset();
   session = nullptr;
   pool = nullptr;
   if (hadPool) std::cout << d3d_multithread_log_line("wgc-closed", res.d3d.Get(), res.ctx.Get());

@@ -410,6 +410,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " oldestSubmittingUs=" << res.captureReadback.OldestSubmittingAgeUs()
             << " oldestGpuPendingNowUs=" << res.captureReadback.OldestGpuPendingAgeUs()
             << " gpuPendingCount=" << res.captureReadback.GpuPendingCount()
+            << " rbDiagAgeUs=" << res.captureReadback.DiagAgeUs()  // r12: snapshot freshness; large + pending>0 = frozen ring
             << " gpuPendingCountPeak=" << watchdog.gpuPendingCountPeak
             << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
             << " readbackDrainRestarts=" << watchdog.drainRestartCount
