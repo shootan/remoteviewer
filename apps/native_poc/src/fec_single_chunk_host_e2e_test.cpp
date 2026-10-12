@@ -143,6 +143,15 @@ struct HostAccount {
   // max committed A(t-2s,t] over the run (max_window_bytes); cap2r is 2r at the logged rate. The TX
   // burst contract is burstWin2s <= cap2r (+ one datagram), checked independent of the RX arrival trace.
   uint64_t maxBurstWin2s = 0, cap2r = 0;
+  // r11b (SW contrast row): the encoder backend the host actually instantiated, from its own
+  // "H264 encoder backend=<resolved> backendRequested=... backendResolved=... hw=0|1" line (the rc-plan line
+  // only exists for the NVIDIA pre-types plan), and the 30-frame encode-call
+  // averages it logs on the surface path ("nv12 surface encode probe ok avgUs=") -- the only encode-time
+  // figures the product prints; a per-frame p95 would need a product log line (proposal, not done here).
+  std::string backend;
+  std::string backendRequested;  // what the selector was asked for (default(mft_auto) / mft_sw / ...)
+  int backendHw = -1;            // the host's own hw= flag on that line; -1 = line not seen
+  std::vector<uint64_t> encodeProbeAvgUs;
 };
 
 HostAccount read_host_log(const std::wstring& path) {
@@ -187,6 +196,16 @@ HostAccount read_host_log(const std::wstring& path) {
       a.budgetActions.push_back(value_of(line, "action"));
     }
     if (line.find(" h264 rc-identity instance=") != std::string::npos) ++a.rcInstances;
+    if (line.find(" H264 encoder backend=") != std::string::npos) {
+      a.backend = value_of(line, "backendResolved");
+      if (a.backend.empty()) a.backend = value_of(line, "backend");
+      a.backendRequested = value_of(line, "backendRequested");
+      a.backendHw = static_cast<int>(num_of(line, "hw"));
+    } else if (a.backend.empty() && line.find(" h264 rc-plan stage=") != std::string::npos && line.find(" backend=") != std::string::npos) {
+      a.backend = value_of(line, "backend");
+    }
+    if (line.find(" nv12 surface encode probe ok avgUs=") != std::string::npos || line.find(" nv12 surface encode too slow avgUs=") != std::string::npos)
+      a.encodeProbeAvgUs.push_back(num_of(line, "avgUs"));
     if (line.find(" h264 rc-plan stage=pre-types") != std::string::npos) ++a.rcPlanPreTypes;
     if (line.find(" h264 rc-plan stage=post-types") != std::string::npos) {
       ++a.rcPlanPostStart;
@@ -240,6 +259,9 @@ struct RunResult {
   bool hostExitedBeforeCleanup = false;  // r8: dead when the live window ended (its own exit, e.g. watchdog 43), not our TerminateProcess
   uint64_t fixturePaints = 0;            // r8: WM_PAINTs the fixture handled during the run
   double fixtureLastPaintAgeMs = 0;      // r8: age of the last fixture paint at the live window's end
+  // r11b: the host process's CPU seconds (kernel+user, GetProcessTimes at reap) over its wall seconds
+  // (creation -> exit) -- cores = cpu/wall. Measured by the harness, not reported by the host.
+  double hostCpuSec = 0, hostWallSec = 0;
   bool hello = false;
   bool nackNegotiated = false;
   HostAccount host;
@@ -469,6 +491,8 @@ uint64_t forced_hang_dump_after_us() {
 //   --host-log nul|run|dir:<path>   where the host's stdout goes (NUL device / the run dir [default] / a dir)
 //   --no-log-poll                   do not read host.log while the host runs (the monitor-fallback scan)
 //   --no-dump                       no hang dumps at all
+//   --expect-backend <a>[|<b>]      r11b: every candidate row's host must have logged an encoder backend containing
+//                                   one of the needles (the software-MFT contrast row: mft_enum_sw|clsid_cmsh264enc)
 //   --low-fps-dump                  re-enable the 3 s low-fps trigger (OFF by default since r11: a host
 //                                   that still delivers is not dumped; silence >= 5 s is the trigger)
 enum class HostLogDest { RunDir, Nul, Dir };
@@ -491,6 +515,22 @@ int gDiagnosticCollected = 0;
 // which has none of the candidate's rc/E lines): the row is printed, the host-exit/host-log lines are the
 // result, and the only check is that the row is a valid measurement (alive, frames, no stall, no dump).
 bool gObserveMode = false;
+// r11b: --expect-backend <needle>[|<needle>...] -- every candidate row's host must have logged a backend
+// containing one of the needles (the SW contrast row: "mft_enum_sw|clsid_cmsh264enc"); a row whose host
+// silently used the hardware encoder FAILS instead of being read as a software measurement.
+std::string gExpectBackend;
+bool backend_expected(const std::string& backend) {
+  if (gExpectBackend.empty()) return true;
+  size_t pos = 0;
+  while (pos <= gExpectBackend.size()) {
+    const size_t bar = gExpectBackend.find('|', pos);
+    const std::string needle = gExpectBackend.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
+    if (!needle.empty() && backend.find(needle) != std::string::npos) return true;
+    if (bar == std::string::npos) break;
+    pos = bar + 1;
+  }
+  return false;
+}
 
 // r7: the harness asks WGC itself, once per window mode, on a window built exactly as the run would
 // build it. The HRESULT is the OS's own answer (the host's log discards it). A simulated refusal
@@ -1121,6 +1161,15 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     }
     TerminateProcess(hostPi.hProcess, 0);
     WaitForSingleObject(hostPi.hProcess, 5000);
+    {
+      FILETIME created{}, exited{}, kernel{}, user{};
+      if (GetProcessTimes(hostPi.hProcess, &created, &exited, &kernel, &user)) {
+        auto ft = [](const FILETIME& f) { return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+        r.hostCpuSec = static_cast<double>(ft(kernel) + ft(user)) / 1e7;
+        const uint64_t c = ft(created), e = ft(exited);
+        r.hostWallSec = (e > c) ? static_cast<double>(e - c) / 1e7 : 0.0;
+      }
+    }
     CloseHandle(hostPi.hProcess);
   }
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
@@ -1646,6 +1695,13 @@ struct RcRow {
   uint64_t fixturePaints = 0;
   bool valid = true;               // r8: false = not a throughput sample (dead host, no frame, stalled capture, dumped)
   bool dumped = false;             // r9: a hang dump was taken during this run
+  std::string backend;             // r11b: the host's resolved encoder backend ("H264 encoder backend=" line); "-" when never logged
+  std::string backendRequested;
+  int backendHw = -1;
+  double cpuCores = 0;             // r11b: host CPU seconds / host wall seconds
+  double hostCpuSec = 0, hostWallSec = 0;
+  double encProbeAvgMsMean = 0, encProbeAvgMsMax = 0;  // r11b: the host's 30-frame encode-call averages (surface path only)
+  uint32_t encProbeN = 0;
 };
 
 RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wireBps, int seconds, const RunResult& r) {
@@ -1720,6 +1776,19 @@ RcRow rc_row_of(const char* host, const RcCell& cell, uint32_t fps, uint32_t wir
   row.dumped = !r.hangDump.empty();
   row.valid = !row.hostDied && r.delivered >= 2 && row.stallMaxMs <= 2000 && !row.dumped;
   row.planState = r.host.rcPlanStates.empty() ? "-" : r.host.rcPlanStates.back();
+  row.backend = r.host.backend.empty() ? "-" : r.host.backend;
+  row.backendRequested = r.host.backendRequested.empty() ? "-" : r.host.backendRequested;
+  row.backendHw = r.host.backendHw;
+  row.hostCpuSec = r.hostCpuSec;
+  row.hostWallSec = r.hostWallSec;
+  row.cpuCores = r.hostWallSec > 0 ? r.hostCpuSec / r.hostWallSec : 0.0;
+  if (!r.host.encodeProbeAvgUs.empty()) {
+    uint64_t sum = 0, mx = 0;
+    for (uint64_t u : r.host.encodeProbeAvgUs) { sum += u; mx = std::max(mx, u); }
+    row.encProbeN = static_cast<uint32_t>(r.host.encodeProbeAvgUs.size());
+    row.encProbeAvgMsMean = static_cast<double>(sum) / r.host.encodeProbeAvgUs.size() / 1000.0;
+    row.encProbeAvgMsMax = mx / 1000.0;
+  }
   return row;
 }
 
@@ -1728,7 +1797,7 @@ void print_rc_row(const RcRow& w) {
               "effWire=%llu profile=%s plan=%s | deliveredFps=%.1f decodeFps=%.1f gap250=%u decodeGapMax=%.0fms "
               "decodeLatP95=%.0fms decodeLatMax=%.0fms | ev p50/p95/max=%.0f/%.0f/%.0fms m=%u/%u | psnr full=%.2f(min %.2f) "
               "text=%.2f(min %.2f) n=%u at %ux%u | idr/s=%.2f keyMax=%.0fKB keyMean=%.0fKB hostSkips=%llu rcWrites=%u(reconf=%u gov=%u) instances=%u "
-              "decErr=%u keyReq=%u nacks=%u\n",
+              "decErr=%u keyReq=%u nacks=%u | backend=%s requested=%s hw=%d cpuCores=%.2f (cpu %.1fs / wall %.1fs) encProbeAvgMs mean=%.1f max=%.1f n=%u\n",
               w.host.c_str(), w.scene.c_str(), w.fps, w.wireBps, w.windowMode.c_str(), w.valid ? 1 : 0,
               w.hostDied ? std::to_string(w.hostExit).c_str() : "alive", (unsigned long long)w.stallMaxMs, (unsigned long long)w.fixturePaints,
               w.dumped ? 1 : 0, w.win1sPct, w.win250Pct, w.win267Pct, w.sentPayloadKbps,
@@ -1737,7 +1806,8 @@ void print_rc_row(const RcRow& w) {
               w.decodeLatP95Ms, w.decodeLatMaxMs, w.evP50, w.evP95, w.evMax, w.evMatched, w.evExpected, w.psnrFullMean,
               w.psnrFullMin, w.psnrTextMean, w.psnrTextMin, w.psnrN, w.decodedW, w.decodedH, w.idrPerSec, w.keyMaxKb,
               w.keyMeanKb, (unsigned long long)w.hostSkips, w.rcReconfigureWrites + w.rcGovernorWrites, w.rcReconfigureWrites, w.rcGovernorWrites,
-              w.rcInstances, w.decErr, w.keyReq, w.nacks);
+              w.rcInstances, w.decErr, w.keyReq, w.nacks, w.backend.c_str(), w.backendRequested.c_str(), w.backendHw, w.cpuCores, w.hostCpuSec, w.hostWallSec, w.encProbeAvgMsMean,
+              w.encProbeAvgMsMax, w.encProbeN);
 }
 
 // r8: --rc-fps / --rc-rate pick ONE cell; --rc-order cand-first runs the candidate before the baseline so
@@ -1797,6 +1867,12 @@ int run_rc_matrix(const std::wstring& candidateHost, const std::wstring& baselin
         if (!ok) {
           std::printf("CAPTURE-UNAVAILABLE: the matrix stops here (first run without a capture item, even with the visible fallback)\n");
           return 3;
+        }
+        if (!gExpectBackend.empty()) {
+          const std::string tagB = std::string("rc ") + cell.label + " " + std::to_string(fps) + "fps " + std::to_string(rate / 1000) + "k";
+          check(backend_expected(candRow.backend), tagB + ": the candidate host ran the expected encoder backend (" + gExpectBackend + ")",
+                "backend=" + candRow.backend + " requested=" + candRow.backendRequested + " hw=" + std::to_string(candRow.backendHw) +
+                    " cpuCores=" + std::to_string(candRow.cpuCores));
         }
         if (gObserveMode) {
           const std::string tagO = std::string("rc ") + cell.label + " " + std::to_string(fps) + "fps " + std::to_string(rate / 1000) + "k";
@@ -2297,6 +2373,8 @@ int main(int argc, char** argv) {
       gNoLogPoll = true;  // r11
     } else if (a == "--rc-observe") {
       gObserveMode = true;  // r11: liveness only (H0)
+    } else if (a == "--expect-backend" && i + 1 < argc) {
+      gExpectBackend = argv[++i];  // r11b: the SW contrast row proves it ran the software encoder
     } else if (a == "--no-dump") {
       gNoDump = true;  // r11
     } else if (a == "--low-fps-dump") {

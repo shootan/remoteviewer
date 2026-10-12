@@ -17,7 +17,8 @@ rem   run.cmd quick   transitions only: the CONTROL smoke (R/E/plan/coalescing p
 rem                   It is not a quality comparison and must not be reported as one.
 rem   run.cmd diag    r8: the SHORT DIAGNOSTIC SET (~4 min) for the Home PC main-loop hangs and the
 rem                   motion regression -- five phases, each separating two hypotheses (see below).
-rem   run.cmd home5   r11: H0 (the log-write discrimination set, baseline only, ~2 min) FIRST, then the
+rem   run.cmd home5   r11: H0 (the log-write discrimination set, baseline only, ~2 min) FIRST, then SW1/SW2
+rem                   (r11b: the software-MFT contrast rows, candidate only, ~30 s), then the
 rem                   home4 phases. H0 answers "does the host stop when its stdout goes to a local file,
 rem                   to the network share, to NUL, with or without the harness reading the file?"
 rem   run.cmd home4   r9: the ONE Home PC run after the r9 fixes (~6 min): the ORIGINAL candidate's
@@ -359,7 +360,28 @@ set "PHASE_RC=%errorlevel%"
 >"%OUT%\h0e_nodump.exit" echo %PHASE_RC%
 echo      exit %PHASE_RC%
 rem H0 is discrimination material: its exits are recorded, not summed into the set's result.
-echo [home5] H0 done; continuing with the home4 phases
+echo [home5] H0 done
+rem SW: the Microsoft software H.264 MFT as the contrast row (r11b, Codex: "OSLink does it on the CPU"). The same
+rem 6M 1080p 60 fps motion and textscroll cells as the HW rows, r9 candidate only, with the PRODUCT's own backend
+rem selector REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw (mf_h264_codec.cpp parse_mft_backend_mode) set for these two
+rem runs only and cleared after. The harness refuses a row whose host did not log a software backend
+rem (--expect-backend), and prints the host's CPU cores (process CPU / wall) and its encode-probe averages on the
+rem RCMATRIX line. On the bake-off PC (AMD) mft_sw held 1.0~1.1x the target at 0.5~1.8 cores; this is the NVIDIA
+rem PC's number. Contrast rows: recorded, not summed into the set's result.
+set REMOTE60_NATIVE_ENCODER_BACKEND=mft_sw
+echo [SW1] software MFT: motion 60fps 6M 1080p, r9 candidate, 12 s (contrast row)
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only motion --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\sw1_mftsw_motion.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\sw1_mftsw_motion.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC% (contrast row)
+echo [SW2] software MFT: textscroll 60fps 6M 1080p, r9 candidate, 12 s (contrast row)
+"%E2E%" --host "%CAND%" --rc-matrix --rc-only textscroll --rc-fps 60 --rc-rate 6000000 --window 1920x1080 --seconds 12 --keep-dir --expect-backend "mft_enum_sw|clsid_cmsh264enc" > "%OUT%\sw2_mftsw_textscroll.log" 2>&1
+set "PHASE_RC=%errorlevel%"
+>"%OUT%\sw2_mftsw_textscroll.exit" echo %PHASE_RC%
+echo      exit %PHASE_RC% (contrast row)
+set REMOTE60_NATIVE_ENCODER_BACKEND=
+findstr /c:"RCMATRIX" "%OUT%\sw1_mftsw_motion.log" "%OUT%\sw2_mftsw_textscroll.log" > "%OUT%\sw_rcmatrix.txt" 2>nul
+echo [home5] SW rows done; continuing with the home4 phases
 
 :home4
 echo [home4] eight short phases; a taskbar test window may appear (window-mode=visible-plain): leave it alone
