@@ -251,6 +251,15 @@ rem PowerShell, whose redirected output follows the console code page set above 
 >>"%ID%" 2>nul powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | Format-List | Out-String -Width 200"
 >>"%ID%" echo == sessions ==
 >>"%ID%" 2>nul qwinsta
+rem r12b: the user saw an "gpu_check" process warned about at shutdown on the Home PC; nothing of that name is
+rem ours. Record what is running (name, PID, path -- no command lines, no values) and which processes use
+rem the GPU engines right now (top 5 by utilization; the counter set may be absent -> the section says so).
+>>"%ID%" echo == processes (name, pid, path; no command lines) ==
+>>"%ID%" 2>nul powershell -NoProfile -NonInteractive -Command "Get-Process | Sort-Object ProcessName | ForEach-Object { '{0,-40} {1,7} {2}' -f $_.ProcessName, $_.Id, $_.Path } | Out-String -Width 300"
+>>"%ID%" echo == gpu engine usage, top 5 processes (Get-Counter 'GPU Engine', 1 s sample) ==
+>>"%ID%" 2>nul powershell -NoProfile -NonInteractive -Command "try { $s = (Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction Stop).CounterSamples | Where-Object { $_.CookedValue -gt 0 }; if (-not $s) { 'no GPU engine activity in the sample' } else { $s | ForEach-Object { $p = if ($_.InstanceName -match 'pid_(\d+)') { [int]$matches[1] } else { 0 }; $n = try { (Get-Process -Id $p -ErrorAction Stop).ProcessName } catch { '?' }; [pscustomobject]@{ pid = $p; name = $n; engine = $_.InstanceName; pct = [math]::Round($_.CookedValue, 1) } } | Sort-Object pct -Descending | Select-Object -First 5 | Format-Table -AutoSize | Out-String -Width 300 } } catch { 'GPU Engine counters unavailable: ' + $_.Exception.Message }"
+>>"%ID%" echo == gpu_check lookup (the process the Home PC warned about at shutdown) ==
+>>"%ID%" 2>nul powershell -NoProfile -NonInteractive -Command "$g = Get-Process -Name 'gpu_check*' -ErrorAction SilentlyContinue; if ($g) { $g | ForEach-Object { '{0} pid={1} path={2}' -f $_.ProcessName, $_.Id, $_.Path } } else { 'no process named gpu_check* is running now' }"
 >>"%ID%" echo == REMOTE60_* names still set after clearing REMOTE60_NATIVE_* and REMOTE60_E2E_* (names only, never values) ==
 for /f "tokens=1 delims==" %%v in ('set REMOTE60_ 2^>nul') do >>"%ID%" echo %%v
 >>"%ID%" echo == location ==
