@@ -560,7 +560,11 @@ if (sentOk) {
 // tick); the per-AU line only with REMOTE60_NATIVE_AU_TRACE=1, bounded (host_au_trace.hpp).
 encoder.qpWindow.Note((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.encodeQp);
 encoder.qpWindow.NoteSlice((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.sliceQp);
-if (au.syntheticReason == kSyntheticReasonSettle && enqueuedForSend) kick.settle.NoteEmitted(hdr.payloadSize);
+// An async MFT returns a refinement AU after its episode may have ended: count it only for its own
+// episode, never for the one running now (motion-settle r2).
+if (au.syntheticReason == kSyntheticReasonSettle && enqueuedForSend && au.settleEpisode == kick.settle.episodes()) {
+  kick.settle.NoteEmitted(hdr.payloadSize);
+}
 // motion-settle r1 M2: a real P far over the sustainable per-frame payload (with a backlog behind it, or
 // twice running) raises the governor's fast ceiling; it is applied before the next encode (pop stage).
 if (enqueuedForSend && !au.synthetic && (hdr.flags & kEncodedFrameFlagKeyFrame) == 0 && encoder.FastPressureEligible()) {
@@ -590,6 +594,8 @@ if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
             << " qp=" << au.encodeQp
             << " qpHr=0x" << std::hex << static_cast<uint32_t>(au.encodeQpHr) << std::dec
             << " sliceQp=" << au.sliceQp
+            << " settleEp=" << au.settleEpisode
+            << " ceiling=" << encoder.codec.plan_max_qp()
             << " bytes=" << hdr.payloadSize
             << " instance=" << au.codecInstance
             << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)

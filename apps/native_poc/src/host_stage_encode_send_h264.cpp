@@ -352,6 +352,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
     encoder.codec.set_next_input_content_version(tc.version);
     if (servedBootstrap && tc.syntheticReason == kSyntheticReasonSettle) kick.settle.NoteSubmitted();
+    encoder.codec.set_next_input_settle_episode(
+        (servedBootstrap && tc.syntheticReason == kSyntheticReasonSettle) ? kick.settle.episodes() : 0);
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {

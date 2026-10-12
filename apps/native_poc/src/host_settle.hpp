@@ -76,11 +76,17 @@ struct SettleAction {
 
 class SettleRefiner {
  public:
-  static constexpr uint32_t kMaxInputs = 8;
+  // r2 (Codex A): the hard ceilings. The default episode stays 8 inputs / 1 s; a comparison candidate
+  // may raise it to these -- 30 accepted inputs, 60 submit attempts, 3 s from the episode's start -- as
+  // bounds, never as a quota (a real frame, a key owed, a busy sender or an identity change still win).
+  static constexpr uint32_t kMaxInputs = 30;
+  static constexpr uint32_t kMaxAttempts = 60;
+  static constexpr uint64_t kMaxDeadlineUs = 3000000;
 
   void Configure(const SettleConfig& c) {
     cfg_ = c;
     cfg_.inputs = std::clamp<uint32_t>(c.inputs, 1, kMaxInputs);
+    cfg_.deadlineUs = std::clamp<uint64_t>(c.deadlineUs, 100000, kMaxDeadlineUs);
   }
   const SettleConfig& config() const { return cfg_; }
 
@@ -132,8 +138,8 @@ class SettleRefiner {
     if (queueBusy || realWaiting || keyOwed) return a;
     if (lastServeUs_ != 0 && nowUs < lastServeUs_ + cfg_.minSpacingUs) return a;
     // Every serve counts against the bound, accepted or not: a cache the identity check refuses or
-    // an encoder that keeps saying "not now" cannot keep the episode going past kMaxInputs * 2.
-    if (attempts_ >= kMaxInputs * 2) {
+    // an encoder that keeps saying "not now" cannot keep the episode going past twice its inputs (<= 60).
+    if (attempts_ >= std::min(kMaxAttempts, cfg_.inputs * 2)) {
       a.ended = End(SettleEnd::Expired);
       return a;
     }

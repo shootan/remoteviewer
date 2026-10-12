@@ -348,7 +348,14 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         item = std::move(sender.queue.front());
         sender.queue.pop_front();
         queueDepthAtDequeue = sender.queue.size();
+        sender.auInFlight.store(true, std::memory_order_release);
       }
+      // motion-settle r2 F: an AU is being sent from here to the end of this iteration -- an empty
+      // queue is not an idle wire. Cleared on every way out of the iteration.
+      struct AuInFlightClear {
+        std::atomic<bool>& flag;
+        ~AuInFlightClear() { flag.store(false, std::memory_order_release); }
+      } auInFlightClear{sender.auInFlight};
       // One consistent set of egress parameters for this frame's pacing and chunking, instead of
       // three process globals re-read at different points inside the send. (Ledger H-22.)
       const UdpEgressConfig egress = sender.EgressSnapshot();

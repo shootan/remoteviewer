@@ -395,6 +395,44 @@ int main() {
               rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 51);
   }
 
+  // ------------------------------------------------------------------ [9] motion-settle r2 F: the settle dip
+  // One owner: the effective ceiling is the dip while it holds, the ordinary desired otherwise; the
+  // next instance is seeded with the ORDINARY desired (never the dip); the restore goes back to the
+  // ordinary desired of that moment (a fast 38 included), not to a remembered or fixed value.
+  {
+    Rig rig(L"VEN_1002", L"AMDh264Encoder");
+    check("[9] AMD legacy first target", rig.apply(30, 6'000'000));
+    RateGovernor& gov = rig.encoder.rateGovernor;
+    rig.encoder.settleDipQp = 20;
+    rig.encoder.settleDipEpisode = 1;
+    rig.encoder.settleDipInstance = rig.encoder.codec.instance_id();
+    check("[9] the dip is the effective ceiling (20) while the ordinary one stays 32",
+          rig.encoder.SettleDipActive() && rig.encoder.EffectiveDesiredQp() == 20 && gov.maxQp() == 32);
+    rig.fake->clear_calls();
+    const auto dip = rig.encoder.ReconcileEffectiveCeiling();
+    check("[9] ...applied with one maxQp Set (20), nothing else",
+          dip.attempted && rig.fake->count_set("maxQp") == 1 && rig.fake->count_set("mean") == 0 && rig.encoder.codec.plan_max_qp() == 20);
+    check("[9] ...and the next instance is seeded with the ORDINARY ceiling, not the dip",
+          rig.encoder.codec.initial_max_qp() == 0 /* 0 = the configured 32 */, s(rig.encoder.codec.initial_max_qp()));
+    // A fast boost arrives while the dip holds: the ordinary desired moves to 38; the restore takes THAT.
+    (void)gov.OnFastPressure();
+    rig.encoder.settleDipEpisode = 0;  // the episode ends (new motion)
+    const auto restore = rig.encoder.ReconcileEffectiveCeiling();
+    check("[9] the restore goes to the ordinary desired of that moment (fast 38), not to 32 or the dip",
+          restore.attempted && rig.encoder.codec.plan_max_qp() == 38 && rig.encoder.codec.initial_max_qp() == 38,
+          s(rig.encoder.codec.plan_max_qp()));
+    // A dip on an instance that is rebuilt: the new instance starts at the ordinary seed and the dip is not live on it.
+    (void)gov.OnCalm();
+    rig.encoder.settleDipEpisode = 2;
+    rig.encoder.settleDipInstance = rig.encoder.codec.instance_id();
+    (void)rig.encoder.ReconcileEffectiveCeiling();
+    check("[9] dip live again (20)", rig.encoder.codec.plan_max_qp() == 20);
+    check("[9] a rebuild starts at the ordinary seed (32), and the old instance's dip is not live on the new one",
+          rig.apply(60, 6'000'000) && rig.encoder.codec.instance_id() == 2 && rig.fake->set_value(CODECAPI_AVEncVideoMaxQP) == 32 &&
+              !rig.encoder.SettleDipActive() && rig.encoder.EffectiveDesiredQp() == 32,
+          s(rig.fake->set_value(CODECAPI_AVEncVideoMaxQP)));
+  }
+
   MFShutdown();
   CoUninitialize();
   std::printf("\nhost_encoder_apply_target_test: %s (%d checks, %d failed)\n", g_failed == 0 ? "PASS" : "FAILED", g_checks, g_failed);

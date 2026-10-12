@@ -57,7 +57,11 @@ constexpr int kCell = 40;          // marker cell (px on the painted page)
 constexpr int kMarkerRows = 2;     // row 0: sync + bits 0..7, row 1: sync + bits 8..15
 constexpr int kMarkerH = kCell * kMarkerRows;
 
-enum class Scene { MinimizeRestore, Scroll1s, ScrollLong, TypeChar, StopStart, Noise };
+// Restart50/100/200 (motion-settle r2 F counter-example): one typed character, then a 1 s scroll that
+// starts 170 ms (the settle quiet) + 50/100/200 ms later -- i.e. while a settle refinement and its
+// lowered ceiling may be running. Their onset is the scroll's first frame.
+enum class Scene { MinimizeRestore, Scroll1s, ScrollLong, TypeChar, StopStart, Noise, Restart50, Restart100, Restart200 };
+constexpr int kSceneCount = 9;
 inline const char* scene_name(Scene s) {
   switch (s) {
     case Scene::MinimizeRestore: return "minrestore";
@@ -66,6 +70,9 @@ inline const char* scene_name(Scene s) {
     case Scene::TypeChar: return "typechar";
     case Scene::StopStart: return "stopstart";
     case Scene::Noise: return "noise";
+    case Scene::Restart50: return "restart50";
+    case Scene::Restart100: return "restart100";
+    case Scene::Restart200: return "restart200";
   }
   return "?";
 }
@@ -382,7 +389,7 @@ class TextPageTarget {
 
   // What the action does at frame `f` of the 60 Hz timer: whether the picture changed, and whether
   // this is the action's last change (the picture the screen then settles on).
-  struct Step { bool changed = false; bool last = false; };
+  struct Step { bool changed = false; bool last = false; bool onset = false; };
   Step ActionStep(uint32_t f) {
     switch (spec_.scene) {
       case Scene::MinimizeRestore:
@@ -409,6 +416,18 @@ class TextPageTarget {
         if (f < 120) { noiseOn_ = true; ++noiseSeed_; return {true, false}; }
         noiseOn_ = false;
         return {true, true};
+      case Scene::Restart50:
+      case Scene::Restart100:
+      case Scene::Restart200: {
+        // Frame 0: one typed character. Then idle until 170 ms + the delay, then a 60-frame scroll.
+        const uint32_t delayMs = spec_.scene == Scene::Restart50 ? 50 : spec_.scene == Scene::Restart100 ? 100 : 200;
+        const uint32_t idleFrames = (170 + delayMs) * 60 / 1000;  // 60 Hz timer
+        if (f == 0) { ++typedChars_; return {true, false}; }
+        if (f < idleFrames) return {false, false};
+        scrollY_ += 12;
+        const uint32_t k = f - idleFrames;
+        return {true, k >= 59, k == 0};
+      }
     }
     return {true, true};
   }
@@ -421,11 +440,21 @@ class TextPageTarget {
         return;
       case Phase::PreIdle:
         if (phaseStartUs_ == 0) {
-          // Wrap the scroll before it runs off the page; every scene starts from a full panel.
-          if (scrollY_ > pageH_ - height - 2400) scrollY_ = 0;
+          // motion-settle r2 D: every episode of a scene starts from the same state, so its final picture
+          // is the same picture every time and one long-still reference serves all of them (and the
+          // baseline and every candidate alike).
+          switch (spec_.scene) {
+            case Scene::MinimizeRestore: scrollY_ = 600; typedChars_ = 0; break;
+            case Scene::Noise: scrollY_ = 300; typedChars_ = 0; break;
+            case Scene::TypeChar: scrollY_ = 0; typedChars_ = 10; break;
+            case Scene::Restart50:
+            case Scene::Restart100:
+            case Scene::Restart200: scrollY_ = 0; typedChars_ = 20; break;
+            default: scrollY_ = 0; typedChars_ = 0; break;
+          }
           panel_ = spec_.scene == Scene::MinimizeRestore ? 1.0 : 0.0;
           noiseOn_ = false;
-          if (typedChars_ > 40) typedChars_ = 0;
+          noiseSeed_ = 1;
           phaseStartUs_ = now;
           rec_.startUs = now;
           PaintNew(now);
@@ -445,7 +474,7 @@ class TextPageTarget {
         ++actionFrame_;
         if (st.changed) {
           PaintNew(now);
-          if (rec_.onsetId == 0) {
+          if (rec_.onsetId == 0 || st.onset) {  // a restart scene's onset is its scroll, not the character
             rec_.onsetId = shownId_;
             rec_.onsetUs = rec_.paints[shownId_];
           }

@@ -2338,6 +2338,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         bool auForcedKey = false;
         uint8_t auSyntheticReason = nextInputSyntheticReason_;
         uint64_t auContentVersion = 0;  // no FIFO entry: unknown
+        uint64_t auSettleEpisode = 0;
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
           normalizedAuSampleTimeHns = provenance.tsHns;
@@ -2347,6 +2348,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
           auForcedKey = provenance.forcedKey;
           auSyntheticReason = provenance.syntheticReason;
           auContentVersion = provenance.contentVersion;
+          auSettleEpisode = provenance.settleEpisode;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -2365,6 +2367,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.inputWasForcedKey = auForcedKey;
         au.syntheticReason = auSyntheticReason;
         au.contentVersion = auContentVersion;
+        au.settleEpisode = auSettleEpisode;
         au.codecInstance = codecInstanceId_;
         // motion-settle r1 M0: the QP this output sample says it was coded with. Absent -> Unknown.
         {
@@ -2425,7 +2428,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
   pendingInputs_.Push(
       PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame,
-                   nextInputSyntheticReason_, nextInputContentVersion_});
+                   nextInputSyntheticReason_, nextInputContentVersion_, nextInputSettleEpisode_});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.

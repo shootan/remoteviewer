@@ -80,6 +80,59 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+void apply_effective_ceiling(HostContext& hx, uint64_t nowUs, const char* why, bool ignoreInterval) {
+  EncoderState& encoder = hx.encoder;
+  if (!ignoreInterval && !encoder.fastPressure.CanSetNow(nowUs)) {
+    encoder.ceilingDirty = true;
+    return;
+  }
+  encoder.ceilingDirty = false;
+  const uint32_t ordinary = encoder.rateGovernor.maxQp();
+  const EncoderState::CeilingReconcile rc = encoder.ReconcileEffectiveCeiling();
+  const bool ok = !rc.attempted || rc.result == RcRuntimeResult::Applied || rc.result == RcRuntimeResult::Unchanged;
+  if (rc.attempted) {
+    encoder.fastPressure.NoteSet(nowUs);
+    if (!ok) encoder.fastPressure.NoteFailure(encoder.codec.instance_id());
+  }
+  // A restore (no dip held, the live ceiling still below the ordinary one) that the MFT refuses must not
+  // leave a low ceiling under the next motion: two failures disable F for this instance and take the
+  // existing repair path (a rebuild seeded with the ordinary desired). Never on a normal settle.
+  const bool restoring = !encoder.SettleDipActive() && encoder.codec.plan_max_qp() < ordinary;
+  if (restoring && rc.attempted && !ok) {
+    ++encoder.settleDipRestoreFailures;
+    encoder.ceilingDirty = true;  // retried in the next slot
+    if (encoder.settleDipRestoreFailures >= 2) {
+      encoder.settleDipDisabledInstance = encoder.codec.instance_id();
+      encoder.ceilingDirty = false;
+      encoder.RequestOutputRepair(nowUs);
+      std::cout << "[native-video-host][settle] dip restore failed twice: F off for instance=" << encoder.codec.instance_id()
+                << ", repair requested\n";
+    }
+  } else if (!restoring && ok) {
+    encoder.settleDipRestoreFailures = 0;
+  }
+  std::cout << "[native-video-host][rate-governor] ceiling why=" << why << " effective=" << rc.desired
+            << " ordinary=" << ordinary << " dip=" << (encoder.SettleDipActive() ? encoder.settleDipQp : 0)
+            << " codecBefore=" << rc.codecBefore << " attempted=" << (rc.attempted ? 1 : 0)
+            << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
+                              : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
+                              : rc.result == RcRuntimeResult::Unproven ? "unproven" : "failed")
+            << " fast=" << (encoder.rateGovernor.fastActive() ? 1 : 0)
+            << " seed=" << ordinary << " intervalException=" << (ignoreInterval ? 1 : 0) << "\n";
+}
+
+void settle_dip_exit(HostContext& hx, uint64_t nowUs, const char* why, bool immediate) {
+  EncoderState& encoder = hx.encoder;
+  if (encoder.settleDipEpisode == 0) return;
+  const bool wasLive = encoder.SettleDipActive();
+  encoder.settleDipEpisode = 0;
+  encoder.settleDipLastExitUs = nowUs;
+  ++encoder.settleDipExits;
+  if (!wasLive) return;  // another instance by now: nothing of the dip is live
+  if (immediate) ++encoder.settleDipCancelRestores;
+  apply_effective_ceiling(hx, nowUs, why, immediate);
+}
+
 SettleIdentity settle_identity_now(HostContext& hx) {
   SettleIdentity id;
   id.mediaEpoch = hx.sender.mediaSessionEpoch.load(std::memory_order_acquire);
@@ -171,25 +224,11 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
  
  
   queueSelectStartUs = qpc_now_us();
-  // motion-settle r1 M2: a ceiling the fast path (or a calm) moved goes to the encoder before the next
-  // encode -- through the governor's one apply path, at most one Set per FastPressure interval.
-  if (encoder.ceilingDirty && encoder.fastPressure.CanSetNow(nowUs)) {
-    encoder.ceilingDirty = false;
-    const EncoderState::CeilingReconcile rc =
-        encoder.ReconcileGovernorCeiling(encoder.rateGovernor.maxQp(), H264Encoder::configured_max_qp());
-    if (rc.attempted) {
-      encoder.fastPressure.NoteSet(nowUs);
-      if (rc.result != RcRuntimeResult::Applied && rc.result != RcRuntimeResult::Unchanged) {
-        encoder.fastPressure.NoteFailure(encoder.codec.instance_id());
-      }
-    }
-    std::cout << "[native-video-host][rate-governor] fast-reconcile desired=" << rc.desired << " codecBefore=" << rc.codecBefore
-              << " fast=" << (encoder.rateGovernor.fastActive() ? 1 : 0) << " attempted=" << (rc.attempted ? 1 : 0)
-              << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
-                                : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
-                                : rc.result == RcRuntimeResult::Unproven ? "unproven" : "failed")
-              << " degraded=" << (encoder.fastPressure.Degraded(encoder.codec.instance_id()) ? 1 : 0) << "\n";
-  }
+  // motion-settle r1 M2 / r2 F: a ceiling the fast path, a calm or the settle dip moved goes to the
+  // encoder before the next encode -- the one reconcile path, at most one Set per interval.
+  // A dip left over from an instance that is gone ends here (nothing of it is live).
+  if (encoder.settleDipEpisode != 0 && !encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "instance-changed", false);
+  if (encoder.ceilingDirty && encoder.fastPressure.CanSetNow(nowUs)) apply_effective_ceiling(hx, nowUs, "deferred", false);
  
  
   if (kick.Due(nowUs)) {
@@ -308,28 +347,31 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     const uint32_t submittedBefore = kick.settle.submitted();
     const uint32_t attemptsBefore = kick.settle.attempts();
     const SettleAction act = kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed);
-    // M2's explicit calm: the screen has been quiet for the settle delay, nothing new is waiting and the
-    // sender backlog is drained -- the fast boost (and the slow ladder) go back to the floor, so the
-    // refinement inputs below are coded under the text ceiling. Checked at every refinement the episode
-    // serves (a serve means the queue is empty and no real frame waits), not only when it starts: after
-    // a heavy burst the episode starts with the queue still full, and a start-only check left the
-    // ceiling at 38 for the whole still (M0 harness, noise: slice QP 37-38 for seconds).
-    if ((act.started || act.serve) && !queueBusy && !realWaiting && encoder.FastPressureEligible() &&
-        encoder.rateGovernor.OnCalm()) {
-      encoder.ceilingDirty = true;
-      if (encoder.fastPressure.CanSetNow(nowUs)) {
-        encoder.ceilingDirty = false;
-        const EncoderState::CeilingReconcile rc =
-            encoder.ReconcileGovernorCeiling(encoder.rateGovernor.maxQp(), H264Encoder::configured_max_qp());
-        if (rc.attempted) {
-          encoder.fastPressure.NoteSet(nowUs);
-          if (rc.result != RcRuntimeResult::Applied && rc.result != RcRuntimeResult::Unchanged) {
-            encoder.fastPressure.NoteFailure(encoder.codec.instance_id());
-          }
-        }
-        std::cout << "[native-video-host][rate-governor] calm desired=" << rc.desired << " codecBefore=" << rc.codecBefore
-                  << " attempted=" << (rc.attempted ? 1 : 0) << "\n";
+    // r2 F: a key owed to the viewer goes out under the ordinary ceiling, never the dip.
+    if (keyOwed && encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "key-owed", true);
+    if (act.ended != SettleEnd::None) settle_dip_exit(hx, nowUs, settle_end_name(act.ended), false);
+    // M2's explicit calm and F's dip, decided together at every refinement the episode serves (a serve
+    // means the queue is empty and no real frame waits), and applied as ONE Set:
+    //  - calm: quiet, nothing new, the backlog drained -- the fast boost and the slow ladder back to the
+    //    floor (checked at every serve, not only at the start: after a heavy burst the episode starts
+    //    with the queue still full; M0 harness noise: slice QP 37-38 for seconds otherwise);
+    //  - dip: on top, for this episode, the ceiling goes to settleDipQp -- only with nothing on the wire
+    //    (no AU in flight, no NACK replay pending), no key owed, AMD legacy live, F not disabled for this
+    //    instance, and not within a cooldown of the previous dip's exit (bounded toggling).
+    if (act.serve && !queueBusy && !realWaiting && encoder.LiveCeilingEligible()) {
+      bool changed = encoder.FastPressureEligible() && encoder.rateGovernor.OnCalm();  // calm is M2's
+      const bool wireIdle = !sender.auInFlight.load(std::memory_order_acquire) &&
+                            sender.pendingReplayCount.load(std::memory_order_relaxed) == 0;
+      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed &&
+          encoder.settleDipDisabledInstance != encoder.codec.instance_id() &&
+          (encoder.settleDipLastExitUs == 0 || nowUs >= encoder.settleDipLastExitUs + 500000) &&
+          encoder.settleDipQp < encoder.rateGovernor.maxQp()) {
+        encoder.settleDipEpisode = kick.settle.episodes();
+        encoder.settleDipInstance = encoder.codec.instance_id();
+        ++encoder.settleDipEntries;
+        changed = true;
       }
+      if (changed) apply_effective_ceiling(hx, nowUs, encoder.SettleDipActive() ? "settle-dip" : "calm", false);
     }
     if (act.ended != SettleEnd::None &&
         (kick.settleLastLogUs == 0 || nowUs >= kick.settleLastLogUs + 500000)) {

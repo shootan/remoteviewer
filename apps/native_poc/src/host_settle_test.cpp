@@ -142,18 +142,29 @@ void TestBoundsWhenRefused() {
   s.Configure(c);
   s.NoteRealChange(0, Id(), 1);
   Run r = Drive(s, 0, 5000 * kMs, Id(), false, false, false, /*refuse=*/true);
-  expect(r.served <= SettleRefiner::kMaxInputs * 2, "M1: refused serves stop at the attempt bound (" + std::to_string(r.served) + ")");
+  expect(r.served == 16, "M1: refused serves stop at twice the episode's inputs (8 -> 16 attempts; got " + std::to_string(r.served) + ")");
   expect(r.ended == SettleEnd::Expired, "M1: ... and the episode says expired, not complete");
   // A configuration past the ceiling is clamped.
   SettleRefiner big;
   SettleConfig b;
   b.inputs = 50;
+  b.deadlineUs = 10000000;
   b.minSpacingUs = 0;
   big.Configure(b);
   big.NoteRealChange(0, Id(), 1);
   Run rb = Drive(big, 0, 5000 * kMs, Id());
-  expect(big.config().inputs == SettleRefiner::kMaxInputs && rb.served == SettleRefiner::kMaxInputs,
-         "M1: never more than 8 accepted refinements in an episode");
+  expect(big.config().inputs == 30 && rb.served == 30 && big.config().deadlineUs == 3000000,
+         "r2 A: a configuration past the ceilings is clamped -- 30 accepted inputs, a 3 s deadline");
+  SettleRefiner slow;
+  SettleConfig sl;
+  sl.inputs = 30;
+  sl.deadlineUs = 3000000;
+  sl.minSpacingUs = 200000;  // 200 ms apart: 30 inputs do not fit in 3 s
+  slow.Configure(sl);
+  slow.NoteRealChange(0, Id(), 1);
+  Run rs = Drive(slow, 0, 10000 * kMs, Id());
+  expect(rs.served <= 16 && rs.ended == SettleEnd::Expired && rs.endedUs == 3170 * kMs,
+         "r2 A: the 3 s deadline ends the episode whatever its input budget (" + std::to_string(rs.served) + " served)");
 }
 
 void TestDisabled() {

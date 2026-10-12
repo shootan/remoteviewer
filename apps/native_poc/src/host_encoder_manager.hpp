@@ -66,16 +66,42 @@ struct EncoderState {
   // next Set slot (FastPressure::CanSetNow) before the next encode.
   FastPressure fastPressure;
   bool ceilingDirty = false;
+  // motion-settle r2 F: a temporary LOWER ceiling while a settle episode refines a still screen (AMD
+  // legacy live only). It is not a governor state: the governor's desired stays the ordinary one, the
+  // dip is bound to (episode, instance) and the effective ceiling is computed here, once. The seed of
+  // the next instance is always the ordinary desired. REMOTE60_NATIVE_SETTLE_DIP_QP (0 = off).
+  uint32_t settleDipQp = 0;
+  uint64_t settleDipEpisode = 0;          // the episode holding the dip (0 = none)
+  uint64_t settleDipInstance = 0;         // ...on this codec instance only
+  uint64_t settleDipDisabledInstance = 0; // F off for this instance after failed restores
+  uint32_t settleDipRestoreFailures = 0;
+  uint64_t settleDipLastExitUs = 0;
+  uint64_t settleDipEntries = 0, settleDipExits = 0, settleDipCancelRestores = 0;
+  bool SettleDipActive() const { return settleDipEpisode != 0 && settleDipInstance == codec.instance_id(); }
+  /** The ceiling the live instance should run now: the dip while it holds, else the ordinary desired. */
+  uint32_t EffectiveDesiredQp() const {
+    const uint32_t ordinary = rateGovernor.maxQp();
+    return SettleDipActive() ? std::min(ordinary, settleDipQp) : ordinary;
+  }
   // Whether the fast path may act on this instance: the governor is on, the instance is the AMD legacy
   // profile with a live ceiling. An unknown legacy MFT keeps the slow loop only; a static-ceiling
   // profile (NVIDIA) never gets a runtime Set. REMOTE60_NATIVE_FAST_PRESSURE=0 turns it off.
   bool FastPressureEligible() const {
-    static const bool on = [] {
-      const char* g = std::getenv("REMOTE60_NATIVE_RATE_GOVERNOR");
+    static const bool fastOn = [] {
       const char* f = std::getenv("REMOTE60_NATIVE_FAST_PRESSURE");
-      return !(g && g[0] == '0') && !(f && f[0] == '0') && H264Encoder::configured_max_qp() != 0;
+      return !(f && f[0] == '0');
     }();
-    if (!on || !codec.started() || codec.rc_profile() != RcProfile::Legacy || !codec.runtime_max_qp_live()) return false;
+    return fastOn && LiveCeilingEligible();
+  }
+  // The instance whose ceiling the host may move at runtime outside the 1 s governor tick: the governor
+  // is on and this is the AMD legacy profile with a live ceiling. The settle dip (F) and the calm need
+  // this; the fast pressure (M2) needs it AND its own switch -- turning M2 off must not turn F off.
+  bool LiveCeilingEligible() const {
+    static const bool governorOn = [] {
+      const char* g = std::getenv("REMOTE60_NATIVE_RATE_GOVERNOR");
+      return !(g && g[0] == '0') && H264Encoder::configured_max_qp() != 0;
+    }();
+    if (!governorOn || !codec.started() || codec.rc_profile() != RcProfile::Legacy || !codec.runtime_max_qp_live()) return false;
     const MftIdentity& id = codec.identity();
     return id.vendorId == "VEN_1002" || id.friendlyName.find("AMD") != std::string::npos;
   }
@@ -213,11 +239,15 @@ struct EncoderState {
     uint32_t codecBefore = 0;                              // the instance's requested ceiling before
     bool degraded = false;                                 // held after the bounded retries
   };
-  CeilingReconcile ReconcileGovernorCeiling(uint32_t desiredQp, uint32_t configuredQp) {
+  // seedQp (motion-settle r2 F): the ceiling the NEXT instance starts from. It is the ORDINARY desired
+  // (governor) even while a settle dip is live -- the dip belongs to this instance's still screen and
+  // must not leak into a rebuild. Defaults to desiredQp (every caller before F).
+  CeilingReconcile ReconcileGovernorCeiling(uint32_t desiredQp, uint32_t configuredQp, uint32_t seedQp = 0xFFFFFFFFu) {
     CeilingReconcile out;
     out.desired = desiredQp;
     out.codecBefore = codec.plan_max_qp();
-    codec.set_initial_max_qp(desiredQp == configuredQp ? 0u : desiredQp);  // the next instance's seed
+    const uint32_t seed = seedQp == 0xFFFFFFFFu ? desiredQp : seedQp;
+    codec.set_initial_max_qp(seed == configuredQp ? 0u : seed);  // the next instance's seed
     if (desiredQp != governorLastDesiredQp || codec.instance_id() != governorFailInstance) {
       // r4 Q1c: a new target OR a new instance gets its own bounded attempts; the old instance's spent
       // budget does not follow the same desired onto its successor.
@@ -242,6 +272,10 @@ struct EncoderState {
     else ++governorQpApplyFailures;
     out.degraded = governorQpApplyFailures >= kGovernorQpApplyMaxFailures;
     return out;
+  }
+  /** One reconcile of the effective ceiling, the ordinary one seeding the next instance. */
+  CeilingReconcile ReconcileEffectiveCeiling() {
+    return ReconcileGovernorCeiling(EffectiveDesiredQp(), H264Encoder::configured_max_qp(), rateGovernor.maxQp());
   }
   static EncoderBudgetPolicy BudgetPolicy() {
     EncoderBudgetPolicy p;

@@ -348,10 +348,13 @@ int startup_start_capture(HostContext& hx) {
     sc.quietUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_QUIET_MS", 170, 50, 1000)) * 1000ULL;
     sc.inputs = env_u32_clamped("REMOTE60_NATIVE_SETTLE_INPUTS", 8, 1, SettleRefiner::kMaxInputs);
     sc.minSpacingUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_SPACING_MS", 33, 0, 500)) * 1000ULL;
+    sc.deadlineUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_DEADLINE_MS", 1000, 100, 3000)) * 1000ULL;
     kick.settle.Configure(sc);
+    // r2 F: the temporary settle ceiling (0 = off; AMD legacy live only, decided per instance).
+    hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 0, 0, 51);
     std::cout << "[native-video-host] settle enabled=" << (sc.enabled ? 1 : 0) << " quietMs=" << sc.quietUs / 1000
               << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
-              << " deadlineMs=" << sc.deadlineUs / 1000 << "\n";
+              << " deadlineMs=" << sc.deadlineUs / 1000 << " dipQp=" << hx.encoder.settleDipQp << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

@@ -62,6 +62,7 @@ struct H264AccessUnit {
   // replaced by the MaxQP ceiling or derived from the byte count. encodeQpHr is the GetUINT64 result.
   uint8_t syntheticReason = 0;
   uint64_t contentVersion = 0;  // the host's capture version of the input (a synthetic input: the cached one's)
+  uint64_t settleEpisode = 0;   // motion-settle r2: the settle episode a refinement input was served in (0 = none)
   uint64_t codecInstance = 0;
   int32_t encodeQp = -1;
   uint64_t encodeQpRaw = 0;
@@ -173,6 +174,7 @@ struct PendingInput {
   bool forcedKey = false;
   uint8_t syntheticReason = 0;  // motion-settle r1 M0 (kSyntheticReason*)
   uint64_t contentVersion = 0;  // motion-settle r1 M0: the capture version the input carried
+  uint64_t settleEpisode = 0;   // motion-settle r2: the settle episode of a refinement input
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -272,6 +274,7 @@ class H264Encoder {
    * it with a late post-type SetValue (C4). Ignored by profiles with a static ceiling.
    */
   void set_initial_max_qp(uint32_t maxQp) { initialMaxQp_ = maxQp; }
+  uint32_t initial_max_qp() const { return initialMaxQp_; }  // the seed above (0 = configured)
   /** The configured ceiling (REMOTE60_NATIVE_MAX_QP, default 32; 0 = none). */
   static uint32_t configured_max_qp();
   // encoder-rc-budget: the instance's policy and plan, for the host's governor and diagnostics.
@@ -319,6 +322,8 @@ class H264Encoder {
   void set_next_input_synthetic_reason(uint8_t reason) { nextInputSyntheticReason_ = reason; }
   // The capture version of the NEXT input; same FIFO (motion-settle r1 M0).
   void set_next_input_content_version(uint64_t version) { nextInputContentVersion_ = version; }
+  // The settle episode of the NEXT input (0 = not a refinement); same FIFO (motion-settle r2).
+  void set_next_input_settle_episode(uint64_t episode) { nextInputSettleEpisode_ = episode; }
   // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
   void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
   // A06: the accepted-input FIFO overflowed, so nothing this encoder emits may be trusted with
@@ -409,6 +414,7 @@ class H264Encoder {
   bool nextInputSynthetic_ = false;
   uint8_t nextInputSyntheticReason_ = 0;
   uint64_t nextInputContentVersion_ = 0;
+  uint64_t nextInputSettleEpisode_ = 0;
   H264SliceQpReader sliceQpReader_;  // motion-settle r1 M0: SPS/PPS seen so far + each AU's slice QP
   uint64_t nextInputEpoch_ = 0;
   std::vector<uint8_t> sequenceHeaderAnnexb_;

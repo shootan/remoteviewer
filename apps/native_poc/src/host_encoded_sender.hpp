@@ -308,6 +308,8 @@ struct SenderState {
   std::atomic<uint64_t> sendDurSumUs{0};
   std::atomic<uint64_t> sendDurMaxUs{0};
   std::atomic<uint64_t> sendCount{0};
+  // motion-settle r2 F: the sender thread holds a dequeued AU it is still putting on the wire.
+  std::atomic<bool> auInFlight{false};
   // A key AU is being put on the wire now for the current media epoch -- set by the sender thread for
   // the whole duration of a key AU's (cap-paced) send, cleared when it finishes or aborts, and on a
   // rollover. The encode gate reads it so a repeated recovery request does not force a SECOND IDR

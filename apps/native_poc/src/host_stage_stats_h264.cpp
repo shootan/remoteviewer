@@ -215,17 +215,17 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
         // motion-settle r1 M2: one minimum interval between ceiling Sets for the fast and the slow half
         // alike. Inside it, a change waits as ceilingDirty for the pop stage (before the next encode).
         const uint64_t setNowUs = qpc_now_us();
-        if (!encoder.fastPressure.CanSetNow(setNowUs) && encoder.codec.plan_max_qp() != governor.maxQp() &&
+        if (!encoder.fastPressure.CanSetNow(setNowUs) && encoder.codec.plan_max_qp() != encoder.EffectiveDesiredQp() &&
             encoder.codec.runtime_max_qp_live()) {
           encoder.ceilingDirty = true;
           // The next instance's seed still follows the decision at once (C4), only the live Set waits.
           encoder.codec.set_initial_max_qp(governor.maxQp() == H264Encoder::configured_max_qp() ? 0u : governor.maxQp());
           EncoderState::CeilingReconcile deferred;
-          deferred.desired = governor.maxQp();
+          deferred.desired = encoder.EffectiveDesiredQp();
           deferred.codecBefore = encoder.codec.plan_max_qp();
           return deferred;
         }
-        const EncoderState::CeilingReconcile rc = encoder.ReconcileGovernorCeiling(governor.maxQp(), H264Encoder::configured_max_qp());
+        const EncoderState::CeilingReconcile rc = encoder.ReconcileEffectiveCeiling();  // r2 F: the dip while a settle holds it, the ordinary desired seeds
         if (rc.attempted) encoder.fastPressure.NoteSet(setNowUs);
         if (rc.attempted || rc.degraded) {
           std::cout << "[native-video-host][rate-governor] ceiling-reconcile why=" << why << " desired=" << rc.desired
@@ -250,7 +250,13 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
       // (in band, near over), not 83% (under).
       const uint32_t payloadBudgetBps = encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps);
       if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
-        // A new target, or the user chose another frame rate: start over from the floor.
+        // A new target, or the user chose another frame rate: start over from the floor. A settle dip of
+        // the old target ends with it (motion-settle r2 F); the reconcile below restores the ordinary one.
+        if (encoder.settleDipEpisode != 0) {
+          encoder.settleDipEpisode = 0;
+          encoder.settleDipLastExitUs = t;
+          ++encoder.settleDipExits;
+        }
         governor.Reset();
         seedInitialQp();
         encoder.rateGovernorBitrate = encoder.activeBitrate;

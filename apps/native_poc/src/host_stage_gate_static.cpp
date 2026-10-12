@@ -137,7 +137,12 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     // static throttling or the explicitly unpaced throughput path.
     // A change arms the settle refinement BEFORE any gate below can hold the frame back: if this was
     // the last change of a burst and it never reaches the encoder, the refinement still re-serves it.
-    if (contentChanged) kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);
+    if (contentChanged) {
+      // r2 F: new content is about to be encoded -- the dip ends and the ordinary ceiling is restored
+      // BEFORE this frame's encode, even inside the 250 ms Set interval (the one exception).
+      settle_dip_exit(hx, queuePopUs, "new-content", true);
+      kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);
+    }
     if (frameGating.ShouldSkip(queuePopUs, keyReqPending, encoder.activeFrameIntervalUs, paceByTick)) {
       ++frameGating.skipCount;
       if (frameGating.staticMode) ++frameGating.staticSkipCount;
@@ -146,6 +151,7 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     }
   }
   if (!servedBootstrap && useH264 && !frameGating.enabled && payload && !payload->empty()) {
+    settle_dip_exit(hx, queuePopUs, "new-content", true);
     kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);  // no gate: every capture is a change
   }
   if (useH264 && guardStalePreEncode && frameAgeAtSelectUs > kMaxPreEncodeFrameAgeUs) {

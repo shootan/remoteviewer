@@ -211,6 +211,12 @@ bool reconnect_tcp_data_session(HostContext& hx, const char* reason);
 // motion-settle r1 M1: what a settle episode is bound to right now -- media/input epoch, stream
 // generation and the capture target (host_stage_pop_frame.cpp).
 SettleIdentity settle_identity_now(HostContext& hx);
+// motion-settle r2 F: apply the effective ceiling (the settle dip or the ordinary desired) through the
+// one reconcile path; ignoreInterval only for the cancel-restore before new motion / an owed key.
+void apply_effective_ceiling(HostContext& hx, uint64_t nowUs, const char* why, bool ignoreInterval);
+// Ends the settle dip (if one is held) and restores the ordinary desired -- at once when `immediate`
+// (new real content or a key is about to be encoded), else in the next Set slot.
+void settle_dip_exit(HostContext& hx, uint64_t nowUs, const char* why, bool immediate);
 // requestedMonitorDevice: for a monitor-select target (monitor_select_target.hpp), the screen the
 // control thread resolved it to; empty otherwise. t-970r4zgo.
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,

@@ -2201,7 +2201,15 @@ struct EpisodeResult {
   double sustainedFps = -1;        // long scroll only
   uint32_t finalVersions = 0;      // decoded versions of the final picture (refinements seen)
   uint32_t visW = 0, visH = 0;
+  // motion-settle r2 D. `valid` is the TEST's validity only (fixture/source/event binding); the product
+  // outcome is separate: reached / censored against the shared long-still reference of this scene.
+  double fixedRef = -1;            // the shared reference (ink dB) -- the same for baseline and candidates
+  int64_t sharpFixedMs = -1;       // first sample >= fixedRef - 1 dB that stays there 500 ms; -1 = censored
+  bool reached = false;
+  bool censored = false;           // not reached by the end of the hold (> hold): a product failure, kept
+  double inkAt[5] = {-1, -1, -1, -1, -1};  // newest decoded final picture at 0.25/0.5/1/2/3 s (-1: not arrived)
 };
+constexpr double kInkAtSec[5] = {0.25, 0.5, 1.0, 2.0, 3.0};
 
 double Percentile(std::vector<double> v, double p) {
   if (v.empty()) return -1;
@@ -2212,10 +2220,11 @@ double Percentile(std::vector<double> v, double p) {
   return v[lo] + (v[hi] - v[lo]) * (idx - lo);
 }
 
-EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& all, int index) {
+EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& all, int index, double fixedRef) {
   EpisodeResult r;
   r.scene = et::scene_name(rec.scene);
   r.index = index;
+  r.fixedRef = fixedRef;
   // This episode's samples: seen between its start and its end.
   std::vector<Sample> s;
   for (const Sample& x : all)
@@ -2256,8 +2265,30 @@ EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& a
         break;
       }
     }
-    if (r.timeToSharpMs < 0 && r.valid) { r.valid = false; r.invalidWhy = "never sharp within the hold"; }
+    // (end-of-hold reference: secondary; no validity decision is taken on it any more -- r2 D)
+    // r2 D: "never sharp" is the product's result (right-censored), not an invalid test -- the episode
+    // stays in the sample. The end-of-hold figure above is kept only as a secondary column.
+    for (int k = 0; k < 5; ++k) {
+      const uint64_t at = rec.finalUs + static_cast<uint64_t>(kInkAtSec[k] * 1e6);
+      for (const Sample* x : fin)
+        if (x->atUs <= at) r.inkAt[k] = q(*x);
+    }
+    if (r.fixedRef > 0) {
+      for (size_t i = 0; i < fin.size(); ++i) {
+        if (q(*fin[i]) < r.fixedRef - 1.0) continue;
+        bool holds = true;
+        for (size_t j = i + 1; j < fin.size() && fin[j]->atUs <= fin[i]->atUs + 500000; ++j)
+          if (q(*fin[j]) < r.fixedRef - 1.0) { holds = false; break; }
+        if (holds && fin[i]->atUs + 500000 <= rec.endUs) {
+          r.sharpFixedMs = static_cast<int64_t>(fin[i]->atUs - rec.finalUs) / 1000;
+          break;
+        }
+      }
+      r.reached = r.sharpFixedMs >= 0;
+      r.censored = !r.reached;
+    }
   }
+  if (r.fixedRef > 0 && fin.empty() && r.valid) r.censored = true;  // the final picture never arrived: censored too
   // onset. The gap is a WAIT for a new picture: from the later of the previous delivery and the paint
   // of the first picture after the one shown -- a stretch in which the source itself did not change
   // (the minimised phase of minrestore, the still beats of stopstart) is not a gap of the stream.
@@ -2308,6 +2339,53 @@ EpisodeResult Analyse(const et::EpisodeRecord& rec, const std::vector<Sample>& a
   return r;
 }
 
+// r2 D calibration: the long-still reference of one episode, judged on the LAST 5 s of the observation
+// (Codex r2 s3.2) -- an early flat stretch is not a plateau: on the AMD MFT the quality sits flat for
+// seconds after a burst before it climbs (minrestore: 34 dB flat at 5 s, 53.7 dB at 60 s). Only NEWLY
+// decoded samples count (distinct versions -- re-reading the same buffer is no evidence): >= 3 of them,
+// range <= 0.5 dB and |slope| <= 0.1 dB/s; their mean is the reference. Not converged = no reference.
+struct Calibration { bool converged = false; double ref = -1; double roi = -1; int64_t atMs = -1; int samples = 0; };
+Calibration Calibrate(const et::EpisodeRecord& rec, const std::vector<Sample>& all) {
+  Calibration c;
+  std::vector<const Sample*> fin;
+  uint64_t lastVersion = 0;
+  for (const Sample& x : all)
+    if (x.id == rec.finalId && x.psnr >= 0 && x.version != lastVersion && x.atUs >= rec.finalUs && x.atUs <= rec.endUs) {
+      fin.push_back(&x);
+      lastVersion = x.version;
+    }
+  c.samples = static_cast<int>(fin.size());
+  for (size_t end = fin.size(); end-- > 0;) {  // the last window only (the loop body returns or breaks)
+    const uint64_t t1 = rec.endUs;
+    if (t1 < rec.finalUs + 5000000) continue;
+    std::vector<const Sample*> w;
+    for (size_t i = 0; i <= end; ++i)
+      if (fin[i]->atUs + 5000000 >= t1) w.push_back(fin[i]);
+    if (w.size() < 3) break;
+    double lo = 1e9, hi = -1e9, sx = 0, sy = 0, sxx = 0, sxy = 0, roi = 0;
+    for (const Sample* x : w) {
+      const double y = x->ink >= 0 ? x->ink : x->psnr;
+      const double t = (static_cast<double>(x->atUs) - static_cast<double>(t1)) / 1e6;
+      lo = std::min(lo, y);
+      hi = std::max(hi, y);
+      sx += t; sy += y; sxx += t * t; sxy += t * y; roi += x->psnr;
+    }
+    const double n = static_cast<double>(w.size());
+    const double den = n * sxx - sx * sx;
+    const double slope = den > 1e-12 ? (n * sxy - sx * sy) / den : 0.0;
+    if (hi - lo <= 0.5 && std::fabs(slope) <= 0.1) {
+      c.converged = true;
+      c.ref = sy / n;
+      c.roi = roi / n;
+      c.atMs = static_cast<int64_t>(t1 - rec.finalUs) / 1000;
+      return c;
+    }
+    c.ref = sy / n;  // reported, but NOT a reference: the window did not converge
+    break;
+  }
+  return c;
+}
+
 struct Options {
   std::wstring hostExe;
   std::wstring outDir;
@@ -2321,6 +2399,9 @@ struct Options {
   std::string label = "run";
   std::vector<std::wstring> hostEnv;
   std::wstring hostArgs;  // extra host command-line arguments (e.g. --keyint for the M3 reproduction)
+  bool calibrate = false;           // r2 D: one long-still episode per scene, writes reference.csv
+  uint32_t calibrateHoldMs = 60000;
+  std::wstring refFile;             // r2 D: the shared reference (scene,refInk) the episodes are judged on
 };
 
 std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
@@ -2345,7 +2426,7 @@ int Run(const Options& o) {
     return 1;
   }
   const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
-  uint64_t perEpisodeMs = o.preMs + o.holdMs + 6000;
+  uint64_t perEpisodeMs = o.preMs + (o.calibrate ? o.calibrateHoldMs : o.holdMs) + 6000;
   const uint64_t seconds = (perEpisodeMs * o.episodes * o.scenes.size()) / 1000 + 60;
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -2446,19 +2527,33 @@ int Run(const Options& o) {
   Sleep(3000);  // first IDR, decoder init
 
   std::vector<EpisodeResult> results;
+  std::map<std::string, double> refs;
+  if (!o.refFile.empty()) {
+    FILE* rf = _wfopen(o.refFile.c_str(), L"r");
+    char line[256];
+    while (rf && std::fgets(line, sizeof(line), rf)) {
+      char name[64]{};
+      double v = -1;
+      if (std::sscanf(line, "%63[^,],%lf", name, &v) == 2 && v > 0) refs[name] = v;
+    }
+    if (rf) std::fclose(rf);
+    std::printf("motion-settle: %zu shared references read\n", refs.size());
+  }
+  FILE* calib = o.calibrate ? _wfopen((runDir + L"reference.csv").c_str(), L"w") : nullptr;
+  if (calib) std::fprintf(calib, "scene,refInk,refRoi,converged,convergedAtMs,newSamples,label\n");
   FILE* deliveries = _wfopen((runDir + L"deliveries.csv").c_str(), L"w");
   FILE* paints = _wfopen((runDir + L"paints.csv").c_str(), L"w");
   std::fprintf(deliveries, "label,scene,index,id,atUs,seq,key,synthetic,roiPsnr,inkPsnr\n");
   std::fprintf(paints, "label,scene,index,id,paintUs\n");
   FILE* csv = _wfopen((runDir + L"episodes.csv").c_str(), L"w");
   std::fprintf(csv, "label,scene,index,valid,why,visW,visH,prePsnr,firstFinalPsnr,worstPsnr,refPsnr,finalFirstSeenMs,timeToSharpMs,"
-                    "finalVersions,firstReactionMs,first250,first1s,painted1s,maxGap1sMs,sustainedFps,onsetId,finalId,onsetUs,finalUs,refRoiPsnr,ink\n");
+                    "finalVersions,firstReactionMs,first250,first1s,painted1s,maxGap1sMs,sustainedFps,onsetId,finalId,onsetUs,finalUs,refRoiPsnr,ink,fixedRef,sharpFixedMs,reached,censored,ink250,ink500,ink1000,ink2000,ink3000\n");
   for (et::Scene scene : o.scenes) {
     for (int i = 0; i < o.episodes; ++i) {
       et::EpisodeSpec spec;
       spec.scene = scene;
       spec.preIdleMs = o.preMs;
-      spec.holdMs = o.holdMs;
+      spec.holdMs = o.calibrate ? o.calibrateHoldMs : o.holdMs;
       // The references are known only once the fixture has painted them: the window thread fills
       // them in the record; until then watch nothing. The pre-still picture is painted first, the
       // final one at the end of the action -- the sampler watches both as soon as they exist.
@@ -2501,8 +2596,17 @@ int Run(const Options& o) {
         std::lock_guard<std::mutex> lk(sh.mu);
         snap = sh.samples;
       }
-      EpisodeResult r = Analyse(rec, snap, i);
+      const auto refIt = refs.find(et::scene_name(scene));
+      EpisodeResult r = Analyse(rec, snap, i, refIt == refs.end() ? -1.0 : refIt->second);
       results.push_back(r);
+      if (calib) {
+        const Calibration c = Calibrate(rec, snap);
+        std::fprintf(calib, "%s,%.3f,%.3f,%d,%lld,%d,%s\n", et::scene_name(scene), c.ref, c.roi, c.converged ? 1 : 0,
+                     (long long)c.atMs, c.samples, o.label.c_str());
+        std::fflush(calib);
+        std::printf("CALIBRATE %s %-10s converged=%d ref=%.2f at=%lldms newSamples=%d\n", o.label.c_str(), et::scene_name(scene),
+                    c.converged ? 1 : 0, c.ref, (long long)c.atMs, c.samples);
+      }
       // The raw material, so any figure can be recomputed offline: every decoded picture the sampler
       // saw in this episode, and every paint.
       for (const Sample& x : snap) {
@@ -2514,18 +2618,20 @@ int Run(const Options& o) {
         std::fprintf(paints, "%s,%s,%d,%u,%llu\n", o.label.c_str(), r.scene.c_str(), i, kv.first, (unsigned long long)kv.second);
       std::fflush(deliveries);
       std::fflush(paints);
-      std::fprintf(csv, "%s,%s,%d,%d,%s,%u,%u,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%u,%lld,%u,%u,%u,%lld,%.1f,%u,%u,%llu,%llu,%.2f,%d\n",
+      std::fprintf(csv, "%s,%s,%d,%d,%s,%u,%u,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%u,%lld,%u,%u,%u,%lld,%.1f,%u,%u,%llu,%llu,%.2f,%d,%.2f,%lld,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                    o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, r.invalidWhy.c_str(), r.visW, r.visH, r.prePsnr,
                    r.firstFinalPsnr, r.worstPsnr, r.refPsnr, (long long)r.finalFirstSeenMs, (long long)r.timeToSharpMs,
                    r.finalVersions, (long long)r.firstReactionMs, r.first250, r.first1s, r.painted1s, (long long)r.maxGap1sMs,
                    r.sustainedFps, rec.onsetId, rec.finalId, (unsigned long long)rec.onsetUs, (unsigned long long)rec.finalUs,
-                   r.refRoiPsnr, r.inkMeasured ? 1 : 0);
+                   r.refRoiPsnr, r.inkMeasured ? 1 : 0, r.fixedRef, (long long)r.sharpFixedMs, r.reached ? 1 : 0,
+                   r.censored ? 1 : 0, r.inkAt[0], r.inkAt[1], r.inkAt[2], r.inkAt[3], r.inkAt[4]);
       std::fflush(csv);
-      std::printf("EPISODE %s %-10s #%02d valid=%d sharp=%lldms ref=%.2f worst=%.2f pre=%.2f firstSeen=%lldms react=%lldms "
-                  "f250=%u f1s=%u/%u gap=%lldms sus=%.1f %s\n",
-                  o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, (long long)r.timeToSharpMs, r.refPsnr, r.worstPsnr,
-                  r.prePsnr, (long long)r.finalFirstSeenMs, (long long)r.firstReactionMs, r.first250, r.first1s, r.painted1s,
-                  (long long)r.maxGap1sMs, r.sustainedFps, r.invalidWhy.c_str());
+      std::printf("EPISODE %s %-10s #%02d valid=%d fixedRef=%.2f sharpFixed=%lldms censored=%d ink@0.5/1/3s=%.1f/%.1f/%.1f "
+                  "Tfinal=%lldms endRefSharp=%lldms pre=%.2f react=%lldms f1s=%u/%u gap=%lldms sus=%.1f %s\n",
+                  o.label.c_str(), r.scene.c_str(), i, r.valid ? 1 : 0, r.fixedRef, (long long)r.sharpFixedMs, r.censored ? 1 : 0,
+                  r.inkAt[1], r.inkAt[2], r.inkAt[4], (long long)r.finalFirstSeenMs, (long long)r.timeToSharpMs, r.prePsnr,
+                  (long long)r.firstReactionMs, r.first1s, r.painted1s, (long long)r.maxGap1sMs, r.sustainedFps,
+                  r.invalidWhy.c_str());
       if (i < 2) {
         std::lock_guard<std::mutex> lk(sh.mu);
         const std::wstring base = runDir + W(r.scene) + L"_" + std::to_wstring(i);
@@ -2543,6 +2649,7 @@ int Run(const Options& o) {
     }
   }
   std::fclose(csv);
+  if (calib) std::fclose(calib);
   std::fclose(deliveries);
   std::fclose(paints);
   stop = true;
@@ -2561,8 +2668,8 @@ int Run(const Options& o) {
   // Summary per scene.
   FILE* sum = _wfopen((runDir + L"summary.txt").c_str(), L"w");
   for (et::Scene scene : o.scenes) {
-    std::vector<double> sharp, react, gap, f1, ratio, sus, ref, worst;
-    int valid = 0, total = 0;
+    std::vector<double> sharp, react, gap, f1, ratio, sus, ref, worst, fixedSharp, tfinal, ink1;
+    int valid = 0, total = 0, reached = 0, censoredN = 0;
     for (const EpisodeResult& r : results) {
       if (r.scene != et::scene_name(scene)) continue;
       ++total;
@@ -2571,21 +2678,37 @@ int Run(const Options& o) {
       f1.push_back(r.first1s);
       if (r.painted1s > 0) ratio.push_back(static_cast<double>(r.first1s) / r.painted1s);
       if (r.sustainedFps >= 0) sus.push_back(r.sustainedFps);
-      if (!r.valid) continue;
+      if (!r.valid) continue;  // a TEST failure (fixture / source / event binding) only
       ++valid;
-      sharp.push_back(static_cast<double>(r.timeToSharpMs));
+      // r2 D: censored episodes stay in the distribution as +inf (> the hold), never dropped.
+      if (r.fixedRef > 0) {
+        if (r.reached) { ++reached; fixedSharp.push_back(static_cast<double>(r.sharpFixedMs)); }
+        else { ++censoredN; fixedSharp.push_back(1e12); }
+      }
+      if (r.finalFirstSeenMs >= 0) tfinal.push_back(static_cast<double>(r.finalFirstSeenMs));
+      if (r.inkAt[2] >= 0) ink1.push_back(r.inkAt[2]);
+      if (r.timeToSharpMs >= 0) sharp.push_back(static_cast<double>(r.timeToSharpMs));
       ref.push_back(r.refPsnr);
       worst.push_back(r.worstPsnr);
     }
-    char line[640];
+    // A quantile that lands on a censored episode is "> hold", not a number.
+    const auto q = [&](double p) -> std::string {
+      if (fixedSharp.empty()) return "n/a";
+      std::vector<double> v = fixedSharp;
+      std::sort(v.begin(), v.end());
+      const size_t idx = static_cast<size_t>(std::ceil(p * v.size())) == 0 ? 0 : static_cast<size_t>(std::ceil(p * v.size())) - 1;
+      const double x = v[std::min(idx, v.size() - 1)];
+      return x >= 1e11 ? (">" + std::to_string(o.holdMs)) : std::to_string(static_cast<long long>(x));
+    };
+    char line[900];
     std::snprintf(line, sizeof(line),
-                  "SUMMARY %s %-10s bitrate=%u fps=%u valid=%d/%d sharp_med=%.0f sharp_p95=%.0f sharp_max=%.0f "
-                  "react_p95=%.0f gap1s_p95=%.0f gap1s_max=%.0f first1s_med=%.0f deliv/painted_med=%.2f sustained_med=%.1f "
-                  "ref_med=%.2f worst_med=%.2f\n",
-                  o.label.c_str(), et::scene_name(scene), o.bitrate, o.fps, valid, total, Percentile(sharp, 0.5),
-                  Percentile(sharp, 0.95), Percentile(sharp, 1.0), Percentile(react, 0.95), Percentile(gap, 0.95),
-                  Percentile(gap, 1.0), Percentile(f1, 0.5), Percentile(ratio, 0.5), Percentile(sus, 0.5), Percentile(ref, 0.5),
-                  Percentile(worst, 0.5));
+                  "SUMMARY %s %-10s bitrate=%u fps=%u valid=%d/%d reached=%d censored=%d sharpFixed_med=%s p95=%s max=%s "
+                  "Tfinal_med=%.0f p95=%.0f ink1s_med=%.1f | react_p95=%.0f gap1s_p95=%.0f gap1s_max=%.0f first1s_med=%.0f "
+                  "deliv/painted_med=%.2f sustained_med=%.1f | endRef sharp_med=%.0f (secondary)\n",
+                  o.label.c_str(), et::scene_name(scene), o.bitrate, o.fps, valid, total, reached, censoredN, q(0.5).c_str(),
+                  q(0.95).c_str(), q(1.0).c_str(), Percentile(tfinal, 0.5), Percentile(tfinal, 0.95), Percentile(ink1, 0.5),
+                  Percentile(react, 0.95), Percentile(gap, 0.95), Percentile(gap, 1.0), Percentile(f1, 0.5), Percentile(ratio, 0.5),
+                  Percentile(sus, 0.5), Percentile(sharp, 0.5));
     std::printf("%s", line);
     std::fputs(line, sum);
   }
@@ -2611,13 +2734,16 @@ int run_motion_settle(int argc, char** argv) {
     else if (a == "--label" && next(&v)) o.label = v;
     else if (a == "--host-env" && next(&v)) o.hostEnv.push_back(motionsettle::W(v));
     else if (a == "--host-arg" && next(&v)) o.hostArgs += L" " + motionsettle::W(v);
+    else if (a == "--calibrate") o.calibrate = true;
+    else if (a == "--calibrate-hold-ms" && next(&v)) o.calibrateHoldMs = static_cast<uint32_t>(std::stoul(v));
+    else if (a == "--ref-file" && next(&v)) o.refFile = motionsettle::W(v);
     else if (a == "--scenes" && next(&v)) {
       o.scenes.clear();
       size_t start = 0;
       while (start <= v.size()) {
         const size_t comma = v.find(',', start);
         const std::string name = v.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        for (int s = 0; s <= static_cast<int>(remote60::native_poc::e2etext::Scene::Noise); ++s) {
+        for (int s = 0; s < remote60::native_poc::e2etext::kSceneCount; ++s) {
           const auto sc = static_cast<remote60::native_poc::e2etext::Scene>(s);
           if (name == remote60::native_poc::e2etext::scene_name(sc)) o.scenes.push_back(sc);
         }
