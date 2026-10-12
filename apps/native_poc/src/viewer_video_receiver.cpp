@@ -709,7 +709,7 @@ void VideoReceiver::run_tcp() {
 
 void VideoReceiver::Run() {
   dec.recvSelectionEpoch = ctx.sel.epoch.load(std::memory_order_acquire);
-  st.statAtUs = qpc_now_us() + 1000000ULL;
+  st.window.Start(qpc_now_us());
   gate.frameIntervalUs = std::max<uint64_t>(
       1ULL, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, args.fpsHint)));
   st.lastPresentCounters = load_present_counters();

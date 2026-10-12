@@ -937,6 +937,14 @@ add_executable(remote60_host_abr_test
 )
 target_include_directories(remote60_host_abr_test PRIVATE src)
 
+# motion-settle r1 M4: the viewer's stats window through the control scheduler to the host ABR (pure).
+add_executable(remote60_viewer_stats_window_test
+  src/viewer_stats_window_test.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_viewer_stats_window_test PRIVATE src)
+target_link_libraries(remote60_viewer_stats_window_test PRIVATE common ws2_32)
+
 # quality r5: the closed loop on the encoder's quantiser ceiling (pure).
 add_executable(remote60_host_rate_governor_test
   src/host_rate_governor_test.cpp

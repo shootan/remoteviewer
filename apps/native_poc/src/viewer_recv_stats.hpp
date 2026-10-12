@@ -16,6 +16,7 @@
 // the locals were initialised.
 
 #include "viewer_common.hpp"
+#include "viewer_stats_window.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -31,7 +32,7 @@ struct PresentCounterSnapshot {
 };
 
 struct RecvStats {
-  uint64_t statAtUs = 0;  // next stats line; set to qpc_now_us() + 1s at thread start
+  StatsWindow window;  // when the next stats line is due; started at thread start (motion-settle M4)
   uint64_t recvFrames = 0;
   uint64_t decodedFrames = 0;
   uint64_t syntheticFrames = 0;  // of decodedFrames: host kick / static-refresh re-encodes (F-10)

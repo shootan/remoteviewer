@@ -67,11 +67,12 @@ void VideoReceiver::append_present_counter_fields(std::ostream& os) {
 }
 
 void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t nowUs,
-    uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal,
+    uint64_t windowUs, uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal,
     uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal,
     double mbpsLocal) {
-    const uint64_t cappedRecvFpsX100 = std::min<uint64_t>(st.recvFrames * 100ULL, 0xFFFFFFFFULL);
-    const uint64_t cappedDecodedFpsX100 = std::min<uint64_t>(st.decodedFrames * 100ULL, 0xFFFFFFFFULL);
+    // Per second of the window that actually elapsed, not per window (motion-settle M4).
+    const uint32_t cappedRecvFpsX100 = StatsWindow::PerSecondX100(st.recvFrames, windowUs);
+    const uint32_t cappedDecodedFpsX100 = StatsWindow::PerSecondX100(st.decodedFrames, windowUs);
     const double mbpsX1000 = mbpsLocal * 1000.0;
     uint32_t recvMbpsX1000 = 0;
     if (mbpsX1000 > 0.0) {
@@ -114,17 +115,20 @@ void VideoReceiver::publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t
 // `codedSize` adds the post-decode copy's " codedSize=" field.
 void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize,
                                        uint32_t codedW, uint32_t codedH) {
-  if (nowUs >= st.statAtUs) {
+  const StatsWindowClose window = st.window.Poll(nowUs);
+  if (window.due) {
     // Real frames only: synthetic ones are excluded from the sums above. (F-10.)
     const uint64_t frames = (st.decodedFrames > st.syntheticFrames) ? (st.decodedFrames - st.syntheticFrames) : 0;
     const uint64_t avgLatencyUs = (frames > 0) ? (st.sumLatencyUs / frames) : 0;
     const uint64_t avgDecodeTailUs = (frames > 0) ? (st.sumDecodeTailUs / frames) : 0;
-    const double mbps = (st.recvBytes * 8.0) / (1000.0 * 1000.0);
-    const double decodedRawMbps = (st.decodedBytes * 8.0) / (1000.0 * 1000.0);
+    const double mbps = StatsWindow::Mbps(st.recvBytes, window.elapsedUs);
+    const double decodedRawMbps = StatsWindow::Mbps(st.decodedBytes, window.elapsedUs);
     const uint64_t decodeRatioX100 =
         (st.recvBytes > 0) ? ((st.decodedBytes * 100ULL) / st.recvBytes) : 0;
-    publish_metrics(w, h, nowUs,
-                    avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
+    if (window.publish) {
+      publish_metrics(w, h, nowUs, window.elapsedUs,
+                      avgLatencyUs, st.maxLatencyUs, avgDecodeTailUs, st.maxDecodeTailUs, mbps);
+    }
     std::ostringstream oss;
     oss << "[native-video-client] recvFrames=" << st.recvFrames
         << " decodedFrames=" << st.decodedFrames
@@ -137,7 +141,9 @@ void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, b
         << " mbps=" << mbps
         << " decodedRawMbps=" << decodedRawMbps
         << " decodeRatioX100=" << decodeRatioX100
-        << " size=" << w << "x" << h;
+        << " size=" << w << "x" << h
+        << " statWindowUs=" << window.elapsedUs
+        << " statPublished=" << (window.publish ? 1 : 0);
     if (codedSize) oss << " codedSize=" << codedW << "x" << codedH;
     fg.append_congestion_fields(oss);
     append_present_counter_fields(oss);
@@ -152,7 +158,6 @@ void VideoReceiver::flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, b
     st.syntheticFrames = 0;
     st.sumDecodeTailUs = 0;
     st.maxDecodeTailUs = 0;
-    st.statAtUs += 1000000ULL;
   }
 }
 
