@@ -400,7 +400,9 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
       std::cout << " settleEpisodes=" << settle.episodes() << " settleSubmitted=" << settle.submitted_total()
                 << " settleEmitted=" << settle.emitted_total() << " settleBytes=" << settle.emitted_bytes_total()
                 << " settleExpired=" << settle.ended_total(SettleEnd::Expired)
-                << " settleCancelled=" << settle.ended_total(SettleEnd::Cancelled);
+                << " settleCancelled=" << settle.ended_total(SettleEnd::Cancelled)
+                << " dipEntries=" << encoder.settleDipEntries << " dipSkippedNearIdr=" << encoder.settleDipSkippedNearIdr
+                << " floorEpisodes=" << encoder.onsetFloorEpisodes << " floorReleases=" << encoder.onsetFloorReleases;
       std::cout << " instance=" << encoder.codec.instance_id() << "\n";
       encoder.qpWindow.Reset();
     }

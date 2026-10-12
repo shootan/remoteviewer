@@ -77,6 +77,23 @@ struct EncoderState {
   uint32_t settleDipRestoreFailures = 0;
   uint64_t settleDipLastExitUs = 0;
   uint64_t settleDipEntries = 0, settleDipExits = 0, settleDipCancelRestores = 0;
+  // The accepted-input ordinal of the last key AU on this instance (0 = none yet), so the dip can stay
+  // clear of the encoder's own periodic IDR: an IDR that lands on a refinement under the dip came out
+  // at slice QP 14-16 and 232 KB, and the next motion frame waited 430-506 ms behind it (gate run r1).
+  uint64_t lastKeyOrdinal = 0;
+  uint64_t lastKeyInstance = 0;
+  uint64_t settleDipSkippedNearIdr = 0;
+  /** Inputs since the last key AU on this instance (UINT64_MAX when unknown). */
+  uint64_t InputsSinceKey() const {
+    if (lastKeyInstance != codec.instance_id() || lastKeyOrdinal == 0) return UINT64_MAX;
+    return codec.accepted_input_count() > lastKeyOrdinal ? codec.accepted_input_count() - lastKeyOrdinal : 0;
+  }
+  /** Inputs until the encoder's own GOP IDR is due on this instance (UINT64_MAX when unknown). */
+  uint64_t InputsUntilGopIdr() const {
+    if (lastKeyInstance != codec.instance_id() || lastKeyOrdinal == 0 || activeKeyint == 0) return UINT64_MAX;
+    const uint64_t since = codec.accepted_input_count() > lastKeyOrdinal ? codec.accepted_input_count() - lastKeyOrdinal : 0;
+    return since >= activeKeyint ? 0 : activeKeyint - since;
+  }
   bool SettleDipActive() const { return settleDipEpisode != 0 && settleDipInstance == codec.instance_id(); }
   // motion-settle r3 (c): a short quantiser FLOOR (MinQP) at the onset of real motion after a still --
   // the encoder's rate control left at a low QP by a refinement starts a motion with frames 1.5-2x

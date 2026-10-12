@@ -360,7 +360,7 @@ int startup_start_capture(HostContext& hx) {
     }
     sc.minSpacingUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_SPACING_MS", 33, 0, 500)) * 1000ULL;
     sc.deadlineUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_DEADLINE_MS", 1000, 100, 3000)) * 1000ULL;
-    kick.settleBytePercent = env_u32_clamped("REMOTE60_NATIVE_SETTLE_BYTE_PCT", 50, 0, 200);
+    kick.settleBytePercent = env_u32_clamped("REMOTE60_NATIVE_SETTLE_BYTE_PCT", 25, 0, 200);
     kick.settle.Configure(sc);
     // r2 F: the temporary settle ceiling (0 = off; AMD legacy live only, decided per instance).
     hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 16, 0, 51);  // r3 candidate: 16 (AMD live only)

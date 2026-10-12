@@ -690,6 +690,10 @@ if ((hdr.flags & 1u) != 0) {
             << " ordinal=" << au.acceptedInputOrdinal << " src=" << synthetic_reason_name(au.syntheticReason)
             << " instance=" << au.codecInstance << " sliceQp=" << au.sliceQp << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
+  if (au.acceptedInputOrdinal != 0) {  // motion-settle r3: where the encoder's own GOP counts from
+    encoder.lastKeyOrdinal = au.acceptedInputOrdinal;
+    encoder.lastKeyInstance = au.codecInstance;
+  }
   encoder.wireSkipAtLastKey = stats.wireOverloadSkipCount;
   // stutter-keyframe r4 G: feed the clamp detector from the AU's PER-AU provenance -- the MFT-accepted
   // input ordinal (real+synthetic), whether that input was a forced key, and a raw NAL5 scan -- not

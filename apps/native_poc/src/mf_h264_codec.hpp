@@ -322,6 +322,8 @@ class H264Encoder {
   // r4 G1: a monotonic id bumped on every successful initialize(), so the clamp detector can reset its
   // latch/baseline on ANY codec reinit path (not just ApplyTarget's main branch) by watching it change.
   uint64_t instance_id() const { return codecInstanceId_; }
+  // motion-settle r3: inputs this instance has accepted so far (the ordinal the next AU's input got).
+  uint64_t accepted_input_count() const { return acceptedInputCounter_; }
   // r4 G3: the MFT clamped the GOP below the policy (post-type readbackGop < requestedGop). Combined
   // with the short self-IDR cadence it distinguishes a real clamp from content scene-change keys.
   bool gop_readback_clamped() const { return gopReadbackClamped_; }

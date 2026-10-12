@@ -51,7 +51,7 @@ struct KickState {
   uint64_t stampClampLastLogUs = 0;     // 1 Hz log rate limit
   // motion-settle r1 M1: the bounded refinement of a screen that just stopped changing (host_settle.hpp).
   SettleRefiner settle;
-  uint32_t settleBytePercent = 50;      // r3: refinement bytes per episode, % of one second of R (0 = none)
+  uint32_t settleBytePercent = 25;      // r3: refinement bytes per episode, % of one second of R (0 = none)
   // r3 candidate: the episode bounds per instance kind. AMD live ceiling: the A bounds measured with
   // F and the onset floor (30 inputs / 3 s); every other instance (NVIDIA, unknown legacy): 8 / 1 s.
   uint32_t settleInputsLive = 30, settleInputsOther = 8;

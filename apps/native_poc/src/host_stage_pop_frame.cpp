@@ -441,7 +441,11 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     }
     const uint32_t submittedBefore = kick.settle.submitted();
     const uint32_t attemptsBefore = kick.settle.attempts();
-    const SettleAction act = kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed);
+    // r3: a refinement must not become the encoder's own periodic IDR (it would be coded at the low QP
+    // the refinement reached): when that IDR is due within two inputs, refinements wait like for a key.
+    const bool gopIdrImminent = encoder.InputsUntilGopIdr() <= 2;
+    const SettleAction act =
+        kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed || gopIdrImminent);
     // r2 F: a key owed to the viewer goes out under the ordinary ceiling, never the dip.
     if (keyOwed && encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "key-owed", true);
     if (act.ended != SettleEnd::None) settle_dip_exit(hx, nowUs, settle_end_name(act.ended), false);
@@ -457,7 +461,14 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       bool changed = encoder.FastPressureEligible() && encoder.rateGovernor.OnCalm();  // calm is M2's
       const bool wireIdle = !sender.auInFlight.load(std::memory_order_acquire) &&
                             sender.pendingReplayCount.load(std::memory_order_relaxed) == 0;
-      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed && encoder.MinQpAtOrdinary() &&
+      // r3: and not when the encoder's own periodic IDR would land inside the episode (it would be coded
+      // under the dip -- a 232 KB key that held the next motion frame for half a second).
+      // ...nor right AFTER a key: the first refinement under the dip after an IDR re-codes the whole
+      // picture (122 KB at slice QP 16 in the gate run) -- the key itself already carries the picture.
+      const uint64_t dipWindow = static_cast<uint64_t>(kick.settle.config().inputs) + 4;
+      const bool nearIdr = encoder.InputsUntilGopIdr() <= dipWindow || encoder.InputsSinceKey() <= dipWindow;
+      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && nearIdr) ++encoder.settleDipSkippedNearIdr;
+      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed && encoder.MinQpAtOrdinary() && !nearIdr &&
           encoder.settleDipDisabledInstance != encoder.codec.instance_id() &&
           (encoder.settleDipLastExitUs == 0 || nowUs >= encoder.settleDipLastExitUs + 500000) &&
           encoder.settleDipQp < encoder.rateGovernor.maxQp()) {
