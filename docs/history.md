@@ -13010,3 +13010,17 @@ Next
 - 근거: Codex SOURCE OK(r9~r14)·Home5 출하 판정, 검증용 독립 빌드, Home PC(Win10 19045, RTX 3070 Ti) r14 행 전부 valid·hang 0(motion 60/6M 41.5fps, text 37.8, 720p 23.6 — 이전 host 둘은 같은 셀에서 정지), 전환 74/74; main 통합 integ157 @09266e5 41/43 + real-recv-smoke + rc-transitions(실패 2 = encode_epoch [3] 간헐, wire_cap_defer 는 출력 리다이렉트 실행 시 이전 코드도 8/8 실패 — ledger).
 - 게시: 버전 commit 5e0e82f, push origin/main=5e0e82f, release --sign gates PASS, NAS manifest 05167241… sig cb5eb786…(서버 디스크 = 로컬), 백업 0.2.156 pair 667b7bbf…/73f39427…, 11 artifact 익명 https 해시 일치. dist/GNLinkSetup-0.2.157.exe.
 - 미검증: 회사 PC DXGI release wedge(exit 44, 별건), NV12 opt-in 실하드웨어, 장시간/WAN, 저rate 1080p 글자 가독성(눈), 실제 호스트의 인앱 업데이트 end-to-end.
+
+### 2026-10-13 viewer-stats-window r1 — 뷰어 통계 창 elapsed 기준(M4) 단독 1차 후보: 실제 체인 e2e·부정 대조·회귀 (fix/viewer-stats-window)
+
+- 목표: 2026-10-12 18:04 현장(회사 PC 뷰어 0.2.156 → 집 AMD 호스트 0.2.157)의 가짜 1 fps 보고 → `high_to_mid_severe` 강등을 **뷰어 쪽 보수만으로** 막는다. 적용점은 **뷰어 업데이트**다(호스트·APK·wire·ABR 임계 불변). 이 항목은 가짜 강등 한 원인만 다룬다 — **글자 복구(motion-settle) 전체 해결이 아니다**(M0 계측·QP trace·Host 정제 M1/F/floor/M2 는 이 브랜치에 없다).
+- 제품(작업용1, 이미 commit): `d84001a` 통계 창 헬퍼 추출(동작 불변) + `7bcfd40` elapsed 기준 창(공백 > 2 s 를 건넌 창은 기록만·미게시, 다음 창 0.5 s, 과거 마감 backlog 없음). 이번 task 의 제품 변경 없음.
+- 시험(이번, commit `039c354`): `remote60_viewer_stats_chain_e2e_test` — 한 프로세스 안에서 제품 `VideoReceiver::Run` + 제품 `ControlClient::Run`(capture_client_control_metrics_snapshot → ClientControlScheduler → 터널 UDP control) 을 격리 GNLinkStream(이 프로세스의 움직이는 창 캡처)에 붙이고, 호스트 자신의 `[abr]`·초당 stats 줄로 판정. 대역: render thread(present anchor 를 찍는 루프), viewer startup 없음(같은 제품 호출을 여기서 수행), decoder 는 공유 D3D device 없이. 공백 = 제품 `StreamStateControl` pause(초기 picker 가 하는 것) → resume.
+- 결과(gap, 같은 GNLinkStream b8fb1a3f… 공유 — M4 는 호스트 파일을 바꾸지 않음):
+  - 7bcfd40: 30 fps × 30/120/180 s, 60 fps × 30/180 s **5/5 PASS** — resume 뒤 ~0.58 s 에 보고 재개, 12% collapse floor 미만 보고 0, 첫 5 s 보고 ≤ 5, 화면은 호스트 송신 cadence(예 28.7/29.4, 47.4/48.0 fps), ABR high 유지.
+  - 같은 harness 를 592ed96 뷰어로(scratch worktree, detached): **5/5 FAIL** — resume 뒤 recvFrames=1 보고 30~186 개, 첫 5 s 35~185 개, **120 s 이상 3 셀에서 호스트 `high_to_mid_severe`(clientDecodedFps=1 evidence=severe_client)**, 180 s@30 은 mid_to_low 까지. 30 s 셀은 폭주가 0.5~1 s 라 강등까지는 안 감(판별은 보고 폭주·가짜 1 fps 로).
+- 실제 장애 강등 보존(relay, 30 fps, 두 뷰어 동일 사유): 25% 영상 손실 `high_to_mid_moderate` · 10 중 9 프레임 손실 `high_to_mid_severe→mid_to_low_severe` · +250 ms `client_emergency` · 영상 전부 차단(control 유지, 보고 중단) `high_to_mid_severe→mid_to_low_severe`(stale_active).
+- 통합 회귀(`run_integ_ref.ps1` 0.2.157 목록, build-local Release): 41/43 + real-recv-smoke + rc-transitions PASS. 실패 분류: cmake_sources_exist 는 harness 미commit 때문(commit 뒤 4/4), host_encode_epoch [3] holdKick 간헐(재실행 5/5 PASS), host_wire_cap_defer 리다이렉트 실행(직접 실행 19/19) — 앞의 둘은 0.2.157 때와 같은 기존 분류.
+- 해시: GNLinkViewer.exe 4103152d…(빌드만, 실행 안 함 — harness 가 같은 뷰어 소스를 링크), GNLinkStream.exe b8fb1a3f…, chain e2e 806421942c…(592ed96 판 57601b9b…), stats_window_test f69668ab…(28/28). 로그 `.claude/e2e_m4/`, 보고 `.claude/report_viewer_stats_r1.md`.
+- 미검증: 실제 현장 경로(회사 PC→집 호스트, WAN·relay), 현장의 공백 원인이던 keyframe 대기·선택 대기 경로 자체(이 시험은 stream pause 로 공백을 만듦), D3D 공유 decoder·실제 present, APK(변경 없음).
+- 다음: 검증용 독립 검사 + Codex 검토 → 뷰어 업데이트 릴리스 여부 결정. scratch worktree `neg-viewer-stats-592` 는 검증용 재현용으로 남김(정리 대상).
