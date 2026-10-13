@@ -113,6 +113,17 @@ struct EncoderState {
   bool onsetFloorReleasePending = false;
   bool onsetFloorRepairDone = false;    // the one repair a failed release may take, per session
   uint64_t onsetFloorEpisodes = 0, onsetFloorReleases = 0;
+  // motion-settle r4: the settle PARK -- the same floor, raised when a refinement train ENDS on a still
+  // screen instead of at the onset (r4 AU trace: after the train AMD RC sits at slice QP 4-8, so the 1 Hz
+  // refresh costs 16 KB and the first motion frame 17-25 KB / 30-50 ms on the wire; the r3 onset floor
+  // fixed the size but its Sets landed in front of the onset frame). Both Sets happen in quiet time: the
+  // park goes up after the train (ordinary ceiling confirmed first), holds through the next motion -- an
+  // unchanged picture under the floor is skip-coded, a motion frame under it is only smaller -- and is
+  // released just before the next train's first refinement. REMOTE60_NATIVE_SETTLE_PARK_QP (0 = off).
+  uint32_t settleParkQp = 0;
+  bool parkWanted = false;              // a train ended on a still screen: raise the park when the ceiling is confirmed
+  bool onsetFloorParked = false;        // the live floor is a park (no input/time release)
+  uint64_t parkEpisodes = 0, parkReleases = 0;
   /** The floor is released and MinQP is confirmed back at the instance's ordinary value. */
   bool MinQpAtOrdinary() const {
     return !onsetFloorActive && !onsetFloorReleasePending &&

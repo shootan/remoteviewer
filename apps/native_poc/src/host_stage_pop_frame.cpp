@@ -138,6 +138,8 @@ void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why) {
   if (!encoder.onsetFloorActive && !encoder.onsetFloorReleasePending) return;
   const bool sameInstance = encoder.onsetFloorInstance == encoder.codec.instance_id();
   encoder.onsetFloorActive = false;
+  const bool wasPark = encoder.onsetFloorParked;
+  encoder.onsetFloorParked = false;
   if (!sameInstance || encoder.codec.ordinary_min_qp() < 0) {
     // A new instance starts at its own ordinary MinQP: nothing of the floor is live on it.
     encoder.onsetFloorReleasePending = false;
@@ -146,8 +148,8 @@ void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why) {
   const RcRuntimeResult r = encoder.codec.set_min_qp(static_cast<uint32_t>(encoder.codec.ordinary_min_qp()));
   const bool ok = r == RcRuntimeResult::Applied || r == RcRuntimeResult::Unchanged;
   encoder.onsetFloorReleasePending = !ok;
-  if (ok) ++encoder.onsetFloorReleases;
-  std::cout << "[native-video-host][onset-floor] release why=" << why << " ok=" << (ok ? 1 : 0)
+  if (ok) ++(wasPark ? encoder.parkReleases : encoder.onsetFloorReleases);
+  std::cout << "[native-video-host][onset-floor] release why=" << why << " park=" << (wasPark ? 1 : 0) << " ok=" << (ok ? 1 : 0)
             << " minQp=" << encoder.codec.confirmed_min_qp() << " ordinaryMin=" << encoder.codec.ordinary_min_qp()
             << " inputs=" << encoder.onsetFloorInputs
             << " heldMs=" << ((nowUs > encoder.onsetFloorStartUs) ? (nowUs - encoder.onsetFloorStartUs) / 1000 : 0) << "\n";
@@ -203,6 +205,39 @@ void onset_floor_begin(HostContext& hx, uint64_t nowUs) {
   }
 }
 
+void settle_park_begin(HostContext& hx, uint64_t nowUs) {
+  EncoderState& encoder = hx.encoder;
+  if (!encoder.parkWanted) return;
+  if (encoder.settleParkQp == 0 || encoder.onsetFloorDisabled || !encoder.LiveCeilingEligible() ||
+      encoder.codec.ordinary_min_qp() < 0) {
+    encoder.parkWanted = false;
+    return;
+  }
+  if (encoder.onsetFloorActive || encoder.onsetFloorReleasePending || encoder.forceKeyNext) return;
+  // Same order as the onset floor (Codex r3 s4): the ordinary ceiling CONFIRMED in force first. A dip
+  // whose restore is still deferred keeps the park wanted; the next tick tries again.
+  const uint32_t ordinaryMax = encoder.rateGovernor.maxQp();
+  if (encoder.SettleDipActive() || encoder.codec.plan_max_qp() != ordinaryMax || !encoder.codec.rc_max_qp_field_applied()) return;
+  encoder.parkWanted = false;
+  const uint32_t parkQp = std::min(encoder.settleParkQp, ordinaryMax);
+  if (static_cast<int32_t>(parkQp) <= encoder.codec.ordinary_min_qp()) return;
+  encoder.onsetFloorActive = true;
+  encoder.onsetFloorParked = true;
+  encoder.onsetFloorStartUs = nowUs;
+  encoder.onsetFloorInstance = encoder.codec.instance_id();
+  encoder.onsetFloorInputs = 0;
+  ++encoder.parkEpisodes;
+  const RcRuntimeResult r = encoder.codec.set_min_qp(parkQp);
+  const bool ok = r == RcRuntimeResult::Applied || r == RcRuntimeResult::Unchanged;
+  std::cout << "[native-video-host][onset-floor] park floor=" << parkQp << " ok=" << (ok ? 1 : 0)
+            << " maxQp=" << encoder.codec.plan_max_qp() << " parks=" << encoder.parkEpisodes << "\n";
+  if (!ok) {
+    ++encoder.onsetFloorFailures;
+    encoder.onsetFloorReleasePending = true;
+    onset_floor_release(hx, nowUs, "park-failed");
+  }
+}
+
 void onset_floor_tick(HostContext& hx, uint64_t nowUs) {
   EncoderState& encoder = hx.encoder;
   if (encoder.onsetFloorReleasePending && !encoder.onsetFloorActive) {
@@ -210,6 +245,11 @@ void onset_floor_tick(HostContext& hx, uint64_t nowUs) {
     return;
   }
   if (!encoder.onsetFloorActive) return;
+  // r4: a park holds until the next train (released there) -- only another instance ends it here.
+  if (encoder.onsetFloorParked) {
+    if (encoder.onsetFloorInstance != encoder.codec.instance_id()) onset_floor_release(hx, nowUs, "instance");
+    return;
+  }
   // Ends by wall time even when no frame comes (a still after a short motion), by real accepted
   // inputs, by an instance change or an owed key -- never extended by further content changes.
   if (encoder.onsetFloorInstance != encoder.codec.instance_id()) onset_floor_release(hx, nowUs, "instance");
@@ -314,6 +354,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // A dip left over from an instance that is gone ends here (nothing of it is live).
   if (encoder.settleDipEpisode != 0 && !encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "instance-changed", false);
   onset_floor_tick(hx, nowUs);  // r3 (c): the floor ends by wall time even when no frame arrives
+  settle_park_begin(hx, nowUs);  // r4: a park wanted after a train goes up once the ceiling is confirmed
   if (encoder.ceilingDirty && encoder.fastPressure.CanSetNow(nowUs)) apply_effective_ceiling(hx, nowUs, "deferred", false);
  
  
@@ -480,6 +521,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     // r2 F: a key owed to the viewer goes out under the ordinary ceiling, never the dip.
     if (keyOwed && encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "key-owed", true);
     if (act.ended != SettleEnd::None) settle_dip_exit(hx, nowUs, settle_end_name(act.ended), false);
+    // r4 park: a train that ran out on a still screen (not superseded by new content, not cancelled by
+    // an identity change) leaves the RC low -- park it once the ceiling is confirmed.
+    if (act.ended == SettleEnd::Complete || act.ended == SettleEnd::Expired || act.ended == SettleEnd::Budget)
+      encoder.parkWanted = encoder.settleParkQp > 0;
+    // ...and the next train's first refinement goes out with the ordinary MinQP again (quiet time).
+    if (act.serve && encoder.onsetFloorParked) onset_floor_release(hx, nowUs, "settle-start");
     // M2's explicit calm and F's dip, decided together at every refinement the episode serves (a serve
     // means the queue is empty and no real frame waits), and applied as ONE Set:
     //  - calm: quiet, nothing new, the backlog drained -- the fast boost and the slow ladder back to the

@@ -403,7 +403,8 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " settleCancelled=" << settle.ended_total(SettleEnd::Cancelled)
                 << " dipEntries=" << encoder.settleDipEntries << " dipSkippedNearIdr=" << encoder.settleDipSkippedNearIdr
                 << " floorEpisodes=" << encoder.onsetFloorEpisodes << " floorReleases=" << encoder.onsetFloorReleases
-                << " catchupOwed=" << hx.kick.catchupOwedTotal << " catchupServed=" << hx.kick.catchupCount;
+                << " catchupOwed=" << hx.kick.catchupOwedTotal << " catchupServed=" << hx.kick.catchupCount
+                << " parks=" << encoder.parkEpisodes << " parkReleases=" << encoder.parkReleases;
       std::cout << " instance=" << encoder.codec.instance_id() << "\n";
       encoder.qpWindow.Reset();
     }

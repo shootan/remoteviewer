@@ -145,6 +145,7 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
       const uint64_t lastChangeUs = kick.settle.last_change_us();
       const bool afterStill = lastChangeUs != 0 && queuePopUs >= lastChangeUs + kick.settle.config().quietUs;
       settle_dip_exit(hx, queuePopUs, "new-content", true);
+      encoder.parkWanted = false;  // r4: motion before the park went up -- no Set in front of this frame
       if (afterStill) onset_floor_begin(hx, queuePopUs);
       kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);
     }
@@ -159,6 +160,7 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc) {
     const uint64_t lastChangeUs = kick.settle.last_change_us();
     const bool afterStill = lastChangeUs != 0 && queuePopUs >= lastChangeUs + kick.settle.config().quietUs;
     settle_dip_exit(hx, queuePopUs, "new-content", true);
+    encoder.parkWanted = false;
     if (afterStill) onset_floor_begin(hx, queuePopUs);
     kick.settle.NoteRealChange(queuePopUs, settle_identity_now(hx), version);  // no gate: every capture is a change
   }

@@ -367,6 +367,8 @@ int startup_start_capture(HostContext& hx) {
     // r3 (c): the onset floor (0 = off); its bounds are clamped to the comparison ceilings 8 / 500 ms.
     // r4: the onset floor is out of the candidate (NO-GO for first-reaction p95); 0 = off, opt-in only.
     hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 0, 0, 51);
+    // r4: the settle park (host_encoder_manager.hpp), 0 = off.
+    hx.encoder.settleParkQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_PARK_QP", 0, 0, 51);
     // r4: latest-content catch-up (host_kick.hpp), on by default.
     {
       const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
@@ -378,7 +380,8 @@ int startup_start_capture(HostContext& hx) {
               << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
               << " deadlineMs=" << sc.deadlineUs / 1000 << " live=" << kick.settleInputsLive << "/" << kick.settleDeadlineLiveUs / 1000 << "ms other=" << kick.settleInputsOther << "/" << kick.settleDeadlineOtherUs / 1000 << "ms bytePct=" << kick.settleBytePercent << " dipQp=" << hx.encoder.settleDipQp
               << " onsetFloorQp=" << hx.encoder.onsetFloorQp << " floorInputs=" << hx.encoder.onsetFloorMaxInputs
-              << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << " catchup=" << (kick.catchupEnabled ? 1 : 0) << "\n";
+              << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << " catchup=" << (kick.catchupEnabled ? 1 : 0)
+              << " parkQp=" << hx.encoder.settleParkQp << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

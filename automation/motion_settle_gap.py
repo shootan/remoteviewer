@@ -1,6 +1,9 @@
 """motion-settle r3: decompose the onset's worst first-second gap into where the time went.
 
-    python motion_settle_gap.py <run dir> [scene prefix]
+    python motion_settle_gap.py <run dir> [scene prefix] [--first]
+
+--first (r4): decompose the FIRST REACTION instead -- the first decoded picture newer than the pre-onset
+one, waited for from the onset paint.
 
 For every episode (optionally only scenes starting with the prefix): the decoded picture that ended the
 longest wait in the first second after the onset paint, and its path, joined by host seq:
@@ -22,7 +25,7 @@ import sys
 KV = re.compile(r"(\w+)=(\S+)")
 
 
-def main(d, prefix=""):
+def main(d, prefix="", first=False):
     eps = [e for e in csv.DictReader(open(os.path.join(d, "episodes.csv"), encoding="utf-8")) if e["scene"].startswith(prefix)]
     dl = list(csv.DictReader(open(os.path.join(d, "deliveries.csv"), encoding="utf-8")))
     paints = {}
@@ -54,6 +57,9 @@ def main(d, prefix=""):
                 if worst is None or g > worst[0]:
                     worst = (g, at, i, seq, start)
                 shown, prev = i, at
+        if first:
+            fr = next(((at, i, seq) for at, i, seq in rows if i >= onset), None)
+            worst = (fr[0] - onUs, fr[0], fr[1], fr[2], onUs) if fr else None
         if not worst:
             continue
         g, at, i, seq, start = worst
@@ -76,4 +82,5 @@ def main(d, prefix=""):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "")
+    pos = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(pos[0], pos[1] if len(pos) > 1 else "", "--first" in sys.argv)
