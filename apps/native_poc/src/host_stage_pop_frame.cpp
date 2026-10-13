@@ -379,6 +379,37 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
     }
   }
+  // motion-settle r4: latest-content catch-up (host_kick.hpp) -- the picture the input gate skipped,
+  // two frame periods after the last skip, as an ordinary P once the sender queue has drained. Never
+  // ahead of a newer real capture (that one carries the content itself) or a key the viewer is owed
+  // (the kick's job).
+  if (!servedBootstrap && useH264 && clientSession.streamControlActive.load(std::memory_order_acquire) &&
+      kick.CatchupDue(nowUs)) {
+    bool blocked = false;
+    if (transport == VideoTransport::Udp) {
+      std::lock_guard<std::mutex> lk(sender.mu);
+      blocked = sender.waitingForKey || !sender.queue.empty();
+    }
+    {
+      std::lock_guard<std::mutex> lk(res.frame.mu);
+      if (res.frame.version != stats.lastVersionSent && res.frame.payload && !res.frame.payload->empty()) blocked = true;
+    }
+    if (!blocked && !encoder.forceKeyNext) {
+      if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+        servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonCatchup;
+        ++kick.catchupCount;
+        seq = 0;
+        version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+        streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+        captureUs = nowUs;
+        callbackUs = nowUs;
+        queuePushUs = nowUs;
+      } else {
+        kick.catchupOwed = false;  // a failed fill (locked/secure/identity) paints nothing, like the kick
+      }
+    }
+  }
   // Periodic static refresh (user requirement): on a still screen duplication offers no content
   // and the trailing kick is one-shot, so NOTHING is sent and the session looks frozen (the
   // field case: a static game map, revived only by dragging it). Re-serve the cached frame at a

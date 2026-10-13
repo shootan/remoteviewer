@@ -365,14 +365,20 @@ int startup_start_capture(HostContext& hx) {
     // r2 F: the temporary settle ceiling (0 = off; AMD legacy live only, decided per instance).
     hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 16, 0, 51);  // r3 candidate: 16 (AMD live only)
     // r3 (c): the onset floor (0 = off); its bounds are clamped to the comparison ceilings 8 / 500 ms.
-    hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 26, 0, 51);  // r3 candidate: 26 (AMD live only)
+    // r4: the onset floor is out of the candidate (NO-GO for first-reaction p95); 0 = off, opt-in only.
+    hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 0, 0, 51);
+    // r4: latest-content catch-up (host_kick.hpp), on by default.
+    {
+      const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
+      kick.catchupEnabled = !(v && v[0] == '0');
+    }
     hx.encoder.onsetFloorMaxInputs = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_INPUTS", 4, 1, 8);
     hx.encoder.onsetFloorMaxUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_MS", 250, 50, 500)) * 1000ULL;
     std::cout << "[native-video-host] settle enabled=" << (sc.enabled ? 1 : 0) << " quietMs=" << sc.quietUs / 1000
               << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
               << " deadlineMs=" << sc.deadlineUs / 1000 << " live=" << kick.settleInputsLive << "/" << kick.settleDeadlineLiveUs / 1000 << "ms other=" << kick.settleInputsOther << "/" << kick.settleDeadlineOtherUs / 1000 << "ms bytePct=" << kick.settleBytePercent << " dipQp=" << hx.encoder.settleDipQp
               << " onsetFloorQp=" << hx.encoder.onsetFloorQp << " floorInputs=" << hx.encoder.onsetFloorMaxInputs
-              << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << "\n";
+              << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << " catchup=" << (kick.catchupEnabled ? 1 : 0) << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

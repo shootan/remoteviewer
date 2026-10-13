@@ -77,12 +77,14 @@ constexpr uint8_t kSyntheticReasonNone = 0;          // a real capture
 constexpr uint8_t kSyntheticReasonKick = 1;          // trailing-edge kick (host_kick.hpp)
 constexpr uint8_t kSyntheticReasonStaticRefresh = 2; // the periodic static refresh
 constexpr uint8_t kSyntheticReasonSettle = 3;        // a settle-refinement input (motion-settle M1)
+constexpr uint8_t kSyntheticReasonCatchup = 4;       // the latest picture the input gate skipped (motion-settle r4)
 inline const char* synthetic_reason_name(uint8_t r) {
   switch (r) {
     case kSyntheticReasonNone: return "real";
     case kSyntheticReasonKick: return "kick";
     case kSyntheticReasonStaticRefresh: return "static_refresh";
     case kSyntheticReasonSettle: return "settle";
+    case kSyntheticReasonCatchup: return "catchup";
     default: return "unknown";
   }
 }

@@ -57,6 +57,19 @@ struct KickState {
   uint32_t settleInputsLive = 30, settleInputsOther = 8;
   uint64_t settleDeadlineLiveUs = 3000000, settleDeadlineOtherUs = 1000000;
   uint64_t settleLastLogUs = 0;         // its episode lines are rate limited to 2/s
+  // motion-settle r4 (Codex split-metrics): latest-content delivery, separate from the refinement train.
+  // A real capture the wire-cap input gate skipped is the newest content and nothing else re-serves it
+  // promptly: the trailing kick only flushes an input the MFT already holds, the settle train waits for
+  // a quiet, the static refresh is 1 Hz. So a skip owes a catch-up: the cached picture once, two frame
+  // periods after the LAST skip (a skip during continuous motion pushes it out; any accepted input
+  // clears it -- a newer real frame or any re-serve of the cache carries the latest content). Not a
+  // refinement: no quota, no quiet, no byte budget; but no admit-always either (an ordinary P that
+  // waits for an empty sender queue like any delta). REMOTE60_NATIVE_CATCHUP=0 turns it off.
+  bool catchupEnabled = true;
+  bool catchupOwed = false;
+  uint64_t catchupDueUs = 0;
+  uint64_t catchupCount = 0;            // telemetry: catch-up submits
+  uint64_t catchupOwedTotal = 0;        // telemetry: skips that opened a debt
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
@@ -76,6 +89,19 @@ struct KickState {
     pending = false;
     dueAtUs = 0;
   }
+
+  // r4 catch-up: the input gate skipped a real capture (or a catch-up) at `atUs`.
+  void NoteAdmissionSkip(uint64_t atUs, uint32_t fps) {
+    if (!catchupEnabled) return;
+    if (!catchupOwed) ++catchupOwedTotal;
+    catchupOwed = true;
+    const uint64_t delayUs = fps > 0 ? std::clamp<uint64_t>(2000000ULL / fps, 15000, kTrailingKickDelayUs)
+                                     : kTrailingKickDelayUs;
+    catchupDueUs = atUs + delayUs;
+  }
+  // Any input the gate admitted carries the newest content: the debt is paid.
+  void NoteInputAdmitted() { catchupOwed = false; }
+  bool CatchupDue(uint64_t nowUs) const { return catchupOwed && nowUs >= catchupDueUs; }
 
   // --- decisions (Phase 2-T3: the former stage_pop_frame conditions, pure on this state) ---
   // The armed trailing edge has arrived.

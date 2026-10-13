@@ -329,13 +329,19 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
      // A settle refinement is an ordinary P under the cap: no admit-always (motion-settle r1 M1).
-     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonSettle;
+     // r4: nor is a catch-up (latest content, but an ordinary delta like the frame it replaces).
+     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonSettle &&
+                           tc.syntheticReason != kSyntheticReasonCatchup;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
+       // r4: the skipped picture is the newest content -- owe it a prompt catch-up (host_kick.hpp).
+       if (!servedBootstrap || tc.syntheticReason == kSyntheticReasonCatchup)
+         kick.NoteAdmissionSkip(qpc_now_us(), hx.encoder.activeFps);
        return Flow::Continue;
      }
    }
+   kick.NoteInputAdmitted();
    // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
    if (forceKeyFrame) {
      if (scheduledKey) encoder.keyReasons |= kHostKeyReasonScheduled;

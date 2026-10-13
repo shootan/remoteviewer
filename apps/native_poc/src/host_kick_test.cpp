@@ -120,7 +120,32 @@ void TestRealStampClampedBehindSyntheticStamp() {
   expect(k.lastEncoderStampUs == late2, "stamp: the record only moves forward");
 }
 
+// motion-settle r4: a skipped picture owes one catch-up two frame periods after the LAST skip; any
+// admitted input pays it; off means never owed.
+void TestCatchupDebt() {
+  KickState k;
+  expect(!k.CatchupDue(10 * kSec), "catchup: nothing owed at start");
+  k.NoteAdmissionSkip(10 * kSec, 30);  // 2/30 s = 66.666 ms
+  expect(k.catchupOwed && k.catchupOwedTotal == 1, "catchup: a skip opens a debt");
+  expect(!k.CatchupDue(10 * kSec + 66000), "catchup: not before two frame periods");
+  k.NoteAdmissionSkip(10 * kSec + 50000, 30);  // continuous motion: a later skip pushes it out
+  expect(k.catchupOwedTotal == 1, "catchup: a second skip is the same debt");
+  expect(!k.CatchupDue(10 * kSec + 100000), "catchup: due follows the last skip");
+  expect(k.CatchupDue(10 * kSec + 50000 + 66667), "catchup: due two frame periods after the last skip");
+  k.NoteInputAdmitted();
+  expect(!k.CatchupDue(20 * kSec), "catchup: an admitted input pays the debt");
+  k.NoteAdmissionSkip(30 * kSec, 0);  // unknown fps: the trailing-kick delay
+  expect(!k.CatchupDue(30 * kSec + KickState::kTrailingKickDelayUs - 1) &&
+             k.CatchupDue(30 * kSec + KickState::kTrailingKickDelayUs),
+         "catchup: unknown fps uses the 150 ms trailing delay");
+  KickState off;
+  off.catchupEnabled = false;
+  off.NoteAdmissionSkip(10 * kSec, 30);
+  expect(!off.catchupOwed && !off.CatchupDue(20 * kSec), "catchup: off never owes");
+}
+
 int main() {
+  TestCatchupDebt();
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();
