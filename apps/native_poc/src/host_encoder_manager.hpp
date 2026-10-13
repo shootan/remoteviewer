@@ -124,6 +124,15 @@ struct EncoderState {
   bool parkWanted = false;              // a train ended on a still screen: raise the park when the ceiling is confirmed
   bool onsetFloorParked = false;        // the live floor is a park (no input/time release)
   uint64_t parkEpisodes = 0, parkReleases = 0;
+  // r4 train floor: the MinQP a refinement train runs under (0 = the ordinary MinQP, the park released).
+  // The r4 trace: a motion that restarts INSIDE a train (no park yet) or the encoder's GOP IDR there is
+  // coded at the train's slice QP 4-10 (16-31 KB first frames, a 147 KB IDR). With a train floor the RC
+  // never goes below it; F's dip ceiling is then max(dip, train floor) so MinQP <= MaxQP holds.
+  // REMOTE60_NATIVE_SETTLE_TRAIN_MIN_QP.
+  uint32_t settleTrainMinQp = 0;
+  uint32_t floorHeldQp = 0;             // the MinQP the live park/train floor set (0 = none)
+  /** F's ceiling while the dip holds: never below the train floor. */
+  uint32_t DipCeilingQp() const { return std::max(settleDipQp, settleTrainMinQp); }
   /** The floor is released and MinQP is confirmed back at the instance's ordinary value. */
   bool MinQpAtOrdinary() const {
     return !onsetFloorActive && !onsetFloorReleasePending &&
@@ -132,7 +141,7 @@ struct EncoderState {
   /** The ceiling the live instance should run now: the dip while it holds, else the ordinary desired. */
   uint32_t EffectiveDesiredQp() const {
     const uint32_t ordinary = rateGovernor.maxQp();
-    return SettleDipActive() ? std::min(ordinary, settleDipQp) : ordinary;
+    return SettleDipActive() ? std::min(ordinary, DipCeilingQp()) : ordinary;
   }
   // Whether the fast path may act on this instance: the governor is on, the instance is the AMD legacy
   // profile with a live ceiling. An unknown legacy MFT keeps the slow loop only; a static-ceiling

@@ -224,6 +224,7 @@ void onset_floor_begin(HostContext& hx, uint64_t nowUs);
 void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why);
 void onset_floor_tick(HostContext& hx, uint64_t nowUs);
 void settle_park_begin(HostContext& hx, uint64_t nowUs);
+bool settle_floor_to(HostContext& hx, uint64_t nowUs, uint32_t qp, const char* why);
 // requestedMonitorDevice: for a monitor-select target (monitor_select_target.hpp), the screen the
 // control thread resolved it to; empty otherwise. t-970r4zgo.
 bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,

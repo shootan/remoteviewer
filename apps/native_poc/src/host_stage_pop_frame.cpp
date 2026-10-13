@@ -112,7 +112,7 @@ void apply_effective_ceiling(HostContext& hx, uint64_t nowUs, const char* why, b
     encoder.settleDipRestoreFailures = 0;
   }
   std::cout << "[native-video-host][rate-governor] ceiling why=" << why << " effective=" << rc.desired
-            << " ordinary=" << ordinary << " dip=" << (encoder.SettleDipActive() ? encoder.settleDipQp : 0)
+            << " ordinary=" << ordinary << " dip=" << (encoder.SettleDipActive() ? encoder.DipCeilingQp() : 0)
             << " codecBefore=" << rc.codecBefore << " attempted=" << (rc.attempted ? 1 : 0)
             << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
                               : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
@@ -140,6 +140,7 @@ void onset_floor_release(HostContext& hx, uint64_t nowUs, const char* why) {
   encoder.onsetFloorActive = false;
   const bool wasPark = encoder.onsetFloorParked;
   encoder.onsetFloorParked = false;
+  encoder.floorHeldQp = 0;
   if (!sameInstance || encoder.codec.ordinary_min_qp() < 0) {
     // A new instance starts at its own ordinary MinQP: nothing of the floor is live on it.
     encoder.onsetFloorReleasePending = false;
@@ -213,29 +214,50 @@ void settle_park_begin(HostContext& hx, uint64_t nowUs) {
     encoder.parkWanted = false;
     return;
   }
-  if (encoder.onsetFloorActive || encoder.onsetFloorReleasePending || encoder.forceKeyNext) return;
-  // Same order as the onset floor (Codex r3 s4): the ordinary ceiling CONFIRMED in force first. A dip
-  // whose restore is still deferred keeps the park wanted; the next tick tries again.
-  const uint32_t ordinaryMax = encoder.rateGovernor.maxQp();
-  if (encoder.SettleDipActive() || encoder.codec.plan_max_qp() != ordinaryMax || !encoder.codec.rc_max_qp_field_applied()) return;
-  encoder.parkWanted = false;
-  const uint32_t parkQp = std::min(encoder.settleParkQp, ordinaryMax);
-  if (static_cast<int32_t>(parkQp) <= encoder.codec.ordinary_min_qp()) return;
+  if ((encoder.onsetFloorActive && !encoder.onsetFloorParked) || encoder.onsetFloorReleasePending || encoder.forceKeyNext) return;
+  // Same order as the onset floor (Codex r3 s4): the ordinary ceiling CONFIRMED in force first (the dip
+  // gone). A dip whose restore is still deferred keeps the park wanted; the next tick tries again.
+  if (encoder.SettleDipActive()) return;
+  if (settle_floor_to(hx, nowUs, encoder.settleParkQp, "park")) {
+    encoder.parkWanted = false;
+    ++encoder.parkEpisodes;
+  }
+}
+
+// r4: move the held park/train floor to `qp` (0 = back to the instance's ordinary MinQP). Raising it
+// needs the ceiling in force CONFIRMED at or above qp (MinQP <= MaxQP at every step); returns false to
+// be retried when it is not. A failed Set takes the floor's failure path (budget 3, then repair).
+bool settle_floor_to(HostContext& hx, uint64_t nowUs, uint32_t qp, const char* why) {
+  EncoderState& encoder = hx.encoder;
+  if (qp == 0 || static_cast<int32_t>(qp) <= encoder.codec.ordinary_min_qp()) {
+    if (encoder.onsetFloorActive && encoder.onsetFloorParked) onset_floor_release(hx, nowUs, why);
+    return true;
+  }
+  if (encoder.onsetFloorDisabled || !encoder.LiveCeilingEligible() || encoder.codec.ordinary_min_qp() < 0) return true;
+  if (encoder.onsetFloorActive && !encoder.onsetFloorParked) return false;  // an onset floor owns MinQP
+  if (encoder.onsetFloorReleasePending) return false;
+  if (encoder.onsetFloorActive && encoder.floorHeldQp == qp && encoder.onsetFloorInstance == encoder.codec.instance_id())
+    return true;
+  const uint32_t ceiling = encoder.codec.plan_max_qp();
+  if (ceiling != encoder.EffectiveDesiredQp() || !encoder.codec.rc_max_qp_field_applied()) return false;
+  qp = std::min(qp, ceiling);
   encoder.onsetFloorActive = true;
   encoder.onsetFloorParked = true;
   encoder.onsetFloorStartUs = nowUs;
   encoder.onsetFloorInstance = encoder.codec.instance_id();
   encoder.onsetFloorInputs = 0;
-  ++encoder.parkEpisodes;
-  const RcRuntimeResult r = encoder.codec.set_min_qp(parkQp);
+  const RcRuntimeResult r = encoder.codec.set_min_qp(qp);
   const bool ok = r == RcRuntimeResult::Applied || r == RcRuntimeResult::Unchanged;
-  std::cout << "[native-video-host][onset-floor] park floor=" << parkQp << " ok=" << (ok ? 1 : 0)
-            << " maxQp=" << encoder.codec.plan_max_qp() << " parks=" << encoder.parkEpisodes << "\n";
+  std::cout << "[native-video-host][onset-floor] " << why << " floor=" << qp << " ok=" << (ok ? 1 : 0)
+            << " maxQp=" << ceiling << " parks=" << encoder.parkEpisodes << "\n";
   if (!ok) {
     ++encoder.onsetFloorFailures;
     encoder.onsetFloorReleasePending = true;
-    onset_floor_release(hx, nowUs, "park-failed");
+    onset_floor_release(hx, nowUs, "floor-failed");
+    return true;  // not retried: the failure path owns it now
   }
+  encoder.floorHeldQp = qp;
+  return true;
 }
 
 void onset_floor_tick(HostContext& hx, uint64_t nowUs) {
@@ -526,7 +548,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     if (act.ended == SettleEnd::Complete || act.ended == SettleEnd::Expired || act.ended == SettleEnd::Budget)
       encoder.parkWanted = encoder.settleParkQp > 0;
     // ...and the next train's first refinement goes out with the ordinary MinQP again (quiet time).
-    if (act.serve && encoder.onsetFloorParked) onset_floor_release(hx, nowUs, "settle-start");
+    // With a train floor the park only moves down to it (both Sets in quiet time, the ceiling still the
+    // ordinary one -- the dip goes on after, never below the floor).
+    if (act.serve && !encoder.SettleDipActive()) {
+      if (encoder.settleTrainMinQp > 0) settle_floor_to(hx, nowUs, encoder.settleTrainMinQp, "train");
+      else if (encoder.onsetFloorParked) onset_floor_release(hx, nowUs, "settle-start");
+    }
     // M2's explicit calm and F's dip, decided together at every refinement the episode serves (a serve
     // means the queue is empty and no real frame waits), and applied as ONE Set:
     //  - calm: quiet, nothing new, the backlog drained -- the fast boost and the slow ladder back to the
@@ -546,10 +573,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       const uint64_t dipWindow = static_cast<uint64_t>(kick.settle.config().inputs) + 4;
       const bool nearIdr = encoder.InputsUntilGopIdr() <= dipWindow || encoder.InputsSinceKey() <= dipWindow;
       if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && nearIdr) ++encoder.settleDipSkippedNearIdr;
-      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed && encoder.MinQpAtOrdinary() && !nearIdr &&
+      const bool minQpFits = encoder.MinQpAtOrdinary() ||
+                             (encoder.onsetFloorParked && !encoder.onsetFloorReleasePending && encoder.floorHeldQp <= encoder.DipCeilingQp());
+      if (encoder.settleDipQp > 0 && encoder.settleDipEpisode == 0 && wireIdle && !keyOwed && minQpFits && !nearIdr &&
           encoder.settleDipDisabledInstance != encoder.codec.instance_id() &&
           (encoder.settleDipLastExitUs == 0 || nowUs >= encoder.settleDipLastExitUs + 500000) &&
-          encoder.settleDipQp < encoder.rateGovernor.maxQp()) {
+          encoder.DipCeilingQp() < encoder.rateGovernor.maxQp()) {
         encoder.settleDipEpisode = kick.settle.episodes();
         encoder.settleDipInstance = encoder.codec.instance_id();
         ++encoder.settleDipEntries;
