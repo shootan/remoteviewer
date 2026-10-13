@@ -31,7 +31,9 @@
 // The impairment scenarios put a relay of this process between the viewer and the host; gap does not.
 //
 //   remote60_viewer_stats_chain_e2e_test --scenario gap|loss|thin|delay|stop [--fps N] [--gap-sec N]
-//       [--warm-sec N] [--after-sec N] [--impair-sec N] [--bitrate N] [--out DIR]
+//       [--warm-sec N] [--after-sec N] [--impair-sec N] [--bitrate N] [--out DIR] [--watchdog-sec N]
+//   A watchdog ends any run that has not finished by the host's --seconds + 240 s as a FAIL (exit 3);
+//   --watchdog-sec overrides that bound (to show it works).
 //   --out DIR keeps host.log and viewer.log there (the staging directory itself is removed).
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
@@ -410,6 +412,7 @@ int wmain(int argc, wchar_t** argv) {
   int warmSec = 15, gapSec = 120, afterSec = 25, impairSec = 20;
   uint32_t bitrate = 6000000;
   std::wstring outDir;
+  int watchdogOverrideSec = 0;  // --watchdog-sec N: only to show the watchdog ends a run (r2)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     const bool more = i + 1 < argc;
@@ -428,6 +431,8 @@ int wmain(int argc, wchar_t** argv) {
       impairSec = _wtoi(argv[++i]);
     } else if (a == L"--bitrate" && more) {
       bitrate = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--watchdog-sec" && more) {
+      watchdogOverrideSec = _wtoi(argv[++i]);
     } else if (a == L"--out" && more) {
       outDir = argv[++i];
       if (!outDir.empty() && outDir.back() != L'\\' && outDir.back() != L'/') outDir += L"\\";
@@ -483,6 +488,18 @@ int wmain(int argc, wchar_t** argv) {
   // The host runs a little past the viewer, so it exits by itself and its stdout file is complete.
   const int runSec = warmSec + (gapRun ? gapSec : impairSec) + afterSec;
   const int hostSec = runSec + 25;
+  // Bounded whatever happens: past this the run is a FAIL. Written straight to the stdout handle (no CRT
+  // lock, which is exactly what a stuck run may be holding) and the process ends; closing the job then
+  // kills the isolated host.
+  const int watchdogSec = watchdogOverrideSec > 0 ? watchdogOverrideSec : hostSec + 240;
+  std::thread([watchdogSec] {
+    std::this_thread::sleep_for(std::chrono::seconds(watchdogSec));
+    const std::string line = "\nFAIL  watchdog: the run did not finish within " + std::to_string(watchdogSec) +
+                             " s\nviewer_stats_chain_e2e_test: FAIL\nRESULT: FAIL\n";
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    TerminateProcess(GetCurrentProcess(), 3);
+  }).detach();
   const std::wstring hostLogPath = dir + L"host.log";
   HANDLE hostLog = INVALID_HANDLE_VALUE;
   PROCESS_INFORMATION hostPi{};
@@ -644,10 +661,15 @@ int wmain(int argc, wchar_t** argv) {
     return static_cast<uint64_t>(std::count_if(realFrameUs.begin(), realFrameUs.end(),
                                                [&](uint64_t t) { return t >= fromUs && t < toUs; }));
   };
+  // The harness's own lines while the product threads run. NOT by swapping std::cout's buffer: MSVC's
+  // ostream sentry locks rdbuf() on entry and unlocks rdbuf() on exit, so a product thread that began a
+  // line on the console buffer and finished it after the swap back left the CRT stdout lock held -- the
+  // next harness write to stdout then waited forever (r2: seen under Start-Process -RedirectStandardOutput).
+  // stdout itself is untouched by the tee, so write there.
   auto say = [&](const std::string& s) {
-    std::cout.rdbuf(consoleBuf);
-    std::cout << s << "\n";
-    std::cout.rdbuf(&tee);
+    const std::string line = s + "\n";
+    std::fwrite(line.data(), 1, line.size(), stdout);
+    std::fflush(stdout);
   };
 
   uint64_t firstFrameUs = 0, eventUs = 0, eventEndUs = 0, endUs = 0;
