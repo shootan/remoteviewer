@@ -13021,3 +13021,10 @@ Next
 - 후보 `4510721`(8304715 + GOP IDR 회피 가드·바이트 예산 25%; AMD live: 30 입력/3 s·dip16·floor26, 기타 8/1 s) 판정 행렬(AMD WGC, 9 장면 × 20 × 3 회 × 4.5M/6M/1.5M, 공용 reference, censored 포함): reference−1 dB 도달 대폭 증가(4.5M minrestore 0→40/60, 1.5M stopstart 1→56/60), glyph@1 s 4.5M minrestore 36→54 dB·noise 31→48 dB, noise T_final 1.8→0.6 s. **그러나 p95 ≤1 s 는 어떤 구성도 미충족, 첫 반응 p95 는 후보가 새로 위반**(4.5M typechar 177→259·stopstart 115→248, 1.5M typechar 131→350·scroll1s 67→414). 부정 대조(4.5M): 정제 끔 → 화질 base 로 복귀(M1 이 주원인), floor 끔 → typechar/stopstart 반응 base 수준(155/119). → 출하 후보 아님, 결정 대기(보고서 §6).
 - 시험: host_settle 30/30, host_encoder_apply_target 96/96, h264_slice_qp 15/15, fast_pressure 24/24, viewer_stats_window 28/28, rate_governor·rc_seam·encoder_budget·mf_h264_codec·kick·frame_gate·encode_epoch·abr·mailbox·recovery_roundtrip·key_period PASS, viewer_udp_recovery 전 시나리오 PASS.
 - 다음: 검증용·Codex 결정(i: M4+M1 축소 후보, ii: floor 제거·저rate 예산 축소, iii: B 격리 대조). 미측정: NVIDIA(Home 묶음 요청 필요), DXGI monitor 경로(사용자 화면 조작 금지 — 격리 desktop 수단 없음), WAN.
+
+### 2026-10-14 motion-settle r4 — catch-up · park · T_read 판정 (작업용1, 후보 d543f8d NO-GO)
+
+- r4(Codex split-metrics): 주 지표 T_read(측정 전 고정한 Q_read 도달 + 500ms 유지). Q_read 1080p ink 35.0 dB, 720p(1.5M) ROI 34.5 dB — 기준선 crop 사다리 판독, 해시 고정.
+- `c275748` catch-up: 입력 게이트가 건너뛴 최신 화면을 2프레임 뒤 일반 P로 1회 재송신(정제와 분리, admit-always 없음). onset floor 기본 0.
+- `90b94fc`→`d543f8d` park: AU trace로 정제 뒤 AMD RC가 slice QP 4~8에 머물러 첫 움직임 프레임이 17~25KB가 되는 것을 확인 → 정제 종료 뒤 조용한 시점에 MinQP 26, 다음 정제 직전 해제(onset 앞 Set 0회). train floor(정제 중 MinQP)는 화질 −4~13 dB로 opt-in.
+- 판정 행렬(3셀×3회×20×9): T_read 목표 4.5M 6/9 · 6M 6/9 · 1.5M 7/9(기준선 0/9·0/9·4/9), @1s 문제 장면 +4~+19 dB. 반응성 새 위반 잔존: 4.5M restart 계열 +55~94ms(정제 도중 재개), 1.5M typechar/noise 주기 이상치(정제 입력이 AMD GOP를 소모해 GOP IDR이 onset에 실림). 다음: GOP IDR 조용한 시점 소화, 정제 도중 재개 대책. 보고 `.claude/report_motion_settle_r1.md` §7.
