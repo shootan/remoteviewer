@@ -13,30 +13,20 @@
 
 #include "clipboard_sync.hpp"
 #include "native_socket.hpp"
+#include "client_telemetry_window.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
 
-// One window's worth of display timing, measured where frames actually reach the screen.
-struct ClientPresentationStats {
-  uint32_t targetIntervalUs = 0;
-  uint32_t fpsX100 = 0;
-  uint32_t gapP50Us = 0;
-  uint32_t gapP95Us = 0;
-  uint32_t gapMaxUs = 0;
-  uint32_t over1_5xCount = 0;
-  uint32_t over2xCount = 0;
-  uint32_t sampleCount = 0;
-  uint32_t scheduledCount = 0;
-  uint32_t immediateCount = 0;
-  uint32_t reanchorCount = 0;
-  uint32_t displayedCount = 0;
-};
-
 class ClientEncodedFrameSink {
  public:
   virtual ~ClientEncodedFrameSink() = default;
+  /** Drains the decoded-picture count since the last call (mobile-abr r1). false when the sink does not
+   *  decode at all (the session then reports no decode-side field, as before) or when its decoder state
+   *  means nothing right now -- no surface, a selection between generations (the session then reports
+   *  nothing for that window rather than "0 fps"). A valid 0 is a real stall and is reported. */
+  virtual bool DrainDecodeStats(ClientDecodeStats* /* out */) { return false; }
   /** Drains the presentation stats accumulated since the last call; false when the sink does
    *  not present frames itself (a decode-only sink has nothing to report). */
   virtual bool DrainPresentationStats(ClientPresentationStats* /* out */) { return false; }
@@ -298,6 +288,14 @@ class ClientSessionController {
   uint32_t owedAttempts_ = 0;
   uint64_t owedNextUs_ = 0;
   std::atomic<bool> clipInitialPushWanted_{false};
+  // mobile-abr r1: the once-a-second report. The AUs and their payload bytes the receive pipeline
+  // handed to the sink (video thread; cumulative, never reset) -- every assembled AU, the ones of an old
+  // generation the sink then drops included, as the PC viewer's recvFrames counts every AU it processes
+  // (FEC parity, NACK retransmits and control are not AUs); and the control loop's report window
+  // with its pending snapshot (client_telemetry_window.hpp; control-loop thread only).
+  std::atomic<uint64_t> sinkFrames_{0};
+  std::atomic<uint64_t> sinkPayloadBytes_{0};
+  ClientTelemetryWindow telemetry_;
 };
 
 }  // namespace remote60::native_poc

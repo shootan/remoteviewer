@@ -858,6 +858,31 @@ target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
 
+# mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
+# NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
+add_executable(remote60_android_decoder_decode_stats_test
+  src/android_decoder_decode_stats_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
+
+# mobile-abr r1: the shared client session's report window against the product control scheduler (pure).
+add_executable(remote60_client_telemetry_window_test
+  src/client_telemetry_window_test.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_client_telemetry_window_test PRIVATE src)
+target_link_libraries(remote60_client_telemetry_window_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_client_telemetry_window_test PRIVATE /utf-8)
+endif()
+
 # t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
 # reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
 # the primary, the retry does not run forever, a transient empty enumeration keeps the retry.

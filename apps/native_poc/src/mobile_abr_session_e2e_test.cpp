@@ -2,33 +2,45 @@
 // (ClientSessionController, native_video_client_session.cpp) with a sink that behaves like the APK's
 // decoder sink, against an isolated GNLinkStream, judged from the host's own "[abr]" and stats lines.
 //
-// The field case (2026-10-14 14:25-14:28, phone SM-S948N -> company host 0.2.157, 3 Mbps / 30 fps): six
-// demotions, every one "evidence=stale_active|decode_unreported metricsFresh=0 clientDecodedFps=0"
-// with the host sending a full cadence -- the phone's reports came ~0.6 a second with gaps of 5-10 s.
-// The session reported only on seconds its sink had presentation stats for (DrainPresentationStats), and
-// never with decode-side fields, so the host's P7 stale-feedback rule read the gaps as a relay collapse.
+// The field case (2026-10-14, phone SM-S948N -> company host 0.2.157, 3 Mbps / 30 fps): the active-session
+// demotion at 14:27:17 "evidence=stale_active|decode_unreported metricsFresh=0 clientDecodedFps=0" with
+// the host sending a full cadence -- the phone's reports came ~0.6 a second with gaps of 5-10 s. 118420f
+// reported only on seconds its sink had presentation stats for, never with decode-side fields, and lost
+// a drained snapshot whenever the control pass went to something else (Codex contract section 1.3).
 //
-// The sink here: the APK sink's codec replaced by a counter. It "decodes" every frame it is handed, and
-// it has presentation stats only when it has presented two frames since the last drain -- the APK's
-// rule (android_video_decoder.cpp DrainPresentationStats: fewer than 2 gaps -> false). --present-duty
-// ON:OFF makes the display side come and go on a cycle of seconds (the field's sparse reports: ~0.6 a
-// second, gaps of 5.5-9.7 s); the default 6:8 leaves ~8 s without a report. P7 needs the 3 s freshness
-// gate + 2 stale seconds + 2 severe seconds, so a gap under ~7 s cannot demote on its own.
+// The sink: the APK sink's codec replaced by a counter. It "decodes" every frame it is handed; it has
+// presentation stats only after two present gaps since the last drain (the APK's rule), and with
+// --present-duty ON:OFF only during the ON seconds (default 6:8: ~8 s without a presentation sample --
+// P7 needs the 3 s freshness gate + 2 stale + 2 severe seconds). With a session that drains decode stats
+// (REMOTE60_CLIENT_DECODE_STATS, after A) it gives its decoded count like the APK sink does after A;
+// built against 118420f there is no one to give it to, which is the field configuration.
+//
+// Every run goes through a relay of this process. Each viewer address gets its own socket towards the
+// host -- a reconnecting phone opens a new socket, so the host sees a new peer, as it would from a phone
+// (one shared back socket made a reconnect look like the session that had just ended). It reads the viewer->host
+// control traffic for ControlClientMetrics -- what reaches the host's socket, seq-deduplicated -- so the
+// report count, spacing and fields are measured where the host receives them; impairments switch there.
 //
 // Scenarios (--scenario, one host run each):
-//   sparse     healthy network, sparse presentation stats. Must NOT demote: no down step in the run.
-//   uplink     healthy, then every viewer->host datagram dropped for --impair-sec (the reports really
-//              stop, history #341's case)                                                -> must demote
-//   videostop  healthy, then every host->viewer video datagram dropped (control flows)  -> must demote
-//   thin       healthy, then 9 of every 10 frames dropped whole (3 of 30 arriving)       -> must demote
-//   loss       healthy, then 25% of the host->viewer video datagrams dropped            -> reported
-//   delay      healthy, then +250 ms on every host->viewer datagram                     -> reported
-// The impairment scenarios run with presentation stats every second (--present-duty 1:0), so what they
-// measure is the impairment, not the sparse display. loss and delay are recorded, not judged: what the
-// phone can see of them is the question this run answers.
+//  healthy -- must NOT demote; 60 s judged: 55-65 reports, max report gap < 3 s, reported decoded fps
+//             within 15% of what the sink decoded, no report above 1.6 x fps:
+//   sparse      sparse presentation stats (decode 30, present 0-1 samples most seconds)
+//   nolatch     presentation samples every second, the view latching none (displayed 0)
+//   static      the source still for the first 20 s (the host sends little), then moving
+//   inputload   sparse, plus a mouse move every 16 ms and a window-list request every 2 s
+//   reconnect   sparse; at 15 s the session disconnects and connects again at once (same sink)
+//  real faults -- must demote (within the impairment + 3 s):
+//   uplink      every viewer->host datagram dropped (the reports really stop; history #341)
+//   videostop   every host->viewer video datagram dropped, control flowing
+//   thin        9 of every 10 frames dropped whole (3 of 30 arriving)
+//   decodestall frames keep arriving, the sink's decoder gives out nothing (recv 30 / decode 0)
+//   recovery    thin for the impairment, then 45 s healthy: must demote AND step back up by the ABR's
+//               own hold times (not forced)
+//  recorded, not judged: loss (25% of video datagrams), delay (+250 ms) -- what the phone can see of them.
+// Impairment scenarios present every second (--present-duty 1:0) unless given.
 //
-//   remote60_mobile_abr_session_e2e_test --scenario S [--fps N] [--bitrate N] [--warm-sec N]
-//       [--run-sec N] [--impair-sec N] [--after-sec N] [--present-duty ON:OFF] [--out DIR] [--watchdog-sec N]
+//   remote60_mobile_abr_session_e2e_test --scenario S [--fps N] [--bitrate N] [--present-duty ON:OFF]
+//       [--impair-sec N] [--out DIR] [--watchdog-sec N]
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include "e2e_isolation.hpp"
@@ -58,9 +70,10 @@ using namespace remote60::native_poc::e2e;
 namespace {
 
 std::wstring kTargetTitle;
+std::atomic<bool> gSourceStill{false};
 
-// Every line of this harness goes to stdout with one fwrite: the product's threads write to stderr /
-// stdout too, and a line built from several insertions can be split by them.
+// Every harness line goes to stdout with one fwrite (product threads write too; std::cout's buffer is
+// never swapped -- viewer_stats_chain r2).
 void say(const std::string& s) {
   const std::string line = s + "\n";
   std::fwrite(line.data(), 1, line.size(), stdout);
@@ -68,8 +81,6 @@ void say(const std::string& s) {
 }
 
 // ------------------------------------------------------------------------------ what the host captures
-// On screen, alpha 1/255, click-through, never activated, repainted every 16 ms (abr_client_evidence's
-// CadenceTarget, default pattern).
 class CadenceTarget {
  public:
   bool Start() {
@@ -86,6 +97,7 @@ class CadenceTarget {
   static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<CadenceTarget*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_TIMER && self) {
+      if (gSourceStill.load()) return 0;  // still: nothing changes, nothing repaints
       ++self->frame_;
       InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
@@ -144,34 +156,40 @@ class CadenceTarget {
 };
 
 // ------------------------------------------------------------------------------ the phone's sink
-// The APK decoder sink (android_video_decoder.cpp) without AMediaCodec: every frame handed over is
-// "decoded" and "presented". Presentation stats follow the APK's rule -- at least 2 present gaps since
-// the last drain -- and, with a duty cycle, exist only during the ON seconds of each cycle.
 class PhoneSink : public ClientEncodedFrameSink {
  public:
-  PhoneSink(uint32_t onSec, uint32_t offSec) : onSec_(onSec), offSec_(offSec), startUs_(qpc_now_us()) {}
+  PhoneSink(uint32_t onSec, uint32_t offSec, bool noLatch)
+      : onSec_(onSec), offSec_(offSec), noLatch_(noLatch), startUs_(qpc_now_us()) {}
+  std::atomic<bool> stall{false};  // decodestall: frames arrive, the decoder gives out nothing
 
   void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) override {
     std::lock_guard<std::mutex> lk(mu_);
     ++frames_;
+    if (stall.load()) return;
     width_ = frame.header.width;
     height_ = frame.header.height;
     ++decodedSinceDrain_;
+    ++decodedTotal_;
     const uint64_t now = qpc_now_us();
     if (DisplayOn(now)) {
       if (lastPresentUs_ != 0 && now > lastPresentUs_) gaps_.push_back(static_cast<uint32_t>(now - lastPresentUs_));
-      if (gaps_.empty() && windowStartUs_ == 0) windowStartUs_ = now;
       lastPresentUs_ = now;
     } else {
-      lastPresentUs_ = 0;  // nothing reached the screen: the next present starts a new run of gaps
+      lastPresentUs_ = 0;
     }
   }
   void OnVideoStreamReset() override {}
 
+  // android_video_decoder.cpp after A: every drain closes the window; under two gaps is "no sample".
   bool DrainPresentationStats(ClientPresentationStats* out) override {
     if (!out) return false;
     std::lock_guard<std::mutex> lk(mu_);
-    if (gaps_.size() < 2) return false;  // android_video_decoder.cpp: the same rule
+    if (gaps_.size() < 2) {
+#ifdef REMOTE60_CLIENT_DECODE_STATS
+      gaps_.clear();
+#endif
+      return false;
+    }
     std::vector<uint32_t> g = gaps_;
     gaps_.clear();
     std::sort(g.begin(), g.end());
@@ -180,7 +198,7 @@ class PhoneSink : public ClientEncodedFrameSink {
     out->gapP50Us = g[g.size() / 2];
     out->gapP95Us = g[std::min(g.size() - 1, g.size() * 95 / 100)];
     out->gapMaxUs = g.back();
-    out->displayedCount = static_cast<uint32_t>(g.size());
+    out->displayedCount = noLatch_ ? 0 : static_cast<uint32_t>(g.size());
     uint64_t span = 0;
     for (uint32_t x : g) span += x;
     out->fpsX100 = span ? static_cast<uint32_t>(g.size() * 100000000ull / span) : 0;
@@ -188,9 +206,26 @@ class PhoneSink : public ClientEncodedFrameSink {
     return true;
   }
 
+#ifdef REMOTE60_CLIENT_DECODE_STATS
+  // android_video_decoder.cpp DrainDecodeStats: pictures given out since the last drain, the output size.
+  bool DrainDecodeStats(ClientDecodeStats* out) override {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    out->decodedFrames = static_cast<uint32_t>(decodedSinceDrain_);
+    decodedSinceDrain_ = 0;
+    out->width = width_;
+    out->height = height_;
+    return true;
+  }
+#endif
+
   uint64_t frames() {
     std::lock_guard<std::mutex> lk(mu_);
     return frames_;
+  }
+  uint64_t decoded_total() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return decodedTotal_;
   }
   uint64_t drains() {
     std::lock_guard<std::mutex> lk(mu_);
@@ -205,17 +240,21 @@ class PhoneSink : public ClientEncodedFrameSink {
   }
   std::mutex mu_;
   const uint32_t onSec_, offSec_;
+  const bool noLatch_;
   const uint64_t startUs_;
-  uint64_t frames_ = 0, drains_ = 0, decodedSinceDrain_ = 0;
+  uint64_t frames_ = 0, drains_ = 0, decodedSinceDrain_ = 0, decodedTotal_ = 0;
   uint32_t width_ = 0, height_ = 0;
-  uint64_t lastPresentUs_ = 0, windowStartUs_ = 0;
+  uint64_t lastPresentUs_ = 0;
   std::vector<uint32_t> gaps_;
 };
 
-// ------------------------------------------------------------------------------ the impairment relay
-// One socket each side; the host answers whatever address it heard from, so it binds the session to
-// this relay. Impairments switch at run time.
+// ------------------------------------------------------------------------------ the relay
 enum class Impair : int { None = 0, Uplink, VideoStop, Thin, Loss, Delay };
+
+struct SeenReport {
+  uint64_t qpcUs;
+  uint32_t seq, decodedFpsX100, recvFpsX100, width, height, presentSamples;
+};
 
 class Relay {
  public:
@@ -229,8 +268,9 @@ class Relay {
     host_.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     front_ = Bind(&frontPort);
     uint16_t backPort = 0;
-    back_ = Bind(&backPort);
-    if (front_ == INVALID_SOCKET || back_ == INVALID_SOCKET) return false;
+    const SOCKET back = Bind(&backPort);
+    back_.store(back);
+    if (front_ == INVALID_SOCKET || back == INVALID_SOCKET) return false;
     running_ = true;
     threads_.emplace_back([this] { Up(); });
     threads_.emplace_back([this] { Down(); });
@@ -242,7 +282,12 @@ class Relay {
     for (auto& t : threads_) t.join();
     threads_.clear();
     if (front_ != INVALID_SOCKET) closesocket(front_);
-    if (back_ != INVALID_SOCKET) closesocket(back_);
+    if (back_.load() != INVALID_SOCKET) closesocket(back_.load());
+    for (SOCKET s : oldBacks_) closesocket(s);
+  }
+  std::vector<SeenReport> Reports() {
+    std::lock_guard<std::mutex> lk(repMu_);
+    return reports_;
   }
 
  private:
@@ -270,6 +315,24 @@ class Relay {
     *seq = h.seq;
     return true;
   }
+  // A ControlClientMetrics message in one control chunk (it is ~150 bytes): recorded once per seq.
+  void NoteReport(const uint8_t* b, int n) {
+    if (n < static_cast<int>(sizeof(UdpControlChunkHeader) + sizeof(ControlClientMetricsMessage))) return;
+    UdpControlChunkHeader h{};
+    std::memcpy(&h, b, sizeof(h));
+    if (h.magic != kMagic || h.kind != static_cast<uint16_t>(UdpPacketKind::ControlData) || h.fragIndex != 0 ||
+        h.fragCount != 1) {
+      return;
+    }
+    ControlClientMetricsMessage m{};
+    std::memcpy(&m, b + sizeof(h), sizeof(m));
+    if (m.header.magic != kMagic || m.header.type != static_cast<uint16_t>(MessageType::ControlClientMetrics)) return;
+    std::lock_guard<std::mutex> lk(repMu_);
+    for (auto it = reports_.rbegin(); it != reports_.rend() && it - reports_.rbegin() < 8; ++it) {
+      if (it->seq == m.seq) return;  // a retransmission
+    }
+    reports_.push_back({qpc_now_us(), m.seq, m.decodedFpsX100, m.recvFpsX100, m.width, m.height, m.presentSampleCount});
+  }
   void Up() {
     uint8_t buf[2048];
     while (running_) {
@@ -279,6 +342,11 @@ class Relay {
       if (n <= 0) continue;
       {
         std::lock_guard<std::mutex> lk(viewerMu_);
+        const bool newViewer = haveViewer_ && (from.sin_port != viewer_.sin_port || from.sin_addr.s_addr != viewer_.sin_addr.s_addr);
+        if (newViewer) {  // a new session: a new peer for the host
+          uint16_t port = 0;
+          oldBacks_.push_back(back_.exchange(Bind(&port)));
+        }
         viewer_ = from;
         haveViewer_ = true;
       }
@@ -286,14 +354,15 @@ class Relay {
         ++dropped;
         continue;
       }
-      sendto(back_, reinterpret_cast<const char*>(buf), n, 0, reinterpret_cast<const sockaddr*>(&host_), sizeof(host_));
+      NoteReport(buf, n);
+      sendto(back_.load(), reinterpret_cast<const char*>(buf), n, 0, reinterpret_cast<const sockaddr*>(&host_), sizeof(host_));
     }
   }
   void Down() {
     std::mt19937 rng(20261014u);
     uint8_t buf[2048];
     while (running_) {
-      const int n = recv(back_, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+      const int n = recv(back_.load(), reinterpret_cast<char*>(buf), sizeof(buf), 0);
       if (n <= 0) continue;
       const Impair m = static_cast<Impair>(mode.load());
       uint32_t seq = 0;
@@ -338,13 +407,17 @@ class Relay {
     }
   }
   sockaddr_in host_{};
-  SOCKET front_ = INVALID_SOCKET, back_ = INVALID_SOCKET;
+  SOCKET front_ = INVALID_SOCKET;
+  std::atomic<SOCKET> back_{INVALID_SOCKET};
+  std::vector<SOCKET> oldBacks_;  // under viewerMu_; closed at Stop
   std::atomic<bool> running_{false};
   std::mutex viewerMu_;
   sockaddr_in viewer_{};
   bool haveViewer_ = false;
   std::mutex qMu_;
   std::deque<std::pair<uint64_t, std::vector<uint8_t>>> q_;
+  std::mutex repMu_;
+  std::vector<SeenReport> reports_;
   std::vector<std::thread> threads_;
 };
 
@@ -368,9 +441,7 @@ std::string field_of(const std::string& line, const std::string& key) {
   const size_t end = line.find(' ', start);
   return line.substr(start, end == std::string::npos ? std::string::npos : end - start);
 }
-bool is_down_reason(const std::string& reason) {
-  return reason.find("high_to_") == 0 || reason.find("mid_to_low") == 0 || reason == "client_emergency";
-}
+int profile_rank(const std::string& p) { return p == "high" ? 0 : p == "mid" ? 1 : p == "low" ? 2 : -1; }
 
 }  // namespace
 
@@ -378,7 +449,7 @@ int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::string scenario = "sparse";
   uint32_t fps = 30, bitrate = 3000000;
-  int warmSec = 12, runSec = 45, impairSec = 20, afterSec = 8;
+  int impairSec = 20;
   uint32_t dutyOn = 6, dutyOff = 8;
   bool dutyGiven = false;
   std::wstring outDir;
@@ -393,14 +464,8 @@ int wmain(int argc, wchar_t** argv) {
       fps = static_cast<uint32_t>(_wtoi(argv[++i]));
     } else if (a == L"--bitrate" && more) {
       bitrate = static_cast<uint32_t>(_wtoi(argv[++i]));
-    } else if (a == L"--warm-sec" && more) {
-      warmSec = _wtoi(argv[++i]);
-    } else if (a == L"--run-sec" && more) {
-      runSec = _wtoi(argv[++i]);
     } else if (a == L"--impair-sec" && more) {
       impairSec = _wtoi(argv[++i]);
-    } else if (a == L"--after-sec" && more) {
-      afterSec = _wtoi(argv[++i]);
     } else if (a == L"--present-duty" && more) {
       dutyGiven = std::swscanf(argv[++i], L"%u:%u", &dutyOn, &dutyOff) == 2;
     } else if (a == L"--out" && more) {
@@ -410,27 +475,35 @@ int wmain(int argc, wchar_t** argv) {
       watchdogOverrideSec = _wtoi(argv[++i]);
     }
   }
+  const bool healthy = scenario == "sparse" || scenario == "nolatch" || scenario == "static" ||
+                       scenario == "inputload" || scenario == "reconnect";
   Impair impair = Impair::None;
+  bool decodeStall = false, recovery = false;
   if (scenario == "uplink") impair = Impair::Uplink;
   else if (scenario == "videostop") impair = Impair::VideoStop;
   else if (scenario == "thin") impair = Impair::Thin;
+  else if (scenario == "recovery") impair = Impair::Thin, recovery = true;
+  else if (scenario == "decodestall") decodeStall = true;
   else if (scenario == "loss") impair = Impair::Loss;
   else if (scenario == "delay") impair = Impair::Delay;
-  else if (scenario != "sparse") {
+  else if (!healthy) {
     say("unknown --scenario " + scenario);
     return 2;
   }
-  const bool sparseRun = impair == Impair::None;
-  if (!sparseRun && !dutyGiven) {
-    dutyOn = 1;
-    dutyOff = 0;
-  }
-  const bool judgedImpair = impair == Impair::Uplink || impair == Impair::VideoStop || impair == Impair::Thin;
-  const int totalSec = sparseRun ? warmSec + runSec : warmSec + impairSec + afterSec;
+  if (scenario == "nolatch" && !dutyGiven) dutyOn = 1, dutyOff = 0;
+  if (!healthy && !dutyGiven) dutyOn = 1, dutyOff = 0;
+  const bool judgedFault = impair == Impair::Uplink || impair == Impair::VideoStop || impair == Impair::Thin || decodeStall;
+  const int warmSec = healthy ? 3 : 12;
+  const int judgeSec = 60;
+  const int afterSec = recovery ? 45 : 8;
+  const int totalSec = healthy ? warmSec + judgeSec + 2 : warmSec + impairSec + afterSec;
   say("mobile_abr_session_e2e_test scenario=" + scenario + " fps=" + std::to_string(fps) + " bitrate=" +
-      std::to_string(bitrate) + " warmSec=" + std::to_string(warmSec) + " " +
-      (sparseRun ? "runSec=" + std::to_string(runSec) : "impairSec=" + std::to_string(impairSec)) +
-      " presentDuty=" + std::to_string(dutyOn) + ":" + std::to_string(dutyOff));
+      std::to_string(bitrate) + " presentDuty=" + std::to_string(dutyOn) + ":" + std::to_string(dutyOff) +
+#ifdef REMOTE60_CLIENT_DECODE_STATS
+      " session=A(decode stats, pending snapshot)");
+#else
+      " session=118420f(no decode stats)");
+#endif
 
   if (!host_e2e_allowed()) {
     say("SKIP  mobile_abr_session_e2e_test (starts a listening host)");
@@ -438,7 +511,6 @@ int wmain(int argc, wchar_t** argv) {
     return kE2eSkippedExit;
   }
   const int hostSec = totalSec + 40;
-  // Bounded whatever happens: straight to the stdout handle, no CRT lock; the job then kills the host.
   const int watchdogSec = watchdogOverrideSec > 0 ? watchdogOverrideSec : hostSec + 240;
   std::thread([watchdogSec] {
     std::this_thread::sleep_for(std::chrono::seconds(watchdogSec));
@@ -464,6 +536,7 @@ int wmain(int argc, wchar_t** argv) {
   const bool staged = CopyFileW((myDir + L"GNLinkStream.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
   check("the host could be staged", staged);
 
+  if (scenario == "static") gSourceStill.store(true);
   CadenceTarget target;
   check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
 
@@ -478,8 +551,8 @@ int wmain(int argc, wchar_t** argv) {
   bool launched = false;
   if (staged) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
-    SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");  // one ABR reading per second
-    SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");                // the user's clipboard stays out
+    SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps " + std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) +
@@ -516,58 +589,91 @@ int wmain(int argc, wchar_t** argv) {
   check("the host started", launched);
 
   Relay relay;
-  if (launched && !sparseRun) check("the impairment relay is up", relay.Start(hostPort));
+  const bool relayUp = launched && relay.Start(hostPort);
+  check("the relay is up (every run: it reads the reports the host receives)", relayUp);
 
   // ------------------------------------------------------------------ the phone: the shared session
-  PhoneSink sink(dutyOn, dutyOff);
+  PhoneSink sink(dutyOn, dutyOff, scenario == "nolatch");
   ClientSessionController session;
+  ClientSessionConnectArgs args;  // what native_bridge.cpp sets for a direct session
+  args.host = "127.0.0.1";
+  args.videoPort = relay.frontPort;
+  args.controlPort = args.videoPort;
+  args.requireUdpHello = true;
+  args.requireTcpControl = false;
+  args.controlOverUdp = true;
+  args.encodedFrameSink = &sink;  // controlIntervalMs: the product default (kClientControlIntervalMsDefault)
   bool connected = false;
-  if (launched) {
-    ClientSessionConnectArgs args;  // what native_bridge.cpp sets for a direct session
-    args.host = "127.0.0.1";
-    args.videoPort = sparseRun ? hostPort : relay.frontPort;
-    args.controlPort = args.videoPort;
-    args.requireUdpHello = true;
-    args.requireTcpControl = false;
-    args.controlOverUdp = true;
-    args.encodedFrameSink = &sink;  // controlIntervalMs: the product default (kClientControlIntervalMsDefault)
+  if (relayUp) {
     connected = session.Connect(args) &&
                 wait_until([&] { return session.Snapshot().state == ClientSessionState::Connected; }, 15000);
     check("the shared session connected (UDP hello + tunnelled control)", connected,
           session.Snapshot().status + " / " + session.Snapshot().lastError);
   }
 
-  uint64_t framesAtStart = 0;
-  int64_t judgeFromMs = -1, judgeToMs = -1, impairFromMs = -1, impairToMs = -1;
+  int64_t judgeFromMs = -1, judgeToMs = -1, impairFromMs = -1, impairToMs = -1, endMs = -1;
+  uint64_t judgeFromUs = 0, judgeToUs = 0, decodedAtFrom = 0, decodedAtTo = 0, reconnectUs = 0;
+  bool reconnected = true;
+  std::atomic<bool> inputStop{false};
+  std::thread inputThread;
   if (connected) {
     const bool picture = wait_until([&] { return sink.frames() > 0; }, 20000);
     check("frames reach the phone's sink", picture, std::to_string(sink.frames()) + " frames");
-    framesAtStart = sink.frames();
-    if (sparseRun) {
-      // The whole session is judged: a phone's first reports are where a sparse display starts to count.
-      // (The host's per-second stats line prints the profile from before that second's ABR decision, so
-      // "high when the span began" is read at the first frame, before any report could have mattered.)
+    if (scenario == "inputload") {
+      inputThread = std::thread([&] {
+        int i = 0;
+        while (!inputStop.load()) {
+          (void)session.QueueInputEvent(1, 100 + (i % 200), 100 + (i % 120), 0, 0, 0);  // a mouse move
+          if (++i % 125 == 0) (void)session.RequestWindowList();                    // every ~2 s
+          std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+      });
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(warmSec));
+    if (healthy) {
       judgeFromMs = local_now_ms();
-      std::this_thread::sleep_for(std::chrono::seconds(warmSec + runSec));
+      judgeFromUs = qpc_now_us();
+      decodedAtFrom = sink.decoded_total();
+      const uint64_t endAtUs = judgeFromUs + static_cast<uint64_t>(judgeSec) * 1000000ull;
+      if (scenario == "static") {
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+        gSourceStill.store(false);
+        say("--- the source starts moving");
+      }
+      if (scenario == "reconnect") {
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        session.Disconnect();
+        reconnectUs = qpc_now_us();
+        reconnected = session.Connect(args) &&
+                      wait_until([&] { return session.Snapshot().state == ClientSessionState::Connected; }, 15000);
+        say(std::string("--- disconnected and connected again: ") + (reconnected ? "connected" : "FAILED"));
+      }
+      while (qpc_now_us() < endAtUs) std::this_thread::sleep_for(std::chrono::milliseconds(50));
       judgeToMs = local_now_ms();
+      judgeToUs = qpc_now_us();
+      decodedAtTo = sink.decoded_total();
     } else {
-      std::this_thread::sleep_for(std::chrono::seconds(warmSec));
       impairFromMs = local_now_ms();
       say("--- impairment " + scenario + " on for " + std::to_string(impairSec) + " s");
+      if (decodeStall) sink.stall.store(true);
       relay.mode.store(static_cast<int>(impair));
       std::this_thread::sleep_for(std::chrono::seconds(impairSec));
       relay.mode.store(static_cast<int>(Impair::None));
+      sink.stall.store(false);
       impairToMs = local_now_ms();
       say("--- impairment off");
       std::this_thread::sleep_for(std::chrono::seconds(afterSec));
     }
+    endMs = local_now_ms();
   }
+  inputStop.store(true);
+  if (inputThread.joinable()) inputThread.join();
   const uint64_t frames = sink.frames();
   const uint64_t drains = sink.drains();
   session.Disconnect();
-  if (!sparseRun) relay.Stop();
+  const std::vector<SeenReport> reports = relay.Reports();
+  relay.Stop();
   if (hostPi.hProcess) {
-    // It exits by itself at --seconds; terminating it earlier could cut its buffered stdout.
     if (WaitForSingleObject(hostPi.hProcess, 90000) != WAIT_OBJECT_0) {
       say("NOTE  host did not exit by itself; terminated");
       TerminateProcess(hostPi.hProcess, 0);
@@ -613,51 +719,103 @@ int wmain(int argc, wchar_t** argv) {
   }
   say("\n--- host [abr] lines (" + std::to_string(abr.size()) + ") ---");
   for (const auto& a : abr) say(a.raw.substr(0, 520));
-  say("phone sink: " + std::to_string(frames) + " frames, " + std::to_string(drains) +
-      " presentation drains (reports with present stats)");
+  say("phone sink: " + std::to_string(frames) + " frames, " + std::to_string(drains) + " presentation drains; relay saw " +
+      std::to_string(reports.size()) + " ControlClientMetrics");
+
+  // Steps between profiles inside [from, to], in order: down (rank grows) and up.
+  auto steps = [&](int64_t from, int64_t to, bool down) {
+    std::string s;
+    std::string prev;
+    for (const auto& h : hostSecs) if (h.ms >= 0 && h.ms < from) prev = h.profile;
+    for (const auto& a : abr) {
+      if (a.ms < from || a.ms > to) continue;
+      const int was = profile_rank(prev.empty() ? "high" : prev);
+      const int now = profile_rank(a.profile);
+      if ((down && now > was) || (!down && now < was)) s += a.reason + "->" + a.profile + "(" + a.evidence + ") ";
+      prev = a.profile;
+    }
+    return s;
+  };
+  auto profile_at = [&](int64_t ms, bool firstAfterIfNone) {
+    std::string p;
+    for (const auto& h : hostSecs) if (h.ms >= 0 && h.ms < ms) p = h.profile;
+    if (p.empty() && firstAfterIfNone) {
+      for (const auto& h : hostSecs) if (h.ms >= ms) return h.profile;
+    }
+    return p;
+  };
+  auto judged_seconds = [&](int64_t from, int64_t to) {
+    uint32_t n = 0;
+    for (const auto& h : hostSecs) if (h.ms >= from && h.ms <= to && h.sentFrames >= std::max<uint32_t>(2, fps / 2)) ++n;
+    return n;
+  };
 
   if (connected) {
-    const int64_t from = sparseRun ? judgeFromMs : impairFromMs;
-    const int64_t to = sparseRun ? judgeToMs : impairToMs + 3000;
-    std::string profileBefore;
-    for (const auto& h : hostSecs) if (h.ms >= 0 && h.ms < from) profileBefore = h.profile;
-    uint32_t judged = 0, seconds = 0;
-    for (const auto& h : hostSecs) {
-      if (h.ms < from || h.ms > to) continue;
-      ++seconds;
-      if (h.sentFrames >= std::max<uint32_t>(2, fps / 2)) ++judged;
-    }
-    std::vector<AbrLine> downs;
-    for (const auto& a : abr)
-      if (a.ms >= from && a.ms <= to && is_down_reason(a.reason)) downs.push_back(a);
-    std::string downList;
-    for (const auto& d : downs) downList += d.reason + "->" + d.profile + "(" + d.evidence + ") ";
-    if (downList.empty()) downList = "none";
-
-    if (sparseRun) {
-      // Before the run starts the host must be at high, or a "no step down" proves nothing.
-      check("the host's ABR was at high when the judged span began", profileBefore == "high", "abrProfile=" + profileBefore);
-      const bool cadence = judged >= static_cast<uint32_t>((warmSec + runSec) * 3 / 4);
+    if (healthy) {
+      check("the host's ABR was at high when the judged span began", profile_at(judgeFromMs, true) == "high",
+            "abrProfile=" + profile_at(judgeFromMs, true));
+      const uint32_t judged = judged_seconds(judgeFromMs, judgeToMs);
+      const bool cadence = scenario == "static" ? judged >= 30u : judged >= static_cast<uint32_t>(judgeSec * 3 / 4);
       check("the host sent a real cadence through the judged span (ABR-judged seconds)", cadence,
-            std::to_string(judged) + " of " + std::to_string(seconds) + " s");
-      if (cadence) {
-        check("THE HOST'S ABR DOES NOT STEP DOWN ON A HEALTHY PHONE WITH A SPARSE DISPLAY", downs.empty(), downList);
-        std::string profileEnd;
-        for (const auto& h : hostSecs) if (h.ms >= 0 && h.ms <= to) profileEnd = h.profile;
-        check("...and is still at high at the end", profileEnd == "high", "abrProfile=" + profileEnd);
-      } else {
-        skip("ABR over the judged span", "the host did not send a real cadence");
+            std::to_string(judged) + " of " + std::to_string(judgeSec) + " s");
+      if (scenario == "reconnect") check("the reconnect connected", reconnected);
+      const std::string downs = steps(judgeFromMs, judgeToMs, true);
+      check("THE HOST'S ABR DOES NOT STEP DOWN ON A HEALTHY PHONE (" + scenario + ")", downs.empty(),
+            downs.empty() ? "none" : downs);
+      check("...and is still at high at the end", profile_at(judgeToMs, false) == "high",
+            "abrProfile=" + profile_at(judgeToMs, false));
+      // The reports, where the host receives them.
+      std::vector<SeenReport> span;
+      for (const auto& r : reports) if (r.qpcUs >= judgeFromUs && r.qpcUs < judgeToUs) span.push_back(r);
+      uint64_t maxGapUs = 0;
+      for (size_t i = 1; i < span.size(); ++i) maxGapUs = std::max<uint64_t>(maxGapUs, span[i].qpcUs - span[i - 1].qpcUs);
+      if (!span.empty()) maxGapUs = std::max<uint64_t>({maxGapUs, span.front().qpcUs - judgeFromUs, judgeToUs - span.back().qpcUs});
+      // A reconnect's own gap (the session is gone for a moment) is the one gap allowed to exceed the bound.
+      uint64_t maxGapOutsideReconnect = 0;
+      for (size_t i = 1; i < span.size(); ++i) {
+        const bool acrossReconnect = reconnectUs && span[i - 1].qpcUs < reconnectUs && span[i].qpcUs >= reconnectUs;
+        if (!acrossReconnect) maxGapOutsideReconnect = std::max<uint64_t>(maxGapOutsideReconnect, span[i].qpcUs - span[i - 1].qpcUs);
       }
+      check("55-65 reports reach the host in the 60 s span", span.size() >= 55 && span.size() <= 65,
+            std::to_string(span.size()) + " reports");
+      check("no gap between reports of 3 s or more (the host's freshness gate)",
+            (reconnectUs ? maxGapOutsideReconnect : maxGapUs) < 3000000ull,
+            "max " + std::to_string((reconnectUs ? maxGapOutsideReconnect : maxGapUs) / 1000) + " ms" +
+                (reconnectUs ? " (outside the reconnect; across it " + std::to_string(maxGapUs / 1000) + " ms)" : ""));
+      uint64_t decSum = 0, decN = 0, overMax = 0;
+      for (const auto& r : span) {
+        if (r.width == 0 && r.decodedFpsX100 == 0 && r.recvFpsX100 == 0) continue;  // present-only
+        decSum += r.decodedFpsX100;
+        ++decN;
+        if (r.decodedFpsX100 > fps * 160 || r.recvFpsX100 > fps * 160) ++overMax;
+      }
+      const double sinkFps = (decodedAtTo - decodedAtFrom) * 1e6 / static_cast<double>(judgeToUs - judgeFromUs);
+      const double reportedFps = decN ? decSum / 100.0 / decN : 0.0;
+      check("the reported decoded fps is what the sink decoded (within 15%, mean over the span)",
+            decN > 0 && reportedFps >= sinkFps * 0.85 && reportedFps <= sinkFps * 1.15,
+            "reported " + std::to_string(reportedFps) + " vs sink " + std::to_string(sinkFps) + " (" +
+                std::to_string(decN) + " reports with decode fields)");
+      check("no report above 1.6 x fps (no catch-up burst, none after the reconnect)", overMax == 0,
+            std::to_string(overMax) + " reports over " + std::to_string(fps * 1.6));
     } else {
-      check("the host's ABR was at high before the impairment", profileBefore == "high", "abrProfile=" + profileBefore);
-      check("the impairment did something", impair == Impair::Delay || relay.dropped.load() > 0,
+      const int64_t to = impairToMs + 3000;
+      check("the host's ABR was at high before the impairment", profile_at(impairFromMs, false) == "high",
+            "abrProfile=" + profile_at(impairFromMs, false));
+      check("the impairment did something", impair == Impair::Delay || decodeStall || relay.dropped.load() > 0,
             std::to_string(relay.dropped.load()) + " datagrams dropped");
-      if (judgedImpair) {
+      const std::string downs = steps(impairFromMs, to, true);
+      const uint32_t judged = judged_seconds(impairFromMs, to);
+      if (judgedFault) {
         check("A REAL " + scenario + " STILL STEPS THE HOST'S ABR DOWN (within the impairment + 3 s)", !downs.empty(),
-              downList + " (" + std::to_string(judged) + " judged seconds)");
+              (downs.empty() ? std::string("none") : downs) + " (" + std::to_string(judged) + " judged seconds)");
       } else {
-        say("NOTE  " + scenario + " (recorded, not judged): down steps " + downList + " (" + std::to_string(judged) +
-            " judged seconds)");
+        say("NOTE  " + scenario + " (recorded, not judged): down steps " + (downs.empty() ? std::string("none") : downs) +
+            " (" + std::to_string(judged) + " judged seconds)");
+      }
+      if (recovery) {
+        const std::string ups = steps(impairToMs, endMs, false);
+        check("...AND STEPS BACK UP once the phone reports healthy decoding again (the ABR's own hold times)",
+              !ups.empty(), ups.empty() ? "none in " + std::to_string(afterSec) + " s" : ups);
       }
     }
   }
@@ -665,8 +823,12 @@ int wmain(int argc, wchar_t** argv) {
   if (!outDir.empty()) {
     CreateDirectoryW(outDir.c_str(), nullptr);
     CopyFileW(hostLogPath.c_str(), (outDir + std::wstring(scenario.begin(), scenario.end()) + L"_host.log").c_str(), FALSE);
+    std::ofstream rep(outDir + std::wstring(scenario.begin(), scenario.end()) + L"_reports.csv");
+    rep << "qpcUs,seq,decodedFpsX100,recvFpsX100,width,height,presentSamples\n";
+    for (const auto& r : reports)
+      rep << r.qpcUs << "," << r.seq << "," << r.decodedFpsX100 << "," << r.recvFpsX100 << "," << r.width << ","
+          << r.height << "," << r.presentSamples << "\n";
   }
-  (void)framesAtStart;
   if (!staging.Remove()) say("WARN  " + staging.why());
   say("\n" + std::to_string(gChecks) + " checks, " + std::to_string(gFailures) + " failed, " + std::to_string(gSkips) +
       " not judged");

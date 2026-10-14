@@ -451,6 +451,18 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     UpdateConnectedStatusLocked("");
   }
 
+  // mobile-abr r1: this connection's report window. The sink outlives sessions (the APK keeps one), so
+  // whatever it counted before this connection is drained and dropped here -- outside mu_, because a
+  // sink drain takes the sink's own lock.
+  if (encodedFrameSink_) {
+    ClientDecodeStats discardDecode{};
+    ClientPresentationStats discardPresent{};
+    (void)encodedFrameSink_->DrainDecodeStats(&discardDecode);
+    (void)encodedFrameSink_->DrainPresentationStats(&discardPresent);
+  }
+  telemetry_.Reset(now_us(), sinkFrames_.load(std::memory_order_relaxed),
+                   sinkPayloadBytes_.load(std::memory_order_relaxed));
+
   if (!controlActive) {
     while (!stopRequested_.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -463,31 +475,22 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     bool didWork = false;
     const uint64_t loopNowUs = now_us();
     ControlOutboundAction action{};
-    ClientControlMetricsSnapshot metrics{};
-    // Report what the display is doing back to the host once a second. Without this the host
-    // only ever saw receive/decode counters, which stay healthy through visible stutter.
-    if (encodedFrameSink_) {
-      static uint64_t lastPresentReportUs = 0;
-      if (loopNowUs >= lastPresentReportUs + 1000000ULL) {
-        ClientPresentationStats present{};
-        if (encodedFrameSink_->DrainPresentationStats(&present) && present.sampleCount > 0) {
-          metrics.message.presentTargetIntervalUs = present.targetIntervalUs;
-          metrics.message.presentFpsX100 = present.fpsX100;
-          metrics.message.presentGapP50Us = present.gapP50Us;
-          metrics.message.presentGapP95Us = present.gapP95Us;
-          metrics.message.presentGapMaxUs = present.gapMaxUs;
-          metrics.message.presentOver1_5xCount = present.over1_5xCount;
-          metrics.message.presentOver2xCount = present.over2xCount;
-          metrics.message.presentSampleCount = present.sampleCount;
-          metrics.message.presentScheduledCount = present.scheduledCount;
-          metrics.message.presentImmediateCount = present.immediateCount;
-          metrics.message.presentReanchorCount = present.reanchorCount;
-          metrics.message.presentDisplayedCount = present.displayedCount;
-          metrics.updatedQpcUs = loopNowUs;
-          lastPresentReportUs = loopNowUs;
-        }
-      }
+    // Once a second, on this connection's own clock: what the sink received and decoded (the decode-side
+    // fields the PC viewer fills) and what its display did (client_telemetry_window.hpp). mobile-abr r1:
+    // this used to be built in a local only on seconds the sink had presentation stats for, without
+    // decode fields, and was lost whenever NextAction picked something else on that pass -- a phone went
+    // 5-10 s without a report and the host's stale-feedback rule (P7) stepped quality down on a healthy
+    // link (field 2026-10-14). The measured snapshot now stays pending until it is actually sent.
+    if (encodedFrameSink_ && telemetry_.Due(loopNowUs)) {
+      ClientDecodeStats decode{};
+      const bool decodeValid = encodedFrameSink_->DrainDecodeStats(&decode);
+      ClientPresentationStats present{};
+      const bool presentValid = encodedFrameSink_->DrainPresentationStats(&present);
+      (void)telemetry_.Close(loopNowUs, sinkFrames_.load(std::memory_order_relaxed),
+                             sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
+                             presentValid ? &present : nullptr);
     }
+    const ClientControlMetricsSnapshot& metrics = telemetry_.Pending();
     // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
     // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
     // answer and was dropped) is asked for again until it arrives -- a request taken here may still
@@ -762,6 +765,8 @@ void ClientSessionController::VideoReceiveMain() {
   SessionVideoPipeline::Callbacks callbacks;
   callbacks.deliver = [&](UdpH264AssembledFrame&& frame) {
     if (!currentSink) return;
+    sinkFrames_.fetch_add(1, std::memory_order_relaxed);
+    sinkPayloadBytes_.fetch_add(frame.payload.size(), std::memory_order_relaxed);
     currentSink->OnEncodedH264Frame(std::move(frame));
     // The decoder may have had to discard what it was just handed. Ask for an IDR now
     // rather than letting every later delta decode against a reference that never arrived.

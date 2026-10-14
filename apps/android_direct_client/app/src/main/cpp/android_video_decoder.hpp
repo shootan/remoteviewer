@@ -36,6 +36,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool ConsumeDecoderKeyframeRequest() override;
   bool DrainPresentationStats(
       remote60::native_poc::ClientPresentationStats* out) override;
+  bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -67,6 +68,24 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OutputPumpMain();
 
   std::mutex mu_;
+  // mobile-abr r1: every section under mu_ ends by publishing what the session's control thread reads
+  // WITHOUT mu_ (DrainDecodeStats) -- that thread must never wait on a lock the codec work holds.
+  void PublishDecodeStateLocked();
+  class LockedState {
+   public:
+    explicit LockedState(AndroidVideoDecoderSink* s) : s_(s), lock_(s->mu_) {}
+    ~LockedState() { s_->PublishDecodeStateLocked(); }  // runs before lock_ is released
+    LockedState(const LockedState&) = delete;
+    LockedState& operator=(const LockedState&) = delete;
+
+   private:
+    AndroidVideoDecoderSink* s_;
+    std::lock_guard<std::mutex> lock_;
+  };
+  std::atomic<uint64_t> decodedTotalPub_{0};
+  std::atomic<bool> decodeValidPub_{false};    // a surface, and no selection still waiting for its answer / first IDR
+  std::atomic<uint64_t> outputSizePub_{0};     // (visible width << 32) | height; 0 = not known
+  uint64_t decodedDrainBase_ = 0;              // the session's control thread only
   ANativeWindow* window_ = nullptr;
   AMediaCodec* codec_ = nullptr;
   uint32_t configuredWidth_ = 0;
@@ -75,6 +94,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint32_t outputHeight_ = 0;
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
+  // mobile-abr r1 (Codex contract section 3): valid decoded pictures, counted where the decoder hands
+  // one out (dequeueOutputBuffer >= 0, not codec-config / end-of-stream) -- not when it is released to
+  // the display later. Never reset: outputFrameCount_ is reset with the codec. An output whose PTS
+  // equals the previous counted one (the bootstrap IDR replayed into a codec that had not answered
+  // yet) is the same picture again and is counted apart, in replayOutputs_.
+  uint64_t decodedTotal_ = 0;
+  uint64_t replayOutputs_ = 0;
+  int64_t lastCountedOutputPts_ = -1;
   // Which selection is armed, whether its answer is still awaited and which stream generation it
   // answered with (selection_ack_gate.hpp; shared with the Windows tests).
   remote60::native_poc::SelectionAckGate gate_;

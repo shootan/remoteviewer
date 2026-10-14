@@ -21,7 +21,8 @@ Controls& controls() {
 }  // namespace fake_ndk
 
 struct AMediaFormat {
-  int unused = 0;
+  int32_t width = 0;   // set only on a format returned by getOutputFormat
+  int32_t height = 0;
 };
 struct AMediaCodec {
   bool started = false;
@@ -52,7 +53,18 @@ media_status_t AMediaFormat_delete(AMediaFormat* f) {
 void AMediaFormat_setString(AMediaFormat*, const char*, const char*) {}
 void AMediaFormat_setInt32(AMediaFormat*, const char*, int32_t) {}
 void AMediaFormat_setBuffer(AMediaFormat*, const char*, const void*, size_t) {}
-bool AMediaFormat_getInt32(AMediaFormat*, const char*, int32_t*) { return false; }
+bool AMediaFormat_getInt32(AMediaFormat* f, const char* name, int32_t* out) {
+  if (!f || !out) return false;
+  if (name == AMEDIAFORMAT_KEY_WIDTH && f->width > 0) {
+    *out = f->width;
+    return true;
+  }
+  if (name == AMEDIAFORMAT_KEY_HEIGHT && f->height > 0) {
+    *out = f->height;
+    return true;
+  }
+  return false;
+}
 
 AMediaCodec* AMediaCodec_createDecoderByType(const char*) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
@@ -92,9 +104,40 @@ media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* c, size_t, int64_t, siz
   fake_ndk::controls().queued.emplace_back(c->input.begin(), c->input.begin() + static_cast<std::ptrdiff_t>(size));
   return AMEDIA_OK;
 }
-ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo*, int64_t) {
-  return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
+ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* info, int64_t) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  auto& c = fake_ndk::controls();
+  if (c.outputs.empty()) return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
+  const fake_ndk::Controls::Output o = c.outputs.front();
+  c.outputs.pop_front();
+  if (o.formatChange) {
+    c.outputWidth = o.width;
+    c.outputHeight = o.height;
+    return AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED;
+  }
+  if (info) {
+    info->offset = 0;
+    info->size = 1;
+    info->presentationTimeUs = o.presentationTimeUs;
+    info->flags = o.flags;
+  }
+  ++c.dequeued;
+  return 0;
 }
-AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*) { return new AMediaFormat(); }
-media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec*, size_t, bool) { return AMEDIA_OK; }
-media_status_t AMediaCodec_releaseOutputBufferAtTime(AMediaCodec*, size_t, int64_t) { return AMEDIA_OK; }
+AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  auto* f = new AMediaFormat();
+  f->width = fake_ndk::controls().outputWidth;
+  f->height = fake_ndk::controls().outputHeight;
+  return f;
+}
+media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec*, size_t, bool) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  ++fake_ndk::controls().released;
+  return AMEDIA_OK;
+}
+media_status_t AMediaCodec_releaseOutputBufferAtTime(AMediaCodec*, size_t, int64_t) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  ++fake_ndk::controls().released;
+  return AMEDIA_OK;
+}

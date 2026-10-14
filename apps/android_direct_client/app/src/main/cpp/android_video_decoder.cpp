@@ -106,7 +106,7 @@ std::vector<uint8_t> with_start_code(const uint8_t* data, size_t size) {
 AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
   // Before the lock: the pump takes it every tick, so joining while holding it would deadlock.
   StopOutputPump();
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
 }
@@ -129,7 +129,7 @@ void AndroidVideoDecoderSink::OutputPumpMain() {
   constexpr auto kPumpInterval = std::chrono::milliseconds(3);
   while (!outputPumpStop_.load(std::memory_order_relaxed)) {
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      LockedState lock(this);
       if (codec_) DrainOutputLocked();
     }
     std::this_thread::sleep_for(kPumpInterval);
@@ -137,7 +137,7 @@ void AndroidVideoDecoderSink::OutputPumpMain() {
 }
 
 void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const uint32_t clampedFps = std::clamp<uint32_t>(fps, 1u, 240u);
   // A runtime FPS change starts a new presentation clock on the next frame.
   playoutClock_.SetTargetFrameIntervalUs(
@@ -145,7 +145,7 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
 }
 
 void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
 
@@ -169,7 +169,7 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
 }
 
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
 
   PumpCodecLocked();
 
@@ -231,7 +231,7 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 }
 
 void AndroidVideoDecoderSink::OnVideoStreamReset() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -250,7 +250,7 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
 }
 
 void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   // Keep SPS/PPS, dimensions, and the active selection generation. Only decoder reference
   // pictures and pending compressed frames are invalid after a UDP loss.
   ResetCodecLocked();
@@ -260,8 +260,19 @@ void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
 bool AndroidVideoDecoderSink::DrainPresentationStats(
     remote60::native_poc::ClientPresentationStats* out) {
   if (!out) return false;
-  std::lock_guard<std::mutex> lock(mu_);
-  if (presentGapsUs_.size() < 2) return false;
+  LockedState lock(this);
+  // mobile-abr r1: the session drains once a second and every drain closes the window. Fewer than two
+  // gaps is "no gap sample this window" -- the gaps and counters are dropped with it, so they cannot be
+  // folded into a window seconds later.
+  if (presentGapsUs_.size() < 2) {
+    presentGapsUs_.clear();
+    presentWindowStartUs_ = lastPresentSteadyUs_;
+    presentScheduledCount_ = 0;
+    presentImmediateCount_ = 0;
+    presentWindowReanchorBase_ = playoutClock_.ReanchorCount();
+    displayedWindowBase_ = displayedFrameCount_.load(std::memory_order_relaxed);
+    return false;
+  }
 
   std::vector<uint32_t> gaps = presentGapsUs_;
   const uint64_t windowStartUs = presentWindowStartUs_;
@@ -302,8 +313,35 @@ bool AndroidVideoDecoderSink::DrainPresentationStats(
   return true;
 }
 
+void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
+  decodedTotalPub_.store(decodedTotal_, std::memory_order_release);
+  const bool selectionWaiting =
+      gate_.awaiting() || (gate_.pending() != 0 && readySelectionGeneration_ != gate_.pending());
+  decodeValidPub_.store(window_ != nullptr && !selectionWaiting, std::memory_order_release);
+  outputSizePub_.store((static_cast<uint64_t>(outputWidth_) << 32u) | static_cast<uint64_t>(outputHeight_),
+                       std::memory_order_release);
+}
+
+// Called by the session's control thread about once a second; reads only what PublishDecodeStateLocked
+// stored. false = the decoder's state is not meaningful now (no surface; a selection still waiting for
+// its answer or its first IDR -- the stream is deliberately between generations): the session then
+// reports nothing for that window instead of "0 fps". A codec reset for a loss stays valid: frames
+// that do not decode then are a real stall.
+bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) {
+  if (!out) return false;
+  const uint64_t total = decodedTotalPub_.load(std::memory_order_acquire);
+  const uint64_t delta = total >= decodedDrainBase_ ? total - decodedDrainBase_ : 0;
+  decodedDrainBase_ = total;
+  if (!decodeValidPub_.load(std::memory_order_acquire)) return false;
+  const uint64_t size = outputSizePub_.load(std::memory_order_acquire);
+  out->decodedFrames = static_cast<uint32_t>(std::min<uint64_t>(delta, 0xFFFFFFFFULL));
+  out->width = static_cast<uint32_t>(size >> 32u);
+  out->height = static_cast<uint32_t>(size & 0xFFFFFFFFULL);
+  return true;
+}
+
 bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const bool requested = decoderKeyframeRequest_;
   decoderKeyframeRequest_ = false;
   return requested;
@@ -314,25 +352,25 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
   // Untagged: taken as the answer to whatever selection is armed (the old behaviour).
   uint64_t tag = 0;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    LockedState lock(this);
     tag = gate_.pending();
   }
   OnWindowSelectionControlResultFor(msg, tag);
 }
 
 uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   return gate_.OwedToken();
 }
 
 uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   return gate_.pending();
 }
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
     const remote60::native_poc::ControlWindowSelectedMessage& msg, uint64_t requestTag) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const auto ack = gate_.OnAck((msg.flags & 0x1u) != 0, msg.streamGeneration, requestTag);
   char line[224];
   if (ack.result == remote60::native_poc::SelectionAckGate::AckResult::Ignored) {
@@ -363,7 +401,7 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
 }
 
 void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGeneration) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -386,7 +424,7 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
 }
 
 void AndroidVideoDecoderSink::AbortWindowSelection() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -406,7 +444,7 @@ void AndroidVideoDecoderSink::AbortWindowSelection() {
 }
 
 std::string AndroidVideoDecoderSink::DebugStatus() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   std::string status = "surface=";
   status += window_ ? "on" : "off";
   status += " codec=";
@@ -442,7 +480,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
 }
 
 uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
   const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
@@ -450,13 +488,13 @@ uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
 }
 
 uint64_t AndroidVideoDecoderSink::ReadySelectionGeneration() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   return readySelectionGeneration_;
 }
 
 uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   return lastOutputPresentationUs_;
 }
@@ -819,6 +857,18 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
     if (outputIndex >= 0) {
+      // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). Codec-config (2) and
+      // end-of-stream (4) buffers carry no picture.
+      constexpr uint32_t kBufferFlagCodecConfig = 2;
+      constexpr uint32_t kBufferFlagEndOfStream = 4;
+      if ((static_cast<uint32_t>(info.flags) & (kBufferFlagCodecConfig | kBufferFlagEndOfStream)) == 0) {
+        if (info.presentationTimeUs > 0 && info.presentationTimeUs == lastCountedOutputPts_) {
+          ++replayOutputs_;
+        } else {
+          ++decodedTotal_;
+          lastCountedOutputPts_ = info.presentationTimeUs;
+        }
+      }
       lastOutputPresentationUs_ =
           (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
       latestOutputStreamGeneration_ = gate_.expected();
