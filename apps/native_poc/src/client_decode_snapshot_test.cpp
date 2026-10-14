@@ -117,6 +117,45 @@ int main() {
     check("a read that never sees a finished write gives up (false), bounded", !got && us < 100000,
           std::to_string(us) + " us");
   }
+  {
+    // r6 (Codex S1): where the valid measurement begins (ClientDecodeSpanStart) and what a drain reads.
+    auto read = [](const ClientDecodeSpanStart& sp, uint64_t total, uint64_t now, ClientDecodeSpan* out) {
+      ClientDecodeState s;
+      s.valid = true;
+      s.decodedTotal = total;
+      s.spanId = sp.id();
+      s.spanStartUs = sp.startUs();
+      s.spanStartTotal = sp.startTotal();
+      return ReadDecodeSpan(s, now, out);
+    };
+    ClientDecodeSpanStart sp;
+    ClientDecodeSpan out;
+    sp.OnGraceStart(100, 3'000'000);  // a grace from 1 s, deadline 3 s
+    check("r6: inside a grace nothing is measured", !read(sp, 100, 2'000'000, &out));
+    sp.OnGraceFirstPicture(2'900'000, 100);  // its first picture at 2.9 s
+    check("r6: the grace's first picture starts the measurement there, counted in it",
+          read(sp, 101, 2'900'000, &out) && out.frames == 1 && out.us == 0 && sp.startUs() == 2'900'000);
+    const bool later = read(sp, 108, 3'150'000, &out);
+    check("r6: ...the grace's 1.9 s are not in the time", later && out.frames == 8 && out.us == 250'000,
+          std::to_string(out.frames) + " over " + std::to_string(out.us) + " us");
+    const uint64_t id = sp.id();
+    sp.OnGraceStart(108, 6'000'000);  // another grace from 4 s, expires without a picture
+    check("r6: a new grace is a new measurement", sp.id() != id);
+    check("r6: an expired grace measures a real 0 from its deadline",
+          read(sp, 108, 6'100'000, &out) && out.frames == 0 && out.us == 100'000);
+    sp.OnGraceFirstPicture(6'500'000, 108);  // a picture after the deadline
+    check("r6: a picture after the deadline does not restart it (the 0s since are real)",
+          sp.startUs() == 6'000'000 && read(sp, 109, 6'500'000, &out) && out.frames == 1 && out.us == 500'000);
+    sp.OnGeneration(7'000'000, 120, false, 0);
+    check("r6: a generation change begins a new measurement at once",
+          read(sp, 125, 7'300'000, &out) && out.frames == 5 && out.us == 300'000);
+    sp.OnGraceStart(125, 10'000'000);
+    sp.OnGeneration(8'500'000, 125, true, 10'000'000);  // abandoned inside the grace
+    check("r6: a generation change inside a running grace is measured from the grace's deadline (no stretch, no early 0)",
+          !read(sp, 125, 9'000'000, &out) && sp.startUs() == 10'000'000);
+    ClientDecodeState none;
+    check("r6: no surface: not valid", !ReadDecodeSpan(none, 1, &out));
+  }
   std::printf("\nclient_decode_snapshot_test: %d passed, %d failed\nRESULT: %s\n", gChecks - gFailures, gFailures,
               gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;

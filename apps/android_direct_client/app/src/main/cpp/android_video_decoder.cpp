@@ -344,8 +344,8 @@ void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
     decodeKeyHash_ = key;
     decodeKeySet_ = true;
     ++decodeGeneration_;
-    generationStartTotal_ = decodedTotal_;
-    generationStartUs_ = steady_now_us();
+    // r6: a new measurement -- inside a grace that has not ended, from its deadline.
+    span_.OnGeneration(steady_now_us(), decodedTotal_, graceActive_, graceDeadlineUs_);
   }
   remote60::native_poc::ClientDecodeState s;
   s.valid = valid;
@@ -353,11 +353,9 @@ void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
   s.width = outputWidth_;
   s.height = outputHeight_;
   s.generation = decodeGeneration_;
-  s.generationStartTotal = generationStartTotal_;
-  s.generationStartUs = generationStartUs_;
-  s.graceActive = graceActive_;
-  s.graceDeadlineUs = graceDeadlineUs_;
-  s.graceBaseTotal = graceBaseTotal_;
+  s.spanId = span_.id();
+  s.spanStartUs = span_.startUs();
+  s.spanStartTotal = span_.startTotal();
   decodeSnapshot_.Publish(s);
 }
 
@@ -366,7 +364,7 @@ void AndroidVideoDecoderSink::StartGraceLocked(bool explicitEpisode) {
   graceActive_ = true;
   graceEligible_ = false;
   graceDeadlineUs_ = steady_now_us() + kStartupGraceUs;
-  graceBaseTotal_ = decodedTotal_;
+  span_.OnGraceStart(decodedTotal_, graceDeadlineUs_);  // r6: measured from the deadline, or its first picture
 }
 
 void AndroidVideoDecoderSink::OnDecodeEpisodeStart() {
@@ -376,34 +374,24 @@ void AndroidVideoDecoderSink::OnDecodeEpisodeStart() {
 
 uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.generation(); }
 
-// Called by the session's control thread about once a second; reads only what PublishDecodeStateLocked
-// stored. false = the decoder's state is not meaningful now (no surface; a selection still waiting for
-// its answer or its first IDR -- the stream is deliberately between generations): the session then
-// reports nothing for that window instead of "0 fps". A codec reset for a loss stays valid: frames
-// that do not decode then are a real stall.
-// r3 R2: one consistent copy (a sequence read, no lock). A window over which the generation changed spans a
-// surface / selection boundary: its count mixes two states, so it is not valid either.
+// Called by the session's control thread on its due passes; reads only what PublishDecodeStateLocked
+// stored (r3 R2: one consistent copy, a sequence read, no lock). false = the decoder's state is not
+// meaningful now: no surface (intended inactivity), or an active transition's startup still inside its
+// grace -- the session then reports nothing for that window instead of "0 fps". A codec reset for a loss
+// stays valid: frames that do not decode then are a real stall. A generation change does not make the
+// drain invalid (r5): a new measurement begins there.
+// r6 (Codex S1): the measurement in progress, cumulative -- the count since it began and the time since
+// then, on this sink's clock. Reading consumes nothing, so the session may ask again a little later
+// (ClientTelemetryWindow::Hold) without losing what it had.
 bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) {
   if (!out) return false;
   remote60::native_poc::ClientDecodeState s;
   if (!decodeSnapshot_.Read(&s)) return false;  // a writer kept overlapping: no copy this window
-  const uint64_t nowUs = steady_now_us();
-  uint64_t delta = s.decodedTotal >= decodedDrainBase_ ? s.decodedTotal - decodedDrainBase_ : 0;
-  uint64_t measuredUs = 0;  // all of the window
-  if (s.generation != drainGeneration_) {
-    // r5: the window spans a generation change -- count what came after it, over the time since it,
-    // rather than throwing the whole window away (which only lengthened the silence).
-    delta = s.decodedTotal >= s.generationStartTotal ? s.decodedTotal - s.generationStartTotal : 0;
-    measuredUs = nowUs > s.generationStartUs ? nowUs - s.generationStartUs : 1;
-  }
-  decodedDrainBase_ = s.decodedTotal;
-  drainGeneration_ = s.generation;
-  if (!s.valid) return false;  // no surface: intended inactivity, not measured
-  if (s.graceActive && s.decodedTotal == s.graceBaseTotal && nowUs < s.graceDeadlineUs) {
-    return false;  // an active transition's startup, inside its grace: not measured yet
-  }
-  out->decodedFrames = static_cast<uint32_t>(std::min<uint64_t>(delta, 0xFFFFFFFFULL));
-  out->measuredUs = measuredUs;
+  remote60::native_poc::ClientDecodeSpan span;
+  if (!remote60::native_poc::ReadDecodeSpan(s, steady_now_us(), &span)) return false;
+  out->spanId = span.id;
+  out->spanFrames = span.frames;
+  out->spanUs = span.us;
   out->width = s.width;
   out->height = s.height;
   out->generation = s.generation;
@@ -952,6 +940,8 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
         if (TakeReplayPtsLocked(info.presentationTimeUs)) {
           ++replayOutputs_;
         } else {
+          // r6: the picture that ends a grace starts the measurement, unless the deadline already did.
+          if (graceActive_) span_.OnGraceFirstPicture(steady_now_us(), decodedTotal_);
           ++decodedTotal_;
           graceActive_ = false;
           graceEligible_ = true;

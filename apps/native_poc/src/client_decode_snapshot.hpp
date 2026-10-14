@@ -28,16 +28,67 @@ struct ClientDecodeState {
   uint32_t width = 0;           // decoder output format (0 = not known)
   uint32_t height = 0;
   uint64_t generation = 0;      // bumps whenever validity / surface / selection changes
-  // r5 (Codex F1 contract): the count and the time (sink's steady clock, us) at which this generation
-  // began -- a drain over a generation change counts only what came after it, over the time it covers.
-  uint64_t generationStartTotal = 0;
-  uint64_t generationStartUs = 0;
-  // r5: an active transition's startup grace -- until the first counted picture, at most until the
-  // deadline (steady us). graceBaseTotal = the count when it began.
-  bool graceActive = false;
-  uint64_t graceDeadlineUs = 0;
-  uint64_t graceBaseTotal = 0;
+  // r6 (Codex S1, codex_mobile_abr_e599123.md): the valid measurement now in progress -- its id, the time
+  // it began (the sink's steady clock, us) and the count then (ClientDecodeSpanStart). A start still
+  // in the future is a startup grace that has not ended: nothing is measured yet.
+  uint64_t spanId = 0;
+  uint64_t spanStartUs = 0;
+  uint64_t spanStartTotal = 0;
 };
+
+// r6: where the valid measurement now in progress began -- the writer's side, kept by the sink under its
+// mutex. A rate is the count since this start over the time since it, so time that was deliberately not
+// measured (a startup grace) never enters a denominator, and the count and the time always cover the
+// same stretch.
+//   - a new generation (surface, selection) begins one at once -- inside a startup grace that has not
+//     ended, at the grace's deadline instead;
+//   - a startup grace begins one at its deadline (a grace that expires without a picture gives a real 0
+//     from there);
+//   - the picture that ends a grace before its deadline moves the start to that picture (counted in it);
+//     after the deadline the measurement has already begun and simply goes on.
+// Pure.
+class ClientDecodeSpanStart {
+ public:
+  void OnGeneration(uint64_t nowUs, uint64_t total, bool graceActive, uint64_t graceDeadlineUs) {
+    ++id_;
+    startTotal_ = total;
+    startUs_ = (graceActive && graceDeadlineUs > nowUs) ? graceDeadlineUs : nowUs;
+  }
+  void OnGraceStart(uint64_t total, uint64_t graceDeadlineUs) {
+    ++id_;
+    startTotal_ = total;
+    startUs_ = graceDeadlineUs;
+  }
+  // totalBefore: the count before the picture that ends the grace.
+  void OnGraceFirstPicture(uint64_t nowUs, uint64_t totalBefore) {
+    if (nowUs >= startUs_) return;
+    startUs_ = nowUs;
+    startTotal_ = totalBefore;
+  }
+  uint64_t id() const { return id_; }
+  uint64_t startUs() const { return startUs_; }
+  uint64_t startTotal() const { return startTotal_; }
+
+ private:
+  uint64_t id_ = 0;
+  uint64_t startUs_ = 0;
+  uint64_t startTotal_ = 0;
+};
+
+// r6: what a drain at nowUs (the clock the span was started on) measures. false = nothing is valid now:
+// no surface, or inside a startup grace (the span has not begun).
+struct ClientDecodeSpan {
+  uint64_t id = 0;
+  uint64_t frames = 0;  // valid pictures since the span began
+  uint64_t us = 0;      // how long it has been measured
+};
+inline bool ReadDecodeSpan(const ClientDecodeState& s, uint64_t nowUs, ClientDecodeSpan* out) {
+  if (!s.valid || nowUs < s.spanStartUs) return false;
+  out->id = s.spanId;
+  out->frames = s.decodedTotal >= s.spanStartTotal ? s.decodedTotal - s.spanStartTotal : 0;
+  out->us = nowUs - s.spanStartUs;
+  return true;
+}
 
 class ClientDecodeSnapshot {
  public:
@@ -50,11 +101,9 @@ class ClientDecodeSnapshot {
     total_.store(v.decodedTotal, std::memory_order_relaxed);
     size_.store((static_cast<uint64_t>(v.width) << 32u) | v.height, std::memory_order_relaxed);
     gen_.store(v.generation, std::memory_order_relaxed);
-    genStartTotal_.store(v.generationStartTotal, std::memory_order_relaxed);
-    genStartUs_.store(v.generationStartUs, std::memory_order_relaxed);
-    grace_.store(v.graceActive, std::memory_order_relaxed);
-    graceDeadlineUs_.store(v.graceDeadlineUs, std::memory_order_relaxed);
-    graceBase_.store(v.graceBaseTotal, std::memory_order_relaxed);
+    spanId_.store(v.spanId, std::memory_order_relaxed);
+    spanStartUs_.store(v.spanStartUs, std::memory_order_relaxed);
+    spanStartTotal_.store(v.spanStartTotal, std::memory_order_relaxed);
     seq_.store(s + 2, std::memory_order_release);
   }
 
@@ -68,11 +117,9 @@ class ClientDecodeSnapshot {
       v.decodedTotal = total_.load(std::memory_order_relaxed);
       const uint64_t size = size_.load(std::memory_order_relaxed);
       v.generation = gen_.load(std::memory_order_relaxed);
-      v.generationStartTotal = genStartTotal_.load(std::memory_order_relaxed);
-      v.generationStartUs = genStartUs_.load(std::memory_order_relaxed);
-      v.graceActive = grace_.load(std::memory_order_relaxed);
-      v.graceDeadlineUs = graceDeadlineUs_.load(std::memory_order_relaxed);
-      v.graceBaseTotal = graceBase_.load(std::memory_order_relaxed);
+      v.spanId = spanId_.load(std::memory_order_relaxed);
+      v.spanStartUs = spanStartUs_.load(std::memory_order_relaxed);
+      v.spanStartTotal = spanStartTotal_.load(std::memory_order_relaxed);
       std::atomic_thread_fence(std::memory_order_acquire);
       if (seq_.load(std::memory_order_relaxed) != s1) continue;
       v.width = static_cast<uint32_t>(size >> 32u);
@@ -91,11 +138,9 @@ class ClientDecodeSnapshot {
   std::atomic<uint64_t> total_{0};
   std::atomic<uint64_t> size_{0};
   std::atomic<uint64_t> gen_{0};
-  std::atomic<uint64_t> genStartTotal_{0};
-  std::atomic<uint64_t> genStartUs_{0};
-  std::atomic<bool> grace_{false};
-  std::atomic<uint64_t> graceDeadlineUs_{0};
-  std::atomic<uint64_t> graceBase_{0};
+  std::atomic<uint64_t> spanId_{0};
+  std::atomic<uint64_t> spanStartUs_{0};
+  std::atomic<uint64_t> spanStartTotal_{0};
 };
 
 }  // namespace remote60::native_poc

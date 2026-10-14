@@ -22,10 +22,11 @@ namespace remote60::native_poc {
 class ClientEncodedFrameSink {
  public:
   virtual ~ClientEncodedFrameSink() = default;
-  /** Drains the decoded-picture count since the last call (mobile-abr r1). false when the sink does not
-   *  decode at all (the session then reports no decode-side field, as before) or when its decoder state
-   *  means nothing right now -- no surface, a selection between generations (the session then reports
-   *  nothing for that window rather than "0 fps"). A valid 0 is a real stall and is reported. */
+  /** The decoder's valid measurement in progress (mobile-abr r1; r6: cumulative since it began, with its
+   *  time -- reading consumes nothing). false when the sink does not decode at all (the session then
+   *  reports no decode-side field, as before) or when its decoder state means nothing right now -- no
+   *  surface, a startup grace (the session then reports nothing for that window rather than "0 fps").
+   *  A valid 0 is a real stall and is reported. */
   virtual bool DrainDecodeStats(ClientDecodeStats* /* out */) { return false; }
   /** The decode generation now (r3 R2): it changes whenever the sink's decode state stops or starts being
    *  meaningful (surface, selection). Lock-free; read on every control pass. 0 for a sink without one. */

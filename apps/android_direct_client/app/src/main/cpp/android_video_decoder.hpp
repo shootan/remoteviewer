@@ -91,21 +91,20 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t decodeGeneration_ = 0;     // under mu_
   uint64_t decodeKeyHash_ = 0;        // under mu_: what the generation last changed on
   bool decodeKeySet_ = false;
-  uint64_t decodedDrainBase_ = 0;     // the session's control thread only
-  uint64_t drainGeneration_ = 0;      // the session's control thread only: the generation of the last drain
-  // r5 (Codex F1 contract): where the current generation began, and the startup grace of an active
-  // transition. A grace begins at an explicit episode start (connection, stream resumed: always) or a
-  // transition inside active viewing (selection prepared, surface back, a switch abandoned while
-  // active: only if a picture has been counted since the last grace -- so prepare / abort / retry /
-  // codec retries / loss resets cannot stretch it). It ends at the first counted picture, or by itself
-  // at the deadline, which the reader observes on its own clock (no frame, poll or lock needed).
-  uint64_t generationStartTotal_ = 0;
-  uint64_t generationStartUs_ = 0;
+  // r5 (Codex F1 contract): the startup grace of an active transition. A grace begins at an explicit
+  // episode start (connection, stream resumed: always) or a transition inside active viewing (selection
+  // prepared, surface back, a switch abandoned while active: only if a picture has been counted since the
+  // last grace -- so prepare / abort / retry / codec retries / loss resets cannot stretch it). It ends at
+  // the first counted picture, or by itself at the deadline, which the reader observes on its own clock
+  // (no frame, poll or lock needed).
+  // r6 (Codex S1): where the valid measurement now in progress began (client_decode_snapshot.hpp) -- a
+  // new generation, a grace's deadline, or the picture that ended a grace. The drain reports the count
+  // and the time since then together, and keeps no state of its own.
   static constexpr uint64_t kStartupGraceUs = 2000000ULL;
   bool graceActive_ = false;
   bool graceEligible_ = true;
   uint64_t graceDeadlineUs_ = 0;
-  uint64_t graceBaseTotal_ = 0;
+  remote60::native_poc::ClientDecodeSpanStart span_;  // under mu_
   void StartGraceLocked(bool explicitEpisode);
   ANativeWindow* window_ = nullptr;
   AMediaCodec* codec_ = nullptr;

@@ -487,14 +487,19 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     // decode fields, and was lost whenever NextAction picked something else on that pass -- a phone went
     // 5-10 s without a report and the host's stale-feedback rule (P7) stepped quality down on a healthy
     // link (field 2026-10-14). The measured snapshot now stays pending until it is actually sent.
+    // r6 (Codex S1): a decode measurement that began just now (a grace's first picture, a generation
+    // change) is held for its minimum sample -- re-asked on a later pass, the presentation drain untouched.
     if (encodedFrameSink_ && telemetry_.Due(loopNowUs)) {
       ClientDecodeStats decode{};
       const bool decodeValid = encodedFrameSink_->DrainDecodeStats(&decode);
-      ClientPresentationStats present{};
-      const bool presentValid = encodedFrameSink_->DrainPresentationStats(&present);
-      (void)telemetry_.Close(loopNowUs, sinkFrames_.load(std::memory_order_relaxed),
-                             sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
-                             presentValid ? &present : nullptr, streamPaused_.load(std::memory_order_acquire));
+      const bool paused = streamPaused_.load(std::memory_order_acquire);
+      if (!telemetry_.Hold(loopNowUs, decodeValid ? &decode : nullptr, paused)) {
+        ClientPresentationStats present{};
+        const bool presentValid = encodedFrameSink_->DrainPresentationStats(&present);
+        (void)telemetry_.Close(loopNowUs, sinkFrames_.load(std::memory_order_relaxed),
+                               sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
+                               presentValid ? &present : nullptr, paused);
+      }
     }
     // r3 R2: a snapshot measured before the sink's decode state changed (surface, selection) is not sent.
     if (encodedFrameSink_) telemetry_.OnDecodeGeneration(encodedFrameSink_->DecodeGeneration());
