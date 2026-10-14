@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "client_decode_snapshot.hpp"
 #include "native_video_client_session.hpp"
 #include "selection_ack_gate.hpp"
 #include "video_playout_clock.hpp"
@@ -36,6 +37,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool ConsumeDecoderKeyframeRequest() override;
   bool DrainPresentationStats(
       remote60::native_poc::ClientPresentationStats* out) override;
+  bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override;
+  uint64_t DecodeGeneration() override;
+  void OnDecodeEpisodeStart() override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -67,6 +71,41 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OutputPumpMain();
 
   std::mutex mu_;
+  // mobile-abr r1: every section under mu_ ends by publishing what the session's control thread reads
+  // WITHOUT mu_ (DrainDecodeStats) -- that thread must never wait on a lock the codec work holds.
+  void PublishDecodeStateLocked();
+  class LockedState {
+   public:
+    explicit LockedState(AndroidVideoDecoderSink* s) : s_(s), lock_(s->mu_) {}
+    ~LockedState() { s_->PublishDecodeStateLocked(); }  // runs before lock_ is released
+    LockedState(const LockedState&) = delete;
+    LockedState& operator=(const LockedState&) = delete;
+
+   private:
+    AndroidVideoDecoderSink* s_;
+    std::lock_guard<std::mutex> lock_;
+  };
+  // r3 R2: (valid, count, size, generation) as one consistent copy (client_decode_snapshot.hpp). The
+  // generation bumps whenever validity / the surface / the selection changes.
+  remote60::native_poc::ClientDecodeSnapshot decodeSnapshot_;
+  uint64_t decodeGeneration_ = 0;     // under mu_
+  uint64_t decodeKeyHash_ = 0;        // under mu_: what the generation last changed on
+  bool decodeKeySet_ = false;
+  // r5 (Codex F1 contract): the startup grace of an active transition. A grace begins at an explicit
+  // episode start (connection, stream resumed: always) or a transition inside active viewing (selection
+  // prepared, surface back, a switch abandoned while active: only if a picture has been counted since the
+  // last grace -- so prepare / abort / retry / codec retries / loss resets cannot stretch it). It ends at
+  // the first counted picture, or by itself at the deadline, which the reader observes on its own clock
+  // (no frame, poll or lock needed).
+  // r6 (Codex S1): where the valid measurement now in progress began (client_decode_snapshot.hpp) -- a
+  // new generation, a grace's deadline, or the picture that ended a grace. The drain reports the count
+  // and the time since then together, and keeps no state of its own.
+  static constexpr uint64_t kStartupGraceUs = 2000000ULL;
+  bool graceActive_ = false;
+  bool graceEligible_ = true;
+  uint64_t graceDeadlineUs_ = 0;
+  remote60::native_poc::ClientDecodeSpanStart span_;  // under mu_
+  void StartGraceLocked(bool explicitEpisode);
   ANativeWindow* window_ = nullptr;
   AMediaCodec* codec_ = nullptr;
   uint32_t configuredWidth_ = 0;
@@ -75,6 +114,22 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint32_t outputHeight_ = 0;
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
+  // mobile-abr r1 (Codex contract section 3): valid decoded pictures, counted where the decoder hands
+  // one out (dequeueOutputBuffer >= 0; not a codec-config buffer, not an end-of-stream buffer without a
+  // picture) -- not when it is released to the display later. Never reset: outputFrameCount_ is reset
+  // with the codec.
+  // r3 R1: the selection's bootstrap IDR re-queued into a codec that had not answered yet is the same
+  // picture again, but the playout clock gives each queue a NEW PTS. The PTS of every replay queue that
+  // succeeded is remembered here (a few at most -- kBootstrapReplayMaxCount per selection) and its output
+  // is counted apart, in replayOutputs_. Forgotten with the codec.
+  uint64_t decodedTotal_ = 0;
+  uint64_t replayOutputs_ = 0;
+  bool queueingReplay_ = false;
+  static constexpr size_t kReplayPtsSlots = 8;
+  int64_t replayPts_[kReplayPtsSlots] = {};
+  size_t replayPtsCount_ = 0;
+  void RememberReplayPtsLocked(int64_t ptsUs);
+  bool TakeReplayPtsLocked(int64_t ptsUs);
   // Which selection is armed, whether its answer is still awaited and which stream generation it
   // answered with (selection_ack_gate.hpp; shared with the Windows tests).
   remote60::native_poc::SelectionAckGate gate_;

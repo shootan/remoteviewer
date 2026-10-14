@@ -106,7 +106,7 @@ std::vector<uint8_t> with_start_code(const uint8_t* data, size_t size) {
 AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
   // Before the lock: the pump takes it every tick, so joining while holding it would deadlock.
   StopOutputPump();
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
 }
@@ -129,7 +129,7 @@ void AndroidVideoDecoderSink::OutputPumpMain() {
   constexpr auto kPumpInterval = std::chrono::milliseconds(3);
   while (!outputPumpStop_.load(std::memory_order_relaxed)) {
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      LockedState lock(this);
       if (codec_) DrainOutputLocked();
     }
     std::this_thread::sleep_for(kPumpInterval);
@@ -137,7 +137,7 @@ void AndroidVideoDecoderSink::OutputPumpMain() {
 }
 
 void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const uint32_t clampedFps = std::clamp<uint32_t>(fps, 1u, 240u);
   // A runtime FPS change starts a new presentation clock on the next frame.
   playoutClock_.SetTargetFrameIntervalUs(
@@ -145,7 +145,7 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
 }
 
 void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
 
@@ -166,10 +166,11 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
   // afresh now that it can be decoded.
   gate_.Rearm();
+  StartGraceLocked(false);  // mobile-abr r5: the surface back is an active transition
 }
 
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
 
   PumpCodecLocked();
 
@@ -231,7 +232,7 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
 }
 
 void AndroidVideoDecoderSink::OnVideoStreamReset() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -250,7 +251,7 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
 }
 
 void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   // Keep SPS/PPS, dimensions, and the active selection generation. Only decoder reference
   // pictures and pending compressed frames are invalid after a UDP loss.
   ResetCodecLocked();
@@ -260,8 +261,19 @@ void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
 bool AndroidVideoDecoderSink::DrainPresentationStats(
     remote60::native_poc::ClientPresentationStats* out) {
   if (!out) return false;
-  std::lock_guard<std::mutex> lock(mu_);
-  if (presentGapsUs_.size() < 2) return false;
+  LockedState lock(this);
+  // mobile-abr r1: the session drains once a second and every drain closes the window. Fewer than two
+  // gaps is "no gap sample this window" -- the gaps and counters are dropped with it, so they cannot be
+  // folded into a window seconds later.
+  if (presentGapsUs_.size() < 2) {
+    presentGapsUs_.clear();
+    presentWindowStartUs_ = lastPresentSteadyUs_;
+    presentScheduledCount_ = 0;
+    presentImmediateCount_ = 0;
+    presentWindowReanchorBase_ = playoutClock_.ReanchorCount();
+    displayedWindowBase_ = displayedFrameCount_.load(std::memory_order_relaxed);
+    return false;
+  }
 
   std::vector<uint32_t> gaps = presentGapsUs_;
   const uint64_t windowStartUs = presentWindowStartUs_;
@@ -302,8 +314,92 @@ bool AndroidVideoDecoderSink::DrainPresentationStats(
   return true;
 }
 
+void AndroidVideoDecoderSink::RememberReplayPtsLocked(int64_t ptsUs) {
+  if (replayPtsCount_ < kReplayPtsSlots) replayPts_[replayPtsCount_++] = ptsUs;
+}
+
+bool AndroidVideoDecoderSink::TakeReplayPtsLocked(int64_t ptsUs) {
+  for (size_t i = 0; i < replayPtsCount_; ++i) {
+    if (replayPts_[i] == ptsUs) {
+      replayPts_[i] = replayPts_[--replayPtsCount_];
+      return true;
+    }
+  }
+  return false;
+}
+
+void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
+  // r5 (Codex F1 contract): no surface = intended inactivity (not measured). A selection being set up is
+  // active viewing: it is held back only by the bounded startup grace, not indefinitely.
+  const bool valid = window_ != nullptr;
+  // The generation moves whenever what the decoder's count means could have changed: validity, the
+  // surface, the selection being prepared / abandoned and the stream generation it was answered with.
+  uint64_t key = reinterpret_cast<uintptr_t>(window_);
+  key = key * 1000003ULL ^ (valid ? 1ULL : 0ULL);
+  key = key * 1000003ULL ^ gate_.pending();
+  // r5: not readySelectionGeneration_ -- it flips when the selection's first picture is released, after
+  // that picture (and the ones decoded with it) were counted into the generation prepare / the answer began.
+  key = key * 1000003ULL ^ gate_.expected();
+  if (!decodeKeySet_ || key != decodeKeyHash_) {
+    decodeKeyHash_ = key;
+    decodeKeySet_ = true;
+    ++decodeGeneration_;
+    // r6: a new measurement -- inside a grace that has not ended, from its deadline.
+    span_.OnGeneration(steady_now_us(), decodedTotal_, graceActive_, graceDeadlineUs_);
+  }
+  remote60::native_poc::ClientDecodeState s;
+  s.valid = valid;
+  s.decodedTotal = decodedTotal_;
+  s.width = outputWidth_;
+  s.height = outputHeight_;
+  s.generation = decodeGeneration_;
+  s.spanId = span_.id();
+  s.spanStartUs = span_.startUs();
+  s.spanStartTotal = span_.startTotal();
+  decodeSnapshot_.Publish(s);
+}
+
+void AndroidVideoDecoderSink::StartGraceLocked(bool explicitEpisode) {
+  if (!explicitEpisode && !graceEligible_) return;  // no stretching: one grace until a picture is counted
+  graceActive_ = true;
+  graceEligible_ = false;
+  graceDeadlineUs_ = steady_now_us() + kStartupGraceUs;
+  span_.OnGraceStart(decodedTotal_, graceDeadlineUs_);  // r6: measured from the deadline, or its first picture
+}
+
+void AndroidVideoDecoderSink::OnDecodeEpisodeStart() {
+  LockedState lock(this);
+  StartGraceLocked(true);
+}
+
+uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.generation(); }
+
+// Called by the session's control thread on its due passes; reads only what PublishDecodeStateLocked
+// stored (r3 R2: one consistent copy, a sequence read, no lock). false = the decoder's state is not
+// meaningful now: no surface (intended inactivity), or an active transition's startup still inside its
+// grace -- the session then reports nothing for that window instead of "0 fps". A codec reset for a loss
+// stays valid: frames that do not decode then are a real stall. A generation change does not make the
+// drain invalid (r5): a new measurement begins there.
+// r6 (Codex S1): the measurement in progress, cumulative -- the count since it began and the time since
+// then, on this sink's clock. Reading consumes nothing, so the session may ask again a little later
+// (ClientTelemetryWindow::Hold) without losing what it had.
+bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) {
+  if (!out) return false;
+  remote60::native_poc::ClientDecodeState s;
+  if (!decodeSnapshot_.Read(&s)) return false;  // a writer kept overlapping: no copy this window
+  remote60::native_poc::ClientDecodeSpan span;
+  if (!remote60::native_poc::ReadDecodeSpan(s, steady_now_us(), &span)) return false;
+  out->spanId = span.id;
+  out->spanFrames = span.frames;
+  out->spanUs = span.us;
+  out->width = s.width;
+  out->height = s.height;
+  out->generation = s.generation;
+  return true;
+}
+
 bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const bool requested = decoderKeyframeRequest_;
   decoderKeyframeRequest_ = false;
   return requested;
@@ -314,25 +410,25 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
   // Untagged: taken as the answer to whatever selection is armed (the old behaviour).
   uint64_t tag = 0;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    LockedState lock(this);
     tag = gate_.pending();
   }
   OnWindowSelectionControlResultFor(msg, tag);
 }
 
 uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   return gate_.OwedToken();
 }
 
 uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   return gate_.pending();
 }
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
     const remote60::native_poc::ControlWindowSelectedMessage& msg, uint64_t requestTag) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   const auto ack = gate_.OnAck((msg.flags & 0x1u) != 0, msg.streamGeneration, requestTag);
   char line[224];
   if (ack.result == remote60::native_poc::SelectionAckGate::AckResult::Ignored) {
@@ -363,7 +459,7 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
 }
 
 void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGeneration) {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -372,6 +468,7 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
   gate_.Prepare(selectionGeneration);
+  StartGraceLocked(false);  // r5: a selection is an active transition
   latestInputStreamGeneration_ = 0;
   latestOutputStreamGeneration_ = 0;
   lastOutputPresentationUs_ = 0;
@@ -386,7 +483,7 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
 }
 
 void AndroidVideoDecoderSink::AbortWindowSelection() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -402,11 +499,17 @@ void AndroidVideoDecoderSink::AbortWindowSelection() {
   staleFrameDropCount_ = 0;
   csd0_.clear();
   csd1_.clear();
+  // mobile-abr r5 (Codex F1 contract): a switch abandoned while the stream stays active must resume,
+  // not wait for the host's next periodic IDR: the next frame asks the session for one (its limiter
+  // applies). Inside the transition's grace only; the app pauses the stream before it aborts, so then
+  // nothing is measured anyway.
+  StartGraceLocked(false);
+  decoderKeyframeRequest_ = true;
   log_info("selection aborted");
 }
 
 std::string AndroidVideoDecoderSink::DebugStatus() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   std::string status = "surface=";
   status += window_ ? "on" : "off";
   status += " codec=";
@@ -442,7 +545,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
 }
 
 uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
   const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
@@ -450,13 +553,13 @@ uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
 }
 
 uint64_t AndroidVideoDecoderSink::ReadySelectionGeneration() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   return readySelectionGeneration_;
 }
 
 uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
-  std::lock_guard<std::mutex> lock(mu_);
+  LockedState lock(this);
   PumpCodecLocked();
   return lastOutputPresentationUs_;
 }
@@ -547,7 +650,10 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
       lastInputQueueSteadyUs_ > 0 &&
       nowUs >= lastInputQueueSteadyUs_ + kBootstrapReplayIntervalUs) {
     auto replayFrame = *bootstrapFrame_;
-    if (TryQueueFrameLocked(replayFrame)) {
+    queueingReplay_ = true;  // r3 R1: TryQueueFrameLocked remembers the PTS this replay is queued with
+    const bool replayQueued = TryQueueFrameLocked(replayFrame);
+    queueingReplay_ = false;
+    if (replayQueued) {
       ++bootstrapReplayCount_;
       char line[192];
       std::snprintf(line, sizeof(line),
@@ -600,6 +706,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   }
 
   ++inputFrameCount_;
+  if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
   if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
@@ -662,6 +769,7 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   bootstrapFrame_.reset();
   lastInputQueueSteadyUs_ = 0;
   bootstrapReplayCount_ = 0;
+  replayPtsCount_ = 0;  // r3 R1: the replays' outputs went with the codec
   // A held buffer index belongs to the codec that produced it. Releasing it against a codec
   // that has been torn down and rebuilt would target an unrelated buffer.
   heldOutputValid_ = false;
@@ -819,6 +927,26 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
     if (outputIndex >= 0) {
+      // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). A codec-config (2)
+      // buffer carries no picture; an end-of-stream (4) buffer may carry the last one, so only an empty
+      // EOS buffer is left out (GNLink never queues an EOS in a session). A replayed input's output is
+      // counted apart (r3 R1).
+      constexpr uint32_t kBufferFlagCodecConfig = 2;
+      constexpr uint32_t kBufferFlagEndOfStream = 4;
+      const uint32_t flags = static_cast<uint32_t>(info.flags);
+      const bool picture = (flags & kBufferFlagCodecConfig) == 0 &&
+                           !((flags & kBufferFlagEndOfStream) != 0 && info.size <= 0);
+      if (picture) {
+        if (TakeReplayPtsLocked(info.presentationTimeUs)) {
+          ++replayOutputs_;
+        } else {
+          // r6: the picture that ends a grace starts the measurement, unless the deadline already did.
+          if (graceActive_) span_.OnGraceFirstPicture(steady_now_us(), decodedTotal_);
+          ++decodedTotal_;
+          graceActive_ = false;
+          graceEligible_ = true;
+        }
+      }
       lastOutputPresentationUs_ =
           (info.presentationTimeUs > 0) ? static_cast<uint64_t>(info.presentationTimeUs) : 0;
       latestOutputStreamGeneration_ = gate_.expected();

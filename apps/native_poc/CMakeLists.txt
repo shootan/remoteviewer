@@ -858,6 +858,35 @@ target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
 
+# mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
+# NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
+add_executable(remote60_android_decoder_decode_stats_test
+  src/android_decoder_decode_stats_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
+
+# mobile-abr r3: the decoder sink's state as one consistent copy (sequence lock), with a negative control (pure).
+add_executable(remote60_client_decode_snapshot_test src/client_decode_snapshot_test.cpp)
+target_include_directories(remote60_client_decode_snapshot_test PRIVATE src)
+
+# mobile-abr r1: the shared client session's report window against the product control scheduler (pure).
+add_executable(remote60_client_telemetry_window_test
+  src/client_telemetry_window_test.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_client_telemetry_window_test PRIVATE src)
+target_link_libraries(remote60_client_telemetry_window_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_client_telemetry_window_test PRIVATE /utf-8)
+endif()
+
 # t-970r4zgo, process level: the test-build host (GNLinkStreamMigrationTest, whose enumerate_monitors
 # reads GNLINK_STREAM_TEST_MONITORS_FILE) loses the picked screen while idle; a returning viewer gets
 # the primary, the retry does not run forever, a transient empty enumeration keeps the retry.
@@ -871,6 +900,21 @@ add_executable(remote60_host_monitor_fallback_e2e_test
 target_include_directories(remote60_host_monitor_fallback_e2e_test PRIVATE src)
 target_link_libraries(remote60_host_monitor_fallback_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir)
 add_dependencies(remote60_host_monitor_fallback_e2e_test remote60_native_video_host_migration_seam)
+
+# mobile-abr r1: the APK's shared client session (with a sink that acts like the APK's decoder sink) against
+# an isolated host, judged from the host's own ABR lines -- the phone's sparse reports, real stops and losses.
+add_executable(remote60_mobile_abr_session_e2e_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/mobile_abr_session_e2e_test.cpp
+)
+target_include_directories(remote60_mobile_abr_session_e2e_test PRIVATE src)
+target_link_libraries(remote60_mobile_abr_session_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_mobile_abr_session_e2e_test PRIVATE /utf-8)
+endif()
 
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
 add_executable(remote60_capture_readback_test
