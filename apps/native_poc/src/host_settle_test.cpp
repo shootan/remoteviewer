@@ -214,7 +214,26 @@ void TestTelemetry() {
 
 }  // namespace
 
+// r6: a late AU of an earlier episode goes to the totals, never to the running episode's budget.
+void TestLateAuNotCharged() {
+  SettleRefiner s;
+  SettleConfig c;
+  c.inputs = 30;
+  c.deadlineUs = 3000000;
+  c.minSpacingUs = 0;
+  s.Configure(c);
+  s.SetByteBudget(100000);
+  s.NoteRealChange(0, Id(), 1);
+  (void)s.Poll(200 * kMs, Id(), false, false, false);
+  s.NoteEmitted(60000);
+  s.NoteEmittedLate(67137);  // an IDR of the previous episode surfacing late
+  expect(s.emitted_bytes_this_episode() == 60000, "r6: a late AU is not charged to the running episode");
+  expect(s.emitted_bytes_total() == 127137 && s.emitted_late_total() == 1, "r6: ...but it is in the totals");
+  expect(s.byte_budget() == 100000, "r6: the budget is readable for the drain's affordability check");
+}
+
 int main() {
+  TestLateAuNotCharged();
   TestBasicEpisode();
   TestChangeWhileWaitingRearms();
   TestChangeWhileActiveSupersedes();

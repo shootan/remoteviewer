@@ -367,9 +367,12 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     encoder.codec.set_next_input_synthetic(servedBootstrap);
     encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
     encoder.codec.set_next_input_content_version(tc.version);
-    if (servedBootstrap && tc.syntheticReason == kSyntheticReasonSettle) kick.settle.NoteSubmitted();
-    encoder.codec.set_next_input_settle_episode(
-        (servedBootstrap && tc.syntheticReason == kSyntheticReasonSettle) ? kick.settle.episodes() : 0);
+    // r6 (Codex s1): a GOP boundary input is a refinement of the same episode -- its submission and,
+    // in the AU stage, its bytes (the IDR included) are charged to that episode's budget like any other.
+    const bool settleInput = servedBootstrap && (tc.syntheticReason == kSyntheticReasonSettle ||
+                                                 tc.syntheticReason == kSyntheticReasonGopDrain);
+    if (settleInput) kick.settle.NoteSubmitted();
+    encoder.codec.set_next_input_settle_episode(settleInput ? kick.settle.episodes() : 0);
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {

@@ -567,10 +567,31 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
       encoder.gopDrainActive = false;
     }
+    // r6 (a'): a NEW drain cycle also needs a content version not drained yet, and the money for it.
+    bool drainNewOk = !encoder.GopDrainCycleAttempted();
+    if (kick.gopDrainEnabled && gopIdrImminent && kick.settle.active() && drainNewOk) {
+      if (encoder.gopDrainContentInstance == encoder.codec.instance_id() &&
+          encoder.gopDrainContentVersion == kick.settle.content_version()) {
+        drainNewOk = false;
+        if (encoder.gopDrainRefusedOrdinal != encoder.lastKeyOrdinal) ++encoder.gopDrainSameContent;
+        encoder.gopDrainRefusedOrdinal = encoder.lastKeyOrdinal;
+      } else {
+        const uint64_t budget = kick.settle.byte_budget();
+        const uint64_t spent = kick.settle.emitted_bytes_this_episode();
+        const uint32_t aus = kick.settle.emitted_this_episode();
+        const uint64_t avgP = aus > 0 ? spent / aus : 0;
+        const bool keyKnown = encoder.lastNaturalKeyInstance == encoder.codec.instance_id() && encoder.lastNaturalKeyBytes > 0;
+        if (!keyKnown || (budget > 0 && (spent >= budget || budget - spent < encoder.lastNaturalKeyBytes + avgP))) {
+          drainNewOk = false;
+          if (encoder.gopDrainRefusedOrdinal != encoder.lastKeyOrdinal) ++encoder.gopDrainUnaffordable;
+          encoder.gopDrainRefusedOrdinal = encoder.lastKeyOrdinal;
+        }
+      }
+    }
     if (kick.gopDrainEnabled && gopIdrImminent && kick.settle.active() && encoder.GopPredictionVerified() &&
         encoder.LiveCeilingEligible() && !keyOwed && !queueBusy && !realWaiting &&
         sender.pendingReplayCount.load(std::memory_order_relaxed) == 0 &&
-        (!encoder.GopDrainCycleAttempted() || (encoder.gopDrainActive && encoder.gopDrainInputs < EncoderState::kGopDrainMaxInputs))) {
+        (drainNewOk || (encoder.GopDrainCycleAttempted() && encoder.gopDrainActive && encoder.gopDrainInputs < EncoderState::kGopDrainMaxInputs))) {
       if (encoder.SettleDipActive()) {
         settle_dip_exit(hx, nowUs, "gop-boundary", false);
       } else if (encoder.codec.plan_max_qp() == encoder.EffectiveDesiredQp() && encoder.codec.rc_max_qp_field_applied()) {
@@ -646,6 +667,8 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         if (!encoder.GopDrainCycleAttempted()) {
           encoder.gopDrainCycleOrdinal = encoder.lastKeyOrdinal;
           encoder.gopDrainCycleInstance = encoder.codec.instance_id();
+          encoder.gopDrainContentVersion = kick.settle.content_version();
+          encoder.gopDrainContentInstance = encoder.codec.instance_id();
           encoder.gopDrainInputs = 0;
           encoder.gopDrainActive = true;
           ++encoder.gopDrainCycles;

@@ -408,7 +408,9 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " gopDrain=" << hx.kick.gopDrainCount << " gopDrainCycles=" << encoder.gopDrainCycles
                 << " gopDrainIdrs=" << encoder.gopDrainIdrs << " gopDrainNoIdr=" << encoder.gopDrainNoIdr
                 << " gopDrainEndedByTrain=" << encoder.gopDrainEndedByTrain << " gopPredictHits=" << encoder.gopPredictHits
-                << " gopPredictMisses=" << encoder.gopPredictMisses << " synthCancelled=" << hx.kick.synthCancelledForReal;
+                << " gopPredictMisses=" << encoder.gopPredictMisses << " synthCancelled=" << hx.kick.synthCancelledForReal
+                << " gopDrainUnaffordable=" << encoder.gopDrainUnaffordable << " gopDrainSameContent=" << encoder.gopDrainSameContent
+                << " settleLate=" << settle.emitted_late_total() << " lastNaturalKeyBytes=" << encoder.lastNaturalKeyBytes;
       std::cout << " instance=" << encoder.codec.instance_id() << "\n";
       encoder.qpWindow.Reset();
     }

@@ -172,6 +172,16 @@ class SettleRefiner {
     emittedBytesThisEpisode_ += bytes;
   }
 
+  // r6: an AU of an EARLIER episode that the async MFT returned after a newer episode started -- counted
+  // in the totals (it went out) but never charged to the running episode's budget.
+  void NoteEmittedLate(uint64_t bytes) {
+    ++emittedTotal_;
+    emittedBytesTotal_ += bytes;
+    ++emittedLateTotal_;
+  }
+  uint64_t emitted_late_total() const { return emittedLateTotal_; }
+  uint64_t byte_budget() const { return byteBudget_; }
+
   // Per-instance bounds (r3 candidate): the caller widens them on the AMD live-ceiling instance only.
   // Takes effect from the next episode; clamped to the hard ceilings like Configure.
   void SetBounds(uint32_t inputs, uint64_t deadlineUs) {
@@ -224,6 +234,7 @@ class SettleRefiner {
   SettleEnd lastEnded_ = SettleEnd::None;
   uint64_t endedCount_[6] = {0, 0, 0, 0, 0, 0};
   uint64_t byteBudget_ = 0;
+  uint64_t emittedLateTotal_ = 0;
 };
 
 }  // namespace remote60::native_poc

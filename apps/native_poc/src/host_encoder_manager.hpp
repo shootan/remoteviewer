@@ -97,6 +97,13 @@ struct EncoderState {
   uint32_t gopDrainInputs = 0;               // inputs served for that cycle
   bool gopDrainActive = false;
   uint64_t gopDrainCycles = 0, gopDrainIdrs = 0, gopDrainNoIdr = 0, gopDrainEndedByTrain = 0;
+  // r6 (a', Codex r6 s3): at most ONE voluntary drain per real-content episode (the content version it
+  // drained), and only when the episode can still pay for it: the remaining refinement byte budget must
+  // cover the last natural IDR of this instance plus one more refinement-sized P. No new credit.
+  uint64_t lastNaturalKeyBytes = 0, lastNaturalKeyInstance = 0;
+  uint64_t gopDrainContentVersion = 0, gopDrainContentInstance = 0;
+  uint64_t gopDrainUnaffordable = 0, gopDrainSameContent = 0;  // per GOP cycle refused
+  uint64_t gopDrainRefusedOrdinal = 0;
   bool GopPredictionVerified() const {
     return gopPredictVerifiedInstance != 0 && gopPredictVerifiedInstance == codec.instance_id() &&
            lastKeyInstance == codec.instance_id() && lastKeyOrdinal != 0 && activeKeyint > 0;

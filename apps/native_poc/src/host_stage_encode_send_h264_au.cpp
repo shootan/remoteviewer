@@ -562,8 +562,12 @@ encoder.qpWindow.Note((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic
 encoder.qpWindow.NoteSlice((hdr.flags & kEncodedFrameFlagKeyFrame) != 0, au.synthetic, au.sliceQp);
 // An async MFT returns a refinement AU after its episode may have ended: count it only for its own
 // episode, never for the one running now (motion-settle r2).
-if (au.syntheticReason == kSyntheticReasonSettle && enqueuedForSend && au.settleEpisode == kick.settle.episodes()) {
-  kick.settle.NoteEmitted(hdr.payloadSize);
+// r6: a GOP boundary AU (the drain's P or IDR) is charged like a refinement; an AU of an earlier episode
+// goes to the totals only (never to the running episode, never lost).
+if ((au.syntheticReason == kSyntheticReasonSettle || au.syntheticReason == kSyntheticReasonGopDrain) && enqueuedForSend &&
+    au.settleEpisode != 0) {
+  if (au.settleEpisode == kick.settle.episodes()) kick.settle.NoteEmitted(hdr.payloadSize);
+  else kick.settle.NoteEmittedLate(hdr.payloadSize);
 }
 // motion-settle r1 M2: a real P far over the sustainable per-frame payload (with a backlog behind it, or
 // twice running) raises the governor's fast ceiling; it is applied before the next encode (pop stage).
@@ -693,6 +697,11 @@ if ((hdr.flags & 1u) != 0) {
   if (au.acceptedInputOrdinal != 0) {  // motion-settle r3: where the encoder's own GOP counts from
     // r5 (a): confirm the GOP prediction on this instance -- a non-forced raw IDR exactly activeKeyint
     // accepted inputs after the previous key of the same instance. Any other distance unconfirms it.
+    // r6 (a'): the cost of this instance's natural IDR, the estimate a drain must afford.
+    if (au.rawIdr && !au.inputWasForcedKey) {
+      encoder.lastNaturalKeyBytes = hdr.payloadSize;
+      encoder.lastNaturalKeyInstance = au.codecInstance;
+    }
     if (au.rawIdr && !au.inputWasForcedKey && encoder.lastKeyInstance == au.codecInstance &&
         encoder.lastKeyOrdinal != 0 && encoder.activeKeyint > 0 && au.acceptedInputOrdinal > encoder.lastKeyOrdinal) {
       const bool hit = au.acceptedInputOrdinal - encoder.lastKeyOrdinal == encoder.activeKeyint;

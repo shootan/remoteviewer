@@ -13037,3 +13037,10 @@ Next
   - 단, drain IDR(평소 QP)이 정제된 정지 화면을 −10dB 다시 흐리게 하고(47→37dB, 회복은 1Hz refresh로만), 짧은 GOP에서 IDR이 +31% 되먹임된다. @0.5s p10 회귀 −1.4~−2.7dB(restart200)가 남는다.
 - 예측 오차·손실 반례: 유계로 닫힘. epoch/instance·pause 반례는 미실행.
 - 보고 `.claude/report_motion_settle_r1.md` §8(§7 정정 2건 포함).
+
+### 2026-10-15 motion-settle r6 — drain 예산 청구 보수 · a′ 부적합 (작업용1)
+
+- 보수: GOP 경계 drain 입력·AU(IDR 포함)가 정제 episode 예산 밖이었다(settleEp=0, IDR 67137B 미청구). 같은 episode에 청구하고, 늦은 AU는 합계에만 넣도록 고쳤다.
+- a′(내용당 drain 1회, 직전 자연 IDR + P 평균을 감당할 때만): 실제 예산(속도의 25%)은 1.5M 46.9KB / 4.5M 140.6KB로 IDR 한 장(65~142KB)보다 작아 실행 0회 → 부적합. a″(저QP IDR)는 4.5M·6M에서 IDR이 +25~30% 커져 비채택.
+- 발견: drain이 없어도 정지 중 자연 GOP IDR이 refresh 입력에 실려 정제된 화면이 47→37dB로 다시 흐려진다(기존 기전).
+- 같은 실효 구성 두 회차의 첫 반응 p95 차이가 최대 400ms라서, 단회 20 episode로는 IDR 위상 귀속을 할 수 없다. 보고 `.claude/report_motion_settle_r1.md` §9.
