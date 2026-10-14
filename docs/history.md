@@ -13028,3 +13028,12 @@ Next
 - `c275748` catch-up: 입력 게이트가 건너뛴 최신 화면을 2프레임 뒤 일반 P로 1회 재송신(정제와 분리, admit-always 없음). onset floor 기본 0.
 - `90b94fc`→`d543f8d` park: AU trace로 정제 뒤 AMD RC가 slice QP 4~8에 머물러 첫 움직임 프레임이 17~25KB가 되는 것을 확인 → 정제 종료 뒤 조용한 시점에 MinQP 26, 다음 정제 직전 해제(onset 앞 Set 0회). train floor(정제 중 MinQP)는 화질 −4~13 dB로 opt-in.
 - 판정 행렬(3셀×3회×20×9): T_read 목표 4.5M 6/9 · 6M 6/9 · 1.5M 7/9(기준선 0/9·0/9·4/9), @1s 문제 장면 +4~+19 dB. 반응성 새 위반 잔존: 4.5M restart 계열 +55~94ms(정제 도중 재개), 1.5M typechar/noise 주기 이상치(정제 입력이 AMD GOP를 소모해 GOP IDR이 onset에 실림). 다음: GOP IDR 조용한 시점 소화, 정제 도중 재개 대책. 보고 `.claude/report_motion_settle_r1.md` §7.
+
+### 2026-10-15 motion-settle r5 — GOP 경계 drain 격리 실험 (작업용1, 채택 불가·다음 안 Codex 결정)
+
+- `5621ad6`: park 기본 OFF(r4 계약 밖, Codex r5 §1.1). GOP 경계 drain은 정제 열 안에서만 동작한다(경계 ≤2, 이 인스턴스에서 확인된 GOP 주기, 주기당 1회, ≤3입력, 예산 합산, key/replay/backlog 우선).
+- 1.5M pilot 결과(외부 시험과 겹친 회차는 재측정):
+  - drain은 IDR이 onset에 실리는 경우를 없앤다(keyint 60: onset·송신 중 IDR 52→2건). 반응 Δ는 typechar +411→+34ms, noise +462→+82ms. 기본 GOP에서의 비용은 ±1MB.
+  - 단, drain IDR(평소 QP)이 정제된 정지 화면을 −10dB 다시 흐리게 하고(47→37dB, 회복은 1Hz refresh로만), 짧은 GOP에서 IDR이 +31% 되먹임된다. @0.5s p10 회귀 −1.4~−2.7dB(restart200)가 남는다.
+- 예측 오차·손실 반례: 유계로 닫힘. epoch/instance·pause 반례는 미실행.
+- 보고 `.claude/report_motion_settle_r1.md` §8(§7 정정 2건 포함).
