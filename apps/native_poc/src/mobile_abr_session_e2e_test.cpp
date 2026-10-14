@@ -37,6 +37,12 @@
 //   recovery    thin for the impairment, then 45 s healthy: must demote AND step back up by the ABR's
 //               own hold times (not forced)
 //  recorded, not judged: loss (25% of video datagrams), delay (+250 ms) -- what the phone can see of them.
+//  external (r3): no session here -- the host and the relay wait for a client elsewhere (the APK sink on a
+//             real MediaCodec in an emulator: apps/android_direct_client/smoke). The relay's port is printed
+//             (RELAY_PORT=) and written to <out>/relay_port.txt; from the first report, --external-sec
+//             seconds are judged against the smoke's fixed schedule (surface off +25..+28 s with the stream
+//             paused, a refused selection at +45 s): 18-22 reports and no 3 s gap in the first 20 s, reports
+//             again after the resume, no ABR down step.
 // Impairment scenarios present every second (--present-duty 1:0) unless given.
 //
 //   remote60_mobile_abr_session_e2e_test --scenario S [--fps N] [--bitrate N] [--present-duty ON:OFF]
@@ -454,6 +460,7 @@ int wmain(int argc, wchar_t** argv) {
   bool dutyGiven = false;
   std::wstring outDir;
   int watchdogOverrideSec = 0;
+  int externalSec = 70;
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     const bool more = i + 1 < argc;
@@ -471,10 +478,13 @@ int wmain(int argc, wchar_t** argv) {
     } else if (a == L"--out" && more) {
       outDir = argv[++i];
       if (!outDir.empty() && outDir.back() != L'\\' && outDir.back() != L'/') outDir += L"\\";
+    } else if (a == L"--external-sec" && more) {
+      externalSec = _wtoi(argv[++i]);
     } else if (a == L"--watchdog-sec" && more) {
       watchdogOverrideSec = _wtoi(argv[++i]);
     }
   }
+  const bool external = scenario == "external";
   const bool healthy = scenario == "sparse" || scenario == "nolatch" || scenario == "static" ||
                        scenario == "inputload" || scenario == "reconnect";
   Impair impair = Impair::None;
@@ -486,7 +496,7 @@ int wmain(int argc, wchar_t** argv) {
   else if (scenario == "decodestall") decodeStall = true;
   else if (scenario == "loss") impair = Impair::Loss;
   else if (scenario == "delay") impair = Impair::Delay;
-  else if (!healthy) {
+  else if (!healthy && !external) {
     say("unknown --scenario " + scenario);
     return 2;
   }
@@ -496,7 +506,8 @@ int wmain(int argc, wchar_t** argv) {
   const int warmSec = healthy ? 3 : 12;
   const int judgeSec = 60;
   const int afterSec = recovery ? 45 : 8;
-  const int totalSec = healthy ? warmSec + judgeSec + 2 : warmSec + impairSec + afterSec;
+  const int totalSec = external ? 120 + externalSec + 5
+                                : healthy ? warmSec + judgeSec + 2 : warmSec + impairSec + afterSec;
   say("mobile_abr_session_e2e_test scenario=" + scenario + " fps=" + std::to_string(fps) + " bitrate=" +
       std::to_string(bitrate) + " presentDuty=" + std::to_string(dutyOn) + ":" + std::to_string(dutyOff) +
 #ifdef REMOTE60_CLIENT_DECODE_STATS
@@ -604,7 +615,25 @@ int wmain(int argc, wchar_t** argv) {
   args.controlOverUdp = true;
   args.encodedFrameSink = &sink;  // controlIntervalMs: the product default (kClientControlIntervalMsDefault)
   bool connected = false;
-  if (relayUp) {
+  uint64_t extFirstUs = 0, extEndUs = 0;
+  int64_t extFirstMs = -1, extEndMs = -1;
+  if (relayUp && external) {
+    say("RELAY_PORT=" + std::to_string(relay.frontPort));
+    if (!outDir.empty()) {
+      CreateDirectoryW(outDir.c_str(), nullptr);
+      std::ofstream(outDir + L"relay_port.txt") << relay.frontPort << "\n";
+    }
+    const bool came = wait_until([&] { return !relay.Reports().empty(); }, 120000);
+    check("the external client's first report reached the host", came);
+    if (came) {
+      extFirstUs = relay.Reports().front().qpcUs;
+      extFirstMs = local_now_ms();
+      std::this_thread::sleep_for(std::chrono::seconds(externalSec));
+      extEndUs = qpc_now_us();
+      extEndMs = local_now_ms();
+    }
+  }
+  if (relayUp && !external) {
     connected = session.Connect(args) &&
                 wait_until([&] { return session.Snapshot().state == ClientSessionState::Connected; }, 15000);
     check("the shared session connected (UDP hello + tunnelled control)", connected,
@@ -750,6 +779,39 @@ int wmain(int argc, wchar_t** argv) {
     return n;
   };
 
+  if (external && extFirstUs) {
+    auto span = [&](uint64_t fromS, uint64_t toS) {
+      std::vector<SeenReport> v;
+      for (const auto& r : reports)
+        if (r.qpcUs >= extFirstUs + fromS * 1000000ull && r.qpcUs < extFirstUs + toS * 1000000ull) v.push_back(r);
+      return v;
+    };
+    auto max_gap = [](const std::vector<SeenReport>& v) {
+      uint64_t g = 0;
+      for (size_t i = 1; i < v.size(); ++i) g = std::max<uint64_t>(g, v[i].qpcUs - v[i - 1].qpcUs);
+      return g;
+    };
+    const auto steady = span(2, 22);
+    double dec = 0;
+    for (const auto& r : steady) dec += r.decodedFpsX100 / 100.0;
+    check("external: 18-22 reports in the 20 steady seconds, no gap of 3 s",
+          steady.size() >= 18 && steady.size() <= 22 && max_gap(steady) < 3000000ull,
+          std::to_string(steady.size()) + " reports, max gap " + std::to_string(max_gap(steady) / 1000) +
+              " ms, mean reported decoded " + std::to_string(steady.empty() ? 0.0 : dec / steady.size()) + " fps");
+    const auto paused = span(26, 28);
+    say("NOTE  external: reports while the surface was off and the stream paused (+26..+28 s): " +
+        std::to_string(paused.size()));
+    const auto resumed = span(31, 43);
+    check("external: reports again after the surface and the stream came back (+31..+43 s: >= 9)",
+          resumed.size() >= 9, std::to_string(resumed.size()) + " reports, max gap " +
+                                   std::to_string(max_gap(resumed) / 1000) + " ms");
+    const auto tail = span(50, static_cast<uint64_t>(std::max(51, externalSec - 2)));
+    check("external: reports after the refused selection (+50 s on: no long gap)",
+          !tail.empty() && max_gap(tail) < 3000000ull,
+          std::to_string(tail.size()) + " reports, max gap " + std::to_string(max_gap(tail) / 1000) + " ms");
+    const std::string downs = steps(extFirstMs - 2000, extEndMs, true);
+    check("external: THE HOST'S ABR DOES NOT STEP DOWN through the run", downs.empty(), downs.empty() ? "none" : downs);
+  }
   if (connected) {
     if (healthy) {
       check("the host's ABR was at high when the judged span began", profile_at(judgeFromMs, true) == "high",
