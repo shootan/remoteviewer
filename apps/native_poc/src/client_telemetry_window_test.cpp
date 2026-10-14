@@ -787,6 +787,55 @@ int main() {
           "decodedFpsX100=" + std::to_string(w.Pending().message.decodedFpsX100));
   }
 #endif
+#ifdef REMOTE60_DECODE_SPAN
+  std::printf("[13] r6: Hold -- the minimum sample, its bound, what it leaves alone\n");
+  {
+    auto span = [](uint64_t id, uint64_t frames, uint64_t us) {
+      ClientDecodeStats d;
+      d.width = 1920;
+      d.height = 1080;
+      d.spanId = id;
+      d.spanFrames = frames;
+      d.spanUs = us;
+      return d;
+    };
+    ClientTelemetryWindow w;
+    w.Reset(0, 0, 0);
+    const ClientDecodeStats a = span(1, 30, 1'000'000);
+    w.Close(1'000'000, 30, 120'000, &a, nullptr);
+    const ClientDecodeStats a2 = span(1, 60, 2'000'000);
+    check("[13] the same measurement a second on is not held, and is its own second",
+          !w.Hold(2'000'000, &a2, false) && w.Close(2'000'000, 60, 240'000, &a2, nullptr) &&
+              w.Pending().message.decodedFpsX100 == 3000);
+    // A new measurement 50 ms old at the due pass: held until it is 250 ms old.
+    const ClientDecodeStats b = span(2, 2, 50'000);
+    const bool heldB = w.Hold(3'000'000, &b, false);
+    check("[13] a measurement 50 ms old is held; due again at 250 ms, not before, not a second later",
+          heldB && !w.Due(3'190'000) && w.Due(3'200'000));
+    check("[13] ...the unsent snapshot is left as it was", w.Pending(3'010'000).updatedQpcUs == 2'000'000);
+    const ClientDecodeStats b2 = span(2, 8, 250'000);
+    const bool closedB = !w.Hold(3'200'000, &b2, false) && w.Close(3'200'000, 96, 384'000, &b2, nullptr);
+    check("[13] at 250 ms it closes, over the measurement's own time (8 in 0.25 s = 32 fps)",
+          closedB && w.Pending().message.decodedFpsX100 == 3200, std::to_string(w.Pending().message.decodedFpsX100));
+    check("[13] ...and the next window is due a second after that close", !w.Due(4'190'000) && w.Due(4'200'000));
+    // A measurement that keeps restarting: the window is held at most 250 ms past its first hold.
+    uint64_t now = 4'200'000, id = 10;
+    bool closed = false;
+    while (now < 5'000'000 && !closed) {
+      const ClientDecodeStats c = span(++id, 0, 30'000);  // a new one every pass, 30 ms old
+      if (w.Due(now) && !w.Hold(now, &c, false)) closed = w.Close(now, 96, 384'000, &c, nullptr);
+      now += 10'000;
+    }
+    check("[13] RESTARTING EVERY PASS DOES NOT HOLD IT FOR EVER: closed 250 ms past the first hold",
+          closed && now - 10'000 == 4'450'000 && w.hold_limited() == 1,
+          "closed at " + std::to_string(now - 10'000) + " us, limited " + std::to_string(w.hold_limited()));
+    // Paused or not valid while held: no hold (Close decides).
+    const ClientDecodeStats d = span(50, 1, 10'000);
+    (void)w.Hold(5'450'000, &d, false);
+    check("[13] paused ends a hold: no hold, Close then withholds", !w.Hold(5'460'000, &d, true) && w.Due(5'460'000));
+    check("[13] not valid ends a hold too", !w.Hold(5'470'000, nullptr, false));
+  }
+#endif
 
   TestChain();
 
