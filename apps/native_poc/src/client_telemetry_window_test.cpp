@@ -272,6 +272,7 @@ struct Result {
   uint32_t minFpsAfter = 0xFFFFFFFFu;
   uint64_t held = 0;
   uint64_t lowReportTicks = 0;  // host ticks that read a fresh report under the collapse floor
+  uint32_t maxStaleActive = 0;  // P7: the longest run of stale seconds while the host sends (stale_active at 2, QF 3)
 };
 
 Result Run(const Scenario& sc) {
@@ -375,6 +376,7 @@ Result Run(const Scenario& sc) {
       in.clientDecodeReported = viewer.decodeReported;
       if (fresh && viewer.decodeReported && viewer.decodedFpsX100 < collapseX100) ++r.lowReportTicks;
       const AbrDecision dec = rate.DecideAbrProfile(in, t);
+      r.maxStaleActive = std::max(r.maxStaleActive, rate.abrStaleActiveSeconds);
       if (dec.targetProfile != rate.abrProfile) {
         if (r.firstDemoteUs < 0) {
           r.firstDemoteUs = static_cast<int>(t / kMs);
@@ -399,6 +401,7 @@ std::string Describe(const Result& r) {
        (r.minFpsAfter == 0xFFFFFFFFu ? std::string("-") : std::to_string(r.minFpsAfter / 100.0).substr(0, 5));
   s += ", host ticks on a fresh low report " + std::to_string(r.lowReportTicks);
   s += ", held passes " + std::to_string(r.held);
+  s += ", max stale s " + std::to_string(r.maxStaleActive);
   return s;
 }
 
@@ -471,16 +474,16 @@ void TestChain() {
   {
     std::string bad;
     int runs = 0;
-    for (uint64_t phase : {5 * kMs, 255 * kMs, 505 * kMs, 755 * kMs, 985 * kMs, 995 * kMs}) {
+    for (uint64_t phase : {5 * kMs, 255 * kMs, 305 * kMs, 505 * kMs, 755 * kMs, 805 * kMs, 985 * kMs, 995 * kMs}) {
       for (uint64_t before : {5 * kMs, 10 * kMs, 30 * kMs, 60 * kMs, 100 * kMs}) {
         const Scenario s = GraceFirstPicture(phase, before);
         const Result r = Run(s);
         ++runs;
-        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000 || r.maxStaleActive >= 2) bad += "\n        " + s.name + ": " + Describe(r);
       }
     }
     check("[12] S1-a sweep (report phase x first picture before the close, " + std::to_string(runs) +
-              " runs): no demotion, every report after the switch >= 20 fps",
+              " runs): no demotion, every report after the switch >= 20 fps, no stale_active from the hold",
           bad.empty(), bad);
   }
   {
@@ -491,7 +494,7 @@ void TestChain() {
         const Scenario s = GraceFirstPictureAfter(phase, after);
         const Result r = Run(s);
         ++runs;
-        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000 || r.maxStaleActive >= 2) bad += "\n        " + s.name + ": " + Describe(r);
       }
     }
     check("[12] S1-a first picture just after a close (" + std::to_string(runs) + " runs): no demotion, >= 20 fps",
@@ -512,7 +515,7 @@ void TestChain() {
           const Scenario s = AnswerJustBeforeClose(phase, before, first);
           const Result r = Run(s);
           ++runs;
-          if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+          if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000 || r.maxStaleActive >= 2) bad += "\n        " + s.name + ": " + Describe(r);
         }
       }
     }
