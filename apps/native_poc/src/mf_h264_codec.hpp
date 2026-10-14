@@ -78,6 +78,7 @@ constexpr uint8_t kSyntheticReasonKick = 1;          // trailing-edge kick (host
 constexpr uint8_t kSyntheticReasonStaticRefresh = 2; // the periodic static refresh
 constexpr uint8_t kSyntheticReasonSettle = 3;        // a settle-refinement input (motion-settle M1)
 constexpr uint8_t kSyntheticReasonCatchup = 4;       // the latest picture the input gate skipped (motion-settle r4)
+constexpr uint8_t kSyntheticReasonGopDrain = 5;      // a still-screen input that spends the encoder's GOP (motion-settle r4)
 inline const char* synthetic_reason_name(uint8_t r) {
   switch (r) {
     case kSyntheticReasonNone: return "real";
@@ -85,6 +86,7 @@ inline const char* synthetic_reason_name(uint8_t r) {
     case kSyntheticReasonStaticRefresh: return "static_refresh";
     case kSyntheticReasonSettle: return "settle";
     case kSyntheticReasonCatchup: return "catchup";
+    case kSyntheticReasonGopDrain: return "gop_drain";
     default: return "unknown";
   }
 }

@@ -70,6 +70,16 @@ struct KickState {
   uint64_t catchupDueUs = 0;
   uint64_t catchupCount = 0;            // telemetry: catch-up submits
   uint64_t catchupOwedTotal = 0;        // telemetry: skips that opened a debt
+  // motion-settle r4 (a): the GOP drain. The AMD MFT counts EVERY input toward its own GOP IDR
+  // (encoder_gop every activeKeyint inputs); refinement inputs spend it during a still, the settle
+  // train then stops 2 inputs short of it, and the IDR lands on the next real input -- the motion onset
+  // (1.5M: 67 KB, ~360 ms; gate r4 periodic first-reaction outliers). On a still screen with the park
+  // held, when the IDR is within gopDrainWindow inputs, cached inputs (tiny P under the park, ~70 B) are
+  // fed at the settle spacing so the IDR is coded and sent in quiet time instead. 0 = off
+  // (REMOTE60_NATIVE_GOP_DRAIN).
+  uint32_t gopDrainWindow = 0;
+  uint64_t gopDrainLastUs = 0;
+  uint64_t gopDrainCount = 0;           // telemetry: drain inputs served
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge

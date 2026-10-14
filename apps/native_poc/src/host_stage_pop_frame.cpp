@@ -508,6 +508,38 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
     }
   }
+  // motion-settle r4 (a): the GOP drain (host_kick.hpp) -- only on a still screen between trains, with
+  // the park held (so the inputs and the IDR come out at the park QP, never under F's dip), nothing on
+  // the wire, nothing owed and nothing real waiting.
+  if (!servedBootstrap && useH264 && kick.gopDrainWindow > 0 &&
+      clientSession.streamControlActive.load(std::memory_order_acquire) && !kick.settle.active() &&
+      !kick.settle.armed() && encoder.onsetFloorParked && !encoder.SettleDipActive() && !encoder.forceKeyNext &&
+      encoder.InputsUntilGopIdr() <= kick.gopDrainWindow &&
+      nowUs >= kick.gopDrainLastUs + kick.settle.config().minSpacingUs) {
+    bool blocked = false;
+    if (transport == VideoTransport::Udp) {
+      std::lock_guard<std::mutex> lk(sender.mu);
+      blocked = sender.waitingForKey || !sender.queue.empty() || sender.auInFlight.load(std::memory_order_acquire);
+    }
+    {
+      std::lock_guard<std::mutex> lk(res.frame.mu);
+      if (res.frame.version != stats.lastVersionSent && res.frame.payload && !res.frame.payload->empty()) blocked = true;
+    }
+    if (!blocked) {
+      kick.gopDrainLastUs = nowUs;
+      if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+        servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonGopDrain;
+        ++kick.gopDrainCount;
+        seq = 0;
+        version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+        streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+        captureUs = nowUs;
+        callbackUs = nowUs;
+        queuePushUs = nowUs;
+      }
+    }
+  }
   // motion-settle r1 M1: the settle refinement (host_settle.hpp). Only when nothing else was served
   // this tick; never ahead of a real capture, a key the viewer is owed, or a sender backlog.
   if (!servedBootstrap && useH264 && clientSession.streamControlActive.load(std::memory_order_acquire) &&

@@ -331,7 +331,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // A settle refinement is an ordinary P under the cap: no admit-always (motion-settle r1 M1).
      // r4: nor is a catch-up (latest content, but an ordinary delta like the frame it replaces).
      adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonSettle &&
-                           tc.syntheticReason != kSyntheticReasonCatchup;
+                           tc.syntheticReason != kSyntheticReasonCatchup && tc.syntheticReason != kSyntheticReasonGopDrain;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;

@@ -404,7 +404,8 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " dipEntries=" << encoder.settleDipEntries << " dipSkippedNearIdr=" << encoder.settleDipSkippedNearIdr
                 << " floorEpisodes=" << encoder.onsetFloorEpisodes << " floorReleases=" << encoder.onsetFloorReleases
                 << " catchupOwed=" << hx.kick.catchupOwedTotal << " catchupServed=" << hx.kick.catchupCount
-                << " parks=" << encoder.parkEpisodes << " parkReleases=" << encoder.parkReleases;
+                << " parks=" << encoder.parkEpisodes << " parkReleases=" << encoder.parkReleases
+                << " gopDrain=" << hx.kick.gopDrainCount;
       std::cout << " instance=" << encoder.codec.instance_id() << "\n";
       encoder.qpWindow.Reset();
     }
