@@ -872,6 +872,21 @@ target_include_directories(remote60_host_monitor_fallback_e2e_test PRIVATE src)
 target_link_libraries(remote60_host_monitor_fallback_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir)
 add_dependencies(remote60_host_monitor_fallback_e2e_test remote60_native_video_host_migration_seam)
 
+# mobile-abr r1: the APK's shared client session (with a sink that acts like the APK's decoder sink) against
+# an isolated host, judged from the host's own ABR lines -- the phone's sparse reports, real stops and losses.
+add_executable(remote60_mobile_abr_session_e2e_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/mobile_abr_session_e2e_test.cpp
+)
+target_include_directories(remote60_mobile_abr_session_e2e_test PRIVATE src)
+target_link_libraries(remote60_mobile_abr_session_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_mobile_abr_session_e2e_test PRIVATE /utf-8)
+endif()
+
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
 add_executable(remote60_capture_readback_test
   src/d3d_capture_readback.cpp
