@@ -244,10 +244,10 @@ int main() {
     const ClientDecodeStats d = decoded(28);
     w.Close(3'000'000, 50, 200'000, &d, nullptr);
     check("[5] the first output turns decode fields on", w.decode_seen() && w.Pending().message.decodedFpsX100 == 2800);
-    const uint64_t before = w.Pending().updatedQpcUs;
     const bool madeU = w.Close(4'000'000, 80, 320'000, nullptr, &p);  // not valid (no surface / selection wait)
-    check("[5] a not-valid window after it is withheld -- not reported as 0, the pending one is not restamped",
-          !madeU && w.withheld() == 1 && w.Pending().updatedQpcUs == before);
+    check("[5] a not-valid window after it is withheld -- not reported as 0, and the unsent one before it is dropped",
+          !madeU && w.withheld() == 1 && w.Pending().updatedQpcUs == 0,
+          "pending updatedQpcUs=" + std::to_string(w.Pending().updatedQpcUs));
     w.Reset(9'000'000, 80, 320'000);
     check("[5] a new connection drops pending and seen", w.Pending().updatedQpcUs == 0 && !w.decode_seen());
   }
@@ -262,6 +262,40 @@ int main() {
     b.Close(1'000'000, 503, 2'012'000, &d, nullptr);
     check("[6] two connections' windows do not share counts",
           a.Pending().message.recvFpsX100 == 3000 && b.Pending().message.recvFpsX100 == 300);
+  }
+
+  std::printf("[7] r3 R2: an unsent snapshot does not outlive a not-valid window (product scheduler)\n");
+  {
+    const uint64_t t0 = 50'000'000;
+    Control c(t0);
+    ClientTelemetryWindow w;
+    w.Reset(t0, 0, 0);
+    c.Pass(t0, w.Pending());            // the first ping goes out at once
+    c.Pass(t0 + 500'000, w.Pending());  // and the next at +500 ms
+    // Window A, healthy, is measured; the pass it is measured on goes to a list request instead.
+    const ClientDecodeStats a = decoded(30);
+    w.Close(t0 + 1'000'000, 30, 120'000, &a, nullptr);
+    c.windowPanel.RequestList("A's pass");
+    c.Pass(t0 + 1'000'000, w.Pending());
+    check("[7] A was measured but not sent on its own pass", c.metricsSent == 0 && w.Pending().updatedQpcUs != 0,
+          "sent=" + std::to_string(c.metricsSent) + " lists=" + std::to_string(c.lists));
+    // Before the next pass that would send it, the decoder's state stops being meaningful (the surface goes,
+    // a selection starts): window B closes not-valid.
+    w.Close(t0 + 1'010'000, 30, 120'000, nullptr, nullptr);
+    c.Pass(t0 + 1'020'000, w.Pending());
+    c.Pass(t0 + 1'030'000, w.Pending());
+    check("[7] A IS NOT SENT AFTER THE NOT-VALID WINDOW (the host would take it as fresh on arrival)",
+          c.metricsSent == 0, std::to_string(c.metricsSent) + " metrics sent");
+    // ...while an ordinary Ping preemption still keeps a healthy window: C is measured on a ping pass, goes next.
+    const ClientDecodeStats cc = decoded(30);
+    w.Close(t0 + 2'030'000, 60, 240'000, &cc, nullptr);
+    c.scheduler.OnPingCompleted(t0 + 1'530'000);  // the ping is due exactly on C's pass
+    c.Pass(t0 + 2'030'000, w.Pending());
+    const uint64_t pingsBefore = c.pings;
+    c.Pass(t0 + 2'040'000, w.Pending());
+    check("[7] a healthy window preempted by a Ping is still sent on the next pass",
+          c.metricsSent == 1 && pingsBefore >= 3, std::to_string(c.metricsSent) + " metrics sent, " +
+                                                     std::to_string(c.pings) + " pings");
   }
 
   std::printf("\nclient_telemetry_window_test: %d passed, %d failed\n", gChecks - gFailures, gFailures);

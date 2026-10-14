@@ -99,9 +99,10 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec* c, size_t, size_t* outSize) {
   *outSize = c->input.size();
   return c->input.data();
 }
-media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* c, size_t, int64_t, size_t size, uint64_t, uint32_t) {
+media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* c, size_t, int64_t, size_t size, uint64_t ptsUs, uint32_t) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   fake_ndk::controls().queued.emplace_back(c->input.begin(), c->input.begin() + static_cast<std::ptrdiff_t>(size));
+  fake_ndk::controls().queuedPts.push_back(static_cast<int64_t>(ptsUs));
   return AMEDIA_OK;
 }
 ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* info, int64_t) {

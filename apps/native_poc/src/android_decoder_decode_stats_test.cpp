@@ -4,6 +4,12 @@
 // out, not their later release to the display; format change / config / end-of-stream are no picture;
 // a replayed picture is not progress; no surface or a selection between generations is "not valid").
 //
+// r3 (Codex candidate review R1): section 9 drives the sink's own bootstrap replay (PumpCodecLocked ->
+// TryQueueFrameLocked of the held selection IDR), and the stand-in codec answers every queued input with
+// an output carrying the PTS the sink queued it with -- a replayed input gets a NEW PTS from the playout
+// clock, so only where it was queued can tell it apart. Ordinary inputs, synthetic AUs and a new codec's
+// output after a loss reset still count.
+//
 // What the stand-in cannot show: MediaCodec's own timing and buffer behaviour, a device's Surface.
 
 #include <chrono>
@@ -85,6 +91,21 @@ bool outputs_drained() {
   bool e = false;
   with_controls([&](fake_ndk::Controls& c) { e = c.outputs.empty(); });
   return e;
+}
+size_t queued_inputs() {
+  size_t n = 0;
+  with_controls([&](fake_ndk::Controls& c) { n = c.queuedPts.size(); });
+  return n;
+}
+// The codec "decodes" queued inputs [from, to): one output each, with the PTS it was queued with.
+void answer_queued(size_t from, size_t to) {
+  with_controls([&](fake_ndk::Controls& c) {
+    for (size_t i = from; i < to && i < c.queuedPts.size(); ++i) {
+      fake_ndk::Controls::Output o;
+      o.presentationTimeUs = c.queuedPts[i];
+      c.outputs.push_back(o);
+    }
+  });
 }
 int64_t steady_us() {
   using namespace std::chrono;
@@ -209,6 +230,55 @@ int main() {
     picture(12000);
     settle();
     check("after the IDR it counts on, no negative or burst", drain(sink).s.decodedFrames == 2);
+  }
+  {
+    std::puts("\n--- 9. the bootstrap replay (r3 R1): a re-queued IDR is not progress ---");
+    sink.PrepareForWindowSelection(9);
+    ControlWindowSelectedMessage ack{};
+    ack.flags = 0x1u;
+    ack.streamGeneration = 90;
+    sink.OnWindowSelectionControlResultFor(ack, 9);
+    const size_t q0 = queued_inputs();
+    sink.OnEncodedH264Frame(frame(90, true, 0x09));  // the selection's IDR: queued, no output yet
+    // No output for it: the sink re-queues the same IDR every 250 ms, at most twice (kBootstrapReplay*).
+    for (int i = 0; i < 4; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      (void)sink.ReadySelectionGeneration();  // a sink call that pumps the codec, as the UI's poll does
+    }
+    const size_t q1 = queued_inputs();
+    std::vector<int64_t> pts;
+    with_controls([&](fake_ndk::Controls& c) { pts.assign(c.queuedPts.begin() + q0, c.queuedPts.end()); });
+    std::string ptsList;
+    for (int64_t p : pts) ptsList += std::to_string(p) + " ";
+    check("the IDR went in once and was re-queued twice, each time with a new PTS",
+          q1 - q0 == 3 && pts.size() == 3 && pts[0] != pts[1] && pts[1] != pts[2], ptsList);
+    (void)drain(sink);
+    answer_queued(q0, q1);  // the codec decodes all three inputs
+    settle(700);
+    const Drained d = drain(sink);
+    check("THE REPLAYED INPUTS' OUTPUTS DO NOT COUNT AS PROGRESS: one picture",
+          d.valid && d.s.decodedFrames == 1,
+          "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.s.decodedFrames));
+    // Ordinary inputs afterwards, a synthetic (static-refresh) AU among them: each counts.
+    const size_t q2 = queued_inputs();
+    sink.OnEncodedH264Frame(frame(90, false, 0x0A));
+    UdpH264AssembledFrame synth = frame(90, false, 0x0B);
+    synth.header.flags |= kEncodedFrameFlagSynthetic;
+    sink.OnEncodedH264Frame(std::move(synth));
+    const size_t q3 = queued_inputs();
+    answer_queued(q2, q3);
+    settle(700);
+    const Drained n = drain(sink);
+    check("two ordinary inputs (one a synthetic AU) count two", n.s.decodedFrames == 2 && q3 - q2 == 2,
+          "decoded=" + std::to_string(n.s.decodedFrames) + " queued=" + std::to_string(q3 - q2));
+    // A loss reset: the next IDR goes to a new codec, and its output counts.
+    sink.OnVideoDiscontinuity();
+    const size_t q4 = queued_inputs();
+    sink.OnEncodedH264Frame(frame(90, true, 0x0C));
+    const size_t q5 = queued_inputs();
+    answer_queued(q4, q5);
+    settle(700);
+    check("after a loss reset the new codec's picture counts", drain(sink).s.decodedFrames == 1 && q5 - q4 == 1);
   }
   check("every queued output was taken by the sink", outputs_drained());
   sink.SetSurface(env, nullptr);

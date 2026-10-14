@@ -19,6 +19,7 @@ struct Controls {
   int codecsCreated = 0;
   int codecsStarted = 0;
   std::vector<std::vector<uint8_t>> queued;  // payloads handed to a codec, in order
+  std::vector<int64_t> queuedPts;            // mobile-abr r3: the PTS each of them was queued with
   // mobile-abr r1: what dequeueOutputBuffer hands out next, one per call. A picture (index 0) with its
   // PTS and buffer flags, or an output format change to width x height (crop not reported).
   struct Output {
