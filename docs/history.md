@@ -13024,3 +13024,9 @@ Next
 - 해시: GNLinkViewer.exe 4103152d…(빌드만, 실행 안 함 — harness 가 같은 뷰어 소스를 링크), GNLinkStream.exe b8fb1a3f…, chain e2e 806421942c…(592ed96 판 57601b9b…), stats_window_test f69668ab…(28/28). 로그 `.claude/e2e_m4/`, 보고 `.claude/report_viewer_stats_r1.md`.
 - 미검증: 실제 현장 경로(회사 PC→집 호스트, WAN·relay), 현장의 공백 원인이던 keyframe 대기·선택 대기 경로 자체(이 시험은 stream pause 로 공백을 만듦), D3D 공유 decoder·실제 present, APK(변경 없음).
 - 다음: 검증용 독립 검사 + Codex 검토 → 뷰어 업데이트 릴리스 여부 결정. scratch worktree `neg-viewer-stats-592` 는 검증용 재현용으로 남김(정리 대상).
+
+### 2026-10-14 0.2.158 게시 — 뷰어 통계 창(M4) 단독
+- 범위(PC 만, 뷰어): 긴 무프레임 뒤 통계 창이 지나간 1초 창을 프레임마다 재발행하던 결함 보수(d84001a+7bcfd40). 적용점은 접속하는 PC 의 뷰어 업데이트. 글자 복구(motion-settle) 는 미포함, 계속 진행 중.
+- 근거: Codex SOURCE OK 2b5b64a, 실체인 e2e fix 5/5·592ed96 5/5 FAIL, 검증용 독립(같은 호스트로 뷰어만 교체: 가짜 0·ABR high vs 가짜 123·high_to_mid_severe), 실장애 강등 보존, 통합 integ158 @98786c5(기존 간헐 2 — host_wire_cap_defer·host_encode_epoch [3]; chain e2e 의 Start-Process 리다이렉트 멈춤은 하네스 결함으로 8b312a9 에서 보수, 제품 무관).
+- 게시: 버전 dbf42ce, push origin/main=dbf42ce, release --sign gates PASS, NAS manifest 78df5305… sig 6dce1ca9…(서버 디스크 = 로컬, releaseId r-0.2.158), 백업 0.2.157 pair 05167241…/cb5eb786…, 11 artifact 익명 https 해시 일치. dist/GNLinkSetup-0.2.158.exe.
+- 미검증: 현장 key/selection 대기 경로, GNLinkViewer.exe UI·D3D present, WAN.
