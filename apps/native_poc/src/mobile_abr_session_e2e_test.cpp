@@ -213,6 +213,27 @@ class PhoneSink : public ClientEncodedFrameSink {
   }
 
 #ifdef REMOTE60_CLIENT_DECODE_STATS
+#ifdef REMOTE60_DECODE_SPAN
+  // android_video_decoder.cpp DrainDecodeStats after r6: the measurement since the episode began (no grace
+  // here -- a stand-in decoder has no startup), cumulative, the output size.
+  bool DrainDecodeStats(ClientDecodeStats* out) override {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    const uint64_t now = qpc_now_us();
+    out->spanId = spanId_;
+    out->spanFrames = decodedTotal_ - spanBase_;
+    out->spanUs = now > spanStartUs_ ? now - spanStartUs_ : 0;
+    out->width = width_;
+    out->height = height_;
+    return true;
+  }
+  void OnDecodeEpisodeStart() override {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++spanId_;
+    spanBase_ = decodedTotal_;
+    spanStartUs_ = qpc_now_us();
+  }
+#else
   // android_video_decoder.cpp DrainDecodeStats: pictures given out since the last drain, the output size.
   bool DrainDecodeStats(ClientDecodeStats* out) override {
     if (!out) return false;
@@ -223,6 +244,7 @@ class PhoneSink : public ClientEncodedFrameSink {
     out->height = height_;
     return true;
   }
+#endif
 #endif
 
   uint64_t frames() {
@@ -249,6 +271,7 @@ class PhoneSink : public ClientEncodedFrameSink {
   const bool noLatch_;
   const uint64_t startUs_;
   uint64_t frames_ = 0, drains_ = 0, decodedSinceDrain_ = 0, decodedTotal_ = 0;
+  uint64_t spanId_ = 0, spanBase_ = 0, spanStartUs_ = 0;  // r6
   uint32_t width_ = 0, height_ = 0;
   uint64_t lastPresentUs_ = 0;
   std::vector<uint32_t> gaps_;

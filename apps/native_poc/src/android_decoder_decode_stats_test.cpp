@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "android_video_decoder.hpp"
+#include "client_telemetry_window.hpp"
 #include "fake_ndk.hpp"
 #include "poc_protocol.hpp"
 
@@ -118,13 +119,27 @@ void settle(int ms = 60) { std::this_thread::sleep_for(std::chrono::milliseconds
 int surfaceToken = 1;
 jobject surface() { return &surfaceToken; }
 
+// One drain, and the pictures it adds since the last valid one -- r6: the sink gives its measurement
+// span (cumulative), so this takes the difference the session's window takes (client_telemetry_window.hpp);
+// before r6 the sink gave the count since the last drain itself.
 struct Drained {
   bool valid = false;
   ClientDecodeStats s;
+  uint64_t frames = 0;
 };
 Drained drain(AndroidVideoDecoderSink& sink) {
   Drained d;
   d.valid = sink.DrainDecodeStats(&d.s);
+#ifdef REMOTE60_DECODE_SPAN
+  static uint64_t lastId = 0, lastFrames = 0;
+  if (d.valid) {
+    d.frames = d.s.spanId == lastId && d.s.spanFrames >= lastFrames ? d.s.spanFrames - lastFrames : d.s.spanFrames;
+    lastId = d.s.spanId;
+    lastFrames = d.s.spanFrames;
+  }
+#else
+  d.frames = d.s.decodedFrames;
+#endif
   return d;
 }
 
@@ -148,9 +163,9 @@ int main() {
     picture(3000);
     settle();
     const Drained d = drain(sink);
-    check("three decoded pictures count three", d.valid && d.s.decodedFrames == 3,
-          "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.s.decodedFrames));
-    check("...and a second drain right after counts none", drain(sink).s.decodedFrames == 0);
+    check("three decoded pictures count three", d.valid && d.frames == 3,
+          "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.frames));
+    check("...and a second drain right after counts none", drain(sink).frames == 0);
   }
   {
     std::puts("\n--- 2. a picture held for its display slot ---");
@@ -158,11 +173,11 @@ int main() {
     picture(steady_us() + 300000);  // due in 300 ms: held in the codec until then
     settle();
     const Drained d = drain(sink);
-    check("counted when the decoder gave it out, before its release", d.s.decodedFrames == 1 && released() == r0,
-          "decoded=" + std::to_string(d.s.decodedFrames) + " releasedSince=" + std::to_string(released() - r0));
+    check("counted when the decoder gave it out, before its release", d.frames == 1 && released() == r0,
+          "decoded=" + std::to_string(d.frames) + " releasedSince=" + std::to_string(released() - r0));
     settle(400);
     check("released at its slot", released() == r0 + 1);
-    check("...and not counted again then", drain(sink).s.decodedFrames == 0);
+    check("...and not counted again then", drain(sink).frames == 0);
   }
   {
     std::puts("\n--- 3. buffers that carry no picture ---");
@@ -170,11 +185,11 @@ int main() {
     picture(5000, 4, 0);  // end of stream, empty
     settle();
     check("a codec-config buffer and an EMPTY end-of-stream buffer are not decoded pictures",
-          drain(sink).s.decodedFrames == 0);
+          drain(sink).frames == 0);
     picture(5500, 4, 1);  // end of stream carrying the last picture
     settle();
     check("r3: an end-of-stream buffer that carries a picture counts it (only EOS-only is left out)",
-          drain(sink).s.decodedFrames == 1);
+          drain(sink).frames == 1);
   }
   {
     std::puts("\n--- 4. an output format change ---");
@@ -183,8 +198,8 @@ int main() {
     settle();
     const Drained d = drain(sink);
     check("the format change is no picture; the size is the decoder's output format",
-          d.s.decodedFrames == 1 && d.s.width == 1280 && d.s.height == 720,
-          std::to_string(d.s.decodedFrames) + " " + std::to_string(d.s.width) + "x" + std::to_string(d.s.height));
+          d.frames == 1 && d.s.width == 1280 && d.s.height == 720,
+          std::to_string(d.frames) + " " + std::to_string(d.s.width) + "x" + std::to_string(d.s.height));
   }
   {
     std::puts("\n--- 5. two outputs of one PTS that are not a replay ---");
@@ -193,7 +208,7 @@ int main() {
     settle();
     // r3 R1: a replay is known by where it was queued (section 9), not by a repeated PTS -- a real replay
     // gets a new PTS, and two ordinary outputs are two pictures.
-    check("r3: two ordinary outputs count two, whatever their PTS", drain(sink).s.decodedFrames == 2);
+    check("r3: two ordinary outputs count two, whatever their PTS", drain(sink).frames == 2);
   }
   {
     std::puts("\n--- 6. the surface goes and comes back ---");
@@ -208,13 +223,13 @@ int main() {
     settle();
     const Drained across = drain(sink);
     check("r5: the window the surface came back in counts only the picture after the boundary (not mixed, not thrown away)",
-          across.valid && across.s.decodedFrames == 1,
-          "valid=" + std::to_string(across.valid) + " decoded=" + std::to_string(across.s.decodedFrames));
+          across.valid && across.frames == 1,
+          "valid=" + std::to_string(across.valid) + " decoded=" + std::to_string(across.frames));
     picture(9500);
     settle();
     const Drained back = drain(sink);
     check("the next window is valid and counts only its own picture",
-          back.valid && back.s.decodedFrames == 1, "decoded=" + std::to_string(back.s.decodedFrames));
+          back.valid && back.frames == 1, "decoded=" + std::to_string(back.frames));
     // r3 R2: the surface goes and comes back BETWEEN two drains -- the window spans both states.
     picture(9600);
     settle();
@@ -225,11 +240,11 @@ int main() {
     settle();
     const Drained roundTrip = drain(sink);
     check("r3/r5: a surface round trip between two drains -- the window counts only what came after it",
-          roundTrip.valid && roundTrip.s.decodedFrames == 1,
-          "valid=" + std::to_string(roundTrip.valid) + " decoded=" + std::to_string(roundTrip.s.decodedFrames));
+          roundTrip.valid && roundTrip.frames == 1,
+          "valid=" + std::to_string(roundTrip.valid) + " decoded=" + std::to_string(roundTrip.frames));
     picture(9800);
     settle();
-    check("...and the window after it counts its own picture", drain(sink).s.decodedFrames == 1);
+    check("...and the window after it counts its own picture", drain(sink).frames == 1);
   }
   {
     std::puts("\n--- 7. a selection between generations ---");
@@ -246,25 +261,25 @@ int main() {
     settle();
     const Drained firstWin = drain(sink);
     check("r5: the window its first picture arrived in counts it (the answer's boundary, not thrown away)",
-          firstWin.valid && firstWin.s.decodedFrames == 1,
-          "valid=" + std::to_string(firstWin.valid) + " decoded=" + std::to_string(firstWin.s.decodedFrames));
+          firstWin.valid && firstWin.frames == 1,
+          "valid=" + std::to_string(firstWin.valid) + " decoded=" + std::to_string(firstWin.frames));
     picture(10500);
     settle();
     const Drained ready = drain(sink);
-    check("then valid, counting from there", ready.valid && ready.s.decodedFrames == 1,
-          "valid=" + std::to_string(ready.valid) + " decoded=" + std::to_string(ready.s.decodedFrames));
+    check("then valid, counting from there", ready.valid && ready.frames == 1,
+          "valid=" + std::to_string(ready.valid) + " decoded=" + std::to_string(ready.frames));
   }
   {
     std::puts("\n--- 8. a codec reset for a loss ---");
     sink.OnVideoDiscontinuity();
     const Drained after = drain(sink);
     check("a loss reset stays valid (frames that do not decode now are a real stall) and counts 0",
-          after.valid && after.s.decodedFrames == 0);
+          after.valid && after.frames == 0);
     sink.OnEncodedH264Frame(frame(70, true, 0x04));
     picture(11000);
     picture(12000);
     settle();
-    check("after the IDR it counts on, no negative or burst", drain(sink).s.decodedFrames == 2);
+    check("after the IDR it counts on, no negative or burst", drain(sink).frames == 2);
   }
   {
     std::puts("\n--- 9. the bootstrap replay (r3 R1): a re-queued IDR is not progress ---");
@@ -297,8 +312,8 @@ int main() {
     settle(700);
     const Drained d = drain(sink);
     check("THE REPLAYED INPUTS' OUTPUTS DO NOT COUNT AS PROGRESS: 0 pictures in the window they came out in",
-          d.valid && d.s.decodedFrames == 0,
-          "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.s.decodedFrames));
+          d.valid && d.frames == 0,
+          "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.frames));
     // Ordinary inputs afterwards, a synthetic (static-refresh) AU among them: each counts.
     const size_t q2 = queued_inputs();
     sink.OnEncodedH264Frame(frame(90, false, 0x0A));
@@ -309,8 +324,8 @@ int main() {
     answer_queued(q2, q3);
     settle(700);
     const Drained n = drain(sink);
-    check("two ordinary inputs (one a synthetic AU) count two", n.s.decodedFrames == 2 && q3 - q2 == 2,
-          "decoded=" + std::to_string(n.s.decodedFrames) + " queued=" + std::to_string(q3 - q2));
+    check("two ordinary inputs (one a synthetic AU) count two", n.frames == 2 && q3 - q2 == 2,
+          "decoded=" + std::to_string(n.frames) + " queued=" + std::to_string(q3 - q2));
     // A loss reset: the next IDR goes to a new codec, and its output counts.
     sink.OnVideoDiscontinuity();
     const size_t q4 = queued_inputs();
@@ -318,7 +333,7 @@ int main() {
     const size_t q5 = queued_inputs();
     answer_queued(q4, q5);
     settle(700);
-    check("after a loss reset the new codec's picture counts", drain(sink).s.decodedFrames == 1 && q5 - q4 == 1);
+    check("after a loss reset the new codec's picture counts", drain(sink).frames == 1 && q5 - q4 == 1);
   }
   {
     // r4 F1 (verifier, AVD 3/3): the app abandons a switch (nativeAbortVideoSwitch -> AbortWindowSelection):
@@ -336,9 +351,9 @@ int main() {
     settle(300);
     const Drained wait2 = drain(sink);
     check("F1: the windows waiting for the next IDR after an abandoned switch are NOT reported as a valid 0",
-          !(wait1.valid && wait1.s.decodedFrames == 0) && !(wait2.valid && wait2.s.decodedFrames == 0),
-          "window1 valid=" + std::to_string(wait1.valid) + " decoded=" + std::to_string(wait1.s.decodedFrames) +
-              " | window2 valid=" + std::to_string(wait2.valid) + " decoded=" + std::to_string(wait2.s.decodedFrames));
+          !(wait1.valid && wait1.frames == 0) && !(wait2.valid && wait2.frames == 0),
+          "window1 valid=" + std::to_string(wait1.valid) + " decoded=" + std::to_string(wait1.frames) +
+              " | window2 valid=" + std::to_string(wait2.valid) + " decoded=" + std::to_string(wait2.frames));
     const size_t q6 = queued_inputs();
     sink.OnEncodedH264Frame(frame(90, true, 0x40));  // the next IDR: a codec again
     const size_t q7 = queued_inputs();
@@ -350,8 +365,8 @@ int main() {
     answer_queued(q7, q8);
     settle(400);
     const Drained after = drain(sink);
-    check("F1: once the next IDR's picture is out, windows count again", after.valid && after.s.decodedFrames == 1,
-          "valid=" + std::to_string(after.valid) + " decoded=" + std::to_string(after.s.decodedFrames));
+    check("F1: once the next IDR's picture is out, windows count again", after.valid && after.frames == 1,
+          "valid=" + std::to_string(after.valid) + " decoded=" + std::to_string(after.frames));
   }
   {
     // r5 (Codex F1 contract) -- the lifecycle of an active transition's startup grace, on the real sink.
@@ -365,8 +380,8 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1900));  // past t0 + 2 s, nothing decoded
     const Drained late = drain(sink);
     check("r5: AFTER THE GRACE A SELECTION STILL WITHOUT A PICTURE IS A VALID 0 (not unmeasured for ever)",
-          late.valid && late.s.decodedFrames == 0,
-          "valid=" + std::to_string(late.valid) + " decoded=" + std::to_string(late.s.decodedFrames) + " at +" +
+          late.valid && late.frames == 0,
+          "valid=" + std::to_string(late.valid) + " decoded=" + std::to_string(late.frames) + " at +" +
               std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t0).count()) + " ms");
     sink.AbortWindowSelection();
 
@@ -389,8 +404,8 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // t1 + 2.3 s
     const Drained retry = drain(sink);
     check("r5: THE RETRY DID NOT STRETCH IT -- at the first transition's deadline the 0 is valid",
-          retry.valid && retry.s.decodedFrames == 0,
-          "valid=" + std::to_string(retry.valid) + " decoded=" + std::to_string(retry.s.decodedFrames) + " at +" +
+          retry.valid && retry.frames == 0,
+          "valid=" + std::to_string(retry.valid) + " decoded=" + std::to_string(retry.frames) + " at +" +
               std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t1).count()) + " ms");
     sink.AbortWindowSelection();
 
@@ -417,9 +432,11 @@ int main() {
     settle(500);
     const Drained first = drain(sink);
     check("r5: the window the selection's first pictures came out in is reported with them (not thrown away)",
-          first.valid && first.s.decodedFrames == 2,
-          "valid=" + std::to_string(first.valid) + " decoded=" + std::to_string(first.s.decodedFrames)
-#ifdef REMOTE60_TELEMETRY_PAUSED
+          first.valid && first.frames == 2,
+          "valid=" + std::to_string(first.valid) + " decoded=" + std::to_string(first.frames)
+#ifdef REMOTE60_DECODE_SPAN
+              + " spanUs=" + std::to_string(first.s.spanUs)
+#elif defined(REMOTE60_TELEMETRY_PAUSED)
               + " measuredUs=" + std::to_string(first.s.measuredUs)
 #endif
     );
@@ -431,8 +448,8 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     const Drained loss = drain(sink);
     check("r5: frames that do not decode after a loss are a valid 0 at once (no grace, however many resets)",
-          loss.valid && loss.s.decodedFrames == 0,
-          "valid=" + std::to_string(loss.valid) + " decoded=" + std::to_string(loss.s.decodedFrames));
+          loss.valid && loss.frames == 0,
+          "valid=" + std::to_string(loss.valid) + " decoded=" + std::to_string(loss.frames));
 
     std::puts("\n--- 15. r5: the surface recreated ---");
     {
@@ -454,8 +471,107 @@ int main() {
     answer_queued(qc, qd);
     settle(300);
     const Drained back2 = drain(sink);
-    check("r5: ...and its first picture counts at once", back2.valid && back2.s.decodedFrames == 1,
-          "valid=" + std::to_string(back2.valid) + " decoded=" + std::to_string(back2.s.decodedFrames));
+    check("r5: ...and its first picture counts at once", back2.valid && back2.frames == 1,
+          "valid=" + std::to_string(back2.valid) + " decoded=" + std::to_string(back2.frames));
+  }
+  {
+    // r6 (Codex S1, codex_mobile_abr_e599123.md): the rate the session's window gives the host, from this
+    // sink, on the real clock -- the session's due pass as native_video_client_session.cpp runs it.
+    std::puts("\n--- 16. r6 S1-a: the first picture after a startup grace, just before the report tick ---");
+    ClientTelemetryWindow tel;
+    tel.Reset(static_cast<uint64_t>(steady_us()), 0, 0);
+    struct Report {
+      bool made = false;
+      uint32_t fpsX100 = 0;
+      int64_t atUs = 0;
+      int held = 0;
+    };
+    // One due pass now, then (r6) the passes Hold asks for, 10 ms apart as the control loop runs.
+    auto report_now = [&]() {
+      Report r;
+      for (int i = 0; i < 100; ++i) {
+        const uint64_t now = static_cast<uint64_t>(steady_us());
+        if (i > 0 && !tel.Due(now)) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+        ClientDecodeStats d{};
+        const bool v = sink.DrainDecodeStats(&d);
+#ifdef REMOTE60_DECODE_SPAN
+        if (tel.Hold(now, v ? &d : nullptr, false)) {
+          ++r.held;
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+#endif
+        r.made = tel.Close(now, 0, 0, v ? &d : nullptr, nullptr);
+        r.fpsX100 = tel.Pending().message.decodedFpsX100;
+        r.atUs = static_cast<int64_t>(now);
+        return r;
+      }
+      return r;
+    };
+    // 30 fps from the decoder, starting `delayMs` from now, on its own thread (the codec keeps producing
+    // while the session's pass waits).
+    auto feeder = [&](int delayMs, int count, int64_t ptsBase) {
+      return std::thread([=] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        for (int i = 0; i < count; ++i) {
+          picture(ptsBase + i);
+          std::this_thread::sleep_for(std::chrono::microseconds(33333));
+        }
+      });
+    };
+    auto fps = [](const Report& r) { return std::to_string(r.fpsX100 / 100.0).substr(0, 5) + " fps"; };
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      (void)report_now();  // the window's base: what came before is not this check's
+      std::thread healthy = feeder(0, 30, 30000);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      const Report h = report_now();
+      healthy.join();
+      check("r6: healthy 30 fps before it is reported as ~30 fps", h.made && h.fpsX100 >= 2500 && h.fpsX100 <= 3500, fps(h));
+    }
+    sink.OnDecodeEpisodeStart();  // the stream resumed: a startup grace (the codec has no picture yet)
+    const int64_t g0 = steady_us();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const Report inGrace = report_now();
+    check("r6: inside the grace the window is not reported", !inGrace.made);
+    // The first picture 15 ms before the next tick (g0 + 1.3 s), then 30 fps.
+    std::this_thread::sleep_for(std::chrono::microseconds(g0 + 1285000 - steady_us()));
+    const int64_t firstUs = steady_us();
+    std::thread after = feeder(0, 20, 31000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    const Report r16 = report_now();
+    after.join();
+    check("r6 S1-a: THE REPORT AFTER THE GRACE'S FIRST PICTURE IS ~30 fps -- the grace is not in its denominator",
+          r16.made && r16.fpsX100 >= 2000 && r16.fpsX100 <= 4500,
+          fps(r16) + ", held passes " + std::to_string(r16.held) + ", " +
+              std::to_string((r16.atUs - firstUs) / 1000) + " ms after the first picture");
+    check("r6: ...and it comes within ~0.25 s of the first picture, not a second later",
+          r16.made && r16.atUs - firstUs < 450000, std::to_string((r16.atUs - firstUs) / 1000) + " ms");
+
+    std::puts("\n--- 17. r6 S1-b: a generation that begins just before the tick, its first picture 20 ms later ---");
+    sink.PrepareForWindowSelection(31);  // pictures were counted in 16: a grace
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    const Report expired = report_now();
+    check("r6 (kept): after the grace, no picture is a valid 0", expired.made && expired.fpsX100 == 0, fps(expired));
+    ControlWindowSelectedMessage ack{};
+    ack.flags = 0x1u;
+    ack.streamGeneration = 310;
+    sink.OnWindowSelectionControlResultFor(ack, 31);  // the answer: a new generation
+    const int64_t ackUs = steady_us();
+    sink.OnEncodedH264Frame(frame(310, true, 0x60));  // its IDR: a codec again
+    std::thread answered = feeder(20, 20, 32000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    const Report r17 = report_now();
+    answered.join();
+    check("r6 S1-b: THE REPORT JUST AFTER A GENERATION CHANGE IS NOT A 0 OVER A FEW ms -- ~30 fps once measured",
+          r17.made && r17.fpsX100 >= 2000 && r17.fpsX100 <= 4500,
+          fps(r17) + ", held passes " + std::to_string(r17.held) + ", at +" + std::to_string((r17.atUs - ackUs) / 1000) +
+              " ms from the answer");
+    settle(100);
+    (void)drain(sink);
   }
   check("every queued output was taken by the sink", outputs_drained());
   sink.SetSurface(env, nullptr);

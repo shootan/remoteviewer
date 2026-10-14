@@ -18,12 +18,18 @@
 //     count, even 0 -- the sink's grace decides when); a not-valid window after it is withheld (not
 //     reported as 0); Reset (a new connection) drops pending and seen.
 // [6] two windows (two controllers) are independent.
+// [12] r6 (Codex S1): the chain sink -> window -> scheduler -> host snapshot -> host ABR around a startup
+//     grace's first picture and a generation change just before a report close, over report phases.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include "client_decode_snapshot.hpp"
 #include "client_telemetry_window.hpp"
+#include "host_abr.hpp"
+#include "host_client_metrics.hpp"
 #include "native_video_client_shared_core.hpp"
 
 using namespace remote60::native_poc;
@@ -84,9 +90,20 @@ struct Control {
   }
 };
 
-ClientDecodeStats decoded(uint32_t n, uint32_t w = 1920, uint32_t h = 1080) {
+// A window's decode drain: n pictures over us. r6: the sink gives its measurement span -- each call here is
+// a new one covering exactly this window (how the sink starts and continues spans is [12] and
+// android_decoder_decode_stats_test); before r6 it gave the count since the last drain.
+ClientDecodeStats decoded(uint32_t n, uint64_t us = 1'000'000, uint32_t w = 1920, uint32_t h = 1080) {
   ClientDecodeStats d;
+#ifdef REMOTE60_DECODE_SPAN
+  static uint64_t id = 1000;
+  d.spanId = ++id;
+  d.spanFrames = n;
+  d.spanUs = us;
+#else
+  (void)us;
   d.decodedFrames = n;
+#endif
   d.width = w;
   d.height = h;
   return d;
@@ -135,6 +152,419 @@ uint64_t run(Load load, bool pending, uint64_t* windows) {
     }
   }
   return c.metricsSent;
+}
+
+// ------------------------------------------------------------------------------------------------------
+// [12] r6 (Codex S1, codex_mobile_abr_e599123.md): the chain, on a hand-made 1 ms clock --
+//   the sink's decode bookkeeping -> ClientTelemetryWindow (with Hold after r6) -> the product
+//   ClientControlScheduler (one action per 10 ms pass, as the session runs it) -> the host's
+//   ClientMetricsSnapshot (stamped on arrival, fresh for 3 s) -> RateControlState::DecideAbrProfile on the
+//   host's own 1 s tick (full cadence sent all along, latency / tail 0 as the APK reports them).
+namespace chain {
+
+constexpr uint64_t kMs = 1000ULL;
+constexpr uint64_t kSec = 1000000ULL;
+constexpr uint64_t kFrameUs = 33333ULL;
+
+// The sink's decode bookkeeping in the order android_video_decoder.cpp runs it: a startup grace
+// (StartGraceLocked: explicit episode always, a transition only if a picture was counted since the last
+// one), a generation change (PublishDecodeStateLocked), a counted picture (DrainOutputLocked) and the
+// control thread's drain (DrainDecodeStats). After r6 the span pieces are the product's own
+// (client_decode_snapshot.hpp). e599123's sink keeps its drain inline, so for that build the drain is
+// transcribed here, line for line -- what the real sink gives in the same phases is
+// android_decoder_decode_stats_test sections 16 / 17.
+struct ModelSink {
+  uint64_t total = 0, generation = 1;
+  bool graceActive = false, graceEligible = true;
+  uint64_t deadline = 0;
+#ifdef REMOTE60_DECODE_SPAN
+  ClientDecodeSpanStart span;
+#else
+  uint64_t genStartTotal = 0, genStartUs = 0, graceBase = 0, drainBase = 0, drainGeneration = 0;
+#endif
+  void Grace(uint64_t t, bool explicitEpisode) {
+    if (!explicitEpisode && !graceEligible) return;
+    graceActive = true;
+    graceEligible = false;
+    deadline = t + 2 * kSec;
+#ifdef REMOTE60_DECODE_SPAN
+    span.OnGraceStart(total, deadline);
+#else
+    graceBase = total;
+#endif
+  }
+  void Generation(uint64_t t) {
+    ++generation;
+#ifdef REMOTE60_DECODE_SPAN
+    span.OnGeneration(t, total, graceActive, deadline);
+#else
+    genStartTotal = total;
+    genStartUs = t;
+#endif
+  }
+  void Picture(uint64_t t) {
+#ifdef REMOTE60_DECODE_SPAN
+    if (graceActive) span.OnGraceFirstPicture(t, total);
+#else
+    (void)t;
+#endif
+    ++total;
+    graceActive = false;
+    graceEligible = true;
+  }
+  bool Drain(uint64_t t, ClientDecodeStats* out) {
+    out->width = 1920;
+    out->height = 1080;
+    out->generation = generation;
+#ifdef REMOTE60_DECODE_SPAN
+    ClientDecodeState s;
+    s.valid = true;
+    s.decodedTotal = total;
+    s.generation = generation;
+    s.spanId = span.id();
+    s.spanStartUs = span.startUs();
+    s.spanStartTotal = span.startTotal();
+    ClientDecodeSpan sp;
+    if (!ReadDecodeSpan(s, t, &sp)) return false;
+    out->spanId = sp.id;
+    out->spanFrames = sp.frames;
+    out->spanUs = sp.us;
+    return true;
+#else
+    uint64_t delta = total >= drainBase ? total - drainBase : 0;
+    uint64_t measuredUs = 0;
+    if (generation != drainGeneration) {
+      delta = total >= genStartTotal ? total - genStartTotal : 0;
+      measuredUs = t > genStartUs ? t - genStartUs : 1;
+    }
+    drainBase = total;
+    drainGeneration = generation;
+    if (graceActive && total == graceBase && t < deadline) return false;
+    out->decodedFrames = static_cast<uint32_t>(delta);
+    out->measuredUs = measuredUs;
+    return true;
+#endif
+  }
+};
+
+enum class Ev { GraceTransition, Generation, PicturesStop, PicturesFrom };
+struct Event {
+  uint64_t atUs;
+  Ev kind;
+};
+struct Scenario {
+  std::string name;
+  uint64_t lengthUs = 20 * kSec;
+  uint64_t phaseUs = 995 * kMs;  // where in the host's second the client's windows close (10 ms grid)
+  bool qualityFirst = false;
+  std::vector<Event> events;     // sorted
+  uint64_t preemptAfterUs = 0;   // a window-list request on the first close at / after this (once)
+  uint64_t watchFromUs = 0;      // reports sent from here are the ones "after the transition"
+};
+struct Report {
+  uint64_t sentUs;
+  uint32_t fpsX100;
+};
+struct Result {
+  int firstDemoteUs = -1;
+  std::string reason, evidence;
+  std::vector<Report> reports;
+  uint32_t minFpsAfter = 0xFFFFFFFFu;
+  uint64_t held = 0;
+  uint64_t lowReportTicks = 0;  // host ticks that read a fresh report under the collapse floor
+};
+
+Result Run(const Scenario& sc) {
+  Result r;
+  ModelSink sink;
+  const uint64_t resetUs = kSec + sc.phaseUs;  // the connection's window starts here
+  ClientTelemetryWindow tel;
+  Control c(resetUs - 250 * kMs);  // the control link came up a little before the first window
+  ClientMetricsSnapshot hostMetrics;
+  RateControlState rate;
+  rate.abrEnabled = true;
+  rate.abrQualityFirst = sc.qualityFirst;
+  rate.abrHasMidProfile = true;
+  rate.abrHasLowProfile = true;
+  rate.abrHasLowerResolution = true;
+  rate.abrHighBitrate = 6000000;
+  rate.abrMidBitrate = 4500000;
+  rate.abrLowBitrate = 3000000;
+  bool picturesOn = true;
+  uint64_t nextPictureUs = 500 * kMs;
+  bool preemptDone = sc.preemptAfterUs == 0;
+  size_t next = 0;
+  const uint32_t collapseX100 = 30u * (sc.qualityFirst ? 18u : 12u);
+  for (uint64_t t = 0; t <= sc.lengthUs; t += kMs) {
+    while (next < sc.events.size() && sc.events[next].atUs <= t) {
+      const Event& e = sc.events[next++];
+      switch (e.kind) {
+        case Ev::GraceTransition:
+          sink.Grace(t, false);
+          break;
+        case Ev::Generation:
+          sink.Generation(t);
+          break;
+        case Ev::PicturesStop:
+          picturesOn = false;
+          break;
+        case Ev::PicturesFrom:
+          picturesOn = true;
+          nextPictureUs = t;
+          break;
+      }
+    }
+    if (picturesOn && t >= nextPictureUs) {
+      sink.Picture(t);
+      nextPictureUs += kFrameUs;
+    }
+    // the client's control pass, every 10 ms
+    if (t >= resetUs - 250 * kMs && (t % (10 * kMs)) == (sc.phaseUs % (10 * kMs))) {
+      if (t == resetUs) {
+        ClientDecodeStats prime{};
+        (void)sink.Drain(t, &prime);  // WorkerMain: what the sink counted before is dropped
+        tel.Reset(t, 0, 0);
+        sink.Grace(t, true);  // OnDecodeEpisodeStart
+      }
+      if (t > resetUs && tel.Due(t)) {
+        ClientDecodeStats d{};
+        const bool v = sink.Drain(t, &d);
+        bool held = false;
+#ifdef REMOTE60_DECODE_SPAN
+        held = tel.Hold(t, v ? &d : nullptr, false);
+#endif
+        if (!held) {
+          (void)tel.Close(t, 0, 0, v ? &d : nullptr, nullptr);
+          if (!preemptDone && t >= sc.preemptAfterUs) {
+            c.windowPanel.RequestList("the panel refreshes its list on this pass");
+            preemptDone = true;
+          }
+        }
+      }
+      if (t >= resetUs) tel.OnDecodeGeneration(sink.generation);
+      ControlOutboundAction a{};
+      if (c.scheduler.NextAction(t, t >= resetUs ? tel.Pending(t) : ClientControlMetricsSnapshot{}, &c.windowPanel,
+                                 &c.streamState, &c.captureMode, &c.keyframes, &c.runtimeTune, &c.inputQueue, &a)) {
+        if (a.kind == ControlOutboundActionKind::Ping) {
+          c.scheduler.OnPingCompleted(t);
+        } else if (a.kind == ControlOutboundActionKind::Metrics) {
+          ViewerMetrics v;
+          v.width = a.metrics.width;
+          v.height = a.metrics.height;
+          v.recvFpsX100 = a.metrics.recvFpsX100;
+          v.decodedFpsX100 = a.metrics.decodedFpsX100;
+          v.updatedUs = t;  // the host stamps a report with its arrival (loopback)
+          hostMetrics.Publish(v);
+          r.reports.push_back({t, a.metrics.decodedFpsX100});
+          if (t >= sc.watchFromUs) r.minFpsAfter = std::min(r.minFpsAfter, a.metrics.decodedFpsX100);
+        }
+      }
+    }
+    // the host's 1 s tick
+    if (t > 0 && t % kSec == 0) {
+      const ViewerMetrics viewer = hostMetrics.Snapshot();
+      const bool fresh = viewer.updatedUs > 0 && t >= viewer.updatedUs && (t - viewer.updatedUs) <= 3 * kSec;
+      AbrInputs in;
+      in.metricsFresh = fresh;
+      in.clDecodedFpsX100 = fresh ? viewer.decodedFpsX100 : 0;
+      in.cb2eAvgUs = 5000;
+      in.sentFrames = 30;
+      in.activeFps = 30;
+      in.startUs = 0;
+      in.clientEverReported = viewer.firstUs != 0;
+      in.clientDecodeReported = viewer.decodeReported;
+      if (fresh && viewer.decodeReported && viewer.decodedFpsX100 < collapseX100) ++r.lowReportTicks;
+      const AbrDecision dec = rate.DecideAbrProfile(in, t);
+      if (dec.targetProfile != rate.abrProfile) {
+        if (r.firstDemoteUs < 0) {
+          r.firstDemoteUs = static_cast<int>(t / kMs);
+          r.reason = dec.reason;
+          r.evidence = abr_evidence_names(dec.evidence);
+        }
+        rate.CommitAbrProfile(dec.targetProfile, false, t);
+      }
+    }
+  }
+#ifdef REMOTE60_DECODE_SPAN
+  r.held = tel.held();
+#endif
+  return r;
+}
+
+std::string Describe(const Result& r) {
+  std::string s = r.firstDemoteUs < 0 ? "no demotion"
+                                      : "DEMOTED at " + std::to_string(r.firstDemoteUs / 1000.0).substr(0, 6) + " s " +
+                                            r.reason + "(" + r.evidence + ")";
+  s += ", min fps after the transition " +
+       (r.minFpsAfter == 0xFFFFFFFFu ? std::string("-") : std::to_string(r.minFpsAfter / 100.0).substr(0, 5));
+  s += ", host ticks on a fresh low report " + std::to_string(r.lowReportTicks);
+  s += ", held passes " + std::to_string(r.held);
+  return s;
+}
+
+// The report windows close on this grid until something holds one.
+uint64_t FirstClose(uint64_t phaseUs, uint64_t atLeastUs) {
+  const uint64_t resetUs = kSec + phaseUs;
+  return resetUs + ((atLeastUs - resetUs + kSec - 1) / kSec) * kSec;
+}
+
+// S1-a: an active switch abandoned at T (a transition grace + a generation change, the codec reset: no
+// picture), its first picture `before` the close G, then 30 fps -- the grace still running at that picture.
+Scenario GraceFirstPicture(uint64_t phaseUs, uint64_t beforeUs, bool qualityFirst = false) {
+  Scenario s;
+  const uint64_t T = 8300 * kMs;
+  const uint64_t G = FirstClose(phaseUs, T + kSec + beforeUs);
+  const uint64_t F = G - beforeUs;
+  s.name = "S1-a phase " + std::to_string(phaseUs / kMs) + " ms, first picture " + std::to_string(beforeUs / kMs) +
+           " ms before the close at " + std::to_string(G / 1000.0 / 1000.0).substr(0, 6) + " s";
+  s.phaseUs = phaseUs;
+  s.qualityFirst = qualityFirst;
+  s.events = {{T, Ev::GraceTransition}, {T, Ev::Generation}, {T, Ev::PicturesStop}, {F, Ev::PicturesFrom}};
+  s.preemptAfterUs = G + kMs;  // the next report goes one pass late (a list refresh on its pass)
+  s.watchFromUs = T;
+  return s;
+}
+// ...the first picture `afterUs` past that close instead (still in the grace).
+Scenario GraceFirstPictureAfter(uint64_t phaseUs, uint64_t afterUs) {
+  Scenario s;
+  const uint64_t T = 8300 * kMs;
+  const uint64_t G = FirstClose(phaseUs, T + kSec);
+  const uint64_t F = G + afterUs;
+  s.name = "S1-a phase " + std::to_string(phaseUs / kMs) + " ms, first picture " + std::to_string(afterUs / kMs) +
+           " ms after a close";
+  s.phaseUs = phaseUs;
+  s.events = {{T, Ev::GraceTransition}, {T, Ev::Generation}, {T, Ev::PicturesStop}, {F, Ev::PicturesFrom}};
+  s.preemptAfterUs = G + kSec + kMs;
+  s.watchFromUs = T;
+  if (F >= T + 2 * kSec) s.name += " (past the deadline)";
+  return s;
+}
+// S1-b: a selection prepared at T whose answer (a generation change) comes after the grace expired,
+// `beforeUs` before the close G, its first picture `firstUs` after the answer.
+Scenario AnswerJustBeforeClose(uint64_t phaseUs, uint64_t beforeUs, uint64_t firstUs) {
+  Scenario s;
+  const uint64_t T = 8300 * kMs;
+  const uint64_t G = FirstClose(phaseUs, T + 2 * kSec + beforeUs + kMs);
+  const uint64_t A = G - beforeUs;
+  s.name = "S1-b phase " + std::to_string(phaseUs / kMs) + " ms, answer " + std::to_string(beforeUs / kMs) +
+           " ms before the close, first picture +" + std::to_string(firstUs / kMs) + " ms";
+  s.phaseUs = phaseUs;
+  s.events = {{T, Ev::GraceTransition}, {T, Ev::Generation}, {T, Ev::PicturesStop}, {A, Ev::Generation},
+              {A + firstUs, Ev::PicturesFrom}};
+  s.preemptAfterUs = G + kMs;
+  s.watchFromUs = A;
+  return s;
+}
+
+}  // namespace chain
+
+void TestChain() {
+  using namespace chain;
+  std::printf("[12] r6 S1: sink -> window -> product scheduler -> host snapshot (3 s fresh) -> host ABR\n");
+  {
+    // Codex's order: the low report at 9.995 s, host ticks at 10 and 11 s, the next report at 11.005 s.
+    const Result r = Run(GraceFirstPicture(995 * kMs, 10 * kMs));
+    std::printf("    Codex order (first picture 9.985 s, close 9.995 s, next report 11.005 s): %s\n", Describe(r).c_str());
+    check("[12] S1-a Codex order: NO high_to_mid_severe FROM ONE PICTURE AFTER A GRACE (one low report, two host ticks)",
+          r.firstDemoteUs < 0 && r.minFpsAfter >= 2000, Describe(r));
+  }
+  {
+    std::string bad;
+    int runs = 0;
+    for (uint64_t phase : {5 * kMs, 255 * kMs, 505 * kMs, 755 * kMs, 985 * kMs, 995 * kMs}) {
+      for (uint64_t before : {5 * kMs, 10 * kMs, 30 * kMs, 60 * kMs, 100 * kMs}) {
+        const Scenario s = GraceFirstPicture(phase, before);
+        const Result r = Run(s);
+        ++runs;
+        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+      }
+    }
+    check("[12] S1-a sweep (report phase x first picture before the close, " + std::to_string(runs) +
+              " runs): no demotion, every report after the switch >= 20 fps",
+          bad.empty(), bad);
+  }
+  {
+    std::string bad;
+    int runs = 0;
+    for (uint64_t phase : {5 * kMs, 505 * kMs, 995 * kMs}) {
+      for (uint64_t after : {5 * kMs, 10 * kMs, 30 * kMs, 300 * kMs}) {
+        const Scenario s = GraceFirstPictureAfter(phase, after);
+        const Result r = Run(s);
+        ++runs;
+        if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+      }
+    }
+    check("[12] S1-a first picture just after a close (" + std::to_string(runs) + " runs): no demotion, >= 20 fps",
+          bad.empty(), bad);
+  }
+  {
+    const Result r = Run(AnswerJustBeforeClose(995 * kMs, 5 * kMs, 20 * kMs));
+    std::printf("    S1-b answer 10.990 s, close 10.995 s, first picture 11.010 s: %s\n", Describe(r).c_str());
+    check("[12] S1-b: NO high_to_mid_severe FROM A 0 OVER THE FIRST ms OF A GENERATION", r.firstDemoteUs < 0 &&
+          r.minFpsAfter >= 2000, Describe(r));
+  }
+  {
+    std::string bad;
+    int runs = 0;
+    for (uint64_t phase : {5 * kMs, 255 * kMs, 505 * kMs, 755 * kMs, 995 * kMs}) {
+      for (uint64_t before : {5 * kMs, 10 * kMs, 30 * kMs}) {
+        for (uint64_t first : {10 * kMs, 20 * kMs, 30 * kMs}) {
+          const Scenario s = AnswerJustBeforeClose(phase, before, first);
+          const Result r = Run(s);
+          ++runs;
+          if (r.firstDemoteUs >= 0 || r.minFpsAfter < 2000) bad += "\n        " + s.name + ": " + Describe(r);
+        }
+      }
+    }
+    check("[12] S1-b sweep (phase x answer before the close x first picture, " + std::to_string(runs) +
+              " runs): no demotion, >= 20 fps",
+          bad.empty(), bad);
+  }
+  {
+    const Result r = Run(GraceFirstPicture(995 * kMs, 10 * kMs, /*qualityFirst=*/true));
+    std::printf("    quality-first, Codex order: %s\n", Describe(r).c_str());
+    check("[12] quality-first (3 ticks) keeps its margin: no demotion", r.firstDemoteUs < 0, Describe(r));
+  }
+  // What has to stay.
+  {
+    Scenario s;
+    s.name = "fault B";
+    s.events = {{8300 * kMs, Ev::GraceTransition}, {8300 * kMs, Ev::Generation}, {8300 * kMs, Ev::PicturesStop}};
+    s.watchFromUs = 8300 * kMs;
+    const Result r = Run(s);
+    std::printf("    fault B (abandoned switch at 8.3 s, no picture ever): %s\n", Describe(r).c_str());
+    check("[12] kept: no picture after the grace (deadline 10.3 s) is a valid 0 and demotes (severe_client)",
+          r.firstDemoteUs > 10300 && r.firstDemoteUs <= 13500 && r.reason == "high_to_mid_severe" &&
+              r.evidence.find("severe_client") != std::string::npos,
+          Describe(r));
+  }
+  {
+    Scenario s;
+    s.name = "loss";
+    s.events = {{8300 * kMs, Ev::PicturesStop}};
+    s.watchFromUs = 8300 * kMs;
+    const Result r = Run(s);
+    std::printf("    normal loss at 8.3 s (no grace): %s\n", Describe(r).c_str());
+    check("[12] kept: a stall in normal streaming is a valid 0 at once (no grace) and demotes",
+          r.firstDemoteUs > 8300 && r.firstDemoteUs <= 11500 && r.reason == "high_to_mid_severe", Describe(r));
+  }
+  {
+    Scenario s;
+    s.name = "steady";
+    s.lengthUs = 60 * kSec;
+    s.watchFromUs = 3 * kSec;
+    const Result r = Run(s);
+    size_t perSecondMax = 0;
+    for (uint64_t sec = 3; sec < 60; ++sec) {
+      size_t n = 0;
+      for (const Report& rep : r.reports) n += (rep.sentUs > (sec - 1) * kSec && rep.sentUs <= sec * kSec) ? 1 : 0;
+      perSecondMax = std::max(perSecondMax, n);
+    }
+    std::printf("    steady 60 s: %s, %zu reports\n", Describe(r).c_str(), r.reports.size());
+    check("[12] kept: steady streaming is reported once a second at ~30 fps, nothing held",
+          r.firstDemoteUs < 0 && r.held == 0 && r.reports.size() >= 57 && perSecondMax <= 2 && r.minFpsAfter >= 2900,
+          Describe(r) + ", " + std::to_string(r.reports.size()) + " reports, max/s " + std::to_string(perSecondMax));
+  }
 }
 
 }  // namespace
@@ -196,7 +626,7 @@ int main() {
     ClientTelemetryWindow w;
     w.Reset(0, 0, 0);
     const uint64_t n = 30 * lenUs / 1'000'000;
-    const ClientDecodeStats d = decoded(static_cast<uint32_t>(n));
+    const ClientDecodeStats d = decoded(static_cast<uint32_t>(n), lenUs);
     w.Close(lenUs, n, n * 4000, &d, nullptr);
     const auto& m = w.Pending().message;
     check("[3] a " + std::to_string(lenUs / 1000) + " ms window of 30 fps reports 30 fps, 0.96 Mbps",
@@ -208,7 +638,7 @@ int main() {
     // A late tick (control busy 5 s): one window, then the next starts at that close -- no backlog.
     ClientTelemetryWindow w;
     w.Reset(0, 0, 0);
-    const ClientDecodeStats d1 = decoded(150);
+    const ClientDecodeStats d1 = decoded(150, 5'000'000);
     w.Close(5'000'000, 150, 600'000, &d1, nullptr);
     check("[3] a 5 s late close is one report of 30 fps", w.reports() == 1 && w.Pending().message.decodedFpsX100 == 3000);
     check("[3] ...and the next window is due 1 s after it, not at once", !w.Due(5'500'000) && w.Due(6'000'000));
@@ -346,13 +776,19 @@ int main() {
   {
     ClientTelemetryWindow w;
     w.Reset(0, 0, 0);
+#ifdef REMOTE60_DECODE_SPAN
+    ClientDecodeStats d = decoded(15, 500'000);  // 15 pictures in the last half second of the window
+#else
     ClientDecodeStats d = decoded(15);
     d.measuredUs = 500'000;  // 15 pictures in the last half second of the window
+#endif
     w.Close(1'000'000, 15, 60'000, &d, nullptr);
     check("[11] 15 pictures over the measured 0.5 s = 30 fps, not 15", w.Pending().message.decodedFpsX100 == 3000,
           "decodedFpsX100=" + std::to_string(w.Pending().message.decodedFpsX100));
   }
 #endif
+
+  TestChain();
 
   std::printf("\nclient_telemetry_window_test: %d passed, %d failed\n", gChecks - gFailures, gFailures);
   std::printf("RESULT: %s\n", gFailures == 0 ? "PASS" : "FAIL");
