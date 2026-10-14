@@ -539,13 +539,20 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     // the refinement reached): when that IDR is due within two inputs, refinements wait like for a key.
     // r5 test knob (counterexample only): REMOTE60_NATIVE_GOP_DRAIN_TEST_SKEW predicts the boundary that
     // many inputs EARLY, so a drain fires where no IDR comes and must still close by its own bounds.
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
     static const uint64_t drainSkew = [] {
       const char* v = std::getenv("REMOTE60_NATIVE_GOP_DRAIN_TEST_SKEW");
       return v ? static_cast<uint64_t>(std::strtoul(v, nullptr, 10)) : 0ULL;
     }();
+#else
+    constexpr uint64_t drainSkew = 0;  // r7: fault injection exists in experiment builds only
+#endif
     const uint64_t untilIdr = encoder.InputsUntilGopIdr();
     const uint64_t untilIdrSeen = (drainSkew == 0 || untilIdr == UINT64_MAX) ? untilIdr : (untilIdr > drainSkew ? untilIdr - drainSkew : 0);
-    const bool gopIdrImminent = untilIdrSeen <= 2;
+    // r7 (Codex r7 s2-4): with the GOP period CONFIRMED on this instance, a refinement must also leave the
+    // surfacing input before the boundary -- the train stops one input earlier (<= 3), so a planned batch
+    // that would reach the encoder's own IDR is cut short or not started. Unknown keeps the r3 <= 2 rule.
+    const bool gopIdrImminent = untilIdrSeen <= (encoder.GopPredictionVerified() ? 3u : 2u);
     // r5 (a): ...unless the boundary drain takes that IDR here, inside this train and its budget
     // (EncoderState::gopDrain*): the prediction confirmed on this instance, this GOP cycle not tried yet
     // (or this train's drain still open), nothing owed / in flight / replaying / queued / waiting, and the
@@ -678,10 +685,14 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
       // Codex r1 s3: when P refinement falls short, a bounded 1-IDR is MEASURED against it -- never the
       // default. REMOTE60_NATIVE_SETTLE_IDR=1 makes the first refinement input of an episode a key.
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
       static const bool settleIdr = [] {
         const char* v = std::getenv("REMOTE60_NATIVE_SETTLE_IDR");
         return v && v[0] == '1';
       }();
+#else
+      constexpr bool settleIdr = false;
+#endif
       if (settleIdr && kick.settle.submitted() == 0) encoder.RequestKey(kHostKeyReasonSettleIdr);
       seq = 0;
       version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)

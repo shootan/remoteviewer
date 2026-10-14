@@ -121,6 +121,11 @@ set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNL
 # rather than MSVC_DEBUG_INFORMATION_FORMAT: that property needs policy CMP0141 (CMake 3.25) and this
 # tree's minimum is 3.20, so the property is silently ignored here. The PDB is a build artefact to keep
 # WITH the exe hash (the bundle's identity.txt records the GUID/Age), never installed.
+# motion-settle r7 (Codex r7 s5): the non-adopted experiment paths (F dip, onset floor, park, train
+# floor, GOP drain, M2 fast pressure, settle IDR) and fault-injection knobs (GOP_DRAIN_TEST_SKEW) read
+# their switches only in an experiment build; a shipping build has no way to turn them on and does not
+# carry their environment names (automation/motion_settle_build_gate.sh checks the binary).
+option(REMOTE60_MOTION_SETTLE_EXPERIMENTS "Compile the motion-settle experiment switches into GNLinkStream" OFF)
 option(REMOTE60_DIAG_PDB "Emit PDBs for GNLinkStream and the e2e harness in Release (diagnostic bundles only)" OFF)
 if(MSVC AND REMOTE60_DIAG_PDB)
   target_compile_options(remote60_native_video_host_poc PRIVATE "$<$<CONFIG:Release>:/Zi>")
@@ -270,8 +275,14 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowscodecs
   shlwapi
 )
+if(REMOTE60_MOTION_SETTLE_EXPERIMENTS)
+  set(_motion_settle_experiments 1)
+else()
+  set(_motion_settle_experiments 0)
+endif()
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+  REMOTE60_MOTION_SETTLE_EXPERIMENTS=${_motion_settle_experiments}
 )
 
 add_executable(remote60_secure_input_service
@@ -1016,6 +1027,8 @@ add_executable(remote60_host_encoder_apply_target_test
   src/host_encoder_apply_target_test.cpp
 )
 target_include_directories(remote60_host_encoder_apply_target_test PRIVATE src)
+# its [8] case drives M2 through REMOTE60_NATIVE_FAST_PRESSURE: the experiment switches compiled in
+target_compile_definitions(remote60_host_encoder_apply_target_test PRIVATE REMOTE60_MOTION_SETTLE_EXPERIMENTS=1)
 target_link_libraries(remote60_host_encoder_apply_target_test PRIVATE capture common ws2_32
   runtimeobject windowsapp advapi32 d3d11 dxgi gdi32 user32 mfplat mf mfuuid wmcodecdspuuid ole32)
 if(MSVC)

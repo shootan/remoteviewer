@@ -1,5 +1,11 @@
 #pragma once
 
+// motion-settle r7: experiment switches compiled in only when the build sets it (CMake option
+// REMOTE60_MOTION_SETTLE_EXPERIMENTS); every other includer sees the shipping value.
+#ifndef REMOTE60_MOTION_SETTLE_EXPERIMENTS
+#define REMOTE60_MOTION_SETTLE_EXPERIMENTS 0
+#endif
+
 // Encoder management state (Nv12PendingRelease, EncoderState).
 //
 // Host split refactor Phase 2-0: this state moved out of native_video_host_main.cpp verbatim so
@@ -177,10 +183,14 @@ struct EncoderState {
   // motion-settle r3: M2 is EXCLUDED from the shipping configuration (Codex r3 s5) -- a default-off
   // comparison feature: only REMOTE60_NATIVE_FAST_PRESSURE=1 turns it (and its calm) on.
   bool FastPressureEligible() const {
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
     static const bool fastOn = [] {
       const char* f = std::getenv("REMOTE60_NATIVE_FAST_PRESSURE");
       return f && f[0] == '1';
     }();
+#else
+    constexpr bool fastOn = false;  // r7: experiment builds only
+#endif
     return fastOn && LiveCeilingEligible();
   }
   // The instance whose ceiling the host may move at runtime outside the 1 s governor tick: the governor

@@ -362,26 +362,33 @@ int startup_start_capture(HostContext& hx) {
     sc.deadlineUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_SETTLE_DEADLINE_MS", 1000, 100, 3000)) * 1000ULL;
     kick.settleBytePercent = env_u32_clamped("REMOTE60_NATIVE_SETTLE_BYTE_PCT", 25, 0, 200);
     kick.settle.Configure(sc);
-    // r2 F: the temporary settle ceiling (0 = off; AMD legacy live only, decided per instance).
-    hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 16, 0, 51);  // r3 candidate: 16 (AMD live only)
-    // r3 (c): the onset floor (0 = off); its bounds are clamped to the comparison ceilings 8 / 500 ms.
-    // r4: the onset floor is out of the candidate (NO-GO for first-reaction p95); 0 = off, opt-in only.
+    // motion-settle r7 (Codex r7): the candidate is catch-up + plain P refinement only. F's dip, the onset
+    // floor, the park, the train floor and the GOP drain are NOT adopted -- off, and switchable only in an
+    // experiment build (REMOTE60_MOTION_SETTLE_EXPERIMENTS), never from a shipping binary.
+    hx.encoder.settleDipQp = 0;
+    hx.encoder.onsetFloorQp = 0;
+    hx.encoder.settleParkQp = 0;
+    hx.encoder.settleTrainMinQp = 0;
+    kick.gopDrainEnabled = false;
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
+    hx.encoder.settleDipQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_DIP_QP", 0, 0, 51);
     hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 0, 0, 51);
-    // r4: the settle park (host_encoder_manager.hpp), 0 = off. Codex r5 s1.1: outside the r4 contract --
-    // an experiment flag, default off.
-    hx.encoder.settleParkQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_PARK_QP", 0, 0, 51);  // r5: experiment, off
+    hx.encoder.settleParkQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_PARK_QP", 0, 0, 51);
     hx.encoder.settleTrainMinQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_TRAIN_MIN_QP", 0, 0, 51);
-    {  // r5 (a): the GOP boundary drain, experiment, default off
+    {
       const char* v = std::getenv("REMOTE60_NATIVE_GOP_DRAIN");
       kick.gopDrainEnabled = v && v[0] == '1';
     }
+#endif
     // r4: latest-content catch-up (host_kick.hpp), on by default.
     {
       const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
       kick.catchupEnabled = !(v && v[0] == '0');
     }
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
     hx.encoder.onsetFloorMaxInputs = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_INPUTS", 4, 1, 8);
     hx.encoder.onsetFloorMaxUs = static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_MS", 250, 50, 500)) * 1000ULL;
+#endif
     std::cout << "[native-video-host] settle enabled=" << (sc.enabled ? 1 : 0) << " quietMs=" << sc.quietUs / 1000
               << " inputs=" << kick.settle.config().inputs << " spacingMs=" << sc.minSpacingUs / 1000
               << " deadlineMs=" << sc.deadlineUs / 1000 << " live=" << kick.settleInputsLive << "/" << kick.settleDeadlineLiveUs / 1000 << "ms other=" << kick.settleInputsOther << "/" << kick.settleDeadlineOtherUs / 1000 << "ms bytePct=" << kick.settleBytePercent << " dipQp=" << hx.encoder.settleDipQp
