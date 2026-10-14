@@ -255,7 +255,7 @@ class PhoneSink : public ClientEncodedFrameSink {
 };
 
 // ------------------------------------------------------------------------------ the relay
-enum class Impair : int { None = 0, Uplink, VideoStop, Thin, Loss, Delay };
+enum class Impair : int { None = 0, Uplink, VideoStop, Thin, Loss, Delay, KeyDrop };
 
 struct SeenReport {
   uint64_t qpcUs;
@@ -380,6 +380,11 @@ class Relay {
       if (video && m == Impair::Loss) drop = (rng() % 1000) < 250;
       if (video && m == Impair::Thin) drop = (seq % 10) != 0;
       if (video && m == Impair::VideoStop) drop = true;
+      if (video && m == Impair::KeyDrop) {  // r5: every chunk of every keyframe
+        UdpVideoChunkHeader h{};
+        std::memcpy(&h, buf, sizeof(h));
+        drop = (h.flags & 0x1u) != 0;
+      }
       if (drop) {
         ++dropped;
         continue;
@@ -465,6 +470,8 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring outDir;
   int watchdogOverrideSec = 0;
   int externalSec = 70;
+  int keyDropFrom = -1, keyDropTo = -1;  // r5 external: drop keyframes over [from, to) s from the first report
+  std::string externalPlan = "app";
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     const bool more = i + 1 < argc;
@@ -482,6 +489,11 @@ int wmain(int argc, wchar_t** argv) {
     } else if (a == L"--out" && more) {
       outDir = argv[++i];
       if (!outDir.empty() && outDir.back() != L'\\' && outDir.back() != L'/') outDir += L"\\";
+    } else if (a == L"--keydrop" && more) {
+      std::swscanf(argv[++i], L"%d:%d", &keyDropFrom, &keyDropTo);
+    } else if (a == L"--plan" && more) {
+      const std::wstring v = argv[++i];
+      externalPlan.assign(v.begin(), v.end());
     } else if (a == L"--external-sec" && more) {
       externalSec = _wtoi(argv[++i]);
     } else if (a == L"--watchdog-sec" && more) {
@@ -636,6 +648,8 @@ int wmain(int argc, wchar_t** argv) {
       uint64_t up0 = relay.upDatagrams.load(), down0 = relay.downDatagrams.load();
       for (int t = 1; t <= externalSec; ++t) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (t == keyDropFrom) relay.mode.store(static_cast<int>(Impair::KeyDrop));
+        if (t == keyDropTo) relay.mode.store(static_cast<int>(Impair::None));
         const uint64_t up1 = relay.upDatagrams.load(), down1 = relay.downDatagrams.load();
         say("RELAY t=" + std::to_string(t) + " up=" + std::to_string(up1 - up0) + " down=" + std::to_string(down1 - down0) +
             " reports=" + std::to_string(relay.Reports().size()));
@@ -804,9 +818,34 @@ int wmain(int argc, wchar_t** argv) {
       for (size_t i = 1; i < v.size(); ++i) g = std::max<uint64_t>(g, v[i].qpcUs - v[i - 1].qpcUs);
       return g;
     };
+    // r5 plan app: the APK's own order (smoke steps: +20 leave, +23 back, +30 refused selection, +31.5 its
+    // failure path, +36 resume, +45 fault A, +58 fault B with keyframes dropped --keydrop 57:66).
+    if (externalPlan == "app") {
+      const auto s1 = span(2, 18);
+      check("app: 14-18 reports in the steady 2..18 s, no gap of 3 s", s1.size() >= 14 && s1.size() <= 18 && max_gap(s1) < 3000000ull,
+            std::to_string(s1.size()) + " reports, max gap " + std::to_string(max_gap(s1) / 1000) + " ms");
+      say("NOTE  app: reports while left (+21..+23 s): " + std::to_string(span(21, 23).size()));
+      const auto back = span(25, 30);
+      check("app: reports again after coming back (+25..+30 s: >= 4)", back.size() >= 4, std::to_string(back.size()));
+      say("NOTE  app: reports during the refused selection and its failure path (+30..+36 s): " +
+          std::to_string(span(30, 36).size()));
+      const auto resumed = span(39, 45);
+      check("app: reports again after resuming (+39..+45 s: >= 5)", resumed.size() >= 5, std::to_string(resumed.size()));
+      const auto afterA = span(48, 57);
+      check("app: fault A (abandoned while active, the IDR comes): reports go on (+48..+57 s: >= 8, no 3 s gap)",
+            afterA.size() >= 8 && max_gap(afterA) < 3000000ull,
+            std::to_string(afterA.size()) + " reports, max gap " + std::to_string(max_gap(afterA) / 1000) + " ms");
+      const std::string downsHealthy = steps(extFirstMs - 2000, extFirstMs + 57000, true);
+      check("app: THE HOST'S ABR DOES NOT STEP DOWN through the normal lifecycle and fault A (0..57 s)",
+            downsHealthy.empty(), downsHealthy.empty() ? "none" : downsHealthy);
+      const std::string downsB = steps(extFirstMs + 58000, extFirstMs + 72000, true);
+      check("app: fault B (no IDR can come): after the grace the host sees the stall and steps down",
+            !downsB.empty(), downsB.empty() ? "none" : downsB);
+    }
     const auto steady = span(2, 22);
     double dec = 0;
     for (const auto& r : steady) dec += r.decodedFpsX100 / 100.0;
+    if (externalPlan == "r3") {
     check("external: 18-22 reports in the 20 steady seconds, no gap of 3 s",
           steady.size() >= 18 && steady.size() <= 22 && max_gap(steady) < 3000000ull,
           std::to_string(steady.size()) + " reports, max gap " + std::to_string(max_gap(steady) / 1000) +
@@ -824,6 +863,7 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(tail.size()) + " reports, max gap " + std::to_string(max_gap(tail) / 1000) + " ms");
     const std::string downs = steps(extFirstMs - 2000, extEndMs, true);
     check("external: THE HOST'S ABR DOES NOT STEP DOWN through the run", downs.empty(), downs.empty() ? "none" : downs);
+    }
   }
   if (connected) {
     if (healthy) {

@@ -207,8 +207,9 @@ int main() {
     picture(9000);
     settle();
     const Drained across = drain(sink);
-    check("r3: the window the surface came back in spans a generation change -- withheld, not mixed",
-          !across.valid);
+    check("r5: the window the surface came back in counts only the picture after the boundary (not mixed, not thrown away)",
+          across.valid && across.s.decodedFrames == 1,
+          "valid=" + std::to_string(across.valid) + " decoded=" + std::to_string(across.s.decodedFrames));
     picture(9500);
     settle();
     const Drained back = drain(sink);
@@ -223,8 +224,9 @@ int main() {
     picture(9700);
     settle();
     const Drained roundTrip = drain(sink);
-    check("r3: a surface round trip between two drains -- that window is withheld, valid on both ends or not",
-          !roundTrip.valid);
+    check("r3/r5: a surface round trip between two drains -- the window counts only what came after it",
+          roundTrip.valid && roundTrip.s.decodedFrames == 1,
+          "valid=" + std::to_string(roundTrip.valid) + " decoded=" + std::to_string(roundTrip.s.decodedFrames));
     picture(9800);
     settle();
     check("...and the window after it counts its own picture", drain(sink).s.decodedFrames == 1);
@@ -242,8 +244,10 @@ int main() {
     sink.OnEncodedH264Frame(frame(70, true, 0x03));
     picture(10000);
     settle();
-    check("r3: the window its first picture arrived in spans the generation change -- withheld",
-          !drain(sink).valid);
+    const Drained firstWin = drain(sink);
+    check("r5: the window its first picture arrived in counts it (the answer's boundary, not thrown away)",
+          firstWin.valid && firstWin.s.decodedFrames == 1,
+          "valid=" + std::to_string(firstWin.valid) + " decoded=" + std::to_string(firstWin.s.decodedFrames));
     picture(10500);
     settle();
     const Drained ready = drain(sink);
@@ -348,6 +352,110 @@ int main() {
     const Drained after = drain(sink);
     check("F1: once the next IDR's picture is out, windows count again", after.valid && after.s.decodedFrames == 1,
           "valid=" + std::to_string(after.valid) + " decoded=" + std::to_string(after.s.decodedFrames));
+  }
+  {
+    // r5 (Codex F1 contract) -- the lifecycle of an active transition's startup grace, on the real sink.
+    using clk = std::chrono::steady_clock;
+    std::puts("\n--- 11. r5: a selection whose answer never comes -- held back 2 s, then a real 0 ---");
+    sink.PrepareForWindowSelection(21);  // a picture was counted in section 10: a grace may start
+    const auto t0 = clk::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    const Drained early = drain(sink);
+    check("r5: inside the transition's grace the count is not measured yet", !early.valid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1900));  // past t0 + 2 s, nothing decoded
+    const Drained late = drain(sink);
+    check("r5: AFTER THE GRACE A SELECTION STILL WITHOUT A PICTURE IS A VALID 0 (not unmeasured for ever)",
+          late.valid && late.s.decodedFrames == 0,
+          "valid=" + std::to_string(late.valid) + " decoded=" + std::to_string(late.s.decodedFrames) + " at +" +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t0).count()) + " ms");
+    sink.AbortWindowSelection();
+
+    std::puts("\n--- 12. r5: prepare -> abort -> prepare again does not stretch the grace ---");
+    // A picture first, so the next transition may start a grace.
+    {
+      const size_t qa = queued_inputs();
+      sink.OnEncodedH264Frame(frame(90, true, 0x50));
+      const size_t qb = queued_inputs();
+      answer_queued(qa, qb);
+      settle(300);
+      (void)drain(sink);
+    }
+    sink.PrepareForWindowSelection(22);
+    const auto t1 = clk::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    sink.AbortWindowSelection();
+    sink.AbortWindowSelection();  // the same abort again: idempotent
+    sink.PrepareForWindowSelection(23);  // retry: still the same grace
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // t1 + 2.3 s
+    const Drained retry = drain(sink);
+    check("r5: THE RETRY DID NOT STRETCH IT -- at the first transition's deadline the 0 is valid",
+          retry.valid && retry.s.decodedFrames == 0,
+          "valid=" + std::to_string(retry.valid) + " decoded=" + std::to_string(retry.s.decodedFrames) + " at +" +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t1).count()) + " ms");
+    sink.AbortWindowSelection();
+
+    std::puts("\n--- 13. r5: the first picture ends the grace at once, and the window counts it ---");
+    {
+      const size_t qa = queued_inputs();
+      sink.OnEncodedH264Frame(frame(90, true, 0x51));
+      const size_t qb = queued_inputs();
+      answer_queued(qa, qb);
+      settle(300);
+      (void)drain(sink);
+    }
+    sink.PrepareForWindowSelection(24);
+    ControlWindowSelectedMessage ack{};
+    ack.flags = 0x1u;
+    ack.streamGeneration = 240;
+    sink.OnWindowSelectionControlResultFor(ack, 24);
+    (void)drain(sink);  // the window the selection began in
+    const size_t q0 = queued_inputs();
+    sink.OnEncodedH264Frame(frame(240, true, 0x52));
+    sink.OnEncodedH264Frame(frame(240, false, 0x53));
+    const size_t q1 = queued_inputs();
+    answer_queued(q0, q1);
+    settle(500);
+    const Drained first = drain(sink);
+    check("r5: the window the selection's first pictures came out in is reported with them (not thrown away)",
+          first.valid && first.s.decodedFrames == 2,
+          "valid=" + std::to_string(first.valid) + " decoded=" + std::to_string(first.s.decodedFrames)
+#ifdef REMOTE60_TELEMETRY_PAUSED
+              + " measuredUs=" + std::to_string(first.s.measuredUs)
+#endif
+    );
+
+    std::puts("\n--- 14. r5: a loss reset in normal streaming gets no grace ---");
+    sink.OnVideoDiscontinuity();
+    sink.OnVideoDiscontinuity();
+    sink.OnVideoDiscontinuity();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const Drained loss = drain(sink);
+    check("r5: frames that do not decode after a loss are a valid 0 at once (no grace, however many resets)",
+          loss.valid && loss.s.decodedFrames == 0,
+          "valid=" + std::to_string(loss.valid) + " decoded=" + std::to_string(loss.s.decodedFrames));
+
+    std::puts("\n--- 15. r5: the surface recreated ---");
+    {
+      const size_t qa = queued_inputs();
+      sink.OnEncodedH264Frame(frame(240, true, 0x54));
+      const size_t qb = queued_inputs();
+      answer_queued(qa, qb);
+      settle(300);
+      (void)drain(sink);
+    }
+    sink.SetSurface(env, nullptr);
+    check("r5: no surface: not measured", !drain(sink).valid);
+    sink.SetSurface(env, surface());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check("r5: the surface back starts a grace: not measured until its first picture", !drain(sink).valid);
+    const size_t qc = queued_inputs();
+    sink.OnEncodedH264Frame(frame(240, true, 0x55));
+    const size_t qd = queued_inputs();
+    answer_queued(qc, qd);
+    settle(300);
+    const Drained back2 = drain(sink);
+    check("r5: ...and its first picture counts at once", back2.valid && back2.s.decodedFrames == 1,
+          "valid=" + std::to_string(back2.valid) + " decoded=" + std::to_string(back2.s.decodedFrames));
   }
   check("every queued output was taken by the sink", outputs_drained());
   sink.SetSurface(env, nullptr);

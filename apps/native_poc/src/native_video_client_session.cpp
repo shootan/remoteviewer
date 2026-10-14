@@ -235,6 +235,9 @@ bool ClientSessionController::RequestStreamActive(bool active) {
     if (!CanQueueControlRequestLocked()) return false;
   }
   streamState_.Request(active);
+  // r5: pausing is intended inactivity (not measured); resuming starts an active episode.
+  const bool wasPaused = streamPaused_.exchange(!active, std::memory_order_acq_rel);
+  if (active && wasPaused && encodedFrameSink_) encodedFrameSink_->OnDecodeEpisodeStart();
   return true;
 }
 
@@ -462,6 +465,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
   }
   telemetry_.Reset(now_us(), sinkFrames_.load(std::memory_order_relaxed),
                    sinkPayloadBytes_.load(std::memory_order_relaxed));
+  // r5: a connection starts an active episode (the host streams to a new viewer at once).
+  streamPaused_.store(false, std::memory_order_release);
+  if (encodedFrameSink_) encodedFrameSink_->OnDecodeEpisodeStart();
 
   if (!controlActive) {
     while (!stopRequested_.load(std::memory_order_acquire)) {
@@ -488,7 +494,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       const bool presentValid = encodedFrameSink_->DrainPresentationStats(&present);
       (void)telemetry_.Close(loopNowUs, sinkFrames_.load(std::memory_order_relaxed),
                              sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
-                             presentValid ? &present : nullptr);
+                             presentValid ? &present : nullptr, streamPaused_.load(std::memory_order_acquire));
     }
     // r3 R2: a snapshot measured before the sink's decode state changed (surface, selection) is not sent.
     if (encodedFrameSink_) telemetry_.OnDecodeGeneration(encodedFrameSink_->DecodeGeneration());

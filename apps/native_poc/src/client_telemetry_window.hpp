@@ -30,6 +30,11 @@
 //   - Present-only reports (before decodeSeen) are what older sessions sent; latency / decode tail are
 //     not measured and stay 0 ("not measured" to every ABR threshold, each a "greater than").
 //   - A cumulative counter that went backwards (a reset) gives a 0 delta for that window and rebases.
+//   - r5 (Codex F1 contract): a paused stream (the viewer asked the host to stop) is intended inactivity:
+//     not measured, no 0-fps report, the unsent snapshot dropped. Decode fields are reported once the
+//     sink has given a valid count in this connection (not only after a first positive one): a decoder
+//     that never produces anything must still reach the host as 0 once the sink calls its count valid
+//     (the sink holds it back only through a bounded startup grace).
 //   - r3 (Codex candidate review R2): an unsent snapshot does not outlive the state it measured. A
 //     not-valid window drops it; so does a change of the sink's decode generation (surface, selection)
 //     seen on any pass; and one older than kMaxPendingAgeUs is not handed out. The host stamps a report
@@ -62,12 +67,16 @@ struct ClientPresentationStats {
 // What the sink's decoder produced since the last drain (mobile-abr r1). The session turns the count
 // into a rate over the second it really spans, next to its own receive counters, and reports them in
 // the decode-side fields of ControlClientMetrics -- the fields the PC viewer fills.
-#define REMOTE60_CLIENT_DECODE_STATS 1  // lets a test sink build against sessions before and after this
+#define REMOTE60_CLIENT_DECODE_STATS 1
+#define REMOTE60_TELEMETRY_PAUSED 1  // r5: Close(..., paused) and ClientDecodeStats::measuredUs  // lets a test sink build against sessions before and after this
 struct ClientDecodeStats {
   uint32_t decodedFrames = 0;  // valid decoded pictures the decoder gave out (dequeued) since the last drain
   uint32_t width = 0;          // the decoder's current output size (0 = not known)
   uint32_t height = 0;
   uint64_t generation = 0;     // the sink's decode generation the window was measured in
+  // r5: the part of the window the count covers, us (0 = all of it): a window over a generation change
+  // counts only the pictures after it, over the time since it.
+  uint64_t measuredUs = 0;
 };
 
 class ClientTelemetryWindow {
@@ -92,7 +101,7 @@ class ClientTelemetryWindow {
   // Closes the window ending now. decode / present: null when the sink had none to give (or the
   // decode drain said it is not valid now). Returns true when a new snapshot became pending.
   bool Close(uint64_t nowUs, uint64_t sinkFrames, uint64_t sinkBytes, const ClientDecodeStats* decode,
-             const ClientPresentationStats* present) {
+             const ClientPresentationStats* present, bool paused = false) {
     const uint64_t windowUs = nowUs > startUs_ ? nowUs - startUs_ : 0;
     const uint64_t frames = sinkFrames >= baseFrames_ ? sinkFrames - baseFrames_ : 0;
     const uint64_t bytes = sinkBytes >= baseBytes_ ? sinkBytes - baseBytes_ : 0;
@@ -102,7 +111,12 @@ class ClientTelemetryWindow {
     ++windows_;
     if (windowUs == 0) return false;
 
-    if (decode && decode->decodedFrames > 0) decodeSeen_ = true;
+    if (paused) {  // intended inactivity: nothing measured, nothing kept
+      ++withheld_;
+      DropPending();
+      return false;
+    }
+    if (decode) decodeSeen_ = true;  // r5: a valid count, even a 0
     ClientControlMetricsSnapshot s{};
     bool report = false;
     if (decodeSeen_) {
@@ -113,7 +127,9 @@ class ClientTelemetryWindow {
       }
       s.message.width = decode->width;
       s.message.height = decode->height;
-      s.message.decodedFpsX100 = PerSecondX100(decode->decodedFrames, windowUs);
+      const uint64_t decodedUs =
+          (decode->measuredUs > 0 && decode->measuredUs < windowUs) ? decode->measuredUs : windowUs;
+      s.message.decodedFpsX100 = PerSecondX100(decode->decodedFrames, decodedUs);
       s.message.recvFpsX100 = PerSecondX100(frames, windowUs);
       // bytes * 8 bits / us = Mbps; x1000.
       s.message.recvMbpsX1000 = static_cast<uint32_t>(std::min<uint64_t>(bytes * 8000ULL / windowUs, 0xFFFFFFFFULL));

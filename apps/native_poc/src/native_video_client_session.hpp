@@ -30,6 +30,10 @@ class ClientEncodedFrameSink {
   /** The decode generation now (r3 R2): it changes whenever the sink's decode state stops or starts being
    *  meaningful (surface, selection). Lock-free; read on every control pass. 0 for a sink without one. */
   virtual uint64_t DecodeGeneration() { return 0; }
+  /** r5 (Codex F1 contract): an explicit start of active viewing -- the connection starting, or the
+   *  viewer resuming a paused stream. The sink may hold its count back for one bounded startup grace
+   *  from here (until its first picture). Called from the session's caller threads. */
+  virtual void OnDecodeEpisodeStart() {}
   /** Drains the presentation stats accumulated since the last call; false when the sink does
    *  not present frames itself (a decode-only sink has nothing to report). */
   virtual bool DrainPresentationStats(ClientPresentationStats* /* out */) { return false; }
@@ -296,6 +300,9 @@ class ClientSessionController {
   // generation the sink then drops included, as the PC viewer's recvFrames counts every AU it processes
   // (FEC parity, NACK retransmits and control are not AUs); and the control loop's report window
   // with its pending snapshot (client_telemetry_window.hpp; control-loop thread only).
+  // r5: the viewer asked the host to pause the stream (RequestStreamActive(false)) -- intended
+  // inactivity, not measured -- until it asks for the stream again.
+  std::atomic<bool> streamPaused_{false};
   std::atomic<uint64_t> sinkFrames_{0};
   std::atomic<uint64_t> sinkPayloadBytes_{0};
   ClientTelemetryWindow telemetry_;

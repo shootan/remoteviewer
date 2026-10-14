@@ -166,6 +166,7 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
   // afresh now that it can be decoded.
   gate_.Rearm();
+  StartGraceLocked(false);  // mobile-abr r5: the surface back is an active transition
 }
 
 void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
@@ -328,20 +329,23 @@ bool AndroidVideoDecoderSink::TakeReplayPtsLocked(int64_t ptsUs) {
 }
 
 void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
-  const bool selectionWaiting =
-      gate_.awaiting() || (gate_.pending() != 0 && readySelectionGeneration_ != gate_.pending());
-  const bool valid = window_ != nullptr && !selectionWaiting;
+  // r5 (Codex F1 contract): no surface = intended inactivity (not measured). A selection being set up is
+  // active viewing: it is held back only by the bounded startup grace, not indefinitely.
+  const bool valid = window_ != nullptr;
   // The generation moves whenever what the decoder's count means could have changed: validity, the
-  // surface, the selection and the stream generation it answered with.
+  // surface, the selection being prepared / abandoned and the stream generation it was answered with.
   uint64_t key = reinterpret_cast<uintptr_t>(window_);
   key = key * 1000003ULL ^ (valid ? 1ULL : 0ULL);
   key = key * 1000003ULL ^ gate_.pending();
-  key = key * 1000003ULL ^ readySelectionGeneration_;
+  // r5: not readySelectionGeneration_ -- it flips when the selection's first picture is released, after
+  // that picture (and the ones decoded with it) were counted into the generation prepare / the answer began.
   key = key * 1000003ULL ^ gate_.expected();
   if (!decodeKeySet_ || key != decodeKeyHash_) {
     decodeKeyHash_ = key;
     decodeKeySet_ = true;
     ++decodeGeneration_;
+    generationStartTotal_ = decodedTotal_;
+    generationStartUs_ = steady_now_us();
   }
   remote60::native_poc::ClientDecodeState s;
   s.valid = valid;
@@ -349,7 +353,25 @@ void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
   s.width = outputWidth_;
   s.height = outputHeight_;
   s.generation = decodeGeneration_;
+  s.generationStartTotal = generationStartTotal_;
+  s.generationStartUs = generationStartUs_;
+  s.graceActive = graceActive_;
+  s.graceDeadlineUs = graceDeadlineUs_;
+  s.graceBaseTotal = graceBaseTotal_;
   decodeSnapshot_.Publish(s);
+}
+
+void AndroidVideoDecoderSink::StartGraceLocked(bool explicitEpisode) {
+  if (!explicitEpisode && !graceEligible_) return;  // no stretching: one grace until a picture is counted
+  graceActive_ = true;
+  graceEligible_ = false;
+  graceDeadlineUs_ = steady_now_us() + kStartupGraceUs;
+  graceBaseTotal_ = decodedTotal_;
+}
+
+void AndroidVideoDecoderSink::OnDecodeEpisodeStart() {
+  LockedState lock(this);
+  StartGraceLocked(true);
 }
 
 uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.generation(); }
@@ -365,12 +387,23 @@ bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecod
   if (!out) return false;
   remote60::native_poc::ClientDecodeState s;
   if (!decodeSnapshot_.Read(&s)) return false;  // a writer kept overlapping: no copy this window
-  const uint64_t delta = s.decodedTotal >= decodedDrainBase_ ? s.decodedTotal - decodedDrainBase_ : 0;
+  const uint64_t nowUs = steady_now_us();
+  uint64_t delta = s.decodedTotal >= decodedDrainBase_ ? s.decodedTotal - decodedDrainBase_ : 0;
+  uint64_t measuredUs = 0;  // all of the window
+  if (s.generation != drainGeneration_) {
+    // r5: the window spans a generation change -- count what came after it, over the time since it,
+    // rather than throwing the whole window away (which only lengthened the silence).
+    delta = s.decodedTotal >= s.generationStartTotal ? s.decodedTotal - s.generationStartTotal : 0;
+    measuredUs = nowUs > s.generationStartUs ? nowUs - s.generationStartUs : 1;
+  }
   decodedDrainBase_ = s.decodedTotal;
-  const bool sameGeneration = s.generation == drainGeneration_;
   drainGeneration_ = s.generation;
-  if (!sameGeneration || !s.valid) return false;
+  if (!s.valid) return false;  // no surface: intended inactivity, not measured
+  if (s.graceActive && s.decodedTotal == s.graceBaseTotal && nowUs < s.graceDeadlineUs) {
+    return false;  // an active transition's startup, inside its grace: not measured yet
+  }
   out->decodedFrames = static_cast<uint32_t>(std::min<uint64_t>(delta, 0xFFFFFFFFULL));
+  out->measuredUs = measuredUs;
   out->width = s.width;
   out->height = s.height;
   out->generation = s.generation;
@@ -447,6 +480,7 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
   inputFrameCount_ = 0;
   outputFrameCount_ = 0;
   gate_.Prepare(selectionGeneration);
+  StartGraceLocked(false);  // r5: a selection is an active transition
   latestInputStreamGeneration_ = 0;
   latestOutputStreamGeneration_ = 0;
   lastOutputPresentationUs_ = 0;
@@ -477,6 +511,12 @@ void AndroidVideoDecoderSink::AbortWindowSelection() {
   staleFrameDropCount_ = 0;
   csd0_.clear();
   csd1_.clear();
+  // mobile-abr r5 (Codex F1 contract): a switch abandoned while the stream stays active must resume,
+  // not wait for the host's next periodic IDR: the next frame asks the session for one (its limiter
+  // applies). Inside the transition's grace only; the app pauses the stream before it aborts, so then
+  // nothing is measured anyway.
+  StartGraceLocked(false);
+  decoderKeyframeRequest_ = true;
   log_info("selection aborted");
 }
 
@@ -913,6 +953,8 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
           ++replayOutputs_;
         } else {
           ++decodedTotal_;
+          graceActive_ = false;
+          graceEligible_ = true;
         }
       }
       lastOutputPresentationUs_ =

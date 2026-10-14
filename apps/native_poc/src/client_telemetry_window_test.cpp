@@ -14,8 +14,9 @@
 // [3] windows of 0.5 / 1 / 2 s and a late tick: rates over the real elapsed; a long gap reports one
 //     window, not a backlog.
 // [4] counter reset (a cumulative count that went backwards) -> 0, no negative delta, no burst.
-// [5] decode validity: no decode fields before this connection's first output; a not-valid window after
-//     it is withheld (not reported as 0); Reset (a new connection) drops pending and seen.
+// [5] decode validity: no decode fields before the sink gives a valid count in this connection (r5: a valid
+//     count, even 0 -- the sink's grace decides when); a not-valid window after it is withheld (not
+//     reported as 0); Reset (a new connection) drops pending and seen.
 // [6] two windows (two controllers) are independent.
 
 #include <cstdio>
@@ -231,19 +232,18 @@ int main() {
   {
     ClientTelemetryWindow w;
     w.Reset(0, 0, 0);
-    const ClientDecodeStats none = decoded(0, 0, 0);
-    const bool made0 = w.Close(1'000'000, 10, 40'000, &none, nullptr);
-    check("[5] before this connection's first decoder output: no report (a 0 would read as a collapse)",
+    const bool made0 = w.Close(1'000'000, 10, 40'000, nullptr, nullptr);
+    check("[5] before the sink gives a valid count: no report",
           !made0 && !w.decode_seen() && w.Pending().updatedQpcUs == 0);
     ClientPresentationStats p{};
     p.sampleCount = 5;
-    const bool madeP = w.Close(2'000'000, 20, 80'000, &none, &p);
+    const bool madeP = w.Close(2'000'000, 20, 80'000, nullptr, &p);
     check("[5] ...a present-only report then carries no decode field (as before)",
           madeP && w.Pending().message.decodedFpsX100 == 0 && w.Pending().message.width == 0 &&
               w.Pending().message.recvFpsX100 == 0);
     const ClientDecodeStats d = decoded(28);
     w.Close(3'000'000, 50, 200'000, &d, nullptr);
-    check("[5] the first output turns decode fields on", w.decode_seen() && w.Pending().message.decodedFpsX100 == 2800);
+    check("[5] the first valid count turns decode fields on", w.decode_seen() && w.Pending().message.decodedFpsX100 == 2800);
     const bool madeU = w.Close(4'000'000, 80, 320'000, nullptr, &p);  // not valid (no surface / selection wait)
     check("[5] a not-valid window after it is withheld -- not reported as 0, and the unsent one before it is dropped",
           !madeU && w.withheld() == 1 && w.Pending().updatedQpcUs == 0,
@@ -317,6 +317,42 @@ int main() {
     w.Reset(9'000'000, 60, 240'000);
     check("[8] a new connection hands out nothing old", w.Pending(9'000'001).updatedQpcUs == 0);
   }
+
+  std::printf("[9] r5: a decoder that never produces anything still reaches the host as 0\n");
+  {
+    ClientTelemetryWindow w;
+    w.Reset(0, 0, 0);
+    const ClientDecodeStats zero = decoded(0);  // the sink calls its count valid (its grace is over)
+    const bool made = w.Close(1'000'000, 30, 120'000, &zero, nullptr);
+    check("[9] A VALID 0 IS REPORTED even before any positive decode in this connection",
+          made && w.Pending().updatedQpcUs == 1'000'000 && w.Pending().message.decodedFpsX100 == 0 &&
+              w.Pending().message.recvFpsX100 == 3000,
+          "made=" + std::to_string(made) + " recvFpsX100=" + std::to_string(w.Pending().message.recvFpsX100));
+  }
+#ifdef REMOTE60_TELEMETRY_PAUSED
+  std::printf("[10] r5: a paused stream is not measured\n");
+  {
+    ClientTelemetryWindow w;
+    w.Reset(0, 0, 0);
+    const ClientDecodeStats d = decoded(30);
+    w.Close(1'000'000, 30, 120'000, &d, nullptr);
+    const ClientDecodeStats zero = decoded(0);
+    const bool made = w.Close(2'000'000, 30, 120'000, &zero, nullptr, /*paused=*/true);
+    check("[10] paused: no report (no 0 fps), and the unsent one is dropped", !made && w.Pending().updatedQpcUs == 0);
+    const bool resumed = w.Close(3'000'000, 60, 240'000, &d, nullptr, false);
+    check("[10] resumed: reported again", resumed && w.Pending().message.decodedFpsX100 == 3000);
+  }
+  std::printf("[11] r5: a window over a generation change reports its measured part as a rate\n");
+  {
+    ClientTelemetryWindow w;
+    w.Reset(0, 0, 0);
+    ClientDecodeStats d = decoded(15);
+    d.measuredUs = 500'000;  // 15 pictures in the last half second of the window
+    w.Close(1'000'000, 15, 60'000, &d, nullptr);
+    check("[11] 15 pictures over the measured 0.5 s = 30 fps, not 15", w.Pending().message.decodedFpsX100 == 3000,
+          "decodedFpsX100=" + std::to_string(w.Pending().message.decodedFpsX100));
+  }
+#endif
 
   std::printf("\nclient_telemetry_window_test: %d passed, %d failed\n", gChecks - gFailures, gFailures);
   std::printf("RESULT: %s\n", gFailures == 0 ? "PASS" : "FAIL");

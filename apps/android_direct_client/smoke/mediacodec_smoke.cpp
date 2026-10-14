@@ -17,7 +17,7 @@
 // It prints one line a second: images rendered, the sink's own status line. The reports themselves are
 // counted where the host receives them (the PC relay).
 //
-//   mediacodec_smoke <host> <port> [seconds=70]
+//   mediacodec_smoke <host> <port> [seconds=70] [plan=app|r3]   (the plans: see the steps in main)
 
 #include <android/native_window.h>
 #include <media/NdkImageReader.h>
@@ -26,8 +26,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <jni.h>
 
@@ -45,6 +47,23 @@ void OnImage(void*, AImageReader* reader) {
     AImage_delete(image);
     image = nullptr;
   }
+}
+// r4 F2: this device's UDP counters (all sockets; the smoke's is the only busy one) -- whether datagrams
+// leave the device while the PC relay sees none arrive.
+std::string udp_counters() {
+  FILE* f = std::fopen("/proc/net/snmp", "r");
+  if (!f) return "udp=?";
+  char header[512] = {}, values[512] = {}, line[512];
+  while (std::fgets(line, sizeof(line), f)) {
+    if (std::strncmp(line, "Udp:", 4) == 0) {
+      if (header[0] == 0) std::strncpy(header, line, sizeof(header) - 1);
+      else std::strncpy(values, line, sizeof(values) - 1);
+    }
+  }
+  std::fclose(f);
+  std::string v = values;
+  while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+  return "udp[" + v + "]";
 }
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -67,6 +86,7 @@ int main(int argc, char** argv) {
   const std::string host = argv[1];
   const int port = std::atoi(argv[2]);
   const int seconds = argc > 3 ? std::atoi(argv[3]) : 70;
+  const std::string plan = argc > 4 ? argv[4] : "app";
   std::setvbuf(stdout, nullptr, _IONBF, 0);
 
   AImageReader* reader = nullptr;
@@ -108,50 +128,93 @@ int main(int argc, char** argv) {
   const uint64_t first = now_ms();
   std::printf("SMOKE first image at +%llu ms\n", static_cast<unsigned long long>(first - t0));
   uint64_t lastImages = gImages.load(), nextLog = first + 1000;
-  bool surfaceOff = false, surfaceBack = false, selected = false, aborted = false;
-  while (now_ms() < first + static_cast<uint64_t>(seconds) * 1000ULL) {
-    const uint64_t t = now_ms() - first;
-    if (!surfaceOff && t >= 25000) {
-      surfaceOff = true;
+  // One-shot steps (r5: each runs once, at its time). Two plans:
+  //  app (default) -- the APK's own call order (MainActivity), r5 Codex F1 contract:
+  //   +20 s leave the viewer: stream pause, then the surface released (releaseVideoSurface)
+  //   +23 s back: surface bound, stream resumed
+  //   +30 s a selection the host refuses (startSelectionTransition: stream active -> prepare -> a REAL
+  //         request -- desktop, the window-locked test host answers "selection_locked_by_config"); when
+  //         it is not ready 1.5 s later the app's failure path: stream pause -> abort -> window list
+  //   +36 s back to viewing the same target: stream resumed
+  //   +45 s fault A: a switch prepared and abandoned while the stream stays ACTIVE (the sink asks for a
+  //         fresh IDR; it comes) -- must not demote
+  //   +58 s fault B: the same while the PC relay drops every keyframe (+57..+66 s from its first report,
+  //         --keydrop-*): no IDR can come; after the 2 s grace the 0 is real and the host may demote
+  //  r3 -- the r3/r4 model kept for comparison: +25 surface off + pause, +28 back, +45 prepare with no
+  //        request (asked=0) and stream active, +47 abort ONCE.
+  struct Step {
+    uint64_t atMs;
+    const char* name;
+    bool done;
+  };
+  std::vector<Step> steps;
+  if (plan == "r3") {
+    steps = {{25000, "r3-surface-off-pause", false}, {28000, "r3-surface-on-resume", false},
+             {45000, "r3-prepare-no-request", false}, {47000, "r3-abort-once", false}};
+  } else {
+    steps = {{20000, "leave-viewer", false},        {23000, "back-to-viewer", false},
+             {30000, "select-refused", false},      {31500, "select-failed-path", false},
+             {36000, "resume-viewing", false},      {45000, "faultA-abort-active", false},
+             {58000, "faultB-abort-active-no-idr", false}};
+  }
+  auto run_step = [&](Step& st, uint64_t t) {
+    st.done = true;
+    const std::string n = st.name;
+    std::string detail;
+    if (n == "r3-surface-off-pause") {
       sink.SetSurface(nullptr, nullptr);
       (void)session.RequestStreamActive(false);
-      std::printf("SMOKE event +%llu surface-off stream-pause\n", static_cast<unsigned long long>(t));
-    }
-    if (!surfaceBack && t >= 28000) {
-      surfaceBack = true;
+    } else if (n == "r3-surface-on-resume") {
       sink.SetSurface(nullptr, reinterpret_cast<jobject>(&surfaceToken));
       (void)session.RequestStreamActive(true);
-      std::printf("SMOKE event +%llu surface-on stream-resume\n", static_cast<unsigned long long>(t));
-    }
-    if (!selected && t >= 45000) {
-      selected = true;
-      const auto panel = session.WindowPanelSnapshotCopy();
-      uint64_t id = 0;
-      for (const auto& w : panel.items) {
-        if (w.title.find("mobile abr target") != std::string::npos) id = w.id;
-      }
+    } else if (n == "r3-prepare-no-request") {
       sink.PrepareForWindowSelection(4501);
-      const bool asked = id != 0 && session.RequestWindowSelect(id);
-      std::printf("SMOKE event +%llu select id=%llu asked=%d\n", static_cast<unsigned long long>(t),
-                  static_cast<unsigned long long>(id), asked ? 1 : 0);
-    }
-    if (selected && !aborted && sink.ReadySelectionGeneration() != 4501 && t >= 47000) {
-      aborted = true;
-      // The window-locked host refuses a selection: the app abandons the switch.
+    } else if (n == "r3-abort-once") {
       sink.AbortWindowSelection();
       session.ClearPendingDecoderKeyframe();
-      std::printf("SMOKE event +%llu select-abort\n", static_cast<unsigned long long>(t));
+    } else if (n == "leave-viewer") {
+      (void)session.RequestStreamActive(false);  // moveToTargets / onStop: the stream first
+      sink.SetSurface(nullptr, nullptr);          // releaseVideoSurface
+    } else if (n == "back-to-viewer") {
+      sink.SetSurface(nullptr, reinterpret_cast<jobject>(&surfaceToken));
+      (void)session.RequestStreamActive(true);
+    } else if (n == "select-refused") {
+      (void)session.RequestStreamActive(true);  // startSelectionTransition: requestStreamActive(true)
+      sink.PrepareForWindowSelection(31);       // nativePrepareVideoSwitch
+      const bool asked = session.RequestDesktopMode();  // nativeSelectDesktopMode: a real request
+      detail = std::string(" asked=") + (asked ? "1" : "0");
+    } else if (n == "select-failed-path") {
+      const bool ready = sink.ReadySelectionGeneration() == 31;
+      detail = std::string(" ready=") + (ready ? "1" : "0") + " status=" + session.WindowPanelSnapshotCopy().status;
+      if (!ready) {  // the selection did not open: the app's failure / back path (moveToTargets)
+        (void)session.RequestStreamActive(false);
+        sink.AbortWindowSelection();               // nativeAbortVideoSwitch
+        session.ClearPendingDecoderKeyframe();
+        (void)session.RequestWindowList();         // TARGETS
+      }
+    } else if (n == "resume-viewing") {
+      (void)session.RequestStreamActive(true);
+    } else if (n == "faultA-abort-active" || n == "faultB-abort-active-no-idr") {
+      sink.PrepareForWindowSelection(n == "faultA-abort-active" ? 45 : 58);
+      sink.AbortWindowSelection();  // the stream stays active: the sink asks for a fresh IDR
+    }
+    std::printf("SMOKE event +%llu %s%s\n", static_cast<unsigned long long>(t), st.name, detail.c_str());
+  };
+  while (now_ms() < first + static_cast<uint64_t>(seconds) * 1000ULL) {
+    const uint64_t t = now_ms() - first;
+    for (auto& st : steps) {
+      if (!st.done && t >= st.atMs) run_step(st, t);
     }
     (void)sink.ReadySelectionGeneration();
     if (now_ms() >= nextLog) {
       const uint64_t img = gImages.load();
       // r4 F2: what reached the session's socket (bytes) and the session's own state, next to the sink's.
       const auto snap = session.Snapshot();
-      std::printf("SMOKE t=%llu images=%llu (+%llu) bytes=%llu state=%d status=%s | %s\n",
+      std::printf("SMOKE t=%llu images=%llu (+%llu) bytes=%llu state=%d status=%s err=%s %s | %s\n",
                   static_cast<unsigned long long>(t / 1000), static_cast<unsigned long long>(img),
                   static_cast<unsigned long long>(img - lastImages),
                   static_cast<unsigned long long>(session.SessionBytesReceived()), static_cast<int>(snap.state),
-                  snap.status.c_str(), sink.DebugStatus().c_str());
+                  snap.status.c_str(), snap.lastError.c_str(), udp_counters().c_str(), sink.DebugStatus().c_str());
       lastImages = img;
       nextLog += 1000;
     }

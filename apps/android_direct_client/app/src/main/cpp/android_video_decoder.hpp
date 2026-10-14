@@ -39,6 +39,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
       remote60::native_poc::ClientPresentationStats* out) override;
   bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override;
   uint64_t DecodeGeneration() override;
+  void OnDecodeEpisodeStart() override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -92,6 +93,20 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool decodeKeySet_ = false;
   uint64_t decodedDrainBase_ = 0;     // the session's control thread only
   uint64_t drainGeneration_ = 0;      // the session's control thread only: the generation of the last drain
+  // r5 (Codex F1 contract): where the current generation began, and the startup grace of an active
+  // transition. A grace begins at an explicit episode start (connection, stream resumed: always) or a
+  // transition inside active viewing (selection prepared, surface back, a switch abandoned while
+  // active: only if a picture has been counted since the last grace -- so prepare / abort / retry /
+  // codec retries / loss resets cannot stretch it). It ends at the first counted picture, or by itself
+  // at the deadline, which the reader observes on its own clock (no frame, poll or lock needed).
+  uint64_t generationStartTotal_ = 0;
+  uint64_t generationStartUs_ = 0;
+  static constexpr uint64_t kStartupGraceUs = 2000000ULL;
+  bool graceActive_ = false;
+  bool graceEligible_ = true;
+  uint64_t graceDeadlineUs_ = 0;
+  uint64_t graceBaseTotal_ = 0;
+  void StartGraceLocked(bool explicitEpisode);
   ANativeWindow* window_ = nullptr;
   AMediaCodec* codec_ = nullptr;
   uint32_t configuredWidth_ = 0;
