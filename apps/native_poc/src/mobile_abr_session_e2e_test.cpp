@@ -297,6 +297,22 @@ class Relay {
   }
   // r4 F2: datagrams through the relay, both ways, cumulative.
   std::atomic<uint64_t> upDatagrams{0}, downDatagrams{0};
+  // r5 F2: the relay's own receive errors on the viewer side (WSAECONNRESET = an ICMP error reported on a
+  // Windows UDP socket), so a stall can be told apart from the relay socket's own trouble.
+  std::atomic<uint64_t> frontRecvErrors{0}, frontConnReset{0};
+  // r5 F2: every control datagram through the relay -- direction, kind (data / ack / nack), stream,
+  // message seq, fragment and, on a first fragment, the message type -- to see which exchange stops.
+  struct CtlEvent {
+    uint64_t qpcUs;
+    bool up;
+    uint16_t kind;
+    uint32_t streamId, messageSeq;
+    uint16_t frag, fragCount, msgType;
+  };
+  std::vector<CtlEvent> CtlEvents() {
+    std::lock_guard<std::mutex> lk(ctlMu_);
+    return ctl_;
+  }
 
  private:
   static SOCKET Bind(uint16_t* port) {
@@ -341,12 +357,51 @@ class Relay {
     }
     reports_.push_back({qpc_now_us(), m.seq, m.decodedFpsX100, m.recvFpsX100, m.width, m.height, m.presentSampleCount});
   }
+  void NoteControl(const uint8_t* b, int n, bool up) {
+    if (n < 8) return;
+    uint32_t magic = 0;
+    uint16_t kind = 0;
+    std::memcpy(&magic, b, 4);
+    std::memcpy(&kind, b + 4, 2);
+    if (magic != kMagic) return;
+    CtlEvent e{qpc_now_us(), up, kind, 0, 0, 0, 0, 0};
+    if (kind == static_cast<uint16_t>(UdpPacketKind::ControlData) && n >= static_cast<int>(sizeof(UdpControlChunkHeader))) {
+      UdpControlChunkHeader h{};
+      std::memcpy(&h, b, sizeof(h));
+      e.streamId = h.streamId;
+      e.messageSeq = h.messageSeq;
+      e.frag = h.fragIndex;
+      e.fragCount = h.fragCount;
+      if (h.fragIndex == 0 && n >= static_cast<int>(sizeof(h) + sizeof(MessageHeader))) {
+        MessageHeader mh{};
+        std::memcpy(&mh, b + sizeof(h), sizeof(mh));
+        if (mh.magic == kMagic) e.msgType = mh.type;
+      }
+    } else if ((kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) ||
+                kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) &&
+               n >= static_cast<int>(sizeof(UdpControlAckPacket) - sizeof(uint16_t) * kUdpControlMaxMissingPerNack)) {
+      UdpControlAckPacket a{};
+      std::memcpy(&a, b, std::min<size_t>(sizeof(a), static_cast<size_t>(n)));
+      e.streamId = a.streamId;
+      e.messageSeq = a.messageSeq;
+      e.frag = a.missingCount;
+    } else {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(ctlMu_);
+    if (ctl_.size() < 200000) ctl_.push_back(e);
+  }
   void Up() {
     uint8_t buf[2048];
     while (running_) {
       sockaddr_in from{};
       int fl = sizeof(from);
       const int n = recvfrom(front_, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl);
+      if (n < 0) {
+        const int e = WSAGetLastError();
+        if (e != WSAETIMEDOUT) ++frontRecvErrors;
+        if (e == WSAECONNRESET) ++frontConnReset;
+      }
       if (n <= 0) continue;
       {
         std::lock_guard<std::mutex> lk(viewerMu_);
@@ -363,6 +418,7 @@ class Relay {
         continue;
       }
       NoteReport(buf, n);
+      NoteControl(buf, n, true);
       ++upDatagrams;
       sendto(back_.load(), reinterpret_cast<const char*>(buf), n, 0, reinterpret_cast<const sockaddr*>(&host_), sizeof(host_));
     }
@@ -376,6 +432,7 @@ class Relay {
       const Impair m = static_cast<Impair>(mode.load());
       uint32_t seq = 0;
       const bool video = IsVideo(buf, n, &seq);
+      if (!video) NoteControl(buf, n, false);
       bool drop = false;
       if (video && m == Impair::Loss) drop = (rng() % 1000) < 250;
       if (video && m == Impair::Thin) drop = (seq % 10) != 0;
@@ -433,6 +490,8 @@ class Relay {
   std::deque<std::pair<uint64_t, std::vector<uint8_t>>> q_;
   std::mutex repMu_;
   std::vector<SeenReport> reports_;
+  std::mutex ctlMu_;
+  std::vector<CtlEvent> ctl_;
   std::vector<std::thread> threads_;
 };
 
@@ -652,7 +711,8 @@ int wmain(int argc, wchar_t** argv) {
         if (t == keyDropTo) relay.mode.store(static_cast<int>(Impair::None));
         const uint64_t up1 = relay.upDatagrams.load(), down1 = relay.downDatagrams.load();
         say("RELAY t=" + std::to_string(t) + " up=" + std::to_string(up1 - up0) + " down=" + std::to_string(down1 - down0) +
-            " reports=" + std::to_string(relay.Reports().size()));
+            " reports=" + std::to_string(relay.Reports().size()) + " frontRecvErrors=" +
+            std::to_string(relay.frontRecvErrors.load()) + " connReset=" + std::to_string(relay.frontConnReset.load()));
         up0 = up1;
         down0 = down1;
       }
@@ -728,6 +788,7 @@ int wmain(int argc, wchar_t** argv) {
   const uint64_t drains = sink.drains();
   session.Disconnect();
   const std::vector<SeenReport> reports = relay.Reports();
+  const auto ctlEvents = relay.CtlEvents();
   relay.Stop();
   if (hostPi.hProcess) {
     if (WaitForSingleObject(hostPi.hProcess, 90000) != WAIT_OBJECT_0) {
@@ -938,6 +999,17 @@ int wmain(int argc, wchar_t** argv) {
   if (!outDir.empty()) {
     CreateDirectoryW(outDir.c_str(), nullptr);
     CopyFileW(hostLogPath.c_str(), (outDir + std::wstring(scenario.begin(), scenario.end()) + L"_host.log").c_str(), FALSE);
+    {
+      std::ofstream ctl(outDir + std::wstring(scenario.begin(), scenario.end()) + L"_control.csv");
+      ctl << "tMs,dir,kind,streamId,messageSeq,fragOrMissing,fragCount,msgType\n";
+      const uint64_t base = ctlEvents.empty() ? 0 : ctlEvents.front().qpcUs;
+      const uint64_t firstReport = reports.empty() ? base : reports.front().qpcUs;
+      for (const auto& e : ctlEvents)
+        ctl << (static_cast<int64_t>(e.qpcUs) - static_cast<int64_t>(firstReport)) / 1000 << "," << (e.up ? "up" : "down") << ","
+            << (e.kind == static_cast<uint16_t>(UdpPacketKind::ControlData) ? "data" :
+                e.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck) ? "ack" : "nack")
+            << "," << e.streamId << "," << e.messageSeq << "," << e.frag << "," << e.fragCount << "," << e.msgType << "\n";
+    }
     std::ofstream rep(outDir + std::wstring(scenario.begin(), scenario.end()) + L"_reports.csv");
     rep << "qpcUs,seq,decodedFpsX100,recvFpsX100,width,height,presentSamples\n";
     for (const auto& r : reports)

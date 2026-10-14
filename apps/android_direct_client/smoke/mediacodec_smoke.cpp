@@ -26,7 +26,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <cstring>
+#include <unistd.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -64,6 +65,23 @@ std::string udp_counters() {
   std::string v = values;
   while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
   return "udp[" + v + "]";
+}
+// r5 F2: this device's Udp OutDatagrams (/proc/net/snmp, the 4th Udp field) -- 0 when unreadable.
+uint64_t udp_out_datagrams() {
+  FILE* f = std::fopen("/proc/net/snmp", "r");
+  if (!f) return 0;
+  char line[512];
+  int seen = 0;
+  uint64_t out = 0;
+  while (std::fgets(line, sizeof(line), f)) {
+    if (std::strncmp(line, "Udp:", 4) != 0) continue;
+    if (++seen == 2) {  // the values line
+      unsigned long long in = 0, noPorts = 0, inErr = 0, o = 0;
+      if (std::sscanf(line + 4, "%llu %llu %llu %llu", &in, &noPorts, &inErr, &o) == 4) out = o;
+    }
+  }
+  std::fclose(f);
+  return out;
 }
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -200,8 +218,31 @@ int main(int argc, char** argv) {
     }
     std::printf("SMOKE event +%llu %s%s\n", static_cast<unsigned long long>(t), st.name, detail.c_str());
   };
+  // r5 F2: the moment this device stops sending any datagram for 1.5 s while the session is connected,
+  // every thread's stack (debuggerd -b, needs adb root on the emulator) -- once, from here, at once.
+  uint64_t lastOut = udp_out_datagrams(), lastOutChangeMs = now_ms(), nextOutCheck = now_ms() + 200;
+  bool f2Captured = false;
   while (now_ms() < first + static_cast<uint64_t>(seconds) * 1000ULL) {
     const uint64_t t = now_ms() - first;
+    if (now_ms() >= nextOutCheck) {
+      nextOutCheck = now_ms() + 200;
+      const uint64_t o = udp_out_datagrams();
+      if (o != lastOut) {
+        lastOut = o;
+        lastOutChangeMs = now_ms();
+      } else if (!f2Captured && now_ms() - lastOutChangeMs >= 1500 &&
+                 session.Snapshot().state == remote60::native_poc::ClientSessionState::Connected) {
+        f2Captured = true;
+        char cmd[256];
+        std::snprintf(cmd, sizeof(cmd), "debuggerd -b %d > /data/local/tmp/smoke_f2_stack_t%llu.txt 2>&1", static_cast<int>(getpid()),
+                      static_cast<unsigned long long>(t / 1000));
+        std::printf("SMOKE F2 no datagram out for %llu ms at +%llu (out=%llu bytes=%llu) -> %s\n",
+                    static_cast<unsigned long long>(now_ms() - lastOutChangeMs), static_cast<unsigned long long>(t),
+                    static_cast<unsigned long long>(o), static_cast<unsigned long long>(session.SessionBytesReceived()), cmd);
+        (void)std::system(cmd);
+        std::printf("SMOKE F2 stack captured %s\n", udp_counters().c_str());
+      }
+    }
     for (auto& st : steps) {
       if (!st.done && t >= st.atMs) run_step(st, t);
     }
