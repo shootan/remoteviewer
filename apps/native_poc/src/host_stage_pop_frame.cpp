@@ -508,38 +508,6 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
     }
   }
-  // motion-settle r4 (a): the GOP drain (host_kick.hpp) -- only on a still screen between trains, with
-  // the park held (so the inputs and the IDR come out at the park QP, never under F's dip), nothing on
-  // the wire, nothing owed and nothing real waiting.
-  if (!servedBootstrap && useH264 && kick.gopDrainWindow > 0 &&
-      clientSession.streamControlActive.load(std::memory_order_acquire) && !kick.settle.active() &&
-      !kick.settle.armed() && encoder.onsetFloorParked && !encoder.SettleDipActive() && !encoder.forceKeyNext &&
-      encoder.InputsUntilGopIdr() <= kick.gopDrainWindow &&
-      nowUs >= kick.gopDrainLastUs + kick.settle.config().minSpacingUs) {
-    bool blocked = false;
-    if (transport == VideoTransport::Udp) {
-      std::lock_guard<std::mutex> lk(sender.mu);
-      blocked = sender.waitingForKey || !sender.queue.empty() || sender.auInFlight.load(std::memory_order_acquire);
-    }
-    {
-      std::lock_guard<std::mutex> lk(res.frame.mu);
-      if (res.frame.version != stats.lastVersionSent && res.frame.payload && !res.frame.payload->empty()) blocked = true;
-    }
-    if (!blocked) {
-      kick.gopDrainLastUs = nowUs;
-      if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
-        servedBootstrap = true;
-        tc.syntheticReason = kSyntheticReasonGopDrain;
-        ++kick.gopDrainCount;
-        seq = 0;
-        version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
-        streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
-        captureUs = nowUs;
-        callbackUs = nowUs;
-        queuePushUs = nowUs;
-      }
-    }
-  }
   // motion-settle r1 M1: the settle refinement (host_settle.hpp). Only when nothing else was served
   // this tick; never ahead of a real capture, a key the viewer is owed, or a sender backlog.
   if (!servedBootstrap && useH264 && clientSession.streamControlActive.load(std::memory_order_acquire) &&
@@ -569,9 +537,48 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     const uint32_t attemptsBefore = kick.settle.attempts();
     // r3: a refinement must not become the encoder's own periodic IDR (it would be coded at the low QP
     // the refinement reached): when that IDR is due within two inputs, refinements wait like for a key.
-    const bool gopIdrImminent = encoder.InputsUntilGopIdr() <= 2;
+    // r5 test knob (counterexample only): REMOTE60_NATIVE_GOP_DRAIN_TEST_SKEW predicts the boundary that
+    // many inputs EARLY, so a drain fires where no IDR comes and must still close by its own bounds.
+    static const uint64_t drainSkew = [] {
+      const char* v = std::getenv("REMOTE60_NATIVE_GOP_DRAIN_TEST_SKEW");
+      return v ? static_cast<uint64_t>(std::strtoul(v, nullptr, 10)) : 0ULL;
+    }();
+    const uint64_t untilIdr = encoder.InputsUntilGopIdr();
+    const uint64_t untilIdrSeen = (drainSkew == 0 || untilIdr == UINT64_MAX) ? untilIdr : (untilIdr > drainSkew ? untilIdr - drainSkew : 0);
+    const bool gopIdrImminent = untilIdrSeen <= 2;
+    // r5 (a): ...unless the boundary drain takes that IDR here, inside this train and its budget
+    // (EncoderState::gopDrain*): the prediction confirmed on this instance, this GOP cycle not tried yet
+    // (or this train's drain still open), nothing owed / in flight / replaying / queued / waiting, and the
+    // ordinary ceiling in force (a key under F's dip was 232 KB) -- a live dip is ended first.
+    bool drainServe = false;
+    if (encoder.gopDrainActive &&
+        (encoder.gopDrainCycleInstance != encoder.codec.instance_id() || encoder.gopDrainCycleOrdinal != encoder.lastKeyOrdinal ||
+         !kick.settle.active())) {
+      // the key came (counted in the AU stage), another instance, or the train ended: the drain is closed.
+      // A train that ended with the cycle's key still not out = the prediction failed on this instance:
+      // no more drains here until a natural IDR reconfirms the period.
+      if (!kick.settle.active() && encoder.gopDrainCycleOrdinal == encoder.lastKeyOrdinal &&
+          encoder.gopDrainCycleInstance == encoder.codec.instance_id()) {
+        ++encoder.gopDrainEndedByTrain;
+        if (encoder.gopDrainInputs >= EncoderState::kGopDrainMaxInputs) {
+          ++encoder.gopDrainNoIdr;
+          encoder.gopPredictVerifiedInstance = 0;
+        }
+      }
+      encoder.gopDrainActive = false;
+    }
+    if (kick.gopDrainEnabled && gopIdrImminent && kick.settle.active() && encoder.GopPredictionVerified() &&
+        encoder.LiveCeilingEligible() && !keyOwed && !queueBusy && !realWaiting &&
+        sender.pendingReplayCount.load(std::memory_order_relaxed) == 0 &&
+        (!encoder.GopDrainCycleAttempted() || (encoder.gopDrainActive && encoder.gopDrainInputs < EncoderState::kGopDrainMaxInputs))) {
+      if (encoder.SettleDipActive()) {
+        settle_dip_exit(hx, nowUs, "gop-boundary", false);
+      } else if (encoder.codec.plan_max_qp() == encoder.EffectiveDesiredQp() && encoder.codec.rc_max_qp_field_applied()) {
+        drainServe = true;
+      }
+    }
     const SettleAction act =
-        kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed || gopIdrImminent);
+        kick.settle.Poll(nowUs, settle_identity_now(hx), queueBusy, realWaiting, keyOwed || (gopIdrImminent && !drainServe));
     // r2 F: a key owed to the viewer goes out under the ordinary ceiling, never the dip.
     if (keyOwed && encoder.SettleDipActive()) settle_dip_exit(hx, nowUs, "key-owed", true);
     if (act.ended != SettleEnd::None) settle_dip_exit(hx, nowUs, settle_end_name(act.ended), false);
@@ -632,6 +639,20 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     if (act.serve && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
       servedBootstrap = true;
       tc.syntheticReason = kSyntheticReasonSettle;
+      if (drainServe) {
+        // r5 (a): the boundary input of this GOP cycle -- still a refinement of this train (its budget,
+        // spacing and deadline), tagged so the AU and the cost are attributable.
+        tc.syntheticReason = kSyntheticReasonGopDrain;
+        if (!encoder.GopDrainCycleAttempted()) {
+          encoder.gopDrainCycleOrdinal = encoder.lastKeyOrdinal;
+          encoder.gopDrainCycleInstance = encoder.codec.instance_id();
+          encoder.gopDrainInputs = 0;
+          encoder.gopDrainActive = true;
+          ++encoder.gopDrainCycles;
+        }
+        ++encoder.gopDrainInputs;
+        ++kick.gopDrainCount;
+      }
       // Codex r1 s3: when P refinement falls short, a bounded 1-IDR is MEASURED against it -- never the
       // default. REMOTE60_NATIVE_SETTLE_IDR=1 makes the first refinement input of an episode a key.
       static const bool settleIdr = [] {

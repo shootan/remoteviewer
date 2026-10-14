@@ -691,6 +691,19 @@ if ((hdr.flags & 1u) != 0) {
             << " instance=" << au.codecInstance << " sliceQp=" << au.sliceQp << "\n";
   encoder.lastKeyAcceptedUs = keyNowUs;
   if (au.acceptedInputOrdinal != 0) {  // motion-settle r3: where the encoder's own GOP counts from
+    // r5 (a): confirm the GOP prediction on this instance -- a non-forced raw IDR exactly activeKeyint
+    // accepted inputs after the previous key of the same instance. Any other distance unconfirms it.
+    if (au.rawIdr && !au.inputWasForcedKey && encoder.lastKeyInstance == au.codecInstance &&
+        encoder.lastKeyOrdinal != 0 && encoder.activeKeyint > 0 && au.acceptedInputOrdinal > encoder.lastKeyOrdinal) {
+      const bool hit = au.acceptedInputOrdinal - encoder.lastKeyOrdinal == encoder.activeKeyint;
+      encoder.gopPredictVerifiedInstance = hit ? au.codecInstance : 0;
+      ++(hit ? encoder.gopPredictHits : encoder.gopPredictMisses);
+    }
+    // r5 (a): the drain's cycle ends with this key -- counted as taken by the drain when it was active.
+    if (encoder.gopDrainActive && encoder.gopDrainCycleInstance == au.codecInstance) {
+      encoder.gopDrainActive = false;
+      ++encoder.gopDrainIdrs;
+    }
     encoder.lastKeyOrdinal = au.acceptedInputOrdinal;
     encoder.lastKeyInstance = au.codecInstance;
   }

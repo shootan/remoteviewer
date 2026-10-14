@@ -367,10 +367,14 @@ int startup_start_capture(HostContext& hx) {
     // r3 (c): the onset floor (0 = off); its bounds are clamped to the comparison ceilings 8 / 500 ms.
     // r4: the onset floor is out of the candidate (NO-GO for first-reaction p95); 0 = off, opt-in only.
     hx.encoder.onsetFloorQp = env_u32_clamped("REMOTE60_NATIVE_ONSET_FLOOR_QP", 0, 0, 51);
-    // r4: the settle park (host_encoder_manager.hpp), 0 = off. r4 candidate: 26 (AMD live only).
-    hx.encoder.settleParkQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_PARK_QP", 26, 0, 51);
+    // r4: the settle park (host_encoder_manager.hpp), 0 = off. Codex r5 s1.1: outside the r4 contract --
+    // an experiment flag, default off.
+    hx.encoder.settleParkQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_PARK_QP", 0, 0, 51);  // r5: experiment, off
     hx.encoder.settleTrainMinQp = env_u32_clamped("REMOTE60_NATIVE_SETTLE_TRAIN_MIN_QP", 0, 0, 51);
-    kick.gopDrainWindow = env_u32_clamped("REMOTE60_NATIVE_GOP_DRAIN", 0, 0, 120);  // r4 (a): 0 = off
+    {  // r5 (a): the GOP boundary drain, experiment, default off
+      const char* v = std::getenv("REMOTE60_NATIVE_GOP_DRAIN");
+      kick.gopDrainEnabled = v && v[0] == '1';
+    }
     // r4: latest-content catch-up (host_kick.hpp), on by default.
     {
       const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
@@ -384,7 +388,7 @@ int startup_start_capture(HostContext& hx) {
               << " onsetFloorQp=" << hx.encoder.onsetFloorQp << " floorInputs=" << hx.encoder.onsetFloorMaxInputs
               << " floorMs=" << hx.encoder.onsetFloorMaxUs / 1000 << " catchup=" << (kick.catchupEnabled ? 1 : 0)
               << " parkQp=" << hx.encoder.settleParkQp << " trainMinQp=" << hx.encoder.settleTrainMinQp
-              << " gopDrain=" << kick.gopDrainWindow << "\n";
+              << " gopDrain=" << (kick.gopDrainEnabled ? 1 : 0) << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

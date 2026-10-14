@@ -341,6 +341,15 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
        return Flow::Continue;
      }
    }
+   // r5 (a) / Codex s2-5: a refinement or boundary input is re-checked right before it goes in -- a real
+   // frame that arrived meanwhile wins (the cached input is dropped unsubmitted, nothing was encoded), and
+   // a boundary input never goes in while a key is owed or one is still in flight.
+   if (servedBootstrap && (tc.syntheticReason == kSyntheticReasonSettle || tc.syntheticReason == kSyntheticReasonGopDrain) &&
+       (latestVersion != stats.lastVersionSent ||
+        (tc.syntheticReason == kSyntheticReasonGopDrain && (keyWanted || forceKeyInFlight)))) {
+     ++kick.synthCancelledForReal;
+     return Flow::Continue;
+   }
    kick.NoteInputAdmitted();
    // Named for the [keyframe] line; the two reasons that do not go through RequestKey.
    if (forceKeyFrame) {

@@ -83,6 +83,27 @@ struct EncoderState {
   uint64_t lastKeyOrdinal = 0;
   uint64_t lastKeyInstance = 0;
   uint64_t settleDipSkippedNearIdr = 0;
+  // motion-settle r5 (a) -- Codex r5 s2: the encoder's own GOP IDR (AMD counts every input toward it)
+  // that a still screen's refinement train reaches is taken INSIDE the train, in quiet time, instead of
+  // on the next real input (the onset). Only at the boundary (<= 2 inputs), only when the prediction
+  // (activeKeyint inputs after the last key on this instance) was CONFIRMED on this instance by a
+  // non-forced raw IDR at exactly that distance, once per GOP cycle (bound to the instance and the last
+  // key ordinal), at most kGopDrainMaxInputs inputs (the boundary + one surfacing input for the async
+  // MFT), counted in the train's own budget, ended by the IDR, the budget, or the train ending.
+  static constexpr uint32_t kGopDrainMaxInputs = 3;
+  uint64_t gopPredictVerifiedInstance = 0;   // instance whose GOP period was confirmed (0 = none)
+  uint64_t gopPredictHits = 0, gopPredictMisses = 0;
+  uint64_t gopDrainCycleOrdinal = 0, gopDrainCycleInstance = 0;  // the cycle the drain belongs to
+  uint32_t gopDrainInputs = 0;               // inputs served for that cycle
+  bool gopDrainActive = false;
+  uint64_t gopDrainCycles = 0, gopDrainIdrs = 0, gopDrainNoIdr = 0, gopDrainEndedByTrain = 0;
+  bool GopPredictionVerified() const {
+    return gopPredictVerifiedInstance != 0 && gopPredictVerifiedInstance == codec.instance_id() &&
+           lastKeyInstance == codec.instance_id() && lastKeyOrdinal != 0 && activeKeyint > 0;
+  }
+  bool GopDrainCycleAttempted() const {
+    return gopDrainCycleInstance == codec.instance_id() && gopDrainCycleOrdinal == lastKeyOrdinal;
+  }
   /** Inputs since the last key AU on this instance (UINT64_MAX when unknown). */
   uint64_t InputsSinceKey() const {
     if (lastKeyInstance != codec.instance_id() || lastKeyOrdinal == 0) return UINT64_MAX;

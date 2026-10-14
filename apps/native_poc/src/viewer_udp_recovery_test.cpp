@@ -757,7 +757,11 @@ struct ViewerRig {
     nack.enabled = ctx.session.hostSupportsNack;
     nack.holdUs = holdUs;
     if (giveUpHardCapUs != 0) nack.giveUpHardCapUs = giveUpHardCapUs;
-    receiver.emplace(ctx, args, dec, gate, qpc_now_us(), 0, 0, nack);
+    // motion-settle r5 counterexamples: the product receiver's own simulated ingress loss (NACK / key
+    // requests), REMOTE60_NATIVE_UDP_SIM_DROP_PM / _SEED as in viewer_startup.cpp; unset = none (as before).
+    const auto envU = [](const char* n) { const char* v = std::getenv(n); return v ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : 0u; };
+    receiver.emplace(ctx, args, dec, gate, qpc_now_us(), std::min<uint32_t>(envU("REMOTE60_NATIVE_UDP_SIM_DROP_PM"), 1000),
+                     envU("REMOTE60_NATIVE_UDP_SIM_DROP_SEED"), nack);
     recvThread = std::thread([this]() { receiver->Run(); });
     presentThread = std::thread([this]() { PresentLoop(); });
     return true;
