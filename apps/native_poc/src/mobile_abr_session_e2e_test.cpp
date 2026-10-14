@@ -295,6 +295,8 @@ class Relay {
     std::lock_guard<std::mutex> lk(repMu_);
     return reports_;
   }
+  // r4 F2: datagrams through the relay, both ways, cumulative.
+  std::atomic<uint64_t> upDatagrams{0}, downDatagrams{0};
 
  private:
   static SOCKET Bind(uint16_t* port) {
@@ -361,6 +363,7 @@ class Relay {
         continue;
       }
       NoteReport(buf, n);
+      ++upDatagrams;
       sendto(back_.load(), reinterpret_cast<const char*>(buf), n, 0, reinterpret_cast<const sockaddr*>(&host_), sizeof(host_));
     }
   }
@@ -410,6 +413,7 @@ class Relay {
       }
       sendto(front_, reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0,
              reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+      ++downDatagrams;
     }
   }
   sockaddr_in host_{};
@@ -628,7 +632,16 @@ int wmain(int argc, wchar_t** argv) {
     if (came) {
       extFirstUs = relay.Reports().front().qpcUs;
       extFirstMs = local_now_ms();
-      std::this_thread::sleep_for(std::chrono::seconds(externalSec));
+      // r4 F2: one line a second -- what went through the relay each way.
+      uint64_t up0 = relay.upDatagrams.load(), down0 = relay.downDatagrams.load();
+      for (int t = 1; t <= externalSec; ++t) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const uint64_t up1 = relay.upDatagrams.load(), down1 = relay.downDatagrams.load();
+        say("RELAY t=" + std::to_string(t) + " up=" + std::to_string(up1 - up0) + " down=" + std::to_string(down1 - down0) +
+            " reports=" + std::to_string(relay.Reports().size()));
+        up0 = up1;
+        down0 = down1;
+      }
       extEndUs = qpc_now_us();
       extEndMs = local_now_ms();
     }

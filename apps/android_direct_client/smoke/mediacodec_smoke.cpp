@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   const uint64_t first = now_ms();
   std::printf("SMOKE first image at +%llu ms\n", static_cast<unsigned long long>(first - t0));
   uint64_t lastImages = gImages.load(), nextLog = first + 1000;
-  bool surfaceOff = false, surfaceBack = false, selected = false;
+  bool surfaceOff = false, surfaceBack = false, selected = false, aborted = false;
   while (now_ms() < first + static_cast<uint64_t>(seconds) * 1000ULL) {
     const uint64_t t = now_ms() - first;
     if (!surfaceOff && t >= 25000) {
@@ -135,7 +135,8 @@ int main(int argc, char** argv) {
       std::printf("SMOKE event +%llu select id=%llu asked=%d\n", static_cast<unsigned long long>(t),
                   static_cast<unsigned long long>(id), asked ? 1 : 0);
     }
-    if (selected && sink.ReadySelectionGeneration() != 4501 && t >= 47000 && t < 47100) {
+    if (selected && !aborted && sink.ReadySelectionGeneration() != 4501 && t >= 47000) {
+      aborted = true;
       // The window-locked host refuses a selection: the app abandons the switch.
       sink.AbortWindowSelection();
       session.ClearPendingDecoderKeyframe();
@@ -144,9 +145,13 @@ int main(int argc, char** argv) {
     (void)sink.ReadySelectionGeneration();
     if (now_ms() >= nextLog) {
       const uint64_t img = gImages.load();
-      std::printf("SMOKE t=%llu images=%llu (+%llu) %s\n", static_cast<unsigned long long>(t / 1000),
-                  static_cast<unsigned long long>(img), static_cast<unsigned long long>(img - lastImages),
-                  sink.DebugStatus().c_str());
+      // r4 F2: what reached the session's socket (bytes) and the session's own state, next to the sink's.
+      const auto snap = session.Snapshot();
+      std::printf("SMOKE t=%llu images=%llu (+%llu) bytes=%llu state=%d status=%s | %s\n",
+                  static_cast<unsigned long long>(t / 1000), static_cast<unsigned long long>(img),
+                  static_cast<unsigned long long>(img - lastImages),
+                  static_cast<unsigned long long>(session.SessionBytesReceived()), static_cast<int>(snap.state),
+                  snap.status.c_str(), sink.DebugStatus().c_str());
       lastImages = img;
       nextLog += 1000;
     }

@@ -316,6 +316,39 @@ int main() {
     settle(700);
     check("after a loss reset the new codec's picture counts", drain(sink).s.decodedFrames == 1 && q5 - q4 == 1);
   }
+  {
+    // r4 F1 (verifier, AVD 3/3): the app abandons a switch (nativeAbortVideoSwitch -> AbortWindowSelection):
+    // the codec and its csd are dropped, the gate is cleared -- the state is "valid" again at once, but no
+    // picture can come out until the next IDR. Those windows were reported as decoded 0 while the host
+    // sent a full cadence -> a severe_client demotion the 0.2.158 APK never caused.
+    std::puts("\n--- 10. r4 F1: an abandoned switch, before the next IDR's picture ---");
+    sink.PrepareForWindowSelection(11);
+    sink.AbortWindowSelection();
+    (void)drain(sink);  // the window the abort happened in (a generation change)
+    for (int i = 0; i < 10; ++i) sink.OnEncodedH264Frame(frame(90, false, static_cast<uint8_t>(0x20 + i)));  // deltas: no codec can take them
+    settle(300);
+    const Drained wait1 = drain(sink);
+    for (int i = 0; i < 10; ++i) sink.OnEncodedH264Frame(frame(90, false, static_cast<uint8_t>(0x30 + i)));
+    settle(300);
+    const Drained wait2 = drain(sink);
+    check("F1: the windows waiting for the next IDR after an abandoned switch are NOT reported as a valid 0",
+          !(wait1.valid && wait1.s.decodedFrames == 0) && !(wait2.valid && wait2.s.decodedFrames == 0),
+          "window1 valid=" + std::to_string(wait1.valid) + " decoded=" + std::to_string(wait1.s.decodedFrames) +
+              " | window2 valid=" + std::to_string(wait2.valid) + " decoded=" + std::to_string(wait2.s.decodedFrames));
+    const size_t q6 = queued_inputs();
+    sink.OnEncodedH264Frame(frame(90, true, 0x40));  // the next IDR: a codec again
+    const size_t q7 = queued_inputs();
+    answer_queued(q6, q7);
+    settle(400);
+    (void)drain(sink);
+    sink.OnEncodedH264Frame(frame(90, false, 0x41));
+    const size_t q8 = queued_inputs();
+    answer_queued(q7, q8);
+    settle(400);
+    const Drained after = drain(sink);
+    check("F1: once the next IDR's picture is out, windows count again", after.valid && after.s.decodedFrames == 1,
+          "valid=" + std::to_string(after.valid) + " decoded=" + std::to_string(after.s.decodedFrames));
+  }
   check("every queued output was taken by the sink", outputs_drained());
   sink.SetSurface(env, nullptr);
   std::printf("\nandroid_decoder_decode_stats_test: %d passed, %d failed\nRESULT: %s\n", gChecks - gFailures, gFailures,
