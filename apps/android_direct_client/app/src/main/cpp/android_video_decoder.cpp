@@ -313,30 +313,67 @@ bool AndroidVideoDecoderSink::DrainPresentationStats(
   return true;
 }
 
+void AndroidVideoDecoderSink::RememberReplayPtsLocked(int64_t ptsUs) {
+  if (replayPtsCount_ < kReplayPtsSlots) replayPts_[replayPtsCount_++] = ptsUs;
+}
+
+bool AndroidVideoDecoderSink::TakeReplayPtsLocked(int64_t ptsUs) {
+  for (size_t i = 0; i < replayPtsCount_; ++i) {
+    if (replayPts_[i] == ptsUs) {
+      replayPts_[i] = replayPts_[--replayPtsCount_];
+      return true;
+    }
+  }
+  return false;
+}
+
 void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
-  decodedTotalPub_.store(decodedTotal_, std::memory_order_release);
   const bool selectionWaiting =
       gate_.awaiting() || (gate_.pending() != 0 && readySelectionGeneration_ != gate_.pending());
-  decodeValidPub_.store(window_ != nullptr && !selectionWaiting, std::memory_order_release);
-  outputSizePub_.store((static_cast<uint64_t>(outputWidth_) << 32u) | static_cast<uint64_t>(outputHeight_),
-                       std::memory_order_release);
+  const bool valid = window_ != nullptr && !selectionWaiting;
+  // The generation moves whenever what the decoder's count means could have changed: validity, the
+  // surface, the selection and the stream generation it answered with.
+  uint64_t key = reinterpret_cast<uintptr_t>(window_);
+  key = key * 1000003ULL ^ (valid ? 1ULL : 0ULL);
+  key = key * 1000003ULL ^ gate_.pending();
+  key = key * 1000003ULL ^ readySelectionGeneration_;
+  key = key * 1000003ULL ^ gate_.expected();
+  if (!decodeKeySet_ || key != decodeKeyHash_) {
+    decodeKeyHash_ = key;
+    decodeKeySet_ = true;
+    ++decodeGeneration_;
+  }
+  remote60::native_poc::ClientDecodeState s;
+  s.valid = valid;
+  s.decodedTotal = decodedTotal_;
+  s.width = outputWidth_;
+  s.height = outputHeight_;
+  s.generation = decodeGeneration_;
+  decodeSnapshot_.Publish(s);
 }
+
+uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.generation(); }
 
 // Called by the session's control thread about once a second; reads only what PublishDecodeStateLocked
 // stored. false = the decoder's state is not meaningful now (no surface; a selection still waiting for
 // its answer or its first IDR -- the stream is deliberately between generations): the session then
 // reports nothing for that window instead of "0 fps". A codec reset for a loss stays valid: frames
 // that do not decode then are a real stall.
+// r3 R2: one consistent copy (a sequence read, no lock). A window over which the generation changed spans a
+// surface / selection boundary: its count mixes two states, so it is not valid either.
 bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) {
   if (!out) return false;
-  const uint64_t total = decodedTotalPub_.load(std::memory_order_acquire);
-  const uint64_t delta = total >= decodedDrainBase_ ? total - decodedDrainBase_ : 0;
-  decodedDrainBase_ = total;
-  if (!decodeValidPub_.load(std::memory_order_acquire)) return false;
-  const uint64_t size = outputSizePub_.load(std::memory_order_acquire);
+  remote60::native_poc::ClientDecodeState s;
+  if (!decodeSnapshot_.Read(&s)) return false;  // a writer kept overlapping: no copy this window
+  const uint64_t delta = s.decodedTotal >= decodedDrainBase_ ? s.decodedTotal - decodedDrainBase_ : 0;
+  decodedDrainBase_ = s.decodedTotal;
+  const bool sameGeneration = s.generation == drainGeneration_;
+  drainGeneration_ = s.generation;
+  if (!sameGeneration || !s.valid) return false;
   out->decodedFrames = static_cast<uint32_t>(std::min<uint64_t>(delta, 0xFFFFFFFFULL));
-  out->width = static_cast<uint32_t>(size >> 32u);
-  out->height = static_cast<uint32_t>(size & 0xFFFFFFFFULL);
+  out->width = s.width;
+  out->height = s.height;
+  out->generation = s.generation;
   return true;
 }
 
@@ -585,7 +622,10 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
       lastInputQueueSteadyUs_ > 0 &&
       nowUs >= lastInputQueueSteadyUs_ + kBootstrapReplayIntervalUs) {
     auto replayFrame = *bootstrapFrame_;
-    if (TryQueueFrameLocked(replayFrame)) {
+    queueingReplay_ = true;  // r3 R1: TryQueueFrameLocked remembers the PTS this replay is queued with
+    const bool replayQueued = TryQueueFrameLocked(replayFrame);
+    queueingReplay_ = false;
+    if (replayQueued) {
       ++bootstrapReplayCount_;
       char line[192];
       std::snprintf(line, sizeof(line),
@@ -638,6 +678,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   }
 
   ++inputFrameCount_;
+  if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
   if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
@@ -700,6 +741,7 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   bootstrapFrame_.reset();
   lastInputQueueSteadyUs_ = 0;
   bootstrapReplayCount_ = 0;
+  replayPtsCount_ = 0;  // r3 R1: the replays' outputs went with the codec
   // A held buffer index belongs to the codec that produced it. Releasing it against a codec
   // that has been torn down and rebuilt would target an unrelated buffer.
   heldOutputValid_ = false;
@@ -857,16 +899,20 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
     if (outputIndex >= 0) {
-      // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). Codec-config (2) and
-      // end-of-stream (4) buffers carry no picture.
+      // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). A codec-config (2)
+      // buffer carries no picture; an end-of-stream (4) buffer may carry the last one, so only an empty
+      // EOS buffer is left out (GNLink never queues an EOS in a session). A replayed input's output is
+      // counted apart (r3 R1).
       constexpr uint32_t kBufferFlagCodecConfig = 2;
       constexpr uint32_t kBufferFlagEndOfStream = 4;
-      if ((static_cast<uint32_t>(info.flags) & (kBufferFlagCodecConfig | kBufferFlagEndOfStream)) == 0) {
-        if (info.presentationTimeUs > 0 && info.presentationTimeUs == lastCountedOutputPts_) {
+      const uint32_t flags = static_cast<uint32_t>(info.flags);
+      const bool picture = (flags & kBufferFlagCodecConfig) == 0 &&
+                           !((flags & kBufferFlagEndOfStream) != 0 && info.size <= 0);
+      if (picture) {
+        if (TakeReplayPtsLocked(info.presentationTimeUs)) {
           ++replayOutputs_;
         } else {
           ++decodedTotal_;
-          lastCountedOutputPts_ = info.presentationTimeUs;
         }
       }
       lastOutputPresentationUs_ =

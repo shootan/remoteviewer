@@ -30,6 +30,11 @@
 //   - Present-only reports (before decodeSeen) are what older sessions sent; latency / decode tail are
 //     not measured and stay 0 ("not measured" to every ABR threshold, each a "greater than").
 //   - A cumulative counter that went backwards (a reset) gives a 0 delta for that window and rebases.
+//   - r3 (Codex candidate review R2): an unsent snapshot does not outlive the state it measured. A
+//     not-valid window drops it; so does a change of the sink's decode generation (surface, selection)
+//     seen on any pass; and one older than kMaxPendingAgeUs is not handed out. The host stamps a report
+//     with its ARRIVAL time, so a late-sent old window would read as fresh. An ordinary Ping / list / input
+//     preemption keeps it: the next pass sends it within the age bound.
 
 #include <algorithm>
 #include <cstdint>
@@ -62,11 +67,14 @@ struct ClientDecodeStats {
   uint32_t decodedFrames = 0;  // valid decoded pictures the decoder gave out (dequeued) since the last drain
   uint32_t width = 0;          // the decoder's current output size (0 = not known)
   uint32_t height = 0;
+  uint64_t generation = 0;     // the sink's decode generation the window was measured in
 };
 
 class ClientTelemetryWindow {
  public:
   static constexpr uint64_t kWindowUs = 1000000ULL;
+  // A measured snapshot is sent within this of its measurement or not at all (r3 R2).
+  static constexpr uint64_t kMaxPendingAgeUs = 1500000ULL;
 
   // A new connection: nothing pending, nothing seen, the first window starts now.
   void Reset(uint64_t nowUs, uint64_t sinkFrames, uint64_t sinkBytes) {
@@ -75,7 +83,8 @@ class ClientTelemetryWindow {
     baseBytes_ = sinkBytes;
     decodeSeen_ = false;
     pending_ = ClientControlMetricsSnapshot{};
-    windows_ = reports_ = withheld_ = 0;
+    pendingGeneration_ = 0;
+    windows_ = reports_ = withheld_ = dropped_ = 0;
   }
 
   bool Due(uint64_t nowUs) const { return nowUs >= startUs_ + kWindowUs; }
@@ -99,6 +108,7 @@ class ClientTelemetryWindow {
     if (decodeSeen_) {
       if (!decode) {
         ++withheld_;  // decoder state unknown this window: say nothing rather than "0 fps"
+        DropPending();  // ...and nothing measured before it either (r3 R2)
         return false;
       }
       s.message.width = decode->width;
@@ -127,17 +137,30 @@ class ClientTelemetryWindow {
     if (!report) return false;
     s.updatedQpcUs = nowUs;  // the time this window was measured, and only this window
     pending_ = s;
+    pendingGeneration_ = decode ? decode->generation : 0;
     ++reports_;
     return true;
   }
 
-  // Handed to NextAction on every pass; the scheduler sends a given updatedQpcUs once.
+  // Every pass, before NextAction: the sink's current decode generation. A snapshot measured in another
+  // generation is dropped.
+  void OnDecodeGeneration(uint64_t generation) {
+    if (pending_.updatedQpcUs != 0 && generation != pendingGeneration_) DropPending();
+  }
+  // Handed to NextAction on every pass; the scheduler sends a given updatedQpcUs once. Past
+  // kMaxPendingAgeUs from its measurement it is no longer handed out.
+  const ClientControlMetricsSnapshot& Pending(uint64_t nowUs) const {
+    if (pending_.updatedQpcUs != 0 && nowUs > pending_.updatedQpcUs + kMaxPendingAgeUs) return empty_;
+    return pending_;
+  }
+  // The pending snapshot as it is (tests).
   const ClientControlMetricsSnapshot& Pending() const { return pending_; }
 
   bool decode_seen() const { return decodeSeen_; }
   uint64_t windows() const { return windows_; }
   uint64_t reports() const { return reports_; }
   uint64_t withheld() const { return withheld_; }
+  uint64_t dropped() const { return dropped_; }
 
   static uint32_t PerSecondX100(uint64_t count, uint64_t elapsedUs) {
     if (elapsedUs == 0) return 0;
@@ -149,8 +172,15 @@ class ClientTelemetryWindow {
   uint64_t baseFrames_ = 0;
   uint64_t baseBytes_ = 0;
   bool decodeSeen_ = false;
+  void DropPending() {
+    if (pending_.updatedQpcUs != 0) ++dropped_;
+    pending_ = ClientControlMetricsSnapshot{};
+    pendingGeneration_ = 0;
+  }
   ClientControlMetricsSnapshot pending_{};
-  uint64_t windows_ = 0, reports_ = 0, withheld_ = 0;
+  uint64_t pendingGeneration_ = 0;
+  const ClientControlMetricsSnapshot empty_{};
+  uint64_t windows_ = 0, reports_ = 0, withheld_ = 0, dropped_ = 0;
 };
 
 }  // namespace remote60::native_poc

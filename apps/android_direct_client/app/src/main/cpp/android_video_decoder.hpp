@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "client_decode_snapshot.hpp"
 #include "native_video_client_session.hpp"
 #include "selection_ack_gate.hpp"
 #include "video_playout_clock.hpp"
@@ -37,6 +38,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool DrainPresentationStats(
       remote60::native_poc::ClientPresentationStats* out) override;
   bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override;
+  uint64_t DecodeGeneration() override;
   void OnWindowSelectionControlResult(
       const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
   void PrepareForWindowSelection(uint64_t selectionGeneration);
@@ -82,10 +84,14 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
     AndroidVideoDecoderSink* s_;
     std::lock_guard<std::mutex> lock_;
   };
-  std::atomic<uint64_t> decodedTotalPub_{0};
-  std::atomic<bool> decodeValidPub_{false};    // a surface, and no selection still waiting for its answer / first IDR
-  std::atomic<uint64_t> outputSizePub_{0};     // (visible width << 32) | height; 0 = not known
-  uint64_t decodedDrainBase_ = 0;              // the session's control thread only
+  // r3 R2: (valid, count, size, generation) as one consistent copy (client_decode_snapshot.hpp). The
+  // generation bumps whenever validity / the surface / the selection changes.
+  remote60::native_poc::ClientDecodeSnapshot decodeSnapshot_;
+  uint64_t decodeGeneration_ = 0;     // under mu_
+  uint64_t decodeKeyHash_ = 0;        // under mu_: what the generation last changed on
+  bool decodeKeySet_ = false;
+  uint64_t decodedDrainBase_ = 0;     // the session's control thread only
+  uint64_t drainGeneration_ = 0;      // the session's control thread only: the generation of the last drain
   ANativeWindow* window_ = nullptr;
   AMediaCodec* codec_ = nullptr;
   uint32_t configuredWidth_ = 0;
@@ -95,13 +101,21 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t inputFrameCount_ = 0;
   uint64_t outputFrameCount_ = 0;
   // mobile-abr r1 (Codex contract section 3): valid decoded pictures, counted where the decoder hands
-  // one out (dequeueOutputBuffer >= 0, not codec-config / end-of-stream) -- not when it is released to
-  // the display later. Never reset: outputFrameCount_ is reset with the codec. An output whose PTS
-  // equals the previous counted one (the bootstrap IDR replayed into a codec that had not answered
-  // yet) is the same picture again and is counted apart, in replayOutputs_.
+  // one out (dequeueOutputBuffer >= 0; not a codec-config buffer, not an end-of-stream buffer without a
+  // picture) -- not when it is released to the display later. Never reset: outputFrameCount_ is reset
+  // with the codec.
+  // r3 R1: the selection's bootstrap IDR re-queued into a codec that had not answered yet is the same
+  // picture again, but the playout clock gives each queue a NEW PTS. The PTS of every replay queue that
+  // succeeded is remembered here (a few at most -- kBootstrapReplayMaxCount per selection) and its output
+  // is counted apart, in replayOutputs_. Forgotten with the codec.
   uint64_t decodedTotal_ = 0;
   uint64_t replayOutputs_ = 0;
-  int64_t lastCountedOutputPts_ = -1;
+  bool queueingReplay_ = false;
+  static constexpr size_t kReplayPtsSlots = 8;
+  int64_t replayPts_[kReplayPtsSlots] = {};
+  size_t replayPtsCount_ = 0;
+  void RememberReplayPtsLocked(int64_t ptsUs);
+  bool TakeReplayPtsLocked(int64_t ptsUs);
   // Which selection is armed, whether its answer is still awaited and which stream generation it
   // answered with (selection_ack_gate.hpp; shared with the Windows tests).
   remote60::native_poc::SelectionAckGate gate_;

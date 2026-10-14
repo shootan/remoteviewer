@@ -298,6 +298,26 @@ int main() {
                                                      std::to_string(c.pings) + " pings");
   }
 
+  std::printf("[8] r3 R2: generation and age\n");
+  {
+    ClientTelemetryWindow w;
+    w.Reset(0, 0, 0);
+    ClientDecodeStats d = decoded(30);
+    d.generation = 4;
+    w.Close(1'000'000, 30, 120'000, &d, nullptr);
+    w.OnDecodeGeneration(4);
+    check("[8] the same generation keeps the unsent snapshot", w.Pending(1'010'000).updatedQpcUs == 1'000'000);
+    w.OnDecodeGeneration(5);  // the surface went (or a selection started) before it was sent
+    check("[8] a generation change on any pass drops it", w.Pending(1'020'000).updatedQpcUs == 0 && w.dropped() == 1);
+    d.generation = 5;
+    w.Close(2'000'000, 60, 240'000, &d, nullptr);
+    check("[8] a snapshot is handed out within 1.5 s of its measurement",
+          w.Pending(3'400'000).updatedQpcUs == 2'000'000);
+    check("[8] ...and not after (the host would stamp it fresh on arrival)", w.Pending(3'600'000).updatedQpcUs == 0);
+    w.Reset(9'000'000, 60, 240'000);
+    check("[8] a new connection hands out nothing old", w.Pending(9'000'001).updatedQpcUs == 0);
+  }
+
   std::printf("\nclient_telemetry_window_test: %d passed, %d failed\n", gChecks - gFailures, gFailures);
   std::printf("RESULT: %s\n", gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;

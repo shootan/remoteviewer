@@ -118,7 +118,7 @@ ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* inf
   }
   if (info) {
     info->offset = 0;
-    info->size = 1;
+    info->size = o.size;
     info->presentationTimeUs = o.presentationTimeUs;
     info->flags = o.flags;
   }

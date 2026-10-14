@@ -872,6 +872,10 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
 
+# mobile-abr r3: the decoder sink's state as one consistent copy (sequence lock), with a negative control (pure).
+add_executable(remote60_client_decode_snapshot_test src/client_decode_snapshot_test.cpp)
+target_include_directories(remote60_client_decode_snapshot_test PRIVATE src)
+
 # mobile-abr r1: the shared client session's report window against the product control scheduler (pure).
 add_executable(remote60_client_telemetry_window_test
   src/client_telemetry_window_test.cpp

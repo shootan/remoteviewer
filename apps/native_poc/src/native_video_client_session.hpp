@@ -27,6 +27,9 @@ class ClientEncodedFrameSink {
    *  means nothing right now -- no surface, a selection between generations (the session then reports
    *  nothing for that window rather than "0 fps"). A valid 0 is a real stall and is reported. */
   virtual bool DrainDecodeStats(ClientDecodeStats* /* out */) { return false; }
+  /** The decode generation now (r3 R2): it changes whenever the sink's decode state stops or starts being
+   *  meaningful (surface, selection). Lock-free; read on every control pass. 0 for a sink without one. */
+  virtual uint64_t DecodeGeneration() { return 0; }
   /** Drains the presentation stats accumulated since the last call; false when the sink does
    *  not present frames itself (a decode-only sink has nothing to report). */
   virtual bool DrainPresentationStats(ClientPresentationStats* /* out */) { return false; }

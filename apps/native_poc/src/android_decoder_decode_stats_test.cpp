@@ -65,11 +65,12 @@ void with_controls(F f) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   f(fake_ndk::controls());
 }
-void picture(int64_t pts, uint32_t flags = 0) {
+void picture(int64_t pts, uint32_t flags = 0, int32_t size = 1) {
   with_controls([&](fake_ndk::Controls& c) {
     fake_ndk::Controls::Output o;
     o.presentationTimeUs = pts;
     o.flags = flags;
+    o.size = size;
     c.outputs.push_back(o);
   });
 }
@@ -165,10 +166,15 @@ int main() {
   }
   {
     std::puts("\n--- 3. buffers that carry no picture ---");
-    picture(4000, 2);  // codec config
-    picture(5000, 4);  // end of stream
+    picture(4000, 2);     // codec config
+    picture(5000, 4, 0);  // end of stream, empty
     settle();
-    check("codec-config and end-of-stream buffers are not decoded pictures", drain(sink).s.decodedFrames == 0);
+    check("a codec-config buffer and an EMPTY end-of-stream buffer are not decoded pictures",
+          drain(sink).s.decodedFrames == 0);
+    picture(5500, 4, 1);  // end of stream carrying the last picture
+    settle();
+    check("r3: an end-of-stream buffer that carries a picture counts it (only EOS-only is left out)",
+          drain(sink).s.decodedFrames == 1);
   }
   {
     std::puts("\n--- 4. an output format change ---");
@@ -181,11 +187,13 @@ int main() {
           std::to_string(d.s.decodedFrames) + " " + std::to_string(d.s.width) + "x" + std::to_string(d.s.height));
   }
   {
-    std::puts("\n--- 5. the same picture again (a replay) ---");
+    std::puts("\n--- 5. two outputs of one PTS that are not a replay ---");
     picture(7000);
     picture(7000);
     settle();
-    check("two outputs of one PTS count one decoded picture", drain(sink).s.decodedFrames == 1);
+    // r3 R1: a replay is known by where it was queued (section 9), not by a repeated PTS -- a real replay
+    // gets a new PTS, and two ordinary outputs are two pictures.
+    check("r3: two ordinary outputs count two, whatever their PTS", drain(sink).s.decodedFrames == 2);
   }
   {
     std::puts("\n--- 6. the surface goes and comes back ---");
@@ -198,9 +206,28 @@ int main() {
     sink.OnEncodedH264Frame(frame(1, true, 0x02));
     picture(9000);
     settle();
+    const Drained across = drain(sink);
+    check("r3: the window the surface came back in spans a generation change -- withheld, not mixed",
+          !across.valid);
+    picture(9500);
+    settle();
     const Drained back = drain(sink);
-    check("back: valid again, and only the new picture counts (the one before was drained with the window)",
+    check("the next window is valid and counts only its own picture",
           back.valid && back.s.decodedFrames == 1, "decoded=" + std::to_string(back.s.decodedFrames));
+    // r3 R2: the surface goes and comes back BETWEEN two drains -- the window spans both states.
+    picture(9600);
+    settle();
+    sink.SetSurface(env, nullptr);
+    sink.SetSurface(env, surface());
+    sink.OnEncodedH264Frame(frame(1, true, 0x05));
+    picture(9700);
+    settle();
+    const Drained roundTrip = drain(sink);
+    check("r3: a surface round trip between two drains -- that window is withheld, valid on both ends or not",
+          !roundTrip.valid);
+    picture(9800);
+    settle();
+    check("...and the window after it counts its own picture", drain(sink).s.decodedFrames == 1);
   }
   {
     std::puts("\n--- 7. a selection between generations ---");
@@ -215,8 +242,12 @@ int main() {
     sink.OnEncodedH264Frame(frame(70, true, 0x03));
     picture(10000);
     settle();
+    check("r3: the window its first picture arrived in spans the generation change -- withheld",
+          !drain(sink).valid);
+    picture(10500);
+    settle();
     const Drained ready = drain(sink);
-    check("its IDR in: valid, counting from there", ready.valid && ready.s.decodedFrames == 1,
+    check("then valid, counting from there", ready.valid && ready.s.decodedFrames == 1,
           "valid=" + std::to_string(ready.valid) + " decoded=" + std::to_string(ready.s.decodedFrames));
   }
   {
@@ -253,11 +284,16 @@ int main() {
     check("the IDR went in once and was re-queued twice, each time with a new PTS",
           q1 - q0 == 3 && pts.size() == 3 && pts[0] != pts[1] && pts[1] != pts[2], ptsList);
     (void)drain(sink);
-    answer_queued(q0, q1);  // the codec decodes all three inputs
+    // The codec answers the original input first: that picture makes the selection ready (a generation
+    // change, so its window is withheld). Then it answers the two replayed inputs.
+    answer_queued(q0, q0 + 1);
+    settle(400);
+    (void)drain(sink);
+    answer_queued(q0 + 1, q1);
     settle(700);
     const Drained d = drain(sink);
-    check("THE REPLAYED INPUTS' OUTPUTS DO NOT COUNT AS PROGRESS: one picture",
-          d.valid && d.s.decodedFrames == 1,
+    check("THE REPLAYED INPUTS' OUTPUTS DO NOT COUNT AS PROGRESS: 0 pictures in the window they came out in",
+          d.valid && d.s.decodedFrames == 0,
           "valid=" + std::to_string(d.valid) + " decoded=" + std::to_string(d.s.decodedFrames));
     // Ordinary inputs afterwards, a synthetic (static-refresh) AU among them: each counts.
     const size_t q2 = queued_inputs();

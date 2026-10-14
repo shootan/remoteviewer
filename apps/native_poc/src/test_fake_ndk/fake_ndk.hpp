@@ -28,6 +28,7 @@ struct Controls {
     uint32_t flags = 0;
     int32_t width = 0;
     int32_t height = 0;
+    int32_t size = 1;  // info.size of a picture buffer (0: an empty buffer, e.g. an EOS-only one)
   };
   std::deque<Output> outputs;
   int32_t outputWidth = 0;   // the format getOutputFormat reports (set by a format change)

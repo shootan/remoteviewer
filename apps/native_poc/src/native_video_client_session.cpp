@@ -490,7 +490,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
                              sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
                              presentValid ? &present : nullptr);
     }
-    const ClientControlMetricsSnapshot& metrics = telemetry_.Pending();
+    // r3 R2: a snapshot measured before the sink's decode state changed (surface, selection) is not sent.
+    if (encodedFrameSink_) telemetry_.OnDecodeGeneration(encodedFrameSink_->DecodeGeneration());
+    const ClientControlMetricsSnapshot& metrics = telemetry_.Pending(loopNowUs);
     // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
     // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
     // answer and was dropped) is asked for again until it arrives -- a request taken here may still
