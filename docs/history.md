@@ -13174,3 +13174,36 @@ Next
   - 그 경우를 탭 좌표를 미리 정해 다시 시험했다: 확인 중 로그아웃 2회 16/16(sign_out 종료·fallback 0·observe/punch/Hello 0).
   - 기존 묶음: ui_run2 60/0, r1 묶음 43/0.
 - 미검증: 실기 폰. R2-b 의 "fallback 예약 후 실행 전" 취소는 UI 에서 만들 수 없어 단위로만 확인했다. 배터리·CPU·바이트.
+
+### 2026-10-15 keepalive r4 — R2 소유권 S1/S2 (`codex_keepalive_70dd162.md`)
+
+- 제품(`eaf784f`):
+  - S1 늦은 정리:
+    - 바뀐 것: stale 연결의 늦은 UI 콜백이 generation 을 읽어 Kotlin 에서 비교한 뒤, 무조건 `nativeDisconnect` 를 부르던 두 단계를 `nativeCloseIfOwn` 하나로 바꿨다.
+    - 동작: Adopt 와 같은 잠금 안에서, 그 op 가 채택한 generation 이 지금도 실행 중일 때만 닫는다. UI 스레드 밖에서 실행한다.
+    - 수동 IP 연결도 op 를 받아 같은 gate 를 지난다.
+    - gate 를 우회하던 미사용 `nativeDirectoryConnect` 는 제거했다.
+  - S2 재생성·취소 수명:
+    - op 번호는 native gate 가 프로세스 전체에서 발급한다(`nativeConnectOpNext`). 새 Activity 가 옛 op 를 되살리지 못한다.
+    - observe/punch 는 gate 의 step 이다. 한 번에 하나만, 현재 op 일 때만 돈다.
+      - stop 플래그는 현재성 확인과 같은 잠금 안에서 등록되고, 새 번호가 나오면 그 잠금 안에서 설정된다. stale step 이 취소를 지우지 못한다.
+      - rendezvous socket 은 그것으로 observe 한 op 의 것이다.
+    - `ConnectIntents`: onStop 이 예약된 fallback 을 영구 무효화한다. onStart 뒤에도 부활하지 않는다.
+- 시험:
+  - `connect_op_gate_test` 24/0, 20회 반복 실패 0.
+    - 시험 hook 은 `REMOTE60_CONNECT_GATE_TEST_HOOKS`, 시험 target 에만 들어간다.
+    - 결정적 경계: compare 와 close 사이 B 의 채택, directory 와 수동 연결, 재생성 번호, step 시작 시 취소, step 중 취소, socket 소유.
+    - 각 경계에 r3 흐름 부정 대조를 두었고 모두 FAIL 이 재현됐다.
+  - SessionParkTest(재생성 번호·stop→start fallback) 포함 Android 191/0. park 34/0, shared_core PASS.
+  - build gate: 4 ABI .so 의 hook 문자열 0(시험 exe 양성 대조 1), 새 JNI 있음, 옛 JNI 없음.
+- AVD(16:47~17:03 슬롯, fixture4 APK, fail-closed 시험 host):
+  - ui_run2 60/0: 로그아웃 뒤 늦은 연결 응답 → native 연결 전 stale, 새 연결 무손상, 401.
+  - ui_signout 15/16: 확인 중 로그아웃 2회 모두 sign_out, fallback 0, 연결 0.
+  - FAIL 1 = 새로 부팅한 AVD 의 첫 선택에서 decoder 가 in=15 out=0 으로 25 s 동안 출력하지 않았다.
+    - 연결과 select ACK 는 정상이었고, 같은 연결의 다음 선택은 724 ms 였다.
+    - r2 에도 같은 증상이 1회 있었다(ka_r2/ui2 13:49:59). 소유권 변경 범위 밖의 별건으로 기록한다.
+- 미검증:
+  - 실기 폰.
+  - 수동 IP 연결의 UI 실행(단위 gate 만 확인).
+  - Activity 재생성의 실제 lifecycle 실행(번호 발급 경계는 단위만 확인).
+  - 위 decoder 첫 출력 정지의 원인.
