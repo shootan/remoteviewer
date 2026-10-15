@@ -878,6 +878,20 @@ target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
 
+# viewer-sharpness r1 A: the APK sink's visible size from the decoder's output format (crop rect / keys / none),
+# android_video_decoder.cpp itself against the stand-in NDK.
+add_executable(remote60_android_decoder_geometry_test
+  src/android_decoder_geometry_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_geometry_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX)
+
 # mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
 # NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
 add_executable(remote60_android_decoder_decode_stats_test

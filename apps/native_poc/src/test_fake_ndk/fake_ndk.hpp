@@ -28,11 +28,18 @@ struct Controls {
     uint32_t flags = 0;
     int32_t width = 0;
     int32_t height = 0;
+    // viewer-sharpness r1: the crop a format change carries -- as the one "crop" rect key (Codec2), as the four
+    // crop-left/top/right/bottom integers, or neither. Inclusive, as MediaFormat reports it.
+    bool cropRect = false;
+    bool cropKeys = false;
+    int32_t cropL = 0, cropT = 0, cropR = 0, cropB = 0;
     int32_t size = 1;  // info.size of a picture buffer (0: an empty buffer, e.g. an EOS-only one)
   };
   std::deque<Output> outputs;
   int32_t outputWidth = 0;   // the format getOutputFormat reports (set by a format change)
   int32_t outputHeight = 0;
+  bool outputCropRect = false, outputCropKeys = false;
+  int32_t outputCropL = 0, outputCropT = 0, outputCropR = 0, outputCropB = 0;
   int dequeued = 0;          // pictures handed out
   int released = 0;          // releaseOutputBuffer / AtTime calls
 };

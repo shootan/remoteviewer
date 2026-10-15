@@ -31,5 +31,7 @@ media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* codec, size_t idx, int6
                                             uint32_t flags);
 ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec* codec, AMediaCodecBufferInfo* info, int64_t timeoutUs);
 AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec* codec);
+media_status_t AMediaCodec_getName(AMediaCodec* codec, char** outName);
+void AMediaCodec_releaseName(AMediaCodec* codec, char* name);
 media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec* codec, size_t idx, bool render);
 media_status_t AMediaCodec_releaseOutputBufferAtTime(AMediaCodec* codec, size_t idx, int64_t timestampNs);

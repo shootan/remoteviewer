@@ -182,6 +182,13 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t outputDequeued_ = 0;     // output buffers dequeued by this codec instance (pictures or not)
   uint64_t formatChanges_ = 0;      // output-format-changed answers, this codec instance
   uint64_t codecsStarted_ = 0;      // codec instances started over the sink's life
+  // viewer-sharpness r1 A: this codec instance's last output format -- the coded size, and where the visible
+  // size (outputWidth_/Height_) came from: "none" (no format yet: the wire size), "rect" / "keys" (a valid crop),
+  // "absent" / "invalid_rect" / "invalid_keys" (the coded size is shown).
+  uint32_t formatWidth_ = 0;
+  uint32_t formatHeight_ = 0;
+  const char* cropSource_ = "none";
+  int32_t cropLeft_ = 0, cropTop_ = 0, cropRight_ = 0, cropBottom_ = 0;
   // keepalive r5 D1: this codec instance has had no IDR queued yet -- deltas are not fed to it (an IDR is asked
   // for instead). The surface can start a codec from the SPS/PPS of an IDR it never received.
   bool codecAwaitsKey_ = false;
