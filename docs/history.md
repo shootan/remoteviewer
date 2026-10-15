@@ -13074,3 +13074,14 @@ Next
 - 결과: telemetry 54/0 — S1-a 40 + 12 runs, S1-b 45 runs 에서 강등 0, 보고 ≥ 20 fps, P7 stale 연속 < 2. S1-b 는 stale 1 초 1 회(응답이 2.7 s 늦은 selection 구간)가 있었고, 그 자리에 e599123 은 0 을 보냈다. 보존: fault B(grace 만료 뒤 0)·정상 loss 강등 시각이 pre 와 같다(12.0 s / 11.0 s), quality-first 무강등, steady 60 s 58 보고·hold 0. Hold 단위 [13](`d3819d1`): 250 ms 에 재-due, 매 pass 재시작해도 첫 보류 + 250 ms 에 닫힌다. decode_stats 42/0 ×4, snapshot 12/0, shared_core PASS, APK assembleDebug 4 ABI.
 - 실체인(@0de0009, 같은 host ec253fe5…, 2026-10-15 00:23~00:48 — 검증용 조율로 fix-motion-settle 측정을 멈춘 사이, 매 run 직전 겹침 확인): core e2e sparse×3·reconnect 무강등 PASS, decodestall 강등 유지 PASS, recovery 복귀 PASS(6/6 exit 0). AVD(격리 gnlink_kbd_test -read-only, smoke 3fd281e7…) app plan post **5/5 PASS** — 정상 lifecycle·fault A 강등 0, fault B 는 grace 만료(+60 s) 뒤 +61.8~62.8 s `high_to_mid_severe(severe_client)`, keyframe 허용 뒤 `client_stable_mid` 복귀(r5 post 와 같은 모양).
 - 남은 것: 실기기 MediaCodec·현장 패턴(게시 후 1회), host 거절 응답 경로, F2 의 에뮬레이터 NAT vs 시험 relay 미구분(ledger).
+
+### 2026-10-15 APK 0.2.29 게시 — 휴대폰이 매초 decode/수신을 보고해 건강한 폰이 강등되지 않는다 (실기 대기)
+
+- 범위: **APK 단독**(versionName 0.2.29 / versionCode 28). PC 는 0.2.158 그대로 — windows manifest·sig pair 불변(서버 78df5305…).
+- 통합: main merge `c4804c1`(fix/mobile-abr-evidence r6 `0e5ddae`, 작업목록 충돌 1건 해결) + 버전 `de5a035`. 검증 후보와의 차이는 build.gradle 버전 2줄 + 작업목록뿐. push `118420f..de5a035`.
+- APK: `GNLink-0.2.29.apk` 12562092 B, sha256 `942b898ff8a3eb73f47e9ed6ba77f0041e79fa5895f754dd2fe480b60191b020`, 인증서 `dcc806ae…`(기존 동일), 4 ABI, Android 단위 177/0. `dist/GNLink-0.2.29.apk`.
+- 게시(`gnlink_deploy.sh --platform android`, dry-run 뒤 실행): android.manifest `f82318f9…`, sig `d5534f81…`(selfVerify), 백업 0.2.28 pair `7a4ee99c…`/`f8216eeb…`. 서버 디스크·외부 https 익명 GET 해시 일치.
+- Codex 직접 최종 확인 PASS(2026-10-15T02:18:32Z, `main-stability-integration/.claude/codex-final-apk-0.2.29/`): pair=local, 운영 공개키 서명 수락·변조 거절, 다운로드 APK 인증서·버전·4 ABI, ls-remote main=de5a035.
+- 판정: **배포 완료(마일스톤) · 휴대폰 실기 대기.** 사용자 행동: 폰 0.2.29 업데이트 → 1~2 분 접속 → 검증용이 그 구간 NAS host.log `[abr]`(stale_active 없음·clientDecodeValid=1) 와 보고 간격 확인.
+- 미검증·경계: 실기기 MediaCodec·SurfaceView, host 의 다른 거절 사유·실 UI, 지연/손실 미측정, 구 APK 는 업데이트 전까지 증상 잔존. 후속: keepalive(task t-rlxt1nhp, feat/keepalive).
+- 제품/테스트/문서: 문서(이 항목·작업목록 MA 줄).
