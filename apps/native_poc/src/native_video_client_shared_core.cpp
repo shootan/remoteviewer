@@ -115,6 +115,11 @@ void ClientInputQueue::WaitForInput(uint32_t timeoutMs) {
   ready_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !queue_.empty(); });
 }
 
+bool ClientInputQueue::Empty() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return queue_.empty();
+}
+
 bool ClientInputQueue::TryDequeue(QueuedControlInputMessage* out) {
   if (!out) return false;
   std::lock_guard<std::mutex> lk(mu_);

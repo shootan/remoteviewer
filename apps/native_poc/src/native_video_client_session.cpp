@@ -95,6 +95,8 @@ bool ClientSessionController::Connect(const ClientSessionConnectArgs& args) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     ResetUnlocked();
+    connectionGeneration_.fetch_add(1, std::memory_order_acq_rel);  // keepalive r1
+    connectCount_.fetch_add(1, std::memory_order_relaxed);
     snapshot_.state = ClientSessionState::Connecting;
     snapshot_.status = "connecting";
     snapshot_.host = args.host;
@@ -138,6 +140,7 @@ bool ClientSessionController::RequestWindowList() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
 
   windowPanel_.RequestList("window_list_request pending");
   // r3 M4: and the screens, where the host lists them -- the APK refreshes its targets through
@@ -171,6 +174,7 @@ bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId, uint64_t 
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
   // t-970r4zgo: through the window-select transaction, which the host answers only once the
   // capture is on that screen, with the stream generation the selection gate waits for. A host
   // that has not said it does this on THIS connection is refused here at once -- the legacy
@@ -208,6 +212,7 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
     if (!CanQueueControlRequestLocked()) return false;
   }
 
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
   const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
   // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
   if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
@@ -234,11 +239,85 @@ bool ClientSessionController::RequestStreamActive(bool active) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
+  // keepalive r1: a parked session takes no stream request; the park pauses the stream itself.
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
   streamState_.Request(active);
   // r5: pausing is intended inactivity (not measured); resuming starts an active episode.
   const bool wasPaused = streamPaused_.exchange(!active, std::memory_order_acq_rel);
   if (active && wasPaused && encodedFrameSink_) encodedFrameSink_->OnDecodeEpisodeStart();
   return true;
+}
+
+bool ClientSessionController::BeginPark() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  const uint64_t nowUs = now_us();
+  std::lock_guard<std::mutex> lk(parkMu_);
+  if (!park_.Begin(nowUs)) return false;
+  // From here nothing new is taken (every request path reads this), and what was queued but not sent
+  // -- downs, moves, text, a macro's next steps -- is dropped; the releases already queued stay.
+  parkInhibit_.store(true, std::memory_order_release);
+  uint32_t dropped = 0, kept = 0;
+  inputQueue_.DropAllButReleases(&dropped, &kept);
+  // The up of everything the host was sent a down for and not yet its up. A release already queued
+  // and repeated here is harmless (an up for a key that is up).
+  const auto releases = heldInput_.Releases(inputQueue_, nowUs);
+  for (const auto& r : releases) inputQueue_.Enqueue(r);
+  parkReleased_.store(static_cast<uint32_t>(releases.size()), std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> tl(thumbMu_);
+    thumbFetchQueue_.clear();
+  }
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> cl(clipMu_);
+    clipHasPending_ = false;
+    clipPendingText_.clear();
+    clipHasIncoming_ = false;
+    clipIncomingText_.clear();
+  }
+  std::fprintf(stderr, "[native-video-client-session] park: begin (dropped %u, releases kept %u, released %zu)\n",
+               dropped, kept, releases.size());
+  return true;
+}
+
+bool ClientSessionController::ResumeFromPark() {
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    if (park_.phase() != ClientParkPhase::Parked) return false;
+    park_.End();
+  }
+  {
+    // The clipboard starts again from what both sides hold now: the next poll is a baseline, and the
+    // app seeds the phone's current text (SeedClipboardBaseline) -- nothing from the parked time travels.
+    std::lock_guard<std::mutex> cl(clipMu_);
+    clipPolicy_.OnResumed();
+    clipHasPending_ = false;
+    clipHasIncoming_ = false;
+  }
+  parkInhibit_.store(false, std::memory_order_release);
+  std::fprintf(stderr, "[native-video-client-session] park: resumed\n");
+  return true;
+}
+
+void ClientSessionController::EndPark() {
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.End();
+  }
+  // Still inhibited until the app's disconnect: nothing is sent on a connection being given up.
+}
+
+ClientParkPhase ClientSessionController::ParkPhase() const {
+  std::lock_guard<std::mutex> lk(parkMu_);
+  return park_.phase();
+}
+
+void ClientSessionController::SeedClipboardBaseline(const std::u16string& text) {
+  std::lock_guard<std::mutex> cl(clipMu_);
+  clipCore_.SeedBaseline(text);
 }
 
 bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fps) {
@@ -269,6 +348,7 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
     if (!CanQueueControlRequestLocked()) return false;
   }
   if (kind < 1 || kind > 6) return false;
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: no input while parked
 
   inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
                                                keyCode, now_us()));
@@ -280,12 +360,14 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1
   return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
 }
 
 bool ClientSessionController::QueueClipboardText(const uint16_t* text, size_t count) {
   if (!text && count > 0) return false;
   if (!clipboardEnabled_.load(std::memory_order_relaxed)) return false;
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: nothing travels while parked
   // Never queue for a host that cannot parse it: the message is gated on the capability bit, and
   // an old host would mis-drain the variable payload and desync the stream.
   if (!hostSupportsClipboard_.load(std::memory_order_relaxed)) return false;
@@ -307,6 +389,7 @@ bool ClientSessionController::QueueClipboardText(const uint16_t* text, size_t co
 
 bool ClientSessionController::TakeIncomingClipboardText(std::u16string* out) {
   if (!out) return false;
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1
   std::lock_guard<std::mutex> lock(clipMu_);
   if (!clipHasIncoming_) return false;
   *out = std::move(clipIncomingText_);
@@ -329,7 +412,8 @@ void ClientSessionController::SetClipboardSyncEnabled(bool enabled) {
 
 int ClientSessionController::PumpClipboardSync(ControlLink& link) {
   if (!clipboardEnabled_.load(std::memory_order_relaxed) ||
-      !hostSupportsClipboard_.load(std::memory_order_relaxed)) {
+      !hostSupportsClipboard_.load(std::memory_order_relaxed) ||
+      parkInhibit_.load(std::memory_order_acquire)) {  // keepalive r1: no poll, no push while parked
     return 0;
   }
   // Once per session the app is asked for whatever is on the phone's clipboard now, so that the
@@ -392,6 +476,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
 
   if (args.requireUdpHello) {
     std::string error;
+    udpHelloCount_.fetch_add(1, std::memory_order_relaxed);  // keepalive r1: a Hello exchange
     if (!ConnectUdpVideo(args, &error)) {
       if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
       FinalizeWorkerExit();
@@ -529,6 +614,28 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       decoderRekeyPending_.store(false, std::memory_order_release);
       std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
     }
+    // keepalive r1: a park's steps, each on a processing boundary (client_park_state.hpp). The releases
+    // drain first (every input is answered); only then the pause, then a Ping after it.
+    {
+      bool pauseNow = false;
+      bool pingNow = false;
+      ClientParkPhase phase = ClientParkPhase::None;
+      {
+        std::lock_guard<std::mutex> lk(parkMu_);
+        phase = park_.Tick(loopNowUs);
+        if (phase == ClientParkPhase::Releasing && inputQueue_.Empty()) pauseNow = park_.OnInputDrained();
+        pingNow = park_.TakePingWanted();
+      }
+      if (pauseNow) {
+        streamState_.Request(false);
+        streamPaused_.store(true, std::memory_order_release);
+      }
+      if (pingNow) controlScheduler_.RequestPingNow();
+      if (phase == ClientParkPhase::Expired) {
+        if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("park expired");
+        break;
+      }
+    }
     if (controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
                                      &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
                                      &desktopBackend_)) {
@@ -547,6 +654,18 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         break;
       }
       didWork = true;
+      {
+        // keepalive r1: what the host now holds, and the park's boundaries (sent = answered or, for a
+        // StreamState with no answer of its own, handed to the ordered control stream).
+        std::lock_guard<std::mutex> lk(parkMu_);
+        heldInput_.OnSent(action);
+        if (action.kind == ControlOutboundActionKind::StreamState) {
+          park_.OnStreamStateSent((action.streamState.flags & 0x1u) != 0);
+        } else if (action.kind == ControlOutboundActionKind::Ping) {
+          park_.OnPingSent(action.ping.seq);
+        }
+        if (response.kind == TcpControlResponseKind::Pong) park_.OnPong(response.pong.seq, now_us());
+      }
 
       switch (response.kind) {
         case TcpControlResponseKind::Pong:
@@ -707,6 +826,7 @@ void ClientSessionController::QueueThumbnailFetchesFromPanel() {
 // (the strict request/response stream is then desynced and the session must drop).
 int ClientSessionController::FetchOneThumbnailLocked(ControlLink& link) {
   if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return 0;
+  if (parkInhibit_.load(std::memory_order_acquire)) return 0;  // keepalive r1: no previews while parked
   uint64_t id = 0;
   {
     std::lock_guard<std::mutex> lk(thumbMu_);
@@ -1189,6 +1309,13 @@ void ClientSessionController::ResetUnlocked() {
   runtimeTune_.Reset(0, 0);
   desktopBackend_.Reset();
   inputQueue_.Reset();
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.End();
+    heldInput_.Reset();
+  }
+  parkInhibit_.store(false, std::memory_order_release);
+  parkReleased_.store(0, std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lk(thumbMu_);
     thumbs_.clear();

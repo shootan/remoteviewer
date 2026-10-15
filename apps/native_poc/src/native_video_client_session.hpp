@@ -13,6 +13,7 @@
 
 #include "clipboard_sync.hpp"
 #include "native_socket.hpp"
+#include "client_park_state.hpp"
 #include "client_telemetry_window.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
@@ -130,6 +131,31 @@ class ClientSessionController {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
   bool RequestStreamActive(bool active);
+
+  // --- keepalive r1: park (Codex .claude/codex_keepalive_r1.md, client_park_state.hpp) ----------
+  //
+  // BeginPark: from now on no new input, clipboard, preview, selection or stream request is taken;
+  // unsent actions are dropped, the release of everything the host still holds from this client is
+  // queued, and the control loop then pauses the stream and fences the pause with a Ping. false = not
+  // connected, or a park already running. ParkPhase says how far it got (Parked = confirmed; Failed /
+  // Expired = the app disconnects). ResumeFromPark: the park ends and the session takes requests
+  // again, the clipboard re-baselined (nothing from the parked time travels); false if not parked.
+  // EndPark drops a park without resuming (the app disconnects next).
+  bool BeginPark();
+  bool ResumeFromPark();
+  void EndPark();
+  ClientParkPhase ParkPhase() const;
+  // How many held keys / buttons the park released (diagnostics).
+  uint32_t ParkReleasedCount() const { return parkReleased_.load(std::memory_order_relaxed); }
+  // The phone's clipboard as it is when a parked session resumes: recorded as already sent.
+  void SeedClipboardBaseline(const std::u16string& text);
+  // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
+  // parked connection is told from one opened since. Counters of the expensive steps, for the
+  // "no directory / punch / Hello on reuse" check.
+  uint64_t ConnectionGeneration() const { return connectionGeneration_.load(std::memory_order_acquire); }
+  uint64_t ConnectCount() const { return connectCount_.load(std::memory_order_relaxed); }
+  uint64_t UdpHelloCount() const { return udpHelloCount_.load(std::memory_order_relaxed); }
+
   // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
   void ClearPendingDecoderKeyframe() { decoderRekeyPending_.store(false, std::memory_order_release); }
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
@@ -307,6 +333,16 @@ class ClientSessionController {
   std::atomic<uint64_t> sinkFrames_{0};
   std::atomic<uint64_t> sinkPayloadBytes_{0};
   ClientTelemetryWindow telemetry_;
+  // keepalive r1. parkMu_ guards the fence and the held-input record (the control loop and the app's
+  // calls); parkInhibit_ is read on every request without it.
+  mutable std::mutex parkMu_;
+  ClientParkFence park_;
+  ClientHeldInput heldInput_;
+  std::atomic<bool> parkInhibit_{false};
+  std::atomic<uint32_t> parkReleased_{0};
+  std::atomic<uint64_t> connectionGeneration_{0};
+  std::atomic<uint64_t> connectCount_{0};
+  std::atomic<uint64_t> udpHelloCount_{0};
 };
 
 }  // namespace remote60::native_poc

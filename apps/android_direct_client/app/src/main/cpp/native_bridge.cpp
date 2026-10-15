@@ -23,6 +23,10 @@ std::string g_rendezvous_error;
 // Which of the offered addresses answered. Worth surfacing: "private" means the traffic never
 // left the LAN, and a fallback after none answered is the case worth noticing in a bug report.
 std::string g_chosen_candidate;
+// keepalive r1: how many observes and punches this process ran -- the reuse of a parked session must
+// add none (nor a session Connect / UDP Hello: ClientSessionController's own counters).
+uint64_t g_observe_count = 0;
+uint64_t g_punch_count = 0;
 
 // One macro per session. Recording taps the same events the client is about to send, so what is
 // captured is exactly what the host saw.
@@ -178,6 +182,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryObserve(
     jstring observe_token) {
   std::string observed;
   g_rendezvous_error.clear();
+  ++g_observe_count;
   const bool ok = g_rendezvous.Observe(jstring_to_string(env, directory_host),
                                        directory_udp_port,
                                        jstring_to_string(env, observe_token), &observed,
@@ -194,6 +199,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
     jstring punch_token) {
   const std::string host = jstring_to_string(env, host_ip);
   g_rendezvous_error.clear();
+  ++g_punch_count;
   (void)g_rendezvous.Punch(host, host_port,
                            punch_budget_ms > 0 ? static_cast<uint32_t>(punch_budget_ms) : 4000u,
                            &g_rendezvous_error);
@@ -259,6 +265,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
   }
 
   remote60::native_poc::RendezvousCandidate chosen;
+  ++g_punch_count;
   const bool answered = g_rendezvous.PunchAny(
       parsed, punch_budget_ms > 0 ? static_cast<uint32_t>(punch_budget_ms) : 4000u, &chosen,
       &g_rendezvous_error);
@@ -675,6 +682,73 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeIsClipboardSyncEnabled(
     JNIEnv* /* env */, jobject /* this */) {
   return g_session_controller.ClipboardSyncEnabled() ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---------------------------------------------------------------- keepalive r1: park
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeBeginPark(
+    JNIEnv* /* env */, jobject /* this */) {
+  // A macro is the app's own source of input: stopped with the rest, so nothing it was about to send
+  // is sent while parked (its queued steps are dropped by the park).
+  g_macro.StopPlayback();
+  g_macro.StopRecording();
+  return g_session_controller.BeginPark() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeResumePark(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.ResumeFromPark() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeEndPark(
+    JNIEnv* /* env */, jobject /* this */) {
+  g_session_controller.EndPark();
+}
+
+/** ClientParkPhase: 0 none, 1 releasing, 2 pausing, 3 fencing, 4 parked, 5 failed, 6 expired. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeParkPhase(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_session_controller.ParkPhase());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeParkReleasedCount(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_session_controller.ParkReleasedCount());
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnectionGeneration(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_session_controller.ConnectionGeneration());
+}
+
+/** "gen=G connects=C hellos=H observes=O punches=P", for the diagnostics log. */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSessionCounters(
+    JNIEnv* env, jobject /* this */) {
+  std::ostringstream oss;
+  oss << "gen=" << g_session_controller.ConnectionGeneration()
+      << " connects=" << g_session_controller.ConnectCount()
+      << " hellos=" << g_session_controller.UdpHelloCount()
+      << " observes=" << g_observe_count << " punches=" << g_punch_count;
+  return to_jstring(env, oss.str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSeedClipboardBaseline(
+    JNIEnv* env, jobject /* this */, jstring text) {
+  if (!text) return;
+  const jsize length = env->GetStringLength(text);
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (!chars) return;
+  g_session_controller.SeedClipboardBaseline(
+      std::u16string(reinterpret_cast<const char16_t*>(chars), static_cast<size_t>(length)));
+  env->ReleaseStringChars(text, chars);
 }
 
 /** Whether the connected host advertised clipboard support, so the UI can say so. */

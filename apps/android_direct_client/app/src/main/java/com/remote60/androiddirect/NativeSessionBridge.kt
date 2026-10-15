@@ -10,6 +10,23 @@ object NativeSessionBridge {
     external fun nativeConnect(host: String, videoPort: Int, controlPort: Int): Boolean
     external fun nativeDisconnect()
 
+    // keepalive r1 (SessionPark.kt): park a connected session while the PC list shows, resume it.
+    /** Stops input / clipboard / previews, releases what the host holds, then pauses and fences. */
+    external fun nativeBeginPark(): Boolean
+    /** Only from Parked: the session takes requests again. */
+    external fun nativeResumePark(): Boolean
+    /** Drops a park without resuming (a disconnect follows). */
+    external fun nativeEndPark()
+    /** SessionPark.NativePhase codes. */
+    external fun nativeParkPhase(): Int
+    external fun nativeParkReleasedCount(): Int
+    /** Bumps on every session Connect: the identity of the authenticated connection. */
+    external fun nativeConnectionGeneration(): Long
+    /** "gen= connects= hellos= observes= punches=" for the log. */
+    external fun nativeSessionCounters(): String
+    /** The phone's clipboard when a parked session resumes: counted as already sent. */
+    external fun nativeSeedClipboardBaseline(text: String)
+
     /**
      * Asks the directory what public address this device's media socket presents, returning
      * "ip:port" or "" on failure. The socket is kept open for [nativeDirectoryConnect], because

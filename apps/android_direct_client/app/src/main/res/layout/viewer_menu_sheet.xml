@@ -61,6 +61,15 @@
 
                 <!-- apk-ui r3d: the way out, first of all, above 화질 (user: "연결 해제 버튼이 가장 위에"). One light
                      confirmation, since a stray tap would otherwise end the session. -->
+                <!-- keepalive r1: to the PC list keeping the connection (shown for a directory session). -->
+                <Button
+                    android:id="@+id/viewerMenuHostsButton"
+                    style="@style/UiSheetRow"
+                    android:contentDescription="@string/ui_menu_to_hosts_description"
+                    android:drawableStart="@drawable/ic_ui_list"
+                    android:text="@string/ui_menu_to_hosts"
+                    android:visibility="gone" />
+
                 <Button
                     android:id="@+id/viewerMenuDisconnectButton"
                     style="@style/UiSheetRow"

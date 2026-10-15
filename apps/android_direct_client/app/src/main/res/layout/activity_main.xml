@@ -167,6 +167,39 @@
             android:textColor="@color/ui_text_secondary"
             android:textSize="13sp" />
 
+        <!-- keepalive r1: the parked connection, and the way to end it. Shown only while one is parked. -->
+        <LinearLayout
+            android:id="@+id/hostsParkBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/panel_button_background"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/hostsParkText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/ui_text"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/hostsParkDisconnectButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/panel_button_background"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
+                android:textColor="@color/ui_danger"
+                android:text="@string/hosts_park_disconnect" />
+        </LinearLayout>
+
         <ListView
             android:id="@+id/hostsListView"
             android:layout_width="match_parent"
@@ -319,6 +352,21 @@
                 android:textColor="@color/ui_text"
                 android:textSize="24sp"
                 android:textStyle="bold" />
+
+            <!-- keepalive r1: back to the PC list keeping this connection (parked, picture stopped). -->
+            <Button
+                android:id="@+id/listHostsButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/panel_button_background"
+                android:contentDescription="@string/ui_targets_to_hosts_description"
+                android:minHeight="@dimen/ui_touch"
+                android:stateListAnimator="@null"
+                android:textAllCaps="false"
+                android:textColor="@color/panel_button_text"
+                android:text="@string/ui_targets_to_hosts"
+                android:visibility="gone" />
 
             <Button
                 android:id="@+id/listDisconnectButton"
