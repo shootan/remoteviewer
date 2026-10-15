@@ -130,8 +130,111 @@ struct KickState {
     ++(catchupInput ? catchupAccepted : catchupClosedByOther);
   }
 
+  // --- awaiting the catch-up's AU (motion-settle r9, Codex r9 s2) ---
+  // ACCEPTED is not DELIVERED: an async MFT may take the lone catch-up input and return its AU only
+  // inside a later encode call (r8: 0.4-0.6 s, released together with the next kick / 1 Hz refresh, 7 of
+  // 9 runs). Nothing re-armed the trailing kick for a synthetic input, so the picture waited for the
+  // refresh. Acceptance closes the submission debt above (never re-submitted per tick) and opens this
+  // separate output-progress state, bound to the codec instance, the session / input epoch, the stream
+  // generation and the accepted input's ordinal / content version. It closes when an AU of the same
+  // instance and input epoch with that ordinal or a later one comes out (outputs follow accepted order);
+  // otherwise kAwaitKickDelayUs after acceptance ONE extra input -- an ordinary trailing-edge kick, gated
+  // like any delta -- lets the encode call collect it. Another input accepted meanwhile already advanced
+  // the encoder: the extra kick is dropped (merged). Still nothing after the kick: exhausted, the 1 Hz
+  // refresh is the fallback and it is not counted as delivered. The kick never re-opens this state.
+  enum class AwaitEnd : uint8_t { Observed, Exhausted, Deferred, Cancelled };
+  struct CatchupAwait {
+    bool active = false;
+    uint64_t codecInstance = 0, sessionEpoch = 0, inputEpoch = 0, streamGeneration = 0;
+    uint64_t ordinal = 0;             // accepted-input ordinal of the catch-up input
+    uint64_t version = 0;             // content version it carried
+    uint64_t acceptedUs = 0;
+    uint64_t kickDueUs = 0;           // when the one extra input may go
+    uint64_t kickDeadlineUs = 0;      // gate / queue may delay that input this long, then deferred
+    bool kickSubmitted = false;       // the extra input was handed to the encode stage
+    bool kickAccepted = false;        // ... and the encoder took it
+    bool advancedByOther = false;     // another input was accepted after the catch-up (kick merged)
+  };
+  static constexpr uint64_t kAwaitKickDelayUs = 150000;      // Codex r9: fixed at the existing 150 ms
+  static constexpr uint64_t kAwaitKickDeadlineUs = 1000000;  // bounded wait for the gate / queue
+  CatchupAwait await;
+  // telemetry: opened / AU in the catch-up's own call (no await) / AU collected later, by which call /
+  // extra kicks submitted / accepted / gate-refused / dropped because another input advanced / ended
+  // without the AU after the kick (exhausted) / deferred to the refresh / cancelled (identity, instance,
+  // pause)
+  uint64_t awaitOpened = 0, awaitOutputOwnCall = 0, awaitObservedByKick = 0, awaitObservedByOther = 0,
+           awaitKickSubmitted = 0, awaitKickAccepted = 0, awaitKickRefused = 0, awaitKickMerged = 0,
+           awaitExhausted = 0, awaitDeferred = 0, awaitCancelled = 0;
+  // The catch-up input was accepted (ordinal) and its own call returned no AU for it.
+  void OpenAwait(uint64_t codecInstance, uint64_t sessionEpoch, uint64_t inputEpoch, uint64_t streamGeneration,
+                 uint64_t ordinal, uint64_t version, uint64_t nowUs) {
+    await = CatchupAwait{};
+    await.active = true;
+    await.codecInstance = codecInstance;
+    await.sessionEpoch = sessionEpoch;
+    await.inputEpoch = inputEpoch;
+    await.streamGeneration = streamGeneration;
+    await.ordinal = ordinal;
+    await.version = version;
+    await.acceptedUs = nowUs;
+    await.kickDueUs = nowUs + kAwaitKickDelayUs;
+    await.kickDeadlineUs = nowUs + kAwaitKickDelayUs + kAwaitKickDeadlineUs;
+    ++awaitOpened;
+  }
+  // An AU came out. Only an output of the SAME codec instance and input epoch whose accepted ordinal
+  // is the catch-up's or later counts (an older instance's late output or a pre-epoch AU never does).
+  bool AwaitSatisfiedBy(uint64_t codecInstance, uint64_t auInputEpoch, uint64_t auOrdinal) const {
+    return await.active && auOrdinal != 0 && codecInstance == await.codecInstance &&
+           auInputEpoch == await.inputEpoch && auOrdinal >= await.ordinal;
+  }
+  bool AwaitIdentityMatches(uint64_t codecInstance, uint64_t sessionEpoch, uint64_t inputEpoch,
+                            uint64_t streamGeneration) const {
+    return await.codecInstance == codecInstance && await.sessionEpoch == sessionEpoch &&
+           await.inputEpoch == inputEpoch && await.streamGeneration == streamGeneration;
+  }
+  // The extra kick may be tried now (it still has to pass the identity / queue / gate checks).
+  bool AwaitKickDue(uint64_t nowUs) const {
+    return await.active && !await.kickSubmitted && !await.advancedByOther && nowUs >= await.kickDueUs;
+  }
+  // Unresolved past the deadline (the kick could not go -- gate refused it, queue busy -- or its call
+  // never reached the acceptance check): hand over to the refresh. Bounds the state in every case.
+  bool AwaitKickExpired(uint64_t nowUs) const {
+    return await.active && nowUs >= await.kickDeadlineUs;
+  }
+  void EndAwait(AwaitEnd how) {
+    if (!await.active) return;
+    switch (how) {
+      case AwaitEnd::Observed: break;  // the caller counts by whom
+      case AwaitEnd::Exhausted: ++awaitExhausted; break;
+      case AwaitEnd::Deferred: ++awaitDeferred; break;
+      case AwaitEnd::Cancelled: ++awaitCancelled; break;
+    }
+    await = CatchupAwait{};
+  }
+  // An encode call accepted an input while the AU is awaited. awaitKickInput: it is the extra kick.
+  void NoteAwaitInputAccepted(bool awaitKickInput) {
+    if (!await.active) return;
+    if (awaitKickInput) {
+      await.kickAccepted = true;
+      ++awaitKickAccepted;
+    } else if (!await.advancedByOther) {
+      await.advancedByOther = true;  // that input moves the encoder on; no extra kick (merged)
+      if (!await.kickSubmitted) ++awaitKickMerged;
+    }
+  }
+  // End of an encode call that did NOT bring the awaited AU: the kick's call ends it as exhausted; a
+  // call of another input leaves it to that input's own trailing edge / the refresh (deferred).
+  void NoteAwaitCallEnded(bool awaitKickInput, bool inputAccepted) {
+    if (!await.active || !inputAccepted) return;
+    if (awaitKickInput) {
+      EndAwait(AwaitEnd::Exhausted);
+    } else if (await.advancedByOther) {
+      EndAwait(AwaitEnd::Deferred);
+    }
+  }
+
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
-  static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
+  static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge (see kAwaitKickDelayUs)
   // (Re)arm the trailing-edge kick to fire kTrailingKickDelayUs after atUs. Raw mode has no
   // encoder to flush, so it is a no-op there.
   void Arm(uint64_t atUs, bool useH264, uint32_t fps = 0) {

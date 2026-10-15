@@ -172,8 +172,113 @@ void TestCatchupDebt() {
          "catchup: unknown fps uses the 150 ms trailing delay");
 }
 
+// r9 (Codex r9 s2): accepted is not delivered. Acceptance closes the submission debt and opens a
+// separate output-progress state bound to codec instance / epochs / generation / ordinal; at most ONE
+// extra kick 150 ms after acceptance, merged away when another input moved the encoder, exhausted
+// (not success) when the kick's call still brings no AU, bounded by a deadline in every case, and the
+// kick never re-opens it. The stage (host_stage_encode_send_h264.cpp settle_await) drives exactly
+// these transitions; the sequences below are the ones it produces.
+void TestCatchupAwait() {
+  const uint64_t t0 = 50 * kSec;
+  // (a) accepted, no AU in its own call -> await; the one kick is due at +150 ms, not before
+  {
+    KickState k;
+    k.OpenAwait(/*instance*/ 4, /*session*/ 7, /*inputEpoch*/ 3, /*gen*/ 2, /*ordinal*/ 105, /*version*/ 349, t0);
+    expect(k.await.active && k.awaitOpened == 1, "await: an accepted catch-up without its AU opens the await");
+    expect(!k.CatchupDue(t0 + 10 * kSec), "await: acceptance leaves no submission debt (no per-tick re-submit)");
+    expect(!k.AwaitKickDue(t0 + KickState::kAwaitKickDelayUs - 1) && k.AwaitKickDue(t0 + KickState::kAwaitKickDelayUs),
+           "await: the extra kick is due 150 ms after acceptance, not before");
+    k.await.kickSubmitted = true;  // stage: the kick went to the encode stage
+    expect(!k.AwaitKickDue(t0 + 2 * KickState::kAwaitKickDelayUs), "await: one kick only -- not due again once submitted");
+    k.NoteAwaitInputAccepted(true);
+    expect(k.await.kickAccepted && k.awaitKickAccepted == 1 && k.awaitOpened == 1,
+           "await: the kick's acceptance is counted and does NOT open another await");
+    expect(k.AwaitSatisfiedBy(4, 3, 105), "await: the catch-up's own ordinal from the same instance/epoch satisfies it");
+    k.EndAwait(KickState::AwaitEnd::Observed);
+    expect(!k.await.active && k.awaitExhausted == 0 && k.awaitDeferred == 0, "await: observed closes it, nothing else counted");
+  }
+  // (b) provenance: only the same instance + input epoch, ordinal >= the catch-up's, counts
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    expect(!k.AwaitSatisfiedBy(3, 3, 200), "await: a late output of an OLDER codec instance never counts");
+    expect(!k.AwaitSatisfiedBy(4, 2, 200), "await: an AU of another input epoch never counts");
+    expect(!k.AwaitSatisfiedBy(4, 3, 104), "await: an AU of an EARLIER input does not count");
+    expect(!k.AwaitSatisfiedBy(4, 3, 0), "await: an AU without provenance (ordinal 0) does not count");
+    expect(k.AwaitSatisfiedBy(4, 3, 106), "await: a LATER input's AU (outputs follow accepted order) counts");
+    expect(k.AwaitIdentityMatches(4, 7, 3, 2) && !k.AwaitIdentityMatches(5, 7, 3, 2) &&
+               !k.AwaitIdentityMatches(4, 8, 3, 2) && !k.AwaitIdentityMatches(4, 7, 4, 2) &&
+               !k.AwaitIdentityMatches(4, 7, 3, 3),
+           "await: identity = codec instance + session epoch + input epoch + stream generation");
+    k.EndAwait(KickState::AwaitEnd::Cancelled);
+    expect(!k.await.active && k.awaitCancelled == 1 && !k.AwaitKickDue(t0 + kSec),
+           "await: cancelled (identity / instance / pause) -> no kick");
+  }
+  // (c) a new real input accepted before the kick: merged, no extra kick; its call without the AU defers
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    k.NoteAwaitInputAccepted(false);
+    expect(k.await.advancedByOther && k.awaitKickMerged == 1 && !k.AwaitKickDue(t0 + kSec),
+           "await: another accepted input moves the encoder -> the extra kick is dropped (merged)");
+    k.NoteAwaitCallEnded(false, true);
+    expect(!k.await.active && k.awaitDeferred == 1 && k.awaitExhausted == 0,
+           "await: that call without the AU defers to the input's own trailing edge / refresh");
+  }
+  // (d) the kick was taken but still no AU: exhausted -- not delivered, not re-kicked, not re-opened
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    k.await.kickSubmitted = true;
+    k.NoteAwaitInputAccepted(true);
+    k.NoteAwaitCallEnded(true, true);
+    expect(!k.await.active && k.awaitExhausted == 1 && !k.AwaitKickDue(t0 + 5 * kSec) && k.awaitOpened == 1,
+           "await: kick taken, no AU -> exhausted; no second kick, nothing reopened");
+  }
+  // (e) a refused / not-accepted kick waits like any delta, but the whole state is bounded
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    k.await.kickSubmitted = true;
+    k.NoteAwaitCallEnded(true, /*inputAccepted*/ false);
+    expect(k.await.active, "await: a kick the encoder did not take does not end the await");
+    k.await.kickSubmitted = false;  // stage: refused -> retry later
+    k.await.kickDueUs = t0 + 300000;
+    expect(!k.AwaitKickDue(t0 + 299999) && k.AwaitKickDue(t0 + 300000), "await: a refused kick is tried again later");
+    const uint64_t deadline = t0 + KickState::kAwaitKickDelayUs + KickState::kAwaitKickDeadlineUs;
+    expect(!k.AwaitKickExpired(deadline - 1) && k.AwaitKickExpired(deadline), "await: bounded -- expires at its deadline");
+    k.await.kickSubmitted = true;  // even with a kick in hand, the deadline still bounds it
+    expect(k.AwaitKickExpired(deadline), "await: the deadline holds even after a submitted kick");
+    k.EndAwait(KickState::AwaitEnd::Deferred);
+    expect(!k.await.active && k.awaitDeferred == 1, "await: expired -> deferred to the refresh");
+  }
+  // (f) a newer catch-up accepted while one is awaited: the old await is advanced-by-other
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    k.NoteAwaitInputAccepted(false);  // the newer catch-up's own acceptance
+    k.NoteAwaitCallEnded(false, true);
+    expect(!k.await.active && k.awaitDeferred == 1, "await: a newer accepted input supersedes the old await");
+    k.OpenAwait(4, 7, 3, 2, 120, 400, t0 + kSec);
+    expect(k.await.active && k.await.ordinal == 120 && k.await.version == 400 && k.awaitOpened == 2,
+           "await: ... and the newer catch-up opens its own");
+  }
+  // nothing awaited: every transition is a no-op
+  {
+    KickState k;
+    k.NoteAwaitInputAccepted(false);
+    k.NoteAwaitInputAccepted(true);
+    k.NoteAwaitCallEnded(true, true);
+    k.EndAwait(KickState::AwaitEnd::Exhausted);
+    expect(!k.await.active && k.awaitKickMerged == 0 && k.awaitKickAccepted == 0 && k.awaitExhausted == 0 &&
+               !k.AwaitKickDue(t0) && !k.AwaitKickExpired(t0 + 10 * kSec) && !k.AwaitSatisfiedBy(4, 3, 105),
+           "await: without an open await nothing is counted or due");
+  }
+}
+
 int main() {
   TestCatchupDebt();
+  TestCatchupAwait();
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();

@@ -2369,6 +2369,28 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     return true;
   };
 
+  // motion-settle r9: asked for one call only -- collect what the MFT already posted before this
+  // input goes in (ProcessOutput strictly in response to METransformHaveOutput, the async contract).
+  const bool prepoll = nextCallPrepoll_;
+  nextCallPrepoll_ = false;
+  if (prepoll && asyncTransform_ && eventGenerator_) {
+    encodeStats->prePollRan = 1;
+    const uint64_t samplesBefore = encodeStats->processOutputSamples;
+    for (uint32_t poll = 0; poll < 4; ++poll) {
+      Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
+      const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+      if (FAILED(ehr) || !ev) break;  // MF_E_NO_EVENTS_AVAILABLE included
+      MediaEventType et = MEUnknown;
+      (void)ev->GetType(&et);
+      if (et == METransformHaveOutput) {
+        ++encodeStats->prePollHaveOutputCount;
+        if (!drain_outputs()) return finish_call(false);
+      }
+    }
+    encodeStats->prePollOutputSamples =
+        static_cast<uint32_t>(encodeStats->processOutputSamples - samplesBefore);
+  }
+
   const uint64_t processInputStartUs = qpc_now_us();
   HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
   const uint64_t processInputDoneUs = qpc_now_us();

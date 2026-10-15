@@ -400,6 +400,15 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " reRejected=" << k.catchupReRejected << " cancelledIdentity=" << k.catchupCancelledIdentity
                 << " gaveUp=" << k.catchupGaveUp << " newerCache=" << k.catchupServedNewerCache
                 << " open=" << (k.catchup.owed ? 1 : 0) << "\n";
+      // r9: accepted -> output-observed (own call / after the extra kick / after another input) and
+      // where the rest went; delivered is the receiver's side (catchup_chain.py)
+      std::cout << "[native-video-host][catchup-await] opened=" << k.awaitOpened
+                << " outputOwnCall=" << k.awaitOutputOwnCall << " observedByKick=" << k.awaitObservedByKick
+                << " observedByOther=" << k.awaitObservedByOther << " kickSubmitted=" << k.awaitKickSubmitted
+                << " kickAccepted=" << k.awaitKickAccepted << " kickRefused=" << k.awaitKickRefused
+                << " kickMerged=" << k.awaitKickMerged << " exhausted=" << k.awaitExhausted
+                << " deferred=" << k.awaitDeferred << " cancelled=" << k.awaitCancelled
+                << " active=" << (k.await.active ? 1 : 0) << "\n";
     }
     sender.sentFrames = 0;
     encoder.encodedFrames = 0;

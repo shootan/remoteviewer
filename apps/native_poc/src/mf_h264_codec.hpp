@@ -119,6 +119,13 @@ struct H264EncodeFrameStats {
   // Diagnostic for the async output-starvation wedge: this call saw MFT events but none were
   // METransformHaveOutput. Repeated while input keeps being accepted is the wedge fingerprint.
   uint32_t asyncNeedInputOnlyCall = 0;
+  // motion-settle r9: a pre-input event poll was asked for this call (set_next_call_prepoll) -- did
+  // it run, how many METransformHaveOutput it found and how many AUs it drained BEFORE this call's
+  // input went in. AUs found there were ready before this call (the earlier call returned too soon);
+  // none there but one after the input = the MFT released it only on the next input.
+  uint8_t prePollRan = 0;
+  uint32_t prePollHaveOutputCount = 0;
+  uint32_t prePollOutputSamples = 0;
   // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
   // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
   uint32_t pendingInputDepth = 0;
@@ -309,6 +316,10 @@ class H264Encoder {
   // catch-up: the source and content version of the NEXT input; same FIFO.
   void set_next_input_synthetic_reason(uint8_t reason) { nextInputSyntheticReason_ = reason; }
   void set_next_input_content_version(uint64_t version) { nextInputContentVersion_ = version; }
+  // motion-settle r9: for the NEXT encode call only, poll the async MFT's events (no wait) and drain
+  // any METransformHaveOutput BEFORE ProcessInput, through the same drain as the post-input poll.
+  // Telemetry for the catch-up's extra kick (H264EncodeFrameStats::prePoll*); one call, then off.
+  void set_next_call_prepoll(bool on) { nextCallPrepoll_ = on; }
   // Inputs this encoder instance actually accepted (ProcessInput succeeded), real and synthetic. A
   // caller compares it across one encode call to learn whether THAT input was taken -- the call's
   // return value also folds in output-drain failures after an accepted input.
@@ -391,6 +402,7 @@ class H264Encoder {
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint8_t nextInputSyntheticReason_ = 0;
   uint64_t nextInputContentVersion_ = 0;
+  bool nextCallPrepoll_ = false;
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
   uint32_t outBufferBytes_ = 0;

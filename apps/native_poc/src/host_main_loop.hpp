@@ -185,6 +185,7 @@ struct TickContext {
   bool servedBootstrap = false;
   bool kickForcedKey = false;    // true only when this kick must open a closed media barrier (IDR)
   uint8_t syntheticReason = 0;   // catch-up: kSyntheticReason* of a served (synthetic) input, 0 = real
+  bool awaitKick = false;        // r9: this kick is the one extra input for an awaited catch-up AU
   uint64_t queuePopUs = 0;
   uint64_t queueSelectWaitUs = 0;
   uint64_t frameAgeAtSelectUs = 0;

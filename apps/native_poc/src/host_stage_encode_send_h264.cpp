@@ -329,10 +329,17 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
      // A catch-up is an ordinary delta under the cap (no admit-always), like the frame it replaces.
-     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonCatchup;
+     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonCatchup && !tc.awaitKick;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
+       if (servedBootstrap && tc.awaitKick && kick.await.active) {
+         // r9: the extra kick waits like any delta; it is tried again until the await deadline
+         kick.await.kickSubmitted = false;
+         kick.await.kickDueUs = qpc_now_us() + KickState::CatchupDelayUs(hx.encoder.activeFps);
+         ++kick.awaitKickRefused;
+         return Flow::Continue;
+       }
        // The skipped picture is the newest content: owe it a prompt catch-up (host_kick.hpp).
        const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;
        if (!servedBootstrap || catchupInput) {
@@ -380,8 +387,13 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     encoder.codec.set_next_input_synthetic(servedBootstrap);
     encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
     encoder.codec.set_next_input_content_version(servedBootstrap ? stats.lastVersionSent : version);
-    encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
+    const uint64_t callInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
+    encoder.codec.set_next_input_epoch(callInputEpoch);
     const uint64_t acceptedBefore = encoder.codec.accepted_input_count();
+    // r9: the extra kick collects first what the MFT already posted (telemetry: ready before this call,
+    // or released only by this input)
+    const bool awaitKickInput = servedBootstrap && tc.awaitKick;
+    if (awaitKickInput) encoder.codec.set_next_call_prepoll(true);
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -464,19 +476,79 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // catch-up: only an input the encoder ACCEPTED pays the debt (Codex r8 s3-3) -- decided from the
   // accepted-input counter BEFORE the failure exits below: an input taken whose output drain then
   // failed was still taken, and must not be re-served as if it had been refused.
+  const bool inputAccepted = encoder.codec.accepted_input_count() != acceptedBefore;
+  uint64_t catchupAcceptedOrdinal = 0, catchupAcceptedVersion = 0;
   {
     const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;
-    if (encoder.codec.accepted_input_count() != acceptedBefore) {
+    if (inputAccepted) {
       if (catchupInput && kick.catchup.owed) {
         std::cout << "[native-video-host][catchup] accepted version=" << kick.catchup.version
                   << " ordinal=" << encoder.codec.accepted_input_count() << "\n";
+        catchupAcceptedOrdinal = encoder.codec.accepted_input_count();
+        catchupAcceptedVersion = kick.catchup.version;
       }
       kick.NoteInputAccepted(catchupInput);
+      kick.NoteAwaitInputAccepted(awaitKickInput);
     } else if (catchupInput) {
       ++kick.catchupNotAccepted;
     }
+    if (awaitKickInput && !inputAccepted && kick.await.active) {
+      // r9: not taken -- the extra kick is tried again until the await deadline, never past it
+      kick.await.kickSubmitted = false;
+      kick.await.kickDueUs = qpc_now_us() + KickState::CatchupDelayUs(hx.encoder.activeFps);
+      ++kick.awaitKickRefused;
+    }
   }
+  // r9 (host_kick.hpp CatchupAwait): what the AUs this call emits mean for an awaited catch-up output,
+  // and whether the catch-up accepted in this call came out in it. Run on the AUs that go on to the
+  // emit stage (none on a failed call, none after a provenance rebuild discarded them).
+  const auto settle_await = [&](const std::vector<H264AccessUnit>& emitted) {
+    const uint64_t inst = encoder.codec.instance_id();
+    const uint64_t settleUs = qpc_now_us();
+    if (kick.await.active) {
+      for (const auto& au : emitted) {
+        if (!kick.AwaitSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
+        ++(awaitKickInput ? kick.awaitObservedByKick : kick.awaitObservedByOther);
+        std::cout << "[native-video-host][catchup] output ordinal=" << kick.await.ordinal
+                  << " auOrdinal=" << au.acceptedInputOrdinal << " via=" << (awaitKickInput ? "kick" : "other")
+                  << " sinceAcceptedUs=" << (settleUs - kick.await.acceptedUs)
+                  << " prePollRan=" << static_cast<unsigned>(encodeStats.prePollRan)
+                  << " prePollHaveOutput=" << encodeStats.prePollHaveOutputCount
+                  << " prePollAus=" << encodeStats.prePollOutputSamples << "\n";
+        kick.EndAwait(KickState::AwaitEnd::Observed);
+        break;
+      }
+      if (kick.await.active) {
+        const bool wasKick = awaitKickInput && inputAccepted;
+        const bool wasOther = !awaitKickInput && inputAccepted && kick.await.advancedByOther;
+        if (wasKick || wasOther) {
+          std::cout << "[native-video-host][catchup] await " << (wasKick ? "exhausted" : "deferred")
+                    << " ordinal=" << kick.await.ordinal << " why=" << (wasKick ? "no-au-after-kick" : "other-input")
+                    << " prePollRan=" << static_cast<unsigned>(encodeStats.prePollRan)
+                    << " prePollHaveOutput=" << encodeStats.prePollHaveOutputCount << "\n";
+        }
+        kick.NoteAwaitCallEnded(awaitKickInput, inputAccepted);
+      }
+    }
+    if (catchupAcceptedOrdinal != 0) {
+      bool own = false;
+      for (const auto& au : emitted) {
+        if (au.acceptedInputOrdinal >= catchupAcceptedOrdinal && au.inputEpoch == callInputEpoch) own = true;
+      }
+      if (own) {
+        ++kick.awaitOutputOwnCall;
+        std::cout << "[native-video-host][catchup] output ordinal=" << catchupAcceptedOrdinal
+                  << " via=own\n";
+      } else {
+        kick.OpenAwait(inst, clientSession.epoch.load(std::memory_order_acquire), callInputEpoch, streamGeneration,
+                       catchupAcceptedOrdinal, catchupAcceptedVersion, settleUs);
+        std::cout << "[native-video-host][catchup] await open ordinal=" << catchupAcceptedOrdinal
+                  << " version=" << catchupAcceptedVersion << " instance=" << inst << "\n";
+      }
+    }
+  };
    if (!surfaceEncoded && !bgraCall.ok) {
+    settle_await({});
     // Dropped output breaks the reference chain; a rejected input by itself does not. Avoid
     // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.
     if (!units.empty() || encodeStats.processOutputErrorCount > 0) {
@@ -654,6 +726,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     }
   }
 
+  settle_await(units);
   if (units.empty()) return Flow::Continue;
 
   stats.captureAgeSumUs += captureAgeAtCallbackUs;
