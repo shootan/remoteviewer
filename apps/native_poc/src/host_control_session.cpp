@@ -864,6 +864,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
       input.header = header;
       if (!link.Read(&input.seq, sizeof(input) - sizeof(MessageHeader))) break;
       const uint64_t inputReceivedUs = qpc_now_us();
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      // viewer-sharpness r1, TEST BUILD ONLY (GNLinkStreamPinnedSelectTest, injection off): the remote pixel each
+      // pointer event arrived with, so a tap on the phone's picture can be checked against where it was aimed.
+      if (input.kind >= 1 && input.kind <= 4) {
+        std::cout << "[native-video-host][input-trace] seq=" << input.seq << " kind=" << input.kind
+                  << " x=" << input.x << " y=" << input.y << " buttons=" << input.buttons << "\n";
+      }
+#endif
       std::string resolvedTarget;
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)

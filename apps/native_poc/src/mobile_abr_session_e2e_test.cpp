@@ -140,6 +140,21 @@ class CadenceTarget {
       HBRUSH fore = CreateSolidBrush(RGB(200, 60 + phase * 5, 40 + phase * 3));
       FillRect(dc, &block, fore);
       DeleteObject(fore);
+      // viewer-sharpness r1: a 2px white frame and a 24px square in each corner (red, green, blue, yellow from the
+      // top left, clockwise) -- the phone's screenshot shows whether an edge row/column is lost or padding shown.
+      const int cw = client.right, ch = client.bottom;
+      const RECT edges[] = {{0, 0, cw, 2}, {0, ch - 2, cw, ch}, {0, 0, 2, ch}, {cw - 2, 0, cw, ch}};
+      HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
+      for (const RECT& e : edges) FillRect(dc, &e, white);
+      DeleteObject(white);
+      const struct { RECT r; COLORREF c; } corners[] = {
+          {{2, 2, 26, 26}, RGB(255, 0, 0)}, {{cw - 26, 2, cw - 2, 26}, RGB(0, 255, 0)},
+          {{cw - 26, ch - 26, cw - 2, ch - 2}, RGB(255, 255, 0)}, {{2, ch - 26, 26, ch - 2}, RGB(0, 0, 255)}};
+      for (const auto& k : corners) {
+        HBRUSH b = CreateSolidBrush(k.c);
+        FillRect(dc, &k.r, b);
+        DeleteObject(b);
+      }
       EndPaint(hwnd, &ps);
       return 0;
     }
