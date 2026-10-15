@@ -13132,3 +13132,45 @@ Next
     - host ABR 은 내내 high
 - 슬롯 중 발견하고 같은 슬롯에서 보수: K3 watchdog(첫 fail 실행에서 6 s 뒤에도 생존), 시험 창 shareable 거절(첫 AVD 선택 실패).
 - 미검증: 실기 폰. relay 경로의 다른 기기 대체(direct 만 시험). K4 보류 경로의 UI 증거. 배터리·CPU·바이트.
+
+### 2026-10-15 keepalive r3 — Codex R1~R3 (`codex_keepalive_2abb8be.md`)
+
+- R3 [안전] 시험 host 의 fail-open:
+  - 사고: 2abb8be 시험 host 는 pid 가 열리는지만 봤다. 유효한 pid 에 틀린 제목이면 시작했고, 시작 단계에서 `fallback=monitor`(화면)로 갔다.
+  - r2 parkclip 은 격리 station 에서 제품 host 를 띄웠다. 격리 station 의 창은 `IsWindowVisible=0` 이라 제품의 창 찾기가 실패했고, 화면 capture 로 떨어졌다.
+    - 작업용 run 두 번: encode 0 · 송신 0.
+    - 검증용 run: 1920x1080 key frame 1장(51570 B)이 loopback 의 harness 로 인코딩·송신됐다. 파일로 저장된 것은 없다.
+  - 보수(`26f5e6d`, `122c5b0`, 모두 `#ifdef` 시험 build 전용):
+    - 시작할 때 그 pid·그 제목의 창을 실제로 찾는다(5 s). 고정은 한 번뿐이다.
+    - capture 시작 지점 전부(시작 item·재시작 WGC/DXGI/GDI·선택·rebind·썸네일)를 하나의 관문이 지킨다. 고정 HWND·같은 프로세스·같은 제목이 아니면 host 가 종료한다(65). 화면 fallback 은 없다.
+    - 창이 파괴·개명·재생성되거나 프로세스가 끝나면 감시 스레드가 host 를 종료한다.
+    - parkclip host 는 no-capture 모드다. 격리 station 의 fixture 에 고정되고, capture 를 아예 시작하지 않으며 control 만 서비스한다.
+  - 확인:
+    - `pinned_seam_boundary_test` 51/0. 격리 station 에서 probe 가 첫 capture 호출에서 capture 객체 생성 전에 끊는다. 부정 대조(2abb8be 판정 복원)는 실제로 screen 으로 갔다.
+    - parkclip 재실행 26/0: capture 0, WinSta0 클립보드 불변.
+- R1 (`fdd9c20`):
+  - 문제: control loop 가 pass 경계에서 읽은 `parking` 을 잠금 밖에서 다음 action 에 적용했다. 그 사이에 들어온 resume 과 새 목록 요청이 끝난 park 의 판정으로 버려졌다.
+  - 보수: NextAction 과 park 판정을 parkMu_ 안에서 함께 한다. resume 의 inhibit 해제도 그 잠금 안에서 한다. 목록·모니터 목록·선택·stream·클립보드 요청은 검사와 enqueue 를 한 단계로 묶었다. park 중 StreamState 는 false 만 허용한다.
+  - 반례(시험 고리로 loop 를 park 판정 직후에 멈춤): 수정 전 dropped 1·무응답(FAIL) → 수정 후 전송·응답(PASS).
+- R2 (`4b77feb`, `0a7e52d`):
+  - native 연결을 앱의 현재 operation 에 묶었다(ConnectOwner → nativeSetConnectOwner).
+    - observe·punch 전후에 확인한다. 소유자가 바뀌면 진행 중인 punch·observe 도 멈춘다.
+    - Connect 는 ConnectOpGate::Adopt 안에서만 한다(직렬화). 도중에 stale 이 되면 끊고 0 을 반환한다.
+    - 반환값은 그 호출이 만든 generation 이다.
+  - onStop·종료도 owner 를 무효화한다.
+  - 보류 탭 fallback 은 예약 시점의 owner·계정·디렉터리·foreground·목록 유지가 모두 그대로일 때만 실행한다.
+  - `connect_op_gate_test` 9/0(2abb8be 흐름 부정 대조 포함), Android 190/0.
+- 시험 host 장애 주입(`0a7e52d`, fault 파일): 일시정지 중 Pong 지연, select ACK 지연, 선택 뒤 key frame N장 유실(NACK 캐시 제외).
+- 실행(2026-10-15 15:36~16:19 슬롯, SLOT_REQUEST.txt, console 세션, 모두 fail-closed 시험 host):
+  - native: park_main 71/0, park_fail 14/0, sparse·reconnect PASS.
+  - AVD 실 APK UI r3 57/59:
+    - 확인 중 탭 보류 → 재사용 3/3(확인 1.3~1.8 s)
+    - 보류 → 확인 실패 → 일반 연결 정확히 1회 2/2
+    - 보류 → HOME → 연결 0
+    - ACK 400 ms 지연 → 첫 프레임 573·637·610 ms, 새 연결 695 ms
+    - key frame 2장 유실 → 511·550·404 ms
+    - relay 경로 B 대체 → parked 종료·자동 재탈취 0
+  - FAIL 2 = 로그아웃 경우. 탭이 늦게 닿아(2.8 s) park 가 먼저 실패했고, fallback 연결이 시작된 뒤 로그아웃이 그 연결을 native 연결 전에 멈췄다(stale, 카운터 불변).
+  - 그 경우를 탭 좌표를 미리 정해 다시 시험했다: 확인 중 로그아웃 2회 16/16(sign_out 종료·fallback 0·observe/punch/Hello 0).
+  - 기존 묶음: ui_run2 60/0, r1 묶음 43/0.
+- 미검증: 실기 폰. R2-b 의 "fallback 예약 후 실행 전" 취소는 UI 에서 만들 수 없어 단위로만 확인했다. 배터리·CPU·바이트.
