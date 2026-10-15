@@ -307,6 +307,21 @@ void ClientSessionController::CollectForParkLocked(uint64_t nowUs, bool releases
                dropped, kept, releases.size());
 }
 
+// keepalive r2 K3: the park's budget and limit, enforced from the video thread too. The control loop can sit
+// in one exchange for up to the control read timeout (12 s) when nothing comes back -- exactly when a park
+// cannot be confirmed -- so its own pass-boundary tick alone would let an unconfirmed park outlive its 2 s.
+void ClientSessionController::ParkWatchdog() {
+  ClientParkPhase phase = ClientParkPhase::None;
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    if (!park_.Inhibiting()) return;
+    phase = park_.Tick(now_us());
+  }
+  if (phase == ClientParkPhase::Failed || phase == ClientParkPhase::Expired) {
+    SignalRuntimeFailure(phase == ClientParkPhase::Expired ? "park expired" : "park not confirmed");
+  }
+}
+
 bool ClientSessionController::HostHonorsStreamPause() const {
   return hostSupportsThumbnails_.load(std::memory_order_acquire);
 }
@@ -989,6 +1004,7 @@ void ClientSessionController::VideoReceiveMain() {
   constexpr uint64_t kUdpDropLogGapUs = 1'000'000;  // bound drop diagnostics to ~1/s even as codes alternate
 
   while (!stopRequested_.load(std::memory_order_acquire)) {
+    ParkWatchdog();  // keepalive r2 K3: this loop ticks (<= 100 ms) even while the control loop waits on an answer
     SocketHandle udpSocket = kInvalidSocket;
     ClientEncodedFrameSink* sink = nullptr;
     {

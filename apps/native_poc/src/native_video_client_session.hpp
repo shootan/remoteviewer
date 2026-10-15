@@ -345,6 +345,7 @@ class ClientSessionController {
   std::atomic<uint32_t> parkReleased_{0};
   std::atomic<uint32_t> parkDroppedActions_{0};
   void CollectForParkLocked(uint64_t nowUs, bool releasesOnly);
+  void ParkWatchdog();
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};
   std::atomic<uint64_t> udpHelloCount_{0};
