@@ -13218,3 +13218,18 @@ Next
   - 수동 IP 연결의 UI 실행(단위 gate 만 확인).
   - Activity 재생성의 실제 lifecycle 실행(번호 발급 경계는 단위만 확인).
   - 위 decoder 첫 출력 정지의 원인.
+
+
+### 2026-10-15 keepalive r5 + quality-6m r1 — 통합 후보 int/apk-0.2.30 (게시 전)
+
+- keepalive r5 (Codex `codex_keepalive_85cb88e.md` SOURCE OK)
+  - T1 `9358a97`: 명시적 연결 해제가 gate 의 같은 잠금 경계(번호 먼저 → session 은 adoptMu_, rendezvous 는 step 잠금·비동기)에서만 닫는다. 취소된 observe 의 socket 누수(200회 +200 handle) 보수. gate 39/0.
+  - D1 `85cb88e`: 첫 선택 무출력의 원인 — 선택 IDR 이 Surface 보다 먼저 와 버려진 뒤 Surface 가 codec 을 시작해 첫 입력이 P 프레임(goldfish 가 입력 버퍼를 쥔 채 출력 0). **0.2.29 기준선에서도 재현**(cold 4 중 1). 새 codec 은 IDR 전 delta 를 버리고 key 를 요청(timeout·reset 없음). 반례 FAIL→PASS, 보수 APK 정지 0(그 경로 실제 4회 발생 후 첫 출력). "delta 먼저"는 필요조건으로만 관측(24 선택 중 5회, 정지 1회).
+  - 미해결: `android_decoder_decode_stats_test` fps 항목의 시간 의존 FAIL(보수 전에도 동일).
+- quality-6m r1 (Codex `codex_quality_6m_7f715b6.md` SOURCE OK): 휴대폰 화질 3단계 LOW 1500 / HIGH 3000 / **BEST 6000**, 기본 LOW, schema 2 유지, 저장된 3000 자동 상향 없음. 설정·뷰어 메뉴 3버튼(큰 글꼴 잘림 결함 발견·수정 `7f715b6`). AVD: 메뉴 3000/6000/1500 각각 host `runtime-config-applied … abrOverride=0`, 같은 6000 반복 no-op, 재시작 후 BEST 유지.
+  - 6M core: 1920×1080 소스에서 6M 적용 직후 1920×1080, 장애 시 high→mid→low 강등. **회복은 1920×1080 에서 FAIL(원본 보존)** — 3M 대조도 같아 fixture cadence 원인으로 **잠정 분류**. 480×270 6M 실행은 **low→mid 회복 입증(6M high·1080p 복귀는 아님)**.
+- park 중 화질 변경: UI 로 도달 불가(설정 탭은 TARGETS, 뷰어 메뉴는 VIEWER/SWITCHING 에서만), native `RequestRuntimeConfig` 는 park 중 거절, 미전송분은 `pendingRuntimeConfigSync` 로 남아 복귀 후 첫 동기화에서 한 번 적용. ABR 은 사용자 선택값을 덮어쓰지 않음(선택은 `selectQuality` 에서만 바뀐다).
+- 통합: `6548e0f`(keepalive merge, 문서 충돌 2건 — history 양쪽 보존, 작업목록 MA 는 main·KA 는 keepalive 줄), `56c2cde`(quality-6m merge, e2e 하네스 옵션 양쪽 보존). 제품 코드는 자동 병합.
+- 회귀: gate 39/0(×10), park 34/0, owed_key 32/0, shared_core PASS, Android 단위 194/0, 4 ABI, build gate(hook·abr-trace·fixture 주소 출하물 0). AVD 짧은 묶음 9/9(cold 첫 화면·BEST 적용·park 재사용·재선택·연결 해제·sign-out, 새 codec 첫 입력 IDR).
+- 미검증: 실기 폰, 제조사 MediaCodec, 1920×1080 회복 완주, DesktopText, 배터리/트래픽.
+- 제품/테스트/문서: 문서(이 항목).
