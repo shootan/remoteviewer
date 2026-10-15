@@ -186,8 +186,10 @@
     <string name="ui_quality_label">화질</string>
     <string name="ui_quality_low">저화질 · 1500</string>
     <string name="ui_quality_high">고화질 · 3000</string>
+    <string name="ui_quality_best">최고화질 · 6000</string>
     <string name="ui_quality_low_short">저화질</string>
     <string name="ui_quality_high_short">고화질</string>
+    <string name="ui_quality_best_short">최고화질</string>
     <string name="ui_fps_label">프레임</string>
     <string name="ui_fps_item">%1$d fps</string>
     <string name="ui_fps_hint">높은 프레임은 데이터·배터리 사용량이 늘 수 있습니다</string>
