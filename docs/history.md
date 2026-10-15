@@ -13103,3 +13103,32 @@ Next
 - 회귀: core e2e sparse·reconnect·decodestall·recovery 4/4 exit 0. 단위 park 23/0·shared_core·telemetry·decode_stats·snapshot PASS. Android 184/0, assembleDebug / Release 4 ABI.
 - 미검증: 실기기 폰 1회. 다른 기기 접속 대체 시 자동 재탈취 0(두 번째 client 시험 미실시). APK UI 의 5 s 미만 park(native 2 s 만 측정). 실제 host 클립보드 경로(fixture host 는 클립보드 off, 단위·코드 경로만). late callback(코드 가드만). 배터리 / CPU.
 - 관찰(ledger): pinned 시험 host 에서 generation 이 같은 선택 응답보다 stream-active IDR 이 먼저 오면, client 의 owed-key 재요청이 보이지 않고 다음 GOP(10 s)를 기다렸다. 실제 host 는 전환 뒤 IDR 을 보내 같은 조건이 생기지 않는 것으로 보이나 별도 확인이 필요하다.
+
+### 2026-10-15 keepalive r2 — Codex K1~K6 (`codex_keepalive_d4b3068.md`)
+
+- 제품(`f0b64cb`, `4434a00`):
+  - K1: park 진입은 표시만 하고, 수거·release·미송신 요청 취소는 control loop 의 pass 경계에서 한다(송신 중이던 down 은 응답·기록 뒤). pause 는 queue 가 비고 held 가 0 일 때만 보낸다. park 중에는 Ping·StreamState·입력(release)·metrics 만 송신하고 나머지는 송신하지 않고 폐기한다. 입력·텍스트·tune·backend 는 park mutex 안에서 검사와 enqueue 를 함께 한다.
+  - K3: 상한 300 s. Failed·Expired 는 control loop 와 video thread watchdog(≤ 100 ms) 양쪽에서 세션을 끝낸다. 예산 뒤 Pong 은 무효이고, Resume 직전에 deadline 을 다시 확인한다.
+  - K5: window-list thumbnail 비트(45dbbb2, 2026-07-27)를 광고한 host 에서만 park 한다. pause 처리는 90f718c(2026-04-07)부터 있었다. 그 외 host 에서는 "PC 목록"을 숨긴다.
+  - K2: 401 에서 park 를 종료하고, park tick 마다 신원을 비교한다. connect 소유자(ConnectOwner): 무효화된 연결은 observe 전·native 연결 전에 멈추고, 자기 연결만 닫는다.
+  - K4: 확인 중 탭을 1회 보류한다. 확정되면 재사용, 스스로 실패하면 일반 연결 1회.
+  - 클립보드: baseline 을 읽지 못한 복귀에서는 실제 클립보드 변경까지 push 를 보류한다.
+- 시험(`7aab5e8`, `a90877c`, `670b59c`):
+  - 시험 host fail-closed: 인수가 없거나 프로세스를 열 수 없으면 exit 64. 목록·선택·썸네일·모니터는 고정 창만 허용한다. 공유 가능 판정은 그 HWND 만 시험 빌드에서 허용하고, 선택은 제품 트랜잭션 그대로다(r1 의 Applied 우회·추가 IDR 은 제거). 구 host 흉내(`REMOTE60_PINNED_TEST_OLD_HOST=1`)를 두었다. 출하 exe 의 seam 문자열 grep 은 0 이다.
+  - harness: park main/fail/expire, parkclip(private window station).
+  - 단위: park 33/0(d4b3068 순서 전사 부정 대조가 실제로 실패함), Android 188/0.
+- 실행(2026-10-15 13:34~14:24 슬롯, SLOT_REQUEST.txt·작업용1 정지 조율):
+  - native park main 67/0: 송신 중 down 경합 6/6 확정(실제 in-flight 1회), 대기 중 list/tune/backend 2건은 송신하지 않고 폐기, 다른 client 직접 대체 시 parked 세션 종료·재연결 0.
+  - fail: 2021 ms 에 스스로 종료. expire: 300026 ms 에 스스로 종료.
+  - parkclip 21/0: park 중 양방향 0, 복귀 재생 0, 새 복사 양방향 정상, 사용자 WinSta0 클립보드 sequence 불변.
+  - 회귀: sparse·reconnect·decodestall·recovery 4/4.
+  - AVD 실 APK UI v2 33/0 + 보강 12/0 + r1 묶음 43/0:
+    - 짧은 park 1.5 s·3 s(capture detach 전)·7 s(후) 각 3회 재사용
+    - 제품 selection 경로 첫 프레임: 재사용 n=22 p50 388 ms, p95 777 ms, 최대 958 ms / 새 연결 n=7 최대 593 ms
+    - 확인 중 즉시 탭 11회 모두 두 번째 탭 없이 TARGETS 도달. 다만 Targets 에서의 park 확정이 4~20 ms 로 빨라 보류 경로 자체는 UI 에서 0/11 이다(단위로만).
+    - 401(장치 철회) → session_refused 종료·재로그인 시 새 연결
+    - 지연 connect 응답(6 s)+sign-out → stale 은 native 연결 전에 멈춤·카운터 증가 0·새 연결 무손상
+    - 구 host(katest2) → "PC 목록" 미노출, host 는 stream-state 를 3회 무시했다
+    - host ABR 은 내내 high
+- 슬롯 중 발견하고 같은 슬롯에서 보수: K3 watchdog(첫 fail 실행에서 6 s 뒤에도 생존), 시험 창 shareable 거절(첫 AVD 선택 실패).
+- 미검증: 실기 폰. relay 경로의 다른 기기 대체(direct 만 시험). K4 보류 경로의 UI 증거. 배터리·CPU·바이트.
