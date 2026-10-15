@@ -13074,3 +13074,32 @@ Next
 - 결과: telemetry 54/0 — S1-a 40 + 12 runs, S1-b 45 runs 에서 강등 0, 보고 ≥ 20 fps, P7 stale 연속 < 2. S1-b 는 stale 1 초 1 회(응답이 2.7 s 늦은 selection 구간)가 있었고, 그 자리에 e599123 은 0 을 보냈다. 보존: fault B(grace 만료 뒤 0)·정상 loss 강등 시각이 pre 와 같다(12.0 s / 11.0 s), quality-first 무강등, steady 60 s 58 보고·hold 0. Hold 단위 [13](`d3819d1`): 250 ms 에 재-due, 매 pass 재시작해도 첫 보류 + 250 ms 에 닫힌다. decode_stats 42/0 ×4, snapshot 12/0, shared_core PASS, APK assembleDebug 4 ABI.
 - 실체인(@0de0009, 같은 host ec253fe5…, 2026-10-15 00:23~00:48 — 검증용 조율로 fix-motion-settle 측정을 멈춘 사이, 매 run 직전 겹침 확인): core e2e sparse×3·reconnect 무강등 PASS, decodestall 강등 유지 PASS, recovery 복귀 PASS(6/6 exit 0). AVD(격리 gnlink_kbd_test -read-only, smoke 3fd281e7…) app plan post **5/5 PASS** — 정상 lifecycle·fault A 강등 0, fault B 는 grace 만료(+60 s) 뒤 +61.8~62.8 s `high_to_mid_severe(severe_client)`, keyframe 허용 뒤 `client_stable_mid` 복귀(r5 post 와 같은 모양).
 - 남은 것: 실기기 MediaCodec·현장 패턴(게시 후 1회), host 거절 응답 경로, F2 의 에뮬레이터 NAT vs 시험 relay 미구분(ledger).
+
+### 2026-10-15 keepalive r1 — 모바일: PC 목록으로 나갔다 같은 PC 재진입 시 연결 재사용 (Codex `codex_keepalive_r1.md`)
+
+- 목표: "PC 목록"(park)과 "연결 해제"(실제 disconnect)를 나눈다. directory 세션 하나를 최대 5분 park 하고, 같은 PC 를 다시 고르면 directory·observe·punch·Hello 없이 같은 연결의 TARGETS 로 돌아간다. 현장 재진입 비용은 약 3.3 s 였다.
+- 제품(`6273b34`):
+  - native `client_park_state.hpp`: `ClientHeldInput` 은 보낸 down 중 up 이 안 나간 키·버튼·물리키를 기록한다. `ClientParkFence` 는 release 가 소진된 뒤 pause 를 보내고, 그 뒤 Ping 의 Pong 으로 확정한다(2 s 예산, 상한 초과 시 Expired).
+  - `ClientSessionController` 의 BeginPark / ResumeFromPark / EndPark / ParkPhase: park 중 입력·텍스트·클립보드·미리보기·목록·선택·stream 요청을 차단한다. 미송신 입력은 폐기하고 release 는 유지한다. 복귀 시 클립보드 baseline 을 다시 세운다(`OnResumed` + `SeedClipboardBaseline`). connection generation 과 connect / Hello 카운터를 둔다.
+  - 앱 `SessionPark.kt`(순수): 재사용 키 = account + directory origin + hostId + generation, 목록 진입부터 5분 hard deadline, 탭 결과 Reuse / Wait / Discard, 종료 사유.
+  - MainActivity: Targets 와 viewer 메뉴에 "PC 목록", 목록에 카드 "연결 유지 중"과 배너(남은 시간, "연결 끊기"). 종료 조건: 다른 PC, 연결 해제, sign-out, onStop, 종료, host 목록 이탈, 네트워크 변경·소실, peer lost, generation 변경, 만료. sign-out 뒤 늦게 온 connect 응답은 채택하지 않는다.
+  - Host·와이어·keepalive 주기·서버 TTL·"연결 해제" 버튼은 바꾸지 않았다.
+- 시험(`9bb6c2d`, `4c03774`):
+  - `client_park_state_test` 23/0(부정 대조 포함), `SessionParkTest`.
+  - 시험 빌드 host `GNLinkStreamPinnedSelectTest`(`REMOTE60_PINNED_SELECT_TEST_SEAM`): 고정한 시험 창만 선택 가능으로 나열하고, 선택 응답 뒤 IDR 을 요청한다. 출하 GNLinkStream.exe 의 seam 문자열 grep 결과는 0 이다.
+  - harness `--scenario park` / `directoryhost` 추가.
+  - 첫 AVD 실행에서 seam 이 런타임 잠금 플래그에 의존해 목록이 창 13개로 나왔다. 사용자 창 제목이 AVD 로 갔을 수 있어 즉시 중단했고, 스크린샷을 삭제하고 앱 데이터를 지운 뒤 인수 기반으로 고쳤다. UI 스크립트는 1개가 아닌 목록이면 바로 중단한다.
+- 실 APK UI(격리 AVD gnlink_kbd_test, 로컬 fixture directory + relay 10.0.2.2, 시험 계정, pinned 시험 host, 2026-10-15 11:48~12:19 측정 슬롯, 겹침 확인):
+  - 48/0.
+  - 새 연결 HOSTS→TARGETS 3.8~4.8 s(7회), 재사용 19~26 ms(7회). 재사용 동안 connects / hellos / observes / punches 증가 0, generation 동일, 서버 connect / helloAck 증가 0(10 = 새 연결 10).
+  - 선택→첫 프레임: 새 연결 뒤 p95 600 ms(6회), 재사용 뒤 p95 791 ms(7회). park 확정 4~240 ms.
+  - park 시간 대역: 8.4~9.3 s ×5 / 14 s / 71 s(capture detach 뒤). 71 s 동안 host 의 encoded / sent 는 0, capture detach 는 inactive 5 s 뒤였다.
+  - 반례: 다른 PC(other_host 폐기), 배너 "연결 끊기", onStop(app_stopped), 회전(유지), 이중 탭(재사용 1회), 비행기 모드(network_lost), sign-out, 5분 만료(300006 ms expired) 뒤 일반 연결.
+  - host ABR 은 내내 high(강등 0).
+- native park(격리 host, relay): 56/0.
+  - fence 20~21 ms, 키 Ctrl 과 마우스 왼쪽 2개 해제.
+  - host 로그: pause 시점에 눌린 키·버튼 0, park 중 수신 입력 0, capture detach 확인.
+  - 65 s park 동안 AU 0, 제어 datagram 7.9/s(양방향 합). 복귀 첫 프레임 41 ms.
+- 회귀: core e2e sparse·reconnect·decodestall·recovery 4/4 exit 0. 단위 park 23/0·shared_core·telemetry·decode_stats·snapshot PASS. Android 184/0, assembleDebug / Release 4 ABI.
+- 미검증: 실기기 폰 1회. 다른 기기 접속 대체 시 자동 재탈취 0(두 번째 client 시험 미실시). APK UI 의 5 s 미만 park(native 2 s 만 측정). 실제 host 클립보드 경로(fixture host 는 클립보드 off, 단위·코드 경로만). late callback(코드 가드만). 배터리 / CPU.
+- 관찰(ledger): pinned 시험 host 에서 generation 이 같은 선택 응답보다 stream-active IDR 이 먼저 오면, client 의 owed-key 재요청이 보이지 않고 다음 GOP(10 s)를 기다렸다. 실제 host 는 전환 뒤 IDR 을 보내 같은 조건이 생기지 않는 것으로 보이나 별도 확인이 필요하다.
