@@ -78,6 +78,20 @@
                     android:text="@string/ui_menu_disconnect"
                     android:textColor="@color/ui_danger" />
 
+                <!-- viewer-sharpness r1 B: 크게 보기 <-> 전체 보기 (the label says what a tap does), and the
+                     controls out of the way: the picture takes their room; a 컨트롤 chip on it brings them back. -->
+                <Button
+                    android:id="@+id/viewerMenuViewButton"
+                    style="@style/UiSheetRow"
+                    android:drawableStart="@drawable/ic_ui_expand"
+                    android:text="@string/viewer_view_large" />
+
+                <Button
+                    android:id="@+id/viewerMenuControlsButton"
+                    style="@style/UiSheetRow"
+                    android:drawableStart="@drawable/ic_ui_desktop"
+                    android:text="@string/viewer_controls_hide" />
+
                 <View
                     android:layout_width="match_parent"
                     android:layout_height="1dp"

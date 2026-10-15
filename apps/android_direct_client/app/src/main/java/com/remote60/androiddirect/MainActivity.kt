@@ -24,6 +24,7 @@ import android.view.Gravity
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
 import android.view.ViewConfiguration
@@ -467,6 +468,27 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             sendHostChord(HostKeyChord.SHOW_DESKTOP, "show-desktop", R.string.ui_chord_sent_desktop)
         }
         findViewById<View>(R.id.viewerMenuTargetsButton).setOnClickListener { openWindowSheet() }
+        viewerViewportChips = findViewById(R.id.viewerViewportChips)
+        viewerPanChip = findViewById(R.id.viewerPanChip)
+        viewerFullViewChip = findViewById(R.id.viewerFullViewChip)
+        viewerShowControlsChip = findViewById(R.id.viewerShowControlsChip)
+        viewerMenuViewButton = findViewById(R.id.viewerMenuViewButton)
+        viewerMenuViewButton.setOnClickListener {
+            closeViewerMenu("view_mode")
+            if (viewerViewport.isLarge) exitLargeView("menu") else enterLargeView("menu")
+        }
+        findViewById<View>(R.id.viewerMenuControlsButton).setOnClickListener {
+            closeViewerMenu("controls_hide")
+            setViewerControlsHidden(true, "menu")
+        }
+        viewerFullViewChip.setOnClickListener { exitLargeView("chip") }
+        viewerPanChip.setOnClickListener {
+            cancelActiveViewerTouch("pan_mode")
+            viewerPanMode = !viewerPanMode
+            diagnosticsLog.log("viewer_view", "pan=$viewerPanMode")
+            renderViewportChips()
+        }
+        viewerShowControlsChip.setOnClickListener { setViewerControlsHidden(false, "chip") }
         findViewById<View>(R.id.viewerMenuUnlockButton).setOnClickListener {
             closeViewerMenu("unlock")
             showUnlockDialog()
@@ -1228,6 +1250,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lastViewerRecoveryAtMs = 0L
     private var lastViewerRecoveryAttempts = 0
     private var requestedRuntimeBitrateKbps = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps
+    // viewer-sharpness r1 B: where the picture sits -- drawing and input both read it (ViewerViewport).
+    private val viewerViewport = ViewerViewport()
+    private var viewerPanMode = false          // 크게보기: touches move / scale the picture and go nowhere else
+    private var viewerControlsHidden = false   // the zone strip and the rail give their room to the picture
+    private var viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+    private var viewportPanLastX = 0f
+    private var viewportPanLastY = 0f
+    private lateinit var viewerViewportChips: View
+    private lateinit var viewerPanChip: TextView
+    private lateinit var viewerFullViewChip: TextView
+    private lateinit var viewerShowControlsChip: TextView
+    private lateinit var viewerMenuViewButton: Button
+    private val viewportScaleDetector by lazy {
+        ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val (cw, ch) = viewerContentSize() ?: return true
+                viewerViewport.zoomBy(detector.scaleFactor, detector.focusX, detector.focusY,
+                    videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), cw, ch)
+                if (!viewerViewport.isLarge) {
+                    exitLargeView("pinch_in")
+                } else {
+                    applyVideoTransform()
+                }
+                return true
+            }
+        })
+    }
     private var requestedRuntimeFps = ViewerQualitySettings.DEFAULT_FPS
     private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
     private var settingsStatusMessage = ""
@@ -2744,6 +2793,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingSelectionGeneration = selectionGeneration
         pendingSelectionStartedAtMs = SystemClock.elapsedRealtime()
         pendingSelectionAckLogged = false
+        resetViewerViewport("select")
         currentScene = UiScene.SWITCHING
         diagnosticsLog.log(
             "select_request",
@@ -2755,6 +2805,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun handleViewerTouch(view: View, event: MotionEvent): Boolean {
         if (currentScene != UiScene.VIEWER) return false
+        // viewer-sharpness r1 B: 크게보기 with 화면 이동 on -- the picture moves / scales, nothing is sent.
+        if (viewerPanMode && viewerViewport.isLarge) return handleViewportGesture(event)
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             showViewerControls()
         }
@@ -3952,38 +4004,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return super.dispatchKeyEvent(event)
     }
 
-    private fun resolveViewerContentRect(): ViewerContentRect? {
-        val viewWidth = videoTextureView.width.toFloat()
-        val viewHeight = videoTextureView.height.toFloat()
+    /** The remote picture's size: what decoded (the decoder's visible size), else what the selection expects. */
+    private fun viewerContentSize(): Pair<Int, Int>? {
         val contentWidth = if (videoWidth > 0) videoWidth else expectedContentWidth
         val contentHeight = if (videoHeight > 0) videoHeight else expectedContentHeight
-        if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0 || contentHeight <= 0) {
-            return null
-        }
+        return if (contentWidth > 0 && contentHeight > 0) Pair(contentWidth, contentHeight) else null
+    }
 
-        val viewAspect = viewWidth / viewHeight
-        val contentAspect = contentWidth.toFloat() / contentHeight.toFloat()
-        return if (contentAspect > viewAspect) {
-            val displayHeight = viewWidth / contentAspect
-            ViewerContentRect(
-                left = 0f,
-                top = (viewHeight - displayHeight) * 0.5f,
-                width = viewWidth,
-                height = displayHeight,
-                contentWidth = contentWidth,
-                contentHeight = contentHeight
-            )
-        } else {
-            val displayWidth = viewHeight * contentAspect
-            ViewerContentRect(
-                left = (viewWidth - displayWidth) * 0.5f,
-                top = 0f,
-                width = displayWidth,
-                height = viewHeight,
-                contentWidth = contentWidth,
-                contentHeight = contentHeight
-            )
-        }
+    // viewer-sharpness r1 B: the placement the picture is drawn with (applyVideoTransform) -- every touch, the
+    // virtual mouse and its pointer read this, so input lands where the picture is, in 전체보기 and 크게보기 alike.
+    private fun resolveViewerContentRect(): ViewerContentRect? {
+        val (contentWidth, contentHeight) = viewerContentSize() ?: return null
+        val p = viewerViewport.place(
+            videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), contentWidth, contentHeight
+        ) ?: return null
+        return ViewerContentRect(
+            left = p.left,
+            top = p.top,
+            width = p.width,
+            height = p.height,
+            contentWidth = contentWidth,
+            contentHeight = contentHeight
+        )
     }
 
     private fun mapTouchToVideoCoords(touchX: Float, touchY: Float, clampToContent: Boolean): Pair<Int, Int>? {
@@ -4148,6 +4190,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
         } else {
             closeViewerSheets("scene_$currentScene")
+            if (viewerViewport.isLarge || viewerPanMode) resetViewerViewport("scene_$currentScene")
+            if (viewerControlsHidden) setViewerControlsHidden(false, "scene_$currentScene")
         }
         applySceneVisibility()
         syncVideoSurface(forceRebind = false)
@@ -4981,6 +5025,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (videoSizeChanged) {
             videoWidth = latestVideoWidth
             videoHeight = latestVideoHeight
+            if (viewerViewport.isLarge || viewerPanMode) resetViewerViewport("video_size")
             diagnosticsLog.log(
                 "video_size",
                 "video=${videoWidth}x${videoHeight} expected=${expectedContentWidth}x${expectedContentHeight}"
@@ -5051,27 +5096,102 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 expectedContentHeight > 0 -> expectedContentHeight
                 else -> surfaceBufferHeight
             }
-        val contentWidth = resolvedContentWidth.toFloat()
-        val contentHeight = resolvedContentHeight.toFloat()
         val matrix = Matrix()
-        if (viewWidth <= 0f || viewHeight <= 0f || contentWidth <= 0f || contentHeight <= 0f) {
+        // viewer-sharpness r1 B: the TextureView first stretches the buffer over the whole view; this maps that onto
+        // the placement -- the aspect-correct fit (전체보기), or the zoomed, moved picture (크게보기). One uniform
+        // scale (never one axis alone), the same placement input reads.
+        val p = viewerViewport.place(viewWidth, viewHeight, resolvedContentWidth, resolvedContentHeight)
+        if (p == null) {
             videoTextureView.setTransform(matrix)
             return
         }
-
-        val viewAspect = viewWidth / viewHeight
-        val contentAspect = contentWidth / contentHeight
-        val scaleX: Float
-        val scaleY: Float
-        if (contentAspect > viewAspect) {
-            scaleX = 1f
-            scaleY = viewAspect / contentAspect
-        } else {
-            scaleX = contentAspect / viewAspect
-            scaleY = 1f
-        }
-        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+        matrix.setScale(p.width / viewWidth, p.height / viewHeight)
+        matrix.postTranslate(p.left, p.top)
         videoTextureView.setTransform(matrix)
+        if (::viewerPanChip.isInitialized) renderViewportChips()
+    }
+
+    /** 크게보기: fill the view, centred; 화면 이동 off (touches still control the PC) until the user turns it on. */
+    private fun enterLargeView(origin: String) {
+        val (cw, ch) = viewerContentSize() ?: return
+        cancelActiveViewerTouch("view_large")
+        viewerViewport.enterLarge(videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), cw, ch)
+        viewerPanMode = false
+        diagnosticsLog.log("viewer_view", "mode=large origin=$origin zoom=${"%.2f".format(viewerViewport.zoom)} " +
+            "view=${videoTextureView.width}x${videoTextureView.height} content=${cw}x$ch")
+        applyVideoTransform()
+        renderViewportChips()
+    }
+
+    /** One step back to 전체보기, from anywhere (the chip, the menu, a pinch below the fit). */
+    private fun exitLargeView(origin: String) {
+        resetViewerViewport(origin)
+        diagnosticsLog.log("viewer_view", "mode=full origin=$origin")
+    }
+
+    private fun resetViewerViewport(reason: String) {
+        if (viewerViewport.isLarge || viewerPanMode) cancelActiveViewerTouch("view_reset_$reason")
+        viewerViewport.reset()
+        viewerPanMode = false
+        viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+        if (::videoTextureView.isInitialized) applyVideoTransform()
+        if (::viewerPanChip.isInitialized) renderViewportChips()
+    }
+
+    /** 화면 이동: one finger moves the picture, two scale it about the fingers. Consumed here, never sent. */
+    private fun handleViewportGesture(event: MotionEvent): Boolean {
+        val (cw, ch) = viewerContentSize() ?: return true
+        val vw = videoTextureView.width.toFloat()
+        val vh = videoTextureView.height.toFloat()
+        viewportScaleDetector.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                viewportPanPointerId = event.getPointerId(0)
+                viewportPanLastX = event.x
+                viewportPanLastY = event.y
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                // keep moving with a finger that is still down
+                val left = (0 until event.pointerCount).firstOrNull { it != event.actionIndex } ?: return true
+                viewportPanPointerId = event.getPointerId(left)
+                viewportPanLastX = event.getX(left)
+                viewportPanLastY = event.getY(left)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val idx = event.findPointerIndex(viewportPanPointerId)
+                if (idx >= 0 && !viewportScaleDetector.isInProgress && event.pointerCount == 1) {
+                    viewerViewport.panBy(event.getX(idx) - viewportPanLastX, event.getY(idx) - viewportPanLastY, vw, vh, cw, ch)
+                    applyVideoTransform()
+                }
+                if (idx >= 0) {
+                    viewportPanLastX = event.getX(idx)
+                    viewportPanLastY = event.getY(idx)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+        }
+        return true
+    }
+
+    /** The zone strip and the rail out of the way (their room goes to the picture), or back. */
+    private fun setViewerControlsHidden(hidden: Boolean, origin: String) {
+        cancelActiveViewerTouch("controls_$origin")
+        releaseViewerModifiers()
+        viewerControlsHidden = hidden
+        findViewById<View>(R.id.viewerZoneBar).visibility = if (hidden) View.GONE else View.VISIBLE
+        viewerControlsBar.visibility = if (hidden) View.GONE else View.VISIBLE
+        diagnosticsLog.log("viewer_view", "controls=${if (hidden) "hidden" else "shown"} origin=$origin")
+        renderViewportChips()
+    }
+
+    private fun renderViewportChips() {
+        val large = viewerViewport.isLarge
+        viewerFullViewChip.visibility = if (large) View.VISIBLE else View.GONE
+        viewerPanChip.visibility = if (large) View.VISIBLE else View.GONE
+        viewerPanChip.setText(if (viewerPanMode) R.string.viewer_chip_pan_on else R.string.viewer_chip_pan)
+        viewerPanChip.isSelected = viewerPanMode
+        viewerShowControlsChip.visibility = if (viewerControlsHidden) View.VISIBLE else View.GONE
+        viewerMenuViewButton.setText(if (large) R.string.viewer_view_full else R.string.viewer_view_large)
     }
 
     private fun parseWindowPanelSnapshot(rawJson: String): WindowPanelUiSnapshot {

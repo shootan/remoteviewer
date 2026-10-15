@@ -184,6 +184,14 @@
     <string name="ui_close">닫기</string>
     <string name="ui_refresh">새로 고침</string>
     <string name="ui_quality_label">화질</string>
+    <!-- viewer-sharpness r1 B -->
+    <string name="viewer_view_large">크게 보기</string>
+    <string name="viewer_view_full">전체 보기</string>
+    <string name="viewer_controls_hide">컨트롤 숨기기</string>
+    <string name="viewer_chip_full">전체보기</string>
+    <string name="viewer_chip_pan">화면 이동</string>
+    <string name="viewer_chip_pan_on">이동 끝</string>
+    <string name="viewer_chip_controls">컨트롤</string>
     <string name="ui_quality_low">저화질 · 1500</string>
     <string name="ui_quality_high">고화질 · 3000</string>
     <string name="ui_quality_best">최고화질 · 6000</string>
