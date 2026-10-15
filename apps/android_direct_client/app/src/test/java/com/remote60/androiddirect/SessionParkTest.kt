@@ -134,51 +134,85 @@ class SessionParkTest {
         assertTrue(SessionPark.clipboardPushAllowed(true, "clip_changed"))
     }
 
-    @Test
-    fun aStaleConnectOwnsNothingNewer() {
-        // r2 K2
-        val owner = SessionPark.ConnectOwner()
-        val a = owner.begin()
-        assertTrue(owner.isCurrent(a))
-        owner.invalidate()  // sign-out
-        assertFalse(owner.isCurrent(a))
-        val b = owner.begin()  // signed in again, connected again
-        assertFalse(owner.isCurrent(a))
-        assertTrue(owner.isCurrent(b))
-        // a's native connect had made generation 3; b's made 4: a's late callback closes nothing
-        assertFalse(owner.staleCloses(madeGeneration = 3, nativeGenerationNow = 4))
-        // a's own connection still the one running: it closes that one
-        assertTrue(owner.staleCloses(madeGeneration = 3, nativeGenerationNow = 3))
-        // never got as far as a native connect: nothing to close
-        assertFalse(owner.staleCloses(madeGeneration = 0, nativeGenerationNow = 0))
+    /** The process's numbering, as the native gate keeps it (one counter for every Activity). */
+    private class ProcessNumbers {
+        var n = 0L
+        val current = mutableListOf<Long>()
+        fun next(): Long { ++n; current.add(n); return n }
+        fun isCurrent(op: Long) = op != 0L && current.lastOrNull() == op
     }
 
     @Test
-    fun theNativeSideHearsEveryOwnerChange() {
-        // r3 R2-a: begin and every invalidation reach the native gate, in order
-        val heard = mutableListOf<Long>()
-        val owner = SessionPark.ConnectOwner { heard.add(it) }
+    fun aStaleConnectIsStaleForGood() {
+        // r2 K2
+        val gate = ProcessNumbers()
+        val owner = SessionPark.ConnectOwner(gate::next)
         val a = owner.begin()
-        owner.invalidate()  // sign-out / exit / stop / disconnect
+        assertTrue(owner.isCurrent(a) && gate.isCurrent(a))
+        owner.invalidate()  // sign-out
+        assertFalse(owner.isCurrent(a) || gate.isCurrent(a))
         val b = owner.begin()
-        assertEquals(listOf(a, a + 1, b), heard)
-        assertEquals(b, owner.current())
+        assertFalse(owner.isCurrent(a) || gate.isCurrent(a))
+        assertTrue(owner.isCurrent(b) && gate.isCurrent(b))
+    }
+
+    @Test
+    fun aRecreatedActivityCannotReviveTheOldOnesOperation() {
+        // r4 S2-a: Activity 1 began op a, then stopped (invalidated); its native observe is still on its way.
+        // Activity 2 (recreated) takes its first number.
+        val gate = ProcessNumbers()
+        val first = SessionPark.ConnectOwner(gate::next)
+        val a = first.begin()
+        first.invalidate()
+        val second = SessionPark.ConnectOwner(gate::next)
+        val b = second.begin()
+        assertTrue("the new Activity's op is not the old one's", b != a)
+        assertFalse("THE OLD ACTIVITY'S OPERATION STAYS STALE IN THE PROCESS GATE", gate.isCurrent(a))
+        assertTrue(gate.isCurrent(b))
+        // negative control -- r3: each Activity counted from 0 and the gate stored the number it was given
+        var r3first = 0L
+        val r3a = ++r3first
+        r3first++  // invalidated
+        var r3second = 0L
+        val r3gateCurrent = ++r3second  // the new Activity's first op, stored as current in the process gate
+        assertTrue("NEGATIVE (r3): the old Activity's op 1 is current again", r3gateCurrent == r3a)
     }
 
     @Test
     fun aHeldTapFallbackRunsOnlyIfNothingHappenedSince() {
-        // r3 R2-b
-        val f = SessionPark.TapFallback(owner = 7, account = "acc", origin = "https://d", hostId = "h1")
-        assertTrue(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = true, hostListed = true))
-        // stopped / backgrounded before it ran
-        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = false, hostListed = true))
-        // signed out and back in as another account (the owner moved, the account differs)
-        assertFalse(SessionPark.tapFallbackRuns(f, 9, "other", "https://d", foreground = true, hostListed = true))
-        // another PC tapped meanwhile (its connect took the owner)
-        assertFalse(SessionPark.tapFallbackRuns(f, 8, "acc", "https://d", foreground = true, hostListed = true))
-        // another directory
-        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://e", foreground = true, hostListed = true))
-        // the PC left the list
-        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = true, hostListed = false))
+        // r3 R2-b, through the Activity's own intents (r4)
+        val gate = ProcessNumbers()
+        val owner = SessionPark.ConnectOwner(gate::next)
+        val intents = SessionPark.ConnectIntents(owner)
+        intents.onStart()
+        owner.begin()
+        val f = intents.scheduleFallback("acc", "https://d", "h1")
+        assertTrue(intents.fallbackRuns(f, "acc", "https://d", hostListed = true))
+        assertFalse("another account", intents.fallbackRuns(f, "other", "https://d", hostListed = true))
+        assertFalse("another directory", intents.fallbackRuns(f, "acc", "https://e", hostListed = true))
+        assertFalse("the PC left the list", intents.fallbackRuns(f, "acc", "https://d", hostListed = false))
+        owner.begin()  // another PC tapped meanwhile: its connect took the owner
+        assertFalse("another connect", intents.fallbackRuns(f, "acc", "https://d", hostListed = true))
+    }
+
+    @Test
+    fun aStopEndsAScheduledFallbackEvenIfTheAppComesBack() {
+        // r4 S2-b: the park failed, the fallback was posted (parked=null, not busy); then onStop -> onStart
+        // before the runnable ran.
+        val gate = ProcessNumbers()
+        val owner = SessionPark.ConnectOwner(gate::next)
+        val intents = SessionPark.ConnectIntents(owner)
+        intents.onStart()
+        owner.begin()
+        val f = intents.scheduleFallback("acc", "https://d", "h1")
+        intents.onStop()   // the user left: no owner change (nothing was busy)
+        intents.onStart()  // and came back before the runnable ran
+        assertFalse("THE FALLBACK THE USER LEFT IS NOT CARRIED OUT", intents.fallbackRuns(f, "acc", "https://d", hostListed = true))
+        // negative control -- r3's check at run time: same owner, same account and directory, in front again
+        val r3runs = f.owner == owner.current() && true && f.account == "acc" && f.origin == "https://d"
+        assertTrue("NEGATIVE (r3): it would have run", r3runs)
+        // and a fallback scheduled after coming back is a new one: it runs
+        val g = intents.scheduleFallback("acc", "https://d", "h1")
+        assertTrue(intents.fallbackRuns(g, "acc", "https://d", hostListed = true))
     }
 }

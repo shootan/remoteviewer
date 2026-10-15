@@ -7,7 +7,14 @@ object NativeSessionBridge {
         System.loadLibrary("remote60_android_direct")
     }
 
-    external fun nativeConnect(host: String, videoPort: Int, controlPort: Int): Boolean
+    /** r4 S1: the manual connect, adopted through the connect gate as operation [op]; the generation it made (0 = none). */
+    external fun nativeConnect(host: String, videoPort: Int, controlPort: Int, op: Long): Long
+
+    /** r4 S2-a: a new connect operation, numbered by the native gate for the whole process (and current there). */
+    external fun nativeConnectOpNext(): Long
+
+    /** r4 S1: closes the session only if [op] adopted generation [gen] and it is still the one running (one step). */
+    external fun nativeCloseIfOwn(op: Long, gen: Long): Boolean
     external fun nativeDisconnect()
 
     // keepalive r1 (SessionPark.kt): park a connected session while the PC list shows, resume it.
@@ -41,17 +48,6 @@ object NativeSessionBridge {
         observeToken: String,
         op: Long,
     ): String
-
-    /** keepalive r3 R2-a: the app's current connect operation (SessionPark.ConnectOwner); 0 = none. */
-    external fun nativeSetConnectOwner(op: Long)
-
-    /** Punches towards the host on the observed socket and starts the session on it. */
-    external fun nativeDirectoryConnect(
-        hostIp: String,
-        hostPort: Int,
-        punchBudgetMs: Int,
-        punchToken: String,
-    ): Boolean
 
     /**
      * Punches every offered address at once and starts the session on whichever answers.

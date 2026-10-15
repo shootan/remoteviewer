@@ -134,15 +134,36 @@ object SessionPark {
     data class PendingTap(val episode: Long, val hostId: String)
 
     /**
-     * r3 R2-b: a held tap's fallback connect, as scheduled -- under which connect owner, account and
-     * directory. It runs only if nothing happened in between: no sign-out, exit, stop, disconnect or other
-     * connect (each moves the owner), the same account and directory, the app in front, the PC still listed.
+     * r3 R2-b / r4 S2-b: a held tap's fallback connect, as scheduled -- under which connect owner, account,
+     * directory and app lifetime (the stops so far).
      */
-    data class TapFallback(val owner: Long, val account: String, val origin: String, val hostId: String)
+    data class TapFallback(
+        val owner: Long, val account: String, val origin: String, val hostId: String, val lifeEpoch: Long,
+    )
 
-    fun tapFallbackRuns(
-        f: TapFallback, ownerNow: Long, account: String, origin: String, foreground: Boolean, hostListed: Boolean,
-    ): Boolean = f.owner == ownerNow && f.account == account && f.origin == origin && foreground && hostListed
+    /**
+     * r4 S2-b: the intents that are scheduled and not yet carried out (a held tap's fallback). One per
+     * Activity, driven by its lifecycle. A stop ends every one of them for good: being in front again later
+     * does not bring back what the user left -- the r3 check read "in front" at run time only, so an
+     * onStop -> onStart between the post and the run let the fallback connect after all.
+     */
+    class ConnectIntents(private val owner: ConnectOwner) {
+        private var lifeEpoch = 0L
+        private var foreground = false
+
+        @Synchronized fun onStart() { foreground = true }
+        @Synchronized fun onStop() {
+            foreground = false
+            ++lifeEpoch
+        }
+        @Synchronized fun scheduleFallback(account: String, origin: String, hostId: String): TapFallback =
+            TapFallback(owner.current(), account, origin, hostId, lifeEpoch)
+
+        /** At run time: nothing moved -- the owner, the account, the directory, the app's lifetime -- and in front. */
+        @Synchronized fun fallbackRuns(f: TapFallback, account: String, origin: String, hostListed: Boolean): Boolean =
+            f.owner == owner.current() && f.lifeEpoch == lifeEpoch && foreground &&
+                f.account == account && f.origin == origin && hostListed
+    }
 
     /** Whether a park that ended this way still owes a held tap its ordinary connect. */
     fun pendingTapFallsBack(reason: String): Boolean = when (reason) {
@@ -158,27 +179,24 @@ object SessionPark {
      * it closes only the connection it made itself (by connection generation) and touches no newer state.
      */
     /**
-     * r2 K2 / r3 R2-a: the connect operation that is the user's now. [onChange] is told every new number
-     * (the native side gets it, so its observe / punch / Connect stop for a stale one and never adopt it).
+     * r2 K2 / r3 R2-a / r4 S2-a: the connect operation that is the user's now. Every number comes from [next]
+     * -- in the app the native gate (nativeConnectOpNext), which numbers operations for the whole process and
+     * makes each new one current there: a new Activity's first operation can never be an older Activity's
+     * number, so it cannot make that operation current again. An invalidation takes a number nobody holds.
+     * The late cleanup of a stale operation is the native compare-and-close (nativeCloseIfOwn), not a check here.
      */
-    class ConnectOwner(private val onChange: ((Long) -> Unit)? = null) {
+    class ConnectOwner(private val next: () -> Long) {
         private var current = 0L
 
         @Synchronized fun begin(): Long {
-            ++current
-            onChange?.invoke(current)
+            current = next()
             return current
         }
         @Synchronized fun invalidate() {
-            ++current
-            onChange?.invoke(current)
+            current = next()
         }
-        @Synchronized fun isCurrent(op: Long): Boolean = op == current
+        @Synchronized fun isCurrent(op: Long): Boolean = op != 0L && op == current
         @Synchronized fun current(): Long = current
-
-        /** What a stale operation's callback may close: only a connection that is still its own. */
-        fun staleCloses(madeGeneration: Long, nativeGenerationNow: Long): Boolean =
-            madeGeneration != 0L && madeGeneration == nativeGenerationNow
     }
 
     /**

@@ -1178,10 +1178,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // r2 §7: a resume whose clipboard baseline could not be read holds pushes until a real change.
     private var clipboardResumeHold = false
     // r2 K2: which directory connect owns the native session (SessionPark.ConnectOwner).
-    // r3 R2-a: every new owner number goes to the native connect gate too.
-    private val connectOwner = SessionPark.ConnectOwner { NativeSessionBridge.nativeSetConnectOwner(it) }
-    // r3 R2-b: between onStart and onStop (a held tap's fallback runs only then).
-    private var inForeground = false
+    // r4 S2-a: numbered by the native connect gate, for the whole process (never reused by a new Activity).
+    private val connectOwner = SessionPark.ConnectOwner { NativeSessionBridge.nativeConnectOpNext() }
+    // r4 S2-b: scheduled intents (a held tap's fallback); every stop ends them for good.
+    private val connectIntents = SessionPark.ConnectIntents(connectOwner)
     private var parkEpisodeCounter = 0L
     private var parkConfirmLogged = false
     private var parkNetwork: Network? = null
@@ -1851,11 +1851,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onStart() {
         super.onStart()
-        inForeground = true
+        connectIntents.onStart()
     }
 
     override fun onStop() {
-        inForeground = false
+        connectIntents.onStop()  // r4 S2-b: a fallback scheduled before this stop never runs
         // keepalive r1: a park lives only while the list is in front. Backgrounded, locked or switched
         // away from, the connection is ended for real -- no foreground service keeps it.
         if (parked != null) endPark("app_stopped", announce = false)
@@ -2240,7 +2240,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         diagnosticsLog.log(reason, "host=$host videoPort=$videoPort controlPort=$controlPort")
 
-        val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort)
+        // r4 S1: a new user intent -- any directory connect on its way is stale from here, and this one is
+        // adopted through the same native gate (so no stale cleanup can close it).
+        val op = connectOwner.begin()
+        val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort, op) != 0L
         if (ok) {
             connectFlowActive = true
             pendingRuntimeConfigSync = true
@@ -2515,15 +2518,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (held != null && SessionPark.pendingTapFallsBack(reason)) {
             // r3 R2-b: scheduled under the owner, account and directory of now; carried out only if none of
             // them changed and the app is still in front when it runs.
-            val fallback = SessionPark.TapFallback(
-                connectOwner.current(), DirectoryClient.sessionAccount(), directoryOrigin(), held.hostId)
-            diagnosticsLog.log("park_tap_fallback", "episode=${p.episode} reason=$reason host=${held.hostId} owner=${fallback.owner}")
+            // r4 S2-b: a stop between this and the run ends it for good (ConnectIntents).
+            val fallback = connectIntents.scheduleFallback(DirectoryClient.sessionAccount(), directoryOrigin(), held.hostId)
+            diagnosticsLog.log("park_tap_fallback",
+                "episode=${p.episode} reason=$reason host=${held.hostId} owner=${fallback.owner} life=${fallback.lifeEpoch}")
             statusHandler.post {
                 val host = directoryHosts.firstOrNull { it.hostId == fallback.hostId }
-                if (!SessionPark.tapFallbackRuns(fallback, connectOwner.current(), DirectoryClient.sessionAccount(),
-                        directoryOrigin(), inForeground, host != null)) {
+                if (!connectIntents.fallbackRuns(fallback, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
                     diagnosticsLog.log("park_tap_fallback_cancelled",
-                        "host=${fallback.hostId} owner=${fallback.owner}->${connectOwner.current()} fg=$inForeground listed=${host != null}")
+                        "host=${fallback.hostId} owner=${fallback.owner}->${connectOwner.current()} life=${fallback.lifeEpoch} listed=${host != null}")
                     return@post
                 }
                 connectToDirectoryHost(host!!)
@@ -4787,11 +4790,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 runOnUiThread {
                     if (!connectOwner.isCurrent(op)) {
-                        // r2 K2: stale -- close the connection this operation made, if it is still the one
-                        // running; touch nothing newer (busy state, scene, another connect's session).
-                        val closes = connectOwner.staleCloses(madeGeneration, NativeSessionBridge.nativeConnectionGeneration())
-                        diagnosticsLog.log("directory_connect_dropped", "op=$op closedOwn=$closes gen=$madeGeneration")
-                        if (closes) NativeSessionBridge.nativeDisconnect()
+                        // r2 K2 / r4 S1: stale -- the connection this operation made is closed only if it is
+                        // still the one running, compared and closed in ONE native step with every adoption
+                        // (off the UI thread: it may wait for another operation's Connect). Nothing newer here
+                        // (busy state, scene, another connect's session) is touched.
+                        val gen = madeGeneration
+                        Thread {
+                            val closed = NativeSessionBridge.nativeCloseIfOwn(op, gen)
+                            diagnosticsLog.log("directory_connect_dropped", "op=$op closedOwn=$closed gen=$gen")
+                        }.start()
                         return@runOnUiThread
                     }
                     setDirectoryBusy(false)

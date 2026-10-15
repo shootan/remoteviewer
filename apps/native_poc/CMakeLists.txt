@@ -918,6 +918,7 @@ endif()
 # keepalive r3 R2-a: the native connect adoption gate (connect_op_gate.hpp); no network.
 add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp)
 target_include_directories(remote60_connect_op_gate_test PRIVATE src)
+target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNECT_GATE_TEST_HOOKS=1)
 
 add_executable(remote60_client_park_state_test
   src/client_park_state_test.cpp
