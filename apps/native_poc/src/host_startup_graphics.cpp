@@ -60,6 +60,7 @@
 #include "poc_protocol.hpp"
 #include "secure_input_broker.hpp"
 #include "time_utils.hpp"
+#include "host_pinned_select_seam.hpp"
 #include "udp_control_channel.hpp"
 #include "capture_backend_dxgi.hpp"
 #include "host_string_util.hpp"
@@ -181,7 +182,29 @@ int startup_select_capture_target(HostContext& hx) {
   // primary duplication still unavailable) is NOT deferred here -- it falls through to the existing
   // exponential backoff, which is the right owner for a backend that truly cannot start.
   capture.windowClientOnlyActive = args.captureWindowClientOnly;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // r3 R3: the target is the window pinned at start, by its owner check -- not a new search. The product's
+  // search also wants a visible window, which no window of a private window station's desktop ever is
+  // (parkclip): there it found nothing and fell back to the screen. The criteria still have to match it.
+  bool seamTarget = false;
+  if (!pinned_select_seam_probe_ungated()) {
+    HWND pinned = pinned_select_seam_pinned_hwnd();
+    CaptureWindowInfo info{};
+    info.hwnd = pinned;
+    uint32_t pid = 0;
+    info.processName = get_window_process_name(pinned, &pid);
+    info.pid = pid;
+    info.title = get_window_title(pinned);
+    const bool processOk = capture.windowCriteria.processNamesLower.empty() ||
+                           capture.windowCriteria.processNamesLower.count(info.processName) != 0;
+    seamTarget = pinned_select_seam_target_ok(pinned) && processOk;
+    if (seamTarget) capture.windowInfo = info;
+  }
+  if (capture.windowTargetConfigured && (seamTarget || (pinned_select_seam_probe_ungated() &&
+                                                        find_capture_window(capture.windowCriteria, &capture.windowInfo)))) {
+#else
   if (capture.windowTargetConfigured && find_capture_window(capture.windowCriteria, &capture.windowInfo)) {
+#endif
     capture.windowModeActive = true;
     std::cout << "[native-video-host] capture-window target hwnd=0x" << std::hex
               << reinterpret_cast<uintptr_t>(capture.windowInfo.hwnd) << std::dec
@@ -191,6 +214,10 @@ int startup_select_capture_target(HostContext& hx) {
               << " clientOnly=" << (args.captureWindowClientOnly ? 1 : 0)
               << "\n";
   } else if (capture.windowTargetConfigured) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    // r3 R3: this test build never falls back to a screen -- the pinned window or no host.
+    if (!pinned_select_seam_probe_ungated()) pinned_select_seam_refuse("startup: the pinned window was not found");
+#endif
     std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
               << " pidFilter=" << args.captureWindowPid
               << " processFilter=" << trim_ascii(args.captureWindowProcess)

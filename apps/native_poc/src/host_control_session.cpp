@@ -30,6 +30,7 @@
 #include "host_bgra_scale.hpp"
 #include "host_capture_device.hpp"
 #include "host_control_session.hpp"
+#include "host_pinned_select_seam.hpp"
 
 #include "clipboard_monitor.hpp"
 #include "clipboard_sync.hpp"
@@ -101,8 +102,11 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
 // and nothing else -- so a real client UI (the APK on an isolated AVD) can open its viewer through the
 // product's own selection transaction on a host that never shows the user's desktop. FAIL-CLOSED (r2 K6):
 //   - it does not start without --capture-window-pid AND --capture-window-title, nor when that process
-//     cannot be opened (pinned_select_seam_admit_start; the open handle also keeps the pid from being
-//     reused for another process while this host runs);
+//     cannot be opened, nor when no window of that process carries that title (pinned_select_seam_admit_start;
+//     the open handle also keeps the pid from being reused for another process while this host runs);
+//   - r3 R3: every capture start passes pinned_select_seam_capture_gate (host_pinned_select_seam.hpp) -- the
+//     pinned window or the host ends; no screen, no fallback -- and a watcher ends the host the moment the
+//     pinned window, its process or its title is gone;
 //   - the window list is the pinned window or nothing -- never the product's enumeration;
 //   - a selection, a thumbnail or a monitor is admitted only for the pinned window (no desktop, no other
 //     HWND, no screen); the monitor list is empty;
@@ -111,6 +115,18 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
 // The shipped GNLinkStream is built without any of this (build gate: no "pinned_test_seam" string).
 namespace {
 HANDLE g_pinnedProcess = nullptr;
+// r3 R3: the pinned window, found once at start -- never re-enumerated, so no other HWND can take its place.
+HWND g_pinnedHwnd = nullptr;
+DWORD g_pinnedPid = 0;
+std::wstring g_pinnedNeedle;  // the pinned title, lower-case
+bool env_is_one(const char* name) {
+  char v[8] = {};
+  return GetEnvironmentVariableA(name, v, sizeof(v)) > 0 && v[0] == '1';
+}
+bool pinned_capture_probe() {
+  static const bool on = env_is_one("REMOTE60_PINNED_TEST_CAPTURE_PROBE");
+  return on;
+}
 // r2 K5 negative control: REMOTE60_PINNED_TEST_OLD_HOST=1 makes this test host behave as a host from
 // before the thumbnail flag -- it does not advertise it, and it takes ControlStreamState without stopping
 // (the stream stays on) while still answering every Ping. The phone must not park on it.
@@ -143,12 +159,8 @@ BOOL CALLBACK pinned_enum(HWND hwnd, LPARAM lp) {
 }
 uint64_t pinned_window_id(const Args& args) {
   if (!pinned_by_args(args)) return 0;  // fail-closed: no pinned window, nothing admitted
-  PinnedFind f{args.captureWindowPid, {}, nullptr};
-  for (unsigned char c : args.captureWindowTitle) f.needle.push_back(static_cast<wchar_t>(towlower(c)));
-  EnumWindows(pinned_enum, reinterpret_cast<LPARAM>(&f));
-  // the product's selection transaction admits this one window (host_window_enum.cpp, r2 K6-b)
-  remote60::native_poc::g_pinned_select_seam_hwnd.store(reinterpret_cast<uintptr_t>(f.found), std::memory_order_release);
-  return f.found ? remote60::native_poc::hwnd_to_id(f.found) : 0;
+  // r3 R3: the window found at start, while it is still the pinned one -- not whatever matches now.
+  return pinned_select_seam_target_ok(g_pinnedHwnd) ? remote60::native_poc::hwnd_to_id(g_pinnedHwnd) : 0;
 }
 
 bool pinned_window_entry(uint64_t id, remote60::native_poc::WindowListEntry* out) {
@@ -171,6 +183,50 @@ bool pinned_window_entry(uint64_t id, remote60::native_poc::WindowListEntry* out
 }
 }  // namespace
 
+bool pinned_select_seam_probe_ungated() {
+  static const bool on = pinned_capture_probe() && env_is_one("REMOTE60_PINNED_TEST_PROBE_UNGATED");
+  return on;
+}
+
+bool pinned_select_seam_target_ok(HWND hwnd) {
+  if (!hwnd || hwnd != g_pinnedHwnd || !g_pinnedProcess || !IsWindow(hwnd)) return false;
+  if (WaitForSingleObject(g_pinnedProcess, 0) != WAIT_TIMEOUT) return false;  // the pinned process ended
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != g_pinnedPid) return false;
+  std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+  return !g_pinnedNeedle.empty() && title.find(g_pinnedNeedle) != std::wstring::npos;
+}
+
+HWND pinned_select_seam_pinned_hwnd() { return g_pinnedHwnd; }
+
+void pinned_select_seam_refuse(const char* where) {
+  std::fprintf(stderr, "[pinned-select-test] refused: %s -- the host ends (65)\n", where ? where : "?");
+  std::cout.flush();
+  std::fflush(stdout);
+  std::fflush(stderr);
+  TerminateProcess(GetCurrentProcess(), 65);
+  for (;;) Sleep(INFINITE);
+}
+
+void pinned_select_seam_capture_gate(HWND window, const char* where) {
+  const bool ungated = pinned_select_seam_probe_ungated();
+  const bool admitted = ungated || (window != nullptr && pinned_select_seam_target_ok(window));
+  if (pinned_capture_probe()) {
+    std::fprintf(stderr, "[pinned-select-test] capture-probe where=%s target=%s hwnd=0x%llx pinned=%d admitted=%d%s\n",
+                 where ? where : "?", window ? "window" : "screen",
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(window)),
+                 window != nullptr && window == g_pinnedHwnd ? 1 : 0, admitted ? 1 : 0, ungated ? " UNGATED" : "");
+    std::cout.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), admitted ? 66 : 65);  // before any capture object exists
+    for (;;) Sleep(INFINITE);
+  }
+  if (!admitted) pinned_select_seam_refuse(where);
+}
+
 bool pinned_select_seam_admit_start(const Args& args, std::string* why) {
   if (args.captureWindowPid == 0 || args.captureWindowTitle.empty()) {
     if (why) *why = "--capture-window-pid and --capture-window-title are both required";
@@ -181,6 +237,32 @@ bool pinned_select_seam_admit_start(const Args& args, std::string* why) {
     if (why) *why = "the pinned process cannot be opened";
     return false;
   }
+  g_pinnedPid = args.captureWindowPid;
+  for (unsigned char c : args.captureWindowTitle) g_pinnedNeedle.push_back(static_cast<wchar_t>(towlower(c)));
+  if (pinned_select_seam_probe_ungated()) return true;  // negative control: the 2abb8be admission
+  // r3 R3: the window itself, of that process, with that title -- a live pid alone admits nothing. A
+  // fixture that is still coming up gets 5 s.
+  PinnedFind f{g_pinnedPid, g_pinnedNeedle, nullptr};
+  for (int t = 0; t < 50 && !f.found; ++t) {
+    if (WaitForSingleObject(g_pinnedProcess, 0) != WAIT_TIMEOUT) break;
+    EnumWindows(pinned_enum, reinterpret_cast<LPARAM>(&f));
+    if (!f.found) Sleep(100);
+  }
+  if (!f.found) {
+    if (why) *why = "no window of the pinned process carries the pinned title";
+    return false;
+  }
+  g_pinnedHwnd = f.found;
+  // Lifetime: the window, its process or its title gone -> the host ends, whatever it is doing.
+  std::thread([] {
+    for (;;) {
+      Sleep(100);
+      if (!pinned_select_seam_target_ok(g_pinnedHwnd)) pinned_select_seam_refuse("the pinned window is gone");
+    }
+  }).detach();
+  std::fprintf(stderr, "[pinned-select-test] pinned hwnd=0x%llx pid=%lu\n",
+               static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_pinnedHwnd)),
+               static_cast<unsigned long>(g_pinnedPid));
   return true;
 }
 #endif

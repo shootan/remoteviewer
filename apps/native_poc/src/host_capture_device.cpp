@@ -32,6 +32,7 @@
 
 #include "capture_backend_dxgi.hpp"
 #include "host_capture_device.hpp"
+#include "host_pinned_select_seam.hpp"
 #include "host_string_util.hpp"
 
 namespace remote60::native_poc {
@@ -75,6 +76,11 @@ bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uin
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItemForPrimaryMonitor(
     HWND preferredWindow, const char* preferredSource,
     HMONITOR preferredMonitor) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // r3 R3: every item of this test build -- the pinned window or the host ends (a screen, the foreground,
+  // the desktop, the shell all included). Before the factory: nothing is created for a refused target.
+  pinned_select_seam_capture_gate(preferredWindow, preferredSource ? preferredSource : "capture item");
+#endif
   auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
                                                IGraphicsCaptureItemInterop>();
   winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};

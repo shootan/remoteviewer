@@ -944,6 +944,21 @@ if(MSVC)
   target_compile_options(remote60_mobile_abr_session_e2e_test PRIVATE /utf-8)
 endif()
 
+# keepalive r3 R3: the pinned test host's capture boundary, on a private window station with the capture
+# probe on -- every case ends before a capture object exists (pinned_seam_boundary_test.cpp).
+add_executable(remote60_pinned_seam_boundary_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/pinned_seam_boundary_test.cpp
+)
+target_include_directories(remote60_pinned_seam_boundary_test PRIVATE src)
+target_link_libraries(remote60_pinned_seam_boundary_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_pinned_seam_boundary_test PRIVATE /utf-8)
+endif()
+
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.
 add_executable(remote60_capture_readback_test
   src/d3d_capture_readback.cpp

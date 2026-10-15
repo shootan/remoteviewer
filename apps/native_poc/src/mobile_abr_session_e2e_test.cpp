@@ -595,6 +595,26 @@ int clip_child_main(int argc, wchar_t** argv) {
   return 1;
 }
 
+// keepalive r3 R3: parkclip's capture target -- a window of a child of this test ON the private station's
+// desktop, so the pinned test host finds it there (a window of this test, on the user's desktop, is not on
+// the host's desktop: the product host fell back to the screen in r2). Up until killed (the job).
+LRESULT CALLBACK station_fixture_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
+int station_fixture_main(const std::wstring& title) {
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = station_fixture_proc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"Remote60MobileAbrStationTarget";
+  RegisterClassExW(&wc);
+  HWND h = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, title.c_str(), WS_POPUP | WS_VISIBLE, 0, 0, 480,
+                           270, nullptr, nullptr, wc.hInstance, nullptr);
+  if (!h) return 3;
+  ShowWindow(h, SW_SHOWNOACTIVATE);
+  MSG msg;
+  while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+  return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -602,6 +622,7 @@ int wmain(int argc, wchar_t** argv) {
   if (argc >= 2 && (std::wstring(argv[1]) == L"--clip-set" || std::wstring(argv[1]) == L"--clip-get")) {
     return clip_child_main(argc, argv);
   }
+  if (argc >= 3 && std::wstring(argv[1]) == L"--station-fixture") return station_fixture_main(argv[2]);
   std::string scenario = "sparse";
   uint32_t fps = 30, bitrate = 3000000;
   int impairSec = 20;
@@ -723,6 +744,9 @@ int wmain(int argc, wchar_t** argv) {
   }
   const std::wstring dir = staging.path();
   const std::wstring myDir = directory_of(self_path());
+  // keepalive r3 R3: parkclip's host runs where this test's window is not; only the fail-closed pinned test
+  // host (no screen, ever) may run there -- never the product host, which falls back to the screen.
+  if (scenario == "parkclip") hostExe = L"GNLinkStreamPinnedSelectTest.exe";
   // Staged as GNLinkStream.exe whichever build it is, so the isolation check below knows it is the host.
   const bool staged = CopyFileW((myDir + hostExe).c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
   check("the host could be staged", staged);
@@ -741,6 +765,7 @@ int wmain(int argc, wchar_t** argv) {
   remote60::native_poc::e2e::StationLock stationLock;
   std::wstring clipDesktop;
   DWORD interactiveClipSeq0 = 0;
+  DWORD stationFixturePid = 0;  // r3 R3: parkclip's capture target process
   if (parkClip) {
     if (!stationLock.Acquire("mobile_abr_session_e2e_test(parkclip)")) {
       return remote60::native_poc::e2e::StationLock::Busy("mobile_abr_session_e2e_test(parkclip)");
@@ -759,6 +784,21 @@ int wmain(int argc, wchar_t** argv) {
     clipDesktop = std::wstring(wsName) + L"\\Default";
     check("[parkclip] the host gets a private window station (its own clipboard)", ws && privateDesk);
     interactiveClipSeq0 = GetClipboardSequenceNumber();
+    // r3 R3: its capture target, on that station
+    std::wstring fcmd = L"\"" + self_path() + L"\" --station-fixture \"" + kTargetTitle + L"\"";
+    STARTUPINFOW fsi{};
+    fsi.cb = sizeof(fsi);
+    fsi.lpDesktop = clipDesktop.data();
+    PROCESS_INFORMATION fpi{};
+    const bool fixtureUp = CreateProcessW(nullptr, fcmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                                          nullptr, &fsi, &fpi) != 0;
+    if (fixtureUp) {
+      AssignProcessToJobObject(job, fpi.hProcess);
+      stationFixturePid = fpi.dwProcessId;
+      CloseHandle(fpi.hThread);
+      CloseHandle(fpi.hProcess);
+    }
+    check("[parkclip] the capture target window is up on the private station (a child of this test)", fixtureUp);
   }
   const std::wstring hostLogPath = dir + L"host.log";
   HANDLE hostLog = INVALID_HANDLE_VALUE;
@@ -772,7 +812,9 @@ int wmain(int argc, wchar_t** argv) {
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps " + std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) +
                        L" --seconds " + std::to_wstring(hostSec) + L" --input-injection-mode none" +
-                       e2e_capture_window_args(kTargetTitle);
+                       (parkClip ? L" --capture-window-pid " + std::to_wstring(stationFixturePid) +
+                                       L" --capture-window-title \"" + kTargetTitle + L"\""
+                                 : e2e_capture_window_args(kTargetTitle));
     if (parkScenario) cmd += L" --input-log-every 1";  // keepalive r1: every input the host receives, logged
     if (directoryHost) {
       // keepalive r1: registered with the fixture directory; its token cache in the staging dir (the
@@ -914,7 +956,11 @@ int wmain(int argc, wchar_t** argv) {
   };
   if (connected && parkClip) {
     // ---------------------------------------------------------------- keepalive r2 §7: the clipboard
-    // The product's own poll / push / host handler, the host on a private station (no picture there).
+    // The product's own poll / push / host handler, the host on a private station. r3 R3: it is the pinned
+    // test build, pinned to the fixture window there -- which WGC cannot capture (no window of a private
+    // station is ever visible), so the host ends at its first capture and this scenario FAILS CLOSED until
+    // a source that captures nothing exists. In r2 it ran the product host here, which fell back to the
+    // screen (captured, 0 encoded): never again.
     const std::wstring self = self_path();
     auto stationRun = [&](const std::wstring& args) -> int {
       std::wstring cmd = L"\"" + self + L"\" " + args;
@@ -1273,6 +1319,21 @@ int wmain(int argc, wchar_t** argv) {
     std::string captureLine;
     const bool own = e2e_host_captured_window(hostLogPath, target.hwnd(), &captureLine);
     check("the host captured the window this test paints (its hwnd, this pid)", own, captureLine);
+  }
+  if (launched) {
+    // keepalive r3 R3: never a screen, in any scenario
+    std::ifstream hl(hostLogPath);
+    const std::string all((std::istreambuf_iterator<char>(hl)), std::istreambuf_iterator<char>());
+    check("the host never fell back to a screen (no fallback=monitor, no process=monitor)",
+          all.find("fallback=monitor") == std::string::npos && all.find("process=monitor") == std::string::npos);
+    if (parkClip) {
+      const std::string want = "[pinned-select-test] pinned hwnd=";
+      const size_t at = all.find(want);
+      const std::string pinLine = at == std::string::npos ? std::string() : all.substr(at, all.find('\n', at) - at);
+      check("[parkclip] the pinned test host pinned the station fixture (its pid)",
+            at != std::string::npos && pinLine.find(" pid=" + std::to_string(stationFixturePid)) != std::string::npos,
+            pinLine);
+    }
   }
   if (parkScenario && !parkClip && launched) {
     // keepalive r1: the host's own record, in its order. At every pause nothing this client pressed may
