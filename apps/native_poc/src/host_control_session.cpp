@@ -103,6 +103,35 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
 // but the test's own window. Never the user's windows: the list is the pinned id only. The shipped
 // GNLinkStream is built without this; there a pinned host lists every window and refuses selection.
 namespace {
+// Pinned by BOTH a pid and a title (what the e2e harnesses pass), decided from the arguments -- not from
+// the runtime lock flag, which is only set once the capture has started (a list asked for before that
+// would otherwise enumerate every window). Without both, the seam is off and the host is the product's.
+bool pinned_by_args(const Args& args) { return args.captureWindowPid != 0 && !args.captureWindowTitle.empty(); }
+
+struct PinnedFind {
+  DWORD pid;
+  std::wstring needle;
+  HWND found;
+};
+BOOL CALLBACK pinned_enum(HWND hwnd, LPARAM lp) {
+  auto* f = reinterpret_cast<PinnedFind*>(lp);
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != f->pid) return TRUE;
+  std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+  if (title.find(f->needle) == std::wstring::npos) return TRUE;
+  f->found = hwnd;
+  return FALSE;
+}
+uint64_t pinned_window_id(const Args& args) {
+  if (!pinned_by_args(args)) return 0;
+  PinnedFind f{args.captureWindowPid, {}, nullptr};
+  for (unsigned char c : args.captureWindowTitle) f.needle.push_back(static_cast<wchar_t>(towlower(c)));
+  EnumWindows(pinned_enum, reinterpret_cast<LPARAM>(&f));
+  return f.found ? remote60::native_poc::hwnd_to_id(f.found) : 0;
+}
+
 bool pinned_window_entry(uint64_t id, remote60::native_poc::WindowListEntry* out) {
   HWND hwnd = remote60::native_poc::window_id_to_hwnd(id);
   if (id == 0 || !hwnd || !IsWindow(hwnd)) return false;
@@ -145,7 +174,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
     rsp.seq = seq;
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
-    const bool pinnedSeam = capture.windowSelectionLocked.load(std::memory_order_relaxed);
+    const bool pinnedSeam = pinned_by_args(args);
 #else
     constexpr bool pinnedSeam = false;
 #endif
@@ -166,7 +195,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
     if (pinnedSeam) {
       remote60::native_poc::WindowListEntry pinned;
-      if (pinned_window_entry(rsp.selectedWindowId, &pinned)) windows.push_back(pinned);
+      if (pinned_window_entry(pinned_window_id(args), &pinned)) windows.push_back(pinned);
     }
 #endif
     rsp.itemCount = std::min<uint32_t>(
@@ -1037,9 +1066,8 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const char* refused = resolved.refused;
 
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
-      const uint64_t pinnedId = capture.selectedWindowId.load(std::memory_order_acquire);
-      const bool pinnedPick = capture.windowSelectionLocked.load(std::memory_order_acquire) &&
-                              req.windowId != 0 && req.windowId == pinnedId;
+      const uint64_t pinnedId = pinned_window_id(args);
+      const bool pinnedPick = pinned_by_args(args) && req.windowId != 0 && req.windowId == pinnedId;
 #else
       constexpr bool pinnedPick = false;
 #endif
@@ -1121,6 +1149,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
 
       if (!link.Write(&rsp, sizeof(rsp))) break;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      // TEST BUILD ONLY: what a real switch does after it is answered -- a fresh IDR, so the client's
+      // selection gate (opened by this answer) gets its key frame now rather than at the next GOP.
+      if (pinnedPick) mailbox.PostRequestKeyframe(kKeyframeReasonViewer);
+#endif
       continue;
     }
 
