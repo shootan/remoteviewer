@@ -96,8 +96,18 @@ bool should_exclude_window_process(uint32_t pid, const std::string& processName)
   return pid != 0 && excludedPids.find(pid) != excludedPids.end();
 }
 
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+// TEST BUILD ONLY (keepalive r2 K6-b): the test's own pinned window -- see host_control_session.cpp. It is
+// transparent and click-through so it never covers the user's screen, which the product's predicate below
+// would refuse; it is admitted here, by its exact HWND, and nothing else changes.
+std::atomic<uintptr_t> g_pinned_select_seam_hwnd{0};
+#endif
+
 bool should_include_window(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd)) return false;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  if (reinterpret_cast<uintptr_t>(hwnd) == g_pinned_select_seam_hwnd.load(std::memory_order_acquire)) return true;
+#endif
   if (hwnd == GetShellWindow()) return false;
   if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
   if (!IsWindowVisible(hwnd)) return false;

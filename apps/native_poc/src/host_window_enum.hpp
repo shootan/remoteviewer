@@ -20,6 +20,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -63,6 +64,10 @@ std::string describe_input_target(HWND hwnd);
 
 bool should_exclude_window_process(uint32_t pid, const std::string& processName);
 bool should_include_window(HWND hwnd);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+// TEST BUILD ONLY: the pinned window, admitted by should_include_window (host_control_session.cpp sets it).
+extern std::atomic<uintptr_t> g_pinned_select_seam_hwnd;
+#endif
 // Report the client extent, not the outer window rect (the stream is cropped to the client area).
 void window_content_extent(HWND hwnd, const RECT& windowRect, int* outW, int* outH);
 

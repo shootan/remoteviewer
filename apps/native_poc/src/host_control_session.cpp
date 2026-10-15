@@ -146,6 +146,8 @@ uint64_t pinned_window_id(const Args& args) {
   PinnedFind f{args.captureWindowPid, {}, nullptr};
   for (unsigned char c : args.captureWindowTitle) f.needle.push_back(static_cast<wchar_t>(towlower(c)));
   EnumWindows(pinned_enum, reinterpret_cast<LPARAM>(&f));
+  // the product's selection transaction admits this one window (host_window_enum.cpp, r2 K6-b)
+  remote60::native_poc::g_pinned_select_seam_hwnd.store(reinterpret_cast<uintptr_t>(f.found), std::memory_order_release);
   return f.found ? remote60::native_poc::hwnd_to_id(f.found) : 0;
 }
 

@@ -907,7 +907,11 @@ int wmain(int argc, wchar_t** argv) {
   bool reconnected = true;
   std::atomic<bool> inputStop{false};
   std::thread inputThread;
-  auto note = [&](const std::string& line) { say("PARK " + line); };
+  auto note = [&](const std::string& line) {
+    say("PARK " + std::to_string(local_now_ms() % 100000) + " " + line + " [session " +
+        std::to_string(static_cast<int>(session.Snapshot().state)) + " park " +
+        client_park_phase_name(session.ParkPhase()) + "]");
+  };
   if (connected && parkClip) {
     // ---------------------------------------------------------------- keepalive r2 §7: the clipboard
     // The product's own poll / push / host handler, the host on a private station (no picture there).
@@ -944,36 +948,56 @@ int wmain(int argc, wchar_t** argv) {
       const bool any = wait_until([&] { return session.TakeIncomingClipboardText(&got); }, ms);
       return any ? std::string(got.begin(), got.end()) : std::string();
     };
+    auto alive = [&] { return session.Snapshot().state == ClientSessionState::Connected; };
     const bool hostClip = wait_until([&] { return session.HostSupportsClipboard(); }, 10000);
     check("[parkclip] the host on its station does clipboard sync (pong flag)", hostClip);
     (void)session.TakeClipboardPushRequest();
     stationSet(L"H0");
-    std::this_thread::sleep_for(std::chrono::seconds(2));  // the session's baseline poll adopts H0's generation
-    check("[parkclip] phone -> host: P0 arrives on the station clipboard", queue("P0") &&
-          wait_until([&] { return stationGet() == "P0"; }, 8000), stationGet());
-    check("[parkclip] host -> phone: H1 arrives", stationSet(L"H1") && takeWithin(8000) == "H1");
+    note("H0 set on the station; waiting for the session's baseline poll");
+    std::this_thread::sleep_for(std::chrono::seconds(4));  // the baseline poll adopts H0's generation
+    const bool sentP0 = queue("P0");
+    const bool gotP0 = wait_until([&] { return stationGet() == "P0"; }, 8000);
+    note("P0 queued=" + std::to_string(sentP0) + " on station=" + std::to_string(gotP0));
+    check("[parkclip] phone -> host: P0 arrives on the station clipboard", sentP0 && gotP0);
+    // the station's H0 (set after the session's baseline poll) is a real change too: drained first
+    note("drained before H1: '" + takeWithin(3000) + "'");
+    const bool setH1 = stationSet(L"H1");
+    const std::string gotH1 = takeWithin(10000);
+    note("H1 set=" + std::to_string(setH1) + " phone got '" + gotH1 + "'");
+    check("[parkclip] host -> phone: H1 arrives", setH1 && gotH1 == "H1", gotH1);
     // A copy queued just before the park: delivered before the pause or not at all -- never after.
     const bool q1 = queue("P1");
-    check("[parkclip] park right after a queued copy", q1 && session.BeginPark() &&
-          wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000));
+    const bool begun = session.BeginPark();
+    const bool parkedOk = wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000);
+    note("P1 queued=" + std::to_string(q1) + " park begun=" + std::to_string(begun) + " parked=" + std::to_string(parkedOk));
+    check("[parkclip] park right after a queued copy", q1 && begun && parkedOk && alive());
     const std::string atPark = stationGet();
     note("pending P1 at the park: station clipboard is now '" + atPark + "'");
     // While parked: both sides copy.
-    check("[parkclip] parked: a phone copy is refused", !queue("P2"));
+    check("[parkclip] parked: a phone copy is refused", !queue("P2") && alive());
     check("[parkclip] parked: the host copies H2", stationSet(L"H2"));
     std::this_thread::sleep_for(std::chrono::seconds(3));
-    check("[parkclip] PARKED: NOTHING FROM THE HOST REACHES THE PHONE", takeWithin(200).empty());
-    check("[parkclip] PARKED: NOTHING FROM THE PHONE REACHES THE HOST (still " + atPark + ")", stationGet() == atPark);
+    const std::string phoneDuringPark = takeWithin(200);
+    const std::string stationDuringPark = stationGet();
+    note("during the park: phone got '" + phoneDuringPark + "', station holds '" + stationDuringPark + "'");
+    check("[parkclip] PARKED: NOTHING FROM THE HOST REACHES THE PHONE", phoneDuringPark.empty() && alive());
+    check("[parkclip] PARKED: NOTHING FROM THE PHONE REACHES THE HOST (the station holds H2, the host's own)",
+          stationDuringPark == "H2" && alive(), stationDuringPark);
     // Resume with the phone's current text as the baseline (what the app seeds).
     session.SeedClipboardBaseline(u16("P2"));
-    check("[parkclip] resume", session.ResumeFromPark());
+    check("[parkclip] resume", session.ResumeFromPark() && alive());
     std::this_thread::sleep_for(std::chrono::seconds(4));  // two polls at least
+    note("resumed, 4 s on");
     check("[parkclip] RESUMED: THE HOST'S PARK-TIME COPY H2 IS NOT REPLAYED TO THE PHONE", takeWithin(500).empty());
     check("[parkclip] RESUMED: THE PHONE'S PARK-TIME COPY P2 IS NOT PUSHED (its baseline)", !queue("P2") &&
           stationGet() == "H2");
-    check("[parkclip] after resume a new host copy H3 arrives", stationSet(L"H3") && takeWithin(8000) == "H3");
-    check("[parkclip] after resume a new phone copy P3 arrives", queue("P3") &&
-          wait_until([&] { return stationGet() == "P3"; }, 8000));
+    const bool setH3 = stationSet(L"H3");
+    const std::string gotH3 = takeWithin(10000);
+    check("[parkclip] after resume a new host copy H3 arrives", setH3 && gotH3 == "H3" && alive(), gotH3);
+    const bool sentP3 = queue("P3");
+    check("[parkclip] after resume a new phone copy P3 arrives", sentP3 &&
+          wait_until([&] { return stationGet() == "P3"; }, 8000) && alive());
+    note("after the new copies");
     check("[parkclip] THE USER'S CLIPBOARD (WinSta0) DID NOT MOVE", GetClipboardSequenceNumber() == interactiveClipSeq0,
           std::to_string(interactiveClipSeq0) + " -> " + std::to_string(GetClipboardSequenceNumber()));
     connected = false;
@@ -1287,6 +1311,8 @@ int wmain(int argc, wchar_t** argv) {
         ++resumes;
       } else if (line.find("capture detached (idle)") != std::string::npos) {
         ++detaches;
+      } else if (line.find("stream restored for new session") != std::string::npos) {
+        paused = false;  // another client's session (the replacement) -- its own requests are not this one's
       } else if (paused && (line.find("[control] window-list") != std::string::npos ||
                             line.find("runtime-config") != std::string::npos ||
                             line.find("desktop-backend-request") != std::string::npos ||
@@ -1296,8 +1322,10 @@ int wmain(int argc, wchar_t** argv) {
       }
     }
     // r2 K1: nothing but release / pause / Ping crossed while paused -- no list, no tune, no backend.
-    check("[park/host] the host saw a pause for every park", pauses >= (parkVariant == "main" ? 4 : 1),
-          std::to_string(pauses) + " pauses");
+    if (parkVariant != "fail") {  // fail: nothing reaches the host after BeginPark, by design
+      check("[park/host] the host saw a pause for every park", pauses >= (parkVariant == "main" ? 4 : 1),
+            std::to_string(pauses) + " pauses");
+    }
     check("[park/host] AT EVERY PAUSE NOTHING THIS CLIENT PRESSED WAS STILL DOWN (releases first)", pausesWithHeld == 0,
           std::to_string(pausesWithHeld) + " " + firstBad);
     check("[park/host] no input reached the host while paused", inputWhilePaused == 0,
