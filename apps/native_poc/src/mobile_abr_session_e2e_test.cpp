@@ -59,6 +59,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <utility>
 #include <functional>
 #include <mutex>
 #include <random>
@@ -87,6 +88,10 @@ void say(const std::string& s) {
 }
 
 // ------------------------------------------------------------------------------ what the host captures
+// quality-6m r1: the captured window's size (--target-size WxH). 480x270 is a UI/protocol fixture; a resolution
+// claim needs the source it is about (1920x1080).
+int gTargetW = 480, gTargetH = 270;
+
 class CadenceTarget {
  public:
   bool Start() {
@@ -142,7 +147,7 @@ class CadenceTarget {
     wc.lpszClassName = L"Remote60MobileAbrTarget";
     RegisterClassExW(&wc);
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                            wc.lpszClassName, kTargetTitle.c_str(), WS_POPUP, 0, 0, 480, 270, nullptr,
+                            wc.lpszClassName, kTargetTitle.c_str(), WS_POPUP, 0, 0, gTargetW, gTargetH, nullptr,
                             nullptr, wc.hInstance, nullptr);
     if (hwnd_) {
       SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
@@ -168,9 +173,15 @@ class PhoneSink : public ClientEncodedFrameSink {
       : onSec_(onSec), offSec_(offSec), noLatch_(noLatch), startUs_(qpc_now_us()) {}
   std::atomic<bool> stall{false};  // decodestall: frames arrive, the decoder gives out nothing
 
+  std::pair<uint32_t, uint32_t> last_size() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return {lastFrameW_, lastFrameH_};
+  }
   void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) override {
     std::lock_guard<std::mutex> lk(mu_);
     ++frames_;
+    lastFrameW_ = frame.header.width;  // quality-6m r1: also while stalled (what the host sent)
+    lastFrameH_ = frame.header.height;
     if (stall.load()) return;
     width_ = frame.header.width;
     height_ = frame.header.height;
@@ -271,6 +282,7 @@ class PhoneSink : public ClientEncodedFrameSink {
   const bool noLatch_;
   const uint64_t startUs_;
   uint64_t frames_ = 0, drains_ = 0, decodedSinceDrain_ = 0, decodedTotal_ = 0;
+  uint32_t lastFrameW_ = 0, lastFrameH_ = 0;
   uint64_t spanId_ = 0, spanBase_ = 0, spanStartUs_ = 0;  // r6
   uint32_t width_ = 0, height_ = 0;
   uint64_t lastPresentUs_ = 0;
@@ -554,6 +566,7 @@ int wmain(int argc, wchar_t** argv) {
   int externalSec = 70;
   int keyDropFrom = -1, keyDropTo = -1;  // r5 external: drop keyframes over [from, to) s from the first report
   std::string externalPlan = "app";
+  uint32_t runtimeBitrate = 0;  // quality-6m r1: asked for after connecting, the app's runtime path
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     const bool more = i + 1 < argc;
@@ -580,6 +593,10 @@ int wmain(int argc, wchar_t** argv) {
       externalSec = _wtoi(argv[++i]);
     } else if (a == L"--watchdog-sec" && more) {
       watchdogOverrideSec = _wtoi(argv[++i]);
+    } else if (a == L"--runtime-bitrate" && more) {
+      runtimeBitrate = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--target-size" && more) {
+      std::swscanf(argv[++i], L"%dx%d", &gTargetW, &gTargetH);
     }
   }
   const bool external = scenario == "external";
@@ -608,6 +625,8 @@ int wmain(int argc, wchar_t** argv) {
                                 : healthy ? warmSec + judgeSec + 2 : warmSec + impairSec + afterSec;
   say("mobile_abr_session_e2e_test scenario=" + scenario + " fps=" + std::to_string(fps) + " bitrate=" +
       std::to_string(bitrate) + " presentDuty=" + std::to_string(dutyOn) + ":" + std::to_string(dutyOff) +
+      " target=" + std::to_string(gTargetW) + "x" + std::to_string(gTargetH) +
+      " runtimeBitrate=" + std::to_string(runtimeBitrate) +
 #ifdef REMOTE60_CLIENT_DECODE_STATS
       " session=A(decode stats, pending snapshot)");
 #else
@@ -758,6 +777,28 @@ int wmain(int argc, wchar_t** argv) {
   if (connected) {
     const bool picture = wait_until([&] { return sink.frames() > 0; }, 20000);
     check("frames reach the phone's sink", picture, std::to_string(sink.frames()) + " frames");
+    if (runtimeBitrate != 0) {
+      // quality-6m r1: the bitrate the app's quality button asks for, through the same session call
+      // (native_bridge nativeRequestRuntimeConfig -> RequestRuntimeConfig), not the host's command line.
+      const bool queued = session.RequestRuntimeConfig(runtimeBitrate, fps);
+      const std::string want = "runtime-config-applied seq=";
+      const std::string wantRate = " bitrate=" + std::to_string(runtimeBitrate) + " ";
+      std::string appliedLine;
+      const bool applied = wait_until([&] {
+        std::ifstream in(hostLogPath);
+        std::string line;
+        while (std::getline(in, line)) {
+          if (line.find(want) != std::string::npos && line.find(wantRate) != std::string::npos) {
+            appliedLine = line;
+            return true;
+          }
+        }
+        return false;
+      }, 10000);
+      check("the runtime request was queued (the session accepted it)", queued);
+      check("the host APPLIED it (runtime-config-applied bitrate=" + std::to_string(runtimeBitrate) + ")", applied,
+            appliedLine.substr(0, 200));
+    }
     if (scenario == "inputload") {
       inputThread = std::thread([&] {
         int i = 0;
@@ -843,10 +884,20 @@ int wmain(int argc, wchar_t** argv) {
   };
   std::vector<AbrLine> abr;
   std::vector<HostSec> hostSecs;
+  std::vector<std::string> keySizes;  // quality-6m r1: the host's encoded size, each time it changes (key frames)
   {
     std::ifstream in(hostLogPath);
     std::string line;
+    std::string lastKeySize;
     while (std::getline(in, line)) {
+      if (line.find("[keyframe] seq=") != std::string::npos) {
+        const std::string size = field_of(line, "size");
+        if (!size.empty() && size != lastKeySize) {
+          keySizes.push_back(line.substr(0, 18) + " size=" + size + " bitrate=" + field_of(line, "bitrate") +
+                             " reasons=" + field_of(line, "reasons"));
+          lastKeySize = size;
+        }
+      }
       if (line.find("[abr] profile=") != std::string::npos) {
         abr.push_back({host_line_ms(line), field_of(line, "reason"), field_of(line, "profile"),
                        field_of(line, "evidence"), line});
@@ -861,6 +912,13 @@ int wmain(int argc, wchar_t** argv) {
   for (const auto& a : abr) say(a.raw.substr(0, 520));
   say("phone sink: " + std::to_string(frames) + " frames, " + std::to_string(drains) + " presentation drains; relay saw " +
       std::to_string(reports.size()) + " ControlClientMetrics");
+  say("\n--- host encoded size changes (key frames) ---");
+  for (const auto& k : keySizes) say(k);
+  {
+    const auto ls = sink.last_size();
+    say("phone sink: the last frame's size " + std::to_string(ls.first) + "x" + std::to_string(ls.second) +
+        " (source " + std::to_string(gTargetW) + "x" + std::to_string(gTargetH) + ")");
+  }
 
   // Steps between profiles inside [from, to], in order: down (rank grows) and up.
   auto steps = [&](int64_t from, int64_t to, bool down) {
