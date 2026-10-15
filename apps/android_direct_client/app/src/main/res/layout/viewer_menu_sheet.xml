@@ -93,18 +93,37 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal">
+                    android:orientation="horizontal"
+                    android:baselineAligned="false">
 
                     <TextView
                         android:id="@+id/viewerQualityLowButton"
                         style="@style/UiSegment"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
                         android:text="@string/ui_quality_low" />
 
                     <TextView
                         android:id="@+id/viewerQualityHighButton"
                         style="@style/UiSegment"
                         android:layout_marginStart="8dp"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
                         android:text="@string/ui_quality_high" />
+
+                    <TextView
+                        android:id="@+id/viewerQualityBestButton"
+                        style="@style/UiSegment"
+                        android:layout_marginStart="8dp"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
+                        android:text="@string/ui_quality_best" />
                 </LinearLayout>
 
                 <TextView

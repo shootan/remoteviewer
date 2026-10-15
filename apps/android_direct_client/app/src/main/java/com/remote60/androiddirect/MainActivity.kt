@@ -138,10 +138,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var viewerDesktopButton: Button
     private lateinit var viewerQualityLowButton: TextView
     private lateinit var viewerQualityHighButton: TextView
+    private lateinit var viewerQualityBestButton: TextView
     private lateinit var viewerFpsSpinner: Spinner
     private lateinit var viewerQualityStatusText: TextView
     private lateinit var settingsQualityLowButton: TextView
     private lateinit var settingsQualityHighButton: TextView
+    private lateinit var settingsQualityBestButton: TextView
     private lateinit var settingsFpsSpinner: Spinner
     /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
     private var qualityStatusMessage = ""
@@ -442,6 +444,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerDesktopButton = findViewById(R.id.viewerDesktopButton)
         viewerQualityLowButton = findViewById(R.id.viewerQualityLowButton)
         viewerQualityHighButton = findViewById(R.id.viewerQualityHighButton)
+        viewerQualityBestButton = findViewById(R.id.viewerQualityBestButton)
         viewerFpsSpinner = findViewById(R.id.viewerFpsSpinner)
         viewerQualityStatusText = findViewById(R.id.viewerQualityStatusText)
 
@@ -481,8 +484,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         viewerQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "menu") }
         viewerQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "menu") }
+        viewerQualityBestButton.setOnClickListener { selectQuality(QualityLevel.BEST, requestedRuntimeFps, "menu") }
         settingsQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "settings") }
         settingsQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "settings") }
+        settingsQualityBestButton.setOnClickListener { selectQuality(QualityLevel.BEST, requestedRuntimeFps, "settings") }
         for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
             val adapter = ArrayAdapter(
                 this,
@@ -826,8 +831,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun qualityLabel(): String = getString(
-        if (QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps) == QualityLevel.HIGH) R.string.ui_quality_high_short
-        else R.string.ui_quality_low_short
+        when (QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps)) {
+            QualityLevel.BEST -> R.string.ui_quality_best_short
+            QualityLevel.HIGH -> R.string.ui_quality_high_short
+            QualityLevel.LOW -> R.string.ui_quality_low_short
+        }
     )
 
     /**
@@ -868,12 +876,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val level = QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps)
         val fpsIndex = ViewerQualitySettings.FPS_CHOICES
             .indexOf(ViewerQualitySettings.nearestFps(requestedRuntimeFps)).coerceAtLeast(0)
-        for ((low, high) in listOf(
-            viewerQualityLowButton to viewerQualityHighButton,
-            settingsQualityLowButton to settingsQualityHighButton,
+        for (row in listOf(
+            listOf(viewerQualityLowButton, viewerQualityHighButton, viewerQualityBestButton),
+            listOf(settingsQualityLowButton, settingsQualityHighButton, settingsQualityBestButton),
         )) {
-            low.isSelected = level == QualityLevel.LOW
-            high.isSelected = level == QualityLevel.HIGH
+            // quality-6m r1: one button per level, in QualityLevel order -- exactly one selected.
+            for ((button, choice) in row.zip(QualityLevel.values())) button.isSelected = level == choice
         }
         for (spinner in listOf(viewerFpsSpinner, settingsFpsSpinner)) {
             if (spinner.selectedItemPosition != fpsIndex) spinner.setSelection(fpsIndex, false)
@@ -1491,6 +1499,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsPanel = findViewById(R.id.settingsPanel)
         settingsQualityLowButton = findViewById(R.id.settingsQualityLowButton)
         settingsQualityHighButton = findViewById(R.id.settingsQualityHighButton)
+        settingsQualityBestButton = findViewById(R.id.settingsQualityBestButton)
         settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
