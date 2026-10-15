@@ -893,6 +893,28 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
 target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
 
 # keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
+# keepalive r3: a second client through the fixture directory's relay (the other device that takes a host
+# from a parked phone). TEST ONLY: the product's directory calls, rendezvous and client session.
+add_executable(ka_relay_client_test
+  src/ka_relay_client_test.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(ka_relay_client_test PRIVATE src)
+target_link_libraries(ka_relay_client_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(ka_relay_client_test PRIVATE /utf-8)
+endif()
+
 # keepalive r3 R2-a: the native connect adoption gate (connect_op_gate.hpp); no network.
 add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp)
 target_include_directories(remote60_connect_op_gate_test PRIVATE src)

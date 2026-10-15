@@ -33,5 +33,24 @@ void pinned_select_seam_capture_gate(HWND window, const char* where);
 // would have gone -- the screen -- without ever capturing it. Never honoured without the probe.
 bool pinned_select_seam_probe_ungated();
 
+// keepalive r3 (K4 held tap, IDR/ACK order and loss): faults at the host's own packet boundaries, read at
+// the moment they apply from the file REMOTE60_PINNED_TEST_FAULT_FILE names ("key=value" lines; absent or
+// 0 = none) -- so one running test host serves each case in turn:
+//   pong_delay_ms  every Pong is held this long while the stream is paused (the park's fence Pong first)
+//   ack_delay_ms   a window-select answer is held this long after its selection was applied (its IDR
+//                  goes out first: answer and key frame reach the phone in the reverse order)
+//   drop_keys      this many key frames after a window-select are never put on the wire (nor cached
+//                  for a NACK): lost for good
+// The client's pause/fence/selection logic is the product's; nothing here answers in its place.
+struct PinnedTestFaults {
+  unsigned pongDelayMs = 0;
+  unsigned ackDelayMs = 0;
+  unsigned dropKeys = 0;
+};
+PinnedTestFaults pinned_select_seam_faults();
+// Arms drop_keys (called on a window-select) / takes one drop (the sender, per key frame): true = drop it.
+void pinned_select_seam_arm_key_drops(unsigned n);
+bool pinned_select_seam_take_key_drop();
+
 }  // namespace remote60::native_poc
 #endif

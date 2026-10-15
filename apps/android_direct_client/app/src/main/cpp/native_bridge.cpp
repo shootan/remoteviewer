@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <sstream>
@@ -31,6 +32,10 @@ uint64_t g_punch_count = 0;
 // keepalive r3 R2-a: the app's current connect operation (SessionPark.ConnectOwner); every directory
 // connect step checks it, and the session's Connect is adopted only through it (connect_op_gate.hpp).
 remote60::native_poc::ConnectOpGate g_connect_gate;
+// Set on every owner change: an observe / punch of the operation that just went stale stops waiting at its
+// next attempt (the rendezvous loops check it) instead of running out its budget. Cleared by the current
+// operation as it starts a step.
+std::atomic<bool> g_connect_stop{false};
 
 // One macro per session. Recording taps the same events the client is about to send, so what is
 // captured is exactly what the host saw.
@@ -184,6 +189,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetConnectOwner(
     JNIEnv* /* env */, jobject /* this */, jlong op) {
   g_connect_gate.SetCurrent(static_cast<int64_t>(op));
+  g_connect_stop.store(true, std::memory_order_release);
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -196,11 +202,12 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryObserve(
     g_rendezvous_error = "stale_operation";
     return to_jstring(env, std::string());
   }
+  g_connect_stop.store(false, std::memory_order_release);
   ++g_observe_count;
   const bool ok = g_rendezvous.Observe(jstring_to_string(env, directory_host),
                                        directory_udp_port,
                                        jstring_to_string(env, observe_token), &observed,
-                                       &g_rendezvous_error);
+                                       &g_rendezvous_error, &g_connect_stop);
   return to_jstring(env, ok ? observed : std::string());
 }
 
@@ -259,6 +266,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
     g_rendezvous_error = "stale_operation";
     return 0;
   }
+  g_connect_stop.store(false, std::memory_order_release);
   std::vector<remote60::native_poc::RendezvousCandidate> parsed;
   const jsize count = candidates ? env->GetArrayLength(candidates) : 0;
   for (jsize i = 0; i < count; ++i) {
@@ -289,7 +297,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
   ++g_punch_count;
   const bool answered = g_rendezvous.PunchAny(
       parsed, punch_budget_ms > 0 ? static_cast<uint32_t>(punch_budget_ms) : 4000u, &chosen,
-      &g_rendezvous_error);
+      &g_rendezvous_error, &g_connect_stop);
   // A punch that answered tells us which address to use. When none did, fall back to the first
   // candidate and let the hello handshake try anyway -- some NATs pass it even after the punch
   // was dropped, and giving up here would refuse connections that would have worked.

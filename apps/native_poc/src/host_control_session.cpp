@@ -201,6 +201,32 @@ bool pinned_select_seam_target_ok(HWND hwnd) {
 
 HWND pinned_select_seam_pinned_hwnd() { return g_pinnedHwnd; }
 
+PinnedTestFaults pinned_select_seam_faults() {
+  PinnedTestFaults f;
+  char path[MAX_PATH] = {};
+  if (GetEnvironmentVariableA("REMOTE60_PINNED_TEST_FAULT_FILE", path, sizeof(path)) == 0) return f;
+  FILE* fp = nullptr;
+  if (fopen_s(&fp, path, "rb") != 0 || !fp) return f;
+  char line[128];
+  while (std::fgets(line, sizeof(line), fp)) {
+    unsigned v = 0;
+    if (std::sscanf(line, "pong_delay_ms=%u", &v) == 1) f.pongDelayMs = (std::min)(v, 10000u);
+    if (std::sscanf(line, "ack_delay_ms=%u", &v) == 1) f.ackDelayMs = (std::min)(v, 10000u);
+    if (std::sscanf(line, "drop_keys=%u", &v) == 1) f.dropKeys = (std::min)(v, 20u);
+  }
+  std::fclose(fp);
+  return f;
+}
+
+std::atomic<unsigned> g_pinnedKeyDrops{0};
+void pinned_select_seam_arm_key_drops(unsigned n) { g_pinnedKeyDrops.store(n, std::memory_order_release); }
+bool pinned_select_seam_take_key_drop() {
+  unsigned v = g_pinnedKeyDrops.load(std::memory_order_acquire);
+  while (v > 0 && !g_pinnedKeyDrops.compare_exchange_weak(v, v - 1, std::memory_order_acq_rel)) {
+  }
+  return v > 0;
+}
+
 void pinned_select_seam_refuse(const char* where) {
   std::fprintf(stderr, "[pinned-select-test] refused: %s -- the host ends (65)\n", where ? where : "?");
   std::cout.flush();
@@ -609,6 +635,15 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlPingMessage ping{};
       ping.header = header;
       if (!link.Read(&ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
+        const unsigned delayMs = pinned_select_seam_faults().pongDelayMs;
+        if (delayMs > 0) {
+          std::cout << "[pinned-select-test] fault: pong seq=" << ping.seq << " held " << delayMs << " ms (paused)\n";
+          std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+      }
+#endif
       ControlPongMessage pong{};
       pong.header.magic = remote60::native_poc::kMagic;
       pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
@@ -1236,6 +1271,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
         windowSelectionTxn.cv.notify_all();
         std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
                   << " pending\n";
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+        if (const unsigned drops = pinned_select_seam_faults().dropKeys; drops > 0) {
+          pinned_select_seam_arm_key_drops(drops);
+          std::cout << "[pinned-select-test] fault: the next " << drops << " key frame(s) are dropped\n";
+        }
+#endif
 
         std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
         // Also give up when the link dies. The client that asked for this selection may be the
@@ -1271,6 +1312,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
         }
         rsp.hostSendQpcUs = qpc_now_us();
       }
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (const unsigned delayMs = pinned_select_seam_faults().ackDelayMs; delayMs > 0 && !seamRefuses) {
+        std::cout << "[pinned-select-test] fault: window-select answer seq=" << req.seq << " held " << delayMs
+                  << " ms (its key frame goes first)\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        rsp.hostSendQpcUs = qpc_now_us();
+      }
+#endif
 
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
