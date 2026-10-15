@@ -13044,3 +13044,12 @@ Next
 - a′(내용당 drain 1회, 직전 자연 IDR + P 평균을 감당할 때만): 실제 예산(속도의 25%)은 1.5M 46.9KB / 4.5M 140.6KB로 IDR 한 장(65~142KB)보다 작아 실행 0회 → 부적합. a″(저QP IDR)는 4.5M·6M에서 IDR이 +25~30% 커져 비채택.
 - 발견: drain이 없어도 정지 중 자연 GOP IDR이 refresh 입력에 실려 정제된 화면이 47→37dB로 다시 흐려진다(기존 기전).
 - 같은 실효 구성 두 회차의 첫 반응 p95 차이가 최대 400ms라서, 단회 20 episode로는 IDR 위상 귀속을 할 수 없다. 보고 `.claude/report_motion_settle_r1.md` §9.
+
+### 2026-10-15 motion-settle r7 — 작은 M1 pilot · 실험 경로 출하 분리 (작업용1, 채택 후보 없음)
+
+- `00cd9ee`: 후보 경로는 catch-up과 일반 P 정제만이다. F·floor·park·train floor·drain·M2·settle IDR 스위치와 TEST_SKEW는 실험 빌드(CMake 옵션 기본 OFF)에만 둔다. build gate(`automation/motion_settle_build_gate.py`)로 출하 빌드 PASS, 이전 빌드 FAIL(부정 대조)을 확인했다. 첫 grep 버전이 실행 없이 PASS를 내던 것을 이 부정 대조로 발견해 교체했다.
+- pilot(정제 2/4/8입력·1s, GOP 위상별 marker 결합 비교):
+  - 위상 대부분(far)에서 첫 반응은 기준선 이하이고, 1.5M·6M 문제 장면의 T_read가 개선된다.
+  - 그러나 4.5M 개선은 미미하다(AMD RC가 입력당 약 1 QP만 움직임).
+  - 정제가 다음 자연 IDR을 키우고(1.5M 65→110KB) 잦게 해서(+29~43%), IDR이 onset에 걸린 회차의 반응이 400→700ms가 된다.
+- restart200의 낮은 꼬리(최종 화면 QP 31~32)는 기준선에도 있는 현상이다(같은 시간대 40회 귀속). 보고 `.claude/report_motion_settle_r1.md` §10.
