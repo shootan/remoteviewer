@@ -7,6 +7,7 @@
 #include <string>
 
 #include "android_video_decoder.hpp"
+#include "connect_op_gate.hpp"
 #include "directory_rendezvous.hpp"
 #include "input_macro.hpp"
 #include "native_video_client_session.hpp"
@@ -27,6 +28,9 @@ std::string g_chosen_candidate;
 // add none (nor a session Connect / UDP Hello: ClientSessionController's own counters).
 uint64_t g_observe_count = 0;
 uint64_t g_punch_count = 0;
+// keepalive r3 R2-a: the app's current connect operation (SessionPark.ConnectOwner); every directory
+// connect step checks it, and the session's Connect is adopted only through it (connect_op_gate.hpp).
+remote60::native_poc::ConnectOpGate g_connect_gate;
 
 // One macro per session. Recording taps the same events the client is about to send, so what is
 // captured is exactly what the host saw.
@@ -176,12 +180,22 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDisconnect(
 
 // Returns "ip:port" as the directory sees this device, or "" with the reason available from
 // nativeDirectoryLastError. The socket stays open for the punch that follows.
+extern "C" JNIEXPORT void JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetConnectOwner(
+    JNIEnv* /* env */, jobject /* this */, jlong op) {
+  g_connect_gate.SetCurrent(static_cast<int64_t>(op));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryObserve(
     JNIEnv* env, jobject /* this */, jstring directory_host, jint directory_udp_port,
-    jstring observe_token) {
+    jstring observe_token, jlong op) {
   std::string observed;
   g_rendezvous_error.clear();
+  if (!g_connect_gate.IsCurrent(static_cast<int64_t>(op))) {  // r3 R2-a: not the app's operation any more
+    g_rendezvous_error = "stale_operation";
+    return to_jstring(env, std::string());
+  }
   ++g_observe_count;
   const bool ok = g_rendezvous.Observe(jstring_to_string(env, directory_host),
                                        directory_udp_port,
@@ -233,11 +247,18 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnect(
 //
 // `candidates` is "ip:port|kind" per entry, which keeps the JNI surface to a string array rather
 // than a class the Kotlin side would have to mirror.
-extern "C" JNIEXPORT jboolean JNICALL
+// r3 R2-a: `op` is the app's connect operation; the generation of the connection this call made comes back
+// (0 = none: failed, or the operation went stale -- before the punch, after it, or while Connect ran).
+extern "C" JNIEXPORT jlong JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
     JNIEnv* env, jobject /* this */, jobjectArray candidates, jint punch_budget_ms,
-    jstring punch_token) {
+    jstring punch_token, jlong op) {
   g_rendezvous_error.clear();
+  const int64_t owner = static_cast<int64_t>(op);
+  if (!g_connect_gate.IsCurrent(owner)) {
+    g_rendezvous_error = "stale_operation";
+    return 0;
+  }
   std::vector<remote60::native_poc::RendezvousCandidate> parsed;
   const jsize count = candidates ? env->GetArrayLength(candidates) : 0;
   for (jsize i = 0; i < count; ++i) {
@@ -261,7 +282,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
   }
   if (parsed.empty()) {
     g_rendezvous_error = "no usable candidate";
-    return JNI_FALSE;
+    return 0;
   }
 
   remote60::native_poc::RendezvousCandidate chosen;
@@ -277,10 +298,16 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
                        (target.kind.empty() ? "unknown" : target.kind) +
                        (answered ? "" : " (no answer, trying anyway)");
 
+  // r3 R2-a: stale after the punch -- the socket is not handed to a session.
+  if (!g_connect_gate.IsCurrent(owner)) {
+    g_rendezvous.Close();
+    g_rendezvous_error = "stale_operation";
+    return 0;
+  }
   const remote60::native_poc::SocketHandle prepared = g_rendezvous.Release();
   if (prepared == remote60::native_poc::kInvalidSocket) {
     if (g_rendezvous_error.empty()) g_rendezvous_error = "no prepared socket";
-    return JNI_FALSE;
+    return 0;
   }
 
   remote60::native_poc::ClientSessionConnectArgs args{};
@@ -292,7 +319,17 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryConnectAny(
   args.peerAuthToken = jstring_to_string(env, punch_token);
   args.preparedUdpSocket = prepared;
   args.encodedFrameSink = &g_video_decoder_sink;
-  return g_session_controller.Connect(args) ? JNI_TRUE : JNI_FALSE;
+  remote60::native_poc::ConnectOpGate::Steps steps;
+  steps.connect = [&] { return g_session_controller.Connect(args); };
+  steps.generation = [] { return g_session_controller.ConnectionGeneration(); };
+  steps.disconnect = [] { g_session_controller.Disconnect(); };
+  steps.closePrepared = [prepared] {
+    remote60::native_poc::SocketHandle s = prepared;
+    remote60::native_poc::close_socket(&s);
+  };
+  const uint64_t made = g_connect_gate.Adopt(owner, steps);
+  if (made == 0 && !g_connect_gate.IsCurrent(owner)) g_rendezvous_error = "stale_operation";
+  return static_cast<jlong>(made);
 }
 
 // Which candidate answered, for the diagnostics log. Empty until a connect has been attempted.
@@ -748,7 +785,8 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeSessionCounters(
   oss << "gen=" << g_session_controller.ConnectionGeneration()
       << " connects=" << g_session_controller.ConnectCount()
       << " hellos=" << g_session_controller.UdpHelloCount()
-      << " observes=" << g_observe_count << " punches=" << g_punch_count;
+      << " observes=" << g_observe_count << " punches=" << g_punch_count
+      << " staleRefused=" << g_connect_gate.StaleRefused();
   return to_jstring(env, oss.str());
 }
 

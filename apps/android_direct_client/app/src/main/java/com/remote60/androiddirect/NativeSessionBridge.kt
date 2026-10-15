@@ -39,7 +39,11 @@ object NativeSessionBridge {
         directoryHost: String,
         directoryUdpPort: Int,
         observeToken: String,
+        op: Long,
     ): String
+
+    /** keepalive r3 R2-a: the app's current connect operation (SessionPark.ConnectOwner); 0 = none. */
+    external fun nativeSetConnectOwner(op: Long)
 
     /** Punches towards the host on the observed socket and starts the session on it. */
     external fun nativeDirectoryConnect(
@@ -61,7 +65,8 @@ object NativeSessionBridge {
         candidates: Array<String>,
         punchBudgetMs: Int,
         punchToken: String,
-    ): Boolean
+        op: Long,
+    ): Long  // r3 R2-a: the generation this call's connection has; 0 = none (failed or stale)
 
     /** Which candidate answered, as "ip:port|kind", for the diagnostics log. */
     external fun nativeDirectoryChosenCandidate(): String

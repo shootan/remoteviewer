@@ -152,4 +152,33 @@ class SessionParkTest {
         // never got as far as a native connect: nothing to close
         assertFalse(owner.staleCloses(madeGeneration = 0, nativeGenerationNow = 0))
     }
+
+    @Test
+    fun theNativeSideHearsEveryOwnerChange() {
+        // r3 R2-a: begin and every invalidation reach the native gate, in order
+        val heard = mutableListOf<Long>()
+        val owner = SessionPark.ConnectOwner { heard.add(it) }
+        val a = owner.begin()
+        owner.invalidate()  // sign-out / exit / stop / disconnect
+        val b = owner.begin()
+        assertEquals(listOf(a, a + 1, b), heard)
+        assertEquals(b, owner.current())
+    }
+
+    @Test
+    fun aHeldTapFallbackRunsOnlyIfNothingHappenedSince() {
+        // r3 R2-b
+        val f = SessionPark.TapFallback(owner = 7, account = "acc", origin = "https://d", hostId = "h1")
+        assertTrue(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = true, hostListed = true))
+        // stopped / backgrounded before it ran
+        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = false, hostListed = true))
+        // signed out and back in as another account (the owner moved, the account differs)
+        assertFalse(SessionPark.tapFallbackRuns(f, 9, "other", "https://d", foreground = true, hostListed = true))
+        // another PC tapped meanwhile (its connect took the owner)
+        assertFalse(SessionPark.tapFallbackRuns(f, 8, "acc", "https://d", foreground = true, hostListed = true))
+        // another directory
+        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://e", foreground = true, hostListed = true))
+        // the PC left the list
+        assertFalse(SessionPark.tapFallbackRuns(f, 7, "acc", "https://d", foreground = true, hostListed = false))
+    }
 }

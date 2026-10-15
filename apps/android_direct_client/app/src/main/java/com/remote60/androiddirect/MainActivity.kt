@@ -1178,7 +1178,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // r2 §7: a resume whose clipboard baseline could not be read holds pushes until a real change.
     private var clipboardResumeHold = false
     // r2 K2: which directory connect owns the native session (SessionPark.ConnectOwner).
-    private val connectOwner = SessionPark.ConnectOwner()
+    // r3 R2-a: every new owner number goes to the native connect gate too.
+    private val connectOwner = SessionPark.ConnectOwner { NativeSessionBridge.nativeSetConnectOwner(it) }
+    // r3 R2-b: between onStart and onStop (a held tap's fallback runs only then).
+    private var inForeground = false
     private var parkEpisodeCounter = 0L
     private var parkConfirmLogged = false
     private var parkNetwork: Network? = null
@@ -1846,10 +1849,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         super.onPause()
     }
 
+    override fun onStart() {
+        super.onStart()
+        inForeground = true
+    }
+
     override fun onStop() {
+        inForeground = false
         // keepalive r1: a park lives only while the list is in front. Backgrounded, locked or switched
         // away from, the connection is ended for real -- no foreground service keeps it.
         if (parked != null) endPark("app_stopped", announce = false)
+        // r3 R2: a connect still on its way is not carried on in the background either -- it stops at its
+        // next step (native included) and adopts nothing; the list is not left busy.
+        if (directoryBusy) {
+            connectOwner.invalidate()
+            setDirectoryBusy(false)
+            directoryConnectingName = ""
+        }
         super.onStop()
     }
 
@@ -2191,6 +2207,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             NativeSessionBridge.nativeResetVideoStream()
         }
         if (parked != null) endPark("exit", announce = false)
+        connectOwner.invalidate()  // r3 R2: a connect on its way adopts nothing after the exit
         NativeSessionBridge.nativeDisconnect()
         connectFlowActive = false
         clearPendingSelection()
@@ -2496,9 +2513,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         hostListAdapter.notifyDataSetChanged()
         // r2 K4: the park failed on its own under a held tap -- that tap still connects, the ordinary way, once.
         if (held != null && SessionPark.pendingTapFallsBack(reason)) {
-            directoryHosts.firstOrNull { it.hostId == held.hostId }?.let { host ->
-                diagnosticsLog.log("park_tap_fallback", "episode=${p.episode} reason=$reason host=${host.hostId}")
-                statusHandler.post { connectToDirectoryHost(host) }
+            // r3 R2-b: scheduled under the owner, account and directory of now; carried out only if none of
+            // them changed and the app is still in front when it runs.
+            val fallback = SessionPark.TapFallback(
+                connectOwner.current(), DirectoryClient.sessionAccount(), directoryOrigin(), held.hostId)
+            diagnosticsLog.log("park_tap_fallback", "episode=${p.episode} reason=$reason host=${held.hostId} owner=${fallback.owner}")
+            statusHandler.post {
+                val host = directoryHosts.firstOrNull { it.hostId == fallback.hostId }
+                if (!SessionPark.tapFallbackRuns(fallback, connectOwner.current(), DirectoryClient.sessionAccount(),
+                        directoryOrigin(), inForeground, host != null)) {
+                    diagnosticsLog.log("park_tap_fallback_cancelled",
+                        "host=${fallback.hostId} owner=${fallback.owner}->${connectOwner.current()} fg=$inForeground listed=${host != null}")
+                    return@post
+                }
+                connectToDirectoryHost(host!!)
             }
         }
     }
@@ -4708,7 +4736,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
                 val observe = {
                     val seen = NativeSessionBridge.nativeDirectoryObserve(
-                        directoryHost, observePort, observeToken
+                        directoryHost, observePort, observeToken, op
                     )
                     if (seen.isEmpty()) {
                         throw DirectoryClient.DirectoryException(
@@ -4736,10 +4764,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
                 // r2 K2: no punch / Hello for an operation that is no longer the user's.
                 if (!stillMine("before_native_connect")) return@execute
-                val started = NativeSessionBridge.nativeDirectoryConnectAny(
-                    connected.candidates.toTypedArray(), 4000, connected.punchToken
+                // r3 R2-a: the native side checks this operation again after the punch and adopts the session
+                // only while it is current; what comes back is the generation THIS call made (0 = none).
+                madeGeneration = NativeSessionBridge.nativeDirectoryConnectAny(
+                    connected.candidates.toTypedArray(), 4000, connected.punchToken, op
                 )
-                madeGeneration = NativeSessionBridge.nativeConnectionGeneration()
+                val started = madeGeneration != 0L
+                if (!started && !connectOwner.isCurrent(op)) {
+                    diagnosticsLog.log("directory_connect_stale",
+                        "op=$op step=native ${NativeSessionBridge.nativeSessionCounters()}")
+                    return@execute
+                }
                 // Which address won matters when something goes wrong later: "private" means the
                 // traffic never left the LAN, and a fallback with no answer explains a slow start.
                 val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate()

@@ -893,6 +893,10 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
 target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
 
 # keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
+# keepalive r3 R2-a: the native connect adoption gate (connect_op_gate.hpp); no network.
+add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp)
+target_include_directories(remote60_connect_op_gate_test PRIVATE src)
+
 add_executable(remote60_client_park_state_test
   src/client_park_state_test.cpp
   src/native_video_client_shared_core.cpp
@@ -939,6 +943,7 @@ add_executable(remote60_mobile_abr_session_e2e_test
   src/mobile_abr_session_e2e_test.cpp
 )
 target_include_directories(remote60_mobile_abr_session_e2e_test PRIVATE src)
+target_compile_definitions(remote60_mobile_abr_session_e2e_test PRIVATE REMOTE60_CLIENT_SESSION_TEST_HOOKS=1)
 target_link_libraries(remote60_mobile_abr_session_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_mobile_abr_session_e2e_test PRIVATE /utf-8)
