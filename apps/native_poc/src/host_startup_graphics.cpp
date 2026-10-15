@@ -145,6 +145,20 @@ int startup_init_graphics(HostContext& hx) {
 
 int startup_select_capture_target(HostContext& hx) {
   auto& args = hx.args;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  if (pinned_select_seam_no_capture()) {
+    // r3 (parkclip): no capture target is chosen and no capture ever starts; the control threads serve on.
+    std::cout << "[pinned-select-test] no-capture: no capture is started; serving control only for "
+              << args.seconds << " s\n";
+    std::cout.flush();
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(args.seconds > 0 ? args.seconds : 60);
+    while (!hx.stop.load() && std::chrono::steady_clock::now() < end) Sleep(100);
+    std::cout << "[pinned-select-test] no-capture: done\n";
+    std::cout.flush();
+    std::fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 0);
+  }
+#endif
   auto& item = hx.item;
   auto& backend = hx.backend;
   auto& inputRouter = hx.inputRouter;

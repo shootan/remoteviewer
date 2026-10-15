@@ -808,6 +808,8 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
     SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", parkClip ? L"1" : L"0");  // r2: only on its own station
+    // r3 R3: parkclip's host captures nothing at all (pinned to the station fixture, it serves control only)
+    SetEnvironmentVariableW(L"REMOTE60_PINNED_TEST_NO_CAPTURE", parkClip ? L"1" : nullptr);
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps " + std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) +
@@ -957,10 +959,9 @@ int wmain(int argc, wchar_t** argv) {
   if (connected && parkClip) {
     // ---------------------------------------------------------------- keepalive r2 §7: the clipboard
     // The product's own poll / push / host handler, the host on a private station. r3 R3: it is the pinned
-    // test build, pinned to the fixture window there -- which WGC cannot capture (no window of a private
-    // station is ever visible), so the host ends at its first capture and this scenario FAILS CLOSED until
-    // a source that captures nothing exists. In r2 it ran the product host here, which fell back to the
-    // screen (captured, 0 encoded): never again.
+    // test build, pinned to the fixture window there (its pid, its title, that desktop) and in its no-capture
+    // mode -- no window of a private station is ever visible and WGC captures none, so it starts no capture
+    // at all and serves control only. In r2 it ran the product host here, which fell back to the screen.
     const std::wstring self = self_path();
     auto stationRun = [&](const std::wstring& args) -> int {
       std::wstring cmd = L"\"" + self + L"\" " + args;
@@ -1368,6 +1369,13 @@ int wmain(int argc, wchar_t** argv) {
       check("[parkclip] the pinned test host pinned the station fixture (its pid)",
             at != std::string::npos && pinLine.find(" pid=" + std::to_string(stationFixturePid)) != std::string::npos,
             pinLine);
+      check("[parkclip] ...on the private station's desktop, not WinSta0",
+            pinLine.find("station=WinSta0") == std::string::npos && pinLine.find("desktop=Default") != std::string::npos,
+            pinLine);
+      check("[parkclip] THE HOST STARTED NO CAPTURE (no-capture mode; no item, no backend start, no frame)",
+            all.find("no-capture: no capture is started") != std::string::npos &&
+                all.find("capture-started=1") == std::string::npos && all.find("capture item source=") == std::string::npos &&
+                all.find("desktop_backend=") == std::string::npos && all.find("first-callback") == std::string::npos);
     }
   }
   if (parkScenario && !parkClip && launched) {

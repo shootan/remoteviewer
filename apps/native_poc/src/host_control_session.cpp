@@ -201,6 +201,11 @@ bool pinned_select_seam_target_ok(HWND hwnd) {
 
 HWND pinned_select_seam_pinned_hwnd() { return g_pinnedHwnd; }
 
+bool pinned_select_seam_no_capture() {
+  static const bool on = env_is_one("REMOTE60_PINNED_TEST_NO_CAPTURE");
+  return on;
+}
+
 PinnedTestFaults pinned_select_seam_faults() {
   PinnedTestFaults f;
   char path[MAX_PATH] = {};
@@ -286,9 +291,14 @@ bool pinned_select_seam_admit_start(const Args& args, std::string* why) {
       if (!pinned_select_seam_target_ok(g_pinnedHwnd)) pinned_select_seam_refuse("the pinned window is gone");
     }
   }).detach();
-  std::fprintf(stderr, "[pinned-select-test] pinned hwnd=0x%llx pid=%lu\n",
+  wchar_t deskName[128] = L"";
+  DWORD deskLen = 0;
+  GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, deskName, sizeof(deskName), &deskLen);
+  wchar_t staName[128] = L"";
+  GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, staName, sizeof(staName), &deskLen);
+  std::fprintf(stderr, "[pinned-select-test] pinned hwnd=0x%llx pid=%lu station=%ls desktop=%ls\n",
                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_pinnedHwnd)),
-               static_cast<unsigned long>(g_pinnedPid));
+               static_cast<unsigned long>(g_pinnedPid), staName, deskName);
   return true;
 }
 #endif

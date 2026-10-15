@@ -33,6 +33,13 @@ void pinned_select_seam_capture_gate(HWND window, const char* where);
 // would have gone -- the screen -- without ever capturing it. Never honoured without the probe.
 bool pinned_select_seam_probe_ungated();
 
+// REMOTE60_PINNED_TEST_NO_CAPTURE=1 (keepalive r3, parkclip): the host never starts a capture at all. Pinned
+// as always (the fixture window of that process, on this host's own desktop, watched for its lifetime), it
+// stops right before the capture target is chosen and serves only what its control threads do -- Hello,
+// Ping, stream-state, clipboard -- until --seconds or its stop. For a host on a private window station,
+// where no window is ever visible and WGC captures none.
+bool pinned_select_seam_no_capture();
+
 // keepalive r3 (K4 held tap, IDR/ACK order and loss): faults at the host's own packet boundaries, read at
 // the moment they apply from the file REMOTE60_PINNED_TEST_FAULT_FILE names ("key=value" lines; absent or
 // 0 = none) -- so one running test host serves each case in turn:
