@@ -9,17 +9,22 @@
 //                        these; modifier bookkeeping in the UI is not the source of truth (an enqueue is
 //                        not a delivery).
 //   ClientParkFence   -- the order of a park, each step on a real processing boundary:
-//                        Releasing (unsent actions dropped, releases for what is held queued, waiting for
-//                        the input queue to drain -- every input is answered by an InputAck)
+//                        Releasing: BeginPark only marks it (and from then the session takes nothing new);
+//                        the control loop COLLECTS at its next pass boundary -- where no action is in
+//                        flight, so a down that was already being sent has been answered and recorded --
+//                        dropping unsent actions and queueing the releases of what is held (r2 K1). It
+//                        then waits for the input queue to drain AND nothing to be held (every input is
+//                        answered by an InputAck; one more round of releases if something still is)
 //                        -> Pausing (ControlStreamState(false) requested only now, because the scheduler
 //                        sends StreamState before input)
 //                        -> Fencing (the pause was sent; a Ping is forced AFTER it)
 //                        -> Parked (that Ping's Pong came back: the host's control handler has taken the
 //                        pause, since control is processed in order). A Pong for a Ping sent before the
 //                        pause never confirms it.
-//                        Not Parked within the budget = Failed (the caller disconnects instead).
-//                        A parked session past its hard limit = Expired (the session ends itself even if
-//                        the app's own timer never ran).
+//                        Not Parked within the budget = Failed; a fence Pong after the budget does not
+//                        save it (r2 K3). Parked past the hard limit -- 5 min from BeginPark, the app's
+//                        own deadline -- = Expired. Both end the session in the control loop itself, so a
+//                        stopped UI cannot keep either alive.
 // Thread:  the session's control loop and the app's calls, under the session's park mutex.
 // Callers: ClientSessionController (native_video_client_session.cpp); client_park_state_test.cpp.
 // Pure, no platform headers.
@@ -124,7 +129,39 @@ class ClientHeldInput {
 class ClientParkFence {
  public:
   static constexpr uint64_t kConfirmBudgetUs = 2000000ULL;   // Codex section 3: an initial 2 s
-  static constexpr uint64_t kParkedLimitUs = 310000000ULL;   // the app's 5 min, plus a margin for its timer
+  static constexpr uint64_t kParkedLimitUs = 300000000ULL;   // the contract's 5 min, from BeginPark (r2 K3)
+
+  // What the control loop does at a pass boundary (no action in flight), before NextAction.
+  struct PassStep {
+    bool collect = false;    // drop unsent actions, queue the releases of what is held, cancel other pending
+    bool reRelease = false;  // something is still held with the queue empty: queue its releases again
+    bool pauseNow = false;   // request ControlStreamState(false) now
+    bool pingNow = false;    // send a Ping next (the fence)
+    ClientParkPhase phase = ClientParkPhase::None;
+  };
+  PassStep OnPassBoundary(uint64_t nowUs, bool inputQueueEmpty, bool nothingHeld) {
+    PassStep st;
+    Tick(nowUs);
+    if (phase_ == ClientParkPhase::Releasing) {
+      if (!collected_) {
+        collected_ = true;
+        st.collect = true;
+      } else if (inputQueueEmpty && nothingHeld) {
+        phase_ = ClientParkPhase::Pausing;
+        st.pauseNow = true;
+      } else if (inputQueueEmpty) {
+        if (reReleases_ < 1) {
+          ++reReleases_;
+          st.reRelease = true;
+        } else {
+          phase_ = ClientParkPhase::Failed;  // a release that will not land: the disconnect teardown releases
+        }
+      }
+    }
+    st.pingNow = TakePingWanted();
+    st.phase = phase_;
+    return st;
+  }
 
   // Starts a park now. false (nothing changes) if one is already running or parked.
   bool Begin(uint64_t nowUs) {
@@ -136,12 +173,8 @@ class ClientParkFence {
     parkedUs_ = 0;
     fencePingSeq_ = 0;
     wantPing_ = false;
-    return true;
-  }
-  // The input queue is empty (every release sent and answered): true = request the pause now.
-  bool OnInputDrained() {
-    if (phase_ != ClientParkPhase::Releasing) return false;
-    phase_ = ClientParkPhase::Pausing;
+    collected_ = false;
+    reReleases_ = 0;
     return true;
   }
   void OnStreamStateSent(bool active) {
@@ -160,6 +193,10 @@ class ClientParkFence {
   }
   void OnPong(uint32_t seq, uint64_t nowUs) {
     if (phase_ == ClientParkPhase::Fencing && fencePingSeq_ != 0 && seq == fencePingSeq_) {
+      if (nowUs > beganUs_ + kConfirmBudgetUs) {  // r2 K3: too late -- not confirmed, not saved
+        phase_ = ClientParkPhase::Failed;
+        return;
+      }
       phase_ = ClientParkPhase::Parked;
       parkedUs_ = nowUs;
     }
@@ -185,6 +222,7 @@ class ClientParkFence {
   uint64_t began_us() const { return beganUs_; }
   uint64_t parked_us() const { return parkedUs_; }
   uint32_t fence_ping_seq() const { return fencePingSeq_; }
+  bool collected() const { return collected_; }
 
  private:
   ClientParkPhase phase_ = ClientParkPhase::None;
@@ -192,6 +230,26 @@ class ClientParkFence {
   uint64_t parkedUs_ = 0;
   uint32_t fencePingSeq_ = 0;
   bool wantPing_ = false;
+  bool collected_ = false;
+  uint32_t reReleases_ = 0;
 };
+
+// r2 K1: what the control loop may still send while a park runs (from its first pass boundary on):
+// the fence's own Ping and pause, input (only releases can be queued by then) and the paused report.
+// Anything else the scheduler hands out -- a list, a selection, a tune, a capture mode, a backend, a key
+// request -- is dropped unsent: a park has no side effect beyond letting go and pausing.
+inline bool client_park_allows(ControlOutboundActionKind kind) {
+  switch (kind) {
+    case ControlOutboundActionKind::Ping:
+    case ControlOutboundActionKind::StreamState:
+    case ControlOutboundActionKind::InputEvent:
+    case ControlOutboundActionKind::InputText:
+    case ControlOutboundActionKind::PhysicalKey:
+    case ControlOutboundActionKind::Metrics:
+      return true;
+    default:
+      return false;
+  }
+}
 
 }  // namespace remote60::native_poc

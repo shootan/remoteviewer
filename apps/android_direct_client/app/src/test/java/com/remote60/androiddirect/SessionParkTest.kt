@@ -20,6 +20,8 @@ class SessionParkTest {
         phase: SessionPark.NativePhase = SessionPark.NativePhase.PARKED,
     ) = SessionPark.NativeState(connected, gen, phase)
 
+    private val me = SessionPark.Identity("alice", "https://dir.example", sessionPresent = true)
+
     private fun tap(
         host: String = "h-1",
         account: String = "alice",
@@ -62,8 +64,8 @@ class SessionParkTest {
     fun theDeadlineIsHard_fromWhenTheListOpened() {
         assertEquals(start + 5 * 60 * 1000, parked.deadlineMs)
         // Ticks keep it while healthy and end it at the deadline; nothing on the way extends it.
-        for (t in listOf(start, start + 1_000, start + 299_999)) assertNull(SessionPark.endReason(parked, t, native()))
-        assertEquals("expired", SessionPark.endReason(parked, start + 300_000, native()))
+        for (t in listOf(start, start + 1_000, start + 299_999)) assertNull(SessionPark.endReason(parked, t, native(), me))
+        assertEquals("expired", SessionPark.endReason(parked, start + 300_000, native(), me))
         assertEquals("0:00", SessionPark.formatRemaining(parked.remainingMs(start + 400_000)))
         assertEquals("5:00", SessionPark.formatRemaining(parked.remainingMs(start)))
         assertEquals("4:59", SessionPark.formatRemaining(parked.remainingMs(start + 1_000)))
@@ -71,15 +73,15 @@ class SessionParkTest {
 
     @Test
     fun aParkEndsByItselfWhenTheConnectionDoes() {
-        assertEquals("peer_lost", SessionPark.endReason(parked, start + 1, native(connected = false)))
-        assertEquals("generation_changed", SessionPark.endReason(parked, start + 1, native(gen = 9)))
+        assertEquals("peer_lost", SessionPark.endReason(parked, start + 1, native(connected = false), me))
+        assertEquals("generation_changed", SessionPark.endReason(parked, start + 1, native(gen = 9), me))
         assertEquals("confirm_failed",
-            SessionPark.endReason(parked, start + 1, native(phase = SessionPark.NativePhase.FAILED)))
+            SessionPark.endReason(parked, start + 1, native(phase = SessionPark.NativePhase.FAILED), me))
         assertEquals("native_expired",
-            SessionPark.endReason(parked, start + 1, native(phase = SessionPark.NativePhase.EXPIRED)))
-        assertNull(SessionPark.endReason(parked, start + 100, native(phase = SessionPark.NativePhase.RELEASING)))
+            SessionPark.endReason(parked, start + 1, native(phase = SessionPark.NativePhase.EXPIRED), me))
+        assertNull(SessionPark.endReason(parked, start + 100, native(phase = SessionPark.NativePhase.RELEASING), me))
         assertEquals("confirm_timeout", SessionPark.endReason(parked, start + SessionPark.CONFIRM_BUDGET_MS,
-            native(phase = SessionPark.NativePhase.PAUSING)))
+            native(phase = SessionPark.NativePhase.PAUSING), me))
     }
 
     @Test
@@ -98,5 +100,56 @@ class SessionParkTest {
         assertEquals(SessionPark.NativePhase.NONE, SessionPark.NativePhase.of(0))
         // An unknown code is never read as parked.
         assertEquals(SessionPark.NativePhase.FAILED, SessionPark.NativePhase.of(99))
+    }
+
+    @Test
+    fun aRefusedOrReplacedSignInEndsThePark_atOnce() {
+        // r2 K2: not only when the PC is tapped again -- the next tick after the screen knows.
+        assertEquals("identity_changed", SessionPark.endReason(parked, start + 1, native(),
+            SessionPark.Identity("alice", "https://dir.example", sessionPresent = false)))
+        assertEquals("identity_changed", SessionPark.endReason(parked, start + 1, native(),
+            SessionPark.Identity("bob", "https://dir.example", sessionPresent = true)))
+        assertEquals("identity_changed", SessionPark.endReason(parked, start + 1, native(),
+            SessionPark.Identity("alice", "https://other.example", sessionPresent = true)))
+        assertNull(SessionPark.endReason(parked, start + 1, native(), me))
+    }
+
+    @Test
+    fun aHeldTapFallsBackOnlyWhenTheParkFailedByItself() {
+        // r2 K4
+        for (r in listOf("confirm_failed", "confirm_timeout", "peer_lost", "park_lost", "generation_changed",
+            "native_expired", "resume_refused")) assertTrue(r, SessionPark.pendingTapFallsBack(r))
+        for (r in listOf("other_host", "disconnect_tap", "sign_out", "app_stopped", "exit", "identity_changed",
+            "session_refused", "expired", "network_changed", "network_lost", "host_gone")) {
+            assertFalse(r, SessionPark.pendingTapFallsBack(r))
+        }
+    }
+
+    @Test
+    fun anUnreadableBaselineHoldsPushesUntilARealChange() {
+        assertTrue(SessionPark.clipboardPushAllowed(false, "focus_gained"))
+        assertFalse(SessionPark.clipboardPushAllowed(true, "focus_gained"))
+        assertFalse(SessionPark.clipboardPushAllowed(true, "session_started"))
+        assertFalse(SessionPark.clipboardPushAllowed(true, "toggle_on"))
+        assertTrue(SessionPark.clipboardPushAllowed(true, "clip_changed"))
+    }
+
+    @Test
+    fun aStaleConnectOwnsNothingNewer() {
+        // r2 K2
+        val owner = SessionPark.ConnectOwner()
+        val a = owner.begin()
+        assertTrue(owner.isCurrent(a))
+        owner.invalidate()  // sign-out
+        assertFalse(owner.isCurrent(a))
+        val b = owner.begin()  // signed in again, connected again
+        assertFalse(owner.isCurrent(a))
+        assertTrue(owner.isCurrent(b))
+        // a's native connect had made generation 3; b's made 4: a's late callback closes nothing
+        assertFalse(owner.staleCloses(madeGeneration = 3, nativeGenerationNow = 4))
+        // a's own connection still the one running: it closes that one
+        assertTrue(owner.staleCloses(madeGeneration = 3, nativeGenerationNow = 3))
+        // never got as far as a native connect: nothing to close
+        assertFalse(owner.staleCloses(madeGeneration = 0, nativeGenerationNow = 0))
     }
 }

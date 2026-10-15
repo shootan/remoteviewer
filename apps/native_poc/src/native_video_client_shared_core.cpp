@@ -1224,6 +1224,14 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   return result;
 }
 
+void WindowPanelStateModel::CancelPendingRequests() {
+  std::lock_guard<std::mutex> lk(mu_);
+  listRequestPending_ = false;
+  selectRequestPending_ = false;
+  monitorListRequestPending_ = false;
+  monitorSelectRequestPending_ = false;
+}
+
 void WindowPanelStateModel::Reset() {
   std::lock_guard<std::mutex> lk(mu_);
   state_ = WindowPanelSnapshot{};

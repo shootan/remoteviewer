@@ -6,8 +6,12 @@
 // [2] the fence: Releasing -> Pausing only when the queue drained, Fencing only once the pause was SENT,
 //     Parked only on the Pong of the Ping sent after it. Negative controls that must fail to confirm:
 //     a Pong of an earlier Ping, a Pong before any Ping, a resume (StreamState true) instead of a pause.
-// [3] budget and limit: not confirmed within 2 s = Failed; parked past the limit = Expired; a second
-//     Begin while running is refused; End clears it.
+// [3] budget and limit: not confirmed within 2 s = Failed; parked past 5 min (300 s) = Expired; a second
+//     Begin while running is refused; End clears it. r2 K3: a fence Pong after the budget is not success.
+// [4] r2 K1: a down that is IN FLIGHT when the park begins (dequeued and being sent, its InputAck and so
+//     its record still to come). The d4b3068 order -- releases computed at BeginPark -- is run as the
+//     negative control and must leave it held at the pause; the pass-boundary collection releases it.
+// [5] r2 K1: what a park may still send.
 
 #include <cstdio>
 #include <string>
@@ -104,8 +108,12 @@ int main() {
     f.OnStreamStateSent(false);
     check("[2] a pause sent while still releasing does not move it (the pause comes after the releases)",
           f.phase() == ClientParkPhase::Releasing);
-    check("[2] drained: request the pause now", f.OnInputDrained() && f.phase() == ClientParkPhase::Pausing);
-    check("[2] ...once", !f.OnInputDrained());
+    check("[2] the first pass boundary collects (no pause yet)", f.OnPassBoundary(1, true, true).collect &&
+          f.phase() == ClientParkPhase::Releasing);
+    check("[2] the queue not drained yet: no pause", !f.OnPassBoundary(1, false, true).pauseNow);
+    check("[2] drained and nothing held: request the pause now", f.OnPassBoundary(1, true, true).pauseNow &&
+          f.phase() == ClientParkPhase::Pausing);
+    check("[2] ...once", !f.OnPassBoundary(1, true, true).pauseNow);
     f.OnPingSent(7);
     f.OnPong(7, 1);
     check("NEGATIVE: a Ping sent BEFORE the pause, and its Pong, do not confirm it", f.phase() == ClientParkPhase::Pausing);
@@ -132,18 +140,106 @@ int main() {
   {
     ClientParkFence f;
     f.Begin(1'000'000);
-    f.OnInputDrained();
+    f.OnPassBoundary(1'000'001, true, true);
+    f.OnPassBoundary(1'000'002, true, true);
     check("[3] confirming within 2 s stays", f.Tick(2'999'999) == ClientParkPhase::Pausing);
-    check("[3] NOT CONFIRMED WITHIN 2 s: failed (the app disconnects)", f.Tick(3'000'001) == ClientParkPhase::Failed);
+    check("[3] NOT CONFIRMED WITHIN 2 s: failed (the control loop ends the session)",
+          f.Tick(3'000'001) == ClientParkPhase::Failed && f.OnPassBoundary(3'000'002, true, true).phase == ClientParkPhase::Failed);
+    {
+      ClientParkFence late;
+      late.Begin(0);
+      late.OnPassBoundary(1, true, true);
+      late.OnPassBoundary(2, true, true);
+      late.OnStreamStateSent(false);
+      late.OnPingSent(5);
+      late.OnPong(5, 2'000'001);  // its Tick never ran (the loop was waiting on the answer)
+      check("[3] r2 K3: A FENCE PONG AFTER THE 2 s BUDGET DOES NOT CONFIRM (failed, not parked)",
+            late.phase() == ClientParkPhase::Failed, client_park_phase_name(late.phase()));
+    }
+    {
+      ClientParkFence held;
+      held.Begin(0);
+      held.OnPassBoundary(1, true, false);  // collect
+      check("[3] queue drained but something still held: one more round of releases",
+            held.OnPassBoundary(2, true, false).reRelease && held.phase() == ClientParkPhase::Releasing);
+      check("[3] ...and still held after it: failed (the disconnect teardown releases)",
+            held.OnPassBoundary(3, true, false).phase == ClientParkPhase::Failed);
+    }
     check("[3] a failed park may begin again", f.Begin(4'000'000));
-    f.OnInputDrained();
+    f.OnPassBoundary(4'000'001, true, true);
+    f.OnPassBoundary(4'000'002, true, true);
     f.OnStreamStateSent(false);
     f.OnPingSent(1);
     f.OnPong(1, 4'100'000);
     check("[3] parked within the budget", f.Tick(4'200'000) == ClientParkPhase::Parked);
+    check("[3] r2 K3: the limit is the contract's 300 s", ClientParkFence::kParkedLimitUs == 300'000'000ULL);
     check("[3] parked just inside the limit stays", f.Tick(4'000'000 + ClientParkFence::kParkedLimitUs) == ClientParkPhase::Parked);
     check("[3] PAST THE LIMIT: expired (the session ends itself)",
           f.Tick(4'000'001 + ClientParkFence::kParkedLimitUs) == ClientParkPhase::Expired);
+  }
+
+  std::printf("[4] r2 K1: a down in flight when the park begins\n");
+  {
+    // The control loop's order of events, both ways. The down is dequeued and being sent when the UI
+    // calls BeginPark; its InputAck (and so heldInput.OnSent) comes after.
+    const ControlOutboundAction down = input(5, 0x11);  // Ctrl down
+    auto drive = [&](bool d4b3068Order) {
+      ClientHeldInput held;
+      ClientInputQueue q;
+      ClientParkFence f;
+      f.Begin(0);  // BeginPark (UI thread) while the down is in flight
+      if (d4b3068Order) {
+        // d4b3068, transcribed: the releases were computed inside BeginPark -- the down was not recorded yet.
+        for (const auto& r : held.Releases(q, 0)) q.Enqueue(r);
+      }
+      held.OnSent(down);  // the in-flight down's InputAck arrives, it is recorded
+      bool pausedWithHeld = false;
+      for (uint64_t t = 1; t < 50 && f.phase() == ClientParkPhase::Releasing; ++t) {
+        if (d4b3068Order) {
+          // d4b3068: pause as soon as the queue is empty.
+          if (q.Empty()) {
+            pausedWithHeld = !held.Empty();
+            break;
+          }
+        } else {
+          const auto st = f.OnPassBoundary(t, q.Empty(), held.Empty());
+          if (st.collect || st.reRelease) {
+            uint32_t dropped = 0, kept = 0;
+            if (st.collect) q.DropAllButReleases(&dropped, &kept);
+            for (const auto& r : held.Releases(q, t)) q.Enqueue(r);
+          }
+          if (st.pauseNow) {
+            pausedWithHeld = !held.Empty();
+            break;
+          }
+        }
+        // the loop sends what is queued; each is answered and recorded
+        QueuedControlInputMessage m{};
+        if (q.TryDequeue(&m)) {
+          ControlOutboundAction sent{};
+          sent.kind = ControlOutboundActionKind::InputEvent;
+          sent.inputEvent = m.inputEvent;
+          held.OnSent(sent);
+        }
+      }
+      return pausedWithHeld;
+    };
+    check("NEGATIVE (d4b3068 order): the in-flight Ctrl down is STILL HELD at the pause", drive(true));
+    check("[4] r2 K1: COLLECTED AT THE PASS BOUNDARY, THE IN-FLIGHT DOWN IS RELEASED BEFORE THE PAUSE", !drive(false));
+  }
+
+  std::printf("[5] r2 K1: what a park may still send\n");
+  {
+    using K = ControlOutboundActionKind;
+    bool releaseAndFence = client_park_allows(K::Ping) && client_park_allows(K::StreamState) &&
+                           client_park_allows(K::InputEvent) && client_park_allows(K::PhysicalKey) &&
+                           client_park_allows(K::Metrics);
+    bool noOthers = !client_park_allows(K::WindowListRequest) && !client_park_allows(K::WindowSelect) &&
+                    !client_park_allows(K::MonitorSelect) && !client_park_allows(K::MonitorListRequest) &&
+                    !client_park_allows(K::CaptureMode) && !client_park_allows(K::KeyframeRequest) &&
+                    !client_park_allows(K::RuntimeTune) && !client_park_allows(K::DesktopBackend);
+    check("[5] the fence, releases and the paused report go out", releaseAndFence);
+    check("[5] a list, selection, monitor, capture mode, key request, tune or backend does not", noOthers);
   }
 
   std::printf("\nclient_park_state_test: %d passed, %d failed\nRESULT: %s\n", gChecks - gFailures, gFailures,

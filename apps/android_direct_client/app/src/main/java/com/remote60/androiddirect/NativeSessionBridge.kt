@@ -20,6 +20,9 @@ object NativeSessionBridge {
     /** SessionPark.NativePhase codes. */
     external fun nativeParkPhase(): Int
     external fun nativeParkReleasedCount(): Int
+    external fun nativeParkDroppedActionCount(): Int
+    /** r2 K5: the host stops sending when paused (else "PC 목록" is not offered: 연결 해제 only). */
+    external fun nativeHostHonorsStreamPause(): Boolean
     /** Bumps on every session Connect: the identity of the authenticated connection. */
     external fun nativeConnectionGeneration(): Long
     /** "gen= connects= hellos= observes= punches=" for the log. */

@@ -617,6 +617,8 @@ struct WindowSelectApplyResult {
 class WindowPanelStateModel {
  public:
   void Reset();
+  // keepalive r2 K1: a park takes back every list / select / monitor request not yet sent.
+  void CancelPendingRequests();
   void RequestList(const char* statusText = nullptr);
   bool TakeListRequest();
   // monitorListRevision: for a monitor-select target, the list the index was taken from

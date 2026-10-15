@@ -1173,6 +1173,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // keepalive r1: the name shown for it, and the one parked connection (SessionPark).
     private var directoryHostName = ""
     private var parked: SessionPark.Parked? = null
+    // r2 K4: a tap on the parked PC made while its park was still confirming, kept for that park.
+    private var parkPendingTap: SessionPark.PendingTap? = null
+    // r2 §7: a resume whose clipboard baseline could not be read holds pushes until a real change.
+    private var clipboardResumeHold = false
+    // r2 K2: which directory connect owns the native session (SessionPark.ConnectOwner).
+    private val connectOwner = SessionPark.ConnectOwner()
     private var parkEpisodeCounter = 0L
     private var parkConfirmLogged = false
     private var parkNetwork: Network? = null
@@ -1313,6 +1319,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Reads the phone clipboard, if it can, and offers it to the host. */
     private fun pushLocalClipboardToHost(reason: String) {
         if (parked != null) return  // keepalive r1: nothing travels from a parked session
+        if (!SessionPark.clipboardPushAllowed(clipboardResumeHold, reason)) return
+        if (reason == "clip_changed") clipboardResumeHold = false
         if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
         if (!NativeSessionBridge.nativeHostSupportsClipboard()) return
         // getPrimaryClip returns null without focus on Android 10+; that is expected, not an error.
@@ -2346,6 +2354,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** 연결 해제: the session ends for real (the parked one too), back to where the app starts. */
     private fun disconnectSession(reason: String) {
         if (parked != null) endPark(reason, announce = false)
+        connectOwner.invalidate()  // r2 K2
         cancelActiveViewerTouch("disconnect")
         hideViewerKeyboard("disconnect")
         desiredStreamActive = false
@@ -2376,12 +2385,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun parkAllowedHere(): Boolean = parked == null && SessionPark.canPark(
         directoryHostKey, manualConnectMode, DirectoryClient.sessionAccount(), DirectoryClient.session(),
         NativeSessionBridge.nativeGetStatus().startsWith("connected"),
-    )
+    ) && NativeSessionBridge.nativeHostHonorsStreamPause()  // r2 K5: an older host gets 연결 해제 only
 
     private fun parkToHostList(origin: String) {
         if (parked != null) return
         if (!parkAllowedHere()) {
-            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=$manualConnectMode")
+            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=$manualConnectMode " +
+                "hostHonorsPause=${NativeSessionBridge.nativeHostHonorsStreamPause()}")
             disconnectSession("park_refused_$origin")
             return
         }
@@ -2442,15 +2452,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!parkConfirmLogged && native.phase == SessionPark.NativePhase.PARKED) {
             parkConfirmLogged = true
             diagnosticsLog.log("park_confirmed",
-                "episode=${p.episode} ms=${now - p.startedAtMs} released=${NativeSessionBridge.nativeParkReleasedCount()}")
+                "episode=${p.episode} ms=${now - p.startedAtMs} released=${NativeSessionBridge.nativeParkReleasedCount()} " +
+                    "dropped=${NativeSessionBridge.nativeParkDroppedActionCount()}")
         }
-        SessionPark.endReason(p, now, native)?.let { endPark(it) }
+        val identity = SessionPark.Identity(DirectoryClient.sessionAccount(), directoryOrigin(),
+            DirectoryClient.session().isNotEmpty())
+        val reason = SessionPark.endReason(p, now, native, identity)
+        if (reason != null) {
+            endPark(reason)
+            return
+        }
+        // r2 K4: the tap made while it was confirming is carried out now, once.
+        val held = parkPendingTap
+        if (held != null && held.episode == p.episode && native.phase == SessionPark.NativePhase.PARKED) {
+            parkPendingTap = null
+            diagnosticsLog.log("park_tap_resumed", "episode=${p.episode} heldMs=${now - p.startedAtMs}")
+            if (!resumeParked(p)) {
+                directoryHosts.firstOrNull { it.hostId == held.hostId }?.let { connectToDirectoryHost(it) }
+            }
+        }
     }
 
     /** Ends the park with a real disconnect. */
     private fun endPark(reason: String, announce: Boolean = true) {
         val p = parked ?: return
         parked = null
+        val held = parkPendingTap?.takeIf { it.episode == p.episode }
+        parkPendingTap = null
         statusHandler.removeCallbacks(parkExpiryRunnable)
         unwatchParkNetwork()
         diagnosticsLog.log("park_end",
@@ -2466,6 +2494,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         resetViewerObservability()
         if (announce) hostsStatusText.text = getString(R.string.hosts_park_ended, p.hostName)
         hostListAdapter.notifyDataSetChanged()
+        // r2 K4: the park failed on its own under a held tap -- that tap still connects, the ordinary way, once.
+        if (held != null && SessionPark.pendingTapFallsBack(reason)) {
+            directoryHosts.firstOrNull { it.hostId == held.hostId }?.let { host ->
+                diagnosticsLog.log("park_tap_fallback", "episode=${p.episode} reason=$reason host=${host.hostId}")
+                statusHandler.post { connectToDirectoryHost(host) }
+            }
+        }
     }
 
     /** The same PC again: its target list on this connection. false = the native side refused. */
@@ -2478,8 +2513,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         parked = null
         statusHandler.removeCallbacks(parkExpiryRunnable)
         unwatchParkNetwork()
-        // What the phone holds now is not news to the PC: copied while parked, it does not travel.
-        readLocalClipboardText()?.let { NativeSessionBridge.nativeSeedClipboardBaseline(it) }
+        // What the phone holds now is not news to the PC: copied while parked, it does not travel. If it
+        // cannot be read, nothing is pushed until the clipboard really changes (r2 §7).
+        val baseline = readLocalClipboardText()
+        if (baseline.isNullOrEmpty()) {
+            clipboardResumeHold = true
+        } else {
+            clipboardResumeHold = false
+            NativeSessionBridge.nativeSeedClipboardBaseline(baseline)
+        }
         diagnosticsLog.log("park_reuse",
             "episode=${p.episode} heldMs=${t0 - p.startedAtMs} host=${p.hostName} " +
                 NativeSessionBridge.nativeSessionCounters())
@@ -4477,6 +4519,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Signs this phone out: here at once, and at the directory as soon as it can be told. */
     private fun performSignOut() {
         if (parked != null) endPark("sign_out", announce = false)
+        // r2 K2: a connect still on its way belonged to this sign-in: disowned, and the screen is not busy.
+        connectOwner.invalidate()
+        setDirectoryBusy(false)
+        directoryConnectingName = ""
         ++signInEpoch
         val url = DirectoryClient.directoryUrl
         val session = DirectoryClient.session()
@@ -4562,6 +4608,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // A refused session with nothing to replace it: ask for the password again
                     // rather than leaving an empty list that looks like "no PCs registered".
                     if (e is DirectoryClient.DirectoryException && e.status == 401) {
+                        // r2 K2: the session is refused -- the park on it ends now, before the screen moves.
+                        if (parked != null) endPark("session_refused", announce = false)
+                        connectOwner.invalidate()
                         ++signInEpoch
                         DirectoryClient.dropSession()
                         currentScene = UiScene.LOGIN
@@ -4590,7 +4639,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 SystemClock.elapsedRealtime(), nativeParkState())) {
                 SessionPark.Tap.Reuse -> if (resumeParked(p)) return
                 SessionPark.Tap.Wait -> {
-                    diagnosticsLog.log("park_tap_wait", "episode=${p.episode} tapped=${host.hostId}")
+                    // r2 K4: kept, one per park, and carried out when the park settles (parkTick / endPark).
+                    if (parkPendingTap?.episode != p.episode) {
+                        parkPendingTap = SessionPark.PendingTap(p.episode, host.hostId)
+                        diagnosticsLog.log("park_tap_held", "episode=${p.episode} tapped=${host.hostId}")
+                    } else {
+                        diagnosticsLog.log("park_tap_dup", "episode=${p.episode} tapped=${host.hostId}")
+                    }
                     return
                 }
                 is SessionPark.Tap.Discard -> {
@@ -4619,8 +4674,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog.log("directory_connect",
             "host=${host.hostName} id=${host.hostId} ${NativeSessionBridge.nativeSessionCounters()}")
         startTargetsReadyWatch("connect", SystemClock.elapsedRealtime())
-        // Late answers: a sign-out (or sign-in as someone else) since this began disowns them.
-        val connectEpoch = signInEpoch
+        // r2 K2: this connect owns the native session only while it is the current operation. A sign-out,
+        // a disconnect, a refused session or another connect makes it stale: it stops at the next step,
+        // and if its native connect already ran it closes only the connection it made.
+        val op = connectOwner.begin()
+        var madeGeneration = 0L
+        fun stillMine(step: String): Boolean {
+            if (connectOwner.isCurrent(op)) return true
+            diagnosticsLog.log("directory_connect_stale", "op=$op step=$step")
+            return false
+        }
 
         val observeToken = DirectoryClient.newObserveToken()
 
@@ -4630,6 +4693,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // the health route -- which needs no session and carries the same value.
                 // The decision lives in DirectoryClient, where it can be exercised without a
                 // server. Here it is only applied.
+                if (!stillMine("before_observe")) return@execute
                 val target = DirectoryClient.resolveObserveTarget(url, directoryObserveEndpoint)
                 if (target is DirectoryClient.ObserveTarget.Refused) {
                     throw DirectoryClient.DirectoryException(target.message)
@@ -4670,9 +4734,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 diagnosticsLog.log("directory_target", connected.candidates.joinToString(" "))
 
+                // r2 K2: no punch / Hello for an operation that is no longer the user's.
+                if (!stillMine("before_native_connect")) return@execute
                 val started = NativeSessionBridge.nativeDirectoryConnectAny(
                     connected.candidates.toTypedArray(), 4000, connected.punchToken
                 )
+                madeGeneration = NativeSessionBridge.nativeConnectionGeneration()
                 // Which address won matters when something goes wrong later: "private" means the
                 // traffic never left the LAN, and a fallback with no answer explains a slow start.
                 val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate()
@@ -4684,16 +4751,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                 }
                 runOnUiThread {
-                    setDirectoryBusy(false)
-                    directoryConnectingName = ""
-                    if (connectEpoch != signInEpoch) {
-                        // keepalive r1: the account this was for is gone; the connection is not adopted.
-                        diagnosticsLog.log("directory_connect_dropped", "reason=signed_out_since")
-                        NativeSessionBridge.nativeDisconnect()
-                        targetsReadyWatchStartMs = 0L
-                        renderStatus()
+                    if (!connectOwner.isCurrent(op)) {
+                        // r2 K2: stale -- close the connection this operation made, if it is still the one
+                        // running; touch nothing newer (busy state, scene, another connect's session).
+                        val closes = connectOwner.staleCloses(madeGeneration, NativeSessionBridge.nativeConnectionGeneration())
+                        diagnosticsLog.log("directory_connect_dropped", "op=$op closedOwn=$closes gen=$madeGeneration")
+                        if (closes) NativeSessionBridge.nativeDisconnect()
                         return@runOnUiThread
                     }
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
                     connectFlowActive = true
                     pendingRuntimeConfigSync = true
                     pendingDesktopBackendSync = true
@@ -4705,8 +4772,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     renderStatus()
                 }
             } catch (e: Exception) {
-                diagnosticsLog.log("directory_connect_failed", e.message.orEmpty())
+                diagnosticsLog.log("directory_connect_failed", "op=$op ${e.message.orEmpty()}")
                 runOnUiThread {
+                    if (!connectOwner.isCurrent(op)) return@runOnUiThread  // r2 K2: not this screen's any more
                     setDirectoryBusy(false)
                     directoryConnectingName = ""
                     hostsStatusText.text = getString(R.string.hosts_connect_failed, e.message.orEmpty())

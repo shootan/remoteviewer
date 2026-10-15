@@ -145,8 +145,11 @@ class ClientSessionController {
   bool ResumeFromPark();
   void EndPark();
   ClientParkPhase ParkPhase() const;
-  // How many held keys / buttons the park released (diagnostics).
+  // How many held keys / buttons the park released, and unsent actions it dropped (diagnostics).
   uint32_t ParkReleasedCount() const { return parkReleased_.load(std::memory_order_relaxed); }
+  uint32_t ParkDroppedActionCount() const { return parkDroppedActions_.load(std::memory_order_relaxed); }
+  // r2 K5: whether this connection's host is known to stop sending when paused (see BeginPark).
+  bool HostHonorsStreamPause() const;
   // The phone's clipboard as it is when a parked session resumes: recorded as already sent.
   void SeedClipboardBaseline(const std::u16string& text);
   // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
@@ -340,6 +343,8 @@ class ClientSessionController {
   ClientHeldInput heldInput_;
   std::atomic<bool> parkInhibit_{false};
   std::atomic<uint32_t> parkReleased_{0};
+  std::atomic<uint32_t> parkDroppedActions_{0};
+  void CollectForParkLocked(uint64_t nowUs, bool releasesOnly);
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};
   std::atomic<uint64_t> udpHelloCount_{0};

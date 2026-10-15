@@ -101,8 +101,17 @@ object SessionPark {
         }
     }
 
-    /** On every status tick while parked: null = keep it, otherwise why it ends (a disconnect follows). */
-    fun endReason(parked: Parked, nowMs: Long, native: NativeState): String? {
+    /** Who is signed in now, as the screen knows it (r2 K2). */
+    data class Identity(val accountId: String, val directoryOrigin: String, val sessionPresent: Boolean)
+
+    /**
+     * On every status tick while parked: null = keep it, otherwise why it ends (a disconnect follows).
+     * r2 K2: a refused or replaced sign-in ends it as soon as the screen knows -- not only when the PC
+     * is tapped again.
+     */
+    fun endReason(parked: Parked, nowMs: Long, native: NativeState, identity: Identity): String? {
+        if (!identity.sessionPresent || identity.accountId != parked.accountId ||
+            identity.directoryOrigin != parked.directoryOrigin) return "identity_changed"
         if (!native.connected) return "peer_lost"
         if (native.connectionGeneration != parked.connectionGeneration) return "generation_changed"
         if (nowMs >= parked.deadlineMs) return "expired"
@@ -115,6 +124,46 @@ object SessionPark {
             else -> "park_lost"
         }
     }
+
+    /**
+     * r2 K4: a tap on the parked PC while its park is still being confirmed is kept -- one, for that
+     * park -- and carried out when it settles: reused once confirmed, or the ordinary connect once if
+     * the park failed on its own. Ended by the user (another PC, 연결 끊기, sign-out, leaving the app)
+     * it is dropped with the park.
+     */
+    data class PendingTap(val episode: Long, val hostId: String)
+
+    /** Whether a park that ended this way still owes a held tap its ordinary connect. */
+    fun pendingTapFallsBack(reason: String): Boolean = when (reason) {
+        "confirm_failed", "confirm_timeout", "park_lost", "peer_lost", "generation_changed",
+        "native_expired", "resume_refused" -> true
+        else -> false  // the user's own act ended it (or the identity went): the tap is not carried out
+    }
+
+    /**
+     * r2 K2: which directory connect owns the native session. Every connect takes a new operation id;
+     * a sign-out, a disconnect, a refused session or another connect makes the old one stale. A stale
+     * operation stops before observe / punch / native connect, and if its native connect already ran,
+     * it closes only the connection it made itself (by connection generation) and touches no newer state.
+     */
+    class ConnectOwner {
+        private var current = 0L
+
+        @Synchronized fun begin(): Long = ++current
+        @Synchronized fun invalidate() { ++current }
+        @Synchronized fun isCurrent(op: Long): Boolean = op == current
+
+        /** What a stale operation's callback may close: only a connection that is still its own. */
+        fun staleCloses(madeGeneration: Long, nativeGenerationNow: Long): Boolean =
+            madeGeneration != 0L && madeGeneration == nativeGenerationNow
+    }
+
+    /**
+     * r2 §7 clipboard: after a resume whose baseline could not be read (no text, no access), nothing the
+     * phone held during the park may be pushed by a focus / session-start read -- only a real change
+     * (the clipboard listener) lifts the hold.
+     */
+    fun clipboardPushAllowed(resumeHold: Boolean, reason: String): Boolean = !resumeHold || reason == "clip_changed"
 
     /** "4:59" for the list banner. */
     fun formatRemaining(ms: Long): String {

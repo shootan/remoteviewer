@@ -721,6 +721,19 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeParkReleasedCount(
   return static_cast<jint>(g_session_controller.ParkReleasedCount());
 }
 
+/** r2 K5: whether this connection's host is known to stop sending while paused (window-list flags). */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHostHonorsStreamPause(
+    JNIEnv* /* env */, jobject /* this */) {
+  return g_session_controller.HostHonorsStreamPause() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeParkDroppedActionCount(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jint>(g_session_controller.ParkDroppedActionCount());
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnectionGeneration(
     JNIEnv* /* env */, jobject /* this */) {
