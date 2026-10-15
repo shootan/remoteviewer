@@ -541,6 +541,13 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " bootstrapReplay=" + std::to_string(bootstrapReplayCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(gate_.awaiting() ? 1 : 0);
+  // keepalive r5 D1: the codec's own answers (see the members).
+  status += " codecs=" + std::to_string(codecsStarted_);
+  status += " inDeq=" + std::to_string(lastInputDequeue_);
+  status += " outDeq=" + std::to_string(lastOutputDequeue_);
+  status += " outDequeued=" + std::to_string(outputDequeued_);
+  status += " fmt=" + std::to_string(formatChanges_);
+  status += " held=" + std::to_string(heldOutputValid_ ? 1 : 0);
   return status;
 }
 
@@ -616,6 +623,11 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
     return false;
   }
 
+  ++codecsStarted_;
+  outputDequeued_ = 0;
+  formatChanges_ = 0;
+  lastInputDequeue_ = 0;
+  lastOutputDequeue_ = 0;
   configuredWidth_ = width;
   configuredHeight_ = height;
   outputWidth_ = width;
@@ -672,6 +684,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (!codec_) return false;
 
   const ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(codec_, 0);
+  lastInputDequeue_ = static_cast<int64_t>(inputIndex);
   if (inputIndex < 0) {
     return false;
   }
@@ -926,7 +939,9 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   AMediaCodecBufferInfo info{};
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
+    lastOutputDequeue_ = static_cast<int64_t>(outputIndex);
     if (outputIndex >= 0) {
+      ++outputDequeued_;
       // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). A codec-config (2)
       // buffer carries no picture; an end-of-stream (4) buffer may carry the last one, so only an empty
       // EOS buffer is left out (GNLink never queues an EOS in a session). A replayed input's output is
@@ -979,6 +994,7 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       continue;
     }
     if (outputIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+      ++formatChanges_;
       UpdateOutputFormatLocked();
       continue;
     }
