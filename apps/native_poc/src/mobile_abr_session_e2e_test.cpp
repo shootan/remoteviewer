@@ -951,6 +951,10 @@ int wmain(int argc, wchar_t** argv) {
   bool reconnected = true;
   std::atomic<bool> inputStop{false};
   std::thread inputThread;
+  // r3 R1: when this client resumed a park (local wall-clock ms). The host never sees a resume -- only the
+  // stream-state true that may come later -- so its log is read with these: after a resume, a request is the
+  // resumed session's, not the park's.
+  std::vector<int64_t> clientResumeMs;
   auto note = [&](const std::string& line) {
     say("PARK " + std::to_string(local_now_ms() % 100000) + " " + line + " [session " +
         std::to_string(static_cast<int>(session.Snapshot().state)) + " park " +
@@ -1195,6 +1199,7 @@ int wmain(int argc, wchar_t** argv) {
           int armed = 0;
           if (!parking || !stage.compare_exchange_strong(armed, 1)) return;
           resumedR1 = session.ResumeFromPark();   // the app, between the loop's read and its next action
+          if (resumedR1) clientResumeMs.push_back(local_now_ms());
           listR1 = session.RequestWindowList();
           stage.store(2);
         });
@@ -1387,8 +1392,17 @@ int wmain(int argc, wchar_t** argv) {
     std::set<std::string> held;
     int pauses = 0, pausesWithHeld = 0, inputWhilePaused = 0, detaches = 0, resumes = 0, requestsWhilePaused = 0;
     bool paused = false;
+    int64_t pausedAtMs = -1;
     std::string firstBad;
     while (std::getline(hl, line)) {
+      if (paused) {
+        // r3 R1: this client resumed since the pause (before any stream-state true): from here on its
+        // requests belong to the resumed session.
+        const int64_t at = host_line_ms(line);
+        for (const int64_t rm : clientResumeMs) {
+          if (at >= 0 && rm > pausedAtMs && rm <= at) paused = false;
+        }
+      }
       if (line.find("[native-video-host][input] blocked ") != std::string::npos ||
           line.find("[native-video-host][input] injected ") != std::string::npos) {
         if (paused) {
@@ -1410,6 +1424,7 @@ int wmain(int argc, wchar_t** argv) {
           if (firstBad.empty()) firstBad = "held at pause: " + *held.begin();
         }
         paused = true;
+        pausedAtMs = host_line_ms(line);
       } else if (line.find("[control] stream-state ") != std::string::npos && line.find(" active=1") != std::string::npos) {
         paused = false;
         ++resumes;
