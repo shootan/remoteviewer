@@ -4,8 +4,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "android_video_decoder.hpp"
 #include "connect_op_gate.hpp"
@@ -209,8 +211,17 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeCloseIfOwn(
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeDisconnect(
     JNIEnv* /* env */, jobject /* this */) {
-  g_session_controller.Disconnect();
-  g_rendezvous.Close();
+  // r5 T1: unconditional, but through the gate -- the session closes under the adoption lock, the rendezvous
+  // socket under the step lock, each once; the latter off this (UI) thread, as a step may still be in its
+  // network wait. r4 called both directly here, beside a cleanup thread or a Connect doing the same.
+  g_connect_gate.CloseExplicit([] { g_session_controller.Disconnect(); }, [] { g_rendezvous.Close(); },
+                               [](const std::function<void()>& closeRendezvous) {
+                                 try {
+                                   std::thread(closeRendezvous).detach();
+                                 } catch (...) {
+                                   closeRendezvous();
+                                 }
+                               });
 }
 
 // Returns "ip:port" as the directory sees this device, or "" with the reason available from

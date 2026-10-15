@@ -18,6 +18,8 @@
 //   - A late cleanup of a stale operation is CloseIfOwn: under the same lock as Adopt, it closes the session
 //     only if that operation's adoption is still the one running -- the compare and the close are one step
 //     (r4 S1: the r3 app read the generation, compared it, then called an unconditional Disconnect).
+//   - The user's explicit disconnect is CloseExplicit: unconditional, but the session and the rendezvous
+//     socket are each closed on their own boundary above, once (r5 T1).
 // Taking a new number never waits for a running Connect or network step.
 
 #include <atomic>
@@ -134,6 +136,46 @@ class ConnectOpGate {
     return true;
   }
 
+  // r5 T1: the user's explicit end of everything (disconnect, exit, the park's end) -- unconditional, unlike
+  // CloseIfOwn, but on the same boundaries: first a new number (every operation before it is stale; never
+  // waits), then the session is closed under adoptMu_ (one at a time with every Adopt / CloseIfOwn -- the
+  // r4 nativeDisconnect called it from outside, so two threads could join the same worker), unless an
+  // operation newer than this close has already been adopted. The rendezvous socket is closed under the
+  // step lock (after any running step has seen its stop and left), handed to `runAsync` so the caller does
+  // not wait for a step's network wait; null runs it here. Returns the close's own number.
+  int64_t CloseExplicit(const std::function<void()>& disconnect, const std::function<void()>& closeRendezvous,
+                        const std::function<void(const std::function<void()>&)>& runAsync) {
+    const int64_t k = Next();
+    Hook("close_explicit_cancelled");
+    {
+      std::lock_guard<std::mutex> lk(adoptMu_);
+      Hook("close_explicit_locked");
+      if (adoptedOp_ <= k) {
+        if (disconnect) disconnect();
+        adoptedOp_ = 0;
+        adoptedGen_ = 0;
+      }
+    }
+    const std::function<void()> rendezvous = [this, k, closeRendezvous] { CloseRendezvousThrough(k, closeRendezvous); };
+    if (runAsync) {
+      runAsync(rendezvous);
+    } else {
+      rendezvous();
+    }
+    return k;
+  }
+  // The rendezvous half of CloseExplicit(k): under the step lock; not a socket a newer operation observed with.
+  void CloseRendezvousThrough(int64_t k, const std::function<void()>& closeRendezvous) {
+    std::lock_guard<std::mutex> net(netMu_);
+    Hook("close_rendezvous_locked");
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      if (rendezvousOwner_ > k) return;
+      rendezvousOwner_ = 0;
+    }
+    if (closeRendezvous) closeRendezvous();
+  }
+
   uint32_t StaleRefused() const { return staleRefused_.load(std::memory_order_relaxed); }
   uint32_t StaleClosed() const { return staleClosed_.load(std::memory_order_relaxed); }
 
@@ -153,7 +195,7 @@ class ConnectOpGate {
   }
   mutable std::mutex mu_;   // currency, steps, rendezvous owner
   std::mutex netMu_;        // one network step at a time
-  std::mutex adoptMu_;      // Adopt and CloseIfOwn
+  std::mutex adoptMu_;      // Adopt, CloseIfOwn and CloseExplicit's session close
   std::atomic<int64_t> current_{0};
   int64_t counter_ = 0;
   std::vector<Step*> steps_;

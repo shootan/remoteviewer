@@ -916,8 +916,10 @@ if(MSVC)
 endif()
 
 # keepalive r3 R2-a: the native connect adoption gate (connect_op_gate.hpp); no network.
-add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp)
+# r5 T1: with the product rendezvous (a cancelled observe must close the socket it opened).
+add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp src/directory_rendezvous.cpp)
 target_include_directories(remote60_connect_op_gate_test PRIVATE src)
+target_link_libraries(remote60_connect_op_gate_test PRIVATE common ws2_32)
 target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNECT_GATE_TEST_HOOKS=1)
 
 add_executable(remote60_client_park_state_test

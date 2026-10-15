@@ -4,13 +4,21 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "connect_op_gate.hpp"
+#include "directory_rendezvous.hpp"
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 using remote60::native_poc::ConnectOpGate;
+using remote60::native_poc::DirectoryRendezvous;
 
 namespace {
 int gPass = 0, gFail = 0;
@@ -25,25 +33,76 @@ struct FakeSession {
   std::atomic<uint64_t> generation{0};
   std::atomic<bool> running{false};
   std::atomic<int> connects{0}, disconnects{0};
+  // r5 T1: Connect and Disconnect both handle the one worker thread (assign / joinable+join). `inside` counts
+  // the calls in it at once (the product has no lock of its own there); `teardowns` the Disconnects that
+  // found a running session (a second one would be a second join of the same thread).
+  std::atomic<int> inside{0}, maxInside{0}, teardowns{0};
+  int holdMs = 0;  // how long a Connect / Disconnect stays inside
   std::vector<std::string> log;
   std::mutex logMu;
   void Note(const std::string& s) {
     std::lock_guard<std::mutex> lk(logMu);
     log.push_back(s);
   }
+  void Enter() {
+    const int n = ++inside;
+    int m = maxInside.load();
+    while (n > m && !maxInside.compare_exchange_weak(m, n)) {
+    }
+  }
   bool Connect(const std::string& who) {
+    Enter();
     ++connects;
     const uint64_t g = ++generation;
     running = true;
     Note("connect " + who + " gen " + std::to_string(g));
+    if (holdMs) sleep_ms(holdMs);
+    --inside;
     return true;
   }
   void Disconnect(const std::string& who) {
+    Enter();
     ++disconnects;
+    if (running) {
+      ++teardowns;
+      if (holdMs) sleep_ms(holdMs);
+    }
     running = false;
     Note("disconnect by " + who + " (gen " + std::to_string(generation.load()) + ")");
+    --inside;
   }
 };
+
+// r5 T1: the shared rendezvous socket as the steps see it -- in use inside a step, closed by whoever.
+struct FakeRendezvous {
+  std::atomic<bool> open{false}, inUse{false};
+  std::atomic<int> closes{0}, closedWhileInUse{0};
+  void Close() {
+    if (inUse) ++closedWhileInUse;
+    if (open.exchange(false)) ++closes;
+  }
+};
+
+// The r4 nativeDisconnect, transcribed (the negative controls): both closes called directly, beside the gate.
+void r4_native_disconnect(FakeSession& s, FakeRendezvous& rv) {
+  s.Disconnect("r4 nativeDisconnect");
+  rv.Close();
+}
+// r5: the same JNI call -- CloseExplicit, the rendezvous half on a thread the caller does not wait for.
+int64_t r5_native_disconnect(ConnectOpGate& g, FakeSession& s, FakeRendezvous& rv, std::thread* async) {
+  return g.CloseExplicit([&s] { s.Disconnect("explicit"); }, [&rv] { rv.Close(); },
+                         [async](const std::function<void()>& fn) { *async = std::thread(fn); });
+}
+
+long open_handles() {
+#if defined(_WIN32)
+  DWORD n = 0;
+  GetProcessHandleCount(GetCurrentProcess(), &n);
+  return static_cast<long>(n);
+#else
+  return 0;
+#endif
+}
 
 ConnectOpGate::Steps steps_for(FakeSession& s, const std::string& who, bool* closed = nullptr) {
   ConnectOpGate::Steps st;
@@ -108,8 +167,14 @@ int main() {
       sleep_ms(80);
     };
     const int connectsBeforeB = s.connects;
-    const bool aClosed = close_if_own(g, s, a, genA, "A's cleanup");
-    const bool bWaited = s.connects == connectsBeforeB;  // B had not connected while A's step ran
+    int connectsAtClose = -1;
+    // r5: read at A's close, inside A's step. Read after it returned, B may already have connected (seen once
+    // in 7 runs: a false FAIL of this check, not of the gate).
+    const bool aClosed = g.CloseIfOwn(a, genA, [&s] { return s.generation.load(); }, [&] {
+      connectsAtClose = s.connects;
+      s.Disconnect("A's cleanup");
+    });
+    const bool bWaited = connectsAtClose == connectsBeforeB;  // B had not connected while A's step ran
     tb.join();
     g.testHook = nullptr;
     check("A's cleanup closed A's own connection (it was still the one running)", aClosed);
@@ -268,6 +333,221 @@ int main() {
     check("cancelling does not wait for a running Connect", waitedMs < 20);
     check("serialised; A not adopted and closed before B connected; B has ITS generation",
           bWaited && genA == 0 && genB == 2 && s.running && s.log.size() == 3 && s.log[1].rfind("disconnect by A", 0) == 0);
+  }
+
+  std::printf("[9] r5 T1: the user's explicit disconnect vs a stale operation's cleanup (CloseIfOwn on its thread)\n");
+  {
+    // A adopted; the user went elsewhere (A stale); A's cleanup thread is inside CloseIfOwn, closing A, when
+    // the user's disconnect / exit arrives.
+    for (int variant = 0; variant < 2; ++variant) {
+      const bool r4 = variant == 1;
+      ConnectOpGate g;
+      FakeSession s;
+      FakeRendezvous rv;
+      s.holdMs = 60;
+      const int64_t a = g.Next();
+      const uint64_t genA = g.Adopt(a, steps_for(s, "A"));
+      g.Next();
+      std::thread explicitThread, async;
+      std::atomic<bool> fired{false};
+      g.testHook = [&](const char* at) {
+        if (std::string(at) != "close_if_own_locked" || fired.exchange(true)) return;
+        explicitThread = std::thread([&] {
+          if (r4) {
+            r4_native_disconnect(s, rv);
+          } else {
+            r5_native_disconnect(g, s, rv, &async);
+          }
+        });
+        sleep_ms(20);  // the explicit close is on its way while the cleanup goes on to close
+      };
+      const bool closed = close_if_own(g, s, a, genA, "A's cleanup");
+      explicitThread.join();
+      if (async.joinable()) async.join();
+      g.testHook = nullptr;
+      if (!r4) {
+        check("cleanup and explicit close: never both inside the session at once", s.maxInside == 1);
+        check("the running session torn down exactly once (no second join)", s.teardowns == 1 && closed && !s.running);
+      } else {
+        check("NEGATIVE (r4 nativeDisconnect, beside the gate): both inside the session at once / torn down twice",
+              s.maxInside >= 2 || s.teardowns >= 2);
+      }
+    }
+  }
+
+  std::printf("[10] r5 T1: explicit disconnect vs an adoption (Connect starting the worker)\n");
+  {
+    for (int variant = 0; variant < 2; ++variant) {
+      const bool r4 = variant == 1;
+      ConnectOpGate g;
+      FakeSession s;
+      FakeRendezvous rv;
+      const int64_t b = g.Next();
+      std::atomic<bool> inConnect{false}, release{false};
+      ConnectOpGate::Steps sb = steps_for(s, "B");
+      sb.connect = [&] {
+        s.Enter();
+        ++s.connects;
+        ++s.generation;
+        s.running = true;
+        inConnect = true;
+        while (!release) sleep_ms(1);
+        --s.inside;
+        return true;
+      };
+      uint64_t genB = 99;
+      std::thread tb([&] { genB = g.Adopt(b, sb); });
+      while (!inConnect) sleep_ms(1);
+      std::thread async;
+      std::atomic<long long> cancelMs{-1};
+      std::atomic<bool> explicitDone{false};
+      const auto t0 = std::chrono::steady_clock::now();
+      if (!r4) {
+        // the cancel (the number) is timed on its own: it must not wait for the Connect
+        g.testHook = [&](const char* at) {
+          if (std::string(at) == "close_explicit_cancelled") {
+            cancelMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                           .count();
+          }
+        };
+      }
+      std::thread te([&] {
+        if (r4) {
+          r4_native_disconnect(s, rv);
+        } else {
+          r5_native_disconnect(g, s, rv, &async);
+        }
+        explicitDone = true;
+      });
+      sleep_ms(50);
+      const bool explicitWaited = !explicitDone;
+      release = true;
+      tb.join();
+      te.join();
+      if (async.joinable()) async.join();
+      g.testHook = nullptr;
+      if (!r4) {
+        check("the explicit cancel does not wait for the running Connect",
+              cancelMs >= 0 && cancelMs < 20 && !g.IsCurrent(b));
+        check("its session close waited for the adoption to end: never inside together",
+              explicitWaited && s.maxInside == 1);
+        check("B went stale during Connect: not adopted, its own connection closed, torn down once",
+              genB == 0 && !s.running && s.teardowns == 1);
+        const uint64_t again = g.Adopt(b, steps_for(s, "B again"));
+        check("AFTER THE EXPLICIT CLOSE, B IS NEVER ADOPTED AGAIN", again == 0 && !s.running && s.connects == 1);
+      } else {
+        check("NEGATIVE (r4 nativeDisconnect, beside the gate): Disconnect runs inside the Connect", s.maxInside >= 2);
+      }
+    }
+    // a newer operation adopted between the explicit cancel and its close is not closed by it
+    ConnectOpGate g;
+    FakeSession s;
+    FakeRendezvous rv;
+    const int64_t a = g.Next();
+    g.Adopt(a, steps_for(s, "A"));
+    uint64_t genC = 0;
+    g.testHook = [&](const char* at) {
+      if (std::string(at) != "close_explicit_cancelled") return;
+      g.testHook = nullptr;
+      std::thread tc([&] {
+        const int64_t c = g.Next();
+        genC = g.Adopt(c, steps_for(s, "C"));
+      });
+      tc.join();
+    };
+    std::thread async;
+    r5_native_disconnect(g, s, rv, &async);
+    if (async.joinable()) async.join();
+    check("a connect started right after the close's number (newer) is not closed by it",
+          genC == 2 && s.running && s.generation == 2);
+  }
+
+  std::printf("[11] r5 T1: explicit disconnect vs a network step using / closing the rendezvous socket\n");
+  {
+    for (int variant = 0; variant < 2; ++variant) {
+      const bool r4 = variant == 1;
+      ConnectOpGate g;
+      FakeSession s;
+      FakeRendezvous rv;
+      const int64_t a = g.Next();
+      std::atomic<bool> inStep{false};
+      std::thread ta([&] {
+        ConnectOpGate::StepGuard step(g, a);
+        g.ClaimRendezvous(a);
+        rv.open = true;
+        rv.inUse = true;
+        inStep = true;
+        for (int i = 0; i < 200 && !step.stopped(); ++i) sleep_ms(5);  // the punch's wait
+        sleep_ms(30);                                                  // the rest of one recv timeout
+        rv.inUse = false;
+        if (step.stopped()) rv.Close();  // the product's punch step: stale -> close, no hand-over
+      });
+      while (!inStep) sleep_ms(1);
+      std::thread async;
+      const auto t0 = std::chrono::steady_clock::now();
+      if (r4) {
+        r4_native_disconnect(s, rv);
+      } else {
+        r5_native_disconnect(g, s, rv, &async);
+      }
+      const auto callMs =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      ta.join();
+      if (async.joinable()) async.join();
+      if (!r4) {
+        check("the explicit disconnect returns without waiting for the step's network wait", callMs < 20);
+        check("the socket is never closed while a step uses it; closed exactly once",
+              rv.closedWhileInUse == 0 && rv.closes == 1 && !rv.open);
+      } else {
+        check("NEGATIVE (r4 nativeDisconnect, beside the gate): the socket is closed while the step uses it",
+              rv.closedWhileInUse >= 1);
+      }
+    }
+    // an idle observed socket (between the observe and the punch: the app's HTTP call) is closed by it
+    ConnectOpGate g;
+    FakeSession s;
+    FakeRendezvous rv;
+    const int64_t a = g.Next();
+    {
+      ConnectOpGate::StepGuard step(g, a);
+      g.ClaimRendezvous(a);
+      rv.open = true;
+    }
+    std::thread async;
+    r5_native_disconnect(g, s, rv, &async);
+    if (async.joinable()) async.join();
+    check("an observed socket waiting for its punch is closed, once", rv.closes == 1 && !rv.open && !g.OwnsRendezvous(a));
+    // ... but not a socket a newer operation observed with before the close's rendezvous half ran
+    FakeRendezvous rv2;
+    g.CloseExplicit(nullptr, [&] { rv2.Close(); }, [&](const std::function<void()>& fn) {
+      const int64_t c = g.Next();
+      {
+        ConnectOpGate::StepGuard step(g, c);
+        g.ClaimRendezvous(c);
+        rv2.open = true;
+      }
+      fn();
+    });
+    check("a newer operation's observed socket is left alone", rv2.open && rv2.closes == 0);
+  }
+
+  std::printf("[12] r5 T1: a cancelled observe closes the socket it opened\n");
+  {
+    // The product's DirectoryRendezvous against a local address: stop is already set, so every call opens its
+    // socket and returns "cancelled" at the first attempt. Opened and closed must match (process handles).
+    DirectoryRendezvous rv;
+    std::atomic<bool> stop{true};
+    std::string observed, err;
+    rv.Observe("127.0.0.1", 9, "t", &observed, &err, &stop);  // warm-up: Winsock's own handles
+    const long before = open_handles();
+    int cancelled = 0;
+    for (int i = 0; i < 200; ++i) {
+      err.clear();
+      if (!rv.Observe("127.0.0.1", 9, "t", &observed, &err, &stop) && err == "cancelled") ++cancelled;
+    }
+    const long grew = open_handles() - before;
+    std::printf("  200 cancelled observes: cancelled=%d, process handles %+ld\n", cancelled, grew);
+    check("200 cancelled observes leave no socket behind (handles grew < 10)", cancelled == 200 && grew < 10);
   }
 
   std::printf("\nconnect_op_gate_test: %d passed, %d failed\nRESULT: %s\n", gPass, gFail, gFail == 0 ? "PASS" : "FAIL");

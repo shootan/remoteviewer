@@ -125,6 +125,8 @@ bool DirectoryRendezvous::Observe(const std::string& directoryHost, int director
     // Between attempts, not inside the wait: the wait is one 300ms recv timeout, so the
     // worst a cancel waits here is that, not the whole 1.8 seconds.
     if (stopped()) {
+      // r5 T1: not handed over yet -- this call's to close (it is not socket_, so Close() never sees it).
+      close_socket(&sock);
       if (outError) *outError = "cancelled";
       return false;
     }
