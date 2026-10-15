@@ -19,6 +19,7 @@
 #include <mutex>
 #include <thread>
 
+#include "host_au_trace.hpp"
 #include "host_args.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_main_loop_mailbox.hpp"
@@ -548,7 +549,8 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         const uint64_t queueWaitUs =
             item.enqueueUs > 0 && sendStartUs >= item.enqueueUs ? sendStartUs - item.enqueueUs : 0;
         prevWireStartUs = sendStartUs;
-        if (item.keyFrame || (wireIntUs > (frameIntervalUs * 3ULL) / 2ULL)) {
+        // catch-up verification: every AU when the per-AU trace is on, so enqueue -> wire joins by seq.
+        if (item.keyFrame || (wireIntUs > (frameIntervalUs * 3ULL) / 2ULL) || au_trace_enabled()) {
           std::cout << "[native-video-host] wire seq=" << item.udpHdr.seq
                     << " key=" << (item.keyFrame ? 1 : 0) << " bytes=" << item.bytes.size()
                     << " chunks=" << pathStats.payloadChunkCount << " wireIntUs=" << wireIntUs

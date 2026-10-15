@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <memory>
+#include <vector>
 
 namespace remote60::native_poc {
 
@@ -47,6 +49,86 @@ struct KickState {
   uint64_t stampClampCount = 0;         // telemetry: real frames whose stamp was moved forward
   uint64_t stampClampMaxUs = 0;         // telemetry: largest forward move
   uint64_t stampClampLastLogUs = 0;     // 1 Hz log rate limit
+
+  // --- latest-content catch-up (motion-settle r8, Codex r8 s3) ---
+  // The wire-cap input gate can skip the LAST real capture of a change; nothing else re-serves it
+  // promptly (the trailing kick only flushes an input the MFT already holds; the static refresh is
+  // 1 Hz), so the final picture arrives up to a second late. A skip opens a DEBT bound to the picture
+  // (its pixels' buffer, content version) and to the session/input epoch and stream generation it
+  // belongs to. Two frame periods after the last skip the main loop re-serves the cached picture once
+  // as an ordinary P: no admit-always, no forced key, no QP change; it waits for an empty sender queue
+  // and never goes ahead of a newer real capture. The debt closes only when the encoder ACCEPTS an
+  // input carrying that picture or a newer one (real, kick, refresh or this catch-up) -- not when a
+  // tick runs, a cache copy succeeds or the gate lets it through. An identity change cancels it; a
+  // re-rejection keeps it; at most kCatchupMaxAttempts served attempts, then the 1 Hz refresh is the
+  // fallback. No new data, no new debt: there is no periodic catch-up. REMOTE60_NATIVE_CATCHUP=0 off.
+  struct CatchupDebt {
+    bool owed = false;
+    uint64_t dueUs = 0;
+    uint64_t sessionEpoch = 0, inputEpoch = 0, streamGeneration = 0;
+    uint64_t version = 0;                            // content version of the skipped real capture
+    std::shared_ptr<std::vector<uint8_t>> payload;   // its pixels (null on a path without a CPU copy)
+    uint32_t attempts = 0;                           // served attempts for this debt
+  };
+  static constexpr uint32_t kCatchupMaxAttempts = 8;
+  bool catchupEnabled = true;
+  CatchupDebt catchup;
+  // telemetry: debts opened / attempts served / closed by the catch-up's own accepted input / closed by
+  // another accepted input / attempts the encoder did not accept / dropped right before submission
+  // because a newer real frame was waiting / cancelled on an identity change / given up after the
+  // attempt bound / served with a newer cache than the skipped picture
+  uint64_t catchupOwed = 0, catchupServed = 0, catchupAccepted = 0, catchupClosedByOther = 0,
+           catchupNotAccepted = 0, catchupDroppedForNewer = 0, catchupCancelledIdentity = 0,
+           catchupGaveUp = 0, catchupServedNewerCache = 0, catchupReRejected = 0;
+  static uint64_t CatchupDelayUs(uint32_t fps) {
+    return fps > 0 ? std::clamp<uint64_t>(2000000ULL / fps, 15000, kTrailingKickDelayUs) : kTrailingKickDelayUs;
+  }
+  // The input gate refused an input at atUs. A real capture opens (or re-targets) the debt to ITS
+  // picture; a refused catch-up keeps the debt it was serving. Either way: due two frame periods on.
+  void NoteAdmissionSkip(uint64_t atUs, uint32_t fps, bool catchupInput, uint64_t sessionEpoch,
+                         uint64_t inputEpoch, uint64_t streamGeneration, uint64_t version,
+                         std::shared_ptr<std::vector<uint8_t>> payload) {
+    if (!catchupEnabled) return;
+    if (catchupInput) {
+      if (!catchup.owed) return;  // its debt was closed or cancelled meanwhile
+      ++catchupReRejected;
+    } else {
+      if (!catchup.owed) ++catchupOwed;
+      catchup.owed = true;
+      catchup.sessionEpoch = sessionEpoch;
+      catchup.inputEpoch = inputEpoch;
+      catchup.streamGeneration = streamGeneration;
+      catchup.version = version;
+      catchup.payload = std::move(payload);
+      catchup.attempts = 0;
+    }
+    catchup.dueUs = atUs + CatchupDelayUs(fps);
+  }
+  bool CatchupDue(uint64_t nowUs) const { return catchup.owed && nowUs >= catchup.dueUs; }
+  // The debt still belongs to what the session watches now.
+  bool CatchupIdentityMatches(uint64_t sessionEpoch, uint64_t inputEpoch, uint64_t streamGeneration) const {
+    return catchup.sessionEpoch == sessionEpoch && catchup.inputEpoch == inputEpoch &&
+           catchup.streamGeneration == streamGeneration;
+  }
+  void CancelCatchup(uint64_t* counter) {
+    if (!catchup.owed) return;
+    catchup = CatchupDebt{};
+    if (counter) ++*counter;
+  }
+  // A catch-up attempt was handed to the encode stage: count it and push the next attempt out.
+  void NoteCatchupServed(uint64_t nowUs, uint32_t fps) {
+    ++catchup.attempts;
+    ++catchupServed;
+    catchup.dueUs = nowUs + CatchupDelayUs(fps);
+  }
+  // The encoder ACCEPTED an input (accepted-input counter moved). Every accepted input carries the
+  // newest picture the host has (a real capture newer than the skipped one, or the cache that kick /
+  // refresh / catch-up re-serve), so any of them pays the debt.
+  void NoteInputAccepted(bool catchupInput) {
+    if (!catchup.owed) return;
+    catchup = CatchupDebt{};
+    ++(catchupInput ? catchupAccepted : catchupClosedByOther);
+  }
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge

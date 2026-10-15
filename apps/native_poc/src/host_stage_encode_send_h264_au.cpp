@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "host_au_trace.hpp"
 #include "d3d_capture_readback.hpp"
 #include "encode_resolution_ladder.hpp"
 #include "gdi_capture_process.hpp"
@@ -525,6 +526,25 @@ if (transport == VideoTransport::Tcp) {
 }
 const uint64_t sendDoneUs = qpc_now_us();
 const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+// catch-up verification (diagnostic, REMOTE60_NATIVE_AU_TRACE=1 only): every AU with the source and
+// content version of the input behind it, so receiver marker -> host seq -> this line -> wire line.
+if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
+  ++encoder.auTraceLines;
+  std::cout << "[native-video-host][au] seq=" << hdr.seq
+            << " key=" << (((hdr.flags & kEncodedFrameFlagKeyFrame) != 0) ? 1 : 0)
+            << " rawIdr=" << (au.rawIdr ? 1 : 0)
+            << " forced=" << (au.inputWasForcedKey ? 1 : 0)
+            << " src=" << synthetic_reason_name(au.syntheticReason)
+            << " bytes=" << hdr.payloadSize
+            << " inputEpoch=" << au.inputEpoch
+            << " gen=" << hdr.streamGeneration
+            << " ordinal=" << au.acceptedInputOrdinal
+            << " contentVersion=" << au.contentVersion
+            << " captureUs=" << hdr.captureQpcUs
+            << " enqueueUs=" << sendStartUs
+            << " enqueued=" << (enqueuedForSend ? 1 : 0)
+            << " sentOk=" << (sentOk ? 1 : 0) << "\n";
+}
 const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
 if (sentOk) {
   stats.lastSendStartUs = sendStartUs;

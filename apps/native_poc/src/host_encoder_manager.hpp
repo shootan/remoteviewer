@@ -55,6 +55,7 @@ struct Nv12PendingRelease {
 // land in the middle of it. (Ledger H-04.)
 struct EncoderState {
   H264Encoder codec;
+  uint64_t auTraceLines = 0;  // catch-up verification: per-AU trace lines printed (host_au_trace.hpp)
   // quality r5: the closed loop on the quantiser ceiling (host_rate_governor.hpp). Off when the
   // configured ceiling is 0 or REMOTE60_NATIVE_RATE_GOVERNOR=0.
   RateGovernor rateGovernor{RateGovernorConfig{H264Encoder::configured_max_qp()}};

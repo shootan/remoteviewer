@@ -7,6 +7,8 @@
 #include "host_kick.hpp"
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 #include <cstdio>
 #include <string>
 
@@ -120,7 +122,58 @@ void TestRealStampClampedBehindSyntheticStamp() {
   expect(k.lastEncoderStampUs == late2, "stamp: the record only moves forward");
 }
 
+// catch-up (Codex r8 s3): a debt per skipped picture, closed only by an ACCEPTED input, bound to the
+// session / input epoch / generation, kept across a re-rejection, never reopened without a new skip.
+void TestCatchupDebt() {
+  KickState k;
+  auto pix = std::make_shared<std::vector<uint8_t>>(16, 1);
+  expect(!k.CatchupDue(10 * kSec), "catchup: nothing owed at start");
+  k.NoteInputAccepted(false);
+  expect(k.catchupClosedByOther == 0 && k.catchupAccepted == 0, "catchup: an accepted input with no debt counts nothing");
+  k.NoteAdmissionSkip(10 * kSec, 30, false, 7, 3, 2, 100, pix);  // 2/30 s = 66.666 ms
+  expect(k.catchup.owed && k.catchupOwed == 1 && k.catchup.version == 100 && k.catchup.payload == pix,
+         "catchup: a skipped real capture opens a debt bound to its picture");
+  expect(!k.CatchupDue(10 * kSec + 66000) && k.CatchupDue(10 * kSec + 66667), "catchup: due two frame periods after the skip");
+  auto pix2 = std::make_shared<std::vector<uint8_t>>(16, 2);
+  k.NoteAdmissionSkip(10 * kSec + 50000, 30, false, 7, 3, 2, 101, pix2);
+  expect(k.catchupOwed == 1 && k.catchup.version == 101 && k.catchup.payload == pix2 &&
+             !k.CatchupDue(10 * kSec + 100000),
+         "catchup: a newer skipped capture re-targets the same debt and pushes it out");
+  expect(k.CatchupIdentityMatches(7, 3, 2) && !k.CatchupIdentityMatches(8, 3, 2) &&
+             !k.CatchupIdentityMatches(7, 4, 2) && !k.CatchupIdentityMatches(7, 3, 3),
+         "catchup: identity = session epoch + input epoch + stream generation");
+  k.NoteCatchupServed(11 * kSec, 30);
+  expect(k.catchup.attempts == 1 && k.catchupServed == 1 && !k.CatchupDue(11 * kSec + 1000),
+         "catchup: a served attempt is counted and the next one waits");
+  k.NoteAdmissionSkip(11 * kSec + 5000, 30, true, 7, 3, 2, 999, nullptr);
+  expect(k.catchup.owed && k.catchup.version == 101 && k.catchupReRejected == 1,
+         "catchup: a re-rejected catch-up keeps the SAME debt (its picture), not a new one");
+  // not accepted: the stage counts it; the debt is untouched
+  expect(k.catchup.owed, "catchup: an attempt the encoder did not accept leaves the debt open");
+  k.NoteInputAccepted(true);
+  expect(!k.catchup.owed && !k.catchup.payload && k.catchupAccepted == 1,
+         "catchup: the catch-up's own accepted input pays the debt and releases the picture");
+  k.NoteAdmissionSkip(20 * kSec, 30, true, 7, 3, 2, 5, nullptr);
+  expect(!k.catchup.owed && k.catchupOwed == 1, "catchup: a refused catch-up never reopens a closed debt (no periodic catch-up)");
+  k.NoteAdmissionSkip(30 * kSec, 30, false, 7, 3, 2, 200, pix);
+  k.NoteInputAccepted(false);
+  expect(!k.catchup.owed && k.catchupClosedByOther == 1, "catchup: a newer real input the encoder accepted pays it too");
+  k.NoteAdmissionSkip(40 * kSec, 30, false, 7, 3, 2, 300, pix);
+  k.CancelCatchup(&k.catchupCancelledIdentity);
+  expect(!k.catchup.owed && k.catchupCancelledIdentity == 1 && !k.CatchupDue(50 * kSec), "catchup: a cancelled debt is gone");
+  KickState off;
+  off.catchupEnabled = false;
+  off.NoteAdmissionSkip(10 * kSec, 30, false, 1, 1, 1, 1, pix);
+  expect(!off.catchup.owed && !off.CatchupDue(20 * kSec) && off.catchupOwed == 0, "catchup: off never owes");
+  KickState slow;
+  slow.NoteAdmissionSkip(10 * kSec, 0, false, 1, 1, 1, 1, nullptr);
+  expect(!slow.CatchupDue(10 * kSec + KickState::kTrailingKickDelayUs - 1) &&
+             slow.CatchupDue(10 * kSec + KickState::kTrailingKickDelayUs),
+         "catchup: unknown fps uses the 150 ms trailing delay");
+}
+
 int main() {
+  TestCatchupDebt();
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();

@@ -186,6 +186,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       bool rearm = false;
       if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonKick;
         // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
         // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
         if (barrierClosed) {
@@ -223,6 +224,50 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
     }
   }
+  // Latest-content catch-up (host_kick.hpp KickState::CatchupDebt): the picture the input gate skipped,
+  // two frame periods after the last skip, as an ordinary P once the sender queue has drained. Never
+  // ahead of a newer real capture (it carries the content itself), a closed barrier or an owed key (the
+  // kick's job), never across an identity change (cancelled), at most kCatchupMaxAttempts attempts.
+  if (!servedBootstrap && useH264 && kick.CatchupDue(nowUs)) {
+    const uint64_t sessionEpochNow = clientSession.epoch.load(std::memory_order_acquire);
+    const uint64_t inputEpochNow = capture.inputEpoch.load(std::memory_order_acquire);
+    const uint64_t generationNow = capture.streamGenerationState.load(std::memory_order_acquire);
+    if (!kick.CatchupIdentityMatches(sessionEpochNow, inputEpochNow, generationNow)) {
+      kick.CancelCatchup(&kick.catchupCancelledIdentity);
+    } else if (kick.catchup.attempts >= KickState::kCatchupMaxAttempts) {
+      kick.CancelCatchup(&kick.catchupGaveUp);
+    } else if (clientSession.streamControlActive.load(std::memory_order_acquire)) {
+      bool blocked = encoder.forceKeyNext;
+      if (transport == VideoTransport::Udp) {
+        std::lock_guard<std::mutex> lk(sender.mu);
+        blocked = blocked || sender.waitingForKey || !sender.queue.empty();
+      }
+      {
+        std::lock_guard<std::mutex> lk(res.frame.mu);
+        if (res.frame.version != stats.lastVersionSent && res.frame.payload && !res.frame.payload->empty()) blocked = true;
+      }
+      if (!blocked) {
+        if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+          if (kick.catchup.payload && payload.get() != kick.catchup.payload.get()) ++kick.catchupServedNewerCache;
+          servedBootstrap = true;
+          tc.syntheticReason = kSyntheticReasonCatchup;
+          kick.NoteCatchupServed(nowUs, hx.encoder.activeFps);
+          std::cout << "[native-video-host][catchup] serve version=" << kick.catchup.version
+                    << " attempt=" << kick.catchup.attempts << " newerCache="
+                    << ((kick.catchup.payload && payload.get() != kick.catchup.payload.get()) ? 1 : 0) << "\n";
+          seq = 0;
+          version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
+          streamGeneration = generationNow;
+          captureUs = nowUs;
+          callbackUs = nowUs;
+          queuePushUs = nowUs;
+        } else {
+          // locked / secure / identity mismatch in the cache itself: paint nothing, like the kick
+          kick.CancelCatchup(&kick.catchupCancelledIdentity);
+        }
+      }
+    }
+  }
   // Periodic static refresh (user requirement): on a still screen duplication offers no content
   // and the trailing kick is one-shot, so NOTHING is sent and the session looks frozen (the
   // field case: a static game map, revived only by dragging it). Re-serve the cached frame at a
@@ -247,6 +292,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       kick.lastStaticRefreshAttemptUs = nowUs;
       if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
+        tc.syntheticReason = kSyntheticReasonStaticRefresh;
         seq = 0;
         version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
         streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);

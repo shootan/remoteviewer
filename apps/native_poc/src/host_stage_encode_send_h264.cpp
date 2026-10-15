@@ -328,10 +328,40 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // Admit-always only for a frame that will actually be a forced key this tick, not every keyWanted
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
-     adm.servedBootstrap = servedBootstrap;
+     // A catch-up is an ordinary delta under the cap (no admit-always), like the frame it replaces.
+     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonCatchup;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
+       // The skipped picture is the newest content: owe it a prompt catch-up (host_kick.hpp).
+       const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;
+       if (!servedBootstrap || catchupInput) {
+         const bool wasOwed = kick.catchup.owed;
+         kick.NoteAdmissionSkip(qpc_now_us(), hx.encoder.activeFps, catchupInput,
+                                clientSession.epoch.load(std::memory_order_acquire),
+                                capture.inputEpoch.load(std::memory_order_acquire), streamGeneration, version,
+                                catchupInput ? nullptr : payload);
+         // the chain's first link (gate skip -> serve -> accepted -> AU -> wire -> receiver): one line
+         // when a debt opens, not one per skip
+         if (!wasOwed && kick.catchup.owed) {
+           std::cout << "[native-video-host][catchup] owe version=" << version << " atUs=" << qpc_now_us()
+                     << " queueDepth=" << senderDepth << "\n";
+         }
+       }
+       return Flow::Continue;
+     }
+   }
+   // Codex r8 s3-4: a catch-up is re-checked right before it goes in -- a real frame that arrived since
+   // the cache was chosen carries newer content and wins (nothing is encoded; the debt stays until an
+   // accepted input pays it).
+   if (servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup) {
+     uint64_t latestNow = 0;
+     {
+       std::lock_guard<std::mutex> lk(res.frame.mu);
+       latestNow = res.frame.version;
+     }
+     if (latestNow != stats.lastVersionSent) {
+       ++kick.catchupDroppedForNewer;
        return Flow::Continue;
      }
    }
@@ -348,7 +378,10 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // is handed over -- an input the MFT accepted but whose call failed later still sits in its
     // timeline. (0.2.97)
     encoder.codec.set_next_input_synthetic(servedBootstrap);
+    encoder.codec.set_next_input_synthetic_reason(servedBootstrap ? tc.syntheticReason : kSyntheticReasonNone);
+    encoder.codec.set_next_input_content_version(servedBootstrap ? stats.lastVersionSent : version);
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
+    const uint64_t acceptedBefore = encoder.codec.accepted_input_count();
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -428,6 +461,21 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                  << " -> gate closed, encoder rebuild requested\n";
      }
    }
+  // catch-up: only an input the encoder ACCEPTED pays the debt (Codex r8 s3-3) -- decided from the
+  // accepted-input counter BEFORE the failure exits below: an input taken whose output drain then
+  // failed was still taken, and must not be re-served as if it had been refused.
+  {
+    const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;
+    if (encoder.codec.accepted_input_count() != acceptedBefore) {
+      if (catchupInput && kick.catchup.owed) {
+        std::cout << "[native-video-host][catchup] accepted version=" << kick.catchup.version
+                  << " ordinal=" << encoder.codec.accepted_input_count() << "\n";
+      }
+      kick.NoteInputAccepted(catchupInput);
+    } else if (catchupInput) {
+      ++kick.catchupNotAccepted;
+    }
+  }
    if (!surfaceEncoded && !bgraCall.ok) {
     // Dropped output breaks the reference chain; a rejected input by itself does not. Avoid
     // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.

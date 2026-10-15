@@ -54,7 +54,26 @@ struct H264AccessUnit {
   uint64_t acceptedInputOrdinal = 0;
   bool inputWasForcedKey = false;
   bool rawIdr = false;
+  // catch-up: WHY the input behind this AU was served (kSyntheticReason*, 0 = a real capture) and the
+  // host content version it carried -- same FIFO, so the per-AU trace can tie an AU to its picture.
+  uint8_t syntheticReason = 0;
+  uint64_t contentVersion = 0;
 };
+
+// The source of an encoder input (H264AccessUnit::syntheticReason).
+constexpr uint8_t kSyntheticReasonNone = 0;           // a real capture
+constexpr uint8_t kSyntheticReasonKick = 1;           // trailing-edge kick (host_kick.hpp)
+constexpr uint8_t kSyntheticReasonStaticRefresh = 2;  // the periodic static refresh
+constexpr uint8_t kSyntheticReasonCatchup = 3;        // the latest picture the input gate skipped
+inline const char* synthetic_reason_name(uint8_t r) {
+  switch (r) {
+    case kSyntheticReasonNone: return "real";
+    case kSyntheticReasonKick: return "kick";
+    case kSyntheticReasonStaticRefresh: return "static_refresh";
+    case kSyntheticReasonCatchup: return "catchup";
+    default: return "unknown";
+  }
+}
 
 struct DecodedFrameNv12 {
   // Coded plane geometry -- the byte-buffer layout. H.264 aligns the coded height to 16
@@ -141,6 +160,8 @@ struct PendingInput {
   // IDR is not mistaken for the encoder's own periodic one (G2).
   uint64_t acceptedOrdinal = 0;
   bool forcedKey = false;
+  uint8_t syntheticReason = 0;   // catch-up: H264AccessUnit::syntheticReason
+  uint64_t contentVersion = 0;   // catch-up: H264AccessUnit::contentVersion
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -285,6 +306,13 @@ class H264Encoder {
   void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
   // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
   void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
+  // catch-up: the source and content version of the NEXT input; same FIFO.
+  void set_next_input_synthetic_reason(uint8_t reason) { nextInputSyntheticReason_ = reason; }
+  void set_next_input_content_version(uint64_t version) { nextInputContentVersion_ = version; }
+  // Inputs this encoder instance actually accepted (ProcessInput succeeded), real and synthetic. A
+  // caller compares it across one encode call to learn whether THAT input was taken -- the call's
+  // return value also folds in output-drain failures after an accepted input.
+  uint64_t accepted_input_count() const { return acceptedInputCounter_; }
   // A06: the accepted-input FIFO overflowed, so nothing this encoder emits may be trusted with
   // provenance (every AU goes out tagged epoch 0, which the emit gate refuses). Only a rebuild --
   // shutdown() followed by a successful initialize() -- clears it.
@@ -361,6 +389,8 @@ class H264Encoder {
   void rc_fields_reset(const RcPlan& plan);                 // requested/want from a plan, outcomes cleared
   void rc_fields_derive();                                  // rcSetAccepted_ / rcPlanState_ from the fields
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
+  uint8_t nextInputSyntheticReason_ = 0;
+  uint64_t nextInputContentVersion_ = 0;
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
   uint32_t outBufferBytes_ = 0;

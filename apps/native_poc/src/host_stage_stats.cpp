@@ -392,6 +392,15 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                                             cadence);
       if (h264Flow != Flow::Next) return h264Flow;
     }
+    if (statsPrintDue && useH264 && hx.kick.catchupOwed > 0) {
+      const KickState& k = hx.kick;
+      std::cout << "[native-video-host][catchup] owed=" << k.catchupOwed << " served=" << k.catchupServed
+                << " accepted=" << k.catchupAccepted << " closedByOther=" << k.catchupClosedByOther
+                << " notAccepted=" << k.catchupNotAccepted << " droppedForNewer=" << k.catchupDroppedForNewer
+                << " reRejected=" << k.catchupReRejected << " cancelledIdentity=" << k.catchupCancelledIdentity
+                << " gaveUp=" << k.catchupGaveUp << " newerCache=" << k.catchupServedNewerCache
+                << " open=" << (k.catchup.owed ? 1 : 0) << "\n";
+    }
     sender.sentFrames = 0;
     encoder.encodedFrames = 0;
     sender.sentBytes = 0;

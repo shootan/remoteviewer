@@ -339,6 +339,12 @@ int startup_start_capture(HostContext& hx) {
       static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
       1000ULL;
   capture.frameHeartbeatEnabled.store(useH264 && kick.staticRefreshIntervalUs > 0);
+  // Latest-content catch-up (host_kick.hpp), on by default; REMOTE60_NATIVE_CATCHUP=0 turns it off.
+  {
+    const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
+    kick.catchupEnabled = !(v && v[0] == '0');
+    std::cout << "[native-video-host] catchup=" << (kick.catchupEnabled ? 1 : 0) << "\n";
+  }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is
   // stale, mismatched, or the desktop is locked/secure -- better black than a wrong picture.

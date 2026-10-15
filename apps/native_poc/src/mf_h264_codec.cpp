@@ -2315,6 +2315,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         uint64_t auEpoch = 0;
         uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
         bool auForcedKey = false;
+        uint8_t auReason = 0;
+        uint64_t auContentVersion = 0;
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
           normalizedAuSampleTimeHns = provenance.tsHns;
@@ -2322,6 +2324,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
           auEpoch = provenance.epoch;
           auOrdinal = provenance.acceptedOrdinal;
           auForcedKey = provenance.forcedKey;
+          auReason = provenance.syntheticReason;
+          auContentVersion = provenance.contentVersion;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
         }
@@ -2338,6 +2342,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.inputEpoch = auEpoch;
         au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
         au.inputWasForcedKey = auForcedKey;
+        au.syntheticReason = auReason;
+        au.contentVersion = auContentVersion;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
           // Keep existing behavior if sequence blob is malformed.
@@ -2385,7 +2391,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   }
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
   pendingInputs_.Push(
-      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame});
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame,
+                   nextInputSyntheticReason_, nextInputContentVersion_});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.
