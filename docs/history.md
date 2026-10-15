@@ -13218,3 +13218,12 @@ Next
   - 수동 IP 연결의 UI 실행(단위 gate 만 확인).
   - Activity 재생성의 실제 lifecycle 실행(번호 발급 경계는 단위만 확인).
   - 위 decoder 첫 출력 정지의 원인.
+
+
+### 2026-10-16 viewer-sharpness r1·r2 — 1088 의 유력 원인 보수 + 전체보기/크게보기 (별도 후보, 0.2.30 과 분리)
+
+- A (`e3cfeb6`): 실폰(SM-S948N) 로그는 wire 1920x1080 인데 format 이후 1920x1088. 이 단말의 decoder 가 visible 영역을 Codec2 의 `"crop"` 사각형 키로만 줬을 것으로 보는 것이 **유력 원인**(AVD 에서도 같은 형식의 `Rect crop` 이 오는데 sink 는 정수 4키만 읽어 crop 0 으로 기록). **실폰 새 빌드의 coded/visible/cropSrc 로그 전에는 그 폰의 원인·해결 확정이 아니라 보수 후보.** 보수: rect 우선·정수 4키 폴백·coded 안의 inclusive crop 만, 없음/무효는 구분 기록, 상수 1080 없음. 반례 10/10(보수 전 1088·1936 크기 오류 재현).
+- B (`a9bda2e`): 그리기와 입력이 같은 배치(ViewerViewport). 전체보기(fit)·크게보기(화면 이동 칩, 전체보기 칩 1탭 복귀)·컨트롤 숨기기. 높이 제한 화면에서는 컨트롤을 숨겨도 거의 커지지 않는다.
+- r2 R1 (`b46ddbf`): 터치 스트림의 소유자를 ACTION_DOWN 에서만 정하고 마지막 UP/CANCEL 까지 유지(ViewerTouchRouter). 실제 다점 MotionEvent(AVD sendevent): 핀치로 전체보기가 된 뒤 손가락을 다시 얹으면 bf0e3a2 는 원격 클릭 `[down, move, up]` 누출 → 후보 0, PC 누름 유지 중 다른 손가락으로 전체보기 bf0e3a2 `[down, up, down, up]` → 후보 `[down, up]`.
+- 미검증: 실폰의 A 결과와 체감 선명도, 태블릿 실기.
+- 제품/테스트/문서: 문서(이 항목).
