@@ -180,6 +180,26 @@ target_link_libraries(remote60_native_video_host_clipsink PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the APK's keepalive runs (keepalive r1): the same sources and libraries as
+# GNLinkStream; pinned to the test's own window (--capture-window-*), it lists that window alone, as
+# selectable, and answers its selection as applied (REMOTE60_PINNED_SELECT_TEST_SEAM, in
+# host_control_session.cpp and nowhere else) -- so the real APK UI can open its viewer on a host that
+# captures nothing of the user's. Its own output name, never packaged.
+get_target_property(_pinned_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_pinned_select ${_pinned_host_sources})
+set_target_properties(remote60_native_video_host_pinned_select PROPERTIES
+  OUTPUT_NAME "GNLinkStreamPinnedSelectTest")
+target_include_directories(remote60_native_video_host_pinned_select PRIVATE src)
+target_compile_definitions(remote60_native_video_host_pinned_select PRIVATE
+  REMOTE60_PINNED_SELECT_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_pinned_select PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 # TEST BUILD of the host for the cached-sign-in migration: the same sources and libraries as
 # GNLinkStream, with the product's server and its former names replaced by loopback fixtures read
 # from the environment (REMOTE60_STREAM_TEST_SEAM, in directory_client.cpp and nowhere else). The
@@ -871,6 +891,14 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
 target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
+
+# keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
+add_executable(remote60_client_park_state_test
+  src/client_park_state_test.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_client_park_state_test PRIVATE src)
+target_link_libraries(remote60_client_park_state_test PRIVATE common ws2_32)
 
 # mobile-abr r3: the decoder sink's state as one consistent copy (sequence lock), with a negative control (pure).
 add_executable(remote60_client_decode_snapshot_test src/client_decode_snapshot_test.cpp)

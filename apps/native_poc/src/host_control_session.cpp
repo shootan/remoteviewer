@@ -96,6 +96,34 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       mailbox(mailbox),
       clipboard(clipboard) {}
 
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+// TEST BUILD ONLY (GNLinkStreamPinnedSelectTest, keepalive r1): a host pinned to one window by
+// --capture-window-* lists that window alone, as selectable, and answers its selection as applied --
+// so a real client UI (the APK on an isolated AVD) can open its viewer on a host that captures nothing
+// but the test's own window. Never the user's windows: the list is the pinned id only. The shipped
+// GNLinkStream is built without this; there a pinned host lists every window and refuses selection.
+namespace {
+bool pinned_window_entry(uint64_t id, remote60::native_poc::WindowListEntry* out) {
+  HWND hwnd = remote60::native_poc::window_id_to_hwnd(id);
+  if (id == 0 || !hwnd || !IsWindow(hwnd)) return false;
+  out->id = id;
+  out->hwnd = hwnd;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  out->pid = pid;
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  out->width = rc.right - rc.left;
+  out->height = rc.bottom - rc.top;
+  out->minimized = IsIconic(hwnd) != FALSE;
+  const std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  out->title.clear();
+  for (wchar_t c : title) out->title.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+  return true;
+}
+}  // namespace
+#endif
+
 void ControlSessionServer::Serve(ControlLink& link) {
   // Which session this conversation belongs to. Checked again at the bottom before touching any
   // shared stream state, so a session that ends after its successor has started cannot turn the
@@ -116,7 +144,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
     rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
     rsp.seq = seq;
-    if (capture.windowSelectionLocked.load(std::memory_order_relaxed)) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    const bool pinnedSeam = capture.windowSelectionLocked.load(std::memory_order_relaxed);
+#else
+    constexpr bool pinnedSeam = false;
+#endif
+    if (capture.windowSelectionLocked.load(std::memory_order_relaxed) && !pinnedSeam) {
       rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
     }
     // Tells the client it may ask for previews; older hosts leave this clear and
@@ -129,7 +162,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
     // acknowledged with the new stream generation). Clients without it keep ControlMonitorSelect.
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1;
     rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
-    const auto windows = enumerate_shareable_windows();
+    auto windows = pinnedSeam ? std::vector<remote60::native_poc::WindowListEntry>{} : enumerate_shareable_windows();
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    if (pinnedSeam) {
+      remote60::native_poc::WindowListEntry pinned;
+      if (pinned_window_entry(rsp.selectedWindowId, &pinned)) windows.push_back(pinned);
+    }
+#endif
     rsp.itemCount = std::min<uint32_t>(
         static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
     for (uint32_t i = 0; i < rsp.itemCount; ++i) {
@@ -997,7 +1036,23 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const std::wstring& monitorDevice = resolved.device;
       const char* refused = resolved.refused;
 
-      if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      const uint64_t pinnedId = capture.selectedWindowId.load(std::memory_order_acquire);
+      const bool pinnedPick = capture.windowSelectionLocked.load(std::memory_order_acquire) &&
+                              req.windowId != 0 && req.windowId == pinnedId;
+#else
+      constexpr bool pinnedPick = false;
+#endif
+      if (pinnedPick) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+        // TEST BUILD ONLY: the pinned window is what is captured already -- applied, nothing moves.
+        rsp.flags = 0x1u;
+        remote60::native_poc::WindowListEntry pinned;
+        if (pinned_window_entry(pinnedId, &pinned)) remote60::native_poc::fill_window_title(rsp.title, pinned.title);
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " applied=1 reason=pinned_test_seam streamGeneration=" << rsp.streamGeneration << "\n";
+#endif
+      } else if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
         rsp.flags |= 0x2u;
         remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
                                                 "selection_locked_by_config");
