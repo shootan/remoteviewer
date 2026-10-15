@@ -14,6 +14,7 @@
 #include "encode_resolution_ladder.hpp"
 #include "host_args.hpp"
 #include "host_bgra_scale.hpp"
+#include "host_pinned_select_seam.hpp"
 
 namespace remote60::native_poc {
 
@@ -232,6 +233,9 @@ bool resize_bgra_bilinear(const uint8_t* src, uint32_t srcW, uint32_t srcH, uint
 bool capture_window_thumbnail(HWND hwnd, uint32_t maxW, uint32_t maxH,
                               std::vector<uint8_t>* outBgra, uint32_t* outW, uint32_t* outH) {
   if (!outBgra || !outW || !outH) return false;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  if (!pinned_select_seam_target_ok(hwnd)) return false;  // r3 R3: no preview but the pinned window's
+#endif
   outBgra->clear();
   *outW = 0;
   *outH = 0;

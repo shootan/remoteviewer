@@ -30,6 +30,7 @@
 #include "host_bgra_scale.hpp"
 #include "host_capture_device.hpp"
 #include "host_control_session.hpp"
+#include "host_pinned_select_seam.hpp"
 
 #include "clipboard_monitor.hpp"
 #include "clipboard_sync.hpp"
@@ -96,6 +97,212 @@ ControlSessionServer::ControlSessionServer(const Args& args, std::atomic<bool>& 
       mailbox(mailbox),
       clipboard(clipboard) {}
 
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+// TEST BUILD ONLY (GNLinkStreamPinnedSelectTest, keepalive r1/r2): the host offers the test's own window
+// and nothing else -- so a real client UI (the APK on an isolated AVD) can open its viewer through the
+// product's own selection transaction on a host that never shows the user's desktop. FAIL-CLOSED (r2 K6):
+//   - it does not start without --capture-window-pid AND --capture-window-title, nor when that process
+//     cannot be opened, nor when no window of that process carries that title (pinned_select_seam_admit_start;
+//     the open handle also keeps the pid from being reused for another process while this host runs);
+//   - r3 R3: every capture start passes pinned_select_seam_capture_gate (host_pinned_select_seam.hpp) -- the
+//     pinned window or the host ends; no screen, no fallback -- and a watcher ends the host the moment the
+//     pinned window, its process or its title is gone;
+//   - the window list is the pinned window or nothing -- never the product's enumeration;
+//   - a selection, a thumbnail or a monitor is admitted only for the pinned window (no desktop, no other
+//     HWND, no screen); the monitor list is empty;
+//   - selection is not locked, so the pinned window goes through the product's selection transaction,
+//     generation and key-frame order unchanged (no answer of its own, no extra IDR).
+// The shipped GNLinkStream is built without any of this (build gate: no "pinned_test_seam" string).
+namespace {
+HANDLE g_pinnedProcess = nullptr;
+// r3 R3: the pinned window, found once at start -- never re-enumerated, so no other HWND can take its place.
+HWND g_pinnedHwnd = nullptr;
+DWORD g_pinnedPid = 0;
+std::wstring g_pinnedNeedle;  // the pinned title, lower-case
+bool env_is_one(const char* name) {
+  char v[8] = {};
+  return GetEnvironmentVariableA(name, v, sizeof(v)) > 0 && v[0] == '1';
+}
+bool pinned_capture_probe() {
+  static const bool on = env_is_one("REMOTE60_PINNED_TEST_CAPTURE_PROBE");
+  return on;
+}
+// r2 K5 negative control: REMOTE60_PINNED_TEST_OLD_HOST=1 makes this test host behave as a host from
+// before the thumbnail flag -- it does not advertise it, and it takes ControlStreamState without stopping
+// (the stream stays on) while still answering every Ping. The phone must not park on it.
+bool pinned_test_old_host() {
+  static const bool on = [] {
+    char v[8] = {};
+    return GetEnvironmentVariableA("REMOTE60_PINNED_TEST_OLD_HOST", v, sizeof(v)) > 0 && v[0] == '1';
+  }();
+  return on;
+}
+bool pinned_by_args(const Args& args) {
+  return args.captureWindowPid != 0 && !args.captureWindowTitle.empty() && g_pinnedProcess != nullptr;
+}
+
+struct PinnedFind {
+  DWORD pid;
+  std::wstring needle;
+  HWND found;
+};
+BOOL CALLBACK pinned_enum(HWND hwnd, LPARAM lp) {
+  auto* f = reinterpret_cast<PinnedFind*>(lp);
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != f->pid) return TRUE;
+  std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+  if (title.find(f->needle) == std::wstring::npos) return TRUE;
+  f->found = hwnd;
+  return FALSE;
+}
+uint64_t pinned_window_id(const Args& args) {
+  if (!pinned_by_args(args)) return 0;  // fail-closed: no pinned window, nothing admitted
+  // r3 R3: the window found at start, while it is still the pinned one -- not whatever matches now.
+  return pinned_select_seam_target_ok(g_pinnedHwnd) ? remote60::native_poc::hwnd_to_id(g_pinnedHwnd) : 0;
+}
+
+bool pinned_window_entry(uint64_t id, remote60::native_poc::WindowListEntry* out) {
+  HWND hwnd = remote60::native_poc::window_id_to_hwnd(id);
+  if (id == 0 || !hwnd || !IsWindow(hwnd)) return false;
+  out->id = id;
+  out->hwnd = hwnd;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  out->pid = pid;
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  out->width = rc.right - rc.left;
+  out->height = rc.bottom - rc.top;
+  out->minimized = IsIconic(hwnd) != FALSE;
+  const std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  out->title.clear();
+  for (wchar_t c : title) out->title.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+  return true;
+}
+}  // namespace
+
+bool pinned_select_seam_probe_ungated() {
+  static const bool on = pinned_capture_probe() && env_is_one("REMOTE60_PINNED_TEST_PROBE_UNGATED");
+  return on;
+}
+
+bool pinned_select_seam_target_ok(HWND hwnd) {
+  if (!hwnd || hwnd != g_pinnedHwnd || !g_pinnedProcess || !IsWindow(hwnd)) return false;
+  if (WaitForSingleObject(g_pinnedProcess, 0) != WAIT_TIMEOUT) return false;  // the pinned process ended
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != g_pinnedPid) return false;
+  std::wstring title = remote60::native_poc::get_window_title(hwnd);
+  for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+  return !g_pinnedNeedle.empty() && title.find(g_pinnedNeedle) != std::wstring::npos;
+}
+
+HWND pinned_select_seam_pinned_hwnd() { return g_pinnedHwnd; }
+
+bool pinned_select_seam_no_capture() {
+  static const bool on = env_is_one("REMOTE60_PINNED_TEST_NO_CAPTURE");
+  return on;
+}
+
+PinnedTestFaults pinned_select_seam_faults() {
+  PinnedTestFaults f;
+  char path[MAX_PATH] = {};
+  if (GetEnvironmentVariableA("REMOTE60_PINNED_TEST_FAULT_FILE", path, sizeof(path)) == 0) return f;
+  FILE* fp = nullptr;
+  if (fopen_s(&fp, path, "rb") != 0 || !fp) return f;
+  char line[128];
+  while (std::fgets(line, sizeof(line), fp)) {
+    unsigned v = 0;
+    if (std::sscanf(line, "pong_delay_ms=%u", &v) == 1) f.pongDelayMs = (std::min)(v, 10000u);
+    if (std::sscanf(line, "ack_delay_ms=%u", &v) == 1) f.ackDelayMs = (std::min)(v, 10000u);
+    if (std::sscanf(line, "drop_keys=%u", &v) == 1) f.dropKeys = (std::min)(v, 20u);
+  }
+  std::fclose(fp);
+  return f;
+}
+
+std::atomic<unsigned> g_pinnedKeyDrops{0};
+void pinned_select_seam_arm_key_drops(unsigned n) { g_pinnedKeyDrops.store(n, std::memory_order_release); }
+bool pinned_select_seam_take_key_drop() {
+  unsigned v = g_pinnedKeyDrops.load(std::memory_order_acquire);
+  while (v > 0 && !g_pinnedKeyDrops.compare_exchange_weak(v, v - 1, std::memory_order_acq_rel)) {
+  }
+  return v > 0;
+}
+
+void pinned_select_seam_refuse(const char* where) {
+  std::fprintf(stderr, "[pinned-select-test] refused: %s -- the host ends (65)\n", where ? where : "?");
+  std::cout.flush();
+  std::fflush(stdout);
+  std::fflush(stderr);
+  TerminateProcess(GetCurrentProcess(), 65);
+  for (;;) Sleep(INFINITE);
+}
+
+void pinned_select_seam_capture_gate(HWND window, const char* where) {
+  const bool ungated = pinned_select_seam_probe_ungated();
+  const bool admitted = ungated || (window != nullptr && pinned_select_seam_target_ok(window));
+  if (pinned_capture_probe()) {
+    std::fprintf(stderr, "[pinned-select-test] capture-probe where=%s target=%s hwnd=0x%llx pinned=%d admitted=%d%s\n",
+                 where ? where : "?", window ? "window" : "screen",
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(window)),
+                 window != nullptr && window == g_pinnedHwnd ? 1 : 0, admitted ? 1 : 0, ungated ? " UNGATED" : "");
+    std::cout.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), admitted ? 66 : 65);  // before any capture object exists
+    for (;;) Sleep(INFINITE);
+  }
+  if (!admitted) pinned_select_seam_refuse(where);
+}
+
+bool pinned_select_seam_admit_start(const Args& args, std::string* why) {
+  if (args.captureWindowPid == 0 || args.captureWindowTitle.empty()) {
+    if (why) *why = "--capture-window-pid and --capture-window-title are both required";
+    return false;
+  }
+  g_pinnedProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, args.captureWindowPid);
+  if (!g_pinnedProcess) {
+    if (why) *why = "the pinned process cannot be opened";
+    return false;
+  }
+  g_pinnedPid = args.captureWindowPid;
+  for (unsigned char c : args.captureWindowTitle) g_pinnedNeedle.push_back(static_cast<wchar_t>(towlower(c)));
+  if (pinned_select_seam_probe_ungated()) return true;  // negative control: the 2abb8be admission
+  // r3 R3: the window itself, of that process, with that title -- a live pid alone admits nothing. A
+  // fixture that is still coming up gets 5 s.
+  PinnedFind f{g_pinnedPid, g_pinnedNeedle, nullptr};
+  for (int t = 0; t < 50 && !f.found; ++t) {
+    if (WaitForSingleObject(g_pinnedProcess, 0) != WAIT_TIMEOUT) break;
+    EnumWindows(pinned_enum, reinterpret_cast<LPARAM>(&f));
+    if (!f.found) Sleep(100);
+  }
+  if (!f.found) {
+    if (why) *why = "no window of the pinned process carries the pinned title";
+    return false;
+  }
+  g_pinnedHwnd = f.found;
+  // Lifetime: the window, its process or its title gone -> the host ends, whatever it is doing.
+  std::thread([] {
+    for (;;) {
+      Sleep(100);
+      if (!pinned_select_seam_target_ok(g_pinnedHwnd)) pinned_select_seam_refuse("the pinned window is gone");
+    }
+  }).detach();
+  wchar_t deskName[128] = L"";
+  DWORD deskLen = 0;
+  GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, deskName, sizeof(deskName), &deskLen);
+  wchar_t staName[128] = L"";
+  GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, staName, sizeof(staName), &deskLen);
+  std::fprintf(stderr, "[pinned-select-test] pinned hwnd=0x%llx pid=%lu station=%ls desktop=%ls\n",
+               static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_pinnedHwnd)),
+               static_cast<unsigned long>(g_pinnedPid), staName, deskName);
+  return true;
+}
+#endif
+
 void ControlSessionServer::Serve(ControlLink& link) {
   // Which session this conversation belongs to. Checked again at the bottom before touching any
   // shared stream state, so a session that ends after its successor has started cannot turn the
@@ -116,11 +323,19 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.header.type = static_cast<uint16_t>(MessageType::ControlWindowList);
     rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
     rsp.seq = seq;
-    if (capture.windowSelectionLocked.load(std::memory_order_relaxed)) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    constexpr bool pinnedSeam = true;  // r2 K6: never the product's enumeration in this build
+#else
+    constexpr bool pinnedSeam = false;
+#endif
+    if (capture.windowSelectionLocked.load(std::memory_order_relaxed) && !pinnedSeam) {
       rsp.flags |= remote60::native_poc::kControlWindowListFlagSelectionLocked;
     }
     // Tells the client it may ask for previews; older hosts leave this clear and
     // older clients ignore the bit, so both directions stay compatible.
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    if (!pinned_test_old_host())
+#endif
     rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
     // Says the monitor messages exist here. A client that asked an older host would wait for a
     // reply that never comes, since unknown opcodes are drained silently.
@@ -129,7 +344,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
     // acknowledged with the new stream generation). Clients without it keep ControlMonitorSelect.
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1;
     rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
-    const auto windows = enumerate_shareable_windows();
+    auto windows = pinnedSeam ? std::vector<remote60::native_poc::WindowListEntry>{} : enumerate_shareable_windows();
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    if (pinnedSeam) {
+      remote60::native_poc::WindowListEntry pinned;
+      if (pinned_window_entry(pinned_window_id(args), &pinned)) windows.push_back(pinned);
+    }
+#endif
     rsp.itemCount = std::min<uint32_t>(
         static_cast<uint32_t>(windows.size()), remote60::native_poc::kControlWindowListMaxEntries);
     for (uint32_t i = 0; i < rsp.itemCount; ++i) {
@@ -153,7 +374,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
     rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
     rsp.seq = seq;
     rsp.selectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    const std::vector<remote60::native_poc::MonitorListEntry> monitors;  // r2 K6: no screen in this build
+#else
     const auto monitors = enumerate_monitors();
+#endif
     // t-970r4zgo: the selection named against THIS list, by the rule the capture restart opens
     // the screen with -- a picked screen that is gone is reported as the one shown instead
     // (the primary), not as a stale index that may now be out of range or another screen.
@@ -219,7 +444,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
     bool ok = false;
 
     HWND hwnd = req.windowId == 0 ? nullptr : window_id_to_hwnd(req.windowId);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    // r2 K6: the pinned window's preview or none -- not the desktop, not another window.
+    const bool eligible = req.windowId != 0 && req.windowId == pinned_window_id(args);
+#else
     const bool eligible = req.windowId == 0 || should_include_window(hwnd);
+#endif
 
     if (eligible) {
       // The key identifies the window well enough that a recycled HWND does not inherit another
@@ -415,6 +645,15 @@ void ControlSessionServer::Serve(ControlLink& link) {
       ControlPingMessage ping{};
       ping.header = header;
       if (!link.Read(&ping.seq, sizeof(ping) - sizeof(MessageHeader))) break;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
+        const unsigned delayMs = pinned_select_seam_faults().pongDelayMs;
+        if (delayMs > 0) {
+          std::cout << "[pinned-select-test] fault: pong seq=" << ping.seq << " held " << delayMs << " ms (paused)\n";
+          std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+      }
+#endif
       ControlPongMessage pong{};
       pong.header.magic = remote60::native_poc::kMagic;
       pong.header.type = static_cast<uint16_t>(MessageType::ControlPong);
@@ -961,7 +1200,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       // Applied by the render loop, which owns the capture item; answered with the list so the
       // client sees the selection that actually took effect rather than the one it asked for.
+#ifndef REMOTE60_PINNED_SELECT_TEST_SEAM
       mailbox.PostSelectMonitor({servedEpoch, req.monitorId});
+#endif  // r2 K6: the pinned test host takes no screen
       if (!send_monitor_list(req.seq)) break;
       continue;
     }
@@ -997,7 +1238,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
       const std::wstring& monitorDevice = resolved.device;
       const char* refused = resolved.refused;
 
-      if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      // r2 K6: only the pinned window; it then goes through the product's transaction below.
+      const bool seamRefuses = req.windowId == 0 || req.windowId != pinned_window_id(args);
+#else
+      constexpr bool seamRefuses = false;
+#endif
+      if (seamRefuses) {
+        rsp.flags |= 0x2u;
+        remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason), "pinned_test_only");
+        std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
+                  << " applied=0 reason=pinned_test_seam_refused\n";
+      } else if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
         rsp.flags |= 0x2u;
         remote60::native_poc::utf8_copy_bounded(rsp.reason, sizeof(rsp.reason),
                                                 "selection_locked_by_config");
@@ -1029,6 +1281,12 @@ void ControlSessionServer::Serve(ControlLink& link) {
         windowSelectionTxn.cv.notify_all();
         std::cout << "[native-video-host][control] window-select seq=" << req.seq << " requestedId=" << req.windowId
                   << " pending\n";
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+        if (const unsigned drops = pinned_select_seam_faults().dropKeys; drops > 0) {
+          pinned_select_seam_arm_key_drops(drops);
+          std::cout << "[pinned-select-test] fault: the next " << drops << " key frame(s) are dropped\n";
+        }
+#endif
 
         std::unique_lock<std::mutex> lk(windowSelectionTxn.mu);
         // Also give up when the link dies. The client that asked for this selection may be the
@@ -1064,6 +1322,14 @@ void ControlSessionServer::Serve(ControlLink& link) {
         }
         rsp.hostSendQpcUs = qpc_now_us();
       }
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (const unsigned delayMs = pinned_select_seam_faults().ackDelayMs; delayMs > 0 && !seamRefuses) {
+        std::cout << "[pinned-select-test] fault: window-select answer seq=" << req.seq << " held " << delayMs
+                  << " ms (its key frame goes first)\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        rsp.hostSendQpcUs = qpc_now_us();
+      }
+#endif
 
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
@@ -1251,6 +1517,13 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       const bool active = ((req.flags & 0x1u) != 0);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (pinned_test_old_host()) {
+        std::cout << "[native-video-host][control] stream-state seq=" << req.seq << " active=" << (active ? 1 : 0)
+                  << " IGNORED (old-host test)\n";
+        continue;
+      }
+#endif
       clientSession.streamControlActive.store(active, std::memory_order_release);
       std::cout << "[native-video-host][control] stream-state seq=" << req.seq
                 << " active=" << (active ? 1 : 0)

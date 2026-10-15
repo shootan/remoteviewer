@@ -175,6 +175,17 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t bootstrapReplayCount_ = 0;
   uint64_t staleFrameDropCount_ = 0;
   uint64_t oversizedInputFrameDropCount_ = 0;
+  // keepalive r5 D1: what the codec itself answered, for the video_debug line -- "out=0" alone does not
+  // say whether no picture was ever dequeued, one is held, or the input side is what stopped.
+  int64_t lastInputDequeue_ = 0;    // last dequeueInputBuffer result (>= 0 an index)
+  int64_t lastOutputDequeue_ = 0;   // last dequeueOutputBuffer result (-1 try again, -2 format, -3 buffers)
+  uint64_t outputDequeued_ = 0;     // output buffers dequeued by this codec instance (pictures or not)
+  uint64_t formatChanges_ = 0;      // output-format-changed answers, this codec instance
+  uint64_t codecsStarted_ = 0;      // codec instances started over the sink's life
+  // keepalive r5 D1: this codec instance has had no IDR queued yet -- deltas are not fed to it (an IDR is asked
+  // for instead). The surface can start a codec from the SPS/PPS of an IDR it never received.
+  bool codecAwaitsKey_ = false;
+  uint64_t deltaBeforeKeyDrops_ = 0;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> pendingFrame_;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> bootstrapFrame_;
   std::vector<uint8_t> csd0_;

@@ -22,6 +22,15 @@
 #include <string>
 
 #include "host_args.hpp"
+
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+#include <string>
+namespace remote60::native_poc {
+// TEST BUILD ONLY (GNLinkStreamPinnedSelectTest): refuse to start unless pinned to an openable process
+// by pid and to a window of it carrying the title (host_control_session.cpp, r3 R3).
+bool pinned_select_seam_admit_start(const Args& args, std::string* why);
+}  // namespace remote60::native_poc
+#endif
 #include "host_backend_policy.hpp"
 #include "host_capture_session.hpp"
 #include "host_client_metrics.hpp"

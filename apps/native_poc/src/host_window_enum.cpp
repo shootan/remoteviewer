@@ -16,6 +16,7 @@
 
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
+#include "host_pinned_select_seam.hpp"
 
 namespace remote60::native_poc {
 
@@ -98,6 +99,12 @@ bool should_exclude_window_process(uint32_t pid, const std::string& processName)
 
 bool should_include_window(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd)) return false;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // TEST BUILD ONLY (keepalive r2 K6-b, r3 R3): the test's own pinned window -- transparent and click-through
+  // so it never covers the user's screen, which the product's predicate below would refuse. Admitted while
+  // it is still the pinned process's window with the pinned title (host_pinned_select_seam.hpp); no other.
+  if (pinned_select_seam_target_ok(hwnd)) return true;
+#endif
   if (hwnd == GetShellWindow()) return false;
   if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
   if (!IsWindowVisible(hwnd)) return false;

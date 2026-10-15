@@ -115,6 +115,11 @@ void ClientInputQueue::WaitForInput(uint32_t timeoutMs) {
   ready_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !queue_.empty(); });
 }
 
+bool ClientInputQueue::Empty() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return queue_.empty();
+}
+
 bool ClientInputQueue::TryDequeue(QueuedControlInputMessage* out) {
   if (!out) return false;
   std::lock_guard<std::mutex> lk(mu_);
@@ -1217,6 +1222,14 @@ UdpH264AssemblyStepResult UdpH264FrameAssembler::PushDatagram(const uint8_t* dat
   result.fecRecovered = fecRecovered;
   result.fecRecoveredChunks = fecRecoveredChunks;
   return result;
+}
+
+void WindowPanelStateModel::CancelPendingRequests() {
+  std::lock_guard<std::mutex> lk(mu_);
+  listRequestPending_ = false;
+  selectRequestPending_ = false;
+  monitorListRequestPending_ = false;
+  monitorSelectRequestPending_ = false;
 }
 
 void WindowPanelStateModel::Reset() {

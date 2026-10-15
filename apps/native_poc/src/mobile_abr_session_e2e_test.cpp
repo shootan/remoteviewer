@@ -47,9 +47,22 @@
 //
 //   remote60_mobile_abr_session_e2e_test --scenario S [--fps N] [--bitrate N] [--present-duty ON:OFF]
 //       [--impair-sec N] [--out DIR] [--watchdog-sec N]
+//   keepalive r1: --scenario park [--park-sec N] --out DIR
+//       The shared session against the isolated host through the relay: a key and a mouse button held,
+//       then BeginPark (client_park_state.hpp) -- the releases reach the host before its stream-state
+//       inactive, the fence confirms, nothing but control crosses while parked (AUs, relay datagrams per
+//       second, capture detached), input is refused while parked; resume -> the first frame. Short parks
+//       (2 s) x3 and one long park (N s, default 65).
+//   keepalive r1: --scenario directoryhost --dir-url URL --dir-id ID --dir-pw PW --host-name NAME
+//       [--external-sec N] --out DIR
+//       The same isolated host (staged copy, own LOCALAPPDATA, this test's window, input injection off,
+//       host clipboard off, bound to 127.0.0.1), registered with a FIXTURE directory under a fixture
+//       account -- for the APK on an isolated AVD to sign in to, list, connect through the relay to,
+//       park and reuse. Up for N seconds or until <out>/stop exists; host log to <out>/directoryhost_host.log.
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include "e2e_isolation.hpp"
+#include "e2e_station_lock.hpp"
 #include "control_resume_e2e_support.hpp"
 
 #include <algorithm>
@@ -62,6 +75,7 @@
 #include <functional>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -540,10 +554,75 @@ std::string field_of(const std::string& line, const std::string& key) {
 }
 int profile_rank(const std::string& p) { return p == "high" ? 0 : p == "mid" ? 1 : p == "low" ? 2 : -1; }
 
+// keepalive r2 parkclip: the station clipboard is read and written by a child of this test started ON
+// the private window station (a clipboard belongs to its station) -- never the user's WinSta0 one.
+int clip_child_main(int argc, wchar_t** argv) {
+  const std::wstring mode = argv[1];
+  if (mode == L"--clip-set" && argc >= 3) {
+    const std::wstring text = argv[2];
+    for (int t = 0; t < 50; ++t) {
+      if (OpenClipboard(nullptr)) {
+        EmptyClipboard();
+        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+        if (h) {
+          std::memcpy(GlobalLock(h), text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+          GlobalUnlock(h);
+          SetClipboardData(CF_UNICODETEXT, h);
+        }
+        CloseClipboard();
+        return 0;
+      }
+      Sleep(20);
+    }
+    return 2;
+  }
+  if (mode == L"--clip-get" && argc >= 3) {
+    std::wstring text;
+    for (int t = 0; t < 50; ++t) {
+      if (OpenClipboard(nullptr)) {
+        if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+          if (const wchar_t* w = static_cast<const wchar_t*>(GlobalLock(h))) text = w;
+          GlobalUnlock(h);
+        }
+        CloseClipboard();
+        std::ofstream(argv[2], std::ios::binary) << std::string(text.begin(), text.end());
+        return 0;
+      }
+      Sleep(20);
+    }
+    return 2;
+  }
+  return 1;
+}
+
+// keepalive r3 R3: parkclip's capture target -- a window of a child of this test ON the private station's
+// desktop, so the pinned test host finds it there (a window of this test, on the user's desktop, is not on
+// the host's desktop: the product host fell back to the screen in r2). Up until killed (the job).
+LRESULT CALLBACK station_fixture_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
+int station_fixture_main(const std::wstring& title) {
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = station_fixture_proc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"Remote60MobileAbrStationTarget";
+  RegisterClassExW(&wc);
+  HWND h = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, title.c_str(), WS_POPUP | WS_VISIBLE, 0, 0, 480,
+                           270, nullptr, nullptr, wc.hInstance, nullptr);
+  if (!h) return 3;
+  ShowWindow(h, SW_SHOWNOACTIVATE);
+  MSG msg;
+  while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+  return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  if (argc >= 2 && (std::wstring(argv[1]) == L"--clip-set" || std::wstring(argv[1]) == L"--clip-get")) {
+    return clip_child_main(argc, argv);
+  }
+  if (argc >= 3 && std::wstring(argv[1]) == L"--station-fixture") return station_fixture_main(argv[2]);
   std::string scenario = "sparse";
   uint32_t fps = 30, bitrate = 3000000;
   int impairSec = 20;
@@ -554,6 +633,10 @@ int wmain(int argc, wchar_t** argv) {
   int externalSec = 70;
   int keyDropFrom = -1, keyDropTo = -1;  // r5 external: drop keyframes over [from, to) s from the first report
   std::string externalPlan = "app";
+  std::wstring dirUrl, dirId, dirPw, dirHostName = L"ka-test-pc";  // keepalive r1 directoryhost
+  std::wstring hostExe = L"GNLinkStream.exe";  // keepalive r1: --host-exe GNLinkStreamPinnedSelectTest.exe
+  int parkLongSec = 65;  // keepalive r1: --park-sec
+  std::string parkVariant = "main";  // keepalive r2: --park-variant main | fail | expire
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     const bool more = i + 1 < argc;
@@ -580,11 +663,30 @@ int wmain(int argc, wchar_t** argv) {
       externalSec = _wtoi(argv[++i]);
     } else if (a == L"--watchdog-sec" && more) {
       watchdogOverrideSec = _wtoi(argv[++i]);
+    } else if (a == L"--dir-url" && more) {
+      dirUrl = argv[++i];
+    } else if (a == L"--dir-id" && more) {
+      dirId = argv[++i];
+    } else if (a == L"--dir-pw" && more) {
+      dirPw = argv[++i];
+    } else if (a == L"--host-name" && more) {
+      dirHostName = argv[++i];
+    } else if (a == L"--host-exe" && more) {
+      hostExe = argv[++i];
+    } else if (a == L"--park-sec" && more) {
+      parkLongSec = _wtoi(argv[++i]);
+    } else if (a == L"--park-variant" && more) {
+      const std::wstring v = argv[++i];
+      parkVariant.assign(v.begin(), v.end());
     }
   }
-  const bool external = scenario == "external";
+  const bool directoryHost = scenario == "directoryhost";
+  const bool parkClip = scenario == "parkclip";
+  const bool parkScenario = scenario == "park" || parkClip;
+  const bool external = scenario == "external" || directoryHost;
   const bool healthy = scenario == "sparse" || scenario == "nolatch" || scenario == "static" ||
-                       scenario == "inputload" || scenario == "reconnect";
+                       scenario == "inputload" || scenario == "reconnect" || scenario == "park" ||
+                       scenario == "parkclip";
   Impair impair = Impair::None;
   bool decodeStall = false, recovery = false;
   if (scenario == "uplink") impair = Impair::Uplink;
@@ -604,7 +706,7 @@ int wmain(int argc, wchar_t** argv) {
   const int warmSec = healthy ? 3 : 12;
   const int judgeSec = 60;
   const int afterSec = recovery ? 45 : 8;
-  const int totalSec = external ? 120 + externalSec + 5
+  const int totalSec = scenario == "park" ? (parkVariant == "expire" ? 360 : 40 + parkLongSec + 60) : external ? 120 + externalSec + 5
                                 : healthy ? warmSec + judgeSec + 2 : warmSec + impairSec + afterSec;
   say("mobile_abr_session_e2e_test scenario=" + scenario + " fps=" + std::to_string(fps) + " bitrate=" +
       std::to_string(bitrate) + " presentDuty=" + std::to_string(dutyOn) + ":" + std::to_string(dutyOff) +
@@ -642,7 +744,11 @@ int wmain(int argc, wchar_t** argv) {
   }
   const std::wstring dir = staging.path();
   const std::wstring myDir = directory_of(self_path());
-  const bool staged = CopyFileW((myDir + L"GNLinkStream.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
+  // keepalive r3 R3: parkclip's host runs where this test's window is not; only the fail-closed pinned test
+  // host (no screen, ever) may run there -- never the product host, which falls back to the screen.
+  if (scenario == "parkclip") hostExe = L"GNLinkStreamPinnedSelectTest.exe";
+  // Staged as GNLinkStream.exe whichever build it is, so the isolation check below knows it is the host.
+  const bool staged = CopyFileW((myDir + hostExe).c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
   check("the host could be staged", staged);
 
   if (scenario == "static") gSourceStill.store(true);
@@ -654,6 +760,46 @@ int wmain(int argc, wchar_t** argv) {
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
+  // keepalive r2 parkclip: a private window station for the host -- its clipboard is its own, not the
+  // user's -- and the station lock, so no other clipboard e2e shares it meanwhile.
+  remote60::native_poc::e2e::StationLock stationLock;
+  std::wstring clipDesktop;
+  DWORD interactiveClipSeq0 = 0;
+  DWORD stationFixturePid = 0;  // r3 R3: parkclip's capture target process
+  if (parkClip) {
+    if (!stationLock.Acquire("mobile_abr_session_e2e_test(parkclip)")) {
+      return remote60::native_poc::e2e::StationLock::Busy("mobile_abr_session_e2e_test(parkclip)");
+    }
+    HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);  // unnamed: medium may not name one
+    wchar_t wsName[256] = L"";
+    DWORD wsLen = 0;
+    if (ws) GetUserObjectInformationW(ws, UOI_NAME, wsName, sizeof(wsName), &wsLen);
+    HWINSTA origWs = GetProcessWindowStation();
+    HDESK privateDesk = nullptr;
+    if (ws) {
+      SetProcessWindowStation(ws);
+      privateDesk = CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+      SetProcessWindowStation(origWs);
+    }
+    clipDesktop = std::wstring(wsName) + L"\\Default";
+    check("[parkclip] the host gets a private window station (its own clipboard)", ws && privateDesk);
+    interactiveClipSeq0 = GetClipboardSequenceNumber();
+    // r3 R3: its capture target, on that station
+    std::wstring fcmd = L"\"" + self_path() + L"\" --station-fixture \"" + kTargetTitle + L"\"";
+    STARTUPINFOW fsi{};
+    fsi.cb = sizeof(fsi);
+    fsi.lpDesktop = clipDesktop.data();
+    PROCESS_INFORMATION fpi{};
+    const bool fixtureUp = CreateProcessW(nullptr, fcmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                                          nullptr, &fsi, &fpi) != 0;
+    if (fixtureUp) {
+      AssignProcessToJobObject(job, fpi.hProcess);
+      stationFixturePid = fpi.dwProcessId;
+      CloseHandle(fpi.hThread);
+      CloseHandle(fpi.hProcess);
+    }
+    check("[parkclip] the capture target window is up on the private station (a child of this test)", fixtureUp);
+  }
   const std::wstring hostLogPath = dir + L"host.log";
   HANDLE hostLog = INVALID_HANDLE_VALUE;
   PROCESS_INFORMATION hostPi{};
@@ -661,12 +807,24 @@ int wmain(int argc, wchar_t** argv) {
   if (staged) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
-    SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
+    SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", parkClip ? L"1" : L"0");  // r2: only on its own station
+    // r3 R3: parkclip's host captures nothing at all (pinned to the station fixture, it serves control only)
+    SetEnvironmentVariableW(L"REMOTE60_PINNED_TEST_NO_CAPTURE", parkClip ? L"1" : nullptr);
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps " + std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) +
                        L" --seconds " + std::to_wstring(hostSec) + L" --input-injection-mode none" +
-                       e2e_capture_window_args(kTargetTitle);
+                       (parkClip ? L" --capture-window-pid " + std::to_wstring(stationFixturePid) +
+                                       L" --capture-window-title \"" + kTargetTitle + L"\""
+                                 : e2e_capture_window_args(kTargetTitle));
+    if (parkScenario) cmd += L" --input-log-every 1";  // keepalive r1: every input the host receives, logged
+    if (directoryHost) {
+      // keepalive r1: registered with the fixture directory; its token cache in the staging dir (the
+      // isolation check below refuses any other place); every input event logged, none injected.
+      cmd += L" --directory-url " + dirUrl + L" --directory-cache \"" + dir + L"dircache.json\"" +
+             L" --directory-id " + dirId + L" --directory-pw " + dirPw + L" --host-name " + dirHostName +
+             L" --input-log-every 1";
+    }
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     SECURITY_ATTRIBUTES sa{};
@@ -681,6 +839,7 @@ int wmain(int argc, wchar_t** argv) {
       si.hStdOutput = hostLog;
       si.hStdError = hostLog;
     }
+    if (parkClip) si.lpDesktop = clipDesktop.data();  // r2 parkclip: the host on the private station
     const std::wstring isoAppData = dir + L"localappdata";
     CreateDirectoryW(isoAppData.c_str(), nullptr);
     std::vector<wchar_t> isoEnv = e2e_isolated_environment(isoAppData);
@@ -696,6 +855,43 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   check("the host started", launched);
+  if (directoryHost) {
+    // keepalive r1: no phone here -- the APK on the AVD is the client. Stay up, then take the host down.
+    if (!outDir.empty()) {
+      CreateDirectoryW(outDir.c_str(), nullptr);
+      std::ofstream(outDir + L"directoryhost_ready.txt") << (launched ? "ready" : "failed") << "\n";
+    }
+    say(std::string("DIRECTORY_HOST ") + (launched ? "ready" : "failed"));
+    const std::wstring stopFile = outDir + L"stop";
+    for (int t = 0; launched && t < externalSec; ++t) {
+      if (!outDir.empty() && GetFileAttributesW(stopFile.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+      if (hostPi.hProcess && WaitForSingleObject(hostPi.hProcess, 0) == WAIT_OBJECT_0) {
+        say("NOTE  host exited by itself");
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    if (hostPi.hProcess) {
+      TerminateProcess(hostPi.hProcess, 0);
+      WaitForSingleObject(hostPi.hProcess, 5000);
+      CloseHandle(hostPi.hProcess);
+    }
+    if (hostPi.hThread) CloseHandle(hostPi.hThread);
+    if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+    CloseHandle(job);
+    if (launched) {
+      std::string captureLine;
+      const bool own = e2e_host_captured_window(hostLogPath, target.hwnd(), &captureLine);
+      check("the host captured the window this test paints (its hwnd, this pid)", own, captureLine);
+    }
+    target.Stop();
+    if (!outDir.empty()) CopyFileW(hostLogPath.c_str(), (outDir + L"directoryhost_host.log").c_str(), FALSE);
+    if (!staging.Remove()) say("WARN  " + staging.why());
+    say(std::string("\nmobile_abr_session_e2e_test: ") + (gFailures == 0 ? "PASS" : "FAIL") +
+        "\nRESULT: " + (gFailures == 0 ? "PASS" : "FAIL"));
+    WSACleanup();
+    return gFailures == 0 ? 0 : 1;
+  }
 
   Relay relay;
   const bool relayUp = launched && relay.Start(hostPort);
@@ -755,6 +951,342 @@ int wmain(int argc, wchar_t** argv) {
   bool reconnected = true;
   std::atomic<bool> inputStop{false};
   std::thread inputThread;
+  // r3 R1: when this client resumed a park (local wall-clock ms). The host never sees a resume -- only the
+  // stream-state true that may come later -- so its log is read with these: after a resume, a request is the
+  // resumed session's, not the park's.
+  std::vector<int64_t> clientResumeMs;
+  auto note = [&](const std::string& line) {
+    say("PARK " + std::to_string(local_now_ms() % 100000) + " " + line + " [session " +
+        std::to_string(static_cast<int>(session.Snapshot().state)) + " park " +
+        client_park_phase_name(session.ParkPhase()) + "]");
+  };
+  if (connected && parkClip) {
+    // ---------------------------------------------------------------- keepalive r2 §7: the clipboard
+    // The product's own poll / push / host handler, the host on a private station. r3 R3: it is the pinned
+    // test build, pinned to the fixture window there (its pid, its title, that desktop) and in its no-capture
+    // mode -- no window of a private station is ever visible and WGC captures none, so it starts no capture
+    // at all and serves control only. In r2 it ran the product host here, which fell back to the screen.
+    const std::wstring self = self_path();
+    auto stationRun = [&](const std::wstring& args) -> int {
+      std::wstring cmd = L"\"" + self + L"\" " + args;
+      STARTUPINFOW csi{};
+      csi.cb = sizeof(csi);
+      csi.lpDesktop = clipDesktop.data();
+      PROCESS_INFORMATION cpi{};
+      if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &csi, &cpi)) return -1;
+      WaitForSingleObject(cpi.hProcess, 10000);
+      DWORD code = 99;
+      GetExitCodeProcess(cpi.hProcess, &code);
+      CloseHandle(cpi.hProcess);
+      CloseHandle(cpi.hThread);
+      return static_cast<int>(code);
+    };
+    const std::wstring clipFile = dir + L"station_clip.txt";
+    auto stationSet = [&](const std::wstring& t) { return stationRun(L"--clip-set " + t) == 0; };
+    auto stationGet = [&]() {
+      DeleteFileW(clipFile.c_str());
+      stationRun(L"--clip-get \"" + clipFile + L"\"");
+      std::ifstream f(clipFile, std::ios::binary);
+      return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    auto u16 = [](const std::string& a) { return std::u16string(a.begin(), a.end()); };
+    auto queue = [&](const std::string& t) {
+      const std::u16string w = u16(t);
+      return session.QueueClipboardText(reinterpret_cast<const uint16_t*>(w.data()), w.size());
+    };
+    auto takeWithin = [&](int ms) {
+      std::u16string got;
+      const bool any = wait_until([&] { return session.TakeIncomingClipboardText(&got); }, ms);
+      return any ? std::string(got.begin(), got.end()) : std::string();
+    };
+    auto alive = [&] { return session.Snapshot().state == ClientSessionState::Connected; };
+    const bool hostClip = wait_until([&] { return session.HostSupportsClipboard(); }, 10000);
+    check("[parkclip] the host on its station does clipboard sync (pong flag)", hostClip);
+    (void)session.TakeClipboardPushRequest();
+    stationSet(L"H0");
+    note("H0 set on the station; waiting for the session's baseline poll");
+    std::this_thread::sleep_for(std::chrono::seconds(4));  // the baseline poll adopts H0's generation
+    const bool sentP0 = queue("P0");
+    const bool gotP0 = wait_until([&] { return stationGet() == "P0"; }, 8000);
+    note("P0 queued=" + std::to_string(sentP0) + " on station=" + std::to_string(gotP0));
+    check("[parkclip] phone -> host: P0 arrives on the station clipboard", sentP0 && gotP0);
+    // the station's H0 (set after the session's baseline poll) is a real change too: drained first
+    note("drained before H1: '" + takeWithin(3000) + "'");
+    const bool setH1 = stationSet(L"H1");
+    const std::string gotH1 = takeWithin(10000);
+    note("H1 set=" + std::to_string(setH1) + " phone got '" + gotH1 + "'");
+    check("[parkclip] host -> phone: H1 arrives", setH1 && gotH1 == "H1", gotH1);
+    // A copy queued just before the park: delivered before the pause or not at all -- never after.
+    const bool q1 = queue("P1");
+    const bool begun = session.BeginPark();
+    const bool parkedOk = wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000);
+    note("P1 queued=" + std::to_string(q1) + " park begun=" + std::to_string(begun) + " parked=" + std::to_string(parkedOk));
+    check("[parkclip] park right after a queued copy", q1 && begun && parkedOk && alive());
+    const std::string atPark = stationGet();
+    note("pending P1 at the park: station clipboard is now '" + atPark + "'");
+    // While parked: both sides copy.
+    check("[parkclip] parked: a phone copy is refused", !queue("P2") && alive());
+    check("[parkclip] parked: the host copies H2", stationSet(L"H2"));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    const std::string phoneDuringPark = takeWithin(200);
+    const std::string stationDuringPark = stationGet();
+    note("during the park: phone got '" + phoneDuringPark + "', station holds '" + stationDuringPark + "'");
+    check("[parkclip] PARKED: NOTHING FROM THE HOST REACHES THE PHONE", phoneDuringPark.empty() && alive());
+    check("[parkclip] PARKED: NOTHING FROM THE PHONE REACHES THE HOST (the station holds H2, the host's own)",
+          stationDuringPark == "H2" && alive(), stationDuringPark);
+    // Resume with the phone's current text as the baseline (what the app seeds).
+    session.SeedClipboardBaseline(u16("P2"));
+    check("[parkclip] resume", session.ResumeFromPark() && alive());
+    std::this_thread::sleep_for(std::chrono::seconds(4));  // two polls at least
+    note("resumed, 4 s on");
+    check("[parkclip] RESUMED: THE HOST'S PARK-TIME COPY H2 IS NOT REPLAYED TO THE PHONE", takeWithin(500).empty());
+    check("[parkclip] RESUMED: THE PHONE'S PARK-TIME COPY P2 IS NOT PUSHED (its baseline)", !queue("P2") &&
+          stationGet() == "H2");
+    const bool setH3 = stationSet(L"H3");
+    const std::string gotH3 = takeWithin(10000);
+    check("[parkclip] after resume a new host copy H3 arrives", setH3 && gotH3 == "H3" && alive(), gotH3);
+    const bool sentP3 = queue("P3");
+    check("[parkclip] after resume a new phone copy P3 arrives", sentP3 &&
+          wait_until([&] { return stationGet() == "P3"; }, 8000) && alive());
+    note("after the new copies");
+    check("[parkclip] THE USER'S CLIPBOARD (WinSta0) DID NOT MOVE", GetClipboardSequenceNumber() == interactiveClipSeq0,
+          std::to_string(interactiveClipSeq0) + " -> " + std::to_string(GetClipboardSequenceNumber()));
+    connected = false;
+  }
+  if (connected && parkScenario) {
+    // ---------------------------------------------------------------- keepalive r1: park
+    const bool picture = wait_until([&] { return sink.frames() > 0; }, 20000);
+    check("frames reach the phone's sink", picture, std::to_string(sink.frames()) + " frames");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::ofstream parkLog(outDir.empty() ? std::wstring(L"park_timeline.txt") : outDir + L"park_timeline.txt");
+    auto note = [&](const std::string& line) {
+      say("PARK " + line);
+      parkLog << local_now_ms() << " " << line << "\n";
+      parkLog.flush();
+    };
+    std::vector<int64_t> resumeMs;
+    const int cycles = parkVariant == "main" ? 4 : 0;
+    for (int c = 0; c < cycles; ++c) {
+      const bool longPark = c == cycles - 1;
+      const int holdSec = longPark ? parkLongSec : 2;
+      // Something held: Ctrl and the left button, sent and answered before the park.
+      const bool q1 = session.QueueInputEvent(5, 0, 0, 0, 0x11, 0);
+      const bool q2 = session.QueueInputEvent(2, 320, 240, 0, 1, 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      note("cycle " + std::to_string(c) + " held ctrl+lbutton queued=" + std::to_string(q1 && q2));
+      const uint64_t framesBefore = sink.frames();
+      const int64_t t0 = local_now_ms();
+      const bool begun = session.BeginPark();
+      check("[park] BeginPark accepted (cycle " + std::to_string(c) + ")", begun);
+      check("[park] a second BeginPark while one runs is refused", !session.BeginPark());
+      const bool parkedOk = wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked ||
+                                                    session.ParkPhase() == ClientParkPhase::Failed; }, 3000) &&
+                            session.ParkPhase() == ClientParkPhase::Parked;
+      const int64_t confirmMs = local_now_ms() - t0;
+      check("[park] the pause is confirmed by the fence within 2 s (cycle " + std::to_string(c) + ")", parkedOk,
+            std::to_string(confirmMs) + " ms, released " + std::to_string(session.ParkReleasedCount()));
+      check("[park] input is refused while parked", !session.QueueInputEvent(5, 0, 0, 0, 0x41, 0));
+      check("[park] a stream request is refused while parked", !session.RequestStreamActive(true));
+      check("[park] a selection is refused while parked", !session.RequestWindowSelect(0));
+      note("cycle " + std::to_string(c) + " parked confirmMs=" + std::to_string(confirmMs) + " released=" +
+           std::to_string(session.ParkReleasedCount()));
+      // While parked: AUs reaching the sink and datagrams through the relay, second by second.
+      uint64_t framesTail = 0, framesSteady = 0, downSteady = 0, upSteady = 0;
+      uint64_t lastFrames = sink.frames(), lastDown = relay.downDatagrams.load(), lastUp = relay.upDatagrams.load();
+      for (int t = 1; t <= holdSec; ++t) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const uint64_t f = sink.frames(), d = relay.downDatagrams.load(), u = relay.upDatagrams.load();
+        if (t <= 2) framesTail += f - lastFrames;
+        if (t > 7) {  // after the host's 5 s capture detach and a margin
+          framesSteady += f - lastFrames;
+          downSteady += d - lastDown;
+          upSteady += u - lastUp;
+        }
+        if (longPark && (t <= 8 || t % 10 == 0)) {
+          note("parked t=" + std::to_string(t) + " frames+" + std::to_string(f - lastFrames) + " down+" +
+               std::to_string(d - lastDown) + " up+" + std::to_string(u - lastUp));
+        }
+        lastFrames = f;
+        lastDown = d;
+        lastUp = u;
+      }
+      note("cycle " + std::to_string(c) + " tail frames(first 2 s)=" + std::to_string(framesTail) +
+           " steady frames=" + std::to_string(framesSteady) + " steady down=" + std::to_string(downSteady) +
+           " up=" + std::to_string(upSteady) + " over " + std::to_string(holdSec > 7 ? holdSec - 7 : 0) + " s");
+      if (longPark) {
+        check("[park] stable park: no AU at all after the capture detach", framesSteady == 0,
+              std::to_string(framesSteady) + " AUs");
+        const double perSec = holdSec > 7 ? static_cast<double>(downSteady + upSteady) / (holdSec - 7) : 0.0;
+        check("[park] stable park: only control keepalive crosses (<= 8 datagrams/s both ways)", perSec <= 8.0,
+              std::to_string(perSec) + " /s");
+        check("[park] the session is still connected after the long park",
+              session.Snapshot().state == ClientSessionState::Connected);
+      }
+      // Resume, then the stream: the first frame after it.
+      const bool resumed = session.ResumeFromPark();
+      check("[park] ResumeFromPark from Parked (cycle " + std::to_string(c) + ")", resumed);
+      check("[park] a second resume is refused", !session.ResumeFromPark());
+      const uint64_t framesAtResume = sink.frames();
+      const int64_t r0 = local_now_ms();
+      const bool streamOk = session.RequestStreamActive(true);
+      const bool frameBack = wait_until([&] { return sink.frames() > framesAtResume; }, 5000);
+      const int64_t rMs = local_now_ms() - r0;
+      check("[park] after resume the picture comes back (cycle " + std::to_string(c) + ")", streamOk && frameBack,
+            std::to_string(rMs) + " ms");
+      if (frameBack) resumeMs.push_back(rMs);
+      note("cycle " + std::to_string(c) + " resumed firstFrameMs=" + std::to_string(rMs) + " framesBeforePark=" +
+           std::to_string(framesBefore));
+      // Input works again; let go of what is held so the next cycle starts clean.
+      check("[park] input is taken again after resume", session.QueueInputEvent(1, 330, 250, 0, 0, 0));
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    if (parkVariant == "main") {
+      // ---- r2 K1: a down IN FLIGHT when the park begins. The relay holds every host->client datagram
+      // 250 ms (Impair::Delay), so the down's InputAck is still on its way when BeginPark runs.
+      relay.mode.store(static_cast<int>(Impair::Delay));
+      int raceParked = 0;
+      for (int r = 0; r < 6; ++r) {
+        const bool q = session.QueueInputEvent(5, 0, 0, 0, 0x10, 0);  // Shift down
+        std::this_thread::sleep_for(std::chrono::milliseconds(20 + 15 * r));  // dequeued, sent, not answered
+        const bool begun = session.BeginPark();
+        const bool ok = wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked ||
+                                                session.ParkPhase() == ClientParkPhase::Failed ||
+                                                session.Snapshot().state != ClientSessionState::Connected; }, 3000) &&
+                        session.ParkPhase() == ClientParkPhase::Parked;
+        raceParked += ok ? 1 : 0;
+        note("race " + std::to_string(r) + " queued=" + std::to_string(q) + " begun=" + std::to_string(begun) +
+             " parked=" + std::to_string(ok) + " released=" + std::to_string(session.ParkReleasedCount()));
+        session.ResumeFromPark();
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+      }
+      relay.mode.store(static_cast<int>(Impair::None));
+      check("[park r2 K1] a park begun while a down is in flight is confirmed (6 tries)", raceParked == 6,
+            std::to_string(raceParked) + " of 6");
+      // ---- r2 K1: requests already waiting when the park begins are not sent (list, tune, backend).
+      const uint32_t droppedBefore = session.ParkDroppedActionCount();
+      relay.mode.store(static_cast<int>(Impair::Delay));  // keep them waiting behind the in-flight input
+      session.QueueInputEvent(5, 0, 0, 0, 0x12, 0);  // Alt down, in flight
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      const bool reqList = session.RequestWindowList();
+      const bool reqTune = session.RequestRuntimeConfig(2000000, 30);
+      const bool reqBackend = session.RequestDesktopCaptureBackend(2);
+      const bool begunP = session.BeginPark();
+      check("[park r2 K1] the waiting requests were accepted before the park",
+            reqList && reqTune && reqBackend && begunP);
+      const bool parkedP = wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000);
+      relay.mode.store(static_cast<int>(Impair::None));
+      check("[park r2 K1] ...the park is confirmed", parkedP);
+      check("[park r2 K1] after BeginPark a list / tune / backend request is refused",
+            !session.RequestWindowList() && !session.RequestRuntimeConfig(2500000, 30) &&
+                !session.RequestDesktopCaptureBackend(1));
+      note("pending-requests park: dropped unsent actions " +
+           std::to_string(session.ParkDroppedActionCount() - droppedBefore) + " (as many as were still waiting)");
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      session.ResumeFromPark();
+      session.RequestStreamActive(true);
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      // ---- r3 R1: the loop has read "parking" at its pass boundary and is stopped right there (the test
+      // hook); the app resumes and asks for the list meanwhile -- the request of the resumed session must
+      // go out, not be dropped by the park the loop read before.
+      {
+        const bool parkedR1 = session.BeginPark() &&
+                              wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000);
+        check("[park r3 R1] parked", parkedR1);
+        const uint32_t droppedR1 = session.ParkDroppedActionCount();
+        std::atomic<int> stage{0};  // 0 armed, 1 the loop is stopped in the hook, 2 released
+        bool resumedR1 = false, listR1 = false;
+        session.SetTestPassBoundaryHook([&](bool parking) {
+          int armed = 0;
+          if (!parking || !stage.compare_exchange_strong(armed, 1)) return;
+          resumedR1 = session.ResumeFromPark();   // the app, between the loop's read and its next action
+          if (resumedR1) clientResumeMs.push_back(local_now_ms());
+          listR1 = session.RequestWindowList();
+          stage.store(2);
+        });
+        const bool hooked = wait_until([&] { return stage.load() == 2; }, 3000);
+        session.SetTestPassBoundaryHook(nullptr);
+        note("R1: hooked=" + std::to_string(hooked) + " resumed=" + std::to_string(resumedR1) +
+             " list queued=" + std::to_string(listR1));
+        check("[park r3 R1] the loop stopped after reading the park; the resume and a list request went in there",
+              hooked && resumedR1 && listR1);
+        const bool answered = wait_until([&] {
+          return session.WindowPanelSnapshotCopy().status.rfind("window_list_received", 0) == 0;
+        }, 4000);
+        const uint32_t droppedNow = session.ParkDroppedActionCount();
+        note("R1: list answered=" + std::to_string(answered) + " dropped " + std::to_string(droppedNow - droppedR1) +
+             " status=" + session.WindowPanelSnapshotCopy().status);
+        check("[park r3 R1] THE RESUMED SESSION'S LIST REQUEST IS SENT AND ANSWERED (not dropped by the old park)",
+              answered && droppedNow == droppedR1,
+              "dropped " + std::to_string(droppedNow - droppedR1) + ", " + session.WindowPanelSnapshotCopy().status);
+        session.RequestStreamActive(true);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
+      // ---- r2 §7: another client takes the host while this one is parked (direct to the host's port).
+      check("[park r2 replace] parked before the other client comes", session.BeginPark() &&
+            wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000));
+      PhoneSink sinkB(dutyOn, dutyOff, false);
+      ClientSessionController sessionB;
+      ClientSessionConnectArgs argsB = args;
+      argsB.videoPort = hostPort;
+      argsB.controlPort = hostPort;
+      argsB.encodedFrameSink = &sinkB;
+      const uint64_t genA = session.ConnectionGeneration();
+      const uint64_t connectsA = session.ConnectCount(), hellosA = session.UdpHelloCount();
+      const bool bConnected = sessionB.Connect(argsB) &&
+                              wait_until([&] { return sessionB.Snapshot().state == ClientSessionState::Connected; }, 15000);
+      check("[park r2 replace] the other client connects (direct)", bConnected,
+            sessionB.Snapshot().status + " / " + sessionB.Snapshot().lastError);
+      const bool bPicture = bConnected && wait_until([&] { return sinkB.frames() > 0; }, 10000);
+      check("[park r2 replace] the other client gets the picture (the host took it)", bPicture,
+            std::to_string(sinkB.frames()) + " frames");
+      const bool aEnded = wait_until([&] { return session.Snapshot().state != ClientSessionState::Connected; }, 20000);
+      check("[park r2 replace] the parked client's session ends (it was replaced)", aEnded,
+            session.Snapshot().status + " / " + session.Snapshot().lastError);
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      check("[park r2 replace] NO AUTOMATIC TAKE-BACK: the parked client made no new connect / Hello",
+            session.ConnectCount() == connectsA && session.UdpHelloCount() == hellosA && session.ConnectionGeneration() == genA,
+            "connects " + std::to_string(session.ConnectCount()) + " hellos " + std::to_string(session.UdpHelloCount()));
+      check("[park r2 replace] the other client is still connected and receiving",
+            sessionB.Snapshot().state == ClientSessionState::Connected && sinkB.frames() > 0);
+      sessionB.Disconnect();
+    }
+    if (parkVariant == "fail") {
+      // ---- r2 K3: the park cannot be confirmed (nothing reaches the host any more) and no UI watches:
+      // the session must end by itself, and not turn into a park.
+      relay.mode.store(static_cast<int>(Impair::Uplink));
+      const int64_t f0 = local_now_ms();
+      check("[park r2 K3 fail] BeginPark", session.BeginPark());
+      const bool ended = wait_until([&] { return session.Snapshot().state != ClientSessionState::Connected; }, 6000);
+      const int64_t fMs = local_now_ms() - f0;
+      check("[park r2 K3 fail] AN UNCONFIRMED PARK ENDS THE SESSION BY ITSELF (no UI tick)", ended,
+            std::to_string(fMs) + " ms, " + session.Snapshot().lastError);
+      check("[park r2 K3 fail] ...it never became a park", session.ParkPhase() != ClientParkPhase::Parked);
+      note("fail: ended after " + std::to_string(fMs) + " ms: " + session.Snapshot().lastError);
+      relay.mode.store(static_cast<int>(Impair::None));
+    }
+    if (parkVariant == "expire") {
+      // ---- r2 K3: parked and left alone -- the native 300 s limit ends the session itself.
+      const int64_t e0 = local_now_ms();
+      check("[park r2 K3 expire] parked", session.BeginPark() &&
+            wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000));
+      const bool alive299 = !wait_until([&] { return session.Snapshot().state != ClientSessionState::Connected; },
+                                        299000 - 50);
+      const bool ended = wait_until([&] { return session.Snapshot().state != ClientSessionState::Connected; }, 8000);
+      const int64_t eMs = local_now_ms() - e0;
+      check("[park r2 K3 expire] still parked just before 300 s", alive299);
+      check("[park r2 K3 expire] THE PARK ENDS BY ITSELF AT 300 s (no UI tick)", ended,
+            std::to_string(eMs) + " ms, " + session.Snapshot().lastError);
+      check("[park r2 K3 expire] ...and resume after it is refused", !session.ResumeFromPark());
+      note("expire: ended after " + std::to_string(eMs) + " ms: " + session.Snapshot().lastError);
+    }
+    std::sort(resumeMs.begin(), resumeMs.end());
+    note("resume first-frame ms sorted: " + [&] {
+      std::string out;
+      for (int64_t v : resumeMs) out += std::to_string(v) + " ";
+      return out;
+    }());
+    connected = false;  // the ordinary scenario body below is not this one's
+  }
   if (connected) {
     const bool picture = wait_until([&] { return sink.frames() > 0; }, 20000);
     check("frames reach the phone's sink", picture, std::to_string(sink.frames()) + " frames");
@@ -824,10 +1356,107 @@ int wmain(int argc, wchar_t** argv) {
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
   CloseHandle(job);
-  if (launched) {
+  if (launched && !parkClip) {
     std::string captureLine;
     const bool own = e2e_host_captured_window(hostLogPath, target.hwnd(), &captureLine);
     check("the host captured the window this test paints (its hwnd, this pid)", own, captureLine);
+  }
+  if (launched) {
+    // keepalive r3 R3: never a screen, in any scenario
+    std::ifstream hl(hostLogPath);
+    const std::string all((std::istreambuf_iterator<char>(hl)), std::istreambuf_iterator<char>());
+    check("the host never fell back to a screen (no fallback=monitor, no process=monitor)",
+          all.find("fallback=monitor") == std::string::npos && all.find("process=monitor") == std::string::npos);
+    if (parkClip) {
+      const std::string want = "[pinned-select-test] pinned hwnd=";
+      const size_t at = all.find(want);
+      const std::string pinLine = at == std::string::npos ? std::string() : all.substr(at, all.find('\n', at) - at);
+      check("[parkclip] the pinned test host pinned the station fixture (its pid)",
+            at != std::string::npos && pinLine.find(" pid=" + std::to_string(stationFixturePid)) != std::string::npos,
+            pinLine);
+      check("[parkclip] ...on the private station's desktop, not WinSta0",
+            pinLine.find("station=WinSta0") == std::string::npos && pinLine.find("desktop=Default") != std::string::npos,
+            pinLine);
+      check("[parkclip] THE HOST STARTED NO CAPTURE (no-capture mode; no item, no backend start, no frame)",
+            all.find("no-capture: no capture is started") != std::string::npos &&
+                all.find("capture-started=1") == std::string::npos && all.find("capture item source=") == std::string::npos &&
+                all.find("desktop_backend=") == std::string::npos && all.find("first-callback") == std::string::npos);
+    }
+  }
+  if (parkScenario && !parkClip && launched) {
+    // keepalive r1: the host's own record, in its order. At every pause nothing this client pressed may
+    // still be down (the releases came first), nothing arrives as input while paused, and the capture
+    // detaches during the long park.
+    std::ifstream hl(hostLogPath);
+    std::string line;
+    std::set<std::string> held;
+    int pauses = 0, pausesWithHeld = 0, inputWhilePaused = 0, detaches = 0, resumes = 0, requestsWhilePaused = 0;
+    bool paused = false;
+    int64_t pausedAtMs = -1;
+    std::string firstBad;
+    while (std::getline(hl, line)) {
+      if (paused) {
+        // r3 R1: this client resumed since the pause (before any stream-state true): from here on its
+        // requests belong to the resumed session.
+        const int64_t at = host_line_ms(line);
+        for (const int64_t rm : clientResumeMs) {
+          if (at >= 0 && rm > pausedAtMs && rm <= at) paused = false;
+        }
+      }
+      if (line.find("[native-video-host][input] blocked ") != std::string::npos ||
+          line.find("[native-video-host][input] injected ") != std::string::npos) {
+        if (paused) {
+          ++inputWhilePaused;
+          if (firstBad.empty()) firstBad = line;
+        }
+        const size_t k = line.find(" key="), kd = line.find(" kind=");
+        if (k != std::string::npos && kd != std::string::npos) {
+          const std::string key = line.substr(k + 5, line.find(' ', k + 5) - (k + 5));
+          const int kind = std::atoi(line.c_str() + kd + 6);
+          if (kind == 5 || kind == 2) held.insert(std::to_string(kind == 2 ? 1000 : 0) + ":" + key);
+          if (kind == 6) held.erase("0:" + key);
+          if (kind == 3) held.erase("1000:" + key);
+        }
+      } else if (line.find("[control] stream-state ") != std::string::npos && line.find(" active=0") != std::string::npos) {
+        ++pauses;
+        if (!held.empty()) {
+          ++pausesWithHeld;
+          if (firstBad.empty()) firstBad = "held at pause: " + *held.begin();
+        }
+        paused = true;
+        pausedAtMs = host_line_ms(line);
+      } else if (line.find("[control] stream-state ") != std::string::npos && line.find(" active=1") != std::string::npos) {
+        paused = false;
+        ++resumes;
+      } else if (line.find("capture detached (idle)") != std::string::npos) {
+        ++detaches;
+      } else if (line.find("stream restored for new session") != std::string::npos) {
+        paused = false;  // another client's session (the replacement) -- its own requests are not this one's
+      } else if (paused && (line.find("[control] window-list") != std::string::npos ||
+                            line.find("runtime-config") != std::string::npos ||
+                            line.find("desktop-backend-request") != std::string::npos ||
+                            line.find("window-select") != std::string::npos)) {
+        ++requestsWhilePaused;
+        if (firstBad.empty()) firstBad = line;
+      }
+    }
+    // r2 K1: nothing but release / pause / Ping crossed while paused -- no list, no tune, no backend.
+    if (parkVariant != "fail") {  // fail: nothing reaches the host after BeginPark, by design
+      check("[park/host] the host saw a pause for every park", pauses >= (parkVariant == "main" ? 4 : 1),
+            std::to_string(pauses) + " pauses");
+    }
+    check("[park/host] AT EVERY PAUSE NOTHING THIS CLIENT PRESSED WAS STILL DOWN (releases first)", pausesWithHeld == 0,
+          std::to_string(pausesWithHeld) + " " + firstBad);
+    check("[park/host] no input reached the host while paused", inputWhilePaused == 0,
+          std::to_string(inputWhilePaused) + " " + firstBad);
+    if (parkVariant != "fail") {
+      check("[park/host] the capture detached during the long park", detaches >= 1, std::to_string(detaches));
+    }
+    if (parkVariant == "main") {
+      check("[park/host] every park was resumed by the client", resumes >= 4, std::to_string(resumes));
+      check("[park/host] r2 K1: NO LIST / TUNE / BACKEND / SELECT REACHED THE HOST WHILE PAUSED", requestsWhilePaused == 0,
+            std::to_string(requestsWhilePaused) + " " + firstBad);
+    }
   }
   target.Stop();
 

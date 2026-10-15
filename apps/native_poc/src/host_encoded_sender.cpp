@@ -24,6 +24,7 @@
 #include "host_main_loop_mailbox.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_net_io.hpp"
+#include "host_pinned_select_seam.hpp"
 #include "host_session.hpp"
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
@@ -388,6 +389,14 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         sender.txNoPeer.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+      if (item.keyFrame && pinned_select_seam_take_key_drop()) {  // keepalive r3: lost for good (not cached)
+        sender.ClearKeyQueuedIfSeq(item.udpHdr.streamGeneration, item.udpHdr.seq);
+        std::cout << "[pinned-select-test] fault: key frame gen=" << item.udpHdr.streamGeneration
+                  << " seq=" << item.udpHdr.seq << " dropped\n";
+        continue;
+      }
+#endif
       const uint64_t frameIntervalUs =
           std::clamp<uint64_t>(item.frameIntervalUs, 8333ULL, 200000ULL);
       const uint64_t nowUs = qpc_now_us();

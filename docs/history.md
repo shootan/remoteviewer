@@ -13085,3 +13085,136 @@ Next
 - 판정: **배포 완료(마일스톤) · 휴대폰 실기 대기.** 사용자 행동: 폰 0.2.29 업데이트 → 1~2 분 접속 → 검증용이 그 구간 NAS host.log `[abr]`(stale_active 없음·clientDecodeValid=1) 와 보고 간격 확인.
 - 미검증·경계: 실기기 MediaCodec·SurfaceView, host 의 다른 거절 사유·실 UI, 지연/손실 미측정, 구 APK 는 업데이트 전까지 증상 잔존. 후속: keepalive(task t-rlxt1nhp, feat/keepalive).
 - 제품/테스트/문서: 문서(이 항목·작업목록 MA 줄).
+
+### 2026-10-15 keepalive r1 — 모바일: PC 목록으로 나갔다 같은 PC 재진입 시 연결 재사용 (Codex `codex_keepalive_r1.md`)
+
+- 목표: "PC 목록"(park)과 "연결 해제"(실제 disconnect)를 나눈다. directory 세션 하나를 최대 5분 park 하고, 같은 PC 를 다시 고르면 directory·observe·punch·Hello 없이 같은 연결의 TARGETS 로 돌아간다. 현장 재진입 비용은 약 3.3 s 였다.
+- 제품(`6273b34`):
+  - native `client_park_state.hpp`: `ClientHeldInput` 은 보낸 down 중 up 이 안 나간 키·버튼·물리키를 기록한다. `ClientParkFence` 는 release 가 소진된 뒤 pause 를 보내고, 그 뒤 Ping 의 Pong 으로 확정한다(2 s 예산, 상한 초과 시 Expired).
+  - `ClientSessionController` 의 BeginPark / ResumeFromPark / EndPark / ParkPhase: park 중 입력·텍스트·클립보드·미리보기·목록·선택·stream 요청을 차단한다. 미송신 입력은 폐기하고 release 는 유지한다. 복귀 시 클립보드 baseline 을 다시 세운다(`OnResumed` + `SeedClipboardBaseline`). connection generation 과 connect / Hello 카운터를 둔다.
+  - 앱 `SessionPark.kt`(순수): 재사용 키 = account + directory origin + hostId + generation, 목록 진입부터 5분 hard deadline, 탭 결과 Reuse / Wait / Discard, 종료 사유.
+  - MainActivity: Targets 와 viewer 메뉴에 "PC 목록", 목록에 카드 "연결 유지 중"과 배너(남은 시간, "연결 끊기"). 종료 조건: 다른 PC, 연결 해제, sign-out, onStop, 종료, host 목록 이탈, 네트워크 변경·소실, peer lost, generation 변경, 만료. sign-out 뒤 늦게 온 connect 응답은 채택하지 않는다.
+  - Host·와이어·keepalive 주기·서버 TTL·"연결 해제" 버튼은 바꾸지 않았다.
+- 시험(`9bb6c2d`, `4c03774`):
+  - `client_park_state_test` 23/0(부정 대조 포함), `SessionParkTest`.
+  - 시험 빌드 host `GNLinkStreamPinnedSelectTest`(`REMOTE60_PINNED_SELECT_TEST_SEAM`): 고정한 시험 창만 선택 가능으로 나열하고, 선택 응답 뒤 IDR 을 요청한다. 출하 GNLinkStream.exe 의 seam 문자열 grep 결과는 0 이다.
+  - harness `--scenario park` / `directoryhost` 추가.
+  - 첫 AVD 실행에서 seam 이 런타임 잠금 플래그에 의존해 목록이 창 13개로 나왔다. 사용자 창 제목이 AVD 로 갔을 수 있어 즉시 중단했고, 스크린샷을 삭제하고 앱 데이터를 지운 뒤 인수 기반으로 고쳤다. UI 스크립트는 1개가 아닌 목록이면 바로 중단한다.
+- 실 APK UI(격리 AVD gnlink_kbd_test, 로컬 fixture directory + relay 10.0.2.2, 시험 계정, pinned 시험 host, 2026-10-15 11:48~12:19 측정 슬롯, 겹침 확인):
+  - 48/0.
+  - 새 연결 HOSTS→TARGETS 3.8~4.8 s(7회), 재사용 19~26 ms(7회). 재사용 동안 connects / hellos / observes / punches 증가 0, generation 동일, 서버 connect / helloAck 증가 0(10 = 새 연결 10).
+  - 선택→첫 프레임: 새 연결 뒤 p95 600 ms(6회), 재사용 뒤 p95 791 ms(7회). park 확정 4~240 ms.
+  - park 시간 대역: 8.4~9.3 s ×5 / 14 s / 71 s(capture detach 뒤). 71 s 동안 host 의 encoded / sent 는 0, capture detach 는 inactive 5 s 뒤였다.
+  - 반례: 다른 PC(other_host 폐기), 배너 "연결 끊기", onStop(app_stopped), 회전(유지), 이중 탭(재사용 1회), 비행기 모드(network_lost), sign-out, 5분 만료(300006 ms expired) 뒤 일반 연결.
+  - host ABR 은 내내 high(강등 0).
+- native park(격리 host, relay): 56/0.
+  - fence 20~21 ms, 키 Ctrl 과 마우스 왼쪽 2개 해제.
+  - host 로그: pause 시점에 눌린 키·버튼 0, park 중 수신 입력 0, capture detach 확인.
+  - 65 s park 동안 AU 0, 제어 datagram 7.9/s(양방향 합). 복귀 첫 프레임 41 ms.
+- 회귀: core e2e sparse·reconnect·decodestall·recovery 4/4 exit 0. 단위 park 23/0·shared_core·telemetry·decode_stats·snapshot PASS. Android 184/0, assembleDebug / Release 4 ABI.
+- 미검증: 실기기 폰 1회. 다른 기기 접속 대체 시 자동 재탈취 0(두 번째 client 시험 미실시). APK UI 의 5 s 미만 park(native 2 s 만 측정). 실제 host 클립보드 경로(fixture host 는 클립보드 off, 단위·코드 경로만). late callback(코드 가드만). 배터리 / CPU.
+- 관찰(ledger): pinned 시험 host 에서 generation 이 같은 선택 응답보다 stream-active IDR 이 먼저 오면, client 의 owed-key 재요청이 보이지 않고 다음 GOP(10 s)를 기다렸다. 실제 host 는 전환 뒤 IDR 을 보내 같은 조건이 생기지 않는 것으로 보이나 별도 확인이 필요하다.
+
+### 2026-10-15 keepalive r2 — Codex K1~K6 (`codex_keepalive_d4b3068.md`)
+
+- 제품(`f0b64cb`, `4434a00`):
+  - K1: park 진입은 표시만 하고, 수거·release·미송신 요청 취소는 control loop 의 pass 경계에서 한다(송신 중이던 down 은 응답·기록 뒤). pause 는 queue 가 비고 held 가 0 일 때만 보낸다. park 중에는 Ping·StreamState·입력(release)·metrics 만 송신하고 나머지는 송신하지 않고 폐기한다. 입력·텍스트·tune·backend 는 park mutex 안에서 검사와 enqueue 를 함께 한다.
+  - K3: 상한 300 s. Failed·Expired 는 control loop 와 video thread watchdog(≤ 100 ms) 양쪽에서 세션을 끝낸다. 예산 뒤 Pong 은 무효이고, Resume 직전에 deadline 을 다시 확인한다.
+  - K5: window-list thumbnail 비트(45dbbb2, 2026-07-27)를 광고한 host 에서만 park 한다. pause 처리는 90f718c(2026-04-07)부터 있었다. 그 외 host 에서는 "PC 목록"을 숨긴다.
+  - K2: 401 에서 park 를 종료하고, park tick 마다 신원을 비교한다. connect 소유자(ConnectOwner): 무효화된 연결은 observe 전·native 연결 전에 멈추고, 자기 연결만 닫는다.
+  - K4: 확인 중 탭을 1회 보류한다. 확정되면 재사용, 스스로 실패하면 일반 연결 1회.
+  - 클립보드: baseline 을 읽지 못한 복귀에서는 실제 클립보드 변경까지 push 를 보류한다.
+- 시험(`7aab5e8`, `a90877c`, `670b59c`):
+  - 시험 host fail-closed: 인수가 없거나 프로세스를 열 수 없으면 exit 64. 목록·선택·썸네일·모니터는 고정 창만 허용한다. 공유 가능 판정은 그 HWND 만 시험 빌드에서 허용하고, 선택은 제품 트랜잭션 그대로다(r1 의 Applied 우회·추가 IDR 은 제거). 구 host 흉내(`REMOTE60_PINNED_TEST_OLD_HOST=1`)를 두었다. 출하 exe 의 seam 문자열 grep 은 0 이다.
+  - harness: park main/fail/expire, parkclip(private window station).
+  - 단위: park 33/0(d4b3068 순서 전사 부정 대조가 실제로 실패함), Android 188/0.
+- 실행(2026-10-15 13:34~14:24 슬롯, SLOT_REQUEST.txt·작업용1 정지 조율):
+  - native park main 67/0: 송신 중 down 경합 6/6 확정(실제 in-flight 1회), 대기 중 list/tune/backend 2건은 송신하지 않고 폐기, 다른 client 직접 대체 시 parked 세션 종료·재연결 0.
+  - fail: 2021 ms 에 스스로 종료. expire: 300026 ms 에 스스로 종료.
+  - parkclip 21/0: park 중 양방향 0, 복귀 재생 0, 새 복사 양방향 정상, 사용자 WinSta0 클립보드 sequence 불변.
+  - 회귀: sparse·reconnect·decodestall·recovery 4/4.
+  - AVD 실 APK UI v2 33/0 + 보강 12/0 + r1 묶음 43/0:
+    - 짧은 park 1.5 s·3 s(capture detach 전)·7 s(후) 각 3회 재사용
+    - 제품 selection 경로 첫 프레임: 재사용 n=22 p50 388 ms, p95 777 ms, 최대 958 ms / 새 연결 n=7 최대 593 ms
+    - 확인 중 즉시 탭 11회 모두 두 번째 탭 없이 TARGETS 도달. 다만 Targets 에서의 park 확정이 4~20 ms 로 빨라 보류 경로 자체는 UI 에서 0/11 이다(단위로만).
+    - 401(장치 철회) → session_refused 종료·재로그인 시 새 연결
+    - 지연 connect 응답(6 s)+sign-out → stale 은 native 연결 전에 멈춤·카운터 증가 0·새 연결 무손상
+    - 구 host(katest2) → "PC 목록" 미노출, host 는 stream-state 를 3회 무시했다
+    - host ABR 은 내내 high
+- 슬롯 중 발견하고 같은 슬롯에서 보수: K3 watchdog(첫 fail 실행에서 6 s 뒤에도 생존), 시험 창 shareable 거절(첫 AVD 선택 실패).
+- 미검증: 실기 폰. relay 경로의 다른 기기 대체(direct 만 시험). K4 보류 경로의 UI 증거. 배터리·CPU·바이트.
+
+### 2026-10-15 keepalive r3 — Codex R1~R3 (`codex_keepalive_2abb8be.md`)
+
+- R3 [안전] 시험 host 의 fail-open:
+  - 사고: 2abb8be 시험 host 는 pid 가 열리는지만 봤다. 유효한 pid 에 틀린 제목이면 시작했고, 시작 단계에서 `fallback=monitor`(화면)로 갔다.
+  - r2 parkclip 은 격리 station 에서 제품 host 를 띄웠다. 격리 station 의 창은 `IsWindowVisible=0` 이라 제품의 창 찾기가 실패했고, 화면 capture 로 떨어졌다.
+    - 작업용 run 두 번: encode 0 · 송신 0.
+    - 검증용 run: 1920x1080 key frame 1장(51570 B)이 loopback 의 harness 로 인코딩·송신됐다. 파일로 저장된 것은 없다.
+  - 보수(`26f5e6d`, `122c5b0`, 모두 `#ifdef` 시험 build 전용):
+    - 시작할 때 그 pid·그 제목의 창을 실제로 찾는다(5 s). 고정은 한 번뿐이다.
+    - capture 시작 지점 전부(시작 item·재시작 WGC/DXGI/GDI·선택·rebind·썸네일)를 하나의 관문이 지킨다. 고정 HWND·같은 프로세스·같은 제목이 아니면 host 가 종료한다(65). 화면 fallback 은 없다.
+    - 창이 파괴·개명·재생성되거나 프로세스가 끝나면 감시 스레드가 host 를 종료한다.
+    - parkclip host 는 no-capture 모드다. 격리 station 의 fixture 에 고정되고, capture 를 아예 시작하지 않으며 control 만 서비스한다.
+  - 확인:
+    - `pinned_seam_boundary_test` 51/0. 격리 station 에서 probe 가 첫 capture 호출에서 capture 객체 생성 전에 끊는다. 부정 대조(2abb8be 판정 복원)는 실제로 screen 으로 갔다.
+    - parkclip 재실행 26/0: capture 0, WinSta0 클립보드 불변.
+- R1 (`fdd9c20`):
+  - 문제: control loop 가 pass 경계에서 읽은 `parking` 을 잠금 밖에서 다음 action 에 적용했다. 그 사이에 들어온 resume 과 새 목록 요청이 끝난 park 의 판정으로 버려졌다.
+  - 보수: NextAction 과 park 판정을 parkMu_ 안에서 함께 한다. resume 의 inhibit 해제도 그 잠금 안에서 한다. 목록·모니터 목록·선택·stream·클립보드 요청은 검사와 enqueue 를 한 단계로 묶었다. park 중 StreamState 는 false 만 허용한다.
+  - 반례(시험 고리로 loop 를 park 판정 직후에 멈춤): 수정 전 dropped 1·무응답(FAIL) → 수정 후 전송·응답(PASS).
+- R2 (`4b77feb`, `0a7e52d`):
+  - native 연결을 앱의 현재 operation 에 묶었다(ConnectOwner → nativeSetConnectOwner).
+    - observe·punch 전후에 확인한다. 소유자가 바뀌면 진행 중인 punch·observe 도 멈춘다.
+    - Connect 는 ConnectOpGate::Adopt 안에서만 한다(직렬화). 도중에 stale 이 되면 끊고 0 을 반환한다.
+    - 반환값은 그 호출이 만든 generation 이다.
+  - onStop·종료도 owner 를 무효화한다.
+  - 보류 탭 fallback 은 예약 시점의 owner·계정·디렉터리·foreground·목록 유지가 모두 그대로일 때만 실행한다.
+  - `connect_op_gate_test` 9/0(2abb8be 흐름 부정 대조 포함), Android 190/0.
+- 시험 host 장애 주입(`0a7e52d`, fault 파일): 일시정지 중 Pong 지연, select ACK 지연, 선택 뒤 key frame N장 유실(NACK 캐시 제외).
+- 실행(2026-10-15 15:36~16:19 슬롯, SLOT_REQUEST.txt, console 세션, 모두 fail-closed 시험 host):
+  - native: park_main 71/0, park_fail 14/0, sparse·reconnect PASS.
+  - AVD 실 APK UI r3 57/59:
+    - 확인 중 탭 보류 → 재사용 3/3(확인 1.3~1.8 s)
+    - 보류 → 확인 실패 → 일반 연결 정확히 1회 2/2
+    - 보류 → HOME → 연결 0
+    - ACK 400 ms 지연 → 첫 프레임 573·637·610 ms, 새 연결 695 ms
+    - key frame 2장 유실 → 511·550·404 ms
+    - relay 경로 B 대체 → parked 종료·자동 재탈취 0
+  - FAIL 2 = 로그아웃 경우. 탭이 늦게 닿아(2.8 s) park 가 먼저 실패했고, fallback 연결이 시작된 뒤 로그아웃이 그 연결을 native 연결 전에 멈췄다(stale, 카운터 불변).
+  - 그 경우를 탭 좌표를 미리 정해 다시 시험했다: 확인 중 로그아웃 2회 16/16(sign_out 종료·fallback 0·observe/punch/Hello 0).
+  - 기존 묶음: ui_run2 60/0, r1 묶음 43/0.
+- 미검증: 실기 폰. R2-b 의 "fallback 예약 후 실행 전" 취소는 UI 에서 만들 수 없어 단위로만 확인했다. 배터리·CPU·바이트.
+
+### 2026-10-15 keepalive r4 — R2 소유권 S1/S2 (`codex_keepalive_70dd162.md`)
+
+- 제품(`eaf784f`):
+  - S1 늦은 정리:
+    - 바뀐 것: stale 연결의 늦은 UI 콜백이 generation 을 읽어 Kotlin 에서 비교한 뒤, 무조건 `nativeDisconnect` 를 부르던 두 단계를 `nativeCloseIfOwn` 하나로 바꿨다.
+    - 동작: Adopt 와 같은 잠금 안에서, 그 op 가 채택한 generation 이 지금도 실행 중일 때만 닫는다. UI 스레드 밖에서 실행한다.
+    - 수동 IP 연결도 op 를 받아 같은 gate 를 지난다.
+    - gate 를 우회하던 미사용 `nativeDirectoryConnect` 는 제거했다.
+  - S2 재생성·취소 수명:
+    - op 번호는 native gate 가 프로세스 전체에서 발급한다(`nativeConnectOpNext`). 새 Activity 가 옛 op 를 되살리지 못한다.
+    - observe/punch 는 gate 의 step 이다. 한 번에 하나만, 현재 op 일 때만 돈다.
+      - stop 플래그는 현재성 확인과 같은 잠금 안에서 등록되고, 새 번호가 나오면 그 잠금 안에서 설정된다. stale step 이 취소를 지우지 못한다.
+      - rendezvous socket 은 그것으로 observe 한 op 의 것이다.
+    - `ConnectIntents`: onStop 이 예약된 fallback 을 영구 무효화한다. onStart 뒤에도 부활하지 않는다.
+- 시험:
+  - `connect_op_gate_test` 24/0, 20회 반복 실패 0.
+    - 시험 hook 은 `REMOTE60_CONNECT_GATE_TEST_HOOKS`, 시험 target 에만 들어간다.
+    - 결정적 경계: compare 와 close 사이 B 의 채택, directory 와 수동 연결, 재생성 번호, step 시작 시 취소, step 중 취소, socket 소유.
+    - 각 경계에 r3 흐름 부정 대조를 두었고 모두 FAIL 이 재현됐다.
+  - SessionParkTest(재생성 번호·stop→start fallback) 포함 Android 191/0. park 34/0, shared_core PASS.
+  - build gate: 4 ABI .so 의 hook 문자열 0(시험 exe 양성 대조 1), 새 JNI 있음, 옛 JNI 없음.
+- AVD(16:47~17:03 슬롯, fixture4 APK, fail-closed 시험 host):
+  - ui_run2 60/0: 로그아웃 뒤 늦은 연결 응답 → native 연결 전 stale, 새 연결 무손상, 401.
+  - ui_signout 15/16: 확인 중 로그아웃 2회 모두 sign_out, fallback 0, 연결 0.
+  - FAIL 1 = 새로 부팅한 AVD 의 첫 선택에서 decoder 가 in=15 out=0 으로 25 s 동안 출력하지 않았다.
+    - 연결과 select ACK 는 정상이었고, 같은 연결의 다음 선택은 724 ms 였다.
+    - r2 에도 같은 증상이 1회 있었다(ka_r2/ui2 13:49:59). 소유권 변경 범위 밖의 별건으로 기록한다.
+- 미검증:
+  - 실기 폰.
+  - 수동 IP 연결의 UI 실행(단위 gate 만 확인).
+  - Activity 재생성의 실제 lifecycle 실행(번호 발급 경계는 단위만 확인).
+  - 위 decoder 첫 출력 정지의 원인.
