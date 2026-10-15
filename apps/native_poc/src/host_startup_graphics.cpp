@@ -156,7 +156,13 @@ int startup_select_capture_target(HostContext& hx) {
   }
   capture.windowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
   capture.selectionLockedByConfig = capture.windowCriteria.enabled() || inputRouter.targetCriteria.enabled();
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // TEST BUILD ONLY (r2 K6): the pinned window is (re)selected through the product's transaction; the
+  // control session admits no other target (host_control_session.cpp).
+  capture.windowSelectionLocked.store(false, std::memory_order_release);
+#else
   capture.windowSelectionLocked.store(capture.selectionLockedByConfig, std::memory_order_release);
+#endif
   capture.windowTargetConfigured = capture.windowCriteria.enabled();
   backend.requested = desktop_capture_backend_from_env();
   backend.active = backend.requested;
