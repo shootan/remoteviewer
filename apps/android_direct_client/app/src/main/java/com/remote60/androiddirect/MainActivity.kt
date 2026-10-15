@@ -483,7 +483,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         viewerFullViewChip.setOnClickListener { exitLargeView("chip") }
         viewerPanChip.setOnClickListener {
-            cancelActiveViewerTouch("pan_mode")
+            interruptViewerTouch("pan_mode")
             viewerPanMode = !viewerPanMode
             diagnosticsLog.log("viewer_view", "pan=$viewerPanMode")
             renderViewportChips()
@@ -1252,6 +1252,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var requestedRuntimeBitrateKbps = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps
     // viewer-sharpness r1 B: where the picture sits -- drawing and input both read it (ViewerViewport).
     private val viewerViewport = ViewerViewport()
+    // r2 R1: who owns the touch stream on the picture, from its ACTION_DOWN to its final UP / CANCEL.
+    private val viewerTouchRouter = ViewerTouchRouter()
     private var viewerPanMode = false          // 크게보기: touches move / scale the picture and go nowhere else
     private var viewerControlsHidden = false   // the zone strip and the rail give their room to the picture
     private var viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
@@ -2805,8 +2807,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun handleViewerTouch(view: View, event: MotionEvent): Boolean {
         if (currentScene != UiScene.VIEWER) return false
-        // viewer-sharpness r1 B: 크게보기 with 화면 이동 on -- the picture moves / scales, nothing is sent.
-        if (viewerPanMode && viewerViewport.isLarge) return handleViewportGesture(event)
+        // viewer-sharpness r1 B / r2 R1: a stream begun in 크게보기 with 화면 이동 on moves / scales the picture to its
+        // end -- even past a pinch back to 전체보기 -- and sends nothing; a PC stream cut by a mode / size / scene
+        // change was released once (interruptViewerTouch) and its rest reaches nobody. Decided at ACTION_DOWN only.
+        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge)) {
+            ViewerTouchRouter.Owner.LOCAL -> return handleViewportGesture(event)
+            ViewerTouchRouter.Owner.SWALLOW, ViewerTouchRouter.Owner.NONE -> return true
+            ViewerTouchRouter.Owner.PC -> Unit
+        }
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             showViewerControls()
         }
@@ -5114,7 +5122,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** 크게보기: fill the view, centred; 화면 이동 off (touches still control the PC) until the user turns it on. */
     private fun enterLargeView(origin: String) {
         val (cw, ch) = viewerContentSize() ?: return
-        cancelActiveViewerTouch("view_large")
+        interruptViewerTouch("view_large")
         viewerViewport.enterLarge(videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), cw, ch)
         viewerPanMode = false
         diagnosticsLog.log("viewer_view", "mode=large origin=$origin zoom=${"%.2f".format(viewerViewport.zoom)} " +
@@ -5130,12 +5138,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resetViewerViewport(reason: String) {
-        if (viewerViewport.isLarge || viewerPanMode) cancelActiveViewerTouch("view_reset_$reason")
+        if (viewerViewport.isLarge || viewerPanMode) interruptViewerTouch("view_reset_$reason")
         viewerViewport.reset()
         viewerPanMode = false
         viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
         if (::videoTextureView.isInitialized) applyVideoTransform()
         if (::viewerPanChip.isInitialized) renderViewportChips()
+    }
+
+    /**
+     * r2 R1: a mode / size / scene change in the middle of a touch stream. A PC stream gets its release once and is
+     * swallowed to its end, with the margin modifiers and the pinch state it held; a local stream stays local. The next
+     * ACTION_DOWN starts in the new mode.
+     */
+    private fun interruptViewerTouch(reason: String) {
+        if (!viewerTouchRouter.interrupt()) return
+        cancelActiveViewerTouch(reason)
+        rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+        tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+        pinchStartSpan = 0f
+        pinchZoomCarry = 0f
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
+        diagnosticsLog.log("viewer_touch_interrupted", "reason=$reason")
     }
 
     /** 화면 이동: one finger moves the picture, two scale it about the fingers. Consumed here, never sent. */
@@ -5175,7 +5199,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     /** The zone strip and the rail out of the way (their room goes to the picture), or back. */
     private fun setViewerControlsHidden(hidden: Boolean, origin: String) {
-        cancelActiveViewerTouch("controls_$origin")
+        interruptViewerTouch("controls_$origin")
         releaseViewerModifiers()
         viewerControlsHidden = hidden
         findViewById<View>(R.id.viewerZoneBar).visibility = if (hidden) View.GONE else View.VISIBLE
