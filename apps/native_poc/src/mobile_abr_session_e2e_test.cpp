@@ -1180,6 +1180,41 @@ int wmain(int argc, wchar_t** argv) {
       session.ResumeFromPark();
       session.RequestStreamActive(true);
       std::this_thread::sleep_for(std::chrono::seconds(2));
+      // ---- r3 R1: the loop has read "parking" at its pass boundary and is stopped right there (the test
+      // hook); the app resumes and asks for the list meanwhile -- the request of the resumed session must
+      // go out, not be dropped by the park the loop read before.
+      {
+        const bool parkedR1 = session.BeginPark() &&
+                              wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000);
+        check("[park r3 R1] parked", parkedR1);
+        const uint32_t droppedR1 = session.ParkDroppedActionCount();
+        std::atomic<int> stage{0};  // 0 armed, 1 the loop is stopped in the hook, 2 released
+        bool resumedR1 = false, listR1 = false;
+        session.SetTestPassBoundaryHook([&](bool parking) {
+          int armed = 0;
+          if (!parking || !stage.compare_exchange_strong(armed, 1)) return;
+          resumedR1 = session.ResumeFromPark();   // the app, between the loop's read and its next action
+          listR1 = session.RequestWindowList();
+          stage.store(2);
+        });
+        const bool hooked = wait_until([&] { return stage.load() == 2; }, 3000);
+        session.SetTestPassBoundaryHook(nullptr);
+        note("R1: hooked=" + std::to_string(hooked) + " resumed=" + std::to_string(resumedR1) +
+             " list queued=" + std::to_string(listR1));
+        check("[park r3 R1] the loop stopped after reading the park; the resume and a list request went in there",
+              hooked && resumedR1 && listR1);
+        const bool answered = wait_until([&] {
+          return session.WindowPanelSnapshotCopy().status.rfind("window_list_received", 0) == 0;
+        }, 4000);
+        const uint32_t droppedNow = session.ParkDroppedActionCount();
+        note("R1: list answered=" + std::to_string(answered) + " dropped " + std::to_string(droppedNow - droppedR1) +
+             " status=" + session.WindowPanelSnapshotCopy().status);
+        check("[park r3 R1] THE RESUMED SESSION'S LIST REQUEST IS SENT AND ANSWERED (not dropped by the old park)",
+              answered && droppedNow == droppedR1,
+              "dropped " + std::to_string(droppedNow - droppedR1) + ", " + session.WindowPanelSnapshotCopy().status);
+        session.RequestStreamActive(true);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
       // ---- r2 §7: another client takes the host while this one is parked (direct to the host's port).
       check("[park r2 replace] parked before the other client comes", session.BeginPark() &&
             wait_until([&] { return session.ParkPhase() == ClientParkPhase::Parked; }, 3000));

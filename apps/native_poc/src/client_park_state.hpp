@@ -238,10 +238,13 @@ class ClientParkFence {
 // the fence's own Ping and pause, input (only releases can be queued by then) and the paused report.
 // Anything else the scheduler hands out -- a list, a selection, a tune, a capture mode, a backend, a key
 // request -- is dropped unsent: a park has no side effect beyond letting go and pausing.
-inline bool client_park_allows(ControlOutboundActionKind kind) {
+// r3 R1: a stream-state action only as the pause (`streamActive` false) -- a resume of the stream belongs to
+// the operation after the park, never to the park.
+inline bool client_park_allows(ControlOutboundActionKind kind, bool streamActive = false) {
   switch (kind) {
-    case ControlOutboundActionKind::Ping:
     case ControlOutboundActionKind::StreamState:
+      return !streamActive;
+    case ControlOutboundActionKind::Ping:
     case ControlOutboundActionKind::InputEvent:
     case ControlOutboundActionKind::InputText:
     case ControlOutboundActionKind::PhysicalKey:

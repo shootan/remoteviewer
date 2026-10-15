@@ -152,6 +152,14 @@ class ClientSessionController {
   bool HostHonorsStreamPause() const;
   // The phone's clipboard as it is when a parked session resumes: recorded as already sent.
   void SeedClipboardBaseline(const std::u16string& text);
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  // TEST BUILD ONLY (keepalive r3 R1): called by the control loop right after its park step at each pass
+  // boundary, with the park state that step read -- a test stops the loop there to put a resume between.
+  void SetTestPassBoundaryHook(std::function<void(bool parking)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testPassHook_ = std::move(hook);
+  }
+#endif
   // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
   // parked connection is told from one opened since. Counters of the expensive steps, for the
   // "no directory / punch / Hello on reuse" check.
@@ -346,6 +354,10 @@ class ClientSessionController {
   std::atomic<uint32_t> parkDroppedActions_{0};
   void CollectForParkLocked(uint64_t nowUs, bool releasesOnly);
   void ParkWatchdog();
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  std::mutex testHookMu_;
+  std::function<void(bool)> testPassHook_;
+#endif
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};
   std::atomic<uint64_t> udpHelloCount_{0};

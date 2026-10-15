@@ -231,6 +231,8 @@ int main() {
   std::printf("[5] r2 K1: what a park may still send\n");
   {
     using K = ControlOutboundActionKind;
+    check("r3 R1: a stream RESUME is not a park's action (only the pause is)",
+          client_park_allows(K::StreamState, false) && !client_park_allows(K::StreamState, true));
     bool releaseAndFence = client_park_allows(K::Ping) && client_park_allows(K::StreamState) &&
                            client_park_allows(K::InputEvent) && client_park_allows(K::PhysicalKey) &&
                            client_park_allows(K::Metrics);
