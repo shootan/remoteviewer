@@ -207,6 +207,23 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
     if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     return;
   }
+  // keepalive r5 D1: a codec instance starts at an IDR. One the surface started -- from the SPS/PPS an IDR left
+  // behind while there was no surface -- would otherwise take the deltas that follow first; measured on a
+  // cold-booted AVD (0.2.29 too), its decoder took 12-15 of them, produced nothing and freed no input buffer
+  // for the IDRs asked for afterwards: the selection never showed a frame. Dropped here and an IDR asked for
+  // (the session's limiter paces the asks); the IDR then starts this instance like any other.
+  if (codecAwaitsKey_ && !isKeyFrame) {
+    ++deltaBeforeKeyDrops_;
+    decoderKeyframeRequest_ = true;
+    if ((deltaBeforeKeyDrops_ % 30u) == 1u) {
+      char line[160];
+      std::snprintf(line, sizeof(line), "delta before the codec's first IDR dropped streamGen=%llu drops=%llu",
+                    static_cast<unsigned long long>(frame.header.streamGeneration),
+                    static_cast<unsigned long long>(deltaBeforeKeyDrops_));
+      log_info(line);
+    }
+    return;
+  }
 
   if (!TryQueueFrameLocked(frame)) {
     if (!pendingFrame_.has_value()) {
@@ -548,6 +565,8 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " outDequeued=" + std::to_string(outputDequeued_);
   status += " fmt=" + std::to_string(formatChanges_);
   status += " held=" + std::to_string(heldOutputValid_ ? 1 : 0);
+  status += " awaitsKey=" + std::to_string(codecAwaitsKey_ ? 1 : 0);
+  status += " deltaBeforeKey=" + std::to_string(deltaBeforeKeyDrops_);
   return status;
 }
 
@@ -624,6 +643,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   }
 
   ++codecsStarted_;
+  codecAwaitsKey_ = true;
   outputDequeued_ = 0;
   formatChanges_ = 0;
   lastInputDequeue_ = 0;
@@ -722,7 +742,10 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
-  if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
+  if ((frame.header.flags & 1u) != 0) {
+    gate_.KeyDelivered(frame.header.streamGeneration);
+    codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
+  }
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
