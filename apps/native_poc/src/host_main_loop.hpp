@@ -185,7 +185,7 @@ struct TickContext {
   bool servedBootstrap = false;
   bool kickForcedKey = false;    // true only when this kick must open a closed media barrier (IDR)
   uint8_t syntheticReason = 0;   // catch-up: kSyntheticReason* of a served (synthetic) input, 0 = real
-  bool awaitKick = false;        // r9: this kick is the one extra input for an awaited catch-up AU
+  bool lastAuHandedToSender = false;  // r11: the AU just emitted was enqueued (UDP) / sent (TCP)
   uint64_t queuePopUs = 0;
   uint64_t queueSelectWaitUs = 0;
   uint64_t frameAgeAtSelectUs = 0;
@@ -232,8 +232,8 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc);   // static-frame gati
 Flow stage_encode_send(HostContext& hx, TickContext& tc);   // raw send / H.264 encode + enqueue (dispatcher)
 Flow encode_send_raw(HostContext& hx, TickContext& tc);
 Flow encode_send_h264(HostContext& hx, TickContext& tc);
-// r10: output-only collect for an open catch-up await (host_stage_encode_send_h264.cpp); true = satisfied
-bool encode_send_h264_collect_await(HostContext& hx, TickContext& tc);
+// r11: one tick of an open catch-up await (host_stage_encode_send_h264.cpp); Flow::Next = carry on
+Flow encode_send_h264_await_tick(HostContext& hx, TickContext& tc);
 Flow stage_stats(HostContext& hx, TickContext& tc);         // 1s tick: stats line, drain watchdog, ABR/M9 -- MUST run first (H-10)
 Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
                      const std::string& targetProcessName, uint64_t queuePushPerSec,

@@ -172,35 +172,23 @@ void TestCatchupDebt() {
          "catchup: unknown fps uses the 150 ms trailing delay");
 }
 
-// r9 (Codex r9 s2): accepted is not delivered. Acceptance closes the submission debt and opens a
-// separate output-progress state bound to codec instance / epochs / generation / ordinal; at most ONE
-// extra kick 150 ms after acceptance, merged away when another input moved the encoder, exhausted
-// (not success) when the kick's call still brings no AU, bounded by a deadline in every case, and the
-// kick never re-opens it. The stage (host_stage_encode_send_h264.cpp settle_await) drives exactly
-// these transitions; the sequences below are the ones it produces.
+// r11 (Codex r11 s1): the await state, collect-only. Acceptance closes the submission debt and opens a
+// separate output-progress state bound to codec instance / epochs / generation / ordinal; it is observed
+// only by an AU of the same instance + input epoch with that ordinal or later, deferred at the deadline
+// (late watch on), cancelled on identity / pause; another accepted input does NOT end it. The tick that
+// drives these transitions on the product path is catchup_await_tick (host_catchup_await.hpp), tested
+// against the real H264Encoder in host_catchup_collect_test.cpp.
 void TestCatchupAwait() {
   const uint64_t t0 = 50 * kSec;
-  // (a) accepted, no AU in its own call -> await; the one kick is due at +150 ms, not before
   {
     KickState k;
     k.OpenAwait(/*instance*/ 4, /*session*/ 7, /*inputEpoch*/ 3, /*gen*/ 2, /*ordinal*/ 105, /*version*/ 349, t0);
-    expect(k.await.active && k.awaitOpened == 1, "await: an accepted catch-up without its AU opens the await");
+    expect(k.await.active && k.awaitOpened == 1 && k.await.deadlineUs == t0 + KickState::kAwaitDeadlineUs,
+           "await: an accepted catch-up without its AU opens the await, deadline 1.15 s");
     expect(!k.CatchupDue(t0 + 10 * kSec), "await: acceptance leaves no submission debt (no per-tick re-submit)");
-    expect(!k.AwaitKickDue(t0 + KickState::kAwaitKickDelayUs - 1) && k.AwaitKickDue(t0 + KickState::kAwaitKickDelayUs),
-           "await: the extra kick is due 150 ms after acceptance, not before");
-    k.await.kickSubmitted = true;  // stage: the kick went to the encode stage
-    expect(!k.AwaitKickDue(t0 + 2 * KickState::kAwaitKickDelayUs), "await: one kick only -- not due again once submitted");
-    k.NoteAwaitInputAccepted(true);
-    expect(k.await.kickAccepted && k.awaitKickAccepted == 1 && k.awaitOpened == 1,
-           "await: the kick's acceptance is counted and does NOT open another await");
+    expect(!k.AwaitExpired(t0 + KickState::kAwaitDeadlineUs - 1) && k.AwaitExpired(t0 + KickState::kAwaitDeadlineUs),
+           "await: bounded by its deadline");
     expect(k.AwaitSatisfiedBy(4, 3, 105), "await: the catch-up's own ordinal from the same instance/epoch satisfies it");
-    k.EndAwait(KickState::AwaitEnd::Observed);
-    expect(!k.await.active && k.awaitExhausted == 0 && k.awaitDeferred == 0, "await: observed closes it, nothing else counted");
-  }
-  // (b) provenance: only the same instance + input epoch, ordinal >= the catch-up's, counts
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
     expect(!k.AwaitSatisfiedBy(3, 3, 200), "await: a late output of an OLDER codec instance never counts");
     expect(!k.AwaitSatisfiedBy(4, 2, 200), "await: an AU of another input epoch never counts");
     expect(!k.AwaitSatisfiedBy(4, 3, 104), "await: an AU of an EARLIER input does not count");
@@ -210,129 +198,45 @@ void TestCatchupAwait() {
                !k.AwaitIdentityMatches(4, 8, 3, 2) && !k.AwaitIdentityMatches(4, 7, 4, 2) &&
                !k.AwaitIdentityMatches(4, 7, 3, 3),
            "await: identity = codec instance + session epoch + input epoch + stream generation");
-    k.EndAwait(KickState::AwaitEnd::Cancelled);
-    expect(!k.await.active && k.awaitCancelled == 1 && !k.AwaitKickDue(t0 + kSec),
-           "await: cancelled (identity / instance / pause) -> no kick");
-  }
-  // (c) a new real input accepted before the kick: merged, no extra kick; its call without the AU defers
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    k.NoteAwaitInputAccepted(false);
-    expect(k.await.advancedByOther && k.awaitKickMerged == 1 && !k.AwaitKickDue(t0 + kSec),
-           "await: another accepted input moves the encoder -> the extra kick is dropped (merged)");
-    k.NoteAwaitCallEnded(false, true);
-    expect(!k.await.active && k.awaitDeferred == 1 && k.awaitExhausted == 0,
-           "await: that call without the AU defers to the input's own trailing edge / refresh");
-  }
-  // (d) the kick was taken but still no AU: exhausted -- not delivered, not re-kicked, not re-opened
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    k.await.kickSubmitted = true;
-    k.NoteAwaitInputAccepted(true);
-    k.NoteAwaitCallEnded(true, true);
-    expect(!k.await.active && k.awaitExhausted == 1 && !k.AwaitKickDue(t0 + 5 * kSec) && k.awaitOpened == 1,
-           "await: kick taken, no AU -> exhausted; no second kick, nothing reopened");
-  }
-  // (e) a refused / not-accepted kick waits like any delta, but the whole state is bounded
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    k.await.kickSubmitted = true;
-    k.NoteAwaitCallEnded(true, /*inputAccepted*/ false);
-    expect(k.await.active, "await: a kick the encoder did not take does not end the await");
-    k.await.kickSubmitted = false;  // stage: refused -> retry later
-    k.await.kickDueUs = t0 + 300000;
-    expect(!k.AwaitKickDue(t0 + 299999) && k.AwaitKickDue(t0 + 300000), "await: a refused kick is tried again later");
-    const uint64_t deadline = t0 + KickState::kAwaitKickDelayUs + KickState::kAwaitKickDeadlineUs;
-    expect(!k.AwaitKickExpired(deadline - 1) && k.AwaitKickExpired(deadline), "await: bounded -- expires at its deadline");
-    k.await.kickSubmitted = true;  // even with a kick in hand, the deadline still bounds it
-    expect(k.AwaitKickExpired(deadline), "await: the deadline holds even after a submitted kick");
-    k.EndAwait(KickState::AwaitEnd::Deferred);
-    expect(!k.await.active && k.awaitDeferred == 1, "await: expired -> deferred to the refresh");
-  }
-  // (f) a newer catch-up accepted while one is awaited: the old await is advanced-by-other
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    k.NoteAwaitInputAccepted(false);  // the newer catch-up's own acceptance
-    k.NoteAwaitCallEnded(false, true);
-    expect(!k.await.active && k.awaitDeferred == 1, "await: a newer accepted input supersedes the old await");
-    k.OpenAwait(4, 7, 3, 2, 120, 400, t0 + kSec);
-    expect(k.await.active && k.await.ordinal == 120 && k.await.version == 400 && k.awaitOpened == 2,
-           "await: ... and the newer catch-up opens its own");
-  }
-  // nothing awaited: every transition is a no-op
-  {
-    KickState k;
-    k.NoteAwaitInputAccepted(false);
-    k.NoteAwaitInputAccepted(true);
-    k.NoteAwaitCallEnded(true, true);
-    k.EndAwait(KickState::AwaitEnd::Exhausted);
-    expect(!k.await.active && k.awaitKickMerged == 0 && k.awaitKickAccepted == 0 && k.awaitExhausted == 0 &&
-               !k.AwaitKickDue(t0) && !k.AwaitKickExpired(t0 + 10 * kSec) && !k.AwaitSatisfiedBy(4, 3, 105),
-           "await: without an open await nothing is counted or due");
-  }
-}
-
-// r10 (Codex r10 s1): collect first, kick only if still unsatisfied. The stage (host_stage_pop_frame.cpp)
-// runs encode_send_h264_collect_await every tick of an open await; an AU it collects that satisfies the
-// await ends it (Observed) BEFORE AwaitWantsKick is asked -- so a ready AU costs no input. Collect-only
-// (experiment arm) never kicks and hands over to the refresh at the deadline. An exhausted / deferred
-// await is still watched so its real output time is known (never counted as the await's success).
-void TestCatchupAwaitCollect() {
-  const uint64_t t0 = 60 * kSec;
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    expect(!k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs - 1) && k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs),
-           "collect: unsatisfied -> the one kick is wanted at +150 ms, not before");
-    // collect at +40 ms brings the catch-up's AU: observed, no kick wanted afterwards
-    expect(k.AwaitSatisfiedBy(4, 3, 105), "collect: the collected AU satisfies the await");
+    k.NoteAwaitOtherInputAccepted();
+    k.NoteAwaitOtherInputAccepted();
+    expect(k.await.active && k.await.advancedByOther && k.awaitOtherInputs == 1,
+           "await: another accepted input does not end it (counted once)");
     k.EndAwait(KickState::AwaitEnd::Observed, t0 + 40000);
-    expect(!k.await.active && !k.AwaitWantsKick(t0 + 10 * kSec) && !k.lateWatch.active,
-           "collect: satisfied by the collect -> no kick wanted, nothing left to watch");
+    expect(!k.await.active && k.awaitDeferred == 0 && k.awaitCancelled == 0 && !k.lateWatch.active,
+           "await: observed closes it, nothing else counted, nothing watched");
   }
   {
     KickState k;
-    k.awaitMode = KickState::AwaitMode::CollectOnly;
     k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    expect(!k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs) && !k.AwaitWantsKick(t0 + kSec),
-           "collect-only: the kick is never wanted");
-    const uint64_t deadline = t0 + KickState::kAwaitKickDelayUs + KickState::kAwaitKickDeadlineUs;
-    expect(k.AwaitKickExpired(deadline), "collect-only: bounded by the same deadline");
-    k.EndAwait(KickState::AwaitEnd::Deferred, deadline);
+    k.EndAwait(KickState::AwaitEnd::Deferred, t0 + KickState::kAwaitDeadlineUs);
     expect(!k.await.active && k.awaitDeferred == 1 && k.lateWatch.active && k.lateWatch.ordinal == 105 &&
-               k.lateWatch.how == KickState::AwaitEnd::Deferred,
-           "collect-only: deferred at the deadline, and its ordinal is still watched");
+               k.lateWatch.acceptedUs == t0 && k.lateWatch.endedUs == t0 + KickState::kAwaitDeadlineUs,
+           "await: deferred -> its ordinal is still watched with accept / end times");
     expect(!k.LateWatchSatisfiedBy(3, 3, 200) && !k.LateWatchSatisfiedBy(4, 2, 200) &&
                !k.LateWatchSatisfiedBy(4, 3, 104) && !k.LateWatchSatisfiedBy(4, 3, 0) && k.LateWatchSatisfiedBy(4, 3, 105),
-           "late watch: same provenance rules as the await (instance / epoch / ordinal >= / no ordinal 0)");
-    expect(!k.LateWatchExpired(deadline + KickState::kAwaitLateWatchUs - 1) &&
-               k.LateWatchExpired(deadline + KickState::kAwaitLateWatchUs),
+           "late watch: same provenance rules as the await");
+    const uint64_t ended = t0 + KickState::kAwaitDeadlineUs;
+    expect(!k.LateWatchExpired(ended + KickState::kAwaitLateWatchUs - 1) && k.LateWatchExpired(ended + KickState::kAwaitLateWatchUs),
            "late watch: given up 5 s after the await ended");
-  }
-  {
-    KickState k;
-    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
-    k.await.kickSubmitted = true;
-    k.NoteAwaitInputAccepted(true);
-    k.NoteAwaitCallEnded(true, true, t0 + 170000);
-    expect(k.awaitExhausted == 1 && k.lateWatch.active && k.lateWatch.how == KickState::AwaitEnd::Exhausted &&
-               k.lateWatch.endedUs == t0 + 170000 && k.lateWatch.acceptedUs == t0,
-           "late watch: an exhausted await is watched with its accept / end times");
     KickState c;
     c.OpenAwait(4, 7, 3, 2, 105, 349, t0);
     c.EndAwait(KickState::AwaitEnd::Cancelled, t0 + 1000);
-    expect(!c.lateWatch.active, "late watch: a cancelled await (identity / pause) is not watched");
+    expect(!c.await.active && c.awaitCancelled == 1 && !c.lateWatch.active, "await: cancelled (identity / pause) is not watched");
+  }
+  {
+    KickState k;  // nothing awaited: every transition is a no-op
+    k.NoteAwaitOtherInputAccepted();
+    k.EndAwait(KickState::AwaitEnd::Deferred, t0);
+    expect(!k.await.active && k.awaitOtherInputs == 0 && k.awaitDeferred == 0 && !k.lateWatch.active &&
+               !k.AwaitExpired(t0 + 10 * kSec) && !k.AwaitSatisfiedBy(4, 3, 105),
+           "await: without an open await nothing is counted or due");
   }
 }
 
 int main() {
   TestCatchupDebt();
   TestCatchupAwait();
-  TestCatchupAwaitCollect();
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();

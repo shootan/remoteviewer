@@ -270,18 +270,19 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowscodecs
   shlwapi
 )
-# motion-settle r10 (Codex r10 s2): diagnostic arm selectors (REMOTE60_NATIVE_CATCHUP_AWAIT_MODE) exist only in
-# an experiment build; a shipping build has no way to select them and does not carry their environment
-# names (automation/motion_settle_build_gate.py checks the binary).
-option(REMOTE60_MOTION_SETTLE_EXPERIMENTS "Compile the motion-settle diagnostic switches into GNLinkStream" OFF)
-if(REMOTE60_MOTION_SETTLE_EXPERIMENTS)
-  set(_motion_settle_experiments 1)
+# motion-settle r11 (Codex r11 s5): the measurement diagnostics -- the first-slice QP reader and the per-real-input
+# capture change / hash lines of the per-AU trace -- exist only in a DIAG build. They change no product
+# behaviour; a shipping build does not carry them (automation/motion_settle_build_gate.py checks the binary
+# for their log literals). There is no runtime selector in either build.
+option(REMOTE60_MOTION_SETTLE_DIAG "Compile the motion-settle measurement diagnostics into GNLinkStream" OFF)
+if(REMOTE60_MOTION_SETTLE_DIAG)
+  set(_motion_settle_diag 1)
 else()
-  set(_motion_settle_experiments 0)
+  set(_motion_settle_diag 0)
 endif()
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
-  REMOTE60_MOTION_SETTLE_EXPERIMENTS=${_motion_settle_experiments}
+  REMOTE60_MOTION_SETTLE_DIAG=${_motion_settle_diag}
 )
 
 add_executable(remote60_secure_input_service

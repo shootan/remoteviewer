@@ -41,7 +41,9 @@
 
 #include "capture_backend_dxgi.hpp"
 #include "host_au_trace.hpp"
+#if REMOTE60_MOTION_SETTLE_DIAG
 #include "h264_slice_qp.hpp"
+#endif
 #include "d3d_capture_readback.hpp"
 #include "encode_resolution_ladder.hpp"
 #include "gdi_capture_process.hpp"
@@ -146,6 +148,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
   // r10 trace only: the first slice's starting QP (diagnostic, -1 = Unknown; h264_slice_qp.hpp), read
   // before the UDP path moves the bytes; one reader per codec instance
   int traceSliceQp = -1;
+#if REMOTE60_MOTION_SETTLE_DIAG
   if (au_trace_enabled()) {
     static H264SliceQpReader qpReader;
     static uint64_t qpReaderInstance = 0;
@@ -155,6 +158,7 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
     }
     traceSliceQp = qpReader.Read(au.bytes.data(), au.bytes.size());
   }
+#endif
   // P11 -- the epoch gate. An async MFT returns an OLDER input's AU during the current call, so
   // the first call after a flush emits the pre-flush picture: true old capture stamp, flagged real,
   // on the new generation (2026-09-07 15:15:59 seq 24484, 820 ms behind its send time; the viewer
@@ -539,6 +543,8 @@ if (transport == VideoTransport::Tcp) {
 }
 const uint64_t sendDoneUs = qpc_now_us();
 const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+// r11: the catch-up await is observed only on an AU that really left the emit stage
+tc.lastAuHandedToSender = (transport == VideoTransport::Tcp) ? sentOk : enqueuedForSend;
 // catch-up verification (diagnostic, REMOTE60_NATIVE_AU_TRACE=1 only): every AU with the source and
 // content version of the input behind it, so receiver marker -> host seq -> this line -> wire line.
 if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
@@ -556,7 +562,9 @@ if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
             << " acceptedUs=" << au.inputAcceptedAtUs
             << " lagOrd=" << (encoder.codec.accepted_input_count() >= au.acceptedInputOrdinal
                                   ? encoder.codec.accepted_input_count() - au.acceptedInputOrdinal : 0)
+#if REMOTE60_MOTION_SETTLE_DIAG
             << " sliceQp=" << traceSliceQp
+#endif
             << " captureUs=" << hdr.captureQpcUs
             << " enqueueUs=" << sendStartUs
             << " enqueued=" << (enqueuedForSend ? 1 : 0)

@@ -31,7 +31,9 @@ NAMES = [
     "REMOTE60_NATIVE_SETTLE_SPACING_MS",
     "REMOTE60_NATIVE_SETTLE_DEADLINE_MS",
     "REMOTE60_NATIVE_SETTLE_BYTE_PCT",
-    "REMOTE60_NATIVE_CATCHUP_AWAIT_MODE",  # r10 diagnostic arm selector (experiment builds only)
+    "REMOTE60_NATIVE_CATCHUP_AWAIT_MODE",  # r10 diagnostic arm selector (removed in r11; must stay absent)
+    "[native-video-host][cap] version=",   # r11 DIAG build only: capture change / hash trace
+    " sliceQp=",                           # r11 DIAG build only: first-slice QP in the per-AU trace
 ]
 REQUIRED = ["REMOTE60_NATIVE_CATCHUP"]
 NUL = bytes([0])

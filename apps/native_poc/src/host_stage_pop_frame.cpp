@@ -224,69 +224,19 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
     }
   }
-  // r9 (host_kick.hpp KickState::CatchupAwait): the catch-up input was accepted but its AU has not come
-  // out. kAwaitKickDelayUs after acceptance, ONE ordinary trailing-edge kick lets an encode call collect
-  // it -- only while nothing else has moved the encoder (a real frame waiting goes first and merges it),
-  // gated like any delta (no admit-always), with an empty sender queue, never across an identity /
-  // codec-instance change or a paused stream (cancelled). Past its deadline the 1 Hz refresh takes over.
+  // r11 (host_kick.hpp KickState::CatchupAwait, host_catchup_await.hpp): the catch-up input was accepted
+  // but its AU has not reached the sender. Every tick while that holds, collect what the MFT has WITHOUT
+  // an input and send it down the ordinary emit path (encode_send_h264_await_tick); deferred to the 1 Hz
+  // refresh past the deadline, cancelled on an identity / codec-instance change or a paused stream. No
+  // extra input of its own; the trailing-edge kick above and the refresh below are not part of this.
   if (kick.LateWatchExpired(nowUs)) {
     std::cout << "[native-video-host][catchup] late-output none ordinal=" << kick.lateWatch.ordinal
               << " withinUs=" << KickState::kAwaitLateWatchUs << "\n";
     kick.lateWatch = KickState::AwaitLateWatch{};
   }
   if (useH264 && kick.await.active) {
-    const uint64_t sessionEpochNow = clientSession.epoch.load(std::memory_order_acquire);
-    const uint64_t inputEpochNow = capture.inputEpoch.load(std::memory_order_acquire);
-    const uint64_t generationNow = capture.streamGenerationState.load(std::memory_order_acquire);
-    const char* cancelWhy = nullptr;
-    if (!kick.AwaitIdentityMatches(encoder.codec.instance_id(), sessionEpochNow, inputEpochNow, generationNow)) {
-      cancelWhy = "identity";
-    } else if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
-      cancelWhy = "paused";
-    }
-    if (cancelWhy) {
-      std::cout << "[native-video-host][catchup] await cancelled ordinal=" << kick.await.ordinal
-                << " why=" << cancelWhy << "\n";
-      kick.EndAwait(KickState::AwaitEnd::Cancelled, nowUs);
-    } else if (encode_send_h264_collect_await(hx, tc)) {
-      // r10: the AU was ready -- collected and sent without any input; no kick
-    } else if (kick.AwaitKickExpired(nowUs)) {
-      std::cout << "[native-video-host][catchup] await deferred ordinal=" << kick.await.ordinal
-                << " why=" << (kick.awaitMode == KickState::AwaitMode::CollectOnly ? "collect-only-deadline" : "kick-deadline")
-                << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs) << "\n";
-      kick.EndAwait(KickState::AwaitEnd::Deferred, nowUs);
-    } else if (!servedBootstrap && kick.AwaitWantsKick(nowUs)) {
-      bool blocked = encoder.forceKeyNext;
-      if (transport == VideoTransport::Udp) {
-        std::lock_guard<std::mutex> lk(sender.mu);
-        blocked = blocked || sender.waitingForKey || !sender.queue.empty();
-      }
-      {
-        std::lock_guard<std::mutex> lk(res.frame.mu);
-        if (res.frame.version != stats.lastVersionSent && res.frame.payload && !res.frame.payload->empty()) blocked = true;
-      }
-      if (!blocked) {
-        if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
-          servedBootstrap = true;
-          tc.syntheticReason = kSyntheticReasonKick;
-          tc.awaitKick = true;
-          kick.await.kickSubmitted = true;
-          ++kick.awaitKickSubmitted;
-          std::cout << "[native-video-host][catchup] await-kick serve ordinal=" << kick.await.ordinal
-                    << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs) << "\n";
-          seq = 0;
-          version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)
-          streamGeneration = generationNow;
-          captureUs = nowUs;
-          callbackUs = nowUs;
-          queuePushUs = nowUs;
-        } else {
-          std::cout << "[native-video-host][catchup] await cancelled ordinal=" << kick.await.ordinal
-                    << " why=fill\n";
-          kick.EndAwait(KickState::AwaitEnd::Cancelled, nowUs);
-        }
-      }
-    }
+    const Flow f = encode_send_h264_await_tick(hx, tc);
+    if (f != Flow::Next) return f;
   }
   // Latest-content catch-up (host_kick.hpp KickState::CatchupDebt): the picture the input gate skipped,
   // two frame periods after the last skip, as an ordinary P once the sender queue has drained. Never

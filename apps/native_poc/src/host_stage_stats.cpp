@@ -400,17 +400,14 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " reRejected=" << k.catchupReRejected << " cancelledIdentity=" << k.catchupCancelledIdentity
                 << " gaveUp=" << k.catchupGaveUp << " newerCache=" << k.catchupServedNewerCache
                 << " open=" << (k.catchup.owed ? 1 : 0) << "\n";
-      // r9: accepted -> output-observed (own call / after the extra kick / after another input) and
-      // where the rest went; delivered is the receiver's side (catchup_chain.py)
+      // r11: accepted -> output-observed (own call / a collect / another input's call, i.e. handed to the
+      // sender) and where the rest went; delivered is the receiver's side (catchup_chain.py)
       std::cout << "[native-video-host][catchup-await] opened=" << k.awaitOpened
-                << " outputOwnCall=" << k.awaitOutputOwnCall << " observedByKick=" << k.awaitObservedByKick
-                << " observedByOther=" << k.awaitObservedByOther << " kickSubmitted=" << k.awaitKickSubmitted
-                << " kickAccepted=" << k.awaitKickAccepted << " kickRefused=" << k.awaitKickRefused
-                << " kickMerged=" << k.awaitKickMerged << " exhausted=" << k.awaitExhausted
-                << " deferred=" << k.awaitDeferred << " cancelled=" << k.awaitCancelled
-                << " observedByCollect=" << k.awaitObservedByCollect << " collectCalls=" << k.awaitCollectCalls
-                << " collectAus=" << k.awaitCollectAus << " lateOutputs=" << k.awaitLateOutputs
-                << " mode=" << (k.awaitMode == KickState::AwaitMode::CollectOnly ? "collect" : "kick")
+                << " outputOwnCall=" << k.awaitOutputOwnCall << " observedByCollect=" << k.awaitObservedByCollect
+                << " observedByOther=" << k.awaitObservedByOther << " deferred=" << k.awaitDeferred
+                << " cancelled=" << k.awaitCancelled << " collectErrors=" << k.awaitCollectErrors
+                << " collectCalls=" << k.awaitCollectCalls << " collectAus=" << k.awaitCollectAus
+                << " otherInputs=" << k.awaitOtherInputs << " lateOutputs=" << k.awaitLateOutputs
                 << " active=" << (k.await.active ? 1 : 0) << "\n";
     }
     sender.sentFrames = 0;

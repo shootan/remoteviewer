@@ -64,6 +64,7 @@
 #include "host_gpu_scaler.hpp"
 #include "host_input_inject.hpp"
 #include "host_input_router.hpp"
+#include "host_catchup_await.hpp"
 #include "host_kick.hpp"
 #include "host_log.hpp"
 #include "host_main_loop.hpp"
@@ -87,74 +88,52 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
-// r10 (host_kick.hpp CatchupAwait): what AUs that go on to the emit stage mean for an open await and for
-// the late watch of an exhausted / deferred one. via = the call that brought them: "collect" (output
-// only, no input), "kick" (the one extra input), "other" (any other input's call). True when the await
-// was satisfied.
-static bool catchup_observe_emitted(KickState& kick, uint64_t inst, const std::vector<H264AccessUnit>& emitted,
-                                    const char* via, uint64_t nowUs) {
-  for (const auto& au : emitted) {
-    if (!kick.LateWatchSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
-    ++kick.awaitLateOutputs;
-    std::cout << "[native-video-host][catchup] late-output ordinal=" << kick.lateWatch.ordinal
-              << " was=" << (kick.lateWatch.how == KickState::AwaitEnd::Exhausted ? "exhausted" : "deferred")
-              << " auOrdinal=" << au.acceptedInputOrdinal << " src=" << synthetic_reason_name(au.syntheticReason)
-              << " via=" << via << " sinceAcceptedUs=" << (nowUs - kick.lateWatch.acceptedUs)
-              << " sinceEndedUs=" << (nowUs - kick.lateWatch.endedUs) << "\n";
-    kick.lateWatch = KickState::AwaitLateWatch{};
-    break;
+// Output loss of an encode call or of an await collect (Codex r11 s4: one recovery path). Dropped output
+// breaks the reference chain; a rejected input by itself does not. Avoid turning ordinary MFT input
+// backpressure into an IDR storm while recovering real output loss.
+static void encode_send_h264_output_failure(HostContext& hx, bool hadUnits, uint32_t processOutputErrors) {
+  auto& encoder = hx.encoder;
+  if (hadUnits || processOutputErrors > 0) {
+    encoder.ResetTimelineAnchors(hx.capture);
+    encoder.RequestKey(kHostKeyReasonEncodeLoss);
   }
-  if (!kick.await.active) return false;
-  for (const auto& au : emitted) {
-    if (!kick.AwaitSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
-    const bool byCollect = via[0] == 'c', byKick = via[0] == 'k';
-    ++(byCollect ? kick.awaitObservedByCollect : byKick ? kick.awaitObservedByKick : kick.awaitObservedByOther);
-    std::cout << "[native-video-host][catchup] output ordinal=" << kick.await.ordinal
-              << " auOrdinal=" << au.acceptedInputOrdinal << " via=" << via
-              << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs)
-              << " kickSubmitted=" << (kick.await.kickSubmitted ? 1 : 0) << "\n";
-    kick.EndAwait(KickState::AwaitEnd::Observed, nowUs);
-    return true;
+  const uint64_t failureUs = qpc_now_us();
+  if (!encoder.encodeErrorSinceUs) encoder.encodeErrorSinceUs = failureUs;
+  if (failureUs - encoder.encodeErrorSinceUs >= 2000000ULL)
+    encoder.RequestOutputRepair(failureUs);
+  ++encoder.encodeFailCount;
+  if ((encoder.encodeFailCount % 60) == 1) {
+    std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
   }
-  return false;
 }
 
-// r10 (Codex r10 s1): the output half of an encode call for an open await -- collect what the MFT
-// already has WITHOUT an input (H264Encoder::collect_outputs), judge it against the await, and send it
-// down the ordinary emit path. No ProcessInput, so no accepted ordinal / PTS / GOP / RC input and no
-// accepted-input bookkeeping; the emitted AUs are synthetic-path output (servedBootstrap) of this tick's
-// own scratch context, so real-frame counters and frame gating do not move. True: the await was
-// satisfied here (no kick will be made).
-bool encode_send_h264_collect_await(HostContext& hx, TickContext& tc) {
+// r11 (host_catchup_await.hpp): one tick of an open catch-up await on the product path -- the same
+// catchup_await_tick the deterministic test drives, with the ordinary emit stage behind emit(). The
+// collected AUs go through encode_send_h264_emit_au on a scratch tick whose generation is the await's
+// (identity-checked) and which is synthetic-path output (servedBootstrap, exactly like the kick / refresh
+// output: no raw byte count, no frame-gating reference). Its failure flags are not dropped: a send
+// failure ends the loop and an encoder reset / reconnect ends the tick, as in encode_send_h264; a collect
+// error runs the encode call's output-failure recovery. Flow::Next = carry on with this tick.
+Flow encode_send_h264_await_tick(HostContext& hx, TickContext& tc) {
   auto& kick = hx.kick;
   auto& encoder = hx.encoder;
   auto& sender = hx.sender;
-  std::vector<H264AccessUnit> units;
-  H264CollectStats cs{};
-  const uint64_t collectStartUs = qpc_now_us();
-  const bool ok = encoder.codec.collect_outputs(&units, &cs);
-  const uint64_t collectEndUs = qpc_now_us();
-  ++kick.awaitCollectCalls;
-  kick.awaitCollectAus += cs.aus;
-  if (au_trace_enabled() && (cs.aus > 0 || cs.haveOutput > 0 || cs.drainErrors > 0 || !ok)) {
-    std::cout << "[native-video-host][catchup] collect ordinal=" << kick.await.ordinal
-              << " sinceAcceptedUs=" << (collectStartUs - kick.await.acceptedUs) << " events=" << cs.events
-              << " haveOutput=" << cs.haveOutput << " needInput=" << cs.needInput << " aus=" << cs.aus
-              << " drainErrors=" << cs.drainErrors << " us=" << cs.us << " ok=" << (ok ? 1 : 0) << "\n";
-  }
-  if (!ok || units.empty()) return false;
-  const bool satisfied = catchup_observe_emitted(kick, encoder.codec.instance_id(), units, "collect", collectEndUs);
-  // the emit stage on a scratch tick: synthetic-path output, stamped with the collect call's own times
+  CatchupAwaitIdentity id;
+  id.codecInstance = encoder.codec.instance_id();
+  id.sessionEpoch = hx.clientSession.epoch.load(std::memory_order_acquire);
+  id.inputEpoch = hx.capture.inputEpoch.load(std::memory_order_acquire);
+  id.streamGeneration = hx.capture.streamGenerationState.load(std::memory_order_acquire);
+  id.streamActive = hx.clientSession.streamControlActive.load(std::memory_order_acquire);
+  const uint64_t startUs = qpc_now_us();
   TickContext ctc;
   ctc.nowUs = tc.nowUs;
   ctc.servedBootstrap = true;
-  ctc.streamGeneration = hx.capture.streamGenerationState.load(std::memory_order_acquire);
+  ctc.streamGeneration = kick.await.streamGeneration;
   D3DReadbackTiming scaleReadbackTiming{};
   uint64_t preEncodePrepUs = 0, scaleUs = 0, nv12Us = 0;
-  const uint64_t encodeStartUs = collectStartUs, encodeInputUs = collectStartUs, queueToEncodeUs = 0,
-                 callbackToEncodeStartUs = 0, encodeEndUs = collectEndUs;
+  const uint64_t encodeStartUs = startUs, encodeInputUs = startUs, queueToEncodeUs = 0, callbackToEncodeStartUs = 0;
+  uint64_t encodeEndUs = startUs;
   H264EncodeFrameStats encodeStats{};
-  encodeStats.encodeCallUs = cs.us;
   bool encoderResetTriggered = false, sessionReconnectTriggered = false, countedRawForInput = true;
   size_t backlog = 0;
   {
@@ -164,12 +143,31 @@ bool encode_send_h264_collect_await(HostContext& hx, TickContext& tc) {
   H264AuBatch b{scaleReadbackTiming, preEncodePrepUs, scaleUs, nv12Us, encodeStartUs, encodeInputUs,
                 queueToEncodeUs, callbackToEncodeStartUs, encodeStats, encodeEndUs, encoderResetTriggered,
                 sessionReconnectTriggered, countedRawForInput, backlog >= 2};
-  for (auto& au : units) {
+  const auto emit = [&](H264AccessUnit& au) -> int {
+    encodeEndUs = qpc_now_us();
+    ctc.lastAuHandedToSender = false;
     const AuFlow f = encode_send_h264_emit_au(hx, ctc, b, au);
-    if (f == AuFlow::Break) break;
+    int e = ctc.lastAuHandedToSender ? kEmitHanded : 0;
+    if (f == AuFlow::Break || ctc.sendFailed || encoderResetTriggered || sessionReconnectTriggered) e |= kEmitStop;
+    return e;
+  };
+  const CatchupAwaitTickResult r = catchup_await_tick(kick, encoder.codec, id, startUs, emit, std::cout);
+  if (au_trace_enabled() && r.step != CatchupAwaitStep::Idle && (r.collected > 0 || r.cs.haveOutput > 0)) {
+    std::cout << "[native-video-host][catchup] collect step=" << catchup_await_step_name(r.step)
+              << " events=" << r.cs.events << " haveOutput=" << r.cs.haveOutput << " needInput=" << r.cs.needInput
+              << " collected=" << r.collected << " handed=" << r.handed << " us=" << r.cs.us << "\n";
   }
-  if (ctc.sendFailed) tc.sendFailed = true;
-  return satisfied;
+  if (r.step == CatchupAwaitStep::CollectError) {
+    encode_send_h264_output_failure(hx, r.droppedOnError > 0, r.cs.drainErrors);
+    return Flow::Continue;
+  }
+  if (ctc.sendFailed) {
+    tc.sendFailed = true;
+    std::cout << "[native-video-host] client disconnected\n";
+    return Flow::Break;
+  }
+  if (encoderResetTriggered || sessionReconnectTriggered) return Flow::Continue;
+  return Flow::Next;
 }
 
 Flow encode_send_h264(HostContext& hx, TickContext& tc) {
@@ -415,17 +413,10 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
      // A catch-up is an ordinary delta under the cap (no admit-always), like the frame it replaces.
-     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonCatchup && !tc.awaitKick;
+     adm.servedBootstrap = servedBootstrap && tc.syntheticReason != kSyntheticReasonCatchup;
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
-       if (servedBootstrap && tc.awaitKick && kick.await.active) {
-         // r9: the extra kick waits like any delta; it is tried again until the await deadline
-         kick.await.kickSubmitted = false;
-         kick.await.kickDueUs = qpc_now_us() + KickState::CatchupDelayUs(hx.encoder.activeFps);
-         ++kick.awaitKickRefused;
-         return Flow::Continue;
-       }
        // The skipped picture is the newest content: owe it a prompt catch-up (host_kick.hpp).
        const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;
        if (!servedBootstrap || catchupInput) {
@@ -476,26 +467,37 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     const uint64_t callInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
     encoder.codec.set_next_input_epoch(callInputEpoch);
     const uint64_t acceptedBefore = encoder.codec.accepted_input_count();
-    // r9/r10: this input is the one extra kick of an await (the collect step ran first this tick and
-    // did not satisfy it -- host_stage_pop_frame.cpp)
-    const bool awaitKickInput = servedBootstrap && tc.awaitKick;
-    // r10 trace only (Codex r10 s3): what a REAL input changed against the previous real input -- a
-    // subsampled (8 px grid) compare of the CPU capture payload, its changed-sample count and bounding
-    // box. Tells a harness repaint from a cursor / capture-duplicate / other change while the marker id
-    // stays the same. No GPU readback; nothing else reads it.
+#if REMOTE60_MOTION_SETTLE_DIAG
+    // r10/r11 DIAG builds only, with the per-AU trace (Codex r10 s3, r11 s2): what a REAL input changed
+    // against the previous real input, from the CPU capture payload -- a 64-bit hash of the whole payload,
+    // the count of changed 8-byte words at full resolution, and the bounding box of changed samples on an
+    // 8 px grid (a hint where). Tells a harness repaint from a capture duplicate (hash equal) or another
+    // small change while the marker id stays the same. No GPU readback; nothing else reads it.
     if (au_trace_enabled() && !servedBootstrap && payload && !payload->empty() && w > 0 && h > 0 && stride >= w * 4) {
       static std::shared_ptr<std::vector<uint8_t>> prevPayload;
       static uint32_t prevW = 0, prevH = 0, prevStride = 0;
+      const size_t bytes = payload->size();
+      uint64_t hash = 1469598103934665603ULL;
+      const size_t words = bytes / 8;
+      const uint8_t* cur = payload->data();
+      for (size_t i = 0; i < words; ++i) {
+        uint64_t v;
+        std::memcpy(&v, cur + i * 8, 8);
+        hash = (hash ^ v) * 1099511628211ULL;
+      }
       uint32_t changed = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+      uint64_t changedWords = 0;
       const bool comparable = prevPayload && prevW == w && prevH == h && prevStride == stride &&
-                              prevPayload->size() == payload->size();
+                              prevPayload->size() == bytes;
       if (comparable) {
-        const uint8_t* a0 = payload->data();
-        const uint8_t* b0 = prevPayload->data();
+        const uint8_t* prev = prevPayload->data();
+        for (size_t i = 0; i < words; ++i) {
+          if (std::memcmp(cur + i * 8, prev + i * 8, 8) != 0) ++changedWords;
+        }
         for (uint32_t y = 0; y < h; y += 8) {
           for (uint32_t x = 0; x < w; x += 8) {
             const size_t off = static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4;
-            if (std::memcmp(a0 + off, b0 + off, 4) != 0) {
+            if (std::memcmp(cur + off, prev + off, 4) != 0) {
               ++changed;
               x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
             }
@@ -503,12 +505,14 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         }
       }
       std::cout << "[native-video-host][cap] version=" << version << " ordinal=" << (acceptedBefore + 1)
-                << " comparable=" << (comparable ? 1 : 0) << " changed=" << changed;
+                << " comparable=" << (comparable ? 1 : 0) << " hash=" << std::hex << hash << std::dec
+                << " changedWords=" << changedWords << " changed=" << changed;
       if (changed > 0) std::cout << " bbox=" << x0 << "," << y0 << "-" << x1 << "," << y1;
       std::cout << "\n";
       prevPayload = payload;
       prevW = w; prevH = h; prevStride = stride;
     }
+#endif
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -603,46 +607,35 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
         catchupAcceptedVersion = kick.catchup.version;
       }
       kick.NoteInputAccepted(catchupInput);
-      kick.NoteAwaitInputAccepted(awaitKickInput);
+      kick.NoteAwaitOtherInputAccepted();
     } else if (catchupInput) {
       ++kick.catchupNotAccepted;
     }
-    if (awaitKickInput && !inputAccepted && kick.await.active) {
-      // r9: not taken -- the extra kick is tried again until the await deadline, never past it
-      kick.await.kickSubmitted = false;
-      kick.await.kickDueUs = qpc_now_us() + KickState::CatchupDelayUs(hx.encoder.activeFps);
-      ++kick.awaitKickRefused;
-    }
   }
-  // r9 (host_kick.hpp CatchupAwait): what the AUs this call emits mean for an awaited catch-up output,
-  // and whether the catch-up accepted in this call came out in it. Run on the AUs that go on to the
-  // emit stage (none on a failed call, none after a provenance rebuild discarded them).
-  const auto settle_await = [&](const std::vector<H264AccessUnit>& emitted) {
+  // r11 (host_kick.hpp CatchupAwait): what the AUs this call HANDED TO THE SENDER mean for an awaited
+  // catch-up output (observed via "other": this input's call drained it in accepted order), for the late
+  // watch of a deferred one, and whether the catch-up accepted in this call came out in it. Runs after
+  // the emit loop on the AUs the emit stage actually enqueued / sent -- none on a failed call, none after
+  // a provenance rebuild discarded them, none on an early exit before the loop.
+  std::vector<CatchupHandedAu> handed;
+  const auto settle_await = [&]() {
     const uint64_t inst = encoder.codec.instance_id();
     const uint64_t settleUs = qpc_now_us();
-    catchup_observe_emitted(kick, inst, emitted, awaitKickInput ? "kick" : "other", settleUs);
-    if (kick.await.active) {
-      const bool wasKick = awaitKickInput && inputAccepted;
-      const bool wasOther = !awaitKickInput && inputAccepted && kick.await.advancedByOther;
-      if (wasKick || wasOther) {
-        std::cout << "[native-video-host][catchup] await " << (wasKick ? "exhausted" : "deferred")
-                  << " ordinal=" << kick.await.ordinal << " why=" << (wasKick ? "no-au-after-kick" : "other-input")
-                  << " sinceAcceptedUs=" << (settleUs - kick.await.acceptedUs)
-                  << " inputHr=0x" << std::hex << static_cast<uint32_t>(encodeStats.processInputHr) << std::dec
-                  << "\n";
-      }
-      kick.NoteAwaitCallEnded(awaitKickInput, inputAccepted, settleUs);
-    }
+    catchup_await_observe_handed(kick, inst, handed, "other", settleUs, std::cout);
     if (catchupAcceptedOrdinal != 0) {
       bool own = false;
-      for (const auto& au : emitted) {
-        if (au.acceptedInputOrdinal >= catchupAcceptedOrdinal && au.inputEpoch == callInputEpoch) own = true;
+      for (const auto& a : handed) {
+        if (a.ordinal >= catchupAcceptedOrdinal && a.inputEpoch == callInputEpoch) own = true;
       }
       if (own) {
         ++kick.awaitOutputOwnCall;
-        std::cout << "[native-video-host][catchup] output ordinal=" << catchupAcceptedOrdinal
-                  << " via=own\n";
+        std::cout << "[native-video-host][catchup] output ordinal=" << catchupAcceptedOrdinal << " via=own\n";
       } else {
+        if (kick.await.active) {
+          std::cout << "[native-video-host][catchup] await cancelled ordinal=" << kick.await.ordinal
+                    << " why=superseded-by=" << catchupAcceptedOrdinal << "\n";
+          kick.EndAwait(KickState::AwaitEnd::Cancelled, settleUs);
+        }
         kick.OpenAwait(inst, clientSession.epoch.load(std::memory_order_acquire), callInputEpoch, streamGeneration,
                        catchupAcceptedOrdinal, catchupAcceptedVersion, settleUs);
         std::cout << "[native-video-host][catchup] await open ordinal=" << catchupAcceptedOrdinal
@@ -651,21 +644,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     }
   };
    if (!surfaceEncoded && !bgraCall.ok) {
-    settle_await({});
-    // Dropped output breaks the reference chain; a rejected input by itself does not. Avoid
-    // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.
-    if (!units.empty() || encodeStats.processOutputErrorCount > 0) {
-      encoder.ResetTimelineAnchors(capture);
-      encoder.RequestKey(kHostKeyReasonEncodeLoss);
-    }
-    const uint64_t failureUs = qpc_now_us();
-    if (!encoder.encodeErrorSinceUs) encoder.encodeErrorSinceUs = failureUs;
-    if (failureUs - encoder.encodeErrorSinceUs >= 2000000ULL)
-      encoder.RequestOutputRepair(failureUs);
-    ++encoder.encodeFailCount;
-    if ((encoder.encodeFailCount % 60) == 1) {
-      std::cout << "[native-video-host] encode failed count=" << encoder.encodeFailCount << "\n";
-    }
+    settle_await();
+    encode_send_h264_output_failure(hx, !units.empty(), encodeStats.processOutputErrorCount);
     // A06: the provenance handling ran inside EncodeBgraWithProvenance above, so this early
     // return cannot skip it either.
     return Flow::Continue;
@@ -829,8 +809,10 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     }
   }
 
-  settle_await(units);
-  if (units.empty()) return Flow::Continue;
+  if (units.empty()) {
+    settle_await();
+    return Flow::Continue;
+  }
 
   stats.captureAgeSumUs += captureAgeAtCallbackUs;
   stats.captureAgeMaxUs = std::max(stats.captureAgeMaxUs, captureAgeAtCallbackUs);
@@ -845,6 +827,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // for the peer to re-Hello rather than exiting.
     ++sender.udpTxFail;
     if (args.seconds == 0) {
+      settle_await();
       return Flow::Continue;
     }
   }
@@ -868,10 +851,14 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                   queueToEncodeUs, callbackToEncodeStartUs, encodeStats, encodeEndUs, encoderResetTriggered,
                   sessionReconnectTriggered, countedRawForInput, senderBacklogged};
     for (auto& au : units) {  // non-const: the UDP path moves au.bytes (ledger H-08)
+      const CatchupHandedAu prov{au.acceptedInputOrdinal, au.inputEpoch, au.syntheticReason};
+      tc.lastAuHandedToSender = false;
       const AuFlow f = encode_send_h264_emit_au(hx, tc, b, au);
+      if (tc.lastAuHandedToSender) handed.push_back(prov);
       if (f == AuFlow::Continue) continue;
       if (f == AuFlow::Break) break;
     }
+  settle_await();
 
   if (encoderResetTriggered || sessionReconnectTriggered) {
     return Flow::Continue;
