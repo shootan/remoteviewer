@@ -936,6 +936,10 @@ target_include_directories(remote60_connect_op_gate_test PRIVATE src)
 target_link_libraries(remote60_connect_op_gate_test PRIVATE common ws2_32)
 target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNECT_GATE_TEST_HOOKS=1)
 
+# keepalive-multi r1: the PCs the phone keeps -- limit, per-PC park, LRU, epoch (session_registry.hpp). Pure.
+add_executable(remote60_session_registry_test src/session_registry_test.cpp)
+target_include_directories(remote60_session_registry_test PRIVATE src)
+
 add_executable(remote60_client_park_state_test
   src/client_park_state_test.cpp
   src/native_video_client_shared_core.cpp
