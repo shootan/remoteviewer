@@ -74,6 +74,9 @@
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
 #include <cstdlib>
+#if REMOTE60_ENCODER_POLL_DIAG
+#include "h264_slice_qp.hpp"
+#endif
 
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
@@ -153,6 +156,20 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
   auto& countedRawForInput = b.countedRawForInput;
   auto& senderBacklogged = b.senderBacklogged;
   if (au.bytes.empty()) return AuFlow::Continue;
+#if REMOTE60_ENCODER_POLL_DIAG
+  // r3 DIAG trace only: the first slice's starting QP (-1 = Unknown; h264_slice_qp.hpp, the r10 reader),
+  // read before the UDP path moves the bytes; one reader per codec instance. Not the picture's mean QP.
+  int traceSliceQp = -1;
+  if (eop_trace_enabled()) {
+    static H264SliceQpReader qpReader;
+    static uint64_t qpReaderInstance = 0;
+    if (qpReaderInstance != encoder.codec.instance_id()) {
+      qpReader = H264SliceQpReader{};
+      qpReaderInstance = encoder.codec.instance_id();
+    }
+    traceSliceQp = qpReader.Read(au.bytes.data(), au.bytes.size());
+  }
+#endif
   // P11 -- the epoch gate. An async MFT returns an OLDER input's AU during the current call, so
   // the first call after a flush emits the pre-flush picture: true old capture stamp, flagged real,
   // on the new generation (2026-09-07 15:15:59 seq 24484, 820 ms behind its send time; the viewer
@@ -547,6 +564,7 @@ if (eop_trace_enabled()) {
             << " ordinal=" << au.acceptedInputOrdinal << " captureUs=" << hdr.captureQpcUs
             << " acceptedUs=" << au.inputAcceptedAtUs << " enqueueUs=" << sendStartUs
             << " lagOrd=" << (accCount >= au.acceptedInputOrdinal ? accCount - au.acceptedInputOrdinal : 0)
+            << " sliceQp=" << traceSliceQp
             << " enqueued=" << (enqueuedForSend ? 1 : 0) << "\n";
 }
 #endif

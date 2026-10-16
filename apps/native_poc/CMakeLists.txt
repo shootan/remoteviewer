@@ -1256,6 +1256,12 @@ add_executable(remote60_host_frame_gate_test
 )
 target_include_directories(remote60_host_frame_gate_test PRIVATE src)
 
+# encoder-output-poll r3: the DIAG trace's first-slice QP reader (h264_slice_qp.hpp, ported from the r10 research
+# branch unchanged); real encoders of the machine (gpu)
+add_executable(remote60_h264_slice_qp_test src/mf_h264_codec.cpp src/h264_slice_qp_test.cpp)
+target_include_directories(remote60_h264_slice_qp_test PRIVATE src)
+target_link_libraries(remote60_h264_slice_qp_test PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+
 add_executable(remote60_host_kick_test
   src/host_kick_test.cpp
 )

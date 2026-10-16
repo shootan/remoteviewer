@@ -495,7 +495,7 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " staticRefreshCount=" << kick.staticRefreshCount
 #if REMOTE60_TRAILING_REFINE_EXPERIMENT
             << " trailingRefineCount=" << kick.refineCount << " trailingRefineDefer=" << kick.refineDeferCount
-            << " trailingRefineCancel=" << kick.refineCancelCount
+            << " trailingRefineCancel=" << kick.refineCancelCount << " trailingRefineWait=" << kick.refineWaitCount
 #endif
             << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
             << " stampClampCount=" << kick.stampClampCount

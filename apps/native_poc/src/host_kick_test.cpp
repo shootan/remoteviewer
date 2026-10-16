@@ -242,6 +242,113 @@ void TestTrailingRefine() {
   }
 }
 
+// encoder-output-poll r3, C500: the refine decided at its own quiet check (KickState::DecideRefine), driven the
+// way stage_pop_frame applies it; the liveness kick keeps the 2-frame edge (DecideTrailing, refine off).
+using RA = KickState::RefineAction;
+struct Scr { bool realWaiting = false, active = true, epoch = true, busy = false; uint64_t publishUs = 0; };
+RA Check(KickState& k, uint64_t nowUs, const Scr& s) {
+  KickState::RefineInputs ri;
+  ri.owed = k.RefineOwed();
+  ri.realWaiting = s.realWaiting;
+  ri.nowUs = nowUs;
+  ri.quietSinceUs = std::max(k.lastRealInputDoneUs, s.publishUs);
+  ri.streamActive = s.active;
+  ri.epochMatch = s.epoch;
+  ri.senderBusy = s.busy;
+  ri.alreadyDeferred = k.refineDeferredForInputCaptureUs == k.lastRealInputCaptureUs;
+  const RA a = KickState::DecideRefine(ri);
+  if (a == RA::Wait) {
+    k.refineCheckAtUs = ri.quietSinceUs + KickState::kRefineQuietUs;
+    if (k.refineCheckAtUs <= nowUs) k.refineCheckAtUs = nowUs + KickState::kRefineDeferUs;
+  } else if (a == RA::Defer) {
+    k.refineDeferredForInputCaptureUs = k.lastRealInputCaptureUs;
+    k.refineCheckAtUs = nowUs + KickState::kRefineDeferUs;
+  } else {
+    k.refineCheckAtUs = 0;
+    if (a == RA::Refine || a == RA::Cancel) k.MarkKickedForCurrentInput();
+  }
+  return a;
+}
+void RealInput(KickState& k, uint64_t captureUs, uint64_t doneUs) {
+  k.lastRealInputCaptureUs = captureUs;
+  k.lastEmittedAuCaptureUs = captureUs;  // the poll fix: its AU came out in the same call
+  k.lastRealInputDoneUs = doneUs;
+  k.refineCheckAtUs = doneUs + KickState::kRefineQuietUs;
+}
+
+void TestRefineC500() {
+  constexpr uint64_t T = 10 * kSec;
+  Scr s;
+  {  // [q1] 499 ms -> nothing; 500 ms -> one refine; then nothing
+    KickState k;
+    RealInput(k, T, T);
+    expect(Check(k, T + 499999, s) == RA::Wait && k.refineCheckAtUs == T + 500000, "c500: 499 ms -> wait, next check at 500 ms");
+    expect(Check(k, T + 500000, s) == RA::Refine && k.refineCheckAtUs == 0, "c500: 500 ms quiet -> one refine");
+    expect(Check(k, T + 900000, s) == RA::None, "c500: no second refine for the same input");
+  }
+  {  // [q2] the r2 counterexample kept: a 34 ms WGC gap inside a scroll was "idle" at the kick edge
+    KickState k;
+    RealInput(k, T, T);
+    KickState::TrailingInputs ti;
+    ti.needKick = k.NeedKick(false);
+    ti.refineEnabled = true; ti.refineOwed = k.RefineOwed(); ti.streamActive = ti.epochMatch = true;
+    expect(KickState::DecideTrailing(ti) == KickState::TrailingAction::Refine, "c500: old rule refines a 34 ms gap (the misread)");
+    expect(Check(k, T + 34000, s) == RA::Wait, "c500: the 500 ms rule waits at the same 34 ms gap");
+    RealInput(k, T + 40000, T + 40000);  // the scroll goes on
+    expect(Check(k, T + 520000, s) == RA::Wait && k.refineCheckAtUs == T + 540000, "c500: motion moves the quiet window");
+    expect(Check(k, T + 540000, s) == RA::Refine, "c500: refine only after the last motion frame + 500 ms");
+  }
+  {  // [q3] the liveness kick is unchanged (2-frame edge, NeedKick) and is the input's refine (merged)
+    KickState k;
+    k.lastRealInputCaptureUs = T; k.lastEmittedAuCaptureUs = T - 1;  // held
+    k.lastRealInputDoneUs = T; k.refineCheckAtUs = T + 500000;
+    k.Arm(T, true, 60);
+    expect(k.Due(T + 33334) && k.NeedKick(false), "c500: held input -> kick due at the 2-frame edge as before");
+    k.MarkKickedForCurrentInput();  // stage_pop_frame served the kick
+    expect(Check(k, T + 500000, s) == RA::None, "c500: kick + refine merged -> no refine");
+  }
+  {  // [q4] a published capture (even one the gate skipped) or a waiting real frame is not quiet
+    KickState k;
+    RealInput(k, T, T);
+    Scr p = s; p.publishUs = T + 300000;
+    expect(Check(k, T + 500000, p) == RA::Wait && k.refineCheckAtUs == T + 800000, "c500: newer publish -> wait to publish + 500 ms");
+    Scr w = s; w.realWaiting = true;
+    expect(Check(k, T + 800000, w) == RA::Wait && k.refineCheckAtUs > T + 800000, "c500: a waiting real frame -> wait (future check)");
+    RealInput(k, T + 810000, T + 810000);  // it was encoded: a new episode
+    expect(Check(k, T + 1310000, s) == RA::Refine, "c500: the new episode gets its one refine");
+  }
+  {  // [q5] pause / epoch -> cancel, not revived
+    KickState k;
+    RealInput(k, T, T);
+    Scr p = s; p.active = false;
+    expect(Check(k, T + 500000, p) == RA::Cancel && !k.RefineOwed(), "c500: paused -> cancel");
+    expect(Check(k, T + 900000, s) == RA::None, "c500: resume does not revive it");
+    KickState k2;
+    RealInput(k2, T, T);
+    Scr e = s; e.epoch = false;
+    expect(Check(k2, T + 500000, e) == RA::Cancel, "c500: epoch changed -> cancel");
+  }
+  {  // [q6] busy sender (queue, on-wire or barrier): one defer of 100 ms, then cancel; bounded
+    KickState k;
+    RealInput(k, T, T);
+    Scr b = s; b.busy = true;
+    expect(Check(k, T + 500000, b) == RA::Defer && k.refineCheckAtUs == T + 600000, "c500: busy -> one defer (+100 ms)");
+    expect(Check(k, T + 600000, b) == RA::Cancel && k.refineCheckAtUs == 0 && !k.RefineOwed(), "c500: busy again -> cancel");
+    KickState k2;
+    RealInput(k2, T, T);
+    (void)Check(k2, T + 500000, b);
+    expect(Check(k2, T + 600000, s) == RA::Refine, "c500: clear after the defer -> refine");
+  }
+  {  // [q7] synthetic / refresh inputs never open an episode; no real input -> nothing
+    KickState k;
+    expect(Check(k, T, s) == RA::None, "c500: no real input -> nothing");
+    RealInput(k, T, T);
+    (void)Check(k, T + 500000, s);
+    k.lastEmittedAuCaptureUs = T + 2000000;  // refreshes later
+    expect(Check(k, T + 3000000, s) == RA::None, "c500: refreshes do not reopen");
+  }
+}
+
 int main() {
   TestArmDueCancel();
   TestOneKickPerHeldInput();
@@ -249,6 +356,7 @@ int main() {
   TestStaticRefreshCadence();
   TestRealStampClampedBehindSyntheticStamp();
   TestTrailingRefine();
+  TestRefineC500();
   if (gFailures == 0) {
     std::printf("host_kick_test: PASS\n");
     return 0;

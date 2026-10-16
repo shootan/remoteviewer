@@ -349,7 +349,17 @@ void SenderState::StartThread(VideoTransport transport, bool useH264, const Args
         item = std::move(sender.queue.front());
         sender.queue.pop_front();
         queueDepthAtDequeue = sender.queue.size();
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+        sender.itemsOnWire.fetch_add(1, std::memory_order_acq_rel);  // under sender.mu, with the pop
+#endif
       }
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+      // ends this item's on-wire span on every exit of the iteration (sent, dropped, fenced, aborted)
+      struct OnWireSpan {
+        std::atomic<uint32_t>& n;
+        ~OnWireSpan() { n.fetch_sub(1, std::memory_order_acq_rel); }
+      } onWireSpan{sender.itemsOnWire};
+#endif
       // One consistent set of egress parameters for this frame's pacing and chunking, instead of
       // three process globals re-read at different points inside the send. (Ledger H-22.)
       const UdpEgressConfig egress = sender.EgressSnapshot();

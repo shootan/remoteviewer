@@ -185,9 +185,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       const bool needKick = kick.NeedKick(barrierClosed) || encoder.forceKeyNext;
       bool rearm = false;
       bool refine = false;
-#if REMOTE60_TRAILING_REFINE_EXPERIMENT
-      // encoder-output-poll r2, experiment C: the trailing episode of the last real input gets one
-      // ordinary-P re-serve even though its AU already came out (KickState::DecideTrailing).
+#if 0  // encoder-output-poll r2 as-built refine at the kick edge -- superseded by the r3 C500 check below
       if (!needKick && kick.RefineOwed()) {
         bool senderBlocked = barrierClosed;
         if (transport == VideoTransport::Udp) {
@@ -253,7 +251,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         // (Ledger H-26b, second pass.)
         rearm = barrierClosed || encoder.forceKeyNext;
       }
-#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+#if 0  // r2 as-built
       if (refine) {
         if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
           // An ordinary delta of the cached frame: no key request, gated like a delta at admission.
@@ -293,6 +291,80 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // within a few loop ticks). kick_try_fill re-validates identity/secure/size, so a lock screen
   // or a mid-switch target stays black rather than repainting a stale picture; a failed fill
   // also stamps the attempt clock so the (uncached) secure probe is not repeated every tick.
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+  // encoder-output-poll r3, C500: one ordinary-P refine of the newest real input's picture once nothing new
+  // has been encoded or published for KickState::kRefineQuietUs. Separate from the liveness kick above
+  // (its time and order are unchanged); a kick already served for the input is the refine (merged).
+  if (!servedBootstrap && useH264 && kick.refineCheckAtUs != 0 && nowUs >= kick.refineCheckAtUs) {
+    KickState::RefineInputs ri;
+    ri.owed = kick.RefineOwed();
+    ri.nowUs = nowUs;
+    uint64_t latestPublishUs = 0;
+    {
+      std::lock_guard<std::mutex> lk(res.frame.mu);
+      ri.realWaiting = (res.frame.version != stats.lastVersionSent) && res.frame.payload && !res.frame.payload->empty();
+      latestPublishUs = res.frame.queuePushUs;
+    }
+    ri.quietSinceUs = std::max(kick.lastRealInputDoneUs, latestPublishUs);
+    ri.streamActive = clientSession.streamControlActive.load(std::memory_order_acquire);
+    ri.epochMatch = kick.lastRealInputSessionEpoch == clientSession.epoch.load(std::memory_order_acquire) &&
+                    kick.lastRealInputInputEpoch == capture.inputEpoch.load(std::memory_order_acquire);
+    uint32_t queued = 0, onWire = 0;
+    bool waitingForKey = false;
+    if (transport == VideoTransport::Udp) {
+      std::lock_guard<std::mutex> lk(sender.mu);
+      queued = static_cast<uint32_t>(sender.queue.size());
+      onWire = sender.itemsOnWire.load(std::memory_order_acquire);
+      waitingForKey = sender.waitingForKey;
+    }
+    ri.senderBusy = waitingForKey || queued != 0 || onWire != 0;
+    ri.alreadyDeferred = kick.refineDeferredForInputCaptureUs == kick.lastRealInputCaptureUs;
+    const KickState::RefineAction act = KickState::DecideRefine(ri);
+    bool filled = false;
+    if (act == KickState::RefineAction::Wait) {
+      kick.refineCheckAtUs = ri.quietSinceUs + KickState::kRefineQuietUs;  // a future time: no spin
+      if (kick.refineCheckAtUs <= nowUs) kick.refineCheckAtUs = nowUs + KickState::kRefineDeferUs;  // real waiting
+      ++kick.refineWaitCount;
+    } else if (act == KickState::RefineAction::Defer) {
+      kick.refineDeferredForInputCaptureUs = kick.lastRealInputCaptureUs;
+      kick.refineCheckAtUs = nowUs + KickState::kRefineDeferUs;
+      ++kick.refineDeferCount;
+    } else {
+      kick.refineCheckAtUs = 0;
+      if (act == KickState::RefineAction::Cancel) {
+        kick.MarkKickedForCurrentInput();
+        ++kick.refineCancelCount;
+      } else if (act == KickState::RefineAction::Refine) {
+        kick.MarkKickedForCurrentInput();  // the input's one synthetic, whether or not the fill succeeds
+        if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+          filled = true;
+          servedBootstrap = true;
+          tc.servedRefine = true;
+          tc.syntheticKind = 3;
+          seq = 0;
+          version = stats.lastVersionSent;
+          streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+          captureUs = nowUs;
+          callbackUs = nowUs;
+          queuePushUs = nowUs;
+          ++kick.refineCount;
+        } else {
+          ++kick.refineCancelCount;  // fill refused (identity / secure / size): not a refine
+        }
+      }
+    }
+    if (act != KickState::RefineAction::Wait || ri.realWaiting) {
+      std::cout << "[native-video-host][refine] input=" << kick.lastRealInputCaptureUs << " act="
+                << (act == KickState::RefineAction::Refine ? (filled ? "refine" : "fill-fail")
+                    : act == KickState::RefineAction::Defer ? "defer"
+                    : act == KickState::RefineAction::Cancel ? "cancel"
+                    : act == KickState::RefineAction::Wait ? "wait" : "none")
+                << " quietMs=" << (nowUs > ri.quietSinceUs ? (nowUs - ri.quietSinceUs) / 1000 : 0)
+                << " active=" << (ri.streamActive ? 1 : 0) << " epochMatch=" << (ri.epochMatch ? 1 : 0)
+                << " queued=" << queued << " onWire=" << onWire << " waitKey=" << (waitingForKey ? 1 : 0) << "\n";
+    }
+  }
+#endif
   if (!servedBootstrap && kick.staticRefreshIntervalUs > 0 && useH264 &&
       clientSession.streamControlActive.load(std::memory_order_acquire) && kick.StaticRefreshDue(nowUs)) {
     bool refreshBlocked = false;

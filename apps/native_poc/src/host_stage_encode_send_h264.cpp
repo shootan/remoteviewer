@@ -527,6 +527,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
 #if REMOTE60_TRAILING_REFINE_EXPERIMENT
     kick.lastRealInputSessionEpoch = clientSession.epoch.load(std::memory_order_acquire);
     kick.lastRealInputInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
+    kick.lastRealInputDoneUs = qpc_now_us();
+    kick.refineCheckAtUs = kick.lastRealInputDoneUs + KickState::kRefineQuietUs;  // r3 C500
 #endif
     kick.Arm(qpc_now_us(), useH264, hx.encoder.activeFps);
   }

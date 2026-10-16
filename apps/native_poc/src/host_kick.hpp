@@ -58,6 +58,12 @@ struct KickState {
   uint64_t refineCount = 0;                        // telemetry: refine re-serves submitted
   uint64_t refineDeferCount = 0;                   // telemetry: one-time defers (sender busy)
   uint64_t refineCancelCount = 0;                  // telemetry: episodes ended without a refine
+  // encoder-output-poll r3, C500: the refine is no longer decided at the 2-frame kick edge (that edge
+  // mistook WGC gaps inside a scroll for idle, r2 s0.3) but at its own check, kRefineQuietUs after the
+  // newest real input / newest published capture. The liveness kick keeps its own time and order.
+  uint64_t lastRealInputDoneUs = 0;                // when the newest real input's encode call returned
+  uint64_t refineCheckAtUs = 0;                    // next refine check (0 = none scheduled)
+  uint64_t refineWaitCount = 0;                    // telemetry: checks that found the screen not yet quiet
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
@@ -113,6 +119,31 @@ struct KickState {
   };
   // The trailing-edge decision at a due kick. The existing kick wins and also counts as the episode's
   // refine; a refine never runs on a busy sender (one defer, then cancel), a paused stream or a new epoch.
+  // r3 C500 -------------------------------------------------------------------------------------------
+  static constexpr uint64_t kRefineQuietUs = 500000;   // no new real frame / published capture for this long
+  static constexpr uint64_t kRefineDeferUs = 100000;   // one defer on a busy sender, then cancel
+  enum class RefineAction { None, Wait, Refine, Defer, Cancel };
+  struct RefineInputs {
+    bool owed = false;            // RefineOwed(): the newest real input has had no synthetic yet
+    bool realWaiting = false;     // a newer real frame is published and not consumed
+    uint64_t nowUs = 0;
+    uint64_t quietSinceUs = 0;    // max(newest real input encoded, newest capture published)
+    bool streamActive = false;
+    bool epochMatch = false;      // session + input epoch unchanged since the real input
+    bool senderBusy = false;      // barrier closed, queue not empty, or an AU on the wire
+    bool alreadyDeferred = false; // this episode already took its one defer
+  };
+  // Wait: not quiet yet -- the caller schedules the next check at quietSinceUs + kRefineQuietUs (a future
+  // time, no spin). Refine at most once per real input (the caller marks it, as the kick does).
+  static RefineAction DecideRefine(const RefineInputs& in) {
+    if (!in.owed) return RefineAction::None;
+    if (!in.streamActive || !in.epochMatch) return RefineAction::Cancel;
+    if (in.realWaiting || in.nowUs < in.quietSinceUs + kRefineQuietUs) return RefineAction::Wait;
+    if (in.senderBusy) return in.alreadyDeferred ? RefineAction::Cancel : RefineAction::Defer;
+    return RefineAction::Refine;
+  }
+  // r2 (as-built, superseded by DecideRefine; kept for the counterexample test): the refine decided at
+  // the 2-frame kick edge.
   static TrailingAction DecideTrailing(const TrailingInputs& in) {
     if (in.realWaiting) return TrailingAction::None;
     if (in.needKick) return TrailingAction::Kick;

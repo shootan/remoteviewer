@@ -305,6 +305,9 @@ struct SenderState {
   std::atomic<uint64_t> txControlDatagrams{0};  // UDP control datagrams (0 on TCP)
   std::atomic<uint64_t> txNoPeer{0};
   std::atomic<uint64_t> lastSendStartUs{0};
+  // encoder-output-poll r3 C500 (incremented only in REMOTE60_TRAILING_REFINE_EXPERIMENT builds): AUs
+  // popped from the queue whose send iteration has not finished -- the refine's "on the wire" check.
+  std::atomic<uint32_t> itemsOnWire{0};
   std::atomic<uint64_t> sendDurSumUs{0};
   std::atomic<uint64_t> sendDurMaxUs{0};
   std::atomic<uint64_t> sendCount{0};
