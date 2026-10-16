@@ -146,6 +146,15 @@ int main() {
     rig.E("o|u|A")->phase = 4;  // the fence Pong
     const uint64_t tB = rig.table.Activate(b, 4);
     check("A fenced: B on screen with a NEW binding", tB != 0 && tB != tA && rig.bound == tB);
+    // A tapped again while ITS OWN pause is still confirming: refused by the table itself, not only by the screen
+    rig.table.BeginPark(b, 5);
+    rig.E("o|u|B")->phase = 2;
+    check("B (its own park confirming) cannot be shown again yet", rig.table.Activate(b, 5) == 0 && rig.bound == 0 &&
+                                                                    rig.E("o|u|B")->resumes == 0);
+    rig.E("o|u|B")->phase = 4;
+    check("...and can once fenced (resumed)", rig.table.Activate(b, 6) != 0 && rig.E("o|u|B")->resumes == 1);
+    rig.table.BeginPark(b, 7);
+    rig.E("o|u|B")->phase = 4;
     check("A parked, alive, not closed", phaseOf(rig.table, a) == EntryPhase::Parked && rig.E("o|u|A")->closes == 0);
     // NEGATIVE: the registry alone does not know about the fence
     SessionRegistry reg;

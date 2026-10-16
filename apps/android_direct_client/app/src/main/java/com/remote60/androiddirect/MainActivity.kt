@@ -1216,6 +1216,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // the directory connect in progress (its entry is reserved, not yet up)
     private var connectingHandle = 0L
     private var keptCardsShown = ""
+    // the PC on screen ended on its own (its peer, a runtime failure): its last error stays shown, as 0.2.30's one
+    // session's did -- the native entry is gone by the time the screen reads it
+    private var activeErrorSeen = ""
+    private var endedSessionError = ""
     private var nativeEntries: Map<Long, SessionPark.NativeEntry> = emptyMap()
     // r2 K4 / multi §3: the latest tap made while a park was still confirming, carried out when it settles.
     private var heldTap: SessionPark.TapFallback? = null
@@ -2510,6 +2514,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (binding == 0L) return false
         activeHandle = handle
         activeBinding = binding
+        endedSessionError = ""
         directoryHostKey = if (k.manual) "" else k.hostId
         directoryHostName = k.hostName
         kept[handle] = k.copy(parkedAtMs = 0L, confirmLogged = false)
@@ -2667,6 +2672,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 changed = true
                 diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
                 if (h == activeHandle) {
+                    endedSessionError = activeErrorSeen
                     clearActive()
                 } else {
                     hostsStatusText.text = getString(R.string.hosts_keep_ended, k.hostName, SessionPark.endedReasonText(reason))
@@ -4206,6 +4212,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun renderStatus() {
         val nowMs = SystemClock.elapsedRealtime()
+        if (activeHandle != 0L) activeErrorSeen = NativeSessionBridge.nativeGetLastError(activeHandle)
         keepTick()  // keepalive r1: confirm / end the kept connections before anything reads the status
         // Clipboard text sync (K1): the bridge has no native->Java callback, so the text the host
         // sent is collected on the poll that is already running, and the button follows the host's
@@ -4218,7 +4225,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         renderClipboardButton()
         val statusValue = NativeSessionBridge.nativeGetStatus(activeHandle)
-        val errorValue = NativeSessionBridge.nativeGetLastError(activeHandle)
+        val errorValue =
+            if (activeHandle != 0L) NativeSessionBridge.nativeGetLastError(activeHandle) else endedSessionError
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding))
         syncExpectedContentSize(panelSnapshot, if (selectionStage != SelectionStage.IDLE) "selection_pending" else "panel_snapshot")
         val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
@@ -4229,6 +4237,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (activeHandle != 0L && !isConnecting && !isConnected) {
             // the PC on screen is gone (its peer, a runtime failure): that entry ends; the kept ones stay
             val gone = activeHandle
+            endedSessionError = errorValue
             NativeSessionBridge.nativeEnd(gone, "peer_lost")
             diagnosticsLog.log("keep_end", "handle=$gone host=$directoryHostName reason=peer_lost active=true")
             forgetKept(gone)

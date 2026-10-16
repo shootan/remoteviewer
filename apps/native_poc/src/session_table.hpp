@@ -125,6 +125,10 @@ class SessionTable {
     ReapLocked(nowMs);
     std::shared_ptr<Entry> e = Find(handle);
     if (!e) return 0;
+    {
+      const int own = e->ParkPhaseCode();
+      if (own >= 1 && own <= 3) return 0;  // its own pause is not fenced yet: shown again only once it is
+    }
     for (auto& o : Live()) {
       if (o == e) continue;
       const int ph = o->ParkPhaseCode();
