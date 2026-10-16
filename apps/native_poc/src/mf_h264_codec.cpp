@@ -2445,6 +2445,16 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   const uint64_t processInputStartUs = qpc_now_us();
   HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
   const uint64_t processInputDoneUs = qpc_now_us();
+  encodeStats->processInputStartUs = processInputStartUs;
+  encodeStats->processInputEndUs = processInputDoneUs;
+  size_t evPos = 0;
+  const auto note_event = [&](char kind) {
+    if (evPos + 12 >= sizeof(encodeStats->postInputEvents)) return;
+    const uint64_t dt = qpc_now_us() - processInputDoneUs;
+    const int n = std::snprintf(encodeStats->postInputEvents + evPos, sizeof(encodeStats->postInputEvents) - evPos,
+                                "%s%c%llu", evPos ? "," : "", kind, static_cast<unsigned long long>(dt));
+    if (n > 0) evPos += static_cast<size_t>(n);
+  };
   encodeStats->processInputUs += (processInputDoneUs >= processInputStartUs) ? (processInputDoneUs - processInputStartUs) : 0;
   if (inHr == MF_E_NOTACCEPTING) {
     // Some hardware/async encoders require draining queued output before accepting new input.
@@ -2505,6 +2515,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       ++encodeStats->asyncPollCount;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
       if (ehr == MF_E_NO_EVENTS_AVAILABLE) {
+        note_event('-');
         ++encodeStats->asyncPollNoEventCount;
         if (asyncPollSleepUs > 0) {
           Sleep(static_cast<DWORD>(asyncPollSleepUs));
@@ -2519,6 +2530,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
       sawEvent = true;
       MediaEventType et = MEUnknown;
       (void)ev->GetType(&et);
+      note_event(et == METransformHaveOutput ? 'H' : et == METransformNeedInput ? 'N' : 'O');
       if (et == METransformHaveOutput) {
         ++encodeStats->asyncPollHaveOutputCount;
         sawHaveOutput = true;

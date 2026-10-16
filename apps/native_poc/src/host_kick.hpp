@@ -225,6 +225,14 @@ struct KickState {
     }
     await = CatchupAwait{};
   }
+  // r12 DIAG builds only: the test-only output probe's state (host_stage_encode_send_h264.cpp). Present
+  // in every build so the struct layout does not depend on the flag; nothing outside DIAG code uses it.
+  struct OutputProbe {
+    bool active = false;
+    uint64_t ordinal = 0, codecInstance = 0, acceptedUs = 0;
+    uint32_t probes = 0;
+  };
+  OutputProbe probe;
   // An encode call accepted another input while the AU is awaited. Nothing ends: that call drains in
   // accepted order (it may hand the catch-up's AU to the sender itself), and the collect goes on.
   void NoteAwaitOtherInputAccepted() {

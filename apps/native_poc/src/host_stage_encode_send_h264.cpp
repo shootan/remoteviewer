@@ -170,6 +170,96 @@ Flow encode_send_h264_await_tick(HostContext& hx, TickContext& tc) {
   return Flow::Next;
 }
 
+#if REMOTE60_MOTION_SETTLE_DIAG
+// r12 DIAG builds only, env REMOTE60_NATIVE_DIAG_OUTPUT_PROBE=1 (Codex r12 s3): a TEST-ONLY observation
+// arm, not a product behaviour. After every accepted input whose AU its own call did not drain, each
+// main-loop tick collects what the MFT has WITHOUT an input (the same collect_outputs + emit path as the
+// catch-up await) until that ordinal's AU leaves this host, the next input is accepted, or 1.15 s pass.
+// It services EVERY input's pending output, so it changes sender timing: it answers "was the AU ready
+// before the next encode call" -- an AU a probe collects was ready; no HaveOutput on any probe until the
+// next input means it was released only by that input. Logs one [probe] line per probe that read events.
+bool diag_output_probe_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("REMOTE60_NATIVE_DIAG_OUTPUT_PROBE");
+    return v && v[0] == '1';
+  }();
+  return on;
+}
+
+Flow encode_send_h264_probe_tick(HostContext& hx, TickContext& tc) {
+  auto& kick = hx.kick;
+  auto& encoder = hx.encoder;
+  auto& sender = hx.sender;
+  if (!kick.probe.active) return Flow::Next;
+  const uint64_t startUs = qpc_now_us();
+  if (encoder.codec.instance_id() != kick.probe.codecInstance || startUs >= kick.probe.acceptedUs + 1150000) {
+    std::cout << "[native-video-host][probe] end ordinal=" << kick.probe.ordinal << " why="
+              << (encoder.codec.instance_id() != kick.probe.codecInstance ? "instance" : "deadline")
+              << " probes=" << kick.probe.probes << "\n";
+    kick.probe = KickState::OutputProbe{};
+    return Flow::Next;
+  }
+  ++kick.probe.probes;
+  std::vector<H264AccessUnit> units;
+  H264CollectStats cs{};
+  const bool ok = encoder.codec.collect_outputs(&units, &cs);
+  if (!ok) {
+    std::cout << "[native-video-host][probe] collect-error ordinal=" << kick.probe.ordinal
+              << " failure=" << h264_collect_failure_name(cs.failure) << "\n";
+    encode_send_h264_output_failure(hx, !units.empty(), cs.drainErrors);
+    kick.probe = KickState::OutputProbe{};
+    return Flow::Continue;
+  }
+  if (cs.events > 0) {
+    std::cout << "[native-video-host][probe] ordinal=" << kick.probe.ordinal
+              << " sinceAcceptedUs=" << (startUs - kick.probe.acceptedUs) << " probe=" << kick.probe.probes
+              << " events=" << cs.events << " haveOutput=" << cs.haveOutput << " needInput=" << cs.needInput
+              << " aus=" << cs.aus << " auOrdinals=";
+    for (size_t i = 0; i < units.size(); ++i) std::cout << (i ? "," : "") << units[i].acceptedInputOrdinal;
+    std::cout << "\n";
+  }
+  if (units.empty()) return Flow::Next;
+  TickContext ctc;
+  ctc.nowUs = tc.nowUs;
+  ctc.servedBootstrap = true;
+  ctc.streamGeneration = hx.capture.streamGenerationState.load(std::memory_order_acquire);
+  D3DReadbackTiming scaleReadbackTiming{};
+  uint64_t preEncodePrepUs = 0, scaleUs = 0, nv12Us = 0;
+  const uint64_t encodeStartUs = startUs, encodeInputUs = startUs, queueToEncodeUs = 0, callbackToEncodeStartUs = 0;
+  const uint64_t encodeEndUs = qpc_now_us();
+  H264EncodeFrameStats encodeStats{};
+  bool encoderResetTriggered = false, sessionReconnectTriggered = false, countedRawForInput = true;
+  size_t backlog = 0;
+  {
+    std::lock_guard<std::mutex> lk(sender.mu);
+    backlog = sender.queue.size();
+  }
+  H264AuBatch b{scaleReadbackTiming, preEncodePrepUs, scaleUs, nv12Us, encodeStartUs, encodeInputUs,
+                queueToEncodeUs, callbackToEncodeStartUs, encodeStats, encodeEndUs, encoderResetTriggered,
+                sessionReconnectTriggered, countedRawForInput, backlog >= 2};
+  std::vector<CatchupHandedAu> handed;
+  bool reached = false;
+  for (auto& au : units) {
+    const CatchupHandedAu prov{au.acceptedInputOrdinal, au.inputEpoch, au.syntheticReason};
+    if (au.acceptedInputOrdinal >= kick.probe.ordinal) reached = true;
+    ctc.lastAuHandedToSender = false;
+    const AuFlow f = encode_send_h264_emit_au(hx, ctc, b, au);
+    if (ctc.lastAuHandedToSender) handed.push_back(prov);
+    if (f == AuFlow::Break || ctc.sendFailed || encoderResetTriggered || sessionReconnectTriggered) break;
+  }
+  // a probe may also bring a catch-up's AU: the await judges it the same way
+  catchup_await_observe_handed(kick, encoder.codec.instance_id(), handed, "collect", startUs, std::cout);
+  if (reached) kick.probe = KickState::OutputProbe{};
+  if (ctc.sendFailed) {
+    tc.sendFailed = true;
+    std::cout << "[native-video-host] client disconnected\n";
+    return Flow::Break;
+  }
+  if (encoderResetTriggered || sessionReconnectTriggered) return Flow::Continue;
+  return Flow::Next;
+}
+#endif
+
 Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   auto& args = hx.args;
   auto& useH264 = hx.useH264;
@@ -596,6 +686,36 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   // accepted-input counter BEFORE the failure exits below: an input taken whose output drain then
   // failed was still taken, and must not be re-served as if it had been refused.
   const bool inputAccepted = encoder.codec.accepted_input_count() != acceptedBefore;
+#if REMOTE60_MOTION_SETTLE_DIAG
+  // r12 replay trace (Codex r12 s3): one line per encode call -- input source / content version / the
+  // ordinal it got, ProcessInput start / end (qpc us) and HRESULT, the events read after it, and the
+  // ordinals of the AUs this call drained. Nothing reads it.
+  if (au_trace_enabled()) {
+    std::cout << "[native-video-host][enc] src=" << synthetic_reason_name(servedBootstrap ? tc.syntheticReason : 0)
+              << " version=" << (servedBootstrap ? stats.lastVersionSent : version)
+              << " accepted=" << (inputAccepted ? 1 : 0) << " ordinal=" << encoder.codec.accepted_input_count()
+              << " piStartUs=" << encodeStats.processInputStartUs << " piEndUs=" << encodeStats.processInputEndUs
+              << " hr=0x" << std::hex << static_cast<uint32_t>(encodeStats.processInputHr) << std::dec
+              << " events=" << (encodeStats.postInputEvents[0] ? encodeStats.postInputEvents : "none") << " drained=";
+    for (size_t i = 0; i < units.size(); ++i) std::cout << (i ? "," : "") << units[i].acceptedInputOrdinal;
+    std::cout << "\n";
+  }
+  if (inputAccepted && diag_output_probe_enabled()) {
+    // the probe follows the newest accepted input until its AU leaves this host (any later accepted
+    // input replaces it: outputs follow accepted order)
+    bool own = false;
+    for (const auto& u : units) {
+      if (u.acceptedInputOrdinal >= encoder.codec.accepted_input_count()) own = true;
+    }
+    hx.kick.probe = KickState::OutputProbe{};
+    if (!own) {
+      hx.kick.probe.active = true;
+      hx.kick.probe.ordinal = encoder.codec.accepted_input_count();
+      hx.kick.probe.codecInstance = encoder.codec.instance_id();
+      hx.kick.probe.acceptedUs = encodeStats.processInputEndUs;
+    }
+  }
+#endif
   uint64_t catchupAcceptedOrdinal = 0, catchupAcceptedVersion = 0;
   {
     const bool catchupInput = servedBootstrap && tc.syntheticReason == kSyntheticReasonCatchup;

@@ -34,6 +34,8 @@ NAMES = [
     "REMOTE60_NATIVE_CATCHUP_AWAIT_MODE",  # r10 diagnostic arm selector (removed in r11; must stay absent)
     "[native-video-host][cap] version=",   # r11 DIAG build only: capture change / hash trace
     " sliceQp=",                           # r11 DIAG build only: first-slice QP in the per-AU trace
+    "REMOTE60_NATIVE_DIAG_OUTPUT_PROBE",   # r12 DIAG build only: the test-only output probe arm
+    "[native-video-host][enc] src=",       # r12 DIAG build only: per-encode-call replay trace
 ]
 REQUIRED = ["REMOTE60_NATIVE_CATCHUP"]
 NUL = bytes([0])

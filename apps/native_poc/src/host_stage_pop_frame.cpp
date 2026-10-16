@@ -238,6 +238,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     const Flow f = encode_send_h264_await_tick(hx, tc);
     if (f != Flow::Next) return f;
   }
+#if REMOTE60_MOTION_SETTLE_DIAG
+  if (useH264 && kick.probe.active) {
+    const Flow f = encode_send_h264_probe_tick(hx, tc);
+    if (f != Flow::Next) return f;
+  }
+#endif
   // Latest-content catch-up (host_kick.hpp KickState::CatchupDebt): the picture the input gate skipped,
   // two frame periods after the last skip, as an ordinary P once the sender queue has drained. Never
   // ahead of a newer real capture (it carries the content itself), a closed barrier or an owed key (the
@@ -324,7 +330,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     // r10: while a catch-up AU is awaited the loop comes back within a frame period so the collect step
     // runs at that cadence (bounded by the await deadline; no busy wait)
     uint64_t waitUs = capture.EffectiveQueueWaitTimeoutUs(encoder);
-    if (kick.await.active) waitUs = std::min<uint64_t>(waitUs, KickState::CatchupDelayUs(hx.encoder.activeFps) / 2);
+    if (kick.await.active || kick.probe.active) waitUs = std::min<uint64_t>(waitUs, KickState::CatchupDelayUs(hx.encoder.activeFps) / 2);
     queueReady = res.frame.cv.wait_for(lk, std::chrono::microseconds(waitUs), [&] {
       return stop.load() || res.frame.version != stats.lastVersionSent;
     });

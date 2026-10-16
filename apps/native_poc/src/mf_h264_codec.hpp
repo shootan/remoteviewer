@@ -158,6 +158,13 @@ struct H264EncodeFrameStats {
   uint32_t asyncNeedInputOnlyCall = 0;
   // r10: the HRESULT of this call's (last) ProcessInput -- S_OK accepted, MF_E_NOTACCEPTING refused.
   int32_t processInputHr = 0;
+  // r12 (Codex r12 s3, replay trace): when ProcessInput started / returned (qpc us), and the events this
+  // call read after the input, in order, as "<N|H|O><us after ProcessInput returned>" (N = NeedInput,
+  // H = HaveOutput, O = other), plus the poll that found none ("-<us>"). When the output became READY is
+  // not known from this -- only when the event was READ.
+  uint64_t processInputStartUs = 0;
+  uint64_t processInputEndUs = 0;
+  char postInputEvents[96] = {0};
   // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
   // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
   uint32_t pendingInputDepth = 0;

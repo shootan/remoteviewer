@@ -234,6 +234,11 @@ Flow encode_send_raw(HostContext& hx, TickContext& tc);
 Flow encode_send_h264(HostContext& hx, TickContext& tc);
 // r11: one tick of an open catch-up await (host_stage_encode_send_h264.cpp); Flow::Next = carry on
 Flow encode_send_h264_await_tick(HostContext& hx, TickContext& tc);
+#if REMOTE60_MOTION_SETTLE_DIAG
+// r12 DIAG only: the test-only output probe (host_stage_encode_send_h264.cpp)
+bool diag_output_probe_enabled();
+Flow encode_send_h264_probe_tick(HostContext& hx, TickContext& tc);
+#endif
 Flow stage_stats(HostContext& hx, TickContext& tc);         // 1s tick: stats line, drain watchdog, ABR/M9 -- MUST run first (H-10)
 Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
                      const std::string& targetProcessName, uint64_t queuePushPerSec,
