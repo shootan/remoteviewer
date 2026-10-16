@@ -13254,3 +13254,12 @@ Next
 - 판정: **배포 완료(마일스톤) · 휴대폰 실기 대기.** 사용자 행동: 폰 0.2.30 업데이트 → 같은 PC 1~2 분 접속(목록으로 나갔다 다시 들어가기 한 번, 메뉴 '크게 보기'·최고화질 한 번) → 검증용이 그 구간 NAS apk.log 의 `coded= cropSrc= crop=`·`output=1920x1080`·`park_reuse` 와 host.log 를 확인.
 - 미검증·경계: 실폰에서 1088 보수 효과(유력 원인 — 새 로그 전 확정 아님)·체감 선명도·크게보기 사용감, 1080p 6M 회복 완주(FAIL 원본 보존·잠정 분류), DesktopText, 태블릿 실기, 터치 소유권의 태블릿 잠금 경우(AVD 대조에서 누출 재현 안 됨), 영상 크기 변경 순간 누름 유지, park 중 화질 변경(UI 도달 불가로 종결 — 실행 PASS 아님), 수동 IP 연결 UI·Activity 재생성 실기, 배터리/트래픽, decode_stats 시간 의존 FAIL(기존).
 - 제품/테스트/문서: 문서(이 항목·작업목록 KA/Q6/VS/GA).
+
+### 2026-10-16 keepalive-multi (후보, 미게시) — 여러 PC 연결 동시 유지 · **앱을 벗어나면 모든 PC 연결 종료**
+
+- 사용자 요구: A·B PC 를 오갈 때 떠난 PC 의 연결을 유지(0.2.30 은 park 1개, 다른 PC 선택 시 종료). branch `feat/keepalive-multi`, 계약 `codex_keepalive_multi_r1.md` + `codex_keepalive_multi_2c22313.md`.
+- 구현: native 세션 테이블(entry handle·entry 별 gate·LRU·PC 별 TTL·lifecycle epoch), 단일 decoder 의 binding token(모든 sink 방향), PC 별 카드 상태·끊기. 정책 최대 3대(화면 포함)·PC 별 5분은 **제안값, 사용자 답 대기**.
+- **동작 변경(r2 L1)**: 0.2.30 은 화면의 세션을 백그라운드에서도 유지했다. 이번부터 **앱을 벗어나면(onStop) 화면의 PC·유지 중 PC·연결 중 전부 종료**한다. 확인된 네트워크 변화와 '모두 끊기'도 전부 종료. 회전은 해당 없음.
+- r2 M1: 새 연결의 LRU 축출은 그 연결의 인증 Hello·제어가 성립(Connected)한 뒤에만 — 실패한 연결은 기존 PC 를 끊지 않는다. r2 M2: 연결 중 다른 PC 탭은 최신 의도로 즉시 실행(진행 중 연결은 자기 것만 취소).
+- 상태: 후보 검증 중(보고 `feat-keepalive-multi/.claude/report_keepalive_multi_r2.md`). 출하 전 필요: 정책값 사용자 답, Codex 판정.
+- 제품/테스트/문서: 문서(이 항목·자원표).

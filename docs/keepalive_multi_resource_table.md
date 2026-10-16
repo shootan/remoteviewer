@@ -55,3 +55,22 @@ ClientSessionController 안쪽(entry 와 함께 옮겨짐): park fence·held inp
 ## 시험 fixture 필요 사항 (발견)
 
 - 디렉터리의 hostId = (account, machineId). 시험 host 의 machineId 는 레지스트리 MachineGuid 로만 정해져 **같은 PC·같은 계정의 host 2대가 같은 hostId** 가 된다. 2-host 검증용으로 **시험 host 빌드 전용**(REMOTE60_PINNED_SELECT_TEST_SEAM) machineId 지정이 필요하다 — 출하 host·wire 변경 아님, build gate 로 부재 확인.
+
+## 장기 작업의 승인 시점 (r2 §5, 호출부)
+
+화면 JNI 는 **호출 순간의 binding** 으로 entry 를 찾고 그 entry 의 controller 를 부른다. binding 조회 뒤 다른 PC 가 활성화되면 그 entry 는 park 중이라(BeginPark 가 token 을 먼저 0 으로) controller 의 park inhibit 이 요청을 거절한다 — 조회와 실행 사이에 새 PC 로 새는 경로는 없다(늦은 요청은 옛 PC 에서 거절되거나 무시).
+
+| 작업 | 승인 binding | 위치 |
+|---|---|---|
+| 매크로 재생 | **시작 binding**(`g_macro_binding`). pump 는 그 binding 이 지금 화면일 때만 보내고, 아니면 재생을 멈춘다. 활성화·BeginPark·End(그 PC)·EndAll 이 재생을 멈춘다 | native_bridge.cpp `nativeMacroStartPlayback`/`nativeMacroPump`/`nativeActivate` |
+| 잠금 해제 입력 순서(Enter→암호→Enter, 600/250 ms 지연) | **요청 순간 binding** 을 잡아 지연 단계에 그대로 사용 — 그 사이 다른 PC 가 화면이면 아무 데도 안 간다 | MainActivity `sendUnlockSequence` |
+| 클립보드 push | 보내는 순간의 binding(그 PC 화면일 때만); 재사용 활성화 때 baseline 재설정, park 중 들어온 것은 resume 이 버림 | `pushLocalClipboardToHost`, `resumeKept`, `ClientSessionController::ResumeFromPark` |
+| 클립보드 pull(수신 적용) | 상태 tick 의 binding — 화면 PC 의 것만 꺼낸다. parked PC 의 수신은 controller 가 받지 않는다(inhibit) | `drainIncomingClipboard` |
+| 미리보기(썸네일) | 화면 binding 으로만 읽는다; parked 는 controller 가 받지 않는다 | `refreshThumbnails` |
+| 선택·화질·캡처 방식·stream active | 호출 순간 binding, 화질/캡처는 재사용 활성화 때 사용자의 현재 값으로 그 PC 에 다시 적용 | `syncConnectedClientPreferences`, `resumeKept` |
+
+## 종료 정책 (r2 L1 확정, 2026-10-16)
+
+- **다중 유지는 앱이 앞에 있는 동안만.** onStop(백그라운드·잠금·다른 앱) = 화면의 PC + 유지 중 PC + 연결 중 전부 종료 + lifecycle epoch 증가. **0.2.30 은 화면의 세션을 백그라운드에서도 유지했으나 이번부터 앱을 벗어나면 모든 PC 연결이 끝난다.** 회전은 configChanges 로 Activity 가 멈추지 않으며, configuration 변경 중 stop 은 종료하지 않는다.
+- 확인된 네트워크 경로 변화 = 전부 종료(화면 PC 포함). 감시는 park 된 PC 가 하나라도 있을 때만 — 화면 PC 하나만 있으면 감시하지 않는다(0.2.30 단일 세션과 같음, 그 세션이 자기 경로 상실을 겪는다).
+- '모두 끊기' = 이름대로 전부(화면 PC 포함). PC 카드 끊기·화면의 연결 해제 = 그 PC 만.

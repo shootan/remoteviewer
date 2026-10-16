@@ -63,6 +63,15 @@ struct SessionEntry {
 
   // SessionTable's entry interface (session_table.hpp).
   int ParkPhaseCode() { return static_cast<int>(controller.ParkPhase()); }
+  // keepalive-multi r2 M1: Connected = the authenticated Hello and the control link are up (WorkerMain sets it
+  // only after both); Connect itself returns once the worker started.
+  int Established() {
+    const auto st = controller.Snapshot().state;
+    if (st == remote60::native_poc::ClientSessionState::Connected) return 1;
+    if (st == remote60::native_poc::ClientSessionState::Connecting) return 0;
+    return -1;
+  }
+  uint64_t Generation() { return controller.ConnectionGeneration(); }
   // Not ended: a session still finishing its handshake right after Connect (state Connecting) is alive -- only one
   // that is Disconnected / Error ended on its own (the first AVD run reaped B here as "peer_lost" while it connected).
   bool Alive() {
@@ -83,11 +92,17 @@ struct SessionEntry {
   }
 };
 
+// The teardown away from the caller. The task is held by a shared_ptr, so a thread that cannot be created leaves it
+// intact for the fallback (r2: std::thread(std::move(f)) may have moved it out before throwing). The fallback runs
+// it in place -- under the table's transition lock (the closer is dispatched from inside it): a session's Close
+// joins its own threads, none of which takes a table lock (their callbacks reach only the decoder's lock through
+// the entry's adapter), so it cannot deadlock -- it only holds other switches until the join is done.
 void run_detached(std::function<void()> f) {
+  auto task = std::make_shared<std::function<void()>>(std::move(f));
   try {
-    std::thread(std::move(f)).detach();
+    std::thread([task] { (*task)(); }).detach();
   } catch (...) {
-    f();
+    (*task)();
   }
 }
 
@@ -282,12 +297,20 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeReserve(
                          static_cast<jlong>(r.victim)});
 }
 
-// The new connection is up: the eviction it reserved (if the limit needed one) happens now. The closed handles.
+// keepalive-multi r2 M1: the new connection is up -- only once its session is established (authenticated Hello +
+// control) on the generation `gen` its connect made. [status, closed...]: status 1 = committed (the closed handles
+// follow: its reservation's eviction, now), 0 = pending (not established yet; nothing changed -- ask again),
+// -1 = failed (it ended first, or another connection: given back, nothing evicted).
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeCommit(
-    JNIEnv* env, jobject /* this */, jlong handle) {
-  std::vector<jlong> out;
-  for (uint64_t h : g_table.Commit(static_cast<uint64_t>(handle), now_ms())) out.push_back(static_cast<jlong>(h));
+    JNIEnv* env, jobject /* this */, jlong handle, jlong gen) {
+  using CR = remote60::native_poc::SessionTable<SessionEntry>::CommitResult;
+  const auto r = g_table.Commit(static_cast<uint64_t>(handle), static_cast<uint64_t>(gen), now_ms());
+  std::vector<jlong> out{r.kind == CR::Committed ? 1 : r.kind == CR::Pending ? 0 : -1};
+  for (uint64_t h : r.closed) out.push_back(static_cast<jlong>(h));
+  if (r.kind == CR::Failed) {
+    std::fprintf(stderr, "[native-bridge] commit failed handle=%lld %s\n", static_cast<long long>(handle), r.why.c_str());
+  }
   return to_jlongs(env, out);
 }
 
@@ -389,7 +412,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeEntriesJson(
     append_json_escaped(oss, x.reason);
     oss << "\",\"agoMs\":" << (now >= x.atMs ? now - x.atMs : 0) << "}";
   }
-  oss << "],\"closing\":" << g_table.PendingCloseCount() << ",\"binding\":" << g_video_decoder_sink.Binding() << "}";
+  const auto counts = g_table.CountsNow();
+  oss << "],\"closing\":" << counts.closing << ",\"live\":" << counts.live << ",\"reserved\":" << counts.reserved
+      << ",\"marked\":" << counts.marked << ",\"binding\":" << g_video_decoder_sink.Binding() << "}";
   return to_jstring(env, oss.str());
 }
 

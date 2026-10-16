@@ -63,6 +63,9 @@ import kotlin.math.roundToInt
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     companion object {
+        // r2 M1: how long a started connect may take to be established before it is given back (its own Hello /
+        // control timeouts normally end it sooner)
+        private const val ESTABLISH_LIMIT_MS = 20_000L
         private const val ZONE_IDLE_ALPHA = 0.85f
         private const val LOG_TAG = "remote60_android_direct"
         // Windows promotes a second press to a double-click only inside SM_CXDOUBLECLK (4px)
@@ -1209,12 +1212,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // keepalive-multi r1 (SessionPark, native session table): the PCs this phone keeps -- handle -> what the screen
     // knows of it. The PC on screen is [activeHandle] with its [activeBinding] (nativeActivate); every screen action
     // carries the binding read at the moment it is taken, so after a switch nothing of B can reach A.
-    private val keepPolicy = SessionPark.Policy()
+    // the policy object, handed to the native table at start (a debug TEST build may shorten the park limit)
+    private val keepPolicy = if (BuildConfig.TEST_KEEP_PARK_TTL_MS > 0L) {
+        SessionPark.Policy(parkTtlMs = BuildConfig.TEST_KEEP_PARK_TTL_MS)
+    } else {
+        SessionPark.Policy()
+    }
     private val kept = LinkedHashMap<Long, SessionPark.Kept>()
     private var activeHandle = 0L
     private var activeBinding = 0L
     // the directory connect in progress (its entry is reserved, not yet up)
     private var connectingHandle = 0L
+    // r2 M1: a connect whose worker started, waiting for its session to be established before it is committed
+    private data class PendingCommit(
+        val handle: Long, val op: Long, val gen: Long, val epoch: Long, val startedAtMs: Long,
+        val pathKind: String, val manual: Boolean,
+    )
+    private var pendingCommit: PendingCommit? = null
     private var keptCardsShown = ""
     // the PC on screen ended on its own (its peer, a runtime failure): its last error stays shown, as 0.2.30's one
     // session's did -- the native entry is gone by the time the screen reads it
@@ -1471,7 +1485,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun statusPollDelayMs(): Long {
         if (selectionStage != SelectionStage.IDLE) return 250L
         // keepalive r1: watching a park confirm (and a tap held for it)
-        if (heldTap != null || kept.values.any { it.parkedAtMs != 0L && !it.confirmLogged }) return 250L
+        if (heldTap != null || pendingCommit != null ||
+            kept.values.any { it.parkedAtMs != 0L && !it.confirmLogged }) return 250L
         return when (currentScene) {
             UiScene.LOGIN, UiScene.HOSTS -> 1000L
             UiScene.TARGETS -> 750L
@@ -1713,6 +1728,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showMacroDialog()
         }
         initDirectoryUi()
+        NativeSessionBridge.nativeSetKeepalivePolicy(keepPolicy.maxHosts, keepPolicy.parkTtlMs)
+        diagnosticsLog.log("keep_policy", "maxHosts=${keepPolicy.maxHosts} parkTtlMs=${keepPolicy.parkTtlMs}")
 
         val savedEndpoint = SessionPersistence.load(this)
         val launchHost = intent.getStringExtra("host")?.trim().orEmpty()
@@ -1768,7 +1785,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listHostsButton.setOnClickListener { parkToHostList("targets") }
         hostsParkDisconnectButton.setOnClickListener {
             diagnosticsLog.log("park_disconnect_all_tap", "scene=$currentScene kept=${kept.size}")
-            if (activeHandle == 0L) endAllKept("disconnect_all") else endParkedKept("disconnect_all")
+            endEverything("disconnect_all")  // r2 L1: what it says -- every PC, the one on screen included
             renderStatus()
         }
 
@@ -1929,12 +1946,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onStop() {
         connectIntents.onStop()  // r4 S2-b: a fallback scheduled before this stop never runs
-        // keepalive r1 / multi §6: a kept PC lives only while the app is in front. Backgrounded, locked or switched
-        // away from, every parked connection is ended for real -- no foreground service keeps them. (The PC on
-        // screen is left as 0.2.30 left it.)
+        // keepalive-multi r2 L1: keeping PCs is for while the app is in front. Backgrounded, locked or switched away
+        // from, EVERY connection ends -- the PC on screen, the kept ones and a connect in progress -- with a new
+        // lifecycle epoch (0.2.30 left the session on screen running in the background; that changes here). No
+        // foreground service keeps anything. Rotation does not stop the Activity (configChanges), and a stop
+        // during a configuration change is not leaving the app.
         // r3 R2: a connect still on its way is not carried on in the background either -- it stops at its
         // next step (native included) and adopts nothing; the list is not left busy.
-        endParkedKept("app_stopped")
+        if (!isChangingConfigurations &&
+            (activeHandle != 0L || kept.isNotEmpty() || connectingHandle != 0L || pendingCommit != null)) {
+            endEverything("app_stopped")
+        }
         if (directoryBusy) {
             setDirectoryBusy(false)
             directoryConnectingName = ""
@@ -2322,31 +2344,142 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         val handle = reservation[1]
         kept[handle] = SessionPark.Kept(handle, "", host, "", "", manual = true)
+        if (connectingHandle != 0L) cancelConnecting("superseded")  // r2 M2: the newest intent wins
+        val epoch = NativeSessionBridge.nativeEpoch()
         val op = entryOps.begin(handle)
-        var ok = NativeSessionBridge.nativeConnect(handle, host, videoPort, controlPort, op) != 0L
-        if (ok) {
-            for (evicted in NativeSessionBridge.nativeCommit(handle)) {
-                diagnosticsLog.log("keep_end", "handle=$evicted host=${kept[evicted]?.hostName.orEmpty()} reason=lru")
-                forgetKept(evicted)
-            }
-            ok = activateKept(handle)
-            if (!ok) NativeSessionBridge.nativeEnd(handle, "activate_refused")
+        val gen = NativeSessionBridge.nativeConnect(handle, host, videoPort, controlPort, op)
+        if (gen != 0L) {
+            // r2 M1: committed (and shown) only once its session is established -- tryCommit, from the status ticks
+            connectingHandle = handle
+            pendingCommit = PendingCommit(handle, op, gen, epoch, SystemClock.elapsedRealtime(), "", manual = true)
+            tryCommit()
         } else {
             diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError(handle))
             NativeSessionBridge.nativeFail(handle, "connect_failed")
-        }
-        if (!ok) forgetKept(handle)
-        if (ok) {
-            connectFlowActive = true
-            pendingRuntimeConfigSync = true
-            pendingDesktopBackendSync = true
-            desiredStreamActive = false
-            lastAppliedStreamActive = null
-            clearPendingSelection()
-            currentScene = UiScene.TARGETS
-            NativeSessionBridge.nativeRequestWindowList(activeBinding)
+            forgetKept(handle)
         }
         renderStatus()
+    }
+
+    /**
+     * r2 M1: a connect whose worker started becomes this screen's PC only once its session is established
+     * (authenticated Hello + control) -- the native table refuses an earlier commit, and only then does the eviction
+     * its reservation made happen. Called on every status tick while one is pending; never waits.
+     */
+    private fun tryCommit() {
+        val p = pendingCommit ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (!entryOps.isCurrent(p.handle, p.op) || NativeSessionBridge.nativeEpoch() != p.epoch) {
+            pendingCommit = null
+            diagnosticsLog.log("directory_connect_stale", "handle=${p.handle} op=${p.op} step=commit")
+            NativeSessionBridge.nativeFail(p.handle, "stale_operation")
+            if (activeHandle != p.handle) forgetKept(p.handle)
+            return
+        }
+        val lastError = NativeSessionBridge.nativeGetLastError(p.handle)
+        val r = NativeSessionBridge.nativeCommit(p.handle, p.gen)
+        val status = r.getOrNull(0) ?: -1L
+        if (status == 0L) {
+            if (now - p.startedAtMs < ESTABLISH_LIMIT_MS) return
+            NativeSessionBridge.nativeFail(p.handle, "establish_timeout")
+        }
+        pendingCommit = null
+        if (status != 1L) {
+            // it ended (or never answered) before it was established: given back -- no kept PC was touched for it
+            val why = if (status == 0L) "establish_timeout" else lastError.ifEmpty { "not_established" }
+            diagnosticsLog.log("directory_connect_failed", "handle=${p.handle} op=${p.op} step=establish $why " +
+                "evicted=0 kept=${kept.size - 1}")
+            forgetKept(p.handle)
+            setDirectoryBusy(false)
+            directoryConnectingName = ""
+            if (p.manual) {
+                diagnosticsLog.log("connect_failed", why)
+            } else {
+                hostsStatusText.text = getString(R.string.hosts_connect_failed, why)
+            }
+            renderStatus()
+            return
+        }
+        connectingHandle = 0L
+        setDirectoryBusy(false)
+        directoryConnectingName = ""
+        diagnosticsLog.log("directory_connect_committed", "handle=${p.handle} ms=${now - p.startedAtMs} evicted=${r.size - 1}")
+        // the eviction its reservation made (if the limit needed one) happens now
+        for (i in 1 until r.size) {
+            val evicted = r[i]
+            val gone = kept[evicted]
+            forgetKept(evicted)
+            diagnosticsLog.log("keep_end", "handle=$evicted host=${gone?.hostName.orEmpty()} reason=lru")
+            if (gone != null) {
+                hostsStatusText.text = getString(R.string.hosts_keep_ended, gone.hostName,
+                    SessionPark.endedReasonText("lru"))
+            }
+        }
+        if (!activateKept(p.handle)) {
+            // another PC still on screen / confirming: should not happen from the list; this one ends
+            diagnosticsLog.log("keep_activate_refused", "handle=${p.handle} table=${NativeSessionBridge.nativeEntriesJson()}")
+            NativeSessionBridge.nativeEnd(p.handle, "activate_refused")
+            forgetKept(p.handle)
+            renderStatus()
+            return
+        }
+        connectionPathKind = p.pathKind
+        connectFlowActive = true
+        pendingRuntimeConfigSync = true
+        pendingDesktopBackendSync = true
+        desiredStreamActive = false
+        lastAppliedStreamActive = null
+        clipboardResumeHold = false
+        clearPendingSelection()
+        currentScene = UiScene.TARGETS
+        NativeSessionBridge.nativeRequestWindowList(activeBinding)
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+    }
+
+    /**
+     * r2 M2: the connect in progress gives way to a newer tap -- its own operation is made stale and its entry given
+     * back at once (the native close stops its network step; nothing waits for its timeout). Other PCs untouched.
+     */
+    private fun cancelConnecting(reason: String) {
+        val h = connectingHandle
+        if (h == 0L) return
+        entryOps.invalidate(h)
+        if (pendingCommit?.handle == h) pendingCommit = null
+        NativeSessionBridge.nativeFail(h, reason)
+        diagnosticsLog.log("directory_connect_superseded", "handle=$h host=${kept[h]?.hostName.orEmpty()} reason=$reason")
+        forgetKept(h)
+        connectingHandle = 0L
+        setDirectoryBusy(false)
+        directoryConnectingName = ""
+    }
+
+    /**
+     * r2 L1: everything ends -- the PC on screen, the kept ones and a connect in progress -- with a new lifecycle
+     * epoch, and the screen goes back to where the app starts. Leaving the app, a confirmed network change and
+     * 모두 끊기. (Rotation is not this: configuration changes are handled in place.)
+     */
+    private fun endEverything(reason: String) {
+        dismissViewerLogDialog()
+        closeViewerSheets(reason)
+        releaseViewerModifiers()
+        cancelActiveViewerTouch(reason)
+        hideViewerKeyboard(reason)
+        viewerKeyPanel?.hide()
+        if (activeBinding != 0L) {
+            if (selectionStage != SelectionStage.IDLE) {
+                NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
+            } else {
+                NativeSessionBridge.nativeResetVideoStream(activeBinding)
+            }
+        }
+        endAllKept(reason)
+        setDirectoryBusy(false)
+        directoryConnectingName = ""
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        currentScene = homeScene()
     }
 
     private fun clearPendingSelection() {
@@ -2530,6 +2663,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         kept.clear()
         nativeEntries = emptyMap()
         connectingHandle = 0L
+        pendingCommit = null
         unwatchParkNetwork()
         if (activeHandle != 0L) {
             desiredStreamActive = false
@@ -2540,21 +2674,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             resetViewerObservability()
         }
         clearActive()
-        hostListAdapter.notifyDataSetChanged()
-    }
-
-    /** The parked PCs (not the one on screen) end, and a connect on its way stops: leaving the app (0.2.30 rule). */
-    private fun endParkedKept(reason: String) {
-        heldTap = null
-        for ((h, k) in kept.toList()) {
-            if (h == activeHandle) continue
-            entryOps.invalidate(h)
-            if (h == connectingHandle) NativeSessionBridge.nativeFail(h, reason) else NativeSessionBridge.nativeEnd(h, reason)
-            forgetKept(h)
-            diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
-        }
-        connectingHandle = 0L
-        unwatchParkNetwork()
         hostListAdapter.notifyDataSetChanged()
     }
 
@@ -2590,6 +2709,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log("keep_table_parse_failed", t.javaClass.simpleName)
         }
         return entries to ended
+    }
+
+    // r2 V1 / multi §5: a PC whose host cannot pause (an older host) is never kept -- "PC 목록" is not offered for
+    // it, only 연결 해제. Said once per connection, as soon as its first list tells (the capability arrives with it).
+    private val keepUnsupportedNoted = HashSet<Long>()
+
+    private fun noteKeepUnsupported(panelSnapshot: WindowPanelUiSnapshot) {
+        val h = activeHandle
+        val k = kept[h] ?: return
+        if (k.manual || h in keepUnsupportedNoted) return
+        if (!panelSnapshot.status.startsWith("window_list_received")) return
+        keepUnsupportedNoted.add(h)
+        if (NativeSessionBridge.nativeHostHonorsStreamPause(h)) return
+        diagnosticsLog.log("keep_unsupported", "handle=$h host=${k.hostName}")
+        Toast.makeText(this, getString(R.string.hosts_keep_unsupported, k.hostName), Toast.LENGTH_LONG).show()
     }
 
     /** Whether "PC 목록" is offered for the PC on screen. */
@@ -2652,6 +2786,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     /** Every status tick: what the native table says about each kept PC; a held tap once nothing is confirming. */
     private fun keepTick() {
+        tryCommit()
         if (kept.isEmpty() && heldTap == null) {
             nativeEntries = emptyMap()
             return
@@ -2785,9 +2920,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             private fun end(reason: String) = runOnUiThread {
                 if (parkNetworkCallback !== this) return@runOnUiThread
-                // multi §6: a confirmed network change ends the kept PCs; with none on screen it is the whole
-                // lifecycle (a new epoch: nothing started before it is carried out).
-                if (activeHandle == 0L) endAllKept(reason) else endParkedKept(reason)
+                // r2 L1: a confirmed network change ends everything -- the PC on screen too -- with a new epoch
+                // (nothing started before it is carried out). Watched while at least one PC is kept parked; a
+                // lone PC on screen is not watched (0.2.30's single session), its own session sees its path go.
+                endEverything(reason)
                 renderStatus()
             }
         }
@@ -4224,7 +4360,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             pushLocalClipboardToHost("session_started")
         }
         renderClipboardButton()
-        val statusValue = NativeSessionBridge.nativeGetStatus(activeHandle)
+        // a connect not committed yet shows as connecting (its session is not this screen's until it is)
+        val statusHandle = if (activeHandle != 0L) activeHandle else pendingCommit?.handle ?: 0L
+        val statusValue = NativeSessionBridge.nativeGetStatus(statusHandle)
         val errorValue =
             if (activeHandle != 0L) NativeSessionBridge.nativeGetLastError(activeHandle) else endedSessionError
         val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding))
@@ -4255,7 +4393,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 clearPendingSelection()
                 resetViewerObservability()
             }
-        } else if (onIdleScreen && connectFlowActive && activeHandle != 0L) {
+        } else if (onIdleScreen && connectFlowActive && activeHandle != 0L && pendingCommit == null) {
             // keepalive r1: a parked connection is connected and still belongs on the list.
             currentScene = UiScene.TARGETS
         }
@@ -4321,6 +4459,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (activeBinding != 0L) syncConnectedClientPreferences(isConnected)
         noteTargetsReady(nowMs, panelSnapshot)
+        noteKeepUnsupported(panelSnapshot)
 
         connectStatusText.text = when {
             statusValue.startsWith("connecting") -> getString(R.string.ui_status_connecting)
@@ -4884,10 +5023,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * same step -- and connected beside the kept ones. A failed connect ends only its own entry.
      */
     private fun connectToDirectoryHost(host: DirectoryClient.Host) {
-        if (directoryBusy) return
         val account = DirectoryClient.sessionAccount()
         val origin = directoryOrigin()
         val key = SessionPark.entryKey(origin, account, host.hostId)
+        // r2 M2: a tap while another PC is still connecting is the user's newest intent -- that connect gives way
+        // (its own operation only; it is not waited for), and this tap is carried out now. The same PC again is
+        // the same intent.
+        if (connectingHandle != 0L) {
+            if (kept[connectingHandle]?.key == key) {
+                diagnosticsLog.log("connect_tap_dup", "host=${host.hostId} handle=$connectingHandle")
+                return
+            }
+            cancelConnecting("superseded")
+        }
         // a kept PC decides first -- before "offline", since the list's online flag lags the connection this
         // phone already holds.
         keepTick()
@@ -5066,39 +5214,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         }.start()
                         return@runOnUiThread
                     }
-                    connectingHandle = 0L
-                    setDirectoryBusy(false)
-                    directoryConnectingName = ""
-                    // up: the eviction its reservation made (if the limit needed one) happens now
-                    for (evicted in NativeSessionBridge.nativeCommit(handle)) {
-                        val gone = kept[evicted]
-                        forgetKept(evicted)
-                        diagnosticsLog.log("keep_end", "handle=$evicted host=${gone?.hostName.orEmpty()} reason=lru")
-                        if (gone != null) {
-                            hostsStatusText.text = getString(R.string.hosts_keep_ended, gone.hostName,
-                                SessionPark.endedReasonText("lru"))
-                        }
-                    }
-                    if (!activateKept(handle)) {
-                        // another PC still on screen / confirming: should not happen from the list; this one ends
-                        diagnosticsLog.log("keep_activate_refused", "handle=$handle table=${NativeSessionBridge.nativeEntriesJson()}")
-                        NativeSessionBridge.nativeEnd(handle, "activate_refused")
-                        forgetKept(handle)
-                        renderStatus()
-                        return@runOnUiThread
-                    }
-                    connectionPathKind = pathKind
-                    connectFlowActive = true
-                    pendingRuntimeConfigSync = true
-                    pendingDesktopBackendSync = true
-                    desiredStreamActive = false
-                    lastAppliedStreamActive = null
-                    clipboardResumeHold = false
-                    clearPendingSelection()
-                    currentScene = UiScene.TARGETS
-                    NativeSessionBridge.nativeRequestWindowList(activeBinding)
-                    hostListAdapter.notifyDataSetChanged()
-                    renderStatus()
+                    // r2 M1: the worker started -- not yet a connection. Commit (and the eviction its reservation
+                    // made) only once its Hello is answered and control is up; until then nothing kept is touched.
+                    diagnosticsLog.log("directory_connect_started", "handle=$handle op=$op gen=$madeGeneration")
+                    pendingCommit = PendingCommit(handle, op, madeGeneration, epoch, SystemClock.elapsedRealtime(),
+                        pathKind, manual = false)
+                    tryCommit()
                 }
             } catch (e: Exception) {
                 diagnosticsLog.log("directory_connect_failed", "handle=$handle op=$op ${e.message.orEmpty()}")
@@ -5120,7 +5241,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         directoryBusy = busy
         loginButton.isEnabled = !busy
         hostsRefreshButton.isEnabled = !busy
-        hostsListView.isEnabled = !busy
+        // r2 M2: the list stays tappable -- a tap while a PC connects is the newest intent (connectToDirectoryHost)
     }
 
     private inner class HostCardAdapter : BaseAdapter() {

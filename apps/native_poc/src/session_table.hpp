@@ -7,7 +7,10 @@
 //
 // Entry (duck-typed) provides:
 //   int ParkPhaseCode()         ClientParkPhase: 0 none, 1-3 confirming, 4 parked, 5 failed, 6 expired
-//   bool Alive()                its session is connected
+//   bool Alive()                its session is not ended (connecting or connected)
+//   int Established()           1 = its authenticated Hello and control are up (Connected), 0 = still connecting,
+//                               -1 = ended (Disconnected / Error) -- the only proof a commit may evict for
+//   uint64_t Generation()       its session's connection generation (which Connect made it)
 //   bool BeginPark()            inhibit -> release -> pause -> Pong fence (the session's own control loop)
 //   bool ResumeFromPark()       only from a confirmed park
 //   void SetParkLimitMs(ms)     the policy's TTL, enforced by the session's own control loop
@@ -95,19 +98,78 @@ class SessionTable {
     return nullptr;
   }
 
-  // The new connection is up. Its eviction (if the limit needed one) happens now; returns the closed handles.
-  std::vector<uint64_t> Commit(uint64_t handle, uint64_t nowMs) {
+  struct CommitResult {
+    enum Kind { Committed, Pending, Failed } kind = Failed;
+    std::vector<uint64_t> closed;  // Committed: the entries its reservation evicted (LRU), closed now
+    std::string why;               // Failed: why (the entry is given back -- nothing evicted for it)
+  };
+
+  // The new connection is up: its eviction (if the limit needed one) happens now -- and ONLY once its session is
+  // established (authenticated Hello + control: Connected) on the connection generation the connect made
+  // (keepalive-multi r2 M1). Connect returns as soon as its worker starts; a commit then would evict a parked PC
+  // for a connection whose Hello may still be refused or time out. Pending = not yet established: nothing changes,
+  // the caller asks again (no wait here). Failed = it ended before it was established, or it is not this
+  // connection any more: it is given back (Fail), and no parked PC was touched.
+  CommitResult Commit(uint64_t handle, uint64_t generation, uint64_t nowMs) {
+    CommitResult out;
     std::lock_guard<std::mutex> tl(transitionMu_);
-    std::vector<uint64_t> closed = registry_.Commit(handle);
-    for (uint64_t v : closed) DetachAndCloseLocked(v, "lru", nowMs);
+    std::shared_ptr<Entry> e = Find(handle);
     RegistryEntry re;
+    if (!e || !registry_.Get(handle, &re) || re.phase != EntryPhase::Connecting) {
+      out.why = "not_connecting";
+      return out;
+    }
+    if (generation != 0 && e->Generation() != generation) {
+      out.why = "generation_changed";
+      FailLocked(handle, out.why, nowMs);
+      return out;
+    }
+    const int est = e->Established();
+    if (est == 0) {
+      out.kind = CommitResult::Pending;
+      return out;
+    }
+    if (est < 0) {
+      out.why = "not_established";
+      FailLocked(handle, out.why, nowMs);
+      return out;
+    }
+    out.closed = registry_.Commit(handle);
+    for (uint64_t v : out.closed) DetachAndCloseLocked(v, "lru", nowMs);
     if (registry_.Get(handle, &re) && re.phase == EntryPhase::Parked) committedMs_[handle] = nowMs;
-    return closed;
+    out.kind = CommitResult::Committed;
+    return out;
   }
 
   // The connection failed or went stale: its own resources go; nothing else is evicted.
   void Fail(uint64_t handle, const std::string& reason, uint64_t nowMs) {
     std::lock_guard<std::mutex> tl(transitionMu_);
+    FailLocked(handle, reason, nowMs);
+  }
+
+  // Counts for the record (multi r2 M1): live = kept within the limit (not closing, not marked to give way),
+  // reserved = connections not yet established (counted in live), marked = parked PCs a reservation will close
+  // if its connection is established, closing = teardowns still running.
+  struct Counts {
+    uint32_t live = 0, reserved = 0, marked = 0, closing = 0;
+  };
+  Counts CountsNow() const {
+    Counts c;
+    for (const auto& re : registry_.Snapshot()) {
+      if (re.phase == EntryPhase::Closing) continue;
+      if (re.evictionFor != 0) {
+        ++c.marked;
+        continue;
+      }
+      ++c.live;
+      if (re.phase == EntryPhase::Connecting) ++c.reserved;
+    }
+    c.closing = static_cast<uint32_t>(PendingCloseCount());
+    return c;
+  }
+
+ private:
+  void FailLocked(uint64_t handle, const std::string& reason, uint64_t nowMs) {
     std::shared_ptr<Entry> e = Detach(handle);
     registry_.Fail(handle);
     committedMs_.erase(handle);
@@ -116,6 +178,8 @@ class SessionTable {
       closer_([e] { e->Close(); });
     }
   }
+
+ public:
 
   // On screen: a new binding. Refused (0) while another entry is Active or still confirming its park, or when a
   // parked entry cannot resume (it is ended). The decoder is bound before the session resumes, so the episode

@@ -16,8 +16,12 @@ object NativeSessionBridge {
 
     /** [kind (0 reuse, 1 new, 2 refused), handle, victim]: a tap on [key] (origin|account|hostId) in lifecycle [epoch]. */
     external fun nativeReserve(key: String, manual: Boolean, epoch: Long): LongArray
-    /** The new connection is up: the handles its reservation evicted (LRU), closed now. */
-    external fun nativeCommit(handle: Long): LongArray
+    /**
+     * r2 M1: the new connection, made as generation [gen], is up -- [status, closed...]: 1 committed (the handles its
+     * reservation evicted follow, closed now), 0 pending (its Hello is not answered yet: ask again), -1 failed (it
+     * ended first: given back, nothing evicted). The eviction happens only for an established connection.
+     */
+    external fun nativeCommit(handle: Long, gen: Long): LongArray
     /** The connect failed or went stale: that entry only. */
     external fun nativeFail(handle: Long, reason: String)
     /** On screen: its binding (0 = refused -- another PC on screen / still confirming, or its resume failed: ended). */

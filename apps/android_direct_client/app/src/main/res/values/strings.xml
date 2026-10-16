@@ -231,6 +231,7 @@
     <string name="hosts_keep_refused">지금은 새 PC 를 연결할 수 없습니다 (연결 중이거나 유지 한도)</string>
     <string name="hosts_keep_disconnect">끊기</string>
     <string name="hosts_keep_disconnect_all">모두 끊기</string>
+    <string name="hosts_keep_unsupported">%1$s 은(는) 연결 유지를 지원하지 않습니다 — PC 업데이트가 필요합니다 (목록으로 가려면 연결 해제)</string>
     <string name="ui_menu_disconnect">연결 해제</string>
     <string name="ui_menu_disconnect_description">PC 와의 연결을 끊고 PC 목록으로 돌아갑니다</string>
     <string name="ui_disconnect_confirm_title">연결을 끊을까요?</string>

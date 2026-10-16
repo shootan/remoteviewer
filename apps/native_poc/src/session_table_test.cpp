@@ -35,6 +35,10 @@ struct FakeEntry {
   std::atomic<int> closes{0};
   std::atomic<int> resumes{0};
   std::atomic<uint64_t> limitMs{0};
+  std::atomic<int> established{1};  // scripted: 1 Connected, 0 still connecting, -1 ended
+  std::atomic<uint64_t> gen{1};
+  int Established() { return established.load(); }
+  uint64_t Generation() { return gen.load(); }
   int ParkPhaseCode() { return phase.load(); }
   bool Alive() { return alive.load(); }
   bool BeginPark() {
@@ -106,7 +110,7 @@ struct Rig {
       return e;
     });
     if (r.kind != SessionRegistry::Reservation::New) return 0;
-    auto c = table.Commit(r.handle, now);
+    auto c = table.Commit(r.handle, 0, now).closed;
     if (closed) *closed = c;
     return r.handle;
   }
@@ -228,7 +232,7 @@ int main() {
     check("new epoch", epoch1 == epoch0 + 1);
     check("3 teardowns queued, none run under the table", rig.Pending() == 3 && rig.E("o|u|A")->closes == 0);
     check("no entry is findable any more, decoder unbound", rig.table.LiveCount() == 0 && rig.bound == 0);
-    check("the in-flight connect's commit does nothing", rig.table.Commit(late.handle, 4).empty() && rig.table.Activate(late.handle, 4) == 0);
+    check("the in-flight connect's commit does nothing", rig.table.Commit(late.handle, 0, 4).kind == SessionTable<FakeEntry>::CommitResult::Failed && rig.table.Activate(late.handle, 4) == 0);
     auto stale = rig.table.Reserve("o|u|D", false, epoch0, [](uint64_t) { return std::make_shared<FakeEntry>(); });
     check("a reservation with the old epoch is refused", stale.kind == SessionRegistry::Reservation::Refused);
     rig.RunCloses();
@@ -343,6 +347,68 @@ int main() {
     check("2000 switches: a binding never resolved to another binding's entry", wrong == 0 && lookups.load() > 1000,
           std::to_string(lookups.load()) + " lookups");
     check("still two entries, both alive", rig.table.LiveCount() == 2 && rig.E("k|A")->closes == 0);
+  }
+
+  std::printf("[9] r2 M1: a commit evicts only for an ESTABLISHED connection; one that fails first evicts nothing\n");
+  {
+    using CR = SessionTable<FakeEntry>::CommitResult;
+    Rig rig;  // limit 3
+    const uint64_t a = rig.Connect("k|A", 1);
+    rig.table.Activate(a, 1);
+    const uint64_t b = rig.Connect("k|B", 2);
+    rig.Switch(a, b, 2);
+    const uint64_t c = rig.Connect("k|C", 3);
+    rig.Switch(b, c, 3);
+    rig.table.BeginPark(c, 4);
+    rig.E("k|C")->phase = 4;  // A, B, C kept; none on screen; A used longest ago
+    auto make = [&](const std::string& key) {
+      return [&rig, key](uint64_t) {
+        auto e = std::make_shared<FakeEntry>();
+        e->established = 0;  // its worker started; Hello not answered yet
+        e->gen = 7;
+        rig.made[key] = e;
+        return e;
+      };
+    };
+    auto d = rig.table.Reserve("k|D", false, rig.table.Epoch(), make("k|D"));
+    check("D reserved at the limit, A marked as its victim", d.kind == SessionRegistry::Reservation::New && d.victim == a);
+    auto p1 = rig.table.Commit(d.handle, 7, 5);
+    rig.RunCloses();
+    check("D not established yet: commit Pending, A untouched", p1.kind == CR::Pending && rig.E("k|A")->closes == 0 &&
+                                                                 rig.table.Find(a) != nullptr);
+    auto counts = rig.table.CountsNow();
+    check("the record tells reservations from the kept: live 3 (B, C, D reserved) + A marked", counts.live == 3 &&
+          counts.reserved == 1 && counts.marked == 1, std::to_string(counts.live) + "/" + std::to_string(counts.reserved) +
+          "/" + std::to_string(counts.marked));
+    rig.E("k|D")->established = -1;  // D's Hello refused / timed out
+    auto f1 = rig.table.Commit(d.handle, 7, 6);
+    rig.RunCloses();
+    check("D failed before it was established: Failed, A, B, C all kept (0 evicted)",
+          f1.kind == CR::Failed && f1.why == "not_established" && rig.E("k|A")->closes == 0 &&
+              rig.E("k|B")->closes == 0 && rig.E("k|C")->closes == 0 && rig.table.Find(a) && !rig.table.Find(d.handle));
+    auto e2 = rig.table.Reserve("k|E", false, rig.table.Epoch(), make("k|E"));
+    check("E reserved: A is the victim again", e2.victim == a);
+    check("a commit with another connection's generation is refused (and gives E back)",
+          rig.table.Commit(e2.handle, 8, 7).kind == CR::Failed && rig.E("k|A")->closes == 0);
+    auto e3 = rig.table.Reserve("k|E", false, rig.table.Epoch(), make("k|E"));
+    rig.E("k|E")->established = 1;
+    auto ok = rig.table.Commit(e3.handle, 7, 8);
+    rig.RunCloses();
+    check("E established: Committed, exactly ONE eviction and it is A (LRU)", ok.kind == CR::Committed &&
+          ok.closed.size() == 1 && ok.closed[0] == a && rig.E("k|A")->closes == 1 && rig.E("k|B")->closes == 0 &&
+          rig.E("k|C")->closes == 0);
+    // NEGATIVE: r1's order -- commit as soon as the worker started (the registry alone) -- loses A for a D that fails
+    SessionRegistry reg;
+    uint64_t hs[3];
+    for (int i = 0; i < 3; ++i) {
+      auto r = reg.Reserve("n|" + std::to_string(i), false, reg.Epoch());
+      reg.Commit(r.handle);
+      hs[i] = r.handle;
+    }
+    auto rd = reg.Reserve("n|D", false, reg.Epoch());
+    const auto lost = reg.Commit(rd.handle);  // r1: madeGeneration != 0 -> nativeCommit at once
+    reg.Fail(rd.handle);                       // then D's Hello fails
+    check("NEGATIVE (r1 order): a D that then fails has already closed a kept PC", lost.size() == 1 && lost[0] == hs[0]);
   }
 
   std::printf("\nsession_table_test: %d passed, %d failed\nRESULT: %s\n", gPass, gFail, gFail == 0 ? "PASS" : "FAIL");
