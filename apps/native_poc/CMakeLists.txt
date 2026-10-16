@@ -923,6 +923,21 @@ target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NO
 # keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
 # keepalive r3: a second client through the fixture directory's relay (the other device that takes a host
 # from a parked phone). TEST ONLY: the product's directory calls, rendezvous and client session.
+# keepalive-multi r3: the clipboard across two kept PCs -- two pinned test hosts on the private station, the product
+# client sessions in the product SessionTable, a mock phone clipboard sink. TEST ONLY.
+add_executable(km_multiclip_e2e_test
+  src/km_multiclip_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(km_multiclip_e2e_test PRIVATE src)
+target_link_libraries(km_multiclip_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(km_multiclip_e2e_test PRIVATE /utf-8)
+endif()
+
 add_executable(ka_relay_client_test
   src/ka_relay_client_test.cpp
   src/directory_session_client.cpp
