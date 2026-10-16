@@ -298,9 +298,18 @@ if(REMOTE60_ENCODER_POLL_DIAG)
 else()
   set(_encoder_poll_diag 0)
 endif()
+# encoder-output-poll r2, experiment C: one ordinary-P refine per real-input trailing episode. A test-build
+# selector only (default OFF); a shipping build carries none of it (automation/encoder_poll_build_gate.py).
+option(REMOTE60_TRAILING_REFINE_EXPERIMENT "Compile the r2 trailing-refine experiment into GNLinkStream" OFF)
+if(REMOTE60_TRAILING_REFINE_EXPERIMENT)
+  set(_trailing_refine 1)
+else()
+  set(_trailing_refine 0)
+endif()
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
   REMOTE60_ENCODER_POLL_DIAG=${_encoder_poll_diag}
+  REMOTE60_TRAILING_REFINE_EXPERIMENT=${_trailing_refine}
 )
 
 add_executable(remote60_secure_input_service

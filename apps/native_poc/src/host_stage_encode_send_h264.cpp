@@ -339,7 +339,7 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
      // Admit-always only for a frame that will actually be a forced key this tick, not every keyWanted
      // one: a keyWanted delta (key already in flight) is gated like any delta. (r3 F2)
      adm.keyWanted = forceKeyFrame;
-     adm.servedBootstrap = servedBootstrap;
+     adm.servedBootstrap = servedBootstrap && !tc.servedRefine;  // r2 experiment C: the refine is a delta
      adm.senderQueueDepth = senderDepth;
      if (decide_encode_admission(adm) == EncodeAdmission::SkipOverloaded) {
        ++stats.wireOverloadSkipCount;
@@ -448,6 +448,8 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
    // ordinals of the AUs it drained
    if (eop_trace_enabled()) {
      std::cout << "[native-video-host][enc] src=" << (servedBootstrap ? "synthetic" : "real")
+               << " kind=" << (!servedBootstrap ? "real" : tc.syntheticKind == 1 ? "kick" : tc.syntheticKind == 2 ? "refresh"
+                               : tc.syntheticKind == 3 ? "refine" : "other")
                << " accepted=" << (encoder.codec.accepted_input_count() != diagAcceptedBefore ? 1 : 0)
                << " ordinal=" << encoder.codec.accepted_input_count()
                << " piStartUs=" << encodeStats.processInputStartUs << " piEndUs=" << encodeStats.processInputEndUs
@@ -522,6 +524,10 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // deadline always trails the LAST real input -- continuous motion keeps pushing it out and
     // adds zero synthetic frames; only a genuine pause lets the kick fire to flush this frame.
     kick.lastRealInputCaptureUs = encodeInputUs;
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+    kick.lastRealInputSessionEpoch = clientSession.epoch.load(std::memory_order_acquire);
+    kick.lastRealInputInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
+#endif
     kick.Arm(qpc_now_us(), useH264, hx.encoder.activeFps);
   }
   while (!encoder.nv12PendingReleases.empty() &&

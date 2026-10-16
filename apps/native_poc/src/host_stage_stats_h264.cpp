@@ -493,6 +493,10 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
             << " captureGateDropPointer=" << cadence.gateDropPointer
             << " trailingKickCount=" << kick.count
             << " staticRefreshCount=" << kick.staticRefreshCount
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+            << " trailingRefineCount=" << kick.refineCount << " trailingRefineDefer=" << kick.refineDeferCount
+            << " trailingRefineCancel=" << kick.refineCancelCount
+#endif
             << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
             << " stampClampCount=" << kick.stampClampCount
             << " stampClampMaxUs=" << kick.stampClampMaxUs

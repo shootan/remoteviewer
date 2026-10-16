@@ -5,6 +5,7 @@
 // Host split refactor Phase 2-T3 (2026-08-26).
 
 #include "host_kick.hpp"
+#include "host_encode_admission.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -120,12 +121,134 @@ void TestRealStampClampedBehindSyntheticStamp() {
   expect(k.lastEncoderStampUs == late2, "stamp: the record only moves forward");
 }
 
+// encoder-output-poll r2, experiment C: the trailing-refine decision (KickState::DecideTrailing) driven
+// through episodes the way stage_pop_frame applies it (the state updates below mirror that call site;
+// the decision itself is the product function). Admission: the refine is gated as a delta.
+struct Env {
+  bool realWaiting = false, barrierClosed = false, forceKey = false, streamActive = true, epochMatch = true,
+       senderBusy = false;
+};
+using TA = KickState::TrailingAction;
+TA DueOnce(KickState& k, const Env& e, bool* rearm) {
+  KickState::TrailingInputs ti;
+  ti.realWaiting = e.realWaiting;
+  ti.needKick = k.NeedKick(e.barrierClosed) || e.forceKey;
+  ti.refineEnabled = true;
+  ti.refineOwed = k.RefineOwed();
+  ti.streamActive = e.streamActive;
+  ti.epochMatch = e.epochMatch;
+  ti.senderBlocked = e.barrierClosed || e.senderBusy;
+  ti.alreadyDeferred = k.refineDeferredForInputCaptureUs == k.lastRealInputCaptureUs;
+  const TA a = KickState::DecideTrailing(ti);
+  *rearm = false;
+  if (a == TA::Kick || a == TA::Refine || a == TA::Cancel) k.MarkKickedForCurrentInput();
+  if (a == TA::Defer) { k.refineDeferredForInputCaptureUs = k.lastRealInputCaptureUs; *rearm = true; }
+  return a;
+}
+
+void TestTrailingRefine() {
+  using remote60::native_poc::EncodeAdmission;
+  using remote60::native_poc::EncodeAdmissionInputs;
+  using remote60::native_poc::decide_encode_admission;
+  bool rearm = false;
+  Env e;
+  {  // [r1] output already out -> one refine, then nothing for the same input
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    expect(DueOnce(k, e, &rearm) == TA::Refine && !rearm, "refine: emitted input -> one refine");
+    expect(DueOnce(k, e, &rearm) == TA::None, "refine: same input -> no second synthetic");
+    k.lastEmittedAuCaptureUs = 200;  // the refine's own AU (stamped later) comes out
+    expect(DueOnce(k, e, &rearm) == TA::None, "refine: a synthetic's AU does not reopen the episode");
+  }
+  {  // [r2] held output -> the existing kick, which is also the episode's refine (merged, 1 input)
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 50;
+    expect(DueOnce(k, e, &rearm) == TA::Kick, "refine: held input -> the liveness kick");
+    k.lastEmittedAuCaptureUs = 100;
+    expect(DueOnce(k, e, &rearm) == TA::None, "refine: kick + refine merged (no second input)");
+  }
+  {  // [r3] a newer real frame waiting wins; the new input opens its own episode, the old one is gone
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    Env w = e; w.realWaiting = true;
+    expect(DueOnce(k, w, &rearm) == TA::None, "refine: a waiting real frame cancels the synthetic");
+    k.lastRealInputCaptureUs = 300; k.lastEmittedAuCaptureUs = 300;  // the real frame encoded + emitted
+    expect(DueOnce(k, e, &rearm) == TA::Refine, "refine: the newest real input gets the refine");
+    expect(DueOnce(k, e, &rearm) == TA::None, "refine: and only once");
+  }
+  {  // [r4] static refresh / kicks never open an episode: no real input -> nothing owed
+    KickState k;
+    expect(!k.RefineOwed() && DueOnce(k, e, &rearm) == TA::None, "refine: no real input -> nothing");
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    (void)DueOnce(k, e, &rearm);
+    k.staticRefreshCount = 5; k.lastEmittedAuCaptureUs = 900;  // refreshes later, same real input
+    expect(!k.RefineOwed() && DueOnce(k, e, &rearm) == TA::None, "refine: a refresh does not reopen");
+  }
+  {  // [r5] paused stream / new epoch -> cancel, owed cleared
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    Env p = e; p.streamActive = false;
+    expect(DueOnce(k, p, &rearm) == TA::Cancel && !k.RefineOwed(), "refine: paused -> cancel, not owed");
+    expect(DueOnce(k, e, &rearm) == TA::None, "refine: resume does not revive the cancelled episode");
+    KickState k2;
+    k2.lastRealInputCaptureUs = 100; k2.lastEmittedAuCaptureUs = 100;
+    Env ep = e; ep.epochMatch = false;
+    expect(DueOnce(k2, ep, &rearm) == TA::Cancel && !k2.RefineOwed(), "refine: epoch changed -> cancel");
+  }
+  {  // [r6] busy sender: one defer (re-armed), then cancel; or defer then clear -> refine
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    Env b = e; b.senderBusy = true;
+    expect(DueOnce(k, b, &rearm) == TA::Defer && rearm, "refine: busy -> one defer, re-armed");
+    expect(DueOnce(k, b, &rearm) == TA::Cancel && !rearm && !k.RefineOwed(), "refine: busy again -> cancel");
+    KickState k2;
+    k2.lastRealInputCaptureUs = 100; k2.lastEmittedAuCaptureUs = 100;
+    expect(DueOnce(k2, b, &rearm) == TA::Defer, "refine: busy -> defer");
+    expect(DueOnce(k2, e, &rearm) == TA::Refine, "refine: clear after the defer -> refine");
+    expect(DueOnce(k2, e, &rearm) == TA::None, "refine: then nothing");
+    // a new real input gets its own one defer
+    k.lastRealInputCaptureUs = 400; k.lastEmittedAuCaptureUs = 400;
+    expect(DueOnce(k, b, &rearm) == TA::Defer, "refine: a new episode has its own defer");
+  }
+  {  // [r7] a closed barrier / pending forced key stays the kick's job (an IDR), never a refine
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    Env c = e; c.barrierClosed = true;
+    expect(DueOnce(k, c, &rearm) == TA::Kick, "refine: closed barrier -> kick, not refine");
+    KickState k2;
+    k2.lastRealInputCaptureUs = 100; k2.lastEmittedAuCaptureUs = 100;
+    Env f = e; f.forceKey = true;
+    expect(DueOnce(k2, f, &rearm) == TA::Kick, "refine: pending forced key -> kick");
+  }
+  {  // [r8] disabled (shipping) -> the old behaviour: nothing when the output is out
+    KickState k;
+    k.lastRealInputCaptureUs = 100; k.lastEmittedAuCaptureUs = 100;
+    KickState::TrailingInputs ti;
+    ti.needKick = k.NeedKick(false);
+    ti.refineEnabled = false;
+    ti.refineOwed = k.RefineOwed();
+    ti.streamActive = ti.epochMatch = true;
+    expect(KickState::DecideTrailing(ti) == TA::None, "refine: disabled -> no synthetic");
+  }
+  {  // [r9] admission: the refine is a delta (wire cap gate skips it on a backlog); a kick is admitted
+    EncodeAdmissionInputs a;
+    a.wireCapActive = true; a.senderQueueDepth = 2;
+    a.servedBootstrap = true && !true;  // servedBootstrap && !servedRefine, as in stage_encode_send
+    expect(decide_encode_admission(a) == EncodeAdmission::SkipOverloaded, "refine: backlogged wire skips it");
+    a.servedBootstrap = true && !false;
+    expect(decide_encode_admission(a) == EncodeAdmission::Admit, "refine: a kick is still admitted");
+    a.servedBootstrap = false; a.senderQueueDepth = 0;
+    expect(decide_encode_admission(a) == EncodeAdmission::Admit, "refine: an idle wire admits the refine");
+  }
+}
+
 int main() {
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();
   TestStaticRefreshCadence();
   TestRealStampClampedBehindSyntheticStamp();
+  TestTrailingRefine();
   if (gFailures == 0) {
     std::printf("host_kick_test: PASS\n");
     return 0;

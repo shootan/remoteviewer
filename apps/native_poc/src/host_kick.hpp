@@ -47,6 +47,17 @@ struct KickState {
   uint64_t stampClampCount = 0;         // telemetry: real frames whose stamp was moved forward
   uint64_t stampClampMaxUs = 0;         // telemetry: largest forward move
   uint64_t stampClampLastLogUs = 0;     // 1 Hz log rate limit
+  // encoder-output-poll r2, experiment C (REMOTE60_TRAILING_REFINE_EXPERIMENT builds only call these):
+  // one ordinary-P re-serve of the cached frame per real-input trailing episode even when that input's
+  // AU already came out -- the refine the old poll rule's held output used to buy through NeedKick.
+  // The episode guard is lastKickedForInputCaptureUs (one synthetic per real input), so a liveness
+  // kick and the refine are the same single input, never two.
+  uint64_t lastRealInputSessionEpoch = 0;          // session epoch when lastRealInputCaptureUs was fed
+  uint64_t lastRealInputInputEpoch = 0;            // capture input epoch at the same moment
+  uint64_t refineDeferredForInputCaptureUs = 0;    // the episode already deferred once (sender busy)
+  uint64_t refineCount = 0;                        // telemetry: refine re-serves submitted
+  uint64_t refineDeferCount = 0;                   // telemetry: one-time defers (sender busy)
+  uint64_t refineCancelCount = 0;                  // telemetry: episodes ended without a refine
 
   // --- behaviour (Phase 2-1: former main() lambdas arm_trailing_kick / cancel_trailing_kick) ---
   static constexpr uint64_t kTrailingKickDelayUs = 150000;  // 150ms trailing edge
@@ -85,6 +96,31 @@ struct KickState {
   }
   // One-shot per held input: remember which input the kick just re-served.
   void MarkKickedForCurrentInput() { lastKickedForInputCaptureUs = lastRealInputCaptureUs; }
+  // Experiment C: this real input's trailing episode has had no synthetic re-serve yet (kick or refine).
+  bool RefineOwed() const {
+    return lastRealInputCaptureUs != 0 && lastKickedForInputCaptureUs != lastRealInputCaptureUs;
+  }
+  enum class TrailingAction { None, Kick, Refine, Defer, Cancel };
+  struct TrailingInputs {
+    bool realWaiting = false;     // a newer real frame is in the ring: it wins, nothing synthetic now
+    bool needKick = false;        // NeedKick(barrier) || forceKeyNext -- the existing liveness/key duty
+    bool refineEnabled = false;   // experiment build
+    bool refineOwed = false;      // RefineOwed()
+    bool streamActive = false;    // stream control active (pause ends the episode)
+    bool epochMatch = false;      // session + input epoch unchanged since the real input
+    bool senderBlocked = false;   // barrier closed or sender queue not empty
+    bool alreadyDeferred = false; // this episode already took its one defer
+  };
+  // The trailing-edge decision at a due kick. The existing kick wins and also counts as the episode's
+  // refine; a refine never runs on a busy sender (one defer, then cancel), a paused stream or a new epoch.
+  static TrailingAction DecideTrailing(const TrailingInputs& in) {
+    if (in.realWaiting) return TrailingAction::None;
+    if (in.needKick) return TrailingAction::Kick;
+    if (!in.refineEnabled || !in.refineOwed) return TrailingAction::None;
+    if (!in.streamActive || !in.epochMatch) return TrailingAction::Cancel;
+    if (in.senderBlocked) return in.alreadyDeferred ? TrailingAction::Cancel : TrailingAction::Defer;
+    return TrailingAction::Refine;
+  }
   // Stamp a REAL frame must carry so the encoder/wire timeline never runs backwards past a stamp
   // already fed (a kick's "now"): strictly after it, else its own. Pure; host_kick_test.cpp.
   static uint64_t ClampRealStamp(uint64_t realStampUs, uint64_t lastEncoderStampUs) {

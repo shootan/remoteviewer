@@ -184,6 +184,9 @@ struct TickContext {
   uint64_t queueSelectStartUs = 0;
   bool servedBootstrap = false;
   bool kickForcedKey = false;    // true only when this kick must open a closed media barrier (IDR)
+  bool servedRefine = false;     // encoder-output-poll r2 experiment C: this synthetic is the trailing
+                                 // refine -- an ordinary delta for admission, not admit-always
+  uint8_t syntheticKind = 0;     // trace only: 1 kick, 2 static refresh, 3 refine
   uint64_t queuePopUs = 0;
   uint64_t queueSelectWaitUs = 0;
   uint64_t frameAgeAtSelectUs = 0;

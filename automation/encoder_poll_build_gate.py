@@ -3,11 +3,13 @@ encoder-output-poll measurement trace (CMake REMOTE60_ENCODER_POLL_DIAG) nor any
 motion-settle research line (catch-up, the output probe, the r11/r12 traces) -- this branch was cut from main
 and must not have picked any of it up. Names are searched as C string literals (followed by NUL).
 
-    python encoder_poll_build_gate.py <GNLinkStream.exe> [--expect-diag]
+    python encoder_poll_build_gate.py <GNLinkStream.exe> [--expect-diag] [--expect-refine]
 
 Default: every DIAG and research name ABSENT (shipping build).
 --expect-diag: every DIAG name PRESENT and every research name still ABSENT -- the negative control that the
-search sees the trace (run it on a REMOTE60_ENCODER_POLL_DIAG=ON build). Exit 0 = passed, 1 = failed, 2 = usage.
+search sees the trace (run it on a REMOTE60_ENCODER_POLL_DIAG=ON build).
+--expect-refine: the r2 experiment C strings (REMOTE60_TRAILING_REFINE_EXPERIMENT=ON) PRESENT; without it they
+must be ABSENT. Exit 0 = passed, 1 = failed, 2 = usage.
 """
 
 import hashlib
@@ -17,6 +19,10 @@ DIAG = [
     "REMOTE60_NATIVE_AU_TRACE",            # the trace's runtime switch
     "[native-video-host][enc] src=",       # per encode call
     "[native-video-host][au] seq=",        # per AU
+]
+REFINE = [
+    " trailingRefineCount=",               # r2 experiment C telemetry
+    "[native-video-host][refine] input=",  # r2 experiment C decision trace
 ]
 RESEARCH = [
     "REMOTE60_NATIVE_CATCHUP",             # catch-up (shipping hold; not on this branch)
@@ -36,16 +42,17 @@ def main(argv):
         return 2
     path = argv[1]
     expect_diag = "--expect-diag" in argv[2:]
+    expect_refine = "--expect-refine" in argv[2:]
     data = open(path, "rb").read()
     fail = False
-    for group, want_present in ((DIAG, expect_diag), (RESEARCH, False)):
+    for group, want_present in ((DIAG, expect_diag), (REFINE, expect_refine), (RESEARCH, False)):
         for n in group:
             present = (n.encode() + NUL) in data
             ok = present == want_present
             print(f"{'PRESENT' if present else 'ABSENT ':<7} {'ok  ' if ok else 'FAIL'} {n}")
             fail |= not ok
     sha = hashlib.sha256(data).hexdigest()[:16]
-    kind = "diag" if expect_diag else "shipping"
+    kind = "+".join(k for k, on in (("diag", expect_diag), ("refine", expect_refine)) if on) or "shipping"
     print(f"GATE {'FAIL' if fail else 'PASS'} ({kind}) {path} sha256={sha}")
     return 1 if fail else 0
 

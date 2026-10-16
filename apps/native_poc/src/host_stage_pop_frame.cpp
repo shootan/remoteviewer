@@ -184,8 +184,47 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       // cached frame is the only input that will ever carry it. (Ledger H-26b.)
       const bool needKick = kick.NeedKick(barrierClosed) || encoder.forceKeyNext;
       bool rearm = false;
+      bool refine = false;
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+      // encoder-output-poll r2, experiment C: the trailing episode of the last real input gets one
+      // ordinary-P re-serve even though its AU already came out (KickState::DecideTrailing).
+      if (!needKick && kick.RefineOwed()) {
+        bool senderBlocked = barrierClosed;
+        if (transport == VideoTransport::Udp) {
+          std::lock_guard<std::mutex> lk(sender.mu);
+          senderBlocked = senderBlocked || !sender.queue.empty();
+        }
+        KickState::TrailingInputs ti;
+        ti.refineEnabled = true;
+        ti.refineOwed = true;
+        ti.streamActive = clientSession.streamControlActive.load(std::memory_order_acquire);
+        ti.epochMatch = kick.lastRealInputSessionEpoch == clientSession.epoch.load(std::memory_order_acquire) &&
+                        kick.lastRealInputInputEpoch == capture.inputEpoch.load(std::memory_order_acquire);
+        ti.senderBlocked = senderBlocked;
+        ti.alreadyDeferred = kick.refineDeferredForInputCaptureUs == kick.lastRealInputCaptureUs;
+        const KickState::TrailingAction act = KickState::DecideTrailing(ti);
+        if (act == KickState::TrailingAction::Refine) {
+          refine = true;
+          kick.MarkKickedForCurrentInput();  // the episode's one synthetic, whether or not the fill succeeds
+        } else if (act == KickState::TrailingAction::Defer) {
+          kick.refineDeferredForInputCaptureUs = kick.lastRealInputCaptureUs;
+          ++kick.refineDeferCount;
+          rearm = true;
+        } else if (act == KickState::TrailingAction::Cancel) {
+          kick.MarkKickedForCurrentInput();
+          ++kick.refineCancelCount;
+        }
+        std::cout << "[native-video-host][refine] input=" << kick.lastRealInputCaptureUs << " act="
+                  << (act == KickState::TrailingAction::Refine ? "refine"
+                      : act == KickState::TrailingAction::Defer ? "defer"
+                      : act == KickState::TrailingAction::Cancel ? "cancel" : "none")
+                  << " active=" << (ti.streamActive ? 1 : 0) << " epochMatch=" << (ti.epochMatch ? 1 : 0)
+                  << " senderBlocked=" << (senderBlocked ? 1 : 0) << "\n";
+      }
+#endif
       if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
         servedBootstrap = true;
+        tc.syntheticKind = 1;
         // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
         // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
         if (barrierClosed) {
@@ -214,6 +253,25 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         // (Ledger H-26b, second pass.)
         rearm = barrierClosed || encoder.forceKeyNext;
       }
+#if REMOTE60_TRAILING_REFINE_EXPERIMENT
+      if (refine) {
+        if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+          // An ordinary delta of the cached frame: no key request, gated like a delta at admission.
+          servedBootstrap = true;
+          tc.servedRefine = true;
+          tc.syntheticKind = 3;
+          seq = 0;
+          version = stats.lastVersionSent;
+          streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+          captureUs = nowUs;
+          callbackUs = nowUs;
+          queuePushUs = nowUs;
+          ++kick.refineCount;
+        } else {
+          ++kick.refineCancelCount;  // fill refused (identity / secure / size): the episode ends here
+        }
+      }
+#endif
       // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
       // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
       if (rearm) {
@@ -254,6 +312,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         callbackUs = nowUs;
         queuePushUs = nowUs;
         ++kick.staticRefreshCount;
+        tc.syntheticKind = 2;
       }
     }
   }
