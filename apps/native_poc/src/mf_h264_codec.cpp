@@ -2352,25 +2352,47 @@ bool H264Encoder::collect_outputs(std::vector<H264AccessUnit>* outUnits, H264Col
   H264CollectStats local{};
   if (!cs) cs = &local;
   *cs = H264CollectStats{};
-  if (!enc_ || !started_ || !outUnits) return false;
+  if (!enc_ || !started_ || !outUnits) {
+    cs->failure = H264CollectFailure::NotRunning;
+    return false;
+  }
   const uint64_t t0 = qpc_now_us();
   H264EncodeFrameStats es{};
-  bool ok = true;
+  const size_t unitsBefore = outUnits->size();
+  // r12 (Codex r12 s2): only MF_E_NO_EVENTS_AVAILABLE is the normal "nothing yet". Any other GetEvent
+  // failure, a success with no event (IMFMediaEventGenerator::GetEvent documents a returned event on
+  // success, so a null one is not a state this code may guess about) and a failed GetType are failures
+  // with their original HRESULT -- never an empty collect, never a successful event.
+  const auto fail = [&](H264CollectFailure why, HRESULT hr) {
+    cs->failure = why;
+    cs->failedHr = static_cast<int32_t>(hr);
+    cs->lastEventHr = static_cast<int32_t>(hr);
+    cs->ausBeforeFailure = static_cast<uint32_t>(outUnits->size() - unitsBefore);
+  };
   if (asyncTransform_ && eventGenerator_) {
     for (uint32_t poll = 0; poll < 4; ++poll) {
       Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
-      if (FAILED(ehr) || !ev) {
-        cs->lastEventHr = (ehr == MF_E_NO_EVENTS_AVAILABLE) ? 0 : static_cast<int32_t>(ehr);
+      if (ehr == MF_E_NO_EVENTS_AVAILABLE) break;
+      if (FAILED(ehr)) {
+        fail(H264CollectFailure::GetEventFailed, ehr);
+        break;
+      }
+      if (!ev) {
+        fail(H264CollectFailure::NullEvent, ehr);
         break;
       }
       ++cs->events;
       MediaEventType et = MEUnknown;
-      (void)ev->GetType(&et);
+      const HRESULT thr = ev->GetType(&et);
+      if (FAILED(thr)) {
+        fail(H264CollectFailure::GetTypeFailed, thr);
+        break;
+      }
       if (et == METransformHaveOutput) {
         ++cs->haveOutput;
         if (!drain_outputs_into(outUnits, &es, lastAcceptedSampleTimeHns_)) {
-          ok = false;
+          fail(H264CollectFailure::DrainFailed, E_FAIL);
           break;
         }
       } else if (et == METransformNeedInput) {
@@ -2378,12 +2400,12 @@ bool H264Encoder::collect_outputs(std::vector<H264AccessUnit>* outUnits, H264Col
       }
     }
   } else if (!asyncTransform_) {
-    ok = drain_outputs_into(outUnits, &es, lastAcceptedSampleTimeHns_);
+    if (!drain_outputs_into(outUnits, &es, lastAcceptedSampleTimeHns_)) fail(H264CollectFailure::DrainFailed, E_FAIL);
   }
   cs->aus = static_cast<uint32_t>(es.processOutputSamples);
   cs->drainErrors = es.processOutputErrorCount;
   cs->us = qpc_now_us() - t0;
-  return ok;
+  return cs->failure == H264CollectFailure::None;
 }
 
 bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,

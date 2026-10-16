@@ -102,15 +102,37 @@ struct DecodedFrameNv12 {
 };
 
 // r10: one output-only collect (H264Encoder::collect_outputs): events read, METransformHaveOutput /
-// NeedInput among them, AUs drained, drain errors, the last GetEvent failure other than "no events",
-// and its duration.
+// NeedInput among them, AUs drained, drain errors, and its duration. r12 (Codex r12 s2): why a collect
+// failed and with which HRESULT -- only MF_E_NO_EVENTS_AVAILABLE is the normal "nothing yet".
+enum class H264CollectFailure : uint8_t {
+  None = 0,
+  NotRunning,      // no encoder / not started / no output vector
+  GetEventFailed,  // GetEvent returned a failure other than MF_E_NO_EVENTS_AVAILABLE (failedHr)
+  NullEvent,       // GetEvent succeeded but handed back no event (failedHr = the success code)
+  GetTypeFailed,   // the event's GetType failed (failedHr)
+  DrainFailed      // ProcessOutput failed after METransformHaveOutput (drainErrors)
+};
+inline const char* h264_collect_failure_name(H264CollectFailure f) {
+  switch (f) {
+    case H264CollectFailure::None: return "none";
+    case H264CollectFailure::NotRunning: return "not-running";
+    case H264CollectFailure::GetEventFailed: return "get-event";
+    case H264CollectFailure::NullEvent: return "null-event";
+    case H264CollectFailure::GetTypeFailed: return "get-type";
+    case H264CollectFailure::DrainFailed: return "drain";
+  }
+  return "?";
+}
 struct H264CollectStats {
   uint32_t events = 0;
   uint32_t haveOutput = 0;
   uint32_t needInput = 0;
   uint32_t aus = 0;
   uint32_t drainErrors = 0;
-  int32_t lastEventHr = 0;
+  int32_t lastEventHr = 0;    // kept for the trace: the failing HRESULT, 0 when none
+  H264CollectFailure failure = H264CollectFailure::None;
+  int32_t failedHr = 0;       // the original HRESULT of the failure (NullEvent: the success code)
+  uint32_t ausBeforeFailure = 0;  // AUs already drained when the failure happened (the caller drops them)
   uint64_t us = 0;
 };
 

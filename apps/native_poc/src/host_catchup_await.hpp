@@ -134,6 +134,8 @@ CatchupAwaitTickResult catchup_await_tick(KickState& kick, H264Encoder& codec, c
     r.collectFailed = true;
     r.droppedOnError = static_cast<uint32_t>(units.size());
     out << "[native-video-host][catchup] await deferred ordinal=" << kick.await.ordinal << " why=collect-error"
+        << " failure=" << h264_collect_failure_name(r.cs.failure) << " hr=0x" << std::hex
+        << static_cast<uint32_t>(r.cs.failedHr) << std::dec << " ausBeforeFailure=" << r.cs.ausBeforeFailure
         << " collected=" << units.size() << " drainErrors=" << r.cs.drainErrors
         << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs) << " collects=" << kick.await.collectAttempts
         << "\n";

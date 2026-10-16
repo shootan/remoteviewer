@@ -23,6 +23,15 @@
 //       comes out in a later encode call -> logged as late output, not as the await's success;
 //  [10] the collect's drain fails after HaveOutput -> collect-error: nothing sent, deferred;
 //  [11] the emit stage drops the collected AU (epoch gate / fence) -> not observed (pending), deferred later.
+// r12 S1 (Codex r12 s2): GetEvent results scripted on the fake -- only MF_E_NO_EVENTS_AVAILABLE is "nothing
+// yet"; everything else is a collect failure with its original HRESULT and nothing it collected is sent:
+//  [12] MF_E_NO_EVENTS_AVAILABLE -> no-output, the await stays open, no failure;
+//  [13] GetEvent E_FAIL -> collect error (get-event, hr E_FAIL), nothing sent, deferred;
+//  [14] GetEvent S_OK with no event -> collect error (null-event, hr S_OK), deferred;
+//  [15] a ready AU drained first, then GetEvent fails -> collect error with 1 AU before the failure; that
+//       AU is NOT sent (the caller runs the encode call's output-failure recovery: hadUnits -> key).
+// (GetType failing is handled the same way in collect_outputs but not driven here: it needs a fake
+// IMFMediaEvent.)
 // Sender / receiver behaviour is the shipping binary's e2e, not this test.
 
 #ifndef NOMINMAX
@@ -69,6 +78,11 @@ class FakeAsyncEncoderMft : public FakeEncoderMft, public IMFMediaEventGenerator
   Policy policy = Policy::Manual;
   int processInputCalls = 0, processOutputCalls = 0, getEventCalls = 0;
   bool failNextProcessOutput = false;  // [10]: the next ProcessOutput with a ready output fails
+  // r12 [12]-[15]: scripted GetEvent results, consumed first: Queue = serve the normal event queue,
+  // Fail = return `hr`, NullOk = return S_OK with no event.
+  enum class Script { Queue, Fail, NullOk };
+  struct ScriptStep { Script kind; HRESULT hr; };
+  std::deque<ScriptStep> script;
 
   FakeAsyncEncoderMft() : FakeEncoderMft(L"VEN_1002", L"AMD H.264 Encoder MFT (fake async)") {
     Microsoft::WRL::ComPtr<IMFAttributes> a;
@@ -107,6 +121,12 @@ class FakeAsyncEncoderMft : public FakeEncoderMft, public IMFMediaEventGenerator
     ++getEventCalls;
     if (!out) return E_POINTER;
     *out = nullptr;
+    if (!script.empty()) {
+      const ScriptStep st = script.front();
+      script.pop_front();
+      if (st.kind == Script::Fail) return st.hr;
+      if (st.kind == Script::NullOk) return S_OK;
+    }
     if (events_.empty()) return (flags & MF_EVENT_FLAG_NO_WAIT) ? MF_E_NO_EVENTS_AVAILABLE : E_NOTIMPL;
     const MediaEventType t = events_.front();
     events_.pop_front();
@@ -429,6 +449,81 @@ void TestTickCollectErrorAndDroppedAu() {
   }
 }
 
+// ---- r12 S1: GetEvent outcomes at the await tick over the real encoder -------------------------------
+using remote60::native_poc::H264CollectFailure;
+
+struct S1Setup {
+  FakeAsyncEncoderMft* fake = nullptr;
+  H264Encoder enc;
+  KickState k;
+  bool ok = false;
+};
+
+void s1_open(S1Setup& t, const char* tag) {
+  t.fake = new FakeAsyncEncoderMft();
+  t.ok = start(t.enc, t.fake);
+  expect(t.ok, std::string(tag) + " init");
+  std::vector<H264AccessUnit> units;
+  encode(t.enc, kSyntheticReasonCatchup, 349, 3333333, &units);
+  open_await(t.k, t.enc, 1);
+}
+
+void TestS1GetEventOutcomes() {
+  {
+    S1Setup t;
+    s1_open(t, "[12]");
+    t.fake->script.push_back({FakeAsyncEncoderMft::Script::Fail, MF_E_NO_EVENTS_AVAILABLE});
+    Recorder rec;
+    const auto r = catchup_await_tick(t.k, t.enc, identity_of(t.enc), kT0 + 10000, rec, gLog);
+    expect(r.step == CatchupAwaitStep::NoOutput && !r.collectFailed && r.cs.failure == H264CollectFailure::None &&
+               t.k.await.active && t.k.awaitCollectErrors == 0,
+           "[12] MF_E_NO_EVENTS_AVAILABLE -> no-output, await open, no failure");
+    t.enc.shutdown();
+  }
+  {
+    S1Setup t;
+    s1_open(t, "[13]");
+    t.fake->ReleaseHeld();  // an AU is ready, but GetEvent fails before it is seen
+    t.fake->script.push_back({FakeAsyncEncoderMft::Script::Fail, E_FAIL});
+    Recorder rec;
+    const auto r = catchup_await_tick(t.k, t.enc, identity_of(t.enc), kT0 + 10000, rec, gLog);
+    expect(r.step == CatchupAwaitStep::CollectError && r.cs.failure == H264CollectFailure::GetEventFailed &&
+               r.cs.failedHr == static_cast<int32_t>(E_FAIL) && r.cs.ausBeforeFailure == 0,
+           "[13] GetEvent E_FAIL -> collect error (get-event) with the original HRESULT");
+    expect(rec.ordinals.empty() && r.droppedOnError == 0 && t.k.awaitDeferred == 1 && t.k.awaitCollectErrors == 1 &&
+               !t.k.await.active && t.k.lateWatch.active,
+           "[13] nothing sent, deferred, late watch on");
+    t.enc.shutdown();
+  }
+  {
+    S1Setup t;
+    s1_open(t, "[14]");
+    t.fake->script.push_back({FakeAsyncEncoderMft::Script::NullOk, S_OK});
+    Recorder rec;
+    const auto r = catchup_await_tick(t.k, t.enc, identity_of(t.enc), kT0 + 10000, rec, gLog);
+    expect(r.step == CatchupAwaitStep::CollectError && r.cs.failure == H264CollectFailure::NullEvent &&
+               r.cs.failedHr == static_cast<int32_t>(S_OK),
+           "[14] GetEvent S_OK with no event -> collect error (null-event), never 'nothing yet'");
+    expect(rec.ordinals.empty() && t.k.awaitDeferred == 1, "[14] nothing sent, deferred");
+    t.enc.shutdown();
+  }
+  {
+    S1Setup t;
+    s1_open(t, "[15]");
+    t.fake->ReleaseHeld();
+    t.fake->script.push_back({FakeAsyncEncoderMft::Script::Queue, S_OK});  // the HaveOutput, served normally
+    t.fake->script.push_back({FakeAsyncEncoderMft::Script::Fail, E_UNEXPECTED});
+    Recorder rec;
+    const auto r = catchup_await_tick(t.k, t.enc, identity_of(t.enc), kT0 + 10000, rec, gLog);
+    expect(r.step == CatchupAwaitStep::CollectError && r.cs.failure == H264CollectFailure::GetEventFailed &&
+               r.cs.failedHr == static_cast<int32_t>(E_UNEXPECTED) && r.cs.ausBeforeFailure == 1 && r.collected == 1,
+           "[15] a ready AU drained first, then GetEvent fails -> collect error, 1 AU before the failure");
+    expect(rec.ordinals.empty() && r.droppedOnError == 1 && t.k.awaitObservedByCollect == 0 && t.k.awaitDeferred == 1,
+           "[15] that AU is not sent and not counted as observed (droppedOnError -> the caller's key/repair)");
+    t.enc.shutdown();
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -443,6 +538,7 @@ int main() {
   TestTickPausedAndInstanceSwap();
   TestTickDeadlineAndLateOutput();
   TestTickCollectErrorAndDroppedAu();
+  TestS1GetEventOutcomes();
   MFShutdown();
   CoUninitialize();
   std::printf("host_catchup_collect_test: %s (%d checks, %d failed)\n", gFailures == 0 ? "PASS" : "FAIL", gChecks,
