@@ -13230,7 +13230,7 @@ Next
   - 6M core: 1920×1080 소스에서 6M 적용 직후 1920×1080, 장애 시 high→mid→low 강등. **회복은 1920×1080 에서 FAIL(원본 보존)** — 3M 대조도 같아 fixture cadence 원인으로 **잠정 분류**. 480×270 6M 실행은 **low→mid 회복 입증(6M high·1080p 복귀는 아님)**.
 - park 중 화질 변경: UI 로 도달 불가(설정 탭은 TARGETS, 뷰어 메뉴는 VIEWER/SWITCHING 에서만), native `RequestRuntimeConfig` 는 park 중 거절, 미전송분은 `pendingRuntimeConfigSync` 로 남아 복귀 후 첫 동기화에서 한 번 적용. ABR 은 사용자 선택값을 덮어쓰지 않음(선택은 `selectQuality` 에서만 바뀐다).
 - 통합: `6548e0f`(keepalive merge, 문서 충돌 2건 — history 양쪽 보존, 작업목록 MA 는 main·KA 는 keepalive 줄), `56c2cde`(quality-6m merge, e2e 하네스 옵션 양쪽 보존). 제품 코드는 자동 병합.
-- 회귀: gate 39/0(×10), park 34/0, owed_key 32/0, shared_core PASS, Android 단위 194/0, 4 ABI, build gate(hook·abr-trace·fixture 주소 출하물 0). AVD 짧은 묶음 9/9(cold 첫 화면·BEST 적용·park 재사용·재선택·연결 해제·sign-out, 새 codec 첫 입력 IDR).
+- 회귀: gate 39/0(×10), park 34/0, owed_key 32/0, shared_core PASS, Android 단위 194/0, 4 ABI, build gate(hook·abr-trace·fixture 주소 출하물 0 — release-unsigned 기준; 실제 게시본(assembleDebug)은 아래 0.2.30 게시 항목 참조). AVD 짧은 묶음 9/9(cold 첫 화면·BEST 적용·park 재사용·재선택·연결 해제·sign-out, 새 codec 첫 입력 IDR).
 - 미검증: 실기 폰, 제조사 MediaCodec, 1920×1080 회복 완주, DesktopText, 배터리/트래픽.
 - 제품/테스트/문서: 문서(이 항목).
 
