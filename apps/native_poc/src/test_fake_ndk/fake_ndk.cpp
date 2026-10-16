@@ -23,6 +23,8 @@ Controls& controls() {
 struct AMediaFormat {
   int32_t width = 0;   // set only on a format returned by getOutputFormat
   int32_t height = 0;
+  bool cropRect = false, cropKeys = false;
+  int32_t cropL = 0, cropT = 0, cropR = 0, cropB = 0;
 };
 struct AMediaCodec {
   bool started = false;
@@ -35,6 +37,7 @@ const char* AMEDIAFORMAT_KEY_HEIGHT = "height";
 const char* AMEDIAFORMAT_KEY_CSD_0 = "csd-0";
 const char* AMEDIAFORMAT_KEY_CSD_1 = "csd-1";
 const char* AMEDIAFORMAT_KEY_PRIORITY = "priority";
+const char* AMEDIAFORMAT_KEY_DISPLAY_CROP = "crop";
 
 int __android_log_write(int prio, const char* tag, const char* text) {
   std::printf("      [decoder %s] %s\n", prio >= ANDROID_LOG_ERROR ? "E" : "I", text ? text : "");
@@ -63,7 +66,18 @@ bool AMediaFormat_getInt32(AMediaFormat* f, const char* name, int32_t* out) {
     *out = f->height;
     return true;
   }
+  if (f->cropKeys) {
+    if (std::strcmp(name, "crop-left") == 0) return (*out = f->cropL), true;
+    if (std::strcmp(name, "crop-top") == 0) return (*out = f->cropT), true;
+    if (std::strcmp(name, "crop-right") == 0) return (*out = f->cropR), true;
+    if (std::strcmp(name, "crop-bottom") == 0) return (*out = f->cropB), true;
+  }
   return false;
+}
+bool AMediaFormat_getRect(AMediaFormat* f, const char* name, int32_t* l, int32_t* t, int32_t* r, int32_t* b) {
+  if (!f || !f->cropRect || std::strcmp(name, AMEDIAFORMAT_KEY_DISPLAY_CROP) != 0) return false;
+  *l = f->cropL, *t = f->cropT, *r = f->cropR, *b = f->cropB;
+  return true;
 }
 
 AMediaCodec* AMediaCodec_createDecoderByType(const char*) {
@@ -114,6 +128,9 @@ ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* inf
   if (o.formatChange) {
     c.outputWidth = o.width;
     c.outputHeight = o.height;
+    c.outputCropRect = o.cropRect;
+    c.outputCropKeys = o.cropKeys;
+    c.outputCropL = o.cropL, c.outputCropT = o.cropT, c.outputCropR = o.cropR, c.outputCropB = o.cropB;
     return AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED;
   }
   if (info) {
@@ -128,10 +145,20 @@ ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* inf
 AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   auto* f = new AMediaFormat();
-  f->width = fake_ndk::controls().outputWidth;
-  f->height = fake_ndk::controls().outputHeight;
+  const auto& c = fake_ndk::controls();
+  f->width = c.outputWidth;
+  f->height = c.outputHeight;
+  f->cropRect = c.outputCropRect;
+  f->cropKeys = c.outputCropKeys;
+  f->cropL = c.outputCropL, f->cropT = c.outputCropT, f->cropR = c.outputCropR, f->cropB = c.outputCropB;
   return f;
 }
+media_status_t AMediaCodec_getName(AMediaCodec*, char** outName) {
+  static char name[] = "fake.h264.decoder";
+  *outName = name;
+  return AMEDIA_OK;
+}
+void AMediaCodec_releaseName(AMediaCodec*, char*) {}
 media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec*, size_t, bool) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   ++fake_ndk::controls().released;

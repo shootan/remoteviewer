@@ -207,6 +207,23 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
     if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     return;
   }
+  // keepalive r5 D1: a codec instance starts at an IDR. One the surface started -- from the SPS/PPS an IDR left
+  // behind while there was no surface -- would otherwise take the deltas that follow first; measured on a
+  // cold-booted AVD (0.2.29 too), its decoder took 12-15 of them, produced nothing and freed no input buffer
+  // for the IDRs asked for afterwards: the selection never showed a frame. Dropped here and an IDR asked for
+  // (the session's limiter paces the asks); the IDR then starts this instance like any other.
+  if (codecAwaitsKey_ && !isKeyFrame) {
+    ++deltaBeforeKeyDrops_;
+    decoderKeyframeRequest_ = true;
+    if ((deltaBeforeKeyDrops_ % 30u) == 1u) {
+      char line[160];
+      std::snprintf(line, sizeof(line), "delta before the codec's first IDR dropped streamGen=%llu drops=%llu",
+                    static_cast<unsigned long long>(frame.header.streamGeneration),
+                    static_cast<unsigned long long>(deltaBeforeKeyDrops_));
+      log_info(line);
+    }
+    return;
+  }
 
   if (!TryQueueFrameLocked(frame)) {
     if (!pendingFrame_.has_value()) {
@@ -541,6 +558,19 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " bootstrapReplay=" + std::to_string(bootstrapReplayCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(gate_.awaiting() ? 1 : 0);
+  // keepalive r5 D1: the codec's own answers (see the members).
+  status += " codecs=" + std::to_string(codecsStarted_);
+  status += " inDeq=" + std::to_string(lastInputDequeue_);
+  status += " outDeq=" + std::to_string(lastOutputDequeue_);
+  status += " outDequeued=" + std::to_string(outputDequeued_);
+  status += " fmt=" + std::to_string(formatChanges_);
+  status += " held=" + std::to_string(heldOutputValid_ ? 1 : 0);
+  status += " awaitsKey=" + std::to_string(codecAwaitsKey_ ? 1 : 0);
+  status += " coded=" + std::to_string(formatWidth_) + "x" + std::to_string(formatHeight_);
+  status += " cropSrc=" + std::string(cropSource_);
+  status += " crop=" + std::to_string(cropLeft_) + "," + std::to_string(cropTop_) + "," + std::to_string(cropRight_) +
+            "," + std::to_string(cropBottom_);
+  status += " deltaBeforeKey=" + std::to_string(deltaBeforeKeyDrops_);
   return status;
 }
 
@@ -616,14 +646,27 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
     return false;
   }
 
+  ++codecsStarted_;
+  codecAwaitsKey_ = true;
+  formatWidth_ = 0;  // viewer-sharpness r1 A: no format of this instance yet -- nothing of the last one is kept
+  formatHeight_ = 0;
+  cropSource_ = "none";
+  cropLeft_ = cropTop_ = cropRight_ = cropBottom_ = 0;
+  outputDequeued_ = 0;
+  formatChanges_ = 0;
+  lastInputDequeue_ = 0;
+  lastOutputDequeue_ = 0;
   configuredWidth_ = width;
   configuredHeight_ = height;
   outputWidth_ = width;
   outputHeight_ = height;
   StartOutputPumpLocked();
-  char line[128];
-  std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu",
-                width, height, csd0_.size(), csd1_.size());
+  char line[224];
+  char* codecName = nullptr;
+  const bool named = AMediaCodec_getName(codec_, &codecName) == AMEDIA_OK && codecName;
+  std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu name=%s",
+                width, height, csd0_.size(), csd1_.size(), named ? codecName : "?");
+  if (named) AMediaCodec_releaseName(codec_, codecName);
   log_info(line);
   return true;
 }
@@ -672,6 +715,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (!codec_) return false;
 
   const ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(codec_, 0);
+  lastInputDequeue_ = static_cast<int64_t>(inputIndex);
   if (inputIndex < 0) {
     return false;
   }
@@ -709,7 +753,10 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
-  if ((frame.header.flags & 1u) != 0) gate_.KeyDelivered(frame.header.streamGeneration);
+  if ((frame.header.flags & 1u) != 0) {
+    gate_.KeyDelivered(frame.header.streamGeneration);
+    codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
+  }
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
@@ -824,32 +871,56 @@ void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
   AMediaFormat* format = AMediaCodec_getOutputFormat(codec_);
   if (!format) return;
 
+  // The coded (buffer) size, then the visible part of it. viewer-sharpness r1 A: Codec2 decoders report the
+  // visible rectangle as ONE key, "crop" (AMEDIAFORMAT_KEY_DISPLAY_CROP, a rect, inclusive), not as the four
+  // crop-left/right/top/bottom integers this read before -- on a phone whose decoder codes 1080 lines as 1088
+  // (SM-S948N, 2026-10-15: size=1920x1080 output=1920x1088) the crop was never found and the 8 padding lines
+  // were taken as picture. The emulator's decoder reports the exact size, so it never showed there.
   int32_t width = 0;
   int32_t height = 0;
-  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &width) && width > 0) {
-    outputWidth_ = static_cast<uint32_t>(width);
-  }
-  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height) && height > 0) {
-    outputHeight_ = static_cast<uint32_t>(height);
-  }
+  const bool hasWidth = AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &width) && width > 0;
+  const bool hasHeight = AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height) && height > 0;
+  if (hasWidth) outputWidth_ = static_cast<uint32_t>(width);
+  if (hasHeight) outputHeight_ = static_cast<uint32_t>(height);
+  formatWidth_ = outputWidth_;
+  formatHeight_ = outputHeight_;
 
-  int32_t cropLeft = 0;
-  int32_t cropRight = 0;
-  int32_t cropTop = 0;
-  int32_t cropBottom = 0;
-  const bool hasCrop =
-      AMediaFormat_getInt32(format, "crop-left", &cropLeft) &&
-      AMediaFormat_getInt32(format, "crop-right", &cropRight) &&
-      AMediaFormat_getInt32(format, "crop-top", &cropTop) &&
-      AMediaFormat_getInt32(format, "crop-bottom", &cropBottom);
-  if (hasCrop && cropRight >= cropLeft && cropBottom >= cropTop) {
-    outputWidth_ = static_cast<uint32_t>(cropRight - cropLeft + 1);
-    outputHeight_ = static_cast<uint32_t>(cropBottom - cropTop + 1);
+  // A crop is used only when it lies inside the coded size: 0 <= left <= right < width, 0 <= top <= bottom
+  // < height. Absent and invalid are told apart from a real crop of the whole frame (0,0,w-1,h-1).
+  const auto valid = [&](int32_t l, int32_t t, int32_t r, int32_t b) {
+    return l >= 0 && t >= 0 && l <= r && t <= b && static_cast<uint32_t>(r) < formatWidth_ &&
+           static_cast<uint32_t>(b) < formatHeight_;
+  };
+  int32_t l = 0, t = 0, r = 0, b = 0;
+  cropSource_ = "absent";
+  if (AMediaFormat_getRect(format, AMEDIAFORMAT_KEY_DISPLAY_CROP, &l, &t, &r, &b)) {
+    cropSource_ = valid(l, t, r, b) ? "rect" : "invalid_rect";
   }
+  if (std::strcmp(cropSource_, "rect") != 0) {
+    int32_t kl = 0, kt = 0, kr = 0, kb = 0;
+    if (AMediaFormat_getInt32(format, "crop-left", &kl) && AMediaFormat_getInt32(format, "crop-top", &kt) &&
+        AMediaFormat_getInt32(format, "crop-right", &kr) && AMediaFormat_getInt32(format, "crop-bottom", &kb)) {
+      if (valid(kl, kt, kr, kb)) {
+        cropSource_ = "keys";
+        l = kl, t = kt, r = kr, b = kb;
+      } else if (std::strcmp(cropSource_, "absent") == 0) {
+        cropSource_ = "invalid_keys";
+        l = kl, t = kt, r = kr, b = kb;
+      }
+    }
+  }
+  const bool cropUsed = std::strcmp(cropSource_, "rect") == 0 || std::strcmp(cropSource_, "keys") == 0;
+  if (cropUsed) {
+    outputWidth_ = static_cast<uint32_t>(r - l + 1);
+    outputHeight_ = static_cast<uint32_t>(b - t + 1);
+  }
+  cropLeft_ = l, cropTop_ = t, cropRight_ = r, cropBottom_ = b;
 
-  char line[160];
-  std::snprintf(line, sizeof(line), "output format width=%u height=%u crop=%d,%d,%d,%d",
-                outputWidth_, outputHeight_, cropLeft, cropTop, cropRight, cropBottom);
+  char line[224];
+  std::snprintf(line, sizeof(line),
+                "output format coded=%ux%u visible=%ux%u crop=%d,%d,%d,%d cropSource=%s hasWidth=%d hasHeight=%d",
+                formatWidth_, formatHeight_, outputWidth_, outputHeight_, l, t, r, b, cropSource_, hasWidth ? 1 : 0,
+                hasHeight ? 1 : 0);
   log_info(line);
   AMediaFormat_delete(format);
 }
@@ -926,7 +997,9 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   AMediaCodecBufferInfo info{};
   for (;;) {
     const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
+    lastOutputDequeue_ = static_cast<int64_t>(outputIndex);
     if (outputIndex >= 0) {
+      ++outputDequeued_;
       // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). A codec-config (2)
       // buffer carries no picture; an end-of-stream (4) buffer may carry the last one, so only an empty
       // EOS buffer is left out (GNLink never queues an EOS in a session). A replayed input's output is
@@ -979,6 +1052,7 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
       continue;
     }
     if (outputIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+      ++formatChanges_;
       UpdateOutputFormatLocked();
       continue;
     }

@@ -180,6 +180,26 @@ target_link_libraries(remote60_native_video_host_clipsink PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD of the host for the APK's keepalive runs (keepalive r1): the same sources and libraries as
+# GNLinkStream; pinned to the test's own window (--capture-window-*), it lists that window alone, as
+# selectable, and answers its selection as applied (REMOTE60_PINNED_SELECT_TEST_SEAM, in
+# host_control_session.cpp and nowhere else) -- so the real APK UI can open its viewer on a host that
+# captures nothing of the user's. Its own output name, never packaged.
+get_target_property(_pinned_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_pinned_select ${_pinned_host_sources})
+set_target_properties(remote60_native_video_host_pinned_select PROPERTIES
+  OUTPUT_NAME "GNLinkStreamPinnedSelectTest")
+target_include_directories(remote60_native_video_host_pinned_select PRIVATE src)
+target_compile_definitions(remote60_native_video_host_pinned_select PRIVATE
+  REMOTE60_PINNED_SELECT_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_pinned_select PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 # TEST BUILD of the host for the cached-sign-in migration: the same sources and libraries as
 # GNLinkStream, with the product's server and its former names replaced by loopback fixtures read
 # from the environment (REMOTE60_STREAM_TEST_SEAM, in directory_client.cpp and nowhere else). The
@@ -858,6 +878,20 @@ target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
 
+# viewer-sharpness r1 A: the APK sink's visible size from the decoder's output format (crop rect / keys / none),
+# android_video_decoder.cpp itself against the stand-in NDK.
+add_executable(remote60_android_decoder_geometry_test
+  src/android_decoder_geometry_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_geometry_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX)
+
 # mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
 # NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
 add_executable(remote60_android_decoder_decode_stats_test
@@ -871,6 +905,43 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
 target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
+
+# keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
+# keepalive r3: a second client through the fixture directory's relay (the other device that takes a host
+# from a parked phone). TEST ONLY: the product's directory calls, rendezvous and client session.
+add_executable(ka_relay_client_test
+  src/ka_relay_client_test.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(ka_relay_client_test PRIVATE src)
+target_link_libraries(ka_relay_client_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(ka_relay_client_test PRIVATE /utf-8)
+endif()
+
+# keepalive r3 R2-a: the native connect adoption gate (connect_op_gate.hpp); no network.
+# r5 T1: with the product rendezvous (a cancelled observe must close the socket it opened).
+add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp src/directory_rendezvous.cpp)
+target_include_directories(remote60_connect_op_gate_test PRIVATE src)
+target_link_libraries(remote60_connect_op_gate_test PRIVATE common ws2_32)
+target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNECT_GATE_TEST_HOOKS=1)
+
+add_executable(remote60_client_park_state_test
+  src/client_park_state_test.cpp
+  src/native_video_client_shared_core.cpp
+)
+target_include_directories(remote60_client_park_state_test PRIVATE src)
+target_link_libraries(remote60_client_park_state_test PRIVATE common ws2_32)
 
 # mobile-abr r3: the decoder sink's state as one consistent copy (sequence lock), with a negative control (pure).
 add_executable(remote60_client_decode_snapshot_test src/client_decode_snapshot_test.cpp)
@@ -911,9 +982,25 @@ add_executable(remote60_mobile_abr_session_e2e_test
   src/mobile_abr_session_e2e_test.cpp
 )
 target_include_directories(remote60_mobile_abr_session_e2e_test PRIVATE src)
+target_compile_definitions(remote60_mobile_abr_session_e2e_test PRIVATE REMOTE60_CLIENT_SESSION_TEST_HOOKS=1)
 target_link_libraries(remote60_mobile_abr_session_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_mobile_abr_session_e2e_test PRIVATE /utf-8)
+endif()
+
+# keepalive r3 R3: the pinned test host's capture boundary, on a private window station with the capture
+# probe on -- every case ends before a capture object exists (pinned_seam_boundary_test.cpp).
+add_executable(remote60_pinned_seam_boundary_test
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/pinned_seam_boundary_test.cpp
+)
+target_include_directories(remote60_pinned_seam_boundary_test PRIVATE src)
+target_link_libraries(remote60_pinned_seam_boundary_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_pinned_seam_boundary_test PRIVATE /utf-8)
 endif()
 
 # Ring policy and buffer pool of the capture readback pipeline; no GPU involved.

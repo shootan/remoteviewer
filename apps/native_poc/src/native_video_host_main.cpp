@@ -159,6 +159,16 @@ int main(int argc, char** argv) {
   startup_process_setup();
 
   const Args args = parse_args(argc, argv);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  {
+    // TEST BUILD ONLY (r2 K6): fail-closed -- this host never starts without its pinned window.
+    std::string why;
+    if (!remote60::native_poc::pinned_select_seam_admit_start(args, &why)) {
+      std::fprintf(stderr, "[pinned-select-test] refused to start: %s\n", why.c_str());
+      return 64;
+    }
+  }
+#endif
   // Viewer input routing: injection mode, SYSTEM broker, counters, cursor forwarder (InputRouterState, Phase 1-9).
   InputRouterState inputRouter;
   const bool useRaw = (args.codec == "raw");

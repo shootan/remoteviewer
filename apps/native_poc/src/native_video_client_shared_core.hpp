@@ -32,6 +32,8 @@ class ClientInputQueue {
   uint32_t NextSequence();
   void Enqueue(const QueuedControlInputMessage& msg);
   bool TryDequeue(QueuedControlInputMessage* out);
+  // keepalive r1: nothing waiting to be sent (a park waits for its releases to drain).
+  bool Empty() const;
   // Wake immediately on typing/mouse input; periodic control work still gets a bounded wait.
   void WaitForInput(uint32_t timeoutMs);
   uint64_t dropped_count() const;
@@ -274,6 +276,8 @@ class ClientControlScheduler {
  public:
   void Reset(uint32_t controlIntervalMs, uint64_t nowUs);
   void OnPingCompleted(uint64_t doneUs);
+  // keepalive r1: the next pass sends a Ping (a park's fence after its pause).
+  void RequestPingNow() { nextPingUs_ = 0; }
   bool NextAction(uint64_t nowUs,
                  const ClientControlMetricsSnapshot& metrics,
                  WindowPanelStateModel* windowPanel,
@@ -613,6 +617,8 @@ struct WindowSelectApplyResult {
 class WindowPanelStateModel {
  public:
   void Reset();
+  // keepalive r2 K1: a park takes back every list / select / monitor request not yet sent.
+  void CancelPendingRequests();
   void RequestList(const char* statusText = nullptr);
   bool TakeListRequest();
   // monitorListRevision: for a monitor-select target, the list the index was taken from

@@ -259,6 +259,17 @@ class ClipboardClientPolicy {
     lastPollUs_ = 0;
   }
 
+  /**
+   * keepalive r1: a parked session resumed. Nothing that changed on either side while it was parked
+   * travels: the next poll is a baseline again (the host's copies made meanwhile are not applied), and
+   * there is no initial push (the caller seeds what the phone holds now as already sent).
+   */
+  void OnResumed() {
+    baselineAdopted_ = false;
+    initialPushPending_ = false;
+    lastPollUs_ = 0;
+  }
+
   /** True exactly once per session, for the caller to push its current clipboard. */
   bool TakeInitialPush() {
     if (!initialPushPending_) return false;

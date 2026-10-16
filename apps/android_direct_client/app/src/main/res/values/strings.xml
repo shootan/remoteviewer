@@ -184,10 +184,20 @@
     <string name="ui_close">닫기</string>
     <string name="ui_refresh">새로 고침</string>
     <string name="ui_quality_label">화질</string>
+    <!-- viewer-sharpness r1 B -->
+    <string name="viewer_view_large">크게 보기</string>
+    <string name="viewer_view_full">전체 보기</string>
+    <string name="viewer_controls_hide">컨트롤 숨기기</string>
+    <string name="viewer_chip_full">전체보기</string>
+    <string name="viewer_chip_pan">화면 이동</string>
+    <string name="viewer_chip_pan_on">이동 끝</string>
+    <string name="viewer_chip_controls">컨트롤</string>
     <string name="ui_quality_low">저화질 · 1500</string>
     <string name="ui_quality_high">고화질 · 3000</string>
+    <string name="ui_quality_best">최고화질 · 6000</string>
     <string name="ui_quality_low_short">저화질</string>
     <string name="ui_quality_high_short">고화질</string>
+    <string name="ui_quality_best_short">최고화질</string>
     <string name="ui_fps_label">프레임</string>
     <string name="ui_fps_item">%1$d fps</string>
     <string name="ui_fps_hint">높은 프레임은 데이터·배터리 사용량이 늘 수 있습니다</string>
@@ -202,6 +212,17 @@
     <string name="ui_macro">매크로</string>
     <string name="ui_connection_list">대상 선택 화면</string>
     <string name="ui_connection_list_description">뷰어를 닫고 대상 선택 화면으로 돌아갑니다 (연결은 유지)</string>
+    <!-- keepalive r1 -->
+    <string name="ui_targets_to_hosts">PC 목록</string>
+    <string name="ui_targets_to_hosts_description">연결은 유지하고 화면 전송을 멈춘 채 PC 목록으로 갑니다</string>
+    <string name="ui_menu_to_hosts">PC 목록 (연결 유지)</string>
+    <string name="ui_menu_to_hosts_description">화면 전송을 멈추고 연결은 5분간 유지한 채 PC 목록으로 갑니다</string>
+    <string name="hosts_parked_state">연결 유지 중</string>
+    <string name="hosts_parked_detail">화면 전송 중지 · 누르면 바로 열립니다</string>
+    <string name="hosts_park_banner">%1$s 연결 유지 중 · 화면 전송 중지 (%2$s 남음)</string>
+    <string name="hosts_park_banner_preparing">%1$s 연결 유지 준비 중…</string>
+    <string name="hosts_park_disconnect">연결 끊기</string>
+    <string name="hosts_park_ended">%1$s 연결이 끝났습니다</string>
     <string name="ui_menu_disconnect">연결 해제</string>
     <string name="ui_menu_disconnect_description">PC 와의 연결을 끊고 PC 목록으로 돌아갑니다</string>
     <string name="ui_disconnect_confirm_title">연결을 끊을까요?</string>

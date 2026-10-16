@@ -20,6 +20,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <string>

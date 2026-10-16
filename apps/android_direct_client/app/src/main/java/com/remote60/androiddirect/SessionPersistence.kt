@@ -25,12 +25,13 @@ object SessionPersistence {
     private const val KEY_UNLOCK_PASSWORD_PREFIX = "unlock_pw_"
 
     /**
-     * The saved endpoint, with bitrate/fps on the two quality levels and three frame rates.
+     * The saved endpoint, with bitrate/fps on the quality levels (1500 / 3000 / 6000) and three frame rates.
      *
-     * The first load after the two-level choice arrived moves the old free-form numbers onto it once
-     * (ViewerQualitySettings.resolve: >= 3000 high, below low, invalid low; fps to the nearest of
-     * 30/45/60) and writes the result back, so the settings screen and the viewer menu read the same
-     * stored model from then on.
+     * The first load after the level choice arrived moves the old free-form numbers onto it once
+     * (ViewerQualitySettings.resolve: >= 6000 best, >= 3000 high, below low, invalid low; fps to the
+     * nearest of 30/45/60) and writes the result back, so the settings screen and the viewer menu read
+     * the same stored model from then on. quality-6m r1: the stored form is the same integers, so the
+     * schema stays 2; a value already on a level is never rewritten (a 3000 is not raised to 6000).
      */
     fun load(context: Context): SavedEndpoint {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

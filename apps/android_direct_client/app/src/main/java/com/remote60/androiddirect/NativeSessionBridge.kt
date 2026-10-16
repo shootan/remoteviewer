@@ -7,8 +7,35 @@ object NativeSessionBridge {
         System.loadLibrary("remote60_android_direct")
     }
 
-    external fun nativeConnect(host: String, videoPort: Int, controlPort: Int): Boolean
+    /** r4 S1: the manual connect, adopted through the connect gate as operation [op]; the generation it made (0 = none). */
+    external fun nativeConnect(host: String, videoPort: Int, controlPort: Int, op: Long): Long
+
+    /** r4 S2-a: a new connect operation, numbered by the native gate for the whole process (and current there). */
+    external fun nativeConnectOpNext(): Long
+
+    /** r4 S1: closes the session only if [op] adopted generation [gen] and it is still the one running (one step). */
+    external fun nativeCloseIfOwn(op: Long, gen: Long): Boolean
     external fun nativeDisconnect()
+
+    // keepalive r1 (SessionPark.kt): park a connected session while the PC list shows, resume it.
+    /** Stops input / clipboard / previews, releases what the host holds, then pauses and fences. */
+    external fun nativeBeginPark(): Boolean
+    /** Only from Parked: the session takes requests again. */
+    external fun nativeResumePark(): Boolean
+    /** Drops a park without resuming (a disconnect follows). */
+    external fun nativeEndPark()
+    /** SessionPark.NativePhase codes. */
+    external fun nativeParkPhase(): Int
+    external fun nativeParkReleasedCount(): Int
+    external fun nativeParkDroppedActionCount(): Int
+    /** r2 K5: the host stops sending when paused (else "PC 목록" is not offered: 연결 해제 only). */
+    external fun nativeHostHonorsStreamPause(): Boolean
+    /** Bumps on every session Connect: the identity of the authenticated connection. */
+    external fun nativeConnectionGeneration(): Long
+    /** "gen= connects= hellos= observes= punches=" for the log. */
+    external fun nativeSessionCounters(): String
+    /** The phone's clipboard when a parked session resumes: counted as already sent. */
+    external fun nativeSeedClipboardBaseline(text: String)
 
     /**
      * Asks the directory what public address this device's media socket presents, returning
@@ -19,15 +46,8 @@ object NativeSessionBridge {
         directoryHost: String,
         directoryUdpPort: Int,
         observeToken: String,
+        op: Long,
     ): String
-
-    /** Punches towards the host on the observed socket and starts the session on it. */
-    external fun nativeDirectoryConnect(
-        hostIp: String,
-        hostPort: Int,
-        punchBudgetMs: Int,
-        punchToken: String,
-    ): Boolean
 
     /**
      * Punches every offered address at once and starts the session on whichever answers.
@@ -41,7 +61,8 @@ object NativeSessionBridge {
         candidates: Array<String>,
         punchBudgetMs: Int,
         punchToken: String,
-    ): Boolean
+        op: Long,
+    ): Long  // r3 R2-a: the generation this call's connection has; 0 = none (failed or stale)
 
     /** Which candidate answered, as "ip:port|kind", for the diagnostics log. */
     external fun nativeDirectoryChosenCandidate(): String

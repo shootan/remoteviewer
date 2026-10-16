@@ -48,6 +48,7 @@
 #include "host_input_inject.hpp"
 #include "host_kick.hpp"
 #include "host_monitor_selection.hpp"
+#include "host_pinned_select_seam.hpp"
 #include "host_session.hpp"
 #include "host_stats.hpp"
 #include "host_string_util.hpp"
@@ -500,6 +501,14 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
   auto& dxgiCaptureSession = res.dxgiCaptureSession;
   auto& gdiCaptureProcess = res.gdiCaptureProcess;
   capture.DetachCaptureSession(res, token);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // r3 R3: every (re)start of this test build -- WGC, DXGI and the GDI helper alike -- captures the pinned
+  // window or ends the host. A screen (no window mode) is never started here.
+  pinned_select_seam_capture_gate(
+      capture.windowModeActive ? reinterpret_cast<HWND>(static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_relaxed)))
+                               : nullptr,
+      "capture restart");
+#endif
 #ifdef REMOTE60_STREAM_TEST_SEAM
   // TEST BUILD ONLY (GNLinkStreamMigrationTest; never GNLinkStream): while the named file exists
   // every capture restart fails here, after the detach, as a real one would -- the e2e checks that

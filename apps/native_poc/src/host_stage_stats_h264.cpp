@@ -559,6 +559,23 @@ Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPri
                           sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs, clUdpDropPm,
                           viewer.firstUs != 0, viewer.decodeReported};
     const AbrDecision abrDecision = rate.DecideAbrProfile(abrIn, t);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    // keepalive r5 D1, TEST BUILD ONLY (GNLinkStreamPinnedSelectTest): what every second's verdict stood
+    // on -- whether the viewer's report kept arriving (reports grows), and with decode values, while it
+    // showed nothing. The [abr] line below is written only when the profile changes.
+    std::cout << "[native-video-host][abr-trace] evidence=" << abr_evidence_names(abrDecision.evidence)
+              << " metricsFresh=" << (metricsFresh ? 1 : 0)
+              << " clientDecodeValid=" << (abrDecision.clientDecodeValid ? 1 : 0)
+              << " clientReports=" << viewer.reports
+              << " clientReportAgeMs=" << (viewer.updatedUs > 0 && t >= viewer.updatedUs ? (t - viewer.updatedUs) / 1000 : 0)
+              << " reportHasDecode=" << (viewer_report_has_decode_fields(viewer) ? 1 : 0)
+              << " rawRecvFps=" << (viewer.recvFpsX100 / 100.0)
+              << " rawDecodedFps=" << (viewer.decodedFpsX100 / 100.0)
+              << " rawSize=" << viewer.width << "x" << viewer.height
+              << " sentFrames=" << sender.sentFrames
+              << " sevSec=" << rate.abrSeverePressureSeconds << " profile=" << rate.abrProfile
+              << " target=" << abrDecision.targetProfile << "\n";
+#endif
     const int targetProfile = abrDecision.targetProfile;
     const char* abrReason = abrDecision.reason;
 

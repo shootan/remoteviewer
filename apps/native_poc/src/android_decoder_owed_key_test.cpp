@@ -233,6 +233,45 @@ int main() {
     sink.SetSurface(env, nullptr);
   }
 
+  {
+    // keepalive r5 D1, measured on a cold-booted AVD (0.2.29 and the candidate alike): the selection's IDR came
+    // before the viewer surface and was dropped; the surface then started a codec at once from the SPS/PPS that
+    // IDR had left, and the next frames -- deltas -- went in first. The emulator's decoder took 12-15 of them,
+    // never produced a picture, and never freed an input buffer for the IDRs that followed: no first frame.
+    std::puts("\n--- 8. r5 D1: a codec started by the surface takes no delta before an IDR ---");
+    AndroidVideoDecoderSink sink;
+    sink.PrepareForWindowSelection(14);
+    sink.OnWindowSelectionControlResultFor(answer(49), 14);
+    sink.OnEncodedH264Frame(frame(49, true, 0x91));  // the selection's IDR -- no surface yet: dropped
+    JNIEnv* env = nullptr;
+    int started0 = 0;
+    with_controls([&](fake_ndk::Controls& c) { started0 = c.codecsStarted; });
+    const size_t q0 = queued_count();
+    sink.SetSurface(env, surface());
+    int started1 = 0;
+    with_controls([&](fake_ndk::Controls& c) { started1 = c.codecsStarted; });
+    std::printf("  codec started by the surface: %s\n", started1 > started0 ? "yes" : "no");
+    (void)sink.ConsumeDecoderKeyframeRequest();
+    sink.OnEncodedH264Frame(frame(49, false, 0x92));  // deltas, before the IDR asked for
+    sink.OnEncodedH264Frame(frame(49, false, 0x93));
+    const bool asked = sink.ConsumeDecoderKeyframeRequest() || sink.KeyframeOwedFor() != 0;
+    sink.OnEncodedH264Frame(frame(49, true, 0x94));  // the IDR asked for
+    std::vector<uint8_t> first;
+    size_t queuedNow = 0;
+    with_controls([&](fake_ndk::Controls& c) {
+      queuedNow = c.queued.size();
+      if (c.queued.size() > q0) first = c.queued[q0];
+    });
+    const bool firstIsIdr = first.size() >= 2 && first[first.size() - 1] == 0x94 && first[first.size() - 2] == 0x94;
+    check("THE FIRST INPUT OF THE NEW CODEC IS AN IDR (no delta before it)", firstIsIdr,
+          "queued after the surface: " + std::to_string(queuedNow - q0));
+    check("the deltas before it are not queued, and an IDR is asked for (through the session's limiter)",
+          queuedNow - q0 == 1 && asked);
+    sink.OnEncodedH264Frame(frame(49, false, 0x95));
+    check("after the IDR, deltas go in as before", last_queued_has(0x95));
+    sink.SetSurface(env, nullptr);
+  }
+
   if (gFailures == 0) {
     std::printf("\nRESULT: ALL PASS  (%d checks, 0 failed)\n", gChecks);
     return 0;
