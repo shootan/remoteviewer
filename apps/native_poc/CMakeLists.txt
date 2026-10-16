@@ -290,8 +290,17 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowscodecs
   shlwapi
 )
+# encoder-output-poll r1: the measurement trace ([enc] / [au] lines) exists only in a DIAG build; it changes
+# no product behaviour and a default build carries none of it (automation/encoder_poll_build_gate.py).
+option(REMOTE60_ENCODER_POLL_DIAG "Compile the encoder-output-poll measurement trace into GNLinkStream" OFF)
+if(REMOTE60_ENCODER_POLL_DIAG)
+  set(_encoder_poll_diag 1)
+else()
+  set(_encoder_poll_diag 0)
+endif()
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+  REMOTE60_ENCODER_POLL_DIAG=${_encoder_poll_diag}
 )
 
 add_executable(remote60_secure_input_service
@@ -1019,6 +1028,11 @@ add_executable(remote60_input_macro_test
 target_include_directories(remote60_input_macro_test PRIVATE
   src
 )
+
+# encoder-output-poll r1: the async encode call's post-input event poll at the real H264Encoder boundary
+add_executable(remote60_host_encoder_poll_test src/mf_h264_codec.cpp src/host_encoder_poll_test.cpp)
+target_include_directories(remote60_host_encoder_poll_test PRIVATE src)
+target_link_libraries(remote60_host_encoder_poll_test PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
 
 add_executable(remote60_mf_h264_codec_test
   src/mf_h264_codec.cpp

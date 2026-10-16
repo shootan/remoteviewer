@@ -85,6 +85,17 @@ using remote60::host::DxgiDesktopCaptureConfig;
 using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
+#if REMOTE60_ENCODER_POLL_DIAG
+// encoder-output-poll r1, DIAG builds only (CMake REMOTE60_ENCODER_POLL_DIAG): the measurement trace, on with
+// REMOTE60_NATIVE_AU_TRACE=1. Changes no product behaviour; a default build carries none of it.
+static bool eop_trace_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("REMOTE60_NATIVE_AU_TRACE");
+    return v && v[0] == '1';
+  }();
+  return on;
+}
+#endif
 
 Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   auto& args = hx.args;
@@ -349,6 +360,9 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     // timeline. (0.2.97)
     encoder.codec.set_next_input_synthetic(servedBootstrap);
     encoder.codec.set_next_input_epoch(capture.inputEpoch.load(std::memory_order_acquire));
+#if REMOTE60_ENCODER_POLL_DIAG
+    const uint64_t diagAcceptedBefore = encoder.codec.accepted_input_count();
+#endif
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -428,6 +442,22 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
                  << " -> gate closed, encoder rebuild requested\n";
      }
    }
+#if REMOTE60_ENCODER_POLL_DIAG
+   // one line per encode call: input source, accepted / ordinal, ProcessInput start / end (QPC us) and
+   // HRESULT-free outcome, the post-input poll's events in read order, the call's total time, and the
+   // ordinals of the AUs it drained
+   if (eop_trace_enabled()) {
+     std::cout << "[native-video-host][enc] src=" << (servedBootstrap ? "synthetic" : "real")
+               << " accepted=" << (encoder.codec.accepted_input_count() != diagAcceptedBefore ? 1 : 0)
+               << " ordinal=" << encoder.codec.accepted_input_count()
+               << " piStartUs=" << encodeStats.processInputStartUs << " piEndUs=" << encodeStats.processInputEndUs
+               << " callUs=" << encodeStats.encodeCallUs << " polls=" << encodeStats.asyncPollCount
+               << " ok=" << ((surfaceEncoded || bgraCall.ok) ? 1 : 0)
+               << " events=" << (encodeStats.postInputEvents[0] ? encodeStats.postInputEvents : "none") << " drained=";
+     for (size_t i = 0; i < units.size(); ++i) std::cout << (i ? "," : "") << units[i].acceptedInputOrdinal;
+     std::cout << "\n";
+   }
+#endif
    if (!surfaceEncoded && !bgraCall.ok) {
     // Dropped output breaks the reference chain; a rejected input by itself does not. Avoid
     // turning ordinary MFT input backpressure into an IDR storm while recovering real output loss.

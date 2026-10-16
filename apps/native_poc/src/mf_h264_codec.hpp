@@ -20,6 +20,7 @@
 #endif
 
 #include "host_encoder_rc_policy.hpp"
+#include "time_utils.hpp"
 
 namespace remote60::native_poc {
 
@@ -52,6 +53,9 @@ struct H264AccessUnit {
   // inputWasForcedKey = that input carried a host key request (G2). rawIdr = the Annex-B bytes carry a
   // real NAL type 5 (not just CleanPoint), so the detector confirms a true IDR, not any clean point.
   uint64_t acceptedInputOrdinal = 0;
+  // encoder-output-poll r1: when the MFT accepted the input behind this AU (encoder clock, us; 0 = no
+  // provenance) -- accepted -> output latency in the DIAG trace.
+  uint64_t inputAcceptedAtUs = 0;
   bool inputWasForcedKey = false;
   bool rawIdr = false;
 };
@@ -100,6 +104,18 @@ struct H264EncodeFrameStats {
   // Diagnostic for the async output-starvation wedge: this call saw MFT events but none were
   // METransformHaveOutput. Repeated while input keeps being accepted is the wedge fingerprint.
   uint32_t asyncNeedInputOnlyCall = 0;
+  // encoder-output-poll r1 (trace): when ProcessInput started / returned (encoder clock, us), and the
+  // events the post-input poll read, in order, as "<N|H|O><us after ProcessInput returned>" (N NeedInput,
+  // H HaveOutput, O other), "-<us>" for a poll that found none, "E<us>" for a failed read. The read time of
+  // an event is not the time the output became ready.
+  uint64_t processInputStartUs = 0;
+  uint64_t processInputEndUs = 0;
+  char postInputEvents[96] = {0};
+  // encoder-output-poll r1: why the post-input poll failed and with which HRESULT (0 = none) -- only
+  // MF_E_NO_EVENTS_AVAILABLE is the normal "nothing yet". 1 = GetEvent failed, 2 = GetEvent succeeded with
+  // no event, 3 = the event's GetType failed.
+  uint8_t asyncEventFailure = 0;
+  int32_t asyncEventFailHr = 0;
   // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
   // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
   uint32_t pendingInputDepth = 0;
@@ -141,6 +157,7 @@ struct PendingInput {
   // IDR is not mistaken for the encoder's own periodic one (G2).
   uint64_t acceptedOrdinal = 0;
   bool forcedKey = false;
+  uint64_t acceptedAtUs = 0;  // encoder-output-poll r1: when the MFT accepted it (H264AccessUnit::inputAcceptedAtUs)
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -306,6 +323,12 @@ class H264Encoder {
    * initialize() calls on entry and on failure) releases it as usual.
    */
   void set_transform_for_test(IMFTransform* transform) { testTransform_ = transform; }
+  // encoder-output-poll r1, TEST SEAM ONLY: the clock this encoder reads for an encode call's start and its
+  // async poll budget (default: the QPC clock). host_encoder_poll_test advances a fake clock inside a
+  // fake MFT's GetEvent; the product never sets it.
+  void set_clock_for_test(uint64_t (*clock)()) { testClock_ = clock; }
+  // Inputs this encoder instance accepted (ProcessInput succeeded), real and synthetic.
+  uint64_t accepted_input_count() const { return acceptedInputCounter_; }
   void shutdown();
 
  private:
@@ -324,6 +347,8 @@ class H264Encoder {
 
   Microsoft::WRL::ComPtr<IMFTransform> enc_;
   Microsoft::WRL::ComPtr<IMFTransform> testTransform_;  // see set_transform_for_test
+  uint64_t (*testClock_)() = nullptr;  // set_clock_for_test
+  uint64_t clock_us() const { return testClock_ ? testClock_() : qpc_now_us(); }
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t fps_ = 0;

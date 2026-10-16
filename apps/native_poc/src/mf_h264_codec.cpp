@@ -2057,7 +2057,7 @@ bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFr
   *encodeStats = H264EncodeFrameStats();
   encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
   outUnits->clear();
-  const uint64_t encodeCallStartUs = qpc_now_us();
+  const uint64_t encodeCallStartUs = clock_us();
   const auto finish_call = [&](bool ok) -> bool {
     const uint64_t encodeCallEndUs = qpc_now_us();
     encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
@@ -2094,7 +2094,7 @@ bool H264Encoder::encode_frame_bgra(const uint8_t* bgra, uint32_t width, uint32_
   *encodeStats = H264EncodeFrameStats();
   encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
   outUnits->clear();
-  const uint64_t encodeCallStartUs = qpc_now_us();
+  const uint64_t encodeCallStartUs = clock_us();
   const auto finish_call = [&](bool ok) -> bool {
     const uint64_t endUs = qpc_now_us();
     encodeStats->encodeCallUs = (endUs >= encodeCallStartUs) ? (endUs - encodeCallStartUs) : 0;
@@ -2150,7 +2150,7 @@ bool H264Encoder::encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFr
   *encodeStats = H264EncodeFrameStats();
   encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
   outUnits->clear();
-  const uint64_t encodeCallStartUs = qpc_now_us();
+  const uint64_t encodeCallStartUs = clock_us();
   const int64_t sampleTime = (inputSampleTimeHns > 0)
                                  ? inputSampleTimeHns
                                  : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
@@ -2314,6 +2314,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
         uint64_t auEpoch = 0;
         uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
+        uint64_t auAcceptedAtUs = 0;
         bool auForcedKey = false;
         PendingInput provenance{};
         if (pendingInputs_.Pop(&provenance)) {
@@ -2321,6 +2322,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
           auSynthetic = provenance.synthetic;
           auEpoch = provenance.epoch;
           auOrdinal = provenance.acceptedOrdinal;
+          auAcceptedAtUs = provenance.acceptedAtUs;
           auForcedKey = provenance.forcedKey;
         } else {
           ++sampleTimeOutputTimestampFallbackCount_;
@@ -2337,6 +2339,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         au.synthetic = auSynthetic;
         au.inputEpoch = auEpoch;
         au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
+        au.inputAcceptedAtUs = auAcceptedAtUs;
         au.inputWasForcedKey = auForcedKey;
         if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
             !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
@@ -2366,6 +2369,19 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   const uint64_t processInputStartUs = qpc_now_us();
   HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
   const uint64_t processInputDoneUs = qpc_now_us();
+  encodeStats->processInputStartUs = processInputStartUs;
+  encodeStats->processInputEndUs = processInputDoneUs;
+  // encoder-output-poll r1 trace: the post-input poll's events in read order (encoder clock offsets)
+  size_t evPos = 0;
+  const uint64_t evBaseUs = clock_us();
+  const auto note_event = [&](char kind) {
+    if (evPos + 12 >= sizeof(encodeStats->postInputEvents)) return;
+    const uint64_t now = clock_us();
+    const unsigned long long dt = now >= evBaseUs ? now - evBaseUs : 0;
+    const int n = std::snprintf(encodeStats->postInputEvents + evPos, sizeof(encodeStats->postInputEvents) - evPos,
+                                "%s%c%llu", evPos ? "," : "", kind, dt);
+    if (n > 0) evPos += static_cast<size_t>(n);
+  };
   encodeStats->processInputUs += (processInputDoneUs >= processInputStartUs) ? (processInputDoneUs - processInputStartUs) : 0;
   if (inHr == MF_E_NOTACCEPTING) {
     // Some hardware/async encoders require draining queued output before accepting new input.
@@ -2385,7 +2401,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   }
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
   pendingInputs_.Push(
-      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame});
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame, clock_us()});
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.
@@ -2418,11 +2434,12 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     for (uint32_t poll = 0; poll < std::max<uint32_t>(1, asyncPollMax); ++poll) {
       // Always take the first poll; after that, stop once this call has used its share of the
       // frame period so a slow drain cannot eat the capture cadence.
-      if (poll > 0 && qpc_now_us() >= asyncPollDeadlineUs) break;
+      if (poll > 0 && clock_us() >= asyncPollDeadlineUs) break;
       Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
       ++encodeStats->asyncPollCount;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
       if (ehr == MF_E_NO_EVENTS_AVAILABLE) {
+        note_event('-');
         ++encodeStats->asyncPollNoEventCount;
         if (asyncPollSleepUs > 0) {
           Sleep(static_cast<DWORD>(asyncPollSleepUs));
@@ -2433,10 +2450,14 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         }
         continue;
       }
-      if (FAILED(ehr) || !ev) break;
+      if (FAILED(ehr) || !ev) {
+        note_event('E');
+        break;
+      }
       sawEvent = true;
       MediaEventType et = MEUnknown;
       (void)ev->GetType(&et);
+      note_event(et == METransformHaveOutput ? 'H' : et == METransformNeedInput ? 'N' : 'O');
       if (et == METransformHaveOutput) {
         ++encodeStats->asyncPollHaveOutputCount;
         sawHaveOutput = true;

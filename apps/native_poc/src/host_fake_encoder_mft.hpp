@@ -249,8 +249,12 @@ class FakeEncoderMft : public IMFTransform, public ICodecAPI {
 
   bool started() const { return started_; }
 
- private:
+ protected:
+  // encoder-output-poll r1: protected so an async variant (host_encoder_poll_test.cpp) can derive and own
+  // its lifetime
   ~FakeEncoderMft() = default;
+
+ private:
   std::atomic<ULONG> refs_{1};
   Microsoft::WRL::ComPtr<IMFAttributes> attrs_;
   Microsoft::WRL::ComPtr<IMFMediaType> inType_, outType_;

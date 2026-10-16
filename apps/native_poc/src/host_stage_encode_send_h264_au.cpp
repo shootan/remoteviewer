@@ -73,6 +73,7 @@
 #include "native_video_transport.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
+#include <cstdlib>
 
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
@@ -81,6 +82,17 @@ using remote60::host::DxgiDesktopCaptureConfig;
 using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
+#if REMOTE60_ENCODER_POLL_DIAG
+// encoder-output-poll r1, DIAG builds only (CMake REMOTE60_ENCODER_POLL_DIAG): the measurement trace, on with
+// REMOTE60_NATIVE_AU_TRACE=1. Changes no product behaviour; a default build carries none of it.
+static bool eop_trace_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("REMOTE60_NATIVE_AU_TRACE");
+    return v && v[0] == '1';
+  }();
+  return on;
+}
+#endif
 
 AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b, H264AccessUnit& au) {
   auto& args = hx.args;
@@ -525,6 +537,19 @@ if (transport == VideoTransport::Tcp) {
 }
 const uint64_t sendDoneUs = qpc_now_us();
 const uint64_t sendDurUs = (sendDoneUs >= sendStartUs) ? (sendDoneUs - sendStartUs) : 0;
+#if REMOTE60_ENCODER_POLL_DIAG
+// one line per AU: host seq, key, input source, bytes, accepted ordinal, capture / accept / enqueue time
+// (QPC us) and the accepted inputs still ahead of it (lagOrd). Joins receiver markers to the encoder.
+if (eop_trace_enabled()) {
+  const uint64_t accCount = encoder.codec.accepted_input_count();
+  std::cout << "[native-video-host][au] seq=" << hdr.seq << " key=" << (((hdr.flags & kEncodedFrameFlagKeyFrame) != 0) ? 1 : 0)
+            << " src=" << (au.synthetic ? "synthetic" : "real") << " bytes=" << hdr.payloadSize
+            << " ordinal=" << au.acceptedInputOrdinal << " captureUs=" << hdr.captureQpcUs
+            << " acceptedUs=" << au.inputAcceptedAtUs << " enqueueUs=" << sendStartUs
+            << " lagOrd=" << (accCount >= au.acceptedInputOrdinal ? accCount - au.acceptedInputOrdinal : 0)
+            << " enqueued=" << (enqueuedForSend ? 1 : 0) << "\n";
+}
+#endif
 const uint64_t sendCallCount = sendPathStats.headerCallCount + sendPathStats.payloadCallCount;
 if (sentOk) {
   stats.lastSendStartUs = sendStartUs;
