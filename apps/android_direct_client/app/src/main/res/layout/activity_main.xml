@@ -167,7 +167,7 @@
             android:textColor="@color/ui_text_secondary"
             android:textSize="13sp" />
 
-        <!-- keepalive r1: the parked connection, and the way to end it. Shown only while one is parked. -->
+        <!-- keepalive r1 / multi r1: how many PCs are kept, and the way to end them all. Shown only while one is. -->
         <LinearLayout
             android:id="@+id/hostsParkBanner"
             android:layout_width="match_parent"
@@ -197,7 +197,7 @@
                 android:stateListAnimator="@null"
                 android:textAllCaps="false"
                 android:textColor="@color/ui_danger"
-                android:text="@string/hosts_park_disconnect" />
+                android:text="@string/hosts_keep_disconnect_all" />
         </LinearLayout>
 
         <ListView

@@ -50,6 +50,7 @@ import android.widget.ListView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -397,12 +398,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * typed into whatever window happens to have focus.
      */
     private fun renderUnlockBar() {
-        val locked = currentScene == UiScene.VIEWER && NativeSessionBridge.nativeIsHostScreenLocked()
+        val locked = currentScene == UiScene.VIEWER && NativeSessionBridge.nativeIsHostScreenLocked(activeBinding)
         viewerUnlockBar.visibility = if (locked) View.VISIBLE else View.GONE
     }
 
     private fun renderDataUsage() {
-        sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived()
+        sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived(activeBinding)
         viewerDataUsageText.text = getString(R.string.viewer_data_usage, formatMegabytes(sessionBytesReceived))
         viewerPathText.text = when (connectionPathKind) {
             "" -> ""
@@ -584,7 +585,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun requestWindowSheetList(reason: String) {
-        windowSheetRequestQueued = NativeSessionBridge.nativeRequestWindowList()
+        windowSheetRequestQueued = NativeSessionBridge.nativeRequestWindowList(activeBinding)
         windowSheetAwaitingList = true
         windowSheetRequestedAtMs = SystemClock.elapsedRealtime()
         diagnosticsLog.log("window_sheet", "action=list_request reason=$reason queued=$windowSheetRequestQueued")
@@ -837,19 +838,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         val handler = Handler(Looper.getMainLooper())
-        pressEnter()
+        // keepalive-multi r1 §5: the PC the user asked to unlock -- the binding taken now. If another PC is on
+        // screen by the time the delayed steps run, they go nowhere (a stale binding does nothing).
+        val binding = activeBinding
+        pressEnter(binding)
         handler.postDelayed({
-            NativeSessionBridge.nativeQueueInputText(password)
-            handler.postDelayed({ pressEnter() }, 250)
+            NativeSessionBridge.nativeQueueInputText(binding, password)
+            handler.postDelayed({ pressEnter(binding) }, 250)
         }, 600)
         // Deliberately says nothing about the password itself, only that the attempt happened.
         diagnosticsLog.log("unlock_sent", "chars=${password.length}")
         Toast.makeText(this, R.string.unlock_sent, Toast.LENGTH_SHORT).show()
     }
 
-    private fun pressEnter() {
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
+    private fun pressEnter(binding: Long) {
+        NativeSessionBridge.nativeQueueInputEvent(binding, INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
+        NativeSessionBridge.nativeQueueInputEvent(binding, INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
     }
 
     private fun qualityLabel(): String = getString(
@@ -871,9 +875,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         requestedRuntimeBitrateKbps = level.bitrateKbps
         requestedRuntimeFps = fps
-        val connected = NativeSessionBridge.nativeGetStatus().startsWith("connected")
+        val connected = NativeSessionBridge.nativeGetStatus(activeHandle).startsWith("connected")
         val sent = connected &&
-            NativeSessionBridge.nativeRequestRuntimeConfig(requestedRuntimeBitrateKbps * 1000, requestedRuntimeFps)
+            NativeSessionBridge.nativeRequestRuntimeConfig(activeBinding, requestedRuntimeBitrateKbps * 1000, requestedRuntimeFps)
         // Not sent is not lost: the connected-sync pass retries until the session takes it.
         pendingRuntimeConfigSync = !sent
         qualityStatusMessage = when {
@@ -1155,7 +1159,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val known = thumbnailVersions[id]
             if (known != null && known == version && thumbnailBitmaps.containsKey(id)) continue
             if (version == 0L && thumbnailBitmaps.containsKey(id)) continue
-            val raw = NativeSessionBridge.nativeGetWindowThumbnail(id) ?: continue
+            val raw = NativeSessionBridge.nativeGetWindowThumbnail(activeBinding, id) ?: continue
             if (raw.size < 8) continue
             val header = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
             val w = header.int
@@ -1200,26 +1204,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // The host this session reached through the directory, so a saved unlock password belongs to
     // one PC rather than to the phone. Empty for a manual IP connection.
     private var directoryHostKey = ""
-    // keepalive r1: the name shown for it, and the one parked connection (SessionPark).
+    // keepalive r1: the name shown for it.
     private var directoryHostName = ""
-    private var parked: SessionPark.Parked? = null
-    // r2 K4: a tap on the parked PC made while its park was still confirming, kept for that park.
-    private var parkPendingTap: SessionPark.PendingTap? = null
+    // keepalive-multi r1 (SessionPark, native session table): the PCs this phone keeps -- handle -> what the screen
+    // knows of it. The PC on screen is [activeHandle] with its [activeBinding] (nativeActivate); every screen action
+    // carries the binding read at the moment it is taken, so after a switch nothing of B can reach A.
+    private val keepPolicy = SessionPark.Policy()
+    private val kept = LinkedHashMap<Long, SessionPark.Kept>()
+    private var activeHandle = 0L
+    private var activeBinding = 0L
+    // the directory connect in progress (its entry is reserved, not yet up)
+    private var connectingHandle = 0L
+    private var nativeEntries: Map<Long, SessionPark.NativeEntry> = emptyMap()
+    // r2 K4 / multi §3: the latest tap made while a park was still confirming, carried out when it settles.
+    private var heldTap: SessionPark.TapFallback? = null
     // r2 §7: a resume whose clipboard baseline could not be read holds pushes until a real change.
     private var clipboardResumeHold = false
-    // r2 K2: which directory connect owns the native session (SessionPark.ConnectOwner).
-    // r4 S2-a: numbered by the native connect gate, for the whole process (never reused by a new Activity).
-    private val connectOwner = SessionPark.ConnectOwner { NativeSessionBridge.nativeConnectOpNext() }
-    // r4 S2-b: scheduled intents (a held tap's fallback); every stop ends them for good.
-    private val connectIntents = SessionPark.ConnectIntents(connectOwner)
+    // r2 K2 per PC: the current connect operation of each entry, numbered by that entry's native gate.
+    private val entryOps = SessionPark.EntryOps { handle -> NativeSessionBridge.nativeConnectOpNext(handle) }
+    // r4 S2-b: scheduled intents (a held tap); every stop ends them for good. Owned by the lifecycle epoch.
+    private val connectIntents = SessionPark.ConnectIntents { NativeSessionBridge.nativeEpoch() }
     private var parkEpisodeCounter = 0L
-    private var parkConfirmLogged = false
     private var parkNetwork: Network? = null
     private var parkNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    private val parkExpiryRunnable = Runnable {
-        parkTick()
-        renderStatus()
-    }
     // How long a tap took to a usable target list: a fresh connect or a parked reuse (diagnostics).
     private var targetsReadyWatchStartMs = 0L
     private var targetsReadyWatchOrigin = ""
@@ -1380,11 +1387,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     /** Reads the phone clipboard, if it can, and offers it to the host. */
     private fun pushLocalClipboardToHost(reason: String) {
-        if (parked != null) return  // keepalive r1: nothing travels from a parked session
+        if (activeBinding == 0L) return  // keepalive r1: nothing travels from a parked session
         if (!SessionPark.clipboardPushAllowed(clipboardResumeHold, reason)) return
         if (reason == "clip_changed") clipboardResumeHold = false
         if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
-        if (!NativeSessionBridge.nativeHostSupportsClipboard()) return
+        if (!NativeSessionBridge.nativeHostSupportsClipboard(activeBinding)) return
         // getPrimaryClip returns null without focus on Android 10+; that is expected, not an error.
         val text = try {
             clipboardManager.primaryClip?.takeIf { it.itemCount > 0 }
@@ -1395,16 +1402,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (text.isNullOrEmpty()) return
         // False covers "not worth sending" (echo, duplicate, empty, oversize, not connected), which
         // is the common case -- the listener fires for our own writes too.
-        if (NativeSessionBridge.nativeQueueClipboardText(text)) {
+        if (NativeSessionBridge.nativeQueueClipboardText(activeBinding, text)) {
             diagnosticsLog.log("clipboard_sent", "reason=$reason units=${text.length}")
         }
     }
 
     /** Applies clipboard text the host sent, if any is waiting. Polled from the status ticker. */
     private fun drainIncomingClipboard() {
-        if (parked != null) return  // keepalive r1
+        if (activeBinding == 0L) return  // keepalive r1
         if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
-        val text = NativeSessionBridge.nativeTakeIncomingClipboardText() ?: return
+        val text = NativeSessionBridge.nativeTakeIncomingClipboardText(activeBinding) ?: return
         if (text.isEmpty()) return
         try {
             clipboardManager.setPrimaryClip(ClipData.newPlainText("GNLink", text))
@@ -1418,7 +1425,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun toggleClipboardSync() {
-        if (!NativeSessionBridge.nativeHostSupportsClipboard()) {
+        if (!NativeSessionBridge.nativeHostSupportsClipboard(activeBinding)) {
             Toast.makeText(this, R.string.clipboard_unsupported, Toast.LENGTH_SHORT).show()
             return
         }
@@ -1438,7 +1445,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Dims the button when the connected host cannot do it, and marks it when sync is off. */
     private fun renderClipboardButton() {
         if (!::viewerClipboardButton.isInitialized) return
-        val supported = NativeSessionBridge.nativeHostSupportsClipboard()
+        val supported = NativeSessionBridge.nativeHostSupportsClipboard(activeBinding)
         val enabled = supported && NativeSessionBridge.nativeIsClipboardSyncEnabled()
         // Said in words rather than dimmed: a faded row fails the contrast floor (Codex 4).
         val label = getString(
@@ -1458,7 +1465,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      */
     private fun statusPollDelayMs(): Long {
         if (selectionStage != SelectionStage.IDLE) return 250L
-        if (parked != null && !parkConfirmLogged) return 250L  // keepalive r1: watching a park confirm
+        // keepalive r1: watching a park confirm (and a tap held for it)
+        if (heldTap != null || kept.values.any { it.parkedAtMs != 0L && !it.confirmLogged }) return 250L
         return when (currentScene) {
             UiScene.LOGIN, UiScene.HOSTS -> 1000L
             UiScene.TARGETS -> 750L
@@ -1488,7 +1496,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         override fun run() {
             val state = NativeSessionBridge.nativeMacroState()
             if (state == MACRO_STATE_PLAYING) {
-                NativeSessionBridge.nativeMacroPump()
+                NativeSessionBridge.nativeMacroPump(activeBinding)
             }
             renderMacroUi()
             if (state != MACRO_STATE_IDLE) {
@@ -1754,21 +1762,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // keepalive r1: the list keeping this connection; and, on the list, ending the kept one.
         listHostsButton.setOnClickListener { parkToHostList("targets") }
         hostsParkDisconnectButton.setOnClickListener {
-            diagnosticsLog.log("park_disconnect_tap", "scene=$currentScene")
-            endPark("disconnect_tap", announce = false)
+            diagnosticsLog.log("park_disconnect_all_tap", "scene=$currentScene kept=${kept.size}")
+            if (activeHandle == 0L) endAllKept("disconnect_all") else endParkedKept("disconnect_all")
             renderStatus()
         }
 
         listRefreshButton.setOnClickListener {
             diagnosticsLog.log("refresh_tap", "scene=$currentScene")
-            NativeSessionBridge.nativeRequestWindowList()
+            NativeSessionBridge.nativeRequestWindowList(activeBinding)
             renderStatus()
         }
 
         listWindowsButton.setOnClickListener {
             activeTargetTab = TargetTab.WINDOWS
             diagnosticsLog.log("tab_switch", "tab=windows")
-            NativeSessionBridge.nativeRequestWindowList()
+            NativeSessionBridge.nativeRequestWindowList(activeBinding)
             renderStatus()
         }
 
@@ -1802,7 +1810,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // above; Apply re-sends them together with the capture backend.
             val messages = mutableListOf<String>()
             val bitrateBps = requestedRuntimeBitrateKbps * 1000
-            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(activeBinding, bitrateBps, requestedRuntimeFps)) {
                 pendingRuntimeConfigSync = false
                 diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             } else {
@@ -1811,7 +1819,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             val backendOk =
-                NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)
+                NativeSessionBridge.nativeRequestDesktopCaptureBackend(activeBinding, requestedDesktopBackend.code)
             if (backendOk) {
                 pendingDesktopBackendSync = false
                 diagnosticsLog.log(
@@ -1916,13 +1924,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onStop() {
         connectIntents.onStop()  // r4 S2-b: a fallback scheduled before this stop never runs
-        // keepalive r1: a park lives only while the list is in front. Backgrounded, locked or switched
-        // away from, the connection is ended for real -- no foreground service keeps it.
-        if (parked != null) endPark("app_stopped", announce = false)
+        // keepalive r1 / multi §6: a kept PC lives only while the app is in front. Backgrounded, locked or switched
+        // away from, every parked connection is ended for real -- no foreground service keeps them. (The PC on
+        // screen is left as 0.2.30 left it.)
         // r3 R2: a connect still on its way is not carried on in the background either -- it stops at its
         // next step (native included) and adopts nothing; the list is not left busy.
+        endParkedKept("app_stopped")
         if (directoryBusy) {
-            connectOwner.invalidate()
             setDirectoryBusy(false)
             directoryConnectingName = ""
         }
@@ -2253,7 +2261,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun exitApplication() {
-        diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
+        diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus(activeHandle)}")
         dismissViewerLogDialog()
         releaseViewerModifiers()
         cancelActiveViewerTouch("exit")
@@ -2262,13 +2270,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
         if (selectionStage != SelectionStage.IDLE) {
-            NativeSessionBridge.nativeAbortVideoSwitch()
+            NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
         } else {
-            NativeSessionBridge.nativeResetVideoStream()
+            NativeSessionBridge.nativeResetVideoStream(activeBinding)
         }
-        if (parked != null) endPark("exit", announce = false)
-        connectOwner.invalidate()  // r3 R2: a connect on its way adopts nothing after the exit
-        NativeSessionBridge.nativeDisconnect()
+        // r3 R2 / multi §6: every PC ends, and a connect on its way adopts nothing after the exit
+        endAllKept("exit")
         connectFlowActive = false
         clearPendingSelection()
         resetViewerObservability()
@@ -2300,10 +2307,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         saveCurrentEndpoint()
         diagnosticsLog.log(reason, "host=$host videoPort=$videoPort controlPort=$controlPort")
 
-        // r4 S1: a new user intent -- any directory connect on its way is stale from here, and this one is
-        // adopted through the same native gate (so no stale cleanup can close it).
-        val op = connectOwner.begin()
-        val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort, op) != 0L
+        // r4 S1 / multi §2: the manual connect is an entry of the same native table (never kept on the list: a
+        // manual connection is not parked), adopted through its own gate, so no stale cleanup can close it.
+        val reservation = NativeSessionBridge.nativeReserve("manual|$host", true, NativeSessionBridge.nativeEpoch())
+        if (reservation.size < 3 || reservation[0] != 1L) {
+            diagnosticsLog.log("connect_failed", "reserve_refused kind=${reservation.getOrNull(0)}")
+            renderStatus()
+            return
+        }
+        val handle = reservation[1]
+        kept[handle] = SessionPark.Kept(handle, "", host, "", "", manual = true)
+        val op = entryOps.begin(handle)
+        var ok = NativeSessionBridge.nativeConnect(handle, host, videoPort, controlPort, op) != 0L
+        if (ok) {
+            for (evicted in NativeSessionBridge.nativeCommit(handle)) {
+                diagnosticsLog.log("keep_end", "handle=$evicted host=${kept[evicted]?.hostName.orEmpty()} reason=lru")
+                forgetKept(evicted)
+            }
+            ok = activateKept(handle)
+            if (!ok) NativeSessionBridge.nativeEnd(handle, "activate_refused")
+        } else {
+            diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError(handle))
+            NativeSessionBridge.nativeFail(handle, "connect_failed")
+        }
+        if (!ok) forgetKept(handle)
         if (ok) {
             connectFlowActive = true
             pendingRuntimeConfigSync = true
@@ -2312,9 +2339,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastAppliedStreamActive = null
             clearPendingSelection()
             currentScene = UiScene.TARGETS
-            NativeSessionBridge.nativeRequestWindowList()
-        } else {
-            diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError())
+            NativeSessionBridge.nativeRequestWindowList(activeBinding)
         }
         renderStatus()
     }
@@ -2365,13 +2390,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (tab != TargetTab.WINDOWS) {
             return Pair(0, 0)
         }
-        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding))
         val item = panelSnapshot.items.firstOrNull { it.id == targetId }
         return if (item != null) Pair(item.width, item.height) else Pair(0, 0)
     }
 
     private fun requestStreamActive(active: Boolean, reason: String): Boolean {
-        val ok = NativeSessionBridge.nativeRequestStreamActive(active)
+        val ok = NativeSessionBridge.nativeRequestStreamActive(activeBinding, active)
         if (ok) {
             lastAppliedStreamActive = active
             diagnosticsLog.log("stream_state_request", "active=$active reason=$reason")
@@ -2398,7 +2423,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (pendingRuntimeConfigSync) {
             val bitrateBps = requestedRuntimeBitrateKbps * 1000
-            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(activeBinding, bitrateBps, requestedRuntimeFps)) {
                 pendingRuntimeConfigSync = false
                 settingsStatusMessage =
                     requestSummary()
@@ -2414,7 +2439,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         if (pendingDesktopBackendSync) {
-            if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)) {
+            if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(activeBinding, requestedDesktopBackend.code)) {
                 pendingDesktopBackendSync = false
                 settingsStatusMessage =
                     requestSummary()
@@ -2431,16 +2456,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    /** 연결 해제: the session ends for real (the parked one too), back to where the app starts. */
+    /** 연결 해제 of the PC on screen: that connection ends for real; the PCs kept on the list stay (multi r1 §6). */
     private fun disconnectSession(reason: String) {
-        if (parked != null) endPark(reason, announce = false)
-        connectOwner.invalidate()  // r2 K2
+        val handle = activeHandle
         cancelActiveViewerTouch("disconnect")
         hideViewerKeyboard("disconnect")
         desiredStreamActive = false
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
-        NativeSessionBridge.nativeDisconnect()
+        if (handle != 0L) {
+            entryOps.invalidate(handle)  // r2 K2: nothing of this PC's connect adopts anything after this
+            NativeSessionBridge.nativeEnd(handle, reason)
+            forgetKept(handle)
+            diagnosticsLog.log("keep_end", "handle=$handle reason=$reason kept=${kept.size}")
+        }
+        clearActive()
         connectFlowActive = false
         clearPendingSelection()
         resetViewerObservability()
@@ -2449,33 +2479,131 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         renderStatus()
     }
 
-    // ------------------------------------------------------------------ keepalive r1: park
+    // ------------------------------------------------------------------ keepalive-multi r1: the kept PCs
     //
-    // The rules are SessionPark's; here they are applied. Parking is "PC 목록" from a directory
-    // session; 연결 해제, sign-out, leaving the app, another PC, the network changing, the peer going
-    // and five minutes all end it with a real disconnect.
+    // The rules are SessionPark's, the connections the native table's (session_table.hpp); here they are applied.
+    // "PC 목록" parks the PC on screen; tapping a kept PC goes back to it on its own connection; another PC is
+    // connected beside the kept ones (up to the policy's limit -- the native table closes the parked PC used
+    // longest ago). One PC ends on its own (its 끊기 / 연결 해제, peer lost, its park limit, a failed pause);
+    // sign-out, a refused session, leaving the app and the network changing end the kept ones.
 
-    private fun nativeParkState(): SessionPark.NativeState = SessionPark.NativeState(
-        connected = NativeSessionBridge.nativeGetStatus().startsWith("connected"),
-        connectionGeneration = NativeSessionBridge.nativeConnectionGeneration(),
-        phase = SessionPark.NativePhase.of(NativeSessionBridge.nativeParkPhase()),
-    )
+    /** The PC on screen now; every screen action reads [activeBinding] when it is taken. */
+    private fun clearActive() {
+        activeHandle = 0L
+        activeBinding = 0L
+        directoryHostKey = ""
+        directoryHostName = ""
+    }
 
-    /** Whether "PC 목록" is offered for the session on screen. */
-    private fun parkAllowedHere(): Boolean = parked == null && SessionPark.canPark(
-        directoryHostKey, manualConnectMode, DirectoryClient.sessionAccount(), DirectoryClient.session(),
-        NativeSessionBridge.nativeGetStatus().startsWith("connected"),
-    ) && NativeSessionBridge.nativeHostHonorsStreamPause()  // r2 K5: an older host gets 연결 해제 only
+    private fun forgetKept(handle: Long) {
+        kept.remove(handle)
+        entryOps.drop(handle)
+        if (connectingHandle == handle) connectingHandle = 0L
+        if (kept.values.none { it.parkedAtMs != 0L }) unwatchParkNetwork()
+    }
+
+    /** Puts a kept PC on screen: its binding from the native table. false = refused (it was ended there). */
+    private fun activateKept(handle: Long): Boolean {
+        val k = kept[handle] ?: return false
+        val binding = NativeSessionBridge.nativeActivate(handle)
+        if (binding == 0L) return false
+        activeHandle = handle
+        activeBinding = binding
+        directoryHostKey = if (k.manual) "" else k.hostId
+        directoryHostName = k.hostName
+        kept[handle] = k.copy(parkedAtMs = 0L, confirmLogged = false)
+        return true
+    }
+
+    /** Every PC kept and the one on screen end (sign-out, refused session, exit, disconnect all): a new epoch. */
+    private fun endAllKept(reason: String) {
+        heldTap = null
+        for (h in entryOps.handles()) entryOps.invalidate(h)
+        val epoch = NativeSessionBridge.nativeEndAll(reason)
+        diagnosticsLog.log("keep_end_all", "reason=$reason epoch=$epoch kept=${kept.size}")
+        kept.clear()
+        nativeEntries = emptyMap()
+        connectingHandle = 0L
+        unwatchParkNetwork()
+        if (activeHandle != 0L) {
+            desiredStreamActive = false
+            pendingRuntimeConfigSync = false
+            lastAppliedStreamActive = null
+            connectFlowActive = false
+            clearPendingSelection()
+            resetViewerObservability()
+        }
+        clearActive()
+        hostListAdapter.notifyDataSetChanged()
+    }
+
+    /** The parked PCs (not the one on screen) end, and a connect on its way stops: leaving the app (0.2.30 rule). */
+    private fun endParkedKept(reason: String) {
+        heldTap = null
+        for ((h, k) in kept.toList()) {
+            if (h == activeHandle) continue
+            entryOps.invalidate(h)
+            if (h == connectingHandle) NativeSessionBridge.nativeFail(h, reason) else NativeSessionBridge.nativeEnd(h, reason)
+            forgetKept(h)
+            diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
+        }
+        connectingHandle = 0L
+        unwatchParkNetwork()
+        hostListAdapter.notifyDataSetChanged()
+    }
+
+    private fun anyParkConfirming(): Boolean = nativeEntries.values.any { it.parkPhase.confirming }
+
+    /** The native table now (it takes sessions that ended on their own off first). */
+    private fun readNativeEntries(): Pair<Map<Long, SessionPark.NativeEntry>, List<Pair<Long, String>>> {
+        val entries = HashMap<Long, SessionPark.NativeEntry>()
+        val ended = ArrayList<Pair<Long, String>>()
+        try {
+            val root = JSONObject(NativeSessionBridge.nativeEntriesJson())
+            val arr = root.optJSONArray("entries") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val h = o.optLong("handle")
+                entries[h] = SessionPark.NativeEntry(
+                    handle = h,
+                    key = o.optString("key"),
+                    phase = o.optString("phase"),
+                    parkPhase = SessionPark.NativePhase.of(o.optInt("parkPhase", 0)),
+                    alive = o.optBoolean("alive"),
+                    generation = o.optLong("generation"),
+                    remainingMs = o.optLong("remainingMs"),
+                    parkEpisode = o.optLong("parkEpisode"),
+                )
+            }
+            val endedArr = root.optJSONArray("ended") ?: JSONArray()
+            for (i in 0 until endedArr.length()) {
+                val o = endedArr.getJSONObject(i)
+                ended.add(o.optLong("handle") to o.optString("reason"))
+            }
+        } catch (t: Throwable) {
+            diagnosticsLog.log("keep_table_parse_failed", t.javaClass.simpleName)
+        }
+        return entries to ended
+    }
+
+    /** Whether "PC 목록" is offered for the PC on screen. */
+    private fun parkAllowedHere(): Boolean = activeHandle != 0L && SessionPark.canPark(
+        directoryHostKey, kept[activeHandle]?.manual ?: true, DirectoryClient.sessionAccount(), DirectoryClient.session(),
+        NativeSessionBridge.nativeGetStatus(activeHandle).startsWith("connected"),
+    ) && NativeSessionBridge.nativeHostHonorsStreamPause(activeHandle)  // r2 K5: an older host gets 연결 해제 only
 
     private fun parkToHostList(origin: String) {
-        if (parked != null) return
+        val handle = activeHandle
+        if (handle == 0L) return
         if (!parkAllowedHere()) {
-            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=$manualConnectMode " +
-                "hostHonorsPause=${NativeSessionBridge.nativeHostHonorsStreamPause()}")
-            disconnectSession("park_refused_$origin")
+            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=${kept[handle]?.manual} " +
+                "hostHonorsPause=${NativeSessionBridge.nativeHostHonorsStreamPause(handle)}")
+            // r2 K5 / multi §5: this PC cannot be kept (an older host without the pause, a manual connection) --
+            // it ends; the PCs already kept stay.
+            disconnectSession("pause_unsupported")
             return
         }
-        diagnosticsLog.log("park_tap", "origin=$origin scene=$currentScene host=$directoryHostName")
+        diagnosticsLog.log("park_tap", "origin=$origin scene=$currentScene host=$directoryHostName handle=$handle")
         // Leaving the viewer as Targets does, first: what a finger or the key panel holds goes up now, so
         // its release is queued before the park drops everything that is not a release.
         dismissViewerLogDialog()
@@ -2485,146 +2613,133 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         hideViewerKeyboard("park")
         viewerKeyPanel?.hide()
         if (selectionStage != SelectionStage.IDLE) {
-            NativeSessionBridge.nativeAbortVideoSwitch()
+            NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
         } else {
-            NativeSessionBridge.nativeResetVideoStream()
+            NativeSessionBridge.nativeResetVideoStream(activeBinding)
         }
         clearPendingSelection()
         resetViewerObservability()
         resetViewerOrientationState()
         desiredStreamActive = false
-        if (!NativeSessionBridge.nativeBeginPark()) {
-            diagnosticsLog.log("park_refused", "origin=$origin reason=native_begin")
-            disconnectSession("park_begin_failed")
+        // multi r1: its binding goes first (no frame of it reaches the decoder from here), then its own park.
+        if (!NativeSessionBridge.nativeBeginPark(handle)) {
+            diagnosticsLog.log("park_refused", "origin=$origin reason=native_begin handle=$handle")
+            disconnectSession("pause_failed")
             return
         }
         // The native side pauses the stream itself and refuses stream requests while parked.
         lastAppliedStreamActive = false
         val now = SystemClock.elapsedRealtime()
-        val p = SessionPark.Parked(
-            hostId = directoryHostKey,
-            hostName = directoryHostName.ifEmpty { directoryHostKey },
-            accountId = DirectoryClient.sessionAccount(),
-            directoryOrigin = directoryOrigin(),
-            connectionGeneration = NativeSessionBridge.nativeConnectionGeneration(),
-            startedAtMs = now,
-            episode = ++parkEpisodeCounter,
-        )
-        parked = p
-        parkConfirmLogged = false
+        val k = (kept[handle] ?: return).copy(parkedAtMs = now, parkEpisode = ++parkEpisodeCounter, confirmLogged = false)
+        kept[handle] = k
         diagnosticsLog.log("park_begin",
-            "episode=${p.episode} host=${p.hostName} id=${p.hostId} gen=${p.connectionGeneration} " +
-                NativeSessionBridge.nativeSessionCounters())
-        statusHandler.removeCallbacks(parkExpiryRunnable)
-        statusHandler.postDelayed(parkExpiryRunnable, SessionPark.PARK_LIMIT_MS)
-        watchParkNetwork(p.episode)
+            "episode=${k.parkEpisode} host=${k.hostName} id=${k.hostId} handle=$handle kept=${kept.size} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
+        clearActive()
+        connectFlowActive = false
+        watchParkNetwork()
         hostsStatusText.text = ""
         currentScene = UiScene.HOSTS
         hostListAdapter.notifyDataSetChanged()
         renderStatus()
     }
 
-    /** Confirms the park once, and ends it when SessionPark says so. Main thread. */
-    private fun parkTick() {
-        val p = parked ?: return
-        val now = SystemClock.elapsedRealtime()
-        val native = nativeParkState()
-        if (!parkConfirmLogged && native.phase == SessionPark.NativePhase.PARKED) {
-            parkConfirmLogged = true
-            diagnosticsLog.log("park_confirmed",
-                "episode=${p.episode} ms=${now - p.startedAtMs} released=${NativeSessionBridge.nativeParkReleasedCount()} " +
-                    "dropped=${NativeSessionBridge.nativeParkDroppedActionCount()}")
-        }
-        val identity = SessionPark.Identity(DirectoryClient.sessionAccount(), directoryOrigin(),
-            DirectoryClient.session().isNotEmpty())
-        val reason = SessionPark.endReason(p, now, native, identity)
-        if (reason != null) {
-            endPark(reason)
+    /** Every status tick: what the native table says about each kept PC; a held tap once nothing is confirming. */
+    private fun keepTick() {
+        if (kept.isEmpty() && heldTap == null) {
+            nativeEntries = emptyMap()
             return
         }
-        // r2 K4: the tap made while it was confirming is carried out now, once.
-        val held = parkPendingTap
-        if (held != null && held.episode == p.episode && native.phase == SessionPark.NativePhase.PARKED) {
-            parkPendingTap = null
-            diagnosticsLog.log("park_tap_resumed", "episode=${p.episode} heldMs=${now - p.startedAtMs}")
-            if (!resumeParked(p)) {
-                directoryHosts.firstOrNull { it.hostId == held.hostId }?.let { connectToDirectoryHost(it) }
+        val (entries, ended) = readNativeEntries()
+        nativeEntries = entries
+        val now = SystemClock.elapsedRealtime()
+        val identity = SessionPark.Identity(DirectoryClient.sessionAccount(), directoryOrigin(),
+            DirectoryClient.session().isNotEmpty())
+        var changed = false
+        for ((h, k) in kept.toList()) {
+            if (h == connectingHandle) continue  // its own connect path settles it
+            val ne = entries[h]
+            if (ne == null || ne.phase == "closing") {
+                // ended by the native side: its park limit, a failed pause, its peer gone, or evicted
+                val reason = ended.lastOrNull { it.first == h }?.second ?: "ended"
+                forgetKept(h)
+                changed = true
+                diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
+                if (h == activeHandle) {
+                    clearActive()
+                } else {
+                    hostsStatusText.text = getString(R.string.hosts_keep_ended, k.hostName, SessionPark.endedReasonText(reason))
+                }
+                continue
+            }
+            if (h != activeHandle && !k.manual) {
+                val why = SessionPark.endReason(k, identity)
+                if (why != null) {
+                    NativeSessionBridge.nativeEnd(h, why)
+                    forgetKept(h)
+                    changed = true
+                    diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$why")
+                    continue
+                }
+            }
+            if (!k.confirmLogged && k.parkedAtMs != 0L && ne.parkPhase == SessionPark.NativePhase.PARKED) {
+                kept[h] = k.copy(confirmLogged = true)
+                changed = true
+                diagnosticsLog.log("park_confirmed",
+                    "episode=${k.parkEpisode} handle=$h ms=${now - k.parkedAtMs} " +
+                        "released=${NativeSessionBridge.nativeParkReleasedCount(h)} " +
+                        "dropped=${NativeSessionBridge.nativeParkDroppedActionCount(h)}")
             }
         }
-    }
-
-    /** Ends the park with a real disconnect. */
-    private fun endPark(reason: String, announce: Boolean = true) {
-        val p = parked ?: return
-        parked = null
-        val held = parkPendingTap?.takeIf { it.episode == p.episode }
-        parkPendingTap = null
-        statusHandler.removeCallbacks(parkExpiryRunnable)
-        unwatchParkNetwork()
-        diagnosticsLog.log("park_end",
-            "episode=${p.episode} reason=$reason heldMs=${SystemClock.elapsedRealtime() - p.startedAtMs} " +
-                NativeSessionBridge.nativeSessionCounters())
-        NativeSessionBridge.nativeEndPark()
-        NativeSessionBridge.nativeDisconnect()
-        desiredStreamActive = false
-        pendingRuntimeConfigSync = false
-        lastAppliedStreamActive = null
-        connectFlowActive = false
-        clearPendingSelection()
-        resetViewerObservability()
-        if (announce) hostsStatusText.text = getString(R.string.hosts_park_ended, p.hostName)
-        hostListAdapter.notifyDataSetChanged()
-        // r2 K4: the park failed on its own under a held tap -- that tap still connects, the ordinary way, once.
-        if (held != null && SessionPark.pendingTapFallsBack(reason)) {
-            // r3 R2-b: scheduled under the owner, account and directory of now; carried out only if none of
-            // them changed and the app is still in front when it runs.
-            // r4 S2-b: a stop between this and the run ends it for good (ConnectIntents).
-            val fallback = connectIntents.scheduleFallback(DirectoryClient.sessionAccount(), directoryOrigin(), held.hostId)
-            diagnosticsLog.log("park_tap_fallback",
-                "episode=${p.episode} reason=$reason host=${held.hostId} owner=${fallback.owner} life=${fallback.lifeEpoch}")
-            statusHandler.post {
-                val host = directoryHosts.firstOrNull { it.hostId == fallback.hostId }
-                if (!connectIntents.fallbackRuns(fallback, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
-                    diagnosticsLog.log("park_tap_fallback_cancelled",
-                        "host=${fallback.hostId} owner=${fallback.owner}->${connectOwner.current()} life=${fallback.lifeEpoch} listed=${host != null}")
-                    return@post
-                }
+        if (changed) hostListAdapter.notifyDataSetChanged()
+        // r2 K4 / multi §3: the latest tap made while a park was confirming is carried out once it settled --
+        // under the epoch, account, directory and app lifetime it was made in.
+        val held = heldTap
+        if (held != null && !anyParkConfirming()) {
+            heldTap = null
+            val host = directoryHosts.firstOrNull { it.hostId == held.hostId }
+            if (!connectIntents.fallbackRuns(held, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
+                diagnosticsLog.log("park_tap_cancelled",
+                    "host=${held.hostId} epoch=${held.epoch}->${NativeSessionBridge.nativeEpoch()} listed=${host != null}")
+            } else {
+                diagnosticsLog.log("park_tap_resumed", "host=${held.hostId}")
                 connectToDirectoryHost(host!!)
             }
         }
     }
 
-    /** The same PC again: its target list on this connection. false = the native side refused. */
-    private fun resumeParked(p: SessionPark.Parked): Boolean {
+    /** The same PC again: its target list on its own connection. false = the native side refused (it is ended). */
+    private fun resumeKept(handle: Long): Boolean {
         val t0 = SystemClock.elapsedRealtime()
-        if (!NativeSessionBridge.nativeResumePark()) {
-            endPark("resume_refused", announce = false)
+        val k = kept[handle] ?: return false
+        if (!activateKept(handle)) {
+            diagnosticsLog.log("park_resume_refused", "handle=$handle host=${k.hostName}")
+            forgetKept(handle)
             return false
         }
-        parked = null
-        statusHandler.removeCallbacks(parkExpiryRunnable)
-        unwatchParkNetwork()
         // What the phone holds now is not news to the PC: copied while parked, it does not travel. If it
-        // cannot be read, nothing is pushed until the clipboard really changes (r2 §7).
+        // cannot be read, nothing is pushed until the clipboard really changes (r2 §7). What the PC sent while
+        // parked was dropped by its resume.
         val baseline = readLocalClipboardText()
         if (baseline.isNullOrEmpty()) {
             clipboardResumeHold = true
         } else {
             clipboardResumeHold = false
-            NativeSessionBridge.nativeSeedClipboardBaseline(baseline)
+            NativeSessionBridge.nativeSeedClipboardBaseline(activeBinding, baseline)
         }
         diagnosticsLog.log("park_reuse",
-            "episode=${p.episode} heldMs=${t0 - p.startedAtMs} host=${p.hostName} " +
-                NativeSessionBridge.nativeSessionCounters())
-        directoryHostKey = p.hostId
-        directoryHostName = p.hostName
+            "episode=${k.parkEpisode} heldMs=${if (k.parkedAtMs != 0L) t0 - k.parkedAtMs else -1L} host=${k.hostName} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
         connectFlowActive = true
+        // the user's current quality / capture settings go to THIS PC (multi §5: settings are tagged with it)
+        pendingRuntimeConfigSync = true
+        pendingDesktopBackendSync = true
         desiredStreamActive = false
         lastAppliedStreamActive = false
         clearPendingSelection()
         currentScene = UiScene.TARGETS
         startTargetsReadyWatch("reuse", t0)
-        NativeSessionBridge.nativeRequestWindowList()
+        NativeSessionBridge.nativeRequestWindowList(activeBinding)
         hostListAdapter.notifyDataSetChanged()
         renderStatus()
         return true
@@ -2637,24 +2752,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         null
     }
 
-    private fun renderParkBanner(nowMs: Long) {
-        val p = parked
-        if (p == null) {
+    /** The list's summary line: how many PCs are kept (each card says its own state), and 모두 끊기. */
+    private fun renderKeepBanner() {
+        val parkedCount = kept.keys.count { it != activeHandle }
+        if (parkedCount == 0) {
             hostsParkBanner.visibility = View.GONE
             return
         }
         hostsParkBanner.visibility = View.VISIBLE
-        val text = if (parkConfirmLogged) {
-            getString(R.string.hosts_park_banner, p.hostName, SessionPark.formatRemaining(p.remainingMs(nowMs)))
-        } else {
-            getString(R.string.hosts_park_banner_preparing, p.hostName)
-        }
+        val text = getString(R.string.hosts_keep_banner, parkedCount, keepPolicy.maxHosts)
         if (hostsParkText.text.toString() != text) hostsParkText.text = text
     }
 
-    /** The network the park was made on; another one (or none) ends it. */
-    private fun watchParkNetwork(episode: Long) {
-        unwatchParkNetwork()
+    /** The network the PCs were kept on; another one (or none) ends them. */
+    private fun watchParkNetwork() {
+        if (parkNetworkCallback != null) return
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         parkNetwork = cm.activeNetwork
         val callback = object : ConnectivityManager.NetworkCallback() {
@@ -2665,8 +2777,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (network == parkNetwork) end("network_lost")
             }
             private fun end(reason: String) = runOnUiThread {
-                if (parked?.episode != episode) return@runOnUiThread
-                endPark(reason)
+                if (parkNetworkCallback !== this) return@runOnUiThread
+                // multi §6: a confirmed network change ends the kept PCs; with none on screen it is the whole
+                // lifecycle (a new epoch: nothing started before it is carried out).
+                if (activeHandle == 0L) endAllKept(reason) else endParkedKept(reason)
                 renderStatus()
             }
         }
@@ -2699,7 +2813,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!panelSnapshot.status.startsWith("window_list_received")) return
         diagnosticsLog.log("targets_ready",
             "origin=$targetsReadyWatchOrigin ms=${nowMs - targetsReadyWatchStartMs} items=${panelSnapshot.items.size} " +
-                NativeSessionBridge.nativeSessionCounters())
+                NativeSessionBridge.nativeSessionCounters(activeHandle))
         targetsReadyWatchStartMs = 0L
     }
 
@@ -2714,9 +2828,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         desiredStreamActive = false
         requestStreamActive(false, reason)
         if (abortPendingSwitch) {
-            NativeSessionBridge.nativeAbortVideoSwitch()
+            NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
         } else {
-            NativeSessionBridge.nativeResetVideoStream()
+            NativeSessionBridge.nativeResetVideoStream(activeBinding)
         }
         clearPendingSelection()
         currentScene = UiScene.TARGETS
@@ -2724,14 +2838,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Leaving the viewer releases the orientation lock so the target list is usable in
         // whichever way the phone is held, and so the next selection re-evaluates cleanly.
         resetViewerOrientationState()
-        NativeSessionBridge.nativeRequestWindowList()
+        NativeSessionBridge.nativeRequestWindowList(activeBinding)
     }
 
     private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {
         // A screen pick on a host that cannot acknowledge one used to wait 6 s and fall back to
         // the list without a word. Say why, and do not start the switch (t-970r4zgo).
         if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
-            !parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).hostSupportsMonitorSelect
+            !parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding)).hostSupportsMonitorSelect
         ) {
             diagnosticsLog.log(
                 "select_unsupported",
@@ -2753,32 +2867,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Rotate now, while the viewer surface does not exist yet. Rotating later would
         // destroy and recreate the TextureView's SurfaceTexture mid-stream.
         applyOrientationForContent(expectedSize.first, expectedSize.second, tab)
-        NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
+        NativeSessionBridge.nativePrepareVideoSwitch(activeBinding, selectionGeneration)
         val ok = when (tab) {
-            TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
+            TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(activeBinding, targetId)
             // A screen id rather than a window id, when the host reported more than one.
             TargetTab.DESKTOP ->
                 if (targetId >= MONITOR_ID_BASE) {
                     // Against the list the user was shown: if a newer one replaced it, this is
                     // refused (and said) rather than read as another screen.
                     NativeSessionBridge.nativeSelectMonitorAt(
+                        activeBinding,
                         (targetId - MONITOR_ID_BASE).toInt(), targetListMonitorRevision
                     )
                 } else {
-                    NativeSessionBridge.nativeSelectDesktopMode()
+                    NativeSessionBridge.nativeSelectDesktopMode(activeBinding)
                 }
             TargetTab.SETTINGS -> false
         }
         if (!ok) {
             if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
-                parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).status
+                parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding)).status
                     .contains("monitor_list_changed")
             ) {
                 Toast.makeText(this, R.string.ui_monitor_list_changed, Toast.LENGTH_SHORT).show()
             }
             desiredStreamActive = false
             requestStreamActive(false, "selection_failed")
-            NativeSessionBridge.nativeAbortVideoSwitch()
+            NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
             diagnosticsLog.log(
                 "select_request_failed",
                 "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
@@ -2848,6 +2963,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     scrollLastTouchY = event.getY(pointerIndex)
                     scrollWheelCarryPx = 0f
                     val queued = NativeSessionBridge.nativeQueueInputEvent(
+                        activeBinding,
                         INPUT_KIND_MOUSE_MOVE,
                         mapped.first,
                         mapped.second,
@@ -2885,6 +3001,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastTouchVideoX = downX
                 lastTouchVideoY = downY
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_DOWN,
                     downX,
                     downY,
@@ -2929,6 +3046,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         }
                     if (stepCount > 0) {
                         val queued = NativeSessionBridge.nativeQueueInputEvent(
+                            activeBinding,
                             INPUT_KIND_MOUSE_WHEEL,
                             lastTouchVideoX,
                             lastTouchVideoY,
@@ -2964,6 +3082,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
                 NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_MOVE,
                     mapped.first,
                     mapped.second,
@@ -3010,6 +3129,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val wasSecondary = activeTouchIsSecondary
                 val wasTap = !touchDragLatched
                 val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_UP,
                     upX,
                     upY,
@@ -3075,6 +3195,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastTouchVideoX = virtualPointerX
                 lastTouchVideoY = virtualPointerY
                 NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
                 )
                 syncVirtualMouseMarker()
@@ -3086,6 +3207,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     virtualPointerX = contentRect.contentWidth / 2
                     virtualPointerY = contentRect.contentHeight / 2
                     NativeSessionBridge.nativeQueueInputEvent(
+                        activeBinding,
                         INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
                     )
                 }
@@ -3096,6 +3218,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = virtualButtonMask(button)
                 NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_DOWN, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, activeTouchButtons,
                 )
@@ -3105,6 +3228,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = 0
                 NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_UP, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, 0,
                 )
@@ -3112,6 +3236,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
             override fun onWheel(notches: Int) {
                 NativeSessionBridge.nativeQueueInputEvent(
+                    activeBinding,
                     INPUT_KIND_MOUSE_WHEEL, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), notches * INPUT_WHEEL_DELTA_STEP, 0, 0,
                 )
@@ -3322,6 +3447,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             pinchZoomCarry -= direction * notches * step
             queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_DOWN)
             NativeSessionBridge.nativeQueueInputEvent(
+                activeBinding,
                 INPUT_KIND_MOUSE_WHEEL,
                 lastTouchVideoX,
                 lastTouchVideoY,
@@ -3427,6 +3553,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             view.findViewById<EditText>(id).text?.toString()?.trim()?.toIntOrNull() ?: fallback
 
         val started = NativeSessionBridge.nativeMacroStartPlayback(
+            activeBinding,
             field(R.id.macroTimingJitterInput, 0),
             field(R.id.macroPositionJitterInput, 0),
             field(R.id.macroRepeatInput, 1),
@@ -3672,6 +3799,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         val queued = NativeSessionBridge.nativeQueueInputEvent(
+            activeBinding,
             INPUT_KIND_MOUSE_UP,
             lastTouchVideoX,
             lastTouchVideoY,
@@ -3847,10 +3975,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerLogDialog = dialog
         refreshViewerLogBody()
         updateViewerLogHeader(
-            NativeSessionBridge.nativeGetStatus(),
-            parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()),
+            NativeSessionBridge.nativeGetStatus(activeHandle),
+            parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding)),
             NativeSessionBridge.nativeGetVideoDebugStatus(),
-            NativeSessionBridge.nativeGetLastError()
+            NativeSessionBridge.nativeGetLastError(activeHandle)
         )
     }
 
@@ -3915,7 +4043,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }
         if (normalized.isEmpty()) return
-        val ok = NativeSessionBridge.nativeQueueInputText(normalized)
+        val ok = NativeSessionBridge.nativeQueueInputText(activeBinding, normalized)
         if (!ok) {
             diagnosticsLog.log("viewer_text_queue_failed", "len=${normalized.length}")
         }
@@ -3932,6 +4060,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val x = resolveKeyboardVideoCoord(lastTouchVideoX, videoWidth)
         val y = resolveKeyboardVideoCoord(lastTouchVideoY, videoHeight)
         return NativeSessionBridge.nativeQueueInputEvent(
+            activeBinding,
             inputKind,
             x,
             y,
@@ -4076,26 +4205,34 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun renderStatus() {
         val nowMs = SystemClock.elapsedRealtime()
-        parkTick()  // keepalive r1: confirm / end the parked connection before anything reads the status
+        keepTick()  // keepalive r1: confirm / end the kept connections before anything reads the status
         // Clipboard text sync (K1): the bridge has no native->Java callback, so the text the host
         // sent is collected on the poll that is already running, and the button follows the host's
         // advertised capability as soon as the first pong reports it.
         drainIncomingClipboard()
         // Once per session the session asks for this phone's clipboard, so a PC still holding an
         // older copy does not pull it back over what the user copied since.
-        if (parked == null && NativeSessionBridge.nativeTakeClipboardPushRequest()) {
+        if (activeBinding != 0L && NativeSessionBridge.nativeTakeClipboardPushRequest(activeBinding)) {
             pushLocalClipboardToHost("session_started")
         }
         renderClipboardButton()
-        val statusValue = NativeSessionBridge.nativeGetStatus()
-        val errorValue = NativeSessionBridge.nativeGetLastError()
-        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val statusValue = NativeSessionBridge.nativeGetStatus(activeHandle)
+        val errorValue = NativeSessionBridge.nativeGetLastError(activeHandle)
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson(activeBinding))
         syncExpectedContentSize(panelSnapshot, if (selectionStage != SelectionStage.IDLE) "selection_pending" else "panel_snapshot")
         val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
-        val readySelectionGeneration = NativeSessionBridge.nativeGetReadySelectionGeneration()
+        val readySelectionGeneration = NativeSessionBridge.nativeGetReadySelectionGeneration(activeBinding)
         val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
+        if (activeHandle != 0L && !isConnecting && !isConnected) {
+            // the PC on screen is gone (its peer, a runtime failure): that entry ends; the kept ones stay
+            val gone = activeHandle
+            NativeSessionBridge.nativeEnd(gone, "peer_lost")
+            diagnosticsLog.log("keep_end", "handle=$gone host=$directoryHostName reason=peer_lost active=true")
+            forgetKept(gone)
+            clearActive()
+        }
         connectFlowActive = isConnecting || isConnected
 
         val idleScene = homeScene()
@@ -4108,7 +4245,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 clearPendingSelection()
                 resetViewerObservability()
             }
-        } else if (onIdleScreen && connectFlowActive && parked == null) {
+        } else if (onIdleScreen && connectFlowActive && activeHandle != 0L) {
             // keepalive r1: a parked connection is connected and still belongs on the list.
             currentScene = UiScene.TARGETS
         }
@@ -4172,7 +4309,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showViewerControls(emphasized = true)
         }
 
-        if (parked == null) syncConnectedClientPreferences(isConnected)
+        if (activeBinding != 0L) syncConnectedClientPreferences(isConnected)
         noteTargetsReady(nowMs, panelSnapshot)
 
         connectStatusText.text = when {
@@ -4190,7 +4327,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (currentScene == UiScene.TARGETS) {
             renderTargetsScene(isConnected, panelSnapshot)
         }
-        if (currentScene == UiScene.HOSTS) renderParkBanner(nowMs)
+        if (currentScene == UiScene.HOSTS) renderKeepBanner()
         viewerMenuHostsButton.visibility = if (parkAllowedHere()) View.VISIBLE else View.GONE
         if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
             renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
@@ -4610,9 +4747,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     /** Signs this phone out: here at once, and at the directory as soon as it can be told. */
     private fun performSignOut() {
-        if (parked != null) endPark("sign_out", announce = false)
-        // r2 K2: a connect still on its way belonged to this sign-in: disowned, and the screen is not busy.
-        connectOwner.invalidate()
+        // r2 K2 / multi §6: every PC of this sign-in ends and a connect still on its way is disowned (a new
+        // lifecycle epoch); the screen is not busy.
+        endAllKept("sign_out")
         setDirectoryBusy(false)
         directoryConnectingName = ""
         ++signInEpoch
@@ -4686,8 +4823,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (epoch != signInEpoch) return@runOnUiThread
                     setDirectoryBusy(false)
                     directoryHosts = list
-                    // keepalive r1: a PC no longer in this account's list ends its park.
-                    parked?.let { p -> if (list.none { it.hostId == p.hostId }) endPark("host_gone") }
+                    // keepalive-multi r1 §6: a PC missing from one list refresh is not an ending -- its kept
+                    // connection is authenticated on its own and ends only by its own reasons (0.2.30 ended it here).
                     hostListAdapter.notifyDataSetChanged()
                     hostsStatusText.text = account.ifEmpty { DirectoryClient.savedAccountId(this) }
                     renderStatus()
@@ -4700,9 +4837,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // A refused session with nothing to replace it: ask for the password again
                     // rather than leaving an empty list that looks like "no PCs registered".
                     if (e is DirectoryClient.DirectoryException && e.status == 401) {
-                        // r2 K2: the session is refused -- the park on it ends now, before the screen moves.
-                        if (parked != null) endPark("session_refused", announce = false)
-                        connectOwner.invalidate()
+                        // r2 K2: the session is refused -- every PC kept on it ends now, before the screen moves.
+                        endAllKept("session_refused")
                         ++signInEpoch
                         DirectoryClient.dropSession()
                         currentScene = UiScene.LOGIN
@@ -4720,31 +4856,40 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /**
      * Address exchange, then punch, then the ordinary session. The address probe has to run on
      * the media socket, so it lives in native code; only the HTTP call happens here.
+     *
+     * keepalive-multi r1: a PC already kept is reused (its own connection); otherwise a new entry is reserved in the
+     * native table -- the limit is counted and, if needed, the parked PC used longest ago marked to close, in that
+     * same step -- and connected beside the kept ones. A failed connect ends only its own entry.
      */
     private fun connectToDirectoryHost(host: DirectoryClient.Host) {
         if (directoryBusy) return
-        // keepalive r1: a parked connection decides first -- before "offline", since the list's online
-        // flag lags the connection this phone already holds.
-        parked?.let { p ->
-            when (val tap = SessionPark.onHostTap(
-                p, host.hostId, DirectoryClient.sessionAccount(), directoryOrigin(),
-                SystemClock.elapsedRealtime(), nativeParkState())) {
-                SessionPark.Tap.Reuse -> if (resumeParked(p)) return
-                SessionPark.Tap.Wait -> {
-                    // r2 K4: kept, one per park, and carried out when the park settles (parkTick / endPark).
-                    if (parkPendingTap?.episode != p.episode) {
-                        parkPendingTap = SessionPark.PendingTap(p.episode, host.hostId)
-                        diagnosticsLog.log("park_tap_held", "episode=${p.episode} tapped=${host.hostId}")
-                    } else {
-                        diagnosticsLog.log("park_tap_dup", "episode=${p.episode} tapped=${host.hostId}")
-                    }
-                    return
-                }
-                is SessionPark.Tap.Discard -> {
-                    diagnosticsLog.log("park_discard", "episode=${p.episode} reason=${tap.reason} tapped=${host.hostId}")
-                    endPark(tap.reason, announce = false)
-                }
+        val account = DirectoryClient.sessionAccount()
+        val origin = directoryOrigin()
+        val key = SessionPark.entryKey(origin, account, host.hostId)
+        // a kept PC decides first -- before "offline", since the list's online flag lags the connection this
+        // phone already holds.
+        keepTick()
+        val k = kept.values.firstOrNull { !it.manual && it.key == key }
+        val ne = k?.let { nativeEntries[it.handle] }
+        when (val tap = SessionPark.onHostTap(k, ne, account, origin, anyParkConfirming())) {
+            is SessionPark.Tap.Reuse -> {
+                if (resumeKept(tap.handle)) return
+                // refused at the moment of adoption (its limit, its pause): ended -- this tap connects anew, once
             }
+            SessionPark.Tap.Wait -> {
+                // r2 K4 / multi §3: kept (the latest tap wins) and carried out when the park settles (keepTick).
+                val previous = heldTap
+                heldTap = connectIntents.scheduleFallback(account, origin, host.hostId)
+                diagnosticsLog.log(if (previous == null) "park_tap_held" else "park_tap_replaced",
+                    "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()}")
+                return
+            }
+            is SessionPark.Tap.Discard -> {
+                diagnosticsLog.log("park_discard", "handle=${tap.handle} reason=${tap.reason} tapped=${host.hostId}")
+                NativeSessionBridge.nativeEnd(tap.handle, tap.reason)
+                forgetKept(tap.handle)
+            }
+            SessionPark.Tap.Connect -> Unit
         }
         if (!host.online) {
             hostsStatusText.text = getString(R.string.hosts_offline_detail)
@@ -4758,23 +4903,52 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
+        // multi r1: the lifecycle epoch this tap belongs to -- a sign-out / refused session / network change after
+        // it makes everything it started stale, and the native table refuses its reservation outright.
+        val epoch = NativeSessionBridge.nativeEpoch()
+        val reservation = NativeSessionBridge.nativeReserve(key, false, epoch)
+        if (reservation.size < 3 || reservation[0] != 1L) {
+            diagnosticsLog.log("keep_reserve_refused",
+                "host=${host.hostId} kind=${reservation.getOrNull(0)} handle=${reservation.getOrNull(1)} kept=${kept.size}")
+            if (reservation.getOrNull(0) == 0L) {
+                // a live entry the screen did not know (it never forgets one it made): shown as it is
+                val h = reservation[1]
+                if (kept[h] == null) kept[h] = SessionPark.Kept(h, host.hostId, host.hostName, account, origin, manual = false)
+                if (!anyParkConfirming() && resumeKept(h)) return
+            }
+            hostsStatusText.text = getString(R.string.hosts_keep_refused)
+            return
+        }
+        val handle = reservation[1]
+        val victim = reservation[2]
+        kept[handle] = SessionPark.Kept(handle, host.hostId, host.hostName, account, origin, manual = false)
+        connectingHandle = handle
+
         setDirectoryBusy(true)
         directoryConnectingName = host.hostName
-        directoryHostKey = host.hostId
-        directoryHostName = host.hostName
         hostsStatusText.text = getString(R.string.hosts_connecting, host.hostName)
         diagnosticsLog.log("directory_connect",
-            "host=${host.hostName} id=${host.hostId} ${NativeSessionBridge.nativeSessionCounters()}")
+            "host=${host.hostName} id=${host.hostId} handle=$handle victim=$victim kept=${kept.size} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
         startTargetsReadyWatch("connect", SystemClock.elapsedRealtime())
-        // r2 K2: this connect owns the native session only while it is the current operation. A sign-out,
-        // a disconnect, a refused session or another connect makes it stale: it stops at the next step,
-        // and if its native connect already ran it closes only the connection it made.
-        val op = connectOwner.begin()
+        // r2 K2, per PC: this connect owns its entry only while it is that entry's current operation and the
+        // lifecycle epoch has not moved. A sign-out, this PC's disconnect, a refused session or leaving the app makes
+        // it stale: it stops at the next step, and if its native connect already ran it closes only the connection
+        // it made. Another PC's connect never makes it stale.
+        val op = entryOps.begin(handle)
         var madeGeneration = 0L
         fun stillMine(step: String): Boolean {
-            if (connectOwner.isCurrent(op)) return true
-            diagnosticsLog.log("directory_connect_stale", "op=$op step=$step")
+            if (entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch) return true
+            diagnosticsLog.log("directory_connect_stale", "handle=$handle op=$op step=$step")
             return false
+        }
+        // a stale operation gives its own entry back (off the UI thread is fine: the table's teardown is detached)
+        fun dropOwnEntry(reason: String) {
+            NativeSessionBridge.nativeFail(handle, reason)
+            runOnUiThread {
+                if (kept[handle] != null && activeHandle != handle) forgetKept(handle)
+                if (connectingHandle == handle) connectingHandle = 0L
+            }
         }
 
         val observeToken = DirectoryClient.newObserveToken()
@@ -4785,7 +4959,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // the health route -- which needs no session and carries the same value.
                 // The decision lives in DirectoryClient, where it can be exercised without a
                 // server. Here it is only applied.
-                if (!stillMine("before_observe")) return@execute
+                if (!stillMine("before_observe")) {
+                    dropOwnEntry("stale_operation")
+                    return@execute
+                }
                 val target = DirectoryClient.resolveObserveTarget(url, directoryObserveEndpoint)
                 if (target is DirectoryClient.ObserveTarget.Refused) {
                     throw DirectoryClient.DirectoryException(target.message)
@@ -4800,11 +4977,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
                 val observe = {
                     val seen = NativeSessionBridge.nativeDirectoryObserve(
-                        directoryHost, observePort, observeToken, op
+                        handle, directoryHost, observePort, observeToken, op
                     )
                     if (seen.isEmpty()) {
                         throw DirectoryClient.DirectoryException(
-                            NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "주소 확인 실패" }
+                            NativeSessionBridge.nativeDirectoryLastError(handle).ifEmpty { "주소 확인 실패" }
                         )
                     }
                     diagnosticsLog.log("directory_observed", seen)
@@ -4827,57 +5004,87 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("directory_target", connected.candidates.joinToString(" "))
 
                 // r2 K2: no punch / Hello for an operation that is no longer the user's.
-                if (!stillMine("before_native_connect")) return@execute
+                if (!stillMine("before_native_connect")) {
+                    dropOwnEntry("stale_operation")
+                    return@execute
+                }
                 // r3 R2-a: the native side checks this operation again after the punch and adopts the session
                 // only while it is current; what comes back is the generation THIS call made (0 = none).
                 madeGeneration = NativeSessionBridge.nativeDirectoryConnectAny(
-                    connected.candidates.toTypedArray(), 4000, connected.punchToken, op
+                    handle, connected.candidates.toTypedArray(), 4000, connected.punchToken, op
                 )
                 val started = madeGeneration != 0L
-                if (!started && !connectOwner.isCurrent(op)) {
+                if (!started && !entryOps.isCurrent(handle, op)) {
                     diagnosticsLog.log("directory_connect_stale",
-                        "op=$op step=native ${NativeSessionBridge.nativeSessionCounters()}")
+                        "handle=$handle op=$op step=native ${NativeSessionBridge.nativeSessionCounters(handle)}")
+                    dropOwnEntry("stale_operation")
                     return@execute
                 }
                 // Which address won matters when something goes wrong later: "private" means the
                 // traffic never left the LAN, and a fallback with no answer explains a slow start.
-                val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate()
+                val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate(handle)
                 diagnosticsLog.log("directory_chosen", chosenCandidate)
-                connectionPathKind = parseChosenCandidateKind(chosenCandidate)
+                val pathKind = parseChosenCandidateKind(chosenCandidate)
                 if (!started) {
                     throw DirectoryClient.DirectoryException(
-                        NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }
+                        NativeSessionBridge.nativeDirectoryLastError(handle).ifEmpty { "연결을 시작하지 못했습니다" }
                     )
                 }
                 runOnUiThread {
-                    if (!connectOwner.isCurrent(op)) {
+                    if (!stillMine("adopt")) {
                         // r2 K2 / r4 S1: stale -- the connection this operation made is closed only if it is
                         // still the one running, compared and closed in ONE native step with every adoption
-                        // (off the UI thread: it may wait for another operation's Connect). Nothing newer here
-                        // (busy state, scene, another connect's session) is touched.
+                        // (off the UI thread: it may wait for this entry's Connect). Nothing of another PC, and
+                        // nothing newer here (busy state, scene, another connect), is touched.
                         val gen = madeGeneration
                         Thread {
-                            val closed = NativeSessionBridge.nativeCloseIfOwn(op, gen)
-                            diagnosticsLog.log("directory_connect_dropped", "op=$op closedOwn=$closed gen=$gen")
+                            val closed = NativeSessionBridge.nativeCloseIfOwn(handle, op, gen)
+                            diagnosticsLog.log("directory_connect_dropped", "handle=$handle op=$op closedOwn=$closed gen=$gen")
+                            dropOwnEntry("stale_operation")
                         }.start()
                         return@runOnUiThread
                     }
+                    connectingHandle = 0L
                     setDirectoryBusy(false)
                     directoryConnectingName = ""
+                    // up: the eviction its reservation made (if the limit needed one) happens now
+                    for (evicted in NativeSessionBridge.nativeCommit(handle)) {
+                        val gone = kept[evicted]
+                        forgetKept(evicted)
+                        diagnosticsLog.log("keep_end", "handle=$evicted host=${gone?.hostName.orEmpty()} reason=lru")
+                        if (gone != null) {
+                            hostsStatusText.text = getString(R.string.hosts_keep_ended, gone.hostName,
+                                SessionPark.endedReasonText("lru"))
+                        }
+                    }
+                    if (!activateKept(handle)) {
+                        // another PC still on screen / confirming: should not happen from the list; this one ends
+                        diagnosticsLog.log("keep_activate_refused", "handle=$handle")
+                        NativeSessionBridge.nativeEnd(handle, "activate_refused")
+                        forgetKept(handle)
+                        renderStatus()
+                        return@runOnUiThread
+                    }
+                    connectionPathKind = pathKind
                     connectFlowActive = true
                     pendingRuntimeConfigSync = true
                     pendingDesktopBackendSync = true
                     desiredStreamActive = false
                     lastAppliedStreamActive = null
+                    clipboardResumeHold = false
                     clearPendingSelection()
                     currentScene = UiScene.TARGETS
-                    NativeSessionBridge.nativeRequestWindowList()
+                    NativeSessionBridge.nativeRequestWindowList(activeBinding)
+                    hostListAdapter.notifyDataSetChanged()
                     renderStatus()
                 }
             } catch (e: Exception) {
-                diagnosticsLog.log("directory_connect_failed", "op=$op ${e.message.orEmpty()}")
+                diagnosticsLog.log("directory_connect_failed", "handle=$handle op=$op ${e.message.orEmpty()}")
+                val mine = entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch
+                // a failed connect gives back its own entry only: nothing kept is evicted for it (multi §3)
+                dropOwnEntry("connect_failed")
                 runOnUiThread {
-                    if (!connectOwner.isCurrent(op)) return@runOnUiThread  // r2 K2: not this screen's any more
+                    if (!mine) return@runOnUiThread  // r2 K2: not this screen's any more
                     setDirectoryBusy(false)
                     directoryConnectingName = ""
                     hostsStatusText.text = getString(R.string.hosts_connect_failed, e.message.orEmpty())
@@ -4905,21 +5112,42 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val view = convertView ?: layoutInflater.inflate(R.layout.host_card, parent, false)
             val host = directoryHosts[position]
             view.findViewById<TextView>(R.id.hostCardName).text = host.hostName
-            // keepalive r1: the parked PC says so on its own card.
-            val isParked = parked?.hostId == host.hostId
-            view.findViewById<TextView>(R.id.hostCardDetail).text = when {
-                isParked -> getString(R.string.hosts_parked_detail)
-                host.online -> getString(R.string.hosts_title)
-                else -> getString(R.string.hosts_offline_detail)
+            // keepalive-multi r1 §7: each kept PC says so on its own card -- its state, its time left -- with its
+            // own 끊기 (the other kept PCs stay).
+            val keptEntry = kept.values.firstOrNull {
+                !it.manual && it.hostId == host.hostId && it.accountId == DirectoryClient.sessionAccount() &&
+                    it.directoryOrigin == directoryOrigin()
+            }
+            val native = keptEntry?.let { nativeEntries[it.handle] }
+            val keepState = SessionPark.listState(native, keptEntry != null && keptEntry.handle == activeHandle)
+            val isKept = keepState == SessionPark.ListState.KEPT || keepState == SessionPark.ListState.CONFIRMING
+            view.findViewById<TextView>(R.id.hostCardDetail).text = when (keepState) {
+                SessionPark.ListState.KEPT -> getString(R.string.hosts_keep_detail,
+                    SessionPark.formatRemaining(native?.remainingMs ?: 0L))
+                SessionPark.ListState.CONFIRMING -> getString(R.string.hosts_keep_confirming)
+                else -> if (host.online) getString(R.string.hosts_title) else getString(R.string.hosts_offline_detail)
             }
             val state = view.findViewById<TextView>(R.id.hostCardState)
             state.text = when {
-                isParked -> getString(R.string.hosts_parked_state)
+                isKept -> getString(R.string.hosts_parked_state)
                 host.online -> getString(R.string.hosts_online)
                 else -> getString(R.string.hosts_offline)
             }
-            state.setTextColor(getColor(if (host.online || isParked) R.color.ui_success else R.color.ui_text_secondary))
-            view.alpha = if (host.online || isParked) 1.0f else 0.8f
+            state.setTextColor(getColor(if (host.online || isKept) R.color.ui_success else R.color.ui_text_secondary))
+            view.alpha = if (host.online || isKept) 1.0f else 0.8f
+            val end = view.findViewById<Button>(R.id.hostCardDisconnect)
+            end.visibility = if (isKept) View.VISIBLE else View.GONE
+            end.setOnClickListener {
+                val h = keptEntry?.handle ?: return@setOnClickListener
+                diagnosticsLog.log("park_disconnect_tap", "handle=$h host=${host.hostName}")
+                entryOps.invalidate(h)
+                NativeSessionBridge.nativeEnd(h, "user_disconnect")
+                forgetKept(h)
+                diagnosticsLog.log("keep_end", "handle=$h host=${host.hostName} reason=user_disconnect")
+                hostsStatusText.text = getString(R.string.hosts_park_ended, host.hostName)
+                notifyDataSetChanged()
+                renderStatus()
+            }
             return view
         }
     }

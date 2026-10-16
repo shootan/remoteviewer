@@ -3,7 +3,11 @@
 계약: `codex_keepalive_multi_r1.md` §2·§4. 0.2.30 의 단일 연결 전역을 **entry(PC 연결 하나)** / **binding(지금 화면에 붙은 entry 의 한 활성 기간)** / **전역 lifecycle epoch** / **UI 전용**으로 나눈다. 목적: 옮길 때 빠뜨리지 않기.
 
 - entry 논리 키: canonical directory origin + account stable ID + hostId. 별도로 프로세스 유일 **entry handle**(같은 host 의 연결 교체도 다른 handle).
-- binding token: entry handle + entry connection generation + binding generation + Surface generation. 화면·디코더·입력·selection·통계는 이 token 이 지금 것과 같을 때만.
+- binding token: 화면·디코더·입력·selection·통계는 이 token 이 지금 것과 같을 때만.
+  - **구현(c5cafb4 이후)**: token 은 entry 의 활성화마다 새로 받는 **프로세스 단조 카운터 값**이다(`SessionTable::Activate`). 계약의 결합 요소는 이렇게 대응한다 —
+    entry handle·binding generation: 활성화마다 새 값이라 같은 entry 의 B→A→B 에서도 옛 binding 은 stale(`android_decoder_binding_test` [3]).
+    entry connection generation: token 은 entry 의 adapter 에만 있고 entry 는 한 연결만 가진다(재연결 = 새 handle).
+    Surface generation: Surface 는 디코더 하나의 전역 상태로 UI(`nativeSetSurface`)만 바꾸고, `Bind` 가 활성화 때 코덱·D1 첫 IDR·selection 을 초기화한다. 옛 binding 의 callback 은 token 불일치로 디코더에 아무것도 못 하므로 새 Surface 를 해제할 수 없다(`android_decoder_binding_test` [1]).
 - 전역 lifecycle epoch: sign-out·account/directory 변경·onStop·확인된 network 변화·명시적 모두 끊기에서만 오른다(0.2.30 `ConnectIntents.lifeEpoch` 를 그대로 씨앗으로 쓴다).
 
 ## native (`native_bridge.cpp`)
