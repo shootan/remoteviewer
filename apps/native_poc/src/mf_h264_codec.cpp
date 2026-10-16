@@ -2431,10 +2431,25 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     const uint64_t asyncPollDeadlineUs =
         encodeCallStartUs + (framePeriodUs * std::min<uint32_t>(100, asyncPollBudgetPercent)) / 100ULL;
     const uint32_t asyncPollSleepUs = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_SLEEP_US", 0);
+    // encoder-output-poll r1: the budget bounds only retries after an empty poll. A read that returned an
+    // event is always followed by another read (still at most asyncPollMax in all): on AMD the first
+    // GetEvent after ProcessInput can take ~10 ms to return its NeedInput -- past the 40% budget at
+    // 60 fps -- and stopping there left the HaveOutput posted right behind it for the next call.
+    bool lastPollHadEvent = false;
+    // r13 (S1): only MF_E_NO_EVENTS_AVAILABLE is "nothing yet". Any other GetEvent failure, a success with
+    // no event and a failed GetType fail the call with their original HRESULT (the stage's existing
+    // output-loss path), never an empty poll or a successful event.
+    const auto event_failure = [&](uint8_t kind, HRESULT hr) {
+      encodeStats->asyncEventFailure = kind;
+      encodeStats->asyncEventFailHr = static_cast<int32_t>(hr);
+      note_event('E');
+      return finish_call(false);
+    };
     for (uint32_t poll = 0; poll < std::max<uint32_t>(1, asyncPollMax); ++poll) {
-      // Always take the first poll; after that, stop once this call has used its share of the
+      // Always take the first poll; after an empty one, stop once this call has used its share of the
       // frame period so a slow drain cannot eat the capture cadence.
-      if (poll > 0 && clock_us() >= asyncPollDeadlineUs) break;
+      if (poll > 0 && !lastPollHadEvent && clock_us() >= asyncPollDeadlineUs) break;
+      lastPollHadEvent = false;
       Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
       ++encodeStats->asyncPollCount;
       const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
@@ -2450,13 +2465,13 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
         }
         continue;
       }
-      if (FAILED(ehr) || !ev) {
-        note_event('E');
-        break;
-      }
+      if (FAILED(ehr)) return event_failure(1, ehr);
+      if (!ev) return event_failure(2, ehr);
       sawEvent = true;
+      lastPollHadEvent = true;
       MediaEventType et = MEUnknown;
-      (void)ev->GetType(&et);
+      const HRESULT thr = ev->GetType(&et);
+      if (FAILED(thr)) return event_failure(3, thr);
       note_event(et == METransformHaveOutput ? 'H' : et == METransformNeedInput ? 'N' : 'O');
       if (et == METransformHaveOutput) {
         ++encodeStats->asyncPollHaveOutputCount;
