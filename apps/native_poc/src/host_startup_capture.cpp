@@ -343,7 +343,15 @@ int startup_start_capture(HostContext& hx) {
   {
     const char* v = std::getenv("REMOTE60_NATIVE_CATCHUP");
     kick.catchupEnabled = !(v && v[0] == '0');
-    std::cout << "[native-video-host] catchup=" << (kick.catchupEnabled ? 1 : 0) << "\n";
+#if REMOTE60_MOTION_SETTLE_EXPERIMENTS
+    // r10 diagnostic arm (experiment builds only): collect = output-only collect, never the extra kick
+    {
+      const char* m = std::getenv("REMOTE60_NATIVE_CATCHUP_AWAIT_MODE");
+      if (m && (m[0] == 'c' || m[0] == 'C')) kick.awaitMode = KickState::AwaitMode::CollectOnly;
+    }
+#endif
+    std::cout << "[native-video-host] catchup=" << (kick.catchupEnabled ? 1 : 0) << " awaitMode="
+              << (kick.awaitMode == KickState::AwaitMode::CollectOnly ? "collect" : "kick") << "\n";
   }
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then
   // fill the loop's frame locals from it. Returns false (leaving the screen black) if anything is

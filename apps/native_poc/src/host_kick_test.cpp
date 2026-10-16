@@ -276,9 +276,63 @@ void TestCatchupAwait() {
   }
 }
 
+// r10 (Codex r10 s1): collect first, kick only if still unsatisfied. The stage (host_stage_pop_frame.cpp)
+// runs encode_send_h264_collect_await every tick of an open await; an AU it collects that satisfies the
+// await ends it (Observed) BEFORE AwaitWantsKick is asked -- so a ready AU costs no input. Collect-only
+// (experiment arm) never kicks and hands over to the refresh at the deadline. An exhausted / deferred
+// await is still watched so its real output time is known (never counted as the await's success).
+void TestCatchupAwaitCollect() {
+  const uint64_t t0 = 60 * kSec;
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    expect(!k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs - 1) && k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs),
+           "collect: unsatisfied -> the one kick is wanted at +150 ms, not before");
+    // collect at +40 ms brings the catch-up's AU: observed, no kick wanted afterwards
+    expect(k.AwaitSatisfiedBy(4, 3, 105), "collect: the collected AU satisfies the await");
+    k.EndAwait(KickState::AwaitEnd::Observed, t0 + 40000);
+    expect(!k.await.active && !k.AwaitWantsKick(t0 + 10 * kSec) && !k.lateWatch.active,
+           "collect: satisfied by the collect -> no kick wanted, nothing left to watch");
+  }
+  {
+    KickState k;
+    k.awaitMode = KickState::AwaitMode::CollectOnly;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    expect(!k.AwaitWantsKick(t0 + KickState::kAwaitKickDelayUs) && !k.AwaitWantsKick(t0 + kSec),
+           "collect-only: the kick is never wanted");
+    const uint64_t deadline = t0 + KickState::kAwaitKickDelayUs + KickState::kAwaitKickDeadlineUs;
+    expect(k.AwaitKickExpired(deadline), "collect-only: bounded by the same deadline");
+    k.EndAwait(KickState::AwaitEnd::Deferred, deadline);
+    expect(!k.await.active && k.awaitDeferred == 1 && k.lateWatch.active && k.lateWatch.ordinal == 105 &&
+               k.lateWatch.how == KickState::AwaitEnd::Deferred,
+           "collect-only: deferred at the deadline, and its ordinal is still watched");
+    expect(!k.LateWatchSatisfiedBy(3, 3, 200) && !k.LateWatchSatisfiedBy(4, 2, 200) &&
+               !k.LateWatchSatisfiedBy(4, 3, 104) && !k.LateWatchSatisfiedBy(4, 3, 0) && k.LateWatchSatisfiedBy(4, 3, 105),
+           "late watch: same provenance rules as the await (instance / epoch / ordinal >= / no ordinal 0)");
+    expect(!k.LateWatchExpired(deadline + KickState::kAwaitLateWatchUs - 1) &&
+               k.LateWatchExpired(deadline + KickState::kAwaitLateWatchUs),
+           "late watch: given up 5 s after the await ended");
+  }
+  {
+    KickState k;
+    k.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    k.await.kickSubmitted = true;
+    k.NoteAwaitInputAccepted(true);
+    k.NoteAwaitCallEnded(true, true, t0 + 170000);
+    expect(k.awaitExhausted == 1 && k.lateWatch.active && k.lateWatch.how == KickState::AwaitEnd::Exhausted &&
+               k.lateWatch.endedUs == t0 + 170000 && k.lateWatch.acceptedUs == t0,
+           "late watch: an exhausted await is watched with its accept / end times");
+    KickState c;
+    c.OpenAwait(4, 7, 3, 2, 105, 349, t0);
+    c.EndAwait(KickState::AwaitEnd::Cancelled, t0 + 1000);
+    expect(!c.lateWatch.active, "late watch: a cancelled await (identity / pause) is not watched");
+  }
+}
+
 int main() {
   TestCatchupDebt();
   TestCatchupAwait();
+  TestCatchupAwaitCollect();
   TestArmDueCancel();
   TestOneKickPerHeldInput();
   TestBarrierOverridesTheGuard();

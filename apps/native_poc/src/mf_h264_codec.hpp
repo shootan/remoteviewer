@@ -58,6 +58,8 @@ struct H264AccessUnit {
   // host content version it carried -- same FIFO, so the per-AU trace can tie an AU to its picture.
   uint8_t syntheticReason = 0;
   uint64_t contentVersion = 0;
+  // r10: when the MFT accepted that input (qpc us; 0 = no provenance) -- accepted -> output latency.
+  uint64_t inputAcceptedAtUs = 0;
 };
 
 // The source of an encoder input (H264AccessUnit::syntheticReason).
@@ -99,6 +101,19 @@ struct DecodedFrameNv12 {
   uint32_t surfaceSubresource = 0;
 };
 
+// r10: one output-only collect (H264Encoder::collect_outputs): events read, METransformHaveOutput /
+// NeedInput among them, AUs drained, drain errors, the last GetEvent failure other than "no events",
+// and its duration.
+struct H264CollectStats {
+  uint32_t events = 0;
+  uint32_t haveOutput = 0;
+  uint32_t needInput = 0;
+  uint32_t aus = 0;
+  uint32_t drainErrors = 0;
+  int32_t lastEventHr = 0;
+  uint64_t us = 0;
+};
+
 struct H264EncodeFrameStats {
   uint64_t encodeCallUs = 0;
   uint64_t colorConvertUs = 0;
@@ -119,13 +134,8 @@ struct H264EncodeFrameStats {
   // Diagnostic for the async output-starvation wedge: this call saw MFT events but none were
   // METransformHaveOutput. Repeated while input keeps being accepted is the wedge fingerprint.
   uint32_t asyncNeedInputOnlyCall = 0;
-  // motion-settle r9: a pre-input event poll was asked for this call (set_next_call_prepoll) -- did
-  // it run, how many METransformHaveOutput it found and how many AUs it drained BEFORE this call's
-  // input went in. AUs found there were ready before this call (the earlier call returned too soon);
-  // none there but one after the input = the MFT released it only on the next input.
-  uint8_t prePollRan = 0;
-  uint32_t prePollHaveOutputCount = 0;
-  uint32_t prePollOutputSamples = 0;
+  // r10: the HRESULT of this call's (last) ProcessInput -- S_OK accepted, MF_E_NOTACCEPTING refused.
+  int32_t processInputHr = 0;
   // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
   // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
   uint32_t pendingInputDepth = 0;
@@ -169,6 +179,7 @@ struct PendingInput {
   bool forcedKey = false;
   uint8_t syntheticReason = 0;   // catch-up: H264AccessUnit::syntheticReason
   uint64_t contentVersion = 0;   // catch-up: H264AccessUnit::contentVersion
+  uint64_t acceptedAtUs = 0;     // r10: H264AccessUnit::inputAcceptedAtUs
 };
 
 // The FIFO itself, separate from the codec so the rules are testable without an MFT.
@@ -316,10 +327,9 @@ class H264Encoder {
   // catch-up: the source and content version of the NEXT input; same FIFO.
   void set_next_input_synthetic_reason(uint8_t reason) { nextInputSyntheticReason_ = reason; }
   void set_next_input_content_version(uint64_t version) { nextInputContentVersion_ = version; }
-  // motion-settle r9: for the NEXT encode call only, poll the async MFT's events (no wait) and drain
-  // any METransformHaveOutput BEFORE ProcessInput, through the same drain as the post-input poll.
-  // Telemetry for the catch-up's extra kick (H264EncodeFrameStats::prePoll*); one call, then off.
-  void set_next_call_prepoll(bool on) { nextCallPrepoll_ = on; }
+  // r10: collect the outputs the MFT already has, without an input (see the definition). False on a
+  // drain failure or when the encoder is not running.
+  bool collect_outputs(std::vector<H264AccessUnit>* outUnits, H264CollectStats* stats);
   // Inputs this encoder instance actually accepted (ProcessInput succeeded), real and synthetic. A
   // caller compares it across one encode call to learn whether THAT input was taken -- the call's
   // return value also folds in output-drain failures after an accepted input.
@@ -356,6 +366,8 @@ class H264Encoder {
   RcPlan build_rc_plan(uint32_t meanBps, uint32_t legacyMaxQp) const;
   bool apply_rc_plan(const RcPlan& plan, const char* stage, bool onlyMismatched);
   RcPlanState read_back_rc_plan(const RcPlan& plan, std::string* outDetail, std::string* outMismatched);
+  bool drain_outputs_into(std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats,
+                          int64_t sampleTime);
   bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,
                             std::vector<H264AccessUnit>* outUnits,
                             H264EncodeFrameStats* encodeStats, uint64_t encodeCallStartUs);
@@ -402,7 +414,7 @@ class H264Encoder {
   uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
   uint8_t nextInputSyntheticReason_ = 0;
   uint64_t nextInputContentVersion_ = 0;
-  bool nextCallPrepoll_ = false;
+  int64_t lastAcceptedSampleTimeHns_ = 0;  // r10: the timestamp an output with no FIFO entry takes in a collect
   uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
   bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
   uint32_t outBufferBytes_ = 0;

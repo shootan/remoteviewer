@@ -47,6 +47,7 @@
 #include "host_force_key_decision.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_abr.hpp"
+#include "host_au_trace.hpp"
 #include "host_args.hpp"
 #include "host_backend_policy.hpp"
 #include "host_bgra_scale.hpp"
@@ -85,6 +86,91 @@ using remote60::host::DxgiDesktopCaptureConfig;
 using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
+
+// r10 (host_kick.hpp CatchupAwait): what AUs that go on to the emit stage mean for an open await and for
+// the late watch of an exhausted / deferred one. via = the call that brought them: "collect" (output
+// only, no input), "kick" (the one extra input), "other" (any other input's call). True when the await
+// was satisfied.
+static bool catchup_observe_emitted(KickState& kick, uint64_t inst, const std::vector<H264AccessUnit>& emitted,
+                                    const char* via, uint64_t nowUs) {
+  for (const auto& au : emitted) {
+    if (!kick.LateWatchSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
+    ++kick.awaitLateOutputs;
+    std::cout << "[native-video-host][catchup] late-output ordinal=" << kick.lateWatch.ordinal
+              << " was=" << (kick.lateWatch.how == KickState::AwaitEnd::Exhausted ? "exhausted" : "deferred")
+              << " auOrdinal=" << au.acceptedInputOrdinal << " src=" << synthetic_reason_name(au.syntheticReason)
+              << " via=" << via << " sinceAcceptedUs=" << (nowUs - kick.lateWatch.acceptedUs)
+              << " sinceEndedUs=" << (nowUs - kick.lateWatch.endedUs) << "\n";
+    kick.lateWatch = KickState::AwaitLateWatch{};
+    break;
+  }
+  if (!kick.await.active) return false;
+  for (const auto& au : emitted) {
+    if (!kick.AwaitSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
+    const bool byCollect = via[0] == 'c', byKick = via[0] == 'k';
+    ++(byCollect ? kick.awaitObservedByCollect : byKick ? kick.awaitObservedByKick : kick.awaitObservedByOther);
+    std::cout << "[native-video-host][catchup] output ordinal=" << kick.await.ordinal
+              << " auOrdinal=" << au.acceptedInputOrdinal << " via=" << via
+              << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs)
+              << " kickSubmitted=" << (kick.await.kickSubmitted ? 1 : 0) << "\n";
+    kick.EndAwait(KickState::AwaitEnd::Observed, nowUs);
+    return true;
+  }
+  return false;
+}
+
+// r10 (Codex r10 s1): the output half of an encode call for an open await -- collect what the MFT
+// already has WITHOUT an input (H264Encoder::collect_outputs), judge it against the await, and send it
+// down the ordinary emit path. No ProcessInput, so no accepted ordinal / PTS / GOP / RC input and no
+// accepted-input bookkeeping; the emitted AUs are synthetic-path output (servedBootstrap) of this tick's
+// own scratch context, so real-frame counters and frame gating do not move. True: the await was
+// satisfied here (no kick will be made).
+bool encode_send_h264_collect_await(HostContext& hx, TickContext& tc) {
+  auto& kick = hx.kick;
+  auto& encoder = hx.encoder;
+  auto& sender = hx.sender;
+  std::vector<H264AccessUnit> units;
+  H264CollectStats cs{};
+  const uint64_t collectStartUs = qpc_now_us();
+  const bool ok = encoder.codec.collect_outputs(&units, &cs);
+  const uint64_t collectEndUs = qpc_now_us();
+  ++kick.awaitCollectCalls;
+  kick.awaitCollectAus += cs.aus;
+  if (au_trace_enabled() && (cs.aus > 0 || cs.haveOutput > 0 || cs.drainErrors > 0 || !ok)) {
+    std::cout << "[native-video-host][catchup] collect ordinal=" << kick.await.ordinal
+              << " sinceAcceptedUs=" << (collectStartUs - kick.await.acceptedUs) << " events=" << cs.events
+              << " haveOutput=" << cs.haveOutput << " needInput=" << cs.needInput << " aus=" << cs.aus
+              << " drainErrors=" << cs.drainErrors << " us=" << cs.us << " ok=" << (ok ? 1 : 0) << "\n";
+  }
+  if (!ok || units.empty()) return false;
+  const bool satisfied = catchup_observe_emitted(kick, encoder.codec.instance_id(), units, "collect", collectEndUs);
+  // the emit stage on a scratch tick: synthetic-path output, stamped with the collect call's own times
+  TickContext ctc;
+  ctc.nowUs = tc.nowUs;
+  ctc.servedBootstrap = true;
+  ctc.streamGeneration = hx.capture.streamGenerationState.load(std::memory_order_acquire);
+  D3DReadbackTiming scaleReadbackTiming{};
+  uint64_t preEncodePrepUs = 0, scaleUs = 0, nv12Us = 0;
+  const uint64_t encodeStartUs = collectStartUs, encodeInputUs = collectStartUs, queueToEncodeUs = 0,
+                 callbackToEncodeStartUs = 0, encodeEndUs = collectEndUs;
+  H264EncodeFrameStats encodeStats{};
+  encodeStats.encodeCallUs = cs.us;
+  bool encoderResetTriggered = false, sessionReconnectTriggered = false, countedRawForInput = true;
+  size_t backlog = 0;
+  {
+    std::lock_guard<std::mutex> lk(sender.mu);
+    backlog = sender.queue.size();
+  }
+  H264AuBatch b{scaleReadbackTiming, preEncodePrepUs, scaleUs, nv12Us, encodeStartUs, encodeInputUs,
+                queueToEncodeUs, callbackToEncodeStartUs, encodeStats, encodeEndUs, encoderResetTriggered,
+                sessionReconnectTriggered, countedRawForInput, backlog >= 2};
+  for (auto& au : units) {
+    const AuFlow f = encode_send_h264_emit_au(hx, ctc, b, au);
+    if (f == AuFlow::Break) break;
+  }
+  if (ctc.sendFailed) tc.sendFailed = true;
+  return satisfied;
+}
 
 Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   auto& args = hx.args;
@@ -390,10 +476,39 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
     const uint64_t callInputEpoch = capture.inputEpoch.load(std::memory_order_acquire);
     encoder.codec.set_next_input_epoch(callInputEpoch);
     const uint64_t acceptedBefore = encoder.codec.accepted_input_count();
-    // r9: the extra kick collects first what the MFT already posted (telemetry: ready before this call,
-    // or released only by this input)
+    // r9/r10: this input is the one extra kick of an await (the collect step ran first this tick and
+    // did not satisfy it -- host_stage_pop_frame.cpp)
     const bool awaitKickInput = servedBootstrap && tc.awaitKick;
-    if (awaitKickInput) encoder.codec.set_next_call_prepoll(true);
+    // r10 trace only (Codex r10 s3): what a REAL input changed against the previous real input -- a
+    // subsampled (8 px grid) compare of the CPU capture payload, its changed-sample count and bounding
+    // box. Tells a harness repaint from a cursor / capture-duplicate / other change while the marker id
+    // stays the same. No GPU readback; nothing else reads it.
+    if (au_trace_enabled() && !servedBootstrap && payload && !payload->empty() && w > 0 && h > 0 && stride >= w * 4) {
+      static std::shared_ptr<std::vector<uint8_t>> prevPayload;
+      static uint32_t prevW = 0, prevH = 0, prevStride = 0;
+      uint32_t changed = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+      const bool comparable = prevPayload && prevW == w && prevH == h && prevStride == stride &&
+                              prevPayload->size() == payload->size();
+      if (comparable) {
+        const uint8_t* a0 = payload->data();
+        const uint8_t* b0 = prevPayload->data();
+        for (uint32_t y = 0; y < h; y += 8) {
+          for (uint32_t x = 0; x < w; x += 8) {
+            const size_t off = static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4;
+            if (std::memcmp(a0 + off, b0 + off, 4) != 0) {
+              ++changed;
+              x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+            }
+          }
+        }
+      }
+      std::cout << "[native-video-host][cap] version=" << version << " ordinal=" << (acceptedBefore + 1)
+                << " comparable=" << (comparable ? 1 : 0) << " changed=" << changed;
+      if (changed > 0) std::cout << " bbox=" << x0 << "," << y0 << "-" << x1 << "," << y1;
+      std::cout << "\n";
+      prevPayload = payload;
+      prevW = w; prevH = h; prevStride = stride;
+    }
     kick.NoteEncoderStamp(encodeInputUs, servedBootstrap);
     if (capture.timelineOriginUs < 0) {
       capture.timelineOriginUs = static_cast<int64_t>(encodeInputUs);
@@ -505,30 +620,18 @@ Flow encode_send_h264(HostContext& hx, TickContext& tc) {
   const auto settle_await = [&](const std::vector<H264AccessUnit>& emitted) {
     const uint64_t inst = encoder.codec.instance_id();
     const uint64_t settleUs = qpc_now_us();
+    catchup_observe_emitted(kick, inst, emitted, awaitKickInput ? "kick" : "other", settleUs);
     if (kick.await.active) {
-      for (const auto& au : emitted) {
-        if (!kick.AwaitSatisfiedBy(inst, au.inputEpoch, au.acceptedInputOrdinal)) continue;
-        ++(awaitKickInput ? kick.awaitObservedByKick : kick.awaitObservedByOther);
-        std::cout << "[native-video-host][catchup] output ordinal=" << kick.await.ordinal
-                  << " auOrdinal=" << au.acceptedInputOrdinal << " via=" << (awaitKickInput ? "kick" : "other")
+      const bool wasKick = awaitKickInput && inputAccepted;
+      const bool wasOther = !awaitKickInput && inputAccepted && kick.await.advancedByOther;
+      if (wasKick || wasOther) {
+        std::cout << "[native-video-host][catchup] await " << (wasKick ? "exhausted" : "deferred")
+                  << " ordinal=" << kick.await.ordinal << " why=" << (wasKick ? "no-au-after-kick" : "other-input")
                   << " sinceAcceptedUs=" << (settleUs - kick.await.acceptedUs)
-                  << " prePollRan=" << static_cast<unsigned>(encodeStats.prePollRan)
-                  << " prePollHaveOutput=" << encodeStats.prePollHaveOutputCount
-                  << " prePollAus=" << encodeStats.prePollOutputSamples << "\n";
-        kick.EndAwait(KickState::AwaitEnd::Observed);
-        break;
+                  << " inputHr=0x" << std::hex << static_cast<uint32_t>(encodeStats.processInputHr) << std::dec
+                  << "\n";
       }
-      if (kick.await.active) {
-        const bool wasKick = awaitKickInput && inputAccepted;
-        const bool wasOther = !awaitKickInput && inputAccepted && kick.await.advancedByOther;
-        if (wasKick || wasOther) {
-          std::cout << "[native-video-host][catchup] await " << (wasKick ? "exhausted" : "deferred")
-                    << " ordinal=" << kick.await.ordinal << " why=" << (wasKick ? "no-au-after-kick" : "other-input")
-                    << " prePollRan=" << static_cast<unsigned>(encodeStats.prePollRan)
-                    << " prePollHaveOutput=" << encodeStats.prePollHaveOutputCount << "\n";
-        }
-        kick.NoteAwaitCallEnded(awaitKickInput, inputAccepted);
-      }
+      kick.NoteAwaitCallEnded(awaitKickInput, inputAccepted, settleUs);
     }
     if (catchupAcceptedOrdinal != 0) {
       bool own = false;

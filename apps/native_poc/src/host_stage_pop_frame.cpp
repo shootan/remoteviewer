@@ -229,7 +229,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // it -- only while nothing else has moved the encoder (a real frame waiting goes first and merges it),
   // gated like any delta (no admit-always), with an empty sender queue, never across an identity /
   // codec-instance change or a paused stream (cancelled). Past its deadline the 1 Hz refresh takes over.
-  if (!servedBootstrap && useH264 && kick.await.active) {
+  if (kick.LateWatchExpired(nowUs)) {
+    std::cout << "[native-video-host][catchup] late-output none ordinal=" << kick.lateWatch.ordinal
+              << " withinUs=" << KickState::kAwaitLateWatchUs << "\n";
+    kick.lateWatch = KickState::AwaitLateWatch{};
+  }
+  if (useH264 && kick.await.active) {
     const uint64_t sessionEpochNow = clientSession.epoch.load(std::memory_order_acquire);
     const uint64_t inputEpochNow = capture.inputEpoch.load(std::memory_order_acquire);
     const uint64_t generationNow = capture.streamGenerationState.load(std::memory_order_acquire);
@@ -242,12 +247,15 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     if (cancelWhy) {
       std::cout << "[native-video-host][catchup] await cancelled ordinal=" << kick.await.ordinal
                 << " why=" << cancelWhy << "\n";
-      kick.EndAwait(KickState::AwaitEnd::Cancelled);
+      kick.EndAwait(KickState::AwaitEnd::Cancelled, nowUs);
+    } else if (encode_send_h264_collect_await(hx, tc)) {
+      // r10: the AU was ready -- collected and sent without any input; no kick
     } else if (kick.AwaitKickExpired(nowUs)) {
       std::cout << "[native-video-host][catchup] await deferred ordinal=" << kick.await.ordinal
-                << " why=kick-deadline\n";
-      kick.EndAwait(KickState::AwaitEnd::Deferred);
-    } else if (kick.AwaitKickDue(nowUs)) {
+                << " why=" << (kick.awaitMode == KickState::AwaitMode::CollectOnly ? "collect-only-deadline" : "kick-deadline")
+                << " sinceAcceptedUs=" << (nowUs - kick.await.acceptedUs) << "\n";
+      kick.EndAwait(KickState::AwaitEnd::Deferred, nowUs);
+    } else if (!servedBootstrap && kick.AwaitWantsKick(nowUs)) {
       bool blocked = encoder.forceKeyNext;
       if (transport == VideoTransport::Udp) {
         std::lock_guard<std::mutex> lk(sender.mu);
@@ -275,7 +283,7 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
         } else {
           std::cout << "[native-video-host][catchup] await cancelled ordinal=" << kick.await.ordinal
                     << " why=fill\n";
-          kick.EndAwait(KickState::AwaitEnd::Cancelled);
+          kick.EndAwait(KickState::AwaitEnd::Cancelled, nowUs);
         }
       }
     }
@@ -363,7 +371,11 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   if (!servedBootstrap) {
     hx.watchdog.EnterSubphase(MainLoopSubphase::PopWait);  // r9
     std::unique_lock<std::mutex> lk(res.frame.mu);
-    queueReady = res.frame.cv.wait_for(lk, std::chrono::microseconds(capture.EffectiveQueueWaitTimeoutUs(encoder)), [&] {
+    // r10: while a catch-up AU is awaited the loop comes back within a frame period so the collect step
+    // runs at that cadence (bounded by the await deadline; no busy wait)
+    uint64_t waitUs = capture.EffectiveQueueWaitTimeoutUs(encoder);
+    if (kick.await.active) waitUs = std::min<uint64_t>(waitUs, KickState::CatchupDelayUs(hx.encoder.activeFps) / 2);
+    queueReady = res.frame.cv.wait_for(lk, std::chrono::microseconds(waitUs), [&] {
       return stop.load() || res.frame.version != stats.lastVersionSent;
     });
     hx.watchdog.EnterSubphase(MainLoopSubphase::None);

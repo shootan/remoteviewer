@@ -408,6 +408,9 @@ Flow stage_stats(HostContext& hx, TickContext& tc) {
                 << " kickAccepted=" << k.awaitKickAccepted << " kickRefused=" << k.awaitKickRefused
                 << " kickMerged=" << k.awaitKickMerged << " exhausted=" << k.awaitExhausted
                 << " deferred=" << k.awaitDeferred << " cancelled=" << k.awaitCancelled
+                << " observedByCollect=" << k.awaitObservedByCollect << " collectCalls=" << k.awaitCollectCalls
+                << " collectAus=" << k.awaitCollectAus << " lateOutputs=" << k.awaitLateOutputs
+                << " mode=" << (k.awaitMode == KickState::AwaitMode::CollectOnly ? "collect" : "kick")
                 << " active=" << (k.await.active ? 1 : 0) << "\n";
     }
     sender.sentFrames = 0;

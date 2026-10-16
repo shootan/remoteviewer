@@ -232,6 +232,8 @@ Flow stage_gate_static(HostContext& hx, TickContext& tc);   // static-frame gati
 Flow stage_encode_send(HostContext& hx, TickContext& tc);   // raw send / H.264 encode + enqueue (dispatcher)
 Flow encode_send_raw(HostContext& hx, TickContext& tc);
 Flow encode_send_h264(HostContext& hx, TickContext& tc);
+// r10: output-only collect for an open catch-up await (host_stage_encode_send_h264.cpp); true = satisfied
+bool encode_send_h264_collect_await(HostContext& hx, TickContext& tc);
 Flow stage_stats(HostContext& hx, TickContext& tc);         // 1s tick: stats line, drain watchdog, ABR/M9 -- MUST run first (H-10)
 Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
                      const std::string& targetProcessName, uint64_t queuePushPerSec,

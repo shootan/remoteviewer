@@ -270,8 +270,18 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowscodecs
   shlwapi
 )
+# motion-settle r10 (Codex r10 s2): diagnostic arm selectors (REMOTE60_NATIVE_CATCHUP_AWAIT_MODE) exist only in
+# an experiment build; a shipping build has no way to select them and does not carry their environment
+# names (automation/motion_settle_build_gate.py checks the binary).
+option(REMOTE60_MOTION_SETTLE_EXPERIMENTS "Compile the motion-settle diagnostic switches into GNLinkStream" OFF)
+if(REMOTE60_MOTION_SETTLE_EXPERIMENTS)
+  set(_motion_settle_experiments 1)
+else()
+  set(_motion_settle_experiments 0)
+endif()
 target_compile_definitions(remote60_native_video_host_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+  REMOTE60_MOTION_SETTLE_EXPERIMENTS=${_motion_settle_experiments}
 )
 
 add_executable(remote60_secure_input_service
@@ -1145,6 +1155,16 @@ add_executable(remote60_host_frame_gate_test
   src/host_frame_gate_test.cpp
 )
 target_include_directories(remote60_host_frame_gate_test PRIVATE src)
+
+# r10: the output-only collect at the real H264Encoder boundary, with an async fake MFT
+add_executable(remote60_host_catchup_collect_test src/mf_h264_codec.cpp src/host_catchup_collect_test.cpp)
+target_include_directories(remote60_host_catchup_collect_test PRIVATE src)
+target_link_libraries(remote60_host_catchup_collect_test PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
+
+# r10: the diagnostic first-slice QP reader of the per-AU trace (h264_slice_qp.hpp)
+add_executable(remote60_h264_slice_qp_test src/mf_h264_codec.cpp src/h264_slice_qp_test.cpp)
+target_include_directories(remote60_h264_slice_qp_test PRIVATE src)
+target_link_libraries(remote60_h264_slice_qp_test PRIVATE d3d11 mfplat mf mfuuid wmcodecdspuuid ole32)
 
 add_executable(remote60_host_kick_test
   src/host_kick_test.cpp

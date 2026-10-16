@@ -142,6 +142,12 @@ struct KickState {
   // like any delta -- lets the encode call collect it. Another input accepted meanwhile already advanced
   // the encoder: the extra kick is dropped (merged). Still nothing after the kick: exhausted, the 1 Hz
   // refresh is the fallback and it is not counted as delivered. The kick never re-opens this state.
+  // r10 (Codex r10 s1): r8 showed the AU was usually READY and simply never collected (the host collects
+  // only inside an encode call). While the await is open, every main-loop tick first COLLECTS what the
+  // MFT has, without an input (H264Encoder::collect_outputs); an AU that satisfies the await ends it
+  // there and no kick input is ever made. Only an await still unsatisfied at kAwaitKickDelayUs gets the
+  // one kick (AwaitWantsKick). AwaitMode::CollectOnly (experiment builds only) never kicks -- the
+  // diagnostic arm that separates "nobody collected" from "the MFT needed another input".
   enum class AwaitEnd : uint8_t { Observed, Exhausted, Deferred, Cancelled };
   struct CatchupAwait {
     bool active = false;
@@ -155,6 +161,8 @@ struct KickState {
     bool kickAccepted = false;        // ... and the encoder took it
     bool advancedByOther = false;     // another input was accepted after the catch-up (kick merged)
   };
+  enum class AwaitMode : uint8_t { Kick = 0, CollectOnly = 1 };
+  AwaitMode awaitMode = AwaitMode::Kick;
   static constexpr uint64_t kAwaitKickDelayUs = 150000;      // Codex r9: fixed at the existing 150 ms
   static constexpr uint64_t kAwaitKickDeadlineUs = 1000000;  // bounded wait for the gate / queue
   CatchupAwait await;
@@ -165,6 +173,28 @@ struct KickState {
   uint64_t awaitOpened = 0, awaitOutputOwnCall = 0, awaitObservedByKick = 0, awaitObservedByOther = 0,
            awaitKickSubmitted = 0, awaitKickAccepted = 0, awaitKickRefused = 0, awaitKickMerged = 0,
            awaitExhausted = 0, awaitDeferred = 0, awaitCancelled = 0;
+  // r10: satisfied by an output-only collect (no input) / collect calls made / AUs they drained / AUs of
+  // an exhausted or deferred await seen later (its real delivery time is logged, never counted as
+  // the await's success)
+  uint64_t awaitObservedByCollect = 0, awaitCollectCalls = 0, awaitCollectAus = 0, awaitLateOutputs = 0;
+  // r10: after Exhausted / Deferred the ordinal is still watched so its actual output time is known.
+  struct AwaitLateWatch {
+    bool active = false;
+    uint64_t codecInstance = 0, inputEpoch = 0, ordinal = 0, acceptedUs = 0, endedUs = 0;
+    AwaitEnd how = AwaitEnd::Exhausted;
+  };
+  static constexpr uint64_t kAwaitLateWatchUs = 5000000;  // stop watching 5 s after the await ended
+  AwaitLateWatch lateWatch;
+  // The one kick is wanted: the await is still open at its due time and this build kicks at all.
+  bool AwaitWantsKick(uint64_t nowUs) const { return awaitMode == AwaitMode::Kick && AwaitKickDue(nowUs); }
+  // An AU the late watch was waiting for (same rules as AwaitSatisfiedBy).
+  bool LateWatchSatisfiedBy(uint64_t codecInstance, uint64_t auInputEpoch, uint64_t auOrdinal) const {
+    return lateWatch.active && auOrdinal != 0 && codecInstance == lateWatch.codecInstance &&
+           auInputEpoch == lateWatch.inputEpoch && auOrdinal >= lateWatch.ordinal;
+  }
+  bool LateWatchExpired(uint64_t nowUs) const {
+    return lateWatch.active && nowUs >= lateWatch.endedUs + kAwaitLateWatchUs;
+  }
   // The catch-up input was accepted (ordinal) and its own call returned no AU for it.
   void OpenAwait(uint64_t codecInstance, uint64_t sessionEpoch, uint64_t inputEpoch, uint64_t streamGeneration,
                  uint64_t ordinal, uint64_t version, uint64_t nowUs) {
@@ -201,8 +231,12 @@ struct KickState {
   bool AwaitKickExpired(uint64_t nowUs) const {
     return await.active && nowUs >= await.kickDeadlineUs;
   }
-  void EndAwait(AwaitEnd how) {
+  void EndAwait(AwaitEnd how, uint64_t nowUs = 0) {
     if (!await.active) return;
+    if (how == AwaitEnd::Exhausted || how == AwaitEnd::Deferred) {
+      lateWatch = AwaitLateWatch{true, await.codecInstance, await.inputEpoch, await.ordinal, await.acceptedUs,
+                                 nowUs, how};
+    }
     switch (how) {
       case AwaitEnd::Observed: break;  // the caller counts by whom
       case AwaitEnd::Exhausted: ++awaitExhausted; break;
@@ -224,12 +258,12 @@ struct KickState {
   }
   // End of an encode call that did NOT bring the awaited AU: the kick's call ends it as exhausted; a
   // call of another input leaves it to that input's own trailing edge / the refresh (deferred).
-  void NoteAwaitCallEnded(bool awaitKickInput, bool inputAccepted) {
+  void NoteAwaitCallEnded(bool awaitKickInput, bool inputAccepted, uint64_t nowUs = 0) {
     if (!await.active || !inputAccepted) return;
     if (awaitKickInput) {
-      EndAwait(AwaitEnd::Exhausted);
+      EndAwait(AwaitEnd::Exhausted, nowUs);
     } else if (await.advancedByOther) {
-      EndAwait(AwaitEnd::Deferred);
+      EndAwait(AwaitEnd::Deferred, nowUs);
     }
   }
 

@@ -2183,6 +2183,209 @@ bool H264Encoder::encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFr
                               encodeCallStartUs);
 }
 
+// Drain every output the MFT will hand out now (the former lambda of encode_sample_common, verbatim
+// but for its parameters). sampleTime = the timestamp an output with no FIFO entry falls back to.
+bool H264Encoder::drain_outputs_into(std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats,
+                                     int64_t sampleTime) {
+  constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
+  const uint64_t drainStartUs = qpc_now_us();
+  ++encodeStats->processOutputDrainLoops;
+  while (true) {
+    MFT_OUTPUT_STREAM_INFO osi{};
+    if (FAILED(enc_->GetOutputStreamInfo(0, &osi))) return false;
+
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> outBuffer;
+    Microsoft::WRL::ComPtr<IMFSample> outSample;
+    MFT_OUTPUT_DATA_BUFFER odb{};
+    odb.dwStreamID = 0;
+    if ((osi.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
+      const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : outBufferBytes_;
+      if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
+      if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
+      if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
+      odb.pSample = outSample.Get();
+    }
+    DWORD status = 0;
+    const HRESULT po = enc_->ProcessOutput(0, 1, &odb, &status);
+    if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+      if (odb.pEvents) odb.pEvents->Release();
+      ++encodeStats->processOutputNeedMoreInputCount;
+      break;
+    }
+    if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
+      if (odb.pEvents) odb.pEvents->Release();
+      ++encodeStats->processOutputStreamChangeCount;
+      // r2 F3: a mid-stream re-type, not the initial configure -- the pre-type GOP log says so, so a
+      // field reader does not mistake a renegotiation probe for the first init.
+      if (!configure_types("retype")) return false;
+      continue;
+    }
+    if (FAILED(po)) {
+      if (asyncTransform_ && po == E_UNEXPECTED) {
+        if (odb.pEvents) odb.pEvents->Release();
+        break;
+      }
+      if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+        std::string line = "encoder ProcessOutput failed hr=" + hr_to_hex(po);
+        codec_debug_log(line.c_str());
+      }
+      if (odb.pEvents) odb.pEvents->Release();
+      ++encodeStats->processOutputErrorCount;
+      return false;
+    }
+
+    // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
+    // odb.pSample has an outstanding reference we must release.
+    Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
+    if (odb.pSample && odb.pSample != outSample.Get()) {
+      mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
+    }
+    IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
+    std::vector<uint8_t> bytes;
+    const bool haveBytes = produced && sample_to_bytes(produced, &bytes) && !bytes.empty();
+    if (!haveBytes && produced) {
+      // The MFT consumed an input to produce this output even though nothing usable came
+      // back. Leaving its entry in the queue would offset every later access unit by a frame,
+      // permanently -- the client paces playout off those timestamps, and the emit gate judges
+      // the epoch that rides with them (the pre-A02 code popped the timestamp and the synthetic
+      // flag here but not the epoch, so every later AU carried the previous input's epoch: the
+      // IDR forced by a flush was then judged old and dropped).
+      pendingInputs_.PopForEmptyOutput();
+      ++sampleTimeOutputTimestampFallbackCount_;
+    }
+    if (haveBytes) {
+      if (!h264_has_start_code(bytes.data(), bytes.size())) {
+        std::vector<uint8_t> annexb;
+        if (h264_avcc_to_annexb(bytes, &annexb) && !annexb.empty()) {
+          bytes.swap(annexb);
+        }
+      }
+      UINT32 cleanPoint = 0;
+      const bool sampleKey = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) &&
+                             cleanPoint != 0;
+      H264AccessUnit au{};
+      const bool rawNal5 = annexb_contains_idr(bytes.data(), bytes.size());  // r4 G: a real IDR slice
+      const bool maybeKey = sampleKey || rawNal5;
+      au.keyFrame = maybeKey;
+      au.rawIdr = rawNal5;
+      int64_t outSampleTimeHns = 0;
+      const bool hasOutputSampleTime =
+          SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
+      if (hasOutputSampleTime) ++sampleTimeOutputTimestampTotalSamples_;
+
+      // Do not align an older async output to `sampleTime`, which belongs to this call's
+      // newest input. That collapsed multiple frames onto one timestamp and produced the
+      // visible burst/pause cadence at 30 fps. MFT output order follows accepted input
+      // order, so the accepted-input FIFO is the stable source of truth even for vendor
+      // encoders that rewrite output timestamps to a private zero-based timeline.
+      int64_t normalizedAuSampleTimeHns = sampleTime;
+      bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
+      // No FIFO entry = no provenance. The epoch is NOT dressed up as this call's: the emit
+      // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
+      // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
+      uint64_t auEpoch = 0;
+      uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
+      bool auForcedKey = false;
+      uint8_t auReason = 0;
+      uint64_t auContentVersion = 0;
+      uint64_t auAcceptedAtUs = 0;
+      PendingInput provenance{};
+      if (pendingInputs_.Pop(&provenance)) {
+        normalizedAuSampleTimeHns = provenance.tsHns;
+        auSynthetic = provenance.synthetic;
+        auEpoch = provenance.epoch;
+        auOrdinal = provenance.acceptedOrdinal;
+        auForcedKey = provenance.forcedKey;
+        auReason = provenance.syntheticReason;
+        auContentVersion = provenance.contentVersion;
+        auAcceptedAtUs = provenance.acceptedAtUs;
+      } else {
+        ++sampleTimeOutputTimestampFallbackCount_;
+      }
+      // A06: after an overflow the queue no longer describes what the MFT holds, so no output
+      // may claim an epoch until the encoder is rebuilt -- 0 is "unknown" and the gate refuses it.
+      if (pendingInputs_.provenance_invalid()) auEpoch = 0;
+      const bool sampleTimeFromOutput =
+          hasOutputSampleTime &&
+          std::llabs(outSampleTimeHns - normalizedAuSampleTimeHns) <=
+              kEncoderOutputTsSkewHns;
+      au.sampleTimeHns = normalizedAuSampleTimeHns;
+      au.sampleTimeFromOutput = sampleTimeFromOutput;
+      au.synthetic = auSynthetic;
+      au.inputEpoch = auEpoch;
+      au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
+      au.inputWasForcedKey = auForcedKey;
+      au.syntheticReason = auReason;
+      au.contentVersion = auContentVersion;
+      au.inputAcceptedAtUs = auAcceptedAtUs;
+      if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
+          !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
+        // Keep existing behavior if sequence blob is malformed.
+      }
+      if (maybeKey && !sequenceHeaderAnnexb_.empty()) {
+        std::vector<uint8_t> prefixed;
+        prefixed.reserve(sequenceHeaderAnnexb_.size() + bytes.size());
+        prefixed.insert(prefixed.end(), sequenceHeaderAnnexb_.begin(), sequenceHeaderAnnexb_.end());
+        prefixed.insert(prefixed.end(), bytes.begin(), bytes.end());
+        au.bytes = std::move(prefixed);
+      } else {
+        au.bytes = std::move(bytes);
+      }
+      report_sps_profile_once(au.bytes.data(), au.bytes.size());
+      ++encodeStats->processOutputSamples;
+      encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
+      outUnits->push_back(std::move(au));
+    }
+    if (odb.pEvents) odb.pEvents->Release();
+  }
+  const uint64_t drainEndUs = qpc_now_us();
+  encodeStats->processOutputDrainUs += (drainEndUs >= drainStartUs) ? (drainEndUs - drainStartUs) : 0;
+  return true;
+}
+
+// motion-settle r10 (Codex r10 s1): collect what the MFT has ready WITHOUT an input -- the output half
+// of an encode call. Async: up to 4 events, never waiting (MF_EVENT_FLAG_NO_WAIT), ProcessOutput only in
+// response to METransformHaveOutput; a NeedInput consumed here carries no state (nothing counts input
+// credits). Sync: ProcessOutput directly (NEED_MORE_INPUT when nothing is held). No ProcessInput, no
+// accepted ordinal / PTS / GOP / rate-control input; an output-only success is never an accepted input.
+bool H264Encoder::collect_outputs(std::vector<H264AccessUnit>* outUnits, H264CollectStats* cs) {
+  H264CollectStats local{};
+  if (!cs) cs = &local;
+  *cs = H264CollectStats{};
+  if (!enc_ || !started_ || !outUnits) return false;
+  const uint64_t t0 = qpc_now_us();
+  H264EncodeFrameStats es{};
+  bool ok = true;
+  if (asyncTransform_ && eventGenerator_) {
+    for (uint32_t poll = 0; poll < 4; ++poll) {
+      Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
+      const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+      if (FAILED(ehr) || !ev) {
+        cs->lastEventHr = (ehr == MF_E_NO_EVENTS_AVAILABLE) ? 0 : static_cast<int32_t>(ehr);
+        break;
+      }
+      ++cs->events;
+      MediaEventType et = MEUnknown;
+      (void)ev->GetType(&et);
+      if (et == METransformHaveOutput) {
+        ++cs->haveOutput;
+        if (!drain_outputs_into(outUnits, &es, lastAcceptedSampleTimeHns_)) {
+          ok = false;
+          break;
+        }
+      } else if (et == METransformNeedInput) {
+        ++cs->needInput;
+      }
+    }
+  } else if (!asyncTransform_) {
+    ok = drain_outputs_into(outUnits, &es, lastAcceptedSampleTimeHns_);
+  }
+  cs->aus = static_cast<uint32_t>(es.processOutputSamples);
+  cs->drainErrors = es.processOutputErrorCount;
+  cs->us = qpc_now_us() - t0;
+  return ok;
+}
+
 bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
                                        bool forceKeyFrame,
                                        std::vector<H264AccessUnit>* outUnits,
@@ -2201,8 +2404,6 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     encodeStats->provenanceInvalid = pendingInputs_.provenance_invalid() ? 1u : 0u;
     return ok;
   };
-  constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
-
   if (forceKeyFrame) {
     // stutter-keyframe r1 (recovery-1): keep the setter HRESULT instead of discarding it. A rejected
     // force means the MFT never armed the key for the next input, which the recovery timeline must be
@@ -2216,180 +2417,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     }
   }
 
-  auto drain_outputs = [&]() -> bool {
-    const uint64_t drainStartUs = qpc_now_us();
-    ++encodeStats->processOutputDrainLoops;
-    while (true) {
-      MFT_OUTPUT_STREAM_INFO osi{};
-      if (FAILED(enc_->GetOutputStreamInfo(0, &osi))) return false;
-
-      Microsoft::WRL::ComPtr<IMFMediaBuffer> outBuffer;
-      Microsoft::WRL::ComPtr<IMFSample> outSample;
-      MFT_OUTPUT_DATA_BUFFER odb{};
-      odb.dwStreamID = 0;
-      if ((osi.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
-        const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : outBufferBytes_;
-        if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
-        if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
-        if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
-        odb.pSample = outSample.Get();
-      }
-      DWORD status = 0;
-      const HRESULT po = enc_->ProcessOutput(0, 1, &odb, &status);
-      if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        if (odb.pEvents) odb.pEvents->Release();
-        ++encodeStats->processOutputNeedMoreInputCount;
-        break;
-      }
-      if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
-        if (odb.pEvents) odb.pEvents->Release();
-        ++encodeStats->processOutputStreamChangeCount;
-        // r2 F3: a mid-stream re-type, not the initial configure -- the pre-type GOP log says so, so a
-        // field reader does not mistake a renegotiation probe for the first init.
-        if (!configure_types("retype")) return false;
-        continue;
-      }
-      if (FAILED(po)) {
-        if (asyncTransform_ && po == E_UNEXPECTED) {
-          if (odb.pEvents) odb.pEvents->Release();
-          break;
-        }
-        if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
-          std::string line = "encoder ProcessOutput failed hr=" + hr_to_hex(po);
-          codec_debug_log(line.c_str());
-        }
-        if (odb.pEvents) odb.pEvents->Release();
-        ++encodeStats->processOutputErrorCount;
-        return false;
-      }
-
-      // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
-      // odb.pSample has an outstanding reference we must release.
-      Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
-      if (odb.pSample && odb.pSample != outSample.Get()) {
-        mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
-      }
-      IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
-      std::vector<uint8_t> bytes;
-      const bool haveBytes = produced && sample_to_bytes(produced, &bytes) && !bytes.empty();
-      if (!haveBytes && produced) {
-        // The MFT consumed an input to produce this output even though nothing usable came
-        // back. Leaving its entry in the queue would offset every later access unit by a frame,
-        // permanently -- the client paces playout off those timestamps, and the emit gate judges
-        // the epoch that rides with them (the pre-A02 code popped the timestamp and the synthetic
-        // flag here but not the epoch, so every later AU carried the previous input's epoch: the
-        // IDR forced by a flush was then judged old and dropped).
-        pendingInputs_.PopForEmptyOutput();
-        ++sampleTimeOutputTimestampFallbackCount_;
-      }
-      if (haveBytes) {
-        if (!h264_has_start_code(bytes.data(), bytes.size())) {
-          std::vector<uint8_t> annexb;
-          if (h264_avcc_to_annexb(bytes, &annexb) && !annexb.empty()) {
-            bytes.swap(annexb);
-          }
-        }
-        UINT32 cleanPoint = 0;
-        const bool sampleKey = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) &&
-                               cleanPoint != 0;
-        H264AccessUnit au{};
-        const bool rawNal5 = annexb_contains_idr(bytes.data(), bytes.size());  // r4 G: a real IDR slice
-        const bool maybeKey = sampleKey || rawNal5;
-        au.keyFrame = maybeKey;
-        au.rawIdr = rawNal5;
-        int64_t outSampleTimeHns = 0;
-        const bool hasOutputSampleTime =
-            SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
-        if (hasOutputSampleTime) ++sampleTimeOutputTimestampTotalSamples_;
-
-        // Do not align an older async output to `sampleTime`, which belongs to this call's
-        // newest input. That collapsed multiple frames onto one timestamp and produced the
-        // visible burst/pause cadence at 30 fps. MFT output order follows accepted input
-        // order, so the accepted-input FIFO is the stable source of truth even for vendor
-        // encoders that rewrite output timestamps to a private zero-based timeline.
-        int64_t normalizedAuSampleTimeHns = sampleTime;
-        bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
-        // No FIFO entry = no provenance. The epoch is NOT dressed up as this call's: the emit
-        // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
-        // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
-        uint64_t auEpoch = 0;
-        uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
-        bool auForcedKey = false;
-        uint8_t auReason = 0;
-        uint64_t auContentVersion = 0;
-        PendingInput provenance{};
-        if (pendingInputs_.Pop(&provenance)) {
-          normalizedAuSampleTimeHns = provenance.tsHns;
-          auSynthetic = provenance.synthetic;
-          auEpoch = provenance.epoch;
-          auOrdinal = provenance.acceptedOrdinal;
-          auForcedKey = provenance.forcedKey;
-          auReason = provenance.syntheticReason;
-          auContentVersion = provenance.contentVersion;
-        } else {
-          ++sampleTimeOutputTimestampFallbackCount_;
-        }
-        // A06: after an overflow the queue no longer describes what the MFT holds, so no output
-        // may claim an epoch until the encoder is rebuilt -- 0 is "unknown" and the gate refuses it.
-        if (pendingInputs_.provenance_invalid()) auEpoch = 0;
-        const bool sampleTimeFromOutput =
-            hasOutputSampleTime &&
-            std::llabs(outSampleTimeHns - normalizedAuSampleTimeHns) <=
-                kEncoderOutputTsSkewHns;
-        au.sampleTimeHns = normalizedAuSampleTimeHns;
-        au.sampleTimeFromOutput = sampleTimeFromOutput;
-        au.synthetic = auSynthetic;
-        au.inputEpoch = auEpoch;
-        au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
-        au.inputWasForcedKey = auForcedKey;
-        au.syntheticReason = auReason;
-        au.contentVersion = auContentVersion;
-        if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
-            !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
-          // Keep existing behavior if sequence blob is malformed.
-        }
-        if (maybeKey && !sequenceHeaderAnnexb_.empty()) {
-          std::vector<uint8_t> prefixed;
-          prefixed.reserve(sequenceHeaderAnnexb_.size() + bytes.size());
-          prefixed.insert(prefixed.end(), sequenceHeaderAnnexb_.begin(), sequenceHeaderAnnexb_.end());
-          prefixed.insert(prefixed.end(), bytes.begin(), bytes.end());
-          au.bytes = std::move(prefixed);
-        } else {
-          au.bytes = std::move(bytes);
-        }
-        report_sps_profile_once(au.bytes.data(), au.bytes.size());
-        ++encodeStats->processOutputSamples;
-        encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
-        outUnits->push_back(std::move(au));
-      }
-      if (odb.pEvents) odb.pEvents->Release();
-    }
-    const uint64_t drainEndUs = qpc_now_us();
-    encodeStats->processOutputDrainUs += (drainEndUs >= drainStartUs) ? (drainEndUs - drainStartUs) : 0;
-    return true;
-  };
-
-  // motion-settle r9: asked for one call only -- collect what the MFT already posted before this
-  // input goes in (ProcessOutput strictly in response to METransformHaveOutput, the async contract).
-  const bool prepoll = nextCallPrepoll_;
-  nextCallPrepoll_ = false;
-  if (prepoll && asyncTransform_ && eventGenerator_) {
-    encodeStats->prePollRan = 1;
-    const uint64_t samplesBefore = encodeStats->processOutputSamples;
-    for (uint32_t poll = 0; poll < 4; ++poll) {
-      Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
-      const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
-      if (FAILED(ehr) || !ev) break;  // MF_E_NO_EVENTS_AVAILABLE included
-      MediaEventType et = MEUnknown;
-      (void)ev->GetType(&et);
-      if (et == METransformHaveOutput) {
-        ++encodeStats->prePollHaveOutputCount;
-        if (!drain_outputs()) return finish_call(false);
-      }
-    }
-    encodeStats->prePollOutputSamples =
-        static_cast<uint32_t>(encodeStats->processOutputSamples - samplesBefore);
-  }
+  // r10: the drain is a member so the output-only collect (collect_outputs) uses the same path.
+  auto drain_outputs = [&]() -> bool { return drain_outputs_into(outUnits, encodeStats, sampleTime); };
 
   const uint64_t processInputStartUs = qpc_now_us();
   HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
@@ -2404,6 +2433,7 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
     encodeStats->processInputUs +=
         (processInputRetryDoneUs >= processInputDoneUs) ? (processInputRetryDoneUs - processInputDoneUs) : 0;
   }
+  encodeStats->processInputHr = static_cast<int32_t>(inHr);
   if (FAILED(inHr)) {
     if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
       std::string line = "encoder ProcessInput failed hr=" + hr_to_hex(inHr);
@@ -2414,7 +2444,8 @@ bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
   const bool overflowedBefore = pendingInputs_.provenance_invalid();
   pendingInputs_.Push(
       PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame,
-                   nextInputSyntheticReason_, nextInputContentVersion_});
+                   nextInputSyntheticReason_, nextInputContentVersion_, qpc_now_us()});
+  lastAcceptedSampleTimeHns_ = sampleTime;
   if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
     // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
     // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.

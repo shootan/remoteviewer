@@ -41,6 +41,7 @@
 
 #include "capture_backend_dxgi.hpp"
 #include "host_au_trace.hpp"
+#include "h264_slice_qp.hpp"
 #include "d3d_capture_readback.hpp"
 #include "encode_resolution_ladder.hpp"
 #include "gdi_capture_process.hpp"
@@ -142,6 +143,18 @@ AuFlow encode_send_h264_emit_au(HostContext& hx, TickContext& tc, H264AuBatch& b
   auto& countedRawForInput = b.countedRawForInput;
   auto& senderBacklogged = b.senderBacklogged;
   if (au.bytes.empty()) return AuFlow::Continue;
+  // r10 trace only: the first slice's starting QP (diagnostic, -1 = Unknown; h264_slice_qp.hpp), read
+  // before the UDP path moves the bytes; one reader per codec instance
+  int traceSliceQp = -1;
+  if (au_trace_enabled()) {
+    static H264SliceQpReader qpReader;
+    static uint64_t qpReaderInstance = 0;
+    if (qpReaderInstance != encoder.codec.instance_id()) {
+      qpReader = H264SliceQpReader{};
+      qpReaderInstance = encoder.codec.instance_id();
+    }
+    traceSliceQp = qpReader.Read(au.bytes.data(), au.bytes.size());
+  }
   // P11 -- the epoch gate. An async MFT returns an OLDER input's AU during the current call, so
   // the first call after a flush emits the pre-flush picture: true old capture stamp, flagged real,
   // on the new generation (2026-09-07 15:15:59 seq 24484, 820 ms behind its send time; the viewer
@@ -540,6 +553,10 @@ if (au_trace_enabled() && encoder.auTraceLines < kAuTraceMaxLines) {
             << " gen=" << hdr.streamGeneration
             << " ordinal=" << au.acceptedInputOrdinal
             << " contentVersion=" << au.contentVersion
+            << " acceptedUs=" << au.inputAcceptedAtUs
+            << " lagOrd=" << (encoder.codec.accepted_input_count() >= au.acceptedInputOrdinal
+                                  ? encoder.codec.accepted_input_count() - au.acceptedInputOrdinal : 0)
+            << " sliceQp=" << traceSliceQp
             << " captureUs=" << hdr.captureQpcUs
             << " enqueueUs=" << sendStartUs
             << " enqueued=" << (enqueuedForSend ? 1 : 0)
