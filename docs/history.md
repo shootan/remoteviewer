@@ -13227,3 +13227,16 @@ Next
 - r2 R1 (`b46ddbf`): 터치 스트림의 소유자를 ACTION_DOWN 에서만 정하고 마지막 UP/CANCEL 까지 유지(ViewerTouchRouter). 실제 다점 MotionEvent(AVD sendevent): 핀치로 전체보기가 된 뒤 손가락을 다시 얹으면 bf0e3a2 는 원격 클릭 `[down, move, up]` 누출 → 후보 0, PC 누름 유지 중 다른 손가락으로 전체보기 bf0e3a2 `[down, up, down, up]` → 후보 `[down, up]`.
 - 미검증: 실폰의 A 결과와 체감 선명도, 태블릿 실기.
 - 제품/테스트/문서: 문서(이 항목).
+
+### 2026-10-16 APK 0.2.30 게시 — 목록 재진입 연결 유지 + 6 Mbps 선택지 + 화면 1088 보수·전체보기/크게보기 (실기 대기)
+
+- 범위: **APK 단독**(versionName 0.2.30 / versionCode 29). 게시된 PC 는 0.2.158 그대로 — windows manifest·sig pair 불변(서버 `78df5305…`/`6dce1ca9…`). b61e0f5 로 main 에 들어온 host 소스는 다음 PC 릴리스부터 사용자에게 간다.
+- 통합: main merge `b61e0f5`(feat/viewer-sharpness `5b0fb6f` = int/apk-0.2.30 `56c2cde`[keepalive `85cb88e` + quality-6m `7f715b6`] + viewer-sharpness `b46ddbf`; 병합 트리 = 5b0fb6f 와 차이 0) + 버전 `b4fd204`. push `a97b2f5..b4fd204`.
+- Codex: keepalive 85cb88e·quality-6m 7f715b6·viewer-sharpness b46ddbf 각 SOURCE OK, 합친 트리 5b0fb6f 통합 SOURCE/EVIDENCE OK(`int-apk-0230/.claude/codex_apk_0230_combined.md`).
+- 검증용 독립(합친 트리 b46ddbf 빌드): AVD int_avd 9/9(cold 첫 선택·park 재사용 새 연결 0·첫 입력 IDR·끊기/sign-out), q6_ui 20/20(host `runtime-config-applied` 1500/3000/6000 모두 abrOverride=0, 같은 선택 no-op, 재시작 후 최고화질 유지), upgrade 3/3(0.2.29 에 저장된 3000 이 업데이트 뒤 3000 유지, schema1 8000→6000), viewer-sharpness geometry 부정대조(보수 전 1088·1936 재현 → 통과)·UI 14/14·host 입력 8/8·실제 다점 sendevent(bf0e3a2 클릭 누출·두 번째 누름 → 0). Android 단위 211/0.
+- APK: `GNLink-0.2.30.apk` 13492132 B, sha256 `e6a6eecbf129f92998d5c4d4e2844057485315489c001023b24f5966a93608cf`, 인증서 `dcc806ae…`(0.2.29 와 동일), 4 ABI, versionCode 29 / 0.2.30(aapt 확인). 빌드 12:53~12:54(측정 슬롯, 작업용1 측정과 겹침 0). `dist/GNLink-0.2.30.apk`.
+- 출하 산출물 검사: dex·.so 에 `abr-trace`·`input-trace`·`10.0.2.2` 0, 새 기능 존재(`delta before the codec`·`cropSource`·ViewerTouchRouter·ViewerViewport·SessionPark·최고화질 버튼). **.so 에 hook 이름 리터럴 close_explicit_*·close_if_own_locked·step_lock_taken·before_adopt 가 남아 있음** — 게시본이 assembleDebug(−O0)라 쓰이지 않는 인자 문자열이 지워지지 않은 것. 기전은 없음(Android 빌드에 REMOTE60_CONNECT_GATE_TEST_HOOKS 미정의, testHook 0). 앞선 "4 ABI hook 문자열 0" 보고들은 release-unsigned 기준이었다 → 작업목록 GA(원장).
+- 게시(`gnlink_deploy.sh --platform android`, verify-only·dry-run 뒤 실행): android.manifest `b64c1b49…`, sig `210ab909…`(selfVerify), 백업 0.2.29 pair `f82318f9…`/`d5534f81…`. 서버 디스크·외부 https 익명 GET(200, 13492132 B) 해시 일치.
+- 판정: **배포 완료(마일스톤) · 휴대폰 실기 대기.** 사용자 행동: 폰 0.2.30 업데이트 → 같은 PC 1~2 분 접속(목록으로 나갔다 다시 들어가기 한 번, 메뉴 '크게 보기'·최고화질 한 번) → 검증용이 그 구간 NAS apk.log 의 `coded= cropSrc= crop=`·`output=1920x1080`·`park_reuse` 와 host.log 를 확인.
+- 미검증·경계: 실폰에서 1088 보수 효과(유력 원인 — 새 로그 전 확정 아님)·체감 선명도·크게보기 사용감, 1080p 6M 회복 완주(FAIL 원본 보존·잠정 분류), DesktopText, 태블릿 실기, 터치 소유권의 태블릿 잠금 경우(AVD 대조에서 누출 재현 안 됨), 영상 크기 변경 순간 누름 유지, park 중 화질 변경(UI 도달 불가로 종결 — 실행 PASS 아님), 수동 IP 연결 UI·Activity 재생성 실기, 배터리/트래픽, decode_stats 시간 의존 FAIL(기존).
+- 제품/테스트/문서: 문서(이 항목·작업목록 KA/Q6/VS/GA).
