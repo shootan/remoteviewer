@@ -63,7 +63,13 @@ struct SessionEntry {
 
   // SessionTable's entry interface (session_table.hpp).
   int ParkPhaseCode() { return static_cast<int>(controller.ParkPhase()); }
-  bool Alive() { return controller.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }
+  // Not ended: a session still finishing its handshake right after Connect (state Connecting) is alive -- only one
+  // that is Disconnected / Error ended on its own (the first AVD run reaped B here as "peer_lost" while it connected).
+  bool Alive() {
+    const auto st = controller.Snapshot().state;
+    return st == remote60::native_poc::ClientSessionState::Connected ||
+           st == remote60::native_poc::ClientSessionState::Connecting;
+  }
   bool BeginPark() { return controller.BeginPark(); }
   bool ResumeFromPark() { return controller.ResumeFromPark(); }
   void SetParkLimitMs(uint64_t ms) { controller.SetParkLimitMs(ms); }

@@ -218,6 +218,10 @@ object SessionPark {
      */
     fun clipboardPushAllowed(resumeHold: Boolean, reason: String): Boolean = !resumeHold || reason == "clip_changed"
 
+    /** "5분" / "4분" ... "59초": a kept PC's card, which changes once a minute until the last one. */
+    fun formatRemainingCoarse(ms: Long): String =
+        if (ms >= 60_000L) "${(ms + 59_999L) / 60_000L}분" else "${(ms.coerceAtLeast(0L) + 999L) / 1000L}초"
+
     /** "4:59" for the list. */
     fun formatRemaining(ms: Long): String {
         val totalSec = (ms + 999L) / 1000L

@@ -1215,6 +1215,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var activeBinding = 0L
     // the directory connect in progress (its entry is reserved, not yet up)
     private var connectingHandle = 0L
+    private var keptCardsShown = ""
     private var nativeEntries: Map<Long, SessionPark.NativeEntry> = emptyMap()
     // r2 K4 / multi §3: the latest tap made while a park was still confirming, carried out when it settles.
     private var heldTap: SessionPark.TapFallback? = null
@@ -4327,7 +4328,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (currentScene == UiScene.TARGETS) {
             renderTargetsScene(isConnected, panelSnapshot)
         }
-        if (currentScene == UiScene.HOSTS) renderKeepBanner()
+        if (currentScene == UiScene.HOSTS) {
+            renderKeepBanner()
+            // each kept PC's card counts down its own time left -- re-bound only when what it shows changes (a
+            // list re-bound every tick never lets the screen settle: uiautomator could not read it, 2026-10-16)
+            val shown = kept.values.joinToString("|") { k ->
+                val ne = nativeEntries[k.handle]
+                "${k.handle}:${ne?.phase}:${ne?.parkPhase}:${SessionPark.formatRemainingCoarse(ne?.remainingMs ?: 0L)}"
+            }
+            if (shown != keptCardsShown) {
+                keptCardsShown = shown
+                hostListAdapter.notifyDataSetChanged()
+            }
+        }
         viewerMenuHostsButton.visibility = if (parkAllowedHere()) View.VISIBLE else View.GONE
         if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
             renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
@@ -5059,7 +5072,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     }
                     if (!activateKept(handle)) {
                         // another PC still on screen / confirming: should not happen from the list; this one ends
-                        diagnosticsLog.log("keep_activate_refused", "handle=$handle")
+                        diagnosticsLog.log("keep_activate_refused", "handle=$handle table=${NativeSessionBridge.nativeEntriesJson()}")
                         NativeSessionBridge.nativeEnd(handle, "activate_refused")
                         forgetKept(handle)
                         renderStatus()
@@ -5123,7 +5136,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val isKept = keepState == SessionPark.ListState.KEPT || keepState == SessionPark.ListState.CONFIRMING
             view.findViewById<TextView>(R.id.hostCardDetail).text = when (keepState) {
                 SessionPark.ListState.KEPT -> getString(R.string.hosts_keep_detail,
-                    SessionPark.formatRemaining(native?.remainingMs ?: 0L))
+                    SessionPark.formatRemainingCoarse(native?.remainingMs ?: 0L))
                 SessionPark.ListState.CONFIRMING -> getString(R.string.hosts_keep_confirming)
                 else -> if (host.online) getString(R.string.hosts_title) else getString(R.string.hosts_offline_detail)
             }
