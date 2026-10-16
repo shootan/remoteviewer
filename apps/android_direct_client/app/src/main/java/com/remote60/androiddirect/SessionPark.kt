@@ -218,9 +218,12 @@ object SessionPark {
      */
     fun clipboardPushAllowed(resumeHold: Boolean, reason: String): Boolean = !resumeHold || reason == "clip_changed"
 
-    /** "5분" / "4분" ... "59초": a kept PC's card, which changes once a minute until the last one. */
+    /**
+     * "5분" ... "1분", then "1분 미만": a kept PC's card changes at most once a minute -- a per-second countdown re-bound
+     * the list every second, which kept the screen from settling (2026-10-16: uiautomator 70 s per read in the last minute).
+     */
     fun formatRemainingCoarse(ms: Long): String =
-        if (ms >= 60_000L) "${(ms + 59_999L) / 60_000L}분" else "${(ms.coerceAtLeast(0L) + 999L) / 1000L}초"
+        if (ms >= 60_000L) "${(ms + 59_999L) / 60_000L}분" else "1분 미만"
 
     /** "4:59" for the list. */
     fun formatRemaining(ms: Long): String {

@@ -102,8 +102,8 @@ class SessionParkTest {
         assertEquals("5분", SessionPark.formatRemainingCoarse(240_001))
         assertEquals("4분", SessionPark.formatRemainingCoarse(240_000))
         assertEquals("1분", SessionPark.formatRemainingCoarse(60_000))
-        assertEquals("59초", SessionPark.formatRemainingCoarse(59_000))
-        assertEquals("0초", SessionPark.formatRemainingCoarse(0))
+        assertEquals("1분 미만", SessionPark.formatRemainingCoarse(59_000))
+        assertEquals("1분 미만", SessionPark.formatRemainingCoarse(0))
     }
 
     @Test
