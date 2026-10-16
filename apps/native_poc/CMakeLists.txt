@@ -953,6 +953,8 @@ target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNEC
 # keepalive-multi r1: the PCs the phone keeps -- limit, per-PC park, LRU, epoch (session_registry.hpp). Pure.
 add_executable(remote60_session_registry_test src/session_registry_test.cpp)
 target_include_directories(remote60_session_registry_test PRIVATE src)
+add_executable(remote60_session_table_test src/session_table_test.cpp)
+target_include_directories(remote60_session_table_test PRIVATE src)
 
 add_executable(remote60_client_park_state_test
   src/client_park_state_test.cpp
