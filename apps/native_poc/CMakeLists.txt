@@ -892,6 +892,20 @@ target_include_directories(remote60_android_decoder_geometry_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX)
 
+# keepalive-multi r1: one decoder, one PC bound at a time -- the binding token on every sink call, the APK's
+# decoder itself against the stand-in NDK (a parked / closing PC's late callbacks touch nothing of the bound one).
+add_executable(remote60_android_decoder_binding_test
+  src/android_decoder_binding_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_binding_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_binding_test PRIVATE NOMINMAX)
+
 # mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
 # NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
 add_executable(remote60_android_decoder_decode_stats_test

@@ -23,6 +23,7 @@
 namespace remote60::native_poc {
 
 struct ClientDecodeState {
+  uint64_t binding = 0;  // keepalive-multi r1: whose decode this is (the active binding when published)
   bool valid = false;           // a surface, and no selection between generations
   uint64_t decodedTotal = 0;    // valid decoded pictures given out, never reset
   uint32_t width = 0;           // decoder output format (0 = not known)
