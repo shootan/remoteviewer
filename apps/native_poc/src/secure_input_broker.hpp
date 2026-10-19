@@ -64,9 +64,9 @@ class SecureInputBrokerClient {
 
  private:
   static constexpr uint64_t kReconnectCooldownMs = 1000;
-  // r14 M1: `budgetMs` -- the startup connect waits for the service's pipe (3 s); the input path does not
-  // wait at all (it runs on the UDP reader thread): one try, and after a failure no new try for
-  // kReconnectCooldownMs.
+  // r14 M1: `budgetMs` -- the startup connect waits for the service's pipe (3 s); the input path (the UDP
+  // reader thread) makes one try -- its wait for the pipe is bounded to 1 ms, the server identity check after
+  // it takes its own time (r21: measured, not instant) -- and after a failure no new try for kReconnectCooldownMs.
   bool ConnectLocked(uint32_t budgetMs);
   // r20 merge: the one open, for both connect paths -- the server verified before a byte is written.
   bool OpenVerifiedLocked(uint32_t waitMs);

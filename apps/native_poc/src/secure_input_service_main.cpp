@@ -46,6 +46,13 @@
 #include "prelogin_owner_floor.hpp"
 #include "prelogin_supervisor.hpp"
 #include "prelogin_worker_launch.hpp"
+#ifdef REMOTE60_SIS_TEST_SEAM
+// prelogin r21 E1: the lifecycle test build only (GNLinkInputServiceLifecycleTest.exe) -- see the header.
+#include "secure_input_service_test_seam.hpp"
+#define SIS_TEST_NOTE(...) remote60::native_poc::sis_test::Note(__VA_ARGS__)
+#else
+#define SIS_TEST_NOTE(...) ((void)0)
+#endif
 
 namespace {
 
@@ -72,6 +79,9 @@ using remote60::native_poc::session_source_name;
 // install directory is deliberately admin-only, so writing beside the binary would either fail
 // or hand a SYSTEM-writable file to a place that is supposed to be read-only at runtime.
 std::wstring diag_log_path() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) return remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_DIAG");
+#endif
   wchar_t base[MAX_PATH]{};
   if (GetEnvironmentVariableW(L"ProgramData", base, MAX_PATH) == 0) return {};
   std::wstring dir = std::wstring(base) + L"\\GNLink";
@@ -167,6 +177,7 @@ bool read_exact(HANDLE handle, void* data, DWORD bytes) {
 }
 
 void stop_agent() {
+  SIS_TEST_NOTE("stop_agent");
   if (gAgent.writePipe) {
     SecureInputMessage shutdown{};
     shutdown.kind = static_cast<uint16_t>(SecureInputKind::Shutdown);
@@ -378,6 +389,12 @@ void report_service_status(DWORD state, DWORD error = NO_ERROR) {
   gStatus.dwWin32ExitCode = error;
   gStatus.dwCheckPoint = 0;
   gStatus.dwWaitHint = 0;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) {  // r21 E1: the SCM boundary -- every report is printed, none is sent
+    remote60::native_poc::sis_test::Status(state, error);
+    return;
+  }
+#endif
   if (gStatusHandle) SetServiceStatus(gStatusHandle, &gStatus);
 }
 
@@ -430,13 +447,53 @@ uint32_t requester_session_of(HANDLE pipe) {
   return session;
 }
 
+// r21 E1: the pipes' names and DACL, and whether OS effects are allowed -- the product's own, or the lifecycle
+// test build's (secure_input_service_test_seam.hpp). Without REMOTE60_SIS_TEST_SEAM these are the constants.
+const wchar_t* service_pipe_sddl() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) return remote60::native_poc::sis_test::Sddl();
+#endif
+  return L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+}
+const wchar_t* secure_input_pipe_name() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) return remote60::native_poc::sis_test::SecureInputPipe();
+#endif
+  return kSecureInputPipeName;
+}
+const wchar_t* unlock_pipe_name() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) return remote60::native_poc::sis_test::UnlockPipe();
+#endif
+  return remote60::native_poc::kSecureUnlockPipeName;
+}
+const wchar_t* admin_pipe_name() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) return remote60::native_poc::sis_test::AdminPipe();
+#endif
+  return remote60::native_poc::prelogin::kPreloginAdminPipeName;
+}
+bool os_effects_blocked_for_test() {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  return remote60::native_poc::sis_test::Active();
+#else
+  return false;
+#endif
+}
+
 HANDLE create_secure_pipe(bool firstInstance) {
   // r14 M1: one instance per client (secure_input_pipe_server.hpp). secure-pipe-identity (r20 merge): the
   // server's first instance is FILE_FLAG_FIRST_PIPE_INSTANCE -- a name squatted while the service was stopped
   // fails the create and the service does not join it (fail closed); the SY/BA DACL + PIPE_REJECT_REMOTE_CLIENTS
   // are unchanged, and the server keeps one of its instances on the name for as long as it runs.
-  return remote60::native_poc::CreateSecureInputPipeInstance(kSecureInputPipeName, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
-                                                             firstInstance);
+#ifdef REMOTE60_SIS_TEST_SEAM
+  DWORD injected = NO_ERROR;
+  if (remote60::native_poc::sis_test::Active() && remote60::native_poc::sis_test::FailThisCreate(&injected)) {
+    SetLastError(injected);
+    return INVALID_HANDLE_VALUE;
+  }
+#endif
+  return remote60::native_poc::CreateSecureInputPipeInstance(secure_input_pipe_name(), service_pipe_sddl(), firstInstance);
 }
 
 // ================= Sealed unlock (SYSTEM side) ==================================================
@@ -516,7 +573,7 @@ namespace su = remote60::native_poc::sealed_unlock;
 HANDLE create_unlock_pipe() {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &descriptor, nullptr)) {
+          service_pipe_sddl(), SDDL_REVISION_1, &descriptor, nullptr)) {
     return INVALID_HANDLE_VALUE;
   }
   SECURITY_ATTRIBUTES security{};
@@ -525,7 +582,7 @@ HANDLE create_unlock_pipe() {
   // FILE_FLAG_FIRST_PIPE_INSTANCE (secure-pipe-identity): see create_secure_pipe. A preempted name fails
   // closed here rather than the service joining a squatter that could seal the viewer's password.
   HANDLE pipe = CreateNamedPipeW(
-      remote60::native_poc::kSecureUnlockPipeName,
+      unlock_pipe_name(),
       PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
       1, 8 * 1024, 8 * 1024, 0, &security);
@@ -744,6 +801,7 @@ bool raise_prelogin_owner_floor(uint64_t floor) {
 // revoke floor comes from the durable external store, NOT the record itself, so an OFF/revoked state and
 // a restored old blob are both rejected. Returns false (feature off) on any failure -- never fails open.
 bool prelogin_feature_enabled() {
+  if (os_effects_blocked_for_test()) return false;  // r21 E1 test build: the machine's record is not read
   // r9 R1/R2: a revoke still owed (or a mark that cannot be read) means off, whatever the record says.
   if (remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0) return false;
   const std::wstring path = machine_record_path();
@@ -913,6 +971,10 @@ void stop_child(HANDLE* h) {
 }
 
 void ensure_prelogin_worker(DWORD consoleSession) {
+  if (os_effects_blocked_for_test()) {
+    SIS_TEST_NOTE("pre-login worker start blocked (test build)");
+    return;
+  }
   // Reuse the existing worker ONLY if it is alive AND was launched for THIS console session (Codex S5):
   // after a fast-user-switch / console change the old child must never be mistaken for the new session's.
   if (child_alive(gPreloginWorker) && gPreloginWorkerSession == consoleSession) return;
@@ -966,6 +1028,10 @@ std::wstring make_launch_nonce() {
 // handoff that replaces the elevated HKCU Run). The token matrix is resolved by the console probe
 // classifiers; here we obtain the primary token and, for a Limited token, its linked Full.
 void launch_user_host(DWORD consoleSession) {
+  if (os_effects_blocked_for_test()) {
+    SIS_TEST_NOTE("user Host start blocked (test build)");
+    return;
+  }
   // Reuse only an alive host launched for THIS session (Codex S5 identity).
   if (child_alive(gUserHostProcess) && gUserHostSession == consoleSession) return;
   stop_child(&gUserHostProcess);
@@ -1215,7 +1281,7 @@ void prelogin_reconcile_loop() {
   bind_service_admin_primitives(&revokePrimitives);
   int lastRevokeStatus = -1;
   while (gRunning.load(std::memory_order_acquire)) {
-    if (remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0) {
+    if (!os_effects_blocked_for_test() && remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0) {
       const auto owed = remote60::native_poc::prelogin::CompletePendingRevoke(revokePrimitives);
       if (static_cast<int>(owed.status) != lastRevokeStatus) {
         diag("prelogin: owed revoke -> status=%d win32=%lu", static_cast<int>(owed.status),
@@ -1284,8 +1350,18 @@ void prelogin_reconcile_loop() {
 void WINAPI service_main(DWORD, wchar_t**) {
   // Ex rather than the plain handler so SERVICE_CONTROL_SESSIONCHANGE can be delivered; the
   // plain form cannot receive it, and without it the agent outlives the session it was made for.
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) {  // r21 E1: no SCM; the test's STOP is this service's own handler
+    gStatusHandle = reinterpret_cast<SERVICE_STATUS_HANDLE>(static_cast<uintptr_t>(1));
+    remote60::native_poc::sis_test::StartStopWatcher(
+        [] { (void)service_control(SERVICE_CONTROL_STOP, 0, nullptr, nullptr); });
+  } else {
+    gStatusHandle = RegisterServiceCtrlHandlerExW(kSecureInputServiceName, service_control, nullptr);
+  }
+#else
   gStatusHandle =
       RegisterServiceCtrlHandlerExW(kSecureInputServiceName, service_control, nullptr);
+#endif
   if (!gStatusHandle) return;
   report_service_status(SERVICE_START_PENDING);
   gRunning.store(true, std::memory_order_release);
@@ -1319,7 +1395,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
   std::thread adminThread([&adminPrimitives, hostImage] {
     remote60::native_poc::prelogin::RunPreloginAdminServer(
         adminPrimitives, [] { return gRunning.load(std::memory_order_acquire); },
-        remote60::native_poc::prelogin::kPreloginAdminPipeName, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+        admin_pipe_name(), service_pipe_sddl(),
         remote60::native_poc::prelogin::ClientIsElevatedAdministrator,
         [hostImage](void* pipe) { return remote60::native_poc::prelogin::ClientImageIs(pipe, hostImage); }, &rebootLedger);
   });
@@ -1377,13 +1453,16 @@ void WINAPI service_main(DWORD, wchar_t**) {
     exitError = servingError != NO_ERROR ? servingError : ERROR_PIPE_BUSY;
     diag("secure input serving ended while running (error=%lu) -> the service stops, fail closed", exitError);
     gRunning.store(false, std::memory_order_release);
+    SIS_TEST_NOTE("serving ended while running: error=%lu, running cleared", exitError);
   }
   {
     std::lock_guard<std::mutex> agent(gAgentMu);
     stop_agent();
   }
   if (preloginThread.joinable()) preloginThread.join();
+  SIS_TEST_NOTE("joined: prelogin supervisor");
   if (adminThread.joinable()) adminThread.join();  // its connect wait checks gRunning every 250 ms
+  SIS_TEST_NOTE("joined: admin pipe server");
   // Wake the unlock worker out of any blocking ConnectNamedPipe/ReadFile and wait for it to exit.
   // CancelSynchronousIo only acts while the thread is inside a synchronous wait, so loop until the
   // thread actually ends. (Codex #370 BLOCKER A.)
@@ -1394,6 +1473,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     }
     unlockThread.join();
   }
+  SIS_TEST_NOTE("joined: unlock worker");
   report_service_status(SERVICE_STOPPED, exitError);
 }
 
@@ -1801,6 +1881,15 @@ int wmain(int argc, wchar_t** argv) {
   // --install-service-prelogin, --prelogin-autostart, --prelogin-demandstart -- had no caller and are gone.
   if (argc == 2 && std::wstring(argv[1]) == L"--install-service") return install_service(/*preloginEnabled=*/false);
   if (argc == 2 && std::wstring(argv[1]) == L"--uninstall-service") return uninstall_service();
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (argc == 2 && std::wstring(argv[1]) == L"--lifecycle-test") {
+    remote60::native_poc::sis_test::Active() = true;
+    SIS_TEST_NOTE("lifecycle test: the product service_main on this thread, no SCM");
+    service_main(0, nullptr);
+    SIS_TEST_NOTE("service_main returned");
+    return 0;
+  }
+#endif
   SERVICE_TABLE_ENTRYW table[] = {
       {const_cast<wchar_t*>(kSecureInputServiceName), service_main},
       {nullptr, nullptr},

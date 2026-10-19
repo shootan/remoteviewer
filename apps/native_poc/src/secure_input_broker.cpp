@@ -152,8 +152,8 @@ bool SecureInputBrokerClient::OpenVerifiedLocked(uint32_t waitMs) {
 bool SecureInputBrokerClient::ConnectLocked(uint32_t budgetMs) {
   if (pipe_ != INVALID_HANDLE_VALUE) return true;
   if (budgetMs == 0) {
-    // r14 M1: the input path (the UDP reader thread) never waits here -- an input that cannot be handed over
-    // now is not held for seconds. One try; a failure holds the next try back for a moment.
+    // r14 M1: the input path (the UDP reader thread) does not wait for a pipe here -- an input that cannot be
+    // handed over now is not held for seconds. One try; a failure holds the next try back for a moment.
     if (GetTickCount64() < nextConnectMs_) return false;
     // r20 merge (Codex Q1): verified like the startup path -- no raw open; a refused or unknown server is
     // closed and not retried before the cooldown either. waitMs 1, not 0 (0 is NMPWAIT_USE_DEFAULT_WAIT):
@@ -184,7 +184,7 @@ void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
 
 bool SecureInputBrokerClient::WriteLocked(SecureInputMessage message) {
   message.flags = static_cast<uint16_t>(message.flags | flags_);  // r10 T2: the agent's fence reads it
-  if (!ConnectLocked(0)) return false;  // r14 M1: never waits on the input path
+  if (!ConnectLocked(0)) return false;  // r14 M1: one bounded try on the input path (no pipe wait loop)
   if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
   CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE;
   // Do not replay an uncertain write: a key/button edge may already have reached the service.

@@ -53,6 +53,8 @@ TEST_MARKERS = [
     'GNLINK_STREAM_TEST_',        # the same seam's environment (DIRECTORY, FORMER_NAME)
     'REMOTE60_PRELOGIN_CAPTURE_ATTACH',  # host_startup_config.cpp: the capture-attach trigger, test build only
     'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM
+    'sis-test-seam',              # secure_input_service_test_seam.hpp, REMOTE60_SIS_TEST_SEAM (r21 E1)
+    'REMOTE60_SIS_TEST_',         # the same seam's environment (SUFFIX, CREATE_FAIL, STOP_EVENT, DIAG)
 ]
 
 # (file, must carry the address)
@@ -62,6 +64,7 @@ WINDOWS_FILES = [
     ('GNLinkStream.exe', True),
     ('GNLinkViewer.exe', False),
     ('GNLinkUpdater.exe', False),
+    ('GNLinkInputService.exe', False),  # r21: the secure-input service; its lifecycle test build is separate
 ]
 
 # What the sign-in screen's removed field was called; a release APK has no resource by that name.

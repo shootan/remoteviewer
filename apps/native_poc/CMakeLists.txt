@@ -331,6 +331,35 @@ target_link_libraries(remote60_secure_input_service PRIVATE
   remote60_sealed_unlock
 )
 
+# prelogin r21 E1: the product service's lifecycle in a process a non-elevated test can start -- the same
+# sources as GNLinkInputService with REMOTE60_SIS_TEST_SEAM (secure_input_service_test_seam.hpp: the SCM is
+# printed, per-run pipe names + a DACL for this user, injected create failures, OS effects off). Never shipped;
+# automation/gnlink_check_fixed_server.py checks GNLinkInputService.exe carries no "sis-test-seam".
+add_executable(remote60_secure_input_service_lifecycle_seam
+  src/secure_input_service_main.cpp
+  src/secure_unlock_service.cpp
+  src/prelogin_user_host_launch.cpp
+  src/prelogin_console_probe.cpp
+  src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
+  src/prelogin_admin_pipe.cpp
+  src/prelogin_admin_service.cpp
+)
+set_target_properties(remote60_secure_input_service_lifecycle_seam PROPERTIES OUTPUT_NAME "GNLinkInputServiceLifecycleTest")
+target_compile_definitions(remote60_secure_input_service_lifecycle_seam PRIVATE REMOTE60_SIS_TEST_SEAM=1)
+target_include_directories(remote60_secure_input_service_lifecycle_seam PRIVATE src)
+target_link_libraries(remote60_secure_input_service_lifecycle_seam PRIVATE
+  advapi32
+  user32
+  userenv
+  wtsapi32
+  crypt32
+  remote60_sealed_unlock
+)
+add_executable(remote60_secure_input_service_lifecycle_test src/secure_input_service_lifecycle_test.cpp)
+target_include_directories(remote60_secure_input_service_lifecycle_test PRIVATE src)
+add_dependencies(remote60_secure_input_service_lifecycle_test remote60_secure_input_service_lifecycle_seam)
+
 # Clipboard image v1 (plan .claude/clip_image_plan.md r1 + r2): the viewer's image client (package,
 # offer/cancel/status, bulk stream, pacer) and the clipboard/WIC pieces it shares with the host. A
 # library because the viewer's state holds the client, so every target that links the viewer's
@@ -592,6 +621,18 @@ target_link_libraries(remote60_native_video_client_poc PRIVATE
 target_compile_definitions(remote60_native_video_client_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
+
+# prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
+# against a fake control host on loopback (no UI, no SendInput, no desktop).
+add_executable(remote60_client_session_role_park_test
+  src/client_session_role_park_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_client_session_role_park_test PRIVATE src)
+target_link_libraries(remote60_client_session_role_park_test PRIVATE common ws2_32)
 
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp

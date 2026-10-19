@@ -429,6 +429,136 @@ int main() {
     check("r20 Q2: STOP ends the capped server with a connection open; every instance gone", reg.size() == 0,
           std::to_string(stopMs) + " ms");
   }
+
+  // r21 E1 (Codex codex_prelogin_r20_integ.md): the product server with create ERRORS injected (nothing else
+  // changed). Creates, in order: 1 listener ok, 2 ok (X served, held, keeps sending), 3 FAIL, 4 FAIL (two in a
+  // row: X still served, the name still ours, the clients refused), 5 ok (Z served -- the count resets),
+  // 6 FAIL, 7 ok (V served), 8 FAIL, 9 FAIL (two after a success: still serving -- the control), 10 FAIL (the
+  // third in a row: serving stops, every connection joined, every instance gone).
+  {
+    const std::wstring nm = L"\\\\.\\pipe\\GNLinkTest-secure-input-faults-" + std::to_wstring(GetCurrentProcessId());
+    const std::vector<bool> plan = {true, true, false, false, true, false, true, false, false, false};
+    n::PipeConnectionRegistry reg;
+    std::atomic<int> creates{0}, served{0}, active{0};
+    std::mutex km;
+    std::vector<uint32_t> keys;
+    std::vector<std::string> notes;
+    std::atomic<bool> returned{false};
+    std::thread srv([&] {
+      n::RunMultiClientPipeServer(
+          [] { return true; },
+          [&](bool first) {
+            const int call = ++creates;
+            if (call <= static_cast<int>(plan.size()) && !plan[call - 1]) {
+              SetLastError(ERROR_NO_SYSTEM_RESOURCES);
+              return INVALID_HANDLE_VALUE;
+            }
+            return n::CreateSecureInputPipeInstance(nm.c_str(), sddl.c_str(), first);
+          },
+          [&](HANDLE pipe, HANDLE stop) {
+            ++served;
+            ++active;
+            n::SecureInputMessage m{};
+            while (n::ReadPipeMessage(pipe, &m, sizeof(m), stop)) {
+              std::lock_guard<std::mutex> l(km);
+              keys.push_back(m.keyCode);
+            }
+            --active;
+          },
+          &reg, [&](const char* line) {
+            std::lock_guard<std::mutex> l(km);
+            notes.push_back(line);
+          });
+      returned = true;
+    });
+    auto open_client = [&]() -> HANDLE {
+      HANDLE h = INVALID_HANDLE_VALUE;
+      wait_until([&] {
+        h = CreateFileW(nm.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW(nm.c_str(), 50);
+        return h != INVALID_HANDLE_VALUE;
+      }, 2000);
+      return h;
+    };
+    auto send_key = [&](HANDLE h, uint32_t k) {
+      n::SecureInputMessage m{};
+      m.magic = n::kSecureInputMagic;
+      m.size = sizeof(m);
+      m.keyCode = k;
+      DWORD w = 0;
+      return h != INVALID_HANDLE_VALUE && WriteFile(h, &m, sizeof(m), &w, nullptr) && w == sizeof(m);
+    };
+    auto has_key = [&](uint32_t k) {
+      std::lock_guard<std::mutex> l(km);
+      return std::find(keys.begin(), keys.end(), k) != keys.end();
+    };
+    auto name_ours = [&] {  // nobody else can take the name first: a FIRST create on it fails
+      HANDLE sq = CreateNamedPipeW(nm.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                   PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, n::kSecureInputPipeMaxInstances, 0,
+                                   64 * 1024, 0, nullptr);
+      if (sq == INVALID_HANDLE_VALUE) return true;
+      CloseHandle(sq);
+      return false;
+    };
+    // a client whose hand-over makes create #`call`; returns its handle (served) or closes it (refused)
+    auto round = [&](int call, bool expectServed) -> HANDLE {
+      const int servedBefore = served.load();
+      HANDLE h = open_client();
+      wait_until([&] { return creates.load() >= call; }, 2000);
+      Sleep(100);
+      const bool isServed = served.load() > servedBefore;
+      if (!expectServed || !isServed) {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        return isServed == expectServed ? reinterpret_cast<HANDLE>(1) : INVALID_HANDLE_VALUE;
+      }
+      return h;
+    };
+    wait_until([&] { return creates.load() >= 1; }, 2000);
+    HANDLE x = round(2, true);
+    const bool xUp = x != INVALID_HANDLE_VALUE && send_key(x, 0x51) && wait_until([&] { return has_key(0x51); }, 2000);
+    const bool y1 = round(3, false) != INVALID_HANDLE_VALUE;
+    const bool y2 = round(4, false) != INVALID_HANDLE_VALUE;
+    const bool xGoesOn = send_key(x, 0x52) && wait_until([&] { return has_key(0x52); }, 2000);
+    bool refusedNoted = false;
+    {
+      std::lock_guard<std::mutex> l(km);
+      for (const auto& line : notes) refusedNoted = refusedNoted || line.find("client refused, listener kept") != std::string::npos;
+    }
+    check("r21 E1: two create failures in a row -- both clients refused, the served one's input goes on, the "
+          "name still ours, the server still running",
+          xUp && y1 && y2 && xGoesOn && name_ours() && refusedNoted && !returned.load(),
+          "creates=" + std::to_string(creates.load()) + " served=" + std::to_string(served.load()));
+    HANDLE z = round(5, true);
+    const bool zUp = z != INVALID_HANDLE_VALUE && send_key(z, 0x53) && wait_until([&] { return has_key(0x53); }, 2000);
+    const bool w1 = round(6, false) != INVALID_HANDLE_VALUE;
+    HANDLE v = round(7, true);
+    const bool vUp = v != INVALID_HANDLE_VALUE && send_key(v, 0x54) && wait_until([&] { return has_key(0x54); }, 2000);
+    const bool u1 = round(8, false) != INVALID_HANDLE_VALUE;
+    const bool u2 = round(9, false) != INVALID_HANDLE_VALUE;
+    Sleep(200);
+    check("r21 E1: a success resets the count -- fail, ok, fail, fail does not stop the server (control)",
+          zUp && w1 && vUp && u1 && u2 && !returned.load() && name_ours() && send_key(x, 0x55) &&
+              wait_until([&] { return has_key(0x55); }, 2000),
+          "creates=" + std::to_string(creates.load()) + " active=" + std::to_string(active.load()));
+    (void)round(10, false);  // the third failure in a row
+    const bool ended = wait_until([&] { return returned.load(); }, 3000);
+    if (!ended) reg.Stop();
+    srv.join();
+    bool stoppedNoted = false;
+    {
+      std::lock_guard<std::mutex> l(km);
+      for (const auto& line : notes) stoppedNoted = stoppedNoted || line.find("serving stopped") != std::string::npos;
+    }
+    const bool xGone = !send_key(x, 0x56);
+    check("r21 E1: the third failure in a row stops serving -- the server returns, every connection joined, "
+          "every instance gone",
+          ended && stoppedNoted && active.load() == 0 && reg.size() == 0 && xGone,
+          "creates=" + std::to_string(creates.load()) + " active=" + std::to_string(active.load()) +
+              " instances=" + std::to_string(reg.size()));
+    for (HANDLE h : {x, z, v}) {
+      if (h != INVALID_HANDLE_VALUE && h != reinterpret_cast<HANDLE>(1)) CloseHandle(h);
+    }
+  }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }
