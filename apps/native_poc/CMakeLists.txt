@@ -110,6 +110,7 @@ add_executable(remote60_native_video_host_poc
   src/udp_control_channel.cpp
   src/mf_h264_codec.cpp
   src/secure_input_broker.cpp
+  src/trusted_service_pipe.cpp
 )
 set_target_properties(remote60_native_video_host_poc PROPERTIES OUTPUT_NAME "GNLinkStream")
 # encoder-rc-budget r9 (⑥): OPT-IN diagnostic PDBs for the host and the e2e harness, so a hang dump taken
@@ -2493,6 +2494,34 @@ add_executable(remote60_unlock_protocol_test
 )
 target_include_directories(remote60_unlock_protocol_test PRIVATE src)
 target_link_libraries(remote60_unlock_protocol_test PRIVATE remote60_sealed_unlock)
+
+# secure-pipe-identity: trusted service-pipe client layer (server identity verification).
+add_executable(remote60_trusted_service_pipe_test
+  src/trusted_service_pipe_test.cpp
+  src/trusted_service_pipe.cpp
+  src/probe_serve.cpp
+)
+target_include_directories(remote60_trusted_service_pipe_test PRIVATE src)
+target_link_libraries(remote60_trusted_service_pipe_test PRIVATE advapi32)
+
+# secure-pipe-identity: UAC-1-time real-SCM positive bundle (a TEST service + a probe; not shipped).
+add_executable(remote60_trusted_service_pipe_probe
+  src/trusted_service_pipe_probe.cpp
+  src/trusted_service_pipe.cpp
+  src/probe_serve.cpp
+)
+target_include_directories(remote60_trusted_service_pipe_probe PRIVATE src)
+target_link_libraries(remote60_trusted_service_pipe_probe PRIVATE advapi32)
+
+# secure-pipe-identity B2: pre-publish isolated gate for the two product clients (real broker/relay).
+add_executable(remote60_secure_pipe_client_gate_test
+  src/secure_pipe_client_gate_test.cpp
+  src/secure_input_broker.cpp
+  src/host_unlock_relay.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_secure_pipe_client_gate_test PRIVATE src)
+target_link_libraries(remote60_secure_pipe_client_gate_test PRIVATE common advapi32)
 
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp

@@ -8,6 +8,7 @@
 
 #include "poc_protocol.hpp"
 #include "secure_input_protocol.hpp"
+#include "trusted_service_pipe.hpp"
 
 namespace remote60::native_poc {
 
@@ -44,6 +45,19 @@ class SecureInputBrokerClient {
                              int32_t originX, int32_t originY, uint32_t width, uint32_t height);
   bool connected() const;
 
+  /**
+   * TEST ONLY (secure-pipe-identity gate): point the REAL connect+verify+send path at a test pipe/
+   * service name and an injected gatherer, so the isolated pre-publish gate exercises this exact code
+   * without the installed service. Shipping callers never touch this -- the defaults are the production
+   * name/service and the production gatherer, and there is no runtime option to reach it.
+   */
+  void SetVerificationEndpointForTest(const wchar_t* pipeName, const wchar_t* serviceName,
+                                      ServerIdentityGatherer gather) {
+    testPipeName_ = pipeName;
+    testServiceName_ = serviceName;
+    testGatherer_ = gather;
+  }
+
  private:
   bool ConnectLocked();
   bool WriteLocked(const SecureInputMessage& message);
@@ -51,6 +65,9 @@ class SecureInputBrokerClient {
 
   mutable std::mutex mu_;
   HANDLE pipe_ = INVALID_HANDLE_VALUE;
+  const wchar_t* testPipeName_ = nullptr;     // nullptr -> production kSecureInputPipeName
+  const wchar_t* testServiceName_ = nullptr;  // nullptr -> production kSecureInputServiceName
+  ServerIdentityGatherer testGatherer_ = nullptr;  // nullptr -> production GatherServerIdentity
   int32_t targetOriginX_ = 0;
   int32_t targetOriginY_ = 0;
   uint32_t targetWidth_ = 0;
