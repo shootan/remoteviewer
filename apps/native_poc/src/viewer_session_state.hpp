@@ -55,6 +55,36 @@ struct SessionState {
   std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
   std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
   std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
+  // Raw host Pong capability bits, refreshed every pong so the toolbar/menu can decide the reboot and
+  // prelogin affordances via reboot_menu_policy (DecideRebootMenu / DecidePreloginCred). 0 until the
+  // first pong and after teardown, so a reconnect never inherits a stale answer. (prelogin-service r3.)
+  std::atomic<uint32_t> hostCaptureFlags{0};
+  // Set by the reboot confirm (the UI thread, after the user picks 확인); the control thread drains it
+  // and sends ControlRebootRequest exactly once. (prelogin-service r3 R3.)
+  std::atomic<bool> rebootRequested{false};
+  // r5 G11: which control connection the confirm was for. The control thread bumps controlRunGen when it
+  // starts serving a connection; a confirm made for an earlier one is not sent on this one.
+  std::atomic<uint64_t> controlRunGen{0};
+  std::atomic<uint64_t> rebootRequestedRunGen{0};
+  // r9 R5: "Ctrl+Alt+Del" clicked (UI thread) for this control connection; the control thread sends one 83.
+  std::atomic<bool> sasRequested{false};
+  std::atomic<uint64_t> sasRequestedRunGen{0};
+  // "Windows 로그인" (prelogin-ui r3, item 5): the UI thread's prompt leaves the password here and
+  // sets the flag; the control thread takes it (swap under the lock), seals it, and zeroes it. Never
+  // stored anywhere else. preloginInjectedAtUs: when the host last said "typed", so the first pong
+  // without kCaptureFlagPreloginV1 after it can be told apart as the actual logon.
+  std::atomic<bool> preloginCredRequested{false};
+  std::mutex preloginCredMu;
+  std::wstring preloginCredPassword;
+  std::atomic<uint64_t> preloginInjectedAtUs{0};
+  // r5 G8: input not sent because the host is at the logon screen (characters, text), and whether the
+  // window has said so since the host last arrived at it.
+  std::atomic<uint64_t> preloginInputHeldBack{0};
+  // r7 H6: a pong of THIS connection has said what the host is (its flags are then meaningful). False at
+  // the start of every connection (ControlClient::Run).
+  std::atomic<bool> hostRoleKnown{false};
+  std::atomic<uint64_t> preloginHeldBackAtSend{0};  // input queued earlier, not sent once the role was known
+  std::atomic<bool> preloginHeldBackNoticed{false};
   // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
   // sent. Written by the control thread on every pong (release), read by the UI thread's window
   // procedure and the input fence (acquire). False until the first pong and after teardown, and an

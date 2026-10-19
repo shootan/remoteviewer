@@ -119,6 +119,9 @@ void shutdown_host(HostContext& hx) {
   auto& res = hx.res;
   hx.watchdog.MarkMainProgress(MainLoopPhase::Shutdown);
   stop = true;
+  // r12 L1: no Ready once shutdown has begun -- stopped (wait woken, a request in flight cancelled, joined)
+  // before anything it reads goes.
+  clientSession.readyNotifier.Stop();
   res.frame.cv.notify_all();
   windowSelectionTxn.cv.notify_all();
   {

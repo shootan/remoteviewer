@@ -154,6 +154,12 @@ struct HostAccount {
   std::vector<uint64_t> encodeProbeAvgUs;
 };
 
+bool file_has(const std::wstring& path, const char* needle) {
+  std::ifstream in(path, std::ios::binary);
+  std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return all.find(needle) != std::string::npos;
+}
+
 HostAccount read_host_log(const std::wstring& path) {
   HostAccount a;
   std::ifstream in(path);
@@ -575,7 +581,7 @@ const WgcProbe& wgc_probe_mode(FixtureWindowMode mode) {
 RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir, Content content, bool tight,
                         uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                         uint32_t bitrate, uint32_t fps, uint32_t downshiftBitrate, uint32_t downshiftAtSec,
-                        bool v2FrameGate, const std::vector<TuneStep>* tunes) {
+                        bool v2FrameGate, const std::vector<TuneStep>* tunes, bool desktopAttach) {
   RunResult r;
   r.windowMode = fixture_window_mode_name();
   {
@@ -628,12 +634,18 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
     // lossless run below asserts "lossless -> premature NACK 0" so the pin does not erase the cap-ON
     // evidence that the r2 progress-based tail fix holds on real hardware. (bitrate-hard-cap r2.)
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_WIRE_CAP", wireCapOn ? L"1" : L"0");
+    // prelogin-service r4 #1: exercise the input-desktop capture attach (the --prelogin capture path)
+    // on the DEFAULT desktop. desktopAttach drops the window-capture args so the host takes the DXGI
+    // desktop/monitor path, and the env enables the SetThreadDesktop(input) attach through the same code
+    // path as --prelogin (without the prelogin control gating, so this ordinary Hello still connects).
+    SetEnvironmentVariableW(L"REMOTE60_PRELOGIN_CAPTURE_ATTACH", desktopAttach ? L"1" : L"0");
     std::wstring cmd = L"\"" + runDir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(port) + L" --fps " +
                        std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) + L" --seconds " +
                        std::to_wstring(gHostSecondsOverride > 0 ? gHostSecondsOverride : seconds + 30) + L" --input-injection-mode none" +
-                       remote60::native_poc::e2e::e2e_capture_window_args(target.title) +
-                       (gFixtureWindowMode == FixtureWindowMode::VisibleFramed ? L" --capture-window-client-only" : L"");
+                       (desktopAttach ? std::wstring(L"")
+                                      : remote60::native_poc::e2e::e2e_capture_window_args(target.title) +
+                                            (gFixtureWindowMode == FixtureWindowMode::VisibleFramed ? L" --capture-window-client-only" : L""));
     const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
     check(noInjection, "the host is started with input injection off");
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -1210,10 +1222,14 @@ RunResult run_host_once(const std::wstring& hostExe, const std::wstring& runDir,
   check(!((r.hostExitedEarly || r.hostExitedBeforeCleanup) && r.hostExitCode == 43),
         "the host was not killed by its main-loop watchdog (exit 43) during the live window", r.hostLastLine);
   if (r.monitorFallbackSeen) delete_saved_frames(runDir);
-  check(!r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
+  // r20 merge: a desktopAttach run (prelogin r4 #1) captures the desktop on purpose -- only window runs are judged.
+  check(desktopAttach || !r.monitorFallbackSeen, "the host never fell back to capturing the MONITOR (the user's screen) -- it found our window",
         r.hostLastLine);
   if (gHostLogDest == HostLogDest::Nul) {
     std::printf("capture: (host log went to NUL -- the capture-window line cannot be read; the window check is not judged in this run)\n");
+  } else if (desktopAttach) {
+    // Only meaningful for window capture. In desktopAttach mode (prelogin r4 #1) the host captures the
+    // whole desktop/monitor, not this test's window, so there is no per-window ownership to assert.
   } else {
     std::string captureLine;
     const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
@@ -1239,7 +1255,13 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
                    uint16_t port, int seconds, uint32_t lossPermille, uint32_t lossSeed, bool wireCapOn,
                    uint32_t bitrate = kBitrate, uint32_t fps = kFps, uint32_t downshiftBitrate = 0,
                    uint32_t downshiftAtSec = 0, bool v2FrameGate = false,
-                   const std::vector<TuneStep>* tunes = nullptr) {
+                   const std::vector<TuneStep>* tunes = nullptr, bool desktopAttach = false) {
+  // prelogin r4 #1 (r20 merge): a desktopAttach run captures the desktop, not a fixture window -- no WGC
+  // window probe, no window-mode retry.
+  if (desktopAttach) {
+    return run_host_once(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed, wireCapOn, bitrate, fps,
+                         downshiftBitrate, downshiftAtSec, v2FrameGate, tunes, /*desktopAttach=*/true);
+  }
   // r7: ask WGC before starting a host. A refused mode is skipped without a host launch; the ladder
   // is invisible -> visible-plain -> visible-framed and stops there (no focus-stealing variants).
   const auto fallback_notice = [&](FixtureWindowMode to, const std::string& why) {
@@ -1280,7 +1302,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     gFixtureWindowMode = next;
   }
   RunResult r = run_host_once(hostExe, runDir, content, tight, port, seconds, lossPermille, lossSeed, wireCapOn, bitrate, fps,
-                              downshiftBitrate, downshiftAtSec, v2FrameGate, tunes);
+                              downshiftBitrate, downshiftAtSec, v2FrameGate, tunes, /*desktopAttach=*/false);
   FixtureWindowMode nextAfterHost;
   if (r.captureItemFailed && fixture_next_window_mode(gFixtureWindowMode, &nextAfterHost)) {
     // The probe accepted but the host did not (second line of defence; r6): one rung up, one retry.
@@ -1292,7 +1314,7 @@ RunResult run_host(const std::wstring& hostExe, const std::wstring& runDir, Cont
     retryDir += L"_visible\\";
     const uint16_t retryPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
     r = run_host_once(hostExe, retryDir, content, tight, retryPort != 0 ? retryPort : port, seconds, lossPermille, lossSeed,
-                      wireCapOn, bitrate, fps, downshiftBitrate, downshiftAtSec, v2FrameGate, tunes);
+                      wireCapOn, bitrate, fps, downshiftBitrate, downshiftAtSec, v2FrameGate, tunes, /*desktopAttach=*/false);
   }
   if (r.captureItemFailed) ++gCaptureUnavailableRuns;
   check(!r.captureItemFailed, std::string("a capture item could be created for the fixture window (window-mode=") + r.windowMode + ")",
@@ -2355,6 +2377,7 @@ int main(int argc, char** argv) {
   uint32_t rcFps = 0, rcRate = 0;
   bool rcCandFirst = false;
   bool rcDiagnostic = false;
+  bool preloginCapture = false;  // prelogin-service r4 #1: desktop capture with the input-desktop attach
   std::wstring baselineHost;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -2417,6 +2440,8 @@ int main(int argc, char** argv) {
       keepDir = true;
     } else if (a == "--matrix") {
       matrix = true;
+    } else if (a == "--prelogin-capture") {
+      preloginCapture = true;
     }
   }
   char allow[8]{};
@@ -2468,6 +2493,40 @@ int main(int argc, char** argv) {
     run_paired(hostExe, baselineHost, dir, seconds);
   } else if (matrix) {
     run_matrix(hostExe, dir, seconds);
+  } else if (preloginCapture) {
+    // prelogin-service r4 #1: the --prelogin capture path (input-desktop attach) against the DEFAULT
+    // desktop, proving a frame reaches the real viewer receive path with the attach active. (Only the
+    // attach trigger differs from production -- the attach code and the whole encoder/transport/receive
+    // pipeline are the product's; the real Winlogon target is the G-phase.)
+    const uint16_t port = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    check(port != 0, "prelogin-capture: a free UDP port for the host", u(port));
+    if (port != 0) {
+      // r6 V5: the trigger (REMOTE60_PRELOGIN_CAPTURE_ATTACH) is read by the TEST build of the host only,
+      // so this run uses it (the same sources; the attach and the pipeline are the product's) -- and the
+      // attach is checked in the host's own words, not inferred from frames arriving (they arrive
+      // without it too).
+      const std::wstring testHost = directory_of(me) + L"GNLinkStreamMigrationTest.exe";
+      const std::wstring runDir = dir + L"prelogin_capture\\";
+      const RunResult r = run_host(testHost, runDir, Content::Video, /*tight=*/true, port, seconds, 0, 1,
+                                   /*wireCapOn=*/false, kBitrate, kFps, 0, 0, /*v2FrameGate=*/false,
+                                   /*tunes=*/nullptr, /*desktopAttach=*/true);
+      print_run(Content::Video, true, 0, 1, r);
+      check(r.launched && r.hello, "prelogin-capture: the desktop-capture host started and answered Hello");
+      check(file_has(runDir + L"host.log", "prelogin capture thread attached to the input desktop"),
+            "prelogin-capture: the host's capture thread attached to the input desktop (its own log)");
+      check(r.delivered > 0,
+            "prelogin-capture: frames reached the viewer with the input-desktop capture attach active",
+            "delivered=" + u(r.delivered));
+      check(r.decoded > 0, "prelogin-capture: a frame decoded at the viewer", "decoded=" + u(r.decoded));
+      // r6 V5 negative: the SHIPPED binary, given the same trigger, does not attach.
+      const uint16_t port2 = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+      const std::wstring runDir2 = dir + L"prelogin_capture_product\\";
+      const RunResult r2 = run_host(hostExe, runDir2, Content::Video, /*tight=*/true, port2, seconds, 0, 1,
+                                    /*wireCapOn=*/false, kBitrate, kFps, 0, 0, /*v2FrameGate=*/false,
+                                    /*tunes=*/nullptr, /*desktopAttach=*/true);
+      check(r2.launched && r2.hello && !file_has(runDir2 + L"host.log", "prelogin capture thread attached"),
+            "r6 V5: the shipped GNLinkStream ignores REMOTE60_PRELOGIN_CAPTURE_ATTACH (no attach)");
+    }
   } else
   for (Content content : contents) {
     const char* cls = content_name(content);

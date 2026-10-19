@@ -134,11 +134,11 @@ LRESULT CALLBACK prompt_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
-}  // namespace
-
-bool prompt_unlock_password(HWND owner, std::wstring* out) {
+// One modal password window; the lock-screen unlock and the pre-login "Windows 로그인" differ only in
+// their words (and class, so a test finds the one it means).
+bool prompt_password_window(HWND owner, const wchar_t* kClass, const wchar_t* title, const wchar_t* label,
+                            const wchar_t* okText, std::wstring* out) {
   if (!out) return false;
-  static const wchar_t kClass[] = L"GNLinkUnlockPrompt";
   WNDCLASSW wc{};
   wc.lpfnWndProc = prompt_proc;
   wc.hInstance = GetModuleHandleW(nullptr);
@@ -150,7 +150,7 @@ bool prompt_unlock_password(HWND owner, std::wstring* out) {
   PromptState st;
   st.out = out;
   HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, kClass,
-                              L"GNLink 잠금해제 비밀번호", WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                              title, WS_POPUP | WS_CAPTION | WS_SYSMENU,
                               0, 0, 360, 150, owner, nullptr, wc.hInstance, nullptr);
   if (!hwnd) return false;
   // Center on the owner (or screen).
@@ -162,12 +162,12 @@ bool prompt_unlock_password(HWND owner, std::wstring* out) {
   SetWindowPos(hwnd, HWND_TOPMOST, sx, sy, 0, 0, SWP_NOSIZE);
   SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
 
-  CreateWindowW(L"STATIC", L"이 호스트의 Windows 로그인 비밀번호를 입력하세요:",
+  CreateWindowW(L"STATIC", label,
                 WS_CHILD | WS_VISIBLE, 12, 10, 330, 20, hwnd, nullptr, wc.hInstance, nullptr);
   st.edit = CreateWindowW(L"EDIT", L"",
                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD | ES_AUTOHSCROLL, 12, 36,
                           330, 24, hwnd, nullptr, wc.hInstance, nullptr);
-  CreateWindowW(L"BUTTON", L"잠금해제", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 176, 74, 78, 26,
+  CreateWindowW(L"BUTTON", okText, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 176, 74, 78, 26,
                 hwnd, reinterpret_cast<HMENU>(1), wc.hInstance, nullptr);
   CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 262, 74, 78, 26, hwnd,
                 reinterpret_cast<HMENU>(2), wc.hInstance, nullptr);
@@ -199,6 +199,108 @@ bool prompt_unlock_password(HWND owner, std::wstring* out) {
   }
   return st.ok && !out->empty();
 }
+}  // namespace
+
+bool prompt_unlock_password(HWND owner, std::wstring* out) {
+  return prompt_password_window(owner, L"GNLinkUnlockPrompt", L"GNLink 잠금해제 비밀번호",
+                                L"이 호스트의 Windows 로그인 비밀번호를 입력하세요:", L"잠금해제", out);
+}
+
+bool prompt_prelogin_password(HWND owner, std::wstring* out) {
+  return prompt_password_window(owner, kPreloginPromptClass, kPreloginPromptTitle,
+                                L"원격 PC 로그인 화면에 입력할 비밀번호:", L"입력", out);
+}
+
+void show_prelogin_cred_result(HWND owner, const std::wstring& text) {
+  show_prelogin_notice(owner, kPreloginResultTitle, text);
+}
+
+std::wstring reboot_result_text(uint8_t result, uint32_t win32) {
+  switch (result) {
+    case 0:
+      return L"원격 PC가 다시 시작 요청을 받아들였습니다 (몇 초 뒤 다시 시작).\n"
+             L"연결이 끊기면 다시 시작이 끝난 뒤 접속하세요.";
+    case 1:
+      return L"원격 PC가 거절했습니다: 이미 다시 시작하는 중입니다.";
+    case 2:
+      return L"원격 PC가 거절했습니다: 이 연결로는 다시 시작할 수 없습니다 (서버 인증 연결만 가능).";
+    case 3:
+      return L"원격 PC가 다시 시작하지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    case kRebootNotSent:
+      return L"보내지 않았습니다: 확인한 뒤 연결이 바뀌었거나 이 PC가 원격 다시 시작을 지원하지 않습니다.";
+    default:
+      return L"원격 PC의 답을 받지 못했습니다. 다시 시작됐는지는 원격 화면이나 재접속으로 확인하세요.";
+  }
+}
+
+std::wstring sas_result_text(uint8_t result, uint32_t win32, uint8_t flags) {
+  const std::wstring cad = (flags & 0x01) != 0  // kPreloginStatusFlagCadNotRequired
+                               ? L"\n이 PC는 로그인할 때 Ctrl+Alt+Del 이 필요 없도록 설정돼 있습니다."
+                               : L"";
+  switch (result) {
+    case 0:
+      return L"원격 PC 로그인 화면에 Ctrl+Alt+Del 을 보냈습니다.\n화면이 바뀌었는지는 원격 화면에서 확인하세요." + cad;
+    case 5:
+      return L"원격 PC 로그인 화면에 Ctrl+Alt+Del 을 보냈습니다.\n이 PC의 정책(SoftwareSASGeneration)이 설정돼 있지 않아 "
+             L"받아들여졌는지는 확인되지 않습니다. 로그인 화면이 바뀌었는지 원격 화면에서 확인하세요." + cad;
+    case 1:
+      return L"원격 PC의 정책이 Ctrl+Alt+Del 을 프로그램이 보내는 것을 허용하지 않습니다 "
+             L"(SoftwareSASGeneration=" + std::to_wstring(win32) + L"). 관리자가 정책을 허용해야 합니다." + cad;
+    case 2:
+      return L"보내지 않았습니다: 원격 PC가 지금 로그인 화면 상태가 아닙니다.";
+    case 3:
+      return L"원격 PC가 거절했습니다: 이 연결로는 보낼 수 없습니다 (서버 인증 연결만 가능).";
+    case 4:
+      return L"원격 PC가 Ctrl+Alt+Del 을 보내지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    case kSasNotSent:
+      return L"보내지 않았습니다: 누른 뒤 연결이 바뀌었거나 이 PC가 지원하지 않습니다.";
+    default:
+      return L"원격 PC의 답을 받지 못했습니다.";
+  }
+}
+
+void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& text) {
+  // Its own small window rather than MessageBox: the same shape as the prompt, with a fixed class and
+  // control ids, so what it says can be read and its button pressed by a test like any other control.
+  WNDCLASSW wc{};
+  wc.lpfnWndProc = prompt_proc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = kPreloginResultClass;
+  wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+  wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+  RegisterClassW(&wc);
+  PromptState st;  // no `out`: the OK button only closes it
+  HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, kPreloginResultClass, title,
+                              WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 440, 170, owner, nullptr, wc.hInstance, nullptr);
+  if (!hwnd) return;
+  RECT wr{};
+  GetWindowRect(hwnd, &wr);
+  SetWindowPos(hwnd, HWND_TOPMOST, (GetSystemMetrics(SM_CXSCREEN) - (wr.right - wr.left)) / 2,
+               (GetSystemMetrics(SM_CYSCREEN) - (wr.bottom - wr.top)) / 2, 0, 0, SWP_NOSIZE);
+  SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
+  CreateWindowW(L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE, 14, 12, 404, 64, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreloginResultTextId)), wc.hInstance, nullptr);
+  HWND ok = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 340, 92, 78, 26,
+                          hwnd, reinterpret_cast<HMENU>(1), wc.hInstance, nullptr);
+  ShowWindow(hwnd, SW_SHOW);
+  SetForegroundWindow(hwnd);
+  SetFocus(ok);
+  if (owner) EnableWindow(owner, FALSE);
+  MSG m{};
+  while (!st.done) {
+    const BOOL got = GetMessageW(&m, nullptr, 0, 0);
+    if (got == 0) {
+      PostQuitMessage(static_cast<int>(m.wParam));
+      break;
+    }
+    if (got == -1) break;
+    if (!IsDialogMessageW(hwnd, &m)) {
+      TranslateMessage(&m);
+      DispatchMessageW(&m);
+    }
+  }
+  if (owner) EnableWindow(owner, TRUE);
+}
 
 // --- the exchange -------------------------------------------------------------------------------
 
@@ -213,6 +315,7 @@ uint16_t utf16_of(const std::wstring& s, uint16_t out[su::kMaxPasswordUtf16]) {
 const char* stage_name(uint16_t stage) {
   switch (static_cast<remote60::native_poc::UnlockStage>(stage)) {
     case remote60::native_poc::UnlockStage::SessionUnlocked: return "unlocked";
+    case remote60::native_poc::UnlockStage::Injected: return "typed";
     case remote60::native_poc::UnlockStage::WtsConnectAccepted: return "connect-accepted";
     case remote60::native_poc::UnlockStage::AuthFailed: return "wrong-password";
     case remote60::native_poc::UnlockStage::RejectedPolicy: return "rejected(policy/not-locked)";
@@ -224,10 +327,14 @@ const char* stage_name(uint16_t stage) {
 }
 }  // namespace
 
-bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostId,
-                         const std::wstring& password, std::string* status, bool* clearCredential) {
+namespace {
+// The one challenge -> seal -> poll exchange. `prelogin` picks the purpose the password is sealed
+// under (sealed_unlock BuildPreloginCred* vs BuildKdfInfo/BuildAad); everything else, the wire
+// included, is shared. True with *terminal filled when the host gave a terminal result.
+bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, bool prelogin,
+                     std::string* status, remote60::native_poc::ControlUnlockStatusResultMessage* terminal) {
   using namespace remote60::native_poc;
-  if (clearCredential) *clearCredential = false;
+  const std::string what = prelogin ? "login" : "unlock";
   auto set_status = [&](const std::string& s) { if (status) *status = s; };
   static uint32_t rid = 1;
   const uint32_t requestId = ++rid;
@@ -262,8 +369,8 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostI
   uint8_t clientPub[su::kPubKeyBytes] = {};
   if (!key.Generate() || !key.ExportPublic(clientPub)) { set_status("crypto init failed"); return false; }
   auto c = ContextFromChallenge(ch, clientPub);
-  const auto kdf = su::BuildKdfInfo(c);
-  const auto aad = su::BuildAad(c);
+  const auto kdf = prelogin ? su::BuildPreloginCredKdfInfo(c) : su::BuildKdfInfo(c);
+  const auto aad = prelogin ? su::BuildPreloginCredAad(c) : su::BuildAad(c);
   uint8_t aesKey[su::kAesKeyBytes] = {};
   bool ok = su::DeriveAesKey(key, ch.hostPub, ch.salt, kdf.data(), kdf.size(), aesKey);
   uint16_t pwUnits[su::kMaxPasswordUtf16] = {};
@@ -322,21 +429,70 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostI
     }
     if (rs.unlockStatusResult.requestId != requestId) continue;  // ignore a stale/foreign result
     if (rs.unlockStatusResult.terminal) {
-      const uint16_t stage = rs.unlockStatusResult.stage;
-      set_status(std::string("unlock: ") + stage_name(stage));
-      // Wrong password / bad decrypt -> tell the caller to drop the stored credential so it is not
-      // auto-reused (which would march toward a Windows account lockout). (Codex #370 review.)
-      if (clearCredential &&
-          (static_cast<UnlockStage>(stage) == UnlockStage::AuthFailed ||
-           static_cast<UnlockStage>(stage) == UnlockStage::DecryptFailed)) {
-        *clearCredential = true;
-      }
-      return static_cast<UnlockStage>(stage) == UnlockStage::SessionUnlocked;
+      *terminal = rs.unlockStatusResult;
+      set_status(what + ": " + stage_name(terminal->stage));
+      return true;
     }
     Sleep(250);
   }
-  set_status("unlock timed out");
+  set_status(what + " timed out");
   return false;
+}
+}  // namespace
+
+bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t /*hostId*/,
+                         const std::wstring& password, std::string* status, bool* clearCredential) {
+  using namespace remote60::native_poc;
+  if (clearCredential) *clearCredential = false;
+  ControlUnlockStatusResultMessage terminal{};
+  if (!sealed_exchange(link, password, false, status, &terminal)) return false;
+  const uint16_t stage = terminal.stage;
+  // Wrong password / bad decrypt -> tell the caller to drop the stored credential so it is not
+  // auto-reused (which would march toward a Windows account lockout). (Codex #370 review.)
+  if (clearCredential &&
+      (static_cast<UnlockStage>(stage) == UnlockStage::AuthFailed ||
+       static_cast<UnlockStage>(stage) == UnlockStage::DecryptFailed)) {
+    *clearCredential = true;
+  }
+  return static_cast<UnlockStage>(stage) == UnlockStage::SessionUnlocked;
+}
+
+bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password,
+                                uint16_t* stage, uint32_t* win32, std::string* status) {
+  remote60::native_poc::ControlUnlockStatusResultMessage terminal{};
+  const bool done = sealed_exchange(link, password, true, status, &terminal);
+  if (stage) *stage = done ? terminal.stage : 0;
+  if (win32) *win32 = done ? terminal.win32Error : 0;
+  return done;
+}
+
+std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32) {
+  using remote60::native_poc::UnlockStage;
+  switch (static_cast<UnlockStage>(stage)) {
+    case UnlockStage::Injected:
+      return L"원격 PC 로그인 화면에 비밀번호를 입력했습니다.\n"
+             L"로그인되었는지는 원격 화면에서 확인하세요. (입력함 = 로그인 성공이 아닙니다)";
+    case UnlockStage::SessionUnlocked:
+      // r5 G11: what was observed, and no more -- the host left the logon screen after the typing. Which
+      // account, and whether its desktop is up, is not something this viewer has seen.
+      return L"원격 PC가 로그인 화면을 벗어났습니다 (비밀번호 입력 뒤).\n"
+             L"로그인된 계정과 화면은 원격 화면에서 확인하세요.";
+    case UnlockStage::RejectedPolicy:
+      return L"원격 PC의 입력 대상이 로그인 화면이 아니어서 입력하지 않았습니다.\n"
+             L"원격 화면에서 비밀번호 칸을 띄운 뒤 다시 시도하세요.";
+    case UnlockStage::DecryptFailed:
+      return L"비밀번호를 안전하게 전달하지 못해 입력하지 않았습니다. 다시 시도하세요.";
+    case UnlockStage::RejectedStaleTopology:
+    case UnlockStage::Timeout:
+      return L"요청이 만료되었거나 원격 PC 상태가 바뀌었습니다. 다시 시도하세요.";
+    case UnlockStage::InternalError:
+      return L"원격 PC가 입력하지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    default:
+      break;
+  }
+  if (stage == kPreloginNotAtLogon) return L"원격 PC가 지금 로그인 화면 상태가 아니어서 보내지 않았습니다.";
+  if (stage == 0) return L"원격 PC가 응답하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.";
+  return L"원격 PC가 입력하지 못했습니다 (단계 " + std::to_wstring(stage) + L").";
 }
 
 }  // namespace remote60::native_poc::viewer

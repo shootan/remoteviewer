@@ -84,6 +84,11 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_connect.cpp
   src/host_startup_control.cpp
   src/host_startup_graphics.cpp
+  src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
+  src/prelogin_admin_pipe.cpp
+  src/prelogin_cred_host.cpp
+  src/sealed_unlock.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
   src/host_stage_time_limit.cpp
@@ -288,6 +293,7 @@ target_link_libraries(remote60_native_video_host_poc PRIVATE
   windowsapp
   advapi32
   bcrypt
+  crypt32
   windowscodecs
   shlwapi
 )
@@ -306,12 +312,22 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
+  src/secure_unlock_service.cpp
+  src/prelogin_user_host_launch.cpp
+  src/prelogin_console_probe.cpp
+  src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
+  src/prelogin_admin_pipe.cpp
+  src/prelogin_admin_service.cpp
 )
 set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
   advapi32
   user32
+  userenv
+  wtsapi32
+  crypt32
   remote60_sealed_unlock
 )
 
@@ -481,6 +497,7 @@ add_dependencies(remote60_file_copy_helper_e2e_test remote60_file_copy_helper)
 add_executable(remote60_native_video_client_poc
   src/native_video_client_main.cpp
   src/viewer_startup.cpp
+  src/viewer_reboot_prompt.cpp
   src/viewer_clip_image_wiring.cpp
   src/viewer_shutdown.cpp
   src/viewer_present.cpp
@@ -630,6 +647,8 @@ add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
   src/update_readiness.cpp
   src/host_app_main.cpp
+  src/prelogin_autostart.cpp
+  src/prelogin_admin_pipe.cpp
   src/directory_client.cpp
   src/update_endpoint.cpp
   src/url_origin.cpp
@@ -1146,6 +1165,7 @@ add_executable(remote60_host_encoder_apply_target_test
   src/host_bgra_scale.cpp
   src/gdi_capture_process.cpp
   src/secure_input_broker.cpp
+  src/trusted_service_pipe.cpp
   src/host_encoder_apply_target_test.cpp
 )
 target_include_directories(remote60_host_encoder_apply_target_test PRIVATE src)
@@ -1453,6 +1473,47 @@ if(MSVC)
   target_compile_options(remote60_viewer_mouse_xbutton_e2e_test PRIVATE /utf-8)
 endif()
 add_dependencies(remote60_viewer_mouse_xbutton_e2e_test remote60_native_video_host_poc)
+
+# prelogin-ui r3 (item 5): "Windows 로그인" end to end -- the product's toolbar item / Ctrl+Alt+U,
+# password window and control worker, sealed under the prelogin purpose, to the test build of the host
+# in --prelogin (directory-authenticated, SeShutdownPrivilege deleted), typed into a window of the test.
+add_executable(remote60_viewer_prelogin_login_e2e_test
+  src/viewer_prelogin_login_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
+  src/viewer_reboot_prompt.cpp
+  src/native_video_client_session.cpp
+  src/viewer_window_proc.cpp
+  src/viewer_input_forward.cpp
+  src/viewer_control_client.cpp
+  src/viewer_present.cpp
+  src/viewer_picker.cpp
+  src/viewer_picker_state.cpp
+  src/viewer_selection_gate.cpp
+  src/viewer_overlay_draw.cpp
+  src/viewer_gdi_util.cpp
+  src/viewer_layout.cpp
+  src/viewer_log.cpp
+  src/viewer_unlock.cpp
+  src/client_session_toolbar.cpp
+  src/input_macro.cpp
+  src/viewer_session_watchdog.cpp
+  src/viewer_cursor_overlay.cpp
+  src/viewer_frame_gate.cpp
+  src/sealed_unlock.cpp
+  src/mf_h264_codec.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_prelogin_login_e2e_test PRIVATE src)
+target_link_libraries(remote60_viewer_prelogin_login_e2e_test PRIVATE
+  remote60_clip_image remote60_test_scratch_dir
+  common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt advapi32 crypt32
+  d3d11 dxgi d3dcompiler mfplat mf mfuuid wmcodecdspuuid)
+if(MSVC)
+  target_compile_options(remote60_viewer_prelogin_login_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_viewer_prelogin_login_e2e_test remote60_native_video_host_migration_seam)
 
 # clip-image ④ (3rd rate agreement, DECISIONS §5): the transfer bar -- percent, seconds, Cancel --
 # through the product's window procedure, image client wiring and control worker, against a real
@@ -2340,6 +2401,82 @@ target_link_libraries(remote60_host_sender_epoch_test PRIVATE
   advapi32
 )
 
+# prelogin-ui r9 (R3): directory auth is bound to the admitted epoch (SessionState::AdmitHello).
+add_executable(remote60_host_session_admission_test
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/udp_control_channel.cpp
+  src/host_session_admission_test.cpp
+)
+target_include_directories(remote60_host_session_admission_test PRIVATE src)
+target_link_libraries(remote60_host_session_admission_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt)
+
+# prelogin-ui r12 (L1): the periodic Ready and the pre-login desktop watch end before what they read.
+add_executable(remote60_host_background_lifetime_test
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/udp_control_channel.cpp
+  src/prelogin_admin_pipe.cpp
+  src/host_background_lifetime_test.cpp
+)
+target_include_directories(remote60_host_background_lifetime_test PRIVATE src)
+target_link_libraries(remote60_host_background_lifetime_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt)
+if(MSVC)
+  target_compile_options(remote60_host_background_lifetime_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r9 (R4/W1): when the service starts the logged-on user's GNLinkHost.
+add_executable(remote60_prelogin_user_host_policy_test src/prelogin_user_host_policy_test.cpp)
+target_include_directories(remote60_prelogin_user_host_policy_test PRIVATE src)
+
+# prelogin-ui r9 (W3 + W1): the handoff's ready end to end -- GNLinkHost's test build -> its streaming test
+# build -> this test serving the admin pipe -- and a second GNLinkHost "--tray" yielding (exit 0).
+add_executable(remote60_prelogin_ready_chain_e2e_test
+  src/prelogin_ready_chain_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_prelogin_ready_chain_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_ready_chain_e2e_test PRIVATE common ws2_32 advapi32 winhttp crypt32 bcrypt
+  remote60_test_scratch_dir)
+add_dependencies(remote60_prelogin_ready_chain_e2e_test remote60_host_app_ui_test remote60_native_video_host_migration_seam)
+
+# prelogin-ui r9 (R5): Ctrl+Alt+Del at the logon screen -- wire, allowlist, the service's decision.
+add_executable(remote60_prelogin_sas_test src/prelogin_sas_test.cpp)
+target_include_directories(remote60_prelogin_sas_test PRIVATE src)
+
+# prelogin-ui r10 (T2): the SYSTEM input agent injects a pre-login message only on the logon desktop.
+add_executable(remote60_secure_input_desktop_fence_test src/secure_input_desktop_fence_test.cpp)
+target_include_directories(remote60_secure_input_desktop_fence_test PRIVATE src)
+
+# prelogin-ui r15 (R14-2): the sealed unlock bound to its own unlock-pipe caller.
+add_executable(remote60_secure_unlock_service_test
+  src/secure_unlock_service_test.cpp
+  src/secure_unlock_service.cpp
+)
+target_include_directories(remote60_secure_unlock_service_test PRIVATE src)
+target_link_libraries(remote60_secure_unlock_service_test PRIVATE remote60_sealed_unlock)
+
+# prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
+add_executable(remote60_secure_input_pipe_server_test
+  src/secure_input_pipe_server_test.cpp
+  src/secure_input_broker.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_secure_input_pipe_server_test PRIVATE src)
+target_link_libraries(remote60_secure_input_pipe_server_test PRIVATE advapi32)
+
+# prelogin-ui r11 (U5): the window-list request and the first pong as one state.
+add_executable(remote60_client_host_role_gate_test src/client_host_role_gate_test.cpp)
+target_include_directories(remote60_client_host_role_gate_test PRIVATE src)
+
 add_executable(remote60_host_backend_policy_test
   src/host_backend_policy_test.cpp
 )
@@ -2522,6 +2659,268 @@ add_executable(remote60_secure_pipe_client_gate_test
 )
 target_include_directories(remote60_secure_pipe_client_gate_test PRIVATE src)
 target_link_libraries(remote60_secure_pipe_client_gate_test PRIVATE common advapi32)
+
+# prelogin-service A1 section 1: the pure supervisor state-machine decision core + negative controls.
+add_executable(remote60_prelogin_supervisor_state_test
+  src/prelogin_supervisor_state_test.cpp
+)
+target_include_directories(remote60_prelogin_supervisor_state_test PRIVATE src)
+
+# prelogin-service A1 section 3: the default-deny prelogin control-message allowlist + negative controls.
+add_executable(remote60_prelogin_control_allowlist_test
+  src/prelogin_control_allowlist_test.cpp
+)
+target_include_directories(remote60_prelogin_control_allowlist_test PRIVATE src)
+
+# prelogin-service r2: remote-reboot wire codec (message types 84/85).
+add_executable(remote60_reboot_wire_test
+  src/reboot_wire_test.cpp
+)
+target_include_directories(remote60_reboot_wire_test PRIVATE src)
+
+# prelogin-ui r1 (item 4): "로그인 전에도 원격 접속 허용" -- the admin pipe's codec, the service's decision
+# over in-memory primitives, and the real pipe's refusals (non-elevated client, the product DACL).
+add_executable(remote60_prelogin_admin_pipe_test
+  src/prelogin_admin_pipe_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_prelogin_admin_pipe_test PRIVATE src)
+target_link_libraries(remote60_prelogin_admin_pipe_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_admin_pipe_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r6 (V1, V4): the pre-login worker's launch contract (environment, arguments, restart backoff)
+# and what uninstall withdraws.
+add_executable(remote60_prelogin_worker_launch_test
+  src/prelogin_worker_launch_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_prelogin_worker_launch_test PRIVATE src)
+target_link_libraries(remote60_prelogin_worker_launch_test PRIVATE advapi32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_worker_launch_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r7 (H1): the service's launch of the user's GNLinkHost, made with the service's own two
+# functions on a staged copy of this test (environment + nonce + working directory).
+add_executable(remote60_prelogin_user_host_launch_test
+  src/prelogin_user_host_launch_test.cpp
+  src/update_job_guard.cpp
+  src/prelogin_user_host_launch.cpp
+)
+target_include_directories(remote60_prelogin_user_host_launch_test PRIVATE src)
+target_link_libraries(remote60_prelogin_user_host_launch_test PRIVATE advapi32 userenv remote60_test_scratch_dir)
+
+# prelogin-ui r7 (H3): the machine record's path -- every level checked (owner + DACL, no redirect) on a
+# handle that stays open while the record is used.
+add_executable(remote60_prelogin_store_chain_test
+  src/prelogin_store_chain_test.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
+target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# prelogin-ui r7 (H6): the viewer's input gate before the role is known and at the send.
+add_executable(remote60_prelogin_input_gate_test
+  src/prelogin_input_gate_test.cpp
+)
+target_include_directories(remote60_prelogin_input_gate_test PRIVATE src)
+
+# prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" -- the product receiver with
+# its typing and target question as seams; the viewer's sealing for both purposes.
+add_executable(remote60_prelogin_cred_host_test
+  src/prelogin_cred_host_test.cpp
+  src/prelogin_cred_host.cpp
+  src/sealed_unlock.cpp
+)
+target_include_directories(remote60_prelogin_cred_host_test PRIVATE src)
+target_link_libraries(remote60_prelogin_cred_host_test PRIVATE bcrypt user32 advapi32 ole32 oleaut32)
+if(MSVC)
+  target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
+endif()
+
+# prelogin-ui r1 (item 4): the toggle in GNLinkHost's own window (the asInvoker test build), worked
+# through UI Automation, against a test pipe served by the product's admin server and decision.
+add_executable(remote60_host_prelogin_toggle_ui_test
+  src/host_prelogin_toggle_ui_test.cpp
+  src/prelogin_admin_pipe.cpp
+)
+target_include_directories(remote60_host_prelogin_toggle_ui_test PRIVATE src)
+target_link_libraries(remote60_host_prelogin_toggle_ui_test PRIVATE advapi32 ole32 oleaut32 user32 gdi32)
+if(MSVC)
+  target_compile_options(remote60_host_prelogin_toggle_ui_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_prelogin_toggle_ui_test remote60_host_app_ui_test)
+
+# prelogin-ui r2 (items 6, 7): a viewer's restart on a directory-authenticated session through the host's
+# gate and the admin pipe to the service's OS seam (once), and the host's ready after registration --
+# GNLinkStreamMigrationTest without SeShutdownPrivilege, a fake directory, the product's pipe server.
+add_executable(remote60_host_reboot_delegate_e2e_test
+  src/host_reboot_delegate_e2e_test.cpp
+  src/prelogin_admin_pipe.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_host_reboot_delegate_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_reboot_delegate_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_host_reboot_delegate_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_reboot_delegate_e2e_test remote60_native_video_host_migration_seam)
+
+# prelogin-ui r1 (item 8): the reboot-menu / prelogin-credential rule against the vectors the Android
+# JVM test also reads (apps/shared/reboot_menu_vectors.txt).
+add_executable(remote60_reboot_menu_vectors_test
+  src/reboot_menu_vectors_test.cpp
+)
+target_include_directories(remote60_reboot_menu_vectors_test PRIVATE src)
+target_compile_definitions(remote60_reboot_menu_vectors_test PRIVATE
+  "REMOTE60_REBOOT_MENU_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/reboot_menu_vectors.txt\""
+)
+
+# prelogin-ui r1 (item 8): the phone's session controller -> 84 -> a real host (started WITHOUT
+# SeShutdownPrivilege) -> 85 back. REMOTE60_ALLOW_HOST_E2E=1.
+add_executable(remote60_android_session_reboot_e2e_test
+  src/android_session_reboot_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_android_session_reboot_e2e_test PRIVATE src)
+target_link_libraries(remote60_android_session_reboot_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_android_session_reboot_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_android_session_reboot_e2e_test remote60_native_video_host_poc)
+
+# prelogin-service A1 section 1: live console observation layer (token/privilege classifiers) + live self-check.
+add_executable(remote60_prelogin_console_probe_test
+  src/prelogin_console_probe_test.cpp
+  src/prelogin_console_probe.cpp
+)
+target_include_directories(remote60_prelogin_console_probe_test PRIVATE src)
+target_link_libraries(remote60_prelogin_console_probe_test PRIVATE advapi32)
+
+# prelogin-service r3 (d-viewer): native reboot confirm popup + UI-evidence test (PrintWindow + WM_COMMAND).
+add_executable(remote60_viewer_reboot_prompt_test
+  src/viewer_reboot_prompt_test.cpp
+  src/viewer_reboot_prompt.cpp
+)
+target_include_directories(remote60_viewer_reboot_prompt_test PRIVATE src)
+target_link_libraries(remote60_viewer_reboot_prompt_test PRIVATE user32 gdi32)
+
+# prelogin-service A1 section f: per-user autostart cleanup (service-owns-startup gate + scoped delete).
+add_executable(remote60_prelogin_autostart_test
+  src/prelogin_autostart_test.cpp
+  src/prelogin_autostart.cpp
+)
+target_include_directories(remote60_prelogin_autostart_test PRIVATE src)
+target_link_libraries(remote60_prelogin_autostart_test PRIVATE advapi32)
+
+# prelogin-service r3: viewer reboot-menu / prelogin-credential policy (R1 warning + PC-first) pure.
+add_executable(remote60_reboot_menu_policy_test
+  src/reboot_menu_policy_test.cpp
+)
+target_include_directories(remote60_reboot_menu_policy_test PRIVATE src)
+
+# prelogin-service r4 item 2 / Codex 3.1: prelogin plaintext-input filter (navigation only).
+add_executable(remote60_prelogin_input_filter_test
+  src/prelogin_input_filter_test.cpp
+)
+target_include_directories(remote60_prelogin_input_filter_test PRIVATE src)
+
+# prelogin-service r4 item 2: input SendInput-path evidence (own window; nav filter drops characters).
+add_executable(remote60_prelogin_input_inject_e2e_test
+  src/prelogin_input_inject_e2e_test.cpp
+)
+target_include_directories(remote60_prelogin_input_inject_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_input_inject_e2e_test PRIVATE user32)
+
+# prelogin-service r6 G9: child-launch adoption gate (Job-bind required; launch-token re-judgement).
+add_executable(remote60_prelogin_child_launch_test
+  src/prelogin_child_launch_test.cpp
+)
+target_include_directories(remote60_prelogin_child_launch_test PRIVATE src)
+
+# prelogin-service r6 G1: the prelogin role pins udp+h264 (the real `--prelogin` command), refuses TCP/raw.
+add_executable(remote60_prelogin_role_args_test
+  src/prelogin_role_args_test.cpp
+  src/host_args.cpp
+)
+target_include_directories(remote60_prelogin_role_args_test PRIVATE src)
+target_link_libraries(remote60_prelogin_role_args_test PRIVATE common)
+
+# prelogin-service r6 G2: ingress authentication policy (token-less first hello refused; no side channel).
+add_executable(remote60_prelogin_ingress_policy_test
+  src/prelogin_ingress_policy_test.cpp
+)
+target_include_directories(remote60_prelogin_ingress_policy_test PRIVATE src)
+
+# prelogin-service r6 G6: --prelogin worker adopts only a record Usable under the owner floor + binding.
+add_executable(remote60_prelogin_worker_binding_test
+  src/prelogin_worker_binding_test.cpp
+)
+target_include_directories(remote60_prelogin_worker_binding_test PRIVATE src)
+
+# prelogin-service A1 section 1: supervisor composition (reconcile-driven lifecycle over the pure cores).
+add_executable(remote60_prelogin_supervisor_test
+  src/prelogin_supervisor_test.cpp
+)
+target_include_directories(remote60_prelogin_supervisor_test PRIVATE src)
+
+# prelogin-service r3: remote-reboot host-side authorization + dedup gate (pure).
+add_executable(remote60_prelogin_reboot_gate_test
+  src/prelogin_reboot_gate_test.cpp
+)
+target_include_directories(remote60_prelogin_reboot_gate_test PRIVATE src)
+
+# prelogin-service A1 section 3: ready-handoff single-owner lease + generation fence (pure).
+add_executable(remote60_prelogin_handoff_test
+  src/prelogin_handoff_test.cpp
+)
+target_include_directories(remote60_prelogin_handoff_test PRIVATE src)
+
+# prelogin-service A1 section 3: prelogin credential sealed purpose (distinct AAD/KDF labels) isolation.
+add_executable(remote60_prelogin_cred_seal_test
+  src/prelogin_cred_seal_test.cpp
+)
+target_include_directories(remote60_prelogin_cred_seal_test PRIVATE src)
+target_link_libraries(remote60_prelogin_cred_seal_test PRIVATE remote60_sealed_unlock)
+
+# prelogin-service r3 (e): prelogin-purpose sealed credential -> Unicode delivery to a test-owned window.
+add_executable(remote60_prelogin_cred_input_e2e_test
+  src/prelogin_cred_input_e2e_test.cpp
+)
+target_include_directories(remote60_prelogin_cred_input_e2e_test PRIVATE src)
+target_link_libraries(remote60_prelogin_cred_input_e2e_test PRIVATE remote60_sealed_unlock user32)
+
+# prelogin-service A1 section 2: machine credential record (pure binding/revocation + serialization).
+add_executable(remote60_prelogin_machine_record_test
+  src/prelogin_machine_record_test.cpp
+)
+target_include_directories(remote60_prelogin_machine_record_test PRIVATE src)
+
+# prelogin-service A1 section 2: machine credential store (DPAPI LOCAL_MACHINE seal + protected DACL).
+add_executable(remote60_prelogin_machine_store_test
+  src/prelogin_machine_store_test.cpp
+  src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_prelogin_machine_store_test PRIVATE src)
+target_link_libraries(remote60_prelogin_machine_store_test PRIVATE crypt32 advapi32)
+
+# prelogin-service r6 G5: trusted-ancestry validation (owner + reparse) counter-examples.
+add_executable(remote60_prelogin_machine_store_g5_test
+  src/prelogin_machine_store_g5_test.cpp
+  src/prelogin_machine_store.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_prelogin_machine_store_g5_test PRIVATE src)
+target_link_libraries(remote60_prelogin_machine_store_g5_test PRIVATE crypt32 advapi32)
 
 add_executable(remote60_dxgi_output_selection_test
   ${CMAKE_SOURCE_DIR}/libs/capture/src/dxgi_output_selection_test.cpp
@@ -2811,6 +3210,17 @@ target_include_directories(remote60_session_toolbar_click_test PRIVATE src)
 target_link_libraries(remote60_session_toolbar_click_test PRIVATE user32 gdi32 shell32)
 if(MSVC)
   target_compile_options(remote60_session_toolbar_click_test PRIVATE /utf-8)
+endif()
+
+# prelogin-service r3 (d-viewer): the in-toolbar remote-reboot item renders + routes to onReboot.
+add_executable(remote60_session_toolbar_reboot_test
+  src/session_toolbar_reboot_test.cpp
+  src/client_session_toolbar.cpp
+)
+target_include_directories(remote60_session_toolbar_reboot_test PRIVATE src)
+target_link_libraries(remote60_session_toolbar_reboot_test PRIVATE user32 gdi32 shell32)
+if(MSVC)
+  target_compile_options(remote60_session_toolbar_reboot_test PRIVATE /utf-8)
 endif()
 
 # Clipboard text sync core (K1): the wire codec and the echo-loop state machine, with no Win32,
@@ -3268,6 +3678,23 @@ add_executable(remote60_winlogon_capture_probe
 )
 target_link_libraries(remote60_winlogon_capture_probe PRIVATE d3d11 dxgi gdi32 advapi32 user32)
 set_target_properties(remote60_winlogon_capture_probe PROPERTIES OUTPUT_NAME "WinlogonProbe")
+
+# A0 isolated probe for the prelogin-service feature: proves the sealed (ECDH+AES-GCM) credential
+# blob, once opened, is delivered as real Unicode keystrokes to a test-owned window (crypto->IPC->
+# input), with a defocused negative control. Non-elevated, current session only. Diagnostic harness.
+add_executable(remote60_prelogin_a0_probe
+  tools/prelogin_a0_probe.cpp
+)
+target_include_directories(remote60_prelogin_a0_probe PRIVATE src)
+target_link_libraries(remote60_prelogin_a0_probe PRIVATE remote60_sealed_unlock user32)
+set_target_properties(remote60_prelogin_a0_probe PROPERTIES OUTPUT_NAME "PreloginA0Probe")
+
+# prelogin-service r4 item 1: capture mechanism probe (SetThreadDesktop(input) -> DXGI / BitBlt fallback).
+add_executable(remote60_prelogin_capture_probe
+  tools/prelogin_capture_probe.cpp
+)
+target_link_libraries(remote60_prelogin_capture_probe PRIVATE d3d11 dxgi gdi32 user32)
+set_target_properties(remote60_prelogin_capture_probe PROPERTIES OUTPUT_NAME "PreloginCaptureProbe")
 
 # Also diagnostic-only. Measures how often the desktop actually changes, with no encoder or
 # client in the way, so 구현계획 A1 can be settled by measurement instead of inference.

@@ -1,6 +1,8 @@
 // See viewer_control_client.hpp. Bodies are the controlThread lambda of native_video_client_main.cpp,
 // verbatim (viewer split refactor Phase 2-4).
 
+#include "prelogin_control_allowlist.hpp"
+#include "prelogin_input_gate.hpp"
 #include "viewer_control_client.hpp"
 
 #include <iostream>
@@ -15,6 +17,7 @@
 #include "viewer_recv_liveness.hpp"
 
 #include "viewer_unlock.hpp"
+#include "reboot_menu_policy.hpp"
 #include "peer_version.hpp"
 #include "paste_apply_wire.hpp"
 #include "viewer_paste_gate.hpp"
@@ -378,6 +381,27 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     ctx.session.unlockSupported.store(
         (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
         std::memory_order_relaxed);
+    // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
+    // every pong like the others so a reconnect never inherits a stale answer.
+    ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+    ctx.session.hostRoleKnown.store(true, std::memory_order_release);  // r7 H6
+    if ((pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) == 0) {
+      ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
+    }
+    // "Windows 로그인": typed is not logged in. The logon is the host leaving the pre-login screen
+    // after the password went in (within two minutes of it); only then is "logged in" shown.
+    if (const uint64_t typedAt = ctx.session.preloginInjectedAtUs.load(std::memory_order_acquire)) {
+      const bool stillAtLogon = (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) != 0;
+      const bool recent = qpc_now_us() - typedAt < 120000000ull;
+      if (!stillAtLogon || !recent) {
+        ctx.session.preloginInjectedAtUs.store(0, std::memory_order_release);
+        if (!stillAtLogon && recent) {
+          std::cout << "[native-video-client][prelogin-login] host left the logon screen after the typed password\n";
+          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult,
+                       static_cast<WPARAM>(remote60::native_poc::UnlockStage::SessionUnlocked), 0);
+        }
+      }
+    }
     // Mouse X buttons (back / forward): sent only to a host that says it maps them. Set every
     // pong like the others, so a reconnect never inherits an answer. (mouse-xbutton r1)
     ctx.session.hostMouseXButtons.store(
@@ -636,6 +660,8 @@ bool ControlClient::pump_control_resume(
   }
 }
 void ControlClient::Run() {
+  ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel);  // r5 G11: a new connection's run
+  ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
   std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
@@ -732,6 +758,99 @@ void ControlClient::Run() {
         }
       }
     }
+    // "Windows 로그인" (prelogin-ui r3, item 5): the prompt left a password; seal it under the prelogin
+    // purpose, let the host's pre-login worker type it, zero it, and tell the window what happened.
+    if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) {
+      std::wstring pw;
+      {
+        std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+        pw.swap(ctx.session.preloginCredPassword);
+      }
+      ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+      uint16_t stage = kPreloginNotAtLogon;
+      uint32_t win32 = 0;
+      std::string status = "not sent: the host is no longer at the logon screen";
+      if (!pw.empty() &&
+          remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc,
+                                                   ctx.session.hostCaptureFlags.load(std::memory_order_relaxed))
+              .sealedEntryAvailable) {
+        (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
+      }
+      if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+      std::cout << "[native-video-client][prelogin-login] " << status << " stage=" << stage << " win32=" << win32 << "\n";
+      if (stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Injected)) {
+        ctx.session.preloginInjectedAtUs.store(qpc_now_us(), std::memory_order_release);
+      }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, stage, static_cast<LPARAM>(win32));
+    }
+    // Remote reboot (prelogin-service r3): the confirm popup set rebootRequested on the UI thread. Send
+    // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.
+    if (ctx.session.rebootRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const uint64_t confirmedFor = ctx.session.rebootRequestedRunGen.load(std::memory_order_acquire);
+      if (confirmedFor != ctx.session.controlRunGen.load(std::memory_order_acquire)) {
+        std::cout << "[native-video-client][reboot] confirmed for an earlier connection; not sent\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
+      } else if ((flags & remote60::native_poc::kCaptureFlagRemoteRebootV1) == 0) {
+        std::cout << "[native-video-client][reboot] host does not advertise remote reboot\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
+      } else {
+        static std::atomic<uint32_t> rebootSeq{0};
+        const uint32_t rid = rebootSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::RebootRequest;
+        action.reboot.header.magic = remote60::native_poc::kMagic;
+        action.reboot.header.type = static_cast<uint16_t>(MessageType::ControlRebootRequest);
+        action.reboot.header.size = static_cast<uint16_t>(sizeof(action.reboot));
+        action.reboot.requestId = rid;
+        action.expectedResponseType = MessageType::ControlRebootReply;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlRebootReplyMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(*controlLink, action, &resp) &&
+            resp.kind == TcpControlResponseKind::RebootReply && resp.rebootReply.requestId == rid) {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.rebootReply.result)
+                    << " win32=" << resp.rebootReply.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, resp.rebootReply.result,
+                       static_cast<LPARAM>(resp.rebootReply.win32));
+        } else {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " no valid reply (link closed/desynced); not auto-retrying\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNoAnswer, 0);
+        }
+      }
+    }
+    // r9 R5: "Ctrl+Alt+Del" at a pre-login host -- one ControlPreloginControl (83), its answer shown.
+    if (ctx.session.sasRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      if (ctx.session.sasRequestedRunGen.load(std::memory_order_acquire) !=
+              ctx.session.controlRunGen.load(std::memory_order_acquire) ||
+          (flags & remote60::native_poc::kCaptureFlagPreloginSasV1) == 0) {
+        std::cout << "[native-video-client][sas] not sent (another connection / not offered)\n";
+        PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNotSent, 0);
+      } else {
+        static std::atomic<uint32_t> sasSeq{0};
+        const uint32_t rid = sasSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::PreloginControl;
+        action.preloginControl = remote60::native_poc::make_sas_request(rid);
+        action.expectedResponseType = MessageType::ControlPreloginStatus;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlPreloginStatusMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(*controlLink, action, &resp) && resp.kind == TcpControlResponseKind::PreloginStatus &&
+            resp.preloginStatus.requestId == rid) {
+          std::cout << "[native-video-client][sas] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.preloginStatus.result)
+                    << " win32=" << resp.preloginStatus.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult,
+                       static_cast<WPARAM>(resp.preloginStatus.result) | (static_cast<WPARAM>(resp.preloginStatus.flags) << 8),
+                       static_cast<LPARAM>(resp.preloginStatus.win32));
+        } else {
+          std::cout << "[native-video-client][sas] requestId=" << rid << " no valid reply\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNoAnswer, 0);
+        }
+      }
+    }
     // Host-IME entry: before draining input, align the host IME to English and confirm, so the
     // switch to physical routing (posted below) never lets an English key compose as jamo. Runs at
     // most one round-trip; keeps ordering because it precedes NextAction on the serial link.
@@ -789,6 +908,22 @@ void ControlClient::Run() {
             &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
             &ctx.control.inputQueue, &action, nullptr,
             bandwidthObserve ? &bandwidthSnapshot : nullptr)) {
+      // r7 H6: the last look before an input leaves -- it may have been queued before the host's role was
+      // known, or before it changed. Held back here exactly as at the keyboard.
+      if (!remote60::native_poc::prelogin::ViewerMaySendAction(
+              remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
+              action)) {
+        ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
+      // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
+      if (ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+          (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
+          !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(action))) {
+        continue;
+      }
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
       const bool actionOk = execute_control_action(*controlLink, action, &response);

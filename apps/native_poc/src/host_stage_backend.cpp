@@ -44,6 +44,7 @@
 #include "gdi_capture_process.hpp"
 #include "host_abr.hpp"
 #include "host_args.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "host_backend_policy.hpp"
 #include "host_bgra_scale.hpp"
 #include "host_bottleneck.hpp"
@@ -91,11 +92,42 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   auto& res = hx.res;
   auto& nowUs = tc.nowUs;
   auto& seq = tc.seq;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (r10 T2): what the DXGI worker does when the input desktop is no longer the one served
+  // (capture_backend_dxgi attach_input_desktop -> request_fallback), made to happen this long into the run
+  // (GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS) -- the test session has no desktop switch to make.
+  {
+    static const ULONGLONG forceAt = [] {
+      const char* v = std::getenv("GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS");
+      return v ? GetTickCount64() + std::strtoull(v, nullptr, 10) : 0ull;
+    }();
+    static bool forced = false;
+    if (forceAt != 0 && !forced && GetTickCount64() >= forceAt) {
+      forced = true;
+      std::cout << "[native-video-host][test-seam] dxgi fallback forced: prelogin_desktop_not_served\n";
+      capture.SetDxgiFallbackReason("prelogin_desktop_not_served");
+      capture.dxgiFallbackRequested.store(true, std::memory_order_release);
+    }
+  }
+#endif
+  // r10 T2: before login a capture that cannot go on ends the worker -- never another backend.
+  if (!capture.preloginServingDesktop.empty() &&
+      (capture.dxgiFallbackRequested.load(std::memory_order_acquire) ||
+       capture.gdiFallbackRequested.load(std::memory_order_acquire))) {
+    const std::string why = capture.SnapshotFallbackReasons().dxgi;
+    remote60::native_poc::prelogin::PreloginStopServing(why.empty() ? std::string("capture fallback requested") : why);
+  }
   if (const auto backendReq = hx.mailbox.TakeBackendRequest(hx.clientSession.epoch.load(std::memory_order_acquire))) {
     const uint32_t reqSeq = backendReq->seq;
     DesktopCaptureBackend nextRequested = backend.requested;
     const uint16_t requestedCode = static_cast<uint16_t>(backendReq->backend);
-    if (desktop_capture_backend_from_code(requestedCode, &nextRequested)) {
+    DesktopCaptureBackend asked = backend.requested;
+    const bool decoded = desktop_capture_backend_from_code(requestedCode, &asked);
+    if (decoded && !capture.preloginServingDesktop.empty() && asked != DesktopCaptureBackend::Dxgi) {
+      // r10 T2: a viewer's backend choice does not apply before login (only DXGI on the logon desktop).
+      std::cout << "[native-video-host][prelogin] desktop backend request ignored (only dxgi before login)\n";
+    } else if (decoded) {
+      nextRequested = asked;
       backend.requested = nextRequested;
       const bool desktopActive = !capture.windowModeActive.load(std::memory_order_acquire);
       const bool restartNeeded = desktopActive && backend.active != backend.requested;

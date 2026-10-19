@@ -108,6 +108,15 @@ constexpr UINT kMsgPasteResult = WM_APP + 17;
 // Paste on demand r7 (D2): the remote PC's files for the UI thread to decide on (lParam:
 // RemoteFilesDecide*, owned by the receiver) -- published here only if newer than this PC's copy.
 constexpr UINT kMsgDecideRemoteFiles = WM_APP + 18;
+// "Windows 로그인" (prelogin-ui r3, item 5): the control thread's outcome. wParam is the terminal
+// UnlockStage (or kPreloginNotAtLogon / 0), lParam the host's win32 error. Shown in a result window.
+constexpr UINT kMsgPreloginCredResult = WM_APP + 19;
+// r5 G8: typing was held back because the host is at the logon screen -- say once where it goes instead.
+constexpr UINT kMsgPreloginTypingHeldBack = WM_APP + 20;
+// r5 G11: the remote restart's answer for the window (wParam RebootResult, or 0xFF = no answer; lParam win32).
+constexpr UINT kMsgRebootResult = WM_APP + 21;
+// r9 R5: wp = PreloginSasResult (or kSasNotSent / kSasNoAnswer) | status flags << 8, lp = win32
+constexpr UINT kMsgSasResult = WM_APP + 22;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

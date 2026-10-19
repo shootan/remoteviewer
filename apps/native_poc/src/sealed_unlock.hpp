@@ -130,6 +130,16 @@ struct UnlockContext {
 std::vector<uint8_t> BuildAad(const UnlockContext& ctx);
 std::vector<uint8_t> BuildKdfInfo(const UnlockContext& ctx);
 
+// Prelogin credential delivery (prelogin-service r3, §2 "new purpose/version within sealed_unlock").
+// Same crypto primitives and the same (password-only, 258-byte) plaintext block, but a DISTINCT purpose
+// label so a blob sealed for typing credentials into the pre-login LogonUI can NEVER be opened under the
+// lock-screen Unlock AAD, and vice versa -- and an old peer (which only knows the Unlock label) rejects
+// a prelogin blob at the tag. The existing BuildAad/BuildKdfInfo bytes are UNCHANGED (the shipped unlock
+// path keeps interoperating). A username/second field would be a further layout version bump; v1 carries
+// password only. A viewer sends the prelogin-sealed credential only to a kCaptureFlagPreloginV1 host.
+std::vector<uint8_t> BuildPreloginCredAad(const UnlockContext& ctx);
+std::vector<uint8_t> BuildPreloginCredKdfInfo(const UnlockContext& ctx);
+
 // --- replay / challenge state machine (pure; no CNG) --------------------------------------------
 enum class ChallengeVerdict {
   Valid,           // matches the one outstanding challenge, not expired, not consumed

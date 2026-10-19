@@ -101,6 +101,17 @@ enum class MessageType : uint16_t {
   // paste_apply_wire.hpp, which only the Windows viewer and the host compile.
   ControlPasteTextApply = 80,
   ControlPasteApplied = 81,
+  // Prelogin remote access (prelogin-service, numbers assigned by the verifier). 82~83 are the prelogin
+  // control pair; their fixed payloads are defined with the prelogin worker unit (prelogin_wire.hpp).
+  // Gated on kCaptureFlagPreloginV1; an old host never sees them.
+  ControlPreloginStatus = 82,   // host -> viewer: the answer to 83 (r9 R5: op Sas -> PreloginSasResult)
+  ControlPreloginControl = 83,  // viewer -> host: a pre-login request (r9 R5: op 1 = Ctrl+Alt+Del / SAS)
+  // Remote reboot (prelogin-service r2, user decision 2026-10-07). A directory-authenticated viewer
+  // asks the host to restart; the SYSTEM service performs InitiateShutdownW. Works in prelogin too.
+  // Gated on kCaptureFlagRemoteRebootV1; an old host leaves the menu item disabled. Layout in
+  // reboot_wire.hpp.
+  ControlRebootRequest = 84,    // viewer -> host: requestId
+  ControlRebootReply = 85,      // host -> viewer: requestId, result (Accepted/Refused/NotAuthorized/Failed), win32
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -295,10 +306,30 @@ constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
 // a host that advertises this: an older host discards an unknown type without answering, and the
 // strict request/response link would then wait on a reply that never comes.
 constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
+// Prelogin remote access v1 (prelogin-service): the host is serving a pre-login secure desktop RIGHT
+// NOW (no interactive user; the remote login screen is live). This is the momentary state, so the
+// viewer can label the session and gate the sealed "Windows 로그인" credential entry. A viewer sends
+// the prelogin control pair (82/83) only to a host that advertises it. (Codex r4 R1: this is distinct
+// from the durable-enabled signal below -- do not conflate "in prelogin now" with "will come up before
+// login after a reboot".)
+constexpr uint32_t kCaptureFlagPreloginV1 = 0x2000u;
+// Remote reboot v1 (prelogin-service r2): the host takes ControlRebootRequest (84) and answers
+// ControlRebootReply (85). A viewer enables its in-menu reboot item (with the confirm popup) only when
+// it sees this bit; an old host leaves the item disabled with a reason.
+constexpr uint32_t kCaptureFlagRemoteRebootV1 = 0x4000u;
+// Prelogin DURABLE-ENABLED (prelogin-service r3, Codex r4 R1): the host has pre-login remote access
+// turned on, so AFTER A REBOOT it will be reachable before anyone logs in. This is independent of
+// kCaptureFlagPreloginV1 -- a logged-in host advertises THIS (durable on) but not that (not in prelogin
+// now). The reboot confirm popup keys its "...can't connect until someone logs in" warning on the
+// ABSENCE of this bit, so a feature-on host is never falsely warned.
+constexpr uint32_t kCaptureFlagPreloginEnabledV1 = 0x8000u;
 // Paste on demand r7 (D2): this host answers the ordered offer query (file messages 86/87): each R->P
 // file offer says which copy on the host it was made of (its copy generation). A viewer asks 86 only
 // of a host that advertises this; an older host is asked 67 as before (its offers carry no order).
 constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
+// prelogin-ui r9 R5: Ctrl+Alt+Del can be asked of this host (ControlPreloginControl op Sas, 83 -> 82). Only a
+// --prelogin worker advertises it; the answer may still be "policy does not allow" (prelogin_sas_wire.hpp).
+constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is

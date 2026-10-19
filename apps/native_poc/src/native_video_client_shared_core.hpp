@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "poc_protocol.hpp"
+#include "prelogin_sas_wire.hpp"
+#include "reboot_wire.hpp"
 
 namespace remote60::native_poc {
 
@@ -226,6 +228,8 @@ enum class ControlOutboundActionKind : uint8_t {
   UnlockStatusRequest,
   ImeStateRequest,
   ClientBandwidth,  // C0 stage 1, no reply
+  RebootRequest,    // prelogin-service r3: ControlRebootRequest (84), expects ControlRebootReply (85)
+  PreloginControl,  // prelogin-ui r9 R5: ControlPreloginControl (83), expects ControlPreloginStatus (82)
 };
 
 struct ControlOutboundAction {
@@ -251,6 +255,8 @@ struct ControlOutboundAction {
   ControlUnlockStatusRequestMessage unlockStatusReq{};
   ControlImeStateRequestMessage imeStateReq{};
   ControlClientBandwidthMessage clientBandwidth{};
+  ControlRebootRequestMessage reboot{};  // prelogin-service r3 (reboot_wire.hpp)
+  ControlPreloginControlMessage preloginControl{};  // prelogin-ui r9 R5 (prelogin_sas_wire.hpp)
   uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
   // t-970r4zgo: for a WindowSelect, the local selection it was asked for (the sink's tag when the
   // request was queued). The answer is handed to the sink with it, so a late answer to an earlier

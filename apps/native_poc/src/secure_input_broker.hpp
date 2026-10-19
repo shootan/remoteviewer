@@ -15,6 +15,8 @@ namespace remote60::native_poc {
 class SecureInputBrokerClient {
  public:
   SecureInputBrokerClient() = default;
+  // Tests: another pipe than the service's (a \\.\pipe\GNLinkTest-... one).
+  explicit SecureInputBrokerClient(std::wstring pipeName) : pipeName_(std::move(pipeName)) {}
   ~SecureInputBrokerClient();
   SecureInputBrokerClient(const SecureInputBrokerClient&) = delete;
   SecureInputBrokerClient& operator=(const SecureInputBrokerClient&) = delete;
@@ -33,6 +35,8 @@ class SecureInputBrokerClient {
    * no way to work it out on its own, since it only ever sees a width and a height.
    */
   void SetTargetRect(int32_t originX, int32_t originY, uint32_t width, uint32_t height);
+  // r10 T2: every message from now on may be injected only on the logon desktop (the --prelogin worker's).
+  void SetLogonDesktopOnly(bool on);
   /** The rect currently stamped into every message (0x0 = none: the host refuses to send). */
   void GetTargetRect(int32_t* originX, int32_t* originY, uint32_t* width, uint32_t* height) const;
   /**
@@ -59,16 +63,25 @@ class SecureInputBrokerClient {
   }
 
  private:
-  bool ConnectLocked();
-  bool WriteLocked(const SecureInputMessage& message);
+  static constexpr uint64_t kReconnectCooldownMs = 1000;
+  // r14 M1: `budgetMs` -- the startup connect waits for the service's pipe (3 s); the input path does not
+  // wait at all (it runs on the UDP reader thread): one try, and after a failure no new try for
+  // kReconnectCooldownMs.
+  bool ConnectLocked(uint32_t budgetMs);
+  // r20 merge: the one open, for both connect paths -- the server verified before a byte is written.
+  bool OpenVerifiedLocked(uint32_t waitMs);
+  bool WriteLocked(SecureInputMessage message);
   void apply_target_rect_locked(SecureInputMessage* message) const;
 
   mutable std::mutex mu_;
   HANDLE pipe_ = INVALID_HANDLE_VALUE;
-  const wchar_t* testPipeName_ = nullptr;     // nullptr -> production kSecureInputPipeName
+  const wchar_t* testPipeName_ = nullptr;     // nullptr -> pipeName_ (production kSecureInputPipeName)
   const wchar_t* testServiceName_ = nullptr;  // nullptr -> production kSecureInputServiceName
   ServerIdentityGatherer testGatherer_ = nullptr;  // nullptr -> production GatherServerIdentity
+  std::wstring pipeName_ = kSecureInputPipeName;
+  uint64_t nextConnectMs_ = 0;  // r14 M1: no connect attempt before this (GetTickCount64)
   int32_t targetOriginX_ = 0;
+  uint16_t flags_ = 0;  // r10 T2: stamped on every message (SetLogonDesktopOnly)
   int32_t targetOriginY_ = 0;
   uint32_t targetWidth_ = 0;
   uint32_t targetHeight_ = 0;

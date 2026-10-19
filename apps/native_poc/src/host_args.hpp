@@ -77,7 +77,33 @@ struct Args {
   std::string directoryPw;
   std::string directoryHostName;
   uint16_t directoryObservePort = 0;
+  // Prelogin remote access (prelogin-service): run as the SYSTEM pre-login worker on the console's
+  // secure desktop. In this mode the host advertises kCaptureFlagPreloginV1, enforces the prelogin
+  // control allowlist on every inbound control message (clipboard/file/paste/char-text/raw-key etc.
+  // rejected), and only accepts credential text over the sealed prelogin path. Launched by the
+  // GNLinkInputService supervisor; never set for an ordinary logged-in host.
+  bool preloginMode = false;
+  // r6 V5: --config was given with --prelogin (not loaded; the host refuses to start).
+  bool preloginRefusedConfig = false;
 };
+
+// r6 G1: the prelogin SYSTEM worker MUST run the directory-registering UDP+H264 path. The TCP/raw
+// default would skip the machine-heartbeat branch entirely, so the box never shows online after reboot.
+// The --prelogin role PINS transport=udp and codec=h264 when they are at their defaults, and REFUSES an
+// explicit conflicting transport/codec (no silent fallback). Pure, so the launcher contract is testable
+// off a machine.
+enum class PreloginRoleArgs { Ok, RejectTransport, RejectCodec };
+inline PreloginRoleArgs ApplyPreloginRoleContract(std::string& transport, std::string& codec) {
+  if (transport.empty())
+    transport = "udp";
+  else if (transport != "udp")
+    return PreloginRoleArgs::RejectTransport;  // an explicit TCP/other is refused, never downgraded to
+  if (codec.empty() || codec == "raw")
+    codec = "h264";
+  else if (codec != "h264")
+    return PreloginRoleArgs::RejectCodec;  // an explicit non-h264 codec is refused
+  return PreloginRoleArgs::Ok;
+}
 
 // Command line (+ optional --config JSON profile) -> Args. Defined in host_args.cpp.
 Args parse_args(int argc, char** argv);

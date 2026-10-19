@@ -22,6 +22,8 @@ enum class TcpControlResponseKind : uint8_t {
   UnlockAccepted,
   UnlockStatusResult,
   ImeStateResponse,
+  RebootReply,  // prelogin-service r3
+  PreloginStatus,  // prelogin-ui r9 R5
 };
 
 struct TcpControlResponse {
@@ -35,11 +37,16 @@ struct TcpControlResponse {
   ControlUnlockAcceptedMessage unlockAccepted{};
   ControlUnlockStatusResultMessage unlockStatusResult{};
   ControlImeStateResponseMessage imeStateResponse{};
+  ControlRebootReplyMessage rebootReply{};  // prelogin-service r3
+  ControlPreloginStatusMessage preloginStatus{};  // prelogin-ui r9 R5
 };
 
 // These take a ControlLink rather than a socket because the same exchange runs over TCP on a
 // LAN and over the hole-punched UDP socket when the host was reached through the directory.
 bool send_control_action(ControlLink& link, const ControlOutboundAction& action);
+// The message type an action puts on the wire (its message's header) -- what a pre-login host's allowlist
+// decides on (prelogin-ui r9). MessageType 0 for None.
+MessageType outbound_message_type(const ControlOutboundAction& action);
 bool recv_control_response(ControlLink& link, const ControlOutboundAction& action,
                            TcpControlResponse* out);
 bool execute_control_action(ControlLink& link, const ControlOutboundAction& action,

@@ -20,6 +20,7 @@
 #include "directory_client.hpp"
 #include "host_injected_input.hpp"
 #include "native_socket.hpp"
+#include "prelogin_admin_pipe.hpp"
 #include "udp_control_channel.hpp"
 
 namespace remote60::native_poc {
@@ -52,12 +53,20 @@ struct SocketCloser {
   enum class DirectoryHello { Rejected, Retransmit, NewSession };
 
 struct SessionState {
-  ~SessionState() { directoryAgent.Stop(); }  // before member/socket destruction, including early startup failure
+  // r12 L1: the Ready notifier (which reads directoryAgent) first, then the agent -- before member/socket
+  // destruction, including an early startup failure.
+  ~SessionState() {
+    readyNotifier.Stop();
+    directoryAgent.Stop();
+  }
   // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
   std::string directoryUrl;
   std::string directoryId;
   std::string directoryPw;
   remote60::native_poc::directory::HostAgent directoryAgent;
+  // r11 U4 / r12 L1: the user Host's periodic Ready to the service; reads directoryAgent's status. Declared
+  // after it (destroyed before it) and stopped first by ~SessionState and shutdown_host.
+  remote60::native_poc::prelogin::UserHostReadyNotifier readyNotifier;
   // Media sockets. lanSock is the legacy-port listener; retiredSock holds whichever socket the
   // handshake did not choose but that still has an owner (the directory agent keeps
   // heartbeating on it).
@@ -142,6 +151,34 @@ struct SessionState {
 
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---
   // Open a new session epoch for a just-connected client; returns the epoch to wait on.
+  // r9 R3: the epoch whose session a directory capability admitted (0 = none). What a dispatcher may do
+  // on the strength of directory auth is decided against THIS and its own epoch -- never by the shared
+  // flag alone, which a newer session's admission sets while an older dispatcher is still running.
+  std::atomic<uint64_t> directoryAuthEpoch{0};
+
+  // An admitted Hello: a new epoch first (when it starts a session), then this session's standing, then
+  // the shared flag -- in that order, so a dispatcher of an earlier epoch can never see the newcomer's
+  // authorization as its own. `step` (tests only) is told after each write. Returns the session's epoch.
+  uint64_t AdmitHello(bool directoryAuth, bool startsSession, const std::function<void(const char*)>& step = {}) {
+    uint64_t e = epoch.load(std::memory_order_acquire);
+    if (startsSession) {
+      e = BeginEpoch();
+      if (step) step("epoch");
+    }
+    directoryAuthEpoch.store(directoryAuth ? e : 0, std::memory_order_release);
+    if (step) step("auth-epoch");
+    directoryAuthenticated.store(directoryAuth, std::memory_order_release);
+    if (step) step("auth");
+    return e;
+  }
+
+  // Directory-authenticated, for a dispatcher serving `servedEpoch` (and only if that is still the session).
+  bool DirectoryAuthenticatedFor(uint64_t servedEpoch) const {
+    return directoryAuthenticated.load(std::memory_order_acquire) &&
+           directoryAuthEpoch.load(std::memory_order_acquire) == servedEpoch &&
+           epoch.load(std::memory_order_acquire) == servedEpoch;
+  }
+
   uint64_t BeginEpoch() {
     SessionState& clientSession = *this;
     const uint64_t epoch = clientSession.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;

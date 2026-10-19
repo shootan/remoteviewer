@@ -84,6 +84,12 @@
 #include "host_input_router.hpp"
 #include "host_encoded_sender.hpp"
 #include "host_session.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "prelogin_ingress_policy.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_machine_store.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_worker_binding.hpp"
 #include "host_encoder_manager.hpp"
 #include "host_stats.hpp"
 #include "host_capture_session.hpp"
@@ -216,8 +222,12 @@ int startup_connect_client(HostContext& hx) {
     // Only the handshake watches both. Whichever socket the Hello arrives on becomes the media
     // socket and everything downstream is unchanged, so a session that never uses this listener
     // behaves exactly as it did before.
+    // r6 G2: no LAN direct-dial fallback in prelogin -- a directory failure/absence means OFFLINE, not a
+    // second, unauthenticated ingress. The only prelogin ingress is the authenticated directory session.
     const uint16_t lanPort =
-        portCandidates.size() > 1 ? portCandidates.back() : 0;
+        (portCandidates.size() > 1 && remote60::native_poc::prelogin::PreloginAllowsSideChannel(args.preloginMode))
+            ? portCandidates.back()
+            : 0;
     if (lanPort != 0 && lanPort != clientSession.mediaBindPort) {
       clientSession.lanSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
       if (clientSession.lanSock != INVALID_SOCKET) {
@@ -240,11 +250,78 @@ int startup_connect_client(HostContext& hx) {
 
     // The directory agent shares this socket on purpose: the public address it publishes has
     // to be the one NAT maps for the media stream, and that is a property of this socket.
+    // Prelogin (r4 #3): the SYSTEM worker has no per-user host.json, so load the directory credential
+    // from the DPAPI-sealed machine record and register/heartbeat as the machine -- this is what makes
+    // the box visible in the client list at the login screen. No record (or disabled) -> stays offline.
+    std::string preloadHostId, preloadHostToken;
+    if (args.preloginMode) {
+      // r6 V5: in --prelogin the machine record is the ONLY credential -- directory arguments and
+      // REMOTE60_DIRECTORY_* were cleared at config time, so nothing can stand in for it.
+      std::wstring recPath;
+      remote60::native_poc::prelogin::MachineRecord rec;
+      uint32_t w = 0;
+      auto readStatus = remote60::native_poc::prelogin::MachineStoreStatus::Read;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY (GNLinkStreamMigrationTest): the record a test sealed (machine-scope DPAPI, the
+      // product's format) in its own root, named by GNLINK_STREAM_TEST_MACHINE_RECORD. The G5 owner check
+      // on the folder is NOT applied (a non-elevated test cannot make a SYSTEM-owned folder); the
+      // unseal, the binding (machine id + floor) and everything after are the product's.
+      readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecordForTest(&recPath, &rec, &w);
+#else
+      wchar_t programData[MAX_PATH] = {};
+      if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) != 0) {
+        recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
+        readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w);
+      }
+#endif
+      {
+        if (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
+          // r6 G6: adopt ONLY a record that is Usable under the SAME binding the service gate uses --
+          // current machine id + the durable owner floor. A server-revoke/floor-raise, a copied blob, a
+          // wrong-machine record, or a floor that cannot be read all keep the worker OFFLINE, rather than
+          // the old `enabled && Unpack` that ignored the revoke.
+          uint64_t floor = 0;
+          const bool floorKnown = remote60::native_poc::prelogin::ReadPreloginOwnerFloor(&floor);
+          remote60::native_poc::prelogin::DirectoryCredential dc;
+          // r6 V7: and only for the product's own server -- a record naming any other address is not
+          // used, whoever wrote it.
+          const bool ownServer = remote60::native_poc::directory::directory_origin_key(rec.directoryOrigin) ==
+                                 remote60::native_poc::directory::directory_origin_key(
+                                     remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl());
+          // r9 R1/R2: a revoke still owed (sign-out / uninstall), or a mark that cannot be read: offline.
+          const bool revokeOwed = remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0;
+          if (revokeOwed) {
+            std::cout << "[native-video-host][prelogin] pre-login access is being withdrawn -> staying offline\n";
+          } else if (!ownServer) {
+            std::cout << "[native-video-host][prelogin] machine credential names another server -> staying offline\n";
+          } else if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
+                         rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
+                     remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
+            clientSession.directoryUrl = rec.directoryOrigin;
+            clientSession.directoryId = dc.accountId;
+            preloadHostId = dc.hostId;
+            preloadHostToken = dc.hostToken;
+            std::cout << "[native-video-host][prelogin] machine credential loaded hostId=" << dc.hostId << "\n";
+          } else {
+            std::cout << "[native-video-host][prelogin] machine credential revoked/unbound -> staying offline\n";
+          }
+        } else {
+          // Distinguish a genuinely un-enrolled box (no file) from a read/validation error.
+          std::cout << "[native-video-host][prelogin] "
+                    << (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Read
+                            ? "no machine credential enrolled"
+                            : "machine credential unreadable")
+                    << " -> staying offline\n";
+        }
+      }
+    }
     if (!clientSession.directoryUrl.empty()) {
       remote60::native_poc::directory::HostAgentConfig dirCfg;
       dirCfg.url = clientSession.directoryUrl;
       dirCfg.accountId = clientSession.directoryId;
       dirCfg.password = clientSession.directoryPw;
+      dirCfg.preloadedHostId = preloadHostId;
+      dirCfg.preloadedHostToken = preloadHostToken;
       dirCfg.hostName = args.directoryHostName;
       dirCfg.observeUdpPort = args.directoryObservePort;
       dirCfg.localUdpPort = clientSession.mediaBindPort;
@@ -278,6 +355,27 @@ int startup_connect_client(HostContext& hx) {
         std::cerr << "[native-video-host] directory disabled: " << dirError << "\n";
       } else {
         std::cout << "[native-video-host] directory agent started url=" << clientSession.directoryUrl << "\n";
+        // r4 #7: this user Host reached its ready point (directory-registered + about to serve). Tell the
+        // prelogin service so it completes the prelogin->user handoff on a real signal, not process life.
+        // The prelogin worker is not a handoff target and does not signal.
+        // prelogin-ui r2 (item 7): ready goes to the service over its admin pipe, where it is tied to
+        // this process's session and start time (the named event any admin process could set is gone).
+        if (!args.preloginMode) {
+          // r12 L1: on the session's own notifier -- stopped (and joined) before the directory agent it
+          // reads, at shutdown and at any earlier unwind (host_session.hpp, host_shutdown.cpp).
+          remote60::native_poc::prelogin::UserHostReadyNotifier::Options readyOptions;
+          // r11 U4: and again for as long as this host runs -- a service that starts or restarts after it
+          // adopts its GNLinkHost and needs this ready to hand over.
+          readyOptions.refreshMs = remote60::native_poc::prelogin::kUserHostReadyRefreshMs;
+          clientSession.readyNotifier.Start(
+              // "online" is set by a successful heartbeat; "punching" only right after one (it carried
+              // capabilities) -- either says the directory accepted this host.
+              [&agent = clientSession.directoryAgent] {
+                const std::string s = agent.StatusLine();
+                return s.rfind("online", 0) == 0 || s.rfind("punching", 0) == 0;
+              },
+              readyOptions);
+        }
       }
     }
 
@@ -376,14 +474,24 @@ int startup_connect_client(HostContext& hx) {
       if (bulkOffered) ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
       size_t tokenLen = 0;
       while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
+      bool helloAuthenticated = false;
       if (tokenLen > 0) {
         const std::string authToken(hello.authToken, hello.authToken + tokenLen);
         if (!clientSession.AuthorizeDirectorySession(authToken, peer)) {
           std::cerr << "[native-video-host] rejected udp hello with invalid directory capability\n";
           continue;
         }
-        clientSession.directoryAuthenticated.store(true, std::memory_order_release);
+        // r9 R3: the first session, admitted by the capability: its epoch's standing, then the flag.
+        (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
+        helloAuthenticated = true;
+      }
+      // r6 G2: in prelogin the login screen is exposed, so a token-less FIRST Hello must be refused
+      // BEFORE any peer/media state is adopted -- not only subsequent Hellos. Only an authenticated
+      // directory capability may open a prelogin session.
+      if (!remote60::native_poc::prelogin::PreloginAdmitFirstHello(args.preloginMode, helloAuthenticated)) {
+        std::cerr << "[native-video-host][prelogin] refusing token-less hello (authentication required)\n";
+        continue;
       }
       // Accepted: whether this client asked for bandwidth observation is its to decide.
       clientSession.bandwidthObserveNegotiated.store(

@@ -84,8 +84,11 @@ class ControlSessionServer {
                        DesktopBackendState& backend, WindowSelectionTxn& windowSelectionTxn,
                        MainLoopMailbox& mailbox, HostClipboardHub* clipboard);
 
-  // Serve one control conversation until the link dies or the host stops.
-  void Serve(ControlLink& link);
+  // Serve one control conversation until the link dies or the host stops. `linkDirectoryAuthenticated`
+  // is THIS link's own standing (r7 H4): the UDP control channel belongs to the peer whose Hello the
+  // directory capability admitted; an accepted TCP control connection is nobody's in particular, so it is
+  // false there -- and a privileged request (remote restart) on it is refused, whatever another link holds.
+  void Serve(ControlLink& link, bool linkDirectoryAuthenticated);
 
  private:
   // Named exactly like the main() locals they alias so the moved body reads unchanged.

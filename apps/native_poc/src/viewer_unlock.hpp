@@ -43,4 +43,42 @@ bool prompt_unlock_password(HWND owner, std::wstring* out);
 bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t hostId,
                          const std::wstring& password, std::string* status, bool* clearCredential);
 
+// --- "Windows 로그인" (prelogin-ui r3, item 5) ---------------------------------------------------
+// Offered only while the host says it is at the pre-login screen (Pong kCaptureFlagPreloginV1,
+// reboot_menu_policy DecidePreloginCred). The password is asked for each time, never stored, sealed
+// under the PRELOGIN purpose (a host's lock-screen unlock cannot open it, nor this worker an unlock
+// blob), typed by the host's pre-login worker into the logon UI, and zeroed. Injected (8) means
+// "typed", not "logged in"; the result window says which.
+constexpr wchar_t kPreloginPromptClass[] = L"GNLinkPreloginLogin";
+constexpr wchar_t kPreloginPromptTitle[] = L"GNLink — Windows 로그인";
+constexpr wchar_t kPreloginResultTitle[] = L"GNLink — Windows 로그인 결과";
+constexpr wchar_t kPreloginResultClass[] = L"GNLinkPreloginResult";
+constexpr int kPreloginResultTextId = 10;  // the STATIC that says what happened; the 확인 button is id 1
+constexpr uint16_t kPreloginNotAtLogon = 0xFFFF;  // not sent: the host was no longer at the logon screen
+
+// Modal prompt (same window as the unlock prompt, its own class and words). Nothing is saved.
+bool prompt_prelogin_password(HWND owner, std::wstring* out);
+// The exchange under the prelogin purpose. True when the host answered with a terminal stage
+// (*stage, *win32); false with *stage 0 when it did not.
+bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password,
+                                uint16_t* stage, uint32_t* win32, std::string* status);
+// What the result window says for a stage (kPreloginNotAtLogon and 0 included).
+std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32);
+// The result window (modal, owned by `owner`): the text and a 확인 button. Returns when it is closed.
+void show_prelogin_cred_result(HWND owner, const std::wstring& text);
+// The same window with another title: the "typing held back at the logon screen" notice (r5 G8) and the
+// remote restart's answer (r5 G11). Its class and control ids are the result window's.
+void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& text);
+constexpr wchar_t kRebootResultTitle[] = L"GNLink — 원격 PC 다시 시작";
+constexpr uint8_t kRebootNoAnswer = 0xFF;  // the request went, no valid answer came back
+constexpr uint8_t kRebootNotSent = 0xFE;   // not sent: the confirm was for another connection / no capability
+// What the restart window says for a RebootResult (0 Accepted, 1 Refused, 2 NotAuthorized, 3 Failed) or
+// kRebootNoAnswer.
+std::wstring reboot_result_text(uint8_t result, uint32_t win32);
+// r9 R5: what "Ctrl+Alt+Del" came to (PreloginSasResult 0..4, or the two local outcomes below).
+constexpr wchar_t kSasResultTitle[] = L"GNLink — Ctrl+Alt+Del";
+constexpr uint8_t kSasNoAnswer = 0xFF;
+constexpr uint8_t kSasNotSent = 0xFE;
+std::wstring sas_result_text(uint8_t result, uint32_t win32, uint8_t flags = 0);
+
 }  // namespace remote60::native_poc::viewer

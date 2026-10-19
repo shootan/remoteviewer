@@ -15,6 +15,7 @@
 #include "native_socket.hpp"
 #include "client_park_state.hpp"
 #include "client_telemetry_window.hpp"
+#include "client_host_role_gate.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
 
@@ -130,6 +131,24 @@ class ClientSessionController {
   bool HostSecureDesktopActive() const {
     return hostSecureDesktopActive_.load(std::memory_order_relaxed);
   }
+  // The connected host's Pong capture flags (0 until the first pong). The Android viewer's menu rules
+  // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
+  uint32_t HostCaptureFlags() const { return hostRole_.Load().flags; }
+  uint64_t PreloginInputHeldBack() const { return preloginInputHeldBack_.load(std::memory_order_relaxed); }
+  // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
+  // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
+  // control thread sends ControlRebootRequest (84) once; an answer that does not come is NOT asked for
+  // again -- the user decides (Codex r4 R3).
+  uint32_t RequestReboot();
+  // The answer for the request, once: outcome = RebootResult (0..3), or kRebootOutcomeNoReply when the
+  // link gave none (closed / desynchronised). False while there is nothing new.
+  static constexpr int kRebootOutcomeNoReply = 100;
+  bool TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32);
+  // r9 R5: Ctrl+Alt+Del at a pre-login host (0x20000). The request id, or 0 when nothing is sent. The answer,
+  // once: outcome = PreloginSasResult (0..4), or kRebootOutcomeNoReply when the link gave none.
+  uint32_t RequestSas();
+  // *flags (optional): kPreloginStatusFlag* -- e.g. the PC's logon needs no Ctrl+Alt+Del (DisableCAD).
+  bool TakeSasOutcome(uint32_t* requestId, int* outcome, uint32_t* win32, uint8_t* flags = nullptr);
   bool RequestStreamActive(bool active);
 
   // --- keepalive r1: park (Codex .claude/codex_keepalive_r1.md, client_park_state.hpp) ----------
@@ -304,6 +323,25 @@ class ClientSessionController {
   // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
+  std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
+  // r7 H6 / r10 / r11 U5: what the host is (the pong's flags, and whether a pong of this session said so) and
+  // the window-list request asked before that -- one state, changed by one transition at a time.
+  HostRoleGate hostRole_;
+  // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
+  std::mutex rebootMu_;
+  uint32_t rebootPendingId_ = 0;
+  bool rebootInFlight_ = false;
+  bool rebootHasOutcome_ = false;
+  uint32_t rebootOutcomeId_ = 0;
+  int rebootOutcome_ = 0;
+  uint32_t rebootWin32_ = 0;
+  // r9 R5: the same for Ctrl+Alt+Del (under rebootMu_).
+  uint32_t sasPendingId_ = 0;
+  bool sasHasOutcome_ = false;
+  uint32_t sasOutcomeId_ = 0;
+  int sasOutcome_ = 0;
+  uint32_t sasWin32_ = 0;
+  uint8_t sasFlags_ = 0;
   std::atomic<uint64_t> sessionBytesReceived_{0};
 
   // Clipboard text sync (K1). clipMu_ guards the core and the two one-slot mailboxes: the app

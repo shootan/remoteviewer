@@ -6,6 +6,7 @@
 
 #include "viewer_common.hpp"
 #include "viewer_state.hpp"
+#include "reboot_menu_policy.hpp"
 #include "viewer_input_forward.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
@@ -105,6 +106,14 @@ void push_session_toolbar_state(ViewerState& ctx) {
   state.connected = ctx.control.connected.load(std::memory_order_relaxed);
   state.inputOn = ctx.session.inputEnabled.load(std::memory_order_relaxed);
   state.macroOpen = remote60::native_poc::macro_window_visible();
+  // Remote reboot menu item is shown only when the host advertises the capability (prelogin-service r3).
+  state.rebootSupported = remote60::native_poc::DecideRebootMenu(
+                              ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)).menuEnabled;
+  state.preloginCredAvailable = remote60::native_poc::DecidePreloginCred(
+                                    remote60::native_poc::ViewerPlatform::Pc,
+                                    ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)).sealedEntryAvailable;
+  state.sasAvailable = (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) &
+                        remote60::native_poc::kCaptureFlagPreloginSasV1) != 0;  // r9 R5
   state.relay = ctx.session.relayPath.load(std::memory_order_relaxed);
   state.pathKnown = ctx.session.relayPathKnown.load(std::memory_order_relaxed);
   const auto metricsSnapshot = ctx.metrics.Snapshot();
