@@ -37,6 +37,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -141,8 +142,30 @@ using remote60::native_poc::VideoTransport;
 
 // Run one main-loop stage and honour the flow it reports. Deliberately not a do/while(0) macro:
 // the continue/break must act on the enclosing while (!stop) loop.
+// prelogin-field D2: the step the main thread is in, named in the exit-49 line when something throws -- the
+// pre-login worker died with 49 after each viewer connect and nothing said where (0.2.160 field).
+std::atomic<const char*> gHostStep{"start"};
+#ifdef REMOTE60_STREAM_TEST_SEAM
+// TEST BUILD ONLY (GNLinkStreamMigrationTest): GNLINK_STREAM_TEST_THROW_AT_STEP=<step> throws at that step --
+// std::runtime_error, or winrt::hresult_error(E_ACCESSDENIED) for "winrt:<step>" -- so a test can see the
+// exit-49 line name it. The shipped GNLinkStream has none of this (build gate: "stream-test-seam").
+inline void host_step_seam(const char* name) {
+  static const std::string target = [] {
+    char v[128] = {};
+    return GetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", v, sizeof(v)) > 0 ? std::string(v) : std::string();
+  }();
+  if (target.empty()) return;
+  if (target == name) throw std::runtime_error("stream-test-seam: injected throw");
+  if (target == std::string("winrt:") + name) throw winrt::hresult_error(E_ACCESSDENIED, L"stream-test-seam: injected winrt");
+}
+#define HOST_STEP(name) (gHostStep.store(name, std::memory_order_relaxed), host_step_seam(name))
+#else
+#define HOST_STEP(name) gHostStep.store(name, std::memory_order_relaxed)
+#endif
+
 #define RUN_STAGE(fn)                                                       \
   {                                                                         \
+    HOST_STEP(#fn);                                                         \
     const remote60::native_poc::Flow f_ = fn(host, tc);                     \
     if (f_ == remote60::native_poc::Flow::Continue) continue;               \
     if (f_ == remote60::native_poc::Flow::Break) break;                     \
@@ -398,6 +421,7 @@ int main(int argc, char** argv) {
   // Startup, in the monolith's order (host_startup.hpp). Each step is one former block of main();
   // the ones that can fail return the exit code main() used to return at that point.
   try {
+  HOST_STEP("startup_configure_from_env");
   if (const int rc = startup_configure_from_env(host)) return rc;
   if (args.preloginMode) {
     // r9 W2: the SYSTEM pre-login worker serves the logon desktop only. The first time the input desktop is
@@ -424,20 +448,33 @@ int main(int argc, char** argv) {
   }
   if (const int rc = resolve_transport(args, useRaw, useH264, transport)) return rc;
   watchdog.MarkMainProgress(remote60::native_poc::MainLoopPhase::Startup);
+  HOST_STEP("startup_start_main_loop_watchdog");
   startup_start_main_loop_watchdog(host, mainLoopWatchdog);
   remote60::native_poc::HostRunGuard runGuard{host};
+  HOST_STEP("startup_log_config");
   startup_log_config(host);
+  HOST_STEP("startup_configure_session");
   startup_configure_session(host);
+  HOST_STEP("startup_connect_client");
   if (const int rc = startup_connect_client(host)) return rc;
   watchdog.MarkMainProgress(remote60::native_poc::MainLoopPhase::Startup);
+  HOST_STEP("startup_configure_control_state");
   startup_configure_control_state(host);
+  HOST_STEP("startup_start_control_threads");
   startup_start_control_threads(host, controlServer);
+  HOST_STEP("startup_init_graphics");
   if (const int rc = startup_init_graphics(host)) return rc;
+  HOST_STEP("startup_select_capture_target");
   if (const int rc = startup_select_capture_target(host)) return rc;
+  HOST_STEP("startup_configure_encode_geometry");
   startup_configure_encode_geometry(host);
+  HOST_STEP("startup_init_encoder");
   if (const int rc = startup_init_encoder(host)) return rc;
+  HOST_STEP("startup_start_dxgi_watchdog");
   startup_start_dxgi_watchdog(host, dxgiWatchdogStop, dxgiWorkerWatchdog);
+  HOST_STEP("startup_create_readback");
   if (const int rc = startup_create_readback(host)) return rc;
+  HOST_STEP("startup_start_capture");
   if (const int rc = startup_start_capture(host)) return rc;
 
   // One tick = the twelve stages of host_main_loop.cpp, in order. A stage that used to
@@ -472,8 +509,30 @@ int main(int argc, char** argv) {
   runGuard.active = false;
   std::cout << "[native-video-host] done\n";
   return 0;
-  } catch (...) {
+  } catch (const winrt::hresult_error& e) {
     // Catching outside HostRunGuard ensures a real unwind, including partially started workers.
+    // prelogin-field D2: what threw and where, then the same exit 49 as before.
+    char line[512];
+    std::snprintf(line, sizeof(line), "[native-video-host] FATAL: winrt::hresult_error hr=0x%08lx \"%s\" at step=%s -- exit 49",
+                  static_cast<unsigned long>(e.code()), winrt::to_string(e.message()).c_str(), gHostStep.load());
+    std::cout << line << std::endl;
+    std::cerr << line << std::endl;
+    OutputDebugStringA(line);
+    return 49;
+  } catch (const std::exception& e) {
+    char line[512];
+    std::snprintf(line, sizeof(line), "[native-video-host] FATAL: std::exception \"%s\" at step=%s -- exit 49", e.what(),
+                  gHostStep.load());
+    std::cout << line << std::endl;
+    std::cerr << line << std::endl;
+    OutputDebugStringA(line);
+    return 49;
+  } catch (...) {
+    char line[256];
+    std::snprintf(line, sizeof(line), "[native-video-host] FATAL: unknown exception at step=%s -- exit 49", gHostStep.load());
+    std::cout << line << std::endl;
+    std::cerr << line << std::endl;
+    OutputDebugStringA(line);
     return 49;
   }
 }

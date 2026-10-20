@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <cstring>
 #include <string>
 #include <thread>
 #include "bounded_process_exit.hpp"
@@ -56,6 +57,7 @@
 #include "prelogin_autostart.hpp"
 #include "secure_input_protocol.hpp"
 #include "host_app_log.hpp"
+#include "host_directory_status.hpp"
 #include "update_readiness.hpp"
 #include "log_upload.hpp"
 #include "host_command_line.hpp"
@@ -91,6 +93,12 @@ constexpr UINT kUpdateHandoffDoneMessage = WM_APP + 4;
 constexpr UINT kPreloginReplyMessage = WM_APP + 8;
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusIntervalMs = 2000;
+// prelogin-field D1: the tray icon is added again until the notification area takes it. With pre-login
+// access on, the service starts this window at logon -- before Explorer has made the notification area --
+// so the first NIM_ADD can fail; and an Explorer restart drops every icon (TaskbarCreated says so).
+constexpr UINT_PTR kTrayRetryTimer = 2;
+constexpr UINT kTrayRetryIntervalMs = 2000;
+constexpr int kTrayRetryLimit = 90;  // 3 minutes of tries; TaskbarCreated still re-adds after that
 // Matches IDI_GNLINK in host_app.rc.
 constexpr int kIconResource = 101;
 // What the user sees. Internal identifiers (window class, Run value, cache folder) keep the
@@ -520,8 +528,12 @@ class StreamingHostProcess {
         remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
         if (marker != std::string::npos) {
+          // D4: a progress line (a viewer's "punch -> ...") does not take "online" away
+          // (host_directory_status.hpp); offline, errors and sign-in lines still do.
           std::lock_guard<std::mutex> lock(statusMu_);
-          directoryStatus_ = line.substr(marker + 10);
+          if (const auto next = remote60::native_poc::NextDirectoryStatus(directoryStatus_, line.substr(marker + 10))) {
+            directoryStatus_ = *next;
+          }
         }
       }
       if (pending.size() > 4096) pending.clear();
@@ -1096,6 +1108,10 @@ void update_tray_tip() {
   Shell_NotifyIconW(NIM_MODIFY, &g.tray);
 }
 
+// The "TaskbarCreated" broadcast (registered in WM_CREATE): Explorer has (re)made the notification area.
+UINT gTaskbarCreatedMessage = 0;
+int gTrayRetries = 0;
+
 void add_tray_icon(HWND window) {
   g.tray = {};
   g.tray.cbSize = sizeof(g.tray);
@@ -1109,8 +1125,40 @@ void add_tray_icon(HWND window) {
   g.tray.hIcon = smallIcon ? smallIcon : LoadIconW(GetModuleHandleW(nullptr),
                                                    MAKEINTRESOURCEW(kIconResource));
   wcscpy_s(g.tray.szTip, kProductName);
+#ifdef REMOTE60_HOST_TEST_SEAM
+  // TEST BUILDS ONLY: GNLINK_HOST_TEST_TRAY_ADD_FAILS=n makes the first n NIM_ADDs fail, as they do when the
+  // notification area does not exist yet.
+  static int injectedFailures = [] {
+    wchar_t v[16] = {};
+    return GetEnvironmentVariableW(L"GNLINK_HOST_TEST_TRAY_ADD_FAILS", v, 16) > 0 ? _wtoi(v) : 0;
+  }();
+  if (injectedFailures > 0) {
+    --injectedFailures;
+    g.trayAdded = false;
+    append_host_app_log("[host-test-seam] tray: NIM_ADD failure injected");
+    return;
+  }
+#endif
   g.trayAdded = Shell_NotifyIconW(NIM_ADD, &g.tray) != FALSE;
   update_tray_tip();
+}
+
+// D1: add the icon; when the notification area is not there yet, try again on a timer (bounded).
+void ensure_tray_icon(HWND window, const char* why) {
+  add_tray_icon(window);
+  if (g.trayAdded) {
+    if (gTrayRetries > 0 || std::strcmp(why, "start") != 0) {
+      append_host_app_log(std::string("[host-app] tray icon added (") + why + ", after " + std::to_string(gTrayRetries) +
+                          " retries)");
+    }
+    gTrayRetries = 0;
+    KillTimer(window, kTrayRetryTimer);
+    return;
+  }
+  append_host_app_log(std::string("[host-app] tray icon not added (") + why + ", err=" + std::to_string(GetLastError()) +
+                      ") -- retrying every " + std::to_string(kTrayRetryIntervalMs) + " ms");
+  gTrayRetries = 0;
+  SetTimer(window, kTrayRetryTimer, kTrayRetryIntervalMs, nullptr);
 }
 
 void remove_tray_icon() {
@@ -2344,13 +2392,23 @@ void open_log_file() {
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+  // D1: Explorer (re)created the notification area -- every icon it had is gone; add ours again.
+  if (gTaskbarCreatedMessage != 0 && message == gTaskbarCreatedMessage) {
+    g.trayAdded = false;
+    ensure_tray_icon(window, "TaskbarCreated");
+    return 0;
+  }
   switch (message) {
     case WM_CREATE:
       g.window = window;
       g.dpi = GetDpiForWindow(window);
       create_fonts();
       build_controls(window);
-      add_tray_icon(window);
+      // D1: this window runs elevated; Explorer's broadcast comes from medium integrity and UIPI would drop
+      // it, so the one message is let through.
+      gTaskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+      if (gTaskbarCreatedMessage != 0) ChangeWindowMessageFilterEx(window, gTaskbarCreatedMessage, MSGFLT_ALLOW, nullptr);
+      ensure_tray_icon(window, "start");
       SetTimer(window, kStatusTimer, kStatusIntervalMs, nullptr);
       return 0;
 
@@ -2557,6 +2615,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       return 0;
 
     case WM_TIMER:
+      if (wParam == kTrayRetryTimer) {
+        ++gTrayRetries;
+        add_tray_icon(window);
+        if (g.trayAdded) {
+          append_host_app_log("[host-app] tray icon added (retry " + std::to_string(gTrayRetries) + ")");
+          gTrayRetries = 0;
+          KillTimer(window, kTrayRetryTimer);
+        } else if (gTrayRetries >= kTrayRetryLimit) {
+          append_host_app_log("[host-app] tray icon still not added after " + std::to_string(gTrayRetries) +
+                              " retries -- waiting for TaskbarCreated");
+          KillTimer(window, kTrayRetryTimer);
+        }
+        return 0;
+      }
       if (wParam == kStatusTimer) {
         refresh_status_text();
         update_tray_tip();
@@ -2592,6 +2664,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
                           std::to_string(GetCurrentProcessId()));
       KillTimer(window, kStatusTimer);
+      KillTimer(window, kTrayRetryTimer);
       // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
       // because "already stopped, no child" and "a child is somehow still alive" are different
       // answers and only one of them is fine.

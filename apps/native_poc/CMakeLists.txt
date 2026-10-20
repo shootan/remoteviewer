@@ -2781,6 +2781,22 @@ if(MSVC)
   target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
 endif()
 
+# prelogin-field D4: the window's directory status keeps "online" through a viewer's punch (pure).
+add_executable(remote60_host_directory_status_test src/host_directory_status_test.cpp)
+target_include_directories(remote60_host_directory_status_test PRIVATE src)
+
+# prelogin-field D2: the streaming host's exit 49 names what threw and the step (GNLinkStreamMigrationTest throws
+# at a named step through REMOTE60_STREAM_TEST_SEAM).
+add_executable(remote60_host_fatal_exception_test src/host_fatal_exception_test.cpp)
+add_dependencies(remote60_host_fatal_exception_test remote60_native_video_host_migration_seam)
+
+# prelogin-field D1: GNLinkHost's tray icon -- retried when the notification area is not there yet, re-added on
+# TaskbarCreated -- in the asInvoker test build, observed through Shell_NotifyIconGetRect.
+add_executable(remote60_host_tray_icon_ui_test src/host_tray_icon_ui_test.cpp)
+target_include_directories(remote60_host_tray_icon_ui_test PRIVATE src)
+target_link_libraries(remote60_host_tray_icon_ui_test PRIVATE shell32 user32)
+add_dependencies(remote60_host_tray_icon_ui_test remote60_host_app_ui_test)
+
 # prelogin-ui r1 (item 4): the toggle in GNLinkHost's own window (the asInvoker test build), worked
 # through UI Automation, against a test pipe served by the product's admin server and decision.
 add_executable(remote60_host_prelogin_toggle_ui_test
