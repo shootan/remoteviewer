@@ -26,6 +26,7 @@
 #include <atomic>
 
 #include "poc_protocol.hpp"
+#include "product_version.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -242,6 +243,11 @@ int wmain() {
                   std::string::npos &&
               wl.find("=== GNLinkStream --prelogin worker start") < wl.find("FATAL:"),
           std::to_string(wl.size()) + " bytes");
+    {
+      const std::wstring v = remote60::native_poc::kProductVersion;
+      check("...the header names this build's version (the one kProductVersion)",
+            wl.find("version=" + std::string(v.begin(), v.end()) + " ===") != std::string::npos, std::string(v.begin(), v.end()));
+    }
     check("...and the same line still reached the stdout it was started with (the test's)",
           read_all(log).find("at step=startup_configure_from_env -- exit 49") != std::string::npos);
     std::filesystem::remove_all(root, ec);

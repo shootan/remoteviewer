@@ -9,6 +9,9 @@ namespace remote60::native_poc {
 // all is to answer "did the update actually take?" -- a question that came up because several
 // releases in a row were diagnostic-only and looked identical from outside. A version that could
 // drift from the binary it labels would be worse than showing nothing.
-constexpr wchar_t kProductVersion[] = L"0.2.160";
+// inline (C++17): ONE definition for the whole program. A plain namespace-scope constexpr array has internal linkage --
+// every translation unit that takes its address gets its own copy, and the release parity gate counts copies
+// (gnlink_release_manifest.py CARRIERS: GNLinkStream 1). The pre-login worker log header made GNLinkStream 2.
+inline constexpr wchar_t kProductVersion[] = L"0.2.160";
 
 }  // namespace remote60::native_poc
