@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 namespace remote60::native_poc {
 
