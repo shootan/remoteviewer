@@ -46,6 +46,7 @@
 #include "prelogin_owner_floor.hpp"
 #include "prelogin_supervisor.hpp"
 #include "prelogin_worker_launch.hpp"
+#include "prelogin_worker_log.hpp"
 #ifdef REMOTE60_SIS_TEST_SEAM
 // prelogin r21 E1: the lifecycle test build only (GNLinkInputServiceLifecycleTest.exe) -- see the header.
 #include "secure_input_service_test_seam.hpp"
@@ -999,6 +1000,22 @@ void ensure_prelogin_worker(DWORD consoleSession) {
   const std::vector<wchar_t> environment = remote60::native_poc::prelogin::PreloginWorkerEnvironment(own);
   if (own) FreeEnvironmentStringsW(own);
   const std::wstring args = remote60::native_poc::prelogin::PreloginWorkerArgs();
+  {
+    // prelogin-field D3: the worker opens its own log (a handle cannot cross into its session); the service makes
+    // sure the folder is there and trusted, and says so when that changes. The worker checks it again itself.
+    static DWORD lastLogFolder = 0xFFFFFFFFu;
+    remote60::native_poc::prelogin::HeldChain logChain;
+    const std::wstring logPath = remote60::native_poc::prelogin::ProductWorkerLogPath();
+    const DWORD lf = logPath.empty() ? ERROR_PATH_NOT_FOUND
+                                     : remote60::native_poc::prelogin::HoldRecordChain(
+                                           logPath, /*create=*/true, remote60::native_poc::prelogin::OwnerIsSystemOrAdministrators,
+                                           &logChain);
+    if (lf != lastLogFolder) {
+      diag("prelogin: worker log folder %s (win32 %lu%s%ls)", lf == 0 ? "ok" : "REFUSED", static_cast<unsigned long>(lf),
+           lf == 0 ? "" : " at ", lf == 0 ? L"" : logChain.failedAt.c_str());
+      lastLogFolder = lf;
+    }
+  }
   gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon", sibling_exe_path(L"GNLinkStream.exe"),
                                                     args.c_str(), environment.data());
   gPreloginWorkerSession = gPreloginWorker ? consoleSession : 0xFFFFFFFFu;

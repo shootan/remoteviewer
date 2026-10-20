@@ -33,10 +33,18 @@ inline constexpr int kLeftLogonDesktopExit = 14;
 // and GDI are not bound to a desktop): the worker stops serving and leaves.
 inline constexpr int kPreloginCaptureStoppedExit = 15;
 
+// prelogin-field D3: what the worker runs right before it ends itself at once (its log sink's drain, when
+// one is installed -- prelogin_worker_log.hpp). Null: nothing.
+inline void (*&PreloginBeforeExitHook())() {
+  static void (*hook)() = nullptr;
+  return hook;
+}
+
 [[noreturn]] inline void PreloginStopServing(const std::string& why) {
   std::cout << "[native-video-host][prelogin] capture cannot continue on the logon desktop (" << why
             << "): no other capture before login -- stop serving and leave (r10 T2)" << std::endl;
   std::cerr.flush();
+  if (PreloginBeforeExitHook()) PreloginBeforeExitHook()();
   TerminateProcess(GetCurrentProcess(), kPreloginCaptureStoppedExit);
   for (;;) Sleep(1000);
 }

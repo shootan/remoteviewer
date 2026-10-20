@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <sddl.h>
 #ifdef min
 #undef min
 #endif
@@ -44,6 +45,9 @@
 #include <vector>
 
 #include "prelogin_logon_desktop.hpp"
+#include "prelogin_worker_log.hpp"
+#include "product_version.hpp"
+#include <functional>
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -172,7 +176,72 @@ inline void host_step_seam(const char* name) {
     if (f_ == remote60::native_poc::Flow::Return) return host.exitCode;     \
   }
 
+// prelogin-field D3: the pre-login worker's own log (prelogin_worker_log.hpp), opened before anything else so
+// an early failure and the exit-49 line are kept. Only for --prelogin; in the shipped build only as LocalSystem
+// (a user running it never creates anything under ProgramData); the test build logs under
+// GNLINK_STREAM_TEST_LOG_ROOT with the test's owner rule, or not at all.
+void install_prelogin_worker_log(int argc, char** argv) {
+  bool prelogin = false;
+  for (int i = 1; i < argc; ++i) prelogin = prelogin || std::strcmp(argv[i], "--prelogin") == 0;
+  if (!prelogin) return;
+  namespace pl = remote60::native_poc::prelogin;
+  std::wstring path;
+  std::function<bool(PSID)> ownerTrusted = pl::OwnerIsSystemOrAdministrators;
+  std::wstring fileSddl;  // empty: the product's SYSTEM+Administrators-only file
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  {
+    wchar_t root[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_LOG_ROOT", root, MAX_PATH) == 0) return;
+    path = std::wstring(root) + L"\\GNLink\\logs\\prelogin_worker.log";
+    HANDLE tok = nullptr;
+    static BYTE self[SECURITY_MAX_SID_SIZE + 64] = {};
+    DWORD n = 0;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+      BYTE buf[256];
+      if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &n)) {
+        CopySid(sizeof(self), self, reinterpret_cast<TOKEN_USER*>(buf)->User.Sid);
+      }
+      CloseHandle(tok);
+    }
+    // the test's rule: SYSTEM, Administrators, or the user running the test (stream-test-seam)
+    ownerTrusted = [](PSID s) { return pl::OwnerIsSystemOrAdministrators(s) || (s && IsValidSid(self) && EqualSid(s, self)); };
+    LPWSTR selfText = nullptr;
+    if (IsValidSid(self) && ConvertSidToStringSidW(self, &selfText)) {
+      fileSddl = std::wstring(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;") + selfText + L")";
+      LocalFree(selfText);
+    }
+  }
+#else
+  if (!pl::ProcessIsLocalSystem()) return;
+  path = pl::ProductWorkerLogPath();
+  if (path.empty()) return;
+#endif
+  SYSTEMTIME utc{};
+  GetSystemTime(&utc);
+  DWORD session = 0;
+  ProcessIdToSessionId(GetCurrentProcessId(), &session);
+  char header[256];
+  std::snprintf(header, sizeof(header),
+                "=== GNLinkStream --prelogin worker start utc=%04u-%02u-%02uT%02u:%02u:%02uZ pid=%lu session=%lu version=%ls ===",
+                utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond,
+                static_cast<unsigned long>(GetCurrentProcessId()), static_cast<unsigned long>(session),
+                remote60::native_poc::kProductVersion);
+  const DWORD e = pl::TheWorkerLogSink().Install(path, ownerTrusted, header, fileSddl.empty() ? nullptr : fileSddl.c_str());
+  if (e != 0) {
+    // No log: said where it can still be seen, and the worker goes on (its availability is the service's policy).
+    std::fprintf(stderr, "[native-video-host][prelogin] worker log refused at %ls (win32 %lu)\n",
+                 pl::TheWorkerLogSink().failedAt().c_str(), static_cast<unsigned long>(e));
+    return;
+  }
+  pl::PreloginBeforeExitHook() = pl::DrainWorkerLogBeforeExit;
+}
+
 int main(int argc, char** argv) {
+  install_prelogin_worker_log(argc, argv);
+  // Declared first, destroyed last: whatever main() returns -- 0, a startup code, 49 -- is on disk first.
+  struct DrainWorkerLogAtReturn {
+    ~DrainWorkerLogAtReturn() { remote60::native_poc::prelogin::DrainWorkerLogBeforeExit(); }
+  } drainWorkerLogAtReturn;
   // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
   // while the host is running; the display requirement is enabled only for an active stream.
   HostPowerKeepalive powerKeepalive;
@@ -432,6 +501,7 @@ int main(int argc, char** argv) {
       std::cout << "[native-video-host][prelogin] the input desktop is no longer the logon desktop (now \""
                 << std::string(name.begin(), name.end()) << "\"): stop serving and leave (r9 W2)" << std::endl;
       std::cerr.flush();
+      remote60::native_poc::prelogin::DrainWorkerLogBeforeExit();
       TerminateProcess(GetCurrentProcess(), remote60::native_poc::prelogin::kLeftLogonDesktopExit);
     };
     remote60::native_poc::prelogin::PreloginLeaveHandler() = leave;

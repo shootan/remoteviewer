@@ -86,6 +86,7 @@ add_executable(remote60_native_video_host_poc
   src/host_startup_graphics.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
+  src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_cred_host.cpp
   src/sealed_unlock.cpp
@@ -317,12 +318,15 @@ add_executable(remote60_secure_input_service
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
+  src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
 )
 set_target_properties(remote60_secure_input_service PROPERTIES OUTPUT_NAME "GNLinkInputService")
 target_include_directories(remote60_secure_input_service PRIVATE src)
 target_link_libraries(remote60_secure_input_service PRIVATE
+  shell32
+  ole32
   advapi32
   user32
   userenv
@@ -342,6 +346,7 @@ add_executable(remote60_secure_input_service_lifecycle_seam
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
+  src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
 )
@@ -349,6 +354,8 @@ set_target_properties(remote60_secure_input_service_lifecycle_seam PROPERTIES OU
 target_compile_definitions(remote60_secure_input_service_lifecycle_seam PRIVATE REMOTE60_SIS_TEST_SEAM=1)
 target_include_directories(remote60_secure_input_service_lifecycle_seam PRIVATE src)
 target_link_libraries(remote60_secure_input_service_lifecycle_seam PRIVATE
+  shell32
+  ole32
   advapi32
   user32
   userenv
@@ -2781,6 +2788,15 @@ if(MSVC)
   target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
 endif()
 
+# prelogin-field D3: the pre-login worker's own log -- trust (G5 chain), bounds, rotation, drain.
+add_executable(remote60_prelogin_worker_log_test
+  src/prelogin_worker_log_test.cpp
+  src/prelogin_worker_log.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_prelogin_worker_log_test PRIVATE src)
+target_link_libraries(remote60_prelogin_worker_log_test PRIVATE advapi32 shell32 ole32)
+
 # prelogin-field D4: the window's directory status keeps "online" through a viewer's punch (pure).
 add_executable(remote60_host_directory_status_test src/host_directory_status_test.cpp)
 target_include_directories(remote60_host_directory_status_test PRIVATE src)
@@ -2788,6 +2804,8 @@ target_include_directories(remote60_host_directory_status_test PRIVATE src)
 # prelogin-field D2: the streaming host's exit 49 names what threw and the step (GNLinkStreamMigrationTest throws
 # at a named step through REMOTE60_STREAM_TEST_SEAM).
 add_executable(remote60_host_fatal_exception_test src/host_fatal_exception_test.cpp)
+target_include_directories(remote60_host_fatal_exception_test PRIVATE src)
+target_link_libraries(remote60_host_fatal_exception_test PRIVATE ws2_32)
 add_dependencies(remote60_host_fatal_exception_test remote60_native_video_host_migration_seam)
 
 # prelogin-field D1: GNLinkHost's tray icon -- retried when the notification area is not there yet, re-added on

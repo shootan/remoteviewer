@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "host_winrt_seam.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -110,9 +111,26 @@ int startup_init_graphics(HostContext& hx) {
   auto& capture = hx.capture;
   auto& res = hx.res;
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  if (!GraphicsCaptureSession::IsSupported()) {
-    std::cerr << "[native-video-host] WGC not supported\n";
-    return 6;
+  if (hx.args.preloginMode) {
+    // prelogin-field D2 (Codex codex_prelogin_field_d3.md): the pre-login worker captures the logon desktop with
+    // DXGI only -- any WGC request there ends it (PreloginStopServing, exit 15) -- so it does not ask about WGC.
+    // The 0.2.160 worker exited 49 right after each viewer connect; this WinRT call is one candidate (not proven).
+    std::cout << "[native-video-host][prelogin] WGC not probed (the logon desktop is DXGI only)\n";
+  } else {
+    // An IsSupported that throws (its activation failed) is the same answer as false: WGC is not there. Said
+    // with the HRESULT, and the existing "not supported" exit -- never taken as supported.
+    bool wgcSupported = false;
+    try {
+      HostWinrtTrap("GraphicsCaptureSession::IsSupported");
+      wgcSupported = HostWgcIsSupported();
+    } catch (const winrt::hresult_error& e) {
+      std::cerr << "[native-video-host] WGC not supported (IsSupported threw hr=" << hr_hex(e.code()) << ")\n";
+      return 6;
+    }
+    if (!wgcSupported) {
+      std::cerr << "[native-video-host] WGC not supported\n";
+      return 6;
+    }
   }
 
   if (useH264) {
@@ -478,8 +496,15 @@ int startup_init_encoder(HostContext& hx) {
               << "\n";
   }
 
+  if (hx.args.preloginMode) {
+    // prelogin-field D2: the WinRT wrapper of the capture device is for the WGC frame pool, which the pre-login
+    // worker never builds (DXGI only). Not created here; the native device, readback and encoder are unchanged.
+    std::cout << "[native-video-host][prelogin] WinRT D3D wrapper not created (no WGC on the logon desktop)\n";
+    return 0;
+  }
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
   res.d3d.As(&dxgi);
+  HostWinrtTrap("CreateDirect3D11DeviceFromDXGIDevice");
   winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), res.inspectable.put()));
   res.d3dDevice = res.inspectable.as<IDirect3DDevice>();
   std::cout << d3d_multithread_log_line("winrt-wrapper", res.d3d.Get(), res.ctx.Get());
