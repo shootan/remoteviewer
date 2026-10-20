@@ -20,6 +20,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <sddl.h>
 
 #include <thread>
 #include <atomic>
@@ -178,6 +179,73 @@ int wmain() {
 
   code = run(dir, L"none", "", &out, 30000);
   check("control (nothing injected): no FATAL line", out.find("FATAL:") == std::string::npos, "exit " + std::to_string(code));
+
+  // ---- r3 (D3 through the worker's own main): --prelogin with the test log root, a throw at the first step ->
+  // exit 49, and the worker's log holds its header and the exit-49 line (the sink installed first thing, drained at
+  // main()'s return). No client is needed: the throw comes before any wait.
+  {
+    const std::wstring root = dir + L"fatal_prelogin_logroot";
+    const std::wstring logs = root + L"\\GNLink\\logs";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    CreateDirectoryW(root.c_str(), nullptr);
+    {
+      // the folders as the product makes them, naming this user (the test build's owner rule trusts it)
+      HANDLE tok = nullptr;
+      OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok);
+      BYTE buf[256];
+      DWORD n = 0;
+      GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &n);
+      CloseHandle(tok);
+      LPWSTR sid = nullptr;
+      ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, &sid);
+      const std::wstring sddl = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + std::wstring(sid) + L")";
+      LocalFree(sid);
+      for (const std::wstring& d : {root + L"\\GNLink", logs}) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr);
+        SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+        CreateDirectoryW(d.c_str(), &sa);
+        LocalFree(sd);
+      }
+    }
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_LOG_ROOT", root.c_str());
+    SetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", "startup_configure_from_env");
+    const std::wstring log = dir + L"fatal_prelogin.log";
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE h = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = h;
+    si.hStdError = h;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --prelogin";
+    PROCESS_INFORMATION pi{};
+    DWORD pcode = 0xFFFFFFFFu;
+    bool ended = false;
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) {
+      ended = WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0;
+      if (ended) GetExitCodeProcess(pi.hProcess, &pcode);
+      else TerminateProcess(pi.hProcess, 99);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+    CloseHandle(h);
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_LOG_ROOT", nullptr);
+    SetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", nullptr);
+    const std::string wl = read_all(logs + L"\\prelogin_worker.log");
+    check("--prelogin worker, throw at the first step: exit 49 by itself", ended && pcode == 49, "exit " + std::to_string(pcode));
+    check("...its own log: the start header, then the exit-49 line naming the step (written before main returned)",
+          wl.find("=== GNLinkStream --prelogin worker start") != std::string::npos &&
+              wl.find("FATAL: std::exception \"stream-test-seam: injected throw\" at step=startup_configure_from_env -- exit 49") !=
+                  std::string::npos &&
+              wl.find("=== GNLinkStream --prelogin worker start") < wl.find("FATAL:"),
+          std::to_string(wl.size()) + " bytes");
+    check("...and the same line still reached the stdout it was started with (the test's)",
+          read_all(log).find("at step=startup_configure_from_env -- exit 49") != std::string::npos);
+    std::filesystem::remove_all(root, ec);
+  }
 
   // ---- D2: the ordinary path's two WinRT calls ----
   code = run_with_client(dir, L"probe_trap", {{"GNLINK_STREAM_TEST_WINRT_TRAP", "probe"}}, "", &out);

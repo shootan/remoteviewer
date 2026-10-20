@@ -2795,7 +2795,7 @@ add_executable(remote60_prelogin_worker_log_test
   src/prelogin_store_chain.cpp
 )
 target_include_directories(remote60_prelogin_worker_log_test PRIVATE src)
-target_link_libraries(remote60_prelogin_worker_log_test PRIVATE advapi32 shell32 ole32)
+target_link_libraries(remote60_prelogin_worker_log_test PRIVATE advapi32 shell32 ole32 mincore)
 
 # prelogin-field D4: the window's directory status keeps "online" through a viewer's punch (pure).
 add_executable(remote60_host_directory_status_test src/host_directory_status_test.cpp)

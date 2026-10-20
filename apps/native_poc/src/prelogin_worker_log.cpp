@@ -9,6 +9,7 @@
 #include <shlobj.h>
 
 #include <cstdio>
+#include <system_error>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -229,118 +230,264 @@ void WorkerLogFile::Flush() {
 
 // ---- WorkerLogSink -------------------------------------------------------------------------------------------
 
-DWORD WorkerLogSink::Install(const std::wstring& path, const std::function<bool(PSID)>& ownerTrusted,
-                             const std::string& header, const wchar_t* fileSddl) {
-  if (installed_.load()) return 0;
-  {
-    std::lock_guard<std::mutex> lk(fileMu_);
-    const DWORD e = file_.Open(path, ownerTrusted, kWorkerLogFileCap, kWorkerLogLineCap, fileSddl);
-    if (e != 0) return e;
-    file_.WriteLine(header);
-    file_.Flush();
-  }
-  {
-    const HANDLE original = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (original && original != INVALID_HANDLE_VALUE && GetFileType(original) != FILE_TYPE_UNKNOWN) {
-      DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &forward_, 0, FALSE, DUPLICATE_SAME_ACCESS);
-    }
-  }
-  SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-  if (!CreatePipe(&readEnd_, &writeEnd_, &sa, 64 * 1024)) return GetLastError();
-  drained_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  // fd 1 and fd 2 (printf, fprintf(stderr), std::cout / std::cerr through the CRT) onto the pipe. A worker
-  // started without std handles has no valid stdout stream: it is opened on NUL first, then re-pointed.
-  for (FILE* stream : {stdout, stderr}) {
-    HANDLE dup = nullptr;
-    if (!DuplicateHandle(GetCurrentProcess(), writeEnd_, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-      return GetLastError();
-    }
-    const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(dup), _O_BINARY);
-    if (fd < 0) {
-      CloseHandle(dup);
-      return ERROR_INVALID_HANDLE;
-    }
-    FILE* reopened = nullptr;
-    if (_fileno(stream) < 0) freopen_s(&reopened, "NUL", "wb", stream);
-    if (_dup2(fd, _fileno(stream)) != 0) {
-      _close(fd);
-      return ERROR_INVALID_HANDLE;
-    }
-    _close(fd);
-    setvbuf(stream, nullptr, _IONBF, 0);  // a line printed is a line in the pipe -- also before a TerminateProcess
-  }
-  SetStdHandle(STD_OUTPUT_HANDLE, writeEnd_);
-  SetStdHandle(STD_ERROR_HANDLE, writeEnd_);
-  std::cout.clear();
-  std::cerr.clear();
-  collector_ = std::thread([this] { Collect(); });
-  collector_.detach();  // lives as long as the process; the object is never destroyed (TheWorkerLogSink)
-  installed_ = true;
-  return 0;
+WorkerLogSink::FailAt& WorkerLogSink::InstallFailForTest() {
+  static FailAt f = FailAt::None;
+  return f;
+}
+std::function<void()>& WorkerLogSink::WriterStallForTest() {
+  static std::function<void()> f;
+  return f;
+}
+std::atomic<bool>& WorkerLogSink::ReaderStopForTest() {
+  static std::atomic<bool> b{false};
+  return b;
 }
 
-void WorkerLogSink::Collect() {
+bool WorkerLogSink::Enqueue(Item&& item, bool force) {
+  {
+    std::lock_guard<std::mutex> lk(qMu_);
+    if (stopping_) return false;
+    const size_t n = item.line.size();
+    // A full queue drops the line (counted) -- the reader never waits for the writer. A drain marker always goes in.
+    if (!force && (queue_.size() >= kWorkerLogQueueLines || queueBytes_ + n > kWorkerLogQueueBytes)) {
+      ++queueDropped_;
+      return false;
+    }
+    queueBytes_ += n;
+    queue_.push_back(std::move(item));
+  }
+  qCv_.notify_one();
+  return true;
+}
+
+void WorkerLogSink::ReadLoop() {
   std::string pending;
   char buf[4096];
   for (;;) {
     DWORD got = 0;
-    if (!ReadFile(readEnd_, buf, sizeof(buf), &got, nullptr) || got == 0) {
-      // The write end is never closed while the process runs: a failure here ends the collector, and every later
-      // line is lost (not waited on).
-      return;
-    }
+    const BOOL ok = ReadFile(readEnd_, buf, sizeof(buf), &got, nullptr);
+    if (!ok || got == 0 || ReaderStopForTest().load()) break;
     pending.append(buf, got);
     size_t nl;
     while ((nl = pending.find('\n')) != std::string::npos) {
-      const std::string line = pending.substr(0, nl);
+      std::string line = pending.substr(0, nl);
       pending.erase(0, nl + 1);
       if (line.rfind(kDrainMarker, 0) == 0) {
-        const uint64_t n = std::strtoull(line.c_str() + sizeof(kDrainMarker) - 1, nullptr, 10);
-        {
-          std::lock_guard<std::mutex> lk(fileMu_);
-          file_.Flush();
-        }
-        drainDone_.store(n);
-        SetEvent(drained_);
+        Item marker;
+        marker.drainId = std::strtoull(line.c_str() + sizeof(kDrainMarker) - 1, nullptr, 10);
+        Enqueue(std::move(marker), /*force=*/true);
         continue;
       }
-      {
-        std::lock_guard<std::mutex> lk(fileMu_);
-        file_.WriteLine(line);
-      }
-      if (forward_) {
-        DWORD w = 0;
-        const std::string out = line + "\n";
-        WriteFile(forward_, out.data(), static_cast<DWORD>(out.size()), &w, nullptr);
-      }
+      Item it;
+      it.line = std::move(line);
+      Enqueue(std::move(it), false);
     }
-    if (pending.size() > kWorkerLogLineCap * 4) {  // no newline for a long while: write what there is as a line
-      std::lock_guard<std::mutex> lk(fileMu_);
-      file_.WriteLine(pending);
+    if (pending.size() > kWorkerLogLineCap * 4) {  // no newline for a long while: what there is goes as a line
+      Item it;
+      it.line = std::move(pending);
       pending.clear();
+      Enqueue(std::move(it), false);
     }
+  }
+  // Nobody empties the pipe any more: close its read end, so a later print fails at once (ERROR_NO_DATA) instead of
+  // waiting for room that will never come.
+  readerAlive_ = false;
+  HANDLE r = readEnd_;
+  readEnd_ = nullptr;
+  if (r) CloseHandle(r);
+}
+
+void WorkerLogSink::WriteLoop() {
+  for (;;) {
+    Item it;
+    uint64_t dropped = 0;
+    {
+      std::unique_lock<std::mutex> lk(qMu_);
+      qCv_.wait(lk, [this] { return stopping_ || !queue_.empty(); });
+      if (queue_.empty()) break;  // stopping, nothing left
+      it = std::move(queue_.front());
+      queue_.pop_front();
+      queueBytes_ -= it.line.size();
+      dropped = queueDropped_.load();
+    }
+    if (const auto& stall = WriterStallForTest()) stall();  // tests: a disk / forward that stops answering
+    if (it.drainId != 0) {
+      file_.Flush();
+      uint64_t prev = drainDone_.load();
+      while (prev < it.drainId && !drainDone_.compare_exchange_weak(prev, it.drainId)) {
+      }
+      SetEvent(drained_);
+      continue;
+    }
+    if (dropped > reportedDropped_) {
+      file_.WriteLine("[worker-log] " + std::to_string(dropped - reportedDropped_) + " line(s) dropped: the log queue was full");
+      reportedDropped_ = dropped;
+    }
+    file_.WriteLine(it.line);
+    if (forward_) {
+      DWORD w = 0;
+      const std::string out = it.line + "\n";
+      WriteFile(forward_, out.data(), static_cast<DWORD>(out.size()), &w, nullptr);
+    }
+  }
+  writerAlive_ = false;
+}
+
+void WorkerLogSink::Rollback() noexcept {
+  FILE* streams[2] = {stdout, stderr};
+  for (int k = 0; k < 2; ++k) {
+    if (redirected_[k]) {
+      std::fflush(streams[k]);
+      if (savedFd_[k] >= 0) _dup2(savedFd_[k], _fileno(streams[k]));  // the stream's fd is what it was
+      redirected_[k] = false;
+    }
+    if (savedFd_[k] >= 0) {
+      _close(savedFd_[k]);
+      savedFd_[k] = -1;
+    }
+  }
+  if (savedStd_[0]) SetStdHandle(STD_OUTPUT_HANDLE, savedStd_[0]);
+  if (savedStd_[1]) SetStdHandle(STD_ERROR_HANDLE, savedStd_[1]);
+  savedStd_[0] = savedStd_[1] = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(qMu_);
+    stopping_ = true;
+  }
+  qCv_.notify_all();
+  if (writeEnd_) {  // the last write handle (the fds' copies went with the restore): the reader sees the end
+    CloseHandle(writeEnd_);
+    writeEnd_ = nullptr;
+  }
+  if (reader_.joinable()) reader_.join();
+  if (writer_.joinable()) writer_.join();
+  if (readEnd_) {
+    CloseHandle(readEnd_);
+    readEnd_ = nullptr;
+  }
+  if (drained_) {
+    CloseHandle(drained_);
+    drained_ = nullptr;
+  }
+  if (forward_) {
+    CloseHandle(forward_);
+    forward_ = nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lk(qMu_);
+    queue_.clear();
+    queueBytes_ = 0;
+    stopping_ = false;
+  }
+  file_.Close();  // the file and the held folder chain are released
+  readerAlive_ = false;
+  writerAlive_ = false;
+}
+
+DWORD WorkerLogSink::Install(const std::wstring& path, const std::function<bool(PSID)>& ownerTrusted,
+                             const std::string& header, const wchar_t* fileSddl) noexcept {
+  if (installed_.load()) return 0;
+  failedAt_.clear();
+  auto fail = [this](const wchar_t* where, DWORD e) -> DWORD {
+    if (failedAt_.empty()) failedAt_ = where;
+    Rollback();
+    return e ? e : ERROR_GEN_FAILURE;
+  };
+  try {
+    const DWORD opened = file_.Open(path, ownerTrusted, kWorkerLogFileCap, kWorkerLogLineCap, fileSddl);
+    if (opened != 0) {
+      failedAt_ = file_.failedAt;
+      return fail(L"file", opened);
+    }
+    file_.WriteLine(header);
+    file_.Flush();
+    {
+      const HANDLE original = GetStdHandle(STD_OUTPUT_HANDLE);
+      if (original && original != INVALID_HANDLE_VALUE && GetFileType(original) != FILE_TYPE_UNKNOWN) {
+        if (!DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &forward_, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+          forward_ = nullptr;  // no forward: the log alone
+        }
+      }
+    }
+    drained_ = InstallFailForTest() == FailAt::Event ? nullptr : CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!drained_) return fail(L"event", InstallFailForTest() == FailAt::Event ? ERROR_NOT_ENOUGH_MEMORY : GetLastError());
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
+    if (!CreatePipe(&readEnd_, &writeEnd_, &sa, 64 * 1024)) return fail(L"pipe", GetLastError());
+    readerAlive_ = true;
+    writerAlive_ = true;
+    // Both threads run BEFORE anything is redirected: from the first redirected byte the pipe is being emptied.
+    if (InstallFailForTest() == FailAt::Thread) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    reader_ = std::thread([this] { ReadLoop(); });
+    writer_ = std::thread([this] { WriteLoop(); });
+    // The std handles as they are now, to put back.
+    savedStd_[0] = GetStdHandle(STD_OUTPUT_HANDLE);
+    savedStd_[1] = GetStdHandle(STD_ERROR_HANDLE);
+    FILE* streams[2] = {stdout, stderr};
+    for (int k = 0; k < 2; ++k) {
+      if (k == 1 && InstallFailForTest() == FailAt::StdoutRedirected) return fail(L"stderr", ERROR_INVALID_HANDLE);
+      FILE* stream = streams[k];
+      if (_fileno(stream) < 0) {  // started without std handles: the stream gets NUL first (and keeps it on failure)
+        FILE* reopened = nullptr;
+        if (freopen_s(&reopened, "NUL", "wb", stream) != 0 || _fileno(stream) < 0) return fail(k == 0 ? L"stdout" : L"stderr", ERROR_INVALID_HANDLE);
+      }
+      savedFd_[k] = _dup(_fileno(stream));
+      if (savedFd_[k] < 0) return fail(k == 0 ? L"stdout" : L"stderr", ERROR_INVALID_HANDLE);
+      HANDLE dup = nullptr;
+      if (!DuplicateHandle(GetCurrentProcess(), writeEnd_, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        return fail(k == 0 ? L"stdout" : L"stderr", GetLastError());
+      }
+      const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(dup), _O_BINARY);
+      if (fd < 0) {
+        CloseHandle(dup);
+        return fail(k == 0 ? L"stdout" : L"stderr", ERROR_INVALID_HANDLE);
+      }
+      std::fflush(stream);
+      const int moved = _dup2(fd, _fileno(stream));
+      _close(fd);
+      if (moved != 0) return fail(k == 0 ? L"stdout" : L"stderr", ERROR_INVALID_HANDLE);
+      redirected_[k] = true;
+      setvbuf(stream, nullptr, _IONBF, 0);  // a line printed is a line in the pipe -- also before a TerminateProcess
+    }
+    if (!SetStdHandle(STD_OUTPUT_HANDLE, writeEnd_) || !SetStdHandle(STD_ERROR_HANDLE, writeEnd_)) {
+      return fail(L"std handles", GetLastError());
+    }
+    std::cout.clear();
+    std::cerr.clear();
+    reader_.detach();  // committed: they live as long as the process (the object is never destroyed)
+    writer_.detach();
+    installed_ = true;
+    return 0;
+  } catch (...) {
+    // std::thread or an allocation failed: nothing escapes into the worker's start -- everything is put back.
+    return fail(L"exception", ERROR_NOT_ENOUGH_MEMORY);
   }
 }
 
-bool WorkerLogSink::Drain(uint32_t timeoutMs) {
-  if (!installed_.load()) return false;
+bool WorkerLogSink::Drain(uint32_t timeoutMs) noexcept {
+  const ULONGLONG deadline = GetTickCount64() + timeoutMs;  // from the call, for every step below
+  if (!installed_.load() || !readerAlive_.load() || !writerAlive_.load()) return false;
+  // stdio is unbuffered and the reader never waits on the disk, so these return as soon as the reader has taken the
+  // bytes; with the reader gone the pipe's read end is closed and they fail at once.
   std::fflush(stdout);
   std::fflush(stderr);
-  std::cout.flush();
-  std::cerr.flush();
+  try {
+    std::cout.flush();
+    std::cerr.flush();
+  } catch (...) {
+  }
   const uint64_t n = ++drainAsked_;
   const std::string marker = std::string(kDrainMarker) + std::to_string(n) + "\n";
   DWORD wrote = 0;
   if (!WriteFile(writeEnd_, marker.data(), static_cast<DWORD>(marker.size()), &wrote, nullptr)) return false;
-  const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+  // The one wait on the disk: bounded by the deadline. A writer stuck on the disk or a forward is "not preserved".
   while (drainDone_.load() < n) {
     const ULONGLONG now = GetTickCount64();
-    if (now >= deadline) return false;
+    if (now >= deadline || !writerAlive_.load()) return false;
     const ULONGLONG left = deadline - now;
-    WaitForSingleObject(drained_, static_cast<DWORD>(left < 50 ? left : 50));  // several drains may share the event
+    WaitForSingleObject(drained_, static_cast<DWORD>(left < 20 ? left : 20));
   }
   return true;
 }
+
 
 WorkerLogSink& TheWorkerLogSink() {
   static WorkerLogSink* sink = new WorkerLogSink();  // never destroyed: the collector may run until the process ends

@@ -29,7 +29,9 @@
 #include <windows.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -82,31 +84,73 @@ class WorkerLogFile {
   bool broken_ = false;  // a rotation that could not be made safely: nothing more is written
 };
 
-// stdout/stderr of this process -> a pipe -> a collector thread -> WorkerLogFile.
+// Bounds of the queue between the pipe reader and the disk writer.
+inline constexpr size_t kWorkerLogQueueLines = 4096;
+inline constexpr size_t kWorkerLogQueueBytes = 1024 * 1024;
+
+// stdout/stderr of this process -> a pipe -> a READER thread -> a bounded queue -> a WRITER thread -> WorkerLogFile
+// (and the original stdout, when there was one).
+//
+// prelogin-field r3 (Codex codex_prelogin_field_r2.md R2-1): the reader does nothing but empty the pipe into the
+// queue; when the queue is full a line is dropped and counted (said in the log once there is room). So a disk or a
+// forward that stops answering stops the WRITER only -- the pipe keeps emptying and whatever prints goes on. If the
+// reader itself ends, it closes the pipe's read end: a later print fails at once instead of waiting.
+// Drain's deadline starts when it is called; nothing in it waits on the disk except the bounded wait at its end.
+// Install (R2-2) is all or nothing: on any failure, or exception, every fd, std handle, thread, pipe, event and
+// file it touched is put back or released, and the caller's stdout/stderr are what they were (a stream that had no
+// handle at all stays on NUL).
 class WorkerLogSink {
  public:
-  // Opens the file, writes `header`, then points fd 1 / fd 2, the process's std handles and std::cout/cerr
-  // (through the CRT) at the pipe. A process started WITH a stdout (a test reading the worker) keeps getting
-  // every line there as well; the service's worker has none. 0, or the win32 error (nothing redirected then).
+  // 0, or the win32 error -- and then nothing is redirected. Never throws. A process started WITH a stdout (a test
+  // reading the worker) keeps getting every line there as well; the service's worker has none.
   DWORD Install(const std::wstring& path, const std::function<bool(PSID)>& ownerTrusted, const std::string& header,
-                const wchar_t* fileSddl = nullptr);
-  // Everything printed so far reaches the disk, or `timeoutMs` passes. Safe from any thread, any number of times.
-  bool Drain(uint32_t timeoutMs);
+                const wchar_t* fileSddl = nullptr) noexcept;
+  // Everything printed before the call is on disk -> true; `timeoutMs` (counted from the call) passed, the writer is
+  // stuck or gone -> false. Never waits longer. Safe from any thread, any number of times.
+  bool Drain(uint32_t timeoutMs) noexcept;
   bool installed() const { return installed_.load(); }
-  std::wstring failedAt() const { return file_.failedAt; }
+  std::wstring failedAt() const { return failedAt_; }
+  uint64_t droppedLines() const { return queueDropped_.load(); }
+
+  // TEST SEAMS (null in the product; prelogin_worker_log_test sets them): where Install fails, the writer's stall
+  // before each item, the reader's stop.
+  enum class FailAt { None, Event, StdoutRedirected /* the stderr step, after stdout already went to the pipe */, Thread };
+  static FailAt& InstallFailForTest();
+  static std::function<void()>& WriterStallForTest();
+  static std::atomic<bool>& ReaderStopForTest();
 
  private:
-  void Collect();
+  struct Item {
+    std::string line;
+    uint64_t drainId = 0;  // != 0: a drain marker, not a line
+  };
+  void ReadLoop();
+  void WriteLoop();
+  bool Enqueue(Item&& item, bool force);
+  void Rollback() noexcept;
   WorkerLogFile file_;
-  std::mutex fileMu_;
+  std::wstring failedAt_;
   HANDLE readEnd_ = nullptr;
-  HANDLE forward_ = nullptr;  // the stdout this process was started with, when it had one (tests): lines go on to it too
   HANDLE writeEnd_ = nullptr;
-  std::thread collector_;
+  HANDLE forward_ = nullptr;  // the stdout this process was started with, when it had one (tests): lines go on to it too
+  HANDLE drained_ = nullptr;  // manual-reset; pulsed when a drain marker went through
+  // what Install changed, to put back
+  int savedFd_[2] = {-1, -1};
+  HANDLE savedStd_[2] = {nullptr, nullptr};
+  bool redirected_[2] = {false, false};
+  std::thread reader_, writer_;
+  std::mutex qMu_;
+  std::condition_variable qCv_;
+  std::deque<Item> queue_;
+  size_t queueBytes_ = 0;
+  bool stopping_ = false;
+  std::atomic<uint64_t> queueDropped_{0};
+  uint64_t reportedDropped_ = 0;
+  std::atomic<bool> readerAlive_{false};
+  std::atomic<bool> writerAlive_{false};
   std::atomic<bool> installed_{false};
   std::atomic<uint64_t> drainAsked_{0};
   std::atomic<uint64_t> drainDone_{0};
-  HANDLE drained_ = nullptr;  // auto-reset; set when a drain marker went through
 };
 
 // The worker's one sink (main() installs it; the immediate-exit paths drain it before TerminateProcess).

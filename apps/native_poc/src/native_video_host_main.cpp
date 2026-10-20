@@ -237,7 +237,11 @@ void install_prelogin_worker_log(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-  install_prelogin_worker_log(argc, argv);
+  // r3 (R2-2): a log that cannot be set up -- even by an exception -- never stops the worker from starting.
+  try {
+    install_prelogin_worker_log(argc, argv);
+  } catch (...) {
+  }
   // Declared first, destroyed last: whatever main() returns -- 0, a startup code, 49 -- is on disk first.
   struct DrainWorkerLogAtReturn {
     ~DrainWorkerLogAtReturn() { remote60::native_poc::prelogin::DrainWorkerLogBeforeExit(); }
