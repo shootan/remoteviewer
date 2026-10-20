@@ -490,6 +490,11 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
     fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_ADDRESS=127.0.0.1");
     fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_PORT=" + std::to_wstring(port));
     fixtures.push_back(L"GNLINK_STREAM_TEST_SECONDS=150");
+    // prelogin-field r2: the WinRT trap / IsSupported answer / worker-log root, when the runner set them, reach the worker.
+    for (const wchar_t* name : {L"GNLINK_STREAM_TEST_WINRT_TRAP", L"GNLINK_STREAM_TEST_WGC_SUPPORTED", L"GNLINK_STREAM_TEST_LOG_ROOT"}) {
+      wchar_t v[MAX_PATH] = {};
+      if (GetEnvironmentVariableW(name, v, MAX_PATH) > 0) fixtures.push_back(std::wstring(name) + L"=" + v);
+    }
     // r9 W2: this worker runs in the test user's session, whose input desktop is "Default" -- the stand-in
     // for the logon desktop it serves here (the product's worker serves "Winlogon" only).
     if (extraEnv.rfind(L"GNLINK_STREAM_TEST_LOGON_DESKTOP=", 0) != 0) {
