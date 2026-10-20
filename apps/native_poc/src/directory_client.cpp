@@ -389,6 +389,17 @@ SOCKET connect_with_timeout(const sockaddr_in& addr, int timeoutMs) {
 }  // namespace
 
 std::string default_host_cache_path() {
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (r9 W3): never the runner's own %LOCALAPPDATA%\remote60\host.json -- SHGetKnownFolderPath
+  // does not follow an isolated LOCALAPPDATA. The test names the file (GNLINK_STREAM_TEST_CACHE), or it is
+  // one beside this test build (which a test stages in its own scratch directory).
+  if (const char* named = std::getenv("GNLINK_STREAM_TEST_CACHE")) return named;
+  char self[MAX_PATH * 2] = {};
+  GetModuleFileNameA(nullptr, self, MAX_PATH * 2);
+  std::string beside(self);
+  beside = beside.substr(0, beside.find_last_of("\\/") + 1) + "host_cache.test.json";
+  return beside;
+#endif
   PWSTR wide = nullptr;
   std::string base;
   if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &wide)) && wide) {
@@ -463,6 +474,14 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   machineId_ = machine_id();
   observeToken_ = random_token(16);
   LoadCache();
+
+  // Prelogin machine credential (r4 #3): adopt the SYSTEM-held hostId/hostToken, overriding any per-user
+  // cache. The agent then has a token (EnsureRegistered is a no-op) and heartbeats as the machine.
+  if (!cfg_.preloadedHostToken.empty() && !cfg_.preloadedHostId.empty()) {
+    hostToken_ = cfg_.preloadedHostToken;
+    hostId_ = cfg_.preloadedHostId;
+    std::cout << "[native-video-host] directory using machine credential hostId=" << hostId_ << "\n";
+  }
 
   if (hostToken_.empty() && cfg_.password.empty()) {
     if (outError) {

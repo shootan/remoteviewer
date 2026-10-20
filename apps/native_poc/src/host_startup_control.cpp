@@ -55,6 +55,7 @@
 #include "capture_cadence_gate.hpp"
 #include "control_resume.hpp"
 #include "host_diag_log.hpp"
+#include "prelogin_ingress_policy.hpp"
 #include "d3d_capture_readback.hpp"
 #include "directory_client.hpp"
 #include "encode_resolution_ladder.hpp"
@@ -112,7 +113,10 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
   auto& inputRouter = hx.inputRouter;
   auto& sender = hx.sender;
   auto& clientSession = hx.clientSession;
-  if (args.controlPort > 0) {
+  // r6 G2: in prelogin the ONLY control path is the authenticated UDP control channel tunnelled over the
+  // media socket. A separate TCP control listener would accept an unauthenticated link that borrows the
+  // shared directoryAuthenticated+epoch state, so it is not opened in prelogin.
+  if (args.controlPort > 0 && remote60::native_poc::prelogin::PreloginAllowsSideChannel(args.preloginMode)) {
     clientSession.controlListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (clientSession.controlListenSock == INVALID_SOCKET) {
       std::cerr << "[native-video-host] control listen socket create failed port=" << args.controlPort << "\n";
@@ -165,7 +169,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             {
               TcpControlLink link(acceptedSock);
               link.SetWriteCounter(&sender.txControlBytes);
-              controlServer.Serve(link);
+              controlServer.Serve(link, /*linkDirectoryAuthenticated=*/false);  // r7 H4: nobody's link
             }
             // This thread is the ONLY closer of an accepted control socket, and the close
             // happens under controlClientSockMu. shutdown_host holds the same mutex for its
@@ -407,6 +411,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') {
               ++tokenLen;
             }
+            // Prelogin (r4 #3): before anyone logs in, ONLY a directory-authenticated peer gets a
+            // session. A token-less LAN Hello (and the direct-LAN fallback it would open) must get no
+            // screen and no input -- reject it outright rather than fall through to direct-LAN mode.
+            if (args.preloginMode && tokenLen == 0) {
+              std::cerr << "[native-video-host][prelogin] rejected token-less LAN Hello "
+                           "(no screen/input before login)\n";
+              continue;
+            }
             bool directoryAuthenticated = false;
             bool newSession = false;
             if (tokenLen > 0) {
@@ -459,8 +471,8 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               std::cerr << "[native-video-host] rejected unauthenticated reconnect during directory session\n";
               continue;
             }
-            clientSession.directoryAuthenticated.store(directoryAuthenticated,
-                                                std::memory_order_release);
+            // r9 R3: the shared flag is no longer written here, ahead of the epoch -- AdmitHello below
+            // writes the epoch, this session's standing and the flag, in that order.
             // Accepted: from here this Hello is the session's. (C5) Every per-client option it
             // carries is stored only now -- the FEC layout and NACK used to be stored before the
             // refusals above too, so a refused Hello could change them under the running session.
@@ -496,7 +508,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               // Even when the endpoint is unchanged: a new client has a new decoder, and sending
               // it deltas against frames it never saw leaves it grey until the next keyframe.
               sender.udpPeerChanged.store(true, std::memory_order_release);
-              const uint64_t epoch = clientSession.BeginEpoch();
+            }
+            const uint64_t epoch = clientSession.AdmitHello(directoryAuthenticated, startsSession);
+            if (startsSession) {
               std::cout << "[native-video-host][control] session epoch=" << epoch
                         << (changed ? " peer=new" : " peer=same") << "\n";
               clientSession.AwaitControlReady(epoch);
@@ -924,7 +938,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // refused. Inside here the channel is in use, and re-keying it would break a link that
         // is working -- the reader reads this flag to decide (item 8).
         clientSession.controlServing.store(true, std::memory_order_release);
-        controlServer.Serve(link);
+        // r7 H4: this channel is the peer's whose Hello was admitted; what that admission was (directory
+        // capability or a LAN Hello) is the session's flag, re-read at every privileged request.
+        controlServer.Serve(link, /*linkDirectoryAuthenticated=*/true);
         clientSession.controlServing.store(false, std::memory_order_release);
         // Closed is not finished. Retransmits running out means this client is gone, which is
         // the ordinary end of a session and the reason to wait for the next one.

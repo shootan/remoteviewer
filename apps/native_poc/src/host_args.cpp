@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -16,11 +17,21 @@ namespace remote60::native_poc {
 Args parse_args(int argc, char** argv) {
   Args a;
   std::string configPath;
+  bool prelogin = false;
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     if (k == "--config" && i + 1 < argc) {
       configPath = argv[++i];
+    } else if (k == "--prelogin") {
+      prelogin = true;
     }
+  }
+  // r6 V5: a --prelogin worker takes nothing from a profile -- not its settings, not the environment
+  // overrides a profile can carry. The service starts it with --prelogin alone; one given anyway is
+  // refused at startup (preloginRefusedConfig), never half-applied.
+  if (prelogin && !configPath.empty()) {
+    a.preloginRefusedConfig = true;
+    configPath.clear();
   }
   if (!configPath.empty()) {
     std::string jsonText;
@@ -114,6 +125,8 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) a.inputLogEvery = std::max<uint32_t>(1, v);
     } else if (k == "--enable-input-injection") {
       a.enableInputInjection = true;
+    } else if (k == "--prelogin") {
+      a.preloginMode = true;
     } else if (k == "--directory-url" && i + 1 < argc) {
       a.directoryUrl = argv[++i];
     } else if (k == "--directory-cache" && i + 1 < argc) {
@@ -174,6 +187,34 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) {
         a.captureWindowRebindIntervalMs = std::clamp<uint32_t>(v, 200, 10000);
       }
+    }
+  }
+  // r6 G1: pin the prelogin role's required transport/codec when they are at their defaults so that
+  // `--prelogin` alone enters the UDP+H264 directory-registration path. A conflicting EXPLICIT value is
+  // left unchanged here on purpose: resolve_transport refuses it with a diagnostic (no silent fallback).
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (GNLinkStreamMigrationTest, r6 V2): a worker started with the service's own argument
+  // list (--prelogin alone) would take the product port on every interface -- which the real GNLink on
+  // the test machine may hold. The test names a loopback address, a free port and a lifetime here.
+  if (const char* v = std::getenv("GNLINK_STREAM_TEST_BIND_ADDRESS")) a.bindAddress = v;
+  if (const char* v = std::getenv("GNLINK_STREAM_TEST_BIND_PORT")) {
+    a.bindPortCandidates = remote60::native_poc::parse_bind_port_candidates(v);
+    if (!a.bindPortCandidates.empty()) a.bindPort = a.bindPortCandidates.front();
+  }
+  if (const char* v = std::getenv("GNLINK_STREAM_TEST_SECONDS")) a.seconds = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+  // r9 W3: GNLinkHost names its child's TCP control port (43001), which the real GNLink may hold.
+  if (const char* v = std::getenv("GNLINK_STREAM_TEST_CONTROL_PORT")) {
+    a.controlPort = static_cast<uint16_t>(std::strtoul(v, nullptr, 10));
+  }
+#endif
+  if (a.preloginMode) {
+    (void)ApplyPreloginRoleContract(a.transport, a.codec);
+    // r6 V6: the same listeners GNLinkHost gives its child (43000 primary, 3478 second; host_app_main),
+    // so a viewer reaches the PC on the same ports before and after login. No control port: before login
+    // there is no separate TCP control link (r6 G2).
+    if (a.bindPortCandidates.empty()) {
+      a.bindPortCandidates = remote60::native_poc::parse_bind_port_candidates("43000,3478");
+      if (!a.bindPortCandidates.empty()) a.bindPort = a.bindPortCandidates.front();
     }
   }
   return a;

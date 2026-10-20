@@ -83,6 +83,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
     gHostTest.migratableOrigins.push_back(formerName);
   }
   gHostTest.cachePath = narrow((std::filesystem::path(appData) / "remote60" / "host.json").wstring());
+  // prelogin-ui r1 (item 4): the runner's stand-in for the service's admin pipe; only a test pipe.
+  const std::wstring adminPipe = test_env(L"GNLINK_HOST_TEST_PRELOGIN_PIPE");
+  if (!adminPipe.empty()) {
+    if (adminPipe.rfind(L"\\\\.\\pipe\\GNLinkTest-", 0) != 0) return 2;
+    gHostTest.preloginPipe = adminPipe;
+    // r5 G3: and the only server this build trusts on it -- the test that serves it, by process id.
+    gHostTest.preloginServerPid = static_cast<uint32_t>(wcstoul(test_env(L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID").c_str(), nullptr, 10));
+    // r14 H2: "start the service" is the test's event (only a GNLinkTest- name).
+    const std::wstring startEvent = test_env(L"GNLINK_HOST_TEST_PRELOGIN_START_EVENT");
+    if (!startEvent.empty()) {
+      if (startEvent.rfind(L"GNLinkTest-", 0) != 0) return 2;
+      gHostTest.preloginStartEvent = startEvent;
+    }
+  }
   gHostTest.streamExe = own_executable_path();
+  // r9 W3: a real streaming TEST build (GNLinkStreamMigrationTest, staged inside the fixture root) in place
+  // of the stand-in -- for the GNLinkHost -> GNLinkStream -> service ready chain. Only inside the root.
+  const std::wstring realStream = test_env(L"GNLINK_HOST_TEST_STREAM_EXE");
+  if (!realStream.empty()) {
+    if (!inside(root, realStream) || !std::filesystem::exists(realStream)) return 2;
+    gHostTest.streamExe = realStream;
+  }
   return host_product_entry(instance, previous, commandLine, show);
 }

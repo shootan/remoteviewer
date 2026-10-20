@@ -85,6 +85,41 @@ struct DxgiDesktopCaptureSession::Impl {
   HMONITOR monitor = nullptr;
   uint32_t width = 0;
   uint32_t height = 0;
+  HDESK attachedDesktop = nullptr;  // prelogin: the input desktop this worker thread is bound to
+  bool refusedDesktop = false;      // r9 W2: the input desktop was another than the one served
+
+  // Prelogin (r4 #1): bind THIS worker thread to the current input desktop so DXGI/GDI capture the right
+  // desktop and can follow a secure-desktop / session switch. Idempotent; closes any prior handle. Called
+  // only when config.attachToInputDesktop is set, so the post-login host never runs this.
+  bool attach_input_desktop() {
+    HDESK desk = OpenInputDesktop(0, FALSE, GENERIC_READ);
+    if (!desk) {
+      log("capture", "prelogin OpenInputDesktop failed err=" + std::to_string(GetLastError()));
+      return false;
+    }
+    if (!config.requiredInputDesktop.empty()) {
+      // r9 W2: only the desktop this worker serves; the thread stays where it was (no new duplication of
+      // the other desktop is made from here).
+      wchar_t name[64] = {};
+      DWORD needed = 0;
+      const bool named = GetUserObjectInformationW(desk, UOI_NAME, name, sizeof(name), &needed) != FALSE;
+      if (!named || _wcsicmp(name, config.requiredInputDesktop.c_str()) != 0) {
+        log("capture", "prelogin capture refused: the input desktop is not the one served");
+        CloseDesktop(desk);
+        refusedDesktop = true;
+        return false;
+      }
+    }
+    if (SetThreadDesktop(desk) == FALSE) {
+      log("capture", "prelogin SetThreadDesktop failed err=" + std::to_string(GetLastError()));
+      CloseDesktop(desk);
+      return false;
+    }
+    if (attachedDesktop) CloseDesktop(attachedDesktop);
+    attachedDesktop = desk;
+    log("capture", "prelogin capture thread attached to the input desktop");
+    return true;
+  }
 
   void log(const std::string& phase, const std::string& message) const {
     if (onLog) onLog(phase, message);
@@ -384,6 +419,25 @@ struct DxgiDesktopCaptureSession::Impl {
       if (progress) progress->lastProgressUs.store(steady_now_us(), std::memory_order_release);
     };
 
+    // Prelogin (r4 #1): attach THIS worker thread to the input desktop before any duplication, and -- as
+    // Start() deferred the first DuplicateOutput to the worker when this flag is set -- create it here,
+    // so the attach always precedes duplication. A failed attach is non-fatal (DXGI is display-level and
+    // may still succeed); a failed initial duplication falls back to GDI exactly like any other failure.
+    if (config.attachToInputDesktop) {
+      attach_input_desktop();
+      if (refusedDesktop) {
+        request_fallback("prelogin_desktop_not_served");
+        return;
+      }
+      if (!duplication) {
+        std::string initialDetail;
+        if (!recreate_duplication(&initialDetail)) {
+          request_fallback("prelogin_initial_duplication_" + initialDetail);
+          return;
+        }
+      }
+    }
+
     while (!stopRequested.load()) {
       enterPhase(CaptureWorkerPhase::Report);
       report_stats_if_due(now_us());
@@ -413,6 +467,16 @@ struct DxgiDesktopCaptureSession::Impl {
       }
       if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_ACCESS_DENIED) {
         log("capture", "duplication_recreate begin reason=" + hresult_hex(hr));
+        // Prelogin: ACCESS_LOST is exactly the secure-desktop / session switch; re-bind to the (now
+        // possibly different) input desktop before recreating the duplication so capture follows it.
+        if (config.attachToInputDesktop) {
+          attach_input_desktop();
+          if (refusedDesktop) {
+            // r9 W2: the desktop changed to one this worker does not serve: no duplication of it, at all.
+            request_fallback("prelogin_desktop_not_served");
+            return;
+          }
+        }
         std::string recreateDetail;
         if (!recreate_duplication(&recreateDetail)) {
           log("capture", "duplication_recreate end success=0 detail=" + recreateDetail);
@@ -532,11 +596,16 @@ bool DxgiDesktopCaptureSession::Start(const DxgiDesktopCaptureConfig& config,
     return false;
   }
 
-  std::string recreateDetail;
-  if (!impl_->recreate_duplication(&recreateDetail)) {
-    if (detailOut) *detailOut = recreateDetail;
-    impl_.reset();
-    return false;
+  // Normally the first DuplicateOutput happens here, on the caller thread. In prelogin we DEFER it to the
+  // worker, which first SetThreadDesktop()s onto the input desktop -- doing it here (on a caller thread
+  // that is not on the input desktop) would duplicate the wrong desktop or fail. (r4 #1)
+  if (!impl_->config.attachToInputDesktop) {
+    std::string recreateDetail;
+    if (!impl_->recreate_duplication(&recreateDetail)) {
+      if (detailOut) *detailOut = recreateDetail;
+      impl_.reset();
+      return false;
+    }
   }
 
   // Publish a fresh heartbeat BEFORE the worker spawns so a watchdog poll that races the spawn sees

@@ -42,6 +42,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "prelogin_logon_desktop.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -169,6 +170,11 @@ int main(int argc, char** argv) {
     }
   }
 #endif
+  if (args.preloginMode && args.preloginRefusedConfig) {
+    std::cerr << "[native-video-host][prelogin] --config is not accepted with --prelogin (the service starts the "
+                 "worker with --prelogin alone)\n";
+    return 12;
+  }
   // Viewer input routing: injection mode, SYSTEM broker, counters, cursor forwarder (InputRouterState, Phase 1-9).
   InputRouterState inputRouter;
   const bool useRaw = (args.codec == "raw");
@@ -384,10 +390,34 @@ int main(int argc, char** argv) {
                    rate, kick, clientMetrics, backend, watchdog, inputRouter, sender, clientSession,
                    encoder, stats, capture, res, mailbox};
 
+  // r12 L1: the pre-login worker's input-desktop watch, OWNED here: declared after `capture` (which it
+  // writes), so on every way out of main -- a normal return, an early startup failure, an exception -- it is
+  // stopped and joined before capture is destroyed.
+  remote60::native_poc::StoppableWorker preloginDesktopWatch;
+
   // Startup, in the monolith's order (host_startup.hpp). Each step is one former block of main();
   // the ones that can fail return the exit code main() used to return at that point.
   try {
   if (const int rc = startup_configure_from_env(host)) return rc;
+  if (args.preloginMode) {
+    // r9 W2: the SYSTEM pre-login worker serves the logon desktop only. The first time the input desktop is
+    // another -- a user has logged on and it is now theirs -- it stops serving and leaves at once, whatever
+    // the handoff's state (prelogin_logon_desktop.hpp). Input is injected only while this says "serving".
+    // r17 R16-1: one leave for the whole worker -- the watch's and any other path's that sees another desktop.
+    static const auto leave = [](const std::wstring& name) {
+      std::cout << "[native-video-host][prelogin] the input desktop is no longer the logon desktop (now \""
+                << std::string(name.begin(), name.end()) << "\"): stop serving and leave (r9 W2)" << std::endl;
+      std::cerr.flush();
+      TerminateProcess(GetCurrentProcess(), remote60::native_poc::prelogin::kLeftLogonDesktopExit);
+    };
+    remote60::native_poc::prelogin::PreloginLeaveHandler() = leave;
+    preloginDesktopWatch.Start([&capture](remote60::native_poc::StoppableWorker& w) {
+      remote60::native_poc::prelogin::RunLogonDesktopWatch(
+          w, capture.preloginServingDesktop, capture.preloginDesktopServing,
+          [] { return remote60::native_poc::prelogin::InputDesktopName(); },
+          [] { std::cout << "[native-video-host][prelogin] serving the logon desktop\n"; }, leave);
+    });
+  }
   if (!ws.ok) {
     std::cerr << "[native-video-host] WSAStartup failed\n";
     return 1;

@@ -56,6 +56,12 @@ struct HostAgentConfig {
   // The product fills this from product_migratable_origins_for(); nothing on the command line
   // or in the environment can.
   std::vector<std::string> migratableOrigins;
+  // Prelogin (prelogin-service r4 #3): a machine credential the SYSTEM prelogin worker already holds
+  // (read from the DPAPI-sealed machine record, which the per-user host.json cache SYSTEM cannot). When
+  // both are set, the agent ADOPTS this hostId/hostToken after LoadCache -- it registers nothing and
+  // heartbeats as the machine, so the box is reachable at the login screen. Empty = ordinary behaviour.
+  std::string preloadedHostId;
+  std::string preloadedHostToken;
 };
 
 /** %LOCALAPPDATA%\remote60\host.json */

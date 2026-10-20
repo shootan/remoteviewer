@@ -88,6 +88,12 @@ object NativeSessionBridge {
     // The pick together with the monitorListRevision of the list it was made from.
     external fun nativeSelectMonitorAt(monitorId: Int, listRevision: Long): Boolean
     external fun nativeIsHostScreenLocked(): Boolean
+    /** The host's Pong capture flags (remote reboot / prelogin bits; RemoteRebootPolicy). */
+    external fun nativeHostCaptureFlags(): Int
+    /** One confirmed remote reboot: the request id, or 0 when nothing was sent. */
+    external fun nativeRequestReboot(): Int
+    /** [requestId, outcome, win32] of the reboot request once, or null. outcome 100 = no answer. */
+    external fun nativeTakeRebootOutcome(): LongArray?
     external fun nativeRequestRuntimeConfig(bitrateBps: Int, fps: Int): Boolean
     external fun nativeRequestDesktopCaptureBackend(backend: Int): Boolean
     external fun nativeRequestStreamActive(active: Boolean): Boolean

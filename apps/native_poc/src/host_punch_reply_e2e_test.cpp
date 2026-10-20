@@ -211,7 +211,7 @@ std::wstring isolation_args(const std::wstring& stagingDir) {
 }
 
 bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t mediaPort,
-               uint16_t controlPort, const char* tag) {
+               uint16_t controlPort, const char* tag, bool prelogin = false) {
   if (mediaPort == 0 || controlPort == 0) {
     // A port the picker could not provide must not reach the host: --bind-port 0 reads as "no
     // candidates" and the host would fall back to the product's default port. Nothing is staged,
@@ -261,7 +261,14 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
   const std::wstring url(directoryUrl.begin(), directoryUrl.end());
   // Loopback on purpose: a wildcard listener is what raises the firewall prompt.
-  std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
+  // r6 G1: in prelogin mode the role flag is the ONLY transport/codec input -- `--prelogin` must itself
+  // pin udp+h264. r6 V5 (updated r9 W4): the directory arguments given here are NOT a way in -- a
+  // --prelogin worker ignores them and takes its credential from the machine record only, so this run is
+  // the negative: the shipped binary, handed a directory to register with, never registers. (The
+  // positive -- the worker registering from a sealed machine record -- is viewer_prelogin_login_e2e's,
+  // on the test build.)
+  const std::wstring roleArgs = prelogin ? L" --prelogin" : L" --transport udp --codec h264";
+  std::wstring cmd = L"\"" + host->dir + L"GNLinkStream.exe\"" + roleArgs +
                      L" --bind-address 127.0.0.1" +
                      L" --bind-port " + std::to_wstring(mediaPort) +
                      L" --control-port " + std::to_wstring(controlPort) +
@@ -284,6 +291,22 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   check("the host gets a LOCALAPPDATA inside the staging directory", envIsolated,
         "the diagnostic mirror writes under whatever LOCALAPPDATA it is handed");
   if (!cmdIsolated || !envIsolated) return false;  // never start a host that could reach the user's files
+  if (prelogin) {
+    // A --prelogin worker reads the machine record under %ProgramData%: this one gets an empty folder of
+    // its own, so a record on this PC (if there ever is one) can never be read or registered with.
+    const std::wstring programData = host->dir + L"programdata";
+    CreateDirectoryW(programData.c_str(), nullptr);
+    const std::wstring kv = L"ProgramData=" + programData;
+    std::vector<wchar_t> rebuilt;
+    for (const wchar_t* p = env.data(); *p; p += wcslen(p) + 1) {
+      if (_wcsnicmp(p, L"ProgramData=", 12) == 0) continue;
+      rebuilt.insert(rebuilt.end(), p, p + wcslen(p) + 1);
+    }
+    rebuilt.insert(rebuilt.end(), kv.begin(), kv.end());
+    rebuilt.push_back(L'\0');
+    rebuilt.push_back(L'\0');
+    env.swap(rebuilt);
+  }
   host->cachePath = host->dir + L"host_cache.json";
 
   std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
@@ -315,6 +338,10 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
       host->output.append(buf, got);
     }
   });
+  // r6 V5: a --prelogin worker given directory arguments ignores them and never starts its directory
+  // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
+  // above; the case checks the offline result itself.
+  if (prelogin) return host->WaitFor("[native-video-host][prelogin]", 20000);
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
   const std::string wantPath(host->cachePath.begin(), host->cachePath.end());
@@ -1174,6 +1201,49 @@ int wmain(int argc, wchar_t** argv) {
     client.Disconnect();
     host.Stop();
     check("the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
+  }
+
+  // ======================================================= prelogin: nothing stands in for the machine record
+  // r6 V5 (replaces the r6 G1 "online" case here): a --prelogin worker's only credential is the machine
+  // record. Directory arguments -- what this case used to hand it so it would register -- are ignored,
+  // so the real host stays OFFLINE with them. That the --prelogin worker does come online, started the
+  // way the service starts it and from a machine record, is viewer_prelogin_login_e2e_test --service-start.
+  {
+    FakeDirectory dir;
+    check("[prelogin] the fake directory starts", dir.Start());
+    ScriptDirectory(dir, "h-prelogin", capabilityBody(token, kIssuedIp, kIssuedPort));
+
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
+    check("[prelogin] a real GNLinkStream starts with --prelogin and directory arguments",
+          StartHost(&host, dir.url(), mediaPort, remote60::native_poc::e2e::e2e_pick_free_tcp_port(),
+                    "prelogin", /*prelogin=*/true));
+    // r14 (Codex 3c8b350): the SHIPPED worker here is judged by what it must do on a user's desktop -- leave
+    // at once (exit 14), serve nothing, register nothing. Whether it got as far as the line that says the
+    // directory arguments are ignored is a race with that correct exit (the desktop watch starts right after
+    // the configuration), so it is not asked here; that the arguments are ignored is
+    // viewer_prelogin_login_e2e_test's r6 V5 case, on a worker that serves and so reaches that step.
+    // r9 W2 on the SHIPPED binary: this test runs in a user's session, whose input desktop is "Default" --
+    // exactly what a SYSTEM worker left over after a logon would see. It serves the logon desktop only, so
+    // it has left (exit 14) without ever serving.
+    DWORD rc = STILL_ACTIVE;
+    const bool ended = WaitForSingleObject(host.pi.hProcess, 15000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+    Sleep(2000);  // a register already on its way would have arrived (the process is gone: nothing new)
+    check("[prelogin] r6 V5: it did NOT register with the directory arguments it was given",
+          dir.Count("/api/host/register") == 0 && dir.Count("/api/host/heartbeat") == 0,
+          "registrations: " + std::to_string(dir.Count("/api/host/register")));
+    check("[prelogin] r9 W2: the shipped worker, on a user's desktop, left at once (exit 14) and never served it",
+          ended && rc == 14 && host.log().find("no longer the logon desktop") != std::string::npos &&
+              host.log().find("serving the logon desktop") == std::string::npos,
+          std::to_string(rc));
+    // r6 G2 negative control: a --control-port was passed, yet prelogin opens NO separate TCP control
+    // listener (the UDP control channel is the only path), so this startup line never prints.
+    check("[prelogin] no separate TCP control listener is opened (G2 side channel off)",
+          host.log().find("control waiting port=") == std::string::npos,
+          "prelogin must not expose an unauthenticated TCP control link");
+    host.Stop();
+    check("[prelogin] the host exited and its staging directory was removed", host.stopClean, host.stopWhy);
   }
 
   // Punch LOSS is not covered in this round. Not "cannot be covered" -- the earlier note said

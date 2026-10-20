@@ -24,6 +24,7 @@
 #include "product_version.hpp"
 #include "version_compare.hpp"
 #include "install_registration.hpp"
+#include "prelogin_uninstall_codes.hpp"
 
 namespace {
 
@@ -463,6 +464,8 @@ void remove_start_menu_shortcut() {
   }
 }
 
+constexpr int kUninstallPreloginNotRevoked = 5;
+
 int do_uninstall(bool fromTemp) {
   const std::wstring directory = install_dir();
   if (directory.empty()) return 2;
@@ -470,9 +473,16 @@ int do_uninstall(bool fromTemp) {
   if (!fromTemp && relaunch_from_temp_for_uninstall()) return 0;
 
   const std::wstring serviceExe = directory + L"\\GNLinkInputService.exe";
+  // r9 R2: the service's own removal withdraws pre-login access as one writer and says whether it really
+  // did. When it did not, removal still goes on (a half-removed product helps nobody), but this program
+  // ends with kUninstallPreloginNotRevoked: the service left its "revoke owed" mark down, so the feature
+  // stays off and any later install's service finishes the revoke before it serves anything.
+  int serviceResult = 0;
   if (GetFileAttributesW(serviceExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-    (void)run_and_wait(serviceExe, L"--uninstall-service");
+    serviceResult = run_and_wait(serviceExe, L"--uninstall-service");
   }
+  // r9 W4: what GNLinkHost remembered about the Run entry it handed to the service (this user's).
+  (void)RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\GNLink", L"PreloginTookOverAutostart");
   stop_running_product();
   remove_firewall_rules();
   remove_start_menu_shortcut();
@@ -524,6 +534,22 @@ int do_uninstall(bool fromTemp) {
 
   (void)RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, KEY_WOW64_64KEY, 0);
 
+  if (serviceResult != 0) {
+    // r9 R2 / r10 T1: said, not swallowed -- and each case in its own words (only the first is "off").
+    std::wstring text;
+    if (serviceResult == remote60::native_poc::prelogin::kUninstallRevokeOwed) {
+      text = L"GNLink Host was removed, but its sign-in-screen access could not be fully withdrawn. It stays "
+             L"switched off; installing GNLink again finishes withdrawing it first.";
+    } else if (serviceResult == remote60::native_poc::prelogin::kUninstallServiceNotRemoved) {
+      text = L"GNLink Host was removed and its sign-in-screen access withdrawn, but the GNLink security service "
+             L"could not be deleted. Restart the PC and run the uninstaller again.";
+    } else {
+      text = L"GNLink Host was removed, but it could NOT be confirmed that its sign-in-screen access was withdrawn "
+             L"(" + std::to_wstring(serviceResult) + L"). Run the uninstaller again as an administrator.";
+    }
+    report(text, true);
+    return kUninstallPreloginNotRevoked;
+  }
   report(filesRemoved ? L"GNLink Host was removed."
                       : L"GNLink Host was removed. Some files are still in use and will be "
                         L"deleted after a restart.",

@@ -17,4 +17,5 @@ target_include_directories(capture PUBLIC
 target_link_libraries(capture PUBLIC
   d3d11
   dxgi
+  user32  # SetThreadDesktop / OpenInputDesktop / CloseDesktop (prelogin input-desktop attach)
 )

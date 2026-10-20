@@ -278,4 +278,7 @@
     <string name="ui_switch_busy">전환하는 중입니다. 잠시 뒤에 다시 눌러 주세요</string>
     <string name="ui_monitor_list_changed">모니터 구성이 바뀌었습니다. 목록에서 다시 골라 주세요</string>
     <string name="ui_monitor_select_needs_host_update">이 PC의 GNLink를 업데이트해야 모니터를 고를 수 있습니다</string>
+    <!-- prelogin-ui r1 (item 8) -->
+    <string name="ui_remote_reboot">원격 PC 다시 시작</string>
+    <string name="ui_remote_reboot_confirm">다시 시작</string>
 </resources>

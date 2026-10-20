@@ -50,6 +50,15 @@
 #include "monitor_select_target.hpp"
 #include "stream_test_hold.hpp"
 #include "poc_protocol.hpp"
+#include "prelogin_control_allowlist.hpp"
+#include "prelogin_input_filter.hpp"
+#include "prelogin_reboot_gate.hpp"
+#include "prelogin_cred_host.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "prelogin_logon_desktop.hpp"
+#include "prelogin_sas_wire.hpp"
+#include "reboot_wire.hpp"
+#include <mutex>
 #include "peer_version.hpp"
 #include "time_utils.hpp"
 
@@ -76,6 +85,52 @@ struct FlushControlMessageOnExit {
     if (link) (void)link->EndMessage();
   }
 };
+
+}  // namespace
+
+namespace {
+// One remote restart in flight per host process, shared across both control dispatcher threads.
+std::mutex gRebootGateMu;
+
+// prelogin-ui r5 (G11): whether the service has pre-login access on, as last asked. Asked in the
+// background every 30 s (never on the pong path, which must not wait on a pipe); false until known.
+// r14 L2: on an owned thread (stoppable_worker.hpp), declared after the value it writes -- so at exit it is
+// stopped (its 30 s wait woken, a query in flight cancelled) and joined before that value goes.
+bool durable_prelogin_enabled() {
+  static std::atomic<bool> enabled{false};
+  static remote60::native_poc::StoppableWorker poll;
+  static const bool started = [] {
+    poll.Start([](remote60::native_poc::StoppableWorker& w) {
+      const std::function<bool()> keep = [&w] { return !w.Stopping(); };
+      do {
+        enabled.store(remote60::native_poc::prelogin::QueryDurablePreloginEnabled(keep), std::memory_order_release);
+      } while (w.Wait(30000));
+    });
+    return true;
+  }();
+  (void)started;
+  return enabled.load(std::memory_order_acquire);
+}
+
+// prelogin-ui r3 (item 5): the pre-login worker's end of "Windows 로그인" (prelogin_cred_host.hpp).
+// Its result line names the request and the stage, never the credential.
+remote60::native_poc::prelogin::PreloginCredReceiver& prelogin_cred() {
+  static remote60::native_poc::prelogin::PreloginCredReceiver receiver(
+      remote60::native_poc::prelogin::ProductCredInject(), remote60::native_poc::prelogin::ProductCredTarget(),
+      remote60::native_poc::prelogin::ProductCredEnvironment(), remote60::native_poc::prelogin::ProductCredHostId(),
+      remote60::native_poc::prelogin::ProductCredTargetWaitMs());
+  static const bool logged = [] {
+    // r17 R16-1: nothing issued, opened or typed once this worker has left the logon desktop.
+    receiver.stillServing = [] { return !remote60::native_poc::prelogin::PreloginLeftLatch().load(); };
+    receiver.onResult = [](uint32_t requestId, uint16_t stage, uint32_t win32) {
+      std::cout << "[native-video-host][prelogin-cred] requestId=" << requestId << " stage=" << stage
+                << " win32=" << win32 << "\n";
+    };
+    return true;
+  }();
+  (void)logged;
+  return receiver;
+}
 
 }  // namespace
 
@@ -303,11 +358,34 @@ bool pinned_select_seam_admit_start(const Args& args, std::string* why) {
 }
 #endif
 
-void ControlSessionServer::Serve(ControlLink& link) {
+void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthenticated) {
   // Which session this conversation belongs to. Checked again at the bottom before touching any
   // shared stream state, so a session that ends after its successor has started cannot turn the
   // successor's stream off. (Ledger H-28.)
   const uint64_t servedEpoch = clientSession.epoch.load(std::memory_order_acquire);
+  // r7 H4 + r9 R3: what directory auth allows on THIS link -- the link's own standing (TCP: none), and the
+  // admission of exactly this epoch (SessionState::AdmitHello), never the shared flag a newer session's
+  // Hello sets while this dispatcher still serves the old one.
+  // r9 W2: a --prelogin worker injects only while the input desktop is the logon desktop it serves.
+  // r10 T2: and not from a cached look either -- the input desktop is asked again for this event: it must be
+  // the desktop the worker serves (the logon desktop; a test build's named one), or nothing is injected.
+  auto prelogin_not_serving = [&]() {
+    if (!args.preloginMode) return false;
+    if (!capture.preloginDesktopServing.load(std::memory_order_acquire)) return true;
+    const std::wstring now = remote60::native_poc::prelogin::InputDesktopName();
+    // r17 R16-1: what this path SEES is the same permanent leave as the watch's (exit 14), not only this
+    // input refused.
+    return remote60::native_poc::prelogin::PreloginInputRefused(now, capture.preloginServingDesktop);
+  };
+  auto link_directory_authenticated = [&]() {
+    return linkDirectoryAuthenticated && clientSession.DirectoryAuthenticatedFor(servedEpoch);
+  };
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (r7 H6): the first pong of this conversation is answered late
+  // (GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS, at most 5 s) so a test can type while the viewer does not
+  // know yet what this host is. Nothing else changes.
+  bool firstPongDelayed = false;
+#endif
   // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
   clientSession.injectedInput.BeginServe(servedEpoch);
   // A new session starts with the stream on, exactly like the first client of a fresh
@@ -557,6 +635,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
   static remote60::native_poc::HostUnlockRelay gUnlockRelay;
   const uint64_t unlockCookie =
       (static_cast<uint64_t>(qpc_now_us()) << 20) ^ reinterpret_cast<uintptr_t>(&stop);
+  // r5 G7: when this control session ends, however it ends, a "Windows 로그인" credential it sent that is
+  // still waiting for the logon UI is dropped untyped.
+  struct EndPreloginCredOnExit {
+    bool prelogin;
+    uint64_t cookie;
+    ~EndPreloginCredOnExit() {
+      if (prelogin) {
+        prelogin_cred().EndSession(cookie);
+        std::cout << "[native-video-host][prelogin-cred] control session ended\n";
+      }
+    }
+  } endPreloginCredOnExit{args.preloginMode, unlockCookie};
   // Host-side IME: scan|E0 of physical keys we actually injected as down. Their matching up must be
   // released even if the policy gate has since closed (foreground/secure change), or a modifier
   // stays stuck on the host. Released for all on connection end. (Codex #370 BLOCKER C.)
@@ -628,6 +718,16 @@ void ControlSessionServer::Serve(ControlLink& link) {
     const size_t bodySize = static_cast<size_t>(header.size - sizeof(header));
     const auto type = static_cast<MessageType>(header.type);
 
+    // Prelogin: the pre-login worker exposes only the minimum control surface (prelogin-service §3).
+    // A control type outside the allowlist (clipboard/file/paste/char-text/raw-key/window-enum/IME/...)
+    // is a misbehaving, old, or hostile peer; close the link rather than risk a half-read variable
+    // body. A correct viewer gates these on kCaptureFlagPreloginV1 and never sends them here.
+    if (args.preloginMode && !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(type)) {
+      std::cout << "[native-video-host][control][prelogin] rejected control type="
+                << static_cast<unsigned>(header.type) << "\n";
+      break;
+    }
+
     if (type == MessageType::ControlVersionRequest && header.size == sizeof(ControlVersionMessage)) {
       ControlVersionMessage request{};
       if (!link.Read(&request.seq, sizeof(request) - sizeof(MessageHeader))) break;
@@ -651,6 +751,17 @@ void ControlSessionServer::Serve(ControlLink& link) {
         if (delayMs > 0) {
           std::cout << "[pinned-select-test] fault: pong seq=" << ping.seq << " held " << delayMs << " ms (paused)\n";
           std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+      }
+#endif
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      if (!firstPongDelayed) {
+        firstPongDelayed = true;
+        wchar_t v[16] = {};
+        if (GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS", v, 16) > 0) {
+          const DWORD ms = static_cast<DWORD>(_wtoi(v));
+          std::cout << "[native-video-host][test-seam] first pong delayed " << ms << " ms\n";
+          Sleep(ms > 5000 ? 5000 : ms);
         }
       }
 #endif
@@ -681,6 +792,24 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (capture.frameHeartbeatEnabled.load())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
+      if (args.preloginMode) {
+        // Serving the pre-login secure desktop right now (prelogin-service r3 R1: the momentary signal).
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginV1;
+        // The worker only runs because the feature is enabled, so it is also durable-enabled -- the bit
+        // the reboot confirm popup keys its "no connect until login" warning on.
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginSasV1;  // r9 R5: Ctrl+Alt+Del here
+      } else if (durable_prelogin_enabled()) {
+        // r5 G11: a logged-in host says so too when the service has pre-login access on, so the restart
+        // popup does not warn "no connect until someone logs in" for a PC that will be reachable.
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
+      }
+      // Remote reboot is offered by ANY host -- prelogin AND the logged-in session (the case the user
+      // hits most). The controls are the directory-authenticated session, the confirm popup, and the
+      // single-flight dedup, NOT the mode. A host that is not durable-enabled simply did not advertise
+      // 0x8000 above, so the viewer shows the "no connect until login after restart" warning.
+      // (prelogin-service r4 item 6.)
+      pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagRemoteRebootV1;
       // Clipboard text sync (K1): advertised only when the hub is running, so a viewer never sends
       // clipboard messages this host cannot handle. An old host never sets this and is never sent one.
       if (clipboard && clipboard->enabled())
@@ -706,6 +835,21 @@ void ControlSessionServer::Serve(ControlLink& link) {
       // held mask only to a host that says so -- an older host made an unknown key a LEFT click.
       if (mouse_xbuttons_enabled())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagMouseXButtonsV1;
+      // Prelogin exposes the MINIMUM surface (Codex review 3.3): strip every user-data feature bit so a
+      // new viewer never even polls clipboard/IME/image/file/paste/x-button here (the allowlist would
+      // close the link on the inbound message; not advertising it keeps a correct viewer from sending
+      // one at all). Prelogin keeps only stream/heartbeat/version/secure-desktop + the sealed credential
+      // path + the prelogin/reboot bits set earlier.
+      if (args.preloginMode) {
+        pong.captureTargetFlags &= ~(remote60::native_poc::kCaptureFlagHostImeV1 |
+                                     remote60::native_poc::kCaptureFlagHostImePulseStateV2 |
+                                     remote60::native_poc::kCaptureFlagClipboardTextV1 |
+                                     remote60::native_poc::kCaptureFlagPasteOnDemandV1 |
+                                     remote60::native_poc::kCaptureFlagClipboardImageV1 |
+                                     remote60::native_poc::kCaptureFlagFileCopyV1 |
+                                     remote60::native_poc::kCaptureFlagFileOfferCopyGenV1 |  // 86/87: not allowed here
+                                     remote60::native_poc::kCaptureFlagMouseXButtonsV1);
+      }
       pong.captureRebindCount = target.rebindCount;
       pong.captureTargetHwnd = target.targetHwnd;
       remote60::native_poc::utf8_copy_bounded(pong.captureTargetProcess,
@@ -723,7 +867,10 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockChallengeMessage rsp{};
-      if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
+      if (args.preloginMode) {
+        // prelogin-ui r3 (item 5): before login the worker answers it -- the "Windows 로그인" credential.
+        rsp = prelogin_cred().Challenge(req, unlockCookie);
+      } else if (!gUnlockRelay.ChallengeSync(req, unlockCookie, &rsp)) {
         rsp = ControlUnlockChallengeMessage{};
         rsp.requestId = req.requestId;
         rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
@@ -741,7 +888,11 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       const uint32_t sealedRequestId = req.requestId;  // preserve before we wipe the ciphertext copy
-      gUnlockRelay.SealedAsync(req, unlockCookie);
+      if (args.preloginMode) {
+        prelogin_cred().Sealed(req, unlockCookie);  // opened under the prelogin purpose, typed, zeroed
+      } else {
+        gUnlockRelay.SealedAsync(req, unlockCookie);
+      }
       SecureZeroMemory(&req, sizeof(req));  // drop the ciphertext copy promptly
       ControlUnlockAcceptedMessage rsp{};
       rsp.header.magic = remote60::native_poc::kMagic;
@@ -759,7 +910,9 @@ void ControlSessionServer::Serve(ControlLink& link) {
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockStatusResultMessage rsp{};
-      if (!gUnlockRelay.PollResult(req.requestId, &rsp)) {
+      const bool haveResult = args.preloginMode ? prelogin_cred().PollResult(req.requestId, &rsp)
+                                                : gUnlockRelay.PollResult(req.requestId, &rsp);
+      if (!haveResult) {
         rsp.requestId = req.requestId;
         rsp.stage = static_cast<uint16_t>(UnlockStage::ConnectStarted);  // still running
         rsp.terminal = 0;
@@ -767,6 +920,79 @@ void ControlSessionServer::Serve(ControlLink& link) {
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusResult);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlPreloginControl &&
+        header.size == sizeof(remote60::native_poc::ControlPreloginControlMessage)) {
+      remote60::native_poc::ControlPreloginControlMessage req{};
+      req.header = header;
+      if (!link.Read(&req.requestId, sizeof(req) - sizeof(MessageHeader))) break;
+      if (req.requestId == 0) continue;  // never echoable
+      // r9 R5: Ctrl+Alt+Del at the logon screen, by the service. Only a --prelogin worker, only on this
+      // link's own directory-authenticated session; the service decides the rest (session, policy).
+      using remote60::native_poc::PreloginSasResult;
+      PreloginSasResult result = PreloginSasResult::Failed;
+      uint32_t win32 = 0;
+      bool cadNotRequired = false;
+      if (req.op != remote60::native_poc::kPreloginControlOpSas) {
+        result = PreloginSasResult::Failed;
+        win32 = ERROR_NOT_SUPPORTED;
+      } else if (!args.preloginMode) {
+        result = PreloginSasResult::NotAtLogon;
+      } else if (!link_directory_authenticated()) {
+        result = PreloginSasResult::NotAuthorized;
+      } else {
+        result = static_cast<PreloginSasResult>(remote60::native_poc::prelogin::DelegateSasToService(&win32, &cadNotRequired));
+      }
+      std::cout << "[native-video-host][control][sas] requestId=" << req.requestId
+                << " result=" << static_cast<unsigned>(result) << " win32=" << win32 << " cad-not-required="
+                << (cadNotRequired ? 1 : 0) << "\n";
+      const auto rsp = remote60::native_poc::make_prelogin_status(
+          req.requestId, req.op, result, win32,
+          cadNotRequired ? remote60::native_poc::kPreloginStatusFlagCadNotRequired : uint8_t{0});
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    if (type == MessageType::ControlRebootRequest &&
+        header.size == sizeof(remote60::native_poc::ControlRebootRequestMessage)) {
+      remote60::native_poc::ControlRebootRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.requestId, sizeof(req) - sizeof(MessageHeader))) break;
+      // A malformed request id (0) is never echoable and cannot be deduped -- drop it (Codex review S4;
+      // Serve was not calling reboot_request_valid). A correct viewer never sends 0.
+      if (!remote60::native_poc::reboot_request_valid(req)) {
+        std::cout << "[native-video-host][control][reboot] dropped malformed request (id=0)\n";
+        continue;
+      }
+      // R2/S3: authorize against THIS served session, not just the shared bool. The auth must hold AND
+      // the session epoch must still be the one this Serve began with -- a superseded/stale link cannot
+      // borrow a current auth. (The full per-link auth flag threaded from ingress, and closing the direct
+      // TCP/LAN listener in prelogin, are the remaining S3 depth.)
+      // r7 H4: and THIS link must be the authenticated one -- a separate TCP link borrows nothing.
+      auto reboot_authorized = [&]() { return link_directory_authenticated(); };
+      const bool authorized = reboot_authorized();
+      uint32_t win32 = 0;
+      remote60::native_poc::RebootResult result = remote60::native_poc::RebootResult::NotAuthorized;
+      if (authorized) {
+        // r5 G10: the host answers nothing on its own -- no early Accepted for a retransmit, no refusal of
+        // its own. Every authorized request goes to the service, which keeps the one restart and the one
+        // answer per request (this host process, this control session, this id); the host relays it. The
+        // OS call is the service's (it holds the shutdown privilege); a failure is Failed -- never forced.
+        std::lock_guard<std::mutex> lock(gRebootGateMu);  // one delegation at a time from this host
+        if (reboot_authorized()) {  // revoked / superseded while waiting: not on stale authority
+          const uint8_t delegated =
+              remote60::native_poc::prelogin::DelegateRebootToService(req.requestId, unlockCookie, &win32);
+          result = static_cast<remote60::native_poc::RebootResult>(delegated);
+        }
+      }
+      std::cout << "[native-video-host][control][reboot] requestId=" << req.requestId
+                << " auth=" << (authorized ? 1 : 0)
+                << " result=" << static_cast<unsigned>(result) << " win32=" << win32 << "\n";
+      const remote60::native_poc::ControlRebootReplyMessage rsp =
+          remote60::native_poc::make_reboot_reply(req.requestId, result, win32);
       if (!link.Write(&rsp, sizeof(rsp))) break;
       continue;
     }
@@ -873,6 +1099,18 @@ void ControlSessionServer::Serve(ControlLink& link) {
       }
 #endif
       std::string resolvedTarget;
+      // Prelogin payload filter (r4 #2 / Codex 3.1): kind 5/6 are key_down/key_up. Before login only
+      // navigation keys may be injected as plaintext; a character/chord key is dropped here (never
+      // injected) so credentials cannot leak into a field as cleartext -- they come via the sealed path.
+      // The event is still acknowledged below so the viewer's strict request/response loop is not stalled.
+      const bool preloginBlockedKey =
+          args.preloginMode && (input.kind == 5 || input.kind == 6) &&
+          !remote60::native_poc::prelogin::IsPreloginNavKeyAllowed(input.keyCode);
+      if (preloginBlockedKey) {
+        // r5 G8: which key it was is not written down -- it may be a character of a password.
+        std::cout << "[native-video-host][input][prelogin] dropped non-navigation key seq=" << input.seq
+                  << " (characters use the sealed credential path)\n";
+      }
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)
       const bool releaseAlreadyDone =
@@ -881,7 +1119,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !prelogin_not_serving()) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -905,7 +1143,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
           inputRouter.secureAttempts.fetch_add(1, std::memory_order_relaxed);
           if (!desktopMode) {
             inputRouter.secureSkipWindowMode.fetch_add(1, std::memory_order_relaxed);
-          } else if (!clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
+          } else if (!link_directory_authenticated()) {
             // A plain-LAN session has no capability token, and the agent will not act without
             // one. Nothing about the click is wrong; it simply cannot be authorised.
             inputRouter.secureSkipUnauthenticated.fetch_add(1, std::memory_order_relaxed);
@@ -978,7 +1216,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
               inputRouter.freshProbeSecure.fetch_add(1, std::memory_order_relaxed);
               // Actually secure now. Retry THIS event through the SYSTEM broker exactly once.
               if (desktopMode &&
-                  clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
+                  link_directory_authenticated() &&
                   secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                 injectResult = InputInjectResult::Injected;
                 resolvedTarget = " secure-system-agent(reprobe)";
@@ -1006,8 +1244,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
                   directFailStage == InputFailStage::SetCursorPos ||
                   directFailStage == InputFailStage::SendInputMouse ||
                   directFailStage == InputFailStage::SendInputKey;
-              if (brokerRetryableStage && desktopMode &&
-                  clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
+              if (brokerRetryableStage && desktopMode && link_directory_authenticated()) {
                 inputRouter.defaultBrokerFallback.fetch_add(1, std::memory_order_relaxed);
                 if (secure_dispatch_event(capture, inputRouter, input, domainW, domainH).sent) {
                   // Queued to the agent, not confirmed landed (the broker does not ACK). Mark
@@ -1127,8 +1364,7 @@ void ControlSessionServer::Serve(ControlLink& link) {
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
         InputInjectResult injectResult = InputInjectResult::Failed;
-        if (desktopMode && clientSession.directoryAuthenticated.load(std::memory_order_acquire) &&
-            !interactive_desktop_is_default() &&
+        if (desktopMode && link_directory_authenticated() && !interactive_desktop_is_default() &&
             secure_dispatch_text(capture, inputRouter, text,
                                  inputRouter.domainW.load(std::memory_order_acquire),
                                  inputRouter.domainH.load(std::memory_order_acquire)).sent) {

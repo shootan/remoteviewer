@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "prelogin_logon_desktop.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
 #include "host_backend_policy.hpp"
@@ -559,6 +560,9 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
     }
     if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Dxgi) {
+      if (capture.monitorInfo->width < capture.monitorInfo->height && !capture.preloginServingDesktop.empty()) {
+        remote60::native_poc::prelogin::PreloginStopServing("rotated monitor (dxgi unsupported)");
+      }
       if (capture.monitorInfo->width < capture.monitorInfo->height) {
         backend.active = DesktopCaptureBackend::Wgc;
         capture.SetDxgiFallbackReason("rotation_unsupported");
@@ -579,6 +583,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         item = refreshedItem;
       }
     } else if (backend.active == DesktopCaptureBackend::Wgc) {
+      if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("wgc requested");
       auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(restart-refresh)",
                                                       capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
       if (!refreshedItem) return false;
@@ -659,6 +664,8 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       // tunable for the A/B the field test needs: 100/0 = legacy, 8/0 = timeout only, 8/2000 = both.
       config.acquireTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_TIMEOUT_MS", 8, 1, 1000);
       config.acquireIdleSleepUs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_IDLE_SLEEP_US", 2000, 0, 100000);
+      config.attachToInputDesktop = capture.preloginAttachInputDesktop;  // r4 #1: prelogin binds to the input desktop
+      config.requiredInputDesktop = capture.preloginServingDesktop;      // r9 W2: and only to the one it serves
       // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
       // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
       config.onPointer = [&](int32_t px, int32_t py, bool visible) {
@@ -726,6 +733,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
       if (!started) {
         std::cout << "[native-video-host] fallback_reason=" << dxgiDetail << "\n";
+        if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("dxgi start: " + dxgiDetail);
         backend.active = DesktopCaptureBackend::Wgc;
         auto refreshedItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(dxgi-fallback)",
                                                         capture.monitorInfo ? capture.monitorInfo->monitor : nullptr);
@@ -754,6 +762,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       }
     }
     if (!capture.windowModeActive && backend.active == DesktopCaptureBackend::Gdi) {
+      if (!capture.preloginServingDesktop.empty()) remote60::native_poc::prelogin::PreloginStopServing("gdi requested");
       GdiCaptureProcessConfig config;
       config.width = newW;
       config.height = newH;

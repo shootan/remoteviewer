@@ -34,6 +34,10 @@
 #include <shlwapi.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -43,9 +47,14 @@
 #include "host_recovery_policy.hpp"
 #include "async_worker_group.hpp"
 #include "child_environment.hpp"
+#include "stream_child_env.hpp"
 #include <vector>
 
 #include "directory_client.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_autostart.hpp"
+#include "secure_input_protocol.hpp"
 #include "host_app_log.hpp"
 #include "update_readiness.hpp"
 #include "log_upload.hpp"
@@ -78,6 +87,8 @@ constexpr UINT kUpdateCheckDoneMessage = WM_APP + 3;
 // The waiter thread's verdict. Posted rather than acted on directly because deciding to exit is
 // a UI-thread decision, and because the wait can outlive the dialog the user answered.
 constexpr UINT kUpdateHandoffDoneMessage = WM_APP + 4;
+// prelogin-ui r5 (G4): the service's answer to a pre-login access request, made off the UI thread.
+constexpr UINT kPreloginReplyMessage = WM_APP + 8;
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT kStatusIntervalMs = 2000;
 // Matches IDI_GNLINK in host_app.rc.
@@ -113,6 +124,9 @@ enum ControlId : int {
   IdBadge,
   IdOpenLog,
   IdVersion,
+  IdPreloginAccess,  // prelogin-ui r1 (item 4)
+  IdPreloginHint,
+  IdPreloginStatus,
 };
 
 enum MenuId : int {
@@ -175,6 +189,13 @@ struct HostTestSeam {
   std::wstring streamExe;
   // Stands in for kMigratableDirectoryOrigins, which names a server no test may talk to.
   std::vector<std::string> migratableOrigins;
+  // The test's own stand-in for the service's admin pipe (\\.\pipe\GNLinkTest-...), so the real
+  // GNLinkSecureInput is never asked; and nothing here starts a service.
+  std::wstring preloginPipe;
+  uint32_t preloginServerPid = 0;  // r5 G3: the test process serving it -- the only server trusted
+  // r14 H2: the OS boundary of "start the service" (StartServiceW) in this build: a \\.\-free event
+  // name (GNLinkTest-...) the test waits on to bring its server up. Empty: nothing is started.
+  std::wstring preloginStartEvent;
 };
 HostTestSeam gHostTest;
 
@@ -626,12 +647,12 @@ class StreamingHostProcess {
       // H.264 is still behind a build-time experiment switch in the streaming host, and a
       // build without it refuses --codec h264 and exits immediately. The product has no other
       // path, so the switch is turned on for the child rather than left to how it was built.
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+      // (The values are stream_child_env.hpp's ProductStreamChildEnv -- the service's pre-login worker
+      // gets the same ones, r6 V1.)
       // The product encoder preset, stated instead of inherited: whatever happens to be in
       // the parent environment must not silently change how every session encodes. Chosen by
       // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
       // latency p95; text legibility is already protected by the peak-constrained VBR policy.
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
       // GPU surface encode bypasses the CPU readback that stalls (captureUnmapWait) when
       // another app -- a game -- holds the GPU. It is opt-in (nv12SurfaceRequested_, default
       // off) because it depends on the driver, and it is forced off after repeated crashes so
@@ -639,7 +660,9 @@ class StreamingHostProcess {
       // the value the child sees is always this decision, not whatever the environment held.
       const bool nv12Surface = nv12SurfaceRequested_.load(std::memory_order_relaxed) &&
                                !nv12SurfaceForcedOff;
-      SetEnvironmentVariableW(L"REMOTE60_NATIVE_NV12_SURFACE", nv12Surface ? L"1" : L"0");
+      for (const auto& kv : remote60::native_poc::ProductStreamChildEnv(nv12Surface)) {
+        SetEnvironmentVariableW(kv.first.c_str(), kv.second.c_str());
+      }
 
       AppendLogLineOnce(nv12Surface
                             ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
@@ -871,6 +894,10 @@ struct AppState {
   HWND signedHostLabel = nullptr;
   HWND statusBadge = nullptr;
   HWND startWithWindowsCheck = nullptr;
+  // "로그인 전에도 원격 접속 허용" (prelogin-ui r1, item 4): the toggle, what it means, what happened.
+  HWND preloginCheck = nullptr;
+  HWND preloginHint = nullptr;
+  HWND preloginStatus = nullptr;
   HWND switchAccountButton = nullptr;
   HWND signOutButton = nullptr;
   HWND openLogButton = nullptr;
@@ -935,7 +962,13 @@ void set_status(const std::wstring& text) {
 
 // ---------------------------------------------------------------- autostart
 
+#ifdef REMOTE60_HOST_TEST_SEAM
+// TEST BUILD ONLY: a key of its own, never the user's real Run key (r6 V3 -- turning pre-login access on
+// now takes the Run entry away, and a test run must not take the user's).
+const wchar_t kRunKey[] = L"Software\\GNLinkHostUiTest\\Run";
+#else
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#endif
 /**
  * The name Task Manager's Startup tab shows, which is why it matters what it says.
  *
@@ -992,6 +1025,46 @@ void set_autostart(bool enabled) {
     RegDeleteValueW(key, kRunValue);
     // Off has to mean off even on a machine that only ever had the old name.
     RegDeleteValueW(key, kLegacyRunValue);
+  }
+  RegCloseKey(key);
+}
+
+// r6 V3: with pre-login access on, the SERVICE starts GNLinkHost at logon (secure_input_service_main.cpp
+// launch_user_host). The Run entry would start a second one, so it goes -- only once the service has
+// confirmed it is on (PreloginServiceOwnsUserStartup), and remembered, so turning the feature off puts
+// back what the user had. The single-instance guard in wWinMain covers the moment both could start.
+#ifdef REMOTE60_HOST_TEST_SEAM
+const wchar_t kTakeoverKey[] = L"Software\\GNLinkHostUiTest";
+#else
+const wchar_t kTakeoverKey[] = L"Software\\GNLink";
+#endif
+const wchar_t kTakeoverValue[] = L"PreloginTookOverAutostart";
+
+void prelogin_take_over_autostart() {
+  const bool had = autostart_enabled();
+  HKEY key = nullptr;
+  if (had && RegCreateKeyExW(HKEY_CURRENT_USER, kTakeoverKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) ==
+                 ERROR_SUCCESS) {
+    const DWORD one = 1;
+    RegSetValueExW(key, kTakeoverValue, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one));
+    RegCloseKey(key);
+  }
+  const wchar_t* const names[] = {kRunValue, kLegacyRunValue};
+  const bool removed = remote60::native_poc::prelogin::RemoveUserRunValues(HKEY_CURRENT_USER, kRunKey, names, 2);
+  append_host_app_log(std::string("[host-app] prelogin access on: the service starts GNLink at logon; Run entry ") +
+                      (removed ? "removed" : "could NOT be removed") + (had ? " (it was on; given back when off)" : ""));
+}
+
+void prelogin_give_back_autostart() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kTakeoverKey, 0, KEY_READ | KEY_WRITE, &key) != ERROR_SUCCESS) return;
+  DWORD v = 0, size = sizeof(v);
+  const bool took = RegQueryValueExW(key, kTakeoverValue, nullptr, nullptr, reinterpret_cast<LPBYTE>(&v), &size) ==
+                        ERROR_SUCCESS && v == 1;
+  if (took) {
+    set_autostart(true);
+    RegDeleteValueW(key, kTakeoverValue);
+    append_host_app_log("[host-app] prelogin access off: the Run entry it took over is back");
   }
   RegCloseKey(key);
 }
@@ -1155,6 +1228,8 @@ void show_tray_menu(HWND window) {
 
 // ---------------------------------------------------------------- sign in
 
+void refresh_prelogin_toggle();  // prelogin-ui r1 (item 4), below
+
 void apply_signed_in_ui(bool signedIn) {
   g.signedIn = signedIn;
   const int form = signedIn ? SW_HIDE : SW_SHOW;
@@ -1178,6 +1253,10 @@ void apply_signed_in_ui(bool signedIn) {
   ShowWindow(g.signedHostLabel, card);
   ShowWindow(g.statusBadge, card);
   ShowWindow(g.startWithWindowsCheck, card);
+  ShowWindow(g.preloginCheck, card);
+  ShowWindow(g.preloginHint, card);
+  ShowWindow(g.preloginStatus, card);
+  if (signedIn) refresh_prelogin_toggle();
   // Signing out belonged in the window, not buried in the tray menu where nobody looks.
   ShowWindow(g.switchAccountButton, card);
   ShowWindow(g.signOutButton, card);
@@ -1590,7 +1669,12 @@ void perform_sign_in() {
 }
 
 
+void withdraw_prelogin_access(const char* why);  // r5 G6, below
+
 void sign_out(bool keepAccount) {
+  // r5 G6: the machine's pre-login access was granted with THIS account's credential -- signing out or
+  // changing account withdraws it (the service raises its floor; the record cannot come back).
+  withdraw_prelogin_access(keepAccount ? "account change" : "sign out");
   {
     std::lock_guard<std::mutex> lock(g.ownerMu);
     g.cache.hostToken.clear();
@@ -1609,7 +1693,9 @@ void sign_out(bool keepAccount) {
   apply_signed_in_ui(false);
   SetWindowTextW(g.passwordEdit, L"");
   if (!keepAccount) SetWindowTextW(g.accountEdit, L"");
-  set_status(L"Signed out.");
+  // r9 R1: the local sign-out is done; the machine's pre-login access is not yet known to be withdrawn --
+  // the withdrawal's answer replaces this (on_prelogin_reply).
+  set_status(L"로그아웃했습니다. 로그인 전 원격 접속 해제를 확인하는 중...");
 }
 
 // ---------------------------------------------------------------- window
@@ -1631,7 +1717,8 @@ void apply_fonts() {
       g.passwordEdit,    g.hostNameLabel,      g.hostNameEdit,     g.createAccountCheck,
       g.signupKeyLabel,  g.signupKeyEdit,      g.signInButton,
       g.signedAccountLabel, g.signedHostLabel,
-      g.statusBadge,     g.startWithWindowsCheck, g.switchAccountButton, g.signOutButton,
+      g.statusBadge,     g.startWithWindowsCheck, g.preloginCheck, g.preloginHint, g.preloginStatus,
+      g.switchAccountButton, g.signOutButton,
       g.openLogButton,   g.statusLabel,     g.versionLabel,
   };
   for (HWND control : bodyControls) {
@@ -1666,6 +1753,341 @@ HWND make_button(HWND parent, int id, const wchar_t* text, DWORD style) {
                                  nullptr, nullptr);
   SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
   return control;
+}
+
+// ---------------------------------------------------------------- 로그인 전 원격 접속 (prelogin-ui r1)
+
+std::wstring prelogin_admin_pipe_name() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  // A run that brings no stand-in gets a name nothing serves: "not running", never the real service.
+  return gHostTest.preloginPipe.empty() ? std::wstring(L"\\\\.\\pipe\\GNLinkTest-none") : gHostTest.preloginPipe;
+#else
+  return remote60::native_poc::prelogin::kPreloginAdminPipeName;
+#endif
+}
+
+/** r5 G3: who may answer -- the installed service; in the test build, the test that serves the pipe. */
+remote60::native_poc::prelogin::ServerCheck prelogin_admin_server_check() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  const uint32_t pid = gHostTest.preloginServerPid;
+  return [pid](void* pipe) { return remote60::native_poc::prelogin::ServerIsProcess(pipe, pid); };
+#else
+  return remote60::native_poc::prelogin::ServerIsInstalledService;
+#endif
+}
+
+// r14 L1: set when the window closes -- a request still in flight is cancelled (prelogin_stop_requests).
+std::atomic<bool> gPreloginCancel{false};
+
+/** Start the service (DEMAND-start until this feature is on; this process is elevated). The test build's
+    OS boundary is the test's event instead of the SCM. */
+bool start_prelogin_service() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  if (gHostTest.preloginStartEvent.empty()) return false;
+  HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, gHostTest.preloginStartEvent.c_str());
+  const bool ok = e && SetEvent(e);
+  if (e) CloseHandle(e);
+  return ok;
+#else
+  bool ok = false;
+  if (SC_HANDLE m = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
+    if (SC_HANDLE s = OpenServiceW(m, remote60::native_poc::kSecureInputServiceName, SERVICE_START)) {
+      ok = StartServiceW(s, 0, nullptr) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+      CloseServiceHandle(s);
+    }
+    CloseServiceHandle(m);
+  }
+  return ok;
+#endif
+}
+
+/** One request to the service. `startIfDown`: a service that is not running is started first and asked again
+    -- every step of turning the feature on and off (r14 H2: also the Query an Enable begins with; a plain
+    status Query does not start it). */
+remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r,
+                                                               bool startIfDown) {
+  namespace pl = remote60::native_poc::prelogin;
+  const std::wstring pipe = prelogin_admin_pipe_name();
+  const std::function<bool()> keep = [] { return !gPreloginCancel.load(); };  // r14 L1: the close cancels it
+  pl::AdminReply reply = pl::SendPreloginAdminRequest(r, 1000, pipe.c_str(), prelogin_admin_server_check(), 5000, keep);
+  if (reply.status == pl::AdminStatus::Unavailable && startIfDown && keep() && start_prelogin_service()) {
+    reply = pl::SendPreloginAdminRequest(r, 5000, pipe.c_str(), prelogin_admin_server_check(), 5000, keep);
+  }
+  return reply;
+}
+remote60::native_poc::prelogin::AdminReply prelogin_admin_call(const remote60::native_poc::prelogin::AdminRequest& r) {
+  return prelogin_admin_call(r, r.op != remote60::native_poc::prelogin::AdminOp::Query);
+}
+
+void show_prelogin_reply(const remote60::native_poc::prelogin::AdminReply& reply, bool asked) {
+  namespace pl = remote60::native_poc::prelogin;
+  std::wstring text;
+  switch (reply.status) {
+    case pl::AdminStatus::Ok:
+      text = reply.enabled ? L"켜짐: 재부팅 직후 로그인 화면에서도 접속할 수 있습니다." : L"꺼짐";
+      break;
+    case pl::AdminStatus::Refused:
+      text = L"관리자 권한으로 실행된 GNLink Host 에서만 바꿀 수 있습니다.";
+      break;
+    case pl::AdminStatus::Unavailable:
+      text = asked ? L"보안 입력 서비스에 연결하지 못했습니다 (설치 확인)." : L"꺼짐 (보안 입력 서비스가 실행 중이 아님)";
+      break;
+    case pl::AdminStatus::Untrusted:
+      text = L"보안 입력 서비스로 확인되지 않는 상대여서 보내지 않았습니다.";
+      break;
+    default:
+      text = L"설정을 바꾸지 못했습니다 (오류 " + std::to_wstring(reply.win32) + L").";
+      break;
+  }
+  SendMessageW(g.preloginCheck, BM_SETCHECK, reply.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  SetWindowTextW(g.preloginStatus, text.c_str());
+}
+
+// r5 G4 + r7 H2: requests to the service go one at a time, in the order they were made, on one worker
+// thread (a pipe that does not answer cannot hold the window). Each carries the owner epoch it was made
+// under: signing out / changing account starts a new epoch, so an Enable still waiting in the queue is
+// dropped unsent, and an answer that comes back for an older epoch does not touch the window. An Enable
+// that is already on its way is fenced by the service itself: it carries the floor the Host just read,
+// and a Disable that got in first has raised it (AdminStatus::Stale). Answers come back as
+// kPreloginReplyMessage.
+struct PreloginReplyResult {
+  remote60::native_poc::prelogin::AdminReply reply;
+  bool asked = false;  // the user changed it (not a refresh)
+  bool want = false;
+  bool withdrawal = false;  // the Disable of a sign-out / account change
+  uint64_t epoch = 0;
+};
+struct PreloginJob {
+  remote60::native_poc::prelogin::AdminRequest r;
+  bool asked = false;
+  bool withdrawal = false;
+  uint64_t epoch = 0;
+};
+std::mutex gPreloginQueueMu;
+std::condition_variable gPreloginQueueCv;
+std::deque<PreloginJob> gPreloginQueue;
+int gPreloginInFlight = 0;  // jobs taken and not yet answered (under gPreloginQueueMu)
+std::atomic<uint64_t> gPreloginOwnerEpoch{1};
+std::atomic<bool> gPreloginBusy{false};
+// r14 L1: the requests' thread has an owner (stoppable_worker.hpp): WM_DESTROY drains (bounded), then stops
+// it -- the queue wait woken, a request in flight cancelled (gPreloginStopping), joined -- before the
+// window and the statics it touches go.
+bool gPreloginStopping = false;  // under gPreloginQueueMu
+remote60::native_poc::StoppableWorker gPreloginRequests;
+
+void prelogin_worker_loop() {
+  namespace pl = remote60::native_poc::prelogin;
+  for (;;) {
+    PreloginJob job;
+    {
+      std::unique_lock<std::mutex> lk(gPreloginQueueMu);
+      gPreloginQueueCv.wait(lk, [] { return gPreloginStopping || !gPreloginQueue.empty(); });
+      if (gPreloginStopping) return;
+      job = std::move(gPreloginQueue.front());
+      gPreloginQueue.pop_front();
+      ++gPreloginInFlight;
+    }
+    auto* result = new PreloginReplyResult;
+    result->asked = job.asked;
+    result->want = job.r.op == pl::AdminOp::Enable;
+    result->withdrawal = job.withdrawal;
+    result->epoch = job.epoch;
+    if (job.r.op == pl::AdminOp::Enable && job.epoch != gPreloginOwnerEpoch.load()) {
+      // Made for an owner who has since signed out: never sent.
+      result->reply.status = pl::AdminStatus::Stale;
+    } else {
+      if (job.r.op == pl::AdminOp::Enable) {
+        // The floor as it is now: the service takes this Enable only if nothing raised it since.
+        pl::AdminRequest q;
+        q.op = pl::AdminOp::Query;
+        // r14 H2: this Query is the first step of turning it on -- a service not running yet (just
+        // installed, or the feature was off at boot) is started here, not reported "not reachable".
+        const pl::AdminReply now = prelogin_admin_call(q, /*startIfDown=*/true);
+        if (now.status != pl::AdminStatus::Ok) {
+          result->reply = now;
+        } else if (job.epoch != gPreloginOwnerEpoch.load()) {
+          // r9: the owner signed out while this waited for the Query -- whose answer may already be the
+          // floor of that sign-out's revoke. Not sent.
+          result->reply.status = pl::AdminStatus::Stale;
+        } else {
+          job.r.expectedFloor = now.ownerGeneration;
+          result->reply = prelogin_admin_call(job.r);
+        }
+      } else {
+        result->reply = prelogin_admin_call(job.r);
+      }
+    }
+    if (!job.r.hostToken.empty()) SecureZeroMemory(&job.r.hostToken[0], job.r.hostToken.size());
+    if (job.withdrawal) {
+      // Said once it is known how it ended -- not when it was asked for.
+      append_host_app_log(std::string("[host-app] prelogin access withdrawal: status=") +
+                          std::to_string(static_cast<int>(result->reply.status)) +
+                          " enabled=" + (result->reply.enabled ? "1" : "0") + " win32=" + std::to_string(result->reply.win32));
+    }
+    if (!PostMessageW(g.window, kPreloginReplyMessage, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    {
+      std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+      --gPreloginInFlight;
+    }
+    gPreloginQueueCv.notify_all();
+  }
+}
+
+void prelogin_enqueue(PreloginJob job) {
+  if (!gPreloginRequests.Running()) gPreloginRequests.Start([](remote60::native_poc::StoppableWorker&) { prelogin_worker_loop(); });
+  gPreloginBusy.store(true);
+  EnableWindow(g.preloginCheck, FALSE);
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    gPreloginQueue.push_back(std::move(job));
+  }
+  gPreloginQueueCv.notify_all();
+}
+
+// Closing the window waits (bounded) for what is queued -- above all a withdrawal -- to be answered.
+bool prelogin_drain(uint32_t ms) {
+  std::unique_lock<std::mutex> lk(gPreloginQueueMu);
+  return gPreloginQueueCv.wait_for(lk, std::chrono::milliseconds(ms),
+                                   [] { return gPreloginQueue.empty() && gPreloginInFlight == 0; });
+}
+
+// r14 L1: after the drain -- stop the requests' thread: no new job, the one in flight cancelled (its pipe
+// wait / I/O ends, waited out), joined. Then the answers it posted that the window will never handle are freed.
+void prelogin_stop_requests(HWND window) {
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    gPreloginStopping = true;
+  }
+  gPreloginCancel.store(true);
+  gPreloginQueueCv.notify_all();
+  gPreloginRequests.Stop();
+  MSG m;
+  while (PeekMessageW(&m, window, kPreloginReplyMessage, kPreloginReplyMessage, PM_REMOVE)) {
+    delete reinterpret_cast<PreloginReplyResult*>(m.lParam);
+  }
+}
+
+void prelogin_call_async(remote60::native_poc::prelogin::AdminRequest r, bool asked) {
+  if (asked) SetWindowTextW(g.preloginStatus, L"보안 입력 서비스에 요청하는 중...");
+  PreloginJob job;
+  job.r = std::move(r);
+  job.asked = asked;
+  job.epoch = gPreloginOwnerEpoch.load();
+  prelogin_enqueue(std::move(job));
+}
+
+// r9 R1: the durable "pre-login access must be off" mark (prelogin_owner_floor.hpp), written BEFORE the
+// Disable is sent: from that moment the feature is off for the service and the worker, and the service
+// completes the revoke itself if this request fails, times out or dies with the window. A test build
+// writes its own key (it is not elevated, and must never touch the real one).
+#ifdef REMOTE60_HOST_TEST_SEAM
+const HKEY kRevokeMarkRoot = HKEY_CURRENT_USER;
+const wchar_t kRevokeMarkKey[] = L"Software\\GNLinkHostUiTest";
+#else
+const HKEY kRevokeMarkRoot = HKEY_LOCAL_MACHINE;
+const wchar_t kRevokeMarkKey[] = L"SOFTWARE\\GNLink";
+#endif
+std::atomic<bool> gPreloginRevokeMarked{false};
+
+void withdraw_prelogin_access(const char* why) {
+  namespace pl = remote60::native_poc::prelogin;
+  // A new owner epoch first: an Enable of the old owner still in the queue -- or waiting for its Query's
+  // answer -- is now never sent. THEN the mark (r9: in this order, so that an old-owner Enable whose Query
+  // ran after the mark cannot pass on the floor that revoke produced).
+  const uint64_t epoch = gPreloginOwnerEpoch.fetch_add(1) + 1;
+  const bool marked = pl::WriteRevokePendingAt(kRevokeMarkRoot, kRevokeMarkKey, true);
+  gPreloginRevokeMarked.store(marked);
+  append_host_app_log(std::string("[host-app] prelogin revoke mark ") + (marked ? "set" : "NOT set (write failed)"));
+  append_host_app_log(std::string("[host-app] prelogin access withdrawal requested on ") + why);
+  PreloginJob job;
+  job.r.op = pl::AdminOp::Disable;
+  job.asked = true;
+  job.withdrawal = true;
+  job.epoch = epoch;
+  prelogin_enqueue(std::move(job));
+}
+
+void on_prelogin_reply(PreloginReplyResult* result) {
+  std::unique_ptr<PreloginReplyResult> owned(result);
+  namespace pl = remote60::native_poc::prelogin;
+  bool idle = false;
+  {
+    std::lock_guard<std::mutex> lk(gPreloginQueueMu);
+    idle = gPreloginQueue.empty() && gPreloginInFlight == 0;
+  }
+  // An answer made for an owner who has since signed out says nothing about the window now.
+  const bool current = owned->epoch == gPreloginOwnerEpoch.load();
+  if (owned->withdrawal && owned->epoch == gPreloginOwnerEpoch.load()) {
+    // r9 R1: signing out is not "done" until the machine's pre-login access is known to be withdrawn --
+    // and a withdrawal that did not finish is said, with what still holds. r10: only the latest owner
+    // change's answer is shown (an earlier sign-out's late answer does not speak for this one).
+    const bool ok = owned->reply.status == pl::AdminStatus::Ok && !owned->reply.enabled;
+    std::wstring text;
+    if (ok) {
+      text = L"로그아웃했습니다. 로그인 전 원격 접속도 해제했습니다.";
+    } else if (gPreloginRevokeMarked.load()) {
+      text = L"로그아웃했습니다. 로그인 전 원격 접속은 막혔지만 해제를 아직 끝내지 못했습니다 (상태 " +
+             std::to_wstring(static_cast<int>(owned->reply.status)) + L", 오류 " + std::to_wstring(owned->reply.win32) +
+             L"). 보안 입력 서비스가 다시 시도합니다.";
+    } else {
+      text = L"로그아웃했습니다. 그러나 로그인 전 원격 접속을 해제하지 못했습니다 (상태 " +
+             std::to_wstring(static_cast<int>(owned->reply.status)) + L", 오류 " + std::to_wstring(owned->reply.win32) +
+             L"). GNLink Host 를 관리자로 다시 열어 로그아웃해 주세요.";
+    }
+    set_status(text.c_str());
+  }
+  if (owned->asked && !owned->withdrawal) {
+    append_host_app_log(std::string("[host-app] prelogin access ") + (owned->want ? "on" : "off") +
+                        " requested: status=" + std::to_string(static_cast<int>(owned->reply.status)) +
+                        " enabled=" + (owned->reply.enabled ? "1" : "0") + " win32=" + std::to_string(owned->reply.win32) +
+                        (current ? "" : " (an earlier owner's; not shown)"));
+  }
+  if (current) {
+    show_prelogin_reply(owned->reply, owned->asked);
+    // r6 V3: who starts GNLink at logon follows the service's answer, never a guess.
+    if (owned->reply.status == pl::AdminStatus::Ok) {
+      if (pl::PreloginServiceOwnsUserStartup(owned->reply.enabled, /*serviceEnrollmentConfirmed=*/owned->reply.enabled)) {
+        prelogin_take_over_autostart();
+      } else if (owned->asked && !owned->want) {
+        prelogin_give_back_autostart();
+      }
+      // While the service starts it, "Start with Windows" is on and not the user's to switch.
+      SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
+                   owned->reply.enabled || autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+      EnableWindow(g.startWithWindowsCheck, !owned->reply.enabled);
+    }
+  }
+  if (idle) {
+    EnableWindow(g.preloginCheck, TRUE);
+    gPreloginBusy.store(false);
+  }
+}
+
+/** What the service says now -- the checkbox shows the service's state, never a guess. */
+void refresh_prelogin_toggle() {
+  namespace pl = remote60::native_poc::prelogin;
+  pl::AdminRequest q;
+  q.op = pl::AdminOp::Query;
+  prelogin_call_async(q, /*asked=*/false);
+}
+
+void on_prelogin_toggle() {
+  namespace pl = remote60::native_poc::prelogin;
+  const bool want = SendMessageW(g.preloginCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  pl::AdminRequest r;
+  r.op = want ? pl::AdminOp::Enable : pl::AdminOp::Disable;
+  if (want) {
+    if (g.cache.hostId.empty() || g.cache.hostToken.empty()) {
+      SendMessageW(g.preloginCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+      SetWindowTextW(g.preloginStatus, L"이 PC가 서버에 등록된 뒤에 켤 수 있습니다.");
+      return;
+    }
+    r.directoryUrl = host_directory_url();
+    r.accountId = g.cache.accountId;
+    r.hostId = g.cache.hostId;
+    r.hostToken = g.cache.hostToken;  // to the service only; never logged
+  }
+  prelogin_call_async(std::move(r), /*asked=*/true);
 }
 
 // Creation order is tab order; the layout functions only assign positions.
@@ -1714,6 +2136,13 @@ void build_controls(HWND window) {
       BS_AUTOCHECKBOX);
   SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
                autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+  // Off by default, and only the service turns it on (prelogin-ui r1, item 4): nothing here writes the
+  // machine record or the service's start mode itself, and an upgrade never ticks this.
+  g.preloginCheck = make_button(window, IdPreloginAccess, L"로그인 전에도 원격 접속 허용", BS_AUTOCHECKBOX);
+  g.preloginHint = make_label(window, IdPreloginHint,
+                              L"재부팅 직후 Windows 로그인 화면에서도 이 PC에 접속합니다. 로그인 화면 입력은 관리자 "
+                              L"계정·PC 뷰어로 가능하고(v1), 휴대폰에서의 로그인 입력은 다음 버전부터입니다.");
+  g.preloginStatus = make_label(window, IdPreloginStatus, L"");
   g.switchAccountButton = make_button(window, IdSwitchAccount, L"Change account", 0);
   g.signOutButton = make_button(window, IdSignOut, L"Sign out", 0);
   g.openLogButton = make_button(window, IdOpenLog, L"Open log", 0);
@@ -1804,7 +2233,13 @@ int layout_signed_in() {
   y += sc(70);
 
   place(g.startWithWindowsCheck, margin, y, contentW, sc(24));
-  y += sc(34);
+  y += sc(30);
+  place(g.preloginCheck, margin, y, contentW, sc(24));
+  y += sc(26);
+  place(g.preloginHint, margin + sc(18), y, contentW - sc(18), sc(62));  // three lines, with descenders
+  y += sc(64);
+  place(g.preloginStatus, margin + sc(18), y, contentW - sc(18), sc(20));
+  y += sc(28);
 
   place(g.switchAccountButton, margin, y, sc(140), sc(30));
   place(g.signOutButton, margin + sc(150), y, sc(110), sc(30));
@@ -1955,6 +2390,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       const int id = LOWORD(wParam);
       if (id == IdSignIn) {
         perform_sign_in();
+        return 0;
+      }
+      if (id == IdPreloginAccess) {
+        on_prelogin_toggle();
         return 0;
       }
       if (id == IdStartWithWindows) {
@@ -2138,11 +2577,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
       ShowWindow(window, SW_HIDE);
       return 0;
 
+    case kPreloginReplyMessage:
+      on_prelogin_reply(reinterpret_cast<PreloginReplyResult*>(lParam));
+      return 0;
     case WM_APP + 7:
       g.signInBusy.store(false); EnableWindow(g.signInButton, TRUE);
       set_status(L"작업 중 오류가 발생했습니다. 다시 시도해 주세요.");
       return 0;
     case WM_DESTROY: {
+      // r7 H2: a withdrawal (sign-out) still on its way is waited for, not abandoned with the window.
+      if (!prelogin_drain(8000)) append_host_app_log("[host-app] prelogin request still pending at close (8 s)");
+      prelogin_stop_requests(window);  // r14 L1: then the thread itself, cancelled and joined
       { std::lock_guard<std::mutex> lock(g.ownerMu); ++g.ownerEpoch; }
       append_host_app_log("[host-app][lifecycle] WM_DESTROY pid=" +
                           std::to_string(GetCurrentProcessId()));
@@ -2175,6 +2620,35 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  // r6 V3: one GNLinkHost per session. With pre-login access on, the service starts it at logon; a Run
+  // entry left from before (or the user starting it by hand) must not make a second one -- that one
+  // brings the first to the front instead (unless it was itself a --tray start) and leaves.
+#ifdef REMOTE60_HOST_TEST_SEAM
+  wchar_t testRoot[MAX_PATH] = {};
+  GetEnvironmentVariableW(L"GNLINK_HOST_TEST_ROOT", testRoot, MAX_PATH);
+  uint32_t rootHash = 2166136261u;
+  for (const wchar_t* c = testRoot; *c; ++c) rootHash = (rootHash ^ static_cast<uint16_t>(*c)) * 16777619u;
+  const std::wstring instanceName = L"Local\\GNLinkHostUiTest-" + std::to_wstring(rootHash);
+#else
+  const std::wstring instanceName = L"Local\\GNLinkHostSingleInstance";
+#endif
+  HANDLE singleInstance = CreateMutexW(nullptr, FALSE, instanceName.c_str());
+  if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+    const bool tray = commandLine && wcsstr(commandLine, L"--tray") != nullptr;
+    if (HWND other = FindWindowW(kWindowClass, nullptr); other && !tray) {
+      ShowWindow(other, SW_SHOWNORMAL);
+      SetForegroundWindow(other);
+    }
+    CloseHandle(singleInstance);
+    return 0;
+  }
+  struct InstanceScope {
+    HANDLE h;
+    ~InstanceScope() {
+      if (h) CloseHandle(h);
+    }
+  } instanceScope{singleInstance};
 
   WSADATA wsa{};
   WSAStartup(MAKEWORD(2, 2), &wsa);

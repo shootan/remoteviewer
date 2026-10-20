@@ -28,4 +28,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 // ANSI and truncated it to "r", and delivered WM_CHAR as ANSI.
 bool create_window(ViewerState& ctx);
 
+// "Windows 로그인" (prelogin-ui r3, item 5), from the session menu item or Ctrl+Alt+U: only while the
+// host is at the pre-login screen. Asks for the password (modal, owned by `owner`), hands it to the
+// control thread, which seals it under the prelogin purpose and posts kMsgPreloginCredResult. UI thread.
+void request_prelogin_login(ViewerState& ctx, HWND owner);
+
 }  // namespace remote60::native_poc::viewer

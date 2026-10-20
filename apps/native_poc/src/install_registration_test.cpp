@@ -192,6 +192,24 @@ int main() {
           narrow(read_value(subkey, L"UninstallString")));
   }
 
+  // ---------------------------------------------------------------- r6 V7: no prelogin install switch
+  {
+    Recorder rec;
+    RegistrationTarget t = base_target(subkey, L"0.2.150");
+    const RegistrationResult r = register_install(t, rec.ops());
+    check("registration succeeds", r.ok, r.detail);
+    check("r6 V7: registration never asks for AUTO start (no --install-service-prelogin; only Enable moves it)",
+          !rec.ran_containing(L"--install-service-prelogin") && rec.ran_containing(L"--install-service"),
+          narrow(rec.ran.empty() ? L"" : rec.ran[0]));
+  }
+  {
+    Recorder rec;
+    const RegistrationResult r = register_install(base_target(subkey, L"0.2.150"), rec.ops());
+    check("default (feature off) registration succeeds", r.ok, r.detail);
+    check("NEGATIVE: the default install does NOT use the prelogin arg",
+          !rec.ran_containing(L"-prelogin"));
+  }
+
   {
     // Registering again with a different version must move DisplayVersion. This is what an update
     // does, and it is the case re-running the OLD installer binary could not have got right.

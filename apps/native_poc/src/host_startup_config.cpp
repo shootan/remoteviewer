@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "prelogin_logon_desktop.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -137,6 +138,9 @@ int startup_configure_from_env(HostContext& hx) {
   auto& encoder = hx.encoder;
   auto& capture = hx.capture;
   inputRouter.injectionMode = parse_input_injection_mode(args.inputInjectionMode);
+  // r10 T2: everything the pre-login worker hands the SYSTEM input agent may land only on the logon
+  // desktop -- the agent checks it after its own attach (secure_input_desktop_fence.hpp).
+  if (args.preloginMode) inputRouter.broker.SetLogonDesktopOnly(true);
   inputRouter.injectionEnabled =
       args.enableInputInjection &&
       (inputRouter.injectionMode == InputInjectionMode::BackgroundMessage) &&
@@ -228,6 +232,29 @@ int startup_configure_from_env(HostContext& hx) {
       "REMOTE60_NATIVE_QUEUE_WAIT_TIMEOUT_US", 0, 0,
       static_cast<uint32_t>(kQueueWaitTimeoutUsDefault));
   capture.gpuScalerRequested = useH264 && !env_truthy("REMOTE60_NATIVE_DISABLE_GPU_SCALER");
+  // Prelogin (r4 #1): the DXGI/GDI capture workers bind to the input desktop so the pre-login secure
+  // desktop is captured. Set once here from the parsed flag; the post-login host leaves it false. The
+  // REMOTE60_PRELOGIN_CAPTURE_ATTACH env enables ONLY this capture-attach (the exact same code path),
+  // without the prelogin control gating, so a Default-desktop e2e can prove frames-reach-the-viewer with
+  // the attach active -- a product-equivalent that does not require the directory-auth prelogin session.
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  capture.preloginAttachInputDesktop = args.preloginMode || env_truthy("REMOTE60_PRELOGIN_CAPTURE_ATTACH");
+#else
+  // r6 V5: the shipped binary takes no test trigger -- only --prelogin attaches capture to the input
+  // desktop (REMOTE60_PRELOGIN_CAPTURE_ATTACH is read by the test build alone).
+  capture.preloginAttachInputDesktop = args.preloginMode;
+#endif
+  // r9 W2: the --prelogin worker serves the logon desktop only. A test build's worker runs in a test user's
+  // session, which has no logon desktop: it may name the one it serves (GNLINK_STREAM_TEST_LOGON_DESKTOP).
+  if (args.preloginMode) {
+    capture.preloginServingDesktop = remote60::native_poc::prelogin::kLogonDesktopName;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+    if (const char* v = std::getenv("GNLINK_STREAM_TEST_LOGON_DESKTOP")) {
+      capture.preloginServingDesktop = std::wstring(v, v + std::strlen(v));
+    }
+#endif
+    remote60::native_poc::prelogin::PreloginServedDesktop() = capture.preloginServingDesktop;  // r18 R17-1
+  }
   capture.framePoolBuffers = kCaptureFramePoolBuffersDefault;
   if (const char* poolEnv = std::getenv("REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS")) {
     const int requested = std::atoi(poolEnv);
@@ -267,6 +294,18 @@ int resolve_transport(const Args& args, bool useRaw, bool useH264, VideoTranspor
   if (transport == VideoTransport::Udp && useRaw) {
     std::cerr << "[native-video-host] raw codec over udp is not supported in current phase (use codec=h264)\n";
     return 16;
+  }
+  // r6 G1: the prelogin role requires the UDP+H264 directory-registration path. Refuse an explicit
+  // TCP/raw fallback outright -- a prelogin worker on TCP never heartbeats, so the box is never online.
+  if (args.preloginMode) {
+    if (!useH264) {
+      std::cerr << "[native-video-host] prelogin requires codec=h264 (raw refused)\n";
+      return 16;
+    }
+    if (transport != VideoTransport::Udp) {
+      std::cerr << "[native-video-host] prelogin requires transport=udp (tcp fallback refused)\n";
+      return 16;
+    }
   }
   return 0;
 }
@@ -386,6 +425,16 @@ void startup_configure_session(HostContext& hx) {
   clientSession.directoryUrl = arg_or_env(args.directoryUrl, "REMOTE60_DIRECTORY_URL");
   clientSession.directoryId = arg_or_env(args.directoryId, "REMOTE60_DIRECTORY_ID");
   clientSession.directoryPw = arg_or_env(args.directoryPw, "REMOTE60_DIRECTORY_PW");
+  if (args.preloginMode) {
+    // r6 V5: before login the machine record is the only credential (host_startup_connect). A
+    // directory given on the command line or in the environment would stand in for it -- ignored.
+    if (!clientSession.directoryUrl.empty() || !clientSession.directoryId.empty() || !clientSession.directoryPw.empty()) {
+      std::cerr << "[native-video-host][prelogin] directory arguments/environment ignored: the machine record is the credential\n";
+    }
+    clientSession.directoryUrl.clear();
+    clientSession.directoryId.clear();
+    clientSession.directoryPw.clear();
+  }
   if (!clientSession.directoryUrl.empty() && transport != VideoTransport::Udp) {
     std::cerr << "[native-video-host] directory requires transport=udp; ignoring directory url\n";
   }

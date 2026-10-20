@@ -1,0 +1,21 @@
+# Remote reboot menu + prelogin credential note: one rule, two viewers (prelogin-ui r1, item 8).
+# Read by the C++ test (remote60_reboot_menu_vectors_test, against reboot_menu_policy.hpp) and by the
+# Android JVM test (RemoteRebootTest, against RemoteRebootPolicy.kt).
+#
+# Pong capture flags: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 prelogin durable-enabled.
+# columns: flags platform menuEnabled disabledBecauseOldHost showPreloginWarning sealedEntryAvailable showAndroidUpdateNote
+0x0000 pc 0 1 0 0 0
+0x0000 android 0 1 0 0 0
+0x4000 pc 1 0 1 0 0
+0x4000 android 1 0 1 0 0
+0xC000 pc 1 0 0 0 0
+0xC000 android 1 0 0 0 0
+0x8000 android 0 1 0 0 0
+0x2000 pc 0 1 0 1 0
+0x2000 android 0 1 0 0 1
+0x6000 android 1 0 1 0 1
+0xE000 android 1 0 0 0 1
+0xE000 pc 1 0 0 1 0
+0xA000 android 0 1 0 0 1
+0x1FFF android 0 1 0 0 0
+0xFFFF android 1 0 0 0 1

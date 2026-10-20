@@ -63,6 +63,8 @@ struct RegistrationTarget {
   std::wstring clientExeName;
   std::wstring serviceExeName;
   std::wstring streamExeName;
+  // (r6 V7: no pre-login switch here. Registration never moves the start type to AUTO; only the admin
+  // pipe's Enable does, with the record, and install_service keeps an existing start type on update.)
 
   bool validate(std::string* detail = nullptr) const;
 };

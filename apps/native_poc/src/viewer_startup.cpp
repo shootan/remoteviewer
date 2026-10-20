@@ -6,6 +6,8 @@
 #include <windowsx.h>
 #include "viewer_gdi_util.hpp"
 #include "viewer_startup.hpp"
+#include "viewer_reboot_prompt.hpp"
+#include "poc_protocol.hpp"
 
 #include "viewer_cancel_channel.hpp"
 #include "bounded_process_exit.hpp"
@@ -249,6 +251,25 @@ int create_window_and_toolbar(ViewerContext& ctx) {
     };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
       ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
+    };
+    // Remote reboot (prelogin-service r3): the in-menu item opens a confirm popup; the warning line is
+    // shown when the host is NOT durable-enabled. Only on 확인 does the control thread send one request.
+    toolbarCallbacks.onReboot = [&ctx] {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const bool warn = (flags & remote60::native_poc::kCaptureFlagPreloginEnabledV1) == 0;
+      if (remote60::native_poc::show_reboot_confirm(ctx.session.hwnd, warn)) {
+        ctx.session.rebootRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                                std::memory_order_release);
+        ctx.session.rebootRequested.store(true, std::memory_order_release);
+      }
+    };
+    // "Windows 로그인" (prelogin-ui r3): the same entry as Ctrl+Alt+U at a pre-login host.
+    toolbarCallbacks.onPreloginLogin = [&ctx] { request_prelogin_login(ctx, ctx.session.hwnd); };
+    // r9 R5: Ctrl+Alt+Del at a pre-login host: no confirm (it only brings up the logon screen's prompt).
+    toolbarCallbacks.onSas = [&ctx] {
+      ctx.session.sasRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                           std::memory_order_release);
+      ctx.session.sasRequested.store(true, std::memory_order_release);
     };
     remote60::native_poc::session_toolbar_create(ctx.session.hwnd, std::move(toolbarCallbacks));
     remote60::native_poc::session_toolbar_set_visible(ctx.startInStreamView);

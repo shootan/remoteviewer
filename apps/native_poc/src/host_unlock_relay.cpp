@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstring>
 
+#include "secure_input_protocol.hpp"  // kSecureInputServiceName
 #include "secure_unlock_ipc.hpp"
+#include "trusted_service_pipe.hpp"
 
 namespace remote60::native_poc {
 
@@ -83,9 +85,17 @@ void HostUnlockRelay::EnsureWorker() {
 void* HostUnlockRelay::ConnectPipe() {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   do {
-    (void)WaitNamedPipeW(kSecureUnlockPipeName, 100);
-    HANDLE pipe = CreateFileW(kSecureUnlockPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // secure-pipe-identity: verify the pipe's server IS the installed GNLinkSecureInput service BEFORE
+    // this handle is used. A local process squatting the name while the service is stopped is refused
+    // (Untrusted/Unavailable) -- we do NOT fall back to it, and never send it a ChallengeRequest. Trust
+    // is only for this handle; every reconnect runs this again. SQOS IDENTIFICATION is set inside.
+    TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
+    ServerIdentityFacts diag;
+    HANDLE pipe = static_cast<HANDLE>(OpenVerifiedServicePipe(
+        testPipeName_ ? testPipeName_ : kSecureUnlockPipeName, GENERIC_READ | GENERIC_WRITE,
+        FILE_ATTRIBUTE_NORMAL, testServiceName_ ? testServiceName_ : kSecureInputServiceName, 100, &st,
+        testGatherer_, &diag));
+    LogTrustChange("unlock", st, diag);  // R3: keep the stage/error locally, once per change
     if (pipe != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_MESSAGE;
       (void)SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
@@ -94,6 +104,17 @@ void* HostUnlockRelay::ConnectPipe() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   } while (std::chrono::steady_clock::now() < deadline && running_.load());
   return INVALID_HANDLE_VALUE;
+}
+
+bool HostUnlockRelay::ProbeConnectForTest() {
+  // Drive the PRODUCTION ConnectPipe (verify included) once; report whether it produced a trusted
+  // handle. running_ must be true for the connect loop to run; restore it afterwards.
+  const bool was = running_.exchange(true);
+  HANDLE h = static_cast<HANDLE>(ConnectPipe());
+  running_.store(was);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  CloseHandle(h);
+  return true;
 }
 
 void HostUnlockRelay::WorkerLoop() {

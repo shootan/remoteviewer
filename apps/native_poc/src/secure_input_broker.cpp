@@ -1,5 +1,8 @@
 #include "secure_input_broker.hpp"
 #include "bounded_pipe_io.hpp"
+#include "secure_input_protocol.hpp"  // kSecureInputServiceName
+#include "trusted_service_pipe.hpp"
+#include "secure_input_desktop_fence.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -124,7 +127,7 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
     if (status) *status = "secure input service start timed out";
     return false;
   }
-  if (!ConnectLocked()) {
+  if (!ConnectLocked(3000)) {
     if (status) *status = win32_error_text("secure input pipe connect");
     return false;
   }
@@ -132,25 +135,56 @@ bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& se
   return true;
 }
 
-bool SecureInputBrokerClient::ConnectLocked() {
+bool SecureInputBrokerClient::OpenVerifiedLocked(uint32_t waitMs) {
+  // secure-pipe-identity: verify the pipe's server IS the installed GNLinkSecureInput service BEFORE
+  // any input byte is written. A local squatter on the name (service stopped) is refused and we do
+  // NOT fall back to it -- no UAC/lock-screen input reaches a fake. Per-handle trust; reconnect
+  // re-verifies. SQOS IDENTIFICATION is set inside OpenVerifiedServicePipe.
+  TrustedPipeStatus st = TrustedPipeStatus::Unavailable;
+  ServerIdentityFacts diag;
+  pipe_ = static_cast<HANDLE>(OpenVerifiedServicePipe(
+      testPipeName_ ? testPipeName_ : pipeName_.c_str(), GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+      testServiceName_ ? testServiceName_ : kSecureInputServiceName, waitMs, &st, testGatherer_, &diag));
+  LogTrustChange("secure-input", st, diag);  // R3: keep the stage/error locally, once per change
+  return pipe_ != INVALID_HANDLE_VALUE;
+}
+
+bool SecureInputBrokerClient::ConnectLocked(uint32_t budgetMs) {
   if (pipe_ != INVALID_HANDLE_VALUE) return true;
+  if (budgetMs == 0) {
+    // r14 M1: the input path (the UDP reader thread) does not wait for a pipe here -- an input that cannot be
+    // handed over now is not held for seconds. One try; a failure holds the next try back for a moment.
+    if (GetTickCount64() < nextConnectMs_) return false;
+    // r20 merge (Codex Q1): verified like the startup path -- no raw open; a refused or unknown server is
+    // closed and not retried before the cooldown either. waitMs 1, not 0 (0 is NMPWAIT_USE_DEFAULT_WAIT):
+    // it bounds only the wait for the pipe to be available. The identity check itself (server pid, SCM,
+    // image file identity) still takes its own time on this thread -- measured in
+    // secure_input_pipe_server_test, not promised to be instant.
+    if (OpenVerifiedLocked(1)) return true;
+    nextConnectMs_ = GetTickCount64() + kReconnectCooldownMs;
+    return false;
+  }
   // A service may report SERVICE_RUNNING just before its worker creates the named pipe.
   // WaitNamedPipe returns immediately with ERROR_FILE_NOT_FOUND during that small window, so
   // a single call permanently pushed the host onto the non-secure fallback path. Retry both
   // discovery and open until the startup budget expires.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
   do {
-    (void)WaitNamedPipeW(kSecureInputPipeName, 100);
-    pipe_ = CreateFileW(kSecureInputPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
-    if (pipe_ != INVALID_HANDLE_VALUE) return true;
+    if (OpenVerifiedLocked(100)) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   } while (std::chrono::steady_clock::now() < deadline);
   return false;
 }
 
-bool SecureInputBrokerClient::WriteLocked(const SecureInputMessage& message) {
-  if (!ConnectLocked()) return false;
+void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  flags_ = on ? static_cast<uint16_t>(flags_ | kSecureInputFlagLogonDesktopOnly)
+              : static_cast<uint16_t>(flags_ & ~kSecureInputFlagLogonDesktopOnly);
+}
+
+bool SecureInputBrokerClient::WriteLocked(SecureInputMessage message) {
+  message.flags = static_cast<uint16_t>(message.flags | flags_);  // r10 T2: the agent's fence reads it
+  if (!ConnectLocked(0)) return false;  // r14 M1: one bounded try on the input path (no pipe wait loop)
   if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
   CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE;
   // Do not replay an uncertain write: a key/button edge may already have reached the service.
