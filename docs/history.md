@@ -13281,3 +13281,11 @@ Next
 - 게시: rel/0.2.161 6be579b(= f3b03c1 + 버전) dry-run 산출물에 직접 서명(manifest a6584fa8… 서명 전후 불변, SHA256SUMS 11 일치, C++ verifier 수락+변조 거부, 서버 verifier), payload 시험 seam 0, UTF-16 0.2.161 carrier 5·0.2.160 0, real-recv-smoke PASS. deploy: windows.manifest `a6584fa8…` sig `46fe7e15…`(서버 = 로컬), 백업 0.2.160 pair `f0374344…`/`00ee26bd…`, 11 artifact 익명 https 해시 일치, android pair 불변. main ff `7b84c28..6be579b`. `dist/GNLinkSetup-0.2.161.exe`.
 - 미검증(사용자 실기): 실 Explorer 로그온 타이밍의 트레이 재등록, SYSTEM/Winlogon 에서 worker 생존·로그온 화면 송출·'Windows 로그인'·사용자 Host 인계(검은 화면 전환), SY/BA 로그 실제 기록(관리자 권한으로만 읽힘). 실패 시 `C:\ProgramData\GNLink\logs\prelogin_worker.log`(승격 읽기)·secure_input.log 로 원인 확인.
 - 제품/테스트/문서: 문서(이 항목·작업목록 PL).
+### 2026-10-22 APK 선명도 필터(sh-filter r1) 구현 — 끄기 / 약하게 0.20 / 강하게 0.35 (미게시·폰 실기 대기)
+
+- 범위(APK 만, 버전 불변 0.2.30/29, 게시·설치·push 없음): 디코더와 화면 사이에 GL 선명화 한 단계(`out=(1+4s)C−s(L+R+T+B)`, 보이는 원본 1픽셀 이웃, RGB, 0..1 clamp). 설정 탭·뷰어 메뉴에 선명도 3단(기본 0.20, 명시적 끄기 보존). 끄기는 기존 직결 경로 그대로. GL 실패 시 '선명도 적용 불가, 원본 표시' + 직결 복귀(같은 surface 회차에서 재시도 없음). 구현 c568fbb(feat/sh-filter, main 5063cd9 기준). 계약 `.claude/codex_sh_filter_r1.md`.
+- 근거(AVD gnlink_kbd_test, SwiftShader, 실 APK·실 UI 조작, 시험 Host 루프백): compare 24/24(가는 글씨 edge off 18.2 < 0.20 23.0 < 0.35 24.7, 저대비 1.8/3.5/4.7, 테두리·위치 x0=275 전 수준 동일, 다시 끄기 = 처음 끄기) · identity(seam s=0 GL vs 끄기, 움직이는 띠 밖 평균 |Δ| 0.10·최대 10) · faults 28/28(context/shader/swap:30/never → 안내 Toast 화면 캡처·직결 복귀·새 프레임 계속) · lifecycle 14/14(끄기↔0.20 5회, 대상 선택 화면 왕복 3회, HOME 3회, 다크모드 재생성으로 onSurfaceTextureDestroyed appReleases=1, 고아 스레드 없음) · 단위 시험 SharpenPathPolicyTest 13.
+- **S4 지연(AVD 수치, 기준 미달 그대로 공개)**: handoff→latch p95 중앙값 끄기 70.5 ms → 0.20 89.0 / 0.35 88.9 ms(+18.5 ms, 창 12개×5 s, 각 n≈1270, unmatched 0), GL draw ≈14 ms(소프트웨어 GL). 4 ms 판정은 폰 실측으로만 한다(`docs/sh_filter_phone_procedure_2026-10-22.md`).
+- 시험 중 발견(이 변경 밖): 수동 IP(TCP 제어) 접속에서 Host 의 UDP 제어 링크가 10 s 읽기 timeout 으로 끝나며 스트림을 inactive 로 내려, 그때 보고 있던 화면이 '화면이 멈췄습니다'로 굳는다(끄기에서도 동일, host_startup_control.cpp UdpControlLink 10000). 하네스는 접속 10 s 뒤에 고르는 것으로 우회.
+- 미검증: 휴대폰(SM-S948N) 실기 전부 — 체감 선명도, 지연 4 ms 기준, 발열, 회전 뒤 터치 위치, 실 GPU 드라이버의 GL 실패 경로.
+- 제품/테스트/문서: 테스트 도구(`automation/sh_filter_avd.py`·`automation/sh_pattern_window.ps1`)·문서(폰 절차·이 항목). 제품 코드는 c568fbb 그대로.
