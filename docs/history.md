@@ -13291,3 +13291,13 @@ Next
 - 보류: minidump(계약 8 — helper 정체 반례에서 5 s 복구 유지 증거가 없어 보류), Bⓑ2(directory 신호), MT 출하 변경.
 - 미검증: 회사 PC 실기(격리 영속·재부팅 뒤 WGC 시작·게임 중 복원), MT A/B 실기, 실제 SY/BA ProgramData 쓰기(관리자 실 Host), 구형 APK 실기.
 - 제품/테스트/문서: 제품(host/viewer/shell), 테스트, 문서(이 항목·MT A/B 절차).
+
+### 2026-10-22 dxgi-wedge-fix r2 — Codex 158aff3 NEEDS_CHANGES D1~D4 보수 (미게시, 실기 대기)
+
+- 근거: `codex_dxgi_wedge_fix_r1.md` D1~D4/E1, 지시 `task_dxgi_wedge_fix_impl_r1.md` r2 절.
+- D1(명시 모니터 동일성): 복원 descriptor 를 `desktop`(논리 desktop = 호스트의 현재 primary, desktop 카드와 같은 선택) / `monitor`(사용자가 고른 화면) / `window` 로 줄였다. 자동 복원은 `desktop` 만 — 화면 목록이 없어도·늦어도·미지원이어도 같은 의미로 고른다. `monitor` 는 GDI 이름+사각형이 안정 출력 identity 가 아니므로 **자동 복원하지 않고 picker + 이유**(Codex 허용 안전 최소안; 안정 identity 는 별도 wire 설계). r1 의 '목록 4 s 미수신·미지원이면 primary(0) 선택'(e711f08)과 이름+사각형 매칭은 제거. PC 뷰어 툴바 화면 전환(구형 ControlMonitorSelect — 적용 전에 목록으로 답하고 generation 을 올리지 않음)은 r1 보고 경로가 발화하지 않아 descriptor 가 `desktop` 으로 남던 결함도 있었다 → 요청 즉시 `monitor` 로 낮춘다(picker 로만 이어지는 값).
+- D2(보고 시점): reveal(확정+첫 decode)은 후보일 뿐, 그 generation 의 프레임이 **실제 present 된 순간**에 commit·보고·`result=restored`. present 실패면 shell 은 이전 값을 유지(A 표시 → B decode 만 → 종료 → A 복원). decode 시점 보고(viewer_restore_frame.hpp)와 kMsgRestoreReport 제거.
+- D3(저장소): 시작 시 future 로 거부되는 기록(last > now+300 s)을 다음 wedge 가 이어 쓰지 않고 now 부터 새로 시작(이어 쓰면 실제 wedge 가 다음 시작에도 격리되지 않음). lock 파일을 공유 가능하게 만들고, 빈 보호 폴더 동시 최초 생성의 sharing violation·생성 경합을 같은 3 s 기한 안에서 재시도.
+- D4(시험 빌드만): MtAb 의 장치 재생성 경로에서 MT arm 을 새 context 생성 직후·WinRT wrapper/MF/scaler 이전으로 옮기고 `where=` 와 `mf-device-set` 로그로 순서를 남긴다. 출하 MT 무변경.
+- 시험: viewer_restore_target 30/30(mutant COMMIT_ON_ARM 6 FAIL·MONITOR_AS_DESKTOP 1 FAIL) · capture_recovery_store 64/64 ×3(2 writer process×20 round 빈 폴더, 최악 62 ms; mutant CONTINUE_FUTURE 3 FAIL·UNSHARED_LOCK_CREATE 20/20 round FAIL) · client_recovery_ui 84/0 · 전체 사슬 dxgi_wedge_reconnect_runner ALL PASS(뷰어 로그 순서 revealed gen=2 → reported why=presented → result=restored) · MtAb arm=on 시작 순서 mt-ab → device-created → mf-device-set → winrt-wrapper(state=on) · 전체 빌드 OK · 출하 gate ALL PASS 9. 재생성 경로의 순서는 실행되지 않았다(어댑터 변경 등 조건 필요) — 소스 순서만.
+- 제품/테스트/문서: 제품(viewer/host 시험빌드 경로·store), 테스트, 문서(이 항목).
