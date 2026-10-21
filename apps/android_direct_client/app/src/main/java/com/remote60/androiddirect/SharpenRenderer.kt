@@ -56,8 +56,12 @@ class SharpenRenderer(
         fun onReady(generation: Long, input: Surface)
         /** On the renderer thread. GL could not start or broke; the renderer stops drawing. */
         fun onFailed(generation: Long, reason: String)
-        /** On the renderer thread. The output EGL surface is destroyed: the TextureView has no producer. */
-        fun onReleased(generation: Long)
+        /**
+         * On the renderer thread, once the release is over. `detached`: the output EGL window surface was
+         * destroyed (or never made) -- the TextureView surface has no producer from this renderer. False
+         * when eglDestroySurface failed or threw: the policy then never treats that surface as free.
+         */
+        fun onReleased(generation: Long, detached: Boolean)
     }
 
     /** Test seam hooks (no-op in shipped builds, see SharpenTestSeam). */
@@ -67,6 +71,8 @@ class SharpenRenderer(
         val failSwapAfterFrames: Int = -1,
         val neverDraw: Boolean = false,
         val forceStrength: Float? = null,
+        /** r2 H1: hold the release this long before tearing down (past the app's 2 s release timeout). */
+        val holdReleaseMs: Long = 0L,
     ) {
         companion object { val NONE = SharpenFaults() }
     }
@@ -97,6 +103,8 @@ class SharpenRenderer(
     private var haveFrame = false
     private var failed = false
     private var released = false
+    /** Release asked for: no more draws, even while a (test-held) teardown waits. */
+    private var stopping = false
     private val texMatrix = FloatArray(16)
     private var uTexMatrix = -1
     private var uStep = -1
@@ -114,7 +122,7 @@ class SharpenRenderer(
 
     fun setStrength(value: Float) {
         handler.post {
-            if (released || failed) return@post
+            if (released || failed || stopping) return@post
             strength = faults.forceStrength ?: value
             // Contract 3: a strength change shows at once, even on a still picture -- one redraw of the
             // frame already latched, which is NOT a new decoded frame (contract 6).
@@ -124,11 +132,19 @@ class SharpenRenderer(
 
     /** Posted; answers onReleased on this thread when the TextureView has no producer left. */
     fun release() {
-        handler.post {
-            if (!released) teardown()
+        val finish = Runnable {
+            val detached = if (!released) teardown() else true
             released = true
-            listener.onReleased(generation)
+            listener.onReleased(generation, detached)
             thread.quitSafely()
+        }
+        if (faults.holdReleaseMs > 0L) {
+            // Test seam only: a driver that takes long to let go. Drawing stops at once (as in a real
+            // release, the decoder has already been detached); the EGL surface stays until the hold ends.
+            handler.post { stopping = true }
+            handler.postDelayed(finish, faults.holdReleaseMs)
+        } else {
+            handler.post(finish)
         }
     }
 
@@ -187,7 +203,7 @@ class SharpenRenderer(
     }
 
     private fun onFrameAvailable() {
-        if (released || failed) return
+        if (released || failed || stopping) return
         framesAvailable.incrementAndGet()
         if (drawPending) {
             framesSkipped.incrementAndGet()  // latest wins: the pending draw will latch the newest
@@ -196,7 +212,7 @@ class SharpenRenderer(
         drawPending = true
         handler.post {
             drawPending = false
-            if (!released && !failed) draw(newFrame = true)
+            if (!released && !failed && !stopping) draw(newFrame = true)
         }
     }
 
@@ -257,31 +273,56 @@ class SharpenRenderer(
         listener.onFailed(generation, reason)
     }
 
-    private fun teardown() {
+    /**
+     * Returns whether the OUTPUT (the TextureView surface's producer) is confirmed gone. Each step is tried
+     * on its own, so a failure in one does not skip the rest; only the output's result is reported up --
+     * the other resources are this renderer's own and die with its thread either way.
+     */
+    private fun teardown(): Boolean {
         // Order: the decoder has already been detached from `input` by the caller (it detaches before it
         // releases us). The output surface goes first -- that is what frees the TextureView's BufferQueue.
+        var detached = windowSurface == EGL14.EGL_NO_SURFACE
+        val notes = mutableListOf<String>()
         try {
             if (display != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                if (windowSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, windowSurface)
+                if (windowSurface != EGL14.EGL_NO_SURFACE) {
+                    detached = EGL14.eglDestroySurface(display, windowSurface)
+                    if (!detached) notes += "eglDestroySurface ${eglError()}"
+                }
             }
-            windowSurface = EGL14.EGL_NO_SURFACE
+        } catch (t: Throwable) {
+            detached = false
+            notes += "output: ${t.message ?: t.javaClass.simpleName}"
+        }
+        if (detached) windowSurface = EGL14.EGL_NO_SURFACE
+        try {
             inputSurface?.release()
-            inputSurface = null
             input?.setOnFrameAvailableListener(null)
             input?.release()
-            input = null
+        } catch (t: Throwable) {
+            notes += "input: ${t.message ?: t.javaClass.simpleName}"
+        }
+        inputSurface = null
+        input = null
+        try {
             if (display != EGL14.EGL_NO_DISPLAY) {
                 if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
                 EGL14.eglReleaseThread()
-                EGL14.eglTerminate(display)
+                if (detached) EGL14.eglTerminate(display)  // never terminate under a surface that is still there
             }
-        } catch (_: Throwable) {
-            // Nothing more can be done for it; the TextureView side is what matters, and it is gone above.
+        } catch (t: Throwable) {
+            notes += "context: ${t.message ?: t.javaClass.simpleName}"
         }
         context = EGL14.EGL_NO_CONTEXT
-        display = EGL14.EGL_NO_DISPLAY
+        if (detached) display = EGL14.EGL_NO_DISPLAY
+        teardownNotes = notes.joinToString("; ")
+        return detached
     }
+
+    /** What went wrong in the last teardown, for the app's log (empty: nothing). */
+    @Volatile var teardownNotes: String = ""
+        private set
 
     private fun buildProgram(): Int {
         val vs = compile(GLES20.GL_VERTEX_SHADER, VERTEX)

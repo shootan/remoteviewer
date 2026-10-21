@@ -2266,8 +2266,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // sh-filter r1 (contract 4): with the sharpening pass on this surface, Android must not release it
         // while the renderer's EGL surface may still use it -- the app releases it once the renderer has
         // let go (single owner). With the decoder on it directly, Android releases it as before.
+        val destroyedId = sharpenPolicy.surfaceId
         val (commands, androidReleases) = sharpenPolicy.surfaceDestroyed()
-        if (!androidReleases) sharpenSurfaceTextureToRelease = surface
+        // r2 H1: kept per surface id -- a late release of an older surface's renderer frees exactly that one.
+        if (destroyedId != null) {
+            if (androidReleases) sharpenSurfaceTextures.remove(destroyedId) else sharpenAppOwnedSurfaces += destroyedId
+        }
         executeSharpen(commands)
         surfaceBufferWidth = 0
         surfaceBufferHeight = 0
@@ -5109,13 +5113,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // this executes its commands on the UI thread. The renderer's own thread does all GL. ----
     private var sharpness = SharpnessLevel.DEFAULT
     private val sharpenPolicy = SharpenPathPolicy(SharpnessLevel.DEFAULT)
-    private var sharpenRenderer: SharpenRenderer? = null
+    /** The renderer of the CURRENT generation (null when none is starting or live). */
+    private val sharpenRenderer: SharpenRenderer?
+        get() = sharpenRenderers[sharpenRendererGeneration]
     private var sharpenRendererGeneration = 0L
+    /** r2 H1: every renderer not yet confirmed released, by generation (a held one outlives the next). */
+    private val sharpenRenderers = HashMap<Long, SharpenRenderer>()
+    private val sharpenReleaseTimeouts = HashMap<Long, Runnable>()
     private var sharpenInputSurface: Surface? = null
-    private var sharpenSurfaceTextureToRelease: SurfaceTexture? = null
+    /** r2 H1: TextureView surfaces by id: the current one, and destroyed ones the app still has to release. */
+    private var sharpenSurfaceSeq = 0L
+    private val sharpenSurfaceTextures = HashMap<Long, SurfaceTexture>()
+    private val sharpenAppOwnedSurfaces = HashSet<Long>()
     private val sharpenHandler = Handler(Looper.getMainLooper())
     private var sharpenStartTimeout: Runnable? = null
-    private var sharpenReleaseTimeout: Runnable? = null
     private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
     private var textureLatchCount = 0L
     private var sharpenGateNotedAtMs = 0L
@@ -5180,25 +5191,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     }
                 }
                 is SharpenPathPolicy.Command.ReleaseRenderer -> {
-                    val renderer = sharpenRenderer
-                    sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
-                    sharpenStartTimeout = null
+                    val gen = command.generation
+                    val renderer = sharpenRenderers[gen]
+                    if (gen == sharpenRendererGeneration) {
+                        sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
+                        sharpenStartTimeout = null
+                    }
                     if (renderer == null) {
-                        executeSharpen(sharpenPolicy.rendererReleased(command.generation))
+                        // Never made (no SurfaceTexture at start): nothing holds the surface.
+                        executeSharpen(sharpenPolicy.rendererReleased(gen, detached = true))
                         continue
                     }
                     renderer.release()
-                    val gen = command.generation
                     val timeout = Runnable {
-                        // Never connect a second producer: if the renderer did not let go, the view stays black.
-                        diagnosticsLog.log("sharpen_release_timeout", "gen=$gen -- the view is left unconnected")
+                        sharpenReleaseTimeouts.remove(gen)
+                        // r2 H1: the surface stays BLOCKED for this renderer -- no producer is connected to it
+                        // until the release arrives, however often the viewer asks.
+                        diagnosticsLog.log("sharpen_release_timeout", "gen=$gen surface=${sharpenPolicy.surfaceId} -- blocked until it lets go")
                         executeSharpen(sharpenPolicy.rendererReleaseTimedOut(gen))
                     }
-                    sharpenReleaseTimeout = timeout
+                    sharpenReleaseTimeouts[gen] = timeout
                     sharpenHandler.postDelayed(timeout, SHARPEN_RELEASE_TIMEOUT_MS)
                 }
                 is SharpenPathPolicy.Command.SetStrength -> {
                     if (command.generation == sharpenRendererGeneration) sharpenRenderer?.setStrength(command.strength)
+                }
+                is SharpenPathPolicy.Command.ProducerStuck -> {
+                    diagnosticsLog.log("sharpen_producer_stuck", "gen=${command.generation} surface=${sharpenPolicy.surfaceId} -- this surface stays unconnected until it is replaced")
                 }
                 is SharpenPathPolicy.Command.ShowFallback -> {
                     diagnosticsLog.log(
@@ -5207,9 +5226,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                     Toast.makeText(this, R.string.ui_sharpness_fallback, Toast.LENGTH_SHORT).show()
                 }
-                SharpenPathPolicy.Command.ReleaseSurfaceTexture -> {
-                    sharpenSurfaceTextureToRelease?.release()
-                    sharpenSurfaceTextureToRelease = null
+                is SharpenPathPolicy.Command.ReleaseSurfaceTexture -> {
+                    val id = command.surfaceId
+                    if (sharpenAppOwnedSurfaces.remove(id)) {
+                        sharpenSurfaceTextures.remove(id)?.release()
+                        diagnosticsLog.log("sharpen_surface_released", "surface=$id")
+                    }
                 }
             }
         }
@@ -5235,18 +5257,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             override fun onFailed(generation: Long, reason: String) {
                 sharpenHandler.post { executeSharpen(sharpenPolicy.rendererFailed(generation, reason)) }
             }
-            override fun onReleased(generation: Long) {
+            override fun onReleased(generation: Long, detached: Boolean) {
                 sharpenHandler.post {
-                    if (generation == sharpenRendererGeneration) {
-                        sharpenReleaseTimeout?.let { sharpenHandler.removeCallbacks(it) }
-                        sharpenReleaseTimeout = null
-                        sharpenRenderer = null
-                    }
-                    executeSharpen(sharpenPolicy.rendererReleased(generation))
+                    sharpenReleaseTimeouts.remove(generation)?.let { sharpenHandler.removeCallbacks(it) }
+                    val r = sharpenRenderers.remove(generation)
+                    diagnosticsLog.log(
+                        "sharpen_released",
+                        "gen=$generation detached=${if (detached) 1 else 0} notes=${r?.teardownNotes?.ifEmpty { "none" } ?: "none"}"
+                    )
+                    executeSharpen(sharpenPolicy.rendererReleased(generation, detached))
                 }
             }
         }
-        sharpenRenderer = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
+        sharpenRenderers[generation] = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
         val timeout = Runnable { executeSharpen(sharpenPolicy.rendererFailed(generation, "start_timeout")) }
         sharpenStartTimeout = timeout
         sharpenHandler.postDelayed(timeout, SHARPEN_START_TIMEOUT_MS)
@@ -5304,11 +5327,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
     }
 
+    /** r2 H1: the policy knows the CURRENT TextureView surface by id; a different object is a new surface. */
+    private fun ensureSharpenSurface(surfaceTexture: SurfaceTexture) {
+        val id = sharpenPolicy.surfaceId
+        if (id != null && sharpenSurfaceTextures[id] === surfaceTexture) return
+        sharpenSurfaceSeq += 1
+        sharpenSurfaceTextures[sharpenSurfaceSeq] = surfaceTexture
+        sharpenPolicy.surfaceAvailable(sharpenSurfaceSeq)
+        diagnosticsLog.log("sharpen_surface", "surface=$sharpenSurfaceSeq")
+    }
+
     private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
         if (surfaceTexture == null) {
             releaseVideoSurface()
             return
         }
+        ensureSharpenSurface(surfaceTexture)
 
         val targetBufferWidth = resolveSurfaceBufferWidth()
         val targetBufferHeight = resolveSurfaceBufferHeight()
@@ -5319,7 +5353,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val bufferSizeChanged =
             surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight
-        if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING) {
+        if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED) {
             surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
             surfaceBufferWidth = targetBufferWidth
             surfaceBufferHeight = targetBufferHeight
@@ -5403,6 +5438,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             videoSizeChanged ||
             sharpenPolicy.path == SharpenPathPolicy.Path.NONE ||
             sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED ||
             surfaceBufferWidth != targetBufferWidth ||
             surfaceBufferHeight != targetBufferHeight) {
             bindVideoSurface(videoTextureView.surfaceTexture)
