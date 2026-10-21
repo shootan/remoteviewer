@@ -385,11 +385,13 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     // every pong like the others so a reconnect never inherits a stale answer.
     ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
     ctx.session.hostRoleKnown.store(true, std::memory_order_release);  // r7 H6
-    if ((pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) == 0) {
+    // lockscreen-cred r1: the held-back notice is said again on the next arrival at EITHER logon screen.
+    if (!remote60::native_poc::prelogin::HostAtLogonScreen(pong.captureTargetFlags)) {
       ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
     }
-    // "Windows 로그인": typed is not logged in. The logon is the host leaving the pre-login screen
-    // after the password went in (within two minutes of it); only then is "logged in" shown.
+    // "Windows 로그인": typed is not logged in. The host leaving the pre-login screen after the password
+    // went in (within two minutes of it) is said as exactly that -- lockscreen-cred r1 (Codex contract 5):
+    // not as a login this viewer saw (kPreloginLeftLogon, "not confirmed").
     if (const uint64_t typedAt = ctx.session.preloginInjectedAtUs.load(std::memory_order_acquire)) {
       const bool stillAtLogon = (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) != 0;
       const bool recent = qpc_now_us() - typedAt < 120000000ull;
@@ -397,8 +399,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
         ctx.session.preloginInjectedAtUs.store(0, std::memory_order_release);
         if (!stillAtLogon && recent) {
           std::cout << "[native-video-client][prelogin-login] host left the logon screen after the typed password\n";
-          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult,
-                       static_cast<WPARAM>(remote60::native_poc::UnlockStage::SessionUnlocked), 0);
+          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRolePrelogin, kPreloginLeftLogon), 0);
         }
       }
     }
@@ -674,6 +675,10 @@ void ControlClient::Run() {
 
   // P0 telemetry accumulators (input serialization diagnosis, #351): one line per second.
   // Move-specific (BLOCKER 1) + coalesce delta (BLOCKER 2) + queue age (HIGH 3) + windowUs.
+  // lockscreen-cred r1: a typed lock-screen credential this connection is following to its unlock (0 = none).
+  uint32_t lockCredPollRequestId = 0;
+  uint64_t lockCredPollNextUs = 0;
+  uint64_t lockCredPollDeadlineUs = 0;
   uint64_t p0MoveSent = 0;       // move InputEvents actually sent (kind==1)
   uint64_t p0MoveRttSumUs = 0;   // send->ack RTT for moves
   uint64_t p0MoveRttMaxUs = 0;
@@ -736,16 +741,21 @@ void ControlClient::Run() {
       p0LastEmitUs = nowUs;
     }
     if (ctx.session.unlockRequested.exchange(false, std::memory_order_acq_rel)) {
+      // lockscreen-cred r1 (Codex contract 2): the disconnected-session unlock now says how it ended, in the
+      // result window -- not only here -- and a password refused as policy is not kept to be replayed.
+      uint16_t stage = 0;
+      uint32_t win32 = 0;
       if (!ctx.session.unlockSupported.load(std::memory_order_relaxed)) {
         std::cout << "[native-video-client][unlock] host does not support sealed unlock\n";
+        stage = kLoginUnsupported;
       } else {
         std::wstring pw;
         if (load_unlock_password(0, &pw)) {
           std::string status;
           bool clearCred = false;
-          (void)run_unlock_exchange(*controlLink, 0, pw, &status, &clearCred);
+          (void)run_unlock_exchange_result(*controlLink, pw, &stage, &win32, &clearCred, &status);
           if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
-          if (clearCred) {  // wrong/corrupt password: drop it so it is not auto-reused (lockout guard)
+          if (clearCred) {  // wrong/corrupt/refused: drop it so it is not auto-reused (lockout guard)
             clear_unlock_password(0);
             std::cout << "[native-video-client][unlock] " << status
                       << " (stored password cleared; set it again to retry)\n";
@@ -755,11 +765,15 @@ void ControlClient::Run() {
         } else {
           clear_unlock_password(0);  // a present-but-unreadable file would block re-prompt forever
           std::cout << "[native-video-client][unlock] no usable stored password (set it again)\n";
+          stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::DecryptFailed);
         }
       }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleUnlock, stage),
+                   static_cast<LPARAM>(win32));
     }
-    // "Windows 로그인" (prelogin-ui r3, item 5): the prompt left a password; seal it under the prelogin
-    // purpose, let the host's pre-login worker type it, zero it, and tell the window what happened.
+    // "Windows 로그인" (prelogin-ui r3, item 5; lockscreen-cred r1): the prompt left a password for the screen
+    // it was asked at. Sent only if the host is still at THAT screen on THIS connection -- sealed under that
+    // screen's purpose -- else dropped (zeroed) and said. The window is told what happened.
     if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) {
       std::wstring pw;
       {
@@ -767,21 +781,59 @@ void ControlClient::Run() {
         pw.swap(ctx.session.preloginCredPassword);
       }
       ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+      const int askedRole = ctx.session.preloginCredRole.load(std::memory_order_acquire);
+      const bool sameConnection = ctx.session.preloginCredRunGen.load(std::memory_order_acquire) ==
+                                  ctx.session.controlRunGen.load(std::memory_order_acquire);
+      const auto nowRole = remote60::native_poc::DecideLogonScreenRole(ctx.session.hostCaptureFlags.load(std::memory_order_relaxed));
+      const bool stillThere =
+          sameConnection && ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+          ((askedRole == kLoginRolePrelogin && nowRole == remote60::native_poc::LogonScreenRole::Prelogin) ||
+           (askedRole == kLoginRoleLockScreen && nowRole == remote60::native_poc::LogonScreenRole::LockScreen));
       uint16_t stage = kPreloginNotAtLogon;
       uint32_t win32 = 0;
-      std::string status = "not sent: the host is no longer at the logon screen";
-      if (!pw.empty() &&
-          remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc,
-                                                   ctx.session.hostCaptureFlags.load(std::memory_order_relaxed))
-              .sealedEntryAvailable) {
-        (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
+      bool waiting = false;
+      uint32_t lockRequestId = 0;
+      std::string status = "not sent: the host is no longer at the screen it was asked for";
+      if (!pw.empty() && stillThere) {
+        if (askedRole == kLoginRoleLockScreen) {
+          (void)run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status);
+        } else {
+          (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
+        }
       }
       if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
-      std::cout << "[native-video-client][prelogin-login] " << status << " stage=" << stage << " win32=" << win32 << "\n";
-      if (stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Injected)) {
+      std::cout << "[native-video-client][" << (askedRole == kLoginRoleLockScreen ? "lock-cred" : "prelogin-login")
+                << "] " << status << " stage=" << stage << " win32=" << win32 << " waiting=" << (waiting ? 1 : 0) << "\n";
+      if (askedRole == kLoginRolePrelogin && stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Injected)) {
         ctx.session.preloginInjectedAtUs.store(qpc_now_us(), std::memory_order_release);
       }
-      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, stage, static_cast<LPARAM>(win32));
+      if (waiting) {
+        // Typed; the unlock is followed between the other work of this loop (one 44 a second), so the user's
+        // Enter -- which goes through this same thread -- is never held up by the wait.
+        lockCredPollRequestId = lockRequestId;
+        lockCredPollNextUs = qpc_now_us() + 1000000ull;
+        lockCredPollDeadlineUs = qpc_now_us() + 135000000ull;
+      }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(askedRole, stage),
+                   static_cast<LPARAM>(win32));
+    }
+    // lockscreen-cred r1: a typed lock-screen credential waiting for its unlock -- one status poll when due.
+    if (lockCredPollRequestId != 0 && qpc_now_us() >= lockCredPollNextUs) {
+      uint16_t stage = 0;
+      bool terminal = false;
+      uint32_t win32 = 0;
+      const bool polled = poll_lock_cred_status(*controlLink, lockCredPollRequestId, &stage, &terminal, &win32);
+      const bool expired = qpc_now_us() >= lockCredPollDeadlineUs;
+      if ((polled && terminal) || expired) {
+        if (!(polled && terminal)) stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
+        std::cout << "[native-video-client][lock-cred] requestId=" << lockCredPollRequestId << " final stage=" << stage
+                  << "\n";
+        PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage),
+                     static_cast<LPARAM>(win32));
+        lockCredPollRequestId = 0;
+      } else {
+        lockCredPollNextUs = qpc_now_us() + 1000000ull;
+      }
     }
     // Remote reboot (prelogin-service r3): the confirm popup set rebootRequested on the UI thread. Send
     // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.

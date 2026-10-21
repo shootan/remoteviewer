@@ -46,7 +46,12 @@ bool host_ime_optin() {
 // the local IME, and the switch to physical is atomic (Codex Edge 4). The env opt-in and the v2
 // capability are folded into imeMode: the control thread only enters Active when both hold.
 bool host_ime_mode(ViewerState& ctx) {
-  return ctx.session.imeMode.load(std::memory_order_acquire) == 2;
+  if (ctx.session.imeMode.load(std::memory_order_acquire) != 2) return false;
+  // lockscreen-cred r1: at a logon screen (pre-login or lock screen, as the host said) keys go by the
+  // virtual-key path instead: the host injects a physical key only on the user's own desktop, so on the
+  // logon screen Enter / Tab / the arrows would go nowhere -- and the characters are held back either way.
+  return !(ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+           remote60::native_poc::prelogin::HostAtLogonScreen(ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)));
 }
 
 // Host-side IME: forward one raw physical key (scan code) so the host IME composes live. Not

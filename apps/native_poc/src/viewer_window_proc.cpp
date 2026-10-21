@@ -211,38 +211,87 @@ void picker_release(ViewerState& ctx, HWND hwnd, const ClientLayout& layout, int
   }
 }
 
+namespace {
+// lockscreen-cred r1: what a login request came to on THIS side (cancelled, unsupported), in the same window.
+void post_login_outcome(ViewerState& ctx, int role, uint16_t stage) {
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(role, stage), 0);
+}
+// One prompt at a time, whichever entry opened it (the button, the menu, Ctrl+Alt+U); cleared on every exit.
+struct LoginPromptGuard {
+  ViewerState& ctx;
+  bool owned;
+  explicit LoginPromptGuard(ViewerState& c)
+      : ctx(c), owned(!c.session.loginPromptOpen.exchange(true, std::memory_order_acq_rel)) {}
+  ~LoginPromptGuard() {
+    if (owned) ctx.session.loginPromptOpen.store(false, std::memory_order_release);
+  }
+};
+}  // namespace
+
+// "Windows 로그인" -- the ONE entry for the toolbar button, the menu and Ctrl+Alt+U, at the pre-login screen
+// and (lockscreen-cred r1) at the lock screen of a logged-on host. Each press asks for the password (nothing
+// is stored or reused), remembers which screen it was asked for, and hands it to the control thread, which
+// sends it only if the host is still at that screen on this connection. Cancel / unsupported are said too.
 void request_prelogin_login(ViewerState& ctx, HWND owner) {
+  LoginPromptGuard guard(ctx);
+  if (!guard.owned) return;  // a prompt is already open (double click, a held key, a nested call)
   const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
-  if (!remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc, flags).sealedEntryAvailable) {
-    std::cout << "[native-video-client][prelogin-login] host is not at the logon screen; not offered\n";
+  const auto policy = remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc, flags);
+  if (!policy.sealedEntryAvailable) {
+    std::cout << "[native-video-client][prelogin-login] host is not at a logon screen; not offered\n";
+    post_login_outcome(ctx, kLoginRoleNone, kLoginUnsupported);
     return;
   }
   if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) return;  // one already on its way
+  const int role = policy.role == remote60::native_poc::LogonScreenRole::LockScreen ? kLoginRoleLockScreen
+                                                                                    : kLoginRolePrelogin;
+  const uint64_t runGen = ctx.session.controlRunGen.load(std::memory_order_acquire);
   std::wstring pw;
-  const bool entered = prompt_prelogin_password(owner, &pw);
+  const bool entered = role == kLoginRoleLockScreen ? prompt_lock_screen_password(owner, &pw)
+                                                    : prompt_prelogin_password(owner, &pw);
+  // The modal window took the keyboard: whatever modifier went to the host before it is released now.
+  (void)enqueue_release_all_modifiers(ctx);
   if (entered) {
     std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
     pw.swap(ctx.session.preloginCredPassword);  // pw now holds whatever was there (nothing, normally)
   }
   if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
-  if (!entered) return;  // cancelled: nothing sent
+  if (!entered) {  // cancelled: nothing sent, and said
+    post_login_outcome(ctx, role, kLoginCancelled);
+    return;
+  }
+  ctx.session.preloginCredRole.store(role, std::memory_order_release);
+  ctx.session.preloginCredRunGen.store(runGen, std::memory_order_release);
   ctx.session.preloginCredRequested.store(true, std::memory_order_release);
 }
 
 // The Ctrl+Alt local hotkeys of WM_KEYDOWN: F5 refresh the window list, F9 capture overview,
 // [ ] bitrate down/up, ; ' keyint down/up. True when consumed.
-bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp) {
-  if (local_hotkey_modifiers_active() && wp == 'U') {  // Ctrl+Alt+U: unlock the host lock screen
-    // A host at the pre-login screen has no lock screen to unlock: the same keys are "Windows 로그인".
+bool on_local_hotkey(ViewerState& ctx, HWND hwnd, WPARAM wp, LPARAM lp) {
+  if (local_hotkey_modifiers_active() && wp == 'U') {  // Ctrl+Alt+U: "Windows 로그인" / unlock
+    if ((lp & (1 << 30)) != 0) return true;  // lockscreen-cred r1: a held key's repeats open nothing more
+    // At the pre-login screen or (lockscreen-cred r1) the lock screen: the same entry as the button.
     if (remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc,
                                                  ctx.session.hostCaptureFlags.load(std::memory_order_relaxed))
             .sealedEntryAvailable) {
       request_prelogin_login(ctx, hwnd);
       return true;
     }
+    // Otherwise the older unlock of a DISCONNECTED locked session (its stored password), if the host has it.
+    if (!ctx.session.unlockSupported.load(std::memory_order_relaxed)) {
+      post_login_outcome(ctx, kLoginRoleUnlock, kLoginUnsupported);
+      return true;
+    }
+    LoginPromptGuard guard(ctx);
+    if (!guard.owned) return true;
     if (!has_unlock_password(0)) {
       std::wstring pw;
-      if (!prompt_unlock_password(hwnd, &pw)) return true;  // cancelled
+      const bool entered = prompt_unlock_password(hwnd, &pw);
+      (void)enqueue_release_all_modifiers(ctx);  // the modal took the Ctrl/Alt ups
+      if (!entered) {
+        post_login_outcome(ctx, kLoginRoleUnlock, kLoginCancelled);
+        return true;
+      }
       save_unlock_password(0, pw);
       if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
     }
@@ -955,7 +1004,7 @@ bool paste_intercept(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
 LRESULT on_key_message(ViewerState& ctx, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   const bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-  if (down && on_local_hotkey(ctx, hwnd, wp)) return 0;
+  if (down && on_local_hotkey(ctx, hwnd, wp, lp)) return 0;
   if (kInputPolicyForceBlock) return 0;
   if (paste_intercept(ctx, hwnd, msg, wp, lp)) return 0;
   forward_key(ctx, hwnd, msg, wp, lp);
@@ -1191,9 +1240,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case kMsgPreloginTypingHeldBack:
       // r5 G8: once per arrival at the logon screen -- the typing went nowhere, and why.
+      // lockscreen-cred r1 (A5): the same for the lock screen -- and where the button is.
       show_prelogin_notice(hwnd, kPreloginPromptTitle,
-                           L"원격 PC가 로그인 화면이라 글자는 보내지 않았습니다.\n"
-                           L"비밀번호는 툴바의 'Windows 로그인'(Ctrl+Alt+U)으로 보내세요.");
+                           L"원격 PC가 로그인·잠금 화면이라 글자는 보내지 않았습니다.\n"
+                           L"비밀번호는 툴바의 'Windows 로그인' 버튼(또는 Ctrl+Alt+U)으로 보내세요.");
       return 0;
     case kMsgRebootResult:
       // r5 G11: what the remote restart request came to, on screen (not only in the log).
@@ -1208,7 +1258,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgPreloginCredResult: {
       // "Windows 로그인": typed (Injected) and logged in (SessionUnlocked, seen afterwards) are two
       // different windows of text; neither carries the password.
-      show_prelogin_cred_result(hwnd, prelogin_cred_result_text(static_cast<uint16_t>(wp), static_cast<uint32_t>(lp)));
+      // lockscreen-cred r1: the role rides above the stage (make_login_result_wparam); 0 is the pre-login
+      // worker's (what older posts carry). Cancel / unsupported are said here too.
+      const int role = static_cast<int>((wp >> 16) & 0xFF);
+      const uint16_t stage = static_cast<uint16_t>(wp & 0xFFFF);
+      const int shownRole = role == kLoginRoleNone && stage < kLoginUnsupported ? kLoginRolePrelogin : role;
+      show_prelogin_cred_result(hwnd, windows_login_result_text(shownRole, stage, static_cast<uint32_t>(lp)));
       return 0;
     }
     case kMsgApplyClipboard: {

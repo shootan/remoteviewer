@@ -58,12 +58,43 @@ constexpr uint16_t kPreloginNotAtLogon = 0xFFFF;  // not sent: the host was no l
 
 // Modal prompt (same window as the unlock prompt, its own class and words). Nothing is saved.
 bool prompt_prelogin_password(HWND owner, std::wstring* out);
+// lockscreen-cred r1: the same prompt, worded for the lock screen of a logged-on host. Nothing is saved.
+bool prompt_lock_screen_password(HWND owner, std::wstring* out);
 // The exchange under the prelogin purpose. True when the host answered with a terminal stage
 // (*stage, *win32); false with *stage 0 when it did not.
 bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password,
                                 uint16_t* stage, uint32_t* win32, std::string* status);
 // What the result window says for a stage (kPreloginNotAtLogon and 0 included).
 std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32);
+
+// --- lockscreen-cred r1: one "Windows 로그인" for the pre-login screen AND the lock screen -------------
+// Which screen a request was made for (and so which purpose it is sealed under). kLoginRoleUnlock is the
+// older disconnected-session unlock (Ctrl+Alt+U when neither screen is up), which keeps its stored password.
+constexpr int kLoginRoleNone = 0;
+constexpr int kLoginRolePrelogin = 1;
+constexpr int kLoginRoleLockScreen = 2;
+constexpr int kLoginRoleUnlock = 3;
+// Local outcomes said in the same result window (never on the wire).
+constexpr uint16_t kLoginCancelled = 0xFFFD;     // the user closed the prompt: nothing sent
+constexpr uint16_t kLoginUnsupported = 0xFFFC;   // no screen to log in to here, or the host predates it
+constexpr uint16_t kPreloginLeftLogon = 0xFFFE;  // typed, then the host left the pre-login screen (not a login seen)
+// The result window's message carries the stage in the low 16 bits of wParam and the role above them.
+inline WPARAM make_login_result_wparam(int role, uint16_t stage) {
+  return static_cast<WPARAM>(stage) | (static_cast<WPARAM>(role & 0xFF) << 16);
+}
+// What the result window says, by role and stage (the local outcomes above included).
+std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32);
+// The lock-screen exchange (88 -> 41 with the LockCred purpose -> 42 -> 43 -> 44/45). True when the host
+// answered: *stage terminal, or Injected with *waiting -- typed, now waiting for the unlock, which the
+// caller follows with poll_lock_cred_status (one 44 each, between other work). *requestId is the job's.
+bool run_lock_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
+                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status);
+bool poll_lock_cred_status(remote60::native_poc::ControlLink& link, uint32_t requestId, uint16_t* stage, bool* terminal,
+                           uint32_t* win32);
+// The disconnected-session unlock with its outcome for the result window (Codex contract 2: the user sees
+// it; *clearCredential when the stored password must go -- wrong, undecryptable, or refused as policy).
+bool run_unlock_exchange_result(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
+                                uint32_t* win32, bool* clearCredential, std::string* status);
 // The result window (modal, owned by `owner`): the text and a 확인 button. Returns when it is closed.
 void show_prelogin_cred_result(HWND owner, const std::wstring& text);
 // The same window with another title: the "typing held back at the logon screen" notice (r5 G8) and the

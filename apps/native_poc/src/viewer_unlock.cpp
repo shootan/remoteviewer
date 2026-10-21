@@ -211,6 +211,12 @@ bool prompt_prelogin_password(HWND owner, std::wstring* out) {
                                 L"원격 PC 로그인 화면에 입력할 비밀번호:", L"입력", out);
 }
 
+bool prompt_lock_screen_password(HWND owner, std::wstring* out) {
+  // lockscreen-cred r1: the same window (its class, ids and button) -- only the words say which screen.
+  return prompt_password_window(owner, kPreloginPromptClass, kPreloginPromptTitle,
+                                L"원격 PC 잠금 화면에 입력할 Windows 비밀번호:", L"입력", out);
+}
+
 void show_prelogin_cred_result(HWND owner, const std::wstring& text) {
   show_prelogin_notice(owner, kPreloginResultTitle, text);
 }
@@ -328,16 +334,43 @@ const char* stage_name(uint16_t stage) {
 }  // namespace
 
 namespace {
-// The one challenge -> seal -> poll exchange. `prelogin` picks the purpose the password is sealed
-// under (sealed_unlock BuildPreloginCred* vs BuildKdfInfo/BuildAad); everything else, the wire
-// included, is shared. True with *terminal filled when the host gave a terminal result.
-bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, bool prelogin,
-                     std::string* status, remote60::native_poc::ControlUnlockStatusResultMessage* terminal) {
+// The purpose a password is sealed under (sealed_unlock): the disconnected-session unlock, the pre-login
+// worker's credential, or (lockscreen-cred r1) the lock screen's credential.
+enum class SealAs { Unlock, Prelogin, LockCred };
+
+// One status poll (44 -> 45) for `requestId`. False when the exchange failed.
+bool poll_status(remote60::native_poc::ControlLink& link, uint32_t requestId,
+                 remote60::native_poc::ControlUnlockStatusResultMessage* out) {
   using namespace remote60::native_poc;
-  const std::string what = prelogin ? "login" : "unlock";
+  ControlOutboundAction st{};
+  st.kind = ControlOutboundActionKind::UnlockStatusRequest;
+  st.expectedResponseType = MessageType::ControlUnlockStatusResult;
+  st.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlUnlockStatusResultMessage));
+  st.unlockStatusReq.header.magic = kMagic;
+  st.unlockStatusReq.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusRequest);
+  st.unlockStatusReq.header.size = static_cast<uint16_t>(sizeof(st.unlockStatusReq));
+  st.unlockStatusReq.requestId = requestId;
+  TcpControlResponse rs{};
+  if (!execute_control_action(link, st, &rs) || rs.kind != TcpControlResponseKind::UnlockStatusResult) return false;
+  *out = rs.unlockStatusResult;
+  return true;
+}
+
+// The one challenge -> seal -> poll exchange. `as` picks the purpose the password is sealed under (and,
+// for LockCred, the challenge request 88 and the purpose the answer must carry); everything else, the
+// wire included, is shared. True with *terminal filled when the host gave a terminal result -- or, for
+// LockCred, the first Injected: typed, and now waiting (not terminal) for the session to unlock, which the
+// caller follows with poll_status between other work. *requestIdOut: this exchange's requestId.
+bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, SealAs as,
+                     std::string* status, remote60::native_poc::ControlUnlockStatusResultMessage* terminal,
+                     uint32_t* requestIdOut = nullptr) {
+  using namespace remote60::native_poc;
+  const std::string what = as == SealAs::Prelogin ? "login" : as == SealAs::LockCred ? "lock-screen login" : "unlock";
   auto set_status = [&](const std::string& s) { if (status) *status = s; };
   static uint32_t rid = 1;
   const uint32_t requestId = ++rid;
+  if (requestIdOut) *requestIdOut = requestId;
+  if (terminal) *terminal = ControlUnlockStatusResultMessage{};
 
   // 1) Challenge.
   ControlOutboundAction a{};
@@ -345,7 +378,8 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
   a.expectedResponseType = MessageType::ControlUnlockChallenge;
   a.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlUnlockChallengeMessage));
   a.unlockChallengeReq.header.magic = kMagic;
-  a.unlockChallengeReq.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallengeRequest);
+  a.unlockChallengeReq.header.type = static_cast<uint16_t>(
+      as == SealAs::LockCred ? MessageType::ControlLockCredChallengeRequest : MessageType::ControlUnlockChallengeRequest);
   a.unlockChallengeReq.header.size = static_cast<uint16_t>(sizeof(a.unlockChallengeReq));
   a.unlockChallengeReq.requestId = requestId;
   TcpControlResponse r{};
@@ -357,6 +391,17 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
   if (ch.requestId != requestId) { set_status("response id mismatch"); return false; }
   if (ch.status != static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
     set_status(std::string("challenge rejected: ") + stage_name(ch.status));
+    if (terminal) {
+      terminal->requestId = requestId;
+      terminal->stage = ch.status;
+      terminal->terminal = 1;
+    }
+    return terminal != nullptr;  // lockscreen-cred r1: the refusal is the answer, said to the user as such
+  }
+  // lockscreen-cred r1: a lock-screen challenge must say it was issued for that purpose -- the password is
+  // never sealed for a challenge of another purpose.
+  if (as == SealAs::LockCred && ch.reserved != kUnlockPurposeLockCred) {
+    set_status("challenge purpose mismatch");
     return false;
   }
 
@@ -369,8 +414,12 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
   uint8_t clientPub[su::kPubKeyBytes] = {};
   if (!key.Generate() || !key.ExportPublic(clientPub)) { set_status("crypto init failed"); return false; }
   auto c = ContextFromChallenge(ch, clientPub);
-  const auto kdf = prelogin ? su::BuildPreloginCredKdfInfo(c) : su::BuildKdfInfo(c);
-  const auto aad = prelogin ? su::BuildPreloginCredAad(c) : su::BuildAad(c);
+  const auto kdf = as == SealAs::LockCred   ? su::BuildLockCredKdfInfo(c)
+                   : as == SealAs::Prelogin ? su::BuildPreloginCredKdfInfo(c)
+                                            : su::BuildKdfInfo(c);
+  const auto aad = as == SealAs::LockCred   ? su::BuildLockCredAad(c)
+                   : as == SealAs::Prelogin ? su::BuildPreloginCredAad(c)
+                                            : su::BuildAad(c);
   uint8_t aesKey[su::kAesKeyBytes] = {};
   bool ok = su::DeriveAesKey(key, ch.hostPub, ch.salt, kdf.data(), kdf.size(), aesKey);
   uint16_t pwUnits[su::kMaxPasswordUtf16] = {};
@@ -411,25 +460,18 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
     return false;
   }
 
-  // 4) Poll status until terminal.
+  // 4) Poll status until terminal (lockscreen-cred: or until typed -- the unlock is followed afterwards).
   for (int i = 0; i < 40; ++i) {
-    ControlOutboundAction st{};
-    st.kind = ControlOutboundActionKind::UnlockStatusRequest;
-    st.expectedResponseType = MessageType::ControlUnlockStatusResult;
-    st.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlUnlockStatusResultMessage));
-    st.unlockStatusReq.header.magic = kMagic;
-    st.unlockStatusReq.header.type = static_cast<uint16_t>(MessageType::ControlUnlockStatusRequest);
-    st.unlockStatusReq.header.size = static_cast<uint16_t>(sizeof(st.unlockStatusReq));
-    st.unlockStatusReq.requestId = requestId;
-    TcpControlResponse rs{};
-    if (!execute_control_action(link, st, &rs) ||
-        rs.kind != TcpControlResponseKind::UnlockStatusResult) {
+    ControlUnlockStatusResultMessage res{};
+    if (!poll_status(link, requestId, &res)) {
       set_status("status poll failed");
       return false;
     }
-    if (rs.unlockStatusResult.requestId != requestId) continue;  // ignore a stale/foreign result
-    if (rs.unlockStatusResult.terminal) {
-      *terminal = rs.unlockStatusResult;
+    if (res.requestId != requestId) continue;  // ignore a stale/foreign result
+    const bool typedWaiting = as == SealAs::LockCred && !res.terminal &&
+                              res.stage == static_cast<uint16_t>(UnlockStage::Injected);
+    if (res.terminal || typedWaiting) {
+      *terminal = res;
       set_status(what + ": " + stage_name(terminal->stage));
       return true;
     }
@@ -445,33 +487,144 @@ bool run_unlock_exchange(remote60::native_poc::ControlLink& link, uint64_t /*hos
   using namespace remote60::native_poc;
   if (clearCredential) *clearCredential = false;
   ControlUnlockStatusResultMessage terminal{};
-  if (!sealed_exchange(link, password, false, status, &terminal)) return false;
+  if (!sealed_exchange(link, password, SealAs::Unlock, status, &terminal)) return false;
   const uint16_t stage = terminal.stage;
   // Wrong password / bad decrypt -> tell the caller to drop the stored credential so it is not
   // auto-reused (which would march toward a Windows account lockout). (Codex #370 review.)
+  // lockscreen-cred r1 (Codex contract 2): and when the host refused it as policy (not a disconnected locked
+  // session) -- a stored password is not kept to be replayed against a screen it does not unlock.
   if (clearCredential &&
       (static_cast<UnlockStage>(stage) == UnlockStage::AuthFailed ||
-       static_cast<UnlockStage>(stage) == UnlockStage::DecryptFailed)) {
+       static_cast<UnlockStage>(stage) == UnlockStage::DecryptFailed ||
+       static_cast<UnlockStage>(stage) == UnlockStage::RejectedPolicy)) {
     *clearCredential = true;
   }
   return static_cast<UnlockStage>(stage) == UnlockStage::SessionUnlocked;
 }
 
+bool run_unlock_exchange_result(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
+                                uint32_t* win32, bool* clearCredential, std::string* status) {
+  using namespace remote60::native_poc;
+  if (clearCredential) *clearCredential = false;
+  ControlUnlockStatusResultMessage terminal{};
+  const bool done = sealed_exchange(link, password, SealAs::Unlock, status, &terminal);
+  if (stage) *stage = done ? terminal.stage : 0;
+  if (win32) *win32 = done ? terminal.win32Error : 0;
+  const auto s = static_cast<UnlockStage>(done ? terminal.stage : 0);
+  if (clearCredential && done &&
+      (s == UnlockStage::AuthFailed || s == UnlockStage::DecryptFailed || s == UnlockStage::RejectedPolicy)) {
+    *clearCredential = true;
+  }
+  return done;
+}
+
 bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password,
                                 uint16_t* stage, uint32_t* win32, std::string* status) {
   remote60::native_poc::ControlUnlockStatusResultMessage terminal{};
-  const bool done = sealed_exchange(link, password, true, status, &terminal);
+  const bool done = sealed_exchange(link, password, SealAs::Prelogin, status, &terminal);
   if (stage) *stage = done ? terminal.stage : 0;
   if (win32) *win32 = done ? terminal.win32Error : 0;
   return done;
 }
 
+bool run_lock_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
+                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status) {
+  remote60::native_poc::ControlUnlockStatusResultMessage res{};
+  uint32_t rid = 0;
+  const bool done = sealed_exchange(link, password, SealAs::LockCred, status, &res, &rid);
+  if (stage) *stage = done ? res.stage : 0;
+  if (win32) *win32 = done ? res.win32Error : 0;
+  if (waiting) *waiting = done && !res.terminal;
+  if (requestId) *requestId = rid;
+  return done;
+}
+
+bool poll_lock_cred_status(remote60::native_poc::ControlLink& link, uint32_t requestId, uint16_t* stage, bool* terminal,
+                           uint32_t* win32) {
+  remote60::native_poc::ControlUnlockStatusResultMessage res{};
+  if (!poll_status(link, requestId, &res) || res.requestId != requestId) return false;
+  if (stage) *stage = res.stage;
+  if (terminal) *terminal = res.terminal != 0;
+  if (win32) *win32 = res.win32Error;
+  return true;
+}
+
+std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32) {
+  using remote60::native_poc::UnlockStage;
+  if (stage == kLoginCancelled) return L"취소했습니다. 아무것도 보내지 않았습니다.";
+  if (stage == kLoginUnsupported) {
+    return L"이 원격 PC에는 지금 'Windows 로그인'을 쓸 수 없습니다.\n"
+           L"원격 PC가 로그인 화면이나 잠금 화면이 아니거나, 원격 PC의 GNLink 가 이 기능보다 오래된 버전입니다.";
+  }
+  if (role == kLoginRolePrelogin) return prelogin_cred_result_text(stage, win32);
+  if (role == kLoginRoleUnlock) {
+    // The disconnected-session unlock (a stored password, Ctrl+Alt+U when neither screen is up).
+    switch (static_cast<UnlockStage>(stage)) {
+      case UnlockStage::SessionUnlocked:
+        return L"원격 PC 세션의 잠금이 해제되었습니다.";
+      case UnlockStage::WtsConnectAccepted:
+        return L"원격 PC가 잠금 해제 요청을 받아들였지만 해제는 확인되지 않았습니다. 원격 화면을 확인하세요.";
+      case UnlockStage::AuthFailed:
+        return L"비밀번호가 맞지 않아 잠금을 해제하지 못했습니다. 저장된 비밀번호를 지웠습니다.\n"
+               L"다시 시도하면 비밀번호를 새로 묻습니다.";
+      case UnlockStage::RejectedPolicy:
+        return L"원격 PC 세션이 지금 '연결이 끊긴 잠금' 상태가 아니어서 보내지 않았습니다. 저장된 비밀번호를 지웠습니다.\n"
+               L"원격 PC가 잠금 화면이면 툴바의 'Windows 로그인'(Ctrl+Alt+U)이 나타납니다.";
+      case UnlockStage::DecryptFailed:
+        return L"비밀번호를 안전하게 전달하지 못했습니다. 저장된 비밀번호를 지웠습니다. 다시 시도하세요.";
+      case UnlockStage::RejectedStaleTopology:
+      case UnlockStage::Timeout:
+        return L"요청이 만료되었거나 원격 PC 상태가 바뀌었습니다. 다시 시도하세요.";
+      default:
+        break;
+    }
+    if (stage == 0) return L"원격 PC가 응답하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.";
+    return L"원격 PC가 잠금을 해제하지 못했습니다 (단계 " + std::to_wstring(stage) + L", 오류 " + std::to_wstring(win32) + L").";
+  }
+  // kLoginRoleLockScreen (lockscreen-cred r1).
+  switch (static_cast<UnlockStage>(stage)) {
+    case UnlockStage::Injected:
+      return L"원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.\n"
+             L"이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)";
+    case UnlockStage::SessionUnlocked:
+      return L"원격 PC의 잠금이 해제되었습니다.";
+    case UnlockStage::UnlockUnconfirmed:
+      return L"비밀번호는 입력했지만 2분 안에 잠금 해제가 확인되지 않았습니다.\n"
+             L"Enter 를 눌렀는지, 비밀번호가 맞는지 원격 화면에서 확인하세요.";
+    case UnlockStage::TargetNotReady:
+      return L"잠금 화면의 비밀번호 칸이 준비되지 않아 입력하지 않았습니다.\n"
+             L"원격 화면을 한 번 클릭해 비밀번호 칸을 띄운 뒤 다시 누르세요.";
+    case UnlockStage::InjectFailed:
+      return L"비밀번호를 입력하지 못했습니다 (오류 " + std::to_wstring(win32) + L"). 다시 시도하세요.";
+    case UnlockStage::RejectedPolicy:
+      return L"원격 PC가 지금 잠금 화면이 아니어서 보내지 않았습니다.";
+    case UnlockStage::DecryptFailed:
+      return L"비밀번호를 안전하게 전달하지 못해 입력하지 않았습니다. 다시 시도하세요.";
+    case UnlockStage::RejectedStaleTopology:
+    case UnlockStage::Timeout:
+      return L"요청이 만료되었거나 원격 PC 상태가 바뀌었습니다. 다시 시도하세요.";
+    case UnlockStage::InternalError:
+      return L"원격 PC가 입력하지 못했습니다 (오류 " + std::to_wstring(win32) + L").";
+    default:
+      break;
+  }
+  if (stage == kPreloginNotAtLogon) return L"원격 PC가 지금 잠금 화면 상태가 아니어서 보내지 않았습니다.";
+  if (stage == 0) return L"원격 PC가 응답하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.";
+  return L"원격 PC가 입력하지 못했습니다 (단계 " + std::to_wstring(stage) + L").";
+}
+
 std::wstring prelogin_cred_result_text(uint16_t stage, uint32_t win32) {
   using remote60::native_poc::UnlockStage;
+  if (stage == kPreloginLeftLogon) {
+    // lockscreen-cred r1 (Codex contract 5): the host leaving the pre-login screen after the typing is not by
+    // itself a login this viewer saw -- said as that, not as success.
+    return L"비밀번호 입력 뒤 원격 PC가 로그인 화면을 벗어났습니다.\n"
+           L"로그인이 됐는지는 확인되지 않았습니다. 원격 화면에서 확인하세요.";
+  }
   switch (static_cast<UnlockStage>(stage)) {
     case UnlockStage::Injected:
       return L"원격 PC 로그인 화면에 비밀번호를 입력했습니다.\n"
-             L"로그인되었는지는 원격 화면에서 확인하세요. (입력함 = 로그인 성공이 아닙니다)";
+             L"이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)";
     case UnlockStage::SessionUnlocked:
       // r5 G11: what was observed, and no more -- the host left the logon screen after the typing. Which
       // account, and whether its desktop is up, is not something this viewer has seen.
