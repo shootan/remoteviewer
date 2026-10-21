@@ -1,4 +1,4 @@
-# SH 선명화 필터 — 휴대폰(SM-S948N) 실기 묶음 절차 (sh-filter r1)
+# SH 선명화 필터 — 휴대폰(SM-S948N) 실기 묶음 절차 (sh-filter r1, r2 갱신)
 
 **상태: 준비만 했다.** 설치는 검증용을 거쳐 사용자 승인을 받은 뒤에 한다. 버전 번호는 올리지 않았다
 (versionName 0.2.30 / versionCode 29 그대로). S5(버전·keepalive-multi 동반·A6 대응)는 사용자가 아직
@@ -20,7 +20,13 @@
 2. 확대·이동·크게보기·화면 회전 뒤에 원격의 작은 대상(체크박스·작은 글자)을 눌러서, 누른 곳과 원격이
    반응한 곳이 같은지 본다(기하 불변).
 3. 수준마다 **10분 연속 재생**한다. 순서는 끄기 → 0.20 → 0.35 → 끄기다.
-   - 앱 진단 로그 `sh_latency` 줄을 그대로 보존한다. 5 s 창마다 n·p50·p95·unmatched·glSkipped·glRedraws 가 들어 있다.
+   - 앱 진단 로그를 그대로 보존한다(r2 정의, AVD 와 같다).
+     - `sh_latency_segment`: 수준(실효)·경로·renderer 세대·surface 가 바뀔 때마다 닫히는 **구간 전체**의 분포. 이 줄의 p95 가 판정값이다.
+     - 표본은 decoder handoff → TextureView latch 의 **새 frame** 만이다(같은 timestamp 의 redraw 는 제외, `redraws` 로 따로 센다).
+     - 구간 시작 1 s(`warmup`)와 이전 producer 의 frame(`stale`), ring 밖(`unmatched`)은 표본이 아니다. 36 000 개를 넘으면 `overflow` 로 세고 분위에 넣지 않는다.
+     - 분위는 nearest-rank: 정렬한 표본의 1-기준 순위 ceil(q·n) 값.
+     - `sh_latency`(5 s): 진행 줄이다. 같은 구간 번호(`seg=`)와 그 시점까지의 구간 p95 를 함께 적는다. 5 s 창 p95 의 중앙값을 판정값으로 쓰지 않는다.
+     - `drawWallUs` 는 updateTexImage→swap 의 벽시계 시간이지 GPU 시간이 아니다. `src= out=` 는 frame 크기와 출력 크기이고 같아야 한다.
    - 같은 시각의 배터리 온도와 thermal status 를 `adb shell dumpsys battery` / `dumpsys thermalservice` 로 1 분마다 남긴다. 사용자가 허용하면 USB 디버깅을 쓰고, 아니면 앱 로그만 쓴다.
 4. 판정(Codex S4):
    - 같은 fps 에서 handoff→latch p95 의 증가가 끄기 대비 4 ms 이하일 것.
@@ -31,6 +37,6 @@
    - 그 기기에서만 direct 로 되돌리는 것은 허용된다. 다만 "기본 0.20 이 그 기기에서 승인됐다" 고 쓰지 않는다.
 
 ## 남길 것
-- 스크린샷 3장(같은 원격 화면), 각 수준의 `sh_latency` 원문, 온도 기록.
+- 스크린샷 3장(같은 원격 화면), 각 수준의 `sh_latency_segment`·`sh_latency` 원문, 온도 기록.
 - 화면 회전·크게보기 뒤 탭 위치 결과.
 - 앱 로그의 `sharpen_path` / `sharpen_fallback`. fallback 이 났으면 기기에서 GL 이 안 되는 것이고, 사용자 화면은 원본으로 나와야 한다.

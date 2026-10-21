@@ -13289,3 +13289,14 @@ Next
 - 시험 중 발견(이 변경 밖): 수동 IP(TCP 제어) 접속에서 Host 의 UDP 제어 링크가 10 s 읽기 timeout 으로 끝나며 스트림을 inactive 로 내려, 그때 보고 있던 화면이 '화면이 멈췄습니다'로 굳는다(끄기에서도 동일, host_startup_control.cpp UdpControlLink 10000). 하네스는 접속 10 s 뒤에 고르는 것으로 우회.
 - 미검증: 휴대폰(SM-S948N) 실기 전부 — 체감 선명도, 지연 4 ms 기준, 발열, 회전 뒤 터치 위치, 실 GPU 드라이버의 GL 실패 경로.
 - 제품/테스트/문서: 테스트 도구(`automation/sh_filter_avd.py`·`automation/sh_pattern_window.ps1`)·문서(폰 절차·이 항목). 제품 코드는 c568fbb 그대로.
+
+### 2026-10-22 sh-filter r2 — Codex c568fbb+2e9428b NEEDS_CHANGES H1~H5 보수 (미게시·폰 실기 대기)
+
+- 근거: `codex_sh_filter_impl_r1.md` H1~H5, 지시 `task_sh_filter_impl_r1.md` r2 절. 버전 0.2.30/29 그대로.
+- H4 aa0a3dc: APK gate 가 모든 classes*.dex 의 sh-test-seam·shTestFault·shTestStrength 를 거부(noseam PASS rc0 / shseam FAIL rc1), Gradle 은 seam 을 켠 release·build·assemble·bundle 을 거부. noseam APK 는 seam 없는 debug 시험물로 표기.
+- H1 7c04456: surface id·세대별 대기 release. timeout 은 NONE 이 아니라 BLOCKED — 그동안 bind/select 는 기억만, 늦은 release 뒤 1회 실행. eglDestroySurface 실패는 surface 를 교체될 때까지 막음. 옛 surface 의 늦은 release 는 그 SurfaceTexture 만 1회 해제. renderer 는 detached 를 보고.
+- H2/H3/H5.3 8f3341f: native ring 이 frame 의 stream 세대·codec epoch·visible 크기를 기록. 첫 출력 gate 는 attach 시점에 arm, 그 renderer·surface·codec 의 새 frame latch 로 확인(사후 baseline 없음), 자체 3 s timeout(VIEWER off→0.20 포함). redraw 는 같은 timestamp 로 구분. 지연은 구간(수준·경로·세대·surface)별 전체 분포, nearest-rank ceil(q·n). tap 간격은 frame 자신의 visible 크기.
+- 실행 중 발견·보수 f238f70: 회전으로 TextureView 가 buffer 크기를 view 크기(1970x1080)로 되돌려 renderer 가 1920x1080 그림을 두 번 resample(가는 글씨 흐려짐, compare 2/4 간헐 실패, r1 부터 잠재) → onSurfaceTextureSizeChanged 에서 캐시 무효화. 같은 순서 6/6 통과. 4b595e2: BLOCKED/RELEASING 중 sync 마다 bind 로그·buffer 재설정이 반복되던 것 정리.
+- AVD(SwiftShader, 최종 APK 4b595e2 noseam A77520A0… / shseam B9A1DEB8…): compare 25/0, lifecycle 14/0, resize 8/0(1920x1080 desktop → 1280x720 창 전환, renderer 가 새 크기로 step, 크기 불일치 frame 도 자기 step), latency 2/0, identity 3/0, faults 28/0(정확한 안내 문구 4/4, swap:30 포함), viewer_never 7/0, hold 11/0(20 s 보류 동안 producer 0, 늦은 release 뒤 1회, 재생성 surface 1회 해제, tick 마다 bind 로그 없음), touch 16/0(끄기·0.20·0.35 에서 원격 = 화면점 − 그림 원점 ±1 px, 크게 보기 포함; 앱→native 큐까지, 호스트 주입 off). 지연 구간 p95: 끄기 73.3 / 0.20 92.0 / 0.35 91.7 / 끄기 75.0 ms(각 1400+ frame) — AVD 에서 4 ms 기준 미달 그대로. 실행 중 AVD system_server 고장 1회(서비스 소실) → cold boot 뒤 같은 APK 로 재실행.
+- 미검증: 휴대폰 실기 전부(4 ms·발열·회전 뒤 터치·Codec2 1088 crop·실 GPU), crop/flip fixture(AVD 디코더가 crop 을 내지 않고 공개 API 로 crop 주입 불가 — 미실시).
+- 제품/테스트/문서: 제품(APK), 테스트(하네스·패턴 창), 문서(폰 절차·이 항목).
