@@ -217,6 +217,11 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
   if (!remote60::native_poc::prelogin::ViewerMaySendInputEvent(host_flags(ctx), kind, keyCode)) {
+    // lockscreen-cred r1: a key down held back here never reached the host -- forget it, so its up (which the
+    // gate lets through as a release) is not sent for a down that never went.
+    if (kind == remote60::native_poc::prelogin::kInputKindKeyDown && keyCode < 256) {
+      ctx.input.forwardedKeyDown[keyCode].store(false, std::memory_order_relaxed);
+    }
     held_back_at_logon(ctx);
     return;
   }

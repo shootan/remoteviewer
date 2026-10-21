@@ -23,7 +23,7 @@ enum class SecureUnlockKind : uint16_t {
   ChallengeResponse = 2,  // service -> host: one-shot challenge (or rejection in `stage`)
   SealedRequest = 3,      // host -> service: the sealed password for the challenge
   Result = 4,             // service -> host: job stage (terminal results are cached/idempotent)
-  // lockscreen-cred r1 (provisional numbers). An older service drops the connection on a kind it does not
+  // lockscreen-cred r1 (numbers assigned by the verifier). An older service drops the connection on a kind it does not
   // know, so the host asks Capabilities first and sends the others only to a service that listed them.
   CapabilitiesRequest = 5,      // host -> service: what do you support?
   CapabilitiesResponse = 6,     // service -> host

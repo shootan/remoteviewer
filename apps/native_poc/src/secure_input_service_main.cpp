@@ -684,6 +684,27 @@ uint64_t account_id_of(uint32_t session, bool* known) {
 bool session_is_locked(uint32_t session, bool* known) {
   *known = false;
   if (session == kInvalidSessionId) return false;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // TEST BUILD ONLY (lockscreen-cred e2e): this user's session stands in for a locked console session --
+  // "locked" until the test signals REMOTE60_SIS_TEST_UNLOCK_EVENT, which is then a session event (the topology
+  // moves once) and "unlocked". Here, not on the unlock primitives alone, so the unlock path and the input
+  // filter (A6) see the same answer. Connect state and console are the real ones.
+  if (remote60::native_poc::sis_test::Active() && !remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_FAKE_LOCK").empty()) {
+    static HANDLE unlockEvent = [] {
+      const std::wstring name = remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_UNLOCK_EVENT");
+      return name.empty() ? nullptr : CreateEventW(nullptr, TRUE, FALSE, name.c_str());
+    }();
+    static std::atomic<bool> bumped{false};
+    DWORD mine = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &mine);
+    if (session == mine) {
+      *known = true;
+      const bool unlocked = unlockEvent && WaitForSingleObject(unlockEvent, 0) == WAIT_OBJECT_0;
+      if (unlocked && !bumped.exchange(true)) gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);
+      return !unlocked;
+    }
+  }
+#endif
   WTSINFOEXW* info = nullptr;
   DWORD bytes = 0;
   bool locked = false;
@@ -773,28 +794,6 @@ const sus::UnlockPrimitives& unlock_primitives() {
     q.typeLockCred = [](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32) {
       return type_lock_cred(session, units, count, win32);
     };
-#ifdef REMOTE60_SIS_TEST_SEAM
-    // TEST BUILD ONLY (lockscreen-cred e2e): this user's session stands in for a locked console session --
-    // "locked" until the test signals REMOTE60_SIS_TEST_UNLOCK_EVENT, which is then a session event (the
-    // topology moves once) and "unlocked". Connect state and console are the real ones.
-    if (remote60::native_poc::sis_test::Active() && !remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_FAKE_LOCK").empty()) {
-      q.sessionIsLocked = [](uint32_t session, bool* known) {
-        static HANDLE unlockEvent = [] {
-          const std::wstring name = remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_UNLOCK_EVENT");
-          return name.empty() ? nullptr : CreateEventW(nullptr, TRUE, FALSE, name.c_str());
-        }();
-        static std::atomic<bool> bumped{false};
-        DWORD mine = 0;
-        ProcessIdToSessionId(GetCurrentProcessId(), &mine);
-        if (session != mine) return session_is_locked(session, known);
-        *known = true;
-        const bool unlocked = unlockEvent && WaitForSingleObject(unlockEvent, 0) == WAIT_OBJECT_0;
-        if (unlocked && !bumped.exchange(true)) gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);
-        return !unlocked;
-      };
-      SIS_TEST_NOTE("fake lock: this session reads as locked until the unlock event");
-    }
-#endif
     return q;
   }();
   return p;

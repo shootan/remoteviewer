@@ -826,6 +826,11 @@ void ControlClient::Run() {
       const bool expired = qpc_now_us() >= lockCredPollDeadlineUs;
       if ((polled && terminal) || expired) {
         if (!(polled && terminal)) stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
+        // It WAS typed: a later refusal means the job's state is gone (the relay reconnected, or another press
+        // replaced it) -- not "not sent". Said as unconfirmed.
+        if (stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SessionUnlocked)) {
+          stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
+        }
         std::cout << "[native-video-client][lock-cred] requestId=" << lockCredPollRequestId << " final stage=" << stage
                   << "\n";
         PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage),

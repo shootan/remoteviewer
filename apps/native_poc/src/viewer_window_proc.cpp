@@ -238,8 +238,8 @@ void request_prelogin_login(ViewerState& ctx, HWND owner) {
   const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
   const auto policy = remote60::native_poc::DecidePreloginCred(remote60::native_poc::ViewerPlatform::Pc, flags);
   if (!policy.sealedEntryAvailable) {
+    // Only a race reaches here (the button is not shown then, and Ctrl+Alt+U goes elsewhere): logged only.
     std::cout << "[native-video-client][prelogin-login] host is not at a logon screen; not offered\n";
-    post_login_outcome(ctx, kLoginRoleNone, kLoginUnsupported);
     return;
   }
   if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) return;  // one already on its way
@@ -1262,7 +1262,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // worker's (what older posts carry). Cancel / unsupported are said here too.
       const int role = static_cast<int>((wp >> 16) & 0xFF);
       const uint16_t stage = static_cast<uint16_t>(wp & 0xFFFF);
-      const int shownRole = role == kLoginRoleNone && stage < kLoginUnsupported ? kLoginRolePrelogin : role;
+      const int shownRole = role == kLoginRoleNone ? kLoginRolePrelogin : role;
       show_prelogin_cred_result(hwnd, windows_login_result_text(shownRole, stage, static_cast<uint32_t>(lp)));
       return 0;
     }

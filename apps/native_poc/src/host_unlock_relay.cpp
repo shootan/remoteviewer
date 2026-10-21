@@ -168,7 +168,8 @@ void HostUnlockRelay::WorkerLoop() {
         m.status = static_cast<uint16_t>(UnlockStage::InternalError);
         challengeResults_[cmd.challenge.requestId] = m;
       } else if (cmd.op == Op::Capabilities) {
-        capsInFlight_ = false;  // unknown: asked again on the next probe
+        capsInFlight_ = false;  // unknown: asked again -- after a pause (no service: no 3 s loop per pong)
+        capsRetryAfterMs_ = GetTickCount64() + 60000;
       } else {
         statusAnswered_[cmd.statusRequestId] = ++statusSeq_;
       }
@@ -282,7 +283,7 @@ void HostUnlockRelay::ProbeLockCredAsync() {
     std::lock_guard<std::mutex> lk(mu_);
     const LockCredSupport now = lockCredSupport_.load(std::memory_order_acquire);
     if (capsInFlight_ || now == LockCredSupport::Supported) return;
-    if (now == LockCredSupport::Unsupported && GetTickCount64() < capsRetryAfterMs_) return;
+    if (GetTickCount64() < capsRetryAfterMs_) return;  // not answered yes lately: asked again after the pause
     capsInFlight_ = true;
   }
   EnsureWorker();

@@ -113,7 +113,7 @@ enum class MessageType : uint16_t {
   ControlRebootRequest = 84,    // viewer -> host: requestId
   ControlRebootReply = 85,      // host -> viewer: requestId, result (Accepted/Refused/NotAuthorized/Failed), win32
   // (86/87 are the ordered file-offer pair, file_copy_wire.hpp.)
-  // Lock-screen "Windows 로그인" (lockscreen-cred r1, provisional number): the user pressed it while the
+  // Lock-screen "Windows 로그인" (lockscreen-cred r1, number assigned by the verifier): the user pressed it while the
   // host's own session is locked on the console. The layout is ControlUnlockChallengeRequestMessage's;
   // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
   // Gated on kCaptureFlagLockCredV1; an old host never sees it.
@@ -336,7 +336,7 @@ constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
 // prelogin-ui r9 R5: Ctrl+Alt+Del can be asked of this host (ControlPreloginControl op Sas, 83 -> 82). Only a
 // --prelogin worker advertises it; the answer may still be "policy does not allow" (prelogin_sas_wire.hpp).
 constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
-// lockscreen-cred r1 (provisional number): the host's OWN session is locked on the console right now
+// lockscreen-cred r1 (number assigned by the verifier): the host's OWN session is locked on the console right now
 // (known from WTS, not guessed from the secure desktop -- a UAC prompt does not set it), and the SYSTEM
 // service said it can type a sealed credential into the lock screen. The viewer offers "Windows 로그인"
 // for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
@@ -874,7 +874,7 @@ enum class UnlockStage : uint16_t {
   AuthFailed = 10,           // wrong password / account restriction
   Timeout = 11,
   InternalError = 12,
-  // lockscreen-cred r1 (provisional numbers): what the lock-screen typing came to, apart from Injected.
+  // lockscreen-cred r1 (numbers assigned by the verifier): what the lock-screen typing came to, apart from Injected.
   TargetNotReady = 13,      // the lock screen's password field was not the input target: nothing typed
   InjectFailed = 14,        // the typing itself failed or was cut short: not retried
   UnlockUnconfirmed = 15,   // typed, but no unlock of that session was seen in the time allowed
