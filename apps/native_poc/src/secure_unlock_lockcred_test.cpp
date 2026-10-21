@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -58,6 +59,10 @@ struct Os {
   std::vector<Typed> typed;
   int wtsCalls = 0;
   std::vector<std::string> log;
+  bool runningFlag = true;
+  // r2 (Codex L2): what happens between the agent finding its target and touching the field.
+  std::function<void(Os&)> beforeCommit;
+  int fenceAsked = 0;
   sus::UnlockPrimitives prims() {
     sus::UnlockPrimitives p;
     p.sessionIsLocked = [this](uint32_t s, bool* k) { *k = locked.count(s) > 0; return *k && locked[s]; };
@@ -73,13 +78,20 @@ struct Os {
       locked[r] = false;  // the reconnect unlocked it
       return true;
     };
-    p.running = [] { return true; };
+    p.running = [this] { return runningFlag; };
     p.sleep = [](uint32_t) {};
     p.log = [this](const char* line) { log.emplace_back(line); };
     if (offerLockCred) {
-      p.typeLockCred = [this](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32) {
-        if (typeAnswer == UnlockStage::Injected) typed.push_back({session, std::u16string(units, units + count)});
+      p.typeLockCred = [this](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32,
+                              const std::function<bool()>& stillValid) {
+        // The product's agent: finds its target, then asks the service's fence right before the field is
+        // touched (lock_cred_channel RunJob / AgentAskGo); a deny types nothing.
         *win32 = typeWin32;
+        if (typeAnswer != UnlockStage::Injected) return typeAnswer;
+        if (beforeCommit) beforeCommit(*this);
+        ++fenceAsked;
+        if (!stillValid || !stillValid()) return UnlockStage::RejectedStaleTopology;
+        typed.push_back({session, std::u16string(units, units + count)});
         return typeAnswer;
       };
     }
@@ -170,10 +182,11 @@ SecureUnlockResult sealed(Conn& c, Os& os, const SecureUnlockSealedRequest& s, u
   return r;
 }
 
-SecureUnlockResult status(Conn& c, Os& os, uint32_t requestId) {
+SecureUnlockResult status(Conn& c, Os& os, uint32_t requestId, uint64_t cookie = 0xC00C1E) {
   SecureUnlockQuery q{};
   q.kind = static_cast<uint16_t>(SecureUnlockKind::StatusRequest);
   q.requestId = requestId;
+  q.clientSessionCookie = cookie;
   const sus::UnlockPrimitives p = os.prims();
   sus::HandleStatusRequest(c.us, q, p, c.writer());
   SecureUnlockResult r{};
@@ -422,6 +435,70 @@ int main() {
     bool leaked = false;
     for (const std::string& l : os.log) leaked = leaked || l.find("SECRET") != std::string::npos;
     check("no log line carries the password", !leaked && !os.log.empty());
+  }
+
+  std::printf("\n[r2 L2: the request must still hold at the commit -- else nothing is typed]\n");
+  struct CommitFence {
+    const char* what;
+    std::function<void(Os&)> change;
+  };
+  const CommitFence commits[] = {
+      {"a session event (unlock -> relock) while the agent waited", [](Os& o) { ++o.topo; }},
+      {"the session was unlocked meanwhile (no event seen yet)", [](Os& o) { o.locked[1] = false; }},
+      {"the session is no longer active", [](Os& o) { o.active[1] = false; }},
+      {"the console moved", [](Os& o) { o.console = 2; }},
+      {"another account is in the session", [](Os& o) { o.account[1] = 0xBEEF; }},
+      {"the commit deadline passed (a slow child / target wait)", [](Os& o) { o.now += sus::kLockCredCommitMs + 1000; }},
+      {"the service is stopping", [](Os& o) { o.runningFlag = false; }},
+  };
+  for (const CommitFence& f : commits) {
+    Os os;
+    os.beforeCommit = f.change;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 91, true);
+    const SecureUnlockResult r = sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    check((std::string("L2: ") + f.what + ": the fence was asked at the commit, NOTHING typed, RejectedStaleTopology").c_str(),
+          os.fenceAsked == 1 && os.typed.empty() && r.stage == st(UnlockStage::RejectedStaleTopology) && r.terminal == 1,
+          stage_of(r));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    a.us.callerStillThere = [&a] { return a.there; };
+    os.beforeCommit = [&a](Os&) { a.there = false; };  // the host's control session ended: its pipe went
+    const SecureUnlockChallengeResponse c = challenge(a, os, 92, true);
+    const SecureUnlockResult r = sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    check("L2: the caller (its control session) went away while the agent waited: nothing typed",
+          os.typed.empty() && r.stage == st(UnlockStage::RejectedStaleTopology), stage_of(r));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 93, true);
+    const SecureUnlockResult r = sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    check("L2 control: nothing changed -> the fence allows, typed once", os.fenceAsked == 1 && os.typed.size() == 1 &&
+                                                                            r.stage == st(UnlockStage::Injected),
+          stage_of(r));
+  }
+
+  std::printf("\n[r2 L1: a result belongs to its control session]\n");
+  {
+    Os os;
+    os.typeAnswer = UnlockStage::TargetNotReady;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 2, true);
+    (void)sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    const SecureUnlockResult mine = status(a, os, 2, 0xC00C1E);
+    const SecureUnlockResult other = status(a, os, 2, 0xD00D);
+    check("L1: the same requestId from ANOTHER control session gets nothing of this one's final result",
+          mine.stage == st(UnlockStage::TargetNotReady) && other.stage == st(UnlockStage::RejectedPolicy),
+          "mine " + stage_of(mine) + " other " + stage_of(other));
+    os.typeAnswer = UnlockStage::Injected;
+    SecureUnlockSealedRequest s = seal(c, u"pw", SealAs::LockCred);
+    s.clientSessionCookie = 0xD00D;
+    const SecureUnlockResult dup = sealed(a, os, s, 5);
+    check("L1: ...nor its cached sealed answer (another session's sealed request is not a 'duplicate' of it)",
+          dup.stage != st(UnlockStage::TargetNotReady) && os.typed.empty(), stage_of(dup));
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

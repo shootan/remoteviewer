@@ -55,6 +55,7 @@
 #include "viewer_picker.hpp"
 #include "viewer_state.hpp"
 #include "viewer_unlock.hpp"
+#include "viewer_constants.hpp"
 #include "viewer_window_proc.hpp"
 #include "viewer_reboot_prompt.hpp"
 #include "native_video_client_session.hpp"
@@ -1865,6 +1866,40 @@ int wmain(int argc, wchar_t** argv) {
           utf8(boxTyped));
     check("the service typed it once (its log, no password in it)",
           seam.DiagLog().find("lock-cred requestId=") != std::string::npos && seam.DiagLog().find(" typed session=") != std::string::npos);
+
+    // ---- r2 (Codex L5): a result of an EARLIER control connection, still queued, is not shown
+    std::cout << "\n--- r2 L5: a stale result window from an earlier connection ---\n";
+    {
+      const uint64_t gen = ctx.session.controlRunGen.load();
+      // A watcher closes the window if one does appear (it would be modal on this thread), so a broken check
+      // fails here instead of hanging the run.
+      std::wstring stale;
+      std::thread ops([&] {
+        HWND b = wait_window(kPreloginResultClass, nullptr, 2000);
+        if (b) {
+          stale = result_box_text(b);
+          close_result(b);
+        }
+      });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen,
+                       static_cast<uint16_t>(remote60::native_poc::UnlockStage::SessionUnlocked), gen - 1),
+                   0);
+      pump_until([] { return false; }, 2500);
+      join_pumping(ops);
+      check("L5: a queued 'unlocked' of an earlier connection is NOT shown", stale.empty(), utf8(stale));
+      std::wstring current;
+      std::thread opg([&] { take_box(&current, L"lock_screen_current_generation"); });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen, remote60::native_poc::viewer::kLoginCancelled, gen),
+                   0);
+      pump_until([&] { return !current.empty(); }, 8000);
+      join_pumping(opg);
+      check("L5 control: the same message of THIS connection is shown", current.find(L"취소했습니다") != std::wstring::npos,
+            utf8(current));
+    }
 
     // ---- the session unlocks (the stand-in's event: one session event, then "unlocked") -> said
     std::cout << "\n--- the session unlocks ---\n";

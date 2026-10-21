@@ -93,13 +93,13 @@ int agent_role(const std::wstring& id, bool stall) {  // the agent's side, as th
   DWORD got = 0, total = 0;
   while (total < sizeof(job) && ReadFile(pipe, reinterpret_cast<uint8_t*>(&job) + total, sizeof(job) - total, &got, nullptr) && got)
     total += got;
-  if (total != sizeof(job) || job.magic != lc::kJobMagic) return 4;
-  lc::Answer a{};
-  a.stage = static_cast<uint16_t>(job.count);  // echoes the count, so the test sees the job arrived whole
-  WriteFile(pipe, &a, sizeof(a), &n, nullptr);
+  if (total != sizeof(job) || job.magic != lc::kJobMagic || job.count != 7) return 4;
+  // r2 (L2): as the product's agent -- found its target, asks the service's fence; "types" only on Go.
+  const bool go = lc::AgentAskGo(pipe, job.requestId);
+  lc::AgentAnswer(pipe, job.requestId, go ? 8 : 13, 0);  // Injected : TargetNotReady
   SecureZeroMemory(&job, sizeof(job));
   CloseHandle(pipe);
-  return 0;
+  return go ? 0 : 6;  // 6: it typed nothing
 }
 int stranger_role(const std::wstring& id) {  // connects first, says Hello with its own pid, waits for anything
   HANDLE pipe = CreateFileW(lc::PipeNameFor(id).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -175,14 +175,39 @@ int wmain(int argc, wchar_t** argv) {
     const bool accepted = started && lc::AcceptOwnedChild(pipe, pi.hProcess, pi.dwProcessId, session, false, 5000, &why);
     lc::Job job{};
     job.session = session;
+    job.requestId = 41;
     job.count = 7;
-    lc::Answer a{};
-    const bool exchanged = accepted && lc::WriteBounded(pipe, &job, sizeof(job), 3000) && lc::ReadBounded(pipe, &a, sizeof(a), 3000);
+    int fenceAsked = 0;
+    uint32_t w32 = 0;
+    const lc::JobOutcome outcome =
+        accepted ? lc::RunJob(pipe, job, [&] { ++fenceAsked; return true; }, 3000, 3000, &w32) : lc::JobOutcome::NoAnswer;
     CloseHandle(pipe);
     const DWORD code = started ? wait_exit(pi, 5000) : 99;
     check("the child the service started (held handle: pid, running, session, its Hello) is accepted", accepted, why);
-    check("...gets the job whole and answers; it exits by itself", exchanged && a.stage == 7 && code == 0,
-          "exit " + std::to_string(code));
+    check("...gets the job whole, asks the fence once right before typing, is allowed, answers Typed, exits by itself",
+          outcome == lc::JobOutcome::Typed && fenceAsked == 1 && code == 0, "exit " + std::to_string(code));
+  }
+
+  std::printf("\n[r2 L2: the fence says no at the commit]\n");
+  {
+    uint32_t err = 0;
+    std::wstring id;
+    HANDLE pipe = lc::CreateServerPipe(user_sddl(), &id, &err);
+    PROCESS_INFORMATION pi{};
+    const bool started = start(me, L"--agent " + id, &pi, true);
+    ResumeThread(pi.hThread);
+    const char* why = "";
+    const bool accepted = started && lc::AcceptOwnedChild(pipe, pi.hProcess, pi.dwProcessId, session, false, 5000, &why);
+    lc::Job job{};
+    job.session = session;
+    job.requestId = 42;
+    job.count = 7;
+    uint32_t w32 = 0;
+    const lc::JobOutcome outcome = accepted ? lc::RunJob(pipe, job, [] { return false; }, 3000, 3000, &w32) : lc::JobOutcome::NoAnswer;
+    CloseHandle(pipe);
+    const DWORD code = started ? wait_exit(pi, 5000) : 99;
+    check("L2: the request no longer holds when the agent is ready: Denied, and the agent typed NOTHING (exit 6)",
+          outcome == lc::JobOutcome::Denied && code == 6, "exit " + std::to_string(code));
   }
 
   std::printf("\n[NEGATIVE: a stranger connects first]\n");
@@ -274,9 +299,10 @@ int wmain(int argc, wchar_t** argv) {
     const char* why = "";
     const bool accepted = started && lc::AcceptOwnedChild(pipe, pi.hProcess, pi.dwProcessId, session, false, 5000, &why);
     lc::Job job{};
-    lc::Answer a{};
+    job.requestId = 43;
     const auto t0 = std::chrono::steady_clock::now();
-    const bool answered = accepted && lc::WriteBounded(pipe, &job, sizeof(job), 2000) && lc::ReadBounded(pipe, &a, sizeof(a), 1500);
+    uint32_t w32 = 0;
+    const bool answered = accepted && lc::RunJob(pipe, job, [] { return true; }, 1500, 1500, &w32) != lc::JobOutcome::NoAnswer;
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     CloseHandle(pipe);
     if (started) wait_exit(pi, 100);  // ended by the test (the service's job does this)

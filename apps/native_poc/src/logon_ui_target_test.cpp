@@ -115,6 +115,48 @@ int main() {
   check("a desktop merely starting with Winlogon is not it",
         lu::LockScreenTarget([] { return std::wstring(L"Winlogon2"); }, field) == 0);
 
+  std::printf("\n[r2 L4: a refusal before the typing is 'nothing typed', not a failed typing]\n");
+  {
+    Run r;
+    r.targets = {77};
+    r.injectOk = false;
+    r.injectErr = lu::kNotTypedError;  // the field was not the verified one / UIA failed / read-only / fence denied
+    uint32_t err = 0;
+    const UnlockStage s = r.go(u"pw", 3000, &err);
+    check("inject refused before typing (kNotTypedError): TargetNotReady", s == UnlockStage::TargetNotReady, stage(s));
+  }
+
+  std::printf("\n[r2 L4: after a partial SendInput, exactly the agent's own presses are released]\n");
+  const uint16_t units[3] = {u'x', u'y', u'z'};
+  auto desc = [](const std::vector<lu::ReleaseStep>& v) {
+    std::string s;
+    for (const auto& r : v) s += (r.unicode ? "u" : "vk") + std::to_string(r.code) + " ";
+    return s;
+  };
+  auto is = [](const std::vector<lu::ReleaseStep>& v, std::initializer_list<lu::ReleaseStep> want) {
+    if (v.size() != want.size()) return false;
+    size_t i = 0;
+    for (const auto& w : want) {
+      if (v[i].unicode != w.unicode || v[i].code != w.code) return false;
+      ++i;
+    }
+    return true;
+  };
+  check("select-all, 0 sent: nothing pressed, nothing released", lu::PendingReleases(true, units, 3, 0).empty());
+  check("select-all, 1 sent (Ctrl down): Ctrl released", is(lu::PendingReleases(true, units, 3, 1), {{false, 0x11}}),
+        desc(lu::PendingReleases(true, units, 3, 1)));
+  check("select-all, 2 sent (Ctrl, A down): A then Ctrl released",
+        is(lu::PendingReleases(true, units, 3, 2), {{false, 'A'}, {false, 0x11}}), desc(lu::PendingReleases(true, units, 3, 2)));
+  check("select-all, 3 sent (A up too): Ctrl released", is(lu::PendingReleases(true, units, 3, 3), {{false, 0x11}}),
+        desc(lu::PendingReleases(true, units, 3, 3)));
+  check("select-all, 4 sent (Ctrl up too): nothing left", lu::PendingReleases(true, units, 3, 4).empty());
+  check("select-all, 5 sent ('x' down): 'x' released", is(lu::PendingReleases(true, units, 3, 5), {{true, u'x'}}),
+        desc(lu::PendingReleases(true, units, 3, 5)));
+  check("select-all, 6 sent ('x' up too): nothing left", lu::PendingReleases(true, units, 3, 6).empty());
+  check("no select-all, 3 sent ('y' down): 'y' released", is(lu::PendingReleases(false, units, 3, 3), {{true, u'y'}}),
+        desc(lu::PendingReleases(false, units, 3, 3)));
+  check("no select-all, 2 sent ('x' down/up): nothing left", lu::PendingReleases(false, units, 3, 2).empty());
+
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }
