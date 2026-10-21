@@ -83,6 +83,13 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
               << hr_hex(devHr) << "\n";
     return false;
   }
+#ifdef REMOTE60_MT_AB_TEST_SEAM
+  // TEST BUILD ONLY (r2 D4): the arm on the NEW context before anything else sees it -- the WinRT wrapper
+  // (WGC), the MF encoder, the GPU scaler and the readback all get the device below. A recreate that
+  // fails after this leaves the old device in place; the new one is released unused.
+  std::cout << "[native-video-host][mt-ab] where=device-recreate(" << reason << ")\n";
+  std::cout << mt_ab_apply(newCtx.Get());
+#endif
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
   if (FAILED(newD3d.As(&dxgiWr)) || !dxgiWr) {
     std::cerr << "[native-video-host] device-recreate(" << reason << ") IDXGIDevice query failed\n";
@@ -112,11 +119,11 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
   // set_d3d11_device does not rebind a running MFT (only initialize() sends SET_D3D_MANAGER), so this
   // is only correct while the encoder uses the CPU readback path (default). NV12 surface mode would
   // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
-  if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
-#ifdef REMOTE60_MT_AB_TEST_SEAM
-  std::cout << mt_ab_apply(res.ctx.Get());  // TEST BUILD ONLY: the same arm on a recreated device
-#endif
   std::cout << d3d_multithread_log_line("device-recreated", res.d3d.Get(), res.ctx.Get());
+  if (useH264) {
+    (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+    std::cout << d3d_multithread_log_line("mf-device-set", res.d3d.Get(), res.ctx.Get());
+  }
   // dxgi-wedge-fix r1: a new device can be on another adapter (the stale-RDP-adapter case): say which.
   std::cout << capture_adapter_log_line(identify_device_adapter(res.d3d.Get()));
   res.gpuScaler = GpuBgraScaler();

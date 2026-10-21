@@ -152,6 +152,7 @@ int startup_init_graphics(HostContext& hx) {
   }
 #ifdef REMOTE60_MT_AB_TEST_SEAM
   // TEST BUILD ONLY (dxgi-wedge-fix r1, Codex B1): the A/B arm, before anything else touches the device.
+  std::cout << "[native-video-host][mt-ab] where=startup\n";
   std::cout << mt_ab_apply(res.ctx.Get());
 #endif
   std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
