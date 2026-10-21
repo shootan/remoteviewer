@@ -41,6 +41,7 @@ struct FakeService {
   std::atomic<bool> stall{false};          // read requests, answer nothing
   std::atomic<int> challengeDelayMs{0};    // r3: answer a challenge / a status this late
   std::atomic<int> statusDelayMs{0};
+  std::atomic<int> sealedDelayMs{0};       // r4: answer a sealed request this late
   std::atomic<uint16_t> sealedStage{8};    // what a SealedRequest is answered with
   std::atomic<bool> sealedTerminal{false};
   std::atomic<int> sealedSeen{0};
@@ -127,6 +128,7 @@ struct FakeService {
                                                                                                  : kUnlockPurposeUnlock;
         write_msg(pipe, &r, sizeof(r));
       } else if (kind == static_cast<uint16_t>(SecureUnlockKind::SealedRequest)) {
+        if (sealedDelayMs.load() > 0) Sleep(sealedDelayMs.load());
         SecureUnlockResult r{};
         r.requestId = requestId;
         r.stage = sealedStage.load();
@@ -471,6 +473,63 @@ int main() {
     h.EndSession(0xA5);
     check("L5-R: EndSession of the holder lets the pipe go at once (well before the hold's end)",
           wait_until([&] { return !svc.connected.load(); }, 1000) && ms_since(t0) < 1000, std::to_string(ms_since(t0)) + " ms");
+    h.Stop();
+  }
+
+  std::printf("\n[r4 R1: a repeated sealed request never restarts the typed hold]\n");
+  {
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    HostUnlockRelay h;
+    point(h, svc);
+    h.SetHoldLimitsForTest(1500, 2000);  // the product's 35 s / 130 s, shortened -- the same code
+    h.ProbeLockCredAsync();
+    wait_until([&] { return h.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 5000);
+    svc.sealedStage = static_cast<uint16_t>(UnlockStage::Injected);  // the service answers a repeat "typed" again
+    svc.sealedTerminal = false;
+    svc.finishJobs = false;
+    ControlUnlockChallengeMessage c{};
+    h.LockCredChallengeSync(challenge_req(61), 0xF1, &c, 5000);
+    const int sealedBefore = svc.sealedSeen.load();
+    h.SealedAsync(sealed_req(61), 0xF1);
+    ControlUnlockStatusResultMessage r{};
+    wait_until([&] { return h.PollResult(0xF1, 61, &r) && r.stage == static_cast<uint16_t>(UnlockStage::Injected); }, 5000);
+    const auto typedAt = std::chrono::steady_clock::now();
+    // Repeats of the SAME sealed request while it waits typed: at 0.5 s, 1.0 s, and one answered late (1.3 s + 0.3 s).
+    while (ms_since(typedAt) < 500) Sleep(10);
+    h.SealedAsync(sealed_req(61), 0xF1);
+    while (ms_since(typedAt) < 1000) Sleep(10);
+    h.SealedAsync(sealed_req(61), 0xF1);
+    while (ms_since(typedAt) < 1300) Sleep(10);
+    svc.sealedDelayMs = 300;
+    h.SealedAsync(sealed_req(61), 0xF1);
+    wait_until([&] { return svc.sealedSeen.load() >= sealedBefore + 4; }, 1500);
+    svc.sealedDelayMs = 0;
+    const int repeatsSent = svc.sealedSeen.load() - sealedBefore - 1;
+    // The FIRST typed deadline (2 s after typed) ends the hold: the next host gets through soon after it.
+    HostUnlockRelay next;
+    point(next, svc);
+    while (ms_since(typedAt) < 2300) Sleep(20);
+    next.ProbeLockCredAsync();
+    const bool caps =
+        wait_until([&] { return next.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 4000);
+    ControlUnlockChallengeMessage nc{};
+    const bool got = caps && next.LockCredChallengeSync(challenge_req(1), 0xF2, &nc, 4000);
+    check("R1: three repeats of the same sealed request reached the service (answered 'typed' again)", repeatsSent == 3,
+          std::to_string(repeatsSent) + " repeats sent");
+    check("R1: ...the hold still ended at the FIRST typed deadline: the next host gets through (not 'busy')",
+          got && nc.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued),
+          "status=" + std::to_string(nc.status) + " at " + std::to_string(ms_since(typedAt)) + " ms after typed");
+    h.PollResult(0xF1, 61, &r);
+    check("R1: ...and the transaction ended with it as UnlockUnconfirmed (final)",
+          r.terminal == 1 && r.stage == static_cast<uint16_t>(UnlockStage::UnlockUnconfirmed), "stage=" + std::to_string(r.stage));
+    const int sealedAfterEnd = svc.sealedSeen.load();
+    h.SealedAsync(sealed_req(61), 0xF1);  // a repeat after the final answer
+    Sleep(300);
+    check("R1 control: a repeat after the FINAL answer is not sent at all (idempotent, as before)",
+          svc.sealedSeen.load() == sealedAfterEnd, std::to_string(svc.sealedSeen.load() - sealedAfterEnd) + " sent");
+    next.EndSession(0xF2);
+    next.Stop();
+    h.EndSession(0xF1);
     h.Stop();
   }
 

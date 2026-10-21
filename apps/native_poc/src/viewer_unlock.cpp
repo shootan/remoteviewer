@@ -565,7 +565,7 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
     // lockscreen-cred r3 (Codex UX-R): another connection's request holds the host's single unlock channel.
     // Said as that -- nothing was sent, nothing is retried by itself, and a stored password is kept.
     return L"다른 연결이 이 원격 PC의 Windows 로그인(잠금 해제) 요청을 처리하고 있어 보내지 않았습니다.\n"
-           L"그 요청이 끝나거나 취소된 뒤(길어야 2분) 다시 누르세요.";
+           L"그 요청이 끝나거나 취소된 뒤 다시 누르세요.";
   }
   if (role == kLoginRolePrelogin) return prelogin_cred_result_text(stage, win32);
   if (role == kLoginRoleUnlock) {

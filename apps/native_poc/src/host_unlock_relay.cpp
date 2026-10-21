@@ -542,9 +542,13 @@ void HostUnlockRelay::WorkerLoop() {
       // wait); anything final -- or a session that ended meanwhile (r3 L1-R) -- ends the transaction.
       if (out.terminal || !live) {
         drop_pipe();
-      } else {
+      } else if (!(holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie && heldRequestId == cmd.seal.requestId &&
+                   heldTxGen == cmd.txGen)) {
         hold_for(typedHoldMs_, cmd, cmd.seal.requestId, true);
       }
+      // else r4 (Codex R1): a repeat of the sealed request this typed transaction already holds the pipe for
+      // (the service answers it "typed" again, typing nothing) keeps the FIRST typed deadline -- a repeat never
+      // starts the 130 s anew.
       if (live) sealedResults_[key] = out;  // a session that ended meanwhile keeps nothing
       cv_.notify_all();
     }
