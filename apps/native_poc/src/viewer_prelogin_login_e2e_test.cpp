@@ -56,6 +56,7 @@
 #include "viewer_state.hpp"
 #include "viewer_unlock.hpp"
 #include "viewer_constants.hpp"
+#include "secure_unlock_ipc.hpp"
 #include "viewer_window_proc.hpp"
 #include "viewer_reboot_prompt.hpp"
 #include "native_video_client_session.hpp"
@@ -1837,7 +1838,77 @@ int wmain(int argc, wchar_t** argv) {
     targets.FocusOn(targets.edit);
     Sleep(700);  // the service's challenge rate limit
 
+    // ---- r3 (Codex UX-R): ANOTHER host's transaction holds the service's one unlock pipe -> this viewer is
+    // told exactly that, nothing is typed, and once that transaction ends a manual retry goes through (the
+    // next step). "Host A" is this test process on the service's real pipe with a real lock-screen challenge
+    // the service issued (pending, awaiting its seal) -- as another user's host would hold it.
+    std::cout << "\n--- r3 UX-R: another host's transaction is pending -> busy, said as that ---\n";
+    {
+      HANDLE a = CreateFileW(seam.unlockPipe().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      DWORD mode = PIPE_READMODE_MESSAGE;
+      if (a != INVALID_HANDLE_VALUE) SetNamedPipeHandleState(a, &mode, nullptr, nullptr);
+      SecureUnlockChallengeRequest areq{};
+      areq.kind = static_cast<uint16_t>(SecureUnlockKind::LockCredChallengeRequest);
+      areq.requestId = 7001;
+      areq.clientSessionCookie = 0xA0A0A0A0ull;
+      SecureUnlockChallengeResponse aresp{};
+      DWORD io = 0;
+      const bool aIssued = a != INVALID_HANDLE_VALUE && WriteFile(a, &areq, sizeof(areq), &io, nullptr) &&
+                           ReadFile(a, &aresp, sizeof(aresp), &io, nullptr) && io == sizeof(aresp) &&
+                           aresp.stage == static_cast<uint16_t>(UnlockStage::ChallengeIssued);
+      check("UX-R setup: host A holds the service's pipe with a REAL pending lock-screen challenge",
+            aIssued, "stage=" + std::to_string(aresp.stage));
+      targets.Clear();
+      SetWindowTextW(targets.edit, L"untouched");
+      OperatorRun runB;
+      std::wstring boxB;
+      std::thread opB([&] {
+        operate_prompt(&runB, kPreloginPromptClass, false);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxB, L"lock_screen_busy");
+      });
+      click_item();
+      pump_until([&] { return !boxB.empty(); }, 30000);
+      join_pumping(opB);
+      check("UX-R: the click opened the password window and took the password", runB.sawPrompt && runB.typedAll);
+      check("UX-R: THE RESULT WINDOW SAYS ANOTHER CONNECTION'S REQUEST IS IN PROGRESS -- try again after it ends -- "
+            "not a general error",
+            boxB.find(L"다른 연결이") != std::wstring::npos && boxB.find(L"다시 누르세요") != std::wstring::npos &&
+                boxB.find(L"오류") == std::wstring::npos && boxB.find(L"입력했습니다") == std::wstring::npos,
+            utf8(boxB));
+      check("UX-R: ...NOTHING was typed anywhere (the field keeps its text)",
+            Targets::text(targets.edit) == L"untouched" && Targets::text(targets.userEdit).empty() &&
+                Targets::text(targets.decoyEdit).empty(),
+            hexw(Targets::text(targets.edit)));
+      // A's transaction was not disturbed: the service still answers A on A's connection.
+      SecureUnlockQuery q{};
+      q.kind = static_cast<uint16_t>(SecureUnlockKind::CapabilitiesRequest);
+      q.requestId = 7002;
+      SecureUnlockCapabilitiesResponse caps{};
+      const bool aStill = a != INVALID_HANDLE_VALUE && WriteFile(a, &q, sizeof(q), &io, nullptr) &&
+                          ReadFile(a, &caps, sizeof(caps), &io, nullptr) && io == sizeof(caps) && caps.requestId == 7002;
+      check("UX-R: ...host A's connection was left alone (the service still answers it)", aStill);
+      if (a != INVALID_HANDLE_VALUE) CloseHandle(a);  // host A's transaction ends
+      std::cout << "    host A's transaction ended (its connection closed)\n";
+      SetWindowTextW(targets.edit, L"");
+      // The control: a general failure is NOT shown as busy (the product's window for stage 12 of this connection).
+      std::wstring general;
+      std::thread opE([&] { take_box(&general, L"lock_screen_general_error"); });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen,
+                       static_cast<uint16_t>(UnlockStage::InternalError), ctx.session.controlRunGen.load()),
+                   0);
+      pump_until([&] { return !general.empty(); }, 8000);
+      join_pumping(opE);
+      check("UX-R control: a general failure is said as a failure, not as 'another connection is busy'",
+            !general.empty() && general.find(L"다른 연결이") == std::wstring::npos, utf8(general));
+      Sleep(700);  // the service's challenge rate limit
+    }
+
     // ---- the button -> the password -> typed into the password field by the service's agent
+    // (r3 UX-R: after host A's transaction ended, this is the manual retry -- it goes through)
     std::cout << "\n--- the button, the password, 입력 (the field already holds an earlier attempt) ---\n";
     targets.Clear();
     SetWindowTextW(targets.edit, L"earlier-attempt");  // Codex Q1 (b): a retry replaces, never appends
