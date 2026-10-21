@@ -614,8 +614,17 @@ def scenario_hold(fx, out):
     if not wait_for(rid='viewerMenuButton', timeout=5):
         pick_desktop() and wait_for(rid='viewerMenuButton', timeout=40)
         time.sleep(3)
-    pic, moving = live_picture(out, 'hold_recreate')
+    # A new session's first seconds can come at 1280x720 before the 최고화질 setting reaches the host; the
+    # picture check is for the 1920x1080 one, so it is retried for a while.
+    pic = moving = False
+    for attempt in range(6):
+        pic, moving = live_picture(out, 'hold_recreate')
+        if pic and moving:
+            break
+        time.sleep(3)
     check(pic and moving, 'after the recreate the picture is on screen and live')
+    bound = [l for l in log_lines() if 'viewer_surface_bound' in l]
+    check(len(bound) <= 6, 'no viewer_surface_bound repeated every tick while a surface was held', 'count=%d' % len(bound))
 
 
 def top_resumed():

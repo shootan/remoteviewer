@@ -5441,8 +5441,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val bufferSizeChanged =
             surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight
-        if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
-            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED) {
+        val held = sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED
+        if (held && !bufferSizeChanged) {
+            // r2: the surface is still held by a renderer that has not confirmed it let go. bind() only records
+            // what to wire afterwards; the periodic sync calls this every tick, so no log and no buffer reset.
+            executeSharpen(sharpenPolicy.bind())
+        } else if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || held) {
             surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
             surfaceBufferWidth = targetBufferWidth
             surfaceBufferHeight = targetBufferHeight
