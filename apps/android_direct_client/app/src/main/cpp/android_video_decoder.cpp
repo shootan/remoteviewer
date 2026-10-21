@@ -647,6 +647,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   }
 
   ++codecsStarted_;
+  codecEpoch_.store(static_cast<uint32_t>(codecsStarted_), std::memory_order_release);
   codecAwaitsKey_ = true;
   formatWidth_ = 0;  // viewer-sharpness r1 A: no format of this instance yet -- nothing of the last one is kept
   formatHeight_ = 0;
@@ -951,6 +952,10 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
     const size_t slot = handoffNext_++ % kHandoffRing;
     handoffKey_[slot].store(0, std::memory_order_release);
     handoffNs_[slot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+    handoffMeta_[slot].store((static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
+                                 (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu),
+                             std::memory_order_release);
+    handoffSize_[slot].store((static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_, std::memory_order_release);
     handoffKey_[slot].store(static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL), std::memory_order_release);
   }
 

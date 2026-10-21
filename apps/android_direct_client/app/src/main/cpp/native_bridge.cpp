@@ -429,6 +429,25 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeHandoffNsForTimestamp(
   return static_cast<jlong>(g_video_decoder_sink.HandoffNsForTimestamp(static_cast<int64_t>(timestampNs)));
 }
 
+// sh-filter r2: [handoffNs, streamGeneration, codecEpoch, visibleWidth, visibleHeight], or null.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHandoffInfo(
+    JNIEnv* env, jobject /* this */, jlong timestampNs) {
+  remote60::android_direct::AndroidVideoDecoderSink::HandoffInfo info;
+  if (!g_video_decoder_sink.HandoffInfoForTimestamp(static_cast<int64_t>(timestampNs), &info)) return nullptr;
+  const jlong values[5] = {static_cast<jlong>(info.handoffNs), static_cast<jlong>(info.streamGeneration),
+                           static_cast<jlong>(info.codecEpoch), static_cast<jlong>(info.visibleWidth),
+                           static_cast<jlong>(info.visibleHeight)};
+  jlongArray out = env->NewLongArray(5);
+  if (out != nullptr) env->SetLongArrayRegion(out, 0, 5, values);
+  return out;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeCodecEpoch(JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.CodecEpoch());
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestWindowList(
     JNIEnv* /* env */, jobject /* this */) {

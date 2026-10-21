@@ -16,7 +16,6 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -34,7 +33,9 @@ import java.util.concurrent.atomic.AtomicLong
  * compositor still enlarges it with the existing transform, which this class never touches.
  *
  * Geometry (contract 1): the vertex shader passes the PRE-transform coordinate (0..1 over the visible
- * picture). The fragment shader steps one visible pixel in that space (1/outW, 1/outH), clamps each tap
+ * picture). The fragment shader steps one visible SOURCE pixel in that space -- 1/visibleW, 1/visibleH of
+ * the frame being drawn, looked up by its timestamp in the decoder's handoff ring (r2 H5.3: not the output
+ * buffer's size, which can lag behind a resolution change while the app defers the resize), clamps each tap
  * inside the visible picture, and only then applies the frame's SurfaceTexture transform -- which carries
  * the decoder's crop (e.g. 1088 -> 1080) and any flip/rotation. So no tap reads the coded padding, and the
  * transform is applied exactly once.
@@ -82,8 +83,11 @@ class SharpenRenderer(
     val framesDrawn = AtomicLong(0)
     val framesSkipped = AtomicLong(0)
     val redraws = AtomicLong(0)
-    /** Swaps of an already-shown frame whose TextureView latch must not count as a new displayed frame. */
-    val pendingRedrawLatches = AtomicInteger(0)
+    /** r2 H5.3: frames whose visible size was not in the handoff ring (the output size was used instead). */
+    val stepFromOutputSize = AtomicLong(0)
+    /** The visible source size the last frame was drawn with ("WxH"). */
+    @Volatile var lastSourceSize: String = ""
+        private set
     /** Monotonic ns of the last swap (frame or redraw); 0 before the first. */
     val lastSwapNs = AtomicLong(0)
     /** Draw cost (updateTexImage..swap), ns, last value and running max for the 1 s diagnostic window. */
@@ -106,6 +110,8 @@ class SharpenRenderer(
     /** Release asked for: no more draws, even while a (test-held) teardown waits. */
     private var stopping = false
     private val texMatrix = FloatArray(16)
+    private var sourceW = 0
+    private var sourceH = 0
     private var uTexMatrix = -1
     private var uStep = -1
     private var uStrength = -1
@@ -225,6 +231,15 @@ class SharpenRenderer(
                 st.updateTexImage()
                 st.getTransformMatrix(texMatrix)  // this frame's crop/flip/rotation
                 haveFrame = true
+                // This frame's own visible size (a redraw keeps the size of the frame it redraws).
+                val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(st.timestamp))
+                if (info != null && info.visibleWidth > 0 && info.visibleHeight > 0) {
+                    sourceW = info.visibleWidth
+                    sourceH = info.visibleHeight
+                } else {
+                    sourceW = 0
+                    sourceH = 0
+                }
             }
             val w = IntArray(1)
             val h = IntArray(1)
@@ -236,8 +251,18 @@ class SharpenRenderer(
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexture)
             GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
-            // One VISIBLE source pixel: the output buffer is the visible video size, 1:1.
-            GLES20.glUniform2f(uStep, 1f / w[0], 1f / h[0])
+            // One VISIBLE SOURCE pixel of this frame, in the pre-transform coordinate. If the transform turns
+            // the picture a quarter (x reads the source's y), the steps swap with it.
+            var stepW = sourceW
+            var stepH = sourceH
+            if (stepW <= 0 || stepH <= 0) {
+                stepW = w[0]; stepH = h[0]
+                if (newFrame) stepFromOutputSize.incrementAndGet()
+            }
+            val quarterTurn = kotlin.math.abs(texMatrix[1]) > kotlin.math.abs(texMatrix[0])
+            if (quarterTurn) { val t = stepW; stepW = stepH; stepH = t }
+            GLES20.glUniform2f(uStep, 1f / stepW, 1f / stepH)
+            if (newFrame) lastSourceSize = "${stepW}x${stepH}"
             GLES20.glUniform1f(uStrength, strength)
             quad.position(0)
             GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 16, quad)
@@ -253,11 +278,8 @@ class SharpenRenderer(
             if (faults.failSwapAfterFrames >= 0 && framesDrawn.get() >= faults.failSwapAfterFrames) {
                 throw IllegalStateException("eglSwapBuffers failed (test seam)")
             }
-            if (!newFrame) pendingRedrawLatches.incrementAndGet()
-            if (!EGL14.eglSwapBuffers(display, windowSurface)) {
-                if (!newFrame) pendingRedrawLatches.decrementAndGet()
-                throw IllegalStateException("eglSwapBuffers ${eglError()}")
-            }
+            // A redraw swaps the SAME timestamp: the view's latch tells it apart by that (LatchClassifier).
+            if (!EGL14.eglSwapBuffers(display, windowSurface)) throw IllegalStateException("eglSwapBuffers ${eglError()}")
             lastSwapNs.set(System.nanoTime())
             if (newFrame) framesDrawn.incrementAndGet() else redraws.incrementAndGet()
             lastDrawNs.set(SystemClock.elapsedRealtimeNanos() - t0)

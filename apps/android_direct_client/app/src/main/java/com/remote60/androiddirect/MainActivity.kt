@@ -2280,22 +2280,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-        textureLatchCount += 1
-        // sh-filter r1 (contract 6): a strength change redraws the frame already shown; its latch is not
-        // a new displayed frame and is not counted as one.
-        val renderer = sharpenRenderer
-        if (renderer != null && renderer.pendingRedrawLatches.get() > 0) {
-            renderer.pendingRedrawLatches.decrementAndGet()
+        val latchNs = System.nanoTime()
+        val surfaceId = sharpenPolicy.surfaceId ?: 0L
+        val timestamp = surface.timestamp
+        // sh-filter r2 (H3): the latched timestamp names the frame. A strength change re-swaps the frame
+        // already shown with the same timestamp: that latch is not a new displayed frame.
+        val newFrame = latchClassifier.isNewFrame(surfaceId, timestamp)
+        enterSharpenLatencySegment(latchNs)
+        if (!newFrame) {
+            sharpenStats.addRedraw()
             return
         }
         // Fires once per frame this view actually latched. Frames handed to the surface that
         // the view never latched -- because a newer one arrived before it drew -- are invisible
         // to every other counter, and are exactly what "it says 30 but looks like 15" is.
         NativeSessionBridge.nativeNotifyFrameDisplayed()
-        // S4: the decoder's handoff of THIS frame (matched by its buffer timestamp, a key) -> this latch.
-        val handoffNs = NativeSessionBridge.nativeHandoffNsForTimestamp(surface.timestamp)
-        if (handoffNs > 0L) sharpenLatency.add(System.nanoTime() - handoffNs) else sharpenLatency.unmatched += 1
-        maybeLogSharpenLatency()
+        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(timestamp))
+        // S4: the decoder's handoff of THIS frame -> this latch.
+        if (info != null) sharpenStats.addMatched(info.handoffNs, latchNs) else sharpenStats.addUnmatched()
+        // H2: the renderer's first output is THIS latch, if it is a frame of that renderer, surface and codec.
+        val liveGen = if (sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) sharpenPolicy.generation else -1L
+        if (sharpenGate.onLatch(liveGen, surfaceId, true, info)) {
+            sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+            sharpenGateTimeout = null
+            diagnosticsLog.log(
+                "sharpen_first_output",
+                "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
+                    "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
+            )
+        }
+        maybeLogSharpenLatency(latchNs)
     }
 
     private fun applyImmersiveMode() {
@@ -4276,7 +4290,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                 }
                 if (readySelectionGeneration == pendingSelectionGeneration && pendingSelectionGeneration != 0L &&
-                    sharpenOutputConfirmed(nowMs)) {
+                    sharpenOutputConfirmed(nowMs, panelSnapshot.lastSelectStreamGeneration)) {
                     diagnosticsLog.log(
                         "select_ready",
                         "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
@@ -5128,17 +5142,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val sharpenHandler = Handler(Looper.getMainLooper())
     private var sharpenStartTimeout: Runnable? = null
     private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
-    private var textureLatchCount = 0L
-    private var sharpenGateNotedAtMs = 0L
-    private var sharpenGateDrawnBase = 0L
-    private var sharpenGateLatchBase = 0L
-    private val sharpenLatency = SharpenLatencyStats()
+    // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
+    private val latchClassifier = LatchClassifier()
+    private val sharpenGate = SharpenOutputGate()
+    private var sharpenGateTimeout: Runnable? = null
+    /** SWITCHING: since when the decoder is ready for the selection but no output of it was latched. */
+    private var sharpenSelectionWaitGen = 0L
+    private var sharpenSelectionWaitSinceMs = 0L
+    private val sharpenStats = SharpenLatencyStats()
     // Bounds on the renderer's start, first output and release (no endless waits).
     private val SHARPEN_START_TIMEOUT_MS = 3000L
     private val SHARPEN_FIRST_OUTPUT_TIMEOUT_MS = 3000L
     private val SHARPEN_RELEASE_TIMEOUT_MS = 2000L
     private var sharpenLatencyWindowStartMs = 0L
     private var sharpenCountersBase = LongArray(4)
+    private var sharpenCountersGen = 0L
 
     private fun selectSharpness(level: SharpnessLevel, origin: String) {
         sharpness = level
@@ -5156,6 +5174,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         for (command in commands) {
             when (command) {
                 SharpenPathPolicy.Command.BindDirect -> {
+                    cancelSharpenGate()
                     val st = videoTextureView.surfaceTexture
                     if (st == null) {
                         diagnosticsLog.log("sharpen_direct_skipped", "reason=no_surface_texture")
@@ -5182,6 +5201,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 is SharpenPathPolicy.Command.AttachDecoderToRenderer -> {
                     val input = sharpenInputSurface
                     if (input != null && command.generation == sharpenRendererGeneration) {
+                        val epochBefore = NativeSessionBridge.nativeCodecEpoch()
+                        armSharpenGate(command.generation, epochBefore)
                         NativeSessionBridge.nativeSetSurface(input)
                         diagnosticsLog.log(
                             "sharpen_path",
@@ -5193,6 +5214,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 is SharpenPathPolicy.Command.ReleaseRenderer -> {
                     val gen = command.generation
                     val renderer = sharpenRenderers[gen]
+                    cancelSharpenGate()
                     if (gen == sharpenRendererGeneration) {
                         sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
                         sharpenStartTimeout = null
@@ -5277,53 +5299,101 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     /**
-     * Contract 6: with the sharpening pass in between, the decoder's "ready" is not yet a picture. The
-     * renderer must have drawn after it and the view latched that. Bounded: no output in time is a renderer
-     * failure (-> direct), never an endless wait and never "ready" on the decoder alone.
+     * Contract 6 / r2 H2: with the sharpening pass in between, the decoder's "ready" is not yet a picture.
+     * The gate is armed when the decoder is attached to the renderer and confirmed by the first latch that is
+     * a frame of THAT renderer, surface and codec (SharpenOutputGate) -- whenever it happens, no counter
+     * baseline. Bounded by the gate's own timeout (armSharpenGate) in every scene, SWITCHING or VIEWER.
      */
-    private fun sharpenOutputConfirmed(nowMs: Long): Boolean {
-        val renderer = sharpenRenderer
+    private fun armSharpenGate(generation: Long, codecEpochBefore: Long) {
+        val surfaceId = sharpenPolicy.surfaceId ?: return
+        sharpenGate.arm(generation, surfaceId, System.nanoTime(), codecEpochBefore, SystemClock.elapsedRealtime())
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        val timeout = Runnable {
+            sharpenGateTimeout = null
+            if (sharpenGate.isArmed && !sharpenGate.confirmed && sharpenPolicy.generation == generation &&
+                sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) {
+                executeSharpen(sharpenPolicy.rendererFailed(generation, "no_output_after_ready"))
+            }
+        }
+        sharpenGateTimeout = timeout
+        sharpenHandler.postDelayed(timeout, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS)
+    }
+
+    private fun cancelSharpenGate() {
+        sharpenGate.cancel()
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        sharpenGateTimeout = null
+    }
+
+    /**
+     * SWITCHING (the decoder is ready for this selection): is a frame of THIS selection's stream generation
+     * on screen through the renderer? A renderer kept across a target change waits for the new target's own
+     * frame; bounded at SHARPEN_FIRST_OUTPUT_TIMEOUT_MS from the decoder's ready, then a renderer failure.
+     */
+    private fun sharpenOutputConfirmed(nowMs: Long, selectionStreamGeneration: Long): Boolean {
         val path = sharpenPolicy.path
-        if (renderer == null || (path != SharpenPathPolicy.Path.STARTING && path != SharpenPathPolicy.Path.LIVE)) {
-            sharpenGateNotedAtMs = 0L
+        if (path != SharpenPathPolicy.Path.STARTING && path != SharpenPathPolicy.Path.LIVE) {
+            sharpenSelectionWaitGen = 0L
             return true
         }
-        if (sharpenGateNotedAtMs == 0L) {
-            sharpenGateNotedAtMs = nowMs
-            sharpenGateDrawnBase = renderer.framesDrawn.get()
-            sharpenGateLatchBase = textureLatchCount
-            return false
-        }
-        if (renderer.framesDrawn.get() > sharpenGateDrawnBase && textureLatchCount > sharpenGateLatchBase) {
-            diagnosticsLog.log("sharpen_first_output", "gen=$sharpenRendererGeneration ms=${nowMs - sharpenGateNotedAtMs}")
-            sharpenGateNotedAtMs = 0L
+        if (path == SharpenPathPolicy.Path.LIVE && sharpenGate.confirmedFor(selectionStreamGeneration)) {
+            sharpenSelectionWaitGen = 0L
             return true
         }
-        if (nowMs - sharpenGateNotedAtMs > SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) {
-            sharpenGateNotedAtMs = 0L
-            executeSharpen(sharpenPolicy.rendererFailed(sharpenRendererGeneration, "no_output_after_ready"))
+        if (sharpenSelectionWaitGen != selectionStreamGeneration) {
+            sharpenSelectionWaitGen = selectionStreamGeneration
+            sharpenSelectionWaitSinceMs = nowMs
+        } else if (path == SharpenPathPolicy.Path.LIVE && !sharpenGate.timedOut(nowMs, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) &&
+            nowMs - sharpenSelectionWaitSinceMs > SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) {
+            sharpenSelectionWaitGen = 0L
+            executeSharpen(sharpenPolicy.rendererFailed(sharpenPolicy.generation, "no_output_for_selection"))
         }
         return false
     }
 
-    /** S4: one line per 5 s window -- handoff->latch p50/p95 with sample counts, per effective level. */
-    private fun maybeLogSharpenLatency() {
+    /** S4 (r2 H3): one segment per (effective level, path, renderer generation, surface). */
+    private fun enterSharpenLatencySegment(nowNs: Long) {
+        val path = when (sharpenPolicy.path) {
+            SharpenPathPolicy.Path.LIVE, SharpenPathPolicy.Path.STARTING -> "sharpen"
+            SharpenPathPolicy.Path.DIRECT -> "direct"
+            else -> "none"
+        }
+        val key = SharpenLatencyStats.Key(
+            sharpenPolicy.effective.code, path, if (path == "sharpen") sharpenPolicy.generation else 0L,
+            sharpenPolicy.surfaceId ?: 0L,
+        )
+        val closedSegment = sharpenStats.segmentId
+        val closed = sharpenStats.enter(key, nowNs) ?: return
+        diagnosticsLog.log(
+            "sh_latency_segment",
+            "seg=$closedSegment ${closed.first} fps=$requestedRuntimeFps ${closed.second.fields()}"
+        )
+        sharpenLatencyWindowStartMs = SystemClock.elapsedRealtime()
+    }
+
+    /** S4: a 5 s progress line for the current segment (the segment line is the whole distribution). */
+    private fun maybeLogSharpenLatency(nowNs: Long) {
         val now = SystemClock.elapsedRealtime()
         if (sharpenLatencyWindowStartMs == 0L) sharpenLatencyWindowStartMs = now
         if (now - sharpenLatencyWindowStartMs < 5000L) return
         sharpenLatencyWindowStartMs = now
-        val s = sharpenLatency.drain()
+        val w = sharpenStats.window(nowNs)
+        val seg = sharpenStats.segment(nowNs)
         val r = sharpenRenderer
         val counters = longArrayOf(
             r?.framesAvailable?.get() ?: 0L, r?.framesDrawn?.get() ?: 0L, r?.framesSkipped?.get() ?: 0L, r?.redraws?.get() ?: 0L)
-        val d = LongArray(4) { (counters[it] - sharpenCountersBase[it]).coerceAtLeast(0L) }
+        // Counters belong to one renderer: a new generation starts again from its own zero.
+        val d = if (sharpenCountersGen != sharpenPolicy.generation) counters
+                else LongArray(4) { counters[it] - sharpenCountersBase[it] }
+        sharpenCountersGen = sharpenPolicy.generation
         sharpenCountersBase = counters
         diagnosticsLog.log(
             "sh_latency",
-            "level=${sharpenPolicy.effective.code} requested=${sharpenPolicy.requested.code} fps=$requestedRuntimeFps " +
-                "n=${s.count} unmatched=${s.unmatched} p50us=${s.p50Us} p95us=${s.p95Us} maxus=${s.maxUs} " +
+            "seg=${sharpenStats.segmentId} ${sharpenStats.key} requested=${sharpenPolicy.requested.code} fps=$requestedRuntimeFps " +
+                "window: ${w.fields()} | segment: n=${seg.count} p95us=${seg.p95Us} | " +
                 "glAvail=${d[0]} glDrawn=${d[1]} glSkipped=${d[2]} glRedraws=${d[3]} " +
-                "drawUs=${(r?.lastDrawNs?.get() ?: 0L) / 1000}"
+                "drawWallUs=${(r?.lastDrawNs?.get() ?: 0L) / 1000} src=${r?.lastSourceSize ?: "-"} " +
+                "stepFromOutput=${r?.stepFromOutputSize?.get() ?: 0L}"
         )
     }
 
