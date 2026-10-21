@@ -18,7 +18,8 @@
 #
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File sh_pattern_window.ps1 [-Seconds 1800] [-Static]
 #   -Static: the square does not move (identical frames for the off/0.20/0.35 picture comparison).
-param([int]$Seconds = 1800, [int]$Left = 0, [switch]$Static, [switch]$Bottom)
+param([int]$Seconds = 1800, [int]$Left = 0, [int]$Top = 0, [int]$Width = 1920, [int]$Height = 1080,
+      [string]$Title = 'GNLINK-SH-PATTERN', [switch]$Static, [switch]$Bottom)
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -33,14 +34,17 @@ public class GnlinkNoActivateForm : System.Windows.Forms.Form {
 }
 "@
 $form = New-Object GnlinkNoActivateForm
-$form.Text = 'GNLINK-SH-PATTERN'
+$form.Text = $Title
 $form.FormBorderStyle = 'None'
 $form.StartPosition = 'Manual'
 # ShowInTaskbar stays true: with false, WinForms gives the window a hidden OWNER, and the host never
 # captures an owned window (host_window_enum.cpp match_capture_window).
 $form.ShowInTaskbar = $true
-$form.Location = New-Object System.Drawing.Point($Left, 0)
-$form.ClientSize = New-Object System.Drawing.Size(1920, 1080)
+$form.Location = New-Object System.Drawing.Point($Left, $Top)
+# r2: -Width/-Height/-Title make a second, smaller pattern window (a resolution change for the viewer:
+# switching to it is a new picture size while the sharpening pass is live). Content is drawn at the same
+# coordinates; what falls outside a smaller window is simply not there.
+$form.ClientSize = New-Object System.Drawing.Size($Width, $Height)
 $form.BackColor = [System.Drawing.Color]::White
 $prop = $form.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic')
 $prop.SetValue($form, $true, $null)
@@ -93,10 +97,10 @@ $form.Add_Paint({
   $g.FillRectangle((New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(230,230,230))), 40, 760, 1840, 240)
   $g.FillRectangle([System.Drawing.Brushes]::DarkOrange, $script:x, 800, 160, 160)
   # border
-  $g.FillRectangle([System.Drawing.Brushes]::Red, 0, 0, 1920, 1)
-  $g.FillRectangle([System.Drawing.Brushes]::Lime, 0, 1079, 1920, 1)
-  $g.FillRectangle([System.Drawing.Brushes]::Blue, 0, 0, 1, 1080)
-  $g.FillRectangle([System.Drawing.Brushes]::Yellow, 1919, 0, 1, 1080)
+  $g.FillRectangle([System.Drawing.Brushes]::Red, 0, 0, $Width, 1)
+  $g.FillRectangle([System.Drawing.Brushes]::Lime, 0, $Height - 1, $Width, 1)
+  $g.FillRectangle([System.Drawing.Brushes]::Blue, 0, 0, 1, $Height)
+  $g.FillRectangle([System.Drawing.Brushes]::Yellow, $Width - 1, 0, 1, $Height)
 })
 
 $timer = New-Object System.Windows.Forms.Timer

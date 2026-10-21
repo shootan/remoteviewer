@@ -1,17 +1,18 @@
-"""sh-filter r1 -- the phone viewer's sharpening, on an AVD, through the real APK UI.
+"""sh-filter r1/r2 -- the phone viewer's sharpening, on an AVD, through the real APK UI.
 
 What runs and what it is:
   * the host: a GNLinkStream TEST build (GNLinkStreamMigrationTest; capture/encode are the product's)
-    bound to 127.0.0.1 only (no firewall prompt), input injection OFF, capturing ONE window by title
-    (automation/sh_pattern_window.ps1: 1920x1080, mostly off screen) -- so the phone decodes 1920x1088
-    and crops to 1080 when its decoder does;
-  * the phone: the AVD `gnlink_kbd_test` (x86_64, API 34, software GL), the APK under test installed
-    as is; the AVD reaches the host's loopback at 10.0.2.2;
+    bound to 127.0.0.1 only (no firewall prompt), input injection OFF, capturing the DESKTOP (DXGI) with
+    the topmost pattern window (automation/sh_pattern_window.ps1, 1920x1080) filling it;
+  * the phone: the AVD `gnlink_kbd_test` (x86_64, API 34, SwiftShader software GL), the APK under test
+    installed as is; the AVD reaches the host's loopback at 10.0.2.2; manual IP connect (TCP control);
   * the UI is driven through uiautomator (resource ids) and adb taps -- the app's own buttons.
-The AVD is not the user's phone: its decoder, GPU, colour and heat are not the SM-S948N's.
+The AVD is not the user's phone: its decoder (goldfish: no 1088 crop), GPU, colour and heat are not the
+SM-S948N's. Seam scenarios (faults, identity, touch, hold, viewer_never) need the -Pgnlink.shTestSeam=true
+APK; compare/lifecycle/latency/resize run the seam-free one.
 
 Usage: python sh_filter_avd.py --host-exe <GNLinkStreamMigrationTest.exe> --apk <apk> --out <dir>
-        [--scenario compare|faults|lifecycle|latency] [--seam]
+        [--scenario compare|identity|faults|lifecycle|latency|touch|hold|viewer_never|resize]
 Prints PASS/FAIL lines and a final RESULT line; exit 0 only when every check passed.
 """
 
@@ -214,7 +215,7 @@ def launch(port, extras=()):
         '--ei', 'controlPort', str(CONTROL_PORT.get(port, port)), *extras)
 
 
-def connect_to_pattern(port, extras=(), best_quality=True):
+def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, before_pick=None, wait_viewer=True):
     launch(port, extras)
     if not tap(rid='loginManualButton', timeout=30):
         return False
@@ -229,21 +230,36 @@ def connect_to_pattern(port, extras=(), best_quality=True):
             return False
         if not tap(rid='settingsQualityBestButton', timeout=10):
             return False
+    if level_before:
+        rid = {'off': 'settingsSharpOffButton', 'weak': 'settingsSharpWeakButton', 'strong': 'settingsSharpStrongButton'}
+        if not tap(rid='listSettingsButton', timeout=20) or not tap(rid=rid[level_before], timeout=10):
+            return False
     # The DESKTOP (the monitor, DXGI), with the topmost pattern window filling it: the host then gets a
     # frame every time the screen changes (the moving square, ~30 fps). Capturing the window itself (WGC)
     # gave ~1 frame/s here, too few to measure anything and slow to answer a lost keyframe.
     if not tap(rid='listDevicesButton', timeout=10):
         return False
-    # Pick only after the host's UDP control link has timed out. On this manual (TCP-control) path the app
-    # never pings the UDP control channel, so the host's 10 s read timeout (host_startup_control.cpp,
-    # UdpControlLink 10000) ends that session 10 s after connect and marks the stream INACTIVE -- a stream
-    # already playing then freezes for good ("화면이 멈췄습니다"). Seen with OFF as well as with the filter
-    # (2026-10-22 debug2-off-low, run-compare7/8); not part of this change, recorded in the report.
+    # A WORKAROUND for these filter tests, not evidence that manual connect works: on this manual (TCP-control)
+    # path the host's UDP control session was seen to end ~10 s after connect ("udp control session ended
+    # reason=none", 4 runs; host_startup_control.cpp has a 10 s UdpControlLink read timeout -- the likely
+    # cause, not established) and to take a stream already playing inactive ("화면이 멈췄습니다"). Seen with
+    # OFF too. Picking after that point keeps the filter runs on a steady stream. Ledger item (verifier).
     wait = 11.5 - (time.time() - connected_at)
     if wait > 0:
         time.sleep(wait)
-    if not tap(rid='targetCardTitle', timeout=30):
+    end = time.time() + 30
+    card = None
+    while time.time() < end and card is None:
+        card = find(dump(), rid='targetCardTitle')
+        if card is None:
+            time.sleep(1)
+    if card is None:
         return False
+    if before_pick:
+        before_pick()
+    tap_node(card)
+    if not wait_viewer:
+        return True
     # The viewer is up once its menu button exists.
     return wait_for(rid='viewerMenuButton', timeout=40) or wait_for(rid='viewerRoot', timeout=5)
 
@@ -348,6 +364,15 @@ def borders_ok(m):
 
 
 # ---------------------------------------------------------------- scenarios
+def check_output_size(lines):
+    """r2: the renderer's EGL output must be the picture's own size -- a different one is resampled twice
+    (seen: 1970x1080 after the rotation reset the TextureView's buffer size)."""
+    pairs = [(m.group(1), m.group(2)) for m in (re.search(r'src=(\d+x\d+) out=(\d+x\d+)', l) for l in lines) if m]
+    bad = [p for p in pairs if p[0] != p[1]]
+    check(pairs and not bad, 'the renderer drew at the picture size itself (src == out) in every progress line',
+          'lines=%d mismatched=%s' % (len(pairs), bad[:3]))
+
+
 def scenario_compare(fx, out, seam):
     """Acceptance 1/2: off -> weak -> strong -> off on the SAME static frame, chosen in the viewer menu."""
     check(connect_to_pattern(fx.port, ('--es', 'shTestFault', 'none') if seam else ()),
@@ -379,6 +404,7 @@ def scenario_compare(fx, out, seam):
               'flat colour stays flat under 0.35', 'std off=%s strong=%s' % (shots['off']['D_flat_std'], shots['strong']['D_flat_std']))
     lines = log_lines()
     check(any('sharpen_path' in l and 'path=sharpen' in l for l in lines), 'the app logged the sharpening path (decoder -> renderer)')
+    check_output_size(lines)
     check(any('sharpen_path' in l and 'path=direct' in l for l in lines), 'the app logged the direct path again after off')
     with open(os.path.join(out, 'compare_metrics.json'), 'w') as f:
         json.dump(shots, f, indent=1)
@@ -410,61 +436,186 @@ def scenario_identity(fx, out):
             json.dump(s, f, indent=1)
 
 
-class ToastWatcher:
-    """Polls the window list for a Toast window and screenshots the screen while one is up.
+FALLBACK_TEXT = '선명도 적용 불가, 원본 표시'
 
-    The fallback notice (선명도 적용 불가, 원본 표시) is a 2 s Toast; it can be up and gone before the viewer
-    is, so it is watched from before the connect. The shot is the evidence that the user saw it."""
 
-    def __init__(self, path):
+class ToastEvents:
+    """`adb shell uiautomator events`: the accessibility event stream, in which every toast arrives as a
+    TYPE_NOTIFICATION_STATE_CHANGED event carrying its text. The check is the EXACT fallback text; any other
+    toast is recorded and does not count (r2 H5.4: r1's watcher accepted any toast window). While this runs,
+    `uiautomator dump` is not used (one UiAutomation client at a time)."""
+
+    def __init__(self):
         import threading
-        self.path, self.seen, self.stop_ev = path, None, threading.Event()
-        self.t = threading.Thread(target=self.run, daemon=True)
+        self.lines = []
+        self.p = subprocess.Popen([ADB, 'shell', 'uiautomator', 'events'], stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT)
+        self.t = threading.Thread(target=self._read, daemon=True)
         self.t.start()
+        time.sleep(1.5)  # the stream is up before the event it must not miss
 
-    def run(self):
-        while not self.stop_ev.is_set() and self.seen is None:
-            w = adb('shell', 'dumpsys', 'window', 'windows', check_rc=False, timeout=30)
-            hit = [l.strip() for l in w.splitlines() if 'Window{' in l and 'Toast' in l]
-            if hit:
-                screencap(self.path)
-                self.seen = hit[0]
-                return
-            time.sleep(0.2)
+    def _read(self):
+        for raw in iter(self.p.stdout.readline, b''):
+            self.lines.append(raw.decode('utf-8', errors='replace'))
 
-    def close(self):
-        self.stop_ev.set()
-        self.t.join(30)
-        return self.seen
+    def stop(self):
+        try:
+            self.p.terminate()
+            self.p.wait(10)
+        except Exception:
+            pass
+        adb('shell', 'pkill', '-f', 'uiautomator', check_rc=False)
+        self.t.join(5)
+        return self.toasts()
+
+    def toasts(self):
+        out = []
+        for l in self.lines:
+            if 'TYPE_NOTIFICATION_STATE_CHANGED' not in l:
+                continue
+            i = l.find('Text: [')
+            j = l.find(']; ', i)
+            if i >= 0 and j > i:
+                text = l[i + 7:j]
+                # The event's text list is [the toast's message, the app's label].
+                if text.endswith(', GNLink'):
+                    text = text[:-len(', GNLink')]
+                out.append(text)
+        return out
+
+
+def check_toast(prefix, toasts, shot_path):
+    check(FALLBACK_TEXT in toasts, prefix + ': the fallback notice "' + FALLBACK_TEXT + '" was shown (exact text)',
+          'toasts seen: ' + repr(toasts))
+    others = [t for t in toasts if t != FALLBACK_TEXT]
+    if others:
+        print('      (other toasts in the same window, not counted: %r)' % others, flush=True)
+
+
+def live_picture(out, name):
+    a = screencap(os.path.join(out, name + '_1.png'))
+    time.sleep(2)
+    b = screencap(os.path.join(out, name + '_2.png'))
+    ma = metrics(a)
+    ok_pic = ma is not None and borders_ok(ma)
+    moving = False
+    if ma:
+        x0 = ma['x0']
+        moving = np.abs(a[760:1000, x0 + 60:x0 + 1880, :] - b[760:1000, x0 + 60:x0 + 1880, :]).mean() > 1.0
+    return ok_pic, moving
 
 
 def scenario_faults(fx, out):
     """Acceptance 4: GL fails -> 선명도 적용 불가, 원본 표시, and the ORIGINAL picture keeps coming."""
     for fault in ['context', 'shader', 'swap:30', 'never']:
-        tw = ToastWatcher(os.path.join(out, 'fault_%s_toast.png' % fault.replace(':', '_')))
-        check(connect_to_pattern(fx.port, ('--es', 'shTestFault', fault)), 'connected with injected fault ' + fault)
-        time.sleep(8)
-        seen = tw.close()
-        check(seen is not None, fault + ': the fallback notice was on screen (Toast window; see fault_*_toast.png)', seen or 'none')
+        holder = {}
+        ok = connect_to_pattern(fx.port, ('--es', 'shTestFault', fault),
+                                before_pick=lambda: holder.setdefault('ev', ToastEvents()), wait_viewer=False)
+        check(ok, 'connected with injected fault ' + fault)
+        time.sleep(9)
+        toasts = holder['ev'].stop() if 'ev' in holder else []
+        check_toast(fault, toasts, None)
         lines = log_lines()
         fb = [l for l in lines if 'sharpen_fallback' in l]
         direct = [l for l in lines if 'sharpen_path' in l and 'path=direct' in l]
         check(fb and 'requested=weak' in fb[-1] and 'effective=off' in fb[-1],
               fault + ': fallback logged with requested=weak effective=off', fb[-1] if fb else 'none')
         check(direct, fault + ': the decoder was rebound DIRECTLY to the view')
-        a = screencap(os.path.join(out, 'fault_%s_1.png' % fault.replace(':', '_')))
-        time.sleep(2)
-        b = screencap(os.path.join(out, 'fault_%s_2.png' % fault.replace(':', '_')))
-        ma = metrics(a)
-        check(ma is not None and borders_ok(ma), fault + ': the original picture is on screen after the fallback')
-        # the moving square: two frames 2 s apart differ inside region G -> new frames keep arriving
-        if ma:
-            x0 = ma['x0']
-            g1 = a[760:1000, x0 + 60:x0 + 1880, :]
-            g2 = b[760:1000, x0 + 60:x0 + 1880, :]
-            check(np.abs(g1 - g2).mean() > 1.0, fault + ': NEW frames keep arriving on the direct path (moving square moved)')
+        pic, moving = live_picture(out, 'fault_' + fault.replace(':', '_'))
+        check(pic, fault + ': the original picture is on screen after the fallback')
+        check(moving, fault + ': NEW frames keep arriving on the direct path (moving square moved)')
         check(not any('sharpen_start' in l for l in lines[lines.index(fb[-1]) + 1:]) if fb else False,
               fault + ': no retry loop in the same surface episode (no renderer started after the fallback)')
+
+
+def scenario_viewer_never(fx, out):
+    """r2 H2: off -> 0.20 IN the viewer, with a renderer that never draws: the first-output gate is armed by
+    the producer change itself (not only by SWITCHING) and falls back within its bound."""
+    check(connect_to_pattern(fx.port, ('--es', 'shTestFault', 'never'), level_before='off'),
+          'connected with 끄기 (direct), renderer fault "never"')
+    time.sleep(3)
+    adb('logcat', '-c', check_rc=False)
+    check(tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls), 'viewer menu opened')
+    # the weak button's place, found before the stream of events starts (no dump while it runs)
+    weak = None
+    end = time.time() + 15
+    while weak is None and time.time() < end:
+        weak = find(dump(), rid='viewerSharpWeakButton')
+    if not check(weak is not None, 'the 0.20 button is on the menu'):
+        return
+    x0, y0, x1, y1 = bounds(weak)
+    ev = ToastEvents()
+    adb('shell', 'input', 'tap', str((x0 + x1) // 2), str((y0 + y1) // 2), check_rc=False)
+    time.sleep(7)
+    toasts = ev.stop()
+    tap(rid='viewerMenuCloseButton', timeout=10)
+    lines = log_lines()
+    starts = [l for l in lines if 'sharpen_start' in l]
+    fb = [l for l in lines if 'sharpen_fallback' in l]
+    check(starts, 'the renderer was started from the viewer (off -> 0.20)')
+    check(fb and 'no_output_after_ready' in fb[-1], 'no output after ready -> fallback (gate armed in VIEWER)',
+          fb[-1] if fb else 'none')
+    check_toast('viewer off->weak never-draw', toasts, None)
+    pic, moving = live_picture(out, 'viewer_never')
+    check(pic and moving, 'the original picture is on screen and live after the fallback')
+
+
+def scenario_hold(fx, out):
+    """r2 H1: the renderer's release is held 20 s (seam), past the app's 2 s timeout. While it holds, the view's
+    surface stays unconnected whatever is asked (a level change in the menu, the viewer's own periodic sync);
+    when it lets go, the request is carried out once. A dark-mode recreate during a held release frees that
+    old surface exactly once, later. (A menu choice takes ~9 s here, so one request fits in the hold.)"""
+    check(connect_to_pattern(fx.port, ('--es', 'shTestFault', 'hold:20000')), 'connected (0.20), releases held 20 s')
+    time.sleep(3)
+    adb('logcat', '-c', check_rc=False)
+    choose_level('off')       # release #1 held
+    choose_level('weak')      # asked while blocked: remembered only
+    time.sleep(16)            # the hold (20 s from the first choice) ends; then the request
+    lines = log_lines()
+    with open(os.path.join(out, 'hold_phase1.txt'), 'w', encoding='utf-8') as fh:
+        fh.write('\n'.join(lines))
+    to = [i for i, l in enumerate(lines) if 'sharpen_release_timeout' in l]
+    rel = [i for i, l in enumerate(lines) if 'sharpen_released' in l]
+    check(to, 'the release timed out at 2 s (the surface is BLOCKED, not NONE)', lines[to[0]] if to else 'none')
+    if to and rel:
+        between = lines[to[0]:rel[0]]
+        bad = [l for l in between if 'sharpen_start' in l or ('sharpen_path' in l and 'path=direct' in l)]
+        check(not bad, 'no producer connected between the timeout and the late release', '; '.join(bad[:2]))
+        check('detached=1' in lines[rel[0]], 'the late release reports its EGL surface destroyed', lines[rel[0]])
+        after = lines[rel[0]:]
+        directs = [l for l in after if 'sharpen_path' in l and 'path=direct' in l]
+        starts = [l for l in after if 'sharpen_start' in l]
+        selects = [l for l in between if 'sharpness_select' in l and 'path=BLOCKED' in l]
+        check(selects, 'the 0.20 choice arrived while the surface was BLOCKED', selects[0] if selects else 'none')
+        check(len(starts) == 1 and not directs, 'then that request (0.20 -> a NEW renderer) is done once',
+              'direct=%d start=%d' % (len(directs), len(starts)))
+    else:
+        check(False, 'a late release was logged', 'release lines: %d' % len(rel))
+    pic, moving = live_picture(out, 'hold_after')
+    check(pic and moving, 'the picture is back and live after the late release')
+
+    # A surface destroyed while its renderer's release is held.
+    choose_level('weak')
+    time.sleep(4)
+    adb('logcat', '-c', check_rc=False)
+    choose_level('off')                     # held release on surface A (15 s)
+    time.sleep(2.5)                         # past the timeout: A is BLOCKED
+    adb('shell', 'cmd', 'uimode', 'night', 'yes', check_rc=False)
+    time.sleep(6)
+    adb('shell', 'cmd', 'uimode', 'night', 'no', check_rc=False)
+    time.sleep(16)                          # A's held release ends -> A is freed (once)
+    lines = log_lines()
+    freed = [l for l in lines if 'sharpen_surface_released' in l]
+    ids = [re.search(r'surface=(\d+)', l).group(1) for l in freed if re.search(r'surface=(\d+)', l)]
+    check(freed and len(ids) == len(set(ids)), 'each app-owned surface released exactly once',
+          '; '.join(l[l.index('[sharpen'):] for l in freed[:4]) if freed else 'none')
+    stuck = [l for l in lines if 'sharpen_producer_stuck' in l]
+    check(not stuck, 'no surface reported stuck')
+    if not wait_for(rid='viewerMenuButton', timeout=5):
+        pick_desktop() and wait_for(rid='viewerMenuButton', timeout=40)
+        time.sleep(3)
+    pic, moving = live_picture(out, 'hold_recreate')
+    check(pic and moving, 'after the recreate the picture is on screen and live')
 
 
 def top_resumed():
@@ -535,21 +686,132 @@ def scenario_lifecycle(fx, out):
 
 
 def scenario_latency(fx, out, seconds):
-    """S4 on the AVD: sh_latency windows for off and weak and strong, same moving input."""
+    """S4 on the AVD: off / 0.20 / 0.35 / off, `seconds` each, same moving input. The numbers are the WHOLE
+    segment's (sh_latency_segment, closed by the next level change) -- not a median of 5 s windows."""
     check(connect_to_pattern(fx.port), 'connected')
-    results = {}
-    for level in ['off', 'weak', 'strong', 'off2']:
+    adb('logcat', '-G', '16M', check_rc=False)
+    adb('logcat', '-c', check_rc=False)
+    for level in ['off', 'weak', 'strong', 'off2', 'weak2']:
         choose_level(level.rstrip('2'))
-        time.sleep(4)
-        adb('logcat', '-c', check_rc=False)
         time.sleep(seconds)
-        lines = [l for l in log_lines() if 'sh_latency' in l]
-        results[level] = lines
-        print('      %s: %d windows' % (level, len(lines)), flush=True)
-        for l in lines:
-            print('        ' + l[l.index('sh_latency'):], flush=True)
-    with open(os.path.join(out, 'latency_raw.json'), 'w') as f:
-        json.dump(results, f, indent=1)
+        print('      %s done' % level, flush=True)
+    lines = [l for l in log_lines() if 'sh_latency_segment' in l]
+    segs = []
+    for l in lines:
+        f = dict(kv.split('=', 1) for kv in l[l.index('sh_latency_segment') + 19:].split() if '=' in kv)
+        segs.append(f)
+        print('        ' + l[l.index('sh_latency_segment'):], flush=True)
+    steady = [f for f in segs if int(f.get('n', '0')) >= 100]
+    check(len(steady) >= 4, 'whole segments with >=100 steady frames were closed for the levels', str(len(steady)))
+    with open(os.path.join(out, 'latency_segments.json'), 'w') as fh:
+        json.dump(segs, fh, indent=1)
+
+
+def lime_target(img):
+    """The pattern's lime block (x 610..730, y 440..700 of the picture) as it is on screen: centre of the
+    pixels that are clearly lime in rows that have many of them (the 1-px lime border row is excluded)."""
+    m = (img[:, :, 1] > 200) & (img[:, :, 0] < 90) & (img[:, :, 2] < 90)
+    count = m.sum(axis=1)
+    # the block's rows only: the 1-px lime border row runs the picture's whole width
+    rows = np.where((count >= 30) & (count <= 400))[0]
+    if len(rows) == 0:
+        return None
+    ys, xs = np.nonzero(m[rows, :])
+    return int(round(xs.mean())), int(round(rows[ys].mean()))
+
+
+def seam_inputs():
+    out = []
+    for l in log_lines('seam_input'):
+        g = re.search(r'kind=(\d+) x=(-?\d+) y=(-?\d+) buttons=(\d+) queued=(\d)', l)
+        if g:
+            out.append(tuple(int(v) for v in g.groups()))
+    return out
+
+
+def scenario_touch(fx, out):
+    """r2 H5.1: a tap on a point of the picture becomes THAT point of the remote screen -- with 끄기, 0.20,
+    0.35, and in 크게 보기. Observed at the app's queue to native (seam log: what nativeQueueInputEvent got);
+    the host runs with input injection OFF, so the host's own receipt is not observed here."""
+    check(connect_to_pattern(fx.port), 'connected')
+    time.sleep(3)
+
+    def tap_lime(label, one_to_one=True):
+        img = screencap(os.path.join(out, 'touch_%s.png' % label))
+        t = lime_target(img)
+        mm = metrics(img) if one_to_one else None
+        if not check(t is not None, label + ': the lime block is found on screen'):
+            return
+        adb('logcat', '-c', check_rc=False)
+        adb('shell', 'input', 'tap', str(t[0]), str(t[1]), check_rc=False)
+        time.sleep(1.5)
+        ev = [e for e in seam_inputs() if e[4] == 1 and (e[1] or e[2])]
+        inside = [e for e in ev if 610 <= e[1] <= 730 and 440 <= e[2] <= 700]
+        near = [e for e in ev if abs(e[1] - 670) <= 6 and abs(e[2] - 570) <= 6]
+        check(ev and len(inside) == len(ev), label + ': every queued event lands inside the lime block (610..730, 440..700)',
+              'screen=%s events=%s' % (t, ev[:4]))
+        check(near, label + ': at its centre (670,570) within 6 px', 'events=%s' % ev[:4])
+        if one_to_one and mm and ev:
+            # 1:1 view: the remote point is exactly the tapped screen point minus the picture's origin
+            exp = (t[0] - mm['x0'], t[1])
+            check(all(abs(e[1] - exp[0]) <= 1 and abs(e[2] - exp[1]) <= 1 for e in ev),
+                  label + ': remote = tapped screen point - picture origin (within 1 px)',
+                  'expected=%s events=%s' % (exp, ev[:2]))
+
+    for level in ['off', 'weak', 'strong']:
+        choose_level(level)
+        time.sleep(3)
+        tap_lime(level)
+    # 크게 보기 (the viewport enlarges the picture; touches must follow)
+    if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10):
+        tap(rid='viewerMenuCloseButton', timeout=10)
+        time.sleep(3)
+        tap_lime('large_weak', one_to_one=False)
+    else:
+        check(False, '크게 보기 could be chosen')
+
+
+def scenario_resize(fx, out):
+    """r2 H5.3: a picture-size change while the filter is live -- switching from the 1920x1080 desktop to a
+    second, 1280x720 pattern window through the viewer's own window sheet (SWITCHING, where the app defers the
+    output-buffer resize). The renderer must step by each frame's own visible size (src= in sh_latency): the
+    new 1280x720 as soon as its frames come, not the output buffer's size. (A quality change alone keeps the
+    desktop at 1920x1080 here, so it does not test this.)"""
+    small = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                              os.path.join(HERE, 'sh_pattern_window.ps1'), '-Seconds', '600', '-Left', '320',
+                              '-Top', '180', '-Width', '1280', '-Height', '720', '-Title', 'GNLINK-SH-SMALL'])
+    try:
+        time.sleep(3)
+        check(connect_to_pattern(fx.port), 'connected (0.20, 최고화질, desktop 1920x1080)')
+        time.sleep(6)
+        adb('logcat', '-c', check_rc=False)
+        ok = tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and             tap(rid='viewerMenuTargetsButton', timeout=45, reveal=scroll_menu_sheet)
+        check(ok, 'the viewer window sheet opened')
+        check(tap(text='GNLINK-SH-SMALL', timeout=30), 'the 1280x720 window picked in the viewer')
+        time.sleep(15)
+        lines = log_lines()
+        sizes = [re.search(r'video=(\d+)x(\d+)', l) for l in lines if '[video_size]' in l]
+        sizes = [(int(m.group(1)), int(m.group(2))) for m in sizes if m]
+        srcs = [re.search(r'src=(\d+)x(\d+) out=(\d+)x(\d+)', l) for l in lines if 'sh_latency' in l]
+        srcs = [tuple(int(v) for v in m.groups()) for m in srcs if m]
+        deferred = [l for l in lines if 'viewer_surface_resize_deferred' in l]
+        print('      video sizes: %s  renderer src/out: %s  deferred: %d' % (sizes, srcs, len(deferred)), flush=True)
+        check(sizes and sizes[-1] == (1280, 720), 'the picture size changed to 1280x720', str(sizes))
+        check(srcs and srcs[-1][:2] == (1280, 720), 'the renderer steps by the NEW visible size (1280x720)', str(srcs[-1:]))
+        ne = [int(m.group(1)) for m in (re.search(r'srcNeOut=(\d+)', l) for l in lines if 'sh_latency' in l) if m]
+        print('      frames drawn while output size != frame size (step = the frame size): %s' % ne, flush=True)
+        fb = [l for l in lines if 'sharpen_fallback' in l]
+        check(not fb, 'no fallback across the size change', fb[-1] if fb else '')
+        check(any('sharpen_path' in l and 'path=sharpen' in l for l in lines) or
+              not any('sharpen_path' in l and 'path=direct' in l for l in lines),
+              'the filter stayed on (no direct path taken)')
+        a = screencap(os.path.join(out, 'resize_1.png'))
+        check(float(a.std()) > 10.0, 'a picture is on screen after the change')
+    finally:
+        try:
+            small.terminate(); small.wait(10)
+        except Exception:
+            pass
 
 
 def main():
@@ -576,6 +838,14 @@ def main():
             scenario_lifecycle(fx, args.out)
         elif args.scenario == 'latency':
             scenario_latency(fx, args.out, args.seconds)
+        elif args.scenario == 'touch':
+            scenario_touch(fx, args.out)
+        elif args.scenario == 'hold':
+            scenario_hold(fx, args.out)
+        elif args.scenario == 'viewer_never':
+            scenario_viewer_never(fx, args.out)
+        elif args.scenario == 'resize':
+            scenario_resize(fx, args.out)
     except Exception as e:
         check(False, 'scenario raised: %r' % e)
     finally:
