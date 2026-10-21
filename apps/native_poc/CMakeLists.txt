@@ -66,6 +66,7 @@ add_executable(remote60_native_video_host_poc
   src/host_window_enum.cpp
   src/host_capture_device.cpp
   src/capture_adapter_identity.cpp
+  src/host_os_snapshot.cpp
   src/host_net_io.cpp
   src/host_input_inject.cpp
   src/host_args.cpp
@@ -2832,6 +2833,11 @@ add_executable(remote60_prelogin_store_chain_test
 )
 target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
 target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# dxgi-wedge-fix r1 (Bⓒ): the watchdog's OS snapshot -- its fields and that a request never waits.
+add_executable(remote60_host_os_snapshot_test src/host_os_snapshot_test.cpp src/host_os_snapshot.cpp)
+target_include_directories(remote60_host_os_snapshot_test PRIVATE src)
+target_link_libraries(remote60_host_os_snapshot_test PRIVATE user32)
 
 # dxgi-wedge-fix r1 (Bⓑ1): the restore handoff's wire forms and the screen match (pure-logic).
 add_executable(remote60_viewer_restore_target_test
