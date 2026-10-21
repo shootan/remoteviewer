@@ -140,6 +140,45 @@
                         android:text="@string/ui_quality_best" />
                 </LinearLayout>
 
+                <!-- sh-filter r1 -->
+                <TextView
+                    style="@style/UiSectionLabel"
+                    android:text="@string/ui_sharpness_label" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:baselineAligned="false">
+
+                    <TextView
+                        android:id="@+id/viewerSharpOffButton"
+                        style="@style/UiSegment"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
+                        android:text="@string/ui_sharpness_off" />
+                    <TextView
+                        android:id="@+id/viewerSharpWeakButton"
+                        style="@style/UiSegment"
+                        android:layout_marginStart="8dp"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
+                        android:text="@string/ui_sharpness_weak" />
+                    <TextView
+                        android:id="@+id/viewerSharpStrongButton"
+                        style="@style/UiSegment"
+                        android:layout_marginStart="8dp"
+                        android:layout_height="match_parent"
+                        android:minHeight="48dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
+                        android:text="@string/ui_sharpness_strong" />
+                </LinearLayout>
+
                 <TextView
                     style="@style/UiSectionLabel"
                     android:text="@string/ui_fps_label" />

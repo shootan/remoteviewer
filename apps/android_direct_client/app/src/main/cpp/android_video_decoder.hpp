@@ -30,6 +30,18 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void NotifyFrameDisplayed() {
     displayedFrameCount_.fetch_add(1, std::memory_order_relaxed);
   }
+  /** sh-filter r1 (S4): the CLOCK_MONOTONIC ns at which the frame whose output buffer carries this
+   *  timestamp was handed to the output Surface; 0 when it is not among the last kHandoffRing. The
+   *  timestamp is a KEY (the same one the TextureView's SurfaceTexture reports at latch, through the
+   *  direct path or the sharpening pass), not a clock. Lock-free reads, for the UI thread. */
+  int64_t HandoffNsForTimestamp(int64_t timestampNs) const {
+    for (size_t i = 0; i < kHandoffRing; ++i) {
+      if (handoffKey_[i].load(std::memory_order_acquire) != timestampNs) continue;
+      const int64_t at = handoffNs_[i].load(std::memory_order_acquire);
+      if (handoffKey_[i].load(std::memory_order_acquire) == timestampNs) return at;
+    }
+    return 0;
+  }
   void SetTargetFps(uint32_t fps);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
@@ -155,6 +167,12 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t heldOutputPresentUs_ = 0;
   // Counted by the view, once per frame it actually latched.
   std::atomic<uint64_t> displayedFrameCount_{0};
+  // sh-filter r1: (buffer timestamp ns -> handoff monotonic ns) of the last frames released to the
+  // output Surface. Written under the decoder lock, read lock-free (HandoffNsForTimestamp).
+  static constexpr size_t kHandoffRing = 256;
+  std::atomic<int64_t> handoffKey_[kHandoffRing] = {};
+  std::atomic<int64_t> handoffNs_[kHandoffRing] = {};
+  size_t handoffNext_ = 0;
   uint64_t displayedWindowBase_ = 0;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;

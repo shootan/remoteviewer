@@ -93,6 +93,15 @@ android {
     }
   }
 
+  // sh-filter r1: the sharpening test seam is a separate source file, chosen here. A build made without
+  // -Pgnlink.shTestSeam=true (every published one) compiles src/noseam, which cannot inject anything;
+  // the release gate checks classes.dex for the seam's marker string.
+  sourceSets {
+    getByName("main") {
+      java.srcDir(if (project.findProperty("gnlink.shTestSeam") == "true") "src/shseam/java" else "src/noseam/java")
+    }
+  }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17

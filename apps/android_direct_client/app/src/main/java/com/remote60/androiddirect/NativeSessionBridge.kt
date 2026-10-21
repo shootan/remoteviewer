@@ -81,6 +81,8 @@ object NativeSessionBridge {
     external fun nativeAbortVideoSwitch()
     external fun nativeGetReadySelectionGeneration(): Long
     external fun nativeGetLastOutputPresentationUs(): Long
+    /** sh-filter r1: monotonic ns of the handoff of the frame with this buffer timestamp (0 = unknown). */
+    external fun nativeHandoffNsForTimestamp(timestampNs: Long): Long
     external fun nativeRequestWindowList(): Boolean
     external fun nativeSelectWindow(windowId: Long): Boolean
     external fun nativeSelectDesktopMode(): Boolean

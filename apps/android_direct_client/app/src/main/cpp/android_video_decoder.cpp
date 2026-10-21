@@ -945,6 +945,14 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
     return;
   }
   ++outputFrameCount_;
+  {
+    // sh-filter r1 (S4): both releases stamp the buffer with heldOutputPresentUs_ (the scheduled time,
+    // or the PTS of an immediate release -- the same number, in the steady domain).
+    const size_t slot = handoffNext_++ % kHandoffRing;
+    handoffKey_[slot].store(0, std::memory_order_release);
+    handoffNs_[slot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+    handoffKey_[slot].store(static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL), std::memory_order_release);
+  }
 
   // Spacing between the moments frames were handed over on their due date. This is what the
   // pacing achieved; whether the view then latched each one is counted separately, by the

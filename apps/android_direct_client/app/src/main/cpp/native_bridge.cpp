@@ -422,6 +422,13 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetLastOutputPresentat
   return static_cast<jlong>(g_video_decoder_sink.LastOutputPresentationUs());
 }
 
+// sh-filter r1 (S4): when the frame with this output-buffer timestamp was handed to the output Surface.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHandoffNsForTimestamp(
+    JNIEnv* /* env */, jobject /* this */, jlong timestampNs) {
+  return static_cast<jlong>(g_video_decoder_sink.HandoffNsForTimestamp(static_cast<int64_t>(timestampNs)));
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestWindowList(
     JNIEnv* /* env */, jobject /* this */) {
