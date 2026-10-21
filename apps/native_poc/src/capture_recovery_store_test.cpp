@@ -8,6 +8,10 @@
 // else may read, a hard link to a file outside, and a folder that is a junction are all refused -- and the
 // file behind them is left byte-for-byte as it was; the 16-record limit drops the oldest; two writers do
 // not lose a wedge; a held lock makes a write fail in bounded time instead of hanging.
+// r2 D3: a record whose `last` is refused as "future" at startup is not carried on by the next wedge (it
+// starts over from now, and the following startup quarantines); in an EMPTY protected folder, two writer
+// PROCESSES released together both record (no sharing violation on the first lock-file create), within a
+// bound. Mutants (each must FAIL here): REMOTE60_STORE_MUTANT_CONTINUE_FUTURE, ..._UNSHARED_LOCK_CREATE.
 // The test's owner rule trusts this user besides SYSTEM/Administrators (a non-elevated test cannot make
 // SYSTEM-owned folders); the product's rule is SYSTEM/Administrators only. pure-logic + filesystem.
 
@@ -17,9 +21,11 @@
 #include <sddl.h>
 #include <winioctl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -153,7 +159,40 @@ constexpr uint64_t kWeek = cr::kQuarantineSeconds;
 
 }  // namespace
 
-int main() {
+// r2 D3 child: one of the concurrent writer processes. --writer <folder> <count> <event>
+int writer_main(char** argv) {
+  const std::wstring me = my_sid_string();
+  PSID mine = nullptr;
+  ConvertStringSidToSidW(me.c_str(), &mine);
+  const auto trustMe = [mine](PSID s) { return pl::OwnerIsSystemOrAdministrators(s) || (s && EqualSid(s, mine)); };
+  const std::wstring fileSddl = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + me + L")";
+  auto widen_acp = [](const char* s) {
+    const int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L' ');
+    if (n > 1) MultiByteToWideChar(CP_ACP, 0, s, -1, w.data(), n);
+    return w;
+  };
+  const std::wstring folder = widen_acp(argv[2]);
+  const int count = std::atoi(argv[3]);
+  HANDLE ev = OpenEventW(SYNCHRONIZE, FALSE, widen_acp(argv[4]).c_str());
+  if (!ev || WaitForSingleObject(ev, 15000) != WAIT_OBJECT_0) return 100;
+  const cr::Store store(folder, trustMe, fileSddl.c_str());
+  int fails = 0;
+  for (int i = 0; i < count; ++i) {
+    std::string w;
+    const DWORD rc = store.RecordWedge(adapter("0123456789abcdef", "31.0.15.5244"), kNow + 100, nullptr, &w);
+    if (rc != 0) {
+      ++fails;
+      std::printf("      writer pid=%lu failed rc=%lu why=%s\n", GetCurrentProcessId(), rc, w.c_str());
+    }
+  }
+  CloseHandle(ev);
+  LocalFree(mine);
+  return fails;
+}
+
+int main(int argc, char** argv) {
+  if (argc >= 5 && std::string(argv[1]) == "--writer") return writer_main(argv);
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("capture-recovery store (dxgi-wedge-fix r1)\n\n--- pure ---\n");
   const auto A = adapter("0123456789abcdef", "31.0.15.5244");
@@ -177,6 +216,24 @@ int main() {
     const cr::Record r4 = cr::NextRecord(&r2, A, kNow + 50);
     check("a clock that went back never moves last back (nor the expiry)", r4.lastUnix == kNow + 100 &&
                                                                             r4.expiresUnix == kNow + 100 + kWeek);
+    // r2 D3: a stored `last` beyond the skew allowance is refused at every startup; carried on, the real
+    // wedge recorded now would never quarantine a start either.
+    cr::Record fut = r;
+    fut.lastUnix = kNow + cr::kFutureSkewSeconds + 3600;
+    fut.expiresUnix = fut.lastUnix + kWeek;
+    check("D3 (premise) a record from beyond the skew is refused at startup",
+          !cr::DecideAtStartup({fut}, {A}, kNow).quarantine);
+    const cr::Record r5 = cr::NextRecord(&fut, A, kNow);
+    check("D3 a wedge after a refused future record starts over from now (not that `last`)",
+          r5.wedges == 1 && r5.firstUnix == kNow && r5.lastUnix == kNow && r5.expiresUnix == kNow + kWeek,
+          "wedges=" + std::to_string(r5.wedges) + " last=" + std::to_string(r5.lastUnix));
+    check("D3 ...and the next startup quarantines on it", cr::DecideAtStartup({r5}, {A}, kNow + 10).quarantine);
+    cr::Record ahead = r;
+    ahead.lastUnix = kNow + 100;  // within the allowance: accepted at startup, so it is continued
+    ahead.expiresUnix = ahead.lastUnix + kWeek;
+    const cr::Record r6 = cr::NextRecord(&ahead, A, kNow);
+    check("D3 a record only slightly ahead (within the skew) is continued: counts, keeps last",
+          r6.wedges == 2 && r6.lastUnix == kNow + 100 && cr::DecideAtStartup({r6}, {A}, kNow).quarantine);
   }
   {
     const std::string good = cr::FormatRecord(cr::NextRecord(nullptr, A, kNow));
@@ -410,6 +467,85 @@ int main() {
     check("...the limit holds and the one that wedged longest ago is gone",
           count_records(folder) == 16 && !exists(folder + L"\\0000000000001000.rec") &&
               exists(folder + L"\\00000000000fffff.rec") && exists(folder + L"\\0000000000001001.rec"));
+  }
+  {
+    // r2 D3, on disk: a planted future record, then a real wedge -> the next startup is quarantined.
+    const std::wstring root = staging.path() + L"future";
+    check("D3 a folder chain for the future record is built", build(root));
+    const std::wstring folder = root + L"\\GNLink\\capture-recovery";
+    cr::Record fut = cr::NextRecord(nullptr, A, kNow);
+    fut.lastUnix = kNow + cr::kFutureSkewSeconds + 86400;
+    fut.expiresUnix = fut.lastUnix + kWeek;
+    check("D3 a future record is planted", make_file(folder + L"\\0123456789abcdef.rec", fileSddl, cr::FormatRecord(fut)));
+    const cr::Store store = store_at(root);
+    std::vector<cr::Record> recs;
+    std::vector<std::string> notes;
+    store.LoadAll(&recs, &notes);
+    check("D3 (premise) startup refuses it", !cr::DecideAtStartup(recs, {A}, kNow).quarantine);
+    cr::Record written;
+    std::string why;
+    check("D3 a real wedge now is recorded", store.RecordWedge(A, kNow, &written, &why) == 0, why);
+    store.LoadAll(&recs, &notes);
+    const auto d = cr::DecideAtStartup(recs, {A}, kNow + 10);
+    check("D3 the next startup quarantines (the wedge was not lost behind the future record)",
+          d.quarantine && written.lastUnix == kNow && written.wedges == 1,
+          "last=" + std::to_string(written.lastUnix) + " wedges=" + std::to_string(written.wedges));
+  }
+  {
+    // r2 D3: two writer PROCESSES released together into an EMPTY protected folder (no lock file yet).
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    int badRounds = 0;
+    ULONGLONG worstMs = 0;
+    std::string detail;
+    constexpr int kRounds = 20, kEach = 3;
+    for (int round = 0; round < kRounds; ++round) {
+      const std::wstring root = staging.path() + L"race" + std::to_wstring(round);
+      if (!build(root)) {
+        ++badRounds;
+        detail += " build" + std::to_string(round);
+        continue;
+      }
+      const std::wstring folder = root + L"\\GNLink\\capture-recovery";
+      const std::wstring evName = L"Local\\gnlink-cr-race-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                  std::to_wstring(round);
+      HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, evName.c_str());
+      HANDLE kids[2]{};
+      for (auto& kid : kids) {
+        std::wstring cmd = L"\"" + std::wstring(self) + L"\" --writer \"" + folder + L"\" " + std::to_wstring(kEach) +
+                           L" " + evName;
+        STARTUPINFOW si{sizeof(si)};
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+          CloseHandle(pi.hThread);
+          kid = pi.hProcess;
+        }
+      }
+      Sleep(300);  // both are waiting on the event
+      const ULONGLONG t0 = GetTickCount64();
+      SetEvent(ev);
+      DWORD rcs[2] = {999, 999};
+      for (int k = 0; k < 2; ++k) {
+        if (!kids[k]) continue;
+        WaitForSingleObject(kids[k], 20000);
+        GetExitCodeProcess(kids[k], &rcs[k]);
+        CloseHandle(kids[k]);
+      }
+      worstMs = (std::max)(worstMs, GetTickCount64() - t0);
+      CloseHandle(ev);
+      std::vector<cr::Record> recs;
+      std::vector<std::string> notes;
+      store_at(root).LoadAll(&recs, &notes);
+      const uint32_t wedges = recs.size() == 1 ? recs[0].wedges : 0;
+      if (rcs[0] != 0 || rcs[1] != 0 || wedges != 2 * kEach) {
+        ++badRounds;
+        detail += " r" + std::to_string(round) + ":rc=" + std::to_string(rcs[0]) + "/" + std::to_string(rcs[1]) +
+                  ",wedges=" + std::to_string(wedges);
+      }
+    }
+    check("D3 empty protected folder, 2 writer processes at once, 20 rounds: every wedge recorded, none refused",
+          badRounds == 0, "bad=" + std::to_string(badRounds) + detail);
+    check("D3 ...each round within the bound (< 10 s)", worstMs < 10000, "worst ms=" + std::to_string(worstMs));
   }
   {
     // The owner rule is load-bearing: with a rule that does not trust this user, the same folder is refused.

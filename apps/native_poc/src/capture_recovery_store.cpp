@@ -92,13 +92,13 @@ DWORD read_checked(const std::wstring& path, const std::function<bool(PSID)>& ow
   return 0;
 }
 
-HANDLE create_new_with(const std::wstring& path, const std::wstring& sddl, DWORD access) {
+HANDLE create_new_with(const std::wstring& path, const std::wstring& sddl, DWORD access, DWORD share = 0) {
   PSECURITY_DESCRIPTOR sd = nullptr;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) {
     return INVALID_HANDLE_VALUE;
   }
   SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
-  HANDLE h = CreateFileW(path.c_str(), access, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE h = CreateFileW(path.c_str(), access, share, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   const DWORD e = GetLastError();
   LocalFree(sd);
   SetLastError(e);
@@ -111,17 +111,30 @@ class FolderLock {
   DWORD Acquire(const std::wstring& folder, const std::function<bool(PSID)>& ownerTrusted, const std::wstring& sddl) {
     const std::wstring path = folder + L"\\" + kLockName;
     constexpr DWORD kAccess = GENERIC_READ | GENERIC_WRITE | READ_CONTROL;
-    h_ = open_no_follow(path, kAccess, FILE_SHARE_READ | FILE_SHARE_WRITE);
-    if (h_ == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND) {
-      h_ = create_new_with(path, sddl, kAccess);
-      // Lost a create race to another supervisor: open what it made.
-      if (h_ == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_EXISTS) {
-        h_ = open_no_follow(path, kAccess, FILE_SHARE_READ | FILE_SHARE_WRITE);
-      }
-    }
-    if (h_ == INVALID_HANDLE_VALUE) return GetLastError();
-    if (!file_acceptable(h_, ownerTrusted)) return ERROR_ACCESS_DENIED;
+    constexpr DWORD kShare = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // One deadline for getting the file AND locking it. r2 D3: in an empty folder two supervisors can
+    // arrive together; the one that creates the lock file creates it shareable (an unshared create made
+    // the other's open fail at once with a sharing violation -- not a lock wait), and a sharing violation
+    // or a lost create race is retried here within the same bound instead of failing the record.
     const ULONGLONG deadline = GetTickCount64() + kLockWaitMs;
+    for (;;) {
+      h_ = open_no_follow(path, kAccess, kShare);
+      DWORD e = h_ == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+      if (e == ERROR_FILE_NOT_FOUND) {
+#ifdef REMOTE60_STORE_MUTANT_UNSHARED_LOCK_CREATE  // test-only mutant: r1's unshared create, no retry
+        h_ = create_new_with(path, sddl, kAccess, 0);
+        if (h_ == INVALID_HANDLE_VALUE) return GetLastError();
+        break;
+#endif
+        h_ = create_new_with(path, sddl, kAccess, kShare);
+        e = h_ == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+        if (e == ERROR_FILE_EXISTS) e = ERROR_SHARING_VIOLATION;  // lost the create race: open what it made
+      }
+      if (e == 0) break;
+      if (e != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) return e;
+      Sleep(20);
+    }
+    if (!file_acceptable(h_, ownerTrusted)) return ERROR_ACCESS_DENIED;
     for (;;) {
       OVERLAPPED ov{};
       if (LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
@@ -251,8 +264,15 @@ Record NextRecord(const Record* existing, const CaptureAdapterIdentity& adapter,
   Record r;
   r.adapterKey = adapter.key;
   r.driver = adapter.driver;
+  // r2 D3: a record continues only if a startup would accept it. One whose `last` is further in the
+  // future than the skew allowance is refused at every startup (DecideAtStartup), so carrying that `last`
+  // on would leave this real wedge unquarantined at the next start too: it starts over from now instead.
   const bool continues = existing && existing->adapterKey == adapter.key && existing->driver == adapter.driver &&
-                         existing->firstUnix <= nowUnix;
+                         existing->firstUnix <= nowUnix
+#ifndef REMOTE60_STORE_MUTANT_CONTINUE_FUTURE  // test-only mutant: r1 carried a refused future `last` on
+                         && existing->lastUnix <= nowUnix + kFutureSkewSeconds
+#endif
+      ;
   r.firstUnix = continues ? existing->firstUnix : nowUnix;
   // A clock that went backwards since the last wedge never moves `last` back (nor the expiry forward).
   r.lastUnix = continues ? std::max(existing->lastUnix, nowUnix) : nowUnix;
