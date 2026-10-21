@@ -472,6 +472,31 @@ int main() {
           os.typed.empty() && r.stage == st(UnlockStage::RejectedStaleTopology), stage_of(r));
   }
   {
+    // r3 (Codex L2-R): sealed just before the challenge's own expiry, Ready just after it -- still well inside
+    // a fresh 20 s. The commit must not outlive the challenge.
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 94, true);
+    const uint64_t expires = c.expiresMs;
+    os.now = expires - 3000;  // the sealed request is taken in time
+    os.beforeCommit = [expires](Os& o) { o.now = expires + 1000; };  // the agent is Ready 1 s past the expiry
+    const SecureUnlockResult r = sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    check("L2-R: taken before the challenge expired, Ready after it (inside a new 20 s): NOTHING typed",
+          os.fenceAsked == 1 && os.typed.empty() && r.stage == st(UnlockStage::RejectedStaleTopology) && r.terminal == 1,
+          stage_of(r));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 95, true);
+    const uint64_t expires = c.expiresMs;
+    os.now = expires - 3000;
+    os.beforeCommit = [expires](Os& o) { o.now = expires - 1000; };  // Ready still before the expiry
+    const SecureUnlockResult r = sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    check("L2-R control: taken late but Ready before the expiry -> typed once",
+          os.fenceAsked == 1 && os.typed.size() == 1 && r.stage == st(UnlockStage::Injected), stage_of(r));
+  }
+  {
     Os os;
     Conn a(101, 1);
     const SecureUnlockChallengeResponse c = challenge(a, os, 93, true);
