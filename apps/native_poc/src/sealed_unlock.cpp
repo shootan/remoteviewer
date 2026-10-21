@@ -393,6 +393,25 @@ std::vector<uint8_t> BuildPreloginCredKdfInfo(const UnlockContext& ctx) {
   return v;
 }
 
+// Lock-screen credential purpose (lockscreen-cred r1): the same context bytes under its own labels.
+std::vector<uint8_t> BuildLockCredAad(const UnlockContext& ctx) {
+  std::vector<uint8_t> v;
+  static const char kLabel[] = "GNLink-Lock-Cred-v1-AAD";
+  v.insert(v.end(), kLabel, kLabel + sizeof(kLabel) - 1);
+  const auto body = serialize_context(ctx);
+  v.insert(v.end(), body.begin(), body.end());
+  return v;
+}
+
+std::vector<uint8_t> BuildLockCredKdfInfo(const UnlockContext& ctx) {
+  std::vector<uint8_t> v;
+  static const char kLabel[] = "GNLink-Lock-Cred-v1-KDF";
+  v.insert(v.end(), kLabel, kLabel + sizeof(kLabel) - 1);
+  const auto body = serialize_context(ctx);
+  v.insert(v.end(), body.begin(), body.end());
+  return v;
+}
+
 // --- replay / challenge state machine -----------------------------------------------------------
 
 void UnlockChallengeState::Issue(const uint8_t challengeId[kChallengeIdBytes],

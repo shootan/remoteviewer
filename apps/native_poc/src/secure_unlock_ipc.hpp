@@ -23,7 +23,16 @@ enum class SecureUnlockKind : uint16_t {
   ChallengeResponse = 2,  // service -> host: one-shot challenge (or rejection in `stage`)
   SealedRequest = 3,      // host -> service: the sealed password for the challenge
   Result = 4,             // service -> host: job stage (terminal results are cached/idempotent)
+  // lockscreen-cred r1 (provisional numbers). An older service drops the connection on a kind it does not
+  // know, so the host asks Capabilities first and sends the others only to a service that listed them.
+  CapabilitiesRequest = 5,      // host -> service: what do you support?
+  CapabilitiesResponse = 6,     // service -> host
+  LockCredChallengeRequest = 7, // host -> service: a challenge for the LOCK-SCREEN credential purpose
+  StatusRequest = 8,            // host -> service: where is this (lock-credential) job now? -> Result
 };
+
+// SecureUnlockCapabilitiesResponse::features.
+constexpr uint32_t kSecureUnlockFeatureLockCredV1 = 0x1u;
 
 #pragma pack(push, 1)
 
@@ -46,7 +55,7 @@ struct SecureUnlockChallengeResponse {
   uint16_t kind = static_cast<uint16_t>(SecureUnlockKind::ChallengeResponse);
   uint32_t requestId = 0;
   uint16_t stage = 0;  // UnlockStage
-  uint16_t reserved = 0;
+  uint16_t purpose = 0;  // kUnlockPurpose* this challenge was issued for (was `reserved`, always 0 = Unlock)
   uint8_t challengeId[16] = {};
   uint8_t hostPub[64] = {};
   uint8_t salt[32] = {};
@@ -89,8 +98,31 @@ struct SecureUnlockResult {
   uint32_t win32Error = 0;
 };
 
+// host -> service (lockscreen-cred r1). The same layout serves CapabilitiesRequest (requestId only) and
+// StatusRequest (the requestId of a lock-credential job). The kind says which.
+struct SecureUnlockQuery {
+  uint32_t magic = kSecureUnlockMagic;
+  uint16_t size = static_cast<uint16_t>(sizeof(SecureUnlockQuery));
+  uint16_t kind = static_cast<uint16_t>(SecureUnlockKind::CapabilitiesRequest);
+  uint32_t requestId = 0;
+  uint32_t reserved = 0;
+};
+
+// service -> host (lockscreen-cred r1).
+struct SecureUnlockCapabilitiesResponse {
+  uint32_t magic = kSecureUnlockMagic;
+  uint16_t size = static_cast<uint16_t>(sizeof(SecureUnlockCapabilitiesResponse));
+  uint16_t kind = static_cast<uint16_t>(SecureUnlockKind::CapabilitiesResponse);
+  uint32_t requestId = 0;
+  uint32_t version = 1;
+  uint32_t features = 0;  // kSecureUnlockFeature*
+  uint32_t reserved = 0;
+};
+
 #pragma pack(pop)
 
+static_assert(sizeof(SecureUnlockQuery) == 16, "unlock ipc query drift");
+static_assert(sizeof(SecureUnlockCapabilitiesResponse) == 24, "unlock ipc capabilities drift");
 static_assert(sizeof(SecureUnlockChallengeRequest) == 24, "unlock ipc challenge-req drift");
 static_assert(sizeof(SecureUnlockChallengeResponse) == 184, "unlock ipc challenge-resp drift");
 static_assert(sizeof(SecureUnlockSealedRequest) == 390, "unlock ipc sealed-req drift");

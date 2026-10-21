@@ -2512,6 +2512,14 @@ add_executable(remote60_secure_unlock_service_test
 target_include_directories(remote60_secure_unlock_service_test PRIVATE src)
 target_link_libraries(remote60_secure_unlock_service_test PRIVATE remote60_sealed_unlock)
 
+# lockscreen-cred r1: the lock-screen credential's purpose, eligibility, single typing and unlock observation.
+add_executable(remote60_secure_unlock_lockcred_test
+  src/secure_unlock_lockcred_test.cpp
+  src/secure_unlock_service.cpp
+)
+target_include_directories(remote60_secure_unlock_lockcred_test PRIVATE src)
+target_link_libraries(remote60_secure_unlock_lockcred_test PRIVATE remote60_sealed_unlock)
+
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test
   src/secure_input_pipe_server_test.cpp
