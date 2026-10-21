@@ -373,6 +373,10 @@ target_link_libraries(remote60_secure_input_service_lifecycle_seam PRIVATE
 add_executable(remote60_secure_input_service_lifecycle_test src/secure_input_service_lifecycle_test.cpp)
 target_include_directories(remote60_secure_input_service_lifecycle_test PRIVATE src)
 add_dependencies(remote60_secure_input_service_lifecycle_test remote60_secure_input_service_lifecycle_seam)
+# lockscreen-cred r2 (Codex L3): the same test build refuses plaintext to a (stand-in) locked target session.
+add_executable(remote60_secure_input_lock_refusal_test src/secure_input_lock_refusal_test.cpp)
+target_include_directories(remote60_secure_input_lock_refusal_test PRIVATE src)
+add_dependencies(remote60_secure_input_lock_refusal_test remote60_secure_input_service_lifecycle_seam)
 
 # Clipboard image v1 (plan .claude/clip_image_plan.md r1 + r2): the viewer's image client (package,
 # offer/cancel/status, bulk stream, pacer) and the clipboard/WIC pieces it shares with the host. A
@@ -2527,11 +2531,21 @@ add_executable(remote60_secure_unlock_lockcred_test
 target_include_directories(remote60_secure_unlock_lockcred_test PRIVATE src)
 target_link_libraries(remote60_secure_unlock_lockcred_test PRIVATE remote60_sealed_unlock)
 
+# lockscreen-cred r2 (Codex L4): the field identity and the replacing typing on real edit controls (UI test).
+add_executable(remote60_logon_ui_identity_ui_test
+  src/logon_ui_identity_ui_test.cpp
+  src/logon_ui_target.cpp
+)
+target_include_directories(remote60_logon_ui_identity_ui_test PRIVATE src)
+target_link_libraries(remote60_logon_ui_identity_ui_test PRIVATE ole32 oleaut32 user32 advapi32)
+
 # lockscreen-cred r1: the lock-screen agent's commit sequence and Winlogon-only target (pure, stand-ins).
 add_executable(remote60_logon_ui_target_test
   src/logon_ui_target_test.cpp
+  src/logon_ui_target.cpp
 )
 target_include_directories(remote60_logon_ui_target_test PRIVATE src)
+target_link_libraries(remote60_logon_ui_target_test PRIVATE ole32 oleaut32 user32 advapi32)
 
 # lockscreen-cred r1 (A6): plaintext to a locked session -- the rule the host and the service both apply.
 add_executable(remote60_lock_input_policy_test

@@ -214,7 +214,7 @@ void picker_release(ViewerState& ctx, HWND hwnd, const ClientLayout& layout, int
 namespace {
 // lockscreen-cred r1: what a login request came to on THIS side (cancelled, unsupported), in the same window.
 void post_login_outcome(ViewerState& ctx, int role, uint16_t stage) {
-  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(role, stage), 0);
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(role, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)), 0);
 }
 // One prompt at a time, whichever entry opened it (the button, the menu, Ctrl+Alt+U); cleared on every exit.
 struct LoginPromptGuard {
@@ -1266,6 +1266,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // worker's (what older posts carry). Cancel / unsupported are said here too.
       const int role = static_cast<int>((wp >> 16) & 0xFF);
       const uint16_t stage = static_cast<uint16_t>(wp & 0xFFFF);
+      // lockscreen-cred r2 (Codex L5): a result of an earlier control connection (queued before it changed) is
+      // not shown -- it is not about this connection's screen.
+      const uint32_t gen = static_cast<uint32_t>(static_cast<uint64_t>(wp) >> 32);
+      if (gen != static_cast<uint32_t>(ctx.session.controlRunGen.load(std::memory_order_acquire))) {
+        std::cout << "[native-video-client][login] a result of an earlier connection was not shown stage=" << stage << "\n";
+        return 0;
+      }
       const int shownRole = role == kLoginRoleNone ? kLoginRolePrelogin : role;
       show_prelogin_cred_result(hwnd, windows_login_result_text(shownRole, stage, static_cast<uint32_t>(lp)));
       return 0;

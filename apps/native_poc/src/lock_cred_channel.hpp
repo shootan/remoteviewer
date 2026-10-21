@@ -22,11 +22,16 @@
 // Never in argv / environment / a file / stdout / a log: the password, the sealed job, a key. If the channel
 // cannot be set up, nothing falls back to any of those -- the job simply fails.
 //
-// Wire (bounded, fixed, versioned): agent -> service Hello, service -> agent Job, agent -> service Answer.
+// Wire (bounded, fixed, versioned): agent -> service Hello, service -> agent Job, then (r2, Codex L2) the
+// commit fence: the agent waits for its target and says Ready; the service asks its own fence again -- the
+// request still valid in every respect it was issued for -- and answers Go(allow) or Go(deny); only on allow
+// does the agent touch the field. Then agent -> service Answer. A Ready never answered within the bound is a
+// deny (the service ends the child).
 
 #include <windows.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "sealed_unlock.hpp"
@@ -37,7 +42,9 @@ constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\GNLinkLockCred-";
 constexpr uint32_t kHelloMagic = 0x4C434848u;   // "LCHH"
 constexpr uint32_t kJobMagic = 0x4C434A42u;     // "LCJB"
 constexpr uint32_t kAnswerMagic = 0x4C434A41u;  // "LCJA"
-constexpr uint16_t kVersion = 1;
+constexpr uint32_t kReadyMagic = 0x4C435244u;   // "LCRD"
+constexpr uint32_t kGoMagic = 0x4C43474Fu;      // "LCGO"
+constexpr uint16_t kVersion = 2;
 
 #pragma pack(push, 1)
 struct Hello {
@@ -51,15 +58,26 @@ struct Job {
   uint16_t size = static_cast<uint16_t>(sizeof(Job));
   uint16_t version = kVersion;
   uint32_t session = 0;  // the session it must type in (the agent checks it is its own)
+  uint32_t requestId = 0;  // r2: the request it is for (Ready / Go / Answer repeat it)
   uint16_t count = 0;
   uint16_t reserved = 0;
   uint16_t units[sealed_unlock::kMaxPasswordUtf16] = {};
 };
-struct Answer {
+// agent -> service: Ready (target found, waiting for Go) or Answer (final) -- one shape, told apart by magic.
+struct AgentMessage {
   uint32_t magic = kAnswerMagic;
-  uint16_t size = static_cast<uint16_t>(sizeof(Answer));
-  uint16_t stage = 0;  // UnlockStage: Injected / TargetNotReady / InjectFailed
+  uint16_t size = static_cast<uint16_t>(sizeof(AgentMessage));
+  uint16_t stage = 0;  // Answer: UnlockStage Injected / TargetNotReady / InjectFailed
+  uint32_t requestId = 0;
   uint32_t win32 = 0;
+};
+using Answer = AgentMessage;
+// service -> agent: the commit fence's answer.
+struct Go {
+  uint32_t magic = kGoMagic;
+  uint16_t size = static_cast<uint16_t>(sizeof(Go));
+  uint16_t allow = 0;  // 1: type now; 0: type nothing
+  uint32_t requestId = 0;
 };
 #pragma pack(pop)
 
@@ -89,5 +107,15 @@ HANDLE OpenFromAgent(const std::wstring& id, DWORD expectedServerPid, ServerChec
 
 // This process's parent process id (0 if it cannot be read).
 DWORD ParentProcessId();
+
+// r2 (Codex L2): the service's side of one job after AcceptOwnedChild -- send it, then serve the commit fence:
+// on the agent's Ready, ask `fence` and answer Go(allow); then read its Answer. Bounded throughout.
+enum class JobOutcome { Typed, TargetNotReady, InjectFailed, Denied, NoAnswer };
+JobOutcome RunJob(HANDLE pipe, const Job& job, const std::function<bool()>& fence, DWORD readyMs, DWORD answerMs,
+                  uint32_t* win32);
+// r2: the agent's side -- say Ready for `requestId` and read the service's Go. True only on an allow for it.
+bool AgentAskGo(HANDLE pipe, uint32_t requestId);
+// The agent's final word.
+void AgentAnswer(HANDLE pipe, uint32_t requestId, uint16_t stage, uint32_t win32);
 
 }  // namespace remote60::native_poc::lock_cred_channel

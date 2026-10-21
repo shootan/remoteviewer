@@ -99,13 +99,16 @@ struct SecureUnlockResult {
 };
 
 // host -> service (lockscreen-cred r1). The same layout serves CapabilitiesRequest (requestId only) and
-// StatusRequest (the requestId of a lock-credential job). The kind says which.
+// StatusRequest (the requestId of a lock-credential job). The kind says which. lockscreen-cred r2 (L1): a
+// status is asked for a TRANSACTION -- the control session's cookie with its requestId; another session's
+// request with the same id is not this one.
 struct SecureUnlockQuery {
   uint32_t magic = kSecureUnlockMagic;
   uint16_t size = static_cast<uint16_t>(sizeof(SecureUnlockQuery));
   uint16_t kind = static_cast<uint16_t>(SecureUnlockKind::CapabilitiesRequest);
   uint32_t requestId = 0;
   uint32_t reserved = 0;
+  uint64_t clientSessionCookie = 0;
 };
 
 // service -> host (lockscreen-cred r1).
@@ -121,7 +124,7 @@ struct SecureUnlockCapabilitiesResponse {
 
 #pragma pack(pop)
 
-static_assert(sizeof(SecureUnlockQuery) == 16, "unlock ipc query drift");
+static_assert(sizeof(SecureUnlockQuery) == 24, "unlock ipc query drift");
 static_assert(sizeof(SecureUnlockCapabilitiesResponse) == 24, "unlock ipc capabilities drift");
 static_assert(sizeof(SecureUnlockChallengeRequest) == 24, "unlock ipc challenge-req drift");
 static_assert(sizeof(SecureUnlockChallengeResponse) == 184, "unlock ipc challenge-resp drift");

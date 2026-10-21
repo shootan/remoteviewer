@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "poc_protocol.hpp"
 
@@ -33,17 +34,33 @@ namespace remote60::native_poc::logon_ui {
 std::wstring InputDesktopName();
 // The identity of the logon UI password field holding the focus in this process's session, or 0.
 uint64_t PasswordFieldIdentity();
-// The identity of `window` (an HWND) of process `pid` when the keyboard focus is a password field of that
-// process (UI Automation IsPassword), else 0. PasswordFieldIdentity is this for the system's LogonUI.
+// The identity of the field holding the keyboard focus when it is a password field (UI Automation IsPassword)
+// of process `pid` in `window` (an HWND), else 0. r2 (Codex L4): the identity is of the ELEMENT -- its UIA
+// RuntimeId is part of it -- so another password field of the same window is another target. The process id is
+// its high 32 bits. PasswordFieldIdentity is this for the system's LogonUI.
 uint64_t FocusedPasswordFieldIdentity(void* window, uint32_t pid);
-// The product's typing (one SendInput); false with *err when the OS refused or sent only part.
+// The product's typing (one SendInput); false with *err when the OS refused or sent only part (what it pressed
+// and did not release is released -- see PendingReleases).
 bool TypeUnicode(const uint16_t* units, uint16_t count, uint32_t* err);
-// lockscreen-cred r1 (Codex Q1 b): the typing that REPLACES what the field holds, for the lock-screen agent --
-// a retry must not be appended to an earlier attempt. The focused password field of process `pid` (the one
-// just verified) is emptied through its writable UI Automation ValuePattern when it has one; otherwise
-// Ctrl+A goes first in the SAME SendInput as the units (select-all, then the typing replaces the selection).
-// Never a second attempt by another way; false with *err if either step failed.
-bool ReplaceWithUnicode(uint32_t pid, const uint16_t* units, uint16_t count, uint32_t* err);
+
+// *err when nothing was typed -- the field was not ready, not the verified one, or a step before the typing
+// refused (ERROR_NOT_READY). TypeIntoTarget reports it as TargetNotReady, not as a failed typing.
+constexpr uint32_t kNotTypedError = 21;
+// lockscreen-cred r1 (Codex Q1 b) / r2 (L4): the typing that REPLACES what the field holds, for the lock-screen
+// agent -- a retry is never appended to an earlier attempt. The focused element must be EXACTLY the verified
+// field (`expectedIdentity`, element included). It is emptied through its writable ValuePattern; only a field
+// that has no ValuePattern at all gets Ctrl+A first in the SAME SendInput as the units, and only while no
+// modifier is held. A UIA failure, a read-only field, a refused clear, or the focus moving off the field
+// (checked again after the clear) types nothing (kNotTypedError). Never a second attempt by another way.
+bool ReplaceWithUnicode(uint64_t expectedIdentity, const uint16_t* units, uint16_t count, uint32_t* err);
+
+// r2 (L4): what a partial SendInput left pressed -- the agent's own downs whose ups were not sent, given the
+// layout ([Ctrl, A down, A up, Ctrl up] when selecting all, then down/up per unit) and how many INPUTs went.
+struct ReleaseStep {
+  bool unicode = false;  // a KEYEVENTF_UNICODE unit (code = the unit) or a virtual key (code = the VK)
+  uint16_t code = 0;
+};
+std::vector<ReleaseStep> PendingReleases(bool selectAllFirst, const uint16_t* units, uint16_t count, size_t sent);
 
 using TargetFn = std::function<uint64_t()>;
 using InjectFn = std::function<bool(const uint16_t* units, uint16_t count, uint32_t* err)>;
@@ -67,6 +84,7 @@ inline UnlockStage TypeIntoTarget(const uint16_t* units, uint16_t count, const T
   if (stillValid && !stillValid()) return UnlockStage::TargetNotReady;
   if ((target ? target() : 0) != seen) return UnlockStage::TargetNotReady;  // changed before: nothing typed
   if (!inject || !inject(units, count, err)) {
+    if (*err == kNotTypedError) return UnlockStage::TargetNotReady;  // refused before anything was typed
     if (*err == 0) *err = 31;  // ERROR_GEN_FAILURE
     return UnlockStage::InjectFailed;
   }

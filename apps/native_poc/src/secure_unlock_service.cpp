@@ -237,6 +237,7 @@ SecureUnlockResult lock_cred_status(UnlockSession& us, const UnlockPrimitives& p
   us.lockCredWaiting = false;
   us.hasTerminal = true;
   us.terminalRequestId = r.requestId;
+  us.terminalCookie = us.lockCredCookie;
   us.terminal = r;
   log_line(p, "lock-cred requestId=%u -> %s session=%u", r.requestId,
            stage == UnlockStage::SessionUnlocked ? "unlocked" : "unlock-unconfirmed", us.ctx.requesterSession);
@@ -246,11 +247,12 @@ SecureUnlockResult lock_cred_status(UnlockSession& us, const UnlockPrimitives& p
 }  // namespace
 
 void HandleStatusRequest(UnlockSession& us, const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write) {
-  if (us.hasTerminal && us.terminalRequestId == q.requestId) {
+  // r2 (L1): a TRANSACTION -- this control session's request, never another's with the same id.
+  if (us.hasTerminal && us.terminalRequestId == q.requestId && us.terminalCookie == q.clientSessionCookie) {
     write(&us.terminal, sizeof(us.terminal));
     return;
   }
-  if (us.lockCredWaiting && us.lockCredRequestId == q.requestId) {
+  if (us.lockCredWaiting && us.lockCredRequestId == q.requestId && us.lockCredCookie == q.clientSessionCookie) {
     const SecureUnlockResult r = lock_cred_status(us, p);
     write(&r, sizeof(r));
     return;
@@ -261,8 +263,8 @@ void HandleStatusRequest(UnlockSession& us, const SecureUnlockQuery& q, const Un
 
 void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req, uint32_t jobId,
                          const UnlockPrimitives& p, const Write& write) {
-  // Idempotent duplicate of a finished job.
-  if (us.hasTerminal && us.terminalRequestId == req.requestId) {
+  // Idempotent duplicate of a finished job (r2 L1: of the same control session).
+  if (us.hasTerminal && us.terminalRequestId == req.requestId && us.terminalCookie == req.clientSessionCookie) {
     SecureUnlockResult r = us.terminal;
     r.jobId = jobId;
     write(&r, sizeof(r));
@@ -270,7 +272,7 @@ void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req
   }
   // lockscreen-cred r1: a duplicate of a typed lock-screen credential that is still waiting for its unlock is
   // answered with where it is now -- never typed again.
-  if (us.lockCredWaiting && us.lockCredRequestId == req.requestId) {
+  if (us.lockCredWaiting && us.lockCredRequestId == req.requestId && us.lockCredCookie == req.clientSessionCookie) {
     SecureUnlockResult r = lock_cred_status(us, p);
     r.jobId = us.lockCredJobId;
     write(&r, sizeof(r));
@@ -281,6 +283,7 @@ void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req
     const SecureUnlockResult r = make_result(req.requestId, jobId, stage, true, win32);
     us.hasTerminal = true;
     us.terminalRequestId = req.requestId;
+    us.terminalCookie = req.clientSessionCookie;
     us.terminal = r;
     write(&r, sizeof(r));
   };
@@ -297,7 +300,7 @@ void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req
   const uint32_t topoNow = p.topologyGeneration();
   const auto verdict = us.challenge.Verify(req.challengeId, req.clientSessionCookie, us.ctx.topologyGeneration, p.nowMs());
   if (verdict == su::ChallengeVerdict::AlreadyConsumed) {
-    if (us.hasTerminal && us.terminalRequestId == req.requestId) {
+    if (us.hasTerminal && us.terminalRequestId == req.requestId && us.terminalCookie == req.clientSessionCookie) {
       SecureUnlockResult r = us.terminal;
       r.jobId = jobId;
       write(&r, sizeof(r));
@@ -371,17 +374,37 @@ void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req
       reject(UnlockStage::RejectedStaleTopology);
       return;
     }
+    // r2 (Codex L2): the same fence again, asked by the agent right before it touches the field -- this
+    // pipe's caller still there (its control session not ended), the topology / session / console / lock /
+    // account as issued, the service running, and within the commit deadline. Anything else: nothing typed.
+    const uint64_t commitDeadline = p.nowMs() + kLockCredCommitMs;
+    const uint64_t accountAtIssue = us.ctx.accountId;
+    const std::function<bool()> stillValid = [&us, &p, commitDeadline, accountAtIssue]() {
+      if (p.running && !p.running()) return false;
+      if (p.nowMs() > commitDeadline) return false;
+      if (p.topologyGeneration() != us.ctx.topologyGeneration) return false;
+      if (!us.callerStillThere || !us.callerStillThere() || us.caller.session != us.ctx.requesterSession) return false;
+      if (p.consoleSession() != us.ctx.consoleSession) return false;
+      bool lk = false, sk = false, ak = false;
+      const bool stillLockedNow = p.sessionIsLocked(us.ctx.requesterSession, &lk);
+      const bool stillActiveNow = p.sessionIsActive(us.ctx.requesterSession, &sk);
+      const uint64_t account = p.accountIdOf(us.ctx.requesterSession, &ak);
+      return lk && stillLockedNow && sk && stillActiveNow && ak && account == accountAtIssue;
+    };
     uint32_t win32 = 0;
-    const UnlockStage typed = p.typeLockCred(us.ctx.requesterSession, pw, pwCount, &win32);
+    const UnlockStage typed = p.typeLockCred(us.ctx.requesterSession, pw, pwCount, &win32, stillValid);
     su::SecureZero(pw, sizeof(pw));
     if (typed != UnlockStage::Injected) {
       log_line(p, "lock-cred requestId=%u not typed stage=%u win32=%u session=%u", req.requestId,
                static_cast<unsigned>(typed), win32, us.ctx.requesterSession);
-      reject(typed == UnlockStage::TargetNotReady ? UnlockStage::TargetNotReady : UnlockStage::InjectFailed, win32);
+      reject(typed == UnlockStage::TargetNotReady || typed == UnlockStage::RejectedStaleTopology ? typed
+                                                                                              : UnlockStage::InjectFailed,
+             win32);
       return;
     }
     us.lockCredWaiting = true;
     us.lockCredRequestId = req.requestId;
+    us.lockCredCookie = req.clientSessionCookie;
     us.lockCredJobId = jobId;
     us.lockCredTopology = p.topologyGeneration();
     us.lockCredTypedMs = p.nowMs();

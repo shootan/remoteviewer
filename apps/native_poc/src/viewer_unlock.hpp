@@ -80,8 +80,12 @@ constexpr uint16_t kLoginUnsupported = 0xFFFC;   // no screen to log in to here,
 constexpr uint16_t kPreloginLeftLogon = 0xFFFE;  // typed, then the host left the pre-login screen (not a login seen)
 constexpr uint16_t kLoginPending = 0xFFFB;       // lockscreen-cred: the previous password still waits for its unlock
 // The result window's message carries the stage in the low 16 bits of wParam and the role above them.
-inline WPARAM make_login_result_wparam(int role, uint16_t stage) {
-  return static_cast<WPARAM>(stage) | (static_cast<WPARAM>(role & 0xFF) << 16);
+// lockscreen-cred r2 (Codex L5): and the control connection's generation (controlRunGen) it belongs to in the
+// high 32 bits -- a result of an earlier connection, still queued when the connection changed, is not shown.
+static_assert(sizeof(WPARAM) == 8, "the result window's message carries the generation in the high half");
+inline WPARAM make_login_result_wparam(int role, uint16_t stage, uint64_t controlRunGen) {
+  return static_cast<WPARAM>(stage) | (static_cast<WPARAM>(role & 0xFF) << 16) |
+         (static_cast<WPARAM>(controlRunGen & 0xFFFFFFFFull) << 32);
 }
 // What the result window says, by role and stage (the local outcomes above included).
 std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32);

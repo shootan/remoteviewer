@@ -293,7 +293,7 @@ constexpr DWORD kLockCredAnswerMs = 10000;   // its target wait (3 s) and the ty
 constexpr DWORD kLockCredExitMs = 2000;
 
 remote60::native_poc::UnlockStage type_lock_cred(uint32_t session, const uint16_t* units, uint16_t count,
-                                                 uint32_t* win32) {
+                                                 uint32_t* win32, const std::function<bool()>& stillValid) {
   using remote60::native_poc::UnlockStage;
   namespace lc = remote60::native_poc::lock_cred_channel;
   *win32 = 0;
@@ -380,20 +380,24 @@ remote60::native_poc::UnlockStage type_lock_cred(uint32_t session, const uint16_
   UnlockStage stage = UnlockStage::InjectFailed;
   const char* why = "";
   if (lc::AcceptOwnedChild(pipe, process.hProcess, process.dwProcessId, childSession, requireSystem, kLockCredConnectMs, &why)) {
+    static std::atomic<uint32_t> jobSeq{0};
     lc::Job jobMsg{};
     jobMsg.session = childSession;
+    jobMsg.requestId = jobSeq.fetch_add(1, std::memory_order_relaxed) + 1;
     jobMsg.count = count;
     for (uint16_t i = 0; i < count; ++i) jobMsg.units[i] = units[i];
-    const bool sent = lc::WriteBounded(pipe, &jobMsg, sizeof(jobMsg), kLockCredConnectMs);
+    // r2 (Codex L2): the agent asks Go right before it touches the field; the answer is this request's fence.
+    const lc::JobOutcome outcome = lc::RunJob(pipe, jobMsg, stillValid, kLockCredAnswerMs, kLockCredConnectMs, win32);
     SecureZeroMemory(&jobMsg, sizeof(jobMsg));
-    lc::Answer answer{};
-    if (sent && lc::ReadBounded(pipe, &answer, sizeof(answer), kLockCredAnswerMs) && answer.magic == lc::kAnswerMagic &&
-        answer.size == sizeof(answer)) {
-      stage = static_cast<UnlockStage>(answer.stage);
-      *win32 = answer.win32;
-      if (stage != UnlockStage::Injected && stage != UnlockStage::TargetNotReady) stage = UnlockStage::InjectFailed;
-    } else {
-      diag("lock-cred agent gave no answer session=%u", session);
+    switch (outcome) {
+      case lc::JobOutcome::Typed: stage = UnlockStage::Injected; break;
+      case lc::JobOutcome::TargetNotReady: stage = UnlockStage::TargetNotReady; break;
+      case lc::JobOutcome::Denied:
+        stage = UnlockStage::RejectedStaleTopology;  // what it was issued for no longer holds: nothing typed
+        diag("lock-cred: the request no longer held at the commit -- nothing typed session=%u", session);
+        break;
+      case lc::JobOutcome::NoAnswer: diag("lock-cred agent gave no answer session=%u", session); break;
+      default: break;
     }
   } else {
     diag("lock-cred: the pipe's client was refused (%s); nothing sent", why);
@@ -719,22 +723,27 @@ bool session_is_locked(uint32_t session, bool* known) {
 }
 
 // lockscreen-cred r1 (Codex A6): a plaintext character (text, or a non-navigation key down) to a session that
-// is -- or must be treated as -- locked is not forwarded. Counted; said once per kind of refusal, then every
+// is -- or must be treated as -- locked is not forwarded. Counted; said for the first 16, then every
 // 200th (no key code, no text).
 std::atomic<uint64_t> gLockedPlaintextRefused{0};
-bool refuse_locked_plaintext(const SecureInputMessage& message, uint32_t requester) {
+// r2 (Codex L3): asked of the session the message will ACTUALLY go to (`targetSession`, resolved the way the
+// forward resolves it -- a requester that is not active falls back to the console), and asked again by the
+// agent itself right before it injects (agent_refuses_locked_plaintext): a message that passed here and then
+// waited in the agent's pipe across a lock is refused there.
+bool locked_plaintext_refused(const SecureInputMessage& message, uint32_t targetSession, const std::wstring& desktopName,
+                              const char* where) {
   namespace li = remote60::native_poc::lock_input;
   const bool text = message.kind == static_cast<uint16_t>(SecureInputKind::InputText);
   if (!text && !li::IsCharacterKey(message.eventKind, message.keyCode)) return false;  // pointer, nav, key up
   bool known = false;
-  const bool locked = session_is_locked(requester, &known);
-  const bool defaultDesktop = _wcsicmp(current_input_desktop_name().c_str(), L"Default") == 0;
-  const bool treat = li::TreatAsLocked(known, locked, defaultDesktop);
+  const bool locked = targetSession != kInvalidSessionId && session_is_locked(targetSession, &known);
+  const bool defaultDesktop = _wcsicmp(desktopName.c_str(), L"Default") == 0;
+  const bool treat = targetSession == kInvalidSessionId || li::TreatAsLocked(known, locked, defaultDesktop);
   if (!(text ? li::RefuseText(treat) : li::RefuseEvent(treat, message.eventKind, message.keyCode))) return false;
   const uint64_t n = gLockedPlaintextRefused.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (n == 1 || n % 200 == 0) {
-    diag("secure input: plaintext %s to a locked session refused (requester=%u lockKnown=%d locked=%d desktopDefault=%d total=%llu)",
-         text ? "text" : "key", requester, known ? 1 : 0, locked ? 1 : 0, defaultDesktop ? 1 : 0,
+  if (n <= 16 || n % 200 == 0) {  // bounded: the first few, then every 200th
+    diag("secure input: plaintext %s to a locked session refused at the %s (session=%u lockKnown=%d locked=%d desktopDefault=%d total=%llu)",
+         text ? "text" : "key", where, targetSession, known ? 1 : 0, locked ? 1 : 0, defaultDesktop ? 1 : 0,
          static_cast<unsigned long long>(n));
   }
   return true;
@@ -791,8 +800,9 @@ const sus::UnlockPrimitives& unlock_primitives() {
     q.sleep = [](uint32_t ms) { Sleep(ms); };
     q.log = [](const char* line) { diag("%s", line); };
     // lockscreen-cred r1: the lock-screen typing, by a one-shot child of this service (type_lock_cred).
-    q.typeLockCred = [](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32) {
-      return type_lock_cred(session, units, count, win32);
+    q.typeLockCred = [](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32,
+                        const std::function<bool()>& stillValid) {
+      return type_lock_cred(session, units, count, win32, stillValid);
     };
     return q;
   }();
@@ -1649,12 +1659,16 @@ void WINAPI service_main(DWORD, wchar_t**) {
             diag("secure input: a message of kind %u from requester session=%u was refused", message.kind, requester);
             continue;
           }
-          // lockscreen-cred r1 (Codex A6): the last boundary before Winlogon -- no plaintext character to a
-          // locked session, whatever the host or its viewer believed (lock_input_policy.hpp).
-          if (refuse_locked_plaintext(message, requester)) continue;
+          // lockscreen-cred r1 (Codex A6) / r2 (L3): no plaintext character to a locked session, whatever the host
+          // or its viewer believed (lock_input_policy.hpp) -- asked of the session the message actually goes to,
+          // resolved under the agent's lock the same way the forward resolves it.
           remote60::native_poc::ForwardOutcome outcome;
           {
             std::lock_guard<std::mutex> agent(gAgentMu);
+            const bool logonOnly = (message.flags & remote60::native_poc::kSecureInputFlagLogonDesktopOnly) != 0;
+            const uint32_t targetSession = logonOnly ? logon_only_target_session(requester, consoleGenerationAtConnect)
+                                                     : static_cast<uint32_t>(target_session(requester));
+            if (locked_plaintext_refused(message, targetSession, current_input_desktop_name(), "service")) continue;
             outcome = forward_to_agent(message, requester, consoleGenerationAtConnect);
           }
           if (outcome == remote60::native_poc::ForwardOutcome::LogonBindingLost) {
@@ -1960,7 +1974,16 @@ int run_agent(HANDLE readPipe) {
     bool journalPlayback = false;
     const auto step = remote60::native_poc::AgentHandleMessage(
         message, [&] { return attach_to_input_desktop(&ownedDesktop, &journalPlayback); },
-        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); });
+        [] { return current_desktop_name(); },
+        [](const SecureInputMessage& m) {
+          // lockscreen-cred r2 (Codex L3): the LAST look -- this agent's own session, on the desktop it has just
+          // attached to, right before the injection. A character that passed the service's check and then
+          // waited in this pipe across a lock is refused here.
+          DWORD mine = kInvalidSessionId;
+          if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine)) mine = kInvalidSessionId;
+          if (locked_plaintext_refused(m, mine, current_desktop_name(), "agent")) return false;
+          return inject_message(m);
+        });
     if (step == remote60::native_poc::AgentStep::AttachFailed) {
       report_agent_state(L"(attach failed)", false, false, false);
       continue;
@@ -2014,11 +2037,11 @@ int run_lock_cred_agent(const std::wstring& id) {
     CloseHandle(pipe);
     return 4;
   }
-  lc::Answer answer{};
-  answer.stage = static_cast<uint16_t>(UnlockStage::InjectFailed);
+  uint16_t answerStage = static_cast<uint16_t>(UnlockStage::InjectFailed);
+  uint32_t answerWin32 = 0;
   DWORD mySession = 0;
   if (!ProcessIdToSessionId(GetCurrentProcessId(), &mySession) || mySession != job.session) {
-    answer.stage = static_cast<uint16_t>(UnlockStage::TargetNotReady);  // not the session it was meant for
+    answerStage = static_cast<uint16_t>(UnlockStage::TargetNotReady);  // not the session it was meant for
   } else {
     // Attach to the desktop receiving input -- the lock screen's -- so the UIA and focus questions and the
     // typing are asked of it (this process was created there; the thread follows it explicitly).
@@ -2041,24 +2064,30 @@ int run_lock_cred_agent(const std::wstring& id) {
     }
 #endif
     uint32_t err = 0;
-    // Codex Q1 (b): the field's content is REPLACED (a retry is never appended to an earlier attempt) -- in the
-    // field of the target just verified (its process id is in the identity), right before the typing.
-    const lu::InjectFn replace = [&target](const uint16_t* units, uint16_t count, uint32_t* e) {
+    // r2 (Codex L2): the service's fence, asked once the target is found and right before the field is touched;
+    // a deny (or no answer) types nothing. Codex Q1 (b) / r2 (L4): then the content of EXACTLY the verified field
+    // (its element identity) is REPLACED -- a retry is never appended to an earlier attempt.
+    const lu::InjectFn replace = [&target, pipe, &job](const uint16_t* units, uint16_t count, uint32_t* e) {
       const uint64_t tid = target();
       if (tid == 0) {
-        *e = ERROR_INVALID_WINDOW_HANDLE;
+        *e = lu::kNotTypedError;
         return false;
       }
-      return lu::ReplaceWithUnicode(static_cast<uint32_t>(tid >> 32), units, count, e);
+      if (!lc::AgentAskGo(pipe, job.requestId)) {
+        *e = lu::kNotTypedError;
+        return false;
+      }
+      return lu::ReplaceWithUnicode(tid, units, count, e);
     };
     const UnlockStage stage = lu::TypeIntoTarget(job.units, job.count, target, replace, [](uint32_t ms) { Sleep(ms); },
                                                  3000, &err);
-    answer.stage = static_cast<uint16_t>(stage);
-    answer.win32 = err;
+    answerStage = static_cast<uint16_t>(stage);
+    answerWin32 = err;
     if (input) CloseDesktop(input);
   }
+  const uint32_t requestId = job.requestId;
   SecureZeroMemory(&job, sizeof(job));
-  (void)write_exact(pipe, &answer, sizeof(answer));
+  lc::AgentAnswer(pipe, requestId, answerStage, answerWin32);
   CloseHandle(pipe);
   return 0;
 }

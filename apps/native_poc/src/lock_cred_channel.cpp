@@ -180,6 +180,63 @@ DWORD ParentProcessId() {
   return parent;
 }
 
+JobOutcome RunJob(HANDLE pipe, const Job& job, const std::function<bool()>& fence, DWORD readyMs, DWORD answerMs,
+                  uint32_t* win32) {
+  *win32 = 0;
+  if (!WriteBounded(pipe, &job, sizeof(job), readyMs)) return JobOutcome::NoAnswer;
+  AgentMessage m{};
+  if (!ReadBounded(pipe, &m, sizeof(m), readyMs) || m.size != sizeof(m) || m.requestId != job.requestId) {
+    return JobOutcome::NoAnswer;
+  }
+  bool denied = false;
+  if (m.magic == kReadyMagic) {
+    // The commit fence: asked NOW, after the agent has found its target and before it touches the field.
+    Go go{};
+    go.requestId = job.requestId;
+    go.allow = (fence && fence()) ? 1 : 0;
+    denied = go.allow == 0;
+    if (!WriteBounded(pipe, &go, sizeof(go), readyMs)) return denied ? JobOutcome::Denied : JobOutcome::NoAnswer;
+    m = AgentMessage{};
+    if (!ReadBounded(pipe, &m, sizeof(m), answerMs) || m.size != sizeof(m) || m.requestId != job.requestId) {
+      return denied ? JobOutcome::Denied : JobOutcome::NoAnswer;
+    }
+  }
+  if (m.magic != kAnswerMagic) return denied ? JobOutcome::Denied : JobOutcome::NoAnswer;
+  *win32 = m.win32;
+  if (denied) return JobOutcome::Denied;
+  switch (m.stage) {
+    case 8: return JobOutcome::Typed;            // UnlockStage::Injected
+    case 13: return JobOutcome::TargetNotReady;  // UnlockStage::TargetNotReady
+    default: return JobOutcome::InjectFailed;
+  }
+}
+
+bool AgentAskGo(HANDLE pipe, uint32_t requestId) {
+  AgentMessage ready{};
+  ready.magic = kReadyMagic;
+  ready.requestId = requestId;
+  DWORD n = 0;
+  if (!WriteFile(pipe, &ready, sizeof(ready), &n, nullptr) || n != sizeof(ready)) return false;
+  Go go{};
+  DWORD total = 0;
+  while (total < sizeof(go)) {
+    DWORD got = 0;
+    if (!ReadFile(pipe, reinterpret_cast<uint8_t*>(&go) + total, sizeof(go) - total, &got, nullptr) || got == 0) return false;
+    total += got;
+  }
+  return go.magic == kGoMagic && go.size == sizeof(go) && go.requestId == requestId && go.allow == 1;
+}
+
+void AgentAnswer(HANDLE pipe, uint32_t requestId, uint16_t stage, uint32_t win32) {
+  AgentMessage a{};
+  a.magic = kAnswerMagic;
+  a.requestId = requestId;
+  a.stage = stage;
+  a.win32 = win32;
+  DWORD n = 0;
+  WriteFile(pipe, &a, sizeof(a), &n, nullptr);
+}
+
 HANDLE OpenFromAgent(const std::wstring& id, DWORD expectedServerPid, ServerCheck verifyServer, const char** why) {
   auto fail = [why](const char* w) {
     if (why) *why = w;

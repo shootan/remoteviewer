@@ -399,7 +399,7 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
         ctx.session.preloginInjectedAtUs.store(0, std::memory_order_release);
         if (!stillAtLogon && recent) {
           std::cout << "[native-video-client][prelogin-login] host left the logon screen after the typed password\n";
-          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRolePrelogin, kPreloginLeftLogon), 0);
+          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRolePrelogin, kPreloginLeftLogon, ctx.session.controlRunGen.load(std::memory_order_acquire)), 0);
         }
       }
     }
@@ -661,8 +661,20 @@ bool ControlClient::pump_control_resume(
   }
 }
 void ControlClient::Run() {
-  ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel);  // r5 G11: a new connection's run
+  const uint64_t runGen = ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel) + 1;  // r5 G11: a new connection's run
   ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
+  // lockscreen-cred r2 (Codex L5): a password still waiting from an earlier connection is that connection's --
+  // dropped (zeroed) now, not left for this one (the send would refuse it too; this makes it not linger).
+  if (ctx.session.preloginCredRequested.load(std::memory_order_acquire) &&
+      ctx.session.preloginCredRunGen.load(std::memory_order_acquire) != runGen) {
+    std::wstring stale;
+    {
+      std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+      stale.swap(ctx.session.preloginCredPassword);
+    }
+    if (!stale.empty()) SecureZeroMemory(&stale[0], stale.size() * sizeof(wchar_t));
+    ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+  }
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.
   std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
@@ -771,7 +783,7 @@ void ControlClient::Run() {
           stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::DecryptFailed);
         }
       }
-      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleUnlock, stage),
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleUnlock, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
                    static_cast<LPARAM>(win32));
     }
     // "Windows 로그인" (prelogin-ui r3, item 5; lockscreen-cred r1): the prompt left a password for the screen
@@ -818,7 +830,7 @@ void ControlClient::Run() {
         lockCredPollNextUs = qpc_now_us() + 1000000ull;
         lockCredPollDeadlineUs = qpc_now_us() + 135000000ull;
       }
-      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(askedRole, stage),
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(askedRole, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
                    static_cast<LPARAM>(win32));
     }
     // lockscreen-cred r1: a typed lock-screen credential waiting for its unlock -- one status poll when due.
@@ -837,7 +849,7 @@ void ControlClient::Run() {
         }
         std::cout << "[native-video-client][lock-cred] requestId=" << lockCredPollRequestId << " final stage=" << stage
                   << "\n";
-        PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage),
+        PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
                      static_cast<LPARAM>(win32));
         lockCredPollRequestId = 0;
         ctx.session.lockCredPending.store(false, std::memory_order_release);

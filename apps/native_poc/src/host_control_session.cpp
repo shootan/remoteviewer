@@ -1008,9 +1008,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       ControlUnlockStatusResultMessage rsp{};
       // lockscreen-cred r1: a typed lock-screen credential is still waiting for its unlock -- ask the service
       // where it is now (a bounded wait; other jobs are answered from the relay's cache as before).
-      if (!args.preloginMode) (void)gUnlockRelay.RefreshLockCredStatus(req.requestId);
+      if (!args.preloginMode) (void)gUnlockRelay.RefreshLockCredStatus(unlockCookie, req.requestId);
       const bool haveResult = args.preloginMode ? prelogin_cred().PollResult(req.requestId, &rsp)
-                                                : gUnlockRelay.PollResult(req.requestId, &rsp);
+                                                : gUnlockRelay.PollResult(unlockCookie, req.requestId, &rsp);
       if (!haveResult) {
         rsp.requestId = req.requestId;
         rsp.stage = static_cast<uint16_t>(UnlockStage::ConnectStarted);  // still running
