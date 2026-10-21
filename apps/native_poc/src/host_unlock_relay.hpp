@@ -51,11 +51,31 @@ class HostUnlockRelay {
   // (the viewer keeps polling until `terminal`).
   bool PollResult(uint32_t requestId, ControlUnlockStatusResultMessage* out);
 
+  // --- lockscreen-cred r1 -------------------------------------------------------------------------
+  // Whether the service on the other end can type a credential into the lock screen. Known only from its
+  // own answer to CapabilitiesRequest on a verified connection; an older service, which drops the
+  // connection on a kind it does not know, is Unsupported (asked again after a while -- it may have been
+  // updated). Never sends that service anything else new.
+  enum class LockCredSupport { Unknown, Supported, Unsupported };
+  LockCredSupport LockCredSupportNow() const { return lockCredSupport_.load(std::memory_order_acquire); }
+  // Any thread: ask the service, in the background, if that is not known (or due again). Never blocks.
+  void ProbeLockCredAsync();
+  // Control thread: a challenge for the lock-screen credential purpose -- sent only to a service that said
+  // it supports it (otherwise `out` is a RejectedPolicy with no pipe traffic). `out->reserved` is the purpose
+  // the service issued it for. Returns false if the service is unreachable / timed out.
+  bool LockCredChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint64_t clientSessionCookie,
+                             ControlUnlockChallengeMessage* out, uint32_t timeoutMs = 3000);
+  // Control thread: for a lock-credential job that is not terminal yet, ask the service where it is now
+  // (bounded wait); the answer replaces the cached result PollResult reads. False for other requestIds.
+  bool RefreshLockCredStatus(uint32_t requestId, uint32_t timeoutMs = 1000);
+
   void Stop();
 
  private:
+  enum class Op { Challenge, LockCredChallenge, Sealed, Capabilities, Status };
   struct Command {
-    bool sealed = false;
+    Op op = Op::Challenge;
+    uint32_t statusRequestId = 0;
     ControlUnlockChallengeRequestMessage challenge{};
     ControlUnlockSealedRequestMessage seal{};
     SecureUnlockSealedRequest seal_ipc{};  // prebuilt pipe message (password ciphertext)
@@ -77,6 +97,14 @@ class HostUnlockRelay {
   std::map<uint32_t, ControlUnlockChallengeMessage> challengeResults_;
   // Sealed job results, keyed by requestId.
   std::map<uint32_t, ControlUnlockStatusResultMessage> sealedResults_;
+  // lockscreen-cred r1: requestIds whose challenge was issued for the lock-screen credential, and the
+  // status refreshes answered (requestId -> answered), for RefreshLockCredStatus's wait.
+  std::map<uint32_t, bool> lockCredRequests_;
+  std::map<uint32_t, uint64_t> statusAnswered_;
+  uint64_t statusSeq_ = 0;
+  std::atomic<LockCredSupport> lockCredSupport_{LockCredSupport::Unknown};
+  bool capsInFlight_ = false;           // under mu_
+  uint64_t capsRetryAfterMs_ = 0;       // under mu_: an Unsupported answer is asked again after this
 
   const wchar_t* testPipeName_ = nullptr;     // nullptr -> production kSecureUnlockPipeName
   const wchar_t* testServiceName_ = nullptr;  // nullptr -> production kSecureInputServiceName

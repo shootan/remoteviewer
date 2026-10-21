@@ -2529,6 +2529,12 @@ add_executable(remote60_logon_ui_target_test
 )
 target_include_directories(remote60_logon_ui_target_test PRIVATE src)
 
+# lockscreen-cred r1 (A6): plaintext to a locked session -- the rule the host and the service both apply.
+add_executable(remote60_lock_input_policy_test
+  src/lock_input_policy_test.cpp
+)
+target_include_directories(remote60_lock_input_policy_test PRIVATE src)
+
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test
   src/secure_input_pipe_server_test.cpp

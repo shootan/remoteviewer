@@ -4,7 +4,9 @@
 
 #include <windows.h>
 #include <imm.h>
+#include <wtsapi32.h>
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "wtsapi32.lib")
 #ifdef min
 #undef min
 #endif
@@ -24,6 +26,7 @@
 #include "host_input_inject.hpp"
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
+#include "lock_input_policy.hpp"
 #include "mouse_button_map.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
@@ -506,6 +509,57 @@ bool interactive_desktop_is_default() {
   cached.store(isDefault, std::memory_order_relaxed);
   lastCheckUs.store(nowUs, std::memory_order_relaxed);
   return isDefault;
+}
+
+namespace {
+OwnSessionState own_session_state_uncached() {
+  OwnSessionState s;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (GNLinkStreamMigrationTest, lockscreen-cred e2e): this session stands in for a locked
+  // console session until the test signals the named event.
+  wchar_t ev[128] = {};
+  const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FAKE_LOCK_UNTIL_EVENT", ev, 128);
+  if (n > 0 && n < 128) {
+    static HANDLE unlockEvent = CreateEventW(nullptr, TRUE, FALSE, ev);
+    s.lockKnown = s.stateKnown = s.active = s.console = true;
+    s.locked = !(unlockEvent && WaitForSingleObject(unlockEvent, 0) == WAIT_OBJECT_0);
+    return s;
+  }
+#endif
+  DWORD mine = 0;
+  if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine)) return s;
+  WTSINFOEXW* info = nullptr;
+  DWORD bytes = 0;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, mine, WTSSessionInfoEx, reinterpret_cast<LPWSTR*>(&info),
+                                  &bytes) &&
+      info && bytes >= sizeof(WTSINFOEXW) && info->Level == 1) {
+    s.lockKnown = true;
+    s.locked = info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
+    s.stateKnown = true;
+    s.active = info->Data.WTSInfoExLevel1.SessionState == WTSActive;
+  }
+  if (info) WTSFreeMemory(info);
+  s.console = WTSGetActiveConsoleSessionId() == mine;
+  return s;
+}
+}  // namespace
+
+OwnSessionState own_session_state() {
+  static std::mutex mu;
+  static uint64_t lastUs = 0;
+  static OwnSessionState cached;
+  const uint64_t nowUs = qpc_now_us();
+  std::lock_guard<std::mutex> lock(mu);
+  if (lastUs == 0 || nowUs - lastUs >= 250000ULL) {
+    cached = own_session_state_uncached();
+    lastUs = nowUs;
+  }
+  return cached;
+}
+
+bool own_session_treat_as_locked() {
+  const OwnSessionState s = own_session_state();
+  return lock_input::TreatAsLocked(s.lockKnown, s.locked, interactive_desktop_is_default());
 }
 
 const char* input_fail_stage_name(InputFailStage s) {

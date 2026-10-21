@@ -52,6 +52,7 @@
 #include "poc_protocol.hpp"
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_filter.hpp"
+#include "lock_input_policy.hpp"
 #include "prelogin_reboot_gate.hpp"
 #include "prelogin_cred_host.hpp"
 #include "prelogin_admin_pipe.hpp"
@@ -633,6 +634,49 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   // this control connection to the challenge it requests, so a sealed reply from another session is
   // rejected by the service. (Codex #365/#366.)
   static remote60::native_poc::HostUnlockRelay gUnlockRelay;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  // TEST BUILD ONLY (lockscreen-cred e2e): the relay's pipe is the test service's (GNLinkInputServiceLifecycleTest,
+  // per-run name), whose server this build accepts as the service -- the shipped host verifies the installed one.
+  {
+    static const bool pointed = [] {
+      static wchar_t pipe[256] = {};
+      const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_UNLOCK_PIPE", pipe, 256);
+      if (n == 0 || n >= 256) return false;
+      gUnlockRelay.SetVerificationEndpointForTest(pipe, L"GNLinkSisTestService", [](void* h, const wchar_t*) {
+        remote60::native_poc::ServerIdentityFacts f;
+        ULONG pid = 0;
+        f.serverPidKnown = GetNamedPipeServerProcessId(static_cast<HANDLE>(h), &pid) != FALSE;
+        f.serverPid = f.servicePid = pid;
+        f.serviceRunning = f.serverImageKnown = f.serviceBinaryKnown = f.imageSameFile = f.finalConsistent =
+            f.serverPidKnown;
+        return f;
+      });
+      std::cout << "[native-video-host][lock-cred] test build: unlock relay pointed at the test service pipe\n";
+      return true;
+    }();
+    (void)pointed;
+  }
+#endif
+  bool lockCredAdvertised = false;  // lockscreen-cred r1: the last LockCredV1 said, for its transition line
+  // lockscreen-cred r1 (A6, A7): plaintext refused because the own session is locked, and host-IME physical
+  // keys dropped because the input desktop is not Default (K3) -- counted, said on the first and every 200th,
+  // never with a key code or text.
+  static std::atomic<uint64_t> lockRefusedTotal{0};
+  static std::atomic<uint64_t> physicalSecureDropTotal{0};
+  auto note_lock_refusal = [&](const char* what) {
+    const uint64_t n = lockRefusedTotal.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || n % 200 == 0) {
+      std::cout << "[native-video-host][input][lock] plaintext " << what
+                << " refused: the session is at its lock screen (use \"Windows 로그인\") total=" << n << "\n";
+    }
+  };
+  auto note_physical_secure_drop = [&]() {
+    const uint64_t n = physicalSecureDropTotal.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || n % 200 == 0) {
+      std::cout << "[native-video-host][input][physical] key not injected: the input desktop is not Default total=" << n
+                << "\n";
+    }
+  };
   const uint64_t unlockCookie =
       (static_cast<uint64_t>(qpc_now_us()) << 20) ^ reinterpret_cast<uintptr_t>(&stop);
   // r5 G7: when this control session ends, however it ends, a "Windows 로그인" credential it sent that is
@@ -804,6 +848,25 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         // popup does not warn "no connect until someone logs in" for a PC that will be reachable.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
       }
+      // lockscreen-cred r1 (Codex A1): "Windows 로그인" at the lock screen -- only while THIS host's own
+      // session is known (WTS) to be locked, active and the console, and the service said it can type into
+      // the lock screen. A UAC prompt (secure desktop, session not locked) never sets it; nor does an
+      // unknown state. The pre-login worker has its own role (PreloginV1) and never sets this.
+      if (!args.preloginMode) {
+        const remote60::native_poc::OwnSessionState own = remote60::native_poc::own_session_state();
+        const bool lockScreen = own.lockKnown && own.locked && own.stateKnown && own.active && own.console;
+        bool offered = false;
+        if (lockScreen) {
+          gUnlockRelay.ProbeLockCredAsync();
+          offered = gUnlockRelay.LockCredSupportNow() == remote60::native_poc::HostUnlockRelay::LockCredSupport::Supported;
+        }
+        if (offered) pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredV1;
+        if (offered != lockCredAdvertised) {
+          lockCredAdvertised = offered;
+          std::cout << "[native-video-host][lock-cred] advertised=" << (offered ? 1 : 0) << " lockKnown=" << own.lockKnown
+                    << " locked=" << own.locked << " active=" << own.active << " console=" << own.console << "\n";
+        }
+      }
       // Remote reboot is offered by ANY host -- prelogin AND the logged-in session (the case the user
       // hits most). The controls are the directory-authenticated session, the confirm popup, and the
       // single-flight dedup, NOT the mode. A host that is not durable-enabled simply did not advertise
@@ -882,6 +945,30 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       continue;
     }
 
+    // lockscreen-cred r1: "Windows 로그인" at the lock screen -- a challenge for the lock-credential purpose,
+    // answered by the SYSTEM service (never by this host); 41 carries the purpose in `reserved`. 42~45 then go
+    // the same way as the unlock's. Not in the pre-login worker's allowlist (it closes the link there).
+    if (type == MessageType::ControlLockCredChallengeRequest &&
+        header.size == sizeof(ControlUnlockChallengeRequestMessage)) {
+      ControlUnlockChallengeRequestMessage req{};
+      req.header = header;
+      if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
+      ControlUnlockChallengeMessage rsp{};
+      if (!gUnlockRelay.LockCredChallengeSync(req, unlockCookie, &rsp)) {
+        rsp = ControlUnlockChallengeMessage{};
+        rsp.requestId = req.requestId;
+        rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
+        rsp.reserved = remote60::native_poc::kUnlockPurposeLockCred;
+      }
+      std::cout << "[native-video-host][lock-cred] challenge requestId=" << req.requestId << " status=" << rsp.status
+                << "\n";
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
     if (type == MessageType::ControlUnlockSealedRequest &&
         header.size == sizeof(ControlUnlockSealedRequestMessage)) {
       ControlUnlockSealedRequestMessage req{};
@@ -910,6 +997,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       ControlUnlockStatusResultMessage rsp{};
+      // lockscreen-cred r1: a typed lock-screen credential is still waiting for its unlock -- ask the service
+      // where it is now (a bounded wait; other jobs are answered from the relay's cache as before).
+      if (!args.preloginMode) (void)gUnlockRelay.RefreshLockCredStatus(req.requestId);
       const bool haveResult = args.preloginMode ? prelogin_cred().PollResult(req.requestId, &rsp)
                                                 : gUnlockRelay.PollResult(req.requestId, &rsp);
       if (!haveResult) {
@@ -1023,19 +1113,33 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
             static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
         return target_has_focus(tgt);
       };
+      // lockscreen-cred r1: a down this host refuses is said (K3 drop / A6 lock), never with its key. The lock
+      // rule is checked on its own, not only through the desktop gate, so it holds if that gate ever changes.
+      auto down_allowed = [&]() {
+        if (!args.preloginMode && remote60::native_poc::lock_input::RefusePhysicalKey(
+                                      remote60::native_poc::own_session_treat_as_locked(), true, k.vk)) {
+          note_lock_refusal("physical key");
+          return false;
+        }
+        if (inputRouter.injectionEnabled && !interactive_desktop_is_default()) {
+          note_physical_secure_drop();
+          return false;
+        }
+        return gate_open();
+      };
       if (physMakeOnly) {
         // Dedicated Hangul/Hanja key: a single make, never tracked and never released, so the host
         // IME toggles the same way the physical key does. A stray up (should not arrive) is ignored
         // -- it is not in physicalDown, so the release-all path never fabricates a break for it.
         // (Codex Edge 1.)
-        if (k.down != 0 && gate_open()) {
+        if (k.down != 0 && down_allowed()) {
           (void)inject_physical_scan_key(k.scanCode, true, physExt);
         }
         send_input_ack(k.seq);
         continue;
       }
       if (k.down != 0) {
-        if (gate_open() && inject_physical_scan_key(k.scanCode, true, physExt)) {
+        if (down_allowed() && inject_physical_scan_key(k.scanCode, true, physExt)) {
           physicalDown.insert(physKey);
         }
       } else {
@@ -1111,6 +1215,13 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         std::cout << "[native-video-host][input][prelogin] dropped non-navigation key seq=" << input.seq
                   << " (characters use the sealed credential path)\n";
       }
+      // lockscreen-cred r1 (Codex A6): no plaintext character to this host's own session while it is locked
+      // (or its lock state is unknown off the Default desktop) -- whatever the viewer believed, however late
+      // the key arrives. Navigation keys, key ups and the pointer pass; a UAC prompt on an unlocked session
+      // is untouched. Acknowledged below like any other (the ack is a receipt, not an injection).
+      const bool lockBlockedKey = !args.preloginMode && remote60::native_poc::lock_input::IsCharacterKey(input.kind, input.keyCode) &&
+                                  remote60::native_poc::own_session_treat_as_locked();
+      if (lockBlockedKey) note_lock_refusal("key");
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)
       const bool releaseAlreadyDone =
@@ -1119,7 +1230,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !prelogin_not_serving()) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !lockBlockedKey && !prelogin_not_serving()) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -1359,7 +1470,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (!link.Read(&text.seq, sizeof(text) - sizeof(MessageHeader))) break;
       const uint64_t textReceivedUs = qpc_now_us();
       std::string resolvedTarget;
-      if (inputRouter.injectionEnabled) {
+      // lockscreen-cred r1 (Codex A6): no text to the own session while it is at its lock screen.
+      const bool lockBlockedText = !args.preloginMode && remote60::native_poc::own_session_treat_as_locked();
+      if (lockBlockedText) note_lock_refusal("text");
+      if (inputRouter.injectionEnabled && !lockBlockedText) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);

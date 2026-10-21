@@ -85,6 +85,20 @@ HostImeAlignResult host_ime_align_query(bool setEnglish);
 bool interactive_desktop_is_default_uncached();
 bool interactive_desktop_is_default();
 
+// lockscreen-cred r1: THIS process's own session as WTS says it is (cached 250 ms, like the desktop probe).
+// Nothing here is guessed from the secure desktop: a UAC prompt leaves `locked` false.
+struct OwnSessionState {
+  bool lockKnown = false;
+  bool locked = false;
+  bool stateKnown = false;
+  bool active = false;   // WTSActive: attached (console or RDP), not disconnected
+  bool console = false;  // this session is the console session
+};
+OwnSessionState own_session_state();
+// lockscreen-cred r1 (A6): the own session is -- or must be treated as -- at its lock screen
+// (lock_input_policy.hpp TreatAsLocked: locked if known; if unknown, any desktop but Default).
+bool own_session_treat_as_locked();
+
 // Mouse X buttons (back / forward, mouse-xbutton r1). True unless REMOTE60_NATIVE_MOUSE_XBUTTONS
 // starts with 0 / f / n. Off, this host behaves as one that predates the feature: the pong does
 // not advertise kCaptureFlagMouseXButtonsV1 (so a viewer never sends an X edge) and an X edge that
