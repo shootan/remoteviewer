@@ -328,6 +328,7 @@ const char* stage_name(uint16_t stage) {
     case remote60::native_poc::UnlockStage::RejectedStaleTopology: return "rejected(session-changed)";
     case remote60::native_poc::UnlockStage::DecryptFailed: return "decrypt-failed";
     case remote60::native_poc::UnlockStage::Timeout: return "timeout";
+    case remote60::native_poc::UnlockStage::Busy: return "busy";
     default: return "error";
   }
 }
@@ -559,6 +560,12 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
   if (stage == kLoginUnsupported) {
     return L"이 원격 PC에는 지금 'Windows 로그인'을 쓸 수 없습니다.\n"
            L"원격 PC가 로그인 화면이나 잠금 화면이 아니거나, 원격 PC의 GNLink 가 이 기능보다 오래된 버전입니다.";
+  }
+  if (stage == static_cast<uint16_t>(UnlockStage::Busy)) {
+    // lockscreen-cred r3 (Codex UX-R): another connection's request holds the host's single unlock channel.
+    // Said as that -- nothing was sent, nothing is retried by itself, and a stored password is kept.
+    return L"다른 연결이 이 원격 PC의 Windows 로그인(잠금 해제) 요청을 처리하고 있어 보내지 않았습니다.\n"
+           L"그 요청이 끝나거나 취소된 뒤(길어야 2분) 다시 누르세요.";
   }
   if (role == kLoginRolePrelogin) return prelogin_cred_result_text(stage, win32);
   if (role == kLoginRoleUnlock) {

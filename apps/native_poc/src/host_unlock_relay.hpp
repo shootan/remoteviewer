@@ -20,6 +20,16 @@
 //     for it, and closes the pipe itself. A silent service never holds the pipe past that.
 //   - "The service can type into the lock screen" is an answer of a particular service process, kept for a
 //     while: a new server process, a failed exchange or its age makes it unknown again and it is asked anew.
+//
+// lockscreen-cred r3 (Codex L1-R / L5-R / UX-R):
+//   - Every transaction is numbered when it starts (its challenge). A result -- answer, failure or busy -- is
+//     kept only while that same numbered transaction is alive: an exchange that completes after its session
+//     ended (or after the session started a newer one) publishes nothing.
+//   - The hold has an absolute end -- challenge 35 s, typed credential 130 s -- checked before every command,
+//     however full the queue is; the held session's own exchanges get no more than what is left of it. When it
+//     ends, the transaction ends with it (a typed one as UnlockUnconfirmed) and is never continued on another
+//     pipe connection.
+//   - "Busy" is its own stage (UnlockStage::Busy), never a general error, so the viewer can say what it is.
 
 #include <atomic>
 #include <condition_variable>
@@ -57,6 +67,13 @@ class HostUnlockRelay {
     shortDeadlineMs_ = shortMs;
     sealedDeadlineMs_ = sealedMs;
   }
+  // TEST ONLY (r3 L5-R): shorter hold ends (the product's are 35 s / 130 s).
+  void SetHoldLimitsForTest(uint64_t challengeHoldMs, uint64_t typedHoldMs) {
+    challengeHoldMs_ = challengeHoldMs;
+    typedHoldMs_ = typedHoldMs;
+  }
+  // TEST ONLY (r3 L1-R): how many entries are kept for `clientSessionCookie` across every map.
+  size_t KeptEntriesForTest(uint64_t clientSessionCookie) const;
 
   // Control thread: synchronous, fast (no WTSConnectSession here). Fills `out` with the service's
   // challenge (or a rejection stage). Returns false if the service is unreachable / timed out.
@@ -99,6 +116,7 @@ class HostUnlockRelay {
     Op op = Op::Challenge;
     uint64_t cookie = 0;
     uint32_t statusRequestId = 0;
+    uint64_t txGen = 0;  // r3 L1-R: the transaction (liveTx_) it was queued for; 0 = none
     ControlUnlockChallengeRequestMessage challenge{};
     ControlUnlockSealedRequestMessage seal{};
     SecureUnlockSealedRequest seal_ipc{};  // prebuilt pipe message (password ciphertext)
@@ -112,7 +130,9 @@ class HostUnlockRelay {
 
   void EnsureWorker();
   void WorkerLoop();
-  void* ConnectPipe();  // returns HANDLE or INVALID_HANDLE_VALUE (opened for overlapped I/O)
+  // Returns HANDLE or INVALID_HANDLE_VALUE (opened for overlapped I/O). `busy` (r3): it failed because the
+  // pipe's one instance stayed taken -- another host's transaction holds it.
+  void* ConnectPipe(bool* busy = nullptr);
   Io Exchange(void* pipe, const void* req, uint32_t reqSize, uint8_t* buf, uint32_t bufSize, uint32_t replySize,
               uint32_t deadlineMs);
 
@@ -129,6 +149,10 @@ class HostUnlockRelay {
   std::map<TxKey, bool> lockCredRequests_;
   std::map<TxKey, uint64_t> statusAnswered_;
   uint64_t statusSeq_ = 0;
+  // r3 L1-R: the transactions alive now and their numbers -- started by a challenge, dropped by EndSession.
+  std::map<TxKey, uint64_t> liveTx_;
+  uint64_t txGenSeq_ = 0;
+  bool IsLiveLocked(const Command& c, uint32_t requestId) const;  // under mu_
 
   // Capability: its answer, when, and of which server process (under mu_).
   LockCredSupport lockCredSupport_ = LockCredSupport::Unknown;
@@ -139,6 +163,8 @@ class HostUnlockRelay {
 
   uint32_t shortDeadlineMs_ = 3000;   // capability / challenge / status
   uint32_t sealedDeadlineMs_ = 25000; // the service's typing (child start, target wait, typing) or WTS connect
+  uint64_t challengeHoldMs_ = 35000;  // an issued challenge holds the pipe for its seal (challenge: 30 s)
+  uint64_t typedHoldMs_ = 130000;     // a typed lock-screen credential, for its unlock (service: 120 s)
 
   const wchar_t* testPipeName_ = nullptr;     // nullptr -> production kSecureUnlockPipeName
   const wchar_t* testServiceName_ = nullptr;  // nullptr -> production kSecureInputServiceName

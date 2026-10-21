@@ -878,6 +878,9 @@ enum class UnlockStage : uint16_t {
   TargetNotReady = 13,      // the lock screen's password field was not the input target: nothing typed
   InjectFailed = 14,        // the typing itself failed or was cut short: not retried
   UnlockUnconfirmed = 15,   // typed, but no unlock of that session was seen in the time allowed
+  // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
+  // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
+  Busy = 16,
 };
 
 // Which sealed purpose a challenge (41) was issued for, in its `reserved` field (lockscreen-cred r1).

@@ -1,5 +1,6 @@
 #include "secure_unlock_service.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -377,7 +378,9 @@ void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req
     // r2 (Codex L2): the same fence again, asked by the agent right before it touches the field -- this
     // pipe's caller still there (its control session not ended), the topology / session / console / lock /
     // account as issued, the service running, and within the commit deadline. Anything else: nothing typed.
-    const uint64_t commitDeadline = p.nowMs() + kLockCredCommitMs;
+    // r3 (Codex L2-R): and never past the challenge's own expiry -- a sealed request taken just before it does
+    // not buy a fresh 20 s (the same boundary as ChallengeState::Verify: past it = expired).
+    const uint64_t commitDeadline = (std::min)(us.ctx.expiresMs, p.nowMs() + kLockCredCommitMs);
     const uint64_t accountAtIssue = us.ctx.accountId;
     const std::function<bool()> stillValid = [&us, &p, commitDeadline, accountAtIssue]() {
       if (p.running && !p.running()) return false;

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <cstring>
@@ -63,10 +64,33 @@ ControlUnlockStatusResultMessage failed_result(uint32_t requestId, UnlockStage s
 constexpr uint64_t kCapsFreshMs = 120000;   // a Supported answer is advertised for this long ...
 constexpr uint64_t kCapsRefreshMs = 60000;  // ... and asked again after this
 constexpr uint64_t kCapsRetryMs = 60000;    // no answer / Unsupported: asked again after this
-constexpr uint64_t kChallengeHoldMs = 35000;  // an issued challenge holds the pipe for its seal (challenge: 30 s)
-constexpr uint64_t kTypedHoldMs = 130000;     // a typed lock-screen credential, for its unlock (service: 120 s)
+
+ControlUnlockChallengeMessage busy_challenge(uint32_t requestId, uint16_t purpose) {
+  ControlUnlockChallengeMessage m{};
+  m.requestId = requestId;
+  m.status = static_cast<uint16_t>(UnlockStage::Busy);
+  m.reserved = purpose;
+  return m;
+}
 
 }  // namespace
+
+bool HostUnlockRelay::IsLiveLocked(const Command& c, uint32_t requestId) const {
+  if (c.txGen == 0) return false;
+  auto it = liveTx_.find(TxKey{c.cookie, requestId});
+  return it != liveTx_.end() && it->second == c.txGen;
+}
+
+size_t HostUnlockRelay::KeptEntriesForTest(uint64_t cookie) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  size_t n = 0;
+  for (const auto& e : challengeResults_) n += e.first.cookie == cookie;
+  for (const auto& e : sealedResults_) n += e.first.cookie == cookie;
+  for (const auto& e : lockCredRequests_) n += e.first.cookie == cookie;
+  for (const auto& e : statusAnswered_) n += e.first.cookie == cookie;
+  for (const auto& e : liveTx_) n += e.first.cookie == cookie;
+  return n;
+}
 
 HostUnlockRelay::~HostUnlockRelay() { Stop(); }
 
@@ -90,8 +114,11 @@ void HostUnlockRelay::EnsureWorker() {
   }
 }
 
-void* HostUnlockRelay::ConnectPipe() {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+void* HostUnlockRelay::ConnectPipe(bool* busy) {
+  if (busy) *busy = false;
+  const auto start = std::chrono::steady_clock::now();
+  const auto deadline = start + std::chrono::seconds(3);
+  bool busySinceStart = true;  // r3 UX-R: every attempt so far found the pipe's one instance taken
   do {
     // secure-pipe-identity: verify the pipe's server IS the installed GNLinkSecureInput service BEFORE
     // this handle is used. A local process squatting the name while the service is stopped is refused
@@ -109,6 +136,13 @@ void* HostUnlockRelay::ConnectPipe() {
       DWORD mode = PIPE_READMODE_MESSAGE;
       (void)SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
       return pipe;
+    }
+    // r3 UX-R: the service's pipe has one instance. Taken for a whole second (not the moment between two of
+    // its connections) means another host's transaction holds it -- said as "busy", sooner than the 3 s.
+    busySinceStart = busySinceStart && diag.failStage == PipeVerifyStage::Open && diag.failWin32 == ERROR_PIPE_BUSY;
+    if (busySinceStart && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(1000)) {
+      if (busy) *busy = true;
+      break;
     }
     if (!running_.load()) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -183,6 +217,10 @@ void HostUnlockRelay::WorkerLoop() {
   // While one control session's transaction holds it, another session's request is answered "busy".
   uint64_t holdUntilMs = 0;   // 0: nothing in flight -- close after the command
   uint64_t heldCookie = 0;    // the control session the held transaction belongs to
+  uint32_t heldRequestId = 0; // r3 L5-R: which of its transactions, and in which phase
+  uint64_t heldTxGen = 0;
+  bool heldTyped = false;
+  bool budgetCut = false;  // r3 L5-R: the exchange's deadline was the hold's end, not its own
   auto drop_pipe = [&]() {
     if (pipe != INVALID_HANDLE_VALUE) {
       CloseHandle(pipe);
@@ -190,11 +228,48 @@ void HostUnlockRelay::WorkerLoop() {
     }
     holdUntilMs = 0;
     heldCookie = 0;
+    heldRequestId = 0;
+    heldTxGen = 0;
+    heldTyped = false;
     pipeServerPid = 0;
   };
+  // r3 L5-R: the hold's absolute end. The pipe goes back to the service, and the transaction ends with it --
+  // it is never continued on another connection (the service's state for it went with this one).
+  auto expire_hold = [&]() {
+    const TxKey key{heldCookie, heldRequestId};
+    Command owner;
+    owner.cookie = heldCookie;
+    owner.txGen = heldTxGen;
+    const bool typed = heldTyped;
+    drop_pipe();
+    std::lock_guard<std::mutex> lk(mu_);
+    if (IsLiveLocked(owner, key.requestId)) {
+      auto it = sealedResults_.find(key);
+      if (typed) {
+        if (it != sealedResults_.end() && !it->second.terminal) {
+          it->second = failed_result(key.requestId, UnlockStage::UnlockUnconfirmed);
+        }
+      } else if (it == sealedResults_.end()) {
+        sealedResults_[key] = failed_result(key.requestId, UnlockStage::Timeout);  // its seal never came in time
+      }
+      lockCredRequests_.erase(key);  // nothing more to ask the service about it
+    }
+    cv_.notify_all();
+  };
+  // What is left of the hold for the held session's own exchange (never past the hold's end).
+  auto budget = [&](uint32_t normalMs) -> uint32_t {
+    budgetCut = false;
+    if (holdUntilMs == 0) return normalMs;
+    const uint64_t now = GetTickCount64();
+    const uint64_t left = holdUntilMs > now ? holdUntilMs - now : 0;
+    budgetCut = left < normalMs;
+    return static_cast<uint32_t>((std::min)(static_cast<uint64_t>(normalMs), left));
+  };
+  bool connectBusy = false;  // r3 UX-R: the last connect found the pipe held by another host
   auto ensure_pipe = [&]() -> bool {
+    connectBusy = false;
     if (pipe != INVALID_HANDLE_VALUE) return true;
-    pipe = static_cast<HANDLE>(ConnectPipe());
+    pipe = static_cast<HANDLE>(ConnectPipe(&connectBusy));
     if (pipe == INVALID_HANDLE_VALUE) return false;
     ULONG pid = 0;
     GetNamedPipeServerProcessId(pipe, &pid);
@@ -206,15 +281,20 @@ void HostUnlockRelay::WorkerLoop() {
     }
     return true;
   };
-  auto hold_for = [&](uint64_t ms, uint64_t cookie) {
+  auto hold_for = [&](uint64_t ms, const Command& c, uint32_t requestId, bool typed) {
     holdUntilMs = GetTickCount64() + ms;
-    heldCookie = cookie;
+    heldCookie = c.cookie;
+    heldRequestId = requestId;
+    heldTxGen = c.txGen;
+    heldTyped = typed;
   };
   auto release_if_idle = [&]() {
     if (holdUntilMs == 0) drop_pipe();
   };
   auto io_failed = [&]() {  // a failed / timed-out / cancelled exchange: the pipe goes, and so does "supported"
+    const bool ours = budgetCut;
     drop_pipe();
+    if (ours) return;  // our hold ran out -- not an answer of the service
     std::lock_guard<std::mutex> lk(mu_);
     if (lockCredSupport_ == LockCredSupport::Supported) {
       lockCredSupport_ = LockCredSupport::Unknown;
@@ -229,10 +309,12 @@ void HostUnlockRelay::WorkerLoop() {
       if (pipe != INVALID_HANDLE_VALUE && holdUntilMs != 0) {
         const uint64_t now = GetTickCount64();
         const auto left = std::chrono::milliseconds(holdUntilMs > now ? holdUntilMs - now : 0);
-        const bool got = cv_.wait_for(lk, left, [this] { return !running_.load() || !queue_.empty(); });
-        if (!got) {  // the held transaction's deadline: the pipe goes back to the service
+        cv_.wait_for(lk, left, [this] { return !running_.load() || !queue_.empty(); });
+        // r3 L5-R: the hold's end is checked whether or not something is queued -- a queue that is never
+        // empty (other sessions' busy requests, probes, repeated status) does not keep the pipe held.
+        if (running_.load() && GetTickCount64() >= holdUntilMs) {
           lk.unlock();
-          drop_pipe();
+          expire_hold();
           continue;
         }
       } else {
@@ -250,23 +332,49 @@ void HostUnlockRelay::WorkerLoop() {
       continue;
     }
 
+    const uint32_t cmdRequestId = cmd.op == Op::Sealed   ? cmd.seal.requestId
+                                  : cmd.op == Op::Status ? cmd.statusRequestId
+                                                         : cmd.challenge.requestId;
+    // r3 L1-R: a seal or a status question of no live transaction (its session ended, or it never had a
+    // challenge here) goes nowhere -- not to the service, and nothing is kept for it.
+    if (cmd.op == Op::Sealed || cmd.op == Op::Status) {
+      std::lock_guard<std::mutex> lk(mu_);
+      if (!IsLiveLocked(cmd, cmdRequestId)) {
+        SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
+        continue;
+      }
+    }
     // L1: another control session's transaction holds the pipe -- this request does not ride on (and
-    // overwrite) its context. Answered "busy" (InternalError, ERROR_BUSY) at once; a capability query waits.
+    // overwrite) its context. Answered Busy at once (r3 UX-R: its own stage); a capability query waits.
     if (holdUntilMs != 0 && heldCookie != cmd.cookie && cmd.op != Op::Capabilities) {
       std::lock_guard<std::mutex> lk(mu_);
-      const TxKey key{cmd.cookie, cmd.op == Op::Sealed ? cmd.seal.requestId
-                                  : cmd.op == Op::Status ? cmd.statusRequestId
-                                                          : cmd.challenge.requestId};
-      if (cmd.op == Op::Sealed) {
-        sealedResults_[key] = failed_result(key.requestId, UnlockStage::InternalError, ERROR_BUSY);
-      } else if (cmd.op == Op::Status) {
+      const TxKey key{cmd.cookie, cmdRequestId};
+      if (IsLiveLocked(cmd, cmdRequestId)) {  // r3 L1-R: a session that ended keeps nothing
+        if (cmd.op == Op::Sealed) {
+          sealedResults_[key] = failed_result(key.requestId, UnlockStage::Busy, ERROR_BUSY);
+        } else if (cmd.op == Op::Status) {
+          statusAnswered_[key] = ++statusSeq_;
+        } else {
+          challengeResults_[key] =
+              busy_challenge(key.requestId, cmd.op == Op::LockCredChallenge ? kUnlockPurposeLockCred : kUnlockPurposeUnlock);
+        }
+      }
+      if (cmd.op == Op::Sealed) SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
+      cv_.notify_all();
+      continue;
+    }
+    // r3 L5-R: a status question is asked only on the connection its typed transaction is held on; with that
+    // connection gone, so is the service's state for it -- unconfirmed, never asked anew on another one.
+    if (cmd.op == Op::Status && !(holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie &&
+                                  heldRequestId == cmd.statusRequestId && heldTxGen == cmd.txGen)) {
+      std::lock_guard<std::mutex> lk(mu_);
+      const TxKey key{cmd.cookie, cmd.statusRequestId};
+      if (IsLiveLocked(cmd, cmd.statusRequestId)) {
+        auto it = sealedResults_.find(key);
+        if (it != sealedResults_.end() && !it->second.terminal) {
+          it->second = failed_result(key.requestId, UnlockStage::UnlockUnconfirmed);
+        }
         statusAnswered_[key] = ++statusSeq_;
-      } else {
-        ControlUnlockChallengeMessage m{};
-        m.requestId = key.requestId;
-        m.status = static_cast<uint16_t>(UnlockStage::InternalError);
-        m.reserved = cmd.op == Op::LockCredChallenge ? kUnlockPurposeLockCred : kUnlockPurposeUnlock;
-        challengeResults_[key] = m;
       }
       cv_.notify_all();
       continue;
@@ -280,18 +388,33 @@ void HostUnlockRelay::WorkerLoop() {
     if (!ensure_pipe()) {
       // Report a failure so a waiting control thread does not hang forever.
       std::lock_guard<std::mutex> lk(mu_);
+      const bool live = IsLiveLocked(cmd, cmdRequestId);  // r3 L1-R
+      // r3 UX-R: held by another host's transaction -> Busy, said as that; anything else stays a failure.
+      const UnlockStage why = connectBusy ? UnlockStage::Busy : UnlockStage::InternalError;
       if (cmd.op == Op::Sealed) {
-        sealedResults_[TxKey{cmd.cookie, cmd.seal.requestId}] = failed_result(cmd.seal.requestId, UnlockStage::InternalError);
+        if (live) {
+          sealedResults_[TxKey{cmd.cookie, cmd.seal.requestId}] =
+              failed_result(cmd.seal.requestId, why, connectBusy ? ERROR_BUSY : 0);
+        }
+        SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
       } else if (cmd.op == Op::Challenge || cmd.op == Op::LockCredChallenge) {
         ControlUnlockChallengeMessage m{};
         m.requestId = cmd.challenge.requestId;
-        m.status = static_cast<uint16_t>(UnlockStage::InternalError);
-        challengeResults_[TxKey{cmd.cookie, cmd.challenge.requestId}] = m;
+        m.status = static_cast<uint16_t>(why);
+        m.reserved = cmd.op == Op::LockCredChallenge ? kUnlockPurposeLockCred : kUnlockPurposeUnlock;
+        if (live) challengeResults_[TxKey{cmd.cookie, cmd.challenge.requestId}] = m;
       } else if (cmd.op == Op::Capabilities) {
-        capsInFlight_ = false;  // unknown: asked again -- after a pause (no service: no 3 s loop per pong)
-        capsRetryAfterMs_ = GetTickCount64() + kCapsRetryMs;
-        lockCredSupport_ = LockCredSupport::Unknown;
-      } else {
+        capsInFlight_ = false;
+        if (connectBusy) {
+          // Another host's transaction holds the pipe: what this service said stays (its age still counts),
+          // and it is asked again soon -- not hidden for a minute because another host is busy.
+          capsRetryAfterMs_ = GetTickCount64() + 5000;
+        } else {
+          // unknown: asked again -- after a pause (no service: no 3 s loop per pong)
+          capsRetryAfterMs_ = GetTickCount64() + kCapsRetryMs;
+          lockCredSupport_ = LockCredSupport::Unknown;
+        }
+      } else if (live) {
         statusAnswered_[TxKey{cmd.cookie, cmd.statusRequestId}] = ++statusSeq_;
       }
       cv_.notify_all();
@@ -328,7 +451,8 @@ void HostUnlockRelay::WorkerLoop() {
                                                                         : SecureUnlockKind::ChallengeRequest);
       req.requestId = cmd.challenge.requestId;
       req.clientSessionCookie = cmd.cookie;
-      const Io io = Exchange(pipe, &req, sizeof(req), buf, sizeof(buf), sizeof(SecureUnlockChallengeResponse), shortDeadlineMs_);
+      const Io io = Exchange(pipe, &req, sizeof(req), buf, sizeof(buf), sizeof(SecureUnlockChallengeResponse),
+                             budget(shortDeadlineMs_));
       ControlUnlockChallengeMessage out{};
       SecureUnlockChallengeResponse resp{};
       if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
@@ -347,18 +471,25 @@ void HostUnlockRelay::WorkerLoop() {
       }
       // Q2: an issued challenge holds the pipe for its seal (the service binds it to this connection) -- no
       // longer than the challenge lives; a refused one lets it go.
-      if (out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
-        hold_for(kChallengeHoldMs, cmd.cookie);
-      } else {
-        drop_pipe();
-      }
       std::lock_guard<std::mutex> lk(mu_);
       const TxKey key{cmd.cookie, cmd.challenge.requestId};
-      if (cmd.op == Op::LockCredChallenge && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
-        lockCredRequests_[key] = true;
+      // r3 L1-R: published only for the transaction still alive -- its session may have ended (or started a
+      // newer one) while this exchange ran; then nothing is kept and nothing is held for it.
+      const bool live = IsLiveLocked(cmd, cmd.challenge.requestId);
+      if (live && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
+        hold_for(challengeHoldMs_, cmd, cmd.challenge.requestId, false);
+      } else if (!(holdUntilMs != 0 && heldCookie == cmd.cookie && heldRequestId != cmd.challenge.requestId)) {
+        // A refusal lets the pipe go -- unless it refused a second request of the session whose OTHER
+        // transaction is held here (Q1 "pending"): that one's state in the service lives on this connection.
+        drop_pipe();
       }
-      sealedResults_.erase(key);  // a new challenge of this transaction: nothing earlier stands for it
-      challengeResults_[key] = out;
+      if (live) {
+        if (cmd.op == Op::LockCredChallenge && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
+          lockCredRequests_[key] = true;
+        }
+        sealedResults_.erase(key);  // a new challenge of this transaction: nothing earlier stands for it
+        challengeResults_[key] = out;
+      }
       cv_.notify_all();
     } else if (cmd.op == Op::Status) {
       // lockscreen-cred r1: where a typed lock-screen credential is now (r2: of THIS control session).
@@ -367,7 +498,7 @@ void HostUnlockRelay::WorkerLoop() {
       q.requestId = cmd.statusRequestId;
       q.clientSessionCookie = cmd.cookie;
       SecureUnlockResult resp{};
-      const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), shortDeadlineMs_);
+      const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), budget(shortDeadlineMs_));
       if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
       const bool valid = io == Io::Ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
                          resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) && resp.requestId == q.requestId;
@@ -378,15 +509,20 @@ void HostUnlockRelay::WorkerLoop() {
       }
       std::lock_guard<std::mutex> lk(mu_);
       const TxKey key{cmd.cookie, q.requestId};
-      if (sealedResults_.count(key) != 0) {  // only a transaction still kept (its session not ended)
-        // The connection the job was on is gone, and with it the job's state in the service: unconfirmed.
-        sealedResults_[key] = valid ? to_control_result(resp) : failed_result(q.requestId, UnlockStage::UnlockUnconfirmed);
+      // r3 L1-R: only a transaction still alive (its session not ended) -- never recreated by a late answer.
+      if (IsLiveLocked(cmd, q.requestId)) {
+        if (sealedResults_.count(key) != 0) {
+          // The connection the job was on is gone, and with it the job's state in the service: unconfirmed.
+          sealedResults_[key] = valid ? to_control_result(resp) : failed_result(q.requestId, UnlockStage::UnlockUnconfirmed);
+        }
+        statusAnswered_[key] = ++statusSeq_;
       }
-      statusAnswered_[key] = ++statusSeq_;
       cv_.notify_all();
     } else {
+      // r3 L5-R: within what is left of its challenge's hold -- the service's own commit fence ends at that
+      // challenge's expiry (30 s), before this hold does (35 s).
       const Io io = Exchange(pipe, &cmd.seal_ipc, sizeof(cmd.seal_ipc), buf, sizeof(buf), sizeof(SecureUnlockResult),
-                             sealedDeadlineMs_);
+                             budget(sealedDeadlineMs_));
       ControlUnlockStatusResultMessage out{};
       SecureUnlockResult resp{};
       if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
@@ -398,19 +534,18 @@ void HostUnlockRelay::WorkerLoop() {
                                                                    : UnlockStage::InternalError);
         io_failed();
       }
-      // Q2: a typed lock-screen credential waits for its unlock on this connection (the service's bounded
-      // wait); anything final ends the transaction.
-      if (out.terminal) {
-        drop_pipe();
-      } else {
-        hold_for(kTypedHoldMs, cmd.cookie);
-      }
       SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
       std::lock_guard<std::mutex> lk(mu_);
       const TxKey key{cmd.cookie, cmd.seal.requestId};
-      if (challengeResults_.count(key) != 0 || lockCredRequests_.count(key) != 0 || sealedResults_.count(key) != 0) {
-        sealedResults_[key] = out;  // a session that ended meanwhile keeps nothing
+      const bool live = IsLiveLocked(cmd, cmd.seal.requestId);
+      // Q2: a typed lock-screen credential waits for its unlock on this connection (the service's bounded
+      // wait); anything final -- or a session that ended meanwhile (r3 L1-R) -- ends the transaction.
+      if (out.terminal || !live) {
+        drop_pipe();
+      } else {
+        hold_for(typedHoldMs_, cmd, cmd.seal.requestId, true);
       }
+      if (live) sealedResults_[key] = out;  // a session that ended meanwhile keeps nothing
       cv_.notify_all();
     }
     activeCookie_.store(0, std::memory_order_release);
@@ -439,6 +574,7 @@ bool HostUnlockRelay::ChallengeSync(const ControlUnlockChallengeRequestMessage& 
     cmd.op = Op::Challenge;
     cmd.challenge = req;
     cmd.cookie = clientSessionCookie;
+    cmd.txGen = liveTx_[key] = ++txGenSeq_;  // r3 L1-R: a transaction starts with its challenge
     queue_.push_back(cmd);
     // A transaction is remembered from its challenge, so its sealed result has a place to land.
     sealedResults_.erase(key);
@@ -475,6 +611,8 @@ void HostUnlockRelay::SealedAsync(const ControlUnlockSealedRequestMessage& req, 
       SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
       return;
     }
+    auto live = liveTx_.find(key);
+    cmd.txGen = live != liveTx_.end() ? live->second : 0;  // r3 L1-R: of the transaction its challenge started
     queue_.push_back(cmd);
   }
   cv_.notify_all();
@@ -493,10 +631,13 @@ void HostUnlockRelay::EndSession(uint64_t clientSessionCookie) {
   if (!running_.load()) return;  // no worker: nothing held
   {
     std::lock_guard<std::mutex> lk(mu_);
-    // L1: everything kept for this session's transactions goes with it.
+    // L1: everything kept for this session's transactions goes with it -- and (r3 L1-R) the transactions
+    // themselves, so an exchange of it still on the pipe publishes nothing when it completes.
     for (auto* m : {&challengeResults_}) {
       for (auto it = m->begin(); it != m->end();) it = it->first.cookie == clientSessionCookie ? m->erase(it) : std::next(it);
     }
+    for (auto it = liveTx_.begin(); it != liveTx_.end();)
+      it = it->first.cookie == clientSessionCookie ? liveTx_.erase(it) : std::next(it);
     for (auto it = sealedResults_.begin(); it != sealedResults_.end();)
       it = it->first.cookie == clientSessionCookie ? sealedResults_.erase(it) : std::next(it);
     for (auto it = lockCredRequests_.begin(); it != lockCredRequests_.end();)
@@ -530,7 +671,7 @@ void HostUnlockRelay::ProbeLockCredAsync() {
     const uint64_t now = GetTickCount64();
     if (capsInFlight_) return;
     if (lockCredSupport_ == LockCredSupport::Supported && now - capsCheckedMs_ < kCapsRefreshMs) return;
-    if (lockCredSupport_ != LockCredSupport::Supported && now < capsRetryAfterMs_) return;
+    if (now < capsRetryAfterMs_) return;  // r3: also after a busy pipe, whatever the answer kept
     capsInFlight_ = true;
   }
   EnsureWorker();
@@ -565,6 +706,7 @@ bool HostUnlockRelay::LockCredChallengeSync(const ControlUnlockChallengeRequestM
     cmd.op = Op::LockCredChallenge;
     cmd.challenge = req;
     cmd.cookie = clientSessionCookie;
+    cmd.txGen = liveTx_[key] = ++txGenSeq_;  // r3 L1-R
     queue_.push_back(cmd);
   }
   cv_.notify_all();
@@ -593,6 +735,8 @@ bool HostUnlockRelay::RefreshLockCredStatus(uint64_t clientSessionCookie, uint32
     cmd.op = Op::Status;
     cmd.cookie = clientSessionCookie;
     cmd.statusRequestId = requestId;
+    auto live = liveTx_.find(key);
+    cmd.txGen = live != liveTx_.end() ? live->second : 0;  // r3 L1-R
     queue_.push_back(cmd);
   }
   cv_.notify_all();
