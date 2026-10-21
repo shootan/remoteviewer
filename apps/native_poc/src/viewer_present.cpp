@@ -12,6 +12,7 @@
 #include "viewer_log.hpp"
 #include "viewer_nv12_renderer.hpp"
 #include "viewer_overlay_draw.hpp"
+#include "viewer_restore.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -341,6 +342,8 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
   if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) note_present_result(ctx, hwnd, presented);
   if (presented) {
     ctx.present.hasPresentedAtLeastOneFrame = true;
+    // dxgi-wedge-fix r2 D2: the only point a picked target counts as seen (and is reported to the shell).
+    if (!pickerVisible) restore_frame_presented(ctx, frameStreamGeneration);
     ctx.frameBuf.lastPresentedVersion.store(frameVersion, std::memory_order_relaxed);
     // A synthetic (kick / refresh) frame carries the kick time, not a capture time: it must not move
     // the present anchor, or the next real frame a slow host readback delivers late reads as "behind

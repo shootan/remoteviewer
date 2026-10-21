@@ -18,18 +18,12 @@ struct RestoreState {
   Phase phase = Phase::None;
   std::string failReason;
   uint64_t waitingSinceUs = 0;
-  bool monitorListAsked = false;
-  uint64_t monitorListAskedUs = 0;
-  std::string lastReported;
   bool reconnect = false;  // started by the shell's automatic reconnect ("재연결 중")
-  bool revealed = false;   // a target has been confirmed and rendered in this viewer (reports may follow)
-  // cross-thread: the control thread arms a report after a screen switch outside the picker gate
-  // (armed = the generation of the last decoded frame at that moment, +1 so 0 means "not armed");
-  // the recv thread posts once a NEWER generation decodes.
-  std::atomic<uint64_t> reportAfterGenerationPlusOne{0};
-  std::atomic<uint64_t> lastDecodedGeneration{0};
-  // cross-thread: control thread notes whether the window list said the host selects screens through
-  // the window-select transaction (0x8); the UI thread reads it.
+  // r2 D2: what the picker was last asked to select (begin_pc_target_selection), armed at its reveal and
+  // committed -- reported to the shell -- only when a frame of it is presented.
+  std::optional<RestoreTarget> picked;
+  RestoreCommitTracker commit;
+  // cross-thread: control thread notes the host's window list arrived; the UI thread reads it.
   std::atomic<bool> windowListSeen{false};
 };
 

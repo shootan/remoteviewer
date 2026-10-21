@@ -252,7 +252,8 @@ int create_window_and_toolbar(ViewerContext& ctx) {
       send_host_key_chord(ctx, VK_LMENU, VK_TAB, "switch-window");
     };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
-      ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
+      // dxgi-wedge-fix r2 D1: what is on screen is no longer known to be the logical desktop.
+      if (ctx.picker.windowPanel.RequestMonitorSelect(monitorId)) restore_note_toolbar_monitor(ctx);
     };
     // Remote reboot (prelogin-service r3): the in-menu item opens a confirm popup; the warning line is
     // shown when the host is NOT durable-enabled. Only on 확인 does the control thread send one request.

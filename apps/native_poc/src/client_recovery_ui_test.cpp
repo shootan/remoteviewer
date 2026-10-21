@@ -660,10 +660,9 @@ int main(int argc, char** argv) {
     // is what the shell decided.
     {
       const std::filesystem::path state = std::filesystem::path(fixture) / "restore-launch.txt";
-      const std::string screen = R"(\\.\DISPLAY2)";
-      std::string hex;
-      for (unsigned char c : screen) { char h[3]; std::snprintf(h, 3, "%02x", c); hex += h; }
-      const std::string target = "desktop:" + hex + ":1920,0,1920,1080:0";
+      // r2 D1: the descriptor is "desktop" (the logical desktop) / "monitor" / "window"; the shell passes it
+      // through unchanged, so the restorable one is what this checks.
+      const std::string target = "desktop";
       const std::string reportLine = "[viewer-restore] target=" + target;
       wchar_t selfPath[MAX_PATH]{};
       GetModuleFileNameW(nullptr, selfPath, MAX_PATH);

@@ -1064,15 +1064,7 @@ void ControlClient::Run() {
           break;
         }
         case TcpControlResponseKind::MonitorList: {
-          const uint32_t before = ctx.picker.windowPanel.Snapshot().selectedMonitorId;
           ctx.picker.windowPanel.ApplyMonitorList(response.monitorList);
-          // dxgi-wedge-fix r1: a screen switch outside the picker (the toolbar's): report it to the
-          // shell once a frame of the new capture has decoded.
-          if (!ctx.picker.visible.load(std::memory_order_relaxed) &&
-              response.monitorList.selectedMonitorId != before) {
-            restore_note_monitor_switch(ctx, 0);
-          }
-          if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgRestoreStep, 0, 0);
           break;
         }
         case TcpControlResponseKind::WindowSelected:

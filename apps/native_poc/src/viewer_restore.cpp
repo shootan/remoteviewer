@@ -1,42 +1,21 @@
-// See viewer_restore.hpp (dxgi-wedge-fix r1, Codex B6).
+// See viewer_restore.hpp (dxgi-wedge-fix r1, Codex B6; r2 D1/D2).
 
 #include "viewer_state.hpp"
 #include "viewer_restore.hpp"
 
 #include <iostream>
-#include <sstream>
-#include <vector>
 
 #include "monitor_select_target.hpp"
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_restore_target.hpp"
-#include "viewer_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
 namespace {
 
-// How long a restore may wait for the new host's lists before it gives up and leaves the picker up.
+// How long a restore may wait for the new host's window list before it gives up and leaves the picker up.
 constexpr uint64_t kRestoreListWaitUs = 15'000'000;
-// A primary screen is restored as plain "desktop" if the monitor list has not come by then.
-constexpr uint64_t kRestorePrimaryFallbackUs = 4'000'000;
-
-std::vector<RestoreMonitor> listed_monitors(const WindowPanelSnapshot& snap) {
-  std::vector<RestoreMonitor> out;
-  for (const auto& m : snap.monitors) {
-    RestoreMonitor r;
-    r.id = m.id;
-    r.name = m.name;
-    r.x = m.x;
-    r.y = m.y;
-    r.width = m.width;
-    r.height = m.height;
-    r.primary = m.primary;
-    out.push_back(std::move(r));
-  }
-  return out;
-}
 
 void fail(ViewerState& ctx, const std::string& reason) {
   auto& r = ctx.picker.restore;
@@ -46,16 +25,10 @@ void fail(ViewerState& ctx, const std::string& reason) {
   if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
 
-void request(ViewerState& ctx, uint64_t windowId, const std::string& what) {
-  auto& r = ctx.picker.restore;
-  // The picker's own transaction: the picker stays up until the first frame of the generation the
-  // host answers with, exactly as after a click.
-  if (begin_pc_target_selection(ctx, windowId, "restore_requested")) {
-    r.phase = RestoreState::Phase::Requested;
-    log_client_line(ctx, "[native-video-client][restore] requested " + what);
-  } else {
-    fail(ctx, "select_refused");
-  }
+void report(ViewerState& ctx, const RestoreTarget& t, const char* why) {
+  // Its own stdout line, unprefixed, so the shell's pump can match it exactly.
+  log_client_line(ctx, FormatRestoreLine(t));
+  log_client_line(ctx, std::string("[native-video-client][restore] reported why=") + why);
 }
 
 }  // namespace
@@ -77,16 +50,12 @@ void restore_init(ViewerState& ctx, const std::string& restoreArg, bool reconnec
 }
 
 void restore_step(ViewerState& ctx, HWND hwnd) {
+  (void)hwnd;
   auto& r = ctx.picker.restore;
-  if (r.phase != RestoreState::Phase::Waiting || !r.target) {
-    // Not restoring: once something has been revealed, a monitor list that arrived since (asked for in
-    // restore_on_reveal) turns a bare "desktop" report into the screen's identity. Deduplicated.
-    if (r.revealed && !ctx.picker.visible.load(std::memory_order_relaxed)) restore_report_current(ctx, "monitor_list");
-    return;
-  }
-  if (r.target->kind == RestoreTarget::Kind::Window) {
-    // B6: a window is not restored automatically -- another window must never be picked by mistake.
-    fail(ctx, "window_not_restored");
+  if (r.phase != RestoreState::Phase::Waiting || !r.target) return;
+  // Decided before waiting on anything: a target that is never restored does not keep the user waiting.
+  if (r.target->kind != RestoreTarget::Kind::Desktop) {
+    fail(ctx, DecideRestore(*r.target, false).failReason);
     return;
   }
   const bool connected = ctx.control.connected.load(std::memory_order_relaxed);
@@ -96,106 +65,70 @@ void restore_step(ViewerState& ctx, HWND hwnd) {
     return;
   }
   if (ctx.sel.pending.load(std::memory_order_acquire)) return;  // a pick already in flight
-  const WindowPanelSnapshot snap = ctx.picker.windowPanel.Snapshot();
-  if (snap.selectionLocked) {
-    fail(ctx, "target_locked_by_host");
+  const RestoreDecision d = DecideRestore(*r.target, ctx.picker.windowPanel.Snapshot().selectionLocked);
+  if (!d.selectDesktop) {
+    fail(ctx, d.failReason);
     return;
   }
-  if (!r.target->hasMonitor) {
-    request(ctx, 0, "desktop");
-    return;
+  // The desktop card's own transaction: the picker stays up until the first frame of the generation
+  // the host answers with, exactly as after a click; the host captures its current primary screen.
+  if (begin_pc_target_selection(ctx, 0, "restore_requested")) {
+    r.phase = RestoreState::Phase::Requested;
+    log_client_line(ctx, "[native-video-client][restore] requested desktop");
+  } else {
+    fail(ctx, "select_refused");
   }
-  if (!snap.hostSupportsMonitors) {
-    // A host that lists no screens has one desktop; it is the same screen only if that was the primary.
-    if (r.target->primary) {
-      request(ctx, 0, "desktop (host lists no screens; was the primary)");
-    } else {
-      fail(ctx, "monitor_list_unsupported");
-    }
-    return;
-  }
-  if (snap.monitors.empty()) {
-    if (!r.monitorListAsked) {
-      r.monitorListAsked = true;
-      r.monitorListAskedUs = qpc_now_us();
-      ctx.picker.windowPanel.RequestMonitorList();
-    } else if (r.target->primary && qpc_now_us() - r.monitorListAskedUs > kRestorePrimaryFallbackUs) {
-      // The primary screen is what "desktop" captures on a new host anyway: a list that does not come
-      // must not keep the user off the screen they were on (the field case is a one-screen PC).
-      request(ctx, 0, "desktop (was the primary; no monitor list after 4 s)");
-    } else if (qpc_now_us() - r.waitingSinceUs > kRestoreListWaitUs) {
-      fail(ctx, "monitor_list_timeout");
-    }
-    return;
-  }
-  const RestoreMatch m = MatchRestoreMonitor(*r.target, listed_monitors(snap));
-  if (m.kind != RestoreMatchKind::Matched) {
-    fail(ctx, m.reason());
-    return;
-  }
-  if (m.primary) {
-    // The new host captures its primary screen for "desktop": the same one-transaction pick a click on
-    // the desktop card makes.
-    request(ctx, 0, "desktop monitor=" + std::to_string(m.monitorId) + " (primary)");
-    return;
-  }
-  if (!snap.hostSupportsMonitorSelect) {
-    fail(ctx, "monitor_select_unsupported");
-    return;
-  }
-  request(ctx, encode_monitor_select_target(m.monitorId), "desktop monitor=" + std::to_string(m.monitorId));
-  (void)hwnd;
 }
 
-void restore_on_reveal(ViewerState& ctx) {
+void restore_note_pick(ViewerState& ctx, uint64_t windowId) {
   auto& r = ctx.picker.restore;
-  if (r.phase == RestoreState::Phase::Requested) {
-    r.phase = RestoreState::Phase::Done;
-    log_client_line(ctx, "[native-video-client][restore] result=restored target=" +
-                             (r.target ? FormatRestoreArg(*r.target) : std::string("?")));
-  } else if (r.phase == RestoreState::Phase::Failed) {
+  RestoreTarget t;
+  if (windowId == 0) {
+    t.kind = RestoreTarget::Kind::Desktop;
+  } else if (classify_select_target(windowId).kind != SelectTargetKind::Window) {
+    t.kind = RestoreTarget::Kind::Monitor;
+  } else {
+    t.kind = RestoreTarget::Kind::Window;
+  }
+  r.picked = t;
+  // A new pick replaces whatever was waiting to be seen.
+  r.commit.Cancel();
+}
+
+void restore_on_reveal(ViewerState& ctx, uint64_t generation) {
+  auto& r = ctx.picker.restore;
+  if (r.phase == RestoreState::Phase::Failed) {
     // The user picked something themselves: the failure line no longer applies.
     r.phase = RestoreState::Phase::Done;
   }
-  r.revealed = true;
-  restore_report_current(ctx, "reveal");
-  // The PC viewer does not fetch the screen list on its own in picker mode; without it the report can
-  // only say "desktop" (= the primary on a new host). Ask once, so a secondary screen can be named.
-  const WindowPanelSnapshot snap = ctx.picker.windowPanel.Snapshot();
-  if (snap.hostSupportsMonitors && snap.monitors.empty()) ctx.picker.windowPanel.RequestMonitorList();
+  if (r.picked) r.commit.Arm(*r.picked, generation);
+  r.picked.reset();
+  log_client_line(ctx, "[native-video-client][restore] revealed gen=" + std::to_string(generation) +
+                           " (reported once presented)");
 }
 
-void restore_report_current(ViewerState& ctx, const char* why) {
+void restore_frame_presented(ViewerState& ctx, uint64_t generation) {
   auto& r = ctx.picker.restore;
-  const WindowPanelSnapshot snap = ctx.picker.windowPanel.Snapshot();
-  RestoreTarget t;
-  if (snap.selectedId != 0) {
-    t.kind = RestoreTarget::Kind::Window;
-  } else {
-    for (const auto& m : snap.monitors) {
-      if (m.id != snap.selectedMonitorId || m.name.empty()) continue;
-      t.hasMonitor = true;
-      t.monitorName = m.name;
-      t.x = m.x;
-      t.y = m.y;
-      t.width = m.width;
-      t.height = m.height;
-      t.primary = m.primary;
-    }
+  const auto committed = r.commit.OnPresented(generation);
+  if (!committed) return;
+  report(ctx, *committed, "presented");
+  if (r.phase == RestoreState::Phase::Requested) {
+    r.phase = RestoreState::Phase::Done;
+    log_client_line(ctx, "[native-video-client][restore] result=restored target=" + FormatRestoreArg(*committed) +
+                             " gen=" + std::to_string(generation));
   }
-  const std::string line = FormatRestoreLine(t);
-  if (line == r.lastReported) return;
-  r.lastReported = line;
-  // Its own stdout line, unprefixed, so the shell's pump can match it exactly.
-  log_client_line(ctx, line);
-  log_client_line(ctx, std::string("[native-video-client][restore] reported why=") + why);
 }
 
-void restore_note_monitor_switch(ViewerState& ctx, uint64_t /*unused*/) {
-  // Arm: the next frame of a NEWER generation than the last decoded one is the switched screen's.
+void restore_note_toolbar_monitor(ViewerState& ctx) {
+  // The legacy screen switch is answered before it is applied and keeps the stream generation, so no
+  // frame can be told to be the new screen's. What is on screen is then no longer known to be the
+  // logical desktop: report a target a reconnect never restores (the picker), never the desktop.
+  RestoreTarget t;
+  t.kind = RestoreTarget::Kind::Monitor;
   auto& r = ctx.picker.restore;
-  r.reportAfterGenerationPlusOne.store(r.lastDecodedGeneration.load(std::memory_order_acquire) + 1,
-                                       std::memory_order_release);
+  const bool changed = r.commit.Committed() != std::optional<RestoreTarget>(t);
+  r.commit.Downgrade(t);
+  if (changed) report(ctx, t, "toolbar_monitor_switch");
 }
 
 }  // namespace remote60::native_poc::viewer

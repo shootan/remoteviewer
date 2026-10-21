@@ -306,7 +306,7 @@ int main() {
     PostMessageW(viewer1, WM_LBUTTONUP, 0, at);
     require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid1).find("[viewer-restore] target=desktop") !=
                                     std::string::npos; }, 30000),
-            "the desktop card pressed: confirmed by the host, first frame decoded, reported to the shell");
+            "the desktop card pressed: confirmed by the host, its frame PRESENTED, reported to the shell");
     const std::string reported = [&] {
       const std::string v = lines_of_pid(viewer_log_text(), pid1);
       const size_t a = v.rfind("[viewer-restore] target=");

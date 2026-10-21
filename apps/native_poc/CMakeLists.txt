@@ -2839,12 +2839,24 @@ add_executable(remote60_host_os_snapshot_test src/host_os_snapshot_test.cpp src/
 target_include_directories(remote60_host_os_snapshot_test PRIVATE src)
 target_link_libraries(remote60_host_os_snapshot_test PRIVATE user32)
 
-# dxgi-wedge-fix r1 (Bⓑ1): the restore handoff's wire forms and the screen match (pure-logic).
+# dxgi-wedge-fix r1/r2 (Bⓑ1, D1/D2): the restore handoff's wire forms, what a restore selects, and when a
+# target counts as seen (pure-logic). The two mutants must FAIL it: commit at the reveal instead of the
+# present (r1's D2 defect), and an explicit screen restored as the desktop (r1's D1 shortcut).
 add_executable(remote60_viewer_restore_target_test
   src/viewer_restore_target_test.cpp
   src/viewer_restore_target.cpp
 )
 target_include_directories(remote60_viewer_restore_target_test PRIVATE src)
+foreach(_mutant COMMIT_ON_ARM MONITOR_AS_DESKTOP)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_viewer_restore_target_mutant_${_mutant_lower}_test
+    src/viewer_restore_target_test.cpp
+    src/viewer_restore_target.cpp
+  )
+  target_include_directories(remote60_viewer_restore_target_mutant_${_mutant_lower}_test PRIVATE src)
+  target_compile_definitions(remote60_viewer_restore_target_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_RESTORE_MUTANT_${_mutant}=1)
+endforeach()
 
 # dxgi-wedge-fix r1: the persistent DXGI quarantine store (format, decision, protected folder, links, limit, lock).
 add_executable(remote60_capture_recovery_store_test
@@ -2855,6 +2867,22 @@ add_executable(remote60_capture_recovery_store_test
 )
 target_include_directories(remote60_capture_recovery_store_test PRIVATE src)
 target_link_libraries(remote60_capture_recovery_store_test PRIVATE advapi32 remote60_test_scratch_dir)
+# r2 D3 mutants (each must FAIL the same test): r1 carried a refused future `last` on; r1 created the
+# lock file unshared and did not retry a sharing violation.
+foreach(_mutant CONTINUE_FUTURE UNSHARED_LOCK_CREATE)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_capture_recovery_store_mutant_${_mutant_lower}_test
+    src/capture_recovery_store_test.cpp
+    src/capture_recovery_store.cpp
+    src/capture_adapter_identity.cpp
+    src/prelogin_store_chain.cpp
+  )
+  target_include_directories(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE src)
+  target_link_libraries(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE advapi32
+    remote60_test_scratch_dir)
+  target_compile_definitions(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_STORE_MUTANT_${_mutant}=1)
+endforeach()
 
 # prelogin-ui r7 (H6): the viewer's input gate before the role is known and at the send.
 add_executable(remote60_prelogin_input_gate_test
@@ -4155,4 +4183,3 @@ if(GNLINK_HAVE_WEBVIEW2)
   target_link_libraries(remote60_client_reconnect_restore_e2e_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_client_reconnect_restore_e2e_test remote60_client_shell remote60_native_video_client_poc)
 endif()
-

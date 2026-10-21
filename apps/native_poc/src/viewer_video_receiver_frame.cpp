@@ -14,7 +14,6 @@
 #include "viewer_overlay_draw.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
-#include "viewer_restore_frame.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -375,8 +374,6 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       post_pc_selection_reveal(ctx, h.streamGeneration,
                                ctx.sel.epoch.load(std::memory_order_acquire));
     }
-    // dxgi-wedge-fix r1: a toolbar screen switch is reported once a NEWER generation decodes.
-    restore_frame_decoded(ctx, h.streamGeneration);
     // While the picker overlays a live stream, WM_PAINT redraws the picker (not the video), so
     // a per-frame invalidate would repaint the whole card grid at video cadence for nothing.
     // The reveal above and the picker-close handler invalidate on their own, so the newest
