@@ -13300,3 +13300,7 @@ Next
   - L1-R: 트랜잭션은 challenge 때 번호를 받고 EndSession 이 지운다. challenge/status/sealed/busy/실패 결과는 그 번호가 살아 있을 때만 남긴다. 살아 있지 않은 seal·status 는 서비스로 보내지 않는다.
   - 시험(이 PC 콘솔, 격리 test build): e2e lock-screen **44/44 ×2**(새 UX-R: 시험 프로세스가 Host A 로서 서비스에서 실제 잠금 challenge 를 받아 둔 채 → 제품 뷰어 클릭 → Busy 창·무입력·A 연결 무사 → A 종료 뒤 수동 재시도로 입력 성공 / 대조: 일반 오류 창은 Busy 문구 없음), prelogin 79, not-prelogin 28. 단위 relay **37/37 ×3**, lockcred 54, secure_unlock_service 12, prelogin_cred_host 43, pipe gate PASS, gate 19/9, window_proc_isolated 42/42 ×2(다른 작업자의 AVD 실행 중에는 화면 캡처 항목 2~5개 FAIL → 끝난 뒤 재실행 PASS, display-capture 의존).
   - 변이: N1(fence 에 원래 만료 없음)·N3/N4(challenge/status 무조건 게시)·N5(busy 를 InternalError 로)·U1(파이프 busy 미인식, 제품 UI) 은 각각 해당 시험이 FAIL. N2(대기열이 빌 때만 마감)는 단독으로는 통과한다 — 교환별 남은 시간 예산이 같은 상한을 지키기 때문이다(예산만 제거해도 통과). 둘 다 제거한 N2b(=r2) 는 FAIL(다음 Host 8.5 s 대기, 마감 뒤 status 210회). 모두 원복 뒤 PASS.
+- **r4 (Codex 53506ab NEEDS_CHANGES, `codex_lockcred_impl_r3.md` R1/R2)**:
+  - R1: 이미 typed 로 보유 중인 같은 트랜잭션의 sealed 재전송(서비스는 재입력 없이 다시 “typed” 로 답함)은 보유 마감을 다시 시작하지 않는다. 최초 typed 마감을 유지한다.
+  - R2: Busy 문구에서 “(길어야 2분)” 을 뺐다(보장되지 않는 수치). 위 r3 줄의 문구는 r3 당시 것이다.
+  - 시험: relay **41/41 ×3**. 보유 2 s 시험 seam 에서 0.5 s·1.0 s·1.3 s(+0.3 s 지연 응답)에 같은 sealed 를 재전송했다. 서비스에 3회 도달했고, 최초 마감에서 다음 Host 의 challenge 가 발급됐으며, 거래는 UnlockUnconfirmed 로 끝났다. 대조: 최종 답 뒤 재전송은 보내지 않는다. 변이(재전송마다 마감 재시작) → 다음 Host FAIL, 원복 PASS. e2e lock-screen 44/44 1회(Busy 창 캡처에 새 문구).
