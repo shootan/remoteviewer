@@ -19,6 +19,8 @@ namespace {
 
 // How long a restore may wait for the new host's lists before it gives up and leaves the picker up.
 constexpr uint64_t kRestoreListWaitUs = 15'000'000;
+// A primary screen is restored as plain "desktop" if the monitor list has not come by then.
+constexpr uint64_t kRestorePrimaryFallbackUs = 4'000'000;
 
 std::vector<RestoreMonitor> listed_monitors(const WindowPanelSnapshot& snap) {
   std::vector<RestoreMonitor> out;
@@ -115,7 +117,12 @@ void restore_step(ViewerState& ctx, HWND hwnd) {
   if (snap.monitors.empty()) {
     if (!r.monitorListAsked) {
       r.monitorListAsked = true;
+      r.monitorListAskedUs = qpc_now_us();
       ctx.picker.windowPanel.RequestMonitorList();
+    } else if (r.target->primary && qpc_now_us() - r.monitorListAskedUs > kRestorePrimaryFallbackUs) {
+      // The primary screen is what "desktop" captures on a new host anyway: a list that does not come
+      // must not keep the user off the screen they were on (the field case is a one-screen PC).
+      request(ctx, 0, "desktop (was the primary; no monitor list after 4 s)");
     } else if (qpc_now_us() - r.waitingSinceUs > kRestoreListWaitUs) {
       fail(ctx, "monitor_list_timeout");
     }

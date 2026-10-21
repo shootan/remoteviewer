@@ -19,6 +19,7 @@ struct RestoreState {
   std::string failReason;
   uint64_t waitingSinceUs = 0;
   bool monitorListAsked = false;
+  uint64_t monitorListAskedUs = 0;
   std::string lastReported;
   bool reconnect = false;  // started by the shell's automatic reconnect ("재연결 중")
   bool revealed = false;   // a target has been confirmed and rendered in this viewer (reports may follow)
