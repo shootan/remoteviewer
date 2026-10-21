@@ -932,8 +932,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun pressEnter() {
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
+        queueRemoteInput(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
+        queueRemoteInput(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
     }
 
     private fun qualityLabel(): String = getString(
@@ -2259,6 +2259,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        // sh-filter r2: TextureView has just set this SurfaceTexture's default buffer size to the VIEW's size
+        // (width x height) before calling us -- the size we set is gone. The decoder's own buffers never
+        // noticed (they carry their size), but the sharpening pass's EGL window surface takes the default
+        // size, and was then drawn at 1970x1080 for a 1920x1080 picture (resampled twice: blurred). Seen
+        // when the rotation to landscape came after the bind. Forget the cached size so the sync sets it again.
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
         syncVideoSurface(forceRebind = false)
     }
 
@@ -2988,7 +2995,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     lastTouchVideoY = mapped.second
                     scrollLastTouchY = event.getY(pointerIndex)
                     scrollWheelCarryPx = 0f
-                    val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    val queued = queueRemoteInput(
                         INPUT_KIND_MOUSE_MOVE,
                         mapped.first,
                         mapped.second,
@@ -3025,7 +3032,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 touchDragLatched = false
                 lastTouchVideoX = downX
                 lastTouchVideoY = downY
-                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                val queued = queueRemoteInput(
                     INPUT_KIND_MOUSE_DOWN,
                     downX,
                     downY,
@@ -3069,7 +3076,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             (abs(scrollWheelCarryPx) / scrollGestureStepPx).toInt()
                         }
                     if (stepCount > 0) {
-                        val queued = NativeSessionBridge.nativeQueueInputEvent(
+                        val queued = queueRemoteInput(
                             INPUT_KIND_MOUSE_WHEEL,
                             lastTouchVideoX,
                             lastTouchVideoY,
@@ -3104,7 +3111,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_MOVE,
                     mapped.first,
                     mapped.second,
@@ -3150,7 +3157,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastTouchVideoY = upY
                 val wasSecondary = activeTouchIsSecondary
                 val wasTap = !touchDragLatched
-                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                val queued = queueRemoteInput(
                     INPUT_KIND_MOUSE_UP,
                     upX,
                     upY,
@@ -3215,7 +3222,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // last real touch was if the two are mixed.
                 lastTouchVideoX = virtualPointerX
                 lastTouchVideoY = virtualPointerY
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
                 )
                 syncVirtualMouseMarker()
@@ -3226,7 +3233,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (virtualPointerX < 0) {
                     virtualPointerX = contentRect.contentWidth / 2
                     virtualPointerY = contentRect.contentHeight / 2
-                    NativeSessionBridge.nativeQueueInputEvent(
+                    queueRemoteInput(
                         INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
                     )
                 }
@@ -3236,7 +3243,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             override fun onButtonDown(button: ViewerVirtualMouse.Button) {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = virtualButtonMask(button)
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_DOWN, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, activeTouchButtons,
                 )
@@ -3245,14 +3252,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             override fun onButtonUp(button: ViewerVirtualMouse.Button) {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = 0
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_UP, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, 0,
                 )
             }
 
             override fun onWheel(notches: Int) {
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_WHEEL, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), notches * INPUT_WHEEL_DELTA_STEP, 0, 0,
                 )
@@ -3462,7 +3469,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val direction = if (pinchZoomCarry > 0f) 1 else -1
             pinchZoomCarry -= direction * notches * step
             queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_DOWN)
-            NativeSessionBridge.nativeQueueInputEvent(
+            queueRemoteInput(
                 INPUT_KIND_MOUSE_WHEEL,
                 lastTouchVideoX,
                 lastTouchVideoY,
@@ -3812,7 +3819,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        val queued = NativeSessionBridge.nativeQueueInputEvent(
+        val queued = queueRemoteInput(
             INPUT_KIND_MOUSE_UP,
             lastTouchVideoX,
             lastTouchVideoY,
@@ -4072,7 +4079,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         val x = resolveKeyboardVideoCoord(lastTouchVideoX, videoWidth)
         val y = resolveKeyboardVideoCoord(lastTouchVideoY, videoHeight)
-        return NativeSessionBridge.nativeQueueInputEvent(
+        return queueRemoteInput(
             inputKind,
             x,
             y,
@@ -5123,6 +5130,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    /**
+     * Every input event to the host goes through here. sh-filter r2 (H5.1): in a TEST build the seam logs
+     * what was queued -- the remote (video) coordinate a touch became -- so the harness can check it against
+     * the point of the picture that was tapped; the shipped seam returns null and nothing is logged.
+     */
+    private fun queueRemoteInput(kind: Int, x: Int, y: Int, wheelDelta: Int, keyCode: Int, buttons: Int): Boolean {
+        val queued = NativeSessionBridge.nativeQueueInputEvent(kind, x, y, wheelDelta, keyCode, buttons)
+        SharpenTestSeam.inputLine(kind, x, y, buttons, queued)?.let { diagnosticsLog.log("seam_input", it) }
+        return queued
+    }
+
     // ---- sh-filter r1: the sharpening pass. SharpenPathPolicy decides who writes into the TextureView;
     // this executes its commands on the UI thread. The renderer's own thread does all GL. ----
     private var sharpness = SharpnessLevel.DEFAULT
@@ -5393,7 +5411,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "window: ${w.fields()} | segment: n=${seg.count} p95us=${seg.p95Us} | " +
                 "glAvail=${d[0]} glDrawn=${d[1]} glSkipped=${d[2]} glRedraws=${d[3]} " +
                 "drawWallUs=${(r?.lastDrawNs?.get() ?: 0L) / 1000} src=${r?.lastSourceSize ?: "-"} " +
-                "stepFromOutput=${r?.stepFromOutputSize?.get() ?: 0L}"
+                "stepFromOutput=${r?.stepFromOutputSize?.get() ?: 0L} srcNeOut=${r?.framesSourceNotOutput?.get() ?: 0L}"
         )
     }
 

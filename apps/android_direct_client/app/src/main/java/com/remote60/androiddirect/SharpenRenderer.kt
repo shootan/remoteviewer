@@ -85,6 +85,9 @@ class SharpenRenderer(
     val redraws = AtomicLong(0)
     /** r2 H5.3: frames whose visible size was not in the handoff ring (the output size was used instead). */
     val stepFromOutputSize = AtomicLong(0)
+    /** r2 H5.3: frames drawn while the output buffer was another size than the frame (a deferred resize);
+     *  their step was still the frame's own -- this counts that the case happened. */
+    val framesSourceNotOutput = AtomicLong(0)
     /** The visible source size the last frame was drawn with ("WxH"). */
     @Volatile var lastSourceSize: String = ""
         private set
@@ -262,7 +265,11 @@ class SharpenRenderer(
             val quarterTurn = kotlin.math.abs(texMatrix[1]) > kotlin.math.abs(texMatrix[0])
             if (quarterTurn) { val t = stepW; stepW = stepH; stepH = t }
             GLES20.glUniform2f(uStep, 1f / stepW, 1f / stepH)
-            if (newFrame) lastSourceSize = "${stepW}x${stepH}"
+            if (newFrame && sourceW > 0 && (sourceW != w[0] || sourceH != h[0])) framesSourceNotOutput.incrementAndGet()
+            if (newFrame) {
+                lastSourceSize = "${stepW}x${stepH} out=${w[0]}x${h[0]} turn=${if (quarterTurn) 1 else 0} " +
+                    "m=%.3f,%.3f,%.3f,%.3f".format(texMatrix[0], texMatrix[1], texMatrix[4], texMatrix[5])
+            }
             GLES20.glUniform1f(uStrength, strength)
             quad.position(0)
             GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 16, quad)
