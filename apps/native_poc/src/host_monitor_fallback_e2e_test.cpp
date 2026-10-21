@@ -23,6 +23,12 @@
 //   --old-client <udp_control_e2e>    a client that predates (2) against this host: its legacy
 //                                     monitor-select exchange still works (the APK gate it feeds is
 //                                     NOT fixed by this host -- that needs the new APK)
+//   --quarantine / --quarantine-control  dxgi-wedge-fix r1 (Codex B5/B7): the host started with the
+//                                     supervisor's REMOTE60_CAPTURE_DXGI_QUARANTINE (or, the control,
+//                                     without it). The APK's dxgi request on connect, a screen pick and
+//                                     back, desktop mode, and a leave/idle-detach/return must never start
+//                                     DXGI under the quarantine; the control run shows the same steps DO
+//                                     run DXGI without it -- so the probe can see DXGI at all.
 //
 // Loopback, staged in the repository's test scratch, isolated from the user's files, input
 // injection OFF. Without REMOTE60_ALLOW_HOST_E2E=1 it skips (exit 77). Tags: display-capture, gpu.
@@ -533,6 +539,73 @@ int finish(SelfHost& self, const std::wstring& log) {
 }
 
 // --old-host: this client against a host built before (2).
+// dxgi-wedge-fix r1: what the host started capturing with, by backend, in its own words.
+size_t dxgi_starts(const std::string& text) { return count_of(text, "desktop_backend=dxgi capture-started=1"); }
+size_t wgc_starts(const std::string& text) { return count_of(text, "desktop_backend=wgc capture-started=1"); }
+
+int run_quarantine(SelfHost& self, bool quarantined) {
+  const std::wstring log = self.logPath();
+  std::printf("\n--- dxgi-wedge-fix r1: %s ---\n",
+              quarantined ? "the host is quarantined (REMOTE60_CAPTURE_DXGI_QUARANTINE)" : "control: no quarantine");
+  const size_t real = real_screen_count();
+  const uint32_t picked = static_cast<uint32_t>(real);
+  CountingSink sink;
+  ClientSessionController c;
+  if (arrive(c, &sink, "a viewer connects")) {
+    c.RequestStreamActive(true);
+    check("video flows", wait_until([&] { return sink.frames() >= 1; }, 20000));
+    // The APK sends its stored backend -- dxgi by default -- on every connect.
+    const size_t reqBefore = count_of(read_all(log), "desktop-backend-");
+    check("an APK-style dxgi request is sent", c.RequestDesktopCaptureBackend(1));
+    check("...and the host answered it (stored or applied)",
+          wait_until([&] { return count_of(read_all(log), "desktop-backend-") > reqBefore; }, 8000));
+    if (quarantined) {
+      check("the host kept the quarantine for that request",
+            read_all(log).find("requested=dxgi effective=wgc reason=persisted:test (kept quarantined)") != std::string::npos);
+    }
+    const uint64_t f0 = sink.frames();
+    check("video still flows after the request", wait_until([&] { return sink.frames() > f0; }, 10000));
+    fresh_monitor_list(c, log, real + 1);
+    const auto b1 = pick_screen(c, sink, picked);
+    check("a screen pick (B) is applied and ready", b1.applied && b1.ready, b1.detail);
+    const auto a1 = pick_screen(c, sink, 0);
+    check("and back to the primary (A)", a1.applied && a1.ready, a1.detail);
+    const bool desktop =
+        c.RequestDesktopMode() &&
+        wait_until([&] { return c.WindowPanelSnapshotCopy().status.find("window_selected") != std::string::npos; }, 8000);
+    check("desktop mode is applied", desktop, c.WindowPanelSnapshotCopy().status);
+    leave_and_detach(c, log, "the viewer leaves; the host detaches its capture (idle)");
+    CountingSink sink2;
+    ClientSessionController c2;
+    if (arrive(c2, &sink2, "a viewer returns (the reattach path)")) {
+      c2.RequestStreamActive(true);
+      check("video flows after the return", wait_until([&] { return sink2.frames() >= 1; }, 20000));
+      c2.RequestDesktopCaptureBackend(1);
+      const uint64_t g0 = sink2.frames();
+      check("video still flows after a second dxgi request", wait_until([&] { return sink2.frames() > g0; }, 10000));
+    }
+    c2.Disconnect();
+  }
+  c.Disconnect();
+  const std::string full = read_all(log);
+  std::printf("      (capture starts: dxgi=%zu wgc=%zu)\n", dxgi_starts(full), wgc_starts(full));
+  // Read at the end: the host's stdout reaches its log file in buffered chunks.
+  check(quarantined ? "startup: requested=dxgi effective=wgc, quarantined, with the supervisor's reason"
+                    : "control startup: requested=dxgi effective=dxgi",
+        quarantined ? full.find("startup requested=dxgi effective=wgc dxgiQuarantined=1 reason=persisted:test") !=
+                          std::string::npos
+                    : full.find("startup requested=dxgi effective=dxgi dxgiQuarantined=0") != std::string::npos);
+  if (quarantined) {
+    check("QUARANTINE: not one DXGI capture started in the whole run (request, picks, desktop, reattach)",
+          dxgi_starts(full) == 0 && wgc_starts(full) >= 3,
+          "dxgi=" + std::to_string(dxgi_starts(full)) + " wgc=" + std::to_string(wgc_starts(full)));
+  } else {
+    check("CONTROL: the same steps without the quarantine DO start DXGI (the probe sees it)", dxgi_starts(full) >= 3,
+          "dxgi=" + std::to_string(dxgi_starts(full)) + " wgc=" + std::to_string(wgc_starts(full)));
+  }
+  return finish(self, log);
+}
+
 int run_old_host(SelfHost& self) {
   const std::wstring log = self.logPath();
   std::puts("\n--- mixed: this client, a host that predates the answerable screen pick ---");
@@ -605,8 +678,11 @@ int run_old_client(SelfHost& self, const std::wstring& oldClient) {
 
 int main(int argc, char** argv) {
   std::wstring oldHost, oldClient;
+  int quarantineMode = 0;  // 1: quarantined, 2: control
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
+    if (a == "--quarantine") quarantineMode = 1;
+    if (a == "--quarantine-control") quarantineMode = 2;
     if (a == "--thumbnail") {
       // Staged as GNLinkCapture.exe. Fails at once rather than never answering: a helper that never
       // answers costs the host its 1 s deadline per window, and the client's strictly sequential
@@ -632,6 +708,8 @@ int main(int argc, char** argv) {
   }
   SelfHost self;
   std::string why;
+  // The supervisor's quarantine for this child (what host_app_main builds), or -- every other mode -- none.
+  SetEnvironmentVariableW(L"REMOTE60_CAPTURE_DXGI_QUARANTINE", quarantineMode == 1 ? L"persisted:test" : nullptr);
   check("an isolated host is started (loopback, no input injection)", self.Start(oldHost, &why), why);
   if (!self.launched) {
     std::printf("\nRESULT: %d FAILED\n", gFailures);
@@ -639,6 +717,7 @@ int main(int argc, char** argv) {
   }
   if (!oldHost.empty()) return run_old_host(self);
   if (!oldClient.empty()) return run_old_client(self, oldClient);
+  if (quarantineMode != 0) return run_quarantine(self, quarantineMode == 1);
 
   const std::wstring log = self.logPath();
   const size_t real = real_screen_count();
