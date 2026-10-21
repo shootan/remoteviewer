@@ -78,6 +78,7 @@ constexpr int kLoginRoleUnlock = 3;
 constexpr uint16_t kLoginCancelled = 0xFFFD;     // the user closed the prompt: nothing sent
 constexpr uint16_t kLoginUnsupported = 0xFFFC;   // no screen to log in to here, or the host predates it
 constexpr uint16_t kPreloginLeftLogon = 0xFFFE;  // typed, then the host left the pre-login screen (not a login seen)
+constexpr uint16_t kLoginPending = 0xFFFB;       // lockscreen-cred: the previous password still waits for its unlock
 // The result window's message carries the stage in the low 16 bits of wParam and the role above them.
 inline WPARAM make_login_result_wparam(int role, uint16_t stage) {
   return static_cast<WPARAM>(stage) | (static_cast<WPARAM>(role & 0xFF) << 16);

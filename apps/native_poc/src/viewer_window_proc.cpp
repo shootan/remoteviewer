@@ -245,6 +245,10 @@ void request_prelogin_login(ViewerState& ctx, HWND owner) {
   if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) return;  // one already on its way
   const int role = policy.role == remote60::native_poc::LogonScreenRole::LockScreen ? kLoginRoleLockScreen
                                                                                     : kLoginRolePrelogin;
+  if (role == kLoginRoleLockScreen && ctx.session.lockCredPending.load(std::memory_order_acquire)) {
+    post_login_outcome(ctx, role, kLoginPending);  // Codex Q1: the earlier one still waits -- said, nothing sent
+    return;
+  }
   const uint64_t runGen = ctx.session.controlRunGen.load(std::memory_order_acquire);
   std::wstring pw;
   const bool entered = role == kLoginRoleLockScreen ? prompt_lock_screen_password(owner, &pw)

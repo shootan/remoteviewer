@@ -38,6 +38,12 @@ uint64_t PasswordFieldIdentity();
 uint64_t FocusedPasswordFieldIdentity(void* window, uint32_t pid);
 // The product's typing (one SendInput); false with *err when the OS refused or sent only part.
 bool TypeUnicode(const uint16_t* units, uint16_t count, uint32_t* err);
+// lockscreen-cred r1 (Codex Q1 b): the typing that REPLACES what the field holds, for the lock-screen agent --
+// a retry must not be appended to an earlier attempt. The focused password field of process `pid` (the one
+// just verified) is emptied through its writable UI Automation ValuePattern when it has one; otherwise
+// Ctrl+A goes first in the SAME SendInput as the units (select-all, then the typing replaces the selection).
+// Never a second attempt by another way; false with *err if either step failed.
+bool ReplaceWithUnicode(uint32_t pid, const uint16_t* units, uint16_t count, uint32_t* err);
 
 using TargetFn = std::function<uint64_t()>;
 using InjectFn = std::function<bool(const uint16_t* units, uint16_t count, uint32_t* err)>;

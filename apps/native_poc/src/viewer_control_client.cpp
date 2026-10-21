@@ -677,6 +677,7 @@ void ControlClient::Run() {
   // Move-specific (BLOCKER 1) + coalesce delta (BLOCKER 2) + queue age (HIGH 3) + windowUs.
   // lockscreen-cred r1: a typed lock-screen credential this connection is following to its unlock (0 = none).
   uint32_t lockCredPollRequestId = 0;
+  ctx.session.lockCredPending.store(false, std::memory_order_release);  // a new connection follows nothing yet
   uint64_t lockCredPollNextUs = 0;
   uint64_t lockCredPollDeadlineUs = 0;
   uint64_t p0MoveSent = 0;       // move InputEvents actually sent (kind==1)
@@ -811,6 +812,7 @@ void ControlClient::Run() {
         // Typed; the unlock is followed between the other work of this loop (one 44 a second), so the user's
         // Enter -- which goes through this same thread -- is never held up by the wait.
         lockCredPollRequestId = lockRequestId;
+        ctx.session.lockCredPending.store(true, std::memory_order_release);
         lockCredPollNextUs = qpc_now_us() + 1000000ull;
         lockCredPollDeadlineUs = qpc_now_us() + 135000000ull;
       }
@@ -836,6 +838,7 @@ void ControlClient::Run() {
         PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage),
                      static_cast<LPARAM>(win32));
         lockCredPollRequestId = 0;
+        ctx.session.lockCredPending.store(false, std::memory_order_release);
       } else {
         lockCredPollNextUs = qpc_now_us() + 1000000ull;
       }

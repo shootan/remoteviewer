@@ -83,6 +83,9 @@ struct SessionState {
   std::atomic<int> preloginCredRole{0};
   std::atomic<uint64_t> preloginCredRunGen{0};
   std::atomic<bool> loginPromptOpen{false};
+  // lockscreen-cred r1 (Codex Q1): a typed lock-screen credential is still waiting for its unlock on this
+  // connection (the control thread is following it). A new press then says so instead of sending.
+  std::atomic<bool> lockCredPending{false};
   // r5 G8: input not sent because the host is at the logon screen (characters, text), and whether the
   // window has said so since the host last arrived at it.
   std::atomic<uint64_t> preloginInputHeldBack{0};

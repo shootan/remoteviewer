@@ -691,6 +691,15 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       }
     }
   } endPreloginCredOnExit{args.preloginMode, unlockCookie};
+  // lockscreen-cred r1 (Codex Q2): a logged-on host's unlock-pipe transaction for this control session ends
+  // with it -- the service's single pipe is not held for a session that is gone.
+  struct EndRelaySessionOnExit {
+    bool prelogin;
+    uint64_t cookie;
+    ~EndRelaySessionOnExit() {
+      if (!prelogin) gUnlockRelay.EndSession(cookie);
+    }
+  } endRelaySessionOnExit{args.preloginMode, unlockCookie};
   // Host-side IME: scan|E0 of physical keys we actually injected as down. Their matching up must be
   // released even if the policy gate has since closed (foreground/secure change), or a modifier
   // stays stuck on the host. Released for all on connection end. (Codex #370 BLOCKER C.)

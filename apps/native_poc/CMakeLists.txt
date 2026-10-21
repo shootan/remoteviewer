@@ -316,6 +316,8 @@ add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
   src/logon_ui_target.cpp
+  src/lock_cred_channel.cpp
+  src/trusted_service_pipe.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -345,6 +347,8 @@ add_executable(remote60_secure_input_service_lifecycle_seam
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
   src/logon_ui_target.cpp
+  src/lock_cred_channel.cpp
+  src/trusted_service_pipe.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -2535,6 +2539,16 @@ add_executable(remote60_lock_input_policy_test
 )
 target_include_directories(remote60_lock_input_policy_test PRIVATE src)
 
+# lockscreen-cred r1 (codex_lockcred_agent_r1.md): the service <-> agent private pipe, on real pipes and
+# processes; it also starts the built GNLinkInputService.exe as a would-be agent (it must refuse).
+add_executable(remote60_lock_cred_channel_test
+  src/lock_cred_channel_test.cpp
+  src/lock_cred_channel.cpp
+)
+target_include_directories(remote60_lock_cred_channel_test PRIVATE src)
+target_link_libraries(remote60_lock_cred_channel_test PRIVATE advapi32 bcrypt)
+add_dependencies(remote60_lock_cred_channel_test remote60_secure_input_service)
+
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test
   src/secure_input_pipe_server_test.cpp
@@ -2730,6 +2744,15 @@ add_executable(remote60_secure_pipe_client_gate_test
 )
 target_include_directories(remote60_secure_pipe_client_gate_test PRIVATE src)
 target_link_libraries(remote60_secure_pipe_client_gate_test PRIVATE common advapi32)
+
+# lockscreen-cred r1 (Codex Q2): the relay holds the service's single unlock pipe only for a transaction.
+add_executable(remote60_host_unlock_relay_ondemand_test
+  src/host_unlock_relay_ondemand_test.cpp
+  src/host_unlock_relay.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_host_unlock_relay_ondemand_test PRIVATE src)
+target_link_libraries(remote60_host_unlock_relay_ondemand_test PRIVATE common advapi32)
 
 # prelogin-service A1 section 1: the pure supervisor state-machine decision core + negative controls.
 add_executable(remote60_prelogin_supervisor_state_test

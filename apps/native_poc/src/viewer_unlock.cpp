@@ -552,6 +552,10 @@ bool poll_lock_cred_status(remote60::native_poc::ControlLink& link, uint32_t req
 std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32) {
   using remote60::native_poc::UnlockStage;
   if (stage == kLoginCancelled) return L"취소했습니다. 아무것도 보내지 않았습니다.";
+  if (stage == kLoginPending) {
+    return L"앞서 입력한 비밀번호의 잠금 해제를 기다리는 중이라 보내지 않았습니다.\n"
+           L"원격 화면에서 Enter 를 눌렀는지 확인하세요. 결과가 나오면(최대 2분) 다시 누를 수 있고, 그때는 칸의 내용을 새로 바꿔 입력합니다.";
+  }
   if (stage == kLoginUnsupported) {
     return L"이 원격 PC에는 지금 'Windows 로그인'을 쓸 수 없습니다.\n"
            L"원격 PC가 로그인 화면이나 잠금 화면이 아니거나, 원격 PC의 GNLink 가 이 기능보다 오래된 버전입니다.";

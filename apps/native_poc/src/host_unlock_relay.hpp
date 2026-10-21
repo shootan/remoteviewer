@@ -68,11 +68,14 @@ class HostUnlockRelay {
   // Control thread: for a lock-credential job that is not terminal yet, ask the service where it is now
   // (bounded wait); the answer replaces the cached result PollResult reads. False for other requestIds.
   bool RefreshLockCredStatus(uint32_t requestId, uint32_t timeoutMs = 1000);
+  // lockscreen-cred r1 (Codex Q2): the control session `clientSessionCookie` ended -- a transaction it holds
+  // the service's unlock pipe for is ended now, not at its deadline. Never blocks.
+  void EndSession(uint64_t clientSessionCookie);
 
   void Stop();
 
  private:
-  enum class Op { Challenge, LockCredChallenge, Sealed, Capabilities, Status };
+  enum class Op { Challenge, LockCredChallenge, Sealed, Capabilities, Status, Release };
   struct Command {
     Op op = Op::Challenge;
     uint32_t statusRequestId = 0;

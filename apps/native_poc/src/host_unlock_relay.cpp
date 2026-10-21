@@ -121,14 +121,16 @@ bool HostUnlockRelay::ProbeConnectForTest() {
 
 void HostUnlockRelay::WorkerLoop() {
   HANDLE pipe = INVALID_HANDLE_VALUE;
+  // lockscreen-cred r1 (Codex Q2): the service's unlock pipe has ONE instance -- while this relay holds it, no
+  // other host can unlock. So it is held only for a transaction: a capability query closes it at once; a
+  // challenge holds it until its seal (the challenge's life), a typed lock-screen credential until its result
+  // (the service's wait), and a terminal result, a refusal, a failure or that deadline closes it. Never held
+  // idle, and never for longer than its deadline.
+  uint64_t holdUntilMs = 0;   // 0: nothing in flight -- close after the command
+  uint64_t heldCookie = 0;    // the control session the held transaction belongs to
   auto ensure_pipe = [&]() -> bool {
     if (pipe != INVALID_HANDLE_VALUE) return true;
     pipe = static_cast<HANDLE>(ConnectPipe());
-    if (pipe != INVALID_HANDLE_VALUE) {
-      // lockscreen-cred r1: a new connection may be to another service process: what the old one said
-      // about its capabilities is not this one's.
-      lockCredSupport_.store(LockCredSupport::Unknown, std::memory_order_release);
-    }
     return pipe != INVALID_HANDLE_VALUE;
   };
   auto drop_pipe = [&]() {
@@ -136,6 +138,15 @@ void HostUnlockRelay::WorkerLoop() {
       CloseHandle(pipe);
       pipe = INVALID_HANDLE_VALUE;
     }
+    holdUntilMs = 0;
+    heldCookie = 0;
+  };
+  auto hold_for = [&](uint64_t ms, uint64_t cookie) {
+    holdUntilMs = GetTickCount64() + ms;
+    heldCookie = cookie;
+  };
+  auto release_if_idle = [&]() {
+    if (holdUntilMs == 0) drop_pipe();
   };
   // One request, one reply of exactly `replySize` bytes, or false.
   auto exchange = [&](const void* req, DWORD reqSize, uint8_t* buf, DWORD bufSize, DWORD replySize) -> bool {
@@ -147,10 +158,26 @@ void HostUnlockRelay::WorkerLoop() {
     Command cmd;
     {
       std::unique_lock<std::mutex> lk(mu_);
-      cv_.wait(lk, [this] { return !running_.load() || !queue_.empty(); });
+      if (pipe != INVALID_HANDLE_VALUE && holdUntilMs != 0) {
+        const uint64_t now = GetTickCount64();
+        const auto left = std::chrono::milliseconds(holdUntilMs > now ? holdUntilMs - now : 0);
+        const bool got = cv_.wait_for(lk, left, [this] { return !running_.load() || !queue_.empty(); });
+        if (!got) {  // the held transaction's deadline: the pipe goes back to the service
+          lk.unlock();
+          drop_pipe();
+          continue;
+        }
+      } else {
+        cv_.wait(lk, [this] { return !running_.load() || !queue_.empty(); });
+      }
       if (!running_.load()) break;
       cmd = queue_.front();
       queue_.pop_front();
+    }
+
+    if (cmd.op == Op::Release) {  // the control session ended: its held transaction ends with it
+      if (heldCookie != 0 && heldCookie == cmd.cookie) drop_pipe();
+      continue;
     }
 
     if (!ensure_pipe()) {
@@ -190,6 +217,7 @@ void HostUnlockRelay::WorkerLoop() {
                          resp.kind == static_cast<uint16_t>(SecureUnlockKind::CapabilitiesResponse) && resp.requestId == 1;
       const bool supported = valid && (resp.features & kSecureUnlockFeatureLockCredV1) != 0;
       if (!valid) drop_pipe();
+      release_if_idle();  // Q2: a capability query does not keep the pipe
       lockCredSupport_.store(supported ? LockCredSupport::Supported : LockCredSupport::Unsupported, std::memory_order_release);
       std::cout << "[native-video-host][lock-cred] service capability "
                 << (supported ? "supported" : valid ? "not offered" : "unknown kind refused (older service)") << "\n";
@@ -221,6 +249,13 @@ void HostUnlockRelay::WorkerLoop() {
         out.status = static_cast<uint16_t>(UnlockStage::InternalError);
         drop_pipe();
       }
+      // Q2: an issued challenge holds the pipe for its seal (the service binds it to this connection) -- no
+      // longer than the challenge lives; a refused one lets it go.
+      if (out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
+        hold_for(35000, cmd.cookie);
+      } else {
+        drop_pipe();
+      }
       std::lock_guard<std::mutex> lk(mu_);
       if (cmd.op == Op::LockCredChallenge &&
           out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
@@ -239,7 +274,7 @@ void HostUnlockRelay::WorkerLoop() {
       if (ok) std::memcpy(&resp, buf, sizeof(resp));
       const bool valid = ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
                          resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) && resp.requestId == q.requestId;
-      if (!valid) drop_pipe();
+      if (!valid || resp.terminal) drop_pipe();  // Q2: a final answer ends the transaction
       std::lock_guard<std::mutex> lk(mu_);
       if (valid) {
         sealedResults_[q.requestId] = to_control_result(resp);
@@ -269,6 +304,13 @@ void HostUnlockRelay::WorkerLoop() {
         out.terminal = 1;
         drop_pipe();
       }
+      // Q2: a typed lock-screen credential waits for its unlock on this connection (the service's bounded
+      // wait); anything final ends the transaction.
+      if (out.terminal) {
+        drop_pipe();
+      } else {
+        hold_for(130000, cmd.cookie);
+      }
       SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
       std::lock_guard<std::mutex> lk(mu_);
       sealedResults_[cmd.seal.requestId] = out;
@@ -276,6 +318,18 @@ void HostUnlockRelay::WorkerLoop() {
     }
   }
   drop_pipe();
+}
+
+void HostUnlockRelay::EndSession(uint64_t clientSessionCookie) {
+  if (!running_.load()) return;  // no worker: nothing held
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    Command cmd;
+    cmd.op = Op::Release;
+    cmd.cookie = clientSessionCookie;
+    queue_.push_back(cmd);
+  }
+  cv_.notify_all();
 }
 
 void HostUnlockRelay::ProbeLockCredAsync() {

@@ -119,6 +119,9 @@ void HandleLockCredChallengeRequest(UnlockSession& us, const SecureUnlockChallen
   else if (!s.active) reason = "session-not-active";
   else if (!s.lockKnown) reason = "lock-unknown";
   else if (!s.locked) reason = "not-locked";
+  // Codex Q1 (a): a typed credential still waiting for its unlock keeps its context -- a new request is
+  // refused until it is answered (unlocked / unconfirmed); then a new one may replace the field's content.
+  else if (us.lockCredWaiting && p.nowMs() - us.lockCredTypedMs <= kLockCredUnlockWaitMs) reason = "pending";
   if (reason) {
     log_rejected(us, p, "lock-cred", reason, s);
     write_rejected(req, kUnlockPurposeLockCred, UnlockStage::RejectedPolicy, write);

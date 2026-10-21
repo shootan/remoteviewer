@@ -91,12 +91,23 @@ uint64_t PasswordFieldIdentity() {
   return system ? FocusedPasswordFieldIdentity(fg, pid) : 0;
 }
 
-bool TypeUnicode(const uint16_t* units, uint16_t count, uint32_t* err) {
+namespace {
+// The typing, optionally preceded by Ctrl+A in the same call.
+bool send_units(const uint16_t* units, uint16_t count, bool selectAllFirst, uint32_t* err) {
   // One SendInput for all of it: the system does not interleave other input into one call's events.
-  std::vector<INPUT> in(static_cast<size_t>(count) * 2);
+  const size_t lead = selectAllFirst ? 4 : 0;
+  std::vector<INPUT> in(lead + static_cast<size_t>(count) * 2);
+  if (selectAllFirst) {
+    const WORD vks[4] = {VK_CONTROL, 'A', 'A', VK_CONTROL};
+    for (size_t i = 0; i < 4; ++i) {
+      in[i].type = INPUT_KEYBOARD;
+      in[i].ki.wVk = vks[i];
+      in[i].ki.dwFlags = (i >= 2) ? KEYEVENTF_KEYUP : 0;
+    }
+  }
   for (uint16_t i = 0; i < count; ++i) {
     for (int k = 0; k < 2; ++k) {
-      INPUT& e = in[static_cast<size_t>(i) * 2 + k];
+      INPUT& e = in[lead + static_cast<size_t>(i) * 2 + k];
       e.type = INPUT_KEYBOARD;
       e.ki.wScan = units[i];
       e.ki.dwFlags = KEYEVENTF_UNICODE | (k == 1 ? KEYEVENTF_KEYUP : 0);
@@ -110,6 +121,53 @@ bool TypeUnicode(const uint16_t* units, uint16_t count, uint32_t* err) {
     return false;
   }
   return true;
+}
+
+// The focused element, if it is a password field of `pid` with a writable ValuePattern: emptied. 1 emptied,
+// 0 no such pattern (the caller selects all instead), -1 the pattern refused (nothing is typed then).
+int empty_by_value_pattern(DWORD pid) {
+  const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  int result = 0;
+  IUIAutomation* uia = nullptr;
+  if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) && uia) {
+    IUIAutomationElement* focused = nullptr;
+    if (SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
+      BOOL isPassword = FALSE;
+      int owner = 0;
+      if (SUCCEEDED(focused->get_CurrentIsPassword(&isPassword)) && isPassword &&
+          SUCCEEDED(focused->get_CurrentProcessId(&owner)) && static_cast<DWORD>(owner) == pid) {
+        IUIAutomationValuePattern* value = nullptr;
+        if (SUCCEEDED(focused->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&value))) && value) {
+          BOOL readOnly = TRUE;
+          if (SUCCEEDED(value->get_CurrentIsReadOnly(&readOnly)) && !readOnly) {
+            BSTR empty = SysAllocString(L"");
+            result = (empty && SUCCEEDED(value->SetValue(empty))) ? 1 : -1;
+            if (empty) SysFreeString(empty);
+          }
+          value->Release();
+        }
+      } else {
+        result = -1;  // the focus moved off the verified field: nothing is typed
+      }
+      focused->Release();
+    }
+    uia->Release();
+  }
+  if (SUCCEEDED(init)) CoUninitialize();
+  return result;
+}
+
+}  // namespace
+
+bool TypeUnicode(const uint16_t* units, uint16_t count, uint32_t* err) { return send_units(units, count, false, err); }
+
+bool ReplaceWithUnicode(uint32_t pid, const uint16_t* units, uint16_t count, uint32_t* err) {
+  const int emptied = empty_by_value_pattern(static_cast<DWORD>(pid));
+  if (emptied < 0) {
+    *err = ERROR_INVALID_DATA;
+    return false;
+  }
+  return send_units(units, count, /*selectAllFirst=*/emptied == 0, err);
 }
 
 }  // namespace remote60::native_poc::logon_ui
