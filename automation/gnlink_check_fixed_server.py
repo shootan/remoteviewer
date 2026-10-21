@@ -55,6 +55,7 @@ TEST_MARKERS = [
     'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM
     'sis-test-seam',              # secure_input_service_test_seam.hpp, REMOTE60_SIS_TEST_SEAM (r21 E1)
     'REMOTE60_SIS_TEST_',         # the same seam's environment (SUFFIX, CREATE_FAIL, STOP_EVENT, DIAG)
+    'GNLINK_SIS_TEST_',           # lockscreen-cred r1: the service seam's lock-screen agent target (CRED_TARGET_TITLE)
 ]
 
 # (file, must carry the address)
@@ -197,6 +198,11 @@ def self_test():
         outer.check(verdict(make('wide-marker', {
             'GNLinkClient.exe': lambda b: b + 'shell-test-seam'.encode('utf-16-le')})) == 1,
             'a test switch as a wide literal fails too')
+        # lockscreen-cred r1 (Codex L6): the new prefix on its own, ASCII and wide, in the service binary.
+        for enc in ('ascii', 'utf-16-le'):
+            outer.check(verdict(make('sis-agent-' + enc, {
+                'GNLinkInputService.exe': lambda b, e=enc: b + 'GNLINK_SIS_TEST_CRED_TARGET_TITLE'.encode(e)})) == 1,
+                'a service carrying GNLINK_SIS_TEST_ alone (%s) fails' % enc)
         missing = make('missing', {})
         os.remove(os.path.join(missing, 'GNLinkViewer.exe'))
         outer.check(verdict(missing) == 1, 'a missing program fails rather than being skipped')
