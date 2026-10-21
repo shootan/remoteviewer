@@ -1535,7 +1535,10 @@ int wmain(int argc, wchar_t** argv) {
       pump_until([] { return false; }, 1500);
       const uint64_t held = ctx.session.preloginInputHeldBack.load() - heldBefore;
       const uint64_t sent = ctx.session.inputEventsSent.load() - sentBefore;
-      check("G8: the character keys were held back in the viewer (6 edges), not sent", held == 6, std::to_string(held));
+      // lockscreen-cred r1: the three downs are held back and forgotten, so their ups are not sent either (a
+      // release goes only for a down that went) -- 3 edges counted.
+      check("G8: the character keys were held back in the viewer (3 downs; their ups never sent), not sent", held == 3,
+            std::to_string(held));
       check("...the window said so once, pointing at \"Windows 로그인\"",
             notice.find(L"보내지 않았습니다") != std::wstring::npos && notice.find(L"Windows 로그인") != std::wstring::npos,
             utf8(notice));
@@ -1786,6 +1789,14 @@ int wmain(int argc, wchar_t** argv) {
           utf8(notice));
     check("...nothing of it was sent (its up neither: its down never went)", ctx.session.inputEventsSent.load() == sentBefore,
           std::to_string(ctx.session.inputEventsSent.load() - sentBefore));
+    // A6, the host's half: whatever character DID reach the host (none, unless the viewer's hold above is
+    // broken -- the E1 mutant) is refused there and typed nowhere.
+    Sleep(500);
+    const uint64_t charsSent = ctx.session.inputEventsSent.load() - sentBefore;
+    check("A6 (host): a character that reached the host would be refused there -- nothing typed anywhere",
+          Targets::text(targets.edit).empty() && Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty() &&
+              (charsSent == 0 || host.Count("[input][lock] plaintext key refused") >= 1),
+          "sent=" + std::to_string(charsSent) + " hostRefusals=" + std::to_string(host.Count("[input][lock] plaintext key refused")));
 
     // ---- cancel: said, nothing sent
     std::cout << "\n--- cancel ---\n";
@@ -1866,6 +1877,9 @@ int wmain(int argc, wchar_t** argv) {
           boxUnlocked.find(L"잠금이 해제되었습니다") != std::wstring::npos, utf8(boxUnlocked));
     check("...and the host stops offering it (0x40000 gone)",
           pump_until([&] { return (flags() & kCaptureFlagLockCredV1) == 0; }, 10000), std::to_string(flags()));
+    // The bar collapses 2.5 s after it was shown and lays its items out again only when expanded (as a user
+    // sees it on the next hover): shown again, as on entry, before it is looked at.
+    session_toolbar_set_visible(true);
     remote60::native_poc::viewer::push_session_toolbar_state(ctx);
     session_toolbar_follow_owner();
     pump_until([] { return false; }, 300);
@@ -1886,7 +1900,18 @@ int wmain(int argc, wchar_t** argv) {
 
     std::cout << "\n--- Ctrl+Alt+U takes the existing unlock path ---\n";
     OperatorRun run;
-    std::thread op([&] { operate_prompt(&run, L"GNLinkUnlockPrompt", /*cancel=*/true); });
+    // lockscreen-cred r1 (contract 2): the cancel is then said in the result window -- modal on this thread, so
+    // the same operator waits for it and closes it (a second thread started after the pump would never run).
+    std::wstring cancelled;
+    std::thread op([&] {
+      operate_prompt(&run, L"GNLinkUnlockPrompt", /*cancel=*/true);
+      HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
+      if (b) {
+        cancelled = result_box_text(b);
+        save_capture(b, L"result_unlock_cancelled");
+        close_result(b);
+      }
+    });
     BYTE keys[256] = {};
     GetKeyboardState(keys);
     BYTE held[256];
@@ -1895,29 +1920,15 @@ int wmain(int argc, wchar_t** argv) {
     held[VK_MENU] = held[VK_LMENU] = 0x80;
     SetKeyboardState(held);
     SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
-    pump_until([&] { return run.sawPrompt; }, 8000);
+    pump_until([&] { return run.sawPrompt && !cancelled.empty(); }, 12000);
     SetKeyboardState(keys);
     pump_until([] { return false; }, 1000);
     join_pumping(op);
     check("Ctrl+Alt+U opened the EXISTING unlock prompt (GNLinkUnlockPrompt), as before", run.sawPrompt,
           utf8(run.promptTitle));
     check("NEGATIVE: no \"Windows 로그인\" window exists", FindWindowW(kPreloginPromptClass, nullptr) == nullptr);
-    {
-      // lockscreen-cred r1 (contract 2): the cancel is said, in the result window.
-      std::wstring cancelled;
-      std::thread opc([&] {
-        HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
-        if (b) {
-          cancelled = result_box_text(b);
-          save_capture(b, L"result_unlock_cancelled");
-          close_result(b);
-        }
-      });
-      pump_until([&] { return !cancelled.empty(); }, 10000);
-      join_pumping(opc);
-      check("lockscreen-cred: ...and its cancel is said (\"취소했습니다\"), nothing sent",
-            cancelled.find(L"취소했습니다") != std::wstring::npos, utf8(cancelled));
-    }
+    check("lockscreen-cred: ...and its cancel is said (\"취소했습니다\"), nothing sent",
+          cancelled.find(L"취소했습니다") != std::wstring::npos, utf8(cancelled));
 
     std::cout << "\n--- the entry itself, and a request that slipped through ---\n";
     remote60::native_poc::viewer::request_prelogin_login(ctx, viewerWindow);
