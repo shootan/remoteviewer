@@ -65,6 +65,7 @@ add_executable(remote60_native_video_host_poc
   src/host_bgra_scale.cpp
   src/host_window_enum.cpp
   src/host_capture_device.cpp
+  src/capture_adapter_identity.cpp
   src/host_net_io.cpp
   src/host_input_inject.cpp
   src/host_args.cpp
@@ -695,6 +696,9 @@ add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
   src/update_readiness.cpp
   src/host_app_main.cpp
+  src/capture_adapter_identity.cpp
+  src/capture_recovery_store.cpp
+  src/prelogin_store_chain.cpp
   src/prelogin_autostart.cpp
   src/prelogin_admin_pipe.cpp
   src/directory_client.cpp
@@ -796,6 +800,24 @@ target_link_libraries(remote60_host_exit_upload_test PRIVATE
   bcrypt
   winhttp
   remote60_test_scratch_dir  # repo-internal scratch + boundary-checked cleanup (R3), never %TEMP%
+)
+
+# dxgi-wedge-fix r1 (Bⓐ2): the real supervisor stopped and started again against the persistent DXGI
+# quarantine; the streaming child is this exe in stand-in mode (REMOTE60_HOST_TEST_SEAM, test root store).
+add_executable(remote60_host_capture_quarantine_test
+  src/host_capture_quarantine_test.cpp
+  ${_host_ui_test_sources}
+)
+target_compile_definitions(remote60_host_capture_quarantine_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_capture_quarantine_test PRIVATE /utf-8)
+target_include_directories(remote60_host_capture_quarantine_test PRIVATE src)
+target_link_libraries(remote60_host_capture_quarantine_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+  remote60_test_scratch_dir
 )
 
 # One file the user can carry to another machine. It embeds the four product executables and
@@ -2768,6 +2790,16 @@ add_executable(remote60_prelogin_store_chain_test
 )
 target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
 target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# dxgi-wedge-fix r1: the persistent DXGI quarantine store (format, decision, protected folder, links, limit, lock).
+add_executable(remote60_capture_recovery_store_test
+  src/capture_recovery_store_test.cpp
+  src/capture_recovery_store.cpp
+  src/capture_adapter_identity.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_capture_recovery_store_test PRIVATE src)
+target_link_libraries(remote60_capture_recovery_store_test PRIVATE advapi32 remote60_test_scratch_dir)
 
 # prelogin-ui r7 (H6): the viewer's input gate before the role is known and at the send.
 add_executable(remote60_prelogin_input_gate_test

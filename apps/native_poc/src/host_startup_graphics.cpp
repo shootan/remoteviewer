@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "host_winrt_seam.hpp"
+#include "capture_adapter_identity.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -149,6 +150,9 @@ int startup_init_graphics(HostContext& hx) {
     return 7;
   }
   std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
+  // dxgi-wedge-fix r1: the adapter this device -- and so any DXGI duplication of it -- sits on. The
+  // supervisor reads this line to know WHICH adapter a later exit 44 wedged (capture_adapter_identity.hpp).
+  std::cout << capture_adapter_log_line(identify_device_adapter(res.d3d.Get()));
   if (useH264) {
     (void)encoder.codec.set_d3d11_device(res.d3d.Get());
     std::cout << d3d_multithread_log_line("mf-device-set", res.d3d.Get(), res.ctx.Get());
@@ -198,7 +202,26 @@ int startup_select_capture_target(HostContext& hx) {
 #endif
   capture.windowTargetConfigured = capture.windowCriteria.enabled();
   backend.requested = desktop_capture_backend_from_env();
-  backend.active = backend.requested;
+  // dxgi-wedge-fix r1 (Codex B4/B5): the supervisor's quarantine is a separate signal from what was
+  // requested. The pre-login worker serves Winlogon through DXGI only and ends rather than falls back
+  // (r10 T2), so a quarantine never applies to it -- whatever its environment says.
+  {
+    const std::string quarantine = dxgi_quarantine_from_env();
+    if (!quarantine.empty() && !capture.preloginServingDesktop.empty()) {
+      std::cout << "[native-video-host][capture-quarantine] ignored reason=" << quarantine
+                << " (pre-login worker: dxgi only)\n";
+    } else if (!quarantine.empty()) {
+      backend.dxgiQuarantined = true;
+      backend.dxgiQuarantineReason = quarantine;
+    }
+  }
+  backend.active = backend.EffectiveRequested();
+  std::cout << "[native-video-host][capture-quarantine] startup requested="
+            << desktop_capture_backend_name(backend.requested)
+            << " effective=" << desktop_capture_backend_name(backend.active)
+            << " dxgiQuarantined=" << (backend.dxgiQuarantined ? 1 : 0)
+            << " reason=" << (backend.dxgiQuarantined ? backend.dxgiQuarantineReason : std::string("none"))
+            << "\n";
   // A demotion away from the requested backend is temporary until proven otherwise; these pace
   // the attempts to get back to it. First retry is quick because the usual causes -- a UAC prompt
   // being answered, RDP disconnecting -- clear in seconds; the ceiling keeps a machine that

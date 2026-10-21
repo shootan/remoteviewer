@@ -48,6 +48,10 @@
 #include "host_recovery_policy.hpp"
 #include "async_worker_group.hpp"
 #include "child_environment.hpp"
+#include <functional>
+#include "capture_adapter_identity.hpp"
+#include "capture_recovery_store.hpp"
+#include "prelogin_store_chain.hpp"
 #include "stream_child_env.hpp"
 #include <vector>
 
@@ -204,6 +208,14 @@ struct HostTestSeam {
   // r14 H2: the OS boundary of "start the service" (StartServiceW) in this build: a \\.\-free event
   // name (GNLinkTest-...) the test waits on to bring its server up. Empty: nothing is started.
   std::wstring preloginStartEvent;
+  // dxgi-wedge-fix r1: the capture-recovery folder (<root>\GNLink\capture-recovery) and who may own it,
+  // in place of ProgramData's -- a test cannot write there and must not touch the machine's record.
+  std::wstring captureRecoveryFolder;
+  std::function<bool(PSID)> captureRecoveryOwnerTrusted;
+  std::wstring captureRecoveryFileSddl;
+  // Stands in for the adapters present (the test's stand-in child reports a made-up one).
+  std::vector<remote60::native_poc::CaptureAdapterIdentity> presentAdapters;
+  bool presentAdaptersSet = false;
 };
 HostTestSeam gHostTest;
 
@@ -247,6 +259,27 @@ std::string host_cache_path() {
 #else
   return directory::default_host_cache_path();
 #endif
+}
+
+// dxgi-wedge-fix r1 (Codex B2): the persistent DXGI quarantine store this supervisor uses.
+remote60::native_poc::capture_recovery::Store capture_recovery_store() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  // A test that does not name a folder gets a store with none (nothing loads, every write fails) --
+  // never the machine's ProgramData record.
+  return remote60::native_poc::capture_recovery::Store(
+      gHostTest.captureRecoveryFolder, gHostTest.captureRecoveryOwnerTrusted,
+      gHostTest.captureRecoveryFileSddl.empty() ? nullptr : gHostTest.captureRecoveryFileSddl.c_str());
+#else
+  return remote60::native_poc::capture_recovery::Store(remote60::native_poc::capture_recovery::ProductFolder(),
+                                                       remote60::native_poc::prelogin::OwnerIsSystemOrAdministrators);
+#endif
+}
+
+std::vector<remote60::native_poc::CaptureAdapterIdentity> capture_present_adapters() {
+#ifdef REMOTE60_HOST_TEST_SEAM
+  if (gHostTest.presentAdaptersSet) return gHostTest.presentAdapters;
+#endif
+  return remote60::native_poc::enumerate_present_adapters();
 }
 
 std::wstring own_executable_path() {
@@ -524,6 +557,12 @@ class StreamingHostProcess {
         // it here meant the other writer could be mid-append into a file being renamed.
         AppendLogLine(line);
         if (!line.empty()) lastChildLine_ = line;  // r1: kept for the exit log's preceding-state field
+        // dxgi-wedge-fix r1: the adapter THIS child's capture device sits on (read after reader.join(),
+        // like lastChildLine_). A later exit 44 is recorded against it.
+        {
+          remote60::native_poc::CaptureAdapterIdentity adapter;
+          if (remote60::native_poc::parse_capture_adapter_line(line, &adapter)) lastChildAdapter_ = adapter;
+        }
         note_child_log_line(line);
         remote60::native_poc::log_upload_enqueue("host", line);
         const size_t marker = line.find("directory ");
@@ -596,8 +635,39 @@ class StreamingHostProcess {
     uint32_t watchdogRecoveries = 0;
     uint64_t watchdogWindowStartMs = 0;
     remote60::native_poc::HostRecoveryPolicy recoveryPolicy;
+    std::string lastQuarantineLog;
     while (running_.load(std::memory_order_relaxed)) {
-      const bool useRecoveryWgc = recoveryPolicy.UseWgc(GetTickCount64());
+      // dxgi-wedge-fix r1 (Codex B2-B5): DXGI is quarantined for this child when it wedged earlier in
+      // THIS supervisor run (in memory, as before), or when a stored record for an adapter present now,
+      // on the same driver, has not expired. Re-read at every launch: an expiry or a driver change takes
+      // effect at the next child start, never mid-run. A store that cannot be read changes nothing.
+      std::string quarantineReason;
+      {
+        namespace cr = remote60::native_poc::capture_recovery;
+        std::vector<cr::Record> records;
+        std::vector<std::string> notes;
+        const DWORD loaded = capture_recovery_store().LoadAll(&records, &notes);
+        const cr::StartupDecision decision = cr::DecideAtStartup(records, capture_present_adapters(), cr::NowUnix());
+        for (const auto& n : decision.notes) notes.push_back(n);
+        if (recoveryPolicy.UseWgc(GetTickCount64())) {
+          quarantineReason = "wedge-this-run";
+        } else if (decision.quarantine) {
+          quarantineReason = cr::PersistedReason(decision);
+        }
+        std::string line = "[host-app][capture-quarantine] launch decision=" +
+                           std::string(quarantineReason.empty() ? "dxgi" : "wgc") +
+                           " reason=" + (quarantineReason.empty() ? std::string("none") : quarantineReason) +
+                           " store=" + (loaded == 0 ? std::string("ok") :
+                                        loaded == ERROR_PATH_NOT_FOUND ? std::string("empty") :
+                                        "error-" + std::to_string(loaded)) +
+                           " records=" + std::to_string(records.size());
+        for (const auto& n : notes) line += " [" + n + "]";
+        if (line != lastQuarantineLog) {
+          AppendLogLineOnce(line);
+          lastQuarantineLog = line;
+        }
+      }
+      const bool useRecoveryWgc = !quarantineReason.empty();
       const bool nv12SurfaceForcedOff = crashStreak >= 2;
       // The control port serves clients on the same network that dial this PC directly. One
       // arriving through the directory tunnels control over the media socket instead, but with
@@ -680,8 +750,11 @@ class StreamingHostProcess {
                             ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
                             : "[host-app] starting the streaming host (tune=low_latency)");
       const uint64_t spawnTickMs = GetTickCount64();
-      const auto childEnvironment = remote60::native_poc::child_environment_with(
-          L"REMOTE60_DESKTOP_CAPTURE_BACKEND", L"wgc", useRecoveryWgc);
+      // The quarantine is its own variable (not REMOTE60_DESKTOP_CAPTURE_BACKEND, which is what the
+      // client may change): always stripped from what the child inherits, set only when it holds.
+      const auto childEnvironment = remote60::native_poc::child_environment_replacing(
+          L"REMOTE60_CAPTURE_DXGI_QUARANTINE",
+          std::wstring(quarantineReason.begin(), quarantineReason.end()), useRecoveryWgc);
 
       // lpApplicationName names the exe by path, so the child is chosen outright instead of by
       // parsing the first token of the command line. (Ledger H-20.)
@@ -724,7 +797,11 @@ class StreamingHostProcess {
         for (int i = 0; i < 30 && running_.load(); ++i) Sleep(100);
         continue;
       }
-      if (useRecoveryWgc) AppendLogLineOnce("[host-app] repeated DXGI wedge: using WGC recovery backend");
+      if (useRecoveryWgc) {
+        AppendLogLineOnce(quarantineReason == "wedge-this-run"
+                              ? "[host-app] repeated DXGI wedge: using WGC recovery backend"
+                              : "[host-app] DXGI quarantined by an earlier wedge on this adapter: using WGC");
+      }
       // r2 (H2): the real child creation, so the previous exit line's restart_planned connects to an
       // actual launch rather than being read as the relaunch itself. attempt is 1-based (restarts_ is
       // the count of relaunches already performed; the first launch is attempt #1).
@@ -740,6 +817,7 @@ class StreamingHostProcess {
       // there is no writer racing this) -- a child that prints nothing, or a different account's child
       // after a sign-out/new sign-in, never inherits the prior child's line.
       lastChildLine_.clear();
+      lastChildAdapter_ = remote60::native_poc::CaptureAdapterIdentity{};
       // Ours must close or the reader never sees end-of-file when the child exits.
       if (writeEnd) CloseHandle(writeEnd);
       std::thread reader;
@@ -801,6 +879,26 @@ class StreamingHostProcess {
                                      : "streaming host self-terminated (main-loop watchdog)";
         ex.extra = "recoveries5m=" + std::to_string(watchdogRecoveries);
         AppendLogLineOnce(remote60::native_poc::format_host_exit_log(ex));
+        if (dxgiWorkerWatchdog) {
+          // dxgi-wedge-fix r1 (Codex B2/B3): remember it for the next supervisor run, against the
+          // adapter this child said its capture ran on. Without that line nothing is written (the
+          // default GPU is not assumed to be the capture's); a failed write still leaves this run on WGC.
+          namespace cr = remote60::native_poc::capture_recovery;
+          std::string line;
+          if (!lastChildAdapter_.valid()) {
+            line = "[host-app][capture-quarantine] not recorded reason=no-adapter-line";
+          } else {
+            cr::Record written;
+            std::string why;
+            const DWORD rc = capture_recovery_store().RecordWedge(lastChildAdapter_, cr::NowUnix(), &written, &why);
+            line = rc == 0 ? "[host-app][capture-quarantine] recorded key=" + written.adapterKey +
+                                 " driver=" + written.driver + " wedges=" + std::to_string(written.wedges) +
+                                 " expires=" + std::to_string(written.expiresUnix)
+                           : "[host-app][capture-quarantine] not recorded key=" + lastChildAdapter_.key +
+                                 " reason=" + why + " err=" + std::to_string(rc);
+          }
+          AppendLogLineOnce(line);
+        }
         // A watchdog kill is not evidence the surface path is bad, so leave crashStreak alone.
       } else if (crashed) {
         ++crashStreak;
@@ -858,6 +956,9 @@ class StreamingHostProcess {
   // reader.join() (a sync point). Cleared at each child start (r2 H1) so it never carries across
   // children or accounts; an EOF partial line is dropped by ReadChildOutput, so this is complete only.
   std::string lastChildLine_;
+  // dxgi-wedge-fix r1: the capture adapter the current child reported (capture_adapter_identity.hpp).
+  // Same ownership as lastChildLine_: reader thread writes, supervisor reads after reader.join().
+  remote60::native_poc::CaptureAdapterIdentity lastChildAdapter_;
   PROCESS_INFORMATION child_{};
   std::thread supervisor_;
   std::atomic<bool> running_{false};

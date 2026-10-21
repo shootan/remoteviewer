@@ -40,6 +40,10 @@ DesktopCaptureBackend desktop_capture_backend_from_env();
 bool desktop_capture_backend_from_code(uint16_t code, DesktopCaptureBackend* out);
 uint16_t desktop_capture_backend_code(DesktopCaptureBackend backend);
 const char* desktop_capture_backend_name(DesktopCaptureBackend backend);
+// dxgi-wedge-fix r1: the supervisor's DXGI quarantine for this child (REMOTE60_CAPTURE_DXGI_QUARANTINE),
+// as a short printable reason; empty = not quarantined. Only the user Host supervisor sets it (the
+// pre-login worker's launch strips nothing and sets nothing -- and the worker ignores it anyway).
+std::string dxgi_quarantine_from_env();
 
 // --- geometry -----------------------------------------------------------------------------------
 bool compute_window_client_crop(HWND hwnd, uint32_t frameW, uint32_t frameH, uint32_t* outX,

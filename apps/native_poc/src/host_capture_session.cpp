@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "capture_adapter_identity.hpp"
 #include "prelogin_logon_desktop.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
@@ -112,6 +113,8 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
   // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
   if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
   std::cout << d3d_multithread_log_line("device-recreated", res.d3d.Get(), res.ctx.Get());
+  // dxgi-wedge-fix r1: a new device can be on another adapter (the stale-RDP-adapter case): say which.
+  std::cout << capture_adapter_log_line(identify_device_adapter(res.d3d.Get()));
   res.gpuScaler = GpuBgraScaler();
   capture.gpuScalerHealthy = false;
   if (capture.gpuScalerRequested) {

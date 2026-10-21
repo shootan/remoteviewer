@@ -230,6 +230,18 @@ DesktopCaptureBackend desktop_capture_backend_from_env() {
   return DesktopCaptureBackend::Dxgi;
 }
 
+std::string dxgi_quarantine_from_env() {
+  const char* raw = std::getenv("REMOTE60_CAPTURE_DXGI_QUARANTINE");
+  if (!raw || !*raw) return {};
+  // A log field, not a command: printable ASCII without spaces, bounded.
+  std::string s;
+  for (const char* p = raw; *p && s.size() < 96; ++p) {
+    const unsigned char c = static_cast<unsigned char>(*p);
+    s.push_back((c > 0x20 && c < 0x7f) ? static_cast<char>(c) : '_');
+  }
+  return s;
+}
+
 bool desktop_capture_backend_from_code(uint16_t code, DesktopCaptureBackend* out) {
   if (!out) return false;
   switch (code) {
