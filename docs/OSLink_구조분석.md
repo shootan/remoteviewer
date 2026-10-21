@@ -4,6 +4,12 @@
 계기: GNLink은 포트포워딩 없이는 붙지 않는데 OSLink은 붙는다는 사용자 관찰. 근거 대장 **E7**(`docs/구현계획.md`)의 상세 근거가 이 문서다.
 성격: **경쟁 제품 실측 기록 + 우리 구조와의 대조**. 여기서 아무 것도 결정하지 않는다 — 채택 여부는 `구현계획.md`의 N/H 항목으로 승격할 때 정한다.
 
+> **정정(2026-10-22)**: 2026-10 정적 분석(`OSLink_정적분석_2026-10.md` §3)에서 확인한 영상 경로는 capture.exe 가 만든
+> **`Global\leidian_fb_rgb_mem_*` 공유 메모리 매핑**을 ldremote.exe 가 열고, ldremote 가 원본 프레임을 **ZEGO SDK raw API** 로 넘기는
+> 것이다(각 구간 정적 확인, 매핑 뷰→모든 프레임 콜백의 완전한 연결·모든 모드는 미확인). 압축이 ldremote 의 SDK 경계 이후라는 것은
+> **추정(높음)** 이다. 그래서 아래 §2 "명명 파이프", §4.2 IPC 줄, §5.1 ① "NV12 텍스처" 를 확정 설명으로 쓰지 않도록 표시했다
+> (파이프 영상 전달이 어떤 모드에서도 없다고 단정하는 것은 아니다). 나머지 실측은 그대로다.
+
 ---
 
 ## 1) 측정 방법 (재현 절차)
@@ -36,7 +42,7 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 
 - **소켓은 `ldremote.exe` 하나만 가진다.** `capture.exe`·서비스·이벤트 프로세스는 소켓 0개. 즉 캡처 프로세스는 네트워크를 모른다.
 - **캡처는 `capture.exe` 소속이 맞다.** `capture.log`가 찍는 TID(예: 19792)가 `ldremote.exe`의 스레드 목록에는 없고 `capture.exe`에 있다. 로그 심볼도 `DxgiOutputDuplicator::Duplicate`, `MonitorCaptureImpl::loop`, `CapturePipeImpl::send`, `VideoFrameIPC::doInitIfNot`.
-- **프레임은 명명 파이프로 건넌다.** `\\.\pipe\ld-winpipe-read-<n>` / `\\.\pipe\ld-winpipe-write-<n>` 쌍. 로그의 `VideoFrameIPC`가 그 계층 이름이다.
+- ~~**프레임은 명명 파이프로 건넌다.**~~ `\\.\pipe\ld-winpipe-read-<n>` / `\\.\pipe\ld-winpipe-write-<n>` 쌍은 실재한다. **정정(2026-10-22)**: 이번에 확인한 프레임 경로는 공유 메모리 `Global\leidian_fb_rgb_mem_*`(capture.exe 생성 → ldremote.exe 매핑)이고, 이 파이프가 프레임을 나른다는 근거는 찾지 못했다(`OSLink_정적분석_2026-10.md` §3).
 - **세션 전환을 서비스가 관리한다.** `ldremoteservice.log`에 `session change eventType:…`, `RunUnderWinLogon: physicalConsoleSessionId:2`, `CreateProcessAsUser success`, `checkSessionID: ldremoteevent session not right 7, 2`, `taskkill ldremoteevent sessionid` — **세션이 바뀌면 SYSTEM 쪽 자식을 죽였다가 새 세션에 다시 띄운다.** 그동안 사용자 세션의 `ldremote.exe`는 살아서 네트워크 연결을 유지한다.
 
 ### 엔진 구성
@@ -85,7 +91,7 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 | 네트워크 | 사용자 프로세스 1개가 전부 소유 | `GNLinkStream`이 캡처·인코딩과 **같은 프로세스**에서 소유 |
 | 세션/보안 데스크톱 | 서비스가 SYSTEM 자식을 죽였다 살리며 따라감 | 입력만 별도 서비스, 캡처는 같은 프로세스가 계속 담당 |
 | 인바운드 포트 | 없음 | `UDP 43000` bind + `TCP 43001 LISTEN` |
-| 프로세스 간 통신 | 명명 파이프 + `VideoFrameIPC` | (해당 없음 — 한 프로세스라 공유 메모리/락) |
+| 프로세스 간 통신 | ~~명명 파이프 + `VideoFrameIPC`~~ → 원본 프레임 공유 메모리 + 이벤트/뮤텍스(정정 2026-10-22) | (해당 없음 — 한 프로세스라 공유 메모리/락) |
 
 ### 4.3 한 프로세스에 몰린 대가 (호스트 코드 기준, 커밋 `ce0f360`)
 
@@ -108,7 +114,7 @@ ldremote.exe             PID 10480   사용자 계정   스레드 84  154MB    �
 
 | 안 | 경계를 넘는 것 | 판정 |
 |---|---|---|
-| ① 캡처만 분리 (OSLink 방식) | **NV12 텍스처** (D3D11 shared NT handle + keyed mutex/fence) | **보류** — 가장 어려운 seam. 아래 5.3 |
+| ① 캡처만 분리 | **NV12 텍스처** (D3D11 shared NT handle + keyed mutex/fence) | **보류** — 가장 어려운 seam. 아래 5.3. **정정(2026-10-22)**: "OSLink 방식 = NV12 공유 텍스처" 는 근거가 없다. 이번에 추적한 OSLink 경로는 **CPU 공유 메모리 원본 프레임 → 네트워크 프로세스의 SDK raw API**(압축 위치는 추정, SDK 인코더 수명은 미확인)다. 이를 참고한 CPU raw IPC 변형의 득실은 `OSLink_정적분석_2026-10.md` §4 — ②권고·§6 ADR 초안(승인 전) 상태는 그대로 |
 | ② **캡처+인코딩 분리 (권고)** | **H.264 AU + 메타**뿐 (0.07~1.5MB/s) | **채택 권고** |
 | ③ 네트워크만 분리 | ②를 반대편에서 본 것 | ②로 흡수. 단 **소켓은 안정 프로세스가 소유**해야 하므로, 현 `GNLinkStream`을 미디어로 두고 네트워크 자식을 붙이는 방향은 소켓 소유자 수명을 오히려 불안정하게 만든다 |
 
