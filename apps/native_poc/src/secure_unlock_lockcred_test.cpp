@@ -306,6 +306,25 @@ int main() {
     check("no unlock within the wait: UnlockUnconfirmed, terminal (typed is not reported as unlocked)",
           s.stage == st(UnlockStage::UnlockUnconfirmed) && s.terminal == 1, stage_of(s));
   }
+  {
+    // Codex Q1 (a): while a typed credential waits for its unlock, a new request is refused (its context kept);
+    // once it has an answer -- here the wait ran out -- a new one is issued.
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 33, true);
+    (void)sealed(a, os, seal(c, u"first", SealAs::LockCred));
+    const SecureUnlockChallengeResponse again = challenge(a, os, 34, true);
+    check("Q1: a new lock-screen request while the typed one still waits: refused (\"pending\"), nothing typed",
+          again.stage == st(UnlockStage::RejectedPolicy) && os.typed.size() == 1 && !os.log.empty() &&
+              os.log.back().find("reason=pending") != std::string::npos,
+          os.log.empty() ? "" : os.log.back());
+    const SecureUnlockResult still = status(a, os, 33);
+    check("Q1: ...and the waiting one is untouched", still.stage == st(UnlockStage::Injected) && still.terminal == 0);
+    os.now += sus::kLockCredUnlockWaitMs + 1000;
+    (void)status(a, os, 33);  // answered: unconfirmed
+    const SecureUnlockChallengeResponse next = challenge(a, os, 35, true);
+    check("Q1: once it is answered, a new request is issued", next.stage == st(UnlockStage::ChallengeIssued));
+  }
   struct Cross {
     const char* what;
     bool lockCredChallenge;

@@ -1826,8 +1826,9 @@ int wmain(int argc, wchar_t** argv) {
     Sleep(700);  // the service's challenge rate limit
 
     // ---- the button -> the password -> typed into the password field by the service's agent
-    std::cout << "\n--- the button, the password, 입력 ---\n";
+    std::cout << "\n--- the button, the password, 입력 (the field already holds an earlier attempt) ---\n";
     targets.Clear();
+    SetWindowTextW(targets.edit, L"earlier-attempt");  // Codex Q1 (b): a retry replaces, never appends
     OperatorRun run;
     std::wstring boxTyped;
     std::atomic<bool> fronted{false};
@@ -1843,7 +1844,8 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring got = Targets::text(targets.edit);
     save_capture(targets.main, L"lock_screen_target_received");
     check("...the prompt took every character", run.sawPrompt && run.typedAll);
-    check("THE SERVICE'S AGENT TYPED THE SECRET INTO THE PASSWORD FIELD, BYTE FOR BYTE", got == kSecret, hexw(got));
+    check("THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE SECRET, BYTE FOR BYTE (the earlier attempt gone)",
+          got == kSecret, hexw(got));
     check("...and nothing into the user-name field or the decoy",
           Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty());
     check("THE RESULT WINDOW SAYS \"typed -- press Enter\", NOT \"unlocked\"",
