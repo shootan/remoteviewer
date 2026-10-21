@@ -104,6 +104,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, 
   if (!realStream.empty()) {
     if (!inside(root, realStream) || !std::filesystem::exists(realStream)) return 2;
     gHostTest.streamExe = realStream;
+    // dxgi-wedge-fix r1: the real streaming test build must not take the installed host's ports or
+    // inject into this desktop. GNLINK_HOST_TEST_STREAM_PORT names a free UDP port; control rides it.
+    const std::wstring port = test_env(L"GNLINK_HOST_TEST_STREAM_PORT");
+    if (port.empty() || port.find_first_not_of(L"0123456789") != std::wstring::npos) return 2;
+    // Loopback only: a test build at a new path that listens on all interfaces makes Windows Firewall ask the
+    // user (seen 2026-10-22 01:35 -- a dialog nobody here may answer, and an unanswered one becomes a Block
+    // rule). The fixture directory, on loopback too, observes 127.0.0.1 as the public candidate.
+    gHostTest.streamExtraArgs = {L"--bind-port", port, L"--bind-address", L"127.0.0.1", L"--control-port", L"0",
+                                 L"--input-injection-mode", L"none"};
   }
   return host_product_entry(instance, previous, commandLine, show);
 }

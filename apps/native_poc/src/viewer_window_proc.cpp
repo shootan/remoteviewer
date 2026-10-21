@@ -28,6 +28,7 @@
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
 #include "viewer_session_watchdog.hpp"
+#include "viewer_restore.hpp"
 
 #include <iostream>
 
@@ -1299,10 +1300,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         remote60::native_poc::session_toolbar_set_visible(true);
         push_session_toolbar_state(ctx);
         InvalidateRect(hwnd, nullptr, FALSE);
+        // dxgi-wedge-fix r1: confirmed by the host AND its first frame decoded -- the only point a
+        // picked target is reported to the shell (and a restore counts as done).
+        restore_on_reveal(ctx);
       }
       ctx.sel.ReleaseRevealLatch();
       return 0;
     }
+    case kMsgRestoreStep:
+      restore_step(ctx, hwnd);
+      return 0;
+    case kMsgRestoreReport:
+      restore_report_current(ctx, "monitor_switch");
+      return 0;
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED: {
       remote60::native_poc::session_toolbar_follow_owner();
@@ -1654,6 +1664,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         poll_video_paint_liveness(ctx, hwnd);
         // Once a second: is the recv thread moving, is anything arriving, is the session dead?
         poll_session_liveness(ctx, hwnd);
+        // dxgi-wedge-fix r1: a restore that is waiting on lists gives up on time, not on an event.
+        restore_step(ctx, hwnd);
         return 0;
       }
       break;

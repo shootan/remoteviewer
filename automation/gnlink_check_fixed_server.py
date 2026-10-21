@@ -55,6 +55,8 @@ TEST_MARKERS = [
     'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM
     'sis-test-seam',              # secure_input_service_test_seam.hpp, REMOTE60_SIS_TEST_SEAM (r21 E1)
     'REMOTE60_SIS_TEST_',         # the same seam's environment (SUFFIX, CREATE_FAIL, STOP_EVENT, DIAG)
+    'mt-ab',                      # mt_ab_test_seam.hpp, REMOTE60_MT_AB_TEST_SEAM (dxgi-wedge-fix r1, Codex B1)
+    'GNLINK_CHAIN_',              # client_reconnect_restore_e2e_test.cpp (dxgi-wedge-fix r1)
 ]
 
 # (file, must carry the address)

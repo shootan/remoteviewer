@@ -229,6 +229,25 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD (dxgi-wedge-fix r1, Codex B1): the D3D multithread-protection A/B for the field PC. The same
+# sources and libraries as GNLinkStream, with REMOTE60_MT_AB_TEST_SEAM: the arm comes from
+# GNLinkStream.mt-ab.txt beside the exe ("on" sets protection right after the device is created; anything
+# else is the shipped behaviour). Its own output name, never packaged; the field procedure swaps it in
+# under the installed name only with the user's approval. mt_ab_build_gate below checks the shipped exe.
+get_target_property(_mtab_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_mtab_seam ${_mtab_host_sources})
+set_target_properties(remote60_native_video_host_mtab_seam PROPERTIES OUTPUT_NAME "GNLinkStreamMtAb")
+target_include_directories(remote60_native_video_host_mtab_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_mtab_seam PRIVATE
+  REMOTE60_MT_AB_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_mtab_seam PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 # TEST BUILD of the host for the stutter-keyframe B1 clamp-fake measurement (r4): the same sources as
 # GNLinkStream, with REMOTE60_CLAMP_BURST_TEST_SEAM defined so REMOTE60_NATIVE_FORCE_CLAMP_BURST forces
 # burst eligibility on this PC's non-clamping MFT. Its own output name, never packaged;
@@ -549,6 +568,9 @@ add_executable(remote60_native_video_client_poc
   src/viewer_window_proc.cpp
   src/viewer_cursor_overlay.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_picker.cpp
   src/viewer_input_forward.cpp
   src/viewer_layout.cpp
@@ -1444,6 +1466,9 @@ add_executable(remote60_viewer_release_all_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1482,6 +1507,9 @@ add_executable(remote60_viewer_stats_chain_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1519,6 +1547,9 @@ add_executable(remote60_viewer_mouse_xbutton_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1560,6 +1591,9 @@ add_executable(remote60_viewer_prelogin_login_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1600,6 +1634,9 @@ add_executable(remote60_viewer_clip_bar_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1641,6 +1678,9 @@ add_executable(remote60_viewer_paste_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -2639,6 +2679,8 @@ target_link_libraries(remote60_viewer_picker_gesture_test PRIVATE common ws2_32)
 add_executable(remote60_picker_preview
   tools/picker_preview.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_picker_state.cpp
@@ -2790,6 +2832,13 @@ add_executable(remote60_prelogin_store_chain_test
 )
 target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
 target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# dxgi-wedge-fix r1 (Bⓑ1): the restore handoff's wire forms and the screen match (pure-logic).
+add_executable(remote60_viewer_restore_target_test
+  src/viewer_restore_target_test.cpp
+  src/viewer_restore_target.cpp
+)
+target_include_directories(remote60_viewer_restore_target_test PRIVATE src)
 
 # dxgi-wedge-fix r1: the persistent DXGI quarantine store (format, decision, protected folder, links, limit, lock).
 add_executable(remote60_capture_recovery_store_test
@@ -3264,6 +3313,9 @@ add_executable(remote60_viewer_window_proc_isolated_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -3293,6 +3345,9 @@ add_executable(remote60_picker_open_chain_test
   src/input_macro.cpp
   src/macro_shell_bridge.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -3577,6 +3632,7 @@ if(GNLINK_HAVE_WEBVIEW2)
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
+    src/viewer_restore_target.cpp
     src/login_credential_store.cpp
     src/login_flow.cpp
     src/client_shell_bridge.cpp
@@ -4079,3 +4135,18 @@ target_link_libraries(remote60_e2e_staging_test PRIVATE remote60_test_scratch_di
 if(MSVC)
   target_compile_options(remote60_e2e_staging_test PRIVATE /utf-8)
 endif()
+
+# dxgi-wedge-fix r1 (Codex B7): the whole reconnect chain -- the product shell (entry renamed) starting the real
+# GNLinkViewer against a private directory and a supervised streaming test build. Run by
+# apps/directory/test/dxgi_wedge_reconnect_runner.js, never on its own.
+if(GNLINK_HAVE_WEBVIEW2)
+  add_executable(remote60_client_reconnect_restore_e2e_test src/client_reconnect_restore_e2e_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_client_reconnect_restore_e2e_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_client_reconnect_restore_e2e_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_client_reconnect_restore_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_reconnect_restore_e2e_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_reconnect_restore_e2e_test remote60_client_shell remote60_native_video_client_poc)
+endif()
+

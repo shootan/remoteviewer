@@ -21,6 +21,7 @@
 #include "peer_version.hpp"
 #include "paste_apply_wire.hpp"
 #include "viewer_paste_gate.hpp"
+#include "viewer_restore.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -507,6 +508,12 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
        remote60::native_poc::kControlWindowListFlagMonitors) != 0;
   const bool monitorsNewlySupported =
       ctx.picker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
+  // dxgi-wedge-fix r1: whether this host answers a screen pick through the window-select transaction
+  // (with the generation the picker's gate waits on) -- what a restored screen is selected through.
+  ctx.picker.windowPanel.SetHostSupportsMonitorSelect(
+      (windowList.flags & remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1) != 0);
+  ctx.picker.restore.windowListSeen.store(true, std::memory_order_release);
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgRestoreStep, 0, 0);
   // The stored --monitor is auto-applied only when the session opens straight
   // into the stream. In picker mode the user has not chosen a target yet, so
   // selecting a monitor here would restart the host capture before any pick and
@@ -1056,9 +1063,18 @@ void ControlClient::Run() {
           handle_window_list(response.windowList);
           break;
         }
-        case TcpControlResponseKind::MonitorList:
+        case TcpControlResponseKind::MonitorList: {
+          const uint32_t before = ctx.picker.windowPanel.Snapshot().selectedMonitorId;
           ctx.picker.windowPanel.ApplyMonitorList(response.monitorList);
+          // dxgi-wedge-fix r1: a screen switch outside the picker (the toolbar's): report it to the
+          // shell once a frame of the new capture has decoded.
+          if (!ctx.picker.visible.load(std::memory_order_relaxed) &&
+              response.monitorList.selectedMonitorId != before) {
+            restore_note_monitor_switch(ctx, 0);
+          }
+          if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgRestoreStep, 0, 0);
           break;
+        }
         case TcpControlResponseKind::WindowSelected:
           handle_window_selected(response.windowSelected);
           break;

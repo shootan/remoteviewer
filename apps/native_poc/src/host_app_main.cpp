@@ -216,6 +216,9 @@ struct HostTestSeam {
   // Stands in for the adapters present (the test's stand-in child reports a made-up one).
   std::vector<remote60::native_poc::CaptureAdapterIdentity> presentAdapters;
   bool presentAdaptersSet = false;
+  // Arguments appended to the streaming child's command line (later ones win in host_args): its own
+  // ports beside the installed host's 43000/3478, and input injection off. Test builds only.
+  std::vector<std::wstring> streamExtraArgs;
 };
 HostTestSeam gHostTest;
 
@@ -694,14 +697,17 @@ class StreamingHostProcess {
       // Built from argument VALUES, not string concatenation. hostName_ comes from an edit box
       // and the account id is user input as well; a value containing a quote used to break
       // the argument boundary and inject or corrupt the child's options. (Ledger H-20.)
-      const std::wstring command = build_windows_command_line(
-          exe, {L"--transport", L"udp",
-                L"--codec", L"h264",
-                L"--bind-port", L"43000,3478",
-                L"--control-port", L"43001",
-                L"--directory-url", directoryUrl_,
-                L"--directory-id", accountId_,
-                L"--host-name", hostName_});
+      std::vector<std::wstring> childArgs = {L"--transport", L"udp",
+                                             L"--codec", L"h264",
+                                             L"--bind-port", L"43000,3478",
+                                             L"--control-port", L"43001",
+                                             L"--directory-url", directoryUrl_,
+                                             L"--directory-id", accountId_,
+                                             L"--host-name", hostName_};
+#ifdef REMOTE60_HOST_TEST_SEAM
+      for (const auto& extra : gHostTest.streamExtraArgs) childArgs.push_back(extra);
+#endif
+      const std::wstring command = build_windows_command_line(exe, childArgs);
 
       // The child's stdout is the only place the directory result is reported, so it is piped
       // back here rather than discarded.

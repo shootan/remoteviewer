@@ -61,6 +61,10 @@ struct Args {
   // to the host's default desktop. Empty falls back to the REMOTE60_NATIVE_START_STREAM_VIEW env
   // var so existing manual/headless probes keep working unchanged.
   std::string initialView;
+  // dxgi-wedge-fix r1: --restore-target <arg> (viewer_restore_target.hpp), passed ONLY by the shell's
+  // automatic reconnect; --reconnect says this window is that reconnect ("재연결 중").
+  std::string restoreTarget;
+  bool reconnect = false;
 };
 
 Args parse_args(int argc, char** argv);

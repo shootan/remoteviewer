@@ -1361,6 +1361,7 @@ void WindowPanelStateModel::ApplyMonitorList(const ControlMonitorListMessage& ms
     e.width = src.width;
     e.height = src.height;
     e.primary = (src.flags & kControlMonitorFlagPrimary) != 0;
+    e.name = fixed_cstr_to_string(src.name, sizeof(src.name));
     state_.monitors.push_back(e);
   }
   state_.selectedMonitorId = msg.selectedMonitorId;

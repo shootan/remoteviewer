@@ -50,6 +50,7 @@
 
 #include "host_winrt_seam.hpp"
 #include "capture_adapter_identity.hpp"
+#include "mt_ab_test_seam.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -149,6 +150,10 @@ int startup_init_graphics(HostContext& hx) {
     std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
     return 7;
   }
+#ifdef REMOTE60_MT_AB_TEST_SEAM
+  // TEST BUILD ONLY (dxgi-wedge-fix r1, Codex B1): the A/B arm, before anything else touches the device.
+  std::cout << mt_ab_apply(res.ctx.Get());
+#endif
   std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
   // dxgi-wedge-fix r1: the adapter this device -- and so any DXGI duplication of it -- sits on. The
   // supervisor reads this line to know WHICH adapter a later exit 44 wedged (capture_adapter_identity.hpp).

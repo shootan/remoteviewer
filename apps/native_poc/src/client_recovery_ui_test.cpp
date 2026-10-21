@@ -80,7 +80,35 @@ bool recovery_capture(const std::wstring& path) {
   return captured->load() == 1;
 }
 
+// dxgi-wedge-fix r1 (Codex B6/B7): a stand-in viewer for the restore handoff. Launch i (counted in
+// GNLINK_RECOVERY_RESTORE_STATE) writes down the arguments it was STARTED with, prints
+// RESTORE_<i>_LINE on stdout (what a real viewer prints once a target is confirmed and rendered),
+// waits a moment for the shell's pump to read it, and exits with RESTORE_<i>_EXIT.
+int run_restore_stand_in(int argc, char** argv) {
+  const char* state = std::getenv("GNLINK_RECOVERY_RESTORE_STATE");
+  int idx = 0;
+  { std::ifstream in(state); if (in) in >> idx; }
+  { std::ofstream out(state); out << (idx + 1); }
+  {
+    std::ofstream args(std::string(state) + ".args", std::ios::app);
+    args << idx << ":";
+    for (int i = 1; i < argc; ++i) {
+      const std::string a = argv[i];
+      if (a == "--reconnect" || a == "--restore-target" || a == "--initial-view") args << " " << a;
+      if ((a == "--restore-target" || a == "--initial-view") && i + 1 < argc) args << " " << argv[i + 1];
+    }
+    args << "\n";
+  }
+  const std::string pfx = "RESTORE_" + std::to_string(idx) + "_";
+  const char* line = std::getenv((pfx + "LINE").c_str());
+  const char* code = std::getenv((pfx + "EXIT").c_str());
+  if (line && *line) { std::printf("%s\n", line); std::fflush(stdout); }
+  Sleep(400);
+  return code ? std::atoi(code) : 0;
+}
+
 int main(int argc, char** argv) {
+  if (std::getenv("GNLINK_RECOVERY_RESTORE_STATE")) return run_restore_stand_in(argc, argv);
   // Stand-in viewer mode. begin_session starts THIS executable in place of GNLinkViewer.exe when
   // the handle-leak case points the test seam at it: it waits on the cancel event it was handed,
   // exactly as a connecting viewer would be told to stop, and exits 0. Nothing else runs. (RV-16)
@@ -622,6 +650,145 @@ int main(int argc, char** argv) {
       }, 10000), "[replace] the second viewer's exit is adopted too");
       recovery_check(recovery_dom(L"!document.querySelector('.host').disabled", 5000),
                      "[replace] ...and only then does the list unlock");
+    }
+
+    // ---------------- dxgi-wedge-fix r1 (Codex B6/B7): an automatic reconnect restores, nothing else does
+    //
+    // Through the real begin_session, the real viewer-output pump and the real handle_viewer_exit; the
+    // viewer is a stand-in (above) that prints what a real one prints once a target is confirmed and
+    // rendered, and exits with the code a session-dead/wedge exit has. What the stand-in was STARTED with
+    // is what the shell decided.
+    {
+      const std::filesystem::path state = std::filesystem::path(fixture) / "restore-launch.txt";
+      const std::string screen = R"(\\.\DISPLAY2)";
+      std::string hex;
+      for (unsigned char c : screen) { char h[3]; std::snprintf(h, 3, "%02x", c); hex += h; }
+      const std::string target = "desktop:" + hex + ":1920,0,1920,1080:0";
+      const std::string reportLine = "[viewer-restore] target=" + target;
+      wchar_t selfPath[MAX_PATH]{};
+      GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+      auto setEnv = [](const std::string& k, const std::string& v) {
+        SetEnvironmentVariableW(widen(k).c_str(), v.empty() ? nullptr : widen(v).c_str());
+      };
+      auto plan = [&](std::vector<std::pair<std::string, int>> launches) {
+        { std::ofstream out(state); out << 0; }
+        { std::ofstream out(state.string() + ".args", std::ios::trunc); }
+        for (int i = 0; i < 6; ++i) { setEnv("RESTORE_" + std::to_string(i) + "_LINE", ""); setEnv("RESTORE_" + std::to_string(i) + "_EXIT", ""); }
+        for (size_t i = 0; i < launches.size(); ++i) {
+          setEnv("RESTORE_" + std::to_string(i) + "_LINE", launches[i].first);
+          setEnv("RESTORE_" + std::to_string(i) + "_EXIT", std::to_string(launches[i].second));
+        }
+      };
+      auto launchArgs = [&]() {
+        std::vector<std::string> out;
+        std::ifstream in(state.string() + ".args");
+        for (std::string l; std::getline(in, l);) out.push_back(l);
+        return out;
+      };
+      auto launches = [&]() { int n = 0; std::ifstream in(state); in >> n; return n; };
+      auto settle = [&]() {
+        return recovery_wait([&] { return gViewerByHost.find("restore-host") == gViewerByHost.end() &&
+                                           gViewerByHost.find("other-host") == gViewerByHost.end() && !gReconnectRequest; }, 20000);
+      };
+      setEnv("GNLINK_RECOVERY_RESTORE_STATE", state.string());
+      gShellTestViewerExe = selfPath;
+      ShellConnectRequest host{};
+      host.hostId = "restore-host";
+      host.hostName = "restore-pc";
+
+      // R1: the user's session reports a screen and the host goes away (44) -> the automatic reconnect
+      // is started with --reconnect --restore-target <that screen>.
+      plan({{reportLine, 44}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return launches() >= 2; }, 15000) && settle(),
+                     "[restore] a reported screen, then exit 44: the shell reconnects on its own");
+      auto args = launchArgs();
+      recovery_check(args.size() >= 2 && args[0].find("--restore-target") == std::string::npos &&
+                         args[0].find("--reconnect") == std::string::npos,
+                     "[restore] the session the user started carried no restore");
+      recovery_check(args.size() >= 2 && args[1].find(" --reconnect") != std::string::npos &&
+                         args[1].find(" --restore-target " + target) != std::string::npos,
+                     "[restore] the automatic reconnect carried --reconnect --restore-target <the reported screen>");
+      {
+        std::ifstream log(log_dir_path() + L"\\client.log");
+        std::stringstream s; s << log.rdbuf();
+        const std::string text = s.str();
+        recovery_check(text.find("code=44") != std::string::npos &&
+                           text.find("reconnect=scheduled attempt=1") != std::string::npos &&
+                           text.find("host=restore-host restore=" + target) != std::string::npos &&
+                           text.find("reconnect attempt=1 host=restore-host restore=" + target) != std::string::npos,
+                       "[restore] the shell logged the exit, the attempt and the restore in one line each");
+        recovery_check(text.find("fixture-password") == std::string::npos && (gSessionToken.empty() || text.find(gSessionToken) == std::string::npos),
+                       "[restore] ...with no credential in them");
+      }
+
+      // R2: exit 44 without a report (nothing confirmed and rendered) -> reconnect onto the picker.
+      plan({{"", 44}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return launches() >= 2; }, 15000) && settle(), "[restore] no report, exit 44: reconnects");
+      args = launchArgs();
+      recovery_check(args.size() >= 2 && args[1].find(" --reconnect") != std::string::npos &&
+                         args[1].find("--restore-target") == std::string::npos,
+                     "[restore] ...onto the picker: no target was confirmed, none is invented (and none carried over from R1)");
+
+      // R3: a chain -- the reconnect itself drops before it reports: the next one still restores the
+      // last confirmed + rendered screen.
+      plan({{reportLine, 43}, {"", 44}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return launches() >= 3; }, 20000) && settle(), "[restore] two drops in a row: two reconnects");
+      args = launchArgs();
+      recovery_check(args.size() >= 3 && args[2].find(" --restore-target " + target) != std::string::npos,
+                     "[restore] the second reconnect still restores the last rendered screen");
+
+      // R4: a non-recoverable end forgets it: the user's next session is plain.
+      plan({{reportLine, 1}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return launches() >= 1; }, 10000) && settle(), "[restore] a non-recoverable end");
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return launches() >= 2; }, 10000) && settle(), "[restore] ...then the user connects again");
+      args = launchArgs();
+      recovery_check(args.size() >= 2 && args[1].find("--restore-target") == std::string::npos &&
+                         args[1].find("--reconnect") == std::string::npos,
+                     "[restore] a session the user starts never restores");
+
+      // R5: the reconnect is cancelled from the page -> nothing is started, the restore is gone.
+      plan({{reportLine, 44}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return gReconnectRequest.has_value() && !gReconnectRestore.empty(); }, 10000),
+                     "[restore] a reconnect with a restore is pending");
+      recovery_eval(L"document.getElementById('cancelReconnect').click();true");
+      recovery_check(recovery_wait([&] { return !gReconnectRequest; }, 5000) && gReconnectRestore.empty(),
+                     "[restore] cancelling it from the page drops the restore");
+      recovery_pump(2500);
+      recovery_check(launches() == 1, "[restore] ...and no reconnect is started");
+
+      // R6: the user picks another PC while the reconnect waits -> that PC's session has no restore,
+      // and the first PC is not reconnected.
+      plan({{reportLine, 44}, {"", 0}, {"", 0}});
+      gReconnectAttempts = 0;
+      begin_session(host);
+      recovery_check(recovery_wait([&] { return gReconnectRequest.has_value(); }, 10000), "[restore] pending again");
+      ShellConnectRequest other{};
+      other.hostId = "other-host";
+      other.hostName = "other-pc";
+      begin_session(other);
+      recovery_check(!gReconnectRequest && gReconnectRestore.empty(), "[restore] another PC picked: the pending reconnect and its restore are dropped");
+      recovery_check(recovery_wait([&] { return launches() >= 2; }, 10000) && settle(), "[restore] the other PC's session ran");
+      recovery_pump(2500);
+      args = launchArgs();
+      recovery_check(launches() == 2 && args.size() >= 2 && args[1].find("--restore-target") == std::string::npos &&
+                         args[1].find("--reconnect") == std::string::npos,
+                     "[restore] it carried no restore, and the first PC was not reconnected");
+
+      setEnv("GNLINK_RECOVERY_RESTORE_STATE", "");
+      gShellTestViewerExe.clear();
+      gReconnectAttempts = 0;
+      recovery_pump(300);
     }
 
     gViewerOperation = 100;
