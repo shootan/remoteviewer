@@ -1,6 +1,11 @@
 // dxgi-wedge-fix r1 (Codex B7): a DXGI wedge in the streaming child, end to end, as processes.
 //
-//   node apps/directory/test/dxgi_wedge_reconnect_runner.js <Release dir of a test build>
+//   node apps/directory/test/dxgi_wedge_reconnect_runner.js <Release dir of a test build> [scenario]
+//
+// scenario (r3, Codex E2/E3; see client_reconnect_restore_e2e_test.cpp): desktop (default) | monitor (the test
+// host lists a second screen: GNLINK_STREAM_TEST_MONITORS_FILE=extra) | presentfail | presentok (a topmost
+// fixture window B, and the viewer is GNLinkViewerR3Test -- presents failed while a file exists).
+// GNLINK_R3_VIEWER=<exe name> runs another test viewer instead (the restore mutants: they must FAIL).
 //
 // What runs, and what it is:
 //   * the directory: a private instance of the PRODUCTION server (apps/directory/server.js), loopback;
@@ -21,6 +26,8 @@ const assert = require('assert');
 
 const root = path.resolve(__dirname, '../../..');
 const bin = path.resolve(process.argv[2] || path.join(root, 'build-local/apps/native_poc/Release'));
+const scenario = process.argv[3] || 'desktop';
+const B_TITLE = '!GNLINK-CHAIN-B';  // the host lists windows by title: '!' sorts first
 const scratchRoot = path.join(root, '.claude', 'test-tmp');
 fs.mkdirSync(scratchRoot, { recursive: true });
 const scratch = fs.mkdtempSync(path.join(scratchRoot, 'dxgi-wedge-'));
@@ -49,7 +56,7 @@ async function port(tcp) {
 }
 const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
 
-let server, host, client;
+let server, host, client, fixtureWindow;
 async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const done = new Promise((r) => child.once('exit', r));
@@ -81,6 +88,25 @@ async function stop(child) {
     GNLINK_STREAM_TEST_DIRECTORY: url,
     GNLINK_STREAM_TEST_CACHE: path.join(hostAppData, 'remote60', 'host.json'),
     GNLINK_STREAM_TEST_DXGI_WEDGE_FILE: wedgeFile };
+  if (scenario === 'monitor' || scenario === 'monitor_test_viewer') {
+    const monitorsFile = path.join(scratch, 'monitors.txt');
+    fs.writeFileSync(monitorsFile, 'extra');
+    hostEnv.GNLINK_STREAM_TEST_MONITORS_FILE = monitorsFile;
+  }
+  if (scenario === 'presentfail' || scenario === 'presentok') {
+    // A window of our own, topmost and never activated, for the picker's first window card. The client
+    // checks it is listed first before it clicks anything.
+    const ps = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;" +
+      "Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition 'public class F : System.Windows.Forms.Form {" +
+      " protected override bool ShowWithoutActivation { get { return true; } }" +
+      " protected override System.Windows.Forms.CreateParams CreateParams { get { var c = base.CreateParams; c.ExStyle |= 0x08000008; return c; } } }';" +
+      "$f = New-Object F; $f.Text = '" + B_TITLE + "'; $f.StartPosition = 'Manual'; $f.Location = New-Object System.Drawing.Point(80, 80);" +
+      "$f.ClientSize = New-Object System.Drawing.Size(640, 400); $f.BackColor = [System.Drawing.Color]::DarkOrange; $f.TopMost = $true;" +
+      "$t = New-Object System.Windows.Forms.Timer; $t.Interval = 600000; $t.Add_Tick({ $f.Close() }); $t.Start();" +
+      "[System.Windows.Forms.Application]::Run($f)";
+    fixtureWindow = spawn('powershell.exe', ['-NoProfile', '-Command', ps], { stdio: 'ignore' });
+    await sleep(3000);
+  }
   host = spawn(path.join(bin, 'GNLinkHostUiTest.exe'), [], { env: hostEnv, stdio: 'ignore' });
   const signin = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', uia,
     '-ProcessId', String(host.pid), '-Expect', 'signin', '-Account', ACCOUNT, '-Password', PASSWORD,
@@ -98,22 +124,39 @@ async function stop(child) {
   // ---- the client: the product shell and the real viewer.
   const clientEnv = { ...env, LOCALAPPDATA: clientAppData, GNLINK_RECOVERY_TEST_ROOT: scratch,
     GNLINK_CHAIN_DIRECTORY: url, GNLINK_CHAIN_ACCOUNT: ACCOUNT, GNLINK_CHAIN_PASSWORD: PASSWORD,
-    GNLINK_CHAIN_HOSTNAME: HOSTNAME, GNLINK_CHAIN_WEDGE_FILE: wedgeFile, GNLINK_CHAIN_SHOTS: shots };
+    GNLINK_CHAIN_HOSTNAME: HOSTNAME, GNLINK_CHAIN_WEDGE_FILE: wedgeFile, GNLINK_CHAIN_SHOTS: shots,
+    GNLINK_CHAIN_SCENARIO: scenario };
+  if (scenario === 'monitor_test_viewer') {
+    // The shell-launched product viewer has no screen switch (no screen list in picker mode): the r3 test
+    // viewer asks for the list after a reveal, as r1 did, and everything after that is the product's.
+    clientEnv.GNLINK_CHAIN_VIEWER_EXE = path.join(bin, process.env.GNLINK_R3_VIEWER || 'GNLinkViewerR3Test.exe');
+    clientEnv.GNLINK_VIEWER_TEST_REQUEST_MONITORS = '1';
+  }
+  if (scenario === 'presentfail' || scenario === 'presentok') {
+    clientEnv.GNLINK_CHAIN_VIEWER_EXE = path.join(bin, process.env.GNLINK_R3_VIEWER || 'GNLinkViewerR3Test.exe');
+    clientEnv.GNLINK_VIEWER_TEST_PRESENT_FAIL_FILE = path.join(scratch, 'present-fail.flag');
+    clientEnv.GNLINK_CHAIN_B_TITLE = B_TITLE;
+  }
   client = spawn(path.join(bin, 'remote60_client_reconnect_restore_e2e_test.exe'), [], { env: clientEnv, stdio: 'inherit' });
   const code = await new Promise((resolve, reject) => { client.once('error', reject); client.once('exit', resolve); });
 
   // ---- what the supervisor saw.
   const h = read(hostLog);
   const hasLine = (re) => re.test(h);
-  console.log(hasLine(/dxgi-worker-wedge phase=frame_handler/) ? 'PASS the product watchdog named the wedge (phase=frame_handler)' : 'FAIL no dxgi-worker-wedge line in host_app.log');
-  console.log(hasLine(/self-terminated \(dxgi-worker watchdog\) code=0x0000002C \(44\)/) ? 'PASS the supervisor observed exit 44' : 'FAIL the supervisor did not observe exit 44');
-  console.log(hasLine(/repeated DXGI wedge: using WGC recovery backend/) && hasLine(/effective=wgc dxgiQuarantined=1 reason=wedge-this-run/)
+  const wedged = !(scenario === 'presentfail' || scenario === 'presentok');
+  if (!wedged) console.log('      (no wedge in this scenario: the session ends through failing presents; wedge lines not expected)');
+  if (wedged) console.log(hasLine(/dxgi-worker-wedge phase=frame_handler/) ? 'PASS the product watchdog named the wedge (phase=frame_handler)' : 'FAIL no dxgi-worker-wedge line in host_app.log');
+  if (wedged) console.log(hasLine(/self-terminated \(dxgi-worker watchdog\) code=0x0000002C \(44\)/) ? 'PASS the supervisor observed exit 44' : 'FAIL the supervisor did not observe exit 44');
+  if (wedged) console.log(hasLine(/repeated DXGI wedge: using WGC recovery backend/) && hasLine(/effective=wgc dxgiQuarantined=1 reason=wedge-this-run/)
     ? 'PASS the relaunched child runs WGC (quarantine for this run)' : 'FAIL the relaunched child is not on WGC');
-  console.log(hasLine(/capture-quarantine\] (recorded|not recorded)/) ? 'PASS the supervisor tried to record the wedge: ' + (h.match(/capture-quarantine\] (recorded|not recorded)[^\n]*/) || [''])[0] : 'FAIL no record attempt logged');
-  const fails = ['dxgi-worker-wedge phase=frame_handler', 'code=0x0000002C (44)', 'using WGC recovery backend'].filter((s) => !h.includes(s)).length;
+  if (wedged) console.log(hasLine(/capture-quarantine\] (recorded|not recorded)/) ? 'PASS the supervisor tried to record the wedge: ' + (h.match(/capture-quarantine\] (recorded|not recorded)[^\n]*/) || [''])[0] : 'FAIL no record attempt logged');
+  // presentfail ends the session through the viewer's own present failure (43), not a wedge.
+  const fails = !wedged ? 0 :
+    ['dxgi-worker-wedge phase=frame_handler', 'code=0x0000002C (44)', 'using WGC recovery backend'].filter((s) => !h.includes(s)).length;
   console.log('      host log: ' + hostLog);
   console.log('      client log dir: ' + path.join(clientAppData, 'GNLink'));
   console.log('      screenshots: ' + shots);
+  if (code === 3) { console.log('dxgi_wedge_reconnect_runner: INVALID (the fixture window was not listed first)'); process.exitCode = 3; return; }
   if (code !== 0 || fails) { console.log('dxgi_wedge_reconnect_runner: FAIL'); process.exitCode = 1; return; }
   console.log('dxgi_wedge_reconnect_runner: ALL PASS');
 })().catch((error) => {
@@ -121,6 +164,7 @@ async function stop(child) {
   console.error('FAIL', error.message); console.log('dxgi_wedge_reconnect_runner: FAIL'); process.exitCode = 1;
 }).finally(async () => {
   await stop(client);
+  await stop(fixtureWindow);
   await stop(host);  // its streaming child goes with its job
   await stop(server);
   console.log('      (fixture kept for inspection: ' + scratch + ')');

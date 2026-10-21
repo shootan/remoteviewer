@@ -13301,3 +13301,12 @@ Next
 - D4(시험 빌드만): MtAb 의 장치 재생성 경로에서 MT arm 을 새 context 생성 직후·WinRT wrapper/MF/scaler 이전으로 옮기고 `where=` 와 `mf-device-set` 로그로 순서를 남긴다. 출하 MT 무변경.
 - 시험: viewer_restore_target 30/30(mutant COMMIT_ON_ARM 6 FAIL·MONITOR_AS_DESKTOP 1 FAIL) · capture_recovery_store 64/64 ×3(2 writer process×20 round 빈 폴더, 최악 62 ms; mutant CONTINUE_FUTURE 3 FAIL·UNSHARED_LOCK_CREATE 20/20 round FAIL) · client_recovery_ui 84/0 · 전체 사슬 dxgi_wedge_reconnect_runner ALL PASS(뷰어 로그 순서 revealed gen=2 → reported why=presented → result=restored) · MtAb arm=on 시작 순서 mt-ab → device-created → mf-device-set → winrt-wrapper(state=on) · 전체 빌드 OK · 출하 gate ALL PASS 9. 재생성 경로의 순서는 실행되지 않았다(어댑터 변경 등 조건 필요) — 소스 순서만.
 - 제품/테스트/문서: 제품(viewer/host 시험빌드 경로·store), 테스트, 문서(이 항목).
+
+### 2026-10-22 dxgi-wedge-fix r3 — Codex f0ee888 EVIDENCE 보완 E2/E3 (제품 동작 변경 없음, 미게시)
+
+- 근거: `codex_dxgi_wedge_fix_r2.md` E2/E3. 제품 소스 변경은 시험 빌드 전용 `#ifdef`(REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM, 변이 정의)와 viewer_present.cpp 의 지역 플래그 1개뿐이다. 출하 GNLinkViewer 는 seam 문자열 0(gate 9 PASS, self-test 20 — 새 표식 viewer-present-fail-seam·GNLINK_VIEWER_TEST_), 시험 뷰어 GNLinkViewerR3Test 는 표식 있음(양성 대조).
+- **발견(E2)**: shell 이 띄우는 PC 뷰어(picker 모드)는 화면 목록을 요청하지 않아, 호스트가 화면 2개를 알려도 툴바에 화면 전환 버튼이 없다(실측: 버튼 1·2·4·5·6, 3 없음). main 5063cd9 도 소스상 같고, r1 은 restore 코드의 부수 효과로 요청했었다. 즉 지금 제품에서는 사용자가 명시 모니터를 고를 수 없다 — Codex 판단 사항(제품 변경 안 함).
+- E2(제품 동등): 시험 뷰어가 reveal 뒤 화면 목록만 요청(r1 동작)하고, 그 뒤는 제품 경로 — 시험 호스트 화면 2개(GNLINK_STREAM_TEST_MONITORS_FILE=extra) → 툴바 전환 버튼 → 메뉴 2번째 화면 → `monitor` 보고 → wedge 44 → shell restore=monitor → 새 뷰어 picker reason=monitor_not_restored, 자동 선택·restored 0 → 수동 desktop 선택 present. 42 PASS. 변이 MONITOR_AS_DESKTOP 은 통합 경로에서 FAIL.
+- E3: 시험 뷰어의 present 실패 주입(render 미실행 → 제품 note_present_result → 43). A(desktop) present·보고 → 툴바 대상 선택 → fixture 창 B(목록 첫 항목인지 확인 후에만 클릭) reveal → present 실패 → B 보고 0(1/1) → 43 → shell restore=desktop → 새 뷰어 desktop restored. 37 PASS. 대조: B present 성공 → `window` 보고 → shell restore=window → 새 뷰어 picker window_not_restored. 36 PASS. 변이 REPORT_ON_REVEAL(r1 규칙)은 통합 경로에서 FAIL(보고 2→3, restore 잃음).
+- 기본 desktop 사슬 재확인 38 PASS. 이 PC 모니터 1개·실 2번째 출력 동일성·회사 PC 실기는 미검증 그대로.
+- 제품/테스트/문서: 시험 seam(제품 소스 내 #ifdef), 테스트(사슬 시나리오·runner·변이 대상·gate 표식), 문서(이 항목).

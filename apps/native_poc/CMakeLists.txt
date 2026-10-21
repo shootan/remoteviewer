@@ -653,6 +653,38 @@ target_compile_definitions(remote60_native_video_client_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
 
+# dxgi-wedge-fix r3 (Codex E2/E3): the same viewer, built with a present that can be made to FAIL (a file named
+# by GNLINK_VIEWER_TEST_PRESENT_FAIL_FILE) and, with GNLINK_VIEWER_TEST_REQUEST_MONITORS=1, asking for the
+# screen list once a target is revealed. Same sources, libraries and options as GNLinkViewer; one define.
+# Never shipped (the release gate refuses its marker); the chain e2e starts it instead of GNLinkViewer.
+get_target_property(_viewer_sources remote60_native_video_client_poc SOURCES)
+add_executable(remote60_viewer_present_fail_test ${_viewer_sources})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_viewer_present_fail_test PROPERTY ${_prop} "${_value}")
+  endif()
+endforeach()
+target_compile_definitions(remote60_viewer_present_fail_test PRIVATE REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM=1)
+set_target_properties(remote60_viewer_present_fail_test PROPERTIES OUTPUT_NAME "GNLinkViewerR3Test")
+# The same test viewer with one restore mutant each (r3: the integrated path must FAIL with them):
+# MONITOR_AS_DESKTOP (E2: a reconnect would select the desktop for an explicit screen) and REPORT_ON_REVEAL
+# (E3: r1's rule -- a revealed B reported before it was presented).
+foreach(_mutant MONITOR_AS_DESKTOP REPORT_ON_REVEAL)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_viewer_r3_mutant_${_mutant_lower}_test ${_viewer_sources})
+  foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+    get_target_property(_value remote60_native_video_client_poc ${_prop})
+    if(_value)
+      set_property(TARGET remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTY ${_prop} "${_value}")
+    endif()
+  endforeach()
+  target_compile_definitions(remote60_viewer_r3_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM=1 REMOTE60_RESTORE_MUTANT_${_mutant}=1)
+  set_target_properties(remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTIES
+    OUTPUT_NAME "GNLinkViewerR3Mutant_${_mutant_lower}")
+endforeach()
+
 # prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
 # against a fake control host on loopback (no UI, no SendInput, no desktop).
 add_executable(remote60_client_session_role_park_test

@@ -9,6 +9,7 @@
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_restore_target.hpp"
+#include "viewer_present_fail_seam.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -102,7 +103,13 @@ void restore_on_reveal(ViewerState& ctx, uint64_t generation) {
     r.phase = RestoreState::Phase::Done;
   }
   if (r.picked) r.commit.Arm(*r.picked, generation);
+#ifdef REMOTE60_RESTORE_MUTANT_REPORT_ON_REVEAL  // test-only mutant: r1's rule, reported at the reveal
+  if (r.picked) report(ctx, *r.picked, "reveal");
+#endif
   r.picked.reset();
+#ifdef REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM
+  if (viewer_test_requests_monitor_list()) ctx.picker.windowPanel.RequestMonitorList();  // TEST BUILD ONLY (r3 E2)
+#endif
   log_client_line(ctx, "[native-video-client][restore] revealed gen=" + std::to_string(generation) +
                            " (reported once presented)");
 }

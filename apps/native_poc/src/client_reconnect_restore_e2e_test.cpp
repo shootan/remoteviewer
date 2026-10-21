@@ -19,14 +19,31 @@
 // Environment (all set by the runner): GNLINK_RECOVERY_TEST_ROOT (fixture with .fixture and profile =
 // TEMP), GNLINK_CHAIN_DIRECTORY, GNLINK_CHAIN_ACCOUNT, GNLINK_CHAIN_PASSWORD (the fixture's test account),
 // GNLINK_CHAIN_HOSTNAME, GNLINK_CHAIN_WEDGE_FILE, GNLINK_CHAIN_SHOTS (folder for the screenshots).
+//
+// dxgi-wedge-fix r3 (Codex E2/E3) -- GNLINK_CHAIN_SCENARIO, after session 1's desktop is presented:
+//   desktop     (default) the wedge -> reconnect -> the desktop again, as above.
+//   monitor     the host (test seam) lists two screens; the viewer's OWN toolbar is searched for its screen
+//               switch. If it is there: pick the second screen through it -> "monitor" reported -> wedge ->
+//               the reconnected viewer shows the picker with the reason and selects nothing -> a manual pick
+//               of the desktop card shows the stream. If it is not there, that is reported as found.
+//   presentfail the viewer is GNLinkViewerR3Test (GNLINK_CHAIN_VIEWER_EXE). Back to the picker
+//               through the toolbar's 대상 선택; the fixture window B (GNLINK_CHAIN_B_TITLE, checked to be the
+//               first listed window before anything is clicked) is picked with presents made to FAIL ->
+//               B revealed, no B report, no restored -> the viewer gives up (43) -> the shell reconnects
+//               with what was last SEEN (desktop) -> the desktop again.
+//   presentok   the same, presents NOT failed while B is picked (the control): B reported as "window" ->
+//               then presents fail (B is a WGC window; the DXGI wedge cannot end it) -> the reconnect carries
+//               "window" -> the reconnected viewer shows the picker ("창은 자동으로 다시 고르지 않습니다").
 
 #define wWinMain chain_product_entry
 #include "client_shell_main.cpp"
 #undef wWinMain
 #include <shlwapi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <stdexcept>
 
@@ -226,6 +243,268 @@ bool desktop_card(const std::string& viewerLines, RECT* out) {
   return r > l && b > t;
 }
 
+// ---- r3 helpers: the viewer's toolbar and its picker cards, driven with posted mouse messages ----------
+HWND toolbar_of_pid(DWORD pid) {
+  struct Find {
+    DWORD pid;
+    HWND found;
+  } f{pid, nullptr};
+  EnumWindows(
+      [](HWND h, LPARAM lp) -> BOOL {
+        auto* f = reinterpret_cast<Find*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(h, &owner);
+        wchar_t cls[64]{};
+        GetClassNameW(h, cls, 64);
+        if (owner == f->pid && std::wstring(cls) == L"Remote60SessionToolbar") {
+          f->found = h;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&f));
+  return f.found;
+}
+
+// Sweeps the toolbar with posted presses (each released OUTSIDE every button, so nothing is clicked) and
+// reads the toolbar's own "[toolbar] down id=N x=X" lines: button id -> an x on it. Id 1 = 대상 선택,
+// 3 = the screen switch (shown only for two or more screens).
+std::map<int, int> sweep_toolbar(HWND toolbar, DWORD pid, int* height) {
+  std::map<int, int> xs;
+  RECT rc{};
+  GetClientRect(toolbar, &rc);
+  const int w = std::max<long>(rc.right, 600), y = std::max<long>(rc.bottom / 2, 12);
+  if (height) *height = y;
+  const size_t before = lines_of_pid(viewer_log_text(), pid).size();
+  for (int x = 4; x < w; x += 10) {
+    PostMessageW(toolbar, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+    PostMessageW(toolbar, WM_LBUTTONUP, 0, MAKELPARAM(30000, 30000));
+    chain_pump(15);
+  }
+  chain_pump(800);
+  const std::string lines = lines_of_pid(viewer_log_text(), pid).substr(before);
+  std::istringstream in(lines);
+  for (std::string l; std::getline(in, l);) {
+    const size_t at = l.find("[toolbar] down id=");
+    if (at == std::string::npos) continue;
+    int id = 0, x = 0, yy = 0;
+    if (std::sscanf(l.c_str() + at, "[toolbar] down id=%d x=%d y=%d", &id, &x, &yy) == 3 && id > 0 && !xs.count(id))
+      xs[id] = x;
+  }
+  return xs;
+}
+
+void click_toolbar(HWND toolbar, int x, int y) {
+  PostMessageW(toolbar, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+  chain_pump(60);
+  PostMessageW(toolbar, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+}
+
+HWND menu_of_pid(DWORD pid) {
+  struct Find {
+    DWORD pid;
+    HWND found;
+  } f{pid, nullptr};
+  EnumWindows(
+      [](HWND h, LPARAM lp) -> BOOL {
+        auto* f = reinterpret_cast<Find*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(h, &owner);
+        wchar_t cls[16]{};
+        GetClassNameW(h, cls, 16);
+        if (owner == f->pid && std::wstring(cls) == L"#32768" && IsWindowVisible(h)) {
+          f->found = h;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&f));
+  return f.found;
+}
+
+// The picker's card for the first listed window: slot 1 of the grid whose slot 0 (the desktop card) the
+// picker logged -- the same arithmetic as card_rect_for_slot (gap 14 px at 96 dpi).
+RECT window_card(const RECT& desktop, HWND viewer, const RECT& client) {
+  const int dpi = static_cast<int>(GetDpiForWindow(viewer));
+  const int gap = MulDiv(14, dpi > 0 ? dpi : 96, 96);
+  const int cw = desktop.right - desktop.left, ch = desktop.bottom - desktop.top;
+  RECT r{desktop.right + gap, desktop.top, desktop.right + gap + cw, desktop.bottom};
+  if (r.right > client.right) r = RECT{desktop.left, desktop.bottom + gap, desktop.right, desktop.bottom + gap + ch};
+  return r;
+}
+
+void click_viewer(HWND viewer, const RECT& card) {
+  const LPARAM at = MAKELPARAM((card.left + card.right) / 2, (card.top + card.bottom) / 2);
+  PostMessageW(viewer, WM_MOUSEMOVE, 0, at);
+  PostMessageW(viewer, WM_LBUTTONDOWN, MK_LBUTTON, at);
+  chain_pump(80);
+  PostMessageW(viewer, WM_LBUTTONUP, 0, at);
+}
+
+// The newest "window-list ... firstTitle=<title>" of this viewer.
+std::string first_listed_title(const std::string& viewerLines) {
+  const size_t at = viewerLines.rfind("firstTitle=");
+  if (at == std::string::npos) return {};
+  std::string t = viewerLines.substr(at + 11);
+  // The title runs to the first field the log appends after it.
+  for (const char* field : {" eventQpcUs=", " viewerSession="}) {
+    const size_t end = t.find(field);
+    if (end != std::string::npos) t.resize(end);
+  }
+  while (!t.empty() && (t.back() == '\r' || t.back() == '\n' || t.back() == ' ')) t.pop_back();
+  return t;
+}
+
+}  // namespace
+
+
+namespace {
+
+// Waits for the shell's next viewer (not `previous`) and returns its pid.
+DWORD next_viewer(DWORD previous) {
+  DWORD pid = 0;
+  chain_wait([&] {
+    for (const auto& e : gViewerByHost)
+      if (e.second.pid != previous) pid = e.second.pid;
+    return pid != 0;
+  }, 20000);
+  return pid;
+}
+
+void run_r3_scenario(const std::string& scenario, DWORD pid1, HWND viewer1, const Shot& pickerShot,
+                     const std::wstring& shots, const std::wstring& wedgeFile, const std::wstring& presentFailFile,
+                     const std::string& bTitle) {
+  HWND toolbar = nullptr;
+  chain_wait([&] { return (toolbar = toolbar_of_pid(pid1)) != nullptr; }, 10000);
+  require(toolbar != nullptr, "the viewer's session toolbar window exists");
+  int ty = 0;
+  const std::map<int, int> buttons = sweep_toolbar(toolbar, pid1, &ty);
+  std::string ids;
+  for (const auto& [id, x] : buttons) ids += std::to_string(id) + "@" + std::to_string(x) + " ";
+  std::printf("      (toolbar buttons found by the sweep: %s)\n", ids.c_str());
+
+  if (scenario == "monitor" || scenario == "monitor_test_viewer") {
+    const std::string v1 = lines_of_pid(viewer_log_text(), pid1);
+    std::printf("      (monitor lists this viewer received: %zu)\n", count_of(v1, "monitor-list"));
+    if (!buttons.count(3)) {
+      check(false, "E2: the toolbar offers a screen switch while the host lists two screens",
+            "FOUND: no screen-switch button (id 3) -- the viewer has no screen list");
+      return;
+    }
+    check(true, "E2: the toolbar offers a screen switch (host lists two screens)");
+    click_toolbar(toolbar, buttons.at(3), ty);
+    HWND menu = nullptr;
+    chain_wait([&] { return (menu = menu_of_pid(pid1)) != nullptr; }, 5000);
+    require(menu != nullptr, "E2: the toolbar's screen menu opened");
+    for (int key : {VK_DOWN, VK_DOWN, VK_RETURN}) {
+      PostMessageW(menu, WM_KEYDOWN, key, 0);
+      chain_pump(150);
+    }
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid1).find("[viewer-restore] target=monitor") !=
+                                    std::string::npos; }, 15000),
+            "E2: the second screen picked through the toolbar -> \"monitor\" reported to the shell");
+    { std::ofstream(wedgeFile) << "wedge\n"; }
+    require(chain_wait([&] { return shell_log_text().find("restore=monitor") != std::string::npos; }, 60000),
+            "E2: the session died; the shell's reconnect carries restore=monitor");
+    const DWORD pid2 = next_viewer(pid1);
+    require(pid2 != 0, "E2: the shell started a new viewer on its own");
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid2).find("result=picker reason=monitor_not_restored") !=
+                                    std::string::npos; }, 60000),
+            "E2: the new viewer did NOT restore it: the picker, reason monitor_not_restored");
+    chain_pump(4000);
+    const std::string v2 = lines_of_pid(viewer_log_text(), pid2);
+    check(v2.find("[restore] requested") == std::string::npos && v2.find("select_request") == std::string::npos &&
+              v2.find("result=restored") == std::string::npos,
+          "E2: ...and selected nothing on its own (no restore request, no select, no restored)");
+    HWND viewer2 = window_of_pid(pid2);
+    const Shot pick2 = screenshot(viewer2, shots + L"\\E2-1-picker-with-reason.bmp");
+    check(pick2.ok && pick2.pickerColorShare > 0.15, "E2: screenshot: the reconnected window is the picker",
+          shot_text(pick2));
+    RECT card{};
+    require(desktop_card(v2, &card), "E2: the picker's desktop card is known");
+    click_viewer(viewer2, card);
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid2).find("[viewer-restore] target=desktop") !=
+                                    std::string::npos; }, 30000),
+            "E2: a MANUAL pick of the desktop card is presented and reported");
+    chain_pump(1500);
+    const Shot s2 = screenshot(viewer2, shots + L"\\E2-2-after-manual-pick.bmp");
+    check(s2.ok && s2.pickerColorShare < 0.05, "E2: screenshot: the stream after the manual pick", shot_text(s2));
+    return;
+  }
+
+  // presentfail / presentok
+  const bool fail = scenario == "presentfail";
+  require(buttons.count(1) != 0, "E3: the toolbar's 대상 선택 is there");
+  const size_t before1 = lines_of_pid(viewer_log_text(), pid1).size();
+  click_toolbar(toolbar, buttons.at(1), ty);
+  RECT card{};
+  require(chain_wait([&] {
+            const std::string fresh = lines_of_pid(viewer_log_text(), pid1).substr(before1);
+            return desktop_card(fresh, &card);
+          }, 20000),
+          "E3: back on the picker through the toolbar (a fresh picker paint)");
+  // The picker shows the newest window list this viewer has (a reopened picker does not fetch a new one).
+  const std::string first = first_listed_title(lines_of_pid(viewer_log_text(), pid1));
+  if (first != bTitle) {
+    // Never click a window of this PC that is not the fixture's.
+    std::printf("chain: INVALID first listed window is \"%s\", not the fixture window \"%s\"\n", first.c_str(),
+                bTitle.c_str());
+    std::fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 3);
+  }
+  check(true, "E3: the first listed window is the fixture window B", first);
+  RECT client{};
+  GetClientRect(viewer1, &client);
+  const RECT bCard = window_card(card, viewer1, client);
+  chain_pump(800);  // the picker guard: shown for at least 300 ms before a pick counts
+  if (fail) { std::ofstream(presentFailFile) << "fail\n"; }
+  const size_t reportsBefore = count_of(lines_of_pid(viewer_log_text(), pid1), "[viewer-restore] target=");
+  const size_t revealsBefore = count_of(lines_of_pid(viewer_log_text(), pid1), "[restore] revealed gen=");
+  click_viewer(viewer1, bCard);
+  require(chain_wait([&] { return count_of(lines_of_pid(viewer_log_text(), pid1), "[restore] revealed gen=") > revealsBefore; },
+                     30000),
+          "E3: B was confirmed by the host and its first frame decoded (revealed)");
+  if (fail) {
+    require(chain_wait([&] { return shell_log_text().find("viewer exit operation=") != std::string::npos; }, 30000),
+            "E3: B's presents failed; the viewer gave up on its own");
+    DeleteFileW(presentFailFile.c_str());  // the reconnected viewer presents normally
+    const std::string v1 = lines_of_pid(viewer_log_text(), pid1);
+    check(count_of(v1, "[viewer-restore] target=") == reportsBefore,
+          "E3: B was NOT reported (the shell still holds A, the desktop)",
+          "reports before/after: " + std::to_string(reportsBefore) + "/" + std::to_string(count_of(v1, "[viewer-restore] target=")));
+    const std::string sl = shell_log_text();
+    const size_t at = sl.rfind("viewer exit operation=");
+    std::printf("      (%s)\n", sl.substr(at, sl.find('\n', at) - at).c_str());
+    check(sl.find("restore=desktop", at) != std::string::npos, "E3: the reconnect carries restore=desktop (A)");
+    const DWORD pid2 = next_viewer(pid1);
+    require(pid2 != 0, "E3: the shell started a new viewer on its own");
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid2).find("result=restored target=desktop") !=
+                                    std::string::npos; }, 60000),
+            "E3: the new viewer went back to A (the desktop) without a pick");
+    chain_pump(1500);
+    const Shot s = screenshot(window_of_pid(pid2), shots + L"\\E3-fail-restored-A.bmp");
+    check(s.ok && s.pickerColorShare < 0.05, "E3: screenshot: the desktop stream again", shot_text(s));
+  } else {
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid1).find("[viewer-restore] target=window") !=
+                                    std::string::npos; }, 30000),
+            "E3 control: B presented -> \"window\" reported (the shell now holds B)");
+    chain_pump(1500);
+    // B is a window: it is captured through WGC, so the DXGI wedge cannot end this session. It is ended the
+    // same way as in presentfail -- presents failing from now on -- AFTER B was presented and reported.
+    { std::ofstream(presentFailFile) << "fail\n"; }
+    require(chain_wait([&] { return shell_log_text().find("viewer exit operation=") != std::string::npos; }, 30000),
+            "E3 control: the session ends (presents failing after B was shown)");
+    DeleteFileW(presentFailFile.c_str());
+    require(chain_wait([&] { return shell_log_text().find("restore=window") != std::string::npos; }, 60000),
+            "E3 control: the reconnect carries restore=window (the shell now holds B)");
+    const DWORD pid2 = next_viewer(pid1);
+    require(pid2 != 0, "E3 control: a new viewer");
+    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid2).find("result=picker reason=window_not_restored") !=
+                                    std::string::npos; }, 60000),
+            "E3 control: the new viewer shows the picker for B (a window is not restored automatically)");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +527,11 @@ int main() {
   const std::wstring shots = widen(envs("GNLINK_CHAIN_SHOTS"));
   const std::wstring wedgeFile = widen(envs("GNLINK_CHAIN_WEDGE_FILE"));
   const std::string hostName = envs("GNLINK_CHAIN_HOSTNAME");
+  const std::string scenario = envs("GNLINK_CHAIN_SCENARIO").empty() ? "desktop" : envs("GNLINK_CHAIN_SCENARIO");
+  if (!envs("GNLINK_CHAIN_VIEWER_EXE").empty()) gShellTestViewerExe = widen(envs("GNLINK_CHAIN_VIEWER_EXE"));
+  const std::wstring presentFailFile = widen(envs("GNLINK_VIEWER_TEST_PRESENT_FAIL_FILE"));
+  const std::string bTitle = envs("GNLINK_CHAIN_B_TITLE");
+  std::printf("      (scenario: %s)\n", scenario.c_str());
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -319,6 +603,11 @@ int main() {
           "screenshot 2: session 1 shows the stream, not the picker (negative control: screenshot 1 is the picker)",
           "picker: " + shot_text(pickerShot) + " / stream: " + shot_text(streamShot));
 
+    if (scenario != "desktop") {
+      run_r3_scenario(scenario, pid1, viewer1, pickerShot, shots, wedgeFile, presentFailFile, bTitle);
+      throw std::runtime_error("__r3_done__");
+    }
+
     // ---- the wedge --------------------------------------------------------------------------------
     { std::ofstream(wedgeFile) << "wedge\n"; }
     const double tWedge = secs();
@@ -371,8 +660,10 @@ int main() {
                 tWedge, tViewerExit, tViewerExit - tWedge, tRelaunch, tRelaunch - tViewerExit, tRestored,
                 tRestored - tRelaunch, tRestored - tWedge);
   } catch (const std::exception& e) {
-    std::printf("chain: FAIL at \"%s\"\n", e.what());
-    result = 1;
+    if (std::string(e.what()) != "__r3_done__") {
+      std::printf("chain: FAIL at \"%s\"\n", e.what());
+      result = 1;
+    }
   }
   // Every viewer this run started ends here: asked to close (the window's own WM_CLOSE), and -- test build
   // only -- through the terminate handle taken from its launch handle (never a pid lookup).

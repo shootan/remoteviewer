@@ -13,6 +13,7 @@
 #include "viewer_nv12_renderer.hpp"
 #include "viewer_overlay_draw.hpp"
 #include "viewer_restore.hpp"
+#include "viewer_present_fail_seam.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -267,7 +268,17 @@ LRESULT paint_video_frame(ViewerState& ctx, HWND hwnd) {
       return 0;
     }
   }
-  if (!pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
+  bool presentFailInjected = false;
+#ifdef REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM
+  // TEST BUILD ONLY (dxgi-wedge-fix r3, Codex E3): the present fails -- nothing is rendered.
+  presentFailInjected = !pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0 &&
+                        viewer_present_fail_armed();
+  if (presentFailInjected) {
+    renderPath = "test_present_fail";
+    fallbackReason = kViewerPresentFailSeamMarker;
+  }
+#endif
+  if (!presentFailInjected && !pickerVisible && (local || localSurfaceTexture) && w > 0 && h > 0) {
     if (localFormat == SharedFrame::PixelFormat::Nv12) {
       if (!ctx.ui.nv12Renderer.ready) {
         if (!ctx.ui.nv12Renderer.init(hwnd)) {
