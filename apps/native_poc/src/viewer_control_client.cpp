@@ -676,6 +676,8 @@ void ControlClient::Run() {
   // P0 telemetry accumulators (input serialization diagnosis, #351): one line per second.
   // Move-specific (BLOCKER 1) + coalesce delta (BLOCKER 2) + queue age (HIGH 3) + windowUs.
   // lockscreen-cred r1: a typed lock-screen credential this connection is following to its unlock (0 = none).
+  // lockscreen-cred r1: key downs the last look held back on this connection (their ups are not sent).
+  bool heldDownAtSend[256] = {};
   uint32_t lockCredPollRequestId = 0;
   ctx.session.lockCredPending.store(false, std::memory_order_release);  // a new connection follows nothing yet
   uint64_t lockCredPollNextUs = 0;
@@ -974,8 +976,23 @@ void ControlClient::Run() {
               remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
                                                                  ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
               action)) {
+        // lockscreen-cred r1: a key down held back here is remembered, so its up -- which the gate lets through
+        // as a release -- is held back too: a release goes only for a down that went.
+        if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.kind == 5 &&
+            action.inputEvent.keyCode < 256) {
+          heldDownAtSend[action.inputEvent.keyCode] = true;
+        }
         ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
         continue;
+      }
+      if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.keyCode < 256 &&
+          (action.inputEvent.kind == 5 || action.inputEvent.kind == 6)) {
+        const bool heldDown = heldDownAtSend[action.inputEvent.keyCode];
+        heldDownAtSend[action.inputEvent.keyCode] = false;
+        if (action.inputEvent.kind == 6 && heldDown) {
+          ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
       }
       // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
       // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
