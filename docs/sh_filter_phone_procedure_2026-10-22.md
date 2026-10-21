@@ -6,8 +6,8 @@
 (Codex S4).
 
 ## 무엇을 설치하는가
-- 시험 후보 APK: `feat/sh-filter` 의 assembleDebug 산출물. seam 이 없는 출하형이다. 해시는 보고서를 본다.
-- 시험 seam APK(`-Pgnlink.shTestSeam=true`)는 휴대폰에 설치하지 않는다. AVD 실패 주입 전용이다.
+- 시험 후보 APK: `feat/sh-filter` 의 assembleDebug 산출물(noseam). **seam 이 없는 debug 시험물**이지 서명된 출하·게시 승인품이 아니다. 해시는 보고서를 본다. 설치 요청 전에 appId·서명자, 기존 설치·저장 정보(로그인·설정)에 미치는 영향을 확정한다(S5 미결과 함께).
+- 시험 seam APK(`-Pgnlink.shTestSeam=true`)는 휴대폰에 설치하지 않는다. AVD 실패 주입 전용이다. APK gate(`gnlink_check_fixed_server.py --apk`)가 seam APK 를 거부하고, Gradle 은 seam 을 켠 release 빌드를 거부한다.
 
 ## 같은 조건으로 고정할 것
 - 같은 PC 호스트, 같은 원격 화면. `automation/sh_pattern_window.ps1` 패턴 창이나 평소 쓰는 가는 글씨 화면.

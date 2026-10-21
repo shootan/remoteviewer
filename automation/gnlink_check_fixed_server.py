@@ -125,6 +125,16 @@ def check_windows_dir(report, directory):
         check_windows_file(report, path, must_carry)
 
 
+# sh-filter r2 (Codex H4): what only the sharpening TEST seam (src/shseam, -Pgnlink.shTestSeam=true) puts
+# into the code -- its marker and the two launch-intent keys that inject faults or force a strength. The
+# shipped half (src/noseam) has none of them. Searched in every classes*.dex.
+APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength']
+
+
+def apk_test_markers_found(dex):
+    return [m for m in APK_TEST_MARKERS if m.encode('ascii') in dex or m.encode('utf-16-le') in dex]
+
+
 def check_apk(report, path):
     name = os.path.basename(path)
     with zipfile.ZipFile(path) as apk:
@@ -138,6 +148,9 @@ def check_apk(report, path):
              if item.encode('ascii') in everything or item.encode('utf-16-le') in everything]
     report.check(not found, '%s has no server field or text asking for one%s'
                  % (name, (' -- found: ' + ', '.join(found)) if found else ''))
+    seam = apk_test_markers_found(dex)
+    report.check(not seam, '%s has no sharpening test seam%s'
+                 % (name, (' -- found: ' + ', '.join(seam)) if seam else ''))
 
     with zipfile.ZipFile(path) as apk:
         names = apk.namelist()
@@ -197,6 +210,13 @@ def self_test():
         outer.check(verdict(make('wide-marker', {
             'GNLinkClient.exe': lambda b: b + 'shell-test-seam'.encode('utf-16-le')})) == 1,
             'a test switch as a wide literal fails too')
+        # sh-filter r2 (H4): the APK seam check on dex bytes (a real APK pair is the release-time control:
+        # the noseam build passes, the shseam build fails -- see the sh-filter report).
+        outer.check(not apk_test_markers_found(b'dex\n035\0' + FIXED_ADDRESS.encode('ascii')),
+                    'a dex without the sharpening seam passes the seam check')
+        for marker in APK_TEST_MARKERS:
+            outer.check(apk_test_markers_found(b'dex\n035\0' + marker.encode('ascii')) == [marker],
+                        'a dex containing "%s" fails the seam check' % marker)
         missing = make('missing', {})
         os.remove(os.path.join(missing, 'GNLinkViewer.exe'))
         outer.check(verdict(missing) == 1, 'a missing program fails rather than being skipped')

@@ -94,11 +94,22 @@ android {
   }
 
   // sh-filter r1: the sharpening test seam is a separate source file, chosen here. A build made without
-  // -Pgnlink.shTestSeam=true (every published one) compiles src/noseam, which cannot inject anything;
-  // the release gate checks classes.dex for the seam's marker string.
+  // -Pgnlink.shTestSeam=true compiles src/noseam, which cannot inject anything. r2 (Codex H4): a release
+  // task is refused outright with the seam on (below), and the APK gate (gnlink_check_fixed_server.py
+  // --apk) refuses any APK whose dex carries the seam's marker or its intent keys.
+  val shTestSeam = project.findProperty("gnlink.shTestSeam") == "true"
+  val buildsRelease = gradle.startParameter.taskNames.any {
+    val task = it.substringAfterLast(':')
+    task.contains("release", ignoreCase = true) || task == "build" || task == "assemble" || task == "bundle"
+  }
+  if (shTestSeam && buildsRelease) {
+    throw GradleException(
+      "gnlink.shTestSeam=true is for test builds only; refusing ${gradle.startParameter.taskNames}"
+    )
+  }
   sourceSets {
     getByName("main") {
-      java.srcDir(if (project.findProperty("gnlink.shTestSeam") == "true") "src/shseam/java" else "src/noseam/java")
+      java.srcDir(if (shTestSeam) "src/shseam/java" else "src/noseam/java")
     }
   }
 
