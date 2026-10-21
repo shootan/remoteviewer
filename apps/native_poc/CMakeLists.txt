@@ -89,6 +89,7 @@ add_executable(remote60_native_video_host_poc
   src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_cred_host.cpp
+  src/logon_ui_target.cpp
   src/sealed_unlock.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
@@ -314,6 +315,7 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
+  src/logon_ui_target.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -342,6 +344,7 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_secure_input_service_lifecycle_seam
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
+  src/logon_ui_target.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -2520,6 +2523,12 @@ add_executable(remote60_secure_unlock_lockcred_test
 target_include_directories(remote60_secure_unlock_lockcred_test PRIVATE src)
 target_link_libraries(remote60_secure_unlock_lockcred_test PRIVATE remote60_sealed_unlock)
 
+# lockscreen-cred r1: the lock-screen agent's commit sequence and Winlogon-only target (pure, stand-ins).
+add_executable(remote60_logon_ui_target_test
+  src/logon_ui_target_test.cpp
+)
+target_include_directories(remote60_logon_ui_target_test PRIVATE src)
+
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test
   src/secure_input_pipe_server_test.cpp
@@ -2788,6 +2797,7 @@ target_include_directories(remote60_prelogin_input_gate_test PRIVATE src)
 add_executable(remote60_prelogin_cred_host_test
   src/prelogin_cred_host_test.cpp
   src/prelogin_cred_host.cpp
+  src/logon_ui_target.cpp
   src/sealed_unlock.cpp
 )
 target_include_directories(remote60_prelogin_cred_host_test PRIVATE src)
