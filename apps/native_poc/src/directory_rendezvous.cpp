@@ -19,20 +19,68 @@ namespace {
 constexpr uint32_t kPunchReadsPerRound = 256;
 constexpr uint32_t kPunchPauseStepMs = 25;
 
-// A receive result PunchAny can wait through: a datagram, an empty one, a timeout, and on Windows the
-// per-datagram truncation and the ICMP-driven reset an earlier punch to an unreachable candidate earns
-// (classify_udp_recv). POSIX reports that ICMP as ECONNREFUSED, which is not terminal here either.
+// A receive result PunchAny waits through, decided HERE and not by the session's classify_udp_recv
+// (hello-delay-fix r2, Codex N2): punching several candidates from one unconnected socket, a failed
+// receive usually speaks about ONE of those paths, not about the socket -- and ending the whole punch on
+// it gives up the candidates that would still answer. So: a datagram, an empty one and a timeout; and
+// the per-datagram/path reports a UDP recvfrom documents -- Windows WSAECONNRESET (an earlier send's ICMP
+// Port Unreachable), WSAENETRESET (its time to live expired), WSAEMSGSIZE (truncated); POSIX ECONNREFUSED
+// (the ICMP report there). Anything else -- a socket that is not one, an invalid or shut-down socket, the
+// network subsystem gone -- ends it: punching longer does not bring that back. Undocumented codes are not
+// assumed to be per-path.
 bool punch_receive_is_transient(int n, int err) {
-  switch (classify_udp_recv(n, err)) {
-    case UdpRecvClass::Terminal:
-#if !defined(_WIN32)
-      return err == ECONNREFUSED;
-#else
-      return false;
+  if (n >= 0) return true;
+#if defined(REMOTE60_PUNCH_TEST_MUTANT_NETRESET_ENDS)
+  if (err == WSAENETRESET) return false;  // TEST BUILD ONLY (punch_any mutant target): the r1 rule
 #endif
-    default:
+#if defined(_WIN32)
+  switch (err) {
+    case WSAEWOULDBLOCK:
+    case WSAETIMEDOUT:
+    case WSAEINTR:
+    case WSAECONNRESET:
+    case WSAENETRESET:
+    case WSAEMSGSIZE:
       return true;
+    default:
+      return false;
   }
+#else
+  switch (err) {
+    case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK:
+#endif
+    case ETIMEDOUT:
+    case EINTR:
+    case ECONNREFUSED:
+      return true;
+    default:
+      return false;
+  }
+#endif
+}
+
+#if defined(REMOTE60_RENDEZVOUS_TEST_SEAM)
+// TEST BUILDS ONLY (punch_any_test): the receive PunchAny makes, so a test can hand it errors no loopback
+// socket produces on demand (a TTL expiry). Never compiled into the product.
+PunchRecvHookForTest gPunchRecvHook = nullptr;
+#endif
+
+int punch_recvfrom(SocketHandle s, char* buf, int len, sockaddr_in* from, int* fromLen, int* err) {
+#if defined(REMOTE60_RENDEZVOUS_TEST_SEAM)
+  if (gPunchRecvHook) return gPunchRecvHook(s, buf, len, from, fromLen, err);
+#endif
+#if defined(_WIN32)
+  int fl = *fromLen;
+  const int n = recvfrom(s, buf, len, 0, reinterpret_cast<sockaddr*>(from), &fl);
+#else
+  socklen_t fl = static_cast<socklen_t>(*fromLen);
+  const int n = static_cast<int>(recvfrom(s, buf, static_cast<size_t>(len), 0, reinterpret_cast<sockaddr*>(from), &fl));
+#endif
+  *fromLen = static_cast<int>(fl);
+  *err = n < 0 ? socket_last_error() : 0;
+  return n;
 }
 
 constexpr uint32_t kObserveAttempts = 6;
@@ -94,6 +142,10 @@ bool parse_observed(const std::string& json, std::string* outIp, int* outPort) {
 }
 
 }  // namespace
+
+#if defined(REMOTE60_RENDEZVOUS_TEST_SEAM)
+void SetPunchRecvHookForTest(PunchRecvHookForTest hook) { gPunchRecvHook = hook; }
+#endif
 
 DirectoryRendezvous::~DirectoryRendezvous() { Close(); }
 
@@ -300,14 +352,9 @@ bool DirectoryRendezvous::PunchAny(const std::vector<RendezvousCandidate>& candi
     (void)set_recv_timeout(socket_, static_cast<uint32_t>((std::max)(static_cast<long long>(1), waitMs)));
 
     sockaddr_in from{};
-#if defined(_WIN32)
-    int fromLen = sizeof(from);
-#else
-    socklen_t fromLen = sizeof(from);
-#endif
-    const int n = recvfrom(socket_, scratch, sizeof(scratch), 0,
-                           reinterpret_cast<sockaddr*>(&from), &fromLen);
-    const int err = n < 0 ? socket_last_error() : 0;
+    int fromLen = static_cast<int>(sizeof(from));
+    int err = 0;
+    const int n = punch_recvfrom(socket_, scratch, static_cast<int>(sizeof(scratch)), &from, &fromLen, &err);
     ++readsThisRound;
     if (n > 0) {
       for (size_t i = 0; i < targets.size(); ++i) {

@@ -10,10 +10,11 @@
 namespace remote60::native_poc {
 
 namespace {
-// hello-delay-fix r1: the most receives one Hello round takes before the round ends anyway -- the
-// bound on a slice spent reading a queue that keeps filling. A real backlog is ~25 punch replies plus
-// the resets the punch left (measured up to ~100); the round also ends at its slice.
-constexpr uint32_t kHelloReadsPerRound = 512;
+// hello-delay-fix r1/r2: receives in one batch before a short pause -- the CPU bound on a round spent
+// reading a queue that keeps filling. A real backlog is ~25 punch replies plus the resets the punch left
+// (measured up to ~100). A full batch never ends the round: the round still ends at its slice (r2 N1).
+constexpr uint32_t kHelloReadsPerBatch = 512;
+constexpr uint32_t kHelloBatchPauseMs = 10;
 }  // namespace
 
 MessageType outbound_message_type(const ControlOutboundAction& action) {
@@ -300,12 +301,26 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
     // meant a socket holding queued punch replies and ICMP resets (left by the punch that preceded
     // this) gave up one item per ~60 ms, with the host's ack waiting behind them for seconds
     // (reconnect-hello-delay r1). The next Hello still goes out on the same clock as before (after the
-    // slice, then retrySleepMs); reading faster sends nothing more. Bounded by the slice, the stop and
-    // kHelloReadsPerRound.
+    // slice, then retrySleepMs); reading faster sends nothing more. Bounded by the slice and the stop;
+    // r2 (Codex N1): a full batch of reads does not end the round early either -- that would let a
+    // queue that refills fast enough pull the next Hello forward (at once, with Android's pause of 0).
+    // It pauses briefly and goes on reading until the round's own end.
     const uint64_t roundEndMs = nowMs + sliceMs;
-    for (uint32_t reads = 0; reads < kHelloReadsPerRound; ++reads) {
+    uint32_t batchReads = 0;
+    for (;;) {
       const uint64_t t = now_ms();
       if (t >= roundEndMs || stopped()) break;
+      if (batchReads >= kHelloReadsPerBatch) {
+        ++stats.fullBatches;
+#if defined(REMOTE60_HELLO_TEST_MUTANT_BATCH_ENDS_ROUND)
+        break;  // TEST BUILD ONLY (hello_backlog mutant target): the r1 shape this replaces
+#endif
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds((std::min<uint64_t>)(kHelloBatchPauseMs, roundEndMs - t)));
+        batchReads = 0;
+        continue;
+      }
+      ++batchReads;
       (void)set_recv_timeout(sock, static_cast<uint32_t>(roundEndMs - t));
       UdpHelloPacket ack{};
       const int received = recv(sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);

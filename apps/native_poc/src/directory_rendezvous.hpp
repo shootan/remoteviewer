@@ -26,6 +26,13 @@ struct RendezvousCandidate {
   std::string kind;  // "private" | "public" | "public-alt"; for logging only
 };
 
+#if defined(REMOTE60_RENDEZVOUS_TEST_SEAM)
+// TEST BUILDS ONLY (hello-delay-fix r2): stands in for PunchAny's recvfrom -- returns what recvfrom would and
+// sets *err to the socket error on a failure. nullptr restores the real one. Never in the product.
+using PunchRecvHookForTest = int (*)(SocketHandle s, char* buf, int len, sockaddr_in* from, int* fromLen, int* err);
+void SetPunchRecvHookForTest(PunchRecvHookForTest hook);
+#endif
+
 class DirectoryRendezvous {
  public:
   ~DirectoryRendezvous();
