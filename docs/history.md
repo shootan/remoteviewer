@@ -13447,3 +13447,10 @@ Next
 - AVD(SwiftShader, 최종 APK 4b595e2 noseam A77520A0… / shseam B9A1DEB8…): compare 25/0, lifecycle 14/0, resize 8/0(1920x1080 desktop → 1280x720 창 전환, renderer 가 새 크기로 step, 크기 불일치 frame 도 자기 step), latency 2/0, identity 3/0, faults 28/0(정확한 안내 문구 4/4, swap:30 포함), viewer_never 7/0, hold 11/0(20 s 보류 동안 producer 0, 늦은 release 뒤 1회, 재생성 surface 1회 해제, tick 마다 bind 로그 없음), touch 16/0(끄기·0.20·0.35 에서 원격 = 화면점 − 그림 원점 ±1 px, 크게 보기 포함; 앱→native 큐까지, 호스트 주입 off). 지연 구간 p95: 끄기 73.3 / 0.20 92.0 / 0.35 91.7 / 끄기 75.0 ms(각 1400+ frame) — AVD 에서 4 ms 기준 미달 그대로. 실행 중 AVD system_server 고장 1회(서비스 소실) → cold boot 뒤 같은 APK 로 재실행.
 - 미검증: 휴대폰 실기 전부(4 ms·발열·회전 뒤 터치·Codec2 1088 crop·실 GPU), crop/flip fixture(AVD 디코더가 crop 을 내지 않고 공개 API 로 crop 주입 불가 — 미실시).
 - 제품/테스트/문서: 제품(APK), 테스트(하네스·패턴 창), 문서(폰 절차·이 항목).
+
+### 2026-10-22 APK 0.2.31 후보 (versionCode 30) — 선명도 필터, PC 0.2.162 와 함께 (rel/apk-0.2.31, 후보 · 서명/게시 전)
+- 사용자 지시(10-22): APK 에 선명도 필터(SH)를 넣어 PC 0.2.162 와 함께 게시. 범위(검증용): SH 만. keepalive-multi 는 넣지 않음(base 가 오래됨, 정책값 미확인). 휴대폰 잠금 화면 비밀번호(sealed APK) 미구현은 알려진 한계 그대로.
+- 브랜치: rel/apk-0.2.31 = rel/0.2.162(6a127eb) + merge feat/sh-filter c494dc6(4394d2c; 충돌 gate self-test·history 양쪽 보존, 제품 충돌 없음) + 이 버전 commit(versionName 0.2.31 / versionCode 30). PC 버전은 그대로.
+- 이 APK 는 PC 0.2.162 의 공유 native 변경(hello-delay 의 punch/hello, DW 의 화면 목록 요청 등)도 싣는다. 빌드·검사·AVD smoke 결과는 .claude/report_rel_apk_0231_r1.md.
+- 상태: 후보. 서명된 manifest·게시·push 없음.
+- 제품/테스트/문서: 제품(APK 버전), 문서(이 항목).
