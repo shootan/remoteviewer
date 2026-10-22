@@ -3146,6 +3146,28 @@ add_executable(remote60_directory_retry_test
 )
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
+# directory-retry-fix r1: the agent loop's cycle record (a test observes completed cycles instead of
+# sampling a status mid-change). Test targets only -- never a shipped one.
+target_compile_definitions(remote60_directory_retry_test PRIVATE REMOTE60_DIRECTORY_TEST_HOOKS=1)
+# ...and two MUTANT builds of the same sources, each of which must FAIL the test: the old "timed out"
+# overwrite, and "no advertisement, so do not try the legacy default". Never staged, never shipped.
+foreach(_drf_mutant TIMEOUT_ONLY NO_LEGACY_ATTEMPT)
+  string(TOLOWER ${_drf_mutant} _drf_lower)
+  add_executable(remote60_directory_retry_mutant_${_drf_lower}_test
+    src/directory_retry_test.cpp
+    src/directory_session_client.cpp
+    src/directory_client.cpp
+    src/update_endpoint.cpp
+    src/url_origin.cpp
+    src/winhttp_transport.cpp
+    src/directory_session_bootstrap.cpp
+    src/directory_rendezvous.cpp
+  )
+  target_include_directories(remote60_directory_retry_mutant_${_drf_lower}_test PRIVATE src)
+  target_link_libraries(remote60_directory_retry_mutant_${_drf_lower}_test PRIVATE common ws2_32)
+  target_compile_definitions(remote60_directory_retry_mutant_${_drf_lower}_test PRIVATE
+    REMOTE60_DIRECTORY_TEST_HOOKS=1 REMOTE60_DIRECTORY_MUTANT_${_drf_mutant}=1)
+endforeach()
 
 # The stored sign-in: the files, the lock, and what a sign-in, a return and a sign-out each leave
 # behind. The store and the flow are the product's; the directory is functions the test owns,

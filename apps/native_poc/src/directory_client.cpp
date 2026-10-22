@@ -219,6 +219,21 @@ uint16_t observe_port_for(const ObserveEndpoint& advertised, uint16_t httpPort, 
   return static_cast<uint16_t>(httpPort + 1);
 }
 
+std::string observe_failure_status(ObserveAim aim, ObserveHealth health, const std::string& healthError,
+                                   uint16_t port) {
+  if (aim != ObserveAim::LegacyDefault) return "address observation timed out";
+  const std::string timedOut =
+      "the observation via the legacy default (port " + std::to_string(port) + ") timed out";
+  switch (health) {
+    case ObserveHealth::NoAdvertisement:
+      return "this directory does not say where to send address observations; " + timedOut;
+    case ObserveHealth::Unreachable:
+      return "could not ask the directory where observations go (" + healthError + "); " + timedOut;
+    default:
+      return "address observation via the legacy default (port " + std::to_string(port) + ") timed out";
+  }
+}
+
 namespace {
 
 /**
@@ -463,12 +478,23 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
       cfg_.observeUdpPort ? cfg_.observeUdpPort
                           : observe_port_for(ObserveEndpoint{}, httpPort_, httpSecure_);
   observeAddrReady_ = false;
+  observeAim_ = ObserveAim::NotAimed;
   if (startupPort != 0) {
     if (!resolve_ipv4(httpHost_, startupPort, &observeAddr_)) {
       if (outError) *outError = "cannot resolve directory host '" + httpHost_ + "'";
       return false;
     }
     observeAddrReady_ = true;
+    observeAim_ = cfg_.observeUdpPort ? ObserveAim::Pinned : ObserveAim::LegacyDefault;
+    observeAimPort_ = startupPort;
+#ifdef REMOTE60_DIRECTORY_MUTANT_NO_LEGACY_ATTEMPT
+    // MUTANT (test target only): "no advertisement, so do not even try the default" -- the stabilising
+    // shortcut the contract forbids.
+    if (!cfg_.observeUdpPort) {
+      observeAddrReady_ = false;
+      observeAim_ = ObserveAim::NotAimed;
+    }
+#endif
   }
 
   machineId_ = machine_id();
@@ -498,8 +524,36 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
 
 void HostAgent::Stop() {
   if (!running_.exchange(false)) return;
+#ifdef REMOTE60_DIRECTORY_TEST_HOOKS
+  { std::lock_guard<std::mutex> lock(mu_); }
+  cycleCv_.notify_all();
+#endif
   if (thread_.joinable()) thread_.join();
 }
+
+#ifdef REMOTE60_DIRECTORY_TEST_HOOKS
+void HostAgent::RecordCycleEnd(const CycleRecord& record) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (cycles_.size() < 256) {
+      cycles_.push_back(record);
+      cycles_.back().status = status_;
+    }
+  }
+  cycleCv_.notify_all();
+}
+
+bool HostAgent::WaitForCycleEnd(uint64_t n, int timeoutMs, CycleRecord* out) {
+  std::unique_lock<std::mutex> lock(mu_);
+  cycleCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+    return cycles_.size() >= n || !running_.load();
+  });
+  // Exactly that cycle's record, however far the loop has run since (cycles are numbered from 1).
+  if (n == 0 || cycles_.size() < n || cycles_[n - 1].n != n) return false;
+  if (out) *out = cycles_[n - 1];
+  return true;
+}
+#endif
 
 void HostAgent::SetStatus(const std::string& status) {
   std::lock_guard<std::mutex> lock(mu_);
@@ -1125,9 +1179,12 @@ bool HostAgent::FetchObserveEndpointFromHealth() {
 
   ObserveEndpoint advertised;
   std::string error;
+  ++healthAsks_;
   if (!observe_endpoint_from_health(cfg_.url, &advertised, &error)) {
     // Absent is not an error -- an older directory says nothing, and observe_port_for has a rule
     // for that. Unreachable is an error, and the two read differently to whoever is looking.
+    lastHealth_ = error.empty() ? ObserveHealth::NoAdvertisement : ObserveHealth::Unreachable;
+    lastHealthError_ = error;
     SetStatus(error.empty()
                   ? "this directory does not say where to send address observations"
                   : "could not ask the directory where observations go: " + error);
@@ -1136,6 +1193,8 @@ bool HostAgent::FetchObserveEndpointFromHealth() {
     return false;
   }
   observeAdvertised_ = advertised;
+  lastHealth_ = ObserveHealth::Advertised;
+  lastHealthError_.clear();
   observeFetchAttempts_ = 0;
   observeFetchCooldown_ = 0;
   return ApplyObserveEndpoint();
@@ -1153,6 +1212,7 @@ bool HostAgent::ApplyObserveEndpoint() {
     SetStatus("this directory has not told us where to send address observations; the server "
               "needs REMOTE60_DIR_OBSERVE_PORT set (or use an http url)");
     observeAddrReady_ = false;
+    observeAim_ = ObserveAim::NotAimed;
     return false;
   }
   // An advertised host is used when given; otherwise the directory's own hostname, which is the
@@ -1169,10 +1229,15 @@ bool HostAgent::ApplyObserveEndpoint() {
   if (!resolve_ipv4(target, port, &resolvedAddress)) {
     SetStatus("cannot resolve the observe host '" + target + "'");
     observeAddrReady_ = false;
+    observeAim_ = ObserveAim::NotAimed;
     return false;
   }
   { std::lock_guard<std::mutex> lock(mu_); observeAddr_ = resolvedAddress; }
   observeAddrReady_ = true;
+  observeAim_ = cfg_.observeUdpPort        ? ObserveAim::Pinned
+                : observeAdvertised_.known ? ObserveAim::Advertised
+                                           : ObserveAim::LegacyDefault;
+  observeAimPort_ = port;
   return true;
 }
 
@@ -1564,6 +1629,9 @@ void HostAgent::Run() {
   while (running_.load()) {
     const auto cycleStart = std::chrono::steady_clock::now();
     ++cycleNo;
+    // directory-retry-fix r1: what this cycle did, for the test hook at its end (plain locals).
+    bool cycleSkippedInactive = false, cycleObserveOk = false, cycleHeartbeatOk = false;
+    const int healthAsksBefore = healthAsks_;
     std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " start cause="
               << cycleCause << "\n";
 
@@ -1571,6 +1639,7 @@ void HostAgent::Run() {
       // The account is not active. Nothing is sent this cycle; the status set when that was
       // learned stands.
       --inactiveCooldown_;
+      cycleSkippedInactive = true;
       std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=skip reason=inactive"
                 << " cyclesLeft=" << inactiveCooldown_ << "\n";
     } else if (EnsureRegistered()) {
@@ -1593,17 +1662,31 @@ void HostAgent::Run() {
       // address, and it publishes whatever the observation last recorded.
       const auto observeStart = std::chrono::steady_clock::now();
       const bool observeOk = RefreshObservedAddress();
+      cycleObserveOk = observeOk;
       std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=observe ok="
                 << (observeOk ? 1 : 0) << " ms=" << stepMs(observeStart) << "\n";
       if (!observeOk) {
         // Only when there is nothing better to say. The specific reason -- no advertisement, an
         // unusable host, a port that cannot be derived -- was already set by whoever found it,
         // and overwriting it with "timed out" turned every one of those into a network symptom.
-        if (observeAddrReady_) SetStatus("address observation timed out");
+        //
+        // directory-retry-fix r1 (Codex contract): an aimed socket that got no answer is a real
+        // timeout, and it is said -- but on the legacy default it is said TOGETHER with what the
+        // health route last told us (kept through its cooldown), from explicit state rather than
+        // a guess. A pinned or advertised aim reads exactly as before.
+        if (observeAddrReady_) {
+#ifdef REMOTE60_DIRECTORY_MUTANT_TIMEOUT_ONLY
+          // MUTANT (test target only): the old behaviour -- every reason overwritten by "timed out".
+          SetStatus("address observation timed out");
+#else
+          SetStatus(observe_failure_status(observeAim_, lastHealth_, lastHealthError_, observeAimPort_));
+#endif
+        }
       } else {
         std::vector<PunchTarget> punch;
         const auto hbStart = std::chrono::steady_clock::now();
         const bool hbOk = Heartbeat(&punch);
+        cycleHeartbeatOk = hbOk;
         std::cout << "[native-video-host][dir-cycle] n=" << cycleNo << " step=heartbeat ok="
                   << (hbOk ? 1 : 0) << " ms=" << stepMs(hbStart)
                   << " capabilities=" << punch.size() << "\n";
@@ -1640,6 +1723,25 @@ void HostAgent::Run() {
         std::cout << "[native-video-host] directory " << now << "\n";
       }
     }
+
+#ifdef REMOTE60_DIRECTORY_TEST_HOOKS
+    {
+      CycleRecord record;
+      record.n = cycleNo;
+      record.skippedInactive = cycleSkippedInactive;
+      record.healthAsked = healthAsks_ != healthAsksBefore;
+      record.health = lastHealth_;
+      record.aim = observeAim_;
+      record.observeOk = cycleObserveOk;
+      record.heartbeatOk = cycleHeartbeatOk;
+      RecordCycleEnd(record);
+    }
+#else
+    (void)cycleSkippedInactive;
+    (void)cycleObserveOk;
+    (void)cycleHeartbeatOk;
+    (void)healthAsksBefore;
+#endif
 
     // Sleep in slices so Stop() is honoured promptly instead of after a whole heartbeat.
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

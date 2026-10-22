@@ -147,6 +147,7 @@ class FakeDirectory {
 
   std::string url() const { return "http://127.0.0.1:" + std::to_string(httpPort_); }
   uint16_t udpPort() const { return udpPort_; }
+  uint16_t httpPort() const { return httpPort_; }  // directory-retry-fix r1: the legacy default is this + 1
 
  private:
   void CloseSockets() {
