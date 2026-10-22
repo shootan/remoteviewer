@@ -3549,6 +3549,24 @@ add_executable(remote60_punch_any_test
 )
 target_include_directories(remote60_punch_any_test PRIVATE src)
 target_link_libraries(remote60_punch_any_test PRIVATE common ws2_32)
+# hello-delay-fix r2: the test's receive seam (error injection; never in the product).
+target_compile_definitions(remote60_punch_any_test PRIVATE REMOTE60_RENDEZVOUS_TEST_SEAM=1)
+
+# hello-delay-fix r2: MUTANT builds of the same sources -- each must FAIL its test (run by the verifier
+# without touching the product source). Never staged, never shipped.
+add_executable(remote60_punch_any_mutant_netreset_test src/punch_any_test.cpp src/directory_rendezvous.cpp)
+target_include_directories(remote60_punch_any_mutant_netreset_test PRIVATE src)
+target_link_libraries(remote60_punch_any_mutant_netreset_test PRIVATE common ws2_32)
+target_compile_definitions(remote60_punch_any_mutant_netreset_test PRIVATE REMOTE60_RENDEZVOUS_TEST_SEAM=1
+  REMOTE60_PUNCH_TEST_MUTANT_NETRESET_ENDS=1)
+add_executable(remote60_hello_backlog_mutant_batch_test
+  src/hello_backlog_test.cpp src/native_video_client_tcp_control.cpp src/udp_control_channel.cpp)
+target_include_directories(remote60_hello_backlog_mutant_batch_test PRIVATE src)
+target_link_libraries(remote60_hello_backlog_mutant_batch_test PRIVATE common ws2_32)
+target_compile_definitions(remote60_hello_backlog_mutant_batch_test PRIVATE REMOTE60_HELLO_TEST_MUTANT_BATCH_ENDS_ROUND=1)
+if(MSVC)
+  target_compile_options(remote60_hello_backlog_mutant_batch_test PRIVATE /utf-8)
+endif()
 
 # Throwaway diagnostic, not part of the product and not staged into the installer. Answers
 # whether a SYSTEM process on the Winlogon desktop can read pixels, and with which API, before

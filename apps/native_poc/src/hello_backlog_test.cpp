@@ -190,14 +190,111 @@ struct Answerer {
   }
 };
 
+// r2 (Codex N1): far more than one batch (512) of not-the-ack, faster than any slice: queued up front and
+// kept topped up by a sender that never sleeps. The viewer's buffer is enlarged so the queue really holds
+// them (the product's is 1 MB); a run where no full batch was read proves nothing and says so.
+struct Torrent {
+  std::atomic<bool> run{true};
+  std::thread t;
+  Torrent(SOCKET from, sockaddr_in to) {
+    t = std::thread([this, from, to] {
+      const UdpHelloPacket p = punch();
+      while (run.load()) send_to(from, to, p);
+    });
+  }
+  ~Torrent() {
+    run = false;
+    t.join();
+  }
+};
+
+void enlarge_receive_buffer(SOCKET s) {
+  int bytes = 8 * 1024 * 1024;
+  setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&bytes), sizeof(bytes));
+}
+
+double thread_cpu_ms() {
+  FILETIME c{}, e{}, k{}, u{};
+  GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
+  const auto ms = [](FILETIME f) {
+    return static_cast<double>((static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime) / 10000.0;
+  };
+  return ms(k) + ms(u);
+}
+
+void torrent_case(const char* who, UdpHelloOptions options, uint32_t maxAttempts) {
+  Pair pair(0);
+  enlarge_receive_buffer(pair.viewer);
+  for (int i = 0; i < 3000; ++i) send_to(pair.host, pair.viewerAddr, punch());
+  Torrent torrent(pair.host, pair.viewerAddr);
+  options.budgetMs = 1000;
+  UdpHelloStats stats;
+  std::string error;
+  const double cpu0 = thread_cpu_ms();
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = udp_hello_handshake(pair.viewer, options, nullptr, &error, nullptr, &stats);
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  const double cpu = thread_cpu_ms() - cpu0;
+  const std::string detail = std::to_string(ms) + " ms, attempts=" + std::to_string(stats.attempts) +
+                             " badAcks=" + std::to_string(stats.badAcks) + " fullBatches=" +
+                             std::to_string(stats.fullBatches) + " cpu=" + std::to_string(static_cast<int>(cpu)) + " ms";
+  check(std::string(who) + ": the torrent really filled batches (else this run proves nothing)", stats.fullBatches >= 2,
+        detail);
+  check(std::string(who) + ": no ack -> not accepted, the budget ends it on time", !ok && stats.budgetSpent && ms < 1500,
+        detail);
+  check(std::string(who) + ": a full batch does NOT bring the next Hello forward (round clock: at most " +
+            std::to_string(maxAttempts) + ")",
+        stats.attempts <= maxAttempts, detail);
+  check(std::string(who) + ": ...and the reading is bounded: the thread used under 70% of a core", cpu < 0.7 * ms, detail);
+}
+
 }  // namespace
 
 int main() {
   WSADATA wsa{};
   WSAStartup(MAKEWORD(2, 2), &wsa);
-  std::cout << "hello_backlog_test (hello-delay-fix r1)\n\n[a queued backlog ahead of the ack]\n";
+  std::cout << "hello_backlog_test (hello-delay-fix r1/r2)\n\n[a queued backlog ahead of the ack]\n";
   backlog_case("viewer options (slice 200, pause 50)", viewer_options());
   backlog_case("android options (slice 250, pause 0)", android_options());
+
+  std::cout << "\n[r2 N1: more than a batch of not-the-ack, faster than the slice]\n";
+  torrent_case("viewer options (200/50)", viewer_options(), 5);
+  torrent_case("android options (250/0)", android_options(), 5);
+  {
+    // The ack behind several batches is still found, in the same round.
+    Pair pair(0);
+    enlarge_receive_buffer(pair.viewer);
+    for (int i = 0; i < 2000; ++i) send_to(pair.host, pair.viewerAddr, punch());
+    send_to(pair.host, pair.viewerAddr, ack(kGoodAck));
+    UdpHelloStats stats;
+    std::string error;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = udp_hello_handshake(pair.viewer, viewer_options(), nullptr, &error, nullptr, &stats);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check("2000 punch replies then the ack: taken in the first round, across full batches",
+          ok && stats.attempts == 1 && stats.fullBatches >= 2 && ms < 1000,
+          std::to_string(ms) + " ms, attempts=" + std::to_string(stats.attempts) + " badAcks=" +
+              std::to_string(stats.badAcks) + " fullBatches=" + std::to_string(stats.fullBatches));
+  }
+  {
+    Pair pair(0);
+    enlarge_receive_buffer(pair.viewer);
+    for (int i = 0; i < 3000; ++i) send_to(pair.host, pair.viewerAddr, punch());
+    Torrent torrent(pair.host, pair.viewerAddr);
+    std::atomic<bool> stop{false};
+    std::thread stopper([&] {
+      Sleep(300);
+      stop = true;
+    });
+    UdpHelloStats stats;
+    std::string error;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = udp_hello_handshake(pair.viewer, android_options(), &stop, &error, nullptr, &stats);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    stopper.join();
+    check("a stop during the torrent ends it promptly", !ok && !stats.budgetSpent && ms < 600,
+          std::to_string(ms) + " ms, attempts=" + std::to_string(stats.attempts));
+  }
 
   std::cout << "\n[no ack while not-the-ack keeps coming: the budget, the stop and the send rate hold]\n";
   {
