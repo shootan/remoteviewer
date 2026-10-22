@@ -10,6 +10,7 @@
 #include "viewer_gdi_util.hpp"
 #include "viewer_state.hpp"
 #include "viewer_layout.hpp"
+#include "viewer_restore.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -118,10 +119,17 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
     const uint64_t shownAt = ctx.picker.shownAtUs.load(std::memory_order_relaxed);
     if (pickerVisible && shownAt != 0 && shownAt != reportedShownAtUs) {
       reportedShownAtUs = shownAt;
+      // dxgi-wedge-fix r1: where the desktop card is (client pixels), so a process-level test can press
+      // it with the messages a mouse produces instead of guessing the layout.
+      const CardGridMetrics cardGrid = compute_card_grid(ctx, layout.listRect);
+      const RECT desktopCard = card_rect_for_slot(layout.listRect, cardGrid, 0);
       log_client_line(ctx, "[picker] first paint after show, client=" +
                                std::to_string(layout.clientRect.right - layout.clientRect.left) +
                                "x" +
-                               std::to_string(layout.clientRect.bottom - layout.clientRect.top));
+                               std::to_string(layout.clientRect.bottom - layout.clientRect.top) +
+                               " desktopCard=" + std::to_string(desktopCard.left) + "," +
+                               std::to_string(desktopCard.top) + "," + std::to_string(desktopCard.right) + "," +
+                               std::to_string(desktopCard.bottom));
     }
   }
 
@@ -232,6 +240,10 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
   if (selectionPending) {
     statusLine = awaitingAck ? std::string("선택하는 중…")
                              : std::string("첫 화면을 기다리는 중…");
+  }
+  // dxgi-wedge-fix r1: an automatic reconnect says so, and says why it stopped on the picker.
+  if (const std::string restoreLine = restore_status_line(ctx, controlUp); !restoreLine.empty()) {
+    statusLine = restoreLine;
   }
   // ⚠️ There used to be an unconditional "호스트에 연결하는 중…" here whenever the control channel
   // was down, and it overwrote everything above it. Two things were wrong with that: it hid the

@@ -483,7 +483,7 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
       if (outReason) *outReason = "monitor_gone";
       return false;
     }
-    if (backend.requested == DesktopCaptureBackend::Wgc || backend.active == DesktopCaptureBackend::Wgc ||
+    if (backend.EffectiveRequested() == DesktopCaptureBackend::Wgc || backend.active == DesktopCaptureBackend::Wgc ||
         !screen->primary) {
       nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(monitor-select)", screen->handle);
       if (!nextItem) {
@@ -499,7 +499,7 @@ bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
     nextTitle = screen->name;
     nextMonitorDevice = screen->device;
   } else if (requestedWindowId == 0) {
-    if (backend.requested == DesktopCaptureBackend::Wgc ||
+    if (backend.EffectiveRequested() == DesktopCaptureBackend::Wgc ||
         backend.active == DesktopCaptureBackend::Wgc) {
       nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
       if (!nextItem) {

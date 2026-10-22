@@ -130,10 +130,18 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       nextRequested = asked;
       backend.requested = nextRequested;
       const bool desktopActive = !capture.windowModeActive.load(std::memory_order_acquire);
-      const bool restartNeeded = desktopActive && backend.active != backend.requested;
+      // dxgi-wedge-fix r1 (Codex B5): the request is STORED as the client's wish either way; what may
+      // run is EffectiveRequested(), so an older APK's dxgi-on-connect cannot lift the quarantine.
+      const DesktopCaptureBackend effective = backend.EffectiveRequested();
+      const bool restartNeeded = desktopActive && backend.active != effective;
+      if (backend.dxgiQuarantined && backend.requested == DesktopCaptureBackend::Dxgi) {
+        std::cout << "[native-video-host][capture-quarantine] request seq=" << reqSeq
+                  << " requested=dxgi effective=" << desktop_capture_backend_name(effective)
+                  << " reason=" << backend.dxgiQuarantineReason << " (kept quarantined)\n";
+      }
       if (restartNeeded) {
         const DesktopCaptureBackend prevActiveBackend = backend.active;
-        backend.active = backend.requested;
+        backend.active = effective;
         if (!restart_capture_session(hx)) {
           backend.active = prevActiveBackend;
           std::cerr << "[native-video-host][control] desktop-backend-apply failed seq=" << reqSeq
@@ -239,7 +247,9 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   // Both causes are temporary by nature. The secure desktop goes away when the prompt is
   // answered, and the desktop returns to the physical adapter when RDP disconnects, so simply
   // trying again is what was missing.
-  if (backend.active != backend.requested &&
+  // dxgi-wedge-fix r1: "back to what was requested" means back to EffectiveRequested() -- while DXGI
+  // is quarantined a WGC that was asked for as DXGI is not a demotion, and must not be climbed out of.
+  if (backend.active != backend.EffectiveRequested() &&
       !capture.windowModeActive.load(std::memory_order_acquire) &&
       clientSession.streamControlActive.load(std::memory_order_acquire)) {
     const uint64_t nowUs = qpc_now_us();
@@ -270,13 +280,14 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       } else {
         backend.NotePromotionAttempt();
         const DesktopCaptureBackend demoted = backend.active;
-        backend.active = backend.requested;
+        const DesktopCaptureBackend target = backend.EffectiveRequested();
+        backend.active = target;
         const bool restarted = restart_capture_session(hx);
         // restart_capture_session(hx) reports that *a* session started, not that it started on the
         // backend we asked for. When the requested one is still unavailable it falls back
         // internally, puts backend.active back where it was, and returns success anyway.
         // The backend the restart actually left behind is the only honest test.
-        const bool promoted = restarted && backend.active == backend.requested;
+        const bool promoted = restarted && backend.active == target;
         if (restarted) {
           // A restart replaces the capture session whether or not the backend moved, so the
           // timeline still has to be re-anchored and the next frame still has to be a keyframe.

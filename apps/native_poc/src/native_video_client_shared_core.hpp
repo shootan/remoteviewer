@@ -566,6 +566,9 @@ struct MonitorEntry {
   uint32_t width = 0;
   uint32_t height = 0;
   bool primary = false;
+  // The host's device name for the screen ("\\.\DISPLAY2"): with the rectangle, what identifies it
+  // to a later connection (dxgi-wedge-fix r1) -- the id is only an index into this list.
+  std::string name;
 };
 
 struct WindowPanelSnapshot {

@@ -28,6 +28,7 @@
 #include "viewer_picker.hpp"
 #include "viewer_present.hpp"
 #include "viewer_session_watchdog.hpp"
+#include "viewer_restore.hpp"
 
 #include <iostream>
 
@@ -1353,6 +1354,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // The video thread saw the first frame of a selection and posted this once; CommitReveal
       // revalidates against the live selection state (see viewer_selection_gate.cpp).
       if (ctx.sel.CommitReveal()) {
+        const uint64_t revealedGeneration = ctx.sel.readyGeneration.load(std::memory_order_acquire);
         // A new stream episode begins here: the per-episode UI-thread state must not carry over
         // from the previous target (F-14). reportedSecure is control-thread state and is left
         // alone -- it is "say it once per process", which is still the right cadence.
@@ -1365,10 +1367,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         remote60::native_poc::session_toolbar_set_visible(true);
         push_session_toolbar_state(ctx);
         InvalidateRect(hwnd, nullptr, FALSE);
+        // dxgi-wedge-fix r2 D2: confirmed by the host and its first frame decoded -- a candidate only.
+        // It is reported to the shell (and a restore counts as done) when that frame is PRESENTED.
+        restore_on_reveal(ctx, revealedGeneration);
       }
       ctx.sel.ReleaseRevealLatch();
       return 0;
     }
+    case kMsgRestoreStep:
+      restore_step(ctx, hwnd);
+      return 0;
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED: {
       remote60::native_poc::session_toolbar_follow_owner();
@@ -1720,6 +1728,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         poll_video_paint_liveness(ctx, hwnd);
         // Once a second: is the recv thread moving, is anything arriving, is the session dead?
         poll_session_liveness(ctx, hwnd);
+        // dxgi-wedge-fix r1: a restore that is waiting on lists gives up on time, not on an event.
+        restore_step(ctx, hwnd);
         return 0;
       }
       break;

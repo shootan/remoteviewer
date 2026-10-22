@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "host_os_snapshot.hpp"
 #include "mf_h264_codec.hpp"
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
@@ -157,6 +158,10 @@ void startup_start_dxgi_watchdog(HostContext& hx, std::atomic<bool>& dxgiWatchdo
               static_cast<unsigned long>(static_cast<uint32_t>(snap.lastAcquireHr)),
               static_cast<unsigned long>(static_cast<uint32_t>(snap.lastReleaseHr)));
           (void)n;  // No synchronous pipe write on the watchdog warning path.
+          // dxgi-wedge-fix r1 (Codex B8): what is on screen right now -- collected and written by a
+          // detached thread; this call only claims a slot and returns (host_os_snapshot.hpp).
+          (void)RequestOsSnapshot("dxgi-slow", remote60::host::capture_worker_phase_name(snap.phase),
+                                  static_cast<unsigned long long>(snap.phaseAgeUs / 1000));
         }
       } else {
         // Progress resumed within this generation; re-arm so a later stall in the same episode warns.

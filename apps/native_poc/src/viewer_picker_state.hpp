@@ -18,6 +18,7 @@
 
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
+#include "viewer_restore_state.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -57,6 +58,8 @@ struct PickerState {
   std::unordered_map<uint64_t, ThumbAttempt> thumbAttempts;
   std::deque<uint64_t> thumbFetchQueue;
   std::atomic<bool> hostSupportsThumbnails{false};
+  // dxgi-wedge-fix r1 (Bⓑ1): the automatic reconnect's restore and the shell report (viewer_restore.cpp).
+  RestoreState restore;
 
   // The picker gesture latch (viewer_picker_state.cpp), shared by the mouse and touch paths: a
   // selection needs DOWN and UP on the SAME target and a picker that has been visible for at least

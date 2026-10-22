@@ -56,6 +56,10 @@ TEST_MARKERS = [
     'sis-test-seam',              # secure_input_service_test_seam.hpp, REMOTE60_SIS_TEST_SEAM (r21 E1)
     'REMOTE60_SIS_TEST_',         # the same seam's environment (SUFFIX, CREATE_FAIL, STOP_EVENT, DIAG)
     'GNLINK_SIS_TEST_',           # lockscreen-cred r1: the service seam's lock-screen agent target (CRED_TARGET_TITLE)
+    'mt-ab',                      # mt_ab_test_seam.hpp, REMOTE60_MT_AB_TEST_SEAM (dxgi-wedge-fix r1, Codex B1)
+    'GNLINK_CHAIN_',              # client_reconnect_restore_e2e_test.cpp (dxgi-wedge-fix r1)
+    'viewer-present-fail-seam',   # viewer_present_fail_seam.hpp, REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM (r3 E3)
+    'GNLINK_VIEWER_TEST_',        # the same seam's environment (PRESENT_FAIL_FILE)
 ]
 
 # (file, must carry the address)

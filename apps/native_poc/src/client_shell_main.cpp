@@ -52,6 +52,7 @@
 #include "login_credential_store.hpp"
 #include "login_flow.hpp"
 #include "product_version.hpp"
+#include "viewer_restore_target.hpp"
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -127,6 +128,23 @@ void close_slot_handles(ViewerCancelSlot& slot) {
 uint32_t gReconnectAttempts = 0;
 std::optional<ShellConnectRequest> gReconnectRequest;
 uint64_t gReconnectOwnerEpoch = 0;
+// dxgi-wedge-fix r1 (Codex B6): what the pending automatic reconnect restores ("" = the picker). Set
+// only from the exiting operation's own report, cleared with gReconnectRequest everywhere.
+std::string gReconnectRestore;
+// The last CONFIRMED + RENDERED target each operation's viewer reported on its stdout
+// ([viewer-restore] target=...), as a --restore-target value. Written by that viewer's pump thread,
+// taken by handle_viewer_exit on the UI thread. An automatic reconnect's operation starts with the
+// target it was asked to restore -- still the last one rendered until its viewer reports another.
+std::mutex gRestoreMu;
+std::map<uint64_t, std::string> gRestoreByOperation;
+std::string take_operation_restore(uint64_t operation) {
+  std::lock_guard<std::mutex> lock(gRestoreMu);
+  const auto it = gRestoreByOperation.find(operation);
+  if (it == gRestoreByOperation.end()) return {};
+  std::string arg = std::move(it->second);
+  gRestoreByOperation.erase(it);
+  return arg;
+}
 constexpr UINT_PTR kReconnectTimer = 89;
 
 void post_ui(std::function<void()> action) {
@@ -420,7 +438,8 @@ void viewer_log_write_line(const std::string& line, const std::string& identity)
  * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
  * thread per session; ends when the child exits and the pipe hits EOF.
  */
-void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, const std::string& context) {
+void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, const std::string& context,
+                               uint64_t operation) {
   std::string pending;
   char buffer[1024];
   DWORD read = 0;
@@ -431,6 +450,12 @@ void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, cons
       std::string line = pending.substr(0, newline);
       pending.erase(0, newline + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
+      // dxgi-wedge-fix r1: this operation's viewer reporting a confirmed, rendered target. Strictly
+      // parsed (shape only, no free text kept); anything else is just a log line.
+      if (const auto restore = remote60::native_poc::viewer::ParseRestoreLine(line)) {
+        std::lock_guard<std::mutex> lock(gRestoreMu);
+        gRestoreByOperation[operation] = remote60::native_poc::viewer::FormatRestoreArg(*restore);
+      }
       viewer_log_write_line(line + context + " collectedTickMs=" + std::to_string(GetTickCount64()), identity);
     }
     if (pending.size() > 8192) {
@@ -1242,6 +1267,9 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
     }
   }
   const uint32_t remaining = gActiveViewers.load();
+  // dxgi-wedge-fix r1: this operation's last confirmed + rendered target, whatever happens next -- taken
+  // (and forgotten) here so no later operation can inherit it except through the reconnect below.
+  const std::string restore = take_operation_restore(operation);
   { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
   if (operation != gViewerOperation) {
     // Older viewers still contribute to main's live-session count, but cannot replace a
@@ -1270,9 +1298,19 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
   if (waited == WAIT_OBJECT_0 && recoverable && gReconnectAttempts < 3) {
     gReconnectRequest = request;
     gReconnectOwnerEpoch = ownerEpoch;
-    SetTimer(gWindow, kReconnectTimer, 1000u << gReconnectAttempts++, nullptr);
+    gReconnectRestore = restore;
+    const UINT delayMs = 1000u << gReconnectAttempts++;
+    SetTimer(gWindow, kReconnectTimer, delayMs, nullptr);
+    // dxgi-wedge-fix r1 (Codex B8): the reconnect branch says what it did, in one line, no credential.
+    log_line("viewer exit operation=" + std::to_string(operation) + " code=" + std::to_string(exitCode) +
+             " ranMs=" + std::to_string(ranMs) + " reconnect=scheduled attempt=" + std::to_string(gReconnectAttempts) +
+             " delayMs=" + std::to_string(delayMs) + " host=" + request.hostId +
+             " restore=" + (restore.empty() ? std::string("picker") : restore));
     post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
   } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
+    log_line("viewer exit operation=" + std::to_string(operation) + " code=" + std::to_string(exitCode) +
+             " ranMs=" + std::to_string(ranMs) + " reconnect=no reason=" +
+             (recoverable ? std::string("attempts-exhausted") : std::string("not-recoverable")));
     post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
   } else {
     gReconnectAttempts = 0;
@@ -1286,7 +1324,7 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
  * The session token is passed rather than the password: a command line can be read by any
  * process that cares to look, and a token expires where a password does not.
  */
-void begin_session(const ShellConnectRequest& request, bool automatic = false) {
+void begin_session(const ShellConnectRequest& request, bool automatic = false, const std::string& restore = {}) {
   // Everything that can refuse comes first, before anything is changed. (RV-06) The operation
   // number and the reconnect timer used to be touched first, so a refused start still moved the
   // operation on -- and the viewer still running then ended as a "stale" one: no automatic
@@ -1374,8 +1412,15 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
   // Past every refusal: from here this is the newest operation. (RV-06)
   KillTimer(gWindow, kReconnectTimer);
   gReconnectRequest.reset();
+  gReconnectRestore.clear();
   if (!automatic) gReconnectAttempts = 0;
   const uint64_t operation = ++gViewerOperation;
+  // dxgi-wedge-fix r1: only an AUTOMATIC reconnect restores; a session the user started is theirs.
+  const std::string restoreArg = automatic ? restore : std::string();
+  if (!restoreArg.empty()) {
+    std::lock_guard<std::mutex> lock(gRestoreMu);
+    gRestoreByOperation[operation] = restoreArg;  // still the last rendered target until this viewer reports
+  }
 
   ShellRuntimeSettings settings;
   {
@@ -1408,6 +1453,12 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
           << L" --runtime-bitrate " << (settings.bitrateKbps * 1000u)
           << L" --runtime-fps " << settings.fps
           << L" --monitor " << settings.monitorId;
+  if (automatic) {
+    // "재연결 중" instead of "연결하는 중", and -- when the previous viewer reported one -- the target to
+    // go back to. An ASCII token checked by the parser on both sides (viewer_restore_target.hpp).
+    command << L" --reconnect";
+    if (!restoreArg.empty()) command << L" --restore-target " << widen(restoreArg);
+  }
 
   // Hand the child a pipe for stdout/stderr: the viewer's per-frame telemetry went to stdout,
   // and CREATE_NO_WINDOW without a redirect silently discarded all of it. Inheritance is limited
@@ -1550,7 +1601,9 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false) {
     const std::string context = " viewerSession=" + std::to_string(pi.dwProcessId) + "-" +
         std::to_string(GetTickCount64()) + " viewerPid=" + std::to_string(pi.dwProcessId) +
         " hostId=" + request.hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
-    gWorkers.Launch([pipeRead, identity = account + "@" + server, context] { pump_viewer_output_to_log(pipeRead, identity, context); });
+    gWorkers.Launch([pipeRead, identity = account + "@" + server, context, operation] {
+      pump_viewer_output_to_log(pipeRead, identity, context, operation);
+    });
   }
   log_line("session started host=" + request.hostId + " kbps=" +
            std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
@@ -1703,7 +1756,7 @@ void handle_page_message(const std::string& json) {
   }
   if (type == "cancelReconnect") {
     KillTimer(gWindow, kReconnectTimer);
-    gReconnectRequest.reset(); ++gViewerOperation; gReconnectAttempts = 0;
+    gReconnectRequest.reset(); gReconnectRestore.clear(); ++gViewerOperation; gReconnectAttempts = 0;
     post_status("idle", "자동 재연결을 취소했습니다.");
     return;
   }
@@ -1711,6 +1764,7 @@ void handle_page_message(const std::string& json) {
     ++gViewerOperation;
     KillTimer(gWindow, kReconnectTimer);
     gReconnectRequest.reset();
+    gReconnectRestore.clear();
     gReconnectAttempts = 0;
     std::string endedSession;
     {
@@ -1799,7 +1853,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         gReconnectRequest.reset();
         uint64_t epoch = 0;
         { std::lock_guard<std::mutex> lock(gStateMu); epoch = gOwnerEpoch; }
-        if (request && epoch == gReconnectOwnerEpoch) begin_session(*request, true);
+        const std::string restore = std::move(gReconnectRestore);
+        gReconnectRestore.clear();
+        if (request && epoch == gReconnectOwnerEpoch) {
+          log_line("reconnect attempt=" + std::to_string(gReconnectAttempts) + " host=" + request->hostId +
+                   " restore=" + (restore.empty() ? std::string("picker") : restore));
+          begin_session(*request, true, restore);
+        }
       }
       return 0;
     case WM_DESTROY:

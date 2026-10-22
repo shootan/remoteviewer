@@ -118,9 +118,33 @@ void TestEvidenceConsumedAndIdleReset() {
          "idle: no demotion in progress resets the whole gate");
 }
 
+// dxgi-wedge-fix r1 (Codex B5): the quarantine is apart from what was requested, and wins.
+void TestQuarantineEffectiveBackend() {
+  using remote60::native_poc::DesktopCaptureBackend;
+  DesktopBackendState b;
+  expect(b.EffectiveRequested() == DesktopCaptureBackend::Dxgi, "quarantine: none -> dxgi as requested");
+  b.dxgiQuarantined = true;
+  expect(b.EffectiveRequested() == DesktopCaptureBackend::Wgc, "quarantine: dxgi requested -> wgc effective");
+  // An older APK sends dxgi on every connect: the wish is stored, the effect stays WGC.
+  b.requested = DesktopCaptureBackend::Dxgi;
+  expect(b.requested == DesktopCaptureBackend::Dxgi && b.EffectiveRequested() == DesktopCaptureBackend::Wgc,
+         "quarantine: a dxgi request is stored as the wish, never as the effect");
+  b.requested = DesktopCaptureBackend::Gdi;
+  expect(b.EffectiveRequested() == DesktopCaptureBackend::Gdi, "quarantine: a GDI request is not DXGI and passes");
+  b.requested = DesktopCaptureBackend::Wgc;
+  expect(b.EffectiveRequested() == DesktopCaptureBackend::Wgc, "quarantine: a WGC request passes");
+  // The climb-back compares active with the EFFECTIVE request: WGC under quarantine is not a demotion.
+  b.requested = DesktopCaptureBackend::Dxgi;
+  b.active = DesktopCaptureBackend::Wgc;
+  expect(b.active == b.EffectiveRequested(), "quarantine: active WGC equals effective -> no climb-back to DXGI");
+  b.dxgiQuarantined = false;
+  expect(b.active != b.EffectiveRequested(), "negative control: without the quarantine the same state climbs back");
+}
+
 }  // namespace
 
 int main() {
+  TestQuarantineEffectiveBackend();
   TestSettleClockAndProbeCadence();
   TestRetryDeadlineAndBackoff();
   TestSuccessResetsEpisode();

@@ -117,6 +117,9 @@ constexpr UINT kMsgPreloginTypingHeldBack = WM_APP + 20;
 constexpr UINT kMsgRebootResult = WM_APP + 21;
 // r9 R5: wp = PreloginSasResult (or kSasNotSent / kSasNoAnswer) | status flags << 8, lp = win32
 constexpr UINT kMsgSasResult = WM_APP + 22;
+// dxgi-wedge-fix r1 (viewer_restore.cpp): the control thread asks the UI thread to advance a restore
+// (a window list arrived).
+constexpr UINT kMsgRestoreStep = WM_APP + 23;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

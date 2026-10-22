@@ -10,6 +10,7 @@
 #include "viewer_input_forward.hpp"
 #include "viewer_layout.hpp"
 #include "viewer_log.hpp"
+#include "viewer_restore.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -208,6 +209,7 @@ bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* 
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
   if (!ctx.picker.windowPanel.RequestSelect(windowId, statusText)) return false;
   ctx.sel.Begin();
+  restore_note_pick(ctx, windowId);  // dxgi-wedge-fix r2 D2: a candidate once revealed, reported once presented
   ctx.control.streamState.Request(true);
   // A selection is a generation change; drop the remote-cursor sample so the previous target's
   // pointer cannot linger over the new one while the first fenced sample is in flight.

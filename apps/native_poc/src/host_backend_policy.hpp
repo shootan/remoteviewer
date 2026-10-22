@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 #include "host_capture_device.hpp"
 
@@ -47,6 +48,24 @@ struct DesktopBackendState {
   std::atomic<uint64_t> promotionDeferredSecureTotal{0};  // deadlines held off by the secure gate (per episode)
   std::atomic<uint64_t> secureProbeFalseTotal{0};         // uncached probes that saw a secure desktop
   std::atomic<uint64_t> lastPromotionWaitUs{0};           // demotion -> successful promotion
+
+  // dxgi-wedge-fix r1 (Codex B5): the supervisor's DXGI quarantine, kept APART from `requested`.
+  // `requested` is what the client wants (an older APK always sends dxgi on connect); the
+  // quarantine is the host's decision that DXGI must not run in this process. Before this the
+  // quarantine rode REMOTE60_DESKTOP_CAPTURE_BACKEND=wgc into `requested`, and the APK's request
+  // overwrote it -- 10-08/10-11/10-14 went straight back to DXGI and 10-11 02:21 wedged again 3
+  // minutes later. Set once at startup (main thread) from REMOTE60_CAPTURE_DXGI_QUARANTINE and
+  // never cleared in-process: an expiry is applied at the supervisor's next launch, not mid-run.
+  bool dxgiQuarantined = false;
+  std::string dxgiQuarantineReason;  // for the log only
+
+  // The backend that may actually run for what was asked. Every place that used to write
+  // `active = requested` goes through this, so no path -- startup, reattach, a client request,
+  // the climb-back -- can bring DXGI back while quarantined. WGC/GDI requests pass through.
+  DesktopCaptureBackend EffectiveRequested() const {
+    if (dxgiQuarantined && requested == DesktopCaptureBackend::Dxgi) return DesktopCaptureBackend::Wgc;
+    return requested;
+  }
 
   // --- promotion gate / backoff (Phase 2-T4: the former stage_backend lines, pure on this state) ---
   // First sight of a demotion episode: remember when it began (for the promotion-wait metric).

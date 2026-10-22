@@ -65,6 +65,8 @@ add_executable(remote60_native_video_host_poc
   src/host_bgra_scale.cpp
   src/host_window_enum.cpp
   src/host_capture_device.cpp
+  src/capture_adapter_identity.cpp
+  src/host_os_snapshot.cpp
   src/host_net_io.cpp
   src/host_input_inject.cpp
   src/host_args.cpp
@@ -225,6 +227,25 @@ target_compile_definitions(remote60_native_video_host_migration_seam PRIVATE
 )
 target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   remote60_file_copy_host  # the same list as GNLinkStream: its sources reference file copy (t-zdmsd4gb)
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
+# TEST BUILD (dxgi-wedge-fix r1, Codex B1): the D3D multithread-protection A/B for the field PC. The same
+# sources and libraries as GNLinkStream, with REMOTE60_MT_AB_TEST_SEAM: the arm comes from
+# GNLinkStream.mt-ab.txt beside the exe ("on" sets protection right after the device is created; anything
+# else is the shipped behaviour). Its own output name, never packaged; the field procedure swaps it in
+# under the installed name only with the user's approval. mt_ab_build_gate below checks the shipped exe.
+get_target_property(_mtab_host_sources remote60_native_video_host_poc SOURCES)
+add_executable(remote60_native_video_host_mtab_seam ${_mtab_host_sources})
+set_target_properties(remote60_native_video_host_mtab_seam PROPERTIES OUTPUT_NAME "GNLinkStreamMtAb")
+target_include_directories(remote60_native_video_host_mtab_seam PRIVATE src)
+target_compile_definitions(remote60_native_video_host_mtab_seam PRIVATE
+  REMOTE60_MT_AB_TEST_SEAM=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_mtab_seam PRIVATE
+  remote60_file_copy_host
   capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
   bcrypt windowscodecs shlwapi winmm
 )
@@ -559,6 +580,9 @@ add_executable(remote60_native_video_client_poc
   src/viewer_window_proc.cpp
   src/viewer_cursor_overlay.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_picker.cpp
   src/viewer_input_forward.cpp
   src/viewer_layout.cpp
@@ -640,6 +664,38 @@ target_compile_definitions(remote60_native_video_client_poc PRIVATE
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
 
+# dxgi-wedge-fix r3 (Codex E2/E3): the same viewer, built with a present that can be made to FAIL (a file named
+# by GNLINK_VIEWER_TEST_PRESENT_FAIL_FILE) and, with GNLINK_VIEWER_TEST_REQUEST_MONITORS=1, asking for the
+# screen list once a target is revealed. Same sources, libraries and options as GNLinkViewer; one define.
+# Never shipped (the release gate refuses its marker); the chain e2e starts it instead of GNLinkViewer.
+get_target_property(_viewer_sources remote60_native_video_client_poc SOURCES)
+add_executable(remote60_viewer_present_fail_test ${_viewer_sources})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_viewer_present_fail_test PROPERTY ${_prop} "${_value}")
+  endif()
+endforeach()
+target_compile_definitions(remote60_viewer_present_fail_test PRIVATE REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM=1)
+set_target_properties(remote60_viewer_present_fail_test PROPERTIES OUTPUT_NAME "GNLinkViewerR3Test")
+# The same test viewer with one restore mutant each (r3: the integrated path must FAIL with them):
+# MONITOR_AS_DESKTOP (E2: a reconnect would select the desktop for an explicit screen) and REPORT_ON_REVEAL
+# (E3: r1's rule -- a revealed B reported before it was presented).
+foreach(_mutant MONITOR_AS_DESKTOP REPORT_ON_REVEAL)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_viewer_r3_mutant_${_mutant_lower}_test ${_viewer_sources})
+  foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+    get_target_property(_value remote60_native_video_client_poc ${_prop})
+    if(_value)
+      set_property(TARGET remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTY ${_prop} "${_value}")
+    endif()
+  endforeach()
+  target_compile_definitions(remote60_viewer_r3_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM=1 REMOTE60_RESTORE_MUTANT_${_mutant}=1)
+  set_target_properties(remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTIES
+    OUTPUT_NAME "GNLinkViewerR3Mutant_${_mutant_lower}")
+endforeach()
+
 # prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
 # against a fake control host on loopback (no UI, no SendInput, no desktop).
 add_executable(remote60_client_session_role_park_test
@@ -706,6 +762,9 @@ add_executable(remote60_host_app WIN32
   src/host_app_log.cpp
   src/update_readiness.cpp
   src/host_app_main.cpp
+  src/capture_adapter_identity.cpp
+  src/capture_recovery_store.cpp
+  src/prelogin_store_chain.cpp
   src/prelogin_autostart.cpp
   src/prelogin_admin_pipe.cpp
   src/directory_client.cpp
@@ -807,6 +866,24 @@ target_link_libraries(remote60_host_exit_upload_test PRIVATE
   bcrypt
   winhttp
   remote60_test_scratch_dir  # repo-internal scratch + boundary-checked cleanup (R3), never %TEMP%
+)
+
+# dxgi-wedge-fix r1 (Bⓐ2): the real supervisor stopped and started again against the persistent DXGI
+# quarantine; the streaming child is this exe in stand-in mode (REMOTE60_HOST_TEST_SEAM, test root store).
+add_executable(remote60_host_capture_quarantine_test
+  src/host_capture_quarantine_test.cpp
+  ${_host_ui_test_sources}
+)
+target_compile_definitions(remote60_host_capture_quarantine_test PRIVATE REMOTE60_HOST_TEST_SEAM=1)
+target_compile_options(remote60_host_capture_quarantine_test PRIVATE /utf-8)
+target_include_directories(remote60_host_capture_quarantine_test PRIVATE src)
+target_link_libraries(remote60_host_capture_quarantine_test PRIVATE
+  ws2_32
+  comctl32
+  shlwapi
+  bcrypt
+  winhttp
+  remote60_test_scratch_dir
 )
 
 # One file the user can carry to another machine. It embeds the four product executables and
@@ -1433,6 +1510,9 @@ add_executable(remote60_viewer_release_all_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1471,6 +1551,9 @@ add_executable(remote60_viewer_stats_chain_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1508,6 +1591,9 @@ add_executable(remote60_viewer_mouse_xbutton_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1549,6 +1635,9 @@ add_executable(remote60_viewer_prelogin_login_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1589,6 +1678,9 @@ add_executable(remote60_viewer_clip_bar_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -1630,6 +1722,9 @@ add_executable(remote60_viewer_paste_e2e_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -2668,6 +2763,8 @@ target_link_libraries(remote60_viewer_picker_gesture_test PRIVATE common ws2_32)
 add_executable(remote60_picker_preview
   tools/picker_preview.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_picker_state.cpp
@@ -2828,6 +2925,56 @@ add_executable(remote60_prelogin_store_chain_test
 )
 target_include_directories(remote60_prelogin_store_chain_test PRIVATE src)
 target_link_libraries(remote60_prelogin_store_chain_test PRIVATE advapi32 remote60_test_scratch_dir)
+
+# dxgi-wedge-fix r1 (Bⓒ): the watchdog's OS snapshot -- its fields and that a request never waits.
+add_executable(remote60_host_os_snapshot_test src/host_os_snapshot_test.cpp src/host_os_snapshot.cpp)
+target_include_directories(remote60_host_os_snapshot_test PRIVATE src)
+target_link_libraries(remote60_host_os_snapshot_test PRIVATE user32)
+
+# dxgi-wedge-fix r1/r2 (Bⓑ1, D1/D2): the restore handoff's wire forms, what a restore selects, and when a
+# target counts as seen (pure-logic). The two mutants must FAIL it: commit at the reveal instead of the
+# present (r1's D2 defect), and an explicit screen restored as the desktop (r1's D1 shortcut).
+add_executable(remote60_viewer_restore_target_test
+  src/viewer_restore_target_test.cpp
+  src/viewer_restore_target.cpp
+)
+target_include_directories(remote60_viewer_restore_target_test PRIVATE src)
+foreach(_mutant COMMIT_ON_ARM MONITOR_AS_DESKTOP)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_viewer_restore_target_mutant_${_mutant_lower}_test
+    src/viewer_restore_target_test.cpp
+    src/viewer_restore_target.cpp
+  )
+  target_include_directories(remote60_viewer_restore_target_mutant_${_mutant_lower}_test PRIVATE src)
+  target_compile_definitions(remote60_viewer_restore_target_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_RESTORE_MUTANT_${_mutant}=1)
+endforeach()
+
+# dxgi-wedge-fix r1: the persistent DXGI quarantine store (format, decision, protected folder, links, limit, lock).
+add_executable(remote60_capture_recovery_store_test
+  src/capture_recovery_store_test.cpp
+  src/capture_recovery_store.cpp
+  src/capture_adapter_identity.cpp
+  src/prelogin_store_chain.cpp
+)
+target_include_directories(remote60_capture_recovery_store_test PRIVATE src)
+target_link_libraries(remote60_capture_recovery_store_test PRIVATE advapi32 remote60_test_scratch_dir)
+# r2 D3 mutants (each must FAIL the same test): r1 carried a refused future `last` on; r1 created the
+# lock file unshared and did not retry a sharing violation.
+foreach(_mutant CONTINUE_FUTURE UNSHARED_LOCK_CREATE)
+  string(TOLOWER ${_mutant} _mutant_lower)
+  add_executable(remote60_capture_recovery_store_mutant_${_mutant_lower}_test
+    src/capture_recovery_store_test.cpp
+    src/capture_recovery_store.cpp
+    src/capture_adapter_identity.cpp
+    src/prelogin_store_chain.cpp
+  )
+  target_include_directories(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE src)
+  target_link_libraries(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE advapi32
+    remote60_test_scratch_dir)
+  target_compile_definitions(remote60_capture_recovery_store_mutant_${_mutant_lower}_test PRIVATE
+    REMOTE60_STORE_MUTANT_${_mutant}=1)
+endforeach()
 
 # prelogin-ui r7 (H6): the viewer's input gate before the role is known and at the send.
 add_executable(remote60_prelogin_input_gate_test
@@ -3293,6 +3440,9 @@ add_executable(remote60_viewer_window_proc_isolated_test
   src/viewer_picker_state.cpp
   src/viewer_selection_gate.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -3322,6 +3472,9 @@ add_executable(remote60_picker_open_chain_test
   src/input_macro.cpp
   src/macro_shell_bridge.cpp
   src/viewer_overlay_draw.cpp
+  src/viewer_restore.cpp
+  src/viewer_restore_status.cpp
+  src/viewer_restore_target.cpp
   src/viewer_gdi_util.cpp
   src/viewer_layout.cpp
   src/viewer_log.cpp
@@ -3606,6 +3759,7 @@ if(GNLINK_HAVE_WEBVIEW2)
   # GNLinkViewer.exe as a child, mirroring how GNLinkHost supervises GNLinkStream.
   add_executable(remote60_client_shell WIN32
     src/client_shell_main.cpp
+    src/viewer_restore_target.cpp
     src/login_credential_store.cpp
     src/login_flow.cpp
     src/client_shell_bridge.cpp
@@ -4107,4 +4261,18 @@ target_include_directories(remote60_e2e_staging_test PRIVATE src)
 target_link_libraries(remote60_e2e_staging_test PRIVATE remote60_test_scratch_dir)
 if(MSVC)
   target_compile_options(remote60_e2e_staging_test PRIVATE /utf-8)
+endif()
+
+# dxgi-wedge-fix r1 (Codex B7): the whole reconnect chain -- the product shell (entry renamed) starting the real
+# GNLinkViewer against a private directory and a supervised streaming test build. Run by
+# apps/directory/test/dxgi_wedge_reconnect_runner.js, never on its own.
+if(GNLINK_HAVE_WEBVIEW2)
+  add_executable(remote60_client_reconnect_restore_e2e_test src/client_reconnect_restore_e2e_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_client_reconnect_restore_e2e_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_client_reconnect_restore_e2e_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_client_reconnect_restore_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_client_reconnect_restore_e2e_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_client_reconnect_restore_e2e_test remote60_client_shell remote60_native_video_client_poc)
 endif()

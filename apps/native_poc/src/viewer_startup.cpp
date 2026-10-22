@@ -24,6 +24,7 @@
 #include "viewer_picker.hpp"
 #include "viewer_log.hpp"
 #include "viewer_clip_image_wiring.hpp"
+#include "viewer_restore.hpp"
 #include "viewer_window_proc.hpp"
 
 namespace remote60::native_poc::viewer {
@@ -172,6 +173,7 @@ void apply_initial_state(ViewerContext& ctx) {
   ctx.startInPicker = !ctx.startInStreamView;
   ctx.picker.visible.store(ctx.startInPicker, std::memory_order_relaxed);
   clear_pc_target_selection(ctx);
+  restore_init(ctx, ctx.args.restoreTarget, ctx.args.reconnect);
   // No target has taken effect yet. 0 disables the persistent generation filter, so the legacy
   // stream-view start and the pre-first-pick window accept whatever the host sends, as before.
   ctx.sel.activeStreamGeneration.store(0, std::memory_order_release);
@@ -250,7 +252,8 @@ int create_window_and_toolbar(ViewerContext& ctx) {
       send_host_key_chord(ctx, VK_LMENU, VK_TAB, "switch-window");
     };
     toolbarCallbacks.onMonitor = [&ctx](uint32_t monitorId) {
-      ctx.picker.windowPanel.RequestMonitorSelect(monitorId);
+      // dxgi-wedge-fix r2 D1: what is on screen is no longer known to be the logical desktop.
+      if (ctx.picker.windowPanel.RequestMonitorSelect(monitorId)) restore_note_toolbar_monitor(ctx);
     };
     // Remote reboot (prelogin-service r3): the in-menu item opens a confirm popup; the warning line is
     // shown when the host is NOT durable-enabled. Only on 확인 does the control thread send one request.

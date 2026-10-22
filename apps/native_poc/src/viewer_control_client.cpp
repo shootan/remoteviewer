@@ -21,6 +21,7 @@
 #include "peer_version.hpp"
 #include "paste_apply_wire.hpp"
 #include "viewer_paste_gate.hpp"
+#include "viewer_restore.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -508,6 +509,12 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
        remote60::native_poc::kControlWindowListFlagMonitors) != 0;
   const bool monitorsNewlySupported =
       ctx.picker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
+  // dxgi-wedge-fix r1: whether this host answers a screen pick through the window-select transaction
+  // (with the generation the picker's gate waits on) -- what a restored screen is selected through.
+  ctx.picker.windowPanel.SetHostSupportsMonitorSelect(
+      (windowList.flags & remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1) != 0);
+  ctx.picker.restore.windowListSeen.store(true, std::memory_order_release);
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgRestoreStep, 0, 0);
   // The stored --monitor is auto-applied only when the session opens straight
   // into the stream. In picker mode the user has not chosen a target yet, so
   // selecting a monitor here would restart the host capture before any pick and
@@ -516,6 +523,13 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
     // Only when a screen other than the primary was asked for: selecting monitor
     // zero would restart the capture for no change.
     ctx.picker.windowPanel.RequestMonitorSelect(ctx.session.requestedMonitorId);
+  } else if (monitorsNewlySupported) {
+    // dxgi-wedge-fix r4 (Codex r3 ③): ask for the screen list once per connection, as soon as the host
+    // says it has the monitor messages -- picker or not. Without it the toolbar never had a screen switch
+    // (it needs two or more screens), so a user could not choose a screen at all. A query only: nothing is
+    // selected, the stream/generation are untouched, and the restore descriptor does not change.
+    ctx.picker.windowPanel.RequestMonitorList();
+    log_client_line(ctx, "[native-video-client][control] monitor-list requested (host has the monitor messages)");
   }
   InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
@@ -662,6 +676,8 @@ bool ControlClient::pump_control_resume(
 }
 void ControlClient::Run() {
   const uint64_t runGen = ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel) + 1;  // r5 G11: a new connection's run
+  // dxgi-wedge-fix r4: the screen capability (and so the one screen-list request) belongs to THIS connection.
+  ctx.picker.windowPanel.SetHostSupportsMonitors(false);
   ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
   // lockscreen-cred r2 (Codex L5): a password still waiting from an earlier connection is that connection's --
   // dropped (zeroed) now, not left for this one (the send would refuse it too; this makes it not linger).
@@ -1145,9 +1161,10 @@ void ControlClient::Run() {
           handle_window_list(response.windowList);
           break;
         }
-        case TcpControlResponseKind::MonitorList:
+        case TcpControlResponseKind::MonitorList: {
           ctx.picker.windowPanel.ApplyMonitorList(response.monitorList);
           break;
+        }
         case TcpControlResponseKind::WindowSelected:
           handle_window_selected(response.windowSelected);
           break;

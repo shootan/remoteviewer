@@ -130,13 +130,14 @@ Flow stage_stream_active(HostContext& hx, TickContext& tc) {
         // Fresh resolution, not the backend the last session was demoted to. This is also
         // what frees a host parked on WGC by an RDP visit: the desktop is back on the real
         // adapter by now, and starting from the requested backend finds it.
-        backend.active = backend.requested;
+        // ...within the DXGI quarantine (dxgi-wedge-fix r1): EffectiveRequested is WGC while it holds.
+        backend.active = backend.EffectiveRequested();
         // Reattach bypasses the climb-back secure gate, so honour the same rule here: if the
         // requested backend is DXGI but the desktop is currently secure (UAC/lock), attaching
         // DXGI would just take an immediate E_ACCESSDENIED and demote. Start on WGC instead so
         // the returning viewer gets a picture now, and let the climb-back promote to DXGI once
         // the default desktop settles. A requested WGC/GDI backend is respected as-is.
-        if (backend.requested == DesktopCaptureBackend::Dxgi &&
+        if (backend.active == DesktopCaptureBackend::Dxgi &&
             !interactive_desktop_is_default_uncached()) {
           backend.active = DesktopCaptureBackend::Wgc;
         }

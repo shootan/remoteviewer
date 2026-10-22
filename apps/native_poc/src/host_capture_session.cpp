@@ -36,6 +36,8 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "capture_adapter_identity.hpp"
+#include "mt_ab_test_seam.hpp"
 #include "prelogin_logon_desktop.hpp"
 #include "d3d_capture_readback.hpp"
 #include "gdi_capture_process.hpp"
@@ -81,6 +83,13 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
               << hr_hex(devHr) << "\n";
     return false;
   }
+#ifdef REMOTE60_MT_AB_TEST_SEAM
+  // TEST BUILD ONLY (r2 D4): the arm on the NEW context before anything else sees it -- the WinRT wrapper
+  // (WGC), the MF encoder, the GPU scaler and the readback all get the device below. A recreate that
+  // fails after this leaves the old device in place; the new one is released unused.
+  std::cout << "[native-video-host][mt-ab] where=device-recreate(" << reason << ")\n";
+  std::cout << mt_ab_apply(newCtx.Get());
+#endif
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgiWr;
   if (FAILED(newD3d.As(&dxgiWr)) || !dxgiWr) {
     std::cerr << "[native-video-host] device-recreate(" << reason << ") IDXGIDevice query failed\n";
@@ -110,8 +119,13 @@ bool RecreateCaptureDeviceOnPrimary(CaptureState& capture, CaptureResources& res
   // set_d3d11_device does not rebind a running MFT (only initialize() sends SET_D3D_MANAGER), so this
   // is only correct while the encoder uses the CPU readback path (default). NV12 surface mode would
   // need a full encoder reinit here -- tracked in docs/구현계획.md, not fixed in this hotfix.
-  if (useH264) (void)encoder.codec.set_d3d11_device(res.d3d.Get());
   std::cout << d3d_multithread_log_line("device-recreated", res.d3d.Get(), res.ctx.Get());
+  if (useH264) {
+    (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+    std::cout << d3d_multithread_log_line("mf-device-set", res.d3d.Get(), res.ctx.Get());
+  }
+  // dxgi-wedge-fix r1: a new device can be on another adapter (the stale-RDP-adapter case): say which.
+  std::cout << capture_adapter_log_line(identify_device_adapter(res.d3d.Get()));
   res.gpuScaler = GpuBgraScaler();
   capture.gpuScalerHealthy = false;
   if (capture.gpuScalerRequested) {
@@ -689,6 +703,23 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
                                       uint32_t accumulatedFrames) {
               if (stop.load()) return;
               if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+              // TEST BUILD ONLY (dxgi-wedge-fix r1): once GNLINK_STREAM_TEST_DXGI_WEDGE_FILE appears, this
+              // DXGI worker stops inside its frame handler -- phase=frame_handler, the 10-08 17:56 field
+              // shape -- and the product's own watchdog (host_startup_capture.cpp) ends the process with
+              // exit 44 after 5 s. Nothing here exits: the wedge is real, the recovery is the product's.
+              {
+                static const std::string wedgeFile = [] {
+                  const char* v = std::getenv("GNLINK_STREAM_TEST_DXGI_WEDGE_FILE");
+                  return std::string(v ? v : "");
+                }();
+                if (!wedgeFile.empty() && GetFileAttributesA(wedgeFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                  std::cout << "[native-video-host][test-seam] dxgi worker held in frame_handler\n";
+                  std::cout.flush();
+                  Sleep(60000);
+                }
+              }
+#endif
               const uint64_t callbackUs = qpc_now_us();
               capture.PublishCapturedTexture(res, texture, callbackUs, callbackUs, 0, 0,
                                        accumulatedFrames > 0, dxgiAttachmentCookie);

@@ -68,6 +68,11 @@ bool should_include_window(HWND hwnd);
 void window_content_extent(HWND hwnd, const RECT& windowRect, int* outW, int* outH);
 
 std::vector<MonitorListEntry> enumerate_monitors();
+#ifdef REMOTE60_STREAM_TEST_SEAM
+// TEST BUILD ONLY (dxgi-wedge-fix r4): GNLINK_STREAM_TEST_MONITORS_FILE says "nomonitors" -- this host does
+// not advertise the monitor messages (an older host), so a client must never ask it for a screen list.
+bool test_host_hides_monitor_messages();
+#endif
 std::vector<WindowListEntry> enumerate_shareable_windows();
 std::optional<WindowListEntry> find_window_by_id(uint64_t id);
 

@@ -141,6 +141,10 @@ Args parse_args(int argc, char** argv) {
       a.initialView = ascii_lower(trim_ascii(argv[++i]));
     } else if (k == "--start-in-picker") {
       a.initialView = "targets";
+    } else if (k == "--restore-target" && i + 1 < argc) {
+      a.restoreTarget = trim_ascii(argv[++i]);
+    } else if (k == "--reconnect") {
+      a.reconnect = true;
     }
   }
   return a;

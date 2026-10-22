@@ -13323,3 +13323,41 @@ Next
   - R1: 이미 typed 로 보유 중인 같은 트랜잭션의 sealed 재전송(서비스는 재입력 없이 다시 “typed” 로 답함)은 보유 마감을 다시 시작하지 않는다. 최초 typed 마감을 유지한다.
   - R2: Busy 문구에서 “(길어야 2분)” 을 뺐다(보장되지 않는 수치). 위 r3 줄의 문구는 r3 당시 것이다.
   - 시험: relay **41/41 ×3**. 보유 2 s 시험 seam 에서 0.5 s·1.0 s·1.3 s(+0.3 s 지연 응답)에 같은 sealed 를 재전송했다. 서비스에 3회 도달했고, 최초 마감에서 다음 Host 의 challenge 가 발급됐으며, 거래는 UnlockUnconfirmed 로 끝났다. 대조: 최종 답 뒤 재전송은 보내지 않는다. 변이(재전송마다 마감 재시작) → 다음 Host FAIL, 원복 PASS. e2e lock-screen 44/44 1회(Busy 창 캡처에 새 문구).
+
+### 2026-10-22 dxgi-wedge-fix r1 — DXGI wedge 격리 영속화·요청 무시, 자동 재연결 화면 복원, 3 s 화면 상태 기록 (미게시, 실기 대기)
+
+- 계기(10-21 사용자 보고·조사 t-p6gs4g4i): 회사 PC 에서 호스트를 시작한 뒤 첫 접속이 몇 분 안에 멈추고 창이 꺼졌다. NAS 기준 10-08~10-21 wedge 9건은 모두 NVIDIA 의 `d3dMt=off` DXGI 구간이었다(상관관계, 원인 미확정). 기존 WGC 격리는 supervisor 메모리에만 있었고, 그마저 구형 APK 의 dxgi 요청이 `requested` 를 덮어 풀었다. 뷰어는 12 s 뒤 닫혔고, shell 자동 재연결은 picker 로 떨어졌다.
+- 설계: Codex `codex_lockkeys_dxgi_r1.md` §B 계약 1~8, 지시서 `task_dxgi_wedge_fix_impl_r1.md`.
+- 수정: (Bⓐ3) child 의 격리를 `requested` 와 분리했다(`REMOTE60_CAPTURE_DXGI_QUARANTINE`, `EffectiveRequested()` 를 startup·reattach·요청·climb-back·화면 item 이 공유). prelogin worker 는 무시한다. (Bⓐ2) exit 44 를 child 가 보고한 어댑터(설명+PCI id 해시, UMD 드라이버 버전)에 대해 `ProgramData\GNLink\capture-recovery\<key>.rec` 에 기록한다. 폴더 규칙은 machine credential 과 같고(SY/BA, reparse·hardlink 거부), CREATE_NEW 임시파일+핸들 rename, 폴더 안 lock, 4 KiB·16개 제한을 둔다. 매 launch 에 다시 읽는다. 같은 어댑터·드라이버이고 마지막 wedge+7일 안이면 첫 child 부터 WGC 로 시작한다. 만료·드라이버 변경·손상·미래 시각은 기본값으로 두고 사유를 남긴다. (Bⓑ1) 뷰어는 확정되고 렌더된 대상만 `[viewer-restore]` 로 보고한다. shell 은 recoverable 43/44/46 자동 재연결에만 `--reconnect --restore-target` 을 넘긴다. 새 뷰어는 picker 자체 transaction 으로 같은 desktop/화면(이름+사각형)을 고른다. 사라짐·변경·모호·창이면 picker 와 사유를 보이고, 표시는 '재연결 중'이다. (Bⓒ) shell 재연결 로그 1줄, watchdog 3 s 경고 시 비동기 OS snapshot(전경 exe·rect·모니터·표시 모드, 제목 없음)을 남긴다. (Bⓐ1) `GNLinkStreamMtAb` test-only 빌드와 실기 절차(`docs/dxgi_wedge_mt_ab_procedure_2026-10-22.md`)를 준비했다.
+- 시험: capture_recovery_store 53/53, host_capture_quarantine(실 supervisor 재시작) 23/23, monitor_fallback e2e `--quarantine` 16/16(DXGI 시작 0, 대조 `--quarantine-control` DXGI 5, mutation FAIL 확인), client_recovery_ui R1~R6(mutation FAIL 확인), viewer_restore_target 26/26, host_os_snapshot 7/7, 기존 회귀 PASS, 전체 빌드 OK, 출하 exe 시험 표식 0. 전체 사슬 e2e(`dxgi_wedge_reconnect_runner.js`)의 첫 실행이 shell parser 결함(로그 타임스탬프 접두)을 잡아 수정했다. 수정본 재실행 ALL PASS: GNLinkHostUiTest 가 감독하는 실제 stream 시험 빌드에서 제품 watchdog 이 exit 44(phase=frame_handler)를 냈고, 3 s snapshot 이 찍혔다. 뷰어는 43 으로 닫혔고, shell 이 restore 를 담아 자동 재연결했다. 새 뷰어는 "재연결 중" 을 보인 뒤 클릭 없이 같은 desktop(primary)으로 돌아가 새 프레임을 렌더했다. wedge 에서 복원까지 20.1 s. 앞선 실행이 띄운 방화벽 대화상자 때문에 시험 호스트를 loopback bind 로 바꿨다.
+- 보류: minidump(계약 8 — helper 정체 반례에서 5 s 복구 유지 증거가 없어 보류), Bⓑ2(directory 신호), MT 출하 변경.
+- 미검증: 회사 PC 실기(격리 영속·재부팅 뒤 WGC 시작·게임 중 복원), MT A/B 실기, 실제 SY/BA ProgramData 쓰기(관리자 실 Host), 구형 APK 실기.
+- 제품/테스트/문서: 제품(host/viewer/shell), 테스트, 문서(이 항목·MT A/B 절차).
+
+### 2026-10-22 dxgi-wedge-fix r2 — Codex 158aff3 NEEDS_CHANGES D1~D4 보수 (미게시, 실기 대기)
+
+- 근거: `codex_dxgi_wedge_fix_r1.md` D1~D4/E1, 지시 `task_dxgi_wedge_fix_impl_r1.md` r2 절.
+- D1(명시 모니터 동일성): 복원 descriptor 를 `desktop`(논리 desktop = 호스트의 현재 primary, desktop 카드와 같은 선택) / `monitor`(사용자가 고른 화면) / `window` 로 줄였다. 자동 복원은 `desktop` 만 — 화면 목록이 없어도·늦어도·미지원이어도 같은 의미로 고른다. `monitor` 는 GDI 이름+사각형이 안정 출력 identity 가 아니므로 **자동 복원하지 않고 picker + 이유**(Codex 허용 안전 최소안; 안정 identity 는 별도 wire 설계). r1 의 '목록 4 s 미수신·미지원이면 primary(0) 선택'(e711f08)과 이름+사각형 매칭은 제거. PC 뷰어 툴바 화면 전환(구형 ControlMonitorSelect — 적용 전에 목록으로 답하고 generation 을 올리지 않음)은 r1 보고 경로가 발화하지 않아 descriptor 가 `desktop` 으로 남던 결함도 있었다 → 요청 즉시 `monitor` 로 낮춘다(picker 로만 이어지는 값).
+- D2(보고 시점): reveal(확정+첫 decode)은 후보일 뿐, 그 generation 의 프레임이 **실제 present 된 순간**에 commit·보고·`result=restored`. present 실패면 shell 은 이전 값을 유지(A 표시 → B decode 만 → 종료 → A 복원). decode 시점 보고(viewer_restore_frame.hpp)와 kMsgRestoreReport 제거.
+- D3(저장소): 시작 시 future 로 거부되는 기록(last > now+300 s)을 다음 wedge 가 이어 쓰지 않고 now 부터 새로 시작(이어 쓰면 실제 wedge 가 다음 시작에도 격리되지 않음). lock 파일을 공유 가능하게 만들고, 빈 보호 폴더 동시 최초 생성의 sharing violation·생성 경합을 같은 3 s 기한 안에서 재시도.
+- D4(시험 빌드만): MtAb 의 장치 재생성 경로에서 MT arm 을 새 context 생성 직후·WinRT wrapper/MF/scaler 이전으로 옮기고 `where=` 와 `mf-device-set` 로그로 순서를 남긴다. 출하 MT 무변경.
+- 시험: viewer_restore_target 30/30(mutant COMMIT_ON_ARM 6 FAIL·MONITOR_AS_DESKTOP 1 FAIL) · capture_recovery_store 64/64 ×3(2 writer process×20 round 빈 폴더, 최악 62 ms; mutant CONTINUE_FUTURE 3 FAIL·UNSHARED_LOCK_CREATE 20/20 round FAIL) · client_recovery_ui 84/0 · 전체 사슬 dxgi_wedge_reconnect_runner ALL PASS(뷰어 로그 순서 revealed gen=2 → reported why=presented → result=restored) · MtAb arm=on 시작 순서 mt-ab → device-created → mf-device-set → winrt-wrapper(state=on) · 전체 빌드 OK · 출하 gate ALL PASS 9. 재생성 경로의 순서는 실행되지 않았다(어댑터 변경 등 조건 필요) — 소스 순서만.
+- 제품/테스트/문서: 제품(viewer/host 시험빌드 경로·store), 테스트, 문서(이 항목).
+
+### 2026-10-22 dxgi-wedge-fix r3 — Codex f0ee888 EVIDENCE 보완 E2/E3 (제품 동작 변경 없음, 미게시)
+
+- 근거: `codex_dxgi_wedge_fix_r2.md` E2/E3. 제품 소스 변경은 시험 빌드 전용 `#ifdef`(REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM, 변이 정의)와 viewer_present.cpp 의 지역 플래그 1개뿐이다. 출하 GNLinkViewer 는 seam 문자열 0(gate 9 PASS, self-test 20 — 새 표식 viewer-present-fail-seam·GNLINK_VIEWER_TEST_), 시험 뷰어 GNLinkViewerR3Test 는 표식 있음(양성 대조).
+- **발견(E2)**: shell 이 띄우는 PC 뷰어(picker 모드)는 화면 목록을 요청하지 않아, 호스트가 화면 2개를 알려도 툴바에 화면 전환 버튼이 없다(실측: 버튼 1·2·4·5·6, 3 없음). main 5063cd9 도 소스상 같고, r1 은 restore 코드의 부수 효과로 요청했었다. 즉 지금 제품에서는 사용자가 명시 모니터를 고를 수 없다 — Codex 판단 사항(제품 변경 안 함).
+- E2(제품 동등): 시험 뷰어가 reveal 뒤 화면 목록만 요청(r1 동작)하고, 그 뒤는 제품 경로 — 시험 호스트 화면 2개(GNLINK_STREAM_TEST_MONITORS_FILE=extra) → 툴바 전환 버튼 → 메뉴 2번째 화면 → `monitor` 보고 → wedge 44 → shell restore=monitor → 새 뷰어 picker reason=monitor_not_restored, 자동 선택·restored 0 → 수동 desktop 선택 present. 42 PASS. 변이 MONITOR_AS_DESKTOP 은 통합 경로에서 FAIL.
+- E3: 시험 뷰어의 present 실패 주입(render 미실행 → 제품 note_present_result → 43). A(desktop) present·보고 → 툴바 대상 선택 → fixture 창 B(목록 첫 항목인지 확인 후에만 클릭) reveal → present 실패 → B 보고 0(1/1) → 43 → shell restore=desktop → 새 뷰어 desktop restored. 37 PASS. 대조: B present 성공 → `window` 보고 → shell restore=window → 새 뷰어 picker window_not_restored. 36 PASS. 변이 REPORT_ON_REVEAL(r1 규칙)은 통합 경로에서 FAIL(보고 2→3, restore 잃음).
+- 기본 desktop 사슬 재확인 38 PASS. 이 PC 모니터 1개·실 2번째 출력 동일성·회사 PC 실기는 미검증 그대로.
+- 제품/테스트/문서: 시험 seam(제품 소스 내 #ifdef), 테스트(사슬 시나리오·runner·변이 대상·gate 표식), 문서(이 항목).
+
+### 2026-10-22 dxgi-wedge-fix r4 — 출하 뷰어 화면 목록 요청, monitor 변이 재작성 (미게시)
+
+- 근거: `codex_dxgi_wedge_fix_r3.md` ①·③(②는 별도 조사 task). E3 은 닫힘: r3 첫 presentfail 실행 35/1 FAIL 과 이후 3 PASS 는 그대로 기록(소급 PASS 아님).
+- ③ 제품: 뷰어가 연결마다 호스트가 monitor messages 를 알리면(window list 플래그) 화면 목록을 1회 요청한다 — picker 여부와 무관(전에는 picker 모드에서 요청이 없어 툴바 화면 전환이 생기지 않았다). 조회만: select·stream·generation·복원 descriptor 변경 0. 연결 시작에 capability 를 초기화해 요청은 연결당 1회. 미지원 호스트에는 보내지 않는다. 시험 뷰어의 목록 요청 보조(GNLINK_VIEWER_TEST_REQUEST_MONITORS)는 제거.
+- 시험 호스트 seam: monitors 파일 "nomonitors" 면 monitor messages 를 알리지 않음(구형 호스트 대조, 시험 빌드 전용).
+- ① monitor_as_desktop 변이: 이전 변이는 restore 의 guard 를 그대로 두고 DecideRestore 만 바꿔 nullptr 문자열로 **뷰어가 충돌**(0xC0000005)했다 — 잘못된 복원의 검출이 아니었다(r3 보고의 "변이 FAIL" 정정). 이제 guard 와 결정을 함께 우회해 실제로 desktop 을 자동 선택·present 하고, E2 는 두 결과(picker 사유 / desktop 복원)를 이름으로 구분해 실패한다.
+- 사슬(출하 GNLinkViewer): monitor 44/0(목록 요청 1회·목록만으로 변화 0·툴바 전환→monitor 보고→wedge→새 뷰어 picker monitor_not_restored·자동 선택 0→수동 선택), nomonitors 29/0(요청 0·전환 버튼 없음), desktop 38/0. 변이 38 PASS + 1 FAIL("WRONG: it restored the desktop on its own"), 프로세스 생존.
+- 제품/테스트/문서: 제품(viewer_control_client), 시험 seam(host_window_enum/host_control_session #ifdef), 테스트(사슬·runner), 문서(이 항목).
