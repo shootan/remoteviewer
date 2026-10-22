@@ -99,6 +99,20 @@ class SharpenFramesTest {
     }
 
     @Test
+    fun aFirstLatchWithoutItsEntry_isCountedBeforeTheConfirmingOne() {
+        // r3 R2: the handoff entry published AFTER the buffer (r2's order) -> the first latch finds none.
+        val g = SharpenOutputGate()
+        g.arm(7, 1, 1_000, 4, 0)
+        assertFalse(g.onLatch(7, 1, true, null))
+        assertTrue(g.onLatch(7, 1, true, info(1_600)))
+        assertEquals(1, g.latchesBeforeConfirm)
+        val h = SharpenOutputGate()
+        h.arm(7, 1, 1_000, 4, 0)
+        assertTrue("entry first: the first latch confirms", h.onLatch(7, 1, true, info(1_500)))
+        assertEquals(0, h.latchesBeforeConfirm)
+    }
+
+    @Test
     fun cancelledGate_confirmsNothing() {
         val g = SharpenOutputGate()
         g.arm(7, 1, 1_000, 4, 0)

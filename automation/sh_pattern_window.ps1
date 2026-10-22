@@ -19,7 +19,7 @@
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File sh_pattern_window.ps1 [-Seconds 1800] [-Static]
 #   -Static: the square does not move (identical frames for the off/0.20/0.35 picture comparison).
 param([int]$Seconds = 1800, [int]$Left = 0, [int]$Top = 0, [int]$Width = 1920, [int]$Height = 1080,
-      [string]$Title = 'GNLINK-SH-PATTERN', [switch]$Static, [switch]$Bottom)
+      [string]$Title = 'GNLINK-SH-PATTERN', [string]$InputLog = '', [switch]$Static, [switch]$Bottom)
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -52,6 +52,13 @@ $prop.SetValue($form, $true, $null)
 $script:x = 40
 $korean = '가는 글씨 선명도 확인 — 원격 화면 GNLink 한글 테스트 0123456789'
 $latin = 'The quick brown fox jumps over the lazy dog 0O1lI| il1 rn m'
+
+# r3 (Codex R3.3): an OWNED input target. With -InputLog, every mouse press/release this window receives
+# (the host's background-message injection posts them here) is appended as "down|up <clientX> <clientY>".
+if ($InputLog) {
+  $form.Add_MouseDown({ param($s, $e) Add-Content -Path $InputLog -Value ("down {0} {1}" -f $e.X, $e.Y) })
+  $form.Add_MouseUp({ param($s, $e) Add-Content -Path $InputLog -Value ("up {0} {1}" -f $e.X, $e.Y) })
+}
 
 $form.Add_Paint({
   param($s, $e)

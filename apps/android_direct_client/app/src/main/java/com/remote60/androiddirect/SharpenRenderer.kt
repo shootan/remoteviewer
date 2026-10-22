@@ -47,7 +47,9 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class SharpenRenderer(
     private val generation: Long,
-    private val output: SurfaceTexture,
+    /** The OUTPUT window: the TextureView's SurfaceTexture in the app; a Surface (an ImageReader's) in the
+     *  test seam's shader fixture. Anything eglCreateWindowSurface takes. */
+    private val output: Any,
     initialStrength: Float,
     private val listener: Listener,
     private val faults: SharpenFaults = SharpenFaults.NONE,
@@ -74,6 +76,14 @@ class SharpenRenderer(
         val forceStrength: Float? = null,
         /** r2 H1: hold the release this long before tearing down (past the app's 2 s release timeout). */
         val holdReleaseMs: Long = 0L,
+        /** r3 R3 negative controls for the shader fixture: taps NOT clamped to the visible picture, and
+         *  no step swap under a quarter turn. Must make the fixture fail. */
+        val unclampedTaps: Boolean = false,
+        val noQuarterSwap: Boolean = false,
+        /** r3 R3: the shader fixture has no decoder ring; this stands for the ring's (buffer-oriented)
+         *  visible size of its frames. 0 = none. */
+        val sourceOverrideW: Int = 0,
+        val sourceOverrideH: Int = 0,
     ) {
         companion object { val NONE = SharpenFaults() }
     }
@@ -239,6 +249,9 @@ class SharpenRenderer(
                 if (info != null && info.visibleWidth > 0 && info.visibleHeight > 0) {
                     sourceW = info.visibleWidth
                     sourceH = info.visibleHeight
+                } else if (faults.sourceOverrideW > 0 && faults.sourceOverrideH > 0) {
+                    sourceW = faults.sourceOverrideW
+                    sourceH = faults.sourceOverrideH
                 } else {
                     sourceW = 0
                     sourceH = 0
@@ -256,14 +269,19 @@ class SharpenRenderer(
             GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
             // One VISIBLE SOURCE pixel of this frame, in the pre-transform coordinate. If the transform turns
             // the picture a quarter (x reads the source's y), the steps swap with it.
-            var stepW = sourceW
-            var stepH = sourceH
-            if (stepW <= 0 || stepH <= 0) {
+            // The ring's size is the BUFFER's (decoder) orientation: under a quarter turn its axes swap. The
+            // output size used when the ring has no entry is already the DISPLAY's orientation: never swapped
+            // (r3: it was swapped too -- found by the shader fixture).
+            var stepW: Int
+            var stepH: Int
+            val quarterTurn = kotlin.math.abs(texMatrix[1]) > kotlin.math.abs(texMatrix[0]) && !faults.noQuarterSwap
+            if (sourceW > 0 && sourceH > 0) {
+                stepW = if (quarterTurn) sourceH else sourceW
+                stepH = if (quarterTurn) sourceW else sourceH
+            } else {
                 stepW = w[0]; stepH = h[0]
                 if (newFrame) stepFromOutputSize.incrementAndGet()
             }
-            val quarterTurn = kotlin.math.abs(texMatrix[1]) > kotlin.math.abs(texMatrix[0])
-            if (quarterTurn) { val t = stepW; stepW = stepH; stepH = t }
             GLES20.glUniform2f(uStep, 1f / stepW, 1f / stepH)
             if (newFrame && sourceW > 0 && (sourceW != w[0] || sourceH != h[0])) framesSourceNotOutput.incrementAndGet()
             if (newFrame) {
@@ -355,7 +373,11 @@ class SharpenRenderer(
 
     private fun buildProgram(): Int {
         val vs = compile(GLES20.GL_VERTEX_SHADER, VERTEX)
-        val fs = compile(GLES20.GL_FRAGMENT_SHADER, if (faults.failShader) "not a shader" else FRAGMENT)
+        val fs = compile(GLES20.GL_FRAGMENT_SHADER, when {
+            faults.failShader -> "not a shader"
+            faults.unclampedTaps -> FRAGMENT.replace("vec2 q = clamp(p, 0.5 * uStep, vec2(1.0) - 0.5 * uStep);", "vec2 q = p;")
+            else -> FRAGMENT
+        })
         val p = GLES20.glCreateProgram()
         GLES20.glAttachShader(p, vs)
         GLES20.glAttachShader(p, fs)

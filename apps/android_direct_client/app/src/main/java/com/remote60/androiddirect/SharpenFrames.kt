@@ -62,6 +62,10 @@ class SharpenOutputGate {
         private set
     var confirmed = false
         private set
+    /** New-frame latches on the armed surface that did NOT qualify before the confirming one (r3 R2
+     *  evidence: 0 = the first frame after the attach confirmed it). */
+    var latchesBeforeConfirm = 0
+        private set
     /** The stream generation of the newest qualifying latch (0: none yet). */
     var lastQualifiedStreamGeneration = 0L
         private set
@@ -69,6 +73,7 @@ class SharpenOutputGate {
     fun arm(rendererGeneration: Long, surfaceId: Long, attachNs: Long, codecEpochAtAttach: Long, nowMs: Long) {
         armed = true
         confirmed = false
+        latchesBeforeConfirm = 0
         lastQualifiedStreamGeneration = 0L
         this.rendererGeneration = rendererGeneration
         this.surfaceId = surfaceId
@@ -93,7 +98,11 @@ class SharpenOutputGate {
 
     /** A latch happened. Returns true exactly when it is the one that first confirms the gate. */
     fun onLatch(rendererGeneration: Long, surfaceId: Long, newFrame: Boolean, info: FrameInfo?): Boolean {
-        if (!qualifies(rendererGeneration, surfaceId, newFrame, info)) return false
+        if (!qualifies(rendererGeneration, surfaceId, newFrame, info)) {
+            if (armed && !confirmed && newFrame && rendererGeneration == this.rendererGeneration &&
+                surfaceId == this.surfaceId) latchesBeforeConfirm += 1
+            return false
+        }
         lastQualifiedStreamGeneration = info!!.streamGeneration
         if (confirmed) return false
         confirmed = true

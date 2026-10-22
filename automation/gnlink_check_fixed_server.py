@@ -129,6 +129,13 @@ def check_windows_dir(report, directory):
 # into the code -- its marker and the two launch-intent keys that inject faults or force a strength. The
 # shipped half (src/noseam) has none of them. Searched in every classes*.dex.
 APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength']
+# sh-filter r3 (R2): the native half of the same seam (debug variant only) -- its marker and the system
+# property prefix it reads. Searched in every lib/*/*.so of the APK.
+APK_NATIVE_TEST_MARKERS = ['sh-test-seam', 'debug.gnlink.sh.']
+
+
+def apk_native_markers_found(so_bytes):
+    return [m for m in APK_NATIVE_TEST_MARKERS if m.encode('ascii') in so_bytes]
 
 
 def apk_test_markers_found(dex):
@@ -151,6 +158,11 @@ def check_apk(report, path):
     seam = apk_test_markers_found(dex)
     report.check(not seam, '%s has no sharpening test seam%s'
                  % (name, (' -- found: ' + ', '.join(seam)) if seam else ''))
+    with zipfile.ZipFile(path) as apk:
+        native = b''.join(apk.read(n) for n in apk.namelist() if n.startswith('lib/') and n.endswith('.so'))
+    native_seam = apk_native_markers_found(native)
+    report.check(not native_seam, '%s has no sharpening test seam in its native libraries%s'
+                 % (name, (' -- found: ' + ', '.join(native_seam)) if native_seam else ''))
 
     with zipfile.ZipFile(path) as apk:
         names = apk.namelist()
@@ -217,6 +229,11 @@ def self_test():
         for marker in APK_TEST_MARKERS:
             outer.check(apk_test_markers_found(b'dex\n035\0' + marker.encode('ascii')) == [marker],
                         'a dex containing "%s" fails the seam check' % marker)
+        outer.check(not apk_native_markers_found(b'\x7fELF' + FIXED_ADDRESS.encode('ascii')),
+                    'a native library without the sharpening seam passes')
+        for marker in APK_NATIVE_TEST_MARKERS:
+            outer.check(apk_native_markers_found(b'\x7fELF' + marker.encode('ascii')) == [marker],
+                        'a native library containing "%s" fails' % marker)
         missing = make('missing', {})
         os.remove(os.path.join(missing, 'GNLinkViewer.exe'))
         outer.check(verdict(missing) == 1, 'a missing program fails rather than being skipped')

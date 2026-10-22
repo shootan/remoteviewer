@@ -1,4 +1,5 @@
 #include "android_video_decoder.hpp"
+#include "android_video_decoder_sh_seam.hpp"
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -930,6 +931,35 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   if (!heldOutputValid_ || !codec_) return;
   heldOutputValid_ = false;
 
+  // sh-filter: both releases stamp the buffer with heldOutputPresentUs_ (the scheduled time, or the PTS of
+  // an immediate release -- the same number, in the steady domain); that timestamp is the frame's key in
+  // the handoff ring (first-output gate, tap step, S4). r3 (Codex R2): the ring entry is published BEFORE
+  // the buffer, so whoever latches the frame always finds it -- the renderer and the view's first latch
+  // can come right after the release. `handoffNs` is therefore the moment the release was issued (just
+  // before it), not after it returned. A release that fails withdraws the entry: never a frame that was
+  // not handed over.
+  const int64_t handoffKey = static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL);
+  auto publish = [&]() -> size_t {
+    const size_t slot = handoffNext_++ % kHandoffRing;
+    handoffKey_[slot].store(0, std::memory_order_release);
+    handoffNs_[slot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+    handoffMeta_[slot].store((static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
+                                 (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu),
+                             std::memory_order_release);
+    handoffSize_[slot].store((static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_, std::memory_order_release);
+    handoffKey_[slot].store(handoffKey, std::memory_order_release);
+    return slot;
+  };
+#ifdef GNLINK_SH_TEST_SEAM
+  // TEST BUILD ONLY (debug + -Pgnlink.shTestSeam=true): delay between publication and release, and r2's
+  // order (release, delay, publish) as the counter-case -- android_video_decoder_sh_seam.hpp.
+  const bool publishAfter = sh_seam_publish_after_release();
+  const size_t slot = publishAfter ? kHandoffRing : publish();
+  if (!publishAfter) sh_seam_handoff_delay();
+#else
+  const size_t slot = publish();
+#endif
+
   media_status_t status;
   if (heldOutputScheduled_) {
     // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
@@ -941,23 +971,20 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
     ++presentImmediateCount_;
   }
   if (status != AMEDIA_OK) {
+    if (slot < kHandoffRing && handoffKey_[slot].load(std::memory_order_acquire) == handoffKey) {
+      handoffKey_[slot].store(0, std::memory_order_release);
+    }
     log_error("AMediaCodec output release failed");
     ResetCodecLocked();
     return;
   }
-  ++outputFrameCount_;
-  {
-    // sh-filter r1 (S4): both releases stamp the buffer with heldOutputPresentUs_ (the scheduled time,
-    // or the PTS of an immediate release -- the same number, in the steady domain).
-    const size_t slot = handoffNext_++ % kHandoffRing;
-    handoffKey_[slot].store(0, std::memory_order_release);
-    handoffNs_[slot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
-    handoffMeta_[slot].store((static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
-                                 (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu),
-                             std::memory_order_release);
-    handoffSize_[slot].store((static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_, std::memory_order_release);
-    handoffKey_[slot].store(static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL), std::memory_order_release);
+#ifdef GNLINK_SH_TEST_SEAM
+  if (publishAfter) {
+    sh_seam_handoff_delay();
+    publish();
   }
+#endif
+  ++outputFrameCount_;
 
   // Spacing between the moments frames were handed over on their due date. This is what the
   // pacing achieved; whether the view then latched each one is counted separately, by the

@@ -1607,6 +1607,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         applyImmersiveMode()
 
         diagnosticsLog = SessionDiagnosticsLog(this)
+        SharpenTestSeam.runFixture(this, intent)  // sh-filter r3: test builds only (the shipped seam does nothing)
         loginScene = findViewById(R.id.loginScene)
         hostsScene = findViewById(R.id.hostsScene)
         loginIdInput = findViewById(R.id.loginIdInput)
@@ -2313,6 +2314,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log(
                 "sharpen_first_output",
                 "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
+                    "ts=$timestamp latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
                     "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
             )
         }

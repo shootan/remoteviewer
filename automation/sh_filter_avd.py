@@ -169,13 +169,14 @@ def log_lines(tag_filter=None):
 
 # ---------------------------------------------------------------- host + pattern
 class Fixture:
-    def __init__(self, host_exe, out, static):
+    def __init__(self, host_exe, out, static, input_log=None):
         self.out = out
         self.port = free_udp_port()
         self.control_port = free_tcp_port()  # manual connect uses a TCP control link (loopback only)
         self.pattern = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                                          os.path.join(HERE, 'sh_pattern_window.ps1'), '-Seconds', '1800']
-                                        + (['-Static'] if static else []))
+                                        + (['-Static'] if static else [])
+                                        + (['-InputLog', input_log] if input_log else []))
         time.sleep(3)
         stage = os.path.join(out, 'host')
         os.makedirs(stage, exist_ok=True)
@@ -187,7 +188,12 @@ class Fixture:
         os.makedirs(env['LOCALAPPDATA'], exist_ok=True)
         self.host_log = open(os.path.join(out, 'host.log'), 'wb')
         cmd = [exe, '--transport', 'udp', '--codec', 'h264', '--bind-address', '127.0.0.1',
-               '--bind-port', str(self.port), '--control-port', str(self.control_port), '--input-injection-mode', 'none', '--seconds', '1800']
+               '--bind-port', str(self.port), '--control-port', str(self.control_port), '--seconds', '1800']
+        # Input injection stays OFF except for touch_host, where it is the background-message mode: posted
+        # to the CAPTURED WINDOW (the pattern window, which logs what it receives) -- never SendInput on a
+        # window target. The scenario checks the target is that window before it sends a single tap.
+        cmd += (['--enable-input-injection', '--input-injection-mode', 'background_message', '--input-log-every', '1']
+                if input_log else ['--input-injection-mode', 'none'])
         # No --capture-window-*: that locks the host's selection and the APK's pick is refused. The APK picks
         # the pattern window from its own window list, as a user would.
         CONTROL_PORT[self.port] = self.control_port
@@ -215,7 +221,8 @@ def launch(port, extras=()):
         '--ei', 'controlPort', str(CONTROL_PORT.get(port, port)), *extras)
 
 
-def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, before_pick=None, wait_viewer=True):
+def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, before_pick=None, wait_viewer=True,
+                       window=False):
     launch(port, extras)
     if not tap(rid='loginManualButton', timeout=30):
         return False
@@ -237,7 +244,7 @@ def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, be
     # The DESKTOP (the monitor, DXGI), with the topmost pattern window filling it: the host then gets a
     # frame every time the screen changes (the moving square, ~30 fps). Capturing the window itself (WGC)
     # gave ~1 frame/s here, too few to measure anything and slow to answer a lost keyframe.
-    if not tap(rid='listDevicesButton', timeout=10):
+    if not tap(rid='listWindowsButton' if window else 'listDevicesButton', timeout=10):
         return False
     # A WORKAROUND for these filter tests, not evidence that manual connect works: on this manual (TCP-control)
     # path the host's UDP control session was seen to end ~10 s after connect ("udp control session ended
@@ -250,7 +257,7 @@ def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, be
     end = time.time() + 30
     card = None
     while time.time() < end and card is None:
-        card = find(dump(), rid='targetCardTitle')
+        card = find(dump(), text=PATTERN_TITLE) if window else find(dump(), rid='targetCardTitle')
         if card is None:
             time.sleep(1)
     if card is None:
@@ -823,6 +830,187 @@ def scenario_resize(fx, out):
             pass
 
 
+def fixture_visible(pattern):
+    """The fixture's visible picture (SharpenShaderFixture.pixel), rows 0..39 of the 64x48 buffer."""
+    v = np.zeros((40, 64, 3), dtype=np.float64)
+    for y in range(40):
+        for x in range(64):
+            if pattern == 'alt':
+                v[y, x] = (40 + 2 * x + (x % 2) * 50, 40 + 3 * y + (y % 2) * 50, 170 - x - y + ((x + y) % 2) * 30)
+            else:
+                v[y, x] = (32 + 3 * x, 40 + 4 * y, 200 - 2 * x - y)
+    return v
+
+
+def kernel(img, s):
+    """out = (1+4s)C - s(L+R+T+B), each neighbour clamped to the picture's own edge, clamped 0..255."""
+    p = np.pad(img, ((1, 1), (1, 1), (0, 0)), mode='edge')
+    c = p[1:-1, 1:-1]
+    n = p[1:-1, :-2] + p[1:-1, 2:] + p[:-2, 1:-1] + p[2:, 1:-1]
+    return np.clip((1 + 4 * s) * c - s * n, 0, 255)
+
+
+def scenario_shader(fx, out):
+    """r3 (Codex R3): the production renderer/shader on a frame with a REAL crop (64x48 buffer, 64x40 visible,
+    magenta padding) and buffer transforms (mirror, quarter turn), fed through its input BufferQueue by the
+    seam fixture; output read back from an ImageReader. Checked against the kernel on the visible picture."""
+    adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    adb('shell', 'run-as', PKG, 'sh', '-c', 'rm -f files/sh_fixture*', check_rc=False)
+    adb('logcat', '-c', check_rc=False)
+    adb('shell', 'am', 'start', '-n', ACT, '--es', 'shTestFixture', 'shader')
+    done = None
+    for _ in range(60):
+        lines = log_lines('sh_fixture_done')
+        if lines:
+            done = lines[-1]
+            break
+        time.sleep(1)
+    if not check(done is not None, 'the fixture ran (sh_fixture_done)'):
+        return
+    summary = json.loads(done[done.index('{'):])
+    print('      ' + json.dumps(summary)[:600], flush=True)
+    results = {}
+    for c in summary.get('cases', []):
+        name = c['name']
+        raw = adb('exec-out', 'run-as', PKG, 'cat', 'files/sh_fixture_%s.rgba' % name, binary=True, timeout=60)
+        w, h = c['outW'], c['outH']
+        ok_size = len(raw) == w * h * 4 and c['note'] == 'ok'
+        check(ok_size, name + ': output read back (%dx%d)' % (w, h), 'note=%s bytes=%d' % (c['note'], len(raw)))
+        if not ok_size:
+            continue
+        got = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].astype(np.float64)
+        vis = fixture_visible(c.get('pattern', 'linear'))
+        if c['transform'] == 0:
+            disp = vis
+        elif c['transform'] == 1:
+            disp = vis[:, ::-1]
+        else:  # ROT_90: the source turned 90 degrees clockwise
+            disp = np.rot90(vis, k=-1)
+        exp = kernel(disp, c['strength'])
+        err = np.abs(got - exp)
+        # orientation: the other candidates must be clearly worse
+        alts = {'none': vis, 'mirror': vis[:, ::-1], 'rot_cw': np.rot90(vis, k=-1), 'rot_ccw': np.rot90(vis, k=1),
+                'flip_v': vis[::-1]}
+        alt_err = {k: float(np.abs(got - kernel(a, c['strength'])).mean()) for k, a in alts.items()
+                   if a.shape == got.shape}
+        best = min(alt_err, key=alt_err.get)
+        edge_rows = {'first_row': float(err[0].max()), 'last_row': float(err[-1].max()),
+                     'first_col': float(err[:, 0].max()), 'last_col': float(err[:, -1].max())}
+        is_mag = lambda a: (a[:, :, 0] > 200) & (a[:, :, 1] < 60) & (a[:, :, 2] > 200)
+        magenta = float((is_mag(got) & ~is_mag(exp)).sum())  # magenta where the picture has none
+        results[name] = {'max_err': float(err.max()), 'mean_err': round(float(err.mean()), 3), 'edges': edge_rows,
+                         'orientation_best': best, 'alt_mean_err': {k: round(v, 2) for k, v in alt_err.items()},
+                         'magenta_pixels': magenta}
+        print('      %s: %s' % (name, json.dumps(results[name])), flush=True)
+        want = {0: 'none', 1: 'mirror', 4: 'rot_cw'}[c['transform']]
+        if c.get('control'):
+            # A deliberately broken renderer (seam fault): the checks below must catch it.
+            check(err.max() > 6 or magenta > 0, name + ': NEGATIVE CONTROL -- the broken renderer is caught',
+                  'max=%.1f magenta=%d edges=%s' % (err.max(), magenta, edge_rows))
+            continue
+        check(best == want, name + ': orientation is the buffer transform\'s (%s)' % want, 'best=%s' % best)
+        check(magenta == 0, name + ': no padding (magenta) pixel reached the output')
+        check(err.max() <= 6, name + ': every output pixel, edges included, matches the kernel on the visible picture (max |d| <= 6)',
+              'max=%.1f edges=%s' % (err.max(), edge_rows))
+    with open(os.path.join(out, 'shader_fixture.json'), 'w') as fh:
+        json.dump(results, fh, indent=1)
+
+
+def scenario_race(fx, out):
+    """r3 (Codex R2): the handoff entry and the decoder's buffer, published with a 300 ms gap (native seam,
+    debug.gnlink.sh.*), on a STILL picture -- where a missed first latch is never followed by another frame.
+    Fixed order (entry first): the first output is confirmed, no fallback. r2's order (buffer first) as the
+    counter-case: the first latch finds no entry, its next latch is the same timestamp (a redraw), and the
+    3 s gate falls back."""
+    results = {}
+    for order in ['before', 'after']:
+        adb('shell', 'setprop', 'debug.gnlink.sh.handoff_delay_ms', '300', check_rc=False)
+        adb('shell', 'setprop', 'debug.gnlink.sh.handoff_order', order, check_rc=False)
+        ok = connect_to_pattern(fx.port)
+        check(ok, order + ': connected (0.20) to the still pattern')
+        time.sleep(10)
+        lines = log_lines()
+        first = [l for l in lines if 'sharpen_first_output' in l]
+        fb = [l for l in lines if 'sharpen_fallback' in l]
+        lat = [l for l in lines if '[sh_latency]' in l]
+        um = [int(m.group(1)) for m in (re.search(r'window: n=\d+ .*? unmatched=(\d+)', l) for l in lat) if m]
+        results[order] = {'first_output': first[:1], 'fallback': fb[:1], 'unmatched_windows': um}
+        print('      %s: first_output=%s fallback=%s unmatched per 5 s window=%s' % (order, first[:1], fb[:1], um), flush=True)
+        with open(os.path.join(out, 'race_%s.txt' % order), 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines))
+        if order == 'before':
+            check(first and not fb, 'entry published BEFORE the buffer: the first output is confirmed, no fallback',
+                  (first or fb or ['none'])[0][-160:])
+            check(first and 'latchesBefore=0' in first[0],
+                  '...confirmed by the FIRST frame latched after the attach (latchesBefore=0)', (first or ['none'])[0][-120:])
+        else:
+            # The host answers the viewer's key requests with further frames here, so a missed first latch is
+            # recovered by a later frame; on a picture that sends no further frame it would be the 3 s fallback.
+            lb = re.search(r'latchesBefore=(\d+)', first[0]) if first else None
+            check((lb and int(lb.group(1)) >= 1) or fb,
+                  'COUNTER-CASE, r2 order (buffer first, entry 300 ms later): the first frame latched did NOT confirm',
+                  'first_output=%s fallback=%s' % ([f[-120:] for f in first[:1]], fb[:1]))
+        adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    adb('shell', 'setprop', 'debug.gnlink.sh.handoff_delay_ms', '0', check_rc=False)
+    adb('shell', 'setprop', 'debug.gnlink.sh.handoff_order', 'before', check_rc=False)
+    with open(os.path.join(out, 'race.json'), 'w') as fh:
+        json.dump(results, fh, indent=1)
+
+
+def scenario_touch_host(fx, out, input_log):
+    """r3 (Codex R3.3): a tap on the picture -> the app's native queue (seam log) -> the HOST -> the pattern
+    window, which records the client point it received. The capture target is the pattern WINDOW, so the
+    host's background-message injection posts to it (no real cursor, no SendInput). Before any tap, the
+    host log must show that window as the applied selection; otherwise nothing is tapped."""
+    ok = connect_to_pattern(fx.port, window=True)
+    check(ok, 'connected (0.20), the pattern WINDOW picked')
+    time.sleep(4)
+    hlog = open(os.path.join(out, 'host.log'), 'rb').read().decode(errors='replace')
+    sel = re.findall(r'window-select seq=\d+ requestedId=\d+ applied=1 selectedId=(\d+) streamGen=\d+ reason=ok title=(.*)', hlog)
+    enabled = 'input injection enabled mode=background_message' in hlog
+    target_ok = bool(sel) and sel[-1][1].strip().startswith(PATTERN_TITLE) and sel[-1][0] != '0'
+    if not check(target_ok and enabled, 'GUARD: the host captures the pattern window and injects by message',
+                 'selections=%s enabled=%s' % (sel[-2:], enabled)):
+        return
+    if os.path.exists(input_log):
+        os.remove(input_log)
+
+    def tap_lime(label, one_to_one=True):
+        img = screencap(os.path.join(out, 'touchhost_%s.png' % label))
+        t = lime_target(img)
+        if not check(t is not None, label + ': the lime block is found on screen'):
+            return
+        before = open(input_log).read().splitlines() if os.path.exists(input_log) else []
+        adb('logcat', '-c', check_rc=False)
+        adb('shell', 'input', 'tap', str(t[0]), str(t[1]), check_rc=False)
+        time.sleep(2.5)
+        queued = [e for e in seam_inputs() if e[4] == 1 and e[0] in (2, 3)]
+        lines = open(input_log).read().splitlines() if os.path.exists(input_log) else []
+        got = [tuple(int(v) for v in l.split()[1:3]) for l in lines[len(before):] if l.startswith('down ')]
+        check(queued, label + ': the app queued the press', str(queued[:2]))
+        check(got, label + ': the pattern window RECEIVED a press through the host', str(lines[len(before):][:4]))
+        if queued and got:
+            q, r = queued[0], got[0]
+            check(abs(q[1] - r[0]) <= 1 and abs(q[2] - r[1]) <= 1,
+                  label + ': the host delivered the same point the app sent (window client px, within 1)',
+                  'app=(%d,%d) window=(%d,%d)' % (q[1], q[2], r[0], r[1]))
+            check(610 <= r[0] <= 730 and 440 <= r[1] <= 700, label + ': ...inside the lime block of the window',
+                  'window=(%d,%d)' % r)
+
+    for level in ['off', 'weak', 'strong']:
+        choose_level(level)
+        time.sleep(3)
+        tap_lime(level)
+    if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10):
+        tap(rid='viewerMenuCloseButton', timeout=10)
+        time.sleep(3)
+        tap_lime('large_weak', one_to_one=False)
+    else:
+        check(False, '크게 보기 could be chosen')
+    with open(os.path.join(out, 'touch_host_received.txt'), 'w') as fh:
+        fh.write(open(input_log).read() if os.path.exists(input_log) else '')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host-exe', required=True)
@@ -835,7 +1023,10 @@ def main():
     emu = ensure_emulator()
     adb('install', '-r', '-g', args.apk, timeout=300)
     adb('shell', 'pm', 'clear', PKG, check_rc=False)
-    fx = Fixture(args.host_exe, args.out, static=False)  # the moving square keeps frames coming (no stall overlay)
+    # The shader fixture needs no host, no picture of this PC and no window on its screen.
+    input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario == 'touch_host' else None
+    fx = None if args.scenario == 'shader' else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
+                                                        input_log=input_log)
     try:
         if args.scenario == 'compare':
             scenario_compare(fx, args.out, seam=False)
@@ -855,6 +1046,12 @@ def main():
             scenario_viewer_never(fx, args.out)
         elif args.scenario == 'resize':
             scenario_resize(fx, args.out)
+        elif args.scenario == 'shader':
+            scenario_shader(fx, args.out)
+        elif args.scenario == 'race':
+            scenario_race(fx, args.out)
+        elif args.scenario == 'touch_host':
+            scenario_touch_host(fx, args.out, input_log)
     except Exception as e:
         check(False, 'scenario raised: %r' % e)
     finally:
@@ -864,7 +1061,8 @@ def main():
         except Exception:
             pass
         adb('shell', 'am', 'force-stop', PKG, check_rc=False)
-        fx.close()
+        if fx is not None:
+            fx.close()
     n, f = len(checks), checks.count(False)
     print('RESULT: %s  (%d checks, %d failed)' % ('ALL PASS' if f == 0 else 'FAILED', n, f), flush=True)
     sys.exit(0 if f == 0 and n > 0 else 1)
