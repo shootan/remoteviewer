@@ -248,6 +248,390 @@ void TestUnresolvableCandidateDoesNotSinkTheOthers() {
   directory.Stop();
 }
 
+// hello-delay-fix r1: a candidate that receives and never answers -- it counts the punches, which is
+// the number of rounds PunchAny sent.
+class SilentCounter {
+ public:
+  bool Start() {
+    sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+    int len = sizeof(addr);
+    getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len);
+    port_ = ntohs(addr.sin_port);
+    DWORD timeout = 50;
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    running_ = true;
+    thread_ = std::thread([this]() {
+      char buffer[512];
+      while (running_.load()) {
+        if (recv(sock_, buffer, sizeof(buffer), 0) > 0) ++count_;
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    running_ = false;
+    if (thread_.joinable()) thread_.join();
+    if (sock_ != INVALID_SOCKET) closesocket(sock_);
+    sock_ = INVALID_SOCKET;
+  }
+  uint16_t port() const { return port_; }
+  int count() const { return count_.load(); }
+
+ private:
+  SOCKET sock_ = INVALID_SOCKET;
+  uint16_t port_ = 0;
+  std::atomic<int> count_{0};
+  std::atomic<bool> running_{false};
+  std::thread thread_;
+};
+
+// Answers punches only after `delayMs` from Start().
+class LateResponder {
+ public:
+  bool Start(int delayMs) {
+    sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+    int len = sizeof(addr);
+    getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len);
+    port_ = ntohs(addr.sin_port);
+    DWORD timeout = 20;
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    running_ = true;
+    const auto opensAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+    thread_ = std::thread([this, opensAt]() {
+      char buffer[512];
+      while (running_.load()) {
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int n = recvfrom(sock_, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+        if (n <= 0 || std::chrono::steady_clock::now() < opensAt) continue;
+        UdpHelloPacket reply{};
+        reply.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+        (void)sendto(sock_, reinterpret_cast<const char*>(&reply), sizeof(reply), 0,
+                     reinterpret_cast<const sockaddr*>(&from), fromLen);
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    running_ = false;
+    if (thread_.joinable()) thread_.join();
+    if (sock_ != INVALID_SOCKET) closesocket(sock_);
+    sock_ = INVALID_SOCKET;
+  }
+  uint16_t port() const { return port_; }
+
+ private:
+  SOCKET sock_ = INVALID_SOCKET;
+  uint16_t port_ = 0;
+  std::atomic<bool> running_{false};
+  std::thread thread_;
+};
+
+long long ms_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// The field case: two candidates nobody listens on (each punch to them earns an ICMP reset that comes
+// back as an immediate receive error), one that never answers. The rounds must keep the 150 ms clock.
+void TestImmediateErrorsDoNotSpeedUpTheRounds() {
+  std::printf("errors that come back at once do not make the rounds faster (150 ms cadence)\n");
+  ObserveStub directory;
+  SilentCounter silent;
+  if (!directory.Start() || !silent.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", silent.port(), "public"},
+  };
+  RendezvousCandidate chosen;
+  const auto start = std::chrono::steady_clock::now();
+  const bool answered = rendezvous.PunchAny(candidates, 1500, &chosen, &error);
+  const long long elapsed = ms_since(start);
+  Sleep(100);
+  const int rounds = silent.count();
+  expect(!answered, "nobody answered (" + error + ")");
+  expect(elapsed >= 1400 && elapsed < 1900, "the budget ended it: " + std::to_string(elapsed) + " ms of 1500");
+  // 1500 / 150 = 10 rounds, plus the first at 0 and one at the edge.
+  expect(rounds >= 8 && rounds <= 12, "rounds sent in 1.5 s: " + std::to_string(rounds) + " (150 ms cadence: 10-11)");
+  rendezvous.Close();
+  silent.Stop();
+  directory.Stop();
+}
+
+// Datagrams that are not from a candidate -- and empty ones -- keep arriving; they neither end the wait
+// nor start a round.
+void TestUnrelatedDatagramsDoNotSpeedUpTheRounds() {
+  std::printf("a stream of unrelated and empty datagrams does not make the rounds faster\n");
+  ObserveStub directory;
+  SilentCounter silent;
+  if (!directory.Start() || !silent.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const uint16_t mine = static_cast<uint16_t>(std::stoi(observed.substr(observed.find(':') + 1)));
+  std::atomic<bool> flooding{true};
+  std::thread flood([&] {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    to.sin_port = htons(mine);
+    UdpHelloPacket junk{};
+    junk.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+    bool empty = false;
+    while (flooding.load()) {
+      (void)sendto(s, reinterpret_cast<const char*>(&junk), empty ? 0 : sizeof(junk), 0,
+                   reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+      empty = !empty;
+      Sleep(1);
+    }
+    closesocket(s);
+  });
+  const std::vector<RendezvousCandidate> candidates = {{"127.0.0.1", silent.port(), "public"}};
+  RendezvousCandidate chosen;
+  const auto start = std::chrono::steady_clock::now();
+  const bool answered = rendezvous.PunchAny(candidates, 1500, &chosen, &error);
+  const long long elapsed = ms_since(start);
+  flooding = false;
+  flood.join();
+  Sleep(100);
+  const int rounds = silent.count();
+  expect(!answered, "a stranger is not a candidate: nobody answered (" + error + ")");
+  expect(elapsed >= 1400 && elapsed < 1900, "the budget ended it: " + std::to_string(elapsed) + " ms");
+  expect(rounds >= 8 && rounds <= 12, "rounds sent in 1.5 s: " + std::to_string(rounds) + " (10-11)");
+  rendezvous.Close();
+  silent.Stop();
+  directory.Stop();
+}
+
+// A candidate that starts answering later is taken as soon as it does -- not at the end of a round.
+void TestALateAnswerIsTakenAtOnce() {
+  std::printf("an answer that comes later is taken when it comes, with errors around it\n");
+  ObserveStub directory;
+  LateResponder host;
+  if (!directory.Start() || !host.Start(500)) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", host.port(), "public"},
+  };
+  RendezvousCandidate chosen;
+  const auto start = std::chrono::steady_clock::now();
+  const bool answered = rendezvous.PunchAny(candidates, 4000, &chosen, &error);
+  const long long elapsed = ms_since(start);
+  expect(answered && chosen.port == host.port(), "the late candidate won (" + error + ")");
+  // It opens at 500 ms; the next round after that reaches it within 150 ms and its reply is read at once.
+  expect(elapsed >= 450 && elapsed < 800, "taken at " + std::to_string(elapsed) + " ms (opens at 500)");
+  rendezvous.Close();
+  host.Stop();
+  directory.Stop();
+}
+
+void TestStopEndsItPromptly() {
+  std::printf("a stop ends the punch promptly, errors or not\n");
+  ObserveStub directory;
+  SilentCounter silent;
+  if (!directory.Start() || !silent.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", silent.port(), "public"},
+  };
+  std::atomic<bool> stop{false};
+  std::thread stopper([&] {
+    Sleep(300);
+    stop = true;
+  });
+  RendezvousCandidate chosen;
+  const auto start = std::chrono::steady_clock::now();
+  const bool answered = rendezvous.PunchAny(candidates, 4000, &chosen, &error, &stop);
+  const long long elapsed = ms_since(start);
+  stopper.join();
+  expect(!answered && error == "cancelled", "reported as cancelled (" + error + ")");
+  expect(elapsed < 500, "within one interval of the stop: " + std::to_string(elapsed) + " ms (stop at 300)");
+  rendezvous.Close();
+  silent.Stop();
+  directory.Stop();
+}
+
+// ---- hello-delay-fix r2 (Codex N2): errors no loopback socket gives on demand, through the test seam ----
+// What the seam stands in for is the recvfrom call itself; everything around it is PunchAny's own.
+std::atomic<int> gInjectError{0};          // the error to report instead of receiving (0: receive for real)
+std::atomic<long long> gInjectUntilMs{0};  // ...until this steady-clock time (0: for good)
+std::atomic<int> gInjected{0};
+
+long long steady_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+int test_recv_hook(remote60::native_poc::SocketHandle s, char* buf, int len, sockaddr_in* from, int* fromLen,
+                   int* err) {
+  const long long until = gInjectUntilMs.load();
+  const int inject = gInjectError.load();
+  if (inject != 0 && (until == 0 || steady_ms() < until)) {
+    ++gInjected;
+    Sleep(1);  // an error comes back at once; this only keeps the test from spinning a core
+    *err = inject;
+    return -1;
+  }
+  int fl = *fromLen;
+  const int n = recvfrom(s, buf, len, 0, reinterpret_cast<sockaddr*>(from), &fl);
+  *fromLen = fl;
+  *err = n < 0 ? WSAGetLastError() : 0;
+  return n;
+}
+
+struct HookScope {
+  HookScope(int error, int forMs) {
+    gInjectError = error;
+    gInjectUntilMs = forMs > 0 ? steady_ms() + forMs : 0;
+    gInjected = 0;
+    remote60::native_poc::SetPunchRecvHookForTest(&test_recv_hook);
+  }
+  ~HookScope() {
+    remote60::native_poc::SetPunchRecvHookForTest(nullptr);
+    gInjectError = 0;
+  }
+};
+
+// One path's TTL expiry (WSAENETRESET on a UDP recvfrom) is about that path: the punch goes on, and the
+// candidate that does answer is taken -- not a fallback to the first-listed address.
+void TestTtlOnOnePathDoesNotEndThePunch() {
+  std::printf("a TTL expiry on one path does not end the punch: the answering candidate is still taken\n");
+  ObserveStub directory;
+  Responder host;
+  if (!directory.Start() || !host.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {
+      {"127.0.0.1", dead_port(), "private"},
+      {"127.0.0.1", host.port(), "public"},
+  };
+  RendezvousCandidate chosen;
+  bool answered = false;
+  long long elapsed = 0;
+  {
+    HookScope ttl(WSAENETRESET, 200);  // the first 200 ms of receives report the TTL expiry
+    const auto start = std::chrono::steady_clock::now();
+    answered = rendezvous.PunchAny(candidates, 3000, &chosen, &error);
+    elapsed = ms_since(start);
+  }
+  expect(gInjected.load() > 0, "the TTL report was actually delivered (" + std::to_string(gInjected.load()) + " times)");
+  expect(answered && chosen.port == host.port(), "the answering candidate was taken (" + error + ")");
+  expect(elapsed >= 150 && elapsed < 700, "after the TTL reports, within a round: " + std::to_string(elapsed) + " ms");
+  rendezvous.Close();
+  host.Stop();
+  directory.Stop();
+}
+
+// A socket that is not a socket any more ends the punch at once, named.
+void TestARealSocketFailureEndsIt() {
+  std::printf("a failure of the socket itself (WSAENOTSOCK) ends the punch at once\n");
+  ObserveStub directory;
+  Responder host;
+  if (!directory.Start() || !host.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {{"127.0.0.1", host.port(), "public"}};
+  RendezvousCandidate chosen;
+  bool answered = true;
+  long long elapsed = 0;
+  {
+    HookScope broken(WSAENOTSOCK, 0);
+    const auto start = std::chrono::steady_clock::now();
+    answered = rendezvous.PunchAny(candidates, 3000, &chosen, &error);
+    elapsed = ms_since(start);
+  }
+  expect(!answered && error.find("punch receive failed") != std::string::npos &&
+             error.find(std::to_string(WSAENOTSOCK)) != std::string::npos,
+         "reported as a receive failure with its code (" + error + ")");
+  expect(elapsed < 100, "at once, not after the budget: " + std::to_string(elapsed) + " ms");
+  rendezvous.Close();
+  host.Stop();
+  directory.Stop();
+}
+
+// TTL reports that never stop: still one round per 150 ms, the budget and the stop still end it.
+void TestContinuousTtlKeepsTheCadence() {
+  std::printf("TTL reports that keep coming do not speed up the rounds, and the budget/stop still hold\n");
+  ObserveStub directory;
+  SilentCounter silent;
+  if (!directory.Start() || !silent.Start()) {
+    expect(false, "test rig failed to start");
+    return;
+  }
+  DirectoryRendezvous rendezvous;
+  std::string observed, error;
+  rendezvous.Observe("127.0.0.1", directory.port(), "token", &observed, &error);
+  const std::vector<RendezvousCandidate> candidates = {{"127.0.0.1", silent.port(), "public"}};
+  RendezvousCandidate chosen;
+  {
+    HookScope ttl(WSAENETRESET, 0);
+    const auto start = std::chrono::steady_clock::now();
+    const bool answered = rendezvous.PunchAny(candidates, 1500, &chosen, &error);
+    const long long elapsed = ms_since(start);
+    Sleep(100);
+    const int rounds = silent.count();
+    expect(!answered && error == "no candidate answered", "the budget ended it (" + error + ")");
+    expect(elapsed >= 1400 && elapsed < 1900, "on time: " + std::to_string(elapsed) + " ms of 1500");
+    expect(rounds >= 8 && rounds <= 12, "rounds in 1.5 s: " + std::to_string(rounds) + " (10-11)");
+  }
+  {
+    HookScope ttl(WSAENETRESET, 0);
+    std::atomic<bool> stop{false};
+    std::thread stopper([&] {
+      Sleep(300);
+      stop = true;
+    });
+    const auto start = std::chrono::steady_clock::now();
+    const bool answered = rendezvous.PunchAny(candidates, 4000, &chosen, &error, &stop);
+    const long long elapsed = ms_since(start);
+    stopper.join();
+    expect(!answered && error == "cancelled" && elapsed < 500,
+           "a stop during them ends it: " + std::to_string(elapsed) + " ms (" + error + ")");
+  }
+  rendezvous.Close();
+  silent.Stop();
+  directory.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -260,6 +644,13 @@ int main() {
   TestBlockedFirstCandidateDoesNotDelayTheWorkingOne();
   TestAllBlockedReportsFailureWithoutHanging();
   TestUnresolvableCandidateDoesNotSinkTheOthers();
+  TestImmediateErrorsDoNotSpeedUpTheRounds();
+  TestUnrelatedDatagramsDoNotSpeedUpTheRounds();
+  TestALateAnswerIsTakenAtOnce();
+  TestStopEndsItPromptly();
+  TestTtlOnOnePathDoesNotEndThePunch();
+  TestARealSocketFailureEndsIt();
+  TestContinuousTtlKeepsTheCadence();
 
   if (gFailures != 0) {
     std::printf("punch_any_test: FAIL (%d)\n", gFailures);

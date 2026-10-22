@@ -13361,3 +13361,53 @@ Next
 - ① monitor_as_desktop 변이: 이전 변이는 restore 의 guard 를 그대로 두고 DecideRestore 만 바꿔 nullptr 문자열로 **뷰어가 충돌**(0xC0000005)했다 — 잘못된 복원의 검출이 아니었다(r3 보고의 "변이 FAIL" 정정). 이제 guard 와 결정을 함께 우회해 실제로 desktop 을 자동 선택·present 하고, E2 는 두 결과(picker 사유 / desktop 복원)를 이름으로 구분해 실패한다.
 - 사슬(출하 GNLinkViewer): monitor 44/0(목록 요청 1회·목록만으로 변화 0·툴바 전환→monitor 보고→wedge→새 뷰어 picker monitor_not_restored·자동 선택 0→수동 선택), nomonitors 29/0(요청 0·전환 버튼 없음), desktop 38/0. 변이 38 PASS + 1 FAIL("WRONG: it restored the desktop on its own"), 프로세스 생존.
 - 제품/테스트/문서: 제품(viewer_control_client), 시험 seam(host_window_enum/host_control_session #ifdef), 테스트(사슬·runner), 문서(이 항목).
+
+### 2026-10-22 hello-delay-fix r1 — 연결 인사(hello)가 쌓인 punch 응답·ICMP 오류 뒤에 수 초 묻히던 결함 보수 (PC 0.2.162 후보용 별도 커밋)
+- 증상: 호스트가 살아 있는 채 뷰어가 다시 붙을 때(검증용은 첫 연결에서도 관찰) hello 가 3~12 s 걸렸다. 10 s 를 넘으면 호스트의 control 읽기 마감으로 세션이 닫혀 window-list timeout → exit 43.
+- 원인(조사 t-uu1zshde, `report_reconnect_hello_delay_r1.md`, Codex `codex_reconnect_hello_delay_r1.md`):
+  - PunchAny 는 recvfrom 이 즉시 실패하면(Windows: 도달 불가 후보로 보낸 punch 의 ICMP 가 WSAECONNRESET 으로 돌아옴) 바로 다음 라운드를 보내 스스로 폭주했다(수 ms 에 ~290 라운드).
+  - 그 결과 남은 punch 응답·오류를, hello 는 한 라운드에 하나씩 읽고 50 ms 쉬어서 이미 와 있던 ack 를 늦게 읽었다.
+  - 5063cd9·4db9f17 동일 코드, 기준판에서 재현.
+- 수정(7646eef):
+  - ① PunchAny 는 monotonic 150 ms 시계로만 라운드를 보낸다. 후보 응답은 즉시 채택하고, 라운드당 수신 상한·대기는 단계적으로, 정지는 매 송신·대기 전에 확인한다. 회복 불가 소켓 오류는 즉시 실패로 끝낸다.
+  - ② hello 한 라운드는 slice 가 끝날 때까지 큐를 계속 읽는다(라운드당 수신 상한 512, stop·deadline 확인). 다음 Hello 는 원래 시계(slice 뒤 retrySleepMs)를 따르므로 송신량은 늘지 않는다.
+  - ACK 판정·DirectoryAuth·budget·재시도 정책·호스트 punch 응답 예산은 불변. 사전 flush·SIO_UDP_CONNRESET 은 하지 않았다.
+  - 보조 지표: 로그에 `recvErrors=` 추가(숫자 요약만).
+- 시험(4d8e4a8):
+  - hello_backlog_test 18/18: 25 punch 응답 + ICMP 리셋 100 이 큐에 있어도 ack 를 0 ms·1 라운드에 읽는다(뷰어·Android 옵션 모두). ack 없는 연속 유입에서도 budget·stop·라운드 시계를 지키고, 잘못된 ack 는 계속 거부한다.
+  - punch_any_test: 즉시 오류·무관/빈 datagram 에서도 1.5 s 에 10 라운드, 늦은 응답은 626 ms(500 ms 에 열림), stop 은 321 ms.
+  - 변이: H1(150 ms 시계 제거) → 397·192 라운드 FAIL. H2(구식: ack 아니면 라운드 종료) → 1.55 s FAIL, Android 26·66 hello FAIL. H3(ICMP 오류에 라운드 종료) → 6.28 s FAIL. 원복 PASS.
+  - 영향 시험 29종 exit 0(이 두 파일을 쓰는 단위·loopback·host e2e).
+- 실 재현(Host 생존 + 뷰어 재생성, loopback, 시험 seam 만 이식한 before=5063cd9 / after=4d8e4a8, 진단 로그 없음):
+  - 11 s 유지 재연결: before 11회 중 3.3 s 1회(나머지 0.32–0.81 s), after 11회 모두 0.27–0.55 s.
+  - 4 s 유지: before 재연결 7회 0.56–0.93 s(첫 연결 1회가 6.0 s), after 첫 연결 포함 8회 모두 0.26–0.54 s.
+  - 첫 연결(각 배치 1번): before 0.56 s·6.0 s, after 0.54 s·0.54 s.
+  - before 의 느린 회차는 모두 PunchAny ms=2~4(폭주)였다. after 는 같은 상황이 ms≈152–160(한 간격 대기)로 바뀌었고 recvErrors 0·badAcks 1–2 였다.
+- 실제 사슬(DW 4db9f17 + 7646eef, scratch inv-hello-chain): presentfail 2회·desktop 1회 모두 exit 0 ALL PASS. 첫 재연결에서 hello 0.27–0.54 s(badAcks 1–2, recvErrors 0) → `result=restored target=desktop`. 첫 연결 hello 0.53–0.54 s.
+- Android: native 공유 코어(PunchAny·udp_hello_handshake)에 들어간다. externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(retrySleepMs 0, slice 250)의 backlog·연속 유입 시험은 Windows 의 같은 코드로 통과. 기기 실행·POSIX 오류 의미(ECONNREFUSED 를 일시 오류로 취급)는 미검증. APK 버전·배포 무변경.
+- 제품/테스트/문서: 제품 7646eef · 테스트 4d8e4a8 · 문서(이 항목).
+- **r2 (Codex 83c3ac5 NEEDS_CHANGES, `codex_hello_delay_fix_r1.md` N1·N2)**:
+  - N1: hello 의 수신 batch(512)가 slice 보다 먼저 차면 라운드가 일찍 끝나, 다음 Hello 가 당겨졌다(Android pause 0 이면 즉시). 이제 batch 가 차면 10 ms 쉬고 그 라운드의 원래 끝까지 계속 읽는다. 상한 확대·timeout 추가는 하지 않았다. `fullBatches` 지표를 추가했고 hpp 주석을 고쳤다.
+  - N2: PunchAny 가 세션용 분류를 그대로 써서 'terminal' 이면 즉시 끝냈다. 이제 PunchAny 안에서 따로 판단한다.
+    - 계속: UDP recvfrom 이 문서화한 경로별 보고(WSAECONNRESET, WSAENETRESET=TTL, WSAEMSGSIZE, POSIX ECONNREFUSED). 150 ms 박자를 지킨다.
+    - 종료: 소켓 자체 실패(WSAENOTSOCK 등).
+    - 광역 classify_udp_recv 는 불변.
+  - 시험 seam(수신 대체)과 변이 매크로 2개는 시험 대상에서만 컴파일된다.
+- r2 시험(bcb6a46·3e625d8):
+  - hello_backlog 28/28:
+    - 3000+ punch 를 계속 채워도 full batch 52–65회에 Hello 4회(PC·Android).
+    - 2000개 뒤의 ack 를 1라운드 51 ms 에 읽는다.
+    - stop 310 ms.
+  - punch_any:
+    - 한 경로 TTL 보고 13회 뒤 응답 후보를 204 ms 에 채택.
+    - WSAENOTSOCK 은 즉시 `punch receive failed (error 10038)`.
+    - TTL 이 계속 와도 1.5 s 10 라운드, stop 329 ms.
+  - 변이 대상(검증용이 제품 소스 수정 없이 실행):
+    - `remote60_hello_backlog_mutant_batch_test` 3 FAIL(PC 16·Android 301 Hello, 2000 뒤 ack 4라운드).
+    - `remote60_punch_any_mutant_netreset_test` 6 FAIL(첫 TTL 에 14 ms 포기).
+  - 영향 시험(r2): hello_backlog·punch_any·hello_stats·connect_op_gate·shared_core·udp_control_e2e·control_resume_e2e(60)·android_session_reboot(17)·host_punch_reply(102) exit 0. gate 9/9·self 16.
+  - directory_retry 1/133 FAIL(`address observation timed out`): 기존 간헐 건, 작업용2 별도 조사.
+  - viewer_udp_recovery 3 FAIL(`stream flowed` 처리량 기준, :1081/:1098/:1146): 후보와 같은 시각의 기준판 5063cd9 도 2/2 같은 세 줄 FAIL(r1 시점 후보는 PASS). **원인 미확정 — ledger 후보.** 처음 적었던 'qemu 부하' 귀속은 철회한다(검증용 측정 당시 qemu 0.15 core/s·전체 CPU 3–4% 로 뒷받침되지 않음). directory_retry 간헐과 원인을 합치지 않는다.
+- r2 실 재현: 11 s 유지 재연결 8회 + 첫 연결 1회 모두 0.27–0.54 s. 실제 사슬 presentfail·desktop 모두 ALL PASS, 첫 재연결 hello 0.27/0.54 s → restored target=desktop.
+- Android(r2): externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(250/0)의 cap 반례 PASS, 변이 301 Hello FAIL. 기기는 미검증.
+- 제품/테스트/문서: 제품 bcb6a46 · 테스트 3e625d8 · 문서(이 줄들).

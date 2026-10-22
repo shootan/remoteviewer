@@ -685,6 +685,7 @@ int connect_media_socket(ViewerContext& ctx) {
         &helloStats);
     std::cout << "[native-video-client][attempt] hello ok=" << (handshakeOk ? 1 : 0)
               << " attempts=" << helloStats.attempts << " badAcks=" << helloStats.badAcks
+              << " recvErrors=" << helloStats.recvErrors
               << " ms=" << helloStats.elapsedMs
               << " budgetMs=" << hello.budgetMs
               << " budgetSpent=" << (helloStats.budgetSpent ? 1 : 0)

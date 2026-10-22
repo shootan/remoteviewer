@@ -99,6 +99,11 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
 struct UdpHelloStats {
   uint32_t attempts = 0;     // hellos actually sent
   uint32_t badAcks = 0;      // answers that came back and were not the ack we needed
+  // hello-delay-fix r1: receives that failed for one item only -- a truncated datagram, or (Windows)
+  // the ICMP reset an earlier send earned. Not answers; counted apart from badAcks.
+  uint32_t recvErrors = 0;
+  // r2: how many times a round read a full batch before its slice ended (and paused, not re-sent).
+  uint32_t fullBatches = 0;
   uint64_t elapsedMs = 0;    // from the first send to the ack, or to the budget running out
   bool budgetSpent = false;  // true when the deadline ended it rather than an ack or a stop
 };
@@ -106,8 +111,9 @@ struct UdpHelloStats {
 struct UdpHelloOptions {
   std::string authToken;      // capability from /api/connect; empty on the LAN
   uint32_t budgetMs = 800;    // how long to keep re-sending Hello
-  uint32_t sliceMaxMs = 250;  // longest single wait for an ack
-  uint32_t retrySleepMs = 0;  // pause after a failed send or a bad ack; 0 = a failed send is fatal
+  uint32_t sliceMaxMs = 250;  // one round: a Hello, then this long reading for the ack (hello-delay-fix)
+  uint32_t retrySleepMs = 0;  // pause after a round without the ack, or after a failed send; 0 = no
+                              // pause, and a failed send is fatal
   bool requestNack = false;   // advertise kUdpFeatureVideoNack in the Hello (video NACK.)
   // Advertise kUdpFeatureControlResume (item 8). The host offers it to everyone and acts on
   // it only for a client that asked, so a client that does not set this is never sent a

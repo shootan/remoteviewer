@@ -9,6 +9,14 @@
 
 namespace remote60::native_poc {
 
+namespace {
+// hello-delay-fix r1/r2: receives in one batch before a short pause -- the CPU bound on a round spent
+// reading a queue that keeps filling. A real backlog is ~25 punch replies plus the resets the punch left
+// (measured up to ~100). A full batch never ends the round: the round still ends at its slice (r2 N1).
+constexpr uint32_t kHelloReadsPerBatch = 512;
+constexpr uint32_t kHelloBatchPauseMs = 10;
+}  // namespace
+
 MessageType outbound_message_type(const ControlOutboundAction& action) {
   uint16_t t = 0;
   switch (action.kind) {
@@ -282,28 +290,66 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
       std::this_thread::sleep_for(std::chrono::milliseconds(options.retrySleepMs));
       continue;
     }
+    ++stats.attempts;
     // Wait at most one slice so a stop request or the deadline is noticed between tries.
     const uint64_t nowMs = now_ms();
     const uint64_t remainingMs = deadlineMs > nowMs ? deadlineMs - nowMs : 0;
     const uint32_t sliceMs = static_cast<uint32_t>(
         std::clamp<uint64_t>(remainingMs, 1, std::max<uint32_t>(1, options.sliceMaxMs)));
-    (void)set_recv_timeout(sock, sliceMs);
-    UdpHelloPacket ack{};
-    const int received = recv(sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
-    const bool validAck =
-        received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
-        ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
-        ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
-    const bool directoryAuthorized =
-        options.authToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
-    ++stats.attempts;
-    if (validAck && directoryAuthorized) {
-      if (error) error->clear();
-      if (outAckFeatures) *outAckFeatures = ack.features;
-      publish(false);
-      return true;
+    // hello-delay-fix r1: the whole slice is spent looking for the ack, not just the first thing that
+    // arrives. Before, one receive per Hello -- and a pause after anything that was not the ack --
+    // meant a socket holding queued punch replies and ICMP resets (left by the punch that preceded
+    // this) gave up one item per ~60 ms, with the host's ack waiting behind them for seconds
+    // (reconnect-hello-delay r1). The next Hello still goes out on the same clock as before (after the
+    // slice, then retrySleepMs); reading faster sends nothing more. Bounded by the slice and the stop;
+    // r2 (Codex N1): a full batch of reads does not end the round early either -- that would let a
+    // queue that refills fast enough pull the next Hello forward (at once, with Android's pause of 0).
+    // It pauses briefly and goes on reading until the round's own end.
+    const uint64_t roundEndMs = nowMs + sliceMs;
+    uint32_t batchReads = 0;
+    for (;;) {
+      const uint64_t t = now_ms();
+      if (t >= roundEndMs || stopped()) break;
+      if (batchReads >= kHelloReadsPerBatch) {
+        ++stats.fullBatches;
+#if defined(REMOTE60_HELLO_TEST_MUTANT_BATCH_ENDS_ROUND)
+        break;  // TEST BUILD ONLY (hello_backlog mutant target): the r1 shape this replaces
+#endif
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds((std::min<uint64_t>)(kHelloBatchPauseMs, roundEndMs - t)));
+        batchReads = 0;
+        continue;
+      }
+      ++batchReads;
+      (void)set_recv_timeout(sock, static_cast<uint32_t>(roundEndMs - t));
+      UdpHelloPacket ack{};
+      const int received = recv(sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
+      const int recvError = received < 0 ? socket_last_error() : 0;
+      // The same ack test as always: reading more of the queue never makes a wrong ack acceptable.
+      const bool validAck =
+          received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
+          ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
+          ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
+      const bool directoryAuthorized =
+          options.authToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
+      if (validAck && directoryAuthorized) {
+        if (error) error->clear();
+        if (outAckFeatures) *outAckFeatures = ack.features;
+        publish(false);
+        return true;
+      }
+      if (received > 0) {
+        ++stats.badAcks;
+        continue;  // a punch reply, a stray datagram or a wrong ack: the next one may be it
+      }
+      const UdpRecvClass cls = classify_udp_recv(received, recvError);
+      if (cls == UdpRecvClass::Empty) continue;
+      if (cls == UdpRecvClass::TruncatedDrop || cls == UdpRecvClass::ResetAdvisory) {
+        ++stats.recvErrors;  // one dropped datagram / one earlier ICMP: about that item only
+        continue;
+      }
+      break;  // the slice ran out (Retryable), or the socket failed: the round ends as it always did
     }
-    if (received > 0) ++stats.badAcks;
     if (options.retrySleepMs > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(options.retrySleepMs));
     }
