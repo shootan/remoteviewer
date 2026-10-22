@@ -3530,6 +3530,19 @@ add_executable(remote60_macro_shell_bridge_test
 )
 target_include_directories(remote60_macro_shell_bridge_test PRIVATE src)
 
+# hello-delay-fix r1: the product's Hello handshake against a socket already holding punch replies and
+# ICMP resets ahead of the ack (real loopback sockets).
+add_executable(remote60_hello_backlog_test
+  src/hello_backlog_test.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_hello_backlog_test PRIVATE src)
+target_link_libraries(remote60_hello_backlog_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_hello_backlog_test PRIVATE /utf-8)
+endif()
+
 add_executable(remote60_punch_any_test
   src/punch_any_test.cpp
   src/directory_rendezvous.cpp
