@@ -35,6 +35,7 @@ MessageType outbound_message_type(const ControlOutboundAction& action) {
     case ControlOutboundActionKind::InputText: t = action.inputText.header.type; break;
     case ControlOutboundActionKind::PhysicalKey: t = action.physicalKey.header.type; break;
     case ControlOutboundActionKind::UnlockChallengeRequest: t = action.unlockChallengeReq.header.type; break;
+    case ControlOutboundActionKind::LockCredRetryChallengeRequest: t = action.lockCredRetryReq.header.type; break;
     case ControlOutboundActionKind::UnlockSealedRequest: t = action.unlockSealed.header.type; break;
     case ControlOutboundActionKind::UnlockStatusRequest: t = action.unlockStatusReq.header.type; break;
     case ControlOutboundActionKind::ImeStateRequest: t = action.imeStateReq.header.type; break;
@@ -79,6 +80,8 @@ bool send_control_action(ControlLink& link, const ControlOutboundAction& action)
       return link.Write(&action.physicalKey, sizeof(action.physicalKey));
     case ControlOutboundActionKind::UnlockChallengeRequest:
       return link.Write(&action.unlockChallengeReq, sizeof(action.unlockChallengeReq));
+    case ControlOutboundActionKind::LockCredRetryChallengeRequest:
+      return link.Write(&action.lockCredRetryReq, sizeof(action.lockCredRetryReq));
     case ControlOutboundActionKind::UnlockSealedRequest:
       return link.Write(&action.unlockSealed, sizeof(action.unlockSealed));
     case ControlOutboundActionKind::UnlockStatusRequest:

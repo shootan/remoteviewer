@@ -875,6 +875,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           offered = gUnlockRelay.LockCredSupportNow() == remote60::native_poc::HostUnlockRelay::LockCredSupport::Supported;
         }
         if (offered) pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredV1;
+        // lk-ux-retry r1: and whether the same service can end this connection's own waiting credential on an
+        // explicit retry -- only then may a viewer send 89 (an older service: the viewer keeps "wait for it").
+        if (offered && gUnlockRelay.LockCredRetrySupported())
+          pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredRetryV1;
         if (offered != lockCredAdvertised) {
           lockCredAdvertised = offered;
           std::cout << "[native-video-host][lock-cred] advertised=" << (offered ? 1 : 0) << " lockKnown=" << own.lockKnown
@@ -976,6 +980,33 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       }
       std::cout << "[native-video-host][lock-cred] challenge requestId=" << req.requestId << " status=" << rsp.status
                 << "\n";
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    // lk-ux-retry r1: the same connection presses "Windows 로그인" again while its typed credential still waits.
+    if (type == MessageType::ControlLockCredRetryChallengeRequest &&
+        header.size == sizeof(remote60::native_poc::ControlLockCredRetryChallengeRequestMessage)) {
+      remote60::native_poc::ControlLockCredRetryChallengeRequestMessage retry{};
+      retry.header = header;
+      if (!link.Read(&retry.seq, sizeof(retry) - sizeof(MessageHeader))) break;
+      ControlUnlockChallengeRequestMessage req{};
+      req.header = header;
+      req.seq = retry.seq;
+      req.requestId = retry.requestId;
+      req.clientSendQpcUs = retry.clientSendQpcUs;
+      ControlUnlockChallengeMessage rsp{};
+      if (!gUnlockRelay.LockCredRetryChallengeSync(req, retry.supersedesRequestId, unlockCookie, &rsp)) {
+        rsp = ControlUnlockChallengeMessage{};
+        rsp.requestId = req.requestId;
+        rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
+        rsp.reserved = remote60::native_poc::kUnlockPurposeLockCred;
+      }
+      std::cout << "[native-video-host][lock-cred] retry challenge requestId=" << req.requestId
+                << " supersedes=" << retry.supersedesRequestId << " status=" << rsp.status << "\n";
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));

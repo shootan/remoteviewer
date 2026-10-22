@@ -816,7 +816,7 @@ void ControlClient::Run() {
       const bool sameConnection = ctx.session.preloginCredRunGen.load(std::memory_order_acquire) ==
                                   ctx.session.controlRunGen.load(std::memory_order_acquire);
       const auto nowRole = remote60::native_poc::DecideLogonScreenRole(ctx.session.hostCaptureFlags.load(std::memory_order_relaxed));
-      const bool stillThere =
+      bool stillThere =
           sameConnection && ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
           ((askedRole == kLoginRolePrelogin && nowRole == remote60::native_poc::LogonScreenRole::Prelogin) ||
            (askedRole == kLoginRoleLockScreen && nowRole == remote60::native_poc::LogonScreenRole::LockScreen));
@@ -825,9 +825,28 @@ void ControlClient::Run() {
       bool waiting = false;
       uint32_t lockRequestId = 0;
       std::string status = "not sent: the host is no longer at the screen it was asked for";
+      // lk-ux-retry r1: a press while this connection's typed password still waits is the explicit retry -- sent as
+      // 89 naming the waiting request, which the host ends first. Only where the host says it can (an older one:
+      // the earlier one is still waited for and nothing is sent, as before).
+      const bool retryAllowed = (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) &
+                                 remote60::native_poc::kCaptureFlagLockCredRetryV1) != 0;
+      const uint32_t supersedes = askedRole == kLoginRoleLockScreen ? lockCredPollRequestId : 0;
+      if (supersedes != 0 && !retryAllowed) {
+        stillThere = false;
+        stage = kLoginPending;
+        status = "not sent: the earlier password still waits and this host cannot end that wait";
+      }
       if (!pw.empty() && stillThere) {
         if (askedRole == kLoginRoleLockScreen) {
-          (void)run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status);
+          (void)run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes);
+          if (supersedes != 0 && stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SupersedeRefused)) {
+            // The earlier wait ended (or had ended): it is followed no more -- its late answers cannot reach the
+            // new attempt (they carry its request id; the host also closed its transaction).
+            std::cout << "[native-video-client][lock-cred] requestId=" << supersedes << " superseded by requestId="
+                      << lockRequestId << "\n";
+            lockCredPollRequestId = 0;
+            ctx.session.lockCredPending.store(false, std::memory_order_release);
+          }
         } else {
           (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
         }

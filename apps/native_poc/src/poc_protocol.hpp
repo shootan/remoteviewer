@@ -118,6 +118,12 @@ enum class MessageType : uint16_t {
   // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
   // Gated on kCaptureFlagLockCredV1; an old host never sees it.
   ControlLockCredChallengeRequest = 88,
+  // lk-ux-retry r1 (number PROPOSED, verifier to confirm): the SAME connection presses "Windows 로그인" again while
+  // its typed lock-screen credential still waits for an unlock. ControlLockCredRetryChallengeRequestMessage: the
+  // new requestId and the one it supersedes. The host ends that wait in the service (only that connection's,
+  // only that request) and only then asks for the new challenge -- one serialized step; the answer is 41 as for 88.
+  // Gated on kCaptureFlagLockCredRetryV1; an old host never sees it.
+  ControlLockCredRetryChallengeRequest = 89,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -342,6 +348,10 @@ constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
 // for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
 // different role: it never turns on the pre-login control allowlist.
 constexpr uint32_t kCaptureFlagLockCredV1 = 0x40000u;
+// lk-ux-retry r1 (PROPOSED): the host and its service can end this connection's own typed-and-waiting lock-screen
+// credential on an explicit retry (ControlLockCredRetryChallengeRequest 89). Without it a viewer keeps saying
+// "wait for the earlier one" -- it never pretends an older service replaced anything.
+constexpr uint32_t kCaptureFlagLockCredRetryV1 = 0x80000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
@@ -881,6 +891,10 @@ enum class UnlockStage : uint16_t {
   // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
   // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
   Busy = 16,
+  // lk-ux-retry r1 (numbers PROPOSED, verifier to confirm):
+  Superseded = 17,       // this typed credential's wait was ended by the same connection's explicit retry.
+                         // GNLink stopped waiting; Windows' own handling of what was typed is not undone.
+  SupersedeRefused = 18, // the earlier wait could not be confirmed ended: the retry sent nothing
 };
 
 // Which sealed purpose a challenge (41) was issued for, in its `reserved` field (lockscreen-cred r1).
@@ -897,6 +911,17 @@ struct ControlUnlockChallengeRequestMessage {
   uint64_t clientSendQpcUs = 0;
 };
 static_assert(sizeof(ControlUnlockChallengeRequestMessage) == 24, "unlock challenge-req wire drift");
+
+// viewer -> host (89, lk-ux-retry r1): a lock-screen challenge that replaces this connection's own waiting one.
+struct ControlLockCredRetryChallengeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;            // the new attempt
+  uint32_t supersedesRequestId = 0;  // the typed attempt still waiting for its unlock
+  uint32_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlLockCredRetryChallengeRequestMessage) == 32, "lock-cred retry-req wire drift");
 
 // host -> client: the one-shot challenge and every binding field (mirrors sealed_unlock::UnlockContext).
 struct ControlUnlockChallengeMessage {

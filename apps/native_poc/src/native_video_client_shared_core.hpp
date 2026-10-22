@@ -230,6 +230,7 @@ enum class ControlOutboundActionKind : uint8_t {
   ClientBandwidth,  // C0 stage 1, no reply
   RebootRequest,    // prelogin-service r3: ControlRebootRequest (84), expects ControlRebootReply (85)
   PreloginControl,  // prelogin-ui r9 R5: ControlPreloginControl (83), expects ControlPreloginStatus (82)
+  LockCredRetryChallengeRequest,  // lk-ux-retry r1: ControlLockCredRetryChallengeRequest (89), expects 41
 };
 
 struct ControlOutboundAction {
@@ -251,6 +252,7 @@ struct ControlOutboundAction {
   ControlInputTextMessage inputText{};
   ControlPhysicalKeyMessage physicalKey{};
   ControlUnlockChallengeRequestMessage unlockChallengeReq{};
+  ControlLockCredRetryChallengeRequestMessage lockCredRetryReq{};  // lk-ux-retry r1
   ControlUnlockSealedRequestMessage unlockSealed{};
   ControlUnlockStatusRequestMessage unlockStatusReq{};
   ControlImeStateRequestMessage imeStateReq{};

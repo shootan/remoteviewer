@@ -329,6 +329,8 @@ const char* stage_name(uint16_t stage) {
     case remote60::native_poc::UnlockStage::DecryptFailed: return "decrypt-failed";
     case remote60::native_poc::UnlockStage::Timeout: return "timeout";
     case remote60::native_poc::UnlockStage::Busy: return "busy";
+    case remote60::native_poc::UnlockStage::Superseded: return "superseded";
+    case remote60::native_poc::UnlockStage::SupersedeRefused: return "supersede-refused";
     default: return "error";
   }
 }
@@ -364,7 +366,7 @@ bool poll_status(remote60::native_poc::ControlLink& link, uint32_t requestId,
 // caller follows with poll_status between other work. *requestIdOut: this exchange's requestId.
 bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, SealAs as,
                      std::string* status, remote60::native_poc::ControlUnlockStatusResultMessage* terminal,
-                     uint32_t* requestIdOut = nullptr) {
+                     uint32_t* requestIdOut = nullptr, uint32_t supersedesRequestId = 0) {
   using namespace remote60::native_poc;
   const std::string what = as == SealAs::Prelogin ? "login" : as == SealAs::LockCred ? "lock-screen login" : "unlock";
   auto set_status = [&](const std::string& s) { if (status) *status = s; };
@@ -383,6 +385,15 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
       as == SealAs::LockCred ? MessageType::ControlLockCredChallengeRequest : MessageType::ControlUnlockChallengeRequest);
   a.unlockChallengeReq.header.size = static_cast<uint16_t>(sizeof(a.unlockChallengeReq));
   a.unlockChallengeReq.requestId = requestId;
+  if (as == SealAs::LockCred && supersedesRequestId != 0) {
+    // lk-ux-retry r1: the explicit retry -- the host ends this connection's own waiting request first (89).
+    a.kind = ControlOutboundActionKind::LockCredRetryChallengeRequest;
+    a.lockCredRetryReq.header.magic = kMagic;
+    a.lockCredRetryReq.header.type = static_cast<uint16_t>(MessageType::ControlLockCredRetryChallengeRequest);
+    a.lockCredRetryReq.header.size = static_cast<uint16_t>(sizeof(a.lockCredRetryReq));
+    a.lockCredRetryReq.requestId = requestId;
+    a.lockCredRetryReq.supersedesRequestId = supersedesRequestId;
+  }
   TcpControlResponse r{};
   if (!execute_control_action(link, a, &r) || r.kind != TcpControlResponseKind::UnlockChallenge) {
     set_status("no response from host");
@@ -529,10 +540,11 @@ bool run_prelogin_cred_exchange(remote60::native_poc::ControlLink& link, const s
 }
 
 bool run_lock_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
-                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status) {
+                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status,
+                            uint32_t supersedesRequestId) {
   remote60::native_poc::ControlUnlockStatusResultMessage res{};
   uint32_t rid = 0;
-  const bool done = sealed_exchange(link, password, SealAs::LockCred, status, &res, &rid);
+  const bool done = sealed_exchange(link, password, SealAs::LockCred, status, &res, &rid, supersedesRequestId);
   if (stage) *stage = done ? res.stage : 0;
   if (win32) *win32 = done ? res.win32Error : 0;
   if (waiting) *waiting = done && !res.terminal;
@@ -595,10 +607,21 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
   // kLoginRoleLockScreen (lockscreen-cred r1).
   switch (static_cast<UnlockStage>(stage)) {
     case UnlockStage::Injected:
+      // lk-ux-retry r1 (Codex section 2.4): a wrong password brings up Windows' own message on the remote screen -- that one
+      // is the user's to close; GNLink presses nothing there.
       return L"원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.\n"
-             L"이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)";
+             L"이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)\n"
+             L"비밀번호가 틀려 원격 화면에 Windows 메시지가 뜨면, 원격 화면에서 그 메시지를 닫은 뒤 "
+             L"'Windows 로그인'을 다시 누르세요.";
     case UnlockStage::SessionUnlocked:
       return L"원격 PC의 잠금이 해제되었습니다.";
+    case UnlockStage::Superseded:
+      // lk-ux-retry r1: the earlier typed password's wait, ended by this connection's own retry (not shown normally:
+      // the new attempt's result follows).
+      return L"앞서 입력한 비밀번호의 결과는 더 기다리지 않습니다. 새로 입력한 비밀번호로 진행합니다.";
+    case UnlockStage::SupersedeRefused:
+      return L"앞서 입력한 비밀번호의 대기를 끝내지 못해 이번 비밀번호는 보내지 않았습니다.\n"
+             L"원격 화면을 확인한 뒤 잠시 후 다시 누르세요.";
     case UnlockStage::UnlockUnconfirmed:
       return L"비밀번호는 입력했지만 2분 안에 잠금 해제가 확인되지 않았습니다.\n"
              L"Enter 를 눌렀는지, 비밀번호가 맞는지 원격 화면에서 확인하세요.";

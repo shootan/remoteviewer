@@ -92,8 +92,10 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
 // The lock-screen exchange (88 -> 41 with the LockCred purpose -> 42 -> 43 -> 44/45). True when the host
 // answered: *stage terminal, or Injected with *waiting -- typed, now waiting for the unlock, which the
 // caller follows with poll_lock_cred_status (one 44 each, between other work). *requestId is the job's.
+// lk-ux-retry r1: `supersedesRequestId` != 0 = an explicit retry while that typed request still waits (89).
 bool run_lock_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
-                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status);
+                            uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status,
+                            uint32_t supersedesRequestId = 0);
 bool poll_lock_cred_status(remote60::native_poc::ControlLink& link, uint32_t requestId, uint16_t* stage, bool* terminal,
                            uint32_t* win32);
 // The disconnected-session unlock with its outcome for the result window (Codex contract 2: the user sees

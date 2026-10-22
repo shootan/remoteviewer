@@ -356,7 +356,7 @@ void HostUnlockRelay::WorkerLoop() {
           statusAnswered_[key] = ++statusSeq_;
         } else {
           challengeResults_[key] =
-              busy_challenge(key.requestId, cmd.op == Op::LockCredChallenge ? kUnlockPurposeLockCred : kUnlockPurposeUnlock);
+              busy_challenge(key.requestId, (cmd.op == Op::LockCredChallenge || cmd.op == Op::LockCredRetry) ? kUnlockPurposeLockCred : kUnlockPurposeUnlock);
         }
       }
       if (cmd.op == Op::Sealed) SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
@@ -397,11 +397,11 @@ void HostUnlockRelay::WorkerLoop() {
               failed_result(cmd.seal.requestId, why, connectBusy ? ERROR_BUSY : 0);
         }
         SecureZeroMemory(&cmd.seal_ipc, sizeof(cmd.seal_ipc));
-      } else if (cmd.op == Op::Challenge || cmd.op == Op::LockCredChallenge) {
+      } else if (cmd.op == Op::Challenge || cmd.op == Op::LockCredChallenge || cmd.op == Op::LockCredRetry) {
         ControlUnlockChallengeMessage m{};
         m.requestId = cmd.challenge.requestId;
         m.status = static_cast<uint16_t>(why);
-        m.reserved = cmd.op == Op::LockCredChallenge ? kUnlockPurposeLockCred : kUnlockPurposeUnlock;
+        m.reserved = (cmd.op == Op::LockCredChallenge || cmd.op == Op::LockCredRetry) ? kUnlockPurposeLockCred : kUnlockPurposeUnlock;
         if (live) challengeResults_[TxKey{cmd.cookie, cmd.challenge.requestId}] = m;
       } else if (cmd.op == Op::Capabilities) {
         capsInFlight_ = false;
@@ -422,6 +422,60 @@ void HostUnlockRelay::WorkerLoop() {
     }
 
     uint8_t buf[512];
+    if (cmd.op == Op::LockCredRetry) {
+      // lk-ux-retry r1 (Codex section 2): end THIS session's typed credential's wait first -- on the connection it lives
+      // on, by its request id -- and ask for the new challenge only once that is confirmed. Served here, on the
+      // pipe's one worker, so nothing of this session's can run in between.
+      const TxKey oldKey{cmd.cookie, cmd.supersedesRequestId};
+      bool cleared = true;
+      if (holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie && heldRequestId == cmd.supersedesRequestId) {
+        SecureUnlockQuery q{};
+        q.kind = static_cast<uint16_t>(SecureUnlockKind::LockCredSupersede);
+        q.requestId = cmd.supersedesRequestId;
+        q.clientSessionCookie = cmd.cookie;
+        SecureUnlockResult resp{};
+        const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), budget(shortDeadlineMs_));
+        if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
+        const bool valid = io == Io::Ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
+                           resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) &&
+                           resp.requestId == cmd.supersedesRequestId;
+        // Ended now (Superseded) or already ended on its own (unlocked / unconfirmed): either way it waits no more.
+        cleared = valid && resp.terminal != 0 && resp.stage != static_cast<uint16_t>(UnlockStage::RejectedPolicy);
+        if (!valid) io_failed();
+        std::lock_guard<std::mutex> lk(mu_);
+        auto old = liveTx_.find(oldKey);
+        if (cleared && old != liveTx_.end()) {
+          sealedResults_[oldKey] = to_control_result(resp);  // its final answer: the old poll ends with it
+          lockCredRequests_.erase(oldKey);                   // ...and is never asked about again
+        }
+        std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId << " supersedes="
+                  << cmd.supersedesRequestId << " cleared=" << (cleared ? 1 : 0)
+                  << " stage=" << (valid ? resp.stage : 0) << "\n";
+        if (cleared) {
+          holdUntilMs = 0;  // the typed hold ended with it; the pipe stays for the new challenge below
+          heldTyped = false;
+          heldRequestId = 0;
+          heldTxGen = 0;
+        }
+      }
+      // (No typed hold of that request on this pipe: its wait already ended -- answered, lapsed, or the
+      // connection it lived on is gone, and the service's state for it with it. Nothing left to end.)
+      if (!cleared) {
+        drop_pipe();
+        std::lock_guard<std::mutex> lk(mu_);
+        if (IsLiveLocked(cmd, cmd.challenge.requestId)) {
+          ControlUnlockChallengeMessage m{};
+          m.requestId = cmd.challenge.requestId;
+          m.status = static_cast<uint16_t>(UnlockStage::SupersedeRefused);
+          m.reserved = kUnlockPurposeLockCred;
+          challengeResults_[TxKey{cmd.cookie, cmd.challenge.requestId}] = m;
+        }
+        cv_.notify_all();
+        activeCookie_.store(0, std::memory_order_release);
+        continue;
+      }
+      cmd.op = Op::LockCredChallenge;  // from here, the ordinary lock-screen challenge
+    }
     if (cmd.op == Op::Capabilities) {
       // lockscreen-cred r1: an older service drops the connection on this kind -- that, too, is its answer.
       SecureUnlockQuery q{};
@@ -433,6 +487,7 @@ void HostUnlockRelay::WorkerLoop() {
       const bool valid = io == Io::Ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
                          resp.kind == static_cast<uint16_t>(SecureUnlockKind::CapabilitiesResponse) && resp.requestId == 1;
       const bool supported = valid && (resp.features & kSecureUnlockFeatureLockCredV1) != 0;
+      const bool retry = supported && (resp.features & kSecureUnlockFeatureLockCredRetryV1) != 0;
       const uint32_t serverPid = pipeServerPid;
       if (!valid) drop_pipe();
       release_if_idle();  // Q2: a capability query does not keep the pipe
@@ -441,6 +496,7 @@ void HostUnlockRelay::WorkerLoop() {
       std::lock_guard<std::mutex> lk(mu_);
       capsInFlight_ = false;
       lockCredSupport_ = supported ? LockCredSupport::Supported : LockCredSupport::Unsupported;
+      lockCredRetry_ = retry;
       capsCheckedMs_ = GetTickCount64();
       capsServerPid_ = serverPid;
       if (!supported) capsRetryAfterMs_ = GetTickCount64() + kCapsRetryMs;
@@ -711,6 +767,47 @@ bool HostUnlockRelay::LockCredChallengeSync(const ControlUnlockChallengeRequestM
     cmd.challenge = req;
     cmd.cookie = clientSessionCookie;
     cmd.txGen = liveTx_[key] = ++txGenSeq_;  // r3 L1-R
+    queue_.push_back(cmd);
+  }
+  cv_.notify_all();
+  std::unique_lock<std::mutex> lk(mu_);
+  const bool got = cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return challengeResults_.count(key) != 0; });
+  if (!got) return false;
+  *out = challengeResults_[key];
+  out->reserved = kUnlockPurposeLockCred;
+  return true;
+}
+
+bool HostUnlockRelay::LockCredRetrySupported() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return lockCredRetry_;
+}
+
+bool HostUnlockRelay::LockCredRetryChallengeSync(const ControlUnlockChallengeRequestMessage& req,
+                                                 uint32_t supersedesRequestId, uint64_t clientSessionCookie,
+                                                 ControlUnlockChallengeMessage* out, uint32_t timeoutMs) {
+  if (!out) return false;
+  if (LockCredSupportNow() != LockCredSupport::Supported || !LockCredRetrySupported() || supersedesRequestId == 0 ||
+      supersedesRequestId == req.requestId) {
+    *out = ControlUnlockChallengeMessage{};
+    out->requestId = req.requestId;
+    out->status = static_cast<uint16_t>(UnlockStage::RejectedPolicy);
+    out->reserved = kUnlockPurposeLockCred;
+    return true;
+  }
+  EnsureWorker();
+  const TxKey key{clientSessionCookie, req.requestId};
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    challengeResults_.erase(key);
+    sealedResults_.erase(key);
+    lockCredRequests_.erase(key);
+    Command cmd;
+    cmd.op = Op::LockCredRetry;
+    cmd.challenge = req;
+    cmd.supersedesRequestId = supersedesRequestId;
+    cmd.cookie = clientSessionCookie;
+    cmd.txGen = liveTx_[key] = ++txGenSeq_;
     queue_.push_back(cmd);
   }
   cv_.notify_all();

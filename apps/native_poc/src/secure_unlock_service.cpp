@@ -134,7 +134,7 @@ void HandleLockCredChallengeRequest(UnlockSession& us, const SecureUnlockChallen
 void HandleCapabilities(const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write) {
   SecureUnlockCapabilitiesResponse r{};
   r.requestId = q.requestId;
-  r.features = p.typeLockCred ? kSecureUnlockFeatureLockCredV1 : 0u;
+  r.features = p.typeLockCred ? (kSecureUnlockFeatureLockCredV1 | kSecureUnlockFeatureLockCredRetryV1) : 0u;
   write(&r, sizeof(r));
 }
 
@@ -256,6 +256,37 @@ void HandleStatusRequest(UnlockSession& us, const SecureUnlockQuery& q, const Un
   if (us.lockCredWaiting && us.lockCredRequestId == q.requestId && us.lockCredCookie == q.clientSessionCookie) {
     const SecureUnlockResult r = lock_cred_status(us, p);
     write(&r, sizeof(r));
+    return;
+  }
+  const SecureUnlockResult r = make_result(q.requestId, 0, UnlockStage::RejectedPolicy, true);
+  write(&r, sizeof(r));
+}
+
+void HandleLockCredSupersede(UnlockSession& us, const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write) {
+  // lk-ux-retry r1 (Codex section 2): only THIS connection's typed credential, by its request id and control session --
+  // never another's. A typing in progress cannot be here: this connection's requests are served one at a time,
+  // and the typing answers before the next request is read.
+  if (us.lockCredWaiting && us.lockCredRequestId == q.requestId && us.lockCredCookie == q.clientSessionCookie) {
+    // It may have ended on its own (unlocked, or past the wait): then that is the answer, as for a status.
+    const SecureUnlockResult now = lock_cred_status(us, p);
+    if (now.terminal) {
+      write(&now, sizeof(now));
+      return;
+    }
+    // Ended here: no more waiting for it. What Windows does with what was typed is Windows' (not undone).
+    const SecureUnlockResult r = make_result(q.requestId, us.lockCredJobId, UnlockStage::Superseded, true);
+    us.lockCredWaiting = false;
+    us.hasTerminal = true;
+    us.terminalRequestId = r.requestId;
+    us.terminalCookie = us.lockCredCookie;
+    us.terminal = r;
+    log_line(p, "lock-cred requestId=%u superseded by the same connection's retry session=%u", r.requestId,
+             us.ctx.requesterSession);
+    write(&r, sizeof(r));
+    return;
+  }
+  if (us.hasTerminal && us.terminalRequestId == q.requestId && us.terminalCookie == q.clientSessionCookie) {
+    write(&us.terminal, sizeof(us.terminal));  // it already ended: nothing left to supersede
     return;
   }
   const SecureUnlockResult r = make_result(q.requestId, 0, UnlockStage::RejectedPolicy, true);

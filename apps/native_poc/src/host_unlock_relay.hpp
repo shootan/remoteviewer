@@ -101,6 +101,16 @@ class HostUnlockRelay {
   // the service issued it for. Returns false if the service is unreachable / timed out.
   bool LockCredChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint64_t clientSessionCookie,
                              ControlUnlockChallengeMessage* out, uint32_t timeoutMs = 3000);
+  // lk-ux-retry r1: whether this service can end a connection's own waiting lock-screen credential
+  // (kSecureUnlockFeatureLockCredRetryV1, from the same capability answer as LockCredSupportNow).
+  bool LockCredRetrySupported() const;
+  // Control thread: the explicit retry. In ONE step on the worker: if THIS control session's typed credential
+  // `supersedesRequestId` still holds the pipe, the service is asked to end its wait (LockCredSupersede) and only
+  // a confirmed end lets the new challenge `req` be asked for, on the same connection. Anything unconfirmed ->
+  // `out->status` SupersedeRefused, nothing asked. Another session holding the pipe -> Busy, as for 88.
+  bool LockCredRetryChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint32_t supersedesRequestId,
+                                  uint64_t clientSessionCookie, ControlUnlockChallengeMessage* out,
+                                  uint32_t timeoutMs = 3000);
   // Control thread: for THIS control session's lock-credential job that is not final yet, ask the service
   // where it is now (bounded wait); the answer replaces the result PollResult reads. False for others.
   bool RefreshLockCredStatus(uint64_t clientSessionCookie, uint32_t requestId, uint32_t timeoutMs = 1000);
@@ -111,11 +121,12 @@ class HostUnlockRelay {
   void Stop();
 
  private:
-  enum class Op { Challenge, LockCredChallenge, Sealed, Capabilities, Status, Release };
+  enum class Op { Challenge, LockCredChallenge, LockCredRetry, Sealed, Capabilities, Status, Release };
   struct Command {
     Op op = Op::Challenge;
     uint64_t cookie = 0;
     uint32_t statusRequestId = 0;
+    uint32_t supersedesRequestId = 0;  // lk-ux-retry r1: LockCredRetry only
     uint64_t txGen = 0;  // r3 L1-R: the transaction (liveTx_) it was queued for; 0 = none
     ControlUnlockChallengeRequestMessage challenge{};
     ControlUnlockSealedRequestMessage seal{};
@@ -156,6 +167,7 @@ class HostUnlockRelay {
 
   // Capability: its answer, when, and of which server process (under mu_).
   LockCredSupport lockCredSupport_ = LockCredSupport::Unknown;
+  bool lockCredRetry_ = false;  // lk-ux-retry r1: the same answer also listed LockCredRetryV1
   uint64_t capsCheckedMs_ = 0;
   uint32_t capsServerPid_ = 0;
   bool capsInFlight_ = false;

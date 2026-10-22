@@ -888,6 +888,11 @@ void unlock_pipe_loop() {
           remote60::native_poc::SecureUnlockQuery q{};
           std::memcpy(&q, buf, sizeof(q));
           sus::HandleStatusRequest(us, q, unlock_primitives(), write);
+        } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::LockCredSupersede) &&
+                   read == sizeof(remote60::native_poc::SecureUnlockQuery)) {  // lk-ux-retry r1
+          remote60::native_poc::SecureUnlockQuery q{};
+          std::memcpy(&q, buf, sizeof(q));
+          sus::HandleLockCredSupersede(us, q, unlock_primitives(), write);
         } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::SealedRequest) &&
                    read == sizeof(SecureUnlockSealedRequest)) {
           SecureUnlockSealedRequest req{};

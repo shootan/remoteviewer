@@ -132,6 +132,8 @@ void HandleCapabilities(const SecureUnlockQuery& q, const UnlockPrimitives& p, c
 // lockscreen-cred r1: where a lock-credential job is now (Injected while it waits; then SessionUnlocked or
 // UnlockUnconfirmed, terminal and cached). Any other requestId: RejectedPolicy, terminal.
 void HandleStatusRequest(UnlockSession& us, const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write);
+// lk-ux-retry r1: end this connection's own typed-and-waiting lock-screen credential (an explicit retry).
+void HandleLockCredSupersede(UnlockSession& us, const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write);
 void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req, uint32_t jobId,
                          const UnlockPrimitives& p, const Write& write);
 
