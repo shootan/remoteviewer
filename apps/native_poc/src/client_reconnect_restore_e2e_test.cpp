@@ -372,6 +372,115 @@ DWORD next_viewer(DWORD previous) {
   return pid;
 }
 
+// integ-0162 r1b (LK + DW together): the toolbar's buttons as x spans -- id -> (first x, last x) -- from the
+// same inert sweep (pressed, released off every button) and the toolbar's own "[toolbar] down id=N" lines.
+std::map<int, std::pair<int, int>> sweep_toolbar_spans(HWND toolbar, DWORD pid, int* width) {
+  std::map<int, std::pair<int, int>> spans;
+  RECT rc{};
+  GetClientRect(toolbar, &rc);
+  const int w = std::max<long>(rc.right, 600), y = std::max<long>(rc.bottom / 2, 12);
+  if (width) *width = rc.right;
+  const size_t before = lines_of_pid(viewer_log_text(), pid).size();
+  for (int x = 2; x < w; x += 4) {
+    PostMessageW(toolbar, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+    PostMessageW(toolbar, WM_LBUTTONUP, 0, MAKELPARAM(30000, 30000));
+    chain_pump(8);
+  }
+  chain_pump(800);
+  std::istringstream in(lines_of_pid(viewer_log_text(), pid).substr(before));
+  for (std::string l; std::getline(in, l);) {
+    const size_t at = l.find("[toolbar] down id=");
+    if (at == std::string::npos) continue;
+    int id = 0, x = 0, yy = 0;
+    if (std::sscanf(l.c_str() + at, "[toolbar] down id=%d x=%d y=%d", &id, &x, &yy) != 3 || id <= 0) continue;
+    auto it = spans.find(id);
+    if (it == spans.end()) spans[id] = {x, x};
+    else it->second = {std::min(it->second.first, x), std::max(it->second.second, x)};
+  }
+  return spans;
+}
+
+// The viewer's notice window (viewer_unlock.cpp kPreloginResultClass), of this viewer process only.
+HWND notice_of_pid(DWORD pid) {
+  struct Find {
+    DWORD pid;
+    HWND found;
+  } f{pid, nullptr};
+  EnumWindows(
+      [](HWND h, LPARAM lp) -> BOOL {
+        auto* f = reinterpret_cast<Find*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(h, &owner);
+        wchar_t cls[64]{};
+        GetClassNameW(h, cls, 64);
+        if (owner == f->pid && std::wstring(cls) == L"GNLinkPreloginResult" && IsWindowVisible(h)) {
+          f->found = h;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&f));
+  return f.found;
+}
+std::wstring longest_child_text(HWND box) {
+  std::wstring best;
+  EnumChildWindows(
+      box,
+      [](HWND c, LPARAM lp) -> BOOL {
+        wchar_t t[1024] = {};
+        GetWindowTextW(c, t, 1023);
+        auto* best = reinterpret_cast<std::wstring*>(lp);
+        if (wcslen(t) > best->size()) *best = t;
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&best));
+  return best;
+}
+
+// The lock screen of a logged-on host (LK, kCaptureFlagLockCredV1) seen by the SHIPPED viewer that also
+// carries DW's once-per-connection screen-list request: "Windows 로그인" (id 7) and the screen switch (id 3)
+// side by side, each its own span inside the bar; one screen-list request; and (first viewer) a character
+// typed at the lock screen still held back with its notice.
+void lockscreen_checks(const std::string& who, DWORD pid, HWND viewer, bool typeOne) {
+  HWND toolbar = nullptr;
+  chain_wait([&] { return (toolbar = toolbar_of_pid(pid)) != nullptr; }, 10000);
+  require(toolbar != nullptr, who + ": the session toolbar window exists");
+  std::map<int, std::pair<int, int>> spans;
+  int width = 0;
+  const bool both = chain_wait([&] {
+    spans = sweep_toolbar_spans(toolbar, pid, &width);
+    return spans.count(7) && spans.count(3);
+  }, 30000);
+  std::string ids;
+  for (const auto& [id, sp] : spans) ids += std::to_string(id) + "@" + std::to_string(sp.first) + "-" + std::to_string(sp.second) + " ";
+  std::printf("      (%s toolbar spans: %s width=%d)\n", who.c_str(), ids.c_str(), width);
+  check(spans.count(7) != 0, who + ": the toolbar lays out \"Windows login\" (id 7) -- the pong carries LockCredV1");
+  check(spans.count(3) != 0, who + ": ...and the screen switch (id 3) -- the screen list arrived");
+  if (both) {
+    const auto a = spans.at(7), c = spans.at(3);
+    check(a.second < c.first || c.second < a.first, who + ": ...the two do not overlap (each its own span)");
+    check(a.first >= 0 && a.second < width && c.first >= 0 && c.second < width, who + ": ...both inside the bar");
+  }
+  const std::string v = lines_of_pid(viewer_log_text(), pid);
+  check(count_of(v, "monitor-list requested") == 1, who + ": one screen-list request on this connection",
+        std::to_string(count_of(v, "monitor-list requested")));
+  if (!typeOne) return;
+  PostMessageW(viewer, WM_KEYDOWN, 'Q', 1);
+  PostMessageW(viewer, WM_KEYUP, 'Q', 0xC0000001);
+  HWND box = nullptr;
+  chain_wait([&] { return (box = notice_of_pid(pid)) != nullptr; }, 10000);
+  std::wstring text;
+  if (box) {
+    chain_wait([&] { return !(text = longest_child_text(box)).empty(); }, 3000);
+  }
+  check(box != nullptr && text.find(L"Ctrl+Alt+U") != std::wstring::npos && text.find(L"Windows") != std::wstring::npos,
+        who + ": a character typed at the lock screen is held back, and the notice names the button and Ctrl+Alt+U");
+  for (int i = 0; i < 30 && box && IsWindow(box); ++i) {
+    PostMessageW(GetDlgItem(box, 1), BM_CLICK, 0, 0);
+    chain_pump(100);
+  }
+}
+
 void run_r3_scenario(const std::string& scenario, DWORD pid1, HWND viewer1, const Shot& pickerShot,
                      const std::wstring& shots, const std::wstring& wedgeFile, const std::wstring& presentFailFile,
                      const std::string& bTitle) {
@@ -630,7 +739,8 @@ int main() {
           "screenshot 2: session 1 shows the stream, not the picker (negative control: screenshot 1 is the picker)",
           "picker: " + shot_text(pickerShot) + " / stream: " + shot_text(streamShot));
 
-    if (scenario != "desktop") {
+    if (scenario == "lockscreen") lockscreen_checks("session 1", pid1, viewer1, true);
+    if (scenario != "desktop" && scenario != "lockscreen") {
       run_r3_scenario(scenario, pid1, viewer1, pickerShot, shots, wedgeFile, presentFailFile, bTitle);
       throw std::runtime_error("__r3_done__");
     }
@@ -682,6 +792,11 @@ int main() {
     const std::string v2later = lines_of_pid(viewer_log_text(), pid2);
     check(count_of(v2later, "decodedFrames=") > decodedBefore && v2later.find("decodedFrames=0 ") == std::string::npos,
           "...and frames keep arriving and decoding after the restore");
+    if (scenario == "lockscreen") {
+      // integ-0162 r1b: after DW's reconnect (viewer exit -> the shell's new viewer), the NEW viewer is told
+      // the lock screen again by its own first pong, and lays the button out again.
+      lockscreen_checks("reconnected viewer", pid2, viewer2, false);
+    }
     std::printf("\n      timeline: wedge %.1fs -> viewer exit seen %.1fs (+%.1f) -> new viewer %.1fs (+%.1f) -> "
                 "restored %.1fs (+%.1f); wedge -> restored %.1f s\n",
                 tWedge, tViewerExit, tViewerExit - tWedge, tRelaunch, tRelaunch - tViewerExit, tRestored,

@@ -56,7 +56,7 @@ async function port(tcp) {
 }
 const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
 
-let server, host, client, fixtureWindow;
+let server, host, client, fixtureWindow, sisService;
 async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const done = new Promise((r) => child.once('exit', r));
@@ -91,6 +91,36 @@ async function stop(child) {
   if (scenario === 'monitor' || scenario === 'nomonitors') {
     const monitorsFile = path.join(scratch, 'monitors.txt');
     fs.writeFileSync(monitorsFile, scenario === 'monitor' ? 'extra' : 'nomonitors');
+    hostEnv.GNLINK_STREAM_TEST_MONITORS_FILE = monitorsFile;
+  }
+  if (scenario === 'lockscreen') {
+    // integ-0162 r1b (LK + DW): the host's own session stands in as locked (test seam, as in the LK e2e
+    // --lock-screen), the service's stand-in (the product service code, lifecycle test build) answers the
+    // lock-cred probe on its unlock pipe, and the host also lists a second screen -- so the SHIPPED viewer
+    // sees LockCredV1 and the screen list on one connection, then again after DW's reconnect.
+    const tag = process.pid + '-' + Date.now();
+    const suffix = 'integ-lock-' + tag, unlockEvent = 'GNLinkSisTestUnlock-' + tag;
+    const sisEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(REMOTE60_SIS_TEST_|GNLINK_SIS_TEST_)/i.test(k)));
+    Object.assign(sisEnv, { REMOTE60_SIS_TEST_SUFFIX: suffix, REMOTE60_SIS_TEST_DIAG: path.join(scratch, 'sis_diag.log'),
+      REMOTE60_SIS_TEST_STOP_EVENT: 'GNLinkSisTestStop-' + tag, REMOTE60_SIS_TEST_FAKE_LOCK: '1',
+      REMOTE60_SIS_TEST_UNLOCK_EVENT: unlockEvent, GNLINK_SIS_TEST_CRED_TARGET_TITLE: 'GNLINK-INTEG-NO-SUCH-TARGET' });
+    const pipe = '\\\\.\\pipe\\GNLinkSisTest-' + suffix + '-unlock';
+    if (process.env.GNLINK_R1B_NO_SERVICE === '1') {
+      // Negative control: no service stand-in, so the host never hears it can type at the lock screen and
+      // never advertises LockCredV1 -- the "Windows 로그인" checks must FAIL.
+      console.log('      (negative control: no service stand-in)');
+    } else {
+      sisService = spawn(path.join(bin, 'GNLinkInputServiceLifecycleTest.exe'), ['--lifecycle-test'],
+        { env: sisEnv, cwd: scratch, stdio: 'ignore', windowsHide: true });
+      let up = false;
+      for (let i = 0; i < 300 && !up; ++i) { up = fs.existsSync(pipe); if (!up) await sleep(100); }  // existsSync is false while the one instance is busy: keep looking
+      assert(up, 'the service stand-in serves its unlock pipe ' + pipe);
+      console.log('PASS the service stand-in serves its unlock pipe');
+    }
+    hostEnv.GNLINK_STREAM_TEST_FAKE_LOCK_UNTIL_EVENT = unlockEvent;
+    hostEnv.GNLINK_STREAM_TEST_UNLOCK_PIPE = pipe;
+    const monitorsFile = path.join(scratch, 'monitors.txt');
+    fs.writeFileSync(monitorsFile, 'extra');
     hostEnv.GNLINK_STREAM_TEST_MONITORS_FILE = monitorsFile;
   }
   if (scenario === 'presentfail' || scenario === 'presentok') {
@@ -151,6 +181,18 @@ async function stop(child) {
   // presentfail ends the session through the viewer's own present failure (43), not a wedge.
   const fails = !wedged ? 0 :
     ['dxgi-worker-wedge phase=frame_handler', 'code=0x0000002C (44)', 'using WGC recovery backend'].filter((s) => !h.includes(s)).length;
+  if (scenario === 'lockscreen') {
+    // The streaming child's own log lines (wherever under the fixture they went): it advertised LockCredV1.
+    const all = [];
+    const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p); else if (/\.log(\.\d+)?$/.test(e.name)) { try { all.push(read(p)); } catch {} } } };  // a live log may be locked
+    walk(scratch);
+    const text = all.join('\n');
+    const adv = (text.match(/\[lock-cred\] advertised=1/g) || []).length;
+    console.log(adv >= 2 ? 'PASS the host advertised LockCredV1 to both connections (' + adv + ' times: before and after the wedge)'
+                         : 'FAIL the host advertised LockCredV1 ' + adv + ' time(s), expected one per streaming child (2)');
+    if (adv < 2) process.exitCode = 1;
+  }
   console.log('      host log: ' + hostLog);
   console.log('      client log dir: ' + path.join(clientAppData, 'GNLink'));
   console.log('      screenshots: ' + shots);
@@ -163,6 +205,7 @@ async function stop(child) {
 }).finally(async () => {
   await stop(client);
   await stop(fixtureWindow);
+  await stop(sisService);
   await stop(host);  // its streaming child goes with its job
   await stop(server);
   console.log('      (fixture kept for inspection: ' + scratch + ')');
