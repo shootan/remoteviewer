@@ -13435,3 +13435,38 @@ Next
 - 고지: 핵심 OS 실기(SYSTEM 서비스→잠금 화면 입력, 로그인 전 화면, UAC, 회사 PC 실제 wedge·NVIDIA) 미검증 상태로 전 채널 배포. APK 0.2.30 은 새 호스트 잠금 화면에 글자 입력 불가. 재연결 자동 복원은 전체 데스크톱만(모니터·창은 picker). Setup.exe 는 Authenticode 미서명(업데이트 manifest 서명과 별개).
 - 다음: 사용자 실기(이 PC 잠금·로그인 전·UAC·휴대폰 0.2.30 / 회사 PC wedge 복원), APK 0.2.31(SH) 게시.
 - 제품/테스트/문서: 문서(이 항목·작업목록 LK/DW/HD 게시 상태·원장 10-22).
+=======
+### 2026-10-22 APK 선명도 필터(sh-filter r1) 구현 — 끄기 / 약하게 0.20 / 강하게 0.35 (미게시·폰 실기 대기)
+
+- 범위(APK 만, 버전 불변 0.2.30/29, 게시·설치·push 없음): 디코더와 화면 사이에 GL 선명화 한 단계(`out=(1+4s)C−s(L+R+T+B)`, 보이는 원본 1픽셀 이웃, RGB, 0..1 clamp). 설정 탭·뷰어 메뉴에 선명도 3단(기본 0.20, 명시적 끄기 보존). 끄기는 기존 직결 경로 그대로. GL 실패 시 '선명도 적용 불가, 원본 표시' + 직결 복귀(같은 surface 회차에서 재시도 없음). 구현 c568fbb(feat/sh-filter, main 5063cd9 기준). 계약 `.claude/codex_sh_filter_r1.md`.
+- 근거(AVD gnlink_kbd_test, SwiftShader, 실 APK·실 UI 조작, 시험 Host 루프백): compare 24/24(가는 글씨 edge off 18.2 < 0.20 23.0 < 0.35 24.7, 저대비 1.8/3.5/4.7, 테두리·위치 x0=275 전 수준 동일, 다시 끄기 = 처음 끄기) · identity(seam s=0 GL vs 끄기, 움직이는 띠 밖 평균 |Δ| 0.10·최대 10) · faults 28/28(context/shader/swap:30/never → 안내 Toast 화면 캡처·직결 복귀·새 프레임 계속) · lifecycle 14/14(끄기↔0.20 5회, 대상 선택 화면 왕복 3회, HOME 3회, 다크모드 재생성으로 onSurfaceTextureDestroyed appReleases=1, 고아 스레드 없음) · 단위 시험 SharpenPathPolicyTest 13.
+- **S4 지연(AVD 수치, 기준 미달 그대로 공개)**: handoff→latch p95 중앙값 끄기 70.5 ms → 0.20 89.0 / 0.35 88.9 ms(+18.5 ms, 창 12개×5 s, 각 n≈1270, unmatched 0), GL draw ≈14 ms(소프트웨어 GL). 4 ms 판정은 폰 실측으로만 한다(`docs/sh_filter_phone_procedure_2026-10-22.md`).
+- 시험 중 발견(이 변경 밖): 수동 IP(TCP 제어) 접속에서 Host 의 UDP 제어 링크가 10 s 읽기 timeout 으로 끝나며 스트림을 inactive 로 내려, 그때 보고 있던 화면이 '화면이 멈췄습니다'로 굳는다(끄기에서도 동일, host_startup_control.cpp UdpControlLink 10000). 하네스는 접속 10 s 뒤에 고르는 것으로 우회.
+- 미검증: 휴대폰(SM-S948N) 실기 전부 — 체감 선명도, 지연 4 ms 기준, 발열, 회전 뒤 터치 위치, 실 GPU 드라이버의 GL 실패 경로.
+- 제품/테스트/문서: 테스트 도구(`automation/sh_filter_avd.py`·`automation/sh_pattern_window.ps1`)·문서(폰 절차·이 항목). 제품 코드는 c568fbb 그대로.
+
+### 2026-10-22 sh-filter r2 — Codex c568fbb+2e9428b NEEDS_CHANGES H1~H5 보수 (미게시·폰 실기 대기)
+
+- 근거: `codex_sh_filter_impl_r1.md` H1~H5, 지시 `task_sh_filter_impl_r1.md` r2 절. 버전 0.2.30/29 그대로.
+- H4 aa0a3dc: APK gate 가 모든 classes*.dex 의 sh-test-seam·shTestFault·shTestStrength 를 거부(noseam PASS rc0 / shseam FAIL rc1), Gradle 은 seam 을 켠 release·build·assemble·bundle 을 거부. noseam APK 는 seam 없는 debug 시험물로 표기.
+- H1 7c04456: surface id·세대별 대기 release. timeout 은 NONE 이 아니라 BLOCKED — 그동안 bind/select 는 기억만, 늦은 release 뒤 1회 실행. eglDestroySurface 실패는 surface 를 교체될 때까지 막음. 옛 surface 의 늦은 release 는 그 SurfaceTexture 만 1회 해제. renderer 는 detached 를 보고.
+- H2/H3/H5.3 8f3341f: native ring 이 frame 의 stream 세대·codec epoch·visible 크기를 기록. 첫 출력 gate 는 attach 시점에 arm, 그 renderer·surface·codec 의 새 frame latch 로 확인(사후 baseline 없음), 자체 3 s timeout(VIEWER off→0.20 포함). redraw 는 같은 timestamp 로 구분. 지연은 구간(수준·경로·세대·surface)별 전체 분포, nearest-rank ceil(q·n). tap 간격은 frame 자신의 visible 크기.
+- 실행 중 발견·보수 f238f70: 회전으로 TextureView 가 buffer 크기를 view 크기(1970x1080)로 되돌려 renderer 가 1920x1080 그림을 두 번 resample(가는 글씨 흐려짐, compare 2/4 간헐 실패, r1 부터 잠재) → onSurfaceTextureSizeChanged 에서 캐시 무효화. 같은 순서 6/6 통과. 4b595e2: BLOCKED/RELEASING 중 sync 마다 bind 로그·buffer 재설정이 반복되던 것 정리.
+- AVD(SwiftShader, 최종 APK 4b595e2 noseam A77520A0… / shseam B9A1DEB8…): compare 25/0, lifecycle 14/0, resize 8/0(1920x1080 desktop → 1280x720 창 전환, renderer 가 새 크기로 step, 크기 불일치 frame 도 자기 step), latency 2/0, identity 3/0, faults 28/0(정확한 안내 문구 4/4, swap:30 포함), viewer_never 7/0, hold 11/0(20 s 보류 동안 producer 0, 늦은 release 뒤 1회, 재생성 surface 1회 해제, tick 마다 bind 로그 없음), touch 16/0(끄기·0.20·0.35 에서 원격 = 화면점 − 그림 원점 ±1 px, 크게 보기 포함; 앱→native 큐까지, 호스트 주입 off). 지연 구간 p95: 끄기 73.3 / 0.20 92.0 / 0.35 91.7 / 끄기 75.0 ms(각 1400+ frame) — AVD 에서 4 ms 기준 미달 그대로. 실행 중 AVD system_server 고장 1회(서비스 소실) → cold boot 뒤 같은 APK 로 재실행.
+- 미검증: 휴대폰 실기 전부(4 ms·발열·회전 뒤 터치·Codec2 1088 crop·실 GPU), crop/flip fixture(AVD 디코더가 crop 을 내지 않고 공개 API 로 crop 주입 불가 — 미실시).
+- 제품/테스트/문서: 제품(APK), 테스트(하네스·패턴 창), 문서(폰 절차·이 항목).
+
+### 2026-10-22 APK 0.2.31 후보 (versionCode 30) — 선명도 필터, PC 0.2.162 와 함께 (rel/apk-0.2.31, 후보 · 서명/게시 전)
+- 사용자 지시(10-22): APK 에 선명도 필터(SH)를 넣어 PC 0.2.162 와 함께 게시. 범위(검증용): SH 만. keepalive-multi 는 넣지 않음(base 가 오래됨, 정책값 미확인). 휴대폰 잠금 화면 비밀번호(sealed APK) 미구현은 알려진 한계 그대로.
+- 브랜치: rel/apk-0.2.31 = rel/0.2.162(6a127eb) + merge feat/sh-filter c494dc6(4394d2c; 충돌 gate self-test·history 양쪽 보존, 제품 충돌 없음) + 이 버전 commit(versionName 0.2.31 / versionCode 30). PC 버전은 그대로.
+- 이 APK 는 PC 0.2.162 의 공유 native 변경(hello-delay 의 punch/hello, DW 의 화면 목록 요청 등)도 싣는다. 빌드·검사·AVD smoke 결과는 .claude/report_rel_apk_0231_r1.md.
+- 상태: 후보. 서명된 manifest·게시·push 없음.
+- 제품/테스트/문서: 제품(APK 버전), 문서(이 항목).
+
+### 2026-10-22 APK 0.2.31 게시 — 선명도 필터(끄기 / 약하게 0.20 / 강하게 0.35, 기본 0.20) (폰 실기 대기)
+- 사용자 지시: "이번에 apk에 필터도 같이 넣어", "내가 시킨 것 중에 작업 다한 거 다 게시해야지 … apk에 넣으라니까".
+- 게시본: rel/apk-0.2.31 2b57bb8(= rel/0.2.162 + SH c494dc6 merge 4394d2c + 버전 0.2.31/vc30). APK `GNLink-0.2.31.apk` 13,799,096 B sha256 230a65e9…a9d5d4, 인증서 SHA-256 dcc806ae…ec2990(0.2.30 과 전체 일치), com.remote60.androiddirect, 4 ABI, gate --apk 7/0, dex·.so seam 표식 0.
+- 검증용 독립 AVD(같은 APK 해시): smoke_monitors 13/0(모니터 1·2, live, 0.20, 재접속 live), compare 25/0, smoke_one 13/1(FAIL 은 하네스가 탭 'Desktop' 까지 집는 기대값 오류 — 소스로 확인, rc 그대로 기록).
+- android.manifest 직접 작성(schema 2, r-0.2.31) → `gnlink_release_sign.ps1 -Platform android`(manifest 309a9c5e… 불변, sig cbb5b7d6…), `gnlink_verify_manifest.js` ok·변조 REFUSED(Windows C++ verifier 는 arm64 를 WrongPlatform 으로 거부 — 설계상 대상 아님). `gnlink_deploy.sh --platform android` dry-run → 실게시 rc0, 백업 0.2.30 pair(b64c1b49…/210ab909…), 외부 https 해시 일치. 서버: android 309a9c5e…/cbb5b7d6…, windows 814e4bb9…/a39b2f14…(0.2.162 그대로).
+- 범위 밖: keepalive-multi(정책값·재통합 미결), 휴대폰 잠금 화면 비밀번호(sealed APK 미구현). 미검증: 실폰 화질·지연(S4, AVD 에서 +13~15 ms 미달)·발열·회전 뒤 터치, control loop failed 관찰(원장).
+- 제품/테스트/문서: 문서(이 항목).

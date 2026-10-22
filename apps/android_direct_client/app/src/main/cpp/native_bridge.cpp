@@ -422,6 +422,72 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetLastOutputPresentat
   return static_cast<jlong>(g_video_decoder_sink.LastOutputPresentationUs());
 }
 
+// sh-filter r1 (S4): when the frame with this output-buffer timestamp was handed to the output Surface.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHandoffNsForTimestamp(
+    JNIEnv* /* env */, jobject /* this */, jlong timestampNs) {
+  return static_cast<jlong>(g_video_decoder_sink.HandoffNsForTimestamp(static_cast<int64_t>(timestampNs)));
+}
+
+// sh-filter r2: [handoffNs, streamGeneration, codecEpoch, visibleWidth, visibleHeight], or null.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeHandoffInfo(
+    JNIEnv* env, jobject /* this */, jlong timestampNs) {
+  remote60::android_direct::AndroidVideoDecoderSink::HandoffInfo info;
+  if (!g_video_decoder_sink.HandoffInfoForTimestamp(static_cast<int64_t>(timestampNs), &info)) return nullptr;
+  const jlong values[5] = {static_cast<jlong>(info.handoffNs), static_cast<jlong>(info.streamGeneration),
+                           static_cast<jlong>(info.codecEpoch), static_cast<jlong>(info.visibleWidth),
+                           static_cast<jlong>(info.visibleHeight)};
+  jlongArray out = env->NewLongArray(5);
+  if (out != nullptr) env->SetLongArrayRegion(out, 0, 5, values);
+  return out;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeCodecEpoch(JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.CodecEpoch());
+}
+
+#ifdef GNLINK_SH_TEST_SEAM
+// sh-filter r3 (R3) -- TEST BUILD ONLY: the shader fixture sets a buffer transform (flip / quarter turn) on
+// the renderer's input window, as a decoder's output would carry one.
+#include <android/native_window_jni.h>
+#include <cstring>
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_SharpenTestSeam_nativeSetBuffersTransform(JNIEnv* env, jobject /* this */,
+                                                                         jobject surface, jint transform) {
+  ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+  if (window == nullptr) return -1;
+  const int32_t rc = ANativeWindow_setBuffersTransform(window, transform);
+  ANativeWindow_release(window);
+  return rc;
+}
+
+// The same, as the producer: one RGBA frame of w x h queued on `surface` with that transform (CPU path --
+// ImageWriter does not carry a window transform, found by the fixture). Returns 0 or the failing step.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_SharpenTestSeam_nativeDrawTransformed(JNIEnv* env, jobject /* this */, jobject surface,
+                                                                     jint transform, jbyteArray rgba, jint w, jint h) {
+  ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+  if (window == nullptr) return -1;
+  int32_t rc = ANativeWindow_setBuffersGeometry(window, w, h, WINDOW_FORMAT_RGBA_8888);
+  if (rc == 0) rc = ANativeWindow_setBuffersTransform(window, transform) == 0 ? 0 : -2;
+  ANativeWindow_Buffer buffer{};
+  if (rc == 0) rc = ANativeWindow_lock(window, &buffer, nullptr) == 0 ? 0 : -3;
+  if (rc == 0) {
+    jbyte* src = env->GetByteArrayElements(rgba, nullptr);
+    for (int y = 0; y < h && y < buffer.height; ++y) {
+      std::memcpy(static_cast<uint8_t*>(buffer.bits) + static_cast<size_t>(y) * buffer.stride * 4,
+                  reinterpret_cast<uint8_t*>(src) + static_cast<size_t>(y) * w * 4, static_cast<size_t>(w) * 4);
+    }
+    env->ReleaseByteArrayElements(rgba, src, JNI_ABORT);
+    rc = ANativeWindow_unlockAndPost(window) == 0 ? 0 : -4;
+  }
+  ANativeWindow_release(window);
+  return rc;
+}
+#endif
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestWindowList(
     JNIEnv* /* env */, jobject /* this */) {

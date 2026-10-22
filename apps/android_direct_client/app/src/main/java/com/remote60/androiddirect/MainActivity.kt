@@ -146,6 +146,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsQualityHighButton: TextView
     private lateinit var settingsQualityBestButton: TextView
     private lateinit var settingsFpsSpinner: Spinner
+    // sh-filter r1: 선명도 끄기 / 약하게 0.20 / 강하게 0.35, in the viewer menu and in settings.
+    private lateinit var viewerSharpOffButton: TextView
+    private lateinit var viewerSharpWeakButton: TextView
+    private lateinit var viewerSharpStrongButton: TextView
+    private lateinit var settingsSharpOffButton: TextView
+    private lateinit var settingsSharpWeakButton: TextView
+    private lateinit var settingsSharpStrongButton: TextView
     /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
     private var qualityStatusMessage = ""
     private val windowSheetItems = mutableListOf<WindowPanelItem>()
@@ -448,6 +455,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         viewerQualityBestButton = findViewById(R.id.viewerQualityBestButton)
         viewerFpsSpinner = findViewById(R.id.viewerFpsSpinner)
         viewerQualityStatusText = findViewById(R.id.viewerQualityStatusText)
+        viewerSharpOffButton = findViewById(R.id.viewerSharpOffButton)
+        viewerSharpWeakButton = findViewById(R.id.viewerSharpWeakButton)
+        viewerSharpStrongButton = findViewById(R.id.viewerSharpStrongButton)
 
         // A tap on the dimmed picture closes the sheet. The sheet swallows its own taps, so they
         // neither close it nor fall through -- nothing under either overlay reaches the PC.
@@ -514,6 +524,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "settings") }
         settingsQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "settings") }
         settingsQualityBestButton.setOnClickListener { selectQuality(QualityLevel.BEST, requestedRuntimeFps, "settings") }
+        for ((buttons, origin) in listOf(
+            listOf(viewerSharpOffButton, viewerSharpWeakButton, viewerSharpStrongButton) to "menu",
+            listOf(settingsSharpOffButton, settingsSharpWeakButton, settingsSharpStrongButton) to "settings",
+        )) {
+            for ((button, level) in buttons.zip(SharpnessLevel.values())) {
+                button.setOnClickListener { selectSharpness(level, origin) }
+            }
+        }
         for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
             val adapter = ArrayAdapter(
                 this,
@@ -914,8 +932,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun pressEnter() {
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
-        NativeSessionBridge.nativeQueueInputEvent(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
+        queueRemoteInput(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
+        queueRemoteInput(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
     }
 
     private fun qualityLabel(): String = getString(
@@ -973,6 +991,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         for (spinner in listOf(viewerFpsSpinner, settingsFpsSpinner)) {
             if (spinner.selectedItemPosition != fpsIndex) spinner.setSelection(fpsIndex, false)
+        }
+        if (::viewerSharpOffButton.isInitialized && ::settingsSharpOffButton.isInitialized) {
+            for (row in listOf(
+                listOf(viewerSharpOffButton, viewerSharpWeakButton, viewerSharpStrongButton),
+                listOf(settingsSharpOffButton, settingsSharpWeakButton, settingsSharpStrongButton),
+            )) {
+                // The REQUESTED level stays selected after a fallback: the user's choice is not overwritten.
+                for ((button, choice) in row.zip(SharpnessLevel.values())) button.isSelected = sharpness == choice
+            }
         }
         viewerQualityStatusText.text = qualityStatusMessage
         viewerQualityStatusText.visibility = if (qualityStatusMessage.isEmpty()) View.GONE else View.VISIBLE
@@ -1580,6 +1607,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         applyImmersiveMode()
 
         diagnosticsLog = SessionDiagnosticsLog(this)
+        SharpenTestSeam.runFixture(this, intent)  // sh-filter r3: test builds only (the shipped seam does nothing)
         loginScene = findViewById(R.id.loginScene)
         hostsScene = findViewById(R.id.hostsScene)
         loginIdInput = findViewById(R.id.loginIdInput)
@@ -1623,6 +1651,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsQualityHighButton = findViewById(R.id.settingsQualityHighButton)
         settingsQualityBestButton = findViewById(R.id.settingsQualityBestButton)
         settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
+        settingsSharpOffButton = findViewById(R.id.settingsSharpOffButton)
+        settingsSharpWeakButton = findViewById(R.id.settingsSharpWeakButton)
+        settingsSharpStrongButton = findViewById(R.id.settingsSharpStrongButton)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
         settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
@@ -1782,6 +1813,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
         requestedRuntimeFps = savedEndpoint.fps
         requestedDesktopBackend = DesktopCaptureBackendOption.fromCode(savedEndpoint.desktopBackendCode)
+        sharpness = SessionPersistence.loadSharpness(this)
+        executeSharpen(sharpenPolicy.select(sharpness))  // no surface yet: only records the choice
         settingsStatusMessage =
             requestSummary()
         settingsAppliedText.text = settingsStatusMessage
@@ -2227,19 +2260,65 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        // sh-filter r2: TextureView has just set this SurfaceTexture's default buffer size to the VIEW's size
+        // (width x height) before calling us -- the size we set is gone. The decoder's own buffers never
+        // noticed (they carry their size), but the sharpening pass's EGL window surface takes the default
+        // size, and was then drawn at 1970x1080 for a 1920x1080 picture (resampled twice: blurred). Seen
+        // when the rotation to landscape came after the bind. Forget the cached size so the sync sets it again.
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
         syncVideoSurface(forceRebind = false)
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-        releaseVideoSurface()
-        return true
+        // sh-filter r1 (contract 4): with the sharpening pass on this surface, Android must not release it
+        // while the renderer's EGL surface may still use it -- the app releases it once the renderer has
+        // let go (single owner). With the decoder on it directly, Android releases it as before.
+        val destroyedId = sharpenPolicy.surfaceId
+        val (commands, androidReleases) = sharpenPolicy.surfaceDestroyed()
+        // r2 H1: kept per surface id -- a late release of an older surface's renderer frees exactly that one.
+        if (destroyedId != null) {
+            if (androidReleases) sharpenSurfaceTextures.remove(destroyedId) else sharpenAppOwnedSurfaces += destroyedId
+        }
+        executeSharpen(commands)
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
+        diagnosticsLog.log("viewer_surface_released", "scene=$currentScene destroyed=1 appReleases=${if (androidReleases) 0 else 1}")
+        return androidReleases
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        val latchNs = System.nanoTime()
+        val surfaceId = sharpenPolicy.surfaceId ?: 0L
+        val timestamp = surface.timestamp
+        // sh-filter r2 (H3): the latched timestamp names the frame. A strength change re-swaps the frame
+        // already shown with the same timestamp: that latch is not a new displayed frame.
+        val newFrame = latchClassifier.isNewFrame(surfaceId, timestamp)
+        enterSharpenLatencySegment(latchNs)
+        if (!newFrame) {
+            sharpenStats.addRedraw()
+            return
+        }
         // Fires once per frame this view actually latched. Frames handed to the surface that
         // the view never latched -- because a newer one arrived before it drew -- are invisible
         // to every other counter, and are exactly what "it says 30 but looks like 15" is.
         NativeSessionBridge.nativeNotifyFrameDisplayed()
+        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(timestamp))
+        // S4: the decoder's handoff of THIS frame -> this latch.
+        if (info != null) sharpenStats.addMatched(info.handoffNs, latchNs) else sharpenStats.addUnmatched()
+        // H2: the renderer's first output is THIS latch, if it is a frame of that renderer, surface and codec.
+        val liveGen = if (sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) sharpenPolicy.generation else -1L
+        if (sharpenGate.onLatch(liveGen, surfaceId, true, info)) {
+            sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+            sharpenGateTimeout = null
+            diagnosticsLog.log(
+                "sharpen_first_output",
+                "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
+                    "ts=$timestamp latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
+                    "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
+            )
+        }
+        maybeLogSharpenLatency(latchNs)
     }
 
     private fun applyImmersiveMode() {
@@ -2918,7 +2997,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     lastTouchVideoY = mapped.second
                     scrollLastTouchY = event.getY(pointerIndex)
                     scrollWheelCarryPx = 0f
-                    val queued = NativeSessionBridge.nativeQueueInputEvent(
+                    val queued = queueRemoteInput(
                         INPUT_KIND_MOUSE_MOVE,
                         mapped.first,
                         mapped.second,
@@ -2955,7 +3034,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 touchDragLatched = false
                 lastTouchVideoX = downX
                 lastTouchVideoY = downY
-                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                val queued = queueRemoteInput(
                     INPUT_KIND_MOUSE_DOWN,
                     downX,
                     downY,
@@ -2999,7 +3078,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             (abs(scrollWheelCarryPx) / scrollGestureStepPx).toInt()
                         }
                     if (stepCount > 0) {
-                        val queued = NativeSessionBridge.nativeQueueInputEvent(
+                        val queued = queueRemoteInput(
                             INPUT_KIND_MOUSE_WHEEL,
                             lastTouchVideoX,
                             lastTouchVideoY,
@@ -3034,7 +3113,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 lastTouchVideoX = mapped.first
                 lastTouchVideoY = mapped.second
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_MOVE,
                     mapped.first,
                     mapped.second,
@@ -3080,7 +3159,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lastTouchVideoY = upY
                 val wasSecondary = activeTouchIsSecondary
                 val wasTap = !touchDragLatched
-                val queued = NativeSessionBridge.nativeQueueInputEvent(
+                val queued = queueRemoteInput(
                     INPUT_KIND_MOUSE_UP,
                     upX,
                     upY,
@@ -3145,7 +3224,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // last real touch was if the two are mixed.
                 lastTouchVideoX = virtualPointerX
                 lastTouchVideoY = virtualPointerY
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
                 )
                 syncVirtualMouseMarker()
@@ -3156,7 +3235,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (virtualPointerX < 0) {
                     virtualPointerX = contentRect.contentWidth / 2
                     virtualPointerY = contentRect.contentHeight / 2
-                    NativeSessionBridge.nativeQueueInputEvent(
+                    queueRemoteInput(
                         INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
                     )
                 }
@@ -3166,7 +3245,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             override fun onButtonDown(button: ViewerVirtualMouse.Button) {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = virtualButtonMask(button)
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_DOWN, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, activeTouchButtons,
                 )
@@ -3175,14 +3254,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             override fun onButtonUp(button: ViewerVirtualMouse.Button) {
                 val vk = virtualButtonVk(button)
                 activeTouchButtons = 0
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_UP, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), 0, vk, 0,
                 )
             }
 
             override fun onWheel(notches: Int) {
-                NativeSessionBridge.nativeQueueInputEvent(
+                queueRemoteInput(
                     INPUT_KIND_MOUSE_WHEEL, virtualPointerX.coerceAtLeast(0),
                     virtualPointerY.coerceAtLeast(0), notches * INPUT_WHEEL_DELTA_STEP, 0, 0,
                 )
@@ -3392,7 +3471,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val direction = if (pinchZoomCarry > 0f) 1 else -1
             pinchZoomCarry -= direction * notches * step
             queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_DOWN)
-            NativeSessionBridge.nativeQueueInputEvent(
+            queueRemoteInput(
                 INPUT_KIND_MOUSE_WHEEL,
                 lastTouchVideoX,
                 lastTouchVideoY,
@@ -3742,7 +3821,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        val queued = NativeSessionBridge.nativeQueueInputEvent(
+        val queued = queueRemoteInput(
             INPUT_KIND_MOUSE_UP,
             lastTouchVideoX,
             lastTouchVideoY,
@@ -4002,7 +4081,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         val x = resolveKeyboardVideoCoord(lastTouchVideoX, videoWidth)
         val y = resolveKeyboardVideoCoord(lastTouchVideoY, videoHeight)
-        return NativeSessionBridge.nativeQueueInputEvent(
+        return queueRemoteInput(
             inputKind,
             x,
             y,
@@ -4219,7 +4298,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             "title=${panelSnapshot.selectedTitle}"
                     )
                 }
-                if (readySelectionGeneration == pendingSelectionGeneration && pendingSelectionGeneration != 0L) {
+                if (readySelectionGeneration == pendingSelectionGeneration && pendingSelectionGeneration != 0L &&
+                    sharpenOutputConfirmed(nowMs, panelSnapshot.lastSelectStreamGeneration)) {
                     diagnosticsLog.log(
                         "select_ready",
                         "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
@@ -5023,7 +5103,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             releaseViewerModifiers()
             applySceneOrientation()
         }
-        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING && videoSurface != null) {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING &&
+            sharpenPolicy.path != SharpenPathPolicy.Path.NONE) {
             releaseVideoSurface()
         }
         if (currentScene != UiScene.VIEWER) {
@@ -5051,11 +5132,307 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    /**
+     * Every input event to the host goes through here. sh-filter r2 (H5.1): in a TEST build the seam logs
+     * what was queued -- the remote (video) coordinate a touch became -- so the harness can check it against
+     * the point of the picture that was tapped; the shipped seam returns null and nothing is logged.
+     */
+    private fun queueRemoteInput(kind: Int, x: Int, y: Int, wheelDelta: Int, keyCode: Int, buttons: Int): Boolean {
+        val queued = NativeSessionBridge.nativeQueueInputEvent(kind, x, y, wheelDelta, keyCode, buttons)
+        SharpenTestSeam.inputLine(kind, x, y, buttons, queued)?.let { diagnosticsLog.log("seam_input", it) }
+        return queued
+    }
+
+    // ---- sh-filter r1: the sharpening pass. SharpenPathPolicy decides who writes into the TextureView;
+    // this executes its commands on the UI thread. The renderer's own thread does all GL. ----
+    private var sharpness = SharpnessLevel.DEFAULT
+    private val sharpenPolicy = SharpenPathPolicy(SharpnessLevel.DEFAULT)
+    /** The renderer of the CURRENT generation (null when none is starting or live). */
+    private val sharpenRenderer: SharpenRenderer?
+        get() = sharpenRenderers[sharpenRendererGeneration]
+    private var sharpenRendererGeneration = 0L
+    /** r2 H1: every renderer not yet confirmed released, by generation (a held one outlives the next). */
+    private val sharpenRenderers = HashMap<Long, SharpenRenderer>()
+    private val sharpenReleaseTimeouts = HashMap<Long, Runnable>()
+    private var sharpenInputSurface: Surface? = null
+    /** r2 H1: TextureView surfaces by id: the current one, and destroyed ones the app still has to release. */
+    private var sharpenSurfaceSeq = 0L
+    private val sharpenSurfaceTextures = HashMap<Long, SurfaceTexture>()
+    private val sharpenAppOwnedSurfaces = HashSet<Long>()
+    private val sharpenHandler = Handler(Looper.getMainLooper())
+    private var sharpenStartTimeout: Runnable? = null
+    private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
+    // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
+    private val latchClassifier = LatchClassifier()
+    private val sharpenGate = SharpenOutputGate()
+    private var sharpenGateTimeout: Runnable? = null
+    /** SWITCHING: since when the decoder is ready for the selection but no output of it was latched. */
+    private var sharpenSelectionWaitGen = 0L
+    private var sharpenSelectionWaitSinceMs = 0L
+    private val sharpenStats = SharpenLatencyStats()
+    // Bounds on the renderer's start, first output and release (no endless waits).
+    private val SHARPEN_START_TIMEOUT_MS = 3000L
+    private val SHARPEN_FIRST_OUTPUT_TIMEOUT_MS = 3000L
+    private val SHARPEN_RELEASE_TIMEOUT_MS = 2000L
+    private var sharpenLatencyWindowStartMs = 0L
+    private var sharpenCountersBase = LongArray(4)
+    private var sharpenCountersGen = 0L
+
+    private fun selectSharpness(level: SharpnessLevel, origin: String) {
+        sharpness = level
+        SessionPersistence.saveSharpness(this, level)
+        executeSharpen(sharpenPolicy.select(level))
+        diagnosticsLog.log(
+            "sharpness_select",
+            "level=${level.code} s=${level.strength} origin=$origin path=${sharpenPolicy.path} " +
+                "effective=${sharpenPolicy.effective.code}"
+        )
+        renderQualityControls()
+    }
+
+    private fun executeSharpen(commands: List<SharpenPathPolicy.Command>) {
+        for (command in commands) {
+            when (command) {
+                SharpenPathPolicy.Command.BindDirect -> {
+                    cancelSharpenGate()
+                    val st = videoTextureView.surfaceTexture
+                    if (st == null) {
+                        diagnosticsLog.log("sharpen_direct_skipped", "reason=no_surface_texture")
+                        continue
+                    }
+                    val surface = Surface(st)
+                    videoSurface = surface
+                    NativeSessionBridge.nativeSetSurface(surface)
+                    diagnosticsLog.log(
+                        "sharpen_path",
+                        "path=direct requested=${sharpenPolicy.requested.code} effective=off " +
+                            "fallback=${sharpenPolicy.fallbackReason ?: "none"}"
+                    )
+                }
+                SharpenPathPolicy.Command.DetachDecoder -> {
+                    // Synchronous on the native side: the codec is stopped and the window released before
+                    // this returns -- the old producer is gone before any new one connects.
+                    NativeSessionBridge.nativeSetSurface(null)
+                    videoSurface?.release()
+                    videoSurface = null
+                    sharpenInputSurface = null  // the renderer owns and releases its input Surface
+                }
+                is SharpenPathPolicy.Command.StartRenderer -> startSharpenRenderer(command.generation, command.strength)
+                is SharpenPathPolicy.Command.AttachDecoderToRenderer -> {
+                    val input = sharpenInputSurface
+                    if (input != null && command.generation == sharpenRendererGeneration) {
+                        val epochBefore = NativeSessionBridge.nativeCodecEpoch()
+                        armSharpenGate(command.generation, epochBefore)
+                        NativeSessionBridge.nativeSetSurface(input)
+                        diagnosticsLog.log(
+                            "sharpen_path",
+                            "path=sharpen gen=${command.generation} requested=${sharpenPolicy.requested.code} " +
+                                "s=${sharpenPolicy.requested.strength}"
+                        )
+                    }
+                }
+                is SharpenPathPolicy.Command.ReleaseRenderer -> {
+                    val gen = command.generation
+                    val renderer = sharpenRenderers[gen]
+                    cancelSharpenGate()
+                    if (gen == sharpenRendererGeneration) {
+                        sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
+                        sharpenStartTimeout = null
+                    }
+                    if (renderer == null) {
+                        // Never made (no SurfaceTexture at start): nothing holds the surface.
+                        executeSharpen(sharpenPolicy.rendererReleased(gen, detached = true))
+                        continue
+                    }
+                    renderer.release()
+                    val timeout = Runnable {
+                        sharpenReleaseTimeouts.remove(gen)
+                        // r2 H1: the surface stays BLOCKED for this renderer -- no producer is connected to it
+                        // until the release arrives, however often the viewer asks.
+                        diagnosticsLog.log("sharpen_release_timeout", "gen=$gen surface=${sharpenPolicy.surfaceId} -- blocked until it lets go")
+                        executeSharpen(sharpenPolicy.rendererReleaseTimedOut(gen))
+                    }
+                    sharpenReleaseTimeouts[gen] = timeout
+                    sharpenHandler.postDelayed(timeout, SHARPEN_RELEASE_TIMEOUT_MS)
+                }
+                is SharpenPathPolicy.Command.SetStrength -> {
+                    if (command.generation == sharpenRendererGeneration) sharpenRenderer?.setStrength(command.strength)
+                }
+                is SharpenPathPolicy.Command.ProducerStuck -> {
+                    diagnosticsLog.log("sharpen_producer_stuck", "gen=${command.generation} surface=${sharpenPolicy.surfaceId} -- this surface stays unconnected until it is replaced")
+                }
+                is SharpenPathPolicy.Command.ShowFallback -> {
+                    diagnosticsLog.log(
+                        "sharpen_fallback",
+                        "requested=${sharpenPolicy.requested.code} effective=off reason=${command.reason}"
+                    )
+                    Toast.makeText(this, R.string.ui_sharpness_fallback, Toast.LENGTH_SHORT).show()
+                }
+                is SharpenPathPolicy.Command.ReleaseSurfaceTexture -> {
+                    val id = command.surfaceId
+                    if (sharpenAppOwnedSurfaces.remove(id)) {
+                        sharpenSurfaceTextures.remove(id)?.release()
+                        diagnosticsLog.log("sharpen_surface_released", "surface=$id")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startSharpenRenderer(generation: Long, strength: Float) {
+        val st = videoTextureView.surfaceTexture
+        sharpenRendererGeneration = generation
+        if (st == null) {
+            executeSharpen(sharpenPolicy.rendererFailed(generation, "no_surface_texture"))
+            return
+        }
+        val listener = object : SharpenRenderer.Listener {
+            override fun onReady(generation: Long, input: Surface) {
+                sharpenHandler.post {
+                    if (generation != sharpenRendererGeneration) return@post
+                    sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
+                    sharpenStartTimeout = null
+                    sharpenInputSurface = input
+                    executeSharpen(sharpenPolicy.rendererReady(generation))
+                }
+            }
+            override fun onFailed(generation: Long, reason: String) {
+                sharpenHandler.post { executeSharpen(sharpenPolicy.rendererFailed(generation, reason)) }
+            }
+            override fun onReleased(generation: Long, detached: Boolean) {
+                sharpenHandler.post {
+                    sharpenReleaseTimeouts.remove(generation)?.let { sharpenHandler.removeCallbacks(it) }
+                    val r = sharpenRenderers.remove(generation)
+                    diagnosticsLog.log(
+                        "sharpen_released",
+                        "gen=$generation detached=${if (detached) 1 else 0} notes=${r?.teardownNotes?.ifEmpty { "none" } ?: "none"}"
+                    )
+                    executeSharpen(sharpenPolicy.rendererReleased(generation, detached))
+                }
+            }
+        }
+        sharpenRenderers[generation] = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
+        val timeout = Runnable { executeSharpen(sharpenPolicy.rendererFailed(generation, "start_timeout")) }
+        sharpenStartTimeout = timeout
+        sharpenHandler.postDelayed(timeout, SHARPEN_START_TIMEOUT_MS)
+        diagnosticsLog.log("sharpen_start", "gen=$generation s=$strength faults=${if (SharpenTestSeam.ACTIVE) sharpenFaults else "none"}")
+    }
+
+    /**
+     * Contract 6 / r2 H2: with the sharpening pass in between, the decoder's "ready" is not yet a picture.
+     * The gate is armed when the decoder is attached to the renderer and confirmed by the first latch that is
+     * a frame of THAT renderer, surface and codec (SharpenOutputGate) -- whenever it happens, no counter
+     * baseline. Bounded by the gate's own timeout (armSharpenGate) in every scene, SWITCHING or VIEWER.
+     */
+    private fun armSharpenGate(generation: Long, codecEpochBefore: Long) {
+        val surfaceId = sharpenPolicy.surfaceId ?: return
+        sharpenGate.arm(generation, surfaceId, System.nanoTime(), codecEpochBefore, SystemClock.elapsedRealtime())
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        val timeout = Runnable {
+            sharpenGateTimeout = null
+            if (sharpenGate.isArmed && !sharpenGate.confirmed && sharpenPolicy.generation == generation &&
+                sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) {
+                executeSharpen(sharpenPolicy.rendererFailed(generation, "no_output_after_ready"))
+            }
+        }
+        sharpenGateTimeout = timeout
+        sharpenHandler.postDelayed(timeout, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS)
+    }
+
+    private fun cancelSharpenGate() {
+        sharpenGate.cancel()
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        sharpenGateTimeout = null
+    }
+
+    /**
+     * SWITCHING (the decoder is ready for this selection): is a frame of THIS selection's stream generation
+     * on screen through the renderer? A renderer kept across a target change waits for the new target's own
+     * frame; bounded at SHARPEN_FIRST_OUTPUT_TIMEOUT_MS from the decoder's ready, then a renderer failure.
+     */
+    private fun sharpenOutputConfirmed(nowMs: Long, selectionStreamGeneration: Long): Boolean {
+        val path = sharpenPolicy.path
+        if (path != SharpenPathPolicy.Path.STARTING && path != SharpenPathPolicy.Path.LIVE) {
+            sharpenSelectionWaitGen = 0L
+            return true
+        }
+        if (path == SharpenPathPolicy.Path.LIVE && sharpenGate.confirmedFor(selectionStreamGeneration)) {
+            sharpenSelectionWaitGen = 0L
+            return true
+        }
+        if (sharpenSelectionWaitGen != selectionStreamGeneration) {
+            sharpenSelectionWaitGen = selectionStreamGeneration
+            sharpenSelectionWaitSinceMs = nowMs
+        } else if (path == SharpenPathPolicy.Path.LIVE && !sharpenGate.timedOut(nowMs, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) &&
+            nowMs - sharpenSelectionWaitSinceMs > SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) {
+            sharpenSelectionWaitGen = 0L
+            executeSharpen(sharpenPolicy.rendererFailed(sharpenPolicy.generation, "no_output_for_selection"))
+        }
+        return false
+    }
+
+    /** S4 (r2 H3): one segment per (effective level, path, renderer generation, surface). */
+    private fun enterSharpenLatencySegment(nowNs: Long) {
+        val path = when (sharpenPolicy.path) {
+            SharpenPathPolicy.Path.LIVE, SharpenPathPolicy.Path.STARTING -> "sharpen"
+            SharpenPathPolicy.Path.DIRECT -> "direct"
+            else -> "none"
+        }
+        val key = SharpenLatencyStats.Key(
+            sharpenPolicy.effective.code, path, if (path == "sharpen") sharpenPolicy.generation else 0L,
+            sharpenPolicy.surfaceId ?: 0L,
+        )
+        val closedSegment = sharpenStats.segmentId
+        val closed = sharpenStats.enter(key, nowNs) ?: return
+        diagnosticsLog.log(
+            "sh_latency_segment",
+            "seg=$closedSegment ${closed.first} fps=$requestedRuntimeFps ${closed.second.fields()}"
+        )
+        sharpenLatencyWindowStartMs = SystemClock.elapsedRealtime()
+    }
+
+    /** S4: a 5 s progress line for the current segment (the segment line is the whole distribution). */
+    private fun maybeLogSharpenLatency(nowNs: Long) {
+        val now = SystemClock.elapsedRealtime()
+        if (sharpenLatencyWindowStartMs == 0L) sharpenLatencyWindowStartMs = now
+        if (now - sharpenLatencyWindowStartMs < 5000L) return
+        sharpenLatencyWindowStartMs = now
+        val w = sharpenStats.window(nowNs)
+        val seg = sharpenStats.segment(nowNs)
+        val r = sharpenRenderer
+        val counters = longArrayOf(
+            r?.framesAvailable?.get() ?: 0L, r?.framesDrawn?.get() ?: 0L, r?.framesSkipped?.get() ?: 0L, r?.redraws?.get() ?: 0L)
+        // Counters belong to one renderer: a new generation starts again from its own zero.
+        val d = if (sharpenCountersGen != sharpenPolicy.generation) counters
+                else LongArray(4) { counters[it] - sharpenCountersBase[it] }
+        sharpenCountersGen = sharpenPolicy.generation
+        sharpenCountersBase = counters
+        diagnosticsLog.log(
+            "sh_latency",
+            "seg=${sharpenStats.segmentId} ${sharpenStats.key} requested=${sharpenPolicy.requested.code} fps=$requestedRuntimeFps " +
+                "window: ${w.fields()} | segment: n=${seg.count} p95us=${seg.p95Us} | " +
+                "glAvail=${d[0]} glDrawn=${d[1]} glSkipped=${d[2]} glRedraws=${d[3]} " +
+                "drawWallUs=${(r?.lastDrawNs?.get() ?: 0L) / 1000} src=${r?.lastSourceSize ?: "-"} " +
+                "stepFromOutput=${r?.stepFromOutputSize?.get() ?: 0L} srcNeOut=${r?.framesSourceNotOutput?.get() ?: 0L}"
+        )
+    }
+
+    /** r2 H1: the policy knows the CURRENT TextureView surface by id; a different object is a new surface. */
+    private fun ensureSharpenSurface(surfaceTexture: SurfaceTexture) {
+        val id = sharpenPolicy.surfaceId
+        if (id != null && sharpenSurfaceTextures[id] === surfaceTexture) return
+        sharpenSurfaceSeq += 1
+        sharpenSurfaceTextures[sharpenSurfaceSeq] = surfaceTexture
+        sharpenPolicy.surfaceAvailable(sharpenSurfaceSeq)
+        diagnosticsLog.log("sharpen_surface", "surface=$sharpenSurfaceSeq")
+    }
+
     private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
         if (surfaceTexture == null) {
             releaseVideoSurface()
             return
         }
+        ensureSharpenSurface(surfaceTexture)
 
         val targetBufferWidth = resolveSurfaceBufferWidth()
         val targetBufferHeight = resolveSurfaceBufferHeight()
@@ -5066,13 +5443,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val bufferSizeChanged =
             surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight
-        if (videoSurface == null) {
+        val held = sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED
+        if (held && !bufferSizeChanged) {
+            // r2: the surface is still held by a renderer that has not confirmed it let go. bind() only records
+            // what to wire afterwards; the periodic sync calls this every tick, so no log and no buffer reset.
+            executeSharpen(sharpenPolicy.bind())
+        } else if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || held) {
             surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
             surfaceBufferWidth = targetBufferWidth
             surfaceBufferHeight = targetBufferHeight
-            val surface = Surface(surfaceTexture)
-            videoSurface = surface
-            NativeSessionBridge.nativeSetSurface(surface)
+            // sh-filter r1: who writes into the TextureView is the policy's call -- the decoder directly
+            // (off / fallback), or the sharpening pass (the decoder is attached to it once it is up).
+            executeSharpen(sharpenPolicy.bind())
             diagnosticsLog.log(
                 "viewer_surface_bound",
                 "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
@@ -5094,10 +5477,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun releaseVideoSurface() {
-        if (videoSurface == null) return
-        NativeSessionBridge.nativeSetSurface(null)
-        videoSurface?.release()
-        videoSurface = null
+        if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE) return
+        executeSharpen(sharpenPolicy.unbind())
         surfaceBufferWidth = 0
         surfaceBufferHeight = 0
         diagnosticsLog.log("viewer_surface_released", "scene=$currentScene")
@@ -5105,7 +5486,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun syncVideoSurface(forceRebind: Boolean) {
         if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
-            if (videoSurface != null) {
+            if (sharpenPolicy.path != SharpenPathPolicy.Path.NONE) {
                 releaseVideoSurface()
             }
             return
@@ -5130,7 +5511,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         if (currentScene == UiScene.SWITCHING &&
-            videoSurface != null &&
+            sharpenPolicy.path != SharpenPathPolicy.Path.NONE &&
             videoSizeChanged &&
             !forceRebind
         ) {
@@ -5150,7 +5531,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (forceRebind ||
             videoSizeChanged ||
-            videoSurface == null ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.NONE ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED ||
             surfaceBufferWidth != targetBufferWidth ||
             surfaceBufferHeight != targetBufferHeight) {
             bindVideoSurface(videoTextureView.surfaceTexture)

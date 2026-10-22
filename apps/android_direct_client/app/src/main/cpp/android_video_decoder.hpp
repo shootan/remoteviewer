@@ -30,6 +30,46 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void NotifyFrameDisplayed() {
     displayedFrameCount_.fetch_add(1, std::memory_order_relaxed);
   }
+  /** sh-filter r1 (S4): the CLOCK_MONOTONIC ns at which the frame whose output buffer carries this
+   *  timestamp was handed to the output Surface; 0 when it is not among the last kHandoffRing. The
+   *  timestamp is a KEY (the same one the TextureView's SurfaceTexture reports at latch, through the
+   *  direct path or the sharpening pass), not a clock. Lock-free reads, for the UI thread. */
+  int64_t HandoffNsForTimestamp(int64_t timestampNs) const {
+    HandoffInfo info;
+    return HandoffInfoForTimestamp(timestampNs, &info) ? info.handoffNs : 0;
+  }
+  /** sh-filter r2 (H2/H3/H5.3): everything known about the frame released with this timestamp -- when it
+   *  was handed over, the stream (selection) generation and codec instance it came from, and its VISIBLE
+   *  size (after crop). false when it is not among the last kHandoffRing. Lock-free (any thread). */
+  struct HandoffInfo {
+    int64_t handoffNs = 0;
+    uint32_t streamGeneration = 0;
+    uint32_t codecEpoch = 0;
+    uint32_t visibleWidth = 0;
+    uint32_t visibleHeight = 0;
+  };
+  bool HandoffInfoForTimestamp(int64_t timestampNs, HandoffInfo* out) const {
+    if (timestampNs == 0) return false;
+    for (size_t i = 0; i < kHandoffRing; ++i) {
+      if (handoffKey_[i].load(std::memory_order_acquire) != timestampNs) continue;
+      HandoffInfo info;
+      info.handoffNs = handoffNs_[i].load(std::memory_order_acquire);
+      const uint64_t meta = handoffMeta_[i].load(std::memory_order_acquire);
+      const uint64_t size = handoffSize_[i].load(std::memory_order_acquire);
+      // The slot is rewritten key=0 first and key last: the same key after the reads means a consistent set.
+      if (handoffKey_[i].load(std::memory_order_acquire) != timestampNs) continue;
+      info.streamGeneration = static_cast<uint32_t>(meta >> 32);
+      info.codecEpoch = static_cast<uint32_t>(meta & 0xffffffffu);
+      info.visibleWidth = static_cast<uint32_t>(size >> 32);
+      info.visibleHeight = static_cast<uint32_t>(size & 0xffffffffu);
+      *out = info;
+      return true;
+    }
+    return false;
+  }
+  /** sh-filter r2 (H2): codec instances started so far; a frame of a codec started after a given moment has
+   *  a larger epoch. Lock-free. */
+  uint32_t CodecEpoch() const { return codecEpoch_.load(std::memory_order_acquire); }
   void SetTargetFps(uint32_t fps);
   void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
   void OnVideoStreamReset() override;
@@ -155,6 +195,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t heldOutputPresentUs_ = 0;
   // Counted by the view, once per frame it actually latched.
   std::atomic<uint64_t> displayedFrameCount_{0};
+  // sh-filter r1: (buffer timestamp ns -> handoff monotonic ns) of the last frames released to the
+  // output Surface. Written under the decoder lock, read lock-free (HandoffNsForTimestamp).
+  static constexpr size_t kHandoffRing = 256;
+  std::atomic<int64_t> handoffKey_[kHandoffRing] = {};
+  std::atomic<int64_t> handoffNs_[kHandoffRing] = {};
+  // r2: (stream generation << 32 | codec epoch) and (visible width << 32 | visible height) of that frame.
+  std::atomic<uint64_t> handoffMeta_[kHandoffRing] = {};
+  std::atomic<uint64_t> handoffSize_[kHandoffRing] = {};
+  size_t handoffNext_ = 0;
+  std::atomic<uint32_t> codecEpoch_{0};
   uint64_t displayedWindowBase_ = 0;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;

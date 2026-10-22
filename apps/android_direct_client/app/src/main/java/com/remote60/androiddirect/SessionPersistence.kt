@@ -23,6 +23,18 @@ object SessionPersistence {
     // everything written before the two-level choice existed.
     private const val KEY_SETTINGS_SCHEMA = "settings_schema"
     private const val KEY_UNLOCK_PASSWORD_PREFIX = "unlock_pw_"
+    // sh-filter r1: its own key, outside the bitrate/fps schema -- reading it never migrates those.
+    private const val KEY_SHARPNESS = "sharpness"
+
+    /** Unset or unknown -> the default (weak); an explicit "off" stays off. */
+    fun loadSharpness(context: Context): SharpnessLevel =
+        SharpnessLevel.fromStored(
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_SHARPNESS, null))
+
+    fun saveSharpness(context: Context, level: SharpnessLevel) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_SHARPNESS, level.code).apply()
+    }
 
     /**
      * The saved endpoint, with bitrate/fps on the quality levels (1500 / 3000 / 6000) and three frame rates.

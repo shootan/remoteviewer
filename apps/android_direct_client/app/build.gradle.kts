@@ -9,6 +9,8 @@ val fixedDirectoryUrl = "https://gnlink.shotan.net"
 // the stored address is rewritten once the server has accepted it. Anything else is neither
 // sent nor erased. Keep in step with kMigratableDirectoryOrigins (fixed_directory.hpp).
 val migratableDirectoryOrigins = "https://rem.shotan.net"
+// sh-filter: the sharpening TEST seam (debug variant only; see sourceSets and the native define below).
+val shTestSeam = project.findProperty("gnlink.shTestSeam") == "true"
 
 // A release that was handed the test property is refused rather than quietly built with the
 // fixed address: whoever passed it believes they are getting something else.
@@ -30,8 +32,8 @@ android {
     applicationId = "com.remote60.androiddirect"
     minSdk = 28
     targetSdk = 34
-    versionCode = 29
-    versionName = "0.2.30"
+    versionCode = 30
+    versionName = "0.2.31"
 
     externalNativeBuild {
       cmake {
@@ -75,6 +77,15 @@ android {
 
   buildTypes {
     debug {
+      // sh-filter r3 (R2): the native half of the test seam -- debug variant only, never release.
+      if (shTestSeam) {
+        externalNativeBuild {
+          cmake {
+            cppFlags += "-DGNLINK_SH_TEST_SEAM=1"
+            arguments += "-DGNLINK_SH_TEST_SEAM=ON"  // links libnativewindow for the fixture's transform hook
+          }
+        }
+      }
       // TEST BUILDS ONLY: -Pgnlink.testDirectoryUrl=http://10.0.2.2:18200 points a debug APK at
       // a fixture directory. There is no such line under `release`.
       (project.findProperty("gnlink.testDirectoryUrl") as String?)?.let {
@@ -90,6 +101,34 @@ android {
         getDefaultProguardFile("proguard-android-optimize.txt"),
         "proguard-rules.pro"
       )
+    }
+  }
+
+  // sh-filter: the sharpening test seam is a separate source file. r3 (Codex R1) -- by structure, not by
+  // the words typed on the command line:
+  //   * the RELEASE variant always compiles src/noseam (its own source set): no flag or task name can put
+  //     the seam into a release build;
+  //   * only the DEBUG variant takes src/shseam, and only with -Pgnlink.shTestSeam=true;
+  //   * with the flag on, a task graph that Gradle has RESOLVED to contain any release-variant task (full
+  //     name, abbreviation such as assembleRel, or an aggregate like build) is refused before it runs.
+  // The APK gate (gnlink_check_fixed_server.py --apk) still refuses any APK whose dex carries the seam.
+  sourceSets {
+    getByName("debug") {
+      java.srcDir(if (shTestSeam) "src/shseam/java" else "src/noseam/java")
+    }
+    getByName("release") {
+      java.srcDir("src/noseam/java")
+    }
+  }
+  if (shTestSeam) {
+    gradle.taskGraph.whenReady {
+      val release = allTasks.filter { it.project == project && it.name.contains("Release") }
+      if (release.isNotEmpty()) {
+        throw GradleException(
+          "gnlink.shTestSeam=true is for debug test builds only; the resolved task graph has release " +
+            "tasks: ${release.take(5).joinToString { it.path }}"
+        )
+      }
     }
   }
 
