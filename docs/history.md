@@ -13326,7 +13326,7 @@ Next
     - `remote60_punch_any_mutant_netreset_test` 6 FAIL(첫 TTL 에 14 ms 포기).
   - 영향 시험(r2): hello_backlog·punch_any·hello_stats·connect_op_gate·shared_core·udp_control_e2e·control_resume_e2e(60)·android_session_reboot(17)·host_punch_reply(102) exit 0. gate 9/9·self 16.
   - directory_retry 1/133 FAIL(`address observation timed out`): 기존 간헐 건, 작업용2 별도 조사.
-  - viewer_udp_recovery 3 FAIL(`stream flowed` 처리량 기준): 같은 시각 기준판 5063cd9 도 2/2 동일하게 FAIL. 다른 작업자의 에뮬레이터(qemu)가 CPU 를 쓰는 환경 탓이다(r1 시점에는 PASS).
+  - viewer_udp_recovery 3 FAIL(`stream flowed` 처리량 기준, :1081/:1098/:1146): 후보와 같은 시각의 기준판 5063cd9 도 2/2 같은 세 줄 FAIL(r1 시점 후보는 PASS). **원인 미확정 — ledger 후보.** 처음 적었던 'qemu 부하' 귀속은 철회한다(검증용 측정 당시 qemu 0.15 core/s·전체 CPU 3–4% 로 뒷받침되지 않음). directory_retry 간헐과 원인을 합치지 않는다.
 - r2 실 재현: 11 s 유지 재연결 8회 + 첫 연결 1회 모두 0.27–0.54 s. 실제 사슬 presentfail·desktop 모두 ALL PASS, 첫 재연결 hello 0.27/0.54 s → restored target=desktop.
 - Android(r2): externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(250/0)의 cap 반례 PASS, 변이 301 Hello FAIL. 기기는 미검증.
 - 제품/테스트/문서: 제품 bcb6a46 · 테스트 3e625d8 · 문서(이 줄들).
