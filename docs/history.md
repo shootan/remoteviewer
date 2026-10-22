@@ -13470,3 +13470,4 @@ Next
 - android.manifest 직접 작성(schema 2, r-0.2.31) → `gnlink_release_sign.ps1 -Platform android`(manifest 309a9c5e… 불변, sig cbb5b7d6…), `gnlink_verify_manifest.js` ok·변조 REFUSED(Windows C++ verifier 는 arm64 를 WrongPlatform 으로 거부 — 설계상 대상 아님). `gnlink_deploy.sh --platform android` dry-run → 실게시 rc0, 백업 0.2.30 pair(b64c1b49…/210ab909…), 외부 https 해시 일치. 서버: android 309a9c5e…/cbb5b7d6…, windows 814e4bb9…/a39b2f14…(0.2.162 그대로).
 - 범위 밖: keepalive-multi(정책값·재통합 미결), 휴대폰 잠금 화면 비밀번호(sealed APK 미구현). 미검증: 실폰 화질·지연(S4, AVD 에서 +13~15 ms 미달)·발열·회전 뒤 터치, control loop failed 관찰(원장).
 - 제품/테스트/문서: 문서(이 항목).
+- 기록 정정(Codex 최종 근거 `.claude/codex_rel_apk_0231_final.md`): 작업목록 SH 행을 "결정 대기·CAS" 에서 "0.2.31 게시·실폰 대기, 자체 5탭 원본 크기 선명화, 끄기/0.20/0.35" 로 고치고 구현계획 SH 체크박스 갱신. 제품 변경 없음.
