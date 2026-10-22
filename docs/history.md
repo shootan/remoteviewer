@@ -13305,3 +13305,28 @@ Next
 - 실제 사슬(DW 4db9f17 + 7646eef, scratch inv-hello-chain): presentfail 2회·desktop 1회 모두 exit 0 ALL PASS. 첫 재연결에서 hello 0.27–0.54 s(badAcks 1–2, recvErrors 0) → `result=restored target=desktop`. 첫 연결 hello 0.53–0.54 s.
 - Android: native 공유 코어(PunchAny·udp_hello_handshake)에 들어간다. externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(retrySleepMs 0, slice 250)의 backlog·연속 유입 시험은 Windows 의 같은 코드로 통과. 기기 실행·POSIX 오류 의미(ECONNREFUSED 를 일시 오류로 취급)는 미검증. APK 버전·배포 무변경.
 - 제품/테스트/문서: 제품 7646eef · 테스트 4d8e4a8 · 문서(이 항목).
+- **r2 (Codex 83c3ac5 NEEDS_CHANGES, `codex_hello_delay_fix_r1.md` N1·N2)**:
+  - N1: hello 의 수신 batch(512)가 slice 보다 먼저 차면 라운드가 일찍 끝나, 다음 Hello 가 당겨졌다(Android pause 0 이면 즉시). 이제 batch 가 차면 10 ms 쉬고 그 라운드의 원래 끝까지 계속 읽는다. 상한 확대·timeout 추가는 하지 않았다. `fullBatches` 지표를 추가했고 hpp 주석을 고쳤다.
+  - N2: PunchAny 가 세션용 분류를 그대로 써서 'terminal' 이면 즉시 끝냈다. 이제 PunchAny 안에서 따로 판단한다.
+    - 계속: UDP recvfrom 이 문서화한 경로별 보고(WSAECONNRESET, WSAENETRESET=TTL, WSAEMSGSIZE, POSIX ECONNREFUSED). 150 ms 박자를 지킨다.
+    - 종료: 소켓 자체 실패(WSAENOTSOCK 등).
+    - 광역 classify_udp_recv 는 불변.
+  - 시험 seam(수신 대체)과 변이 매크로 2개는 시험 대상에서만 컴파일된다.
+- r2 시험(bcb6a46·3e625d8):
+  - hello_backlog 28/28:
+    - 3000+ punch 를 계속 채워도 full batch 52–65회에 Hello 4회(PC·Android).
+    - 2000개 뒤의 ack 를 1라운드 51 ms 에 읽는다.
+    - stop 310 ms.
+  - punch_any:
+    - 한 경로 TTL 보고 13회 뒤 응답 후보를 204 ms 에 채택.
+    - WSAENOTSOCK 은 즉시 `punch receive failed (error 10038)`.
+    - TTL 이 계속 와도 1.5 s 10 라운드, stop 329 ms.
+  - 변이 대상(검증용이 제품 소스 수정 없이 실행):
+    - `remote60_hello_backlog_mutant_batch_test` 3 FAIL(PC 16·Android 301 Hello, 2000 뒤 ack 4라운드).
+    - `remote60_punch_any_mutant_netreset_test` 6 FAIL(첫 TTL 에 14 ms 포기).
+  - 영향 시험(r2): hello_backlog·punch_any·hello_stats·connect_op_gate·shared_core·udp_control_e2e·control_resume_e2e(60)·android_session_reboot(17)·host_punch_reply(102) exit 0. gate 9/9·self 16.
+  - directory_retry 1/133 FAIL(`address observation timed out`): 기존 간헐 건, 작업용2 별도 조사.
+  - viewer_udp_recovery 3 FAIL(`stream flowed` 처리량 기준): 같은 시각 기준판 5063cd9 도 2/2 동일하게 FAIL. 다른 작업자의 에뮬레이터(qemu)가 CPU 를 쓰는 환경 탓이다(r1 시점에는 PASS).
+- r2 실 재현: 11 s 유지 재연결 8회 + 첫 연결 1회 모두 0.27–0.54 s. 실제 사슬 presentfail·desktop 모두 ALL PASS, 첫 재연결 hello 0.27/0.54 s → restored target=desktop.
+- Android(r2): externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(250/0)의 cap 반례 PASS, 변이 301 Hello FAIL. 기기는 미검증.
+- 제품/테스트/문서: 제품 bcb6a46 · 테스트 3e625d8 · 문서(이 줄들).
