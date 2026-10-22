@@ -105,6 +105,9 @@ void say(const std::string& s) {
 // quality-6m r1: the captured window's size (--target-size WxH). 480x270 is a UI/protocol fixture; a resolution
 // claim needs the source it is about (1920x1080).
 int gTargetW = 480, gTargetH = 270;
+// keepalive-multi r1: --target-mark RRGGBB paints a large square of that colour in the middle, so the phone's screenshot
+// says which of two fixture hosts it shows (-1 = none).
+long gTargetMark = -1;
 
 class CadenceTarget {
  public:
@@ -154,6 +157,12 @@ class CadenceTarget {
         HBRUSH b = CreateSolidBrush(k.c);
         FillRect(dc, &k.r, b);
         DeleteObject(b);
+      }
+      if (gTargetMark >= 0) {
+        const RECT mark{cw / 2 - ch / 4, ch / 4, cw / 2 + ch / 4, ch * 3 / 4};
+        HBRUSH m = CreateSolidBrush(RGB((gTargetMark >> 16) & 0xff, (gTargetMark >> 8) & 0xff, gTargetMark & 0xff));
+        FillRect(dc, &mark, m);
+        DeleteObject(m);
       }
       EndPaint(hwnd, &ps);
       return 0;
@@ -708,6 +717,8 @@ int wmain(int argc, wchar_t** argv) {
       parkVariant.assign(v.begin(), v.end());
     } else if (a == L"--runtime-bitrate" && more) {
       runtimeBitrate = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--target-mark" && more) {
+      gTargetMark = std::wcstol(argv[++i], nullptr, 16);
     } else if (a == L"--target-size" && more) {
       std::swscanf(argv[++i], L"%dx%d", &gTargetW, &gTargetH);
     }

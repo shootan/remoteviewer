@@ -418,6 +418,13 @@ std::string default_host_cache_path() {
 }
 
 std::string machine_id() {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // TEST BUILD ONLY (keepalive-multi r1): two fixture hosts on one PC would share MachineGuid -- and so one hostId at
+  // the directory. The 2-host fixture gives each its own machine id; GNLinkStream never reads this.
+  if (const char* fixture = std::getenv("REMOTE60_PINNED_TEST_MACHINE_ID"); fixture && *fixture) {
+    return std::string(fixture);
+  }
+#endif
   // MachineGuid survives reinstalls of our own software, which is exactly the property we
   // need: re-registering must update the existing host entry, not add another one.
   char buf[128] = {};

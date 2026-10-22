@@ -13471,3 +13471,13 @@ Next
 - 제품/테스트/문서: 문서(이 항목).
 - 기록 정정(Codex 최종 근거 `.claude/codex_rel_apk_0231_final.md`): 작업목록 SH 행을 "결정 대기·CAS" 에서 "0.2.31 게시·실폰 대기, 자체 5탭 원본 크기 선명화, 끄기/0.20/0.35" 로 고치고 구현계획 SH 체크박스 갱신. 제품 변경 없음.
 - 기록 정정 추가(Codex `.claude/codex_rel_apk_0231_final.md`): d41162e 의 history 에 남은 merge 구분자 '=======' 1줄 제거(양쪽 본문 보존), APK 후보 항목의 공유 native 서술을 punch/hello 와 모니터 Host 대조로 구분.
+
+
+### 2026-10-16 keepalive-multi (후보, 미게시) — 여러 PC 연결 동시 유지 · **앱을 벗어나면 모든 PC 연결 종료**
+
+- 사용자 요구: A·B PC 를 오갈 때 떠난 PC 의 연결을 유지(0.2.30 은 park 1개, 다른 PC 선택 시 종료). branch `feat/keepalive-multi`, 계약 `codex_keepalive_multi_r1.md` + `codex_keepalive_multi_2c22313.md`.
+- 구현: native 세션 테이블(entry handle·entry 별 gate·LRU·PC 별 TTL·lifecycle epoch), 단일 decoder 의 binding token(모든 sink 방향), PC 별 카드 상태·끊기. 정책 최대 3대(화면 포함)·PC 별 5분은 **제안값, 사용자 답 대기**.
+- **동작 변경(r2 L1)**: 0.2.30 은 화면의 세션을 백그라운드에서도 유지했다. 이번부터 **앱을 벗어나면(onStop) 화면의 PC·유지 중 PC·연결 중 전부 종료**한다. 확인된 네트워크 변화와 '모두 끊기'도 전부 종료. 회전은 해당 없음.
+- r2 M1: 새 연결의 LRU 축출은 그 연결의 인증 Hello·제어가 성립(Connected)한 뒤에만 — 실패한 연결은 기존 PC 를 끊지 않는다. r2 M2: 연결 중 다른 PC 탭은 최신 의도로 즉시 실행(진행 중 연결은 자기 것만 취소).
+- 상태: 후보 검증 중(보고 `feat-keepalive-multi/.claude/report_keepalive_multi_r2.md`). 출하 전 필요: 정책값 사용자 답, Codex 판정.
+- 제품/테스트/문서: 문서(이 항목·자원표).

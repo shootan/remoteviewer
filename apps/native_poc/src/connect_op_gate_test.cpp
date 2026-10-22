@@ -1,6 +1,7 @@
 // keepalive r3 R2-a / r4 S1·S2: the native connect gate (connect_op_gate.hpp) -- the product's own class, with
 // its test hooks (REMOTE60_CONNECT_GATE_TEST_HOOKS, this target only) used to put an event exactly at a
 // boundary. Each boundary also has its negative control: the r3 / 2abb8be flow transcribed, which must fail.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -548,6 +549,33 @@ int main() {
     const long grew = open_handles() - before;
     std::printf("  200 cancelled observes: cancelled=%d, process handles %+ld\n", cancelled, grew);
     check("200 cancelled observes leave no socket behind (handles grew < 10)", cancelled == 200 && grew < 10);
+  }
+
+  std::printf("[13] keepalive-multi r1: one gate per PC -- B's new operation does not stop A's step; numbers stay unique\n");
+  {
+    ConnectOpGate gA, gB;  // A parked, B being connected
+    const int64_t a = gA.Next();
+    bool aStopped = true;
+    {
+      ConnectOpGate::StepGuard stepA(gA, a);  // A's step in progress
+      const int64_t b = gB.Next();            // the user taps B
+      aStopped = stepA.stopped();
+      check("op numbers are unique across the two gates", a != b);
+    }
+    check("A's step is NOT stopped by B's operation (cancel is per PC)", !aStopped);
+    std::vector<int64_t> nums;
+    for (int i = 0; i < 50; ++i) {
+      nums.push_back(gA.Next());
+      nums.push_back(gB.Next());
+    }
+    std::sort(nums.begin(), nums.end());
+    check("100 numbers from two gates: no duplicate", std::adjacent_find(nums.begin(), nums.end()) == nums.end());
+    // negative control: 0.2.30 -- one gate for the process; B's Next stops A's step
+    ConnectOpGate g0;
+    const int64_t a0 = g0.Next();
+    ConnectOpGate::StepGuard s0(g0, a0);
+    g0.Next();
+    check("NEGATIVE (0.2.30 single gate): B's operation stops A's step", s0.stopped());
   }
 
   std::printf("\nconnect_op_gate_test: %d passed, %d failed\nRESULT: %s\n", gPass, gFail, gFail == 0 ? "PASS" : "FAIL");

@@ -16,7 +16,7 @@ val shTestSeam = project.findProperty("gnlink.shTestSeam") == "true"
 // fixed address: whoever passed it believes they are getting something else.
 gradle.taskGraph.whenReady {
   val release = allTasks.any { it.project == project && it.name.contains("Release") }
-  for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins")) {
+  for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins", "gnlink.testKeepParkTtlMs")) {
     if (release && project.hasProperty(property)) {
       throw GradleException(
         "$property is for debug builds; a release build always uses $fixedDirectoryUrl")
@@ -50,6 +50,9 @@ android {
     buildConfigField("String", "DIRECTORY_URL", "\"" + fixedDirectoryUrl + "\"")
     buildConfigField("String", "DIRECTORY_MIGRATABLE_ORIGINS",
       "\"" + migratableDirectoryOrigins + "\"")
+    // keepalive-multi: 0 = the policy object's own park limit (SessionPark.Policy). Only a debug TEST build may set
+    // another (below), to watch a park expire in a test run.
+    buildConfigField("long", "TEST_KEEP_PARK_TTL_MS", "0L")
 
     // Where updates come from, and the key that says a manifest is ours.
     //
@@ -93,6 +96,11 @@ android {
         // A fixture has no former names unless the test names them.
         buildConfigField("String", "DIRECTORY_MIGRATABLE_ORIGINS",
           "\"" + (project.findProperty("gnlink.testMigratableOrigins") ?: "") + "\"")
+      }
+      // TEST BUILDS ONLY (keepalive-multi r2 V1): -Pgnlink.testKeepParkTtlMs=45000 shortens each PC's park limit so a
+      // test sees one expire. Refused for a release (above); the shipped default stays SessionPark.Policy's.
+      (project.findProperty("gnlink.testKeepParkTtlMs") as String?)?.let {
+        buildConfigField("long", "TEST_KEEP_PARK_TTL_MS", it.toLong().toString() + "L")
       }
     }
     release {

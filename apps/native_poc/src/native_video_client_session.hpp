@@ -163,6 +163,11 @@ class ClientSessionController {
   bool BeginPark();
   bool ResumeFromPark();
   void EndPark();
+  // keepalive-multi r1: this connection's park limit (the policy's TTL), enforced by its own control loop.
+  void SetParkLimitMs(uint64_t ms) {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.SetParkedLimitUs(ms * 1000ull);
+  }
   ClientParkPhase ParkPhase() const;
   // How many held keys / buttons the park released, and unsent actions it dropped (diagnostics).
   uint32_t ParkReleasedCount() const { return parkReleased_.load(std::memory_order_relaxed); }
