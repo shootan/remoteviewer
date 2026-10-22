@@ -22,10 +22,11 @@
 //
 // dxgi-wedge-fix r3 (Codex E2/E3) -- GNLINK_CHAIN_SCENARIO, after session 1's desktop is presented:
 //   desktop     (default) the wedge -> reconnect -> the desktop again, as above.
-//   monitor     the host (test seam) lists two screens; the viewer's OWN toolbar is searched for its screen
-//               switch. If it is there: pick the second screen through it -> "monitor" reported -> wedge ->
-//               the reconnected viewer shows the picker with the reason and selects nothing -> a manual pick
-//               of the desktop card shows the stream. If it is not there, that is reported as found.
+//   monitor     the host (test seam) lists two screens; the SHIPPED viewer asks for the list itself (r4) and
+//               its own toolbar shows the screen switch: pick the second screen through it -> "monitor"
+//               reported -> wedge -> the reconnected viewer shows the picker with the reason and selects
+//               nothing (a restore of the desktop is named as WRONG) -> a manual pick shows the stream.
+//   nomonitors  the host does not advertise the monitor messages: no screen-list request, no switch.
 //   presentfail the viewer is GNLinkViewerR3Test (GNLINK_CHAIN_VIEWER_EXE). Back to the picker
 //               through the toolbar's 대상 선택; the fixture window B (GNLINK_CHAIN_B_TITLE, checked to be the
 //               first listed window before anything is clicked) is picked with presents made to FAIL ->
@@ -383,9 +384,21 @@ void run_r3_scenario(const std::string& scenario, DWORD pid1, HWND viewer1, cons
   for (const auto& [id, x] : buttons) ids += std::to_string(id) + "@" + std::to_string(x) + " ";
   std::printf("      (toolbar buttons found by the sweep: %s)\n", ids.c_str());
 
-  if (scenario == "monitor" || scenario == "monitor_test_viewer") {
+  if (scenario == "nomonitors") {
+    // r4: a host that does not advertise the monitor messages (test seam "nomonitors", an older host): the
+    // shipped viewer must never ask it for a screen list, and so shows no screen switch.
+    chain_pump(3000);
     const std::string v1 = lines_of_pid(viewer_log_text(), pid1);
-    std::printf("      (monitor lists this viewer received: %zu)\n", count_of(v1, "monitor-list"));
+    check(v1.find("monitor-list requested") == std::string::npos, "r4: no screen-list request to a host without the monitor messages");
+    check(!buttons.count(3), "r4: ...and no screen switch on the toolbar");
+    return;
+  }
+  if (scenario == "monitor") {
+    const std::string v1 = lines_of_pid(viewer_log_text(), pid1);
+    std::printf("      (screen-list requests by this viewer: %zu)\n", count_of(v1, "monitor-list requested"));
+    check(count_of(v1, "monitor-list requested") == 1, "r4: the SHIPPED viewer asked the host for its screen list, once");
+    check(v1.find("[viewer-restore] target=monitor") == std::string::npos,
+          "r4: the list alone selected nothing and did not change what is reported (still the desktop)");
     if (!buttons.count(3)) {
       check(false, "E2: the toolbar offers a screen switch while the host lists two screens",
             "FOUND: no screen-switch button (id 3) -- the viewer has no screen list");
@@ -408,9 +421,23 @@ void run_r3_scenario(const std::string& scenario, DWORD pid1, HWND viewer1, cons
             "E2: the session died; the shell's reconnect carries restore=monitor");
     const DWORD pid2 = next_viewer(pid1);
     require(pid2 != 0, "E2: the shell started a new viewer on its own");
-    require(chain_wait([&] { return lines_of_pid(viewer_log_text(), pid2).find("result=picker reason=monitor_not_restored") !=
-                                    std::string::npos; }, 60000),
-            "E2: the new viewer did NOT restore it: the picker, reason monitor_not_restored");
+    // Either outcome is waited for and named: the picker with its reason (right), or a restore of the desktop
+    // (wrong -- what the MONITOR_AS_DESKTOP mutant does). A viewer that dies or never decides is INVALID.
+    std::string outcome;
+    chain_wait([&] {
+      const std::string v = lines_of_pid(viewer_log_text(), pid2);
+      if (v.find("result=picker reason=monitor_not_restored") != std::string::npos) outcome = "picker";
+      else if (v.find("[restore] requested") != std::string::npos || v.find("result=restored") != std::string::npos)
+        outcome = "restored";
+      return !outcome.empty();
+    }, 60000);
+    if (outcome.empty()) {
+      std::printf("chain: INVALID the new viewer neither restored nor showed the picker reason (exited or stuck)\n");
+      std::fflush(stdout);
+      TerminateProcess(GetCurrentProcess(), 3);
+    }
+    require(outcome == "picker", "E2: the new viewer did NOT restore it: the picker, reason monitor_not_restored",
+            outcome == "restored" ? "WRONG: it restored the desktop on its own for an explicitly chosen screen" : outcome);
     chain_pump(4000);
     const std::string v2 = lines_of_pid(viewer_log_text(), pid2);
     check(v2.find("[restore] requested") == std::string::npos && v2.find("select_request") == std::string::npos &&

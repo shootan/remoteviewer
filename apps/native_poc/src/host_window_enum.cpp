@@ -139,6 +139,22 @@ void window_content_extent(HWND hwnd, const RECT& windowRect, int* outW, int* ou
   }
 }
 
+#ifdef REMOTE60_STREAM_TEST_SEAM
+bool test_host_hides_monitor_messages() {
+  wchar_t path[MAX_PATH] = {};
+  const DWORD n = GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_MONITORS_FILE", path, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return false;
+  char mode[16] = {};
+  HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (f == INVALID_HANDLE_VALUE) return false;
+  DWORD got = 0;
+  ReadFile(f, mode, sizeof(mode) - 1, &got, nullptr);
+  CloseHandle(f);
+  return std::string(mode).rfind("nomonitors", 0) == 0;
+}
+#endif
+
 std::vector<MonitorListEntry> enumerate_monitors() {
   std::vector<MonitorListEntry> out;
   auto cb = [](HMONITOR mon, HDC, LPRECT, LPARAM lParam) -> BOOL {

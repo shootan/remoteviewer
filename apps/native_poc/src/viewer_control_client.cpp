@@ -522,6 +522,13 @@ void ControlClient::handle_window_list(const ControlWindowListMessage& windowLis
     // Only when a screen other than the primary was asked for: selecting monitor
     // zero would restart the capture for no change.
     ctx.picker.windowPanel.RequestMonitorSelect(ctx.session.requestedMonitorId);
+  } else if (monitorsNewlySupported) {
+    // dxgi-wedge-fix r4 (Codex r3 ③): ask for the screen list once per connection, as soon as the host
+    // says it has the monitor messages -- picker or not. Without it the toolbar never had a screen switch
+    // (it needs two or more screens), so a user could not choose a screen at all. A query only: nothing is
+    // selected, the stream/generation are untouched, and the restore descriptor does not change.
+    ctx.picker.windowPanel.RequestMonitorList();
+    log_client_line(ctx, "[native-video-client][control] monitor-list requested (host has the monitor messages)");
   }
   InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
 }
@@ -668,6 +675,8 @@ bool ControlClient::pump_control_resume(
 }
 void ControlClient::Run() {
   ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel);  // r5 G11: a new connection's run
+  // dxgi-wedge-fix r4: the screen capability (and so the one screen-list request) belongs to THIS connection.
+  ctx.picker.windowPanel.SetHostSupportsMonitors(false);
   ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
   // Built once, not per action: the tunnelled link carries the partially-read inbound
   // message between calls, and a fresh one each time would drop whatever it held.

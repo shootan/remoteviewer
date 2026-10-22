@@ -13310,3 +13310,12 @@ Next
 - E3: 시험 뷰어의 present 실패 주입(render 미실행 → 제품 note_present_result → 43). A(desktop) present·보고 → 툴바 대상 선택 → fixture 창 B(목록 첫 항목인지 확인 후에만 클릭) reveal → present 실패 → B 보고 0(1/1) → 43 → shell restore=desktop → 새 뷰어 desktop restored. 37 PASS. 대조: B present 성공 → `window` 보고 → shell restore=window → 새 뷰어 picker window_not_restored. 36 PASS. 변이 REPORT_ON_REVEAL(r1 규칙)은 통합 경로에서 FAIL(보고 2→3, restore 잃음).
 - 기본 desktop 사슬 재확인 38 PASS. 이 PC 모니터 1개·실 2번째 출력 동일성·회사 PC 실기는 미검증 그대로.
 - 제품/테스트/문서: 시험 seam(제품 소스 내 #ifdef), 테스트(사슬 시나리오·runner·변이 대상·gate 표식), 문서(이 항목).
+
+### 2026-10-22 dxgi-wedge-fix r4 — 출하 뷰어 화면 목록 요청, monitor 변이 재작성 (미게시)
+
+- 근거: `codex_dxgi_wedge_fix_r3.md` ①·③(②는 별도 조사 task). E3 은 닫힘: r3 첫 presentfail 실행 35/1 FAIL 과 이후 3 PASS 는 그대로 기록(소급 PASS 아님).
+- ③ 제품: 뷰어가 연결마다 호스트가 monitor messages 를 알리면(window list 플래그) 화면 목록을 1회 요청한다 — picker 여부와 무관(전에는 picker 모드에서 요청이 없어 툴바 화면 전환이 생기지 않았다). 조회만: select·stream·generation·복원 descriptor 변경 0. 연결 시작에 capability 를 초기화해 요청은 연결당 1회. 미지원 호스트에는 보내지 않는다. 시험 뷰어의 목록 요청 보조(GNLINK_VIEWER_TEST_REQUEST_MONITORS)는 제거.
+- 시험 호스트 seam: monitors 파일 "nomonitors" 면 monitor messages 를 알리지 않음(구형 호스트 대조, 시험 빌드 전용).
+- ① monitor_as_desktop 변이: 이전 변이는 restore 의 guard 를 그대로 두고 DecideRestore 만 바꿔 nullptr 문자열로 **뷰어가 충돌**(0xC0000005)했다 — 잘못된 복원의 검출이 아니었다(r3 보고의 "변이 FAIL" 정정). 이제 guard 와 결정을 함께 우회해 실제로 desktop 을 자동 선택·present 하고, E2 는 두 결과(picker 사유 / desktop 복원)를 이름으로 구분해 실패한다.
+- 사슬(출하 GNLinkViewer): monitor 44/0(목록 요청 1회·목록만으로 변화 0·툴바 전환→monitor 보고→wedge→새 뷰어 picker monitor_not_restored·자동 선택 0→수동 선택), nomonitors 29/0(요청 0·전환 버튼 없음), desktop 38/0. 변이 38 PASS + 1 FAIL("WRONG: it restored the desktop on its own"), 프로세스 생존.
+- 제품/테스트/문서: 제품(viewer_control_client), 시험 seam(host_window_enum/host_control_session #ifdef), 테스트(사슬·runner), 문서(이 항목).

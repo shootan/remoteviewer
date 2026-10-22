@@ -9,7 +9,6 @@
 #include "viewer_log.hpp"
 #include "viewer_picker.hpp"
 #include "viewer_restore_target.hpp"
-#include "viewer_present_fail_seam.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -55,10 +54,15 @@ void restore_step(ViewerState& ctx, HWND hwnd) {
   auto& r = ctx.picker.restore;
   if (r.phase != RestoreState::Phase::Waiting || !r.target) return;
   // Decided before waiting on anything: a target that is never restored does not keep the user waiting.
+  // (The test-only MONITOR_AS_DESKTOP mutant bypasses this guard as well as DecideRestore's answer, so it
+  // really goes on to select and present the desktop for an explicit screen -- r4: an r3 mutant that only
+  // changed DecideRestore crashed here instead, which is not the wrong restore it was meant to show.)
+#ifndef REMOTE60_RESTORE_MUTANT_MONITOR_AS_DESKTOP
   if (r.target->kind != RestoreTarget::Kind::Desktop) {
     fail(ctx, DecideRestore(*r.target, false).failReason);
     return;
   }
+#endif
   const bool connected = ctx.control.connected.load(std::memory_order_relaxed);
   const bool listSeen = r.windowListSeen.load(std::memory_order_acquire);
   if (!connected || !listSeen) {
@@ -107,9 +111,6 @@ void restore_on_reveal(ViewerState& ctx, uint64_t generation) {
   if (r.picked) report(ctx, *r.picked, "reveal");
 #endif
   r.picked.reset();
-#ifdef REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM
-  if (viewer_test_requests_monitor_list()) ctx.picker.windowPanel.RequestMonitorList();  // TEST BUILD ONLY (r3 E2)
-#endif
   log_client_line(ctx, "[native-video-client][restore] revealed gen=" + std::to_string(generation) +
                            " (reported once presented)");
 }

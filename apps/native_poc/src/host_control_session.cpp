@@ -417,10 +417,15 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
     rsp.flags |= remote60::native_poc::kControlWindowListFlagThumbnails;
     // Says the monitor messages exist here. A client that asked an older host would wait for a
     // reply that never comes, since unknown opcodes are drained silently.
+#ifdef REMOTE60_STREAM_TEST_SEAM
+    if (!remote60::native_poc::test_host_hides_monitor_messages())  // r4: an older host, for the client's control
+#endif
+    {
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitors;
     // And that a monitor can be selected through the window-select transaction (applied, then
     // acknowledged with the new stream generation). Clients without it keep ControlMonitorSelect.
     rsp.flags |= remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1;
+    }
     rsp.selectedWindowId = capture.selectedWindowId.load(std::memory_order_relaxed);
     auto windows = pinnedSeam ? std::vector<remote60::native_poc::WindowListEntry>{} : enumerate_shareable_windows();
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM

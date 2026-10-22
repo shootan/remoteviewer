@@ -88,9 +88,9 @@ async function stop(child) {
     GNLINK_STREAM_TEST_DIRECTORY: url,
     GNLINK_STREAM_TEST_CACHE: path.join(hostAppData, 'remote60', 'host.json'),
     GNLINK_STREAM_TEST_DXGI_WEDGE_FILE: wedgeFile };
-  if (scenario === 'monitor' || scenario === 'monitor_test_viewer') {
+  if (scenario === 'monitor' || scenario === 'nomonitors') {
     const monitorsFile = path.join(scratch, 'monitors.txt');
-    fs.writeFileSync(monitorsFile, 'extra');
+    fs.writeFileSync(monitorsFile, scenario === 'monitor' ? 'extra' : 'nomonitors');
     hostEnv.GNLINK_STREAM_TEST_MONITORS_FILE = monitorsFile;
   }
   if (scenario === 'presentfail' || scenario === 'presentok') {
@@ -126,11 +126,9 @@ async function stop(child) {
     GNLINK_CHAIN_DIRECTORY: url, GNLINK_CHAIN_ACCOUNT: ACCOUNT, GNLINK_CHAIN_PASSWORD: PASSWORD,
     GNLINK_CHAIN_HOSTNAME: HOSTNAME, GNLINK_CHAIN_WEDGE_FILE: wedgeFile, GNLINK_CHAIN_SHOTS: shots,
     GNLINK_CHAIN_SCENARIO: scenario };
-  if (scenario === 'monitor_test_viewer') {
-    // The shell-launched product viewer has no screen switch (no screen list in picker mode): the r3 test
-    // viewer asks for the list after a reveal, as r1 did, and everything after that is the product's.
-    clientEnv.GNLINK_CHAIN_VIEWER_EXE = path.join(bin, process.env.GNLINK_R3_VIEWER || 'GNLinkViewerR3Test.exe');
-    clientEnv.GNLINK_VIEWER_TEST_REQUEST_MONITORS = '1';
+  if (scenario === 'monitor' && process.env.GNLINK_R3_VIEWER) {
+    // A restore mutant (it must FAIL by restoring the desktop); the shipped viewer otherwise.
+    clientEnv.GNLINK_CHAIN_VIEWER_EXE = path.join(bin, process.env.GNLINK_R3_VIEWER);
   }
   if (scenario === 'presentfail' || scenario === 'presentok') {
     clientEnv.GNLINK_CHAIN_VIEWER_EXE = path.join(bin, process.env.GNLINK_R3_VIEWER || 'GNLinkViewerR3Test.exe');
@@ -143,8 +141,8 @@ async function stop(child) {
   // ---- what the supervisor saw.
   const h = read(hostLog);
   const hasLine = (re) => re.test(h);
-  const wedged = !(scenario === 'presentfail' || scenario === 'presentok');
-  if (!wedged) console.log('      (no wedge in this scenario: the session ends through failing presents; wedge lines not expected)');
+  const wedged = !(scenario === 'presentfail' || scenario === 'presentok' || scenario === 'nomonitors');
+  if (!wedged) console.log('      (no wedge in this scenario; wedge lines not expected)');
   if (wedged) console.log(hasLine(/dxgi-worker-wedge phase=frame_handler/) ? 'PASS the product watchdog named the wedge (phase=frame_handler)' : 'FAIL no dxgi-worker-wedge line in host_app.log');
   if (wedged) console.log(hasLine(/self-terminated \(dxgi-worker watchdog\) code=0x0000002C \(44\)/) ? 'PASS the supervisor observed exit 44' : 'FAIL the supervisor did not observe exit 44');
   if (wedged) console.log(hasLine(/repeated DXGI wedge: using WGC recovery backend/) && hasLine(/effective=wgc dxgiQuarantined=1 reason=wedge-this-run/)
@@ -156,7 +154,7 @@ async function stop(child) {
   console.log('      host log: ' + hostLog);
   console.log('      client log dir: ' + path.join(clientAppData, 'GNLink'));
   console.log('      screenshots: ' + shots);
-  if (code === 3) { console.log('dxgi_wedge_reconnect_runner: INVALID (the fixture window was not listed first)'); process.exitCode = 3; return; }
+  if (code === 3) { console.log('dxgi_wedge_reconnect_runner: INVALID (see the client lines above)'); process.exitCode = 3; return; }
   if (code !== 0 || fails) { console.log('dxgi_wedge_reconnect_runner: FAIL'); process.exitCode = 1; return; }
   console.log('dxgi_wedge_reconnect_runner: ALL PASS');
 })().catch((error) => {

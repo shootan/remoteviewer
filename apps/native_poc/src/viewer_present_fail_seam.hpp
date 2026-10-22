@@ -17,15 +17,6 @@ namespace remote60::native_poc::viewer {
 
 inline const char* kViewerPresentFailSeamMarker = "viewer-present-fail-seam";
 
-// r3 (Codex E2): the shell-launched viewer never asks for the screen list in picker mode, so its toolbar has
-// no screen switch however many screens the host has (found by the r3 chain run). With
-// GNLINK_VIEWER_TEST_REQUEST_MONITORS=1 this test viewer asks once a target is revealed -- what r1 did in the
-// product -- so the toolbar's own switch, callback, report, shell handoff and reconnect can be exercised.
-inline bool viewer_test_requests_monitor_list() {
-  wchar_t v[4] = {};
-  return GetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_REQUEST_MONITORS", v, 4) == 1 && v[0] == L'1';
-}
-
 inline bool viewer_present_fail_armed() {
   wchar_t path[MAX_PATH] = {};
   const DWORD n = GetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_PRESENT_FAIL_FILE", path, MAX_PATH);
