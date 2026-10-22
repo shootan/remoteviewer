@@ -13411,3 +13411,19 @@ Next
 - r2 실 재현: 11 s 유지 재연결 8회 + 첫 연결 1회 모두 0.27–0.54 s. 실제 사슬 presentfail·desktop 모두 ALL PASS, 첫 재연결 hello 0.27/0.54 s → restored target=desktop.
 - Android(r2): externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(250/0)의 cap 반례 PASS, 변이 301 Hello FAIL. 기기는 미검증.
 - 제품/테스트/문서: 제품 bcb6a46 · 테스트 3e625d8 · 문서(이 줄들).
+
+### 2026-10-22 PC 0.2.162 릴리스 후보 dry-run (게시 전 — 서명·업로드·push 없음)
+- 범위: integ/0.2.162 9f54912 = LK e728485(잠금 화면 'Windows 로그인') + DW fc4cd57(DXGI wedge 격리·재연결 복원) + hello d0fe74e(연결 인사 지연). Codex `codex_integ_0162_r1.md` 통합 OK·rel 후보 준비 승인.
+- rel/0.2.162 = 9f54912 + 버전 commit **b4dfaed**(product_version.hpp 0.2.161→0.2.162 한 줄; UTF-8 BOM·CRLF 17·크기 1020 B 유지). worktree `C:/work/gnlink-wt/rel-0162`, webview2 는 robocopy 실복사(90 파일 47,602,794 B, 원본 불변, junction 없음).
+- `gnlink_release.sh --dry-run` **rc 0**:
+  - parity·payload-set·checksums PASS, installer payload 10/10.
+  - `.claude/rel/0.2.162`: windows.manifest(미서명) `814e4bb9…`, SHA256SUMS.txt `2a91650d…`(11 항목 `sha256sum -c` OK).
+  - sdk set `703a6a41…`.
+- 산출물 검사:
+  - UTF-16 `0.2.162` 는 Viewer·Stream·Host·Client 각 1, Setup 5. `0.2.161` 잔존 0.
+  - gate `--dir payload` 9/9, self-test 23.
+  - 출하 9 타깃 vcxproj 시험 define 0(`REMOTE60_ENCODER_POLL_DIAG=0` 만 — 출하값).
+  - payload 9 exe 에 seam/test/mutant 문자열 0, 시험 exe 0.
+  - shell.html `8fac49cd…`(소스 checkout·payload·Release/ui 동일).
+  - smoke: real-recv-smoke(payload GNLinkStream) PASS · host_punch_reply_e2e 102/0 · hello_backlog 28/0 · punch_any PASS(콘솔 세션).
+- 상태: **로컬 실기 후보(게시 전)**. 서명·NAS 업로드·manifest 교체·push·사용자 PC 설치 없음. OS 실기(LK A~D·DW 회사 PC·hello 실 LAN/Android 기기) 미검증. ledger 유지: directory_retry 간헐, viewer_udp_recovery 처리량 FAIL(원인 미확정), APK S5.
