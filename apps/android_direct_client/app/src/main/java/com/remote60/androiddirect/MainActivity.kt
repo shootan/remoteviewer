@@ -1307,11 +1307,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // carries the binding read at the moment it is taken, so after a switch nothing of B can reach A.
     // the policy object, handed to the native table at start (a debug TEST build may shorten the park limit)
     private val keepPolicy = if (BuildConfig.TEST_KEEP_PARK_TTL_MS > 0L) {
-        SessionPark.Policy(parkTtlMs = BuildConfig.TEST_KEEP_PARK_TTL_MS)
+        SessionPark.Policy(parkLimit = SessionPark.ParkLimit.Finite(BuildConfig.TEST_KEEP_PARK_TTL_MS))
     } else {
         SessionPark.Policy()
     }
     private val kept = LinkedHashMap<Long, SessionPark.Kept>()
+    // keepalive r2: the three PCs used most recently (per account, persisted), the PCs the user disconnected (not
+    // prepared again this sign-in), and the planner that would prepare them. Preconnect.SEND_TO_REAL_HOSTS is off:
+    // nothing is sent to a host automatically until the host side is confirmed (spike A).
+    private val recentHosts: RecentHosts.Book by lazy { RecentHosts.load(this) }
+    private val keepSuppression = RecentHosts.Suppression()
+    private val preconnectPlanner = Preconnect.Planner { Math.random() }
+    private var preconnectOffLogged = false
+
+    private fun recentKeyOf(k: SessionPark.Kept): RecentHosts.Key? =
+        if (k.manual) null else RecentHosts.Key(k.directoryOrigin, k.accountId, k.hostId)
     private var activeHandle = 0L
     private var activeBinding = 0L
     // the directory connect in progress (its entry is reserved, not yet up)
@@ -1830,8 +1840,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             showMacroDialog()
         }
         initDirectoryUi()
-        NativeSessionBridge.nativeSetKeepalivePolicy(keepPolicy.maxHosts, keepPolicy.parkTtlMs)
-        diagnosticsLog.log("keep_policy", "maxHosts=${keepPolicy.maxHosts} parkTtlMs=${keepPolicy.parkTtlMs}")
+        NativeSessionBridge.nativeSetKeepalivePolicy(keepPolicy.maxHosts, keepPolicy.parkLimit.unlimited,
+                                                     keepPolicy.parkLimit.ttlMs)
+        diagnosticsLog.log("keep_policy", "maxHosts=${keepPolicy.maxHosts} parkLimit=" +
+            if (keepPolicy.parkLimit.unlimited) "unlimited" else "${keepPolicy.parkLimit.ttlMs}ms")
 
         val savedEndpoint = SessionPersistence.load(this)
         val launchHost = intent.getStringExtra("host")?.trim().orEmpty()
@@ -1889,6 +1901,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         listHostsButton.setOnClickListener { parkToHostList("targets") }
         hostsParkDisconnectButton.setOnClickListener {
             diagnosticsLog.log("park_disconnect_all_tap", "scene=$currentScene kept=${kept.size}")
+            for (k in kept.values) recentKeyOf(k)?.let { keepSuppression.suppress(it) }  // keepalive r2
             endEverything("disconnect_all")  // r2 L1: what it says -- every PC, the one on screen included
             renderStatus()
         }
@@ -2486,7 +2499,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         // r4 S1 / multi §2: the manual connect is an entry of the same native table (never kept on the list: a
         // manual connection is not parked), adopted through its own gate, so no stale cleanup can close it.
-        val reservation = NativeSessionBridge.nativeReserve("manual|$host", true, NativeSessionBridge.nativeEpoch())
+        val reservation = NativeSessionBridge.nativeReserve("manual|$host", true, NativeSessionBridge.nativeEpoch(), false)
         if (reservation.size < 3 || reservation[0] != 1L) {
             diagnosticsLog.log("connect_failed", "reserve_refused kind=${reservation.getOrNull(0)}")
             renderStatus()
@@ -2753,6 +2766,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
         if (handle != 0L) {
+            kept[handle]?.let { k -> recentKeyOf(k)?.let { keepSuppression.suppress(it) } }  // keepalive r2
             entryOps.invalidate(handle)  // r2 K2: nothing of this PC's connect adopts anything after this
             NativeSessionBridge.nativeEnd(handle, reason)
             forgetKept(handle)
@@ -2801,6 +2815,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         directoryHostKey = if (k.manual) "" else k.hostId
         directoryHostName = k.hostName
         kept[handle] = k.copy(parkedAtMs = 0L, confirmLogged = false)
+        // keepalive r2: on screen by the user's action -- the only thing that reorders the recent three.
+        recentKeyOf(k)?.let { key ->
+            if (recentHosts.recordUse(key)) RecentHosts.save(this, recentHosts)
+            diagnosticsLog.log("recent_use", "host=${key.hostId} recent=${recentHosts.recent(key.directoryOrigin, key.accountId).size}")
+        }
         return true
     }
 
@@ -4911,6 +4930,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun directoryOrigin(): String = DirectoryClient.originKey(DirectoryClient.directoryUrl)
 
+    /**
+     * keepalive r2: whether to prepare one of the recent three now. OFF for real hosts (Preconnect.SEND_TO_REAL_HOSTS):
+     * a Hello to today's host replaces whoever is using it, so nothing is sent until the host can hold a control-only
+     * waiting entry (spike A, Codex). Said once in the log, with what it would have considered.
+     */
+    private fun considerPreconnect(reason: String) {
+        val account = DirectoryClient.sessionAccount()
+        val origin = directoryOrigin()
+        val recent = recentHosts.recent(origin, account)
+        if (!Preconnect.SEND_TO_REAL_HOSTS) {
+            if (!preconnectOffLogged) {
+                preconnectOffLogged = true
+                diagnosticsLog.log("preconnect_off", "reason=$reason why=host_support_unconfirmed recent=${recent.size}")
+            }
+            return
+        }
+        // Reached only once the host side is confirmed (stage 2): the planner picks one PC, and its connect is the
+        // directory connect with autoAdmit = true (nativeReserve) -- born parked, never bound, no screen, no input.
+        val listed = directoryHosts.associateBy { it.hostId }
+        val candidates = recent.map { Preconnect.Candidate(RecentHosts.Key(origin, account, it), listed[it]?.online == true) }
+        val keptKeys = kept.values.mapNotNull { recentKeyOf(it) }.toSet()
+        val next = preconnectPlanner.next(System.currentTimeMillis(), candidates, keptKeys, keepSuppression,
+                                          manualPending = connectingHandle != 0L)
+        diagnosticsLog.log("preconnect_plan", "reason=$reason next=${next?.hostId.orEmpty()}")
+    }
+
     private fun flowLog(line: String) = diagnosticsLog.log("sign_in_store", line)
 
     /** Takes a session into use: memory, the log uploader, and the host list. Main thread. */
@@ -5076,6 +5121,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // r2 K2 / multi §6: every PC of this sign-in ends and a connect still on its way is disowned (a new
         // lifecycle epoch); the screen is not busy.
         endAllKept("sign_out")
+        keepSuppression.clear()  // keepalive r2: a new sign-in starts with nothing suppressed and no back-off
+        preconnectPlanner.reset()
         setDirectoryBusy(false)
         directoryConnectingName = ""
         ++signInEpoch
@@ -5152,6 +5199,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // keepalive-multi r1 §6: a PC missing from one list refresh is not an ending -- its kept
                     // connection is authenticated on its own and ends only by its own reasons (0.2.30 ended it here).
                     hostListAdapter.notifyDataSetChanged()
+                    considerPreconnect(reason)
                     hostsStatusText.text = account.ifEmpty { DirectoryClient.savedAccountId(this) }
                     renderStatus()
                 }
@@ -5191,6 +5239,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val account = DirectoryClient.sessionAccount()
         val origin = directoryOrigin()
         val key = SessionPark.entryKey(origin, account, host.hostId)
+        // keepalive r2: the user's explicit connect -- this PC may be kept again, and the user comes first.
+        keepSuppression.release(RecentHosts.Key(origin, account, host.hostId))
+        preconnectPlanner.onManualTap()
         // r2 M2: a tap while another PC is still connecting is the user's newest intent -- that connect gives way
         // (its own operation only; it is not waited for), and this tap is carried out now. The same PC again is
         // the same intent.
@@ -5241,7 +5292,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // multi r1: the lifecycle epoch this tap belongs to -- a sign-out / refused session / network change after
         // it makes everything it started stale, and the native table refuses its reservation outright.
         val epoch = NativeSessionBridge.nativeEpoch()
-        val reservation = NativeSessionBridge.nativeReserve(key, false, epoch)
+        val reservation = NativeSessionBridge.nativeReserve(key, false, epoch, false)
         if (reservation.size < 3 || reservation[0] != 1L) {
             diagnosticsLog.log("keep_reserve_refused",
                 "host=${host.hostId} kind=${reservation.getOrNull(0)} handle=${reservation.getOrNull(1)} kept=${kept.size}")
@@ -5430,8 +5481,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val keepState = SessionPark.listState(native, keptEntry != null && keptEntry.handle == activeHandle)
             val isKept = keepState == SessionPark.ListState.KEPT || keepState == SessionPark.ListState.CONFIRMING
             view.findViewById<TextView>(R.id.hostCardDetail).text = when (keepState) {
-                SessionPark.ListState.KEPT -> getString(R.string.hosts_keep_detail,
-                    SessionPark.formatRemainingCoarse(native?.remainingMs ?: 0L))
+                SessionPark.ListState.KEPT -> if (SessionPark.hasDeadline(native?.remainingMs ?: -1L)) {
+                    getString(R.string.hosts_keep_detail, SessionPark.formatRemainingCoarse(native?.remainingMs ?: 0L))
+                } else {
+                    getString(R.string.hosts_keep_detail_unlimited)
+                }
                 SessionPark.ListState.CONFIRMING -> getString(R.string.hosts_keep_confirming)
                 else -> if (host.online) getString(R.string.hosts_title) else getString(R.string.hosts_offline_detail)
             }

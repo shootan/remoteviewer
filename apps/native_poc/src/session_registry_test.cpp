@@ -80,7 +80,7 @@ int main() {
           closed.empty() ? "none" : std::to_string(closed[0]));
     check("A and C kept, 3 PCs", present(r, a) && present(r, c) && r.Snapshot().size() == 3);
     // with a limit of 2, C is the one that evicts
-    SessionRegistry r2(KeepalivePolicy{2, 5 * kMin});
+    SessionRegistry r2(KeepalivePolicy{2, /*parkUnlimited=*/false, 5 * kMin});
     open(r2, "k|A", 1);
     open(r2, "k|B", 2);
     std::vector<uint64_t> c2;
@@ -138,9 +138,9 @@ int main() {
     check("8 racing reservations at the limit: exactly 2 (the parked A, B) get a slot", news == 2, std::to_string(news));
   }
 
-  std::printf("[5] each PC's park has its own 5 minutes from leaving it; nothing else extends it\n");
+  std::printf("[5] a FINITE limit (tests only since keepalive r2): each PC's park has its own 5 minutes from leaving it\n");
   {
-    SessionRegistry r;
+    SessionRegistry r(KeepalivePolicy{3, /*parkUnlimited=*/false, 5 * kMin});
     const uint64_t a = open(r, "k|A", 0);
     const uint64_t b = open(r, "k|B", 0);         // A parked at 0 -> deadline 5:00
     const uint64_t c = open(r, "k|C", 2 * kMin);  // B parked at 2:00 -> 7:00
@@ -189,6 +189,55 @@ int main() {
     check("a manual connection cannot be parked", !r.Park(m.handle, 4));
     auto dup = r.Reserve("k|B", false, r.Epoch());
     check("a PC already connecting: a second tap is not a second connection", dup.kind == SessionRegistry::Reservation::Reuse || dup.why == "already_connecting");
+  }
+
+  std::printf("[8] keepalive r2: the product policy is Unlimited -- a park has no deadline, nothing expires\n");
+  {
+    SessionRegistry r;  // default policy
+    check("the default policy is Unlimited (said, not a 0 TTL)", r.Policy().parkUnlimited);
+    const uint64_t a = open(r, "k|A", 0);
+    open(r, "k|B", 0);  // A parked at 0
+    RegistryEntry ae;
+    r.Get(a, &ae);
+    check("a parked PC carries no deadline (0 = none)", ae.phase == EntryPhase::Parked && ae.parkDeadlineMs == 0 &&
+                                                            ae.parkEpisode == 1);
+    check("...and does not expire, even a day later", r.Expire(24ull * 60 * kMin).empty() && phase(r, a) == EntryPhase::Parked);
+    open(r, "k|C", 1000);
+    std::vector<uint64_t> closed;
+    open(r, "k|D", 2000, &closed);
+    check("the 3-PC limit still evicts the parked LRU", closed.size() == 1 && closed[0] == a);
+  }
+
+  std::printf("[9] keepalive r2: an automatic (preconnect) admission\n");
+  {
+    SessionRegistry r;
+    const uint64_t a = open(r, "k|A", 1000);  // the user's PC, on screen
+    auto p = r.Reserve("k|P", false, r.Epoch(), /*autoAdmit=*/true);
+    RegistryEntry pe;
+    check("an automatic reservation is a new entry, flagged autoAdmitted",
+          p.kind == SessionRegistry::Reservation::New && r.Get(p.handle, &pe) && pe.autoAdmitted);
+    r.Commit(p.handle);
+    check("committed: parked, never active, and A is still the one on screen",
+          phase(r, p.handle) == EntryPhase::Parked && r.ActiveHandle() == a);
+    check("its park episode starts without having been Active (ParkAdmitted)", r.ParkAdmitted(p.handle, 2000));
+    r.Get(p.handle, &pe);
+    check("...once only, with no deadline under Unlimited and no use recorded", !r.ParkAdmitted(p.handle, 3000) &&
+          pe.parkEpisode == 1 && pe.parkDeadlineMs == 0 && pe.lastUsedMs == 0);
+    check("a user's PC cannot be 'admitted' this way (only automatic ones)", !r.ParkAdmitted(a, 3000));
+    auto m = r.Reserve("manual|10.0.0.9", true, r.Epoch(), /*autoAdmit=*/true);
+    RegistryEntry me;
+    check("a manual connection is never automatic", r.Get(m.handle, &me) && !me.autoAdmitted);
+    r.Fail(m.handle);
+    open(r, "k|B", 4000);  // A parked (used at 4000), B on screen
+    std::vector<uint64_t> closed;
+    open(r, "k|C", 5000, &closed);
+    check("at the limit the never-used automatic entry gives way first", closed.size() == 1 && closed[0] == p.handle);
+    auto p2 = r.Reserve("k|P2", false, r.Epoch(), true);
+    std::vector<uint64_t> closed2 = r.Commit(p2.handle);
+    for (uint64_t v : closed2) r.Remove(v);
+    r.ParkAdmitted(p2.handle, 6000);
+    auto tap = r.Reserve("k|P2", false, r.Epoch());
+    check("the user's tap on it is a REUSE (no new connection)", tap.kind == SessionRegistry::Reservation::Reuse && tap.handle == p2.handle);
   }
 
   std::printf("\nsession_registry_test: %d passed, %d failed\nRESULT: %s\n", gPass, gFail, gFail == 0 ? "PASS" : "FAIL");

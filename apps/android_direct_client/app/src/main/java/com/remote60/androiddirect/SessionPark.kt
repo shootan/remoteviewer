@@ -13,8 +13,9 @@ package com.remote60.androiddirect
  * happen; the rules the screen applies are here, pure, so they can be exercised without a device:
  *  - At most [Policy.maxHosts] PCs (the one on screen included). A new PC beyond that closes the parked PC used
  *    longest ago -- the native table picks it, atomically with the reservation.
- *  - Each PC's park has its own limit ([Policy.parkTtlMs]) from the moment it was left; nothing extends it, only
- *    showing that PC again and leaving it again starts a new one. Its own session's control loop enforces it.
+ *  - keepalive r2 (Codex section 1): the product has NO park limit -- [ParkLimit.Unlimited], said explicitly. A
+ *    finite limit ([ParkLimit.Finite], tests only) counts from the moment that PC was left; nothing extends it, and
+ *    its own session's control loop enforces it. Transport liveness, auth and server leases are not this limit.
  *  - The key of a kept PC is the directory it was issued by, the account and the host id -- not a name or an
  *    address. A new connection to the same PC is a new native handle.
  *  - Reuse only once the native side says Parked. While any PC's park is still confirming, a tap is held (the
@@ -34,7 +35,18 @@ object SessionPark {
      * The policy object (the user's answer pending, these are the proposed values): how many PCs are kept, the
      * one on screen included, and how long each one's park lasts. Handed to the native table as is.
      */
-    data class Policy(val maxHosts: Int = 3, val parkTtlMs: Long = PARK_LIMIT_MS)
+    data class Policy(val maxHosts: Int = 3, val parkLimit: ParkLimit = ParkLimit.Unlimited)
+
+    /** How long a parked PC is kept. Unlimited is the product's; Finite(ms > 0) exists for tests that watch an expiry. */
+    sealed class ParkLimit {
+        object Unlimited : ParkLimit()
+        data class Finite(val ms: Long) : ParkLimit() {
+            init { require(ms > 0) { "a finite park limit must be positive (0 is not 'unlimited')" } }
+        }
+        val unlimited: Boolean get() = this is Unlimited
+        /** For the native policy call: meaningful only when finite. */
+        val ttlMs: Long get() = (this as? Finite)?.ms ?: PARK_LIMIT_MS
+    }
 
     /** ClientParkPhase, as the native side reports it. */
     enum class NativePhase(val code: Int) {
@@ -224,6 +236,9 @@ object SessionPark {
      */
     fun formatRemainingCoarse(ms: Long): String =
         if (ms >= 60_000L) "${(ms + 59_999L) / 60_000L}분" else "1분 미만"
+
+    /** keepalive r2: the native snapshot says -1 for a park without a deadline (Unlimited). */
+    fun hasDeadline(remainingMs: Long): Boolean = remainingMs >= 0L
 
     /** "4:59" for the list. */
     fun formatRemaining(ms: Long): String {

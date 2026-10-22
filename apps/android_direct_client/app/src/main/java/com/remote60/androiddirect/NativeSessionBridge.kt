@@ -15,7 +15,8 @@ object NativeSessionBridge {
     // never reach A after a switch (a stale binding does nothing). The decoder and Surface stay single.
 
     /** [kind (0 reuse, 1 new, 2 refused), handle, victim]: a tap on [key] (origin|account|hostId) in lifecycle [epoch]. */
-    external fun nativeReserve(key: String, manual: Boolean, epoch: Long): LongArray
+    /** keepalive r2: [autoAdmit] = an automatic preconnect (born parked, never bound) -- false for every user tap. */
+    external fun nativeReserve(key: String, manual: Boolean, epoch: Long, autoAdmit: Boolean): LongArray
     /**
      * r2 M1: the new connection, made as generation [gen], is up -- [status, closed...]: 1 committed (the handles its
      * reservation evicted follow, closed now), 0 pending (its Hello is not answered yet: ask again), -1 failed (it
@@ -31,7 +32,8 @@ object NativeSessionBridge {
     /** Everything ends (sign-out, account / directory, network, disconnect all): the new lifecycle epoch. */
     external fun nativeEndAll(reason: String): Long
     external fun nativeEpoch(): Long
-    external fun nativeSetKeepalivePolicy(maxHosts: Int, parkTtlMs: Long)
+    /** keepalive r2: [parkUnlimited] is the product policy; [parkTtlMs] counts only when it is false (tests). */
+    external fun nativeSetKeepalivePolicy(maxHosts: Int, parkUnlimited: Boolean, parkTtlMs: Long)
     /** {"epoch","maxHosts","parkTtlMs","entries":[...],"ended":[...],"closing","binding"} -- no token, no address. */
     external fun nativeEntriesJson(): String
 

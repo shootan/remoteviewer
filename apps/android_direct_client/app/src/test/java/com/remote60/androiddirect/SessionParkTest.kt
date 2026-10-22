@@ -89,7 +89,14 @@ class SessionParkTest {
     @Test
     fun thePolicyIsAValueObject() {
         assertEquals(3, SessionPark.Policy().maxHosts)
-        assertEquals(5 * 60 * 1000L, SessionPark.Policy().parkTtlMs)
+        // keepalive r2: the product policy has no park limit, said as Unlimited (not a 0)
+        assertEquals(SessionPark.ParkLimit.Unlimited, SessionPark.Policy().parkLimit)
+        assertTrue(SessionPark.Policy().parkLimit.unlimited)
+        assertEquals(45_000L, SessionPark.ParkLimit.Finite(45_000L).ttlMs)
+        assertFalse(SessionPark.ParkLimit.Finite(45_000L).unlimited)
+        assertTrue(runCatching { SessionPark.ParkLimit.Finite(0L) }.isFailure)
+        assertFalse(SessionPark.hasDeadline(-1L))
+        assertTrue(SessionPark.hasDeadline(0L))
         assertEquals(2, SessionPark.Policy(maxHosts = 2).maxHosts)
     }
 

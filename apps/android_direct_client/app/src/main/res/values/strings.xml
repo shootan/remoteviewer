@@ -234,6 +234,7 @@
     <string name="hosts_keep_banner">연결 유지 %1$d대 · 최대 %2$d대 (화면 포함)</string>
     <string name="hosts_keep_detail">화면 전송 중지 · %1$s 남음 · 누르면 바로 열립니다</string>
     <string name="hosts_keep_confirming">연결 유지 준비 중…</string>
+    <string name="hosts_keep_detail_unlimited">화면 전송 중지 · 누르면 바로 열립니다</string>
     <string name="hosts_keep_ended">%1$s 연결이 끝났습니다 (%2$s)</string>
     <string name="hosts_keep_refused">지금은 새 PC 를 연결할 수 없습니다 (연결 중이거나 유지 한도)</string>
     <string name="hosts_keep_disconnect">끊기</string>

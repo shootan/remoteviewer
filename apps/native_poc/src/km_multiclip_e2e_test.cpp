@@ -67,7 +67,7 @@ struct Entry {
   uint64_t Generation() { return controller.ConnectionGeneration(); }
   bool BeginPark() { return controller.BeginPark(); }
   bool ResumeFromPark() { return controller.ResumeFromPark(); }
-  void SetParkLimitMs(uint64_t ms) { controller.SetParkLimitMs(ms); }
+  void SetParkLimit(bool unlimited, uint64_t ms) { controller.SetParkLimit(unlimited, ms); }
   void SetBindingToken(uint64_t t) { token = t; }
   uint64_t BindingToken() { return token.load(); }
   void Close() { controller.Disconnect(); }

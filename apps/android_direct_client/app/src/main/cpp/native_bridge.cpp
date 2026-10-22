@@ -81,7 +81,7 @@ struct SessionEntry {
   }
   bool BeginPark() { return controller.BeginPark(); }
   bool ResumeFromPark() { return controller.ResumeFromPark(); }
-  void SetParkLimitMs(uint64_t ms) { controller.SetParkLimitMs(ms); }
+  void SetParkLimit(bool unlimited, uint64_t ms) { controller.SetParkLimit(unlimited, ms); }
   void SetBindingToken(uint64_t t) { sink.SetToken(t); }
   uint64_t BindingToken() { return sink.Token(); }
   // Off every table lock (the closer's thread): the session under the adoption lock, the rendezvous socket under
@@ -286,10 +286,12 @@ jlongArray to_jlongs(JNIEnv* env, const std::vector<jlong>& v) {
 // lifecycle epoch the tap was made in: a tap from before a sign-out / stop is refused.
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeReserve(
-    JNIEnv* env, jobject /* this */, jstring key, jboolean manual, jlong epoch) {
+    JNIEnv* env, jobject /* this */, jstring key, jboolean manual, jlong epoch, jboolean auto_admit) {
   g_table.Reap(now_ms());
+  // keepalive r2: auto_admit = an automatic preconnect (born parked, never bound, no never-shown grace).
   const auto r = g_table.Reserve(jstring_to_string(env, key), manual == JNI_TRUE, static_cast<uint64_t>(epoch),
-                                 [](uint64_t h) { return std::make_shared<SessionEntry>(h); });
+                                 [](uint64_t h) { return std::make_shared<SessionEntry>(h); },
+                                 auto_admit == JNI_TRUE);
   std::fprintf(stderr, "[native-bridge] reserve %s handle=%llu victim=%llu %s\n", reservation_kind(r.kind),
                static_cast<unsigned long long>(r.handle), static_cast<unsigned long long>(r.victim), r.why.c_str());
   using R = remote60::native_poc::SessionRegistry::Reservation;
@@ -366,10 +368,13 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeEpoch(
 // The policy object: how many PCs are kept (the one on screen included) and each one's park limit.
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetKeepalivePolicy(
-    JNIEnv* /* env */, jobject /* this */, jint max_hosts, jlong park_ttl_ms) {
+    JNIEnv* /* env */, jobject /* this */, jint max_hosts, jboolean park_unlimited, jlong park_ttl_ms) {
   remote60::native_poc::KeepalivePolicy p;
   if (max_hosts > 0) p.maxHosts = static_cast<uint32_t>(max_hosts);
-  if (park_ttl_ms > 0) p.parkTtlMs = static_cast<uint64_t>(park_ttl_ms);
+  // keepalive r2: Unlimited is said, not encoded as a TTL value. A finite limit needs a positive TTL; anything else
+  // keeps the policy's own value (never "0 = expire now").
+  p.parkUnlimited = park_unlimited == JNI_TRUE;
+  if (!p.parkUnlimited && park_ttl_ms > 0) p.parkTtlMs = static_cast<uint64_t>(park_ttl_ms);
   g_table.SetPolicy(p);
 }
 
@@ -382,6 +387,7 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeEntriesJson(
   g_table.Reap(now);
   std::ostringstream oss;
   oss << "{\"epoch\":" << g_table.Epoch() << ",\"maxHosts\":" << g_table.Policy().maxHosts
+      << ",\"parkUnlimited\":" << (g_table.Policy().parkUnlimited ? "true" : "false")
       << ",\"parkTtlMs\":" << g_table.Policy().parkTtlMs << ",\"entries\":[";
   bool first = true;
   for (const auto& re : g_table.Snapshot()) {
@@ -395,8 +401,13 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeEntriesJson(
         << ",\"parkPhase\":" << (e ? e->ParkPhaseCode() : -1)
         << ",\"alive\":" << (e && e->Alive() ? "true" : "false")
         << ",\"generation\":" << (e ? e->controller.ConnectionGeneration() : 0)
+        // keepalive r2: -1 = parked with no deadline (the Unlimited policy) -- not 0, which reads as "ends now".
         << ",\"remainingMs\":"
-        << (re.phase == remote60::native_poc::EntryPhase::Parked && re.parkDeadlineMs > now ? re.parkDeadlineMs - now : 0)
+        << (re.phase != remote60::native_poc::EntryPhase::Parked ? 0
+            : re.parkDeadlineMs == 0                             ? -1
+            : re.parkDeadlineMs > now                            ? static_cast<int64_t>(re.parkDeadlineMs - now)
+                                                                 : 0)
+        << ",\"autoAdmitted\":" << (re.autoAdmitted ? "true" : "false")
         << ",\"parkEpisode\":" << re.parkEpisode << ",\"reason\":\"";
     append_json_escaped(oss, re.endReason);
     oss << "\"}";

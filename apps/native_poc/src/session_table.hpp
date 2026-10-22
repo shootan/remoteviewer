@@ -62,20 +62,23 @@ class SessionTable {
   void SetPolicy(KeepalivePolicy p) {
     std::lock_guard<std::mutex> tl(transitionMu_);
     registry_.SetPolicy(p);
-    for (auto& e : Live()) e->SetParkLimitMs(p.parkTtlMs);
+    for (auto& e : Live()) e->SetParkLimit(p.parkUnlimited, p.parkTtlMs);
   }
   KeepalivePolicy Policy() const { return registry_.Policy(); }
   uint64_t Epoch() const { return registry_.Epoch(); }
   SessionRegistry& Registry() { return registry_; }
 
   // A tap (or a manual connect): reuse the live entry for the key, or reserve a new one -- made by `make`.
+  // keepalive r2: autoAdmit = an automatic preconnect (not a user's tap): see Commit.
   SessionRegistry::Reservation Reserve(const std::string& key, bool manual, uint64_t epochSeen,
-                                       const std::function<std::shared_ptr<Entry>(uint64_t)>& make) {
+                                       const std::function<std::shared_ptr<Entry>(uint64_t)>& make,
+                                       bool autoAdmit = false) {
     std::lock_guard<std::mutex> tl(transitionMu_);
-    auto r = registry_.Reserve(key, manual, epochSeen);
+    auto r = registry_.Reserve(key, manual, epochSeen, autoAdmit);
     if (r.kind == SessionRegistry::Reservation::New) {
       std::shared_ptr<Entry> e = make(r.handle);
-      e->SetParkLimitMs(registry_.Policy().parkTtlMs);
+      const KeepalivePolicy p = registry_.Policy();
+      e->SetParkLimit(p.parkUnlimited, p.parkTtlMs);
       std::lock_guard<std::mutex> lk(mu_);
       map_[r.handle] = std::move(e);
     }
@@ -136,7 +139,21 @@ class SessionTable {
     }
     out.closed = registry_.Commit(handle);
     for (uint64_t v : out.closed) DetachAndCloseLocked(v, "lru", nowMs);
-    if (registry_.Get(handle, &re) && re.phase == EntryPhase::Parked) committedMs_[handle] = nowMs;
+    if (re.autoAdmitted) {
+      // keepalive r2 (Codex section 3): an automatic admission is a normal PARKED entry from the start -- not "a
+      // connection that came up and was never shown" (no never-shown grace for it), never bound to the decoder,
+      // and no other entry's Active state is touched. Its session parks itself now (inhibit, release, pause, Pong
+      // fence) so nothing of it flows while it waits; a host that will not pause is not kept.
+      if (!e->BeginPark()) {
+        DetachAndCloseLocked(handle, "pause_refused", nowMs);
+        out.kind = CommitResult::Failed;
+        out.why = "pause_refused";
+        return out;
+      }
+      registry_.ParkAdmitted(handle, nowMs);
+    } else if (registry_.Get(handle, &re) && re.phase == EntryPhase::Parked) {
+      committedMs_[handle] = nowMs;
+    }
     out.kind = CommitResult::Committed;
     return out;
   }

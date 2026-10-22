@@ -164,8 +164,10 @@ class ClientSessionController {
   bool ResumeFromPark();
   void EndPark();
   // keepalive-multi r1: this connection's park limit (the policy's TTL), enforced by its own control loop.
-  void SetParkLimitMs(uint64_t ms) {
+  // keepalive r2: unlimited (the product policy) or a finite limit in ms (tests).
+  void SetParkLimit(bool unlimited, uint64_t ms) {
     std::lock_guard<std::mutex> lk(parkMu_);
+    park_.SetParkedUnlimited(unlimited);
     park_.SetParkedLimitUs(ms * 1000ull);
   }
   ClientParkPhase ParkPhase() const;

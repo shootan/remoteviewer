@@ -26,9 +26,13 @@
 namespace remote60::native_poc {
 
 struct KeepalivePolicy {
-  // Proposed values (the user's answer pending): 3 PCs with the active one, 5 minutes per PC.
+  // keepalive r2 (Codex codex_keepalive_r2.md section 1): 3 PCs with the active one, and NO product park limit --
+  // an explicit Unlimited, not a 0 that some reader takes as "now" or "the default". A finite limit
+  // (parkUnlimited = false, parkTtlMs) remains for tests that watch a park expire. Transport liveness, auth and
+  // the server's own lease/capability lifetimes are not this setting and are unchanged by it.
   uint32_t maxHosts = 3;
-  uint64_t parkTtlMs = 5ull * 60ull * 1000ull;
+  bool parkUnlimited = true;
+  uint64_t parkTtlMs = 5ull * 60ull * 1000ull;  // used only when !parkUnlimited
 };
 
 enum class EntryPhase : int { Connecting = 0, Active = 1, Parked = 2, Closing = 3 };
@@ -54,6 +58,10 @@ struct RegistryEntry {
   uint64_t epoch = 0;           // the lifecycle epoch it was created in
   uint64_t evictionFor = 0;     // !=0: marked to close when that new connection commits
   bool manual = false;          // a manual (IP) connection: never parked
+  // keepalive r2: an automatic (preconnect) admission -- never chosen by the user. Born parked on commit, never
+  // bound to the decoder by itself, exempt from the never-shown sweep, and never made Active except by a user's
+  // explicit activation (Activate). A user's reuse of it is the first time it counts as used (lastUsedMs).
+  bool autoAdmitted = false;
   std::string endReason;        // set when Closing
 };
 
@@ -83,7 +91,7 @@ class SessionRegistry {
 
   // A tap on a PC (or a manual connect). A live entry for the key is reused; otherwise a new one is reserved -- the
   // count (every entry not Closing, eviction-marked ones excluded) and the reservation are one step.
-  Reservation Reserve(const std::string& key, bool manual, uint64_t epochSeen) {
+  Reservation Reserve(const std::string& key, bool manual, uint64_t epochSeen, bool autoAdmit = false) {
     std::lock_guard<std::mutex> lk(mu_);
     Reservation r;
     if (epochSeen != epoch_) {
@@ -125,6 +133,7 @@ class SessionRegistry {
     n.phase = EntryPhase::Connecting;
     n.epoch = epoch_;
     n.manual = manual;
+    n.autoAdmitted = autoAdmit && !manual;
     entries_.push_back(n);
     if (victim) FindLocked(victim)->evictionFor = n.handle;
     r.kind = Reservation::New;
@@ -200,7 +209,19 @@ class SessionRegistry {
     e->phase = EntryPhase::Parked;
     e->lastUsedMs = nowMs;
     e->parkStartMs = nowMs;
-    e->parkDeadlineMs = nowMs + policy_.parkTtlMs;
+    e->parkDeadlineMs = policy_.parkUnlimited ? 0 : nowMs + policy_.parkTtlMs;  // 0 = no deadline (Expire skips)
+    ++e->parkEpisode;
+    return true;
+  }
+
+  // keepalive r2: an automatic admission that has just committed (Parked, never shown) starts its park episode
+  // here -- the same bookkeeping as Park, without having been Active. false for anything else.
+  bool ParkAdmitted(uint64_t handle, uint64_t nowMs) {
+    std::lock_guard<std::mutex> lk(mu_);
+    RegistryEntry* e = FindLocked(handle);
+    if (!e || e->phase != EntryPhase::Parked || !e->autoAdmitted || e->manual || e->parkEpisode != 0) return false;
+    e->parkStartMs = nowMs;
+    e->parkDeadlineMs = policy_.parkUnlimited ? 0 : nowMs + policy_.parkTtlMs;
     ++e->parkEpisode;
     return true;
   }

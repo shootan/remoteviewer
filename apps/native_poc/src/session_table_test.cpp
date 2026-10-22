@@ -42,6 +42,7 @@ struct FakeEntry {
   int ParkPhaseCode() { return phase.load(); }
   bool Alive() { return alive.load(); }
   bool BeginPark() {
+    ++beginParks;
     if (!pauseHonoured.load()) return false;
     phase = 1;
     return true;
@@ -52,7 +53,12 @@ struct FakeEntry {
     ++resumes;
     return true;
   }
-  void SetParkLimitMs(uint64_t ms) { limitMs = ms; }
+  std::atomic<bool> limitUnlimited{false};
+  std::atomic<int> beginParks{0};
+  void SetParkLimit(bool unlimited, uint64_t ms) {
+    limitUnlimited = unlimited;
+    limitMs = ms;
+  }
   void SetBindingToken(uint64_t t) { token = t; }
   uint64_t BindingToken() { return token.load(); }
   void Close() {
@@ -113,6 +119,18 @@ struct Rig {
     auto c = table.Commit(r.handle, 0, now).closed;
     if (closed) *closed = c;
     return r.handle;
+  }
+  // keepalive r2: an automatic (preconnect) admission -- reserve with autoAdmit, then commit.
+  SessionTable<FakeEntry>::CommitResult ConnectAuto(const std::string& key, uint64_t now, uint64_t* handle) {
+    auto r = table.Reserve(key, false, table.Epoch(), [&](uint64_t) {
+      auto e = std::make_shared<FakeEntry>();
+      e->name = key;
+      made[key] = e;
+      return e;
+    }, /*autoAdmit=*/true);
+    *handle = r.kind == SessionRegistry::Reservation::New ? r.handle : 0;
+    if (!*handle) return {};
+    return table.Commit(r.handle, 0, now);
   }
   std::shared_ptr<FakeEntry> E(const std::string& key) { return made[key]; }
   // the app's transition: park the active one, wait for its fence, show the next
@@ -409,6 +427,70 @@ int main() {
     const auto lost = reg.Commit(rd.handle);  // r1: madeGeneration != 0 -> nativeCommit at once
     reg.Fail(rd.handle);                       // then D's Hello fails
     check("NEGATIVE (r1 order): a D that then fails has already closed a kept PC", lost.size() == 1 && lost[0] == hs[0]);
+  }
+
+  std::printf("[k2-1] keepalive r2: the policy is Unlimited by default, and reaches every session\n");
+  {
+    Rig rig;
+    const uint64_t a = rig.Connect("o|u|A", 1);
+    check("the table's default policy is Unlimited", rig.table.Policy().parkUnlimited);
+    check("...and a new session was given it (not a TTL)", rig.E("o|u|A")->limitUnlimited.load());
+    KeepalivePolicy finite;
+    finite.parkUnlimited = false;
+    finite.parkTtlMs = 45000;
+    rig.table.SetPolicy(finite);
+    check("a finite policy (tests) reaches the live session too", !rig.E("o|u|A")->limitUnlimited.load() &&
+                                                                     rig.E("o|u|A")->limitMs.load() == 45000);
+    (void)a;
+  }
+
+  std::printf("[k2-2] keepalive r2: an automatic admission is born parked -- no bind, no other PC touched, no 10 s end\n");
+  {
+    Rig rig;
+    const uint64_t a = rig.Connect("o|u|A", 1);
+    const uint64_t tA = rig.table.Activate(a, 1);
+    const int bindsBefore = rig.binds;
+    uint64_t p = 0;
+    const auto c = rig.ConnectAuto("o|u|P", 2, &p);
+    check("the automatic connection commits", p != 0 && c.kind == SessionTable<FakeEntry>::CommitResult::Committed);
+    check("...its session parked itself at once (BeginPark once)", rig.E("o|u|P")->beginParks.load() == 1);
+    check("...it was never bound to the decoder (0 binds, A's binding untouched)",
+          rig.binds == bindsBefore && rig.bound == tA && rig.E("o|u|P")->token.load() == 0);
+    check("...and A is still the one on screen", phaseOf(rig.table, a) == EntryPhase::Active &&
+                                                     rig.table.Registry().ActiveHandle() == a);
+    rig.E("o|u|P")->phase = 4;  // its fence Pong
+    rig.table.Reap(2 + SessionTable<FakeEntry>::kUnshownGraceMs + 60000);
+    check("NOT ended as never_shown, well past the 10 s grace", rig.table.Find(p) != nullptr &&
+                                                                    phaseOf(rig.table, p) == EntryPhase::Parked);
+    // the user shows it: the explicit activation is what makes it the PC on screen
+    const uint64_t tP = rig.Switch(a, p, 70000);
+    check("a user's activation shows it: bound now, resumed from its park", tP != 0 && rig.bound == tP &&
+                                                                              rig.E("o|u|P")->resumes.load() == 1);
+  }
+
+  std::printf("[k2-3] keepalive r2: negative controls\n");
+  {
+    Rig rig;
+    const uint64_t a = rig.Connect("o|u|A", 1);
+    rig.table.Activate(a, 1);
+    const uint64_t u = rig.Connect("o|u|U", 2);  // a USER connection that is never shown
+    rig.table.Reap(2 + SessionTable<FakeEntry>::kUnshownGraceMs);
+    check("a user's connection never shown is still ended after 10 s (never_shown kept for it)",
+          rig.table.Find(u) == nullptr);
+    uint64_t p = 0;
+    rig.made.clear();
+    auto res = rig.table.Reserve("o|u|Q", false, rig.table.Epoch(), [&](uint64_t) {
+      auto e = std::make_shared<FakeEntry>();
+      e->pauseHonoured = false;  // an old host that will not pause
+      rig.made["o|u|Q"] = e;
+      return e;
+    }, true);
+    p = res.handle;
+    const auto c = rig.table.Commit(p, 0, 3);
+    check("an automatic admission to a host that will not pause is not kept (pause_refused)",
+          c.kind == SessionTable<FakeEntry>::CommitResult::Failed && c.why == "pause_refused" &&
+              rig.table.Find(p) == nullptr);
+    check("...and the PC on screen is untouched", rig.table.Registry().ActiveHandle() == a);
   }
 
   std::printf("\nsession_table_test: %d passed, %d failed\nRESULT: %s\n", gPass, gFail, gFail == 0 ? "PASS" : "FAIL");
