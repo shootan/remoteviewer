@@ -13281,3 +13281,27 @@ Next
 - 게시: rel/0.2.161 6be579b(= f3b03c1 + 버전) dry-run 산출물에 직접 서명(manifest a6584fa8… 서명 전후 불변, SHA256SUMS 11 일치, C++ verifier 수락+변조 거부, 서버 verifier), payload 시험 seam 0, UTF-16 0.2.161 carrier 5·0.2.160 0, real-recv-smoke PASS. deploy: windows.manifest `a6584fa8…` sig `46fe7e15…`(서버 = 로컬), 백업 0.2.160 pair `f0374344…`/`00ee26bd…`, 11 artifact 익명 https 해시 일치, android pair 불변. main ff `7b84c28..6be579b`. `dist/GNLinkSetup-0.2.161.exe`.
 - 미검증(사용자 실기): 실 Explorer 로그온 타이밍의 트레이 재등록, SYSTEM/Winlogon 에서 worker 생존·로그온 화면 송출·'Windows 로그인'·사용자 Host 인계(검은 화면 전환), SY/BA 로그 실제 기록(관리자 권한으로만 읽힘). 실패 시 `C:\ProgramData\GNLink\logs\prelogin_worker.log`(승격 읽기)·secure_input.log 로 원인 확인.
 - 제품/테스트/문서: 문서(이 항목·작업목록 PL).
+### 2026-10-22 hello-delay-fix r1 — 연결 인사(hello)가 쌓인 punch 응답·ICMP 오류 뒤에 수 초 묻히던 결함 보수 (PC 0.2.162 후보용 별도 커밋)
+- 증상: 호스트가 살아 있는 채 뷰어가 다시 붙을 때(검증용은 첫 연결에서도 관찰) hello 가 3~12 s 걸렸다. 10 s 를 넘으면 호스트의 control 읽기 마감으로 세션이 닫혀 window-list timeout → exit 43.
+- 원인(조사 t-uu1zshde, `report_reconnect_hello_delay_r1.md`, Codex `codex_reconnect_hello_delay_r1.md`):
+  - PunchAny 는 recvfrom 이 즉시 실패하면(Windows: 도달 불가 후보로 보낸 punch 의 ICMP 가 WSAECONNRESET 으로 돌아옴) 바로 다음 라운드를 보내 스스로 폭주했다(수 ms 에 ~290 라운드).
+  - 그 결과 남은 punch 응답·오류를, hello 는 한 라운드에 하나씩 읽고 50 ms 쉬어서 이미 와 있던 ack 를 늦게 읽었다.
+  - 5063cd9·4db9f17 동일 코드, 기준판에서 재현.
+- 수정(7646eef):
+  - ① PunchAny 는 monotonic 150 ms 시계로만 라운드를 보낸다. 후보 응답은 즉시 채택하고, 라운드당 수신 상한·대기는 단계적으로, 정지는 매 송신·대기 전에 확인한다. 회복 불가 소켓 오류는 즉시 실패로 끝낸다.
+  - ② hello 한 라운드는 slice 가 끝날 때까지 큐를 계속 읽는다(라운드당 수신 상한 512, stop·deadline 확인). 다음 Hello 는 원래 시계(slice 뒤 retrySleepMs)를 따르므로 송신량은 늘지 않는다.
+  - ACK 판정·DirectoryAuth·budget·재시도 정책·호스트 punch 응답 예산은 불변. 사전 flush·SIO_UDP_CONNRESET 은 하지 않았다.
+  - 보조 지표: 로그에 `recvErrors=` 추가(숫자 요약만).
+- 시험(4d8e4a8):
+  - hello_backlog_test 18/18: 25 punch 응답 + ICMP 리셋 100 이 큐에 있어도 ack 를 0 ms·1 라운드에 읽는다(뷰어·Android 옵션 모두). ack 없는 연속 유입에서도 budget·stop·라운드 시계를 지키고, 잘못된 ack 는 계속 거부한다.
+  - punch_any_test: 즉시 오류·무관/빈 datagram 에서도 1.5 s 에 10 라운드, 늦은 응답은 626 ms(500 ms 에 열림), stop 은 321 ms.
+  - 변이: H1(150 ms 시계 제거) → 397·192 라운드 FAIL. H2(구식: ack 아니면 라운드 종료) → 1.55 s FAIL, Android 26·66 hello FAIL. H3(ICMP 오류에 라운드 종료) → 6.28 s FAIL. 원복 PASS.
+  - 영향 시험 29종 exit 0(이 두 파일을 쓰는 단위·loopback·host e2e).
+- 실 재현(Host 생존 + 뷰어 재생성, loopback, 시험 seam 만 이식한 before=5063cd9 / after=4d8e4a8, 진단 로그 없음):
+  - 11 s 유지 재연결: before 11회 중 3.3 s 1회(나머지 0.32–0.81 s), after 11회 모두 0.27–0.55 s.
+  - 4 s 유지: before 재연결 7회 0.56–0.93 s(첫 연결 1회가 6.0 s), after 첫 연결 포함 8회 모두 0.26–0.54 s.
+  - 첫 연결(각 배치 1번): before 0.56 s·6.0 s, after 0.54 s·0.54 s.
+  - before 의 느린 회차는 모두 PunchAny ms=2~4(폭주)였다. after 는 같은 상황이 ms≈152–160(한 간격 대기)로 바뀌었고 recvErrors 0·badAcks 1–2 였다.
+- 실제 사슬(DW 4db9f17 + 7646eef, scratch inv-hello-chain): presentfail 2회·desktop 1회 모두 exit 0 ALL PASS. 첫 재연결에서 hello 0.27–0.54 s(badAcks 1–2, recvErrors 0) → `result=restored target=desktop`. 첫 연결 hello 0.53–0.54 s.
+- Android: native 공유 코어(PunchAny·udp_hello_handshake)에 들어간다. externalNativeBuildDebug 4 ABI 빌드 성공. Android 옵션(retrySleepMs 0, slice 250)의 backlog·연속 유입 시험은 Windows 의 같은 코드로 통과. 기기 실행·POSIX 오류 의미(ECONNREFUSED 를 일시 오류로 취급)는 미검증. APK 버전·배포 무변경.
+- 제품/테스트/문서: 제품 7646eef · 테스트 4d8e4a8 · 문서(이 항목).
