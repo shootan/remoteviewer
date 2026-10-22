@@ -113,7 +113,9 @@ async function stop(child) {
       sisService = spawn(path.join(bin, 'GNLinkInputServiceLifecycleTest.exe'), ['--lifecycle-test'],
         { env: sisEnv, cwd: scratch, stdio: 'ignore', windowsHide: true });
       let up = false;
-      for (let i = 0; i < 300 && !up; ++i) { up = fs.existsSync(pipe); if (!up) await sleep(100); }  // existsSync is false while the one instance is busy: keep looking
+      for (let i = 0; i < 100 && !up; ++i) { up = fs.existsSync(pipe); if (!up) await sleep(100); }
+      // A run where this expires is INVALID before any product step (once in r1b: cause not determined;
+      // a harness follow-up). Not lengthened, and not blamed on existsSync without evidence.
       assert(up, 'the service stand-in serves its unlock pipe ' + pipe);
       console.log('PASS the service stand-in serves its unlock pipe');
     }
