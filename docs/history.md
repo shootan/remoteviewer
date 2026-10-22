@@ -13427,3 +13427,11 @@ Next
   - shell.html `8fac49cd…`(소스 checkout·payload·Release/ui 동일).
   - smoke: real-recv-smoke(payload GNLinkStream) PASS · host_punch_reply_e2e 102/0 · hello_backlog 28/0 · punch_any PASS(콘솔 세션).
 - 상태: **로컬 실기 후보(게시 전)**. 서명·NAS 업로드·manifest 교체·push·사용자 PC 설치 없음. OS 실기(LK A~D·DW 회사 PC·hello 실 LAN/Android 기기) 미검증. ledger 유지: directory_retry 간헐, viewer_udp_recovery 처리량 FAIL(원인 미확정), APK S5.
+
+### 2026-10-22 PC 0.2.162 게시 — 잠금 화면 'Windows 로그인'·DXGI wedge 격리와 재연결 복원·연결 인사 지연 (실기 대기)
+- 사용자 지시: "이제 그럼 게시해", "내가 시킨 것 중에 작업 다한 거 다 게시해야지. 마무리해서."
+- 게시본: rel/0.2.162 b4dfaed(= integ 9f54912 + 버전) — dry-run 산출물에 `gnlink_release_sign.ps1` 직접 서명(manifest 814e4bb9… 서명 전후 불변, sig a39b2f14…), C++ `remote60_verify_release` PASS(1바이트 변조 거부)·`gnlink_verify_manifest.js` ok·변조본 REFUSED. `gnlink_deploy.sh` dry-run → 실게시 rc0: 11 artifact 업로드·서버 검증, 백업 0.2.161 pair(a6584fa8…/46fe7e15…), 외부 https 11 해시 일치. 서버 windows pair = 로컬 서명본, android pair 불변(b64c1b49…/210ab909…).
+- 검증용 독립(게시 전): SHA256SUMS 11 OK, UTF-16 0.2.162 Viewer/Stream/Host/Client 각 1·Setup 5·0.2.161 0, payload seam 표식 0, shell.html 8fac49cd…. 통합 9f54912 독립 검증·Codex 통합 OK(`.claude/codex_integ_0162_r1.md`).
+- 고지: 핵심 OS 실기(SYSTEM 서비스→잠금 화면 입력, 로그인 전 화면, UAC, 회사 PC 실제 wedge·NVIDIA) 미검증 상태로 전 채널 배포. APK 0.2.30 은 새 호스트 잠금 화면에 글자 입력 불가. 재연결 자동 복원은 전체 데스크톱만(모니터·창은 picker). Setup.exe 는 Authenticode 미서명(업데이트 manifest 서명과 별개).
+- 다음: 사용자 실기(이 PC 잠금·로그인 전·UAC·휴대폰 0.2.30 / 회사 PC wedge 복원), APK 0.2.31(SH) 게시.
+- 제품/테스트/문서: 문서(이 항목·작업목록 LK/DW/HD 게시 상태·원장 10-22).
