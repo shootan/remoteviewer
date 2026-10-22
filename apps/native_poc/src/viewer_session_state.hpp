@@ -77,6 +77,15 @@ struct SessionState {
   std::mutex preloginCredMu;
   std::wstring preloginCredPassword;
   std::atomic<uint64_t> preloginInjectedAtUs{0};
+  // lockscreen-cred r1: which screen the waiting password was asked for (kLoginRolePrelogin / LockScreen) and
+  // on which control connection; the control thread sends it only if the host is still at that screen on
+  // that connection, else drops it (zeroed) and says so. A prompt is open (one at a time, whatever opened it).
+  std::atomic<int> preloginCredRole{0};
+  std::atomic<uint64_t> preloginCredRunGen{0};
+  std::atomic<bool> loginPromptOpen{false};
+  // lockscreen-cred r1 (Codex Q1): a typed lock-screen credential is still waiting for its unlock on this
+  // connection (the control thread is following it). A new press then says so instead of sending.
+  std::atomic<bool> lockCredPending{false};
   // r5 G8: input not sent because the host is at the logon screen (characters, text), and whether the
   // window has said so since the host last arrived at it.
   std::atomic<uint64_t> preloginInputHeldBack{0};

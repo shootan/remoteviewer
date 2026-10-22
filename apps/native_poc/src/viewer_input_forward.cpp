@@ -46,7 +46,12 @@ bool host_ime_optin() {
 // the local IME, and the switch to physical is atomic (Codex Edge 4). The env opt-in and the v2
 // capability are folded into imeMode: the control thread only enters Active when both hold.
 bool host_ime_mode(ViewerState& ctx) {
-  return ctx.session.imeMode.load(std::memory_order_acquire) == 2;
+  if (ctx.session.imeMode.load(std::memory_order_acquire) != 2) return false;
+  // lockscreen-cred r1: at a logon screen (pre-login or lock screen, as the host said) keys go by the
+  // virtual-key path instead: the host injects a physical key only on the user's own desktop, so on the
+  // logon screen Enter / Tab / the arrows would go nowhere -- and the characters are held back either way.
+  return !(ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+           remote60::native_poc::prelogin::HostAtLogonScreen(ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)));
 }
 
 // Host-side IME: forward one raw physical key (scan code) so the host IME composes live. Not
@@ -212,6 +217,11 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
   if (!remote60::native_poc::prelogin::ViewerMaySendInputEvent(host_flags(ctx), kind, keyCode)) {
+    // lockscreen-cred r1: a key down held back here never reached the host -- forget it, so its up (which the
+    // gate lets through as a release) is not sent for a down that never went.
+    if (kind == remote60::native_poc::prelogin::kInputKindKeyDown && keyCode < 256) {
+      ctx.input.forwardedKeyDown[keyCode].store(false, std::memory_order_relaxed);
+    }
     held_back_at_logon(ctx);
     return;
   }

@@ -22,8 +22,11 @@ namespace remote60::native_poc::prelogin {
 constexpr uint16_t kInputKindKeyDown = 5;  // ControlInputEvent kinds 5/6 (as the host reads them)
 constexpr uint16_t kInputKindKeyUp = 6;
 
+// lockscreen-cred r1 (Codex A5): the lock screen of a logged-on host (kCaptureFlagLockCredV1) is a logon
+// screen for this purpose too -- characters are held back there and pointed at "Windows 로그인". (The host and
+// the service refuse them as well; this is the viewer not sending them, and saying why.)
 inline bool HostAtLogonScreen(uint32_t hostCaptureFlags) {
-  return (hostCaptureFlags & kCaptureFlagPreloginV1) != 0;
+  return (hostCaptureFlags & (kCaptureFlagPreloginV1 | kCaptureFlagLockCredV1)) != 0;
 }
 
 // r7 H6: before the host's first pong a viewer does not know which it is talking to -- and an unknown
@@ -37,6 +40,9 @@ inline uint32_t EffectiveHostFlags(bool roleKnown, uint32_t hostCaptureFlags) {
 inline bool ViewerMaySendInputEvent(uint32_t hostCaptureFlags, uint16_t kind, uint32_t keyCode) {
   if (!HostAtLogonScreen(hostCaptureFlags)) return true;
   if (kind != kInputKindKeyDown && kind != kInputKindKeyUp) return true;  // pointer / wheel
+  // lockscreen-cred r1 (Codex A6): a key UP goes -- it releases a key whose down reached the host before the
+  // screen changed (the viewer sends an up only for a down it sent); holding it back would leave it stuck.
+  if (kind == kInputKindKeyUp) return true;
   return keyCode <= 0xFFFF && IsPreloginNavKeyAllowed(static_cast<uint16_t>(keyCode));
 }
 

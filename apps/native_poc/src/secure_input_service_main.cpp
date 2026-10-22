@@ -28,6 +28,10 @@
 #include "secure_input_protocol.hpp"
 #include "secure_input_session.hpp"
 #include "secure_input_diag_budget.hpp"
+#include "logon_ui_target.hpp"  // lockscreen-cred r1: the lock-screen agent's target and typing
+#include "lock_input_policy.hpp"  // lockscreen-cred r1 (A6): no plaintext characters to a locked session
+#include "lock_cred_channel.hpp"  // lockscreen-cred r1: the service <-> agent private pipe
+#include "trusted_service_pipe.hpp"  // lockscreen-cred r1: the agent checks its server
 
 // Prelogin remote access (prelogin-service): the supervisor + console observation + machine credential.
 #include "prelogin_child_launch.hpp"
@@ -271,6 +275,139 @@ bool start_agent(DWORD sessionId, const std::wstring& desktopName) {
   gAgent.sessionId = sessionId;
   gAgent.desktop = desktopName;
   return true;
+}
+
+// ------------------------------------------------------------------ lock-screen credential agent
+// lockscreen-cred r1 (Codex A4 + codex_lockcred_agent_r1.md). The typing of a lock-screen credential is NOT a
+// message on the input agent's pipe: the input pipe carries only InputEvent/InputText, and nothing a host
+// sends there can become a credential job. The unlock thread starts a ONE-SHOT child of this service -- the
+// installed executable named explicitly, the service's own SYSTEM token moved into the target session, on that
+// session's Winlogon desktop, NO inherited handles, suspended, in a kill-on-close job, then resumed -- and
+// hands it the job over a private one-shot named pipe this service created first (lock_cred_channel.hpp):
+// sent only after the client is shown to be that very child (held process handle: pid, running, session,
+// SYSTEM, its Hello), while the child talks only to a server that is the trusted service and its parent. The
+// child checks the target (logon_ui_target.hpp), replaces the field's content once, answers, zeroes, exits.
+// The password is never on a command line, in an environment, a file or a log; nothing falls back to them.
+constexpr DWORD kLockCredConnectMs = 5000;   // the child's start and connect
+constexpr DWORD kLockCredAnswerMs = 10000;   // its target wait (3 s) and the typing
+constexpr DWORD kLockCredExitMs = 2000;
+
+remote60::native_poc::UnlockStage type_lock_cred(uint32_t session, const uint16_t* units, uint16_t count,
+                                                 uint32_t* win32, const std::function<bool()>& stillValid) {
+  using remote60::native_poc::UnlockStage;
+  namespace lc = remote60::native_poc::lock_cred_channel;
+  *win32 = 0;
+  if (count > remote60::native_poc::sealed_unlock::kMaxPasswordUtf16) return UnlockStage::InjectFailed;
+  const wchar_t* sddl = L"D:P(A;;GA;;;SY)";  // SYSTEM alone
+  bool requireSystem = true;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) {
+    sddl = remote60::native_poc::sis_test::Sddl();  // TEST BUILD ONLY: this user too
+    requireSystem = false;
+  }
+#endif
+  std::wstring id;
+  uint32_t pipeErr = 0;
+  HANDLE pipe = lc::CreateServerPipe(sddl, &id, &pipeErr);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    *win32 = pipeErr;
+    diag("lock-cred: the private pipe could not be created (win32=%u) -> not typed", pipeErr);
+    return UnlockStage::InjectFailed;
+  }
+  const std::wstring exe = current_executable_path();
+  std::wstring cmd = L"\"" + exe + L"\" --lockcred-agent " + id;  // the mode and the pipe's id: nothing secret
+  std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+  mutableCmd.push_back(L'\0');
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  std::wstring desktopSpec = L"winsta0\\Winlogon";
+  PROCESS_INFORMATION process{};
+  bool ok = false;
+  DWORD childSession = session;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  if (remote60::native_poc::sis_test::Active()) {
+    // TEST BUILD ONLY: no SYSTEM token to move into a session -- the child runs as this user, in this session,
+    // on this desktop; its target is the test's window by title (run_lock_cred_agent).
+    ok = CreateProcessW(exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup,
+                        &process) != FALSE;
+    ProcessIdToSessionId(GetCurrentProcessId(), &childSession);
+    SIS_TEST_NOTE("lock-cred agent started (test build: this user, this session, this desktop) ok=%d", ok ? 1 : 0);
+  } else
+#endif
+  {
+    HANDLE serviceToken = nullptr, agentToken = nullptr;
+    DWORD sessionId = session;
+    ok = OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_SESSIONID, &serviceToken) &&
+         DuplicateTokenEx(serviceToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary, &agentToken) &&
+         SetTokenInformation(agentToken, TokenSessionId, &sessionId, sizeof(sessionId));
+    if (serviceToken) CloseHandle(serviceToken);
+    if (ok) {
+      startup.lpDesktop = desktopSpec.data();
+      ok = CreateProcessAsUserW(agentToken, exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE,
+                                CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+                                &startup, &process) != FALSE;
+    }
+    if (agentToken) CloseHandle(agentToken);
+  }
+  if (!ok) {
+    *win32 = GetLastError();
+    CloseHandle(pipe);
+    diag("lock-cred agent start failed win32=%u session=%u", *win32, session);
+    return UnlockStage::InjectFailed;
+  }
+  // Into a kill-on-close job before it runs a single instruction -- or it does not run at all.
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  const bool jobbed = job && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) &&
+                      AssignProcessToJobObject(job, process.hProcess);
+  if (!jobbed) {
+    *win32 = GetLastError();
+    TerminateProcess(process.hProcess, 1);
+    WaitForSingleObject(process.hProcess, kLockCredExitMs);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (job) CloseHandle(job);
+    CloseHandle(pipe);
+    diag("lock-cred agent not resumed: no job (win32=%u)", *win32);
+    return UnlockStage::InjectFailed;
+  }
+  ResumeThread(process.hThread);
+  CloseHandle(process.hThread);
+
+  UnlockStage stage = UnlockStage::InjectFailed;
+  const char* why = "";
+  if (lc::AcceptOwnedChild(pipe, process.hProcess, process.dwProcessId, childSession, requireSystem, kLockCredConnectMs, &why)) {
+    static std::atomic<uint32_t> jobSeq{0};
+    lc::Job jobMsg{};
+    jobMsg.session = childSession;
+    jobMsg.requestId = jobSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+    jobMsg.count = count;
+    for (uint16_t i = 0; i < count; ++i) jobMsg.units[i] = units[i];
+    // r2 (Codex L2): the agent asks Go right before it touches the field; the answer is this request's fence.
+    const lc::JobOutcome outcome = lc::RunJob(pipe, jobMsg, stillValid, kLockCredAnswerMs, kLockCredConnectMs, win32);
+    SecureZeroMemory(&jobMsg, sizeof(jobMsg));
+    switch (outcome) {
+      case lc::JobOutcome::Typed: stage = UnlockStage::Injected; break;
+      case lc::JobOutcome::TargetNotReady: stage = UnlockStage::TargetNotReady; break;
+      case lc::JobOutcome::Denied:
+        stage = UnlockStage::RejectedStaleTopology;  // what it was issued for no longer holds: nothing typed
+        diag("lock-cred: the request no longer held at the commit -- nothing typed session=%u", session);
+        break;
+      case lc::JobOutcome::NoAnswer: diag("lock-cred agent gave no answer session=%u", session); break;
+      default: break;
+    }
+  } else {
+    diag("lock-cred: the pipe's client was refused (%s); nothing sent", why);
+  }
+  CloseHandle(pipe);
+  // Its own exit, bounded; then the job closes, which ends it if it has not -- it types nothing after that.
+  WaitForSingleObject(process.hProcess, kLockCredExitMs);
+  CloseHandle(process.hProcess);
+  CloseHandle(job);
+  return stage;
 }
 
 // True when `session` is actively connected (WTSActive). *known=false when the state could not be
@@ -551,6 +688,27 @@ uint64_t account_id_of(uint32_t session, bool* known) {
 bool session_is_locked(uint32_t session, bool* known) {
   *known = false;
   if (session == kInvalidSessionId) return false;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // TEST BUILD ONLY (lockscreen-cred e2e): this user's session stands in for a locked console session --
+  // "locked" until the test signals REMOTE60_SIS_TEST_UNLOCK_EVENT, which is then a session event (the topology
+  // moves once) and "unlocked". Here, not on the unlock primitives alone, so the unlock path and the input
+  // filter (A6) see the same answer. Connect state and console are the real ones.
+  if (remote60::native_poc::sis_test::Active() && !remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_FAKE_LOCK").empty()) {
+    static HANDLE unlockEvent = [] {
+      const std::wstring name = remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_UNLOCK_EVENT");
+      return name.empty() ? nullptr : CreateEventW(nullptr, TRUE, FALSE, name.c_str());
+    }();
+    static std::atomic<bool> bumped{false};
+    DWORD mine = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &mine);
+    if (session == mine) {
+      *known = true;
+      const bool unlocked = unlockEvent && WaitForSingleObject(unlockEvent, 0) == WAIT_OBJECT_0;
+      if (unlocked && !bumped.exchange(true)) gSessionTopologyGeneration.fetch_add(1, std::memory_order_release);
+      return !unlocked;
+    }
+  }
+#endif
   WTSINFOEXW* info = nullptr;
   DWORD bytes = 0;
   bool locked = false;
@@ -563,6 +721,34 @@ bool session_is_locked(uint32_t session, bool* known) {
   if (info) WTSFreeMemory(info);
   return locked;
 }
+
+// lockscreen-cred r1 (Codex A6): a plaintext character (text, or a non-navigation key down) to a session that
+// is -- or must be treated as -- locked is not forwarded. Counted; said for the first 16, then every
+// 200th (no key code, no text).
+std::atomic<uint64_t> gLockedPlaintextRefused{0};
+// r2 (Codex L3): asked of the session the message will ACTUALLY go to (`targetSession`, resolved the way the
+// forward resolves it -- a requester that is not active falls back to the console), and asked again by the
+// agent itself right before it injects (agent_refuses_locked_plaintext): a message that passed here and then
+// waited in the agent's pipe across a lock is refused there.
+bool locked_plaintext_refused(const SecureInputMessage& message, uint32_t targetSession, const std::wstring& desktopName,
+                              const char* where) {
+  namespace li = remote60::native_poc::lock_input;
+  const bool text = message.kind == static_cast<uint16_t>(SecureInputKind::InputText);
+  if (!text && !li::IsCharacterKey(message.eventKind, message.keyCode)) return false;  // pointer, nav, key up
+  bool known = false;
+  const bool locked = targetSession != kInvalidSessionId && session_is_locked(targetSession, &known);
+  const bool defaultDesktop = _wcsicmp(desktopName.c_str(), L"Default") == 0;
+  const bool treat = targetSession == kInvalidSessionId || li::TreatAsLocked(known, locked, defaultDesktop);
+  if (!(text ? li::RefuseText(treat) : li::RefuseEvent(treat, message.eventKind, message.keyCode))) return false;
+  const uint64_t n = gLockedPlaintextRefused.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 16 || n % 200 == 0) {  // bounded: the first few, then every 200th
+    diag("secure input: plaintext %s to a locked session refused at the %s (session=%u lockKnown=%d locked=%d desktopDefault=%d total=%llu)",
+         text ? "text" : "key", where, targetSession, known ? 1 : 0, locked ? 1 : 0, defaultDesktop ? 1 : 0,
+         static_cast<unsigned long long>(n));
+  }
+  return true;
+}
+
 
 using remote60::native_poc::SecureUnlockChallengeRequest;
 using remote60::native_poc::SecureUnlockChallengeResponse;
@@ -613,6 +799,11 @@ const sus::UnlockPrimitives& unlock_primitives() {
     q.running = [] { return gRunning.load(std::memory_order_acquire); };
     q.sleep = [](uint32_t ms) { Sleep(ms); };
     q.log = [](const char* line) { diag("%s", line); };
+    // lockscreen-cred r1: the lock-screen typing, by a one-shot child of this service (type_lock_cred).
+    q.typeLockCred = [](uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32,
+                        const std::function<bool()>& stillValid) {
+      return type_lock_cred(session, units, count, win32, stillValid);
+    };
     return q;
   }();
   return p;
@@ -682,6 +873,21 @@ void unlock_pipe_loop() {
           SecureUnlockChallengeRequest req{};
           std::memcpy(&req, buf, sizeof(req));
           sus::HandleChallengeRequest(us, req, unlock_primitives(), write);
+        } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::LockCredChallengeRequest) &&
+                   read == sizeof(SecureUnlockChallengeRequest)) {  // lockscreen-cred r1
+          SecureUnlockChallengeRequest req{};
+          std::memcpy(&req, buf, sizeof(req));
+          sus::HandleLockCredChallengeRequest(us, req, unlock_primitives(), write);
+        } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::CapabilitiesRequest) &&
+                   read == sizeof(remote60::native_poc::SecureUnlockQuery)) {  // lockscreen-cred r1
+          remote60::native_poc::SecureUnlockQuery q{};
+          std::memcpy(&q, buf, sizeof(q));
+          sus::HandleCapabilities(q, unlock_primitives(), write);
+        } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::StatusRequest) &&
+                   read == sizeof(remote60::native_poc::SecureUnlockQuery)) {  // lockscreen-cred r1
+          remote60::native_poc::SecureUnlockQuery q{};
+          std::memcpy(&q, buf, sizeof(q));
+          sus::HandleStatusRequest(us, q, unlock_primitives(), write);
         } else if (kind == static_cast<uint16_t>(remote60::native_poc::SecureUnlockKind::SealedRequest) &&
                    read == sizeof(SecureUnlockSealedRequest)) {
           SecureUnlockSealedRequest req{};
@@ -1446,9 +1652,23 @@ void WINAPI service_main(DWORD, wchar_t**) {
           // r15 R14-1: overlapped, woken by the server's stop event (secure_input_pipe_server.hpp).
           if (!remote60::native_poc::ReadPipeMessage(pipe, &message, sizeof(message), stop)) break;
           if (message.magic != kSecureInputMagic || message.size != sizeof(message)) break;
+          // lockscreen-cred r1: this pipe carries input and nothing else -- a host cannot make the agent stop
+          // (Shutdown is the service's own) or carry anything new.
+          if (message.kind != static_cast<uint16_t>(SecureInputKind::InputEvent) &&
+              message.kind != static_cast<uint16_t>(SecureInputKind::InputText)) {
+            diag("secure input: a message of kind %u from requester session=%u was refused", message.kind, requester);
+            continue;
+          }
+          // lockscreen-cred r1 (Codex A6) / r2 (L3): no plaintext character to a locked session, whatever the host
+          // or its viewer believed (lock_input_policy.hpp) -- asked of the session the message actually goes to,
+          // resolved under the agent's lock the same way the forward resolves it.
           remote60::native_poc::ForwardOutcome outcome;
           {
             std::lock_guard<std::mutex> agent(gAgentMu);
+            const bool logonOnly = (message.flags & remote60::native_poc::kSecureInputFlagLogonDesktopOnly) != 0;
+            const uint32_t targetSession = logonOnly ? logon_only_target_session(requester, consoleGenerationAtConnect)
+                                                     : static_cast<uint32_t>(target_session(requester));
+            if (locked_plaintext_refused(message, targetSession, current_input_desktop_name(), "service")) continue;
             outcome = forward_to_agent(message, requester, consoleGenerationAtConnect);
           }
           if (outcome == remote60::native_poc::ForwardOutcome::LogonBindingLost) {
@@ -1754,7 +1974,16 @@ int run_agent(HANDLE readPipe) {
     bool journalPlayback = false;
     const auto step = remote60::native_poc::AgentHandleMessage(
         message, [&] { return attach_to_input_desktop(&ownedDesktop, &journalPlayback); },
-        [] { return current_desktop_name(); }, [](const SecureInputMessage& m) { return inject_message(m); });
+        [] { return current_desktop_name(); },
+        [](const SecureInputMessage& m) {
+          // lockscreen-cred r2 (Codex L3): the LAST look -- this agent's own session, on the desktop it has just
+          // attached to, right before the injection. A character that passed the service's check and then
+          // waited in this pipe across a lock is refused here.
+          DWORD mine = kInvalidSessionId;
+          if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine)) mine = kInvalidSessionId;
+          if (locked_plaintext_refused(m, mine, current_desktop_name(), "agent")) return false;
+          return inject_message(m);
+        });
     if (step == remote60::native_poc::AgentStep::AttachFailed) {
       report_agent_state(L"(attach failed)", false, false, false);
       continue;
@@ -1770,6 +1999,99 @@ int run_agent(HANDLE readPipe) {
   CloseHandle(readPipe);
   return 0;
 }
+
+// lockscreen-cred r1: the one-shot lock-screen typing (see type_lock_cred). Talks only to the trusted service
+// that is its parent, over the pipe named by `id`; says who it is; takes one job; types it into the lock
+// screen's password field if -- and only if -- that is the input target (replacing what the field held);
+// answers; zeroes; exits. Nothing it reads is logged. Exit codes: 0 answered, 2 bad id, 3 the server was not
+// the trusted service / its parent, 4 no job.
+namespace {
+bool agent_trusts_server(HANDLE pipe) {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // TEST BUILD ONLY (its parent is the lifecycle test service, which no SCM knows): the parent check stands.
+  if (!remote60::native_poc::sis_test::Env(L"GNLINK_SIS_TEST_CRED_TARGET_TITLE").empty()) return true;
+#endif
+  return remote60::native_poc::ClassifyServerIdentity(
+             remote60::native_poc::GatherServerIdentity(pipe, remote60::native_poc::kSecureInputServiceName)) ==
+         remote60::native_poc::TrustedPipeStatus::Trusted;
+}
+}  // namespace
+
+int run_lock_cred_agent(const std::wstring& id) {
+  using remote60::native_poc::UnlockStage;
+  namespace lu = remote60::native_poc::logon_ui;
+  namespace lc = remote60::native_poc::lock_cred_channel;
+  if (!lc::IdIsWellFormed(id)) return 2;
+  const char* why = "";
+  HANDLE pipe = lc::OpenFromAgent(id, lc::ParentProcessId(), agent_trusts_server, &why);
+  if (pipe == INVALID_HANDLE_VALUE) return 3;
+  lc::Hello hello{};
+  hello.pid = GetCurrentProcessId();
+  DWORD n = 0;
+  lc::Job job{};
+  const bool got = WriteFile(pipe, &hello, sizeof(hello), &n, nullptr) && n == sizeof(hello) &&
+                   read_exact(pipe, &job, sizeof(job)) && job.magic == lc::kJobMagic && job.size == sizeof(job) &&
+                   job.version == lc::kVersion && job.count <= remote60::native_poc::sealed_unlock::kMaxPasswordUtf16;
+  if (!got) {
+    SecureZeroMemory(&job, sizeof(job));
+    CloseHandle(pipe);
+    return 4;
+  }
+  uint16_t answerStage = static_cast<uint16_t>(UnlockStage::InjectFailed);
+  uint32_t answerWin32 = 0;
+  DWORD mySession = 0;
+  if (!ProcessIdToSessionId(GetCurrentProcessId(), &mySession) || mySession != job.session) {
+    answerStage = static_cast<uint16_t>(UnlockStage::TargetNotReady);  // not the session it was meant for
+  } else {
+    // Attach to the desktop receiving input -- the lock screen's -- so the UIA and focus questions and the
+    // typing are asked of it (this process was created there; the thread follows it explicitly).
+    HDESK input = OpenInputDesktop(0, FALSE, kDesktopBaseAccess | DESKTOP_JOURNALPLAYBACK);
+    if (!input) input = OpenInputDesktop(0, FALSE, kDesktopBaseAccess);
+    if (input) (void)SetThreadDesktop(input);
+    lu::TargetFn target = [] { return lu::LockScreenTarget(lu::InputDesktopName, lu::PasswordFieldIdentity); };
+#ifdef REMOTE60_SIS_TEST_SEAM
+    // TEST BUILD ONLY (GNLinkInputServiceLifecycleTest's child): the test's window by its title, on this
+    // desktop, with the same password-field rule.
+    const std::wstring title = remote60::native_poc::sis_test::Env(L"GNLINK_SIS_TEST_CRED_TARGET_TITLE");
+    if (!title.empty()) {
+      target = [title]() -> uint64_t {
+        HWND fg = GetForegroundWindow();
+        wchar_t now[256] = {};
+        DWORD pid = 0;
+        if (!fg || GetWindowTextW(fg, now, 256) <= 0 || title != now || !GetWindowThreadProcessId(fg, &pid)) return 0;
+        return lu::FocusedPasswordFieldIdentity(fg, pid);
+      };
+    }
+#endif
+    uint32_t err = 0;
+    // r2 (Codex L2): the service's fence, asked once the target is found and right before the field is touched;
+    // a deny (or no answer) types nothing. Codex Q1 (b) / r2 (L4): then the content of EXACTLY the verified field
+    // (its element identity) is REPLACED -- a retry is never appended to an earlier attempt.
+    const lu::InjectFn replace = [&target, pipe, &job](const uint16_t* units, uint16_t count, uint32_t* e) {
+      const uint64_t tid = target();
+      if (tid == 0) {
+        *e = lu::kNotTypedError;
+        return false;
+      }
+      if (!lc::AgentAskGo(pipe, job.requestId)) {
+        *e = lu::kNotTypedError;
+        return false;
+      }
+      return lu::ReplaceWithUnicode(tid, units, count, e);
+    };
+    const UnlockStage stage = lu::TypeIntoTarget(job.units, job.count, target, replace, [](uint32_t ms) { Sleep(ms); },
+                                                 3000, &err);
+    answerStage = static_cast<uint16_t>(stage);
+    answerWin32 = err;
+    if (input) CloseDesktop(input);
+  }
+  const uint32_t requestId = job.requestId;
+  SecureZeroMemory(&job, sizeof(job));
+  lc::AgentAnswer(pipe, requestId, answerStage, answerWin32);
+  CloseHandle(pipe);
+  return 0;
+}
+
 
 }  // namespace
 
@@ -1892,6 +2214,9 @@ int wmain(int argc, wchar_t** argv) {
   if (argc == 3 && std::wstring(argv[1]) == L"--agent") {
     const uintptr_t value = static_cast<uintptr_t>(_wcstoui64(argv[2], nullptr, 10));
     return run_agent(reinterpret_cast<HANDLE>(value));
+  }
+  if (argc == 3 && std::wstring(argv[1]) == L"--lockcred-agent") {  // lockscreen-cred r1: one job, then exit
+    return run_lock_cred_agent(argv[2]);  // the private pipe's id -- nothing secret is ever on this line
   }
   // r6 V7: the start type moves only through the admin pipe's Enable/Disable (the record, the start type
   // and the floor in their one order). The install / toggle switches that moved it on their own --

@@ -89,6 +89,7 @@ add_executable(remote60_native_video_host_poc
   src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_cred_host.cpp
+  src/logon_ui_target.cpp
   src/sealed_unlock.cpp
   src/host_startup_capture.cpp
   src/host_shutdown.cpp
@@ -314,6 +315,9 @@ target_compile_definitions(remote60_native_video_host_poc PRIVATE
 add_executable(remote60_secure_input_service
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
+  src/logon_ui_target.cpp
+  src/lock_cred_channel.cpp
+  src/trusted_service_pipe.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -342,6 +346,9 @@ target_link_libraries(remote60_secure_input_service PRIVATE
 add_executable(remote60_secure_input_service_lifecycle_seam
   src/secure_input_service_main.cpp
   src/secure_unlock_service.cpp
+  src/logon_ui_target.cpp
+  src/lock_cred_channel.cpp
+  src/trusted_service_pipe.cpp
   src/prelogin_user_host_launch.cpp
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
@@ -366,6 +373,10 @@ target_link_libraries(remote60_secure_input_service_lifecycle_seam PRIVATE
 add_executable(remote60_secure_input_service_lifecycle_test src/secure_input_service_lifecycle_test.cpp)
 target_include_directories(remote60_secure_input_service_lifecycle_test PRIVATE src)
 add_dependencies(remote60_secure_input_service_lifecycle_test remote60_secure_input_service_lifecycle_seam)
+# lockscreen-cred r2 (Codex L3): the same test build refuses plaintext to a (stand-in) locked target session.
+add_executable(remote60_secure_input_lock_refusal_test src/secure_input_lock_refusal_test.cpp)
+target_include_directories(remote60_secure_input_lock_refusal_test PRIVATE src)
+add_dependencies(remote60_secure_input_lock_refusal_test remote60_secure_input_service_lifecycle_seam)
 
 # Clipboard image v1 (plan .claude/clip_image_plan.md r1 + r2): the viewer's image client (package,
 # offer/cancel/status, bulk stream, pacer) and the clipboard/WIC pieces it shares with the host. A
@@ -2512,6 +2523,46 @@ add_executable(remote60_secure_unlock_service_test
 target_include_directories(remote60_secure_unlock_service_test PRIVATE src)
 target_link_libraries(remote60_secure_unlock_service_test PRIVATE remote60_sealed_unlock)
 
+# lockscreen-cred r1: the lock-screen credential's purpose, eligibility, single typing and unlock observation.
+add_executable(remote60_secure_unlock_lockcred_test
+  src/secure_unlock_lockcred_test.cpp
+  src/secure_unlock_service.cpp
+)
+target_include_directories(remote60_secure_unlock_lockcred_test PRIVATE src)
+target_link_libraries(remote60_secure_unlock_lockcred_test PRIVATE remote60_sealed_unlock)
+
+# lockscreen-cred r2 (Codex L4): the field identity and the replacing typing on real edit controls (UI test).
+add_executable(remote60_logon_ui_identity_ui_test
+  src/logon_ui_identity_ui_test.cpp
+  src/logon_ui_target.cpp
+)
+target_include_directories(remote60_logon_ui_identity_ui_test PRIVATE src)
+target_link_libraries(remote60_logon_ui_identity_ui_test PRIVATE ole32 oleaut32 user32 advapi32)
+
+# lockscreen-cred r1: the lock-screen agent's commit sequence and Winlogon-only target (pure, stand-ins).
+add_executable(remote60_logon_ui_target_test
+  src/logon_ui_target_test.cpp
+  src/logon_ui_target.cpp
+)
+target_include_directories(remote60_logon_ui_target_test PRIVATE src)
+target_link_libraries(remote60_logon_ui_target_test PRIVATE ole32 oleaut32 user32 advapi32)
+
+# lockscreen-cred r1 (A6): plaintext to a locked session -- the rule the host and the service both apply.
+add_executable(remote60_lock_input_policy_test
+  src/lock_input_policy_test.cpp
+)
+target_include_directories(remote60_lock_input_policy_test PRIVATE src)
+
+# lockscreen-cred r1 (codex_lockcred_agent_r1.md): the service <-> agent private pipe, on real pipes and
+# processes; it also starts the built GNLinkInputService.exe as a would-be agent (it must refuse).
+add_executable(remote60_lock_cred_channel_test
+  src/lock_cred_channel_test.cpp
+  src/lock_cred_channel.cpp
+)
+target_include_directories(remote60_lock_cred_channel_test PRIVATE src)
+target_link_libraries(remote60_lock_cred_channel_test PRIVATE advapi32 bcrypt)
+add_dependencies(remote60_lock_cred_channel_test remote60_secure_input_service)
+
 # prelogin-ui r14 (M1): the secure-input pipe serves more than one client; the broker never waits on input.
 add_executable(remote60_secure_input_pipe_server_test
   src/secure_input_pipe_server_test.cpp
@@ -2708,6 +2759,15 @@ add_executable(remote60_secure_pipe_client_gate_test
 target_include_directories(remote60_secure_pipe_client_gate_test PRIVATE src)
 target_link_libraries(remote60_secure_pipe_client_gate_test PRIVATE common advapi32)
 
+# lockscreen-cred r1 (Codex Q2): the relay holds the service's single unlock pipe only for a transaction.
+add_executable(remote60_host_unlock_relay_ondemand_test
+  src/host_unlock_relay_ondemand_test.cpp
+  src/host_unlock_relay.cpp
+  src/trusted_service_pipe.cpp
+)
+target_include_directories(remote60_host_unlock_relay_ondemand_test PRIVATE src)
+target_link_libraries(remote60_host_unlock_relay_ondemand_test PRIVATE common advapi32)
+
 # prelogin-service A1 section 1: the pure supervisor state-machine decision core + negative controls.
 add_executable(remote60_prelogin_supervisor_state_test
   src/prelogin_supervisor_state_test.cpp
@@ -2780,6 +2840,7 @@ target_include_directories(remote60_prelogin_input_gate_test PRIVATE src)
 add_executable(remote60_prelogin_cred_host_test
   src/prelogin_cred_host_test.cpp
   src/prelogin_cred_host.cpp
+  src/logon_ui_target.cpp
   src/sealed_unlock.cpp
 )
 target_include_directories(remote60_prelogin_cred_host_test PRIVATE src)

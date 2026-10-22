@@ -61,6 +61,23 @@ int main() {
     check(!andrNo.sealedEntryAvailable && !andrNo.showAndroidUpdateNote, "host NOT in prelogin -> no note (Android)");
   }
 
+  std::printf("[lockscreen-cred r1: one 'Windows 로그인' for both screens]\n");
+  {
+    const auto lock = DecidePreloginCred(ViewerPlatform::Pc, kCaptureFlagLockCredV1 | kCaptureFlagSecureDesktopActive);
+    check(lock.sealedEntryAvailable && lock.role == LogonScreenRole::LockScreen,
+          "lock screen (0x40000) -> PC entry offered, role LockScreen");
+    const auto pre = DecidePreloginCred(ViewerPlatform::Pc, kCaptureFlagPreloginV1);
+    check(pre.sealedEntryAvailable && pre.role == LogonScreenRole::Prelogin, "pre-login (0x2000) -> offered, role Prelogin");
+    const auto uac = DecidePreloginCred(ViewerPlatform::Pc, kCaptureFlagSecureDesktopActive | kCaptureFlagUnlockSealedV1);
+    check(!uac.sealedEntryAvailable && uac.role == LogonScreenRole::None,
+          "NEGATIVE: a UAC prompt alone (secure desktop, sealed-unlock cap) -> no entry");
+    const auto none = DecidePreloginCred(ViewerPlatform::Pc, 0);
+    check(!none.sealedEntryAvailable && none.role == LogonScreenRole::None, "NEGATIVE: logged-in desktop -> no entry");
+    const auto android = DecidePreloginCred(ViewerPlatform::Android, kCaptureFlagLockCredV1);
+    check(!android.sealedEntryAvailable && android.showAndroidUpdateNote,
+          "Android at the lock screen -> no sealed entry, the update note only (APK unchanged)");
+  }
+
   if (gFailures != 0) {
     std::printf("reboot_menu_policy_test: FAIL (%d)\n", gFailures);
     return 1;

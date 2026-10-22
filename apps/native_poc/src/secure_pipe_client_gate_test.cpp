@@ -79,6 +79,9 @@ struct Sink {
               std::memcpy(&req, buf, sizeof(req));
               SecureUnlockChallengeResponse resp{};  // magic/size/kind defaulted
               resp.requestId = req.requestId;
+              // lockscreen-cred r2 (L1): the relay now also checks the challenge is bound to the control session
+              // that asked (the real service echoes the cookie it was given).
+              resp.clientSessionCookie = req.clientSessionCookie;
               resp.stage = static_cast<uint16_t>(UnlockStage::ChallengeIssued);
               resp.hostId = kSyntheticHostId;
               resp.expiresMs = kSyntheticExpiresMs;

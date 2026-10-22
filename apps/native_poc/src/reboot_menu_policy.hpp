@@ -37,16 +37,29 @@ inline RebootMenuPolicy DecideRebootMenu(uint32_t hostCaptureFlags) {
   return p;
 }
 
+// lockscreen-cred r1: which logon screen the host is at, if any -- the one decision the toolbar button, the
+// menu and Ctrl+Alt+U all take ("Windows 로그인" is the same entry for both screens; what differs is the
+// purpose the password is sealed under and who types it).
+enum class LogonScreenRole { None, Prelogin, LockScreen };
+
 struct PreloginCredPolicy {
   bool sealedEntryAvailable = false;  // the viewer may send the sealed credential to the LogonUI
   bool showAndroidUpdateNote = false; // Android v1: guidance only, never a plaintext fallback
+  LogonScreenRole role = LogonScreenRole::None;
 };
 
+inline LogonScreenRole DecideLogonScreenRole(uint32_t hostCaptureFlags) {
+  if ((hostCaptureFlags & kCaptureFlagPreloginV1) != 0) return LogonScreenRole::Prelogin;  // the worker's
+  if ((hostCaptureFlags & kCaptureFlagLockCredV1) != 0) return LogonScreenRole::LockScreen;  // a logged-on host's
+  return LogonScreenRole::None;
+}
+
 inline PreloginCredPolicy DecidePreloginCred(ViewerPlatform platform, uint32_t hostCaptureFlags) {
-  const bool hostInPrelogin = (hostCaptureFlags & kCaptureFlagPreloginV1) != 0;
   PreloginCredPolicy p;
-  p.sealedEntryAvailable = hostInPrelogin && platform == ViewerPlatform::Pc;
-  p.showAndroidUpdateNote = hostInPrelogin && platform == ViewerPlatform::Android;
+  p.role = DecideLogonScreenRole(hostCaptureFlags);
+  const bool atLogonScreen = p.role != LogonScreenRole::None;
+  p.sealedEntryAvailable = atLogonScreen && platform == ViewerPlatform::Pc;
+  p.showAndroidUpdateNote = atLogonScreen && platform == ViewerPlatform::Android;
   return p;
 }
 

@@ -140,6 +140,14 @@ std::vector<uint8_t> BuildKdfInfo(const UnlockContext& ctx);
 std::vector<uint8_t> BuildPreloginCredAad(const UnlockContext& ctx);
 std::vector<uint8_t> BuildPreloginCredKdfInfo(const UnlockContext& ctx);
 
+// Lock-screen credential delivery (lockscreen-cred r1, Codex A3): the third purpose. The service opens it
+// and its agent types it into the lock screen of the caller's own, ACTIVE console session -- it never
+// reaches WTSConnectSession. Same context bytes, DISTINCT labels for both the key (KDF info) and the AAD,
+// so a blob sealed for one of Unlock / PreloginCred / LockCred opens under neither of the others. Which
+// purpose a challenge is for is fixed when it is issued (the request kind), never guessed by trying.
+std::vector<uint8_t> BuildLockCredAad(const UnlockContext& ctx);
+std::vector<uint8_t> BuildLockCredKdfInfo(const UnlockContext& ctx);
+
 // --- replay / challenge state machine (pure; no CNG) --------------------------------------------
 enum class ChallengeVerdict {
   Valid,           // matches the one outstanding challenge, not expired, not consumed

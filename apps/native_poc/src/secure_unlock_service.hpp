@@ -73,7 +73,23 @@ struct UnlockPrimitives {
   std::function<bool()> running;
   std::function<void(uint32_t ms)> sleep;
   std::function<void(const char* line)> log;  // optional
+  // lockscreen-cred r1: type `count` UTF-16 units into the lock screen's password field of `session` --
+  // the service's own agent in that session, on its Winlogon desktop, after it has checked the target
+  // (logon_ui_target.hpp). Returns Injected, TargetNotReady (nothing typed) or InjectFailed (*win32).
+  // Unset: the feature is not offered (Capabilities lists nothing).
+  // lockscreen-cred r2 (Codex L2): `stillValid` is the service's fence -- asked right before the field is touched
+  // (after the agent found its target); false = everything it was issued for no longer holds -> nothing typed,
+  // RejectedStaleTopology. The agent never decides that alone.
+  std::function<UnlockStage(uint32_t session, const uint16_t* units, uint16_t count, uint32_t* win32,
+                            const std::function<bool()>& stillValid)>
+      typeLockCred;
 };
+
+// lockscreen-cred r1: how long a typed lock-screen credential waits for its session to unlock (the user
+// presses Enter) before the job ends as UnlockUnconfirmed.
+inline constexpr uint64_t kLockCredUnlockWaitMs = 120000;
+// lockscreen-cred r2 (Codex L2): a consumed lock-screen credential must reach the field within this, or it is not typed.
+inline constexpr uint64_t kLockCredCommitMs = 20000;
 
 // Per-connection unlock state, owned by the unlock thread.
 struct UnlockSession {
@@ -86,15 +102,36 @@ struct UnlockSession {
   bool hasChallenge = false;
   uint32_t badAttempts = 0;                 // invalid-tag DoS guard
   uint32_t terminalRequestId = 0;           // cached terminal result (idempotent duplicate)
+  uint64_t terminalCookie = 0;              // r2 (L1): ...of that control session only
   bool hasTerminal = false;
   SecureUnlockResult terminal{};
   uint64_t lastChallengeMs = 0;             // rate-limit issuance (capability is advertised on the wire)
+  // lockscreen-cred r1: the purpose the outstanding challenge was ISSUED for (kUnlockPurpose*). The sealed
+  // request is opened under this purpose only -- never by trying the others.
+  uint16_t purpose = kUnlockPurposeUnlock;
+  // A typed lock-screen credential waiting to be seen unlocking its session (the job is not terminal yet).
+  bool lockCredWaiting = false;
+  uint32_t lockCredRequestId = 0;
+  uint64_t lockCredCookie = 0;     // r2 (L1): the control session it belongs to
+  uint32_t lockCredJobId = 0;
+  uint32_t lockCredTopology = 0;   // the topology generation when it was typed
+  uint64_t lockCredTypedMs = 0;
+  uint32_t rejectLogs = 0;         // refusals said so far on this connection (bounded)
 };
 
 using Write = std::function<void(const void* data, size_t len)>;
 
 void HandleChallengeRequest(UnlockSession& us, const SecureUnlockChallengeRequest& req, const UnlockPrimitives& p,
                             const Write& write);
+// lockscreen-cred r1: a challenge for the lock-screen credential -- only for the caller's own session while it
+// is the console, ACTIVE and locked. The disconnected-session unlock above is untouched.
+void HandleLockCredChallengeRequest(UnlockSession& us, const SecureUnlockChallengeRequest& req,
+                                    const UnlockPrimitives& p, const Write& write);
+// lockscreen-cred r1: the answer to CapabilitiesRequest.
+void HandleCapabilities(const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write);
+// lockscreen-cred r1: where a lock-credential job is now (Injected while it waits; then SessionUnlocked or
+// UnlockUnconfirmed, terminal and cached). Any other requestId: RejectedPolicy, terminal.
+void HandleStatusRequest(UnlockSession& us, const SecureUnlockQuery& q, const UnlockPrimitives& p, const Write& write);
 void HandleSealedRequest(UnlockSession& us, const SecureUnlockSealedRequest& req, uint32_t jobId,
                          const UnlockPrimitives& p, const Write& write);
 

@@ -4,12 +4,12 @@
 #include "prelogin_cred_host.hpp"
 
 #include <windows.h>
-#include <UIAutomation.h>
 
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "logon_ui_target.hpp"
 #include "prelogin_logon_desktop.hpp"
 #include "unlock_wire.hpp"
 
@@ -205,79 +205,12 @@ PreloginCredReceiver::~PreloginCredReceiver() {
 }
 
 PreloginCredReceiver::InjectFn ProductCredInject() {
-  return [](const uint16_t* units, uint16_t count, uint32_t* err) {
-    // One SendInput for all of it: the system does not interleave other input into one call's events.
-    std::vector<INPUT> in(static_cast<size_t>(count) * 2);
-    for (uint16_t i = 0; i < count; ++i) {
-      for (int k = 0; k < 2; ++k) {
-        INPUT& e = in[static_cast<size_t>(i) * 2 + k];
-        e.type = INPUT_KEYBOARD;
-        e.ki.wScan = units[i];
-        e.ki.dwFlags = KEYEVENTF_UNICODE | (k == 1 ? KEYEVENTF_KEYUP : 0);
-      }
-    }
-    const UINT sent = SendInput(static_cast<UINT>(in.size()), in.data(), sizeof(INPUT));
-    const DWORD e = GetLastError();
-    SecureZeroMemory(in.data(), in.size() * sizeof(INPUT));
-    if (sent != in.size()) {
-      *err = e ? e : ERROR_GEN_FAILURE;
-      return false;
-    }
-    return true;
-  };
+  // lockscreen-cred r1: the one typing, shared with the lock-screen agent (logon_ui_target.hpp).
+  return [](const uint16_t* units, uint16_t count, uint32_t* err) { return logon_ui::TypeUnicode(units, count, err); };
 }
 
 namespace {
-std::wstring input_desktop_name() {
-  std::wstring name;
-  if (HDESK d = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS)) {
-    wchar_t buf[128] = {};
-    DWORD need = 0;
-    if (GetUserObjectInformationW(d, UOI_NAME, buf, sizeof(buf), &need)) name = buf;
-    CloseDesktop(d);
-  }
-  return name;
-}
-
-bool process_is_local_system(HANDLE proc) {
-  HANDLE tok = nullptr;
-  if (!OpenProcessToken(proc, TOKEN_QUERY, &tok)) return false;
-  BYTE buf[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)] = {};
-  DWORD n = 0;
-  bool system = false;
-  if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &n)) {
-    BYTE sys[SECURITY_MAX_SID_SIZE];
-    DWORD sysSize = sizeof(sys);
-    system = CreateWellKnownSid(WinLocalSystemSid, nullptr, sys, &sysSize) &&
-             EqualSid(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, sys);
-  }
-  CloseHandle(tok);
-  return system;
-}
-
-// r7 H5: the element that has the keyboard focus is a password field, in process `pid`.
-bool focused_password_field_in(DWORD pid) {
-  const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-  bool ok = false;
-  IUIAutomation* uia = nullptr;
-  if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) && uia) {
-    IUIAutomationElement* focused = nullptr;
-    if (SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
-      BOOL isPassword = FALSE;
-      int owner = 0;
-      ok = SUCCEEDED(focused->get_CurrentIsPassword(&isPassword)) && isPassword &&
-           SUCCEEDED(focused->get_CurrentProcessId(&owner)) && static_cast<DWORD>(owner) == pid;
-      focused->Release();
-    }
-    uia->Release();
-  }
-  if (SUCCEEDED(init)) CoUninitialize();
-  return ok;
-}
-
-uint64_t identity_of(HWND w, DWORD pid) {
-  return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(w)) & 0xFFFFFFFFull) | (static_cast<uint64_t>(pid) << 32) | 1ull;
-}
+std::wstring input_desktop_name() { return logon_ui::InputDesktopName(); }
 }  // namespace
 
 PreloginCredReceiver::TargetFn ProductCredTargetWith(std::function<std::wstring()> desktopName,
@@ -321,34 +254,13 @@ PreloginCredReceiver::TargetFn ProductCredTarget() {
     wchar_t got[256] = {};
     DWORD pid = 0;
     if (!fg || GetWindowTextW(fg, got, 256) <= 0 || title != got || !GetWindowThreadProcessId(fg, &pid)) return 0;
-    if (!focused_password_field_in(pid)) return 0;  // r7 H5: the same field rule as the product
-    return identity_of(fg, pid);
+    return logon_ui::FocusedPasswordFieldIdentity(fg, pid);  // r7 H5: the same field rule as the product
   };
 #else
-  wchar_t sysDir[MAX_PATH] = {};
-  const UINT len = GetSystemDirectoryW(sysDir, MAX_PATH);
-  const std::wstring logonUi = std::wstring(sysDir, len < MAX_PATH ? len : 0) + L"\\LogonUI.exe";
-  // The input is on the Winlogon desktop (r18 R17-1: any other desktop seen here is the worker's leave),
-  // its foreground window belongs to the system's LogonUI.exe (that full path, not just a process called so),
-  // running as LocalSystem in this worker's session.
-  return ProductCredTargetWith(input_desktop_name, [logonUi]() -> uint64_t {
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid == 0) return 0;
-    DWORD mine = 0, theirs = 0;
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine) || !ProcessIdToSessionId(pid, &theirs) || mine != theirs) return 0;
-    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!p) return 0;
-    wchar_t path[MAX_PATH * 2] = {};
-    DWORD plen = MAX_PATH * 2;
-    const bool image = QueryFullProcessImageNameW(p, 0, path, &plen) != FALSE &&
-                       CompareStringOrdinal(path, static_cast<int>(plen), logonUi.c_str(), static_cast<int>(logonUi.size()),
-                                            TRUE) == CSTR_EQUAL;
-    const bool system = image && process_is_local_system(p);
-    CloseHandle(p);
-    // r7 H5: and the focus is in a password field of it -- not the user-name box of the same window.
-    return system && focused_password_field_in(pid) ? identity_of(fg, pid) : 0;
-  }, L"Winlogon");
+  // The input is on the Winlogon desktop (r18 R17-1: any other desktop seen here is the worker's leave), and
+  // the focus is the system LogonUI's password field (logon_ui_target.hpp -- the rule the lock-screen agent
+  // uses too).
+  return ProductCredTargetWith(input_desktop_name, [] { return logon_ui::PasswordFieldIdentity(); }, L"Winlogon");
 #endif
 }
 

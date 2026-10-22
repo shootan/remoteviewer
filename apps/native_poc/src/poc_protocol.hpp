@@ -112,6 +112,12 @@ enum class MessageType : uint16_t {
   // reboot_wire.hpp.
   ControlRebootRequest = 84,    // viewer -> host: requestId
   ControlRebootReply = 85,      // host -> viewer: requestId, result (Accepted/Refused/NotAuthorized/Failed), win32
+  // (86/87 are the ordered file-offer pair, file_copy_wire.hpp.)
+  // Lock-screen "Windows 로그인" (lockscreen-cred r1, number assigned by the verifier): the user pressed it while the
+  // host's own session is locked on the console. The layout is ControlUnlockChallengeRequestMessage's;
+  // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
+  // Gated on kCaptureFlagLockCredV1; an old host never sees it.
+  ControlLockCredChallengeRequest = 88,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -330,6 +336,12 @@ constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
 // prelogin-ui r9 R5: Ctrl+Alt+Del can be asked of this host (ControlPreloginControl op Sas, 83 -> 82). Only a
 // --prelogin worker advertises it; the answer may still be "policy does not allow" (prelogin_sas_wire.hpp).
 constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
+// lockscreen-cred r1 (number assigned by the verifier): the host's OWN session is locked on the console right now
+// (known from WTS, not guessed from the secure desktop -- a UAC prompt does not set it), and the SYSTEM
+// service said it can type a sealed credential into the lock screen. The viewer offers "Windows 로그인"
+// for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
+// different role: it never turns on the pre-login control allowlist.
+constexpr uint32_t kCaptureFlagLockCredV1 = 0x40000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
@@ -862,7 +874,20 @@ enum class UnlockStage : uint16_t {
   AuthFailed = 10,           // wrong password / account restriction
   Timeout = 11,
   InternalError = 12,
+  // lockscreen-cred r1 (numbers assigned by the verifier): what the lock-screen typing came to, apart from Injected.
+  TargetNotReady = 13,      // the lock screen's password field was not the input target: nothing typed
+  InjectFailed = 14,        // the typing itself failed or was cut short: not retried
+  UnlockUnconfirmed = 15,   // typed, but no unlock of that session was seen in the time allowed
+  // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
+  // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
+  Busy = 16,
 };
+
+// Which sealed purpose a challenge (41) was issued for, in its `reserved` field (lockscreen-cred r1).
+// 0 is what every older host sends: the disconnected-session unlock (or, from a pre-login worker, its
+// credential). A viewer that asked 88 accepts only kUnlockPurposeLockCred.
+constexpr uint16_t kUnlockPurposeUnlock = 0;
+constexpr uint16_t kUnlockPurposeLockCred = 2;
 
 // client -> host: the user pressed Unlock. The host replies with a fresh one-shot challenge.
 struct ControlUnlockChallengeRequestMessage {

@@ -93,6 +93,50 @@ int main() {
   check(!AesGcmOpen(hk, nonce, aad.data(), aad.size(), ucipher, kPlaintextBytes, utag, out),
         "an unlock blob does NOT open under the prelogin context");
 
+  // lockscreen-cred r1 (Codex A3): the third purpose, LockCred. Every pairing of the three: a blob sealed
+  // for one opens under its own key + AAD and under NO other combination -- neither the other purpose's
+  // key with its AAD, nor this key with the other AAD.
+  std::printf("[lockscreen-cred: Unlock / PreloginCred / LockCred, every pairing]\n");
+  struct Purpose {
+    const char* name;
+    std::vector<uint8_t> (*kdf)(const UnlockContext&);
+    std::vector<uint8_t> (*aad)(const UnlockContext&);
+  };
+  const Purpose purposes[] = {{"Unlock", BuildKdfInfo, BuildAad},
+                              {"PreloginCred", BuildPreloginCredKdfInfo, BuildPreloginCredAad},
+                              {"LockCred", BuildLockCredKdfInfo, BuildLockCredAad}};
+  check(BuildLockCredAad(ctx) != BuildAad(ctx) && BuildLockCredAad(ctx) != BuildPreloginCredAad(ctx),
+        "lock-cred AAD differs from both others");
+  check(BuildLockCredKdfInfo(ctx) != BuildKdfInfo(ctx) && BuildLockCredKdfInfo(ctx) != BuildPreloginCredKdfInfo(ctx),
+        "lock-cred KDF info differs from both others");
+  for (const Purpose& s : purposes) {
+    const auto sInfo = s.kdf(ctx);
+    const auto sAad = s.aad(ctx);
+    uint8_t sKeyClient[kAesKeyBytes], sKeyHost[kAesKeyBytes];
+    const bool derived = DeriveAesKey(client, hostPub, salt, sInfo.data(), sInfo.size(), sKeyClient) &&
+                         DeriveAesKey(host, clientPub, salt, sInfo.data(), sInfo.size(), sKeyHost);
+    uint8_t sCipher[kPlaintextBytes], sTag[kTagBytes];
+    const bool sealed = derived && AesGcmSeal(sKeyClient, nonce, sAad.data(), sAad.size(), plain, kPlaintextBytes, sCipher, sTag);
+    for (const Purpose& o : purposes) {
+      const auto oInfo = o.kdf(ctx);
+      const auto oAad = o.aad(ctx);
+      uint8_t oKey[kAesKeyBytes];
+      const bool oDerived = DeriveAesKey(host, clientPub, salt, oInfo.data(), oInfo.size(), oKey);
+      char what[160];
+      if (&s == &o) {
+        std::snprintf(what, sizeof(what), "%s blob opens under %s key + AAD", s.name, o.name);
+        check(sealed && oDerived && AesGcmOpen(oKey, nonce, oAad.data(), oAad.size(), sCipher, kPlaintextBytes, sTag, out) &&
+                  std::memcmp(out, plain, kPlaintextBytes) == 0,
+              what);
+        continue;
+      }
+      std::snprintf(what, sizeof(what), "%s blob does NOT open under %s key + AAD", s.name, o.name);
+      check(sealed && oDerived && !AesGcmOpen(oKey, nonce, oAad.data(), oAad.size(), sCipher, kPlaintextBytes, sTag, out), what);
+      std::snprintf(what, sizeof(what), "%s blob does NOT open under its own key + %s AAD", s.name, o.name);
+      check(sealed && !AesGcmOpen(sKeyHost, nonce, oAad.data(), oAad.size(), sCipher, kPlaintextBytes, sTag, out), what);
+    }
+  }
+
   if (gFailures != 0) {
     std::printf("prelogin_cred_seal_test: FAIL (%d)\n", gFailures);
     return 1;
