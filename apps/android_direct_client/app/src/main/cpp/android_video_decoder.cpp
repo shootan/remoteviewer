@@ -1,4 +1,5 @@
 #include "android_video_decoder.hpp"
+#include "android_video_decoder_sh_seam.hpp"
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -647,6 +648,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   }
 
   ++codecsStarted_;
+  codecEpoch_.store(static_cast<uint32_t>(codecsStarted_), std::memory_order_release);
   codecAwaitsKey_ = true;
   formatWidth_ = 0;  // viewer-sharpness r1 A: no format of this instance yet -- nothing of the last one is kept
   formatHeight_ = 0;
@@ -929,6 +931,35 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   if (!heldOutputValid_ || !codec_) return;
   heldOutputValid_ = false;
 
+  // sh-filter: both releases stamp the buffer with heldOutputPresentUs_ (the scheduled time, or the PTS of
+  // an immediate release -- the same number, in the steady domain); that timestamp is the frame's key in
+  // the handoff ring (first-output gate, tap step, S4). r3 (Codex R2): the ring entry is published BEFORE
+  // the buffer, so whoever latches the frame always finds it -- the renderer and the view's first latch
+  // can come right after the release. `handoffNs` is therefore the moment the release was issued (just
+  // before it), not after it returned. A release that fails withdraws the entry: never a frame that was
+  // not handed over.
+  const int64_t handoffKey = static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL);
+  auto publish = [&]() -> size_t {
+    const size_t slot = handoffNext_++ % kHandoffRing;
+    handoffKey_[slot].store(0, std::memory_order_release);
+    handoffNs_[slot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+    handoffMeta_[slot].store((static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
+                                 (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu),
+                             std::memory_order_release);
+    handoffSize_[slot].store((static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_, std::memory_order_release);
+    handoffKey_[slot].store(handoffKey, std::memory_order_release);
+    return slot;
+  };
+#ifdef GNLINK_SH_TEST_SEAM
+  // TEST BUILD ONLY (debug + -Pgnlink.shTestSeam=true): delay between publication and release, and r2's
+  // order (release, delay, publish) as the counter-case -- android_video_decoder_sh_seam.hpp.
+  const bool publishAfter = sh_seam_publish_after_release();
+  const size_t slot = publishAfter ? kHandoffRing : publish();
+  if (!publishAfter) sh_seam_handoff_delay();
+#else
+  const size_t slot = publish();
+#endif
+
   media_status_t status;
   if (heldOutputScheduled_) {
     // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
@@ -940,10 +971,34 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
     ++presentImmediateCount_;
   }
   if (status != AMEDIA_OK) {
+    if (slot < kHandoffRing && handoffKey_[slot].load(std::memory_order_acquire) == handoffKey) {
+      handoffKey_[slot].store(0, std::memory_order_release);
+    }
     log_error("AMediaCodec output release failed");
     ResetCodecLocked();
     return;
   }
+#ifdef GNLINK_SH_TEST_SEAM
+  if (publishAfter) {
+    // The late publication must not hold the decoder lock: a sleep here stalls whoever waits on the lock
+    // (the UI thread's handoff query among them), so the view could never latch ahead of the entry. The
+    // slot is taken now, under the lock, and written after the delay by a thread of its own. Test build
+    // only; a session teardown inside the <= 2 s delay could touch a freed sink -- accepted for a seam
+    // that never ships.
+    const size_t lateSlot = handoffNext_++ % kHandoffRing;
+    handoffKey_[lateSlot].store(0, std::memory_order_release);
+    const uint64_t meta = (static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
+                          (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu);
+    const uint64_t size = (static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_;
+    std::thread([this, lateSlot, meta, size, handoffKey]() {
+      sh_seam_handoff_delay();
+      handoffNs_[lateSlot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+      handoffMeta_[lateSlot].store(meta, std::memory_order_release);
+      handoffSize_[lateSlot].store(size, std::memory_order_release);
+      handoffKey_[lateSlot].store(handoffKey, std::memory_order_release);
+    }).detach();
+  }
+#endif
   ++outputFrameCount_;
 
   // Spacing between the moments frames were handed over on their due date. This is what the

@@ -26,3 +26,7 @@ target_link_libraries(remote60_android_direct
   ${log-lib}
   ${mediandk-lib}
 )
+# sh-filter r3: the debug test seam's shader fixture sets buffer transforms (libnativewindow). Only then.
+if(GNLINK_SH_TEST_SEAM)
+  target_link_libraries(remote60_android_direct nativewindow)
+endif()

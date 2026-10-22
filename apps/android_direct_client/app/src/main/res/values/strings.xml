@@ -199,6 +199,13 @@
     <string name="ui_quality_high_short">고화질</string>
     <string name="ui_quality_best_short">최고화질</string>
     <string name="ui_fps_label">프레임</string>
+    <!-- sh-filter r1: the phone-side sharpening choice; the values are shown so 0.20 and 0.35 can be compared. -->
+    <string name="ui_sharpness_label">선명도</string>
+    <string name="ui_sharpness_off">끄기</string>
+    <string name="ui_sharpness_weak">약하게 · 0.20</string>
+    <string name="ui_sharpness_strong">강하게 · 0.35</string>
+    <string name="ui_sharpness_hint">휴대폰에서만 처리 · 받는 데이터량은 그대로</string>
+    <string name="ui_sharpness_fallback">선명도 적용 불가, 원본 표시</string>
     <string name="ui_fps_item">%1$d fps</string>
     <string name="ui_fps_hint">높은 프레임은 데이터·배터리 사용량이 늘 수 있습니다</string>
     <string name="ui_quality_status_requested">PC 에 요청했습니다: %1$s · %2$d fps</string>

@@ -81,6 +81,13 @@ object NativeSessionBridge {
     external fun nativeAbortVideoSwitch()
     external fun nativeGetReadySelectionGeneration(): Long
     external fun nativeGetLastOutputPresentationUs(): Long
+    /** sh-filter r1: monotonic ns of the handoff of the frame with this buffer timestamp (0 = unknown). */
+    external fun nativeHandoffNsForTimestamp(timestampNs: Long): Long
+    /** sh-filter r2: [handoffNs, streamGeneration, codecEpoch, visibleWidth, visibleHeight] of the frame
+     *  released with this timestamp, or null (not among the recent ones). Any thread. */
+    external fun nativeHandoffInfo(timestampNs: Long): LongArray?
+    /** sh-filter r2: codec instances started so far (a frame from a later codec has a larger epoch). */
+    external fun nativeCodecEpoch(): Long
     external fun nativeRequestWindowList(): Boolean
     external fun nativeSelectWindow(windowId: Long): Boolean
     external fun nativeSelectDesktopMode(): Boolean

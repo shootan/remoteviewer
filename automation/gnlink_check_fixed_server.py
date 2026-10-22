@@ -130,6 +130,23 @@ def check_windows_dir(report, directory):
         check_windows_file(report, path, must_carry)
 
 
+# sh-filter r2 (Codex H4): what only the sharpening TEST seam (src/shseam, -Pgnlink.shTestSeam=true) puts
+# into the code -- its marker and the two launch-intent keys that inject faults or force a strength. The
+# shipped half (src/noseam) has none of them. Searched in every classes*.dex.
+APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength']
+# sh-filter r3 (R2): the native half of the same seam (debug variant only) -- its marker and the system
+# property prefix it reads. Searched in every lib/*/*.so of the APK.
+APK_NATIVE_TEST_MARKERS = ['sh-test-seam', 'debug.gnlink.sh.']
+
+
+def apk_native_markers_found(so_bytes):
+    return [m for m in APK_NATIVE_TEST_MARKERS if m.encode('ascii') in so_bytes]
+
+
+def apk_test_markers_found(dex):
+    return [m for m in APK_TEST_MARKERS if m.encode('ascii') in dex or m.encode('utf-16-le') in dex]
+
+
 def check_apk(report, path):
     name = os.path.basename(path)
     with zipfile.ZipFile(path) as apk:
@@ -143,6 +160,14 @@ def check_apk(report, path):
              if item.encode('ascii') in everything or item.encode('utf-16-le') in everything]
     report.check(not found, '%s has no server field or text asking for one%s'
                  % (name, (' -- found: ' + ', '.join(found)) if found else ''))
+    seam = apk_test_markers_found(dex)
+    report.check(not seam, '%s has no sharpening test seam%s'
+                 % (name, (' -- found: ' + ', '.join(seam)) if seam else ''))
+    with zipfile.ZipFile(path) as apk:
+        native = b''.join(apk.read(n) for n in apk.namelist() if n.startswith('lib/') and n.endswith('.so'))
+    native_seam = apk_native_markers_found(native)
+    report.check(not native_seam, '%s has no sharpening test seam in its native libraries%s'
+                 % (name, (' -- found: ' + ', '.join(native_seam)) if native_seam else ''))
 
     with zipfile.ZipFile(path) as apk:
         names = apk.namelist()
@@ -207,6 +232,19 @@ def self_test():
             outer.check(verdict(make('sis-agent-' + enc, {
                 'GNLinkInputService.exe': lambda b, e=enc: b + 'GNLINK_SIS_TEST_CRED_TARGET_TITLE'.encode(e)})) == 1,
                 'a service carrying GNLINK_SIS_TEST_ alone (%s) fails' % enc)
+
+        # sh-filter r2 (H4): the APK seam check on dex bytes (a real APK pair is the release-time control:
+        # the noseam build passes, the shseam build fails -- see the sh-filter report).
+        outer.check(not apk_test_markers_found(b'dex\n035\0' + FIXED_ADDRESS.encode('ascii')),
+                    'a dex without the sharpening seam passes the seam check')
+        for marker in APK_TEST_MARKERS:
+            outer.check(apk_test_markers_found(b'dex\n035\0' + marker.encode('ascii')) == [marker],
+                        'a dex containing "%s" fails the seam check' % marker)
+        outer.check(not apk_native_markers_found(b'\x7fELF' + FIXED_ADDRESS.encode('ascii')),
+                    'a native library without the sharpening seam passes')
+        for marker in APK_NATIVE_TEST_MARKERS:
+            outer.check(apk_native_markers_found(b'\x7fELF' + marker.encode('ascii')) == [marker],
+                        'a native library containing "%s" fails' % marker)
         missing = make('missing', {})
         os.remove(os.path.join(missing, 'GNLinkViewer.exe'))
         outer.check(verdict(missing) == 1, 'a missing program fails rather than being skipped')
