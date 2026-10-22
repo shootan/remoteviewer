@@ -99,6 +99,9 @@ bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
 struct UdpHelloStats {
   uint32_t attempts = 0;     // hellos actually sent
   uint32_t badAcks = 0;      // answers that came back and were not the ack we needed
+  // hello-delay-fix r1: receives that failed for one item only -- a truncated datagram, or (Windows)
+  // the ICMP reset an earlier send earned. Not answers; counted apart from badAcks.
+  uint32_t recvErrors = 0;
   uint64_t elapsedMs = 0;    // from the first send to the ack, or to the budget running out
   bool budgetSpent = false;  // true when the deadline ended it rather than an ack or a stop
 };
