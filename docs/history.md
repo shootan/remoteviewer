@@ -13435,7 +13435,6 @@ Next
 - 고지: 핵심 OS 실기(SYSTEM 서비스→잠금 화면 입력, 로그인 전 화면, UAC, 회사 PC 실제 wedge·NVIDIA) 미검증 상태로 전 채널 배포. APK 0.2.30 은 새 호스트 잠금 화면에 글자 입력 불가. 재연결 자동 복원은 전체 데스크톱만(모니터·창은 picker). Setup.exe 는 Authenticode 미서명(업데이트 manifest 서명과 별개).
 - 다음: 사용자 실기(이 PC 잠금·로그인 전·UAC·휴대폰 0.2.30 / 회사 PC wedge 복원), APK 0.2.31(SH) 게시.
 - 제품/테스트/문서: 문서(이 항목·작업목록 LK/DW/HD 게시 상태·원장 10-22).
-=======
 ### 2026-10-22 APK 선명도 필터(sh-filter r1) 구현 — 끄기 / 약하게 0.20 / 강하게 0.35 (미게시·폰 실기 대기)
 
 - 범위(APK 만, 버전 불변 0.2.30/29, 게시·설치·push 없음): 디코더와 화면 사이에 GL 선명화 한 단계(`out=(1+4s)C−s(L+R+T+B)`, 보이는 원본 1픽셀 이웃, RGB, 0..1 clamp). 설정 탭·뷰어 메뉴에 선명도 3단(기본 0.20, 명시적 끄기 보존). 끄기는 기존 직결 경로 그대로. GL 실패 시 '선명도 적용 불가, 원본 표시' + 직결 복귀(같은 surface 회차에서 재시도 없음). 구현 c568fbb(feat/sh-filter, main 5063cd9 기준). 계약 `.claude/codex_sh_filter_r1.md`.
@@ -13459,7 +13458,7 @@ Next
 ### 2026-10-22 APK 0.2.31 후보 (versionCode 30) — 선명도 필터, PC 0.2.162 와 함께 (rel/apk-0.2.31, 후보 · 서명/게시 전)
 - 사용자 지시(10-22): APK 에 선명도 필터(SH)를 넣어 PC 0.2.162 와 함께 게시. 범위(검증용): SH 만. keepalive-multi 는 넣지 않음(base 가 오래됨, 정책값 미확인). 휴대폰 잠금 화면 비밀번호(sealed APK) 미구현은 알려진 한계 그대로.
 - 브랜치: rel/apk-0.2.31 = rel/0.2.162(6a127eb) + merge feat/sh-filter c494dc6(4394d2c; 충돌 gate self-test·history 양쪽 보존, 제품 충돌 없음) + 이 버전 commit(versionName 0.2.31 / versionCode 30). PC 버전은 그대로.
-- 이 APK 는 PC 0.2.162 의 공유 native 변경(hello-delay 의 punch/hello, DW 의 화면 목록 요청 등)도 싣는다. 빌드·검사·AVD smoke 결과는 .claude/report_rel_apk_0231_r1.md.
+- 이 APK 는 PC 0.2.162 의 공유 native 변경 중 **hello-delay 의 punch/hello** 를 싣는다(Android native 빌드 대상). DW 의 화면 목록 요청은 PC `viewer_control_client.cpp` 변경이라 APK 에 들어가지 않는다(Android compile_commands 8 TU 에 없음) — APK AVD smoke 의 '모니터 Host' 성공은 APK 기존 화면 선택 경로와 호스트의 대조 결과다. 빌드·검사·AVD smoke 결과는 .claude/report_rel_apk_0231_r1.md.
 - 상태: 후보. 서명된 manifest·게시·push 없음.
 - 제품/테스트/문서: 제품(APK 버전), 문서(이 항목).
 
@@ -13471,3 +13470,4 @@ Next
 - 범위 밖: keepalive-multi(정책값·재통합 미결), 휴대폰 잠금 화면 비밀번호(sealed APK 미구현). 미검증: 실폰 화질·지연(S4, AVD 에서 +13~15 ms 미달)·발열·회전 뒤 터치, control loop failed 관찰(원장).
 - 제품/테스트/문서: 문서(이 항목).
 - 기록 정정(Codex 최종 근거 `.claude/codex_rel_apk_0231_final.md`): 작업목록 SH 행을 "결정 대기·CAS" 에서 "0.2.31 게시·실폰 대기, 자체 5탭 원본 크기 선명화, 끄기/0.20/0.35" 로 고치고 구현계획 SH 체크박스 갱신. 제품 변경 없음.
+- 기록 정정 추가(Codex `.claude/codex_rel_apk_0231_final.md`): d41162e 의 history 에 남은 merge 구분자 '=======' 1줄 제거(양쪽 본문 보존), APK 후보 항목의 공유 native 서술을 punch/hello 와 모니터 Host 대조로 구분.
