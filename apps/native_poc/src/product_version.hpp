@@ -12,6 +12,6 @@ namespace remote60::native_poc {
 // inline (C++17): ONE definition for the whole program. A plain namespace-scope constexpr array has internal linkage --
 // every translation unit that takes its address gets its own copy, and the release parity gate counts copies
 // (gnlink_release_manifest.py CARRIERS: GNLinkStream 1). The pre-login worker log header made GNLinkStream 2.
-inline constexpr wchar_t kProductVersion[] = L"0.2.161";
+inline constexpr wchar_t kProductVersion[] = L"0.2.162";
 
 }  // namespace remote60::native_poc
