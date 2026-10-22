@@ -980,8 +980,23 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   }
 #ifdef GNLINK_SH_TEST_SEAM
   if (publishAfter) {
-    sh_seam_handoff_delay();
-    publish();
+    // The late publication must not hold the decoder lock: a sleep here stalls whoever waits on the lock
+    // (the UI thread's handoff query among them), so the view could never latch ahead of the entry. The
+    // slot is taken now, under the lock, and written after the delay by a thread of its own. Test build
+    // only; a session teardown inside the <= 2 s delay could touch a freed sink -- accepted for a seam
+    // that never ships.
+    const size_t lateSlot = handoffNext_++ % kHandoffRing;
+    handoffKey_[lateSlot].store(0, std::memory_order_release);
+    const uint64_t meta = (static_cast<uint64_t>(latestOutputStreamGeneration_) << 32) |
+                          (static_cast<uint64_t>(codecsStarted_) & 0xffffffffu);
+    const uint64_t size = (static_cast<uint64_t>(outputWidth_) << 32) | outputHeight_;
+    std::thread([this, lateSlot, meta, size, handoffKey]() {
+      sh_seam_handoff_delay();
+      handoffNs_[lateSlot].store(static_cast<int64_t>(steady_now_us()) * 1000, std::memory_order_release);
+      handoffMeta_[lateSlot].store(meta, std::memory_order_release);
+      handoffSize_[lateSlot].store(size, std::memory_order_release);
+      handoffKey_[lateSlot].store(handoffKey, std::memory_order_release);
+    }).detach();
   }
 #endif
   ++outputFrameCount_;

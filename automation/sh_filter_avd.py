@@ -917,14 +917,19 @@ def scenario_shader(fx, out):
 
 
 def scenario_race(fx, out):
-    """r3 (Codex R2): the handoff entry and the decoder's buffer, published with a 300 ms gap (native seam,
+    """r3 (Codex R2): the handoff entry and the decoder's buffer, published with a gap (native seam: 300 ms before, 2000 ms after;
     debug.gnlink.sh.*), on a STILL picture -- where a missed first latch is never followed by another frame.
     Fixed order (entry first): the first output is confirmed, no fallback. r2's order (buffer first) as the
     counter-case: the first latch finds no entry, its next latch is the same timestamp (a redraw), and the
     3 s gate falls back."""
     results = {}
     for order in ['before', 'after']:
-        adb('shell', 'setprop', 'debug.gnlink.sh.handoff_delay_ms', '300', check_rc=False)
+        # The decoder releases a frame well before its due time (releaseOutputBufferAtTime; on the still
+        # pattern handoff -> latch was 0.7-1.3 s, r3h), so an entry only 300 ms late still precedes the latch
+        # and r2's order looks harmless. The counter-case needs a gap longer than that lead: 2000 ms (the
+        # seam's maximum) for 'after'; 300 ms between entry and buffer for 'before'.
+        delay = '2000' if order == 'after' else '300'
+        adb('shell', 'setprop', 'debug.gnlink.sh.handoff_delay_ms', delay, check_rc=False)
         adb('shell', 'setprop', 'debug.gnlink.sh.handoff_order', order, check_rc=False)
         ok = connect_to_pattern(fx.port)
         check(ok, order + ': connected (0.20) to the still pattern')
@@ -948,7 +953,7 @@ def scenario_race(fx, out):
             # recovered by a later frame; on a picture that sends no further frame it would be the 3 s fallback.
             lb = re.search(r'latchesBefore=(\d+)', first[0]) if first else None
             check((lb and int(lb.group(1)) >= 1) or fb,
-                  'COUNTER-CASE, r2 order (buffer first, entry 300 ms later): the first frame latched did NOT confirm',
+                  'COUNTER-CASE, r2 order (buffer first, entry 2000 ms later): the first frame latched did NOT confirm',
                   'first_output=%s fallback=%s' % ([f[-120:] for f in first[:1]], fb[:1]))
         adb('shell', 'am', 'force-stop', PKG, check_rc=False)
     adb('shell', 'setprop', 'debug.gnlink.sh.handoff_delay_ms', '0', check_rc=False)
@@ -978,7 +983,12 @@ def scenario_touch_host(fx, out, input_log):
     def tap_lime(label, one_to_one=True):
         img = screencap(os.path.join(out, 'touchhost_%s.png' % label))
         t = lime_target(img)
-        if not check(t is not None, label + ': the lime block is found on screen'):
+        if t is None:
+            # r3: a session that dropped before the tap (connect screen, [status] error) is not a detection
+            # miss -- name it so the run is read as INVALID, not as a touch failure.
+            dropped = [l for l in log_lines() if '[status] error' in l]
+            check(False, label + (': INVALID -- the session dropped before the tap' if dropped
+                                  else ': the lime block is found on screen'), (dropped or [''])[-1][-120:])
             return
         before = open(input_log).read().splitlines() if os.path.exists(input_log) else []
         adb('logcat', '-c', check_rc=False)
