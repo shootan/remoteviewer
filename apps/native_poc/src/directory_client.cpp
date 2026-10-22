@@ -537,7 +537,10 @@ void HostAgent::RecordCycleEnd(const CycleRecord& record) {
     std::lock_guard<std::mutex> lock(mu_);
     if (cycles_.size() < 256) {
       cycles_.push_back(record);
+      // What StatusLine() shows at that moment (the window's line): the status, and the published
+      // address when one is held. Composed here because StatusLine() takes mu_ itself.
       cycles_.back().status = status_;
+      if (observedReady_) cycles_.back().status += " public=" + observedIp_ + ":" + std::to_string(observedPort_);
     }
   }
   cycleCv_.notify_all();

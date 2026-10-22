@@ -13299,3 +13299,10 @@ Next
 - 별건: PC 뷰어 directory 경로에서 relay kind 가 Public 으로 바뀌어 로그·relayPath 판정에서 사라질 수 있는 코드 경로(실제 UI 미재현).
 - Codex 문서 검토 r1 NEEDS_CHANGES(N1 분모·bound 의미, N2 재현·망 분류, N3 인과, N4 2500 ms, N5 relay 라벨 범위) 반영 → r2 OK(`.claude/codex_np_direct_connect_doc_r2.md`, 합산 표기 교정 포함). 작업목록 NP(후속 후보, 착수 승인 아님), 구현계획 체크박스. 제품 변경 없음.
 - 제품/테스트/문서: 문서(이 항목·NP 문서·작업목록·구현계획).
+
+### 2026-10-22 directory-retry-fix r1 — 관찰 실패 진단에 두 사실을 함께, 시험은 완료된 cycle 로 (fix/directory-retry, 차기 유지보수 후보 · 0.2.162 backport 없음)
+- 계기: directory_retry 간헐 FAIL(조사 t-azc166pv, `.claude/report_directory_retry_flake_r1.md`) — 고정 15 s 뒤 단일 상태 샘플이 cycle 안에서 바뀌는 문구의 경계에 걸림(기준 5/10·후보 6/10). 계약 `.claude/codex_directory_retry_flake_r1.md`.
+- 제품(A): 관찰 socket 의 조준 출처(ObserveAim: NotAimed/Pinned/Advertised/LegacyDefault)와 health 의 마지막 답(ObserveHealth: NotAsked/Advertised/NoAdvertisement/Unreachable + 오류)을 명시 값으로 둔다(health cooldown 동안 유지). 조준된 socket 의 관찰 실패는 `observe_failure_status()` 로: legacy default 면 "this directory does not say where to send address observations; the observation via the legacy default (port N) timed out"(또는 health 오류와 함께), pinned/advertised 는 기존 "address observation timed out" 그대로. 조준·ready·관찰 횟수/간격·cooldown·heartbeat·인증·재등록·연결 정책은 바꾸지 않았다.
+- 시험(B): `REMOTE60_DIRECTORY_TEST_HOOKS`(시험 타깃만)로 loop 경계에서 cycle 기록을 남기고, StagedHost 가 그 cycle 의 완료를 bounded 로 기다려 읽는다. cached-silent(1·2·4 cycle: 두 사실 → cooldown 유지 → 광고 시작 뒤 online), inactive(1: 401 → 2·3: skip, heartbeat 1 → 4: online, heartbeat 2 — 목표 3/기대 ≤2 모순 해소), pinned/advertised 무응답, https 미조준, 순수 규칙. 변이 2개(TIMEOUT_ONLY, NO_LEGACY_ATTEMPT) 시험 타깃.
+- 결과: 시험 154/0; 변이 timeout_only 1 FAIL·no_legacy_attempt 9 FAIL(기대대로); 전 코어 부하 3회에서 새 항목 모두 PASS, 별건 "a silent host loses to the relay" 만 3/3 FAIL(범위 밖, 미수정). 출하 타깃 define 0(생성 vcxproj).
+- 제품/테스트/문서: 제품(directory_client·directory_observe), 테스트(directory_retry_test·fake·CMake 시험/변이 타깃), 문서(이 항목).
