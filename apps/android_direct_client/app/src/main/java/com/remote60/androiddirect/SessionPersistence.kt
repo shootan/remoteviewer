@@ -8,7 +8,6 @@ data class SavedEndpoint(
     val controlPort: Int = 43001,
     val bitrateKbps: Int = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps,
     val fps: Int = ViewerQualitySettings.DEFAULT_FPS,
-    val desktopBackendCode: Int = 1,
 )
 
 object SessionPersistence {
@@ -18,6 +17,9 @@ object SessionPersistence {
     private const val KEY_CONTROL_PORT = "control_port"
     private const val KEY_BITRATE_KBPS = "bitrate_kbps"
     private const val KEY_FPS = "fps"
+    // ua2-apk r1 (Codex codex_rel_0163_r1.md §1): the capture backend is no longer stored -- the choice is one
+    // connection's. A value an older APK left (it re-sent it on every connect, to every host) is removed on the
+    // next save and never read.
     private const val KEY_DESKTOP_BACKEND = "desktop_backend"
     // apk-ui r1: which meaning bitrate/fps have (ViewerQualitySettings.CURRENT_SCHEMA). Absent on
     // everything written before the two-level choice existed.
@@ -65,7 +67,6 @@ object SessionPersistence {
             controlPort = prefs.getInt(KEY_CONTROL_PORT, 43001),
             bitrateKbps = resolved.bitrateKbps,
             fps = resolved.fps,
-            desktopBackendCode = prefs.getInt(KEY_DESKTOP_BACKEND, 1),
         )
     }
 
@@ -99,7 +100,6 @@ object SessionPersistence {
         controlPort: Int,
         bitrateKbps: Int,
         fps: Int,
-        desktopBackendCode: Int,
     ) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -109,7 +109,7 @@ object SessionPersistence {
             .putInt(KEY_BITRATE_KBPS, bitrateKbps)
             .putInt(KEY_FPS, fps)
             .putInt(KEY_SETTINGS_SCHEMA, ViewerQualitySettings.CURRENT_SCHEMA)
-            .putInt(KEY_DESKTOP_BACKEND, desktopBackendCode)
+            .remove(KEY_DESKTOP_BACKEND)
             .apply()
     }
 }

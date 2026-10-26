@@ -548,6 +548,27 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestRuntimeConfig(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueryDesktopCaptureBackend(
+    JNIEnv* /* env */, jobject /* this */) {
+  // ua2-apk r1: ask what runs now (changes nothing); false toward a host that does not answer.
+  return g_session_controller.QueryDesktopCaptureBackend() ? JNI_TRUE : JNI_FALSE;
+}
+
+// ua2-apk r1: [valid, seq, requested, effective, active, flags, changeCount, hostAnswers] -- this connection's.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetDesktopBackendStatus(
+    JNIEnv* env, jobject /* this */) {
+  const auto s = g_session_controller.DesktopCaptureBackendStatus();
+  const jlong v[8] = {s.valid ? 1 : 0, static_cast<jlong>(s.seq), static_cast<jlong>(s.requested),
+                      static_cast<jlong>(s.effective), static_cast<jlong>(s.active), static_cast<jlong>(s.flags),
+                      static_cast<jlong>(s.changeCount),
+                      g_session_controller.HostAnswersDesktopBackendStatus() ? 1 : 0};
+  jlongArray out = env->NewLongArray(8);
+  if (out) env->SetLongArrayRegion(out, 0, 8, v);
+  return out;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeRequestDesktopCaptureBackend(
     JNIEnv* /* env */, jobject /* this */, jint backend) {
   return g_session_controller.RequestDesktopCaptureBackend(

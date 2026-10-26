@@ -352,7 +352,7 @@ void DesktopBackendControl::Reset() {
 }
 
 void DesktopBackendControl::Request(uint16_t backend) {
-  if (backend < 1 || backend > 2) return;
+  if (backend < 1 || backend > 3) return;  // ua2-apk r1: + 3 gdi
   backend_.store(backend, std::memory_order_release);
   pending_.store(true, std::memory_order_release);
 }

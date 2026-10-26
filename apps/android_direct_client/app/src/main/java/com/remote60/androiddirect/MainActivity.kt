@@ -646,7 +646,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun requestSummary(): String =
-        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps, requestedDesktopBackend.label)
+        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps)
 
     /**
      * Win+D / Alt+Tab on the PC, the way the PC viewer's toolbar sends them (send_host_key_chord):
@@ -1159,6 +1159,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsDesktopBackendDxgiButton: Button
     private lateinit var settingsDesktopBackendWgcButton: Button
     private lateinit var settingsDesktopBackendGdiButton: Button
+    private lateinit var settingsDesktopBackendStatusText: TextView
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
     private lateinit var viewerControlsBar: LinearLayout
@@ -1373,10 +1374,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         })
     }
     private var requestedRuntimeFps = ViewerQualitySettings.DEFAULT_FPS
-    private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
+    // ua2-apk r1: what THIS connection asked for (null = nothing: the host's default). Never stored; a new
+    // connection starts without one (Codex codex_rel_0163_r1.md §1).
+    private var sessionDesktopBackend: DesktopCaptureBackendOption? = null
+    private var desktopBackendQueryAtMs = 0L
+    /** renderStatus's own reading of the session (status "connected"), for the backend controls. */
+    private var sessionConnectedNow = false
     private var settingsStatusMessage = ""
     private var pendingRuntimeConfigSync = false
-    private var pendingDesktopBackendSync = false
     private var desiredStreamActive = false
     private var lastAppliedStreamActive: Boolean? = null
     private var videoSurface: Surface? = null
@@ -1657,6 +1662,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
         settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
+        settingsDesktopBackendStatusText = findViewById(R.id.settingsDesktopBackendStatusText)
         settingsApplyButton = findViewById(R.id.settingsApplyButton)
         settingsAppliedText = findViewById(R.id.settingsAppliedText)
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
@@ -1812,7 +1818,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
         requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
         requestedRuntimeFps = savedEndpoint.fps
-        requestedDesktopBackend = DesktopCaptureBackendOption.fromCode(savedEndpoint.desktopBackendCode)
         sharpness = SessionPersistence.loadSharpness(this)
         executeSharpen(sharpenPolicy.select(sharpness))  // no surface yet: only records the choice
         settingsStatusMessage =
@@ -1888,18 +1893,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
 
-        settingsDesktopBackendDxgiButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
-            updateDesktopBackendButtons()
-        }
-        settingsDesktopBackendWgcButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.WGC
-            updateDesktopBackendButtons()
-        }
-        settingsDesktopBackendGdiButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.GDI
-            updateDesktopBackendButtons()
-        }
+        settingsDesktopBackendDxgiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.DXGI) }
+        settingsDesktopBackendWgcButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.WGC) }
+        settingsDesktopBackendGdiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.GDI) }
 
         settingsApplyButton.setOnClickListener {
             // The picture level and the frame rate are already chosen (and stored) by the controls
@@ -1914,21 +1910,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             }
 
-            val backendOk =
-                NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)
-            if (backendOk) {
-                pendingDesktopBackendSync = false
-                diagnosticsLog.log(
-                    "desktop_backend_request",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
-            } else {
-                messages += getString(R.string.ui_request_backend_failed)
-                diagnosticsLog.log(
-                    "desktop_backend_failed",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
-            }
+            // ua2-apk r1: the capture backend is not part of Apply any more -- its buttons ask the connected PC at
+            // once, for this connection only.
             if (messages.isEmpty()) {
                 settingsStatusMessage =
                     requestSummary()
@@ -2457,7 +2440,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (ok) {
             connectFlowActive = true
             pendingRuntimeConfigSync = true
-            pendingDesktopBackendSync = true
+            resetSessionDesktopBackend("connect")
             desiredStreamActive = false
             lastAppliedStreamActive = null
             clearPendingSelection()
@@ -2531,18 +2514,82 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return ok
     }
 
+    /** ua2-apk r1: a new connection (or none): no choice of its own -- the host's default until the user picks. */
+    private fun resetSessionDesktopBackend(reason: String) {
+        sessionDesktopBackend = null
+        desktopBackendQueryAtMs = 0L
+        diagnosticsLog.log("desktop_backend_session_reset", "reason=$reason")
+        updateDesktopBackendButtons()
+    }
+
+    /** ua2-apk r1: the user's pick goes to the CONNECTED PC now, for this connection only. */
+    private fun requestSessionDesktopBackend(choice: DesktopCaptureBackendOption) {
+        diagnosticsLog.log("desktop_backend_tap", "backend=${choice.label.lowercase()} connected=${desktopBackendConnected()} " +
+            "parked=${parked != null}")
+        if (!desktopBackendConnected()) {
+            updateDesktopBackendButtons()
+            return
+        }
+        if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(choice.code)) {
+            sessionDesktopBackend = choice
+            desktopBackendQueryAtMs = SystemClock.elapsedRealtime()  // the request asks for the answer itself
+            diagnosticsLog.log("desktop_backend_request", "backend=${choice.label.lowercase()} scope=connection")
+        } else {
+            Toast.makeText(this, R.string.ui_request_backend_failed, Toast.LENGTH_SHORT).show()
+            diagnosticsLog.log("desktop_backend_failed", "backend=${choice.label.lowercase()}")
+        }
+        updateDesktopBackendButtons()
+    }
+
+    private fun desktopBackendConnected(): Boolean = parked == null && sessionConnectedNow
+
+    /** ua2-apk r1: the buttons and the line show what the HOST says runs now (DesktopBackendPresentation). */
     private fun updateDesktopBackendButtons() {
-        settingsDesktopBackendDxgiButton.text = "DXGI"
-        settingsDesktopBackendDxgiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.DXGI
-        settingsDesktopBackendWgcButton.text = "WGC"
-        settingsDesktopBackendWgcButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.WGC
-        settingsDesktopBackendGdiButton.text = "GDI"
-        settingsDesktopBackendGdiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.GDI
+        if (!::settingsDesktopBackendStatusText.isInitialized) return
+        val p = DesktopBackendPresentation
+        val connected = desktopBackendConnected()
+        val status = if (connected) DesktopBackendPresentation.HostStatus.of(NativeSessionBridge.nativeGetDesktopBackendStatus()) else null
+        val v = p.present(connected, sessionDesktopBackend?.code, status)
+        for ((button, code) in listOf(settingsDesktopBackendDxgiButton to p.DXGI, settingsDesktopBackendWgcButton to p.WGC,
+                                      settingsDesktopBackendGdiButton to p.GDI)) {
+            button.text = p.label(code)
+            button.isSelected = v.lit == code
+            button.isEnabled = v.enabled
+            button.alpha = if (v.enabled) 1f else 0.45f
+        }
+        val asked = v.asked?.let { p.label(it) }
+        val line = when (v.state) {
+            DesktopBackendPresentation.State.NOT_CONNECTED -> getString(R.string.settings_desktop_backend_not_connected)
+            DesktopBackendPresentation.State.NO_ANSWER_HOST ->
+                if (asked != null) getString(R.string.settings_desktop_backend_no_answer_asked, asked)
+                else getString(R.string.settings_desktop_backend_no_answer)
+            DesktopBackendPresentation.State.CHECKING -> getString(R.string.settings_desktop_backend_checking)
+            DesktopBackendPresentation.State.APPLYING ->
+                getString(R.string.settings_desktop_backend_applying, asked ?: "?", p.label(v.active))
+            DesktopBackendPresentation.State.APPLIED ->
+                if (asked != null) getString(R.string.settings_desktop_backend_applied_asked, asked, p.label(v.active))
+                else getString(R.string.settings_desktop_backend_applied, p.label(v.active))
+        }
+        val reasons = v.reasons.map {
+            getString(when (it) {
+                DesktopBackendPresentation.Reason.WINDOW_TARGET -> R.string.settings_desktop_backend_reason_window
+                DesktopBackendPresentation.Reason.DXGI_QUARANTINED -> R.string.settings_desktop_backend_reason_quarantine
+                DesktopBackendPresentation.Reason.BEFORE_LOGIN -> R.string.settings_desktop_backend_reason_logon
+                DesktopBackendPresentation.Reason.NOT_YET_APPLIED -> R.string.settings_desktop_backend_reason_not_yet
+            })
+        }
+        val text = if (reasons.isEmpty()) line else line + " (" + reasons.joinToString(", ") + ")"
+        if (settingsDesktopBackendStatusText.text?.toString() != text) {
+            settingsDesktopBackendStatusText.text = text
+            diagnosticsLog.log("desktop_backend_ui", "state=${v.state} lit=${v.lit?.let { p.label(it) } ?: "none"} " +
+                "asked=${asked ?: "none"} enabled=${v.enabled}")
+        }
     }
 
     private fun syncConnectedClientPreferences(isConnected: Boolean) {
         if (!isConnected) {
             lastAppliedStreamActive = null
+            updateDesktopBackendButtons()  // ua2-apk r1: disabled, nothing lit
             return
         }
 
@@ -2563,18 +2610,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        if (pendingDesktopBackendSync) {
-            if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)) {
-                pendingDesktopBackendSync = false
-                settingsStatusMessage =
-                    requestSummary()
-                settingsAppliedText.text = settingsStatusMessage
-                diagnosticsLog.log(
-                    "desktop_backend_sync",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
+        // ua2-apk r1: nothing is re-sent on connect (no stored backend). While the settings screen shows, the host
+        // is asked what runs now -- every 2 s at most -- and the answer is what the buttons show.
+        if (activeTargetTab == TargetTab.SETTINGS && currentScene == UiScene.TARGETS) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs - desktopBackendQueryAtMs >= 2000L) {
+                desktopBackendQueryAtMs = nowMs
+                NativeSessionBridge.nativeQueryDesktopCaptureBackend()
             }
         }
+        updateDesktopBackendButtons()
 
         if (lastAppliedStreamActive != desiredStreamActive) {
             requestStreamActive(desiredStreamActive, "connected_sync")
@@ -4247,6 +4292,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
+        sessionConnectedNow = isConnected
         connectFlowActive = isConnecting || isConnected
         if (!isConnecting && !isConnected && rebootFlow.onDisconnected()) {
             // The restart took the connection: the request's state, not an error.
@@ -5031,7 +5077,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     directoryConnectingName = ""
                     connectFlowActive = true
                     pendingRuntimeConfigSync = true
-                    pendingDesktopBackendSync = true
+                    resetSessionDesktopBackend("directory_connect")
                     desiredStreamActive = false
                     lastAppliedStreamActive = null
                     clearPendingSelection()
@@ -5916,7 +5962,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             controlPort,
             bitrateKbps,
             fps,
-            requestedDesktopBackend.code
         )
     }
 }

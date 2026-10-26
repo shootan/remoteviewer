@@ -541,7 +541,9 @@ bool ClientSessionController::RequestDesktopCaptureBackend(uint16_t backend) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
-  if (backend < 1 || backend > 2) return false;
+  // ua2-apk r1: 1 dxgi, 2 wgc, 3 gdi (the host's isolated GDI, 5dbfc1a). 3 was refused here since then, so the
+  // APK's GDI button never reached the host.
+  if (backend < 1 || backend > 3) return false;
   std::lock_guard<std::mutex> pk(parkMu_);
   if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r2 K1
   desktopBackend_.Request(backend);
