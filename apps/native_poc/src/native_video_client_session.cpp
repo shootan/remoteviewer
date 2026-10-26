@@ -338,16 +338,29 @@ void ClientSessionController::PollLocalSelection() {
   std::unique_lock<std::mutex> ls(localSelectMu_);  // r2 (N1): read, judge and complete against one start
   const uint64_t tag = localSelectTag_.load(std::memory_order_acquire);
   if (tag == 0) return;
-  if (encodedFrameSink_->CurrentSelectionTag() != tag) {
+  // r3 (N1): the sink's "still this selection, bound by G" and the panel's record are one step under the sink's
+  // state, the one a cancel (nativeAbortVideoSwitch) or a new Prepare takes -- never a read, then a record later.
+  // Lock order local -> sink -> panel; nothing takes them the other way.
+  WindowSelectApplyResult applied;
+  const auto result = encodedFrameSink_->CommitLocalSelectionFor(tag, [&](uint64_t generation) {
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+    std::function<void(uint64_t, uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testBeforeLocalCommitHook_;
+    }
+    if (hook) hook(tag, generation);
+#endif
+    uint64_t expected = tag;
+    if (!localSelectTag_.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) return;
+    applied = windowPanel_.ApplyLocalSelectedFor(tag, generation);
+  });
+  if (result == ClientEncodedFrameSink::LocalCommit::Abandoned) {
     uint64_t stale = tag;
     localSelectTag_.compare_exchange_strong(stale, 0, std::memory_order_acq_rel);
     return;  // replaced or abandoned: it completes nothing
   }
-  const uint64_t generation = encodedFrameSink_->LocalSelectionBoundFor(tag);
-  if (generation == 0) return;
-  uint64_t expected = tag;
-  if (!localSelectTag_.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) return;
-  const auto applied = windowPanel_.ApplyLocalSelectedFor(tag, generation);
+  if (result == ClientEncodedFrameSink::LocalCommit::Unbound) return;
   ls.unlock();
   if (!applied.logLine.empty()) std::fprintf(stderr, "%s\n", applied.logLine.c_str());
   const auto panelSnapshot = windowPanel_.Snapshot();

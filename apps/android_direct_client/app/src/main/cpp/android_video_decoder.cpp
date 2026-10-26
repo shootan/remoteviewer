@@ -483,6 +483,18 @@ uint64_t AndroidVideoDecoderSink::LocalSelectionBoundFor(uint64_t tag) {
   return gate_.LocalBoundFor(tag);
 }
 
+// apk-0232 r3 (Codex N1): judged and recorded under the state Prepare/Abort (the UI's JNI calls) take -- a cancel
+// cannot finish between "still this selection, bound" and the panel's record.
+remote60::native_poc::ClientEncodedFrameSink::LocalCommit AndroidVideoDecoderSink::CommitLocalSelectionFor(
+    uint64_t tag, const std::function<void(uint64_t generation)>& commit) {
+  LockedState lock(this);
+  if (tag == 0 || gate_.pending() != tag) return LocalCommit::Abandoned;
+  const uint64_t generation = gate_.LocalBoundFor(tag);
+  if (generation == 0) return LocalCommit::Unbound;
+  commit(generation);
+  return LocalCommit::Committed;
+}
+
 void AndroidVideoDecoderSink::RefuseSelectionFor(uint64_t tag) {
   LockedState lock(this);
   const bool refused = gate_.Refuse(tag);

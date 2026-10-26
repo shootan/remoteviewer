@@ -71,6 +71,15 @@ class ClientEncodedFrameSink {
   virtual bool BeginLocalSelectionFor(uint64_t /* tag */) { return false; }
   virtual uint64_t LocalSelectionBoundFor(uint64_t /* tag */) { return 0; }
   virtual void RefuseSelectionFor(uint64_t /* tag */) {}
+  // apk-0232 r3 (Codex N1, the last boundary): the local selection `tag`'s completion, judged and recorded in ONE
+  // step against the sink's own selection state. If `tag` is still the selection and its IDR bound it, `commit`
+  // runs with that generation WHILE the sink holds its state -- a cancel (Abort) or a new Prepare, which take the
+  // same state, lands wholly before (nothing completes) or wholly after (a completion already recorded, which it
+  // then supersedes). `commit` must not call back into the sink. Abandoned: `tag` is no longer the selection.
+  enum class LocalCommit : uint8_t { Abandoned = 0, Unbound = 1, Committed = 2 };
+  virtual LocalCommit CommitLocalSelectionFor(uint64_t /* tag */, const std::function<void(uint64_t generation)>& /* commit */) {
+    return LocalCommit::Abandoned;
+  }
 };
 
 enum class ClientSessionState : uint8_t {
@@ -194,6 +203,12 @@ class ClientSessionController {
   void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
     std::lock_guard<std::mutex> lk(testHookMu_);
     testAfterLocalSinkBeginHook_ = std::move(hook);
+  }
+  // TEST BUILD ONLY (apk-0232 r3 N1): called by the poll once the local selection is found bound to `generation`,
+  // right before the panel records it -- a test cancels or prepares a newer pick there.
+  void SetTestBeforeLocalCommitHook(std::function<void(uint64_t tag, uint64_t generation)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testBeforeLocalCommitHook_ = std::move(hook);
   }
 #endif
   // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
@@ -434,6 +449,7 @@ class ClientSessionController {
   std::mutex testHookMu_;
   std::function<void(bool)> testPassHook_;
   std::function<void(uint64_t)> testAfterLocalSinkBeginHook_;
+  std::function<void(uint64_t, uint64_t)> testBeforeLocalCommitHook_;
 #endif
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};

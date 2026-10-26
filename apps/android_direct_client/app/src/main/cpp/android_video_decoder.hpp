@@ -94,6 +94,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool BeginLocalSelectionFor(uint64_t tag) override;
   uint64_t LocalSelectionBoundFor(uint64_t tag) override;
   void RefuseSelectionFor(uint64_t tag) override;
+  LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t generation)>& commit) override;
   void AbortWindowSelection();
   std::string DebugStatus();
   uint64_t VideoSizePacked();
