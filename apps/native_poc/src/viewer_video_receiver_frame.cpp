@@ -334,10 +334,14 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       // checked in the same step that writes the FrameBuffer. A picture of an op no longer live is not written.
       const uint64_t candidate = dec.localCandidateOp == frameOp ? dec.localCandidateGen : 0;
       const bool wasUnbound = frameLocal && ctx.sel.expectedGeneration.load(std::memory_order_acquire) == 0;
-      if (!ctx.sel.CommitFrame(frameOp, frameLocal, candidate, h.streamGeneration, &revealGen)) {
+      // rel-0163 r6 (R3 1): the permission holds the gate's lock to the end of this write (selHeld, released with
+      // this scope) -- no Begin/Clear can fall between "this op is live" and the picture being written.
+      std::unique_lock<std::mutex> selHeld;
+      if (!ctx.sel.CommitFrame(frameOp, frameLocal, candidate, h.streamGeneration, &revealGen, &selHeld)) {
         ++st.skippedQueued;
         return true;
       }
+      if (ctx.sel.testAfterFramePermit) ctx.sel.testAfterFramePermit();  // tests only (the lock is held here)
       if (wasUnbound && frameLocal) {
         std::cout << "[native-video-client][picker] local selection bound to streamGeneration=" << revealGen
                   << " epoch=" << frameOp << " (its first adopted output)\n";

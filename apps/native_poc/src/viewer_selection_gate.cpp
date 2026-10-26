@@ -69,19 +69,25 @@ bool SelectionGateState::BindLocalGeneration(uint64_t opEpoch, uint64_t streamGe
 }
 
 bool SelectionGateState::CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t candidateGen, uint64_t inputGeneration,
-                                     uint64_t* revealGen) {
-  std::lock_guard<std::mutex> lk(mu);
+                                     uint64_t* revealGen, std::unique_lock<std::mutex>* held) {
+  std::unique_lock<std::mutex> lk(mu);
   if (revealGen) *revealGen = inputGeneration;
-  if (!frameLocal) return true;  // an ordinary frame: as before (the generation gate decided it)
+  const auto permit = [&] {
+    if (held) *held = std::move(lk);  // kept by the caller until its write is done
+    return true;
+  };
+  if (!frameLocal) return permit();  // an ordinary frame: as before (the generation gate decided it)
   if (!pending.load(std::memory_order_acquire) || !localAckless.load(std::memory_order_acquire) ||
       epoch.load(std::memory_order_acquire) != opEpoch) {
     // Its op was cancelled / replaced / revealed-and-closed meanwhile. A revealed local op's later pictures are
     // ordinary from then on (pending is over) -- but this frame was taken for the op, and only the op it was
     // taken for may own it while that op is pending; after the reveal the active-generation filter applies.
-    if (!pending.load(std::memory_order_acquire) && activeStreamGeneration.load(std::memory_order_acquire) != 0 &&
-        epoch.load(std::memory_order_acquire) == opEpoch) {
+    // rel-0163 r6 (R3 2): only the op that WAS revealed (its reveal committed with this op's epoch) -- a later op
+    // cancelled before its own reveal has the same epoch but is not it, and its pictures are refused.
+    if (!pending.load(std::memory_order_acquire) && revealedOp.load(std::memory_order_acquire) == opEpoch &&
+        epoch.load(std::memory_order_acquire) == opEpoch && activeStreamGeneration.load(std::memory_order_acquire) != 0) {
       if (revealGen) *revealGen = activeStreamGeneration.load(std::memory_order_acquire);
-      return true;  // the same op, already revealed: its stream goes on
+      return permit();  // the same op, already revealed: its stream goes on
     }
     localFramesRefused.fetch_add(1, std::memory_order_relaxed);
     return false;
@@ -91,7 +97,7 @@ bool SelectionGateState::CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t
     expectedGeneration.store(candidateGen, std::memory_order_release);
   }
   if (revealGen) *revealGen = expectedGeneration.load(std::memory_order_acquire);
-  return true;
+  return permit();
 }
 
 SelectionAck SelectionGateState::ApplyHostAck(const std::function<std::pair<bool, uint64_t>()>& applyPanel) {
@@ -192,6 +198,7 @@ bool SelectionGateState::CommitReveal() {
     // Persistent filter for late stragglers from the previous target (see the recv gate).
     activeStreamGeneration.store(readyGeneration.load(std::memory_order_acquire),
                                  std::memory_order_release);
+    revealedOp.store(readyEpoch.load(std::memory_order_acquire), std::memory_order_release);  // rel-0163 r6
   }
   return commit;
 }

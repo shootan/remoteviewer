@@ -80,6 +80,9 @@ struct SelectionGateState {
   std::atomic<uint64_t> expectedGeneration{0};
   std::atomic<uint64_t> epoch{0};
   std::atomic<uint64_t> activeStreamGeneration{0};
+  // rel-0163 r6 (R3 2): the op whose reveal was committed (with activeStreamGeneration, its generation) -- only
+  // THAT op's later pictures go on after its pending is over; a cancelled op of the same epoch is not it.
+  std::atomic<uint64_t> revealedOp{0};
   std::atomic<bool> localAckless{false};     // rel-0163 r3: see above
   std::atomic<uint64_t> deferredPick{0};     // rel-0163 r3: UI writes, control reads (posts), UI runs
   std::atomic<uint64_t> deferredRun{0};      // rel-0163 r4: the control run the held pick belongs to
@@ -89,6 +92,9 @@ struct SelectionGateState {
   std::function<void()> testAfterRoleRead;
   // Tests only: right before a decoded picture's final adoption (CommitFrame) -- a cancel / new op lands here.
   std::function<void()> testBeforeFrameCommit;
+  // Tests only: between a picture's permission and its write (the gate's lock held) -- a Begin/Clear tried here
+  // must wait until the write is done.
+  std::function<void()> testAfterFramePermit;
   // Tests only: right before a host ack's boundary (apply_window_selected_result) -- a local op begins here.
   std::function<void()> testBeforeAckBoundary;
   std::atomic<uint64_t> localFramesRefused{0};  // pictures of a no-longer-live local op not adopted (telemetry)
@@ -111,8 +117,11 @@ struct SelectionGateState {
   // its op token was taken -- a frame of a local op is never re-read as an ordinary one). For a local frame: only
   // while its op is still the live local op; an unbound op is bound HERE to `candidateGen` (a valid output exists
   // by now). *revealGen = the generation this adoption stands for. Ordinary frames: permitted as before.
+  // rel-0163 r6 (Codex codex_rel_0163_src_r5.md R3 1): when it permits, the gate's lock is handed to the caller
+  // in *held and must be kept until the FrameBuffer write is done -- a Begin/Clear (which take only this lock)
+  // can then never fall between the permission and the write. Lock order: FrameBuffer, then this.
   bool CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t candidateGen, uint64_t inputGeneration,
-                   uint64_t* revealGen);
+                   uint64_t* revealGen, std::unique_lock<std::mutex>* held);
   // rel-0163 r5 (R4): a host WindowSelected, applied to the panel AND the gate under one boundary. `applyPanel`
   // runs only when the in-flight op asked for an ack (never for a local op) and returns {ok, streamGeneration}.
   SelectionAck ApplyHostAck(const std::function<std::pair<bool, uint64_t>()>& applyPanel);
