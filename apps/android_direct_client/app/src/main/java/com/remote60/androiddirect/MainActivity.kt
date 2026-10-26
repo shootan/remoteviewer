@@ -2285,14 +2285,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val latchNs = System.nanoTime()
         val surfaceId = sharpenPolicy.surfaceId ?: 0L
         val timestamp = surface.timestamp
-        // sh-strength r4 (N1 c): the layout the view now shows -- the one the renderer's last video swap was drawn with
-        // (a cleared swap names none). One buffer of slack: a swap that lands between this latch and the read is
-        // credited a frame early (stated limit).
-        sharpenRenderer?.let { sharpenShownPlacementGen = it.swappedPlacementGen.get() }
-        if (timestamp == SharpenRenderer.CLEAR_SWAP_TIMESTAMP) return  // r4: a cleared swap before any frame
-        // sh-filter r2 (H3): the latched timestamp names the frame. A strength change re-swaps the frame
-        // already shown with the same timestamp: that latch is not a new displayed frame.
-        val newFrame = latchClassifier.isNewFrame(surfaceId, timestamp)
+        // sh-strength r5 (Codex codex_sh_strength_r4.md N1-c1): the buffer the view LATCHED, by its own timestamp -- a
+        // renderer output is looked up in that renderer's log (what it is, its layout, its decoder frame); never the
+        // renderer's latest swap. A cleared buffer or an unknown one counts as nothing and shows no layout.
+        val latched = SharpenLatch.decide(timestamp, sharpenRenderer?.outputs)
+        latched.shownGen?.let { sharpenShownPlacementGen = it }
+        if (!latched.frame && !latched.redraw) return
+        val frameTs = latched.frameTs  // the decoder frame this buffer shows
+        // sh-filter r2 (H3): the decoder timestamp names the frame. A strength change re-draws the frame already
+        // shown: that latch is not a new displayed frame.
+        val newFrame = latched.frame && latchClassifier.isNewFrame(surfaceId, frameTs)
         enterSharpenLatencySegment(latchNs)
         if (!newFrame) {
             sharpenStats.addRedraw()
@@ -2302,7 +2304,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // the view never latched -- because a newer one arrived before it drew -- are invisible
         // to every other counter, and are exactly what "it says 30 but looks like 15" is.
         NativeSessionBridge.nativeNotifyFrameDisplayed()
-        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(timestamp))
+        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(frameTs))
         // S4: the decoder's handoff of THIS frame -> this latch.
         if (info != null) sharpenStats.addMatched(info.handoffNs, latchNs) else sharpenStats.addUnmatched()
         // H2: the renderer's first output is THIS latch, if it is a frame of that renderer, surface and codec.
@@ -2313,7 +2315,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log(
                 "sharpen_first_output",
                 "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
-                    "ts=$timestamp latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
+                    "ts=$frameTs latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
                     "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
             )
         }
@@ -3034,22 +3036,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // viewer-sharpness r1 B / r2 R1: a stream begun in 크게보기 with 화면 이동 on moves / scales the picture to its
         // end -- even past a pinch back to 전체보기 -- and sends nothing; a PC stream cut by a mode / size / scene
         // change was released once (interruptViewerTouch) and its rest reaches nobody. Decided at ACTION_DOWN only.
-        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge)) {
+        // sh-strength r5 (N1-c2): a stream that starts while B's new layout is not shown yet is swallowed WHOLE (second
+        // finger, moves, partial ups) until its final up; the next new DOWN is judged again.
+        val layoutShown = !sharpenLayoutNotShown()
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && !layoutShown && !(viewerPanMode && viewerViewport.isLarge) &&
+            sharpenInputHeldGen != sharpenPlacementGenSent) {
+            sharpenInputHeldGen = sharpenPlacementGenSent
+            diagnosticsLog.log("input_held_layout", "sent=$sharpenPlacementGenSent shown=$sharpenShownPlacementGen")
+        }
+        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge, layoutShown)) {
             ViewerTouchRouter.Owner.LOCAL -> return handleViewportGesture(event)
             ViewerTouchRouter.Owner.SWALLOW, ViewerTouchRouter.Owner.NONE -> return true
             ViewerTouchRouter.Owner.PC -> Unit
         }
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             showViewerControls()
-            // sh-strength r4 (N1 c): the picture on screen is still the old layout while the mapping is the new one --
-            // this touch is not sent (no coordinate of either layout); the next one, once shown, is.
-            if (sharpenLayoutNotShown()) {
-                if (sharpenInputHeldGen != sharpenPlacementGenSent) {
-                    sharpenInputHeldGen = sharpenPlacementGenSent
-                    diagnosticsLog.log("input_held_layout", "sent=$sharpenPlacementGenSent shown=$sharpenShownPlacementGen")
-                }
-                return true
-            }
         }
 
         when (event.actionMasked) {
@@ -5726,6 +5727,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 sharpenPlacementSent = place
                 sharpenPlacementGenSent += 1  // r4 (N1 c): named, so its display can be told
                 sharpenRenderer?.setDisplayPlacement(place, sharpenPlacementGenSent)
+                // r5 (N1-c2): a PC stream under way was mapped with the old layout -- released once, the rest swallowed
+                interruptViewerTouch("layout_$sharpenPlacementGenSent")
             }
             val logged = "%.1f,%.1f,%.1fx%.1f buffer=%dx%d".format(place.left, place.top, place.width, place.height,
                 surfaceBufferWidth, surfaceBufferHeight)

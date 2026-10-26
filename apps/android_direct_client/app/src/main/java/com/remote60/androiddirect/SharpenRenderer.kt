@@ -28,7 +28,8 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Per decoded frame: onFrameAvailable (input thread = this thread) -> at most ONE pending draw (later frames
  * fold into it and are counted as skipped) -> updateTexImage, the frame's own transform matrix, one
- * full-buffer draw of the 5-tap cross kernel, eglPresentationTimeANDROID(the input frame's timestamp),
+ * full-buffer draw of the 5-tap cross kernel, eglPresentationTimeANDROID(this output's own timestamp, r5:
+ * SharpenOutputLog -- the input frame's is recorded with it),
  * eglSwapBuffers. The output buffer is the visible video size the TextureView already uses (S1): the
  * compositor still enlarges it with the existing transform, which this class never touches.
  *
@@ -128,9 +129,9 @@ class SharpenRenderer(
     val layoutClearSwaps = AtomicLong(0)
     /** r3 (N2): placement updates that changed nothing (dropped without any work). */
     val placementsUnchanged = AtomicLong(0)
-    /** r4 (N1 c): the placement generation (setDisplayPlacement's `gen`) of the last VIDEO swap -- a frame or a redraw
-     *  drawn with that layout; never a cleared swap. The Activity reads it at the TextureView's latch. */
-    val swappedPlacementGen = AtomicLong(0)
+    /** r5 (N1 c1): every swap's identity -- what the buffer is, its layout, its decoder frame -- by its own timestamp;
+     *  the Activity looks the buffer it latched up here (SharpenLatch). */
+    val outputs = SharpenOutputLog()
     /** The visible source size the last frame was drawn with ("WxH"). */
     @Volatile var lastSourceSize: String = ""
         private set
@@ -224,9 +225,13 @@ class SharpenRenderer(
                 nextGen = placementWantedGen
             }
             if (next == placement) {
-                placementGen = nextGen  // the same layout under a newer name: what is shown already is it
-                if (next != null && haveFrame && !frameWaitsForLayout && !redrawWaitsForLayout) swappedPlacementGen.set(nextGen)
                 placementsUnchanged.incrementAndGet()
+                if (nextGen != placementGen) {
+                    // r5 (N1 c1): the same layout under a newer name -- it is shown under that name only once a buffer
+                    // drawn with it is latched: one redraw (never a credit without a swap and a latch)
+                    placementGen = nextGen
+                    if (next != null && haveFrame && !frameWaitsForLayout && !redrawWaitsForLayout) draw(newFrame = false)
+                }
                 return@Runnable
             }
             placement = next
@@ -382,8 +387,13 @@ class SharpenRenderer(
                     GLES20.glViewport(0, 0, out[0].coerceAtLeast(1), out[1].coerceAtLeast(1))
                     GLES20.glClearColor(0f, 0f, 0f, 1f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    EGLExt.eglPresentationTimeANDROID(display, windowSurface, if (lastFrameTimestamp != 0L) lastFrameTimestamp else CLEAR_SWAP_TIMESTAMP)
-                    if (!EGL14.eglSwapBuffers(display, windowSurface)) throw IllegalStateException("eglSwapBuffers (layout clear) ${eglError()}")
+                    // r5 (N1 c1): a CLEAR output of its own -- never a frame, a redraw or a first output at the latch
+                    val clearTs = outputs.reserve(SharpenOutputLog.Kind.CLEAR, placementGen, lastFrameTimestamp)
+                    EGLExt.eglPresentationTimeANDROID(display, windowSurface, clearTs)
+                    if (!EGL14.eglSwapBuffers(display, windowSurface)) {
+                        outputs.drop(clearTs)
+                        throw IllegalStateException("eglSwapBuffers (layout clear) ${eglError()}")
+                    }
                     scheduleLayoutRetry()
                     return
                 }
@@ -475,15 +485,19 @@ class SharpenRenderer(
             checkGl("draw")
             // The frame keeps its decoder timestamp through this pass: the TextureView's latch can be
             // matched to the decoder's release by it (a key, not a clock -- S4).
-            EGLExt.eglPresentationTimeANDROID(display, windowSurface, st.timestamp)
             if (faults.failSwapAfterFrames >= 0 && framesDrawn.get() >= faults.failSwapAfterFrames) {
                 throw IllegalStateException("eglSwapBuffers failed (test seam)")
             }
-            // A redraw swaps the SAME timestamp: the view's latch tells it apart by that (LatchClassifier).
-            if (!EGL14.eglSwapBuffers(display, windowSurface)) throw IllegalStateException("eglSwapBuffers ${eglError()}")
+            // r5 (N1 c1): this buffer's own timestamp, recorded before the swap -- a frame or a redraw, the layout it
+            // was drawn with and the decoder frame it shows; the view's latch looks the latched buffer up by it.
+            val outTs = outputs.reserve(if (newFrame) SharpenOutputLog.Kind.VIDEO else SharpenOutputLog.Kind.REDRAW,
+                placementGen, st.timestamp)
+            EGLExt.eglPresentationTimeANDROID(display, windowSurface, outTs)
+            if (!EGL14.eglSwapBuffers(display, windowSurface)) {
+                outputs.drop(outTs)  // not swapped: it names nothing
+                throw IllegalStateException("eglSwapBuffers ${eglError()}")
+            }
             lastFrameTimestamp = st.timestamp
-            // r4 (N1 c): this layout is now in a buffer the view will latch (A: no placement, nothing to name)
-            if (place != null) swappedPlacementGen.set(placementGen)
             lastSwapNs.set(System.nanoTime())
             if (newFrame) framesDrawn.incrementAndGet() else redraws.incrementAndGet()
             lastDrawNs.set(SystemClock.elapsedRealtimeNanos() - t0)
@@ -588,8 +602,6 @@ class SharpenRenderer(
         /** r4 (N1 a/b): a waiting draw is retried this often, and one layout episode lasts at most this long. */
         const val LAYOUT_RETRY_MS = 16L
         const val LAYOUT_LIMIT_MS = 1000L
-        /** r4: the timestamp of a cleared swap made before any frame -- the view's latch ignores it (not a frame). */
-        const val CLEAR_SWAP_TIMESTAMP = 1L
         /** x, y, u, v -- a full-buffer strip; u,v are the PRE-transform coordinate over the visible picture. */
         private val QUAD = floatArrayOf(
             -1f, -1f, 0f, 0f,
