@@ -1288,11 +1288,10 @@ def scenario_ua2(fx, out):
     screencap(os.path.join(out, 'ua2_2_connected.png'))
     w, d, st = c['settingsDesktopBackendWgcButton'], c['settingsDesktopBackendDxgiButton'], c['settingsDesktopBackendStatusText']
     check(d and w and d['enabled'] and w['enabled'], 'connected: the buttons are enabled', str(c))
-    check(st and '지금 PC가 쓰는 방식' in st['text'] and (d['selected'] or w['selected']),
-          'connected: the line says what the HOST runs and that button is lit (not the stored WGC by itself)', str(st))
-    host_lit = 'WGC' if (w and w['selected']) else 'DXGI'
-    # a window target is WGC whatever: the reason is said
-    check(st and ('창 캡처는 WGC' in st['text'] or host_lit == 'DXGI'), 'the reason is shown when the host runs WGC for a window', str(st))
+    # r2 (Codex N2/N3): a window is being captured -- the line says WGC NOW (not the dormant desktop backend), the scope
+    # only because the host confirms it, and the lit button is this connection's desktop method as handled (DXGI)
+    check(st and st['text'] == '지금 창 캡처: WGC · 이 연결에만 적용' and d['selected'] and not w['selected'],
+          'connected (window target): "지금 창 캡처: WGC · 이 연결에만 적용", DXGI (this connection\'s desktop method) lit', str(st))
     # pick GDI (a real tap on the rendered button)
     time.sleep(2)  # a scroll still settling takes the first tap to stop itself
     taps = 0
@@ -1312,7 +1311,10 @@ def scenario_ua2(fx, out):
     req = backend_requests(fx)
     check(req == ['gdi'], 'the tap sent ONE change request, for this connection (gdi)', str(req))
     st = c['settingsDesktopBackendStatusText']
-    check(st and '요청: GDI' in st['text'], 'the line says what was asked AND what the host applies', str(st))
+    g = c['settingsDesktopBackendGdiButton']
+    check(st and st['text'] == '요청: GDI · 바탕화면을 볼 때 적용 · 지금 창 캡처: WGC · 이 연결에만 적용' and g and g['selected'],
+          'after the tap: GDI is kept for the desktop (handled, lit) while the window is captured with WGC -- not "applied"',
+          str(st))
     # disconnect, connect again: nothing asked, host default shown
     tap(rid='listDisconnectButton', timeout=10)
     time.sleep(3)
@@ -1331,14 +1333,74 @@ def scenario_ua2(fx, out):
     c = ua2_controls()
     screencap(os.path.join(out, 'ua2_4_reconnected.png'))
     st = c['settingsDesktopBackendStatusText']
-    check(st and '요청:' not in st['text'] and '지금 PC가 쓰는 방식' in st['text'],
-          'reconnected: no choice of its own -- the line shows the host\'s current one only', str(st))
+    check(st and st['text'] == '지금 창 캡처: WGC · 이 연결에만 적용',
+          'reconnected: no choice of its own -- the host\'s own again', str(st))
+    ui = [l for l in log_lines() if 'desktop_backend_ui' in l]
+    states = [re.search(r'state=(\w+)', l).group(1) for l in ui if re.search(r'state=(\w+)', l)]
+    # (a delayed first pong cannot be staged on this manual TCP-control path: the client ends the session when its
+    # first answer is late -- the CHECKING -> supported order is the unit test's)
+    check('NO_ANSWER_HOST' not in states, 'a new host is never shown as an older one (states seen: %s)' % states[:6])
     prefs_after = adb('shell', 'run-as', PKG, 'cat', 'shared_prefs/remote60_android_direct.xml', check_rc=False)
     check('desktop_backend' not in prefs_after, 'the old global key is gone from the app\'s storage', prefs_after[-200:])
     check('strong' in prefs_after, 'the sharpness choice (강하게) is kept', prefs_after[-200:])
     lines = [l for l in log_lines() if 'desktop_backend' in l]
     with open(os.path.join(out, 'ua2_app_lines.txt'), 'w', encoding='utf-8') as fh:
         fh.write('\n'.join(lines))
+
+
+def scenario_ua2_old(fx, out, new_host_exe):
+    """ua2-apk r2 (Codex N3): an OLDER host (no backend status): the change goes out on the old wire, nothing is lit,
+    nothing is confirmed and no session scope is promised -- then a NEW host on a new connection gets nothing of it."""
+    ok = connect_to_pattern(fx.port, best_quality=False, window=True)
+    check(ok, 'old host: connected and viewing (window pick)')
+    for _ in range(3):
+        if find(dump(), rid='listSettingsButton') is not None:
+            break
+        adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False)
+        time.sleep(2)
+    show_backend_controls()
+    time.sleep(3)
+    c = ua2_controls()
+    screencap(os.path.join(out, 'ua2old_1_connected.png'))
+    st = c['settingsDesktopBackendStatusText']
+    lit = [k for k in ('settingsDesktopBackendDxgiButton', 'settingsDesktopBackendWgcButton', 'settingsDesktopBackendGdiButton')
+           if c[k] and c[k]['selected']]
+    check(st and st['text'] == '이 PC는 적용 결과를 알려주지 않습니다 · 이번 연결에만 적용되는지도 보장할 수 없습니다' and not lit,
+          'old host: "알려주지 않습니다 · 보장할 수 없습니다", nothing lit', str(st) + ' lit=' + str(lit))
+    time.sleep(2)
+    gdi = find(dump(), rid='settingsDesktopBackendGdiButton')
+    tap_node(gdi)
+    time.sleep(3)
+    c = ua2_controls()
+    screencap(os.path.join(out, 'ua2old_2_after_pick.png'))
+    st = c['settingsDesktopBackendStatusText']
+    lit = [k for k in ('settingsDesktopBackendDxgiButton', 'settingsDesktopBackendWgcButton', 'settingsDesktopBackendGdiButton')
+           if c[k] and c[k]['selected']]
+    check(backend_requests(fx) == ['gdi'], 'old host: the change went out on the old wire (one request)', str(backend_requests(fx)))
+    check(st and st['text'].startswith('요청: GDI 보냄') and '보장할 수 없습니다' in st['text'] and not lit,
+          'old host: after the request still no confirmation, nothing lit, the scope still not promised', str(st) + ' lit=' + str(lit))
+    tap(rid='listDisconnectButton', timeout=10)
+    time.sleep(3)
+    # a NEW host, a new connection
+    os.makedirs(os.path.join(out, 'newhost'), exist_ok=True)
+    fx2 = Fixture(new_host_exe, os.path.join(out, 'newhost'), static=False, layered_size=(1440, 810))
+    try:
+        ok = connect_to_pattern(fx2.port, best_quality=False, window=True)
+        check(ok, 'new host: connected')
+        time.sleep(3)
+        check(backend_requests(fx2) == [], 'new host: nothing of the old connection\'s request reached it', str(backend_requests(fx2)))
+        for _ in range(3):
+            if find(dump(), rid='listSettingsButton') is not None:
+                break
+            adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False)
+            time.sleep(2)
+        show_backend_controls()
+        time.sleep(3)
+        st = ua2_controls()['settingsDesktopBackendStatusText']
+        screencap(os.path.join(out, 'ua2old_3_new_host.png'))
+        check(st and st['text'] == '지금 창 캡처: WGC · 이 연결에만 적용', 'new host: its own state, no request carried', str(st))
+    finally:
+        fx2.close()
 
 
 def scenario_race(fx, out):
@@ -1462,6 +1524,7 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--scenario', default='compare')
     ap.add_argument('--seconds', type=int, default=60)
+    ap.add_argument('--new-host-exe', default='')  # ua2_old: the second (new) host
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if args.scenario == 'compare_ab_offline':
@@ -1474,7 +1537,7 @@ def main():
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
     input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab') else None
     fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
-                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2') else None,
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old') else None,
                                                                       pulse_ms=33 if args.scenario == 'latency_ab' else 200,
                                                         input_log=input_log)
     try:
@@ -1498,6 +1561,8 @@ def main():
             scenario_resize(fx, args.out)
         elif args.scenario == 'compare_ab_offline':
             scenario_compare_ab(fx, args.out, offline=True)
+        elif args.scenario == 'ua2_old':
+            scenario_ua2_old(fx, args.out, args.new_host_exe)
         elif args.scenario == 'ua2':
             scenario_ua2(fx, args.out)
         elif args.scenario == 'touch_ab':

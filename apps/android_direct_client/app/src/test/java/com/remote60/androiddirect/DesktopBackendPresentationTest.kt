@@ -9,66 +9,114 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ua2-apk r1: the settings screen's capture-backend line (Codex codex_rel_0163_r1.md §1). */
+/** ua2-apk r1/r2: the settings screen's capture-backend state (Codex codex_rel_0163_r1.md §1, codex_ua2_apk_src_r1.md). */
 class DesktopBackendPresentationTest {
     private val p = DesktopBackendPresentation
 
-    private fun st(requested: Int, active: Int, flags: Int = 0x1, valid: Boolean = true, answers: Boolean = true) =
-        HostStatus(valid, requested, active, active, flags, 1, answers)
+    /** A supported host's answer `seq` (requested/active/flags), with the native intent (asked, sent, sentSeq). */
+    private fun st(seq: Long, requested: Int, active: Int, flags: Int = p.FLAG_SESSION_SCOPED,
+                   asked: Long = 0, sent: Long = 0, sentSeq: Long = 0, valid: Boolean = true, answers: Boolean = true,
+                   roleKnown: Boolean = true) =
+        HostStatus(valid, seq, requested, requested, active, flags, 1, answers, roleKnown, asked, sent, sentSeq)
 
     @Test fun notConnectedDisablesAndLightsNothing() {
-        val v = p.present(false, p.WGC, st(p.WGC, p.WGC))
+        val v = p.present(false, p.WGC, st(1, p.WGC, p.WGC))
         assertEquals(State.NOT_CONNECTED, v.state)
         assertFalse(v.enabled)
         assertNull(v.lit)
     }
 
-    @Test fun anOlderHostIsNeverShownAsApplied() {
-        val v = p.present(true, p.WGC, st(p.WGC, p.WGC, answers = false))
-        assertEquals(State.NO_ANSWER_HOST, v.state)
-        assertNull(v.lit)
-        assertTrue(v.enabled)
-        assertEquals(p.WGC, v.asked)
-    }
-
-    @Test fun beforeTheAnswerNothingIsLit() {
-        val v = p.present(true, p.WGC, st(0, 0, valid = false))
+    // ---- N3: capability unknown / unsupported
+    @Test fun beforeTheFirstPongItIsCheckingNotAnOlderHost() {
+        val v = p.present(true, null, st(0, 0, 0, valid = false, answers = false, roleKnown = false))
         assertEquals(State.CHECKING, v.state)
         assertNull(v.lit)
     }
 
-    @Test fun theHostsActiveBackendIsLitNotTheRequest() {
-        // asked DXGI, the host quarantined DXGI: WGC runs and is the one lit, with the reason
-        val v = p.present(true, p.DXGI, st(p.DXGI, p.WGC, flags = 0x1 or p.FLAG_DXGI_QUARANTINED))
+    @Test fun anOlderHostIsNeverShownAppliedNorSessionScoped() {
+        val v = p.present(true, p.WGC, st(0, 0, 0, valid = false, answers = false, asked = 1, sent = 1, sentSeq = 1))
+        assertEquals(State.NO_ANSWER_HOST, v.state)
+        assertNull(v.lit)
+        assertFalse(v.sessionScoped)
+        assertEquals(p.WGC, v.asked)
+    }
+
+    @Test fun sessionScopeOnlyWhenTheHostSaysSo() {
+        assertTrue(p.present(true, null, st(1, p.DXGI, p.DXGI)).sessionScoped)
+        assertFalse(p.present(true, null, st(1, p.DXGI, p.DXGI, flags = 0)).sessionScoped)
+    }
+
+    @Test fun supportedButNoAnswerYetIsChecking() {
+        assertEquals(State.CHECKING, p.present(true, null, st(0, 0, 0, valid = false)).state)
+    }
+
+    // ---- N1: the current request, by seq
+    @Test fun prelogonRefusalIsTerminalNotApplying() {
+        // asked WGC at a logon-screen host: handled (its seq), requested stays DXGI, BEFORE_LOGIN, no NotYetApplied
+        val v = p.present(true, p.WGC, st(3, p.DXGI, p.DXGI, flags = p.FLAG_SESSION_SCOPED or p.FLAG_BEFORE_LOGIN,
+            asked = 1, sent = 1, sentSeq = 3))
+        assertEquals(State.REFUSED, v.state)
+        assertEquals(p.DXGI, v.lit)
+        assertEquals(listOf(Reason.BEFORE_LOGIN), v.reasons)
+        // ...and stays refused at later questions (no endless "applying")
+        assertEquals(State.REFUSED, p.present(true, p.WGC, st(5, p.DXGI, p.DXGI,
+            flags = p.FLAG_SESSION_SCOPED or p.FLAG_BEFORE_LOGIN, asked = 1, sent = 1, sentSeq = 3)).state)
+    }
+
+    @Test fun sameValueAgainIsNotDoneUntilItsOwnAnswerSaysSo() {
+        // DXGI asked again; the last answer already says DXGI but is OLDER than this request -> applying
+        assertEquals(State.APPLYING, p.present(true, p.DXGI, st(4, p.DXGI, p.DXGI, asked = 2, sent = 2, sentSeq = 5)).state)
+        // its own answer, NotYetApplied -> still applying, nothing lit
+        val nya = p.present(true, p.DXGI, st(5, p.DXGI, p.DXGI, flags = p.FLAG_SESSION_SCOPED or p.FLAG_NOT_YET_APPLIED,
+            asked = 2, sent = 2, sentSeq = 5))
+        assertEquals(State.APPLYING, nya.state)
+        assertNull(nya.lit)
+        // handled -> applied
+        assertEquals(State.APPLIED, p.present(true, p.DXGI, st(6, p.DXGI, p.DXGI, asked = 2, sent = 2, sentSeq = 5)).state)
+    }
+
+    @Test fun aBaLateAnswerKeepsTheLatestIntent() {
+        // A (WGC) seq 3, B (GDI) seq 4, A (WGC) again seq 5: the late answer to B (seq 4, requested GDI) says nothing
+        val late = p.present(true, p.WGC, st(4, p.GDI, p.GDI, asked = 3, sent = 3, sentSeq = 5))
+        assertEquals(State.APPLYING, late.state)
+        assertNull(late.lit)
+        assertEquals(State.APPLIED, p.present(true, p.WGC, st(5, p.WGC, p.WGC, asked = 3, sent = 3, sentSeq = 5)).state)
+    }
+
+    @Test fun notSentYetIsApplying() {
+        assertEquals(State.APPLYING, p.present(true, p.GDI, st(2, p.DXGI, p.DXGI, asked = 2, sent = 1, sentSeq = 2)).state)
+    }
+
+    // ---- N2: a window target is WGC now; the desktop request is kept for the desktop
+    @Test fun windowTargetKeepsTheDesktopRequestAndSaysWgcNow() {
+        // the stored evidence: requested=3 effective=3 active=1 flags=0x5 (scoped | window target)
+        val v = p.present(true, p.GDI, HostStatus(true, 7, p.GDI, p.GDI, p.DXGI, 0x5, 1, true, true, 1, 1, 7))
+        assertEquals(State.STORED_FOR_DESKTOP, v.state)
+        assertEquals(p.GDI, v.lit)          // this connection's desktop method, as handled -- not the dormant DXGI
+        assertTrue(v.windowTarget)
+        assertTrue(v.reasons.contains(Reason.WINDOW_TARGET))
+    }
+
+    @Test fun quarantineShowsTheRealOne() {
+        val v = p.present(true, p.DXGI, st(2, p.DXGI, p.WGC, flags = p.FLAG_SESSION_SCOPED or p.FLAG_DXGI_QUARANTINED,
+            asked = 1, sent = 1, sentSeq = 2))
         assertEquals(State.APPLIED, v.state)
-        assertEquals(p.WGC, v.lit)
+        assertEquals(p.WGC, v.active)
         assertEquals(listOf(Reason.DXGI_QUARANTINED), v.reasons)
     }
 
-    @Test fun aRequestNotInTheAnswerYetIsApplying() {
-        val v = p.present(true, p.WGC, st(p.DXGI, p.DXGI))
-        assertEquals(State.APPLYING, v.state)
-        assertEquals(p.DXGI, v.lit)  // what runs now, not what was asked
-    }
-
-    @Test fun aNewConnectionWithNoChoiceShowsTheHostDefault() {
-        val v = p.present(true, null, st(p.DXGI, p.DXGI))
-        assertEquals(State.APPLIED, v.state)
+    @Test fun newConnectionShowsTheHostsOwn() {
+        val v = p.present(true, null, st(1, p.DXGI, p.DXGI))
+        assertEquals(State.IDLE, v.state)
         assertEquals(p.DXGI, v.lit)
-        assertNull(v.asked)
-    }
-
-    @Test fun windowTargetAndLogonScreenReasons() {
-        assertEquals(listOf(Reason.WINDOW_TARGET), p.present(true, p.DXGI, st(p.DXGI, p.WGC, flags = p.FLAG_WINDOW_TARGET)).reasons)
-        assertEquals(listOf(Reason.BEFORE_LOGIN, Reason.NOT_YET_APPLIED),
-            p.present(true, p.WGC, st(p.WGC, p.DXGI, flags = p.FLAG_BEFORE_LOGIN or p.FLAG_NOT_YET_APPLIED)).reasons)
     }
 
     @Test fun rawSnapshotParsing() {
-        val s = HostStatus.of(longArrayOf(1, 7, 2, 2, 2, 1, 3, 1))!!
-        assertTrue(s.valid && s.hostAnswers)
-        assertEquals(p.WGC, s.active)
-        assertNull(HostStatus.of(longArrayOf(1, 2)))
+        val s = HostStatus.of(longArrayOf(1, 7, 3, 3, 1, 5, 2, 1, 1, 4, 4, 7))!!
+        assertTrue(s.valid && s.hostAnswers && s.roleKnown)
+        assertEquals(p.GDI, s.requested)
+        assertEquals(7L, s.intentSentSeq)
+        assertNull(HostStatus.of(longArrayOf(1, 2, 3, 4, 5, 6, 7, 8)))
         assertNull(HostStatus.of(null))
     }
 }

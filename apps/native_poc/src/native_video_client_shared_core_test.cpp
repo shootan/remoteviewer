@@ -1783,6 +1783,34 @@ bool test_desktop_backend_control() {
     c.Request(4);
     if (!expect(!c.ConsumePending(&out), "backend: 4 is not a backend: nothing goes out")) return false;
   }
+  {
+    // ua2-apk r2 (N1): the intent -- which request went out with which seq -- so an answer is matched to the CURRENT one.
+    DesktopBackendControl c;
+    c.SetHostAnswers(true);
+    c.Request(2);
+    auto i = c.CurrentIntent();
+    if (!expect(i.asked == 1 && i.sent == 0 && i.sentSeq == 0, "intent: asked, not sent yet")) return false;
+    PendingDesktopBackendRequest out{};
+    c.ConsumePending(&out);
+    i = c.CurrentIntent();
+    if (!expect(i.sent == 1 && i.sentSeq == out.seq, "intent: the change went out with its seq")) return false;
+    c.Request(3);
+    c.Request(1);  // A, B, A again before the next send: only the last goes out, as the last intent
+    i = c.CurrentIntent();
+    if (!expect(i.asked == 3 && i.sent == 1, "intent: two more asked, the old one still the last sent")) return false;
+    c.ConsumePending(&out);
+    i = c.CurrentIntent();
+    if (!expect(i.sent == 3 && i.sentSeq == out.seq && out.backend == 1, "intent: the latest went out (dxgi) with a later seq"))
+      return false;
+    c.Query();
+    PendingDesktopBackendRequest q{};
+    c.ConsumePending(&q);
+    i = c.CurrentIntent();
+    if (!expect(i.sent == 3 && i.sentSeq == out.seq && q.seq > out.seq, "intent: a question does not move the intent")) return false;
+    c.Reset();
+    i = c.CurrentIntent();
+    if (!expect(i.asked == 0 && i.sent == 0 && i.sentSeq == 0, "intent: a new connection starts with none")) return false;
+  }
   return true;
 }
 
