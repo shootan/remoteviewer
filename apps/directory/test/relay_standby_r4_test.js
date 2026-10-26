@@ -167,6 +167,31 @@ const connect = (h, c, standby) => api('POST', '/api/connect',
   session = r.body.sessionToken;
   check('login', r.status === 200 && !!session);
 
+  // ------------------------------------------------------------ decision 2: standby support, asked without side effects
+  {
+    const hosts = await api('GET', '/api/hosts', null, session);
+    check('the host list says, without side effects, that this directory knows standby connects and runs a relay',
+          hosts.status === 200 && hosts.body.standby && hosts.body.standby.supported === true && hosts.body.standby.relay === true,
+          JSON.stringify(hosts.body.standby));
+    // an account the relay is not for: a standby connect is told so (no relay candidate, a reason)
+    const out = await api('POST', '/api/login', { id: 'outsider', pw: 'outsider-pass-1234' });
+    const reg = await api('POST', '/api/host/register', { id: 'outsider', pw: 'outsider-pass-1234', hostName: 'r4-out', machineId: 'm-r4-out' });
+    if (out.status === 200 && reg.status === 200) {
+      const hs = recorder();
+      await bind(hs.sock);
+      socks.push(hs.sock);
+      await observe(hs.sock, 'r4-out-obs');
+      await api('POST', '/api/host/heartbeat', { hostToken: reg.body.hostToken, hostName: 'r4-out', observeToken: 'r4-out-obs' });
+      const c = await mkClient('r4-out-c');
+      const rc = await api('POST', '/api/connect', { hostId: reg.body.hostId, observeToken: c.obs, standby: true }, out.body.sessionToken);
+      check('a standby connect the relay is not for is answered standbyRelay=not-eligible, with no relay candidate',
+            rc.status === 200 && rc.body.standbyRelay === 'not-eligible' && !(rc.body.candidates || []).some((x) => x.kind === 'relay'),
+            JSON.stringify({ s: rc.status, r: rc.body.standbyRelay }));
+    } else {
+      console.log('      N/A  no outsider account in this store (run through run.js for it)');
+    }
+  }
+
   // ------------------------------------------------------------ N1: the first pin needs the host's proof
   {
     const h = await mkHost('r4-n1');

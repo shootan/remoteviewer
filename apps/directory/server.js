@@ -2386,7 +2386,10 @@ function handleHosts(req, res) {
       lastSeen: h.lastSeen,
     }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.hostName.localeCompare(b.hostName));
-  sendJson(res, 200, { hosts: list });
+  // keepalive-r2 r4 (Codex decision 2): whether this directory knows standby connects, asked without side effects
+  // (an older one has no such field: a client must not learn it from a first mutating /api/connect). relay: whether
+  // a relay runs here at all -- each connect still answers for itself (standbyRelay).
+  sendJson(res, 200, { hosts: list, standby: { supported: true, relay: RELAY_ENABLED } });
 }
 
 async function handleConnect(req, res) {
@@ -2465,7 +2468,10 @@ async function handleConnect(req, res) {
   // simply has no relay candidate, and says why; the direct candidates are as always.
   let relayOffered = relayEligible;
   let standbyRelay = '';
-  if (relayEligible && body.standby === true) {
+  if (body.standby === true && !relayEligible) {
+    // r4 (Codex decision 2): a standby connect is told why there is no relay for it -- never left to guess.
+    standbyRelay = RELAY_ENABLED ? 'not-eligible' : 'relay-disabled';
+  } else if (relayEligible && body.standby === true) {
     const expiresAt = Date.now() + RELAY_AUTH_TTL_MS;
     const reserved = await relayReserveStandby(host, session.accountId, clientWireIp, punchToken, connectId, expiresAt);
     if (!reserved.session) {
