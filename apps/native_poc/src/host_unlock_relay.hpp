@@ -128,6 +128,9 @@ class HostUnlockRelay {
     uint64_t cookie = 0;
     uint32_t statusRequestId = 0;
     uint32_t supersedesRequestId = 0;  // lk-ux-retry r1: LockCredRetry only
+    // lk-ux-retry r2 (Codex N1): the whole retry's absolute end (GetTickCount64; 0 = none) -- its wait in the
+    // queue, the supersede and the fresh challenge share it: past it nothing more of the retry is done.
+    uint64_t deadlineMs = 0;
     uint64_t txGen = 0;  // r3 L1-R: the transaction (liveTx_) it was queued for; 0 = none
     ControlUnlockChallengeRequestMessage challenge{};
     ControlUnlockSealedRequestMessage seal{};

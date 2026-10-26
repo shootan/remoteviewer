@@ -29,7 +29,7 @@ enum class SecureUnlockKind : uint16_t {
   CapabilitiesResponse = 6,     // service -> host
   LockCredChallengeRequest = 7, // host -> service: a challenge for the LOCK-SCREEN credential purpose
   StatusRequest = 8,            // host -> service: where is this (lock-credential) job now? -> Result
-  // lk-ux-retry r1 (PROPOSED): host -> service, SecureUnlockQuery: end THIS connection's typed lock-screen
+  // lk-ux-retry r1 (assigned by the verifier): host -> service, SecureUnlockQuery: end THIS connection's typed lock-screen
   // credential that waits for its unlock (requestId + clientSessionCookie must be that one). -> Result:
   // Superseded (ended now), or the result it already reached on its own, or RejectedPolicy (nothing of
   // this connection's to end). Sent only to a service that listed kSecureUnlockFeatureLockCredRetryV1.

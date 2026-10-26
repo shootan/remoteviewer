@@ -79,6 +79,16 @@ constexpr uint16_t kLoginCancelled = 0xFFFD;     // the user closed the prompt: 
 constexpr uint16_t kLoginUnsupported = 0xFFFC;   // no screen to log in to here, or the host predates it
 constexpr uint16_t kPreloginLeftLogon = 0xFFFE;  // typed, then the host left the pre-login screen (not a login seen)
 constexpr uint16_t kLoginPending = 0xFFFB;       // lockscreen-cred: the previous password still waits for its unlock
+// lk-ux-retry r2 (Codex N2): the retry ended the earlier wait (the host issued the new challenge), and then the
+// NEW password ... was never sealed/sent (a local failure) -- or was sent, but its answer never came.
+constexpr uint16_t kLockRetryNotSent = 0xFFFA;
+constexpr uint16_t kLockRetryUnknown = 0xFFF9;
+// How far one lock-screen exchange got: the challenge it asked for was issued (for a retry: the earlier wait IS
+// over), and its sealed password was handed to the link.
+struct LockCredProgress {
+  bool challengeIssued = false;
+  bool sealSent = false;
+};
 // The result window's message carries the stage in the low 16 bits of wParam and the role above them.
 // lockscreen-cred r2 (Codex L5): and the control connection's generation (controlRunGen) it belongs to in the
 // high 32 bits -- a result of an earlier connection, still queued when the connection changed, is not shown.
@@ -95,7 +105,7 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
 // lk-ux-retry r1: `supersedesRequestId` != 0 = an explicit retry while that typed request still waits (89).
 bool run_lock_cred_exchange(remote60::native_poc::ControlLink& link, const std::wstring& password, uint16_t* stage,
                             uint32_t* win32, bool* waiting, uint32_t* requestId, std::string* status,
-                            uint32_t supersedesRequestId = 0);
+                            uint32_t supersedesRequestId = 0, LockCredProgress* progress = nullptr);
 bool poll_lock_cred_status(remote60::native_poc::ControlLink& link, uint32_t requestId, uint16_t* stage, bool* terminal,
                            uint32_t* win32);
 // The disconnected-session unlock with its outcome for the result window (Codex contract 2: the user sees

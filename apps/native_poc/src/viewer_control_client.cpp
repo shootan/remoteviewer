@@ -838,11 +838,20 @@ void ControlClient::Run() {
       }
       if (!pw.empty() && stillThere) {
         if (askedRole == kLoginRoleLockScreen) {
-          (void)run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes);
-          // The host answers 18 for every "not ended / nothing asked"; no answer at all (stage 0) is not known
-          // either. Only otherwise has the earlier wait ended.
-          if (supersedes != 0 && stage != 0 &&
-              stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SupersedeRefused)) {
+          LockCredProgress progress;
+          const bool exchanged =
+              run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes, &progress);
+          // lk-ux-retry r2 (Codex N2): the earlier wait is over exactly when the host issued THIS retry's challenge
+          // -- whatever then happened to the new password. 18, a refusal or no answer: it still waits (followed).
+          // (Superseded as the retry's own answer: the earlier wait ended, but no new challenge could be had.)
+          const bool priorEnded =
+              progress.challengeIssued || stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Superseded);
+          if (supersedes != 0 && priorEnded) {
+            if (!exchanged) {
+              // The new password: never sealed (a local failure) / sent, but its answer never came.
+              stage = progress.sealSent ? kLockRetryUnknown : kLockRetryNotSent;
+              win32 = 0;
+            }
             // The earlier wait ended (or had ended): it is followed no more -- its late answers cannot reach the
             // new attempt (they carry its request id; the host also closed its transaction).
             std::cout << "[native-video-client][lock-cred] requestId=" << supersedes << " superseded by requestId="
@@ -882,7 +891,9 @@ void ControlClient::Run() {
         if (!(polled && terminal)) stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
         // It WAS typed: a later refusal means the job's state is gone (the relay reconnected, or another press
         // replaced it) -- not "not sent". Said as unconfirmed.
-        if (stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SessionUnlocked)) {
+        // lk-ux-retry r2 (Codex N2): an explicit end of it (Superseded) is said as that, never as "2 minutes".
+        if (stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SessionUnlocked) &&
+            stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::Superseded)) {
           stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
         }
         std::cout << "[native-video-client][lock-cred] requestId=" << lockCredPollRequestId << " final stage=" << stage

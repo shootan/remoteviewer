@@ -327,6 +327,21 @@ void HostUnlockRelay::WorkerLoop() {
       activeCookie_.store(cmd.cookie, std::memory_order_release);
     }
 
+    if (cmd.op == Op::LockCredRetry) {
+      // lk-ux-retry r2 (Codex N1): a retry whose caller already answered 18 (timed out: its transaction was
+      // withdrawn) or whose session ended does nothing at all -- no supersede, no challenge, no pipe.
+      bool live = false;
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        live = IsLiveLocked(cmd, cmd.challenge.requestId);
+      }
+      if (!live || (cmd.deadlineMs != 0 && GetTickCount64() >= cmd.deadlineMs)) {
+        std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId
+                  << " not started: " << (live ? "past its deadline" : "withdrawn") << "\n";
+        activeCookie_.store(0, std::memory_order_release);
+        continue;
+      }
+    }
     if (cmd.op == Op::Release) {  // the control session ended: its held transaction ends with it
       if (heldCookie != 0 && heldCookie == cmd.cookie) drop_pipe();
       continue;
@@ -422,6 +437,7 @@ void HostUnlockRelay::WorkerLoop() {
     }
 
     uint8_t buf[512];
+    bool retryEndedEarlier = false;  // lk-ux-retry r2: this challenge follows the retry's confirmed supersede
     if (cmd.op == Op::LockCredRetry) {
       // lk-ux-retry r1 (Codex section 2): end THIS session's typed credential's wait first -- on the connection it lives
       // on, by its request id -- and ask for the new challenge only once that is confirmed. Served here, on the
@@ -445,7 +461,13 @@ void HostUnlockRelay::WorkerLoop() {
         q.requestId = cmd.supersedesRequestId;
         q.clientSessionCookie = cmd.cookie;
         SecureUnlockResult resp{};
-        const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), budget(shortDeadlineMs_));
+        uint32_t supersedeBudget = budget(shortDeadlineMs_);
+        if (cmd.deadlineMs != 0) {
+          const uint64_t now = GetTickCount64();
+          const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 1;
+          supersedeBudget = static_cast<uint32_t>((std::min)(static_cast<uint64_t>(supersedeBudget), left));
+        }
+        const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), supersedeBudget);
         if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
         const bool valid = io == Io::Ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
                            resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) &&
@@ -486,7 +508,36 @@ void HostUnlockRelay::WorkerLoop() {
         activeCookie_.store(0, std::memory_order_release);
         continue;
       }
+      // lk-ux-retry r2 (Codex N1): the earlier wait is over (its own final answer stays with it, above); the
+      // fresh challenge is asked only for a retry still owned and in time. One whose caller already answered
+      // (timed out -> 18) or whose session ended gets none: no challenge, no hold of the pipe for it.
+      {
+        bool stillLive = false;
+        {
+          std::lock_guard<std::mutex> lk(mu_);
+          stillLive = IsLiveLocked(cmd, cmd.challenge.requestId);
+        }
+        if (!stillLive || (cmd.deadlineMs != 0 && GetTickCount64() >= cmd.deadlineMs)) {
+          if (stillLive) {
+            // Said as what happened: the earlier wait IS over (Superseded), and this retry got no challenge.
+            std::lock_guard<std::mutex> lk(mu_);
+            ControlUnlockChallengeMessage m{};
+            m.requestId = cmd.challenge.requestId;
+            m.status = static_cast<uint16_t>(UnlockStage::Superseded);
+            m.reserved = kUnlockPurposeLockCred;
+            challengeResults_[TxKey{cmd.cookie, cmd.challenge.requestId}] = m;
+          }
+          std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId
+                    << " ended the earlier wait, then " << (stillLive ? "ran out of time" : "was withdrawn")
+                    << ": no new challenge\n";
+          release_if_idle();
+          cv_.notify_all();
+          activeCookie_.store(0, std::memory_order_release);
+          continue;
+        }
+      }
       cmd.op = Op::LockCredChallenge;  // from here, the ordinary lock-screen challenge
+      retryEndedEarlier = true;
     }
     if (cmd.op == Op::Capabilities) {
       // lockscreen-cred r1: an older service drops the connection on this kind -- that, too, is its answer.
@@ -519,8 +570,14 @@ void HostUnlockRelay::WorkerLoop() {
                                                                         : SecureUnlockKind::ChallengeRequest);
       req.requestId = cmd.challenge.requestId;
       req.clientSessionCookie = cmd.cookie;
+      uint32_t challengeBudget = budget(shortDeadlineMs_);
+      if (cmd.deadlineMs != 0) {  // lk-ux-retry r2: a retry's fresh challenge ends with the retry
+        const uint64_t now = GetTickCount64();
+        const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 1;
+        challengeBudget = static_cast<uint32_t>((std::min)(static_cast<uint64_t>(challengeBudget), left));
+      }
       const Io io = Exchange(pipe, &req, sizeof(req), buf, sizeof(buf), sizeof(SecureUnlockChallengeResponse),
-                             budget(shortDeadlineMs_));
+                             challengeBudget);
       ControlUnlockChallengeMessage out{};
       SecureUnlockChallengeResponse resp{};
       if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
@@ -534,7 +591,10 @@ void HostUnlockRelay::WorkerLoop() {
         out = to_control_challenge(resp);
       } else {
         out.requestId = cmd.challenge.requestId;
-        out.status = static_cast<uint16_t>(UnlockStage::InternalError);
+        // lk-ux-retry r2 (Codex N1/N2): after a retry ended the earlier wait, a fresh challenge that could not be
+        // had (no answer within the retry's time) is said as that: the earlier one is over, nothing new issued.
+        out.status = static_cast<uint16_t>(retryEndedEarlier ? UnlockStage::Superseded : UnlockStage::InternalError);
+        if (retryEndedEarlier) out.reserved = kUnlockPurposeLockCred;
         io_failed();
       }
       // Q2: an issued challenge holds the pipe for its seal (the service binds it to this connection) -- no
@@ -821,12 +881,28 @@ bool HostUnlockRelay::LockCredRetryChallengeSync(const ControlUnlockChallengeReq
     cmd.supersedesRequestId = supersedesRequestId;
     cmd.cookie = clientSessionCookie;
     cmd.txGen = liveTx_[key] = ++txGenSeq_;
+    // lk-ux-retry r2 (Codex N1): one end for the whole retry -- a little inside the caller's wait, so whatever
+    // the worker concludes by it reaches the caller (never a worker result racing the caller's give-up).
+    cmd.deadlineMs = GetTickCount64() + timeoutMs - (std::min)(timeoutMs / 4, 250u);
     queue_.push_back(cmd);
   }
   cv_.notify_all();
   std::unique_lock<std::mutex> lk(mu_);
   const bool got = cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return challengeResults_.count(key) != 0; });
-  if (!got) return false;
+  if (!got) {
+    // lk-ux-retry r2 (Codex N1): the caller answers 18 now, so the retry is withdrawn with it: not started ->
+    // removed from the queue; started -> its transaction is gone, and the worker's fences stop it before any
+    // fresh challenge (a supersede already on the pipe completes: the earlier request keeps its real end).
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+      if (it->op == Op::LockCredRetry && it->cookie == clientSessionCookie && it->challenge.requestId == req.requestId) {
+        queue_.erase(it);
+        break;
+      }
+    }
+    liveTx_.erase(key);
+    challengeResults_.erase(key);
+    return false;
+  }
   *out = challengeResults_[key];
   out->reserved = kUnlockPurposeLockCred;
   return true;

@@ -118,7 +118,7 @@ enum class MessageType : uint16_t {
   // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
   // Gated on kCaptureFlagLockCredV1; an old host never sees it.
   ControlLockCredChallengeRequest = 88,
-  // lk-ux-retry r1 (number PROPOSED, verifier to confirm): the SAME connection presses "Windows 로그인" again while
+  // lk-ux-retry r1 (number assigned by the verifier): the SAME connection presses "Windows 로그인" again while
   // its typed lock-screen credential still waits for an unlock. ControlLockCredRetryChallengeRequestMessage: the
   // new requestId and the one it supersedes. The host ends that wait in the service (only that connection's,
   // only that request) and only then asks for the new challenge -- one serialized step; the answer is 41 as for 88.
@@ -348,7 +348,7 @@ constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
 // for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
 // different role: it never turns on the pre-login control allowlist.
 constexpr uint32_t kCaptureFlagLockCredV1 = 0x40000u;
-// lk-ux-retry r1 (PROPOSED): the host and its service can end this connection's own typed-and-waiting lock-screen
+// lk-ux-retry r1 (assigned by the verifier): the host and its service can end this connection's own typed-and-waiting lock-screen
 // credential on an explicit retry (ControlLockCredRetryChallengeRequest 89). Without it a viewer keeps saying
 // "wait for the earlier one" -- it never pretends an older service replaced anything.
 constexpr uint32_t kCaptureFlagLockCredRetryV1 = 0x80000u;
@@ -891,7 +891,7 @@ enum class UnlockStage : uint16_t {
   // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
   // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
   Busy = 16,
-  // lk-ux-retry r1 (numbers PROPOSED, verifier to confirm):
+  // lk-ux-retry r1 (numbers assigned by the verifier):
   Superseded = 17,       // this typed credential's wait was ended by the same connection's explicit retry.
                          // GNLink stopped waiting; Windows' own handling of what was typed is not undone.
   SupersedeRefused = 18, // the earlier wait could not be confirmed ended: the retry sent nothing
