@@ -1778,8 +1778,15 @@ int wmain(int argc, wchar_t** argv) {
       std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
       versionAfter = ctx.frameBuf.frame.version;
     }
+    // The refusal is the next commit after the hook; B's own first picture needs B's own keyframe (later), so the
+    // version read the moment the refusal is counted is A's not-written one.
+    pump_until([&] { return ctx.sel.localFramesRefused.load() > refusedAtFire.load(); }, 3000);
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      versionAfter = ctx.frameBuf.frame.version;
+    }
     check("E1 PS (4) R3: A cancelled and B begun right before A's first picture's commit -- A's picture REFUSED, not written",
-          hookFired && ctx.sel.localFramesRefused.load() > refusedAtFire.load(),
+          hookFired && ctx.sel.localFramesRefused.load() > refusedAtFire.load() && versionAfter == versionAtFire.load(),
           "versionAtFire=" + std::to_string(versionAtFire.load()) + " refused " + std::to_string(refusedAtFire.load()) + " -> " +
               std::to_string(ctx.sel.localFramesRefused.load()));
     ctx.sel.testBeforeFrameCommit = nullptr;
@@ -1790,6 +1797,46 @@ int wmain(int argc, wchar_t** argv) {
           shown4 && ctx.sel.activeStreamGeneration.load() != 0 && ctx.sel.epoch.load() == opB.load() && opA.load() != opB.load(),
           "opA=" + std::to_string(opA.load()) + " opB=" + std::to_string(opB.load()) + " versionAfterFire=" +
               std::to_string(versionAfter));
+
+    // (5) rel-0163 r6 (Codex R3 1): between a picture's PERMISSION and its WRITE. A local pick A; right after A's first
+    //     picture is permitted (the gate's lock held), another thread tries to cancel A and begin B: it must wait
+    //     until A's picture is written; only then does B begin. A's write (made while A was live) lands; B completes on
+    //     its own keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired5{false}, blocked5{false}, began5{false};
+    std::atomic<uint64_t> version5{0};
+    std::thread other5;
+    ctx.sel.testAfterFramePermit = [&] {
+      // (The gate's lock is held here by the receive thread -- read its atomics, never call a locking member.)
+      if (fired5.load() || !ctx.sel.pending.load() || !ctx.sel.localAckless.load()) return;
+      fired5 = true;
+      version5 = ctx.frameBuf.frame.version;  // (the FrameBuffer lock is held here by the receive thread itself)
+      other5 = std::thread([&] {
+        ctx.sel.Clear();
+        ctx.sel.BeginLocal();
+        began5 = true;
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      blocked5 = !began5.load();
+    };
+    const uint64_t p5 = presents();
+    press_desktop();
+    const bool fired5ok = pump_until([&] { return fired5.load() && began5.load(); }, 8000);
+    ctx.sel.testAfterFramePermit = nullptr;
+    if (other5.joinable()) other5.join();
+    uint64_t version5After = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      version5After = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (5) R3: a cancel/new op tried between A's permission and its write WAITS -- A's write lands first",
+          fired5ok && blocked5.load() && version5After > version5.load(),
+          "blocked=" + std::to_string(blocked5.load() ? 1 : 0) + " version " + std::to_string(version5.load()) + " -> " +
+              std::to_string(version5After));
+    uint64_t lat5 = 0;
+    const bool shown5 = wait_presented(p5, qpc_now_us(), 12000, &lat5);
+    check("E1 PS (5) R3: ...then B begins and completes on its own keyframe", shown5 && ctx.sel.activeStreamGeneration.load() != 0);
     check("E1 PS: the worker is still serving (no exit 15 / 14)", worker_alive());
     check("E1 PS: no present failed", ctx.present.d3dPresentFailCount.load() == 0,
           std::to_string(ctx.present.d3dPresentFailCount.load()) + " failed");

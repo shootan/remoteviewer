@@ -6,6 +6,10 @@
 //
 // Build: remote60_viewer_selection_gate_test (CMake). Run: prints "viewer_selection_gate_test: PASS".
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 
@@ -281,24 +285,63 @@ void test_local_ackless_selection() {
     g.BeginLocal();
     const uint64_t a = g.epoch.load();
     uint64_t gen = 0;
-    CHECK(!g.CommitFrame(a, true, 0, 4, &gen));
+    CHECK(!g.CommitFrame(a, true, 0, 4, &gen, nullptr));
     CHECK(g.expectedGeneration.load() == 0);
     g.Clear();
     g.BeginLocal();
     const uint64_t b = g.epoch.load();
-    CHECK(!g.CommitFrame(a, true, 4, 4, &gen));  // A's picture after B began
+    CHECK(!g.CommitFrame(a, true, 4, 4, &gen, nullptr));  // A's picture after B began
     CHECK(g.expectedGeneration.load() == 0 && g.localFramesRefused.load() >= 1);
     g.Clear();
-    CHECK(!g.CommitFrame(b, true, 4, 4, &gen));  // B's picture after B was cancelled (nothing pending)
+    CHECK(!g.CommitFrame(b, true, 4, 4, &gen, nullptr));  // B's picture after B was cancelled (nothing pending)
     g.BeginLocal();
     const uint64_t c = g.epoch.load();
-    CHECK(g.CommitFrame(c, true, 6, 6, &gen) && gen == 6 && g.expectedGeneration.load() == 6);
-    CHECK(g.CommitFrame(c, true, 6, 6, &gen) && gen == 6);  // later frames of the bound op
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen, nullptr) && gen == 6 && g.expectedGeneration.load() == 6);
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen, nullptr) && gen == 6);  // later frames of the bound op
     CHECK(g.RecordReveal(gen, c));
     CHECK(g.CommitReveal());
     g.Clear();  // what the reveal's UI handler does
-    CHECK(g.CommitFrame(c, true, 6, 6, &gen));  // the same op, revealed: its stream goes on
-    CHECK(g.CommitFrame(0, false, 0, 9, &gen) && gen == 9);  // an ordinary frame: as before
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen, nullptr));  // the same op, revealed: its stream goes on
+    CHECK(g.CommitFrame(0, false, 0, 9, &gen, nullptr) && gen == 9);  // an ordinary frame: as before
+  }
+  {
+    // r6 (Codex R3 2): op R revealed at generation 7; a new local op A begins and is cancelled before its reveal.
+    // A's picture is refused (the same epoch as A, but A was never revealed); R's own later picture is refused too
+    // (R is no longer the epoch); while R was the epoch, its later pictures went on.
+    SelectionGateState g;
+    g.BeginLocal();
+    const uint64_t r = g.epoch.load();
+    uint64_t gen = 0;
+    CHECK(g.CommitFrame(r, true, 7, 7, &gen, nullptr) && gen == 7);
+    CHECK(g.RecordReveal(7, r));
+    CHECK(g.CommitReveal());
+    g.Clear();
+    CHECK(g.CommitFrame(r, true, 7, 7, &gen, nullptr) && gen == 7);  // R revealed: its stream goes on
+    g.BeginLocal();
+    const uint64_t a = g.epoch.load();
+    g.Clear();  // A cancelled before its reveal
+    CHECK(!g.CommitFrame(a, true, 9, 9, &gen, nullptr));
+    CHECK(!g.CommitFrame(r, true, 7, 7, &gen, nullptr));
+  }
+  {
+    // r6 (R3 1): a permitted picture keeps the gate's lock until the caller lets it go -- a Clear/Begin waits.
+    SelectionGateState g;
+    g.BeginLocal();
+    const uint64_t a = g.epoch.load();
+    uint64_t gen = 0;
+    std::unique_lock<std::mutex> held;
+    CHECK(g.CommitFrame(a, true, 5, 5, &gen, &held) && held.owns_lock());
+    std::atomic<bool> began{false};
+    std::thread other([&] {
+      g.Clear();
+      g.BeginLocal();
+      began = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(!began.load());  // blocked while the write is still being made
+    held.unlock();
+    other.join();
+    CHECK(began.load() && g.epoch.load() == a + 1);
   }
   {
     // r5 (Codex R4): the host ack and the panel are one boundary -- a local op: the panel is never applied.
