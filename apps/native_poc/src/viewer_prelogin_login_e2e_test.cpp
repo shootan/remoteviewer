@@ -758,6 +758,7 @@ int wmain(int argc, wchar_t** argv) {
   bool foreignPeer = false;
   bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
   bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
+  bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
   bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -775,6 +776,7 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
     if (a == L"--still-screen") stillScreen = true;
     if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
+    if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
     if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
@@ -931,8 +933,9 @@ int wmain(int argc, wchar_t** argv) {
                                   // capture-lifecycle r1 (PS): this PC's desktop is never still (60 content
                                   // updates/s measured 10-26, a user at work on it) -- the test build stands
                                   // it in for a still logon screen (host_capture_session.cpp).
-                                  stillScreen ? std::wstring(stillNoFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
-                                                                          : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
+                                  stillScreen ? std::wstring(stillNoFirst        ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
+                                                             : stillPointerFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst"
+                                                                                 : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
                                               : std::wstring());
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
@@ -1562,6 +1565,17 @@ int wmain(int argc, wchar_t** argv) {
       check("PS: ...and its first frame was delivered (\"reacquire: delivered after\")",
             host.Count("full-frame reacquire: delivered after") >= 1,
             std::to_string(host.Count("full-frame reacquire: delivered after")) + " deliveries");
+      if (stillPointerFirst) {
+        // r3 (Codex M9): the remade duplication's first acquire is pointer-only (the test build says so) -- it does
+        // NOT answer the request; the next acquire with an image does. In that order.
+        const std::string log = host.log();
+        const size_t declined = log.find("full-frame reacquire: a pointer-only acquire does not answer it");
+        const size_t delivered = log.find("full-frame reacquire: delivered after");
+        check("PS pointer-first: A POINTER-ONLY ACQUIRE DID NOT ANSWER THE FULL-FRAME REQUEST (request kept)",
+              declined != std::string::npos);
+        check("PS pointer-first: ...the image acquire after it did (delivered after the refusal)",
+              declined != std::string::npos && delivered != std::string::npos && delivered > declined);
+      }
     } else {
       // r2 contrast (=nofirst): the same pick with a capture that gives NOTHING, not even a remade
       // duplication's first frame. Nothing is shown (so the still run's picture came from the remake), the

@@ -46,8 +46,10 @@ struct DxgiDesktopCaptureConfig {
   // the product. A desktop that never changes, emulated here so the full-frame reacquire's real duplication
   // remake runs: Still = of what duplication reports, only the first frame of each (new) duplication is
   // handed on; every other acquire is released and taken as a timeout. StillNoFirstFrame = not even that (the
-  // bounded remake gives up). Off = the product.
-  enum class TestStill : uint8_t { Off, Still, StillNoFirstFrame };
+  // bounded remake gives up). StillPointerFirst (r3) = Still, but while a full-frame request is open (once per request) a new
+  // duplication's first acquire is handed on as POINTER-ONLY (no desktop image) -- the case that must not
+  // answer the request -- and its next image acquire is the first frame. Off = the product.
+  enum class TestStill : uint8_t { Off, Still, StillNoFirstFrame, StillPointerFirst };
   TestStill testStill = TestStill::Off;
 };
 

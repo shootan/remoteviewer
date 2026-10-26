@@ -95,6 +95,8 @@ struct DxgiDesktopCaptureSession::Impl {
   std::atomic<uint64_t> fullFrameRequestedUs{0};
   uint32_t fullFrameRecreates = 0;
   bool testDeliveredSinceDuplication = false;  // TestStill: the current duplication's first frame went out
+  bool testPointerForRequest = false;          // StillPointerFirst: the open request's pointer-only acquire went out
+  bool fullFrameDeclinedLogged = false;        // the pointer-only refusal is said once per request
   static constexpr uint64_t kFullFrameRecreateAfterUs = 150000;
   static constexpr uint32_t kMaxFullFrameRecreates = 3;
 
@@ -463,12 +465,23 @@ struct DxgiDesktopCaptureSession::Impl {
       // TEST BUILDS ONLY (config.testStill): an acquire a still desktop would not have given is released and
       // taken as the timeout it would have been.
       bool testFirstOfDuplication = false;
+      bool testPointerOnly = false;  // StillPointerFirst: this acquire is handed on as carrying no image
       bool idle = hr == DXGI_ERROR_WAIT_TIMEOUT;
       if (SUCCEEDED(hr) && config.testStill != DxgiDesktopCaptureConfig::TestStill::Off) {
+        const bool pointerFirst = config.testStill == DxgiDesktopCaptureConfig::TestStill::StillPointerFirst;
+        // Once per open request: the first new-duplication acquire after it is the pointer-only one.
+        const bool requestOpen = fullFrameRequestedUs.load(std::memory_order_acquire) != 0;
+        if (!requestOpen) testPointerForRequest = false;
+        if (pointerFirst && requestOpen && !testDeliveredSinceDuplication && !testPointerForRequest) {
+          testPointerOnly = true;
+          testPointerForRequest = true;
+        }
         // (Its first acquire that carries a desktop IMAGE -- a pointer-only one does not; see below.)
-        testFirstOfDuplication = config.testStill == DxgiDesktopCaptureConfig::TestStill::Still &&
-                                 !testDeliveredSinceDuplication && frameInfo.LastPresentTime.QuadPart != 0;
-        if (!testFirstOfDuplication) {
+        testFirstOfDuplication =
+            !testPointerOnly &&
+            (config.testStill == DxgiDesktopCaptureConfig::TestStill::Still || pointerFirst) &&
+            !testDeliveredSinceDuplication && frameInfo.LastPresentTime.QuadPart != 0;
+        if (!testFirstOfDuplication && !testPointerOnly) {
           duplication->ReleaseFrame();
           resource.Reset();
           idle = true;
@@ -615,14 +628,18 @@ struct DxgiDesktopCaptureSession::Impl {
       // pointer-only acquire's surface may hold no image at all (a new duplication's first one, measured
       // 10-26: delivered as "the full frame", it was black -- luma spread 0). That one goes on as what it is
       // (pointer only) and the request stays open (the bounded remake above still runs out).
-      uint32_t handedAccumulated = frameInfo.AccumulatedFrames;
+      uint32_t handedAccumulated = testPointerOnly ? 0u : frameInfo.AccumulatedFrames;
       if (testFirstOfDuplication && handedAccumulated == 0) handedAccumulated = 1;  // a new duplication's whole image
-      const bool carriesImage = frameInfo.LastPresentTime.QuadPart != 0;
+      const bool carriesImage = !testPointerOnly && frameInfo.LastPresentTime.QuadPart != 0;
       if (carriesImage && fullFrameRequestedUs.exchange(0, std::memory_order_acq_rel) != 0) {
         if (handedAccumulated == 0) handedAccumulated = 1;
         log("capture", "full-frame reacquire: delivered after " + std::to_string(fullFrameRecreates) +
                            " duplication(s) content=1");
         fullFrameRecreates = 0;
+        fullFrameDeclinedLogged = false;
+      } else if (!carriesImage && fullFrameRequestedUs.load(std::memory_order_acquire) != 0 && !fullFrameDeclinedLogged) {
+        fullFrameDeclinedLogged = true;
+        log("capture", "full-frame reacquire: a pointer-only acquire does not answer it (request kept)");
       }
       try {
         if (onFrame) onFrame(texture.Get(), width, height, handedAccumulated);

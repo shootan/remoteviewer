@@ -97,8 +97,12 @@ Flow stage_time_limit(HostContext& hx, TickContext& tc) {
   watchdog.EnterSubphase(MainLoopSubphase::Tick);  // r9
   nowUs = qpc_now_us();
   // Attachment retries cannot depend on callbacks from the attachment that just failed.
-  if (capture.restartPending && clientSession.streamControlActive.load(std::memory_order_acquire) &&
-      nowUs >= capture.restartRetryAtUs && restart_capture_session(hx)) {
+  // capture-lifecycle r3 (Codex N1-a): ...except a desktop rebuild's -- the backend stage retries it within its
+  // bound for that desktop generation, and this generic retry would go past it (8 s backoff, no limit). A
+  // full-frame reacquire's failure is retried here as that episode's own (no new source).
+  if (capture.restartPending && capture.restartOwner != CaptureState::RestartOwner::DesktopRebuild &&
+      clientSession.streamControlActive.load(std::memory_order_acquire) &&
+      nowUs >= capture.restartRetryAtUs && restart_capture_session(hx, capture.restartOwner)) {
     ++capture.restartCount;
     encoder.ResetTimelineAnchors(capture);
     encoder.RequestKey(kHostKeyReasonCaptureRestart);

@@ -60,6 +60,9 @@ struct BackendRequest {
   uint64_t epoch = 0;  // 0 = unstamped (accept always)
   uint32_t seq = 0;
   uint32_t backend = 0;  // 1 = dxgi, 2 = wgc, 3 = gdi
+  // capture-lifecycle r3 (Codex N2 end): the Serve() it was posted from (SessionState::backendServeSeq; 0 =
+  // unstamped). A request of a Serve() that has ended is dropped (host_backend_owner.hpp).
+  uint64_t serve = 0;
 };
 
 // Why a keyframe is being asked for. A bitmask, not an enum value: several reasons can accrue
@@ -146,10 +149,10 @@ class MainLoopMailbox {
   // capture-lifecycle r2 (Codex N2): taken under the owner the main loop settled THIS tick (ownerEpoch, from its
   // one epoch read). Older -> dropped; NEWER -> left in place for the tick that makes its epoch the owner
   // first (TakeForEpoch would have dropped it, and the new session's choice with it). See host_backend_owner.hpp.
-  std::optional<BackendRequest> TakeBackendRequestForOwner(uint64_t ownerEpoch) {
+  std::optional<BackendRequest> TakeBackendRequestForOwner(const BackendOwnerState& owner) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!backend_) return std::nullopt;
-    switch (ClassifyBackendRequest(backend_->epoch, ownerEpoch)) {
+    switch (ClassifyBackendRequest(backend_->epoch, backend_->serve, owner)) {
       case BackendRequestFate::Leave:
         return std::nullopt;
       case BackendRequestFate::Drop:

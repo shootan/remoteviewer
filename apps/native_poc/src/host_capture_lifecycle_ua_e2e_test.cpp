@@ -20,10 +20,13 @@
 //     that WGC shows a real UAC prompt. That is the user's field check (a real UAC, approved by the user).
 //   * The host is the test build, input injection off, its files isolated; the clipboard stays out.
 //
-//   --rebuild-fails (r2, Codex N1 (b)): GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL=1 -- the rebuild after the edge to
-//               the secure desktop fails every attempt. Nothing of the attachment made before the edge may
-//               reach the viewer (its frames are refused at adoption), the attempts are bounded, and the next
-//               edge's rebuild brings the picture back. Instead of the phases above.
+//   --rebuild-fails (r2/r3, Codex N1 (b) / N1-a): the rebuild after the edge to the secure desktop fails AFTER
+//               its detach, as a real one does (GNLINK_STREAM_TEST_FAIL_RESTART_FILE: while that file exists every
+//               capture restart fails right after DetachCaptureSession). (1) one failure, the file goes: the
+//               SAME desktop generation's 2nd attempt succeeds and the picture comes back. (2) the file stays:
+//               3 attempts, then nothing -- not the rebuild, not the host's generic retry (4th attempt 0) -- and
+//               no picture; the next edge (file gone) rebuilds and the picture comes back. Instead of the
+//               phases above.
 //
 //   remote60_host_capture_lifecycle_ua_e2e_test   (REMOTE60_ALLOW_HOST_E2E=1; exit 77 = skipped)
 //   REMOTE60_E2E_OLD_BIN=<exe>: run another host build (a negative control).
@@ -138,6 +141,19 @@ struct SeenLog {
     }
     return false;
   }
+  // What was decoded at/after a time (decode clock), for a failure's detail (up to 4).
+  std::string DescribeDecodedSince(uint64_t fromUs) {
+    std::lock_guard<std::mutex> lk(mu);
+    std::string out;
+    int n = 0;
+    for (const Seen& s : v) {
+      if (s.us < fromUs) continue;
+      out += " [at=" + std::to_string(s.us) + " cap=" + std::to_string(s.captureUs) + " key=" + (s.key ? "1" : "0") +
+             " syn=" + (s.synthetic ? "1" : "0") + "]";
+      if (++n == 4) break;
+    }
+    return out;
+  }
   size_t CountSince(uint64_t fromUs) {
     std::lock_guard<std::mutex> lk(mu);
     return static_cast<size_t>(std::count_if(v.begin(), v.end(), [&](const Seen& s) { return s.us >= fromUs; }));
@@ -224,6 +240,16 @@ int wmain(int argc, wchar_t** argv) {
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
   const std::wstring hostLogPath = dir + L"host.log";
+  // r3: while this file exists, every capture restart of the test host fails after its detach (--rebuild-fails).
+  const std::wstring failRestartPath = dir + L"fail-restart.flag";
+  const auto set_fail_restart = [&](bool on) {
+    if (on) {
+      HANDLE f = CreateFileW(failRestartPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    } else {
+      DeleteFileW(failRestartPath.c_str());
+    }
+  };
   HANDLE hostLog = INVALID_HANDLE_VALUE;
   PROCESS_INFORMATION hostPi{};
   bool launched = false;
@@ -231,7 +257,7 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");  // h264, as the product child gets it
     SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");  // the user's clipboard stays out
     SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_SECURE_DESKTOP_EVENT", secureEventName.c_str());
-    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL", rebuildFails ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FAIL_RESTART_FILE", rebuildFails ? failRestartPath.c_str() : nullptr);
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps 30 --seconds 150 --input-injection-mode none";
@@ -367,9 +393,9 @@ int wmain(int argc, wchar_t** argv) {
           std::to_string(seen.CountSince(t3)) + " frames");
   };
 
-  // ------------------------------------------------------------------ r2: an edge whose rebuild fails
+  // ------------------------------------------------------------------ r2/r3: an edge whose rebuild fails
   if (launched && rebuildFails) {
-    std::cout << "\n--- r2 (N1 b): the rebuild after the edge fails; nothing of the old attachment crosses ---\n";
+    std::cout << "\n--- r3 (N1-a): the rebuild after the edge fails after its detach ---\n";
     SeenLog seen;
     DecodingSink rs;
     rs.log = &seen;
@@ -392,46 +418,71 @@ int wmain(int argc, wchar_t** argv) {
     check("it asks for WGC (a capture that keeps giving frames of this live desktop), and the host runs it",
           phone.RequestDesktopCaptureBackend(2) && host_says("desktop-backend-applied seq=", 8000));
     Sleep(2000);
-    check("before the edge, the picture comes (frames in 1 s)", [&] {
-      const uint64_t t = qpc_now_us();
-      Sleep(1000);
-      return seen.CountSince(t) >= 2;
-    }());
+    const auto injected = [&] { return host_count("capture restart failed (injected)"); };
+
+    // (1) one failure after the detach, then the restart works again: the same generation's 2nd attempt.
+    set_fail_restart(true);
     SetEvent(secure);
-    check("the host saw the input desktop go secure", host_says("input desktop Default -> Winlogon", 3000));
-    const uint64_t gen = last_edge_gen("input desktop Default -> Winlogon");
-    check("THE MEDIA FENCE CAME AT THE EDGE, before any rebuild (\"edge fence desktopGen=G\")",
-          host_says("edge fence desktopGen=" + std::to_string(gen) + " atUs=", 2000) &&
-              host_log().find("edge fence desktopGen=" + std::to_string(gen)) <
-                  host_log().find("rebuild desktopGen=" + std::to_string(gen) + " attempt=1"),
-          "desktopGen=" + std::to_string(gen));
-    uint64_t fenceUs = 0;
-    {
-      const std::string log = host_log();
-      const size_t at = log.find("edge fence desktopGen=" + std::to_string(gen) + " atUs=");
-      if (at != std::string::npos) fenceUs = std::strtoull(log.c_str() + log.find("atUs=", at) + 5, nullptr, 10);
-    }
-    const bool gaveUp = host_says("rebuild gave up desktopGen=" + std::to_string(gen), 6000);
-    check("the rebuild failed, BOUNDED: 3 attempts, then it gave up (no loop)",
-          gaveUp && host_count("rebuild desktopGen=" + std::to_string(gen) + " attempt=3 ok=0") == 1 &&
-              host_count("rebuild desktopGen=" + std::to_string(gen) + " attempt=4") == 0);
-    check("the old attachment's frames were REFUSED at adoption (\"publish refused reason=provenance\")",
-          host_count("publish refused reason=provenance") >= 1);
-    Sleep(1500);
-    // An AU whose first datagram left before the fence finishes (the sender's contract, P11) -- 500 ms for it.
-    const uint64_t quietFrom = fenceUs + 500000ULL;
-    const size_t after = seen.CountSince(quietFrom);
-    check("NOTHING OF THE OLD ATTACHMENT REACHES THE VIEWER after the edge (0 pictures decoded from fence+500 ms)",
-          fenceUs != 0 && after == 0, std::to_string(after) + " pictures; fenceUs=" + std::to_string(fenceUs));
-    check("the session is still up (no reconnect)", phone.Snapshot().state == ClientSessionState::Connected);
-    const uint64_t tBack = qpc_now_us();
+    check("(1) the host saw the input desktop go secure", host_says("input desktop Default -> Winlogon", 3000));
+    const uint64_t gen1 = last_edge_gen("input desktop Default -> Winlogon");
+    const std::string r1 = "rebuild desktopGen=" + std::to_string(gen1);
+    check("(1) THE MEDIA FENCE CAME AT THE EDGE, before any rebuild",
+          host_says("edge fence desktopGen=" + std::to_string(gen1) + " atUs=", 2000) &&
+              host_log().find("edge fence desktopGen=" + std::to_string(gen1)) < host_log().find(r1 + " attempt=1"));
+    check("(1) the 1st attempt failed AFTER its detach (the injected restart failure)",
+          host_says(r1 + " attempt=1 ok=0", 3000) && injected() >= 1, std::to_string(injected()) + " injected");
+    set_fail_restart(false);
+    check("(1) THE SAME GENERATION'S 2nd ATTEMPT SUCCEEDED (a failed detach is not 'rebuilt')",
+          host_says(r1 + " attempt=2 ok=1", 4000));
+    const uint64_t t1 = qpc_now_us();
+    check("(1) ...and the picture comes back on the same connection",
+          wait_until([&] { return seen.RealCapturedAtOrAfter(t1); }, 5000));
     ResetEvent(secure);
-    check("the host saw the input desktop come back to Default", host_says("input desktop Winlogon -> Default", 3000));
-    const uint64_t backGen = last_edge_gen("input desktop Winlogon -> Default");
-    check("...and THAT edge's rebuild succeeded",
-          host_says("rebuild desktopGen=" + std::to_string(backGen) + " attempt=1 ok=1", 4000));
-    const bool resumed = wait_until([&] { return seen.RealCapturedAtOrAfter(tBack); }, 5000);
-    check("THE PICTURE COMES BACK on the same connection (a real capture after the return, decoded)", resumed);
+    check("(1) back to Default: rebuilt", host_says("input desktop Winlogon -> Default", 3000) &&
+                                            host_says("rebuild desktopGen=" + std::to_string(gen1 + 1) + " attempt=1 ok=1", 4000));
+    Sleep(2000);
+
+    // (2) the restart keeps failing: 3 attempts, then nothing more -- the generic retry does not take over.
+    set_fail_restart(true);
+    const size_t injectedBefore = injected();
+    const size_t recoveredBefore = host_count("capture retry recovered");
+    const size_t secureEdgesBefore = host_count("input desktop Default -> Winlogon");
+    SetEvent(secure);
+    check("(2) the host saw the input desktop go secure (a NEW edge)",
+          wait_until([&] { return host_count("input desktop Default -> Winlogon") > secureEdgesBefore; }, 3000));
+    const uint64_t gen2 = last_edge_gen("input desktop Default -> Winlogon");
+    const std::string r2 = "rebuild desktopGen=" + std::to_string(gen2);
+    uint64_t fenceUs = 0;
+    if (host_says("edge fence desktopGen=" + std::to_string(gen2) + " atUs=", 2000)) {
+      const std::string log = host_log();
+      const size_t at = log.find("edge fence desktopGen=" + std::to_string(gen2) + " atUs=");
+      fenceUs = std::strtoull(log.c_str() + log.find("atUs=", at) + 5, nullptr, 10);
+    }
+    const bool gaveUp = host_says("rebuild gave up desktopGen=" + std::to_string(gen2), 8000);
+    const size_t third = host_count(r2 + " attempt=3 ok=0");
+    const size_t injectedNow = injected() - injectedBefore;
+    check("(2) 3 attempts failed after their detach, then the rebuild gave up", gaveUp && third == 1 && injectedNow >= 3,
+          "gaveUp=" + std::to_string(gaveUp ? 1 : 0) + " attempt3=" + std::to_string(third) + " injected=" +
+              std::to_string(injectedNow));
+    Sleep(10000);  // past the generic retry's backoff (250 ms << 5 = 8 s)
+    check("(2) NOTHING MORE FOR 10 s: no 4th attempt, the generic retry did not take over (3 restarts in all)",
+          host_count(r2 + " attempt=4") == 0 && injected() - injectedBefore == 3 &&
+              host_count("capture retry recovered") == recoveredBefore,
+          std::to_string(injected() - injectedBefore) + " restarts tried");
+    const size_t after = fenceUs != 0 ? seen.CountSince(fenceUs + 500000ULL) : 1;
+    check("(2) NOTHING OF THE OLD ATTACHMENT REACHES THE VIEWER after the edge (0 pictures from fence+500 ms)",
+          fenceUs != 0 && after == 0,
+          std::to_string(after) + " pictures; fenceUs=" + std::to_string(fenceUs) + seen.DescribeDecodedSince(fenceUs + 500000ULL));
+    check("(2) the session is still up (no reconnect)", phone.Snapshot().state == ClientSessionState::Connected);
+    set_fail_restart(false);
+    const uint64_t tBack = qpc_now_us();
+    const size_t backEdgesBefore = host_count("input desktop Winlogon -> Default");
+    ResetEvent(secure);
+    check("(2) back to Default (file gone): THAT edge's rebuild succeeded",
+          wait_until([&] { return host_count("input desktop Winlogon -> Default") > backEdgesBefore; }, 3000) &&
+              host_says("rebuild desktopGen=" + std::to_string(gen2 + 1) + " attempt=1 ok=1", 4000));
+    check("(2) THE PICTURE COMES BACK on the same connection",
+          wait_until([&] { return seen.RealCapturedAtOrAfter(tBack); }, 5000));
     phone.Disconnect();
   }
 

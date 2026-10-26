@@ -278,6 +278,7 @@ void CaptureState::PublishCapturedTexture(CaptureResources& res, ID3D11Texture2D
   // and PublishFrame drops it instead of adopting it under the new attachment (r13, Codex C1).
   meta.streamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
   meta.attachmentCookie = sourceAttachmentCookie;
+  meta.cacheContinuity = capture.cacheContinuity.load(std::memory_order_acquire);  // r3 (Codex N1-b)
   if (capture.windowModeActive && capture.windowClientOnlyActive) {
     const HWND cropHwnd = reinterpret_cast<HWND>(
         static_cast<uintptr_t>(capture.targetHwnd.load(std::memory_order_acquire)));
@@ -722,6 +723,7 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
         const char* still = std::getenv("GNLINK_STREAM_TEST_STILL_SCREEN");
         if (still && std::strcmp(still, "1") == 0) config.testStill = DxgiDesktopCaptureConfig::TestStill::Still;
         if (still && std::strcmp(still, "nofirst") == 0) config.testStill = DxgiDesktopCaptureConfig::TestStill::StillNoFirstFrame;
+        if (still && std::strcmp(still, "pointerfirst") == 0) config.testStill = DxgiDesktopCaptureConfig::TestStill::StillPointerFirst;
       }
 #endif
       auto startDxgi = [&, dxgiAttachmentCookie](std::string* detailOut) {
@@ -835,9 +837,13 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
                                    gdiDefaultFps, 1, 120);
       config.captureLayeredWindows = env_truthy("REMOTE60_GDI_CAPTURE_LAYERED");
       std::string gdiDetail;
+      // capture-lifecycle r3 (Codex N1-b): the attachment this GDI child belongs to, by value -- its frames carry
+      // it like WGC's and DXGI's (a 0 cookie is refused at PublishFrame), so an old child's late callback after
+      // a detach is never adopted under the new attachment.
+      const uint64_t gdiAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
       const bool started = gdiCaptureProcess.Start(
           config,
-          [&](std::shared_ptr<std::vector<uint8_t>> pixels, uint32_t width,
+          [&, gdiAttachmentCookie](std::shared_ptr<std::vector<uint8_t>> pixels, uint32_t width,
               uint32_t height, uint32_t stride, uint64_t captureQpcUs,
               uint64_t captureCopyUs, uint64_t parentCopyUs) {
             if (stop.load()) return;
@@ -856,6 +862,8 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
             meta.submitCopyUs = captureCopyUs;
             meta.streamGeneration =
                 capture.streamGenerationState.load(std::memory_order_acquire);
+            meta.attachmentCookie = gdiAttachmentCookie;
+            meta.cacheContinuity = capture.cacheContinuity.load(std::memory_order_acquire);
             capturePublishFn(std::move(pixels), width, height, stride, meta,
                              0, 0, parentCopyUs);
           },
@@ -1035,6 +1043,7 @@ void CaptureState::InvalidateBootstrapCache(const char* why) {
   bool had = false;
   {
     std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+    cacheContinuity.fetch_add(1, std::memory_order_acq_rel);  // r3 (Codex N1-b): before the clear, under the lock
     had = static_cast<bool>(bootstrapCache.payload);
     bootstrapCache.payload.reset();
   }
@@ -1095,6 +1104,7 @@ bool CaptureState::TrackInputDesktop(uint64_t nowUs) {
     std::lock_guard<std::mutex> lk(bootstrapCacheMu);
     desktopName = now;
     hadCache = static_cast<bool>(bootstrapCache.payload);
+    cacheContinuity.fetch_add(1, std::memory_order_acq_rel);  // r3: as every invalidation
     bootstrapCache.payload.reset();  // pixels of the desktop that was: never shown on this one
     gen = desktopGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     desktopChangeDetectedUs.store(nowUs, std::memory_order_release);
@@ -1244,9 +1254,10 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   // current one. Checked again AT each adoption, under the lock that adoption takes (the tracker bumps the
   // generation under bootstrapCacheMu and then empties the raw queue under res.frame.mu): an old frame is never
   // given the new desktop's name, whatever its callback time.
+  // r3 (Codex N1-b): no cookie, no provenance -- every capture path carries one; 0 is refused, never waved through.
   const auto provenanceCurrent = [&]() {
-    return (meta.attachmentCookie == 0 ||
-            meta.attachmentCookie == capture.attachmentCookie.load(std::memory_order_acquire)) &&
+    return meta.attachmentCookie != 0 &&
+           meta.attachmentCookie == capture.attachmentCookie.load(std::memory_order_acquire) &&
            capture.attachmentDesktopGen.load(std::memory_order_acquire) ==
                capture.desktopGeneration.load(std::memory_order_acquire);
   };
@@ -1262,11 +1273,15 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   };
   {
     std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
-    if (provenanceCurrent() && !capture.desktopSuspect.load(std::memory_order_acquire)) {
+    // r3 (Codex N1-b): ...and taken after the last invalidation (its continuity token is still the current one):
+    // a readback submitted before an Unknown look / a candidate name completes after the desktop is confirmed
+    // again with the same cookie and generation -- it is still not cached. (Raw adoption is not refused for
+    // it: no edge was confirmed, and dropping live frames on every Unknown look would freeze the picture.)
+    if (provenanceCurrent() && !capture.desktopSuspect.load(std::memory_order_acquire) &&
+        meta.cacheContinuity == capture.cacheContinuity.load(std::memory_order_acquire)) {
       capture.bootstrapCache.desktopName = capture.desktopName;
       capture.bootstrapCache.desktopGeneration = capture.desktopGeneration.load(std::memory_order_acquire);
-      capture.bootstrapCache.attachmentCookie =
-          meta.attachmentCookie != 0 ? meta.attachmentCookie : capture.attachmentCookie.load(std::memory_order_acquire);
+      capture.bootstrapCache.attachmentCookie = meta.attachmentCookie;
       capture.bootstrapCache.payload = payload;
       capture.bootstrapCache.width = frameW;
       capture.bootstrapCache.height = frameH;

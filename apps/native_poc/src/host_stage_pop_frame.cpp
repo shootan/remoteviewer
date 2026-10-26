@@ -92,6 +92,9 @@ bool ask_full_frame(HostContext& hx, uint64_t nowUs, CaptureState::KickMiss why,
   auto& capture = hx.capture;
   if (why != CaptureState::KickMiss::NothingCached && why != CaptureState::KickMiss::NotCurrent) return false;
   if (capture.windowModeActive.load(std::memory_order_acquire)) return false;
+  // r3 (Codex N1-a): no capture is running (its restart failed after the detach) -- its recovery's owner retries
+  // it; a full-frame ask would be one more restart outside that recovery's bound.
+  if (capture.restartPending) return false;
   // A capture (re)attached just now delivers its own first frame (a new duplication / WGC session).
   const uint64_t attachedUs = capture.lastAttachUs.load(std::memory_order_acquire);
   if (attachedUs != 0 && nowUs >= attachedUs && nowUs - attachedUs < CaptureState::kFullFrameAttachGraceUs) return true;

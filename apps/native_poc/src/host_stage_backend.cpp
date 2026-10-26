@@ -92,7 +92,7 @@ uint16_t backend_wire_code(DesktopCaptureBackend b) {
   }
 }
 // capture-lifecycle r1 (UA-2): what the control thread answers a status request with (90).
-void publish_backend_status(HostContext& hx) {
+uint64_t backend_status_packed(HostContext& hx) {
   auto& backend = hx.backend;
   auto& capture = hx.capture;
   uint16_t flags = kDesktopBackendStatusFlagSessionScoped;
@@ -103,11 +103,11 @@ void publish_backend_status(HostContext& hx) {
                           (static_cast<uint64_t>(backend_wire_code(backend.EffectiveRequested())) << 16) |
                           (static_cast<uint64_t>(backend_wire_code(backend.active)) << 32) |
                           (static_cast<uint64_t>(flags) << 48);
-  if (capture.backendStatusPacked.exchange(packed, std::memory_order_acq_rel) != packed) {
-    capture.backendStatusChanges.fetch_add(1, std::memory_order_acq_rel);
-  }
-  // r2 (Codex N3): ...of this owner (stored after the packed status: the control thread reads it around it).
-  capture.backendStatusEpoch.store(backend.owner.ownerEpoch, std::memory_order_release);
+  return packed;
+}
+void publish_backend_status(HostContext& hx) {
+  // r3 (Codex N3-host): with its owner, in one snapshot.
+  hx.capture.backendStatus.Publish(hx.backend.owner.ownerEpoch, backend_status_packed(hx));
 }
 }  // namespace
 
@@ -179,11 +179,12 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   // Only the request is reset here: the climb-back below applies it while a stream is active, a reattach
   // starts from it -- no capture work for a stream nobody watches. Before login nothing is asked anyway.
   // r2 (Codex N2): ONE epoch read for this tick -- the owner it settles is the one every backend request below is
-  // taken and marked under; its real end (backendSessionEndedEpoch) puts the choice back too, once.
+  // taken and marked under; its real end (backendSessionEnded) puts the choice back too, once, and that ended
+  // Serve()'s requests -- queued or late -- are dropped (r3).
   const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
   {
     const BackendOwnerStep ownerStep = StepBackendOwner(
-        backend.owner, curEpoch, clientSession.backendSessionEndedEpoch.load(std::memory_order_acquire));
+        backend.owner, curEpoch, clientSession.backendSessionEnded.load(std::memory_order_acquire));
     if (ownerStep.ownerChanged) {
       std::cout << "[native-video-host][control] backend-owner epoch=" << curEpoch
                 << " requested=" << desktop_capture_backend_name(backend.requested)
@@ -227,31 +228,31 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   // made under an older desktop generation. Detached (idle) -> nothing to do, the reattach is made under the
   // current one. No stream -> nothing now (no capture work for a stream nobody watches); a resume rebuilds.
   // Bounded per desktop generation, backoff between attempts.
+  // r3 (Codex N1-a): a rebuild that FAILED has already detached (DetachCaptureSession stamps the generation the
+  // next attachment would have had), so "stale" alone would call it done. The rebuild is open until a restart
+  // of this generation succeeds: stale, or this generation's rebuild failed and nothing has attached since
+  // (restartPending, owned by the rebuild -- the generic retry leaves it alone). Counted per (generation,
+  // control session); a newer generation or a new session starts its own count.
   {
     const uint64_t dgen = capture.desktopGeneration.load(std::memory_order_acquire);
     const bool stale = capture.attachmentDesktopGen.load(std::memory_order_acquire) != dgen;
-    if (stale && streamActiveNow && !capture.idleDetached) {
-      if (backend.desktopRebuildGen != dgen) {
+    const bool failedHere = capture.restartPending && capture.restartOwner == CaptureState::RestartOwner::DesktopRebuild &&
+                            backend.desktopRebuildGen == dgen;
+    if ((stale || failedHere) && streamActiveNow && !capture.idleDetached) {
+      if (backend.desktopRebuildGen != dgen || backend.desktopRebuildEpoch != curEpoch) {
         backend.desktopRebuildGen = dgen;
+        backend.desktopRebuildEpoch = curEpoch;
         backend.desktopRebuildAttempts = 0;
         backend.desktopRebuildRetryAtUs = 0;
       }
       const uint64_t nowRebuildUs = qpc_now_us();
+      // (Never before the restart wrapper's own backoff: an attempt it would refuse unseen is no attempt.)
       if (backend.desktopRebuildAttempts < DesktopBackendState::kMaxDesktopRebuildAttempts &&
-          nowRebuildUs >= backend.desktopRebuildRetryAtUs) {
+          nowRebuildUs >= backend.desktopRebuildRetryAtUs &&
+          (!capture.restartPending || nowRebuildUs >= capture.restartRetryAtUs)) {
         ++backend.desktopRebuildAttempts;
         powerKeepalive.SetStreaming(true, true);
-        bool seamFail = false;
-#ifdef REMOTE60_STREAM_TEST_SEAM
-        // TEST BUILD ONLY (capture-lifecycle r2): GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL=1 -- every rebuild for an
-        // odd desktop generation (the secure side of a round trip from Default) fails, as a rebuild that cannot
-        // open its capture would: what crosses an edge whose rebuild never comes.
-        {
-          const char* v = std::getenv("GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL");
-          seamFail = v && std::strcmp(v, "1") == 0 && (dgen % 2) == 1;
-        }
-#endif
-        const bool ok = !seamFail && restart_capture_session(hx);
+        const bool ok = restart_capture_session(hx, CaptureState::RestartOwner::DesktopRebuild);
         if (ok) restarted_capture("desktop-edge-rebuild");
         std::cout << "[native-video-host][desktop] rebuild desktopGen=" << dgen << " attempt="
                   << backend.desktopRebuildAttempts << " ok=" << (ok ? 1 : 0)
@@ -270,17 +271,16 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   // PS-A: a still WGC desktop with nothing cached gives no frame by itself; the pop stage asked (bounded)
   // for a fresh session, whose first frame is the whole picture.
   if (capture.wgcFullFrameRestartWanted.exchange(false, std::memory_order_acq_rel) && streamActiveNow && desktopMode &&
-      !beforeLogin && backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached) {
+      !beforeLogin && backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached && !capture.restartPending) {
     powerKeepalive.SetStreaming(true, true);
-    capture.fullFrameOwnRestart = true;  // r2 (Codex N4): the episode's own reacquire keeps its budget
-    const bool ok = restart_capture_session(hx);
-    capture.fullFrameOwnRestart = false;
+    // r2/r3 (Codex N4/N1-a): the episode's own reacquire keeps its budget -- and so does its retry, if it fails.
+    const bool ok = restart_capture_session(hx, CaptureState::RestartOwner::FullFrame);
     if (ok) restarted_capture("full-frame-wgc-restart");
     std::cout << "[native-video-host] full-frame wgc restart ok=" << (ok ? 1 : 0) << "\n";
   }
 
   publish_backend_status(hx);  // capture-lifecycle r1 (UA-2): whatever changed since the last tick
-  if (const auto backendReq = hx.mailbox.TakeBackendRequestForOwner(backend.owner.ownerEpoch)) {
+  if (const auto backendReq = hx.mailbox.TakeBackendRequestForOwner(backend.owner)) {
     const uint32_t reqSeq = backendReq->seq;
     // capture-lifecycle r1 (UA-2): handled (applied, stored or refused) once this block ends -- the control
     // thread answers a status request then. A struct with its destructor at the block's end, every path.
@@ -288,8 +288,8 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       HostContext& hx;
       uint64_t key;
       ~AppliedMark() {
-        publish_backend_status(hx);
-        hx.capture.backendAppliedKey.store(key, std::memory_order_release);
+        // r3 (Codex N3-host): the handled key with the status it left, in one publish.
+        hx.capture.backendStatus.PublishHandled(hx.backend.owner.ownerEpoch, backend_status_packed(hx), key);
       }
     } appliedMark{hx, BackendRequestKey(backendReq->epoch, backend.owner.ownerEpoch, reqSeq)};  // r2 N2: its own epoch
     DesktopCaptureBackend nextRequested = backend.requested;

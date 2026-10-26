@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "capture_backend_dxgi.hpp"
+#include "host_backend_status_board.hpp"
 #include "capture_cadence_gate.hpp"
 #include "frame_signal_collector.hpp"
 #include "d3d_capture_readback.hpp"
@@ -222,6 +223,12 @@ struct CaptureState {
   bool restartPending = false;
   uint64_t restartRetryAtUs = 0;
   uint32_t restartFailures = 0;
+  // capture-lifecycle r3 (Codex N1-a): whose restart failed (restart_capture_session's caller). A failed restart
+  // has already detached -- the generic retry (stage_time_limit) must not take over a recovery that keeps its
+  // own budget: a desktop rebuild's retries are the backend stage's (bounded per desktop generation), a
+  // full-frame reacquire's retry stays that episode's own (no new source boundary). Main loop only.
+  enum class RestartOwner : uint8_t { General, DesktopRebuild, FullFrame };
+  RestartOwner restartOwner = RestartOwner::General;
   bool dxgiStarted = false;
   bool gdiStarted = false;
   std::mutex fallbackReasonMu;
@@ -283,6 +290,10 @@ struct CaptureState {
   // picture's continuity is no longer known -- the cache is dropped and nothing is cached until a look sees the
   // confirmed desktop again.
   std::atomic<bool> desktopSuspect{false};
+  // r3 (Codex N1-b): moved by every bootstrap-cache invalidation (under bootstrapCacheMu, before the clear); a
+  // frame carries the value it was taken under (CaptureFrameMeta::cacheContinuity) and is cached only while it
+  // is still current -- an Unknown look, a candidate name, a detach or an inactive change in between: never.
+  std::atomic<uint64_t> cacheContinuity{1};
   std::atomic<uint64_t> provenanceRefused{0};        // frames refused at adoption (log rate limit)
   std::atomic<uint64_t> firstAdoptedLoggedCookie{0};  // r2: the attachment whose first adopted frame was logged
   std::atomic<uint64_t> desktopChangeDetectedUs{0};
@@ -325,13 +336,12 @@ struct CaptureState {
   // capture-lifecycle r1 (UA-2): the backend as the main loop last applied it, for the control thread's
   // ControlDesktopBackendStatus (90) -- requested | effective<<16 | active<<32 | flags<<48 (wire codes) -- how
   // many times it changed, and the (epoch<<32 | seq) of the last backend request the main loop handled.
-  std::atomic<uint64_t> backendStatusPacked{0};
-  std::atomic<uint32_t> backendStatusChanges{0};
-  std::atomic<uint64_t> backendAppliedKey{0};
-  // capture-lifecycle r2 (Codex N2/N3): the owner epoch backendStatusPacked was published for (stored after it,
-  // read around it by the control thread), and the (epoch<<32 | seq) of the last backend CHANGE a control thread
-  // posted (a question is answered NotYetApplied while that one is not yet handled).
-  std::atomic<uint64_t> backendStatusEpoch{0};
+  // r3 (Codex N3-host): owner epoch, packed status, change count and handled key as ONE snapshot
+  // (host_backend_status_board.hpp) -- replaces r2's separate backendStatusPacked / Changes / AppliedKey /
+  // StatusEpoch atomics, which a reader could take from two different publishes.
+  BackendStatusBoard backendStatus;
+  // capture-lifecycle r2 (Codex N3): the (epoch<<32 | seq) of the last backend CHANGE a control thread posted
+  // (a question is answered NotYetApplied while that one is not yet handled). Control thread only.
   std::atomic<uint64_t> backendChangePostedKey{0};
   static constexpr uint64_t kFullFrameAttachGraceUs = 500000;
   static constexpr uint64_t kFullFrameAskIntervalUs = 1000000;

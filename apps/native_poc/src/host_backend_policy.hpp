@@ -73,6 +73,7 @@ struct DesktopBackendState {
   // own count; an older one's attempts are never settled against it), retried a bounded number of times with
   // backoff, never in a loop. Main loop only.
   uint64_t desktopRebuildGen = 0;
+  uint64_t desktopRebuildEpoch = 0;  // r3: a new control session starts its own count for the same generation
   uint32_t desktopRebuildAttempts = 0;
   uint64_t desktopRebuildRetryAtUs = 0;
   static constexpr uint32_t kMaxDesktopRebuildAttempts = 3;
