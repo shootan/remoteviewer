@@ -192,6 +192,8 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // rel-0163 r4 (Codex R3): the op this frame is processed for -- the token taken when the receive loop last saw
     // the selection epoch (it reset the decoder for it). Everything this frame binds or reveals is that op's.
     const uint64_t frameOp = dec.recvSelectionEpoch;
+    // rel-0163 r5: ...and whether it was taken for a LOCAL op -- fixed now, never re-read later as ordinary.
+    const bool frameLocal = ctx.sel.IsLiveLocal(frameOp);
 
     if (!dec.decoderReady || dec.decoderW != h.width || dec.decoderH != h.height) {
       if (!dec.decoder.initialize(h.width, h.height, args.fpsHint)) {
@@ -287,19 +289,8 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       return true;
     }
     fg.clear_empty_streak();
-    // rel-0163 r4 (Codex R3): output came -- the decoder (reset for this op, started on a keyframe) produced a
-    // picture: the local op takes its candidate keyframe's generation, for THIS op only.
-    if (dec.localCandidateOp == frameOp && dec.localCandidateGen != 0 &&
-        ctx.sel.BindLocalGeneration(frameOp, dec.localCandidateGen)) {
-      std::cout << "[native-video-client][picker] local selection bound to streamGeneration=" << dec.localCandidateGen
-                << " epoch=" << frameOp << " (its first decoded output)\n";
-    }
-    // A picture of an op that is no longer the live one is not adopted for a local op (a newer pick began).
-    if (ctx.sel.localAckless.load(std::memory_order_acquire) && ctx.sel.pending.load(std::memory_order_acquire) &&
-        !ctx.sel.IsLiveLocal(frameOp)) {
-      ++st.skippedQueued;
-      return true;
-    }
+    // rel-0163 r5 (Codex R3): a local op's generation is bound and its picture adopted at ONE point -- the final
+    // FrameBuffer commit below (CommitFrame inside the FrameBuffer lock), after the output is known to be valid.
 
     auto& decoded = outFrames.back();
     // Provenance of THIS decoded frame (a decoder may return an older input's picture during this
@@ -335,8 +326,22 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     const uint64_t queueSetUs = nowUs;
     const uint64_t decodeToQueueUs = (queueSetUs >= decodeEndUs) ? (queueSetUs - decodeEndUs) : 0;
     ctx.recvLive.Enter(RecvStage::Publish, nowUs);
+    if (ctx.sel.testBeforeFrameCommit) ctx.sel.testBeforeFrameCommit();  // tests only
+    uint64_t revealGen = h.streamGeneration;
     {
       std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      // rel-0163 r5 (Codex R3): the final adoption -- this frame's op (and, for a local op, its generation bind)
+      // checked in the same step that writes the FrameBuffer. A picture of an op no longer live is not written.
+      const uint64_t candidate = dec.localCandidateOp == frameOp ? dec.localCandidateGen : 0;
+      const bool wasUnbound = frameLocal && ctx.sel.expectedGeneration.load(std::memory_order_acquire) == 0;
+      if (!ctx.sel.CommitFrame(frameOp, frameLocal, candidate, h.streamGeneration, &revealGen)) {
+        ++st.skippedQueued;
+        return true;
+      }
+      if (wasUnbound && frameLocal) {
+        std::cout << "[native-video-client][picker] local selection bound to streamGeneration=" << revealGen
+                  << " epoch=" << frameOp << " (its first adopted output)\n";
+      }
       const uint64_t prevVersion = ctx.frameBuf.frame.version;
       const uint64_t lastPresentedVersion = ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed);
       // Overwrites while the picker covers the stream are the intended latest-wins behavior of a
@@ -393,11 +398,8 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // picker flip, input guard and toolbar are committed on the UI thread (after revalidation),
     // not here, so a racing cancel/new-selection/disconnect cannot wrongly close the picker.
     if (ctx.sel.AckedSelectionPending()) {
-      // rel-0163 r4 (Codex R3): the candidate is this frame's op -- never the live epoch read now. For a local op its
-      // generation is the bound one (the decoded keyframe's), not the current input header's.
-      const uint64_t revealGen = ctx.sel.localAckless.load(std::memory_order_acquire)
-                                     ? ctx.sel.expectedGeneration.load(std::memory_order_acquire)
-                                     : h.streamGeneration;
+      // rel-0163 r4/r5 (Codex R3): the candidate is this frame's op and the generation its adoption stood for (for a
+      // local op the bound one) -- never the live epoch or the current input header read now.
       post_pc_selection_reveal(ctx, revealGen, frameOp);
     }
     // While the picker overlays a live stream, WM_PAINT redraws the picker (not the video), so

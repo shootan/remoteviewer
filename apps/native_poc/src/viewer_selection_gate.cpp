@@ -68,6 +68,47 @@ bool SelectionGateState::BindLocalGeneration(uint64_t opEpoch, uint64_t streamGe
   return true;
 }
 
+bool SelectionGateState::CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t candidateGen, uint64_t inputGeneration,
+                                     uint64_t* revealGen) {
+  std::lock_guard<std::mutex> lk(mu);
+  if (revealGen) *revealGen = inputGeneration;
+  if (!frameLocal) return true;  // an ordinary frame: as before (the generation gate decided it)
+  if (!pending.load(std::memory_order_acquire) || !localAckless.load(std::memory_order_acquire) ||
+      epoch.load(std::memory_order_acquire) != opEpoch) {
+    // Its op was cancelled / replaced / revealed-and-closed meanwhile. A revealed local op's later pictures are
+    // ordinary from then on (pending is over) -- but this frame was taken for the op, and only the op it was
+    // taken for may own it while that op is pending; after the reveal the active-generation filter applies.
+    if (!pending.load(std::memory_order_acquire) && activeStreamGeneration.load(std::memory_order_acquire) != 0 &&
+        epoch.load(std::memory_order_acquire) == opEpoch) {
+      if (revealGen) *revealGen = activeStreamGeneration.load(std::memory_order_acquire);
+      return true;  // the same op, already revealed: its stream goes on
+    }
+    localFramesRefused.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (expectedGeneration.load(std::memory_order_acquire) == 0) {
+    if (candidateGen == 0) return false;  // no decoded keyframe of this op yet: nothing to stand for
+    expectedGeneration.store(candidateGen, std::memory_order_release);
+  }
+  if (revealGen) *revealGen = expectedGeneration.load(std::memory_order_acquire);
+  return true;
+}
+
+SelectionAck SelectionGateState::ApplyHostAck(const std::function<std::pair<bool, uint64_t>()>& applyPanel) {
+  std::lock_guard<std::mutex> lk(mu);
+  if (pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire)) {
+    return SelectionAck::IgnoredLocal;  // the panel is not touched either
+  }
+  const std::pair<bool, uint64_t> r = applyPanel();
+  if (!pending.load(std::memory_order_acquire)) return SelectionAck::NotPending;
+  if (r.first) {
+    expectedGeneration.store(r.second, std::memory_order_release);
+    awaitingAck.store(false, std::memory_order_release);
+    return SelectionAck::Acked;
+  }
+  return SelectionAck::Failed;
+}
+
 SelectionAck SelectionGateState::ApplyAck(bool ok, uint64_t streamGeneration) {
   std::lock_guard<std::mutex> lk(mu);
   if (!pending.load(std::memory_order_acquire)) return SelectionAck::NotPending;

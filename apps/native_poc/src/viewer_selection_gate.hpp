@@ -53,6 +53,7 @@
 
 #include <functional>
 #include <mutex>
+#include <utility>
 
 namespace remote60::native_poc::viewer {
 
@@ -86,6 +87,11 @@ struct SelectionGateState {
   // Tests only (empty in the product): runs between the UI's role read and the held pick's store -- a
   // pong landing exactly there (Codex R1's order).
   std::function<void()> testAfterRoleRead;
+  // Tests only: right before a decoded picture's final adoption (CommitFrame) -- a cancel / new op lands here.
+  std::function<void()> testBeforeFrameCommit;
+  // Tests only: right before a host ack's boundary (apply_window_selected_result) -- a local op begins here.
+  std::function<void()> testBeforeAckBoundary;
+  std::atomic<uint64_t> localFramesRefused{0};  // pictures of a no-longer-live local op not adopted (telemetry)
   // cross-thread: recv records, UI revalidates and commits.
   std::atomic<uint64_t> readyGeneration{0};
   std::atomic<uint64_t> readyEpoch{0};
@@ -100,6 +106,16 @@ struct SelectionGateState {
   // recv: bind THAT local op to the generation of the keyframe whose decode produced its first output.
   bool BindLocalGeneration(uint64_t opEpoch, uint64_t streamGeneration);
   bool IsLiveLocal(uint64_t opEpoch) const;                // recv: the frame's op is the live local op
+  // rel-0163 r5 (Codex codex_rel_0163_src_r4.md R3): the FINAL adoption of a decoded picture, called inside the
+  // FrameBuffer's own lock right before it is written. `frameLocal` is what the frame was processed as (taken when
+  // its op token was taken -- a frame of a local op is never re-read as an ordinary one). For a local frame: only
+  // while its op is still the live local op; an unbound op is bound HERE to `candidateGen` (a valid output exists
+  // by now). *revealGen = the generation this adoption stands for. Ordinary frames: permitted as before.
+  bool CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t candidateGen, uint64_t inputGeneration,
+                   uint64_t* revealGen);
+  // rel-0163 r5 (R4): a host WindowSelected, applied to the panel AND the gate under one boundary. `applyPanel`
+  // runs only when the in-flight op asked for an ack (never for a local op) and returns {ok, streamGeneration}.
+  SelectionAck ApplyHostAck(const std::function<std::pair<bool, uint64_t>()>& applyPanel);
   void Clear();                                            // any thread: drop the in-flight transaction
   SelectionAck ApplyAck(bool ok, uint64_t streamGeneration);   // control: the host's WindowSelected
   bool EpochChanged(uint64_t& seenEpoch);                  // recv: a new pick since the last frame (reset the decoder)

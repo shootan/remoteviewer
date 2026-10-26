@@ -244,6 +244,8 @@ void resolve_unsendable_pc_selection(ViewerState& ctx, uint64_t windowId, uint64
 // Returns true only when the select request was actually accepted for sending, so callers can
 // log/refresh on real selections instead of refused attempts (disconnected, locked target).
 bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* statusText) {
+  // rel-0163 r5 (Codex R1-run): the control run this pick was made on, taken FIRST -- a held pick stays that run's.
+  const uint64_t runAtPick = ctx.session.controlRunGen.load(std::memory_order_seq_cst);
   if (ctx.sel.pending.load(std::memory_order_acquire)) return false;
   if (!ctx.control.connected.load(std::memory_order_relaxed)) return false;
   // rel-0163 r3 (Codex codex_rel_0163_e1_decision.md): what the host takes depends on its role, known from its
@@ -251,7 +253,7 @@ bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* 
   // pick waits as this connection's intent and runs once the role is known (kMsgRunDeferredPick).
   if (!ctx.session.hostRoleKnown.load(std::memory_order_seq_cst)) {
     if (ctx.sel.testAfterRoleRead) ctx.sel.testAfterRoleRead();  // tests only: a pong lands here
-    ctx.sel.deferredRun.store(ctx.session.controlRunGen.load(std::memory_order_acquire), std::memory_order_seq_cst);
+    ctx.sel.deferredRun.store(runAtPick, std::memory_order_seq_cst);
     ctx.sel.deferredPick.store(windowId + 1, std::memory_order_seq_cst);
     ctx.picker.windowPanel.SetStatus("waiting_host_role");
     std::cout << "[native-video-client][picker] pick held until the host's role is known id=" << windowId << "\n";
@@ -259,7 +261,10 @@ bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* 
     // rel-0163 r4 (Codex R1): the handshake with the first pong. The control thread sets the role and THEN looks
     // for a held pick; this side holds the pick and THEN looks at the role again (both sequentially consistent):
     // at least one of them sees the other, so the pick is never lost; run_deferred_pc_selection takes it once.
-    if (ctx.session.hostRoleKnown.load(std::memory_order_seq_cst)) run_deferred_pc_selection(ctx);
+    if (ctx.session.hostRoleKnown.load(std::memory_order_seq_cst) &&
+        ctx.session.controlRunGen.load(std::memory_order_seq_cst) == runAtPick) {
+      run_deferred_pc_selection(ctx);
+    }
     return true;
   }
   ctx.sel.deferredPick.store(0, std::memory_order_release);
@@ -312,16 +317,22 @@ void post_pc_selection_reveal(ViewerState& ctx, uint64_t readyGeneration, uint64
 }
 
 void apply_window_selected_result(ViewerState& ctx, const ControlWindowSelectedMessage& msg) {
-  // rel-0163 r4 (Codex R4): a local op asked for no ack -- one arriving now is an older op's: neither the panel nor
-  // the gate, the generation, the stream or the pending state changes.
-  if (ctx.sel.pending.load(std::memory_order_acquire) && ctx.sel.localAckless.load(std::memory_order_acquire)) {
+  // rel-0163 r4/r5 (Codex R4): whether the in-flight op takes an ack, and the panel's and the gate's application,
+  // are ONE boundary (ApplyHostAck): a local op asked for no ack -- one arriving now is an older op's, and neither
+  // the panel nor the gate, the generation, the stream or the pending state changes.
+  if (ctx.sel.testBeforeAckBoundary) ctx.sel.testBeforeAckBoundary();  // tests only
+  WindowSelectApplyResult result{};
+  const SelectionAck ack = ctx.sel.ApplyHostAck([&] {
+    result = ctx.picker.windowPanel.ApplyWindowSelected(msg);
+    return std::make_pair(result.ok, msg.streamGeneration);
+  });
+  if (ack == SelectionAck::IgnoredLocal) {
     log_client_line(ctx, "[native-video-client][picker] window-selected ignored: the pick in flight is local (no ack asked) seq=" +
                              std::to_string(msg.seq));
     return;
   }
-  const auto result = ctx.picker.windowPanel.ApplyWindowSelected(msg);
   log_client_line(ctx, result.logLine);
-  switch (ctx.sel.ApplyAck(result.ok, msg.streamGeneration)) {
+  switch (ack) {
     case SelectionAck::Acked:
       ctx.picker.windowPanel.SetStatus("waiting_first_frame");
       if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
@@ -332,7 +343,7 @@ void apply_window_selected_result(ViewerState& ctx, const ControlWindowSelectedM
       clear_pc_target_selection(ctx);
       if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
       return;
-    case SelectionAck::IgnoredLocal:  // (raced to local after the check above) -- nothing
+    case SelectionAck::IgnoredLocal:  // handled above
       return;
     case SelectionAck::NotPending:
       break;
