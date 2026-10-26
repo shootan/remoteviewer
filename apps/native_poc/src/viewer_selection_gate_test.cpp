@@ -273,6 +273,46 @@ void test_local_ackless_selection() {
     CHECK(!g.ConvertToLocal(g.epoch.load()));
     CHECK(!g.BindLocalGeneration(g.epoch.load(), 4));
   }
+  {
+    // r5 (Codex R3): the FINAL adoption. A local op's frame with no decoded keyframe yet (candidate 0) is not
+    // adopted and binds nothing; with one, it binds and is adopted; after the op was cancelled and B began, A's
+    // frame is refused (and is never re-read as an ordinary frame); B adopts its own.
+    SelectionGateState g;
+    g.BeginLocal();
+    const uint64_t a = g.epoch.load();
+    uint64_t gen = 0;
+    CHECK(!g.CommitFrame(a, true, 0, 4, &gen));
+    CHECK(g.expectedGeneration.load() == 0);
+    g.Clear();
+    g.BeginLocal();
+    const uint64_t b = g.epoch.load();
+    CHECK(!g.CommitFrame(a, true, 4, 4, &gen));  // A's picture after B began
+    CHECK(g.expectedGeneration.load() == 0 && g.localFramesRefused.load() >= 1);
+    g.Clear();
+    CHECK(!g.CommitFrame(b, true, 4, 4, &gen));  // B's picture after B was cancelled (nothing pending)
+    g.BeginLocal();
+    const uint64_t c = g.epoch.load();
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen) && gen == 6 && g.expectedGeneration.load() == 6);
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen) && gen == 6);  // later frames of the bound op
+    CHECK(g.RecordReveal(gen, c));
+    CHECK(g.CommitReveal());
+    g.Clear();  // what the reveal's UI handler does
+    CHECK(g.CommitFrame(c, true, 6, 6, &gen));  // the same op, revealed: its stream goes on
+    CHECK(g.CommitFrame(0, false, 0, 9, &gen) && gen == 9);  // an ordinary frame: as before
+  }
+  {
+    // r5 (Codex R4): the host ack and the panel are one boundary -- a local op: the panel is never applied.
+    SelectionGateState g;
+    int panelApplied = 0;
+    g.BeginLocal();
+    CHECK(g.ApplyHostAck([&] { ++panelApplied; return std::make_pair(true, uint64_t{5}); }) == SelectionAck::IgnoredLocal);
+    CHECK(g.ApplyHostAck([&] { ++panelApplied; return std::make_pair(false, uint64_t{0}); }) == SelectionAck::IgnoredLocal);
+    CHECK(panelApplied == 0 && g.expectedGeneration.load() == 0 && g.pending.load());
+    g.Clear();
+    g.Begin();  // an ordinary op: its own ack applies the panel and the gate
+    CHECK(g.ApplyHostAck([&] { ++panelApplied; return std::make_pair(true, uint64_t{5}); }) == SelectionAck::Acked);
+    CHECK(panelApplied == 1 && g.expectedGeneration.load() == 5 && !g.awaitingAck.load());
+  }
 }
 
 }  // namespace
