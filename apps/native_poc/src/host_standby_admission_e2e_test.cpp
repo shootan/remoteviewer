@@ -821,6 +821,215 @@ struct RelayMock {
   ~RelayMock() { Stop(); }
 };
 
+// ------------------------------------------------------------------ the real directory server (r3, relay (a))
+// apps/directory/server.js under node, on loopback ports this test picked, with its data and logs in a staging
+// directory of its own. Its stdout is kept for the relay's own lines (reserved / bound / pinned / ready / active).
+struct NodeServer {
+  PROCESS_INFORMATION pi{};
+  HANDLE job = nullptr;
+  HANDLE readEnd = nullptr;
+  std::thread reader;
+  std::mutex mu;
+  std::string output;
+  remote60::native_poc::e2e::StagingDir staging;
+  uint16_t httpPort = 0, udpPort = 0, relayPort = 0;
+  std::wstring node, script;
+
+  std::string log() {
+    std::lock_guard<std::mutex> lock(mu);
+    return output;
+  }
+  bool WaitFor(const char* marker, uint32_t budgetMs) {
+    return wait_until([&] { return log().find(marker) != std::string::npos; }, budgetMs);
+  }
+  std::vector<wchar_t> Env() const {
+    // The test's own environment plus the server's settings; nothing of the server reaches outside staging.
+    std::vector<std::pair<std::wstring, std::wstring>> set = {
+        {L"REMOTE60_DIR_DATA", staging.path() + L"directory.json"},
+        {L"REMOTE60_LOG_DIR", staging.path() + L"logs"},
+        {L"REMOTE60_DIR_PORT", std::to_wstring(httpPort)},
+        {L"REMOTE60_DIR_UDP_PORT", std::to_wstring(udpPort)},
+        {L"REMOTE60_RELAY_ENABLED", L"1"},
+        {L"REMOTE60_RELAY_IP", L"127.0.0.1"},
+        {L"REMOTE60_RELAY_PORT", std::to_wstring(relayPort)},
+        {L"REMOTE60_RELAY_GRACE_MS", L"400"},
+        {L"REMOTE60_RELAY_ALLOW_IPS", L"127.0.0.1"},
+        {L"REMOTE60_RELAY_ALLOW_ACCOUNTS", L"tester"},
+        {L"REMOTE60_RELAY_HOST_FACING_IP", L"127.0.0.1"},
+        {L"REMOTE60_RELAY_HOST_FACING_BIND", L"127.0.0.1"},
+    };
+    std::vector<wchar_t> env;
+    if (wchar_t* block = GetEnvironmentStringsW()) {
+      for (const wchar_t* p = block; *p; p += wcslen(p) + 1) {
+        bool overridden = false;
+        for (const auto& kv : set) {
+          if (_wcsnicmp(p, (kv.first + L"=").c_str(), kv.first.size() + 1) == 0) overridden = true;
+        }
+        if (!overridden) env.insert(env.end(), p, p + wcslen(p) + 1);
+      }
+      FreeEnvironmentStringsW(block);
+    }
+    for (const auto& kv : set) {
+      const std::wstring line = kv.first + L"=" + kv.second;
+      env.insert(env.end(), line.begin(), line.end());
+      env.push_back(L'\0');
+    }
+    env.push_back(L'\0');
+    return env;
+  }
+  // Runs node with `args`; when `wait`, to its end (the --add-account step), else kept running with its output read.
+  bool Run(const std::wstring& args, bool wait) {
+    std::wstring cmd = L"\"" + node + L"\" \"" + script + L"\" " + args;
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+    std::vector<wchar_t> env = Env();
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 1 << 20)) return false;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION p{};
+    const bool ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, env.data(),
+                                   staging.path().c_str(), &si, &p) != FALSE;
+    CloseHandle(wr);
+    if (!ok) {
+      CloseHandle(rd);
+      return false;
+    }
+    if (!job) {
+      job = CreateJobObjectW(nullptr, nullptr);
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    }
+    AssignProcessToJobObject(job, p.hProcess);
+    ResumeThread(p.hThread);
+    CloseHandle(p.hThread);
+    if (wait) {
+      const DWORD w = WaitForSingleObject(p.hProcess, 20000);
+      char buf[4096];
+      DWORD got = 0;
+      while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        std::lock_guard<std::mutex> lock(mu);
+        output.append(buf, got);
+      }
+      DWORD code = 1;
+      GetExitCodeProcess(p.hProcess, &code);
+      CloseHandle(p.hProcess);
+      CloseHandle(rd);
+      return w == WAIT_OBJECT_0 && code == 0;
+    }
+    pi = p;
+    readEnd = rd;
+    reader = std::thread([this] {
+      char buf[4096];
+      DWORD got = 0;
+      while (readEnd && ReadFile(readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        std::lock_guard<std::mutex> lock(mu);
+        output.append(buf, got);
+      }
+    });
+    return true;
+  }
+  bool Start(const std::wstring& nodeExe, const std::wstring& serverJs) {
+    node = nodeExe;
+    script = serverJs;
+    if (!staging.Create(L"realdir")) return false;
+    CreateDirectoryW((staging.path() + L"logs").c_str(), nullptr);
+    httpPort = remote60::native_poc::e2e::e2e_pick_free_tcp_port();
+    udpPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    relayPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    if (!httpPort || !udpPort || !relayPort || udpPort == relayPort) return false;
+    if (!Run(L"--add-account tester e2e-pass-1234", true)) return false;
+    if (!Run(L"", false)) return false;
+    return WaitFor("[relay] listening on udp", 15000);
+  }
+  void Stop() {
+    if (job) {
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      job = nullptr;
+    }
+    if (pi.hProcess) {
+      WaitForSingleObject(pi.hProcess, 20000);
+      CloseHandle(pi.hProcess);
+      pi = PROCESS_INFORMATION{};
+    }
+    if (readEnd) {
+      CloseHandle(readEnd);
+      readEnd = nullptr;
+    }
+    if (reader.joinable()) reader.join();
+    if (staging.created()) staging.Remove();
+  }
+  ~NodeServer() { Stop(); }
+};
+
+// One HTTP/1.0 request to 127.0.0.1:port (no chunking, the server closes): the status and the body.
+int http_call(uint16_t port, const char* method, const std::string& path, const std::string& body,
+              const std::string& bearer, std::string* out) {
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s == INVALID_SOCKET) return 0;
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a.sin_port = htons(port);
+  DWORD to = 5000;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+  if (connect(s, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) != 0) {
+    closesocket(s);
+    return 0;
+  }
+  std::string req = std::string(method) + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
+  if (!bearer.empty()) req += "Authorization: Bearer " + bearer + "\r\n";
+  if (!body.empty()) req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+  req += "\r\n" + body;
+  send(s, req.data(), static_cast<int>(req.size()), 0);
+  std::string resp;
+  char buf[4096];
+  for (int n; (n = recv(s, buf, sizeof(buf), 0)) > 0;) resp.append(buf, n);
+  closesocket(s);
+  const size_t sp = resp.find(' ');
+  const size_t split = resp.find("\r\n\r\n");
+  if (out) *out = split == std::string::npos ? std::string() : resp.substr(split + 4);
+  return sp == std::string::npos ? 0 : std::atoi(resp.c_str() + sp + 1);
+}
+
+// The string value of "key" in a flat JSON text (enough for these replies), or "".
+std::string json_str(const std::string& json, const std::string& key) {
+  const std::string k = "\"" + key + "\":\"";
+  const size_t at = json.find(k);
+  if (at == std::string::npos) return std::string();
+  const size_t end = json.find('"', at + k.size());
+  return end == std::string::npos ? std::string() : json.substr(at + k.size(), end - at - k.size());
+}
+
+// OBSERVE from this socket, so the server knows the client's wire tuple (what /api/connect binds the relay to).
+bool observe_from(SOCKET s, uint16_t udpPort, const std::string& token) {
+  sockaddr_in d{};
+  d.sin_family = AF_INET;
+  d.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  d.sin_port = htons(udpPort);
+  const std::string msg = "OBSERVE " + token;
+  for (int i = 0; i < 10; ++i) {
+    sendto(s, msg.data(), static_cast<int>(msg.size()), 0, reinterpret_cast<const sockaddr*>(&d), sizeof(d));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (std::chrono::steady_clock::now() < deadline) {
+      char buf[512];
+      const int n = recv(s, buf, sizeof(buf) - 1, 0);
+      if (n > 0 && buf[0] == '{') return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -842,8 +1051,10 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
   std::wstring oldHost;
-  for (int i = 1; i + 1 < argc; ++i) {
-    if (std::wstring(argv[i]) == L"--old-host") oldHost = argv[i + 1];
+  bool realDirectory = false;
+  for (int i = 1; i < argc; ++i) {
+    if (i + 1 < argc && std::wstring(argv[i]) == L"--old-host") oldHost = argv[i + 1];
+    if (std::wstring(argv[i]) == L"--real-directory") realDirectory = true;
   }
   const char* kIssuedIp = "211.218.222.1";
   const uint16_t kIssuedPort = 60420;
@@ -1051,6 +1262,100 @@ int wmain(int argc, wchar_t** argv) {
     closesocket(c);
     relay.Stop();
     host.Stop();
+  }
+
+  // ================================================================== the REAL directory server's relay
+  // r3 (Codex decision 1 (a), "제한된 로컬 실제 server.js 다중 lease 시험"): apps/directory/server.js under node, a real
+  // GNLinkStream registered and heartbeating to it, and two raw clients each taking a STANDBY relay lease through
+  // it (/api/connect {standby:true}). The relay gives each lease its own host-facing socket; the host's existing
+  // punch to the extra pendingPunch entry pins it. Loopback: no NAT is crossed here -- the NAT path is shown
+  // only as far as "the host punched the reserved port and the lease pinned it".
+  if (realDirectory) {
+    std::printf("\n[the real directory server.js relay: two standby leases through it, one active]\n");
+    wchar_t nodeExe[MAX_PATH] = {};
+    const bool haveNode = SearchPathW(nullptr, L"node.exe", nullptr, MAX_PATH, nodeExe, nullptr) > 0;
+    const std::string repo = REMOTE60_TEST_REPO_ROOT;
+    const std::wstring serverJs = std::wstring(repo.begin(), repo.end()) + L"/apps/directory/server.js";
+    NodeServer srv;
+    check("node and the repository's server.js are found", haveNode && GetFileAttributesW(serverJs.c_str()) != INVALID_FILE_ATTRIBUTES);
+    check("the real directory server starts (relay on, loopback, its own staging)", haveNode && srv.Start(nodeExe, serverJs),
+          srv.log().size() > 300 ? srv.log().substr(srv.log().size() - 300) : srv.log());
+    SpawnedHost host;
+    const uint16_t mediaPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+    check("a real GNLinkStream starts against it",
+          StartHost(&host, "http://127.0.0.1:" + std::to_string(srv.httpPort), mediaPort,
+                    remote60::native_poc::e2e::e2e_pick_free_tcp_port(), "realdir"));
+    // Online = a heartbeat with an observation went through (registered alone is not: /api/connect says offline).
+    check("the host registers with the real server and is online", host.WaitFor("directory online", 30000), host.tail());
+    std::string body;
+    const int loginStatus = http_call(srv.httpPort, "POST", "/api/login", "{\"id\":\"tester\",\"pw\":\"e2e-pass-1234\"}", "", &body);
+    const std::string session = json_str(body, "sessionToken");
+    http_call(srv.httpPort, "GET", "/api/hosts", "", session, &body);
+    const std::string hostId = json_str(body, "hostId");
+    check("a client signs in and sees the host", loginStatus == 200 && !session.empty() && !hostId.empty(),
+          "login=" + std::to_string(loginStatus));
+    sockaddr_in relayAddr{};
+    relayAddr.sin_family = AF_INET;
+    relayAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    relayAddr.sin_port = htons(srv.relayPort);
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    hostAddr.sin_port = htons(mediaPort);
+    SOCKET b = raw_open("127.0.0.1"), c = raw_open("127.0.0.1");
+    const auto standbyConnect = [&](SOCKET s, const char* obsToken, std::string* reply) {
+      if (!observe_from(s, srv.udpPort, obsToken)) return std::string();
+      http_call(srv.httpPort, "POST", "/api/connect",
+                std::string("{\"hostId\":\"") + hostId + "\",\"observeToken\":\"" + obsToken + "\",\"standby\":true}",
+                session, reply);
+      return json_str(*reply, "punchToken");
+    };
+    std::string rb, rc;
+    const std::string tb = standbyConnect(b, "realdir-b-observe", &rb);
+    const std::string tc = standbyConnect(c, "realdir-c-observe", &rc);
+    check("two standby connects: each reserved its own relay lease",
+          !tb.empty() && !tc.empty() && json_str(rb, "standbyRelay") == "reserved" && json_str(rc, "standbyRelay") == "reserved",
+          rb + " | " + rc);
+    // The host collects both capabilities with a heartbeat and punches every entry -- the two relay-facing ones too.
+    check("the host collects them and punches both reserved host-facing ports; both leases pin the host",
+          wait_until([&] { return count_of(srv.log(), "standby host pinned") >= 2; }, 15000),
+          host.Lines("directory punch ->"));
+    const Entry eb = admit(b, relayAddr, 0xB7, 1, tb, 40);
+    const Entry ec = admit(c, relayAddr, 0xC7, 1, tc, 40);
+    check("B and C are admitted as standby entries THROUGH the real relay, each its own",
+          eb.ok && ec.ok && eb.id != ec.id, "b=" + std::to_string(eb.status) + " c=" + std::to_string(ec.status));
+    check("...the relay saw both leases bound and ready (two host-facing sockets)",
+          count_of(srv.log(), "standby bound client=") == 2 && count_of(srv.log(), "standby ready") == 2);
+    check("...and no session started", count_of(host.log(), "session epoch=") == 0 &&
+                                           host.log().find("first session by activation") == std::string::npos);
+    uint32_t refusal = 0;
+    check("B activates over its lease: HelloAck through the relay, the relay marks the lease active",
+          activate(b, relayAddr, eb, 1, &refusal) && srv.WaitFor("standby active", 3000), "refusal=" + std::to_string(refusal));
+    check("B's control (through the real relay) works", select_seen(host, b, relayAddr, 1, 0xB7B7000000000001ull));
+    bool pings = true;
+    for (int i = 0; i < 5; ++i) pings = pings && ping(c, relayAddr, ec) == remote60::native_poc::kUdpStandbyStatusOk;
+    check("C, parked on its own lease, keeps pinging", pings);
+    const size_t epochs = count_of(host.log(), "session epoch=");
+    for (int i = 0; i < 5; ++i) raw_send_window_select(c, relayAddr, 80 + i, 0xC7C7000000000000ull + i);
+    for (int i = 0; i < 3; ++i) raw_send_resume(c, relayAddr, 0xC7C70000u + i);
+    check("C's session packets through its lease are never processed (the host tells the leases apart by address)",
+          host.log().find("requestedId=" + std::to_string(0xC7C7000000000000ull)) == std::string::npos);
+    check("...B keeps the session, its control still works",
+          count_of(host.log(), "session epoch=") == epochs && select_seen(host, b, relayAddr, 2, 0xB7B7000000000002ull));
+    check("C's explicit activation takes it (a new epoch), its control works",
+          activate(c, relayAddr, ec, 1, &refusal) && host.WaitFor("(standby activation", 3000) &&
+              select_seen(host, c, relayAddr, 1, 0xC7C7000000000101ull));
+    raw_send_window_select(b, relayAddr, 3, 0xB7B70000000000FFull);
+    check("B's late control (its old session) is refused",
+          !host.WaitFor(("requestedId=" + std::to_string(0xB7B70000000000FFull)).c_str(), 1500));
+    check("B, parked again, still pings Ok through its lease", ping(b, relayAddr, eb) == remote60::native_poc::kUdpStandbyStatusOk);
+    closesocket(b);
+    closesocket(c);
+    host.Stop();
+    srv.Stop();
+    check("the host exited cleanly", host.stopClean, host.stopWhy);
+  } else {
+    std::printf("\n[the real directory server.js relay] not run (pass --real-directory; needs node on PATH)\n");
   }
 
   // ================================================================== an older host
