@@ -170,6 +170,9 @@ object SharpenShaderFixture {
         var firstTs = 0L
         var redrawsAfterPan = 0L
         var drawnAtPan = 0L
+        var lastKind = ""
+        var lastDecoderTs = 0L
+        var lastGen = 0L
         val renderer = SharpenRenderer(9000L + c.name.hashCode() % 1000, reader.surface, c.strength,
             object : SharpenRenderer.Listener {
                 override fun onReady(generation: Long, input2: Surface) { input.set(input2); ready.countDown() }
@@ -205,7 +208,7 @@ object SharpenShaderFixture {
                         val until = System.currentTimeMillis() + 2000
                         while (renderer.framesDrawn.get() < 1 && System.currentTimeMillis() < until) Thread.sleep(10)
                         Thread.sleep(200)
-                        firstTs = lastTs.get()
+                        firstTs = renderer.outputs.lookup(lastTs.get())?.decoderTs ?: -1L  // r5: the decoder frame shown
                         drawnAtPan = renderer.framesDrawn.get()
                         val r0 = renderer.redraws.get()
                         val dx = Math.round(outW / 4f).toFloat()
@@ -214,6 +217,10 @@ object SharpenShaderFixture {
                         while (renderer.redraws.get() <= r0 && failure.get() == null && System.currentTimeMillis() < until2) Thread.sleep(10)
                         Thread.sleep(300)
                         redrawsAfterPan = renderer.redraws.get() - r0
+                        val last = renderer.outputs.lookup(lastTs.get())
+                        lastKind = last?.kind?.name ?: "unknown"
+                        lastDecoderTs = last?.decoderTs ?: -1L
+                        lastGen = last?.placementGen ?: -1L
                         if (failure.get() != null) note = "failed:" + failure.get()
                     }
                     return@run
@@ -253,8 +260,8 @@ object SharpenShaderFixture {
             "\"src\":\"${renderer.lastSourceSize}\",\"outScale\":${c.outScale},\"display\":${c.display}," +
             "\"heldNoSource\":${renderer.framesHeldNoSource.get()},\"drawn\":${renderer.framesDrawn.get()}," +
             "\"flow\":\"${c.flow}\",\"clearSwaps\":${renderer.layoutClearSwaps.get()},\"images\":${images.get()}," +
-            "\"firstTs\":$firstTs,\"lastTs\":${lastTs.get()},\"redrawsAfterPan\":$redrawsAfterPan,\"drawnAtPan\":$drawnAtPan," +
-            "\"shownGen\":${renderer.swappedPlacementGen.get()}}"
+            "\"firstTs\":$firstTs,\"lastTs\":$lastDecoderTs,\"lastKind\":\"$lastKind\",\"lastGen\":$lastGen,\"outTs\":${lastTs.get()},\"redrawsAfterPan\":$redrawsAfterPan,\"drawnAtPan\":$drawnAtPan," +
+            "\"end\":0}"
     }
 
 }
