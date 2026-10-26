@@ -163,8 +163,19 @@ class DesktopBackendControl {
   // together go out as the change alone -- its answer (asked for toward a host that answers) IS the status; a
   // question taken first goes out first and a change after it is still sent. One message per ConsumePending.
   bool Query();
+  // ua2-apk r2 (Codex codex_ua2_apk_src_r1.md N1): which change the app asked for last, which one went out, and with
+  // which wire seq -- so an answer can be told to be about THE CURRENT request (its seq or later) or an older one.
+  // Ids count Request calls on this connection (Reset: 0).
+  struct Intent {
+    uint64_t asked = 0;    // the latest Request
+    uint64_t sent = 0;     // the Request whose change went out last
+    uint32_t sentSeq = 0;  // that change's seq (34)
+  };
+  Intent CurrentIntent() const;
 
 private:
+  mutable std::mutex intentMu_;
+  Intent intent_;
   std::atomic<bool> pending_{false};       // a change (backend_) is waiting
   std::atomic<bool> queryPending_{false};  // r2 N3: a question is waiting -- kept apart from the change
   std::atomic<uint32_t> nextSeq_{0};

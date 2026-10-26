@@ -554,17 +554,21 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeQueryDesktopCaptureBac
   return g_session_controller.QueryDesktopCaptureBackend() ? JNI_TRUE : JNI_FALSE;
 }
 
-// ua2-apk r1: [valid, seq, requested, effective, active, flags, changeCount, hostAnswers] -- this connection's.
+// ua2-apk r1/r2: [valid, seq, requested, effective, active, flags, changeCount, hostAnswers, roleKnown, intentAsked,
+// intentSent, intentSentSeq] -- this connection's.
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetDesktopBackendStatus(
     JNIEnv* env, jobject /* this */) {
   const auto s = g_session_controller.DesktopCaptureBackendStatus();
-  const jlong v[8] = {s.valid ? 1 : 0, static_cast<jlong>(s.seq), static_cast<jlong>(s.requested),
-                      static_cast<jlong>(s.effective), static_cast<jlong>(s.active), static_cast<jlong>(s.flags),
-                      static_cast<jlong>(s.changeCount),
-                      g_session_controller.HostAnswersDesktopBackendStatus() ? 1 : 0};
-  jlongArray out = env->NewLongArray(8);
-  if (out) env->SetLongArrayRegion(out, 0, 8, v);
+  const auto i = g_session_controller.DesktopCaptureBackendIntent();
+  const jlong v[12] = {s.valid ? 1 : 0, static_cast<jlong>(s.seq), static_cast<jlong>(s.requested),
+                       static_cast<jlong>(s.effective), static_cast<jlong>(s.active), static_cast<jlong>(s.flags),
+                       static_cast<jlong>(s.changeCount),
+                       g_session_controller.HostAnswersDesktopBackendStatus() ? 1 : 0,
+                       g_session_controller.HostRoleKnown() ? 1 : 0,
+                       static_cast<jlong>(i.asked), static_cast<jlong>(i.sent), static_cast<jlong>(i.sentSeq)};
+  jlongArray out = env->NewLongArray(12);
+  if (out) env->SetLongArrayRegion(out, 0, 12, v);
   return out;
 }
 

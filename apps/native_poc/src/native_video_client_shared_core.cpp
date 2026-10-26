@@ -344,6 +344,10 @@ bool StreamStateControl::ConsumePending(PendingStreamStateRequest* out) {
 }
 
 void DesktopBackendControl::Reset() {
+  {
+    std::lock_guard<std::mutex> lk(intentMu_);
+    intent_ = Intent{};
+  }
   pending_.store(false, std::memory_order_relaxed);
   queryPending_.store(false, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);
@@ -353,20 +357,32 @@ void DesktopBackendControl::Reset() {
 
 void DesktopBackendControl::Request(uint16_t backend) {
   if (backend < 1 || backend > 3) return;  // ua2-apk r1: + 3 gdi
+  std::lock_guard<std::mutex> lk(intentMu_);  // ua2-apk r2: the intent and the change it asks, one step
+  ++intent_.asked;
   backend_.store(backend, std::memory_order_release);
   pending_.store(true, std::memory_order_release);
+}
+
+DesktopBackendControl::Intent DesktopBackendControl::CurrentIntent() const {
+  std::lock_guard<std::mutex> lk(intentMu_);
+  return intent_;
 }
 
 bool DesktopBackendControl::ConsumePending(PendingDesktopBackendRequest* out) {
   if (!out) return false;
   const bool answers = hostAnswers_.load(std::memory_order_acquire);
-  if (pending_.exchange(false, std::memory_order_acq_rel)) {
-    // The change first. Toward a host that answers, its answer is the status a pending question waited for.
-    if (answers) queryPending_.store(false, std::memory_order_release);
-    out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
-    out->backend = backend_.load(std::memory_order_acquire);
-    out->wantsStatus = answers;
-    return true;
+  {
+    std::lock_guard<std::mutex> lk(intentMu_);  // ua2-apk r2: the change taken and the intent it carries, one step
+    if (pending_.exchange(false, std::memory_order_acq_rel)) {
+      // The change first. Toward a host that answers, its answer is the status a pending question waited for.
+      if (answers) queryPending_.store(false, std::memory_order_release);
+      out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+      out->backend = backend_.load(std::memory_order_acquire);
+      out->wantsStatus = answers;
+      intent_.sent = intent_.asked;
+      intent_.sentSeq = out->seq;
+      return true;
+    }
   }
   if (!queryPending_.exchange(false, std::memory_order_acq_rel)) return false;
   if (!answers) return false;  // a question to a host that answers none

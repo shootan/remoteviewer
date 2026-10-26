@@ -2543,7 +2543,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun desktopBackendConnected(): Boolean = parked == null && sessionConnectedNow
 
-    /** ua2-apk r1: the buttons and the line show what the HOST says runs now (DesktopBackendPresentation). */
+    /**
+     * ua2-apk r1/r2: the buttons and the line under them (DesktopBackendPresentation): the host's capability, the
+     * CURRENT request (matched by its wire seq), and what captures now -- kept apart. Nothing is lit until the host has
+     * handled this connection's method; the session scope is said only when the host confirms it.
+     */
     private fun updateDesktopBackendButtons() {
         if (!::settingsDesktopBackendStatusText.isInitialized) return
         val p = DesktopBackendPresentation
@@ -2558,31 +2562,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             button.alpha = if (v.enabled) 1f else 0.45f
         }
         val asked = v.asked?.let { p.label(it) }
-        val line = when (v.state) {
-            DesktopBackendPresentation.State.NOT_CONNECTED -> getString(R.string.settings_desktop_backend_not_connected)
-            DesktopBackendPresentation.State.NO_ANSWER_HOST ->
-                if (asked != null) getString(R.string.settings_desktop_backend_no_answer_asked, asked)
-                else getString(R.string.settings_desktop_backend_no_answer)
-            DesktopBackendPresentation.State.CHECKING -> getString(R.string.settings_desktop_backend_checking)
-            DesktopBackendPresentation.State.APPLYING ->
-                getString(R.string.settings_desktop_backend_applying, asked ?: "?", p.label(v.active))
-            DesktopBackendPresentation.State.APPLIED ->
-                if (asked != null) getString(R.string.settings_desktop_backend_applied_asked, asked, p.label(v.active))
-                else getString(R.string.settings_desktop_backend_applied, p.label(v.active))
-        }
         val reasons = v.reasons.map {
             getString(when (it) {
                 DesktopBackendPresentation.Reason.WINDOW_TARGET -> R.string.settings_desktop_backend_reason_window
                 DesktopBackendPresentation.Reason.DXGI_QUARANTINED -> R.string.settings_desktop_backend_reason_quarantine
                 DesktopBackendPresentation.Reason.BEFORE_LOGIN -> R.string.settings_desktop_backend_reason_logon
-                DesktopBackendPresentation.Reason.NOT_YET_APPLIED -> R.string.settings_desktop_backend_reason_not_yet
             })
+        }.filter { it != getString(R.string.settings_desktop_backend_reason_window) }  // said by "지금 창 캡처" itself
+        var now = if (v.windowTarget) getString(R.string.settings_desktop_backend_now_window)
+            else getString(R.string.settings_desktop_backend_now_desktop, p.label(v.active))
+        if (reasons.isNotEmpty()) now += " (" + reasons.joinToString(", ") + ")"
+        var text = when (v.state) {
+            DesktopBackendPresentation.State.NOT_CONNECTED -> getString(R.string.settings_desktop_backend_not_connected)
+            DesktopBackendPresentation.State.CHECKING -> getString(R.string.settings_desktop_backend_checking)
+            DesktopBackendPresentation.State.NO_ANSWER_HOST ->
+                if (asked != null) getString(R.string.settings_desktop_backend_no_answer_asked, asked)
+                else getString(R.string.settings_desktop_backend_no_answer)
+            DesktopBackendPresentation.State.IDLE -> getString(R.string.settings_desktop_backend_idle, now)
+            DesktopBackendPresentation.State.APPLYING -> getString(R.string.settings_desktop_backend_applying, asked ?: "?", now)
+            DesktopBackendPresentation.State.APPLIED -> getString(R.string.settings_desktop_backend_applied, asked ?: "?", now)
+            DesktopBackendPresentation.State.STORED_FOR_DESKTOP -> getString(R.string.settings_desktop_backend_stored, asked ?: "?", now)
+            DesktopBackendPresentation.State.REFUSED -> getString(R.string.settings_desktop_backend_refused, asked ?: "?", now)
         }
-        val text = if (reasons.isEmpty()) line else line + " (" + reasons.joinToString(", ") + ")"
+        if (v.sessionScoped && v.state != DesktopBackendPresentation.State.NOT_CONNECTED &&
+            v.state != DesktopBackendPresentation.State.CHECKING) {
+            text += " · " + getString(R.string.settings_desktop_backend_scope)
+        }
         if (settingsDesktopBackendStatusText.text?.toString() != text) {
             settingsDesktopBackendStatusText.text = text
             diagnosticsLog.log("desktop_backend_ui", "state=${v.state} lit=${v.lit?.let { p.label(it) } ?: "none"} " +
-                "asked=${asked ?: "none"} enabled=${v.enabled}")
+                "asked=${asked ?: "none"} window=${v.windowTarget} scoped=${v.sessionScoped} enabled=${v.enabled} " +
+                "seq=${status?.seq ?: 0} sentSeq=${status?.intentSentSeq ?: 0}")
         }
     }
 
@@ -2611,7 +2621,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         // ua2-apk r1: nothing is re-sent on connect (no stored backend). While the settings screen shows, the host
-        // is asked what runs now -- every 2 s at most -- and the answer is what the buttons show.
+        // is asked what runs now -- about every 2 s (checked on the status poll) -- and the answer is what the buttons show.
         if (activeTargetTab == TargetTab.SETTINGS && currentScene == UiScene.TARGETS) {
             val nowMs = SystemClock.elapsedRealtime()
             if (nowMs - desktopBackendQueryAtMs >= 2000L) {

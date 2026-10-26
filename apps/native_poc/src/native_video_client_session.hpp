@@ -213,6 +213,10 @@ class ClientSessionController {
   bool QueryDesktopCaptureBackend();
   DesktopBackendStatusSnapshot DesktopCaptureBackendStatus() const;
   bool HostAnswersDesktopBackendStatus() const { return desktopBackend_.HostAnswers(); }
+  // ua2-apk r2: the app's backend intent on this connection (N1), and whether the host's role -- its first pong, which
+  // carries the backend-status capability -- is known yet (N3: unknown is not "unsupported").
+  DesktopBackendControl::Intent DesktopCaptureBackendIntent() const { return desktopBackend_.CurrentIntent(); }
+  bool HostRoleKnown() const { return hostRole_.Load().known; }
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);
