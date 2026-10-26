@@ -324,6 +324,28 @@ void test_local_ackless_selection() {
     CHECK(!g.CommitFrame(r, true, 7, 7, &gen, nullptr));
   }
   {
+    // r7 (Codex R3 token): the ticket is one snapshot. A local A's ticket, then A cancelled and B begun: A's picture
+    // is refused. An ORDINARY ticket (nothing pending), then a local B begun: that ordinary picture is not mixed into
+    // B either. B's own ticket is local and B's picture is adopted.
+    SelectionGateState g;
+    uint64_t gen = 0;
+    g.BeginLocal();
+    const SelectionGateState::FrameTicket ta = g.TakeFrameTicket();
+    CHECK(ta.local && ta.epoch == g.epoch.load());
+    g.Clear();
+    g.BeginLocal();
+    CHECK(!g.CommitFrame(ta.epoch, ta.local, 5, 5, &gen, nullptr));
+    g.Clear();
+    const SelectionGateState::FrameTicket to = g.TakeFrameTicket();
+    CHECK(!to.local);
+    CHECK(g.CommitFrame(to.epoch, to.local, 0, 3, &gen, nullptr));  // ordinary, nothing pending: as before
+    g.BeginLocal();
+    CHECK(!g.CommitFrame(to.epoch, to.local, 0, 3, &gen, nullptr));  // ...but not into the local op begun after it
+    const SelectionGateState::FrameTicket tb = g.TakeFrameTicket();
+    CHECK(tb.local && tb.epoch != to.epoch);
+    CHECK(g.CommitFrame(tb.epoch, tb.local, 6, 6, &gen, nullptr) && gen == 6);
+  }
+  {
     // r6 (R3 1): a permitted picture keeps the gate's lock until the caller lets it go -- a Clear/Begin waits.
     SelectionGateState g;
     g.BeginLocal();
