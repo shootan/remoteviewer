@@ -13572,3 +13572,9 @@ Next
 - 서명 `gnlink_release_sign.ps1`: signature `57d1d2ca5b34568e580ea0676504e4aed7583610870b2b0f50f4716a0174d01a`, manifest 본문 서명 전후 불변, JS·C++ verifier PASS, 1바이트 변조본 두 verifier 모두 거부.
 - `gnlink_deploy.sh`: dry-run → 실게시 rc 0 — 11 업로드·서버 검증, 백업 0.2.162 pair(814e4bb9/a39b2f14), pair 교체, https 익명 11 artifact 서명 해시 일치(401 은 근거 아님). 서버 디스크 windows pair = 6d89ae48/57d1d2ca, android pair 309a9c5e/cbb5b7d6(0.2.31) 불변.
 - **실기 대기**(자동 검증 범위 밖): 실 재부팅 로그인 전 화면 picker→바탕화면, 실 UAC 예/아니오(같은 연결 2회), 폰 0.2.31 WGC 사용 뒤 PC 접속 = DXGI, 실 잠금 화면 틀린 비밀번호 → 다시 누름 → 해제, 회사 PC. APK 0.2.32(SH r2·UA-2 표시·공용 세션 picker ack 대기 보수)는 별도.
+
+## 2026-10-26 APK 0.2.32 ① — 공용 세션의 로그인 전 picker ack 대기 보수 (apk-0232 r1)
+
+- 원인: 공용 세션이 로그인 전 화면 Host(PreloginV1)에 보낼 수 없는 WindowSelect(0) 를 queue 했다가 송신 직전 말없이 버렸고(`native_video_client_session.cpp` 역할 검사), APK 는 REQUESTING 에서 6 s 뒤 목록으로 돌아갔다. PC 뷰어(0.2.163)와 같은 결함의 공용 세션 쪽.
+- 보수(Codex `codex_rel_0163_e1_decision.md`): SelectionAckGate 의 local 모드(같은 tag, ack 없음, 디코더에 실제로 들어간 첫 IDR 로 세대 결합, 그 뒤 straggler 필터), 세션의 즉시 local/창 거부와 첫 pong 전 queue 의 같은 op 전환/거부, 결합 뒤에만 패널 selected(그 세대). Android sink 는 gate 위임만, Kotlin 무변경.
+- 시험: 제품 세션 하네스 38/38(원본 세션 14 FAIL, 부정 대조 3 FAIL), 실 로그인 전 Host 공용 세션 37/37(원본 4 FAIL), 회귀 e2e 7·순수 8 PASS, APK 빌드·단위 249/0. AVD 실 APK UI 는 0.2.32 통합 단계.
