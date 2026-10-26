@@ -60,6 +60,29 @@ TEST_MARKERS = [
     'GNLINK_CHAIN_',              # client_reconnect_restore_e2e_test.cpp (dxgi-wedge-fix r1)
     'viewer-present-fail-seam',   # viewer_present_fail_seam.hpp, REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM (r3 E3)
     'GNLINK_VIEWER_TEST_',        # the same seam's environment (PRESENT_FAIL_FILE)
+    # rel 0.2.163 (LK-UX + capture-lifecycle): the test-build host's own log tag for its seams
+    # (host_stage_backend.cpp: "[native-video-host][test-seam] ..."), the LK relay's test hooks
+    # (SetRetryIoHookForTest / KeptEntriesForTest -- a name that reaches a binary as text means a hook
+    # was wired into something that prints or exports it), and the capture lib's test-only still-screen
+    # modes as the test host spells them in its environment (=nofirst / =pointerfirst).
+    '][test-seam]',
+    'ForTest',
+    'pointerfirst',
+]
+
+# rel 0.2.163: every test-build environment name LK-UX and capture-lifecycle added, each checked ALONE
+# (ascii and wide) by the self-test -- the prefixes above cover them, this keeps a prefix change from
+# silently uncovering one.
+RELEASE_0163_SEAM_NAMES = [
+    'GNLINK_STREAM_TEST_DESKTOP_ALIAS',
+    'GNLINK_STREAM_TEST_STILL_SCREEN',
+    'GNLINK_STREAM_TEST_SECURE_DESKTOP_EVENT',
+    'GNLINK_STREAM_TEST_WGC_STILL',
+    'GNLINK_STREAM_TEST_FAIL_RESTART_FILE',
+    'GNLINK_STREAM_TEST_LOGON_DESKTOP',
+    'GNLINK_STREAM_TEST_UNLOCK_PIPE',
+    'GNLINK_VIEWER_TEST_STATUS_POLLS',
+    'GNLINK_VIEWER_TEST_SEAL_FAIL',
 ]
 
 # (file, must carry the address)
@@ -232,6 +255,15 @@ def self_test():
             outer.check(verdict(make('sis-agent-' + enc, {
                 'GNLinkInputService.exe': lambda b, e=enc: b + 'GNLINK_SIS_TEST_CRED_TARGET_TITLE'.encode(e)})) == 1,
                 'a service carrying GNLINK_SIS_TEST_ alone (%s) fails' % enc)
+
+        # rel 0.2.163: each LK-UX / capture-lifecycle test-build name alone, ascii and wide, in the
+        # streaming host and the viewer.
+        for seam in RELEASE_0163_SEAM_NAMES:
+            for enc in ('ascii', 'utf-16-le'):
+                target = 'GNLinkViewer.exe' if seam.startswith('GNLINK_VIEWER_') else 'GNLinkStream.exe'
+                outer.check(verdict(make('r0163-%s-%s' % (seam, enc), {
+                    target: lambda b, s=seam, e=enc: b + s.encode(e)})) == 1,
+                    '%s carrying %s alone (%s) fails' % (target, seam, enc))
 
         # sh-filter r2 (H4): the APK seam check on dex bytes (a real APK pair is the release-time control:
         # the noseam build passes, the shseam build fails -- see the sh-filter report).

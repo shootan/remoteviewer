@@ -20,6 +20,20 @@
 //     that WGC shows a real UAC prompt. That is the user's field check (a real UAC, approved by the user).
 //   * The host is the test build, input injection off, its files isolated; the clipboard stays out.
 //
+//   --rebuild-fails (r2/r3, Codex N1 (b) / N1-a): the rebuild after the edge to the secure desktop fails AFTER
+//               its detach, as a real one does (GNLINK_STREAM_TEST_FAIL_RESTART_FILE: while that file exists every
+//               capture restart fails right after DetachCaptureSession). (1) one failure, the file goes: the
+//               SAME desktop generation's 2nd attempt succeeds and the picture comes back. (2) the file stays:
+//               3 attempts, then nothing -- not the rebuild, not the host's generic retry (4th attempt 0) -- and
+//               no picture; the next edge (file gone) rebuilds and the picture comes back. Instead of the
+//               phases above.
+//   --fullframe-fails (r4, Codex N1-a FullFrame): a still WGC desktop (GNLINK_STREAM_TEST_WGC_STILL=1: each WGC
+//               attachment hands on its first frame only) whose full-frame reacquire -- the real WGC restart --
+//               fails after its detach. (C) one failure, then the restart works: the same episode's next ask
+//               brings the picture back. (A) it keeps failing: the first try and its retries are the
+//               episode's asks -- 3 restarts in all, then none (not the generic retry, not a new kick),
+//               no picture. (B) a new session (a new source) gets a new bounded budget and the picture back.
+//
 //   remote60_host_capture_lifecycle_ua_e2e_test   (REMOTE60_ALLOW_HOST_E2E=1; exit 77 = skipped)
 //   REMOTE60_E2E_OLD_BIN=<exe>: run another host build (a negative control).
 // Tags: display-capture (this desktop), gpu (DXGI/WGC, encoder), network (loopback).
@@ -89,6 +103,7 @@ struct Seen {
   uint64_t us = 0;
   uint64_t captureUs = 0;
   bool key = false;
+  bool synthetic = false;  // r2: a re-served cached frame (kEncodedFrameFlagSynthetic) -- its stamp is "now"
 };
 struct SeenLog {
   std::mutex mu;
@@ -97,16 +112,53 @@ struct SeenLog {
     std::lock_guard<std::mutex> lk(mu);
     v.push_back(s);
   }
-  // A key frame whose capture came after `afterUs`, decoded by now.
+  // A key frame of a REAL capture (not a re-served cached frame, whose stamp is the time it was re-served --
+  // capture-lifecycle r2, Codex: a synthetic stamp is not a new source) made after `afterUs`, decoded by now.
   bool KeyCapturedAfter(uint64_t afterUs, Seen* out = nullptr) {
     std::lock_guard<std::mutex> lk(mu);
     for (const Seen& s : v) {
-      if (s.key && s.captureUs > afterUs) {
+      if (s.key && !s.synthetic && s.captureUs > afterUs) {
         if (out) *out = s;
         return true;
       }
     }
     return false;
+  }
+  // What came at/after a capture time, for a failure's detail (up to 4: capture, key, synthetic).
+  std::string Describe(uint64_t fromCaptureUs) {
+    std::lock_guard<std::mutex> lk(mu);
+    std::string out;
+    int n = 0;
+    for (const Seen& s : v) {
+      if (s.captureUs + 1 < fromCaptureUs) continue;
+      out += " [cap=" + std::to_string(s.captureUs) + " key=" + (s.key ? "1" : "0") + " syn=" + (s.synthetic ? "1" : "0") + "]";
+      if (++n == 4) break;
+    }
+    return out.empty() ? std::string(" [nothing seen at/after]") : out;
+  }
+  // A real (not re-served) decoded picture captured at/after `fromCaptureUs`.
+  bool RealCapturedAtOrAfter(uint64_t fromCaptureUs, Seen* out = nullptr) {
+    std::lock_guard<std::mutex> lk(mu);
+    for (const Seen& s : v) {
+      if (!s.synthetic && s.captureUs >= fromCaptureUs) {
+        if (out) *out = s;
+        return true;
+      }
+    }
+    return false;
+  }
+  // What was decoded at/after a time (decode clock), for a failure's detail (up to 4).
+  std::string DescribeDecodedSince(uint64_t fromUs) {
+    std::lock_guard<std::mutex> lk(mu);
+    std::string out;
+    int n = 0;
+    for (const Seen& s : v) {
+      if (s.us < fromUs) continue;
+      out += " [at=" + std::to_string(s.us) + " cap=" + std::to_string(s.captureUs) + " key=" + (s.key ? "1" : "0") +
+             " syn=" + (s.synthetic ? "1" : "0") + "]";
+      if (++n == 4) break;
+    }
+    return out;
   }
   size_t CountSince(uint64_t fromUs) {
     std::lock_guard<std::mutex> lk(mu);
@@ -141,7 +193,7 @@ struct DecodingSink : ClientEncodedFrameSink {
       for (const auto& d : out) {
         if (d.bytes.empty()) continue;
         ++decoded;
-        log->Add(Seen{qpc_now_us(), f.header.captureQpcUs, key});
+        log->Add(Seen{qpc_now_us(), f.header.captureQpcUs, key, (f.header.flags & kEncodedFrameFlagSynthetic) != 0});
       }
     } else {
       ++failed;
@@ -152,8 +204,14 @@ struct DecodingSink : ClientEncodedFrameSink {
 
 }  // namespace
 
-int wmain(int, wchar_t**) {
+int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  bool rebuildFails = false;
+  bool fullFrameFails = false;  // r4
+  for (int i = 1; i < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--rebuild-fails") rebuildFails = true;
+    if (std::wstring(argv[i]) == L"--fullframe-fails") fullFrameFails = true;
+  }
   std::printf("host_capture_lifecycle_ua_e2e_test (capture-lifecycle r1: UA-1 / UA-2)\n");
   if (!host_e2e_allowed()) {
     std::printf("SKIP  (starts a listening host that captures this desktop)\n");
@@ -190,6 +248,16 @@ int wmain(int, wchar_t**) {
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
   const std::wstring hostLogPath = dir + L"host.log";
+  // r3: while this file exists, every capture restart of the test host fails after its detach (--rebuild-fails).
+  const std::wstring failRestartPath = dir + L"fail-restart.flag";
+  const auto set_fail_restart = [&](bool on) {
+    if (on) {
+      HANDLE f = CreateFileW(failRestartPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    } else {
+      DeleteFileW(failRestartPath.c_str());
+    }
+  };
   HANDLE hostLog = INVALID_HANDLE_VALUE;
   PROCESS_INFORMATION hostPi{};
   bool launched = false;
@@ -197,6 +265,9 @@ int wmain(int, wchar_t**) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");  // h264, as the product child gets it
     SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");  // the user's clipboard stays out
     SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_SECURE_DESKTOP_EVENT", secureEventName.c_str());
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_FAIL_RESTART_FILE",
+                            (rebuildFails || fullFrameFails) ? failRestartPath.c_str() : nullptr);
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_WGC_STILL", fullFrameFails ? L"1" : nullptr);
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps 30 --seconds 150 --input-injection-mode none";
@@ -234,6 +305,29 @@ int wmain(int, wchar_t**) {
     return wait_until([&] { return host_log().find(needle) != std::string::npos; }, budgetMs);
   };
   const auto host_count = [&](const std::string& needle) { return count_of(host_log(), needle); };
+  // capture-lifecycle r2 (Codex N1 evidence): the desktop generation the host's LAST "<edge>" line moved to, and
+  // the capture time of the first frame the host adopted from an attachment made under it ("adopted first
+  // frame ... desktopGen=G captureUs=X", PublishFrame) -- 0 if none yet.
+  const auto last_edge_gen = [&](const std::string& edge) -> uint64_t {
+    const std::string log = host_log();
+    const size_t at = log.rfind(edge);
+    if (at == std::string::npos) return 0;
+    const size_t g = log.find("desktopGen=", at);
+    return g == std::string::npos ? 0 : std::strtoull(log.c_str() + g + 11, nullptr, 10);
+  };
+  const auto adopted_capture_us = [&](uint64_t gen) -> uint64_t {
+    const std::string log = host_log();
+    const std::string needle = "desktopGen=" + std::to_string(gen) + " captureUs=";
+    size_t at = 0;
+    while ((at = log.find("adopted first frame", at)) != std::string::npos) {
+      const size_t eol = log.find('\n', at);
+      const std::string line = log.substr(at, eol == std::string::npos ? std::string::npos : eol - at);
+      const size_t n = line.find(needle);
+      if (n != std::string::npos) return std::strtoull(line.c_str() + n + needle.size(), nullptr, 10);
+      at += 1;
+    }
+    return 0;
+  };
   const auto host_alive = [&] { return launched && WaitForSingleObject(hostPi.hProcess, 0) == WAIT_TIMEOUT; };
 
   // One secure-desktop round trip on a connection: shown secure, then back, with what each edge must bring.
@@ -255,8 +349,27 @@ int wmain(int, wchar_t**) {
     }
     Seen k{};
     const bool key1 = wait_until([&] { return seen.KeyCapturedAfter(t1, &k); }, 5000);
-    check(tag + ": A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side)", key1,
-          key1 ? std::to_string((k.us - t1) / 1000) + " ms after the edge" : std::string("none in 5 s"));
+    check(tag + ": A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side; a real capture, not re-served)",
+          key1, key1 ? std::to_string((k.us - t1) / 1000) + " ms after the edge" : std::string("none in 5 s"));
+    {
+      // r2: ...of the attachment made under the new desktop generation -- the key's capture is no earlier than
+      // that attachment's first adopted frame (so it is not a frame of the desktop that was, re-labelled).
+      const uint64_t gen = last_edge_gen("input desktop Default -> Winlogon");
+      uint64_t adoptedUs = 0;
+      wait_until([&] { return (adoptedUs = adopted_capture_us(gen)) != 0; }, 3000);
+      // The host sent that very frame as the new epoch's first key ("capture-switch first-frame ...
+      // captureQpcUs=<adopted> auEpoch=E curEpoch=E"), and the viewer decoded a real picture captured at/after
+      // it. (The decoded picture's capture time is the decoder OUTPUT's; the viewer's "key" mark is its INPUT
+      // packet's -- an MF decoder may return a picture one call late, so the two are not joined on one Seen.)
+      const std::string firstKey = "captureQpcUs=" + std::to_string(adoptedUs) + " size=";
+      const bool hostKey = adoptedUs != 0 && host_says(firstKey, 3000);
+      Seen kk{};
+      const bool joined = adoptedUs != 0 && wait_until([&] { return seen.RealCapturedAtOrAfter(adoptedUs, &kk); }, 3000);
+      check(tag + ": ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED", hostKey && joined,
+            "desktopGen=" + std::to_string(gen) + " adoptedCaptureUs=" + std::to_string(adoptedUs) +
+                " hostFirstKey=" + (hostKey ? "1" : "0") +
+                (joined ? " decodedCaptureUs=" + std::to_string(kk.captureUs) : seen.Describe(adoptedUs)));
+    }
     Sleep(1500);
     const uint64_t t2 = qpc_now_us();
     ResetEvent(secure);
@@ -265,19 +378,221 @@ int wmain(int, wchar_t**) {
     check(tag + ": ...and " + onBackWhat, wait_until([&] { return host_count(onBack) > backNeedleBefore; }, 8000), onBack);
     Seen k2{};
     const bool key2 = wait_until([&] { return seen.KeyCapturedAfter(t2, &k2); }, 5000);
-    check(tag + ": A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED", key2,
+    check(tag + ": A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED (a real capture, not re-served)", key2,
           key2 ? std::to_string((k2.us - t2) / 1000) + " ms after the edge" : std::string("none in 5 s"));
+    {
+      const uint64_t gen = last_edge_gen("input desktop Winlogon -> Default");
+      uint64_t adoptedUs = 0;
+      wait_until([&] { return (adoptedUs = adopted_capture_us(gen)) != 0; }, 3000);
+      // The host sent that very frame as the new epoch's first key ("capture-switch first-frame ...
+      // captureQpcUs=<adopted> auEpoch=E curEpoch=E"), and the viewer decoded a real picture captured at/after
+      // it. (The decoded picture's capture time is the decoder OUTPUT's; the viewer's "key" mark is its INPUT
+      // packet's -- an MF decoder may return a picture one call late, so the two are not joined on one Seen.)
+      const std::string firstKey = "captureQpcUs=" + std::to_string(adoptedUs) + " size=";
+      const bool hostKey = adoptedUs != 0 && host_says(firstKey, 3000);
+      Seen kk{};
+      const bool joined = adoptedUs != 0 && wait_until([&] { return seen.RealCapturedAtOrAfter(adoptedUs, &kk); }, 3000);
+      check(tag + ": ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED", hostKey && joined,
+            "desktopGen=" + std::to_string(gen) + " adoptedCaptureUs=" + std::to_string(adoptedUs) +
+                " hostFirstKey=" + (hostKey ? "1" : "0") +
+                (joined ? " decodedCaptureUs=" + std::to_string(kk.captureUs) : seen.Describe(adoptedUs)));
+    }
     const uint64_t t3 = qpc_now_us();
     Sleep(2000);
     check(tag + ": ...and the picture keeps coming (frames in the 2 s after)", seen.CountSince(t3) >= 2,
           std::to_string(seen.CountSince(t3)) + " frames");
   };
 
+  // ------------------------------------------------------------------ r2/r3: an edge whose rebuild fails
+  if (launched && rebuildFails) {
+    std::cout << "\n--- r3 (N1-a): the rebuild after the edge fails after its detach ---\n";
+    SeenLog seen;
+    DecodingSink rs;
+    rs.log = &seen;
+    ClientSessionController phone;
+    ClientSessionConnectArgs a;
+    a.host = "127.0.0.1";
+    a.videoPort = hostPort;
+    a.controlPort = hostPort;
+    a.requireUdpHello = true;
+    a.requireTcpControl = false;
+    a.controlOverUdp = true;
+    a.controlIntervalMs = 200;
+    a.udpHandshakeTimeoutMs = 20000;
+    a.encodedFrameSink = &rs;
+    const bool up = phone.Connect(a) &&
+                    wait_until([&] { return phone.Snapshot().state == ClientSessionState::Connected; }, 25000);
+    check("the shared session connects", up, phone.Snapshot().status);
+    check("...and decodes the desktop", wait_until([&] { return rs.decoded > 0; }, 15000));
+    wait_until([&] { return phone.HostAnswersDesktopBackendStatus(); }, 5000);
+    check("it asks for WGC (a capture that keeps giving frames of this live desktop), and the host runs it",
+          phone.RequestDesktopCaptureBackend(2) && host_says("desktop-backend-applied seq=", 8000));
+    Sleep(2000);
+    const auto injected = [&] { return host_count("capture restart failed (injected)"); };
+
+    // (1) one failure after the detach, then the restart works again: the same generation's 2nd attempt.
+    set_fail_restart(true);
+    SetEvent(secure);
+    check("(1) the host saw the input desktop go secure", host_says("input desktop Default -> Winlogon", 3000));
+    const uint64_t gen1 = last_edge_gen("input desktop Default -> Winlogon");
+    const std::string r1 = "rebuild desktopGen=" + std::to_string(gen1);
+    check("(1) THE MEDIA FENCE CAME AT THE EDGE, before any rebuild",
+          host_says("edge fence desktopGen=" + std::to_string(gen1) + " atUs=", 2000) &&
+              host_log().find("edge fence desktopGen=" + std::to_string(gen1)) < host_log().find(r1 + " attempt=1"));
+    check("(1) the 1st attempt failed AFTER its detach (the injected restart failure)",
+          host_says(r1 + " attempt=1 ok=0", 3000) && injected() >= 1, std::to_string(injected()) + " injected");
+    set_fail_restart(false);
+    check("(1) THE SAME GENERATION'S 2nd ATTEMPT SUCCEEDED (a failed detach is not 'rebuilt')",
+          host_says(r1 + " attempt=2 ok=1", 4000));
+    const uint64_t t1 = qpc_now_us();
+    check("(1) ...and the picture comes back on the same connection",
+          wait_until([&] { return seen.RealCapturedAtOrAfter(t1); }, 5000));
+    ResetEvent(secure);
+    check("(1) back to Default: rebuilt", host_says("input desktop Winlogon -> Default", 3000) &&
+                                            host_says("rebuild desktopGen=" + std::to_string(gen1 + 1) + " attempt=1 ok=1", 4000));
+    Sleep(2000);
+
+    // (2) the restart keeps failing: 3 attempts, then nothing more -- the generic retry does not take over.
+    set_fail_restart(true);
+    const size_t injectedBefore = injected();
+    const size_t recoveredBefore = host_count("capture retry recovered");
+    const size_t secureEdgesBefore = host_count("input desktop Default -> Winlogon");
+    SetEvent(secure);
+    check("(2) the host saw the input desktop go secure (a NEW edge)",
+          wait_until([&] { return host_count("input desktop Default -> Winlogon") > secureEdgesBefore; }, 3000));
+    const uint64_t gen2 = last_edge_gen("input desktop Default -> Winlogon");
+    const std::string r2 = "rebuild desktopGen=" + std::to_string(gen2);
+    uint64_t fenceUs = 0;
+    if (host_says("edge fence desktopGen=" + std::to_string(gen2) + " atUs=", 2000)) {
+      const std::string log = host_log();
+      const size_t at = log.find("edge fence desktopGen=" + std::to_string(gen2) + " atUs=");
+      fenceUs = std::strtoull(log.c_str() + log.find("atUs=", at) + 5, nullptr, 10);
+    }
+    const bool gaveUp = host_says("rebuild gave up desktopGen=" + std::to_string(gen2), 8000);
+    const size_t third = host_count(r2 + " attempt=3 ok=0");
+    const size_t injectedNow = injected() - injectedBefore;
+    check("(2) 3 attempts failed after their detach, then the rebuild gave up", gaveUp && third == 1 && injectedNow >= 3,
+          "gaveUp=" + std::to_string(gaveUp ? 1 : 0) + " attempt3=" + std::to_string(third) + " injected=" +
+              std::to_string(injectedNow));
+    Sleep(10000);  // past the generic retry's backoff (250 ms << 5 = 8 s)
+    check("(2) NOTHING MORE FOR 10 s: no 4th attempt, the generic retry did not take over (3 restarts in all)",
+          host_count(r2 + " attempt=4") == 0 && injected() - injectedBefore == 3 &&
+              host_count("capture retry recovered") == recoveredBefore,
+          std::to_string(injected() - injectedBefore) + " restarts tried");
+    const size_t after = fenceUs != 0 ? seen.CountSince(fenceUs + 500000ULL) : 1;
+    check("(2) NOTHING OF THE OLD ATTACHMENT REACHES THE VIEWER after the edge (0 pictures from fence+500 ms)",
+          fenceUs != 0 && after == 0,
+          std::to_string(after) + " pictures; fenceUs=" + std::to_string(fenceUs) + seen.DescribeDecodedSince(fenceUs + 500000ULL));
+    check("(2) the session is still up (no reconnect)", phone.Snapshot().state == ClientSessionState::Connected);
+    set_fail_restart(false);
+    const uint64_t tBack = qpc_now_us();
+    const size_t backEdgesBefore = host_count("input desktop Winlogon -> Default");
+    ResetEvent(secure);
+    check("(2) back to Default (file gone): THAT edge's rebuild succeeded",
+          wait_until([&] { return host_count("input desktop Winlogon -> Default") > backEdgesBefore; }, 3000) &&
+              host_says("rebuild desktopGen=" + std::to_string(gen2 + 1) + " attempt=1 ok=1", 4000));
+    check("(2) THE PICTURE COMES BACK on the same connection",
+          wait_until([&] { return seen.RealCapturedAtOrAfter(tBack); }, 5000));
+    phone.Disconnect();
+  }
+
+  // ------------------------------------------------------------------ r4: a full-frame reacquire whose restart fails
+  if (launched && fullFrameFails) {
+    std::cout << "\n--- r4 (N1-a FullFrame): the full-frame WGC restart fails after its detach ---\n";
+    SeenLog seen;
+    DecodingSink fs;
+    fs.log = &seen;
+    const auto connect = [&](ClientSessionController& phone) {
+      ClientSessionConnectArgs a;
+      a.host = "127.0.0.1";
+      a.videoPort = hostPort;
+      a.controlPort = hostPort;
+      a.requireUdpHello = true;
+      a.requireTcpControl = false;
+      a.controlOverUdp = true;
+      a.controlIntervalMs = 200;
+      a.udpHandshakeTimeoutMs = 20000;
+      a.encodedFrameSink = &fs;
+      return phone.Connect(a) &&
+             wait_until([&] { return phone.Snapshot().state == ClientSessionState::Connected; }, 25000);
+    };
+    const auto injected = [&] { return host_count("capture restart failed (injected)"); };
+    const auto restarts = [&] { return host_count("full-frame wgc restart ok="); };
+    // A picker-like off/on: frames that arrive while off clear the cache; the still WGC gives none after.
+    const auto off_on = [&](ClientSessionController& phone) {
+      phone.RequestStreamActive(false);
+      Sleep(2000);
+      phone.RequestStreamActive(true);
+    };
+    {
+      ClientSessionController phone;
+      const bool upA = connect(phone);
+      check("the shared session connects", upA, phone.Snapshot().status);
+      wait_until([&] { return phone.HostAnswersDesktopBackendStatus(); }, 5000);
+      check("it asks for WGC and the host runs it",
+            phone.RequestDesktopCaptureBackend(2) && host_says("desktop-backend-applied seq=", 8000) &&
+                host_log().find("requested=wgc active=wgc") != std::string::npos);
+      check("...its first WGC frame is decoded (the still WGC gives nothing after it)",
+            wait_until([&] { return fs.decoded > 0; }, 8000));
+      Sleep(1500);
+
+      // (C) one failure, then the restart works: the same episode's next ask brings the picture back.
+      set_fail_restart(true);
+      const size_t injC = injected();
+      const size_t restC = restarts();
+      const uint64_t tC = qpc_now_us();
+      off_on(phone);
+      check("(C) the full-frame WGC restart was asked and FAILED AFTER ITS DETACH",
+            wait_until([&] { return injected() > injC; }, 4000) && host_says("full-frame wgc restart ok=0", 1000));
+      set_fail_restart(false);
+      check("(C) THE SAME EPISODE'S NEXT ASK RESTARTED IT (ok=1) -- no generic retry needed",
+            host_says("full-frame wgc restart ok=1", 4000) && host_count("capture retry recovered") == 0);
+      check("(C) ...and the picture comes back (a real capture after the pick, decoded)",
+            wait_until([&] { return seen.RealCapturedAtOrAfter(tC); }, 5000));
+      check("(C) ...within the episode's bound (2 restarts: the failed one + the one that worked)",
+            restarts() - restC == 2, std::to_string(restarts() - restC) + " restarts");
+      Sleep(1500);
+
+      // (A) it keeps failing: 3 restarts in all for the episode, then none.
+      set_fail_restart(true);
+      const size_t injA = injected();
+      const size_t restA = restarts();
+      const size_t recA = host_count("capture retry recovered");
+      off_on(phone);
+      const uint64_t tA = qpc_now_us();
+      const bool three = wait_until([&] { return restarts() - restA >= 3; }, 8000);
+      Sleep(12000);  // past the generic retry's backoff (250 ms << 5 = 8 s) and several kicks
+      const size_t restN = restarts() - restA;
+      const size_t injN = injected() - injA;
+      check("(A) THE EPISODE'S RESTARTS STOP AT 3 (first try + its retries), NONE AFTER (12 s: no generic retry, no kick)",
+            three && restN == 3 && injN == 3 && host_count("capture retry recovered") == recA &&
+                host_count("full-frame ask=4/") == 0,
+            std::to_string(restN) + " full-frame restarts, " + std::to_string(injN) + " restarts tried");
+      const size_t pics = seen.CountSince(tA + 500000ULL);
+      check("(A) no picture meanwhile (nothing captured, nothing re-served)", pics == 0, std::to_string(pics) + " pictures");
+      check("(A) the session is still up", phone.Snapshot().state == ClientSessionState::Connected);
+      set_fail_restart(false);
+      phone.Disconnect();
+    }
+    Sleep(1500);
+    // (B) a new session is a new source: a new bounded budget, and the picture back.
+    {
+      ClientSessionController phone;
+      const uint64_t tB = qpc_now_us();
+      const bool upB = connect(phone);
+      check("(B) a new session connects", upB, phone.Snapshot().status);
+      check("(B) A NEW SOURCE GETS ITS PICTURE BACK (a real capture after it, decoded)",
+            wait_until([&] { return seen.RealCapturedAtOrAfter(tB); }, 10000));
+      check("(B) ...with no 4th ask in any episode", host_count("full-frame ask=4/") == 0);
+      phone.Disconnect();
+    }
+  }
+
   // ------------------------------------------------------------------ UA-1 (WGC): the shared session
   SeenLog phoneSeen;
   DecodingSink sink;
   sink.log = &phoneSeen;
-  if (launched) {
+  if (launched && !rebuildFails && !fullFrameFails) {
     std::cout << "\n--- UA-1 (WGC): the shared session the Android app drives asks for WGC ---\n";
     ClientSessionController phone;
     ClientSessionConnectArgs a;
@@ -359,7 +674,7 @@ int wmain(int, wchar_t**) {
   std::atomic<bool> stopPresent{false};
   SeenLog pcSeen;
   bool pcUp = false;
-  if (launched && host_alive()) {
+  if (launched && !rebuildFails && !fullFrameFails && host_alive()) {
     std::cout << "\n--- UA-2: the PC viewer connects next (it asks for no backend) ---\n";
     using namespace remote60::native_poc::viewer;
     args.codec = "h264";
@@ -424,7 +739,7 @@ int wmain(int, wchar_t**) {
               seenVersion = f.version;
               ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
               if (!f.synthetic) ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
-              pcSeen.Add(Seen{qpc_now_us(), f.captureUs, f.key});
+              pcSeen.Add(Seen{qpc_now_us(), f.captureUs, f.key, f.synthetic});
             }
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -491,6 +806,11 @@ int wmain(int, wchar_t**) {
     CloseHandle(hostPi.hThread);
   }
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+  {
+    // r2: the whole host log, kept for the evidence where the caller says (REMOTE60_E2E_HOST_LOG_COPY=<file>).
+    wchar_t keep[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_HOST_LOG_COPY", keep, MAX_PATH) > 0) CopyFileW(hostLogPath.c_str(), keep, FALSE);
+  }
   if (job) CloseHandle(job);
   if (secure) CloseHandle(secure);
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());

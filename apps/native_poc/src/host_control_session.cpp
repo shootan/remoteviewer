@@ -389,6 +389,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
 #endif
   // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
   clientSession.injectedInput.BeginServe(servedEpoch);
+  // capture-lifecycle r3 (Codex N2 end): this Serve()'s own sequence -- its backend requests carry it, its end
+  // names it.
+  const uint64_t servedSeq =
+      (clientSession.backendServeSeq.fetch_add(1, std::memory_order_acq_rel) + 1) & kBackendServeSeqMask;
   // A new session starts with the stream on, exactly like the first client of a fresh
   // process. The previous session's disconnect turned it off, and a client that never
   // sends stream-state (the Windows client) would otherwise stare at a black screen
@@ -1909,7 +1913,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-        mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend});
+        // capture-lifecycle r2 (Codex N3): the change this session has asked for and the main loop has not yet
+        // handled -- a later question (backend 0) is answered NotYetApplied until it is.
+        capture.backendChangePostedKey.store((servedEpoch << 32) | req.seq, std::memory_order_release);
+        mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend, servedSeq});
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
                   << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
@@ -1921,31 +1928,37 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // 10-26); past that, as it is now with NotYetApplied, and the client asks again (backend 0 = a question,
       // answered at once).
       if ((req.flags & kDesktopBackendRequestFlagStatusV1) != 0) {
-        bool applied = true;
-        if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-          const uint64_t key = (servedEpoch << 32) | req.seq;
-          const uint64_t until = GetTickCount64() + 250;
-          applied = false;
-          while (GetTickCount64() < until && clientSession.epoch.load(std::memory_order_acquire) == servedEpoch) {
-            if (capture.backendAppliedKey.load(std::memory_order_acquire) == key) {
-              applied = true;
-              break;
-            }
-            Sleep(5);
+        // capture-lifecycle r2 (Codex N3): "applied" = the status published is THIS session's (the main loop has
+        // made servedEpoch the owner -- never the previous session's choice as this connection's answer) and no
+        // change of this session is waiting (for a change: this one has been handled; for a question: the last
+        // change asked, if any). Waited for up to 250 ms, else answered as it is with NotYetApplied.
+        // r3 (Codex N3-host): every look is ONE snapshot (owner, status, handled key -- host_backend_status_board.hpp),
+        // and a snapshot of another owner answers nothing for this session (fields 0, NotYetApplied).
+        const bool isChange = req.backend == 1 || req.backend == 2 || req.backend == 3;
+        const uint64_t requestKey = (servedEpoch << 32) | req.seq;
+        const uint64_t posted = capture.backendChangePostedKey.load(std::memory_order_acquire);
+        const uint64_t until = GetTickCount64() + 250;
+        BackendStatusAnswer answer;
+        for (;;) {
+          answer = DecideBackendStatusAnswer(capture.backendStatus.Read(), servedEpoch, isChange, requestKey, posted);
+          if (answer.applied || GetTickCount64() >= until ||
+              clientSession.epoch.load(std::memory_order_acquire) != servedEpoch) {
+            break;
           }
+          Sleep(5);
         }
-        const uint64_t packed = capture.backendStatusPacked.load(std::memory_order_acquire);
+        const bool applied = answer.applied;
         ControlDesktopBackendStatusMessage st{};
         st.header.magic = remote60::native_poc::kMagic;
         st.header.type = static_cast<uint16_t>(MessageType::ControlDesktopBackendStatus);
         st.header.size = static_cast<uint16_t>(sizeof(st));
         st.seq = req.seq;
-        st.requested = static_cast<uint16_t>(packed & 0xffffu);
-        st.effective = static_cast<uint16_t>((packed >> 16) & 0xffffu);
-        st.active = static_cast<uint16_t>((packed >> 32) & 0xffffu);
-        st.flags = static_cast<uint16_t>((packed >> 48) & 0xffffu);
+        st.requested = answer.requested;
+        st.effective = answer.effective;
+        st.active = answer.active;
+        st.flags = answer.flags;
         if (!applied) st.flags |= kDesktopBackendStatusFlagNotYetApplied;
-        st.changeCount = capture.backendStatusChanges.load(std::memory_order_acquire);
+        st.changeCount = answer.changes;
         st.hostSendQpcUs = qpc_now_us();
         std::cout << "[native-video-host][control] desktop-backend-status seq=" << st.seq << " requested=" << st.requested
                   << " effective=" << st.effective << " active=" << st.active << " flags=0x" << std::hex << st.flags
@@ -2171,6 +2184,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch &&
       !clientSession.controlResumePending.load(std::memory_order_acquire)) {
     clientSession.streamControlActive.store(false, std::memory_order_release);
+    // capture-lifecycle r2 (Codex N2): the real end of this logical session -- its backend choice ends with it.
+    clientSession.backendSessionEnded.store(PackBackendSessionEnd(servedEpoch, servedSeq), std::memory_order_release);
   }
 }
 

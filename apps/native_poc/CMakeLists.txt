@@ -1409,6 +1409,19 @@ add_executable(remote60_host_kick_test
 )
 target_include_directories(remote60_host_kick_test PRIVATE src)
 
+# capture-lifecycle r2 (Codex N2): the owner of a viewer's desktop-backend choice and the mailbox take under it,
+# on the epoch boundary orders (host_backend_owner.hpp).
+add_executable(remote60_host_backend_owner_test
+  src/host_backend_owner_test.cpp
+)
+target_include_directories(remote60_host_backend_owner_test PRIVATE src)
+
+# capture-lifecycle r3 (Codex N3-host): request 34's answer from one status snapshot.
+add_executable(remote60_host_backend_status_board_test
+  src/host_backend_status_board_test.cpp
+)
+target_include_directories(remote60_host_backend_status_board_test PRIVATE src)
+
 # P11 on the real MF H264Encoder: the flush epoch rides the accepted-input FIFO, a pre-flush AU
 # surfacing after the flush is reproduced and then gated (the new epoch's first send is its IDR),
 # the gate's rules and bounds on fabricated AUs, and the hold as observed on this backend.

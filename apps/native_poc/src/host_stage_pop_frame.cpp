@@ -92,10 +92,28 @@ bool ask_full_frame(HostContext& hx, uint64_t nowUs, CaptureState::KickMiss why,
   auto& capture = hx.capture;
   if (why != CaptureState::KickMiss::NothingCached && why != CaptureState::KickMiss::NotCurrent) return false;
   if (capture.windowModeActive.load(std::memory_order_acquire)) return false;
+  // r3/r4 (Codex N1-a): no capture is running (its restart failed after the detach). Another recovery's
+  // failure is that recovery's to retry -- no ask. A full-frame reacquire's OWN failure is retried as this
+  // episode's next ask (the same budget, interval and source key below), once the restart's backoff has run:
+  // an attempt the restart would refuse unseen is never counted as an ask.
+  if (capture.restartPending) {
+    if (capture.restartOwner != CaptureState::RestartOwner::FullFrame) return false;
+    if (nowUs < capture.restartRetryAtUs) return true;
+  }
   // A capture (re)attached just now delivers its own first frame (a new duplication / WGC session).
   const uint64_t attachedUs = capture.lastAttachUs.load(std::memory_order_acquire);
   if (attachedUs != 0 && nowUs >= attachedUs && nowUs - attachedUs < CaptureState::kFullFrameAttachGraceUs) return true;
-  if (!capture.fullFrameEpisodeOpen.exchange(true, std::memory_order_acq_rel)) {
+  // r2 (Codex N4): the budget is the current source's. A closed episode (a frame of the current provenance came)
+  // or another source (desktop / stream generation, control session, an external (re)attach) opens a new one;
+  // the same source asking again keeps counting -- never reset per kick, poll or its own reacquire.
+  const CaptureState::FullFrameSourceKey key{capture.desktopGeneration.load(std::memory_order_acquire),
+                                             capture.streamGenerationState.load(std::memory_order_acquire),
+                                             hx.clientSession.epoch.load(std::memory_order_acquire),
+                                             capture.fullFrameSourceBoundary};
+  const bool wasOpen = capture.fullFrameEpisodeOpen.exchange(true, std::memory_order_acq_rel);
+  if (!wasOpen || key != capture.fullFrameEpisodeKey) {
+    capture.fullFrameEpisodeKey = key;
+    ++capture.fullFrameEpisodes;
     capture.fullFrameAsks = 0;
     capture.fullFrameAskedAtUs = 0;
   }
@@ -106,16 +124,18 @@ bool ask_full_frame(HostContext& hx, uint64_t nowUs, CaptureState::KickMiss why,
   const char* how = "none";
   if (hx.backend.active == DesktopCaptureBackend::Dxgi && capture.dxgiStarted) {
     hx.res.dxgiCaptureSession.RequestFullFrame();
-#ifdef REMOTE60_STREAM_TEST_SEAM
-    capture.seamStillFullFrameAsked.store(true, std::memory_order_release);  // the still-screen seam lets it pass
-#endif
     how = "dxgi";
   } else if (hx.backend.active == DesktopCaptureBackend::Wgc) {
     capture.wgcFullFrameRestartWanted.store(true, std::memory_order_release);
     how = "wgc-restart";
   }
+  // Two different bounds, logged apart: this host asks at most kMaxFullFrameAsks times per episode; the DXGI
+  // library makes its duplication anew at most 3 times per ask ("full-frame reacquire: duplication made anew
+  // attempt=", capture_backend_dxgi.cpp) -- an episode's remakes are at most asks x 3, not 3.
   std::cout << "[native-video-host] full-frame ask=" << capture.fullFrameAsks << "/" << CaptureState::kMaxFullFrameAsks
-            << " via=" << how << " from=" << where
+            << " episode=" << capture.fullFrameEpisodes << " desktopGen=" << key.desktopGeneration
+            << " streamGen=" << key.streamGeneration << " epoch=" << key.sessionEpoch
+            << " source=" << key.sourceBoundary << " via=" << how << " from=" << where
             << " reason=" << (why == CaptureState::KickMiss::NothingCached ? "nothing-cached" : "not-current") << "\n";
   return capture.fullFrameAsks < CaptureState::kMaxFullFrameAsks;
 }

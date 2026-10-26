@@ -159,10 +159,14 @@ class DesktopBackendControl {
   void SetHostAnswers(bool answers) { hostAnswers_.store(answers, std::memory_order_release); }
   bool HostAnswers() const { return hostAnswers_.load(std::memory_order_acquire); }
   // Ask what runs now, changing nothing. False (nothing queued) toward a host that does not answer.
+  // capture-lifecycle r2 (Codex N3): a question never replaces a change. A change and a question pending
+  // together go out as the change alone -- its answer (asked for toward a host that answers) IS the status; a
+  // question taken first goes out first and a change after it is still sent. One message per ConsumePending.
   bool Query();
 
 private:
-  std::atomic<bool> pending_{false};
+  std::atomic<bool> pending_{false};       // a change (backend_) is waiting
+  std::atomic<bool> queryPending_{false};  // r2 N3: a question is waiting -- kept apart from the change
   std::atomic<uint32_t> nextSeq_{0};
   std::atomic<uint16_t> backend_{2};
   std::atomic<bool> hostAnswers_{false};

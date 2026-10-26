@@ -757,6 +757,8 @@ int wmain(int argc, wchar_t** argv) {
   bool captureFallback = false;
   bool foreignPeer = false;
   bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
+  bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
+  bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
   bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -773,6 +775,8 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
     if (a == L"--still-screen") stillScreen = true;
+    if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
+    if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
     if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
@@ -929,7 +933,10 @@ int wmain(int argc, wchar_t** argv) {
                                   // capture-lifecycle r1 (PS): this PC's desktop is never still (60 content
                                   // updates/s measured 10-26, a user at work on it) -- the test build stands
                                   // it in for a still logon screen (host_capture_session.cpp).
-                                  stillScreen ? std::wstring(L"GNLINK_STREAM_TEST_STILL_SCREEN=1") : std::wstring());
+                                  stillScreen ? std::wstring(stillNoFirst        ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
+                                                             : stillPointerFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst"
+                                                                                 : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
+                                              : std::wstring());
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
         started);
@@ -1502,7 +1509,8 @@ int wmain(int argc, wchar_t** argv) {
   // datagrams. What differs from the product, said once: the worker serves "Winlogon" on this test user's
   // "Default" desktop (GNLINK_STREAM_TEST_DESKTOP_ALIAS -- the name it is shown, desktop_name_seam.hpp), so
   // the pixels are this desktop's; that desktop is made STILL by the test build
-  // (GNLINK_STREAM_TEST_STILL_SCREEN: of what duplication reports, only what a still screen gives passes);
+  // (GNLINK_STREAM_TEST_STILL_SCREEN: the capture library takes every acquire but a new duplication's first
+  // as a timeout -- so the full-frame reacquire runs its real duplication remake);
   // the present thread stamps what the renderer would show (no window).
   if (stillScreen && connected) {
     std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
@@ -1545,9 +1553,67 @@ int wmain(int argc, wchar_t** argv) {
     };
     // The viewer started in its picker; the worker's capture comes up behind it.
     Sleep(1500);
-    pick_after("A (still attached)", 3000);
-    pick_after("B (after the idle detach)", 10000);
-    pick_after("B2 (after the idle detach, again)", 10000);
+    if (!stillNoFirst) {
+      pick_after("A (still attached)", 3000);
+      pick_after("B (after the idle detach)", 10000);
+      pick_after("B2 (after the idle detach, again)", 10000);
+      // r2 (Codex): the full-frame reacquire ran the capture library's REAL duplication remake -- not a seam in
+      // the host -- and that remake's first frame is what was delivered.
+      check("PS: THE REACQUIRE RAN THE LIBRARY'S DUPLICATION REMAKE (\"duplication made anew\")",
+            host.Count("full-frame reacquire: duplication made anew") >= 1,
+            std::to_string(host.Count("full-frame reacquire: duplication made anew")) + " remakes");
+      check("PS: ...and its first frame was delivered (\"reacquire: delivered after\")",
+            host.Count("full-frame reacquire: delivered after") >= 1,
+            std::to_string(host.Count("full-frame reacquire: delivered after")) + " deliveries");
+      if (stillPointerFirst) {
+        // r3 (Codex M9): the remade duplication's first acquire is pointer-only (the test build says so) -- it does
+        // NOT answer the request; the next acquire with an image does. In that order.
+        const std::string log = host.log();
+        const size_t declined = log.find("full-frame reacquire: a pointer-only acquire does not answer it");
+        const size_t delivered = log.find("full-frame reacquire: delivered after");
+        check("PS pointer-first: A POINTER-ONLY ACQUIRE DID NOT ANSWER THE FULL-FRAME REQUEST (request kept)",
+              declined != std::string::npos);
+        check("PS pointer-first: ...the image acquire after it did (delivered after the refusal)",
+              declined != std::string::npos && delivered != std::string::npos && delivered > declined);
+      }
+    } else {
+      // r2 contrast (=nofirst): the same pick with a capture that gives NOTHING, not even a remade
+      // duplication's first frame. Nothing is shown (so the still run's picture came from the remake), the
+      // library gives up after its bounded remakes, the host stops asking at its bound, the worker lives on.
+      std::cout << "\n--- PS contrast: a still screen that gives no frame at all ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(3000);
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      check("PS contrast: NOTHING IS SHOWN (no frame from a capture that gives none)", frames_since(t0) == 0,
+            std::to_string(frames_since(t0)) + " frames");
+      const size_t remakes = host.Count("full-frame reacquire: duplication made anew");
+      check("PS contrast: the library's duplication remake ran (\"duplication made anew\")", remakes >= 1,
+            std::to_string(remakes) + " remakes");
+      check("PS contrast: ...and gave up, bounded (\"reacquire gave up after 3\")",
+            host.Count("full-frame reacquire gave up after 3") >= 1,
+            std::to_string(host.Count("full-frame reacquire gave up after 3")) + " give-ups");
+      const size_t asks = host.Count("full-frame ask=");
+      check("PS contrast: the host's asks stop at their bound (3/3 reached, never 4)",
+            host.Count("full-frame ask=3/3") >= 1 && host.Count("full-frame ask=4/") == 0, std::to_string(asks) + " asks");
+      Sleep(4000);
+      check("PS contrast: ...and stay stopped (no new ask in the next 4 s: no loop)", host.Count("full-frame ask=") == asks,
+            std::to_string(host.Count("full-frame ask=")) + " asks now");
+      // r2 (Codex N4): a NEW source -- the idle detach, then the pick's reattach -- gets its own bounded budget;
+      // the spent one does not carry over (r1: it did, and the new source was never asked at all).
+      ctx.control.streamState.Request(false);
+      Sleep(10000);
+      const int asksBefore = host.Count("full-frame ask=");
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      const int asksNew = host.Count("full-frame ask=") - asksBefore;
+      check("PS contrast: A NEW SOURCE (idle detach -> reattach) GETS A NEW BUDGET (asks again, from 1/3)",
+            asksNew >= 1 && host.Count("full-frame ask=1/3") >= 2, std::to_string(asksNew) + " new asks");
+      check("PS contrast: ...bounded again (3 at most for that source, never 4)",
+            asksNew <= 3 && host.Count("full-frame ask=4/") == 0, std::to_string(asksNew) + " new asks");
+      check("PS contrast: the worker is still serving", worker_alive());
+    }
     check("PS: the worker never asked for WGC before login (r10 T2 path not taken)",
           host.log().find("capture cannot continue on the logon desktop") == std::string::npos &&
               host.log().find("wgc requested") == std::string::npos,
