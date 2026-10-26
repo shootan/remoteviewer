@@ -15,11 +15,16 @@ package com.remote60.androiddirect
  *
  * Stored on its own key, apart from the bitrate/fps schema, so reading it never changes those.
  * Unset means WEAK (the default); an explicit OFF is kept.
+ *
+ * sh-strength r2 (Codex codex_field_0162_0231.md §4, user 10-22 "약하게랑 강하게랑 차이가 없어"): STRONG is 0.60
+ * (was 0.35). The stored code stays "strong", so a phone that had chosen STRONG keeps STRONG and gets the new
+ * strength -- by design: the choice is "the stronger one", and the UI shows the number. OFF, WEAK and unset are
+ * unchanged.
  */
 enum class SharpnessLevel(val code: String, val strength: Float) {
     OFF("off", 0f),
     WEAK("weak", 0.20f),
-    STRONG("strong", 0.35f);
+    STRONG("strong", 0.60f);
 
     val filtered: Boolean get() = this != OFF
 

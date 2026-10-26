@@ -63,7 +63,7 @@ class SharpenPathPolicyTest {
     fun weakToStrong_isAStrengthChange_notAProducerChange() {
         val (p, gen) = start(SharpnessLevel.WEAK)
         p.rendererReady(gen)
-        assertEquals(listOf(Command.SetStrength(gen, 0.35f)), p.select(SharpnessLevel.STRONG))
+        assertEquals(listOf(Command.SetStrength(gen, 0.60f)), p.select(SharpnessLevel.STRONG))
         assertEquals(Path.LIVE, p.path)
     }
 
@@ -234,7 +234,7 @@ class SharpenPathPolicyTest {
     fun choiceDuringStart_offReleases_strengthGoesWithReady() {
         val (p, gen) = start(SharpnessLevel.WEAK)
         assertEquals(emptyList<Command>(), p.select(SharpnessLevel.STRONG))
-        assertEquals(Command.SetStrength(gen, 0.35f), p.rendererReady(gen)[1])
+        assertEquals(Command.SetStrength(gen, 0.60f), p.rendererReady(gen)[1])
         val (q, g2) = start(SharpnessLevel.WEAK)
         assertEquals(listOf(Command.DetachDecoder, Command.ReleaseRenderer(g2)), q.select(SharpnessLevel.OFF))
         assertEquals(listOf(Command.BindDirect), q.rendererReleased(g2, true))
@@ -247,7 +247,7 @@ class SharpenPathPolicyTest {
         assertEquals(SharpnessLevel.STRONG, SharpnessLevel.fromStored("strong"))
         assertEquals(SharpnessLevel.WEAK, SharpnessLevel.fromStored("bogus"))
         assertEquals(0.20f, SharpnessLevel.WEAK.strength)
-        assertEquals(0.35f, SharpnessLevel.STRONG.strength)
+        assertEquals(0.60f, SharpnessLevel.STRONG.strength)
         assertFalse(SharpnessLevel.OFF.filtered)
     }
 }
