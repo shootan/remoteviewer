@@ -25,6 +25,8 @@
 #include <mutex>
 #include <optional>
 
+#include "host_backend_owner.hpp"
+
 namespace remote60::native_poc {
 
 // --- request payloads ---
@@ -140,6 +142,26 @@ class MainLoopMailbox {
   }
   std::optional<BackendRequest> TakeBackendRequest(uint64_t currentEpoch = 0) {
     return TakeForEpoch(backend_, currentEpoch);
+  }
+  // capture-lifecycle r2 (Codex N2): taken under the owner the main loop settled THIS tick (ownerEpoch, from its
+  // one epoch read). Older -> dropped; NEWER -> left in place for the tick that makes its epoch the owner
+  // first (TakeForEpoch would have dropped it, and the new session's choice with it). See host_backend_owner.hpp.
+  std::optional<BackendRequest> TakeBackendRequestForOwner(uint64_t ownerEpoch) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!backend_) return std::nullopt;
+    switch (ClassifyBackendRequest(backend_->epoch, ownerEpoch)) {
+      case BackendRequestFate::Leave:
+        return std::nullopt;
+      case BackendRequestFate::Drop:
+        backend_.reset();
+        ++staleDropped_;
+        return std::nullopt;
+      case BackendRequestFate::Handle:
+        break;
+    }
+    std::optional<BackendRequest> out;
+    out.swap(backend_);
+    return out;
   }
   // Returns the accumulated reason mask and clears it; kKeyframeReasonNone when nothing pending.
   uint32_t TakeKeyframeReasons(uint16_t* outViewerReason = nullptr) {

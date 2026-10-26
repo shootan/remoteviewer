@@ -90,6 +90,9 @@ struct BootstrapFrameCache {
   // capture-lifecycle r1: the input desktop it was published under, and that desktop's generation.
   std::wstring desktopName;
   uint64_t desktopGeneration = 0;
+  // capture-lifecycle r2 (Codex N1): the attachment that made it (its cookie) -- a cached picture is only ever
+  // the current attachment's.
+  uint64_t attachmentCookie = 0;
 };
 
 // Capture session state (Phase 1-3a state struct): everything the capture path shares that is
@@ -271,18 +274,50 @@ struct CaptureState {
   // came before the change was seen are not cached at all. A look that could not tell is no change.
   std::wstring desktopName;                          // under bootstrapCacheMu (tracker writes, publish reads)
   std::atomic<uint64_t> desktopGeneration{0};
+  // capture-lifecycle r2 (Codex N1): the desktop generation the CURRENT attachment was made under (stamped when
+  // it is made -- DetachCaptureSession, which every (re)attach runs first). A frame carries its attachment's
+  // cookie; with that cookie current, this is the frame's own provenance. A confirmed change makes it stale at
+  // once: nothing of that attachment is adopted (raw queue or cache) until a new attachment is made.
+  std::atomic<uint64_t> attachmentDesktopGen{0};
+  // An unknown look, or a first look at another name: not an edge (no restart, never "locked"), but the
+  // picture's continuity is no longer known -- the cache is dropped and nothing is cached until a look sees the
+  // confirmed desktop again.
+  std::atomic<bool> desktopSuspect{false};
+  std::atomic<uint64_t> provenanceRefused{0};        // frames refused at adoption (log rate limit)
+  std::atomic<uint64_t> firstAdoptedLoggedCookie{0};  // r2: the attachment whose first adopted frame was logged
   std::atomic<uint64_t> desktopChangeDetectedUs{0};
   std::wstring desktopCandidate;                     // main loop only
   uint32_t desktopCandidateSeen = 0;
   uint64_t desktopProbeAtUs = 0;
   static constexpr uint64_t kDesktopProbeIntervalUs = 100000;
   // PS-A: the bounded full-frame reacquire when nothing cached may be shown (main loop only). An episode
-  // ends with the next real published frame (PublishFrame clears fullFrameEpisodeOpen).
+  // ends with the next real published frame of the current provenance (PublishFrame clears
+  // fullFrameEpisodeOpen -- a refused frame never does).
+  // r2 (Codex N4): an episode belongs to ONE source: desktop generation, stream generation, control session and
+  // the source boundary below. Any of them moved -> a new source, a new bounded budget; the same source keeps
+  // its budget across its own reacquire (DXGI duplication remakes, the full-frame WGC restart).
+  struct FullFrameSourceKey {
+    uint64_t desktopGeneration = 0;
+    uint64_t streamGeneration = 0;
+    uint64_t sessionEpoch = 0;
+    uint64_t sourceBoundary = 0;
+    bool operator==(const FullFrameSourceKey& o) const {
+      return desktopGeneration == o.desktopGeneration && streamGeneration == o.streamGeneration &&
+             sessionEpoch == o.sessionEpoch && sourceBoundary == o.sourceBoundary;
+    }
+    bool operator!=(const FullFrameSourceKey& o) const { return !(*this == o); }
+  };
+  FullFrameSourceKey fullFrameEpisodeKey;
+  uint64_t fullFrameEpisodes = 0;  // for the log
+  // Bumped by every capture (re)attach (DetachCaptureSession) -- idle reattach, backend switch, climb-back,
+  // desktop rebuild, selection, geometry -- EXCEPT the full-frame WGC restart, the episode's own reacquire
+  // (fullFrameOwnRestart, set around it by the backend stage). Main loop only.
+  uint64_t fullFrameSourceBoundary = 0;
+  bool fullFrameOwnRestart = false;
   uint64_t fullFrameAskedAtUs = 0;
   uint32_t fullFrameAsks = 0;
   std::atomic<bool> fullFrameEpisodeOpen{false};
   std::atomic<bool> wgcFullFrameRestartWanted{false};  // WGC: the main loop's bounded restart does it
-  std::atomic<bool> seamStillFullFrameAsked{false};    // TEST BUILD ONLY: the still-screen seam's "asked"
   // When the current capture attachment began (DetachCaptureSession stamps it: every (re)attach detaches
   // first). A fresh attachment's own first frame is on its way: no full-frame ask in the first
   // kFullFrameAttachGraceUs (a second restart of a capture 10 ms old helps nobody).
@@ -293,6 +328,11 @@ struct CaptureState {
   std::atomic<uint64_t> backendStatusPacked{0};
   std::atomic<uint32_t> backendStatusChanges{0};
   std::atomic<uint64_t> backendAppliedKey{0};
+  // capture-lifecycle r2 (Codex N2/N3): the owner epoch backendStatusPacked was published for (stored after it,
+  // read around it by the control thread), and the (epoch<<32 | seq) of the last backend CHANGE a control thread
+  // posted (a question is answered NotYetApplied while that one is not yet handled).
+  std::atomic<uint64_t> backendStatusEpoch{0};
+  std::atomic<uint64_t> backendChangePostedKey{0};
   static constexpr uint64_t kFullFrameAttachGraceUs = 500000;
   static constexpr uint64_t kFullFrameAskIntervalUs = 1000000;
   static constexpr uint32_t kMaxFullFrameAsks = 3;

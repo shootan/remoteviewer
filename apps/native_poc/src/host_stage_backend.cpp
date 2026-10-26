@@ -45,6 +45,7 @@
 #include "host_abr.hpp"
 #include "host_args.hpp"
 #include "prelogin_logon_desktop.hpp"
+#include "host_backend_owner.hpp"
 #include "host_backend_policy.hpp"
 #include "host_bgra_scale.hpp"
 #include "host_bottleneck.hpp"
@@ -105,6 +106,8 @@ void publish_backend_status(HostContext& hx) {
   if (capture.backendStatusPacked.exchange(packed, std::memory_order_acq_rel) != packed) {
     capture.backendStatusChanges.fetch_add(1, std::memory_order_acq_rel);
   }
+  // r2 (Codex N3): ...of this owner (stored after the packed status: the control thread reads it around it).
+  capture.backendStatusEpoch.store(backend.owner.ownerEpoch, std::memory_order_release);
 }
 }  // namespace
 
@@ -175,15 +178,21 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   // A resume / a re-sent Hello / a selection of the same session keeps the epoch, and so the choice.
   // Only the request is reset here: the climb-back below applies it while a stream is active, a reattach
   // starts from it -- no capture work for a stream nobody watches. Before login nothing is asked anyway.
+  // r2 (Codex N2): ONE epoch read for this tick -- the owner it settles is the one every backend request below is
+  // taken and marked under; its real end (backendSessionEndedEpoch) puts the choice back too, once.
+  const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
   {
-    const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
-    if (curEpoch != backend.ownerEpoch) {
-      backend.ownerEpoch = curEpoch;
+    const BackendOwnerStep ownerStep = StepBackendOwner(
+        backend.owner, curEpoch, clientSession.backendSessionEndedEpoch.load(std::memory_order_acquire));
+    if (ownerStep.ownerChanged) {
       std::cout << "[native-video-host][control] backend-owner epoch=" << curEpoch
                 << " requested=" << desktop_capture_backend_name(backend.requested)
                 << " active=" << desktop_capture_backend_name(backend.active) << "\n";
+    }
+    if (ownerStep.ownerChanged || ownerStep.ownerEnded) {
       if (!beforeLogin && backend.requested != backend.startupRequested) {
-        std::cout << "[native-video-host][control] desktop-backend-reset new-session epoch=" << curEpoch
+        std::cout << "[native-video-host][control] desktop-backend-reset "
+                  << (ownerStep.ownerChanged ? "new-session" : "session-ended") << " epoch=" << curEpoch
                   << " requested=" << desktop_capture_backend_name(backend.requested)
                   << " -> host-default=" << desktop_capture_backend_name(backend.startupRequested)
                   << " effective=" << desktop_capture_backend_name(
@@ -198,34 +207,62 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
 
   // capture-lifecycle r1 (PS-A / UA-1, Codex §4 -- one contract): the input desktop tracker, owned here.
   // A confirmed change clears the bootstrap cache and moves the desktop generation.
-  capture.TrackInputDesktop(qpc_now_us());
-  // UA-1: a WGC desktop capture is rebuilt on every confirmed desktop change, whatever was requested --
-  // the 10-23 field: requested=active=WGC never crossed a UAC prompt (no frames of it, then black after
-  // it), and two reconnects were what rebuilt it. Once per change; bounded retries with backoff.
+  if (capture.TrackInputDesktop(qpc_now_us())) {
+    // r2 (Codex N1): the media fence comes FIRST, whatever a rebuild below does or fails to do -- the input
+    // epoch moves (the sender drops every AU encoded before it), the raw frame waiting for the encoder goes,
+    // and a key is owed. Nothing captured on the desktop that was crosses the edge; the attachment's later
+    // frames are refused at adoption (PublishFrame: their attachment's desktop generation is stale).
+    capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+    capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+    capture.lastCallbackUs.store(0, std::memory_order_release);
+    encoder.ResetTimelineAnchors(capture);
+    encoder.RequestKey(kHostKeyReasonCaptureRestart);
+    capture.FlushCapturePipelineState(res, frameGating, stats, "desktop-edge");
+    std::cout << "[native-video-host][desktop] edge fence desktopGen="
+              << capture.desktopGeneration.load(std::memory_order_acquire) << " atUs=" << qpc_now_us() << "\n";
+  }
+  // UA-1 / r2 N1: the running capture is rebuilt after every confirmed desktop change, whatever backend --
+  // the 10-23 field: requested=active=WGC never crossed a UAC prompt (no frames of it, then black after it),
+  // and two reconnects were what rebuilt it. The rule is the provenance itself: the attachment running was
+  // made under an older desktop generation. Detached (idle) -> nothing to do, the reattach is made under the
+  // current one. No stream -> nothing now (no capture work for a stream nobody watches); a resume rebuilds.
+  // Bounded per desktop generation, backoff between attempts.
   {
     const uint64_t dgen = capture.desktopGeneration.load(std::memory_order_acquire);
-    if (backend.wgcRebuiltForDesktopGen == 0) backend.wgcRebuiltForDesktopGen = dgen;  // the first look
-    if (dgen != backend.wgcRebuiltForDesktopGen) {
-      const bool applicable = streamActiveNow && desktopMode && !beforeLogin &&
-                              backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached;
+    const bool stale = capture.attachmentDesktopGen.load(std::memory_order_acquire) != dgen;
+    if (stale && streamActiveNow && !capture.idleDetached) {
+      if (backend.desktopRebuildGen != dgen) {
+        backend.desktopRebuildGen = dgen;
+        backend.desktopRebuildAttempts = 0;
+        backend.desktopRebuildRetryAtUs = 0;
+      }
       const uint64_t nowRebuildUs = qpc_now_us();
-      if (!applicable) {
-        backend.wgcRebuiltForDesktopGen = dgen;  // nothing running on WGC now: a later (re)attach is fresh anyway
-        backend.wgcRebuildAttempts = 0;
-      } else if (nowRebuildUs >= backend.wgcRebuildRetryAtUs) {
-        ++backend.wgcRebuildAttempts;
+      if (backend.desktopRebuildAttempts < DesktopBackendState::kMaxDesktopRebuildAttempts &&
+          nowRebuildUs >= backend.desktopRebuildRetryAtUs) {
+        ++backend.desktopRebuildAttempts;
         powerKeepalive.SetStreaming(true, true);
-        const bool ok = restart_capture_session(hx);
-        if (ok) restarted_capture("desktop-edge-wgc-rebuild");
-        std::cout << "[native-video-host][desktop] wgc-rebuild desktopGen=" << dgen << " attempt="
-                  << backend.wgcRebuildAttempts << " ok=" << (ok ? 1 : 0)
+        bool seamFail = false;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+        // TEST BUILD ONLY (capture-lifecycle r2): GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL=1 -- every rebuild for an
+        // odd desktop generation (the secure side of a round trip from Default) fails, as a rebuild that cannot
+        // open its capture would: what crosses an edge whose rebuild never comes.
+        {
+          const char* v = std::getenv("GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL");
+          seamFail = v && std::strcmp(v, "1") == 0 && (dgen % 2) == 1;
+        }
+#endif
+        const bool ok = !seamFail && restart_capture_session(hx);
+        if (ok) restarted_capture("desktop-edge-rebuild");
+        std::cout << "[native-video-host][desktop] rebuild desktopGen=" << dgen << " attempt="
+                  << backend.desktopRebuildAttempts << " ok=" << (ok ? 1 : 0)
                   << " active=" << desktop_capture_backend_name(backend.active) << "\n";
-        if (ok || backend.wgcRebuildAttempts >= DesktopBackendState::kMaxWgcRebuildAttempts) {
-          backend.wgcRebuiltForDesktopGen = dgen;
-          backend.wgcRebuildAttempts = 0;
-          backend.wgcRebuildRetryAtUs = 0;
-        } else {
-          backend.wgcRebuildRetryAtUs = nowRebuildUs + 500000ULL * backend.wgcRebuildAttempts;
+        if (!ok) {
+          backend.desktopRebuildRetryAtUs = nowRebuildUs + 500000ULL * backend.desktopRebuildAttempts;
+          if (backend.desktopRebuildAttempts >= DesktopBackendState::kMaxDesktopRebuildAttempts) {
+            // Fail closed: the old attachment's frames stay refused (no picture of the desktop that was);
+            // any later attach (reconnect, idle reattach, backend change) is made under this generation.
+            std::cout << "[native-video-host][desktop] rebuild gave up desktopGen=" << dgen << "\n";
+          }
         }
       }
     }
@@ -235,13 +272,15 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   if (capture.wgcFullFrameRestartWanted.exchange(false, std::memory_order_acq_rel) && streamActiveNow && desktopMode &&
       !beforeLogin && backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached) {
     powerKeepalive.SetStreaming(true, true);
+    capture.fullFrameOwnRestart = true;  // r2 (Codex N4): the episode's own reacquire keeps its budget
     const bool ok = restart_capture_session(hx);
+    capture.fullFrameOwnRestart = false;
     if (ok) restarted_capture("full-frame-wgc-restart");
     std::cout << "[native-video-host] full-frame wgc restart ok=" << (ok ? 1 : 0) << "\n";
   }
 
   publish_backend_status(hx);  // capture-lifecycle r1 (UA-2): whatever changed since the last tick
-  if (const auto backendReq = hx.mailbox.TakeBackendRequest(hx.clientSession.epoch.load(std::memory_order_acquire))) {
+  if (const auto backendReq = hx.mailbox.TakeBackendRequestForOwner(backend.owner.ownerEpoch)) {
     const uint32_t reqSeq = backendReq->seq;
     // capture-lifecycle r1 (UA-2): handled (applied, stored or refused) once this block ends -- the control
     // thread answers a status request then. A struct with its destructor at the block's end, every path.
@@ -252,7 +291,7 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
         publish_backend_status(hx);
         hx.capture.backendAppliedKey.store(key, std::memory_order_release);
       }
-    } appliedMark{hx, (hx.clientSession.epoch.load(std::memory_order_acquire) << 32) | reqSeq};
+    } appliedMark{hx, BackendRequestKey(backendReq->epoch, backend.owner.ownerEpoch, reqSeq)};  // r2 N2: its own epoch
     DesktopCaptureBackend nextRequested = backend.requested;
     const uint16_t requestedCode = static_cast<uint16_t>(backendReq->backend);
     DesktopCaptureBackend asked = backend.requested;
@@ -267,7 +306,10 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
       // dxgi-wedge-fix r1 (Codex B5): the request is STORED as the client's wish either way; what may
       // run is EffectiveRequested(), so an older APK's dxgi-on-connect cannot lift the quarantine.
       const DesktopCaptureBackend effective = backend.EffectiveRequested();
-      const bool restartNeeded = desktopActive && backend.active != effective;
+      // r2 (Codex N2): no capture work for a stream nobody watches -- inactive / detached, the choice is only
+      // stored; the next active attach (reattach: EffectiveRequested) or the climb-back applies it.
+      const bool restartNeeded =
+          desktopActive && streamActiveNow && !capture.idleDetached && backend.active != effective;
       if (backend.dxgiQuarantined && backend.requested == DesktopCaptureBackend::Dxgi) {
         std::cout << "[native-video-host][capture-quarantine] request seq=" << reqSeq
                   << " requested=dxgi effective=" << desktop_capture_backend_name(effective)

@@ -143,6 +143,10 @@ struct SessionState {
   // repaired and the picture must not blink. Set by the reader before it wakes the dispatcher,
   // cleared once the answer has gone out.
   std::atomic<bool> controlResumePending{false};
+  // capture-lifecycle r2 (Codex N2): the epoch whose control session really ended -- its Serve() returned while
+  // it was still current and no resume was pending (the same rule that turns its stream off). The main loop
+  // puts that owner's backend choice back to the host default, once (host_backend_owner.hpp).
+  std::atomic<uint64_t> backendSessionEndedEpoch{0};
   // Keys and buttons this session injected as down, released by the host whenever a Serve()
   // ends -- a resume or the end of the session. Lives here, not in Serve(), because a resume
   // leaves one Serve() and enters the next and the marks must survive that. (RV-01)

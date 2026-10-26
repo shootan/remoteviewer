@@ -42,6 +42,13 @@ struct DxgiDesktopCaptureConfig {
   // its pixels are never duplicated. Empty: any (the capture-attach test path).
   std::wstring requiredInputDesktop;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
+  // TEST BUILDS ONLY (capture-lifecycle r2): set solely by a host built with REMOTE60_STREAM_TEST_SEAM, never by
+  // the product. A desktop that never changes, emulated here so the full-frame reacquire's real duplication
+  // remake runs: Still = of what duplication reports, only the first frame of each (new) duplication is
+  // handed on; every other acquire is released and taken as a timeout. StillNoFirstFrame = not even that (the
+  // bounded remake gives up). Off = the product.
+  enum class TestStill : uint8_t { Off, Still, StillNoFirstFrame };
+  TestStill testStill = TestStill::Off;
 };
 
 // accumulatedFrames is what desktop duplication reported for this acquire: the number of

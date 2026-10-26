@@ -94,6 +94,7 @@ struct DxgiDesktopCaptureSession::Impl {
   // most kMaxFullFrameRecreates times per request.
   std::atomic<uint64_t> fullFrameRequestedUs{0};
   uint32_t fullFrameRecreates = 0;
+  bool testDeliveredSinceDuplication = false;  // TestStill: the current duplication's first frame went out
   static constexpr uint64_t kFullFrameRecreateAfterUs = 150000;
   static constexpr uint32_t kMaxFullFrameRecreates = 3;
 
@@ -331,6 +332,7 @@ struct DxgiDesktopCaptureSession::Impl {
 
   bool recreate_duplication(std::string* detailOut) {
     duplication.Reset();
+    testDeliveredSinceDuplication = false;
 
     Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
     DXGI_OUTPUT_DESC desc{};
@@ -458,7 +460,23 @@ struct DxgiDesktopCaptureSession::Impl {
       const HRESULT hr = duplication->AcquireNextFrame(config.acquireTimeoutMs, &frameInfo, &resource);
       if (progress) progress->lastAcquireHr.store(static_cast<int32_t>(hr), std::memory_order_release);
       markProgress();
-      if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+      // TEST BUILDS ONLY (config.testStill): an acquire a still desktop would not have given is released and
+      // taken as the timeout it would have been.
+      bool testFirstOfDuplication = false;
+      bool idle = hr == DXGI_ERROR_WAIT_TIMEOUT;
+      if (SUCCEEDED(hr) && config.testStill != DxgiDesktopCaptureConfig::TestStill::Off) {
+        // (Its first acquire that carries a desktop IMAGE -- a pointer-only one does not; see below.)
+        testFirstOfDuplication = config.testStill == DxgiDesktopCaptureConfig::TestStill::Still &&
+                                 !testDeliveredSinceDuplication && frameInfo.LastPresentTime.QuadPart != 0;
+        if (!testFirstOfDuplication) {
+          duplication->ReleaseFrame();
+          resource.Reset();
+          idle = true;
+        } else {
+          testDeliveredSinceDuplication = true;
+        }
+      }
+      if (idle) {
         // The routine 100ms idle path -- markProgress above already refreshed the heartbeat, so a
         // static desktop keeps the worker "young" and never trips the wedge watchdog.
         ++stats.timeouts;
@@ -592,13 +610,18 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       enterPhase(CaptureWorkerPhase::FrameHandler);
-      // capture-lifecycle r1 (PS-A): the frame a full-frame request waits for -- whatever this acquire
-      // carried, its surface is the current desktop image; handed on as content (at least 1 accumulated).
+      // capture-lifecycle r1 (PS-A): the frame a full-frame request waits for, handed on as content (at least 1
+      // accumulated). r2: only an acquire that carries a desktop IMAGE (LastPresentTime != 0) answers it -- a
+      // pointer-only acquire's surface may hold no image at all (a new duplication's first one, measured
+      // 10-26: delivered as "the full frame", it was black -- luma spread 0). That one goes on as what it is
+      // (pointer only) and the request stays open (the bounded remake above still runs out).
       uint32_t handedAccumulated = frameInfo.AccumulatedFrames;
-      if (fullFrameRequestedUs.exchange(0, std::memory_order_acq_rel) != 0) {
+      if (testFirstOfDuplication && handedAccumulated == 0) handedAccumulated = 1;  // a new duplication's whole image
+      const bool carriesImage = frameInfo.LastPresentTime.QuadPart != 0;
+      if (carriesImage && fullFrameRequestedUs.exchange(0, std::memory_order_acq_rel) != 0) {
         if (handedAccumulated == 0) handedAccumulated = 1;
         log("capture", "full-frame reacquire: delivered after " + std::to_string(fullFrameRecreates) +
-                           " duplication(s) content=" + (frameInfo.LastPresentTime.QuadPart != 0 ? "1" : "0"));
+                           " duplication(s) content=1");
         fullFrameRecreates = 0;
       }
       try {

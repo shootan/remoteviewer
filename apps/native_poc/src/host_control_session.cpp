@@ -1909,6 +1909,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
+        // capture-lifecycle r2 (Codex N3): the change this session has asked for and the main loop has not yet
+        // handled -- a later question (backend 0) is answered NotYetApplied until it is.
+        capture.backendChangePostedKey.store((servedEpoch << 32) | req.seq, std::memory_order_release);
         mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend});
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
@@ -1921,20 +1924,30 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // 10-26); past that, as it is now with NotYetApplied, and the client asks again (backend 0 = a question,
       // answered at once).
       if ((req.flags & kDesktopBackendRequestFlagStatusV1) != 0) {
-        bool applied = true;
-        if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-          const uint64_t key = (servedEpoch << 32) | req.seq;
-          const uint64_t until = GetTickCount64() + 250;
-          applied = false;
-          while (GetTickCount64() < until && clientSession.epoch.load(std::memory_order_acquire) == servedEpoch) {
-            if (capture.backendAppliedKey.load(std::memory_order_acquire) == key) {
-              applied = true;
-              break;
-            }
-            Sleep(5);
+        // capture-lifecycle r2 (Codex N3): "applied" = the status published is THIS session's (the main loop has
+        // made servedEpoch the owner -- never the previous session's choice as this connection's answer) and no
+        // change of this session is waiting (for a change: this one has been handled; for a question: the last
+        // change asked, if any). Waited for up to 250 ms, else answered as it is with NotYetApplied.
+        const bool isChange = req.backend == 1 || req.backend == 2 || req.backend == 3;
+        const uint64_t until = GetTickCount64() + 250;
+        bool applied = false;
+        uint64_t packed = 0;
+        for (;;) {
+          const uint64_t statusEpoch = capture.backendStatusEpoch.load(std::memory_order_acquire);
+          packed = capture.backendStatusPacked.load(std::memory_order_acquire);
+          const uint64_t posted = capture.backendChangePostedKey.load(std::memory_order_acquire);
+          const uint64_t handled = capture.backendAppliedKey.load(std::memory_order_acquire);
+          const uint64_t wanted = isChange ? ((servedEpoch << 32) | req.seq) : posted;
+          const bool changeDone = isChange ? handled == wanted : ((posted >> 32) != servedEpoch || handled == posted);
+          // The epoch read again after the packed status: both of the same publish (one owner).
+          applied = statusEpoch == servedEpoch && changeDone &&
+                    capture.backendStatusEpoch.load(std::memory_order_acquire) == statusEpoch;
+          if (applied || GetTickCount64() >= until ||
+              clientSession.epoch.load(std::memory_order_acquire) != servedEpoch) {
+            break;
           }
+          Sleep(5);
         }
-        const uint64_t packed = capture.backendStatusPacked.load(std::memory_order_acquire);
         ControlDesktopBackendStatusMessage st{};
         st.header.magic = remote60::native_poc::kMagic;
         st.header.type = static_cast<uint16_t>(MessageType::ControlDesktopBackendStatus);
@@ -2171,6 +2184,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch &&
       !clientSession.controlResumePending.load(std::memory_order_acquire)) {
     clientSession.streamControlActive.store(false, std::memory_order_release);
+    // capture-lifecycle r2 (Codex N2): the real end of this logical session -- its backend choice ends with it.
+    clientSession.backendSessionEndedEpoch.store(servedEpoch, std::memory_order_release);
   }
 }
 

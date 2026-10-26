@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <string>
 
+#include "host_backend_owner.hpp"
 #include "host_capture_device.hpp"
 
 namespace remote60::native_poc {
@@ -64,15 +65,17 @@ struct DesktopBackendState {
   // EffectiveRequested). A viewer's request belongs to the logical control session (epoch) that made it:
   // a new session starts from this again, and a resume of the same one keeps it. Main loop only.
   DesktopCaptureBackend startupRequested = DesktopCaptureBackend::Dxgi;
-  uint64_t ownerEpoch = 0;
+  BackendOwnerState owner;  // r2 (Codex N2): the one owner decision, host_backend_owner.hpp
 
-  // capture-lifecycle r1 (UA-1, Codex §4): the WGC capture is rebuilt on each confirmed input-desktop
-  // change (Default <-> a secure desktop) -- once per change, retried a bounded number of times with
+  // capture-lifecycle r1 (UA-1, Codex §4) / r2 (N1): the running capture -- any backend -- is rebuilt after each
+  // confirmed input-desktop change (Default <-> a secure desktop): its attachment was made under the desktop
+  // that was, and nothing of it is adopted any more. Counted per desktop generation (a newer change starts its
+  // own count; an older one's attempts are never settled against it), retried a bounded number of times with
   // backoff, never in a loop. Main loop only.
-  uint64_t wgcRebuiltForDesktopGen = 0;
-  uint32_t wgcRebuildAttempts = 0;
-  uint64_t wgcRebuildRetryAtUs = 0;
-  static constexpr uint32_t kMaxWgcRebuildAttempts = 3;
+  uint64_t desktopRebuildGen = 0;
+  uint32_t desktopRebuildAttempts = 0;
+  uint64_t desktopRebuildRetryAtUs = 0;
+  static constexpr uint32_t kMaxDesktopRebuildAttempts = 3;
 
   // The backend that may actually run for what was asked. Every place that used to write
   // `active = requested` goes through this, so no path -- startup, reattach, a client request,
