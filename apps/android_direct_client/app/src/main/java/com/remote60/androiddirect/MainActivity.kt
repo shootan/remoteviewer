@@ -153,6 +153,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsSharpOffButton: TextView
     private lateinit var settingsSharpWeakButton: TextView
     private lateinit var settingsSharpStrongButton: TextView
+    private lateinit var settingsSharpMethodDefaultButton: TextView
+    private lateinit var settingsSharpMethodDisplayButton: TextView
     /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
     private var qualityStatusMessage = ""
     private val windowSheetItems = mutableListOf<WindowPanelItem>()
@@ -532,6 +534,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 button.setOnClickListener { selectSharpness(level, origin) }
             }
         }
+        settingsSharpMethodDefaultButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DEFAULT, "settings") }
+        settingsSharpMethodDisplayButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DISPLAY, "settings") }
         for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
             val adapter = ArrayAdapter(
                 this,
@@ -1000,6 +1004,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // The REQUESTED level stays selected after a fallback: the user's choice is not overwritten.
                 for ((button, choice) in row.zip(SharpnessLevel.values())) button.isSelected = sharpness == choice
             }
+        }
+        if (::settingsSharpMethodDefaultButton.isInitialized) {
+            settingsSharpMethodDefaultButton.isSelected = sharpenMethod == SharpenMethod.DEFAULT
+            settingsSharpMethodDisplayButton.isSelected = sharpenMethod == SharpenMethod.DISPLAY
         }
         viewerQualityStatusText.text = qualityStatusMessage
         viewerQualityStatusText.visibility = if (qualityStatusMessage.isEmpty()) View.GONE else View.VISIBLE
@@ -1658,6 +1666,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
         settingsSharpOffButton = findViewById(R.id.settingsSharpOffButton)
         settingsSharpWeakButton = findViewById(R.id.settingsSharpWeakButton)
+        settingsSharpMethodDefaultButton = findViewById(R.id.settingsSharpMethodDefaultButton)
+        settingsSharpMethodDisplayButton = findViewById(R.id.settingsSharpMethodDisplayButton)
         settingsSharpStrongButton = findViewById(R.id.settingsSharpStrongButton)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
@@ -1819,6 +1829,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
         requestedRuntimeFps = savedEndpoint.fps
         sharpness = SessionPersistence.loadSharpness(this)
+        sharpenMethod = SessionPersistence.loadSharpenMethod(this)  // sh-strength r3: unset = DEFAULT (A)
         executeSharpen(sharpenPolicy.select(sharpness))  // no surface yet: only records the choice
         settingsStatusMessage =
             requestSummary()
@@ -5218,15 +5229,40 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val sharpenHandler = Handler(Looper.getMainLooper())
     private var sharpenStartTimeout: Runnable? = null
     private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
-    /** sh-strength r2 B: the display-size pass (test builds only; the shipped seam always answers 0 = A). */
+    /** sh-strength r2 B: the test seam's switch (test builds only; the shipped seam always answers 0). */
     private val sharpenDisplayPass: Int by lazy { SharpenTestSeam.displayPassFrom(intent) }
     private var sharpenDisplayPlacementLogged = ""
+    /** sh-strength r3: the user's choice of where the pass draws (settings; stored). */
+    private var sharpenMethod = SharpenMethod.DEFAULT
+    /** r3 (N2): the placement last handed to the current renderer (null: none) -- the same one is never sent again. */
+    private var sharpenPlacementSent: DisplayPlacement? = null
+
+    /** 0 = A, 1 = B, 2 = B with the double transform (the test seam's negative control only). */
+    private fun displayPassMode(): Int =
+        if (sharpenDisplayPass != 0) sharpenDisplayPass else if (sharpenMethod == SharpenMethod.DISPLAY) 1 else 0
 
     /** B is in effect while the sharpening renderer is the TextureView's producer (starting or live). */
     private fun sharpenDisplayPassActive(): Boolean =
-        sharpenDisplayPass != 0 &&
+        displayPassMode() != 0 &&
             (sharpenPolicy.path == SharpenPathPolicy.Path.STARTING || sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) &&
             videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** r3 (N1): B is what the renderer WILL draw (a filtered level, no fallback): the output is sized for the view from
+     *  the start, so the renderer begins with the layout it draws. */
+    private fun sharpenDisplayPassIntended(): Boolean =
+        displayPassMode() != 0 && sharpenPolicy.requested.filtered && sharpenPolicy.fallbackReason == null &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** sh-strength r3: the user picks where the pass draws. A live renderer is replaced through the usual release. */
+    private fun selectSharpenMethod(method: SharpenMethod, origin: String) {
+        if (method == sharpenMethod) return
+        sharpenMethod = method
+        SessionPersistence.saveSharpenMethod(this, method)
+        diagnosticsLog.log("sharpen_method", "method=${method.code} origin=$origin path=${sharpenPolicy.path}")
+        executeSharpen(sharpenPolicy.restartRenderer())
+        syncVideoSurface(forceRebind = false)  // the output size follows (view for B, source for A)
+        renderQualityControls()
+    }
     // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
     private val latchClassifier = LatchClassifier()
     private val sharpenGate = SharpenOutputGate()
@@ -5377,6 +5413,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
         sharpenRenderers[generation] = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
+        sharpenPlacementSent = null  // r3: a new renderer has no placement yet
+        sharpenDisplayPlacementLogged = ""  // ...and its own first placement is logged
         val timeout = Runnable { executeSharpen(sharpenPolicy.rendererFailed(generation, "start_timeout")) }
         sharpenStartTimeout = timeout
         sharpenHandler.postDelayed(timeout, SHARPEN_START_TIMEOUT_MS)
@@ -5610,7 +5648,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun resolveSurfaceBufferWidth(): Int {
         // sh-strength r2 B: the pass draws at the view's pixel size (the remote source size is unchanged elsewhere).
-        if (sharpenDisplayPassActive()) return videoTextureView.width
+        // r3 (N1): from the moment B is intended, so a renderer starts with the size it draws at.
+        if (sharpenDisplayPassIntended()) return videoTextureView.width
         if (videoWidth > 0) return videoWidth
         if (expectedContentWidth > 0) return expectedContentWidth
         if (videoTextureView.width > 0) return videoTextureView.width
@@ -5618,7 +5657,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resolveSurfaceBufferHeight(): Int {
-        if (sharpenDisplayPassActive()) return videoTextureView.height
+        if (sharpenDisplayPassIntended()) return videoTextureView.height
         if (videoHeight > 0) return videoHeight
         if (expectedContentHeight > 0) return expectedContentHeight
         if (videoTextureView.height > 0) return videoTextureView.height
@@ -5649,25 +5688,31 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // sh-strength r2 B: the pass draws the picture where the viewport placed it, in a view-sized buffer;
             // the TextureView adds nothing (identity) -- else the placement would be applied twice. The double
             // transform is the negative control's (test seam 2) only.
-            val place = if (p != null) DisplayPlacement(p.left, p.top, p.width, p.height)
-            else DisplayPlacement(0f, 0f, viewWidth, viewHeight)
-            if (sharpenDisplayPass == 2 && p != null) {
+            val place = if (p != null) DisplayPlacement(p.left, p.top, p.width, p.height, viewWidth, viewHeight)
+            else DisplayPlacement(0f, 0f, viewWidth, viewHeight, viewWidth, viewHeight)
+            if (displayPassMode() == 2 && p != null) {
                 matrix.setScale(p.width / viewWidth, p.height / viewHeight)
                 matrix.postTranslate(p.left, p.top)
             }
             videoTextureView.setTransform(matrix)
-            sharpenRenderer?.setDisplayPlacement(place)
+            if (place != sharpenPlacementSent) {  // r3 (N2): the same placement is not sent again
+                sharpenPlacementSent = place
+                sharpenRenderer?.setDisplayPlacement(place)
+            }
             val logged = "%.1f,%.1f,%.1fx%.1f buffer=%dx%d".format(place.left, place.top, place.width, place.height,
                 surfaceBufferWidth, surfaceBufferHeight)
             if (logged != sharpenDisplayPlacementLogged) {
                 sharpenDisplayPlacementLogged = logged
-                diagnosticsLog.log("sharpen_display_pass", "mode=$sharpenDisplayPass place=$logged " +
+                diagnosticsLog.log("sharpen_display_pass", "mode=${displayPassMode()} method=${sharpenMethod.code} place=$logged " +
                     "view=${viewWidth.toInt()}x${viewHeight.toInt()} content=${resolvedContentWidth}x$resolvedContentHeight")
             }
             if (::viewerPanChip.isInitialized) renderViewportChips()
             return
         }
-        if (sharpenDisplayPass != 0) sharpenRenderer?.setDisplayPlacement(null)
+        if (sharpenPlacementSent != null) {
+            sharpenPlacementSent = null
+            sharpenRenderer?.setDisplayPlacement(null)
+        }
         if (p == null) {
             videoTextureView.setTransform(matrix)
             return

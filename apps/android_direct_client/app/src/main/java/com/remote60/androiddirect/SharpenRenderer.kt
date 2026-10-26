@@ -52,8 +52,14 @@ import java.util.concurrent.atomic.AtomicLong
  * Whether the driver's conversion matches the compositor's for the direct path is a MEASUREMENT (strength-0
  * seam run vs OFF), not an assumption.
  */
-/** sh-strength r2 B: the video quad in output pixels (left/top from the output's top-left). */
-data class DisplayPlacement(val left: Float, val top: Float, val width: Float, val height: Float)
+/**
+ * sh-strength r2 B: the video quad in VIEW pixels (left/top from the view's top-left) and the view size it was placed
+ * in. The renderer draws it as fractions of that view (r3, Codex codex_sh_strength_r2.md N1), so the picture lands
+ * where the viewport placed it whatever the output buffer's size is at that moment -- and it draws video only into a
+ * buffer of that view's size (see draw()).
+ */
+data class DisplayPlacement(val left: Float, val top: Float, val width: Float, val height: Float,
+                            val viewWidth: Float, val viewHeight: Float)
 
 class SharpenRenderer(
     private val generation: Long,
@@ -112,6 +118,10 @@ class SharpenRenderer(
     val framesSourceNotOutput = AtomicLong(0)
     /** sh-strength r2 B: frames not drawn because their source size was unknown (no fallback in B). */
     val framesHeldNoSource = AtomicLong(0)
+    /** r3 (N1): swaps of a cleared buffer, made only to move the output to the view's size before video is drawn. */
+    val layoutClearSwaps = AtomicLong(0)
+    /** r3 (N2): placement updates that changed nothing (dropped without any work). */
+    val placementsUnchanged = AtomicLong(0)
     /** The visible source size the last frame was drawn with ("WxH"). */
     @Volatile var lastSourceSize: String = ""
         private set
@@ -126,7 +136,13 @@ class SharpenRenderer(
     /** sh-strength r2 B: where the video quad goes in the (view-sized) output; null = A (full buffer). Renderer
      *  thread only (set through setDisplayPlacement). */
     private var placement: DisplayPlacement? = null
-    private var placementRedrawPending = false
+    // r3 (N2): the latest placement asked for and whether a task to take it is posted -- a burst of UI updates is one
+    // task that takes the newest; a placement equal to the one in use does nothing.
+    @Volatile private var placementWanted: DisplayPlacement? = null
+    private val placementPosted = java.util.concurrent.atomic.AtomicBoolean(false)
+    // r3 (N1): a new frame not yet latched because the output was not the placement's view size; clear swaps so far.
+    private var frameWaitsForLayout = false
+    private var clearSwapsForLayout = 0
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var context: EGLContext = EGL14.EGL_NO_CONTEXT
     private var windowSurface: EGLSurface = EGL14.EGL_NO_SURFACE
@@ -174,15 +190,20 @@ class SharpenRenderer(
      * while a redraw is pending fold into it.
      */
     fun setDisplayPlacement(value: DisplayPlacement?) {
+        placementWanted = value
+        if (!placementPosted.compareAndSet(false, true)) return  // the posted task will take the newest
         handler.post {
+            placementPosted.set(false)
             if (released || failed || stopping) return@post
-            placement = value
-            if (!haveFrame || placementRedrawPending) return@post
-            placementRedrawPending = true
-            handler.post {
-                placementRedrawPending = false
-                if (!released && !failed && !stopping && haveFrame) draw(newFrame = false)
+            val next = placementWanted
+            if (next == placement) {
+                placementsUnchanged.incrementAndGet()
+                return@post
             }
+            placement = next
+            clearSwapsForLayout = 0
+            if (frameWaitsForLayout) draw(newFrame = true)       // the frame that waited for this layout
+            else if (haveFrame) draw(newFrame = false)           // one redraw of the latched frame, new layout
         }
     }
 
@@ -278,6 +299,29 @@ class SharpenRenderer(
         val t0 = SystemClock.elapsedRealtimeNanos()
         try {
             val st = input ?: return
+            val place0 = placement
+            if (place0 != null) {
+                // r3 (N1): video goes only into an output of the placement's view size. A buffer not there yet (the
+                // default size changed, the next dequeued buffer has it) is moved on by swapping a CLEARED frame --
+                // not latched, not counted as a frame -- at most twice per layout; the frame waits, not dropped.
+                val ow = IntArray(1)
+                val oh = IntArray(1)
+                EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_WIDTH, ow, 0)
+                EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_HEIGHT, oh, 0)
+                val matches = ow[0] == place0.viewWidth.toInt() && oh[0] == place0.viewHeight.toInt()
+                if (!matches && clearSwapsForLayout < 2) {
+                    if (newFrame) frameWaitsForLayout = true
+                    clearSwapsForLayout += 1
+                    layoutClearSwaps.incrementAndGet()
+                    GLES20.glViewport(0, 0, ow[0].coerceAtLeast(1), oh[0].coerceAtLeast(1))
+                    GLES20.glClearColor(0f, 0f, 0f, 1f)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    EGL14.eglSwapBuffers(display, windowSurface)
+                    handler.post { if (!released && !failed && !stopping && frameWaitsForLayout) draw(newFrame = true) }
+                    return
+                }
+            }
+            frameWaitsForLayout = false
             if (newFrame) {
                 st.updateTexImage()
                 st.getTransformMatrix(texMatrix)  // this frame's crop/flip/rotation
@@ -327,19 +371,20 @@ class SharpenRenderer(
             }
             if (faults.outputPixelTaps && place != null) {
                 // Negative control only: one OUTPUT pixel, expressed in the pre-transform (source) coordinate.
-                stepW = place.width.toInt().coerceAtLeast(1)
-                stepH = place.height.toInt().coerceAtLeast(1)
+                stepW = (place.width / place.viewWidth * w[0]).toInt().coerceAtLeast(1)
+                stepH = (place.height / place.viewHeight * h[0]).toInt().coerceAtLeast(1)
             }
             GLES20.glUniform2f(uStep, 1f / stepW, 1f / stepH)
             // The quad: the whole buffer (A), or the placement rectangle in NDC of the view-sized output (B).
             if (place != null) {
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                val sx = place.width / w[0]
-                val sy = place.height / h[0]
+                // r3 (N1): fractions of the view the placement was made in (the buffer is stretched over that view)
+                val sx = place.width / place.viewWidth
+                val sy = place.height / place.viewHeight
                 // output y grows downward in the view, NDC y upward
-                val cx = (place.left + place.width / 2f) / w[0] * 2f - 1f
-                val cy = 1f - (place.top + place.height / 2f) / h[0] * 2f
+                val cx = (place.left + place.width / 2f) / place.viewWidth * 2f - 1f
+                val cy = 1f - (place.top + place.height / 2f) / place.viewHeight * 2f
                 GLES20.glUniform4f(uPlace, sx, sy, cx, cy)
             } else {
                 GLES20.glUniform4f(uPlace, 1f, 1f, 0f, 0f)

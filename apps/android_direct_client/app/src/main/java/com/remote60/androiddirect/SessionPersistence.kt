@@ -27,11 +27,22 @@ object SessionPersistence {
     private const val KEY_UNLOCK_PASSWORD_PREFIX = "unlock_pw_"
     // sh-filter r1: its own key, outside the bitrate/fps schema -- reading it never migrates those.
     private const val KEY_SHARPNESS = "sharpness"
+    private const val KEY_SHARPEN_METHOD = "sharpen_method"
 
     /** Unset or unknown -> the default (weak); an explicit "off" stays off. */
     fun loadSharpness(context: Context): SharpnessLevel =
         SharpnessLevel.fromStored(
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_SHARPNESS, null))
+
+    /** sh-strength r3: where the sharpening draws (SharpenMethod); its own key -- unset = DEFAULT (A). */
+    fun loadSharpenMethod(context: Context): SharpenMethod =
+        SharpenMethod.fromStored(
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_SHARPEN_METHOD, null))
+
+    fun saveSharpenMethod(context: Context, method: SharpenMethod) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_SHARPEN_METHOD, method.code).apply()
+    }
 
     fun saveSharpness(context: Context, level: SharpnessLevel) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
