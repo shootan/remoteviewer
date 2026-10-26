@@ -165,14 +165,28 @@ bool HostUnlockRelay::ProbeConnectForTest() {
 // early by the cancel event (Stop, or the active transaction's session ending). On anything but Ok the I/O
 // in flight is cancelled and waited for here, on the pipe's owner thread -- the caller then closes the pipe.
 HostUnlockRelay::Io HostUnlockRelay::Exchange(void* pipeHandle, const void* req, uint32_t reqSize, uint8_t* buf,
-                                              uint32_t bufSize, uint32_t replySize, uint32_t deadlineMs) {
+                                              uint32_t bufSize, uint32_t replySize, uint32_t deadlineMs,
+                                              const Command* gate) {
   HANDLE pipe = static_cast<HANDLE>(pipeHandle);
   const ULONGLONG deadline = GetTickCount64() + deadlineMs;
   auto run = [&](bool write, void* data, DWORD size, DWORD* done) -> Io {
     OVERLAPPED ov{};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ov.hEvent) return Io::Failed;
-    BOOL started = write ? WriteFile(pipe, data, size, done, &ov) : ReadFile(pipe, data, size, done, &ov);
+    BOOL started = FALSE;
+    if (write && gate) {
+      // lk-ux-retry r3 (Codex N1): the linearization point -- owned and in time, checked and the write started
+      // under the lock the caller withdraws under. Past it, nothing is started (never a 1 ms extension).
+      std::lock_guard<std::mutex> lk(mu_);
+      if (!IsLiveLocked(*gate, gate->challenge.requestId) ||
+          (gate->deadlineMs != 0 && GetTickCount64() >= gate->deadlineMs)) {
+        CloseHandle(ov.hEvent);
+        return Io::Withdrawn;
+      }
+      started = WriteFile(pipe, data, size, done, &ov);
+    } else {
+      started = write ? WriteFile(pipe, data, size, done, &ov) : ReadFile(pipe, data, size, done, &ov);
+    }
     Io result = Io::Ok;
     if (!started) {
       if (GetLastError() != ERROR_IO_PENDING) {
@@ -464,17 +478,19 @@ void HostUnlockRelay::WorkerLoop() {
         uint32_t supersedeBudget = budget(shortDeadlineMs_);
         if (cmd.deadlineMs != 0) {
           const uint64_t now = GetTickCount64();
-          const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 1;
+          const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 0;  // 0: the gate refuses it
           supersedeBudget = static_cast<uint32_t>((std::min)(static_cast<uint64_t>(supersedeBudget), left));
         }
-        const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), supersedeBudget);
+        if (retryIoHookForTest_) retryIoHookForTest_("supersede");
+        const Io io = Exchange(pipe, &q, sizeof(q), buf, sizeof(buf), sizeof(resp), supersedeBudget, &cmd);
         if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
         const bool valid = io == Io::Ok && resp.magic == kSecureUnlockMagic && resp.size == sizeof(resp) &&
                            resp.kind == static_cast<uint16_t>(SecureUnlockKind::Result) &&
                            resp.requestId == cmd.supersedesRequestId;
         // Ended now (Superseded) or already ended on its own (unlocked / unconfirmed): either way it waits no more.
         cleared = valid && resp.terminal != 0 && resp.stage != static_cast<uint16_t>(UnlockStage::RejectedPolicy);
-        if (!valid) io_failed();
+        // (Withdrawn: nothing was written -- the earlier wait and its pipe are as they were.)
+        if (!valid && io != Io::Withdrawn) io_failed();
         std::lock_guard<std::mutex> lk(mu_);
         auto old = liveTx_.find(oldKey);
         if (cleared && old != liveTx_.end() && old->second == heldTxGen) {
@@ -573,11 +589,12 @@ void HostUnlockRelay::WorkerLoop() {
       uint32_t challengeBudget = budget(shortDeadlineMs_);
       if (cmd.deadlineMs != 0) {  // lk-ux-retry r2: a retry's fresh challenge ends with the retry
         const uint64_t now = GetTickCount64();
-        const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 1;
+        const uint64_t left = cmd.deadlineMs > now ? cmd.deadlineMs - now : 0;  // r3: 0 -- the gate refuses it
         challengeBudget = static_cast<uint32_t>((std::min)(static_cast<uint64_t>(challengeBudget), left));
       }
+      if (retryEndedEarlier && retryIoHookForTest_) retryIoHookForTest_("challenge");
       const Io io = Exchange(pipe, &req, sizeof(req), buf, sizeof(buf), sizeof(SecureUnlockChallengeResponse),
-                             challengeBudget);
+                             challengeBudget, retryEndedEarlier ? &cmd : nullptr);
       ControlUnlockChallengeMessage out{};
       SecureUnlockChallengeResponse resp{};
       if (io == Io::Ok) std::memcpy(&resp, buf, sizeof(resp));
@@ -595,7 +612,27 @@ void HostUnlockRelay::WorkerLoop() {
         // had (no answer within the retry's time) is said as that: the earlier one is over, nothing new issued.
         out.status = static_cast<uint16_t>(retryEndedEarlier ? UnlockStage::Superseded : UnlockStage::InternalError);
         if (retryEndedEarlier) out.reserved = kUnlockPurposeLockCred;
-        io_failed();
+        if (io != Io::Withdrawn) io_failed();
+      }
+      // lk-ux-retry r3 (Codex N1): a retry's fresh challenge is ADOPTED (held, cached as issued) only for the retry
+      // still owned and in time -- a valid answer that came after its end is never promoted to a new attempt:
+      // the earlier wait is over (17), nothing new held.
+      if (retryEndedEarlier && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
+        if (retryIoHookForTest_) retryIoHookForTest_("adopt");
+        bool inTime = false;
+        {
+          std::lock_guard<std::mutex> lk(mu_);
+          inTime = IsLiveLocked(cmd, cmd.challenge.requestId) &&
+                   (cmd.deadlineMs == 0 || GetTickCount64() < cmd.deadlineMs);
+        }
+        if (!inTime) {
+          std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId
+                    << " challenge answered after the retry ended: not adopted\n";
+          out = ControlUnlockChallengeMessage{};
+          out.requestId = cmd.challenge.requestId;
+          out.status = static_cast<uint16_t>(UnlockStage::Superseded);
+          out.reserved = kUnlockPurposeLockCred;
+        }
       }
       // Q2: an issued challenge holds the pipe for its seal (the service binds it to this connection) -- no
       // longer than the challenge lives; a refused one lets it go.

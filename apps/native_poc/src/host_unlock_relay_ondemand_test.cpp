@@ -872,6 +872,144 @@ int main() {
     h.Stop();
   }
 
+  std::printf("\n[lk-ux-retry r3 (Codex N1): the write is started only for a retry still owned and in time; a late answer is not adopted]\n");
+  {
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    svc.offerRetry = true;
+    svc.supersedeDelayMs = 0;
+    svc.challengeDelayMs = 0;
+    svc.statusDelayMs = 0;
+    svc.finishJobs = false;
+    svc.sealedStage = static_cast<uint16_t>(UnlockStage::Injected);
+    svc.sealedTerminal = false;
+    svc.supersedeStage = static_cast<uint16_t>(UnlockStage::Superseded);
+    svc.supersedeTerminal = true;
+    HostUnlockRelay h;
+    point(h, svc);
+    // The latch: the worker stops at the named point (after its fence, before the exchange's own gate) until
+    // the test lets it go.
+    std::atomic<int> at{0};  // 0 none, 1 holding
+    std::string holdAt;
+    HANDLE go = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    h.SetRetryIoHookForTest([&](const char* what) {
+      if (holdAt != what) return;
+      at.store(1);
+      WaitForSingleObject(go, 10000);
+      at.store(0);
+    });
+    const auto reprobe = [&] {
+      h.ProbeLockCredAsync();
+      wait_until([&] { return h.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 5000);
+    };
+    const auto typed_wait = [&](uint64_t cookie, uint32_t id) {
+      ControlUnlockChallengeMessage c{};
+      h.LockCredChallengeSync(challenge_req(id), cookie, &c, 5000);
+      h.SealedAsync(sealed_req(id), cookie);
+      ControlUnlockStatusResultMessage r{};
+      wait_until([&] { return h.PollResult(cookie, id, &r); }, 5000);
+      return r.stage == static_cast<uint16_t>(UnlockStage::Injected) && r.terminal == 0;
+    };
+    reprobe();
+
+    // (4) Held after the supersede, right before the fresh challenge's write; meanwhile the caller gives up (18,
+    // its transaction withdrawn). Let go: the write is NOT started -- 0 challenges, no hold; A keeps its 17.
+    check("N1 (4) setup: A typed and waiting", typed_wait(0x91, 91));
+    ResetEvent(go);
+    holdAt = "challenge";
+    const int ch4 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r4{};
+    bool got4 = true;
+    std::thread caller4([&] { got4 = h.LockCredRetryChallengeSync(challenge_req(92), 91, 0x91, &r4, 300); });
+    const bool held4 = wait_until([&] { return at.load() == 1; }, 3000);
+    caller4.join();  // the caller's 300 ms ran out while the worker was held
+    SetEvent(go);
+    Sleep(600);
+    ControlUnlockStatusResultMessage a4{};
+    check("N1 (4): held between its fence and the write while the caller gave up (no answer -> 18)", held4 && !got4);
+    check("N1 (4): ...let go: THE FRESH CHALLENGE IS NEVER WRITTEN, no hold, nothing kept for the retry",
+          svc.challengeSeen.load() == ch4 && !h.PollResult(0x91, 92, &a4) && wait_until([&] { return !svc.connected.load(); }, 3000),
+          std::to_string(svc.challengeSeen.load() - ch4) + " challenges");
+    check("N1 (4): ...and the earlier request keeps its real end (Superseded)",
+          h.PollResult(0x91, 91, &a4) && a4.stage == static_cast<uint16_t>(UnlockStage::Superseded) && a4.terminal == 1,
+          "stage=" + std::to_string(a4.stage));
+    h.EndSession(0x91);
+    holdAt.clear();
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    reprobe();
+
+    // (5) Held before the supersede's write while the caller gives up: let go -- nothing written at all, the
+    // earlier wait as it was (still held, still waiting).
+    check("N1 (5) setup: A typed and waiting", typed_wait(0x93, 93));
+    ResetEvent(go);
+    holdAt = "supersede";
+    const int sup5 = svc.supersedeSeen.load(), ch5 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r5{};
+    bool got5 = true;
+    std::thread caller5([&] { got5 = h.LockCredRetryChallengeSync(challenge_req(94), 93, 0x93, &r5, 300); });
+    const bool held5 = wait_until([&] { return at.load() == 1; }, 3000);
+    caller5.join();
+    SetEvent(go);
+    Sleep(600);
+    ControlUnlockStatusResultMessage a5{};
+    check("N1 (5): held before the supersede's write while the caller gave up -> let go: 0 supersede, 0 challenge",
+          held5 && !got5 && svc.supersedeSeen.load() == sup5 && svc.challengeSeen.load() == ch5,
+          std::to_string(svc.supersedeSeen.load() - sup5) + " supersede, " + std::to_string(svc.challengeSeen.load() - ch5) + " challenge");
+    check("N1 (5): ...the earlier wait untouched (Injected, its pipe still held)",
+          h.PollResult(0x93, 93, &a5) && a5.stage == static_cast<uint16_t>(UnlockStage::Injected) && a5.terminal == 0 &&
+              svc.connected.load());
+    h.EndSession(0x93);
+    holdAt.clear();
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    reprobe();
+
+    // (6) Held before the fresh challenge's write while the SESSION ends: nothing written, nothing kept.
+    check("N1 (6) setup: A typed and waiting", typed_wait(0x95, 95));
+    ResetEvent(go);
+    holdAt = "challenge";
+    const int ch6 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r6{};
+    std::thread caller6([&] { (void)h.LockCredRetryChallengeSync(challenge_req(96), 95, 0x95, &r6, 3000); });
+    const bool held6 = wait_until([&] { return at.load() == 1; }, 3000);
+    h.EndSession(0x95);
+    SetEvent(go);
+    caller6.join();
+    Sleep(600);
+    check("N1 (6): the session ended while held before the challenge's write -> 0 challenges, nothing of it kept, no hold",
+          held6 && svc.challengeSeen.load() == ch6 && h.KeptEntriesForTest(0x95) == 0 &&
+              wait_until([&] { return !svc.connected.load(); }, 3000),
+          std::to_string(svc.challengeSeen.load() - ch6) + " challenges, " + std::to_string(h.KeptEntriesForTest(0x95)) + " kept");
+    holdAt.clear();
+    reprobe();
+
+    // (7) The fresh challenge WAS written and answered (issued); the worker is held before adopting it until the
+    // retry's own deadline has passed -- while its caller is still waiting (2000 ms wait; the retry ends 250 ms
+    // inside it). Let go: the late "issued" is NOT adopted -- the caller hears Superseded (the earlier wait is
+    // over, no new challenge), and the pipe is not held for it.
+    check("N1 (7) setup: A typed and waiting", typed_wait(0x97, 97));
+    ResetEvent(go);
+    holdAt = "adopt";
+    ControlUnlockChallengeMessage r7{};
+    bool got7 = false;
+    const auto t7 = std::chrono::steady_clock::now();
+    std::thread caller7([&] { got7 = h.LockCredRetryChallengeSync(challenge_req(98), 97, 0x97, &r7, 2000); });
+    const bool held7 = wait_until([&] { return at.load() == 1; }, 3000);
+    while (ms_since(t7) < 1850) Sleep(10);  // past the retry's deadline (1750), inside the caller's wait (2000)
+    SetEvent(go);
+    caller7.join();
+    Sleep(300);
+    ControlUnlockStatusResultMessage a7{};
+    const bool noHold7 = wait_until([&] { return !svc.connected.load(); }, 3000);
+    check("N1 (7): an issued challenge adopted after the retry's deadline? NO -- the caller hears Superseded, no hold",
+          held7 && got7 && r7.status == static_cast<uint16_t>(UnlockStage::Superseded) && noHold7 &&
+              !h.PollResult(0x97, 98, &a7),
+          "got=" + std::to_string(got7) + " status=" + std::to_string(r7.status) + " noHold=" + std::to_string(noHold7));
+    h.EndSession(0x97);
+    holdAt.clear();
+    h.SetRetryIoHookForTest(nullptr);
+    CloseHandle(go);
+    h.Stop();
+  }
+
   a.Stop();
   b.Stop();
   svc.Stop();

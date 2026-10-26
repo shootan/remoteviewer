@@ -83,11 +83,15 @@ constexpr uint16_t kLoginPending = 0xFFFB;       // lockscreen-cred: the previou
 // NEW password ... was never sealed/sent (a local failure) -- or was sent, but its answer never came.
 constexpr uint16_t kLockRetryNotSent = 0xFFFA;
 constexpr uint16_t kLockRetryUnknown = 0xFFF9;
+// lk-ux-retry r3 (Codex N2-a): a password (no retry) handed to the host whose answer has not come yet -- followed on.
+constexpr uint16_t kLockCredSentUnknown = 0xFFF8;
 // How far one lock-screen exchange got: the challenge it asked for was issued (for a retry: the earlier wait IS
 // over), and its sealed password was handed to the link.
+// lk-ux-retry r3 (Codex N2-b): both are set only for an answer that passed every check (request id, purpose).
 struct LockCredProgress {
   bool challengeIssued = false;
   bool sealSent = false;
+  bool supersededAnswer = false;  // a retry answered Superseded (LockCred purpose): earlier over, nothing new issued
 };
 // The result window's message carries the stage in the low 16 bits of wParam and the role above them.
 // lockscreen-cred r2 (Codex L5): and the control connection's generation (controlRunGen) it belongs to in the

@@ -34,6 +34,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -123,6 +124,12 @@ class HostUnlockRelay {
 
  private:
   enum class Op { Challenge, LockCredChallenge, LockCredRetry, Sealed, Capabilities, Status, Release };
+ public:
+  // TEST ONLY (lk-ux-retry r3): called on the worker right before a retry's exchange ("supersede" /
+  // "challenge"), after its fence and before Exchange's own gate -- a test holds it there.
+  void SetRetryIoHookForTest(std::function<void(const char*)> hook) { retryIoHookForTest_ = std::move(hook); }
+ private:
+  std::function<void(const char*)> retryIoHookForTest_;
   struct Command {
     Op op = Op::Challenge;
     uint64_t cookie = 0;
@@ -141,15 +148,18 @@ class HostUnlockRelay {
     uint32_t requestId = 0;
     bool operator<(const TxKey& o) const { return cookie != o.cookie ? cookie < o.cookie : requestId < o.requestId; }
   };
-  enum class Io { Ok, Failed, Timeout, Cancelled };
+  enum class Io { Ok, Failed, Timeout, Cancelled, Withdrawn };  // Withdrawn: lk-ux-retry r3, a retry's gate refused to start
 
   void EnsureWorker();
   void WorkerLoop();
   // Returns HANDLE or INVALID_HANDLE_VALUE (opened for overlapped I/O). `busy` (r3): it failed because the
   // pipe's one instance stayed taken -- another host's transaction holds it.
   void* ConnectPipe(bool* busy = nullptr);
+  // lk-ux-retry r3 (Codex N1): `gate` (a retry's command): its write is started only while that retry is still
+  // owned (live) and inside its absolute deadline -- checked under mu_ and the write issued in the same
+  // critical section, so a caller's withdrawal is either before it (nothing written: Io::Withdrawn) or after.
   Io Exchange(void* pipe, const void* req, uint32_t reqSize, uint8_t* buf, uint32_t bufSize, uint32_t replySize,
-              uint32_t deadlineMs);
+              uint32_t deadlineMs, const Command* gate = nullptr);
 
   std::thread worker_;
   std::atomic<bool> running_{false};

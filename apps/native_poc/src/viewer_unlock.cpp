@@ -418,6 +418,15 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
   const ControlUnlockChallengeMessage ch = r.unlockChallenge;
   if (ch.requestId != requestId) { set_status("response id mismatch"); return false; }
   if (ch.status != static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
+    if (as == SealAs::LockCred && supersedesRequestId != 0 &&
+        ch.status == static_cast<uint16_t>(UnlockStage::Superseded)) {
+      // lk-ux-retry r3 (Codex N2-b): "the earlier wait is over" is believed only from an answer of this purpose.
+      if (ch.reserved != kUnlockPurposeLockCred) {
+        set_status("challenge purpose mismatch");
+        return false;
+      }
+      if (progress) progress->supersededAnswer = true;
+    }
     set_status(std::string("challenge rejected: ") + stage_name(ch.status));
     if (terminal) {
       terminal->requestId = requestId;
@@ -426,13 +435,14 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
     }
     return terminal != nullptr;  // lockscreen-cred r1: the refusal is the answer, said to the user as such
   }
-  if (progress) progress->challengeIssued = true;  // lk-ux-retry r2: for a retry, the earlier wait is over now
   // lockscreen-cred r1: a lock-screen challenge must say it was issued for that purpose -- the password is
   // never sealed for a challenge of another purpose.
   if (as == SealAs::LockCred && ch.reserved != kUnlockPurposeLockCred) {
     set_status("challenge purpose mismatch");
     return false;
   }
+  // lk-ux-retry r2/r3 (Codex N2-b): for a retry the earlier wait is over now -- said only after every check.
+  if (progress) progress->challengeIssued = true;
 
   // 2) Seal the password to the host's ephemeral key.
 #ifdef REMOTE60_VIEWER_UNLOCK_TEST_SEAM
@@ -499,7 +509,16 @@ bool sealed_exchange(remote60::native_poc::ControlLink& link, const std::wstring
   }
 
   // 4) Poll status until terminal (lockscreen-cred: or until typed -- the unlock is followed afterwards).
-  for (int i = 0; i < 40; ++i) {
+  int polls = 40;
+#ifdef REMOTE60_VIEWER_UNLOCK_TEST_SEAM
+  // TEST BUILD ONLY (lk-ux-retry r3, Codex N2-a): stop asking here after N looks (GNLINK_VIEWER_TEST_STATUS_POLLS)
+  // -- the "sent, its answer not come yet" state, made on demand; the caller then follows it as it would.
+  {
+    wchar_t v[16] = {};
+    if (GetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", v, 16) > 0) polls = _wtoi(v);
+  }
+#endif
+  for (int i = 0; i < polls; ++i) {
     ControlUnlockStatusResultMessage res{};
     if (!poll_status(link, requestId, &res)) {
       set_status("status poll failed");
@@ -595,9 +614,13 @@ std::wstring windows_login_result_text(int role, uint16_t stage, uint32_t win32)
     return L"앞서 입력한 비밀번호의 대기는 끝냈지만, 새 비밀번호는 이 PC에서 암호화하지 못해 보내지 않았습니다.\n"
            L"'Windows 로그인'을 다시 누르세요.";
   }
-  if (stage == kLockRetryUnknown) {
-    return L"앞서 입력한 비밀번호의 대기는 끝냈고 새 비밀번호를 보냈지만, 원격 PC의 답을 받지 못했습니다.\n"
-           L"원격 화면에서 비밀번호 칸을 확인하세요.";
+  if (stage == kLockRetryUnknown) {  // lk-ux-retry r3: and it is followed on
+    return L"앞서 입력한 비밀번호의 대기는 끝냈고 새 비밀번호를 보냈습니다. 결과는 아직 오지 않아 계속 확인합니다.\n"
+           L"원격 화면에서 비밀번호 칸을 확인하세요. 다시 누르면 이 비밀번호를 새 비밀번호로 바꿉니다.";
+  }
+  if (stage == kLockCredSentUnknown) {
+    return L"비밀번호를 보냈습니다. 결과는 아직 오지 않아 계속 확인합니다.\n"
+           L"원격 화면에서 비밀번호 칸을 확인하세요. 다시 누르면 이 비밀번호를 새 비밀번호로 바꿉니다.";
   }
   if (stage == kLoginPending) {
     return L"앞서 입력한 비밀번호의 잠금 해제를 기다리는 중이라 보내지 않았습니다.\n"

@@ -2998,6 +2998,21 @@ if(MSVC)
   target_compile_options(remote60_prelogin_cred_host_test PRIVATE /utf-8)
 endif()
 
+# lk-ux-retry r3 (Codex N2-b): what the viewer believes from a retry's answer -- the product's exchange
+# (viewer_unlock.cpp, real sealing) against a scripted host on a fake control link.
+add_executable(remote60_viewer_lock_cred_retry_test
+  src/viewer_lock_cred_retry_test.cpp
+  src/viewer_unlock.cpp
+  src/native_video_client_tcp_control.cpp
+  src/native_video_client_shared_core.cpp
+  src/udp_control_channel.cpp
+)
+target_include_directories(remote60_viewer_lock_cred_retry_test PRIVATE src)
+target_link_libraries(remote60_viewer_lock_cred_retry_test PRIVATE remote60_sealed_unlock common bcrypt user32 gdi32 crypt32 advapi32 ws2_32)
+if(MSVC)
+  target_compile_options(remote60_viewer_lock_cred_retry_test PRIVATE /utf-8)
+endif()
+
 # prelogin-field D3: the pre-login worker's own log -- trust (G5 chain), bounds, rotation, drain.
 add_executable(remote60_prelogin_worker_log_test
   src/prelogin_worker_log_test.cpp
