@@ -13553,3 +13553,10 @@ Next
 - smoke(같은 commit 의 시험 빌드, 콘솔 세션, SLOT CreateNew→삭제): LK lock 68·prelogin 79, PS still 32, UA 54, UA fullframe-fails 18, real-recv-smoke(payload GNLinkStream) PASS, host_punch_reply 102, hello_backlog 28, punch_any PASS, **dxgi_wedge_reconnect_runner ALL PASS**(DW 에서 미뤄 둔 1회). 잔여 시험 프로세스 0.
 - 상태: **로컬 실기 후보(게시 전)**. 서명·NAS 게시·push 는 검증용(독립 검사·Codex EVIDENCE 뒤). 실기 미검증: 실 잠금 화면 틀린 비밀번호 재시도, 실 로그인 전 재부팅, 실 UAC 승인/거부, 회사 PC DW. APK 0.2.32 는 별도.
 - 제품/테스트/문서: 제품(버전 한 줄) / 테스트(출하 gate 표식·self-test) / 문서(이 항목·작업목록·구현계획).
+### 2026-10-26 PC 0.2.163 r3 — 로그인 전 화면에서 picker 의 바탕화면 선택이 끝나지 않던 결함 (rel/0.2.163, 미게시)
+- 근거: rel-0163 r2 E1(실제 제품 renderer 시험)에서 재현 3/3 + 1(`report_rel_0163_r2_e1_blocker.md`), 결정 `codex_rel_0163_e1_decision.md`.
+- 원인: 셸은 뷰어를 항상 picker 로 띄운다. 로그인 전 호스트(kCaptureFlagPreloginV1)에는 뷰어가 WindowList/WindowSelect 를 보내지 않는데(allowlist), picker 의 선택은 그 select 의 ack 를 기다리는 동안 모든 프레임을 버렸다 → picker 가 닫히지 않고 영상 0. 10-22 실기의 정황과 일치(유일 원인으로 확정하지 않음).
+- 수정(뷰어): 역할이 알려진 로그인 전 호스트 + 바탕화면(0) 선택만 **로컬 선택 transaction**(selection gate 의 localAckless) — 같은 pending·op epoch(decoder 초기화·keyframe 대기), ack 대신 **그 op 뒤 처음 받아들인 keyframe 의 stream generation 을 결합**, 그 뒤 다른 generation 은 ack 뒤와 같이 버림, reveal 은 UI 에서 재검증, 실제 present 뒤 restore 보고(기존 그대로). 가짜 ack·allowlist 확대·MonitorSelect 대용 없음. 역할을 알기 전(첫 pong 전) 누른 선택은 이 연결의 의도로 보류했다가 역할이 알려지면 한 번 실행. 보내지 못한 WindowSelect 는 조용히 버리지 않고 그 op 를 로컬로 잇거나(바탕화면) 명시적으로 거부(창). 로그인 전 화면에서 창 선택은 거부. UAC·LockCred 만으로는 이 경로에 들어가지 않는다(PreloginV1 일 때만).
+- 시험: PS `--still-screen --render`(제품 WndProc·실제 present·화면 밖 창·WGC 창 캡처) 33/33 — 역할 확인 전 클릭 보류→1회 실행, 창 선택 거부, picker 10 s → 바탕화면 **275 ms**·다시 10 s → **279 ms**, 이후 3 s 에 5~6 present. 수정 전 같은 시험 4/4 FAIL(present 0). viewer_selection_gate_test 에 로컬 transaction 경우(bind 전 reveal 없음·gen 불일치·옛 op·cancel·전환·늦은 ack) 추가.
+- 공용 세션(APK): `native_video_client_session.cpp` 도 로그인 전 호스트에 WindowSelect 를 보내지 않고 WindowSelected 를 기다린다 — 같은 종류(확인만, 수정은 APK 0.2.32 단계).
+- 제품/테스트/문서: 제품(viewer selection gate·수신 경로 결합·picker·control client·window proc) / 테스트(PS E1 확장, gate 단위) / 문서(이 항목).

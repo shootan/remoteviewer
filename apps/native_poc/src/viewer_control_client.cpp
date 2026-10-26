@@ -385,7 +385,11 @@ void ControlClient::handle_pong(const ControlOutboundAction& action, const Contr
     // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
     // every pong like the others so a reconnect never inherits a stale answer.
     ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
-    ctx.session.hostRoleKnown.store(true, std::memory_order_release);  // r7 H6
+    const bool roleWasKnown = ctx.session.hostRoleKnown.exchange(true, std::memory_order_acq_rel);  // r7 H6
+    // rel-0163 r3: a pick held until now runs once, on the UI thread.
+    if (!roleWasKnown && ctx.sel.deferredPick.load(std::memory_order_acquire) != 0 && ctx.session.hwnd) {
+      PostMessageW(ctx.session.hwnd, kMsgRunDeferredPick, 0, 0);
+    }
     // lockscreen-cred r1: the held-back notice is said again on the next arrival at EITHER logon screen.
     if (!remote60::native_poc::prelogin::HostAtLogonScreen(pong.captureTargetFlags)) {
       ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
@@ -1074,6 +1078,12 @@ void ControlClient::Run() {
       if (ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
           (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
           !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(action))) {
+        // rel-0163 r3: a WindowSelect not sent is a pick still waiting for its ack -- resolve that op on the UI
+        // thread (continued as a local desktop selection, or refused), never left waiting.
+        if (action.kind == ControlOutboundActionKind::WindowSelect && ctx.session.hwnd) {
+          PostMessageW(ctx.session.hwnd, kMsgUnsendableSelect, static_cast<WPARAM>(action.windowSelect.windowId),
+                       static_cast<LPARAM>(ctx.sel.epoch.load(std::memory_order_acquire)));
+        }
         continue;
       }
       TcpControlResponse response{};

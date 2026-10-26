@@ -24,6 +24,15 @@
 //   activeStreamGeneration : generation of the last successfully revealed selection; after
 //                            reveal this is the persistent filter (0 = accept anything, which
 //                            covers the legacy stream-view start and the window before any pick).
+//   localAckless           : rel-0163 r3 (Codex codex_rel_0163_e1_decision.md): a DESKTOP pick at a host
+//                            known to be at the logon screen (kCaptureFlagPreloginV1). Such a host takes no
+//                            WindowSelect (its allowlist), so no ack will ever come: the transaction is the
+//                            same -- pending, its own epoch (decoder reset, wait for a keyframe) -- but its
+//                            generation is the one of the FIRST KEYFRAME admitted after it began (bound
+//                            once, BindLocalGeneration); until then nothing can reveal, after it frames of
+//                            another generation drop exactly as after an ack.
+//   deferredPick           : a pick made before the host's role was known (its first pong) -- id + 1, 0 =
+//                            none. Run once when the role is known (kMsgRunDeferredPick), never sent blind.
 // The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
 // selection / disconnect that races the post cannot wrongly close the picker. The video thread
 // records the candidate (generation + epoch) and posts once; the UI handler revalidates against
@@ -61,6 +70,8 @@ struct SelectionGateState {
   std::atomic<uint64_t> expectedGeneration{0};
   std::atomic<uint64_t> epoch{0};
   std::atomic<uint64_t> activeStreamGeneration{0};
+  std::atomic<bool> localAckless{false};     // rel-0163 r3: see above
+  std::atomic<uint64_t> deferredPick{0};     // rel-0163 r3: UI writes, control reads (posts), UI runs
   // cross-thread: recv records, UI revalidates and commits.
   std::atomic<uint64_t> readyGeneration{0};
   std::atomic<uint64_t> readyEpoch{0};
@@ -69,6 +80,10 @@ struct SelectionGateState {
   // The transitions (viewer_selection_gate.cpp), each the atomic sequence the former free function
   // or inline block performed, in the same order. Time-free, so viewer_selection_gate_test drives them.
   void Begin();                                            // UI: a pick was accepted for sending
+  void BeginLocal();                                       // UI: rel-0163 r3 -- a desktop pick at a logon-screen host
+  bool ConvertToLocal(uint64_t opEpoch);                   // UI: that op's WindowSelect(0) was not sendable after all
+  bool LocalUnbound() const;                               // recv: a local transaction still waiting for its keyframe
+  bool BindLocalGeneration(uint64_t streamGeneration);     // recv: bind it to the first admitted keyframe's generation
   void Clear();                                            // any thread: drop the in-flight transaction
   SelectionAck ApplyAck(bool ok, uint64_t streamGeneration);   // control: the host's WindowSelected
   bool EpochChanged(uint64_t& seenEpoch);                  // recv: a new pick since the last frame (reset the decoder)

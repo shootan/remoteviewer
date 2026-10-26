@@ -8,6 +8,7 @@
 namespace remote60::native_poc::viewer {
 
 void SelectionGateState::Begin() {
+  localAckless.store(false, std::memory_order_release);
   expectedGeneration.store(0, std::memory_order_release);
   awaitingAck.store(true, std::memory_order_release);
   pending.store(true, std::memory_order_release);
@@ -19,6 +20,38 @@ void SelectionGateState::Clear() {
   pending.store(false, std::memory_order_release);
   awaitingAck.store(false, std::memory_order_release);
   expectedGeneration.store(0, std::memory_order_release);
+  localAckless.store(false, std::memory_order_release);
+}
+// rel-0163 r3: the same transaction as Begin -- pending, a new epoch (the receive loop resets the decoder and
+// waits for a keyframe) -- without an ack to wait for. Its generation is bound by the first admitted keyframe.
+void SelectionGateState::BeginLocal() {
+  expectedGeneration.store(0, std::memory_order_release);
+  awaitingAck.store(false, std::memory_order_release);
+  localAckless.store(true, std::memory_order_release);
+  pending.store(true, std::memory_order_release);
+  epoch.fetch_add(1, std::memory_order_acq_rel);
+}
+// A transaction begun the ordinary way whose WindowSelect(0) turned out unsendable (the host's role became
+// known as the logon screen before it went out): the SAME op -- epoch unchanged, its decoder reset already done --
+// continues as a local one. Only that op, only while it still waits for its ack.
+bool SelectionGateState::ConvertToLocal(uint64_t opEpoch) {
+  if (!pending.load(std::memory_order_acquire) || !awaitingAck.load(std::memory_order_acquire) ||
+      epoch.load(std::memory_order_acquire) != opEpoch) {
+    return false;
+  }
+  expectedGeneration.store(0, std::memory_order_release);
+  localAckless.store(true, std::memory_order_release);
+  awaitingAck.store(false, std::memory_order_release);
+  return true;
+}
+bool SelectionGateState::LocalUnbound() const {
+  return pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire) &&
+         expectedGeneration.load(std::memory_order_acquire) == 0;
+}
+bool SelectionGateState::BindLocalGeneration(uint64_t streamGeneration) {
+  if (streamGeneration == 0 || !LocalUnbound()) return false;
+  uint64_t unbound = 0;
+  return expectedGeneration.compare_exchange_strong(unbound, streamGeneration, std::memory_order_acq_rel);
 }
 
 SelectionAck SelectionGateState::ApplyAck(bool ok, uint64_t streamGeneration) {
@@ -68,7 +101,9 @@ SelectionAdmit SelectionGateState::AdmitGeneration(uint64_t streamGeneration) co
 }
 
 bool SelectionGateState::AckedSelectionPending() const {
-  return pending.load(std::memory_order_acquire) && !awaitingAck.load(std::memory_order_acquire);
+  // rel-0163 r3: a local transaction counts once its generation is bound (its first keyframe), not before.
+  return pending.load(std::memory_order_acquire) && !awaitingAck.load(std::memory_order_acquire) &&
+         !(localAckless.load(std::memory_order_acquire) && expectedGeneration.load(std::memory_order_acquire) == 0);
 }
 
 bool SelectionGateState::RecordReveal(uint64_t readyGen, uint64_t readyEp) {

@@ -66,6 +66,10 @@ void clear_pc_target_selection(ViewerState& ctx);
 // Returns true only when the select request was actually accepted for sending, so callers can
 // log/refresh on real selections instead of refused attempts (disconnected, locked target).
 bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* statusText);
+// rel-0163 r3: a pick held until the host's role was known, run once (UI thread).
+void run_deferred_pc_selection(ViewerState& ctx);
+// rel-0163 r3: a WindowSelect the control thread could not send to a logon-screen host (UI thread).
+void resolve_unsendable_pc_selection(ViewerState& ctx, uint64_t windowId, uint64_t opEpoch);
 
 // Video-thread half of the reveal. It only *records* the candidate (the generation and epoch of
 // the first decoded frame) and posts the reveal once; it deliberately touches none of the live

@@ -193,6 +193,37 @@ void set_picker_visible_and_sync_stream(ViewerState& ctx, bool visible) {
 // the stream request (itself atomic-backed).
 void clear_pc_target_selection(ViewerState& ctx) {
   ctx.sel.Clear();
+  ctx.sel.deferredPick.store(0, std::memory_order_release);  // rel-0163 r3: a held pick ends with it
+}
+
+// rel-0163 r3: the held pick, now that the host's role is known (UI thread; once).
+void run_deferred_pc_selection(ViewerState& ctx) {
+  const uint64_t held = ctx.sel.deferredPick.exchange(0, std::memory_order_acq_rel);
+  if (held == 0) return;
+  if (!ctx.picker.visible.load(std::memory_order_relaxed) || !ctx.control.connected.load(std::memory_order_relaxed)) return;
+  const uint64_t windowId = held - 1;
+  (void)begin_pc_target_selection(ctx, windowId, windowId == 0 ? "desktop_select_requested" : "window_select_requested");
+}
+
+// rel-0163 r3: a WindowSelect the control thread could not send (the host is known to be at the logon screen,
+// its allowlist has no WindowSelect). Its op continues as a local desktop selection, or -- another target --
+// fails the way a refused ack does. Never silently: the op is resolved either way.
+void resolve_unsendable_pc_selection(ViewerState& ctx, uint64_t windowId, uint64_t opEpoch) {
+  if (windowId == 0 && ctx.sel.ConvertToLocal(opEpoch)) {
+    ctx.picker.windowPanel.SetStatus("desktop_select_local");
+    request_keyframe(ctx, 1);
+    std::cout << "[native-video-client][picker] desktop select not sendable at the logon screen: the same op continues as a local selection epoch="
+              << opEpoch << "\n";
+    return;
+  }
+  if (ctx.sel.pending.load(std::memory_order_acquire) && ctx.sel.awaitingAck.load(std::memory_order_acquire) &&
+      ctx.sel.epoch.load(std::memory_order_acquire) == opEpoch) {
+    ctx.control.streamState.Request(false);
+    clear_pc_target_selection(ctx);
+    ctx.picker.windowPanel.SetStatus("window_select_unavailable_prelogin");
+    std::cout << "[native-video-client][picker] window select not sendable at the logon screen: refused id=" << windowId
+              << "\n";
+  }
 }
 
 // UI-thread entry for picking a target from the picker. Orders the control traffic so the host's
@@ -206,6 +237,40 @@ void clear_pc_target_selection(ViewerState& ctx) {
 bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* statusText) {
   if (ctx.sel.pending.load(std::memory_order_acquire)) return false;
   if (!ctx.control.connected.load(std::memory_order_relaxed)) return false;
+  // rel-0163 r3 (Codex codex_rel_0163_e1_decision.md): what the host takes depends on its role, known from its
+  // first pong. Before that nothing is sent blind (a logon-screen host closes the link on a WindowSelect): the
+  // pick waits as this connection's intent and runs once the role is known (kMsgRunDeferredPick).
+  if (!ctx.session.hostRoleKnown.load(std::memory_order_acquire)) {
+    ctx.sel.deferredPick.store(windowId + 1, std::memory_order_release);
+    ctx.picker.windowPanel.SetStatus("waiting_host_role");
+    std::cout << "[native-video-client][picker] pick held until the host's role is known id=" << windowId << "\n";
+    if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+    return true;
+  }
+  ctx.sel.deferredPick.store(0, std::memory_order_release);
+  // A host known to be at the LOGON screen (kCaptureFlagPreloginV1 -- not the lock screen's LockCred, not a
+  // secure desktop): it takes no WindowSelect, and serves exactly one desktop. A desktop pick there is a local
+  // transaction (the gate's localAckless); any other target is not available there.
+  if ((ctx.session.hostCaptureFlags.load(std::memory_order_acquire) & remote60::native_poc::kCaptureFlagPreloginV1) != 0) {
+    if (windowId != 0) {
+      ctx.picker.windowPanel.SetStatus("window_select_unavailable_prelogin");
+      std::cout << "[native-video-client][picker] window pick refused: the host is at the logon screen id=" << windowId
+                << "\n";
+      if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+      return false;
+    }
+    if (ctx.picker.windowPanel.Snapshot().selectionLocked) return false;
+    ctx.sel.BeginLocal();
+    restore_note_pick(ctx, 0);
+    ctx.picker.windowPanel.SetStatus("desktop_select_local");
+    ctx.control.streamState.Request(true);
+    request_keyframe(ctx, 1);  // allowed at the logon screen (ControlRequestKeyFrame)
+    ctx.cursor.Publish(RemoteCursorSample{});
+    std::cout << "[native-video-client][picker] desktop pick at the logon screen: local selection (no host ack) epoch="
+              << ctx.sel.epoch.load(std::memory_order_acquire) << "\n";
+    if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+    return true;
+  }
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
   if (!ctx.picker.windowPanel.RequestSelect(windowId, statusText)) return false;
   ctx.sel.Begin();

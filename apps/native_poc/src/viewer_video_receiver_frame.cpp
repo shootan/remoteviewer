@@ -189,6 +189,14 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       ++st.skippedQueued;
       return true;
     }
+    // rel-0163 r3: a local (logon-screen desktop) selection takes the generation of the first KEYFRAME admitted
+    // after it began (the decoder was reset for it and waits for a keyframe); from here frames of another
+    // generation drop as after an ack, and the reveal below can only come from that generation.
+    if ((h.flags & kEncodedFrameFlagKeyFrame) != 0 && ctx.sel.LocalUnbound() &&
+        ctx.sel.BindLocalGeneration(h.streamGeneration)) {
+      std::cout << "[native-video-client][picker] local selection bound to streamGeneration=" << h.streamGeneration
+                << " epoch=" << ctx.sel.epoch.load(std::memory_order_acquire) << "\n";
+    }
 
     if (!dec.decoderReady || dec.decoderW != h.width || dec.decoderH != h.height) {
       if (!dec.decoder.initialize(h.width, h.height, args.fpsHint)) {
