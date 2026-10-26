@@ -708,6 +708,18 @@ add_executable(remote60_client_session_role_park_test
 target_include_directories(remote60_client_session_role_park_test PRIVATE src)
 target_link_libraries(remote60_client_session_role_park_test PRIVATE common ws2_32)
 
+# apk-0232 r1: a desktop pick at a host at the logon screen through the PRODUCT shared session and the APK's
+# selection gate (selection_ack_gate.hpp), against a fake control host on loopback.
+add_executable(remote60_client_session_prelogin_select_test
+  src/client_session_prelogin_select_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_client_session_prelogin_select_test PRIVATE src)
+target_link_libraries(remote60_client_session_prelogin_select_test PRIVATE common ws2_32)
+
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp
