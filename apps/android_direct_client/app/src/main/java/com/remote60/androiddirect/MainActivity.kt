@@ -2592,6 +2592,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             DesktopBackendPresentation.State.IDLE -> getString(R.string.settings_desktop_backend_idle, now)
             DesktopBackendPresentation.State.APPLYING -> getString(R.string.settings_desktop_backend_applying, asked ?: "?", now)
             DesktopBackendPresentation.State.APPLIED -> getString(R.string.settings_desktop_backend_applied, asked ?: "?", now)
+            DesktopBackendPresentation.State.POLICY_REPLACED ->
+                getString(R.string.settings_desktop_backend_policy, asked ?: "?", p.label(v.effective), now)
+            DesktopBackendPresentation.State.RECEIVED -> getString(R.string.settings_desktop_backend_received, asked ?: "?", now)
             DesktopBackendPresentation.State.STORED_FOR_DESKTOP -> getString(R.string.settings_desktop_backend_stored, asked ?: "?", now)
             DesktopBackendPresentation.State.REFUSED -> getString(R.string.settings_desktop_backend_refused, asked ?: "?", now)
         }

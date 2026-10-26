@@ -232,6 +232,19 @@ class ClientSessionController {
   // carries the backend-status capability -- is known yet (N3: unknown is not "unsupported").
   DesktopBackendControl::Intent DesktopCaptureBackendIntent() const { return desktopBackend_.CurrentIntent(); }
   bool HostRoleKnown() const { return hostRole_.Load().known; }
+  // ua2-apk r3 (Codex codex_ua2_apk_src_r2.md N3): the host's backend-status capability from ONE read of its role --
+  // known (its first pong came) and, from the same pong's flags, whether it answers. Never "known" from one moment and
+  // "answers" from another (a first pong between two reads made a new host look like an older one). `stopPoint`
+  // (tests) runs after the read: a pong arriving there changes nothing of this snapshot.
+  struct DesktopBackendCapabilitySnapshot {
+    bool known = false;
+    bool answers = false;
+  };
+  DesktopBackendCapabilitySnapshot DesktopBackendCapability(const std::function<void()>& stopPoint = {}) const {
+    const auto role = hostRole_.Load();
+    if (stopPoint) stopPoint();
+    return {role.known, role.known && (role.flags & kCaptureFlagDesktopBackendStatusV1) != 0};
+  }
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);

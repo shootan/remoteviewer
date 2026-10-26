@@ -15,6 +15,12 @@ package com.remote60.androiddirect
  *  - WHAT CAPTURES NOW: a window target is WGC; the desktop's backend.active is shown only for a desktop target.
  * The lit button is this connection's desktop method as the host HANDLED it (status.requested), and only then.
  *
+ * r3 (codex_ua2_apk_src_r2.md N1): "handled" is the host having taken the request (stored, refused, or restarted
+ * with it) -- not the capture having switched. APPLIED only when what captures now (active) IS the request; the
+ * host's policy putting another in its place (effective, e.g. DXGI quarantined) is POLICY_REPLACED; a request taken
+ * while the desktop still captures with another (idle desktop, or a restart that fell back) is RECEIVED -- the facts
+ * only: no cause is made up the wire does not carry.
+ *
  * Pure (no Android types): MainActivity feeds it the native snapshot; DesktopBackendPresentationTest drives it.
  */
 object DesktopBackendPresentation {
@@ -67,7 +73,12 @@ object DesktopBackendPresentation {
         IDLE,
         /** The current request is not answered yet (not sent, an older answer, or NotYetApplied). */
         APPLYING,
+        /** Handled, and the desktop captures with it now. */
         APPLIED,
+        /** Handled; the host's policy uses another in its place (effective), and that one captures now. */
+        POLICY_REPLACED,
+        /** Handled, but the desktop captures with another now (stored while idle, or a restart that fell back). */
+        RECEIVED,
         /** Handled, but a window is being captured (WGC): the method applies when the desktop is shown. */
         STORED_FOR_DESKTOP,
         /** Handled and not taken (the host's reason). Terminal: another pick is possible. */
@@ -84,6 +95,8 @@ object DesktopBackendPresentation {
         val asked: Int?,
         /** What the host's answer says (0 when there is none). */
         val requested: Int,
+        /** The host's policy pick for the request (0: none said). */
+        val effective: Int,
         val active: Int,
         val windowTarget: Boolean,
         /** The host says the choice ends with this session (supported hosts only). */
@@ -98,10 +111,10 @@ object DesktopBackendPresentation {
      */
     fun present(connected: Boolean, asked: Int?, status: HostStatus?): View {
         fun view(state: State, lit: Int? = null, s: HostStatus? = null, reasons: List<Reason> = emptyList()) = View(
-            state, lit, connected, asked, s?.requested ?: 0, s?.active ?: 0,
+            state, lit, connected, asked, s?.requested ?: 0, s?.effective ?: 0, s?.active ?: 0,
             s != null && s.flags and FLAG_WINDOW_TARGET != 0,
             s != null && s.hostAnswers && s.flags and FLAG_SESSION_SCOPED != 0, reasons)
-        if (!connected) return View(State.NOT_CONNECTED, null, false, null, 0, 0, false, false, emptyList())
+        if (!connected) return View(State.NOT_CONNECTED, null, false, null, 0, 0, 0, false, false, emptyList())
         if (status == null || !status.roleKnown) return view(State.CHECKING)
         if (!status.hostAnswers) return view(State.NO_ANSWER_HOST)
         if (!status.valid) return view(State.CHECKING)
@@ -111,13 +124,23 @@ object DesktopBackendPresentation {
             if (status.flags and FLAG_BEFORE_LOGIN != 0) add(Reason.BEFORE_LOGIN)
         }
         val handledLit = status.requested.takeIf { it in DXGI..GDI }
-        if (asked == null) return view(State.IDLE, handledLit, status, reasons)
+        if (asked == null) {
+            // r3 (N1): no request of ours -- the host's own, once it has one: an answer with no state yet (0 fields,
+            // NotYetApplied) is still waiting, not a confirmed "now: ?".
+            val noStateYet = status.flags and FLAG_NOT_YET_APPLIED != 0 ||
+                (status.flags and FLAG_WINDOW_TARGET == 0 && status.active !in DXGI..GDI)
+            return if (noStateYet) view(State.CHECKING) else view(State.IDLE, handledLit, status, reasons)
+        }
         // the current request: sent? answered at or after its seq? handled?
         val pending = status.intentAsked == 0L || status.intentSent < status.intentAsked || status.intentSentSeq == 0L ||
             status.seq < status.intentSentSeq || status.flags and FLAG_NOT_YET_APPLIED != 0
         if (pending) return view(State.APPLYING, null, status, reasons)
         if (status.requested != asked) return view(State.REFUSED, handledLit, status, reasons)
         if (status.flags and FLAG_WINDOW_TARGET != 0) return view(State.STORED_FOR_DESKTOP, handledLit, status, reasons)
+        // r3 (N1): handled is not switched -- what captures now decides the word
+        val effective = status.effective.takeIf { it in DXGI..GDI } ?: status.requested
+        if (effective != status.requested && status.active == effective) return view(State.POLICY_REPLACED, handledLit, status, reasons)
+        if (status.active != status.requested) return view(State.RECEIVED, handledLit, status, reasons)
         return view(State.APPLIED, handledLit, status, reasons)
     }
 

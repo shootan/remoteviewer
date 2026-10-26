@@ -28,6 +28,9 @@
     <string name="settings_desktop_backend_idle">%1$s</string>
     <string name="settings_desktop_backend_applying">요청: %1$s · 적용 중… (%2$s)</string>
     <string name="settings_desktop_backend_applied">요청: %1$s 적용됨 · %2$s</string>
+    <!-- ua2-apk r3: handled, but not (or not as asked) capturing now: the facts only -->
+    <string name="settings_desktop_backend_policy">요청: %1$s 접수 · PC 정책으로 %2$s 사용 · %3$s</string>
+    <string name="settings_desktop_backend_received">요청: %1$s 접수 · 아직 이 방식으로 캡처하지 않음 · %2$s</string>
     <string name="settings_desktop_backend_stored">요청: %1$s · 바탕화면을 볼 때 적용 · %2$s</string>
     <string name="settings_desktop_backend_refused">요청: %1$s 적용 안 됨 · %2$s</string>
     <string name="settings_desktop_backend_scope">이 연결에만 적용</string>

@@ -561,11 +561,13 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetDesktopBackendStatu
     JNIEnv* env, jobject /* this */) {
   const auto s = g_session_controller.DesktopCaptureBackendStatus();
   const auto i = g_session_controller.DesktopCaptureBackendIntent();
+  // ua2-apk r3 (N3): known and answers from one read of the host's role
+  const auto cap = g_session_controller.DesktopBackendCapability();
   const jlong v[12] = {s.valid ? 1 : 0, static_cast<jlong>(s.seq), static_cast<jlong>(s.requested),
                        static_cast<jlong>(s.effective), static_cast<jlong>(s.active), static_cast<jlong>(s.flags),
                        static_cast<jlong>(s.changeCount),
-                       g_session_controller.HostAnswersDesktopBackendStatus() ? 1 : 0,
-                       g_session_controller.HostRoleKnown() ? 1 : 0,
+                       cap.answers ? 1 : 0,
+                       cap.known ? 1 : 0,
                        static_cast<jlong>(i.asked), static_cast<jlong>(i.sent), static_cast<jlong>(i.sentSeq)};
   jlongArray out = env->NewLongArray(12);
   if (out) env->SetLongArrayRegion(out, 0, 12, v);
