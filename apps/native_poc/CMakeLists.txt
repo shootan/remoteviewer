@@ -1635,6 +1635,8 @@ if(MSVC)
   target_compile_options(remote60_host_capture_lifecycle_ua_e2e_test PRIVATE /utf-8)
 endif()
 add_dependencies(remote60_host_capture_lifecycle_ua_e2e_test remote60_native_video_host_migration_seam)
+# rel-0163 r2 E1: e2e_window_capture.hpp (Windows.Graphics.Capture on the viewer window) -- test target only.
+target_link_libraries(remote60_host_capture_lifecycle_ua_e2e_test PRIVATE windowsapp)
 
 # mouse-xbutton r1: the back / forward buttons through the product's window procedure, the wire, a
 # real isolated host and into a window of this process -- and not at all (--legacy-host) against a
@@ -1716,6 +1718,7 @@ add_executable(remote60_viewer_prelogin_login_e2e_test
 target_include_directories(remote60_viewer_prelogin_login_e2e_test PRIVATE src)
 # lk-ux-retry r2 (Codex N2): the test-only sealing failure in viewer_unlock.cpp -- this e2e target only, never the viewer.
 target_compile_definitions(remote60_viewer_prelogin_login_e2e_test PRIVATE REMOTE60_VIEWER_UNLOCK_TEST_SEAM=1)
+target_link_libraries(remote60_viewer_prelogin_login_e2e_test PRIVATE windowsapp)  # rel-0163 r2 E1 (test target only)
 target_link_libraries(remote60_viewer_prelogin_login_e2e_test PRIVATE
   remote60_clip_image remote60_test_scratch_dir
   common user32 gdi32 shell32 ole32 shlwapi version ws2_32 imm32 bcrypt ncrypt advapi32 crypt32

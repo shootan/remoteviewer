@@ -120,6 +120,11 @@ constexpr UINT kMsgSasResult = WM_APP + 22;
 // dxgi-wedge-fix r1 (viewer_restore.cpp): the control thread asks the UI thread to advance a restore
 // (a window list arrived).
 constexpr UINT kMsgRestoreStep = WM_APP + 23;
+// rel-0163 r3: the host's role became known -- run a pick that was held for it (viewer_picker.cpp).
+constexpr UINT kMsgRunDeferredPick = WM_APP + 24;
+// rel-0163 r3: a WindowSelect was not sendable to a logon-screen host. wParam = windowId, lParam = the op's
+// selection epoch (low 32 bits are enough: it only has to match the live op).
+constexpr UINT kMsgUnsendableSelect = WM_APP + 25;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

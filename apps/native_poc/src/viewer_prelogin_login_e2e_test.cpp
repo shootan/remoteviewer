@@ -40,6 +40,7 @@
 
 #include <fstream>
 #include <memory>
+#include <set>
 #include <sstream>
 
 #include "client_session_toolbar.hpp"
@@ -58,6 +59,8 @@
 #include "viewer_constants.hpp"
 #include "secure_unlock_ipc.hpp"
 #include "viewer_window_proc.hpp"
+#include "e2e_window_capture.hpp"  // rel-0163 r2 E1: what DWM composes for the viewer window
+#include "viewer_layout.hpp"  // rel-0163 r2 E1: the picker's desktop card, as the product lays it out
 #include "viewer_decoder_state.hpp"  // capture-lifecycle r1 (PS): the product receive chain
 #include "viewer_frame_gate_state.hpp"
 #include "viewer_video_receiver.hpp"
@@ -515,7 +518,8 @@ std::vector<wchar_t> test_base_environment(const std::wstring& dir, const std::v
 
 bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, Start how,
                 const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring(),
-                const std::wstring& extraEnv2 = std::wstring(), const std::wstring& extraEnv3 = std::wstring()) {
+                const std::wstring& extraEnv2 = std::wstring(), const std::wstring& extraEnv3 = std::wstring(),
+                const std::wstring& extraEnv4 = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
   // r13 negative control: REMOTE60_E2E_OLD_BIN names a streaming TEST build without the udp-control-peer
@@ -550,6 +554,7 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
   if (!extraEnv.empty()) fixtures.push_back(extraEnv);
   if (!extraEnv2.empty()) fixtures.push_back(extraEnv2);
   if (!extraEnv3.empty()) fixtures.push_back(extraEnv3);
+  if (!extraEnv4.empty()) fixtures.push_back(extraEnv4);
   std::wstring cmd;
   std::vector<wchar_t> env;
   if (how == Start::LoggedIn) {
@@ -759,6 +764,8 @@ int wmain(int argc, wchar_t** argv) {
   bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
   bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
   bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
+  bool renderE1 = false;  // rel-0163 r2 E1: --still-screen through the PRODUCT renderer (window procedure -> D3D present)
+  std::wstring shotsDir;  // ...where its window captures go (--shots <dir>)
   bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -777,6 +784,8 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--still-screen") stillScreen = true;
     if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
     if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
+    if (a == L"--render") renderE1 = true;
+    if (a == L"--shots" && i + 1 < argc) shotsDir = argv[++i];
     if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
@@ -936,7 +945,10 @@ int wmain(int argc, wchar_t** argv) {
                                   stillScreen ? std::wstring(stillNoFirst        ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
                                                              : stillPointerFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst"
                                                                                  : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
-                                              : std::wstring());
+                                              : std::wstring(),
+                                  // rel-0163 r3 E1: the first pong late, so the first pick is pressed before the host's
+                                  // role is known (the viewer must hold it, not send a WindowSelect blind).
+                                  renderE1 ? std::wstring(L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=4000") : std::wstring());
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
         started);
@@ -1180,8 +1192,11 @@ int wmain(int argc, wchar_t** argv) {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60PreloginLoginViewer";
     RegisterClassExW(&wc);
-    viewerWindow = CreateWindowExW(0, wc.lpszClassName, L"remote60 prelogin login viewer", WS_OVERLAPPEDWINDOW, 500, 40,
-                                   800, 500, nullptr, nullptr, wc.hInstance, &ctx);
+    // rel-0163 r2 E1: the viewer window is placed OFF every monitor -- it is presented and captured
+    // (PrintWindow, PW_RENDERFULLCONTENT) without covering any of the user's screen.
+    const int e1X = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 200;
+    viewerWindow = CreateWindowExW(0, wc.lpszClassName, L"remote60 prelogin login viewer", WS_OVERLAPPEDWINDOW,
+                                   renderE1 ? e1X : 500, 40, 800, 500, nullptr, nullptr, wc.hInstance, &ctx);
     check("the product's window procedure owns a window", viewerWindow != nullptr);
     ShowWindow(viewerWindow, SW_SHOWNOACTIVATE);
     ctx.session.hwnd = viewerWindow;
@@ -1283,15 +1298,15 @@ int wmain(int argc, wchar_t** argv) {
       gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
       gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
       gate.waitForKeyFrame = true;
-      ctx.picker.visible.store(false);
+      if (!renderE1) ctx.picker.visible.store(false);  // E1: the product's own picker, shown by its control client
       ctx.control.keyframeRequests.Reset();
       VideoReceiver::NackOptions nack;
       nack.enabled = false;
       receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
       ingress = std::thread([&] { receiver->Run(); });
       // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
-      // of a sparse sample of the visible picture).
-      presentThread = std::thread([&] {
+      // of a sparse sample of the visible picture). Not in E1: there the product's window procedure presents.
+      if (!renderE1) presentThread = std::thread([&] {
         uint64_t seen = 0;
         while (!ingressStop.load() && ctx.session.running.load()) {
           Shown s{};
@@ -1379,6 +1394,9 @@ int wmain(int argc, wchar_t** argv) {
     ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
     ctx.control.connected.store(true, std::memory_order_relaxed);
     worker = std::thread([&] { control.Run(); });
+    // rel-0163 r2 E1: what viewer_startup.cpp does once control is up -- ask the host for its window list (the
+    // picker's cards, and the selection transaction a pick goes through).
+    if (renderE1) remote60::native_poc::viewer::queue_window_list_request(ctx, "window_list_request pending");
     // r7 H6: the host's first pong is late (test seam, 3 s). Keys typed now -- the role not known yet --
     // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
     // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
@@ -1512,7 +1530,371 @@ int wmain(int argc, wchar_t** argv) {
   // (GNLINK_STREAM_TEST_STILL_SCREEN: the capture library takes every acquire but a new duplication's first
   // as a timeout -- so the full-frame reacquire runs its real duplication remake);
   // the present thread stamps what the renderer would show (no window).
-  if (stillScreen && connected) {
+  // rel-0163 r2 E1 (Codex codex_rel_0163_evidence_r1.md): the same still logon screen, through the PRODUCT
+  // renderer -- the viewer's window procedure (WndProc), request_video_paint -> WM_PAINT -> paint_video_frame ->
+  // the D3D swap chain's Present (viewer_present.cpp; ctx.present.d3dPresentSuccessCount counts the presents
+  // that succeeded). The product picker is shown for 10 s, its desktop card is pressed with the messages a
+  // mouse produces, and the window is captured with PrintWindow (PW_RENDERFULLCONTENT: what DWM composes for it).
+  // The window is OFF every monitor: nothing of the user's screen is covered or touched.
+  if (stillScreen && connected && renderE1) {
+    std::cout << "\n--- PS E1: the product renderer, picker 10 s -> desktop ---\n";
+    using namespace remote60::native_poc::viewer;
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto presents = [&] { return ctx.present.d3dPresentSuccessCount.load(std::memory_order_relaxed); };
+    struct Shot {
+      bool ok = false;
+      double pickerShare = 1.0;  // share of pixels that are exactly the picker background RGB(13,15,20)
+      uint32_t lumaSpread = 0;
+      size_t colors = 0;
+      int w = 0, h = 0;
+    };
+    // What DWM composes for the viewer window (Windows.Graphics.Capture on it, e2e_window_capture.hpp). PrintWindow
+    // cannot be used: for the D3D flip-model swap chain it returns the window's GDI background (measured 10-26).
+    const auto capture = [&](const std::wstring& name) {
+      Shot sh;
+      const remote60::native_poc::e2e::WindowCapture c = remote60::native_poc::e2e::e2e_capture_window(viewerWindow, [&] {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&msg);
+          DispatchMessageW(&msg);
+        }
+      });
+      if (!c.ok) return sh;
+      sh.w = c.w;
+      sh.h = c.h;
+      size_t picker = 0;
+      uint32_t lo = 255, hi = 0;
+      std::set<uint32_t> colors;
+      // The client area only (the capture includes the frame): the centre 80 %.
+      for (int y = c.h / 10; y < c.h * 9 / 10; ++y) {
+        for (int x = c.w / 10; x < c.w * 9 / 10; ++x) {
+          const uint32_t px = c.px[static_cast<size_t>(y) * c.w + x] & 0xFFFFFF;
+          if (px == 0x0D0F14) ++picker;
+          const uint32_t luma = (((px >> 16) & 0xFF) * 3 + ((px >> 8) & 0xFF) * 6 + (px & 0xFF)) / 10;
+          lo = std::min(lo, luma);
+          hi = std::max(hi, luma);
+          if (colors.size() < 5000) colors.insert(px);
+        }
+      }
+      const double area = static_cast<double>(c.w * 8 / 10) * (c.h * 8 / 10);
+      sh.pickerShare = area > 0 ? picker / area : 0;
+      sh.lumaSpread = hi - lo;
+      sh.colors = colors.size();
+      sh.ok = true;
+      if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      return sh;
+    };
+    // The picker before any pick is GDI-drawn (no swap chain exists until a pick produces a frame): PrintWindow.
+    const auto capture_gdi = [&](const std::wstring& name) {
+      Shot sh;
+      RECT rc{};
+      GetClientRect(viewerWindow, &rc);
+      sh.w = rc.right - rc.left;
+      sh.h = rc.bottom - rc.top;
+      if (sh.w <= 0 || sh.h <= 0) return sh;
+      HDC wdc = GetDC(viewerWindow);
+      HDC mem = CreateCompatibleDC(wdc);
+      BITMAPINFO bi{};
+      bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+      bi.bmiHeader.biWidth = sh.w;
+      bi.bmiHeader.biHeight = -sh.h;
+      bi.bmiHeader.biPlanes = 1;
+      bi.bmiHeader.biBitCount = 32;
+      bi.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      HBITMAP bmp = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+      HGDIOBJ old = SelectObject(mem, bmp);
+      const BOOL printed = PrintWindow(viewerWindow, mem, PW_CLIENTONLY);
+      SelectObject(mem, old);
+      if (printed && bits) {
+        remote60::native_poc::e2e::WindowCapture c;
+        c.ok = true;
+        c.w = sh.w;
+        c.h = sh.h;
+        c.px.assign(static_cast<const uint32_t*>(bits), static_cast<const uint32_t*>(bits) + sh.w * sh.h);
+        size_t picker = 0;
+        for (const uint32_t px : c.px) {
+          if ((px & 0xFFFFFF) == 0x0D0F14) ++picker;
+        }
+        sh.pickerShare = static_cast<double>(picker) / (static_cast<double>(sh.w) * sh.h);
+        sh.ok = true;
+        if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      }
+      DeleteObject(bmp);
+      DeleteDC(mem);
+      ReleaseDC(viewerWindow, wdc);
+      return sh;
+    };
+    const auto shot_text = [](const Shot& sh) {
+      char b[128];
+      std::snprintf(b, sizeof(b), "pickerBg=%.1f%% luma=%u colors=%zu %dx%d", sh.pickerShare * 100.0, sh.lumaSpread,
+                    sh.colors, sh.w, sh.h);
+      return std::string(b);
+    };
+    RECT wr{};
+    GetWindowRect(viewerWindow, &wr);
+    const RECT vs{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                  GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+    RECT overlap{};
+    check("E1: the viewer window is OFF every monitor (the user's screen is not covered)",
+          !IntersectRect(&overlap, &wr, &vs), std::to_string(wr.left) + "," + std::to_string(wr.top));
+    // The product picker: shown by the control client (startInPicker), the stream off behind it.
+    const bool pickerUp = pump_until([&] { return ctx.picker.visible.load(); }, 5000);
+    check("E1: the product's picker is shown", pickerUp);
+    // The desktop card where the product lays it out, pressed with the messages a mouse produces.
+    const auto press_desktop = [&] {
+      const ClientLayout layout = compute_client_layout(ctx, viewerWindow);
+      const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);
+      const RECT card = card_rect_for_slot(layout.listRect, grid, 0);
+      const int cx = (card.left + card.right) / 2, cy = (card.top + card.bottom) / 2;
+      PostMessageW(viewerWindow, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(cx, cy));
+      PostMessageW(viewerWindow, WM_LBUTTONUP, 0, MAKELPARAM(cx, cy));
+    };
+    // The picker (whatever draws it: GDI before the first swap chain, the swap chain after).
+    const auto picker_shot = [&](const std::wstring& name) {
+      const Shot a = capture(name);
+      if (a.ok && a.pickerShare > 0.15) return a;
+      return capture_gdi(name);
+    };
+    // Waits for the product renderer to present a picture after `t0`: picker closed, a successful present.
+    const auto wait_presented = [&](uint64_t presentsBefore, uint64_t t0, int budgetMs, uint64_t* latencyMs) {
+      uint64_t at = 0;
+      const bool ok = pump_until([&] {
+        if (presents() > presentsBefore && !ctx.picker.visible.load() &&
+            ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed) != 0) {
+          at = qpc_now_us();
+          return true;
+        }
+        return false;
+      }, budgetMs);
+      *latencyMs = ok ? (at - t0) / 1000 : 0;
+      return ok;
+    };
+    const auto shown_after = [&](const char* name, const std::wstring& shot, const Shot& pickerShot) {
+      pump_until([] { return false; }, 300);
+      const Shot streamShot = capture(shot);
+      check((std::string("E1 PS ") + name + ": SCREENSHOT -- the window shows the picture (not the picker, not a blank)").c_str(),
+            streamShot.ok && streamShot.pickerShare < 0.05 && streamShot.lumaSpread >= 8 && streamShot.colors > 64 &&
+                pickerShot.pickerShare > 0.15,
+            shot_text(streamShot) + " (picker before: " + shot_text(pickerShot) + ")");
+      const uint64_t presentsAt = presents();
+      pump_until([] { return false; }, 3000);
+      const uint64_t refreshed = presents() - presentsAt;
+      check((std::string("E1 PS ") + name + ": THE STILL SCREEN KEEPS BEING PRESENTED (>= 4 presents in the next 3 s)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " presents");
+    };
+    const auto viewer_text = [&] { return std::string(); };
+    (void)viewer_text;
+
+    // (0) rel-0163 r3: the first pick BEFORE the host's role is known (its first pong is 4 s late): held, not sent;
+    //     run once when the role is known -- at the logon screen, as a local selection.
+    pump_until([] { return false; }, 700);  // past the picker's mis-click guard
+    const bool roleUnknown = !ctx.session.hostRoleKnown.load();
+    const Shot pickerShot0 = picker_shot(L"E1-0-picker-before-role.bmp");
+    const uint64_t p0 = presents();
+    const uint64_t t0 = qpc_now_us();
+    press_desktop();
+    pump_until([] { return false; }, 300);
+    check("E1 PS (0): pressed BEFORE the host's role is known -- the pick is held (picker stays, nothing sent blind)",
+          roleUnknown && ctx.sel.deferredPick.load() == 1 && ctx.picker.visible.load() && !ctx.sel.pending.load(),
+          std::string("roleKnown=") + (ctx.session.hostRoleKnown.load() ? "1" : "0") +
+              " deferred=" + std::to_string(ctx.sel.deferredPick.load()));
+    uint64_t lat0 = 0;
+    const bool shown0 = wait_presented(p0, t0, 9000, &lat0);
+    const bool roleKnownMs = ctx.session.hostRoleKnown.load();
+    check("E1 PS (0): ...once the role is known (logon screen) it runs ONCE as a local selection and the product renderer presents",
+          shown0 && roleKnownMs && ctx.sel.deferredPick.load() == 0,
+          shown0 ? std::to_string(lat0) + " ms after the press (the pong was held 4 s)" : std::string("no present in 9 s"));
+    if (shown0) shown_after("(0)", L"E1-0b-presented-after-role.bmp", pickerShot0);
+
+    // (1) a WINDOW pick at the logon screen is refused (the host takes no WindowSelect there); nothing changes.
+    set_picker_visible_and_sync_stream(ctx, true);  // what the toolbar's "targets" does
+    pump_until([] { return false; }, 700);
+    const bool windowTaken = begin_pc_target_selection(ctx, 0x12345678ull, "window_select_requested");
+    check("E1 PS (1): a window pick at the logon screen is refused -- no transaction, the picker stays",
+          !windowTaken && !ctx.sel.pending.load() && ctx.picker.visible.load() &&
+              ctx.picker.windowPanel.Snapshot().status == "window_select_unavailable_prelogin",
+          ctx.picker.windowPanel.Snapshot().status);
+
+    // (2) Codex E1: picker 10 s (the worker's capture idles, then detaches) -> the desktop card -> presented <= 1 s.
+    pump_until([] { return false; }, 10000);
+    const Shot pickerShot = picker_shot(L"E1-1-picker.bmp");
+    check("E1: screenshot 1 -- the picker (negative control for the stream screenshots)",
+          pickerShot.ok && pickerShot.pickerShare > 0.15, shot_text(pickerShot));
+    const uint64_t p2 = presents();
+    const uint64_t t2 = qpc_now_us();
+    press_desktop();
+    uint64_t lat2 = 0;
+    const bool shown2 = wait_presented(p2, t2, 4000, &lat2);
+    check("E1 PS: THE DESKTOP CARD WAS PRESSED -> THE PRODUCT RENDERER PRESENTED THE STILL SCREEN WITHIN 1 s",
+          shown2 && lat2 <= 1000,
+          shown2 ? std::to_string(lat2) + " ms (d3dPresentSuccess " + std::to_string(p2) + " -> " + std::to_string(presents()) + ")"
+                 : std::string("no successful present in 4 s"));
+    if (shown2) shown_after("(2)", L"E1-2-presented.bmp", pickerShot);
+
+    // (3) again: the picker 10 s more, the desktop again (repeated viewing; the idle reattach again).
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 10000);
+    const Shot pickerShot3 = picker_shot(L"E1-3-picker-again.bmp");
+    const uint64_t p3 = presents();
+    const uint64_t t3 = qpc_now_us();
+    press_desktop();
+    uint64_t lat3 = 0;
+    const bool shown3 = wait_presented(p3, t3, 4000, &lat3);
+    check("E1 PS (3): the desktop again after 10 s in the picker: PRESENTED WITHIN 1 s",
+          shown3 && lat3 <= 1000, shown3 ? std::to_string(lat3) + " ms" : std::string("no present in 4 s"));
+    if (shown3) shown_after("(3)", L"E1-4-presented-again.bmp", pickerShot3);
+
+    // (4) rel-0163 r5 (Codex R3): the FINAL adoption boundary. A local pick A; right before A's first picture is
+    //     committed to the FrameBuffer (a test hook on the receive thread), A is cancelled and a new local op B
+    //     begins. A's picture must not be adopted (refused at the commit, its version not written) nor bind or
+    //     reveal B; B then completes on its OWN decoded keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired{false};
+    std::atomic<uint64_t> opA{0}, opB{0}, versionAtFire{0}, refusedAtFire{0};
+    ctx.sel.testBeforeFrameCommit = [&] {
+      if (fired.load()) return;
+      const uint64_t e = ctx.sel.epoch.load();
+      if (!ctx.sel.LocalUnbound(e)) return;  // only A's first picture, before any bind
+      opA = e;
+      {
+        std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+        versionAtFire = ctx.frameBuf.frame.version;
+      }
+      refusedAtFire = ctx.sel.localFramesRefused.load();
+      ctx.sel.Clear();       // A cancelled ...
+      ctx.sel.BeginLocal();  // ... and a new local op B began
+      opB = ctx.sel.epoch.load();
+      fired = true;
+    };
+    const uint64_t p4 = presents();
+    press_desktop();
+    const bool hookFired = pump_until([&] { return fired.load(); }, 8000);
+    pump_until([] { return false; }, 50);
+    uint64_t versionAfter = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      versionAfter = ctx.frameBuf.frame.version;
+    }
+    // The refusal is the next commit after the hook; B's own first picture needs B's own keyframe (later), so the
+    // version read the moment the refusal is counted is A's not-written one.
+    pump_until([&] { return ctx.sel.localFramesRefused.load() > refusedAtFire.load(); }, 3000);
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      versionAfter = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (4) R3: A cancelled and B begun right before A's first picture's commit -- A's picture REFUSED, not written",
+          hookFired && ctx.sel.localFramesRefused.load() > refusedAtFire.load() && versionAfter == versionAtFire.load(),
+          "versionAtFire=" + std::to_string(versionAtFire.load()) + " refused " + std::to_string(refusedAtFire.load()) + " -> " +
+              std::to_string(ctx.sel.localFramesRefused.load()));
+    ctx.sel.testBeforeFrameCommit = nullptr;
+    // B (pending, picker still up) completes on its own keyframe: bound with B's token, revealed, presented.
+    uint64_t lat4 = 0;
+    const bool shown4 = wait_presented(p4, qpc_now_us(), 12000, &lat4);
+    check("E1 PS (4) R3: ...B then binds and completes on its OWN decoded keyframe (bound with B's op, never A's)",
+          shown4 && ctx.sel.activeStreamGeneration.load() != 0 && ctx.sel.epoch.load() == opB.load() && opA.load() != opB.load(),
+          "opA=" + std::to_string(opA.load()) + " opB=" + std::to_string(opB.load()) + " versionAfterFire=" +
+              std::to_string(versionAfter));
+
+    // (5) rel-0163 r6 (Codex R3 1): between a picture's PERMISSION and its WRITE. A local pick A; right after A's first
+    //     picture is permitted (the gate's lock held), another thread tries to cancel A and begin B: it must wait
+    //     until A's picture is written; only then does B begin. A's write (made while A was live) lands; B completes on
+    //     its own keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired5{false}, blocked5{false}, began5{false};
+    std::atomic<uint64_t> version5{0};
+    std::thread other5;
+    ctx.sel.testAfterFramePermit = [&] {
+      // (The gate's lock is held here by the receive thread -- read its atomics, never call a locking member.)
+      if (fired5.load() || !ctx.sel.pending.load() || !ctx.sel.localAckless.load()) return;
+      fired5 = true;
+      version5 = ctx.frameBuf.frame.version;  // (the FrameBuffer lock is held here by the receive thread itself)
+      other5 = std::thread([&] {
+        ctx.sel.Clear();
+        ctx.sel.BeginLocal();
+        began5 = true;
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      blocked5 = !began5.load();
+    };
+    const uint64_t p5 = presents();
+    press_desktop();
+    const bool fired5ok = pump_until([&] { return fired5.load() && began5.load(); }, 8000);
+    ctx.sel.testAfterFramePermit = nullptr;
+    if (other5.joinable()) other5.join();
+    uint64_t version5After = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      version5After = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (5) R3: a cancel/new op tried between A's permission and its write WAITS -- A's write lands first",
+          fired5ok && blocked5.load() && version5After > version5.load(),
+          "blocked=" + std::to_string(blocked5.load() ? 1 : 0) + " version " + std::to_string(version5.load()) + " -> " +
+              std::to_string(version5After));
+    uint64_t lat5 = 0;
+    const bool shown5 = wait_presented(p5, qpc_now_us(), 12000, &lat5);
+    check("E1 PS (5) R3: ...then B begins and completes on its own keyframe", shown5 && ctx.sel.activeStreamGeneration.load() != 0);
+
+    // (6) rel-0163 r7 (Codex R3 token): at the TICKET boundary. A local pick A; right after a frame took A's ticket
+    //     (local, A's epoch) A is cancelled and B begins. That frame must be refused at its commit -- neither
+    //     written as A's nor re-read as an ordinary frame -- and B completes on its own ticket and keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired6{false};
+    std::atomic<uint64_t> opA6{0}, refused6{0}, version6{0};
+    ctx.sel.testAfterFrameTicket = [&](uint64_t epoch, bool local) {
+      if (fired6.load() || !local) return;
+      opA6 = epoch;
+      refused6 = ctx.sel.localFramesRefused.load();
+      {
+        std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+        version6 = ctx.frameBuf.frame.version;
+      }
+      ctx.sel.Clear();       // A cancelled ...
+      ctx.sel.BeginLocal();  // ... B begun
+      fired6 = true;
+    };
+    const uint64_t p6 = presents();
+    press_desktop();
+    const bool fired6ok = pump_until([&] { return fired6.load(); }, 8000);
+    ctx.sel.testAfterFrameTicket = nullptr;
+    // That frame's own outcome: it reaches its commit (refused) or drops earlier (B's AdmitGeneration / decoder) --
+    // either way it is never written; B's first write needs B's own keyframe, which comes later.
+    pump_until([&] { return ctx.sel.localFramesRefused.load() > refused6.load(); }, 1500);
+    uint64_t version6After = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      version6After = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (6) R3: A cancelled / B begun right after a frame took A's ticket -- that frame is NOT written",
+          fired6ok && version6After == version6.load(),
+          "version " + std::to_string(version6.load()) + " -> " + std::to_string(version6After) + ", refused " +
+              std::to_string(refused6.load()) + " -> " + std::to_string(ctx.sel.localFramesRefused.load()));
+    uint64_t lat6 = 0;
+    const bool shown6 = wait_presented(p6, qpc_now_us(), 12000, &lat6);
+    check("E1 PS (6) R3: ...B completes on its own ticket and keyframe", shown6 && ctx.sel.epoch.load() != opA6.load());
+    check("E1 PS: the worker is still serving (no exit 15 / 14)", worker_alive());
+    check("E1 PS: no present failed", ctx.present.d3dPresentFailCount.load() == 0,
+          std::to_string(ctx.present.d3dPresentFailCount.load()) + " failed");
+    {
+      // The host's own account of the run, for the evidence.
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"select", "window", "stream-state", "full-frame", "[desktop]", "capture detached",
+                                "capture reattached", "bootstrap-cache", "kick"}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (stillScreen && connected && !renderE1) {
     std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
     const auto frames_since = [&](uint64_t fromUs) {
       std::lock_guard<std::mutex> lk(shownMu);

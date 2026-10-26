@@ -1381,6 +1381,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgRestoreStep:
       restore_step(ctx, hwnd);
       return 0;
+    case kMsgRunDeferredPick:  // rel-0163 r3
+      run_deferred_pc_selection(ctx);
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    case kMsgUnsendableSelect:  // rel-0163 r3
+      resolve_unsendable_pc_selection(ctx, static_cast<uint64_t>(wp), static_cast<uint64_t>(lp));
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
     // The toolbar is a window of its own, so it does not move with this one for free.
     case WM_WINDOWPOSCHANGED: {
       remote60::native_poc::session_toolbar_follow_owner();
