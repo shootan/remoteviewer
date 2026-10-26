@@ -40,6 +40,7 @@
 
 #include <fstream>
 #include <memory>
+#include <set>
 #include <sstream>
 
 #include "client_session_toolbar.hpp"
@@ -58,6 +59,8 @@
 #include "viewer_constants.hpp"
 #include "secure_unlock_ipc.hpp"
 #include "viewer_window_proc.hpp"
+#include "e2e_window_capture.hpp"  // rel-0163 r2 E1: what DWM composes for the viewer window
+#include "viewer_layout.hpp"  // rel-0163 r2 E1: the picker's desktop card, as the product lays it out
 #include "viewer_decoder_state.hpp"  // capture-lifecycle r1 (PS): the product receive chain
 #include "viewer_frame_gate_state.hpp"
 #include "viewer_video_receiver.hpp"
@@ -759,6 +762,8 @@ int wmain(int argc, wchar_t** argv) {
   bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
   bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
   bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
+  bool renderE1 = false;  // rel-0163 r2 E1: --still-screen through the PRODUCT renderer (window procedure -> D3D present)
+  std::wstring shotsDir;  // ...where its window captures go (--shots <dir>)
   bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
@@ -777,6 +782,8 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--still-screen") stillScreen = true;
     if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
     if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
+    if (a == L"--render") renderE1 = true;
+    if (a == L"--shots" && i + 1 < argc) shotsDir = argv[++i];
     if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
@@ -1180,8 +1187,11 @@ int wmain(int argc, wchar_t** argv) {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"Remote60PreloginLoginViewer";
     RegisterClassExW(&wc);
-    viewerWindow = CreateWindowExW(0, wc.lpszClassName, L"remote60 prelogin login viewer", WS_OVERLAPPEDWINDOW, 500, 40,
-                                   800, 500, nullptr, nullptr, wc.hInstance, &ctx);
+    // rel-0163 r2 E1: the viewer window is placed OFF every monitor -- it is presented and captured
+    // (PrintWindow, PW_RENDERFULLCONTENT) without covering any of the user's screen.
+    const int e1X = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 200;
+    viewerWindow = CreateWindowExW(0, wc.lpszClassName, L"remote60 prelogin login viewer", WS_OVERLAPPEDWINDOW,
+                                   renderE1 ? e1X : 500, 40, 800, 500, nullptr, nullptr, wc.hInstance, &ctx);
     check("the product's window procedure owns a window", viewerWindow != nullptr);
     ShowWindow(viewerWindow, SW_SHOWNOACTIVATE);
     ctx.session.hwnd = viewerWindow;
@@ -1283,15 +1293,15 @@ int wmain(int argc, wchar_t** argv) {
       gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
       gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
       gate.waitForKeyFrame = true;
-      ctx.picker.visible.store(false);
+      if (!renderE1) ctx.picker.visible.store(false);  // E1: the product's own picker, shown by its control client
       ctx.control.keyframeRequests.Reset();
       VideoReceiver::NackOptions nack;
       nack.enabled = false;
       receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
       ingress = std::thread([&] { receiver->Run(); });
       // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
-      // of a sparse sample of the visible picture).
-      presentThread = std::thread([&] {
+      // of a sparse sample of the visible picture). Not in E1: there the product's window procedure presents.
+      if (!renderE1) presentThread = std::thread([&] {
         uint64_t seen = 0;
         while (!ingressStop.load() && ctx.session.running.load()) {
           Shown s{};
@@ -1379,6 +1389,9 @@ int wmain(int argc, wchar_t** argv) {
     ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
     ctx.control.connected.store(true, std::memory_order_relaxed);
     worker = std::thread([&] { control.Run(); });
+    // rel-0163 r2 E1: what viewer_startup.cpp does once control is up -- ask the host for its window list (the
+    // picker's cards, and the selection transaction a pick goes through).
+    if (renderE1) remote60::native_poc::viewer::queue_window_list_request(ctx, "window_list_request pending");
     // r7 H6: the host's first pong is late (test seam, 3 s). Keys typed now -- the role not known yet --
     // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
     // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
@@ -1512,7 +1525,177 @@ int wmain(int argc, wchar_t** argv) {
   // (GNLINK_STREAM_TEST_STILL_SCREEN: the capture library takes every acquire but a new duplication's first
   // as a timeout -- so the full-frame reacquire runs its real duplication remake);
   // the present thread stamps what the renderer would show (no window).
-  if (stillScreen && connected) {
+  // rel-0163 r2 E1 (Codex codex_rel_0163_evidence_r1.md): the same still logon screen, through the PRODUCT
+  // renderer -- the viewer's window procedure (WndProc), request_video_paint -> WM_PAINT -> paint_video_frame ->
+  // the D3D swap chain's Present (viewer_present.cpp; ctx.present.d3dPresentSuccessCount counts the presents
+  // that succeeded). The product picker is shown for 10 s, its desktop card is pressed with the messages a
+  // mouse produces, and the window is captured with PrintWindow (PW_RENDERFULLCONTENT: what DWM composes for it).
+  // The window is OFF every monitor: nothing of the user's screen is covered or touched.
+  if (stillScreen && connected && renderE1) {
+    std::cout << "\n--- PS E1: the product renderer, picker 10 s -> desktop ---\n";
+    using namespace remote60::native_poc::viewer;
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto presents = [&] { return ctx.present.d3dPresentSuccessCount.load(std::memory_order_relaxed); };
+    struct Shot {
+      bool ok = false;
+      double pickerShare = 1.0;  // share of pixels that are exactly the picker background RGB(13,15,20)
+      uint32_t lumaSpread = 0;
+      size_t colors = 0;
+      int w = 0, h = 0;
+    };
+    // What DWM composes for the viewer window (Windows.Graphics.Capture on it, e2e_window_capture.hpp). PrintWindow
+    // cannot be used: for the D3D flip-model swap chain it returns the window's GDI background (measured 10-26).
+    const auto capture = [&](const std::wstring& name) {
+      Shot sh;
+      const remote60::native_poc::e2e::WindowCapture c = remote60::native_poc::e2e::e2e_capture_window(viewerWindow, [&] {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&msg);
+          DispatchMessageW(&msg);
+        }
+      });
+      if (!c.ok) return sh;
+      sh.w = c.w;
+      sh.h = c.h;
+      size_t picker = 0;
+      uint32_t lo = 255, hi = 0;
+      std::set<uint32_t> colors;
+      // The client area only (the capture includes the frame): the centre 80 %.
+      for (int y = c.h / 10; y < c.h * 9 / 10; ++y) {
+        for (int x = c.w / 10; x < c.w * 9 / 10; ++x) {
+          const uint32_t px = c.px[static_cast<size_t>(y) * c.w + x] & 0xFFFFFF;
+          if (px == 0x0D0F14) ++picker;
+          const uint32_t luma = (((px >> 16) & 0xFF) * 3 + ((px >> 8) & 0xFF) * 6 + (px & 0xFF)) / 10;
+          lo = std::min(lo, luma);
+          hi = std::max(hi, luma);
+          if (colors.size() < 5000) colors.insert(px);
+        }
+      }
+      const double area = static_cast<double>(c.w * 8 / 10) * (c.h * 8 / 10);
+      sh.pickerShare = area > 0 ? picker / area : 0;
+      sh.lumaSpread = hi - lo;
+      sh.colors = colors.size();
+      sh.ok = true;
+      if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      return sh;
+    };
+    // The picker before any pick is GDI-drawn (no swap chain exists until a pick produces a frame): PrintWindow.
+    const auto capture_gdi = [&](const std::wstring& name) {
+      Shot sh;
+      RECT rc{};
+      GetClientRect(viewerWindow, &rc);
+      sh.w = rc.right - rc.left;
+      sh.h = rc.bottom - rc.top;
+      if (sh.w <= 0 || sh.h <= 0) return sh;
+      HDC wdc = GetDC(viewerWindow);
+      HDC mem = CreateCompatibleDC(wdc);
+      BITMAPINFO bi{};
+      bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+      bi.bmiHeader.biWidth = sh.w;
+      bi.bmiHeader.biHeight = -sh.h;
+      bi.bmiHeader.biPlanes = 1;
+      bi.bmiHeader.biBitCount = 32;
+      bi.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      HBITMAP bmp = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+      HGDIOBJ old = SelectObject(mem, bmp);
+      const BOOL printed = PrintWindow(viewerWindow, mem, PW_CLIENTONLY);
+      SelectObject(mem, old);
+      if (printed && bits) {
+        remote60::native_poc::e2e::WindowCapture c;
+        c.ok = true;
+        c.w = sh.w;
+        c.h = sh.h;
+        c.px.assign(static_cast<const uint32_t*>(bits), static_cast<const uint32_t*>(bits) + sh.w * sh.h);
+        size_t picker = 0;
+        for (const uint32_t px : c.px) {
+          if ((px & 0xFFFFFF) == 0x0D0F14) ++picker;
+        }
+        sh.pickerShare = static_cast<double>(picker) / (static_cast<double>(sh.w) * sh.h);
+        sh.ok = true;
+        if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      }
+      DeleteObject(bmp);
+      DeleteDC(mem);
+      ReleaseDC(viewerWindow, wdc);
+      return sh;
+    };
+    const auto shot_text = [](const Shot& sh) {
+      char b[128];
+      std::snprintf(b, sizeof(b), "pickerBg=%.1f%% luma=%u colors=%zu %dx%d", sh.pickerShare * 100.0, sh.lumaSpread,
+                    sh.colors, sh.w, sh.h);
+      return std::string(b);
+    };
+    RECT wr{};
+    GetWindowRect(viewerWindow, &wr);
+    const RECT vs{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                  GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+    RECT overlap{};
+    check("E1: the viewer window is OFF every monitor (the user's screen is not covered)",
+          !IntersectRect(&overlap, &wr, &vs), std::to_string(wr.left) + "," + std::to_string(wr.top));
+    // The product picker: shown by the control client (startInPicker), the stream off behind it.
+    const bool pickerUp = pump_until([&] { return ctx.picker.visible.load(); }, 5000);
+    check("E1: the product's picker is shown", pickerUp);
+    pump_until([] { return false; }, 10000);  // 10 s in the picker (the worker's capture idles, then detaches)
+    const Shot pickerShot = capture_gdi(L"E1-1-picker.bmp");
+    check("E1: screenshot 1 -- the picker (negative control for the stream screenshots)",
+          pickerShot.ok && pickerShot.pickerShare > 0.15, shot_text(pickerShot));
+    const ClientLayout layout = compute_client_layout(ctx, viewerWindow);
+    const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);
+    const RECT card = card_rect_for_slot(layout.listRect, grid, 0);
+    const int cx = (card.left + card.right) / 2, cy = (card.top + card.bottom) / 2;
+    const uint64_t presentsBefore = presents();
+    const uint64_t t0 = qpc_now_us();
+    PostMessageW(viewerWindow, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(cx, cy));
+    PostMessageW(viewerWindow, WM_LBUTTONUP, 0, MAKELPARAM(cx, cy));
+    uint64_t firstPresentUs = 0;
+    const bool presented = pump_until([&] {
+      if (presents() > presentsBefore && !ctx.picker.visible.load() &&
+          ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed) != 0) {
+        if (firstPresentUs == 0) firstPresentUs = qpc_now_us();
+        return true;
+      }
+      return false;
+    }, 4000);
+    const uint64_t latencyMs = presented ? (firstPresentUs - t0) / 1000 : 0;
+    check("E1 PS: THE DESKTOP CARD WAS PRESSED -> THE PRODUCT RENDERER PRESENTED THE STILL SCREEN WITHIN 1 s",
+          presented && latencyMs <= 1000,
+          presented ? std::to_string(latencyMs) + " ms (d3dPresentSuccess " + std::to_string(presentsBefore) + " -> " +
+                          std::to_string(presents()) + ")"
+                    : std::string("no successful present in 4 s"));
+    pump_until([] { return false; }, 300);
+    const Shot streamShot = capture(L"E1-2-presented.bmp");
+    check("E1 PS: screenshot 2 -- the window SHOWS the picture (not the picker, not a blank)",
+          streamShot.ok && streamShot.pickerShare < 0.05 && streamShot.lumaSpread >= 8 && streamShot.colors > 64,
+          shot_text(streamShot));
+    const uint64_t presentsAt = presents();
+    pump_until([] { return false; }, 3000);
+    const uint64_t refreshed = presents() - presentsAt;
+    check("E1 PS: THE STILL SCREEN KEEPS BEING PRESENTED (>= 4 successful presents in the next 3 s, 500 ms refresh)",
+          refreshed >= 4, std::to_string(refreshed) + " presents");
+    const Shot laterShot = capture(L"E1-3-still-refreshed.bmp");
+    check("E1 PS: screenshot 3 -- still the picture 3 s later", laterShot.ok && laterShot.pickerShare < 0.05 &&
+                                                                   laterShot.lumaSpread >= 8, shot_text(laterShot));
+    check("E1 PS: the worker is still serving (no exit 15 / 14)", worker_alive());
+    check("E1 PS: no present failed", ctx.present.d3dPresentFailCount.load() == 0,
+          std::to_string(ctx.present.d3dPresentFailCount.load()) + " failed");
+    {
+      // The host's own account of the run, for the evidence.
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"select", "window", "stream-state", "full-frame", "[desktop]", "capture detached",
+                                "capture reattached", "bootstrap-cache", "kick"}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (stillScreen && connected && !renderE1) {
     std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
     const auto frames_since = [&](uint64_t fromUs) {
       std::lock_guard<std::mutex> lk(shownMu);
