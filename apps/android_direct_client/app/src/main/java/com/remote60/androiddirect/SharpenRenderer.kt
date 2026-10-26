@@ -102,6 +102,12 @@ class SharpenRenderer(
         val sourceOverrideH: Int = 0,
         /** sh-strength r2 B negative control: step one OUTPUT pixel instead of one source pixel. Must fail. */
         val outputPixelTaps: Boolean = false,
+        /** sh-strength r4 (Codex N1 a/b): the output size check reports a wrong size this many times (-1: always),
+         *  starting with the Nth placement change (1 = the first) -- a buffer that will not (or not yet) resize. */
+        val layoutMismatchQueries: Int = 0,
+        val layoutMismatchFromPlacement: Int = 1,
+        /** sh-strength r4 (N1 c): a placement is taken this long after it is set -- the GL side late to the layout. */
+        val holdPlacementMs: Long = 0L,
     ) {
         companion object { val NONE = SharpenFaults() }
     }
@@ -122,6 +128,9 @@ class SharpenRenderer(
     val layoutClearSwaps = AtomicLong(0)
     /** r3 (N2): placement updates that changed nothing (dropped without any work). */
     val placementsUnchanged = AtomicLong(0)
+    /** r4 (N1 c): the placement generation (setDisplayPlacement's `gen`) of the last VIDEO swap -- a frame or a redraw
+     *  drawn with that layout; never a cleared swap. The Activity reads it at the TextureView's latch. */
+    val swappedPlacementGen = AtomicLong(0)
     /** The visible source size the last frame was drawn with ("WxH"). */
     @Volatile var lastSourceSize: String = ""
         private set
@@ -139,10 +148,20 @@ class SharpenRenderer(
     // r3 (N2): the latest placement asked for and whether a task to take it is posted -- a burst of UI updates is one
     // task that takes the newest; a placement equal to the one in use does nothing.
     @Volatile private var placementWanted: DisplayPlacement? = null
+    @Volatile private var placementWantedGen = 0L
     private val placementPosted = java.util.concurrent.atomic.AtomicBoolean(false)
-    // r3 (N1): a new frame not yet latched because the output was not the placement's view size; clear swaps so far.
+    private var placementGen = 0L
+    // r3/r4 (N1): the output is not the placement's view size yet. Two different waits (r4 b): a NEW frame not latched
+    // yet, and the frame already latched to be REDRAWN with the new layout (no new decoder frame needed). One layout
+    // episode (from the first mismatch of a placement) is bounded in time; past it the renderer fails (-> direct).
     private var frameWaitsForLayout = false
-    private var clearSwapsForLayout = 0
+    private var redrawWaitsForLayout = false
+    private var layoutEpisodeStartMs = 0L
+    private var layoutRetryPosted = false
+    private var placementChanges = 0
+    private var mismatchLeft = 0
+    /** The last decoded frame's timestamp (a cleared swap carries it, so the view's latch does not count it new). */
+    private var lastFrameTimestamp = 0L
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var context: EGLContext = EGL14.EGL_NO_CONTEXT
     private var windowSurface: EGLSurface = EGL14.EGL_NO_SURFACE
@@ -189,22 +208,64 @@ class SharpenRenderer(
      * output), or null for A. A still picture is redrawn with it -- the latest one only: placements that arrive
      * while a redraw is pending fold into it.
      */
-    fun setDisplayPlacement(value: DisplayPlacement?) {
-        placementWanted = value
+    fun setDisplayPlacement(value: DisplayPlacement?, gen: Long = 0L) {
+        synchronized(placementPosted) {
+            placementWanted = value
+            placementWantedGen = gen
+        }
         if (!placementPosted.compareAndSet(false, true)) return  // the posted task will take the newest
-        handler.post {
+        val take = Runnable {
             placementPosted.set(false)
-            if (released || failed || stopping) return@post
-            val next = placementWanted
+            if (released || failed || stopping) return@Runnable
+            val next: DisplayPlacement?
+            val nextGen: Long
+            synchronized(placementPosted) {
+                next = placementWanted
+                nextGen = placementWantedGen
+            }
             if (next == placement) {
+                placementGen = nextGen  // the same layout under a newer name: what is shown already is it
+                if (next != null && haveFrame && !frameWaitsForLayout && !redrawWaitsForLayout) swappedPlacementGen.set(nextGen)
                 placementsUnchanged.incrementAndGet()
-                return@post
+                return@Runnable
             }
             placement = next
-            clearSwapsForLayout = 0
+            placementGen = nextGen
+            placementChanges += 1
+            if (faults.layoutMismatchQueries != 0 && placementChanges == faults.layoutMismatchFromPlacement) {
+                mismatchLeft = faults.layoutMismatchQueries
+            }
+            layoutEpisodeStartMs = 0L  // r4: a new layout, a new bounded episode
             if (frameWaitsForLayout) draw(newFrame = true)       // the frame that waited for this layout
             else if (haveFrame) draw(newFrame = false)           // one redraw of the latched frame, new layout
         }
+        // Test seam only: the GL side takes the layout late (N1 c) -- the screen keeps the old one meanwhile.
+        if (faults.holdPlacementMs > 0L) handler.postDelayed(take, faults.holdPlacementMs) else handler.post(take)
+    }
+
+    /** r4 (N1 a/b): one pending retry of the waiting draw, a frame's time later. */
+    private fun scheduleLayoutRetry() {
+        if (layoutRetryPosted) return
+        layoutRetryPosted = true
+        handler.postDelayed({
+            layoutRetryPosted = false
+            if (released || failed || stopping) return@postDelayed
+            if (frameWaitsForLayout) draw(newFrame = true)
+            else if (redrawWaitsForLayout && haveFrame) draw(newFrame = false)
+        }, LAYOUT_RETRY_MS)
+    }
+
+    /** The output's size as the layout check sees it (the test seam can make it lie, N1 a/b). */
+    private fun outputSizeForLayout(): IntArray {
+        val w = IntArray(1)
+        val h = IntArray(1)
+        EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_WIDTH, w, 0)
+        EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_HEIGHT, h, 0)
+        if (mismatchLeft != 0) {
+            if (mismatchLeft > 0) mismatchLeft -= 1
+            return intArrayOf(w[0] + 7, h[0])
+        }
+        return intArrayOf(w[0], h[0])
     }
 
     /** Posted; answers onReleased on this thread when the TextureView has no producer left. */
@@ -301,27 +362,35 @@ class SharpenRenderer(
             val st = input ?: return
             val place0 = placement
             if (place0 != null) {
-                // r3 (N1): video goes only into an output of the placement's view size. A buffer not there yet (the
-                // default size changed, the next dequeued buffer has it) is moved on by swapping a CLEARED frame --
-                // not latched, not counted as a frame -- at most twice per layout; the frame waits, not dropped.
-                val ow = IntArray(1)
-                val oh = IntArray(1)
-                EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_WIDTH, ow, 0)
-                EGL14.eglQuerySurface(display, windowSurface, EGL14.EGL_HEIGHT, oh, 0)
-                val matches = ow[0] == place0.viewWidth.toInt() && oh[0] == place0.viewHeight.toInt()
-                if (!matches && clearSwapsForLayout < 2) {
-                    if (newFrame) frameWaitsForLayout = true
-                    clearSwapsForLayout += 1
+                // r3/r4 (N1 a): video goes ONLY into an output of the placement's view size -- never past a retry
+                // count. A buffer not there yet (the default size changed; the next dequeued buffer has it) is moved
+                // on by swapping a CLEARED frame (not latched, not a frame, carrying the last frame's timestamp so the
+                // view's latch does not take it for a new one), then retried a frame's time later. One layout episode
+                // is bounded (LAYOUT_LIMIT_MS): past it the renderer fails -- the policy's way back to direct.
+                val out = outputSizeForLayout()
+                val matches = out[0] == place0.viewWidth.toInt() && out[1] == place0.viewHeight.toInt()
+                if (!matches) {
+                    // r4 (N1 b): which draw waits -- a new frame, or the latched one's redraw with the new layout
+                    if (newFrame) frameWaitsForLayout = true else if (!frameWaitsForLayout) redrawWaitsForLayout = true
+                    val now = SystemClock.elapsedRealtime()
+                    if (layoutEpisodeStartMs == 0L) layoutEpisodeStartMs = now
+                    if (now - layoutEpisodeStartMs > LAYOUT_LIMIT_MS) {
+                        throw IllegalStateException("layout: output ${out[0]}x${out[1]} did not become the view's " +
+                            "${place0.viewWidth.toInt()}x${place0.viewHeight.toInt()} in $LAYOUT_LIMIT_MS ms")
+                    }
                     layoutClearSwaps.incrementAndGet()
-                    GLES20.glViewport(0, 0, ow[0].coerceAtLeast(1), oh[0].coerceAtLeast(1))
+                    GLES20.glViewport(0, 0, out[0].coerceAtLeast(1), out[1].coerceAtLeast(1))
                     GLES20.glClearColor(0f, 0f, 0f, 1f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    EGL14.eglSwapBuffers(display, windowSurface)
-                    handler.post { if (!released && !failed && !stopping && frameWaitsForLayout) draw(newFrame = true) }
+                    EGLExt.eglPresentationTimeANDROID(display, windowSurface, if (lastFrameTimestamp != 0L) lastFrameTimestamp else CLEAR_SWAP_TIMESTAMP)
+                    if (!EGL14.eglSwapBuffers(display, windowSurface)) throw IllegalStateException("eglSwapBuffers (layout clear) ${eglError()}")
+                    scheduleLayoutRetry()
                     return
                 }
+                layoutEpisodeStartMs = 0L
             }
             frameWaitsForLayout = false
+            redrawWaitsForLayout = false
             if (newFrame) {
                 st.updateTexImage()
                 st.getTransformMatrix(texMatrix)  // this frame's crop/flip/rotation
@@ -412,6 +481,9 @@ class SharpenRenderer(
             }
             // A redraw swaps the SAME timestamp: the view's latch tells it apart by that (LatchClassifier).
             if (!EGL14.eglSwapBuffers(display, windowSurface)) throw IllegalStateException("eglSwapBuffers ${eglError()}")
+            lastFrameTimestamp = st.timestamp
+            // r4 (N1 c): this layout is now in a buffer the view will latch (A: no placement, nothing to name)
+            if (place != null) swappedPlacementGen.set(placementGen)
             lastSwapNs.set(System.nanoTime())
             if (newFrame) framesDrawn.incrementAndGet() else redraws.incrementAndGet()
             lastDrawNs.set(SystemClock.elapsedRealtimeNanos() - t0)
@@ -513,6 +585,11 @@ class SharpenRenderer(
     private fun eglError(): String = "0x" + Integer.toHexString(EGL14.eglGetError())
 
     companion object {
+        /** r4 (N1 a/b): a waiting draw is retried this often, and one layout episode lasts at most this long. */
+        const val LAYOUT_RETRY_MS = 16L
+        const val LAYOUT_LIMIT_MS = 1000L
+        /** r4: the timestamp of a cleared swap made before any frame -- the view's latch ignores it (not a frame). */
+        const val CLEAR_SWAP_TIMESTAMP = 1L
         /** x, y, u, v -- a full-buffer strip; u,v are the PRE-transform coordinate over the visible picture. */
         private val QUAD = floatArrayOf(
             -1f, -1f, 0f, 0f,
