@@ -719,6 +719,14 @@ add_executable(remote60_client_session_prelogin_select_test
 )
 target_include_directories(remote60_client_session_prelogin_select_test PRIVATE src)
 target_link_libraries(remote60_client_session_prelogin_select_test PRIVATE common ws2_32)
+# apk-0232 r2: the N1 latch (SetTestAfterLocalSinkBeginHook) -- this test only; the session in every product target
+# compiles without it.
+target_compile_definitions(remote60_client_session_prelogin_select_test PRIVATE REMOTE60_CLIENT_SESSION_TEST_HOOKS=1)
+
+# apk-0232 r2 (N2): the Android sink's held input frame (decoder_pending_slot.hpp) with the selection gate.
+add_executable(remote60_decoder_pending_slot_test src/decoder_pending_slot_test.cpp)
+target_include_directories(remote60_decoder_pending_slot_test PRIVATE src)
+target_link_libraries(remote60_decoder_pending_slot_test PRIVATE common)
 
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp
