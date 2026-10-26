@@ -60,11 +60,11 @@ const realServerPath = process.env.RELAY_WIRE_TEST_SERVER || path.join(__dirname
 const preloadPath = path.join(__dirname, 'wake_resend_preload.js');
 
 const root = path.resolve(__dirname, '../../..');
-// r5 (Codex N4): under the suite's test root when the runner names one, else this worktree's .claude/test-tmp.
-const scratchRoot = process.env.REMOTE60_TEST_TMP ? path.resolve(process.env.REMOTE60_TEST_TMP) : path.join(root, '.claude', 'test-tmp');
-fs.mkdirSync(scratchRoot, { recursive: true });
-const scratch = fs.mkdtempSync(path.join(scratchRoot, 'relay-wire-'));
-assert(!path.relative(scratchRoot, scratch).startsWith('..'));
+// r6 (Codex N4 b): the suite's checked test root only (test_tmp.js) -- no raw variable, no worktree fallback;
+// run alone without REMOTE60_TEST_TMP, this stops before writing anything.
+const testTmp = require('./test_tmp');
+const scratchRoot = testTmp.root();
+const scratch = testTmp.scratchDir('relay-wire-');
 const dataPath = path.join(scratch, 'store.json');
 const controlPath = path.join(scratch, 'clock.json');
 
@@ -196,7 +196,7 @@ const esc = (ip) => ip.replace(/\./g, '\\.');
 
 function cleanupScratch() {
   if (path.relative(scratchRoot, scratch).startsWith('..')) return;   // never outside the scratch root
-  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { testTmp.remove(scratch, { recursive: true }); } catch { /* best effort */ }
 }
 
 (async () => {

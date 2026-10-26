@@ -4,11 +4,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { spawn, spawnSync } = require('child_process');
 const net = require('net'), dgram = require('dgram'), assert = require('assert');
 const root = path.resolve(__dirname, '../../..');
-// r5 (Codex N4): under the suite's test root when the runner names one, else this worktree's .claude/test-tmp.
-const scratchRoot = process.env.REMOTE60_TEST_TMP ? path.resolve(process.env.REMOTE60_TEST_TMP) : path.join(root, '.claude', 'test-tmp');
-fs.mkdirSync(scratchRoot, { recursive: true });
-const scratch = fs.mkdtempSync(path.join(scratchRoot, 'server-recovery-'));
-assert(!path.relative(scratchRoot, scratch).startsWith('..'));
+// r6 (Codex N4 b): the suite's checked test root only (test_tmp.js) -- no raw variable, no worktree fallback;
+// run alone without REMOTE60_TEST_TMP, this stops before writing anything.
+const testTmp = require('./test_tmp');
+const scratchRoot = testTmp.root();
+const scratch = testTmp.scratchDir('server-recovery-');
 const serverPath = path.resolve(__dirname, '../server.js');
 const data = path.join(scratch, 'store.json'), flag = path.join(scratch, 'fail-write');
 const preload = path.join(scratch, 'fault.cjs');
@@ -79,4 +79,4 @@ async function stop() {
   console.log('PASS corrupt store refuses startup and preserves original bytes');
   console.log('recovery_fault_test: ALL PASS');
 })().catch(error => { console.error('FAIL', error.message); process.exitCode = 1; })
-  .finally(async () => { await stop(); fs.rmSync(scratch, { recursive: true, force: true }); });
+  .finally(async () => { await stop(); testTmp.remove(scratch, { recursive: true }); });
