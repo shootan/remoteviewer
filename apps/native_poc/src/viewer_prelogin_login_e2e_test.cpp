@@ -999,6 +999,15 @@ int wmain(int argc, wchar_t** argv) {
       bool BeginLocalSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.BeginLocal(tag); }
       uint64_t LocalSelectionBoundFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(tag); }
       void RefuseSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); gate.Refuse(tag); }
+      // apk-0232 r3 (picker N1): as android_video_decoder.cpp -- judged and recorded under the sink's own lock
+      LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t)>& commit) override {
+        std::lock_guard<std::mutex> l(mu);
+        if (tag == 0 || gate.pending() != tag) return LocalCommit::Abandoned;
+        const uint64_t generation = gate.LocalBoundFor(tag);
+        if (generation == 0) return LocalCommit::Unbound;
+        commit(generation);
+        return LocalCommit::Committed;
+      }
       void Prepare(uint64_t sel) { std::lock_guard<std::mutex> l(mu); gate.Prepare(sel); ready = 0; keysAfterPrepare = 0; }
       uint64_t Ready() { std::lock_guard<std::mutex> l(mu); return ready; }
       uint64_t Bound(uint64_t sel) { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(sel); }
