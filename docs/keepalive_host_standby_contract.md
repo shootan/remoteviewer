@@ -34,11 +34,12 @@
   - Ping 은 entry 의 끝점을 갱신한다(peer 이동을 따라감).
   - 릴레이처럼 여러 클라이언트가 같은 주소로 보여도 entry 는 구별된다.
 - **재전송 멱등** (r3, Codex `codex_keepalive_r2_spike_r1.md` S1·S2 로 좁힘):
-  - StandbyHello 의 같은 Ack 재전송은 **같은 입장 증거**일 때만이다: 같은 기기·generation + **같은 capability**(fingerprint — token 자체는 일회용이라 보관하지 않음) + **같은 반환 끝점** + **유효 lease**(만료 entry 를 먼저 정리). 그 밖은 새 capability 가 필요한 새 admission 이다. 공개된 기기 id·generation 은 아무것도 증명하지 않는다 — 틀린 token 은 secret 0·entry 변경 0, 다른 끝점의 같은 Hello 도 답 없음.
+  - StandbyHello 의 같은 Ack 재전송은 **같은 입장 증거**일 때만이다: 같은 기기·generation + **같은 capability**(r4: **SHA-256 전체 비교** — 64-bit 축약 금지, 계산 실패는 replay 아님·입장 없음; token 자체는 일회용이라 보관하지 않음) + **같은 반환 끝점** + **유효 lease**(만료 entry 를 먼저 정리). 그 밖은 새 capability 가 필요한 새 admission 이다. 공개된 기기 id·generation 은 아무것도 증명하지 않는다 — 틀린 token 은 secret 0·entry 변경 0, 다른 끝점의 같은 Hello 도 답 없음.
   - 다른 끝점으로 옮기는 것은 Hello 재전송이 아니라 **secret 을 가진 Ping** 이다.
+  - (r4 N2-b) 같은 기기의 입장 중 **현재 entry 보다 새롭지 않은 것**(gen ≤ admitGen: 늦게 온 미사용 옛 capability, 같은 gen 의 다른 proof)은 `Stale` — Superseded 로 답하고 secret 0, 현재 entry·secret 불변. 더 새로운 operation 만 교체한다. **클라이언트는 입장 generation 을 재시작을 넘어 단조로 유지**한다(②의 계약). entry 가 lease 로 사라진 뒤에는 작은 번호도 새 입장이다.
   - Activate: entry 마다 **역할과 무관한 단조 high-water**. 0 은 generation 이 아니다(거부). 낮은 값은 stale(`Superseded`, 상태 변경 0). 같은 값은 **그 grant 가 아직 세션을 가진 동안에만** 새 세션 없이 HelloAck 를 다시 보낸다. 큰 값만 새 명시 activation.
 - **늦은 activation 거부**: 2→1→B→2, 0→B→0 모두 `Superseded`. 다시 activation 하려면 더 큰 generation(= 새 사용자 행동)이 필요하다. → parked 기기는 자동으로 세션을 되찾지 않는다.
-- **activation 결과의 상관 (제안 — Codex 미동결, 결정②)**: 수락된 activation 은 HelloAck 직전에 `StandbyPong`(entryId + 그 activation 의 clientGen + status 0 + features `kUdpStandbyPongActivationGranted`)을 보낸다. 거부도 `StandbyPong` 에 **거부한 그 generation** 을 싣는다. 클라이언트는 entry+generation 으로 늦은 Ack 와 현재 operation 을 구별한다. 새 kind 는 늘리지 않았다.
+- **activation 결과의 상관 (r4: Codex 결정 1 GO)**: 수락된 activation 은 HelloAck 직전에 `StandbyPong`(entryId + 그 activation 의 clientGen + status 0 + features `kUdpStandbyPongActivationGranted`)을 보낸다. 거부도 `StandbyPong` 에 **거부한 그 generation** 을 싣는다. 클라이언트는 entry+generation 으로 늦은 Ack 와 현재 operation 을 구별한다. 새 kind 는 늘리지 않았다. Pong 은 **host 의 admission/grant 수락**이지 영상·입력·로그인 성공이 아니다. 클라이언트는 현재 entry/incarnation·그 operation 의 gen·예상 경로가 맞는 Pong 만 쓰고, bare HelloAck 만으로 activation 을 완료하지 않으며, Pong·HelloAck 의 손실·역순을 견디는 유한 상태기계를 둔다(②).
 
 ### 2.3 entry 별 liveness·권한
 - entry 에는 control channel 이 없다. liveness = Ping 이다(lease 20 s, Ping 에 갱신). active entry 의 liveness 는 세션 자체이고 lease 로 만료시키지 않는다.
@@ -68,8 +69,9 @@
 - `/api/connect` 에 `standby: true`(추가 필드, 기본 off = 오늘 경로). relay 대상이면 그 connect 에 **전용 host-facing UDP 소켓을 mint 시점에 예약**한다. 응답 `standbyRelay`: `reserved` 또는 거부 이유(`host-full`/`account-full`/`ip-full`/`server-full`/`bind-failed`) — 거부면 그 connect 에 relay 후보가 없다(직결 후보는 그대로).
 - 상태: `reserved` → StandbyHello(104 B, 그 capability)가 client 끝점에 bind → `provisional` → 호스트 StandbyAck Ok → `ready` → 같은 lease 위 StandbyActivate 의 HelloAck(DirectoryAuth) → `active`. **activation 에 새 directory connect 가 필요 없다.**
 - 공존: 한 호스트의 standby lease 여럿이 공존한다. 새 standby lease 는 다른 lease·capability 를 폐기하지 않는다. **legacy lease**(49 B Hello, observe 소켓, newest-wins)는 그대로이고 standby lease 를 끊지 않는다. standby capability 로 legacy Hello 불가, legacy capability 로 standby lease 불가.
-- **NAT 경로(호스트 변경 없음)**: heartbeat 의 `pendingPunch` 에 예약마다 entry 하나를 더 싣는다 — `RELAY_HOST_FACING_IP:<예약 포트>`, **어느 클라이언트도 갖지 않는 token**. (클라이언트 token 을 두 번 싣지 않는다 — 두 번째 항목이 같은 capability 로 두 번째 admission 을 허락하게 된다.) 호스트는 기존대로 모든 entry 에 media 소켓으로 punch 하고, 예약 소켓은 **호스트 주소에서 온 첫 datagram 의 tuple 을 pin**(포트 무관 — symmetric NAT 은 목적지마다 새로 매핑)한 뒤 그 밖은 받지 않는다. heartbeat 의 전역 tuple 을 pin 된 lease 에 덮지 않는다(호스트가 이동하면 pin 만 놓고 다음 datagram 이 다시 pin). 예약 소켓도 호스트 쪽으로 punch 1회를 보낸다(주소만 거르는 NAT 용).
-- 상한: 호스트당 8(legacy lease 포함), 계정·client wire IP·전체 소켓 상한(환경변수). 회수: 세션 drop 이 소켓·색인·capability 를 함께 닫는다 — 예약 TTL = capability TTL(60 s), provisional 30 s, client 무음 60 s, `closeHostsNow`(호스트 비활성·계정 철회).
+- **NAT 경로·최초 pin (r4, Codex N1)**: heartbeat 의 `pendingPunch` 에 예약마다 entry 하나를 더 싣는다 — `RELAY_HOST_FACING_IP:<예약 포트>`, 아무 클라이언트도 갖지 않는 punchToken, 그리고 **그 lease 의 `hostProof`(host 에게만)**. 클라이언트 token 은 두 번 싣지 않는다. 호스트는 그 목적지로 보내는 punch 의 token 칸에 proof 를 싣는다(그 밖의 punch 는 비움 — 클라이언트 token 을 선로에 싣지 않는다; proof 항목은 capability 로 등록하지 않는다). 예약 소켓은 **호스트 주소에서 온, 현재 proof 를 실은 Punch 만** 그 tuple 로 pin 한다(포트 무관 — symmetric NAT). proof 없음·틀림·다른 lease 것·그 밖의 datagram 은 pin·ready·전달 변경 0. heartbeat 의 전역 tuple 을 pin 된 lease 에 덮지 않는다. **호스트가 이동하면** pin 을 놓고 lease 마다 **새 proof** 를 그 heartbeat 의 pendingPunch 로 준다 — 옛 proof 재생은 아무것도 pin 하지 않는다. 예약 소켓이 호스트로 보내는 punch 1회(주소만 거르는 NAT 용)는 그대로다.
+- 상한: 호스트당 8(legacy lease 포함) — **r4: 어느 쪽이 먼저 오든**(standby 8 뒤 새 legacy 도 거부, 아무것도 끊지 않음; legacy 교체는 8 유지). 계정·client wire IP·전체 소켓 상한은 환경변수 — 양의 정수가 아니면 기본값과 경고.
+- **지원 확인 (r4, Codex 결정 2)**: `GET /api/hosts` 가 `standby: {supported: true, relay: <relay 켜짐>}` 를 싣는다(부작용 없음; 옛 directory 엔 필드 없음 = 미지원). standby 요청에는 항상 `standbyRelay` 를 답한다 — `reserved` / 상한 이유 / `bind-failed` / `not-eligible` / `relay-disabled`. 클라이언트는 첫 mutating connect 로 지원을 알아내지 않고, 없음·timeout 을 지원/ready 로 보거나 자동 legacy Hello 로 넘어가지 않는다. 서버 enum `active` 는 Host 의 현재 owner 가 아니다 — 소유 판단에 쓰지 않는다. 회수: 세션 drop 이 소켓·색인·capability 를 함께 닫는다 — 예약 TTL = capability TTL(60 s), provisional 30 s, client 무음 60 s, `closeHostsNow`(호스트 비활성·계정 철회).
 - **클라이언트 계약**: client-facing 소켓은 공유라 client→host 는 client 끝점으로 가른다 → **host lease 하나에 UDP 소켓 하나**. ②APK/③Viewer 는 여러 host 를 한 소켓으로 다중화하지 않는다. 또 legacy lease 끝점에서 온 Standby* 는 relay 가 버린다 — relay 경유의 standby probe 는 기존 수동 연결 위가 아니라 자기 소켓의 standby connect 로 한다(직결은 무관).
 - (b) 공유 host-facing 주소 + entry demux 는 R2 에서 제외(S4): 그 뒤에서는 호스트의 control/ACK/NACK/resume/bulk gate 가 주소라 parked 클라이언트의 패킷이 통과한다(부정 대조 KS4 로 확인).
 
@@ -97,3 +99,8 @@
   - S4: B active 동안 C 가 window-select·control ACK·control NACK·video NACK·resume·bulk 형 datagram·틀린 secret·gen 0 activation 을 보냄 → 처리 0, C 의 leg 엔 Standby* 답 말고 아무것도 안 옴, B 의 epoch·control session 불변, B 의 다음 select 응답은 B 의 leg 로. 부정 대조 KS4(C 의 세션 패킷만 B 의 host-facing 소켓으로) → 2 FAIL.
   - 개수 변천: r2 72(직결 + relay 클라이언트별 + relay 공유 + 구 Host) → r3 WIP 64(공유 모드 삭제, S3/S4 추가) → 67(S4 확장) → 89(실 server.js relay 22).
 - `apps/directory` suite(`test/run.js`) 791 PASS rc0, 그중 `relay_standby_test.js` 24. 부정 대조(서버): R1 standby 를 observe 소켓으로 / R2 legacy bind 가 standby 도 끊음 / R3 heartbeat 가 pin 을 덮음 / R4 pin 뒤 아무 출처나 받음 / R6 legacy lease 미계수 → 모두 FAIL. R5(standby token 의 legacy Hello)는 기존 newest-legacy-token 규칙이 이미 거부해 생존.
+
+## 6. r4 (2026-10-26, Codex `codex_keepalive_r2_spike_r3.md` N1~N3 + 결정 1~3)
+- 표 56/56(N2 반례 포함), e2e `--old-host --real-directory` 89/89 ×2(실 Host 가 proof 를 실은 punch 로 실 server.js lease 를 pin), directory suite 815 PASS rc0(`relay_standby_r4_test` 20, `relay_env_bound_test` 4).
+- 부정 대조: N1a(IP 만으로 최초 pin) 5 FAIL / N1b(이동 시 새 proof 없음) 2 FAIL / N3a(legacy 미계수) 1 FAIL / N3b(r3 env 해석) 3 FAIL / N2a(앞 8바이트 비교) 1 FAIL / N2b(Stale 없음) 5 FAIL / N2c(digest 실패 무시) 1 FAIL.
+- 아직: 실 NAT·운영 배포·포트 범위, 서버 LAN 의 `RELAY_HOST_FACING_IP`, ②의 클라이언트 상태기계(Pong 역순·손실·cancel), held input release 직접 반례, 비용.

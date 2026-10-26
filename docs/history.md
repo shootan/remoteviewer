@@ -13572,3 +13572,10 @@ Next
 - 호스트: replay 는 같은 입장 증거(capability fingerprint·반환 끝점·유효 lease)일 때만(S1), activation high-water 단조·0 거부·같은 gen 은 살아 있는 grant 만(S2), grant 는 실제 세션 끝과 함께·`Live` 보호·CSPRNG 결과 확인(S3), 실패/거부 응답이 그 operation 을 이름(제안). 계약 `docs/keepalive_host_standby_contract.md` §2·§5.
 - 서버: `/api/connect {standby:true}` → 예약 host-facing 소켓, StandbyHello bind, ready/active 상태, legacy lease 와 공존, pendingPunch 추가 entry 로 NAT 경로(호스트 변경 없음), 상한·회수. 계약 §2.7.
 - 시험: 표 47/47(+부정 대조 7, 등가 1), e2e 89/89(실 server.js relay 포함, KS4 부정 대조), directory suite 791 rc0(+서버 부정 대조 6, 생존 1 — 이유 기록). loopback 이라 실 NAT·배포는 미검증.
+
+## 2026-10-26 keepalive-r2 A r4 — N1~N3 보수 (Codex `codex_keepalive_r2_spike_r3.md`)
+
+- N1: relay 예약 소켓은 Host 전용 `hostProof`(pendingPunch, Host 에게만)를 실은 Host 의 punch 로만 최초 pin — 같은 IP 의 다른 소켓·틀린/다른 lease proof 는 변경 0; Host 이동 시 lease 마다 새 proof. Host 는 그 목적지 punch 에만 proof 를 싣고 capability 로 등록하지 않는다.
+- N2: replay 판정은 capability 의 SHA-256 전체 비교(실패는 fail-closed), 같은 기기의 늦은/같은 gen 다른 proof 입장은 Stale(entry·secret 불변).
+- N3: standby 8 뒤 새 legacy 도 거부(비파괴), env 상한은 양의 정수만. 결정 2: `/api/hosts` 의 standby metadata, standby 요청엔 항상 standbyRelay 이유.
+- 시험: 표 56/56, e2e 89/89 ×2(실 server.js+실 Host), directory suite 815 rc0, 부정 대조 7 모두 FAIL. 운영 NAS 무변경, 자동 preconnect 출하 OFF.
