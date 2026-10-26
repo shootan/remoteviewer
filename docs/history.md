@@ -13545,3 +13545,11 @@ Next
 - 시험 대역(시험 빌드만): `GNLINK_STREAM_TEST_WGC_STILL=1` — WGC attachment 마다 첫 프레임만 넘김(비활성 검사 뒤라 꺼진 동안의 프레임은 캐시를 지움).
 - 시험: UA `--fullframe-fails`(신규) 18/18 — (C) 1회 실패 → 같은 episode 의 ask 2 가 재시작 ok → 그림, (A) 계속 실패: 재시작 3회(ask 1~3), 12 s 동안 추가 0·일반 retry 0·그림 0, (B) 새 세션 = 새 source → 새 budget 의 ask 1 로 그림 복귀. 부정 대조 M16(r3 규칙: 일반 retry 가 FullFrame 도 재시도) → report r4 절.
 - 제품/테스트/문서: 제품(일반 retry 의 owner 조건, full-frame ask 의 실패 retry 결산, 재시작 조건) / 테스트(UA fullframe-fails, 시험 빌드 WGC still 대역) / 문서(이 항목).
+### 2026-10-26 PC 0.2.163 릴리스 후보 dry-run (게시 전 — 서명·업로드·push 없음)
+- 범위: R1 을 PC 먼저 / APK 나중으로 분리(작업용2 미착수 — PC 뷰어는 backend 요청을 보내지 않아 UA-2 UI 없이 완결, 구 APK 0.2.31 의 wgc 요청은 새 Host 에서 그 세션에만 적용). 정본 `task_rel_0163_r1.md`.
+- rel/0.2.163 = main a1c551c + merge --no-ff **f0a388c**(fix/capture-lifecycle adc9482: capture-lifecycle r1~r4 + LK-UX 8d8655e, Codex SOURCE OK `codex_capture_lifecycle_src_r4.md`·`codex_lk_ux_retry_src_r4.md`; 충돌은 `docs/작업목록.md` 한 곳 — PS 행 + LK 최신 행 보존) + 버전 **90192f4**(product_version.hpp 0.2.162→0.2.163 한 줄; UTF-8 BOM·CRLF 17·1020 B 유지). webview2 는 robocopy 실복사(90 파일, 원본 불변, junction 없음).
+- `gnlink_release.sh --dry-run` **rc 0**: parity·payload-set·checksums PASS, installer payload 10/10. `.claude/rel/0.2.163`: windows.manifest(미서명) `5ea1ac74…`, SHA256SUMS.txt `9b1a21dd…`(11 항목 OK), sdk set `703a6a41…`.
+- 산출물: UTF-16 `0.2.163` Viewer·Stream·Host·Client 각 1·Setup 5, `0.2.162` 잔존 0. 출하 gate 에 LK·capture 시험 표식 추가(`][test-seam]`·`ForTest`·`pointerfirst` + 새 환경 이름 9개 단독 대조) — payload 9/9, self-test 51, 시험 빌드 host 를 넣은 부정 대조 FAIL(새 표식 검출). 출하 10 타깃 시험 define 0(`REMOTE60_ENCODER_POLL_DIAG=0` 만). 제품의 시험 hook 호출 0(LK hook 선언·기본 empty, capture testStill 은 시험 빌드 #ifdef 안에서만). shell.html `8fac49cd…`(소스·빌드·payload 동일).
+- smoke(같은 commit 의 시험 빌드, 콘솔 세션, SLOT CreateNew→삭제): LK lock 68·prelogin 79, PS still 32, UA 54, UA fullframe-fails 18, real-recv-smoke(payload GNLinkStream) PASS, host_punch_reply 102, hello_backlog 28, punch_any PASS, **dxgi_wedge_reconnect_runner ALL PASS**(DW 에서 미뤄 둔 1회). 잔여 시험 프로세스 0.
+- 상태: **로컬 실기 후보(게시 전)**. 서명·NAS 게시·push 는 검증용(독립 검사·Codex EVIDENCE 뒤). 실기 미검증: 실 잠금 화면 틀린 비밀번호 재시도, 실 로그인 전 재부팅, 실 UAC 승인/거부, 회사 PC DW. APK 0.2.32 는 별도.
+- 제품/테스트/문서: 제품(버전 한 줄) / 테스트(출하 gate 표식·self-test) / 문서(이 항목·작업목록·구현계획).
