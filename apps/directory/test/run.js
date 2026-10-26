@@ -207,6 +207,25 @@ function cleanup() {
     process.exit(relay);
   }
 
+  // keepalive-r2 relay decision (a): standby leases, each with its own host-facing socket (loopback-bound),
+  // beside the legacy lease. Its own server: the reserved sockets are counted per process.
+  console.log('\n--- relay standby leases (keepalive-r2 (a)) ---');
+  const standbyEnv = { ...relayEnv, REMOTE60_RELAY_HOST_FACING_IP: '127.0.0.1',
+                       REMOTE60_RELAY_HOST_FACING_BIND: '127.0.0.1' };
+  server = spawn(process.execPath, [serverPath], { env: standbyEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const standby = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_test.js')],
+                        { env: standbyEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+  await stopServer(server);
+  if (standby !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(standby);
+  }
+
   // Its own server again, because the correction only exists when the server knows its own
   // public address, and "unset means the raw observation" is what the other passes rely on.
   console.log('\n--- observe correction (own lan) ---');
