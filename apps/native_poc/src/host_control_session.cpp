@@ -386,6 +386,22 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   // (GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS, at most 5 s) so a test can type while the viewer does not
   // know yet what this host is. Nothing else changes.
   bool firstPongDelayed = false;
+  // TEST BUILD ONLY (apk-0232 evidence A, Codex codex_apk0232_evidence_design.md): GNLINK_STREAM_TEST_PRELOGIN_ROLE=1
+  // makes this ordinary (non --prelogin) host ADVERTISE the logon-screen role (kCaptureFlagPreloginV1) to a manually
+  // connected viewer -- so the real APK's local desktop selection runs -- while it holds the prelogin control
+  // allowlist as a TRIPWIRE: a window list / select / thumbnail (anything the logon screen refuses) or an effectful
+  // logon-screen message (credential, unlock, reboot, Ctrl+Alt+Del) is logged FORBIDDEN and the link is closed, never
+  // answered. Nothing of the real worker changes: --prelogin, its directory authentication, its capture. Default off.
+  // =2: the tripwire's own control -- the role advertised but the user-data feature bits KEPT (a real worker strips
+  // them), so a correct app sends a message the logon screen refuses and the tripwire must catch it.
+  wchar_t testPreloginRoleValue[8] = {};
+  const bool testPreloginRoleSet =
+      GetEnvironmentVariableW(L"GNLINK_STREAM_TEST_PRELOGIN_ROLE", testPreloginRoleValue, 8) > 0;
+  const bool testPreloginRole = testPreloginRoleSet && (testPreloginRoleValue[0] == L'1' || testPreloginRoleValue[0] == L'2');
+  const bool testPreloginRoleKeepsBits = testPreloginRole && testPreloginRoleValue[0] == L'2';
+  if (testPreloginRole) {
+    std::cout << "[native-video-host][test-seam] prelogin-role advertised (test build; allowlist tripwire on)\n";
+  }
 #endif
   // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
   clientSession.injectedInput.BeginServe(servedEpoch);
@@ -789,6 +805,20 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
                 << static_cast<unsigned>(header.type) << "\n";
       break;
     }
+#ifdef REMOTE60_STREAM_TEST_SEAM
+    if (testPreloginRole) {
+      const bool effectful = type == MessageType::ControlUnlockChallengeRequest ||
+                             type == MessageType::ControlUnlockSealedRequest ||
+                             type == MessageType::ControlUnlockStatusRequest ||
+                             type == MessageType::ControlRebootRequest ||
+                             type == MessageType::ControlPreloginControl;
+      if (!remote60::native_poc::prelogin::IsControlAllowedInPrelogin(type) || effectful) {
+        std::cout << "[native-video-host][test-seam] prelogin-role FORBIDDEN control type="
+                  << static_cast<unsigned>(header.type) << " (closing the link)\n";
+        break;
+      }
+    }
+#endif
 
     if (type == MessageType::ControlVersionRequest && header.size == sizeof(ControlVersionMessage)) {
       ControlVersionMessage request{};
@@ -854,6 +884,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (capture.frameHeartbeatEnabled.load())
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagFrameHeartbeat;
       pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPeerVersion;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // apk-0232 evidence A: the role only (the momentary bit) -- not durable-enabled, not SAS
+      if (testPreloginRole) pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginV1;
+#endif
       if (args.preloginMode) {
         // Serving the pre-login secure desktop right now (prelogin-service r3 R1: the momentary signal).
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginV1;
@@ -927,7 +961,12 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // close the link on the inbound message; not advertising it keeps a correct viewer from sending
       // one at all). Prelogin keeps only stream/heartbeat/version/secure-desktop + the sealed credential
       // path + the prelogin/reboot bits set earlier.
-      if (args.preloginMode) {
+      bool logonScreenSurface = args.preloginMode;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // apk-0232 evidence A: the test role offers exactly the worker's surface (else the app polls a clipboard here)
+      logonScreenSurface = logonScreenSurface || (testPreloginRole && !testPreloginRoleKeepsBits);
+#endif
+      if (logonScreenSurface) {
         pong.captureTargetFlags &= ~(remote60::native_poc::kCaptureFlagHostImeV1 |
                                      remote60::native_poc::kCaptureFlagHostImePulseStateV2 |
                                      remote60::native_poc::kCaptureFlagClipboardTextV1 |

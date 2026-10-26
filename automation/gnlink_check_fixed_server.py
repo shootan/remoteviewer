@@ -83,6 +83,7 @@ RELEASE_0163_SEAM_NAMES = [
     'GNLINK_STREAM_TEST_UNLOCK_PIPE',
     'GNLINK_VIEWER_TEST_STATUS_POLLS',
     'GNLINK_VIEWER_TEST_SEAL_FAIL',
+    'GNLINK_STREAM_TEST_PRELOGIN_ROLE',  # apk-0232 evidence A: the test host's logon-screen role
 ]
 
 # (file, must carry the address)

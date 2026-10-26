@@ -178,7 +178,7 @@ def log_lines(tag_filter=None):
 
 # ---------------------------------------------------------------- host + pattern
 class Fixture:
-    def __init__(self, host_exe, out, static, input_log=None, layered_size=None, pulse_ms=200):
+    def __init__(self, host_exe, out, static, input_log=None, layered_size=None, pulse_ms=200, host_args=(), host_env=None):
         self.out = out
         self.port = free_udp_port()
         self.control_port = free_tcp_port()  # manual connect uses a TCP control link (loopback only)
@@ -199,6 +199,7 @@ class Fixture:
         shutil.copyfile(host_exe, exe)
         env = dict(os.environ)
         env['REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE'] = '1'
+        env.update(host_env or {})
         env['LOCALAPPDATA'] = os.path.join(stage, 'localappdata')
         os.makedirs(env['LOCALAPPDATA'], exist_ok=True)
         self.host_log = open(os.path.join(out, 'host.log'), 'wb')
@@ -211,6 +212,7 @@ class Fixture:
                 if input_log else ['--input-injection-mode', 'none'])
         # No --capture-window-*: that locks the host's selection and the APK's pick is refused. The APK picks
         # the pattern window from its own window list, as a user would.
+        cmd += list(host_args)
         CONTROL_PORT[self.port] = self.control_port
         self.host = subprocess.Popen(cmd, cwd=stage, env=env, stdout=self.host_log, stderr=subprocess.STDOUT)
         time.sleep(2)
@@ -1070,8 +1072,12 @@ def scenario_strength_ab(fx, out):
               name + ': no new frame, a moved placement (size check lying 3x) -> exactly ONE redraw, no new frame drawn',
               'note=%s redraws=%s drawn=%s clearSwaps=%s' % (pc['note'][:60], pc.get('redrawsAfterPan'), pc.get('drawn'), pc.get('clearSwaps')))
         check(pc.get('clearSwaps', 0) >= 1 and pc.get('lastTs') == pc.get('firstTs') and pc.get('firstTs', 0) > 0,
-              name + ': the redraw keeps the frame\'s timestamp (after the cleared swaps)',
+              name + ': the redraw shows the SAME decoder frame (after the cleared swaps)',
               'first=%s last=%s' % (pc.get('firstTs'), pc.get('lastTs')))
+        # r5 (N1-c1): the last output buffer is named, by its own timestamp, a REDRAW of the pan's layout (gen 2)
+        check(pc.get('lastKind') == 'REDRAW' and pc.get('lastGen') == 2 and pc.get('outTs', 0) >= (1 << 62),
+              name + ': the latched buffer is identified as a REDRAW of the new layout (its own output timestamp)',
+              'kind=%s gen=%s outTs=%s' % (pc.get('lastKind'), pc.get('lastGen'), pc.get('outTs')))
         if ok:
             img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].astype(np.float64)
             dx = int(round(w / 4.0))
@@ -1289,6 +1295,148 @@ def backend_requests(fx):
     """The CHANGE requests the host logged (a question -- backend 0 -- is not logged as one)."""
     log = open(os.path.join(fx.out, 'host.log'), 'rb').read().decode(errors='replace')
     return re.findall(r'desktop-backend-request seq=\d+ backend=(\w+)', log)
+
+
+def scenario_prelogin_ui(fx, out, role=True):
+    """apk-0232 evidence A (Codex codex_apk0232_evidence_design.md): the REAL APK UI against a test host that advertises
+    the logon-screen role (GNLINK_STREAM_TEST_PRELOGIN_ROLE=1, test build only) with the prelogin allowlist as a
+    tripwire, its source fixed from startup on the off-screen pattern window (--capture-window-title; UI = the desktop,
+    source = a WGC pattern -- not the real worker's DXGI logon screen). The app must take its LOCAL desktop selection:
+    the list -> the PC -> its desktop card -> the first IDR -> the decoder -> the picture on screen; cancel before it
+    shows and pick again on the same connection; SH 끄기/약하게/강하게/화면 크기 on that connection -- with NO window
+    list / window select / thumbnail ever reaching the host. role=False is the negative control: an ordinary host, the
+    same steps -- the app then sends its WindowSelect and the no-WindowSelect check must FAIL."""
+    tag = '' if role else 'CONTROL '
+    hlog = lambda: open(os.path.join(out, 'host.log'), 'rb').read().decode(errors='replace')
+    # what the logon screen refuses and an ordinary host answers: its window list, a window select, a thumbnail
+    selects = lambda: len(re.findall(r'\[control\] (?:window-list|window-select|thumbnail)', hlog()))
+    forbidden = lambda: re.findall(r'prelogin-role FORBIDDEN control type=(\d+)', hlog())
+    launch(fx.port)
+    ok = tap(rid='loginManualButton', timeout=30) and tap(rid='connectButton', timeout=20)
+    connected_at = time.time()
+    check(ok, tag + 'connected (manual)')
+    time.sleep(2)
+    if role:
+        check('prelogin-role advertised' in hlog(), 'the test host advertises the logon-screen role (test seam on)')
+    if not tap(rid='listDevicesButton', timeout=15):
+        check(False, tag + 'the PC list could be shown')
+        return
+    wait = 11.5 - (time.time() - connected_at)  # the manual-connect workaround (see connect_to_pattern)
+    if wait > 0:
+        time.sleep(wait)
+
+    def desktop_card():
+        end = time.time() + 30
+        while time.time() < end:
+            n = find(dump(), rid='targetCardTitle')
+            if n is not None:
+                return n
+            time.sleep(1)
+        return None
+
+    def picture(label):
+        img = screencap(os.path.join(out, 'prelogin_%s.png' % label))
+        t = lime_target(img)
+        return t is not None and float(img.std()) > 10, t
+
+    # 1. the desktop pick -> the local selection -> the picture
+    card = desktop_card()
+    screencap(os.path.join(out, 'prelogin_0_list.png'))
+    if not check(card is not None, tag + 'the PC\'s desktop card is on the list'):
+        return
+    adb('logcat', '-c', check_rc=False)
+    tap_node(card)
+    shown = wait_for(rid='viewerMenuButton', timeout=40)
+    time.sleep(3)
+    pic, t = picture('1_shown')
+    lines = log_lines()
+    local = [l for l in lines if 'selection local (logon screen)' in l and 'begun=1' in l]
+    check(shown and pic, tag + 'the desktop pick shows the picture (decoded pattern on screen)', 'lime=%s' % (t,))
+    check(local, tag + 'the app took its LOCAL selection (logon screen)', (local or [''])[-1][-100:])
+    check(selects() == 0, tag + 'no window list / WindowSelect reached the host', 'window-list/select lines=%d' % selects())
+    if not role:
+        return
+    # 2. cancel before the picture shows, then the same connection picks again
+    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False)
+    time.sleep(3)
+    card = desktop_card()
+    if check(card is not None, 'back on the list'):
+        b = card.get('bounds')
+        g = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', b or '')
+        cx, cy = (int(g.group(1)) + int(g.group(3))) // 2, (int(g.group(2)) + int(g.group(4))) // 2
+        adb('logcat', '-c', check_rc=False)
+        # the host holds every frame while this file exists (test build: GNLINK_STREAM_TEST_PAUSE_PUBLISH_FILE,
+        # bounded 15 s) -- the pick waits for its first IDR, the user cancels in that wait, then the frames go on
+        pause = os.path.join(os.path.abspath(out), 'pause_publish')
+        open(pause, 'w').close()
+        try:
+            tap_node(card)
+            waiting = wait_for(rid='viewerMenuButton', timeout=10)  # the viewer, no picture yet
+            screencap(os.path.join(out, 'prelogin_2_waiting.png'))
+            adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False)
+            time.sleep(2)
+            early = find(dump(), rid='targetCardTitle') is not None
+            screencap(os.path.join(out, 'prelogin_2_cancelled.png'))
+        finally:
+            os.remove(pause)  # our own file, inside this run's output folder
+        time.sleep(6)  # the held frames are published now: none of them may open the viewer again
+        late = find(dump(), rid='targetCardTitle') is not None and find(dump(), rid='viewerMenuButton') is None
+        lines = log_lines()
+        aborted = any('selection aborted' in l for l in lines)
+        completed = [l for l in lines if 'local selection' in l and 'selected' in l and 'logon screen' in l]
+        check(waiting and early and late and aborted,
+              'cancel while the pick waits for its first frame: the list stays, the late frames open nothing',
+              'waiting=%s early=%s late=%s aborted=%s' % (waiting, early, late, aborted))
+        adb('logcat', '-c', check_rc=False)
+        tap_node(desktop_card())
+        shown = wait_for(rid='viewerMenuButton', timeout=40)
+        time.sleep(3)
+        pic, t = picture('3_again')
+        local = [l for l in log_lines() if 'selection local (logon screen)' in l and 'begun=1' in l]
+        check(shown and pic and local, 'picked again on the SAME connection: its own local selection, the picture shown',
+              'lime=%s local=%s' % (t, (local or [''])[-1][-80:]))
+    # 3. SH on this connection: 끄기 / 약하게 / 강하게, then 화면 크기 (실험) and back to 기본
+    for level in ('off', 'weak', 'strong'):
+        adb('logcat', '-c', check_rc=False)
+        choose_level(level)
+        time.sleep(6)
+        pic, t = picture('4_%s' % level)
+        lines = log_lines()
+        path = 'direct' if level == 'off' else 'sharpen'
+        # a path change logs sharpen_path; a strength change on a live renderer shows in the 1 s latency line
+        took = any('sharpen_path' in l and ('path=%s' % path) in l for l in lines) or \
+            any('sh_latency' in l and ('level=%s ' % level) in l and ('path=%s ' % path) in l for l in lines)
+        check(pic and took, 'SH %s on this connection: the picture shown, the %s path' % (level, path), 'lime=%s' % (t,))
+    to_list()
+    settings_method('settingsSharpMethodDisplayButton')
+    adb('logcat', '-c', check_rc=False)
+    if tap(rid='listDevicesButton', timeout=10):
+        tap_node(desktop_card())
+    shown = wait_for(rid='viewerMenuButton', timeout=40)
+    time.sleep(5)
+    pic, t = picture('5_display')
+    lines = log_lines()
+    check(shown and pic and any('sharpen_display_pass' in l and 'mode=1 method=display' in l for l in lines),
+          'SH 화면 크기 (실험): B drawn on this connection (display pass), the picture shown', 'lime=%s' % (t,))
+    to_list()
+    settings_method('settingsSharpMethodDefaultButton')
+    # 4. the whole run: nothing the logon screen refuses ever reached the host
+    check(selects() == 0, 'the whole run: no window list / WindowSelect at the host', str(selects()))
+    check(not forbidden(), 'the whole run: no forbidden control (window list / thumbnail / effectful) at the host', str(forbidden()))
+
+
+def scenario_prelogin_tripwire(fx, out):
+    """apk-0232 evidence A, the tripwire's own control: GNLINK_STREAM_TEST_PRELOGIN_ROLE=2 advertises the role but KEEPS
+    the user-data feature bits a real logon-screen worker strips (clipboard ...). The real APK then polls the clipboard,
+    a message the logon screen refuses: the host must log it FORBIDDEN and close the link -- never answer it."""
+    hlog = lambda: open(os.path.join(out, 'host.log'), 'rb').read().decode(errors='replace')
+    launch(fx.port)
+    ok = tap(rid='loginManualButton', timeout=30) and tap(rid='connectButton', timeout=20)
+    check(ok, 'tripwire control: connected (manual)')
+    time.sleep(8)
+    fb = re.findall(r'prelogin-role FORBIDDEN control type=(\d+)', hlog())
+    check('role advertised' in hlog() and fb, 'TRIPWIRE: a refused message from the real app is logged FORBIDDEN', str(fb))
+    check('tcp client disconnected' in hlog(), 'TRIPWIRE: ...and the link is closed (not answered)')
 
 
 def scenario_ua2_desktop(fx, out):
@@ -1858,11 +2006,20 @@ def scenario_layout_b(fx, out, input_log):
     picture_where_placed('land')
     corners('landscape')
     tap_lime('landscape')
+    def rotate_to(portrait):
+        """The viewer's own rotate button, until the screen IS that way (a missed tap on the sheet is retried once)."""
+        for _ in range(2):
+            tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerRotateButton', timeout=15, reveal=scroll_menu_sheet)
+            tap(rid='viewerMenuCloseButton', timeout=5)
+            time.sleep(6)
+            h, w = screencap(os.path.join(out, 'layoutb_rot_probe.png')).shape[:2]
+            if (h > w) == portrait:
+                return True
+        return False
+
     # 2. rotation: the viewer's own button -> portrait
     adb('logcat', '-c', check_rc=False)
-    rot = tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerRotateButton', timeout=15, reveal=scroll_menu_sheet)
-    tap(rid='viewerMenuCloseButton', timeout=5)
-    time.sleep(6)
+    rot = rotate_to(True)
     pl = display_pass_place()
     check(rot and pl is not None and pl[5] > pl[4], 'rotation: portrait, and B\'s placement has the new (portrait) view size',
           str(pl))
@@ -1872,14 +2029,24 @@ def scenario_layout_b(fx, out, input_log):
     corners('portrait')
     tap_lime('portrait')
     adb('logcat', '-c', check_rc=False)
-    rot = tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerRotateButton', timeout=15, reveal=scroll_menu_sheet)
-    tap(rid='viewerMenuCloseButton', timeout=5)
-    time.sleep(6)
+    rot = rotate_to(False)
     pl = display_pass_place()
     check(rot and pl is not None and pl[4] > pl[5], 'rotation back: landscape placement again', str(pl))
     tap_lime('landscape_again')
     # 3. 크게보기 + 화면 이동: a pan moves the picture, sends nothing
-    if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10, reveal=scroll_menu_sheet_up):
+    def choose_large():
+        for attempt in range(2):
+            if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10, reveal=scroll_menu_sheet_up):
+                return True
+            screencap(os.path.join(out, 'layoutb_large_miss%d.png' % attempt))
+            with open(os.path.join(out, 'layoutb_large_miss%d.xml' % attempt), 'w', encoding='utf-8') as fh:
+                fh.write(adb('exec-out', 'uiautomator', 'dump', '/dev/tty', check_rc=False) or '')
+            tap(rid='viewerMenuCloseButton', timeout=3)
+            adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False) if find(dump(), rid='viewerMenuCloseButton') is not None else None
+            time.sleep(2)
+        return False
+
+    if choose_large():
         tap(rid='viewerMenuCloseButton', timeout=10)
         time.sleep(3)
         chip = tap(rid='viewerPanChip', timeout=10, reveal=reveal_controls)
@@ -1989,9 +2156,19 @@ def main():
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
     input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab', 'layout_b') else None
     fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
-                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui', 'layout_b', 'ua2_desktop') else None,
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui', 'layout_b', 'ua2_desktop', 'prelogin_ui', 'prelogin_ui_control', 'prelogin_tripwire') else None,
                                                                       pulse_ms=33 if args.scenario == 'latency_ab' else 200,
-                                                        input_log=input_log)
+                                                        input_log=input_log,
+                                                        # evidence A: the source fixed from startup (no WindowSelect needed),
+                                                        # the logon-screen role for prelogin_ui only (the control: an ordinary host)
+                                                        host_args=(('--capture-window-title', PATTERN_TITLE)
+                                                                   if args.scenario in ('prelogin_ui', 'prelogin_ui_control', 'prelogin_tripwire') else ()),
+                                                        host_env=({'GNLINK_STREAM_TEST_PRELOGIN_ROLE': '1',
+                                                                   'GNLINK_STREAM_TEST_PAUSE_PUBLISH_FILE':
+                                                                       os.path.join(os.path.abspath(args.out), 'pause_publish')}
+                                                                  if args.scenario == 'prelogin_ui' else
+                                                                  {'GNLINK_STREAM_TEST_PRELOGIN_ROLE': '2'} if args.scenario == 'prelogin_tripwire'
+                                                                  else None))
     try:
         if args.scenario == 'compare':
             scenario_compare(fx, args.out, seam=False)
@@ -2021,6 +2198,12 @@ def main():
             scenario_ua2(fx, args.out)
         elif args.scenario == 'ua2_desktop':
             scenario_ua2_desktop(fx, args.out)
+        elif args.scenario == 'prelogin_ui':
+            scenario_prelogin_ui(fx, args.out)
+        elif args.scenario == 'prelogin_tripwire':
+            scenario_prelogin_tripwire(fx, args.out)
+        elif args.scenario == 'prelogin_ui_control':
+            scenario_prelogin_ui(fx, args.out, role=False)
         elif args.scenario == 'touch_ab':
             scenario_touch_ab(fx, args.out, input_log)
         elif args.scenario == 'layout_b':
