@@ -36,6 +36,10 @@ struct DecoderState {
   // Which selection generation the recv loop has already reset the decoder for. A bump by
   // begin_pc_target_selection() on the UI thread makes the next frame flush stale references.
   uint64_t recvSelectionEpoch = 0;  // set from ctx.sel.epoch at thread start
+  // rel-0163 r4 (Codex R3): a local op's candidate -- the generation of the last keyframe the frame gate sent to
+  // the decoder for that op (recv thread only). Bound only when its decode produces output.
+  uint64_t localCandidateOp = 0;
+  uint64_t localCandidateGen = 0;
 };
 
 }  // namespace remote60::native_poc::viewer

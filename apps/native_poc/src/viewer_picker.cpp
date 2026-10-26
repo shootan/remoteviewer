@@ -196,10 +196,19 @@ void clear_pc_target_selection(ViewerState& ctx) {
   ctx.sel.deferredPick.store(0, std::memory_order_release);  // rel-0163 r3: a held pick ends with it
 }
 
+// rel-0163 r4: the control thread's half of the R1 handshake -- the role just became known.
+void note_host_role_known(ViewerState& ctx, bool firstTime) {
+  if (firstTime && ctx.sel.deferredPick.load(std::memory_order_seq_cst) != 0 && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgRunDeferredPick, 0, 0);
+  }
+}
+
 // rel-0163 r3: the held pick, now that the host's role is known (UI thread; once).
 void run_deferred_pc_selection(ViewerState& ctx) {
-  const uint64_t held = ctx.sel.deferredPick.exchange(0, std::memory_order_acq_rel);
-  if (held == 0) return;
+  const uint64_t held = ctx.sel.deferredPick.exchange(0, std::memory_order_seq_cst);
+  if (held == 0) return;  // already run (the UI's own re-check and the pong's message may both come): once
+  // A pick held on an earlier connection is that connection's.
+  if (ctx.sel.deferredRun.load(std::memory_order_acquire) != ctx.session.controlRunGen.load(std::memory_order_acquire)) return;
   if (!ctx.picker.visible.load(std::memory_order_relaxed) || !ctx.control.connected.load(std::memory_order_relaxed)) return;
   const uint64_t windowId = held - 1;
   (void)begin_pc_target_selection(ctx, windowId, windowId == 0 ? "desktop_select_requested" : "window_select_requested");
@@ -240,11 +249,17 @@ bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* 
   // rel-0163 r3 (Codex codex_rel_0163_e1_decision.md): what the host takes depends on its role, known from its
   // first pong. Before that nothing is sent blind (a logon-screen host closes the link on a WindowSelect): the
   // pick waits as this connection's intent and runs once the role is known (kMsgRunDeferredPick).
-  if (!ctx.session.hostRoleKnown.load(std::memory_order_acquire)) {
-    ctx.sel.deferredPick.store(windowId + 1, std::memory_order_release);
+  if (!ctx.session.hostRoleKnown.load(std::memory_order_seq_cst)) {
+    if (ctx.sel.testAfterRoleRead) ctx.sel.testAfterRoleRead();  // tests only: a pong lands here
+    ctx.sel.deferredRun.store(ctx.session.controlRunGen.load(std::memory_order_acquire), std::memory_order_seq_cst);
+    ctx.sel.deferredPick.store(windowId + 1, std::memory_order_seq_cst);
     ctx.picker.windowPanel.SetStatus("waiting_host_role");
     std::cout << "[native-video-client][picker] pick held until the host's role is known id=" << windowId << "\n";
     if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+    // rel-0163 r4 (Codex R1): the handshake with the first pong. The control thread sets the role and THEN looks
+    // for a held pick; this side holds the pick and THEN looks at the role again (both sequentially consistent):
+    // at least one of them sees the other, so the pick is never lost; run_deferred_pc_selection takes it once.
+    if (ctx.session.hostRoleKnown.load(std::memory_order_seq_cst)) run_deferred_pc_selection(ctx);
     return true;
   }
   ctx.sel.deferredPick.store(0, std::memory_order_release);
@@ -272,7 +287,10 @@ bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* 
     return true;
   }
   // RequestSelect refuses when the target is locked by host config; do not touch the stream then.
-  if (!ctx.picker.windowPanel.RequestSelect(windowId, statusText)) return false;
+  // rel-0163 r4 (Codex R2): the request carries its op's tag (the epoch Begin is about to give it -- the UI thread
+  // is the only one that begins a selection), so what becomes of the request is that op's alone.
+  const uint64_t opTag = ctx.sel.epoch.load(std::memory_order_acquire) + 1;
+  if (!ctx.picker.windowPanel.RequestSelect(windowId, statusText, opTag)) return false;
   ctx.sel.Begin();
   restore_note_pick(ctx, windowId);  // dxgi-wedge-fix r2 D2: a candidate once revealed, reported once presented
   ctx.control.streamState.Request(true);
@@ -294,6 +312,13 @@ void post_pc_selection_reveal(ViewerState& ctx, uint64_t readyGeneration, uint64
 }
 
 void apply_window_selected_result(ViewerState& ctx, const ControlWindowSelectedMessage& msg) {
+  // rel-0163 r4 (Codex R4): a local op asked for no ack -- one arriving now is an older op's: neither the panel nor
+  // the gate, the generation, the stream or the pending state changes.
+  if (ctx.sel.pending.load(std::memory_order_acquire) && ctx.sel.localAckless.load(std::memory_order_acquire)) {
+    log_client_line(ctx, "[native-video-client][picker] window-selected ignored: the pick in flight is local (no ack asked) seq=" +
+                             std::to_string(msg.seq));
+    return;
+  }
   const auto result = ctx.picker.windowPanel.ApplyWindowSelected(msg);
   log_client_line(ctx, result.logLine);
   switch (ctx.sel.ApplyAck(result.ok, msg.streamGeneration)) {
@@ -306,6 +331,8 @@ void apply_window_selected_result(ViewerState& ctx, const ControlWindowSelectedM
       ctx.control.streamState.Request(false);
       clear_pc_target_selection(ctx);
       if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+      return;
+    case SelectionAck::IgnoredLocal:  // (raced to local after the check above) -- nothing
       return;
     case SelectionAck::NotPending:
       break;

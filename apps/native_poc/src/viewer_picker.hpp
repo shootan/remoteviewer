@@ -68,6 +68,8 @@ void clear_pc_target_selection(ViewerState& ctx);
 bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* statusText);
 // rel-0163 r3: a pick held until the host's role was known, run once (UI thread).
 void run_deferred_pc_selection(ViewerState& ctx);
+// rel-0163 r4: the role just became known (control thread) -- posts the held pick's run (R1 handshake).
+void note_host_role_known(ViewerState& ctx, bool firstTime);
 // rel-0163 r3: a WindowSelect the control thread could not send to a logon-screen host (UI thread).
 void resolve_unsendable_pc_selection(ViewerState& ctx, uint64_t windowId, uint64_t opEpoch);
 

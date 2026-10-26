@@ -32,7 +32,12 @@
 //                            once, BindLocalGeneration); until then nothing can reveal, after it frames of
 //                            another generation drop exactly as after an ack.
 //   deferredPick           : a pick made before the host's role was known (its first pong) -- id + 1, 0 =
-//                            none. Run once when the role is known (kMsgRunDeferredPick), never sent blind.
+//                            none, with deferredRun (the control run it belongs to). Run once when the role is
+//                            known (kMsgRunDeferredPick, or the UI's own re-check right after holding it).
+// rel-0163 r4 (Codex codex_rel_0163_src_r3.md R3/R4): every transition and every read that decides a frame or a
+// reveal takes `mu`, so Begin/BeginLocal/Clear/Convert/bind/commit are seen whole. A local op's generation is
+// bound only for THAT op (its epoch, the token the receive path took when it began the frame), so an old frame
+// can never bind a newer op; a host ack never touches a local op (IgnoredLocal).
 // The reveal is decided on the video thread but *committed* on the UI thread, so a cancel / new
 // selection / disconnect that races the post cannot wrongly close the picker. The video thread
 // records the candidate (generation + epoch) and posts once; the UI handler revalidates against
@@ -46,6 +51,9 @@
 
 #include "viewer_common.hpp"
 
+#include <functional>
+#include <mutex>
+
 namespace remote60::native_poc::viewer {
 
 // What the host's WindowSelected ack did to the in-flight selection (ApplyAck).
@@ -53,6 +61,7 @@ enum class SelectionAck : uint8_t {
   NotPending = 0,  // no PC-side selection tracked (legacy stream-view session): caller's old path
   Acked = 1,       // the transaction now waits for the first frame of its generation
   Failed = 2,      // the caller stops the speculative stream and clears the transaction
+  IgnoredLocal = 3,  // rel-0163 r4: the in-flight op is local (no ack asked) -- an ack changes nothing
 };
 
 // Whether a decoded frame of a given stream generation may be presented (AdmitGeneration).
@@ -72,6 +81,11 @@ struct SelectionGateState {
   std::atomic<uint64_t> activeStreamGeneration{0};
   std::atomic<bool> localAckless{false};     // rel-0163 r3: see above
   std::atomic<uint64_t> deferredPick{0};     // rel-0163 r3: UI writes, control reads (posts), UI runs
+  std::atomic<uint64_t> deferredRun{0};      // rel-0163 r4: the control run the held pick belongs to
+  mutable std::mutex mu;                     // rel-0163 r4: the transitions and the deciding reads
+  // Tests only (empty in the product): runs between the UI's role read and the held pick's store -- a
+  // pong landing exactly there (Codex R1's order).
+  std::function<void()> testAfterRoleRead;
   // cross-thread: recv records, UI revalidates and commits.
   std::atomic<uint64_t> readyGeneration{0};
   std::atomic<uint64_t> readyEpoch{0};
@@ -82,8 +96,10 @@ struct SelectionGateState {
   void Begin();                                            // UI: a pick was accepted for sending
   void BeginLocal();                                       // UI: rel-0163 r3 -- a desktop pick at a logon-screen host
   bool ConvertToLocal(uint64_t opEpoch);                   // UI: that op's WindowSelect(0) was not sendable after all
-  bool LocalUnbound() const;                               // recv: a local transaction still waiting for its keyframe
-  bool BindLocalGeneration(uint64_t streamGeneration);     // recv: bind it to the first admitted keyframe's generation
+  bool LocalUnbound(uint64_t opEpoch) const;               // recv: THAT local op still waits for its keyframe
+  // recv: bind THAT local op to the generation of the keyframe whose decode produced its first output.
+  bool BindLocalGeneration(uint64_t opEpoch, uint64_t streamGeneration);
+  bool IsLiveLocal(uint64_t opEpoch) const;                // recv: the frame's op is the live local op
   void Clear();                                            // any thread: drop the in-flight transaction
   SelectionAck ApplyAck(bool ok, uint64_t streamGeneration);   // control: the host's WindowSelected
   bool EpochChanged(uint64_t& seenEpoch);                  // recv: a new pick since the last frame (reset the decoder)
