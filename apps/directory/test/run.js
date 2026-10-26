@@ -211,12 +211,25 @@ function cleanup() {
   // beside the legacy lease. Its own server: the reserved sockets are counted per process.
   console.log('\n--- relay standby leases (keepalive-r2 (a)) ---');
   const standbyEnv = { ...relayEnv, REMOTE60_RELAY_HOST_FACING_IP: '127.0.0.1',
-                       REMOTE60_RELAY_HOST_FACING_BIND: '127.0.0.1' };
+                       REMOTE60_RELAY_HOST_FACING_BIND: '127.0.0.1',
+                       // r4: every test client is 127.0.0.1 and the tester account -- raised so the per-host
+                       // bound (8) is what the cases meet
+                       REMOTE60_RELAY_STANDBY_MAX_PER_ACCOUNT: '200', REMOTE60_RELAY_STANDBY_MAX_PER_WIRE_IP: '200' };
   server = spawn(process.execPath, [serverPath], { env: standbyEnv, stdio: 'ignore' });
   await sleep(1500);
   const standby = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_test.js')],
                         { env: standbyEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  }) || await new Promise((resolve) => {
+    // r4 (Codex N1, N3): the first pin needs the host's proof; the eight hold either way round
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_r4_test.js')],
+                        { env: standbyEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  }) || await new Promise((resolve) => {
+    // r4 (Codex N3): bad bounds in the environment fall back (its own server, own ports)
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_env_bound_test.js')],
+                        { env, stdio: 'inherit' });
     child.on('exit', (code) => resolve(code ?? 1));
   });
   await stopServer(server);

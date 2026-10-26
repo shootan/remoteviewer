@@ -25,7 +25,14 @@ struct Dev {
   }
 };
 const StandbyEndpoint kA{0x0100007F, 1000}, kA2{0x0100007F, 1001}, kRelay{0x0200000A, 43000};
-constexpr uint64_t kFp1 = 0x1111, kFp2 = 0x2222;
+// r4: the replay proof is a 32-byte digest; tests use distinct fixed values.
+StandbyProof Proof(int b) {
+  StandbyProof p{};
+  p.fill(static_cast<uint8_t>(b));
+  p[0] = static_cast<uint8_t>(b >> 8);
+  return p;
+}
+const StandbyProof kFp1 = Proof(0x11), kFp2 = Proof(0x22);
 
 sockaddr_in Addr(uint16_t port) {
   sockaddr_in a{};
@@ -126,7 +133,7 @@ int main() {
   t.SessionEnded(7, now + 70);  // a LATE end of A's earlier grant (epoch 7)
   check("S3: a late end of an EARLIER session leaves the current grant alone", t.activeEntryId() == a2.entryId);
   check("S3: the device holding the live session is not re-admitted underneath it (Live)",
-        t.Admit(Dev(1).id, 9, 0x9999, 0, kA, now + 75, &got) == StandbyTable::AdmitResult::Live && t.activeEntryId() == a2.entryId);
+        t.Admit(Dev(1).id, 9, Proof(0x9999), 0, kA, now + 75, &got) == StandbyTable::AdmitResult::Live && t.activeEntryId() == a2.entryId);
   check("S3: ...nor released underneath it (Live)", t.Release(a2.entryId, a2.secret.data()) == StandbyTable::Verdict::Live &&
                                                        t.Find(a2.entryId) != nullptr);
   t.SessionEnded(9, now + 80);  // A's session (epoch 9) really ended
@@ -160,20 +167,20 @@ int main() {
   std::printf("\n[bounds]\n");
   StandbyTable full;
   StandbyEntry e;
-  for (uint8_t d = 1; d <= kStandbyMaxEntries; ++d) full.Admit(Dev(d).id, 1, d, 0, kRelay, now, &e);
+  for (uint8_t d = 1; d <= kStandbyMaxEntries; ++d) full.Admit(Dev(d).id, 1, Proof(d), 0, kRelay, now, &e);
   check("eight devices fill the host", full.size() == kStandbyMaxEntries);
   check("a ninth: BUSY, nothing changes",
-        full.Admit(Dev(99).id, 1, 99, 0, kRelay, now, &e) == StandbyTable::AdmitResult::Busy && full.size() == kStandbyMaxEntries);
+        full.Admit(Dev(99).id, 1, Proof(99), 0, kRelay, now, &e) == StandbyTable::AdmitResult::Busy && full.size() == kStandbyMaxEntries);
   check("...but a device already holding an entry may renew it (replace), not Busy",
-        full.Admit(Dev(3).id, 7, 77, 0, kRelay, now + 5, &e) == StandbyTable::AdmitResult::Admitted &&
+        full.Admit(Dev(3).id, 7, Proof(77), 0, kRelay, now + 5, &e) == StandbyTable::AdmitResult::Admitted &&
             full.size() == kStandbyMaxEntries);
   check("release frees a place", full.Release(e.entryId, e.secret.data()) == StandbyTable::Verdict::Ok &&
-                                     full.Admit(Dev(99).id, 1, 99, 0, kRelay, now + 6, &e) == StandbyTable::AdmitResult::Admitted);
+                                     full.Admit(Dev(99).id, 1, Proof(99), 0, kRelay, now + 6, &e) == StandbyTable::AdmitResult::Admitted);
   check("release with the wrong secret: unknown", full.Release(e.entryId, wrong) == StandbyTable::Verdict::Unknown);
   StandbyTable lapse;
-  for (uint8_t d = 1; d <= kStandbyMaxEntries; ++d) lapse.Admit(Dev(d).id, 1, d, 0, kRelay, now, &e);
+  for (uint8_t d = 1; d <= kStandbyMaxEntries; ++d) lapse.Admit(Dev(d).id, 1, Proof(d), 0, kRelay, now, &e);
   check("a full host whose entries have lapsed admits again (swept first)",
-        lapse.Admit(Dev(99).id, 1, 99, 0, kRelay, now + kStandbyLeaseMs + 1, &e) == StandbyTable::AdmitResult::Admitted &&
+        lapse.Admit(Dev(99).id, 1, Proof(99), 0, kRelay, now + kStandbyLeaseMs + 1, &e) == StandbyTable::AdmitResult::Admitted &&
             lapse.size() == 1);
 
   std::printf("\n[random draw -- S3]\n");
@@ -243,6 +250,53 @@ int main() {
   o = standby_handle(w, reinterpret_cast<const uint8_t*>(&act), sizeof(act), Addr(2999), false, auth, now + 100, /*endedEpoch=*/21);
   check("S3: the session's end reaches the handling first: the same activation is then refused (Superseded)",
         o.action == StandbyAction::Reply && o.reply.status == kUdpStandbyStatusSuperseded && w.activeEntryId() == 0);
+
+  std::printf("\n[r4 N2: the replay proof is a digest; a late admission changes nothing]\n");
+  {
+    StandbyProof d1{}, d1b{}, d2{};
+    check("N2-a: the proof is SHA-256 of the capability: the same token gives the same digest, another a different one",
+          StandbyProofDigest("cap-aaaa", 8, &d1) && StandbyProofDigest("cap-aaaa", 8, &d1b) && StandbyProofDigest("cap-aaab", 8, &d2) &&
+              d1 == d1b && d1 != d2);
+    StandbyTable n;
+    StandbyEntry e11, got2;
+    const StandbyProof capA = Proof(0xA10), capB = Proof(0xB11), capC = Proof(0xC11), capD = Proof(0xD12);
+    check("N2-b: gen 11 (capability B) admitted first", n.Admit(Dev(7).id, 11, capB, 0, kA, now, &e11) == StandbyTable::AdmitResult::Admitted);
+    check("N2-b: the late gen 10 with its UNUSED capability A: Stale -- the gen-11 entry and its secret stay",
+          n.Admit(Dev(7).id, 10, capA, 0, kA2, now + 10, &got2) == StandbyTable::AdmitResult::Stale &&
+              n.Find(e11.entryId) != nullptr && n.Find(e11.entryId)->secret == e11.secret && n.size() == 1);
+    check("N2-b: the same gen 11 with ANOTHER proof: Stale too",
+          n.Admit(Dev(7).id, 11, capC, 0, kA, now + 20, &got2) == StandbyTable::AdmitResult::Stale &&
+              n.Find(e11.entryId)->secret == e11.secret);
+    check("N2-b: ...while the gen-11 retransmit (same proof, same endpoint) is still a replay",
+          n.ClassifyHello(Dev(7).id, 11, capB, kA, now + 30, nullptr) == StandbyTable::HelloClass::Replay);
+    StandbyProof nearB = capB;
+    nearB[31] ^= 0x01;  // the same first 31 bytes: a shortened comparison would take it
+    check("N2-a: a proof equal to the admitted one except its LAST byte is not a replay (compared whole)",
+          n.ClassifyHello(Dev(7).id, 11, nearB, kA, now + 35, nullptr) == StandbyTable::HelloClass::NeedProof);
+    check("N2-b: a really new operation (gen 12, its own capability) replaces it",
+          n.Admit(Dev(7).id, 12, capD, 0, kA, now + 40, &got2) == StandbyTable::AdmitResult::Admitted && got2.entryId != e11.entryId &&
+              n.size() == 1);
+    // wire: the refusal on the wire, and a digest that cannot be computed
+    StandbyTable wn;
+    int calls = 0;
+    std::string good = "cap-n2-gen11";
+    const auto auth2 = [&](const std::string& tok, const sockaddr_in&) { ++calls; return tok.rfind("cap-n2", 0) == 0; };
+    UdpStandbyPacket h11 = Hello(8, 11, "cap-n2-gen11");
+    auto o = standby_handle(wn, reinterpret_cast<const uint8_t*>(&h11), sizeof(h11), Addr(3000), false, auth2, now);
+    const UdpStandbyPacket ack11 = o.reply;
+    UdpStandbyPacket h10 = Hello(8, 10, "cap-n2-gen10");
+    o = standby_handle(wn, reinterpret_cast<const uint8_t*>(&h10), sizeof(h10), Addr(3001), false, auth2, now + 10);
+    check("N2-b wire: the late gen 10 is answered Superseded with NO secret; the gen-11 entry keeps its secret",
+          o.action == StandbyAction::Reply && o.reply.status == kUdpStandbyStatusSuperseded && o.reply.entryId == 0 &&
+              wn.Find(ack11.entryId) != nullptr &&
+              std::memcmp(wn.Find(ack11.entryId)->secret.data(), ack11.entrySecret, 16) == 0);
+    const int before = calls;
+    UdpStandbyPacket h12 = Hello(8, 12, "cap-n2-gen12");
+    const auto failing = [](const char*, size_t, StandbyProof*) { return false; };
+    o = standby_handle(wn, reinterpret_cast<const uint8_t*>(&h12), sizeof(h12), Addr(3000), false, auth2, now + 20, 0, failing);
+    check("N2-a wire: a digest that cannot be computed admits nothing and spends no capability (fail-closed)",
+          o.action == StandbyAction::Silent && calls == before && wn.Find(ack11.entryId) != nullptr && wn.size() == 1);
+  }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

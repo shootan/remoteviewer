@@ -158,7 +158,8 @@ async function waitFor(pred, ms = 1500) {
     const pending = hb.body.pendingPunch || [];
     for (const p of pending) {
       const fromNat = p.ip === '127.0.0.1' && p.port !== host.sock.address().port;
-      (fromNat ? hostNat.sock : host.sock).send(buildHello(KIND_PUNCH, '', 0), p.port, p.ip);
+      // r4 (N1): toward a relay lease's own socket the host's punch carries that lease's hostProof
+      (fromNat ? hostNat.sock : host.sock).send(buildHello(KIND_PUNCH, p.hostProof || '', 0), p.port, p.ip);
     }
     return pending;
   };
