@@ -297,6 +297,12 @@ def scroll_menu_sheet():
     time.sleep(0.8)
 
 
+def scroll_menu_sheet_up():
+    """r4: back to the sheet's top (크게 보기 ...) after it was scrolled down to its lower buttons."""
+    adb('shell', 'input', 'swipe', '1900', '500', '1900', '950', '600', check_rc=False)
+    time.sleep(0.8)
+
+
 def pick_desktop():
     """Pick the DESKTOP on the target list -- never the first card of whatever tab is open: on the window
     tab that is a real window of this PC."""
@@ -1005,16 +1011,29 @@ def scenario_strength_ab(fx, out):
         time.sleep(1)
     if not check(done is not None, 'the fixture ran (sh_fixture_done)'):
         return
-    summary = json.loads(done[done.index('{'):])
+    # r4: the whole summary from the app's file -- logcat cuts a line past ~4 KB
+    raw_summary = adb('exec-out', 'run-as', PKG, 'cat', 'files/sh_fixture.json', binary=True, timeout=60)
+    summary = json.loads(raw_summary.decode('utf-8') if raw_summary else done[done.index('{'):])
     vis = fixture_visible('text')
     got = {}
     results = {}
+    pan_case = None
     for c in summary.get('cases', []):
         name = c['name']
         if name.endswith('_noring'):
             check(c['note'] == 'no_output' and c.get('heldNoSource', 0) >= 1 and c.get('drawn', 0) == 0,
                   name + ': B without a source size draws NOTHING (held, no output-size fallback)',
                   'note=%s held=%s drawn=%s' % (c['note'], c.get('heldNoSource'), c.get('drawn')))
+            continue
+        if c.get('flow') == 'layout_fail':
+            # sh-strength r4 (Codex codex_sh_strength_r3.md N1 a): never video into a buffer of the wrong size --
+            # bounded cleared swaps, then the renderer fails (the policy's way back to direct)
+            check(c['note'].startswith('failed:layout') and c.get('drawn', -1) == 0 and 2 <= c.get('clearSwaps', 0) <= 120,
+                  name + ': the output never the view\'s size -> NO video frame drawn, bounded cleared swaps, then failed (-> direct)',
+                  'note=%s drawn=%s clearSwaps=%s' % (c['note'][:90], c.get('drawn'), c.get('clearSwaps')))
+            continue
+        if c.get('flow') == 'pan_redraw':
+            pan_case = c
             continue
         raw = adb('exec-out', 'run-as', PKG, 'cat', 'files/sh_fixture_%s.rgba' % name, binary=True, timeout=60)
         w, h = c['outW'], c['outH']
@@ -1039,6 +1058,33 @@ def scenario_strength_ab(fx, out):
             continue
         check(err.max() <= 6, name + ': matches the shader model on the same frame (max |d| <= 6)',
               'max=%.1f mean=%.3f' % (err.max(), err.mean()))
+    # ---- r4 (N1 b): a pan with no new decoder frame -> the latched frame redrawn once at the new place
+    pc = pan_case
+    if pc is not None:
+        name = pc['name']
+        raw = adb('exec-out', 'run-as', PKG, 'cat', 'files/sh_fixture_%s.rgba' % name, binary=True, timeout=60)
+        w, h = pc['outW'], pc['outH']
+        base = got.get('textB133_s35')
+        ok = len(raw) == w * h * 4 and pc['note'] == 'ok' and base is not None
+        check(pc['note'] == 'ok' and pc.get('redrawsAfterPan') == 1 and pc.get('drawn') == 1 and pc.get('drawnAtPan') == 1,
+              name + ': no new frame, a moved placement (size check lying 3x) -> exactly ONE redraw, no new frame drawn',
+              'note=%s redraws=%s drawn=%s clearSwaps=%s' % (pc['note'][:60], pc.get('redrawsAfterPan'), pc.get('drawn'), pc.get('clearSwaps')))
+        check(pc.get('clearSwaps', 0) >= 1 and pc.get('lastTs') == pc.get('firstTs') and pc.get('firstTs', 0) > 0,
+              name + ': the redraw keeps the frame\'s timestamp (after the cleared swaps)',
+              'first=%s last=%s' % (pc.get('firstTs'), pc.get('lastTs')))
+        if ok:
+            img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].astype(np.float64)
+            dx = int(round(w / 4.0))
+            moved = np.abs(img[:, :w - dx - 2] - base[:, dx:w - 2])
+            right = img[:, w - dx + 2:]
+            check(moved.max() <= 6 and right.max() <= 8,
+                  name + ': the redraw shows the picture at the NEW place (shifted by %d px, black beyond)' % dx,
+                  'moved max=%.1f right max=%.1f' % (moved.max(), right.max()))
+        else:
+            check(False, name + ': the redraw read back', 'bytes=%d base=%s' % (len(raw), base is not None))
+    else:
+        check(False, 'r4: the pan redraw case ran')
+
     # ---- the comparisons (same input frame)
     bars = lambda w, h: (int(4 * h / 40), int(36 * h / 40), int(8 * w / 64), int(40 * w / 64))
     low = lambda w, h: (int(4 * h / 40), int(36 * h / 40), int(44 * w / 64), w)
@@ -1632,6 +1678,230 @@ def scenario_touch_host(fx, out, input_log, extras=(), prefix=''):
         fh.write(open(input_log).read() if os.path.exists(input_log) else '')
 
 
+def view_bounds():
+    """The video TextureView's rectangle on the screen (uiautomator bounds), or None."""
+    n = find(dump(), rid='videoTextureView')
+    if n is None:
+        return None
+    g = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds') or '')
+    return tuple(int(v) for v in g.groups()) if g else None
+
+
+def display_pass_place():
+    """The last B placement the app logged: (left, top, width, height, viewW, viewH) in view pixels."""
+    for l in reversed(log_lines('sharpen_display_pass')):
+        g = re.search(r'place=(-?[\d.]+),(-?[\d.]+),([\d.]+)x([\d.]+) .*view=(\d+)x(\d+)', l)
+        if g:
+            return tuple(float(v) for v in g.groups())
+    return None
+
+
+def picture_rect():
+    """The picture's rectangle on the SCREEN: the view's bounds plus the B placement inside it."""
+    vb, pl = view_bounds(), display_pass_place()
+    if vb is None or pl is None:
+        return None
+    return (vb[0] + pl[0], vb[1] + pl[1], vb[0] + pl[0] + pl[2], vb[1] + pl[1] + pl[3]), vb, pl
+
+
+def scenario_layout_b(fx, out, input_log):
+    """sh-strength r4 (Codex codex_sh_strength_r3.md: N1 c + the Activity-level behaviours the earlier scenarios did not
+    run) -- B (display-size pass) through the REAL Activity, the pattern window captured, taps injected by the host:
+      1. letterbox / corners: taps in the black outside the picture send nothing; just inside its corners -> (0,0)-ish
+         and (W,H)-ish of the window;
+      2. a real rotation (the viewer's rotate button -> portrait and back): the new view size reaches B's placement,
+         the picture is where the placement says, no fallback, a tap lands right;
+      3. 크게보기 + 화면 이동: a pan moves the picture (local, nothing sent);
+      4. a display resize (wm size, this AVD only): B follows the new view, a tap lands right;
+      5. the input fence: the renderer takes a placement 6 s late (seam holdplace) -- a tap in that gap is NOT sent
+         (input_held_layout), the next one after the layout is shown is, at the right point;
+      6. fallback: B's swap fails (seam swap:40) -> direct, the picture still placed, a tap still right.
+    Scroll shimmer is NOT judged here (no oracle in this harness) -- said so in the report, not claimed."""
+    base_extras = ('--ez', 'shTestDisplayPass', 'true')
+
+    def guard():
+        hlog = open(os.path.join(out, 'host.log'), 'rb').read().decode(errors='replace')
+        sel = re.findall(r'window-select seq=\d+ requestedId=\d+ applied=1 selectedId=(\d+) streamGen=\d+ reason=ok title=(.*)', hlog)
+        return bool(sel) and sel[-1][1].strip().startswith(PATTERN_TITLE) and 'input injection enabled mode=background_message' in hlog
+
+    def received_since(before):
+        lines = open(input_log).read().splitlines() if os.path.exists(input_log) else []
+        return [tuple(int(v) for v in l.split()[1:3]) for l in lines[before:] if l.startswith('down ')]
+
+    def log_count():
+        return len(open(input_log).read().splitlines()) if os.path.exists(input_log) else 0
+
+    def tap_at(x, y, settle=2.5):
+        adb('logcat', '-c', check_rc=False)
+        before = log_count()
+        adb('shell', 'input', 'tap', str(int(x)), str(int(y)), check_rc=False)
+        time.sleep(settle)
+        queued = [e for e in seam_inputs() if e[4] == 1 and e[0] in (2, 3)]
+        return queued, received_since(before)
+
+    def tap_lime(label):
+        img = screencap(os.path.join(out, 'layoutb_%s.png' % label))
+        t = lime_target(img)
+        if not check(t is not None, label + ': the lime block is on screen'):
+            return
+        q, got = tap_at(t[0], t[1])
+        check(q and got and 610 <= got[0][0] <= 730 and 440 <= got[0][1] <= 700,
+              label + ': a tap on the lime block reaches the window INSIDE the lime block',
+              'queued=%s received=%s' % (q[:1], got[:1]))
+
+    def corners(label):
+        pr = picture_rect()
+        if not check(pr is not None, label + ': the picture rectangle (view bounds + B placement) is known'):
+            return
+        (l, t, r, b), vb, pl = pr
+        # outside the picture, inside the view: the letterbox side (whichever has room)
+        outside = []
+        if l - vb[0] >= 12:
+            outside.append(((vb[0] + l) / 2, (t + b) / 2))
+        if t - vb[1] >= 12:
+            outside.append(((l + r) / 2, (vb[1] + t) / 2))
+        if vb[3] - b >= 12:
+            outside.append(((l + r) / 2, (b + vb[3]) / 2))
+        for i, (x, y) in enumerate(outside):
+            q, got = tap_at(x, y, settle=1.5)
+            check(not q and not got, label + ': a tap in the letterbox (%d,%d) sends nothing' % (x, y), 'queued=%s got=%s' % (q[:1], got[:1]))
+        check(outside, label + ': there is a letterbox to tap', str((vb, (l, t, r, b))))
+        q, got = tap_at(l + 4, t + 4)
+        check(q and got and got[0][0] <= 12 and got[0][1] <= 12, label + ': just inside the top-left corner -> the window\'s (0,0)',
+              'queued=%s received=%s' % (q[:1], got[:1]))
+        q, got = tap_at(r - 5, b - 5)
+        check(q and got and got[0][0] >= 1440 - 14 and got[0][1] >= 810 - 14,
+              label + ': just inside the bottom-right corner -> the window\'s (1440,810)', 'queued=%s received=%s' % (q[:1], got[:1]))
+
+    def picture_where_placed(label):
+        pr = picture_rect()
+        img = screencap(os.path.join(out, 'layoutb_%s_pic.png' % label))
+        if not check(pr is not None, label + ': B placement logged'):
+            return
+        (l, t, r, b), vb, pl = pr
+        h, w = img.shape[:2]
+        inside = img[int(t) + 6:int(b) - 6, int(l) + 6:int(r) - 6]
+        # the pattern's top border is a red row: it must be at the placement's top (within a row)
+        rows = [img[y, int(l) + 20:int(r) - 20].reshape(-1, 3).mean(axis=0) for y in range(max(0, int(t) - 1), min(h, int(t) + 3))]
+        red = [y for y, v in zip(range(max(0, int(t) - 1), min(h, int(t) + 3)), rows) if v[0] > 45 and v[0] > v[1] + 25 and v[0] > v[2] + 15]
+        check(inside.size and float(inside.std()) > 10 and red,
+              label + ': the picture is drawn where B placed it (the red top border at the placement\'s top)',
+              'rect=%s view=%s rows=%s' % ((int(l), int(t), int(r), int(b)), vb, [[round(float(c)) for c in v] for v in rows]))
+
+    # ---- 1-4 in one B session
+    ok = connect_to_pattern(fx.port, base_extras, level_before='strong', window=True)
+    check(ok, 'B: connected, 강하게, the pattern window picked')
+    time.sleep(5)
+    if not check(guard(), 'GUARD: the host captures the pattern window and injects by message'):
+        return
+    lines = log_lines()
+    check(any('sharpen_display_pass' in l and 'mode=1' in l for l in lines), 'B is drawing (display pass logged)')
+    picture_where_placed('land')
+    corners('landscape')
+    tap_lime('landscape')
+    # 2. rotation: the viewer's own button -> portrait
+    adb('logcat', '-c', check_rc=False)
+    rot = tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerRotateButton', timeout=15, reveal=scroll_menu_sheet)
+    tap(rid='viewerMenuCloseButton', timeout=5)
+    time.sleep(6)
+    pl = display_pass_place()
+    check(rot and pl is not None and pl[5] > pl[4], 'rotation: portrait, and B\'s placement has the new (portrait) view size',
+          str(pl))
+    lines = log_lines()
+    check(not any('sharpen_fallback' in l for l in lines), 'rotation: no fallback (B stays)', '')
+    picture_where_placed('portrait')
+    corners('portrait')
+    tap_lime('portrait')
+    adb('logcat', '-c', check_rc=False)
+    rot = tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerRotateButton', timeout=15, reveal=scroll_menu_sheet)
+    tap(rid='viewerMenuCloseButton', timeout=5)
+    time.sleep(6)
+    pl = display_pass_place()
+    check(rot and pl is not None and pl[4] > pl[5], 'rotation back: landscape placement again', str(pl))
+    tap_lime('landscape_again')
+    # 3. 크게보기 + 화면 이동: a pan moves the picture, sends nothing
+    if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10, reveal=scroll_menu_sheet_up):
+        tap(rid='viewerMenuCloseButton', timeout=10)
+        time.sleep(3)
+        chip = tap(rid='viewerPanChip', timeout=10, reveal=reveal_controls)
+        time.sleep(1.5)
+        img0 = screencap(os.path.join(out, 'layoutb_pan0.png'))
+        t0 = lime_target(img0)
+        adb('logcat', '-c', check_rc=False)
+        vb = view_bounds()
+        cx, cy = (vb[0] + vb[2]) // 2, (vb[1] + vb[3]) // 2
+        adb('shell', 'input', 'swipe', str(cx), str(cy), str(cx - 300), str(cy - 150), '600', check_rc=False)
+        time.sleep(1.0)
+        img1 = screencap(os.path.join(out, 'layoutb_pan1.png'))
+        t1 = lime_target(img1)
+        q = [e for e in seam_inputs() if e[4] == 1]
+        check(chip and t0 and t1 and t1[0] < t0[0] - 100 and not q,
+              'pan (크게보기 + 화면 이동): the picture moved with the finger, nothing was sent',
+              'lime %s -> %s queued=%s' % (t0, t1, q[:2]))
+        tap(rid='viewerPanChip', timeout=10, reveal=reveal_controls)
+        time.sleep(1)
+        tap_lime('large_after_pan')
+        if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10, reveal=scroll_menu_sheet_up):
+            tap(rid='viewerMenuCloseButton', timeout=10)
+        time.sleep(3)
+    else:
+        check(False, '크게 보기 could be chosen')
+        tap(rid='viewerMenuCloseButton', timeout=5)  # never leave the sheet over the picture
+    # 4. a display resize (this AVD only; restored in finally)
+    size0 = adb('shell', 'wm', 'size', check_rc=False)
+    try:
+        g = re.search(r'Physical size: (\d+)x(\d+)', size0 or '')
+        if check(g is not None, 'resize: the AVD\'s display size read', (size0 or '')[:80]):
+            pw, ph = int(g.group(1)), int(g.group(2))
+            before = display_pass_place()
+            adb('logcat', '-c', check_rc=False)
+            adb('shell', 'wm', 'size', '%dx%d' % (int(pw * 0.85), int(ph * 0.85)), check_rc=False)
+            time.sleep(7)
+            after = display_pass_place()
+            check(after is not None and before is not None and (after[4], after[5]) != (before[4], before[5]),
+                  'resize: B\'s placement follows the new view size', '%s -> %s' % (before, after))
+            lines = log_lines()
+            check(not any('sharpen_fallback' in l for l in lines), 'resize: no fallback')
+            picture_where_placed('resized')
+            tap_lime('resized')
+    finally:
+        adb('shell', 'wm', 'size', 'reset', check_rc=False)
+        time.sleep(4)
+
+    # ---- 5. the input fence: the GL side takes each placement 6 s late
+    adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    ok = connect_to_pattern(fx.port, base_extras + ('--es', 'shTestFault', 'holdplace:8000'), level_before='strong', window=True)
+    check(ok, 'fence: connected (B, placements taken 8 s late)')
+    time.sleep(12)
+    vb = view_bounds()
+    adb('logcat', '-c', check_rc=False)
+    if tap(rid='viewerMenuButton', timeout=15, reveal=reveal_controls) and tap(rid='viewerMenuViewButton', timeout=10):
+        tap(rid='viewerMenuCloseButton', timeout=2)
+        held_place = display_pass_place()  # read before the tap clears the log
+        q, got = tap_at((vb[0] + vb[2]) // 2, (vb[1] + vb[3]) // 2, settle=1.0)
+        held = log_lines('input_held_layout')
+        check(not q and not got and held, 'fence: a tap while the new layout is not shown yet is NOT sent (held)',
+              'queued=%s received=%s held=%s' % (q[:1], got[:1], held[-1:][0][-60:] if held else None))
+        time.sleep(10)
+        check(held_place is not None and held_place[2] > 1920 + 50,
+              'fence: 크게 보기 was the layout held (its placement is the enlarged one)', str(held_place))
+        tap_lime('fence_after_shown')
+    else:
+        check(False, 'fence: 크게 보기 could be chosen')
+
+    # ---- 6. fallback: B's swap fails -> direct; the picture still placed, a tap still right
+    adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    ok = connect_to_pattern(fx.port, base_extras + ('--es', 'shTestFault', 'swap:40'), level_before='strong', window=True)
+    check(ok, 'fallback: connected (B, the swap fails after 40 frames)')
+    time.sleep(10)
+    lines = log_lines()
+    check(any('sharpen_fallback' in l for l in lines) and any('sharpen_path' in l and 'path=direct' in l for l in lines),
+          'fallback: B failed -> the direct path', ([l for l in lines if 'sharpen_fallback' in l] or [''])[-1][-120:])
+    m = cmp_metrics(screencap(os.path.join(out, 'layoutb_fallback.png')))
+    check(m is not None and borders_ok(m), 'fallback: the picture is still placed (borders where they belong)', str(m and m.get('x0')))
+    tap_lime('fallback')
+
+
 def scenario_touch_ab(fx, out, input_log):
     """sh-strength r2 (Codex §4B geometry): the same tap path as touch_host, on the x1.33 off-screen layered pattern
     window -- A, then B (display-size pass). The remote point the app computes is the viewport's either way; B
@@ -1658,9 +1928,9 @@ def main():
     adb('install', '-r', '-g', args.apk, timeout=300)
     adb('shell', 'pm', 'clear', PKG, check_rc=False)
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
-    input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab') else None
+    input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab', 'layout_b') else None
     fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
-                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui') else None,
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui', 'layout_b') else None,
                                                                       pulse_ms=33 if args.scenario == 'latency_ab' else 200,
                                                         input_log=input_log)
     try:
@@ -1692,6 +1962,8 @@ def main():
             scenario_ua2(fx, args.out)
         elif args.scenario == 'touch_ab':
             scenario_touch_ab(fx, args.out, input_log)
+        elif args.scenario == 'layout_b':
+            scenario_layout_b(fx, args.out, input_log)
         elif args.scenario == 'latency_ab':
             scenario_latency_ab(fx, args.out, args.seconds)
         elif args.scenario == 'compare_ab':
