@@ -13578,3 +13578,10 @@ Next
 - 원인: 공용 세션이 로그인 전 화면 Host(PreloginV1)에 보낼 수 없는 WindowSelect(0) 를 queue 했다가 송신 직전 말없이 버렸고(`native_video_client_session.cpp` 역할 검사), APK 는 REQUESTING 에서 6 s 뒤 목록으로 돌아갔다. PC 뷰어(0.2.163)와 같은 결함의 공용 세션 쪽.
 - 보수(Codex `codex_rel_0163_e1_decision.md`): SelectionAckGate 의 local 모드(같은 tag, ack 없음, 디코더에 실제로 들어간 첫 IDR 로 세대 결합, 그 뒤 straggler 필터), 세션의 즉시 local/창 거부와 첫 pong 전 queue 의 같은 op 전환/거부, 결합 뒤에만 패널 selected(그 세대). Android sink 는 gate 위임만, Kotlin 무변경.
 - 시험: 제품 세션 하네스 38/38(원본 세션 14 FAIL, 부정 대조 3 FAIL), 실 로그인 전 Host 공용 세션 37/37(원본 4 FAIL), 회귀 e2e 7·순수 8 PASS, APK 빌드·단위 249/0. AVD 실 APK UI 는 0.2.32 통합 단계.
+
+### 2026-10-26 APK 0.2.32 후보 (versionCode 31) — 로그인 전 picker · 선명도 강 0.60 · 캡처 방식 이번 연결만 (fix/apk-prelogin-select, 후보 · 서명/게시 전)
+- 담은 것: ① 공용 세션 로그인 전 바탕화면 선택 = 로컬 선택(apk-0232 r1, report_apk_prelogin_select_r1.md) ② 선명도 강하게 0.35 → 0.60, 표시 크기 1패스 B 는 시험 빌드 전용 실험(report_sh_strength_r2.md) ③ 캡처 방식은 이 PC의 이번 연결에만 · Host 실제 적용 표시 · 저장/재전송 중단 · GDI 배선 수정(report_ua2_apk_r1.md).
+- 이 버전 commit: versionName 0.2.32 / versionCode 31. PC 버전은 그대로(0.2.163).
+- 후보 APK(seam 없는 assembleDebug, 기존 게시와 같은 debug 키): 13,885,960 B sha256 d5506f67…9e029f75, 인증서 SHA-256 dcc806ae…ec2990(0.2.31 과 일치), com.remote60.androiddirect, 4 ABI, minSdk 28 / target 34, gate --apk 7/0, 단위 257/0, AVD smoke(ua2, 같은 APK) 13/0.
+- 상태: 후보. 서명된 android.manifest·게시·push 없음(검증용).
+- 제품/테스트/문서: 제품(APK 버전), 문서(이 항목).
