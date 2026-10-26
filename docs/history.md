@@ -13538,3 +13538,10 @@ Next
 - M9 대조(결정적): 시험 빌드 `GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst` — 열린 요청마다 한 번, 새 duplication 의 첫 acquire 를 포인터 전용으로 넘긴다. 그것이 요청을 닫지 않고 그 뒤 이미지 acquire 가 닫는지 본다(첫 시도: 재생성마다 넘겨 정지 화면에서 영원히 미전달 — 요청당 1회로 고침).
 - 시험: report r3 절. UA `--rebuild-fails` 를 실제 Detach 뒤 실패(`GNLINK_STREAM_TEST_FAIL_RESTART_FILE`)로 다시 짬 — (1) 1회 실패 뒤 같은 gen 2회차 성공·그림 복귀 (2) 3회 실패·포기, 10 s 동안 4회차·일반 retry 0, 그림 0, 다음 edge 에서 복귀. r2 의 `GNLINK_STREAM_TEST_DESKTOP_REBUILD_FAIL`(함수 호출 전 실패 — 이 경로를 못 탐)은 제거.
 - 제품/테스트/문서: 제품(재시작 owner·재구성 열림 규칙·GDI cookie·연속성 토큰·Serve sequence·상태 board, lib pointerfirst seam) / 테스트(UA rebuild-fails 재작성, PS pointer-first, owner 단위 확장, status board 단위 신규, attachment [D] 계약 반전·[E][F] 신규) / 문서(이 항목).
+### 2026-10-26 capture-lifecycle r4 — full-frame WGC 재시작 실패의 retry 도 같은 episode 의 ask (fix/capture-lifecycle, 미게시 · R1 0.2.163 통합 대기)
+- 근거: `codex_capture_lifecycle_src_r3.md`(6ffd94b: 나머지 SOURCE OK, FullFrame 실패 retry 한 곳만 잔여).
+- 원인: r3 의 일반 retry(`host_stage_time_limit.cpp`)는 DesktopRebuild 실패만 제외해, full-frame WGC 재시작이 Detach 뒤 실패하면 8 s backoff 로 끝없이 다시 시작했다(fullFrameAsks 는 첫 1회만 차감, ask 는 restartPending 이면 조기 return).
+- 이제 일반 retry 는 General 실패만 맡는다. FullFrame 자신의 실패는 그 episode 의 다음 ask 로 재시도한다(같은 3회·1 s 간격·source key, 재시작 wrapper 의 backoff 가 지난 뒤에만 — 보이지 않게 거절될 시도를 ask 로 세지 않음). 소진 뒤에는 일반 tick·새 kick·posted flag 어느 것으로도 추가 시작 0. 새 유효 source(세션·부착 경계 등)는 기존 N4 대로 새 budget.
+- 시험 대역(시험 빌드만): `GNLINK_STREAM_TEST_WGC_STILL=1` — WGC attachment 마다 첫 프레임만 넘김(비활성 검사 뒤라 꺼진 동안의 프레임은 캐시를 지움).
+- 시험: UA `--fullframe-fails`(신규) 18/18 — (C) 1회 실패 → 같은 episode 의 ask 2 가 재시작 ok → 그림, (A) 계속 실패: 재시작 3회(ask 1~3), 12 s 동안 추가 0·일반 retry 0·그림 0, (B) 새 세션 = 새 source → 새 budget 의 ask 1 로 그림 복귀. 부정 대조 M16(r3 규칙: 일반 retry 가 FullFrame 도 재시도) → report r4 절.
+- 제품/테스트/문서: 제품(일반 retry 의 owner 조건, full-frame ask 의 실패 retry 결산, 재시작 조건) / 테스트(UA fullframe-fails, 시험 빌드 WGC still 대역) / 문서(이 항목).

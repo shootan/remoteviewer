@@ -408,6 +408,20 @@ bool CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
         }
       }
 #endif
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY (capture-lifecycle r4): GNLINK_STREAM_TEST_WGC_STILL=1 -- a still WGC desktop: each WGC
+      // attachment hands on its first frame only (after the inactive check above, so a frame while nobody
+      // watches still clears the cache). The full-frame reacquire's real WGC restart is then the only way to
+      // a new picture.
+      {
+        static const bool wgcStill = [] {
+          const char* v = std::getenv("GNLINK_STREAM_TEST_WGC_STILL");
+          return v && std::strcmp(v, "1") == 0;
+        }();
+        static std::atomic<uint64_t> deliveredCookie{0};
+        if (wgcStill && deliveredCookie.exchange(myAttachmentCookie, std::memory_order_acq_rel) == myAttachmentCookie) return;
+      }
+#endif
       // The frame is stamped with THIS worker's attachment cookie, not the live one: if a detach
       // crossed between the check above and here, the live cookie already moved and PublishFrame
       // drops this frame by the cookie it carries (r13, Codex C1).

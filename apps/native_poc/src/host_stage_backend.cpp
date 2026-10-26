@@ -270,8 +270,10 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
   }
   // PS-A: a still WGC desktop with nothing cached gives no frame by itself; the pop stage asked (bounded)
   // for a fresh session, whose first frame is the whole picture.
+  // r4 (Codex N1-a): a pending failure is only this reacquire's own (an ask counted it); another recovery's is not.
   if (capture.wgcFullFrameRestartWanted.exchange(false, std::memory_order_acq_rel) && streamActiveNow && desktopMode &&
-      !beforeLogin && backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached && !capture.restartPending) {
+      !beforeLogin && backend.active == DesktopCaptureBackend::Wgc && !capture.idleDetached &&
+      (!capture.restartPending || capture.restartOwner == CaptureState::RestartOwner::FullFrame)) {
     powerKeepalive.SetStreaming(true, true);
     // r2/r3 (Codex N4/N1-a): the episode's own reacquire keeps its budget -- and so does its retry, if it fails.
     const bool ok = restart_capture_session(hx, CaptureState::RestartOwner::FullFrame);

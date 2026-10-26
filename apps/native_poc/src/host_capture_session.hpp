@@ -226,7 +226,9 @@ struct CaptureState {
   // capture-lifecycle r3 (Codex N1-a): whose restart failed (restart_capture_session's caller). A failed restart
   // has already detached -- the generic retry (stage_time_limit) must not take over a recovery that keeps its
   // own budget: a desktop rebuild's retries are the backend stage's (bounded per desktop generation), a
-  // full-frame reacquire's retry stays that episode's own (no new source boundary). Main loop only.
+  // full-frame reacquire's retries are that episode's next asks (r4: counted against the same 3, the same
+  // 1 s interval, the same source key -- host_stage_pop_frame.cpp). Only a General failure is the generic
+  // retry's. Main loop only.
   enum class RestartOwner : uint8_t { General, DesktopRebuild, FullFrame };
   RestartOwner restartOwner = RestartOwner::General;
   bool dxgiStarted = false;
