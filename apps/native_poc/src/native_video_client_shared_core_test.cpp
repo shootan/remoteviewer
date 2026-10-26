@@ -1772,6 +1772,17 @@ bool test_desktop_backend_control() {
                 "backend: old host -> the change, without asking for an answer")) return false;
     if (!expect(!c.ConsumePending(&out), "backend: old host -> never a backend-0 question")) return false;
   }
+  {
+    // ua2-apk r1: 3 = the host's isolated GDI goes out (it was dropped here, so the APK's GDI button did nothing);
+    // anything past it is still not a backend.
+    DesktopBackendControl c;
+    c.SetHostAnswers(true);
+    c.Request(3);
+    PendingDesktopBackendRequest out{};
+    if (!expect(c.ConsumePending(&out) && out.backend == 3 && out.wantsStatus, "backend: GDI (3) goes out")) return false;
+    c.Request(4);
+    if (!expect(!c.ConsumePending(&out), "backend: 4 is not a backend: nothing goes out")) return false;
+  }
   return true;
 }
 
