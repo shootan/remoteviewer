@@ -3,6 +3,7 @@
 #include <dpapi.h>
 #include <wincrypt.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -279,15 +280,29 @@ void show_prelogin_notice(HWND owner, const wchar_t* title, const std::wstring& 
   HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, kPreloginResultClass, title,
                               WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 440, 170, owner, nullptr, wc.hInstance, nullptr);
   if (!hwnd) return;
+  SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
+  HWND label = CreateWindowW(L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE, 14, 12, 404, 64, hwnd,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreloginResultTextId)), wc.hInstance, nullptr);
+  // lk-ux-retry r1: as tall as what it says -- a fixed 64 px cut the retry guidance off mid-sentence (the
+  // window grows with the text; never shorter than before).
+  int extra = 0;
+  if (HDC dc = label ? GetDC(label) : nullptr) {
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(label, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+    RECT tr{0, 0, 404, 0};
+    DrawTextW(dc, text.c_str(), -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS);
+    if (oldFont) SelectObject(dc, oldFont);
+    ReleaseDC(label, dc);
+    extra = (std::max)(0, static_cast<int>(tr.bottom - tr.top) + 4 - 64);
+    SetWindowPos(label, nullptr, 0, 0, 404, 64 + extra, SWP_NOMOVE | SWP_NOZORDER);
+  }
+  HWND ok = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 340, 92 + extra, 78,
+                          26, hwnd, reinterpret_cast<HMENU>(1), wc.hInstance, nullptr);
   RECT wr{};
   GetWindowRect(hwnd, &wr);
-  SetWindowPos(hwnd, HWND_TOPMOST, (GetSystemMetrics(SM_CXSCREEN) - (wr.right - wr.left)) / 2,
-               (GetSystemMetrics(SM_CYSCREEN) - (wr.bottom - wr.top)) / 2, 0, 0, SWP_NOSIZE);
-  SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
-  CreateWindowW(L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE, 14, 12, 404, 64, hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreloginResultTextId)), wc.hInstance, nullptr);
-  HWND ok = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 340, 92, 78, 26,
-                          hwnd, reinterpret_cast<HMENU>(1), wc.hInstance, nullptr);
+  const int ww = wr.right - wr.left, wh = wr.bottom - wr.top + extra;
+  SetWindowPos(hwnd, HWND_TOPMOST, (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2, ww,
+               wh, 0);
   ShowWindow(hwnd, SW_SHOW);
   SetForegroundWindow(hwnd);
   SetFocus(ok);

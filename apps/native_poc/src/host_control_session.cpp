@@ -1000,9 +1000,11 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.clientSendQpcUs = retry.clientSendQpcUs;
       ControlUnlockChallengeMessage rsp{};
       if (!gUnlockRelay.LockCredRetryChallengeSync(req, retry.supersedesRequestId, unlockCookie, &rsp)) {
+        // No answer in time: not known to have ended the earlier wait -- said as "not ended" (18), never as a
+        // general error the viewer would read as "the earlier one is over".
         rsp = ControlUnlockChallengeMessage{};
         rsp.requestId = req.requestId;
-        rsp.status = static_cast<uint16_t>(UnlockStage::InternalError);
+        rsp.status = static_cast<uint16_t>(UnlockStage::SupersedeRefused);
         rsp.reserved = remote60::native_poc::kUnlockPurposeLockCred;
       }
       std::cout << "[native-video-host][lock-cred] retry challenge requestId=" << req.requestId

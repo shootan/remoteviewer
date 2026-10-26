@@ -839,7 +839,10 @@ void ControlClient::Run() {
       if (!pw.empty() && stillThere) {
         if (askedRole == kLoginRoleLockScreen) {
           (void)run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes);
-          if (supersedes != 0 && stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SupersedeRefused)) {
+          // The host answers 18 for every "not ended / nothing asked"; no answer at all (stage 0) is not known
+          // either. Only otherwise has the earlier wait ended.
+          if (supersedes != 0 && stage != 0 &&
+              stage != static_cast<uint16_t>(remote60::native_poc::UnlockStage::SupersedeRefused)) {
             // The earlier wait ended (or had ended): it is followed no more -- its late answers cannot reach the
             // new attempt (they carry its request id; the host also closed its transaction).
             std::cout << "[native-video-client][lock-cred] requestId=" << supersedes << " superseded by requestId="

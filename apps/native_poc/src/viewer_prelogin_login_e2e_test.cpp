@@ -87,6 +87,9 @@ namespace {
 
 // A test string, not anybody's password: ASCII, a quote, a space, Latin-1 and a Hangul syllable.
 const std::wstring kSecret = L"Pw-7Qz \"!ä가x";
+// lk-ux-retry r1: the second password of the same connection's explicit retry (the first stands for the wrong one).
+// The same "Pw-7Qz" head, so every "no password in any log" check below covers it too.
+const std::wstring kSecret2 = L"Pw-7Qz-retry 나2";
 
 std::string utf8(const std::wstring& w) {
   if (w.empty()) return {};
@@ -651,6 +654,8 @@ bool file_contains(const std::wstring& path, const std::string& needle) {
 std::wstring find_secret_on_disk(const std::wstring& root) {
   const std::string u8 = utf8(kSecret);
   const std::string u16(reinterpret_cast<const char*>(kSecret.data()), kSecret.size() * sizeof(wchar_t));
+  const std::string u8b = utf8(kSecret2);  // lk-ux-retry r1
+  const std::string u16b(reinterpret_cast<const char*>(kSecret2.data()), kSecret2.size() * sizeof(wchar_t));
   std::vector<std::wstring> stack{root};
   while (!stack.empty()) {
     const std::wstring d = stack.back();
@@ -664,7 +669,8 @@ std::wstring find_secret_on_disk(const std::wstring& root) {
       if (n == L"GNLinkCapture.exe") continue;  // the staged copy of THIS test's image, which holds the test string
       if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         stack.push_back(d + n + L"\\");
-      } else if (file_contains(d + n, u8) || file_contains(d + n, u16)) {
+      } else if (file_contains(d + n, u8) || file_contains(d + n, u16) || file_contains(d + n, u8b) ||
+                 file_contains(d + n, u16b)) {
         FindClose(h);
         return d + n;
       }
@@ -683,6 +689,41 @@ std::wstring result_box_text(HWND box) {
   }, 3000);
   Sleep(300);  // painted before anyone takes its picture
   return b;
+}
+
+// lk-ux-retry r1: whether the result window shows ALL of its text -- the text's wrapped height in the label's
+// own font against the label's height, and the label inside the window's client area (a 64 px label cut the
+// retry guidance off mid-sentence). Measured the way the STATIC draws it.
+bool result_box_text_fits(HWND box, std::string* detail) {
+  HWND s = GetDlgItem(box, kPreloginResultTextId);
+  if (!s) return false;
+  wchar_t b[1024] = {};
+  GetWindowTextW(s, b, 1023);
+  RECT lr{}, cr{};
+  GetClientRect(s, &lr);
+  HDC dc = GetDC(s);
+  HFONT font = reinterpret_cast<HFONT>(SendMessageW(s, WM_GETFONT, 0, 0));
+  HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+  RECT tr{0, 0, lr.right, 0};
+  DrawTextW(dc, b, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS);
+  if (old) SelectObject(dc, old);
+  ReleaseDC(s, dc);
+  RECT sw{};
+  GetWindowRect(s, &sw);
+  MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&sw), 2);
+  GetClientRect(box, &cr);
+  HWND ok = GetDlgItem(box, 1);
+  RECT okr{};
+  if (ok) {
+    GetWindowRect(ok, &okr);
+    MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&okr), 2);
+  }
+  if (detail) {
+    *detail = "text " + std::to_string(tr.bottom) + " px in a " + std::to_string(lr.bottom) + " px label; label bottom " +
+              std::to_string(sw.bottom) + ", button " + std::to_string(okr.top) + ".." + std::to_string(okr.bottom) +
+              ", client " + std::to_string(cr.bottom);
+  }
+  return tr.bottom <= lr.bottom && sw.bottom <= cr.bottom && (!ok || (okr.top >= sw.bottom && okr.bottom <= cr.bottom));
 }
 
 // Presses its 확인 button until it is gone.
@@ -1301,7 +1342,7 @@ int wmain(int argc, wchar_t** argv) {
     bool sawPrompt = false, typedAll = false, captured = false;
     std::wstring promptTitle;
   };
-  const auto operate_prompt = [&](OperatorRun* run, const wchar_t* cls, bool cancel) {
+  const auto operate_prompt = [&](OperatorRun* run, const wchar_t* cls, bool cancel, const std::wstring& secret = kSecret) {
     HWND prompt = nullptr;
     HWND wrong = nullptr;  // the other prompt: a wrong path must fail here, not hang the run in a modal
     const wchar_t* other = (std::wstring(cls) == L"GNLinkUnlockPrompt") ? kPreloginPromptClass : L"GNLinkUnlockPrompt";
@@ -1326,8 +1367,8 @@ int wmain(int argc, wchar_t** argv) {
     run->promptTitle = t;
     HWND edit = FindWindowExW(prompt, nullptr, L"EDIT", nullptr);
     if (!cancel && edit) {
-      for (wchar_t c : kSecret) PostMessageW(edit, WM_CHAR, c, 1);
-      run->typedAll = wait_until([&] { return GetWindowTextLengthW(edit) == static_cast<int>(kSecret.size()); }, 3000);
+      for (wchar_t c : secret) PostMessageW(edit, WM_CHAR, c, 1);
+      run->typedAll = wait_until([&] { return GetWindowTextLengthW(edit) == static_cast<int>(secret.size()); }, 3000);
     }
     Sleep(150);
     run->captured = save_capture(prompt, cancel ? L"unlock_prompt_old_path" : L"prelogin_prompt_typed");
@@ -1768,9 +1809,10 @@ int wmain(int argc, wchar_t** argv) {
       PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
       PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
     };
-    const auto take_box = [&](std::wstring* text, const wchar_t* picture) {
+    const auto take_box = [&](std::wstring* text, const wchar_t* picture, bool* fits = nullptr, std::string* fitsWhy = nullptr) {
       HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
       if (!box) return;
+      if (fits) *fits = result_box_text_fits(box, fitsWhy);  // before the text is published: the caller waits on it
       *text = result_box_text(box);
       save_capture(box, picture);
       close_result(box);
@@ -1937,6 +1979,81 @@ int wmain(int argc, wchar_t** argv) {
           utf8(boxTyped));
     check("the service typed it once (its log, no password in it)",
           seam.DiagLog().find("lock-cred requestId=") != std::string::npos && seam.DiagLog().find(" typed session=") != std::string::npos);
+
+    // ---- lk-ux-retry r1 (Codex section 2): the user's 10-22 case. That password was the wrong one -- Windows
+    // refused it on the remote screen -- and its wait for the unlock goes on. The same connection presses
+    // "Windows 로그인" again: the earlier wait is ended first, then a new challenge, a new password, the field's
+    // content replaced. No reconnect. (Windows' own refusal is the field check: here the stand-in's lock stays.)
+    std::cout << "\n--- lk-ux-retry: the first password was wrong; the same connection presses again ---\n";
+    check("THE PONG ADVERTISES kCaptureFlagLockCredRetryV1 (0x80000) -- the host and its service can end the wait",
+          (flags() & kCaptureFlagLockCredRetryV1) != 0, std::to_string(flags()));
+    check("...the first password still waits for its unlock (the state 0.2.162 answered 'still in progress')",
+          ctx.session.lockCredPending.load());
+    const uint64_t genBeforeRetry = ctx.session.controlRunGen.load();
+    {
+      // The retry's password window, cancelled: nothing sent, and the earlier wait goes on.
+      OperatorRun runRc;
+      std::wstring boxRc;
+      std::thread opRc([&] {
+        operate_prompt(&runRc, kPreloginPromptClass, /*cancel=*/true);
+        take_box(&boxRc, L"lock_screen_retry_cancelled");
+      });
+      click_item();
+      pump_until([&] { return !boxRc.empty(); }, 20000);
+      join_pumping(opRc);
+      check("RETRY: THE PRESS OPENS THE PASSWORD WINDOW (not \"the earlier one is still in progress\")",
+            runRc.sawPrompt && runRc.promptTitle == kPreloginPromptTitle, utf8(runRc.promptTitle) + " | " + utf8(boxRc));
+      check("RETRY, CANCELLED: said, no retry reached the host, and the earlier wait goes on",
+            boxRc.find(L"취소했습니다") != std::wstring::npos && host.Count("retry challenge requestId=") == 0 &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxRc));
+    }
+    Sleep(700);  // the service's challenge rate limit
+    OperatorRun runR;
+    std::wstring boxR;
+    bool fitsR = false;
+    std::string fitsWhyR;
+    std::thread opR([&] {
+      operate_prompt(&runR, kPreloginPromptClass, false, kSecret2);
+      Sleep(300);
+      bring_front(targets.main);
+      take_box(&boxR, L"lock_screen_retry_typed", &fitsR, &fitsWhyR);
+    });
+    click_item();
+    pump_until([&] { return !boxR.empty(); }, 30000);
+    join_pumping(opR);
+    const std::wstring gotR = Targets::text(targets.edit);
+    save_capture(targets.main, L"lock_screen_retry_target_received");
+    check("RETRY: the password window took the new password", runR.sawPrompt && runR.typedAll);
+    const std::string hostLogR = host.log();
+    const size_t retryAt = hostLogR.find("[lock-cred] retry challenge requestId=");
+    const std::string retryLine =
+        retryAt == std::string::npos ? std::string() : hostLogR.substr(retryAt, hostLogR.find('\n', retryAt) - retryAt);
+    check("THE HOST ENDED THE EARLIER WAIT FIRST -- confirmed by the service (Superseded, 17) -- THEN ASKED A NEW CHALLENGE",
+          host.Count("[lock-cred] retry requestId=") == 1 && hostLogR.find(" cleared=1 stage=17") != std::string::npos &&
+              retryLine.find(" status=3") != std::string::npos,
+          "retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")) + " | " + retryLine);
+    check("THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE NEW PASSWORD, BYTE FOR BYTE (the first one gone)",
+          gotR == kSecret2, hexw(gotR));
+    check("...and nothing into the user-name field or the decoy",
+          Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty());
+    check("THE RESULT WINDOW SAYS \"typed -- press Enter\" for the new password, and how to retry if Windows refuses it",
+          boxR.find(L"입력했습니다") != std::wstring::npos && boxR.find(L"Enter") != std::wstring::npos &&
+              boxR.find(L"다시 누르세요") != std::wstring::npos && boxR.find(L"해제되었습니다") == std::wstring::npos &&
+              boxR.find(L"보내지 않았습니다") == std::wstring::npos,
+          utf8(boxR));
+    check("...AND THE WINDOW SHOWS ALL OF IT -- the retry guidance is not cut off, the 확인 button below it", fitsR,
+          fitsWhyR);
+    check("SAME CONNECTION: the control connection was never re-made (reconnect 0)",
+          ctx.session.controlRunGen.load() == genBeforeRetry,
+          std::to_string(ctx.session.controlRunGen.load() - genBeforeRetry) + " reconnects");
+    const std::string diagR = seam.DiagLog();
+    size_t typedLines = 0;
+    for (size_t at = diagR.find(" typed session="); at != std::string::npos; at = diagR.find(" typed session=", at + 1)) ++typedLines;
+    check("the service ended the first (its own line) and typed twice in all -- once per password, never re-sent",
+          diagR.find("superseded by the same connection's retry") != std::string::npos && typedLines == 2,
+          std::to_string(typedLines) + " typed lines");
+    check("...the new attempt is the one followed now", ctx.session.lockCredPending.load());
 
     // ---- r2 (Codex L5): a result of an EARLIER control connection, still queued, is not shown
     std::cout << "\n--- r2 L5: a stale result window from an earlier connection ---\n";

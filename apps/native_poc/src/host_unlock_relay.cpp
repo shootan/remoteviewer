@@ -428,7 +428,18 @@ void HostUnlockRelay::WorkerLoop() {
       // pipe's one worker, so nothing of this session's can run in between.
       const TxKey oldKey{cmd.cookie, cmd.supersedesRequestId};
       bool cleared = true;
-      if (holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie && heldRequestId == cmd.supersedesRequestId) {
+      // Only the typed transaction this pipe holds for it: this session, this request, and the SAME transaction
+      // (tx generation) -- not an earlier one that happened to carry the id.
+      bool heldIsIt = holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie && heldRequestId == cmd.supersedesRequestId;
+      if (heldIsIt) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = liveTx_.find(oldKey);
+        heldIsIt = it != liveTx_.end() && it->second == heldTxGen;
+      }
+      // This session's typed wait on the pipe is ANOTHER request (or another transaction of that id): the retry
+      // names one that is not waiting here -- it ends nothing, and asks nothing past the wait that is.
+      if (!heldIsIt && holdUntilMs != 0 && heldTyped && heldCookie == cmd.cookie) cleared = false;
+      if (heldIsIt) {
         SecureUnlockQuery q{};
         q.kind = static_cast<uint16_t>(SecureUnlockKind::LockCredSupersede);
         q.requestId = cmd.supersedesRequestId;
@@ -444,7 +455,7 @@ void HostUnlockRelay::WorkerLoop() {
         if (!valid) io_failed();
         std::lock_guard<std::mutex> lk(mu_);
         auto old = liveTx_.find(oldKey);
-        if (cleared && old != liveTx_.end()) {
+        if (cleared && old != liveTx_.end() && old->second == heldTxGen) {
           sealedResults_[oldKey] = to_control_result(resp);  // its final answer: the old poll ends with it
           lockCredRequests_.erase(oldKey);                   // ...and is never asked about again
         }
@@ -461,7 +472,8 @@ void HostUnlockRelay::WorkerLoop() {
       // (No typed hold of that request on this pipe: its wait already ended -- answered, lapsed, or the
       // connection it lived on is gone, and the service's state for it with it. Nothing left to end.)
       if (!cleared) {
-        drop_pipe();
+        // Not confirmed ended: nothing new is asked. A service that answered keeps the earlier wait as it was (its
+        // hold and the pipe stay); a failed exchange already let the pipe go (io_failed), and with it that wait.
         std::lock_guard<std::mutex> lk(mu_);
         if (IsLiveLocked(cmd, cmd.challenge.requestId)) {
           ControlUnlockChallengeMessage m{};
@@ -789,9 +801,10 @@ bool HostUnlockRelay::LockCredRetryChallengeSync(const ControlUnlockChallengeReq
   if (!out) return false;
   if (LockCredSupportNow() != LockCredSupport::Supported || !LockCredRetrySupported() || supersedesRequestId == 0 ||
       supersedesRequestId == req.requestId) {
+    // Nothing ended, nothing asked: said as that (18), so the viewer keeps following the earlier wait.
     *out = ControlUnlockChallengeMessage{};
     out->requestId = req.requestId;
-    out->status = static_cast<uint16_t>(UnlockStage::RejectedPolicy);
+    out->status = static_cast<uint16_t>(UnlockStage::SupersedeRefused);
     out->reserved = kUnlockPurposeLockCred;
     return true;
   }

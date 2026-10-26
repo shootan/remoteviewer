@@ -106,8 +106,9 @@ class HostUnlockRelay {
   bool LockCredRetrySupported() const;
   // Control thread: the explicit retry. In ONE step on the worker: if THIS control session's typed credential
   // `supersedesRequestId` still holds the pipe, the service is asked to end its wait (LockCredSupersede) and only
-  // a confirmed end lets the new challenge `req` be asked for, on the same connection. Anything unconfirmed ->
-  // `out->status` SupersedeRefused, nothing asked. Another session holding the pipe -> Busy, as for 88.
+  // a confirmed end lets the new challenge `req` be asked for, on the same connection. Anything unconfirmed -- the
+  // service's answer, no answer, this session's typed wait being another request, or a service without
+  // LockCredRetryV1 -> `out->status` SupersedeRefused, nothing asked. Another session holding the pipe -> Busy.
   bool LockCredRetryChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint32_t supersedesRequestId,
                                   uint64_t clientSessionCookie, ControlUnlockChallengeMessage* out,
                                   uint32_t timeoutMs = 3000);
