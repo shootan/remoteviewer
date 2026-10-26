@@ -11,6 +11,7 @@
 
 #include "client_decode_snapshot.hpp"
 #include "native_video_client_session.hpp"
+#include "decoder_pending_slot.hpp"
 #include "selection_ack_gate.hpp"
 #include "video_playout_clock.hpp"
 
@@ -248,7 +249,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // for instead). The surface can start a codec from the SPS/PPS of an IDR it never received.
   bool codecAwaitsKey_ = false;
   uint64_t deltaBeforeKeyDrops_ = 0;
-  std::optional<remote60::native_poc::UdpH264AssembledFrame> pendingFrame_;
+  // apk-0232 r2 (N2): the frame held for an input buffer, with the gate asked again when it is queued and no newer
+  // frame overtaking it (decoder_pending_slot.hpp, shared with the Windows tests).
+  remote60::native_poc::DecoderPendingSlot pendingFrame_;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> bootstrapFrame_;
   std::vector<uint8_t> csd0_;
   std::vector<uint8_t> csd1_;

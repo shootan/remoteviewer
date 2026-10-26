@@ -189,6 +189,12 @@ class ClientSessionController {
     std::lock_guard<std::mutex> lk(testHookMu_);
     testPassHook_ = std::move(hook);
   }
+  // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
+  // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
+  void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testAfterLocalSinkBeginHook_ = std::move(hook);
+  }
 #endif
   // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
   // parked connection is told from one opened since. Counters of the expensive steps, for the
@@ -390,6 +396,11 @@ class ClientSessionController {
   uint32_t owedAttempts_ = 0;
   // apk-0232 r1: the local selection (logon screen) whose generation the panel is still waiting to show; 0 = none.
   std::atomic<uint64_t> localSelectTag_{0};
+  // apk-0232 r2 (Codex codex_apk_prelogin_select_src_r1.md N1): a local selection's start -- the sink, the panel and
+  // localSelectTag_ -- and the poll that completes it are one step each under this lock, so a queued pick turned
+  // local late cannot publish its tag over a newer pick's (nor clear it). Taken after parkMu_, never before it; no
+  // network under it.
+  std::mutex localSelectMu_;
   void PollLocalSelection();
   void ResolveUnsendableSelect(const ControlOutboundAction& action);
   uint64_t owedNextUs_ = 0;
@@ -418,6 +429,7 @@ class ClientSessionController {
 #ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
   std::mutex testHookMu_;
   std::function<void(bool)> testPassHook_;
+  std::function<void(uint64_t)> testAfterLocalSinkBeginHook_;
 #endif
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};

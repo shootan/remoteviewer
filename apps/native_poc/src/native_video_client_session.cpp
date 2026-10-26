@@ -264,8 +264,10 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
       std::fprintf(stderr, "[native-video-client-session] window pick refused: the host is at the logon screen\n");
       return false;
     }
-    if (!encodedFrameSink_ || tag == 0 || !windowPanel_.BeginLocalSelect(tag, "desktop_select_local") ||
-        !encodedFrameSink_->BeginLocalSelectionFor(tag)) {
+    // r2 (N1): the sink, the panel and the tracked tag in one step (after parkMu_, which this path holds).
+    std::lock_guard<std::mutex> ls(localSelectMu_);
+    if (!encodedFrameSink_ || tag == 0 || !encodedFrameSink_->BeginLocalSelectionFor(tag) ||
+        !windowPanel_.BeginLocalSelect(tag, "desktop_select_local")) {
       return false;
     }
     localSelectTag_.store(tag, std::memory_order_release);
@@ -287,12 +289,30 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
 // apk-0232 r1: a WindowSelect queued before the host's role was known, unsendable now that it is the logon screen.
 void ClientSessionController::ResolveUnsendableSelect(const ControlOutboundAction& action) {
   const uint64_t tag = action.selectionTag;
-  if (action.windowSelect.windowId == 0 && encodedFrameSink_ && tag != 0 &&
-      encodedFrameSink_->BeginLocalSelectionFor(tag)) {
-    windowPanel_.ConvertSelectToLocal(tag, "desktop_select_local");
-    localSelectTag_.store(tag, std::memory_order_release);
-    std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: the host is at the logon screen, "
-                 "continues as a local selection\n", static_cast<unsigned long long>(tag));
+  // r2 (N1): the sink's turn to local, the panel's and the tracked tag are one step -- a newer pick made meanwhile
+  // waits for it, then publishes its own; and a panel that already holds a newer pick takes no tag from this one.
+  std::unique_lock<std::mutex> ls(localSelectMu_);
+  bool sinkLocal = false;
+  if (action.windowSelect.windowId == 0 && encodedFrameSink_ && tag != 0) sinkLocal = encodedFrameSink_->BeginLocalSelectionFor(tag);
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  if (sinkLocal) {
+    std::function<void(uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testAfterLocalSinkBeginHook_;
+    }
+    if (hook) hook(tag);
+  }
+#endif
+  if (sinkLocal) {
+    if (windowPanel_.ConvertSelectToLocal(tag, "desktop_select_local")) {
+      localSelectTag_.store(tag, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: the host is at the logon screen, "
+                   "continues as a local selection\n", static_cast<unsigned long long>(tag));
+    } else {
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: a newer pick holds the panel, "
+                   "nothing tracked for it\n", static_cast<unsigned long long>(tag));
+    }
   } else if (action.windowSelect.windowId != 0 || tag == 0 || !encodedFrameSink_) {
     // A window pick (or one no sink tracks): it cannot be made there. Refused, shown as failed if still current.
     if (encodedFrameSink_ && tag != 0) encodedFrameSink_->RefuseSelectionFor(tag);
@@ -304,6 +324,7 @@ void ClientSessionController::ResolveUnsendableSelect(const ControlOutboundActio
     std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu is no longer armed: nothing to do\n",
                  static_cast<unsigned long long>(tag));
   }
+  ls.unlock();
   const auto panelSnapshot = windowPanel_.Snapshot();
   std::lock_guard<std::mutex> lock(mu_);
   SyncWindowPanelSnapshotLocked(panelSnapshot);
@@ -313,8 +334,10 @@ void ClientSessionController::ResolveUnsendableSelect(const ControlOutboundActio
 // apk-0232 r1: once the local selection's first IDR has reached the decoder, the panel shows it selected with that
 // generation (what an answer would have shown) -- only if it is still the selection requested.
 void ClientSessionController::PollLocalSelection() {
+  if (localSelectTag_.load(std::memory_order_acquire) == 0 || !encodedFrameSink_) return;
+  std::unique_lock<std::mutex> ls(localSelectMu_);  // r2 (N1): read, judge and complete against one start
   const uint64_t tag = localSelectTag_.load(std::memory_order_acquire);
-  if (tag == 0 || !encodedFrameSink_) return;
+  if (tag == 0) return;
   if (encodedFrameSink_->CurrentSelectionTag() != tag) {
     uint64_t stale = tag;
     localSelectTag_.compare_exchange_strong(stale, 0, std::memory_order_acq_rel);
@@ -325,6 +348,7 @@ void ClientSessionController::PollLocalSelection() {
   uint64_t expected = tag;
   if (!localSelectTag_.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) return;
   const auto applied = windowPanel_.ApplyLocalSelectedFor(tag, generation);
+  ls.unlock();
   if (!applied.logLine.empty()) std::fprintf(stderr, "%s\n", applied.logLine.c_str());
   const auto panelSnapshot = windowPanel_.Snapshot();
   std::lock_guard<std::mutex> lock(mu_);

@@ -163,6 +163,16 @@ class SelectionAckGate {
     return true;
   }
 
+  // apk-0232 r2 (N2): may a frame of this generation go into the codec NOW -- asked again at the moment of queueing
+  // (a frame held for an input buffer included), with no side effect. A selection waiting for its answer admits
+  // nothing; an unbound local selection only its current candidate IDR; an answered or bound one only its generation.
+  bool PermitsQueue(uint64_t frameStreamGeneration) const {
+    if (pending_ == 0) return true;
+    if (awaiting_) return false;
+    if (local_ && expected_ == 0) return candidate_ != 0 && frameStreamGeneration == candidate_;
+    return expected_ != 0 && frameStreamGeneration == expected_;
+  }
+
   // The answered selection still has no IDR of its generation (see the class comment).
   bool KeyOwed() const { return keyOwed_; }
   uint64_t pending() const { return pending_; }
