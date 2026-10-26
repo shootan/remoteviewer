@@ -13500,3 +13500,10 @@ Next
 - 시험(이 PC 콘솔, SLOT_REQUEST CreateNew→삭제): relay ondemand 81/81 ×3 rc0(+N1 (4)~(7): 쓰기 직전 latch 중 호출자 회수 / supersede 쓰기 직전 회수 / 쓰기 직전 EndSession / 시한 뒤 채택 직전). 새 `viewer_lock_cred_retry_test` 5/5(가짜 control link 의 같은 RID·틀린 purpose 발급/17, 다른 RID). e2e `--lock-screen` 68/68 ×2(+N2-a: 시험 전용 `GNLINK_VIEWER_TEST_STATUS_POLLS=0` 로 '보냈으나 답 없음' 재현 → 계속 추적 → 늦게 입력 → 다음 누름이 그 요청을 지목한 재시도, reconnect 0) · prelogin 79/79 · `--not-prelogin` 28/28.
 - 부정 대조: M7(쓰기 gate·채택 fence 제거) → (4)~(7) 5 FAIL(늦은 challenge 1회 쓰기, 시한 뒤 발급 채택·hold). M8(N2-a 되돌림) → 다음 누름이 일반 요청으로 거절('잠금 화면이 아니어서') 3 FAIL. M9(purpose 검증 전 표식) → 2 FAIL. 복원 뒤 PASS.
 - 제품/테스트/문서: 제품(relay 쓰기 gate·채택 fence, 뷰어 추적·표식 순서·문구) / 테스트(relay latch 반례, viewer 단위 시험 신규, e2e N2-a + e2e 전용 seam 확장) / 문서(이 항목).
+
+### 2026-10-26 lk-ux-retry r4 — N1 시한 적용 잔여 2곳 (fix/lk-retry, 미게시 · R1 통합 대기)
+- 근거: `codex_lk_ux_retry_src_r3.md`(9ff6c15: N2-a/b·쓰기 개시 닫힘, 시한 적용 2곳 잔여).
+- (1) 재시도의 `Exchange` 대기 끝 = min(지금 + 상대 budget, 재시도의 절대 끝) — 쓰기와 읽기 모두. 끝 직전에 시작한 쓰기의 답 대기가 옛 상대 budget 으로 넘어가지 않는다.
+- (2) 새 challenge 의 채택(hold·cache) 결정은 그 hold/cache 를 하는 한 임계 구역 안에서 '소유 + 절대 시한' 을 함께 본다(별도 예비 검사 제거, 시험 hook 은 그 구역 바로 앞).
+- 시험: relay ondemand 84/84 ×4 rc0(+N1 (8): 끝 직전 쓰기·서비스 900 ms 지연 → 1746 ms 에 17, caller 대기 안). 부정 대조: M10(clamp 제거) → (8) FAIL(2004 ms, 답 없음) / M11(채택 구역에서 시한 미검사) → (7) FAIL(늦은 발급 채택·hold). 복원 뒤 PASS.
+- 제품/테스트/문서: 제품(relay Exchange 끝·채택 구역) / 테스트(relay (8), (7) 이 채택 구역 앞 hook 으로) / 문서(이 항목).

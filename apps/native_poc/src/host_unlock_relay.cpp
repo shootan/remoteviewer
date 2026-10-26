@@ -168,7 +168,10 @@ HostUnlockRelay::Io HostUnlockRelay::Exchange(void* pipeHandle, const void* req,
                                               uint32_t bufSize, uint32_t replySize, uint32_t deadlineMs,
                                               const Command* gate) {
   HANDLE pipe = static_cast<HANDLE>(pipeHandle);
-  const ULONGLONG deadline = GetTickCount64() + deadlineMs;
+  ULONGLONG deadline = GetTickCount64() + deadlineMs;
+  // lk-ux-retry r4 (Codex N1): a retry's exchange -- its write AND its read -- never waits past the retry's own
+  // absolute end, whatever relative budget was worked out before it got here.
+  if (gate && gate->deadlineMs != 0 && gate->deadlineMs < deadline) deadline = gate->deadlineMs;
   auto run = [&](bool write, void* data, DWORD size, DWORD* done) -> Io {
     OVERLAPPED ov{};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -617,23 +620,7 @@ void HostUnlockRelay::WorkerLoop() {
       // lk-ux-retry r3 (Codex N1): a retry's fresh challenge is ADOPTED (held, cached as issued) only for the retry
       // still owned and in time -- a valid answer that came after its end is never promoted to a new attempt:
       // the earlier wait is over (17), nothing new held.
-      if (retryEndedEarlier && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
-        if (retryIoHookForTest_) retryIoHookForTest_("adopt");
-        bool inTime = false;
-        {
-          std::lock_guard<std::mutex> lk(mu_);
-          inTime = IsLiveLocked(cmd, cmd.challenge.requestId) &&
-                   (cmd.deadlineMs == 0 || GetTickCount64() < cmd.deadlineMs);
-        }
-        if (!inTime) {
-          std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId
-                    << " challenge answered after the retry ended: not adopted\n";
-          out = ControlUnlockChallengeMessage{};
-          out.requestId = cmd.challenge.requestId;
-          out.status = static_cast<uint16_t>(UnlockStage::Superseded);
-          out.reserved = kUnlockPurposeLockCred;
-        }
-      }
+      if (retryEndedEarlier && retryIoHookForTest_) retryIoHookForTest_("adopt");
       // Q2: an issued challenge holds the pipe for its seal (the service binds it to this connection) -- no
       // longer than the challenge lives; a refused one lets it go.
       std::lock_guard<std::mutex> lk(mu_);
@@ -641,6 +628,18 @@ void HostUnlockRelay::WorkerLoop() {
       // r3 L1-R: published only for the transaction still alive -- its session may have ended (or started a
       // newer one) while this exchange ran; then nothing is kept and nothing is held for it.
       const bool live = IsLiveLocked(cmd, cmd.challenge.requestId);
+      // lk-ux-retry r3/r4 (Codex N1): a retry's fresh challenge is ADOPTED (held, cached as issued) only while the
+      // retry is still owned AND in time -- decided here, in the one critical section that holds/caches it. A
+      // valid answer after its end is never promoted: the earlier wait is over (17), nothing new held.
+      if (retryEndedEarlier && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued) &&
+          !(live && (cmd.deadlineMs == 0 || GetTickCount64() < cmd.deadlineMs))) {
+        std::cout << "[native-video-host][lock-cred] retry requestId=" << cmd.challenge.requestId
+                  << " challenge answered after the retry ended: not adopted\n";
+        out = ControlUnlockChallengeMessage{};
+        out.requestId = cmd.challenge.requestId;
+        out.status = static_cast<uint16_t>(UnlockStage::Superseded);
+        out.reserved = kUnlockPurposeLockCred;
+      }
       if (live && out.status == static_cast<uint16_t>(UnlockStage::ChallengeIssued)) {
         hold_for(challengeHoldMs_, cmd, cmd.challenge.requestId, false);
       } else if (!(holdUntilMs != 0 && heldCookie == cmd.cookie && heldRequestId != cmd.challenge.requestId)) {
