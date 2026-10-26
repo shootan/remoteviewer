@@ -1392,12 +1392,15 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
         std::string ip;
         uint32_t port = 0;
         std::string punchToken;
+        std::string hostProof;
         if (json_get_string(entry, "ip", &ip) && json_get_u32(entry, "port", &port) &&
             json_get_string(entry, "punchToken", &punchToken) && punchToken.size() == 32 && port &&
             port <= 65535) {
+          // keepalive-r2 r4: an optional relay host-facing proof (32 hex); anything else is not one.
+          if (!json_get_string(entry, "hostProof", &hostProof) || hostProof.size() != 32) hostProof.clear();
           in_addr parsed{};
           if (inet_pton(AF_INET, ip.c_str(), &parsed) == 1) {
-            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port), punchToken});
+            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port), punchToken, hostProof});
           }
         }
         cursor = objEnd + 1;
@@ -1427,6 +1430,7 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
                        [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
         authorizedPeers_.end());
     for (const auto& target : targets) {
+      if (!target.hostProof.empty()) continue;  // keepalive-r2 r4: a relay socket of ours, not a peer
       authorizedPeers_.push_back(
           AuthorizedPeer{target, now + std::chrono::seconds(30)});
     }
@@ -1453,7 +1457,12 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
       to.sin_family = AF_INET;
       to.sin_addr.s_addr = t.ipv4NetworkOrder;
       to.sin_port = htons(t.port);
-      send_(&packet, sizeof(packet), to);
+      // keepalive-r2 r4 (Codex N1): toward a relay lease's host-facing socket, the punch carries that lease's
+      // host proof -- what the relay pins this host's tuple by. Every other punch stays empty (a client's token
+      // is never put on the wire here).
+      UdpHelloPacket p = packet;
+      if (!t.hostProof.empty()) std::memcpy(p.authToken, t.hostProof.data(), (std::min)(t.hostProof.size(), sizeof(p.authToken) - 1));
+      send_(&p, sizeof(p), to);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(kPunchIntervalMs));
   }

@@ -22,6 +22,11 @@
 //   S2  Each entry keeps a monotonic activation high-water, whatever its role. 0 is never a generation; a
 //       lower one is stale; the same one is answered again only while that very grant still owns the
 //       session; a higher one is a new explicit activation.
+//   r4  (Codex codex_keepalive_r2_spike_r3.md N2) the replay proof is the capability's SHA-256 digest, compared in
+//       full (no 64-bit non-cryptographic shortcut) -- a digest that cannot be computed is no replay and admits
+//       nothing; and a device's admission no newer than its current entry's (gen <= admitGen, an unused older
+//       capability arriving late, or the same gen with another proof) is Stale: that entry and its secret stay.
+//       (A client keeps its admission generation monotonic across restarts -- the client side's contract.)
 //   S3  The active grant ends with its session (SessionEnded, from the control session's real end -- a
 //       resume or a pause is not one), not only when another session takes the host. A device whose entry
 //       holds the live session is not re-admitted or released underneath it. The CSPRNG's result is
@@ -52,15 +57,20 @@ struct StandbyEndpoint {
   bool operator==(const StandbyEndpoint& o) const { return ipNet == o.ipNet && portNet == o.portNet; }
 };
 
-// A fingerprint of the capability an entry was admitted with (FNV-1a 64): identifies a retransmit of the same
-// admission. Not a secret and not a credential -- the capability itself was consumed when it was checked.
-inline uint64_t StandbyProofFingerprint(const char* token, size_t len) {
-  uint64_t h = 1469598103934665603ull;
-  for (size_t i = 0; i < len; ++i) {
-    h ^= static_cast<uint8_t>(token[i]);
-    h *= 1099511628211ull;
-  }
-  return h == 0 ? 1 : h;
+// r4 (N2-a): the capability an entry was admitted with, as its SHA-256 digest -- what decides that a later Hello
+// is a retransmit of that admission (and so needs no capability again). Compared whole. The token itself was
+// consumed when it was checked and is not kept.
+using StandbyProof = std::array<uint8_t, 32>;
+
+inline bool StandbyProofDigest(const char* token, size_t len, StandbyProof* out) {
+  if (!out || !token || len == 0) return false;
+  out->fill(0);
+#if defined(_WIN32)
+  return BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, reinterpret_cast<PUCHAR>(const_cast<char*>(token)),
+                    static_cast<ULONG>(len), out->data(), static_cast<ULONG>(out->size())) == 0;
+#else
+  return false;
+#endif
 }
 
 struct StandbyEntry {
@@ -68,7 +78,7 @@ struct StandbyEntry {
   std::array<uint8_t, 16> secret{};
   std::array<uint8_t, 16> deviceId{};
   uint32_t admitGen = 0;       // the StandbyHello generation that made it (a retransmit replays it)
-  uint64_t proofFp = 0;        // r3 S1: the admitting capability's fingerprint
+  StandbyProof proof{};        // r3 S1 / r4 N2-a: the admitting capability's SHA-256
   StandbyEndpoint admitFrom;   // r3 S1: where that admission came from (a replay must come from there)
   uint32_t helloFeatures = 0;  // what its Hello would have asked for: used at activation
   StandbyEndpoint endpoint;    // where it last spoke from (follows a moved endpoint on Ping)
@@ -81,7 +91,7 @@ struct StandbyEntry {
 class StandbyTable {
  public:
   enum class HelloClass { Replay, NeedProof };
-  enum class AdmitResult { Admitted, Busy, Live, Failed };
+  enum class AdmitResult { Admitted, Busy, Live, Failed, Stale };
   enum class Verdict { Ok, Unknown, Superseded, Live };
   using Rng = std::function<bool(uint64_t*)>;
 
@@ -92,12 +102,12 @@ class StandbyTable {
   //   Replay    -- the very admission again (same device, generation, capability, endpoint, valid lease):
   //                answer it as before, nothing changes.
   //   NeedProof -- anything else: only a fresh capability may admit (or replace) an entry.
-  HelloClass ClassifyHello(const uint8_t deviceId[16], uint32_t gen, uint64_t proofFp, StandbyEndpoint from,
+  HelloClass ClassifyHello(const uint8_t deviceId[16], uint32_t gen, const StandbyProof& proof, StandbyEndpoint from,
                            uint64_t nowMs, StandbyEntry* out) {
     Expire(nowMs);
     for (const StandbyEntry& e : entries_) {
       if (std::memcmp(e.deviceId.data(), deviceId, 16) != 0) continue;
-      if (e.admitGen == gen && e.proofFp == proofFp && e.admitFrom == from && nowMs - e.admittedMs <= kStandbyHelloReplayMs) {
+      if (e.admitGen == gen && e.proof == proof && e.admitFrom == from && nowMs - e.admittedMs <= kStandbyHelloReplayMs) {
         if (out) *out = e;
         return HelloClass::Replay;
       }
@@ -106,10 +116,11 @@ class StandbyTable {
     return HelloClass::NeedProof;
   }
 
-  // An admission whose capability the caller has just checked. One entry per device: a new admission
+  // An admission whose capability the caller has just checked. One entry per device: a NEWER admission
   // replaces that device's old entry -- unless that entry holds the live session (Live: the device is the
-  // session; nothing changes). A full table is Busy; a failed random draw is Failed (no entry at all).
-  AdmitResult Admit(const uint8_t deviceId[16], uint32_t gen, uint64_t proofFp, uint32_t helloFeatures,
+  // session; nothing changes). r4 N2-b: one no newer than the entry there (gen <= its admitGen) is Stale and
+  // changes nothing. A full table is Busy; a failed random draw is Failed (no entry at all).
+  AdmitResult Admit(const uint8_t deviceId[16], uint32_t gen, const StandbyProof& proof, uint32_t helloFeatures,
                     StandbyEndpoint from, uint64_t nowMs, StandbyEntry* out) {
     Expire(nowMs);
     size_t sameDevice = entries_.size();
@@ -117,6 +128,7 @@ class StandbyTable {
       if (std::memcmp(entries_[i].deviceId.data(), deviceId, 16) == 0) sameDevice = i;
     }
     if (sameDevice != entries_.size() && IsLive(entries_[sameDevice].entryId)) return AdmitResult::Live;
+    if (sameDevice != entries_.size() && gen <= entries_[sameDevice].admitGen) return AdmitResult::Stale;
     if (sameDevice == entries_.size() && entries_.size() >= kStandbyMaxEntries) return AdmitResult::Busy;
     StandbyEntry e;
     bool idOk = false;
@@ -131,7 +143,7 @@ class StandbyTable {
     std::memcpy(e.secret.data() + 8, &b, 8);
     std::memcpy(e.deviceId.data(), deviceId, 16);
     e.admitGen = gen;
-    e.proofFp = proofFp;
+    e.proof = proof;
     e.admitFrom = from;
     e.helloFeatures = helloFeatures;
     e.endpoint = from;

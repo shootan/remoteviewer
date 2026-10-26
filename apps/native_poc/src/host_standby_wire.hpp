@@ -37,12 +37,13 @@ struct StandbyOutcome {
 };
 
 // `authorize` is the capability check (directoryAgent.AuthorizePeer); asked only for a StandbyHello that is
-// not a replay of its own admission. `endedEpoch` (r3 S3): the control session that last really ended
+// not a replay of its own admission. `digest` (r4 N2-a) replaces StandbyProofDigest -- tests only (a failure). `endedEpoch` (r3 S3): the control session that last really ended
 // (SessionState::backendSessionEnded's epoch) -- the active grant ends with it before anything else is decided.
 inline StandbyOutcome standby_handle(StandbyTable& table, const uint8_t* rx, size_t len, const sockaddr_in& peer,
                                      bool preloginMode,
                                      const std::function<bool(const std::string&, const sockaddr_in&)>& authorize,
-                                     uint64_t nowMs, uint64_t endedEpoch = 0) {
+                                     uint64_t nowMs, uint64_t endedEpoch = 0,
+                                     const std::function<bool(const char*, size_t, StandbyProof*)>& digest = nullptr) {
   StandbyOutcome out;
   if (len != sizeof(UdpStandbyPacket)) return out;
   UdpStandbyPacket sb{};
@@ -69,8 +70,14 @@ inline StandbyOutcome standby_handle(StandbyTable& table, const uint8_t* rx, siz
     // lease -- is answered as before without a capability (it was spent). Anything else is a NEW admission
     // and needs a fresh capability: a known device id + generation prove nothing, and a refused one gets no
     // secret and changes no entry.
-    const uint64_t proofFp = StandbyProofFingerprint(sb.authToken, tokenLen);
-    const bool replay = table.ClassifyHello(sb.deviceId, sb.clientGen, proofFp, from, nowMs, &e) ==
+    StandbyProof proof{};
+    const bool digested = digest ? digest(sb.authToken, tokenLen, &proof) : StandbyProofDigest(sb.authToken, tokenLen, &proof);
+    if (!digested) {
+      // r4 N2-a: fail-closed -- no digest, no replay and no admission (the capability is not spent either).
+      out.log = "[native-video-host][standby] hello refused (proof digest failed)";
+      return out;
+    }
+    const bool replay = table.ClassifyHello(sb.deviceId, sb.clientGen, proof, from, nowMs, &e) ==
                         StandbyTable::HelloClass::Replay;
     StandbyTable::AdmitResult r = StandbyTable::AdmitResult::Admitted;
     if (!replay) {
@@ -79,12 +86,15 @@ inline StandbyOutcome standby_handle(StandbyTable& table, const uint8_t* rx, siz
         out.log = "[native-video-host][standby] hello refused (capability)";
         return out;
       }
-      r = table.Admit(sb.deviceId, sb.clientGen, proofFp, sb.features, from, nowMs, &e);
+      r = table.Admit(sb.deviceId, sb.clientGen, proof, sb.features, from, nowMs, &e);
     }
     out.action = StandbyAction::Reply;
     out.reply.kind = static_cast<uint16_t>(UdpPacketKind::StandbyAck);
     out.reply.clientGen = sb.clientGen;
-    if (r != StandbyTable::AdmitResult::Admitted) {
+    if (r == StandbyTable::AdmitResult::Stale) {
+      // r4 N2-b: a late admission of this device, no newer than its entry: Superseded, no secret, entry unchanged.
+      out.reply.status = kUdpStandbyStatusSuperseded;
+    } else if (r != StandbyTable::AdmitResult::Admitted) {
       // Busy: the table is full / Live: this device holds the session / Failed: no random draw -- all Busy on
       // the wire (no secret).
       out.reply.status = kUdpStandbyStatusBusy;
@@ -98,6 +108,7 @@ inline StandbyOutcome standby_handle(StandbyTable& table, const uint8_t* rx, siz
                        : r == StandbyTable::AdmitResult::Busy ? "busy"
                        : r == StandbyTable::AdmitResult::Live ? "refused (device holds the session)"
                        : r == StandbyTable::AdmitResult::Failed ? "refused (random draw failed)"
+                       : r == StandbyTable::AdmitResult::Stale ? "refused (stale: not newer than its entry)"
                                                                 : "admitted";
     out.log = std::string("[native-video-host][standby] hello ") + what + " entries=" + std::to_string(table.size()) +
               " active=" + (table.activeEntryId() != 0 ? "1" : "0");
