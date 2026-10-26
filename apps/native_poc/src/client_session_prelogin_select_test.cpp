@@ -604,6 +604,32 @@ void p9_commit_vs_cancel() {
   }
 }
 
+// P10 (ua2-apk r3, Codex N3): the backend-status capability is one read of the host's role. The reader is stopped
+// right after its read (stopPoint) while a supporting host's FIRST pong is let through and processed: the snapshot
+// must still be one moment -- unknown (checking) or known+answers -- never known-but-not-answering (an older host).
+void p10_capability_snapshot() {
+  std::printf("\n--- P10: the host's backend capability, one read across its first pong ---\n");
+  FakeHost h;
+  h.pongFlags = n::kCaptureFlagDesktopBackendStatusV1;
+  h.holdPongs = true;
+  if (!h.Start()) return check("P10: fake host starts", false);
+  n::ClientSessionController c;
+  GateSink sink;
+  check("P10: the session connects (first pong held)", connect_to(c, h, &sink));
+  bool pongLanded = false;
+  const auto cap = c.DesktopBackendCapability([&] {
+    h.holdPongs = false;
+    pongLanded = wait_until([&] { return c.HostRoleKnown(); }, 3000);
+  });
+  check("P10: the first pong landed between the read and the answer", pongLanded);
+  check("P10: the snapshot is one moment -- not known-but-not-answering", !(cap.known && !cap.answers),
+        "known=" + std::to_string(cap.known) + " answers=" + std::to_string(cap.answers));
+  const auto after = c.DesktopBackendCapability();
+  check("P10: after the pong: known and answering", after.known && after.answers);
+  c.Disconnect();
+  h.Stop();
+}
+
 // P7: a new connection.
 void p7_reconnect() {
   std::printf("\n--- P7: a new connection to a logon-screen host ---\n");
@@ -640,6 +666,7 @@ int main() {
   p7_reconnect();
   p8_stale_turn();
   p9_commit_vs_cancel();
+  p10_capability_snapshot();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

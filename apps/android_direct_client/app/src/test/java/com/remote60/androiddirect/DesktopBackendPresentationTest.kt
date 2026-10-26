@@ -16,8 +16,8 @@ class DesktopBackendPresentationTest {
     /** A supported host's answer `seq` (requested/active/flags), with the native intent (asked, sent, sentSeq). */
     private fun st(seq: Long, requested: Int, active: Int, flags: Int = p.FLAG_SESSION_SCOPED,
                    asked: Long = 0, sent: Long = 0, sentSeq: Long = 0, valid: Boolean = true, answers: Boolean = true,
-                   roleKnown: Boolean = true) =
-        HostStatus(valid, seq, requested, requested, active, flags, 1, answers, roleKnown, asked, sent, sentSeq)
+                   roleKnown: Boolean = true, effective: Int = requested) =
+        HostStatus(valid, seq, requested, effective, active, flags, 1, answers, roleKnown, asked, sent, sentSeq)
 
     @Test fun notConnectedDisablesAndLightsNothing() {
         val v = p.present(false, p.WGC, st(1, p.WGC, p.WGC))
@@ -97,12 +97,42 @@ class DesktopBackendPresentationTest {
         assertTrue(v.reasons.contains(Reason.WINDOW_TARGET))
     }
 
+    // r3 (codex_ua2_apk_src_r2.md N1 (b)): a policy replacement is not "DXGI applied"
     @Test fun quarantineShowsTheRealOne() {
         val v = p.present(true, p.DXGI, st(2, p.DXGI, p.WGC, flags = p.FLAG_SESSION_SCOPED or p.FLAG_DXGI_QUARANTINED,
-            asked = 1, sent = 1, sentSeq = 2))
-        assertEquals(State.APPLIED, v.state)
+            asked = 1, sent = 1, sentSeq = 2, effective = p.WGC))
+        assertEquals(State.POLICY_REPLACED, v.state)
         assertEquals(p.WGC, v.active)
+        assertEquals(p.WGC, v.effective)
         assertEquals(listOf(Reason.DXGI_QUARANTINED), v.reasons)
+    }
+
+    // r3 N1 (a): handled GDI, requested = effective = GDI, but DXGI captures (idle desktop stored it, or the restart fell
+    // back) -- "received", not "applied"; and it is terminal (no endless applying), the request still lit as handled
+    @Test fun handledButNotCapturingIsReceivedNotApplied() {
+        val v = p.present(true, p.GDI, st(4, p.GDI, p.DXGI, asked = 2, sent = 2, sentSeq = 4))
+        assertEquals(State.RECEIVED, v.state)
+        assertEquals(p.GDI, v.lit)
+        assertEquals(p.DXGI, v.active)
+        assertEquals(State.RECEIVED, p.present(true, p.GDI, st(9, p.GDI, p.DXGI, asked = 2, sent = 2, sentSeq = 4)).state)
+        // the same request once the desktop does capture with it: applied (d)
+        assertEquals(State.APPLIED, p.present(true, p.GDI, st(10, p.GDI, p.GDI, asked = 2, sent = 2, sentSeq = 4)).state)
+    }
+
+    // r3 N1 (c): nothing asked on this connection; an answer with a seq but no state yet (0 fields, NotYetApplied)
+    @Test fun noRequestAndNoStateYetIsCheckingNotIdle() {
+        assertEquals(State.CHECKING, p.present(true, null, st(1, 0, 0, flags = p.FLAG_SESSION_SCOPED or p.FLAG_NOT_YET_APPLIED)).state)
+        assertEquals(State.CHECKING, p.present(true, null, st(1, 0, 0)).state)
+        assertNull(p.present(true, null, st(1, 0, 0)).lit)
+        // a window target with no desktop state is not "waiting": WGC now is a fact
+        assertEquals(State.IDLE, p.present(true, null, st(1, 0, 0, flags = p.FLAG_SESSION_SCOPED or p.FLAG_WINDOW_TARGET)).state)
+    }
+
+    // r3 (Codex note): an OLD answer whose requested equals the latest request (A, seq 3 < sentSeq 5) proves nothing
+    @Test fun anOldAnswerWithTheSameCodeIsNotTheLatestRequestsAnswer() {
+        val old = p.present(true, p.WGC, st(3, p.WGC, p.WGC, asked = 3, sent = 3, sentSeq = 5))
+        assertEquals(State.APPLYING, old.state)
+        assertNull(old.lit)
     }
 
     @Test fun newConnectionShowsTheHostsOwn() {
