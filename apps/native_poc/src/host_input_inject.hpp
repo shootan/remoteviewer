@@ -84,6 +84,11 @@ HostImeAlignResult host_ime_align_query(bool setEnglish);
 
 bool interactive_desktop_is_default_uncached();
 bool interactive_desktop_is_default();
+// capture-lifecycle r1: the input desktop's name, uncached. *known false when it could not be told (then
+// ""): never read as "locked" or as any desktop. One this process may not open is a secure desktop, named
+// kUnopenableInputDesktop. A test build may show a stand-in name (desktop_name_seam.hpp).
+inline constexpr wchar_t kUnopenableInputDesktop[] = L"<secure:unopenable>";
+std::wstring input_desktop_name_uncached(bool* known);
 
 // lockscreen-cred r1: THIS process's own session as WTS says it is (cached 250 ms, like the desktop probe).
 // Nothing here is guessed from the secure desktop: a UAC prompt leaves `locked` false.

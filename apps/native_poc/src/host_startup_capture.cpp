@@ -340,8 +340,9 @@ int startup_start_capture(HostContext& hx) {
   // Periodic static refresh cadence (0 = off). On a genuinely still screen the pipeline sends
   // nothing at all, so the viewer's picture silently ages and looks dead; this re-serves the
   // cached frame as a cheap P-frame at a low rate. Milliseconds via env for field tuning.
+  // capture-lifecycle r1 (Codex §2, the user's standing order): 500 ms (2 fps), was 1000 ms.
   kick.staticRefreshIntervalUs =
-      static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 1000, 0, 10000)) *
+      static_cast<uint64_t>(env_u32_clamped("REMOTE60_NATIVE_STATIC_REFRESH_MS", 500, 0, 10000)) *
       1000ULL;
   capture.frameHeartbeatEnabled.store(useH264 && kick.staticRefreshIntervalUs > 0);
   // Validate the cache against the live capture identity and the CURRENT secure-desktop state, then

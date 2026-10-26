@@ -70,6 +70,8 @@ uint16_t expected_message_size(MessageType type) {
       return static_cast<uint16_t>(sizeof(ControlWindowSelectedMessage));
     case MessageType::ControlInputAck:
       return static_cast<uint16_t>(sizeof(ControlInputAckMessage));
+    case MessageType::ControlDesktopBackendStatus:  // capture-lifecycle r1
+      return static_cast<uint16_t>(sizeof(ControlDesktopBackendStatusMessage));
     default:
       return 0;
   }
@@ -345,6 +347,7 @@ void DesktopBackendControl::Reset() {
   pending_.store(false, std::memory_order_relaxed);
   nextSeq_.store(0, std::memory_order_relaxed);
   backend_.store(2, std::memory_order_relaxed);
+  hostAnswers_.store(false, std::memory_order_relaxed);  // capture-lifecycle r1: the next host says its own
 }
 
 void DesktopBackendControl::Request(uint16_t backend) {
@@ -358,6 +361,15 @@ bool DesktopBackendControl::ConsumePending(PendingDesktopBackendRequest* out) {
   if (!pending_.exchange(false, std::memory_order_acq_rel)) return false;
   out->seq = nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
   out->backend = backend_.load(std::memory_order_acquire);
+  out->wantsStatus = hostAnswers_.load(std::memory_order_acquire);
+  if (out->backend == 0 && !out->wantsStatus) return false;  // a question to a host that answers none
+  return true;
+}
+
+bool DesktopBackendControl::Query() {
+  if (!hostAnswers_.load(std::memory_order_acquire)) return false;
+  backend_.store(0, std::memory_order_release);
+  pending_.store(true, std::memory_order_release);
   return true;
 }
 
@@ -674,6 +686,11 @@ bool ClientControlScheduler::NextAction(uint64_t nowUs,
     out->desktopBackend.seq = pendingDesktopBackend.seq;
     out->desktopBackend.backend = pendingDesktopBackend.backend;
     out->desktopBackend.clientSendQpcUs = nowUs;
+    if (pendingDesktopBackend.wantsStatus) {  // capture-lifecycle r1 (UA-2): answered with 90
+      out->desktopBackend.flags |= kDesktopBackendRequestFlagStatusV1;
+      out->expectedResponseType = MessageType::ControlDesktopBackendStatus;
+      out->expectedResponseSize = expected_message_size(MessageType::ControlDesktopBackendStatus);
+    }
     return true;
   }
 

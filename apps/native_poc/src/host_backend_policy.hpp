@@ -59,6 +59,21 @@ struct DesktopBackendState {
   bool dxgiQuarantined = false;
   std::string dxgiQuarantineReason;  // for the log only
 
+  // capture-lifecycle r1 (UA-2, Codex §1): what this host runs when nobody asked -- its startup request
+  // (REMOTE60_DESKTOP_CAPTURE_BACKEND, default DXGI; the quarantine still applies through
+  // EffectiveRequested). A viewer's request belongs to the logical control session (epoch) that made it:
+  // a new session starts from this again, and a resume of the same one keeps it. Main loop only.
+  DesktopCaptureBackend startupRequested = DesktopCaptureBackend::Dxgi;
+  uint64_t ownerEpoch = 0;
+
+  // capture-lifecycle r1 (UA-1, Codex §4): the WGC capture is rebuilt on each confirmed input-desktop
+  // change (Default <-> a secure desktop) -- once per change, retried a bounded number of times with
+  // backoff, never in a loop. Main loop only.
+  uint64_t wgcRebuiltForDesktopGen = 0;
+  uint32_t wgcRebuildAttempts = 0;
+  uint64_t wgcRebuildRetryAtUs = 0;
+  static constexpr uint32_t kMaxWgcRebuildAttempts = 3;
+
   // The backend that may actually run for what was asked. Every place that used to write
   // `active = requested` goes through this, so no path -- startup, reattach, a client request,
   // the climb-back -- can bring DXGI back while quarantined. WGC/GDI requests pass through.

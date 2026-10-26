@@ -166,6 +166,11 @@ bool recv_control_response(ControlLink& link, const ControlOutboundAction& actio
       out->preloginStatus.header = header;
       return link.Read(&out->preloginStatus.requestId,
                        sizeof(out->preloginStatus) - sizeof(MessageHeader));
+    case MessageType::ControlDesktopBackendStatus:  // capture-lifecycle r1 (UA-2)
+      out->kind = TcpControlResponseKind::DesktopBackendStatus;
+      out->desktopBackendStatus.header = header;
+      return link.Read(&out->desktopBackendStatus.seq,
+                       sizeof(out->desktopBackendStatus) - sizeof(MessageHeader));
     default:
       out->kind = TcpControlResponseKind::None;
       return link.Discard(header.size - sizeof(MessageHeader));

@@ -879,6 +879,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         // explicit retry -- only then may a viewer send 89 (an older service: the viewer keeps "wait for it").
         if (offered && gUnlockRelay.LockCredRetrySupported())
           pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredRetryV1;
+        // capture-lifecycle r1 (UA-2): a backend asked for is this session's, and a request may ask its answer (90).
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagDesktopBackendStatusV1;
         if (offered != lockCredAdvertised) {
           lockCredAdvertised = offered;
           std::cout << "[native-video-host][lock-cred] advertised=" << (offered ? 1 : 0) << " lockKnown=" << own.lockKnown
@@ -1911,7 +1913,44 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
                   << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
-                  << "\n";
+                  << (req.flags & kDesktopBackendRequestFlagStatusV1 ? " status=asked" : "") << "\n";
+      }
+      // capture-lifecycle r1 (UA-2): the answer, if this request asked for it (only a client that saw
+      // kCaptureFlagDesktopBackendStatusV1 does). A change is answered once the main loop handled it -- within
+      // 250 ms: this channel is one request at a time, so pings and key requests wait behind it (verifier
+      // 10-26); past that, as it is now with NotYetApplied, and the client asks again (backend 0 = a question,
+      // answered at once).
+      if ((req.flags & kDesktopBackendRequestFlagStatusV1) != 0) {
+        bool applied = true;
+        if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
+          const uint64_t key = (servedEpoch << 32) | req.seq;
+          const uint64_t until = GetTickCount64() + 250;
+          applied = false;
+          while (GetTickCount64() < until && clientSession.epoch.load(std::memory_order_acquire) == servedEpoch) {
+            if (capture.backendAppliedKey.load(std::memory_order_acquire) == key) {
+              applied = true;
+              break;
+            }
+            Sleep(5);
+          }
+        }
+        const uint64_t packed = capture.backendStatusPacked.load(std::memory_order_acquire);
+        ControlDesktopBackendStatusMessage st{};
+        st.header.magic = remote60::native_poc::kMagic;
+        st.header.type = static_cast<uint16_t>(MessageType::ControlDesktopBackendStatus);
+        st.header.size = static_cast<uint16_t>(sizeof(st));
+        st.seq = req.seq;
+        st.requested = static_cast<uint16_t>(packed & 0xffffu);
+        st.effective = static_cast<uint16_t>((packed >> 16) & 0xffffu);
+        st.active = static_cast<uint16_t>((packed >> 32) & 0xffffu);
+        st.flags = static_cast<uint16_t>((packed >> 48) & 0xffffu);
+        if (!applied) st.flags |= kDesktopBackendStatusFlagNotYetApplied;
+        st.changeCount = capture.backendStatusChanges.load(std::memory_order_acquire);
+        st.hostSendQpcUs = qpc_now_us();
+        std::cout << "[native-video-host][control] desktop-backend-status seq=" << st.seq << " requested=" << st.requested
+                  << " effective=" << st.effective << " active=" << st.active << " flags=0x" << std::hex << st.flags
+                  << std::dec << "\n";
+        if (!link.Write(&st, sizeof(st))) break;
       }
       continue;
     }

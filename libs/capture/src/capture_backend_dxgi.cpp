@@ -87,6 +87,15 @@ struct DxgiDesktopCaptureSession::Impl {
   uint32_t height = 0;
   HDESK attachedDesktop = nullptr;  // prelogin: the input desktop this worker thread is bound to
   bool refusedDesktop = false;      // r9 W2: the input desktop was another than the one served
+  // capture-lifecycle r1 (PS-A): the host has no picture to encode and the desktop is still, so no
+  // acquire will ever carry one. Set (steady_now_us) by RequestFullFrame; the next acquire -- a
+  // pointer-only one too: its surface is the whole current desktop image -- is handed on as content,
+  // and with no acquire at all the duplication is made anew (its first frame is the full image), at
+  // most kMaxFullFrameRecreates times per request.
+  std::atomic<uint64_t> fullFrameRequestedUs{0};
+  uint32_t fullFrameRecreates = 0;
+  static constexpr uint64_t kFullFrameRecreateAfterUs = 150000;
+  static constexpr uint32_t kMaxFullFrameRecreates = 3;
 
   // Prelogin (r4 #1): bind THIS worker thread to the current input desktop so DXGI/GDI capture the right
   // desktop and can follow a secure-desktop / session switch. Idempotent; closes any prior handle. Called
@@ -463,6 +472,34 @@ struct DxgiDesktopCaptureSession::Impl {
         if (config.acquireIdleSleepUs > 0 && !stopRequested.load()) {
           std::this_thread::sleep_for(std::chrono::microseconds(config.acquireIdleSleepUs));
         }
+        // capture-lifecycle r1 (PS-A): a full frame was asked for and the desktop gives nothing -- a still
+        // screen. A new duplication's first acquire is the whole image; bounded, never a loop.
+        const uint64_t fullAskedUs = fullFrameRequestedUs.load(std::memory_order_acquire);
+        if (fullAskedUs != 0 && steady_now_us() - fullAskedUs >= kFullFrameRecreateAfterUs) {
+          if (fullFrameRecreates >= kMaxFullFrameRecreates) {
+            fullFrameRequestedUs.store(0, std::memory_order_release);
+            fullFrameRecreates = 0;
+            log("capture", "full-frame reacquire gave up after " + std::to_string(kMaxFullFrameRecreates) +
+                               " duplications (no acquire)");
+            continue;
+          }
+          ++fullFrameRecreates;
+          if (config.attachToInputDesktop) {
+            attach_input_desktop();
+            if (refusedDesktop) {
+              request_fallback("prelogin_desktop_not_served");  // r9 W2, as for ACCESS_LOST
+              return;
+            }
+          }
+          std::string detail;
+          if (!recreate_duplication(&detail)) {
+            log("capture", "full-frame reacquire: duplication failed detail=" + detail);
+            request_fallback(detail);
+            return;
+          }
+          fullFrameRequestedUs.store(steady_now_us(), std::memory_order_release);  // the next wait is its own
+          log("capture", "full-frame reacquire: duplication made anew attempt=" + std::to_string(fullFrameRecreates));
+        }
         continue;
       }
       if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_ACCESS_DENIED) {
@@ -555,8 +592,17 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       enterPhase(CaptureWorkerPhase::FrameHandler);
+      // capture-lifecycle r1 (PS-A): the frame a full-frame request waits for -- whatever this acquire
+      // carried, its surface is the current desktop image; handed on as content (at least 1 accumulated).
+      uint32_t handedAccumulated = frameInfo.AccumulatedFrames;
+      if (fullFrameRequestedUs.exchange(0, std::memory_order_acq_rel) != 0) {
+        if (handedAccumulated == 0) handedAccumulated = 1;
+        log("capture", "full-frame reacquire: delivered after " + std::to_string(fullFrameRecreates) +
+                           " duplication(s) content=" + (frameInfo.LastPresentTime.QuadPart != 0 ? "1" : "0"));
+        fullFrameRecreates = 0;
+      }
       try {
-        if (onFrame) onFrame(texture.Get(), width, height, frameInfo.AccumulatedFrames);
+        if (onFrame) onFrame(texture.Get(), width, height, handedAccumulated);
       } catch (...) {
         releaseFrame();
         request_fallback("dxgi_frame_handler_exception");
@@ -659,6 +705,12 @@ CaptureWorkerSnapshot DxgiDesktopCaptureSession::SnapshotWorker() const {
   s.lastReleaseHr = progress_->lastReleaseHr.load(std::memory_order_acquire);
   s.lastAccumulatedFrames = progress_->lastAccumulatedFrames.load(std::memory_order_acquire);
   return s;
+}
+
+void DxgiDesktopCaptureSession::RequestFullFrame() {
+  if (!impl_) return;
+  uint64_t none = 0;  // a request already waiting keeps its own clock
+  impl_->fullFrameRequestedUs.compare_exchange_strong(none, steady_now_us(), std::memory_order_acq_rel);
 }
 
 uint32_t DxgiDesktopCaptureSession::width() const {

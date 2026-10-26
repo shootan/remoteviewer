@@ -87,6 +87,9 @@ struct BootstrapFrameCache {
   uint32_t srcCaptureWidth = 0;   // pre-crop capture source dims (meta.width/height)
   uint32_t srcCaptureHeight = 0;
   uint32_t consoleSessionId = 0;  // WTS active console session at capture time
+  // capture-lifecycle r1: the input desktop it was published under, and that desktop's generation.
+  std::wstring desktopName;
+  uint64_t desktopGeneration = 0;
 };
 
 // Capture session state (Phase 1-3a state struct): everything the capture path shares that is
@@ -262,6 +265,37 @@ struct CaptureState {
   // Static-screen bootstrap cache (last raw frame actually published; survives a flush).
   std::mutex bootstrapCacheMu;
   BootstrapFrameCache bootstrapCache;
+  // capture-lifecycle r1 (PS-A and UA-1 -- Codex §2/§4: one contract). The input desktop as the main loop's
+  // tracker last CONFIRMED it (two agreeing uncached looks), and how many times it has changed. A frame is
+  // cached with the desktop it was published under; a change clears the cache, and frames whose callback
+  // came before the change was seen are not cached at all. A look that could not tell is no change.
+  std::wstring desktopName;                          // under bootstrapCacheMu (tracker writes, publish reads)
+  std::atomic<uint64_t> desktopGeneration{0};
+  std::atomic<uint64_t> desktopChangeDetectedUs{0};
+  std::wstring desktopCandidate;                     // main loop only
+  uint32_t desktopCandidateSeen = 0;
+  uint64_t desktopProbeAtUs = 0;
+  static constexpr uint64_t kDesktopProbeIntervalUs = 100000;
+  // PS-A: the bounded full-frame reacquire when nothing cached may be shown (main loop only). An episode
+  // ends with the next real published frame (PublishFrame clears fullFrameEpisodeOpen).
+  uint64_t fullFrameAskedAtUs = 0;
+  uint32_t fullFrameAsks = 0;
+  std::atomic<bool> fullFrameEpisodeOpen{false};
+  std::atomic<bool> wgcFullFrameRestartWanted{false};  // WGC: the main loop's bounded restart does it
+  std::atomic<bool> seamStillFullFrameAsked{false};    // TEST BUILD ONLY: the still-screen seam's "asked"
+  // When the current capture attachment began (DetachCaptureSession stamps it: every (re)attach detaches
+  // first). A fresh attachment's own first frame is on its way: no full-frame ask in the first
+  // kFullFrameAttachGraceUs (a second restart of a capture 10 ms old helps nobody).
+  std::atomic<uint64_t> lastAttachUs{0};
+  // capture-lifecycle r1 (UA-2): the backend as the main loop last applied it, for the control thread's
+  // ControlDesktopBackendStatus (90) -- requested | effective<<16 | active<<32 | flags<<48 (wire codes) -- how
+  // many times it changed, and the (epoch<<32 | seq) of the last backend request the main loop handled.
+  std::atomic<uint64_t> backendStatusPacked{0};
+  std::atomic<uint32_t> backendStatusChanges{0};
+  std::atomic<uint64_t> backendAppliedKey{0};
+  static constexpr uint64_t kFullFrameAttachGraceUs = 500000;
+  static constexpr uint64_t kFullFrameAskIntervalUs = 1000000;
+  static constexpr uint32_t kMaxFullFrameAsks = 3;
   // Idle detach (no client) and reattach backoff.
   bool idleDetached = false;
   uint64_t idleDetachAtUs = 0;
@@ -353,8 +387,18 @@ struct CaptureState {
   void LogFirstSentGeneration(CaptureResources& res, HostStats& stats, const char* path, uint64_t streamGeneration,
                               uint64_t sendStartUs, uint64_t captureStampUs, uint32_t width, uint32_t height, uint64_t auEpoch = 0, uint64_t currentEpoch = 0);
   // Serve the cached bootstrap frame for a trailing kick / static refresh, if still valid.
+  // capture-lifecycle r1: *why says what a refusal was -- only the desktop that may be shown, with nothing
+  // of it cached (or nothing of the current target), is worth asking the capture for a whole frame.
+  enum class KickMiss : uint8_t { None, DesktopNotShown, NothingCached, NotCurrent };
   bool KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload,
-                   uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs);
+                   uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs, KickMiss* why = nullptr);
+  // capture-lifecycle r1: the input desktop tracker (main loop; bounded cadence). True when a change was
+  // confirmed just now: the cache is cleared and the generation moved.
+  bool TrackInputDesktop(uint64_t nowUs);
+  // The desktop the stream may show now: the served logon desktop before login, Default after.
+  bool DesktopMayBeShown(const std::wstring& name, bool known) const;
+  // Drop the cached frame (its continuity is no longer known). Any thread.
+  void InvalidateBootstrapCache(const char* why);
   uint64_t EffectiveQueueWaitTimeoutUs(EncoderState& encoder);
   // Readback-worker publish callback body (main() binds res.capturePublishFn to it).
   void PublishFrame(CaptureResources& res, HostStats& stats, std::shared_ptr<std::vector<uint8_t>> payload,

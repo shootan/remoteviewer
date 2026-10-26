@@ -98,6 +98,10 @@ class DxgiDesktopCaptureSession {
              DxgiDesktopFallbackHandler onFallback,
              std::string* detailOut);
   void Stop();
+  // capture-lifecycle r1 (PS-A): the host needs a whole picture of a still desktop (none cached). The
+  // next acquire is handed on as content; with none, the duplication is made anew (bounded). Called by
+  // the thread that Start()s / Stop()s this session.
+  void RequestFullFrame();
 
   uint32_t width() const;
   uint32_t height() const;

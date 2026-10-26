@@ -319,7 +319,12 @@ bool CaptureState::AttachFrameArrived(CaptureResources& res, SessionState& clien
       while (auto newer = pool.TryGetNextFrame()) {
         latest = newer;
       }
-      if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
+      if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
+        // capture-lifecycle r1 (PS-A): the screen changed while nobody watched -- the cached picture is
+        // no longer known to be the screen. A returning viewer gets a whole new frame instead.
+        capture.InvalidateBootstrapCache("changed-while-inactive");
+        return;
+      }
 
       // A WGC frame-pool surface is a FIXED buffer size (capture.width x capture.height, chosen when
       // the pool was created); frame.ContentSize() is the actual content region and shrinks/grows
@@ -457,6 +462,10 @@ void CaptureState::DetachCaptureSession(CaptureResources& res, winrt::event_toke
   // attachment before we tear the pool down: bumping the cookie makes that in-flight work drop
   // instead of being published under the post-recreate target/geometry/generation.
   capture.attachmentCookie.fetch_add(1, std::memory_order_acq_rel);
+  // capture-lifecycle r1 (Codex §2): what happens on screen while detached is not seen -- the next
+  // attachment's own first frame is the picture, never this one.
+  capture.InvalidateBootstrapCache("capture-detached");
+  capture.lastAttachUs.store(qpc_now_us(), std::memory_order_release);
   // Re-read the console session with the new cookie: the next attachment's frames are stamped
   // from here instead of paying a syscall per publish. (Ledger H-18.)
   capture.attachedConsoleSessionId.store(WTSGetActiveConsoleSessionId(), std::memory_order_release);
@@ -679,7 +688,9 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       config.acquireTimeoutMs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_TIMEOUT_MS", 8, 1, 1000);
       config.acquireIdleSleepUs = env_u32_clamped("REMOTE60_NATIVE_DXGI_ACQUIRE_IDLE_SLEEP_US", 2000, 0, 100000);
       config.attachToInputDesktop = capture.preloginAttachInputDesktop;  // r4 #1: prelogin binds to the input desktop
-      config.requiredInputDesktop = capture.preloginServingDesktop;      // r9 W2: and only to the one it serves
+      // r9 W2: and only to the one it serves (capture-lifecycle r1: by its real name -- a test build's
+      // stand-in name maps back, desktop_name_seam.hpp; the product's is unchanged).
+      config.requiredInputDesktop = SeamRealDesktopName(capture.preloginServingDesktop);
       // Capture-thread side of the cursor forwarder: just stores the latest sample; the main
       // loop's pump_cursor_forward() throttles and sends. No lock, no send from this thread.
       config.onPointer = [&](int32_t px, int32_t py, bool visible) {
@@ -696,15 +707,42 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
       // (by value into the callback); DetachCaptureSession stops this session before it bumps nothing
       // else, so a frame that is still being published when the cookie moves is dropped downstream.
       const uint64_t dxgiAttachmentCookie = capture.attachmentCookie.load(std::memory_order_acquire);
-      auto startDxgi = [&, dxgiAttachmentCookie](std::string* detailOut) {
+      // TEST BUILD ONLY use (capture-lifecycle r1, the still-screen seam below): this attachment's first frame.
+      auto dxgiFirstFrameSeen = std::make_shared<std::atomic<bool>>(false);
+      auto startDxgi = [&, dxgiAttachmentCookie, dxgiFirstFrameSeen](std::string* detailOut) {
         return dxgiCaptureSession.Start(
             config,
-            [&, dxgiAttachmentCookie](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
+            [&, dxgiAttachmentCookie, dxgiFirstFrameSeen](ID3D11Texture2D* texture, uint32_t width, uint32_t height,
                                       uint32_t accumulatedFrames) {
               if (stop.load()) return;
-              if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
 #ifdef REMOTE60_STREAM_TEST_SEAM
-              // TEST BUILD ONLY (dxgi-wedge-fix r1): once GNLINK_STREAM_TEST_DXGI_WEDGE_FILE appears, this
+              // TEST BUILD ONLY (capture-lifecycle r1, PS): GNLINK_STREAM_TEST_STILL_SCREEN=1 -- the test user's
+              // desktop stands in for a STILL logon screen (this PC's never is). Of what duplication reports,
+              // only what a still screen gives passes: the first frame of this attachment (a new duplication's
+              // whole image) and the frame a full-frame request is answered with. Nothing else ever changed.
+              {
+                static const bool stillSeam = [] {
+                  const char* v = std::getenv("GNLINK_STREAM_TEST_STILL_SCREEN");
+                  return v && v[0] == '1';
+                }();
+                if (stillSeam) {
+                  // (A new duplication's first image is content; a pointer-only acquire on this busy desktop
+                  // does not stand in for it.)
+                  const bool first = accumulatedFrames > 0 && !dxgiFirstFrameSeen->exchange(true);
+                  const bool asked = capture.seamStillFullFrameAsked.exchange(false);
+                  if (!first && !asked) return;
+                  std::cout << "[native-video-host][test-seam] still screen: frame passed (" << (first ? "first" : "asked")
+                            << ")\n";
+                }
+              }
+#endif
+              if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
+                // capture-lifecycle r1 (PS-A): new content nobody watched (a pointer-only acquire is not).
+                if (accumulatedFrames > 0) capture.InvalidateBootstrapCache("changed-while-inactive");
+                return;
+              }
+#ifdef REMOTE60_STREAM_TEST_SEAM
+            // TEST BUILD ONLY (dxgi-wedge-fix r1): once GNLINK_STREAM_TEST_DXGI_WEDGE_FILE appears, this
               // DXGI worker stops inside its frame handler -- phase=frame_handler, the 10-08 17:56 field
               // shape -- and the product's own watchdog (host_startup_capture.cpp) ends the process with
               // exit 44 after 5 s. Nothing here exits: the wedge is real, the recovery is the product's.
@@ -808,7 +846,11 @@ bool CaptureState::RestartCaptureSessionImpl(CaptureResources& res, DesktopBacke
           [&](std::shared_ptr<std::vector<uint8_t>> pixels, uint32_t width,
               uint32_t height, uint32_t stride, uint64_t captureQpcUs,
               uint64_t captureCopyUs, uint64_t parentCopyUs) {
-            if (stop.load() || !clientSession.streamControlActive.load(std::memory_order_acquire)) return;
+            if (stop.load()) return;
+            if (!clientSession.streamControlActive.load(std::memory_order_acquire)) {
+              capture.InvalidateBootstrapCache("changed-while-inactive");  // capture-lifecycle r1 (PS-A)
+              return;
+            }
             const uint64_t callbackUs = qpc_now_us();
             remote60::native_poc::CaptureFrameMeta meta{};
             meta.width = width;
@@ -987,29 +1029,106 @@ void CaptureState::LogFirstSentGeneration(CaptureResources& res, HostStats& stat
             << " holdUs=" << ((sendStartUs >= captureStampUs) ? (sendStartUs - captureStampUs) : 0) << "\n";
 }
 
-bool CaptureState::KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs) {
+bool CaptureState::DesktopMayBeShown(const std::wstring& name, bool known) const {
+  if (!known) return false;  // a look that could not tell shows nothing (and is not read as locked either)
+  // Before login: the logon desktop this worker serves (r9 W2), and nothing else. After: Default only --
+  // a secure desktop (UAC, lock) is never repainted from a cache.
+  const std::wstring& allowed = preloginServingDesktop.empty() ? std::wstring(L"Default") : preloginServingDesktop;
+  return _wcsicmp(name.c_str(), allowed.c_str()) == 0;
+}
+
+void CaptureState::InvalidateBootstrapCache(const char* why) {
+  bool had = false;
+  {
+    std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+    had = static_cast<bool>(bootstrapCache.payload);
+    bootstrapCache.payload.reset();
+  }
+  if (had) std::cout << "[native-video-host] bootstrap-cache cleared reason=" << (why ? why : "unknown") << "\n";
+}
+
+bool CaptureState::TrackInputDesktop(uint64_t nowUs) {
+  if (nowUs < desktopProbeAtUs) return false;
+  desktopProbeAtUs = nowUs + kDesktopProbeIntervalUs;
+  bool known = false;
+  const std::wstring now = input_desktop_name_uncached(&known);
+  if (!known) return false;  // Codex §4: an unknown look is no edge (and never "locked")
+  std::wstring confirmed;
+  {
+    std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+    confirmed = desktopName;
+  }
+  if (_wcsicmp(now.c_str(), confirmed.c_str()) == 0) {
+    desktopCandidateSeen = 0;
+    return false;
+  }
+  if (desktopCandidateSeen == 0 || _wcsicmp(now.c_str(), desktopCandidate.c_str()) != 0) {
+    desktopCandidate = now;
+    desktopCandidateSeen = 1;
+    // The very first look of the process is taken as it is: there is no earlier desktop to debounce against.
+    if (!confirmed.empty()) return false;
+  } else {
+    ++desktopCandidateSeen;
+  }
+  if (!confirmed.empty() && desktopCandidateSeen < 2) return false;
+  desktopCandidateSeen = 0;
+  bool hadCache = false;
+  uint64_t gen = 0;
+  {
+    // Name, generation, the time it was seen and the cleared cache move together, under the lock
+    // PublishFrame checks and stamps under.
+    std::lock_guard<std::mutex> lk(bootstrapCacheMu);
+    desktopName = now;
+    hadCache = static_cast<bool>(bootstrapCache.payload);
+    bootstrapCache.payload.reset();  // pixels of the desktop that was: never shown on this one
+    gen = desktopGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    desktopChangeDetectedUs.store(nowUs, std::memory_order_release);
+  }
+  std::string from(confirmed.begin(), confirmed.end()), to(now.begin(), now.end());  // desktop names are ASCII
+  std::cout << "[native-video-host][desktop] input desktop " << (from.empty() ? "<first look>" : from) << " -> " << to
+            << " desktopGen=" << gen << " cacheCleared=" << (hadCache ? 1 : 0) << "\n";
+  return !confirmed.empty();
+}
+
+bool CaptureState::KickTryFill(SessionState& clientSession, KickState& kick, std::shared_ptr<std::vector<uint8_t>>& outPayload, uint32_t& outW, uint32_t& outH, uint32_t& outStride, uint64_t nowUs, KickMiss* why) {
   CaptureState& capture = *this;
+  auto miss = [&](KickMiss m) {
+    if (why) *why = m;
+    return false;
+  };
+  if (why) *why = KickMiss::None;
+  // capture-lifecycle r1 (PS-A): the desktop in front NOW (uncached -- the shared query caches ~250ms) must
+  // be one this stream may show: Default after login, the served logon desktop before it. (This used to be
+  // "Default only", which refused every cached frame of the pre-login worker: a still logon screen was
+  // never shown at all -- 10-22 field.)
+  bool desktopKnown = false;
+  const std::wstring desktopNow = input_desktop_name_uncached(&desktopKnown);
+  if (!capture.DesktopMayBeShown(desktopNow, desktopKnown)) return miss(KickMiss::DesktopNotShown);
   BootstrapFrameCache snap;
   {
     std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
     snap = capture.bootstrapCache;  // copies the shared_ptr (keeps pixels alive) + identity fields
   }
-  if (!snap.payload || snap.payload->empty() || snap.width < 2 || snap.height < 2) return false;
+  if (!snap.payload || snap.payload->empty() || snap.width < 2 || snap.height < 2) return miss(KickMiss::NothingCached);
   // Identity: the cached pixels must belong to the target the session is watching now.
-  if (snap.windowMode != capture.windowModeActive.load(std::memory_order_acquire)) return false;
-  if (snap.selectedWindowId != capture.selectedWindowId.load(std::memory_order_acquire)) return false;
-  if (snap.targetHwnd != capture.targetHwnd.load(std::memory_order_acquire)) return false;
-  if (snap.targetPid != capture.targetPid.load(std::memory_order_acquire)) return false;
+  if (snap.windowMode != capture.windowModeActive.load(std::memory_order_acquire)) return miss(KickMiss::NotCurrent);
+  if (snap.selectedWindowId != capture.selectedWindowId.load(std::memory_order_acquire)) return miss(KickMiss::NotCurrent);
+  if (snap.targetHwnd != capture.targetHwnd.load(std::memory_order_acquire)) return miss(KickMiss::NotCurrent);
+  if (snap.targetPid != capture.targetPid.load(std::memory_order_acquire)) return miss(KickMiss::NotCurrent);
   if (snap.streamGeneration != capture.streamGenerationState.load(std::memory_order_acquire))
-    return false;
-  if (snap.consoleSessionId != WTSGetActiveConsoleSessionId()) return false;
+    return miss(KickMiss::NotCurrent);
+  if (snap.consoleSessionId != WTSGetActiveConsoleSessionId()) return miss(KickMiss::NotCurrent);
   {
     std::lock_guard<std::mutex> lk(capture.resourceMu);
     if (snap.srcCaptureWidth != capture.width || snap.srcCaptureHeight != capture.height)
-      return false;
+      return miss(KickMiss::NotCurrent);
   }
-  // Re-check secure/lock state live (the shared query caches ~250ms; do not trust it here).
-  if (!interactive_desktop_is_default_uncached()) return false;
+  // ...and published under THIS desktop, with no change of it seen since (Codex §2: provenance, not a
+  // current generation written onto an old picture).
+  if (snap.desktopGeneration != capture.desktopGeneration.load(std::memory_order_acquire) ||
+      _wcsicmp(snap.desktopName.c_str(), desktopNow.c_str()) != 0) {
+    return miss(KickMiss::NotCurrent);
+  }
   outPayload = snap.payload;
   outW = snap.width;
   outH = snap.height;
@@ -1098,22 +1217,31 @@ void CaptureState::PublishFrame(CaptureResources& res, HostStats& stats,
   // recycles a payload only once its LAST holder releases, so holding this copy keeps the pixels
   // alive and immutable until the next publish replaces it. meta.width/height are the pre-crop
   // capture source dims; frameW/frameH are the post-crop payload dims we must encode.
+  // capture-lifecycle r1: a real frame ends a full-frame reacquire episode.
+  capture.fullFrameEpisodeOpen.store(false, std::memory_order_release);
+  // ...and is cached only if its callback came after the last desktop change was seen: a frame of the
+  // desktop that was must not become the picture of the one that is (Codex §2/§4).
+  // (Checked and stamped under the lock the tracker changes the desktop under: never half of each.)
   {
     std::lock_guard<std::mutex> lk(capture.bootstrapCacheMu);
-    capture.bootstrapCache.payload = payload;
-    capture.bootstrapCache.width = frameW;
-    capture.bootstrapCache.height = frameH;
-    capture.bootstrapCache.stride = stride;
-    capture.bootstrapCache.captureQpcUs = meta.captureUs;
-    capture.bootstrapCache.streamGeneration = meta.streamGeneration;
-    capture.bootstrapCache.windowMode = capture.windowModeActive.load(std::memory_order_acquire);
-    capture.bootstrapCache.selectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
-    capture.bootstrapCache.targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
-    capture.bootstrapCache.targetPid = capture.targetPid.load(std::memory_order_acquire);
-    capture.bootstrapCache.srcCaptureWidth = meta.width;
-    capture.bootstrapCache.srcCaptureHeight = meta.height;
-    capture.bootstrapCache.consoleSessionId =
-        capture.attachedConsoleSessionId.load(std::memory_order_acquire);
+    if (meta.callbackUs >= capture.desktopChangeDetectedUs.load(std::memory_order_acquire)) {
+      capture.bootstrapCache.desktopName = capture.desktopName;
+      capture.bootstrapCache.desktopGeneration = capture.desktopGeneration.load(std::memory_order_acquire);
+      capture.bootstrapCache.payload = payload;
+      capture.bootstrapCache.width = frameW;
+      capture.bootstrapCache.height = frameH;
+      capture.bootstrapCache.stride = stride;
+      capture.bootstrapCache.captureQpcUs = meta.captureUs;
+      capture.bootstrapCache.streamGeneration = meta.streamGeneration;
+      capture.bootstrapCache.windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+      capture.bootstrapCache.selectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
+      capture.bootstrapCache.targetHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+      capture.bootstrapCache.targetPid = capture.targetPid.load(std::memory_order_acquire);
+      capture.bootstrapCache.srcCaptureWidth = meta.width;
+      capture.bootstrapCache.srcCaptureHeight = meta.height;
+      capture.bootstrapCache.consoleSessionId =
+          capture.attachedConsoleSessionId.load(std::memory_order_acquire);
+    }
   }
   uint64_t currentVersion = 0;
   {

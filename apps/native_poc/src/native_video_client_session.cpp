@@ -481,6 +481,21 @@ bool ClientSessionController::RequestDesktopCaptureBackend(uint16_t backend) {
   return true;
 }
 
+bool ClientSessionController::QueryDesktopCaptureBackend() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
+  return desktopBackend_.Query();
+}
+
+DesktopBackendStatusSnapshot ClientSessionController::DesktopCaptureBackendStatus() const {
+  std::lock_guard<std::mutex> lk(backendStatusMu_);
+  return backendStatus_;
+}
+
 bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                                               uint32_t keyCode, uint16_t buttons) {
   {
@@ -882,6 +897,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           hostSecureDesktopActive_.store(
               (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
               std::memory_order_relaxed);
+          // capture-lifecycle r1 (UA-2): whether this host answers backend requests (every pong: another host
+          // after a reconnect may not).
+          desktopBackend_.SetHostAnswers((response.pong.captureTargetFlags & kCaptureFlagDesktopBackendStatusV1) != 0);
           // r7 H6 / r11 U5: the role, and on the first pong the deferred request, in one transition.
           (void)hostRole_.Pong(response.pong.captureTargetFlags, kCaptureFlagPreloginV1,
                                [this](HostRoleGate::FirstPong first) {
@@ -912,6 +930,19 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
             hostSupportsClipboard_.store(clipboardHost, std::memory_order_relaxed);
           }
           break;
+        case TcpControlResponseKind::DesktopBackendStatus: {  // capture-lifecycle r1 (UA-2)
+          const auto& st = response.desktopBackendStatus;
+          std::lock_guard<std::mutex> lk(backendStatusMu_);
+          backendStatus_.valid = true;
+          backendStatus_.seq = st.seq;
+          backendStatus_.requested = st.requested;
+          backendStatus_.effective = st.effective;
+          backendStatus_.active = st.active;
+          backendStatus_.flags = st.flags;
+          backendStatus_.changeCount = st.changeCount;
+          backendStatus_.receivedUs = now_us();
+          break;
+        }
         case TcpControlResponseKind::MonitorList: {
           windowPanel_.ApplyMonitorList(response.monitorList);
           const auto panelSnapshot = windowPanel_.Snapshot();
@@ -1603,6 +1634,10 @@ void ClientSessionController::ResetUnlocked() {
   keyframeRequests_.Reset();
   runtimeTune_.Reset(0, 0);
   desktopBackend_.Reset();
+  {
+    std::lock_guard<std::mutex> lk(backendStatusMu_);
+    backendStatus_ = DesktopBackendStatusSnapshot{};  // capture-lifecycle r1: never carried to the next connection
+  }
   inputQueue_.Reset();
   {
     std::lock_guard<std::mutex> lk(parkMu_);

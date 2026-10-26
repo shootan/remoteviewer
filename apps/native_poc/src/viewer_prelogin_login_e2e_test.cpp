@@ -58,6 +58,11 @@
 #include "viewer_constants.hpp"
 #include "secure_unlock_ipc.hpp"
 #include "viewer_window_proc.hpp"
+#include "viewer_decoder_state.hpp"  // capture-lifecycle r1 (PS): the product receive chain
+#include "viewer_frame_gate_state.hpp"
+#include "viewer_video_receiver.hpp"
+#include <optional>
+#include <mfapi.h>
 #include "viewer_reboot_prompt.hpp"
 #include "native_video_client_session.hpp"
 #include "prelogin_machine_record.hpp"
@@ -510,7 +515,7 @@ std::vector<wchar_t> test_base_environment(const std::wstring& dir, const std::v
 
 bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, Start how,
                 const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring(),
-                const std::wstring& extraEnv2 = std::wstring()) {
+                const std::wstring& extraEnv2 = std::wstring(), const std::wstring& extraEnv3 = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
   // r13 negative control: REMOTE60_E2E_OLD_BIN names a streaming TEST build without the udp-control-peer
@@ -544,6 +549,7 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
       L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())};
   if (!extraEnv.empty()) fixtures.push_back(extraEnv);
   if (!extraEnv2.empty()) fixtures.push_back(extraEnv2);
+  if (!extraEnv3.empty()) fixtures.push_back(extraEnv3);
   std::wstring cmd;
   std::vector<wchar_t> env;
   if (how == Start::LoggedIn) {
@@ -750,6 +756,8 @@ int wmain(int argc, wchar_t** argv) {
   bool androidSession = false;
   bool captureFallback = false;
   bool foreignPeer = false;
+  bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
+  bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
@@ -764,6 +772,8 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
+    if (a == L"--still-screen") stillScreen = true;
+    if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
       androidSession = true;  // the same shared-session setup; its own steps below
@@ -794,6 +804,7 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  if (stillScreen && FAILED(MFStartup(MF_VERSION))) return 1;  // capture-lifecycle r1 (PS): the product decoder
 
   StagingDir staging;
   if (!staging.Create(L"prelogin_login")) {
@@ -832,7 +843,7 @@ int wmain(int argc, wchar_t** argv) {
   HANDLE restricted = token_without_shutdown_privilege();
   Host host;
   const uint16_t hostPort = e2e_pick_free_udp_port();
-  if (!notPrelogin && restricted && hostPort != 0) {
+  if (!notPrelogin && !stillScreen && restricted && hostPort != 0) {
     // r6 V1 counter-example, first: the worker started the way the service started it BEFORE r6 -- the
     // same argument list, the service's own environment with none of the product's switches -- ends at
     // once (rc 11: the h264 switch is missing). This is what every reboot did.
@@ -908,9 +919,17 @@ int wmain(int argc, wchar_t** argv) {
                                   lockScreen ? L"GNLINK_STREAM_TEST_FAKE_LOCK_UNTIL_EVENT=" + seam.unlockEvent
                                   : sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000"
                                   : captureFallback ? L"GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS=8000"
+                                  : (stillScreen && !noAlias) ? L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Winlogon"
+                                  : stillScreen ? L""
                                   : notPrelogin ? L""
                                                 : L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=3000",  // r7 H6
-                                  lockScreen ? L"GNLINK_STREAM_TEST_UNLOCK_PIPE=" + seam.unlockPipe() : std::wstring());
+                                  lockScreen ? L"GNLINK_STREAM_TEST_UNLOCK_PIPE=" + seam.unlockPipe()
+                                  : (stillScreen && !noAlias) ? std::wstring(L"GNLINK_STREAM_TEST_DESKTOP_ALIAS=Winlogon")
+                                                              : std::wstring(),
+                                  // capture-lifecycle r1 (PS): this PC's desktop is never still (60 content
+                                  // updates/s measured 10-26, a user at work on it) -- the test build stands
+                                  // it in for a still logon screen (host_capture_session.cpp).
+                                  stillScreen ? std::wstring(L"GNLINK_STREAM_TEST_STILL_SCREEN=1") : std::wstring());
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
         started);
@@ -1130,6 +1149,16 @@ int wmain(int argc, wchar_t** argv) {
   ViewerState ctx;
   std::thread worker, ingress;
   std::atomic<bool> ingressStop{false};
+  // capture-lifecycle r1 (PS): what the product receiver published, as the renderer would show it.
+  struct Shown {
+    uint64_t us = 0;
+    bool synthetic = false;
+    uint32_t lumaSpread = 0, w = 0, h = 0;
+  };
+  std::vector<Shown> shown;
+  std::mutex shownMu;
+  std::thread presentThread;
+  std::optional<remote60::native_poc::viewer::VideoReceiver> receiver;
   std::atomic<uint64_t> media{0};
   uint32_t nextResumeId = 0x7500;
   uint64_t generation = 1;
@@ -1219,6 +1248,93 @@ int wmain(int argc, wchar_t** argv) {
         [](const std::string& line) { std::cout << "    " << line << "\n"; }, [&nextResumeId]() { return ++nextResumeId; },
         [&generation]() { return generation; }, cfg, (ackFeatures & kUdpFeatureControlResume) != 0, peer.sin_addr.s_addr,
         peer.sin_port);
+    if (stillScreen) {
+      // capture-lifecycle r1 (PS): the product's receive chain instead of a datagram counter -- set up with the
+      // calls viewer_stats_chain_e2e_test makes (VideoReceiver::Run: assembler, FrameGate, MF decoder,
+      // FrameBuffer; it also feeds the control tunnel). NACK off (not asked in this Hello).
+      using namespace remote60::native_poc::viewer;
+      static Args rxArgs;
+      rxArgs.codec = "h264";
+      rxArgs.transport = "udp";
+      rxArgs.fpsHint = 30;
+      rxArgs.udpMtu = 1200;
+      rxArgs.inputLogEvery = 0;
+      static DecoderState dec;
+      dec.useH264 = true;
+      dec.transport = VideoTransport::Udp;
+      static FrameGateState gate;
+      gate.catchupReenterMinIntervalUs = kCatchupReenterMinIntervalUsDefault;
+      gate.staleCaptureDropUs = kStaleCaptureDropUs;
+      gate.staleReferenceRecoveryMinIntervalUs = kStaleRecoveryMinIntervalUsDefault;
+      gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;
+      gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;
+      gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;
+      gate.catchupLagDropUs = kCatchupLagDropUs;
+      gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;
+      gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
+      gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
+      gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
+      gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
+      gate.waitForKeyFrame = true;
+      ctx.picker.visible.store(false);
+      ctx.control.keyframeRequests.Reset();
+      VideoReceiver::NackOptions nack;
+      nack.enabled = false;
+      receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
+      ingress = std::thread([&] { receiver->Run(); });
+      // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
+      // of a sparse sample of the visible picture).
+      presentThread = std::thread([&] {
+        uint64_t seen = 0;
+        while (!ingressStop.load() && ctx.session.running.load()) {
+          Shown s{};
+          bool fresh = false;
+          {
+            std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+            auto& f = ctx.frameBuf.frame;
+            if (f.version != seen && f.bytes && !f.bytes->empty() && f.width > 0 && f.height > 0) {
+              seen = f.version;
+              fresh = true;
+              ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
+              if (!f.synthetic) ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
+              s.synthetic = f.synthetic;
+              s.w = f.width;
+              s.h = f.height;
+              const uint8_t* b = f.bytes->data();
+              const size_t n = f.bytes->size();
+              int lo = 255, hi = 0;
+              for (uint32_t y = 0; y < f.height; y += 17) {
+                for (uint32_t x = 0; x < f.width; x += 23) {
+                  int luma = -1;
+                  if (f.format == SharedFrame::PixelFormat::Bgra32) {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + static_cast<size_t>(f.visibleLeft + x) * 4;
+                    if (at + 2 < n) luma = (b[at] * 29 + b[at + 1] * 150 + b[at + 2] * 77) >> 8;
+                  } else {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + (f.visibleLeft + x);
+                    if (at < n) luma = b[at];
+                  }
+                  if (luma >= 0) {
+                    lo = (std::min)(lo, luma);
+                    hi = (std::max)(hi, luma);
+                  }
+                }
+              }
+              s.lumaSpread = hi >= lo ? static_cast<uint32_t>(hi - lo) : 0;
+            }
+          }
+          if (fresh) {
+            s.us = qpc_now_us();
+            std::lock_guard<std::mutex> lk(shownMu);
+            shown.push_back(s);
+          }
+          Sleep(2);
+        }
+      });
+      // The picker-first start, as viewer_startup.cpp:186 does it: "stream off" queued before the control
+      // link runs, so it is the first thing the host hears (10-22: 2 ms after the version exchange).
+      ctx.control.streamState.Request(false);
+      connected = true;  // the viewer starts in its picker: no picture is owed yet
+    } else {
     ingress = std::thread([&] {
       std::vector<uint8_t> buf(2048);
       while (!ingressStop.load()) {
@@ -1234,6 +1350,7 @@ int wmain(int argc, wchar_t** argv) {
     });
     connected = wait_until([&] { return media.load() > 0; }, 20000);
     check("video is arriving", connected, std::to_string(media.load()) + " media datagrams");
+    }  // capture-lifecycle r1: !stillScreen
     if (captureFallback) {
       // r10 T2: mid-stream the DXGI worker finds the input desktop is not the one served and asks for a
       // fallback. Before login there is none: the worker must stop serving and leave (exit 15) -- not move
@@ -1251,7 +1368,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     static remote60::native_poc::viewer::Args args;
     args.inputLogEvery = 0;
-    static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/false);
+    static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/stillScreen);
     ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
     ctx.control.connected.store(true, std::memory_order_relaxed);
     worker = std::thread([&] { control.Run(); });
@@ -1259,7 +1376,7 @@ int wmain(int argc, wchar_t** argv) {
     // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
     // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
     // (the main --prelogin run; the other modes start their host without the delay).
-    if (connected && !notPrelogin && !sessionEnds && !captureFallback) {
+    if (connected && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
       {
         std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
         ctx.frameBuf.frame.width = 320;
@@ -1377,6 +1494,85 @@ int wmain(int argc, wchar_t** argv) {
     wait_until([&] { return !IsWindow(prompt); }, 3000);
   };
 
+  // ---- capture-lifecycle r1 (PS, Codex §2/§3): a STILL logon screen, picked from the picker. The 10-22
+  // field case end to end: the viewer starts in its picker (stream off), waits there, then picks the
+  // desktop -- and must SEE the logon screen within 1 s, keep seeing it refreshed (500 ms), and the worker
+  // must live through a pick after the idle detach (10-22: exit 15). Judged on DECODED frames that the
+  // product's receiver (VideoReceiver: assembler, FrameGate, MF decoder, FrameBuffer) published -- not on
+  // datagrams. What differs from the product, said once: the worker serves "Winlogon" on this test user's
+  // "Default" desktop (GNLINK_STREAM_TEST_DESKTOP_ALIAS -- the name it is shown, desktop_name_seam.hpp), so
+  // the pixels are this desktop's; that desktop is made STILL by the test build
+  // (GNLINK_STREAM_TEST_STILL_SCREEN: of what duplication reports, only what a still screen gives passes);
+  // the present thread stamps what the renderer would show (no window).
+  if (stillScreen && connected) {
+    std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
+    const auto frames_since = [&](uint64_t fromUs) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      return static_cast<size_t>(std::count_if(shown.begin(), shown.end(), [&](const Shown& s) { return s.us >= fromUs; }));
+    };
+    const auto first_since = [&](uint64_t fromUs, Shown* out) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      for (const Shown& s : shown) {
+        if (s.us >= fromUs) {
+          *out = s;
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto pick_after = [&](const char* name, int pickerMs) {
+      std::cout << "\n--- PS " << name << ": " << pickerMs << " ms in the picker (stream off), then the desktop ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(static_cast<DWORD>(pickerMs));
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Shown first{};
+      const bool got = wait_until([&] { return first_since(t0, &first); }, 4000);
+      const uint64_t latencyMs = got ? (first.us - t0) / 1000 : 0;
+      check((std::string("PS ") + name + ": THE LOGON SCREEN IS SHOWN WITHIN 1 s OF THE PICK (a decoded frame)").c_str(),
+            got && latencyMs <= 1000, got ? std::to_string(latencyMs) + " ms" : std::string("no decoded frame in 4 s"));
+      check((std::string("PS ") + name + ": ...and it is a picture, not a blank (luma spread)").c_str(),
+            got && first.lumaSpread >= 8,
+            got ? "spread=" + std::to_string(first.lumaSpread) + " " + std::to_string(first.w) + "x" +
+                      std::to_string(first.h) + (first.synthetic ? " (re-served cached frame)" : " (captured frame)")
+                : std::string());
+      Sleep(3000);
+      const size_t refreshed = frames_since(t0 + 1000000ULL);
+      check((std::string("PS ") + name + ": THE STILL SCREEN KEEPS BEING REFRESHED (>= 4 frames in the next 3 s, 500 ms cadence)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " frames");
+      check((std::string("PS ") + name + ": the worker is still serving (no exit 15 / 14)").c_str(), worker_alive());
+    };
+    // The viewer started in its picker; the worker's capture comes up behind it.
+    Sleep(1500);
+    pick_after("A (still attached)", 3000);
+    pick_after("B (after the idle detach)", 10000);
+    pick_after("B2 (after the idle detach, again)", 10000);
+    check("PS: the worker never asked for WGC before login (r10 T2 path not taken)",
+          host.log().find("capture cannot continue on the logon desktop") == std::string::npos &&
+              host.log().find("wgc requested") == std::string::npos,
+          host.log().find("capture cannot continue") == std::string::npos ? std::string()
+                                                                           : host.log().substr(host.log().find("capture cannot continue"), 200));
+    std::cout << "    host: full-frame asks=" << host.Count("full-frame ask=") << " dxgi reacquire delivered="
+              << host.Count("full-frame reacquire: delivered") << " cache-cleared=" << host.Count("bootstrap-cache cleared")
+              << " idle-detach=" << host.Count("capture detached (idle)") << "\n";
+    // The host's own account of the run, for the evidence (stillness: content acquires per second).
+    {
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"dxgi-acquire", "full-frame", "[desktop]", "bootstrap-cache", "stream-state", "capture detached",
+                                "capture reattached", "stream active", "stream inactive", "trailing-edge kick",
+                                "capture cannot continue", "desktop_backend="}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+
   const bool ready = connected && pump_until([&] { return ctx.control.lastRttUs.load() > 0; }, 25000);
   if (!androidSession && !captureFallback) check("the worker completes a round trip with the host", ready);
   const auto flags = [&] { return ctx.session.hostCaptureFlags.load(); };
@@ -1385,7 +1581,7 @@ int wmain(int argc, wchar_t** argv) {
     check("the toolbar window exists", bar != nullptr);
   }
 
-  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback) {
+  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
     std::cout << "\n--- the host is at the pre-login screen ---\n";
     check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
           std::to_string(flags()));
@@ -2310,6 +2506,8 @@ int wmain(int argc, wchar_t** argv) {
   if (worker.joinable()) worker.join();
   ingressStop.store(true);
   if (ingress.joinable()) ingress.join();
+  if (presentThread.joinable()) presentThread.join();
+  receiver.reset();  // capture-lifecycle r1 (PS): its decoder goes while Media Foundation is still up
   if (ctx.session.sock != INVALID_SOCKET) closesocket(ctx.session.sock);
   session_toolbar_destroy();
   if (viewerWindow) DestroyWindow(viewerWindow);
@@ -2335,6 +2533,7 @@ int wmain(int argc, wchar_t** argv) {
 
   std::cout.rdbuf(tee.real);
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
+  if (stillScreen) MFShutdown();
   WSACleanup();
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks << " checks, "
             << gFailures << " failed)\n";
