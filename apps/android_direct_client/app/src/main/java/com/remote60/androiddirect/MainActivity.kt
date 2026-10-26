@@ -5162,6 +5162,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val sharpenHandler = Handler(Looper.getMainLooper())
     private var sharpenStartTimeout: Runnable? = null
     private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
+    /** sh-strength r2 B: the display-size pass (test builds only; the shipped seam always answers 0 = A). */
+    private val sharpenDisplayPass: Int by lazy { SharpenTestSeam.displayPassFrom(intent) }
+    private var sharpenDisplayPlacementLogged = ""
+
+    /** B is in effect while the sharpening renderer is the TextureView's producer (starting or live). */
+    private fun sharpenDisplayPassActive(): Boolean =
+        sharpenDisplayPass != 0 &&
+            (sharpenPolicy.path == SharpenPathPolicy.Path.STARTING || sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
     // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
     private val latchClassifier = LatchClassifier()
     private val sharpenGate = SharpenOutputGate()
@@ -5544,6 +5553,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resolveSurfaceBufferWidth(): Int {
+        // sh-strength r2 B: the pass draws at the view's pixel size (the remote source size is unchanged elsewhere).
+        if (sharpenDisplayPassActive()) return videoTextureView.width
         if (videoWidth > 0) return videoWidth
         if (expectedContentWidth > 0) return expectedContentWidth
         if (videoTextureView.width > 0) return videoTextureView.width
@@ -5551,6 +5562,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resolveSurfaceBufferHeight(): Int {
+        if (sharpenDisplayPassActive()) return videoTextureView.height
         if (videoHeight > 0) return videoHeight
         if (expectedContentHeight > 0) return expectedContentHeight
         if (videoTextureView.height > 0) return videoTextureView.height
@@ -5577,6 +5589,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // the placement -- the aspect-correct fit (전체보기), or the zoomed, moved picture (크게보기). One uniform
         // scale (never one axis alone), the same placement input reads.
         val p = viewerViewport.place(viewWidth, viewHeight, resolvedContentWidth, resolvedContentHeight)
+        if (sharpenDisplayPassActive()) {
+            // sh-strength r2 B: the pass draws the picture where the viewport placed it, in a view-sized buffer;
+            // the TextureView adds nothing (identity) -- else the placement would be applied twice. The double
+            // transform is the negative control's (test seam 2) only.
+            val place = if (p != null) DisplayPlacement(p.left, p.top, p.width, p.height)
+            else DisplayPlacement(0f, 0f, viewWidth, viewHeight)
+            if (sharpenDisplayPass == 2 && p != null) {
+                matrix.setScale(p.width / viewWidth, p.height / viewHeight)
+                matrix.postTranslate(p.left, p.top)
+            }
+            videoTextureView.setTransform(matrix)
+            sharpenRenderer?.setDisplayPlacement(place)
+            val logged = "%.1f,%.1f,%.1fx%.1f buffer=%dx%d".format(place.left, place.top, place.width, place.height,
+                surfaceBufferWidth, surfaceBufferHeight)
+            if (logged != sharpenDisplayPlacementLogged) {
+                sharpenDisplayPlacementLogged = logged
+                diagnosticsLog.log("sharpen_display_pass", "mode=$sharpenDisplayPass place=$logged " +
+                    "view=${viewWidth.toInt()}x${viewHeight.toInt()} content=${resolvedContentWidth}x$resolvedContentHeight")
+            }
+            if (::viewerPanChip.isInitialized) renderViewportChips()
+            return
+        }
+        if (sharpenDisplayPass != 0) sharpenRenderer?.setDisplayPlacement(null)
         if (p == null) {
             videoTextureView.setTransform(matrix)
             return
