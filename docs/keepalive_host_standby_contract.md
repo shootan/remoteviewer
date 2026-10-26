@@ -70,7 +70,7 @@
 - 공존: 한 호스트의 standby lease 여럿이 공존한다. 새 standby lease 는 다른 lease·capability 를 폐기하지 않는다. **legacy lease**(49 B Hello, observe 소켓, newest-wins)는 그대로이고 standby lease 를 끊지 않는다. standby capability 로 legacy Hello 불가, legacy capability 로 standby lease 불가.
 - **NAT 경로(호스트 변경 없음)**: heartbeat 의 `pendingPunch` 에 예약마다 entry 하나를 더 싣는다 — `RELAY_HOST_FACING_IP:<예약 포트>`, **어느 클라이언트도 갖지 않는 token**. (클라이언트 token 을 두 번 싣지 않는다 — 두 번째 항목이 같은 capability 로 두 번째 admission 을 허락하게 된다.) 호스트는 기존대로 모든 entry 에 media 소켓으로 punch 하고, 예약 소켓은 **호스트 주소에서 온 첫 datagram 의 tuple 을 pin**(포트 무관 — symmetric NAT 은 목적지마다 새로 매핑)한 뒤 그 밖은 받지 않는다. heartbeat 의 전역 tuple 을 pin 된 lease 에 덮지 않는다(호스트가 이동하면 pin 만 놓고 다음 datagram 이 다시 pin). 예약 소켓도 호스트 쪽으로 punch 1회를 보낸다(주소만 거르는 NAT 용).
 - 상한: 호스트당 8(legacy lease 포함), 계정·client wire IP·전체 소켓 상한(환경변수). 회수: 세션 drop 이 소켓·색인·capability 를 함께 닫는다 — 예약 TTL = capability TTL(60 s), provisional 30 s, client 무음 60 s, `closeHostsNow`(호스트 비활성·계정 철회).
-- **클라이언트 계약**: client-facing 소켓은 공유라 client→host 는 client 끝점으로 가른다 → **host lease 하나에 UDP 소켓 하나**. ②APK/③Viewer 는 여러 host 를 한 소켓으로 다중화하지 않는다.
+- **클라이언트 계약**: client-facing 소켓은 공유라 client→host 는 client 끝점으로 가른다 → **host lease 하나에 UDP 소켓 하나**. ②APK/③Viewer 는 여러 host 를 한 소켓으로 다중화하지 않는다. 또 legacy lease 끝점에서 온 Standby* 는 relay 가 버린다 — relay 경유의 standby probe 는 기존 수동 연결 위가 아니라 자기 소켓의 standby connect 로 한다(직결은 무관).
 - (b) 공유 host-facing 주소 + entry demux 는 R2 에서 제외(S4): 그 뒤에서는 호스트의 control/ACK/NACK/resume/bulk gate 가 주소라 parked 클라이언트의 패킷이 통과한다(부정 대조 KS4 로 확인).
 
 ## 3. 아직 계약 밖·다음 단계에서 정할 것
