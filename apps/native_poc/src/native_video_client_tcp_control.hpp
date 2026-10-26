@@ -24,6 +24,7 @@ enum class TcpControlResponseKind : uint8_t {
   ImeStateResponse,
   RebootReply,  // prelogin-service r3
   PreloginStatus,  // prelogin-ui r9 R5
+  DesktopBackendStatus,  // capture-lifecycle r1 (UA-2)
 };
 
 struct TcpControlResponse {
@@ -39,6 +40,7 @@ struct TcpControlResponse {
   ControlImeStateResponseMessage imeStateResponse{};
   ControlRebootReplyMessage rebootReply{};  // prelogin-service r3
   ControlPreloginStatusMessage preloginStatus{};  // prelogin-ui r9 R5
+  ControlDesktopBackendStatusMessage desktopBackendStatus{};  // capture-lifecycle r1 (UA-2)
 };
 
 // These take a ControlLink rather than a socket because the same exchange runs over TCP on a

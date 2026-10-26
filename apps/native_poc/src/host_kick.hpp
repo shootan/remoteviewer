@@ -96,12 +96,13 @@ struct KickState {
     if (stampUs > lastEncoderStampUs) lastEncoderStampUs = stampUs;
     if (synthetic && stampUs > lastSyntheticStampUs) lastSyntheticStampUs = stampUs;
   }
-  // Periodic static refresh cadence (the kick-side half of the stage condition): no kick pending, an AU
-  // has been seen, and both the emitted-AU and the attempt anchors are at least one interval old.
+  // Periodic static refresh cadence (the kick-side half of the stage condition): no kick pending, and both
+  // the emitted-AU and the attempt anchors are at least one interval old. capture-lifecycle r1 (Codex §2):
+  // NOT "an AU has been seen" -- a still screen whose first picture never went out (the 10-22 logon
+  // screen) is exactly the one that needs it; the attempt anchor alone keeps it at the cadence.
   bool StaticRefreshDue(uint64_t nowUs) const {
     const KickState& kick = *this;
     return !kick.pending &&
-           kick.lastEmittedAuCaptureUs != 0 &&
            nowUs >= kick.lastEmittedAuCaptureUs + kick.staticRefreshIntervalUs &&
            nowUs >= kick.lastStaticRefreshAttemptUs + kick.staticRefreshIntervalUs;
   }

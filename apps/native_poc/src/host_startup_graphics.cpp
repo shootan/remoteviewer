@@ -208,6 +208,7 @@ int startup_select_capture_target(HostContext& hx) {
 #endif
   capture.windowTargetConfigured = capture.windowCriteria.enabled();
   backend.requested = desktop_capture_backend_from_env();
+  backend.startupRequested = backend.requested;  // capture-lifecycle r1 (UA-2): what a new session starts from
   // dxgi-wedge-fix r1 (Codex B4/B5): the supervisor's quarantine is a separate signal from what was
   // requested. The pre-login worker serves Winlogon through DXGI only and ends rather than falls back
   // (r10 T2), so a quarantine never applies to it -- whatever its environment says.

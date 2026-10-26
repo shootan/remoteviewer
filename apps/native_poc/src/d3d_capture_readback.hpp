@@ -34,8 +34,13 @@ struct CaptureFrameMeta {
   // Capture attachment (session) cookie the frame was submitted under. The host bumps this on
   // every pool recreate; a readback completion whose cookie no longer matches the live one
   // belonged to a previous attachment and is dropped instead of published under the new target.
-  // 0 means "no cookie carried" (e.g. the GDI path) and is never checked.
+  // 0 means "no cookie carried" and is never checked by the readback itself; the host's PublishFrame
+  // (capture-lifecycle r3) refuses it -- every capture path (WGC, DXGI, GDI) now carries its own.
   uint64_t attachmentCookie = 0;
+  // capture-lifecycle r3 (Codex N1-b): the host's bootstrap-cache continuity token when the frame was taken
+  // (CaptureState::cacheContinuity). Every cache invalidation moves it; a frame taken before one is never
+  // cached after it, however late its readback completes.
+  uint64_t cacheContinuity = 0;
   // Callback-side timings, filled by Submit().
   uint64_t d3dWaitUs = 0;
   uint64_t submitCopyUs = 0;

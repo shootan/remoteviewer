@@ -22,6 +22,7 @@
 #include <iostream>
 #include <string>
 
+#include "desktop_name_seam.hpp"
 #include "stoppable_worker.hpp"
 
 namespace remote60::native_poc::prelogin {
@@ -49,7 +50,8 @@ inline void (*&PreloginBeforeExitHook())() {
   for (;;) Sleep(1000);
 }
 
-// The input desktop's name now; empty when it cannot be opened.
+// The input desktop's name now; empty when it cannot be opened. (capture-lifecycle r1: a test build's
+// stand-in name, desktop_name_seam.hpp; the product's is the real one.)
 inline std::wstring InputDesktopName() {
   std::wstring name;
   if (HDESK d = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS)) {
@@ -58,7 +60,7 @@ inline std::wstring InputDesktopName() {
     if (GetUserObjectInformationW(d, UOI_NAME, buf, sizeof(buf), &needed)) name = buf;
     CloseDesktop(d);
   }
-  return name;
+  return SeamInputDesktopName(name);
 }
 
 // r17 R16-1: ONE permanent "this worker has left" for the whole process. Whichever prelogin path actually

@@ -194,6 +194,19 @@ SecureUnlockResult status(Conn& c, Os& os, uint32_t requestId, uint64_t cookie =
   return r;
 }
 
+// lk-ux-retry r1: the host's LockCredSupersede (kind 9) for `requestId` of the control session `cookie`.
+SecureUnlockResult supersede(Conn& c, Os& os, uint32_t requestId, uint64_t cookie = 0xC00C1E) {
+  SecureUnlockQuery q{};
+  q.kind = static_cast<uint16_t>(SecureUnlockKind::LockCredSupersede);
+  q.requestId = requestId;
+  q.clientSessionCookie = cookie;
+  const sus::UnlockPrimitives p = os.prims();
+  sus::HandleLockCredSupersede(c.us, q, p, c.writer());
+  SecureUnlockResult r{};
+  if (c.last.size() == sizeof(r)) std::memcpy(&r, c.last.data(), sizeof(r));
+  return r;
+}
+
 uint16_t st(UnlockStage s) { return static_cast<uint16_t>(s); }
 std::string stage_of(const SecureUnlockResult& r) {
   return "stage=" + std::to_string(r.stage) + " terminal=" + std::to_string(r.terminal);
@@ -224,6 +237,12 @@ int main() {
     });
     std::memcpy(&r, out.data(), sizeof(r));
     check("...and one that cannot lists nothing", r.features == 0);
+    sus::HandleCapabilities(q, os.prims(), [&](const void* d, size_t n) {
+      out.assign(static_cast<const uint8_t*>(d), static_cast<const uint8_t*>(d) + n);
+    });
+    std::memcpy(&r, out.data(), sizeof(r));
+    check("lk-ux-retry: the service that types also lists LockCredRetryV1 (it can end a waiting credential)",
+          (r.features & remote60::native_poc::kSecureUnlockFeatureLockCredRetryV1) != 0);
   }
 
   std::printf("\n[who gets a lock-credential challenge]\n");
@@ -524,6 +543,98 @@ int main() {
     const SecureUnlockResult dup = sealed(a, os, s, 5);
     check("L1: ...nor its cached sealed answer (another session's sealed request is not a 'duplicate' of it)",
           dup.stage != st(UnlockStage::TargetNotReady) && os.typed.empty(), stage_of(dup));
+  }
+
+  std::printf("\n[lk-ux-retry r1: the same connection's explicit retry ends its own waiting credential]\n");
+  {
+    // The user's 10-22 case: a wrong password typed, Windows refused it, the wait goes on -- then the retry.
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c1 = challenge(a, os, 41, true);
+    (void)sealed(a, os, seal(c1, u"wrong-pw", SealAs::LockCred));
+    const SecureUnlockResult sup = supersede(a, os, 41);
+    check("supersede of this connection's waiting request: Superseded, terminal",
+          sup.requestId == 41 && sup.stage == st(UnlockStage::Superseded) && sup.terminal == 1, stage_of(sup));
+    check("...said in one line without the password",
+          !os.log.empty() && os.log.back().find("superseded") != std::string::npos &&
+              os.log.back().find("wrong-pw") == std::string::npos,
+          os.log.empty() ? "" : os.log.back());
+    const SecureUnlockResult old = status(a, os, 41);
+    check("its status from then on: the same Superseded (the old poll ends with it)",
+          old.stage == st(UnlockStage::Superseded) && old.terminal == 1, stage_of(old));
+    const SecureUnlockResult replay = sealed(a, os, seal(c1, u"wrong-pw", SealAs::LockCred), 3);
+    check("the old sealed request again: its final answer, typed 0 more times",
+          replay.stage == st(UnlockStage::Superseded) && os.typed.size() == 1, stage_of(replay));
+    const SecureUnlockChallengeResponse c2 = challenge(a, os, 42, true);
+    check("the new attempt: a NEW challenge (not 'pending'), its own challenge id",
+          c2.stage == st(UnlockStage::ChallengeIssued) && c2.requestId == 42 &&
+              std::memcmp(c2.challengeId, c1.challengeId, sizeof(c1.challengeId)) != 0);
+    const SecureUnlockResult r2 = sealed(a, os, seal(c2, u"right-pw", SealAs::LockCred), 4);
+    check("...typed once, the new password (the agent replaces the field's content)",
+          r2.stage == st(UnlockStage::Injected) && r2.terminal == 0 && os.typed.size() == 2 &&
+              os.typed[1].text == u"right-pw",
+          stage_of(r2));
+    const SecureUnlockResult oldAgain = status(a, os, 41);
+    const SecureUnlockResult cur = status(a, os, 42);
+    check("the old request's status does not reach the new one (new still Injected, waiting)",
+          oldAgain.stage != st(UnlockStage::Injected) && cur.stage == st(UnlockStage::Injected) && cur.terminal == 0,
+          "old " + stage_of(oldAgain) + " new " + stage_of(cur));
+    const SecureUnlockResult oldSup = supersede(a, os, 41);
+    const SecureUnlockResult curAfter = status(a, os, 42);
+    check("a late supersede of the OLD id ends nothing of the new one (not Superseded for 42)",
+          oldSup.requestId == 41, stage_of(oldSup));
+    check("...the new one still waits", curAfter.stage == st(UnlockStage::Injected) && curAfter.terminal == 0,
+          stage_of(curAfter));
+    const SecureUnlockResult oldSeal = sealed(a, os, seal(c1, u"wrong-pw", SealAs::LockCred), 5);
+    check("the old seal re-sent during the new attempt: types nothing", os.typed.size() == 2, stage_of(oldSeal));
+    os.locked[1] = false;
+    ++os.topo;
+    const SecureUnlockResult done = status(a, os, 42);
+    check("the new attempt's unlock: SessionUnlocked", done.stage == st(UnlockStage::SessionUnlocked) && done.terminal == 1,
+          stage_of(done));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 43, true);
+    (void)sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    const SecureUnlockResult other = supersede(a, os, 43, 0xD00D);
+    const SecureUnlockResult wrongId = supersede(a, os, 44);
+    const SecureUnlockResult still = status(a, os, 43);
+    check("another control session cannot end it (RejectedPolicy)", other.stage == st(UnlockStage::RejectedPolicy),
+          stage_of(other));
+    check("nor a request id that is not the waiting one", wrongId.stage == st(UnlockStage::RejectedPolicy), stage_of(wrongId));
+    check("...and the waiting one is untouched", still.stage == st(UnlockStage::Injected) && still.terminal == 0,
+          stage_of(still));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 45, true);
+    (void)sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    os.locked[1] = false;
+    ++os.topo;  // it unlocked before the retry reached the service
+    const SecureUnlockResult sup = supersede(a, os, 45);
+    check("a retry after it already unlocked: the real answer (SessionUnlocked), not 'superseded'",
+          sup.stage == st(UnlockStage::SessionUnlocked) && sup.terminal == 1, stage_of(sup));
+  }
+  {
+    Os os;
+    Conn a(101, 1);
+    (void)challenge(a, os, 46, true);
+    const SecureUnlockResult sup = supersede(a, os, 46);
+    check("a challenge not typed yet has nothing waiting to end: RejectedPolicy (the host then sends nothing)",
+          sup.stage == st(UnlockStage::RejectedPolicy) && sup.terminal == 1 && os.typed.empty(), stage_of(sup));
+  }
+  {
+    Os os;
+    os.typeAnswer = UnlockStage::TargetNotReady;
+    Conn a(101, 1);
+    const SecureUnlockChallengeResponse c = challenge(a, os, 47, true);
+    (void)sealed(a, os, seal(c, u"pw", SealAs::LockCred));
+    const SecureUnlockResult sup = supersede(a, os, 47);
+    check("a request that already ended untyped: its own final answer (TargetNotReady), not 'superseded'",
+          sup.stage == st(UnlockStage::TargetNotReady) && sup.terminal == 1, stage_of(sup));
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

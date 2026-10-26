@@ -1729,7 +1729,54 @@ bool test_sequence_gap_response() {
   return true;
 }
 
+// capture-lifecycle r2 (Codex N3): a question never replaces a change waiting to go out, in either order.
+bool test_desktop_backend_control() {
+  using remote60::native_poc::DesktopBackendControl;
+  using remote60::native_poc::PendingDesktopBackendRequest;
+  {
+    DesktopBackendControl c;
+    c.SetHostAnswers(true);
+    c.Request(2);
+    if (!expect(c.Query(), "backend: a question toward a host that answers is queued")) return false;
+    PendingDesktopBackendRequest out{};
+    if (!expect(c.ConsumePending(&out) && out.backend == 2 && out.wantsStatus,
+                "backend: Request then Query -> the WGC change goes out (asking for the status)")) return false;
+    if (!expect(!c.ConsumePending(&out), "backend: ...and its answer is the question's: nothing more")) return false;
+  }
+  {
+    DesktopBackendControl c;
+    c.SetHostAnswers(true);
+    c.Query();
+    PendingDesktopBackendRequest q{};
+    if (!expect(c.ConsumePending(&q) && q.backend == 0 && q.wantsStatus, "backend: Query alone -> a question")) return false;
+    c.Request(2);
+    PendingDesktopBackendRequest out{};
+    if (!expect(c.ConsumePending(&out) && out.backend == 2 && out.seq == q.seq + 1,
+                "backend: Query taken, then Request -> the change still goes out after it")) return false;
+  }
+  {
+    DesktopBackendControl c;
+    c.SetHostAnswers(true);
+    c.Query();
+    c.Request(2);
+    PendingDesktopBackendRequest out{};
+    if (!expect(c.ConsumePending(&out) && out.backend == 2, "backend: Query then Request -> the change goes out")) return false;
+    if (!expect(!c.ConsumePending(&out), "backend: one message for both")) return false;
+  }
+  {
+    DesktopBackendControl c;  // an old host: no answers
+    c.Request(2);
+    if (!expect(!c.Query(), "backend: no question toward a host that answers none")) return false;
+    PendingDesktopBackendRequest out{};
+    if (!expect(c.ConsumePending(&out) && out.backend == 2 && !out.wantsStatus,
+                "backend: old host -> the change, without asking for an answer")) return false;
+    if (!expect(!c.ConsumePending(&out), "backend: old host -> never a backend-0 question")) return false;
+  }
+  return true;
+}
+
 int main() {
+  if (!test_desktop_backend_control()) return 1;
   if (!test_control_keepalive_interval()) return 1;
   if (!test_ping_and_metrics_order()) return 1;
   if (!test_window_and_input_actions()) return 1;

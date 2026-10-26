@@ -118,6 +118,18 @@ enum class MessageType : uint16_t {
   // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
   // Gated on kCaptureFlagLockCredV1; an old host never sees it.
   ControlLockCredChallengeRequest = 88,
+  // lk-ux-retry r1 (number assigned by the verifier): the SAME connection presses "Windows 로그인" again while
+  // its typed lock-screen credential still waits for an unlock. ControlLockCredRetryChallengeRequestMessage: the
+  // new requestId and the one it supersedes. The host ends that wait in the service (only that connection's,
+  // only that request) and only then asks for the new challenge -- one serialized step; the answer is 41 as for 88.
+  // Gated on kCaptureFlagLockCredRetryV1; an old host never sees it.
+  ControlLockCredRetryChallengeRequest = 89,
+  // capture-lifecycle r1 (UA-2, Codex §1; number assigned by the verifier): host -> viewer, the answer to a
+  // ControlDesktopBackendRequest (34) that set kDesktopBackendRequestFlagStatusV1 -- what this connection's
+  // session asked for, what may run for it and what runs now. Only ever an ANSWER (the control channel is
+  // request/response): a client follows a later change by asking again (backend 0 = ask only). Sent only by a
+  // host with kCaptureFlagDesktopBackendStatusV1, only to a request that asked for it.
+  ControlDesktopBackendStatus = 90,
 };
 
 enum class UdpPacketKind : uint16_t {
@@ -342,6 +354,14 @@ constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
 // for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
 // different role: it never turns on the pre-login control allowlist.
 constexpr uint32_t kCaptureFlagLockCredV1 = 0x40000u;
+// lk-ux-retry r1 (assigned by the verifier): the host and its service can end this connection's own typed-and-waiting lock-screen
+// credential on an explicit retry (ControlLockCredRetryChallengeRequest 89). Without it a viewer keeps saying
+// "wait for the earlier one" -- it never pretends an older service replaced anything.
+constexpr uint32_t kCaptureFlagLockCredRetryV1 = 0x80000u;
+// capture-lifecycle r1 (UA-2, assigned by the verifier): a capture backend asked for applies to THIS session
+// only (a new session starts from the host's default), and a request may ask for its answer
+// (ControlDesktopBackendStatus 90; backend 0 = ask only). Without it a client cannot know either.
+constexpr uint32_t kCaptureFlagDesktopBackendStatusV1 = 0x100000u;
 
 // ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
 // own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
@@ -563,10 +583,31 @@ struct ControlRuntimeEncoderConfigMessage {
 struct ControlDesktopBackendRequestMessage {
   MessageHeader header{};
   uint32_t seq = 0;
-  uint16_t backend = 0;  // 1:dxgi, 2:wgc
-  uint16_t flags = 0;
+  uint16_t backend = 0;  // 1:dxgi, 2:wgc; 0 = ask only (with kDesktopBackendRequestFlagStatusV1, to a 0x100000 host)
+  uint16_t flags = 0;    // kDesktopBackendRequestFlag*
   uint64_t clientSendQpcUs = 0;
 };
+// capture-lifecycle r1: answer this request with ControlDesktopBackendStatus (90). Set only toward a host with
+// kCaptureFlagDesktopBackendStatusV1 -- an older host answers 34 with nothing, and a client waiting would stall.
+constexpr uint16_t kDesktopBackendRequestFlagStatusV1 = 0x1u;
+
+// host -> viewer (90): the backend of this session, as the host's main loop last applied it.
+struct ControlDesktopBackendStatusMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;        // the request's (34) seq
+  uint16_t requested = 0;  // what this session asked for (or the host's default): 1 dxgi, 2 wgc, 3 gdi
+  uint16_t effective = 0;  // what may run for that (the DXGI quarantine applied)
+  uint16_t active = 0;     // what runs now
+  uint16_t flags = 0;      // kDesktopBackendStatusFlag*
+  uint32_t changeCount = 0;  // bumps on every change of the four fields above (in this host process)
+  uint64_t hostSendQpcUs = 0;
+};
+static_assert(sizeof(ControlDesktopBackendStatusMessage) == 32, "desktop backend status wire drift");
+constexpr uint16_t kDesktopBackendStatusFlagSessionScoped = 0x1u;  // the choice ends with this session
+constexpr uint16_t kDesktopBackendStatusFlagDxgiQuarantined = 0x2u;
+constexpr uint16_t kDesktopBackendStatusFlagWindowTarget = 0x4u;   // a window is captured: WGC whatever was asked
+constexpr uint16_t kDesktopBackendStatusFlagBeforeLogin = 0x8u;    // the pre-login worker: DXGI only, requests ignored
+constexpr uint16_t kDesktopBackendStatusFlagNotYetApplied = 0x10u; // the request was not applied in time: as it is now
 
 struct ControlCaptureModeRequestMessage {
   MessageHeader header{};
@@ -881,6 +922,10 @@ enum class UnlockStage : uint16_t {
   // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
   // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
   Busy = 16,
+  // lk-ux-retry r1 (numbers assigned by the verifier):
+  Superseded = 17,       // this typed credential's wait was ended by the same connection's explicit retry.
+                         // GNLink stopped waiting; Windows' own handling of what was typed is not undone.
+  SupersedeRefused = 18, // the earlier wait could not be confirmed ended: the retry sent nothing
 };
 
 // Which sealed purpose a challenge (41) was issued for, in its `reserved` field (lockscreen-cred r1).
@@ -897,6 +942,17 @@ struct ControlUnlockChallengeRequestMessage {
   uint64_t clientSendQpcUs = 0;
 };
 static_assert(sizeof(ControlUnlockChallengeRequestMessage) == 24, "unlock challenge-req wire drift");
+
+// viewer -> host (89, lk-ux-retry r1): a lock-screen challenge that replaces this connection's own waiting one.
+struct ControlLockCredRetryChallengeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;            // the new attempt
+  uint32_t supersedesRequestId = 0;  // the typed attempt still waiting for its unlock
+  uint32_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlLockCredRetryChallengeRequestMessage) == 32, "lock-cred retry-req wire drift");
 
 // host -> client: the one-shot challenge and every binding field (mirrors sealed_unlock::UnlockContext).
 struct ControlUnlockChallengeMessage {

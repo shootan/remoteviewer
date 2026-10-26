@@ -246,8 +246,12 @@ void request_prelogin_login(ViewerState& ctx, HWND owner) {
   if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) return;  // one already on its way
   const int role = policy.role == remote60::native_poc::LogonScreenRole::LockScreen ? kLoginRoleLockScreen
                                                                                     : kLoginRolePrelogin;
-  if (role == kLoginRoleLockScreen && ctx.session.lockCredPending.load(std::memory_order_acquire)) {
-    post_login_outcome(ctx, role, kLoginPending);  // Codex Q1: the earlier one still waits -- said, nothing sent
+  if (role == kLoginRoleLockScreen && ctx.session.lockCredPending.load(std::memory_order_acquire) &&
+      (flags & remote60::native_poc::kCaptureFlagLockCredRetryV1) == 0) {
+    // Codex Q1: the earlier one still waits -- said, nothing sent. (lk-ux-retry r1: only where the host cannot end
+    // that wait; where it can, this press is the explicit retry -- a new prompt, and the control thread ends the
+    // earlier wait before sending the new one.)
+    post_login_outcome(ctx, role, kLoginPending);
     return;
   }
   const uint64_t runGen = ctx.session.controlRunGen.load(std::memory_order_acquire);

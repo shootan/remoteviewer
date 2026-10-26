@@ -389,6 +389,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
 #endif
   // Keys and buttons held from an earlier client are not this one's; a resume keeps its marks.
   clientSession.injectedInput.BeginServe(servedEpoch);
+  // capture-lifecycle r3 (Codex N2 end): this Serve()'s own sequence -- its backend requests carry it, its end
+  // names it.
+  const uint64_t servedSeq =
+      (clientSession.backendServeSeq.fetch_add(1, std::memory_order_acq_rel) + 1) & kBackendServeSeqMask;
   // A new session starts with the stream on, exactly like the first client of a fresh
   // process. The previous session's disconnect turned it off, and a client that never
   // sends stream-state (the Windows client) would otherwise stare at a black screen
@@ -875,6 +879,12 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           offered = gUnlockRelay.LockCredSupportNow() == remote60::native_poc::HostUnlockRelay::LockCredSupport::Supported;
         }
         if (offered) pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredV1;
+        // lk-ux-retry r1: and whether the same service can end this connection's own waiting credential on an
+        // explicit retry -- only then may a viewer send 89 (an older service: the viewer keeps "wait for it").
+        if (offered && gUnlockRelay.LockCredRetrySupported())
+          pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredRetryV1;
+        // capture-lifecycle r1 (UA-2): a backend asked for is this session's, and a request may ask its answer (90).
+        pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagDesktopBackendStatusV1;
         if (offered != lockCredAdvertised) {
           lockCredAdvertised = offered;
           std::cout << "[native-video-host][lock-cred] advertised=" << (offered ? 1 : 0) << " lockKnown=" << own.lockKnown
@@ -976,6 +986,35 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       }
       std::cout << "[native-video-host][lock-cred] challenge requestId=" << req.requestId << " status=" << rsp.status
                 << "\n";
+      rsp.header.magic = remote60::native_poc::kMagic;
+      rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
+      rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
+      if (!link.Write(&rsp, sizeof(rsp))) break;
+      continue;
+    }
+
+    // lk-ux-retry r1: the same connection presses "Windows 로그인" again while its typed credential still waits.
+    if (type == MessageType::ControlLockCredRetryChallengeRequest &&
+        header.size == sizeof(remote60::native_poc::ControlLockCredRetryChallengeRequestMessage)) {
+      remote60::native_poc::ControlLockCredRetryChallengeRequestMessage retry{};
+      retry.header = header;
+      if (!link.Read(&retry.seq, sizeof(retry) - sizeof(MessageHeader))) break;
+      ControlUnlockChallengeRequestMessage req{};
+      req.header = header;
+      req.seq = retry.seq;
+      req.requestId = retry.requestId;
+      req.clientSendQpcUs = retry.clientSendQpcUs;
+      ControlUnlockChallengeMessage rsp{};
+      if (!gUnlockRelay.LockCredRetryChallengeSync(req, retry.supersedesRequestId, unlockCookie, &rsp)) {
+        // No answer in time: not known to have ended the earlier wait -- said as "not ended" (18), never as a
+        // general error the viewer would read as "the earlier one is over".
+        rsp = ControlUnlockChallengeMessage{};
+        rsp.requestId = req.requestId;
+        rsp.status = static_cast<uint16_t>(UnlockStage::SupersedeRefused);
+        rsp.reserved = remote60::native_poc::kUnlockPurposeLockCred;
+      }
+      std::cout << "[native-video-host][lock-cred] retry challenge requestId=" << req.requestId
+                << " supersedes=" << retry.supersedesRequestId << " status=" << rsp.status << "\n";
       rsp.header.magic = remote60::native_poc::kMagic;
       rsp.header.type = static_cast<uint16_t>(MessageType::ControlUnlockChallenge);
       rsp.header.size = static_cast<uint16_t>(sizeof(rsp));
@@ -1874,11 +1913,57 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       req.header = header;
       if (!link.Read(&req.seq, sizeof(req) - sizeof(MessageHeader))) break;
       if (req.backend == 1 || req.backend == 2 || req.backend == 3) {
-        mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend});
+        // capture-lifecycle r2 (Codex N3): the change this session has asked for and the main loop has not yet
+        // handled -- a later question (backend 0) is answered NotYetApplied until it is.
+        capture.backendChangePostedKey.store((servedEpoch << 32) | req.seq, std::memory_order_release);
+        mailbox.PostBackendRequest({servedEpoch, req.seq, req.backend, servedSeq});
         std::cout << "[native-video-host][control] desktop-backend-request seq=" << req.seq
                   << " backend="
                   << (req.backend == 2 ? "wgc" : (req.backend == 3 ? "gdi" : "dxgi"))
-                  << "\n";
+                  << (req.flags & kDesktopBackendRequestFlagStatusV1 ? " status=asked" : "") << "\n";
+      }
+      // capture-lifecycle r1 (UA-2): the answer, if this request asked for it (only a client that saw
+      // kCaptureFlagDesktopBackendStatusV1 does). A change is answered once the main loop handled it -- within
+      // 250 ms: this channel is one request at a time, so pings and key requests wait behind it (verifier
+      // 10-26); past that, as it is now with NotYetApplied, and the client asks again (backend 0 = a question,
+      // answered at once).
+      if ((req.flags & kDesktopBackendRequestFlagStatusV1) != 0) {
+        // capture-lifecycle r2 (Codex N3): "applied" = the status published is THIS session's (the main loop has
+        // made servedEpoch the owner -- never the previous session's choice as this connection's answer) and no
+        // change of this session is waiting (for a change: this one has been handled; for a question: the last
+        // change asked, if any). Waited for up to 250 ms, else answered as it is with NotYetApplied.
+        // r3 (Codex N3-host): every look is ONE snapshot (owner, status, handled key -- host_backend_status_board.hpp),
+        // and a snapshot of another owner answers nothing for this session (fields 0, NotYetApplied).
+        const bool isChange = req.backend == 1 || req.backend == 2 || req.backend == 3;
+        const uint64_t requestKey = (servedEpoch << 32) | req.seq;
+        const uint64_t posted = capture.backendChangePostedKey.load(std::memory_order_acquire);
+        const uint64_t until = GetTickCount64() + 250;
+        BackendStatusAnswer answer;
+        for (;;) {
+          answer = DecideBackendStatusAnswer(capture.backendStatus.Read(), servedEpoch, isChange, requestKey, posted);
+          if (answer.applied || GetTickCount64() >= until ||
+              clientSession.epoch.load(std::memory_order_acquire) != servedEpoch) {
+            break;
+          }
+          Sleep(5);
+        }
+        const bool applied = answer.applied;
+        ControlDesktopBackendStatusMessage st{};
+        st.header.magic = remote60::native_poc::kMagic;
+        st.header.type = static_cast<uint16_t>(MessageType::ControlDesktopBackendStatus);
+        st.header.size = static_cast<uint16_t>(sizeof(st));
+        st.seq = req.seq;
+        st.requested = answer.requested;
+        st.effective = answer.effective;
+        st.active = answer.active;
+        st.flags = answer.flags;
+        if (!applied) st.flags |= kDesktopBackendStatusFlagNotYetApplied;
+        st.changeCount = answer.changes;
+        st.hostSendQpcUs = qpc_now_us();
+        std::cout << "[native-video-host][control] desktop-backend-status seq=" << st.seq << " requested=" << st.requested
+                  << " effective=" << st.effective << " active=" << st.active << " flags=0x" << std::hex << st.flags
+                  << std::dec << "\n";
+        if (!link.Write(&st, sizeof(st))) break;
       }
       continue;
     }
@@ -2099,6 +2184,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
   if (clientSession.epoch.load(std::memory_order_acquire) == servedEpoch &&
       !clientSession.controlResumePending.load(std::memory_order_acquire)) {
     clientSession.streamControlActive.store(false, std::memory_order_release);
+    // capture-lifecycle r2 (Codex N2): the real end of this logical session -- its backend choice ends with it.
+    clientSession.backendSessionEnded.store(PackBackendSessionEnd(servedEpoch, servedSeq), std::memory_order_release);
   }
 }
 

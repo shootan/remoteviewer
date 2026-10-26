@@ -87,6 +87,18 @@ struct DxgiDesktopCaptureSession::Impl {
   uint32_t height = 0;
   HDESK attachedDesktop = nullptr;  // prelogin: the input desktop this worker thread is bound to
   bool refusedDesktop = false;      // r9 W2: the input desktop was another than the one served
+  // capture-lifecycle r1 (PS-A): the host has no picture to encode and the desktop is still, so no
+  // acquire will ever carry one. Set (steady_now_us) by RequestFullFrame; the next acquire -- a
+  // pointer-only one too: its surface is the whole current desktop image -- is handed on as content,
+  // and with no acquire at all the duplication is made anew (its first frame is the full image), at
+  // most kMaxFullFrameRecreates times per request.
+  std::atomic<uint64_t> fullFrameRequestedUs{0};
+  uint32_t fullFrameRecreates = 0;
+  bool testDeliveredSinceDuplication = false;  // TestStill: the current duplication's first frame went out
+  bool testPointerForRequest = false;          // StillPointerFirst: the open request's pointer-only acquire went out
+  bool fullFrameDeclinedLogged = false;        // the pointer-only refusal is said once per request
+  static constexpr uint64_t kFullFrameRecreateAfterUs = 150000;
+  static constexpr uint32_t kMaxFullFrameRecreates = 3;
 
   // Prelogin (r4 #1): bind THIS worker thread to the current input desktop so DXGI/GDI capture the right
   // desktop and can follow a secure-desktop / session switch. Idempotent; closes any prior handle. Called
@@ -322,6 +334,7 @@ struct DxgiDesktopCaptureSession::Impl {
 
   bool recreate_duplication(std::string* detailOut) {
     duplication.Reset();
+    testDeliveredSinceDuplication = false;
 
     Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
     DXGI_OUTPUT_DESC desc{};
@@ -449,7 +462,34 @@ struct DxgiDesktopCaptureSession::Impl {
       const HRESULT hr = duplication->AcquireNextFrame(config.acquireTimeoutMs, &frameInfo, &resource);
       if (progress) progress->lastAcquireHr.store(static_cast<int32_t>(hr), std::memory_order_release);
       markProgress();
-      if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+      // TEST BUILDS ONLY (config.testStill): an acquire a still desktop would not have given is released and
+      // taken as the timeout it would have been.
+      bool testFirstOfDuplication = false;
+      bool testPointerOnly = false;  // StillPointerFirst: this acquire is handed on as carrying no image
+      bool idle = hr == DXGI_ERROR_WAIT_TIMEOUT;
+      if (SUCCEEDED(hr) && config.testStill != DxgiDesktopCaptureConfig::TestStill::Off) {
+        const bool pointerFirst = config.testStill == DxgiDesktopCaptureConfig::TestStill::StillPointerFirst;
+        // Once per open request: the first new-duplication acquire after it is the pointer-only one.
+        const bool requestOpen = fullFrameRequestedUs.load(std::memory_order_acquire) != 0;
+        if (!requestOpen) testPointerForRequest = false;
+        if (pointerFirst && requestOpen && !testDeliveredSinceDuplication && !testPointerForRequest) {
+          testPointerOnly = true;
+          testPointerForRequest = true;
+        }
+        // (Its first acquire that carries a desktop IMAGE -- a pointer-only one does not; see below.)
+        testFirstOfDuplication =
+            !testPointerOnly &&
+            (config.testStill == DxgiDesktopCaptureConfig::TestStill::Still || pointerFirst) &&
+            !testDeliveredSinceDuplication && frameInfo.LastPresentTime.QuadPart != 0;
+        if (!testFirstOfDuplication && !testPointerOnly) {
+          duplication->ReleaseFrame();
+          resource.Reset();
+          idle = true;
+        } else {
+          testDeliveredSinceDuplication = true;
+        }
+      }
+      if (idle) {
         // The routine 100ms idle path -- markProgress above already refreshed the heartbeat, so a
         // static desktop keeps the worker "young" and never trips the wedge watchdog.
         ++stats.timeouts;
@@ -462,6 +502,34 @@ struct DxgiDesktopCaptureSession::Impl {
         // held here and ReleaseFrame timing is unchanged.
         if (config.acquireIdleSleepUs > 0 && !stopRequested.load()) {
           std::this_thread::sleep_for(std::chrono::microseconds(config.acquireIdleSleepUs));
+        }
+        // capture-lifecycle r1 (PS-A): a full frame was asked for and the desktop gives nothing -- a still
+        // screen. A new duplication's first acquire is the whole image; bounded, never a loop.
+        const uint64_t fullAskedUs = fullFrameRequestedUs.load(std::memory_order_acquire);
+        if (fullAskedUs != 0 && steady_now_us() - fullAskedUs >= kFullFrameRecreateAfterUs) {
+          if (fullFrameRecreates >= kMaxFullFrameRecreates) {
+            fullFrameRequestedUs.store(0, std::memory_order_release);
+            fullFrameRecreates = 0;
+            log("capture", "full-frame reacquire gave up after " + std::to_string(kMaxFullFrameRecreates) +
+                               " duplications (no acquire)");
+            continue;
+          }
+          ++fullFrameRecreates;
+          if (config.attachToInputDesktop) {
+            attach_input_desktop();
+            if (refusedDesktop) {
+              request_fallback("prelogin_desktop_not_served");  // r9 W2, as for ACCESS_LOST
+              return;
+            }
+          }
+          std::string detail;
+          if (!recreate_duplication(&detail)) {
+            log("capture", "full-frame reacquire: duplication failed detail=" + detail);
+            request_fallback(detail);
+            return;
+          }
+          fullFrameRequestedUs.store(steady_now_us(), std::memory_order_release);  // the next wait is its own
+          log("capture", "full-frame reacquire: duplication made anew attempt=" + std::to_string(fullFrameRecreates));
         }
         continue;
       }
@@ -555,8 +623,26 @@ struct DxgiDesktopCaptureSession::Impl {
       }
 
       enterPhase(CaptureWorkerPhase::FrameHandler);
+      // capture-lifecycle r1 (PS-A): the frame a full-frame request waits for, handed on as content (at least 1
+      // accumulated). r2: only an acquire that carries a desktop IMAGE (LastPresentTime != 0) answers it -- a
+      // pointer-only acquire's surface may hold no image at all (a new duplication's first one, measured
+      // 10-26: delivered as "the full frame", it was black -- luma spread 0). That one goes on as what it is
+      // (pointer only) and the request stays open (the bounded remake above still runs out).
+      uint32_t handedAccumulated = testPointerOnly ? 0u : frameInfo.AccumulatedFrames;
+      if (testFirstOfDuplication && handedAccumulated == 0) handedAccumulated = 1;  // a new duplication's whole image
+      const bool carriesImage = !testPointerOnly && frameInfo.LastPresentTime.QuadPart != 0;
+      if (carriesImage && fullFrameRequestedUs.exchange(0, std::memory_order_acq_rel) != 0) {
+        if (handedAccumulated == 0) handedAccumulated = 1;
+        log("capture", "full-frame reacquire: delivered after " + std::to_string(fullFrameRecreates) +
+                           " duplication(s) content=1");
+        fullFrameRecreates = 0;
+        fullFrameDeclinedLogged = false;
+      } else if (!carriesImage && fullFrameRequestedUs.load(std::memory_order_acquire) != 0 && !fullFrameDeclinedLogged) {
+        fullFrameDeclinedLogged = true;
+        log("capture", "full-frame reacquire: a pointer-only acquire does not answer it (request kept)");
+      }
       try {
-        if (onFrame) onFrame(texture.Get(), width, height, frameInfo.AccumulatedFrames);
+        if (onFrame) onFrame(texture.Get(), width, height, handedAccumulated);
       } catch (...) {
         releaseFrame();
         request_fallback("dxgi_frame_handler_exception");
@@ -659,6 +745,12 @@ CaptureWorkerSnapshot DxgiDesktopCaptureSession::SnapshotWorker() const {
   s.lastReleaseHr = progress_->lastReleaseHr.load(std::memory_order_acquire);
   s.lastAccumulatedFrames = progress_->lastAccumulatedFrames.load(std::memory_order_acquire);
   return s;
+}
+
+void DxgiDesktopCaptureSession::RequestFullFrame() {
+  if (!impl_) return;
+  uint64_t none = 0;  // a request already waiting keeps its own clock
+  impl_->fullFrameRequestedUs.compare_exchange_strong(none, steady_now_us(), std::memory_order_acq_rel);
 }
 
 uint32_t DxgiDesktopCaptureSession::width() const {

@@ -34,6 +34,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -101,6 +102,17 @@ class HostUnlockRelay {
   // the service issued it for. Returns false if the service is unreachable / timed out.
   bool LockCredChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint64_t clientSessionCookie,
                              ControlUnlockChallengeMessage* out, uint32_t timeoutMs = 3000);
+  // lk-ux-retry r1: whether this service can end a connection's own waiting lock-screen credential
+  // (kSecureUnlockFeatureLockCredRetryV1, from the same capability answer as LockCredSupportNow).
+  bool LockCredRetrySupported() const;
+  // Control thread: the explicit retry. In ONE step on the worker: if THIS control session's typed credential
+  // `supersedesRequestId` still holds the pipe, the service is asked to end its wait (LockCredSupersede) and only
+  // a confirmed end lets the new challenge `req` be asked for, on the same connection. Anything unconfirmed -- the
+  // service's answer, no answer, this session's typed wait being another request, or a service without
+  // LockCredRetryV1 -> `out->status` SupersedeRefused, nothing asked. Another session holding the pipe -> Busy.
+  bool LockCredRetryChallengeSync(const ControlUnlockChallengeRequestMessage& req, uint32_t supersedesRequestId,
+                                  uint64_t clientSessionCookie, ControlUnlockChallengeMessage* out,
+                                  uint32_t timeoutMs = 3000);
   // Control thread: for THIS control session's lock-credential job that is not final yet, ask the service
   // where it is now (bounded wait); the answer replaces the result PollResult reads. False for others.
   bool RefreshLockCredStatus(uint64_t clientSessionCookie, uint32_t requestId, uint32_t timeoutMs = 1000);
@@ -111,11 +123,21 @@ class HostUnlockRelay {
   void Stop();
 
  private:
-  enum class Op { Challenge, LockCredChallenge, Sealed, Capabilities, Status, Release };
+  enum class Op { Challenge, LockCredChallenge, LockCredRetry, Sealed, Capabilities, Status, Release };
+ public:
+  // TEST ONLY (lk-ux-retry r3): called on the worker right before a retry's exchange ("supersede" /
+  // "challenge"), after its fence and before Exchange's own gate -- a test holds it there.
+  void SetRetryIoHookForTest(std::function<void(const char*)> hook) { retryIoHookForTest_ = std::move(hook); }
+ private:
+  std::function<void(const char*)> retryIoHookForTest_;
   struct Command {
     Op op = Op::Challenge;
     uint64_t cookie = 0;
     uint32_t statusRequestId = 0;
+    uint32_t supersedesRequestId = 0;  // lk-ux-retry r1: LockCredRetry only
+    // lk-ux-retry r2 (Codex N1): the whole retry's absolute end (GetTickCount64; 0 = none) -- its wait in the
+    // queue, the supersede and the fresh challenge share it: past it nothing more of the retry is done.
+    uint64_t deadlineMs = 0;
     uint64_t txGen = 0;  // r3 L1-R: the transaction (liveTx_) it was queued for; 0 = none
     ControlUnlockChallengeRequestMessage challenge{};
     ControlUnlockSealedRequestMessage seal{};
@@ -126,15 +148,18 @@ class HostUnlockRelay {
     uint32_t requestId = 0;
     bool operator<(const TxKey& o) const { return cookie != o.cookie ? cookie < o.cookie : requestId < o.requestId; }
   };
-  enum class Io { Ok, Failed, Timeout, Cancelled };
+  enum class Io { Ok, Failed, Timeout, Cancelled, Withdrawn };  // Withdrawn: lk-ux-retry r3, a retry's gate refused to start
 
   void EnsureWorker();
   void WorkerLoop();
   // Returns HANDLE or INVALID_HANDLE_VALUE (opened for overlapped I/O). `busy` (r3): it failed because the
   // pipe's one instance stayed taken -- another host's transaction holds it.
   void* ConnectPipe(bool* busy = nullptr);
+  // lk-ux-retry r3 (Codex N1): `gate` (a retry's command): its write is started only while that retry is still
+  // owned (live) and inside its absolute deadline -- checked under mu_ and the write issued in the same
+  // critical section, so a caller's withdrawal is either before it (nothing written: Io::Withdrawn) or after.
   Io Exchange(void* pipe, const void* req, uint32_t reqSize, uint8_t* buf, uint32_t bufSize, uint32_t replySize,
-              uint32_t deadlineMs);
+              uint32_t deadlineMs, const Command* gate = nullptr);
 
   std::thread worker_;
   std::atomic<bool> running_{false};
@@ -156,6 +181,7 @@ class HostUnlockRelay {
 
   // Capability: its answer, when, and of which server process (under mu_).
   LockCredSupport lockCredSupport_ = LockCredSupport::Unknown;
+  bool lockCredRetry_ = false;  // lk-ux-retry r1: the same answer also listed LockCredRetryV1
   uint64_t capsCheckedMs_ = 0;
   uint32_t capsServerPid_ = 0;
   bool capsInFlight_ = false;

@@ -58,6 +58,11 @@
 #include "viewer_constants.hpp"
 #include "secure_unlock_ipc.hpp"
 #include "viewer_window_proc.hpp"
+#include "viewer_decoder_state.hpp"  // capture-lifecycle r1 (PS): the product receive chain
+#include "viewer_frame_gate_state.hpp"
+#include "viewer_video_receiver.hpp"
+#include <optional>
+#include <mfapi.h>
 #include "viewer_reboot_prompt.hpp"
 #include "native_video_client_session.hpp"
 #include "prelogin_machine_record.hpp"
@@ -87,6 +92,9 @@ namespace {
 
 // A test string, not anybody's password: ASCII, a quote, a space, Latin-1 and a Hangul syllable.
 const std::wstring kSecret = L"Pw-7Qz \"!ä가x";
+// lk-ux-retry r1: the second password of the same connection's explicit retry (the first stands for the wrong one).
+// The same "Pw-7Qz" head, so every "no password in any log" check below covers it too.
+const std::wstring kSecret2 = L"Pw-7Qz-retry 나2";
 
 std::string utf8(const std::wstring& w) {
   if (w.empty()) return {};
@@ -507,7 +515,7 @@ std::vector<wchar_t> test_base_environment(const std::wstring& dir, const std::v
 
 bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, Start how,
                 const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring(),
-                const std::wstring& extraEnv2 = std::wstring()) {
+                const std::wstring& extraEnv2 = std::wstring(), const std::wstring& extraEnv3 = std::wstring()) {
   host->dir = dir;
   const std::wstring myDir = directory_of(self_path());
   // r13 negative control: REMOTE60_E2E_OLD_BIN names a streaming TEST build without the udp-control-peer
@@ -541,6 +549,7 @@ bool start_host(Host* host, const std::wstring& dir, const std::string& url, uin
       L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())};
   if (!extraEnv.empty()) fixtures.push_back(extraEnv);
   if (!extraEnv2.empty()) fixtures.push_back(extraEnv2);
+  if (!extraEnv3.empty()) fixtures.push_back(extraEnv3);
   std::wstring cmd;
   std::vector<wchar_t> env;
   if (how == Start::LoggedIn) {
@@ -651,6 +660,8 @@ bool file_contains(const std::wstring& path, const std::string& needle) {
 std::wstring find_secret_on_disk(const std::wstring& root) {
   const std::string u8 = utf8(kSecret);
   const std::string u16(reinterpret_cast<const char*>(kSecret.data()), kSecret.size() * sizeof(wchar_t));
+  const std::string u8b = utf8(kSecret2);  // lk-ux-retry r1
+  const std::string u16b(reinterpret_cast<const char*>(kSecret2.data()), kSecret2.size() * sizeof(wchar_t));
   std::vector<std::wstring> stack{root};
   while (!stack.empty()) {
     const std::wstring d = stack.back();
@@ -664,7 +675,8 @@ std::wstring find_secret_on_disk(const std::wstring& root) {
       if (n == L"GNLinkCapture.exe") continue;  // the staged copy of THIS test's image, which holds the test string
       if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         stack.push_back(d + n + L"\\");
-      } else if (file_contains(d + n, u8) || file_contains(d + n, u16)) {
+      } else if (file_contains(d + n, u8) || file_contains(d + n, u16) || file_contains(d + n, u8b) ||
+                 file_contains(d + n, u16b)) {
         FindClose(h);
         return d + n;
       }
@@ -683,6 +695,41 @@ std::wstring result_box_text(HWND box) {
   }, 3000);
   Sleep(300);  // painted before anyone takes its picture
   return b;
+}
+
+// lk-ux-retry r1: whether the result window shows ALL of its text -- the text's wrapped height in the label's
+// own font against the label's height, and the label inside the window's client area (a 64 px label cut the
+// retry guidance off mid-sentence). Measured the way the STATIC draws it.
+bool result_box_text_fits(HWND box, std::string* detail) {
+  HWND s = GetDlgItem(box, kPreloginResultTextId);
+  if (!s) return false;
+  wchar_t b[1024] = {};
+  GetWindowTextW(s, b, 1023);
+  RECT lr{}, cr{};
+  GetClientRect(s, &lr);
+  HDC dc = GetDC(s);
+  HFONT font = reinterpret_cast<HFONT>(SendMessageW(s, WM_GETFONT, 0, 0));
+  HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+  RECT tr{0, 0, lr.right, 0};
+  DrawTextW(dc, b, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS);
+  if (old) SelectObject(dc, old);
+  ReleaseDC(s, dc);
+  RECT sw{};
+  GetWindowRect(s, &sw);
+  MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&sw), 2);
+  GetClientRect(box, &cr);
+  HWND ok = GetDlgItem(box, 1);
+  RECT okr{};
+  if (ok) {
+    GetWindowRect(ok, &okr);
+    MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&okr), 2);
+  }
+  if (detail) {
+    *detail = "text " + std::to_string(tr.bottom) + " px in a " + std::to_string(lr.bottom) + " px label; label bottom " +
+              std::to_string(sw.bottom) + ", button " + std::to_string(okr.top) + ".." + std::to_string(okr.bottom) +
+              ", client " + std::to_string(cr.bottom);
+  }
+  return tr.bottom <= lr.bottom && sw.bottom <= cr.bottom && (!ok || (okr.top >= sw.bottom && okr.bottom <= cr.bottom));
 }
 
 // Presses its 확인 button until it is gone.
@@ -709,6 +756,10 @@ int wmain(int argc, wchar_t** argv) {
   bool androidSession = false;
   bool captureFallback = false;
   bool foreignPeer = false;
+  bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
+  bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
+  bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
+  bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
   for (int i = 1; i < argc; ++i) {
     const std::wstring a = argv[i];
     if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
@@ -723,6 +774,10 @@ int wmain(int argc, wchar_t** argv) {
     if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
+    if (a == L"--still-screen") stillScreen = true;
+    if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
+    if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
+    if (a == L"--no-alias") noAlias = true;
     if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
       foreignPeer = true;
       androidSession = true;  // the same shared-session setup; its own steps below
@@ -753,6 +808,7 @@ int wmain(int argc, wchar_t** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  if (stillScreen && FAILED(MFStartup(MF_VERSION))) return 1;  // capture-lifecycle r1 (PS): the product decoder
 
   StagingDir staging;
   if (!staging.Create(L"prelogin_login")) {
@@ -791,7 +847,7 @@ int wmain(int argc, wchar_t** argv) {
   HANDLE restricted = token_without_shutdown_privilege();
   Host host;
   const uint16_t hostPort = e2e_pick_free_udp_port();
-  if (!notPrelogin && restricted && hostPort != 0) {
+  if (!notPrelogin && !stillScreen && restricted && hostPort != 0) {
     // r6 V1 counter-example, first: the worker started the way the service started it BEFORE r6 -- the
     // same argument list, the service's own environment with none of the product's switches -- ends at
     // once (rc 11: the h264 switch is missing). This is what every reboot did.
@@ -867,9 +923,20 @@ int wmain(int argc, wchar_t** argv) {
                                   lockScreen ? L"GNLINK_STREAM_TEST_FAKE_LOCK_UNTIL_EVENT=" + seam.unlockEvent
                                   : sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000"
                                   : captureFallback ? L"GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS=8000"
+                                  : (stillScreen && !noAlias) ? L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Winlogon"
+                                  : stillScreen ? L""
                                   : notPrelogin ? L""
                                                 : L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=3000",  // r7 H6
-                                  lockScreen ? L"GNLINK_STREAM_TEST_UNLOCK_PIPE=" + seam.unlockPipe() : std::wstring());
+                                  lockScreen ? L"GNLINK_STREAM_TEST_UNLOCK_PIPE=" + seam.unlockPipe()
+                                  : (stillScreen && !noAlias) ? std::wstring(L"GNLINK_STREAM_TEST_DESKTOP_ALIAS=Winlogon")
+                                                              : std::wstring(),
+                                  // capture-lifecycle r1 (PS): this PC's desktop is never still (60 content
+                                  // updates/s measured 10-26, a user at work on it) -- the test build stands
+                                  // it in for a still logon screen (host_capture_session.cpp).
+                                  stillScreen ? std::wstring(stillNoFirst        ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
+                                                             : stillPointerFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst"
+                                                                                 : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
+                                              : std::wstring());
   check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
                     : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
         started);
@@ -1089,6 +1156,16 @@ int wmain(int argc, wchar_t** argv) {
   ViewerState ctx;
   std::thread worker, ingress;
   std::atomic<bool> ingressStop{false};
+  // capture-lifecycle r1 (PS): what the product receiver published, as the renderer would show it.
+  struct Shown {
+    uint64_t us = 0;
+    bool synthetic = false;
+    uint32_t lumaSpread = 0, w = 0, h = 0;
+  };
+  std::vector<Shown> shown;
+  std::mutex shownMu;
+  std::thread presentThread;
+  std::optional<remote60::native_poc::viewer::VideoReceiver> receiver;
   std::atomic<uint64_t> media{0};
   uint32_t nextResumeId = 0x7500;
   uint64_t generation = 1;
@@ -1178,6 +1255,93 @@ int wmain(int argc, wchar_t** argv) {
         [](const std::string& line) { std::cout << "    " << line << "\n"; }, [&nextResumeId]() { return ++nextResumeId; },
         [&generation]() { return generation; }, cfg, (ackFeatures & kUdpFeatureControlResume) != 0, peer.sin_addr.s_addr,
         peer.sin_port);
+    if (stillScreen) {
+      // capture-lifecycle r1 (PS): the product's receive chain instead of a datagram counter -- set up with the
+      // calls viewer_stats_chain_e2e_test makes (VideoReceiver::Run: assembler, FrameGate, MF decoder,
+      // FrameBuffer; it also feeds the control tunnel). NACK off (not asked in this Hello).
+      using namespace remote60::native_poc::viewer;
+      static Args rxArgs;
+      rxArgs.codec = "h264";
+      rxArgs.transport = "udp";
+      rxArgs.fpsHint = 30;
+      rxArgs.udpMtu = 1200;
+      rxArgs.inputLogEvery = 0;
+      static DecoderState dec;
+      dec.useH264 = true;
+      dec.transport = VideoTransport::Udp;
+      static FrameGateState gate;
+      gate.catchupReenterMinIntervalUs = kCatchupReenterMinIntervalUsDefault;
+      gate.staleCaptureDropUs = kStaleCaptureDropUs;
+      gate.staleReferenceRecoveryMinIntervalUs = kStaleRecoveryMinIntervalUsDefault;
+      gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;
+      gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;
+      gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;
+      gate.catchupLagDropUs = kCatchupLagDropUs;
+      gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;
+      gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
+      gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
+      gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
+      gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
+      gate.waitForKeyFrame = true;
+      ctx.picker.visible.store(false);
+      ctx.control.keyframeRequests.Reset();
+      VideoReceiver::NackOptions nack;
+      nack.enabled = false;
+      receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
+      ingress = std::thread([&] { receiver->Run(); });
+      // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
+      // of a sparse sample of the visible picture).
+      presentThread = std::thread([&] {
+        uint64_t seen = 0;
+        while (!ingressStop.load() && ctx.session.running.load()) {
+          Shown s{};
+          bool fresh = false;
+          {
+            std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+            auto& f = ctx.frameBuf.frame;
+            if (f.version != seen && f.bytes && !f.bytes->empty() && f.width > 0 && f.height > 0) {
+              seen = f.version;
+              fresh = true;
+              ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
+              if (!f.synthetic) ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
+              s.synthetic = f.synthetic;
+              s.w = f.width;
+              s.h = f.height;
+              const uint8_t* b = f.bytes->data();
+              const size_t n = f.bytes->size();
+              int lo = 255, hi = 0;
+              for (uint32_t y = 0; y < f.height; y += 17) {
+                for (uint32_t x = 0; x < f.width; x += 23) {
+                  int luma = -1;
+                  if (f.format == SharedFrame::PixelFormat::Bgra32) {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + static_cast<size_t>(f.visibleLeft + x) * 4;
+                    if (at + 2 < n) luma = (b[at] * 29 + b[at + 1] * 150 + b[at + 2] * 77) >> 8;
+                  } else {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + (f.visibleLeft + x);
+                    if (at < n) luma = b[at];
+                  }
+                  if (luma >= 0) {
+                    lo = (std::min)(lo, luma);
+                    hi = (std::max)(hi, luma);
+                  }
+                }
+              }
+              s.lumaSpread = hi >= lo ? static_cast<uint32_t>(hi - lo) : 0;
+            }
+          }
+          if (fresh) {
+            s.us = qpc_now_us();
+            std::lock_guard<std::mutex> lk(shownMu);
+            shown.push_back(s);
+          }
+          Sleep(2);
+        }
+      });
+      // The picker-first start, as viewer_startup.cpp:186 does it: "stream off" queued before the control
+      // link runs, so it is the first thing the host hears (10-22: 2 ms after the version exchange).
+      ctx.control.streamState.Request(false);
+      connected = true;  // the viewer starts in its picker: no picture is owed yet
+    } else {
     ingress = std::thread([&] {
       std::vector<uint8_t> buf(2048);
       while (!ingressStop.load()) {
@@ -1193,6 +1357,7 @@ int wmain(int argc, wchar_t** argv) {
     });
     connected = wait_until([&] { return media.load() > 0; }, 20000);
     check("video is arriving", connected, std::to_string(media.load()) + " media datagrams");
+    }  // capture-lifecycle r1: !stillScreen
     if (captureFallback) {
       // r10 T2: mid-stream the DXGI worker finds the input desktop is not the one served and asks for a
       // fallback. Before login there is none: the worker must stop serving and leave (exit 15) -- not move
@@ -1210,7 +1375,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     static remote60::native_poc::viewer::Args args;
     args.inputLogEvery = 0;
-    static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/false);
+    static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/stillScreen);
     ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
     ctx.control.connected.store(true, std::memory_order_relaxed);
     worker = std::thread([&] { control.Run(); });
@@ -1218,7 +1383,7 @@ int wmain(int argc, wchar_t** argv) {
     // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
     // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
     // (the main --prelogin run; the other modes start their host without the delay).
-    if (connected && !notPrelogin && !sessionEnds && !captureFallback) {
+    if (connected && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
       {
         std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
         ctx.frameBuf.frame.width = 320;
@@ -1301,7 +1466,7 @@ int wmain(int argc, wchar_t** argv) {
     bool sawPrompt = false, typedAll = false, captured = false;
     std::wstring promptTitle;
   };
-  const auto operate_prompt = [&](OperatorRun* run, const wchar_t* cls, bool cancel) {
+  const auto operate_prompt = [&](OperatorRun* run, const wchar_t* cls, bool cancel, const std::wstring& secret = kSecret) {
     HWND prompt = nullptr;
     HWND wrong = nullptr;  // the other prompt: a wrong path must fail here, not hang the run in a modal
     const wchar_t* other = (std::wstring(cls) == L"GNLinkUnlockPrompt") ? kPreloginPromptClass : L"GNLinkUnlockPrompt";
@@ -1326,8 +1491,8 @@ int wmain(int argc, wchar_t** argv) {
     run->promptTitle = t;
     HWND edit = FindWindowExW(prompt, nullptr, L"EDIT", nullptr);
     if (!cancel && edit) {
-      for (wchar_t c : kSecret) PostMessageW(edit, WM_CHAR, c, 1);
-      run->typedAll = wait_until([&] { return GetWindowTextLengthW(edit) == static_cast<int>(kSecret.size()); }, 3000);
+      for (wchar_t c : secret) PostMessageW(edit, WM_CHAR, c, 1);
+      run->typedAll = wait_until([&] { return GetWindowTextLengthW(edit) == static_cast<int>(secret.size()); }, 3000);
     }
     Sleep(150);
     run->captured = save_capture(prompt, cancel ? L"unlock_prompt_old_path" : L"prelogin_prompt_typed");
@@ -1335,6 +1500,144 @@ int wmain(int argc, wchar_t** argv) {
     PostMessageW(button, BM_CLICK, 0, 0);
     wait_until([&] { return !IsWindow(prompt); }, 3000);
   };
+
+  // ---- capture-lifecycle r1 (PS, Codex §2/§3): a STILL logon screen, picked from the picker. The 10-22
+  // field case end to end: the viewer starts in its picker (stream off), waits there, then picks the
+  // desktop -- and must SEE the logon screen within 1 s, keep seeing it refreshed (500 ms), and the worker
+  // must live through a pick after the idle detach (10-22: exit 15). Judged on DECODED frames that the
+  // product's receiver (VideoReceiver: assembler, FrameGate, MF decoder, FrameBuffer) published -- not on
+  // datagrams. What differs from the product, said once: the worker serves "Winlogon" on this test user's
+  // "Default" desktop (GNLINK_STREAM_TEST_DESKTOP_ALIAS -- the name it is shown, desktop_name_seam.hpp), so
+  // the pixels are this desktop's; that desktop is made STILL by the test build
+  // (GNLINK_STREAM_TEST_STILL_SCREEN: the capture library takes every acquire but a new duplication's first
+  // as a timeout -- so the full-frame reacquire runs its real duplication remake);
+  // the present thread stamps what the renderer would show (no window).
+  if (stillScreen && connected) {
+    std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
+    const auto frames_since = [&](uint64_t fromUs) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      return static_cast<size_t>(std::count_if(shown.begin(), shown.end(), [&](const Shown& s) { return s.us >= fromUs; }));
+    };
+    const auto first_since = [&](uint64_t fromUs, Shown* out) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      for (const Shown& s : shown) {
+        if (s.us >= fromUs) {
+          *out = s;
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto pick_after = [&](const char* name, int pickerMs) {
+      std::cout << "\n--- PS " << name << ": " << pickerMs << " ms in the picker (stream off), then the desktop ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(static_cast<DWORD>(pickerMs));
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Shown first{};
+      const bool got = wait_until([&] { return first_since(t0, &first); }, 4000);
+      const uint64_t latencyMs = got ? (first.us - t0) / 1000 : 0;
+      check((std::string("PS ") + name + ": THE LOGON SCREEN IS SHOWN WITHIN 1 s OF THE PICK (a decoded frame)").c_str(),
+            got && latencyMs <= 1000, got ? std::to_string(latencyMs) + " ms" : std::string("no decoded frame in 4 s"));
+      check((std::string("PS ") + name + ": ...and it is a picture, not a blank (luma spread)").c_str(),
+            got && first.lumaSpread >= 8,
+            got ? "spread=" + std::to_string(first.lumaSpread) + " " + std::to_string(first.w) + "x" +
+                      std::to_string(first.h) + (first.synthetic ? " (re-served cached frame)" : " (captured frame)")
+                : std::string());
+      Sleep(3000);
+      const size_t refreshed = frames_since(t0 + 1000000ULL);
+      check((std::string("PS ") + name + ": THE STILL SCREEN KEEPS BEING REFRESHED (>= 4 frames in the next 3 s, 500 ms cadence)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " frames");
+      check((std::string("PS ") + name + ": the worker is still serving (no exit 15 / 14)").c_str(), worker_alive());
+    };
+    // The viewer started in its picker; the worker's capture comes up behind it.
+    Sleep(1500);
+    if (!stillNoFirst) {
+      pick_after("A (still attached)", 3000);
+      pick_after("B (after the idle detach)", 10000);
+      pick_after("B2 (after the idle detach, again)", 10000);
+      // r2 (Codex): the full-frame reacquire ran the capture library's REAL duplication remake -- not a seam in
+      // the host -- and that remake's first frame is what was delivered.
+      check("PS: THE REACQUIRE RAN THE LIBRARY'S DUPLICATION REMAKE (\"duplication made anew\")",
+            host.Count("full-frame reacquire: duplication made anew") >= 1,
+            std::to_string(host.Count("full-frame reacquire: duplication made anew")) + " remakes");
+      check("PS: ...and its first frame was delivered (\"reacquire: delivered after\")",
+            host.Count("full-frame reacquire: delivered after") >= 1,
+            std::to_string(host.Count("full-frame reacquire: delivered after")) + " deliveries");
+      if (stillPointerFirst) {
+        // r3 (Codex M9): the remade duplication's first acquire is pointer-only (the test build says so) -- it does
+        // NOT answer the request; the next acquire with an image does. In that order.
+        const std::string log = host.log();
+        const size_t declined = log.find("full-frame reacquire: a pointer-only acquire does not answer it");
+        const size_t delivered = log.find("full-frame reacquire: delivered after");
+        check("PS pointer-first: A POINTER-ONLY ACQUIRE DID NOT ANSWER THE FULL-FRAME REQUEST (request kept)",
+              declined != std::string::npos);
+        check("PS pointer-first: ...the image acquire after it did (delivered after the refusal)",
+              declined != std::string::npos && delivered != std::string::npos && delivered > declined);
+      }
+    } else {
+      // r2 contrast (=nofirst): the same pick with a capture that gives NOTHING, not even a remade
+      // duplication's first frame. Nothing is shown (so the still run's picture came from the remake), the
+      // library gives up after its bounded remakes, the host stops asking at its bound, the worker lives on.
+      std::cout << "\n--- PS contrast: a still screen that gives no frame at all ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(3000);
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      check("PS contrast: NOTHING IS SHOWN (no frame from a capture that gives none)", frames_since(t0) == 0,
+            std::to_string(frames_since(t0)) + " frames");
+      const size_t remakes = host.Count("full-frame reacquire: duplication made anew");
+      check("PS contrast: the library's duplication remake ran (\"duplication made anew\")", remakes >= 1,
+            std::to_string(remakes) + " remakes");
+      check("PS contrast: ...and gave up, bounded (\"reacquire gave up after 3\")",
+            host.Count("full-frame reacquire gave up after 3") >= 1,
+            std::to_string(host.Count("full-frame reacquire gave up after 3")) + " give-ups");
+      const size_t asks = host.Count("full-frame ask=");
+      check("PS contrast: the host's asks stop at their bound (3/3 reached, never 4)",
+            host.Count("full-frame ask=3/3") >= 1 && host.Count("full-frame ask=4/") == 0, std::to_string(asks) + " asks");
+      Sleep(4000);
+      check("PS contrast: ...and stay stopped (no new ask in the next 4 s: no loop)", host.Count("full-frame ask=") == asks,
+            std::to_string(host.Count("full-frame ask=")) + " asks now");
+      // r2 (Codex N4): a NEW source -- the idle detach, then the pick's reattach -- gets its own bounded budget;
+      // the spent one does not carry over (r1: it did, and the new source was never asked at all).
+      ctx.control.streamState.Request(false);
+      Sleep(10000);
+      const int asksBefore = host.Count("full-frame ask=");
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      const int asksNew = host.Count("full-frame ask=") - asksBefore;
+      check("PS contrast: A NEW SOURCE (idle detach -> reattach) GETS A NEW BUDGET (asks again, from 1/3)",
+            asksNew >= 1 && host.Count("full-frame ask=1/3") >= 2, std::to_string(asksNew) + " new asks");
+      check("PS contrast: ...bounded again (3 at most for that source, never 4)",
+            asksNew <= 3 && host.Count("full-frame ask=4/") == 0, std::to_string(asksNew) + " new asks");
+      check("PS contrast: the worker is still serving", worker_alive());
+    }
+    check("PS: the worker never asked for WGC before login (r10 T2 path not taken)",
+          host.log().find("capture cannot continue on the logon desktop") == std::string::npos &&
+              host.log().find("wgc requested") == std::string::npos,
+          host.log().find("capture cannot continue") == std::string::npos ? std::string()
+                                                                           : host.log().substr(host.log().find("capture cannot continue"), 200));
+    std::cout << "    host: full-frame asks=" << host.Count("full-frame ask=") << " dxgi reacquire delivered="
+              << host.Count("full-frame reacquire: delivered") << " cache-cleared=" << host.Count("bootstrap-cache cleared")
+              << " idle-detach=" << host.Count("capture detached (idle)") << "\n";
+    // The host's own account of the run, for the evidence (stillness: content acquires per second).
+    {
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"dxgi-acquire", "full-frame", "[desktop]", "bootstrap-cache", "stream-state", "capture detached",
+                                "capture reattached", "stream active", "stream inactive", "trailing-edge kick",
+                                "capture cannot continue", "desktop_backend="}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
 
   const bool ready = connected && pump_until([&] { return ctx.control.lastRttUs.load() > 0; }, 25000);
   if (!androidSession && !captureFallback) check("the worker completes a round trip with the host", ready);
@@ -1344,7 +1647,7 @@ int wmain(int argc, wchar_t** argv) {
     check("the toolbar window exists", bar != nullptr);
   }
 
-  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback) {
+  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
     std::cout << "\n--- the host is at the pre-login screen ---\n";
     check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
           std::to_string(flags()));
@@ -1768,9 +2071,10 @@ int wmain(int argc, wchar_t** argv) {
       PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
       PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
     };
-    const auto take_box = [&](std::wstring* text, const wchar_t* picture) {
+    const auto take_box = [&](std::wstring* text, const wchar_t* picture, bool* fits = nullptr, std::string* fitsWhy = nullptr) {
       HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
       if (!box) return;
+      if (fits) *fits = result_box_text_fits(box, fitsWhy);  // before the text is published: the caller waits on it
       *text = result_box_text(box);
       save_capture(box, picture);
       close_result(box);
@@ -1938,6 +2242,185 @@ int wmain(int argc, wchar_t** argv) {
     check("the service typed it once (its log, no password in it)",
           seam.DiagLog().find("lock-cred requestId=") != std::string::npos && seam.DiagLog().find(" typed session=") != std::string::npos);
 
+    // ---- lk-ux-retry r1 (Codex section 2): the user's 10-22 case. That password was the wrong one -- Windows
+    // refused it on the remote screen -- and its wait for the unlock goes on. The same connection presses
+    // "Windows 로그인" again: the earlier wait is ended first, then a new challenge, a new password, the field's
+    // content replaced. No reconnect. (Windows' own refusal is the field check: here the stand-in's lock stays.)
+    std::cout << "\n--- lk-ux-retry: the first password was wrong; the same connection presses again ---\n";
+    check("THE PONG ADVERTISES kCaptureFlagLockCredRetryV1 (0x80000) -- the host and its service can end the wait",
+          (flags() & kCaptureFlagLockCredRetryV1) != 0, std::to_string(flags()));
+    check("...the first password still waits for its unlock (the state 0.2.162 answered 'still in progress')",
+          ctx.session.lockCredPending.load());
+    const uint64_t genBeforeRetry = ctx.session.controlRunGen.load();
+    {
+      // The retry's password window, cancelled: nothing sent, and the earlier wait goes on.
+      OperatorRun runRc;
+      std::wstring boxRc;
+      std::thread opRc([&] {
+        operate_prompt(&runRc, kPreloginPromptClass, /*cancel=*/true);
+        take_box(&boxRc, L"lock_screen_retry_cancelled");
+      });
+      click_item();
+      pump_until([&] { return !boxRc.empty(); }, 20000);
+      join_pumping(opRc);
+      check("RETRY: THE PRESS OPENS THE PASSWORD WINDOW (not \"the earlier one is still in progress\")",
+            runRc.sawPrompt && runRc.promptTitle == kPreloginPromptTitle, utf8(runRc.promptTitle) + " | " + utf8(boxRc));
+      check("RETRY, CANCELLED: said, no retry reached the host, and the earlier wait goes on",
+            boxRc.find(L"취소했습니다") != std::wstring::npos && host.Count("retry challenge requestId=") == 0 &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxRc));
+    }
+    Sleep(700);  // the service's challenge rate limit
+    OperatorRun runR;
+    std::wstring boxR;
+    bool fitsR = false;
+    std::string fitsWhyR;
+    std::thread opR([&] {
+      operate_prompt(&runR, kPreloginPromptClass, false, kSecret2);
+      Sleep(300);
+      bring_front(targets.main);
+      take_box(&boxR, L"lock_screen_retry_typed", &fitsR, &fitsWhyR);
+    });
+    click_item();
+    pump_until([&] { return !boxR.empty(); }, 30000);
+    join_pumping(opR);
+    const std::wstring gotR = Targets::text(targets.edit);
+    save_capture(targets.main, L"lock_screen_retry_target_received");
+    check("RETRY: the password window took the new password", runR.sawPrompt && runR.typedAll);
+    const std::string hostLogR = host.log();
+    const size_t retryAt = hostLogR.find("[lock-cred] retry challenge requestId=");
+    const std::string retryLine =
+        retryAt == std::string::npos ? std::string() : hostLogR.substr(retryAt, hostLogR.find('\n', retryAt) - retryAt);
+    check("THE HOST ENDED THE EARLIER WAIT FIRST -- confirmed by the service (Superseded, 17) -- THEN ASKED A NEW CHALLENGE",
+          host.Count("[lock-cred] retry requestId=") == 1 && hostLogR.find(" cleared=1 stage=17") != std::string::npos &&
+              retryLine.find(" status=3") != std::string::npos,
+          "retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")) + " | " + retryLine);
+    check("THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE NEW PASSWORD, BYTE FOR BYTE (the first one gone)",
+          gotR == kSecret2, hexw(gotR));
+    check("...and nothing into the user-name field or the decoy",
+          Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty());
+    check("THE RESULT WINDOW SAYS \"typed -- press Enter\" for the new password, and how to retry if Windows refuses it",
+          boxR.find(L"입력했습니다") != std::wstring::npos && boxR.find(L"Enter") != std::wstring::npos &&
+              boxR.find(L"다시 누르세요") != std::wstring::npos && boxR.find(L"해제되었습니다") == std::wstring::npos &&
+              boxR.find(L"보내지 않았습니다") == std::wstring::npos,
+          utf8(boxR));
+    check("...AND THE WINDOW SHOWS ALL OF IT -- the retry guidance is not cut off, the 확인 button below it", fitsR,
+          fitsWhyR);
+    check("SAME CONNECTION: the control connection was never re-made (reconnect 0)",
+          ctx.session.controlRunGen.load() == genBeforeRetry,
+          std::to_string(ctx.session.controlRunGen.load() - genBeforeRetry) + " reconnects");
+    const std::string diagR = seam.DiagLog();
+    size_t typedLines = 0;
+    for (size_t at = diagR.find(" typed session="); at != std::string::npos; at = diagR.find(" typed session=", at + 1)) ++typedLines;
+    check("the service ended the first (its own line) and typed twice in all -- once per password, never re-sent",
+          diagR.find("superseded by the same connection's retry") != std::string::npos && typedLines == 2,
+          std::to_string(typedLines) + " typed lines");
+    check("...the new attempt is the one followed now", ctx.session.lockCredPending.load());
+
+    // ---- lk-ux-retry r2 (Codex N2): the retry ends the earlier wait (the host issued the new challenge), and
+    // then the new password fails HERE, before it is sealed (the test-only fault, REMOTE60_VIEWER_UNLOCK_TEST_SEAM).
+    // The earlier wait is over and said so; the new password was not sent and said so; nothing waits on; no
+    // "2 minutes" -- and nothing was typed.
+    std::cout << "\n--- lk-ux-retry r2 (N2): the earlier wait ended, the new password failed before sealing ---\n";
+    {
+      Sleep(700);  // the service's challenge rate limit
+      const std::wstring fieldBefore = Targets::text(targets.edit);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_SEAL_FAIL", L"1");
+      OperatorRun runF;
+      std::wstring boxF;
+      std::thread opF([&] {
+        operate_prompt(&runF, kPreloginPromptClass, false, kSecret);
+        take_box(&boxF, L"lock_screen_retry_seal_failed");
+      });
+      click_item();
+      pump_until([&] { return !boxF.empty(); }, 30000);
+      join_pumping(opF);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_SEAL_FAIL", nullptr);
+      check("N2: the host ended the earlier wait and issued the new challenge (a second retry, cleared)",
+            host.Count("[lock-cred] retry requestId=") == 2 && host.Count(" cleared=1 stage=17") == 2,
+            std::to_string(host.Count("[lock-cred] retry requestId=")) + " retries");
+      check("N2: THE WINDOW SAYS the earlier wait is over and the new password was NOT sent -- not \"2 minutes\"",
+            boxF.find(L"대기는 끝냈지만") != std::wstring::npos && boxF.find(L"보내지 않았습니다") != std::wstring::npos &&
+                boxF.find(L"2분") == std::wstring::npos,
+            utf8(boxF));
+      check("N2: ...nothing follows the earlier wait any more, and nothing new was typed (the field as it was)",
+            !ctx.session.lockCredPending.load() && Targets::text(targets.edit) == fieldBefore,
+            hexw(Targets::text(targets.edit)));
+      Sleep(4000);  // a late answer of the earlier attempt, had it still been followed, would show by now
+      check("N2: ...and no later window reports the earlier one (no \"2 minutes\", no stale result)",
+            FindWindowW(kPreloginResultClass, nullptr) == nullptr);
+      // The user presses once more: an ordinary press (nothing waits), the field replaced, typed.
+      Sleep(700);
+      OperatorRun runG;
+      std::wstring boxG;
+      std::thread opG([&] {
+        operate_prompt(&runG, kPreloginPromptClass, false, kSecret);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxG, L"lock_screen_after_seal_failure");
+      });
+      click_item();
+      pump_until([&] { return !boxG.empty(); }, 30000);
+      join_pumping(opG);
+      check("N2: the next press goes through as an ordinary one: typed (the field replaced), followed for its unlock",
+            boxG.find(L"입력했습니다") != std::wstring::npos && Targets::text(targets.edit) == kSecret &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxG));
+    }
+
+    // ---- lk-ux-retry r3 (Codex N2-a): the new password LEFT (the host took its seal) but its answer did not come
+    // within the exchange (the test-only GNLINK_VIEWER_TEST_STATUS_POLLS=0: the viewer stops asking right after
+    // the host accepted it -- the 10 s give-up of the field case, on demand). It must stay followed: the host
+    // types it a moment later, and the user's next press is a retry that NAMES it (the host ends its wait first)
+    // -- not an ordinary request refused as "the earlier one still waits". Nothing re-sent by itself.
+    std::cout << "\n--- lk-ux-retry r3 (N2-a): sent, its answer not come -> followed; the next press names it ---\n";
+    {
+      Sleep(700);  // the service's challenge rate limit
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", L"0");
+      OperatorRun runH;
+      std::wstring boxH;
+      std::thread opH([&] {
+        operate_prompt(&runH, kPreloginPromptClass, false, kSecret2);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxH, L"lock_screen_retry_sent_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxH.empty(); }, 30000);
+      join_pumping(opH);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", nullptr);
+      check("N2-a: a retry (the earlier wait ended), its new password sent, its answer not come",
+            host.Count("[lock-cred] retry requestId=") == 3 && host.Count(" cleared=1 stage=17") == 3,
+            std::to_string(host.Count("[lock-cred] retry requestId=")) + " retries");
+      check("N2-a: THE WINDOW SAYS it was sent and is being followed -- not \"typed\", not \"not sent\", not \"2 minutes\"",
+            boxH.find(L"계속 확인합니다") != std::wstring::npos && boxH.find(L"입력했습니다") == std::wstring::npos &&
+                boxH.find(L"2분") == std::wstring::npos,
+            utf8(boxH));
+      check("N2-a: ...AND IT IS FOLLOWED (the viewer still waits on it)", ctx.session.lockCredPending.load());
+      check("N2-a: ...the host types it a moment later (the field now holds the new password)",
+            pump_until([&] { return Targets::text(targets.edit) == kSecret2; }, 8000), hexw(Targets::text(targets.edit)));
+      // The user presses again: a retry naming THAT password -- its wait ended first -- and the field replaced.
+      Sleep(700);
+      OperatorRun runI;
+      std::wstring boxI;
+      std::thread opI([&] {
+        operate_prompt(&runI, kPreloginPromptClass, false, kSecret);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxI, L"lock_screen_retry_after_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxI.empty(); }, 30000);
+      join_pumping(opI);
+      check("N2-a: THE NEXT PRESS IS A RETRY OF IT -- ended first (17), then typed: field replaced, no 'pending' refusal",
+            host.Count("[lock-cred] retry requestId=") == 4 && host.Count(" cleared=1 stage=17") == 4 &&
+                boxI.find(L"입력했습니다") != std::wstring::npos && Targets::text(targets.edit) == kSecret &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxI) + " | retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")));
+      check("N2-a: ...on the same connection (reconnect 0) and nothing was re-sent by itself (typed once per press)",
+            ctx.session.controlRunGen.load() == genBeforeRetry);
+    }
+
     // ---- r2 (Codex L5): a result of an EARLIER control connection, still queued, is not shown
     std::cout << "\n--- r2 L5: a stale result window from an earlier connection ---\n";
     {
@@ -2089,6 +2572,8 @@ int wmain(int argc, wchar_t** argv) {
   if (worker.joinable()) worker.join();
   ingressStop.store(true);
   if (ingress.joinable()) ingress.join();
+  if (presentThread.joinable()) presentThread.join();
+  receiver.reset();  // capture-lifecycle r1 (PS): its decoder goes while Media Foundation is still up
   if (ctx.session.sock != INVALID_SOCKET) closesocket(ctx.session.sock);
   session_toolbar_destroy();
   if (viewerWindow) DestroyWindow(viewerWindow);
@@ -2114,6 +2599,7 @@ int wmain(int argc, wchar_t** argv) {
 
   std::cout.rdbuf(tee.real);
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
+  if (stillScreen) MFShutdown();
   WSACleanup();
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks << " checks, "
             << gFailures << " failed)\n";

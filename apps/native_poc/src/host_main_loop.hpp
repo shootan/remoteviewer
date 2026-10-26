@@ -198,7 +198,9 @@ struct TickContext {
 };
 
 // Helpers (former main() lambdas).
-bool restart_capture_session(HostContext& hx);
+// owner (capture-lifecycle r3): who asks -- kept with a failure (CaptureState::restartOwner) so the retry that
+// follows is that recovery's own.
+bool restart_capture_session(HostContext& hx, CaptureState::RestartOwner owner = CaptureState::RestartOwner::General);
 // Re-derives the SYSTEM input agent's target rect from the current capture target
 // (host_input_target_rect.hpp) and hands it to the broker when it changed, with a log line.
 // Called after every capture (re)start and once at startup. Main loop only.

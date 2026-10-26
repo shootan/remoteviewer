@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 
+#include "desktop_name_seam.hpp"
 #include "host_input_inject.hpp"
 #include "host_string_util.hpp"
 #include "host_window_enum.hpp"
@@ -484,18 +485,33 @@ const char* input_injection_mode_name(InputInjectionMode mode) {
 // that must not trust a stale flag -- the static-screen bootstrap, which is about to paint pixels
 // -- can force a live check.
 bool interactive_desktop_is_default_uncached() {
-  bool isDefault = false;
+  bool known = false;
+  const std::wstring name = input_desktop_name_uncached(&known);
+  // A desktop this process cannot even open is the secure one (and an unreadable one is not Default).
+  return known && _wcsicmp(name.c_str(), L"Default") == 0;
+}
+
+std::wstring input_desktop_name_uncached(bool* known) {
+  std::wstring name;
+  bool ok = false;
   HDESK desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
   if (desktop) {
-    wchar_t name[64]{};
+    wchar_t buf[64]{};
     DWORD needed = 0;
-    if (GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &needed)) {
-      isDefault = _wcsicmp(name, L"Default") == 0;
+    if (GetUserObjectInformationW(desktop, UOI_NAME, buf, sizeof(buf), &needed)) {
+      name = buf;
+      ok = true;
     }
     CloseDesktop(desktop);
+  } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+    name = kUnopenableInputDesktop;  // the secure one, as far as this process can tell
+    ok = true;
   }
-  // A desktop this process cannot even open is the secure one.
-  return isDefault;
+  // capture-lifecycle r1: a test build's stand-in name (desktop_name_seam.hpp); the product's is the real one.
+  const std::wstring shown = SeamInputDesktopName(ok ? name : std::wstring());
+  if (!ok && !shown.empty()) ok = true;
+  if (known) *known = ok;
+  return ok ? shown : std::wstring();
 }
 
 bool interactive_desktop_is_default() {

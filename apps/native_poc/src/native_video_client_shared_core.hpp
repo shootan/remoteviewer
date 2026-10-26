@@ -145,7 +145,8 @@ class StreamStateControl {
 
 struct PendingDesktopBackendRequest {
   uint32_t seq = 0;
-  uint16_t backend = 1;  // 1:dxgi, 2:wgc
+  uint16_t backend = 1;  // 1:dxgi, 2:wgc; 0 = ask only (capture-lifecycle r1)
+  bool wantsStatus = false;  // capture-lifecycle r1: ask the host's answer (90) -- only a 0x100000 host
 };
 
 class DesktopBackendControl {
@@ -153,11 +154,35 @@ class DesktopBackendControl {
   void Reset();
   void Request(uint16_t backend);
   bool ConsumePending(PendingDesktopBackendRequest* out);
+  // capture-lifecycle r1 (UA-2): whether the connected host answers (kCaptureFlagDesktopBackendStatusV1,
+  // from its pong). Only then does a request ask for the answer, and may a question be asked at all.
+  void SetHostAnswers(bool answers) { hostAnswers_.store(answers, std::memory_order_release); }
+  bool HostAnswers() const { return hostAnswers_.load(std::memory_order_acquire); }
+  // Ask what runs now, changing nothing. False (nothing queued) toward a host that does not answer.
+  // capture-lifecycle r2 (Codex N3): a question never replaces a change. A change and a question pending
+  // together go out as the change alone -- its answer (asked for toward a host that answers) IS the status; a
+  // question taken first goes out first and a change after it is still sent. One message per ConsumePending.
+  bool Query();
 
 private:
-  std::atomic<bool> pending_{false};
+  std::atomic<bool> pending_{false};       // a change (backend_) is waiting
+  std::atomic<bool> queryPending_{false};  // r2 N3: a question is waiting -- kept apart from the change
   std::atomic<uint32_t> nextSeq_{0};
   std::atomic<uint16_t> backend_{2};
+  std::atomic<bool> hostAnswers_{false};
+};
+
+// capture-lifecycle r1 (UA-2): the host's last answer (ControlDesktopBackendStatus, 90). valid = one came on
+// this connection; codes 1 dxgi, 2 wgc, 3 gdi; flags kDesktopBackendStatusFlag*.
+struct DesktopBackendStatusSnapshot {
+  bool valid = false;
+  uint32_t seq = 0;
+  uint16_t requested = 0;
+  uint16_t effective = 0;
+  uint16_t active = 0;
+  uint16_t flags = 0;
+  uint32_t changeCount = 0;
+  uint64_t receivedUs = 0;
 };
 
 struct PendingRuntimeTuneRequest {
@@ -230,6 +255,7 @@ enum class ControlOutboundActionKind : uint8_t {
   ClientBandwidth,  // C0 stage 1, no reply
   RebootRequest,    // prelogin-service r3: ControlRebootRequest (84), expects ControlRebootReply (85)
   PreloginControl,  // prelogin-ui r9 R5: ControlPreloginControl (83), expects ControlPreloginStatus (82)
+  LockCredRetryChallengeRequest,  // lk-ux-retry r1: ControlLockCredRetryChallengeRequest (89), expects 41
 };
 
 struct ControlOutboundAction {
@@ -251,6 +277,7 @@ struct ControlOutboundAction {
   ControlInputTextMessage inputText{};
   ControlPhysicalKeyMessage physicalKey{};
   ControlUnlockChallengeRequestMessage unlockChallengeReq{};
+  ControlLockCredRetryChallengeRequestMessage lockCredRetryReq{};  // lk-ux-retry r1
   ControlUnlockSealedRequestMessage unlockSealed{};
   ControlUnlockStatusRequestMessage unlockStatusReq{};
   ControlImeStateRequestMessage imeStateReq{};

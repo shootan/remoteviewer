@@ -70,8 +70,16 @@ int main() {
     return 77;
   }
   // The same publish wiring host_startup_capture.cpp installs: the ring's worker calls PublishFrame.
+  // r3: a completion can be HELD just before PublishFrame (holdNext), as a slow readback would be, and released.
+  std::atomic<bool> holdNext{false};
+  std::atomic<bool> held{false};
+  HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   res->capturePublishFn = [&](std::shared_ptr<std::vector<uint8_t>> payload, uint32_t frameW, uint32_t frameH, uint32_t stride,
                                const CaptureFrameMeta& meta, uint64_t gpuPendingUs, uint64_t workerMapUs, uint64_t workerMemcpyUs) {
+    if (holdNext.exchange(false)) {
+      held.store(true);
+      WaitForSingleObject(release, 5000);
+    }
     capture->PublishFrame(*res, *stats, std::move(payload), frameW, frameH, stride, meta, gpuPendingUs, workerMapUs, workerMemcpyUs);
   };
   capture->width = W;
@@ -125,10 +133,61 @@ int main() {
   check(gotC && frame_pixel() == 3, "[C] the new attachment's frame is published under its cookie", "version=" + std::to_string(frame_version()));
   check(capture->staleAttachmentDrops.load() == 1, "[C] no further stale drops");
 
-  // [D] a frame with no attachment identity (0) is never checked (the GDI path's contract)
+  // [D] capture-lifecycle r3 (Codex N1-b): a frame with no attachment identity (0) is REFUSED -- every capture
+  //     path (WGC, DXGI and now GDI) carries its own; 0 used to be waved through (the GDI path), which let an
+  //     old GDI child's late frame be adopted under the new attachment.
   const uint64_t v3 = frame_version();
   capture->PublishCapturedTexture(*res, src1.Get(), qpc_us(), qpc_us(), 0, 0, true, 0);
-  check(wait_version(v3 + 1, 3000), "[D] cookie 0 (no identity) is not guarded");
+  Sleep(400);
+  check(frame_version() == v3, "[D] cookie 0 (no identity) is refused (never published)",
+        "version=" + std::to_string(frame_version()));
+  // ...while the live attachment's own frame still is
+  capture->PublishCapturedTexture(*res, src1.Get(), qpc_us(), qpc_us(), 0, 0, true, capture->attachmentCookie.load());
+  check(wait_version(v3 + 1, 3000), "[D] ...and the live cookie's frame right after it is published");
+
+  // [E] r3 (Codex N1-b): a readback submitted BEFORE a cache invalidation (an Unknown look / a candidate name)
+  //     and completing AFTER it, with the same cookie and generation: published to the encoder, never cached.
+  const auto cached = [&] { std::lock_guard<std::mutex> lk(capture->bootstrapCacheMu); return static_cast<bool>(capture->bootstrapCache.payload); };
+  {
+    const uint64_t v = frame_version();
+    ResetEvent(release);
+    held.store(false);
+    holdNext.store(true);
+    capture->PublishCapturedTexture(*res, src2.Get(), qpc_us(), qpc_us(), 0, 0, true, capture->attachmentCookie.load());
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    while (!held.load() && std::chrono::steady_clock::now() < until) Sleep(5);
+    capture->InvalidateBootstrapCache("desktop-unknown");  // the look in between
+    SetEvent(release);
+    check(held.load() && wait_version(v + 1, 3000), "[E] the held frame (same cookie, same gen) still reaches the encoder");
+    check(!cached(), "[E] ...but is NOT cached: it was taken before the invalidation (continuity token)");
+    const uint64_t v2e = frame_version();
+    capture->PublishCapturedTexture(*res, src3.Get(), qpc_us(), qpc_us(), 0, 0, true, capture->attachmentCookie.load());
+    check(wait_version(v2e + 1, 3000) && cached(), "[E] a frame taken after it is cached");
+  }
+  // [F] r3: a held completion of an attachment that is detached meanwhile (an old GDI child's late frame looks
+  //     the same now: it carries its cookie): no raw, no cache, and it does not close a full-frame episode.
+  {
+    const uint64_t v = frame_version();
+    capture->InvalidateBootstrapCache("test");
+    capture->fullFrameEpisodeOpen.store(true);
+    ResetEvent(release);
+    held.store(false);
+    holdNext.store(true);
+    capture->PublishCapturedTexture(*res, src1.Get(), qpc_us(), qpc_us(), 0, 0, true, capture->attachmentCookie.load());
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    while (!held.load() && std::chrono::steady_clock::now() < until) Sleep(5);
+    capture->attachmentCookie.fetch_add(1, std::memory_order_acq_rel);  // the detach
+    SetEvent(release);
+    Sleep(400);
+    check(held.load() && frame_version() == v, "[F] the old attachment's held frame is not published");
+    check(!cached(), "[F] ...nor cached");
+    check(capture->fullFrameEpisodeOpen.load(), "[F] ...and the full-frame episode stays open (a refused frame closes nothing)");
+    const uint64_t vf = frame_version();
+    capture->PublishCapturedTexture(*res, src3.Get(), qpc_us(), qpc_us(), 0, 0, true, capture->attachmentCookie.load());
+    check(wait_version(vf + 1, 3000) && !capture->fullFrameEpisodeOpen.load(),
+          "[F] the new attachment's frame passes and closes the episode");
+  }
+  CloseHandle(release);
 
   res->captureReadback.Shutdown();
   std::printf("capture_attachment_test: %d PASS, %d FAIL (NV12 lease path not exercised: WARP has no video processor)\n", gPass, gFail);

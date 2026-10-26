@@ -211,7 +211,7 @@ SecureDispatchOutcome secure_dispatch_text(CaptureState& capture, InputRouterSta
   });
 }
 
-bool restart_capture_session(HostContext& hx) {
+bool restart_capture_session(HostContext& hx, CaptureState::RestartOwner owner) {
   auto& useH264 = hx.useH264;
   auto& stop = hx.stop;
   auto& item = hx.item;
@@ -232,7 +232,13 @@ bool restart_capture_session(HostContext& hx) {
   // survives (some size-changes keep it): a stale position against the new capture geometry
   // would misplace the remote cursor until the next real mouse update.
   capture.dxgiPointerUpdateUs.store(0, std::memory_order_release);
-  if (!capture.RestartCaptureSessionImpl(res, backend, clientSession, encoder, stop, useH264, item, token)) {
+  // capture-lifecycle r3 (Codex N1-a/N4): a full-frame reacquire's own restart -- first try or its retry -- is
+  // no new source for the episode budget (DetachCaptureSession reads this).
+  capture.fullFrameOwnRestart = owner == CaptureState::RestartOwner::FullFrame;
+  const bool started = capture.RestartCaptureSessionImpl(res, backend, clientSession, encoder, stop, useH264, item, token);
+  capture.fullFrameOwnRestart = false;
+  if (!started) {
+    capture.restartOwner = owner;
     capture.restartPending = true;
     capture.restartFailures = std::min<uint32_t>(capture.restartFailures + 1, 5);
     capture.restartRetryAtUs = qpc_now_us() + (250000ULL << capture.restartFailures);
@@ -241,6 +247,7 @@ bool restart_capture_session(HostContext& hx) {
   capture.restartPending = false;
   capture.restartRetryAtUs = 0;
   capture.restartFailures = 0;
+  capture.restartOwner = CaptureState::RestartOwner::General;
   uint32_t finalW = 0, finalH = 0;
   {
     std::lock_guard<std::mutex> lk(capture.resourceMu);

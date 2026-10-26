@@ -80,6 +80,67 @@ using remote60::host::DxgiDesktopCaptureSession;
 
 namespace remote60::native_poc {
 
+namespace {
+// capture-lifecycle r1 (PS-A, Codex §2): a viewer is owed a picture, the desktop in front may be shown, and
+// nothing of it is cached (or not of the current target) -- on a still screen no frame will ever come by
+// itself. Ask the capture for a whole one: DXGI hands on its next acquire / makes its duplication anew,
+// WGC is restarted by the backend stage. Bounded: kMaxFullFrameAsks, kFullFrameAskIntervalUs apart, per
+// episode (one ends with the next real published frame). Window capture is left to WGC as before.
+// True while a later look is still worth it (the caller may re-arm its kick): this ask was held for a fresh
+// attachment's own first frame, or was made / is waiting its interval with asks left.
+bool ask_full_frame(HostContext& hx, uint64_t nowUs, CaptureState::KickMiss why, const char* where) {
+  auto& capture = hx.capture;
+  if (why != CaptureState::KickMiss::NothingCached && why != CaptureState::KickMiss::NotCurrent) return false;
+  if (capture.windowModeActive.load(std::memory_order_acquire)) return false;
+  // r3/r4 (Codex N1-a): no capture is running (its restart failed after the detach). Another recovery's
+  // failure is that recovery's to retry -- no ask. A full-frame reacquire's OWN failure is retried as this
+  // episode's next ask (the same budget, interval and source key below), once the restart's backoff has run:
+  // an attempt the restart would refuse unseen is never counted as an ask.
+  if (capture.restartPending) {
+    if (capture.restartOwner != CaptureState::RestartOwner::FullFrame) return false;
+    if (nowUs < capture.restartRetryAtUs) return true;
+  }
+  // A capture (re)attached just now delivers its own first frame (a new duplication / WGC session).
+  const uint64_t attachedUs = capture.lastAttachUs.load(std::memory_order_acquire);
+  if (attachedUs != 0 && nowUs >= attachedUs && nowUs - attachedUs < CaptureState::kFullFrameAttachGraceUs) return true;
+  // r2 (Codex N4): the budget is the current source's. A closed episode (a frame of the current provenance came)
+  // or another source (desktop / stream generation, control session, an external (re)attach) opens a new one;
+  // the same source asking again keeps counting -- never reset per kick, poll or its own reacquire.
+  const CaptureState::FullFrameSourceKey key{capture.desktopGeneration.load(std::memory_order_acquire),
+                                             capture.streamGenerationState.load(std::memory_order_acquire),
+                                             hx.clientSession.epoch.load(std::memory_order_acquire),
+                                             capture.fullFrameSourceBoundary};
+  const bool wasOpen = capture.fullFrameEpisodeOpen.exchange(true, std::memory_order_acq_rel);
+  if (!wasOpen || key != capture.fullFrameEpisodeKey) {
+    capture.fullFrameEpisodeKey = key;
+    ++capture.fullFrameEpisodes;
+    capture.fullFrameAsks = 0;
+    capture.fullFrameAskedAtUs = 0;
+  }
+  if (capture.fullFrameAsks >= CaptureState::kMaxFullFrameAsks) return false;
+  if (capture.fullFrameAskedAtUs != 0 && nowUs - capture.fullFrameAskedAtUs < CaptureState::kFullFrameAskIntervalUs) return true;
+  capture.fullFrameAskedAtUs = nowUs;
+  ++capture.fullFrameAsks;
+  const char* how = "none";
+  if (hx.backend.active == DesktopCaptureBackend::Dxgi && capture.dxgiStarted) {
+    hx.res.dxgiCaptureSession.RequestFullFrame();
+    how = "dxgi";
+  } else if (hx.backend.active == DesktopCaptureBackend::Wgc) {
+    capture.wgcFullFrameRestartWanted.store(true, std::memory_order_release);
+    how = "wgc-restart";
+  }
+  // Two different bounds, logged apart: this host asks at most kMaxFullFrameAsks times per episode; the DXGI
+  // library makes its duplication anew at most 3 times per ask ("full-frame reacquire: duplication made anew
+  // attempt=", capture_backend_dxgi.cpp) -- an episode's remakes are at most asks x 3, not 3.
+  std::cout << "[native-video-host] full-frame ask=" << capture.fullFrameAsks << "/" << CaptureState::kMaxFullFrameAsks
+            << " episode=" << capture.fullFrameEpisodes << " desktopGen=" << key.desktopGeneration
+            << " streamGen=" << key.streamGeneration << " epoch=" << key.sessionEpoch
+            << " source=" << key.sourceBoundary << " via=" << how << " from=" << where
+            << " reason=" << (why == CaptureState::KickMiss::NothingCached ? "nothing-cached" : "not-current") << "\n";
+  return capture.fullFrameAsks < CaptureState::kMaxFullFrameAsks;
+}
+}  // namespace
+
 Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   if (hx.encoder.targetPending) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -184,7 +245,8 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       // cached frame is the only input that will ever carry it. (Ledger H-26b.)
       const bool needKick = kick.NeedKick(barrierClosed) || encoder.forceKeyNext;
       bool rearm = false;
-      if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+      CaptureState::KickMiss kickMiss = CaptureState::KickMiss::None;
+      if (needKick && capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs, &kickMiss)) {
         servedBootstrap = true;
         // A closed barrier needs a real IDR; an ordinary trailing edge on an open stream can ride
         // the held frame as-is (a P-frame is fine). Leave any pre-existing encoder.forceKeyNext untouched.
@@ -216,6 +278,12 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
       }
       // Otherwise one-shot: a failed fill (locked/secure/identity mismatch) leaves the screen black
       // rather than painting a wrong or stale picture, and a satisfied trailing edge stays quiet.
+      // capture-lifecycle r1 (PS-A): ...unless the desktop may be shown and simply nothing of it is
+      // cached: then the capture is asked for a whole frame (which comes back as a real one).
+      if (needKick && !servedBootstrap && clientSession.streamControlActive.load(std::memory_order_acquire) &&
+          ask_full_frame(hx, nowUs, kickMiss, "kick") && (barrierClosed || encoder.forceKeyNext)) {
+        rearm = true;  // an IDR is still owed: look again (bounded by the asks above), not one-shot
+      }
       if (rearm) {
         kick.Arm(nowUs, useH264, hx.encoder.activeFps);
       } else {
@@ -226,10 +294,10 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
   // Periodic static refresh (user requirement): on a still screen duplication offers no content
   // and the trailing kick is one-shot, so NOTHING is sent and the session looks frozen (the
   // field case: a static game map, revived only by dragging it). Re-serve the cached frame at a
-  // low cadence (default 1Hz, REMOTE60_NATIVE_STATIC_REFRESH_MS, 0=off) as an ordinary P-frame.
-  // The cadence anchors on BOTH the last emitted AU and the last refresh ATTEMPT: the async MFT
-  // may legally return no output for a submitted input, and an emitted-only clock would then
-  // retry on every loop iteration -- a tight input flood, the opposite of an idle 1Hz refresh.
+  // low cadence (default 500 ms since capture-lifecycle r1, REMOTE60_NATIVE_STATIC_REFRESH_MS, 0=off) as an
+  // ordinary P-frame. The cadence anchors on BOTH the last emitted AU and the last refresh ATTEMPT: the async
+  // MFT may legally return no output for a submitted input, and an emitted-only clock would then
+  // retry on every loop iteration -- a tight input flood, the opposite of an idle low-rate refresh.
   // The barrier must be open (a closed barrier is the kick's job and needs an IDR) and the
   // sender queue empty (stacking a synthetic frame onto a backlog helps nobody; the queue drains
   // within a few loop ticks). kick_try_fill re-validates identity/secure/size, so a lock screen
@@ -245,7 +313,10 @@ Flow stage_pop_frame(HostContext& hx, TickContext& tc) {
     if (!refreshBlocked) {
       // Stamped on the ATTEMPT, before the encode result is known -- see the cadence note.
       kick.lastStaticRefreshAttemptUs = nowUs;
-      if (capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs)) {
+      CaptureState::KickMiss refreshMiss = CaptureState::KickMiss::None;
+      if (!capture.KickTryFill(clientSession, kick, payload, w, h, stride, nowUs, &refreshMiss)) {
+        ask_full_frame(hx, nowUs, refreshMiss, "static-refresh");  // capture-lifecycle r1 (PS-A), bounded
+      } else {
         servedBootstrap = true;
         seq = 0;
         version = stats.lastVersionSent;  // no real version consumed (keeps queue bookkeeping stable)

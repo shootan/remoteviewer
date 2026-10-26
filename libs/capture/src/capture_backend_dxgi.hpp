@@ -42,6 +42,15 @@ struct DxgiDesktopCaptureConfig {
   // its pixels are never duplicated. Empty: any (the capture-attach test path).
   std::wstring requiredInputDesktop;
   DxgiDesktopPointerHandler onPointer;  // optional; see DxgiDesktopPointerHandler
+  // TEST BUILDS ONLY (capture-lifecycle r2): set solely by a host built with REMOTE60_STREAM_TEST_SEAM, never by
+  // the product. A desktop that never changes, emulated here so the full-frame reacquire's real duplication
+  // remake runs: Still = of what duplication reports, only the first frame of each (new) duplication is
+  // handed on; every other acquire is released and taken as a timeout. StillNoFirstFrame = not even that (the
+  // bounded remake gives up). StillPointerFirst (r3) = Still, but while a full-frame request is open (once per request) a new
+  // duplication's first acquire is handed on as POINTER-ONLY (no desktop image) -- the case that must not
+  // answer the request -- and its next image acquire is the first frame. Off = the product.
+  enum class TestStill : uint8_t { Off, Still, StillNoFirstFrame, StillPointerFirst };
+  TestStill testStill = TestStill::Off;
 };
 
 // accumulatedFrames is what desktop duplication reported for this acquire: the number of
@@ -98,6 +107,10 @@ class DxgiDesktopCaptureSession {
              DxgiDesktopFallbackHandler onFallback,
              std::string* detailOut);
   void Stop();
+  // capture-lifecycle r1 (PS-A): the host needs a whole picture of a still desktop (none cached). The
+  // next acquire is handed on as content; with none, the duplication is made anew (bounded). Called by
+  // the thread that Start()s / Stop()s this session.
+  void RequestFullFrame();
 
   uint32_t width() const;
   uint32_t height() const;

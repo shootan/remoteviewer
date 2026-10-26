@@ -74,7 +74,11 @@ void TestBarrierOverridesTheGuard() {
 void TestStaticRefreshCadence() {
   KickState k;
   k.staticRefreshIntervalUs = kSec;
-  expect(!k.StaticRefreshDue(50 * kSec), "refresh: never before the first emitted AU");
+  // capture-lifecycle r1 (Codex §2): a still screen whose first picture never went out is due too.
+  expect(k.StaticRefreshDue(50 * kSec), "refresh: due before any emitted AU (the first picture is owed)");
+  k.lastStaticRefreshAttemptUs = 50 * kSec;
+  expect(!k.StaticRefreshDue(50 * kSec + 500000), "refresh: ...and held to the cadence by the attempt clock");
+  k.lastStaticRefreshAttemptUs = 0;
   k.lastEmittedAuCaptureUs = 5 * kSec;
   expect(!k.StaticRefreshDue(5 * kSec + 500000), "refresh: not inside the interval after the last AU");
   expect(k.StaticRefreshDue(6 * kSec), "refresh: due one interval after the last AU");

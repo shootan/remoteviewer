@@ -137,7 +137,11 @@ Flow stage_stream_active(HostContext& hx, TickContext& tc) {
         // DXGI would just take an immediate E_ACCESSDENIED and demote. Start on WGC instead so
         // the returning viewer gets a picture now, and let the climb-back promote to DXGI once
         // the default desktop settles. A requested WGC/GDI backend is respected as-is.
-        if (backend.active == DesktopCaptureBackend::Dxgi &&
+        // capture-lifecycle r1 (PS-B, Codex §3): NOT before login. The pre-login worker's desktop is the
+        // secure one by definition and only DXGI bound to it captures there (r10 T2) -- this rule turned a
+        // picker -> idle detach -> desktop pick into "wgc requested" and the worker's exit 15 (10-22 field).
+        // Decided by the local mode (the desktop this worker serves), never by anything a viewer says.
+        if (backend.active == DesktopCaptureBackend::Dxgi && capture.preloginServingDesktop.empty() &&
             !interactive_desktop_is_default_uncached()) {
           backend.active = DesktopCaptureBackend::Wgc;
         }
