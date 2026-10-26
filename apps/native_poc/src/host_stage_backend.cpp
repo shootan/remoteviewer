@@ -179,8 +179,8 @@ Flow stage_backend(HostContext& hx, TickContext& tc) {
     const uint64_t curEpoch = clientSession.epoch.load(std::memory_order_acquire);
     if (curEpoch != backend.ownerEpoch) {
       backend.ownerEpoch = curEpoch;
-      std::cout << "[native-video-host][control] session epoch=" << curEpoch
-                << " backend requested=" << desktop_capture_backend_name(backend.requested)
+      std::cout << "[native-video-host][control] backend-owner epoch=" << curEpoch
+                << " requested=" << desktop_capture_backend_name(backend.requested)
                 << " active=" << desktop_capture_backend_name(backend.active) << "\n";
       if (!beforeLogin && backend.requested != backend.startupRequested) {
         std::cout << "[native-video-host][control] desktop-backend-reset new-session epoch=" << curEpoch

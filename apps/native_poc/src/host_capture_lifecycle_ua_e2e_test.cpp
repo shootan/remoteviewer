@@ -330,8 +330,8 @@ int wmain(int, wchar_t**) {
                  "attempt=1 ok=1 active=wgc", "THE HOST REBUILT ITS WGC CAPTURE for Default again");
     }
     check("UA-1 WGC: SAME CONNECTION throughout -- the session never left Connected; one session (epoch) at the host",
-          phone.Snapshot().state == ClientSessionState::Connected && host_count(" backend requested=") == 1,
-          std::to_string(host_count(" backend requested=")) + " session epoch(s)");
+          phone.Snapshot().state == ClientSessionState::Connected && host_count("backend-owner epoch=") == 1,
+          std::to_string(host_count("backend-owner epoch=")) + " session epoch(s)");
     // A question (backend 0) after the round trips: answered at once, changing nothing.
     const uint32_t seqBefore = phone.DesktopCaptureBackendStatus().seq;
     const bool queried = phone.QueryDesktopCaptureBackend();
@@ -457,8 +457,8 @@ int wmain(int, wchar_t**) {
         Sleep(1000);
       }
       check("UA-1 DXGI: SAME CONNECTION throughout -- two sessions (epochs) at the host in all: the phone's, this one",
-            host_count(" backend requested=") == 2,
-            std::to_string(host_count(" backend requested=")) + " session epoch(s)");
+            host_count("backend-owner epoch=") == 2,
+            std::to_string(host_count("backend-owner epoch=")) + " session epoch(s)");
     }
   }
 
@@ -475,7 +475,7 @@ int wmain(int, wchar_t**) {
     std::istringstream lines(host_log());
     std::string line;
     while (std::getline(lines, line)) {
-      for (const char* key : {"[desktop]", "desktop-backend", "fallback_reason", "full-frame", "test-seam", "session epoch=",
+      for (const char* key : {"[desktop]", "desktop-backend", "fallback_reason", "full-frame", "test-seam", "backend-owner epoch=",
                               "capture reattached", "desktop_backend="}) {
         if (line.find(key) != std::string::npos) {
           std::cout << "    host| " << line << "\n";
