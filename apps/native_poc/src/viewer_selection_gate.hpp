@@ -95,6 +95,8 @@ struct SelectionGateState {
   // Tests only: between a picture's permission and its write (the gate's lock held) -- a Begin/Clear tried here
   // must wait until the write is done.
   std::function<void()> testAfterFramePermit;
+  // Tests only: right after a frame took its ticket (no gate lock held) -- a cancel / new op lands here.
+  std::function<void(uint64_t epoch, bool local)> testAfterFrameTicket;
   // Tests only: right before a host ack's boundary (apply_window_selected_result) -- a local op begins here.
   std::function<void()> testBeforeAckBoundary;
   std::atomic<uint64_t> localFramesRefused{0};  // pictures of a no-longer-live local op not adopted (telemetry)
@@ -112,6 +114,15 @@ struct SelectionGateState {
   // recv: bind THAT local op to the generation of the keyframe whose decode produced its first output.
   bool BindLocalGeneration(uint64_t opEpoch, uint64_t streamGeneration);
   bool IsLiveLocal(uint64_t opEpoch) const;                // recv: the frame's op is the live local op
+  // rel-0163 r7 (Codex codex_rel_0163_src_r6.md R3): the op a frame is processed for -- its epoch AND whether it is
+  // a local op -- taken in ONE snapshot under the gate's lock, before the frame does anything else. The frame keeps
+  // this ticket to its final commit and reveal (a cancel / new op in between is caught there, never by a second
+  // read that could see a different op).
+  struct FrameTicket {
+    uint64_t epoch = 0;
+    bool local = false;
+  };
+  FrameTicket TakeFrameTicket() const;
   // rel-0163 r5 (Codex codex_rel_0163_src_r4.md R3): the FINAL adoption of a decoded picture, called inside the
   // FrameBuffer's own lock right before it is written. `frameLocal` is what the frame was processed as (taken when
   // its op token was taken -- a frame of a local op is never re-read as an ordinary one). For a local frame: only

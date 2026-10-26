@@ -53,6 +53,14 @@ bool SelectionGateState::LocalUnbound(uint64_t opEpoch) const {
   return pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire) &&
          epoch.load(std::memory_order_acquire) == opEpoch && expectedGeneration.load(std::memory_order_acquire) == 0;
 }
+SelectionGateState::FrameTicket SelectionGateState::TakeFrameTicket() const {
+  std::lock_guard<std::mutex> lk(mu);
+  FrameTicket t;
+  t.epoch = epoch.load(std::memory_order_acquire);
+  t.local = pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire);
+  return t;
+}
+
 bool SelectionGateState::IsLiveLocal(uint64_t opEpoch) const {
   std::lock_guard<std::mutex> lk(mu);
   return pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire) &&
@@ -76,7 +84,16 @@ bool SelectionGateState::CommitFrame(uint64_t opEpoch, bool frameLocal, uint64_t
     if (held) *held = std::move(lk);  // kept by the caller until its write is done
     return true;
   };
-  if (!frameLocal) return permit();  // an ordinary frame: as before (the generation gate decided it)
+  if (!frameLocal) {
+    // rel-0163 r7: an ordinary frame is not mixed into a local op that began after its ticket was taken -- that op
+    // shows only what it took a ticket for itself.
+    if (pending.load(std::memory_order_acquire) && localAckless.load(std::memory_order_acquire) &&
+        epoch.load(std::memory_order_acquire) != opEpoch) {
+      localFramesRefused.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    return permit();  // an ordinary frame: as before (the generation gate decided it)
+  }
   if (!pending.load(std::memory_order_acquire) || !localAckless.load(std::memory_order_acquire) ||
       epoch.load(std::memory_order_acquire) != opEpoch) {
     // Its op was cancelled / replaced / revealed-and-closed meanwhile. A revealed local op's later pictures are

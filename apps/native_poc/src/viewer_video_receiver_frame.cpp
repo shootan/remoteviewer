@@ -179,7 +179,12 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
     // Target-selection gate (mobile parity, Android commit 4892dea). While the user's pick is
     // resolving, keep the picker up and present nothing until the acknowledged generation's
     // first frame decodes.
-    if (ctx.sel.EpochChanged(dec.recvSelectionEpoch)) {
+    // rel-0163 r7 (Codex R3): this frame's op -- epoch and local mode in ONE snapshot (TakeFrameTicket), taken first;
+    // the decoder is reset for that epoch, and the same ticket goes to the final commit and the reveal below.
+    const SelectionGateState::FrameTicket ticket = ctx.sel.TakeFrameTicket();
+    if (ctx.sel.testAfterFrameTicket) ctx.sel.testAfterFrameTicket(ticket.epoch, ticket.local);  // tests only
+    if (ticket.epoch != dec.recvSelectionEpoch) {
+      dec.recvSelectionEpoch = ticket.epoch;
       dec.lastRealDecodedCaptureUs = 0;
       // A fresh pick: drop stale reference frames and hold for the new generation's keyframe.
       dec.decoder.reset();
@@ -189,11 +194,10 @@ bool VideoReceiver::process_h264_frame(const EncodedFrameHeader& h, std::vector<
       ++st.skippedQueued;
       return true;
     }
-    // rel-0163 r4 (Codex R3): the op this frame is processed for -- the token taken when the receive loop last saw
-    // the selection epoch (it reset the decoder for it). Everything this frame binds or reveals is that op's.
-    const uint64_t frameOp = dec.recvSelectionEpoch;
-    // rel-0163 r5: ...and whether it was taken for a LOCAL op -- fixed now, never re-read later as ordinary.
-    const bool frameLocal = ctx.sel.IsLiveLocal(frameOp);
+    // rel-0163 r4/r5/r7 (Codex R3): the op this frame is processed for and whether it is local -- the ticket's, never
+    // re-read. Everything this frame binds, writes or reveals is that op's.
+    const uint64_t frameOp = ticket.epoch;
+    const bool frameLocal = ticket.local;
 
     if (!dec.decoderReady || dec.decoderW != h.width || dec.decoderH != h.height) {
       if (!dec.decoder.initialize(h.width, h.height, args.fpsHint)) {
