@@ -1,6 +1,6 @@
 # keepalive-r2 A — 호스트 대기(standby) entry 계약 초안 + spike (2026-10-22, 작업용1)
 
-근거 계약: `codex_keepalive_r2.md` §5. 정본 task: `task_keepalive_r2.md` A. 기준 main `82b3d14`.
+근거 계약: `codex_keepalive_r2.md` §5. 정본 task: `task_keepalive_r2.md` A. 기준: 처음 main `82b3d14`(328d616), 10-26 에 R1 후보 `fix/capture-lifecycle 569059f` 위로 옮김(브랜치 `spike/host-admission-r2`).
 **상태: 계약 초안 + 제한 spike(브랜치 `spike/host-admission`).** 출하 경로·클라이언트(APK/PC) 배선은 아직 없다. 자동 3대 재접속은 이 계약이 Codex 확정되기 전까지 출하하지 않는다.
 
 ## 1. 현 소스가 말하는 것 (82b3d14)
@@ -65,3 +65,14 @@
 - **보안 수준**: entry secret 은 평문 UDP 로 오간다. 기존 capability 와 같은 수준이다(경로상 관찰자는 둘 다 볼 수 있다). 암호화 채널은 범위 밖이다.
 - lease 갱신 정책과 서버 capability 수명, 클라이언트 쪽 backoff·Busy 처리·표시, entry 재인증(호스트 재시작 시 entry 소멸 → 클라이언트는 새 capability 로 StandbyHello).
 - 비용 측정(§6): 대기 entry 는 영상·control channel 이 없고 Ping 데이터그램(20 s lease 안에서 몇 초 간격)만 있다. 실측은 ②~④ 단계에서 한다.
+
+## 4. 실행 결과 (2026-10-26, spike/host-admission-r2 = 569059f 위)
+- `host_standby_table_test` 25/25 rc0.
+- `host_standby_admission_e2e_test --old-host <9991b36 의 GNLinkStream>` **72/72 ×2 rc0**(이 PC 콘솔, SLOT_REQUEST CreateNew→삭제, 루프백, 설치본 무조작):
+  - 두 기기 대기 공존(세션 0) → A 명시 activation(첫 세션) → B 의 ping·재 admission·control·늦은 activation 이 A 를 못 건드림 → B 명시 takeover(새 epoch·새 keyframe) → A 의 옛 control 거부·A 는 parked 로 남음 → A 의 옛 generation activation 은 superseded 거부, 새 generation 만 되찾음.
+  - 상한 8·Busy·Release 회수, lease 만료.
+  - relay 대역(클라이언트별 / 공유 host-facing 주소) 두 방식에서 entry 로 구별, 직결 A 무간섭.
+  - 구 Host: StandbyHello 에 답 없음(= 미지원), 그 Host 의 기존 세션 무간섭.
+- 처음 실행에서 드러난 시험 쪽 오류 2건(제품 아님)을 고쳤다: 첫 세션은 handshake 경로라 `session epoch=… peer=new` 줄이 없다(기대값이 하나씩 컸음) / 구 Host 경우 B 의 무응답 확인을 8회(3.2 s)→3회로 — 원시 시험 클라이언트가 control ACK 를 보내지 않아 구 Host 가 ~6 s 뒤 peer-lost 로 끝내는 것이 겹쳤다. 그리고 capture-lifecycle 의 UA-2 로그가 같은 `session epoch=` 를 써 이중 집계되던 것은 그쪽에서 `backend-owner epoch=` 로 고쳤다(569059f).
+- 시험 실패 증거용으로 `REMOTE60_E2E_DUMP_HOST_LOG`(시험 프로그램 쪽 환경변수, 호스트 로그를 파일로 덧붙임)를 넣었다.
+- 아직 아님: 실 릴레이 서버(호스트당 lease 1 — §3), 클라이언트(APK/PC) 배선, 비용 실측, held input release 의 직접 반례(기존 Serve 종료 동작에 기댐).

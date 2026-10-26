@@ -160,6 +160,18 @@ struct SpawnedHost {
 
   void Stop() {
     reading = false;
+    // The host's whole log, appended to REMOTE60_E2E_DUMP_HOST_LOG when set (the evidence of a failing case).
+    {
+      char dump[MAX_PATH] = {};
+      if (GetEnvironmentVariableA("REMOTE60_E2E_DUMP_HOST_LOG", dump, MAX_PATH) > 0) {
+        if (FILE* f = std::fopen(dump, "ab")) {
+          const std::string all = log();
+          std::fprintf(f, "\n===== host log (%zu bytes) =====\n", all.size());
+          std::fwrite(all.data(), 1, all.size(), f);
+          std::fclose(f);
+        }
+      }
+    }
     if (job) {
       CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE takes the host with it
       job = nullptr;
@@ -842,8 +854,10 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t refusal = 0;
     check("A's explicit activation is answered with a HelloAck (DirectoryAuth)", activate(a, hostAddr, ea, 1, &refusal),
           "refusal=" + std::to_string(refusal));
-    check("...through the session admission: epoch 2, logged as a standby activation",
-          host.WaitFor("(standby activation", 3000) && count_of(host.log(), "session epoch=") == 1, host.tail());
+    // The FIRST session is admitted in the handshake loop ("first session by activation"); only a later takeover
+    // rolls the session over (`session epoch=N peer=new (standby activation ...)`).
+    check("...through the session admission: the first session, logged as an activation (no rollover yet)",
+          host.WaitFor("first session by activation", 3000) && count_of(host.log(), "session epoch=") == 0, host.tail());
     check("A's control works (its window-select is processed)", select_seen(host, a, hostAddr, 1, 0xA0A0000000000001ull));
 
     std::printf("  -- B, parked, keeps itself alive and retries; A must not notice --\n");
@@ -949,10 +963,10 @@ int wmain(int argc, wchar_t** argv) {
       pings = pings && ping(b, relay.frontAddr, eb) == 0 && ping(c, relay.frontAddr, ec) == 0;
     check("their pings are told apart by entry, not by address", pings);
     check("A's direct session is untouched by both", select_seen(host, a, hostAddr, 2, 0xA1A1000000000002ull) &&
-                                                         count_of(host.log(), "session epoch=") == 1);
+                                                         count_of(host.log(), "session epoch=") == 0);
     check("B activates through the relay: takes the session", activate(b, relay.frontAddr, eb, 1, &refusal) &&
                                                                   host.WaitFor("(standby activation", 3000) &&
-                                                                  count_of(host.log(), "session epoch=") == 2);
+                                                                  count_of(host.log(), "session epoch=") == 1);
     check("B's control (through the relay) works", select_seen(host, b, relay.frontAddr, 1, 0xB2B2000000000001ull));
     check("C, parked behind the same relay, still answers", ping(c, relay.frontAddr, ec) == 0);
     check("...and A, parked, too", ping(a, hostAddr, ea) == 0);
@@ -988,7 +1002,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     check("A holds a session on the older host (ordinary Hello)", aUp);
     const size_t epochs = count_of(host.log(), "session epoch=");
-    const Entry eb = admit(b, hostAddr, 0xB3, 1, tokens[1], 8);
+    // 3 tries (1.2 s): a host that has standby answers within milliseconds. Kept short because this raw client
+    // does not acknowledge the host's control data, and an older host ends such a peer as lost after ~6 s
+    // (10-26: 8 tries let A's session lapse before its second select -- the harness, not the probe).
+    const Entry eb = admit(b, hostAddr, 0xB3, 1, tokens[1], 3);
     check("B's StandbyHello gets NO answer (= 'not supported'; a client stops here, sends no Hello)",
           !eb.ok && eb.status == 99);
     check("A's session on the older host is untouched", select_seen(host, a, hostAddr, 2, 0x01D0000000000002ull) &&
