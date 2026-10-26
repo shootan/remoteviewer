@@ -125,6 +125,15 @@ def find(root, rid=None, text=None):
     return None
 
 
+def find_exact(root, text):
+    if root is None:
+        return None
+    for n in root.iter('node'):
+        if (n.get('text') or '') == text:
+            return n
+    return None
+
+
 def tap_node(n):
     x0, y0, x1, y1 = bounds(n)
     adb('shell', 'input', 'tap', str((x0 + x1) // 2), str((y0 + y1) // 2))
@@ -169,14 +178,20 @@ def log_lines(tag_filter=None):
 
 # ---------------------------------------------------------------- host + pattern
 class Fixture:
-    def __init__(self, host_exe, out, static, input_log=None):
+    def __init__(self, host_exe, out, static, input_log=None, layered_size=None, pulse_ms=200):
         self.out = out
         self.port = free_udp_port()
         self.control_port = free_tcp_port()  # manual connect uses a TCP control link (loopback only)
+        # sh-strength r2: layered_size=(w, h) -> the pattern is a LAYERED window outside every monitor (it covers
+        # nothing on this PC's screen); the APK must pick it as a window (WGC).
+        self.pattern_log = open(os.path.join(out, 'pattern.log'), 'wb')
         self.pattern = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                                          os.path.join(HERE, 'sh_pattern_window.ps1'), '-Seconds', '1800']
                                         + (['-Static'] if static else [])
-                                        + (['-InputLog', input_log] if input_log else []))
+                                        + (['-InputLog', input_log] if input_log else [])
+                                        + (['-Layered', '-Width', str(layered_size[0]), '-Height', str(layered_size[1]),
+                                            '-PulseMs', str(pulse_ms)] if layered_size else []),
+                                        stdout=self.pattern_log, stderr=subprocess.STDOUT)
         time.sleep(3)
         stage = os.path.join(out, 'host')
         os.makedirs(stage, exist_ok=True)
@@ -257,7 +272,8 @@ def connect_to_pattern(port, extras=(), best_quality=True, level_before=None, be
     end = time.time() + 30
     card = None
     while time.time() < end and card is None:
-        card = find(dump(), text=PATTERN_TITLE) if window else find(dump(), rid='targetCardTitle')
+        # Exact title: once the window is the host's current target, a header "지금 보는 대상: <title>" holds it too.
+        card = find_exact(dump(), PATTERN_TITLE) if window else find(dump(), rid='targetCardTitle')
         if card is None:
             time.sleep(1)
     if card is None:
@@ -322,7 +338,8 @@ def video_origin(img):
     are on hue, not on full intensity."""
     h, w, _ = img.shape
     row = img[0, :, :]
-    red = (row[:, 0] > 80) & (row[:, 1] < 50) & (row[:, 2] < 50)
+    # sh-strength r2: > 60 (was 80) -- at s=0.60 the 1-px red row next to white comes back darker (R ~80, measured).
+    red = (row[:, 0] > 60) & (row[:, 1] < 50) & (row[:, 2] < 50)
     for x0 in range(0, w - VIDEO_W + 1):
         if red[x0 + 3:x0 + 40].all() and red[x0 + VIDEO_W - 40:x0 + VIDEO_W - 3].all() and not red[max(0, x0 - 3):x0].any():
             return x0
@@ -365,7 +382,7 @@ def metrics(img):
 def borders_ok(m):
     """Top red, bottom green, right yellow, each where the 1920x1080 picture's edge is (hue thresholds, 4:2:0)."""
     t, b, r = m['border_top_rgb'], m['border_bottom_rgb'], m['border_right_rgb']
-    return (t[0] > 80 and t[1] < 50 and t[2] < 50
+    return (t[0] > 60 and t[1] < 50 and t[2] < 50
             and b[1] > 150 and b[0] < b[1] - 80 and b[2] < b[1] - 80
             and r[0] > 150 and r[1] > 150 and r[2] < min(r[0], r[1]) - 60)
 
@@ -837,6 +854,16 @@ def fixture_visible(pattern):
         for x in range(64):
             if pattern == 'alt':
                 v[y, x] = (40 + 2 * x + (x % 2) * 50, 40 + 3 * y + (y % 2) * 50, 170 - x - y + ((x + y) % 2) * 30)
+            elif pattern == 'text':
+                if 8 <= x <= 39 and 4 <= y <= 35:
+                    g = 228 if (x // 2) % 2 == 0 else 28
+                elif y == 20:
+                    g = 228
+                elif x >= 44 and 4 <= y <= 35:
+                    g = 120 if (x + y) % 2 == 0 else 136
+                else:
+                    g = 28
+                v[y, x] = (g, g, (g * 3 + 255) // 4)
             else:
                 v[y, x] = (32 + 3 * x, 40 + 4 * y, 200 - 2 * x - y)
     return v
@@ -916,6 +943,265 @@ def scenario_shader(fx, out):
         json.dump(results, fh, indent=1)
 
 
+def shader_model(src, s, out_w, out_h):
+    """sh-strength r2: what the production shader computes, on the CPU -- each output pixel centre mapped onto the
+    visible picture (the B placement covers the whole output; out == visible size is A), the five taps one SOURCE
+    pixel apart, each clamped half a pixel inside the picture, bilinear with clamp-to-edge, ONE final clamp.
+    At out == visible size this is kernel()."""
+    h, w = src.shape[:2]
+    uu = (np.arange(out_w) + 0.5) / out_w
+    vv = (np.arange(out_h) + 0.5) / out_h
+    U, V = np.meshgrid(uu, vv)
+
+    def samp(a, b):
+        a = np.clip(a, 0.5 / w, 1 - 0.5 / w)
+        b = np.clip(b, 0.5 / h, 1 - 0.5 / h)
+        x = a * w - 0.5
+        y = b * h - 0.5
+        x0 = np.clip(np.floor(x).astype(int), 0, w - 1)
+        y0 = np.clip(np.floor(y).astype(int), 0, h - 1)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+        fx = (x - np.floor(x))[..., None]
+        fy = (y - np.floor(y))[..., None]
+        top = src[y0, x0] * (1 - fx) + src[y0, x1] * fx
+        bot = src[y1, x0] * (1 - fx) + src[y1, x1] * fx
+        return top * (1 - fy) + bot * fy
+
+    c = samp(U, V)
+    n = samp(U + 1.0 / w, V) + samp(U - 1.0 / w, V) + samp(U, V + 1.0 / h) + samp(U, V - 1.0 / h)
+    return np.clip((1 + 4 * s) * c - s * n, 0, 255)
+
+
+def upscale_bilinear(img, out_w, out_h):
+    """A's last step stood in on the CPU: the compositor's enlargement of the source-size output (a model --
+    the real compositor's filter is the device's; the AVD compare captures the real one)."""
+    return shader_model(img, 0.0, out_w, out_h)
+
+
+def picture_stats(img, region):
+    """Edge energy (mean |horizontal gradient|), and the clipped share (0 or 255 in any channel), over `region`."""
+    y0, y1, x0, x1 = region
+    a = img[y0:y1, x0:x1]
+    g = np.abs(np.diff(a.mean(axis=2), axis=1)).mean()
+    clip = float(((a <= 0.5) | (a >= 254.5)).any(axis=2).mean())
+    return round(float(g), 3), round(clip, 4)
+
+
+def scenario_strength_ab(fx, out):
+    """sh-strength r2 (Codex §4/§4B): one input frame through the production renderer -- A at 0/0.20/0.35/0.60 and B
+    (display-size, one pass) at x1.33/x2 -- read back and checked against shader_model; then the strength effect
+    (A s vs A 0) and the position effect (A s enlarged afterwards vs B s at the same size) on the same frame."""
+    adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    adb('shell', 'run-as', PKG, 'sh', '-c', 'rm -f files/sh_fixture*', check_rc=False)
+    adb('logcat', '-c', check_rc=False)
+    adb('shell', 'am', 'start', '-n', ACT, '--es', 'shTestFixture', 'strengthab')
+    done = None
+    for _ in range(120):
+        lines = log_lines('sh_fixture_done')
+        if lines:
+            done = lines[-1]
+            break
+        time.sleep(1)
+    if not check(done is not None, 'the fixture ran (sh_fixture_done)'):
+        return
+    summary = json.loads(done[done.index('{'):])
+    vis = fixture_visible('text')
+    got = {}
+    results = {}
+    for c in summary.get('cases', []):
+        name = c['name']
+        if name.endswith('_noring'):
+            check(c['note'] == 'no_output' and c.get('heldNoSource', 0) >= 1 and c.get('drawn', 0) == 0,
+                  name + ': B without a source size draws NOTHING (held, no output-size fallback)',
+                  'note=%s held=%s drawn=%s' % (c['note'], c.get('heldNoSource'), c.get('drawn')))
+            continue
+        raw = adb('exec-out', 'run-as', PKG, 'cat', 'files/sh_fixture_%s.rgba' % name, binary=True, timeout=60)
+        w, h = c['outW'], c['outH']
+        ok = len(raw) == w * h * 4 and c['note'] == 'ok'
+        check(ok, name + ': output read back (%dx%d)' % (w, h), 'note=%s bytes=%d src=%s' % (c['note'], len(raw), c.get('src')))
+        if not ok:
+            continue
+        img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].astype(np.float64)
+        got[name] = img
+        exp = shader_model(vis, c['strength'], w, h)
+        err = np.abs(img - exp)
+        results[name] = {'size': [w, h], 'max_err': float(err.max()), 'mean_err': round(float(err.mean()), 3)}
+        if c.get('control'):
+            check(err.max() > 6, name + ': NEGATIVE CONTROL -- output-pixel taps are caught', 'max=%.1f' % err.max())
+            continue
+        check(err.max() <= 6, name + ': matches the shader model on the same frame (max |d| <= 6)',
+              'max=%.1f mean=%.3f' % (err.max(), err.mean()))
+    # ---- the comparisons (same input frame)
+    bars = lambda w, h: (int(4 * h / 40), int(36 * h / 40), int(8 * w / 64), int(40 * w / 64))
+    low = lambda w, h: (int(4 * h / 40), int(36 * h / 40), int(44 * w / 64), w)
+    table = {}
+    for name, img in got.items():
+        h, w = img.shape[:2]
+        e_bar, c_bar = picture_stats(img, bars(w, h))
+        e_low, _ = picture_stats(img, low(w, h))
+        table[name] = {'bars_edge': e_bar, 'bars_clipped': c_bar, 'lowcontrast_edge': e_low}
+    a0 = got.get('textA_s00')
+    for st in ('20', '35', '60'):
+        a = got.get('textA_s' + st)
+        if a is not None and a0 is not None:
+            d = np.abs(a - a0)
+            table['textA_s' + st]['vs_A0_mean'] = round(float(d.mean()), 3)
+            table['textA_s' + st]['vs_A0_p99'] = round(float(np.percentile(d, 99)), 2)
+    if got.get('textA_s20') is not None and got.get('textA_s35') is not None:
+        d = np.abs(got['textA_s35'] - got['textA_s20'])
+        check(d.max() > 6, 'A: 0.35 and 0.20 are DIFFERENT final pixels on the same frame (the strength reaches the output)',
+              'mean=%.3f max=%.1f' % (d.mean(), d.max()))
+    if got.get('textA_s60') is not None and got.get('textA_s35') is not None:
+        d = np.abs(got['textA_s60'] - got['textA_s35'])
+        check(d.max() > 6, 'A: 0.60 differs from 0.35 on the same frame', 'mean=%.3f max=%.1f' % (d.mean(), d.max()))
+    for scale in ('B133', 'B2'):
+        for st in ('00', '20', '35', '60'):
+            b = got.get('text%s_s%s' % (scale, st))
+            a = got.get('textA_s' + st)
+            if b is None or a is None:
+                continue
+            h, w = b.shape[:2]
+            a_up = upscale_bilinear(a, w, h)
+            d = np.abs(b - a_up)
+            e_aup, c_aup = picture_stats(a_up, bars(w, h))
+            table['text%s_s%s' % (scale, st)].update({
+                'vs_Aup_mean': round(float(d.mean()), 3), 'vs_Aup_p99': round(float(np.percentile(d, 99)), 2),
+                'vs_Aup_max': round(float(d.max()), 1), 'Aup_bars_edge': e_aup, 'Aup_bars_clipped': c_aup})
+    print('      ' + json.dumps(table), flush=True)
+    with open(os.path.join(out, 'strength_ab.json'), 'w') as fh:
+        json.dump({'checks': results, 'table': table}, fh, indent=1)
+    for name, img in got.items():
+        Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).resize(
+            (img.shape[1] * 4, img.shape[0] * 4), Image.NEAREST).save(os.path.join(out, name + '_x4.png'))
+
+
+CMP_SCALE = 4.0 / 3.0  # a 1440x810 pattern window shown 1920x1080 on the AVD's 1080-high screen
+CMP_REGIONS = {'A_text': (60, 40, 900, 400), 'B_lowcontrast': (960, 40, 1430, 400), 'C_lines': (60, 440, 440, 700),
+               'D_flat': (490, 450, 590, 690), 'E_checker': (1040, 440, 1400, 700)}
+
+
+def cmp_metrics(img):
+    """metrics() for the x1.33 picture: the same pattern regions, scaled onto the screen."""
+    x0 = video_origin(img)
+    if x0 is None:
+        return None
+    m = {'x0': x0}
+    for k, (l, t, r, b) in CMP_REGIONS.items():
+        reg = img[int(t * CMP_SCALE):int(b * CMP_SCALE), x0 + int(l * CMP_SCALE):x0 + int(r * CMP_SCALE), :]
+        m[k + '_edge'] = round(edge_energy(reg), 3)
+        g = reg.mean(axis=2)
+        m[k + '_clip'] = round(float(((g <= 2) | (g >= 253)).mean()), 4)
+    top = img[0, x0 + 5:x0 + VIDEO_W - 5, :].mean(axis=0)
+    bottom = img[VIDEO_H - 1, x0 + 5:x0 + VIDEO_W - 5, :].mean(axis=0)
+    right = img[5:VIDEO_H - 5, x0 + VIDEO_W - 1, :].mean(axis=0)
+    m['border_top_rgb'] = [round(float(v)) for v in top]
+    m['border_bottom_rgb'] = [round(float(v)) for v in bottom]
+    m['border_right_rgb'] = [round(float(v)) for v in right]
+    return m
+
+
+def scenario_compare_ab(fx, out, offline=False):
+    """sh-strength r2 (Codex §4/§4B): the REAL APK path on the AVD, the same static picture (an off-screen layered
+    1440x810 pattern window, captured as a window) shown x1.33 -- A (source-size pass, the compositor enlarges) at
+    off/0.20/0.35/0.60 and B (display-size pass, one draw) at 0.20/0.35/0.60, plus B's double-transform negative
+    control. Each configuration is its own launch (B is a launch extra of the test build)."""
+    configs = [
+        ('A_off', 'off', ()), ('A_s20', 'weak', ()), ('A_s35', 'strong', ('--ef', 'shTestStrength', '0.35')),
+        ('A_s60', 'strong', ()),
+        ('B_s20', 'weak', ('--ez', 'shTestDisplayPass', 'true')),
+        ('B_s35', 'strong', ('--ez', 'shTestDisplayPass', 'true', '--ef', 'shTestStrength', '0.35')),
+        ('B_s60', 'strong', ('--ez', 'shTestDisplayPass', 'true')),
+        ('Bdouble_s35', 'strong', ('--ez', 'shTestDisplayPassDouble', 'true', '--ef', 'shTestStrength', '0.35')),
+    ]
+    shots = {}
+    imgs = {}
+    for name, level, extras in configs:
+        if offline:
+            # The judgement again on the screenshots a run saved (no AVD, no host): --scenario compare_ab_offline.
+            img = np.asarray(Image.open(os.path.join(out, 'shot_%s.png' % name)).convert('RGB'))
+            imgs[name] = img
+            shots[name] = cmp_metrics(img)
+            print('      %s: %s' % (name, json.dumps(shots[name])), flush=True)
+            continue
+        ok = connect_to_pattern(fx.port, extras, level_before=level, window=True)
+        check(ok, name + ': the APK connects and shows the pattern window (real UI, window pick)')
+        time.sleep(6)
+        img = screencap(os.path.join(out, 'shot_%s.png' % name))
+        imgs[name] = img
+        shots[name] = cmp_metrics(img)
+        lines = log_lines()
+        place = [l[l.index('sharpen_display_pass'):] for l in lines if 'sharpen_display_pass' in l]
+        sizes = [l[l.index('sharpen_'):][:160] for l in lines if 'sharpen_path' in l or 'sh_output' in l][-2:]
+        print('      %s: %s | %s | %s' % (name, json.dumps(shots[name]), place[-1:] , sizes), flush=True)
+        if name.startswith('B'):
+            check(bool(place), name + ': the app ran the display-size pass (placement logged)', str(place[-1:]))
+    good = [k for k in shots if not k.startswith('Bdouble')]
+    for k in good:
+        check(shots[k] is not None and borders_ok(shots[k]), k + ': the picture is found with its four borders where the x1.33 picture\'s edges are',
+              str(shots[k] and (shots[k]['border_top_rgb'], shots[k]['border_bottom_rgb'], shots[k]['border_right_rgb'])))
+    if all(shots[k] for k in good):
+        check(len({shots[k]['x0'] for k in good}) == 1, 'A and B place the picture at the same screen x (no double placement)',
+              str({k: shots[k]['x0'] for k in good}))
+        # the same picture, pixel for pixel in placement: flat colour identical, and B s vs A s differ only at edges
+        for st in ('s20', 's35', 's60'):
+            a, b = imgs['A_' + st].astype(np.float64), imgs['B_' + st].astype(np.float64)
+            x0 = shots['A_' + st]['x0']
+            l, t, r, bb = CMP_REGIONS['D_flat']
+            fa = a[int(t * CMP_SCALE):int(bb * CMP_SCALE), x0 + int(l * CMP_SCALE):x0 + int(r * CMP_SCALE)]
+            fb = b[int(t * CMP_SCALE):int(bb * CMP_SCALE), x0 + int(l * CMP_SCALE):x0 + int(r * CMP_SCALE)]
+            check(np.abs(fa.mean(axis=(0, 1)) - fb.mean(axis=(0, 1))).max() < 4,
+                  'A vs B %s: flat colour the same (colour / geometry of the two paths agree)' % st,
+                  '%s vs %s' % (fa.mean(axis=(0, 1)).round(1), fb.mean(axis=(0, 1)).round(1)))
+        for path in ('A', 'B'):
+            seq = [('A_off' if path == 'A' else None), path + '_s20', path + '_s35', path + '_s60']
+            seq = [k for k in seq if k]
+            vals = [shots[k]['A_text_edge'] for k in seq]
+            check(all(x < y for x, y in zip(vals, vals[1:])), path + ': text edge energy rises with the strength', str(dict(zip(seq, vals))))
+    d = shots.get('Bdouble_s35')
+    caught = d is None or not borders_ok(d) or (shots.get('B_s35') and d['x0'] != shots['B_s35']['x0'])
+    check(caught, 'NEGATIVE CONTROL: B with the TextureView placement applied as well (double transform) is caught',
+          str(d and {'x0': d['x0'], 'borders': (d['border_top_rgb'], d['border_bottom_rgb'])}))
+    with open(os.path.join(out, 'compare_ab.json'), 'w') as fh:
+        json.dump(shots, fh, indent=1)
+
+
+def scenario_latency_ab(fx, out, seconds):
+    """sh-strength r2 cost (Codex §4B: 1 pass with more output pixels is not free): the same changing input (the
+    off-screen layered pattern, a block flipped every 33 ms) shown x1.33 -- A off (direct), A 0.60, B 0.60, each its
+    own launch, `seconds` long. Read from the app's own 5 s lines: handoff->latch window p95, GL draw wall time,
+    frames drawn / skipped."""
+    configs = [('A_off', 'off', ()), ('A_s60', 'strong', ()), ('B_s60', 'strong', ('--ez', 'shTestDisplayPass', 'true'))]
+    res = {}
+    for name, level, extras in configs:
+        ok = connect_to_pattern(fx.port, extras, level_before=level, window=True)
+        check(ok, name + ': connected and viewing the pattern window')
+        adb('logcat', '-c', check_rc=False)
+        time.sleep(seconds)
+        lines = [l[l.index('[sh_latency] '):] for l in log_lines() if '[sh_latency] ' in l]
+        draws, p95s, drawn, skipped = [], [], 0, 0
+        for l in lines:
+            f = dict(kv.split('=', 1) for kv in l.replace('|', ' ').split() if '=' in kv)
+            if 'drawWallUs' in f and f.get('glDrawn', '0') != '0':
+                draws.append(int(f['drawWallUs']))
+            # the WINDOW's p95 is the first p95us of the line (the segment's comes after 'segment:')
+            win = l.split('| segment:')[0]
+            wf = dict(kv.split('=', 1) for kv in win.split() if '=' in kv)
+            if 'p95us' in wf:
+                try:
+                    p95s.append(int(wf['p95us']))
+                except ValueError:
+                    pass
+            drawn += int(f.get('glDrawn', '0'))
+            skipped += int(f.get('glSkipped', '0'))
+        res[name] = {'lines': len(lines), 'drawWallUs': draws, 'window_p95us': p95s,
+                     'glDrawn': drawn, 'glSkipped': skipped, 'sample': lines[-1][:400] if lines else ''}
+        print('      %s: %s' % (name, json.dumps(res[name])), flush=True)
+        check(len(lines) >= 3, name + ': the app reported its 5 s latency lines', str(len(lines)))
+    with open(os.path.join(out, 'latency_ab.json'), 'w') as fh:
+        json.dump(res, fh, indent=1)
+
+
 def scenario_race(fx, out):
     """r3 (Codex R2): the handoff entry and the decoder's buffer, published with a gap (native seam: 300 ms before, 2000 ms after;
     debug.gnlink.sh.*), on a STILL picture -- where a missed first latch is never followed by another frame.
@@ -962,13 +1248,13 @@ def scenario_race(fx, out):
         json.dump(results, fh, indent=1)
 
 
-def scenario_touch_host(fx, out, input_log):
+def scenario_touch_host(fx, out, input_log, extras=(), prefix=''):
     """r3 (Codex R3.3): a tap on the picture -> the app's native queue (seam log) -> the HOST -> the pattern
     window, which records the client point it received. The capture target is the pattern WINDOW, so the
     host's background-message injection posts to it (no real cursor, no SendInput). Before any tap, the
     host log must show that window as the applied selection; otherwise nothing is tapped."""
-    ok = connect_to_pattern(fx.port, window=True)
-    check(ok, 'connected (0.20), the pattern WINDOW picked')
+    ok = connect_to_pattern(fx.port, extras, window=True)
+    check(ok, prefix + 'connected (0.20), the pattern WINDOW picked')
     time.sleep(4)
     hlog = open(os.path.join(out, 'host.log'), 'rb').read().decode(errors='replace')
     sel = re.findall(r'window-select seq=\d+ requestedId=\d+ applied=1 selectedId=(\d+) streamGen=\d+ reason=ok title=(.*)', hlog)
@@ -981,6 +1267,7 @@ def scenario_touch_host(fx, out, input_log):
         os.remove(input_log)
 
     def tap_lime(label, one_to_one=True):
+        label = prefix + label
         img = screencap(os.path.join(out, 'touchhost_%s.png' % label))
         t = lime_target(img)
         if t is None:
@@ -1021,6 +1308,14 @@ def scenario_touch_host(fx, out, input_log):
         fh.write(open(input_log).read() if os.path.exists(input_log) else '')
 
 
+def scenario_touch_ab(fx, out, input_log):
+    """sh-strength r2 (Codex §4B geometry): the same tap path as touch_host, on the x1.33 off-screen layered pattern
+    window -- A, then B (display-size pass). The remote point the app computes is the viewport's either way; B
+    must show the picture where those points are (no double placement) and the host must receive the same point."""
+    scenario_touch_host(fx, out, input_log, (), 'A ')
+    scenario_touch_host(fx, out, input_log, ('--ez', 'shTestDisplayPass', 'true'), 'B ')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host-exe', required=True)
@@ -1030,12 +1325,18 @@ def main():
     ap.add_argument('--seconds', type=int, default=60)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    if args.scenario == 'compare_ab_offline':
+        scenario_compare_ab(None, args.out, offline=True)
+        print('RESULT: %s  (%d checks, %d failed)' % ('ALL PASS' if all(checks) else 'FAILED', len(checks), checks.count(False)))
+        return 0 if all(checks) else 1
     emu = ensure_emulator()
     adb('install', '-r', '-g', args.apk, timeout=300)
     adb('shell', 'pm', 'clear', PKG, check_rc=False)
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
-    input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario == 'touch_host' else None
-    fx = None if args.scenario == 'shader' else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
+    input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab') else None
+    fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab') else None,
+                                                                      pulse_ms=33 if args.scenario == 'latency_ab' else 200,
                                                         input_log=input_log)
     try:
         if args.scenario == 'compare':
@@ -1056,6 +1357,16 @@ def main():
             scenario_viewer_never(fx, args.out)
         elif args.scenario == 'resize':
             scenario_resize(fx, args.out)
+        elif args.scenario == 'compare_ab_offline':
+            scenario_compare_ab(fx, args.out, offline=True)
+        elif args.scenario == 'touch_ab':
+            scenario_touch_ab(fx, args.out, input_log)
+        elif args.scenario == 'latency_ab':
+            scenario_latency_ab(fx, args.out, args.seconds)
+        elif args.scenario == 'compare_ab':
+            scenario_compare_ab(fx, args.out)
+        elif args.scenario == 'strength_ab':
+            scenario_strength_ab(fx, args.out)
         elif args.scenario == 'shader':
             scenario_shader(fx, args.out)
         elif args.scenario == 'race':

@@ -156,7 +156,8 @@ def check_windows_dir(report, directory):
 # sh-filter r2 (Codex H4): what only the sharpening TEST seam (src/shseam, -Pgnlink.shTestSeam=true) puts
 # into the code -- its marker and the two launch-intent keys that inject faults or force a strength. The
 # shipped half (src/noseam) has none of them. Searched in every classes*.dex.
-APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength']
+# sh-strength r2: + the display-size pass A/B switch (B is a test-build experiment, never a shipped intent key).
+APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength', 'shTestDisplayPass']
 # sh-filter r3 (R2): the native half of the same seam (debug variant only) -- its marker and the system
 # property prefix it reads. Searched in every lib/*/*.so of the APK.
 APK_NATIVE_TEST_MARKERS = ['sh-test-seam', 'debug.gnlink.sh.']
