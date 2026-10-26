@@ -63,6 +63,14 @@ class ClientEncodedFrameSink {
   virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
     OnWindowSelectionControlResult(msg);
   }
+  // apk-0232 r1: a desktop pick at a host known to be at the logon screen (kCaptureFlagPreloginV1) gets no answer.
+  // The selection `tag` (still waiting for one) continues as a LOCAL selection: bound by its own first IDR, not by
+  // an answer (SelectionAckGate::BeginLocal). False = not that selection any more (or a sink that cannot) -- then
+  // nothing is selected. LocalSelectionBoundFor: the generation that bound it, 0 while unbound. RefuseSelectionFor:
+  // the selection `tag` cannot be made there (a window pick): it opens nothing.
+  virtual bool BeginLocalSelectionFor(uint64_t /* tag */) { return false; }
+  virtual uint64_t LocalSelectionBoundFor(uint64_t /* tag */) { return 0; }
+  virtual void RefuseSelectionFor(uint64_t /* tag */) {}
 };
 
 enum class ClientSessionState : uint8_t {
@@ -122,6 +130,9 @@ class ClientSessionController {
   ClientSessionSnapshot Snapshot() const;
   WindowPanelSnapshot WindowPanelSnapshotCopy() const;
   bool RequestWindowList();
+  // apk-0232 r1: at a host KNOWN to be at the logon screen a desktop pick is a local selection (nothing sent; see
+  // ClientEncodedFrameSink::BeginLocalSelectionFor) and a window pick is refused (false). A pick made before the
+  // role is known is queued and decided when it would go out (the control loop), the same way.
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
   bool RequestMonitorList();
@@ -377,6 +388,10 @@ class ClientSessionController {
   // Control-loop thread only.
   uint64_t owedSelection_ = 0;
   uint32_t owedAttempts_ = 0;
+  // apk-0232 r1: the local selection (logon screen) whose generation the panel is still waiting to show; 0 = none.
+  std::atomic<uint64_t> localSelectTag_{0};
+  void PollLocalSelection();
+  void ResolveUnsendableSelect(const ControlOutboundAction& action);
   uint64_t owedNextUs_ = 0;
   std::atomic<bool> clipInitialPushWanted_{false};
   // mobile-abr r1: the once-a-second report. The AUs and their payload bytes the receive pipeline

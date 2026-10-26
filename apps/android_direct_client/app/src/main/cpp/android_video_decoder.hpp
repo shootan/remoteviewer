@@ -88,6 +88,11 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t KeyframeOwedFor() override;
   void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& msg,
                                          uint64_t requestTag) override;
+  // apk-0232 r1: a desktop pick at a host at the logon screen (no answer comes): the armed selection continues as a
+  // local one, bound by its own first IDR that reaches the codec (SelectionAckGate::BeginLocal).
+  bool BeginLocalSelectionFor(uint64_t tag) override;
+  uint64_t LocalSelectionBoundFor(uint64_t tag) override;
+  void RefuseSelectionFor(uint64_t tag) override;
   void AbortWindowSelection();
   std::string DebugStatus();
   uint64_t VideoSizePacked();

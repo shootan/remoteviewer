@@ -1513,6 +1513,54 @@ WindowSelectApplyResult WindowPanelStateModel::ApplyWindowSelectedFor(const Cont
   return result;
 }
 
+bool WindowPanelStateModel::BeginLocalSelect(uint64_t selectionTag, const char* statusText) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (state_.selectionLocked) return false;
+  selectRequestPending_ = false;
+  pendingSelectTag_ = 0;
+  currentSelectTag_ = selectionTag;
+  if (statusText) state_.status = statusText;
+  return true;
+}
+
+bool WindowPanelStateModel::ConvertSelectToLocal(uint64_t selectionTag, const char* statusText) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (selectionTag != currentSelectTag_) return false;
+  if (statusText) state_.status = statusText;
+  return true;
+}
+
+WindowSelectApplyResult WindowPanelStateModel::ApplyLocalSelectedFor(uint64_t selectionTag, uint64_t streamGeneration) {
+  WindowSelectApplyResult result{};
+  std::lock_guard<std::mutex> lk(mu_);
+  if (selectionTag == 0 || selectionTag != currentSelectTag_ || streamGeneration == 0) {
+    result.shown = false;
+    return result;
+  }
+  state_.lastSelectOk = true;
+  state_.lastSelectWindowId = 0;
+  state_.lastSelectStreamGeneration = streamGeneration;
+  state_.lastSelectHostSendQpcUs = 0;
+  state_.selectedId = 0;
+  state_.selectedTitle = "desktop";
+  set_selected_target_dimensions(&state_);
+  state_.status = "window_selected: desktop (logon screen)";
+  std::ostringstream oss;
+  oss << "[native-video-client][control] window-selected local (logon screen) streamGen=" << streamGeneration
+      << " selection=" << selectionTag;
+  result.logLine = oss.str();
+  result.ok = true;
+  return result;
+}
+
+bool WindowPanelStateModel::RefuseSelectFor(uint64_t selectionTag, const char* reason) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (selectionTag != 0 && selectionTag != currentSelectTag_) return false;
+  state_.lastSelectOk = false;
+  state_.status = std::string("window_select_failed: ") + (reason ? reason : "unknown");
+  return true;
+}
+
 void WindowPanelStateModel::Scroll(int deltaSteps, int visibleCount) {
   std::lock_guard<std::mutex> lk(mu_);
   const int clampedVisibleCount = std::max(1, visibleCount);

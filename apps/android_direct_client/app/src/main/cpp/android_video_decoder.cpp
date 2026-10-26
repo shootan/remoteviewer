@@ -476,6 +476,30 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
   log_info(line);
 }
 
+bool AndroidVideoDecoderSink::BeginLocalSelectionFor(uint64_t tag) {
+  LockedState lock(this);
+  const bool begun = gate_.BeginLocal(tag);
+  char line[160];
+  std::snprintf(line, sizeof(line), "selection local (logon screen) localGen=%llu begun=%u",
+                static_cast<unsigned long long>(tag), begun ? 1u : 0u);
+  log_info(line);
+  return begun;
+}
+
+uint64_t AndroidVideoDecoderSink::LocalSelectionBoundFor(uint64_t tag) {
+  LockedState lock(this);
+  return gate_.LocalBoundFor(tag);
+}
+
+void AndroidVideoDecoderSink::RefuseSelectionFor(uint64_t tag) {
+  LockedState lock(this);
+  const bool refused = gate_.Refuse(tag);
+  char line[160];
+  std::snprintf(line, sizeof(line), "selection refused (logon screen) localGen=%llu refused=%u",
+                static_cast<unsigned long long>(tag), refused ? 1u : 0u);
+  log_info(line);
+}
+
 void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGeneration) {
   LockedState lock(this);
   ResetCodecLocked();
@@ -559,6 +583,7 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " bootstrapReplay=" + std::to_string(bootstrapReplayCount_);
   status += " lastOutUs=" + std::to_string(lastOutputPresentationUs_);
   status += " awaitingAck=" + std::to_string(gate_.awaiting() ? 1 : 0);
+  status += " localSel=" + std::to_string(gate_.local() ? 1 : 0);  // apk-0232 r1
   // keepalive r5 D1: the codec's own answers (see the members).
   status += " codecs=" + std::to_string(codecsStarted_);
   status += " inDeq=" + std::to_string(lastInputDequeue_);
