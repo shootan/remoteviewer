@@ -66,7 +66,11 @@ object SharpenShaderFixture {
             listOf(Case("control_textB133_outtaps", 0, 0.35f, ring(SharpenRenderer.SharpenFaults(outputPixelTaps = true)),
                 pattern = "text", cpu = true, outScale = 4f / 3f, display = true, control = true),
                 // B with no source size: must not draw (no output-size fallback in B) -- the case expects NO frame
-                Case("textB133_noring", 0, 0.35f, pattern = "text", cpu = true, outScale = 4f / 3f, display = true))
+                Case("textB133_noring", 0, 0.35f, pattern = "text", cpu = true, outScale = 4f / 3f, display = true),
+                // r3 (Codex §4.3): B with the decoder's crop (64x48 buffer, 64x40 visible, magenta padding) and with a
+                // quarter turn, enlarged x1.33 -- taps one SOURCE pixel, the transform once, no padding read
+                Case("cropB133_s35", 0, 0.35f, ring(), outScale = 4f / 3f, display = true),
+                Case("rot90B133_s35", ROT_90, 0.35f, ring(), pattern = "alt", outScale = 4f / 3f, display = true))
     }
 
     val CASES by lazy { listOf(
@@ -152,7 +156,7 @@ object SharpenShaderFixture {
                 override fun onFailed(generation: Long, reason: String) { failure.set(reason); ready.countDown(); got.countDown() }
                 override fun onReleased(generation: Long, detached: Boolean) { released.countDown() }
             }, c.faults)
-        if (c.display) renderer.setDisplayPlacement(DisplayPlacement(0f, 0f, outW.toFloat(), outH.toFloat()))
+        if (c.display) renderer.setDisplayPlacement(DisplayPlacement(0f, 0f, outW.toFloat(), outH.toFloat(), outW.toFloat(), outH.toFloat()))
         var note = "ok"
         try {
             if (!ready.await(5, TimeUnit.SECONDS) || input.get() == null) {

@@ -1024,7 +1024,14 @@ def scenario_strength_ab(fx, out):
             continue
         img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].astype(np.float64)
         got[name] = img
-        exp = shader_model(vis, c['strength'], w, h)
+        # r3: the case's own picture -- the pattern it was fed, turned as its buffer transform turns it
+        src = fixture_visible(c.get('pattern', 'text'))
+        if c['transform'] == 4:
+            src = np.rot90(src, k=-1)
+        exp = shader_model(src, c['strength'], w, h)
+        is_mag = lambda a: (a[:, :, 0] > 200) & (a[:, :, 1] < 60) & (a[:, :, 2] > 200)
+        if (is_mag(img) & ~is_mag(exp)).sum() > 0:
+            check(False, name + ': no padding (magenta) pixel reaches the output', str(int((is_mag(img) & ~is_mag(exp)).sum())))
         err = np.abs(img - exp)
         results[name] = {'size': [w, h], 'max_err': float(err.max()), 'mean_err': round(float(err.mean()), 3)}
         if c.get('control'):
@@ -1179,7 +1186,7 @@ def scenario_latency_ab(fx, out, seconds):
         adb('logcat', '-c', check_rc=False)
         time.sleep(seconds)
         lines = [l[l.index('[sh_latency] '):] for l in log_lines() if '[sh_latency] ' in l]
-        draws, p95s, drawn, skipped = [], [], 0, 0
+        draws, p95s, drawn, skipped, redraws = [], [], 0, 0, 0
         for l in lines:
             f = dict(kv.split('=', 1) for kv in l.replace('|', ' ').split() if '=' in kv)
             if 'drawWallUs' in f and f.get('glDrawn', '0') != '0':
@@ -1194,8 +1201,9 @@ def scenario_latency_ab(fx, out, seconds):
                     pass
             drawn += int(f.get('glDrawn', '0'))
             skipped += int(f.get('glSkipped', '0'))
+            redraws += int(f.get('glRedraws', '0'))  # r3 (N2): redraws of a latched frame (no new picture)
         res[name] = {'lines': len(lines), 'drawWallUs': draws, 'window_p95us': p95s,
-                     'glDrawn': drawn, 'glSkipped': skipped, 'sample': lines[-1][:400] if lines else ''}
+                     'glDrawn': drawn, 'glSkipped': skipped, 'glRedraws': redraws, 'sample': lines[-1][:400] if lines else ''}
         print('      %s: %s' % (name, json.dumps(res[name])), flush=True)
         check(len(lines) >= 3, name + ': the app reported its 5 s latency lines', str(len(lines)))
     with open(os.path.join(out, 'latency_ab.json'), 'w') as fh:
@@ -1403,6 +1411,121 @@ def scenario_ua2_old(fx, out, new_host_exe):
         fx2.close()
 
 
+def node_state(rid):
+    root = dump()
+    for n in (root.iter('node') if root is not None else []):
+        if n.get('resource-id') == PKG + ':id/' + rid:
+            return {'selected': n.get('selected') == 'true', 'enabled': n.get('enabled') == 'true', 'bounds': n.get('bounds')}
+    return None
+
+
+def to_list():
+    for _ in range(4):
+        if find(dump(), rid='listSettingsButton') is not None:
+            return True
+        adb('shell', 'input', 'keyevent', 'KEYCODE_BACK', check_rc=False)
+        time.sleep(2)
+    return find(dump(), rid='listSettingsButton') is not None
+
+
+def settings_method(rid_to_tap=None):
+    """The settings tab scrolled to the drawing-method buttons; optionally a real tap on one. Returns their state."""
+    tap(rid='listSettingsButton', timeout=20)
+    for _ in range(10):
+        if node_state('settingsSharpMethodDisplayButton'):
+            break
+        adb('shell', 'input', 'swipe', '540', '1800', '540', '1000', '300', check_rc=False)
+        time.sleep(1)
+    time.sleep(1)
+    if rid_to_tap:
+        n = find(dump(), rid=rid_to_tap)
+        if n is not None:
+            tap_node(n)
+        time.sleep(1.5)
+    return node_state('settingsSharpMethodDefaultButton'), node_state('settingsSharpMethodDisplayButton')
+
+
+def pick_pattern_again():
+    tap(rid='listWindowsButton', timeout=10)
+    end = time.time() + 30
+    card = None
+    while time.time() < end and card is None:
+        card = find_exact(dump(), PATTERN_TITLE)
+        if card is None:
+            time.sleep(1)
+    if card is None:
+        return False
+    tap_node(card)
+    return wait_for(rid='viewerMenuButton', timeout=40) or wait_for(rid='viewerRoot', timeout=5)
+
+
+def scenario_method_ui(fx, out):
+    """sh-strength r3 (Codex codex_sh_strength_r2.md §2, §4.1): the drawing method through the NORMAL settings UI of the
+    seam-free APK -- default A, a real tap on "화면 크기 (실험)" -> B draws (display pass logged, crisper edges), B -> off
+    -> direct (placement unchanged) -> strong again = B, back to 기본 = A, and the choice restored after a restart."""
+    adb('logcat', '-c', check_rc=False)
+    ok = connect_to_pattern(fx.port, level_before='strong', window=True)
+    check(ok, 'connected, 강하게 (0.60), the pattern window shown')
+    time.sleep(5)
+    a = cmp_metrics(screencap(os.path.join(out, 'method_1_default.png')))
+    lines = log_lines()
+    check(a is not None and not any('sharpen_display_pass' in l for l in lines),
+          'default: drawn the A way (no display pass) -- a fresh install is A', str(a and a['A_text_edge']))
+    to_list()
+    d, b = settings_method()
+    check(d and b and d['selected'] and not b['selected'], 'settings: 기본 selected, 화면 크기 not (rendered)', str((d, b)))
+    d, b = settings_method('settingsSharpMethodDisplayButton')
+    check(d and b and b['selected'] and not d['selected'], 'a real tap on 화면 크기 (실험): it is the selected one', str((d, b)))
+    adb('logcat', '-c', check_rc=False)
+    check(pick_pattern_again(), 'back in the viewer')
+    time.sleep(5)
+    bm = cmp_metrics(screencap(os.path.join(out, 'method_2_display.png')))
+    lines = log_lines()
+    dp = [l[l.index('sharpen_display_pass'):][:160] for l in lines if 'sharpen_display_pass' in l]
+    check(any('mode=1 method=display' in l for l in dp), 'B is drawn because of the SETTING (no test extra): display pass logged', str(dp[-1:]))
+    check(a and bm and borders_ok(bm) and bm['x0'] == a['x0'], 'B: the picture is where A put it (borders, x)', str(bm and (bm['x0'], bm['border_top_rgb'])))
+    check(a and bm and bm['A_text_edge'] > a['A_text_edge'] * 1.15, 'B: text edges crisper than A at the same strength',
+          '%s -> %s' % (a and a['A_text_edge'], bm and bm['A_text_edge']))
+    # B -> off -> strong (B again), in the viewer menu
+    choose_level('off')
+    time.sleep(4)
+    off = cmp_metrics(screencap(os.path.join(out, 'method_3_off.png')))
+    lines = log_lines()
+    check(off and borders_ok(off) and off['x0'] == a['x0'] and any('sharpen_path' in l and 'path=direct' in l for l in lines),
+          'B -> 끄기: direct again, the picture where it was', str(off and off['x0']))
+    adb('logcat', '-c', check_rc=False)
+    choose_level('strong')
+    time.sleep(5)
+    again = cmp_metrics(screencap(os.path.join(out, 'method_4_display_again.png')))
+    lines = log_lines()
+    check(any('sharpen_display_pass' in l and 'mode=1' in l for l in lines) and again and again['A_text_edge'] > a['A_text_edge'] * 1.15,
+          '끄기 -> 강하게: B again (a new renderer, the display pass)', str(again and again['A_text_edge']))
+    # back to 기본
+    to_list()
+    d, b = settings_method('settingsSharpMethodDefaultButton')
+    check(d and d['selected'], 'a real tap on 기본: selected', str((d, b)))
+    adb('logcat', '-c', check_rc=False)
+    check(pick_pattern_again(), 'back in the viewer (기본)')
+    time.sleep(5)
+    a2 = cmp_metrics(screencap(os.path.join(out, 'method_5_default_again.png')))
+    lines = log_lines()
+    check(a2 and not any('sharpen_display_pass' in l and 'mode=1' in l for l in lines) and abs(a2['A_text_edge'] - a['A_text_edge']) < 0.1 * a['A_text_edge'],
+          '기본 again: A (no display pass), edges as before', str(a2 and a2['A_text_edge']))
+    # the choice survives a restart
+    to_list()
+    settings_method('settingsSharpMethodDisplayButton')
+    adb('shell', 'am', 'force-stop', PKG, check_rc=False)
+    time.sleep(2)
+    ok = connect_to_pattern(fx.port, best_quality=False, window=True)
+    check(ok, 'restarted and connected')
+    time.sleep(5)
+    lines = log_lines()
+    check(any('sharpen_display_pass' in l and 'mode=1 method=display' in l for l in lines), 'after a restart the stored 화면 크기 is used')
+    to_list()
+    d, b = settings_method()
+    check(b and b['selected'], '...and shown selected in settings', str((d, b)))
+
+
 def scenario_race(fx, out):
     """r3 (Codex R2): the handoff entry and the decoder's buffer, published with a gap (native seam: 300 ms before, 2000 ms after;
     debug.gnlink.sh.*), on a STILL picture -- where a missed first latch is never followed by another frame.
@@ -1537,7 +1660,7 @@ def main():
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
     input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab') else None
     fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
-                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old') else None,
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui') else None,
                                                                       pulse_ms=33 if args.scenario == 'latency_ab' else 200,
                                                         input_log=input_log)
     try:
@@ -1561,6 +1684,8 @@ def main():
             scenario_resize(fx, args.out)
         elif args.scenario == 'compare_ab_offline':
             scenario_compare_ab(fx, args.out, offline=True)
+        elif args.scenario == 'method_ui':
+            scenario_method_ui(fx, args.out)
         elif args.scenario == 'ua2_old':
             scenario_ua2_old(fx, args.out, args.new_host_exe)
         elif args.scenario == 'ua2':

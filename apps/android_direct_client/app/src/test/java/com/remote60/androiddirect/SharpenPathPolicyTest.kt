@@ -27,6 +27,18 @@ class SharpenPathPolicyTest {
         return p to gen
     }
 
+    // sh-strength r3: a method change replaces the renderer -- released first, the new one only after it let go
+    @Test
+    fun restartReleasesThenStartsANewRenderer() {
+        val (p, gen) = start(SharpnessLevel.WEAK)
+        val c = p.restartRenderer()
+        assertEquals(listOf(Command.DetachDecoder, Command.ReleaseRenderer(gen)), c)
+        assertEquals(SharpenPathPolicy.Path.RELEASING, p.path)
+        val after = p.rendererReleased(gen, detached = true)
+        assertEquals(listOf(Command.StartRenderer(gen + 1, SharpnessLevel.WEAK.strength)), after)
+        assertEquals(emptyList<Command>(), SharpenPathPolicy(SharpnessLevel.OFF).restartRenderer())
+    }
+
     /** Producer-connecting commands: what must never happen on a surface that is not free. */
     private fun producers(c: List<Command>): List<Command> =
         c.filter { it is Command.BindDirect || it is Command.StartRenderer }
