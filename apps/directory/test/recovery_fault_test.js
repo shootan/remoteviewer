@@ -4,10 +4,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { spawn, spawnSync } = require('child_process');
 const net = require('net'), dgram = require('dgram'), assert = require('assert');
 const root = path.resolve(__dirname, '../../..');
-const scratchRoot = path.join(root, '.claude', 'test-tmp');
+// r5 (Codex N4): under the suite's test root when the runner names one, else this worktree's .claude/test-tmp.
+const scratchRoot = process.env.REMOTE60_TEST_TMP ? path.resolve(process.env.REMOTE60_TEST_TMP) : path.join(root, '.claude', 'test-tmp');
 fs.mkdirSync(scratchRoot, { recursive: true });
 const scratch = fs.mkdtempSync(path.join(scratchRoot, 'server-recovery-'));
-assert(!path.relative(root, scratch).startsWith('..'));
+assert(!path.relative(scratchRoot, scratch).startsWith('..'));
 const serverPath = path.resolve(__dirname, '../server.js');
 const data = path.join(scratch, 'store.json'), flag = path.join(scratch, 'fail-write');
 const preload = path.join(scratch, 'fault.cjs');

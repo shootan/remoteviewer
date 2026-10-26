@@ -19,10 +19,11 @@ const { spawn, spawnSync } = require('child_process');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '../../..');
-const scratchRoot = path.join(root, '.claude', 'test-tmp');
+// r5 (Codex N4): under the suite's test root when the runner names one, else this worktree's .claude/test-tmp.
+const scratchRoot = process.env.REMOTE60_TEST_TMP ? path.resolve(process.env.REMOTE60_TEST_TMP) : path.join(root, '.claude', 'test-tmp');
 fs.mkdirSync(scratchRoot, { recursive: true });
 const scratch = fs.mkdtempSync(path.join(scratchRoot, 'device-credential-'));
-assert(!path.relative(root, scratch).startsWith('..'));
+assert(!path.relative(scratchRoot, scratch).startsWith('..'));
 const serverPath = path.resolve(__dirname, '../server.js');
 const data = path.join(scratch, 'store.json');
 const flag = path.join(scratch, 'fail-write');

@@ -4,7 +4,7 @@
 // and reads what it prints.
 const { spawn } = require('child_process');
 const path = require('path');
-const os = require('os');
+const testTmp = require('./test_tmp');  // r5 (Codex N4): only inside REMOTE60_TEST_TMP
 const fs = require('fs');
 
 let failures = 0;
@@ -13,7 +13,7 @@ function check(name, cond, detail) {
   if (!cond) failures++;
 }
 
-const dataPath = path.join(os.tmpdir(), `remote60-envbound-${process.pid}.json`);
+const dataPath = testTmp.file(`remote60-envbound-${process.pid}.json`);
 const env = { ...process.env, REMOTE60_DIR_DATA: dataPath, REMOTE60_LOG_DISABLED: '1',
               REMOTE60_DIR_PORT: '18090', REMOTE60_DIR_UDP_PORT: '18091',
               REMOTE60_RELAY_ENABLED: '1', REMOTE60_RELAY_IP: '127.0.0.1', REMOTE60_RELAY_PORT: '18453',
@@ -34,7 +34,7 @@ setTimeout(() => {
   check('...and the server still starts', out.includes('[relay] listening on udp'));
   server.kill();
   server.on('exit', () => {
-    fs.rmSync(dataPath, { force: true });
+    testTmp.remove(dataPath);
     console.log(`\nRESULT: ${failures ? 'FAILED' : 'ALL PASS'}  (${failures} failed)`);
     process.exit(failures ? 1 : 0);
   });
