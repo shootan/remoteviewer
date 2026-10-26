@@ -1880,6 +1880,7 @@ add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_p
 # keepalive-r2 A (spike/host-admission): standby entries -- the table as logic, and at a real host.
 add_executable(remote60_host_standby_table_test src/host_standby_table_test.cpp)
 target_include_directories(remote60_host_standby_table_test PRIVATE src)
+target_link_libraries(remote60_host_standby_table_test PRIVATE ws2_32)  # r3: the Standby* handling cases (htons)
 add_executable(remote60_host_standby_admission_e2e_test
   src/host_standby_admission_e2e_test.cpp
   src/native_video_client_shared_core.cpp

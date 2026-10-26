@@ -791,6 +791,12 @@ constexpr uint32_t kUdpStandbyStatusOk = 0;
 constexpr uint32_t kUdpStandbyStatusBusy = 1;     // the host holds as many entries as it allows
 constexpr uint32_t kUdpStandbyStatusUnknown = 2;  // no such entry (expired, released, replaced) or wrong secret
 constexpr uint32_t kUdpStandbyStatusSuperseded = 3;  // Activate: an old generation (a late packet), not a new activation
+// keepalive-r2 A r3 (Codex decision 2): an activation's RESULT names its operation. The host answers an
+// accepted StandbyActivate with a StandbyPong {entryId, clientGen = the activation's generation, status Ok,
+// features |= this flag} right before the HelloAck; a refused one with a StandbyPong {entryId, clientGen,
+// status Unknown/Superseded}. A client takes an activation as done only on the Pong of ITS entry and ITS
+// generation -- a late Ack of an earlier activation, or of a cancelled one, carries another generation.
+constexpr uint32_t kUdpStandbyPongActivationGranted = 0x1;
 struct UdpStandbyPacket {
   uint32_t magic = kMagic;
   uint16_t kind = 0;

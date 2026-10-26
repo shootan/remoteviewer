@@ -386,7 +386,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               [&](const std::string& token, const sockaddr_in& from) {
                 return clientSession.directoryAgent.AuthorizePeer(token, from);
               },
-              GetTickCount64());
+              GetTickCount64(),
+              // r3 S3: the active grant ends with its control session's real end (a resume/pause is none).
+              clientSession.backendSessionEnded.load(std::memory_order_acquire) >> remote60::native_poc::kBackendServeSeqBits);
           if (sb.action != remote60::native_poc::StandbyAction::NotStandby) {
             if (!sb.log.empty()) {
               const bool refusal = sb.log.find("refused (capability)") != std::string::npos;
@@ -436,10 +438,14 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
               sender.udpPeerChanged.store(true, std::memory_order_release);
               const uint64_t epoch = clientSession.AdmitHello(true, true);
+              clientSession.standby.BindActiveEpoch(sb.entry.grantId, epoch);  // r3 S3: the grant ends with it
               std::cout << "[native-video-host][control] session epoch=" << epoch << (changed ? " peer=new" : " peer=same")
                         << " (standby activation, entries=" << clientSession.standby.size() << ")\n";
               clientSession.AwaitControlReady(epoch);
             }
+            // r3 (Codex decision 2): the result names its operation (entry + generation), then the HelloAck.
+            (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&sb.activationPong), sizeof(sb.activationPong),
+                         0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
             (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                          reinterpret_cast<const sockaddr*>(&peer), peerLen);
             continue;
@@ -583,7 +589,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
             }
             const uint64_t epoch = clientSession.AdmitHello(directoryAuthenticated, startsSession);
             // keepalive-r2 A: a session that came from a Hello is no standby entry's.
-            if (startsSession) clientSession.standby.SessionTakenByHello();
+            if (startsSession) clientSession.standby.SessionTakenByHello(GetTickCount64());
             if (startsSession) {
               std::cout << "[native-video-host][control] session epoch=" << epoch
                         << (changed ? " peer=new" : " peer=same") << "\n";

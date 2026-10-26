@@ -429,7 +429,8 @@ int startup_connect_client(HostContext& hx) {
             [&](const std::string& token, const sockaddr_in& from) {
               return clientSession.directoryAgent.AuthorizePeer(token, from);
             },
-            GetTickCount64());
+            GetTickCount64(),
+            clientSession.backendSessionEnded.load(std::memory_order_acquire) >> remote60::native_poc::kBackendServeSeqBits);
         if (sb.action != remote60::native_poc::StandbyAction::NotStandby) {
           if (!sb.log.empty()) std::cout << sb.log << "\n";
           if (sb.action == remote60::native_poc::StandbyAction::Reply) {
@@ -449,7 +450,11 @@ int startup_connect_client(HostContext& hx) {
           clientSession.bandwidthObserveNegotiated.store((f & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
                                                          std::memory_order_release);
           if (clientSession.clipImage) clientSession.clipImage->SetBulkNegotiated((ack.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0);
-          (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
+          const uint64_t firstEpoch = clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
+          if (sb.fresh) clientSession.standby.BindActiveEpoch(sb.entry.grantId, firstEpoch);  // r3 S3: ends with it
+          // r3 (Codex decision 2): the result names its operation (entry + generation), then the HelloAck.
+          (void)sendto(readySock, reinterpret_cast<const char*>(&sb.activationPong), sizeof(sb.activationPong), 0,
+                       reinterpret_cast<const sockaddr*>(&peer), peerLen);
           (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
                        reinterpret_cast<const sockaddr*>(&peer), peerLen);
           std::cout << "[native-video-host][standby] first session by activation entries=" << clientSession.standby.size()
@@ -535,7 +540,7 @@ int startup_connect_client(HostContext& hx) {
         // r9 R3: the first session, admitted by the capability: its epoch's standing, then the flag.
         (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
-        clientSession.standby.SessionTakenByHello();
+        clientSession.standby.SessionTakenByHello(GetTickCount64());
         helloAuthenticated = true;
       }
       // r6 G2: in prelogin the login screen is exposed, so a token-less FIRST Hello must be refused
