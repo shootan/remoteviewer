@@ -246,7 +246,7 @@ void shared_socket_test(FakeHost& host) {
   n::close_socket(&args.preparedUdpSocket);  // the session ended (its descriptor closed, not shut down)
   check("the session's connect() on its duplicate; its descriptor closed; SessionOver", connected && lease.SessionOver(op));
   const int seen0 = directory.seen;
-  check("...an observe to ANOTHER address from the lease works (POSIX: the association dissolved; Windows: a fresh socket)",
+  check("...an observe to ANOTHER address from the lease works (a fresh socket: the tied one keeps its endpoint)",
         lease.ObserveFrom("127.0.0.1", directory.port, "obs-shared") && directory.seen > seen0,
         "seen=" + std::to_string(directory.seen - seen0));
   const int pings = host.pings;
