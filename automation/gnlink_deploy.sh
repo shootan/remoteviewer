@@ -483,24 +483,32 @@ publish_pair() {
     #    do they verify together (the same verifier and key as the checks before the swap)?
     # The exit code stays 4 in every case: a failed publish a person has to look at. Nothing is undone or
     # cleaned up here (Codex maint M1: no automatic rollback, no blind cleanup).
-    # maint r3 (Codex M2): a state is only said when the query that says it RAN. Each query exits 0 and prints one
-    # typed word; a non-zero exit (ssh 255, a remote command that failed) or any other output is "unknown" -- never
-    # read as "missing". Likewise only the verifier's own REFUSED (exit 3) is "does-not-verify"; node that cannot
-    # run, a file or key it cannot read, anything thrown, is "unknown".
-    local swap_state="unknown" answer=""
-    answer="$(remote_sh "if test ! -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'; then echo gnlink-swap-manifest-only; elif test -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'; then echo gnlink-swap-neither; else echo gnlink-swap-other; fi" 2>/dev/null)" || answer=""
-    case "$answer" in
-      gnlink-swap-manifest-only) swap_state="manifest-only" ;;
-      gnlink-swap-neither)       swap_state="neither" ;;
-    esac
+    # maint r3/r4 (Codex M2): a state is only said when the query that says it RAN. Only the verifier's own REFUSED
+    # (exit 3) is "does-not-verify"; node that cannot run, a file or key it cannot read, anything thrown, is
+    # "unknown". And "missing" is only said when the directory was LISTED: one read-only listing of the manifest
+    # directory (name and type of each entry, a symlink by what it points to), which must end with its own end mark. `test -f x` cannot tell
+    # "x is not there" from "x could not be looked at" (both false), so it is not used for this. A listing that
+    # failed anywhere (find exits non-zero on any entry it cannot read, ssh 255, no end mark) is "unknown".
+    local swap_state="unknown" listing="" listed=0
+    listing="$(remote_sh "find '$MANIFEST_DIR' -mindepth 1 -maxdepth 1 -printf '%Y %f\\n' && echo gnlink-list-end" 2>/dev/null)" || listing=""
+    case "$listing" in *gnlink-list-end) listed=1 ;; esac
+    has_entry() { printf '%s\n' "$listing" | grep -qxF -- "$1"; }
+    if [ "$listed" = "1" ]; then
+      if ! has_entry "f $PLATFORM.manifest.tmp" && has_entry "f $PLATFORM.sig.tmp"; then
+        swap_state="manifest-only"
+      elif has_entry "f $PLATFORM.manifest.tmp" && has_entry "f $PLATFORM.sig.tmp"; then
+        swap_state="neither"
+      fi
+    fi
     local pair_state="unknown" pdir="" vrc=0
     mkdir -p "$REPO_ROOT/.claude/deploy-tmp" 2>/dev/null
     pdir="$(mktemp -d "$REPO_ROOT/.claude/deploy-tmp/pair.XXXXXX" 2>/dev/null)" || pdir=""
     if [ -n "$pdir" ]; then
-      answer="$(remote_sh "if test -f '$dst_manifest' && test -f '$dst_sig'; then echo gnlink-pair-present; else echo gnlink-pair-missing; fi" 2>/dev/null)" || answer=""
-      if [ "$answer" = "gnlink-pair-missing" ]; then
-        pair_state="incomplete"
-      elif [ "$answer" = "gnlink-pair-present" ] && remote_sh "cat -- '$dst_manifest'" > "$pdir/m" 2>/dev/null && remote_sh "cat -- '$dst_sig'" > "$pdir/s" 2>/dev/null; then
+      if [ "$listed" != "1" ]; then
+        :  # not listed: unknown
+      elif ! has_entry "f $PLATFORM.manifest" || ! has_entry "f $PLATFORM.sig"; then
+        pair_state="incomplete"  # listed, and one of the two is not there as a regular file
+      elif remote_sh "cat -- '$dst_manifest'" > "$pdir/m" 2>/dev/null && remote_sh "cat -- '$dst_sig'" > "$pdir/s" 2>/dev/null; then
         vrc=0
         node "$REPO_ROOT/automation/gnlink_verify_manifest.js" "$pdir/m" "$pdir/s" "$PLATFORM" >/dev/null 2>&1 || vrc=$?
         if [ "$vrc" -eq 0 ]; then

@@ -351,7 +351,9 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
     - ⚠️ 상태는 **그 조회가 실제로 돌았을 때만** 말한다(maint r3, Codex M2). 존재 조회가 실패하면(ssh 255·
       원격 명령 실패) `incomplete` 가 아니라 `unknown` 이다. `does-not-verify` 는 검증기가 돌아서 **명시적으로
       거부했을 때**(`gnlink_verify_manifest.js` exit **3**)뿐이다. node 실행 불가(127)·node 자체 오류(1)·파일/키를
-      읽지 못함(4)은 `unknown` 이다.
+      읽지 못함(4)은 `unknown` 이다. (r4) "없음" 은 manifest 디렉터리를 **끝 표지까지 나열**했을 때만 말한다 —
+      `test -f` 는 "없음" 과 "볼 수 없음" 을 구분하지 못한다. 공용 검증 모듈은 `crypto.verify` 예외도
+      SignatureInvalid 로 접으므로, CLI 가 같은 입력으로 한 번 더 확인해 **예외면 4** 로 낸다.
     어느 경우든 exit 4 이고 게시 실패는 **blocker 로 보고**한다. 원복은 상태에 따라 다르다:
     - `verified-this-release`: 이 릴리스의 두 파일과 대조해 확인한 뒤 **재실행**한다(원복 대상이 아니다).
     - `verified-another-pair`: backup 의 SHA256SUMS 와 대조한다. **그것이 게시돼야 할 짝이 아닐 때만** 정확한
