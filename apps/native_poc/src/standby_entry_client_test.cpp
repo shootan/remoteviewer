@@ -280,6 +280,38 @@ void refused_and_cancelled() {
         Effect::Activated) == 0 && e.OnHelloAck(3006).empty());
 }
 
+void release() {
+  std::printf("\n--- release (the app leaves the screen, the PC is evicted, sign-out) ---\n");
+  MemStore s;
+  n::GenerationAllocator g(s, rnd);
+  Client c(g, 0);
+  park(c);
+  auto fx = c.Release(3000);
+  const auto* r = sent(fx, n::UdpPacketKind::StandbyRelease);
+  check("parked: ONE StandbyRelease with the entry and its secret", r && r->entryId == 77 && r->entrySecret[0] == 1 &&
+        count(fx, Effect::Send) == 1);
+  check("...then idle: no entry, no Ping, nothing more", c.state() == Client::State::Idle && c.entryId() == 0 &&
+        c.Tick(20000).empty() && c.Tick(60000).empty());
+  check("...a late Pong of it changes nothing", c.OnStandbyPacket(pong(77, 0, n::kUdpStandbyStatusOk, false), 61000).empty() &&
+        c.state() == Client::State::Idle);
+  Client d(g, 0);
+  park(d);
+  auto a = d.Activate(2000);
+  const uint32_t gen = sent(a, n::UdpPacketKind::StandbyActivate)->clientGen;
+  d.OnStandbyPacket(pong(77, gen, 0, true), 2010);
+  d.OnHelloAck(2011);
+  fx = d.Release(2100);
+  check("active: no Release (a granted entry refuses it; its session ends by itself)", fx.empty() &&
+        d.state() == Client::State::Active);
+  MemStore s2;
+  n::GenerationAllocator g2(s2, rnd);
+  Client e(g2, 0);
+  e.Admit("cap", 0);
+  for (uint64_t t = 1; t <= 10000; t += 50) e.Tick(t);
+  e.Release(10001);
+  check("an older host (Unsupported) stays known as such after a release", e.state() == Client::State::Unsupported);
+}
+
 void generations() {
   std::printf("\n--- generations across a restart ---\n");
   MemStore s;
@@ -322,6 +354,7 @@ int main() {
   lost_entry();
   activation();
   refused_and_cancelled();
+  release();
   generations();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

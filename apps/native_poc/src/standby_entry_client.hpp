@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@ class GenerationAllocator {
   // The next generation, already saved. false: the store or the random source failed -- then nothing may be sent
   // under a generation that a restart could hand out again.
   bool Next(uint32_t* gen) {
+    std::lock_guard<std::mutex> lock(mu_);  // ② e: one counter for every lease of this install (several threads)
     if (!loaded_ && !LoadOrCreate()) return false;
     if (last_ == UINT32_MAX) return false;  // exhausted: never wraps to a smaller value
     const uint32_t next = last_ + 1;
@@ -60,6 +62,7 @@ class GenerationAllocator {
     return true;
   }
   bool DeviceId(std::array<uint8_t, 16>* out) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!loaded_ && !LoadOrCreate()) return false;
     *out = deviceId_;
     return true;
@@ -85,6 +88,7 @@ class GenerationAllocator {
     return true;
   }
 
+  std::mutex mu_;
   StandbyGenerationStore& store_;
   std::function<bool(uint8_t*, size_t)> random_;
   std::array<uint8_t, 16> deviceId_{};
@@ -179,6 +183,22 @@ class StandbyEntryClient {
     state_ = State::Parked;
     lastPongMs_ = nowMs;  // pinging resumes from now
     nextPingMs_ = nowMs;
+    return fx;
+  }
+
+  // The client lets the entry go (the app left the screen -- the phone keeps standby only while visible -- the PC was
+  // evicted from the recent three, sign-out): a parked entry is released at the host at once (one StandbyRelease, no
+  // retry: an unanswered one lapses on the lease anyway) and nothing more is sent. Not while Active / Activating (a
+  // granted entry refuses Release -- Live; that session ends by itself). Idle afterwards: a new admission needs a new
+  // capability.
+  Effects Release(uint64_t /* nowMs */) {
+    Effects fx;
+    if (state_ == State::Parked) fx.push_back(SendOf(Packet(UdpPacketKind::StandbyRelease, 0)));
+    if (state_ == State::Active || state_ == State::Activating) return fx;
+    entryId_ = 0;
+    std::memset(secret_, 0, sizeof(secret_));
+    std::memset(hello_.authToken, 0, sizeof(hello_.authToken));
+    if (state_ != State::Unsupported) state_ = State::Idle;  // an older host stays known as such
     return fx;
   }
 
