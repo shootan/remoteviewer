@@ -152,6 +152,13 @@ object StandbyKeep {
         object Fresh : ClipboardStart()
     }
 
+    /**
+     * r3 R3 (Codex codex_ka_e_src_r2.md): a session is "back from standby" when the user went back to a PC on standby
+     * -- whatever path the connection took (its activation, or that same tap's ordinary fallback after a failed one).
+     * A separate cold connect is not.
+     */
+    fun isReturn(preparedReturn: Boolean, pathKind: String): Boolean = preparedReturn || pathKind == "standby"
+
     fun clipboardOnStart(fromStandby: Boolean, phoneText: String?): ClipboardStart = when {
         !fromStandby -> ClipboardStart.Fresh
         phoneText.isNullOrEmpty() -> ClipboardStart.Hold

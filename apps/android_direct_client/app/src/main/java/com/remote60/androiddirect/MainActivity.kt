@@ -2633,7 +2633,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // r2 N3 (clipboard r3): back from standby, what the phone holds is this new binding's baseline -- not sent; if it
         // cannot be read, nothing is pushed until a real change. A cold connect starts as before. r3 R3: "back from
         // standby" is the user's return (preparedReturn), not the path it took -- its ordinary fallback is one too.
-        val returning = p.preparedReturn || p.pathKind == "standby"
+        val returning = StandbyKeep.isReturn(p.preparedReturn, p.pathKind)
         when (val c = StandbyKeep.clipboardOnStart(returning, if (returning) readLocalClipboardText() else null)) {
             is StandbyKeep.ClipboardStart.Seed -> {
                 clipboardResumeHold = false
