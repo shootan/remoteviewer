@@ -251,6 +251,28 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
   kill, 전역 제품 락 경쟁은 하지 않는다.**
 - 키·토큰 원문을 출력에 남기지 않는다.
 - ⚠️ **UI 를 실행하지 않은 것을 "격리 실증" 이라고 부르지 않는다.**
+- 🔴 **시험 Host 의 입력 주입은 명시 OFF, effective OFF 확인 전 연결 금지**(2026-10-28 — GNLinkStream 은 기본 주입 ON
+  이라 시험 Host 의 입력 주입 경로가 켜져 있었던 사건(OS 실제 영향 미확인), `.claude/codex_test_injection_finding.md`).
+  - 실 입력 경로가 있는 Host 를 띄우는 **모든** 자동 시험(GPU 여부·이름 무관, 구 게시본·부정 대조·직접/중계·helper
+    child 포함)은 시험 설정에서 주입을 **명시 OFF** 한다. 제품 기본값을 바꾸는 일이 아니다.
+  - **그 launch(새 PID·새 로그 범위·binary/config hash)의 effective OFF 증거**를 본 뒤에만 Viewer/클라이언트/세션
+    연결이나 입력 가능한 요청을 보낸다. 설정 문자열·"보낼 입력 없음"·이전 실행의 disabled 줄로 대신하지 않는다.
+  - `enabled`·설정 오류/무시·미지원 옵션·확인 로그 없음·timeout·상충은 **setup 실패로 종료**(연결 0). check(false)
+    를 찍고 계속하는 것은 fail-closed 가 아니다. 사후 grep 은 사전 gate 를 대신하지 않는다. 부정 대조(설정 누락/true·
+    확인 미도달)에서 연결 0 을 확인한다. 자기 launch 의 자식만 회수한다.
+  - 실행 중 ON/상충 상태가 발견돼도 그 run 을 중지·invalid 로 기록한다. 사후 확인만으로 사전 gate 누락을 면제하지 않는다.
+  - 설정을 거부하는 구/prelogin Host 는 보안을 풀어 시험하지 않는다 — effective OFF 를 보장하는 명시된 test build/
+    OS 효과 경계를 쓰거나 그 case 를 미검증으로 남긴다. **실 OS 입력 자체의 시험**은 승인된 격리 목적지·세션에서만
+    하고, 사용 중인 사용자 PC 로 흘리지 않는다.
+  - OFF 여도 Host 의 input 수신·ACK 경로는 살아 있다 — 전송·수신·순서·fence 는 OFF 로 검증하되, 그것을 OS 주입
+    성공으로 보고하지 않는다.
+  - 정책/routing 시험의 record-only sink 는 제품 수신·gate·dispatch 를 공유하고 물리 OS 주입·실 broker 위임·사용자
+    Default fallback 을 모두 차단한다. 논리 dispatch 와 OS 효과 OFF 를 구분해 이번 build/process 에서 확인하고,
+    Host 의 허용/거부·sink 도달을 검사한다. Queue/ACK 만으로 정책 통과나 OS 주입 성공을 주장하지 않는다.
+  - **viewer_prelogin_login_e2e_test 현 하네스는 전 모드·wrapper 실행 금지**(Finding-2). 수정·빌드·정적/비해당
+    안전 시험은 계속할 수 있으나, 재설계·효과 OFF/sink 검토·이 문서 commit 으로 금지가 풀리지 않는다. 동일 시험은
+    **사용자의 명시 재개 지시 전까지 재실행하지 않는다.** 별도 desktop/window station·Default 이름 alias 자체를
+    입력 격리나 실제 GPU/Winlogon 동등성의 증거로 쓰지 않는다.
 
 ## 삭제 후보 — 모아 두고, 사용자가 말할 때 한 번에
 

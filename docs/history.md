@@ -13597,3 +13597,11 @@ Next
 - 검증용 독립(`.claude/verify_0232/VERIFY_0232_FINAL.md`, 같은 해시): 실 APK UI × 로그인 전 역할 시험 Host 15/15, tripwire 3/3, 일반 Host 부정 대조 기대 FAIL, UA-2 9·13, 설정 16, B layout 47, strength 35·compare 26·touch 36·latency 6, --android-select 37, picker 60, gate 7/54, 통제 스크롤 연속 출력 정성 관찰(AVD·재압축 한계 명시). Codex EVIDENCE OK(`codex_apk0232_evidence_final.md`).
 - 서명 android.manifest `e4f046d5…`·sig `090ca467…`(JS verifier PASS, 1바이트 변조 거부; C++ verifier 는 Windows 전용이라 arm64 를 WrongPlatform 으로 거부 — 0.2.31 게시본도 같음). `gnlink_deploy.sh --platform android` dry-run → 실게시 rc 0, 백업 0.2.31 pair(309a9c5e/cbb5b7d6), https 익명 APK 해시 일치(직접 curl), windows 0.2.163 pair(6d89ae48/57d1d2ca) 불변.
 - 실기 대기: 휴대폰 업데이트 → 로그인 전 화면 PC 바탕화면 선택, 선명도 강하게/화면 크기 체감·발열, 캡처 방식 표시. 하네스 H1(새 하네스의 adb rm /sdcard 정리)은 후속 실행 전 수정 — ledger.
+
+### 2026-10-28 안전 Finding — 시험 Host 입력 주입 기본 ON (정책 문서)
+- 목표·변경: CLAUDE.md '검증 독립성과 재현' 절에 시험 Host 명시 OFF + 해당 launch 의 effective OFF 확인 전 연결 금지(fail-closed), OS 효과 경계 및 특정 시험 실행 금지를 기록. 변경 파일은 CLAUDE.md·docs/history.md 두 개이며 제품 기본값은 변경하지 않음.
+- 사실·확인 한계: GNLinkStream 기본은 enableInputInjection=true·background_message. KA PC e2e(r1~r4)의 주입 ON·modifier key-up 2490(eventKind=6, key-down·마우스·text 0)은 작업용2 로그 집계다. OS 실제 영향은 미확인이고 osInjectionConfirmed=0 은 무영향 증거가 아니다. KA host_standby_admission_e2e 의 검증용 4회는 주입 여부가 로그 삭제로 미확인이다. 다른 Host 시험의 OFF 전제도 전수 조사 중이다.
+- Finding-2: viewer_prelogin_login_e2e 는 사용자 Default 를 logon 대역으로 쓰고 Tab down/up·pointer 를 전송하는 경로가 있다. 검증용의 10-26~27 PS/LK·기본 prelogin·android-select·render 등 실행 보고를 조사 목록으로 보존하며, 모드별 실제 입력/화면 반영은 미확인이다. 현 하네스 전 모드·wrapper 는 실행 금지·재설계 검토 대상이고 사용자 명시 재개 전에는 실행하지 않는다.
+- 기존 판정 정정: KA 82679b2·534242b 의 실 GNLinkStream e2e 는 안전한 재확인 전 관문 사용 보류, 순수 시험·NP e16ad0d 구성 단위 EVIDENCE 는 유지. KA PC③는 최종 EVIDENCE 승인이 없었음. PC 0.2.163 PS/LK 및 동일 하네스를 사용한 행동, APK 0.2.32 android-select/prelogin 근거는 관측 원문을 보존하되 관문 사용 보류/안전한 재확인 대기로 정정한다. 제품 SOURCE·서명/hash·게시/main/dist 사실은 별개로 유지한다.
+- 검토: Codex `codex_test_injection_finding.md` 의 정책/영향 판정과 감수 완료 diff(`injection_policy_r1_reviewed.diff`)를 대조한 문서 전용 변경. 금지된 시험·제품 build·OS 입력은 실행하지 않았다. 정책 문서 검토는 해당 시험의 실행 재개 승인이 아니다.
+- 다음: 기존 작업용1(Host 시험 전수 확인)·작업용2(PC e2e) 창구에서 안전 하네스/record-only sink 후보와 mode 별 OS 효과 경계를 고정해 전문 검토한다. 현 시험의 금지는 유지하며 비해당 안전 작업은 계속한다. 이 두 파일만 Git MCP commit, 단독 push 없음.
