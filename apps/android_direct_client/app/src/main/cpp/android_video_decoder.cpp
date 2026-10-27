@@ -170,8 +170,9 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   StartGraceLocked(false);  // mobile-abr r5: the surface back is an active transition
 }
 
-void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) {
+void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::native_poc::UdpH264AssembledFrame&& frame) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return;
 
   PumpCodecLocked();
 
@@ -241,8 +242,57 @@ void AndroidVideoDecoderSink::OnEncodedH264Frame(remote60::native_poc::UdpH264As
   PumpCodecLocked();
 }
 
-void AndroidVideoDecoderSink::OnVideoStreamReset() {
+// keepalive-multi r1: everything a binding owned goes with it -- the codec and its reference pictures, the
+// selection gate (an answer or an owed key of the last PC is not this one's), the counts, the presentation window, a
+// pending key request. A new binding starts like a new stream (D1: its codec takes no delta before an IDR).
+void AndroidVideoDecoderSink::ResetForBindingLocked() {
+  ResetCodecLocked();
+  configuredWidth_ = 0;
+  configuredHeight_ = 0;
+  outputWidth_ = 0;
+  outputHeight_ = 0;
+  inputFrameCount_ = 0;
+  outputFrameCount_ = 0;
+  gate_.Reset();
+  readySelectionGeneration_ = 0;
+  latestInputStreamGeneration_ = 0;
+  latestOutputStreamGeneration_ = 0;
+  lastOutputPresentationUs_ = 0;
+  staleFrameDropCount_ = 0;
+  csd0_.clear();
+  csd1_.clear();
+  presentGapsUs_.clear();
+  presentScheduledCount_ = 0;
+  presentImmediateCount_ = 0;
+  decoderKeyframeRequest_ = false;
+}
+
+void AndroidVideoDecoderSink::Bind(uint64_t token) {
   LockedState lock(this);
+  binding_ = token;
+  ResetForBindingLocked();
+  char line[96];
+  std::snprintf(line, sizeof(line), "decoder bound binding=%llu", static_cast<unsigned long long>(token));
+  log_info(line);
+}
+
+bool AndroidVideoDecoderSink::Unbind(uint64_t token) {
+  LockedState lock(this);
+  if (token == 0 || binding_ != token) return false;  // a stale unbind (a closed PC's late call) changes nothing
+  binding_ = 0;
+  ResetForBindingLocked();
+  log_info("decoder unbound");
+  return true;
+}
+
+uint64_t AndroidVideoDecoderSink::Binding() {
+  LockedState lock(this);
+  return binding_;
+}
+
+void AndroidVideoDecoderSink::OnVideoStreamResetAs(uint64_t token) {
+  LockedState lock(this);
+  if (!OwnerLocked(token)) return;
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -260,18 +310,20 @@ void AndroidVideoDecoderSink::OnVideoStreamReset() {
   csd1_.clear();
 }
 
-void AndroidVideoDecoderSink::OnVideoDiscontinuity() {
+void AndroidVideoDecoderSink::OnVideoDiscontinuityAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return;
   // Keep SPS/PPS, dimensions, and the active selection generation. Only decoder reference
   // pictures and pending compressed frames are invalid after a UDP loss.
   ResetCodecLocked();
   log_info("video decoder reset after transport discontinuity");
 }
 
-bool AndroidVideoDecoderSink::DrainPresentationStats(
-    remote60::native_poc::ClientPresentationStats* out) {
+bool AndroidVideoDecoderSink::DrainPresentationStatsAs(
+    uint64_t token, remote60::native_poc::ClientPresentationStats* out) {
   if (!out) return false;
   LockedState lock(this);
+  if (!OwnerLocked(token)) return false;
   // mobile-abr r1: the session drains once a second and every drain closes the window. Fewer than two
   // gaps is "no gap sample this window" -- the gaps and counters are dropped with it, so they cannot be
   // folded into a window seconds later.
@@ -345,6 +397,7 @@ void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
   // The generation moves whenever what the decoder's count means could have changed: validity, the
   // surface, the selection being prepared / abandoned and the stream generation it was answered with.
   uint64_t key = reinterpret_cast<uintptr_t>(window_);
+  key = key * 1000003ULL ^ binding_;  // keepalive-multi r1: a new binding starts a new measurement
   key = key * 1000003ULL ^ (valid ? 1ULL : 0ULL);
   key = key * 1000003ULL ^ gate_.pending();
   // r5: not readySelectionGeneration_ -- it flips when the selection's first picture is released, after
@@ -358,6 +411,7 @@ void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
     span_.OnGeneration(steady_now_us(), decodedTotal_, graceActive_, graceDeadlineUs_);
   }
   remote60::native_poc::ClientDecodeState s;
+  s.binding = binding_;
   s.valid = valid;
   s.decodedTotal = decodedTotal_;
   s.width = outputWidth_;
@@ -377,12 +431,18 @@ void AndroidVideoDecoderSink::StartGraceLocked(bool explicitEpisode) {
   span_.OnGraceStart(decodedTotal_, graceDeadlineUs_);  // r6: measured from the deadline, or its first picture
 }
 
-void AndroidVideoDecoderSink::OnDecodeEpisodeStart() {
+void AndroidVideoDecoderSink::OnDecodeEpisodeStartAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return;
   StartGraceLocked(true);
 }
 
-uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.generation(); }
+uint64_t AndroidVideoDecoderSink::DecodeGenerationAs(uint64_t token) {
+  if (token == kAnyBinding) return decodeSnapshot_.generation();
+  remote60::native_poc::ClientDecodeState s;
+  if (!decodeSnapshot_.Read(&s) || s.binding != token) return 0;  // not this binding's decoder: nothing of it
+  return s.generation;
+}
 
 // Called by the session's control thread on its due passes; reads only what PublishDecodeStateLocked
 // stored (r3 R2: one consistent copy, a sequence read, no lock). false = the decoder's state is not
@@ -393,10 +453,12 @@ uint64_t AndroidVideoDecoderSink::DecodeGeneration() { return decodeSnapshot_.ge
 // r6 (Codex S1): the measurement in progress, cumulative -- the count since it began and the time since
 // then, on this sink's clock. Reading consumes nothing, so the session may ask again a little later
 // (ClientTelemetryWindow::Hold) without losing what it had.
-bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) {
+bool AndroidVideoDecoderSink::DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out) {
   if (!out) return false;
   remote60::native_poc::ClientDecodeState s;
   if (!decodeSnapshot_.Read(&s)) return false;  // a writer kept overlapping: no copy this window
+  // keepalive-multi r1: another PC's decode is not this PC's report (checked in the same consistent copy).
+  if (token != kAnyBinding && s.binding != token) return false;
   remote60::native_poc::ClientDecodeSpan span;
   if (!remote60::native_poc::ReadDecodeSpan(s, steady_now_us(), &span)) return false;
   out->spanId = span.id;
@@ -408,37 +470,42 @@ bool AndroidVideoDecoderSink::DrainDecodeStats(remote60::native_poc::ClientDecod
   return true;
 }
 
-bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequest() {
+bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequestAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return false;
   const bool requested = decoderKeyframeRequest_;
   decoderKeyframeRequest_ = false;
   return requested;
 }
 
-void AndroidVideoDecoderSink::OnWindowSelectionControlResult(
-    const remote60::native_poc::ControlWindowSelectedMessage& msg) {
+void AndroidVideoDecoderSink::OnWindowSelectionControlResultAs(
+    uint64_t token, const remote60::native_poc::ControlWindowSelectedMessage& msg) {
   // Untagged: taken as the answer to whatever selection is armed (the old behaviour).
   uint64_t tag = 0;
   {
     LockedState lock(this);
+    if (!OwnerLocked(token)) return;
     tag = gate_.pending();
   }
-  OnWindowSelectionControlResultFor(msg, tag);
+  OnWindowSelectionControlResultForAs(token, msg, tag);  // checks the owner again, under the lock it mutates in
 }
 
-uint64_t AndroidVideoDecoderSink::KeyframeOwedFor() {
+uint64_t AndroidVideoDecoderSink::KeyframeOwedForAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return 0;
   return gate_.OwedToken();
 }
 
-uint64_t AndroidVideoDecoderSink::CurrentSelectionTag() {
+uint64_t AndroidVideoDecoderSink::CurrentSelectionTagAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return 0;
   return gate_.pending();
 }
 
-void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
-    const remote60::native_poc::ControlWindowSelectedMessage& msg, uint64_t requestTag) {
+void AndroidVideoDecoderSink::OnWindowSelectionControlResultForAs(
+    uint64_t token, const remote60::native_poc::ControlWindowSelectedMessage& msg, uint64_t requestTag) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return;
   const auto ack = gate_.OnAck((msg.flags & 0x1u) != 0, msg.streamGeneration, requestTag);
   char line[224];
   if (ack.result == remote60::native_poc::SelectionAckGate::AckResult::Ignored) {
@@ -468,8 +535,10 @@ void AndroidVideoDecoderSink::OnWindowSelectionControlResultFor(
   log_info(line);
 }
 
-bool AndroidVideoDecoderSink::BeginLocalSelectionFor(uint64_t tag) {
+// keepalive-r2 merge: the local selection (apk-0232) owner-checked like every selection call (*As, keepalive-multi).
+bool AndroidVideoDecoderSink::BeginLocalSelectionForAs(uint64_t token, uint64_t tag) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return false;
   const bool begun = gate_.BeginLocal(tag);
   char line[160];
   std::snprintf(line, sizeof(line), "selection local (logon screen) localGen=%llu begun=%u",
@@ -478,16 +547,18 @@ bool AndroidVideoDecoderSink::BeginLocalSelectionFor(uint64_t tag) {
   return begun;
 }
 
-uint64_t AndroidVideoDecoderSink::LocalSelectionBoundFor(uint64_t tag) {
+uint64_t AndroidVideoDecoderSink::LocalSelectionBoundForAs(uint64_t token, uint64_t tag) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return 0;
   return gate_.LocalBoundFor(tag);
 }
 
 // apk-0232 r3 (Codex N1): judged and recorded under the state Prepare/Abort (the UI's JNI calls) take -- a cancel
 // cannot finish between "still this selection, bound" and the panel's record.
-remote60::native_poc::ClientEncodedFrameSink::LocalCommit AndroidVideoDecoderSink::CommitLocalSelectionFor(
-    uint64_t tag, const std::function<void(uint64_t generation)>& commit) {
+remote60::native_poc::ClientEncodedFrameSink::LocalCommit AndroidVideoDecoderSink::CommitLocalSelectionForAs(
+    uint64_t token, uint64_t tag, const std::function<void(uint64_t generation)>& commit) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return LocalCommit::Abandoned;  // not on screen: nothing of it completes
   if (tag == 0 || gate_.pending() != tag) return LocalCommit::Abandoned;
   const uint64_t generation = gate_.LocalBoundFor(tag);
   if (generation == 0) return LocalCommit::Unbound;
@@ -495,8 +566,9 @@ remote60::native_poc::ClientEncodedFrameSink::LocalCommit AndroidVideoDecoderSin
   return LocalCommit::Committed;
 }
 
-void AndroidVideoDecoderSink::RefuseSelectionFor(uint64_t tag) {
+void AndroidVideoDecoderSink::RefuseSelectionForAs(uint64_t token, uint64_t tag) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return;
   const bool refused = gate_.Refuse(tag);
   char line[160];
   std::snprintf(line, sizeof(line), "selection refused (logon screen) localGen=%llu refused=%u",
@@ -504,8 +576,9 @@ void AndroidVideoDecoderSink::RefuseSelectionFor(uint64_t tag) {
   log_info(line);
 }
 
-void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGeneration) {
+bool AndroidVideoDecoderSink::PrepareForWindowSelectionAs(uint64_t token, uint64_t selectionGeneration) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return false;
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -526,10 +599,12 @@ void AndroidVideoDecoderSink::PrepareForWindowSelection(uint64_t selectionGenera
   std::snprintf(line, sizeof(line), "selection prepare localGen=%llu",
                 static_cast<unsigned long long>(gate_.pending()));
   log_info(line);
+  return true;
 }
 
-void AndroidVideoDecoderSink::AbortWindowSelection() {
+bool AndroidVideoDecoderSink::AbortWindowSelectionAs(uint64_t token) {
   LockedState lock(this);
+  if (!OwnerLocked(token)) return false;
   ResetCodecLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
@@ -552,6 +627,7 @@ void AndroidVideoDecoderSink::AbortWindowSelection() {
   StartGraceLocked(false);
   decoderKeyframeRequest_ = true;
   log_info("selection aborted");
+  return true;
 }
 
 std::string AndroidVideoDecoderSink::DebugStatus() {

@@ -206,7 +206,9 @@ class ClientParkFence {
     const bool confirming = phase_ == ClientParkPhase::Releasing || phase_ == ClientParkPhase::Pausing ||
                             phase_ == ClientParkPhase::Fencing;
     if (confirming && nowUs > beganUs_ + kConfirmBudgetUs) phase_ = ClientParkPhase::Failed;
-    if (phase_ == ClientParkPhase::Parked && nowUs > beganUs_ + kParkedLimitUs) phase_ = ClientParkPhase::Expired;
+    if (phase_ == ClientParkPhase::Parked && !parkedUnlimited_ && nowUs > beganUs_ + parkedLimitUs_) {
+      phase_ = ClientParkPhase::Expired;
+    }
     return phase_;
   }
   // Resumed or abandoned: nothing parked.
@@ -217,6 +219,13 @@ class ClientParkFence {
   }
 
   ClientParkPhase phase() const { return phase_; }
+  // keepalive-multi r1: the park limit is a policy value (KeepalivePolicy::parkTtlMs); kParkedLimitUs by default.
+  void SetParkedLimitUs(uint64_t us) { parkedLimitUs_ = us ? us : kParkedLimitUs; }
+  uint64_t parked_limit_us() const { return parkedLimitUs_; }
+  // keepalive r2: the product policy has no park limit -- said explicitly (not as 0, which above means the default).
+  // The confirm budget (kConfirmBudgetUs) is not a park limit and still applies.
+  void SetParkedUnlimited(bool unlimited) { parkedUnlimited_ = unlimited; }
+  bool parked_unlimited() const { return parkedUnlimited_; }
   // Any phase but None: the session holds input, clipboard, previews and the stream back.
   bool Inhibiting() const { return phase_ != ClientParkPhase::None; }
   uint64_t began_us() const { return beganUs_; }
@@ -232,6 +241,8 @@ class ClientParkFence {
   bool wantPing_ = false;
   bool collected_ = false;
   uint32_t reReleases_ = 0;
+  uint64_t parkedLimitUs_ = kParkedLimitUs;
+  bool parkedUnlimited_ = false;  // the fence's own default stays the contract's 5 min; the policy sets Unlimited
 };
 
 // r2 K1: what the control loop may still send while a park runs (from its first pass boundary on):

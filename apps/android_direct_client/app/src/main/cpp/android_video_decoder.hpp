@@ -72,36 +72,85 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
    *  a larger epoch. Lock-free. */
   uint32_t CodecEpoch() const { return codecEpoch_.load(std::memory_order_acquire); }
   void SetTargetFps(uint32_t fps);
-  void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override;
-  void OnVideoStreamReset() override;
-  void OnVideoDiscontinuity() override;
-  bool ConsumeDecoderKeyframeRequest() override;
-  bool DrainPresentationStats(
-      remote60::native_poc::ClientPresentationStats* out) override;
-  bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override;
-  uint64_t DecodeGeneration() override;
-  void OnDecodeEpisodeStart() override;
-  void OnWindowSelectionControlResult(
-      const remote60::native_poc::ControlWindowSelectedMessage& msg) override;
-  void PrepareForWindowSelection(uint64_t selectionGeneration);
+  // keepalive-multi r1: one decoder and one Surface, used by one PC connection at a time -- its BINDING (a
+  // process-unique token for: entry handle, connection generation, activation, Surface). Each PC's controller talks
+  // to this sink through its own adapter carrying the token it was bound with; every call below checks that token
+  // against the current binding INSIDE this sink's lock, before it touches anything (no check-then-call gap). A
+  // parked or closed PC's late callback -- a reset, a frame, a selection answer, a stats drain -- does nothing.
+  // kAnyBinding: the direct (unbound) caller of the virtual methods (tests, single-session use) -- always the owner.
+  static constexpr uint64_t kAnyBinding = ~0ull;
+  // A new binding: the codec, the selection gate and every count start over, for this token only. 0 = nobody.
+  void Bind(uint64_t token);
+  // Ends `token`'s binding if it is still the current one (true); a stale token changes nothing.
+  bool Unbind(uint64_t token);
+  uint64_t Binding();
+
+  void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& frame) override {
+    OnEncodedH264FrameAs(kAnyBinding, std::move(frame));
+  }
+  void OnVideoStreamReset() override { OnVideoStreamResetAs(kAnyBinding); }
+  void OnVideoDiscontinuity() override { OnVideoDiscontinuityAs(kAnyBinding); }
+  bool ConsumeDecoderKeyframeRequest() override { return ConsumeDecoderKeyframeRequestAs(kAnyBinding); }
+  bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
+    return DrainPresentationStatsAs(kAnyBinding, out);
+  }
+  bool DrainDecodeStats(remote60::native_poc::ClientDecodeStats* out) override {
+    return DrainDecodeStatsAs(kAnyBinding, out);
+  }
+  uint64_t DecodeGeneration() override { return DecodeGenerationAs(kAnyBinding); }
+  void OnDecodeEpisodeStart() override { OnDecodeEpisodeStartAs(kAnyBinding); }
+  void OnWindowSelectionControlResult(const remote60::native_poc::ControlWindowSelectedMessage& msg) override {
+    OnWindowSelectionControlResultAs(kAnyBinding, msg);
+  }
+  void PrepareForWindowSelection(uint64_t selectionGeneration) {
+    PrepareForWindowSelectionAs(kAnyBinding, selectionGeneration);
+  }
   // t-970r4zgo: the selection a select request is queued under, and its answer for that selection.
-  uint64_t CurrentSelectionTag() override;
-  uint64_t KeyframeOwedFor() override;
+  uint64_t CurrentSelectionTag() override { return CurrentSelectionTagAs(kAnyBinding); }
+  uint64_t KeyframeOwedFor() override { return KeyframeOwedForAs(kAnyBinding); }
   void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& msg,
-                                         uint64_t requestTag) override;
-  // apk-0232 r1: a desktop pick at a host at the logon screen (no answer comes): the armed selection continues as a
-  // local one, bound by its own first IDR that reaches the codec (SelectionAckGate::BeginLocal).
-  bool BeginLocalSelectionFor(uint64_t tag) override;
-  uint64_t LocalSelectionBoundFor(uint64_t tag) override;
-  void RefuseSelectionFor(uint64_t tag) override;
-  LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t generation)>& commit) override;
-  void AbortWindowSelection();
+                                         uint64_t requestTag) override {
+    OnWindowSelectionControlResultForAs(kAnyBinding, msg, requestTag);
+  }
+  void AbortWindowSelection() { AbortWindowSelectionAs(kAnyBinding); }
+  // apk-0232 r1/r3: a desktop pick at a host at the logon screen (no answer comes): the armed selection continues as a
+  // local one, bound by its own first IDR that reaches the codec (SelectionAckGate::BeginLocal); its completion is
+  // judged and recorded under the state Prepare/Abort take. keepalive-r2 merge: owner-checked (*As) as below.
+  bool BeginLocalSelectionFor(uint64_t tag) override { return BeginLocalSelectionForAs(kAnyBinding, tag); }
+  uint64_t LocalSelectionBoundFor(uint64_t tag) override { return LocalSelectionBoundForAs(kAnyBinding, tag); }
+  void RefuseSelectionFor(uint64_t tag) override { RefuseSelectionForAs(kAnyBinding, tag); }
+  LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t generation)>& commit) override {
+    return CommitLocalSelectionForAs(kAnyBinding, tag, commit);
+  }
+
+  // The same, for `token` only (a non-owner gets the empty answer: no frame taken, nothing reset, false / 0).
+  void OnEncodedH264FrameAs(uint64_t token, remote60::native_poc::UdpH264AssembledFrame&& frame);
+  void OnVideoStreamResetAs(uint64_t token);
+  void OnVideoDiscontinuityAs(uint64_t token);
+  bool ConsumeDecoderKeyframeRequestAs(uint64_t token);
+  bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
+  bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
+  uint64_t DecodeGenerationAs(uint64_t token);
+  void OnDecodeEpisodeStartAs(uint64_t token);
+  void OnWindowSelectionControlResultAs(uint64_t token, const remote60::native_poc::ControlWindowSelectedMessage& msg);
+  bool PrepareForWindowSelectionAs(uint64_t token, uint64_t selectionGeneration);
+  uint64_t CurrentSelectionTagAs(uint64_t token);
+  uint64_t KeyframeOwedForAs(uint64_t token);
+  void OnWindowSelectionControlResultForAs(uint64_t token, const remote60::native_poc::ControlWindowSelectedMessage& msg,
+                                           uint64_t requestTag);
+  bool AbortWindowSelectionAs(uint64_t token);
+  bool BeginLocalSelectionForAs(uint64_t token, uint64_t tag);
+  uint64_t LocalSelectionBoundForAs(uint64_t token, uint64_t tag);
+  void RefuseSelectionForAs(uint64_t token, uint64_t tag);
+  LocalCommit CommitLocalSelectionForAs(uint64_t token, uint64_t tag, const std::function<void(uint64_t generation)>& commit);
   std::string DebugStatus();
   uint64_t VideoSizePacked();
   uint64_t ReadySelectionGeneration();
   uint64_t LastOutputPresentationUs();
 
  private:
+  bool OwnerLocked(uint64_t token) const { return token == kAnyBinding || token == binding_; }
+  void ResetForBindingLocked();
   void PumpCodecLocked();
   bool TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame);
   bool EnsureCodecLocked(uint32_t width, uint32_t height);
@@ -118,6 +167,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OutputPumpMain();
 
   std::mutex mu_;
+  uint64_t binding_ = 0;  // keepalive-multi r1: under mu_
   // mobile-abr r1: every section under mu_ ends by publishing what the session's control thread reads
   // WITHOUT mu_ (DrainDecodeStats) -- that thread must never wait on a lock the codec work holds.
   void PublishDecodeStateLocked();

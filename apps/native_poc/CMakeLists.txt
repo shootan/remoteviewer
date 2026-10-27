@@ -1077,6 +1077,20 @@ target_include_directories(remote60_android_decoder_geometry_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX)
 
+# keepalive-multi r1: one decoder, one PC bound at a time -- the binding token on every sink call, the APK's
+# decoder itself against the stand-in NDK (a parked / closing PC's late callbacks touch nothing of the bound one).
+add_executable(remote60_android_decoder_binding_test
+  src/android_decoder_binding_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_binding_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
+)
+target_compile_definitions(remote60_android_decoder_binding_test PRIVATE NOMINMAX)
+
 # mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
 # NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
 add_executable(remote60_android_decoder_decode_stats_test
@@ -1094,6 +1108,21 @@ target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NO
 # keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
 # keepalive r3: a second client through the fixture directory's relay (the other device that takes a host
 # from a parked phone). TEST ONLY: the product's directory calls, rendezvous and client session.
+# keepalive-multi r3: the clipboard across two kept PCs -- two pinned test hosts on the private station, the product
+# client sessions in the product SessionTable, a mock phone clipboard sink. TEST ONLY.
+add_executable(km_multiclip_e2e_test
+  src/km_multiclip_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(km_multiclip_e2e_test PRIVATE src)
+target_link_libraries(km_multiclip_e2e_test PRIVATE common ws2_32 user32 gdi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(km_multiclip_e2e_test PRIVATE /utf-8)
+endif()
+
 add_executable(ka_relay_client_test
   src/ka_relay_client_test.cpp
   src/directory_session_client.cpp
@@ -1120,6 +1149,12 @@ add_executable(remote60_connect_op_gate_test src/connect_op_gate_test.cpp src/di
 target_include_directories(remote60_connect_op_gate_test PRIVATE src)
 target_link_libraries(remote60_connect_op_gate_test PRIVATE common ws2_32)
 target_compile_definitions(remote60_connect_op_gate_test PRIVATE REMOTE60_CONNECT_GATE_TEST_HOOKS=1)
+
+# keepalive-multi r1: the PCs the phone keeps -- limit, per-PC park, LRU, epoch (session_registry.hpp). Pure.
+add_executable(remote60_session_registry_test src/session_registry_test.cpp)
+target_include_directories(remote60_session_registry_test PRIVATE src)
+add_executable(remote60_session_table_test src/session_table_test.cpp)
+target_include_directories(remote60_session_table_test PRIVATE src)
 
 add_executable(remote60_client_park_state_test
   src/client_park_state_test.cpp

@@ -33,9 +33,12 @@ namespace remote60::native_poc {
 class ConnectOpGate {
  public:
   // A new current operation (process-unique). Every step of an older one is stopped now.
+  // keepalive-multi r1: the number comes from one counter for the whole process (ProcessOpCounter), so no two gates
+  // ever hand out the same number; the cancel stays this gate's -- one PC connection's (a new connect to B does not
+  // stop a parked A's steps).
   int64_t Next() {
     std::lock_guard<std::mutex> lk(mu_);
-    const int64_t op = ++counter_;
+    const int64_t op = ProcessOpCounter().fetch_add(1, std::memory_order_relaxed) + 1;
     current_.store(op, std::memory_order_release);
     for (auto* s : steps_) {
       if (s->op != op) s->stop.store(true, std::memory_order_release);
@@ -197,7 +200,10 @@ class ConnectOpGate {
   std::mutex netMu_;        // one network step at a time
   std::mutex adoptMu_;      // Adopt, CloseIfOwn and CloseExplicit's session close
   std::atomic<int64_t> current_{0};
-  int64_t counter_ = 0;
+  static std::atomic<int64_t>& ProcessOpCounter() {
+    static std::atomic<int64_t> counter{0};
+    return counter;
+  }
   std::vector<Step*> steps_;
   int64_t rendezvousOwner_ = 0;
   int64_t adoptedOp_ = 0;

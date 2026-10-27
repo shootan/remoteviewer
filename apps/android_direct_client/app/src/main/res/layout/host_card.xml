@@ -46,4 +46,20 @@
         android:paddingBottom="4dp"
         android:textSize="12sp"
         android:textStyle="bold" />
+
+    <!-- keepalive-multi r1: ends this kept PC only. Not focusable, so the card itself stays tappable. -->
+    <Button
+        android:id="@+id/hostCardDisconnect"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/panel_button_background"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:minHeight="@dimen/ui_touch"
+        android:stateListAnimator="@null"
+        android:text="@string/hosts_keep_disconnect"
+        android:textAllCaps="false"
+        android:textColor="@color/ui_danger"
+        android:visibility="gone" />
 </LinearLayout>

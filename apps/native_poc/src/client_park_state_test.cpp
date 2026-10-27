@@ -178,6 +178,30 @@ int main() {
           f.Tick(4'000'001 + ClientParkFence::kParkedLimitUs) == ClientParkPhase::Expired);
   }
 
+  std::printf("[3b] keepalive r2: Unlimited -- a confirmed park never expires; the confirm budget still holds\n");
+  {
+    ClientParkFence u;
+    u.SetParkedUnlimited(true);
+    u.Begin(0);
+    u.OnPassBoundary(1, true, true);
+    u.OnPassBoundary(2, true, true);
+    u.OnStreamStateSent(false);
+    u.OnPingSent(1);
+    u.OnPong(1, 100'000);
+    check("[3b] parked", u.Tick(200'000) == ClientParkPhase::Parked);
+    check("[3b] far past the old 300 s limit (a day): still parked, not expired",
+          u.Tick(86'400'000'000ULL) == ClientParkPhase::Parked);
+    ClientParkFence slow;
+    slow.SetParkedUnlimited(true);
+    slow.Begin(0);
+    slow.OnPassBoundary(1, true, true);
+    check("[3b] Unlimited is not a confirm budget: an unconfirmed pause still FAILS after 2 s",
+          slow.Tick(2'000'001) == ClientParkPhase::Failed);
+    ClientParkFence def;
+    check("[3b] the fence's own default is still the finite 300 s (the policy says Unlimited explicitly)",
+          !def.parked_unlimited() && def.parked_limit_us() == ClientParkFence::kParkedLimitUs);
+  }
+
   std::printf("[4] r2 K1: a down in flight when the park begins\n");
   {
     // The control loop's order of events, both ways. The down is dequeued and being sent when the UI
