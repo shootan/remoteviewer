@@ -1134,9 +1134,10 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
   NullSink sinkA, sinkB;
   remote60::native_poc::ClientSessionController ca, cb;
   remote60::native_poc::ClientSessionConnectArgs argsA;
+  uint64_t opA = 0, opB = 0, opA2 = 0;
   argsA.encodedFrameSink = &sinkA;
   argsA.controlIntervalMs = 200;
-  check("A's activation arguments: its lease's socket and the activation handshake", a.ActivationArgs(&argsA));
+  check("A's activation arguments: its lease's socket and the activation handshake", a.ActivationArgs(&argsA, nullptr, &opA));
   const bool upA = ca.Connect(argsA) &&
                    wait_until([&] { return ca.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
   check("A's ClientSessionController connects THROUGH the activation (no Hello)", upA, ca.Snapshot().lastError + " | " + last_events(a));
@@ -1159,7 +1160,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
   remote60::native_poc::ClientSessionConnectArgs argsB;
   argsB.encodedFrameSink = &sinkB;
   argsB.controlIntervalMs = 200;
-  check("B's activation arguments", b.ActivationArgs(&argsB));
+  check("B's activation arguments", b.ActivationArgs(&argsB, nullptr, &opB));
   const bool upB = cb.Connect(argsB) &&
                    wait_until([&] { return cb.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
   check("B connects through ITS activation", upB, cb.Snapshot().lastError + " | " + last_events(b));
@@ -1170,7 +1171,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
       wait_until([&] { return ca.Snapshot().state != remote60::native_poc::ClientSessionState::Connected; }, 25000);
   check("A's session ends (the host moved on)", aEnded, ca.Snapshot().status);
   ca.Disconnect();
-  a.SessionOver();
+  check("A's session over (its own operation)", a.SessionOver(opA));
   pump_until(a, [] { return false; }, 7000);
   check("A parks again on its lease's own socket: its entry answers its Pings", a.state() == StandbyLease::State::Parked &&
         a.lostCount() == 0, last_events(a));
@@ -1178,7 +1179,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
   argsA2.encodedFrameSink = &sinkA;
   argsA2.controlIntervalMs = 200;
   const uint64_t framesBefore = sinkA.frames();
-  const bool upA2 = a.ActivationArgs(&argsA2) && ca.Connect(argsA2) &&
+  const bool upA2 = a.ActivationArgs(&argsA2, nullptr, &opA2) && ca.Connect(argsA2) &&
                     wait_until([&] { return ca.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
   check("A takes it back (a larger generation)", upA2, ca.Snapshot().lastError + " | " + last_events(a));
   check("...video reaches A again", wait_until([&] { return sinkA.frames() > framesBefore; }, 10000));
@@ -1218,10 +1219,11 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     NullSink sinkR;
     remote60::native_poc::ClientSessionController cr;
     remote60::native_poc::ClientSessionConnectArgs argsR;
+    uint64_t opR = 0;
     argsR.encodedFrameSink = &sinkR;
     argsR.controlIntervalMs = 200;
     const size_t epochsR = count_of(host.log(), "(standby activation");
-    const bool upR = runner.TakeActivation("h-standby", &argsR) && cr.Connect(argsR) &&
+    const bool upR = runner.TakeActivation("h-standby", &argsR, &opR) && cr.Connect(argsR) &&
                      wait_until([&] { return cr.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
     check("TakeActivation + Connect: the runner's PC takes the session by activation (video)", upR &&
           count_of(host.log(), "(standby activation") == epochsR + 1 && wait_until([&] { return sinkR.frames() > 0; }, 10000),
@@ -1230,7 +1232,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
           runner.StatusOf("h-standby").handedOff);
     const size_t endedR = count_of(host.log(), "control session ended");
     cr.Disconnect();
-    runner.SessionOver("h-standby");
+    check("...the runner takes the session-over of its operation", runner.SessionOver("h-standby", opR));
     // the host ends that grant with the session's real end (contract §2.3 S3) -- until then the entry holds the session
     // and refuses a Release (Live): a release sent then is simply refused and the entry lapses on its lease later
     check("the host sees the session end (the grant ends with it)",
@@ -1297,9 +1299,10 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     NullSink rsinkA, rsinkB;
     remote60::native_poc::ClientSessionController rca, rcb;
     remote60::native_poc::ClientSessionConnectArgs rargsA;
+    uint64_t ropA = 0, ropB = 0, ropA2 = 0;
     rargsA.encodedFrameSink = &rsinkA;
     rargsA.controlIntervalMs = 200;
-    const bool rupA = ra.ActivationArgs(&rargsA) && rca.Connect(rargsA) &&
+    const bool rupA = ra.ActivationArgs(&rargsA, nullptr, &ropA) && rca.Connect(rargsA) &&
                       wait_until([&] { return rca.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
     check("A's session through its relay lease, by activation", rupA && rh.WaitFor("first session by activation", 3000),
           rca.Snapshot().lastError + " | " + last_events(ra));
@@ -1311,13 +1314,13 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     remote60::native_poc::ClientSessionConnectArgs rargsB;
     rargsB.encodedFrameSink = &rsinkB;
     rargsB.controlIntervalMs = 200;
-    const bool rupB = rb.ActivationArgs(&rargsB) && rcb.Connect(rargsB) &&
+    const bool rupB = rb.ActivationArgs(&rargsB, nullptr, &ropB) && rcb.Connect(rargsB) &&
                       wait_until([&] { return rcb.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
     check("B takes over through ITS relay lease (a new epoch, video)", rupB && rh.WaitFor("(standby activation", 3000) &&
           wait_until([&] { return rsinkB.frames() > 0; }, 10000), rcb.Snapshot().lastError + " | " + last_events(rb));
     wait_until([&] { return rca.Snapshot().state != remote60::native_poc::ClientSessionState::Connected; }, 25000);
     rca.Disconnect();
-    ra.SessionOver();
+    check("A's relay session over (its own operation)", ra.SessionOver(ropA));
     // the lease kept its socket (the session had a duplicate handle): the SAME endpoint its relay lease is bound to --
     // the entry goes on by Ping through the relay, no loss, no new standby connect
     const int connectsBefore = observeSeq;
@@ -1328,7 +1331,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     rargsA2.encodedFrameSink = &rsinkA;
     rargsA2.controlIntervalMs = 200;
     const uint64_t rframes = rsinkA.frames();
-    const bool rupA2 = ra.ActivationArgs(&rargsA2) && rca.Connect(rargsA2) &&
+    const bool rupA2 = ra.ActivationArgs(&rargsA2, nullptr, &ropA2) && rca.Connect(rargsA2) &&
                        wait_until([&] { return rca.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
     check("...and takes the session back through the same relay lease (video)", rupA2 &&
           wait_until([&] { return rsinkA.frames() > rframes; }, 10000), rca.Snapshot().lastError + " | " + last_events(ra));

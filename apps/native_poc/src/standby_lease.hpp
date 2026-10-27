@@ -15,16 +15,41 @@
 // own Pong (Granted) AND the HelloAck have arrived, in either order (StandbyEntryClient). Everything after is the
 // session's ordinary path. The lease keeps its own handle and does not read it until the session is over; then it goes
 // on with the SAME socket -- the same endpoint, which a relay lease is bound to (§2.7) -- and the entry by Ping.
+//
+// r3 (Codex codex_keepalive_r2_scope2.md N1, N2) -- one contract for an activation's lifetime:
+//  - ActivationArgs gives an OPERATION number; the handshake closure holds `keepAlive` (the runner's slot), so the lease
+//    outlives every copy of the arguments whatever the app releases meanwhile.
+//  - The caller then does exactly one of: Connect with the arguments (the session owns the duplicated handle and closes
+//    it, success or failure), or Abandon(op, handle) (the handle closed here). After the session is over -- Connect
+//    failed, or Disconnect RETURNED (its reader has stopped) -- it calls SessionOver(op).
+//  - SessionOver / Abandon of another operation (a late call after a new activation) do nothing; SessionOver while the
+//    handshake still runs is refused (the session's reader may still be reading this socket's duplicate).
+//  - Release while handed off cancels the handshake in flight (it returns false; its late answers adopt nothing) --
+//    nothing else is sent: the host's grant, if any, ends with its session.
+//  - The HelloAck the activation accepts passes the ordinary handshake's test (udp_hello_ack_acceptable, DirectoryAuth
+//    required) AND its declared size; anything else is ignored -- no state, no features. Which grant it belongs to is
+//    the Pong's to say (entry + generation): a HelloAck carries no generation, it only completes the activation in
+//    flight together with that activation's own Pong (a late one of a cancelled activation is the same session
+//    admission's feature answer; it never makes a grant by itself).
+// Every method takes the lease's lock; nothing holds it across a receive wait (the pump and the handshake take it per
+// step), so a call from the UI never queues behind a wait. One reader at a time: the pump marks its wait (reading_), and
+// ActivationArgs / ObserveFrom wait it out (at most one 20 ms wait) before the socket changes hands.
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "native_socket.hpp"
 #include "native_video_client_session.hpp"
+#include "native_video_client_tcp_control.hpp"
 #include "poc_protocol.hpp"
 #include "standby_entry_client.hpp"
 
@@ -84,27 +109,77 @@ class StandbyLease {
   StandbyLease(const StandbyLease&) = delete;
   StandbyLease& operator=(const StandbyLease&) = delete;
 
-  bool Open(std::string* error) { return Reopen(error); }
+  bool Open(std::string* error) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return Reopen(error);
+  }
 
-  State state() const { return client_.state(); }
-  uint64_t entryId() const { return client_.entryId(); }
-  int lostCount() const { return lost_; }
+  State state() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return client_.state();
+  }
+  uint64_t entryId() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return client_.entryId();
+  }
+  int lostCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return lost_;
+  }
   // ② e: the lease waits for a capability its CapabilityFn could not give now (the APK: the directory call is the app's,
   // Kotlin) -- the owner observes from the lease's socket (ObserveFrom), gets one, and hands it in (Provide).
-  bool needsCapability() const { return needsCapability_; }
-  const std::vector<std::string>& events() const { return events_; }
-  std::string target() const { return ip_ + ":" + std::to_string(port_); }
+  bool needsCapability() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return needsCapability_;
+  }
+  bool handedOff() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return handedOff_;
+  }
+  // r3 (N2): every field read under ONE lock (a coherent status for the UI, not five separate reads)
+  struct Snapshot {
+    State state = State::Idle;
+    uint64_t entryId = 0;
+    int lost = 0;
+    bool handedOff = false;
+    bool needsCapability = false;
+  };
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    Snapshot s;
+    s.state = client_.state();
+    s.entryId = client_.entryId();
+    s.lost = lost_;
+    s.handedOff = handedOff_;
+    s.needsCapability = needsCapability_;
+    return s;
+  }
+  // the last kEventsKept notes (r3: bounded -- a long retry loop does not grow it; no secret is ever written to it)
+  std::vector<std::string> events() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return std::vector<std::string>(events_.begin(), events_.end());
+  }
+  std::string target() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return ip_ + ":" + std::to_string(port_);
+  }
 
   // Start (or restart) the admission with a capability from CapabilityFn.
-  void Start() { NeedCapability(); }
+  void Start() {
+    std::lock_guard<std::mutex> lock(mu_);
+    NeedCapability();
+  }
 
   // The directory observation from THIS lease's socket (the relay binds a standby lease to that endpoint).
   bool ObserveFrom(const std::string& host, uint16_t port, const std::string& token) {
+    std::unique_lock<std::mutex> lock(mu_);
+    idle_.wait(lock, [this] { return !reading_; });  // the pump's wait ends first: its reply is not the pump's to read
     return socket_ != kInvalidSocket && !handedOff_ && standby_observe_on(socket_, host, port, token);
   }
 
   // A capability the owner got for this lease (after needsCapability()): aim, then the admission.
   bool Provide(const StandbyCapability& cap) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!needsCapability_ || cap.token.empty() || cap.port == 0) return false;
     needsCapability_ = false;
     ip_ = cap.ip;
@@ -114,24 +189,42 @@ class StandbyLease {
   }
 
   // Reads what has arrived for up to `waitMs`, feeds it in, keeps time and does what the entry decides.
+  // r3: the wait itself is outside the lock (reading_ set) -- a call never queues behind it.
   void Pump(uint32_t waitMs) {
-    if (socket_ == kInvalidSocket || handedOff_) return;
     const uint64_t until = now_() + waitMs;
     do {
+      SocketHandle s = kInvalidSocket;
+      sockaddr_in want{};
+      bool aimed = false;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (socket_ == kInvalidSocket || handedOff_) return;
+        s = socket_;
+        aimed = Aim(&want);
+        reading_ = true;
+      }
       UdpStandbyPacket p{};
       p.magic = 0;
-      if (Receive(socket_, 20, &p, nullptr) && p.magic == kMagic) Apply(client_.OnStandbyPacket(p, now_()));
+      const bool got = Receive(s, 20, aimed ? &want : nullptr, &p, nullptr);
+      std::lock_guard<std::mutex> lock(mu_);
+      reading_ = false;
+      idle_.notify_all();
+      if (got && p.magic == kMagic) Apply(client_.OnStandbyPacket(p, now_()));
       Apply(client_.Tick(now_()));
     } while (now_() < until);
   }
 
   // The arguments of the ClientSessionController::Connect that activates this entry: its socket (the session owns it
   // from now on) and the activation handshake. Parked only; else false.
-  bool ActivationArgs(ClientSessionConnectArgs* args) {
-    if (client_.state() != State::Parked || socket_ == kInvalidSocket || port_ == 0) return false;
+  // `keepAlive` (r3 N2): held by the handshake closure -- the owner of this lease (the runner's slot), so the lease lives
+  // as long as any copy of the arguments. *op: this activation's number (SessionOver / Abandon name it).
+  bool ActivationArgs(ClientSessionConnectArgs* args, std::shared_ptr<void> keepAlive = nullptr, uint64_t* op = nullptr) {
+    std::unique_lock<std::mutex> lock(mu_);
+    idle_.wait(lock, [this] { return !reading_; });  // the pump's wait ends first: from here only the session reads
+    if (client_.state() != State::Parked || socket_ == kInvalidSocket || port_ == 0 || handedOff_) return false;
     const SocketHandle sessionHandle = Duplicate(socket_);
     if (sessionHandle == kInvalidSocket) {
-      events_.push_back("socket duplicate failed");
+      Note("socket duplicate failed");
       return false;
     }
     args->host = ip_;
@@ -142,30 +235,54 @@ class StandbyLease {
     args->controlOverUdp = true;
     args->preparedUdpSocket = sessionHandle;  // the session's handle; the lease keeps its own
     handedOff_ = true;
-    args->udpHandshake = [this](SocketHandle s, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures) {
-      return Handshake(s, stop, error, ackFeatures);
+    cancel_.store(false, std::memory_order_release);
+    const uint64_t thisOp = op_ = NextOp();  // process-wide: a late call naming an old lease's op never matches a new one
+    if (op) *op = thisOp;
+    args->udpHandshake = [self = this, keep = std::move(keepAlive), thisOp](SocketHandle s, const std::atomic<bool>& stop,
+                                                                           std::string* error, uint32_t* ackFeatures) {
+      return self->Handshake(thisOp, s, stop, error, ackFeatures);
     };
+    return true;
+  }
+
+  // The arguments of operation `op` will not be used: its session handle is closed here and the lease takes its socket
+  // back. Another operation's: nothing.
+  bool Abandon(uint64_t op, SocketHandle* sessionHandle) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (op != op_ || !handedOff_ || handshaking_.load(std::memory_order_acquire)) return false;
+    if (sessionHandle) close_socket(sessionHandle);
+    handedOff_ = false;
     return true;
   }
 
   // The session this lease activated ended (or its Connect failed; the session closed its handle): the entry goes on
   // by Ping on the lease's same socket.
-  void SessionOver() {
+  // r3 (N2): only for the operation it names, and never while that operation's handshake still runs.
+  bool SessionOver(uint64_t op) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (op != op_ || !handedOff_ || handshaking_.load(std::memory_order_acquire)) return false;
     handedOff_ = false;
     if (client_.state() == State::Active) client_.SessionEnded(now_());
     if (socket_ == kInvalidSocket) {
       std::string error;
-      if (!Reopen(&error)) events_.push_back("reopen failed: " + error);
+      if (!Reopen(&error)) Note("reopen failed: " + error);
     }
+    return true;
   }
 
-  // The user gave up the activation in flight (Connect still running): its late answers adopt nothing.
-  void CancelActivation() { Apply(client_.CancelActivation(now_())); }
+  // The user gave up the activation in flight (Connect still running): its handshake stops, its late answers adopt
+  // nothing (the operation is dead for good: the next activation is a new operation with a larger generation).
+  void CancelActivation() { cancel_.store(true, std::memory_order_release); }
 
   // The app lets this PC's standby go (it leaves the screen, the PC left the recent three, sign-out): a parked entry is
-  // released at the host (one datagram); the lease stays open for a later admission. Not while handed off (a session).
+  // released at the host (one datagram). Handed off: the handshake in flight is cancelled and nothing is sent (a granted
+  // entry refuses Release; that session ends by itself).
   void Release() {
-    if (handedOff_) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (handedOff_) {
+      cancel_.store(true, std::memory_order_release);
+      return;
+    }
     Apply(client_.Release(now_()));
   }
 
@@ -214,8 +331,9 @@ class StandbyLease {
            sizeof(to));
   }
 
-  // One datagram from the lease's target within `waitMs`: a standby packet (*sb) or a HelloAck (*ack).
-  bool Receive(SocketHandle s, uint32_t waitMs, UdpStandbyPacket* sb, UdpHelloPacket* ack) const {
+  // One datagram from `want` (the lease's target, read under the lock by the caller; null = none yet: the wait only)
+  // within `waitMs`: a standby packet (*sb) or a HelloAck (*ack). Takes no lock.
+  static bool Receive(SocketHandle s, uint32_t waitMs, const sockaddr_in* want, UdpStandbyPacket* sb, UdpHelloPacket* ack) {
     fd_set rd;
     FD_ZERO(&rd);
     FD_SET(s, &rd);
@@ -229,8 +347,7 @@ class StandbyLease {
     const int n = static_cast<int>(
         recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fromLen));
     if (n < 8) return false;
-    sockaddr_in want{};
-    if (!Aim(&want) || from.sin_addr.s_addr != want.sin_addr.s_addr || from.sin_port != want.sin_port) return false;
+    if (!want || from.sin_addr.s_addr != want->sin_addr.s_addr || from.sin_port != want->sin_port) return false;
     uint32_t magic = 0;
     uint16_t kind = 0;
     std::memcpy(&magic, buf, 4);
@@ -244,14 +361,43 @@ class StandbyLease {
     }
     if (kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) && n >= static_cast<int>(sizeof(UdpHelloPacket))) {
       if (!ack) return false;
-      std::memcpy(ack, buf, sizeof(*ack));
+      UdpHelloPacket candidate{};
+      std::memcpy(&candidate, buf, sizeof(candidate));
+      // r3 (N1): the ordinary handshake's test (DirectoryAuth required: a standby activation is directory-authenticated)
+      // and the declared size; a failing one is ignored whole -- no state, no features
+      if (!udp_hello_ack_acceptable(candidate, n, /*requireDirectoryAuth=*/true) ||
+          candidate.size != static_cast<uint16_t>(sizeof(UdpHelloPacket))) {
+        return false;
+      }
+      *ack = candidate;
       return true;
     }
     return false;  // video or control before the HelloAck: not the handshake's
   }
 
-  bool Handshake(SocketHandle s, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures) {
-    StandbyEntryClient::Effects fx = client_.Activate(now_());
+  bool Handshake(uint64_t thisOp, SocketHandle s, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures) {
+    struct Done {
+      std::atomic<bool>* flag = nullptr;
+      ~Done() {
+        if (flag) flag->store(false, std::memory_order_release);
+      }
+    } finished;
+    StandbyEntryClient::Effects fx;
+    sockaddr_in want{};
+    bool aimed = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      aimed = Aim(&want);
+      // its operation still handed off (no Abandon / SessionOver / newer activation came first) and not cancelled; the
+      // flag is set under the same lock SessionOver / Abandon test it under
+      if (thisOp != op_ || !handedOff_ || cancel_.load(std::memory_order_acquire)) {
+        if (error) *error = "standby activation cancelled";
+        return false;
+      }
+      handshaking_.store(true, std::memory_order_release);
+      finished.flag = &handshaking_;
+      fx = client_.Activate(now_());
+    }
     bool done = false, failed = false;
     uint32_t features = 0;
     auto run = [&](const StandbyEntryClient::Effects& effects) {
@@ -263,8 +409,8 @@ class StandbyLease {
         } else if (e.kind == StandbyEntryClient::Effect::ActivationFailed || e.kind == StandbyEntryClient::Effect::Lost) {
           failed = true;
           if (error && error->empty()) *error = "standby activation: " + e.reason;
-          events_.push_back(std::string(e.kind == StandbyEntryClient::Effect::Lost ? "lost: " : "activation failed: ") +
-                            e.reason);
+          std::lock_guard<std::mutex> lock(mu_);
+          Note(std::string(e.kind == StandbyEntryClient::Effect::Lost ? "lost: " : "activation failed: ") + e.reason);
           if (e.kind == StandbyEntryClient::Effect::Lost) ++lost_;
         }
       }
@@ -274,28 +420,38 @@ class StandbyLease {
       return false;
     }
     run(fx);
-    while (!done && !failed && !stop.load(std::memory_order_acquire)) {
+    auto step = [&](const std::function<StandbyEntryClient::Effects()>& f) {
+      StandbyEntryClient::Effects e;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        e = f();
+      }
+      run(e);
+    };
+    while (!done && !failed && !stop.load(std::memory_order_acquire) && !cancel_.load(std::memory_order_acquire)) {
       UdpStandbyPacket sb{};
       UdpHelloPacket ack{};
       sb.magic = 0;
       ack.magic = 0;
-      if (Receive(s, 20, &sb, &ack)) {
-        if (sb.magic == kMagic) run(client_.OnStandbyPacket(sb, now_()));
-        if (ack.magic == kMagic && ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck)) {
-          features = ack.features;
-          run(client_.OnHelloAck(now_()));
+      if (Receive(s, 20, aimed ? &want : nullptr, &sb, &ack)) {  // no lock across the wait
+        if (sb.magic == kMagic) step([&] { return client_.OnStandbyPacket(sb, now_()); });
+        if (ack.magic == kMagic) {
+          features = ack.features;  // passed udp_hello_ack_acceptable + size (Receive)
+          step([&] { return client_.OnHelloAck(now_()); });
         }
       }
-      run(client_.Tick(now_()));
+      step([&] { return client_.Tick(now_()); });
     }
+    std::lock_guard<std::mutex> lock(mu_);
     if (done) {
-      events_.push_back("activated gen=" + std::to_string(client_.activationGen()));
+      Note("activated gen=" + std::to_string(client_.activationGen()));
       if (ackFeatures) *ackFeatures = features;
       return true;
     }
     if (!failed) {
-      // stopped (Disconnect / cancel) in the middle: drop this activation
-      run(client_.CancelActivation(now_()));
+      // stopped (Disconnect) or cancelled in the middle: this activation is dead; its late answers adopt nothing
+      Apply(client_.CancelActivation(now_()));
+      Note("activation cancelled");
       if (error && error->empty()) *error = "standby activation stopped";
     }
     return false;
@@ -304,7 +460,7 @@ class StandbyLease {
   void NeedCapability() {
     StandbyCapability cap;
     if (socket_ == kInvalidSocket || !capability_ || !capability_(socket_, &cap) || cap.token.empty() || cap.port == 0) {
-      events_.push_back("no capability now");
+      Note("no capability now");
       needsCapability_ = true;  // the owner may hand one in (Provide); the entry waits for it -- nothing is sent
       return;
     }
@@ -324,11 +480,11 @@ class StandbyLease {
           NeedCapability();
           break;
         case StandbyEntryClient::Effect::Unsupported:
-          events_.push_back("unsupported: " + e.reason);
+          Note("unsupported: " + e.reason);
           break;
         case StandbyEntryClient::Effect::Lost:
           ++lost_;
-          events_.push_back("lost: " + e.reason);
+          Note("lost: " + e.reason);
           break;
         default:
           break;
@@ -336,6 +492,23 @@ class StandbyLease {
     }
   }
 
+  static uint64_t NextOp() {
+    static std::atomic<uint64_t> next{0};
+    return next.fetch_add(1, std::memory_order_relaxed) + 1;
+  }
+
+  static constexpr size_t kEventsKept = 32;
+  void Note(const std::string& e) {
+    events_.push_back(e);
+    while (events_.size() > kEventsKept) events_.pop_front();
+  }
+
+  mutable std::mutex mu_;
+  std::condition_variable idle_;  // reading_ went false
+  bool reading_ = false;          // the pump waits on socket_ (outside the lock)
+  std::atomic<bool> cancel_{false};
+  std::atomic<bool> handshaking_{false};
+  uint64_t op_ = 0;
   StandbyEntryClient client_;
   CapabilityFn capability_;
   Clock now_;
@@ -345,7 +518,7 @@ class StandbyLease {
   bool handedOff_ = false;
   bool needsCapability_ = false;
   int lost_ = 0;
-  std::vector<std::string> events_;
+  std::deque<std::string> events_;
 };
 
 }  // namespace remote60::native_poc
