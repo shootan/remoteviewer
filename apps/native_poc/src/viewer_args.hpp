@@ -56,6 +56,10 @@ struct Args {
   // process inherit. Empty when the viewer was started by hand, which simply means it cannot
   // be called off -- the behaviour it had before the shell could do that at all.
   std::string cancelEventHandle;
+  // ka-pc-impl r4 (Codex decision 1): --owner-end-event, a second unnamed event from the shell. The cancel event
+  // calls off a CONNECT (a replacement); it never ends an established session. This one is the owner ending the
+  // session (sign-out, account change, the shell closing): the owner fence, then the window's own teardown.
+  std::string ownerEndEventHandle;
   // ka-pc-impl r1 (KA ③): started by the client shell as the managed standby viewer of one PC. The two handle
   // values are this process's ends of the shell's private pipes (managed_viewer_ipc.hpp); everything secret
   // (the session token) arrives on them, never here.

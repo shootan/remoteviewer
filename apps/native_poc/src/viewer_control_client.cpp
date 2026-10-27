@@ -1042,6 +1042,28 @@ void ControlClient::Run() {
       std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
       bandwidthSnapshot = ctx.control.bandwidth;
     }
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+    // TEST BUILD ONLY (GNLinkViewerKaTest, ka-pc-impl r4, Codex R3): REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS=N
+    // holds every outbound control action for N ms after the owner fence -- a sender that is slow at exactly the
+    // wrong moment -- so a test can show the fence waits for its releases instead of closing over them.
+    {
+      static const uint64_t holdMs = [] {
+        const char* v = std::getenv("REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS");
+        return v ? std::strtoull(v, nullptr, 10) : 0ull;
+      }();
+      const uint64_t fencedAt = ctx.session.ownerFenceAtMs.load();
+      if (holdMs && fencedAt && GetTickCount64() - fencedAt < holdMs) {
+        Sleep(5);
+        continue;
+      }
+    }
+#endif
+    // r4 (Codex R3): raised before the dequeue (see ViewerControlState::inputInFlight), lowered after the exchange.
+    if (!ctx.control.inputQueue.Empty()) ctx.control.inputInFlight.store(true);
+    struct InFlightDone {
+      std::atomic<bool>* f;
+      ~InFlightDone() { f->store(false); }
+    } inFlightDone{&ctx.control.inputInFlight};
     if (ctx.control.scheduler.NextAction(
             nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
             &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,

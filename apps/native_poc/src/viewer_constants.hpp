@@ -146,6 +146,9 @@ constexpr UINT_PTR kRenderRetryTimerId = 0x713;
 // Paste on demand: while a paste waits for its answer, its deadline is judged here on the UI thread,
 // so a control thread that never answers still ends the paste (without its key).
 constexpr UINT_PTR kPasteTimerId = 0x714;
+// ka-pc-impl r4 (Codex R3): the owner fence waits (bounded) for its releases to reach the host before closing.
+constexpr UINT_PTR kOwnerFenceDrainTimerId = 0x715;
+constexpr uint64_t kOwnerFenceDrainBudgetMs = 2000;
 constexpr UINT kPasteTimerMs = 50;
 constexpr uint64_t kRemoteCursorStaleUs = 500000;  // hide after 500ms without a sample
 constexpr int kCursorOverlaySize = 24;             // ring bitmap edge; window is centered on the point

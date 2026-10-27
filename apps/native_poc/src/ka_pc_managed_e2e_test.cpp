@@ -385,17 +385,33 @@ int main() {
     const std::wstring dir = gRoot + L"host-" + W(name) + L"\\";
     CreateDirectoryW(dir.c_str(), nullptr);
     CopyFileW(exe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE);
+    // r4: input injection OFF for every test host. GNLinkStream injects by default (host_args.hpp enableInputInjection =
+    // true); before this, each session start's modifier key-ups reached THIS PC's desktop input (2026-10-28, reported).
+    // The host still receives, logs ([input-timing] ... injectionEnabled=0) and acknowledges every input event.
+    // A --config file CLEARS the host's environment overrides (json_profile.hpp), so the h264 switch the
+    // product child gets from its environment is given there too (forceEncodedExperiment).
+    {
+      HANDLE f = CreateFileW((dir + L"host-config.json").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+      const char cfg[] = "{\"enableInputInjection\": false, \"forceEncodedExperiment\": true}\n";
+      DWORD put = 0;
+      if (f != INVALID_HANDLE_VALUE) { WriteFile(f, cfg, sizeof(cfg) - 1, &put, nullptr); CloseHandle(f); }
+    }
     const auto env = env_with(dir + L"lad", {});
     const uint16_t media = e2e::e2e_pick_free_udp_port(), control = e2e::e2e_pick_free_tcp_port();
     h.logPath = dir + L"host.log";
     return h.Start(L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
                        std::to_wstring(media) + L" --control-port " + std::to_wstring(control) + L" --directory-url " + W(url) +
                        L" --directory-id tester --directory-pw e2e-pass-1234 --host-name " + W(name) +
-                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900",
+                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900 --config \"" + dir + L"host-config.json\"",
                    dir, &env);
   };
   Child hostA;
   check("host KA-A (this build) starts", startHost(hostA, gBuild + L"GNLinkStream.exe", "KA-A"));
+  // fail closed: no viewer connects to a host that would inject input into this PC
+  if (!hostA.WaitFor([](const std::string& t) { return t.find("input injection disabled") != std::string::npos; }, 10000)) {
+    std::printf("FAIL  host KA-A did not say 'input injection disabled' -- stopping before any viewer connects\n");
+    return 1;
+  }
   // KA-OLD runs only after KA-A has ended: every host process on this machine registers under the same machine
   // id, so two at once would be one host record that the later one takes over.
   wchar_t oldStream[1024] = {};
@@ -851,6 +867,8 @@ int main() {
   hostA.End();
   if (haveOld) {
     check("host KA-OLD (the published 0.2.163) starts, after KA-A ended", startHost(hostOld, oldStream, "KA-OLD"));
+    check("...with input injection disabled",
+          hostOld.WaitFor([](const std::string& t) { return t.find("input injection disabled") != std::string::npos; }, 10000));
     const uint64_t until = now_ms() + 30000;
     while (now_ms() < until && idOld.empty()) {
       std::vector<DirectoryHostEntry> hosts;

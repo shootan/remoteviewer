@@ -109,6 +109,10 @@ struct ViewerCancelSlot {
   // answered without reopening by pid -- a pid that has been reused would answer about
   // somebody else. SYNCHRONIZE and nothing more: this is for waiting, never for killing.
   HANDLE process = nullptr;
+  // (after `process`, so the brace-initialised {pid, cancel, process} of older tests keeps its meaning)
+  // ka-pc-impl r4 (Codex decision 1): the owner-end event -- signalled only when this shell's owner ends the
+  // viewer's session (sign-out, account change, the shell closing). The cancel event calls off a connect only.
+  HANDLE ownerEndEvent = nullptr;
   // The begin_session that launched it. What an exit is matched against: a pid can come round
   // again between the exit and its handling, an operation number cannot. (RV-06)
   uint64_t operation = 0;
@@ -126,6 +130,10 @@ struct ViewerCancelSlot {
 #endif
 };
 std::map<std::string, ViewerCancelSlot> gViewerByHost;
+// ka-pc-impl r4 (Codex decision 1): viewers this owner started whose slot a replacement took over. The cancel only
+// calls off a CONNECT -- one that had already connected stays open -- so they are still this owner's: the owner's
+// end reaches them, and their exit forgets them. UI thread only.
+std::vector<ViewerCancelSlot> gReplacedViewers;
 
 // ka-pc-impl r3 (Codex decision 1): the open window of a viewer this shell started, brought to the front. The
 // shell has the foreground (its card was just pressed), so it may hand it on.
@@ -156,6 +164,8 @@ void bring_viewer_forward(DWORD pid) {
 
 /** Closes every handle a slot owns. */
 void close_slot_handles(ViewerCancelSlot& slot) {
+  if (slot.ownerEndEvent) CloseHandle(slot.ownerEndEvent);
+  slot.ownerEndEvent = nullptr;
   if (slot.process) CloseHandle(slot.process);
   slot.process = nullptr;
   if (slot.terminate) CloseHandle(slot.terminate);
@@ -196,9 +206,25 @@ void on_ordinary_connected(uint64_t operation, const std::string& hostId, uint64
 // ka-pc-impl r3 (Codex R1): the one reservation for a candidate beside three PCs (see the kept-PC section).
 bool reserve_for_new_pc(const std::string& hostId, std::string* refusal);
 void release_reservation(const std::string& hostId, const char* why);
-// ka-pc-impl r3 (Codex R2): an exit whose output pump had not finished within its bound: a "connected" line that
-// comes after it is not counted (the pump takes its op out again when it ends). Under gConnectedMu.
+// ka-pc-impl r3/r4 (Codex R2): pump end and exit, decided under ONE lock (gConnectedMu), whichever comes first:
+//  - the pump ends first: its op goes into gPumpEnded; the exit then finds it there, takes it out, and is decided
+//    with every line counted.
+//  - the exit's bounded wait runs out first: its op goes into gEndedBeforePump -- a "connected" line after that is
+//    not counted -- and the pump, when it ends, takes it out (and does not leave a gPumpEnded entry behind).
+// Either way both sets are empty for that op once both have happened.
 std::set<uint64_t> gEndedBeforePump;
+std::set<uint64_t> gPumpEnded;
+// The pump has read its last line (its op's output is complete).
+void note_pump_end(uint64_t op) {
+  if (op == 0) return;
+  std::lock_guard<std::mutex> lock(gConnectedMu);
+  if (gEndedBeforePump.erase(op) == 0) gPumpEnded.insert(op);  // the exit has not been decided yet
+}
+// The exit is being decided (after its bounded wait for the pump).
+void note_exit_decided(uint64_t op) {
+  std::lock_guard<std::mutex> lock(gConnectedMu);
+  if (gPumpEnded.erase(op) == 0) gEndedBeforePump.insert(op);  // the pump is still reading
+}
 // ka-pc-impl r1: the kept PCs (UI thread only; the section near handle_page_message).
 std::unique_ptr<remote60::native_poc::shell::ManagedViewers> gManaged;
 uint64_t gTokenVersion = 1;
@@ -518,10 +544,7 @@ void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, cons
                                uint64_t operation, const std::string& hostId = {}, uint64_t ownerEpoch = 0) {
   struct EndGuard {
     uint64_t op;
-    ~EndGuard() {
-      std::lock_guard<std::mutex> lock(gConnectedMu);
-      gEndedBeforePump.erase(op);
-    }
+    ~EndGuard() { note_pump_end(op); }
   } endGuard{operation};
   std::string pending;
   char buffer[1024];
@@ -1379,6 +1402,14 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
   // Forgotten only if it is still the one recorded. A replacement has already overwritten this
   // entry, and erasing it here would forget the viewer that is actually open.
   bool currentForHost = false;
+  for (auto r = gReplacedViewers.begin(); r != gReplacedViewers.end(); ++r) {
+    if (r->operation == operation) {
+      if (r->cancelEvent) CloseHandle(r->cancelEvent);
+      close_slot_handles(*r);
+      gReplacedViewers.erase(r);
+      break;
+    }
+  }
   {
     // By the operation that launched it, not by pid. (RV-06)
     (void)exitedPid;
@@ -1421,7 +1452,8 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
       return;
     }
     if (!gReconnectRequest)
-      post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+      post_host_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "",
+                       request.hostId);
     return;
   }
   if (ranMs >= 60000) gReconnectAttempts = 0;
@@ -1437,15 +1469,17 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
              " ranMs=" + std::to_string(ranMs) + " reconnect=scheduled attempt=" + std::to_string(gReconnectAttempts) +
              " delayMs=" + std::to_string(delayMs) + " host=" + request.hostId +
              " restore=" + (restore.empty() ? std::string("picker") : restore));
-    post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
+    post_host_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.", request.hostId);
   } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
     log_line("viewer exit operation=" + std::to_string(operation) + " code=" + std::to_string(exitCode) +
              " ranMs=" + std::to_string(ranMs) + " reconnect=no reason=" +
              (recoverable ? std::string("attempts-exhausted") : std::string("not-recoverable")));
-    post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
+    post_host_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")",
+                     request.hostId);
   } else {
     gReconnectAttempts = 0;
-    post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+    post_host_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "",
+                     request.hostId);
     if (keepThis) keep_after_close(request, /*statusIsMine=*/true);
   }
 }
@@ -1581,8 +1615,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
         return;   // the slot stays; handle_viewer_exit clears it when that viewer ends
       }
 
-      if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
-      close_slot_handles(previous->second);
+      // r4 (Codex decision 1): the cancel only calls off a CONNECT. If the old viewer had in fact connected (its
+      // line not yet here), it stays open -- and stays this owner's: kept apart, so the owner's end still reaches
+      // it and its exit forgets it.
+      gReplacedViewers.push_back(previous->second);
       gViewerByHost.erase(previous);
     }
   }
@@ -1611,6 +1647,8 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   // the same inherit whitelist as the pipe -- bInheritHandles alone would hand the child every
   // inheritable handle this process has.
   HANDLE cancelEvent = remote60::native_poc::viewer::viewer_create_cancel_event();
+  // r4: the owner's end, apart from the connect's cancel (Codex decision 1). Same kind of handle, same whitelist.
+  HANDLE ownerEndEvent = remote60::native_poc::viewer::viewer_create_cancel_event();
 
   std::wstringstream command;
   command << L"\"" << exe << L"\""
@@ -1664,7 +1702,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
 
   STARTUPINFOEXW six{};
   PROCESS_INFORMATION pi{};
-  HANDLE inheritList[3] = {nullptr, nullptr, nullptr};
+  HANDLE inheritList[4] = {nullptr, nullptr, nullptr, nullptr};
   if (pipeOk) {
     // Microsoft's documented dance: the sizing probe FAILS with ERROR_INSUFFICIENT_BUFFER and
     // returns the byte count -- anything else means the API is unusable here, so fall back to a
@@ -1679,13 +1717,14 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
       if (six.lpAttributeList &&
           InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &attrSize)) {
         listInitialized = true;
-        inheritList[0] = pipeWrite;
-        inheritList[1] = nulIn;
-        inheritList[2] = cancelEvent;
-        // The size is the USED bytes, not the array's: a null third entry would be passed as a
+        SIZE_T used = 0;
+        inheritList[used++] = pipeWrite;
+        inheritList[used++] = nulIn;
+        if (cancelEvent) inheritList[used++] = cancelEvent;
+        if (ownerEndEvent) inheritList[used++] = ownerEndEvent;
+        // The size is the USED bytes, not the array's: a null entry would be passed as a
         // handle to inherit and the launch fails with ERROR_INVALID_PARAMETER.
-        const SIZE_T inheritBytes =
-            sizeof(HANDLE) * (cancelEvent ? 3u : 2u);
+        const SIZE_T inheritBytes = sizeof(HANDLE) * used;
         if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
                                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList,
                                        inheritBytes, nullptr, nullptr)) {
@@ -1720,6 +1759,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   if (cancelEvent && pipeOk) {
     command << L" --cancel-event "
             << remote60::native_poc::viewer::viewer_cancel_handle_arg(cancelEvent);
+  }
+  if (ownerEndEvent && pipeOk) {
+    command << L" --owner-end-event "
+            << remote60::native_poc::viewer::viewer_cancel_handle_arg(ownerEndEvent);
   }
 
   std::wstring mutableCommand = command.str();
@@ -1765,7 +1808,8 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
     // here until the registry takes it, so every failed launch leaked one -- invisible until
     // a shell that has been open all day runs out of handles.
     cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(false, cancelEvent);
-    post_status("error", "세션을 시작하지 못했습니다");
+    ownerEndEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(false, ownerEndEvent);
+    post_host_status("error", "세션을 시작하지 못했습니다", request.hostId);
     return;
   }
   ++gActiveViewers;
@@ -1778,6 +1822,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   // (bounded, on its worker) so a "connected" line still in the pipe is counted before the exit is decided.
   std::shared_ptr<void> pumpDone(CreateEventW(nullptr, TRUE, pipeOk ? FALSE : TRUE, nullptr),
                                  [](void* h) { if (h) CloseHandle(h); });
+  if (!pipeOk) note_pump_end(operation);  // no pump: its "end" is now
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);
@@ -1807,6 +1852,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
              "it cannot be called off when replaced");
   }
   cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(pipeOk, cancelEvent);
+  ownerEndEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(pipeOk, ownerEndEvent);
   // SYNCHRONIZE only: enough to ask whether it is still running, not enough to end it.
   HANDLE liveness = nullptr;
   if (!DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &liveness,
@@ -1816,6 +1862,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
              "running cannot be asked, so replacing it will be refused until it ends");
   }
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
+  gViewerByHost[request.hostId].ownerEndEvent = ownerEndEvent;
   gViewerByHost[request.hostId].operation = operation;
   {
     HANDLE terminate = nullptr;
@@ -1834,6 +1881,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   }
 #endif
   cancelEvent = nullptr;  // the map owns it now
+  ownerEndEvent = nullptr;
 
   // Watched rather than forgotten: when the session window closes the list has to become usable
   // again, and if it exits immediately that is a failure the user should hear about.
@@ -1845,12 +1893,10 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
     DWORD exitCode = 0;
     GetExitCodeProcess(handle, &exitCode);
     CloseHandle(handle);
-    // r3 (Codex R2): the output first -- a viewer that connected and was closed at once has its "connected" line
-    // in the pipe. Bounded: past it, a late line is not counted (gEndedBeforePump).
-    if (pumpDone && WaitForSingleObject(pumpDone.get(), 2000) != WAIT_OBJECT_0) {
-      std::lock_guard<std::mutex> lock(gConnectedMu);
-      gEndedBeforePump.insert(operation);
-    }
+    // r3/r4 (Codex R2): the output first -- a viewer that connected and was closed at once has its "connected" line
+    // in the pipe. Bounded; and decided under the same lock as the pump's end (see gPumpEnded).
+    if (pumpDone) (void)WaitForSingleObject(pumpDone.get(), 2000);
+    note_exit_decided(operation);
     gActiveViewers.fetch_sub(1);
     const uint64_t ranMs = GetTickCount64() - startedMs;
     post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs, pid] {
@@ -1858,7 +1904,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
     });
   });
 
-  post_status("connecting", request.hostName + " 창을 여는 중");
+  post_host_status("connecting", request.hostName + " 창을 여는 중", request.hostId);
 }
 
 
@@ -1992,7 +2038,10 @@ bool room_for_new_pc(const std::string& hostId) {
 // ends without connecting, or its owner changes. true with nothing reserved when there is room anyway.
 bool reserve_for_new_pc(const std::string& hostId, std::string* refusal) {
   if (gStagingHost == hostId) return true;                                  // its own reservation (a replacement)
-  if (logical_pcs(hostId).size() < kept::kMaxKept) return true;             // room without anybody going
+  // r4 (Codex R1): a reservation HOLDS its place until it succeeds or is given back -- even when the PC it would
+  // have let go is released meanwhile. So it is counted as a PC here.
+  const size_t occupied = logical_pcs(hostId).size() + (gStagingHost.empty() ? 0u : 1u);
+  if (occupied < kept::kMaxKept) return true;                               // room without anybody going
   if (!gStagingHost.empty()) { *refusal = "another PC is being opened"; return false; }
   if (standby_victim(hostId).empty()) { *refusal = "three PCs are in use"; return false; }
   gStagingHost = hostId;
@@ -2007,13 +2056,25 @@ void release_reservation(const std::string& hostId, const char* why) {
 // The reserved candidate succeeded: it becomes one of the PCs, and the PCs are counted again NOW (a standby the user
 // opened meanwhile is not let go -- settle_pc_count only ever lets a standing-by PC go).
 void commit_reservation(const std::string& hostId) {
-  if (gStagingHost != hostId) {
-    settle_pc_count(hostId);
-    return;
+  if (gStagingHost == hostId) {
+    gStagingHost.clear();
+    log_line("kept PCs: reservation of host=" + hostId + " committed (it connected)");
   }
-  gStagingHost.clear();
-  log_line("kept PCs: reservation of host=" + hostId + " committed (it connected)");
   settle_pc_count(hostId);
+  // r4 (Codex R1): never confirmed as a fourth. If no standby could be let go, this one is ended by its owner (the
+  // fence: an established session closes through its own teardown) and the user is told.
+  if (logical_pcs().size() > kept::kMaxKept) {
+    log_line("kept PCs: host=" + hostId + " would be a fourth PC with none standing by; it is closed");
+    const auto o = gViewerByHost.find(hostId);
+    if (o != gViewerByHost.end()) {
+      (void)remote60::native_poc::viewer::viewer_request_cancel(o->second.ownerEndEvent);
+      (void)remote60::native_poc::viewer::viewer_request_cancel(o->second.cancelEvent);
+    } else if (gManaged && gManaged->Find(hostId)) {
+      gManaged->Release(hostId, "a fourth PC");
+      post_keep_state(hostId, "none");
+    }
+    post_host_status("error", "PC 3대가 이미 열려 있어 이 PC 를 닫았습니다. 쓰지 않는 창을 닫은 뒤 다시 눌러 주세요.", hostId);
+  }
 }
 
 // An ordinary viewer's session connected ("connected host=", pumped on another thread). The real use: the recent
@@ -2024,6 +2085,10 @@ void on_ordinary_connected(uint64_t operation, const std::string& hostId, uint64
   const auto it = gViewerByHost.find(hostId);
   if (it == gViewerByHost.end() || it->second.operation != operation) return;
   recent_touch_host(hostId);
+  // r4 (decision 1 / R4): the card that was being connected says so now -- its "connecting" mark ends (a press on
+  // it is then "already open", not a second attempt). As the kept PC's picker-ready does.
+  const auto name = gHostNames.find(hostId);
+  post_host_status("idle", (name == gHostNames.end() ? hostId : name->second) + " 연결됨", hostId);
   commit_reservation(hostId);
 }
 
@@ -2224,6 +2289,11 @@ void end_owner_children(const std::string& reason) {
   // Their ending (the fence, then the bounded fallback) is owned by the workers below, with handles of their own.
   std::map<std::string, ViewerCancelSlot> ending;
   ending.swap(gViewerByHost);
+  {
+    size_t n = 0;
+    for (auto& r : gReplacedViewers) ending.emplace("(replaced " + std::to_string(++n) + ") " + std::to_string(r.pid), r);
+    gReplacedViewers.clear();
+  }
   struct CloseSlots {
     std::map<std::string, ViewerCancelSlot>* m;
     ~CloseSlots() {
@@ -2235,7 +2305,9 @@ void end_owner_children(const std::string& reason) {
   } closeSlots{&ending};
   for (auto& entry : ending) {
     ViewerCancelSlot& slot = entry.second;
-    const bool asked = remote60::native_poc::viewer::viewer_request_cancel(slot.cancelEvent);
+    // r4: the owner's end (an established session: the fence) AND the connect's cancel (one still connecting)
+    const bool ownerAsked = remote60::native_poc::viewer::viewer_request_cancel(slot.ownerEndEvent);
+    const bool asked = remote60::native_poc::viewer::viewer_request_cancel(slot.cancelEvent) || ownerAsked;
     HANDLE t = nullptr;
     if (!slot.terminate ||
         !DuplicateHandle(GetCurrentProcess(), slot.terminate, GetCurrentProcess(), &t, 0, FALSE, DUPLICATE_SAME_ACCESS)) {

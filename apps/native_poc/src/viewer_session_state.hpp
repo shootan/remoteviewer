@@ -43,6 +43,8 @@ struct SessionState {
   // ka-pc-impl r2 (Codex N4): set on the UI thread by kMsgOwnerFence; from then on no input or clipboard reaches the
   // host from this window (the window proc drops them) while the session closes.
   bool ownerFenced = false;
+  // r4: when the fence was raised (GetTickCount64), for its drain budget; read by the control thread in test builds
+  std::atomic<uint64_t> ownerFenceAtMs{0};
   // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
   HWND hwnd = nullptr;
   uint32_t windowW = 1600;

@@ -123,6 +123,10 @@ struct ControlChannelState {
   remote60::native_poc::StreamStateControl streamState;
   CaptureModeRequestState captureModeRequests;
   ClientInputQueue inputQueue;
+  // ka-pc-impl r4 (Codex R3): raised by the control thread BEFORE it takes the next action while input is queued,
+  // lowered once that action's exchange (its ack) is over -- so "the queue is empty and nothing is in flight" means
+  // every queued input was acknowledged by the host. The owner fence waits on it.
+  std::atomic<bool> inputInFlight{false};
   // C0 stage 1: the receive thread's latest bandwidth observation, for the control thread to
   // send. Guarded; copied out whole so a report is never sent half-updated.
   std::mutex bandwidthMu;
