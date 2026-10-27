@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@ class GenerationAllocator {
   // The next generation, already saved. false: the store or the random source failed -- then nothing may be sent
   // under a generation that a restart could hand out again.
   bool Next(uint32_t* gen) {
+    std::lock_guard<std::mutex> lock(mu_);  // ② e: one counter for every lease of this install (several threads)
     if (!loaded_ && !LoadOrCreate()) return false;
     if (last_ == UINT32_MAX) return false;  // exhausted: never wraps to a smaller value
     const uint32_t next = last_ + 1;
@@ -60,6 +62,7 @@ class GenerationAllocator {
     return true;
   }
   bool DeviceId(std::array<uint8_t, 16>* out) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!loaded_ && !LoadOrCreate()) return false;
     *out = deviceId_;
     return true;
@@ -85,6 +88,7 @@ class GenerationAllocator {
     return true;
   }
 
+  std::mutex mu_;
   StandbyGenerationStore& store_;
   std::function<bool(uint8_t*, size_t)> random_;
   std::array<uint8_t, 16> deviceId_{};
