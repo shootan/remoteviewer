@@ -130,6 +130,15 @@ struct UdpHelloOptions {
 };
 // `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
 // learns whether the host supports NACK (kUdpFeatureVideoNack) etc.
+// The HelloAck test every handshake applies (the ordinary Hello's, and -- keepalive-r2 ② r3, Codex scope2 N1 -- a standby
+// activation's, which adds the declared-size check): enough bytes, the magic, a HelloAck, this protocol version, video
+// FEC; DirectoryAuth when the session was authenticated by a directory capability.
+inline bool udp_hello_ack_acceptable(const UdpHelloPacket& ack, int received, bool requireDirectoryAuth) {
+  return received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
+         ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) && ack.version == kUdpProtocolVersion &&
+         (ack.features & kUdpFeatureVideoFec) != 0 && (!requireDirectoryAuth || (ack.features & kUdpFeatureDirectoryAuth) != 0);
+}
+
 bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
                          const std::atomic<bool>* stop, std::string* error,
                          uint32_t* outAckFeatures = nullptr,
