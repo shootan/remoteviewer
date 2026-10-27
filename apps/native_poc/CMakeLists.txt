@@ -1948,6 +1948,8 @@ target_include_directories(remote60_standby_entry_client_test PRIVATE src)
 add_executable(remote60_standby_lease_test src/standby_lease_test.cpp)
 target_include_directories(remote60_standby_lease_test PRIVATE src)
 target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
+# r3 N2-b: the pump's read start / end hooks (test build only; the product header compiles without them)
+target_compile_definitions(remote60_standby_lease_test PRIVATE REMOTE60_STANDBY_TEST_HOOKS)
 add_executable(remote60_host_standby_admission_e2e_test
   src/host_standby_admission_e2e_test.cpp
   src/native_video_client_shared_core.cpp
