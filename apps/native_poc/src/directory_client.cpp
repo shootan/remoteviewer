@@ -498,6 +498,10 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   }
 
   refreshRequested_.store(false, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(punchMu_);
+    punchJobs_.clear();  // r2 N1: nothing of an earlier Start..Stop (Stop already cleared it; this is the belt)
+  }
   running_.store(true);
   thread_ = std::thread([this] { Run(); });
   punchThread_ = std::thread([this] { PunchLoop(); });
@@ -512,6 +516,10 @@ void HostAgent::Stop() {
   punchCv_.notify_all();
   if (punchThread_.joinable()) punchThread_.join();
   if (thread_.joinable()) thread_.join();
+  // r2 N1: both ended -- the cycle may have queued a train after the punch thread left (Punch() checks running_, this
+  // covers the step between its check and its push): discarded, never sent by a later Start.
+  std::lock_guard<std::mutex> lock(punchMu_);
+  punchJobs_.clear();
 }
 
 // The punch trains (see punchThread_): every target queued gets one punch per kPunchIntervalMs until it has had
@@ -1502,6 +1510,7 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
   // being punched starts its count over.
   {
     std::lock_guard<std::mutex> lock(punchMu_);
+    if (!running_.load()) return;  // r2 N1: stopping -- nothing new for a thread that is leaving (or gone)
     for (const auto& t : targets) {
       auto same = std::find_if(punchJobs_.begin(), punchJobs_.end(), [&](const PunchJob& j) {
         return j.target.ipv4NetworkOrder == t.ipv4NetworkOrder && j.target.port == t.port && j.target.hostProof == t.hostProof;

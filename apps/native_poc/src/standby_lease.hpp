@@ -146,10 +146,14 @@ class StandbyLease {
     int lost = 0;
     bool handedOff = false;
     bool needsCapability = false;
-    // r2 D1: the old session's tail is still arriving (its video / control from the target reached this socket within
-    // kTailQuietMs). An observation of what the host still sends -- not a proof that its grant ended when it stops.
+    // r2 D1: datagrams from the target that are not standby traffic, a HelloAck or a Punch reached this socket within
+    // kTailQuietMs -- an observation of what the target still sends (a session's video / control, or anything else it
+    // sends there), not a proof that its grant ended when it stops, and not a count of "video" either.
     bool tailActive = false;
-    uint64_t strays = 0;  // such datagrams so far (the tail's cost, counted apart)
+    uint64_t strays = 0;  // such datagrams so far (counted apart)
+    // r3 (Codex codex_ka_e_src_r2.md D1): the host's Punch trains to this socket (a first transition's punches: 25 a
+    // train), counted on their own -- r2 counted them as strays, so a punch alone made "a tail"
+    uint64_t punches = 0;
   };
   static constexpr uint64_t kTailQuietMs = 1500;
   Snapshot snapshot() const {
@@ -161,6 +165,7 @@ class StandbyLease {
     s.handedOff = handedOff_;
     s.needsCapability = needsCapability_;
     s.strays = strays_;
+    s.punches = punches_;
     s.tailActive = !handedOff_ && lastStrayMs_ != 0 && now_() - lastStrayMs_ < kTailQuietMs;
     return s;
   }
@@ -248,7 +253,8 @@ class StandbyLease {
       UdpStandbyPacket p{};
       p.magic = 0;
       bool stray = false;
-      const bool got = Receive(s, 20, aimed ? &want : nullptr, &p, nullptr, &stray);
+      bool punch = false;
+      const bool got = Receive(s, 20, aimed ? &want : nullptr, &p, nullptr, &stray, &punch);
       TestPoint(kTestReadDone);  // outside the lock: a test registers a handoff here, while the read is "in flight"
       std::lock_guard<std::mutex> lock(mu_);
       reading_ = false;
@@ -257,6 +263,7 @@ class StandbyLease {
         ++strays_;
         lastStrayMs_ = now_();
       }
+      if (punch) ++punches_;
       if (got && p.magic == kMagic) Apply(client_.OnStandbyPacket(p, now_()));
       Apply(client_.Tick(now_()));
     } while (now_() < until);
@@ -393,10 +400,11 @@ class StandbyLease {
 
   // One datagram from `want` (the lease's target, read under the lock by the caller; null = none yet: the wait only)
   // within `waitMs`: a standby packet (*sb) or a HelloAck (*ack). Takes no lock.
-  // *stray (optional): a datagram from `want` that is neither -- the video / control of a session that used this socket
-  // and that the host still sends (r2 D1: the end of a session's tail is observed, never assumed).
+  // *stray (optional): a datagram from `want` that is none of these and no Punch -- e.g. the video / control of a session
+  // that used this socket and that the host still sends (r2 D1: observed, never assumed). *punch (optional): a Punch
+  // from `want` (r3: counted apart, never a stray).
   static bool Receive(SocketHandle s, uint32_t waitMs, const sockaddr_in* want, UdpStandbyPacket* sb, UdpHelloPacket* ack,
-                      bool* stray = nullptr) {
+                      bool* stray = nullptr, bool* punch = nullptr) {
     fd_set rd;
     FD_ZERO(&rd);
     FD_SET(s, &rd);
@@ -417,6 +425,11 @@ class StandbyLease {
     std::memcpy(&magic, buf, 4);
     std::memcpy(&kind, buf + 4, 2);
     if (magic != kMagic) return false;
+    if (kind == static_cast<uint16_t>(UdpPacketKind::Punch)) {
+      if (stray) *stray = false;
+      if (punch) *punch = true;
+      return false;
+    }
     if (n == static_cast<int>(sizeof(UdpStandbyPacket)) && kind >= static_cast<uint16_t>(UdpPacketKind::StandbyHello) &&
         kind <= static_cast<uint16_t>(UdpPacketKind::StandbyRelease)) {
       if (stray) *stray = false;
@@ -624,7 +637,8 @@ class StandbyLease {
   bool reading_ = false;          // the pump waits on socket_ (outside the lock)
   bool observing_ = false;        // ObserveFrom reads socket_ (outside the lock)
   bool peerTied_ = false;         // a session connect()ed this socket to its peer: reopen before aiming elsewhere
-  uint64_t strays_ = 0;           // datagrams from the target that were not standby traffic (a session's tail)
+  uint64_t strays_ = 0;           // datagrams from the target that were not standby / HelloAck / Punch (r3)
+  uint64_t punches_ = 0;          // Punches from the target (r3: apart from the strays)
   bool capabilityAfterRead_ = false;  // NeedCapability waits for the pump's read in flight (r2 N2)
   uint64_t lastStrayMs_ = 0;
   int intents_ = 0;               // handoffs / observations waiting for the socket: no new pump read meanwhile

@@ -347,6 +347,24 @@ void tail_test(FakeHost& host) {
   const auto after = lease.snapshot();
   check("...it stops: no tail any more (an observation, not a proof the grant ended), the count kept",
         !after.tailActive && after.strays == during.strays && lease.state() == State::Parked);
+
+  // r3 (Codex codex_ka_e_src_r2.md D1, its tail_punch_probe: one Punch made strays=1 tail=1 with no session ever): a
+  // Punch is counted on its own, never as a stray, and makes no tail
+  std::printf("\n--- r3 D1: the host's Punches are not a tail ---\n");
+  n::StandbyLease fresh(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("a new lease parks, no session ever", park(fresh) && fresh.snapshot().strays == 0 && fresh.snapshot().punches == 0);
+  n::UdpHelloPacket punch{};
+  punch.magic = n::kMagic;
+  punch.kind = static_cast<uint16_t>(n::UdpPacketKind::Punch);
+  punch.size = static_cast<uint16_t>(sizeof(punch));
+  for (int i = 0; i < 5; ++i) {
+    host.SendRaw(&punch, sizeof(punch));
+    fresh.Pump(20);
+  }
+  const auto pp = fresh.snapshot();
+  check("5 Punches: punches 5, strays 0, no tail", pp.punches == 5 && pp.strays == 0 && !pp.tailActive,
+        "punches=" + std::to_string(pp.punches) + " strays=" + std::to_string(pp.strays) +
+            " tail=" + std::to_string(pp.tailActive));
 }
 
 // The connect thread of a session: runs the handshake of `args` as ClientSessionController::Connect would.
@@ -685,6 +703,28 @@ void runner_test(FakeHost& host) {
   check("...the lease pings again on its own", wait_until([&] { return host.pings > pings0; }, 7000) && parked("k3"));
   runner.ReleaseAll();
   check("ReleaseAll: every slot gone", runner.size() == 0 && n::StandbyRunner::liveSlots() == slots0);
+
+  // r3 (Codex codex_ka_e_src_r2.md R2): two app screens share this process's runner; the old one's late cleanup takes
+  // its own leases only -- the new screen's lease (even of the same PC) stays, and the old ones are reclaimed, not leaked
+  std::printf("\n--- r3 R2: one owner's cleanup takes its own leases only ---\n");
+  check("old owner o1: two leases park", runner.Start("o1|pcA") && runner.Start("o1|pcB") && parked("o1|pcA") &&
+        parked("o1|pcB"));
+  check("new owner o2: a lease of the same PC parks beside them", runner.Start("o2|pcA") && parked("o2|pcA"));
+  check("prefix \"o1\" alone would also match \"o10|..\": a lease of owner o10 parks too",
+        runner.Start("o10|pcC") && parked("o10|pcC"));
+  const int rel0 = host.releases;
+  const size_t gone = runner.ReleaseWhere("o1|");
+  check("ReleaseWhere(\"o1|\"): its two leases go (released at the host), o2's and o10's stay parked",
+        gone == 2 && runner.size() == 2 && !runner.StatusOf("o1|pcA").exists && !runner.StatusOf("o1|pcB").exists &&
+            parked("o2|pcA") && parked("o10|pcC") &&
+            wait_until([&] { return host.releases >= rel0 + 2; }, 3000),
+        "gone=" + std::to_string(gone) + " size=" + std::to_string(runner.size()) +
+            " releases=" + std::to_string(host.releases - rel0));
+  check("...a late Provide / status of the old owner's key touches nothing",
+        !runner.Provide("o1|pcA", n::StandbyCapability{}) && !runner.StatusOf("o1|pcA").exists && parked("o2|pcA"));
+  check("ReleaseWhere(\"\") releases nothing", runner.ReleaseWhere("") == 0 && runner.size() == 2);
+  runner.ReleaseAll();
+  check("...ReleaseAll (the runner's end): every slot gone", runner.size() == 0 && n::StandbyRunner::liveSlots() == slots0);
 }
 }  // namespace
 
