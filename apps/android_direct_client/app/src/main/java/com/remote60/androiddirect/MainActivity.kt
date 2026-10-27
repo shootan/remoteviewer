@@ -2995,7 +2995,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val prelogin = (NativeSessionBridge.nativeHostCaptureFlags(activeBinding) and RemoteRebootPolicy.FLAG_PRELOGIN_NOW) != 0
         val decision = StandbyKeep.onListReturn(
             fromStandby = fromStandby, directory = rk != null, supported = standbySupport.supported, prelogin = prelogin,
-            knownUnsupported = rk != null && standbyBook.isUnsupported(rk), enabled = true)
+            knownUnsupported = false, enabled = true)  // an unanswered lease is never taken for an older host
         diagnosticsLog.log("list_return",
             "origin=$origin host=$directoryHostName handle=$handle decision=$decision fromStandby=$fromStandby " +
                 "supported=${standbySupport.supported} prelogin=$prelogin " + NativeSessionBridge.nativeSessionCounters(handle))
@@ -3049,7 +3049,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     /** A lease for [key] (none yet): started on the standby thread; its capability is fetched when it asks. */
     private fun startStandby(key: RecentHosts.Key, reason: String) {
-        if (standbyBook.has(key) || standbyBook.isUnsupported(key) || !ensureStandbyInit()) return
+        if (standbyBook.has(key) || !ensureStandbyInit()) return
         val inc = standbyBook.begin(key)
         val nk = StandbyKeep.nativeKey(key)
         diagnosticsLog.log("standby_start", "host=${key.hostId} inc=$inc reason=$reason leases=${standbyBook.keys().size}")
@@ -3070,6 +3070,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         diagnosticsLog.log("standby_release", "host=${key.hostId} reason=$reason")
         val nk = StandbyKeep.nativeKey(key)
         standbyExecutor.execute { NativeSessionBridge.nativeStandbyRelease(nk) }
+        hostListAdapter.notifyDataSetChanged()
     }
 
     private fun releaseAllStandby(reason: String) {
@@ -3094,6 +3095,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         val now = SystemClock.elapsedRealtime()
         val next = HashMap<RecentHosts.Key, StandbyKeep.Lease>()
+        var cardsChanged = false
         for (key in keys) {
             val lease = StandbyKeep.Lease.of(NativeSessionBridge.nativeStandbyStatus(StandbyKeep.nativeKey(key)))
             val before = standbyLeases[key]
@@ -3101,18 +3103,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("standby_state",
                     "host=${key.hostId} exists=${lease.exists} state=${lease.state} handedOff=${lease.handedOff} " +
                         "lost=${lease.lost} needs=${lease.needsCapability}")
+                cardsChanged = true  // what the card says comes from this status: it is drawn again
             }
             if (lease.exists && lease.state == StandbyKeep.LeaseState.UNSUPPORTED) {
-                standbyBook.markUnsupported(key)
-                releaseStandby(key, "unsupported")
-                hostsStatusText.text = getString(R.string.hosts_standby_unsupported_host,
+                standbyBook.markUnsupported(key, now)
+                releaseStandby(key, "unanswered")
+                hostsStatusText.text = getString(R.string.hosts_standby_unanswered,
                     directoryHosts.firstOrNull { it.hostId == key.hostId }?.hostName ?: key.hostId)
+                cardsChanged = true
                 continue
             }
             next[key] = lease
             if (lease.exists && lease.needsCapability && !lease.handedOff) requestStandbyCapability(key, now)
         }
         standbyLeases = next
+        if (cardsChanged) hostListAdapter.notifyDataSetChanged()
         val origin = directoryOrigin()
         val account = DirectoryClient.sessionAccount()
         val recent = recentHosts.recent(origin, account).map { RecentHosts.Key(origin, account, it) }
@@ -5206,7 +5211,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val listed = directoryHosts.associateBy { it.hostId }
         for (hostId in recent.take(RecentHosts.MAX)) {
             val key = RecentHosts.Key(origin, account, hostId)
-            if (listed[hostId]?.online != true || keepSuppression.isSuppressed(key) || standbyBook.isUnsupported(key)) continue
+            if (listed[hostId]?.online != true || keepSuppression.isSuppressed(key) ||
+                standbyBook.isUnsupported(key, SystemClock.elapsedRealtime())) continue
             if (standbyBook.has(key) || kept.values.any { recentKeyOf(it) == key }) continue
             startStandby(key, "auto_$reason")
         }

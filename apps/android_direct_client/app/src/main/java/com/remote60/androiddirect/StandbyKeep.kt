@@ -81,8 +81,10 @@ object StandbyKeep {
     /**
      * "PC 목록" with a PC on screen. [fromStandby] = its session came from a lease's activation; [directory] = a
      * directory-brokered connection (not raw IP); [supported] = the directory said standby (read-only /api/hosts);
-     * [prelogin] = the PC is at its logon screen (a pre-login worker); [knownUnsupported] = this PC's lease already
-     * found an older host; [enabled] = model A is on in this build.
+     * [prelogin] = the PC is at its logon screen (a pre-login worker); [knownUnsupported] = known for certain not to
+     * stand by (the app passes false: a lease whose Hellos went unanswered may have met an older host OR a path that
+     * failed for now -- Codex: an unconfirmed / passing failure is never taken for an older version, so "PC 목록" tries
+     * again); [enabled] = model A is on in this build.
      */
     fun onListReturn(
         fromStandby: Boolean,
@@ -102,6 +104,9 @@ object StandbyKeep {
     fun evictions(recent: List<RecentHosts.Key>, leases: Collection<RecentHosts.Key>, onScreen: RecentHosts.Key?): List<RecentHosts.Key> =
         leases.filter { it !in recent.take(RecentHosts.MAX) && it != onScreen }
 
+    /** How long the app's own preparation leaves a PC whose lease went unanswered (a user's PC 목록 never waits). */
+    const val UNANSWERED_HOLD_MS = 10L * 60L * 1000L
+
     /** The native runner's key of a PC. */
     fun nativeKey(key: RecentHosts.Key): String = SessionPark.entryKey(key.directoryOrigin, key.accountId, key.hostId)
 
@@ -112,7 +117,7 @@ object StandbyKeep {
     class Book {
         private var counter = 0L
         private val current = LinkedHashMap<RecentHosts.Key, Long>()
-        private val unsupported = HashSet<RecentHosts.Key>()
+        private val unsupported = HashMap<RecentHosts.Key, Long>()  // until when the app's own preparation holds off
         private val failures = HashMap<RecentHosts.Key, Int>()
         private val notBefore = HashMap<RecentHosts.Key, Long>()
         private var staging: Pair<RecentHosts.Key, Long>? = null
@@ -143,9 +148,12 @@ object StandbyKeep {
         @Synchronized fun isCurrent(key: RecentHosts.Key, inc: Long): Boolean = inc != 0L && current[key] == inc
         @Synchronized fun keys(): List<RecentHosts.Key> = current.keys.toList()
 
-        /** An older host / a pre-login worker answered no standby: not tried again this sign-in. */
-        @Synchronized fun markUnsupported(key: RecentHosts.Key) { unsupported.add(key) }
-        @Synchronized fun isUnsupported(key: RecentHosts.Key): Boolean = key in unsupported
+        /**
+         * A lease's Hellos went unanswered (an older host -- or a path that failed for now: not told apart). Only the
+         * app's OWN preparation holds off for [UNANSWERED_HOLD_MS]; a user's "PC 목록" tries again.
+         */
+        @Synchronized fun markUnsupported(key: RecentHosts.Key, nowMs: Long) { unsupported[key] = nowMs + UNANSWERED_HOLD_MS }
+        @Synchronized fun isUnsupported(key: RecentHosts.Key, nowMs: Long): Boolean = nowMs < (unsupported[key] ?: 0L)
 
         /**
          * Staging <= 1: one capability job at a time (observe + standby connect). true = [key]@[inc] may start one now

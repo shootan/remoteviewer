@@ -121,11 +121,11 @@ class StandbyKeepTest {
         val b = StandbyKeep.Book()
         val a = b.begin(k("A"))
         b.begin(k("B"))
-        b.markUnsupported(k("C"))
+        b.markUnsupported(k("C"), 1_000L)
         assertEquals(setOf(k("A"), k("B")), b.endAll().toSet())
         assertFalse(b.isCurrent(k("A"), a))
         assertTrue(b.keys().isEmpty())
-        assertFalse(b.isUnsupported(k("C")))
+        assertFalse(b.isUnsupported(k("C"), 1_000L))
         // numbers are not reused after a sign-out: an old job of the previous sign-in cannot match a new lease
         assertTrue(b.begin(k("A")) > a)
     }
@@ -148,6 +148,16 @@ class StandbyKeepTest {
         assertFalse(b.startStaging(k("A"), a + 100, 3_000L))  // not the current incarnation
         b.end(k("A"))
         assertFalse(b.startStaging(k("A"), a, 3_000L))        // released
+    }
+
+    @Test
+    fun anUnansweredLeaseHoldsOffOnlyTheAppsOwnPreparationForAWhile() {
+        // Codex: an unanswered lease may be an older host or a path that failed for now -- not taken for an older version
+        val b = StandbyKeep.Book()
+        b.markUnsupported(k("A"), 1_000L)
+        assertTrue(b.isUnsupported(k("A"), 1_000L + StandbyKeep.UNANSWERED_HOLD_MS - 1))
+        assertFalse(b.isUnsupported(k("A"), 1_000L + StandbyKeep.UNANSWERED_HOLD_MS))
+        assertFalse(b.isUnsupported(k("B"), 1_000L))
     }
 
     @Test
