@@ -177,6 +177,178 @@ class FakeHost {
   sockaddr_in peer_{};
 };
 
+bool park(n::StandbyLease& lease);
+
+// A UDP endpoint on loopback that answers every datagram with itself (a directory's observe port, for ObserveFrom).
+class Echo {
+ public:
+  ~Echo() { Stop(); }
+  bool Start() {
+    s_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (bind(s_, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) != 0) return false;
+    socklen_t l = sizeof(a);
+    getsockname(s_, reinterpret_cast<sockaddr*>(&a), &l);
+    port = ntohs(a.sin_port);
+    t_ = std::thread([this] {
+      while (!stop_) {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(s_, &rd);
+        timeval tv{0, 20000};
+        if (select(static_cast<int>(s_) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+        char buf[256];
+        sockaddr_in from{};
+        socklen_t fl = sizeof(from);
+        const int n = static_cast<int>(recvfrom(s_, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl));
+        if (n > 0) {
+          ++seen;
+          sendto(s_, buf, n, 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+        }
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    stop_ = true;
+    if (t_.joinable()) t_.join();
+    n::close_socket(&s_);
+  }
+  uint16_t port = 0;
+  std::atomic<int> seen{0};
+
+ private:
+  n::SocketHandle s_ = n::kInvalidSocket;
+  std::thread t_;
+  std::atomic<bool> stop_{false};
+};
+
+// ② e (AVD ke_r3): the session connect()s the duplicate it got; the lease's socket must not stay tied to that peer.
+void shared_socket_test(FakeHost& host) {
+  std::printf("\n--- ② e: the activation's socket is shared; the session's connect() does not stay on the lease ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  Echo directory;
+  check("parked at the fake host; an observe endpoint up", park(lease) && directory.Start());
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("activation arguments say the socket is shared (the session never shuts it down)",
+        lease.ActivationArgs(&args, nullptr, &op) && args.preparedSocketShared);
+  // what ClientSessionController::ConnectUdpVideo does with a prepared socket: connect() it to the peer
+  sockaddr_in peer{};
+  peer.sin_family = AF_INET;
+  peer.sin_port = htons(host.port);
+  inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+  const bool connected = connect(args.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+  n::close_socket(&args.preparedUdpSocket);  // the session ended (its descriptor closed, not shut down)
+  check("the session's connect() on its duplicate; its descriptor closed; SessionOver", connected && lease.SessionOver(op));
+  const int seen0 = directory.seen;
+  check("...an observe to ANOTHER address from the lease works (a fresh socket: the tied one keeps its endpoint)",
+        lease.ObserveFrom("127.0.0.1", directory.port, "obs-shared") && directory.seen > seen0,
+        "seen=" + std::to_string(directory.seen - seen0));
+  const int pings = host.pings;
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && host.pings == pings) lease.Pump(50);
+  check("...and the lease pings its own target again", host.pings > pings && lease.state() == State::Parked);
+}
+
+// r2 (Codex codex_ka_e_src_r1.md N2, its probe): a SYNCHRONOUS capability source (a PC's directory calls, in the
+// CapabilityFn) observes from the socket it is given. After a session tied that socket to its peer, a fresh capability
+// (a restart: Lost / re-admission) must still be able to observe -- before r2 it observed from the tied socket and failed.
+void sync_capability_test(FakeHost& host) {
+  std::printf("\n--- r2 N2: a synchronous capability after a session observes from a fresh socket ---\n");
+  Echo directory;
+  check("an observe endpoint up", directory.Start());
+  std::atomic<int> calls{0}, observed{0};
+  auto capability = [&](n::SocketHandle s, n::StandbyCapability* out) {
+    ++calls;
+    if (!n::standby_observe_on(s, "127.0.0.1", directory.port, "obs-sync")) return false;
+    ++observed;
+    out->token = "cap-test";
+    out->ip = "127.0.0.1";
+    out->port = host.port;
+    return true;
+  };
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, capability, mono_ms);
+  check("parked by a synchronous capability (its first observe answered)", park(lease) && calls == 1 && observed == 1);
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  sockaddr_in peer{};
+  peer.sin_family = AF_INET;
+  peer.sin_port = htons(host.port);
+  inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+  const bool session = lease.ActivationArgs(&args, nullptr, &op) &&
+                       connect(args.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+  n::close_socket(&args.preparedUdpSocket);
+  check("a session tied the shared socket to its peer; SessionOver", session && lease.SessionOver(op));
+  lease.Start();  // a fresh capability (what a Lost / a re-admission does)
+  const bool reparked = [&] {
+    const uint64_t until = mono_ms() + 3000;
+    while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+    return lease.state() == State::Parked;
+  }();
+  check("...the fresh capability's observe is answered (a fresh socket), and the lease parks again",
+        calls == 2 && observed == 2 && reparked, "calls=" + std::to_string(calls.load()) + " observed=" +
+        std::to_string(observed.load()));
+  // the same while the pump reads: the reopen waits for the read in flight (no descriptor closed under a read)
+  std::atomic<bool> stopPump{false};
+  std::thread pump([&] {
+    while (!stopPump) lease.Pump(30);
+  });
+  n::ClientSessionConnectArgs args2;
+  uint64_t op2 = 0;
+  bool session2 = false;
+  {
+    // the pump is running: take the socket as a session would, tie it, give it back
+    session2 = wait_until([&] { return lease.ActivationArgs(&args2, nullptr, &op2); }, 3000) &&
+               connect(args2.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+    n::close_socket(&args2.preparedUdpSocket);
+    session2 = session2 && lease.SessionOver(op2);
+  }
+  const int before = observed;
+  lease.Start();  // from this thread while the pump may be reading
+  const bool again = wait_until([&] { return observed == before + 1 && lease.state() == State::Parked; }, 7000);
+  stopPump = true;
+  pump.join();
+  check("...and while the pump reads: deferred to its next turn, observed from a fresh socket, parked",
+        session2 && again, "calls=" + std::to_string(calls.load()) + " observed=" + std::to_string(observed.load()) + " events: " +
+            [&] { std::string e; for (const auto& x : lease.events()) e += x + " | "; return e; }());
+}
+
+// r2 (Codex D1): the old session's tail is OBSERVED -- what the host still sends to the socket after SessionOver.
+void tail_test(FakeHost& host) {
+  std::printf("\n--- r2 D1: the old session's tail is observed, not assumed ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked; no tail before any session", park(lease) && !lease.snapshot().tailActive && lease.snapshot().strays == 0);
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("a session over", lease.ActivationArgs(&args, nullptr, &op) && [&] {
+    n::close_socket(&args.preparedUdpSocket);
+    return lease.SessionOver(op);
+  }());
+  uint8_t video[600];
+  std::memset(video, 0x5A, sizeof(video));  // not a standby datagram: what a still-running session would send
+  for (int i = 0; i < 10; ++i) {
+    host.SendRaw(video, sizeof(video));
+    lease.Pump(20);
+  }
+  const auto during = lease.snapshot();
+  check("the host still sends the old session's datagrams: tail active, counted", during.tailActive && during.strays >= 5,
+        "strays=" + std::to_string(during.strays));
+  const uint64_t until = mono_ms() + 2500;
+  while (mono_ms() < until) lease.Pump(50);
+  const auto after = lease.snapshot();
+  check("...it stops: no tail any more (an observation, not a proof the grant ended), the count kept",
+        !after.tailActive && after.strays == during.strays && lease.state() == State::Parked);
+}
+
 // The connect thread of a session: runs the handshake of `args` as ClientSessionController::Connect would.
 struct Handshaking {
   std::atomic<bool> stop{false}, done{false};
@@ -525,6 +697,9 @@ int main() {
   hello_ack_test(host);
   cancel_then_answer_test(host);
   handoff_priority_test(host);
+  shared_socket_test(host);
+  sync_capability_test(host);
+  tail_test(host);
   runner_test(host);
   host.Stop();
   std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
