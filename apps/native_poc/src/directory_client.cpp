@@ -544,6 +544,37 @@ void HostAgent::RecordCycleEnd(const CycleRecord& record) {
     }
   }
   cycleCv_.notify_all();
+  // dirretry r2 (Codex T1): the barrier. Held here, after the record and before the loop's sleep and the next
+  // cycle, so a test reads one moment -- this cycle's -- instead of a record from one and counters from later.
+  std::unique_lock<std::mutex> lock(mu_);
+  if (!cycleGate_) return;
+  const bool released = cycleCv_.wait_for(lock, std::chrono::milliseconds(cycleGateTimeoutMs_), [&] {
+    return cycleReleased_ >= record.n || !running_.load();
+  });
+  if (!released) cycleGateTimedOut_ = true;
+}
+
+void HostAgent::EnableCycleGateForTest(int timeoutMs) {
+#if defined(REMOTE60_DIRECTORY_MUTANT_NO_CYCLE_GATE)
+  (void)timeoutMs;  // MUTANT (test build only): the barrier is gone, the loop runs on as it did before r2
+#else
+  std::lock_guard<std::mutex> lock(mu_);
+  cycleGate_ = true;
+  cycleGateTimeoutMs_ = timeoutMs;
+#endif
+}
+
+void HostAgent::ReleaseCycleForTest(uint64_t n) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (n > cycleReleased_) cycleReleased_ = n;
+  }
+  cycleCv_.notify_all();
+}
+
+bool HostAgent::CycleGateTimedOutForTest() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return cycleGateTimedOut_;
 }
 
 bool HostAgent::WaitForCycleEnd(uint64_t n, int timeoutMs, CycleRecord* out) {

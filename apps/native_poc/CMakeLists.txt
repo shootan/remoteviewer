@@ -3466,9 +3466,10 @@ target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 # directory-retry-fix r1: the agent loop's cycle record (a test observes completed cycles instead of
 # sampling a status mid-change). Test targets only -- never a shipped one.
 target_compile_definitions(remote60_directory_retry_test PRIVATE REMOTE60_DIRECTORY_TEST_HOOKS=1)
-# ...and two MUTANT builds of the same sources, each of which must FAIL the test: the old "timed out"
-# overwrite, and "no advertisement, so do not try the legacy default". Never staged, never shipped.
-foreach(_drf_mutant TIMEOUT_ONLY NO_LEGACY_ATTEMPT)
+# ...and MUTANT builds of the same sources, each of which must FAIL the test: the old "timed out"
+# overwrite, "no advertisement, so do not try the legacy default", and (dirretry r2) no cycle barrier --
+# the slow-observer stages then read counters from a later cycle. Never staged, never shipped.
+foreach(_drf_mutant TIMEOUT_ONLY NO_LEGACY_ATTEMPT NO_CYCLE_GATE)
   string(TOLOWER ${_drf_mutant} _drf_lower)
   add_executable(remote60_directory_retry_mutant_${_drf_lower}_test
     src/directory_retry_test.cpp

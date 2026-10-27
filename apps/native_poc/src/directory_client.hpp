@@ -304,6 +304,16 @@ class HostAgent {
   };
   /** Waits (bounded) until cycle `n` has completed; false on timeout or if the agent stopped. */
   bool WaitForCycleEnd(uint64_t n, int timeoutMs, CycleRecord* out);
+  /**
+   * TEST BUILD ONLY (dirretry r2, Codex T1): a bounded barrier at the same loop boundary. Enabled before
+   * Start, the loop stops right after recording cycle n until the test releases n (or the agent stops, or
+   * `timeoutMs` passes -- then it goes on and CycleGateTimedOutForTest() says so, for a loud failure). While
+   * it waits, nothing of cycle n+1 has happened: what the test reads of the directory is cycle n's, and a
+   * script it installs is there before the next cycle asks.
+   */
+  void EnableCycleGateForTest(int timeoutMs);
+  void ReleaseCycleForTest(uint64_t n);
+  bool CycleGateTimedOutForTest() const;
 #endif
 
  private:
@@ -449,6 +459,10 @@ class HostAgent {
   void RecordCycleEnd(const CycleRecord& record);
   std::condition_variable cycleCv_;  // with mu_
   std::vector<CycleRecord> cycles_;  // guarded by mu_; every completed cycle, in order (bounded)
+  bool cycleGate_ = false;           // guarded by mu_ (set before Start)
+  int cycleGateTimeoutMs_ = 0;
+  uint64_t cycleReleased_ = 0;       // guarded by mu_
+  bool cycleGateTimedOut_ = false;   // guarded by mu_
 #endif
 
   mutable std::mutex mu_;

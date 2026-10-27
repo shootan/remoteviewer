@@ -87,14 +87,65 @@ std::string candidateBody() {
  * arrives on -- so the test supplies one, forwards what the agent sends, and feeds the replies
  * back in through ConsumeUdpPacket. That is the same wiring the real host has.
  */
-std::string exe_directory() {
-  char path[MAX_PATH] = {};
-  GetModuleFileNameA(nullptr, path, MAX_PATH);
-  std::string text(path);
-  // Both separators. This was "\/" -- an unknown escape that is just "/", so on a Windows path
-  // nothing was found and the fixture cache landed in the working directory instead. (RV-17)
-  const size_t slash = text.find_last_of("\\/");
-  return slash == std::string::npos ? std::string(".") : text.substr(0, slash);
+// dirretry r2 (Codex T2): where the fixture caches live -- and the only place this test deletes anything.
+// It used to be beside the executable, which for a build outside the repository meant creating and
+// deleting files outside it. Now the caller names ONE folder directly under the trusted anchor
+// D:/remote/remote/.claude/test-tmp (REMOTE60_TEST_TMP, the directory suite's rule, test_tmp.js); the
+// path is checked before anything is made: the anchor must exist and be no link, the folder is created
+// one level inside it and must not be a link either. Without a valid root the test refuses to run.
+const wchar_t kTestAnchor[] = L"D:\\remote\\remote\\.claude\\test-tmp";
+std::string gCacheRoot;  // narrow form of the validated root (ASCII: the anchor is, and the name is checked)
+
+bool is_reparse(const std::wstring& p) {
+  const DWORD a = GetFileAttributesW(p.c_str());
+  return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+bool init_cache_root(std::string* why) {
+  wchar_t given[1024] = {};
+  const DWORD n = GetEnvironmentVariableW(L"REMOTE60_TEST_TMP", given, 1024);
+  if (n == 0 || n >= 1024) { *why = "REMOTE60_TEST_TMP is not set"; return false; }
+  wchar_t full[1024] = {};
+  wchar_t* namePart = nullptr;
+  if (GetFullPathNameW(given, 1024, full, &namePart) == 0 || !namePart || !*namePart) {
+    *why = "REMOTE60_TEST_TMP is not a usable path"; return false;
+  }
+  std::wstring name(namePart);
+  for (wchar_t ch : name) {
+    const bool ok = (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9') ||
+                    ch == L'-' || ch == L'_' || ch == L'.';
+    if (!ok || name == L"." || name == L"..") { *why = "the test root's name must be a plain ASCII folder name"; return false; }
+  }
+  std::wstring parent(full, namePart - full);
+  while (!parent.empty() && (parent.back() == L'\\' || parent.back() == L'/')) parent.pop_back();
+  if (_wcsicmp(parent.c_str(), kTestAnchor) != 0) {
+    *why = "REMOTE60_TEST_TMP must be a folder directly under D:/remote/remote/.claude/test-tmp"; return false;
+  }
+  const DWORD anchorAttr = GetFileAttributesW(kTestAnchor);
+  if (anchorAttr == INVALID_FILE_ATTRIBUTES || !(anchorAttr & FILE_ATTRIBUTE_DIRECTORY) || is_reparse(kTestAnchor)) {
+    *why = "the test anchor is missing or a link"; return false;
+  }
+  const std::wstring root = std::wstring(kTestAnchor) + L"\\" + name;
+  if (!CreateDirectoryW(root.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    *why = "the test root could not be created"; return false;
+  }
+  if (is_reparse(root)) { *why = "the test root is a link"; return false; }
+  gCacheRoot.clear();
+  for (wchar_t ch : root) gCacheRoot.push_back(static_cast<char>(ch));  // ASCII by the checks above
+  return true;
+}
+
+// A fixture file under the root; and the one delete the test does, of such a file only.
+std::string cache_file(const std::string& leaf) { return gCacheRoot + "\\" + leaf; }
+void delete_fixture_file(const std::string& path) {
+  const std::string prefix = gCacheRoot + "\\";
+  if (gCacheRoot.empty() || path.size() <= prefix.size() || _strnicmp(path.c_str(), prefix.c_str(), prefix.size()) != 0 ||
+      path.find("..") != std::string::npos || path.find_first_of("\\/", prefix.size()) != std::string::npos) {
+    std::printf("FAIL  refused to delete outside the test root: %s\n", path.c_str());
+    ++gFailures;
+    return;
+  }
+  DeleteFileA(path.c_str());
 }
 
 /**
@@ -143,9 +194,9 @@ std::string RunHost(FakeDirectory& dir, const char* label, int wantHeartbeats,
   cfg.accountId = "tester";
   cfg.password = "test-pass-1234";
   cfg.hostName = "Fixture PC";
-  // Beside this executable and unique per case, so no run reads another's cached token and
-  // nothing outside the build tree is written.
-  cfg.cachePath = exe_directory() + "\\retry-fixture-" + std::string(label) + ".json";
+  // In the test root (dirretry r2, Codex T2) and unique per case, so no run reads another's cached token
+  // and nothing outside that root is written or deleted.
+  cfg.cachePath = cache_file("retry-fixture-" + std::string(label) + ".json");
   // Nothing pinned by default: the point of most of these cases is what the agent works out for
   // itself. A case that pins one says so.
   cfg.observeUdpPort = explicitPort;
@@ -181,7 +232,7 @@ std::string RunHost(FakeDirectory& dir, const char* label, int wantHeartbeats,
   pumping = false;
   closesocket(media);
   if (pump.joinable()) pump.join();
-  DeleteFileA(cfg.cachePath.c_str());
+  delete_fixture_file(cfg.cachePath);
   return status;
 }
 
@@ -225,7 +276,7 @@ class StagedHost {
     cfg_.accountId = "tester";
     cfg_.password = "test-pass-1234";
     cfg_.hostName = "Fixture PC";
-    cfg_.cachePath = exe_directory() + "\\retry-fixture-staged-" + std::string(label) + ".json";
+    cfg_.cachePath = cache_file("retry-fixture-staged-" + std::string(label) + ".json");
     cfg_.observeUdpPort = explicitPort;
     cfg_.heartbeatSeconds = 5;
     if (seedCache) {
@@ -233,6 +284,10 @@ class StagedHost {
       cfg_.password.clear();
     }
     legacyPort_ = static_cast<uint16_t>(dir.httpPort() + 1);
+    label_ = label;
+    // dirretry r2 (Codex T1): the loop waits at each cycle's end until Wait() lets it go on. 60 s is the
+    // bound; reaching it is a failure (checked when this ends), never a silent continue.
+    agent_.EnableCycleGateForTest(60000);
     std::string error;
     started_ = agent_.Start(cfg_, [this](const void* data, size_t len, const sockaddr_in& to) {
       if (ntohs(to.sin_port) == legacyPort_) legacySends_.fetch_add(1);
@@ -244,16 +299,30 @@ class StagedHost {
   }
 
   ~StagedHost() {
+    const bool gateTimedOut = agent_.CycleGateTimedOutForTest();
     agent_.Stop();
     pumping_ = false;
     closesocket(media_);
     if (pump_.joinable()) pump_.join();
-    DeleteFileA(cfg_.cachePath.c_str());
+    check((std::string("[") + label_ + "] the cycle barrier was never left by its timeout").c_str(), !gateTimedOut);
+    delete_fixture_file(cfg_.cachePath);
   }
 
-  /** The record of cycle n, once that cycle has completed (bounded: 12 s, about two cycles). */
+  /**
+   * The record of cycle n, once that cycle has completed (bounded: 12 s per cycle). dirretry r2: cycles are
+   * stepped -- each earlier one is released only on the way to n -- and the loop is HELD at the end of n
+   * until the next Wait (or the end). So whatever the test reads now (the fake's counters, LegacySends) is
+   * cycle n's, however slow the test is, and a Script() it installs now is in place before cycle n+1.
+   * A lower n than the one held just returns that past record.
+   */
   bool Wait(uint64_t n, Cycle* out) {
-    return started_ && agent_.WaitForCycleEnd(n, 12000, out);
+    if (!started_) return false;
+    while (stepped_ < n) {
+      if (stepped_ > 0) agent_.ReleaseCycleForTest(stepped_);
+      if (!agent_.WaitForCycleEnd(stepped_ + 1, 12000, nullptr)) return false;
+      ++stepped_;
+    }
+    return agent_.WaitForCycleEnd(n, 1, out);
   }
   int LegacySends() const { return legacySends_.load(); }
   int Sends() const { return sends_.load(); }
@@ -267,6 +336,8 @@ class StagedHost {
   remote60::native_poc::directory::HostAgent agent_;
   remote60::native_poc::directory::HostAgentConfig cfg_;
   uint16_t legacyPort_ = 0;
+  std::string label_;
+  uint64_t stepped_ = 0;  // the cycle the loop is held at (0: none yet)
   std::atomic<int> legacySends_{0};
   std::atomic<int> sends_{0};
   bool started_ = false;
@@ -349,7 +420,7 @@ struct PunchHarness {
     Stop();
     std::printf("  (harness: %llu datagram(s) addressed off this machine, recorded but not sent)\n",
                 static_cast<unsigned long long>(offMachineSuppressed.load()));
-    if (!cachePath.empty()) DeleteFileA(cachePath.c_str());
+    if (!cachePath.empty()) delete_fixture_file(cachePath);
   }
 };
 
@@ -467,7 +538,7 @@ bool SentTo(PunchHarness* harness, const sockaddr_in& want) {
 // heartbeat in the count is one a punch asked for.
 bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* label,
                        const sockaddr_in* capabilityTarget, uint32_t heartbeatSeconds = 5) {
-  harness->cachePath = exe_directory() + "\\punch-fixture-" + std::string(label) + ".json";
+  harness->cachePath = cache_file("punch-fixture-" + std::string(label) + ".json");
 
   harness->media = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   sockaddr_in bindAddr{};
@@ -539,6 +610,15 @@ bool StartPunchHarness(FakeDirectory& dir, PunchHarness* harness, const char* la
 }  // namespace
 
 int main() {
+  // dirretry r2 (Codex T2): no valid test root, no run -- the caches (and their deletes) go nowhere else.
+  {
+    std::string why;
+    if (!init_cache_root(&why)) {
+      std::printf("FAIL  no test root: %s\n", why.c_str());
+      return 2;
+    }
+    std::printf("test root: %s\n", gCacheRoot.c_str());
+  }
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
     std::printf("FAIL  winsock did not start\n");
@@ -1211,14 +1291,24 @@ int main() {
     // The heartbeat count is a count AT A STAGE: 1 through cycle 3, 2 after cycle 4. (The old form
     // waited for 3 heartbeats and then expected at most 2 -- passing only when its fixed wait ran out
     // in between.)
-    {
-      StagedHost host(dir, "inactive", false, dir.udpPort());
+    for (int slowMs : {0, 17000}) {
+      // dirretry r2 (Codex T1): the second pass is a slow observer -- 17 s (past cycle 4: 401, two skipped cycles, the next ask) between
+      // having cycle 1's record and reading the counters. Without the barrier the loop would be past cycle 4
+      // by then (Codex reproduced it with 17 s: heartbeat count 2 at "cycle 1"); with it, the same counts.
+      const char* tag = slowMs ? "inactive-slow" : "inactive";
+      if (slowMs) dir.Script("/api/host/heartbeat",
+                             {Reply{401, "{\"error\":\"unknown host token\",\"code\":\"account_inactive\"}"},
+                              Reply{200, "{\"ok\":true}"}});
+      const int hb0 = dir.Count("/api/host/heartbeat"), reg0 = dir.Count("/api/host/register");
+      StagedHost host(dir, tag, false, dir.udpPort());
       StagedHost::Cycle c1, c3, c4;
       const bool got1 = host.Wait(1, &c1);
+      if (slowMs) std::this_thread::sleep_for(std::chrono::milliseconds(slowMs));
       check("[inactive] cycle 1 completed", got1, cycle_text(c1));
       check("[inactive] cycle 1: the 401 for an account that is not active -- one heartbeat, one registration, no re-registration",
-            got1 && !c1.heartbeatOk && dir.Count("/api/host/heartbeat") == 1 && dir.Count("/api/host/register") == 1,
-            std::to_string(dir.Count("/api/host/heartbeat")) + "/" + std::to_string(dir.Count("/api/host/register")));
+            got1 && !c1.heartbeatOk && dir.Count("/api/host/heartbeat") - hb0 == 1 && dir.Count("/api/host/register") - reg0 == 1,
+            std::string(tag) + " " + std::to_string(dir.Count("/api/host/heartbeat") - hb0) + "/" +
+                std::to_string(dir.Count("/api/host/register") - reg0));
       check("[inactive] ...it says so in the words the window reads as SIGN IN AGAIN",
             c1.status.find("token rejected") != std::string::npos && c1.status.find("not active") != std::string::npos,
             c1.status);
@@ -1226,14 +1316,15 @@ int main() {
       StagedHost::Cycle c2;
       host.Wait(2, &c2);
       check("[inactive] cycles 2 and 3 wait it out: skipped, and no heartbeat was sent",
-            got3 && c2.skippedInactive && c3.skippedInactive && dir.Count("/api/host/heartbeat") == 1,
-            cycle_text(c3) + " heartbeats=" + std::to_string(dir.Count("/api/host/heartbeat")));
+            got3 && c2.skippedInactive && c3.skippedInactive && dir.Count("/api/host/heartbeat") - hb0 == 1,
+            std::string(tag) + " " + cycle_text(c3) + " heartbeats=" + std::to_string(dir.Count("/api/host/heartbeat") - hb0));
       const bool got4 = host.Wait(4, &c4);
       check("[inactive] cycle 4 asks again: re-enabled, the same token is taken back -- online",
             got4 && c4.heartbeatOk && c4.status.rfind("online", 0) == 0, cycle_text(c4));
       check("[inactive] ...with exactly one more heartbeat and nothing re-registered",
-            dir.Count("/api/host/heartbeat") == 2 && dir.Count("/api/host/register") == 1,
-            std::to_string(dir.Count("/api/host/heartbeat")) + "/" + std::to_string(dir.Count("/api/host/register")));
+            dir.Count("/api/host/heartbeat") - hb0 == 2 && dir.Count("/api/host/register") - reg0 == 1,
+            std::string(tag) + " " + std::to_string(dir.Count("/api/host/heartbeat") - hb0) + "/" +
+                std::to_string(dir.Count("/api/host/register") - reg0));
     }
     dir.Stop();
   }
@@ -1412,20 +1503,26 @@ int main() {
     // observe port is elsewhere). The diagnosis keeps BOTH facts: no advertisement, and that the
     // default timed out. It holds through the cooldown cycles. Then the directory starts advertising,
     // and the cycle that asks again is online on that answer.
-    {
-      StagedHost host(dir, "cached-silent", true, 0);
+    for (int slowMs : {0, 17000}) {
+      // dirretry r2 (Codex T1): the second pass waits 17 s after cycle 2 before installing the advertisement --
+      // past cycle 4, the next health ask. Without the barrier cycle 4 would already have asked (and
+      // been told nothing); with it, the script is in place before cycle 3 starts, as in the fast pass.
+      const char* tag = slowMs ? "cached-silent-slow" : "cached-silent";
+      dir.Script("/healthz", {Reply{200, "{\"ok\":true}"}});
+      const int health0 = dir.Count("/healthz"), hb0 = dir.Count("/api/host/heartbeat"), reg0 = dir.Count("/api/host/register");
+      StagedHost host(dir, tag, true, 0);
       const std::string legacy = "legacy default (port " + std::to_string(host.LegacyPort()) + ") timed out";
       StagedHost::Cycle c1, c2, c4;
       const bool got1 = host.Wait(1, &c1);
-      check("cached-silent: cycle 1 completed", got1, cycle_text(c1));
+      check((std::string(tag) + ": cycle 1 completed").c_str(), got1, cycle_text(c1));
       check("cycle 1: the health route was asked once and said nothing about observations",
-            got1 && c1.healthAsked && c1.health == ObserveHealth::NoAdvertisement && dir.Count("/healthz") == 1,
-            cycle_text(c1) + " healthz=" + std::to_string(dir.Count("/healthz")));
+            got1 && c1.healthAsked && c1.health == ObserveHealth::NoAdvertisement && dir.Count("/healthz") - health0 == 1,
+            std::string(tag) + " " + cycle_text(c1) + " healthz=" + std::to_string(dir.Count("/healthz") - health0));
       check("...the legacy default was still tried (aimed there, probes sent to httpPort+1) and got no answer",
             c1.aim == ObserveAim::LegacyDefault && !c1.observeOk && host.LegacySends() >= 1,
             "legacySends=" + std::to_string(host.LegacySends()));
       check("...so nothing is published and no heartbeat is sent",
-            !c1.heartbeatOk && c1.status.find("public=") == std::string::npos && dir.Count("/api/host/heartbeat") == 0,
+            !c1.heartbeatOk && c1.status.find("public=") == std::string::npos && dir.Count("/api/host/heartbeat") - hb0 == 0,
             c1.status);
       check("...and the status says BOTH: the directory gave no observe address, and the default timed out",
             c1.status.find("does not say where to send address observations") != std::string::npos &&
@@ -1434,10 +1531,12 @@ int main() {
       const int legacyAfter1 = host.LegacySends();
       const bool got2 = host.Wait(2, &c2);
       check("cycle 2 (health cooldown): not asked again, the default tried again, the same two facts",
-            got2 && !c2.healthAsked && dir.Count("/healthz") == 1 && host.LegacySends() > legacyAfter1 &&
+            got2 && !c2.healthAsked && dir.Count("/healthz") - health0 == 1 && host.LegacySends() > legacyAfter1 &&
                 c2.health == ObserveHealth::NoAdvertisement && c2.status == c1.status,
             cycle_text(c2));
-      // Now the directory advertises where observations go; cycle 4 is the next to ask (cooldown 2).
+      // Now the directory advertises where observations go; cycle 4 is the next to ask (cooldown 2). The
+      // loop is held at the end of cycle 2 while this is installed (dirretry r2), however late it comes.
+      if (slowMs) std::this_thread::sleep_for(std::chrono::milliseconds(slowMs));
       dir.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" + std::to_string(dir.udpPort()) + "}}"}});
       const bool got4 = host.Wait(4, &c4);
       check("cycle 4: asked again, the advertisement is used, the observation answers and the heartbeat goes",
@@ -1445,9 +1544,9 @@ int main() {
                 c4.observeOk && c4.heartbeatOk,
             cycle_text(c4));
       check("...online, published, nothing registered (the cached token)",
-            c4.status.find("public=") != std::string::npos && dir.Count("/api/host/register") == 0 &&
-                dir.Count("/api/host/heartbeat") >= 1 && dir.Count("/healthz") == 2,
-            c4.status + " healthz=" + std::to_string(dir.Count("/healthz")));
+            c4.status.find("public=") != std::string::npos && dir.Count("/api/host/register") - reg0 == 0 &&
+                dir.Count("/api/host/heartbeat") - hb0 >= 1 && dir.Count("/healthz") - health0 == 2,
+            std::string(tag) + " " + c4.status + " healthz=" + std::to_string(dir.Count("/healthz") - health0));
     }
     dir.Stop();
   }
