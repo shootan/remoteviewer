@@ -1401,16 +1401,18 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyStart(JNIEnv* e
 }
 
 // [exists, state (StandbyEntryClient::State: 0 Idle, 1 Admitting, 2 Parked, 3 Activating, 4 Active, 5 Unsupported,
-// 6 Waiting), lost count, handed off, needs a capability, tail active, strays] -- r2 D1: the last two are the old
-// session's datagrams the lease still receives (observed) and how many so far
+// 6 Waiting), lost count, handed off, needs a capability, tail active, strays, punches] -- r2 D1: datagrams from the
+// target that are no standby traffic / HelloAck / Punch, still arriving (observed) and how many so far; r3: the host's
+// Punches, counted apart
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyStatus(JNIEnv* env, jobject /* this */, jstring key) {
   auto* r = standby_runner();
   const auto st = r ? r->StatusOf(jstring_to_string(env, key)) : remote60::native_poc::StandbyRunner::Status{};
-  const jlong v[7] = {st.exists ? 1 : 0, static_cast<jlong>(st.state), static_cast<jlong>(st.lost), st.handedOff ? 1 : 0,
-                      st.needsCapability ? 1 : 0, st.tailActive ? 1 : 0, static_cast<jlong>(st.strays)};
-  jlongArray out = env->NewLongArray(7);
-  if (out) env->SetLongArrayRegion(out, 0, 7, v);
+  const jlong v[8] = {st.exists ? 1 : 0, static_cast<jlong>(st.state), static_cast<jlong>(st.lost), st.handedOff ? 1 : 0,
+                      st.needsCapability ? 1 : 0, st.tailActive ? 1 : 0, static_cast<jlong>(st.strays),
+                      static_cast<jlong>(st.punches)};
+  jlongArray out = env->NewLongArray(8);
+  if (out) env->SetLongArrayRegion(out, 0, 8, v);
   return out;
 }
 
@@ -1446,6 +1448,15 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyRelease(JNIEnv*
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyReleaseAll(JNIEnv* /* env */, jobject /* this */) {
   if (auto* r = standby_runner()) r->ReleaseAll();
+}
+
+// r3 (Codex codex_ka_e_src_r2.md R2): one app screen's leases (its key prefix) and no other -- the runner is the
+// process's, the screens come and go. How many went.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyReleaseOwner(JNIEnv* env, jobject /* this */,
+                                                                             jstring prefix) {
+  auto* r = standby_runner();
+  return r ? static_cast<jint>(r->ReleaseWhere(jstring_to_string(env, prefix))) : 0;
 }
 
 // keepalive-r2 ② e (kept model A, codex_keepalive_r2_kept_model.md): a tap on a PC whose lease is ready -- this NEW

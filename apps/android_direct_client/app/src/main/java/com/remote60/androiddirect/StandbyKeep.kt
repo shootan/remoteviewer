@@ -31,9 +31,10 @@ object StandbyKeep {
     }
 
     /**
-     * nativeStandbyStatus: [exists, state, lost, handedOff, needsCapability, tailActive, strays]. r2 D1 (Codex
-     * codex_ka_e_src_r1.md): [tailActive] = the old session's datagrams still reach the lease (what the host still sends
-     * it, observed), [strays] = how many so far (the tail's cost, counted apart).
+     * nativeStandbyStatus: [exists, state, lost, handedOff, needsCapability, tailActive, strays, punches]. r2 D1 (Codex
+     * codex_ka_e_src_r1.md): [tailActive] = datagrams from the target that are no standby traffic, HelloAck or Punch
+     * still reach the lease (observed -- not a proof the host's grant ended, not a count of video), [strays] = how many
+     * so far. r3 (codex_ka_e_src_r2.md D1): [punches] = the host's Punches, counted apart (r2 counted them as strays).
      */
     data class Lease(
         val exists: Boolean,
@@ -43,13 +44,15 @@ object StandbyKeep {
         val needsCapability: Boolean,
         val tailActive: Boolean = false,
         val strays: Long = 0L,
+        val punches: Long = 0L,
     ) {
         companion object {
             val NONE = Lease(false, LeaseState.IDLE, 0L, false, false)
             fun of(v: LongArray?): Lease {
                 if (v == null || v.size < 5 || v[0] == 0L) return NONE
                 return Lease(true, LeaseState.of(v[1]), v[2], v[3] != 0L, v[4] != 0L,
-                    tailActive = v.size > 5 && v[5] != 0L, strays = if (v.size > 6) v[6] else 0L)
+                    tailActive = v.size > 5 && v[5] != 0L, strays = if (v.size > 6) v[6] else 0L,
+                    punches = if (v.size > 7) v[7] else 0L)
             }
         }
     }
@@ -164,6 +167,14 @@ object StandbyKeep {
 
     /** The native runner's key of a PC. */
     fun nativeKey(key: RecentHosts.Key): String = SessionPark.entryKey(key.directoryOrigin, key.accountId, key.hostId)
+
+    /**
+     * r3 (Codex codex_ka_e_src_r2.md R2): the native runner is one per process, an app screen (Activity) is not. Each
+     * screen is an owner with its own key prefix ("o<n>|", n never reused in this process); its leases are keyed under
+     * it and its cleanup releases that prefix only -- a late cleanup of an old screen never takes the new screen's leases.
+     */
+    fun ownerPrefix(n: Long): String = "o$n|"
+    fun ownerKey(ownerPrefix: String, key: RecentHosts.Key): String = ownerPrefix + nativeKey(key)
 
     /**
      * The leases of this sign-in and their incarnations (one counter for all: a number is never reused). A capability

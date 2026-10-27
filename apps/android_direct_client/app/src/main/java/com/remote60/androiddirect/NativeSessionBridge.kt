@@ -250,6 +250,8 @@ object NativeSessionBridge {
     external fun nativeStandbyProvide(key: String, token: String, ip: String, port: Int): Boolean
     external fun nativeStandbyRelease(key: String)
     external fun nativeStandbyReleaseAll()
+    // r3 R2: the leases whose key starts with [prefix] (one app screen's) -- no other
+    external fun nativeStandbyReleaseOwner(prefix: String): Int
     /**
      * keepalive-r2 ② e (kept model A): the reserved entry [handle]'s session by the ready lease [key]'s activation,
      * under connect operation [op]. The generation it made (0 = none: nativeDirectoryLastError says why). Off the UI thread.

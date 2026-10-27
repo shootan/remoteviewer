@@ -66,6 +66,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // r2 M1: how long a started connect may take to be established before it is given back (its own Hello /
         // control timeouts normally end it sooner)
         private const val ESTABLISH_LIMIT_MS = 20_000L
+        // r3 R2: each Activity is one owner of standby leases in this process's native runner (never reused)
+        private val STANDBY_OWNERS = java.util.concurrent.atomic.AtomicLong()
         private const val ZONE_IDLE_ALPHA = 0.85f
         private const val LOG_TAG = "remote60_android_direct"
         // Windows promotes a second press to a double-click only inside SM_CXDOUBLECLK (4px)
@@ -1333,6 +1335,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // may wait (start, observe, the standby connect, release) run on their own thread in order -- never on the UI
     // thread, never queued behind a tap's connect on directoryExecutor.
     private val standbyBook = StandbyKeep.Book()
+    // r3 (Codex codex_ka_e_src_r2.md R2): this screen's own key prefix in the process's runner -- every native standby
+    // call goes through standbyKey(), and this screen's cleanup releases this prefix only (a late one never takes the
+    // leases of the screen after it)
+    private val standbyOwner = StandbyKeep.ownerPrefix(STANDBY_OWNERS.incrementAndGet())
+    private fun standbyKey(key: RecentHosts.Key): String = StandbyKeep.ownerKey(standbyOwner, key)
     private var standbyLeases: Map<RecentHosts.Key, StandbyKeep.Lease> = emptyMap()
     private val standbyHandles = HashMap<Long, RecentHosts.Key>()
     private var standbySupport = DirectoryClient.StandbySupport.NONE
@@ -1357,9 +1364,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     // the directory connect in progress (its entry is reserved, not yet up)
     private var connectingHandle = 0L
     // r2 M1: a connect whose worker started, waiting for its session to be established before it is committed
+    // r3 R3 (Codex codex_ka_e_src_r2.md): preparedReturn = the user went back to a PC on standby -- its activation, or
+    // that same tap's own ordinary fallback (whatever path it took): the clipboard starts from a baseline, as back from
+    // standby. A separate cold connect the user asked for starts fresh, as before.
     private data class PendingCommit(
         val handle: Long, val op: Long, val gen: Long, val epoch: Long, val startedAtMs: Long,
-        val pathKind: String, val manual: Boolean,
+        val pathKind: String, val manual: Boolean, val preparedReturn: Boolean = false,
     )
     private var pendingCommit: PendingCommit? = null
     private var keptCardsShown = ""
@@ -2621,16 +2631,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         desiredStreamActive = false
         lastAppliedStreamActive = null
         // r2 N3 (clipboard r3): back from standby, what the phone holds is this new binding's baseline -- not sent; if it
-        // cannot be read, nothing is pushed until a real change. A cold connect starts as before.
-        when (val c = StandbyKeep.clipboardOnStart(p.pathKind == "standby", if (p.pathKind == "standby") readLocalClipboardText() else null)) {
+        // cannot be read, nothing is pushed until a real change. A cold connect starts as before. r3 R3: "back from
+        // standby" is the user's return (preparedReturn), not the path it took -- its ordinary fallback is one too.
+        val returning = p.preparedReturn || p.pathKind == "standby"
+        when (val c = StandbyKeep.clipboardOnStart(returning, if (returning) readLocalClipboardText() else null)) {
             is StandbyKeep.ClipboardStart.Seed -> {
                 clipboardResumeHold = false
                 NativeSessionBridge.nativeSeedClipboardBaseline(activeBinding, c.text)
-                diagnosticsLog.log("clipboard_baseline", "start=seed units=${c.text.length} handle=${p.handle}")
+                diagnosticsLog.log("clipboard_baseline", "start=seed units=${c.text.length} handle=${p.handle} path=${p.pathKind}")
             }
             StandbyKeep.ClipboardStart.Hold -> {
                 clipboardResumeHold = true
-                diagnosticsLog.log("clipboard_baseline", "start=hold handle=${p.handle}")
+                diagnosticsLog.log("clipboard_baseline", "start=hold handle=${p.handle} path=${p.pathKind}")
             }
             StandbyKeep.ClipboardStart.Fresh -> clipboardResumeHold = false
         }
@@ -2923,6 +2935,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun forgetKept(handle: Long) {
+        // r3 R1 (Codex codex_ka_e_src_r2.md): a "PC 목록" still fencing this entry goes with it -- its end never runs
+        // later (it would start a lease for a PC the user let go)
+        listReturnEnds.remove(handle)?.let { diagnosticsLog.log("list_return_dropped", "handle=$handle host=${it.key?.hostId.orEmpty()}") }
         kept.remove(handle)
         entryOps.drop(handle)
         standbyHandles.remove(handle)
@@ -2952,6 +2967,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Every PC kept and the one on screen end (sign-out, refused session, exit, disconnect all): a new epoch. */
     private fun endAllKept(reason: String) {
         heldTap = null
+        // r3 R1: every "PC 목록" still fencing goes too (the native end-all below ends their sessions) -- none of them
+        // starts a lease afterwards, under this owner or the next sign-in
+        if (listReturnEnds.isNotEmpty()) {
+            diagnosticsLog.log("list_return_dropped", "all=${listReturnEnds.size} reason=$reason")
+            listReturnEnds.clear()
+        }
         for (h in entryOps.handles()) entryOps.invalidate(h)
         val epoch = NativeSessionBridge.nativeEndAll(reason)
         diagnosticsLog.log("keep_end_all", "reason=$reason epoch=$epoch kept=${kept.size}")
@@ -3085,7 +3106,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             StandbyKeep.ListReturn.BACK_TO_STANDBY -> diagnosticsLog.log("standby_return", "host=${rk?.hostId.orEmpty()}")
             StandbyKeep.ListReturn.FIRST_TRANSITION -> {
                 diagnosticsLog.log("standby_first_transition", "host=${rk?.hostId.orEmpty()} new_directory_requests=1")
-                rk?.let { startStandby(it, "first_transition") }
+                rk?.let { startStandby(it, "first_transition") }  // r3 R1: startStandby checks owner / sign-in / 끊기
             }
             StandbyKeep.ListReturn.UNSUPPORTED_END -> {
                 diagnosticsLog.log("standby_unsupported_end", "host=${end.hostName}")
@@ -3122,14 +3143,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun otherActiveSessions(): Int = if (activeHandle != 0L && standbyHandles[activeHandle] == null) 1 else 0
 
     private fun startStandby(key: RecentHosts.Key, reason: String) {
-        if (standbyBook.has(key) || !ensureStandbyInit()) return
+        if (standbyBook.has(key)) return
+        // r3 R1 (Codex codex_ka_e_src_r2.md): a lease only for this live screen, the sign-in it belongs to, and a PC the
+        // user has not let go (끊기) -- whatever asked for it (a list return's end, the app's own preparation)
+        val why = when {
+            isDestroyed || isFinishing -> "owner_ended"
+            DirectoryClient.session().isEmpty() || key.accountId != DirectoryClient.sessionAccount() ||
+                key.directoryOrigin != directoryOrigin() -> "not_this_sign_in"
+            keepSuppression.isSuppressed(key) -> "let_go"
+            else -> null
+        }
+        if (why != null) {
+            diagnosticsLog.log("standby_start_skipped", "host=${key.hostId} reason=$reason why=$why")
+            return
+        }
+        if (!ensureStandbyInit()) return
         if (!StandbyKeep.mayStart(standbyBook.keys().size, otherActiveSessions())) {
             diagnosticsLog.log("standby_start_skipped",
                 "host=${key.hostId} reason=$reason why=limit leases=${standbyBook.keys().size} other=${otherActiveSessions()}")
             return
         }
         val inc = standbyBook.begin(key)
-        val nk = StandbyKeep.nativeKey(key)
+        val nk = standbyKey(key)
         diagnosticsLog.log("standby_start", "host=${key.hostId} inc=$inc reason=$reason leases=${standbyBook.keys().size}")
         standbyExecutor.execute {
             if (!standbyBook.isCurrent(key, inc)) return@execute
@@ -3146,7 +3181,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         standbyBook.end(key)
         standbyLeases = standbyLeases - key
         diagnosticsLog.log("standby_release", "host=${key.hostId} reason=$reason")
-        val nk = StandbyKeep.nativeKey(key)
+        val nk = standbyKey(key)
         standbyExecutor.execute { NativeSessionBridge.nativeStandbyRelease(nk) }
         hostListAdapter.notifyDataSetChanged()
     }
@@ -3156,8 +3191,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         standbyLeases = emptyMap()
         standbyHandles.clear()
         if (!standbyInitDone) return
-        diagnosticsLog.log("standby_release_all", "reason=$reason leases=${keys.size}")
-        standbyExecutor.execute { NativeSessionBridge.nativeStandbyReleaseAll() }
+        diagnosticsLog.log("standby_release_all", "reason=$reason leases=${keys.size} owner=$standbyOwner")
+        val owner = standbyOwner
+        standbyExecutor.execute {
+            val gone = NativeSessionBridge.nativeStandbyReleaseOwner(owner)
+            diagnosticsLog.log("standby_release_owner", "owner=$owner released=$gone")
+        }
     }
 
     /**
@@ -3175,7 +3214,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val next = HashMap<RecentHosts.Key, StandbyKeep.Lease>()
         var cardsChanged = false
         for (key in keys) {
-            val lease = StandbyKeep.Lease.of(NativeSessionBridge.nativeStandbyStatus(StandbyKeep.nativeKey(key)))
+            val lease = StandbyKeep.Lease.of(NativeSessionBridge.nativeStandbyStatus(standbyKey(key)))
             val before = standbyLeases[key]
             if (before == null || before.state != lease.state || before.handedOff != lease.handedOff || before.lost != lease.lost) {
                 diagnosticsLog.log("standby_state",
@@ -3194,10 +3233,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             next[key] = lease
             if (before?.handedOff == true && !lease.handedOff) {
                 // r2 D1 cost: what of the old session had already reached the lease when it took its socket back
-                diagnosticsLog.log("standby_back", "host=${key.hostId} strays=${lease.strays} tail=${lease.tailActive}")
+                diagnosticsLog.log("standby_back",
+                    "host=${key.hostId} strays=${lease.strays} punches=${lease.punches} tail=${lease.tailActive}")
             }
             if (before?.tailActive == true && !lease.tailActive) {
-                diagnosticsLog.log("standby_tail_quiet", "host=${key.hostId} strays=${lease.strays}")
+                diagnosticsLog.log("standby_tail_quiet", "host=${key.hostId} strays=${lease.strays} punches=${lease.punches}")
             }
             if (lease.tailActive != (before?.tailActive == true)) cardsChanged = true
             if (lease.exists && lease.needsCapability && !lease.handedOff) requestStandbyCapability(key, now)
@@ -3229,7 +3269,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val url = DirectoryClient.directoryUrl
         val token = DirectoryClient.session()
         val endpoint = directoryObserveEndpoint
-        val nk = StandbyKeep.nativeKey(key)
+        val nk = standbyKey(key)
         diagnosticsLog.log("standby_capability_begin", "host=${key.hostId} inc=$inc")
         standbyExecutor.execute {
             var ok = false
@@ -3308,7 +3348,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val t0 = SystemClock.elapsedRealtime()
         startTargetsReadyWatch("standby", t0)
         val op = entryOps.begin(handle)
-        val nk = StandbyKeep.nativeKey(rk)
+        val nk = standbyKey(rk)
         diagnosticsLog.log("standby_activate",
             "host=${host.hostName} id=${host.hostId} handle=$handle op=$op " + NativeSessionBridge.nativeSessionCounters(handle))
         Thread {
@@ -3319,7 +3359,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val mine = entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch
                 if (gen != 0L && mine) {
                     diagnosticsLog.log("directory_connect_started", "handle=$handle op=$op gen=$gen standby=1")
-                    pendingCommit = PendingCommit(handle, op, gen, epoch, t0, "standby", manual = false)
+                    pendingCommit = PendingCommit(handle, op, gen, epoch, t0, "standby", manual = false, preparedReturn = true)
                     tryCommit()
                     return@runOnUiThread
                 }
@@ -3332,7 +3372,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 setDirectoryBusy(false)
                 directoryConnectingName = ""
                 releaseStandby(rk, "activate_failed")
-                connectToDirectoryHost(host, TapIntent.RETRY)
+                connectToDirectoryHost(host, TapIntent.RETRY, preparedReturn = true)  // r3 R3: still the return
             }
         }.start()
     }
@@ -5612,7 +5652,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** r2 N1: who asks -- the user's own tap, a held tap carried out, or the one ordinary retry of a failed activation. */
     private enum class TapIntent { USER, HELD, RETRY }
 
-    private fun connectToDirectoryHost(host: DirectoryClient.Host, intent: TapIntent = TapIntent.USER) {
+    private fun connectToDirectoryHost(
+        host: DirectoryClient.Host, intent: TapIntent = TapIntent.USER, preparedReturn: Boolean = false,
+    ) {
+        var returning = preparedReturn
         val account = DirectoryClient.sessionAccount()
         val origin = directoryOrigin()
         val key = SessionPark.entryKey(origin, account, host.hostId)
@@ -5667,7 +5710,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("standby_tap_held", "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()} seq=$tapSeq")
                 return
             }
-            is StandbyKeep.Tap.Cold -> if (st.releaseFirst) releaseStandby(rk, "cold_tap")
+            is StandbyKeep.Tap.Cold -> if (st.releaseFirst) {
+                releaseStandby(rk, "cold_tap")
+                // r3 R3: this PC was on standby (its lease not ready yet) -- the user goes back to it: a return
+                returning = true
+            }
         }
         // a PC still in the native table decides next -- before "offline", since the list's online flag lags the
         // connection this phone already holds.
@@ -5854,7 +5901,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // made) only once its Hello is answered and control is up; until then nothing kept is touched.
                     diagnosticsLog.log("directory_connect_started", "handle=$handle op=$op gen=$madeGeneration")
                     pendingCommit = PendingCommit(handle, op, madeGeneration, epoch, SystemClock.elapsedRealtime(),
-                        pathKind, manual = false)
+                        pathKind, manual = false, preparedReturn = returning)
                     tryCommit()
                 }
             } catch (e: Exception) {
@@ -5950,6 +5997,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 val h = keptEntry?.handle ?: return@setOnClickListener
                 diagnosticsLog.log("park_disconnect_tap", "handle=$h host=${host.hostName}")
+                // r3 R1: its 끊기 lets this PC go -- not kept automatically again (as a lease's 끊기)
+                keepSuppression.suppress(rk)
                 entryOps.invalidate(h)
                 NativeSessionBridge.nativeEnd(h, "user_disconnect")
                 forgetKept(h)

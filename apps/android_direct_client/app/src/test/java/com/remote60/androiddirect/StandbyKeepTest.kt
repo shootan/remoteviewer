@@ -214,6 +214,27 @@ class StandbyKeepTest {
     }
 
     @Test
+    fun punchesAreReadApartFromStrays() {
+        // r3 D1: the 8th element is the host's Punches; a 7-element status reads none
+        val l = StandbyKeep.Lease.of(longArrayOf(1, 2, 0, 0, 0, 0, 3, 25))
+        assertEquals(3L, l.strays)
+        assertEquals(25L, l.punches)
+        assertFalse(l.tailActive)
+        assertEquals(0L, StandbyKeep.Lease.of(longArrayOf(1, 2, 0, 0, 0, 1, 40)).punches)
+    }
+
+    @Test
+    fun eachOwnerHasItsOwnKeyPrefix() {
+        // r3 R2: owner 1's prefix never matches owner 10's keys
+        val a = StandbyKeep.ownerKey(StandbyKeep.ownerPrefix(1), k("A"))
+        val b = StandbyKeep.ownerKey(StandbyKeep.ownerPrefix(10), k("A"))
+        assertTrue(a.startsWith(StandbyKeep.ownerPrefix(1)))
+        assertFalse(b.startsWith(StandbyKeep.ownerPrefix(1)))
+        assertTrue(a != b)
+        assertEquals(StandbyKeep.nativeKey(k("A")), a.removePrefix(StandbyKeep.ownerPrefix(1)))
+    }
+
+    @Test
     fun activePlusStandbyAreAtMostThree() {
         // N4: three leases, then an ordinary / raw-IP session is committed: the least recent lease goes
         val leases = listOf(k("A"), k("B"), k("C"))
