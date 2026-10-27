@@ -1888,6 +1888,11 @@ target_link_libraries(remote60_host_standby_table_test PRIVATE ws2_32)  # r3: th
 # keepalive-r2 ② (a, b): the client side of a standby entry -- a pure state machine and the durable generation counter.
 add_executable(remote60_standby_entry_client_test src/standby_entry_client_test.cpp)
 target_include_directories(remote60_standby_entry_client_test PRIVATE src)
+# keepalive-r2 ② r3 (Codex scope2 N1, N2): the lease and the runner against a fake host on loopback -- the activation's
+# HelloAck test and the lifetime counterexamples (no product process).
+add_executable(remote60_standby_lease_test src/standby_lease_test.cpp)
+target_include_directories(remote60_standby_lease_test PRIVATE src)
+target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
 add_executable(remote60_host_standby_admission_e2e_test
   src/host_standby_admission_e2e_test.cpp
   src/native_video_client_shared_core.cpp
