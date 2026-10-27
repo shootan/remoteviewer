@@ -13590,3 +13590,10 @@ Next
 - 후보 APK(seam 없는 assembleDebug, 기존 게시와 같은 debug 키): 13,885,960 B sha256 d5506f67…9e029f75, 인증서 SHA-256 dcc806ae…ec2990(0.2.31 과 일치), com.remote60.androiddirect, 4 ABI, minSdk 28 / target 34, gate --apk 7/0, 단위 257/0, AVD smoke(ua2, 같은 APK) 13/0.
 - 상태: 후보. 서명된 android.manifest·게시·push 없음(검증용).
 - 제품/테스트/문서: 제품(APK 버전), 문서(이 항목).
+
+### 2026-10-27 APK 0.2.32 게시 (NAS, 검증용)
+- 빌드: fix/apk-prelogin-select b554e76(제품 SOURCE OK — picker 9afcec7·UA-2 482a901·SH d29a034), main 병합 0baf28c(apps/libs = 브랜치 그대로). APK `GNLink-0.2.32.apk` 13,990,300 B sha256 `1a3eee63a992371f7ad455deedfabbc0e0b627c1c7432fa9f9251b8183d815ab`, versionName 0.2.32 / versionCode 31, 4 ABI, 서명자 dcc806ae(0.2.31 과 같음).
+- 담은 것: ① 휴대폰이 로그인 전 화면 PC 에서 바탕화면을 고르면 표시(공용 세션 로컬 선택) ② 선명도 강하게 0.35→0.60, 선명화 방식 '화면 크기(실험)'(기본 끔) ③ 캡처 방식 선택은 이 PC 의 이번 연결에만 — 저장값 자동 재전송 중단, 요청/실제 적용 구분 표시(PC 0.2.163 의 90 상태 응답). GDI 버튼이 08-03 이후 Host 에 닿지 않던 결함도 수정.
+- 검증용 독립(`.claude/verify_0232/VERIFY_0232_FINAL.md`, 같은 해시): 실 APK UI × 로그인 전 역할 시험 Host 15/15, tripwire 3/3, 일반 Host 부정 대조 기대 FAIL, UA-2 9·13, 설정 16, B layout 47, strength 35·compare 26·touch 36·latency 6, --android-select 37, picker 60, gate 7/54, 통제 스크롤 연속 출력 정성 관찰(AVD·재압축 한계 명시). Codex EVIDENCE OK(`codex_apk0232_evidence_final.md`).
+- 서명 android.manifest `e4f046d5…`·sig `090ca467…`(JS verifier PASS, 1바이트 변조 거부; C++ verifier 는 Windows 전용이라 arm64 를 WrongPlatform 으로 거부 — 0.2.31 게시본도 같음). `gnlink_deploy.sh --platform android` dry-run → 실게시 rc 0, 백업 0.2.31 pair(309a9c5e/cbb5b7d6), https 익명 APK 해시 일치(직접 curl), windows 0.2.163 pair(6d89ae48/57d1d2ca) 불변.
+- 실기 대기: 휴대폰 업데이트 → 로그인 전 화면 PC 바탕화면 선택, 선명도 강하게/화면 크기 체감·발열, 캡처 방식 표시. 하네스 H1(새 하네스의 adb rm /sdcard 정리)은 후속 실행 전 수정 — ledger.
