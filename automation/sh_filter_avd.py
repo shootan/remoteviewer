@@ -178,19 +178,23 @@ def log_lines(tag_filter=None):
 
 # ---------------------------------------------------------------- host + pattern
 class Fixture:
-    def __init__(self, host_exe, out, static, input_log=None, layered_size=None, pulse_ms=200, host_args=(), host_env=None):
+    def __init__(self, host_exe, out, static, input_log=None, layered_size=None, pulse_ms=200, host_args=(), host_env=None,
+                 scroll=False):
         self.out = out
         self.port = free_udp_port()
         self.control_port = free_tcp_port()  # manual connect uses a TCP control link (loopback only)
         # sh-strength r2: layered_size=(w, h) -> the pattern is a LAYERED window outside every monitor (it covers
         # nothing on this PC's screen); the APK must pick it as a window (WGC).
         self.pattern_log = open(os.path.join(out, 'pattern.log'), 'wb')
+        # apk-0232 E1: the pattern scrolls while this file exists (sh_pattern_window.ps1 -ScrollFile)
+        self.scroll_file = os.path.join(os.path.abspath(out), 'scroll_on') if scroll else None
         self.pattern = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                                          os.path.join(HERE, 'sh_pattern_window.ps1'), '-Seconds', '1800']
                                         + (['-Static'] if static else [])
                                         + (['-InputLog', input_log] if input_log else [])
                                         + (['-Layered', '-Width', str(layered_size[0]), '-Height', str(layered_size[1]),
-                                            '-PulseMs', str(pulse_ms)] if layered_size else []),
+                                            '-PulseMs', str(pulse_ms)] if layered_size else [])
+                                        + (['-ScrollFile', self.scroll_file, '-ScrollPx', '4'] if scroll else []),
                                         stdout=self.pattern_log, stderr=subprocess.STDOUT)
         time.sleep(3)
         stage = os.path.join(out, 'host')
@@ -1439,6 +1443,69 @@ def scenario_prelogin_tripwire(fx, out):
     check('tcp client disconnected' in hlog(), 'TRIPWIRE: ...and the link is closed (not answered)')
 
 
+def scenario_scroll_shimmer(fx, out):
+    """apk-0232 E1 (Codex codex_apk0232_evidence_final.md): the phone's FINAL OUTPUT while the picture scrolls -- for a
+    person to look at, not a score. The off-screen layered pattern (thin text, 1-px lines, checkerboard) scrolls up
+    4 px per 33 ms tick while a file exists; every source picture carries its number (digits + 16 stripes, bottom right)
+    and is logged (pattern.log "scroll frame=..."). The candidate APK as shipped, one connection, four settings in turn:
+    끄기 / 약하게 0.20 / 강하게 0.60 (A, 기본) / 화면 크기 (실험) 0.60 (B, through the normal settings). Each: 4 s of
+    adb screenrecord of the phone's display (shimmer_<name>.mp4) while it scrolls, one still after, the source frame
+    range and what the app logged about its drawing path. Nothing is judged here beyond 'it was recorded'."""
+    segs = [('off', 'off', None), ('A_weak_s20', 'weak', None), ('A_strong_s60', 'strong', None),
+            ('B_display_s60', 'strong', 'display')]
+    ok = connect_to_pattern(fx.port, level_before='off', window=True)
+    check(ok, 'connected (끄기), the pattern window shown')
+    time.sleep(4)
+    summary = []
+    for name, level, method in segs:
+        if method == 'display':
+            to_list()
+            settings_method('settingsSharpMethodDisplayButton')
+            check(pick_pattern_again(), name + ': back in the viewer with 화면 크기 (실험)')
+            time.sleep(5)
+        else:
+            choose_level(level)
+            time.sleep(4)
+        state = [l[l.index('[sharpen_'):][:120] for l in log_lines() if '[sharpen_path]' in l or '[sharpen_display_pass]' in l]
+        adb('logcat', '-c', check_rc=False)
+        before = open(os.path.join(out, 'pattern.log'), 'rb').read().decode(errors='replace')
+        open(fx.scroll_file, 'w').close()
+        time.sleep(0.5)  # the scroll is running before the recording starts
+        dev = '/sdcard/shimmer_%s.mp4' % name
+        t0 = time.time()
+        adb('shell', 'screenrecord', '--time-limit', '4', dev, check_rc=False, timeout=30)
+        t1 = time.time()
+        # two stills of the phone's output 0.3 s apart, still scrolling: the output really moves (and two frames to open)
+        s1 = screencap(os.path.join(out, 'shimmer_%s_still1.png' % name))
+        time.sleep(0.3)
+        s2 = screencap(os.path.join(out, 'shimmer_%s_still2.png' % name))
+        moved = float(np.abs(s1.astype(np.float64) - s2.astype(np.float64)).mean())
+        os.remove(fx.scroll_file)  # the harness's own flag file, inside this run's output folder
+        time.sleep(0.5)
+        local = os.path.join(out, 'shimmer_%s.mp4' % name)
+        adb('pull', dev, local, check_rc=False, timeout=60)
+        adb('shell', 'rm', '-f', dev, check_rc=False)  # the AVD's own scratch file
+        screencap(os.path.join(out, 'shimmer_%s_after.png' % name))
+        after = open(os.path.join(out, 'pattern.log'), 'rb').read().decode(errors='replace')
+        frames = [int(m) for m in re.findall(r'scroll frame=(\d+)', after[len(before):])]
+        lines = log_lines()
+        path = state[-2:] + [l[l.index('[sharpen_'):][:120] for l in lines if '[sharpen_path]' in l or '[sharpen_display_pass]' in l]
+        size = os.path.getsize(local) if os.path.exists(local) else 0
+        rec = {'segment': name, 'level': level, 'method': method or 'default', 'mp4': os.path.basename(local), 'bytes': size,
+               'recordSeconds': round(t1 - t0, 2), 'sourceFrames': [frames[0], frames[-1]] if frames else None,
+               'sourceFrameCount': len(frames), 'sourceFps': round(len(frames) / max(0.1, t1 - t0 + 1.0), 1),
+               'appPathLog': path[-3:], 'outputMovedMeanAbs': round(moved, 2)}
+        summary.append(rec)
+        print('      %s' % json.dumps(rec, ensure_ascii=False), flush=True)
+        check(size > 20000 and frames and moved > 1.0,
+              name + ': recorded while the source scrolled (mp4, its source frame range, the output moving between two stills)',
+              '%d bytes, frames %s, moved %.2f' % (size, rec['sourceFrames'], moved))
+    to_list()
+    settings_method('settingsSharpMethodDefaultButton')  # leave the app's choice as it was (기본)
+    with open(os.path.join(out, 'shimmer_summary.json'), 'w', encoding='utf-8') as fh:
+        json.dump(summary, fh, ensure_ascii=False, indent=1)
+
+
 def scenario_ua2_desktop(fx, out):
     """ua2-apk r3 (Codex codex_ua2_apk_src_r2.md N1, the desktop target): the settings line through the real APK UI
     while the DESKTOP is captured (DXGI at the test host) -- the host's own state first (no request: "지금 바탕화면
@@ -2156,9 +2223,10 @@ def main():
     # The shader fixture needs no host, no picture of this PC and no window on its screen.
     input_log = os.path.join(os.path.abspath(args.out), 'pattern_input.txt') if args.scenario in ('touch_host', 'touch_ab', 'layout_b') else None
     fx = None if args.scenario in ('shader', 'strength_ab') else Fixture(args.host_exe, args.out, static=args.scenario == 'race',
-                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui', 'layout_b', 'ua2_desktop', 'prelogin_ui', 'prelogin_ui_control', 'prelogin_tripwire') else None,
+                                                                      layered_size=(1440, 810) if args.scenario in ('compare_ab', 'latency_ab', 'touch_ab', 'ua2', 'ua2_old', 'method_ui', 'layout_b', 'ua2_desktop', 'prelogin_ui', 'prelogin_ui_control', 'prelogin_tripwire', 'scroll_shimmer') else None,
                                                                       pulse_ms=33 if args.scenario == 'latency_ab' else 200,
                                                         input_log=input_log,
+                                                        scroll=args.scenario == 'scroll_shimmer',
                                                         # evidence A: the source fixed from startup (no WindowSelect needed),
                                                         # the logon-screen role for prelogin_ui only (the control: an ordinary host)
                                                         host_args=(('--capture-window-title', PATTERN_TITLE)
@@ -2198,6 +2266,8 @@ def main():
             scenario_ua2(fx, args.out)
         elif args.scenario == 'ua2_desktop':
             scenario_ua2_desktop(fx, args.out)
+        elif args.scenario == 'scroll_shimmer':
+            scenario_scroll_shimmer(fx, args.out)
         elif args.scenario == 'prelogin_ui':
             scenario_prelogin_ui(fx, args.out)
         elif args.scenario == 'prelogin_tripwire':
