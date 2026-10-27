@@ -98,6 +98,14 @@ void close_session_window(ViewerContext& ctx) {
 
 void log(const std::string& line) { std::cout << "[viewer][standby] " << line << std::endl; }
 
+// How long after an activation's session ended this viewer still says "returning", not "ready". The Host ends a
+// session when its control channel has been silent for 10 s (host_startup_control.cpp, UdpControlLink 10000) --
+// the viewer's leaving is not announced -- and until then it still counts this device's entry as holding the
+// session: a Release is refused (Live), a new admission of this device is Busy. A Pong only says the entry is
+// alive, never that the grant is back (Codex model A), so "ready" is not claimed before the Host can have seen the
+// end. A tap during "returning" still works: an activation with a newer generation is the device taking it back.
+constexpr uint64_t kReturningMs = 12000;
+
 }  // namespace
 
 int run_managed_standby(const std::function<bool(ViewerContext&)>& load, const std::function<int(ViewerContext&)>& run) {
@@ -204,10 +212,12 @@ int run_managed_standby(const std::function<bool(ViewerContext&)>& load, const s
 
   std::string lastState;
   uint64_t lastStateAt = 0;
+  uint64_t returningUntil = 0;
   std::string exitReason;
   auto publish = [&](bool force) {
     const StandbyRunner::Status s = runner.StatusOf(key);
-    const std::string name = state_name(s);
+    std::string name = state_name(s);
+    if (name == "ready" && mono_ms() < returningUntil) name = "returning";
     if (!force && name == lastState && mono_ms() - lastStateAt < 2000) return;
     Message m = stamped(Type::State);
     m.fields["state"] = name;
@@ -291,14 +301,15 @@ int run_managed_standby(const std::function<bool(ViewerContext&)>& load, const s
       }
     });
     log("activation op=" + op);
-    const int rc = run(*ctx);
+    const int rc = run(*ctx);  // run_session closes and drains the session's window on every way out
     over.store(true);
     watcher.join();
-    close_session_window(*ctx);
+    close_session_window(*ctx);  // a second, harmless pass (nothing left after run_session)
     // The session's threads have joined (run returned after shutdown_viewer): the lease takes its socket back.
     const bool taken = ctx->standbyTaken;
     if (taken) {
       runner.SessionOver(key, leaseOp);
+      returningUntil = mono_ms() + kReturningMs;
     } else {
       runner.Abandon(key, leaseOp, &args);
     }

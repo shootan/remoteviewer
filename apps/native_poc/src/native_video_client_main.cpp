@@ -25,7 +25,7 @@ namespace {
 // viewer activates its lease again after a park). Everything a session creates (its window, toolbar, decoder,
 // MF, threads, sockets) is created and torn down inside; the process-wide state it touches is reset at the
 // start of the next one (create_window, session_toolbar_destroy).
-int run_session(ViewerContext& ctx) {
+int run_session_body(ViewerContext& ctx) {
   if (const int rc = create_window_and_toolbar(ctx)) return rc;
   if (const int rc = init_decoder(ctx)) return rc;
 
@@ -152,6 +152,27 @@ int run_session(ViewerContext& ctx) {
   shutdown_viewer(ctx);
   std::cout << "[native-video-client] done\n";
   return ctx.session.recoveryExitCode.load();
+}
+
+// ka-pc-impl r1: a session that ended without its window's X (--seconds, the host gone, a takeover, a failed
+// connect) left its window: in a process that then ended that did not matter. A process that runs another session
+// (the managed standby viewer, the re-entry test) must not keep a window whose context is gone, nor the quit it
+// posts. So on EVERY way out of a session its window is destroyed and its messages drained up to that quit.
+void close_session_window(ViewerContext& ctx) {
+  if (ctx.session.hwnd && IsWindow(ctx.session.hwnd)) DestroyWindow(ctx.session.hwnd);
+  ctx.session.hwnd = nullptr;
+  MSG m;
+  while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+    if (m.message == WM_QUIT) break;
+    TranslateMessage(&m);
+    DispatchMessageW(&m);
+  }
+}
+
+int run_session(ViewerContext& ctx) {
+  const int rc = run_session_body(ctx);
+  close_session_window(ctx);
+  return rc;
 }
 
 }  // namespace

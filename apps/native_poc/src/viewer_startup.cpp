@@ -708,7 +708,7 @@ int connect_media_socket(ViewerContext& ctx) {
             ? ctx.standby->udpHandshake(ctx.session.sock, ctx.connectCancelled, &helloError, &ackFeatures)
             : remote60::native_poc::udp_hello_handshake(ctx.session.sock, hello, &ctx.connectCancelled, &helloError,
                                                         &ackFeatures, &helloStats);
-    std::cout << "[native-video-client][attempt] hello ok=" << (handshakeOk ? 1 : 0)
+    std::cout << "[native-video-client][attempt] " << (ctx.standby ? "activation ok=" : "hello ok=") << (handshakeOk ? 1 : 0)
               << " attempts=" << helloStats.attempts << " badAcks=" << helloStats.badAcks
               << " recvErrors=" << helloStats.recvErrors
               << " ms=" << helloStats.elapsedMs

@@ -166,7 +166,13 @@ void keep_after_close(const ShellConnectRequest& request, uint64_t operation);
 std::unique_ptr<remote60::native_poc::shell::ManagedViewers> gManaged;
 uint64_t gTokenVersion = 1;
 std::map<std::string, std::string> gHostNames;   // the last list's names, for the viewers' titles and logs
-std::set<std::string> gKeepUnconfirmed;          // this owner: a PC whose Host did not confirm standby (no retry now)
+// This owner: a PC whose Host did not confirm standby -- "not confirmed", not "an old Host" (Codex): one more try
+// is allowed 60 s later (e.g. a Host that ignored a too-quick re-admission, ka-pc-impl r1 FINDING), then none.
+struct KeepUnconfirmed {
+  int times = 0;
+  uint64_t retryAtMs = 0;
+};
+std::map<std::string, KeepUnconfirmed> gKeepUnconfirmed;
 int gStandbySupport = -1;                         // this owner's directory: -1 unknown, 0 no, 1 yes
 void kept_after_hosts(const std::vector<DirectoryHostEntry>& hosts);
 
@@ -1781,7 +1787,13 @@ std::wstring managed_base_args(const std::string& hostId, const std::string& hos
 bool keep_launch(const std::string& hostId, std::string* why) {
   if (!gManaged) { *why = "no manager"; return false; }
   if (gManaged->Find(hostId)) return true;
-  if (gKeepUnconfirmed.count(hostId)) { *why = "the Host did not confirm standby"; return false; }
+  {
+    const auto u = gKeepUnconfirmed.find(hostId);
+    if (u != gKeepUnconfirmed.end() && (u->second.times >= 2 || GetTickCount64() < u->second.retryAtMs)) {
+      *why = "the Host did not confirm standby";
+      return false;
+    }
+  }
   std::string account, token;
   uint64_t epoch = 0;
   {
@@ -1881,7 +1893,11 @@ void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
       if (state == "unsupported" || state == "failed") {
         // Codex: an unanswered standby Hello is "not confirmed", not proof of an old Host -- no retry for this
         // owner's run, and a tap is an ordinary connect.
-        gKeepUnconfirmed.insert(e.hostId);
+        {
+          KeepUnconfirmed& u = gKeepUnconfirmed[e.hostId];
+          ++u.times;
+          u.retryAtMs = GetTickCount64() + 60000;
+        }
         gManaged->Release(e.hostId, state);
         post_keep_state(e.hostId, state);
         return;
@@ -2120,7 +2136,7 @@ void handle_page_message(const std::string& json) {
   if (shell_parse_connect(json, &connect)) {
     if (gManaged) {
       if (const auto* c = gManaged->Find(connect.hostId)) {
-        if (c->state == "ready") {
+        if (c->state == "ready" || c->state == "returning") {
           uint64_t op = 0;
           if (gManaged->Activate(connect.hostId, &op)) {
             log_line("kept PC activation host=" + connect.hostId + " op=" + std::to_string(op));
