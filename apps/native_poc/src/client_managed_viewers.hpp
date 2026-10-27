@@ -13,7 +13,8 @@
 //  - every message from a child is checked against the child's key, incarnation and the owner epoch it was started
 //    under; a child of an older owner (a signed-out account) can say nothing that reaches the current UI.
 //  - ending: Release / Shutdown are sent at once; the bounded wait (then TerminateJobObject on its own job) runs on
-//    a thread, never on the UI thread.
+//    a thread, never on the UI thread. A finished reaper is joined at the next ending (ka-pc-impl r2, Codex N5) -- not
+//    only at the shell's exit -- so evicting and preparing PCs all day does not pile up threads.
 //
 // UI thread only, except where a method says otherwise. Events reach the UI through the `post` callback.
 
@@ -256,9 +257,14 @@ class ManagedViewers {
   bool Activate(const std::string& hostId, uint64_t* op) {
     Child* c = Mutable(hostId);
     if (!c || c->ending || c->activeOp != 0) return false;
-    c->activeOp = ++c->nextOp;
-    *op = c->activeOp;
-    return c->channel->Send(Stamp(*c, managed_ipc::Type::Activate, {{"op", std::to_string(c->activeOp)}}));
+    const uint64_t next = c->nextOp + 1;
+    // ka-pc-impl r2 (Codex N6): an Activate that could not be sent leaves no activation behind (no activeOp that
+    // nothing will ever end).
+    if (!c->channel->Send(Stamp(*c, managed_ipc::Type::Activate, {{"op", std::to_string(next)}}))) return false;
+    c->nextOp = next;
+    c->activeOp = next;
+    *op = next;
+    return true;
   }
 
   void TokenRenewed(const std::string& session, uint64_t version) {
@@ -284,15 +290,21 @@ class ManagedViewers {
     for (auto& kv : snapshot) End(std::move(kv.second), managed_ipc::Type::Shutdown, reason);
   }
 
-  // Shell exit: the reapers are joined, each bounded by its own wait (3 s) -- the process ends right after.
+  // Shell exit: the reapers are joined, each bounded by its own wait -- the process ends right after.
   void JoinReapers() {
-    std::vector<std::thread> reapers;
+    std::vector<Reaper> reapers;
     {
       std::lock_guard<std::mutex> lock(reapMu_);
       reapers.swap(reapers_);
     }
-    for (auto& t : reapers)
-      if (t.joinable()) t.join();
+    for (auto& r : reapers)
+      if (r.thread.joinable()) r.thread.join();
+  }
+
+  // How many reaper threads are held (finished ones included until the next ending joins them). For tests.
+  size_t ReaperCount() {
+    std::lock_guard<std::mutex> lock(reapMu_);
+    return reapers_.size();
   }
 
   void Forget(const std::string& hostId) {  // the child exited on its own: its handles go
@@ -319,26 +331,45 @@ class ManagedViewers {
     return m;
   }
 
+  // ka-pc-impl r2: the child's own teardown (owner fence, WM_CLOSE, its session's bounded joins of 3 s + 3 s, the
+  // lease's Release) is given this long before its job is ended.
+  static constexpr DWORD kEndMs = 8000;
+
   void End(std::unique_ptr<Child> c, managed_ipc::Type how, const std::string& reason) {
     c->ending = true;
-    c->channel->Send(Stamp(*c, how, {{"reason", reason}, {"deadlineMs", "3000"}}));
+    c->channel->Send(Stamp(*c, how, {{"reason", reason}, {"deadlineMs", std::to_string(kEndMs)}}));
     log_("managed viewer ending host=" + c->hostId + " pid=" + std::to_string(c->pid) + " reason=" + reason);
     Child* raw = c.release();
     std::lock_guard<std::mutex> lock(reapMu_);
-    reapers_.emplace_back([raw, log = log_] {
+    // Finished reapers first (Codex N5): joined now, not at the shell's exit.
+    for (auto it = reapers_.begin(); it != reapers_.end();) {
+      if (it->done->load()) {
+        if (it->thread.joinable()) it->thread.join();
+        it = reapers_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    Reaper r;
+    r.done = done;
+    r.thread = std::thread([raw, log = log_, done] {
       std::unique_ptr<Child> owned(raw);
-      const DWORD w = WaitForSingleObject(owned->process, 3000);
+      const DWORD w = WaitForSingleObject(owned->process, kEndMs);
       if (w != WAIT_OBJECT_0) {
         TerminateJobObject(owned->job, 1);  // its own job: this child only
         WaitForSingleObject(owned->process, 2000);
-        log("managed viewer did not end in 3 s; its job was ended host=" + owned->hostId);
+        log("managed viewer did not end in " + std::to_string(kEndMs) + " ms; its job was ended host=" + owned->hostId);
       }
       owned->channel->Close();
       if (owned->forwarder.joinable()) owned->forwarder.join();
       if (owned->waiter.joinable()) owned->waiter.join();
       CloseHandle(owned->process);
       CloseHandle(owned->job);
+      owned.reset();
+      done->store(true);
     });
+    reapers_.push_back(std::move(r));
   }
 
   void EndAllNow() {
@@ -352,8 +383,12 @@ class ManagedViewers {
   OnEvent onEvent_;
   uint64_t incarnations_ = 0;
   std::map<std::string, std::unique_ptr<Child>> children_;
+  struct Reaper {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> done;
+  };
   std::mutex reapMu_;
-  std::vector<std::thread> reapers_;
+  std::vector<Reaper> reapers_;
 };
 
 }  // namespace remote60::native_poc::shell

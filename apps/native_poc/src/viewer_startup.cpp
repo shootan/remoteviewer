@@ -822,6 +822,7 @@ void attach_control_tunnel_and_log(ViewerContext& ctx) {
     std::cout << "[native-video-client] control tunnelled over the media socket\n";
   }
 
+  ctx.sessionConnected = true;
   std::cout << "[native-video-client] connected host=" << ctx.resolvedArgs.host
             << " port=" << ctx.resolvedArgs.port
             << " transport=" << video_transport_name(ctx.dec.transport)

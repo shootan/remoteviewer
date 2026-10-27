@@ -40,6 +40,9 @@ struct SessionState {
   std::function<void(const char*)> milestone;
   std::atomic<bool> pickerReadySaid{false};
   std::atomic<bool> presentedSaid{false};
+  // ka-pc-impl r2 (Codex N4): set on the UI thread by kMsgOwnerFence; from then on no input or clipboard reaches the
+  // host from this window (the window proc drops them) while the session closes.
+  bool ownerFenced = false;
   // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
   HWND hwnd = nullptr;
   uint32_t windowW = 1600;

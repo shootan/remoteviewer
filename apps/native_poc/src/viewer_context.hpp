@@ -85,6 +85,9 @@ struct ViewerContext : ViewerState {
    */
   remote60::native_poc::ClientSessionConnectArgs* standby = nullptr;
   bool standbyTaken = false;
+  // ka-pc-impl r2 (Codex N6): the session really connected -- handshake and control done, "connected host=" said.
+  // Not the same as standbyTaken (the socket was taken): a handshake that failed after the take is not a connect.
+  bool sessionConnected = false;
 };
 
 }  // namespace remote60::native_poc::viewer

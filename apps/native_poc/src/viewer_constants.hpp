@@ -125,6 +125,11 @@ constexpr UINT kMsgRunDeferredPick = WM_APP + 24;
 // rel-0163 r3: a WindowSelect was not sendable to a logon-screen host. wParam = windowId, lParam = the op's
 // selection epoch (low 32 bits are enough: it only has to match the live op).
 constexpr UINT kMsgUnsendableSelect = WM_APP + 25;
+// ka-pc-impl r2 (Codex N4): the shell that started this viewer is ending it (sign-out, account change, its exit, a
+// kept PC released). On the UI thread: input and the clipboard are cut at once -- held keys and buttons released,
+// the clipboard listener off, pastes cancelled, no further input forwarded -- and then the window closes through
+// its ordinary WM_CLOSE teardown.
+constexpr UINT kMsgOwnerFence = WM_APP + 26;
 // The poll interval itself is kClipboardPollIntervalUs in clipboard_sync.hpp, shared with the
 // Android session so both clients ask at the same cadence. Unqualified uses here resolve to it
 // through the enclosing namespace.

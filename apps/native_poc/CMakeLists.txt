@@ -701,6 +701,9 @@ endforeach()
 # ka-pc-impl r1 (KA ③): the shell <-> managed viewer channel and the recent-PC store (no viewer, no network).
 add_executable(remote60_ka_pc_units_test src/ka_pc_units_test.cpp)
 target_include_directories(remote60_ka_pc_units_test PRIVATE src)
+# ka-pc-impl r2 (Codex N5): Channel::Close bounded in the orderings one CancelSynchronousIo misses (real header, real pipes).
+add_executable(remote60_ka_pc_ipc_close_race_test src/ka_pc_ipc_close_race_test.cpp)
+target_include_directories(remote60_ka_pc_ipc_close_race_test PRIVATE src)
 
 # ka-pc-impl r1 (KA ③): the managed standby viewer end to end (this test plays the shell): real server.js, real
 # hosts (this build + the published 0.2.163), GNLinkViewerKaTest --managed-standby. Writes only under REMOTE60_TEST_TMP.

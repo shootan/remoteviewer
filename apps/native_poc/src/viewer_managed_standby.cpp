@@ -19,6 +19,7 @@
 #include "standby_directory.hpp"
 #include "standby_file_store.hpp"
 #include "standby_runner.hpp"
+#include "viewer_constants.hpp"
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -98,12 +99,13 @@ void close_session_window(ViewerContext& ctx) {
 
 void log(const std::string& line) { std::cout << "[viewer][standby] " << line << std::endl; }
 
-// How long after an activation's session ended this viewer still says "returning", not "ready". The Host ends a
-// session when its control channel has been silent for 10 s (host_startup_control.cpp, UdpControlLink 10000) --
-// the viewer's leaving is not announced -- and until then it still counts this device's entry as holding the
-// session: a Release is refused (Live), a new admission of this device is Busy. A Pong only says the entry is
-// alive, never that the grant is back (Codex model A), so "ready" is not claimed before the Host can have seen the
-// end. A tap during "returning" still works: an activation with a newer generation is the device taking it back.
+// How long after an activation's session ended this viewer says "returning" before "ready".
+// ka-pc-impl r2 (Codex D1): this is NOT a proof that the Host has given the grant back -- nothing on the existing wire
+// says that (a Pong only says the entry is alive; SessionOver is local). It is a display interval: the Host ends a
+// session after 10 s of control silence (host_startup_control.cpp, UdpControlLink 10000), so for about that long
+// the previous connection may still be being cleaned up there. "ready" means: the local hand-back is done and the
+// lease's entry is alive -- not "the Host has finished cleaning up". A tap during "returning" is allowed (the device
+// takes the grant back with a newer generation), and so is a release.
 constexpr uint64_t kReturningMs = 12000;
 
 }  // namespace
@@ -271,10 +273,13 @@ int run_managed_standby(const std::function<bool(ViewerContext&)>& load, const s
     std::atomic<bool> stopAfter{false};
     std::atomic<bool> parkAsked{false};
     ViewerContext* live = ctx.get();
+    // ka-pc-impl r2 (Codex N4): the owner fence first -- input and the clipboard cut on the UI thread, then the
+    // window's own WM_CLOSE teardown. A connect still in progress ends; a session whose window does not exist yet
+    // never starts (run_session_body checks connectCancelled before the window and after the connect).
     auto closeIt = [live] {
-      live->connectCancelled.store(true, std::memory_order_release);  // a connect still in progress ends
+      live->connectCancelled.store(true, std::memory_order_release);
       HWND h = live->session.hwnd;
-      if (h && IsWindow(h)) PostMessageW(h, WM_CLOSE, 0, 0);
+      if (h && IsWindow(h)) PostMessageW(h, kMsgOwnerFence, 0, 0);
     };
     // The channel during the session: Park / Release / Shutdown close the window (the same path as its X), a
     // renewed token is kept for the lease, a second Activate is nothing (this one is running).
@@ -313,13 +318,22 @@ int run_managed_standby(const std::function<bool(ViewerContext&)>& load, const s
     } else {
       runner.Abandon(key, leaseOp, &args);
     }
+    // ka-pc-impl r2 (Codex N6): "connected" is the session's real connect (handshake + control, the line the
+    // ordinary path also counts) -- not that the lease's socket was taken. A handshake that failed after the take
+    // is a failed connect (rc 6), and says so.
+    const bool connected = ctx->sessionConnected;
     Message e = stamped(Type::SessionEnded);
     e.fields["op"] = op;
     e.fields["rc"] = std::to_string(rc);
-    e.fields["reason"] = parkAsked.load() ? "park" : (stopAfter.load() ? exitReason : (rc == 0 ? "closed" : "ended"));
-    e.fields["connected"] = taken ? "1" : "0";
+    e.fields["reason"] = parkAsked.load() ? "park"
+                         : stopAfter.load() ? exitReason
+                         : !connected ? "connect-failed"
+                         : (rc == 0 ? "closed" : "ended");
+    e.fields["connected"] = connected ? "1" : "0";
+    e.fields["taken"] = taken ? "1" : "0";
     ch.Send(e);
-    log("activation op=" + op + " ended rc=" + std::to_string(rc));
+    log("activation op=" + op + " ended rc=" + std::to_string(rc) + " connected=" + (connected ? "1" : "0") +
+        " taken=" + (taken ? "1" : "0"));
     ctx.reset();
     publish(true);
     return !stopAfter.load();

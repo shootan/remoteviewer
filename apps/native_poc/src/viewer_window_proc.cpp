@@ -1223,7 +1223,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
   ViewerState& ctx = *state;
   ctx.session.uiHeartbeatUs.store(qpc_now_us(), std::memory_order_relaxed);
+  // ka-pc-impl r2 (Codex N4): fenced by its owner -- nothing typed, clicked or copied here goes on to the host.
+  if (ctx.session.ownerFenced &&
+      ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+       msg == WM_INPUT || msg == WM_CLIPBOARDUPDATE || msg == kMsgPushClipboardNow || msg == kMsgApplyClipboard)) {
+    return DefWindowProcW(hwnd, msg, wp, lp);
+  }
   switch (msg) {
+    case kMsgOwnerFence:
+      if (!ctx.session.ownerFenced) {
+        ctx.session.ownerFenced = true;
+        std::cout << "[native-video-client] owner fence: input and clipboard cut, closing the session\n";
+        cancel_pastes(ctx, hwnd, PasteFailure::Silent, "owner fence");
+        RemoveClipboardFormatListener(hwnd);
+        release_all_physical(ctx);
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+      }
+      return 0;
     case WM_CLOSE:
       ctx.session.running = false;
       // ka-pc-impl r1: a lease's socket is not shut down -- the lease pings on it after this session.
