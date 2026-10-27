@@ -39,6 +39,7 @@
 #include "host_standby_table.hpp"
 #include "standby_lease.hpp"
 #include "standby_runner.hpp"
+#include "standby_directory.hpp"
 #include "directory_session_client.hpp"
 
 using remote60::native_poc::test_support::FakeDirectory;
@@ -1260,21 +1261,17 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
           remote60::native_poc::directory_standby_support(url, session, &supported, &relay, &lerr) && supported && relay, lerr);
     int observeSeq = 0;
     std::string lastRelayState;
-    // The capability through the lease's OWN socket: observe from it, then a standby connect -- the relay binds the
-    // lease to this endpoint. Aim at the relay only when THIS connect reserved one.
-    auto relayCap = [&](remote60::native_poc::SocketHandle s, remote60::native_poc::StandbyCapability* out) {
-      const std::string obs = "prod-standby-" + std::to_string(++observeSeq);
-      if (!observe_from(s, srv.udpPort, obs)) return false;
-      remote60::native_poc::DirectoryConnectTarget t;
-      std::string e;
-      if (!remote60::native_poc::directory_connect(url, session, hostId, obs, &t, &e, nullptr, /*standby=*/true)) return false;
-      lastRelayState = t.standbyRelay;
-      if (t.standbyRelay != "reserved" || t.relayPort == 0) return false;
-      out->token = t.punchToken;
-      out->ip = t.relayIp;
-      out->port = t.relayPort;
-      return true;
-    };
+    // The PRODUCT capability (standby_directory.hpp): observe from the lease's own socket, a standby connect, aim at the
+    // relay when this connect reserved one.
+    remote60::native_poc::StandbyDirectoryConfig dirCfg;
+    dirCfg.url = url;
+    dirCfg.session = [&] { return session; };
+    dirCfg.hostId = hostId;
+    dirCfg.observeHost = "127.0.0.1";
+    dirCfg.observePort = srv.udpPort;
+    dirCfg.freshToken = [&] { return "prod-standby-" + std::to_string(++observeSeq); };
+    dirCfg.note = [&](const std::string& what) { lastRelayState = what; };
+    auto relayCap = remote60::native_poc::standby_directory_capability(dirCfg);
     MemGenStore rsA, rsB;
     GenerationAllocator rgA(rsA, randA), rgB(rsB, randB);
     StandbyLease ra(rgA, features, relayCap, mono_ms), rb(rgB, features, relayCap, mono_ms);
