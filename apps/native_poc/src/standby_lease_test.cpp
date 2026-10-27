@@ -290,6 +290,128 @@ void hello_ack_test(FakeHost& host) {
   check("200 notes: at most 32 kept", none.events().size() <= 32, std::to_string(none.events().size()));
 }
 
+// r3 N2-a (Codex codex_keepalive_r2_src_r3.md, reproduced there): a Release that finished while the handshake waited
+// wins -- the answer that completes the activation, arriving after it, is not adopted (no true, no features). Both
+// orders, several times (the wait the Release lands in is the scheduler's; every round must hold).
+void cancel_then_answer_test(FakeHost& host) {
+  std::printf("\n--- N2-a: Release finished, then the completing answer: not adopted ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked at the fake host", park(lease));
+  for (int order = 0; order < 2; ++order) {
+    int adopted = 0, rounds = 0, stillActive = 0;
+    for (int round = 0; round < 6; ++round) {
+      const uint64_t until = mono_ms() + 7000;
+      while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+      n::ClientSessionConnectArgs args;
+      uint64_t op = 0;
+      if (!lease.ActivationArgs(&args, nullptr, &op)) break;
+      ++rounds;
+      {
+        const int before = host.activates.load();
+        Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+        wait_until([&] { return host.activates > before; }, 2000);
+        const uint32_t gen = host.lastActivateGen;
+        if (order == 0) host.HelloAck(kGoodAck); else host.Pong(gen, true);  // the first half of the grant
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));          // it is in, the handshake waits again
+        lease.Release();                                                     // finished before the second half
+        if (order == 0) host.Pong(gen, true); else host.HelloAck(kGoodAck);
+        wait_until([&] { return h.done.load(); }, 3000);
+        if (h.ok || h.features != 0xFFFFFFFFu) ++adopted;
+        if (lease.state() == State::Active) ++stillActive;
+      }
+      n::close_socket(&args.preparedUdpSocket);
+      lease.SessionOver(op);  // its Connect failed: the lease reads its socket again
+      // the answer that came after the Release is still queued: the pump reads it away (a stale HelloAck left there
+      // would complete the NEXT round's activation with that round's own Pong -- the untagged-Ack contract, not this case)
+      lease.Pump(150);
+    }
+    check(order == 0 ? "HelloAck, Release, then the current Pong: never adopted (6 rounds)"
+                     : "Pong, Release, then a valid HelloAck: never adopted (6 rounds)",
+          rounds == 6 && adopted == 0 && stillActive == 0,
+          "rounds=" + std::to_string(rounds) + " adopted=" + std::to_string(adopted) + " active=" + std::to_string(stillActive));
+  }
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+  check("...the lease is parked again and activates normally afterwards", lease.state() == State::Parked && [&] {
+    n::ClientSessionConnectArgs args;
+    uint64_t op = 0;
+    if (!lease.ActivationArgs(&args, nullptr, &op)) return false;
+    bool ok = false;
+    {
+      const int before = host.activates.load();
+      Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+      wait_until([&] { return host.activates > before; }, 2000);
+      host.Pong(host.lastActivateGen, true);
+      host.HelloAck(kGoodAck);
+      ok = wait_until([&] { return h.done.load(); }, 3000) && h.ok && h.features == kGoodAck;
+    }
+    n::close_socket(&args.preparedUdpSocket);
+    lease.SessionOver(op);
+    return ok;
+  }());
+}
+
+// r3 N2-b: a handoff (or an observation) registered while a pump read is in flight is served by the end of THAT read
+// -- the pump starts no new one while it is pending. Deterministic: the pump's own read-end hook registers it.
+void handoff_priority_test(FakeHost& host) {
+  std::printf("\n--- N2-b: a pending handoff / observation stops the next pump read ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked at the fake host", park(lease));
+  for (int kind = 0; kind < 2; ++kind) {  // 0: ActivationArgs, 1: ObserveFrom
+    std::atomic<bool> armed{true}, waiterRunning{false}, stopPump{false};
+    std::atomic<int> readsWhilePending{0}, readsSeen{0};
+    std::thread waiter;
+    std::atomic<bool> waiterResult{false};
+    n::ClientSessionConnectArgs args;
+    uint64_t op = 0;
+    lease.testHook = [&](int point, int intents) {
+      if (point == n::StandbyLease::kTestReadStart) {
+        ++readsSeen;
+        if (intents > 0) ++readsWhilePending;  // a read begun while a handoff / observation waits or runs
+        return;
+      }
+      if (point != n::StandbyLease::kTestReadDone || !armed.exchange(false)) return;
+      // the read is still "in flight" (reading_ set): the waiter registers and sleeps on it
+      waiterRunning = true;
+      waiter = std::thread([&] {
+        bool ok = false;
+        if (kind == 0) ok = lease.ActivationArgs(&args, nullptr, &op);
+        else ok = lease.ObserveFrom("127.0.0.1", host.port, "obs-test");  // the fake host never answers: false, ~2 s
+        waiterResult = ok;
+        waiterRunning = false;
+      });
+      while (lease.pendingIntentsForTest() == 0) std::this_thread::yield();
+    };
+    std::thread pump([&] {
+      while (!stopPump) lease.Pump(30);
+    });
+    const bool served = wait_until([&] { return !armed && !waiterRunning; }, 6000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stopPump = true;
+    pump.join();
+    if (waiter.joinable()) waiter.join();
+    lease.testHook = nullptr;
+    if (kind == 0) {
+      check("handoff registered during a read: served at that read's end, no new read began meanwhile",
+            served && waiterResult && lease.handedOff() && readsWhilePending == 0,
+            "reads begun while pending=" + std::to_string(readsWhilePending.load()));
+      n::close_socket(&args.preparedUdpSocket);
+      check("...the arguments abandoned: the pump reads again", lease.Abandon(op, nullptr) && !lease.handedOff());
+    } else {
+      check("observation registered during a read: no pump read until it ended (it gets the socket alone)",
+            served && readsWhilePending == 0, "reads begun while pending=" + std::to_string(readsWhilePending.load()));
+    }
+  }
+  const int pings = host.pings;
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && host.pings == pings) lease.Pump(50);
+  check("...and the lease goes on by Ping", host.pings > pings && lease.state() == State::Parked);
+}
+
 void runner_test(FakeHost& host) {
   MemStore store;
   n::GenerationAllocator gens(store, rnd);
@@ -401,6 +523,8 @@ int main() {
     return 1;
   }
   hello_ack_test(host);
+  cancel_then_answer_test(host);
+  handoff_priority_test(host);
   runner_test(host);
   host.Stop();
   std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
