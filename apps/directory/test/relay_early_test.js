@@ -197,6 +197,40 @@ async function freshClient(tag) {
   // punch from here is the neighbour case again: it must not be answered early.
   check('and its punch is not answered early', ms === -1 || ms >= GRACE_MS - 50, `firstAnswerMs=${ms}`);
 
+  // ---------------------------------------------------------------- np-impl r2 (Codex N1): same tuple, next connect
+  // A is accepted and punches from tuple X; while A's early replies are still due (0/120/240 ms), B -- no flag --
+  // connects from the SAME socket X. Nothing more of A may reach X after B's connect is answered, and B's own
+  // punch is answered after B's grace. Before the fix, A's 120/240 ms replies arrived here inside B's race.
+  {
+    const x = recorder();
+    await bind(x.sock);
+    await observe(x.sock, 'early-x-a');
+    await observe(x.sock, 'early-x-b');
+    x.got.length = 0;
+    r = await api('POST', '/api/connect', { hostId, observeToken: 'early-x-a', relayEarly: true }, session);
+    check('same tuple: A is accepted', r.body.relayEarly === 'accepted', `relayEarly=${r.body.relayEarly}`);
+    const fromRelay = () => x.got.filter((p) => p.rinfo.port === RELAY_PORT && p.msg.length === HELLO_BYTES &&
+                                               p.msg.readUInt16LE(4) === KIND_PUNCH);
+    const punchAt = Date.now();
+    x.sock.send(buildPunch(), RELAY_PORT, '127.0.0.1');
+    while (fromRelay().length === 0 && Date.now() - punchAt < 100) await sleep(2);
+    const firstAt = Date.now();
+    r = await api('POST', '/api/connect', { hostId, observeToken: 'early-x-b' }, session);
+    const bAnsweredAt = Date.now();
+    check('same tuple: B (no flag) connects while A\'s replies are still due',
+          r.status === 200 && !('relayEarly' in r.body) && bAnsweredAt - punchAt < 120,
+          `status=${r.status} firstReplyMs=${firstAt - punchAt} bConnectDoneMs=${bAnsweredAt - punchAt}`);
+    const afterB = () => fromRelay().filter((p) => p.at >= bAnsweredAt);
+    await sleep(400);  // past A's last early reply (240 ms)
+    check('same tuple: no reply of A reaches X after B\'s connect', afterB().length === 0,
+          `afterB=${afterB().length} total=${fromRelay().length}`);
+    x.got.length = 0;
+    const ms2 = await punchAndTime(x, GRACE_MS + 600);
+    check('same tuple: B\'s own punch is answered after B\'s grace', ms2 >= GRACE_MS - 50,
+          `firstAnswerMs=${ms2} grace=${GRACE_MS}`);
+    x.sock.close();
+  }
+
   // ---------------------------------------------------------------- an early answer binds nothing
   // Codex NP contract: the early answer must not take the host from a session already running. Only a
   // Hello binds; a viewer that holds the relay answer and then goes direct never sends one. So: a live

@@ -67,7 +67,14 @@ struct PunchRaceReport {
   std::string decision;               // "direct" | "relay" | "relay-after-commit" | "none" | "cancelled" | "error"
 };
 
-/** The exact shape a punch answer has (the host's and the relay's alike): 49 B, magic, size, version, kind. */
+/**
+ * The exact shape a punch answer has (the host's and the relay's alike): 49 B, magic, size, version, kind.
+ *
+ * version >= kUdpProtocolVersion (2) is the accepted range as a policy: every Host and relay today answers with
+ * version 2, and a punch answer is read for nothing but its shape, so a higher number is not refused here. That is
+ * not a claim that some future version will be compatible -- only that this check is not where it would be judged.
+ * Reachability only, never an authentication of the peer.
+ */
 bool punch_answer_is_valid(const char* data, int n);
 
 #if defined(REMOTE60_RENDEZVOUS_TEST_SEAM)

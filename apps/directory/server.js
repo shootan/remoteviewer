@@ -1790,6 +1790,17 @@ function relayScheduleReply(clientIp, clientPort, eligible) {
   for (let i = 0; i < RELAY_PUNCH_REPLIES; ++i) {
     setTimeout(() => {
       if (!relaySock) return;
+      // np-impl r2 (Codex N1): a reply belongs to the connect it was scheduled for. By the time it is due,
+      // a newer connect may own this wire IP -- the same tuple even (a socket or NAT mapping reused) -- and
+      // an early reply left over from the old one would reach the new connect's race before its own grace.
+      // So the record that scheduled it must still be the current one, and unexpired, at the moment of
+      // sending; otherwise nothing more is sent for it. (A datagram already on the wire is not recalled.)
+      // A replaced connect's client keeps punching and is answered under the record that replaced it.
+      if (relayEligibleByWireIp.get(clientIp) !== eligible || Date.now() > eligible.expiresAt) {
+        console.log(`[relay] connect=${eligible.connectId} reply ${i + 1}/${RELAY_PUNCH_REPLIES} to ${key} dropped: ` +
+                    `${Date.now() > eligible.expiresAt ? 'expired' : 'superseded'}`);
+        return;
+      }
       relaySock.send(packet, clientPort, clientIp, (err) => {
         if (err) console.error(`[relay] punch reply failed: ${err.message}`);
       });
