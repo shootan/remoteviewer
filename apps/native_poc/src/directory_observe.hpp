@@ -88,4 +88,36 @@ bool parse_observe_metadata(const std::string& json, ObserveEndpoint* out);
  */
 uint16_t observe_port_for(const ObserveEndpoint& advertised, uint16_t httpPort, bool secure);
 
+/**
+ * Where the observe socket is aimed, and on whose word. directory-retry-fix r1 (Codex contract): a
+ * failed observation is diagnosed from these explicit values, never guessed from a bool or the text
+ * of an earlier status.
+ */
+enum class ObserveAim {
+  NotAimed,       // nowhere to send it (https with no advertisement, or a host that did not resolve)
+  Pinned,         // the configured observe port -- the operator's decision
+  Advertised,     // what the directory said (registration answer or health route)
+  LegacyDefault,  // plain http, nothing said: httpPort + 1, the documented legacy rule
+};
+
+/** What the health route last said about the observe endpoint (kept through its cooldown cycles). */
+enum class ObserveHealth {
+  NotAsked,         // never asked: a pin, or an advertisement that came with registration
+  Advertised,       // it answered with an endpoint
+  NoAdvertisement,  // it answered, and said nothing about observations
+  Unreachable,      // it could not be asked (the error is kept beside it)
+};
+
+/**
+ * The status for an observation that got no answer from an aimed socket.
+ *
+ * Both facts are kept when the aim was the legacy default: the directory gave no address, AND the
+ * default address did not answer. Neither is dropped -- the first is not proof the server is
+ * misconfigured (the default may be right), and the second is a real timeout, not to be hidden.
+ * A pinned or advertised aim that does not answer reads exactly as before. NotAimed is never asked
+ * here: the caller keeps the reason that left the socket unaimed.
+ */
+std::string observe_failure_status(ObserveAim aim, ObserveHealth health, const std::string& healthError,
+                                   uint16_t port);
+
 }  // namespace remote60::native_poc::directory
