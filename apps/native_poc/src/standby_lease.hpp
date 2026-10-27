@@ -16,6 +16,7 @@
 // session's ordinary path. The lease keeps its own handle and does not read it until the session is over; then it goes
 // on with the SAME socket -- the same endpoint, which a relay lease is bound to (§2.7) -- and the entry by Ping.
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -28,6 +29,41 @@
 #include "standby_entry_client.hpp"
 
 namespace remote60::native_poc {
+
+// One observation from socket `s`: "OBSERVE <token>" to the directory's observe endpoint until an answer (the same
+// datagram the rendezvous sends, on this socket). true = the directory recorded this endpoint for `token`.
+inline bool standby_observe_on(SocketHandle s, const std::string& host, uint16_t port, const std::string& token) {
+  sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  if (inet_pton(AF_INET, host.c_str(), &to.sin_addr) != 1) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return false;
+    to.sin_addr = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
+  }
+  const std::string probe = "OBSERVE " + token;
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    sendto(s, probe.data(), static_cast<int>(probe.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (std::chrono::steady_clock::now() < until) {
+      fd_set rd;
+      FD_ZERO(&rd);
+      FD_SET(s, &rd);
+      timeval tv{0, 50000};
+      if (select(static_cast<int>(s) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+      char buf[512];
+      sockaddr_in from{};
+      socklen_t fl = sizeof(from);
+      const int n = static_cast<int>(recvfrom(s, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl));
+      if (n > 0 && from.sin_addr.s_addr == to.sin_addr.s_addr && from.sin_port == to.sin_port) return true;
+    }
+  }
+  return false;
+}
 
 struct StandbyCapability {
   std::string token;  // the one-time capability (/api/connect punchToken)
@@ -53,11 +89,29 @@ class StandbyLease {
   State state() const { return client_.state(); }
   uint64_t entryId() const { return client_.entryId(); }
   int lostCount() const { return lost_; }
+  // ② e: the lease waits for a capability its CapabilityFn could not give now (the APK: the directory call is the app's,
+  // Kotlin) -- the owner observes from the lease's socket (ObserveFrom), gets one, and hands it in (Provide).
+  bool needsCapability() const { return needsCapability_; }
   const std::vector<std::string>& events() const { return events_; }
   std::string target() const { return ip_ + ":" + std::to_string(port_); }
 
   // Start (or restart) the admission with a capability from CapabilityFn.
   void Start() { NeedCapability(); }
+
+  // The directory observation from THIS lease's socket (the relay binds a standby lease to that endpoint).
+  bool ObserveFrom(const std::string& host, uint16_t port, const std::string& token) {
+    return socket_ != kInvalidSocket && !handedOff_ && standby_observe_on(socket_, host, port, token);
+  }
+
+  // A capability the owner got for this lease (after needsCapability()): aim, then the admission.
+  bool Provide(const StandbyCapability& cap) {
+    if (!needsCapability_ || cap.token.empty() || cap.port == 0) return false;
+    needsCapability_ = false;
+    ip_ = cap.ip;
+    port_ = cap.port;
+    Apply(client_.Admit(cap.token, now_()));
+    return true;
+  }
 
   // Reads what has arrived for up to `waitMs`, feeds it in, keeps time and does what the entry decides.
   void Pump(uint32_t waitMs) {
@@ -251,8 +305,10 @@ class StandbyLease {
     StandbyCapability cap;
     if (socket_ == kInvalidSocket || !capability_ || !capability_(socket_, &cap) || cap.token.empty() || cap.port == 0) {
       events_.push_back("no capability now");
+      needsCapability_ = true;  // the owner may hand one in (Provide); the entry waits for it -- nothing is sent
       return;
     }
+    needsCapability_ = false;
     ip_ = cap.ip;
     port_ = cap.port;
     Apply(client_.Admit(cap.token, now_()));
@@ -287,6 +343,7 @@ class StandbyLease {
   std::string ip_;
   uint16_t port_ = 0;
   bool handedOff_ = false;
+  bool needsCapability_ = false;
   int lost_ = 0;
   std::vector<std::string> events_;
 };
