@@ -18,8 +18,8 @@
 // Writes only under REMOTE60_TEST_TMP (a folder directly under D:/remote/remote/.claude/test-tmp); deletes nothing.
 // Every child this test starts directly (directory, hosts, the standalone viewer) is in a job of this process.
 //
-// The shared standby FINDING (a new lease of the same PC key within ~30 s of its previous admission gets no answer)
-// is respected: no PC key is re-leased here within 31 s of its last admission.
+// The shared standby FINDING of r1 (a new lease of the same PC key within ~30 s of its previous admission got no
+// answer) is fixed in the shared code (a7773e6, merged): A is kept again right after its eviction, without a wait.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -41,6 +41,9 @@ namespace {
 uint64_t gT0 = 0;
 double secs() { return (GetTickCount64() - gT0) / 1000.0; }
 int gFailures = 0;
+// The detail is computed after the predicate: a function argument's evaluation order is unspecified (MSVC goes right
+// to left), so a detail passed beside a waiting predicate would describe the moment BEFORE the wait.
+void check_after(const std::function<bool()>& predicate, const std::string& label, const std::function<std::string()>& detail);
 void check(bool ok, const std::string& label, const std::string& detail = {}) {
   std::printf("%s [%6.1fs] %s%s%s\n", ok ? "PASS" : "FAIL", secs(), label.c_str(), detail.empty() ? "" : "  ",
               detail.c_str());
@@ -50,6 +53,11 @@ void check(bool ok, const std::string& label, const std::string& detail = {}) {
 void note(const std::string& text) {
   std::printf("      [%6.1fs] %s\n", secs(), text.c_str());
   std::fflush(stdout);
+}
+
+void check_after(const std::function<bool()>& predicate, const std::string& label, const std::function<std::string()>& detail) {
+  const bool ok = predicate();
+  check(ok, label, detail());
 }
 
 std::wstring gRoot;   // with a trailing backslash
@@ -508,6 +516,8 @@ int main() {
     }
     {
       using namespace remote60::native_poc::shell;
+      // the connect is posted from the output pump to the UI thread: give the UI its turn
+      wait_for([] { return recent_for(recent_load(recent_path()), pc_origin(), "tester").size() >= 3; }, 5000);
       const auto recent = recent_for(recent_load(recent_path()), pc_origin(), "tester");
       const std::string order = recent.size() >= 3 ? recent[0] + "," + recent[1] + "," + recent[2] : "(short)";
       check(recent.size() >= 3 && recent[0] == H("KA-C").id && recent[1] == H("KA-B").id && recent[2] == H("KA-A").id,
@@ -518,7 +528,7 @@ int main() {
     for (const char* n : {"KA-A", "KA-C", "KA-B"}) {
       const DWORD pid = ordinary_pid(H(n).id);
       check(close_window_of(pid), std::string("close ") + n + "'s viewer window (its X)");
-      check(wait_card(n, "대기 중", 45000), std::string(n) + ": its card says '대기 중' (kept, standing by)", card_state(n));
+      check_after([&] { return wait_card(n, "대기 중", 45000); }, std::string(n) + ": its card says '대기 중' (kept, standing by)", [&] { return card_state(n); });
       check(card_has_release(n), std::string(n) + ": ...with its own '연결 해제' button");
     }
     check(count_of(client_log(), "kept PC: first conversion to standby host=") >= 3,
@@ -544,10 +554,10 @@ int main() {
             "...and only then the least recently USED standby (A) was let go");
       const std::string slice = client_log().substr(logBefore);
       check(count_of(slice, "releasing host=") == 1, "...exactly one", std::to_string(count_of(slice, "releasing host=")));
-      check(wait_card("KA-A", "연결 가능", 10000) && !card_has_release("KA-A"), "KA-A's card: no longer kept", card_state("KA-A"));
+      check_after([&] { return wait_card("KA-A", "연결 가능", 10000) && !card_has_release("KA-A"); }, "KA-A's card: no longer kept", [&] { return card_state("KA-A"); });
       check(card_state("KA-B") == "대기 중" && card_state("KA-C") == "대기 중", "B and C stay kept");
       check(close_window_of(pid), "close KA-D's viewer window");
-      check(wait_card("KA-D", "대기 중", 45000), "KA-D: kept on close (B, C, D)", card_state("KA-D"));
+      check_after([&] { return wait_card("KA-D", "대기 중", 45000); }, "KA-D: kept on close (B, C, D)", [&] { return card_state("KA-D"); });
     }
     const uint64_t admittedD = GetTickCount64();
 
@@ -558,7 +568,7 @@ int main() {
       // the page marks the pressed card '연결하는 중…' until the shell answers; the kept state is '여는 중' / '연결됨'
       const bool opening = wait_for([&] { const auto s = card_state(n); return s == "연결하는 중…" || s == "여는 중" || s == "연결됨"; }, 5000);
       check(opening, std::string(n) + ": the card says it is opening", card_state(n));
-      check(wait_card(n, "연결됨", 30000), std::string(n) + ": '연결됨' (picker-ready of this op)", card_state(n));
+      check_after([&] { return wait_card(n, "연결됨", 30000); }, std::string(n) + ": '연결됨' (picker-ready of this op)", [&] { return card_state(n); });
       activePid[n] = managed_pid(H(n).id);
     }
     capture_page(shots + L"3-three-active.png");
@@ -576,16 +586,17 @@ int main() {
     }
     // park all three (their windows' X): returning, then 대기 중
     for (const char* n : {"KA-B", "KA-C", "KA-D"}) check(close_window_of(activePid[n]), std::string("close ") + n + "'s session window");
-    check(wait_for([] { return card_state("KA-B").find("이전 연결 정리 중일 수 있음") != std::string::npos; }, 10000),
-          "after the session: '대기 중 · 이전 연결 정리 중일 수 있음' (returning -- not a grant proof)", card_state("KA-B"));
-    for (const char* n : {"KA-B", "KA-C", "KA-D"}) check(wait_card(n, "대기 중", 30000), std::string(n) + ": back to '대기 중'", card_state(n));
+    check_after([] { return wait_for([] { return card_state("KA-B").find("이전 연결 정리 중일 수 있음") != std::string::npos; }, 10000); },
+                "after the session: '대기 중 · 이전 연결 정리 중일 수 있음' (returning -- not a grant proof)",
+                [] { return card_state("KA-B"); });
+    for (const char* n : {"KA-B", "KA-C", "KA-D"}) check_after([&] { return wait_card(n, "대기 중", 30000); }, std::string(n) + ": back to '대기 중'", [&] { return card_state(n); });
 
     // ======================================================== N3: 연결 해제
     {
       const DWORD pidC = managed_pid(H("KA-C").id);
       check(press_release("KA-C"), "press KA-C's '연결 해제'");
       check(log_has("kept PC: released by the user host=" + H("KA-C").id, 5000), "the shell released it (bridge -> native)");
-      check(wait_card("KA-C", "연결 가능", 10000) && !card_has_release("KA-C"), "KA-C's card: not kept, no button", card_state("KA-C"));
+      check_after([&] { return wait_card("KA-C", "연결 가능", 10000) && !card_has_release("KA-C"); }, "KA-C's card: not kept, no button", [&] { return card_state("KA-C"); });
       HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pidC);
       check(p && WaitForSingleObject(p, 12000) == WAIT_OBJECT_0, "its managed viewer process ended");
       if (p) CloseHandle(p);
@@ -598,14 +609,14 @@ int main() {
 
     // ======================================================== N2: a fourth PC that FAILS costs nobody
     {
-      // A again: its key was last admitted at the three conversions -- wait out the shared FINDING window first.
-      while (GetTickCount64() < admittedABC + 31000) pump(500);
+      // A again, right after it was let go (evicted): with the shared fix (a7773e6) no wait is needed.
+      (void)admittedABC;
       check(tap("KA-A"), "tap KA-A (B, D kept): an ordinary connect");
       DWORD pid = 0;
       wait_for([&] { return (pid = ordinary_pid(H("KA-A").id)) != 0; }, 10000);
       check(pid && ordinary_connected(pid, 40000), "KA-A connected");
       check(close_window_of(pid), "close KA-A's window");
-      check(wait_card("KA-A", "대기 중", 45000), "KA-A kept again (A, B, D)", card_state("KA-A"));
+      check_after([&] { return wait_card("KA-A", "대기 중", 45000); }, "KA-A kept again (A, B, D)", [&] { return card_state("KA-A"); });
       // C's host goes away; C (released, so not kept) is tapped: its connect fails
       H("KA-C").proc.End();
       const size_t logBefore = client_log().size();
@@ -633,10 +644,13 @@ int main() {
     {
       (void)admittedD;  // an activation of D's existing lease, not a new lease: no wait needed
       H("KA-D").proc.End();  // D's host goes away; D's lease has not noticed yet
+      const size_t logFrom = client_log().size();
       check(tap("KA-D"), "tap kept KA-D right after its host went away");
-      check(log_has("kept PC session ended host=" + H("KA-D").id, 60000), "D's activation ended");
-      const std::string l = client_log();
-      const size_t at = l.rfind("kept PC session ended host=" + H("KA-D").id);
+      const std::string endedTag = "kept PC session ended host=" + H("KA-D").id;
+      check(wait_for([&] { return client_log().substr(logFrom).find(endedTag) != std::string::npos; }, 60000),
+            "D's activation ended");
+      const std::string l = client_log().substr(logFrom);
+      const size_t at = l.find(endedTag);
       const std::string line = at == std::string::npos ? "" : l.substr(at, l.find('\n', at) - at);
       check(line.find("connected=0") != std::string::npos, "...reported as NOT connected (not the socket take)", line);
       check(wait_for([] { return status_line().find("연결에 실패했습니다") != std::string::npos ||
@@ -680,7 +694,7 @@ int main() {
       check(bEnded, "sign-out: the shell's ordinary viewer of KA-B ended");
       check(lines_of_pid(viewer_log(), pidB).find("owner fence: input and clipboard cut") != std::string::npos,
             "...through the owner fence (input and clipboard cut, then its own WM_CLOSE teardown)");
-      check(code == 0 && client_log().substr(logBefore).find("ended by its handle") == std::string::npos,
+      check(code == 0 && client_log().substr(logBefore).find("did not close in time") == std::string::npos,
             "...exit 0, not ended by the shell's handle", "exit=" + std::to_string(code));
       if (pB) CloseHandle(pB);
       bool managedGone = true;

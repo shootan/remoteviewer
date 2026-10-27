@@ -281,19 +281,13 @@ struct Managed {
   ~Managed() { End(); }
 };
 
-// FINDING (10-28, reported): a NEW lease of the same device for the same Host, started within ~30 s of that device's
-// previous admission, got no answer at all (relay "no StandbyAck", nothing in the Host log) and ended "unsupported";
-// the next admission came ~30.3 s after the previous one (the Host's kStandbyHelloReplayMs is 30000 -- a coincidence
-// or the cause, not settled here). Shared Host / relay code. The cases below that start the same PC key again wait
-// that long first, said here and in the report; the immediate case is measured on its own (FINDING line).
+// The shared FINDING of r1 (a NEW lease of the same PC key within ~30 s of its previous admission got no answer) was
+// fixed in the shared code (ka-r3 a7773e6: the Host's punch trains no longer block its directory cycle) and merged
+// here. The cases below therefore start the same PC key again AT ONCE -- after EndAll, after a crash -- and count it.
+// (Before the fix this helper waited 31 s first.)
 void wait_after_admission(const std::string& hostLog, uint64_t* lastAdmitAt) {
   (void)hostLog;
-  const uint64_t ready = *lastAdmitAt + 31000;
-  if (now_ms() < ready) {
-    std::printf("  (waiting %llu ms: 31 s after this device's last admission -- see the FINDING note)\n",
-                static_cast<unsigned long long>(ready - now_ms()));
-    Sleep(static_cast<DWORD>(ready - now_ms()));
-  }
+  (void)lastAdmitAt;
 }
 
 HWND viewer_window(DWORD pid) {
@@ -650,8 +644,11 @@ int main() {
     // could have made its window. Nothing of it may come up: no window, no connected session, no picker.
     const size_t from = a.Count();
     const size_t textFrom = a.proc.Text().size();
+    // Back to back: the Release is already queued when the activation starts. (20 ms later was measured to be too
+    // late here -- the warm lease's handshake had already connected, and the fence then closed an ACTIVE session:
+    // the other case, run in the shell e2e.)
+    const size_t hostFrom = hostA.Text().size();
     a.Send(Type::Activate, {{"op", "7"}});
-    Sleep(20);
     a.Send(Type::Release, {{"reason", "test"}});
     bool windowSeen = false;
     const uint64_t until = now_ms() + 4000;
@@ -672,9 +669,21 @@ int main() {
     const int bye = a.WaitMsg(Type::Bye, 0, 8000);
     check("Release: the viewer says bye and ends", bye >= 0 && a.proc.Exited(8000));
     Sleep(500);
-    const std::string hl = hostA.Text();
-    check("...and the Host took the Release (not refused as Live)", hl.find("release refused") == std::string::npos,
-          hl.find("release refused") == std::string::npos ? "" : "release refused seen");
+    // Model A, measured (r2): the activation was already granted a session at the Host (StandbyActivate, taken=1)
+    // when the Release arrived, so the Host refuses that Release ("the entry holds the session") -- there is no wire
+    // to say a session ended (Codex D1) -- and ends that session itself on control silence ~10 s later. Either way
+    // nothing stays: the Release taken, or the session ended within 15 s.
+    const bool refused = hostA.Text().substr(hostFrom).find("release refused") != std::string::npos;
+    bool sessionEnded = !refused;
+    if (refused) {
+      const uint64_t until2 = now_ms() + 15000;
+      while (!sessionEnded && now_ms() < until2) {
+        sessionEnded = hostA.Text().substr(hostFrom).find("udp control session ended") != std::string::npos;
+        Sleep(200);
+      }
+    }
+    check("...the Host took the Release, or (refused while the granted session was held) ended that session itself",
+          sessionEnded, refused ? "refused, then the session ended on control silence" : "taken");
   }
   // ---------------------------------------------------------------- the shell's ManagedViewers (product module)
   // The product module the client shell uses: suspended -> its own job -> resumed, Init over the pipes, events
@@ -778,7 +787,7 @@ int main() {
           std::to_string(now_ms() - t0) + " ms");
   }
   {
-    // FINDING (reported, not counted): IMMEDIATELY after a crash (the child above ended by its job, its entry and relay
+    // (r2: counted since the shared fix a7773e6) IMMEDIATELY after a crash (the child above ended by its job, its entry and relay
     // lease left behind), a NEW viewer for the same PC key. Observed 10-28: the relay forwards its standby Hellos
     // and the Host answers none (relay "no StandbyAck", h2c=0; no standby line in the host log), so it ends as
     // "unsupported". Shared Host / relay code (not this task's files): measured here, handed over.
@@ -798,7 +807,8 @@ int main() {
         return m.get("state") == "ready" || m.get("state") == "unsupported";
       });
       const std::string got = okReady >= 0 ? d.At(okReady).get("state") : std::string("none in 45 s");
-      std::printf("FINDING  a new viewer for the same PC right after a crash: %s\n", got.c_str());
+      check("a new viewer for the same PC right after a crash is ready (the shared FINDING, fixed in a7773e6)",
+            got == "ready", got);
       d.Send(Type::Release, {{"reason", "test"}});
       d.proc.Exited(8000);
     }
