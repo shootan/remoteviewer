@@ -3387,7 +3387,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val held = heldTap
         val heldLeaseReturning = held != null &&
             standbyLeases[RecentHosts.Key(held.origin, held.account, held.hostId)]?.handedOff == true
-        if (held != null && !anyParkConfirming() && !heldLeaseReturning) {
+        if (held != null && !anyParkConfirming() && listReturnEnds.isEmpty() && !heldLeaseReturning) {
             heldTap = null
             val host = directoryHosts.firstOrNull { it.hostId == held.hostId }
             if (heldTapSeq != tapSeq) {
@@ -5631,6 +5631,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 return
             }
             cancelConnecting("superseded")
+        }
+        // r2 (AVD ke_r15): while "PC 목록" still fences a session (<= 2.5 s), no other session can go on screen -- the
+        // native table refuses an activation while a park is confirming, and a session made meanwhile was thrown away
+        // ("keep_activate_refused"). The tap waits, as the newest intent (a newer one replaces it, 끊기 drops it), and is
+        // carried out when the fence ends (keepTick).
+        if (listReturnEnds.isNotEmpty() || anyParkConfirming()) {
+            val previous = heldTap
+            heldTap = connectIntents.scheduleFallback(account, origin, host.hostId)
+            heldTapSeq = tapSeq
+            diagnosticsLog.log("tap_held_fence", "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()} seq=$tapSeq")
+            return
         }
         // keepalive-r2 ② e, kept model A: a PC with a lease decides first -- ready: activate THAT lease; its last
         // session still handing the socket back: the tap waits (carried out when it settles); anything else: the
