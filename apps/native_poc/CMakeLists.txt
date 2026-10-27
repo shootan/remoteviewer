@@ -3464,6 +3464,21 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# np-impl r1 TEST TOOL (never shipped): the product's directory_session_open against a real test directory,
+# driven by apps/directory/test/np_early_bootstrap_e2e.js (new/old server x new/old viewer).
+add_executable(remote60_np_early_bootstrap_probe
+  src/np_early_bootstrap_probe.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+)
+target_include_directories(remote60_np_early_bootstrap_probe PRIVATE src)
+target_link_libraries(remote60_np_early_bootstrap_probe PRIVATE common ws2_32)
+
 # The stored sign-in: the files, the lock, and what a sign-in, a return and a sign-out each leave
 # behind. The store and the flow are the product's; the directory is functions the test owns,
 # because a real one cannot be told to answer after a sign-out.

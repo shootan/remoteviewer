@@ -202,6 +202,11 @@ function cleanup() {
     const child = spawn(process.execPath, [path.join(__dirname, 'relay_test.js')],
                         { env: relayEnv, stdio: 'inherit' });
     child.on('exit', (code) => resolve(code ?? 1));
+  }) || await new Promise((resolve) => {
+    // np-impl r1: the relayEarly flag -- at once only for the accepted connect, the grace for the rest
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_early_test.js')],
+                        { env: relayEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
   });
 
   await stopServer(server);

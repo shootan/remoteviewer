@@ -390,6 +390,8 @@ int open_media_socket(ViewerContext& ctx) {
     // Six seconds of this call is spent waiting -- observe attempts and then the punch --
     // and until this it could not be called off at all.
     request.stop = &ctx.connectCancelled;
+    // np-impl r1: ask for relayEarly; the race uses it only when this server accepts it for this connect.
+    request.relayEarly = true;
     remote60::native_poc::DirectorySessionResult session{};
     if (!remote60::native_poc::directory_session_open(request, &session, &directoryError)) {
       // A cancel ends the attempt here now too -- a punch that was called off no longer

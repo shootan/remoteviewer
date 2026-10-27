@@ -33,6 +33,9 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
                             std::string* outError) {
   if (!result) return false;
   *result = DirectorySessionResult{};
+  // np-impl r1 (contract 3): the whole call, kept apart from the race's own T0 -- the user waits for
+  // this one (observe + connect + race), the commit point counts from the first punch.
+  const auto openStart = std::chrono::steady_clock::now();
   if (request.url.empty() || request.sessionToken.empty() || request.hostId.empty()) {
     if (outError) *outError = "directory session needs a url, a session and a host";
     return false;
@@ -91,7 +94,7 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
   DirectoryConnectTarget target;
   uint32_t connectStatus = 0;
   if (!directory_connect(request.url, request.sessionToken, request.hostId, observeToken, &target,
-                         outError, &connectStatus)) {
+                         outError, &connectStatus, false, request.relayEarly)) {
     // 409 is the directory saying it has no address observation for this client. That is a state
     // this end can repair -- send another one from the same socket -- and it is not an
     // authentication failure, so the session stays and nothing signs out.
@@ -106,7 +109,7 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
       return false;
     }
     if (!directory_connect(request.url, request.sessionToken, request.hostId, observeToken,
-                           &target, outError)) {
+                           &target, outError, nullptr, false, request.relayEarly)) {
       return false;
     }
     // The first attempt's message is not the outcome. Left in place, a caller that logs outError
@@ -143,22 +146,53 @@ bool directory_session_open(const DirectorySessionRequest& request, DirectorySes
               << (target.connectId.empty() ? "-" : target.connectId)
               << " candidates=" << target.candidates.size() << " kinds=" << kinds
               << " capability=" << (target.punchToken.empty() ? 0 : 1)
-              << " reobserved=" << (connectStatus == 409 ? 1 : 0) << "\n";
+              << " reobserved=" << (connectStatus == 409 ? 1 : 0)
+              << (request.relayEarly
+                      ? " relayEarly=" + (target.relayEarly.empty() ? std::string("unknown") : target.relayEarly)
+                      : std::string())
+              << "\n";
   }
 
+  // np-impl r1 (contract 2-3): the early race only on a connect the server said 'accepted' for; any
+  // other answer -- and an older server, which says nothing -- keeps the race exactly as it was.
+  PunchRaceOptions raceOptions{};
+  if (request.relayEarly && target.relayEarly == "accepted") raceOptions.relayCommitMs = request.relayCommitMs;
+  PunchRaceReport race{};
   RendezvousCandidate chosen{};
   std::string punchError;
   const auto punchStart = std::chrono::steady_clock::now();
   const bool answered =
-      rendezvous.PunchAny(candidates, request.punchBudgetMs, &chosen, &punchError,
+      rendezvous.PunchAny(candidates, request.punchBudgetMs, raceOptions, &chosen, &race, &punchError,
                           request.stop);
+  const auto punchEnd = std::chrono::steady_clock::now();
   std::cout << "[native-video-client][attempt] connect="
             << (target.connectId.empty() ? "-" : target.connectId) << " punch answered="
             << (answered ? 1 : 0) << " kind=" << (answered ? chosen.kind : std::string("-"))
             << " ms="
-            << std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now() - punchStart).count()
+            << std::chrono::duration_cast<std::chrono::milliseconds>(punchEnd - punchStart).count()
             << (answered ? "" : " why=" + punchError) << "\n";
+  // np-impl r1 (contract 1): what the race saw, beside the line above (kept as it was, for the readers
+  // of it). Counts, times after T0 and the tuples of anything that came from no candidate -- never a
+  // packet's contents or a token. The stranger table is bounded by PunchRaceReport::kMaxStrangers.
+  {
+    std::ostringstream line;
+    line << "[native-video-client][race] connect=" << (target.connectId.empty() ? "-" : target.connectId)
+         << " mode=" << (raceOptions.relayCommitMs > 0 ? "early" : "legacy")
+         << " commitMs=" << raceOptions.relayCommitMs << " decision=" << race.decision
+         << " chosenMs=" << race.chosenMs << " firstDirectMs=" << race.firstDirectMs
+         << " firstRelayMs=" << race.firstRelayMs << " relayHeld=" << (race.relayHeld ? 1 : 0)
+         << " rounds=" << race.rounds << " resolved=" << race.candidatesResolved
+         << " invalidFromCandidate=" << race.invalidFromCandidate
+         << " strangers=" << race.strangerDatagrams << " untracked=" << race.strangersUntracked
+         << " openMs=" << std::chrono::duration_cast<std::chrono::milliseconds>(punchEnd - openStart).count();
+    for (const auto& s : race.strangers) {
+      const uint32_t a = ntohl(s.ipv4NetworkOrder);
+      line << " from=" << ((a >> 24) & 255) << "." << ((a >> 16) & 255) << "." << ((a >> 8) & 255) << "."
+           << (a & 255) << ":" << s.port << "/n=" << s.datagrams << "/punch=" << s.validPunches
+           << "/firstMs=" << s.firstMs << "/bytes=" << s.firstBytes;
+    }
+    std::cout << line.str() << "\n";
+  }
   // A cancelled punch is not a punch that failed. The fallback below exists because some NATs
   // drop the punch and pass the hello -- that reasoning does not apply when the caller has
   // asked to stop, and carrying on would open a socket and say hello on behalf of an attempt

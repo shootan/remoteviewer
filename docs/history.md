@@ -13579,3 +13579,13 @@ Next
 - N2: replay 판정은 capability 의 SHA-256 전체 비교(실패는 fail-closed), 같은 기기의 늦은/같은 gen 다른 proof 입장은 Stale(entry·secret 불변).
 - N3: standby 8 뒤 새 legacy 도 거부(비파괴), env 상한은 양의 정수만. 결정 2: `/api/hosts` 의 standby metadata, standby 요청엔 항상 standbyRelay 이유.
 - 시험: 표 56/56, e2e 89/89 ×2(실 server.js+실 Host), directory suite 815 rc0, 부정 대조 7 모두 FAIL. 운영 NAS 무변경, 자동 preconnect 출하 OFF.
+
+## 2026-10-27 np-impl r1 — 직접 연결 우선 ⓪ 계측 + ①b 조기 relay (Codex `codex_np_design_r1.md`)
+
+- 범위: Codex 수정 조건부 GO 의 첫 묶음(⓪ + ①b). ①a(prflx)·구 Host 무토큰 수용은 하지 않음(NO-GO/후속). 기준 spike/host-admission-r3 0a5e71d, 브랜치 feat/np-early-relay.
+- 서버: `/api/connect {relayEarly:true}` → legacy relay lease 에만 `relayEarly:"accepted"`, 그 connect 의 wire tuple 에서 온 punch 만 즉시 응답(x3). 플래그 없음·같은 wire IP 의 다른 소켓·standby·relay 없음은 기존 grace. 이유는 응답 필드로(standby/no-relay/not-accepted/no-wire-port).
+- 공용 native(`directory_rendezvous`): 응답은 정확한 Punch 형식(49 B·magic·size·version·kind)만 인정. 비일치 출처는 tuple 별 집계(최대 8, 나머지 개수만) — 원문·token 미기록. early 모드: T0(첫 punch 직전) + 1000 ms 전 direct 우선, 1000 에 받은 relay 만 선택, 없으면 기존 4 s 예산 안에서 계속. cancel 이 선택보다 우선, 선택은 1회.
+- 라벨: `CandidateKind::Relay` 추가 — PC 뷰어 로그·relayPath 가 relay 를 public 으로 잃던 경로(10-22 분석 §6) 정정. `[native-video-client][race]` 줄(결정·시각·비일치 집계·openMs) 추가, 기존 `[attempt]` 줄 형식 유지.
+- PC 뷰어만 relayEarly 를 보낸다. APK 는 JNI 호출부가 feat/apk-0.2.33 과 같은 줄이라 그 뒤로(플래그만 먼저 보내면 relay 즉시 승리 회귀).
+- 시험: punch_any 60/60 ×6(시험 실행 전체)(가상 시계 999/1000/1001·relay 선후/유실·무응답·legacy·형식 오류·비일치·취소·실 소켓·필드 표본 replay), 부정 대조 mutant 3 모두 FAIL, directory suite PASS 832 rc0(relay_early 16 포함), np_early_bootstrap e2e 26/26 ×3(새/구 서버 × 새/구 뷰어 × host 응답/무응답), directory_session_client·connect_candidates·connect_op_gate·directory_retry PASS, NDK aarch64 문법 검사 0 경고. 운영 서버·NAS·공유기 무변경.
+- 제품/테스트/문서: 제품(server.js relay 응답·connect, rendezvous·bootstrap·session_client·connect_candidates·viewer_startup) / 테스트(punch_any, relay_early, e2e+probe) / 문서(README relay, 이 항목).
