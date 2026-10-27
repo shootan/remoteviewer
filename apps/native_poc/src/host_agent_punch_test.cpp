@@ -5,8 +5,10 @@
 //
 // r3 (Codex codex_ka_punch_thread_src_r2.md T2, as dirretry r2 d2f1243): the agent's cache file lives in ONE test root
 // -- REMOTE60_TEST_TMP must name a folder directly under the trusted anchor D:/remote/remote/.claude/test-tmp (no links)
-// -- under a name unique to this process; the test deletes that file only, through a guard, and refuses to run without
-// a valid root. (r2 named a fixed file beside the executable and deleted it at start and end: for a build outside the
+// -- the root itself checked to BE a plain folder (r4 T2-a), and inside it a NEW folder of this run's own (made with
+// CreateDirectory, which fails on any existing name: r4 T2-b) holds the cache file. Nothing is deleted before the run;
+// after it, that file (if the agent wrote it) and this run's folder (not recursive) go. Without a valid root it refuses
+// to run. (r2 named a fixed file beside the executable and deleted it at start and end: for a build outside the
 // repository that is a delete outside it. The agent never wrote it -- an unreachable directory never registers -- so
 // those deletes found nothing; see the report.)
 
@@ -70,13 +72,31 @@ bool init_root(std::string* why) {
     *why = "the test root could not be created";
     return false;
   }
-  if (is_reparse(root)) { *why = "the test root is a link"; return false; }
-  gRoot.clear();
-  for (wchar_t ch : root) gRoot.push_back(static_cast<char>(ch));
-  return true;
+  // r4 (Codex T2-a): what is there now must BE a folder -- looked up, a directory, no link (a plain file of that name
+  // used to pass: CreateDirectory said "already exists" and only the link bit was read)
+  const DWORD rootAttr = GetFileAttributesW(root.c_str());
+  if (rootAttr == INVALID_FILE_ATTRIBUTES || !(rootAttr & FILE_ATTRIBUTE_DIRECTORY) || (rootAttr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    *why = "the test root is not a plain folder";
+    return false;
+  }
+  // r4 (Codex T2-b): this run's own folder in it, made NEW (CreateDirectory fails on any existing name -- a folder, a
+  // file, another run's): what is in it is this run's alone. Nothing that was already there is touched.
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    const std::wstring run = root + L"\\run-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                             std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(attempt);
+    if (CreateDirectoryW(run.c_str(), nullptr)) {
+      if (is_reparse(run)) { *why = "this run's folder is a link"; return false; }
+      gRoot.clear();
+      for (wchar_t ch : run) gRoot.push_back(static_cast<char>(ch));
+      return true;
+    }
+    if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+  }
+  *why = "no new folder for this run could be made";
+  return false;
 }
 
-// The one delete this test does: a file directly in its root, of this run's own name.
+// The one delete this test does: a file directly in THIS run's own new folder (gRoot is that folder).
 void delete_own_file(const std::string& path) {
   const std::string prefix = gRoot + "\\";
   if (gRoot.empty() || path.size() <= prefix.size() || _strnicmp(path.c_str(), prefix.c_str(), prefix.size()) != 0 ||
@@ -128,10 +148,8 @@ int main() {
   }
   WSADATA w;
   WSAStartup(MAKEWORD(2, 2), &w);
-  // this run's own file in the root (an unreachable directory never registers: the agent never writes it -- the name
-  // is still unique and the delete still guarded)
-  const std::string cache = gRoot + "\\host-agent-punch-" + std::to_string(GetCurrentProcessId()) + ".cache";
-  delete_own_file(cache);
+  // in this run's own new folder: nothing to clear first (r4 T2-b -- no pre-delete of a name another run could hold)
+  const std::string cache = gRoot + "\\host-agent.cache";
 
   d::HostAgentConfig cfg;
   cfg.url = "http://127.0.0.1:9";  // nobody answers: the cycle fails and retries, nothing else happens
@@ -179,7 +197,10 @@ int main() {
   agent.Stop();
   check("Stop again: empty", agent.PendingPunchJobsForTest() == 0);
 
-  delete_own_file(cache);
+  delete_own_file(cache);  // only if the agent wrote it; in this run's folder either way
+  std::wstring wroot;
+  for (char ch : gRoot) wroot.push_back(static_cast<wchar_t>(ch));
+  RemoveDirectoryW(wroot.c_str());  // this run's folder, not recursive: anything unexpected in it stays
   std::printf("\n%d checks, %d failures\n%s\n", gChecks, gFailures, gFailures == 0 ? "RESULT PASS" : "RESULT FAIL");
   WSACleanup();
   return gFailures == 0 ? 0 : 1;
