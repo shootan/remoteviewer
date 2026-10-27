@@ -3192,6 +3192,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 continue
             }
             next[key] = lease
+            if (before?.handedOff == true && !lease.handedOff) {
+                // r2 D1 cost: what of the old session had already reached the lease when it took its socket back
+                diagnosticsLog.log("standby_back", "host=${key.hostId} strays=${lease.strays} tail=${lease.tailActive}")
+            }
             if (before?.tailActive == true && !lease.tailActive) {
                 diagnosticsLog.log("standby_tail_quiet", "host=${key.hostId} strays=${lease.strays}")
             }
