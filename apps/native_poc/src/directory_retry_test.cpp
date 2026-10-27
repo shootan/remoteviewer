@@ -1678,7 +1678,7 @@ int main() {
         // Never silently skipped: an unavailable adjacent port would otherwise turn this into a
         // case that passes by not running.
         check((std::string(row.what) + ": could not lay out the fixture").c_str(), false,
-              "the adjacent udp port was not free after 32 tries");
+              "no free tcp/udp adjacent pair after 256 random tries");
         continue;
       }
       dir.Script("/healthz", {row.health});
