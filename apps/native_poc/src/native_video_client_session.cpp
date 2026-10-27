@@ -1559,7 +1559,10 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
                                               : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
   hello.requestNack = true;  // ask for selective retransmit (video NACK.)
   uint32_t ackFeatures = 0;
-  if (!udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures)) {
+  // keepalive-r2 (2): a standby activation replaces the Hello on this socket (the lease's); everything after it is the same
+  const bool admitted = args.udpHandshake ? args.udpHandshake(connected, stopRequested_, error, &ackFeatures)
+                                          : udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures);
+  if (!admitted) {
     close_socket(&connected);
     return false;
   }
