@@ -18,6 +18,8 @@
 // `static nextToolbarPushUs`, initialisers unchanged (viewer split refactor Phase 1-1). The
 // write-only gOverlayConfig snapshot that came with them is gone (F-03).
 
+#include <functional>
+
 #include "viewer_common.hpp"
 #include "viewer_constants.hpp"
 
@@ -30,6 +32,14 @@ struct SessionState {
   std::atomic<uint64_t> uiHeartbeatUs{0};
   bool controlRequired = false;
   SOCKET sock = INVALID_SOCKET;
+  // ka-pc-impl r1: `sock` is a duplicate of a standby lease's socket (an activation). It is closed, never shut
+  // down: shutdown() acts on the socket the lease keeps pinging on after the session.
+  bool sockSharedWithLease = false;
+  // ka-pc-impl r1: the managed standby viewer's milestones of one activation ("picker-ready", "presented"),
+  // each said once; empty in an ordinary viewer. Called on the UI thread.
+  std::function<void(const char*)> milestone;
+  std::atomic<bool> pickerReadySaid{false};
+  std::atomic<bool> presentedSaid{false};
   // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
   HWND hwnd = nullptr;
   uint32_t windowW = 1600;

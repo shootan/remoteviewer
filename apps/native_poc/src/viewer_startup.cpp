@@ -328,6 +328,25 @@ int open_media_socket(ViewerContext& ctx) {
   // already prepared (it is the one the directory observed, so the host is punching towards it)
   // and the capability that follows is what the host authorises the session against.
   ctx.resolvedArgs = ctx.args;
+  // ka-pc-impl r1 (KA ③): a standby lease's activation. Its socket is the lease's (duplicated): no directory,
+  // no observe, no punch -- the address is the one the lease is admitted at (the Host, or a relay lease).
+  if (ctx.standby) {
+    if (ctx.standbyTaken || ctx.standby->preparedUdpSocket == INVALID_SOCKET) {
+      std::cerr << "[native-video-client] standby activation arguments already used\n";
+      return 3;
+    }
+    ctx.session.sock = ctx.standby->preparedUdpSocket;
+    ctx.standby->preparedUdpSocket = INVALID_SOCKET;  // the session owns this handle now
+    ctx.standbyTaken = true;
+    ctx.session.sockSharedWithLease = true;
+    ctx.resolvedArgs.host = ctx.standby->host;
+    ctx.resolvedArgs.port = ctx.standby->videoPort;
+    ctx.resolvedArgs.controlPort = 0;  // control rides the media socket, as on the directory path
+    ctx.directoryPunchToken.clear();
+    std::cout << "[native-video-client] standby activation on the lease socket -> " << ctx.standby->host << ":"
+              << ctx.standby->videoPort << "\n";
+    return 0;
+  }
   if (!ctx.args.directoryUrl.empty()) {
     if (ctx.dec.transport != VideoTransport::Udp) {
       std::cerr << "[native-video-client] the directory path is udp only\n";
@@ -682,9 +701,13 @@ int connect_media_socket(ViewerContext& ctx) {
     remote60::native_poc::UdpHelloStats helloStats;
     // The stop this viewer never passed. Without it the handshake ran its whole budget --
     // now thirty seconds -- after the shell had already started a different session.
-    const bool handshakeOk = remote60::native_poc::udp_hello_handshake(
-        ctx.session.sock, hello, &ctx.connectCancelled, &helloError, &ackFeatures,
-        &helloStats);
+    // ka-pc-impl r1: an activation replaces the Hello with the lease's handshake (StandbyActivate, then the
+    // current generation's Pong + HelloAck); everything after it is the same.
+    const bool handshakeOk =
+        (ctx.standby && ctx.standby->udpHandshake)
+            ? ctx.standby->udpHandshake(ctx.session.sock, ctx.connectCancelled, &helloError, &ackFeatures)
+            : remote60::native_poc::udp_hello_handshake(ctx.session.sock, hello, &ctx.connectCancelled, &helloError,
+                                                        &ackFeatures, &helloStats);
     std::cout << "[native-video-client][attempt] hello ok=" << (handshakeOk ? 1 : 0)
               << " attempts=" << helloStats.attempts << " badAcks=" << helloStats.badAcks
               << " recvErrors=" << helloStats.recvErrors

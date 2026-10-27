@@ -9,28 +9,23 @@
 #include "viewer_shutdown.hpp"
 #include "viewer_cancel_channel.hpp"
 #include "viewer_startup.hpp"
+#include "viewer_managed_standby.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <memory>
 
 using namespace remote60::native_poc::viewer;
 
-int main(int argc, char** argv) {
-  std::cout.setf(std::ios::unitbuf);
-  std::cerr.setf(std::ios::unitbuf);
-  apply_latency_priority();
-  apply_dpi_awareness();
+namespace {
 
-  ViewerContext ctx;
-  load_config(ctx, argc, argv);
-  if (const int rc = validate_codec_transport(ctx)) return rc;
-  apply_initial_state(ctx);
-
-  remote60::native_poc::WinsockScope ws;
-  if (!ws.ok) {
-    std::cerr << "[native-video-client] WSAStartup failed\n";
-    return 1;
-  }
-
+// ka-pc-impl r1 (KA ③, step 1): one session, start to end, on a context of its own. What main() did after
+// WSAStartup, unchanged -- moved here so a process can run more than one session in turn (the managed standby
+// viewer activates its lease again after a park). Everything a session creates (its window, toolbar, decoder,
+// MF, threads, sockets) is created and torn down inside; the process-wide state it touches is reset at the
+// start of the next one (create_window, session_toolbar_destroy).
+int run_session(ViewerContext& ctx) {
   if (const int rc = create_window_and_toolbar(ctx)) return rc;
   if (const int rc = init_decoder(ctx)) return rc;
 
@@ -89,6 +84,13 @@ int main(int argc, char** argv) {
     }
 
     // Only what the code actually knows. No guess about firewalls or accounts.
+    // ka-pc-impl r1: an activation's arguments are used once -- no "retry" here. The managed viewer reports the
+    // failure to the shell and goes back to standby; a new attempt is a new tap (Codex: no automatic re-activation).
+    if (ctx.standby) {
+      viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+      return rc;
+    }
+
     std::string reason;
     if (rc == 3) {
       reason = "연결을 준비하지 못했습니다.";
@@ -150,4 +152,61 @@ int main(int argc, char** argv) {
   shutdown_viewer(ctx);
   std::cout << "[native-video-client] done\n";
   return ctx.session.recoveryExitCode.load();
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  std::cout.setf(std::ios::unitbuf);
+  std::cerr.setf(std::ios::unitbuf);
+  apply_latency_priority();
+  apply_dpi_awareness();
+
+  remote60::native_poc::WinsockScope ws;
+  if (!ws.ok) {
+    std::cerr << "[native-video-client] WSAStartup failed\n";
+    return 1;
+  }
+
+  // ka-pc-impl r1 (KA ③): the client shell's managed standby viewer of one PC (viewer_managed_standby.hpp).
+  {
+    auto probe = std::make_unique<ViewerContext>();
+    load_config(*probe, argc, argv);
+    if (probe->args.managedStandby) {
+      probe.reset();
+      return run_managed_standby(
+          [argc, argv](ViewerContext& c) {
+            load_config(c, argc, argv);
+            if (validate_codec_transport(c) != 0) return false;
+            apply_initial_state(c);
+            return true;
+          },
+          [](ViewerContext& c) { return run_session(c); });
+    }
+  }
+
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+  // TEST BUILD ONLY (GNLinkViewerKaTest, ka-pc-impl r1 step 1): REMOTE60_VIEWER_TEST_SESSIONS=N runs N sessions
+  // one after another in this one process, each on a fresh context -- the re-entry the managed standby viewer
+  // needs. The exit code is the last session's; each session's end is logged.
+  int sessions = 1;
+  if (const char* v = std::getenv("REMOTE60_VIEWER_TEST_SESSIONS")) sessions = (std::max)(1, std::atoi(v));
+  int rc = 0;
+  for (int i = 1; i <= sessions; ++i) {
+    std::cout << "[viewer][ka-test] session " << i << "/" << sessions << " begins\n";
+    auto ctx = std::make_unique<ViewerContext>();
+    load_config(*ctx, argc, argv);
+    if (const int bad = validate_codec_transport(*ctx)) return bad;
+    apply_initial_state(*ctx);
+    rc = run_session(*ctx);
+    std::cout << "[viewer][ka-test] session " << i << "/" << sessions << " ended rc=" << rc << "\n";
+  }
+  return rc;
+#else
+  ViewerContext ctx;
+  load_config(ctx, argc, argv);
+  if (const int rc = validate_codec_transport(ctx)) return rc;
+  apply_initial_state(ctx);
+  return run_session(ctx);
+#endif
 }

@@ -328,6 +328,13 @@
   // Remembered so the list can be redrawn when only the connecting target changes.
   let lastHosts = [];
   let connectingId = '';
+  // ka-pc-impl r1 (KA ③): what the shell says about each kept PC -- only what a managed viewer reported
+  // (hostKeep), never inferred here. "ready" means the PC's standby entry is confirmed and alive.
+  const keepState = {};
+  const keepText = {
+    ready: '준비됨', preparing: '준비 중', starting: '준비 중', retry: '다시 준비 중',
+    active: '연결됨', unsupported: '상시 유지 미지원 (PC 업데이트 필요)', failed: '상시 유지 안 됨',
+  };
 
   function renderHosts(hosts) {
     lastHosts = hosts;
@@ -343,8 +350,12 @@
       button.className = 'host';
       button.dataset.online = host.online ? '1' : '0';
       if (connecting) button.dataset.connecting = '1';
-      button.disabled = !host.online || busy;
-      const state = connecting ? '연결하는 중…' : (host.online ? '연결 가능' : '오프라인');
+      // Per card (ka-pc-impl r1): the PC being connected is the one that waits; another PC can still be
+      // chosen -- the newest choice is what counts.
+      button.disabled = !host.online || connecting;
+      const kept = keepText[keepState[host.hostId]];
+      const state = connecting ? '연결하는 중…'
+                               : (host.online ? (kept ? kept : '연결 가능') : '오프라인');
       button.innerHTML =
         (connecting ? '<span class="spinner"></span>'
                     : '<span class="dot' + (host.online ? ' on' : '') + '"></span>') +
@@ -352,9 +363,8 @@
       // textContent, not innerHTML: the name came off another machine.
       button.querySelector('.name').textContent = host.hostName || host.hostId;
       button.onclick = () => {
-        if (busy) return;
+        if (host.hostId === connectingId) return;
         connectingId = host.hostId;
-        setBusy(true);
         message($('hostsMsg'), (host.hostName || 'PC') + '에 연결하는 중');
         renderHosts(lastHosts);
         send({ type: 'connect', hostId: host.hostId, hostName: host.hostName });
@@ -443,7 +453,14 @@
       renderHosts(msg.hosts || []);
       return;
     }
+    if (msg.type === 'hostKeep') {
+      if (msg.state && msg.state !== 'none') keepState[msg.hostId] = msg.state;
+      else delete keepState[msg.hostId];
+      if (lastHosts.length) renderHosts(lastHosts);
+      return;
+    }
     if (msg.type === 'signedOut') {
+      for (const k of Object.keys(keepState)) delete keepState[k];
       show($('cancelReconnect'), false);
       setBusy(false);
       updateVersion = '';

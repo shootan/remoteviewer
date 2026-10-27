@@ -116,6 +116,8 @@ void restore_on_reveal(ViewerState& ctx, uint64_t generation) {
 }
 
 void restore_frame_presented(ViewerState& ctx, uint64_t generation) {
+  // ka-pc-impl r1: the managed viewer's Presented (the first picture of its activation, after a pick).
+  if (ctx.session.milestone && !ctx.session.presentedSaid.exchange(true)) ctx.session.milestone("presented");
   auto& r = ctx.picker.restore;
   const auto committed = r.commit.OnPresented(generation);
   if (!committed) return;

@@ -30,6 +30,7 @@
 #include "viewer_session_watchdog.hpp"
 #include "viewer_restore.hpp"
 
+#include <cstdlib>
 #include <iostream>
 
 namespace remote60::native_poc::viewer {
@@ -399,6 +400,27 @@ struct PasteGesture {
   bool ext = false;
 };
 PasteGesture gLastFailed;
+
+// ka-pc-impl r1 (KA ③, step 1): this file's statics belong to ONE session (one window). A process that runs
+// another session after the first (the managed standby viewer, after a park) starts it from these defaults,
+// never from the last session's paste, IME or held keys. Called by create_window, on the UI thread.
+void reset_window_session_statics() {
+  gPrevHimc = nullptr;
+  gImeDetached = false;
+  gPhysicalDown.clear();
+  gPaste = PasteGate{};
+  gLatestCopy = LatestCopy{};
+  gWaitingSnap = PasteSnapshot{};
+  gGenAtLocalCopy = 0;
+  gGenAtLocalValid = false;
+  gLocalCopySeq = 0;
+  gLocalBasePending = false;
+  gProbeId = 0;
+  gProbeSnap = PasteSnapshot{};
+  gReleasedMods = 0;
+  gPasteLine = PasteLine{};
+  gLastFailed = PasteGesture{};
+}
 
 void paste_log(const std::string& line) { std::cout << "[native-video-client][paste] " << line << "\n"; }
 
@@ -1204,7 +1226,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_CLOSE:
       ctx.session.running = false;
-      if (ctx.session.sock != INVALID_SOCKET) shutdown(ctx.session.sock, SD_BOTH);
+      // ka-pc-impl r1: a lease's socket is not shut down -- the lease pings on it after this session.
+      if (ctx.session.sock != INVALID_SOCKET && !ctx.session.sockSharedWithLease) shutdown(ctx.session.sock, SD_BOTH);
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
@@ -1758,6 +1781,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // must be the explicit *W form -- DefWindowProcA on a Unicode window read the wide title as
 // ANSI and truncated it to "r", and delivered WM_CHAR as ANSI.
 bool create_window(ViewerState& ctx) {
+  reset_window_session_statics();
   HINSTANCE inst = GetModuleHandle(nullptr);
   const wchar_t* cls = L"Remote60NativeVideoClient";
   WNDCLASSEXW wc{};
@@ -1768,7 +1792,8 @@ bool create_window(ViewerState& ctx) {
   // Keep background unmanaged so WM_ERASEBKGND can suppress flicker.
   wc.hbrBackground = nullptr;
   wc.lpszClassName = cls;
-  if (!RegisterClassExW(&wc)) return false;
+  // A second session in the same process (ka-pc-impl r1) finds the class already registered -- that is fine.
+  if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
   // The user sees this in the taskbar and in Alt-Tab. "remote60 native video client" is the
   // name of a prototype; set_viewer_window_title() puts the target beside it once one is chosen.
@@ -1788,7 +1813,18 @@ bool create_window(ViewerState& ctx) {
     SetWindowPos(ctx.session.hwnd, nullptr, 0, 0, dpi_scale(ctx, static_cast<int>(ctx.session.windowW)),
                  dpi_scale(ctx, static_cast<int>(ctx.session.windowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+  // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_WINDOW_X/_Y place the window (off the user's
+  // monitors for an isolated run) and it is shown without taking the focus. The product shows it as below.
+  if (const char* x = std::getenv("REMOTE60_VIEWER_TEST_WINDOW_X")) {
+    const char* y = std::getenv("REMOTE60_VIEWER_TEST_WINDOW_Y");
+    SetWindowPos(ctx.session.hwnd, nullptr, std::atoi(x), y ? std::atoi(y) : 0, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  ShowWindow(ctx.session.hwnd, SW_SHOWNOACTIVATE);
+#else
   ShowWindow(ctx.session.hwnd, SW_SHOW);
+#endif
   UpdateWindow(ctx.session.hwnd);
   // Remote-cursor overlay cadence: 50ms is enough for a 30Hz feed and costs nothing when hidden.
   SetTimer(ctx.session.hwnd, kCursorOverlayTimerId, 50, nullptr);

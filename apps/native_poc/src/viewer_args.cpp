@@ -145,6 +145,12 @@ Args parse_args(int argc, char** argv) {
       a.restoreTarget = trim_ascii(argv[++i]);
     } else if (k == "--reconnect") {
       a.reconnect = true;
+    } else if (k == "--managed-standby") {
+      a.managedStandby = true;
+    } else if (k == "--ipc-read" && i + 1 < argc) {
+      a.ipcReadHandle = trim_ascii(argv[++i]);
+    } else if (k == "--ipc-write" && i + 1 < argc) {
+      a.ipcWriteHandle = trim_ascii(argv[++i]);
     }
   }
   return a;

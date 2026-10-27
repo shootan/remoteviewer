@@ -609,6 +609,8 @@ add_executable(remote60_native_video_client_poc
   src/url_origin.cpp
   # The macro window is a page too, so the viewer needs the same shell the client uses.
   src/macro_shell_bridge.cpp
+  # ka-pc-impl r1 (KA ③): the managed standby mode -- one PC's lease, activated by the shell.
+  src/viewer_managed_standby.cpp
 )
 # Korean literals reach the user from this target: the macro window's messages, and the picker's
 # header and status lines. The flag used to sit inside the WebView2 conditional, which made the
@@ -695,6 +697,37 @@ foreach(_mutant MONITOR_AS_DESKTOP REPORT_ON_REVEAL)
   set_target_properties(remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTIES
     OUTPUT_NAME "GNLinkViewerR3Mutant_${_mutant_lower}")
 endforeach()
+
+# ka-pc-impl r1 (KA ③): the shell <-> managed viewer channel and the recent-PC store (no viewer, no network).
+add_executable(remote60_ka_pc_units_test src/ka_pc_units_test.cpp)
+target_include_directories(remote60_ka_pc_units_test PRIVATE src)
+
+# ka-pc-impl r1 (KA ③): the managed standby viewer end to end (this test plays the shell): real server.js, real
+# hosts (this build + the published 0.2.163), GNLinkViewerKaTest --managed-standby. Writes only under REMOTE60_TEST_TMP.
+add_executable(remote60_ka_pc_managed_e2e_test
+  src/ka_pc_managed_e2e_test.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_ka_pc_managed_e2e_test PRIVATE src)
+target_link_libraries(remote60_ka_pc_managed_e2e_test PRIVATE common ws2_32 windowsapp d3d11 dxgi)
+add_dependencies(remote60_ka_pc_managed_e2e_test remote60_viewer_ka_test remote60_native_video_host_poc)
+
+# ka-pc-impl r1 (KA ③): the same viewer with REMOTE60_VIEWER_KA_TEST_SEAM -- N sessions in one process
+# (REMOTE60_VIEWER_TEST_SESSIONS) and a window placed off the user's monitors, shown without focus
+# (REMOTE60_VIEWER_TEST_WINDOW_X/_Y). Same sources, libraries and options as GNLinkViewer; one define. Never shipped.
+add_executable(remote60_viewer_ka_test ${_viewer_sources})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_viewer_ka_test PROPERTY ${_prop} "${_value}")
+  endif()
+endforeach()
+target_compile_definitions(remote60_viewer_ka_test PRIVATE REMOTE60_VIEWER_KA_TEST_SEAM=1)
+set_target_properties(remote60_viewer_ka_test PROPERTIES OUTPUT_NAME "GNLinkViewerKaTest")
 
 # prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
 # against a fake control host on loopback (no UI, no SendInput, no desktop).

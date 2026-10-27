@@ -55,7 +55,10 @@ void shutdown_viewer(ViewerContext& ctx) {
   ctx.input.macro.StopPlayback();
   ctx.input.macro.StopRecording();
   remote60::native_poc::macro_window_destroy();
-  if (ctx.session.sock != INVALID_SOCKET) {
+  // ka-pc-impl r1: a lease's socket (an activation's duplicate) is closed below, never shut down -- shutdown()
+  // would end the very socket the lease keeps pinging on once this session is over. The recv thread still
+  // leaves: `running` is down and its receive is bounded by the timeout armed at connect.
+  if (ctx.session.sock != INVALID_SOCKET && !ctx.session.sockSharedWithLease) {
     shutdown(ctx.session.sock, SD_BOTH);
   }
   if (ctx.controlSock != INVALID_SOCKET) {
