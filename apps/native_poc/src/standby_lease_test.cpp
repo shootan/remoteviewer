@@ -177,6 +177,84 @@ class FakeHost {
   sockaddr_in peer_{};
 };
 
+bool park(n::StandbyLease& lease);
+
+// A UDP endpoint on loopback that answers every datagram with itself (a directory's observe port, for ObserveFrom).
+class Echo {
+ public:
+  ~Echo() { Stop(); }
+  bool Start() {
+    s_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (bind(s_, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) != 0) return false;
+    socklen_t l = sizeof(a);
+    getsockname(s_, reinterpret_cast<sockaddr*>(&a), &l);
+    port = ntohs(a.sin_port);
+    t_ = std::thread([this] {
+      while (!stop_) {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(s_, &rd);
+        timeval tv{0, 20000};
+        if (select(static_cast<int>(s_) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+        char buf[256];
+        sockaddr_in from{};
+        socklen_t fl = sizeof(from);
+        const int n = static_cast<int>(recvfrom(s_, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl));
+        if (n > 0) {
+          ++seen;
+          sendto(s_, buf, n, 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+        }
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    stop_ = true;
+    if (t_.joinable()) t_.join();
+    n::close_socket(&s_);
+  }
+  uint16_t port = 0;
+  std::atomic<int> seen{0};
+
+ private:
+  n::SocketHandle s_ = n::kInvalidSocket;
+  std::thread t_;
+  std::atomic<bool> stop_{false};
+};
+
+// ② e (AVD ke_r3): the session connect()s the duplicate it got; the lease's socket must not stay tied to that peer.
+void shared_socket_test(FakeHost& host) {
+  std::printf("\n--- ② e: the activation's socket is shared; the session's connect() does not stay on the lease ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  Echo directory;
+  check("parked at the fake host; an observe endpoint up", park(lease) && directory.Start());
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("activation arguments say the socket is shared (the session never shuts it down)",
+        lease.ActivationArgs(&args, nullptr, &op) && args.preparedSocketShared);
+  // what ClientSessionController::ConnectUdpVideo does with a prepared socket: connect() it to the peer
+  sockaddr_in peer{};
+  peer.sin_family = AF_INET;
+  peer.sin_port = htons(host.port);
+  inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+  const bool connected = connect(args.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+  n::close_socket(&args.preparedUdpSocket);  // the session ended (its descriptor closed, not shut down)
+  check("the session's connect() on its duplicate; its descriptor closed; SessionOver", connected && lease.SessionOver(op));
+  const int seen0 = directory.seen;
+  check("...an observe to ANOTHER address from the lease works (POSIX: the association dissolved; Windows: a fresh socket)",
+        lease.ObserveFrom("127.0.0.1", directory.port, "obs-shared") && directory.seen > seen0,
+        "seen=" + std::to_string(directory.seen - seen0));
+  const int pings = host.pings;
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && host.pings == pings) lease.Pump(50);
+  check("...and the lease pings its own target again", host.pings > pings && lease.state() == State::Parked);
+}
+
 // The connect thread of a session: runs the handshake of `args` as ClientSessionController::Connect would.
 struct Handshaking {
   std::atomic<bool> stop{false}, done{false};
@@ -525,6 +603,7 @@ int main() {
   hello_ack_test(host);
   cancel_then_answer_test(host);
   handoff_priority_test(host);
+  shared_socket_test(host);
   runner_test(host);
   host.Stop();
   std::printf("\n%d checks, %d failures\n", gChecks, gFailures);

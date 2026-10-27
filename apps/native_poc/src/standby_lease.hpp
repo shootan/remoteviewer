@@ -186,6 +186,18 @@ class StandbyLease {
         idle_.notify_all();
         return false;
       }
+      if (peerTied_) {
+        // still tied to a session's peer (Windows): a fresh socket for the new capability (no read is running: the
+        // pump starts none while an intent waits, and the one in flight has ended)
+        std::string error;
+        peerTied_ = false;
+        if (!Reopen(&error)) {
+          Note("reopen failed: " + error);
+          idle_.notify_all();
+          return false;
+        }
+        Note("socket reopened (tied to a session's peer)");
+      }
       observing_ = true;
       s = socket_;
     }
@@ -263,6 +275,7 @@ class StandbyLease {
     args->requireTcpControl = false;
     args->controlOverUdp = true;
     args->preparedUdpSocket = sessionHandle;  // the session's handle; the lease keeps its own
+    args->preparedSocketShared = true;        // ② e: never shut down by the session (POSIX: it is this socket too)
     handedOff_ = true;
     cancel_.store(false, std::memory_order_release);
     const uint64_t thisOp = op_ = NextOp();  // process-wide: a late call naming an old lease's op never matches a new one
@@ -280,7 +293,7 @@ class StandbyLease {
     std::lock_guard<std::mutex> lock(mu_);
     if (op != op_ || !handedOff_ || handshaking_.load(std::memory_order_acquire)) return false;
     if (sessionHandle) close_socket(sessionHandle);
-    handedOff_ = false;
+    handedOff_ = false;  // never connected: the session's worker (which connect()s it) did not start
     return true;
   }
 
@@ -291,6 +304,8 @@ class StandbyLease {
     std::lock_guard<std::mutex> lock(mu_);
     if (op != op_ || !handedOff_ || handshaking_.load(std::memory_order_acquire)) return false;
     handedOff_ = false;
+    // the session connect()ed its duplicate to its peer: that stays on the shared socket unless dissolved
+    if (!DissolvePeer(socket_)) peerTied_ = true;
     if (client_.state() == State::Active) client_.SessionEnded(now_());
     if (socket_ == kInvalidSocket) {
       std::string error;
@@ -332,6 +347,23 @@ class StandbyLease {
       return false;
     }
     return true;
+  }
+
+  // ② e (AVD ke_r3): the session connect()s its duplicate to its peer, and the association is the SOCKET's (a POSIX
+  // dup, and a WSADuplicateSocket duplicate alike): when the lease takes its socket back it is dissolved, so the lease's
+  // own datagrams go where IT aims them again. POSIX: connect(AF_UNSPEC). Windows cannot un-connect a UDP socket
+  // (INADDR_ANY:0 -> WSAEADDRNOTAVAIL, AF_UNSPEC -> WSAEAFNOSUPPORT, measured): false -- the socket stays tied to that
+  // peer, which is still the lease's own target (its Pings go on); before it aims anywhere else (an observation for a
+  // new capability) the lease opens a fresh socket (ObserveFrom), as a new capability's lease is a new one anyway.
+  static bool DissolvePeer(SocketHandle s) {
+    if (s == kInvalidSocket) return true;
+#if defined(_WIN32)
+    return false;
+#else
+    sockaddr none{};
+    none.sa_family = AF_UNSPEC;
+    return connect(s, &none, sizeof(none)) == 0;
+#endif
   }
 
   // Another handle to the same socket (the same local endpoint); closing one leaves the other.
@@ -558,6 +590,7 @@ class StandbyLease {
   std::condition_variable idle_;  // reading_ / observing_ went false, an intent was withdrawn
   bool reading_ = false;          // the pump waits on socket_ (outside the lock)
   bool observing_ = false;        // ObserveFrom reads socket_ (outside the lock)
+  bool peerTied_ = false;         // a session's connect() could not be dissolved: reopen before aiming elsewhere
   int intents_ = 0;               // handoffs / observations waiting for the socket: no new pump read meanwhile
 
  public:
