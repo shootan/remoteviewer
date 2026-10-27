@@ -1161,7 +1161,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
   ca.Disconnect();
   a.SessionOver();
   pump_until(a, [] { return false; }, 7000);
-  check("A parks again on a new socket: its entry answers its Pings", a.state() == StandbyLease::State::Parked &&
+  check("A parks again on its lease's own socket: its entry answers its Pings", a.state() == StandbyLease::State::Parked &&
         a.lostCount() == 0, last_events(a));
   remote60::native_poc::ClientSessionConnectArgs argsA2;
   argsA2.encodedFrameSink = &sinkA;
@@ -1263,11 +1263,21 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     wait_until([&] { return rca.Snapshot().state != remote60::native_poc::ClientSessionState::Connected; }, 25000);
     rca.Disconnect();
     ra.SessionOver();
-    // the stated limit: A's new socket is not the endpoint its relay lease is bound to -- its Pings die there, the
-    // entry is lost (never kept as ready) and re-admitted with a NEW standby connect from the new socket
-    const bool readmitted = pump_until(ra, [&] { return ra.lostCount() >= 1 && ra.state() == StandbyLease::State::Parked; }, 45000);
-    check("through the relay, A's lease after its session: lost on the new socket, then re-admitted and parked (bounded)",
-          readmitted, last_events(ra));
+    // the lease kept its socket (the session had a duplicate handle): the SAME endpoint its relay lease is bound to --
+    // the entry goes on by Ping through the relay, no loss, no new standby connect
+    const int connectsBefore = observeSeq;
+    pump_until(ra, [] { return false; }, 20000);
+    check("through the relay, A's lease after its session: still parked on the same socket -- no loss, no new connect",
+          ra.state() == StandbyLease::State::Parked && ra.lostCount() == 0 && observeSeq == connectsBefore, last_events(ra));
+    remote60::native_poc::ClientSessionConnectArgs rargsA2;
+    rargsA2.encodedFrameSink = &rsinkA;
+    rargsA2.controlIntervalMs = 200;
+    const uint64_t rframes = rsinkA.frames();
+    const bool rupA2 = ra.ActivationArgs(&rargsA2) && rca.Connect(rargsA2) &&
+                       wait_until([&] { return rca.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
+    check("...and takes the session back through the same relay lease (video)", rupA2 &&
+          wait_until([&] { return rsinkA.frames() > rframes; }, 10000), rca.Snapshot().lastError + " | " + last_events(ra));
+    rca.Disconnect();
     rcb.Disconnect();
     rh.Stop();
     srv.Stop();
