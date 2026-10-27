@@ -40,6 +40,12 @@ struct DirectoryConnectTarget {
   // empty because the host predates it.
   std::string hostPublicIp;
   uint16_t hostPublicUdpPort = 0;
+  // keepalive-r2 (2), a standby connect only (contract §2.7): "reserved" (this connect has its own relay lease) or
+  // why not ("host-full", "not-eligible", "relay-disabled", ...); empty = the server did not say (an older server:
+  // no standby relay). The relay's address when one is offered (the candidate of kind "relay").
+  std::string standbyRelay;
+  std::string relayIp;
+  uint16_t relayPort = 0;
 };
 
 /**
@@ -148,6 +154,14 @@ SessionCall directory_session_logout(const std::string& url, const std::string& 
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
                        DirectoryConnectTarget* outTarget, std::string* outError,
-                       uint32_t* outStatus = nullptr);
+                       uint32_t* outStatus = nullptr, bool standby = false);
+
+/**
+ * keepalive-r2 (2) (contract §2.7, Codex decision 2): whether this directory supports standby, read from /api/hosts
+ * (no side effect). An older server says nothing: *outSupported false. Missing, a timeout or an error is NOT support --
+ * a client never learns it from a first mutating connect.
+ */
+bool directory_standby_support(const std::string& url, const std::string& sessionToken, bool* outSupported,
+                               bool* outRelay, std::string* outError);
 
 }  // namespace remote60::native_poc

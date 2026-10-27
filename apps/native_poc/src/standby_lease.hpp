@@ -4,6 +4,11 @@
 // host lease, one socket; two hosts are never multiplexed on one) and the StandbyEntryClient that decides what goes on
 // it. The caller pumps it (Pump) from whatever thread owns the lease; nothing here starts a thread.
 //
+// Where the lease's datagrams go is the capability's: CapabilityFn gets the lease's socket (a relay standby connect
+// observes from THIS socket, so the relay binds its lease to this endpoint) and returns the one-time capability with
+// the address to aim at -- the relay's (standbyRelay "reserved") or the host's. Only datagrams from that address are
+// read.
+//
 // Activation is a CONNECT MODE of ClientSessionController, not another session type: ActivationArgs() hands the
 // lease's socket to the session (ClientSessionConnectArgs::preparedUdpSocket, which the session then owns) with a
 // handshake that sends StandbyActivate instead of the Hello and returns only when this activation's own Pong
@@ -28,11 +33,17 @@
 
 namespace remote60::native_poc {
 
+struct StandbyCapability {
+  std::string token;  // the one-time capability (/api/connect punchToken)
+  std::string ip;     // where this lease's datagrams go: the relay (a standby lease reserved there) or the host
+  uint16_t port = 0;
+};
+
 class StandbyLease {
  public:
   using State = StandbyEntryClient::State;
-  // A fresh one-time capability for this host (a directory connect), or empty when none can be had now.
-  using CapabilityFn = std::function<std::string()>;
+  // A fresh capability for this host through the lease's own socket; false = none can be had now.
+  using CapabilityFn = std::function<bool(SocketHandle socket, StandbyCapability* out)>;
   using Clock = std::function<uint64_t()>;
 
   StandbyLease(GenerationAllocator& gens, uint32_t helloFeatures, CapabilityFn capability, Clock nowMs)
@@ -41,17 +52,13 @@ class StandbyLease {
   StandbyLease(const StandbyLease&) = delete;
   StandbyLease& operator=(const StandbyLease&) = delete;
 
-  // The lease's socket, aimed at the host (direct: the host's address; relay: the lease's relay address).
-  bool Open(const std::string& hostIp, uint16_t port, std::string* error) {
-    hostIp_ = hostIp;
-    port_ = port;
-    return Reopen(error);
-  }
+  bool Open(std::string* error) { return Reopen(error); }
 
   State state() const { return client_.state(); }
   uint64_t entryId() const { return client_.entryId(); }
   int lostCount() const { return lost_; }
   const std::vector<std::string>& events() const { return events_; }
+  std::string target() const { return ip_ + ":" + std::to_string(port_); }
 
   // Start (or restart) the admission with a capability from CapabilityFn.
   void Start() { NeedCapability(); }
@@ -62,7 +69,8 @@ class StandbyLease {
     const uint64_t until = now_() + waitMs;
     do {
       UdpStandbyPacket p{};
-      if (Receive(socket_, 20, &p, nullptr)) Apply(client_.OnStandbyPacket(p, now_()));
+      p.magic = 0;
+      if (Receive(socket_, 20, &p, nullptr) && p.magic == kMagic) Apply(client_.OnStandbyPacket(p, now_()));
       Apply(client_.Tick(now_()));
     } while (now_() < until);
   }
@@ -70,8 +78,8 @@ class StandbyLease {
   // The arguments of the ClientSessionController::Connect that activates this entry: its socket (the session owns it
   // from now on) and the activation handshake. Parked only; else false.
   bool ActivationArgs(ClientSessionConnectArgs* args) {
-    if (client_.state() != State::Parked || socket_ == kInvalidSocket) return false;
-    args->host = hostIp_;
+    if (client_.state() != State::Parked || socket_ == kInvalidSocket || port_ == 0) return false;
+    args->host = ip_;
     args->videoPort = port_;
     args->controlPort = port_;
     args->requireUdpHello = true;
@@ -106,20 +114,33 @@ class StandbyLease {
       if (error) *error = "udp socket failed";
       return false;
     }
-    sockaddr_in to{};
-    to.sin_family = AF_INET;
-    to.sin_port = htons(port_);
-    if (inet_pton(AF_INET, hostIp_.c_str(), &to.sin_addr) != 1 ||
-        connect(socket_, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) != 0) {
-      if (error) *error = "udp connect to the host failed";
+    sockaddr_in any{};
+    any.sin_family = AF_INET;
+    if (bind(socket_, reinterpret_cast<const sockaddr*>(&any), sizeof(any)) != 0) {
+      if (error) *error = "udp bind failed";
       close_socket(&socket_);
       return false;
     }
     return true;
   }
 
-  // One datagram within `waitMs`: a standby packet (*sb) or a HelloAck (*ack). false: nothing of either.
-  static bool Receive(SocketHandle s, uint32_t waitMs, UdpStandbyPacket* sb, UdpHelloPacket* ack) {
+  bool Aim(sockaddr_in* to) const {
+    if (port_ == 0) return false;
+    *to = sockaddr_in{};
+    to->sin_family = AF_INET;
+    to->sin_port = htons(port_);
+    return inet_pton(AF_INET, ip_.c_str(), &to->sin_addr) == 1;
+  }
+
+  void SendTo(SocketHandle s, const UdpStandbyPacket& p) {
+    sockaddr_in to{};
+    if (!Aim(&to)) return;
+    sendto(s, reinterpret_cast<const char*>(&p), static_cast<int>(sizeof(p)), 0, reinterpret_cast<const sockaddr*>(&to),
+           sizeof(to));
+  }
+
+  // One datagram from the lease's target within `waitMs`: a standby packet (*sb) or a HelloAck (*ack).
+  bool Receive(SocketHandle s, uint32_t waitMs, UdpStandbyPacket* sb, UdpHelloPacket* ack) const {
     fd_set rd;
     FD_ZERO(&rd);
     FD_SET(s, &rd);
@@ -128,8 +149,13 @@ class StandbyLease {
     tv.tv_usec = static_cast<long>((waitMs % 1000) * 1000);
     if (select(static_cast<int>(s) + 1, &rd, nullptr, nullptr, &tv) <= 0) return false;
     uint8_t buf[2048];
-    const int n = static_cast<int>(recv(s, reinterpret_cast<char*>(buf), sizeof(buf), 0));
+    sockaddr_in from{};
+    socklen_t fromLen = sizeof(from);
+    const int n = static_cast<int>(
+        recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fromLen));
     if (n < 8) return false;
+    sockaddr_in want{};
+    if (!Aim(&want) || from.sin_addr.s_addr != want.sin_addr.s_addr || from.sin_port != want.sin_port) return false;
     uint32_t magic = 0;
     uint16_t kind = 0;
     std::memcpy(&magic, buf, 4);
@@ -156,7 +182,7 @@ class StandbyLease {
     auto run = [&](const StandbyEntryClient::Effects& effects) {
       for (const auto& e : effects) {
         if (e.kind == StandbyEntryClient::Effect::Send) {
-          send(s, reinterpret_cast<const char*>(&e.packet), static_cast<int>(sizeof(e.packet)), 0);
+          SendTo(s, e.packet);
         } else if (e.kind == StandbyEntryClient::Effect::Activated) {
           done = true;
         } else if (e.kind == StandbyEntryClient::Effect::ActivationFailed || e.kind == StandbyEntryClient::Effect::Lost) {
@@ -201,21 +227,21 @@ class StandbyLease {
   }
 
   void NeedCapability() {
-    const std::string cap = capability_ ? capability_() : std::string();
-    if (cap.empty()) {
+    StandbyCapability cap;
+    if (socket_ == kInvalidSocket || !capability_ || !capability_(socket_, &cap) || cap.token.empty() || cap.port == 0) {
       events_.push_back("no capability now");
       return;
     }
-    Apply(client_.Admit(cap, now_()));
+    ip_ = cap.ip;
+    port_ = cap.port;
+    Apply(client_.Admit(cap.token, now_()));
   }
 
   void Apply(const StandbyEntryClient::Effects& fx) {
     for (const auto& e : fx) {
       switch (e.kind) {
         case StandbyEntryClient::Effect::Send:
-          if (socket_ != kInvalidSocket) {
-            send(socket_, reinterpret_cast<const char*>(&e.packet), static_cast<int>(sizeof(e.packet)), 0);
-          }
+          if (socket_ != kInvalidSocket) SendTo(socket_, e.packet);
           break;
         case StandbyEntryClient::Effect::NeedCapability:
           NeedCapability();
@@ -237,7 +263,7 @@ class StandbyLease {
   CapabilityFn capability_;
   Clock now_;
   SocketHandle socket_ = kInvalidSocket;
-  std::string hostIp_;
+  std::string ip_;
   uint16_t port_ = 0;
   bool handedOff_ = false;
   int lost_ = 0;
