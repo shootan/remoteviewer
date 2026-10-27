@@ -1895,9 +1895,15 @@ add_executable(remote60_host_standby_admission_e2e_test
   src/native_video_client_tcp_control.cpp
   src/udp_control_channel.cpp
   src/directory_rendezvous.cpp
+  # keepalive-r2 (2): the product client's own directory calls (standby support, standby connect)
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
 )
 target_include_directories(remote60_host_standby_admission_e2e_test PRIVATE src)
-target_link_libraries(remote60_host_standby_admission_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir)
+target_link_libraries(remote60_host_standby_admission_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir winhttp)
 if(MSVC)
   target_compile_options(remote60_host_standby_admission_e2e_test PRIVATE /utf-8)
 endif()
