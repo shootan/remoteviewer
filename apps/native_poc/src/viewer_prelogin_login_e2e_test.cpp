@@ -33,6 +33,7 @@
 //     (the existing unlock path's) is never the user's.
 
 #include "e2e_isolation.hpp"
+#include "selection_ack_gate.hpp"
 #include "control_resume_e2e_support.hpp"
 #include "directory_fake_server.hpp"
 
@@ -759,6 +760,7 @@ int wmain(int argc, wchar_t** argv) {
   bool lockScreen = false;
   bool sessionEnds = false;
   bool androidSession = false;
+  bool androidSelect = false;  // apk-0232 r1: the app's desktop pick at the logon screen
   bool captureFallback = false;
   bool foreignPeer = false;
   bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
@@ -780,6 +782,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
     if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
+    if (a == L"--android-select") {  // apk-0232 r1: the same shared-session setup; its own steps below
+      androidSelect = true;
+      androidSession = true;
+    }
     if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
     if (a == L"--still-screen") stillScreen = true;
     if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
@@ -969,7 +975,46 @@ int wmain(int argc, wchar_t** argv) {
     struct Sink : remote60::native_poc::ClientEncodedFrameSink {
       void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& f) override { (void)f; }
       void OnVideoStreamReset() override {}
-    } sink;
+    } plainSink;
+    // apk-0232 r1: the APK decoder sink's selection handling over the shared gate (see the --android-select steps).
+    struct GateSink : remote60::native_poc::ClientEncodedFrameSink {
+      std::mutex mu;
+      remote60::native_poc::SelectionAckGate gate;
+      uint64_t ready = 0, keysAfterPrepare = 0;
+      void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& f) override {
+        std::lock_guard<std::mutex> l(mu);
+        const bool key = (f.header.flags & 1u) != 0;
+        if (key) ++keysAfterPrepare;
+        if (!gate.Admit(f.header.streamGeneration, key)) return;
+        if (key) gate.KeyDelivered(f.header.streamGeneration);
+        if (gate.pending() != 0 && ready != gate.pending()) ready = gate.pending();
+      }
+      void OnVideoStreamReset() override {}
+      uint64_t CurrentSelectionTag() override { std::lock_guard<std::mutex> l(mu); return gate.pending(); }
+      uint64_t KeyframeOwedFor() override { std::lock_guard<std::mutex> l(mu); return gate.OwedToken(); }
+      void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& m, uint64_t tag) override {
+        std::lock_guard<std::mutex> l(mu);
+        gate.OnAck((m.flags & 0x1u) != 0, m.streamGeneration, tag);
+      }
+      bool BeginLocalSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.BeginLocal(tag); }
+      uint64_t LocalSelectionBoundFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(tag); }
+      void RefuseSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); gate.Refuse(tag); }
+      // apk-0232 r3 (picker N1): as android_video_decoder.cpp -- judged and recorded under the sink's own lock
+      LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t)>& commit) override {
+        std::lock_guard<std::mutex> l(mu);
+        if (tag == 0 || gate.pending() != tag) return LocalCommit::Abandoned;
+        const uint64_t generation = gate.LocalBoundFor(tag);
+        if (generation == 0) return LocalCommit::Unbound;
+        commit(generation);
+        return LocalCommit::Committed;
+      }
+      void Prepare(uint64_t sel) { std::lock_guard<std::mutex> l(mu); gate.Prepare(sel); ready = 0; keysAfterPrepare = 0; }
+      uint64_t Ready() { std::lock_guard<std::mutex> l(mu); return ready; }
+      uint64_t Bound(uint64_t sel) { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(sel); }
+      uint64_t KeysAfterPrepare() { std::lock_guard<std::mutex> l(mu); return keysAfterPrepare; }
+    } gateSink;
+    remote60::native_poc::ClientEncodedFrameSink& sink =
+        androidSelect ? static_cast<remote60::native_poc::ClientEncodedFrameSink&>(gateSink) : plainSink;
     u_long nb = 1;
     ioctlsocket(sock, FIONBIO, &nb);
     char drain[2048];
@@ -999,7 +1044,52 @@ int wmain(int argc, wchar_t** argv) {
     const bool up = phone.Connect(a) &&
                     wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
     check("the session connects, directory-authenticated", up, phone.Snapshot().status);
-    if (foreignPeer) {
+    if (androidSelect) {
+      // apk-0232 r1 (Codex codex_rel_0163_e1_decision.md, the shared session): the app's desktop pick at this
+      // REAL pre-login host, through the shared session and the selection gate the APK's decoder sink uses. The
+      // sink below is that sink's selection handling (android_video_decoder.cpp: Admit per frame, KeyDelivered
+      // for an IDR handed to the codec, the selection's first output) with the codec left out: every admitted
+      // frame "decodes". The frames are the host's real ones, through the session's real receive loop.
+      std::cout << "\n--- apk-0232: the app's desktop pick at the logon screen (shared session) ---\n";
+      check("...the session is up", up);
+      const auto status = [&] { return phone.WindowPanelSnapshotCopy().status; };
+      const auto acked = [&] { return status().rfind("window_selected", 0) == 0; };
+      // The app: stream on, prepare the decoder for selection 1, pick the desktop -- before the first pong
+      // (delayed 3 s here), so the host's role is not known yet and the pick is queued.
+      const bool roleUnknown = phone.HostCaptureFlags() == 0;
+      const bool streamOn = phone.RequestStreamActive(true);
+      gateSink.Prepare(1);
+      const bool picked = phone.RequestDesktopMode();
+      check("apk-0232: the pick is taken before the host's role is known (queued, not refused)",
+            roleUnknown && streamOn && picked, std::to_string(phone.HostCaptureFlags()));
+      check("apk-0232: ...the host's role arrives: the logon screen (0x2000)",
+            wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+      const bool selected1 = wait_until(acked, 8000);
+      const uint64_t gen1 = phone.WindowPanelSnapshotCopy().lastSelectStreamGeneration;
+      check("apk-0232: the SAME pick went local and the host's own IDR completed it: selected (APK: ACKED) with the "
+            "generation of that IDR",
+            selected1 && gen1 != 0 && gen1 == gateSink.Bound(1), status() + " gen=" + std::to_string(gen1));
+      check("apk-0232: ...its first picture came out (APK: select_ready)", wait_until([&] { return gateSink.Ready() == 1; }, 3000));
+      check("apk-0232: no WindowSelect reached the host (it would have closed the link): nothing rejected, still connected",
+            host.Count("[control][prelogin] rejected control type=") == 0 &&
+                phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected,
+            phone.Snapshot().status);
+      // Again, the role known now: the direct local path.
+      gateSink.Prepare(2);
+      const bool picked2 = phone.RequestDesktopMode();
+      const bool selected2 = wait_until([&] { return acked() && gateSink.Bound(2) != 0; }, 8000);
+      check("apk-0232: a second desktop pick (role known): local at once, completed by a NEW IDR",
+            picked2 && selected2 && wait_until([&] { return gateSink.Ready() == 2; }, 3000) && gateSink.KeysAfterPrepare() >= 1,
+            status() + " keys=" + std::to_string(gateSink.KeysAfterPrepare()));
+      // A window pick there: refused, nothing sent.
+      gateSink.Prepare(3);
+      check("apk-0232: a window pick at the logon screen is refused at once", !phone.RequestWindowSelect(1001));
+      Sleep(800);
+      check("apk-0232: ...the link is still up and the host rejected nothing",
+            host.Count("[control][prelogin] rejected control type=") == 0 &&
+                phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected);
+      phone.Disconnect();
+    } else if (foreignPeer) {
       // r13: main's udp-control-peer gate (0.2.152) in front of what a pre-login host does for its session:
       // Ctrl+Alt+Del (83 -> the service's SendSAS), a restart (84 -> the service's OS restart) and input.
       // B is another endpoint (same IP, another port) sending VALID control datagrams on the host's

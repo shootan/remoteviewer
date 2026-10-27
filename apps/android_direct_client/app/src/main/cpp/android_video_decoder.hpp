@@ -11,6 +11,7 @@
 
 #include "client_decode_snapshot.hpp"
 #include "native_video_client_session.hpp"
+#include "decoder_pending_slot.hpp"
 #include "selection_ack_gate.hpp"
 #include "video_playout_clock.hpp"
 
@@ -88,6 +89,12 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t KeyframeOwedFor() override;
   void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& msg,
                                          uint64_t requestTag) override;
+  // apk-0232 r1: a desktop pick at a host at the logon screen (no answer comes): the armed selection continues as a
+  // local one, bound by its own first IDR that reaches the codec (SelectionAckGate::BeginLocal).
+  bool BeginLocalSelectionFor(uint64_t tag) override;
+  uint64_t LocalSelectionBoundFor(uint64_t tag) override;
+  void RefuseSelectionFor(uint64_t tag) override;
+  LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t generation)>& commit) override;
   void AbortWindowSelection();
   std::string DebugStatus();
   uint64_t VideoSizePacked();
@@ -243,7 +250,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // for instead). The surface can start a codec from the SPS/PPS of an IDR it never received.
   bool codecAwaitsKey_ = false;
   uint64_t deltaBeforeKeyDrops_ = 0;
-  std::optional<remote60::native_poc::UdpH264AssembledFrame> pendingFrame_;
+  // apk-0232 r2 (N2): the frame held for an input buffer, with the gate asked again when it is queued and no newer
+  // frame overtaking it (decoder_pending_slot.hpp, shared with the Windows tests).
+  remote60::native_poc::DecoderPendingSlot pendingFrame_;
   std::optional<remote60::native_poc::UdpH264AssembledFrame> bootstrapFrame_;
   std::vector<uint8_t> csd0_;
   std::vector<uint8_t> csd1_;

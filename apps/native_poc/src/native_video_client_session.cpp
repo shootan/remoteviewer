@@ -252,7 +252,28 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
   decoderRekeyPending_.store(false, std::memory_order_release);
   const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
-  if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
+  // apk-0232 r1 (Codex codex_rel_0163_e1_decision.md): a host KNOWN to be at the logon screen (PreloginV1 -- not a
+  // secure desktop, not LockCred) takes no WindowSelect and serves its one desktop. A desktop pick there is a local
+  // selection: nothing is sent, the sink's armed selection continues without an answer and is bound by its own
+  // first IDR (asked for through the owed-IDR path). A window pick there is refused. A role not known yet: queued
+  // as always and decided where it would go out.
+  const HostRoleGate::Role role = hostRole_.Load();
+  if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0) {
+    if (windowId != 0) {
+      windowPanel_.SetStatus("window_select_unavailable_prelogin");
+      std::fprintf(stderr, "[native-video-client-session] window pick refused: the host is at the logon screen\n");
+      return false;
+    }
+    // r2 (N1): the sink, the panel and the tracked tag in one step (after parkMu_, which this path holds).
+    std::lock_guard<std::mutex> ls(localSelectMu_);
+    if (!encodedFrameSink_ || tag == 0 || !encodedFrameSink_->BeginLocalSelectionFor(tag) ||
+        !windowPanel_.BeginLocalSelect(tag, "desktop_select_local")) {
+      return false;
+    }
+    localSelectTag_.store(tag, std::memory_order_release);
+    std::fprintf(stderr, "[native-video-client-session] desktop pick at the logon screen: local selection %llu\n",
+                 static_cast<unsigned long long>(tag));
+  } else if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
     return false;
   }
   pk.unlock();
@@ -263,6 +284,89 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   SyncWindowPanelSnapshotLocked(panelSnapshot);
   UpdateConnectedStatusLocked(panelSnapshot.status);
   return true;
+}
+
+// apk-0232 r1: a WindowSelect queued before the host's role was known, unsendable now that it is the logon screen.
+void ClientSessionController::ResolveUnsendableSelect(const ControlOutboundAction& action) {
+  const uint64_t tag = action.selectionTag;
+  // r2 (N1): the sink's turn to local, the panel's and the tracked tag are one step -- a newer pick made meanwhile
+  // waits for it, then publishes its own; and a panel that already holds a newer pick takes no tag from this one.
+  std::unique_lock<std::mutex> ls(localSelectMu_);
+  bool sinkLocal = false;
+  if (action.windowSelect.windowId == 0 && encodedFrameSink_ && tag != 0) sinkLocal = encodedFrameSink_->BeginLocalSelectionFor(tag);
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  if (sinkLocal) {
+    std::function<void(uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testAfterLocalSinkBeginHook_;
+    }
+    if (hook) hook(tag);
+  }
+#endif
+  if (sinkLocal) {
+    if (windowPanel_.ConvertSelectToLocal(tag, "desktop_select_local")) {
+      localSelectTag_.store(tag, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: the host is at the logon screen, "
+                   "continues as a local selection\n", static_cast<unsigned long long>(tag));
+    } else {
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: a newer pick holds the panel, "
+                   "nothing tracked for it\n", static_cast<unsigned long long>(tag));
+    }
+  } else if (action.windowSelect.windowId != 0 || tag == 0 || !encodedFrameSink_) {
+    // A window pick (or one no sink tracks): it cannot be made there. Refused, shown as failed if still current.
+    if (encodedFrameSink_ && tag != 0) encodedFrameSink_->RefuseSelectionFor(tag);
+    windowPanel_.RefuseSelectFor(tag, "unavailable_prelogin");
+    std::fprintf(stderr, "[native-video-client-session] queued pick %llu (window %llu) refused: the host is at the "
+                 "logon screen\n", static_cast<unsigned long long>(tag),
+                 static_cast<unsigned long long>(action.windowSelect.windowId));
+  } else {
+    std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu is no longer armed: nothing to do\n",
+                 static_cast<unsigned long long>(tag));
+  }
+  ls.unlock();
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+}
+
+// apk-0232 r1: once the local selection's first IDR has reached the decoder, the panel shows it selected with that
+// generation (what an answer would have shown) -- only if it is still the selection requested.
+void ClientSessionController::PollLocalSelection() {
+  if (localSelectTag_.load(std::memory_order_acquire) == 0 || !encodedFrameSink_) return;
+  std::unique_lock<std::mutex> ls(localSelectMu_);  // r2 (N1): read, judge and complete against one start
+  const uint64_t tag = localSelectTag_.load(std::memory_order_acquire);
+  if (tag == 0) return;
+  // r3 (N1): the sink's "still this selection, bound by G" and the panel's record are one step under the sink's
+  // state, the one a cancel (nativeAbortVideoSwitch) or a new Prepare takes -- never a read, then a record later.
+  // Lock order local -> sink -> panel; nothing takes them the other way.
+  WindowSelectApplyResult applied;
+  const auto result = encodedFrameSink_->CommitLocalSelectionFor(tag, [&](uint64_t generation) {
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+    std::function<void(uint64_t, uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testBeforeLocalCommitHook_;
+    }
+    if (hook) hook(tag, generation);
+#endif
+    uint64_t expected = tag;
+    if (!localSelectTag_.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) return;
+    applied = windowPanel_.ApplyLocalSelectedFor(tag, generation);
+  });
+  if (result == ClientEncodedFrameSink::LocalCommit::Abandoned) {
+    uint64_t stale = tag;
+    localSelectTag_.compare_exchange_strong(stale, 0, std::memory_order_acq_rel);
+    return;  // replaced or abandoned: it completes nothing
+  }
+  if (result == ClientEncodedFrameSink::LocalCommit::Unbound) return;
+  ls.unlock();
+  if (!applied.logLine.empty()) std::fprintf(stderr, "%s\n", applied.logLine.c_str());
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
 }
 
 bool ClientSessionController::RequestDesktopMode() {
@@ -474,7 +578,9 @@ bool ClientSessionController::RequestDesktopCaptureBackend(uint16_t backend) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!CanQueueControlRequestLocked()) return false;
   }
-  if (backend < 1 || backend > 2) return false;
+  // ua2-apk r1: 1 dxgi, 2 wgc, 3 gdi (the host's isolated GDI, 5dbfc1a). 3 was refused here since then, so the
+  // APK's GDI button never reached the host.
+  if (backend < 1 || backend > 3) return false;
   std::lock_guard<std::mutex> pk(parkMu_);
   if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r2 K1
   desktopBackend_.Request(backend);
@@ -799,6 +905,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       if (hook) hook(parking);
     }
 #endif
+    PollLocalSelection();  // apk-0232 r1
     // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
     // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
     // answer and was dropped) is asked for again until it arrives -- a request taken here may still
@@ -865,6 +972,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
       if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0 &&
           !prelogin::IsControlAllowedInPrelogin(outbound_message_type(action))) {
+        // apk-0232 r1: a pick queued before the role was known is not dropped in silence (the APK waited in
+        // REQUESTING for an answer that never came). THAT op -- its own tag -- continues: a desktop pick as a
+        // local selection, a window pick refused. A tag no longer armed (a later pick replaced it) changes nothing.
+        if (action.kind == ControlOutboundActionKind::WindowSelect) ResolveUnsendableSelect(action);
         continue;
       }
       TcpControlResponse response{};
@@ -1653,6 +1764,7 @@ void ClientSessionController::ResetUnlocked() {
   }
   hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
   hostRole_.Reset();  // r7 H6: unknown again until the next pong (r10: nothing deferred either)
+  localSelectTag_.store(0, std::memory_order_release);  // apk-0232 r1
   {
     // A request not sent yet does not survive into another session; an answer already taken stays.
     std::lock_guard<std::mutex> lk(rebootMu_);

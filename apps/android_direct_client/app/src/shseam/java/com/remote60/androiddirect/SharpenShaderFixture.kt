@@ -41,11 +41,49 @@ object SharpenShaderFixture {
                     /** "linear": smooth gradients (crop cases: SurfaceTexture shrinks a crop by a fraction
                      *  of a texel, which a 1-px alternation would turn into large but legitimate differences);
                      *  "alt": gradients + 1-px alternation (no crop: the result depends on 1-px taps). */
-                    val pattern: String = "linear")
+                    val pattern: String = "linear",
+                    /** sh-strength r2: the output is this many times the visible size (B: the view's pixels). */
+                    val outScale: Float = 1f,
+                    /** sh-strength r2 B: draw through the display placement (the whole output) -- else A. */
+                    val display: Boolean = false,
+                    /** Feed the frame with the CPU producer (no crop) even without a transform. */
+                    val cpu: Boolean = false,
+                    /** sh-strength r4: "frame" (one frame, its output), "layout_fail" (the output never the view's size:
+                     *  wait for the renderer's failure, no video drawn), "pan_redraw" (one frame shown, then a moved
+                     *  placement with no new frame, the size check lying `layout:3@2`: the latched frame redrawn there). */
+                    val flow: String = "frame")
 
     // ANativeWindow transform bits (android/native_window.h)
     private const val MIRROR_H = 1
     private const val ROT_90 = 4
+
+    /** sh-strength r2 (Codex §4/§4B): ONE input picture ("text": hard 2-px bars, a 1-px line, a low-contrast
+     *  checker), the same frame for every case -- A at off(GL 0)/0.20/0.35/0.60, and B (display-size, one pass) at
+     *  x1.33 and x2 with the same strengths; one negative control (B stepping an OUTPUT pixel). */
+    val CASES_AB by lazy {
+        val strengths = listOf(0f, 0.20f, 0.35f, 0.60f)
+        strengths.map { st -> Case("textA_s%02d".format((st * 100).toInt()), 0, st, ring(), pattern = "text", cpu = true) } +
+            strengths.map { st -> Case("textB133_s%02d".format((st * 100).toInt()), 0, st, ring(), pattern = "text", cpu = true,
+                outScale = 4f / 3f, display = true) } +
+            listOf(0.35f, 0.60f).map { st -> Case("textB2_s%02d".format((st * 100).toInt()), 0, st, ring(), pattern = "text", cpu = true,
+                outScale = 2f, display = true) } +
+            listOf(Case("control_textB133_outtaps", 0, 0.35f, ring(SharpenRenderer.SharpenFaults(outputPixelTaps = true)),
+                pattern = "text", cpu = true, outScale = 4f / 3f, display = true, control = true),
+                // B with no source size: must not draw (no output-size fallback in B) -- the case expects NO frame
+                Case("textB133_noring", 0, 0.35f, pattern = "text", cpu = true, outScale = 4f / 3f, display = true),
+                // r3 (Codex §4.3): B with the decoder's crop (64x48 buffer, 64x40 visible, magenta padding) and with a
+                // quarter turn, enlarged x1.33 -- taps one SOURCE pixel, the transform once, no padding read
+                Case("cropB133_s35", 0, 0.35f, ring(), outScale = 4f / 3f, display = true),
+                Case("rot90B133_s35", ROT_90, 0.35f, ring(), pattern = "alt", outScale = 4f / 3f, display = true),
+                // r4 (Codex codex_sh_strength_r3.md N1 a): the output never becomes the view's size -- no video, ever
+                Case("layoutB133_never", 0, 0.35f, ring(SharpenRenderer.SharpenFaults(layoutMismatchQueries = -1)),
+                    pattern = "text", cpu = true, outScale = 4f / 3f, display = true, flow = "layout_fail"),
+                // r4 (N1 b): no new decoder frame; a pan placement whose first 3 size checks lie -> the latched frame
+                // redrawn ONCE at the new place, its timestamp kept
+                Case("panB133_redraw", 0, 0.35f, ring(SharpenRenderer.SharpenFaults(layoutMismatchQueries = 3,
+                    layoutMismatchFromPlacement = 2)), pattern = "text", cpu = true, outScale = 4f / 3f, display = true,
+                    flow = "pan_redraw"))
+    }
 
     val CASES by lazy { listOf(
         Case("crop_s0", 0, 0f, ring()), Case("crop_s35", 0, 0.35f, ring()),
@@ -63,6 +101,15 @@ object SharpenShaderFixture {
     fun pixel(x: Int, y: Int, pattern: String): IntArray = when {
         y >= VIS_H -> intArrayOf(255, 0, 255)
         pattern == "alt" -> intArrayOf(40 + 2 * x + (x % 2) * 50, 40 + 3 * y + (y % 2) * 50, 170 - x - y + ((x + y) % 2) * 30)
+        pattern == "text" -> {
+            val v = when {
+                x in 8..39 && y in 4..35 -> if ((x / 2) % 2 == 0) 228 else 28   // 2-px bars, white on black
+                y == 20 -> 228                                                  // a 1-px line
+                x >= 44 && y in 4..35 -> if ((x + y) % 2 == 0) 120 else 136     // low contrast, 1-px checker
+                else -> 28
+            }
+            intArrayOf(v, v, (v * 3 + 255) / 4)  // a colour tint in blue so channels differ
+        }
         else -> intArrayOf(32 + 3 * x, 40 + 4 * y, 200 - 2 * x - y)
     }
 
@@ -70,10 +117,10 @@ object SharpenShaderFixture {
     private fun ring(f: SharpenRenderer.SharpenFaults = SharpenRenderer.SharpenFaults.NONE) =
         f.copy(sourceOverrideW = VIS_W, sourceOverrideH = VIS_H)
 
-    fun run(context: Context): String {
+    fun run(context: Context, set: String = "shader"): String {
         NativeSessionBridge.nativeCodecEpoch()  // the native library is loaded
         val out = StringBuilder("{\"cases\":[")
-        CASES.forEachIndexed { i, c ->
+        (if (set == "strengthab") CASES_AB else CASES).forEachIndexed { i, c ->
             if (i > 0) out.append(',')
             out.append(runCase(context, c))
         }
@@ -84,13 +131,17 @@ object SharpenShaderFixture {
 
     private fun runCase(context: Context, c: Case): String {
         val quarter = c.transform and ROT_90 != 0
-        val outW = if (quarter) VIS_H else VIS_W
-        val outH = if (quarter) VIS_W else VIS_H
+        val baseW = if (quarter) VIS_H else VIS_W
+        val baseH = if (quarter) VIS_W else VIS_H
+        val outW = Math.round(baseW * c.outScale)
+        val outH = Math.round(baseH * c.outScale)
         val thread = HandlerThread("sh-fixture-${c.name}").apply { start() }
         val handler = Handler(thread.looper)
         val reader = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 2)
         val got = CountDownLatch(1)
         val bytes = AtomicReference<ByteArray?>(null)
+        val lastTs = java.util.concurrent.atomic.AtomicLong(0)
+        val images = java.util.concurrent.atomic.AtomicInteger(0)
         reader.setOnImageAvailableListener({ r ->
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
@@ -104,6 +155,8 @@ object SharpenShaderFixture {
                     System.arraycopy(row, 0, all, y * outW * 4, outW * 4)
                 }
                 bytes.set(all)
+                lastTs.set(img.timestamp)
+                images.incrementAndGet()
                 got.countDown()
             } finally {
                 img.close()
@@ -113,19 +166,27 @@ object SharpenShaderFixture {
         val input = AtomicReference<Surface?>(null)
         val failure = AtomicReference<String?>(null)
         val released = CountDownLatch(1)
+        val failedLatch = CountDownLatch(1)
+        var firstTs = 0L
+        var redrawsAfterPan = 0L
+        var drawnAtPan = 0L
+        var lastKind = ""
+        var lastDecoderTs = 0L
+        var lastGen = 0L
         val renderer = SharpenRenderer(9000L + c.name.hashCode() % 1000, reader.surface, c.strength,
             object : SharpenRenderer.Listener {
                 override fun onReady(generation: Long, input2: Surface) { input.set(input2); ready.countDown() }
-                override fun onFailed(generation: Long, reason: String) { failure.set(reason); ready.countDown(); got.countDown() }
+                override fun onFailed(generation: Long, reason: String) { failure.set(reason); ready.countDown(); got.countDown(); failedLatch.countDown() }
                 override fun onReleased(generation: Long, detached: Boolean) { released.countDown() }
             }, c.faults)
+        if (c.display) renderer.setDisplayPlacement(DisplayPlacement(0f, 0f, outW.toFloat(), outH.toFloat(), outW.toFloat(), outH.toFloat()))
         var note = "ok"
         try {
             if (!ready.await(5, TimeUnit.SECONDS) || input.get() == null) {
                 note = "not_ready:" + (failure.get() ?: "timeout")
             } else run {
                 val surface = input.get()!!
-                if (c.transform != 0) {
+                if (c.transform != 0 || c.cpu) {
                     // ImageWriter does not carry a window transform: the transform cases use a CPU producer on
                     // the same input window (no crop on this path -- the crop cases above cover crop).
                     val rgba = ByteArray(VIS_W * VIS_H * 4)
@@ -135,8 +196,33 @@ object SharpenShaderFixture {
                     }
                     val rc = SharpenTestSeam.nativeDrawTransformed(surface, c.transform, rgba, VIS_W, VIS_H)
                     if (rc != 0) note = "draw_rc=$rc"
+                    if (c.flow == "layout_fail") {
+                        // r4 a: only cleared swaps reach the output; the renderer gives up within its bound
+                        note = if (failedLatch.await(4, TimeUnit.SECONDS)) "failed:" + failure.get() else "no_failure"
+                        return@run
+                    }
                     if (!got.await(5, TimeUnit.SECONDS)) note = "no_output"
                     if (failure.get() != null) note = "failed:" + failure.get()
+                    if (c.flow == "pan_redraw" && note == "ok") {
+                        // r4 b: the frame shown; then a pan (no new frame) -- the size check lies 3 times
+                        val until = System.currentTimeMillis() + 2000
+                        while (renderer.framesDrawn.get() < 1 && System.currentTimeMillis() < until) Thread.sleep(10)
+                        Thread.sleep(200)
+                        firstTs = renderer.outputs.lookup(lastTs.get())?.decoderTs ?: -1L  // r5: the decoder frame shown
+                        drawnAtPan = renderer.framesDrawn.get()
+                        val r0 = renderer.redraws.get()
+                        val dx = Math.round(outW / 4f).toFloat()
+                        renderer.setDisplayPlacement(DisplayPlacement(-dx, 0f, outW.toFloat(), outH.toFloat(), outW.toFloat(), outH.toFloat()), 2L)
+                        val until2 = System.currentTimeMillis() + 2000
+                        while (renderer.redraws.get() <= r0 && failure.get() == null && System.currentTimeMillis() < until2) Thread.sleep(10)
+                        Thread.sleep(300)
+                        redrawsAfterPan = renderer.redraws.get() - r0
+                        val last = renderer.outputs.lookup(lastTs.get())
+                        lastKind = last?.kind?.name ?: "unknown"
+                        lastDecoderTs = last?.decoderTs ?: -1L
+                        lastGen = last?.placementGen ?: -1L
+                        if (failure.get() != null) note = "failed:" + failure.get()
+                    }
                     return@run
                 }
                 val rc = 0
@@ -171,7 +257,11 @@ object SharpenShaderFixture {
         if (data != null) File(context.filesDir, "sh_fixture_${c.name}.rgba").writeBytes(data)
         return "{\"name\":\"${c.name}\",\"transform\":${c.transform},\"strength\":${c.strength},\"control\":${c.control},\"pattern\":\"${c.pattern}\"," +
             "\"outW\":$outW,\"outH\":$outH,\"bytes\":${data?.size ?: 0},\"note\":\"$note\"," +
-            "\"src\":\"${renderer.lastSourceSize}\"}"
+            "\"src\":\"${renderer.lastSourceSize}\",\"outScale\":${c.outScale},\"display\":${c.display}," +
+            "\"heldNoSource\":${renderer.framesHeldNoSource.get()},\"drawn\":${renderer.framesDrawn.get()}," +
+            "\"flow\":\"${c.flow}\",\"clearSwaps\":${renderer.layoutClearSwaps.get()},\"images\":${images.get()}," +
+            "\"firstTs\":$firstTs,\"lastTs\":$lastDecoderTs,\"lastKind\":\"$lastKind\",\"lastGen\":$lastGen,\"outTs\":${lastTs.get()},\"redrawsAfterPan\":$redrawsAfterPan,\"drawnAtPan\":$drawnAtPan," +
+            "\"end\":0}"
     }
 
 }

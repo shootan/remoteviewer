@@ -63,6 +63,23 @@ class ClientEncodedFrameSink {
   virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
     OnWindowSelectionControlResult(msg);
   }
+  // apk-0232 r1: a desktop pick at a host known to be at the logon screen (kCaptureFlagPreloginV1) gets no answer.
+  // The selection `tag` (still waiting for one) continues as a LOCAL selection: bound by its own first IDR, not by
+  // an answer (SelectionAckGate::BeginLocal). False = not that selection any more (or a sink that cannot) -- then
+  // nothing is selected. LocalSelectionBoundFor: the generation that bound it, 0 while unbound. RefuseSelectionFor:
+  // the selection `tag` cannot be made there (a window pick): it opens nothing.
+  virtual bool BeginLocalSelectionFor(uint64_t /* tag */) { return false; }
+  virtual uint64_t LocalSelectionBoundFor(uint64_t /* tag */) { return 0; }
+  virtual void RefuseSelectionFor(uint64_t /* tag */) {}
+  // apk-0232 r3 (Codex N1, the last boundary): the local selection `tag`'s completion, judged and recorded in ONE
+  // step against the sink's own selection state. If `tag` is still the selection and its IDR bound it, `commit`
+  // runs with that generation WHILE the sink holds its state -- a cancel (Abort) or a new Prepare, which take the
+  // same state, lands wholly before (nothing completes) or wholly after (a completion already recorded, which it
+  // then supersedes). `commit` must not call back into the sink. Abandoned: `tag` is no longer the selection.
+  enum class LocalCommit : uint8_t { Abandoned = 0, Unbound = 1, Committed = 2 };
+  virtual LocalCommit CommitLocalSelectionFor(uint64_t /* tag */, const std::function<void(uint64_t generation)>& /* commit */) {
+    return LocalCommit::Abandoned;
+  }
 };
 
 enum class ClientSessionState : uint8_t {
@@ -122,6 +139,9 @@ class ClientSessionController {
   ClientSessionSnapshot Snapshot() const;
   WindowPanelSnapshot WindowPanelSnapshotCopy() const;
   bool RequestWindowList();
+  // apk-0232 r1: at a host KNOWN to be at the logon screen a desktop pick is a local selection (nothing sent; see
+  // ClientEncodedFrameSink::BeginLocalSelectionFor) and a window pick is refused (false). A pick made before the
+  // role is known is queued and decided when it would go out (the control loop), the same way.
   bool RequestWindowSelect(uint64_t windowId);
   bool RequestDesktopMode();
   bool RequestMonitorList();
@@ -178,6 +198,18 @@ class ClientSessionController {
     std::lock_guard<std::mutex> lk(testHookMu_);
     testPassHook_ = std::move(hook);
   }
+  // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
+  // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
+  void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testAfterLocalSinkBeginHook_ = std::move(hook);
+  }
+  // TEST BUILD ONLY (apk-0232 r3 N1): called by the poll once the local selection is found bound to `generation`,
+  // right before the panel records it -- a test cancels or prepares a newer pick there.
+  void SetTestBeforeLocalCommitHook(std::function<void(uint64_t tag, uint64_t generation)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testBeforeLocalCommitHook_ = std::move(hook);
+  }
 #endif
   // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
   // parked connection is told from one opened since. Counters of the expensive steps, for the
@@ -196,6 +228,23 @@ class ClientSessionController {
   bool QueryDesktopCaptureBackend();
   DesktopBackendStatusSnapshot DesktopCaptureBackendStatus() const;
   bool HostAnswersDesktopBackendStatus() const { return desktopBackend_.HostAnswers(); }
+  // ua2-apk r2: the app's backend intent on this connection (N1), and whether the host's role -- its first pong, which
+  // carries the backend-status capability -- is known yet (N3: unknown is not "unsupported").
+  DesktopBackendControl::Intent DesktopCaptureBackendIntent() const { return desktopBackend_.CurrentIntent(); }
+  bool HostRoleKnown() const { return hostRole_.Load().known; }
+  // ua2-apk r3 (Codex codex_ua2_apk_src_r2.md N3): the host's backend-status capability from ONE read of its role --
+  // known (its first pong came) and, from the same pong's flags, whether it answers. Never "known" from one moment and
+  // "answers" from another (a first pong between two reads made a new host look like an older one). `stopPoint`
+  // (tests) runs after the read: a pong arriving there changes nothing of this snapshot.
+  struct DesktopBackendCapabilitySnapshot {
+    bool known = false;
+    bool answers = false;
+  };
+  DesktopBackendCapabilitySnapshot DesktopBackendCapability(const std::function<void()>& stopPoint = {}) const {
+    const auto role = hostRole_.Load();
+    if (stopPoint) stopPoint();
+    return {role.known, role.known && (role.flags & kCaptureFlagDesktopBackendStatusV1) != 0};
+  }
   bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
                        uint32_t keyCode, uint16_t buttons);
   bool QueueInputText(const uint16_t* text, size_t count);
@@ -377,6 +426,15 @@ class ClientSessionController {
   // Control-loop thread only.
   uint64_t owedSelection_ = 0;
   uint32_t owedAttempts_ = 0;
+  // apk-0232 r1: the local selection (logon screen) whose generation the panel is still waiting to show; 0 = none.
+  std::atomic<uint64_t> localSelectTag_{0};
+  // apk-0232 r2 (Codex codex_apk_prelogin_select_src_r1.md N1): a local selection's start -- the sink, the panel and
+  // localSelectTag_ -- and the poll that completes it are one step each under this lock, so a queued pick turned
+  // local late cannot publish its tag over a newer pick's (nor clear it). Taken after parkMu_, never before it; no
+  // network under it.
+  std::mutex localSelectMu_;
+  void PollLocalSelection();
+  void ResolveUnsendableSelect(const ControlOutboundAction& action);
   uint64_t owedNextUs_ = 0;
   std::atomic<bool> clipInitialPushWanted_{false};
   // mobile-abr r1: the once-a-second report. The AUs and their payload bytes the receive pipeline
@@ -403,6 +461,8 @@ class ClientSessionController {
 #ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
   std::mutex testHookMu_;
   std::function<void(bool)> testPassHook_;
+  std::function<void(uint64_t)> testAfterLocalSinkBeginHook_;
+  std::function<void(uint64_t, uint64_t)> testBeforeLocalCommitHook_;
 #endif
   std::atomic<uint64_t> connectionGeneration_{0};
   std::atomic<uint64_t> connectCount_{0};

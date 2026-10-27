@@ -15,8 +15,28 @@
     <string name="targets_title">Select A Target</string>
     <string name="settings_title">스트림 설정</string>
     <string name="settings_hint">뷰어 메뉴와 같은 설정입니다. 연결 중이면 바로 PC 에 요청합니다.</string>
-    <string name="settings_desktop_backend_label">Desktop Capture Backend</string>
-    <string name="settings_desktop_backend_hint">Choose DXGI, WGC, or isolated GDI for desktop mode. Window-target capture remains WGC.</string>
+    <string name="settings_desktop_backend_label">바탕화면 캡처 방식</string>
+    <!-- ua2-apk r1 (Codex codex_rel_0163_r1.md §1): the choice is this connection's only; the host decides what runs. -->
+    <!-- ua2-apk r2: the scope ("this connection only") is said only when the PC confirms it (status line). -->
+    <string name="settings_desktop_backend_hint">PC가 바탕화면을 캡처하는 방식 · 연결한 PC에 바로 요청 · 창 캡처는 항상 WGC</string>
+    <string name="settings_desktop_backend_not_connected">연결한 뒤 고를 수 있습니다</string>
+    <string name="settings_desktop_backend_checking">이 PC가 결과를 알려주는지 확인하는 중…</string>
+    <string name="settings_desktop_backend_no_answer">이 PC는 적용 결과를 알려주지 않습니다 · 이번 연결에만 적용되는지도 보장할 수 없습니다</string>
+    <string name="settings_desktop_backend_no_answer_asked">요청: %1$s 보냄 · 이 PC는 적용 결과를 알려주지 않습니다 · 이번 연결에만 적용되는지도 보장할 수 없습니다</string>
+    <string name="settings_desktop_backend_now_desktop">지금 바탕화면 캡처: %1$s</string>
+    <string name="settings_desktop_backend_now_window">지금 창 캡처: WGC</string>
+    <string name="settings_desktop_backend_idle">%1$s</string>
+    <string name="settings_desktop_backend_applying">요청: %1$s · 적용 중… (%2$s)</string>
+    <string name="settings_desktop_backend_applied">요청: %1$s 적용됨 · %2$s</string>
+    <!-- ua2-apk r3: handled, but not (or not as asked) capturing now: the facts only -->
+    <string name="settings_desktop_backend_policy">요청: %1$s 접수 · PC 정책으로 %2$s 사용 · %3$s</string>
+    <string name="settings_desktop_backend_received">요청: %1$s 접수 · 아직 이 방식으로 캡처하지 않음 · %2$s</string>
+    <string name="settings_desktop_backend_stored">요청: %1$s · 바탕화면을 볼 때 적용 · %2$s</string>
+    <string name="settings_desktop_backend_refused">요청: %1$s 적용 안 됨 · %2$s</string>
+    <string name="settings_desktop_backend_scope">이 연결에만 적용</string>
+    <string name="settings_desktop_backend_reason_window">창은 WGC로 캡처</string>
+    <string name="settings_desktop_backend_reason_quarantine">DXGI 문제로 WGC 사용</string>
+    <string name="settings_desktop_backend_reason_logon">로그인 전 화면은 DXGI만</string>
     <string name="settings_bitrate_hint">Bitrate Kbps</string>
     <string name="settings_fps_hint">FPS</string>
     <string name="settings_desktop_backend_dxgi">DXGI</string>
@@ -199,12 +219,17 @@
     <string name="ui_quality_high_short">고화질</string>
     <string name="ui_quality_best_short">최고화질</string>
     <string name="ui_fps_label">프레임</string>
-    <!-- sh-filter r1: the phone-side sharpening choice; the values are shown so 0.20 and 0.35 can be compared. -->
+    <!-- sh-filter r1: the phone-side sharpening choice; the values are shown so the levels can be compared (sh-strength r2: strong 0.35 -> 0.60). -->
     <string name="ui_sharpness_label">선명도</string>
     <string name="ui_sharpness_off">끄기</string>
     <string name="ui_sharpness_weak">약하게 · 0.20</string>
-    <string name="ui_sharpness_strong">강하게 · 0.35</string>
+    <string name="ui_sharpness_strong">강하게 · 0.60</string>
     <string name="ui_sharpness_hint">휴대폰에서만 처리 · 받는 데이터량은 그대로</string>
+    <!-- sh-strength r3 (Codex codex_sh_strength_r2.md §2): where the pass draws; A stays the default. -->
+    <string name="ui_sharpen_method_label">선명화 방식</string>
+    <string name="ui_sharpen_method_default">기본</string>
+    <string name="ui_sharpen_method_display">화면 크기 (실험)</string>
+    <string name="ui_sharpen_method_hint">화면 크기: 글씨를 더 또렷하게 표시 · 기기에 따라 지연·발열 증가 · 선명도 끄기면 쓰지 않음</string>
     <string name="ui_sharpness_fallback">선명도 적용 불가, 원본 표시</string>
     <string name="ui_fps_item">%1$d fps</string>
     <string name="ui_fps_hint">높은 프레임은 데이터·배터리 사용량이 늘 수 있습니다</string>
@@ -277,7 +302,7 @@
     <string name="ui_targets_current">지금 보는 대상: %1$s</string>
     <string name="ui_targets_loading">창 목록을 불러오는 중…</string>
     <string name="ui_targets_minimized">%1$s · 최소화됨</string>
-    <string name="ui_request_summary">요청: %1$s · %2$d fps · 바탕화면 캡처 %3$s</string>
+    <string name="ui_request_summary">요청: %1$s · %2$d fps</string>
     <string name="ui_request_quality_failed">화질 요청을 보내지 못했습니다</string>
     <string name="ui_request_backend_failed">캡처 방식 요청을 보내지 못했습니다</string>
     <string name="ui_status_connecting">연결하는 중…</string>

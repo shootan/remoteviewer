@@ -153,6 +153,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsSharpOffButton: TextView
     private lateinit var settingsSharpWeakButton: TextView
     private lateinit var settingsSharpStrongButton: TextView
+    private lateinit var settingsSharpMethodDefaultButton: TextView
+    private lateinit var settingsSharpMethodDisplayButton: TextView
     /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
     private var qualityStatusMessage = ""
     private val windowSheetItems = mutableListOf<WindowPanelItem>()
@@ -532,6 +534,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 button.setOnClickListener { selectSharpness(level, origin) }
             }
         }
+        settingsSharpMethodDefaultButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DEFAULT, "settings") }
+        settingsSharpMethodDisplayButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DISPLAY, "settings") }
         for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
             val adapter = ArrayAdapter(
                 this,
@@ -646,7 +650,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun requestSummary(): String =
-        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps, requestedDesktopBackend.label)
+        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps)
 
     /**
      * Win+D / Alt+Tab on the PC, the way the PC viewer's toolbar sends them (send_host_key_chord):
@@ -1001,6 +1005,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 for ((button, choice) in row.zip(SharpnessLevel.values())) button.isSelected = sharpness == choice
             }
         }
+        if (::settingsSharpMethodDefaultButton.isInitialized) {
+            settingsSharpMethodDefaultButton.isSelected = sharpenMethod == SharpenMethod.DEFAULT
+            settingsSharpMethodDisplayButton.isSelected = sharpenMethod == SharpenMethod.DISPLAY
+        }
         viewerQualityStatusText.text = qualityStatusMessage
         viewerQualityStatusText.visibility = if (qualityStatusMessage.isEmpty()) View.GONE else View.VISIBLE
     }
@@ -1159,6 +1167,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var settingsDesktopBackendDxgiButton: Button
     private lateinit var settingsDesktopBackendWgcButton: Button
     private lateinit var settingsDesktopBackendGdiButton: Button
+    private lateinit var settingsDesktopBackendStatusText: TextView
     private lateinit var settingsApplyButton: Button
     private lateinit var settingsAppliedText: TextView
     private lateinit var viewerControlsBar: LinearLayout
@@ -1373,10 +1382,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         })
     }
     private var requestedRuntimeFps = ViewerQualitySettings.DEFAULT_FPS
-    private var requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
+    // ua2-apk r1: what THIS connection asked for (null = nothing: the host's default). Never stored; a new
+    // connection starts without one (Codex codex_rel_0163_r1.md §1).
+    private var sessionDesktopBackend: DesktopCaptureBackendOption? = null
+    private var desktopBackendQueryAtMs = 0L
+    /** renderStatus's own reading of the session (status "connected"), for the backend controls. */
+    private var sessionConnectedNow = false
     private var settingsStatusMessage = ""
     private var pendingRuntimeConfigSync = false
-    private var pendingDesktopBackendSync = false
     private var desiredStreamActive = false
     private var lastAppliedStreamActive: Boolean? = null
     private var videoSurface: Surface? = null
@@ -1653,10 +1666,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
         settingsSharpOffButton = findViewById(R.id.settingsSharpOffButton)
         settingsSharpWeakButton = findViewById(R.id.settingsSharpWeakButton)
+        settingsSharpMethodDefaultButton = findViewById(R.id.settingsSharpMethodDefaultButton)
+        settingsSharpMethodDisplayButton = findViewById(R.id.settingsSharpMethodDisplayButton)
         settingsSharpStrongButton = findViewById(R.id.settingsSharpStrongButton)
         settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
         settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
         settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
+        settingsDesktopBackendStatusText = findViewById(R.id.settingsDesktopBackendStatusText)
         settingsApplyButton = findViewById(R.id.settingsApplyButton)
         settingsAppliedText = findViewById(R.id.settingsAppliedText)
         viewerControlsBar = findViewById(R.id.viewerControlsBar)
@@ -1812,8 +1828,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
         requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
         requestedRuntimeFps = savedEndpoint.fps
-        requestedDesktopBackend = DesktopCaptureBackendOption.fromCode(savedEndpoint.desktopBackendCode)
         sharpness = SessionPersistence.loadSharpness(this)
+        sharpenMethod = SessionPersistence.loadSharpenMethod(this)  // sh-strength r3: unset = DEFAULT (A)
         executeSharpen(sharpenPolicy.select(sharpness))  // no surface yet: only records the choice
         settingsStatusMessage =
             requestSummary()
@@ -1888,18 +1904,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             renderStatus()
         }
 
-        settingsDesktopBackendDxgiButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.DXGI
-            updateDesktopBackendButtons()
-        }
-        settingsDesktopBackendWgcButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.WGC
-            updateDesktopBackendButtons()
-        }
-        settingsDesktopBackendGdiButton.setOnClickListener {
-            requestedDesktopBackend = DesktopCaptureBackendOption.GDI
-            updateDesktopBackendButtons()
-        }
+        settingsDesktopBackendDxgiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.DXGI) }
+        settingsDesktopBackendWgcButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.WGC) }
+        settingsDesktopBackendGdiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.GDI) }
 
         settingsApplyButton.setOnClickListener {
             // The picture level and the frame rate are already chosen (and stored) by the controls
@@ -1914,21 +1921,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
             }
 
-            val backendOk =
-                NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)
-            if (backendOk) {
-                pendingDesktopBackendSync = false
-                diagnosticsLog.log(
-                    "desktop_backend_request",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
-            } else {
-                messages += getString(R.string.ui_request_backend_failed)
-                diagnosticsLog.log(
-                    "desktop_backend_failed",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
-            }
+            // ua2-apk r1: the capture backend is not part of Apply any more -- its buttons ask the connected PC at
+            // once, for this connection only.
             if (messages.isEmpty()) {
                 settingsStatusMessage =
                     requestSummary()
@@ -2291,11 +2285,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val latchNs = System.nanoTime()
         val surfaceId = sharpenPolicy.surfaceId ?: 0L
         val timestamp = surface.timestamp
-        // sh-filter r2 (H3): the latched timestamp names the frame. A strength change re-swaps the frame
-        // already shown with the same timestamp: that latch is not a new displayed frame.
-        val newFrame = latchClassifier.isNewFrame(surfaceId, timestamp)
+        // sh-strength r5 (Codex codex_sh_strength_r4.md N1-c1): the buffer the view LATCHED, by its own timestamp -- a
+        // renderer output is looked up in that renderer's log (what it is, its layout, its decoder frame); never the
+        // renderer's latest swap. A cleared buffer or an unknown one counts as nothing and shows no layout.
+        // r6 (N1-b): a decoder frame's FIRST time on screen (its VIDEO, or a REDRAW of it when the VIDEO was never
+        // latched) counts once; a cleared or unknown buffer shows no layout (the fence holds) and counts as nothing.
+        val latched = SharpenLatch.qualify(timestamp, sharpenRenderer?.outputs, latchClassifier, surfaceId)
+        latched.shownGen?.let { sharpenShownPlacementGen = it }
+        if (!latched.firstShow && !latched.redraw) return
+        val frameTs = latched.frameTs  // the decoder frame this buffer shows
         enterSharpenLatencySegment(latchNs)
-        if (!newFrame) {
+        if (!latched.firstShow) {
             sharpenStats.addRedraw()
             return
         }
@@ -2303,7 +2303,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // the view never latched -- because a newer one arrived before it drew -- are invisible
         // to every other counter, and are exactly what "it says 30 but looks like 15" is.
         NativeSessionBridge.nativeNotifyFrameDisplayed()
-        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(timestamp))
+        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(frameTs))
         // S4: the decoder's handoff of THIS frame -> this latch.
         if (info != null) sharpenStats.addMatched(info.handoffNs, latchNs) else sharpenStats.addUnmatched()
         // H2: the renderer's first output is THIS latch, if it is a frame of that renderer, surface and codec.
@@ -2314,7 +2314,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             diagnosticsLog.log(
                 "sharpen_first_output",
                 "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
-                    "ts=$timestamp latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
+                    "ts=$frameTs latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
                     "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
             )
         }
@@ -2457,7 +2457,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (ok) {
             connectFlowActive = true
             pendingRuntimeConfigSync = true
-            pendingDesktopBackendSync = true
+            resetSessionDesktopBackend("connect")
             desiredStreamActive = false
             lastAppliedStreamActive = null
             clearPendingSelection()
@@ -2531,18 +2531,95 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return ok
     }
 
+    /** ua2-apk r1: a new connection (or none): no choice of its own -- the host's default until the user picks. */
+    private fun resetSessionDesktopBackend(reason: String) {
+        sessionDesktopBackend = null
+        desktopBackendQueryAtMs = 0L
+        diagnosticsLog.log("desktop_backend_session_reset", "reason=$reason")
+        updateDesktopBackendButtons()
+    }
+
+    /** ua2-apk r1: the user's pick goes to the CONNECTED PC now, for this connection only. */
+    private fun requestSessionDesktopBackend(choice: DesktopCaptureBackendOption) {
+        diagnosticsLog.log("desktop_backend_tap", "backend=${choice.label.lowercase()} connected=${desktopBackendConnected()} " +
+            "parked=${parked != null}")
+        if (!desktopBackendConnected()) {
+            updateDesktopBackendButtons()
+            return
+        }
+        if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(choice.code)) {
+            sessionDesktopBackend = choice
+            desktopBackendQueryAtMs = SystemClock.elapsedRealtime()  // the request asks for the answer itself
+            diagnosticsLog.log("desktop_backend_request", "backend=${choice.label.lowercase()} scope=connection")
+        } else {
+            Toast.makeText(this, R.string.ui_request_backend_failed, Toast.LENGTH_SHORT).show()
+            diagnosticsLog.log("desktop_backend_failed", "backend=${choice.label.lowercase()}")
+        }
+        updateDesktopBackendButtons()
+    }
+
+    private fun desktopBackendConnected(): Boolean = parked == null && sessionConnectedNow
+
+    /**
+     * ua2-apk r1/r2: the buttons and the line under them (DesktopBackendPresentation): the host's capability, the
+     * CURRENT request (matched by its wire seq), and what captures now -- kept apart. Nothing is lit until the host has
+     * handled this connection's method; the session scope is said only when the host confirms it.
+     */
     private fun updateDesktopBackendButtons() {
-        settingsDesktopBackendDxgiButton.text = "DXGI"
-        settingsDesktopBackendDxgiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.DXGI
-        settingsDesktopBackendWgcButton.text = "WGC"
-        settingsDesktopBackendWgcButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.WGC
-        settingsDesktopBackendGdiButton.text = "GDI"
-        settingsDesktopBackendGdiButton.isSelected = requestedDesktopBackend == DesktopCaptureBackendOption.GDI
+        if (!::settingsDesktopBackendStatusText.isInitialized) return
+        val p = DesktopBackendPresentation
+        val connected = desktopBackendConnected()
+        val status = if (connected) DesktopBackendPresentation.HostStatus.of(NativeSessionBridge.nativeGetDesktopBackendStatus()) else null
+        val v = p.present(connected, sessionDesktopBackend?.code, status)
+        for ((button, code) in listOf(settingsDesktopBackendDxgiButton to p.DXGI, settingsDesktopBackendWgcButton to p.WGC,
+                                      settingsDesktopBackendGdiButton to p.GDI)) {
+            button.text = p.label(code)
+            button.isSelected = v.lit == code
+            button.isEnabled = v.enabled
+            button.alpha = if (v.enabled) 1f else 0.45f
+        }
+        val asked = v.asked?.let { p.label(it) }
+        val reasons = v.reasons.map {
+            getString(when (it) {
+                DesktopBackendPresentation.Reason.WINDOW_TARGET -> R.string.settings_desktop_backend_reason_window
+                DesktopBackendPresentation.Reason.DXGI_QUARANTINED -> R.string.settings_desktop_backend_reason_quarantine
+                DesktopBackendPresentation.Reason.BEFORE_LOGIN -> R.string.settings_desktop_backend_reason_logon
+            })
+        }.filter { it != getString(R.string.settings_desktop_backend_reason_window) }  // said by "지금 창 캡처" itself
+        var now = if (v.windowTarget) getString(R.string.settings_desktop_backend_now_window)
+            else getString(R.string.settings_desktop_backend_now_desktop, p.label(v.active))
+        if (reasons.isNotEmpty()) now += " (" + reasons.joinToString(", ") + ")"
+        var text = when (v.state) {
+            DesktopBackendPresentation.State.NOT_CONNECTED -> getString(R.string.settings_desktop_backend_not_connected)
+            DesktopBackendPresentation.State.CHECKING -> getString(R.string.settings_desktop_backend_checking)
+            DesktopBackendPresentation.State.NO_ANSWER_HOST ->
+                if (asked != null) getString(R.string.settings_desktop_backend_no_answer_asked, asked)
+                else getString(R.string.settings_desktop_backend_no_answer)
+            DesktopBackendPresentation.State.IDLE -> getString(R.string.settings_desktop_backend_idle, now)
+            DesktopBackendPresentation.State.APPLYING -> getString(R.string.settings_desktop_backend_applying, asked ?: "?", now)
+            DesktopBackendPresentation.State.APPLIED -> getString(R.string.settings_desktop_backend_applied, asked ?: "?", now)
+            DesktopBackendPresentation.State.POLICY_REPLACED ->
+                getString(R.string.settings_desktop_backend_policy, asked ?: "?", p.label(v.effective), now)
+            DesktopBackendPresentation.State.RECEIVED -> getString(R.string.settings_desktop_backend_received, asked ?: "?", now)
+            DesktopBackendPresentation.State.STORED_FOR_DESKTOP -> getString(R.string.settings_desktop_backend_stored, asked ?: "?", now)
+            DesktopBackendPresentation.State.REFUSED -> getString(R.string.settings_desktop_backend_refused, asked ?: "?", now)
+        }
+        if (v.sessionScoped && v.state != DesktopBackendPresentation.State.NOT_CONNECTED &&
+            v.state != DesktopBackendPresentation.State.CHECKING) {
+            text += " · " + getString(R.string.settings_desktop_backend_scope)
+        }
+        if (settingsDesktopBackendStatusText.text?.toString() != text) {
+            settingsDesktopBackendStatusText.text = text
+            diagnosticsLog.log("desktop_backend_ui", "state=${v.state} lit=${v.lit?.let { p.label(it) } ?: "none"} " +
+                "asked=${asked ?: "none"} window=${v.windowTarget} scoped=${v.sessionScoped} enabled=${v.enabled} " +
+                "seq=${status?.seq ?: 0} sentSeq=${status?.intentSentSeq ?: 0}")
+        }
     }
 
     private fun syncConnectedClientPreferences(isConnected: Boolean) {
         if (!isConnected) {
             lastAppliedStreamActive = null
+            updateDesktopBackendButtons()  // ua2-apk r1: disabled, nothing lit
             return
         }
 
@@ -2563,18 +2640,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        if (pendingDesktopBackendSync) {
-            if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(requestedDesktopBackend.code)) {
-                pendingDesktopBackendSync = false
-                settingsStatusMessage =
-                    requestSummary()
-                settingsAppliedText.text = settingsStatusMessage
-                diagnosticsLog.log(
-                    "desktop_backend_sync",
-                    "backend=${requestedDesktopBackend.label.lowercase()}"
-                )
+        // ua2-apk r1: nothing is re-sent on connect (no stored backend). While the settings screen shows, the host
+        // is asked what runs now -- about every 2 s (checked on the status poll) -- and the answer is what the buttons show.
+        if (activeTargetTab == TargetTab.SETTINGS && currentScene == UiScene.TARGETS) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs - desktopBackendQueryAtMs >= 2000L) {
+                desktopBackendQueryAtMs = nowMs
+                NativeSessionBridge.nativeQueryDesktopCaptureBackend()
             }
         }
+        updateDesktopBackendButtons()
 
         if (lastAppliedStreamActive != desiredStreamActive) {
             requestStreamActive(desiredStreamActive, "connected_sync")
@@ -2960,7 +3035,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // viewer-sharpness r1 B / r2 R1: a stream begun in 크게보기 with 화면 이동 on moves / scales the picture to its
         // end -- even past a pinch back to 전체보기 -- and sends nothing; a PC stream cut by a mode / size / scene
         // change was released once (interruptViewerTouch) and its rest reaches nobody. Decided at ACTION_DOWN only.
-        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge)) {
+        // sh-strength r5 (N1-c2): a stream that starts while B's new layout is not shown yet is swallowed WHOLE (second
+        // finger, moves, partial ups) until its final up; the next new DOWN is judged again.
+        val layoutShown = !sharpenLayoutNotShown()
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && !layoutShown && !(viewerPanMode && viewerViewport.isLarge) &&
+            sharpenInputHeldGen != sharpenPlacementGenSent) {
+            sharpenInputHeldGen = sharpenPlacementGenSent
+            diagnosticsLog.log("input_held_layout", "sent=$sharpenPlacementGenSent shown=$sharpenShownPlacementGen")
+        }
+        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge, layoutShown)) {
             ViewerTouchRouter.Owner.LOCAL -> return handleViewportGesture(event)
             ViewerTouchRouter.Owner.SWALLOW, ViewerTouchRouter.Owner.NONE -> return true
             ViewerTouchRouter.Owner.PC -> Unit
@@ -4247,6 +4330,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
         val isConnecting = statusValue.startsWith("connecting")
         val isConnected = statusValue.startsWith("connected")
+        sessionConnectedNow = isConnected
         connectFlowActive = isConnecting || isConnected
         if (!isConnecting && !isConnected && rebootFlow.onDisconnected()) {
             // The restart took the connection: the request's state, not an error.
@@ -5031,7 +5115,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     directoryConnectingName = ""
                     connectFlowActive = true
                     pendingRuntimeConfigSync = true
-                    pendingDesktopBackendSync = true
+                    resetSessionDesktopBackend("directory_connect")
                     desiredStreamActive = false
                     lastAppliedStreamActive = null
                     clearPendingSelection()
@@ -5162,6 +5246,49 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private val sharpenHandler = Handler(Looper.getMainLooper())
     private var sharpenStartTimeout: Runnable? = null
     private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
+    /** sh-strength r2 B: the test seam's switch (test builds only; the shipped seam always answers 0). */
+    private val sharpenDisplayPass: Int by lazy { SharpenTestSeam.displayPassFrom(intent) }
+    private var sharpenDisplayPlacementLogged = ""
+    /** sh-strength r3: the user's choice of where the pass draws (settings; stored). */
+    private var sharpenMethod = SharpenMethod.DEFAULT
+    /** r3 (N2): the placement last handed to the current renderer (null: none) -- the same one is never sent again. */
+    private var sharpenPlacementSent: DisplayPlacement? = null
+    /** r4 (N1 c): the generation of the placement last sent to the renderer, and the one the view has shown. A remote
+     *  touch starting while they differ (B) is held: the screen still shows the old layout, the mapping the new. */
+    private var sharpenPlacementGenSent = 0L
+    private var sharpenShownPlacementGen = 0L
+    private var sharpenInputHeldGen = -1L
+
+    /** r4 (N1 c): B is drawing a layout the view has not shown yet. */
+    private fun sharpenLayoutNotShown(): Boolean =
+        sharpenPlacementSent != null && sharpenDisplayPassActive() && sharpenShownPlacementGen != sharpenPlacementGenSent
+
+    /** 0 = A, 1 = B, 2 = B with the double transform (the test seam's negative control only). */
+    private fun displayPassMode(): Int =
+        if (sharpenDisplayPass != 0) sharpenDisplayPass else if (sharpenMethod == SharpenMethod.DISPLAY) 1 else 0
+
+    /** B is in effect while the sharpening renderer is the TextureView's producer (starting or live). */
+    private fun sharpenDisplayPassActive(): Boolean =
+        displayPassMode() != 0 &&
+            (sharpenPolicy.path == SharpenPathPolicy.Path.STARTING || sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** r3 (N1): B is what the renderer WILL draw (a filtered level, no fallback): the output is sized for the view from
+     *  the start, so the renderer begins with the layout it draws. */
+    private fun sharpenDisplayPassIntended(): Boolean =
+        displayPassMode() != 0 && sharpenPolicy.requested.filtered && sharpenPolicy.fallbackReason == null &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** sh-strength r3: the user picks where the pass draws. A live renderer is replaced through the usual release. */
+    private fun selectSharpenMethod(method: SharpenMethod, origin: String) {
+        if (method == sharpenMethod) return
+        sharpenMethod = method
+        SessionPersistence.saveSharpenMethod(this, method)
+        diagnosticsLog.log("sharpen_method", "method=${method.code} origin=$origin path=${sharpenPolicy.path}")
+        executeSharpen(sharpenPolicy.restartRenderer())
+        syncVideoSurface(forceRebind = false)  // the output size follows (view for B, source for A)
+        renderQualityControls()
+    }
     // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
     private val latchClassifier = LatchClassifier()
     private val sharpenGate = SharpenOutputGate()
@@ -5312,6 +5439,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
         sharpenRenderers[generation] = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
+        sharpenPlacementSent = null  // r3: a new renderer has no placement yet
+        sharpenShownPlacementGen = 0L  // r4: and nothing of it shown
+        sharpenDisplayPlacementLogged = ""  // ...and its own first placement is logged
         val timeout = Runnable { executeSharpen(sharpenPolicy.rendererFailed(generation, "start_timeout")) }
         sharpenStartTimeout = timeout
         sharpenHandler.postDelayed(timeout, SHARPEN_START_TIMEOUT_MS)
@@ -5544,6 +5674,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resolveSurfaceBufferWidth(): Int {
+        // sh-strength r2 B: the pass draws at the view's pixel size (the remote source size is unchanged elsewhere).
+        // r3 (N1): from the moment B is intended, so a renderer starts with the size it draws at.
+        if (sharpenDisplayPassIntended()) return videoTextureView.width
         if (videoWidth > 0) return videoWidth
         if (expectedContentWidth > 0) return expectedContentWidth
         if (videoTextureView.width > 0) return videoTextureView.width
@@ -5551,6 +5684,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun resolveSurfaceBufferHeight(): Int {
+        if (sharpenDisplayPassIntended()) return videoTextureView.height
         if (videoHeight > 0) return videoHeight
         if (expectedContentHeight > 0) return expectedContentHeight
         if (videoTextureView.height > 0) return videoTextureView.height
@@ -5577,6 +5711,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // the placement -- the aspect-correct fit (전체보기), or the zoomed, moved picture (크게보기). One uniform
         // scale (never one axis alone), the same placement input reads.
         val p = viewerViewport.place(viewWidth, viewHeight, resolvedContentWidth, resolvedContentHeight)
+        if (sharpenDisplayPassActive()) {
+            // sh-strength r2 B: the pass draws the picture where the viewport placed it, in a view-sized buffer;
+            // the TextureView adds nothing (identity) -- else the placement would be applied twice. The double
+            // transform is the negative control's (test seam 2) only.
+            val place = if (p != null) DisplayPlacement(p.left, p.top, p.width, p.height, viewWidth, viewHeight)
+            else DisplayPlacement(0f, 0f, viewWidth, viewHeight, viewWidth, viewHeight)
+            if (displayPassMode() == 2 && p != null) {
+                matrix.setScale(p.width / viewWidth, p.height / viewHeight)
+                matrix.postTranslate(p.left, p.top)
+            }
+            videoTextureView.setTransform(matrix)
+            if (place != sharpenPlacementSent) {  // r3 (N2): the same placement is not sent again
+                sharpenPlacementSent = place
+                sharpenPlacementGenSent += 1  // r4 (N1 c): named, so its display can be told
+                sharpenRenderer?.setDisplayPlacement(place, sharpenPlacementGenSent)
+                // r5 (N1-c2): a PC stream under way was mapped with the old layout -- released once, the rest swallowed
+                interruptViewerTouch("layout_$sharpenPlacementGenSent")
+            }
+            val logged = "%.1f,%.1f,%.1fx%.1f buffer=%dx%d".format(place.left, place.top, place.width, place.height,
+                surfaceBufferWidth, surfaceBufferHeight)
+            if (logged != sharpenDisplayPlacementLogged) {
+                sharpenDisplayPlacementLogged = logged
+                diagnosticsLog.log("sharpen_display_pass", "mode=${displayPassMode()} method=${sharpenMethod.code} place=$logged " +
+                    "view=${viewWidth.toInt()}x${viewHeight.toInt()} content=${resolvedContentWidth}x$resolvedContentHeight")
+            }
+            if (::viewerPanChip.isInitialized) renderViewportChips()
+            return
+        }
+        if (sharpenPlacementSent != null) {
+            sharpenPlacementSent = null
+            sharpenRenderer?.setDisplayPlacement(null)
+        }
         if (p == null) {
             videoTextureView.setTransform(matrix)
             return
@@ -5881,7 +6047,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             controlPort,
             bitrateKbps,
             fps,
-            requestedDesktopBackend.code
         )
     }
 }

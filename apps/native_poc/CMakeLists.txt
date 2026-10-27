@@ -708,6 +708,26 @@ add_executable(remote60_client_session_role_park_test
 target_include_directories(remote60_client_session_role_park_test PRIVATE src)
 target_link_libraries(remote60_client_session_role_park_test PRIVATE common ws2_32)
 
+# apk-0232 r1: a desktop pick at a host at the logon screen through the PRODUCT shared session and the APK's
+# selection gate (selection_ack_gate.hpp), against a fake control host on loopback.
+add_executable(remote60_client_session_prelogin_select_test
+  src/client_session_prelogin_select_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_client_session_prelogin_select_test PRIVATE src)
+target_link_libraries(remote60_client_session_prelogin_select_test PRIVATE common ws2_32)
+# apk-0232 r2: the N1 latch (SetTestAfterLocalSinkBeginHook) -- this test only; the session in every product target
+# compiles without it.
+target_compile_definitions(remote60_client_session_prelogin_select_test PRIVATE REMOTE60_CLIENT_SESSION_TEST_HOOKS=1)
+
+# apk-0232 r2 (N2): the Android sink's held input frame (decoder_pending_slot.hpp) with the selection gate.
+add_executable(remote60_decoder_pending_slot_test src/decoder_pending_slot_test.cpp)
+target_include_directories(remote60_decoder_pending_slot_test PRIVATE src)
+target_link_libraries(remote60_decoder_pending_slot_test PRIVATE common)
+
 add_executable(remote60_native_video_client_shared_core_test
   src/native_video_client_shared_core.cpp
   src/native_video_client_tcp_control.cpp

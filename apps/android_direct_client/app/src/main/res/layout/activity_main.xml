@@ -544,6 +544,16 @@
                     android:textColor="@color/panel_button_text" />
             </LinearLayout>
 
+            <!-- ua2-apk r1: what the host says runs now (DesktopBackendPresentation) -->
+            <TextView
+                android:id="@+id/settingsDesktopBackendStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/settings_desktop_backend_not_connected"
+                android:textColor="@color/ui_text_secondary"
+                android:textSize="12sp" />
+
             <!-- apk-ui r1 (Codex 3): the viewer menu's two picture levels and three frame rates,
                  on the same stored model (SessionPersistence / ViewerQualitySettings). -->
             <TextView
@@ -640,6 +650,49 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:text="@string/ui_sharpness_hint"
+                android:textColor="@color/ui_text_secondary"
+                android:textSize="12sp" />
+
+            <!-- sh-strength r3: where the sharpening draws (SharpenMethod) -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/ui_sharpen_method_label"
+                android:textColor="@color/ui_text"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:baselineAligned="false">
+
+                <TextView
+                    android:id="@+id/settingsSharpMethodDefaultButton"
+                    style="@style/UiSegment"
+                    android:layout_height="match_parent"
+                    android:minHeight="48dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:text="@string/ui_sharpen_method_default" />
+                <TextView
+                    android:id="@+id/settingsSharpMethodDisplayButton"
+                    style="@style/UiSegment"
+                    android:layout_marginStart="8dp"
+                    android:layout_height="match_parent"
+                    android:minHeight="48dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:text="@string/ui_sharpen_method_display" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/ui_sharpen_method_hint"
                 android:textColor="@color/ui_text_secondary"
                 android:textSize="12sp" />
 

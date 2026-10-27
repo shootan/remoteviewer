@@ -169,6 +169,16 @@ class SharpenPathPolicy(requested: SharpnessLevel) {
         }
     }
 
+    /**
+     * sh-strength r3: the renderer is replaced (the drawing method changed): the current one leaves through the usual
+     * release -- its release confirmed before another producer is wired -- and a new one starts after it. Nothing to
+     * do when no renderer is the producer.
+     */
+    fun restartRenderer(): List<Command> = when (path) {
+        Path.STARTING, Path.LIVE -> releaseRenderer(after = Path.LIVE)
+        else -> emptyList()
+    }
+
     fun rendererReady(gen: Long): List<Command> {
         if (gen != generation || path != Path.STARTING) return emptyList()
         path = Path.LIVE

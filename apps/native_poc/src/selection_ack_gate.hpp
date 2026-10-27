@@ -24,6 +24,14 @@ namespace remote60::native_poc {
 //     bounded, while it is owed; OwedToken changes when the duty is re-armed (a new surface),
 //     so the session's bounded retries start over for a decoder that has just become able.
 // It never opens on a frame before the answer.
+//
+// apk-0232 r1 (Codex codex_rel_0163_e1_decision.md, the shared-session half): a LOCAL selection. A desktop pick at
+// a host known to be at the logon screen (kCaptureFlagPreloginV1) gets no answer -- that host takes no WindowSelect
+// and serves its one desktop. The same armed selection (same tag) then needs no ack, but keeps everything else:
+// pending, the first-picture wait, the straggler filter after it. Its generation is BOUND by its first IDR that
+// actually reaches the decoder (KeyDelivered of the key Admit let through as the candidate); until then it owes an
+// IDR (the session asks, bounded), deltas are dropped, and an IDR the decoder could not take binds nothing and is
+// owed again. A host answer never completes a local selection; a local selection never completes another's.
 class SelectionAckGate {
  public:
   enum class AckResult { Ignored, Applied, Failed };
@@ -38,16 +46,65 @@ class SelectionAckGate {
     expected_ = 0;
     droppedCount_ = 0;
     keyOwed_ = false;
+    local_ = false;
+    candidate_ = 0;
+  }
+
+  // apk-0232 r1: the armed selection `selection`, still waiting for its answer, continues as a LOCAL one (see the
+  // class comment). Only that selection, only while it waits; false otherwise (a later pick replaced it, it was
+  // answered, refused or abandoned) -- then nothing changes.
+  bool BeginLocal(uint64_t selection) {
+    if (selection == 0 || pending_ != selection || !awaiting_ || local_) return false;
+    awaiting_ = false;
+    local_ = true;
+    expected_ = 0;
+    candidate_ = 0;
+    keyOwed_ = true;  // the first picture needs an IDR: asked for until one reaches the decoder
+    ++owedToken_;
+    return true;
+  }
+
+  // apk-0232 r1: the armed selection `selection` cannot be made (a window pick at the logon screen): it is over
+  // as a failure -- nothing passes for it (like a failed answer). Only that selection, only while it waits.
+  bool Refuse(uint64_t selection) {
+    if (selection == 0 || pending_ != selection || !awaiting_) return false;
+    awaiting_ = false;
+    local_ = false;
+    expected_ = 0;
+    keyOwed_ = false;
+    return true;
+  }
+
+  // The generation local selection `selection` was bound to, 0 while unbound (or not that local selection).
+  uint64_t LocalBoundFor(uint64_t selection) const {
+    return (selection != 0 && local_ && pending_ == selection) ? expected_ : 0;
   }
 
   // An IDR of the answered generation reached the decoder (queued): the duty is paid.
+  // apk-0232 r1: for a local selection still unbound, the IDR Admit let through as its candidate binds it here.
   void KeyDelivered(uint64_t frameStreamGeneration) {
+    if (local_ && pending_ != 0 && expected_ == 0) {
+      if (candidate_ != 0 && frameStreamGeneration == candidate_) {
+        expected_ = candidate_;
+        keyOwed_ = false;
+      }
+      return;
+    }
     if (expected_ != 0 && frameStreamGeneration == expected_) keyOwed_ = false;
   }
 
   // An IDR of the answered generation passed the gate but the decoder could not take it (no
   // surface, codec not configured, ...): the selection is owed one (again).
   void KeyLost(uint64_t frameStreamGeneration) {
+    if (local_ && pending_ != 0 && expected_ == 0) {
+      // apk-0232 r1: an unbound local selection's candidate the decoder did not take binds nothing.
+      if (candidate_ == frameStreamGeneration) candidate_ = 0;
+      if (!keyOwed_) {
+        keyOwed_ = true;
+        ++owedToken_;
+      }
+      return;
+    }
     if (pending_ == 0 || expected_ == 0 || frameStreamGeneration != expected_ || keyOwed_) return;
     keyOwed_ = true;
     ++owedToken_;
@@ -67,9 +124,12 @@ class SelectionAckGate {
     expected_ = 0;
     droppedCount_ = 0;
     keyOwed_ = false;
+    local_ = false;
+    candidate_ = 0;
   }
 
   Ack OnAck(bool ok, uint64_t streamGeneration, uint64_t requestTag) {
+    // A local selection waits for no answer (awaiting_ is false): a host's answer never completes it.
     if (pending_ == 0 || !awaiting_ || requestTag != pending_) return {AckResult::Ignored, false};
     awaiting_ = false;
     if (!ok || streamGeneration == 0) {
@@ -87,7 +147,13 @@ class SelectionAckGate {
   // Whether the frame may go to the decoder. Passing here pays nothing (KeyDelivered does);
   // isKey is kept for the callers' symmetry.
   bool Admit(uint64_t frameStreamGeneration, bool isKey = false) {
-    (void)isKey;
+    if (pending_ != 0 && local_ && expected_ == 0) {
+      // apk-0232 r1: an unbound local selection starts at an IDR. The one let through is its candidate; it binds
+      // once it really reaches the decoder (KeyDelivered). A delta binds nothing and does not pass.
+      if (!isKey || frameStreamGeneration == 0) return false;
+      candidate_ = frameStreamGeneration;
+      return true;
+    }
     if (pending_ != 0 && awaiting_) {
       RememberDropped(frameStreamGeneration);
       return false;
@@ -97,11 +163,22 @@ class SelectionAckGate {
     return true;
   }
 
+  // apk-0232 r2 (N2): may a frame of this generation go into the codec NOW -- asked again at the moment of queueing
+  // (a frame held for an input buffer included), with no side effect. A selection waiting for its answer admits
+  // nothing; an unbound local selection only its current candidate IDR; an answered or bound one only its generation.
+  bool PermitsQueue(uint64_t frameStreamGeneration) const {
+    if (pending_ == 0) return true;
+    if (awaiting_) return false;
+    if (local_ && expected_ == 0) return candidate_ != 0 && frameStreamGeneration == candidate_;
+    return expected_ != 0 && frameStreamGeneration == expected_;
+  }
+
   // The answered selection still has no IDR of its generation (see the class comment).
   bool KeyOwed() const { return keyOwed_; }
   uint64_t pending() const { return pending_; }
   bool awaiting() const { return awaiting_; }
   uint64_t expected() const { return expected_; }
+  bool local() const { return local_; }
 
  private:
   static constexpr size_t kDroppedMemory = 4;
@@ -132,6 +209,8 @@ class SelectionAckGate {
   size_t droppedCount_ = 0;
   bool keyOwed_ = false;
   uint64_t owedToken_ = 0;
+  bool local_ = false;      // apk-0232 r1: the armed selection needs no answer (see BeginLocal)
+  uint64_t candidate_ = 0;  // ...and the IDR generation let through for it, not yet bound
 };
 
 }  // namespace remote60::native_poc

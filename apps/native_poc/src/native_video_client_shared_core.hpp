@@ -163,8 +163,19 @@ class DesktopBackendControl {
   // together go out as the change alone -- its answer (asked for toward a host that answers) IS the status; a
   // question taken first goes out first and a change after it is still sent. One message per ConsumePending.
   bool Query();
+  // ua2-apk r2 (Codex codex_ua2_apk_src_r1.md N1): which change the app asked for last, which one went out, and with
+  // which wire seq -- so an answer can be told to be about THE CURRENT request (its seq or later) or an older one.
+  // Ids count Request calls on this connection (Reset: 0).
+  struct Intent {
+    uint64_t asked = 0;    // the latest Request
+    uint64_t sent = 0;     // the Request whose change went out last
+    uint32_t sentSeq = 0;  // that change's seq (34)
+  };
+  Intent CurrentIntent() const;
 
 private:
+  mutable std::mutex intentMu_;
+  Intent intent_;
   std::atomic<bool> pending_{false};       // a change (backend_) is waiting
   std::atomic<bool> queryPending_{false};  // r2 N3: a question is waiting -- kept apart from the change
   std::atomic<uint32_t> nextSeq_{0};
@@ -686,6 +697,16 @@ class WindowPanelStateModel {
   // selection most recently requested here -- compared and applied under the one lock RequestSelect
   // takes, so a pick made between the two cannot be overwritten. selectionTag 0 = untracked, shown.
   WindowSelectApplyResult ApplyWindowSelectedFor(const ControlWindowSelectedMessage& msg, uint64_t selectionTag);
+  // apk-0232 r1: a LOCAL desktop selection (a host at the logon screen: no WindowSelect, no answer). Begin: the pick
+  // is the selection now requested (`selectionTag`), with nothing queued for the wire -- a pick still queued is
+  // replaced, as a new RequestSelect replaces it. Convert: the queued pick `selectionTag` (taken off the queue, not
+  // sent) becomes local -- only if it is still the selection requested. Applied: its generation is bound (its
+  // first IDR reached the decoder): shown as selected, like an answer, only if it is still the selection requested.
+  // Refused: the pick `selectionTag` cannot be made at the logon screen (a window), shown as failed if current.
+  bool BeginLocalSelect(uint64_t selectionTag, const char* statusText);
+  bool ConvertSelectToLocal(uint64_t selectionTag, const char* statusText);
+  WindowSelectApplyResult ApplyLocalSelectedFor(uint64_t selectionTag, uint64_t streamGeneration);
+  bool RefuseSelectFor(uint64_t selectionTag, const char* reason);
   void Scroll(int deltaSteps, int visibleCount);
   bool TryResolveWindowIdForVisibleRow(int row, int visibleCount, uint64_t* outWindowId) const;
   WindowPanelSnapshot Snapshot() const;

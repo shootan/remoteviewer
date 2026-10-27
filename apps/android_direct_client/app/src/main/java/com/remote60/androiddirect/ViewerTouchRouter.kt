@@ -12,6 +12,9 @@ package com.remote60.androiddirect
  * - SWALLOW: a PC stream cut by a mode / size / scene change. The caller sends the release once ([interrupt]); the
  *   rest of that stream reaches nobody, so a held finger does not press again.
  * The next ACTION_DOWN starts the next stream in whatever mode is current then.
+ * sh-strength r5 (N1-c2): a PC stream whose ACTION_DOWN comes while the picture's new layout is not shown yet
+ * ([layoutShown] false) is SWALLOW from its start to its final up -- a second finger, a move, a partial up never
+ * begins sending; the layout becoming shown mid-stream does not resume it. A LOCAL stream (화면 이동) is unaffected.
  *
  * The action values are MotionEvent's (ACTION_DOWN 0, UP 1, MOVE 2, CANCEL 3, POINTER_DOWN 5, POINTER_UP 6), kept here so
  * this runs in a plain unit test.
@@ -22,10 +25,11 @@ class ViewerTouchRouter {
     var owner = Owner.NONE
         private set
 
-    /** The route for this event. [localNow] = 크게보기 with 화면 이동 on, read only at ACTION_DOWN. */
-    fun route(actionMasked: Int, localNow: Boolean): Owner {
+    /** The route for this event. [localNow] = 크게보기 with 화면 이동 on, [layoutShown] = the picture on screen is the
+     *  layout input maps with; both read only at ACTION_DOWN. */
+    fun route(actionMasked: Int, localNow: Boolean, layoutShown: Boolean = true): Owner {
         if (actionMasked == ACTION_DOWN) {
-            owner = if (localNow) Owner.LOCAL else Owner.PC
+            owner = if (localNow) Owner.LOCAL else if (layoutShown) Owner.PC else Owner.SWALLOW
         } else if (owner == Owner.NONE) {
             // A stream whose ACTION_DOWN this view never saw (it began elsewhere): nobody's.
             owner = Owner.SWALLOW

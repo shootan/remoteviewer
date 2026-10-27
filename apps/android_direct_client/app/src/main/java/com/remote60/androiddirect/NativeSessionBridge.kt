@@ -103,6 +103,10 @@ object NativeSessionBridge {
     external fun nativeTakeRebootOutcome(): LongArray?
     external fun nativeRequestRuntimeConfig(bitrateBps: Int, fps: Int): Boolean
     external fun nativeRequestDesktopCaptureBackend(backend: Int): Boolean
+    /** ua2-apk r1: ask the host what runs now (false: nothing asked -- a host that does not answer). */
+    external fun nativeQueryDesktopCaptureBackend(): Boolean
+    /** ua2-apk r1: DesktopBackendPresentation.HostStatus.of(...) reads it. */
+    external fun nativeGetDesktopBackendStatus(): LongArray?
     external fun nativeRequestStreamActive(active: Boolean): Boolean
     external fun nativeQueueInputEvent(
         kind: Int,
