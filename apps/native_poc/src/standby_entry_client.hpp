@@ -182,6 +182,22 @@ class StandbyEntryClient {
     return fx;
   }
 
+  // The client lets the entry go (the app left the screen -- the phone keeps standby only while visible -- the PC was
+  // evicted from the recent three, sign-out): a parked entry is released at the host at once (one StandbyRelease, no
+  // retry: an unanswered one lapses on the lease anyway) and nothing more is sent. Not while Active / Activating (a
+  // granted entry refuses Release -- Live; that session ends by itself). Idle afterwards: a new admission needs a new
+  // capability.
+  Effects Release(uint64_t /* nowMs */) {
+    Effects fx;
+    if (state_ == State::Parked) fx.push_back(SendOf(Packet(UdpPacketKind::StandbyRelease, 0)));
+    if (state_ == State::Active || state_ == State::Activating) return fx;
+    entryId_ = 0;
+    std::memset(secret_, 0, sizeof(secret_));
+    std::memset(hello_.authToken, 0, sizeof(hello_.authToken));
+    if (state_ != State::Unsupported) state_ = State::Idle;  // an older host stays known as such
+    return fx;
+  }
+
   // The session this entry activated ended (the caller's session layer): the host parks the entry again (§2.3 S3).
   void SessionEnded(uint64_t nowMs) {
     if (state_ != State::Active) return;

@@ -108,6 +108,13 @@ class StandbyLease {
   // The user gave up the activation in flight (Connect still running): its late answers adopt nothing.
   void CancelActivation() { Apply(client_.CancelActivation(now_())); }
 
+  // The app lets this PC's standby go (it leaves the screen, the PC left the recent three, sign-out): a parked entry is
+  // released at the host (one datagram); the lease stays open for a later admission. Not while handed off (a session).
+  void Release() {
+    if (handedOff_) return;
+    Apply(client_.Release(now_()));
+  }
+
  private:
   bool Reopen(std::string* error) {
     close_socket(&socket_);
