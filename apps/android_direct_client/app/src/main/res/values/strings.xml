@@ -265,6 +265,17 @@
     <string name="hosts_keep_disconnect">끊기</string>
     <string name="hosts_keep_disconnect_all">모두 끊기</string>
     <string name="hosts_keep_unsupported">%1$s 은(는) 연결 유지를 지원하지 않습니다 — PC 업데이트가 필요합니다 (목록으로 가려면 연결 해제)</string>
+    <!-- keepalive-r2 ② e, kept model A: a PC's standby lease on its card, and "PC 목록" for a PC that cannot stand by -->
+    <string name="hosts_standby_state">대기 중</string>
+    <string name="hosts_standby_state_pending">대기 준비</string>
+    <string name="hosts_standby_ready_detail">대기 연결 준비됨 · 누르면 바로 열립니다</string>
+    <string name="hosts_standby_preparing">대기 연결 준비 중…</string>
+    <string name="hosts_standby_retry">대기 연결 다시 시도 대기 중</string>
+    <string name="hosts_standby_returning">대기 연결로 돌아가는 중…</string>
+    <string name="hosts_standby_unsupported">상시 유지 미지원</string>
+    <string name="hosts_standby_activating">연결 중…</string>
+    <string name="hosts_standby_unsupported_end">%1$s 은(는) 상시 유지를 지원하지 않아 연결을 닫았습니다 (대기 연결을 지원하는 PC 버전으로 업데이트하면 유지됩니다)</string>
+    <string name="hosts_standby_unsupported_host">%1$s 은(는) 상시 유지를 지원하지 않습니다 — 다시 누르면 새로 연결합니다</string>
     <string name="ui_menu_disconnect">연결 해제</string>
     <string name="ui_menu_disconnect_description">PC 와의 연결을 끊고 PC 목록으로 돌아갑니다</string>
     <string name="ui_disconnect_confirm_title">연결을 끊을까요?</string>

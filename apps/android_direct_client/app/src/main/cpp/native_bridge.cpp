@@ -20,6 +20,7 @@
 #include "session_table.hpp"
 #include "standby_file_store.hpp"
 #include "standby_runner.hpp"
+#include "standby_session_link.hpp"
 #include "utf8_bounded.hpp"
 
 namespace {
@@ -53,6 +54,9 @@ struct SessionEntry {
   // session Connect / UDP Hello: the controller's own counters).
   std::atomic<uint64_t> observes{0};
   std::atomic<uint64_t> punches{0};
+  // keepalive-r2 ② e (kept model A): the lease activation this entry's session came from, if any -- its SessionOver is
+  // said right after every Disconnect of the entry (standby_session_link.hpp), so the lease pings again.
+  remote60::native_poc::StandbySessionLink standby;
 
   void SetError(const std::string& e) {
     std::lock_guard<std::mutex> lk(infoMu);
@@ -89,7 +93,11 @@ struct SessionEntry {
   // Off every table lock (the closer's thread): the session under the adoption lock, the rendezvous socket under
   // the step lock, each once (r5 T1).
   void Close() {
-    gate.CloseExplicit([this] { controller.Disconnect(); }, [this] { rendezvous.Close(); },
+    gate.CloseExplicit([this] {
+                         controller.Disconnect();
+                         standby.Over();  // after Disconnect RETURNED: the worker and the video reader are joined
+                       },
+                       [this] { rendezvous.Close(); },
                        [](const std::function<void()>& closeRendezvous) { closeRendezvous(); });
   }
 };
@@ -468,7 +476,10 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeCloseIfOwn(
   if (!e) return JNI_FALSE;
   return e->gate.CloseIfOwn(static_cast<int64_t>(op), static_cast<uint64_t>(gen),
                             [&e] { return e->controller.ConnectionGeneration(); },
-                            [&e] { e->controller.Disconnect(); })
+                            [&e] {
+                              e->controller.Disconnect();
+                              e->standby.Over();
+                            })
              ? JNI_TRUE
              : JNI_FALSE;
 }
@@ -1333,8 +1344,9 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeTakeRebootOutcome(
 }
 
 // ===================================================================== keepalive-r2 (2) e: standby leases (one per PC)
-// The app's StandbyRunner. Nothing calls it while Preconnect.SEND_TO_REAL_HOSTS is off (the shipped value): these
-// functions exist so the wiring can be tested; a lease is only ever started by nativeStandbyStart.
+// The app's StandbyRunner (kept model A): a lease per PC the phone stands by for -- made by a user's "PC 목록" from a
+// supported PC, or by the app's own preparation of the recent PCs (Preconnect.AUTO_PREPARE, off when shipped). A lease
+// is only ever started by nativeStandbyStart; a tap activates it with nativeConnectStandby (end of this file).
 namespace {
 
 // The device id + last generation file: standby_file_store.hpp (FileGenerationStore, shared and tested).
@@ -1433,4 +1445,33 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyRelease(JNIEnv*
 extern "C" JNIEXPORT void JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyReleaseAll(JNIEnv* /* env */, jobject /* this */) {
   if (auto* r = standby_runner()) r->ReleaseAll();
+}
+
+// keepalive-r2 ② e (kept model A, codex_keepalive_r2_kept_model.md): a tap on a PC whose lease is ready -- this NEW
+// entry's session by that lease's activation, through the entry's gate under `op` (standby_session_link.hpp): no
+// directory, observe, punch or ordinary Hello. The generation it made (0 = none; why: nativeDirectoryLastError --
+// "standby_not_ready", "stale_operation", "connect_failed"). Off the UI thread (it may wait for the pump's read in flight).
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeConnectStandby(JNIEnv* env, jobject /* this */, jlong handle,
+                                                                         jstring key, jlong op) {
+  auto e = entry_of(handle);
+  if (!e) return 0;
+  auto* r = standby_runner();
+  if (!r) {
+    e->SetError("standby_not_initialized");
+    return 0;
+  }
+  SessionEntry* entry = e.get();
+  const auto res = remote60::native_poc::standby_adopt(
+      e->gate, static_cast<int64_t>(op), *r, jstring_to_string(env, key), e->controller, e->standby,
+      [entry](remote60::native_poc::ClientSessionConnectArgs& args) {
+        args.encodedFrameSink = &entry->sink;
+        entry->controller.SetClipboardSyncEnabled(g_clipboard_sync_enabled.load());
+      });
+  {
+    std::lock_guard<std::mutex> lk(e->infoMu);
+    e->chosenCandidate = "standby";
+  }
+  e->SetError(res.generation != 0 ? std::string() : res.why);
+  return static_cast<jlong>(res.generation);
 }

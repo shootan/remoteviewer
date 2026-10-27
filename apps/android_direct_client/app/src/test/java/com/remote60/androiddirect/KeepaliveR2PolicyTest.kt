@@ -148,7 +148,9 @@ class KeepaliveR2PolicyTest {
     }
 
     @Test
-    fun theSwitchToRealHostsIsOffUntilTheHostSideIsConfirmed() {
-        assertFalse(Preconnect.SEND_TO_REAL_HOSTS)
+    fun automaticPreparationIsOffInAnOrdinaryBuild() {
+        // codex_ka_e_switch_decision.md: off until the independent check; only -Pgnlink.testStandbyAutoPrepare=true
+        // (a debug test build, refused for a release) turns it on
+        assertFalse(Preconnect.AUTO_PREPARE)
     }
 }

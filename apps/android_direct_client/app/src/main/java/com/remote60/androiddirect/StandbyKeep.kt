@@ -1,0 +1,175 @@
+package com.remote60.androiddirect
+
+/**
+ * keepalive-r2 ② e -- kept model A (Codex codex_keepalive_r2_kept_model.md): a PC the phone keeps is a standby LEASE
+ * (StandbyRunner, native), not a parked control session. The lease has its own UDP socket, an entry at the host and
+ * its Pings -- no control link, no video, no decoder, no input. A tap on a ready PC activates THAT lease: a new session
+ * entry connected with the lease's activation (nativeConnectStandby) -- no directory, observe, punch or ordinary Hello.
+ * "PC 목록" ends that session; the lease goes on by Ping on the same socket.
+ *
+ * The rules, pure (the screen and the native runner apply them):
+ *  - [shown]: what the list says of a PC -- only a confirmed entry on a live lease is READY ("준비됨"); idle, waiting
+ *    for a capability, unanswered or handed off never reads as ready.
+ *  - [onTap]: ready -> activate; a lease still handed off (its session is ending) -> the tap waits; anything else -> the
+ *    ordinary connect (a lease still preparing is let go first: one thing per PC).
+ *  - [onListReturn]: from an activation -> back to standby; an ordinary directory session of a supported directory ->
+ *    the FIRST transition (a new lease: its directory requests are real and logged as such); raw IP, an older host, a
+ *    pre-login worker, an unknown support -> "상시 유지 미지원" and the session ends.
+ *  - [Book]: the leases of this sign-in, each with an incarnation -- a late capability (a directory answer that comes
+ *    back after a Release, a sign-out or a new lease under the same key) is dropped by it, never provided to another.
+ *  - At most [RecentHosts.MAX] PCs (active and standby together): the leases are the recent PCs; one that drops out of
+ *    the recent list (only a user's successful use reorders it) is released. A failed fourth evicts nothing.
+ */
+object StandbyKeep {
+    /** StandbyEntryClient::State, as nativeStandbyStatus reports it. */
+    enum class LeaseState(val code: Int) {
+        IDLE(0), ADMITTING(1), PARKED(2), ACTIVATING(3), ACTIVE(4), UNSUPPORTED(5), WAITING(6);
+
+        companion object {
+            fun of(code: Long): LeaseState = values().firstOrNull { it.code.toLong() == code } ?: IDLE
+        }
+    }
+
+    /** nativeStandbyStatus: [exists, state, lost, handedOff, needsCapability]. */
+    data class Lease(
+        val exists: Boolean,
+        val state: LeaseState,
+        val lost: Long,
+        val handedOff: Boolean,
+        val needsCapability: Boolean,
+    ) {
+        companion object {
+            val NONE = Lease(false, LeaseState.IDLE, 0L, false, false)
+            fun of(v: LongArray?): Lease {
+                if (v == null || v.size < 5 || v[0] == 0L) return NONE
+                return Lease(true, LeaseState.of(v[1]), v[2], v[3] != 0L, v[4] != 0L)
+            }
+        }
+    }
+
+    enum class Shown { PREPARING, READY, ACTIVATING, ACTIVE, RETURNING, UNSUPPORTED, RETRY }
+
+    /** What the list shows for a PC with this lease. [onScreen] = its activated session is the one on screen. null = no lease. */
+    fun shown(lease: Lease, onScreen: Boolean): Shown? = when {
+        !lease.exists -> null
+        lease.state == LeaseState.UNSUPPORTED -> Shown.UNSUPPORTED
+        lease.handedOff && onScreen -> if (lease.state == LeaseState.ACTIVE) Shown.ACTIVE else Shown.ACTIVATING
+        lease.handedOff -> Shown.RETURNING  // its session is ending (or never came up): not ready until the lease reads again
+        lease.state == LeaseState.PARKED -> Shown.READY
+        lease.state == LeaseState.WAITING -> Shown.RETRY
+        else -> Shown.PREPARING
+    }
+
+    sealed class Tap {
+        /** The lease is ready: a new session by its activation. */
+        object Activate : Tap()
+        /** Its last session is still handing the socket back: the tap is held until it settles. */
+        object Wait : Tap()
+        /** The ordinary connect; [releaseFirst] = a lease that is not ready is let go first. */
+        data class Cold(val releaseFirst: Boolean) : Tap()
+    }
+
+    fun onTap(lease: Lease?): Tap = when {
+        lease == null || !lease.exists -> Tap.Cold(false)
+        lease.handedOff -> Tap.Wait
+        lease.state == LeaseState.PARKED -> Tap.Activate
+        else -> Tap.Cold(true)
+    }
+
+    enum class ListReturn { BACK_TO_STANDBY, FIRST_TRANSITION, UNSUPPORTED_END }
+
+    /**
+     * "PC 목록" with a PC on screen. [fromStandby] = its session came from a lease's activation; [directory] = a
+     * directory-brokered connection (not raw IP); [supported] = the directory said standby (read-only /api/hosts);
+     * [prelogin] = the PC is at its logon screen (a pre-login worker); [knownUnsupported] = this PC's lease already
+     * found an older host; [enabled] = model A is on in this build.
+     */
+    fun onListReturn(
+        fromStandby: Boolean,
+        directory: Boolean,
+        supported: Boolean,
+        prelogin: Boolean,
+        knownUnsupported: Boolean,
+        enabled: Boolean,
+    ): ListReturn = when {
+        !enabled || !directory || prelogin || knownUnsupported -> ListReturn.UNSUPPORTED_END
+        fromStandby -> ListReturn.BACK_TO_STANDBY
+        supported -> ListReturn.FIRST_TRANSITION
+        else -> ListReturn.UNSUPPORTED_END
+    }
+
+    /** The leases that go: the ones whose PC is not among the recent ones any more -- never the one on screen. */
+    fun evictions(recent: List<RecentHosts.Key>, leases: Collection<RecentHosts.Key>, onScreen: RecentHosts.Key?): List<RecentHosts.Key> =
+        leases.filter { it !in recent.take(RecentHosts.MAX) && it != onScreen }
+
+    /** The native runner's key of a PC. */
+    fun nativeKey(key: RecentHosts.Key): String = SessionPark.entryKey(key.directoryOrigin, key.accountId, key.hostId)
+
+    /**
+     * The leases of this sign-in and their incarnations (one counter for all: a number is never reused). A capability
+     * job carries the (key, incarnation) it was started for and provides only if that is still current.
+     */
+    class Book {
+        private var counter = 0L
+        private val current = LinkedHashMap<RecentHosts.Key, Long>()
+        private val unsupported = HashSet<RecentHosts.Key>()
+        private val failures = HashMap<RecentHosts.Key, Int>()
+        private val notBefore = HashMap<RecentHosts.Key, Long>()
+        private var staging: Pair<RecentHosts.Key, Long>? = null
+
+        /** A lease for [key] starts (or starts over): its new incarnation. */
+        @Synchronized fun begin(key: RecentHosts.Key): Long {
+            val inc = ++counter
+            current[key] = inc
+            return inc
+        }
+        /** The lease of [key] goes: every job of it is stale from now. */
+        @Synchronized fun end(key: RecentHosts.Key) {
+            current.remove(key)
+            if (staging?.first == key) staging = null
+        }
+        /** Sign-out, an account / directory change, leaving the app: all go (returned so the caller releases them). */
+        @Synchronized fun endAll(): List<RecentHosts.Key> {
+            val all = current.keys.toList()
+            current.clear()
+            unsupported.clear()
+            failures.clear()
+            notBefore.clear()
+            staging = null
+            return all
+        }
+        @Synchronized fun has(key: RecentHosts.Key): Boolean = key in current
+        @Synchronized fun incarnation(key: RecentHosts.Key): Long = current[key] ?: 0L
+        @Synchronized fun isCurrent(key: RecentHosts.Key, inc: Long): Boolean = inc != 0L && current[key] == inc
+        @Synchronized fun keys(): List<RecentHosts.Key> = current.keys.toList()
+
+        /** An older host / a pre-login worker answered no standby: not tried again this sign-in. */
+        @Synchronized fun markUnsupported(key: RecentHosts.Key) { unsupported.add(key) }
+        @Synchronized fun isUnsupported(key: RecentHosts.Key): Boolean = key in unsupported
+
+        /**
+         * Staging <= 1: one capability job at a time (observe + standby connect). true = [key]@[inc] may start one now
+         * (current, not backing off, nothing else staging).
+         */
+        @Synchronized fun startStaging(key: RecentHosts.Key, inc: Long, nowMs: Long): Boolean {
+            if (staging != null || !isCurrent(key, inc)) return false
+            if (nowMs < (notBefore[key] ?: 0L)) return false
+            staging = key to inc
+            return true
+        }
+        /** The job of [key]@[inc] ended: ok resets its back-off; a failure waits longer (1, 2, 4, 8, 16, 30 s + jitter). */
+        @Synchronized fun endStaging(key: RecentHosts.Key, inc: Long, ok: Boolean, nowMs: Long, random: Double) {
+            if (staging == key to inc) staging = null
+            if (ok) {
+                failures.remove(key)
+                notBefore.remove(key)
+                return
+            }
+            val f = (failures[key] ?: 0) + 1
+            failures[key] = f
+            notBefore[key] = nowMs + Preconnect.backoffMs(f, random)
+        }
+        @Synchronized fun stagingKey(): RecentHosts.Key? = staging?.first
+        @Synchronized fun failuresOf(key: RecentHosts.Key): Int = failures[key] ?: 0
+    }
+}

@@ -16,7 +16,8 @@ val shTestSeam = project.findProperty("gnlink.shTestSeam") == "true"
 // fixed address: whoever passed it believes they are getting something else.
 gradle.taskGraph.whenReady {
   val release = allTasks.any { it.project == project && it.name.contains("Release") }
-  for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins", "gnlink.testKeepParkTtlMs")) {
+  for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins", "gnlink.testKeepParkTtlMs",
+                          "gnlink.testStandbyAutoPrepare")) {
     if (release && project.hasProperty(property)) {
       throw GradleException(
         "$property is for debug builds; a release build always uses $fixedDirectoryUrl")
@@ -53,6 +54,10 @@ android {
     // keepalive-multi: 0 = the policy object's own park limit (SessionPark.Policy). Only a debug TEST build may set
     // another (below), to watch a park expire in a test run.
     buildConfigField("long", "TEST_KEEP_PARK_TTL_MS", "0L")
+    // keepalive-r2 ② e (Codex codex_ka_e_switch_decision.md): whether the app prepares a standby for the recent PCs on
+    // its own (start / return / list refresh). OFF in every shipped build; a user's own "PC 목록" from a supported PC
+    // goes to standby regardless. Only a debug TEST build may turn it on (below).
+    buildConfigField("boolean", "STANDBY_AUTO_PREPARE", "false")
 
     // Where updates come from, and the key that says a manifest is ours.
     //
@@ -101,6 +106,11 @@ android {
       // test sees one expire. Refused for a release (above); the shipped default stays SessionPark.Policy's.
       (project.findProperty("gnlink.testKeepParkTtlMs") as String?)?.let {
         buildConfigField("long", "TEST_KEEP_PARK_TTL_MS", it.toLong().toString() + "L")
+      }
+      // TEST BUILDS ONLY (keepalive-r2 ② e): -Pgnlink.testStandbyAutoPrepare=true -- the recent PCs are prepared
+      // automatically. Refused for a release (above).
+      if (project.findProperty("gnlink.testStandbyAutoPrepare") == "true") {
+        buildConfigField("boolean", "STANDBY_AUTO_PREPARE", "true")
       }
     }
     release {

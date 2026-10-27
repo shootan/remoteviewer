@@ -10,13 +10,14 @@ package com.remote60.androiddirect
  *  - Never a PC that is already kept (or connecting), never one the user disconnected ([RecentHosts.Suppression]),
  *    never more than the recent list holds. An offline PC is skipped; the other two are not affected by it.
  *
- * WARNING (Codex section 5, task keepalive-r2 B.4): an automatic preconnect to a REAL host is OFF until the host
- * side can hold a control-only waiting entry without taking over the active session (spike A, Codex to confirm).
- * Today a Hello to a host replaces its active peer, so sending one would take the PC from whoever is using it.
- * [SEND_TO_REAL_HOSTS] is that switch; the planner below decides, and nothing is sent while it is false.
+ * [AUTO_PREPARE] (keepalive-r2 ② e, Codex codex_ka_e_switch_decision.md): whether the app STARTS a standby for a
+ * recent PC on its own -- at start / return, a list refresh, an online event, the planner's retry. OFF in every
+ * shipped build (BuildConfig.STANDBY_AUTO_PREPARE; only a debug test build turns it on) until the independent check.
+ * It is not a transport switch: a user's own "PC 목록" from a supported PC goes to standby (kept model A), and a
+ * lease that exists keeps its Pings either way. OFF never prepares a recent PC behind the user's back.
  */
 object Preconnect {
-    const val SEND_TO_REAL_HOSTS = false
+    @JvmField val AUTO_PREPARE: Boolean = BuildConfig.STANDBY_AUTO_PREPARE
 
     val BACKOFF_STEPS_MS = longArrayOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 30_000L)
     const val JITTER = 0.2

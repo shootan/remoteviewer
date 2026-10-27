@@ -240,8 +240,9 @@ object NativeSessionBridge {
     external fun nativeGetSessionBytesReceived(binding: Long): Long
     external fun nativeResetVideoStream(binding: Long)
 
-    // keepalive-r2 (2) e: the standby leases (StandbyRunner). Nothing calls these while Preconnect.SEND_TO_REAL_HOSTS
-    // is off. Status: [exists, state, lost, handedOff, needsCapability].
+    // keepalive-r2 (2) e, kept model A: the standby leases (StandbyRunner) -- a user's "PC 목록" from a supported PC
+    // makes / keeps one; the app's own preparation of the recent PCs only with Preconnect.AUTO_PREPARE (off when
+    // shipped). Status: [exists, state, lost, handedOff, needsCapability].
     external fun nativeStandbyInit(filesDir: String): Boolean
     external fun nativeStandbyStart(key: String): Boolean
     external fun nativeStandbyStatus(key: String): LongArray?
@@ -249,4 +250,9 @@ object NativeSessionBridge {
     external fun nativeStandbyProvide(key: String, token: String, ip: String, port: Int): Boolean
     external fun nativeStandbyRelease(key: String)
     external fun nativeStandbyReleaseAll()
+    /**
+     * keepalive-r2 ② e (kept model A): the reserved entry [handle]'s session by the ready lease [key]'s activation,
+     * under connect operation [op]. The generation it made (0 = none: nativeDirectoryLastError says why). Off the UI thread.
+     */
+    external fun nativeConnectStandby(handle: Long, key: String, op: Long): Long
 }
