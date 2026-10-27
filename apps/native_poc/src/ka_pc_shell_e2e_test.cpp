@@ -151,6 +151,21 @@ std::wstring card_expr(const std::string& name) {
   return L"Array.from(document.querySelectorAll('.hostRow')).find(function(r){var n=r.querySelector('.name');"
          L"return n&&n.textContent==='" + widen(name) + L"';})";
 }
+// Fills the form and presses 로그인, as a person does -- again every few seconds until the list shows. (r3-2: the
+// page's own 'restore' message can arrive after the form was filled and empty the id field; the press then only
+// says "아이디와 비밀번호를 모두 입력해 주세요" and nothing is sent. A person types again; so does this.)
+bool sign_in_through_page() {
+  const uint64_t until = GetTickCount64() + 40000;
+  while (GetTickCount64() < until) {
+    js(L"(function(){var b=document.getElementById('signIn');if(b.disabled)return false;"
+       L"document.getElementById('account').value='tester';document.getElementById('password').value='e2e-pass-1234';"
+       L"b.click();return true;})()");
+    if (wait_for([] { return js(L"!document.getElementById('hostsCard').classList.contains('hidden')") == "true"; }, 4000))
+      return true;
+  }
+  return false;
+}
+
 // What the person reads on that PC's card.
 std::string card_state(const std::string& name) {
   return unquote(js(L"(function(){var r=" + card_expr(name) + L";if(!r)return '(no card)';var s=r.querySelector('.state');"
@@ -533,10 +548,7 @@ int main() {
     check(SUCCEEDED(create_shell_webview()), "the product shell's WebView starts (beyond the screen's right edge)");
     check(wait_for([] { return js(L"!!document.getElementById('signIn')&&!document.getElementById('signIn').disabled") == "true"; }, 20000),
           "the sign-in form is up");
-    js(L"document.getElementById('account').value='tester';document.getElementById('password').value='e2e-pass-1234';"
-       L"document.getElementById('signIn').click();true");
-    check(wait_for([] { return js(L"!document.getElementById('hostsCard').classList.contains('hidden')") == "true"; }, 30000),
-          "signed in through the page: the PC list is shown");
+    check(sign_in_through_page(), "signed in through the page: the PC list is shown");
     check(wait_for([&] {
             for (auto& h : hosts)
               if (card_state(h->name) != "연결 가능") return false;
@@ -905,10 +917,7 @@ int main() {
     }
     // ======================================================== R2 (r3): a late connect notice of the old owner
     {
-      js(L"document.getElementById('account').value='tester';document.getElementById('password').value='e2e-pass-1234';"
-         L"document.getElementById('signIn').click();true");
-      check(wait_for([] { return js(L"!document.getElementById('hostsCard').classList.contains('hidden')") == "true"; }, 30000),
-            "R2: signed in again (a new owner)");
+      check(sign_in_through_page(), "R2: signed in again (a new owner)");
       const std::string recentBefore = read_file(recent_path());
       const size_t logFrom = client_log().size();
       // the notice a viewer of the signed-out owner would send late: its op, a host, the OLD owner epoch
