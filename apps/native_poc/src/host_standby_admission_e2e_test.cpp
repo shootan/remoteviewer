@@ -1202,8 +1202,17 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     MemGenStore storeR;
     auto randR = [](uint8_t* b, size_t n) { for (size_t i = 0; i < n; ++i) b[i] = static_cast<uint8_t>(0xD1); return true; };
     GenerationAllocator gensR(storeR, randR);
-    remote60::native_poc::StandbyRunner runner(gensR, features, [&](const std::string&) { return cap; }, mono_ms);
+    // as the APK does it: the lease has no capability source of its own -- it says it needs one, the app (Kotlin's
+    // directory call) gets one and hands it in
+    remote60::native_poc::StandbyRunner runner(
+        gensR, features, [](const std::string&) { return remote60::native_poc::StandbyLease::CapabilityFn(); }, mono_ms);
     check("the runner starts a lease for the PC (its own thread)", runner.Start("h-standby") && runner.size() == 1);
+    check("...it waits for a capability (none of its own), nothing sent",
+          wait_until([&] { return runner.StatusOf("h-standby").needsCapability; }, 3000) &&
+              runner.StatusOf("h-standby").state == StandbyLease::State::Idle);
+    remote60::native_poc::StandbyCapability given;
+    cap(remote60::native_poc::kInvalidSocket, &given);
+    check("the app hands one in (Provide)", runner.Provide("h-standby", given) && !runner.StatusOf("h-standby").needsCapability);
     check("...it parks without anyone pumping it here",
           wait_until([&] { return runner.StatusOf("h-standby").state == StandbyLease::State::Parked; }, 20000));
     NullSink sinkR;

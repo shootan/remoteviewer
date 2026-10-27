@@ -18,40 +18,7 @@
 
 namespace remote60::native_poc {
 
-// One observation from socket `s`: "OBSERVE <token>" to the directory's observe endpoint until an answer (the same
-// datagram the rendezvous sends, on this socket). true = the directory recorded this endpoint for `token`.
-inline bool standby_observe_on(SocketHandle s, const std::string& host, uint16_t port, const std::string& token) {
-  sockaddr_in to{};
-  to.sin_family = AF_INET;
-  to.sin_port = htons(port);
-  if (inet_pton(AF_INET, host.c_str(), &to.sin_addr) != 1) {
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return false;
-    to.sin_addr = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
-    freeaddrinfo(res);
-  }
-  const std::string probe = "OBSERVE " + token;
-  for (int attempt = 0; attempt < 6; ++attempt) {
-    sendto(s, probe.data(), static_cast<int>(probe.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
-    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-    while (std::chrono::steady_clock::now() < until) {
-      fd_set rd;
-      FD_ZERO(&rd);
-      FD_SET(s, &rd);
-      timeval tv{0, 50000};
-      if (select(static_cast<int>(s) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
-      char buf[512];
-      sockaddr_in from{};
-      socklen_t fl = sizeof(from);
-      const int n = static_cast<int>(recvfrom(s, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl));
-      if (n > 0 && from.sin_addr.s_addr == to.sin_addr.s_addr && from.sin_port == to.sin_port) return true;
-    }
-  }
-  return false;
-}
+// (standby_observe_on: standby_lease.hpp)
 
 struct StandbyDirectoryConfig {
   std::string url;                          // the directory (https in the product)

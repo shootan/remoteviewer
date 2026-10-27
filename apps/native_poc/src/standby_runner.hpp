@@ -33,6 +33,7 @@ class StandbyRunner {
     uint64_t entryId = 0;
     int lost = 0;
     bool handedOff = false;
+    bool needsCapability = false;  // ② e: the lease waits for a capability the app gets (Observe, then Provide)
   };
   // The capability source of one PC's lease (directory observe + standby connect through that lease's socket).
   using CapabilityFactory = std::function<StandbyLease::CapabilityFn(const std::string& key)>;
@@ -82,6 +83,7 @@ class StandbyRunner {
     s.entryId = slot->entryId.load(std::memory_order_acquire);
     s.lost = slot->lost.load(std::memory_order_acquire);
     s.handedOff = slot->handedOff.load(std::memory_order_acquire);
+    s.needsCapability = slot->needsCapability.load(std::memory_order_acquire);
     return s;
   }
 
@@ -93,6 +95,22 @@ class StandbyRunner {
     slot->handedOff = true;
     slot->state.store(static_cast<int>(StandbyEntryClient::State::Activating), std::memory_order_release);
     return true;
+  }
+
+  // ② e (the APK): the directory observation from this PC's lease socket, then the capability the app got for it.
+  bool Observe(const std::string& key, const std::string& host, uint16_t port, const std::string& token) {
+    std::shared_ptr<Slot> slot = Find(key);
+    if (!slot) return false;
+    std::lock_guard<std::mutex> l(slot->mu);
+    return slot->lease->ObserveFrom(host, port, token);
+  }
+  bool Provide(const std::string& key, const StandbyCapability& cap) {
+    std::shared_ptr<Slot> slot = Find(key);
+    if (!slot) return false;
+    std::lock_guard<std::mutex> l(slot->mu);
+    const bool ok = slot->lease->Provide(cap);
+    Publish(*slot);
+    return ok;
   }
 
   // The session made from TakeActivation ended (or its Connect failed): the lease goes on by Ping.
@@ -141,12 +159,14 @@ class StandbyRunner {
     std::atomic<int> state{0};
     std::atomic<uint64_t> entryId{0};
     std::atomic<int> lost{0};
+    std::atomic<bool> needsCapability{false};
   };
 
   static void Publish(Slot& s) {
     s.state.store(static_cast<int>(s.lease->state()), std::memory_order_release);
     s.entryId.store(s.lease->entryId(), std::memory_order_release);
     s.lost.store(s.lease->lostCount(), std::memory_order_release);
+    s.needsCapability.store(s.lease->needsCapability(), std::memory_order_release);
   }
 
   std::shared_ptr<Slot> Find(const std::string& key) const {
