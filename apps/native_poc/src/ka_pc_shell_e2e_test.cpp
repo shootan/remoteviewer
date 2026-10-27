@@ -230,6 +230,10 @@ size_t count_of(const std::string& text, const std::string& needle) {
   for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
   return n;
 }
+// A line written AFTER `from` (a size of client.log taken before the action): an earlier identical line does not count.
+bool log_since(size_t from, const std::string& needle, unsigned ms) {
+  return wait_for([&] { const std::string l = client_log(); return l.size() > from && l.find(needle, from) != std::string::npos; }, ms);
+}
 bool log_has(const std::string& needle, unsigned ms) {
   return wait_for([&] { return client_log().find(needle) != std::string::npos; }, ms);
 }
@@ -654,7 +658,9 @@ int main() {
       wait_for([&] { return (pid = ordinary_pid(H("KA-D").id)) != 0; }, 10000);
       const bool connected = pid != 0 && ordinary_connected(pid, 40000);
       check(connected, "KA-D: the shell's viewer connected");
-      check(log_has("kept PCs: making room after host=" + H("KA-D").id + " succeeded, releasing host=" + H("KA-A").id, 10000),
+      // read from the log AFTER the tap only (R1 above already wrote the same line for D once)
+      const std::string evictLine = "kept PCs: making room after host=" + H("KA-D").id + " succeeded, releasing host=" + H("KA-A").id;
+      check(wait_for([&] { return client_log().substr(logBefore).find(evictLine) != std::string::npos; }, 10000),
             "...and only then the least recently USED standby (A) was let go");
       const std::string slice = client_log().substr(logBefore);
       check(count_of(slice, "releasing host=") == 1, "...exactly one", std::to_string(count_of(slice, "releasing host=")));
@@ -718,8 +724,9 @@ int main() {
     const ChildIdentity releasedC = identity_of(H("KA-C").id);  // r2b: its messages are delivered late, below
     {
       const DWORD pidC = managed_pid(H("KA-C").id);
+      const size_t relFrom = client_log().size();
       check(press_release("KA-C"), "press KA-C's '연결 해제'");
-      check(log_has("kept PC: released by the user host=" + H("KA-C").id, 5000), "the shell released it (bridge -> native)");
+      check(log_since(relFrom, "kept PC: released by the user host=" + H("KA-C").id, 5000), "the shell released it (bridge -> native)");
       check_after([&] { return wait_card("KA-C", "연결 가능", 10000) && !card_has_release("KA-C"); }, "KA-C's card: not kept, no button", [&] { return card_state("KA-C"); });
       HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pidC);
       check(p && WaitForSingleObject(p, 12000) == WAIT_OBJECT_0, "its managed viewer process ended");
@@ -774,8 +781,9 @@ int main() {
       check(tap("KA-C"), "tap KA-C, whose host is gone, beside three kept PCs");
       DWORD pidC0 = 0;
       wait_for([&] { return (pidC0 = ordinary_pid(H("KA-C").id)) != 0; }, 10000);
+      const size_t closeFrom = client_log().size();
       check(close_window_of(activeA), "R4: close A's session window while C is connecting");
-      check(log_has("kept PC session ended host=" + H("KA-A").id + " op=", 15000), "R4: A's session ended (its SessionEnded reached the shell)");
+      check(log_since(closeFrom, "kept PC session ended host=" + H("KA-A").id + " op=", 15000), "R4: A's session ended (its SessionEnded reached the shell)");
       pump(500);
       check_after([] { return card_state("KA-C") == "연결하는 중…"; }, "R4: ...and C's card still says '연결하는 중…'",
                   [] { return card_state("KA-C"); });
