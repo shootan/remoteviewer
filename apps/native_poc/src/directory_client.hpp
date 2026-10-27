@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -387,6 +388,20 @@ class HostAgent {
 
   std::thread thread_;
   std::atomic<bool> running_{false};
+  // keepalive-r2 FINDING (작업용2 report_ka_pc_impl_r1.md; e2e kae_relapse5): the punch trains run on their own thread,
+  // beside the agent's cycle -- not in it. A train is kPunchPackets x kPunchIntervalMs (5 s); run inside the cycle it
+  // kept the agent from acting on the next wake, so a capability minted meanwhile (a second connect, a standby
+  // re-admission) waited for the train and the next cycle -- longer than a client's Hellos last (~3 s): it read as
+  // "no answer" / "unsupported". Punch() now hands its targets to this thread and returns.
+  struct PunchJob {
+    PunchTarget target;
+    int left = 0;
+  };
+  void PunchLoop();
+  std::mutex punchMu_;
+  std::condition_variable punchCv_;
+  std::vector<PunchJob> punchJobs_;
+  std::thread punchThread_;
   // A peer punch means /api/connect has just queued a capability for this host. Wake the
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};
