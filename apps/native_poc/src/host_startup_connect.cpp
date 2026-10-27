@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "host_standby_wire.hpp"
 #include "host_clip_image.hpp"
 #include "host_file_copy.hpp"
 #include "mf_h264_codec.hpp"
@@ -419,6 +420,61 @@ int startup_connect_client(HostContext& hx) {
           return 5;
       }
       hx.watchdog.MarkMainProgress(MainLoopPhase::Startup);
+      // keepalive-r2 A (spike/host-admission): Standby* before the first session. Entries are kept, renewed and
+      // released here exactly as during a session; an accepted StandbyActivate opens the FIRST session -- the same
+      // admission an authenticated first Hello gets below. Only on the media socket (the directory path).
+      if (readySock == clientSession.clientSock) {
+        const auto sb = remote60::native_poc::standby_handle(
+            clientSession.standby, rx, static_cast<size_t>(n), peer, args.preloginMode,
+            [&](const std::string& token, const sockaddr_in& from) {
+              return clientSession.directoryAgent.AuthorizePeer(token, from);
+            },
+            GetTickCount64(),
+            clientSession.backendSessionEnded.load(std::memory_order_acquire) >> remote60::native_poc::kBackendServeSeqBits);
+        if (sb.action != remote60::native_poc::StandbyAction::NotStandby) {
+          if (!sb.log.empty()) std::cout << sb.log << "\n";
+          if (sb.action == remote60::native_poc::StandbyAction::Reply) {
+            (void)sendto(readySock, reinterpret_cast<const char*>(&sb.reply), sizeof(sb.reply), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), peerLen);
+          }
+          if (sb.action != remote60::native_poc::StandbyAction::Activate) continue;
+          const bool bulkAvailable = (clientSession.clipImage && clientSession.clipImage->Available()) ||
+                                     (clientSession.fileCopy && clientSession.fileCopy->Advertised());
+          const UdpHelloPacket ack = remote60::native_poc::standby_hello_ack(sb.entry.helloFeatures, bulkAvailable);
+          const uint32_t f = sb.entry.helloFeatures;
+          sender.fecInterleaved.store((f & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+                                      std::memory_order_relaxed);
+          sender.nackEnabled.store((f & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
+          clientSession.controlResumeNegotiated.store(remote60::native_poc::host_resume_negotiated(f),
+                                                      std::memory_order_release);
+          clientSession.bandwidthObserveNegotiated.store((f & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
+                                                         std::memory_order_release);
+          if (clientSession.clipImage) clientSession.clipImage->SetBulkNegotiated((ack.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0);
+          const uint64_t firstEpoch = clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
+          if (sb.fresh) clientSession.standby.BindActiveEpoch(sb.entry.grantId, firstEpoch);  // r3 S3: ends with it
+          // r3 (Codex decision 2): the result names its operation (entry + generation), then the HelloAck.
+          (void)sendto(readySock, reinterpret_cast<const char*>(&sb.activationPong), sizeof(sb.activationPong), 0,
+                       reinterpret_cast<const sockaddr*>(&peer), peerLen);
+          (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                       reinterpret_cast<const sockaddr*>(&peer), peerLen);
+          std::cout << "[native-video-host][standby] first session by activation entries=" << clientSession.standby.size()
+                    << "\n";
+          if (clientSession.lanSock != INVALID_SOCKET) {
+            closesocket(clientSession.lanSock);
+            clientSession.lanSock = INVALID_SOCKET;
+          }
+          sender.udpPeer = peer;
+          sender.udpPeerReady = true;
+          {
+            std::lock_guard<std::mutex> lk(sender.mu);
+            sender.peer = peer;
+            sender.peerReady = true;
+          }
+          sender.udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+          sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+          break;
+        }
+      }
       UdpHelloPacket hello{};
       bool isHello = n >= static_cast<int>(sizeof(UdpHelloPacket));
       if (isHello) {
@@ -484,6 +540,7 @@ int startup_connect_client(HostContext& hx) {
         // r9 R3: the first session, admitted by the capability: its epoch's standing, then the flag.
         (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
         ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
+        clientSession.standby.SessionTakenByHello(GetTickCount64());
         helloAuthenticated = true;
       }
       // r6 G2: in prelogin the login screen is exposed, so a token-less FIRST Hello must be refused

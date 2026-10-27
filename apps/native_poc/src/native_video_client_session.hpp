@@ -112,6 +112,11 @@ struct ClientSessionConnectArgs {
   uint32_t controlIntervalMs = kClientControlIntervalMsDefault;
   uint32_t udpHandshakeTimeoutMs = 800;
   ClientEncodedFrameSink* encodedFrameSink = nullptr;
+  // keepalive-r2 (2): the UDP handshake to run on the (prepared) socket INSTEAD of the Hello -- a standby entry's
+  // activation (StandbyLease): it returns true once the host admitted this session, with the HelloAck's features.
+  // Empty = the ordinary authenticated Hello (udp_hello_handshake), as before.
+  std::function<bool(SocketHandle socket, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures)>
+      udpHandshake;
 };
 
 struct ClientSessionSnapshot {

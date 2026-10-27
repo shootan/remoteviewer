@@ -1900,6 +1900,35 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
 
+# keepalive-r2 A (spike/host-admission): standby entries -- the table as logic, and at a real host.
+add_executable(remote60_host_standby_table_test src/host_standby_table_test.cpp)
+target_include_directories(remote60_host_standby_table_test PRIVATE src)
+target_link_libraries(remote60_host_standby_table_test PRIVATE ws2_32)  # r3: the Standby* handling cases (htons)
+
+# keepalive-r2 ② (a, b): the client side of a standby entry -- a pure state machine and the durable generation counter.
+add_executable(remote60_standby_entry_client_test src/standby_entry_client_test.cpp)
+target_include_directories(remote60_standby_entry_client_test PRIVATE src)
+add_executable(remote60_host_standby_admission_e2e_test
+  src/host_standby_admission_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_session.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/directory_rendezvous.cpp
+  # keepalive-r2 (2): the product client's own directory calls (standby support, standby connect)
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_standby_admission_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_standby_admission_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir winhttp)
+if(MSVC)
+  target_compile_options(remote60_host_standby_admission_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_standby_admission_e2e_test remote60_native_video_host_poc)
+
 # The cached-sign-in migration, run as a process: a real streaming host (the test-seam build
 # above) started the way GNLinkHost starts it, against fixture directories that record what they
 # were sent. What is judged is the requests each address received and the bytes of the cache.

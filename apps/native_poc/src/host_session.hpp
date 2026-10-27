@@ -19,6 +19,7 @@
 
 #include "directory_client.hpp"
 #include "host_injected_input.hpp"
+#include "host_standby_table.hpp"
 #include "native_socket.hpp"
 #include "prelogin_admin_pipe.hpp"
 #include "udp_control_channel.hpp"
@@ -154,6 +155,9 @@ struct SessionState {
   // ends -- a resume or the end of the session. Lives here, not in Serve(), because a resume
   // leaves one Serve() and enters the next and the marks must survive that. (RV-01)
   InjectedInputTracker injectedInput;
+  // keepalive-r2 A: the control-only standby entries (host_standby_table.hpp). Used by the handshake loop
+  // before the first session and by the UDP reader after it -- never both at once.
+  StandbyTable standby;
 
 
   // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---

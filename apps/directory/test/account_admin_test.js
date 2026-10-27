@@ -17,10 +17,11 @@ const http = require('http');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '../../..');
-const scratchRoot = path.join(root, '.claude', 'test-tmp');
-fs.mkdirSync(scratchRoot, { recursive: true });
-const scratch = fs.mkdtempSync(path.join(scratchRoot, 'account-admin-'));
-assert(!path.relative(root, scratch).startsWith('..'));
+// r6 (Codex N4 b): the suite's checked test root only (test_tmp.js) -- no raw variable, no worktree fallback;
+// run alone without REMOTE60_TEST_TMP, this stops before writing anything.
+const testTmp = require('./test_tmp');
+const scratchRoot = testTmp.root();
+const scratch = testTmp.scratchDir('account-admin-');
 const serverPath = path.resolve(__dirname, '../server.js');
 const data = path.join(scratch, 'store.json');
 const flag = path.join(scratch, 'fail-write');

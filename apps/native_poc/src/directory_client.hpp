@@ -290,6 +290,10 @@ class HostAgent {
     uint32_t ipv4NetworkOrder = 0;
     uint16_t port = 0;
     std::string punchToken;
+    // keepalive-r2 r4 (Codex N1): a relay lease's own host-facing socket, not a peer. The punch toward it carries
+    // this proof (from this heartbeat only) so the relay pins THIS host's tuple and nobody else's; such a target
+    // is no capability -- it is never authorised as a peer.
+    std::string hostProof;
   };
 
   struct AuthorizedPeer {

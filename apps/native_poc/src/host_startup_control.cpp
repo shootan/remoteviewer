@@ -54,6 +54,7 @@
 #include "bind_port_candidates.hpp"
 #include "capture_cadence_gate.hpp"
 #include "control_resume.hpp"
+#include "host_standby_wire.hpp"
 #include "host_diag_log.hpp"
 #include "prelogin_ingress_policy.hpp"
 #include "d3d_capture_readback.hpp"
@@ -309,6 +310,7 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
       uint32_t resumeWakeId = 0;
       uint64_t resumeWakeWaitFor = 0;
       uint64_t resumeThrottleLogUs = 0;
+      uint64_t standbyRejectLogUs = 0;  // keepalive-r2 A: a refused StandbyHello is logged once per 5 s
       // Startup barrier. The dispatcher's first Reset races this thread: if the client's first
       // ControlData lands here first, OnPacket ACKs it into rxReady_, then the dispatcher's
       // Reset wipes rxReady_ -- and the client, holding an ACK, never retransmits. The serve
@@ -373,6 +375,82 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         // a session carrying video never sits idle long enough for the timeout path to run.
         clientSession.udpControlChannel.Tick();
         const size_t len = static_cast<size_t>(n);
+
+        // keepalive-r2 A (spike/host-admission): STANDBY entries, ahead of everything that touches the
+        // session. Nothing here reaches the adopted peer, the epoch, the control channel, the stream state,
+        // input, clipboard, file copy or LockCred -- except an accepted StandbyActivate (the explicit user
+        // activation), which takes the session through the same steps an authenticated Hello does.
+        {
+          const auto sb = remote60::native_poc::standby_handle(
+              clientSession.standby, rx, len, peer, args.preloginMode,
+              [&](const std::string& token, const sockaddr_in& from) {
+                return clientSession.directoryAgent.AuthorizePeer(token, from);
+              },
+              GetTickCount64(),
+              // r3 S3: the active grant ends with its control session's real end (a resume/pause is none).
+              clientSession.backendSessionEnded.load(std::memory_order_acquire) >> remote60::native_poc::kBackendServeSeqBits);
+          if (sb.action != remote60::native_poc::StandbyAction::NotStandby) {
+            if (!sb.log.empty()) {
+              const bool refusal = sb.log.find("refused (capability)") != std::string::npos;
+              const uint64_t nowUs = remote60::native_poc::qpc_now_us();
+              if (!refusal || nowUs - standbyRejectLogUs >= 5000000ull) {
+                if (refusal) standbyRejectLogUs = nowUs;
+                std::cout << sb.log << "\n";
+              }
+            }
+            if (sb.action == remote60::native_poc::StandbyAction::Reply) {
+              (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&sb.reply), sizeof(sb.reply), 0,
+                           reinterpret_cast<const sockaddr*>(&peer), peerLen);
+            }
+            if (sb.action != remote60::native_poc::StandbyAction::Activate) continue;
+            const UdpHelloPacket ack = remote60::native_poc::standby_hello_ack(
+                sb.entry.helloFeatures, (clientSession.clipImage && clientSession.clipImage->Available()) ||
+                                            (clientSession.fileCopy && clientSession.fileCopy->Advertised()));
+            if (sb.fresh) {
+              // The same order as an accepted authenticated Hello (below): this client's options, the peer, a
+              // keyframe for its new decoder, then AdmitHello -- a new epoch, which resets the control channel,
+              // ends the previous session's Serve (its held input is released there) and fences its late
+              // packets (they now come from a peer that is not adopted).
+              std::string secureInputStatus;
+              (void)inputRouter.broker.EnsureInstalledAndConnected(
+                  remote60::native_poc::sibling_executable_path(L"GNLinkInputService.exe"), &secureInputStatus);
+              {
+                // The previous Hello's token must not re-adopt its sender: a retransmit of it would otherwise
+                // count as the same session (ClassifyDirectoryHello's Retransmit) and take the peer back.
+                std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+                clientSession.directoryToken.clear();
+                clientSession.directoryIpNet = 0;
+              }
+              const uint32_t f = sb.entry.helloFeatures;
+              clientSession.controlResumeNegotiated.store(remote60::native_poc::host_resume_negotiated(f),
+                                                          std::memory_order_release);
+              sender.fecInterleaved.store((f & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+                                          std::memory_order_relaxed);
+              sender.nackEnabled.store((f & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
+              clientSession.bandwidthObserveNegotiated.store((f & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
+                                                             std::memory_order_release);
+              if (clientSession.clipImage) {
+                clientSession.clipImage->SetBulkNegotiated((ack.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0);
+              }
+              const bool changed = sender.udpPeerIpNet.load(std::memory_order_acquire) != peer.sin_addr.s_addr ||
+                                   sender.udpPeerPortNet.load(std::memory_order_acquire) != peer.sin_port;
+              sender.udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+              sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+              sender.udpPeerChanged.store(true, std::memory_order_release);
+              const uint64_t epoch = clientSession.AdmitHello(true, true);
+              clientSession.standby.BindActiveEpoch(sb.entry.grantId, epoch);  // r3 S3: the grant ends with it
+              std::cout << "[native-video-host][control] session epoch=" << epoch << (changed ? " peer=new" : " peer=same")
+                        << " (standby activation, entries=" << clientSession.standby.size() << ")\n";
+              clientSession.AwaitControlReady(epoch);
+            }
+            // r3 (Codex decision 2): the result names its operation (entry + generation), then the HelloAck.
+            (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&sb.activationPong), sizeof(sb.activationPong),
+                         0, reinterpret_cast<const sockaddr*>(&peer), peerLen);
+            (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                         reinterpret_cast<const sockaddr*>(&peer), peerLen);
+            continue;
+          }
+        }
 
         UdpHelloPacket hello{};
         if (len >= sizeof(UdpHelloPacket)) {
@@ -510,6 +588,8 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
               sender.udpPeerChanged.store(true, std::memory_order_release);
             }
             const uint64_t epoch = clientSession.AdmitHello(directoryAuthenticated, startsSession);
+            // keepalive-r2 A: a session that came from a Hello is no standby entry's.
+            if (startsSession) clientSession.standby.SessionTakenByHello(GetTickCount64());
             if (startsSession) {
               std::cout << "[native-video-host][control] session epoch=" << epoch
                         << (changed ? " peer=new" : " peer=same") << "\n";

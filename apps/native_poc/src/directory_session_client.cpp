@@ -418,10 +418,41 @@ bool directory_list_hosts(const std::string& url, const std::string& sessionToke
   return true;
 }
 
+bool directory_standby_support(const std::string& url, const std::string& sessionToken, bool* outSupported,
+                               bool* outRelay, std::string* outError) {
+  if (outSupported) *outSupported = false;
+  if (outRelay) *outRelay = false;
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, secure, "GET", "/api/hosts", sessionToken, {}, &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+  // {"hosts":[...],"standby":{"supported":true,"relay":true}} -- the object after the host list
+  const size_t at = response.find("\"standby\":{");
+  if (at == std::string::npos) return true;  // an older server: no standby
+  const size_t end = response.find('}', at);
+  const std::string object = response.substr(at, end == std::string::npos ? std::string::npos : end - at + 1);
+  bool supported = false, relay = false;
+  json_get_bool(object, "supported", &supported);
+  json_get_bool(object, "relay", &relay);
+  if (outSupported) *outSupported = supported;
+  if (outRelay) *outRelay = supported && relay;
+  return true;
+}
+
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
                        DirectoryConnectTarget* outTarget, std::string* outError,
-                       uint32_t* outStatus) {
+                       uint32_t* outStatus, bool standby) {
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -429,7 +460,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
 
   std::ostringstream body;
   body << "{\"hostId\":\"" << json_escape(hostId) << "\",\"observeToken\":\""
-       << json_escape(observeToken) << "\"}";
+       << json_escape(observeToken) << "\"" << (standby ? ",\"standby\":true" : "") << "}";
 
   uint32_t status = 0;
   std::string response;
@@ -448,6 +479,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
   *outTarget = DirectoryConnectTarget{};
   json_get_string(response, "punchToken", &outTarget->punchToken);
   json_get_string(response, "connectId", &outTarget->connectId);  // pc2-connect-diag
+  json_get_string(response, "standbyRelay", &outTarget->standbyRelay);  // keepalive-r2 (2)
   json_get_string(response, "hostPublicIp", &outTarget->hostPublicIp);
   uint32_t publicPort = 0;
   if (json_get_u32(response, "hostPublicUdpPort", &publicPort)) {
@@ -462,6 +494,10 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
     candidate.port = static_cast<uint16_t>(candidatePort);
     std::string kind;
     json_get_string(object, "kind", &kind);
+    if (kind == "relay") {  // keepalive-r2 (2): where a standby lease goes when one is reserved
+      outTarget->relayIp = candidate.ip;
+      outTarget->relayPort = candidate.port;
+    }
     // An unknown kind is kept rather than dropped: the server may learn new ones, and a
     // candidate we cannot label is still a candidate we can punch.
     if (!candidate_kind_from_name(kind, &candidate.kind)) {
