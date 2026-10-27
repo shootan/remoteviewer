@@ -201,6 +201,14 @@ object StandbyKeep {
         @Synchronized fun has(key: RecentHosts.Key): Boolean = key in current
         @Synchronized fun incarnation(key: RecentHosts.Key): Long = current[key] ?: 0L
         @Synchronized fun isCurrent(key: RecentHosts.Key, inc: Long): Boolean = inc != 0L && current[key] == inc
+        /**
+         * r2 (AVD ke_r18): [block] runs only while [key]@[inc] is current, and no [end] / [endAll] can come between the
+         * check and it (both take this lock). A capability job checked, the user's 끊기 ended the lease, and the job's
+         * Provide still reached the native lease (its Release queued behind the job): now 끊기 is either before the
+         * check (nothing provided) or after the Provide (which it then releases). [block] must be short (no network).
+         */
+        @Synchronized fun <T> ifCurrent(key: RecentHosts.Key, inc: Long, block: () -> T): T? =
+            if (inc != 0L && current[key] == inc) block() else null
         @Synchronized fun keys(): List<RecentHosts.Key> = current.keys.toList()
 
         /**

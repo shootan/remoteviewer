@@ -3257,10 +3257,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     }
                     val aim = DirectoryClient.standbyAim(t) ?: throw DirectoryClient.DirectoryException("no standby target")
                     what = "relay=${t.standbyRelay.ifEmpty { "-" }} aim=${if (t.standbyRelay == "reserved") "relay" else "host"}"
-                    if (!standbyBook.isCurrent(key, inc)) {
-                        what += " stale"  // released / replaced meanwhile: this capability goes nowhere
+                    // released / replaced meanwhile: this capability goes nowhere -- checked and provided under the
+                    // book's lock, so a 끊기 cannot fall between the two (ke_r18)
+                    val provided = standbyBook.ifCurrent(key, inc) {
+                        val p = NativeSessionBridge.nativeStandbyProvide(nk, t.punchToken, aim.first, aim.second)
+                        diagnosticsLog.log("standby_provided", "host=${key.hostId} inc=$inc ok=$p")
+                        p
+                    }
+                    if (provided == null) {
+                        what += " stale"
                     } else {
-                        ok = NativeSessionBridge.nativeStandbyProvide(nk, t.punchToken, aim.first, aim.second)
+                        ok = provided
                         if (!ok) what += " provide_refused"
                     }
                 }

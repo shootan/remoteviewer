@@ -117,6 +117,32 @@ class StandbyKeepTest {
     }
 
     @Test
+    fun aReleaseCannotFallBetweenTheCheckAndTheProvide() {
+        // r2 (AVD ke_r18): the check and the Provide hold the book's lock; an end() from another thread waits for both
+        val b = StandbyKeep.Book()
+        val i = b.begin(k("A"))
+        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val inBlock = java.util.concurrent.CountDownLatch(1)
+        val ender = Thread {
+            inBlock.await()
+            b.end(k("A"))
+            order.add("end")
+        }
+        ender.start()
+        val r = b.ifCurrent(k("A"), i) {
+            inBlock.countDown()
+            Thread.sleep(200)  // the ender is blocked on the lock all this time
+            order.add("provide")
+            true
+        }
+        ender.join(5000)
+        assertEquals(true, r)
+        assertEquals(listOf("provide", "end"), order.toList())
+        assertNull(b.ifCurrent(k("A"), i) { true })  // after the end: nothing runs
+        assertNull(b.ifCurrent(k("A"), 0L) { true })
+    }
+
+    @Test
     fun signOutEndsEveryLeaseAndEveryFence() {
         val b = StandbyKeep.Book()
         val a = b.begin(k("A"))
