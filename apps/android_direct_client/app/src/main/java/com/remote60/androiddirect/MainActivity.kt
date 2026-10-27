@@ -1338,6 +1338,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var standbySupport = DirectoryClient.StandbySupport.NONE
     private val standbyExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var standbyInitDone = false
+    // r2 N1 (Codex codex_ka_e_src_r1.md): every user tap is the newest intent -- its number; a held tap carries the
+    // number it was made under and runs only if no tap came since (a held / retried tap never re-approves itself).
+    private var tapSeq = 0L
+    private var heldTapSeq = 0L
+    // r2 held input: "PC 목록" fences the session first (its held input released, its pause proven by a Ping) and ends it
+    // when the fence settles or its budget runs out -- then the standby part (return / first transition / not supported).
+    private data class ListReturnEnd(
+        val handle: Long, val decision: StandbyKeep.ListReturn, val key: RecentHosts.Key?, val hostName: String,
+        val deadlineMs: Long,
+    )
+    private val listReturnEnds = HashMap<Long, ListReturnEnd>()
 
     private fun recentKeyOf(k: SessionPark.Kept): RecentHosts.Key? =
         if (k.manual) null else RecentHosts.Key(k.directoryOrigin, k.accountId, k.hostId)
@@ -2300,6 +2311,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         updateStatusReceiver = null
         saveCurrentEndpoint()
         directoryExecutor.shutdownNow()
+        // r2 N5: this Activity's leases go first (owners invalidated, ReleaseAll queued), then its standby thread ends
+        // once what is queued has run -- a graceful shutdown, never shutdownNow (that would drop the ReleaseAll). Nothing
+        // here waits on the UI thread; a capability job still in flight finds its lease gone and provides nothing.
+        releaseAllStandby("destroy")
+        standbyExecutor.shutdown()
         exitDialog?.dismiss()
         exitDialog = null
         dismissViewerLogDialog()
@@ -2604,7 +2620,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         resetSessionDesktopBackend("commit")  // ua2-apk: this connection's own choice, none yet (nothing re-sent)
         desiredStreamActive = false
         lastAppliedStreamActive = null
-        clipboardResumeHold = false
+        // r2 N3 (clipboard r3): back from standby, what the phone holds is this new binding's baseline -- not sent; if it
+        // cannot be read, nothing is pushed until a real change. A cold connect starts as before.
+        when (val c = StandbyKeep.clipboardOnStart(p.pathKind == "standby", if (p.pathKind == "standby") readLocalClipboardText() else null)) {
+            is StandbyKeep.ClipboardStart.Seed -> {
+                clipboardResumeHold = false
+                NativeSessionBridge.nativeSeedClipboardBaseline(activeBinding, c.text)
+                diagnosticsLog.log("clipboard_baseline", "start=seed units=${c.text.length} handle=${p.handle}")
+            }
+            StandbyKeep.ClipboardStart.Hold -> {
+                clipboardResumeHold = true
+                diagnosticsLog.log("clipboard_baseline", "start=hold handle=${p.handle}")
+            }
+            StandbyKeep.ClipboardStart.Fresh -> clipboardResumeHold = false
+        }
+        // r2 N4: a committed ordinary / raw-IP session counts toward the three with the leases (the least recent goes)
+        standbyTick()
         clearPendingSelection()
         currentScene = UiScene.TARGETS
         NativeSessionBridge.nativeRequestWindowList(activeBinding)
@@ -2855,6 +2886,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         lastAppliedStreamActive = null
         if (handle != 0L) {
             kept[handle]?.let { k ->
+                if (heldTap?.hostId == k.hostId) heldTap = null  // r2 N1: a held tap of the PC let go never runs
                 recentKeyOf(k)?.let {
                     keepSuppression.suppress(it)  // keepalive r2
                     releaseStandby(it, "user_disconnect")  // model A: its lease too -- not kept automatically again
@@ -3017,11 +3049,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingRuntimeConfigSync = false
         lastAppliedStreamActive = null
         entryOps.invalidate(handle)
-        NativeSessionBridge.nativeEnd(handle,
-            if (decision == StandbyKeep.ListReturn.UNSUPPORTED_END) "keep_unsupported" else "to_standby")
-        forgetKept(handle)
         clearActive()
         connectFlowActive = false
+        val end = ListReturnEnd(handle, decision, rk, k?.hostName.orEmpty(),
+            SystemClock.elapsedRealtime() + SessionPark.CONFIRM_BUDGET_MS)
+        // r2: what the session holds is released NOW, not left to the host's end of it (Codex: held input and the
+        // clipboard are never put off to the tail) -- the native fence: no new input / clipboard, the releases of what is
+        // held sent, the pause proven by a Ping. It ends the session when it settles (keepTick) or at its budget. A
+        // session that cannot fence (an older host, a raw-IP one) ends at once.
+        if (NativeSessionBridge.nativeBeginPark(handle)) {
+            listReturnEnds[handle] = end
+            diagnosticsLog.log("list_return_fence", "handle=$handle begin")
+        } else {
+            diagnosticsLog.log("list_return_fence", "handle=$handle none (cannot fence: ends now)")
+            finishListReturn(end, "no_fence")
+        }
+        hostsStatusText.text = ""
+        currentScene = UiScene.HOSTS
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+    }
+
+    /** The fenced session ends; then the standby part of "PC 목록". */
+    private fun finishListReturn(end: ListReturnEnd, how: String) {
+        listReturnEnds.remove(end.handle)
+        val decision = end.decision
+        val rk = end.key
+        diagnosticsLog.log("list_return_end",
+            "handle=${end.handle} how=$how released=${NativeSessionBridge.nativeParkReleasedCount(end.handle)} " +
+                "dropped=${NativeSessionBridge.nativeParkDroppedActionCount(end.handle)}")
+        NativeSessionBridge.nativeEnd(end.handle,
+            if (decision == StandbyKeep.ListReturn.UNSUPPORTED_END) "keep_unsupported" else "to_standby")
+        forgetKept(end.handle)
         when (decision) {
             StandbyKeep.ListReturn.BACK_TO_STANDBY -> diagnosticsLog.log("standby_return", "host=${rk?.hostId.orEmpty()}")
             StandbyKeep.ListReturn.FIRST_TRANSITION -> {
@@ -3029,15 +3088,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 rk?.let { startStandby(it, "first_transition") }
             }
             StandbyKeep.ListReturn.UNSUPPORTED_END -> {
-                diagnosticsLog.log("standby_unsupported_end", "host=${k?.hostName.orEmpty()}")
-                Toast.makeText(this, getString(R.string.hosts_standby_unsupported_end, k?.hostName.orEmpty()),
-                    Toast.LENGTH_LONG).show()
+                diagnosticsLog.log("standby_unsupported_end", "host=${end.hostName}")
+                Toast.makeText(this, getString(R.string.hosts_standby_unsupported_end, end.hostName), Toast.LENGTH_LONG).show()
             }
         }
-        hostsStatusText.text = ""
-        currentScene = UiScene.HOSTS
         hostListAdapter.notifyDataSetChanged()
-        renderStatus()
+    }
+
+    /** Every status tick: a fenced "PC 목록" ends when its fence settled (or failed), or at its budget. */
+    private fun listReturnTick() {
+        if (listReturnEnds.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        for (end in listReturnEnds.values.toList()) {
+            val phase = SessionPark.NativePhase.of(NativeSessionBridge.nativeParkPhase(end.handle))
+            when {
+                phase == SessionPark.NativePhase.PARKED -> finishListReturn(end, "fenced")
+                phase == SessionPark.NativePhase.FAILED || phase == SessionPark.NativePhase.EXPIRED ->
+                    finishListReturn(end, "fence_" + phase.name.lowercase())
+                now >= end.deadlineMs -> finishListReturn(end, "fence_budget")
+            }
+        }
     }
 
     // ---------------------------------------------------------------- keepalive-r2 ② e: the standby leases
@@ -3048,8 +3118,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     /** A lease for [key] (none yet): started on the standby thread; its capability is fetched when it asks. */
+    /** r2 N4: sessions on screen that are not a lease's (an ordinary / raw-IP connection): they count toward the three. */
+    private fun otherActiveSessions(): Int = if (activeHandle != 0L && standbyHandles[activeHandle] == null) 1 else 0
+
     private fun startStandby(key: RecentHosts.Key, reason: String) {
         if (standbyBook.has(key) || !ensureStandbyInit()) return
+        if (!StandbyKeep.mayStart(standbyBook.keys().size, otherActiveSessions())) {
+            diagnosticsLog.log("standby_start_skipped",
+                "host=${key.hostId} reason=$reason why=limit leases=${standbyBook.keys().size} other=${otherActiveSessions()}")
+            return
+        }
         val inc = standbyBook.begin(key)
         val nk = StandbyKeep.nativeKey(key)
         diagnosticsLog.log("standby_start", "host=${key.hostId} inc=$inc reason=$reason leases=${standbyBook.keys().size}")
@@ -3114,6 +3192,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 continue
             }
             next[key] = lease
+            if (before?.tailActive == true && !lease.tailActive) {
+                diagnosticsLog.log("standby_tail_quiet", "host=${key.hostId} strays=${lease.strays}")
+            }
+            if (lease.tailActive != (before?.tailActive == true)) cardsChanged = true
             if (lease.exists && lease.needsCapability && !lease.handedOff) requestStandbyCapability(key, now)
         }
         standbyLeases = next
@@ -3123,6 +3205,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val recent = recentHosts.recent(origin, account).map { RecentHosts.Key(origin, account, it) }
         for (gone in StandbyKeep.evictions(recent, keys.filter { standbyBook.has(it) }, standbyHandles[activeHandle])) {
             releaseStandby(gone, "lru")
+        }
+        // r2 N4: active + standby together at most three -- a committed ordinary / raw-IP session counts too
+        val byRecency = standbyBook.keys().sortedBy { k -> recent.indexOf(k).let { if (it < 0) Int.MAX_VALUE else it } }
+        for (gone in StandbyKeep.overLimit(byRecency, otherActiveSessions(), standbyHandles[activeHandle])) {
+            releaseStandby(gone, "limit")
         }
         if (standbyBook.keys().isEmpty() && kept.values.none { it.parkedAtMs != 0L }) unwatchParkNetwork()
     }
@@ -3178,7 +3265,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             } finally {
                 val done = ok
                 diagnosticsLog.log("standby_capability", "host=${key.hostId} inc=$inc ok=$done $what")
-                runOnUiThread { standbyBook.endStaging(key, inc, done, SystemClock.elapsedRealtime(), Math.random()) }
+                runOnUiThread {
+                    if (!isDestroyed) standbyBook.endStaging(key, inc, done, SystemClock.elapsedRealtime(), Math.random())
+                }
             }
         }
     }
@@ -3215,6 +3304,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val gen = NativeSessionBridge.nativeConnectStandby(handle, nk, op)
             val why = if (gen == 0L) NativeSessionBridge.nativeDirectoryLastError(handle) else ""
             runOnUiThread {
+                if (isDestroyed) return@runOnUiThread  // r2 N5: an ended Activity's late answer changes nothing
                 val mine = entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch
                 if (gen != 0L && mine) {
                     diagnosticsLog.log("directory_connect_started", "handle=$handle op=$op gen=$gen standby=1")
@@ -3231,7 +3321,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 setDirectoryBusy(false)
                 directoryConnectingName = ""
                 releaseStandby(rk, "activate_failed")
-                connectToDirectoryHost(host)
+                connectToDirectoryHost(host, TapIntent.RETRY)
             }
         }.start()
     }
@@ -3239,6 +3329,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Every status tick: what the native table says about each kept PC; a held tap once nothing is confirming. */
     private fun keepTick() {
         tryCommit()
+        listReturnTick()
         standbyTick()
         if (kept.isEmpty() && heldTap == null) {
             nativeEntries = emptyMap()
@@ -3295,12 +3386,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (held != null && !anyParkConfirming() && !heldLeaseReturning) {
             heldTap = null
             val host = directoryHosts.firstOrNull { it.hostId == held.hostId }
-            if (!connectIntents.fallbackRuns(held, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
+            if (heldTapSeq != tapSeq) {
+                // a newer tap came since (it clears the held one; this is the belt to that brace)
+                diagnosticsLog.log("park_tap_cancelled", "host=${held.hostId} why=newer_tap seq=$heldTapSeq->$tapSeq")
+            } else if (!connectIntents.fallbackRuns(held, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
                 diagnosticsLog.log("park_tap_cancelled",
                     "host=${held.hostId} epoch=${held.epoch}->${NativeSessionBridge.nativeEpoch()} listed=${host != null}")
             } else {
                 diagnosticsLog.log("park_tap_resumed", "host=${held.hostId}")
-                connectToDirectoryHost(host!!)
+                connectToDirectoryHost(host!!, TapIntent.HELD)
             }
         }
     }
@@ -5504,13 +5598,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
      * native table -- the limit is counted and, if needed, the parked PC used longest ago marked to close, in that
      * same step -- and connected beside the kept ones. A failed connect ends only its own entry.
      */
-    private fun connectToDirectoryHost(host: DirectoryClient.Host) {
+    /** r2 N1: who asks -- the user's own tap, a held tap carried out, or the one ordinary retry of a failed activation. */
+    private enum class TapIntent { USER, HELD, RETRY }
+
+    private fun connectToDirectoryHost(host: DirectoryClient.Host, intent: TapIntent = TapIntent.USER) {
         val account = DirectoryClient.sessionAccount()
         val origin = directoryOrigin()
         val key = SessionPark.entryKey(origin, account, host.hostId)
-        // keepalive r2: the user's explicit connect -- this PC may be kept again, and the user comes first.
-        keepSuppression.release(RecentHosts.Key(origin, account, host.hostId))
-        preconnectPlanner.onManualTap()
+        if (intent == TapIntent.USER) {
+            // the newest intent: any tap still held goes (r2 N1), the user's explicit connect lifts this PC's suppression
+            ++tapSeq
+            if (heldTap != null) diagnosticsLog.log("tap_held_superseded", "held=${heldTap?.hostId} by=${host.hostId}")
+            heldTap = null
+            // keepalive r2: the user's explicit connect -- this PC may be kept again, and the user comes first.
+            keepSuppression.release(RecentHosts.Key(origin, account, host.hostId))
+            preconnectPlanner.onManualTap()
+        } else if (keepSuppression.isSuppressed(RecentHosts.Key(origin, account, host.hostId))) {
+            // a held / retried tap never undoes the user's 끊기 made since (r2 N1)
+            diagnosticsLog.log("tap_continuation_dropped", "host=${host.hostId} intent=$intent why=suppressed")
+            return
+        }
         // r2 M2: a tap while another PC is still connecting is the user's newest intent -- that connect gives way
         // (its own operation only; it is not waited for), and this tap is carried out now. The same PC again is
         // the same intent.
@@ -5534,7 +5641,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             StandbyKeep.Tap.Wait -> {
                 val previous = heldTap
                 heldTap = connectIntents.scheduleFallback(account, origin, host.hostId)
-                diagnosticsLog.log("standby_tap_held", "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()}")
+                heldTapSeq = tapSeq
+                diagnosticsLog.log("standby_tap_held", "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()} seq=$tapSeq")
                 return
             }
             is StandbyKeep.Tap.Cold -> if (st.releaseFirst) releaseStandby(rk, "cold_tap")
@@ -5554,6 +5662,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 // r2 K4 / multi §3: kept (the latest tap wins) and carried out when the park settles (keepTick).
                 val previous = heldTap
                 heldTap = connectIntents.scheduleFallback(account, origin, host.hostId)
+                heldTapSeq = tapSeq
                 diagnosticsLog.log(if (previous == null) "park_tap_held" else "park_tap_replaced",
                     "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()}")
                 return
@@ -5776,6 +5885,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val isKept = shown != null
             view.findViewById<TextView>(R.id.hostCardDetail).text = if (shown != null) when (shown) {
                 StandbyKeep.Shown.READY -> getString(R.string.hosts_standby_ready_detail)
+                StandbyKeep.Shown.SETTLING -> getString(R.string.hosts_standby_settling)
                 StandbyKeep.Shown.PREPARING -> getString(R.string.hosts_standby_preparing)
                 StandbyKeep.Shown.RETRY -> getString(R.string.hosts_standby_retry)
                 StandbyKeep.Shown.RETURNING -> getString(R.string.hosts_standby_returning)
@@ -5792,7 +5902,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             val state = view.findViewById<TextView>(R.id.hostCardState)
             state.text = when {
-                shown == StandbyKeep.Shown.READY -> getString(R.string.hosts_standby_state)
+                shown == StandbyKeep.Shown.READY || shown == StandbyKeep.Shown.SETTLING -> getString(R.string.hosts_standby_state)
                 isKept -> getString(R.string.hosts_standby_state_pending)
                 host.online -> getString(R.string.hosts_online)
                 else -> getString(R.string.hosts_offline)
@@ -5802,6 +5912,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val end = view.findViewById<Button>(R.id.hostCardDisconnect)
             end.visibility = if (isKept) View.VISIBLE else View.GONE
             end.setOnClickListener {
+                if (heldTap?.hostId == host.hostId) {
+                    heldTap = null  // r2 N1: a held tap of this PC never runs after its 끊기
+                    diagnosticsLog.log("tap_held_dropped", "host=${host.hostId} why=disconnect")
+                }
                 if (standbyBook.has(rk)) {
                     // this PC's standby goes, and it is not kept automatically again (until the user connects it)
                     diagnosticsLog.log("standby_disconnect_tap", "host=${host.hostName}")

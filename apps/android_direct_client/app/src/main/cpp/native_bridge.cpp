@@ -1401,15 +1401,16 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyStart(JNIEnv* e
 }
 
 // [exists, state (StandbyEntryClient::State: 0 Idle, 1 Admitting, 2 Parked, 3 Activating, 4 Active, 5 Unsupported,
-// 6 Waiting), lost count, handed off, needs a capability]
+// 6 Waiting), lost count, handed off, needs a capability, tail active, strays] -- r2 D1: the last two are the old
+// session's datagrams the lease still receives (observed) and how many so far
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeStandbyStatus(JNIEnv* env, jobject /* this */, jstring key) {
   auto* r = standby_runner();
   const auto st = r ? r->StatusOf(jstring_to_string(env, key)) : remote60::native_poc::StandbyRunner::Status{};
-  const jlong v[5] = {st.exists ? 1 : 0, static_cast<jlong>(st.state), static_cast<jlong>(st.lost), st.handedOff ? 1 : 0,
-                      st.needsCapability ? 1 : 0};
-  jlongArray out = env->NewLongArray(5);
-  if (out) env->SetLongArrayRegion(out, 0, 5, v);
+  const jlong v[7] = {st.exists ? 1 : 0, static_cast<jlong>(st.state), static_cast<jlong>(st.lost), st.handedOff ? 1 : 0,
+                      st.needsCapability ? 1 : 0, st.tailActive ? 1 : 0, static_cast<jlong>(st.strays)};
+  jlongArray out = env->NewLongArray(7);
+  if (out) env->SetLongArrayRegion(out, 0, 7, v);
   return out;
 }
 

@@ -30,24 +30,37 @@ object StandbyKeep {
         }
     }
 
-    /** nativeStandbyStatus: [exists, state, lost, handedOff, needsCapability]. */
+    /**
+     * nativeStandbyStatus: [exists, state, lost, handedOff, needsCapability, tailActive, strays]. r2 D1 (Codex
+     * codex_ka_e_src_r1.md): [tailActive] = the old session's datagrams still reach the lease (what the host still sends
+     * it, observed), [strays] = how many so far (the tail's cost, counted apart).
+     */
     data class Lease(
         val exists: Boolean,
         val state: LeaseState,
         val lost: Long,
         val handedOff: Boolean,
         val needsCapability: Boolean,
+        val tailActive: Boolean = false,
+        val strays: Long = 0L,
     ) {
         companion object {
             val NONE = Lease(false, LeaseState.IDLE, 0L, false, false)
             fun of(v: LongArray?): Lease {
                 if (v == null || v.size < 5 || v[0] == 0L) return NONE
-                return Lease(true, LeaseState.of(v[1]), v[2], v[3] != 0L, v[4] != 0L)
+                return Lease(true, LeaseState.of(v[1]), v[2], v[3] != 0L, v[4] != 0L,
+                    tailActive = v.size > 5 && v[5] != 0L, strays = if (v.size > 6) v[6] else 0L)
             }
         }
     }
 
-    enum class Shown { PREPARING, READY, ACTIVATING, ACTIVE, RETURNING, UNSUPPORTED, RETRY }
+    /**
+     * r2 D1: what the list may say -- three facts kept apart: (1) the local hand-back of the socket (RETURNING while it
+     * is not done), (2) the entry alive on its lease (READY / SETTLING), (3) the host's old grant and picture cleaned up
+     * -- which the existing wire does not confirm: READY never claims it, and SETTLING says the old session's datagrams
+     * are still arriving (observed). A tap on either is the user's explicit activation (a new generation: rollover).
+     */
+    enum class Shown { PREPARING, READY, SETTLING, ACTIVATING, ACTIVE, RETURNING, UNSUPPORTED, RETRY }
 
     /** What the list shows for a PC with this lease. [onScreen] = its activated session is the one on screen. null = no lease. */
     fun shown(lease: Lease, onScreen: Boolean): Shown? = when {
@@ -55,6 +68,7 @@ object StandbyKeep {
         lease.state == LeaseState.UNSUPPORTED -> Shown.UNSUPPORTED
         lease.handedOff && onScreen -> if (lease.state == LeaseState.ACTIVE) Shown.ACTIVE else Shown.ACTIVATING
         lease.handedOff -> Shown.RETURNING  // its session is ending (or never came up): not ready until the lease reads again
+        lease.state == LeaseState.PARKED && lease.tailActive -> Shown.SETTLING
         lease.state == LeaseState.PARKED -> Shown.READY
         lease.state == LeaseState.WAITING -> Shown.RETRY
         else -> Shown.PREPARING
@@ -98,6 +112,47 @@ object StandbyKeep {
         fromStandby -> ListReturn.BACK_TO_STANDBY
         supported -> ListReturn.FIRST_TRANSITION
         else -> ListReturn.UNSUPPORTED_END
+    }
+
+    /**
+     * r2 N4: active + standby together are at most [max]. [leasesByRecency] = the leases, most recent first (leases of PCs
+     * no longer recent last); [otherActive] = sessions on screen / committed that are NOT a lease's (an ordinary or a raw-IP
+     * connection: 0 or 1). The excess goes from the least recent lease -- never the one on screen. Called once a connection
+     * is committed (a success): a fourth that fails evicts nothing.
+     */
+    fun overLimit(leasesByRecency: List<RecentHosts.Key>, otherActive: Int, onScreen: RecentHosts.Key?,
+                  max: Int = RecentHosts.MAX): List<RecentHosts.Key> {
+        val allowed = (max - otherActive).coerceAtLeast(0)
+        if (leasesByRecency.size <= allowed) return emptyList()
+        val out = ArrayList<RecentHosts.Key>()
+        var excess = leasesByRecency.size - allowed
+        for (k in leasesByRecency.asReversed()) {
+            if (excess == 0) break
+            if (k == onScreen) continue
+            out.add(k)
+            --excess
+        }
+        return out
+    }
+
+    /** r2 N4: whether one more lease may start now (the same count). */
+    fun mayStart(leases: Int, otherActive: Int, max: Int = RecentHosts.MAX): Boolean = leases + otherActive < max
+
+    /**
+     * r2 N3 (clipboard r3 contract, kept): what a NEW session of a PC starts with. Back from standby (an activation):
+     * what the phone holds now is not news to that PC -- it becomes the new binding's baseline and is NOT sent; if it
+     * cannot be read, nothing is pushed until the clipboard really changes. An ordinary (cold) connect: as before.
+     */
+    sealed class ClipboardStart {
+        data class Seed(val text: String) : ClipboardStart()
+        object Hold : ClipboardStart()
+        object Fresh : ClipboardStart()
+    }
+
+    fun clipboardOnStart(fromStandby: Boolean, phoneText: String?): ClipboardStart = when {
+        !fromStandby -> ClipboardStart.Fresh
+        phoneText.isNullOrEmpty() -> ClipboardStart.Hold
+        else -> ClipboardStart.Seed(phoneText)
     }
 
     /** The leases that go: the ones whose PC is not among the recent ones any more -- never the one on screen. */
@@ -165,9 +220,13 @@ object StandbyKeep {
             staging = key to inc
             return true
         }
-        /** The job of [key]@[inc] ended: ok resets its back-off; a failure waits longer (1, 2, 4, 8, 16, 30 s + jitter). */
+        /**
+         * The job of [key]@[inc] ended: ok resets its back-off; a failure waits longer (1, 2, 4, 8, 16, 30 s + jitter).
+         * r2 N5: a late end of a job whose lease is gone / replaced changes nothing of the current one.
+         */
         @Synchronized fun endStaging(key: RecentHosts.Key, inc: Long, ok: Boolean, nowMs: Long, random: Double) {
             if (staging == key to inc) staging = null
+            if (!isCurrent(key, inc)) return
             if (ok) {
                 failures.remove(key)
                 notBefore.remove(key)

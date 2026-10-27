@@ -171,6 +171,63 @@ class StandbyKeepTest {
         assertTrue(b.startStaging(k("C"), c, 0L))
     }
 
+    // ---------------------------------------------------------------- r2 (Codex codex_ka_e_src_r1.md)
+
+    @Test
+    fun theOldSessionsTailIsSettlingNotReady() {
+        // D1: the entry alive on its lease, but the old session's datagrams still arriving -- not "ready"
+        val settling = StandbyKeep.Lease(true, StandbyKeep.LeaseState.PARKED, 0L, false, false, tailActive = true, strays = 40)
+        assertEquals(StandbyKeep.Shown.SETTLING, StandbyKeep.shown(settling, false))
+        // a tap on it is the user's explicit activation (rollover allowed)
+        assertEquals(StandbyKeep.Tap.Activate, StandbyKeep.onTap(settling))
+        val l = StandbyKeep.Lease.of(longArrayOf(1, 2, 0, 0, 0, 1, 40))
+        assertTrue(l.tailActive)
+        assertEquals(40L, l.strays)
+        // an older bridge's 5-element status: no tail
+        assertFalse(StandbyKeep.Lease.of(longArrayOf(1, 2, 0, 0, 0)).tailActive)
+    }
+
+    @Test
+    fun activePlusStandbyAreAtMostThree() {
+        // N4: three leases, then an ordinary / raw-IP session is committed: the least recent lease goes
+        val leases = listOf(k("A"), k("B"), k("C"))
+        assertEquals(listOf(k("C")), StandbyKeep.overLimit(leases, otherActive = 1, onScreen = null))
+        assertEquals(emptyList<RecentHosts.Key>(), StandbyKeep.overLimit(leases, otherActive = 0, onScreen = null))
+        // never the one on screen
+        assertEquals(listOf(k("B")), StandbyKeep.overLimit(leases, otherActive = 1, onScreen = k("C")))
+        assertFalse(StandbyKeep.mayStart(leases = 2, otherActive = 1))
+        assertTrue(StandbyKeep.mayStart(leases = 2, otherActive = 0))
+    }
+
+    @Test
+    fun backFromStandbyTheClipboardIsABaselineNotNews() {
+        // N3: the phone's text becomes the new binding's baseline (not sent); unreadable -> held until a real change
+        assertEquals(StandbyKeep.ClipboardStart.Seed("copied on B"), StandbyKeep.clipboardOnStart(true, "copied on B"))
+        assertEquals(StandbyKeep.ClipboardStart.Hold, StandbyKeep.clipboardOnStart(true, null))
+        assertEquals(StandbyKeep.ClipboardStart.Hold, StandbyKeep.clipboardOnStart(true, ""))
+        // a cold connect: as before
+        assertEquals(StandbyKeep.ClipboardStart.Fresh, StandbyKeep.clipboardOnStart(false, "anything"))
+        // and nothing held lets a session_started push through, only a real change (SessionPark, unchanged)
+        assertFalse(SessionPark.clipboardPushAllowed(true, "session_started"))
+        assertTrue(SessionPark.clipboardPushAllowed(true, "clip_changed"))
+    }
+
+    @Test
+    fun aLateCapabilityJobChangesNothingOfTheNewLease() {
+        // N5: an old job's end after endAll / a new incarnation leaves the new one's back-off and staging alone
+        val b = StandbyKeep.Book()
+        val old = b.begin(k("A"))
+        assertTrue(b.startStaging(k("A"), old, 0L))
+        b.endAll()
+        val fresh = b.begin(k("A"))
+        assertTrue(b.startStaging(k("A"), fresh, 0L))
+        b.endStaging(k("A"), old, ok = false, nowMs = 100L, random = 0.0)  // the late failure of the old job
+        assertEquals(0, b.failuresOf(k("A")))
+        assertEquals(k("A"), b.stagingKey())                              // the new one is still staging
+        b.endStaging(k("A"), fresh, ok = false, nowMs = 200L, random = 0.0)
+        assertEquals(1, b.failuresOf(k("A")))
+    }
+
     // ---------------------------------------------------------------- the directory's side
 
     @Test

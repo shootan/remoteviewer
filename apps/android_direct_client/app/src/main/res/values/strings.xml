@@ -268,7 +268,10 @@
     <!-- keepalive-r2 ② e, kept model A: a PC's standby lease on its card, and "PC 목록" for a PC that cannot stand by -->
     <string name="hosts_standby_state">대기 중</string>
     <string name="hosts_standby_state_pending">대기 준비</string>
-    <string name="hosts_standby_ready_detail">대기 연결 준비됨 · 누르면 바로 열립니다</string>
+    <!-- r2 D1: "대기 중" says only that this phone's standby entry is alive on its lease, not that the PC already cleaned
+         up the previous connection (that is not confirmed by the PC; while its old picture still arrives: settling) -->
+    <string name="hosts_standby_ready_detail">대기 연결 있음 · 누르면 엽니다</string>
+    <string name="hosts_standby_settling">이전 연결 정리 중일 수 있음 · 누르면 다시 엽니다</string>
     <string name="hosts_standby_preparing">대기 연결 준비 중…</string>
     <string name="hosts_standby_retry">대기 연결 다시 시도 대기 중</string>
     <string name="hosts_standby_returning">대기 연결로 돌아가는 중…</string>
