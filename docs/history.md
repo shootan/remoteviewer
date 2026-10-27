@@ -13572,3 +13572,8 @@ Next
 - 서명 `gnlink_release_sign.ps1`: signature `57d1d2ca5b34568e580ea0676504e4aed7583610870b2b0f50f4716a0174d01a`, manifest 본문 서명 전후 불변, JS·C++ verifier PASS, 1바이트 변조본 두 verifier 모두 거부.
 - `gnlink_deploy.sh`: dry-run → 실게시 rc 0 — 11 업로드·서버 검증, 백업 0.2.162 pair(814e4bb9/a39b2f14), pair 교체, https 익명 11 artifact 서명 해시 일치(401 은 근거 아님). 서버 디스크 windows pair = 6d89ae48/57d1d2ca, android pair 309a9c5e/cbb5b7d6(0.2.31) 불변.
 - **실기 대기**(자동 검증 범위 밖): 실 재부팅 로그인 전 화면 picker→바탕화면, 실 UAC 예/아니오(같은 연결 2회), 폰 0.2.31 WGC 사용 뒤 PC 접속 = DXGI, 실 잠금 화면 틀린 비밀번호 → 다시 누름 → 해제, 회사 PC. APK 0.2.32(SH r2·UA-2 표시·공용 세션 picker ack 대기 보수)는 별도.
+
+### 2026-10-27 운영 정책 — 삭제 후보는 모아 두고 사용자가 말할 때 한 번에 (문서 전용)
+- 목표: 사용자 지시 "삭제해야 될 거는 모아놨다가 나중에 내가 말할 때 한 번에 말해서 삭제할 수 있도록 해. 작업 중간에 권한 묻지 말고." 를 영속 정책으로. 같은 날 사용자 결정: 시험이 CreateNew 로 직접 만든 `C:/work/gnlink-wt/SLOT_REQUEST.txt` 한 파일의 종료 삭제만 예외(이 슬롯 규칙의 출처는 사용자가 아니라 검증용 10-15 이었음 — 정정).
+- 변경 파일: `AGENTS.md` 가장 상위 정책(root 밖 삭제 금지 유지, "필요시 권한을 물어본다" → 작업 중 묻지 않고 후보 보존·요청 시 일괄 명시 승인, slot 1파일 예외), `CLAUDE.md` 새 절 "삭제 후보"(중앙 목록 경로·항목 형식·중복 방지·검증용 한 창구·승인분만·지우기 직전 재확인·junction rmdir·예외 범위), `docs/구현계획.md` 에이전트 운영 정책 체크박스. 운영 목록 `.claude/deletion_candidates.md`(미추적).
+- 검토: 고정 diff 를 Codex 전문 검토 **OK**(task t-94tjfghd, 정본 `.claude/task_deletion_policy_2026-10-27.md`, 판정 `.claude/codex_deletion_policy_r1.md`; `git diff --check` 0·CRLF 유지). 제품·빌드·삭제 실행 없음. 다음 담당: 검증용(사용자가 정리를 요청할 때 목록 제시).
