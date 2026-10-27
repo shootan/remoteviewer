@@ -146,7 +146,12 @@ class StandbyLease {
     int lost = 0;
     bool handedOff = false;
     bool needsCapability = false;
+    // r2 D1: the old session's tail is still arriving (its video / control from the target reached this socket within
+    // kTailQuietMs). An observation of what the host still sends -- not a proof that its grant ended when it stops.
+    bool tailActive = false;
+    uint64_t strays = 0;  // such datagrams so far (the tail's cost, counted apart)
   };
+  static constexpr uint64_t kTailQuietMs = 1500;
   Snapshot snapshot() const {
     std::lock_guard<std::mutex> lock(mu_);
     Snapshot s;
@@ -155,6 +160,8 @@ class StandbyLease {
     s.lost = lost_;
     s.handedOff = handedOff_;
     s.needsCapability = needsCapability_;
+    s.strays = strays_;
+    s.tailActive = !handedOff_ && lastStrayMs_ != 0 && now_() - lastStrayMs_ < kTailQuietMs;
     return s;
   }
   // the last kEventsKept notes (r3: bounded -- a long retry loop does not grow it; no secret is ever written to it)
@@ -186,17 +193,10 @@ class StandbyLease {
         idle_.notify_all();
         return false;
       }
-      if (peerTied_) {
-        // still tied to a session's peer: a fresh socket for the new capability (no read is running: the pump starts
-        // none while an intent waits, and the one in flight has ended)
-        std::string error;
-        peerTied_ = false;
-        if (!Reopen(&error)) {
-          Note("reopen failed: " + error);
-          idle_.notify_all();
-          return false;
-        }
-        Note("socket reopened (tied to a session's peer)");
+      // no read is running here: the pump starts none while an intent waits, and the one in flight has ended
+      if (!UntieForNewCapability()) {
+        idle_.notify_all();
+        return false;
       }
       observing_ = true;
       s = socket_;
@@ -235,6 +235,11 @@ class StandbyLease {
           idle_.wait_for(lock, std::chrono::milliseconds(20));
         }
         if (socket_ == kInvalidSocket || handedOff_) return;
+        if (capabilityAfterRead_) {  // r2 N2: deferred while a read ran -- no read runs now
+          capabilityAfterRead_ = false;
+          NeedCapability();
+          if (socket_ == kInvalidSocket) return;
+        }
         s = socket_;
         aimed = Aim(&want);
         reading_ = true;
@@ -242,11 +247,16 @@ class StandbyLease {
       }
       UdpStandbyPacket p{};
       p.magic = 0;
-      const bool got = Receive(s, 20, aimed ? &want : nullptr, &p, nullptr);
+      bool stray = false;
+      const bool got = Receive(s, 20, aimed ? &want : nullptr, &p, nullptr, &stray);
       TestPoint(kTestReadDone);  // outside the lock: a test registers a handoff here, while the read is "in flight"
       std::lock_guard<std::mutex> lock(mu_);
       reading_ = false;
       idle_.notify_all();
+      if (stray) {
+        ++strays_;
+        lastStrayMs_ = now_();
+      }
       if (got && p.magic == kMagic) Apply(client_.OnStandbyPacket(p, now_()));
       Apply(client_.Tick(now_()));
     } while (now_() < until);
@@ -383,7 +393,10 @@ class StandbyLease {
 
   // One datagram from `want` (the lease's target, read under the lock by the caller; null = none yet: the wait only)
   // within `waitMs`: a standby packet (*sb) or a HelloAck (*ack). Takes no lock.
-  static bool Receive(SocketHandle s, uint32_t waitMs, const sockaddr_in* want, UdpStandbyPacket* sb, UdpHelloPacket* ack) {
+  // *stray (optional): a datagram from `want` that is neither -- the video / control of a session that used this socket
+  // and that the host still sends (r2 D1: the end of a session's tail is observed, never assumed).
+  static bool Receive(SocketHandle s, uint32_t waitMs, const sockaddr_in* want, UdpStandbyPacket* sb, UdpHelloPacket* ack,
+                      bool* stray = nullptr) {
     fd_set rd;
     FD_ZERO(&rd);
     FD_SET(s, &rd);
@@ -398,6 +411,7 @@ class StandbyLease {
         recvfrom(s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fromLen));
     if (n < 8) return false;
     if (!want || from.sin_addr.s_addr != want->sin_addr.s_addr || from.sin_port != want->sin_port) return false;
+    if (stray) *stray = true;  // from the target; cleared below if it is standby / handshake traffic
     uint32_t magic = 0;
     uint16_t kind = 0;
     std::memcpy(&magic, buf, 4);
@@ -405,11 +419,13 @@ class StandbyLease {
     if (magic != kMagic) return false;
     if (n == static_cast<int>(sizeof(UdpStandbyPacket)) && kind >= static_cast<uint16_t>(UdpPacketKind::StandbyHello) &&
         kind <= static_cast<uint16_t>(UdpPacketKind::StandbyRelease)) {
+      if (stray) *stray = false;
       if (!sb) return false;
       std::memcpy(sb, buf, sizeof(*sb));
       return true;
     }
     if (kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) && n >= static_cast<int>(sizeof(UdpHelloPacket))) {
+      if (stray) *stray = false;
       if (!ack) return false;
       UdpHelloPacket candidate{};
       std::memcpy(&candidate, buf, sizeof(candidate));
@@ -531,6 +547,18 @@ class StandbyLease {
 
   void NeedCapability() {
     StandbyCapability cap;
+    // r2 (Codex codex_ka_e_src_r1.md N2): a synchronous CapabilityFn observes from the socket it is given -- never one
+    // still tied to a session's peer (its directory answer would not come back). The socket is replaced only while no
+    // read runs on it (a descriptor closed under a read could come back as the new one's number): a read in flight
+    // defers this to the pump's next turn, before it starts another read.
+    if (peerTied_ && reading_) {
+      capabilityAfterRead_ = true;
+      return;
+    }
+    if (!UntieForNewCapability()) {
+      needsCapability_ = true;
+      return;
+    }
     if (socket_ == kInvalidSocket || !capability_ || !capability_(socket_, &cap) || cap.token.empty() || cap.port == 0) {
       Note("no capability now");
       needsCapability_ = true;  // the owner may hand one in (Provide); the entry waits for it -- nothing is sent
@@ -542,6 +570,21 @@ class StandbyLease {
     Apply(client_.Admit(cap.token, now_()));
   }
 
+  // A new capability is a new lease at the relay (or a new admission at the host) anyway: a socket a session tied to its
+  // peer is replaced by a fresh one first -- for every way to one (ObserveFrom for an async owner, NeedCapability for a
+  // synchronous CapabilityFn). Steady reuse never comes here: the same endpoint stays. Under mu_. false = no socket.
+  bool UntieForNewCapability() {
+    if (!peerTied_) return true;
+    peerTied_ = false;
+    std::string error;
+    if (!Reopen(&error)) {
+      Note("reopen failed: " + error);
+      return false;
+    }
+    Note("socket reopened (tied to a session's peer)");
+    return true;
+  }
+
   void Apply(const StandbyEntryClient::Effects& fx) {
     for (const auto& e : fx) {
       switch (e.kind) {
@@ -549,6 +592,7 @@ class StandbyLease {
           if (socket_ != kInvalidSocket) SendTo(socket_, e.packet);
           break;
         case StandbyEntryClient::Effect::NeedCapability:
+          Note("capability again: " + e.reason);
           NeedCapability();
           break;
         case StandbyEntryClient::Effect::Unsupported:
@@ -580,6 +624,9 @@ class StandbyLease {
   bool reading_ = false;          // the pump waits on socket_ (outside the lock)
   bool observing_ = false;        // ObserveFrom reads socket_ (outside the lock)
   bool peerTied_ = false;         // a session connect()ed this socket to its peer: reopen before aiming elsewhere
+  uint64_t strays_ = 0;           // datagrams from the target that were not standby traffic (a session's tail)
+  bool capabilityAfterRead_ = false;  // NeedCapability waits for the pump's read in flight (r2 N2)
+  uint64_t lastStrayMs_ = 0;
   int intents_ = 0;               // handoffs / observations waiting for the socket: no new pump read meanwhile
 
  public:
