@@ -20,10 +20,16 @@
 #   G  moving       a square crossing the strip at 30 fps (the "video" case)     x  40..1880 y 760..1000
 #   border          1-px rows/columns: top red, bottom green, left blue, right yellow (crop/flip check)
 #
+# -ScrollFile <path> (apk-0232 E1 shimmer, -Layered only): while that file exists the WHOLE content scrolls up at
+# -ScrollPx px per 33 ms tick (wrapping), and every pushed picture carries its number -- digits and a 16-bit stripe code
+# (white = 1, grey = 0, least significant on the left) in the bottom-right box -- and is logged to stdout as
+# "scroll frame=<n> offset=<px> ms=<tick ms>", so a recording of the phone's output can be matched to the source frames.
+# Without the file: the static picture and the pulse, as before.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File sh_pattern_window.ps1 [-Seconds 1800] [-Static]
 #   -Static: the square does not move (identical frames for the off/0.20/0.35 picture comparison).
 param([int]$Seconds = 1800, [int]$Left = 0, [int]$Top = 0, [int]$Width = 1920, [int]$Height = 1080,
-      [string]$Title = 'GNLINK-SH-PATTERN', [string]$InputLog = '', [switch]$Static, [switch]$Bottom, [switch]$Layered, [int]$PulseMs = 200)
+      [string]$Title = 'GNLINK-SH-PATTERN', [string]$InputLog = '', [switch]$Static, [switch]$Bottom, [switch]$Layered, [int]$PulseMs = 200,
+      [string]$ScrollFile = '', [int]$ScrollPx = 4)
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -193,6 +199,54 @@ if ($Layered) {
       [GnlinkLayered]::Push($form.Handle, $script:lbmp, $Left, $Top) | Out-Null
     })
     $pulse.Start()
+    if ($ScrollFile) {
+      # the source of the scrolling picture: the content twice, one above the other (a seamless wrap)
+      $script:tall = New-Object System.Drawing.Bitmap($Width, ($Height * 2), [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+      $tg = [System.Drawing.Graphics]::FromImage($script:tall)
+      $tg.Clear([System.Drawing.Color]::White)
+      & $draw $tg
+      $tg.TranslateTransform(0, $Height)
+      & $draw $tg
+      $tg.Dispose()
+      $script:offset = 0
+      $script:frame = 0
+      $script:scrolling = $false
+      $script:numFont = New-Object System.Drawing.Font('Consolas', 28, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      $scroll = New-Object System.Windows.Forms.Timer
+      $scroll.Interval = 33
+      $scroll.Add_Tick({
+        $on = Test-Path $ScrollFile
+        if (-not $on) {
+          if ($script:scrolling) {
+            # stopped: back to the static picture (the pulse keeps a window capture alive)
+            $script:scrolling = $false
+            [GnlinkLayered]::Push($form.Handle, $script:lbmp, $Left, $Top) | Out-Null
+          }
+          return
+        }
+        $script:scrolling = $true
+        $script:frame++
+        $script:offset = ($script:offset + $ScrollPx) % $Height
+        $fb = New-Object System.Drawing.Bitmap($Width, $Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $fg = [System.Drawing.Graphics]::FromImage($fb)
+        $fg.DrawImage($script:tall, (New-Object System.Drawing.Rectangle(0, 0, $Width, $Height)),
+                      (New-Object System.Drawing.Rectangle(0, $script:offset, $Width, $Height)), [System.Drawing.GraphicsUnit]::Pixel)
+        # the frame number: a box with digits and 16 stripes (8 px each)
+        $bx = $Width - 300; $by = $Height - 70
+        $fg.FillRectangle([System.Drawing.Brushes]::Black, $bx, $by, 290, 64)
+        $fg.DrawString(("{0:D6}" -f $script:frame), $script:numFont, [System.Drawing.Brushes]::White, ($bx + 6), ($by + 2))
+        for ($b = 0; $b -lt 16; $b++) {
+          $brush = if ((($script:frame -shr $b) -band 1) -eq 1) { [System.Drawing.Brushes]::White } else { [System.Drawing.Brushes]::Gray }
+          $fg.FillRectangle($brush, ($bx + 6 + $b * 17), ($by + 40), 12, 18)
+        }
+        $fg.Dispose()
+        [GnlinkLayered]::Push($form.Handle, $fb, $Left, $Top) | Out-Null
+        $fb.Dispose()
+        [Console]::Out.WriteLine(("scroll frame={0} offset={1} ms={2}" -f $script:frame, $script:offset, $sw.ElapsedMilliseconds)); [Console]::Out.Flush()  # an event handler's Write-Output never reaches stdout
+      })
+      $scroll.Start()
+    }
     $stop.Start()
   })
 } else {
