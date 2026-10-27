@@ -239,4 +239,14 @@ object NativeSessionBridge {
     /** Total UDP video bytes received this session. */
     external fun nativeGetSessionBytesReceived(binding: Long): Long
     external fun nativeResetVideoStream(binding: Long)
+
+    // keepalive-r2 (2) e: the standby leases (StandbyRunner). Nothing calls these while Preconnect.SEND_TO_REAL_HOSTS
+    // is off. Status: [exists, state, lost, handedOff, needsCapability].
+    external fun nativeStandbyInit(filesDir: String): Boolean
+    external fun nativeStandbyStart(key: String): Boolean
+    external fun nativeStandbyStatus(key: String): LongArray?
+    external fun nativeStandbyObserve(key: String, host: String, port: Int, token: String): Boolean
+    external fun nativeStandbyProvide(key: String, token: String, ip: String, port: Int): Boolean
+    external fun nativeStandbyRelease(key: String)
+    external fun nativeStandbyReleaseAll()
 }
