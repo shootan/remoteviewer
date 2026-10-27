@@ -38,6 +38,7 @@
 #include "poc_protocol.hpp"
 #include "host_standby_table.hpp"
 #include "standby_lease.hpp"
+#include "standby_runner.hpp"
 #include "directory_session_client.hpp"
 
 using remote60::native_poc::test_support::FakeDirectory;
@@ -222,6 +223,14 @@ struct SpawnedHost {
  * makes the pre-launch check refuse, so the host that would have written the real cache is
  * never started.
  */
+// The host's lifetime: 90 s (the spike cases), or REMOTE60_E2E_HOST_SECONDS -- the product-client run is longer (two
+// leases, a takeover, a re-activation and the runner on ONE host) and set it (a host that exits mid-run fails it).
+std::wstring e2e_host_seconds() {
+  wchar_t v[16] = {};
+  if (GetEnvironmentVariableW(L"REMOTE60_E2E_HOST_SECONDS", v, 16) > 0 && _wtoi(v) > 0) return v;
+  return L"90";
+}
+
 std::wstring isolation_args(const std::wstring& stagingDir) {
   return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
 }
@@ -290,7 +299,7 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --control-port " + std::to_wstring(controlPort) +
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
-                     L" --seconds 90" + isolation_args(host->dir);
+                     L" --seconds " + e2e_host_seconds() + isolation_args(host->dir);
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
@@ -1079,6 +1088,7 @@ std::string last_events(const remote60::native_poc::StandbyLease& lease) {
 // B's Pings leave it alone; B takes over explicitly; A, parked again on a new socket, takes it back with a larger
 // generation. An older host: the lease is Unsupported and never sends a Hello.
 int run_product_client(const std::vector<std::string>& tokens, const std::wstring& oldHost, bool realDirectory) {
+  SetEnvironmentVariableW(L"REMOTE60_E2E_HOST_SECONDS", L"420");
   using remote60::native_poc::StandbyLease;
   using remote60::native_poc::GenerationAllocator;
   const char* kIssuedIp = "211.218.222.1";
@@ -1185,6 +1195,45 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
   }
   ca.Disconnect();
   cb.Disconnect();
+
+  std::printf("  -- the app's StandbyRunner (a pump thread per PC): start, activate, session over, release --\n");
+  {
+    MemGenStore storeR;
+    auto randR = [](uint8_t* b, size_t n) { for (size_t i = 0; i < n; ++i) b[i] = static_cast<uint8_t>(0xD1); return true; };
+    GenerationAllocator gensR(storeR, randR);
+    remote60::native_poc::StandbyRunner runner(gensR, features, [&](const std::string&) { return cap; }, mono_ms);
+    check("the runner starts a lease for the PC (its own thread)", runner.Start("h-standby") && runner.size() == 1);
+    check("...it parks without anyone pumping it here",
+          wait_until([&] { return runner.StatusOf("h-standby").state == StandbyLease::State::Parked; }, 20000));
+    NullSink sinkR;
+    remote60::native_poc::ClientSessionController cr;
+    remote60::native_poc::ClientSessionConnectArgs argsR;
+    argsR.encodedFrameSink = &sinkR;
+    argsR.controlIntervalMs = 200;
+    const size_t epochsR = count_of(host.log(), "(standby activation");
+    const bool upR = runner.TakeActivation("h-standby", &argsR) && cr.Connect(argsR) &&
+                     wait_until([&] { return cr.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 15000);
+    check("TakeActivation + Connect: the runner's PC takes the session by activation (video)", upR &&
+          count_of(host.log(), "(standby activation") == epochsR + 1 && wait_until([&] { return sinkR.frames() > 0; }, 10000),
+          cr.Snapshot().lastError);
+    check("...while handed off the runner reports it so (the pump leaves the socket alone)",
+          runner.StatusOf("h-standby").handedOff);
+    const size_t endedR = count_of(host.log(), "control session ended");
+    cr.Disconnect();
+    runner.SessionOver("h-standby");
+    // the host ends that grant with the session's real end (contract §2.3 S3) -- until then the entry holds the session
+    // and refuses a Release (Live): a release sent then is simply refused and the entry lapses on its lease later
+    check("the host sees the session end (the grant ends with it)",
+          wait_until([&] { return count_of(host.log(), "control session ended") > endedR; }, 30000), host.tail());
+    check("session over: parked again by the runner's own pings",
+          wait_until([&] { const auto st = runner.StatusOf("h-standby");
+                           return st.state == StandbyLease::State::Parked && !st.handedOff; }, 15000));
+    const size_t releasedBefore = count_of(host.log(), "[standby] released");
+    runner.Release("h-standby");
+    check("Release: the lease is gone here and released at the host (one StandbyRelease)",
+          runner.size() == 0 && host.WaitFor("[standby] released", 3000) && count_of(host.log(), "[standby] released") == releasedBefore + 1,
+          host.tail());
+  }
   host.Stop();
 
   if (realDirectory) {
