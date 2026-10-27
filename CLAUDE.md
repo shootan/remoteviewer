@@ -255,6 +255,10 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
   이라 시험 Host 의 입력 주입 경로가 켜져 있었던 사건(OS 실제 영향 미확인), `.claude/codex_test_injection_finding.md`).
   - 실 입력 경로가 있는 Host 를 띄우는 **모든** 자동 시험(GPU 여부·이름 무관, 구 게시본·부정 대조·직접/중계·helper
     child 포함)은 시험 설정에서 주입을 **명시 OFF** 한다. 제품 기본값을 바꾸는 일이 아니다.
+  - 명시 OFF 는 `enableInputInjection=false` 또는 해당 source/binary 에서 `Disabled` 로 해석됨을 확인한
+    `--input-injection-mode none` 을 허용한다. 후자의 기존 `disabled (unsupported mode) mode=none` 로그는
+    정확한 mode 값·이번 launch 의 effective OFF 와 함께 확인한다. 임의 unknown 값의 fallback 비활성은 인정하지 않는다.
+    이 OFF 는 일반 입력 주입 경로의 차단이며 SAS/credential/clipboard 등 별도 OS 효과의 격리를 대신하지 않는다.
   - **그 launch(새 PID·새 로그 범위·binary/config hash)의 effective OFF 증거**를 본 뒤에만 Viewer/클라이언트/세션
     연결이나 입력 가능한 요청을 보낸다. 설정 문자열·"보낼 입력 없음"·이전 실행의 disabled 줄로 대신하지 않는다.
   - `enabled`·설정 오류/무시·미지원 옵션·확인 로그 없음·timeout·상충은 **setup 실패로 종료**(연결 0). check(false)
