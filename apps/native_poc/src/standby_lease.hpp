@@ -10,15 +10,11 @@
 // read.
 //
 // Activation is a CONNECT MODE of ClientSessionController, not another session type: ActivationArgs() hands the
-// lease's socket to the session (ClientSessionConnectArgs::preparedUdpSocket, which the session then owns) with a
-// handshake that sends StandbyActivate instead of the Hello and returns only when this activation's own Pong
-// (Granted) AND the HelloAck have arrived, in either order (StandbyEntryClient). Everything after is the session's
-// ordinary path. Until the session ends the lease does not touch the socket.
-//
-// Limit (said, not hidden): when the session ends -- or a failed activation closes the socket -- the lease opens a
-// NEW socket and keeps the entry by Ping (the host follows an entry's endpoint by its secret, §2.2). Directly that is
-// enough; through a relay the lease is bound to the old client endpoint, so the Pings die and the entry is re-admitted
-// with a new capability (bounded backoff). Keeping the socket across the session is ③'s.
+// session a DUPLICATE handle of the lease's socket (ClientSessionConnectArgs::preparedUdpSocket, which the session owns
+// and closes) with a handshake that sends StandbyActivate instead of the Hello and returns only when this activation's
+// own Pong (Granted) AND the HelloAck have arrived, in either order (StandbyEntryClient). Everything after is the
+// session's ordinary path. The lease keeps its own handle and does not read it until the session is over; then it goes
+// on with the SAME socket -- the same endpoint, which a relay lease is bound to (§2.7) -- and the entry by Ping.
 
 #include <cstdint>
 #include <cstring>
@@ -79,14 +75,18 @@ class StandbyLease {
   // from now on) and the activation handshake. Parked only; else false.
   bool ActivationArgs(ClientSessionConnectArgs* args) {
     if (client_.state() != State::Parked || socket_ == kInvalidSocket || port_ == 0) return false;
+    const SocketHandle sessionHandle = Duplicate(socket_);
+    if (sessionHandle == kInvalidSocket) {
+      events_.push_back("socket duplicate failed");
+      return false;
+    }
     args->host = ip_;
     args->videoPort = port_;
     args->controlPort = port_;
     args->requireUdpHello = true;
     args->requireTcpControl = false;
     args->controlOverUdp = true;
-    args->preparedUdpSocket = socket_;
-    socket_ = kInvalidSocket;  // the session's now
+    args->preparedUdpSocket = sessionHandle;  // the session's handle; the lease keeps its own
     handedOff_ = true;
     args->udpHandshake = [this](SocketHandle s, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures) {
       return Handshake(s, stop, error, ackFeatures);
@@ -94,12 +94,15 @@ class StandbyLease {
     return true;
   }
 
-  // The session this lease activated ended (or its Connect failed): a new socket, and the entry goes on by Ping.
+  // The session this lease activated ended (or its Connect failed; the session closed its handle): the entry goes on
+  // by Ping on the lease's same socket.
   void SessionOver() {
     handedOff_ = false;
     if (client_.state() == State::Active) client_.SessionEnded(now_());
-    std::string error;
-    if (!Reopen(&error)) events_.push_back("reopen failed: " + error);
+    if (socket_ == kInvalidSocket) {
+      std::string error;
+      if (!Reopen(&error)) events_.push_back("reopen failed: " + error);
+    }
   }
 
   // The user gave up the activation in flight (Connect still running): its late answers adopt nothing.
@@ -122,6 +125,17 @@ class StandbyLease {
       return false;
     }
     return true;
+  }
+
+  // Another handle to the same socket (the same local endpoint); closing one leaves the other.
+  static SocketHandle Duplicate(SocketHandle s) {
+#if defined(_WIN32)
+    WSAPROTOCOL_INFOW info{};
+    if (WSADuplicateSocketW(s, GetCurrentProcessId(), &info) != 0) return kInvalidSocket;
+    return WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, WSA_FLAG_OVERLAPPED);
+#else
+    return dup(s);
+#endif
   }
 
   bool Aim(sockaddr_in* to) const {
