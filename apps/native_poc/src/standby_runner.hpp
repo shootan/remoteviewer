@@ -45,6 +45,7 @@ class StandbyRunner {
     bool needsCapability = false;  // ② e: the lease waits for a capability the app gets (Observe, then Provide)
     bool tailActive = false;       // r2 D1: the old session's datagrams still arrive (StandbyLease::Snapshot)
     uint64_t strays = 0;
+    uint64_t punches = 0;          // r3 D1: the host's Punches, apart from the strays
   };
   // The capability source of one PC's lease (directory observe + standby connect through that lease's socket).
   using CapabilityFactory = std::function<StandbyLease::CapabilityFn(const std::string& key)>;
@@ -163,6 +164,27 @@ class StandbyRunner {
     for (auto& kv : all) Stop(kv.second);
   }
 
+  // r3 (Codex codex_ka_e_src_r2.md R2): the leases of ONE owner -- every key starting with `prefix` (non-empty) -- and
+  // no other. An app screen's late cleanup reclaims its own leases and never those of the screen after it, which share
+  // this process's runner. How many went.
+  size_t ReleaseWhere(const std::string& prefix) {
+    if (prefix.empty()) return 0;
+    std::vector<std::shared_ptr<Slot>> mine;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (auto it = leases_.begin(); it != leases_.end();) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0) {
+          mine.push_back(it->second);
+          it = leases_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (auto& slot : mine) Stop(slot);
+    return mine.size();
+  }
+
   size_t size() const {
     std::lock_guard<std::mutex> lock(mu_);
     return leases_.size();
@@ -200,6 +222,7 @@ class StandbyRunner {
     s.status.needsCapability = n.needsCapability;
     s.status.tailActive = n.tailActive;
     s.status.strays = n.strays;
+    s.status.punches = n.punches;
     return s.status;
   }
 
