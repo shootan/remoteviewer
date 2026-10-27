@@ -3458,6 +3458,18 @@ target_link_libraries(remote60_directory_session_client_test PRIVATE common ws2_
 
 # Counts what the clients ask for when the directory refuses with 409. The outcome alone does not
 # separate "repaired it once" from "retried in a loop", so the assertions are about the counts.
+# keepalive-r2 FINDING r2 (Codex codex_ka_punch_thread_src_r1.md N1): the host agent's punch queue lives one Start..Stop.
+add_executable(remote60_host_agent_punch_test
+  src/host_agent_punch_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_agent_punch_test PRIVATE src)
+target_compile_definitions(remote60_host_agent_punch_test PRIVATE REMOTE60_HOST_AGENT_TEST_HOOKS)
+target_link_libraries(remote60_host_agent_punch_test PRIVATE common ws2_32 winhttp)
+
 add_executable(remote60_directory_retry_test
   src/directory_retry_test.cpp
   src/directory_session_client.cpp
