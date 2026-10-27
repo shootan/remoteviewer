@@ -483,26 +483,33 @@ publish_pair() {
     #    do they verify together (the same verifier and key as the checks before the swap)?
     # The exit code stays 4 in every case: a failed publish a person has to look at. Nothing is undone or
     # cleaned up here (Codex maint M1: no automatic rollback, no blind cleanup).
-    local swap_state="unknown"
-    if remote_sh "test ! -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'"; then
-      swap_state="manifest-only"
-    elif remote_sh "test -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'"; then
-      swap_state="neither"
-    fi
-    local pair_state="unknown" pdir=""
+    # maint r3 (Codex M2): a state is only said when the query that says it RAN. Each query exits 0 and prints one
+    # typed word; a non-zero exit (ssh 255, a remote command that failed) or any other output is "unknown" -- never
+    # read as "missing". Likewise only the verifier's own REFUSED (exit 3) is "does-not-verify"; node that cannot
+    # run, a file or key it cannot read, anything thrown, is "unknown".
+    local swap_state="unknown" answer=""
+    answer="$(remote_sh "if test ! -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'; then echo gnlink-swap-manifest-only; elif test -e '$dst_manifest.tmp' && test -e '$dst_sig.tmp'; then echo gnlink-swap-neither; else echo gnlink-swap-other; fi" 2>/dev/null)" || answer=""
+    case "$answer" in
+      gnlink-swap-manifest-only) swap_state="manifest-only" ;;
+      gnlink-swap-neither)       swap_state="neither" ;;
+    esac
+    local pair_state="unknown" pdir="" vrc=0
     mkdir -p "$REPO_ROOT/.claude/deploy-tmp" 2>/dev/null
     pdir="$(mktemp -d "$REPO_ROOT/.claude/deploy-tmp/pair.XXXXXX" 2>/dev/null)" || pdir=""
     if [ -n "$pdir" ]; then
-      if ! remote_sh "test -f '$dst_manifest' && test -f '$dst_sig'"; then
+      answer="$(remote_sh "if test -f '$dst_manifest' && test -f '$dst_sig'; then echo gnlink-pair-present; else echo gnlink-pair-missing; fi" 2>/dev/null)" || answer=""
+      if [ "$answer" = "gnlink-pair-missing" ]; then
         pair_state="incomplete"
-      elif remote_sh "cat -- '$dst_manifest'" > "$pdir/m" 2>/dev/null && remote_sh "cat -- '$dst_sig'" > "$pdir/s" 2>/dev/null; then
-        if node "$REPO_ROOT/automation/gnlink_verify_manifest.js" "$pdir/m" "$pdir/s" "$PLATFORM" >/dev/null 2>&1; then
+      elif [ "$answer" = "gnlink-pair-present" ] && remote_sh "cat -- '$dst_manifest'" > "$pdir/m" 2>/dev/null && remote_sh "cat -- '$dst_sig'" > "$pdir/s" 2>/dev/null; then
+        vrc=0
+        node "$REPO_ROOT/automation/gnlink_verify_manifest.js" "$pdir/m" "$pdir/s" "$PLATFORM" >/dev/null 2>&1 || vrc=$?
+        if [ "$vrc" -eq 0 ]; then
           if cmp -s "$pdir/m" "$MANIFEST" && cmp -s "$pdir/s" "$SIGNATURE"; then
             pair_state="verified-this-release"
           else
             pair_state="verified-another-pair"
           fi
-        else
+        elif [ "$vrc" -eq 3 ]; then
           pair_state="does-not-verify"
         fi
       fi
@@ -513,13 +520,13 @@ publish_pair() {
       verified-this-release)
         printf 'ERROR %s\n' "the swap reported a failure, but the pair published now is THIS release's and verifies -- confirm both files against this release, then re-run" >&2 ;;
       verified-another-pair)
-        printf 'ERROR %s\n' "the swap failed; the pair published now verifies but is NOT this release (the previous pair, intact?) -- check it against the backup's SHA256SUMS" >&2 ;;
+        printf 'ERROR %s\n' "the swap failed; the pair published now verifies but is NOT this release (the previous pair, intact?) -- check it against the backup's SHA256SUMS; restore the exact backup pair only if it is not the one that should be published" >&2 ;;
       does-not-verify)
         printf 'ERROR %s\n' "the swap failed and the published manifest and signature do NOT verify together -- clients will refuse this update; restore the exact backup pair by hand" >&2 ;;
       incomplete)
         printf 'ERROR %s\n' "the swap failed and the published pair is incomplete (manifest or signature missing) -- restore the exact backup pair by hand" >&2 ;;
       *)
-        printf 'ERROR %s\n' "the swap failed and the published pair could not be checked -- it may be partially replaced; check both files and restore the exact backup pair by hand" >&2 ;;
+        printf 'ERROR %s\n' "the swap failed and the published pair could not be checked (a query or the verifier did not run) -- nothing is known about it; check both files by hand, and restore the exact backup pair if they are not a verifying pair" >&2 ;;
     esac
     printf 'swap-state %s\n' "$swap_state" >&2
     printf 'pair-state %s\n' "$pair_state" >&2

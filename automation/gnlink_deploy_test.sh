@@ -514,6 +514,87 @@ run_deploy_failing "$ROOT13E" "$REL13" ".sig.tmp" "update-manifests/windows.sig"
 check "13e. the published pair cannot be read back: exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
 check "13e. ...published: unknown, and no claim either way" \
       "$([ "$(state_line pair-state)" = unknown ] && ! grep '^ERROR the swap' "$LAST_OUT" | grep -q 'refuse\|verifies\|is THIS' && echo 1 || echo 0)" "$(state_line pair-state)"
+# maint r3 (Codex M2): a check that did not RUN is "unknown", never "missing" or "refused". Two more shims, in their
+# own directory so the cases above are untouched: a `bash` that fails (255, as ssh does) the one remote query whose
+# text carries $GNLINK_TEST_FAIL_SH_MATCH -- the local root runs every remote command through `bash -c` -- and a
+# `node` that, for the read-back pair only (deploy-tmp/pair.*), cannot run (127) or dies with node's own exit 1.
+SHIM13M="$WORK/shim13m"; mkdir -p "$SHIM13M"
+REAL_BASH="$(command -v bash)"
+REAL_NODE="$(command -v node)"
+cat > "$SHIM13M/bash" <<SHIM
+#!$REAL_BASH
+if [ "\${1:-}" = "-c" ] && [ -n "\${GNLINK_TEST_FAIL_SH_MATCH:-}" ]; then
+  case "\${2:-}" in *"\$GNLINK_TEST_FAIL_SH_MATCH"*) echo "ssh: the test dropped this query" >&2; exit 255 ;; esac
+fi
+exec "$REAL_BASH" "\$@"
+SHIM
+cat > "$SHIM13M/node" <<SHIM
+#!$REAL_BASH
+for a in "\$@"; do
+  case "\$a" in *deploy-tmp/pair.*)
+    case "\${GNLINK_TEST_NODE_FAULT:-}" in
+      missing) echo "node: command not found (the test)" >&2; exit 127 ;;
+      throw)   echo "Error: thrown by the test" >&2; exit 1 ;;
+    esac ;;
+  esac
+done
+exec "$REAL_NODE" "\$@"
+SHIM
+chmod +x "$SHIM13M/bash" "$SHIM13M/node"
+run_deploy_m2() {
+  local root="$1" rel="$2" shMatch="$3" nodeFault="$4"
+  PATH="$SHIM13M:$PATH" GNLINK_TEST_FAIL_SH_MATCH="$shMatch" GNLINK_TEST_NODE_FAULT="$nodeFault" \
+    run_deploy_failing "$root" "$rel" ".sig.tmp"
+}
+pair_sha() { printf '%s %s' "$(sha256sum -- "$1/update-manifests/windows.manifest" 2>/dev/null | cut -d' ' -f1)" \
+                            "$(sha256sum -- "$1/update-manifests/windows.sig" 2>/dev/null | cut -d' ' -f1)"; }
+no_claim() { ! grep '^ERROR the swap' "$LAST_OUT" | grep -q 'refuse\|incomplete\|missing\|verifies\|is THIS'; }
+# 13g. the existence query does not run (255): unknown -- before r3 this said "incomplete"
+ROOT13G="$WORK/root13g"; mkdir -p "$ROOT13G"
+run_deploy "$ROOT13G" "$REL13" >/dev/null 2>&1
+before13g="$(pair_sha "$ROOT13G")"
+run_deploy_m2 "$ROOT13G" "$REL13" "gnlink-pair-present" ""; rc=$?
+check "13g. the existence query fails (255): exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+check "13g. ...published: unknown (not incomplete), and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && no_claim && echo 1 || echo 0)" "$(state_line pair-state)"
+check "13g. ...and it is true that the pair is whole: the same bytes as before" \
+      "$([ "$(pair_sha "$ROOT13G")" = "$before13g" ] && echo 1 || echo 0)"
+# 13h. the swap-phase query does not run: swap-state unknown (not a guessed phase)
+ROOT13H="$WORK/root13h"; mkdir -p "$ROOT13H"
+run_deploy_m2 "$ROOT13H" "$REL13" "gnlink-swap-manifest-only" ""; rc=$?
+check "13h. the swap-phase query fails (255): exit 4, swap-state unknown" \
+      "$([ $rc -eq 4 ] && [ "$(state_line swap-state)" = unknown ] && echo 1 || echo 0)" "exit=$rc $(state_line swap-state)"
+# 13i. the verifier cannot run (127): unknown -- before r3 this said "does-not-verify, clients will refuse"
+ROOT13I="$WORK/root13i"; mkdir -p "$ROOT13I"
+run_deploy "$ROOT13I" "$REL13" >/dev/null 2>&1
+before13i="$(pair_sha "$ROOT13I")"
+run_deploy_m2 "$ROOT13I" "$REL13" "" "missing"; rc=$?
+check "13i. the verifier cannot run (127): exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+check "13i. ...published: unknown (not does-not-verify), and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && no_claim && echo 1 || echo 0)" "$(state_line pair-state)"
+check "13i. ...and it is true that the pair verifies: the same bytes as before" \
+      "$([ "$(pair_sha "$ROOT13I")" = "$before13i" ] && echo 1 || echo 0)"
+# 13j. the verifier dies (node's own exit 1, an uncaught error): unknown
+ROOT13J="$WORK/root13j"; mkdir -p "$ROOT13J"
+run_deploy "$ROOT13J" "$REL13" >/dev/null 2>&1
+run_deploy_m2 "$ROOT13J" "$REL13" "" "throw"; rc=$?
+check "13j. the verifier dies (exit 1): exit 4, published: unknown" \
+      "$([ $rc -eq 4 ] && [ "$(state_line pair-state)" = unknown ] && no_claim && echo 1 || echo 0)" "exit=$rc $(state_line pair-state)"
+# 13k. the verifier's own codes, run for real: a refusal is 3 and only a refusal; a check that cannot be done is 4
+VJS="$(cygpath -w "$REPO/automation/gnlink_verify_manifest.js")"
+vcode() { local rc=0; node "$VJS" "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+if [ -n "$TEST_KEY_HEX" ] && [ -n "${RELO:-}" ]; then
+  # a real refusal: this release's manifest with another release's signature (both made with the test key)
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode "$(cygpath -w "$REL13/windows.manifest")" "$(cygpath -w "$RELO/windows.sig")" windows)"
+  check "13k. verifier: a document that does not verify -> 3 (REFUSED)" "$([ "$c" = 3 ] && echo 1 || echo 0)" "exit=$c"
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode "$(cygpath -w "$REL13/windows.manifest")" "$(cygpath -w "$REL13/windows.sig")" windows)"
+  check "13k. ...a pair that verifies -> 0" "$([ "$c" = 0 ] && echo 1 || echo 0)" "exit=$c"
+fi
+c="$(GNLINK_PUBLIC_KEY_HEX="${TEST_KEY_HEX:-}" vcode "$(cygpath -w "$WORK/no-such.manifest")" "$(cygpath -w "$REL13/windows.sig")" windows)"
+check "13k. ...a file it cannot read -> 4 (not 3)" "$([ "$c" = 4 ] && echo 1 || echo 0)" "exit=$c"
+c="$(GNLINK_PUBLIC_KEY_HEX="zz" vcode "$(cygpath -w "$REL13/windows.manifest")" "$(cygpath -w "$REL13/windows.sig")" windows)"
+check "13k. ...a key it cannot use -> 4 (not 3)" "$([ "$c" = 4 ] && echo 1 || echo 0)" "exit=$c"
+
 # 13f. a normal publish has neither line, and names the restart rule
 ROOT13F="$WORK/root13f"; mkdir -p "$ROOT13F"
 run_deploy "$ROOT13F" "$REL13"; rc=$?

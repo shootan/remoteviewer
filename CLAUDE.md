@@ -347,9 +347,18 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
       릴리스를 다시 게시하던 중이면 남은 sig 가 그 manifest 에 그대로 유효하다(Codex maint M1).
     - `pair-state`(**지금 게시된 것**, 읽기 전용으로 가져와 바이트 비교 + 게시 전과 같은 검증기·키로 서명
       검증): `verified-this-release` / `verified-another-pair` / `does-not-verify`(클라이언트가 거부) /
-      `incomplete`(파일 없음) / `unknown`(읽기·검증 실패 — 어느 쪽으로도 단정하지 않음).
-    어느 경우든 exit 4 이고, **정확한 backup pair 로 확인·원복**하며 게시 실패는 **blocker 로 보고**한다.
-    "클라이언트가 거부한다" 는 `does-not-verify` 일 때만 쓴다.
+      `incomplete`(파일 없음) / `unknown`(조회·읽기·검증을 **수행하지 못함** — 어느 쪽으로도 단정하지 않음).
+    - ⚠️ 상태는 **그 조회가 실제로 돌았을 때만** 말한다(maint r3, Codex M2). 존재 조회가 실패하면(ssh 255·
+      원격 명령 실패) `incomplete` 가 아니라 `unknown` 이다. `does-not-verify` 는 검증기가 돌아서 **명시적으로
+      거부했을 때**(`gnlink_verify_manifest.js` exit **3**)뿐이다. node 실행 불가(127)·node 자체 오류(1)·파일/키를
+      읽지 못함(4)은 `unknown` 이다.
+    어느 경우든 exit 4 이고 게시 실패는 **blocker 로 보고**한다. 원복은 상태에 따라 다르다:
+    - `verified-this-release`: 이 릴리스의 두 파일과 대조해 확인한 뒤 **재실행**한다(원복 대상이 아니다).
+    - `verified-another-pair`: backup 의 SHA256SUMS 와 대조한다. **그것이 게시돼야 할 짝이 아닐 때만** 정확한
+      backup pair 로 원복한다.
+    - `does-not-verify` / `incomplete`: **정확한 backup pair 로 직접 원복**한다.
+    - `unknown`: 두 파일을 직접 확인하고, 검증되는 짝이 아니면 정확한 backup pair 로 원복한다.
+    자동 원복·부분 파일 삭제는 하지 않는다. "클라이언트가 거부한다" 는 `does-not-verify` 일 때만 쓴다.
   - 예전 문구(*"the previous release is still published"*, *"env 를 바꿀 때만 재시작"*)는 09-23 커밋
     65fcee7 에서 이미 바뀌었다. 이 절의 옛 줄 번호(:435~:445)는 그 이전 기준이었다.
 - **재시작**: 평시 릴리스는 필요 없다 — manifest 핸들러가 요청마다 디스크를 읽는다
