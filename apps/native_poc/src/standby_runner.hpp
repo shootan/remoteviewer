@@ -43,6 +43,8 @@ class StandbyRunner {
     int lost = 0;
     bool handedOff = false;
     bool needsCapability = false;  // ② e: the lease waits for a capability the app gets (Observe, then Provide)
+    bool tailActive = false;       // r2 D1: the old session's datagrams still arrive (StandbyLease::Snapshot)
+    uint64_t strays = 0;
   };
   // The capability source of one PC's lease (directory observe + standby connect through that lease's socket).
   using CapabilityFactory = std::function<StandbyLease::CapabilityFn(const std::string& key)>;
@@ -196,6 +198,8 @@ class StandbyRunner {
     s.status.lost = n.lost;
     s.status.handedOff = n.handedOff;
     s.status.needsCapability = n.needsCapability;
+    s.status.tailActive = n.tailActive;
+    s.status.strays = n.strays;
     return s.status;
   }
 
