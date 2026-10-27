@@ -2470,6 +2470,24 @@ HRESULT create_shell_webview() {
 
 }  // namespace
 
+// ka-pc-impl r1/r2: the kept PCs' manager -- its events reach on_managed_event on this thread, each child's output
+// goes to the viewer log (operation 0: a managed child's "connected" line is not an ordinary connect). A function so
+// the shell e2e (which compiles this file with its entry renamed) builds exactly the same one.
+void make_managed_viewers() {
+  gManaged = std::make_unique<remote60::native_poc::shell::ManagedViewers>(
+      [](std::function<void()> f) { post_ui(std::move(f)); }, [](const std::string& line) { log_line(line); },
+      [](HANDLE read, uint32_t pid, const std::string& hostId) {
+        std::string account;
+        { std::lock_guard<std::mutex> lock(gStateMu); account = gAccountId; }
+        const std::string context = " viewerSession=managed-" + std::to_string(pid) + " viewerPid=" + std::to_string(pid) +
+                                    " hostId=" + hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
+        gWorkers.Launch([read, identity = account + "@" + shell_directory_url(), context] {
+          pump_viewer_output_to_log(read, identity, context, 0);
+        });
+      },
+      [](const remote60::native_poc::shell::ManagedEvent& e) { on_managed_event(e); });
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 1;
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -2506,18 +2524,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
                             520, 720, nullptr, nullptr, instance, nullptr);
   if (!gWindow) return 2;
   ShowWindow(gWindow, SW_SHOW);
-  gManaged = std::make_unique<remote60::native_poc::shell::ManagedViewers>(
-      [](std::function<void()> f) { post_ui(std::move(f)); }, [](const std::string& line) { log_line(line); },
-      [](HANDLE read, uint32_t pid, const std::string& hostId) {
-        std::string account;
-        { std::lock_guard<std::mutex> lock(gStateMu); account = gAccountId; }
-        const std::string context = " viewerSession=managed-" + std::to_string(pid) + " viewerPid=" + std::to_string(pid) +
-                                    " hostId=" + hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
-        gWorkers.Launch([read, identity = account + "@" + shell_directory_url(), context] {
-          pump_viewer_output_to_log(read, identity, context, 0);
-        });
-      },
-      [](const remote60::native_poc::shell::ManagedEvent& e) { on_managed_event(e); });
+  make_managed_viewers();
 
   // Before the WebView is created, and not waited on. The window is already up, so a server that
   // never answers costs nothing here.

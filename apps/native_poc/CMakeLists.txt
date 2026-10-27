@@ -4473,4 +4473,16 @@ if(GNLINK_HAVE_WEBVIEW2)
   target_include_directories(remote60_client_reconnect_restore_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   target_link_libraries(remote60_client_reconnect_restore_e2e_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_client_reconnect_restore_e2e_test remote60_client_shell remote60_native_video_client_poc)
+
+  # ka-pc-impl r2 (Codex N1-N4, N6): kept PCs through the product shell (entry renamed, REMOTE60_SHELL_TEST_SEAM) --
+  # its page, bridge and handlers -- with the real viewer (GNLinkViewerKaTest), a real directory and four real hosts.
+  # Writes only under REMOTE60_TEST_TMP; its own window and the viewers' are placed beyond the screen's right edge.
+  add_executable(remote60_ka_pc_shell_e2e_test src/ka_pc_shell_e2e_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_ka_pc_shell_e2e_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_ka_pc_shell_e2e_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_ka_pc_shell_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_ka_pc_shell_e2e_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_ka_pc_shell_e2e_test remote60_client_shell remote60_viewer_ka_test remote60_native_video_host_poc)
 endif()

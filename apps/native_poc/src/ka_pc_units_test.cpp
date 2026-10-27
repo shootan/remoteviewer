@@ -3,10 +3,12 @@
 // directly under D:/remote/remote/.claude/test-tmp), including a non-ASCII sub-folder.
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <thread>
 
+#include "client_managed_viewers.hpp"
 #include "client_recent_hosts.hpp"
 #include "managed_viewer_ipc.hpp"
 
@@ -106,6 +108,43 @@ int main() {
     check("Close with a peer that never reads returns in bounded time", ms < 3000, std::to_string(ms) + " ms");
     CloseHandle(w);
     CloseHandle(r2);
+  }
+
+  // ------------------------------------------------------------ ManagedViewers: finished reapers do not pile up
+  {
+    // ka-pc-impl r2 (Codex N5): every ending used to keep its reaper thread until the shell's exit. Twenty
+    // launch/release cycles of a child that exits at once (cmd.exe: "exit 0", the managed flags after it are a
+    // remark) -- a finished reaper is joined at the next ending, so only the last one or two are held.
+    wchar_t sys[MAX_PATH] = {};
+    GetSystemDirectoryW(sys, MAX_PATH);
+    shell::ManagedViewers mv([](std::function<void()>) {}, [](const std::string&) {}, nullptr,
+                             [](const shell::ManagedEvent&) {});
+    size_t most = 0;
+    bool launched = true;
+    std::string firstWhy;
+    for (int i = 0; i < 20; ++i) {
+      shell::ManagedLaunch spec;
+      spec.exe = std::wstring(sys) + L"\\cmd.exe";
+      spec.baseArgs = L"/c exit 0 &rem";
+      spec.url = "http://127.0.0.1:1";
+      spec.session = "t";
+      spec.hostId = "h" + std::to_string(i);
+      spec.key = "k" + std::to_string(i);
+      spec.genDir = "unused";
+      std::string why;
+      const bool ok = mv.Launch(spec, &why);
+      if (!ok && firstWhy.empty()) firstWhy = why;
+      launched = launched && ok;
+      Sleep(150);
+      mv.Release(spec.hostId, "test");
+      most = (std::max)(most, mv.ReaperCount());
+      Sleep(100);
+    }
+    check("twenty launch/release cycles", launched, firstWhy);
+    check("...the reaper threads held stay bounded (finished ones joined at the next ending)", most <= 2,
+          "most held at once=" + std::to_string(most));
+    mv.JoinReapers();
+    check("...and none after JoinReapers", mv.ReaperCount() == 0);
   }
 
   // ------------------------------------------------------------ recent store

@@ -646,7 +646,29 @@ int main() {
 
   // ---------------------------------------------------------------- release, then a job close
   {
+    // ka-pc-impl r2 (Codex N4, init in reverse): an Activate, and the Release right behind it -- before that session
+    // could have made its window. Nothing of it may come up: no window, no connected session, no picker.
+    const size_t from = a.Count();
+    const size_t textFrom = a.proc.Text().size();
+    a.Send(Type::Activate, {{"op", "7"}});
+    Sleep(20);
     a.Send(Type::Release, {{"reason", "test"}});
+    bool windowSeen = false;
+    const uint64_t until = now_ms() + 4000;
+    while (now_ms() < until && !a.proc.Exited(0)) {
+      windowSeen = windowSeen || viewer_window(a.proc.pi.dwProcessId) != nullptr;
+      Sleep(10);
+    }
+    const std::string after = a.proc.Text().substr(textFrom);
+    const int ended = a.WaitMsg(Type::SessionEnded, from, 8000);
+    check("Activate then Release at once: no window shown, no session connected, no picker",
+          !windowSeen && after.find("connected host=") == std::string::npos && a.WaitMsg(Type::PickerReady, from, 100) < 0,
+          std::string("window=") + (windowSeen ? "1" : "0"));
+    check("...its SessionEnded says release, not connected",
+          ended >= 0 && a.At(ended).get("reason") == "release" && a.At(ended).get("connected") == "0",
+          ended >= 0 ? "reason=" + a.At(ended).get("reason") + " connected=" + a.At(ended).get("connected") +
+                           " taken=" + a.At(ended).get("taken")
+                     : "none");
     const int bye = a.WaitMsg(Type::Bye, 0, 8000);
     check("Release: the viewer says bye and ends", bye >= 0 && a.proc.Exited(8000));
     Sleep(500);
