@@ -169,6 +169,8 @@ bool press_release(const std::string& name) {
             L"if(!b||b.disabled)return false;b.click();return true;})()") == "true";
 }
 std::string status_line() { return unquote(js(L"document.getElementById('hostsMsg').textContent")); }
+// "대기 중" -- with or without "· 이전 연결 정리 중일 수 있음" (returning)
+bool standing_by(const std::string& name) { return card_state(name).rfind("대기 중", 0) == 0; }
 bool wait_card(const std::string& name, const std::string& text, unsigned ms) {
   return wait_for([&] { return card_state(name) == text; }, ms);
 }
@@ -345,6 +347,42 @@ std::vector<wchar_t> env_with(const std::wstring& localAppData, const std::vecto
   return e2e::e2e_isolated_environment(localAppData);
 }
 
+// r2b (Codex N6 counter-cases): a message from a kept PC's viewer exactly as the shell's forwarder hands it to the UI
+// (ManagedEvent -> on_managed_event), stamped with the identity given -- so a stale op, or a child that is no longer
+// the current one, can be delivered at a chosen moment. The shell's own handler decides; nothing is bypassed.
+struct ChildIdentity {
+  std::string hostId, key;
+  uint64_t inc = 0, epoch = 0;
+};
+ChildIdentity identity_of(const std::string& hostId) {
+  ChildIdentity id;
+  if (const auto* c = gManaged ? gManaged->Find(hostId) : nullptr) {
+    id.hostId = hostId;
+    id.key = c->key;
+    id.inc = c->incarnation;
+    id.epoch = c->ownerEpoch;
+  }
+  return id;
+}
+void deliver(const ChildIdentity& who, remote60::native_poc::managed_ipc::Type t,
+             std::map<std::string, std::string> fields) {
+  remote60::native_poc::shell::ManagedEvent e;
+  e.hostId = who.hostId;
+  e.incarnation = who.inc;
+  e.ownerEpoch = who.epoch;
+  e.message.type = t;
+  e.message.fields = std::move(fields);
+  e.message.fields["key"] = who.key;
+  e.message.fields["inc"] = std::to_string(who.inc);
+  e.message.fields["epoch"] = std::to_string(who.epoch);
+  on_managed_event(e);
+}
+// The native side of a page's connect message (what the bridge hands handle_page_message), for a press the page
+// itself would not offer at that moment (a card it shows as busy).
+void page_connect(const std::string& hostId, const std::string& name) {
+  handle_page_message("{\"type\":\"connect\",\"hostId\":\"" + hostId + "\",\"hostName\":\"" + name + "\"}");
+}
+
 struct TestHost {
   std::string name, id;
   Child proc;
@@ -408,7 +446,7 @@ int main() {
   // ---------------------------------------------------------------- four hosts, one record each
   std::vector<std::unique_ptr<TestHost>> hosts;
   const std::string realMachine = remote60::native_poc::directory::machine_id();
-  for (const char* name : {"KA-A", "KA-B", "KA-C", "KA-D"}) {
+  for (const char* name : {"KA-A", "KA-B", "KA-C", "KA-D", "KA-E"}) {
     auto h = std::make_unique<TestHost>();
     h->name = name;
     std::string token, err;
@@ -457,7 +495,7 @@ int main() {
       if (online == hosts.size()) break;
       Sleep(500);
     }
-    check(online == hosts.size(), "the four hosts are four online PCs of the account", std::to_string(online) + "/4");
+    check(online == hosts.size(), "the five hosts are five online PCs of the account", std::to_string(online) + "/5");
     if (online != hosts.size()) return 1;
   }
 
@@ -504,8 +542,62 @@ int main() {
               if (card_state(h->name) != "연결 가능") return false;
             return true;
           }, 30000),
-          "the four PCs are listed, each '연결 가능'");
+          "the five PCs are listed, each '연결 가능'");
     check(log_has("kept PCs: directory standby supported", 20000), "the shell learned the directory's standby support");
+
+    // ======================================================== R1 (r3): ONE reservation beside three PCs
+    {
+      // A standing by, B and C open: three logical PCs
+      check(tap("KA-A"), "R1: tap KA-A");
+      DWORD pa = 0;
+      wait_for([&] { return (pa = ordinary_pid(H("KA-A").id)) != 0; }, 10000);
+      check(pa && ordinary_connected(pa, 40000) && close_window_of(pa), "R1: A connected, and its window closed");
+      check_after([&] { return wait_card("KA-A", "대기 중", 45000); }, "R1: A standing by", [&] { return card_state("KA-A"); });
+      for (const char* n : {"KA-B", "KA-C"}) {
+        check(tap(n), std::string("R1: tap ") + n);
+        DWORD pid = 0;
+        wait_for([&] { return (pid = ordinary_pid(H(n).id)) != 0; }, 10000);
+        check(pid && ordinary_connected(pid, 40000), std::string("R1: ") + n + " open");
+      }
+      // D, then A (the only standby), then E -- pressed one after the other in ONE turn of the page, so all three
+      // reach the shell while D is still connecting
+      const size_t logFrom = client_log().size();
+      js(L"(function(){function card(n){return Array.from(document.querySelectorAll('.hostRow')).find(function(r){"
+         L"var e=r.querySelector('.name');return e&&e.textContent===n;}).querySelector('.host');}"
+         L"card('KA-D').click();card('KA-A').click();card('KA-E').click();return true;})()");
+      pump(500);
+      const std::string slice = client_log().substr(logFrom);
+      check(slice.find("host=" + H("KA-D").id + " reserved beside three PCs") != std::string::npos,
+            "R1: D (beside A standing by, B and C open) took the one reservation");
+      check(slice.find("kept PC activation host=" + H("KA-A").id + " refused") != std::string::npos,
+            "R1: ...opening A -- the last standby that could make room for D -- is refused while D is reserved");
+      check(slice.find("refused host=" + H("KA-E").id + " (connect): another PC is being opened") != std::string::npos &&
+                ordinary_pid(H("KA-E").id) == 0,
+            "R1: ...and E is refused ('다른 PC 를 여는 중'): no second candidate on the same standby");
+      DWORD pd = 0;
+      wait_for([&] { return (pd = ordinary_pid(H("KA-D").id)) != 0; }, 10000);
+      check(pd && ordinary_connected(pd, 40000), "R1: D connected");
+      check(log_has("reservation of host=" + H("KA-D").id + " committed", 10000) &&
+                log_has("making room after host=" + H("KA-D").id + " succeeded, releasing host=" + H("KA-A").id, 5000),
+            "R1: ...then, and only then, its reservation was committed and A let go");
+      check(count_of(client_log().substr(logFrom), "releasing host=") == 1, "R1: ...exactly one PC let go");
+      const size_t logE = client_log().size();
+      check(tap("KA-E"), "R1: tap E with B, C, D all open");
+      pump(1500);
+      check(client_log().substr(logE).find("refused host=" + H("KA-E").id + " (connect): three PCs are in use") != std::string::npos &&
+                ordinary_pid(H("KA-E").id) == 0,
+            "R1: ...E refused ('PC 3대가 모두 열려'): never a fourth window", status_line());
+      // back to nothing kept: B, C, D closed (each kept), then released by the user -- the next part starts clean
+      for (const char* n : {"KA-B", "KA-C", "KA-D"}) close_window_of(ordinary_pid(H(n).id));
+      for (const char* n : {"KA-B", "KA-C", "KA-D"}) {
+        wait_for([&] { return card_has_release(n); }, 45000);
+        press_release(n);
+        wait_card(n, "연결 가능", 15000);
+      }
+      check(card_state("KA-A") == "연결 가능" && card_state("KA-B") == "연결 가능" && card_state("KA-C") == "연결 가능" &&
+                card_state("KA-D") == "연결 가능",
+            "R1: (set back: nothing kept)");
+    }
 
     // ======================================================== N1: each PC's own first conversion, any close order
     for (const char* n : {"KA-A", "KA-B", "KA-C"}) {
@@ -573,6 +665,25 @@ int main() {
     }
     capture_page(shots + L"3-three-active.png");
     check(log_has("picker-ready ms=", 1000), "the shell log has the activation's picker-ready with its op");
+    // r2b (Codex N6): messages of an op this activation is not -- an older one and one never sent -- are dropped:
+    // B stays '연결됨' with its activation, the status line is not touched
+    {
+      using remote60::native_poc::managed_ipc::Type;
+      const ChildIdentity b = identity_of(H("KA-B").id);
+      const uint64_t op = gManaged->Find(H("KA-B").id)->activeOp;
+      const std::string statusBefore = status_line();
+      const size_t logFrom = client_log().size();
+      deliver(b, Type::SessionEnded, {{"op", std::to_string(op + 41)}, {"rc", "6"}, {"reason", "connect-failed"}, {"connected", "0"}});
+      deliver(b, Type::SessionEnded, {{"op", "0"}, {"rc", "0"}, {"reason", "closed"}, {"connected", "1"}});
+      deliver(b, Type::PickerReady, {{"op", std::to_string(op + 41)}, {"ms", "1"}});
+      pump(800);
+      const std::string slice = client_log().substr(logFrom);
+      check(op != 0 && gManaged->Find(H("KA-B").id)->activeOp == op && card_state("KA-B") == "연결됨" &&
+                status_line() == statusBefore,
+            "N6: a SessionEnded / PickerReady of another op leaves B's activation as it is", "op=" + std::to_string(op));
+      check(count_of(slice, "dropped (current op=" + std::to_string(op) + ")") == 3, "...each one dropped by op, and said",
+            std::to_string(count_of(slice, "dropped (current op=")));
+    }
     // N2: three PCs on screen; a fourth is refused and nothing is let go
     {
       const size_t logBefore = client_log().size();
@@ -592,6 +703,7 @@ int main() {
     for (const char* n : {"KA-B", "KA-C", "KA-D"}) check_after([&] { return wait_card(n, "대기 중", 30000); }, std::string(n) + ": back to '대기 중'", [&] { return card_state(n); });
 
     // ======================================================== N3: 연결 해제
+    const ChildIdentity releasedC = identity_of(H("KA-C").id);  // r2b: its messages are delivered late, below
     {
       const DWORD pidC = managed_pid(H("KA-C").id);
       check(press_release("KA-C"), "press KA-C's '연결 해제'");
@@ -606,6 +718,28 @@ int main() {
       check(card_state("KA-B") == "대기 중" && card_state("KA-D") == "대기 중", "B and D are untouched");
       capture_page(shots + L"4-released.png");
     }
+    // r2b (Codex N6): while B is being opened, late messages of C's ended viewer arrive (its old incarnation) -- a
+    // SessionEnded that would say "failed", a State that would say "ready", its exit. None of it reaches the page.
+    {
+      using remote60::native_poc::managed_ipc::Type;
+      check(tap("KA-B"), "tap kept KA-B");
+      for (const auto& t : {Type::SessionEnded, Type::State}) {
+        if (t == Type::SessionEnded) deliver(releasedC, t, {{"op", "1"}, {"rc", "6"}, {"reason", "connect-failed"}, {"connected", "0"}});
+        else deliver(releasedC, t, {{"state", "ready"}, {"lost", "0"}});
+      }
+      remote60::native_poc::shell::ManagedEvent gone;
+      gone.hostId = releasedC.hostId;
+      gone.incarnation = releasedC.inc;
+      gone.ownerEpoch = releasedC.epoch;
+      gone.exited = true;
+      gone.exitCode = 0;
+      on_managed_event(gone);
+      check_after([&] { return wait_card("KA-B", "연결됨", 30000); }, "N6: B opens as usual ('연결됨')", [&] { return card_state("KA-B"); });
+      check(card_state("KA-C") == "연결 가능" && status_line().find("실패") == std::string::npos,
+            "...C's late messages changed nothing (C not kept, no failure said)", card_state("KA-C") + " / " + status_line());
+      check(close_window_of(managed_pid(H("KA-B").id)), "close B's session window");
+      check_after([&] { return wait_card("KA-B", "대기 중", 30000); }, "B back to '대기 중'", [&] { return card_state("KA-B"); });
+    }
 
     // ======================================================== N2: a fourth PC that FAILS costs nobody
     {
@@ -619,15 +753,42 @@ int main() {
       check_after([&] { return wait_card("KA-A", "대기 중", 45000); }, "KA-A kept again (A, B, D)", [&] { return card_state("KA-A"); });
       // C's host goes away; C (released, so not kept) is tapped: its connect fails
       H("KA-C").proc.End();
+      // r3 (Codex R4): A is opened first; while C is still connecting, A's window is closed -- A's own, valid
+      // SessionEnded arrives and must not end C's "connecting" mark
+      check(tap("KA-A"), "R4: tap kept KA-A");
+      check_after([&] { return wait_card("KA-A", "연결됨", 30000); }, "R4: A is open ('연결됨')", [&] { return card_state("KA-A"); });
+      const DWORD activeA = managed_pid(H("KA-A").id);
       const size_t logBefore = client_log().size();
       check(tap("KA-C"), "tap KA-C, whose host is gone, beside three kept PCs");
+      DWORD pidC0 = 0;
+      wait_for([&] { return (pidC0 = ordinary_pid(H("KA-C").id)) != 0; }, 10000);
+      check(close_window_of(activeA), "R4: close A's session window while C is connecting");
+      check(log_has("kept PC session ended host=" + H("KA-A").id + " op=", 15000), "R4: A's session ended (its SessionEnded reached the shell)");
+      pump(500);
+      check_after([] { return card_state("KA-C") == "연결하는 중…"; }, "R4: ...and C's card still says '연결하는 중…'",
+                  [] { return card_state("KA-C"); });
+      // r2b (Codex N2, a CANCELLED fourth): while that first attempt is still connecting, C is pressed again (the
+      // bridge's connect for C; the page itself shows the busy card) -- the shell calls the first attempt off and
+      // starts another. The called-off one must cost nobody and must not be kept.
+      pump(2500);
+      page_connect(H("KA-C").id, "KA-C");
+      HANDLE p0 = pidC0 ? OpenProcess(SYNCHRONIZE, FALSE, pidC0) : nullptr;
+      const bool calledOff = p0 && wait_for([&] { return WaitForSingleObject(p0, 0) == WAIT_OBJECT_0; }, 15000);
+      if (p0) CloseHandle(p0);
+      check(calledOff && lines_of_pid(viewer_log(), pidC0).find("connect cancelled") != std::string::npos,
+            "N2: the first attempt for C was called off (its log: connect cancelled) and ended");
+      pump(1000);
+      check(client_log().substr(logBefore).find("releasing host=") == std::string::npos &&
+                client_log().substr(logBefore).find("first conversion to standby host=" + H("KA-C").id) == std::string::npos &&
+                standing_by("KA-A") && standing_by("KA-B") && standing_by("KA-D"),
+            "...a cancelled fourth: nobody let go, C not kept");
       DWORD pidC = 0;
-      wait_for([&] { return (pidC = ordinary_pid(H("KA-C").id)) != 0; }, 10000);
+      wait_for([&] { return (pidC = ordinary_pid(H("KA-C").id)) != 0 && pidC != pidC0; }, 10000);
       pump(45000);  // longer than a connect to a live host takes here
       const bool failed = pidC && lines_of_pid(viewer_log(), pidC).find("connected host=") == std::string::npos;
       check(failed, "KA-C's viewer did not connect (its host is gone)");
       check(client_log().substr(logBefore).find("releasing host=") == std::string::npos &&
-                card_state("KA-A") == "대기 중" && card_state("KA-B") == "대기 중" && card_state("KA-D") == "대기 중",
+                standing_by("KA-A") && standing_by("KA-B") && standing_by("KA-D"),
             "...and the three kept PCs are all still kept (no eviction for a failed fourth)");
       if (pidC) close_window_of(pidC);
       if (!wait_for([&] { return ordinary_pid(H("KA-C").id) == 0; }, 20000)) {
@@ -638,6 +799,8 @@ int main() {
         note("KA-C's failed viewer did not close on WM_CLOSE; ended by the test's launch handle");
         wait_for([&] { return ordinary_pid(H("KA-C").id) == 0; }, 10000);
       }
+      check(log_has("reservation of host=" + H("KA-C").id + " released (ended without connecting)", 5000),
+            "R1: C's reservation was released when it ended without connecting");
     }
 
     // ======================================================== N6: a handshake that fails after the take
@@ -658,8 +821,27 @@ int main() {
             "the status line says it failed -- not idle", status_line());
       capture_page(shots + L"5-failed-activation.png");
     }
+    // r2b (Codex N6): an Activate that cannot be sent -- the shell's channel to A's viewer is closed (as when that
+    // pipe breaks) and A is pressed at once, before anything else runs on this thread. No activation may be left
+    // behind and the user is told; nothing pretends to open.
+    {
+      wait_for([&] { const auto* k = gManaged->Find(H("KA-A").id); return k && k->state == "ready"; }, 20000);
+      const auto* a = gManaged->Find(H("KA-A").id);
+      check(a && a->state == "ready", "KA-A is kept and ready", a ? a->state : "(none)");
+      if (a) const_cast<remote60::native_poc::shell::ManagedViewers::Child*>(a)->channel->Close();
+      const size_t logFrom = client_log().size();
+      page_connect(H("KA-A").id, "KA-A");
+      const auto* after = gManaged->Find(H("KA-A").id);
+      check(client_log().substr(logFrom).find("kept PC activation host=" + H("KA-A").id + " could not be sent") != std::string::npos,
+            "N6: the Activate could not be sent, and the shell says so in its log");
+      check(after == nullptr || after->activeOp == 0, "...no activation is left behind (activeOp 0)");
+      check(wait_for([] { return status_line().find("여는 요청을 보내지 못했습니다") != std::string::npos; }, 3000),
+            "...and the status line tells the user", status_line());
+      check(ordinary_pid(H("KA-A").id) == 0, "...no ordinary viewer was started beside the lease");
+    }
 
     // ======================================================== N4: sign-out ends the shell's own viewers with the fence
+    uint64_t oldEpoch = 0;
     {
       // B's standby is released by the user, then B is connected as an ordinary session and left open
       check(press_release("KA-B"), "release KA-B");
@@ -687,13 +869,19 @@ int main() {
       for (const auto& id : gManaged->HostIds()) managedPids.push_back(managed_pid(id));
       const size_t presentsBefore = count_of(outside.Text(), "[present]");
       const size_t logBefore = client_log().size();
+      oldEpoch = gOwnerEpoch.load();
       js(L"document.getElementById('signOut').click();true");
       const bool bEnded = pB && wait_for([&] { return WaitForSingleObject(pB, 0) == WAIT_OBJECT_0; }, 12000);
       DWORD code = 99;
       if (pB) GetExitCodeProcess(pB, &code);
       check(bEnded, "sign-out: the shell's ordinary viewer of KA-B ended");
-      check(lines_of_pid(viewer_log(), pidB).find("owner fence: input and clipboard cut") != std::string::npos,
-            "...through the owner fence (input and clipboard cut, then its own WM_CLOSE teardown)");
+      {
+        const std::string vb = lines_of_pid(viewer_log(), pidB);
+        const size_t at = vb.find("owner fence: held input released (modifierUps=");
+        check(at != std::string::npos && vb.find("input and clipboard cut", at) != std::string::npos,
+              "...through the owner fence: held input released FIRST, then input and clipboard cut, then its own teardown",
+              at == std::string::npos ? "" : vb.substr(at, vb.find('\n', at) - at).substr(0, 110));
+      }
       check(code == 0 && client_log().substr(logBefore).find("did not close in time") == std::string::npos,
             "...exit 0, not ended by the shell's handle", "exit=" + std::to_string(code));
       if (pB) CloseHandle(pB);
@@ -714,6 +902,22 @@ int main() {
             "the page is back at the sign-in form");
       capture_page(shots + L"6-signed-out.png");
       outside.End();
+    }
+    // ======================================================== R2 (r3): a late connect notice of the old owner
+    {
+      js(L"document.getElementById('account').value='tester';document.getElementById('password').value='e2e-pass-1234';"
+         L"document.getElementById('signIn').click();true");
+      check(wait_for([] { return js(L"!document.getElementById('hostsCard').classList.contains('hidden')") == "true"; }, 30000),
+            "R2: signed in again (a new owner)");
+      const std::string recentBefore = read_file(recent_path());
+      const size_t logFrom = client_log().size();
+      // the notice a viewer of the signed-out owner would send late: its op, a host, the OLD owner epoch
+      on_ordinary_connected(gViewerOperation, H("KA-B").id, oldEpoch);
+      on_ordinary_connected(gViewerOperation + 1, H("KA-E").id, oldEpoch);
+      pump(500);
+      check(read_file(recent_path()) == recentBefore && client_log().substr(logFrom).find("committed") == std::string::npos &&
+                client_log().substr(logFrom).find("making room") == std::string::npos,
+            "R2: the old owner's late connect notice changes nothing for the new owner (recent list, PC count)");
     }
 
     DestroyWindow(gWindow);

@@ -27,11 +27,46 @@ namespace {
 // MF, threads, sockets) is created and torn down inside; the process-wide state it touches is reset at the
 // start of the next one (create_window, session_toolbar_destroy).
 int run_session_body(ViewerContext& ctx) {
-  // ka-pc-impl r2 (Codex N4): ended before it began (a Release / Shutdown that reached the managed viewer before
-  // this session's window existed) -- no window, no decoder, nothing of the old owner's comes up.
+  // ka-pc-impl r2/r3 (Codex N4, R3): ended before it began -- the managed viewer's Release / Shutdown before this
+  // session's window existed, or (ordinary) the shell's cancel already signalled when this process started (its
+  // owner signed out while it was starting). No window, no decoder, nothing of the old owner's comes up.
+  HANDLE cancelEvent = nullptr;
+  if (!ctx.args.cancelEventHandle.empty()) {
+    cancelEvent = viewer_cancel_handle_from_arg(
+        std::wstring(ctx.args.cancelEventHandle.begin(), ctx.args.cancelEventHandle.end()));
+    if (!cancelEvent) {
+      // One line, and then on with the connection. A viewer that cannot be called off is
+      // the viewer this product shipped until now; refusing to connect over it would turn a
+      // missing convenience into a broken session.
+      std::cerr << "[native-video-client] --cancel-event is not a handle this process holds;"
+                << " connecting anyway, this session cannot be called off" << std::endl;
+    }
+  }
+  if (cancelEvent && WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0) {
+    std::cerr << "[native-video-client] called off before the session began; nothing is opened\n";
+    return 0;
+  }
   if (ctx.connectCancelled.load(std::memory_order_acquire)) return 0;
-  if (const int rc = create_window_and_toolbar(ctx)) return rc;
-  if (const int rc = init_decoder(ctx)) return rc;
+  // The watcher runs from here -- before the window -- so a cancel during the set-up below is seen.
+  (void)viewer_start_cancel_watcher(cancelEvent, &ctx.connectCancelled,
+                                    &ctx.connectCancelledByOwner, &ctx.cancelWatcherStop,
+                                    &ctx.cancelWatcher);
+  if (const int rc = create_window_and_toolbar(ctx)) {
+    viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+    return rc;
+  }
+  if (const int rc = init_decoder(ctx)) {
+    viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+    return rc;
+  }
+  if (ctx.connectCancelled.load(std::memory_order_acquire)) {
+    // Called off while its window and decoder were being made: closed before any connect (run_session closes the
+    // window and drains it).
+    std::cerr << "[native-video-client] called off during set-up; the session is not started\n";
+    viewer_stop_cancel_watcher(&ctx.cancelWatcherStop, &ctx.cancelWatcher);
+    if (ctx.dec.mfStarted) MFShutdown();
+    return 0;
+  }
 
   // The connection attempt, and the only thing that changes when it fails: the window stays and
   // says why. The reason was already known here -- it went to stderr -- and the program closed
@@ -47,30 +82,10 @@ int run_session_body(ViewerContext& ctx) {
   // Started before the first attempt and stopped after the last, so a cancel that arrives between
   // attempts is still seen.
   // The handle the shell created and let this process inherit, named on the command line by
-  // value. Nothing is opened here: an unnamed event has no name to open, which is the point --
-  // the earlier named one could be signalled by any process in the session that knew a pid.
-  //
-  // The check that follows asks only whether the number is a valid handle in this process. It
-  // does not prove the handle is an event, nor that it came from the shell -- it rules out
-  // waiting on a number that is nothing, which is the case that actually turns up.
-  //
-  // The value is ASCII digits, so it converts without needing the viewer's wide-string
-  // helpers, which live in the shell rather than here.
-  HANDLE cancelEvent = nullptr;
-  if (!ctx.args.cancelEventHandle.empty()) {
-    cancelEvent = viewer_cancel_handle_from_arg(
-        std::wstring(ctx.args.cancelEventHandle.begin(), ctx.args.cancelEventHandle.end()));
-    if (!cancelEvent) {
-      // One line, and then on with the connection. A viewer that cannot be called off is
-      // the viewer this product shipped until now; refusing to connect over it would turn a
-      // missing convenience into a broken session.
-      std::cerr << "[native-video-client] --cancel-event is not a handle this process holds;"
-                << " connecting anyway, this session cannot be called off" << std::endl;
-    }
-  }
-  (void)viewer_start_cancel_watcher(cancelEvent, &ctx.connectCancelled,
-                                    &ctx.connectCancelledByOwner, &ctx.cancelWatcherStop,
-                                    &ctx.cancelWatcher);
+  // value (read at the top of this function). Nothing is opened: an unnamed event has no name to open,
+  // which is the point -- the earlier named one could be signalled by any process in the session that knew a pid.
+  // The check there asks only whether the number is a valid handle in this process. It does not prove the handle
+  // is an event, nor that it came from the shell -- it rules out waiting on a number that is nothing.
   for (;;) {
     // A new attempt. The generation moves first, so anything still in flight from the previous
     // one is already superseded when it comes back.

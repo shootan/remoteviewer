@@ -533,7 +533,10 @@
       show($('cancelReconnect'), msg.state === 'reconnecting');
       if (msg.state === 'reconnecting') setBusy(true);
       const failed = msg.state === 'error';
-      if (failed || msg.state === 'idle') setBusy(false);
+      // ka-pc-impl r3 (Codex R4): a status about ONE PC (hostId) ends only that PC's "connecting" mark -- another
+      // PC's result (its window opened, closed, failed) must not unlock the card that is still being connected.
+      const aboutAnotherPc = !!msg.hostId && msg.hostId !== connectingId;
+      if ((failed || msg.state === 'idle') && !aboutAnotherPc) setBusy(false);
       if (!$('settingsCard').classList.contains('hidden')) {
         message($('settingsMsg'), msg.detail, msg.state === 'error');
         return;

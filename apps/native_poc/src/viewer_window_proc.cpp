@@ -1223,20 +1223,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
   ViewerState& ctx = *state;
   ctx.session.uiHeartbeatUs.store(qpc_now_us(), std::memory_order_relaxed);
-  // ka-pc-impl r2 (Codex N4): fenced by its owner -- nothing typed, clicked or copied here goes on to the host.
-  if (ctx.session.ownerFenced &&
-      ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
-       msg == WM_INPUT || msg == WM_CLIPBOARDUPDATE || msg == kMsgPushClipboardNow || msg == kMsgApplyClipboard)) {
-    return DefWindowProcW(hwnd, msg, wp, lp);
+  // ka-pc-impl r2/r3 (Codex N4, R3): fenced by its owner. The gate itself is inputEnabled (cleared by the fence):
+  // every input path -- keys, mouse, IME results, text, macro -- enqueues only while it is on. What is dropped
+  // here besides is what would START something: a typed or clicked message, an IME message, a clipboard change, a
+  // deferred / restored / refused pick. The three posts that carry a payload are freed, not applied.
+  if (ctx.session.ownerFenced) {
+    if (msg == kMsgApplyClipboard) {
+      std::unique_ptr<RemoteTextApply> owned(reinterpret_cast<RemoteTextApply*>(lp));
+      return 0;
+    }
+    if (msg == kMsgApplyWindowList) {
+      std::unique_ptr<ControlWindowListMessage> owned(reinterpret_cast<ControlWindowListMessage*>(lp));
+      return 0;
+    }
+    if (msg == kMsgDecideRemoteFiles) {
+      std::unique_ptr<RemoteFilesDecide> owned(reinterpret_cast<RemoteFilesDecide*>(lp));
+      return 0;
+    }
+    if ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+        msg == WM_INPUT || (msg >= WM_IME_STARTCOMPOSITION && msg <= WM_IME_KEYLAST) ||
+        (msg >= WM_IME_SETCONTEXT && msg <= WM_IME_KEYUP) || msg == WM_CLIPBOARDUPDATE ||
+        msg == kMsgPushClipboardNow || msg == kMsgRunDeferredPick || msg == kMsgUnsendableSelect ||
+        msg == kMsgRestoreStep) {
+      return DefWindowProcW(hwnd, msg, wp, lp);
+    }
   }
   switch (msg) {
     case kMsgOwnerFence:
       if (!ctx.session.ownerFenced) {
-        ctx.session.ownerFenced = true;
-        std::cout << "[native-video-client] owner fence: input and clipboard cut, closing the session\n";
+        // 1. Whatever is held is released FIRST, while input is still on -- the same set the control channel's
+        //    resume sends: every modifier up, every key this window sent down, every mouse button, the scan keys
+        //    of host-IME routing, the mouse capture. (Turning input off first would drop these very releases.)
         cancel_pastes(ctx, hwnd, PasteFailure::Silent, "owner fence");
+        int modifierUps = 0;
+        if (!kInputPolicyForceBlock) {
+          modifierUps = enqueue_release_all_modifiers(ctx);
+          enqueue_release_for_pressed_keys(ctx);
+          enqueue_release_for_pressed_mouse_buttons(ctx);
+          release_all_physical(ctx);
+          release_mouse_capture_if_idle(ctx, hwnd);
+        }
+        ctx.picker.CancelPress();
+        ctx.input.macro.StopPlayback();
+        ctx.input.macro.StopRecording();
+        // 2. Then the gate: nothing more is sent from this window, and nothing new starts.
+        ctx.session.inputEnabled = false;
+        ctx.session.ownerFenced = true;
         RemoveClipboardFormatListener(hwnd);
-        release_all_physical(ctx);
+        std::cout << "[native-video-client] owner fence: held input released (modifierUps=" << modifierUps
+                  << "), input and clipboard cut, closing the session\n";
+        // 3. The ordinary teardown.
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
       }
       return 0;

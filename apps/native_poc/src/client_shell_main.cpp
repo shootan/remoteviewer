@@ -72,6 +72,9 @@ HRESULT create_shell_webview();
 HWND gWindow = nullptr;
 std::atomic<bool> gClosing{false};
 void post_status(const std::string& state, const std::string& detail);
+// ka-pc-impl r3 (Codex R4): a status about ONE PC. The page shows its text, but a PC's idle/error does not end the
+// "connecting" mark of ANOTHER card (only a status with no PC, or about the card being connected, does).
+void post_host_status(const std::string& state, const std::string& detail, const std::string& hostId);
 void post_ui(std::function<void()> action);
 AsyncWorkerGroup gWorkers([] { post_ui([] { post_status("error", "작업 중 오류가 발생했습니다. 다시 시도해 주세요."); }); });
 std::atomic<bool> gUpdateHandoffActive{false};
@@ -124,6 +127,33 @@ struct ViewerCancelSlot {
 };
 std::map<std::string, ViewerCancelSlot> gViewerByHost;
 
+// ka-pc-impl r3 (Codex decision 1): the open window of a viewer this shell started, brought to the front. The
+// shell has the foreground (its card was just pressed), so it may hand it on.
+void bring_viewer_forward(DWORD pid) {
+  struct Find {
+    DWORD pid;
+    HWND hwnd;
+  } f{pid, nullptr};
+  EnumWindows(
+      [](HWND h, LPARAM p) -> BOOL {
+        auto* f = reinterpret_cast<Find*>(p);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(h, &owner);
+        wchar_t cls[64] = {};
+        GetClassNameW(h, cls, 64);
+        if (owner == f->pid && wcscmp(cls, L"Remote60NativeVideoClient") == 0 && IsWindowVisible(h)) {
+          f->hwnd = h;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&f));
+  if (!f.hwnd) return;
+  AllowSetForegroundWindow(pid);
+  if (IsIconic(f.hwnd)) ShowWindow(f.hwnd, SW_RESTORE);
+  SetForegroundWindow(f.hwnd);
+}
+
 /** Closes every handle a slot owns. */
 void close_slot_handles(ViewerCancelSlot& slot) {
   if (slot.process) CloseHandle(slot.process);
@@ -162,8 +192,13 @@ std::mutex gConnectedMu;
 std::set<uint64_t> gConnectedOps;
 void end_owner_children(const std::string& reason);
 void keep_after_close(const ShellConnectRequest& request, bool statusIsMine);
-void on_ordinary_connected(uint64_t operation, const std::string& hostId);
-bool room_for_new_pc(const std::string& hostId);
+void on_ordinary_connected(uint64_t operation, const std::string& hostId, uint64_t ownerEpoch);
+// ka-pc-impl r3 (Codex R1): the one reservation for a candidate beside three PCs (see the kept-PC section).
+bool reserve_for_new_pc(const std::string& hostId, std::string* refusal);
+void release_reservation(const std::string& hostId, const char* why);
+// ka-pc-impl r3 (Codex R2): an exit whose output pump had not finished within its bound: a "connected" line that
+// comes after it is not counted (the pump takes its op out again when it ends). Under gConnectedMu.
+std::set<uint64_t> gEndedBeforePump;
 // ka-pc-impl r1: the kept PCs (UI thread only; the section near handle_page_message).
 std::unique_ptr<remote60::native_poc::shell::ManagedViewers> gManaged;
 uint64_t gTokenVersion = 1;
@@ -480,7 +515,14 @@ void viewer_log_write_line(const std::string& line, const std::string& identity)
  * thread per session; ends when the child exits and the pipe hits EOF.
  */
 void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, const std::string& context,
-                               uint64_t operation, const std::string& hostId = {}) {
+                               uint64_t operation, const std::string& hostId = {}, uint64_t ownerEpoch = 0) {
+  struct EndGuard {
+    uint64_t op;
+    ~EndGuard() {
+      std::lock_guard<std::mutex> lock(gConnectedMu);
+      gEndedBeforePump.erase(op);
+    }
+  } endGuard{operation};
   std::string pending;
   char buffer[1024];
   DWORD read = 0;
@@ -494,12 +536,19 @@ void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, cons
       // dxgi-wedge-fix r1: this operation's viewer reporting a confirmed, rendered target. Strictly
       // parsed (shape only, no free text kept); anything else is just a log line.
       if (operation != 0 && line.rfind("[native-video-client] connected host=", 0) == 0) {
+        bool counted = false;
         {
           std::lock_guard<std::mutex> lock(gConnectedMu);
-          gConnectedOps.insert(operation);
+          // r3 (Codex R2): an exit already decided without this line is not reopened by it
+          if (!gEndedBeforePump.count(operation)) {
+            gConnectedOps.insert(operation);
+            counted = true;
+          }
         }
-        // ka-pc-impl r2 (Codex N2): a real connect is when the recent order moves and when the PC count is settled.
-        if (!hostId.empty()) post_ui([operation, hostId] { on_ordinary_connected(operation, hostId); });
+        // ka-pc-impl r2/r3 (Codex N2, R2): a real connect is when the recent order moves and when the PC count is
+        // settled -- for the owner that started this viewer only.
+        if (counted && !hostId.empty())
+          post_ui([operation, hostId, ownerEpoch] { on_ordinary_connected(operation, hostId, ownerEpoch); });
       }
       if (const auto restore = remote60::native_poc::viewer::ParseRestoreLine(line)) {
         std::lock_guard<std::mutex> lock(gRestoreMu);
@@ -529,6 +578,14 @@ void post_to_page(const std::string& json) {
 
 void post_status(const std::string& state, const std::string& detail) {
   post_to_page(shell_status_json(state, detail));
+}
+void post_host_status(const std::string& state, const std::string& detail, const std::string& hostId) {
+  std::string json = shell_status_json(state, detail);
+  std::string id;
+  for (char c : hostId)
+    if (c != '"' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) id += c;
+  json.insert(json.size() - 1, ",\"hostId\":\"" + id + "\"");
+  post_to_page(json);
 }
 
 /**
@@ -1333,6 +1390,8 @@ void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, 
       gViewerByHost.erase(it);
     }
   }
+  // r3 (Codex R1): a candidate that ends before its connect committed releases the reservation (cancelled, failed)
+  if (currentForHost) release_reservation(request.hostId, connected ? "ended after connecting" : "ended without connecting");
   const uint32_t remaining = gActiveViewers.load();
   // dxgi-wedge-fix r1: this operation's last confirmed + rendered target, whatever happens next -- taken
   // (and forgotten) here so no later operation can inherit it except through the reconnect below.
@@ -1429,13 +1488,50 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
     return;
   }
 
-  // ka-pc-impl r2 (Codex N2): one count of logical PCs -- ordinary viewers and kept ones together, at most three.
-  // A new PC beside three others starts only if one of those is a standby that can be let go -- and that happens
-  // only once this one has connected (on_ordinary_connected). Three PCs all on screen: refused, nothing evicted.
-  if (!room_for_new_pc(request.hostId)) {
-    log_line("kept PCs: refused host=" + request.hostId + ": three PCs are open");
-    post_status("error", "PC 3대가 모두 열려 있어 새 PC 를 열지 않았습니다. 쓰지 않는 창을 닫아 주세요.");
-    return;
+  // ka-pc-impl r3 (Codex decision 1): a PC whose ordinary session is OPEN (connected) is not replaced by a plain
+  // press of its card -- its window is brought forward and the user is told it is open. Replacing applies only to an
+  // attempt still connecting. (A viewer that has connected but whose "connected" line has not reached this shell
+  // yet still counts as connecting -- the remaining edge.)
+  if (!automatic) {
+    const auto open = gViewerByHost.find(request.hostId);
+    bool connectedNow = false;
+    if (open != gViewerByHost.end()) {
+      std::lock_guard<std::mutex> lock(gConnectedMu);
+      connectedNow = gConnectedOps.count(open->second.operation) != 0;
+    }
+    if (connectedNow) {
+      bring_viewer_forward(open->second.pid);
+      log_line("connect: host=" + request.hostId + " is open (pid=" + std::to_string(open->second.pid) +
+               "): shown, not replaced");
+      post_host_status("idle", request.hostName + " 은(는) 이미 열려 있습니다.", request.hostId);
+      return;
+    }
+  }
+  // ka-pc-impl r2/r3 (Codex N2, R1, decision 2): one count of logical PCs -- ordinary viewers and kept ones, at most
+  // three -- and ONE reservation for a candidate beside three: taken here, before the launch, by an ordinary start
+  // (by hand or an automatic reconnect) exactly as by a kept PC's preparation. Released if the start fails or the
+  // viewer ends without connecting; committed (one standby let go) only when it has connected.
+  {
+    std::string refusal;
+    if (!reserve_for_new_pc(request.hostId, &refusal)) {
+      log_line("kept PCs: refused host=" + request.hostId + " (" + (automatic ? "reconnect" : "connect") + "): " + refusal);
+      if (automatic) {
+        // decision 2: the reconnect is not made, said so, and not retried against the limit
+        KillTimer(gWindow, kReconnectTimer);
+        gReconnectRequest.reset();
+        gReconnectRestore.clear();
+        gReconnectAttempts = 0;
+        log_line("viewer reconnect=refused reason=three-pcs host=" + request.hostId);
+        post_host_status("error", request.hostName + " 의 연결이 끊겼지만, PC 3대가 열려 있어 다시 연결하지 않았습니다. "
+                                  "다른 창을 닫은 뒤 이 PC 를 다시 눌러 주세요.", request.hostId);
+      } else if (refusal == "another PC is being opened") {
+        post_host_status("error", "다른 PC 를 여는 중입니다. 그 PC 가 열린 뒤 다시 눌러 주세요.", request.hostId);
+      } else {
+        post_host_status("error", "PC 3대가 모두 열려 있어 새 PC 를 열지 않았습니다. 쓰지 않는 창을 닫아 주세요.",
+                         request.hostId);
+      }
+      return;
+    }
   }
 
   // Call off the viewer already open on this PC, if there is one. It may be mid-connect -- up to
@@ -1664,6 +1760,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
       CloseHandle(pipeWrite);
     }
     log_line("session launch failed err=" + std::to_string(launchErr));
+    release_reservation(request.hostId, "launch failed");
     // The cancel event dies with the attempt. It was created before the launch and is owned
     // here until the registry takes it, so every failed launch leaked one -- invisible until
     // a shell that has been open all day runs out of handles.
@@ -1677,14 +1774,20 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   // session that produced none looked the same, which is exactly the ambiguity that made the
   // missing 13:02-13:09 viewer.log unexplainable.
   if (!pipeOk) log_line("session output not captured (no pipe); viewer log will be empty");
+  // ka-pc-impl r3 (Codex R2): set when this viewer's output pump has read its last line. The exit below waits for it
+  // (bounded, on its worker) so a "connected" line still in the pipe is counted before the exit is decided.
+  std::shared_ptr<void> pumpDone(CreateEventW(nullptr, TRUE, pipeOk ? FALSE : TRUE, nullptr),
+                                 [](void* h) { if (h) CloseHandle(h); });
   if (pipeOk) {
     // The parent's copy of the write end must close, or the reader never sees EOF after exit.
     CloseHandle(pipeWrite);
     const std::string context = " viewerSession=" + std::to_string(pi.dwProcessId) + "-" +
         std::to_string(GetTickCount64()) + " viewerPid=" + std::to_string(pi.dwProcessId) +
         " hostId=" + request.hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
-    gWorkers.Launch([pipeRead, identity = account + "@" + server, context, operation, hostId = request.hostId] {
-      pump_viewer_output_to_log(pipeRead, identity, context, operation, hostId);
+    gWorkers.Launch([pipeRead, identity = account + "@" + server, context, operation, hostId = request.hostId,
+                     ownerEpoch, pumpDone] {
+      pump_viewer_output_to_log(pipeRead, identity, context, operation, hostId, ownerEpoch);
+      SetEvent(pumpDone.get());
     });
   }
   log_line("session started host=" + request.hostId + " kbps=" +
@@ -1735,13 +1838,19 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   // Watched rather than forgotten: when the session window closes the list has to become usable
   // again, and if it exits immediately that is a failure the user should hear about.
   gWorkers.Launch([handle = pi.hProcess, request, operation, ownerEpoch,
-                   pid = pi.dwProcessId, startedMs = GetTickCount64()]() {
+                   pid = pi.dwProcessId, startedMs = GetTickCount64(), pumpDone]() {
     DWORD waited = WAIT_TIMEOUT;
     while (!gWorkers.Stopping() && (waited = WaitForSingleObject(handle, 250)) == WAIT_TIMEOUT) {}
     if (gWorkers.Stopping()) { CloseHandle(handle); return; }
     DWORD exitCode = 0;
     GetExitCodeProcess(handle, &exitCode);
     CloseHandle(handle);
+    // r3 (Codex R2): the output first -- a viewer that connected and was closed at once has its "connected" line
+    // in the pipe. Bounded: past it, a late line is not counted (gEndedBeforePump).
+    if (pumpDone && WaitForSingleObject(pumpDone.get(), 2000) != WAIT_OBJECT_0) {
+      std::lock_guard<std::mutex> lock(gConnectedMu);
+      gEndedBeforePump.insert(operation);
+    }
     gActiveViewers.fetch_sub(1);
     const uint64_t ranMs = GetTickCount64() - startedMs;
     post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs, pid] {
@@ -1825,8 +1934,8 @@ std::set<std::string> logical_pcs(const std::string& except = {}) {
   std::set<std::string> out;
   for (const auto& entry : gViewerByHost) out.insert(entry.first);
   if (gManaged)
-    for (const auto& id : gManaged->HostIds())
-      if (id != gStagingHost) out.insert(id);
+    for (const auto& id : gManaged->HostIds()) out.insert(id);
+  out.erase(gStagingHost);  // r3 (Codex R1): the reserved candidate -- ordinary or kept -- is not one of the three
   out.erase(except);
   return out;
 }
@@ -1877,13 +1986,45 @@ bool room_for_new_pc(const std::string& hostId) {
   return !standby_victim(hostId).empty();
 }
 
+// ka-pc-impl r3 (Codex R1): THE reservation of a candidate beside three PCs -- one at a time, for every kind of start
+// (an ordinary connect by hand, an automatic reconnect, a kept PC's preparation). Taken before the start; nobody is
+// let go until the candidate succeeds (settle_pc_count then judges again); released when it fails, is called off,
+// ends without connecting, or its owner changes. true with nothing reserved when there is room anyway.
+bool reserve_for_new_pc(const std::string& hostId, std::string* refusal) {
+  if (gStagingHost == hostId) return true;                                  // its own reservation (a replacement)
+  if (logical_pcs(hostId).size() < kept::kMaxKept) return true;             // room without anybody going
+  if (!gStagingHost.empty()) { *refusal = "another PC is being opened"; return false; }
+  if (standby_victim(hostId).empty()) { *refusal = "three PCs are in use"; return false; }
+  gStagingHost = hostId;
+  log_line("kept PCs: host=" + hostId + " reserved beside three PCs; one standby goes only when it has connected");
+  return true;
+}
+void release_reservation(const std::string& hostId, const char* why) {
+  if (gStagingHost.empty() || gStagingHost != hostId) return;
+  gStagingHost.clear();
+  log_line(std::string("kept PCs: reservation of host=") + hostId + " released (" + why + ")");
+}
+// The reserved candidate succeeded: it becomes one of the PCs, and the PCs are counted again NOW (a standby the user
+// opened meanwhile is not let go -- settle_pc_count only ever lets a standing-by PC go).
+void commit_reservation(const std::string& hostId) {
+  if (gStagingHost != hostId) {
+    settle_pc_count(hostId);
+    return;
+  }
+  gStagingHost.clear();
+  log_line("kept PCs: reservation of host=" + hostId + " committed (it connected)");
+  settle_pc_count(hostId);
+}
+
 // An ordinary viewer's session connected ("connected host=", pumped on another thread). The real use: the recent
-// order moves now -- not when its window closes -- and the PC count is settled. Only for this PC's current viewer.
-void on_ordinary_connected(uint64_t operation, const std::string& hostId) {
+// order moves now -- not when its window closes -- and the PC count is settled. Only for this PC's current viewer,
+// and only for the owner that started it (Codex R2: a late notice of a signed-out owner touches nothing).
+void on_ordinary_connected(uint64_t operation, const std::string& hostId, uint64_t ownerEpoch) {
+  { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
   const auto it = gViewerByHost.find(hostId);
   if (it == gViewerByHost.end() || it->second.operation != operation) return;
   recent_touch_host(hostId);
-  settle_pc_count(hostId);
+  commit_reservation(hostId);
 }
 
 // One PC to standby. false (+why): nothing new runs. `automatic`: the list-return keep or sign-in preparation (the
@@ -1908,18 +2049,17 @@ bool keep_launch(const std::string& hostId, bool automatic, bool statusIsMine, s
     epoch = gOwnerEpoch;
   }
   if (token.empty() || account.empty()) { *why = "not signed in"; return false; }
-  // At most three logical PCs (Codex N2). Beside three others this one is STAGED: it runs, but it is not counted and
-  // nobody is let go until it is ready (on_managed_event); if it fails, the three stay as they were. One at a time.
-  bool staged = false;
-  if (logical_pcs(hostId).size() >= kept::kMaxKept) {
-    if (!gStagingHost.empty()) { *why = "another PC is being prepared"; return false; }
-    if (standby_victim(hostId).empty()) {
-      *why = "three PCs are in use";
-      if (statusIsMine)
-        post_status("error", "PC 3대가 모두 열려 있어 이 PC 는 대기로 두지 않습니다. 쓰지 않는 창을 닫아 주세요.");
+  // At most three logical PCs (Codex N2) -- through the ONE reservation every start uses (Codex R1): beside three
+  // others this one is reserved, it runs but is not counted, and nobody is let go until it is ready.
+  const bool hadReservation = gStagingHost == hostId;
+  {
+    std::string refusal;
+    if (!reserve_for_new_pc(hostId, &refusal)) {
+      *why = refusal;
+      if (statusIsMine && refusal == "three PCs are in use")
+        post_host_status("error", "PC 3대가 모두 열려 있어 이 PC 는 대기로 두지 않습니다. 쓰지 않는 창을 닫아 주세요.", hostId);
       return false;
     }
-    staged = true;
   }
   remote60::native_poc::shell::ManagedLaunch spec;
   spec.exe = executable_dir() + L"\\GNLinkViewer.exe";
@@ -1937,10 +2077,9 @@ bool keep_launch(const std::string& hostId, bool automatic, bool statusIsMine, s
   spec.key = pc_key(account, hostId);
   spec.genDir = narrow(shell_data_dir() + L"\\standby");
   spec.ownerEpoch = epoch;
-  if (!gManaged->Launch(spec, why)) return false;
-  if (staged) {
-    gStagingHost = hostId;
-    log_line("kept PCs: host=" + hostId + " staged beside three PCs; one standby goes only when it is ready");
+  if (!gManaged->Launch(spec, why)) {
+    if (!hadReservation) release_reservation(hostId, "launch failed");
+    return false;
   }
   post_keep_state(hostId, "starting");
   return true;
@@ -1965,7 +2104,7 @@ void keep_after_close(const ShellConnectRequest& request, bool statusIsMine) {
 // still sends is dropped (Current() no longer finds it). Other PCs are not touched.
 void release_kept_by_user(const std::string& hostId) {
   gKeepSuppressed.insert(hostId);
-  if (gStagingHost == hostId) gStagingHost.clear();
+  release_reservation(hostId, "released by the user");
   const auto* c = gManaged ? gManaged->Find(hostId) : nullptr;
   if (!c) {
     log_line("kept PC: release asked for host=" + hostId + ", nothing kept (suppressed from now on)");
@@ -1977,7 +2116,7 @@ void release_kept_by_user(const std::string& hostId) {
            " active=" + (c->activeOp != 0 ? "1" : "0"));
   gManaged->Release(hostId, "user");
   post_keep_state(hostId, "none");
-  post_status("idle", name + " 연결을 해제했습니다.");
+  post_host_status("idle", name + " 연결을 해제했습니다.", hostId);
 }
 
 void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
@@ -1991,10 +2130,10 @@ void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
              (c->state == "unsupported" ? std::string(" (standby not confirmed)") : std::string()));
     const bool wasActive = c->activeOp != 0;
     const std::string last = c->state;
-    if (gStagingHost == e.hostId) gStagingHost.clear();
+    release_reservation(e.hostId, "its viewer ended");
     gManaged->Forget(e.hostId);
     post_keep_state(e.hostId, last == "unsupported" ? "unsupported" : "none");
-    if (wasActive) post_status("idle", "");
+    if (wasActive) post_host_status("idle", "", e.hostId);
     return;
   }
   const auto& m = e.message;
@@ -2019,15 +2158,12 @@ void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
           ++u.times;
           u.retryAtMs = GetTickCount64() + 60000;
         }
-        if (gStagingHost == e.hostId) gStagingHost.clear();  // a staged candidate that failed: the three stay
+        release_reservation(e.hostId, "not confirmed");  // a reserved candidate that failed: the three stay
         gManaged->Release(e.hostId, state);
         post_keep_state(e.hostId, state);
         return;
       }
-      if (state == "ready" && gStagingHost == e.hostId) {
-        gStagingHost.clear();  // it succeeded: now it is one of the PCs, and the least recent standby goes
-        settle_pc_count(e.hostId);
-      }
+      if (state == "ready" && gStagingHost == e.hostId) commit_reservation(e.hostId);  // it succeeded
       if (c->activeOp == 0) post_keep_state(e.hostId, state);
       return;
     }
@@ -2035,7 +2171,7 @@ void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
       log_line("kept PC activation host=" + e.hostId + " op=" + m.get("op") + " picker-ready ms=" + m.get("ms"));
       recent_touch_host(e.hostId);  // a real reuse
       post_keep_state(e.hostId, "active");
-      post_status("idle", name + " 연결됨");
+      post_host_status("idle", name + " 연결됨", e.hostId);
       return;
     case Type::Presented:
       log_line("kept PC activation host=" + e.hostId + " op=" + m.get("op") + " presented ms=" + m.get("ms"));
@@ -2046,12 +2182,12 @@ void on_managed_event(const remote60::native_poc::shell::ManagedEvent& e) {
       log_line("kept PC session ended host=" + e.hostId + " op=" + m.get("op") + " rc=" + m.get("rc") +
                " reason=" + reason + " connected=" + m.get("connected") + " taken=" + m.get("taken"));
       if (reason == "not-ready") {
-        post_status("error", name + " 를 아직 준비하는 중입니다. 잠시 뒤 다시 눌러 주세요.");
+        post_host_status("error", name + " 를 아직 준비하는 중입니다. 잠시 뒤 다시 눌러 주세요.", e.hostId);
       } else if (m.get("connected") != "1") {
         // The lease's socket may have been taken and the handshake still failed (rc 6): a failed connect, said so.
-        post_status("error", name + " 연결에 실패했습니다 (코드 " + m.get("rc") + ")");
+        post_host_status("error", name + " 연결에 실패했습니다 (코드 " + m.get("rc") + ")", e.hostId);
       } else {
-        post_status("idle", "");
+        post_host_status("idle", "", e.hostId);
       }
       // Not "ready" yet when the lease's socket was taken: the viewer's own State follows (returning first, D1).
       post_keep_state(e.hostId, m.get("taken") == "1" ? std::string("returning") : c->state);
@@ -2083,7 +2219,21 @@ void end_owner_children(const std::string& reason) {
   gKeepSuppressed.clear();
   gStagingHost.clear();
   gStandbySupport = -1;
-  for (auto& entry : gViewerByHost) {
+  // r3 (Codex R2): the old owner's ordinary viewers leave the registry NOW -- they no longer count among this
+  // shell's PCs, a new owner's start cannot find them as "already open", and a late notice of theirs matches no slot.
+  // Their ending (the fence, then the bounded fallback) is owned by the workers below, with handles of their own.
+  std::map<std::string, ViewerCancelSlot> ending;
+  ending.swap(gViewerByHost);
+  struct CloseSlots {
+    std::map<std::string, ViewerCancelSlot>* m;
+    ~CloseSlots() {
+      for (auto& entry : *m) {
+        if (entry.second.cancelEvent) CloseHandle(entry.second.cancelEvent);
+        close_slot_handles(entry.second);
+      }
+    }
+  } closeSlots{&ending};
+  for (auto& entry : ending) {
     ViewerCancelSlot& slot = entry.second;
     const bool asked = remote60::native_poc::viewer::viewer_request_cancel(slot.cancelEvent);
     HANDLE t = nullptr;
@@ -2291,6 +2441,15 @@ void handle_page_message(const std::string& json) {
     gKeepUnconfirmed.erase(connect.hostId);
     if (gManaged) {
       if (const auto* c = gManaged->Find(connect.hostId)) {
+        if ((c->state == "ready" || c->state == "returning") && !gStagingHost.empty() &&
+            gStagingHost != connect.hostId && standby_victim(connect.hostId).empty()) {
+          // r3 (Codex R1): a PC is reserved beside three, and this standby is the last one that could make room for
+          // it -- opening it now would leave four on screen. Refused while the other PC is being opened.
+          log_line("kept PC activation host=" + connect.hostId + " refused: host=" + gStagingHost +
+                   " is reserved and this is the last standby");
+          post_host_status("error", "다른 PC 를 여는 중입니다. 그 PC 가 열린 뒤 다시 눌러 주세요.", connect.hostId);
+          return;
+        }
         if (c->state == "ready" || c->state == "returning") {
           uint64_t op = 0;
           if (gManaged->Activate(connect.hostId, &op)) {
@@ -2302,16 +2461,17 @@ void handle_page_message(const std::string& json) {
           if (c->activeOp == 0 && !c->ending) {
             // Activate could not be sent (the channel to that viewer is gone): said, and nothing is pretended.
             log_line("kept PC activation host=" + connect.hostId + " could not be sent");
-            post_status("error", connect.hostName + " 을(를) 여는 요청을 보내지 못했습니다. 잠시 뒤 다시 눌러 주세요.");
+            post_host_status("error", connect.hostName + " 을(를) 여는 요청을 보내지 못했습니다. 잠시 뒤 다시 눌러 주세요.",
+                             connect.hostId);
             return;
           }
         }
         if (c->state == "active" || c->activeOp != 0) {
-          post_status("idle", connect.hostName + " 은(는) 이미 열려 있습니다.");
+          post_host_status("idle", connect.hostName + " 은(는) 이미 열려 있습니다.", connect.hostId);
           return;
         }
         // Not ready yet: said, not pretended (Codex ④) -- and no ordinary connect beside the lease.
-        post_status("error", connect.hostName + " 를 아직 준비하는 중입니다. 잠시 뒤 다시 눌러 주세요.");
+        post_host_status("error", connect.hostName + " 를 아직 준비하는 중입니다. 잠시 뒤 다시 눌러 주세요.", connect.hostId);
         return;
       }
     }
