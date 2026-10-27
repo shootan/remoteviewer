@@ -2288,15 +2288,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // sh-strength r5 (Codex codex_sh_strength_r4.md N1-c1): the buffer the view LATCHED, by its own timestamp -- a
         // renderer output is looked up in that renderer's log (what it is, its layout, its decoder frame); never the
         // renderer's latest swap. A cleared buffer or an unknown one counts as nothing and shows no layout.
-        val latched = SharpenLatch.decide(timestamp, sharpenRenderer?.outputs)
+        // r6 (N1-b): a decoder frame's FIRST time on screen (its VIDEO, or a REDRAW of it when the VIDEO was never
+        // latched) counts once; a cleared or unknown buffer shows no layout (the fence holds) and counts as nothing.
+        val latched = SharpenLatch.qualify(timestamp, sharpenRenderer?.outputs, latchClassifier, surfaceId)
         latched.shownGen?.let { sharpenShownPlacementGen = it }
-        if (!latched.frame && !latched.redraw) return
+        if (!latched.firstShow && !latched.redraw) return
         val frameTs = latched.frameTs  // the decoder frame this buffer shows
-        // sh-filter r2 (H3): the decoder timestamp names the frame. A strength change re-draws the frame already
-        // shown: that latch is not a new displayed frame.
-        val newFrame = latched.frame && latchClassifier.isNewFrame(surfaceId, frameTs)
         enterSharpenLatencySegment(latchNs)
-        if (!newFrame) {
+        if (!latched.firstShow) {
             sharpenStats.addRedraw()
             return
         }
