@@ -334,13 +334,7 @@ bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
       const int received = recv(sock, reinterpret_cast<char*>(&ack), sizeof(ack), 0);
       const int recvError = received < 0 ? socket_last_error() : 0;
       // The same ack test as always: reading more of the queue never makes a wrong ack acceptable.
-      const bool validAck =
-          received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
-          ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) &&
-          ack.version == kUdpProtocolVersion && (ack.features & kUdpFeatureVideoFec) != 0;
-      const bool directoryAuthorized =
-          options.authToken.empty() || (ack.features & kUdpFeatureDirectoryAuth) != 0;
-      if (validAck && directoryAuthorized) {
+      if (udp_hello_ack_acceptable(ack, received, !options.authToken.empty())) {  // shared with standby (②)
         if (error) error->clear();
         if (outAckFeatures) *outAckFeatures = ack.features;
         publish(false);
