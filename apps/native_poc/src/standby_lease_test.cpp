@@ -363,6 +363,8 @@ void runner_test(FakeHost& host) {
   check("...its session handle still open", args.preparedUdpSocket != n::kInvalidSocket);
 
   std::printf("\n--- N2: handed off, the pump leaves the socket alone; Abandon gives it back ---\n");
+  // a Ping the pump sent just before the hand-off may still be in flight: let it land before counting
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
   const int pings0 = host.pings;
   std::this_thread::sleep_for(std::chrono::milliseconds(6000));
   check("6 s handed off: no Ping from the pump (the session's reader alone may read)", host.pings == pings0,
