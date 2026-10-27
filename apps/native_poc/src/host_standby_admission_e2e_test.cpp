@@ -855,6 +855,23 @@ struct NodeServer {
   bool WaitFor(const char* marker, uint32_t budgetMs) {
     return wait_until([&] { return log().find(marker) != std::string::npos; }, budgetMs);
   }
+  // the last relay / capability lines (a failing check's detail)
+  std::string tail() {
+    const std::string all = log();
+    std::string out;
+    size_t pos = 0;
+    while (pos < all.size()) {
+      const size_t nl = all.find('\n', pos);
+      const std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+      if (line.find("[relay]") != std::string::npos || line.find("[capability]") != std::string::npos ||
+          line.find("[wake]") != std::string::npos || line.find("[host-hb]") != std::string::npos) {
+        out += line + " / ";
+      }
+      if (nl == std::string::npos) break;
+      pos = nl + 1;
+    }
+    return out.size() > 4000 ? out.substr(out.size() - 4000) : out;
+  }
   std::vector<wchar_t> Env() const {
     // The test's own environment plus the server's settings; nothing of the server reaches outside staging.
     std::vector<std::pair<std::wstring, std::wstring>> set = {
@@ -1345,6 +1362,60 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
           last_events(ra) + " | " + last_events(rb) + " target=" + ra.target());
     check("...two relay leases bound and ready, no session", count_of(srv.log(), "standby ready") >= 2 &&
           count_of(rh.log(), "first session") == 0, rh.tail());
+    // keepalive-r2 FINDING (작업용2 report_ka_pc_impl_r1.md): the same device leases again right after its last
+    // admission (a crash, an end-all, an eviction) -- seen there: unanswered until 30 s had passed.
+    std::printf("  -- the same device again at once: after a crash (no release), and after a release --\n");
+    {
+      auto randX = [](uint8_t* b, size_t n) { for (size_t i = 0; i < n; ++i) b[i] = static_cast<uint8_t>(0xA9); return true; };
+      MemGenStore rsX;
+      GenerationAllocator rgX(rsX, randX);
+      auto hostCycle = [&] {  // the host's own directory cycle and standby lines (the last 30)
+        const std::string all = rh.log();
+        std::vector<std::string> keep;
+        size_t pos = 0;
+        while (pos < all.size()) {
+          const size_t nl = all.find('\n', pos);
+          const std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+          if (line.find("dir-cycle") != std::string::npos || line.find("[standby]") != std::string::npos ||
+              line.find("dir-punch") != std::string::npos || line.find("refreshing capability") != std::string::npos) {
+            keep.push_back(line.size() > 160 ? line.substr(0, 160) : line);
+          }
+          if (nl == std::string::npos) break;
+          pos = nl + 1;
+        }
+        std::string out;
+        for (size_t i = keep.size() > 30 ? keep.size() - 30 : 0; i < keep.size(); ++i) out += keep[i] + " / ";
+        return out;
+      };
+      auto parkWithin = [&](StandbyLease& l, uint32_t ms) {
+        return pump_until(l, [&] { return l.state() == StandbyLease::State::Parked; }, ms);
+      };
+      bool first = false;
+      {
+        StandbyLease x1(rgX, features, relayCap, mono_ms);
+        first = x1.Open(&err) && (x1.Start(), parkWithin(x1, 30000));
+        check("device X parks through the relay", first, last_events(x1) + " | relay: " + srv.tail() + " | host: " + hostCycle());
+      }  // gone without a release: a crash -- its host entry and its relay lease stay behind
+      const size_t readyBefore = count_of(srv.log(), "standby ready");
+      StandbyLease x2(rgX, features, relayCap, mono_ms);
+      const uint64_t t0 = mono_ms();
+      const bool again = x2.Open(&err) && (x2.Start(), parkWithin(x2, 15000));
+      const uint64_t tookAgain = mono_ms() - t0;
+      check("...the same device again at once after a crash: parked within 10 s (a new admission, its own relay lease)",
+            again && tookAgain < 10000,
+            "took " + std::to_string(tookAgain) + " ms state=" + std::to_string(static_cast<int>(x2.state())) + " | " +
+                last_events(x2) + " | relay: " + srv.tail() + " | host: " + hostCycle());
+      x2.Release();
+      StandbyLease x3(rgX, features, relayCap, mono_ms);
+      const uint64_t t1 = mono_ms();
+      const bool third = x3.Open(&err) && (x3.Start(), parkWithin(x3, 15000));
+      const uint64_t tookThird = mono_ms() - t1;
+      check("...and again at once after a release: parked within 10 s", third && tookThird < 10000,
+            "took " + std::to_string(tookThird) + " ms | " + last_events(x3) + " | relay: " + srv.tail() + " | host: " +
+                hostCycle());
+      check("...each one its own relay lease (ready twice more)", count_of(srv.log(), "standby ready") >= readyBefore + 2);
+      x3.Release();
+    }
     NullSink rsinkA, rsinkB;
     remote60::native_poc::ClientSessionController rca, rcb;
     remote60::native_poc::ClientSessionConnectArgs rargsA;
@@ -1387,6 +1458,23 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
     rca.Disconnect();
     rcb.Disconnect();
     rh.Stop();
+    {
+      // the host's own directory cycle, punches and standby lines -- complete only once it has stopped (its output
+      // reaches this test through a buffered pipe): what the same-device-again cases above are read against
+      const std::string all = rh.log();
+      size_t pos = 0;
+      while (pos < all.size()) {
+        const size_t nl = all.find('\n', pos);
+        const std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        if (line.find("dir-cycle") != std::string::npos || line.find("dir-punch") != std::string::npos ||
+            line.find("[standby]") != std::string::npos || line.find("refreshing capability") != std::string::npos ||
+            line.find("punch-reply") != std::string::npos) {
+          std::printf("HOSTLOG %s\n", line.substr(0, 220).c_str());
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+      }
+    }
     srv.Stop();
   }
 
