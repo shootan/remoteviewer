@@ -627,8 +627,10 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
     return false;
   }
 
-  inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
-                                               keyCode, now_us()));
+  const QueuedControlInputMessage queued =
+      make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta, keyCode, now_us());
+  inputQueue_.Enqueue(queued);
+  mouseXLedger_.NoteQueued(kind, keyCode, queued.inputEvent.seq);  // r4: a queued X down, by its sequence
   return true;
 }
 
