@@ -159,6 +159,24 @@ object StandbyKeep {
      */
     fun isReturn(preparedReturn: Boolean, pathKind: String): Boolean = preparedReturn || pathKind == "standby"
 
+    /**
+     * What the native lease's activation handshake says when the host answers its StandbyActivate "unknown entry"
+     * (standby_entry_client.hpp Lose -> standby_lease.hpp: "standby activation: " + reason). The session's lastError.
+     */
+    const val ACTIVATION_UNKNOWN_ENTRY = "activation: entry unknown to the host"
+
+    /**
+     * Codex codex_avd_guard_src_r1.md N3: a lease's activation can fail AFTER nativeConnectStandby returned its
+     * generation (the controller starts its worker first; the handshake ends later). When the host said the entry is
+     * unknown -- the lease could not be used -- the tap becomes the ordinary connect, once, as a gen-0 failure does.
+     * Only for an activation (pathKind "standby"), only before it was established, not after the establish limit ran
+     * out, and only once (the fallback is an ordinary connect: it never falls back again). Superseded, cancelled,
+     * another device's takeover, a stale tap, an established session's peer_lost: none of them. The caller has already
+     * checked the tap is still current (its op and epoch).
+     */
+    fun fallbackAfterEstablishFailure(pathKind: String, establishTimedOut: Boolean, lastError: String): Boolean =
+        pathKind == "standby" && !establishTimedOut && lastError.contains(ACTIVATION_UNKNOWN_ENTRY)
+
     fun clipboardOnStart(fromStandby: Boolean, phoneText: String?): ClipboardStart = when {
         !fromStandby -> ClipboardStart.Fresh
         phoneText.isNullOrEmpty() -> ClipboardStart.Hold

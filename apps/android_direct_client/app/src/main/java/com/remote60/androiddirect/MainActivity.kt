@@ -1370,6 +1370,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private data class PendingCommit(
         val handle: Long, val op: Long, val gen: Long, val epoch: Long, val startedAtMs: Long,
         val pathKind: String, val manual: Boolean, val preparedReturn: Boolean = false,
+        // N3 (codex_avd_guard_src_r1): an activation's PC and lease -- the same tap's ordinary fallback if the
+        // activation fails before it is established (StandbyKeep.fallbackAfterEstablishFailure)
+        val fallbackHost: DirectoryClient.Host? = null, val fallbackKey: RecentHosts.Key? = null,
     )
     private var pendingCommit: PendingCommit? = null
     private var keptCardsShown = ""
@@ -2593,6 +2596,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             forgetKept(p.handle)
             setDirectoryBusy(false)
             directoryConnectingName = ""
+            // N3: the activation failed after its generation came back -- the lease could not be used (the host does
+            // not know the entry): this same, still current tap (checked above) becomes the ordinary connect, once
+            val fh = p.fallbackHost
+            val fk = p.fallbackKey
+            if (fh != null && fk != null && StandbyKeep.fallbackAfterEstablishFailure(p.pathKind, status == 0L, lastError)) {
+                diagnosticsLog.log("standby_activate_failed",
+                    "handle=${p.handle} op=${p.op} gen=${p.gen} why=$why mine=true step=establish")
+                if (connectingHandle == p.handle) connectingHandle = 0L
+                releaseStandby(fk, "activate_failed")
+                connectToDirectoryHost(fh, TapIntent.RETRY, preparedReturn = true)  // r3 R3: still the return
+                return
+            }
             if (p.manual) {
                 diagnosticsLog.log("connect_failed", why)
             } else {
@@ -3359,7 +3374,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val mine = entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch
                 if (gen != 0L && mine) {
                     diagnosticsLog.log("directory_connect_started", "handle=$handle op=$op gen=$gen standby=1")
-                    pendingCommit = PendingCommit(handle, op, gen, epoch, t0, "standby", manual = false, preparedReturn = true)
+                    pendingCommit = PendingCommit(handle, op, gen, epoch, t0, "standby", manual = false, preparedReturn = true,
+                        fallbackHost = host, fallbackKey = rk)
                     tryCommit()
                     return@runOnUiThread
                 }

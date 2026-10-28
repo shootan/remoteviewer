@@ -2014,6 +2014,17 @@ target_include_directories(remote60_standby_lease_test PRIVATE src)
 target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
 # r3 N2-b: the pump's read start / end hooks (test build only; the product header compiles without them)
 target_compile_definitions(remote60_standby_lease_test PRIVATE REMOTE60_STANDBY_TEST_HOOKS)
+# keepalive-r2 e (N3): an activation through the REAL controller against a fake host -- the generation comes back
+# before the handshake fails; the unknown-entry error text the APK's fallback reads.
+add_executable(remote60_standby_async_fallback_test
+  src/standby_async_fallback_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_standby_async_fallback_test PRIVATE src)
+target_link_libraries(remote60_standby_async_fallback_test PRIVATE common ws2_32)
 add_executable(remote60_host_standby_admission_e2e_test
   src/host_standby_admission_e2e_test.cpp
   src/native_video_client_shared_core.cpp

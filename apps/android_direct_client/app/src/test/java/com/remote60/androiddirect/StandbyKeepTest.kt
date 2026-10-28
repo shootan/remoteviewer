@@ -329,4 +329,25 @@ class StandbyKeepTest {
         val relayOnly = DirectoryClient.parseConnect(connectAnswer("relay-disabled", Triple("198.51.100.7", 41000, "relay")))
         assertNull(DirectoryClient.standbyAim(relayOnly))
     }
+
+    // N3 (codex_avd_guard_src_r1): the activation's failure that comes after its generation -- the same tap's ordinary
+    // connect, once, only for an unknown entry
+    @Test
+    fun anActivationThatFailsAfterItsGenerationFallsBackOnlyForAnUnknownEntry() {
+        val unknown = "standby activation: " + StandbyKeep.ACTIVATION_UNKNOWN_ENTRY
+        assertTrue(StandbyKeep.fallbackAfterEstablishFailure("standby", establishTimedOut = false, lastError = unknown))
+        // not an activation: an ordinary / raw / relay connect (and so the fallback itself) never falls back again
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("relay", false, unknown))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("private", false, unknown))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("direct", false, unknown))
+        // the establish limit ran out: not this failure
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", true, unknown))
+        // superseded (a stale generation), cancelled, another device holding the PC, nothing said: no fallback
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", false,
+            "standby activation: activation refused (superseded)"))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", false, "standby activation cancelled"))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", false, "standby activation: host busy"))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", false, ""))
+        assertFalse(StandbyKeep.fallbackAfterEstablishFailure("standby", false, "not_established"))
+    }
 }

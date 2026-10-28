@@ -671,7 +671,8 @@ int wmain(int argc, wchar_t** argv) {
   int keyDropFrom = -1, keyDropTo = -1;  // r5 external: drop keyframes over [from, to) s from the first report
   std::string externalPlan = "app";
   std::wstring dirUrl, dirId, dirPw, dirHostName = L"ka-test-pc";  // keepalive r1 directoryhost
-  std::wstring hostExe = L"GNLinkStream.exe";  // keepalive r1: --host-exe GNLinkStreamPinnedSelectTest.exe
+  std::wstring hostExe = L"GNLinkStream.exe";
+  std::wstring runId;  // keepalive-r2 e (AVD guard r2 N1/N2): directoryhost's readiness names the run it belongs to  // keepalive r1: --host-exe GNLinkStreamPinnedSelectTest.exe
   int parkLongSec = 65;  // keepalive r1: --park-sec
   std::string parkVariant = "main";  // keepalive r2: --park-variant main | fail | expire
   uint32_t runtimeBitrate = 0;  // quality-6m r1: asked for after connecting, the app's runtime path
@@ -711,6 +712,8 @@ int wmain(int argc, wchar_t** argv) {
       dirHostName = argv[++i];
     } else if (a == L"--host-exe" && more) {
       hostExe = argv[++i];
+    } else if (a == L"--run-id" && more) {
+      runId = argv[++i];
     } else if (a == L"--park-sec" && more) {
       parkLongSec = _wtoi(argv[++i]);
     } else if (a == L"--park-variant" && more) {
@@ -725,6 +728,24 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   const bool directoryHost = scenario == "directoryhost";
+  // AVD guard r2 (Codex codex_avd_guard_src_r1.md N1/N2): directoryhost writes its readiness ONLY once its host passed
+  // the guard, naming this run, into an --out folder that holds none yet -- anything else: INVALID, nothing started.
+  auto setup_invalid = [&](const std::string& why) {
+    say("FAIL  SETUP mobile_abr: " + why + " -- no readiness written, no client\nRESULT: INVALID");
+    return 2;
+  };
+  if (directoryHost) {
+    bool plainRun = !runId.empty() && runId.size() <= 64;
+    for (wchar_t ch : runId) {
+      plainRun = plainRun && ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9') ||
+                              ch == L'-' || ch == L'_');
+    }
+    if (!plainRun) return setup_invalid("directoryhost needs --run-id (ASCII letters, digits, - _)");
+    if (outDir.empty()) return setup_invalid("directoryhost needs --out");
+    if (GetFileAttributesW((outDir + L"directoryhost_ready.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+      return setup_invalid("--out already holds a readiness file (an earlier run's): not reused");
+    }
+  }
   const bool parkClip = scenario == "parkclip";
   const bool parkScenario = scenario == "park" || parkClip;
   const bool external = scenario == "external" || directoryHost;
@@ -796,6 +817,7 @@ int wmain(int argc, wchar_t** argv) {
   // Staged as GNLinkStream.exe whichever build it is, so the isolation check below knows it is the host.
   const bool staged = CopyFileW((myDir + hostExe).c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
   check("the host could be staged", staged);
+  if (!staged) return setup_invalid("the host could not be staged");  // before any window, any host
 
   if (scenario == "static") gSourceStill.store(true);
   CadenceTarget target;
@@ -903,6 +925,11 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   check("the host started", launched);
+  if (!launched) {  // AVD guard r2 N1: not started is no gate passed -- no readiness, no client, no relay
+    if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+    CloseHandle(job);
+    return setup_invalid("the host did not start");
+  }
   // fail closed (e2e_injection_guard.hpp): no client -- the APK on the AVD for directoryhost -- reaches a host that has
   // not said, in THIS launch's own output, both whole OFF lines (input injection none, host power management off)
   std::string injWhy;
@@ -936,11 +963,23 @@ int wmain(int argc, wchar_t** argv) {
   };
   if (directoryHost) {
     // keepalive r1: no phone here -- the APK on the AVD is the client. Stay up, then take the host down.
-    if (!outDir.empty()) {
-      CreateDirectoryW(outDir.c_str(), nullptr);
-      std::ofstream(outDir + L"directoryhost_ready.txt") << (launched ? "ready" : "failed") << "\n";
+    {
+      // launched and the guard's gate passed (else this run already ended INVALID): the readiness, written whole
+      // (a temporary renamed into place -- a reader never sees half of it), naming this run, this harness, its host and
+      // the host's exact log (ke_avd.py reads that path, never a guess by pid)
+      const std::wstring tmp = outDir + L"directoryhost_ready.tmp";
+      {
+        std::ofstream r(tmp, std::ios::binary | std::ios::trunc);
+        r << "ready run=" << std::string(runId.begin(), runId.end()) << " harness_pid=" << GetCurrentProcessId()
+          << " host_pid=" << hostPi.dwProcessId << " host_log=" << std::string(hostLogPath.begin(), hostLogPath.end())
+          << "\n";
+      }
+      if (!MoveFileExW(tmp.c_str(), (outDir + L"directoryhost_ready.txt").c_str(), MOVEFILE_WRITE_THROUGH)) {
+        endHostJudged();
+        return setup_invalid("the readiness could not be written");
+      }
     }
-    say(std::string("DIRECTORY_HOST ") + (launched ? "ready" : "failed"));
+    say("DIRECTORY_HOST ready");
     const std::wstring stopFile = outDir + L"stop";
     for (int t = 0; launched && t < externalSec; ++t) {
       if (!outDir.empty() && GetFileAttributesW(stopFile.c_str()) != INVALID_FILE_ATTRIBUTES) break;
