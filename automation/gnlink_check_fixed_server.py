@@ -51,6 +51,8 @@ TEST_MARKERS = [
     'GNLINK_RECOVERY_TEST_ROOT',  # client_recovery_ui_test.cpp
     'stream-test-seam',           # directory_client.cpp, REMOTE60_STREAM_TEST_SEAM
     'os-input-record',            # os_input_effects.hpp, REMOTE60_OS_INPUT_RECORD_ONLY (record-only test host)
+    'pinned-select-test',         # host_control_session.cpp, REMOTE60_PINNED_SELECT_TEST_SEAM (its log tag, faults)
+    'REMOTE60_PINNED_TEST_',      # the same seam's environment (FAULT_FILE, MACHINE_ID, NO_CAPTURE, CAPTURE_PROBE)
     'GNLINK_STREAM_TEST_',        # the same seam's environment (DIRECTORY, FORMER_NAME)
     'REMOTE60_PRELOGIN_CAPTURE_ATTACH',  # host_startup_config.cpp: the capture-attach trigger, test build only
     'update-http-test-seam',      # update_http.cpp, REMOTE60_UPDATE_HTTP_TEST_SEAM

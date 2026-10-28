@@ -3,6 +3,12 @@
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
 #include <windows.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <mutex>
+#include <set>
+#include <string>
+
 namespace remote60::native_poc {
 
 // TEST BUILD ONLY (GNLinkStreamPinnedSelectTest, keepalive r3 R3): the capture boundary of the pinned test
@@ -58,6 +64,44 @@ PinnedTestFaults pinned_select_seam_faults();
 // Arms drop_keys (called on a window-select) / takes one drop (the sender, per key frame): true = drop it.
 void pinned_select_seam_arm_key_drops(unsigned n);
 bool pinned_select_seam_take_key_drop();
+
+// keepalive-r2 e (Codex codex_ka_e_src_r3.md decision 2): the activation failure of ONE test episode, so the APK's
+// fallback (nativeConnectStandby gen 0, still its operation -> the same tap's ordinary connect) runs for real.
+//   fail_activation_once=<token>  the NEXT StandbyActivate this host receives is refused as an unknown entry (the
+//                                 existing kUdpStandbyStatusUnknown answer, as when an entry expired) -- once per
+//                                 token: a token already used never applies again, so a later activation and every
+//                                 ordinary connect (a Hello, not a StandbyActivate) are untouched. A new episode
+//                                 writes a new token (ASCII, up to 32: letters, digits, '-', '_').
+// True when this activation is the one to refuse; *log then names the token, the entry and the generation.
+// (Header-only: the host and its seam-built unit test, host_standby_activation_fault_test, share this one.)
+// keepalive-r2 e (decision 2): fail_activation_once=<token> -- read at the moment an activation arrives; a token
+// applies to one activation only (the tokens used are kept for this process's life).
+inline bool pinned_select_seam_take_activation_fault(uint64_t entryId, uint32_t gen, std::string* log) {
+  char path[MAX_PATH] = {};
+  if (GetEnvironmentVariableA("REMOTE60_PINNED_TEST_FAULT_FILE", path, sizeof(path)) == 0) return false;
+  FILE* fp = nullptr;
+  if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+  std::string token;
+  char line[128];
+  while (std::fgets(line, sizeof(line), fp)) {
+    char t[40] = {};
+    if (std::sscanf(line, "fail_activation_once=%32[A-Za-z0-9_-]", t) == 1) token = t;
+  }
+  std::fclose(fp);
+  if (token.empty()) return false;
+  static std::mutex mu;
+  static std::set<std::string> used;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    if (!used.insert(token).second) return false;  // this episode's activation was already refused
+  }
+  if (log) {
+    *log = "[pinned-select-test] fault: fail_activation applied token=" + token + " entry=" + std::to_string(entryId) +
+           " gen=" + std::to_string(gen) + " -- refused as unknown (once)";
+  }
+  return true;
+}
+
 
 }  // namespace remote60::native_poc
 #endif

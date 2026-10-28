@@ -15,6 +15,9 @@
 
 #include "host_standby_table.hpp"
 #include "poc_protocol.hpp"
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+#include "host_pinned_select_seam.hpp"  // the test build's activation fault (keepalive-r2 e)
+#endif
 
 namespace remote60::native_poc {
 
@@ -135,6 +138,22 @@ inline StandbyOutcome standby_handle(StandbyTable& table, const uint8_t* rx, siz
   }
   // StandbyActivate (StandbyAck / StandbyPong arriving here are a peer's mistake: silent).
   if (kind != static_cast<uint16_t>(UdpPacketKind::StandbyActivate)) return out;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // TEST BUILD ONLY (keepalive-r2 e, decision 2): one episode's activation refused as an unknown entry -- the answer
+  // the host gives an expired entry -- so the client's fallback runs for real. Nothing of the table changes.
+  {
+    std::string faultLog;
+    if (pinned_select_seam_take_activation_fault(sb.entryId, sb.clientGen, &faultLog)) {
+      out.action = StandbyAction::Reply;
+      out.reply.kind = static_cast<uint16_t>(UdpPacketKind::StandbyPong);
+      out.reply.entryId = sb.entryId;
+      out.reply.clientGen = sb.clientGen;
+      out.reply.status = kUdpStandbyStatusUnknown;
+      out.log = faultLog;
+      return out;
+    }
+  }
+#endif
   const auto v = table.Activate(sb.entryId, sb.entrySecret, sb.clientGen, from, nowMs, &out.fresh, &out.entry);
   if (v != StandbyTable::Verdict::Ok) {
     out.action = StandbyAction::Reply;

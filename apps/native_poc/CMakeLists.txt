@@ -1974,6 +1974,13 @@ add_executable(remote60_host_standby_table_test src/host_standby_table_test.cpp)
 target_include_directories(remote60_host_standby_table_test PRIVATE src)
 target_link_libraries(remote60_host_standby_table_test PRIVATE ws2_32)  # r3: the Standby* handling cases (htons)
 
+# keepalive-r2 e (decision 2): the pinned test host's activation fault through the real Standby* handling, built
+# as the pinned test host builds it (REMOTE60_PINNED_SELECT_TEST_SEAM); its fault file in the repo scratch root.
+add_executable(remote60_host_standby_activation_fault_test src/host_standby_activation_fault_test.cpp)
+target_include_directories(remote60_host_standby_activation_fault_test PRIVATE src)
+target_compile_definitions(remote60_host_standby_activation_fault_test PRIVATE REMOTE60_PINNED_SELECT_TEST_SEAM=1)
+target_link_libraries(remote60_host_standby_activation_fault_test PRIVATE remote60_test_scratch_dir ws2_32)
+
 # keepalive-r2 ② (a, b): the client side of a standby entry -- a pure state machine and the durable generation counter.
 add_executable(remote60_standby_entry_client_test src/standby_entry_client_test.cpp)
 target_include_directories(remote60_standby_entry_client_test PRIVATE src)
