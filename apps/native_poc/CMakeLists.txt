@@ -726,6 +726,12 @@ target_include_directories(remote60_ka_pc_units_test PRIVATE src)
 add_executable(remote60_ka_pc_ipc_close_race_test src/ka_pc_ipc_close_race_test.cpp)
 target_include_directories(remote60_ka_pc_ipc_close_race_test PRIVATE src)
 
+# ka-pc e2e (Codex test SOURCE r1 N2): the shared e2e Child (ka_pc_e2e_child.hpp) on its own -- its end verdict, a
+# failed set-up step creating no process, a real child (this exe) judged, evidence on disk before a refusing Finalize.
+# No host, viewer, window, network or WebView. Writes only under REMOTE60_TEST_TMP.
+add_executable(remote60_ka_pc_e2e_child_test src/ka_pc_e2e_child_test.cpp)
+target_include_directories(remote60_ka_pc_e2e_child_test PRIVATE src)
+
 # ka-pc-impl r1 (KA ③): the managed standby viewer end to end (this test plays the shell): real server.js, real
 # hosts (this build + the published 0.2.163), GNLinkViewerKaTest --managed-standby. Writes only under REMOTE60_TEST_TMP.
 add_executable(remote60_ka_pc_managed_e2e_test

@@ -17,6 +17,8 @@
 // The shell's own window is placed beyond the right edge of the virtual screen too: nothing covers the user's screen.
 // Writes only under REMOTE60_TEST_TMP (a folder directly under D:/remote/remote/.claude/test-tmp); deletes nothing.
 // Every child this test starts directly (directory, hosts, the standalone viewer) is in a job of this process.
+// The shell's WebView profile is a NEW folder of this run, fixed and preflighted before any WebView exists and its real
+// use confirmed before the sign-in (see "the shell's WebView profile, isolated" below; Codex N1). Kept, never deleted.
 //
 // The shared standby FINDING of r1 (a new lease of the same PC key within ~30 s of its previous admission got no
 // answer) is fixed in the shared code (a7773e6, merged): A is kept again right after its eviction, without a wait.
@@ -36,6 +38,7 @@
 #include <sstream>
 
 #include "e2e_injection_guard.hpp"
+#include "ka_pc_e2e_child.hpp"
 #include "e2e_isolation.hpp"
 
 namespace {
@@ -96,6 +99,180 @@ bool init_root(std::string* why) {
   return true;
 }
 
+// ---------------------------------------------------------------- the shell's WebView profile, isolated (Codex N1)
+// The product (create_shell_webview, unchanged) asks for GetTempPathW + "GNLinkClient" as its user data folder (UDF).
+// The WebView2 loader lets WEBVIEW2_USER_DATA_FOLDER and the WebView2 registry policies replace that argument, and other
+// WEBVIEW2_* variables / policies change the runtime and its arguments. So BEFORE any environment is created:
+//   * this run's TEMP checked (ka_pc_e2e::private_temp), the UDF a NEW path inside the run, within MAX_PATH;
+//   * WEBVIEW2_USER_DATA_FOLDER set to exactly that UDF (and read back);
+//   * any other WEBVIEW2_* variable, and any value or key under SOFTWARE\Policies\Microsoft\Edge\WebView2 (HKLM / HKCU,
+//     64- and 32-bit views, read only), refuses the run -- nobody has to know which one would win;
+//   * additional browser arguments: none (the product passes no options; no variable, no policy).
+// Anything not confirmed: INVALID, exit 2, CreateCoreWebView2Environment never called. After the product created its
+// environment, ICoreWebView2Environment7::get_UserDataFolder (the folder really in use) must be that UDF before the
+// sign-in and before any client -- else the run stops. Downloads, new windows and OS dialogs are refused and stop it.
+// The profile is evidence: kept, never deleted here.
+constexpr wchar_t kWebView2Policies[] = L"SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2";
+
+// Names of every WEBVIEW2_* variable in this process's environment except the UDF one ("" = none).
+std::string webview_variables_other_than_udf() {
+  std::string found;
+  wchar_t* block = GetEnvironmentStringsW();
+  if (!block) return "the environment could not be read";
+  for (const wchar_t* e = block; *e; e += wcslen(e) + 1) {
+    const std::wstring entry(e);
+    const size_t eq = entry.find(L'=', 1);
+    const std::wstring name = entry.substr(0, eq);
+    if (name.size() >= 9 && _wcsnicmp(name.c_str(), L"WEBVIEW2_", 9) == 0 &&
+        _wcsicmp(name.c_str(), L"WEBVIEW2_USER_DATA_FOLDER") != 0) {
+      found += (found.empty() ? "" : ", ") + narrow(name);
+    }
+  }
+  FreeEnvironmentStringsW(block);
+  return found;
+}
+
+// Every WebView2 policy present (subkey or value names) or unreadable, HKLM / HKCU, both views ("" = none).
+std::string webview_policies_present() {
+  std::string found;
+  for (HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    for (REGSAM view : {static_cast<REGSAM>(KEY_WOW64_64KEY), static_cast<REGSAM>(KEY_WOW64_32KEY)}) {
+      const std::string where = std::string(root == HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") +
+                                (view == KEY_WOW64_64KEY ? "(64)" : "(32)");
+      HKEY k = nullptr;
+      const LONG r = RegOpenKeyExW(root, kWebView2Policies, 0, KEY_READ | view, &k);
+      if (r == ERROR_FILE_NOT_FOUND) continue;
+      if (r != ERROR_SUCCESS) {
+        found += where + ": unreadable (error " + std::to_string(r) + "); ";
+        continue;
+      }
+      DWORD subkeys = 0, values = 0;
+      if (RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr, &values, nullptr, nullptr, nullptr,
+                           nullptr) != ERROR_SUCCESS) {
+        found += where + ": its contents unreadable; ";
+      } else {
+        for (DWORD i = 0; i < subkeys; ++i) {
+          wchar_t n[256] = {};
+          DWORD len = 256;
+          if (RegEnumKeyExW(k, i, n, &len, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS)
+            found += where + " key " + narrow(n) + "; ";
+          else
+            found += where + " key #" + std::to_string(i) + "; ";
+        }
+        for (DWORD i = 0; i < values; ++i) {
+          wchar_t n[256] = {};
+          DWORD len = 256;
+          if (RegEnumValueW(k, i, n, &len, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS)
+            found += where + " value '" + narrow(n) + "'; ";
+          else
+            found += where + " value #" + std::to_string(i) + "; ";
+        }
+      }
+      RegCloseKey(k);
+    }
+  }
+  return found;
+}
+
+// What the product would ask for right now: its own computation (GetTempPathW into MAX_PATH + "GNLinkClient"), or ""
+// when that would not fit its buffer (wcscat_s would not return).
+std::wstring product_udf_now() {
+  wchar_t b[MAX_PATH] = {};
+  const DWORD n = GetTempPathW(MAX_PATH, b);
+  if (n == 0 || n >= MAX_PATH || n + wcslen(L"GNLinkClient") + 1 > MAX_PATH) return {};
+  return std::wstring(b, n) + L"GNLinkClient";
+}
+
+// The preflight, read only (nothing set here): empty = every condition holds for `expectedUdf`; otherwise why not.
+std::string webview_preflight(const std::wstring& expectedUdf) {
+  if (!ka_pc_e2e::is_inside(expectedUdf, gRoot)) return "the UDF is not inside this run";
+  const std::wstring asked = product_udf_now();
+  if (asked.empty()) return "the product's UDF would not fit MAX_PATH";
+  if (!ka_pc_e2e::same_path(asked, expectedUdf))
+    return "the product would ask for " + narrow(asked) + ", not " + narrow(expectedUdf);
+  wchar_t v[2048] = {};
+  const DWORD n = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", v, 2048);
+  if (n == 0 || n >= 2048 || !ka_pc_e2e::same_path(std::wstring(v, n), expectedUdf))
+    return "WEBVIEW2_USER_DATA_FOLDER is not the UDF";
+  const DWORD a = GetFileAttributesW(expectedUdf.c_str());
+  if (a != INVALID_FILE_ATTRIBUTES || GetLastError() != ERROR_FILE_NOT_FOUND) return "the UDF is not new (it exists already)";
+  const std::wstring parent = expectedUdf.substr(0, expectedUdf.find_last_of(L'\\'));
+  if (!ka_pc_e2e::resolves_to_itself(parent)) return "the UDF's folder does not resolve to itself";
+  const std::string vars = webview_variables_other_than_udf();
+  if (!vars.empty()) return "other WebView2 variables are set: " + vars;
+  const std::string policies = webview_policies_present();
+  if (!policies.empty()) return "WebView2 policies are present: " + policies;
+  return {};
+}
+
+// The folder the product's environment REALLY uses (ICoreWebView2Environment7::get_UserDataFolder), or "" + why.
+std::wstring effective_udf(std::string* why) {
+  if (!gWebView) { *why = "no WebView"; return {}; }
+  ComPtr<ICoreWebView2_2> w2;
+  ComPtr<ICoreWebView2Environment> env;
+  ComPtr<ICoreWebView2Environment7> env7;
+  if (FAILED(gWebView.As(&w2)) || !w2) { *why = "ICoreWebView2_2 unavailable"; return {}; }
+  if (FAILED(w2->get_Environment(&env)) || !env) { *why = "get_Environment failed"; return {}; }
+  if (FAILED(env.As(&env7)) || !env7) { *why = "ICoreWebView2Environment7 unavailable"; return {}; }
+  LPWSTR p = nullptr;
+  if (FAILED(env7->get_UserDataFolder(&p)) || !p) { *why = "get_UserDataFolder failed"; return {}; }
+  std::wstring s(p);
+  CoTaskMemFree(p);
+  return s;
+}
+
+// Anything that would leave the run's own folder (a download, a new window, an OS dialog): refused at once, then the
+// run stops (pump). A literal, set once.
+std::atomic<const char*> gExternal{nullptr};
+std::atomic<bool> gStopping{false};
+void pump(unsigned ms);
+[[noreturn]] void stop_run(const std::string& why, int code);
+
+// OS dialogs of this test (its own, or owned by one of its windows -- the WebView's file dialog is): closed, recorded.
+std::atomic<bool> gDialogWatchStop{false};
+void dialog_watch() {
+  while (!gDialogWatchStop.load()) {
+    EnumWindows(
+        [](HWND h, LPARAM) -> BOOL {
+          wchar_t cls[16] = {};
+          GetClassNameW(h, cls, 16);
+          if (wcscmp(cls, L"#32770") != 0 || !IsWindowVisible(h)) return TRUE;
+          DWORD pid = 0, ownerPid = 0;
+          GetWindowThreadProcessId(h, &pid);
+          if (HWND owner = GetWindow(h, GW_OWNER)) GetWindowThreadProcessId(owner, &ownerPid);
+          if (pid == GetCurrentProcessId() || ownerPid == GetCurrentProcessId()) {
+            const char* none = nullptr;
+            gExternal.compare_exchange_strong(none, "an OS dialog");
+            PostMessageW(h, WM_CLOSE, 0, 0);
+          }
+          return TRUE;
+        },
+        0);
+    Sleep(200);
+  }
+}
+
+// The run stops (N1): the product shell closed (its viewers told to end), every child ended and judged (each host
+// through its Finalize), the guard's final check -- the profile and every log kept -- then INVALID / FAILED.
+[[noreturn]] void stop_run(const std::string& why, int code) {
+  gStopping = true;
+  std::printf("FAIL  STOP %s -- the run stops here; the WebView profile and every log are kept\n", why.c_str());
+  std::fflush(stdout);
+  if (gWindow && IsWindow(gWindow)) {
+    DestroyWindow(gWindow);
+    pump(500);
+  }
+  if (gManaged) {
+    gManaged->JoinReapers();
+    gManaged.reset();
+  }
+  ka_pc_e2e::children_end_all();
+  e2e::e2e_injection_final_check_all();
+  std::printf("RESULT: %s\n", code == 2 ? "INVALID" : "FAILED");
+  std::fflush(stdout);
+  std::_Exit(code);
+}
+
 // ---------------------------------------------------------------- the UI thread's pump and the page
 void pump(unsigned ms) {
   const uint64_t end = GetTickCount64() + ms;
@@ -106,6 +283,9 @@ void pump(unsigned ms) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
       }
+    }
+    if (!gStopping.load()) {
+      if (const char* e = gExternal.load()) stop_run(std::string(e) + " came up during the run (refused / closed)", 1);
     }
     Sleep(5);
   } while (GetTickCount64() < end);
@@ -289,123 +469,9 @@ bool ordinary_connected(DWORD pid, unsigned ms) {
 }
 
 // ---------------------------------------------------------------- children of this test (directory, hosts)
-// One child of this test: started suspended, resumed only inside a verified kill-on-close job (the shared guard's
-// e2e_adopt_or_invalid), its stdout/stderr read to a CONFIRMED end (e2e_read_to_end). A test HOST additionally goes
-// through the shared guard (Guard): no client before THIS launch said input injection OFF and power management OFF,
-// both whole lines; a monitor judges its output while it runs; its end (End) is the guard's final judgement -- the job
-// ended (confirmed), the output read to EOF, that final text judged (E2eInjectionMonitor::Finalize). Nothing here
-// varies the guard; it is used as it is (ka-r3 b8dcc93).
-struct Child {
-  PROCESS_INFORMATION pi{};
-  HANDLE job = nullptr;
-  HANDLE out = nullptr;
-  std::thread reader;
-  std::atomic<bool> reading{false};
-  std::atomic<int> readResult{0};
-  std::atomic<unsigned long> readErr{0};
-  std::mutex mu;
-  std::string text;
-  std::wstring logPath;
-  std::unique_ptr<e2e::E2eInjectionMonitor> monitor;
-  bool Start(const std::wstring& cmd, const std::wstring& dir, const std::vector<wchar_t>* env,
-             std::vector<HANDLE> extraInherit = {}) {
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE w = nullptr;
-    if (!CreatePipe(&out, &w, &sa, 1 << 20)) return false;
-    SetHandleInformation(out, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-    std::vector<HANDLE> inherit = {w, nul};
-    for (HANDLE h : extraInherit) inherit.push_back(h);
-    SIZE_T sz = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &sz);
-    std::vector<char> buf(sz);
-    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buf.data());
-    InitializeProcThreadAttributeList(attrs, 1, 0, &sz);
-    UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(), inherit.size() * sizeof(HANDLE),
-                              nullptr, nullptr);
-    STARTUPINFOEXW si{};
-    si.StartupInfo.cb = sizeof(si);
-    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdOutput = w;
-    si.StartupInfo.hStdError = w;
-    si.StartupInfo.hStdInput = nul;
-    si.lpAttributeList = attrs;
-    std::vector<wchar_t> c(cmd.begin(), cmd.end());
-    c.push_back(0);
-    const BOOL ok = CreateProcessW(nullptr, c.data(), nullptr, nullptr, TRUE,
-                                   CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT |
-                                       (env ? CREATE_UNICODE_ENVIRONMENT : 0),
-                                   env ? const_cast<wchar_t*>(env->data()) : nullptr, dir.c_str(), &si.StartupInfo, &pi);
-    DeleteProcThreadAttributeList(attrs);
-    CloseHandle(w);
-    CloseHandle(nul);
-    if (!ok) return false;
-    job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-      JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
-      lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-      SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim));
-    }
-    e2e::e2e_adopt_or_invalid(job, pi, "ka-pc e2e child");  // resumed only inside a verified kill-on-close job
-    reading = true;
-    reader = std::thread([this] {
-      DWORD err = 0;
-      const auto end = e2e::e2e_read_to_end(
-          out, [this] { return reading.load(); },
-          [this](const char* p, size_t n) {
-            std::lock_guard<std::mutex> lock(mu);
-            text.append(p, n);
-          },
-          &err);
-      readErr = err;
-      readResult = static_cast<int>(end);
-    });
-    return true;
-  }
-  // A test host: the shared guard's initial gate, then its monitor. Fails closed (INVALID, exit 2) before any client.
-  void Guard(const char* where) {
-    std::string why;
-    if (!e2e::e2e_wait_injection_off([this] { return Text(); }, 20000, &why)) e2e::e2e_injection_setup_failed(where, why);
-    monitor = std::make_unique<e2e::E2eInjectionMonitor>([this] { return Text(); }, job, where);
-  }
-  std::string Text() {
-    std::lock_guard<std::mutex> lock(mu);
-    return text;
-  }
-  bool WaitFor(const std::function<bool(const std::string&)>& pred, int ms) {
-    const uint64_t until = GetTickCount64() + ms;
-    while (GetTickCount64() < until) {
-      if (pred(Text())) return true;
-      Sleep(100);
-    }
-    return pred(Text());
-  }
-  bool Exited(int ms) { return pi.hProcess && WaitForSingleObject(pi.hProcess, ms) == WAIT_OBJECT_0; }
-  void End() {
-    bool producerEnded = false;
-    if (job) producerEnded = e2e::e2e_end_job_confirmed(job);  // every process of its job, confirmed
-    if (!producerEnded) {
-      reading = false;  // an end not confirmed: the read is cut, the output is NOT complete (judged so below)
-      if (out) CloseHandle(out), out = nullptr;
-    }
-    if (reader.joinable()) reader.join();
-    if (out) CloseHandle(out), out = nullptr;
-    if (monitor) {
-      monitor->Finalize(producerEnded, e2e::e2e_final_pipe(static_cast<e2e::E2eReadEnd>(readResult.load()),
-                                                           readErr.load(), Text()));
-      monitor.reset();
-    }
-    if (job) CloseHandle(job), job = nullptr;
-    if (pi.hProcess) WaitForSingleObject(pi.hProcess, 3000);
-    if (!logPath.empty()) {
-      std::ofstream f(logPath, std::ios::binary | std::ios::trunc);
-      f << Text();
-    }
-    if (pi.hThread) CloseHandle(pi.hThread), pi.hThread = nullptr;
-    if (pi.hProcess) CloseHandle(pi.hProcess), pi.hProcess = nullptr;
-  }
-  ~Child() { End(); }
-};
+// One child of this test: the shared ka-pc e2e Child (ka_pc_e2e_child.hpp) -- every set-up step checked, its own
+// log written as it is read, its end judged for every child (N2), a host through the shared guard as it is.
+using ka_pc_e2e::Child;
 
 std::vector<wchar_t> env_with(const std::wstring& localAppData, const std::vector<std::pair<std::wstring, std::wstring>>& add) {
   for (const auto& kv : add) SetEnvironmentVariableW(kv.first.c_str(), kv.second.c_str());
@@ -464,15 +530,58 @@ int main() {
     std::printf("FAIL  no test root: %s\n", why.c_str());
     return 2;
   }
-  // TEMP / TMP of this process (and so of every child it starts) inside this run: nothing of the test -- the shell's
-  // WebView profile (GetTempPath + "GNLinkClient") among them -- lands in the user's %TEMP%.
-  {
-    const std::wstring tmp = gRoot + L"temp";
-    CreateDirectoryW(tmp.c_str(), nullptr);
-    SetEnvironmentVariableW(L"TEMP", tmp.c_str());
-    SetEnvironmentVariableW(L"TMP", tmp.c_str());
-  }
   std::printf("test root: %s\n", narrow(gRoot).c_str());
+  // N1: TEMP / TMP of this process (and so of every child it starts) inside this run, then the shell's WebView profile
+  // fixed and preflighted -- all BEFORE any child and before any WebView environment exists. Anything not confirmed:
+  // INVALID, exit 2, CreateCoreWebView2Environment never called.
+  std::wstring udf;
+  {
+    std::wstring tmp;
+    if (!ka_pc_e2e::private_temp(gRoot, &tmp, &why)) {
+      std::printf("FAIL  SETUP this run's own TEMP: %s\nRESULT: INVALID\n", why.c_str());
+      return 2;
+    }
+    udf = tmp + L"GNLinkClient";
+    wchar_t before[8] = {};
+    const bool hadUdfVariable = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", before, 8) > 0;
+    if (!SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", udf.c_str())) {
+      std::printf("FAIL  SETUP WEBVIEW2_USER_DATA_FOLDER could not be set (error %lu)\nRESULT: INVALID\n", GetLastError());
+      return 2;
+    }
+    const std::string pre = webview_preflight(udf);
+    if (!pre.empty()) {
+      std::printf("FAIL  SETUP the WebView profile preflight: %s -- no WebView environment is created\nRESULT: INVALID\n",
+                  pre.c_str());
+      return 2;
+    }
+    LPWSTR runtime = nullptr;
+    std::string runtimeVersion = "unknown";
+    if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &runtime)) && runtime) {
+      runtimeVersion = narrow(runtime);
+      CoTaskMemFree(runtime);
+    }
+    check(true, "WebView profile preflight: UDF " + narrow(udf) +
+                    " (new, inside this run) = what the product asks for (GetTempPathW + GNLinkClient) = "
+                    "WEBVIEW2_USER_DATA_FOLDER" + (hadUdfVariable ? " (an inherited value replaced)" : "") +
+                    "; other WEBVIEW2_* variables: none; WebView2 policies (HKLM/HKCU, 64/32): none; additional browser "
+                    "arguments: none (no options, no variable, no policy); runtime " + runtimeVersion);
+    // the refusals, provoked without any environment: a second owned path, an extra variable, a moved UDF variable
+    const bool otherRoot = !webview_preflight(gRoot + L"other-root\\GNLinkClient").empty();
+    SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--ka-pc-preflight-contrast");
+    const bool extraVariable = webview_preflight(udf).find("other WebView2 variables") != std::string::npos;
+    SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", nullptr);
+    SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", (gRoot + L"other-root\\GNLinkClient").c_str());
+    const bool movedVariable = webview_preflight(udf).find("WEBVIEW2_USER_DATA_FOLDER") != std::string::npos;
+    SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", udf.c_str());
+    const bool backToPass = webview_preflight(udf).empty();
+    check(otherRoot && extraVariable && movedVariable && backToPass,
+          "...the preflight refuses another owned path, an extra WEBVIEW2_* variable and a moved UDF variable, and "
+          "passes again once restored (no environment created for any of them)");
+    if (!(otherRoot && extraVariable && movedVariable && backToPass)) {  // a preflight that cannot refuse proves nothing
+      std::printf("RESULT: INVALID\n");
+      return 2;
+    }
+  }
   wchar_t nodeExe[MAX_PATH] = {};
   wchar_t repoBuf[1024] = {};
   GetEnvironmentVariableW(L"REMOTE60_KA_REPO", repoBuf, 1024);
@@ -508,6 +617,7 @@ int main() {
                                                   {L"REMOTE60_RELAY_HOST_FACING_BIND", L"127.0.0.1"}});
   {
     Child add;
+    add.logPath = dirData + L"add-account.log";
     add.Start(L"\"" + std::wstring(nodeExe) + L"\" \"" + serverJs + L"\" --add-account tester e2e-pass-1234", dirData, &dirEnv);
     add.Exited(15000);
   }
@@ -589,7 +699,8 @@ int main() {
   SetEnvironmentVariableW(L"REMOTE60_VIEWER_TEST_WINDOW_Y", std::to_wstring(GetSystemMetrics(SM_YVIRTUALSCREEN) + 40).c_str());
   const std::wstring shellLad = gRoot + L"shell-lad";
   CreateDirectoryW(shellLad.c_str(), nullptr);
-  SetEnvironmentVariableW(L"LOCALAPPDATA", shellLad.c_str());  // the shell's children inherit this environment
+  if (!SetEnvironmentVariableW(L"LOCALAPPDATA", shellLad.c_str()))  // the shell's children inherit this environment
+    stop_run("LOCALAPPDATA could not be set to the run's shell-lad (error " + std::to_string(GetLastError()) + ")", 2);
   gShellTestDirectoryUrl = url;
   gShellTestDataDir = gRoot + L"shelldata";
   gShellTestViewerExe = gBuild + L"GNLinkViewerKaTest.exe";
@@ -614,7 +725,68 @@ int main() {
                               GetSystemMetrics(SM_YVIRTUALSCREEN) + 40, 520, 760, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(gWindow, SW_SHOWNOACTIVATE);
     make_managed_viewers();
+    std::thread dialogWatch(dialog_watch);  // from here: an OS dialog of this test is closed and stops the run
+    // N1: the same preflight once more right before the product creates its environment (nothing may have moved)
+    {
+      const std::string pre = webview_preflight(udf);
+      if (!pre.empty()) {
+        gDialogWatchStop = true;
+        dialogWatch.join();
+        stop_run("the WebView profile preflight, right before the WebView: " + pre + " -- no environment created", 2);
+      }
+    }
     check(SUCCEEDED(create_shell_webview()), "the product shell's WebView starts (beyond the screen's right edge)");
+    // N1: the folder the product's environment REALLY uses, before the sign-in and before any client. (The product's
+    // own callback has already navigated to its local page, ui/shell.html -- that cannot be held back without a seam
+    // in the product file, which this round does not touch.)
+    wait_for([] { return static_cast<bool>(gWebView); }, 20000);
+    {
+      std::string gw;
+      const std::wstring used = effective_udf(&gw);
+      const bool same = !used.empty() && ka_pc_e2e::same_path(used, udf) && ka_pc_e2e::resolves_to_itself(udf) &&
+                        ka_pc_e2e::is_inside(ka_pc_e2e::final_path_of(udf), gRoot);
+      check(same, "the product's WebView environment really uses the run's UDF (ICoreWebView2Environment7::get_UserDataFolder)",
+            used.empty() ? gw : narrow(used));
+      if (!same) {
+        gDialogWatchStop = true;
+        dialogWatch.join();
+        stop_run("the WebView's user data folder is not the run's (" + (used.empty() ? gw : narrow(used)) +
+                     ") -- if it is another folder, that folder may already have been touched; nothing is cleaned",
+                 2);
+      }
+      // downloads and new windows: refused at once, then the run stops (the default download folder is the user's)
+      ComPtr<ICoreWebView2_4> w4;
+      EventRegistrationToken token{};
+      const bool downloads =
+          SUCCEEDED(gWebView.As(&w4)) && w4 &&
+          SUCCEEDED(w4->add_DownloadStarting(
+              Callback<ICoreWebView2DownloadStartingEventHandler>(
+                  [](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* a) -> HRESULT {
+                    a->put_Cancel(TRUE);
+                    a->put_Handled(TRUE);
+                    const char* none = nullptr;
+                    gExternal.compare_exchange_strong(none, "a download");
+                    return S_OK;
+                  })
+                  .Get(),
+              &token));
+      const bool windows = SUCCEEDED(gWebView->add_NewWindowRequested(
+          Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+              [](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* a) -> HRESULT {
+                a->put_Handled(TRUE);  // no window of any kind is opened
+                const char* none = nullptr;
+                gExternal.compare_exchange_strong(none, "a new window");
+                return S_OK;
+              })
+              .Get(),
+          &token));
+      check(downloads && windows, "downloads and new windows are refused (and stop the run) from before the sign-in");
+      if (!(downloads && windows)) {
+        gDialogWatchStop = true;
+        dialogWatch.join();
+        stop_run("the download / new-window refusal could not be installed", 2);
+      }
+    }
     check(wait_for([] { return js(L"!!document.getElementById('signIn')&&!document.getElementById('signIn').disabled") == "true"; }, 20000),
           "the sign-in form is up");
     check(sign_in_through_page(), "signed in through the page: the PC list is shown");
@@ -1099,9 +1271,15 @@ int main() {
       gManaged->JoinReapers();
       gManaged.reset();
     }
+    gDialogWatchStop = true;
+    dialogWatch.join();
+    const char* external = gExternal.load();
+    check(!external, "no download, new window or OS dialog came up during the run", external ? external : "");
   }
   for (auto& h : hosts) h->proc.End();  // each host's end is the guard's final judgement (Finalize)
   server.End();
+  // N2: every child this test started -- ended here if still running -- judged on its end, EOF and log
+  check(ka_pc_e2e::children_end_all() == 0, "every child ended (confirmed), read to EOF, kept in its log");
   // the shared guard: every launch of the run judged before the result
   e2e::e2e_injection_final_check_all();
   std::printf("\nka_pc_shell_e2e_test: %s (%d failed)\n", gFailures ? "FAILED" : "ALL PASS", gFailures);
