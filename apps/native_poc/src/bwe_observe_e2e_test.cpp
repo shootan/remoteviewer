@@ -666,7 +666,9 @@ int wmain(int argc, wchar_t** argv) {
   if (injMon) injMon->StopPolling();
   const bool hostEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
   if (injMon) {
-    injMon->Finalize(hostEnded);
+    // r8 N1: the final snapshot read to a confirmed EOF (an open failure / a read error is not complete), its OFF
+    // lines judged; the job closes after
+    injMon->Finalize(hostEnded, remote60::native_poc::e2e::e2e_final_file(hostLogPath));
     injMon.reset();
   }
   CloseHandle(job);

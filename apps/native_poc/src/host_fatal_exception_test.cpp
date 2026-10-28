@@ -189,11 +189,30 @@ std::vector<wchar_t> host_env(const std::wstring& tag) {
   return remote60::native_poc::e2e::e2e_isolated_environment(lad);
 }
 
-// r5 F4: the host said its power management OFF, whole (the effect-0 basis is main()'s order; this is the record)
-bool said_power_off(const std::string& out) {
-  std::string why;
-  return remote60::native_poc::e2e::e2e_power_state(out, &why) == 1;
+// r8 N1: a case's final output, read to a confirmed EOF after its producer's end -- an end not confirmed (the case is
+// in gKeepLogs) or a log that cannot be read whole (missing, a read error part-way) ends the whole test INVALID here,
+// before anything of it is judged or deleted.
+std::string final_output_or_invalid(const std::wstring& tag, const std::wstring& log) {
+  if (gKeepLogs.count(tag)) fatal_invalid(tag, "its producer's end is not confirmed (its output may still grow)");
+  const remote60::native_poc::e2e::E2eFinalOutput fin = remote60::native_poc::e2e::e2e_final_file(log);
+  if (!fin.complete) fatal_invalid(tag, "its final output is not known complete: " + fin.why);
+  return fin.text;
 }
+
+// r8 N2: a startup-fault case judged whole (e2e_startup_fault_verdict): power OFF said, whole; no contradiction; the
+// input line may be absent (the fault comes before the input path) -- said which. Anything else: the whole test INVALID.
+void startup_fault_judged(const std::wstring& tag, const std::string& label, bool producerEnded,
+                          const remote60::native_poc::e2e::E2eFinalOutput& fin) {
+  bool inputSaid = false;
+  const std::string why = remote60::native_poc::e2e::e2e_startup_fault_verdict(producerEnded, fin, &inputSaid);
+  if (!why.empty()) fatal_invalid(tag, label + ": " + why);
+  check((label + ": its whole output (read to EOF, " + std::to_string(fin.text.size()) +
+         " bytes): power management OFF whole, no input / power contradiction; the input line " +
+         (inputSaid ? "said OFF" : "absent (a startup fault before the input path -- the allowed exception)"))
+            .c_str(),
+        true);
+}
+
 
 // Runs the host with `step` injected (empty = none); returns the exit code (or 0xFFFFFFFF on timeout).
 DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& step, std::string* out, int timeoutMs) {
@@ -227,7 +246,7 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
   }
   CloseHandle(h);
   SetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", nullptr);
-  *out = read_all(log);
+  *out = final_output_or_invalid(tag, log);  // r8 N1
   return code;
 }
 // r6 F-a / F-c: the shared helpers (e2e_child_util.hpp, their negative controls in e2e_guard_runtime_test)
@@ -319,7 +338,7 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
   }
   CloseHandle(h);
   for (const auto& kv : env) SetEnvironmentVariableA(kv.first.c_str(), nullptr);
-  *out = read_all(log);
+  *out = final_output_or_invalid(tag, log);  // r8 N1
   return code;
 }
 }  // namespace
@@ -344,24 +363,16 @@ int wmain() {
 
   std::string out;
   DWORD code = run(dir, L"std", "startup_configure_from_env", &out, 20000);
-  check("std: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
-  {
-    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
-    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"std", why);
-    check("std: no input / power contradiction in its whole output (r6 G1)", true);
-  }
+  // r8 N2: power OFF not said is no longer a mere FAIL: the whole test INVALID (like a contradiction)
+  startup_fault_judged(L"std", "std", true, remote60::native_poc::e2e::e2e_final_pipe(remote60::native_poc::e2e::E2eReadEnd::Eof, 0, out));
   check("std: exit 49", code == 49, std::to_string(code));
   check("std: the line says std::exception, its what(), and the step",
         out.find("FATAL: std::exception \"stream-test-seam: injected throw\" at step=startup_configure_from_env -- exit 49") !=
             std::string::npos);
 
   code = run(dir, L"winrt", "winrt:startup_configure_from_env", &out, 20000);
-  check("winrt: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
-  {
-    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
-    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"winrt", why);
-    check("winrt: no input / power contradiction in its whole output (r6 G1)", true);
-  }
+  // r8 N2: power OFF not said is no longer a mere FAIL: the whole test INVALID (like a contradiction)
+  startup_fault_judged(L"winrt", "winrt", true, remote60::native_poc::e2e::e2e_final_pipe(remote60::native_poc::e2e::E2eReadEnd::Eof, 0, out));
   check("winrt: exit 49", code == 49, std::to_string(code));
   check("winrt: the line says winrt::hresult_error, its HRESULT, its message, and the step",
         out.find("FATAL: winrt::hresult_error hr=0x80070005 \"stream-test-seam: injected winrt\" at step=startup_configure_from_env") !=
@@ -371,8 +382,9 @@ int wmain() {
   code = run(dir, L"none", "", &out, 30000);
   check("normal control (nothing injected): no FATAL line", out.find("FATAL:") == std::string::npos, "exit " + std::to_string(code));
   {
-    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
-    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"none", why);
+    // r8 N1: the normal control's whole output (read to EOF): both OFF lines, whole, and no contradiction -- else INVALID
+    const std::string why = remote60::native_poc::e2e::e2e_final_verdict(true, remote60::native_poc::e2e::e2e_final_pipe(remote60::native_poc::e2e::E2eReadEnd::Eof, 0, out));
+    if (!why.empty()) fatal_invalid(L"none", why);
     check("normal control: no input / power contradiction in its whole output (r6 G1)", true);
   }
   check("normal control: the host said input injection OFF and power management OFF, both whole (r5 F4)",
@@ -434,6 +446,7 @@ int wmain() {
       ended = WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0;
       if (ended) GetExitCodeProcess(pi.hProcess, &pcode);
       else workerGone = end_child_confirmed(pi.hProcess, 99);  // r6 F-b: confirmed, or its logs are kept below
+      if (!ended && !workerGone) gKeepLogs.insert(L"prelogin");  // r8 N2: said as NOT confirmed if it ends the test
       CloseHandle(pi.hProcess);
       CloseHandle(pi.hThread);
     }
@@ -458,7 +471,18 @@ int wmain() {
     }
     check("...and the same line still reached the stdout it was started with (the test's)",
           read_all(log).find("at step=startup_configure_from_env -- exit 49") != std::string::npos);
-    check("...the worker said its power management OFF (r5 F4, the record)", said_power_off(read_all(log)));
+    // r8 N2: BEFORE anything of it is deleted, its stdout and its own log are read whole and judged: power OFF said,
+    // no contradiction (the input line may be absent: it throws before the input path), the end confirmed --
+    // otherwise the whole test ends INVALID here, every log kept, no further launch (probe_trap never starts).
+    {
+      const bool workerEnded = ended || (workerGone && gKeepLogs.count(L"prelogin") == 0);
+      startup_fault_judged(L"prelogin", "--prelogin worker (its stdout)", workerEnded, remote60::native_poc::e2e::e2e_final_file(log));
+      const remote60::native_poc::e2e::E2eFinalOutput own = remote60::native_poc::e2e::e2e_final_file(logs + L"\\prelogin_worker.log");
+      if (!own.complete) fatal_invalid(L"prelogin", "--prelogin worker (its own log): " + own.why);
+      std::string why;
+      if (remote60::native_poc::e2e::e2e_injection_contradicted(own.text, &why)) fatal_invalid(L"prelogin", "--prelogin worker (its own log): " + why);
+      check("...its own log, read whole: no input / power contradiction", true);
+    }
     // r5 F1: the one file it writes there, then the folders made for it -- each alone, none recursively.
     // r6 F-b: only once the worker's end is confirmed; otherwise everything of it is kept (said), cleanup deferred
     if ((ended || workerGone)) {

@@ -123,6 +123,9 @@ struct Host {
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
+  // r8 N1: how the reader's read ended (E2eReadEnd) and its error -- EOF is the only "output complete"
+  std::atomic<int> readResult{0};
+  std::atomic<unsigned long> readErr{0};
   std::mutex mu;
   std::string output;
   std::wstring dir;
@@ -145,13 +148,11 @@ struct Host {
     // r7 N1: the producer is ended (its job: every process of it, confirmed), its output read to the end (the reader
     // gets EOF once the last writer is gone), THEN the final snapshot is judged. An end not confirmed: the read is cut
     // and the output is NOT complete -- the final judgement says so (INVALID).
-    bool outputComplete = false;
-    if (job) {
-      outputComplete = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
-      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
-      job = nullptr;
-    }
-    if (!outputComplete) {
+    // r8 N1: complete = the producer's end confirmed AND the reader's own EOF (not its join) AND the OFF lines in that
+    // final text (e2e_final_verdict); the job stays open until the final judgement is made, then it closes.
+    bool producerEnded = false;
+    if (job) producerEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+    if (!producerEnded) {
       reading = false;
       if (readEnd) {
         CloseHandle(readEnd);
@@ -164,8 +165,14 @@ struct Host {
       readEnd = nullptr;
     }
     if (injMonitor) {
-      injMonitor->Finalize(outputComplete);
+      injMonitor->Finalize(producerEnded, remote60::native_poc::e2e::e2e_final_pipe(
+                                              static_cast<remote60::native_poc::e2e::E2eReadEnd>(readResult.load()),
+                                              readErr.load(), log()));
       injMonitor.reset();
+    }
+    if (job) {
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
+      job = nullptr;
     }
     if (pi.hProcess) {
       WaitForSingleObject(pi.hProcess, 20000);
@@ -237,13 +244,18 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
   // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
   remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_reboot_delegate");
   host->reading = true;
-  host->reader = std::thread([host] {
-    char buf[4096];
-    DWORD got = 0;
-    while (host->reading.load() && host->readEnd && ReadFile(host->readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-      std::lock_guard<std::mutex> l(host->mu);
-      host->output.append(buf, got);
-    }
+  host->reader = std::thread([host, h = host->readEnd] {
+    // r8 N1: read to a confirmed end of output (EOF / broken pipe), any other end kept apart (e2e_read_to_end)
+    DWORD err = 0;
+    const auto end = remote60::native_poc::e2e::e2e_read_to_end(
+        h, [host] { return host->reading.load(); },
+        [host](const char* p, size_t n) {
+          std::lock_guard<std::mutex> l(host->mu);
+          host->output.append(p, n);
+        },
+        &err);
+    host->readErr = err;
+    host->readResult = static_cast<int>(end);
   });
   return true;
 }
