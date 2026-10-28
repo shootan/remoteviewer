@@ -21,6 +21,7 @@
 
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
+#include "client_mouse_xbutton_fence.hpp"
 
 namespace remote60::native_poc {
 
@@ -618,6 +619,12 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  // keepalive-r2 e: no X edge, no X bit to a host without kCaptureFlagMouseXButtonsV1 (or not known yet) -- the
+  // JNI input and the macro playback both come here (client_mouse_xbutton_fence.hpp; the PC: fence_mouse_for_host).
+  if (!FenceMouseXButtonsForHost(HostTakesMouseXButtons(role.known, role.flags), kind, keyCode, &buttons)) {
+    mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
 
   inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
                                                keyCode, now_us()));
@@ -966,6 +973,12 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       const HostRoleGate::Role role = hostRole_.Load();  // r11 U5
       if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(role.known, role.flags), action)) {
         preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      // keepalive-r2 e: the same X fence on whatever reached the queue another way (a release the park or the
+      // held state made, an entry the queue kept through DropAllButReleases); a refused edge is never OnSent.
+      if (!FenceMouseXButtonsAction(HostTakesMouseXButtons(role.known, role.flags), &action)) {
+        mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
       // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the

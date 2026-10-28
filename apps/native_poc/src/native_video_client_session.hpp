@@ -165,6 +165,9 @@ class ClientSessionController {
   // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
   uint32_t HostCaptureFlags() const { return hostRole_.Load().flags; }
   uint64_t PreloginInputHeldBack() const { return preloginInputHeldBack_.load(std::memory_order_relaxed); }
+  // keepalive-r2 e (client_mouse_xbutton_fence.hpp): X edges not sent to a host without kCaptureFlagMouseXButtonsV1
+  // (refused when queued, or dropped right before sending).
+  uint64_t MouseXButtonsHeldBack() const { return mouseXButtonsHeldBack_.load(std::memory_order_relaxed); }
   // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
   // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
   // control thread sends ControlRebootRequest (84) once; an answer that does not come is NOT asked for
@@ -400,6 +403,7 @@ class ClientSessionController {
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
+  std::atomic<uint64_t> mouseXButtonsHeldBack_{0};  // keepalive-r2 e: X edges not sent to a host without X
   // r7 H6 / r10 / r11 U5: what the host is (the pong's flags, and whether a pong of this session said so) and
   // the window-list request asked before that -- one state, changed by one transition at a time.
   HostRoleGate hostRole_;
