@@ -13,13 +13,16 @@
 //   * the end of everything is confirmed by the job's active-process count reaching 0 (else: NOT confirmed);
 //   * one line on stdout: "job_run: child_exit=<c> residual=<n> forced=<0|1> ended_confirmed=<0|1>"; the exit code is
 //     the command's when nothing had to be forced or terminated and the end was confirmed, else 95 (residual killed),
-//     97 (forced), 98 (end not confirmed), 2 (could not start inside the job -- nothing ran).
+//     97 (forced), 98 (end not confirmed -- also when a start failure's end was not seen), 2 (could not start inside
+//     the job: it never ran, its end confirmed).
 // Nothing outside its own job is ever touched (no pid, no name).
 
 #include <windows.h>
 
 #include <cstdio>
 #include <string>
+
+#include "e2e_job_run_start.hpp"
 
 namespace {
 DWORD active_processes(HANDLE job) {
@@ -73,14 +76,18 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("job_run: the command could not be created (%lu) -- nothing started\n", GetLastError());
     return 2;
   }
-  BOOL inJob = FALSE;
-  if (!AssignProcessToJobObject(job, pi.hProcess) || !IsProcessInJob(pi.hProcess, job, &inJob) || !inJob) {
-    TerminateProcess(pi.hProcess, 2);  // created suspended: it never ran
-    WaitForSingleObject(pi.hProcess, 5000);
-    std::printf("job_run: the command could not be put in the job -- ended before it ran\n");
-    return 2;
+  // J1 (Codex codex_avd_guard_src_r3.md): into its job, then resumed -- each failure ended and that end CONFIRMED, or
+  // said not confirmed (e2e_job_run_start.hpp; its failure branches driven by a stand-in in e2e_job_run_start_test)
+  const remote60::native_poc::e2e::JobStartResult started =
+      remote60::native_poc::e2e::e2e_job_start(remote60::native_poc::e2e::JobStartApi{}, job, pi);
+  if (!started.running) {
+    std::printf("%s\n", started.line.c_str());
+    std::fflush(stdout);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(job);
+    return started.exitCode;
   }
-  ResumeThread(pi.hThread);
   CloseHandle(pi.hThread);
 
   bool forced = false;

@@ -2019,7 +2019,11 @@ target_compile_definitions(remote60_standby_lease_test PRIVATE REMOTE60_STANDBY_
 # keepalive-r2 e (AVD guard r3 G2): the AVD bundle's fixture in a verified kill-on-close job of its own -- nothing it
 # starts outlives the bundle (test tooling, never packaged).
 add_executable(remote60_e2e_job_run src/e2e_job_run_tool.cpp)
+target_include_directories(remote60_e2e_job_run PRIVATE src)
 set_target_properties(remote60_e2e_job_run PROPERTIES OUTPUT_NAME "e2e_job_run")
+# J1: its start's failure branches, driven by a stand-in for the Win32 calls (no process, no job)
+add_executable(remote60_e2e_job_run_start_test src/e2e_job_run_start_test.cpp)
+target_include_directories(remote60_e2e_job_run_start_test PRIVATE src)
 add_executable(remote60_standby_async_fallback_test
   src/standby_async_fallback_test.cpp
   src/native_video_client_shared_core.cpp
