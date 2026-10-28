@@ -127,9 +127,12 @@ inline bool e2e_injection_contradicted(const std::string& hostOutput) {
 
 // The tests whose very subject is an injection the OS performs (2026-10-28): a host that injects into a window of
 // the test's own -- but in window mode a KEY goes through SendInput whenever that window holds the focus
-// (host_input_inject.cpp, the kind 5/6 branch). That is this PC's real input path. Such a test refuses to run unless
-// the person starting it says so for this run: REMOTE60_ALLOW_REAL_INPUT_TEST=1. Refused = exit 3,
-// "RESULT: REFUSED" -- never a pass. Whether it becomes a receipt-only / record-sink test is its owner's decision.
+// (host_input_inject.cpp, the kind 5/6 branch). That is this PC's real input path. Such a test is REFUSED by default:
+// exit 3, "RESULT: REFUSED" -- never counted as a pass -- before it opens a window, a clipboard, a hook or a host.
+// REMOTE60_ALLOW_REAL_INPUT_TEST=1 is only the technical switch for an approved, isolated destination (a VM); it is
+// NOT a permission and not evidence of isolation. No agent sets it on a PC someone is using (Codex: real-input 4).
+// The automatic regression of these tests' product logic belongs in a record-only test build (os_input_effects.hpp),
+// not here.
 inline bool e2e_real_input_refused(const char* test, const char* why) {
   wchar_t v[8] = {};
   if (GetEnvironmentVariableW(L"REMOTE60_ALLOW_REAL_INPUT_TEST", v, 8) > 0 && wcscmp(v, L"1") == 0) return false;
